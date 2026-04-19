@@ -509,6 +509,16 @@ class TestPaddedAngleHaloConsistency:
     the iter-496..501 ng=3 scaffolding is broken.
     """
 
+    # iter-531 (Codex follow-up): use rtol-based tolerances so the
+    # tests pass under both x64 and the default float32 backend.
+    # iter-530 used atol=1e-12 (angle) and atol=1e-6 (metrics) which
+    # are tighter than float32's ~1e-7 relative precision; the tests
+    # only passed because the matrix run sets `JAX_ENABLE_X64=1`.
+    # `compute_padded_angle` returns radians (range ~π/2 ≈ 1.6) →
+    # rtol=1e-5 with atol=1e-6 covers float32 precision.
+    # `compute_padded_half_metrics` returns metres on Earth (~1.5e6) →
+    # absolute float32 precision is ~0.15 m; rtol=1e-5 covers it.
+
     def test_compute_padded_angle_h2_h3_consistent(self):
         from legoesm.grids.halo import compute_padded_angle
         n = 8
@@ -522,7 +532,7 @@ class TestPaddedAngleHaloConsistency:
         np.testing.assert_allclose(
             np.asarray(a_h3[:, 1:-1, 1:-1]),
             np.asarray(a_h2),
-            atol=1e-12,
+            rtol=1e-5, atol=1e-6,
             err_msg="compute_padded_angle(h=3) interior does not "
                     "match compute_padded_angle(h=2) — h3 scaffolding "
                     "would propagate inconsistency to the FB chain.")
@@ -536,9 +546,9 @@ class TestPaddedAngleHaloConsistency:
         assert hx2.shape == (6, n + 4, n + 4)
         assert hx3.shape == (6, n + 6, n + 6)
         np.testing.assert_allclose(
-            np.asarray(hx3[:, 1:-1, 1:-1]), np.asarray(hx2), atol=1e-6)
+            np.asarray(hx3[:, 1:-1, 1:-1]), np.asarray(hx2), rtol=1e-5)
         np.testing.assert_allclose(
-            np.asarray(hy3[:, 1:-1, 1:-1]), np.asarray(hy2), atol=1e-6)
+            np.asarray(hy3[:, 1:-1, 1:-1]), np.asarray(hy2), rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------

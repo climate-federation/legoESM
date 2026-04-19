@@ -168,6 +168,28 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-531 (2026-04-19)**: addressed Codex stop-time review of
+  iter-530: "iter-530's new regression only passes with x64 enabled".
+
+  iter-530 used `atol=1e-12` for the angle test and `atol=1e-6`
+  for the metrics test.  These are tighter than float32's ~1e-7
+  relative precision, so the tests only passed because the matrix
+  run sets `JAX_ENABLE_X64=1`.  Direct verification on the default
+  float32 backend without x64 produced max abs diff = 1.625 on the
+  metrics (out of ~1.5e6 = 1.7e-6 relative) — well above the
+  iter-530 atol.
+
+  iter-531 fix: switched to rtol-based tolerances:
+    - angle test: `rtol=1e-5, atol=1e-6` (radians, range ~π/2)
+    - metrics test: `rtol=1e-5` (no atol; metres on Earth, ~1.5e6)
+
+  Verified BOTH x32 and x64 backends now pass:
+    - `JAX_PLATFORMS=cpu` (no x64): 2/2 pass
+    - `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`: 2/2 pass
+
+  No production-path numerical changes (test tolerance only).
+  235/235 tests pass.
+
 - **iter-530 (2026-04-19)**: validated halo=3 readiness of
   `compute_padded_angle` and `compute_padded_half_metrics` — the
   two grid-helper functions that the iter-496..501 ng=3 halo
