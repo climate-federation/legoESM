@@ -646,16 +646,26 @@ class TestPadHaloH3Dispatch:
         np.testing.assert_array_equal(
             np.asarray(padded[0, -1, 3:-3]), np.asarray(data[0, -1, :]))
 
-    def test_duogrid_at_halo3_raises(self):
-        """Duo-Grid remap at halo=3 not yet implemented — must error
-        clearly rather than silently call the halo=2 remap path."""
-        # Build a tiny DuoGridData-shaped object sufficient to trip the
-        # guard — the duogrid-None check runs before any remap call.
-        data = jnp.ones((6, N, N), dtype=jnp.float64)
-        class _FakeDuogrid:
-            pass
-        with pytest.raises(NotImplementedError, match="Duo-Grid"):
-            pad_halo(data, halo=3, duogrid=_FakeDuogrid())
+    def test_duogrid_at_halo3_works_with_real_duogrid(self):
+        """Iter-533 (was iter-499): halo=3 is now ALLOWED for the
+        duogrid path because `cube_rmp_vectorized` and
+        `fill_corner_region` already loop over halo depth.  This test
+        verifies a real duogrid build accepts halo=3 and produces a
+        finite, correctly-shaped output on a constant field."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        # Build a real cubed sphere with duogrid enabled (ng=4 covers
+        # the full 3-deep Lagrange path).
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+        assert grid.duogrid is not None
+        data = jnp.ones((6, n, n), dtype=jnp.float64) * 5.0
+        padded = pad_halo(data, halo=3, duogrid=grid.duogrid)
+        assert padded.shape == (6, n + 6, n + 6)
+        # Constant field: every padded cell must remain 5.0 (no halo
+        # path can introduce non-trivial variation).
+        np.testing.assert_allclose(
+            np.asarray(padded), 5.0, atol=1e-12,
+            err_msg="duogrid+halo=3 broke constant-field preservation")
 
 
 # ---------------------------------------------------------------------------

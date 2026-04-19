@@ -168,6 +168,45 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-533 (2026-04-19)**: extended `pad_halo` to support
+  `halo=3` together with `duogrid` — completing one more iter-496..501
+  precondition for the `_d2a2c_vect_duogrid` upgrade to h=3.
+
+  Iter-499 had blocked the combination with a NotImplementedError
+  on the assumption that the duogrid Lagrange remap and corner
+  fill would need explicit halo=3 implementations.  Iter-533
+  audit: both `cube_rmp_vectorized` and `fill_corner_region` in
+  `src/legoesm/grids/duogrid.py` ALREADY support arbitrary halo
+  depth:
+    - `cube_rmp_vectorized` loops `for d in range(min(halo,
+      duogrid.ng))` (line 775).
+    - `fill_corner_region` falls back to averaging when
+      `h > duogrid.ng` (line 893), preserving correctness
+      regardless of `ng`.
+
+  Removed the iter-499 NotImplementedError guard.  Behaviour now:
+    - `duogrid.ng >= 3`: full Lagrange remap + corner fill at
+      all 3 halo depths.
+    - `duogrid.ng < 3`:   outer halo-3 cells get averaging fallback
+      instead of Lagrange (matches existing `h > ng` behaviour).
+
+  Replaced the iter-499 "raises NotImplementedError" test with a
+  positive test
+  (`test_duogrid_at_halo3_works_with_real_duogrid`):
+    - builds `create_cubed_sphere(n=8, use_duogrid=True, ng=4)`
+    - calls `pad_halo(constant_field, halo=3, duogrid=...)`
+    - asserts shape `(6, n+6, n+6)` and constant-field
+      preservation to 1e-12
+
+  Remaining iter-496 plan items still TODO:
+    - Update `_d2a2c_vect_duogrid` to use h=3 (now unblocked by
+      this iteration).
+    - FB chain replacement in `FV3EdgeShallowWaterModel`.
+
+  No production-path numerical changes (no current caller passes
+  `halo=3` with duogrid; this just removes the guardrail).
+  237/237 tests pass.
+
 - **iter-532 (2026-04-19)**: wired `halo_interp_offsets_h3` as a
   precomputed `CubedSphereGrid` attribute, completing one of the
   three remaining iter-496..501 ng=3 plan items.

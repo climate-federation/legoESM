@@ -567,12 +567,16 @@ def pad_halo(
     else:  # halo == 3
         padded = _pad_halo_local_h3(data, offsets)
 
-    # Duo-Grid post-processing: kinked→extended remap + corner fill
+    # Duo-Grid post-processing: kinked→extended remap + corner fill.
+    # iter-533: halo=3 is now ALLOWED for the duogrid path:
+    # `cube_rmp_vectorized` already loops `for d in range(min(halo,
+    # duogrid.ng))` (line 775), and `fill_corner_region` falls back
+    # to averaging when `h > duogrid.ng` (line 893).  So:
+    #   - duogrid.ng >= 3: full Lagrange remap at all 3 halo depths
+    #   - duogrid.ng <  3: outer halo-3 cells get averaging-fallback
+    #     instead of Lagrange, matching the iter-114 behaviour for
+    #     halo > ng.
     if duogrid is not None:
-        if halo == 3:
-            raise NotImplementedError(
-                "Duo-Grid remap at halo=3 not yet implemented; "
-                "use interp_offsets for the h3 scalar path.")
         from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
         padded = cube_rmp_vectorized(padded, duogrid, halo)
         padded = fill_corner_region(padded, duogrid, halo)
