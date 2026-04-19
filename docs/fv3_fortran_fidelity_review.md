@@ -168,6 +168,39 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-548 (2026-04-19)**: regression lock for
+  `_interp_center_to_corner` (previously untested).
+
+  Codex audit identified `_interp_center_to_corner`
+  (`src/legoesm/core/operators_cdgrid.py:868-892`) as the dual of
+  the iter-544/545-locked `_interp_corner_to_center`.  It averages
+  a cell-centre field `(6, n, n[, nlev])` to D-grid corners via a
+  4-point average of the halo-padded field and supports an optional
+  `padded=` bypass for stage-level pre-padded inputs.  Before
+  iter-548 the function had NO direct tests — a refactor to a
+  weighted or skewed average would propagate into production callers
+  (e.g. `_d_sw5_corner_divergence` at fv3_sw_core.py:1024 for the
+  Smagorinsky corner-vorticity interpolation) without regression.
+
+  Added `TestInterpCenterToCorner` (5 tests in `test_cdgrid.py`):
+    (a) Shape 2D `(6, n, n)` → `(6, n+1, n+1)` and 3D → 4D forms.
+    (b) Constant-field preservation through halo + averaging.
+    (c) `padded=` bypass exact arithmetic on 2D
+        `(6, n+2, n+2)` distinct-value random input.
+    (d) `padded=` bypass exact arithmetic on 4D
+        `(6, n+2, n+2, nlev)` with pre-guard on `ndim == 4`.
+    (e) `padded=zeros` forces zero output regardless of `field`
+        content — proof that the bypass actually overrides internal
+        halo exchange.
+
+  **Sanity-checked**: patched the 4D branch to 40/20/20/20 skewed
+  weights.  Test (d) correctly fires with `max diff 5.988e-01` at
+  5.988e9× the 1e-10 threshold.  Restored production code; all 5
+  tests pass.
+
+  No production-path numerical changes.  52/52 tests pass in
+  `test_cdgrid.py` (47 prior + 5 new).
+
 - **iter-547 (2026-04-19)**: addressed Codex stop-time review of
   iter-546: "new tests do not actually lock Pass-1 edge averaging".
 

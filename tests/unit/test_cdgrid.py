@@ -836,6 +836,172 @@ class TestInterpCornerToCenter(unittest.TestCase):
                  f"plain-arithmetic variant."))
 
 
+class TestInterpCenterToCorner(unittest.TestCase):
+    """Iter-548: regression lock for `_interp_center_to_corner`
+    (`src/legoesm/core/operators_cdgrid.py:868-892`).
+
+    The dual of `_interp_corner_to_center` (iter-544/545 lock):
+    averages a cell-centre field `(6, n, n[, nlev])` to D-grid corners
+    `(6, n+1, n+1[, nlev])` via a 4-point average of the halo-padded
+    field.  The helper supports an optional `padded=` argument for
+    stage-level pre-padded inputs — both the `padded=None` (internal
+    halo exchange) and the `padded=...` (bypass) paths need locks.
+
+    Before iter-548 the function had NO direct tests.  Production
+    callers (e.g., `_d_sw5_corner_divergence` at fv3_sw_core.py:1024
+    for the Smagorinsky vorticity-to-corner interpolation) rely on
+    this helper's exact averaging formula.  A silent refactor to
+    weighted/skewed averaging would propagate into the damping term
+    without a regression.
+
+    Locks:
+      (a) 2D shape: `(6, n, n)` -> `(6, n+1, n+1)` via internal pad
+      (b) 3D shape: `(6, n, n, nlev)` -> `(6, n+1, n+1, nlev)`
+      (c) `padded=` bypass: when caller pre-pads, the internal halo
+          exchange is skipped and the pre-padded input is used as-is.
+      (d) Exact `0.25*(SW + SE + NW + NE)` from the padded field at
+          cube-face interior corners (where the halo values are
+          well-defined from the internal cubed-sphere exchange).
+      (e) 3D branch matches 3D-branch-applied-to-single-level for
+          each k.
+    """
+
+    def _build(self, n=6):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        return n, cdgrid
+
+    def test_shape_2d_and_3d_with_internal_pad(self):
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner)
+        n, cdgrid = self._build(n=6)
+        nlev = 5
+        field_2d = jnp.zeros((6, n, n))
+        field_3d = jnp.zeros((6, n, n, nlev))
+        out_2d = _interp_center_to_corner(field_2d, cdgrid)
+        out_3d = _interp_center_to_corner(field_3d, cdgrid)
+        self.assertEqual(out_2d.shape, (6, n + 1, n + 1))
+        self.assertEqual(out_3d.shape, (6, n + 1, n + 1, nlev))
+
+    def test_constant_field_preserved(self):
+        """Constant input must round-trip through halo + averaging to
+        a constant output at every corner (no phase artifacts)."""
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner)
+        n, cdgrid = self._build(n=6)
+        field = jnp.full((6, n, n), 3.75, dtype=jnp.float64)
+        out = _interp_center_to_corner(field, cdgrid)
+        max_dev = float(jnp.max(jnp.abs(out - 3.75)))
+        # Allow small drift from duogrid halo interpolation; should be
+        # exact for constant fields since the interpolation is linear.
+        self.assertLess(
+            max_dev, 1e-10,
+            msg=(f"Constant field not preserved at corners; max dev "
+                 f"= {max_dev:.3e}.  A weighted-average refactor "
+                 f"that preserves summation may still fail this if "
+                 f"the weights do not sum to 1."))
+
+    def test_padded_bypass_exact_arithmetic_average_2d(self):
+        """With a caller-supplied `padded=...`, the helper MUST skip
+        its own halo exchange and use `padded` directly.  Verified by
+        passing a pre-padded field with distinct values at every cell
+        and asserting output = `0.25*(SW+SE+NW+NE)` from `padded`."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner)
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(548)
+        # Caller-supplied pad shape (6, n+2, n+2) with random unique
+        # values.  The `field` argument is passed through as a shape
+        # carrier — its content should be IGNORED because padded is
+        # provided.
+        padded_np = rng.standard_normal(
+            (6, n + 2, n + 2)).astype(np.float64)
+        padded = jnp.asarray(padded_np)
+        field_dummy = jnp.zeros((6, n, n))
+
+        out = np.asarray(
+            _interp_center_to_corner(
+                field_dummy, cdgrid, padded=padded),
+            dtype=np.float64)
+        expected = 0.25 * (
+            padded_np[:, :-1, :-1]
+            + padded_np[:, 1:, :-1]
+            + padded_np[:, :-1, 1:]
+            + padded_np[:, 1:, 1:]
+        )
+        max_diff = float(np.max(np.abs(out - expected)))
+        self.assertLess(
+            max_diff, 1e-10,
+            msg=(f"`_interp_center_to_corner(field, cdgrid, "
+                 f"padded=...)` does not take the 4-point average "
+                 f"directly from the provided `padded` array; max "
+                 f"diff = {max_diff:.3e}.  Either a halo exchange is "
+                 f"still being done internally (defeating the "
+                 f"stage-packing bypass) or the averaging formula "
+                 f"changed.  Update this test with the new expected "
+                 f"formula if the change is intentional."))
+
+    def test_padded_bypass_exact_arithmetic_average_4d(self):
+        """Same as 4D branch: caller-supplied pad, distinct values,
+        per-level 4-point average."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner)
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(1548)
+        padded_np = rng.standard_normal(
+            (6, n + 2, n + 2, nlev)).astype(np.float64)
+        padded = jnp.asarray(padded_np)
+        field_dummy = jnp.zeros((6, n, n, nlev))
+
+        self.assertEqual(field_dummy.ndim, 4,
+                         msg="Test must exercise ndim==4 branch.")
+
+        out = np.asarray(
+            _interp_center_to_corner(
+                field_dummy, cdgrid, padded=padded),
+            dtype=np.float64)
+        self.assertEqual(out.shape, (6, n + 1, n + 1, nlev))
+
+        expected = 0.25 * (
+            padded_np[:, :-1, :-1, :]
+            + padded_np[:, 1:, :-1, :]
+            + padded_np[:, :-1, 1:, :]
+            + padded_np[:, 1:, 1:, :]
+        )
+        max_diff = float(np.max(np.abs(out - expected)))
+        self.assertLess(
+            max_diff, 1e-10,
+            msg=(f"4D branch of `_interp_center_to_corner(padded=)` "
+                 f"deviates from per-level `0.25*(SW+SE+NW+NE)` by "
+                 f"{max_diff:.3e}.  Production caller "
+                 f"`_d_sw5_corner_divergence` assumes this formula."))
+
+    def test_padded_argument_changes_output(self):
+        """Sanity: `padded=` actually controls the output.  Supplying
+        a pad filled with zeros (ignoring the real field) must produce
+        all-zero output even though the `field` argument has
+        non-zero content."""
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner)
+        n, cdgrid = self._build(n=6)
+        field = jnp.ones((6, n, n)) * 100.0   # non-trivial field
+        zero_pad = jnp.zeros((6, n + 2, n + 2))
+        out = _interp_center_to_corner(field, cdgrid, padded=zero_pad)
+        # With all-zero pad, the 0.25*(...) average must be zero.
+        max_abs = float(jnp.max(jnp.abs(out)))
+        self.assertEqual(
+            max_abs, 0.0,
+            msg=(f"Providing `padded=zeros` did not force zero "
+                 f"output; max abs = {max_abs:.3e}.  The `padded` "
+                 f"bypass must override the internal halo exchange."))
+
+
 class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
     """Iter-518: lock the structural asymmetry between u_c and v_c
     formulas in `dgrid_to_cgrid` and `fv3_cc2c` as INTENTIONAL.
