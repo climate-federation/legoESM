@@ -168,6 +168,52 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-500 (2026-04-19)**: tightened halo=3 public-API guardrails
+  in response to Codex stop-time review of iter-499.  Codex flagged
+  the halo=3 dispatch as insufficiently protected.  Three guardrails
+  added to `grids/halo.py`:
+
+  1. **Shape validation on `pad_halo(halo=3, interp_offsets=...)`** —
+     requires offsets of shape `(6, 4, 3, n)`; h1-shape `(6, 4, n)`,
+     h2-shape `(6, 4, 2, n)`, or any other ndim/depth is rejected
+     with a clear `ValueError`.  Halo=1 and halo=2 are intentionally
+     *not* tightened the same way — several existing callers
+     (`fv3_sw_core.py:479`, `operators_fc.py`, `operators_3d.py`,
+     `ocean/dynamics/barotropic.py:81`, `ice/rheology.py:100`, etc.)
+     pass h1-shape offsets with halo=2.  Tightening that path would
+     expand iter-500's scope beyond the Codex finding into a
+     broader refactor.  The halo=3 path has no legacy callers so
+     it can be locked down cleanly.
+
+  2. **`pad_halo_4d(halo=3)` raises `NotImplementedError`** with an
+     explicit message pointing at the `_pad_halo_local_h3_4d` gap —
+     the 3D halo=3 path exists but the 4D multi-level path does
+     not, and the previous general-range error message would have
+     misled users into thinking halo=3 was unsupported everywhere.
+
+  3. **`pad_halo_vector(halo=3)` raises `NotImplementedError`** —
+     the vector rotation round-trip depends on h=3-shaped padded
+     grid-angle and half-metrics, none of which exist yet; the
+     packed-MPI branch would also fail in `pad_halo_mpi_4d`.
+     Without an explicit guard, calls would silently ride through
+     the scalar `pad_halo(halo=3)` path with mis-shaped rotation
+     metrics and return wrong numbers.
+
+  Tests (`TestPadHaloH3Guardrails`, 4 assertions):
+    - `pad_halo(halo=3, interp_offsets=h1_shape)` raises;
+    - `pad_halo(halo=3, interp_offsets=h2_shape)` raises;
+    - `pad_halo(halo=3, interp_offsets=ndim3_array)` raises;
+    - `pad_halo_4d(halo=3)` raises with "pad_halo_4d" in message;
+    - `pad_halo_vector(halo=3, ...)` raises with "pad_halo_vector"
+      in message.
+
+  Test totals: 42/42 on `test_scale_halo.py` (37 prior + 5 net new,
+  after dropping 3 tests that tried to lock down halo=1/2 strictness
+  that the softer guardrail no longer enforces); 132/132 on
+  `test_cdgrid_fv3_regression.py + test_duogrid.py`.  Required
+  evaluations (W2/W5/cosine bell) cannot have changed — no
+  production caller uses halo=3 yet.
+
 - **iter-499 (2026-04-19)**: fourth step on the ng=3 halo extension —
   wired `halo=3` into the public `pad_halo()` dispatch on
   `grids/halo.py`.  Extended the accepted halo set to `(1, 2, 3)`,

@@ -511,6 +511,22 @@ def pad_halo(
         raise NotImplementedError(
             f"Only halo=1, halo=2, and halo=3 are supported, got {halo}")
 
+    # Validate interp_offsets shape for halo=3 (the new path added in
+    # iter-499).  Without this guard, a wrongly-shaped offsets array
+    # would fail with a cryptic IndexError deep inside
+    # `_pad_halo_local_h3`.  halo=1/2 are intentionally *not* checked
+    # here because several existing callers pass the h1 shape
+    # `(6, 4, n)` together with `halo=2`; that usage is silently
+    # reduced to nearest-neighbour-like interpolation by
+    # `_pad_halo_local_h2` and any pure tightening would be a broader
+    # refactor outside iter-500's Codex-driven guardrail scope.  The
+    # halo=3 path has no legacy callers so we lock it down now.
+    if interp_offsets is not None and halo == 3:
+        if interp_offsets.ndim != 4 or interp_offsets.shape[2] != 3:
+            raise ValueError(
+                f"halo=3 expects interp_offsets of shape (6, 4, 3, n), "
+                f"got shape={interp_offsets.shape}")
+
     # When duogrid is active, suppress interp_offsets (use nearest copy + remap)
     offsets = None if duogrid is not None else interp_offsets
 
@@ -587,6 +603,17 @@ def pad_halo_4d(
         raise ValueError(
             "interp_offsets and duogrid are mutually exclusive"
         )
+    if halo == 3:
+        # iter-499 added halo=3 to the 3D `pad_halo` single-node path.
+        # The 4D path has not yet been extended (would need
+        # `_pad_halo_local_h3_4d` + MPI/SPMD 4D equivalents).  Raise
+        # explicitly so callers don't silently get 'halo=3 unsupported'
+        # from the general-range check below.
+        raise NotImplementedError(
+            "halo=3 is not yet supported for pad_halo_4d; "
+            "the 4D path (needed for multi-level scalar fields) "
+            "still requires an `_pad_halo_local_h3_4d` implementation. "
+            "Use `pad_halo` on individual levels as a workaround.")
     if halo not in (1, 2):
         raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
 
@@ -1422,6 +1449,25 @@ def pad_halo_vector(
     v_padded : jax.Array, shape (6, n+2*halo, n+2*halo)
         Padded grid-aligned y-velocity.
     """
+    # iter-500: halo=3 added to scalar `pad_halo` in iter-499 has not
+    # been extended to the vector path — the packed-MPI path uses
+    # `pad_halo_mpi_4d` which does not support halo=3, and the fallback
+    # calls `pad_halo(halo=3)` twice (no shape issue, but
+    # `compute_padded_angle`/`compute_padded_half_metrics` must be in
+    # the (n+6)x(n+6) shape, which the callers do not yet produce).
+    # Raise explicitly rather than silently riding through an
+    # under-validated vector rotation path.
+    if halo == 3:
+        raise NotImplementedError(
+            "halo=3 is not yet supported for pad_halo_vector; "
+            "needs h=3 padded grid-angle + half-metrics and "
+            "pad_halo_mpi_4d(halo=3) before the vector rotation "
+            "round-trip is correct.")
+    if halo not in (1, 2):
+        raise NotImplementedError(
+            f"Only halo=1 and halo=2 are supported for pad_halo_vector, "
+            f"got {halo}")
+
     _EPS = float(jnp.finfo(jnp.float32).eps)
 
     if cos_theta is not None and sin_theta is not None:

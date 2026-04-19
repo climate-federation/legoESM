@@ -574,6 +574,69 @@ class TestPadHaloH3Dispatch:
 
 
 # ---------------------------------------------------------------------------
+# Public-API guardrails for halo=3 (iter-500, Codex stop-time fix)
+# ---------------------------------------------------------------------------
+
+class TestPadHaloH3Guardrails:
+    """Codex flagged iter-499 for exposing halo=3 publicly without
+    enough guardrails.  These tests pin down the guardrails:
+
+    1. `pad_halo(halo=3)` validates `interp_offsets` shape — wrong
+       shape raises `ValueError` clearly instead of IndexError.
+    2. `pad_halo_4d(halo=3)` raises `NotImplementedError` with a
+       message pointing at the 4D gap.
+    3. `pad_halo_vector(halo=3)` raises `NotImplementedError` — the
+       vector rotation round-trip depends on h=3 padded grid angles
+       and half-metrics, none of which exist yet.
+    """
+
+    def test_pad_halo_halo3_rejects_h1_shape_offsets(self):
+        """Passing h1-shape offsets (6, 4, n) with halo=3 must raise
+        ValueError — the halo=3 path strictly requires h3 shape
+        (6, 4, 3, n)."""
+        from legoesm.grids.halo import compute_halo_interp_offsets
+        offsets_h1 = compute_halo_interp_offsets(N)  # (6, 4, N)
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects.*shape \(6, 4, 3, n\)"):
+            pad_halo(data, halo=3, interp_offsets=offsets_h1)
+
+    def test_pad_halo_halo3_rejects_h2_shape_offsets(self):
+        from legoesm.grids.halo import compute_halo_interp_offsets_h2
+        offsets_h2 = compute_halo_interp_offsets_h2(N)  # (6, 4, 2, N)
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects.*shape \(6, 4, 3, n\)"):
+            pad_halo(data, halo=3, interp_offsets=offsets_h2)
+
+    def test_pad_halo_halo3_rejects_non4d_offsets(self):
+        """Wrong ndim for halo=3 must be caught."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((6, 4, N), dtype=jnp.float64)  # ndim=3
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_4d_halo3_raises_notimplemented(self):
+        from legoesm.grids.halo import pad_halo_4d
+        data = jnp.ones((6, N, N, 3), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError, match="pad_halo_4d"):
+            pad_halo_4d(data, halo=3)
+
+    def test_pad_halo_vector_halo3_raises_notimplemented(self):
+        """The vector rotation round-trip needs h=3 grid angles and
+        half-metrics; with neither in place, pad_halo_vector at halo=3
+        must error rather than produce wrong numbers."""
+        from legoesm.grids.halo import pad_halo_vector
+        u = jnp.ones((6, N, N), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 6, N + 6), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 6, N + 6), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError, match="pad_halo_vector"):
+            pad_halo_vector(
+                u, v, ca, sa, cap, sap, interp_offsets=None, halo=3)
+
+
+# ---------------------------------------------------------------------------
 # JIT compatibility
 # ---------------------------------------------------------------------------
 
