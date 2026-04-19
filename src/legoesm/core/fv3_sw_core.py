@@ -1722,7 +1722,14 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     cdgrid : CubedSphereCDGrid
     dt : float — full time step
     g : float
-    div_damp : float — legacy C-grid damping (unused when d_sw5 params active)
+    div_damp : float — LEGACY, UNUSED parameter.  The d_sw5 corner
+        divergence damping at step (5) uses `d2_bg / dddmp / d4_bg /
+        nord` exclusively.  This `div_damp` is neither read nor
+        validated in the function body — it is kept in the signature
+        only for backward compatibility with older callers.  Future
+        consolidation should drop this parameter from all three FB
+        entry points (`_d_sw_native`, `fv3_forward_backward_step`,
+        `fv3_fb_sw_step`) and from `CDGridShallowWaterConfig`.
     d2_bg : float — FV3 d_sw5 background del-2 coefficient (default 0.0)
     dddmp : float — FV3 d_sw5 adaptive Smagorinsky coefficient (default 0.0)
     d4_bg : float — FV3 d_sw5 background del-4+ coefficient (default 0.16)
