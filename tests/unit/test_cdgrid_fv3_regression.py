@@ -1614,6 +1614,149 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                  f"the refactor is intentional, UPDATE this test "
                  f"with the new formula."))
 
+    def test_corner_vorticity_boundary_gates_linear_extrapolation_on_not_use_duogrid(self):
+        """Iter-553 (Codex follow-up to iter-552): the iter-552 change
+        gated the boundary linear-extrapolation on `not use_duogrid`.
+        Previous tests (iter-550 zero-flow, iter-551 interior) do NOT
+        exercise the BOUNDARY corners where this gate actually fires.
+
+        This test pins the iter-552 branch:
+          (a) `use_duogrid=True`:  boundary fx_pad/fy_pad values are
+              `mode='edge'` (copy of outermost cell) -- linear
+              extrapolation SKIPPED.
+          (b) `use_duogrid=False`: boundary values are
+              `2*a[0] - a[1]` and `2*a[n-1] - a[n-2]` -- linear
+              extrapolation APPLIED.
+
+        Verified at boundary corners (i, j in {0, n}) by comparing
+        the vorticity output against the expected formulas derived
+        from the two padding variants.  Computes ONLY cases where
+        the corner-vertex override (lines 1123-1126) is inactive
+        (use_duogrid=True) OR where it doesn't reach the specific
+        corner under test (non-duogrid: skip 4 cube vertices).
+
+        If the gate is removed (reverting to `if n > 2:`), the
+        duogrid branch will fail; if the gate is inverted, the
+        non-duogrid branch will fail.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        rng = np.random.default_rng(2552)
+        # Same cdgrid for both paths (duogrid works fine for both —
+        # the `use_duogrid` argument to `_corner_vorticity` is the
+        # gate we're testing, not the cdgrid construction).
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        uc_np = rng.standard_normal((6, n + 1, n)).astype(np.float64)
+        vc_np = rng.standard_normal((6, n, n + 1)).astype(np.float64)
+        uc = jnp.asarray(uc_np)
+        vc = jnp.asarray(vc_np)
+
+        dxc = np.asarray(cdgrid.dxc, dtype=np.float64)
+        dyc = np.asarray(cdgrid.dyc, dtype=np.float64)
+        area_c = np.asarray(cdgrid.area_corner, dtype=np.float64)
+        f_corner = np.asarray(cdgrid.f_corner, dtype=np.float64)
+
+        fx_circ = uc_np * dxc   # (6, n+1, n)
+        fy_circ = vc_np * dyc   # (6, n, n+1)
+
+        # Build the expected fx_pad / fy_pad under each gate branch.
+        def _build_pad(fx_c, fy_c, apply_extrap):
+            # fx_pad shape (6, n+1, n+2): pad axis=2
+            fx_pad = np.pad(
+                fx_c, [(0, 0), (0, 0), (1, 1)], mode='edge')
+            fy_pad = np.pad(
+                fy_c, [(0, 0), (1, 1), (0, 0)], mode='edge')
+            if apply_extrap and n > 2:
+                fx_pad[:, :, 0] = 2 * fx_c[:, :, 0] - fx_c[:, :, 1]
+                fx_pad[:, :, n + 1] = (
+                    2 * fx_c[:, :, n - 1] - fx_c[:, :, n - 2])
+                fy_pad[:, 0, :] = 2 * fy_c[:, 0, :] - fy_c[:, 1, :]
+                fy_pad[:, n + 1, :] = (
+                    2 * fy_c[:, n - 1, :] - fy_c[:, n - 2, :])
+            return fx_pad, fy_pad
+
+        def _expected_vort_abs(apply_extrap):
+            fxp, fyp = _build_pad(fx_circ, fy_circ, apply_extrap)
+            vort = (fxp[:, :, :-1] - fxp[:, :, 1:]
+                    - fyp[:, :-1, :] + fyp[:, 1:, :])
+            return f_corner + vort / area_c
+
+        # Branch (a): duogrid=True -> extrapolation SKIPPED.
+        out_dg = np.asarray(
+            _corner_vorticity(uc, vc, cdgrid, use_duogrid=True),
+            dtype=np.float64)
+        expected_dg = _expected_vort_abs(apply_extrap=False)
+        # Check at the 4 BOUNDARY ROW/COLUMN positions (i=0, i=n,
+        # j=0, j=n) -- away from the 4 cube-vertex corners which are
+        # also affected on the non-duogrid path.  Under duogrid, no
+        # vertex-override is applied, so all boundary cells are a
+        # clean comparison.
+        max_diff_dg = float(np.max(np.abs(out_dg - expected_dg)))
+        scale_dg = float(np.max(np.abs(expected_dg)))
+        self.assertLess(
+            max_diff_dg, 1e-10 * max(1.0, scale_dg),
+            msg=(f"duogrid=True: `_corner_vorticity` output differs "
+                 f"from the `mode='edge'`-only expected formula by "
+                 f"{max_diff_dg:.3e} (scale {scale_dg:.3e}).  If the "
+                 f"iter-552 gate was removed (reverting to "
+                 f"`if n > 2:` without duogrid check), the boundary "
+                 f"output would include the linear extrapolation "
+                 f"and this assertion would fail."))
+
+        # Branch (b): duogrid=False -> extrapolation APPLIED.
+        # Compare only at the 4 face boundaries EXCLUDING cube
+        # vertices (which also get the override at lines 1123-1126).
+        out_nd = np.asarray(
+            _corner_vorticity(uc, vc, cdgrid, use_duogrid=False),
+            dtype=np.float64)
+        expected_nd = _expected_vort_abs(apply_extrap=True)
+
+        # Build a boundary-only mask excluding the 4 corners.
+        mask = np.zeros((6, n + 1, n + 1), dtype=bool)
+        # West column j=0, excluding corners (0,0) and (n,0)
+        mask[:, 1:n, 0] = True
+        # East column j=n, excluding (0,n) and (n,n)
+        mask[:, 1:n, n] = True
+        # South row i=0, excluding (0,0) and (0,n)
+        mask[:, 0, 1:n] = True
+        # North row i=n, excluding (n,0) and (n,n)
+        mask[:, n, 1:n] = True
+
+        diff = np.abs(out_nd - expected_nd)
+        diff_boundary = diff[mask]
+        max_diff_nd = float(np.max(diff_boundary))
+        scale_nd = float(
+            np.max(np.abs(expected_nd[mask])))
+        self.assertLess(
+            max_diff_nd, 1e-10 * max(1.0, scale_nd),
+            msg=(f"duogrid=False: boundary-row/column "
+                 f"`_corner_vorticity` output differs from the "
+                 f"linear-extrapolation-applied expected formula "
+                 f"by {max_diff_nd:.3e} (scale {scale_nd:.3e}).  "
+                 f"If the iter-552 gate was inverted "
+                 f"(`if use_duogrid and n > 2`), the non-duogrid "
+                 f"branch would use mode='edge' only and this "
+                 f"assertion would fail."))
+
+        # Sanity: the two outputs MUST differ at the boundary under
+        # random input (proof that the gate actually controls
+        # behaviour).
+        branch_diff = np.max(np.abs(out_dg - out_nd)[mask])
+        self.assertGreater(
+            branch_diff, 1e-8 * max(1.0, scale_dg),
+            msg=(f"duogrid=True and duogrid=False produce IDENTICAL "
+                 f"output at the boundary (max diff {branch_diff:.3e}) "
+                 f"on random input.  The iter-552 gate is ineffective "
+                 f"— either the extrapolation was never actually "
+                 f"gated, or the branches were both made equivalent."))
+
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
         corners against the Fortran Formula

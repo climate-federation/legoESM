@@ -168,6 +168,43 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-553 (2026-04-19)**: addressed Codex stop-time review of
+  iter-552: "the iter-552 code change is still untested on the only
+  branch it modified".
+
+  Iter-552 changed the `_corner_vorticity` boundary extrapolation
+  gate from `if n > 2:` to `if (not use_duogrid) and n > 2:`.  The
+  iter-550 tests (zero-flow, shape/finiteness) and iter-551 test
+  (INTERIOR circulation) do NOT exercise the BOUNDARY corners where
+  this gate actually fires — the change itself was unprotected by
+  any regression.  A future refactor that reverted or inverted the
+  gate would pass all existing tests.
+
+  Iter-553 adds
+  `test_corner_vorticity_boundary_gates_linear_extrapolation_on_not_use_duogrid`:
+    (a) duogrid=True branch: asserts boundary output matches the
+        expected `mode='edge'`-only formula (NO linear extrapolation
+        applied under duogrid).
+    (b) non-duogrid branch: asserts boundary output (excluding the
+        4 cube vertices, which get additional overrides at
+        lines 1123-1126) matches the expected
+        `2*a[0]-a[1], 2*a[n-1]-a[n-2]` extrapolation-applied
+        formula.
+    (c) Sanity: duogrid=True and duogrid=False MUST produce
+        measurably different boundary output on random input —
+        proof the gate actually controls behaviour.
+
+  **Two-stage sanity check**:
+    (i) Reverted gate to `if n > 2:` (remove duogrid check):
+        branch (a) fires with max diff 7.173e-06 (5% relative
+        error at boundary) — correctly detects loss of gating.
+    (ii) Inverted gate to `if use_duogrid and n > 2:`: branch (a)
+         also fires (under duogrid the extrapolation is now
+         applied, contradicting the expected `mode='edge'`).
+
+  Restored production code; all 5 `_corner_vorticity` tests pass.
+  No production-path numerical changes.
+
 - **iter-552 (2026-04-19)**: **production numerical change** —
   gate `_corner_vorticity` linear-extrapolation on
   `not use_duogrid` per Fortran convention.
