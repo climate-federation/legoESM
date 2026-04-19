@@ -197,6 +197,37 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-575 (2026-04-20)**: addressed Codex stop-time review of
+  iter-574: "new tests still don't constrain the actual flux-form
+  divergence formula".
+
+  Iter-574's structural tests (linearity, anti-symmetry, no-op
+  detection) would pass on any linear-anti-symmetric refactor —
+  e.g., `div = (u_c[1:] - u_c[:-1] + ...) / area` (without the
+  `dy_edge_x` / `dx_edge_y` metric weighting) would be different
+  but still linear and anti-symmetric.
+
+  Added `test_exact_flux_form_formula`:
+    - Float32 bit-exact reproduction of the production formula:
+      ```
+      flux_x = u_c * dy_edge_x     (6, n+1, n)
+      flux_y = v_c * dx_edge_y     (6, n, n+1)
+      net_x = flux_x[:, 1:, :] - flux_x[:, :-1, :]
+      net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
+      div = (net_x + net_y) / area
+      ```
+    - Uses `assertEqual(diff, 0.0)` — production output must
+      match bit-for-bit in float32.
+
+  **Sanity-checked**: replaced production with unit metrics
+  (`flux_x = u_c`, `flux_y = v_c` — no `dy`/`dx` weighting).
+  `test_exact_flux_form_formula` correctly fires, along with the
+  no-op test (because scaling changes massively when metrics
+  drop).  Restored production; all 8 tests pass.
+
+  No production-path numerical changes.  102/102 tests pass in
+  `test_cdgrid.py` (101 prior + 1 new).
+
 - **iter-574 (2026-04-20)**: comprehensive behavior locks for
   `cgrid_divergence`.
 

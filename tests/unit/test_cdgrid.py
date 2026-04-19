@@ -992,6 +992,68 @@ class TestCgridDivergenceBehavior(unittest.TestCase):
                      f"{diff:.3e} (scale {scale:.3e}).  Level-"
                      f"routing bug."))
 
+    def test_exact_flux_form_formula(self):
+        """Iter-575 (Codex follow-up to iter-574): pin the EXACT
+        flux-form divergence formula via float32 bit-exact
+        reproduction.
+
+        Iter-574's structural tests (linearity, anti-symmetry,
+        no-op detection) would pass on any linear-anti-symmetric
+        refactor — e.g., `div = (u_c[1:] - u_c[:-1] + ...) /
+        area` (without the `dy_edge_x` and `dx_edge_y` metric
+        weighting).  That's a DIFFERENT formula that still
+        passes those tests.
+
+        This test pins the exact formula:
+            flux_x = u_c * dy_edge_x     (6, n+1, n)
+            flux_y = v_c * dx_edge_y     (6, n, n+1)
+            net_x = flux_x[:, 1:] - flux_x[:, :-1]
+            net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
+            div = (net_x + net_y) / area
+
+        Uses float32 matching reproduction so production output
+        is compared BIT-FOR-BIT against the expected formula.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(5574)
+
+        # Cast inputs to float32 to match jax's internal precision.
+        u_np = rng.standard_normal(
+            (6, n + 1, n)).astype(np.float32)
+        v_np = rng.standard_normal(
+            (6, n, n + 1)).astype(np.float32)
+
+        prod = np.asarray(cgrid_divergence(
+            jnp.asarray(u_np), jnp.asarray(v_np), cdgrid))
+
+        # Reproduce in float32 mirroring production ops.
+        dy = np.asarray(cdgrid.dy_edge_x).astype(np.float32)
+        dx = np.asarray(cdgrid.dx_edge_y).astype(np.float32)
+        area = np.asarray(cdgrid.base.area).astype(np.float32)
+
+        flux_x = u_np * dy   # (6, n+1, n)
+        flux_y = v_np * dx   # (6, n, n+1)
+        net_x = flux_x[:, 1:, :] - flux_x[:, :-1, :]
+        net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
+        expected = (net_x + net_y) / area
+
+        diff = float(np.max(np.abs(
+            prod.astype(np.float32) - expected)))
+        self.assertEqual(
+            diff, 0.0,
+            msg=(f"`cgrid_divergence` output differs from the "
+                 f"exact flux-form formula `(net_x + net_y) / area` "
+                 f"by {diff:.3e}.  Either:\n"
+                 f"  - the metric weighting was changed "
+                 f"(dy_edge_x / dx_edge_y replaced with another "
+                 f"metric)\n"
+                 f"  - the area normalisation was changed\n"
+                 f"  - the axis for the differencing was swapped\n"
+                 f"If an intentional refactor, UPDATE this test "
+                 f"with the new formula."))
+
 
 class TestArakawaLambGradient(unittest.TestCase):
     """Iter-572: regression lock for `_arakawa_lamb_gradient`
