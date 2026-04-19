@@ -197,6 +197,92 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-566 cross-reference: pyFV3's xppm.py vs our
+  `_ppm_reconstruct_1d`** (concrete evidence for iter-542
+  documented divergence):
+
+  Fetched pyFV3 `pyfv3/stencils/xppm.py` (374 lines) from
+  https://github.com/NOAA-GFDL/pyFV3/blob/develop/pyfv3/stencils/xppm.py
+  and cross-checked the smt5/smt6 detector and edge-formula
+  structure.  Confirmed mapping:
+
+    1. **smt5 detector** (line 43-56 of pyFV3 xppm.py):
+       ```python
+       @gtfunction
+       def get_advection_mask(bl, b0, br):
+           if __INLINED(mord == 5):
+               smt5 = bl * br < 0              # sign-change
+           else:  # mord == 3 default
+               smt5 = (3.0 * abs(b0)) < abs(bl - br)   # smoothness
+           if smt5[-1, 0, 0] or smt5[0, 0, 0]:
+               advection_mask = 1.0
+           else:
+               advection_mask = 0.0
+           return advection_mask
+       ```
+       This confirms iter-542's documented gap: our
+       `_ppm_reconstruct_1d` implements textbook
+       Colella-Woodward (flatten at extrema, clip at
+       overshoot) which does NOT map to pyFV3's mord==3
+       "apply flux only if smt5 fires" logic.
+
+    2. **compute_al with edge formulas** (line 142-180):
+       ```python
+       al = p1 * (q[-1] + q) + p2 * (q[-2] + q[1])
+       if grid_type < 3:
+           with horizontal(region[i_start - 1, :],
+                           region[i_end, :]):
+               al = c1 * q[-2] + c2 * q[-1] + c3 * q
+           with horizontal(region[i_start, :],
+                           region[i_end + 1, :]):
+               al = 0.5 * (
+                   ((2*dxa[-1] + dxa[-2]) * q[-1]
+                    - dxa[-1] * q[-2]) / (dxa[-2] + dxa[-1])
+                   + ((2*dxa[0] + dxa[1]) * q[0]
+                      - dxa[0] * q[1]) / (dxa[0] + dxa[1]))
+           with horizontal(region[i_start + 1, :],
+                           region[i_end + 2, :]):
+               al = c3 * q[-1] + c2 * q[0] + c1 * q[1]
+       ```
+       This matches Fortran `tp_core.F90:357-369` exactly and
+       confirms the `c1/c2/c3/dxa` edge formulas are the
+       canonical FV3 boundary treatment — the "one-sided"
+       rules Codex flagged in iter-542.
+
+    3. **iord==8 dm-slope path** (line 79-97):
+       ```python
+       @gtfunction
+       def dm_iord8plus(q):
+           xt = 0.25 * (q[1] - q[-1])
+           dqr = max(max(q, q[-1]), q[1]) - q
+           dql = q - min(min(q, q[-1]), q[1])
+           return sign(min(min(abs(xt), dqr), dql), xt)
+
+       @gtfunction
+       def al_iord8plus(q, dm):
+           return 0.5 * (q[-1] + q) + 1/3 * (dm[-1] - dm)
+
+       @gtfunction
+       def blbr_iord8(q, al, dm):
+           xt = 2.0 * dm
+           bl = -sign(min(abs(xt), abs(al - q)), xt)
+           br = sign(min(abs(xt), abs(al[1] - q)), xt)
+           return bl, br
+       ```
+       Exact Python mapping of Fortran `tp_core.F90:548-553`.
+       FV3 default hord_mt/hord_dp/hord_tm=8 uses this path.
+
+  **Net evidence for iter-542**: the divergence between
+  our textbook CW and FV3-faithful PPM is REAL and
+  Python-implementable.  A future port can translate the
+  pyFV3 gt4py stencils to JAX array operations directly.
+  The pyFV3 code uses `@gtfunction` with relative indexing
+  (`q[-1, 0, 0]`); our port would use `jnp.pad` + slice
+  arithmetic, but the algebra is identical.
+
+  No code changes this iteration — this is a documentation
+  cross-reference to unblock the future port.
+
 - **iter-565 (2026-04-19)**: regression lock for `_pad_halo_auto`
   and `_pad_halo_auto_h2` (previously untested).
 
