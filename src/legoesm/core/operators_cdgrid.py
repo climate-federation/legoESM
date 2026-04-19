@@ -1452,10 +1452,26 @@ def fv3_sw_tendencies(
         du_cc = du_cc - hyperdiff_coeff * bilap_u_local
         dv_cc = dv_cc - hyperdiff_coeff * bilap_v_local
 
-    # (j) Smooth face-boundary tendencies. The geostrophic imbalance at boundary
-    # cells (rows 0 and n-1) is 7.7x larger than interior due to halo
-    # interpolation error in corner winds and gradient. Blending with the
-    # adjacent interior reduces this without affecting balanced flows.
+    # (j) Smooth face-boundary tendencies — non-FV3 stabilizer.
+    # The geostrophic imbalance at boundary cells (rows 0 and n-1) is
+    # ~7.7x larger than interior due to halo interpolation error in
+    # corner winds (step (e)) and the Arakawa-Lamb gradient (step (d)).
+    # Blending the boundary tendency with the adjacent interior cell
+    # reduces this O(dx) error without altering balanced flows.
+    #
+    # **Iter-511 measurement** on the canonical W2 production harness
+    # (C36, dt=60s, 1 day):
+    #   boundary_fix=True:  L2 = 5.64e-4, Linf = 4.53e-3
+    #   boundary_fix=False: L2 = 1.36e-3, Linf = 8.51e-3   (2.4x worse)
+    # Locked by `tests/.../test_w2_alpha0_c16_1day_boundary_fix_load_bearing`
+    # (iter-513) so this stabilizer cannot be silently disabled.
+    #
+    # This is a NON-FV3 hack (the FV3 d_sw_native chain achieves the
+    # same effect via Fortran-faithful c_sw + flux-sync + d_sw5 corner
+    # divergence damping; our A-L + RK3 production path is not
+    # FV3-faithful, so the boundary cells need explicit smoothing).
+    # Removing this is gated on the FB chain becoming stable at C36
+    # (review-doc item #2: ng=3 halo infrastructure).
     if boundary_fix and n > 2:
         du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
         du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))

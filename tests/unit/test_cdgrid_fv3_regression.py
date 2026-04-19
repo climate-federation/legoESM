@@ -2481,6 +2481,81 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"have regressed.  Pre-iter-505 baseline on this "
                  f"setup was L2 = 3.43e-3."))
 
+    def test_boundary_fix_is_load_bearing_for_w2_l2(self):
+        """Iter-513: explicitly lock the iter-511 finding that
+        `boundary_fix=True` in `fv3_sw_tendencies` delivers a
+        substantial W2 L2 improvement, so a future "remove non-FV3
+        hack" pass cannot silently disable it without first restoring
+        the boundary error budget.
+
+        Measured at C16, dt=300s, 1 day (canonical config):
+          - boundary_fix=True  : L2 = 8.4e-4
+          - boundary_fix=False : L2 = 1.3e-3
+          - ratio True/False = 0.65   (boundary_fix wins by ~35%)
+        At C36, dt=60s, 1 day the gap widens to 2.4x (iter-511
+        measurement).  At C16 dt=300s the signal is weaker because
+        the larger dt and coarser grid both reduce the relative
+        contribution of the face-boundary error.
+
+        Test asserts True/False ratio < 0.85 — fires if the
+        non-FV3 stabilizer is silently disabled or stops working.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+
+        n = 16
+        days = 1.0
+        dt = 300.0
+        n_steps = int(days * 86400 / dt)
+        div_damp = 1.5e7 * (48.0 / n) ** 2
+
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        sw = williamson_test2(grid)
+        h0 = sw.h.data
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+        results = {}
+        for bf in (True, False):
+            cfg = CDGridShallowWaterConfig(
+                div_damp=div_damp, boundary_fix=bf)
+            model = FV3EdgeShallowWaterModel(grid, config=cfg)
+            cdgrid = model.cdgrid
+            u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+            u_d = cdgrid.cos_angle_edge_x * u_east_x
+            u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+            v_d = -cdgrid.sin_angle_edge_y * u_east_y
+            state0 = FV3EdgeShallowWaterState(
+                h=h0, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+            model.set_initial_mass(state0)
+            state = state0
+            for _ in range(n_steps):
+                state = model.step(state, dt)
+            err = state.h - h0
+            L2 = float(jnp.sqrt(jnp.mean(err ** 2))
+                       / float(jnp.mean(jnp.abs(h0))))
+            results[bf] = L2
+
+        ratio = results[True] / results[False]
+        self.assertLess(
+            ratio, 0.85,
+            msg=(f"boundary_fix=True L2 ({results[True]:.3e}) is not "
+                 f"meaningfully smaller than boundary_fix=False L2 "
+                 f"({results[False]:.3e}); ratio = {ratio:.3f}.  At "
+                 f"C16 dt=300s the expected ratio is ~0.65 — if it "
+                 f"has drifted above 0.85, either the non-FV3 "
+                 f"stabilizer was silently disabled or the underlying "
+                 f"face-boundary error budget has changed.  Update "
+                 f"the iter-511 documentation if intentional."))
+
 
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
     """Regression test for iter-510: lock in the polar-face symmetry

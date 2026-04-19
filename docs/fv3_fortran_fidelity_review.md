@@ -168,6 +168,40 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-513 (2026-04-19)**: documented and locked the non-FV3
+  `boundary_fix=True` stabilizer in `fv3_sw_tendencies` step (j).
+
+  Audit findings (from this iteration):
+    - `operators_fv.py::fv_flux_divergence` and its `_ppm_reconstruct_x/y`
+      helpers use a different axis convention (`axis=-2`) than
+      `operators_cdgrid.py::_ppm_reconstruct_1d` (`axis=-1`).  The
+      operators_fv.py file is internally consistent (its
+      `_ppm_reconstruct_x` correctly extracts strips with the
+      halo-padded axis on axis=1, then operates on axis=-2).
+      Verified: no production atmospheric path actually calls
+      `fv_flux_divergence` (only its private helpers
+      `_ppm_edge_values` and `_ppm_limit` are reused by lat-lon
+      variants).  No iter-505-style bug exposure.
+
+  Concrete improvements:
+    1. Expanded the `boundary_fix` inline comment at
+       `operators_cdgrid.py:1455-1473` with the iter-511 measurement
+       (2.4× L2 / 1.9× Linf at C36) and an explicit "non-FV3" tag,
+       linking to the FB-chain unblock (review-doc item #2) as the
+       precondition for removing this stabilizer.
+    2. Added
+       `TestW2BoundaryErrorBudget::test_boundary_fix_is_load_bearing_for_w2_l2`
+       — runs the canonical W2 setup at C16 once with
+       `boundary_fix=True` and once with `boundary_fix=False`,
+       asserts True/False L2 ratio < 0.85.  Measured baseline at
+       this configuration: ratio ≈ 0.65 (boundary_fix delivers ~35 %
+       improvement at C16 dt=300s; the gap widens to 2.4× at C36
+       dt=60s as documented in iter-511).  If a future "remove
+       improvisation" pass disables `boundary_fix`, the test fires
+       with a clear pointer to the iter-511 documentation.
+
+  No production-path numerical changes.  188/188 tests pass.
+
 - **iter-512 (2026-04-19)**: re-pinned the iter-511 W2 regression to
   the canonical production harness after Codex stop-time review:
   "new W2 regression is pinned to a non-canonical, noisier setup
