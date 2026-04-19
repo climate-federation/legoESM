@@ -168,6 +168,39 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-526 (2026-04-19)**: addressed Codex stop-time review of
+  iter-525: "the new regression can still pass on sampled NaNs and
+  it does not actually check positivity throughout the 1-day run".
+
+  Two strengthening changes to the cosine bell positivity test:
+
+  **(1) Check h_min at EVERY step, not 5 sampled points.**
+  iter-525 sampled steps `{6, 12, 24, 36, 48}` (out of 48 total),
+  so a transient negative excursion that recovers before the next
+  sample slipped through.  Iter-526 scans `min(h)` after each
+  `transport_step` call and tracks the worst value.  Empirical
+  evidence the per-step scan finds more: with the
+  positivity clip disabled, the per-step scan reports worst
+  h_min = **-2.825e-02 at step 47**, while iter-525's sampled
+  version reported only **-1.054e-02 at step 48**.
+
+  **(2) Explicit NaN/Inf check at every step.**  Python's
+  `min(seq, key=lambda t: t[1])` silently ignores NaN values
+  because NaN comparisons return False — so a `jnp.min(h)` that
+  returns NaN would not produce the worst-case in `min()`.
+  Iter-526 adds:
+    - `assert bool(jnp.all(jnp.isfinite(h)))` after each step
+      (NaN is not finite, so this catches it at the source).
+    - `assert not math.isnan(h_min_i)` defensive double-check on
+      the per-step `jnp.min` result.
+
+  Sanity-checked locally: removing the `jnp.maximum(h_new, 0.0)`
+  clip from `transport_step` produces a CLEAR failure with a
+  message pointing at `fv_tp_2d.py:558-568`.
+
+  No production-path numerical changes (test only).
+  230/230 tests pass.
+
 - **iter-525 (2026-04-19)**: locked the cosine bell positivity
   invariant on the canonical production matrix path
   (`run_atmosphere_test_matrix.py:1517-1545`).

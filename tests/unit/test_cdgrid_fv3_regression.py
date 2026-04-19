@@ -2788,6 +2788,7 @@ class TestCosineBellPositivity(unittest.TestCase):
 
     def test_cosine_bell_h_nonnegative_throughout_1day_canonical(self):
         import jax.numpy as jnp
+        import math
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -2809,34 +2810,54 @@ class TestCosineBellPositivity(unittest.TestCase):
             state.u_d, state.v_d, cdgrid)
         _mass_target = float(jnp.sum(state.h * grid.area))
 
-        # Sample h.min() across the trajectory; clipped path should
-        # keep h_min ≥ 0 at every step.
-        sample_steps = {n_steps // 8, n_steps // 4, n_steps // 2,
-                        3 * n_steps // 4, n_steps}
-        h = state.h
-        h_mins = [(0, float(jnp.min(h)))]
-        for i in range(n_steps):
-            h = transport_step(h, ut, vt, dt, cdgrid,
-                               mass_target=_mass_target)
-            if (i + 1) in sample_steps:
-                h_mins.append((i + 1, float(jnp.min(h))))
-
+        # iter-526 (Codex): two strengthening changes vs iter-525:
+        # (1) Check h_min and finiteness at EVERY step, not just 5
+        #     sampled points — otherwise a transient negative excursion
+        #     that recovers before the next sample slips through.
+        # (2) Explicit `jnp.all(jnp.isfinite(h))` check at every step,
+        #     because Python's `min()` with a NaN value silently
+        #     ignores the NaN (NaN comparisons return False).
         # Tolerance: allow a tiny negative excursion (1e-9 of h_max)
         # to absorb pure float-precision noise; anything larger is
         # a real positivity violation that means transport_step's
         # `jnp.maximum(h_new, 0.0)` clip (line 564) was removed.
         tol = -1e-9 * h_max_init
-        worst = min(h_mins, key=lambda t: t[1])
+
+        h = state.h
+        worst_min = float(jnp.min(h))
+        worst_step = 0
+        for i in range(n_steps):
+            h = transport_step(h, ut, vt, dt, cdgrid,
+                               mass_target=_mass_target)
+            # NaN/Inf check — uses jnp.all(jnp.isfinite) which DOES
+            # propagate NaN correctly (NaN is not finite).
+            assert bool(jnp.all(jnp.isfinite(h))), (
+                f"Cosine bell h has NaN/Inf at step {i + 1} — "
+                f"transport_step blew up.  Pre-blowup h.min was "
+                f"{worst_min:.3e} at step {worst_step}.")
+            h_min_i = float(jnp.min(h))
+            # Guard against `jnp.min` returning NaN even though
+            # `isfinite` claimed all values are finite (defensive —
+            # should not happen, but a Python-level `math.isnan`
+            # check costs nothing and removes one possible silent
+            # passthrough).
+            assert not math.isnan(h_min_i), (
+                f"jnp.min(h) returned NaN at step {i + 1} despite "
+                f"isfinite(h).all() == True — JAX semantics drift?")
+            if h_min_i < worst_min:
+                worst_min = h_min_i
+                worst_step = i + 1
+
         self.assertGreater(
-            worst[1], tol,
+            worst_min, tol,
             msg=(f"Cosine bell h went negative beyond tolerance "
-                 f"({tol:.2e}): worst h_min = {worst[1]:.3e} at "
-                 f"step {worst[0]}.  Per-sample h_min: "
-                 f"{[(s, round(v, 9)) for s, v in h_mins]}.  "
-                 f"This indicates the `jnp.maximum(h_new, 0.0)` "
-                 f"clip in `transport_step` (fv_tp_2d.py:558-568) "
-                 f"was removed.  Restore it OR add a documented "
-                 f"FCT-equivalent positivity guarantee elsewhere."))
+                 f"({tol:.2e}): worst h_min = {worst_min:.3e} at "
+                 f"step {worst_step} (out of {n_steps} total steps "
+                 f"checked at EVERY step).  This indicates the "
+                 f"`jnp.maximum(h_new, 0.0)` clip in `transport_step` "
+                 f"(fv_tp_2d.py:558-568) was removed.  Restore it OR "
+                 f"add a documented FCT-equivalent positivity "
+                 f"guarantee elsewhere."))
 
 
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
