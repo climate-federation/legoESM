@@ -870,10 +870,16 @@ class TestFluxSyncCallSitesWired:
          order upwind mass flux in the experimental FB chain).
     """
 
+    # Iter-503 (Codex): each entry now pins the exact target function
+    # inside which the call must live.  iter-502's module-wide search
+    # was too permissive — a refactor could delete the live call while
+    # leaving a dead helper or test-only wrapper still referencing
+    # `synchronize_cgrid_fluxes`, and the test would incorrectly pass.
     REQUIRED_SITES = (
-        "src/legoesm/core/operators_cdgrid.py",
-        "src/legoesm/core/fv_tp_2d.py",
-        "src/legoesm/core/fv3_sw_core.py",
+        # (file, required enclosing function name)
+        ("src/legoesm/core/operators_cdgrid.py", "cgrid_mass_flux_divergence"),
+        ("src/legoesm/core/fv_tp_2d.py",          "fv_tp_2d"),
+        ("src/legoesm/core/fv3_sw_core.py",       "_c_sw"),
     )
 
     def _repo_root(self):
@@ -882,48 +888,110 @@ class TestFluxSyncCallSitesWired:
         # tests/unit/test_duogrid.py -> repo/tests/unit -> repo
         return here.parent.parent.parent
 
+    @staticmethod
+    def _find_function(tree, name):
+        """Return the ast.FunctionDef node named ``name`` at module scope,
+        or None if not found."""
+        import ast
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        return None
+
+    @classmethod
+    def _iter_calls_in_function(cls, func_node, callee_name):
+        """Yield every ast.Call to ``callee_name`` that appears directly
+        inside the body of ``func_node`` (not inside a nested function).
+        """
+        import ast
+        for node in ast.walk(func_node):
+            # Exclude calls inside a nested FunctionDef so that a helper
+            # inside the function that was never used cannot satisfy the
+            # test while the mainline body is silently unwired.
+            if isinstance(node, ast.FunctionDef) and node is not func_node:
+                # ast.walk visits children of nested funcs too; we can't
+                # easily skip them here, so we track depth via a separate
+                # pre-order walk below.
+                continue
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == callee_name):
+                # Confirm this call is directly in func_node's body, not
+                # inside a nested FunctionDef/Lambda/comprehension scope
+                # that might be dead code.
+                if cls._call_is_in_direct_body(func_node, node):
+                    yield node
+
+    @staticmethod
+    def _call_is_in_direct_body(func_node, call_node):
+        """Verify ``call_node`` sits inside ``func_node`` but not inside
+        any nested function/lambda/generator expression within it."""
+        import ast
+        # Walk the tree rooted at func_node, but stop descending whenever
+        # we hit a nested function or lambda.
+        stack = [(func_node, False)]
+        while stack:
+            node, inside_nested = stack.pop()
+            if node is call_node and not inside_nested:
+                return True
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+            ) and node is not func_node:
+                inside_nested = True
+            for child in ast.iter_child_nodes(node):
+                stack.append((child, inside_nested))
+        return False
+
     def test_each_required_site_calls_synchronize_cgrid_fluxes(self):
-        """Every required site must contain a live (non-comment)
-        `synchronize_cgrid_fluxes(` call."""
+        """The sync call must live inside the specific target function,
+        not just anywhere in the module.  A dead helper or test-only
+        wrapper elsewhere in the file must not satisfy this test.
+        """
         import ast
 
         root = self._repo_root()
-        for rel in self.REQUIRED_SITES:
+        for rel, func_name in self.REQUIRED_SITES:
             path = root / rel
             tree = ast.parse(path.read_text())
-            call_found = False
-            for node in ast.walk(tree):
-                if (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id == "synchronize_cgrid_fluxes"):
-                    call_found = True
-                    break
-            assert call_found, (
-                f"{rel} is required to call synchronize_cgrid_fluxes "
-                f"(Ralph Critical Duogrid Constraint #1).  If a refactor "
-                f"rewires this site, update the constraint — do not just "
-                f"drop the sync silently."
+            func = self._find_function(tree, func_name)
+            assert func is not None, (
+                f"{rel}: expected module-level function `{func_name}` "
+                f"as the sync-call host; not found.")
+            calls = list(
+                self._iter_calls_in_function(func, "synchronize_cgrid_fluxes"))
+            assert calls, (
+                f"{rel}:{func_name}: must contain a live call to "
+                f"`synchronize_cgrid_fluxes` in its direct body "
+                f"(Ralph Critical Duogrid Constraint #1).  A call in "
+                f"another function, a nested helper, or a docstring "
+                f"does NOT count.  If this call was deliberately "
+                f"relocated, update REQUIRED_SITES with the new host "
+                f"function name."
             )
 
     def test_every_flux_sync_site_is_duogrid_gated(self):
-        """The synchronization must be gated so it only fires when
-        duogrid is active (non-duogrid cubed sphere uses PPM boundary
-        asymmetry as a feature; unconditional sync causes a 110x W2
-        regression per the operators_cdgrid inline comment).  Locked
-        by: the call must sit inside an `if` whose test mentions
-        `duogrid` or `dg`."""
+        """Inside the host function the call must be inside an `if`
+        whose test mentions `duogrid` or `dg`.  Unconditional sync
+        causes a 110x W2 regression for non-duogrid, per the inline
+        comment in `cgrid_mass_flux_divergence`."""
         import ast
 
         root = self._repo_root()
-        for rel in self.REQUIRED_SITES:
+        for rel, func_name in self.REQUIRED_SITES:
             path = root / rel
             src = path.read_text()
             tree = ast.parse(src)
-            # Map line number -> enclosing If node to find the gate.
+            func = self._find_function(tree, func_name)
+            assert func is not None, (
+                f"{rel}: function `{func_name}` not found.")
+
+            # Collect If nodes inside the target function (not its
+            # nested scopes).
             if_nodes_by_range = []
-            for node in ast.walk(tree):
-                if isinstance(node, ast.If):
-                    # Record (start_line, end_line, test_src)
+            stack = [(func, False)]
+            while stack:
+                node, inside_nested = stack.pop()
+                if isinstance(node, ast.If) and not inside_nested:
                     end = max(
                         (getattr(c, "lineno", node.lineno)
                          for c in ast.walk(node)),
@@ -931,31 +999,32 @@ class TestFluxSyncCallSitesWired:
                     )
                     if_nodes_by_range.append(
                         (node.lineno, end, ast.unparse(node.test)))
+                if isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+                ) and node is not func:
+                    inside_nested = True
+                for child in ast.iter_child_nodes(node):
+                    stack.append((child, inside_nested))
 
-            # Find the call location(s) and verify each is inside a gate.
+            calls = list(
+                self._iter_calls_in_function(func, "synchronize_cgrid_fluxes"))
             src_lines = src.splitlines()
-            for node in ast.walk(tree):
-                if (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id == "synchronize_cgrid_fluxes"):
-                    lineno = node.lineno
-                    # Find innermost enclosing if
-                    enclosing = [
-                        (s, e, t) for (s, e, t) in if_nodes_by_range
-                        if s <= lineno <= e
-                    ]
-                    assert enclosing, (
-                        f"{rel}:{lineno}: synchronize_cgrid_fluxes call "
-                        f"is not inside an `if` — must be gated on duogrid. "
-                        f"Source: {src_lines[lineno - 1].strip()}")
-                    # Innermost is the one with the largest start line
-                    innermost = max(enclosing, key=lambda t: t[0])
-                    gate_src = innermost[2]
-                    assert ("duogrid" in gate_src or "dg" in gate_src), (
-                        f"{rel}:{lineno}: synchronize_cgrid_fluxes call is "
-                        f"inside an `if` whose test ('{gate_src}') does "
-                        f"not mention `duogrid` or `dg` — flux sync must "
-                        f"be gated on duogrid active.")
+            for call_node in calls:
+                lineno = call_node.lineno
+                enclosing = [
+                    (s, e, t) for (s, e, t) in if_nodes_by_range
+                    if s <= lineno <= e
+                ]
+                assert enclosing, (
+                    f"{rel}:{func_name}:{lineno}: synchronize_cgrid_fluxes "
+                    f"call is not inside an `if` — must be gated on "
+                    f"duogrid. Source: {src_lines[lineno - 1].strip()}")
+                innermost = max(enclosing, key=lambda t: t[0])
+                gate_src = innermost[2]
+                assert ("duogrid" in gate_src or "dg" in gate_src), (
+                    f"{rel}:{func_name}:{lineno}: enclosing `if` test "
+                    f"('{gate_src}') does not mention `duogrid` or `dg` — "
+                    f"flux sync must be gated on duogrid active.")
 
 
 # =========================================================================

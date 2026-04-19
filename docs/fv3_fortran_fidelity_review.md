@@ -168,6 +168,39 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-503 (2026-04-19)**: strengthened the iter-502 AST test after
+  Codex stop-time review flagged it as "can pass after the real
+  production call is removed".  iter-502's walker accepted any
+  `synchronize_cgrid_fluxes(` call anywhere in the module — a
+  refactor could delete the live call at `line 500` of
+  `operators_cdgrid.py` while leaving a dead helper, a docstring
+  reference, or a test-only wrapper, and the test would still pass.
+
+  Two orthogonal tighteners:
+
+  1. `REQUIRED_SITES` now pairs each file with the specific host
+     function name inside which the call must live.  The test
+     asserts the module-level `FunctionDef` is present and that the
+     call sits directly in its body (not inside a nested function,
+     lambda, or comprehension scope).  The three host functions
+     are:
+       - `operators_cdgrid.py::cgrid_mass_flux_divergence`
+       - `fv_tp_2d.py::fv_tp_2d`
+       - `fv3_sw_core.py::_c_sw`
+  2. `_call_is_in_direct_body` performs a pre-order walk that
+     tracks `inside_nested=True` whenever it descends into a
+     nested `FunctionDef`, `AsyncFunctionDef`, or `Lambda`, and
+     rejects calls flagged that way.  This closes the "dead
+     nested helper" regression class.
+
+  Sanity-checked locally against three regression scenarios that
+  iter-502 would have silently accepted — (a) call relocated to a
+  nested dead helper inside the same function, (b) call existing
+  only in a docstring, (c) call relocated to a different function
+  — all three are now correctly reported as absent.
+
+  No production-path changes.  179/179 tests pass.
+
 - **iter-502 (2026-04-19)**: source-level AST lock for the Ralph-prompt
   Critical Duogrid Constraint #1 ("flux computation split across
   d_sw1/d_sw3/d_sw5 and updates across d_sw2/d_sw4/d_sw6 requires
