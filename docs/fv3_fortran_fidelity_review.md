@@ -177,7 +177,13 @@ Latest iteration work:
   3691-3692)".  I verified the symmetric-v_c variant empirically:
   on the C36 quick SW matrix, adding
   `v_c = v_avg*sina_v - u_at_v*cosa_v` DEGRADES W2 L2 by ~200x
-  (2.42e-04 → 4.79e-02) and W5 mass drift by ~6x.
+  (2.42e-04 → 4.79e-02) and W5 mass drift by ~6x.  User-observed:
+  the regression was WIDE — both u and v winds showed large
+  global errors, not just the h field.  This confirms the
+  convention is load-bearing end-to-end: u_d/v_d → mass flux →
+  h tendency → Bernoulli → u,v tendency in a tightly coupled
+  loop, so partially symmetrizing one piece breaks the closure
+  across ALL diagnostics, not just the one touched.
 
   Root cause: Python's cubed-sphere D-grid uses a mixed-orthogonal
   convention where `u_d` is along e_i but `v_d` is along e_perp
