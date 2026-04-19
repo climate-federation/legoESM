@@ -168,6 +168,36 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-540 (2026-04-19)**: production-path fidelity audit found a
+  small live W5 initializer mismatch in the code path used by the SW
+  matrix / CLI (`tests.test_cases.williamson` is imported at runtime).
+
+  Fortran `../atmos_cubed_sphere-symmetryclean/tools/test_cases.F90:
+  1175-1187,1201-1205` defines Williamson-5 mountain topography with
+  a CLIPPED lon/lat-plane radius:
+  `r=min(r0, sqrt((lon-lon_c)^2 + (lat-lat_c)^2))`,
+  then `phis=2000*grav*(1-r/r0)`.  Python
+  `tests/atmosphere/shallow_water/test_cases/williamson.py:145-157`
+  was instead using GREAT-CIRCLE distance via `arccos(...)`, which
+  broadens the cone and changes the forcing actually seen by the
+  production cubed-sphere W5 run.
+
+  Fix: replaced the great-circle radius with the Fortran planar
+  formula, using a wrapped longitude delta in Python so the same
+  periodic centre (`3*pi/2` in our longitude convention) is measured
+  on the repo's `[-pi, pi]` grid representation.  No W2 code path
+  changed.
+
+  Verification:
+    - `JAX_PLATFORM_NAME=cpu JAX_PLATFORMS=cpu .venv/bin/python -m pytest tests/atmosphere/shallow_water/integration/test_shallow_water.py::TestWilliamsonTest5::test_mountain_peak -q` -> PASS
+    - `JAX_PLATFORM_NAME=cpu JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py --only sw --grid cubed_sphere --quick` -> PASS
+    - Matrix comparison vs standing pre-iter-540 production baseline:
+      W2 unchanged at `L2=2.42e-04`, `Linf=1.83e-03`; cosine bell
+      unchanged at `L1=1.20e-01`, `L2=1.17e-01`, `Linf=1.23e-01`;
+      W5 remains stable with mass drift `1.74e-05` vs prior
+      `1.42e-05`, consistent with the intentionally changed mountain
+      geometry.
+
 - **iter-539 (2026-04-19)**: addressed Codex stop-time review of
   iter-538: "iter-538's new assertion still does not prove
   two-neighbour corner blending".
