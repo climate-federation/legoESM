@@ -168,6 +168,49 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-524 (2026-04-19)**: comprehensive visual inspection of the
+  three required-evaluation cases per Ralph step 5.  Inspected the
+  most recent snapshots at C36 dt=300s 1 day with the canonical
+  config (boundary_fix=True, fix_mass=True, hyperdiff scaled).
+
+  **Visual inspection summary** (post-iter-505):
+
+  | Case        | Field      | State          |
+  | ----------- | ---------- | -------------- |
+  | W2          | wind_speed | CLEAN          |
+  | W2          | height     | CLEAN          |
+  | W2          | u-wind     | CLEAN          |
+  | W2          | v-wind     | residual ~0.3 m/s 4-fold cube-face pattern at lat ±60° |
+  | W5          | wind_speed | CLEAN (mountain wake is real dynamics) |
+  | W5          | height     | CLEAN |
+  | W5          | v-wind     | CLEAN (dipole is mountain-wake dynamics) |
+  | cosine bell | height     | CLEAN, h ∈ [0.000, 979] (no negative overshoot, no edge artifacts) |
+
+  Programmatic value baselines on canonical C36 1d:
+    - W2 L2 (h vs IC):           2.50e-4   (matrix reports 2.42e-4)
+    - W2 max|v_ll|:              0.303 m/s (peak at t=1d)
+    - W5 mass drift:             1.90e-5
+    - cosine bell L1:            0.120
+    - cosine bell h_min/h_max:   0.000 / 894.8 (no overshoot)
+
+  **Single residual visible artifact**: W2 v-wind ~0.3 m/s
+  cube-face pattern.  Per iter-25 analysis, ~65 % is a
+  diagnostic-representation artifact (D-grid → geographic
+  conversion uses cell-centre angles); ~35 % is real dynamics
+  inherent to the A-L production path's face-boundary handling.
+  Eliminating the dynamics 35 % requires the FB chain stable at
+  C36 (review-doc item #2: ng=3 halo infrastructure).
+
+  Locked by `TestW2BoundaryErrorBudget` (3 tests at canonical C36
+  dt=300s 1d setup):
+    - L2 < 5.0e-4  (passes 2.50e-4; was 1.59e-3 pre-iter-505)
+    - boundary_fix True/False ratio < 0.7  (passes 0.525)
+    - peak max|v_ll| < 0.4 m/s across all 11 matrix snapshot
+      times (passes 0.303; was 0.556 pre-iter-505)
+
+  No production-path numerical changes.  Documentation update
+  fulfilling Ralph step 5 ("careful visual inspection").
+
 - **iter-523 (2026-04-19)**: addressed Codex stop-time review of
   iter-522: "the new 'drift' assertion is tautological and does
   not actually protect against matrix snapshot-step drift."
