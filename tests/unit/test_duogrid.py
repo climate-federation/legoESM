@@ -835,6 +835,130 @@ class TestSynchronizeCgridFluxes:
 
 
 # =========================================================================
+# T8b: Flux-sync call-site AST lock (Ralph-prompt Critical Duogrid #1)
+# =========================================================================
+
+
+class TestFluxSyncCallSitesWired:
+    """Source-level lock: every production-path site that computes C-grid
+    fluxes in Python must still call `synchronize_cgrid_fluxes` on the
+    duogrid branch.  The user's Ralph prompt Critical Duogrid Constraint #1
+    says:
+
+        Flux computation split across d_sw1/d_sw3/d_sw5 and updates
+        across d_sw2/d_sw4/d_sw6 requires mandatory cube-edge flux
+        synchronization before update, with synchronized flux =
+        average(face_A_to_B, face_B_to_A).
+
+    Runtime-level coverage already exists in `TestSynchronizeCgridFluxes`
+    (the helper itself) and in the iter-104/105/106 mock-patch tests for
+    `_bgrid_ke_transport`.  This class adds a parallel source-level guard
+    so that a refactor that silently removes the synchronization call
+    from any of the three live sites fires a clear regression test
+    rather than producing a subtle mass-conservation drift.
+
+    The three required sites (all guarded by `dg is not None and
+    dg.ng >= 2`):
+
+      1. `src/legoesm/core/operators_cdgrid.py` —
+         `cgrid_mass_flux_divergence` (production A-L tendency path used
+         by the default `FV3EdgeShallowWaterModel`).
+      2. `src/legoesm/core/fv_tp_2d.py` — `fv_tp_2d` (FV3 PPM transport
+         used by both the production vorticity flux and the FB-chain
+         mass transport).
+      3. `src/legoesm/core/fv3_sw_core.py` — `_c_sw` (FV3 c_sw first-
+         order upwind mass flux in the experimental FB chain).
+    """
+
+    REQUIRED_SITES = (
+        "src/legoesm/core/operators_cdgrid.py",
+        "src/legoesm/core/fv_tp_2d.py",
+        "src/legoesm/core/fv3_sw_core.py",
+    )
+
+    def _repo_root(self):
+        import pathlib
+        here = pathlib.Path(__file__).resolve()
+        # tests/unit/test_duogrid.py -> repo/tests/unit -> repo
+        return here.parent.parent.parent
+
+    def test_each_required_site_calls_synchronize_cgrid_fluxes(self):
+        """Every required site must contain a live (non-comment)
+        `synchronize_cgrid_fluxes(` call."""
+        import ast
+
+        root = self._repo_root()
+        for rel in self.REQUIRED_SITES:
+            path = root / rel
+            tree = ast.parse(path.read_text())
+            call_found = False
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "synchronize_cgrid_fluxes"):
+                    call_found = True
+                    break
+            assert call_found, (
+                f"{rel} is required to call synchronize_cgrid_fluxes "
+                f"(Ralph Critical Duogrid Constraint #1).  If a refactor "
+                f"rewires this site, update the constraint — do not just "
+                f"drop the sync silently."
+            )
+
+    def test_every_flux_sync_site_is_duogrid_gated(self):
+        """The synchronization must be gated so it only fires when
+        duogrid is active (non-duogrid cubed sphere uses PPM boundary
+        asymmetry as a feature; unconditional sync causes a 110x W2
+        regression per the operators_cdgrid inline comment).  Locked
+        by: the call must sit inside an `if` whose test mentions
+        `duogrid` or `dg`."""
+        import ast
+
+        root = self._repo_root()
+        for rel in self.REQUIRED_SITES:
+            path = root / rel
+            src = path.read_text()
+            tree = ast.parse(src)
+            # Map line number -> enclosing If node to find the gate.
+            if_nodes_by_range = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.If):
+                    # Record (start_line, end_line, test_src)
+                    end = max(
+                        (getattr(c, "lineno", node.lineno)
+                         for c in ast.walk(node)),
+                        default=node.lineno,
+                    )
+                    if_nodes_by_range.append(
+                        (node.lineno, end, ast.unparse(node.test)))
+
+            # Find the call location(s) and verify each is inside a gate.
+            src_lines = src.splitlines()
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "synchronize_cgrid_fluxes"):
+                    lineno = node.lineno
+                    # Find innermost enclosing if
+                    enclosing = [
+                        (s, e, t) for (s, e, t) in if_nodes_by_range
+                        if s <= lineno <= e
+                    ]
+                    assert enclosing, (
+                        f"{rel}:{lineno}: synchronize_cgrid_fluxes call "
+                        f"is not inside an `if` — must be gated on duogrid. "
+                        f"Source: {src_lines[lineno - 1].strip()}")
+                    # Innermost is the one with the largest start line
+                    innermost = max(enclosing, key=lambda t: t[0])
+                    gate_src = innermost[2]
+                    assert ("duogrid" in gate_src or "dg" in gate_src), (
+                        f"{rel}:{lineno}: synchronize_cgrid_fluxes call is "
+                        f"inside an `if` whose test ('{gate_src}') does "
+                        f"not mention `duogrid` or `dg` — flux sync must "
+                        f"be gated on duogrid active.")
+
+
+# =========================================================================
 # T9: BGRID_NE vector corner sync (iter-100, Priority 2 scaffold)
 # =========================================================================
 

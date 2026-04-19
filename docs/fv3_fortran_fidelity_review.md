@@ -168,6 +168,42 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-502 (2026-04-19)**: source-level AST lock for the Ralph-prompt
+  Critical Duogrid Constraint #1 ("flux computation split across
+  d_sw1/d_sw3/d_sw5 and updates across d_sw2/d_sw4/d_sw6 requires
+  mandatory cube-edge flux synchronization").  Audited each Python
+  site that computes C-grid fluxes in a production or FB-chain
+  shallow-water path against the Fortran oracle
+  (`dyn_core.F90:853-900`) and confirmed that all three are already
+  calling `synchronize_cgrid_fluxes` on the duogrid branch:
+
+    1. `src/legoesm/core/operators_cdgrid.py::cgrid_mass_flux_divergence`
+       (production A-L tendency path used by the default
+       `FV3EdgeShallowWaterModel`).
+    2. `src/legoesm/core/fv_tp_2d.py::fv_tp_2d` (FV3 PPM transport
+       used by both the production vorticity flux and the FB-chain
+       mass transport).
+    3. `src/legoesm/core/fv3_sw_core.py::_c_sw` (FV3 c_sw first-order
+       upwind mass flux in the experimental FB chain).
+
+  Added `TestFluxSyncCallSitesWired` in `tests/unit/test_duogrid.py`
+  with two AST-parsed assertions per call site:
+
+    (a) `synchronize_cgrid_fluxes(` is called live in the file
+        (not commented out) — if a refactor silently removes the
+        sync, the test fires with a clear message pointing at the
+        Ralph constraint.
+    (b) the innermost enclosing `if` test mentions `duogrid` or
+        `dg` — the sync must be gated (unconditional sync causes a
+        110x W2 regression for non-duogrid, per the documented
+        inline comment in `cgrid_mass_flux_divergence`).
+
+  Sanity-checked the negative case by hand (simulated an unwired
+  `operators_cdgrid.py` — the AST walker correctly reports
+  `synchronize_cgrid_fluxes` absent).  Totals: 179/179 pass (177 prior
+  + 2 new).  No production-path numerical changes; locks in the
+  existing wiring against silent regression.
+
 - **iter-501 (2026-04-19)**: strengthened the halo=3 `interp_offsets`
   shape check in `pad_halo()` after Codex stop-time review of
   iter-500 flagged it as "not actually strict".  The iter-500 check
