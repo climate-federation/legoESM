@@ -1160,6 +1160,76 @@ class TestDgridCenterVectorConversions(unittest.TestCase):
                 max(diff_u, diff_v), 1e-6 * scale,
                 msg=f"Level {k} routing bug in 4D branch.")
 
+    def test_c2d_vector_exact_halo_plus_4point_formula(self):
+        """Iter-580 (Codex follow-up to iter-579):
+        `center_to_dgrid_vector` needs an EXACT formula lock on
+        the production (duogrid=True) path — iter-579's no-op
+        and shape checks don't catch a wrong-formula refactor
+        that still produces non-zero output.
+
+        The exact production formula:
+          1. `pad_halo_vector(u_cc, v_cc, ...)` with duogrid=dg
+             and offsets=None (duogrid path).
+          2. Simple 4-point average:
+             u_d = 0.25 * (u_pad[:-1,:-1] + u_pad[1:,:-1]
+                           + u_pad[:-1,1:] + u_pad[1:,1:])
+             v_d = 0.25 * (v_pad analogous)
+
+        This test calls `pad_halo_vector` directly with the same
+        duogrid args, then does the 4-point average in numpy,
+        and compares to production output BIT-FOR-BIT.  A
+        refactor that changed:
+          - the halo routing (duogrid → non-duogrid offsets)
+          - the averaging formula (weights, stencil shape)
+          - the component rotation
+        would fire this test.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+        from legoesm.grids.halo import pad_halo_vector
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(4579)
+        u_cc_np = rng.standard_normal((6, n, n)).astype(np.float64)
+        v_cc_np = rng.standard_normal((6, n, n)).astype(np.float64)
+        u_cc = jnp.asarray(u_cc_np)
+        v_cc = jnp.asarray(v_cc_np)
+
+        # Production call
+        u_d_prod, v_d_prod = center_to_dgrid_vector(
+            u_cc, v_cc, cdgrid)
+
+        # Reproduce step by step
+        grid = cdgrid.base
+        dg = grid.duogrid
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        u_pad, v_pad = pad_halo_vector(
+            u_cc, v_cc,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=offsets, duogrid=dg,
+        )
+        u_d_expected = 0.25 * (
+            u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
+            + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+        v_d_expected = 0.25 * (
+            v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
+            + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+
+        diff_u = float(jnp.max(jnp.abs(
+            jnp.asarray(u_d_prod) - u_d_expected)))
+        diff_v = float(jnp.max(jnp.abs(
+            jnp.asarray(v_d_prod) - v_d_expected)))
+        self.assertLess(
+            diff_u, 1e-10,
+            msg=(f"u_d differs from `pad_halo_vector` + 4-point "
+                 f"average formula by {diff_u:.3e}.  Possible "
+                 f"causes: halo routing changed, averaging "
+                 f"weights changed, or vector-rotation "
+                 f"convention changed."))
+        self.assertLess(
+            diff_v, 1e-10,
+            msg=(f"v_d differs from expected by {diff_v:.3e}."))
+
 
 class TestCgridDivergenceBehavior(unittest.TestCase):
     """Iter-574: comprehensive locks for `cgrid_divergence`

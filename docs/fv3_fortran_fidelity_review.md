@@ -197,6 +197,33 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-580 (2026-04-20)**: addressed Codex stop-time review of
+  iter-579: "`center_to_dgrid_vector` is still not meaningfully
+  locked on the default production path".
+
+  Iter-579's `c2d_vector` tests only checked shape, zero
+  preservation, non-zero-output-on-random, and 4D level routing.
+  None pinned the EXACT formula.  A refactor changing:
+    - halo routing (duogrid → non-duogrid offsets)
+    - averaging weights (0.25/0.25/0.25/0.25 → other)
+    - vector-rotation convention
+  would pass iter-579's tests if the output is still non-zero.
+
+  Added `test_c2d_vector_exact_halo_plus_4point_formula`:
+    - Production call produces `u_d`, `v_d`.
+    - Reproduction calls `pad_halo_vector` directly with the
+      same duogrid args, then applies the 4-point average in
+      numpy.
+    - Assertion: `|u_d - expected| < 1e-10` (bit-for-bit match
+      after the halo-aware rotation).
+
+  **Sanity-checked**: changed averaging weights to 40/20/20/20.
+  New test correctly fires with diff 0.579 (vs 1e-10 threshold).
+  Restored production; all 9 c2d/d2c tests pass.
+
+  No production-path numerical changes.  114/114 tests pass in
+  `test_cdgrid.py` (113 prior + 1 new).
+
 - **iter-579 (2026-04-20)**: regression locks for
   `dgrid_to_center_vector` and `center_to_dgrid_vector`
   (previously untested).
