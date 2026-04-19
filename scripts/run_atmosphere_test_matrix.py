@@ -944,10 +944,10 @@ def _save_snapshot_data(
     lat_deg: np.ndarray,
 ):
     """Save snapshot field arrays as NPZ files with proper time series format.
-    
+
     NEW FORMAT: Each field is saved as a time series array with shape (n_times, ...).
     This replaces the old format where each timestep was a separate variable.
-    
+
     Produces:
         snapshots_native.npz   – raw arrays keyed as ``{field}`` with time series
         snapshots_latlon.npz   – regridded to (181, 360) regular lat-lon,
@@ -984,12 +984,12 @@ def _save_snapshot_data(
         # Collect this field across all timesteps
         field_timesteps = []
         latlon_timesteps = []
-        
+
         for step in sorted_steps:
             if field_key in snapshots[step]:
                 arr = np.asarray(snapshots[step][field_key], dtype=np.float64)
                 field_timesteps.append(arr)
-                
+
                 # Regrid to lat-lon
                 if field_key.endswith("_3d"):
                     regridded = _regrid_3d_level(arr, lon_deg, lat_deg, coord_kind)
@@ -999,7 +999,7 @@ def _save_snapshot_data(
             else:
                 # Field not available at this timestep - skip incomplete time series
                 break
-        
+
         # Only save fields that are available at all timesteps
         if len(field_timesteps) == len(sorted_steps):
             # Stack into time series: shape (n_times, ...)
