@@ -178,6 +178,13 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "acc_channel", g, acc_res[g], 30.0, 2.0))
 
+    # --- ACC channel rest state (no forcing, no diffusion) ---
+    # Same IC as acc_channel but with all forcing/diffusion off.
+    # Tests whether stratification + ridge bathymetry maintain steady state.
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "acc_channel_rest", g, acc_res[g], 10.0, 1.0))
+
     return matrix
 
 

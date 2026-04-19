@@ -59,6 +59,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
+    bilaplacian_cgrid,
     laplacian_cgrid,
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
@@ -483,6 +484,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
+        if config.K_bih > 0:
+            dtr_dt = dtr_dt - config.K_bih * bilaplacian_cgrid(tr, grid, mask=mask)
         # Vertical tracer diffusion: always applied regardless of physics
         # pipeline state. The physics pipeline's vertical_mixing module is
         # a separate concept (e.g., KPP). Baseline K_v diffusion should

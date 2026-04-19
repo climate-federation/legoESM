@@ -389,6 +389,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
     K_h: float = 0.0
+    K_bih: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30

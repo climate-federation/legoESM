@@ -111,6 +111,11 @@ FIELD_RANGES = {
         "speed_sfc": (0, 0.2),      # m/s - zonal flow over ridge
         "SST": (0, 9),              # °C - Abernathey profile range
     },
+    "acc_channel_rest": {
+        "eta": (-1e-4, 1e-4),      # meters - should stay near zero
+        "speed_sfc": (0, 0.01),     # m/s - should stay near zero
+        "SST": (0, 9),              # °C - should maintain initial profile
+    },
 }
 
 # ===========================================================================

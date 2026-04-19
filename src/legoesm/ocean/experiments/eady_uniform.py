@@ -79,8 +79,9 @@ class EadyUniformConfig:
     A_h: float = 0.0
     B_h: float = 1e10
     C_smag: float = 0.1
-    K_h: float = 10.0
-    bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag [m/s]
+    K_h: float = 0.0
+    K_bih: float = 1e10
+    bottom_drag_coeff: float = 1e-4
 
     # Sponge layer: absorbs eddy energy near walls to prevent
     # Kelvin wave trapping and nonlinear steepening at boundaries.
@@ -124,23 +125,35 @@ def compute_sponge_mask(grid, config: EadyUniformConfig):
     """Compute sponge relaxation coefficient gamma(y) [1/s].
 
     Quadratic ramp from 0 in the interior to 1/tau at the walls.
-    Returns gamma at cell centers, shape (n_lat, n_lon).
+    Works for both latlon (returns n_lat × n_lon) and MPAS (returns nCells).
     """
-    lat_deg = np.degrees(np.asarray(grid.lat))
     tau = config.sponge_timescale_days * 86400.0
-    gamma = np.zeros((grid.n_lat, grid.n_lon), dtype=np.float64)
-
     south_edge = config.lat_south
     north_edge = config.lat_north
     w = config.sponge_width_deg
 
-    for i, lat in enumerate(lat_deg):
-        dist_south = lat - south_edge
-        dist_north = north_edge - lat
-        if dist_south < w:
-            gamma[i, :] = (1.0 - dist_south / w) ** 2 / tau
-        elif dist_north < w:
-            gamma[i, :] = (1.0 - dist_north / w) ** 2 / tau
+    if hasattr(grid, 'lat'):
+        # Latlon grid
+        lat_deg = np.degrees(np.asarray(grid.lat))
+        gamma = np.zeros((grid.n_lat, grid.n_lon), dtype=np.float64)
+        for i, lat in enumerate(lat_deg):
+            dist_south = lat - south_edge
+            dist_north = north_edge - lat
+            if dist_south < w:
+                gamma[i, :] = (1.0 - dist_south / w) ** 2 / tau
+            elif dist_north < w:
+                gamma[i, :] = (1.0 - dist_north / w) ** 2 / tau
+    else:
+        # MPAS grid
+        lat_deg = np.degrees(np.asarray(grid.latCell))
+        gamma = np.zeros(len(lat_deg), dtype=np.float64)
+        for i, lat in enumerate(lat_deg):
+            dist_south = lat - south_edge
+            dist_north = north_edge - lat
+            if dist_south < w:
+                gamma[i] = (1.0 - dist_south / w) ** 2 / tau
+            elif dist_north < w:
+                gamma[i] = (1.0 - dist_north / w) ** 2 / tau
 
     return gamma
 

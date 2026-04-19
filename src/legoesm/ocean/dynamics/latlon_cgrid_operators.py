@@ -193,6 +193,30 @@ def gradient_y_cgrid(
 # Divergence operator (face velocities -> cell center)
 # =============================================================================
 
+def bilaplacian_cgrid(
+    f: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Scalar bilaplacian (∇⁴f) on C-grid cell centers.
+
+    Applies ``laplacian_cgrid`` twice: ∇⁴f = ∇²(∇²f).
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
+    grid : LatLonGrid
+    mask : array, optional
+
+    Returns
+    -------
+    bilap_f : array, same shape as f
+    """
+    lap_f = laplacian_cgrid(f, grid, mask=mask)
+    return laplacian_cgrid(lap_f, grid, mask=mask)
+
+
 def divergence_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,

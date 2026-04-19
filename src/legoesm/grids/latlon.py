@@ -203,9 +203,10 @@ def create_regional_latlon_grid(
     is placed on all four boundaries for closed-basin experiments.
 
     When ``periodic_x=True``, no east/west wall cells are added and
-    longitude spans the full 360° for channel-like experiments (e.g.
-    Eady baroclinic instability).  The latitude dimension still has
-    1-cell walls at north and south.
+    longitude spans from *lon_west* to *lon_east* with periodic
+    boundary conditions for channel-like experiments (e.g. Eady
+    baroclinic instability, ACC channel).  The latitude dimension
+    still has 1-cell walls at north and south.
 
     Operators remain periodic in longitude via ``jnp.roll``.  In the
     closed-basin case (``periodic_x=False``), the wall mask + Neumann
@@ -219,7 +220,8 @@ def create_regional_latlon_grid(
         Southern and northern boundaries [degrees].
     lon_west, lon_east : float
         Western and eastern boundaries [degrees].
-        Ignored when ``periodic_x=True`` (longitude spans 0-360°).
+        When ``periodic_x=True``, these set the zonal extent of the
+        periodic channel (default 0-360°).
     radius : float
         Sphere radius [m].
     omega : float
@@ -260,10 +262,13 @@ def create_regional_latlon_grid(
     )
 
     if periodic_x:
-        # Channel: full 360° longitude, no wall cells in x
+        # Channel: periodic in x over [lon_west, lon_east), no wall cells
         nx = n_lon
-        dlon = 2.0 * jnp.pi / n_lon
-        lon = jnp.linspace(0.0, 2.0 * jnp.pi - float(dlon), n_lon)
+        lon_w_rad = jnp.deg2rad(lon_west)
+        lon_e_rad = jnp.deg2rad(lon_east)
+        dlon = (lon_e_rad - lon_w_rad) / n_lon
+        lon = jnp.linspace(
+            float(lon_w_rad), float(lon_e_rad) - float(dlon), n_lon)
     else:
         # Closed basin: wall cells on east/west
         nx = n_lon + 2
