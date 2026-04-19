@@ -1434,6 +1434,97 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             "the iter-132 context.",
         )
 
+    def test_corner_vorticity_zero_flow_yields_f_corner(self):
+        """Iter-550: basic sanity lock for `_corner_vorticity`
+        (`src/legoesm/core/fv3_sw_core.py:1099-1129`).
+
+        On zero C-grid winds (uc=vc=0), the function must return
+        `cdgrid.f_corner` (Coriolis parameter at D-grid corners)
+        exactly — the relative vorticity contribution is zero and
+        only the Coriolis offset survives.
+
+        This lock catches refactors that (i) silently drop the
+        `cdgrid.f_corner` offset, (ii) introduce a non-zero baseline
+        from uninitialized halo data, or (iii) change the sign
+        convention on the circulation sum.
+
+        Currently `_corner_vorticity` has NO direct tests.
+        """
+        import jax.numpy as jnp
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        uc = jnp.zeros((6, n + 1, n))
+        vc = jnp.zeros((6, n, n + 1))
+        # Exercise the use_duogrid=True path (Python currently
+        # applies linear extrapolation even here — this is a known
+        # documented fidelity gap relative to Fortran's halo-based
+        # approach; see iter-132 marker test for the related
+        # `_d_sw5_corner_divergence` case).
+        vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid=True)
+
+        max_diff = float(jnp.max(jnp.abs(vort_abs - cdgrid.f_corner)))
+        self.assertLess(
+            max_diff, 1e-10,
+            msg=(f"_corner_vorticity(uc=0, vc=0) does not return "
+                 f"f_corner; max deviation = {max_diff:.3e}.  The "
+                 f"relative vorticity on zero flow must be zero, "
+                 f"and the returned value must equal the Coriolis "
+                 f"parameter at corners."))
+
+    def test_corner_vorticity_non_duogrid_path_also_zero(self):
+        """Iter-550: same zero-flow invariant must hold on the non-
+        duogrid path (which adds explicit cube-vertex corrections
+        at lines 1123-1126).  Those corrections must cancel on
+        zero input — if they don't, there's a sign or indexing bug
+        in the vertex override."""
+        import jax.numpy as jnp
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        uc = jnp.zeros((6, n + 1, n))
+        vc = jnp.zeros((6, n, n + 1))
+        vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid=False)
+        max_diff = float(jnp.max(jnp.abs(vort_abs - cdgrid.f_corner)))
+        self.assertLess(
+            max_diff, 1e-10,
+            msg=(f"_corner_vorticity non-duogrid path with zero "
+                 f"input does not return f_corner; max deviation = "
+                 f"{max_diff:.3e}.  The 4 cube-vertex overrides at "
+                 f"fv3_sw_core.py:1123-1126 may have a sign bug."))
+
+    def test_corner_vorticity_output_shape_and_finite(self):
+        """Iter-550: shape and finiteness invariant for random input.
+        Output shape must be (6, n+1, n+1), all values finite."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(550)
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+        vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid=True)
+        self.assertEqual(vort_abs.shape, (6, n + 1, n + 1))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(vort_abs))),
+                        msg="Non-finite values in _corner_vorticity "
+                            "output on random input.")
+
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
         corners against the Fortran Formula

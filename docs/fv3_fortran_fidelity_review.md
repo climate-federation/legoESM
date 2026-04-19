@@ -168,6 +168,47 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-550 (2026-04-19)**: regression lock for `_corner_vorticity`
+  (previously untested).
+
+  Codex audit did not find a narrow production numerical gap that
+  could be fixed without architectural risk.  Pivoted to a
+  previously-untested production helper in the FB chain:
+  `_corner_vorticity` (`src/legoesm/core/fv3_sw_core.py:1099-1129`).
+  This computes absolute vorticity at D-grid corners from C-grid
+  circulation, and is called from `_c_sw` and `_c_sw_tendencies`
+  (the FB-chain and experimental-CSW paths).  Has NO direct tests.
+
+  Known documented divergence (not fixed this iteration): the
+  linear-extrapolation override at lines 1112-1115 is applied
+  UNCONDITIONALLY (just gated on `n > 2`), not on
+  `not use_duogrid`.  Per Fortran's duogrid convention, the
+  extrapolation should only fire on the non-duogrid path where the
+  halo has no cross-face data.  In duogrid mode, Fortran uses the
+  halo-exchanged `uc`/`vc`; Python still does linear extrapolation.
+  This is a smaller variant of the iter-132 `_d_sw5_corner_
+  divergence` halo gap — same architectural root cause (no
+  halo-padded C-grid wind in the FB chain), same scope (FB chain
+  only, which is known unstable at C36).
+
+  Added 3 tests to `TestFvTp2dCornerInvariant`:
+    (a) `test_corner_vorticity_zero_flow_yields_f_corner`:
+        zero C-grid winds + duogrid=True → f_corner exactly.
+    (b) `test_corner_vorticity_non_duogrid_path_also_zero`: same
+        invariant on non-duogrid path (exercises the 4 cube-vertex
+        overrides at lines 1123-1126).
+    (c) `test_corner_vorticity_output_shape_and_finite`: shape and
+        finiteness under random input.
+
+  **Sanity-checked**: dropped the `cdgrid.f_corner +` offset from
+  the return statement.  Tests (a) and (b) correctly fire with max
+  deviation 1.458e-04 — equal to the expected Coriolis magnitude
+  at these latitudes.  Test (c) still passes (shape/finiteness
+  invariant unaffected).  Restored production code; all 3 pass.
+
+  No production-path numerical changes.  59/59 tests pass in
+  `test_cdgrid_fv3_regression.py` (56 prior + 3 new).
+
 - **iter-549 (2026-04-19)**: regression lock for `_broadcast_metric`
   (`src/legoesm/core/operators_cdgrid.py:75-79`).
 
