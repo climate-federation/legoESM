@@ -197,6 +197,82 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-570 (2026-04-19)**: exact ndsl.corners cell mapping for
+  the iter-128/569 d2a2c_vect cube-vertex override.
+
+  Iter-569 documented pyFV3's call to
+  `fill_corners_3cells_mult_x(..., sw=-1, se=+1, nw=+1, ne=-1)`
+  but not the ndsl internal stencil.  Iter-570 fetched
+  `NOAA-GFDL/NDSL/ndsl/stencils/corners.py:29-121` and extracted
+  the precise cell-by-cell mapping.
+
+  **Exact ndsl stencil** (gt4py relative indexing, translated):
+
+  `fill_corners_2cells_mult_x` at SW corner writes:
+  ```
+  q[i_start-1, j_start-1] = sw_mult * q_corner[0, 1, 0]
+     = sw_mult * q_corner[i_start-1, j_start]
+  q[i_start-2, j_start-1] = sw_mult * q_corner[1, 2, 0]
+     = sw_mult * q_corner[i_start-1, j_start+1]
+  ```
+
+  `fill_corners_3cells_mult_x` adds the third cell at SW:
+  ```
+  q[i_start-3, j_start-1] = sw_mult * q_corner[2, 3, 0]
+     = sw_mult * q_corner[i_start-1, j_start+2]
+  ```
+
+  Same structure at SE, NW, NE corners (with sign and
+  reflection adjustments per the multiplier table).
+
+  **Equivalent Fortran pattern** (sw_core.F90:3527-3530):
+  ```
+  do i = -2, 0
+      utmp(i, 0) = -vtmp(0, 1 - i)
+  enddo
+  ```
+  - i=0:   utmp(0, 0)  = -vtmp(0, 1)
+  - i=-1:  utmp(-1, 0) = -vtmp(0, 2)
+  - i=-2:  utmp(-2, 0) = -vtmp(0, 3)
+
+  **VERIFIED EQUIVALENT**: ndsl's `q_corner[offset_0, offset_1]`
+  at the SW corner cell `[i_start-(k+1), j_start-1]` reads from
+  `q_corner[i_start-1, j_start+k]` for k=0, 1, 2.  This exactly
+  matches Fortran's `utmp(-k, 0) = -vtmp(0, k+1)` for k=0, 1, 2.
+
+  **Concrete port recipe** (once iter-496 h=3 halo wiring lands):
+  ```python
+  # After _fill_corners_h3 completes, add these overrides:
+  # SW corner (halo row j=-1 < j_start=0)
+  for k in range(3):
+      # Interior is i_start=0..n-1, so halo cell is i=-(k+1)
+      # maps to Fortran utmp(-k, 0) = -vtmp(0, k+1).
+      padded[:, halo - k - 1, halo - 1] = (
+          -1 * v_corner[:, halo - 1, halo + k])   # sw_mult=-1
+  # SE corner (halo row j=-1, rightmost halo columns)
+  for k in range(3):
+      padded[:, n + halo + k, halo - 1] = (
+          +1 * v_corner[:, n + halo - 1, halo + k])  # se_mult=+1
+  # NE corner
+  for k in range(3):
+      padded[:, n + halo + k, n + halo] = (
+          -1 * v_corner[:, n + halo - 1, n + halo - 1 - k])  # ne_mult=-1
+  # NW corner
+  for k in range(3):
+      padded[:, halo - k - 1, n + halo] = (
+          +1 * v_corner[:, halo - 1, n + halo - 1 - k])  # nw_mult=+1
+  ```
+
+  (Plus the symmetric y-direction `fill_corners_*cells_mult_y`
+  for `vtmp` using the same multipliers.)
+
+  This is the precise recipe needed when the h=3 halo
+  infrastructure (iter-530-533) is wired into
+  `_d2a2c_vect_duogrid` — replaces the iter-128 architectural
+  bound.
+
+  Doc-only; no code or test changes.
+
 - **iter-569 (2026-04-19)**: pyFV3 cross-reference for iter-128
   non-duogrid `_d2a2c_vect` cube-vertex override gap.
 
