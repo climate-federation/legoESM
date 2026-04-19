@@ -521,11 +521,21 @@ def pad_halo(
     # `_pad_halo_local_h2` and any pure tightening would be a broader
     # refactor outside iter-500's Codex-driven guardrail scope.  The
     # halo=3 path has no legacy callers so we lock it down now.
+    #
+    # iter-501 (Codex stop-time review of iter-500): the ndim + depth
+    # check alone is not strict — it accepts (10, 7, 3, 100) which
+    # would then fail cryptically in the loop for face=6..9 / edge=4..6,
+    # and even if it survived the indexing loop a strip shape
+    # mismatch against `data.shape[1]` (the grid size `n`) would give
+    # silently-wrong interpolation.  Now every axis is validated.
     if interp_offsets is not None and halo == 3:
-        if interp_offsets.ndim != 4 or interp_offsets.shape[2] != 3:
+        n = data.shape[1]
+        expected = (6, 4, 3, n)
+        if tuple(interp_offsets.shape) != expected:
             raise ValueError(
-                f"halo=3 expects interp_offsets of shape (6, 4, 3, n), "
-                f"got shape={interp_offsets.shape}")
+                f"halo=3 expects interp_offsets of shape {expected} "
+                f"(6 faces, 4 edges, 3 halo depths, n = data.shape[1]); "
+                f"got shape={tuple(interp_offsets.shape)}.")
 
     # When duogrid is active, suppress interp_offsets (use nearest copy + remap)
     offsets = None if duogrid is not None else interp_offsets

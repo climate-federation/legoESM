@@ -597,20 +597,43 @@ class TestPadHaloH3Guardrails:
         from legoesm.grids.halo import compute_halo_interp_offsets
         offsets_h1 = compute_halo_interp_offsets(N)  # (6, 4, N)
         data = jnp.ones((6, N, N), dtype=jnp.float64)
-        with pytest.raises(ValueError, match=r"halo=3 expects.*shape \(6, 4, 3, n\)"):
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
             pad_halo(data, halo=3, interp_offsets=offsets_h1)
 
     def test_pad_halo_halo3_rejects_h2_shape_offsets(self):
         from legoesm.grids.halo import compute_halo_interp_offsets_h2
         offsets_h2 = compute_halo_interp_offsets_h2(N)  # (6, 4, 2, N)
         data = jnp.ones((6, N, N), dtype=jnp.float64)
-        with pytest.raises(ValueError, match=r"halo=3 expects.*shape \(6, 4, 3, n\)"):
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
             pad_halo(data, halo=3, interp_offsets=offsets_h2)
 
     def test_pad_halo_halo3_rejects_non4d_offsets(self):
         """Wrong ndim for halo=3 must be caught."""
         data = jnp.ones((6, N, N), dtype=jnp.float64)
         bad = jnp.zeros((6, 4, N), dtype=jnp.float64)  # ndim=3
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_halo3_rejects_wrong_face_axis(self):
+        """Iter-501 (Codex): non-6 face axis must be caught, not silently
+        accepted because ndim and depth happen to match."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((10, 4, 3, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_halo3_rejects_wrong_edge_axis(self):
+        """Non-4 edge axis must be rejected."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((6, 7, 3, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_halo3_rejects_n_mismatch(self):
+        """Final axis (n) must match data.shape[1] — otherwise _interp_strip
+        silently produces wrong-sized output."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((6, 4, 3, N + 2), dtype=jnp.float64)  # n axis wrong
         with pytest.raises(ValueError, match=r"halo=3 expects"):
             pad_halo(data, halo=3, interp_offsets=bad)
 

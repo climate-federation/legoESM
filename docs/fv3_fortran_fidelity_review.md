@@ -168,6 +168,31 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-501 (2026-04-19)**: strengthened the halo=3 `interp_offsets`
+  shape check in `pad_halo()` after Codex stop-time review of
+  iter-500 flagged it as "not actually strict".  The iter-500 check
+  only verified `ndim == 4` and `shape[2] == 3`, so a
+  `(10, 7, 3, 100)` offsets array on 6-face data of size `n=8`
+  would pass validation and then fail cryptically in the indexing
+  loop.  Now validates the full expected shape
+  `(6, 4, 3, data.shape[1])`: 6 faces, 4 edges, 3 halo depths,
+  `n` matching the grid size on the data.  Error message includes
+  the actual vs expected shape.
+
+  New tests (`TestPadHaloH3Guardrails`, 3 assertions appended):
+    - wrong face axis (10 instead of 6) rejected;
+    - wrong edge axis (7 instead of 4) rejected;
+    - `n` mismatch (offsets axis-3 ≠ `data.shape[1]`) rejected.
+
+  Pre-existing tests updated to use a looser regex (`r"halo=3
+  expects"`) since the error message now lists the precise
+  expected shape rather than the abstract `(6, 4, 3, n)`.
+
+  Test totals: 45/45 on `test_scale_halo.py` (42 prior + 3 new);
+  132/132 on `test_cdgrid_fv3_regression.py + test_duogrid.py`;
+  177/177 total.  No production caller uses halo=3, so W2/W5/
+  cosine bell are unchanged.
+
 - **iter-500 (2026-04-19)**: tightened halo=3 public-API guardrails
   in response to Codex stop-time review of iter-499.  Codex flagged
   the halo=3 dispatch as insufficiently protected.  Three guardrails
