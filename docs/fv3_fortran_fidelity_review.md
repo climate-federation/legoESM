@@ -168,6 +168,39 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-507 (2026-04-19)**: strengthened the FCT behavioural guard
+  after Codex stop-time review of iter-506 — "the new FCT
+  'behavioral guard' still passes on the buggy implementation".
+  Directly verified by copying pre-iter-506 `operators_cdgrid.py`
+  into place: iter-506's
+  `test_fct_tracer_flux_nonzero_for_pure_x_variation` passed on the
+  buggy version because the Zalesak blender's first-order upwind
+  fallback produces non-zero tendency on a purely-x-varying tracer
+  even when the PPM high-order path is broken.
+
+  New test
+  `test_fct_high_order_x_matches_mass_flux_divergence_on_smooth_monotone`
+  compares `_cgrid_fct_fluxes_2d` against `cgrid_mass_flux_divergence`
+  (which uses the correct iter-505 swap) on a smooth monotone
+  quadratic, restricted to INTERIOR cells (`[:, 4:-4, 4:-4]`).  The
+  Zalesak limiter legitimately fires at cube-face boundaries where
+  the local min/max neighbour set includes halo-interpolated
+  values, so the interior restriction is necessary to isolate the
+  axis-bug signal from legitimate boundary clipping.
+
+  Empirical discrimination on C16:
+    - buggy FCT (pre-iter-506): interior rel_gap ≈ 6.01 %
+    - fixed FCT (post-iter-506): interior rel_gap ≈ 0 (machine
+      precision since both paths reduce to the same 4th-order PPM)
+
+  Test threshold: 1 %.  Clean separation between buggy and fixed.
+
+  The iter-506 "nonzero-tendency" test is kept as a fast fail-early
+  smoke alongside the strengthened version.
+
+  No production-path changes this iteration (tests only).  184/184
+  tests pass.
+
 - **iter-506 (2026-04-19)**: addressed Codex stop-time feedback on
   iter-505 — "the fix is under-guarded and the same axis-contract bug
   is still live in a sibling production path".

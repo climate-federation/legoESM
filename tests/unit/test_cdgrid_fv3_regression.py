@@ -2215,15 +2215,71 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
                 f"max|dh/dt| = {max_abs_dhdt:.2e} — the x-direction "
                 f"PPM axis bug (iter-505) appears to have re-entered.")
 
+    def test_fct_high_order_x_matches_mass_flux_divergence_on_smooth_monotone(self):
+        """iter-507 (Codex): the iter-506 "nonzero-tendency" test still
+        passed on the buggy FCT because the first-order upwind flux
+        also produces non-zero tendency on a purely-x-varying tracer.
+
+        This strengthened test compares the FCT output against
+        `cgrid_mass_flux_divergence` (which uses the correct swapped
+        x-PPM) on a smooth monotonic quadratic.  The comparison is
+        restricted to INTERIOR cells (4:-4) because the Zalesak limiter
+        legitimately fires near cube-face boundaries where neighbour-
+        face halo values produce slight overshoot room in the local
+        min/max estimate.  Empirically on C16:
+
+            Interior rel_gap (buggy FCT)  ≈ 6.0 %
+            Interior rel_gap (fixed FCT)  ≈ 0   (machine precision)
+
+        so a 1% threshold cleanly separates the two.  Any divergence
+        means the FCT x-PPM has silently collapsed to first-order
+        upwind — the iter-506 axis bug.
+        """
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.operators_cdgrid import (
+            _cgrid_fct_fluxes_2d, cgrid_mass_flux_divergence,
+        )
+
+        n = 16  # C16 gives a large interior so boundary clipping is a
+                # small fraction of the total field.
+        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(base)
+        # Smooth monotone quadratic in i only — no extrema so the
+        # Colella-Woodward monotonicity limiter cannot fire.
+        i_vals = jnp.arange(n, dtype=jnp.float64) ** 2 * 0.1 + 1.0
+        q = jnp.broadcast_to(i_vals[None, :, None], (6, n, n))
+        u_c = jnp.ones((6, n + 1, n), dtype=jnp.float64)   # uniform +1 m/s
+        v_c = jnp.zeros((6, n, n + 1), dtype=jnp.float64)
+
+        dq_fct = _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
+        dq_ref = cgrid_mass_flux_divergence(q, u_c, v_c, cdgrid)
+
+        # Restrict to interior cells [4:-4, 4:-4] so that the Zalesak
+        # limiter's legitimate firing near cube-face boundaries does
+        # not mask the axis-bug signal.
+        interior = (slice(None), slice(4, -4), slice(4, -4))
+        max_ref = float(jnp.max(jnp.abs(dq_ref[interior])))
+        max_diff = float(jnp.max(jnp.abs(dq_fct[interior] - dq_ref[interior])))
+        rel_gap = max_diff / max_ref if max_ref > 0 else max_diff
+
+        self.assertLess(
+            rel_gap, 0.01,
+            msg=(f"On a smooth monotone quadratic where the FCT "
+                 f"limiter CANNOT fire in the INTERIOR, "
+                 f"`_cgrid_fct_fluxes_2d` deviates from "
+                 f"`cgrid_mass_flux_divergence` by rel_gap = "
+                 f"{rel_gap:.2%} (max_diff = {max_diff:.2e}, "
+                 f"max_ref = {max_ref:.2e}).  This indicates the FCT "
+                 f"x-PPM has collapsed to first-order upwind — the "
+                 f"iter-506 axis bug has likely re-entered."))
+
     def test_fct_tracer_flux_nonzero_for_pure_x_variation(self):
-        """iter-506 (Codex): `_cgrid_fct_fluxes_2d` had the same axis
-        bug as `cgrid_mass_flux_divergence`.  A purely-x-varying tracer
-        with uniform u_c > 0 must produce non-trivial monotone tracer
-        tendency.  Prior to iter-506 the x-PPM was reconstructing along
-        the j-interior axis and the first-order upwind fallback carried
-        the whole transport, so FCT produced zero high-order correction
-        for purely-x-varying tracers — degrading tracer transport
-        accuracy silently on every cubed-sphere simulation."""
+        """Weak sanity check: purely-x-varying q with uniform u_c > 0
+        must produce nonzero FCT tendency.  Kept alongside the
+        strengthened iter-507 test above as a fast fail-early guard.
+        """
         import jax.numpy as jnp
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -2232,7 +2288,6 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         n = 8
         base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(base)
-        # Smooth quadratic variation in i only
         i_vals = jnp.arange(n, dtype=jnp.float64) ** 2 * 0.1 + 1.0
         q = jnp.broadcast_to(i_vals[None, :, None], (6, n, n))
         u_c = jnp.ones((6, n + 1, n), dtype=jnp.float64)
@@ -2242,10 +2297,8 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         max_abs_dqdt = float(jnp.max(jnp.abs(dq_dt)))
         self.assertGreater(
             max_abs_dqdt, 1e-9,
-            msg=f"FCT tracer tendency should be non-trivial for a "
-                f"purely-x-varying q with u_c = +1, but got "
-                f"max|dq/dt| = {max_abs_dqdt:.2e} — the FCT x-axis "
-                f"PPM bug (iter-506) appears to have re-entered.")
+            msg=f"FCT tendency should be non-trivial for pure-x q "
+                f"with u_c = +1; got max|dq/dt| = {max_abs_dqdt:.2e}.")
 
     def test_no_future_caller_passes_non_halo_last_axis_to_ppm(self):
         """Source-level axis-contract guard (iter-506): any call to
