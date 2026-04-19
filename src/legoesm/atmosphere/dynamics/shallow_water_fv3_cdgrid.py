@@ -71,18 +71,21 @@ class CDGridShallowWaterConfig(NamedTuple):
                                   # USED by three live paths that share this
                                   # field:
                                   #   - cdgrid_momentum_tendencies
-                                  #     (operators_cdgrid.py:1124; called by
-                                  #     the A-L tendency path via
-                                  #     _cdgrid_step in this file L135)
+                                  #     (operators_cdgrid.py:1124) — called
+                                  #     from cdgrid_shallow_water_tendencies
+                                  #     (this file L146), which is itself
+                                  #     invoked by CDGridShallowWaterModel.
+                                  #     tendencies / .step (this file L271,
+                                  #     L285).
                                   #   - fv3_sw_tendencies
-                                  #     (operators_cdgrid.py:1384; the A-L
-                                  #     RK3 PRODUCTION path used by
+                                  #     (operators_cdgrid.py:1384) — the
+                                  #     A-L RK3 PRODUCTION path used by
                                   #     FV3EdgeShallowWaterModel when
-                                  #     use_experimental_csw=False)
+                                  #     use_experimental_csw=False.
                                   #   - fv3_csw_tendencies
-                                  #     (fv3_sw_core.py:1344; experimental
+                                  #     (fv3_sw_core.py:1344) — experimental
                                   #     CSW path for
-                                  #     use_experimental_csw=True)
+                                  #     use_experimental_csw=True.
                                   # IGNORED by the FB chain
                                   # (fv3_forward_backward_step /
                                   # fv3_fb_sw_step): div_damp is forwarded
