@@ -83,25 +83,59 @@ def _broadcast_metric(metric, field):
 # PPM (Piecewise Parabolic Method) transport
 # ==============================================================================
 
-def _ppm_reconstruct_1d(q):
-    """PPM face-value reconstruction along the LAST axis.
+def _ppm_reconstruct_1d(q, axis: int = -1):
+    """PPM face-value reconstruction along ``axis``.
 
-    Given cell averages q[..., i], compute left and right face values
-    (q_L[i], q_R[i]) for each cell using 4th-order interpolation with
+    Given cell averages along ``axis``, compute left and right face
+    values (q_L, q_R) for each cell using 4th-order interpolation with
     monotonicity constraints (Colella & Woodward 1984).
+
+    iter-508: previously this function operated implicitly on the
+    LAST axis only.  Several callers in this module relied on that
+    convention but extracted strips with the halo-padded axis on
+    axis 1 (e.g., ``h_pad[:, :, 2:-2]`` of shape ``(6, n+4, n)``),
+    silently reconstructing along the WRONG axis (the n-cell interior
+    j-direction with no halo).  iter-505 / iter-506 fixed
+    `cgrid_mass_flux_divergence` and `_cgrid_fct_fluxes_2d` with
+    explicit `swapaxes` wrappers; iter-508 makes the contract
+    explicit by accepting an `axis` argument so future callers must
+    decide the reconstruction axis at the call site.  The default
+    `axis=-1` preserves backward compatibility with all existing
+    callers that already pass axis-last data.
 
     Parameters
     ----------
-    q : jax.Array, shape (..., N)
-        Cell averages.  Requires N >= 4 for the 4th-order stencil.
+    q : jax.Array, shape (..., N, ...)
+        Cell averages.  Requires the size along ``axis`` to be N >= 4.
+    axis : int, optional
+        Axis along which to reconstruct face values.  Default is the
+        LAST axis (``-1``) for backward compatibility.
 
     Returns
     -------
-    q_L : jax.Array, shape (..., N)
-        Left face value for each cell.
-    q_R : jax.Array, shape (..., N)
-        Right face value for each cell.
+    q_L : jax.Array, same shape as ``q``
+        Left face value for each cell along ``axis``.
+    q_R : jax.Array, same shape as ``q``
+        Right face value for each cell along ``axis``.
     """
+    # Normalize negative axis to positive for clarity.
+    orig_axis = q.ndim + axis if axis < 0 else axis
+    if not 0 <= orig_axis < q.ndim:
+        raise ValueError(
+            f"_ppm_reconstruct_1d: axis={axis} out of range for "
+            f"input of ndim={q.ndim}.")
+    if q.shape[orig_axis] < 4:
+        raise ValueError(
+            f"_ppm_reconstruct_1d: requires size along axis>=4 for the "
+            f"4th-order stencil, got {q.shape[orig_axis]} along axis "
+            f"{orig_axis}.")
+    # If axis is not last, move it to last, run the reconstruction,
+    # then move it back.  This consolidates the swapaxes pattern that
+    # iter-505 and iter-506 had to repeat at every call site.
+    moved = orig_axis != q.ndim - 1
+    if moved:
+        q = jnp.moveaxis(q, orig_axis, -1)
+
     N = q.shape[-1]
 
     # Pad with 2 ghost cells on each side (edge extrapolation)
@@ -141,6 +175,12 @@ def _ppm_reconstruct_1d(q):
     cond_R = -q_6 > dq * dq
     q_R_adj = 3.0 * q - 2.0 * q_L
     q_R = jnp.where(cond_R & ~is_extremum, q_R_adj, q_R)
+
+    # Restore the original axis ordering if the caller passed a non-
+    # default `axis`.
+    if moved:
+        q_L = jnp.moveaxis(q_L, -1, orig_axis)
+        q_R = jnp.moveaxis(q_R, -1, orig_axis)
 
     return q_L, q_R
 
@@ -456,20 +496,11 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     # original grid, which maps to padded indices i..i+3.
 
     # Extract strips along i for each j: shape (6, n+4, n) from padded.
-    # `_ppm_reconstruct_1d` operates on the LAST axis, so transpose the
-    # strip to put the i-axis last, reconstruct, then transpose back.
-    # (iter-505: prior to this swap, `_ppm_reconstruct_1d(h_x_strips)`
-    # was silently reconstructing along j-interior with only n cells
-    # and no halo — producing flat face values on purely-x-varying
-    # fields instead of the 4th-order x-face reconstruction intended
-    # by the comment above.)
-    h_x_strips = h_pad[:, :, 2:-2]                 # (6, n+4, n)  axes: (face, i_pad, j_int)
-    h_x_strips_T = jnp.swapaxes(h_x_strips, 1, 2)   # (6, n, n+4)  axes: (face, j_int, i_pad)
-
-    # PPM reconstruction along last axis (i-direction, now trailing)
-    q_L_x_T, q_R_x_T = _ppm_reconstruct_1d(h_x_strips_T)  # each (6, n, n+4)
-    q_L_x = jnp.swapaxes(q_L_x_T, 1, 2)  # (6, n+4, n)
-    q_R_x = jnp.swapaxes(q_R_x_T, 1, 2)  # (6, n+4, n)
+    # The halo-padded i-axis is axis=1; pass `axis=1` explicitly so
+    # `_ppm_reconstruct_1d` reconstructs in the i-direction (iter-508
+    # made the axis explicit to prevent the iter-505 silent-bug class).
+    h_x_strips = h_pad[:, :, 2:-2]                  # (6, n+4, n)
+    q_L_x, q_R_x = _ppm_reconstruct_1d(h_x_strips, axis=1)
 
     # Face values at x-interfaces: we need n+1 faces for interior cells
     # Face (i) is between padded cells (i+1) and (i+2), i.e. original cells i-1 and i
@@ -594,18 +625,11 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     # ----------------------------------------------------------------
     q_pad_h2 = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4)
 
-    # X-direction PPM — same axis-contract fix as
-    # `cgrid_mass_flux_divergence` (iter-505): `_ppm_reconstruct_1d`
-    # operates on the LAST axis, so transpose the strip to put the
-    # halo-padded i-axis last, reconstruct, then transpose back.
-    # Without this swap the FCT high-order flux used j-direction
-    # reconstructions at x-interfaces, making the FCT path silently
-    # mis-direction-ed on any cubed-sphere tracer transport.
+    # X-direction PPM — pass `axis=1` explicitly to reconstruct along
+    # the halo-padded i-direction.  Same iter-508 contract as
+    # `cgrid_mass_flux_divergence`.
     q_x_strips = q_pad_h2[:, :, 2:-2]                   # (6, n+4, n)
-    q_x_strips_T = jnp.swapaxes(q_x_strips, 1, 2)        # (6, n, n+4)
-    q_L_x_T, q_R_x_T = _ppm_reconstruct_1d(q_x_strips_T)
-    q_L_x = jnp.swapaxes(q_L_x_T, 1, 2)                  # (6, n+4, n)
-    q_R_x = jnp.swapaxes(q_R_x_T, 1, 2)                  # (6, n+4, n)
+    q_L_x, q_R_x = _ppm_reconstruct_1d(q_x_strips, axis=1)
     q_R_left = q_R_x[:, 1:n+2, :]
     q_L_right = q_L_x[:, 2:n+3, :]
     q_face_hi_x = jnp.where(u_c > 0, q_R_left, q_L_right)

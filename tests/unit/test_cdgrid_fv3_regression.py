@@ -2324,8 +2324,9 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         src = src_file.read_text()
         tree = ast.parse(src)
 
-        # Find every call to `_ppm_reconstruct_1d(<arg>)` and the arg
-        # expression source text.
+        # Find every call to `_ppm_reconstruct_1d(<arg>, [axis=...])`
+        # and capture the positional arg expression + whether `axis=`
+        # was passed.
         calls = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call)
@@ -2333,7 +2334,9 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
                     and node.func.id == "_ppm_reconstruct_1d"):
                 if len(node.args) >= 1:
                     arg_src = ast.unparse(node.args[0])
-                    calls.append((node.lineno, arg_src))
+                    has_axis_kwarg = any(
+                        kw.arg == "axis" for kw in node.keywords)
+                    calls.append((node.lineno, arg_src, has_axis_kwarg))
 
         self.assertGreaterEqual(
             len(calls), 4,
@@ -2345,19 +2348,21 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
 
         src_lines = src.splitlines()
         # Accept any of:
-        #   (a) argument expression contains `swapaxes` directly (caller
-        #       performed the transpose inline);
-        #   (b) bare variable ending in `_T` (convention for a
-        #       transposed strip already swapped onto reconstruction axis);
-        #   (c) bare variable ending in `_y_strips` or `_y` (y-direction
-        #       strip whose halo-padded axis is naturally last).
+        #   (a) the call passes `axis=...` explicitly (iter-508 — the
+        #       sanctioned way to disambiguate the reconstruction
+        #       direction at the call site);
+        #   (b) argument expression contains `swapaxes` directly
+        #       (caller performed the transpose inline);
+        #   (c) bare variable ending in `_T` (convention for a
+        #       transposed strip already swapped onto recon axis);
+        #   (d) bare variable ending in `_y_strips` or `_y`
+        #       (y-direction strip whose halo-padded axis is last).
         #
-        # Additionally, for each call site we verify that within the
-        # ~5 lines above the call there is an actual `swapaxes(...)`
-        # call producing the bare variable we pass in.  This closes the
-        # naming-only loophole where someone renames a buggy strip
-        # `h_x_strips_T` without actually swapping anything.
-        for lineno, arg_src in calls:
+        # For (c) we additionally verify a swapaxes/transpose
+        # assignment to that name in the 6 preceding lines.
+        for lineno, arg_src, has_axis_kwarg in calls:
+            if has_axis_kwarg:
+                continue  # Explicit axis= — contract honoured.
             if "swapaxes" in arg_src:
                 continue  # Explicitly swapped inline — contract honoured.
 

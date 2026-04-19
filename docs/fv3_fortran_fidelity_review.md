@@ -168,6 +168,43 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-508 (2026-04-19)**: addressed the root cause of the
+  iter-505 axis bug class by making `_ppm_reconstruct_1d`'s
+  reconstruction axis EXPLICIT instead of an implicit "operates on
+  the LAST axis" convention.  The function now accepts an optional
+  `axis: int = -1` kwarg.  When `axis != -1`, internally moves the
+  requested axis to last via `jnp.moveaxis`, runs the existing
+  body, and moves it back at return.  Default is -1 so no existing
+  caller breaks.
+
+  Refactored both iter-505 and iter-506 call sites
+  (`cgrid_mass_flux_divergence` and `_cgrid_fct_fluxes_2d`) to use
+  the new API (`_ppm_reconstruct_1d(strip, axis=1)`) instead of the
+  manual `swapaxes(1, 2)` before/after pattern — cleaner, less
+  noise, and impossible to silently get wrong (swapaxes pattern
+  required THREE statements per call, missing any of them
+  re-introduced the bug).
+
+  Audit: confirmed `operators_fv.py` uses a *different* internal
+  axis convention (`axis=-2`) for its private `_ppm_reconstruct_x`
+  / `_ppm_reconstruct_y` operators.  This convention difference
+  between modules is the root cause of the iter-505 confusion;
+  the iter-508 explicit-axis API closes the door on similar
+  silent bugs in `operators_cdgrid.py`.
+
+  AST guard test (`test_no_future_caller_passes_non_halo_last_axis_to_ppm`)
+  extended to recognize `axis=...` kwarg as a sanctioned form
+  alongside the existing `swapaxes`/`_T`/`_y_strips` patterns.
+
+  **Test-matrix metrics** (C36 W2 1-day): unchanged from iter-505
+  (L2=2.42e-04, Linf=1.83e-03).  W5/cosine bell unchanged.  Ocean
+  rest state 12/12 PASS.  184/184 tests pass.
+
+  This iteration is a refactor (no numerical change) but eliminates
+  the entire bug class that produced iter-505/506.  Future callers
+  cannot make the same mistake without explicit `# noqa`-style
+  pattern violation.
+
 - **iter-507 (2026-04-19)**: strengthened the FCT behavioural guard
   after Codex stop-time review of iter-506 — "the new FCT
   'behavioral guard' still passes on the buggy implementation".
