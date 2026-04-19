@@ -836,6 +836,163 @@ class TestInterpCornerToCenter(unittest.TestCase):
                  f"plain-arithmetic variant."))
 
 
+class TestCgridDivergenceBehavior(unittest.TestCase):
+    """Iter-574: comprehensive locks for `cgrid_divergence`
+    (`src/legoesm/core/operators_cdgrid.py:420-441`).
+
+    Pre-iter-574 tests only verified shape + constant-velocity
+    (loosely, with no magnitude assertion).  A no-op refactor
+    `return jnp.zeros_like(u_c[..., :, :n])` would pass.
+
+    Production-critical: used by `fv3_sw_tendencies` for
+    divergence damping and `_arakawa_lamb_gradient`-derived
+    divergence diagnostics.
+
+    Locks (mirroring iter-572/573 for `_arakawa_lamb_gradient`):
+      (a) 2D shape: u_c (6, n+1, n), v_c (6, n, n+1) →
+          div (6, n, n)
+      (b) 3D shape with nlev
+      (c) No-op detection: non-trivial (u_c, v_c) → non-zero div
+      (d) Anti-symmetry: div(-u, -v) == -div(u, v)
+      (e) Linearity: div(5u, 5v) == 5*div(u, v)
+      (f) 3D no-op detection at every level
+      (g) 3D per-level consistency with 2D slice
+    """
+
+    def _build(self, n=6):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        return n, cdgrid
+
+    def test_shape_2d(self):
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        u_c = jnp.zeros((6, n + 1, n))
+        v_c = jnp.zeros((6, n, n + 1))
+        div = cgrid_divergence(u_c, v_c, cdgrid)
+        self.assertEqual(div.shape, (6, n, n))
+
+    def test_shape_3d(self):
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        nlev = 4
+        u_c = jnp.zeros((6, n + 1, n, nlev))
+        v_c = jnp.zeros((6, n, n + 1, nlev))
+        div = cgrid_divergence(u_c, v_c, cdgrid)
+        self.assertEqual(div.shape, (6, n, n, nlev))
+
+    def test_non_zero_output(self):
+        """Random non-trivial (u_c, v_c) → non-zero divergence.
+        Catches `return zeros_like` no-op refactors."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(574)
+        u_c = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        v_c = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+        div = cgrid_divergence(u_c, v_c, cdgrid)
+        max_div = float(jnp.max(jnp.abs(div)))
+        self.assertGreater(
+            max_div, 1e-9,
+            msg=(f"Random non-trivial input gave ~zero divergence "
+                 f"max = {max_div:.3e}.  No-op refactor detection."))
+
+    def test_anti_symmetry(self):
+        """div(-u, -v) == -div(u, v).  Catches sign bugs."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(1574)
+        u_np = rng.standard_normal((6, n + 1, n)).astype(np.float64)
+        v_np = rng.standard_normal((6, n, n + 1)).astype(np.float64)
+        d_pos = cgrid_divergence(jnp.asarray(u_np),
+                                  jnp.asarray(v_np), cdgrid)
+        d_neg = cgrid_divergence(jnp.asarray(-u_np),
+                                  jnp.asarray(-v_np), cdgrid)
+        diff = float(jnp.max(jnp.abs(
+            jnp.asarray(d_pos) + jnp.asarray(d_neg))))
+        self.assertLess(
+            diff, 1e-10,
+            msg=f"Anti-symmetry failed; max dev {diff:.3e}.")
+
+    def test_linearity(self):
+        """div(5u, 5v) == 5*div(u, v).  Catches non-linear
+        refactors."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(2574)
+        u_np = rng.standard_normal((6, n + 1, n)).astype(np.float64)
+        v_np = rng.standard_normal((6, n, n + 1)).astype(np.float64)
+        d_1 = cgrid_divergence(jnp.asarray(u_np),
+                                jnp.asarray(v_np), cdgrid)
+        d_5 = cgrid_divergence(jnp.asarray(5.0 * u_np),
+                                jnp.asarray(5.0 * v_np), cdgrid)
+        diff = float(jnp.max(jnp.abs(
+            jnp.asarray(d_5) - 5.0 * jnp.asarray(d_1))))
+        scale = float(jnp.max(jnp.abs(jnp.asarray(d_5))))
+        self.assertLess(
+            diff, 1e-6 * max(scale, 1.0),
+            msg=(f"Linearity failed; diff {diff:.3e} scale "
+                 f"{scale:.3e}."))
+
+    def test_3d_non_zero_per_level(self):
+        """4D input, distinct per level → non-zero output at
+        every level.  Catches 4D-branch no-op refactors."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(3574)
+        u_np = rng.standard_normal(
+            (6, n + 1, n, nlev)).astype(np.float64) * 10.0
+        v_np = rng.standard_normal(
+            (6, n, n + 1, nlev)).astype(np.float64) * 10.0
+        # Add per-level-distinct offset
+        for k in range(nlev):
+            u_np[..., k] += 100.0 * (k + 1)
+        div = cgrid_divergence(jnp.asarray(u_np),
+                                jnp.asarray(v_np), cdgrid)
+        for k in range(nlev):
+            max_k = float(jnp.max(jnp.abs(div[..., k])))
+            self.assertGreater(
+                max_k, 1e-9,
+                msg=(f"4D div level {k} zero; max {max_k:.3e}."))
+
+    def test_3d_matches_2d_per_level(self):
+        """4D output at level k == 2D div on k-th slice.  Catches
+        level-routing bugs in the 4D branch."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(4574)
+        u_np = rng.standard_normal(
+            (6, n + 1, n, nlev)).astype(np.float64)
+        v_np = rng.standard_normal(
+            (6, n, n + 1, nlev)).astype(np.float64)
+        for k in range(nlev):
+            u_np[..., k] += 10.0 * (k + 1)   # distinct per level
+        div_4d = cgrid_divergence(jnp.asarray(u_np),
+                                    jnp.asarray(v_np), cdgrid)
+        div_4d_np = np.asarray(div_4d)
+        for k in range(nlev):
+            div_2d = cgrid_divergence(
+                jnp.asarray(u_np[..., k]),
+                jnp.asarray(v_np[..., k]), cdgrid)
+            diff = float(jnp.max(jnp.abs(
+                jnp.asarray(div_4d_np[..., k]) - div_2d)))
+            scale = float(jnp.max(jnp.abs(div_2d)))
+            self.assertLess(
+                diff, 1e-6 * max(scale, 1.0),
+                msg=(f"Level {k}: 4D div differs from 2D by "
+                     f"{diff:.3e} (scale {scale:.3e}).  Level-"
+                     f"routing bug."))
+
+
 class TestArakawaLambGradient(unittest.TestCase):
     """Iter-572: regression lock for `_arakawa_lamb_gradient`
     (`src/legoesm/core/operators_cdgrid.py:811-861`).

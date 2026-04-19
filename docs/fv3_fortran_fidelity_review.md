@@ -197,6 +197,27 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-574 (2026-04-20)**: comprehensive behavior locks for
+  `cgrid_divergence`.
+
+  Pre-iter-574 tests for `cgrid_divergence`
+  (`operators_cdgrid.py:420-441`) were only shape checks + a
+  loose "constant velocity is finite" test.  A `return
+  zeros_like` no-op refactor would pass.
+
+  Added `TestCgridDivergenceBehavior` (7 tests, mirroring the
+  iter-572/573 pattern for `_arakawa_lamb_gradient`):
+    (a) 2D shape
+    (b) 3D shape
+    (c) No-op detection on random input (max > 1e-9)
+    (d) Anti-symmetry: div(-u, -v) == -div(u, v)
+    (e) Linearity: div(5u, 5v) == 5*div(u, v)
+    (f) 3D no-op detection per level
+    (g) 3D per-level consistency with 2D slice
+
+  No production-path numerical changes.  101/101 tests pass in
+  `test_cdgrid.py` (94 prior + 7 new).
+
 - **iter-573 (2026-04-19)**: addressed Codex stop-time review of
   iter-572: "4D `_arakawa_lamb_gradient` behavior is still
   effectively uncovered".
