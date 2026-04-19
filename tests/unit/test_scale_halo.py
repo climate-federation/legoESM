@@ -804,14 +804,21 @@ class TestPadHaloH3Dispatch:
                     f"fill did not blend in neighbour faces "
                     f"{nbr_a} (={v_a}) and {nbr_b} (={v_b})."
                 )
-                # (3) Iter-538 (Codex follow-up): TWO-face blend.
-                # The cross-face check above passes if all cells
-                # equal a SINGLE neighbour's value v_a.  To prove
-                # actual blending of BOTH neighbours, at least one
-                # cell must be STRICTLY BETWEEN v_a and v_b — i.e.,
-                # in (lo, hi) open interval, distinct from both
-                # endpoints.  This rules out the
-                # "single-neighbour propagation" failure mode.
+                # (3) Iter-538/539 (Codex follow-up): TWO-face SPATIAL
+                # blend.  The cross-face check above passes if all
+                # cells equal a SINGLE neighbour's value v_a.  But a
+                # degenerate "all cells = midpoint(v_a, v_b)" fill
+                # also passes "strict-between" — it's blended in
+                # COMPOSITION but not in SPATIAL STRUCTURE.
+                #
+                # To prove BOTH neighbours genuinely contribute
+                # POSITION-DEPENDENTLY (cells closer to W are closer
+                # to v_W, cells closer to S are closer to v_S), the
+                # block must contain at least one cell BELOW the
+                # midpoint AND at least one cell ABOVE the midpoint.
+                # That rules out:
+                #   - single-neighbour propagation (all = v_a or v_b)
+                #   - degenerate constant-blend (all = midpoint)
                 gap = hi - lo
                 # Only meaningful when v_a != v_b (which is always
                 # true for face-unique values; CONNECTIVITY never
@@ -821,21 +828,20 @@ class TestPadHaloH3Dispatch:
                     f"neighbours have equal value (v_a={v_a}, "
                     f"v_b={v_b}); face-unique field cannot exercise "
                     f"two-face blend.")
-                # Strictly between lo and hi — at least 5% of the
-                # gap from each endpoint, generous enough to allow
-                # corner cells that get a 1/4 weight from one side
-                # (e.g., a 3:1 weighted average).
-                margin = 0.05 * gap
-                in_open_interval = bool(np.any(
-                    (block > lo + margin) & (block < hi - margin)))
-                assert in_open_interval, (
-                    f"face {face} {label} corner block: NO cell "
-                    f"lies strictly between neighbours v_a={v_a} "
-                    f"and v_b={v_b} (gap={gap:.3f}); cells: "
+                midpoint = 0.5 * (lo + hi)
+                margin = 0.02 * gap   # 2% margin to absorb float drift
+                some_below = bool(np.any(block < midpoint - margin))
+                some_above = bool(np.any(block > midpoint + margin))
+                assert some_below and some_above, (
+                    f"face {face} {label} corner block: lacks SPATIAL "
+                    f"two-face blend.  midpoint = {midpoint:.3f} "
+                    f"(between v_a={v_a}, v_b={v_b}); "
+                    f"some_below_midpoint = {some_below}, "
+                    f"some_above_midpoint = {some_above}.  Cells: "
                     f"{sorted(set(block.flatten().tolist()))}.  "
-                    f"Corner fill propagated a single neighbour's "
-                    f"value instead of blending both — "
-                    f"single-neighbour-propagation failure mode."
+                    f"A genuine two-face blend produces cells "
+                    f"closer to v_a near the v_a edge AND cells "
+                    f"closer to v_b near the v_b edge."
                 )
 
     def test_duogrid_at_halo3_third_ring_carries_neighbour_data(self):

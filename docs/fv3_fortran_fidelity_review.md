@@ -168,6 +168,51 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-539 (2026-04-19)**: addressed Codex stop-time review of
+  iter-538: "iter-538's new assertion still does not prove
+  two-neighbour corner blending".
+
+  iter-538's strict-between assertion (at least one cell in
+  `(lo + 5%·gap, hi - 5%·gap)`) was still satisfied by a
+  DEGENERATE constant-blend failure mode: if the corner-fill rule
+  produced `all 9 cells = midpoint(v_a, v_b) = 5.0` (blended in
+  COMPOSITION but not in SPATIAL STRUCTURE), every cell sits in
+  the open interval and the iter-538 assertion passes silently.
+  A true two-face blend is *position-dependent* — cells nearer
+  the v_a-side edge should be closer to v_a, and cells nearer
+  the v_b-side edge should be closer to v_b.
+
+  Iter-539 replaces "some cell in open interval" with
+  **some-below + some-above midpoint** (with a 2% gap margin to
+  absorb float drift):
+
+  ```python
+  midpoint = 0.5 * (lo + hi)
+  some_below = bool(np.any(block < midpoint - 0.02*gap))
+  some_above = bool(np.any(block > midpoint + 0.02*gap))
+  assert some_below and some_above, ...
+  ```
+
+  Ruled-out failure modes (compound of iter-536/537/538/539):
+    - cell is non-finite / out of host range (iter-536 smoke)
+    - cell equals host face value (iter-537 cross-face-blend)
+    - all cells equal a single neighbour (iter-538 strict-between)
+    - all cells equal midpoint (iter-539 spatial some-below+some-above)
+
+  **Sanity-checked locally**: patched corner-fill to hard-code
+  `v_corner = 5.0 = 0.5*(4.0 + 6.0)` across the entire 3×3 block
+  (constant midpoint blend).  Result: iter-538 assertion passes
+  (every cell IS strictly between 4 and 6), iter-539 assertion
+  correctly FIRES (no cell below midpoint - margin, no cell above
+  midpoint + margin).  Note the spatial criterion is only
+  well-defined when `v_a ≠ v_b`; the test already asserts that
+  and raises a clean failure if the neighbour data is degenerate.
+
+  No production-path numerical changes.  Full regression (188
+  tests in `test_cdgrid_fv3_regression.py` + `test_duogrid.py` +
+  `test_cdgrid.py`) all pass; halo test file (53 tests in
+  `test_scale_halo.py`) all pass.
+
 - **iter-538 (2026-04-19)**: addressed Codex stop-time review of
   iter-537: "iter-537's new test does not actually prove
   two-face corner blending".
