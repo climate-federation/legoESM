@@ -970,6 +970,96 @@ class TestCgridTracerAdvectionFct(unittest.TestCase):
                 msg=(f"Level {k} constant-per-level tendency = "
                      f"{level_max:.3e}, expected 0 under zero flow."))
 
+    def test_nonzero_flow_varying_tracer_nonzero_tendency(self):
+        """Iter-562 (Codex follow-up to iter-561): rule out a
+        `return jnp.zeros_like(q)` no-op regression.
+
+        iter-561's 5 tests all accept zero output (shape, zero flow,
+        constant tracer, all pass with any zeros_like).  A refactor
+        that silently replaces the function body with a no-op would
+        slip through.
+
+        This test supplies a SPATIALLY-VARYING tracer AND a non-
+        zero flow and asserts the resulting tendency has
+        non-negligible magnitude (at least some fraction of the
+        advective scale u * |grad(q)|).
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_tracer_advection_fct)
+        n, cdgrid = self._build(n=6)
+        # Spatial sine wave in tracer (high-amplitude so the
+        # flux divergence is above noise floor)
+        lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
+        q_np = 100.0 + 50.0 * np.cos(2 * lon) * np.cos(lat)
+        q = jnp.asarray(q_np)
+        # Constant uniform flow magnitude 10 in the i-direction.
+        u_c = jnp.full((6, n + 1, n), 10.0, dtype=jnp.float64)
+        v_c = jnp.zeros((6, n, n + 1), dtype=jnp.float64)
+
+        out = np.asarray(cgrid_tracer_advection_fct(
+            q, u_c, v_c, cdgrid))
+        out_max = float(np.max(np.abs(out)))
+        # Advective scale estimate:
+        # |dq/dt| ~ |u| * |grad(q)| ~ 10 * (50 / cell_size).
+        # For n=6 on a sphere, cell size ~ R * pi/2 / 6 ~ 1.7e6 m.
+        # So |dq/dt| ~ 10 * 50 / 1.7e6 ~ 3e-4.
+        # Assert the output exceeds 1e-6 — well above noise and
+        # far above the no-op output of 0.
+        self.assertGreater(
+            out_max, 1e-6,
+            msg=(f"Non-zero flow + spatially-varying tracer gave "
+                 f"tendency max abs = {out_max:.3e}.  Expected "
+                 f"order `|u| * |grad(q)| / cell_size` ~ 1e-4 to "
+                 f"1e-3.  If a `return jnp.zeros_like(q)` no-op "
+                 f"was introduced, this assertion fires."))
+
+    def test_opposite_flows_give_opposite_sign_tendency(self):
+        """Iter-562: verify the function is NOT returning a
+        constant-regardless-of-input.  Reversing the flow direction
+        must reverse the SIGN of the tendency at cells where the
+        tracer gradient is non-zero — catches a `return constant`
+        refactor that `test_nonzero_flow_varying_tracer_nonzero_
+        tendency` alone wouldn't."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_tracer_advection_fct)
+        n, cdgrid = self._build(n=6)
+        lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
+        q_np = 100.0 + 50.0 * np.cos(2 * lon) * np.cos(lat)
+        q = jnp.asarray(q_np)
+
+        u_c_pos = jnp.full((6, n + 1, n), 10.0, dtype=jnp.float64)
+        u_c_neg = jnp.full((6, n + 1, n), -10.0, dtype=jnp.float64)
+        v_c = jnp.zeros((6, n, n + 1), dtype=jnp.float64)
+
+        out_pos = np.asarray(cgrid_tracer_advection_fct(
+            q, u_c_pos, v_c, cdgrid))
+        out_neg = np.asarray(cgrid_tracer_advection_fct(
+            q, u_c_neg, v_c, cdgrid))
+
+        # In principle: out_neg == -out_pos for purely linear
+        # advection.  PPM with clipping may have slight asymmetry
+        # at the limiter, but the bulk tendency should be opposite
+        # sign.  Test: the dot product of the two vectors (as
+        # flattened arrays) should be negative (anti-correlated).
+        corr = float(np.sum(out_pos * out_neg))
+        pos_energy = float(np.sum(out_pos * out_pos))
+        self.assertLess(
+            corr, 0.0,
+            msg=(f"dot(tendency[u>0], tendency[u<0]) = {corr:.3e} "
+                 f">= 0.  Output is not flow-dependent in the "
+                 f"expected anti-correlated sense (would fire on "
+                 f"`return constant_value` refactor)."))
+        self.assertGreater(
+            pos_energy, 1e-12,
+            msg=(f"Positive-flow tendency energy = {pos_energy:.3e} "
+                 f"— the tendency is essentially zero, so the "
+                 f"correlation test above is meaningless.  The "
+                 f"function is not producing meaningful output."))
+
 
 class TestLaplacianDgrid(unittest.TestCase):
     """Iter-560: regression lock for `_laplacian_dgrid`

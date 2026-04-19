@@ -168,6 +168,43 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-562 (2026-04-19)**: addressed Codex stop-time review of
+  iter-561: "the new `cgrid_tracer_advection_fct` tests do not
+  actually lock the public wrapper against a no-op regression".
+
+  Iter-561's 5 tests (shape, zero-flow, constant-tracer, 3D
+  constant-per-level) would ALL pass if the function body were
+  replaced with `return jnp.zeros_like(q)`.  Codex correctly
+  flagged this.
+
+  Iter-562 adds two no-op-detecting tests:
+    (a) `test_nonzero_flow_varying_tracer_nonzero_tendency`: a
+        spatially-varying tracer `100 + 50 * cos(2*lon) * cos(lat)`
+        with uniform flow `u_c = 10` must produce a tendency of
+        magnitude at least 1e-6 (well above the noise floor; the
+        advective scale estimate is ~1e-4).
+    (b) `test_opposite_flows_give_opposite_sign_tendency`:
+        `u_c = +10` vs `u_c = -10` with the same varying tracer
+        must produce anti-correlated tendencies — dot product <
+        0.  Catches a `return constant_value` regression that
+        test (a) alone wouldn't.
+
+  Per user note: these are REASONABILITY guards against bugs,
+  not Fortran-derived absolute-value locks.  They don't
+  improvise production code — they just ensure the existing
+  production function isn't trivially broken (returns 0 or a
+  constant).  Actual Fortran-faithful value locks for FCT
+  tracer advection would require comparison against Fortran
+  reference runs, which is a broader infrastructure item.
+
+  **Sanity-checked**: replaced the function body with `return
+  jnp.zeros_like(q)`.  Tests (a) and (b) correctly fire with
+  diagnostics `max abs = 0.000e+00` and `dot product = 0.0`.
+  Restored production code; all 7 tests pass.
+
+  No production-path numerical changes.  75/75 tests pass in
+  `test_cdgrid.py` (73 prior + 2 new).
+
 - **iter-561 (2026-04-19)**: regression lock for
   `cgrid_tracer_advection_fct` (previously untested).
 
