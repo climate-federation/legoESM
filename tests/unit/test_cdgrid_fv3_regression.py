@@ -2647,55 +2647,72 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             h=h0, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
         model.set_initial_mass(state0)
 
-        state = state0
-        for _ in range(n_steps):
-            state = model.step(state, dt)
-
-        # Reproduce the matrix's extract_fn EXACTLY
-        # (run_atmosphere_test_matrix.py:1213-1244, including the
-        # normalization step iter-519 missed and the lat-lon regrid).
-        u_cc = 0.5 * (np.asarray(state.u_d, dtype=np.float64)[:, :, :-1]
-                       + np.asarray(state.u_d, dtype=np.float64)[:, :, 1:])
-        v_cc = 0.5 * (np.asarray(state.v_d, dtype=np.float64)[:, :-1, :]
-                       + np.asarray(state.v_d, dtype=np.float64)[:, 1:, :])
+        # Pre-compute the matrix's regrid weights (matches
+        # `run_atmosphere_test_matrix.py::_get_cs_weights(n)`).
+        w = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
         cax = np.asarray(cdgrid.cos_angle_edge_x, dtype=np.float64)
         sax = np.asarray(cdgrid.sin_angle_edge_x, dtype=np.float64)
         cay = np.asarray(cdgrid.cos_angle_edge_y, dtype=np.float64)
         say = np.asarray(cdgrid.sin_angle_edge_y, dtype=np.float64)
-        ca = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
-                     + cay[:, :-1, :] + cay[:, 1:, :])
-        sa = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
-                     + say[:, :-1, :] + say[:, 1:, :])
-        # NORMALIZE — iter-519 missed this; matches matrix line 1230-1231.
-        norm = np.sqrt(ca ** 2 + sa ** 2)
-        ca /= norm
-        sa /= norm
-        v_north_cc = sa * u_cc + ca * v_cc
+        ca_4edge = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
+                           + cay[:, :-1, :] + cay[:, 1:, :])
+        sa_4edge = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
+                           + say[:, :-1, :] + say[:, 1:, :])
+        norm = np.sqrt(ca_4edge ** 2 + sa_4edge ** 2)
+        ca_4edge /= norm
+        sa_4edge /= norm
 
-        # Apply the matrix's lat-lon regrid (matrix lines 1234-1235 +
-        # _regrid_2d using face-aware bilinear weights).
-        w = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
-        v_ll = apply_cubedsphere_to_latlon(v_north_cc, w)
-        max_v_ll = float(np.max(np.abs(v_ll)))
+        def _extract_v_ll(s):
+            """Reproduce matrix `extract_fn` (run_atmosphere_test_matrix.py:
+            1213-1235) for the v_ll field, including the normalization
+            and the cube→latlon regrid that snapshots_v.png plots."""
+            u_cc = 0.5 * (np.asarray(s.u_d, dtype=np.float64)[:, :, :-1]
+                           + np.asarray(s.u_d, dtype=np.float64)[:, :, 1:])
+            v_cc = 0.5 * (np.asarray(s.v_d, dtype=np.float64)[:, :-1, :]
+                           + np.asarray(s.v_d, dtype=np.float64)[:, 1:, :])
+            v_north_cc = sa_4edge * u_cc + ca_4edge * v_cc
+            return apply_cubedsphere_to_latlon(v_north_cc, w)
 
-        # Measured baselines on this CANONICAL lat-lon regridded
-        # pipeline (iter-520 local measurement at C36 dt=300s 1d):
-        #   BUGGY (pre-iter-505):  max|v_ll| = 0.5562 m/s
-        #   FIXED  (post-iter-505): max|v_ll| = 0.3028 m/s
+        # Iter-521 (Codex follow-up): track v_ll across the 11 snapshot
+        # times the matrix saves (t=0, then 10 evenly-spaced steps to
+        # t=1d) — the visible artifact in `snapshots_v.png` is the
+        # temporal evolution, not just the final state.  Lock the max
+        # across ALL snapshots so a regression that shifts the peak
+        # to an intermediate time still fires.
+        n_snaps = 10
+        # Match matrix `_snapshot_steps(n_steps, n_snaps)` — evenly
+        # spaced from 1 to n_steps inclusive.
+        snap_steps = set(int(round((i + 1) * n_steps / n_snaps))
+                         for i in range(n_snaps))
+
+        max_v_ll_per_snap = [float(np.max(np.abs(_extract_v_ll(state0))))]
+        state = state0
+        for i in range(n_steps):
+            state = model.step(state, dt)
+            if (i + 1) in snap_steps:
+                max_v_ll_per_snap.append(
+                    float(np.max(np.abs(_extract_v_ll(state)))))
+
+        max_v_ll_overall = max(max_v_ll_per_snap)
+
+        # Measured baselines on the CANONICAL lat-lon path across all
+        # 11 snapshot times (iter-521).  Pattern is monotone-increasing
+        # with t, so the peak is at t=1d (final snapshot):
+        #   BUGGY (pre-iter-505):  max|v_ll| = 0.5562 m/s (at t=1d)
+        #   FIXED  (post-iter-505): max|v_ll| = 0.3028 m/s (at t=1d)
         # Ceiling at 0.40 m/s cleanly separates: passes FIXED with
-        # 32 % headroom, fails BUGGY by 39 %.  The small headroom
-        # is intentional — this is the user-visible quantity and
-        # any further regression toward the pre-fix value is
-        # exactly what we want to catch.
+        # 32 % headroom, fails BUGGY by 39 %.  Locking the max across
+        # all snapshots (not just t=1d) future-proofs the test against
+        # a refactor that shifts the peak to an earlier timestep.
         self.assertLess(
-            max_v_ll, 0.40,
-            msg=(f"W2 alpha=0 C36 1d max|v_ll| = {max_v_ll:.4f} m/s "
-                 f"on the user-visible lat-lon regridded v field "
-                 f"exceeds 0.40 m/s ceiling.  Pre-iter-505 baseline "
-                 f"was 0.556 m/s; iter-505 axis fix dropped it to "
-                 f"0.303 m/s.  If max|v_ll| crept back above 0.40, "
-                 f"the iter-505 fix may have regressed or a new "
-                 f"v-wind imprint was introduced."))
+            max_v_ll_overall, 0.40,
+            msg=(f"W2 alpha=0 C36 1d peak max|v_ll| = "
+                 f"{max_v_ll_overall:.4f} m/s across the 11 matrix "
+                 f"snapshot times exceeds 0.40 m/s ceiling.  Per-snap "
+                 f"max|v_ll|: "
+                 f"{[f'{x:.3f}' for x in max_v_ll_per_snap]}.  "
+                 f"Pre-iter-505 baseline was 0.556 m/s (at t=1d); "
+                 f"iter-505 axis fix dropped it to 0.303 m/s."))
 
 
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):

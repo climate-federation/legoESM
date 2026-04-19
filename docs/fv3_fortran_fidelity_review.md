@@ -168,6 +168,39 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-521 (2026-04-19)**: extended iter-520 to track `v_ll`
+  across all 11 matrix snapshot timesteps after Codex stop-time
+  review: "iter-520 still does not lock the actual
+  `snapshots_v.png` artifact path".
+
+  iter-520 only checked `max|v_ll|` at the final t=1d state.  The
+  matrix's `snapshots_v.png` plots 11 timesteps (t=0 plus 10
+  evenly-spaced steps to t=1d), so a regression that shifts the
+  visible peak to an intermediate time would not be caught.
+
+  Iter-521 reproduces the matrix's `_snapshot_steps(n_steps,
+  n_snaps=10)` step set and runs `_extract_v_ll(state)` at each
+  of the 11 snapshot times, collecting per-snapshot max|v_ll|
+  into a list.  The assertion is on the OVERALL max across all
+  snapshots, so a peak at any intermediate time fires the test.
+
+  Per-snapshot evolution observed on BUGGY code (pre-iter-505):
+    [0.008, 0.089, 0.190, 0.261, 0.276, 0.292, 0.344, 0.391,
+     0.452, 0.514, 0.556]
+  Monotone-increasing — peak at t=1d (matches the iter-520 single-
+  point measurement).  On FIXED code the peak is also at t=1d at
+  0.303 m/s.  So the temporal-max framing produces the same
+  numerical result here, but future-proofs against a refactor
+  that shifts the peak.
+
+  Ceiling unchanged at 0.40 m/s — passes FIXED with 32 % headroom,
+  fails BUGGY by 39 %.  Failure message now includes the full
+  per-snapshot trace, making it easy to see where the peak lives
+  if the test fires.
+
+  No production-path numerical changes (test extension only).
+  229/229 tests pass.
+
 - **iter-520 (2026-04-19)**: re-pinned the iter-519 v-wind regression
   to the canonical user-visible lat-lon regridded quantity, after
   Codex stop-time review: "iter-519's new regression test does not
