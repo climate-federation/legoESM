@@ -168,6 +168,45 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-537 (2026-04-19)**: addressed Codex stop-time review of
+  iter-536: "the added regression only smoke-tests the outer
+  ring and does not verify corner correctness".
+
+  iter-536's corner test only does smoke-checks (finite, in
+  range, non-zero).  A corner cell could pass all three while
+  being identically equal to the host face's value (i.e., the
+  corner fill silently propagated host data instead of cross-
+  face neighbour data) — a real correctness violation that smoke
+  tests don't catch.
+
+  Iter-537 adds
+  `test_duogrid_at_halo3_corner_cells_blend_neighbour_faces`:
+  for each of the 6 faces × 4 cube vertices, verify the 3×3
+  corner block of the halo=3 padded array satisfies BOTH:
+
+    (1) **Convex-hull check**: every cell value is in
+        `[min(N_a, N_b), max(N_a, N_b)]` (± 1e-5 float drift),
+        where N_a and N_b are the two adjacent neighbour faces'
+        constant values.
+
+    (2) **Cross-face blend check**: at least ONE cell in the
+        block differs from the host face's value (= host_face +
+        1.0) — proves the corner fill DID blend cross-face data.
+
+  **Sanity-checked locally**: monkey-patched both `_fill_corners_h3`
+  and `fill_corner_region` to silently propagate the host face
+  value into corner blocks (instead of blending neighbour data).
+  Result: face 0 SW corner block all 9 cells = 1.0 (host) →
+  iter-537 cross-face-blend assertion correctly fires.
+
+  **Coverage status** of the halo=3 outer ring under duogrid:
+    - iter-535: edge strips contain neighbour values (face-unique check)
+    - iter-536: corner cells finite, in range, non-zero
+    - iter-537: corner cells blend neighbour faces (CORRECTNESS)
+
+  No production-path numerical changes (test only).
+  241/241 tests pass.
+
 - **iter-536 (2026-04-19)**: addressed Codex stop-time review of
   iter-535: "iter-535 still leaves the halo=3 outer ring only
   partially covered".

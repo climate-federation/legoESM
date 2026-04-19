@@ -730,6 +730,81 @@ class TestPadHaloH3Dispatch:
             f"the duogrid h3 corner-fill or edge-strip path left "
             f"some cells at the zero initialization value.")
 
+    def test_duogrid_at_halo3_corner_cells_blend_neighbour_faces(self):
+        """Iter-537 (Codex follow-up to iter-536): the iter-536 test
+        only does smoke-checks (finite / in range / non-zero) on
+        the outer ring corner cells.  A corner cell could pass all
+        three while still being identically equal to the host face's
+        value (i.e., the corner fill silently propagated host data
+        instead of cross-face neighbour data) — a meaningful
+        correctness violation that smoke-tests don't catch.
+
+        This test verifies POSITIVE correctness on the corner blocks:
+        for each face × each cube vertex, the 3×3 corner block cells
+        must have values within the convex hull of the TWO adjacent
+        neighbour faces' values, AND at least one cell of each
+        corner block must NOT be identically equal to the host face's
+        value (proving the corner fill DID blend cross-face data).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+        n = 8
+        h = 3  # halo width
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+        data = jnp.zeros((6, n, n), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+
+        p_h3 = pad_halo(data, halo=h, duogrid=grid.duogrid)
+        p_np = np.asarray(p_h3)
+
+        # The 3x3 corner blocks of the halo=3 padded array sit at
+        # the four corners.  Map each cube vertex to its two
+        # adjacent edges and the corresponding (i, j) slice.
+        corner_specs = [
+            ("SW", WEST,  SOUTH, slice(0, h),    slice(0, h)),
+            ("SE", EAST,  SOUTH, slice(-h, None), slice(0, h)),
+            ("NE", EAST,  NORTH, slice(-h, None), slice(-h, None)),
+            ("NW", WEST,  NORTH, slice(0, h),    slice(-h, None)),
+        ]
+
+        for face in range(6):
+            host_value = float(face) + 1.0
+            for label, edge_a, edge_b, i_slice, j_slice in corner_specs:
+                nbr_a, _, _ = CONNECTIVITY[face][edge_a]
+                nbr_b, _, _ = CONNECTIVITY[face][edge_b]
+                v_a = float(nbr_a) + 1.0
+                v_b = float(nbr_b) + 1.0
+                lo = min(v_a, v_b)
+                hi = max(v_a, v_b)
+                block = p_np[face, i_slice, j_slice]  # (h, h)
+                # (1) Convex-hull check: every cell in the corner
+                # block must be in [lo, hi] ± 1e-5 float drift.
+                cell_min = float(block.min())
+                cell_max = float(block.max())
+                assert cell_min >= lo - 1e-5, (
+                    f"face {face} {label}: min cell value "
+                    f"{cell_min} < neighbour min {lo} = min(face "
+                    f"{nbr_a}+1, face {nbr_b}+1).  Corner fill "
+                    f"produced an out-of-hull value.")
+                assert cell_max <= hi + 1e-5, (
+                    f"face {face} {label}: max cell value "
+                    f"{cell_max} > neighbour max {hi}.  Corner "
+                    f"fill produced an out-of-hull value.")
+                # (2) Cross-face blend check: at least one cell in
+                # the block must differ from the host value.  (If
+                # ALL cells equal the host value, the corner fill
+                # silently propagated host data instead of cross-
+                # face neighbour data — a real correctness bug.)
+                differs = bool(np.any(np.abs(block - host_value) > 1e-5))
+                assert differs, (
+                    f"face {face} {label} corner block: all 9 cells "
+                    f"equal the host value {host_value}.  Corner "
+                    f"fill did not blend in neighbour faces "
+                    f"{nbr_a} (={v_a}) and {nbr_b} (={v_b})."
+                )
+
     def test_duogrid_at_halo3_third_ring_carries_neighbour_data(self):
         """Iter-535 (Codex follow-up to iter-534): the iter-534
         edge-match test only checks `p_h3[1:-1, 1:-1]` — the overlap
