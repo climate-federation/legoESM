@@ -1525,6 +1525,95 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         msg="Non-finite values in _corner_vorticity "
                             "output on random input.")
 
+    def test_corner_vorticity_interior_exact_circulation_formula(self):
+        """Iter-551 (Codex follow-up to iter-550): the iter-550 tests
+        only exercised the ZERO-FLOW case (vort == f_corner).  A
+        refactor that silently changed the CIRCULATION formula on
+        non-zero flows — wrong sign, wrong stencil weights, swapped
+        dxc/dyc, or skewed rarea_c — would leave the zero-flow
+        invariant intact and pass iter-550's lock.
+
+        This test pins the EXACT circulation formula at INTERIOR
+        corners (indices [1, n-1] along each axis, where the linear-
+        extrapolation override at lines 1112-1115 does NOT reach).
+        On a random non-zero (uc, vc) pair with `use_duogrid=True`,
+        assert:
+
+          vort_abs(f, i, j) = f_corner(f, i, j) + (1/area_c) * (
+              fx_circ(f, i, j-1) - fx_circ(f, i, j)       # x-edge diff
+              - fy_circ(f, i-1, j) + fy_circ(f, i, j))    # y-edge diff
+
+        where `fx_circ = uc * dxc` and `fy_circ = vc * dyc`.
+
+        Exercises the actual Fortran `sw_core.F90:378-408` circulation
+        form with the correct sign convention.  Catches refactors
+        that flip a sign, swap dxc/dyc, or drop a term.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(1551)
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+
+        out = np.asarray(
+            _corner_vorticity(uc, vc, cdgrid, use_duogrid=True),
+            dtype=np.float64)
+
+        # Reproduce the expected circulation at INTERIOR corners.
+        # `fx_circ` has shape (6, n+1, n): axis 1 is the corner row,
+        # axis 2 is the cell column.  For corner (i, j) at the face
+        # with i,j in [1, n-1] (interior), we use fx_circ[i, j-1] and
+        # fx_circ[i, j], and fy_circ[i-1, j] and fy_circ[i, j].
+        dxc = np.asarray(cdgrid.dxc, dtype=np.float64)  # (6, n+1, n)
+        dyc = np.asarray(cdgrid.dyc, dtype=np.float64)  # (6, n, n+1)
+        uc_np = np.asarray(uc, dtype=np.float64)
+        vc_np = np.asarray(vc, dtype=np.float64)
+
+        fx_circ = uc_np * dxc   # (6, n+1, n)
+        fy_circ = vc_np * dyc   # (6, n, n+1)
+
+        # Interior corners: i in [1, n-1], j in [1, n-1].
+        # Expected: vort = fx_circ[i, j-1] - fx_circ[i, j]
+        #                  - fy_circ[i-1, j] + fy_circ[i, j]
+        i_int = slice(1, n)   # corner rows
+        j_int = slice(1, n)   # corner cols
+        expected_circ = (
+            fx_circ[:, i_int, 0:n-1]      # fx_circ[i, j-1] for j in [1, n-1]
+            - fx_circ[:, i_int, 1:n]      # fx_circ[i, j]   for j in [1, n-1]
+            - fy_circ[:, 0:n-1, j_int]    # fy_circ[i-1, j] for i in [1, n-1]
+            + fy_circ[:, 1:n, j_int]      # fy_circ[i, j]   for i in [1, n-1]
+        )
+        rarea_c = 1.0 / np.asarray(cdgrid.area_corner, dtype=np.float64)
+        f_corner = np.asarray(cdgrid.f_corner, dtype=np.float64)
+        expected_vort = (
+            f_corner[:, i_int, j_int]
+            + rarea_c[:, i_int, j_int] * expected_circ
+        )
+
+        actual = out[:, i_int, j_int]
+        max_diff = float(np.max(np.abs(actual - expected_vort)))
+        rtol_scale = float(np.max(np.abs(expected_vort)))
+        # Tolerance scales with magnitude; require to ~1e-10 relative.
+        self.assertLess(
+            max_diff, 1e-10 * max(1.0, rtol_scale),
+            msg=(f"Interior `_corner_vorticity` output differs from "
+                 f"the Fortran circulation formula "
+                 f"`f_corner + (1/area_c)*(fx[j-1] - fx[j] - fy[i-1] "
+                 f"+ fy[i])` by {max_diff:.3e} on random input.  "
+                 f"Expected magnitude ~{rtol_scale:.3e}.  A sign "
+                 f"flip, dxc/dyc swap, or dropped term in the "
+                 f"circulation sum would fire this assertion.  If "
+                 f"the refactor is intentional, UPDATE this test "
+                 f"with the new formula."))
+
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
         corners against the Fortran Formula

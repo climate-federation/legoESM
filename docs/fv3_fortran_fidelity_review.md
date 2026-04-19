@@ -168,6 +168,44 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-551 (2026-04-19)**: addressed Codex stop-time review of
+  iter-550: "the new `_corner_vorticity` tests do not actually lock
+  the implementation".
+
+  Iter-550's three tests exercised only (a) zero-flow → f_corner,
+  (b) non-duogrid zero-flow → f_corner, and (c) shape/finiteness
+  on random input.  A refactor that flipped a sign in the
+  circulation sum, swapped `dxc`/`dyc`, dropped a term, or skewed
+  `rarea_c` would LEAVE zero-flow → f_corner intact (because every
+  term in the circulation is zero) and keep shape/finiteness, so
+  iter-550's lock would pass while production output is wrong.
+
+  Iter-551 adds
+  `test_corner_vorticity_interior_exact_circulation_formula`:
+    - Generates random `uc, vc` with non-zero values on a duogrid
+      n=8 cdgrid.
+    - At INTERIOR corners (`i, j ∈ [1, n-1]`, where the line 1112-
+      1115 linear-extrapolation override does not reach), asserts
+      the output EXACTLY matches Fortran's `sw_core.F90:378-408`
+      circulation formula:
+        `vort = f_corner + (1/area_c) * (fx(i,j-1) - fx(i,j)
+                 - fy(i-1,j) + fy(i,j))`
+      where `fx = uc*dxc`, `fy = vc*dyc`.
+    - Tolerance: `1e-10 * max(1, magnitude)` — catches relative
+      errors down to machine precision.
+
+  **Sanity-checked**: flipped the `fy_pad` sign in the circulation
+  sum (lines 1117-1119).  The new iter-551 test correctly fires
+  with `max diff 7.279e-05 vs expected magnitude 1.628e-04` (~45%
+  relative error, 7e5× above the 1e-10 threshold).  Meanwhile the
+  iter-550 zero-flow tests STILL PASS (as expected — a sign flip
+  doesn't affect the zero-flow invariant).  This is precisely the
+  regression class Codex identified.  Restored production code;
+  all 4 corner_vorticity tests pass.
+
+  No production-path numerical changes.  60/60 tests pass in
+  `test_cdgrid_fv3_regression.py` (59 prior + 1 new).
+
 - **iter-550 (2026-04-19)**: regression lock for `_corner_vorticity`
   (previously untested).
 
