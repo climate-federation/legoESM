@@ -168,6 +168,42 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-542 (2026-04-19)**: documented and locked the Python PPM
+  limiter divergence from Fortran FV3 ``mord``/``iord`` variants.
+
+  Codex fidelity audit: Python `_ppm_reconstruct_1d`
+  (`src/legoesm/core/operators_cdgrid.py:156-175`) implements the
+  TEXTBOOK Colella-Woodward 1984 limiter (flatten at extrema, clip
+  at overshoot).  Fortran `tp_core.F90:378-610` offers a family of
+  limiters selected by the caller's ``mord``/``iord`` integer:
+    - ``mord == 3``: smt5/smt6 smoothness detector
+    - ``mord == 4``: hi5/hi6 combined detector
+    - ``iord == 8``: monotonicity via ``dm`` slopes (FV3 default
+      for mass/momentum)
+    - ``iord == 9, 13``: calls ``pert_ppm`` (positive definite)
+    - ``iord == 10``: Lin/pmp-lac limiter (FV3 default for tracers)
+
+  Production FV3 uses ``hord_mt = hord_dp = hord_tm = 8`` and
+  ``hord_tr = 10`` by default (per `fv_arrays.F90` defaults).
+  Python's classic CW does not map 1:1 to any of these.  Porting
+  ``iord == 8`` is the narrowest FV3-faithful fix, but is a
+  cross-cutting numerics change requiring Williamson-1/2/5 +
+  cosine-bell + DCMIP advection tests to validate.  Deferred.
+
+  Iter-542 adds `TestPpmLimiterAtSmoothExtremum` with two tests:
+    (a) `test_cw_limiter_flattens_at_smooth_extremum`: on the
+        stencil `[1, 2, 3, 2, 1]` at cell i=2 (local max), asserts
+        `q_L = q_R = 3.0` (classic CW flattening).  Locks the
+        current behaviour so any future refactor that silently
+        changes the limiter class is detected.
+    (b) `test_cw_limiter_does_not_implement_fortran_smt5_detector`:
+        AST-asserts `smt5` / `smt6` symbol names are absent from
+        `_ppm_reconstruct_1d` -- explicit evidence that Fortran's
+        smoothness detector is NOT ported.
+
+  Both tests have explicit "update, don't delete" comments for the
+  future FV3-faithful port.  No production-path numerical changes.
+
 - **iter-541 (2026-04-19)**: behavioral lock on the iter-518
   convention-asymmetry finding.
 

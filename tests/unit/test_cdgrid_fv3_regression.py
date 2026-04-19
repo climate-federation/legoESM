@@ -2392,6 +2392,110 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
                     f"y).  Source: `{source_line}`.")
 
 
+class TestPpmLimiterAtSmoothExtremum(unittest.TestCase):
+    """Iter-542: lock the current Python `_ppm_reconstruct_1d` limiter
+    behaviour at a SMOOTH extremum stencil and document the divergence
+    from Fortran FV3 ``mord``/``iord`` variants.
+
+    Fortran `tp_core.F90:378-610` implements a family of limiters:
+
+      - ``mord == 3``: smoothness-gated flux (smt5/smt6 detector based
+        on ``abs(b0) < abs(bl-br)``), line 415-441.
+      - ``mord == 4``: combined hi5/hi6 smoothness, line 443-471.
+      - ``iord == 8``: monotonicity constraint via ``dm`` slopes (line
+        548-553).
+      - ``iord == 9`` / ``iord == 13``: calls ``pert_ppm`` for positive
+        definite constraint (line 610) after any of the above.
+      - ``iord == 10``: Lin/pmp-lac limiter (line 554-572).
+
+    Python `_ppm_reconstruct_1d` in
+    `src/legoesm/core/operators_cdgrid.py:156-175` implements the
+    TEXTBOOK Colella-Woodward 1984 limiter (flatten at extrema, clip at
+    overshoot).  This does NOT map 1:1 to any single Fortran
+    ``mord``/``iord``, and the production FV3 default
+    (``hord_mt=hord_dp=hord_tm=8``, ``hord_tr=10``) is different.
+
+    This test LOCKS the current CW behaviour on a specific stencil so
+    any future refactor that silently switches to a different limiter
+    class is caught.  A genuine FV3-faithful limiter port would
+    intentionally FAIL this test — at which point it should be
+    UPDATED (not deleted) with the new expected values from the new
+    limiter.
+
+    Open follow-up: port the production ``hord_mt=8`` limiter
+    (``iord==8`` in `tp_core.F90:548-553`) when a time budget is
+    available for the cross-cutting validation it requires.
+    """
+
+    def test_cw_limiter_flattens_at_smooth_extremum(self):
+        """Classic CW behaviour: at a local maximum cell, both face
+        values collapse to the cell value (parabola -> flat).
+
+        Stencil: ``q = [1, 2, 3, 2, 1]`` -- cell i=2 is a strict local
+        max.  For the CW limiter implemented in Python, the face values
+        at cell i=2 must EQUAL ``q[2] = 3`` (flattened).
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _ppm_reconstruct_1d
+
+        # 1-D stencil with a hump at i=2
+        q_1d = jnp.array([1.0, 2.0, 3.0, 2.0, 1.0])
+        # Broadcast into a (1, N) array, reconstruct along axis=1
+        q = q_1d[None, :]                         # (1, 5)
+        q_L, q_R = _ppm_reconstruct_1d(q, axis=1)
+
+        # The hump is at i=2 (q=3, neighbours are 2 both sides).
+        # For the Python CW limiter, is_extremum at i=2 should fire
+        # (delta = (q_R - q) * (q - q_L)), flattening q_L = q_R = 3.
+        self.assertAlmostEqual(
+            float(q_L[0, 2]), 3.0, places=10,
+            msg=(f"CW limiter must flatten q_L to cell value at local "
+                 f"max; got q_L[2] = {float(q_L[0, 2]):.6f}, expected 3.0. "
+                 f"If this fires, the limiter behaviour changed -- see "
+                 f"iter-542 note in docs/fv3_fortran_fidelity_review.md "
+                 f"and verify the new behaviour matches Fortran "
+                 f"`tp_core.F90:548-610` (iord==8/9/10) or confirm it "
+                 f"is an intentional CW variant."))
+        self.assertAlmostEqual(
+            float(q_R[0, 2]), 3.0, places=10,
+            msg=(f"CW limiter must flatten q_R to cell value at local "
+                 f"max; got q_R[2] = {float(q_R[0, 2]):.6f}, expected 3.0."))
+
+    def test_cw_limiter_does_not_implement_fortran_smt5_detector(self):
+        """Iter-542: explicit source-level evidence that the Python
+        limiter does NOT implement Fortran's smt5/smt6 smoothness
+        detector used in ``mord==3`` (tp_core.F90:421-424).  If someone
+        adds this detector, this test must be UPDATED -- not deleted.
+        """
+        import pathlib
+        root = (pathlib.Path(__file__).resolve()
+                .parent.parent.parent)
+        src = (root / "src/legoesm/core/operators_cdgrid.py").read_text()
+        # smt5 / smt6 would appear as symbol names if the detector
+        # were ported.  Check they do NOT appear in the PPM function.
+        import ast
+        tree = ast.parse(src)
+        ppm_src = None
+        for node in tree.body:
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == "_ppm_reconstruct_1d"):
+                ppm_src = ast.unparse(node)
+                break
+        self.assertIsNotNone(ppm_src,
+                             "Could not find `_ppm_reconstruct_1d`.")
+        self.assertNotIn(
+            "smt5", ppm_src,
+            msg=("If Fortran smt5 was ported, this test must be "
+                 "UPDATED with the new expected limiter behaviour "
+                 "-- not deleted.  See iter-542."))
+        self.assertNotIn(
+            "smt6", ppm_src,
+            msg=("If Fortran smt6 was ported, this test must be "
+                 "UPDATED with the new expected limiter behaviour "
+                 "-- not deleted.  See iter-542."))
+
+
 class TestW2BoundaryErrorBudget(unittest.TestCase):
     """Iter-511 / iter-512: lock the post-iter-505 Williamson 2 error
     budget on the CANONICAL production harness used by
