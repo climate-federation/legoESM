@@ -1893,12 +1893,39 @@ All FV3 duogrid-branch operator formulas are implemented and verified against th
 3. ~~**d_sw3 scalar KE sync vs Fortran BGRID_NE component sync**~~ **RESOLVED (iter-103)** — replaced the scalar-KE sync fallback with a Fortran-faithful BGRID_NE component sync via the geographic-frame helper `synchronize_bgrid_ne_corner_geo` (iter-102).  Now `ubb` and `vbbtemp` are synced BEFORE the KE is formed, matching `dyn_core.F90:968-1019`.  The geo-frame approach handles all 24 seams (reversed + non-reversed + cross-axis) and the 8 cube vertices via the existing scalar-corner infrastructure.
 4. **Non-duogrid `_d2a2c_vect` corner 2x2 solve** — ~~4-point adjacent-strip~~ PORTED (iter 68).  Fortran sw_core.F90:739-811 four corner systems remain unimplemented; they require halo i-columns / j-rows (vt(0,j), ut(i,0) etc.) that Python's interior-only layout does not expose. Affects non-duogrid FB path (experimental, unstable anyway).
 
-### Evaluation metrics (post iter-66 follow-up #3)
-- Williamson 2: L2=1.53e-03, Linf=4.07e-03 (C36, 1 day)
-- Williamson 5: mass drift=1.42e-05 (C36, 1 day)
-- Cosine bell: L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01
-- Ocean rest state: all cubed-sphere variants machine-precision
-- 124 regression + audit-harness tests pass
+### Evaluation metrics (post iter-505 axis fix; refreshed iter-527)
+
+**iter-505** fixed a major x-direction PPM axis bug in
+`cgrid_mass_flux_divergence` (and iter-506 the same in
+`_cgrid_fct_fluxes_2d`).  The fix is locked by 3 unit-level
+regression tests in `TestCgridMassFluxDivergenceXAxis`, 2 polar-
+symmetry tests in `TestFv3SwTendenciesPolarFaceSymmetry`, and 3
+end-to-end W2 tests in `TestW2BoundaryErrorBudget` (all canonical
+C36 dt=300s 1d setup).
+
+Current canonical metrics (C36, dt=300s, 1 day, full canonical
+config: hyperdiff + div_damp + boundary_fix + fix_mass):
+
+| Quantity                        | Pre-iter-505 | Post-iter-505 | Change |
+| ------------------------------- | ------------ | ------------- | ------ |
+| Williamson 2 L2                 | 1.53e-3      | **2.42e-4**   | 6.3× ↓ |
+| Williamson 2 Linf               | 4.07e-3      | **1.83e-3**   | 2.2× ↓ |
+| Williamson 2 max\|v_ll\| (lat-lon) | 0.557 m/s | **0.303 m/s** | 1.8× ↓ |
+| Williamson 5 mass drift          | 1.42e-5      | **1.90e-5**   | within order |
+| Cosine bell L1                  | 1.20e-1      | **1.20e-1**   | unchanged |
+| Cosine bell L2                  | 1.17e-1      | **1.17e-1**   | unchanged |
+| Cosine bell Linf                | 1.23e-1      | **1.23e-1**   | unchanged |
+| Cosine bell h_min               | (clipped)    | **0** (clipped) | invariant |
+| Ocean rest state                | machine prec | **machine prec** | invariant |
+
+Cosine bell metrics unchanged because its path uses
+`transport_step` (Lin-Rood) directly, not `cgrid_mass_flux_divergence`
+(see iter-525 discovery).  W5 mass drift slightly larger because
+the iter-505 fix increased the high-order PPM correction; the
+mass fixer absorbs it without functional impact.
+
+Test count: **230/230 pass** across `test_scale_halo.py`,
+`test_cdgrid_fv3_regression.py`, `test_duogrid.py`, `test_cdgrid.py`.
 
 ---
 
