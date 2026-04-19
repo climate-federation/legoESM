@@ -2751,6 +2751,64 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
                 f"DELETED at this boundary, or the gate may have "
                 f"been moved.")
 
+        # --- Iter-589 (Codex follow-up): zero-sign cases.
+        # The `jnp.where(ua > 0, ...)` branch uses STRICT
+        # inequality, so ua==0 takes the "else" branch (no
+        # override applied at west/south; override applied at
+        # east/north where condition is `ua <= 0`).  A refactor
+        # to `>= 0` would silently apply the west/south override
+        # even at zero-wind cells.
+        # Build a second input where ua and va are exactly zero
+        # at all boundaries, run under duogrid=False, and verify
+        # the west/south boundary cells equal PURE UPWIND (not
+        # the sin_sg/cos_sg override).
+        ua_zero_np = np.zeros((6, n, n), dtype=np.float64)
+        va_zero_np = np.zeros((6, n, n), dtype=np.float64)
+        ua_zero = jnp.asarray(ua_zero_np)
+        va_zero = jnp.asarray(va_zero_np)
+
+        ke_u_zero, ke_v_zero = _ke_upwind(
+            uc, vc, ua_zero, va_zero, u_d, v_d, cdgrid,
+            use_duogrid=False)
+        ke_u_zero_np = np.asarray(ke_u_zero)
+        ke_v_zero_np = np.asarray(ke_v_zero)
+
+        # With ua==0 at i=0:
+        #   line 728: ke_u[:, 0, :] = uc[:, 1, :]  (downwind branch)
+        #   line 736-737: jnp.where(0 > 0, ke_bdy_l, ke_u)
+        #                 = ke_u = uc[:, 1, :]  (no override)
+        # So ke_u[:, 0, :] should equal uc[:, 1, :].
+        # A `>= 0` refactor would instead give ke_bdy_l.
+        expected_ke_u_0_zero = uc_np[:, 1, :]  # downwind (ua not > 0)
+        diff_w = float(np.max(np.abs(
+            ke_u_zero_np[:, 0, :] - expected_ke_u_0_zero)))
+        # With ua==0 at i=n-1:
+        #   line 728: ke_u[:, n-1, :] = uc[:, n, :]  (downwind)
+        #   line 740-741: jnp.where(0 > 0, ke_u, ke_bdy_r)
+        #                 = ke_bdy_r (override fires)
+        # So ke_u[:, n-1, :] SHOULD equal ke_bdy_r (override
+        # triggers because `ua > 0` is False at zero, going to
+        # the override branch).
+        expected_ke_u_nm1_zero = (
+            uc_np[:, n, :] * sg_np[:, n - 1, :, 2]
+            + v_d_np[:, n, :] * cg_np[:, n - 1, :, 2])
+        diff_e = float(np.max(np.abs(
+            ke_u_zero_np[:, n - 1, :] - expected_ke_u_nm1_zero)))
+
+        assert diff_w < 1e-5, (
+            f"Under duogrid=False with ua=0, ke_u[:,0,:] "
+            f"deviates from PURE UPWIND (uc[:,1,:]) by "
+            f"{diff_w:.3e}.  The west override should NOT fire "
+            f"at ua=0 because the condition is `ua > 0` "
+            f"(strict).  A refactor to `>= 0` would silently "
+            f"apply the override at zero-wind cells.")
+        assert diff_e < 1e-5, (
+            f"Under duogrid=False with ua=0, ke_u[:,n-1,:] "
+            f"deviates from ke_bdy_r (east override) by "
+            f"{diff_e:.3e}.  The east branch uses `ua <= 0` "
+            f"(via jnp.where(ua > 0, interior, override)), so "
+            f"ua=0 SHOULD trigger the override.")
+
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
         override in `cubed_sphere_cdgrid.py` must remain inside the

@@ -197,6 +197,39 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-589 (2026-04-20)**: addressed Codex stop-time review of
+  iter-588: "`_ke_upwind` is not comprehensively locked because
+  the zero-sign boundary case is untested".
+
+  Iter-588 used constant-sign `ua`/`va` (±1) to trigger the
+  override.  The `jnp.where(ua > 0, ke_bdy_l, ke_u)` branch
+  uses STRICT inequality; a refactor to `>= 0` would silently
+  fire the override at `ua = 0` cells.
+
+  Iter-589 adds zero-sign cases inside the same test:
+    - With ua = va = 0 at all boundaries:
+      * `ke_u[:, 0, :]` MUST equal pure upwind `uc[:, 1, :]`
+        (ua > 0 is False → override does NOT fire at west edge).
+      * `ke_u[:, n-1, :]` MUST equal `ke_bdy_r` (east branch
+        uses `jnp.where(ua > 0, ke_u, ke_bdy_r)`; at ua=0,
+        the else branch fires → override APPLIES at east edge).
+
+  **Sanity-checked**: changed the west-edge condition from
+  `ua[:, 0, :] > 0` to `>= 0`.  Test correctly fires with
+  diff 43.73 (ke_u at west boundary becomes ke_bdy_l instead
+  of pure upwind when ua=0).
+
+  All 5 Constraint #2 gates now locked against:
+    (a) gate removal (iter-581 AST)
+    (b) gate inversion (per-gate behavioral)
+    (c) body deletion (per-gate behavioral)
+    (d) body relocation (per-gate behavioral)
+    (e) dual-edge omission (iter-587)
+    (f) strict-vs-non-strict inequality drift (iter-589)
+
+  No production-path numerical changes.  107/107 tests pass in
+  `test_duogrid.py`.
+
 - **iter-588 (2026-04-20)**: extended the 4-mode behavioral lock
   pattern to the final Constraint #2 gate: `_ke_upwind`
   (fv3_sw_core.py:731).
