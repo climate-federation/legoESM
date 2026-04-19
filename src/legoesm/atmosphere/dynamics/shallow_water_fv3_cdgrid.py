@@ -67,7 +67,15 @@ class CDGridShallowWaterConfig(NamedTuple):
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0  # Biharmonic hyperdiffusion
-    div_damp: float = 0.0         # Divergence damping coefficient [m^2/s]
+    div_damp: float = 0.0         # Divergence damping coefficient [m^2/s].
+                                  # USED by the experimental-CSW path
+                                  # (fv3_csw_tendencies at fv3_sw_core.py:1344-
+                                  # 1350).  IGNORED by the FB chain
+                                  # (fv3_forward_backward_step / fv3_fb_sw_step)
+                                  # — the FB chain uses d_sw5 coefficients
+                                  # (d2_bg/dddmp/d4_bg/nord) below for its
+                                  # divergence damping.  See `_d_sw_native`
+                                  # docstring for the split.
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
