@@ -2439,6 +2439,130 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
                 f"requires the body to fire in the non-duogrid "
                 f"path.")
 
+    def test_vorticity_flux_legacy_overrides_gated_both_sides(self):
+        """Iter-585: four-mode behavioral lock for
+        `_vorticity_flux`'s two `if not use_duogrid:` gates
+        (fv3_sw_core.py:1156-1158 and 1162-1164).
+
+        Fortran `sw_core.F90:445-449 / 458-461` sets fy1 =
+        dt2*v (direct D-grid wind, no non-orthogonality
+        correction) at panel-edge interior cells for non-
+        duogrid grids.  Analogous for fx1 at j=0 / j=npy.
+
+        Under duogrid, fy1/fx1 should USE the non-orthogonality
+        correction formula everywhere (no panel-edge override).
+
+        Test checks BOTH sides:
+          - under use_duogrid=True: production fy1[:, 0, :] ==
+            corrected formula `(v_d - uc*cosa_u) / sina_u`
+            (not `v_d` directly).  Catches gate INVERSION.
+          - under use_duogrid=False: production fy1[:, 0, :]
+            == v_d[:, 0, :] exactly.  Catches BODY DELETION.
+
+        Symmetric checks for fx1.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import (
+            _vorticity_flux, _sina_u_v_from_sin_sg)
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(585)
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+        vort_abs = jnp.asarray(
+            rng.standard_normal((6, n + 1, n + 1)) * 0.001)
+
+        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+        cosa_u = np.asarray(cdgrid.cosa_u)
+        cosa_v = np.asarray(cdgrid.cosa_v)
+        sina_u_np = np.asarray(sina_u)
+        sina_v_np = np.asarray(sina_v)
+        eps = 1e-30
+
+        # Corrected formula (used everywhere under duogrid)
+        fy1_corrected = (
+            (np.asarray(v_d) - np.asarray(uc) * cosa_u)
+            / np.maximum(sina_u_np, eps))
+        fx1_corrected = (
+            (np.asarray(u_d) - np.asarray(vc) * cosa_v)
+            / np.maximum(sina_v_np, eps))
+
+        # --- Under-duogrid check: boundary cells use corrected formula ---
+        fy1_dg, _, fx1_dg, _ = _vorticity_flux(
+            v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid=True)
+        fy1_dg_np = np.asarray(fy1_dg)
+        fx1_dg_np = np.asarray(fx1_dg)
+
+        # fy1 at boundaries i=0 and i=n should match corrected formula
+        diff_fy1_0 = float(np.max(np.abs(
+            fy1_dg_np[:, 0, :] - fy1_corrected[:, 0, :])))
+        diff_fy1_n = float(np.max(np.abs(
+            fy1_dg_np[:, n, :] - fy1_corrected[:, n, :])))
+        assert diff_fy1_0 < 1e-10, (
+            f"Under duogrid=True, fy1[:, 0, :] deviates from "
+            f"corrected `(v_d - uc*cosa_u)/sina_u` by "
+            f"{diff_fy1_0:.3e}.  The panel-edge override "
+            f"(fy1 = v_d) is firing under duogrid — gate "
+            f"INVERTED.")
+        assert diff_fy1_n < 1e-10, (
+            f"Under duogrid=True, fy1[:, {n}, :] deviates from "
+            f"corrected formula by {diff_fy1_n:.3e}.")
+
+        diff_fx1_0 = float(np.max(np.abs(
+            fx1_dg_np[:, :, 0] - fx1_corrected[:, :, 0])))
+        diff_fx1_n = float(np.max(np.abs(
+            fx1_dg_np[:, :, n] - fx1_corrected[:, :, n])))
+        assert diff_fx1_0 < 1e-10, (
+            f"Under duogrid=True, fx1[:, :, 0] deviates from "
+            f"corrected formula by {diff_fx1_0:.3e}.  Gate "
+            f"INVERTED for fx1.")
+        assert diff_fx1_n < 1e-10, (
+            f"Under duogrid=True, fx1[:, :, {n}] deviates from "
+            f"corrected formula by {diff_fx1_n:.3e}.")
+
+        # --- Non-duogrid check: boundary cells use direct v_d/u_d ---
+        fy1_nd, _, fx1_nd, _ = _vorticity_flux(
+            v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid=False)
+        fy1_nd_np = np.asarray(fy1_nd)
+        fx1_nd_np = np.asarray(fx1_nd)
+
+        v_d_np = np.asarray(v_d)
+        u_d_np = np.asarray(u_d)
+
+        # fy1 boundaries should EQUAL v_d directly
+        diff_fy1_override_0 = float(np.max(np.abs(
+            fy1_nd_np[:, 0, :] - v_d_np[:, 0, :])))
+        diff_fy1_override_n = float(np.max(np.abs(
+            fy1_nd_np[:, n, :] - v_d_np[:, n, :])))
+        assert diff_fy1_override_0 < 1e-10, (
+            f"Under duogrid=False, fy1[:, 0, :] should equal "
+            f"v_d[:, 0, :] directly (panel-edge override), but "
+            f"differs by {diff_fy1_override_0:.3e}.  Override "
+            f"body may have been DELETED or moved outside the "
+            f"`if not use_duogrid:` block.")
+        assert diff_fy1_override_n < 1e-10, (
+            f"Under duogrid=False, fy1[:, {n}, :] should equal "
+            f"v_d[:, {n}, :] by {diff_fy1_override_n:.3e}.")
+
+        diff_fx1_override_0 = float(np.max(np.abs(
+            fx1_nd_np[:, :, 0] - u_d_np[:, :, 0])))
+        diff_fx1_override_n = float(np.max(np.abs(
+            fx1_nd_np[:, :, n] - u_d_np[:, :, n])))
+        assert diff_fx1_override_0 < 1e-10, (
+            f"Under duogrid=False, fx1[:, :, 0] should equal "
+            f"u_d[:, :, 0] by {diff_fx1_override_0:.3e}.")
+        assert diff_fx1_override_n < 1e-10, (
+            f"Under duogrid=False, fx1[:, :, {n}] should equal "
+            f"u_d[:, :, {n}] by {diff_fx1_override_n:.3e}.")
+
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
         override in `cubed_sphere_cdgrid.py` must remain inside the

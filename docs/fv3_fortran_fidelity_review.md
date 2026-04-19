@@ -197,6 +197,33 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-585 (2026-04-20)**: extended the 4-mode behavioral lock
+  pattern to `_vorticity_flux`'s two `if not use_duogrid:`
+  gates (fv3_sw_core.py:1156-1158 and 1162-1164).
+
+  Added `test_vorticity_flux_legacy_overrides_gated_both_sides`:
+    - Under duogrid=True: boundary fy1[:, 0, :] and fy1[:, n, :]
+      (and fx1 symmetric) MUST equal the corrected formula
+      `(v_d - uc*cosa_u)/sina_u` — catches gate INVERSION.
+    - Under duogrid=False: boundary fy1 and fx1 MUST equal
+      direct v_d / u_d (panel-edge override) — catches body
+      DELETION.
+
+  Two-stage sanity check:
+    (i) Body deletion (`if not use_duogrid: pass`): non-duogrid
+        check fires with diff 14.75 (fy1 doesn't equal v_d).
+    (ii) Gate inversion (`if use_duogrid:` with same body):
+         under-duogrid check fires with diff 14.75 (fy1
+         clobbered to v_d in duogrid mode).
+
+  Combined with iter-581 AST lock: `_vorticity_flux` now has
+  comprehensive coverage against gate removal, inversion, body
+  relocation, and body deletion — matching iter-584's pattern
+  for `_corner_vorticity`.
+
+  No production-path numerical changes.  106/106 tests pass in
+  `test_duogrid.py` (105 prior + 1 new).
+
 - **iter-584 (2026-04-20)**: addressed Codex stop-time review of
   iter-583: "iter-583 still does not lock the correction-body
   deletion case".
