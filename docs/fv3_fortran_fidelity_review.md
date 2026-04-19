@@ -168,6 +168,43 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-556 (2026-04-19)**: addressed Codex stop-time review of
+  iter-554/555: "attenuation test still does not lock the required
+  `0.25` factor".
+
+  Iter-555's rms ratio bound `0.15 < rms_1/rms_2 < 0.45` caught
+  the headline-grabbing 0.5× / 0.05× factor changes but still
+  passed small refactors like `0.25 → 0.30` (ratio ~0.365) or
+  `0.25 → 0.20` (ratio ~0.243).  Not a real "exact 0.25" lock.
+
+  Iter-556 approach: reproduce the full `_divergence_corner_duo`
+  formula in **pure numpy float32** (matching jax's float32
+  production precision BIT-FOR-BIT), then assert production
+  output equals `float32(0.25) * raw_reproduction` at face-
+  adjacent cells EXACTLY (0.0 diff, strict equality).
+
+  Key implementation detail: all intermediate multipliers (0.25,
+  0.5) are cast to `np.float32`, and the reproduction uses
+  `mode='edge'` padding identical to production.  With this
+  float32 matching, the diff on production is EXACTLY 0.0 (not
+  "approximately zero" with a tolerance — genuinely bit-exact).
+
+  **Sanity-checked**: 0.25 → 0.30 (20% change) produces diff
+  `2.709e-07 ≠ 0.0` at the i=1 strip, firing the exact-equality
+  assertion.  This is the smallest factor change one could
+  reasonably expect; larger changes (0.5, 1.0, 0.0) produce
+  proportionally larger diffs that also fire the same assertion.
+
+  Two checks now:
+    - Check 1: interior cells (not face-adjacent, not boundary)
+      match raw reproduction bit-exactly.
+    - Check 2: face-adjacent cells (i=1, i=n-1, j=1, j=n-1 strips,
+      excluding the 4 double-attenuated corners) match
+      `0.25 × raw` bit-exactly.
+
+  Restored production code; both tests pass.  63/63 tests pass in
+  `test_cdgrid_fv3_regression.py`.
+
 - **iter-555 (2026-04-19)**: addressed Codex stop-time review of
   iter-554: "the new regression test does not actually lock the
   required `0.25` attenuation".

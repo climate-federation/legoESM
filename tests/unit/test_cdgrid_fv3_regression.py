@@ -1818,31 +1818,24 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"{float(np.max(np.abs(divg_d[:, :, n]))):.3e}.")
 
     def test_divergence_corner_duo_attenuation_factor(self):
-        """Iter-555 (Codex follow-up to iter-554): tighten the rms
-        ratio bound to genuinely lock the 0.25 attenuation factor.
+        """Iter-556 (Codex follow-up to iter-554/555): lock the EXACT
+        0.25 attenuation factor via float32 reproduction of the
+        formula.
 
-        Iter-554 used ``rms_1 < 0.6 * rms_2`` which Codex flagged as
-        too loose — e.g. a refactor from 0.25 to 0.5 would double
-        rms_1 but might still fall under 0.6 * rms_2 depending on
-        the raw ratio between i=1 and i=2 rows.
+        Iter-555's ratio bound (0.15 < rms_1/rms_2 < 0.45) still
+        passed small refactors like 0.25 → 0.30 (ratio ~0.365) or
+        0.25 → 0.20 (ratio ~0.243).  Codex correctly flagged this.
 
-        Empirically on seed 2554: production (0.25 factor) gives
-        ``rms_1 / rms_2 = 0.304``.  If the factor doubles to 0.5
-        without changing the raw formula, rms_1 doubles → ratio
-        0.608.  A tightened threshold of ``0.45`` catches any
-        factor change ≥ ~50% relative (0.25 → 0.375 gives
-        0.304 * 1.5 = 0.456 > 0.45, fires).  Production factor 0.25
-        gives 0.304 < 0.45, passes.
+        Iter-556 approach: reproduce `_divergence_corner_duo`'s full
+        formula in **pure numpy float32** (to exactly match jax's
+        float32 production precision), then compare production
+        output to `0.25 * reproduction` at face-adjacent cells.
+        With float32-matching reproduction, the diff is BIT-FOR-BIT
+        ZERO on production code, and any factor change produces a
+        100% relative diff that fires the 1e-10 tolerance.
 
-        This is not as strong as a bit-for-bit pin, but with
-        float32 grid metrics a bit-for-bit numpy reproduction has
-        ~10-30% relative drift at these scales; the rms-ratio
-        approach uses production-internal precision for both
-        numerator and denominator, so the comparison is stable.
-
-        The threshold 0.45 is set specifically to catch the failure
-        mode Codex identified (factor doubling to 0.5), verified
-        by two-stage sanity in the commit message.
+        Key detail: all intermediate multipliers (0.25, 0.5) are
+        cast to np.float32 to match jax's float32 behaviour.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -1855,48 +1848,117 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         rng = np.random.default_rng(2554)
-        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
-        ua = jnp.asarray(rng.standard_normal((6, n, n)))
-        va = jnp.asarray(rng.standard_normal((6, n, n)))
+        # Cast inputs to float32 so production and numpy
+        # reproduction operate at identical precision.
+        u_d_f32 = rng.standard_normal((6, n, n + 1)).astype(np.float32)
+        v_d_f32 = rng.standard_normal((6, n + 1, n)).astype(np.float32)
+        ua_f32 = rng.standard_normal((6, n, n)).astype(np.float32)
+        va_f32 = rng.standard_normal((6, n, n)).astype(np.float32)
 
-        divg_d = np.asarray(
-            _divergence_corner_duo(u_d, v_d, ua, va, cdgrid),
-            dtype=np.float64)
+        prod = np.asarray(
+            _divergence_corner_duo(
+                jnp.asarray(u_d_f32), jnp.asarray(v_d_f32),
+                jnp.asarray(ua_f32), jnp.asarray(va_f32), cdgrid))
 
-        i1_rms = float(np.sqrt(np.mean(divg_d[:, 1, 2:n-1] ** 2)))
-        i2_rms = float(np.sqrt(np.mean(divg_d[:, 2, 2:n-1] ** 2)))
-        ratio = i1_rms / i2_rms
+        # --- Reproduce the RAW (pre-attenuation) formula in
+        # float32, mirroring fv3_sw_core.py:847-909. ---
+        sg = np.asarray(cdgrid.sin_sg).astype(np.float32)
+        cg = np.asarray(cdgrid.cos_sg).astype(np.float32)
+        dxc = np.asarray(cdgrid.dxc).astype(np.float32)
+        dyc = np.asarray(cdgrid.dyc).astype(np.float32)
+        rarea_c = np.asarray(cdgrid.rarea_c).astype(np.float32)
 
-        # Threshold 0.45: catches factor doubling (0.25 → 0.5 pushes
-        # ratio to ~0.608 which fails).  Production factor 0.25
-        # gives 0.304 which passes with margin 0.146.  A weaker
-        # factor change like 0.25 → 0.3 (20% increase) would give
-        # ratio 0.365 and still pass — but such small changes are
-        # unlikely and would probably not be flagged as "removed
-        # attenuation" in any case.
-        self.assertLess(
-            ratio, 0.45,
-            msg=(f"rms(divg_d[i=1]) / rms(divg_d[i=2]) = "
-                 f"{ratio:.4f} >= 0.45.  Under the 0.25 attenuation "
-                 f"factor this ratio should be ~0.30 (empirical, "
-                 f"seed 2554).  A ratio > 0.45 indicates the "
-                 f"attenuation factor was increased above ~0.375 "
-                 f"(50% larger than 0.25) or removed.  Fortran "
-                 f"sw_core.F90:2437-2440 requires 0.25.  If a "
-                 f"refactor intentionally changed the factor, "
-                 f"UPDATE this test with the new expected ratio."))
+        ua_pad = np.pad(
+            ua_f32, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        va_pad = np.pad(
+            va_f32, [(0, 0), (0, 0), (1, 1)], mode='edge')
 
-        # Also assert the ratio is not TOO small — catches a
-        # "attenuation became 0.05 or 0.0" regression (which the
-        # iter-554 < 0.6 bound would also miss).  Empirical 0.304,
-        # so require ratio > 0.15.
-        self.assertGreater(
-            ratio, 0.15,
-            msg=(f"rms(divg_d[i=1]) / rms(divg_d[i=2]) = "
-                 f"{ratio:.4f} <= 0.15.  Attenuation factor may "
-                 f"have been reduced below 0.125 (half of 0.25) or "
-                 f"the face-adjacent row is being zeroed."))
+        cos_N = np.pad(
+            cg[:, :, :, 3], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        cos_S = np.pad(
+            cg[:, :, :, 1], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        sin_N = np.pad(
+            sg[:, :, :, 3], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        sin_S = np.pad(
+            sg[:, :, :, 1], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        cos_sum_u = cos_N[:, :, :-1] + cos_S[:, :, 1:]
+        sin_sum_u = sin_N[:, :, :-1] + sin_S[:, :, 1:]
+
+        uf = (
+            u_d_f32
+            - np.float32(0.25)
+            * (va_pad[:, :, :-1] + va_pad[:, :, 1:])
+            * cos_sum_u
+        ) * dyc * np.float32(0.5) * sin_sum_u
+
+        cos_E = np.pad(
+            cg[:, :, :, 2], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        cos_W = np.pad(
+            cg[:, :, :, 0], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        sin_E = np.pad(
+            sg[:, :, :, 2], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        sin_W = np.pad(
+            sg[:, :, :, 0], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        cos_sum_v = cos_E[:, :-1, :] + cos_W[:, 1:, :]
+        sin_sum_v = sin_E[:, :-1, :] + sin_W[:, 1:, :]
+
+        vf = (
+            v_d_f32
+            - np.float32(0.25)
+            * (ua_pad[:, :-1, :] + ua_pad[:, 1:, :])
+            * cos_sum_v
+        ) * dxc * np.float32(0.5) * sin_sum_v
+
+        vfp = np.pad(
+            vf, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        ufp = np.pad(
+            uf, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        raw_divg = (
+            vfp[:, :, :-1] - vfp[:, :, 1:]
+            + ufp[:, :-1, :] - ufp[:, 1:, :]
+        ) * rarea_c
+
+        # --- Check 1: interior (i, j in [2, n-2]) matches raw ---
+        i_int = slice(2, n - 1)
+        j_int = slice(2, n - 1)
+        interior_diff = float(np.max(np.abs(
+            prod[:, i_int, j_int].astype(np.float32)
+            - raw_divg[:, i_int, j_int])))
+        self.assertEqual(
+            interior_diff, 0.0,
+            msg=(f"Interior divg_d output differs from float32 "
+                 f"reproduction by {interior_diff:.3e}.  The "
+                 f"reproduction mirrors fv3_sw_core.py:847-909 and "
+                 f"should match production bit-for-bit.  If the "
+                 f"production formula changed, UPDATE this "
+                 f"reproduction to match."))
+
+        # --- Check 2: at face-adjacent cells, prod == 0.25 * raw ---
+        # Exclude the 8 "double-attenuated" corners (i ∈ {1, n-1} AND
+        # j ∈ {1, n-1}) where BOTH row and column attenuation apply
+        # (so prod = 0.25 * 0.25 * raw).
+        # Test strips: (i=1, j=2..n-2), (i=n-1, j=2..n-2),
+        #               (i=2..n-2, j=1), (i=2..n-2, j=n-1).
+        strips = [
+            ("i=1",   (slice(None), 1,      slice(2, n - 1))),
+            ("i=n-1", (slice(None), n - 1,  slice(2, n - 1))),
+            ("j=1",   (slice(None), slice(2, n - 1),  1)),
+            ("j=n-1", (slice(None), slice(2, n - 1),  n - 1)),
+        ]
+        for label, slc in strips:
+            prod_vals = prod[slc].astype(np.float32)
+            expected = np.float32(0.25) * raw_divg[slc]
+            diff = float(np.max(np.abs(prod_vals - expected)))
+            self.assertEqual(
+                diff, 0.0,
+                msg=(f"{label} face-adjacent strip: prod != "
+                     f"0.25 * raw (float32 bit-exact), diff = "
+                     f"{diff:.3e}.  Production attenuation factor "
+                     f"is NOT exactly 0.25.  Fortran sw_core.F90:"
+                     f"2437-2440 requires 0.25.  A refactor that "
+                     f"changed the factor to any other value "
+                     f"(including 0.2, 0.3, 0.5, 0) produces "
+                     f"non-zero diff.  UPDATE if intentional."))
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
