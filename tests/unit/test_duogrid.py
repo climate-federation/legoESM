@@ -922,21 +922,39 @@ class TestFluxSyncCallSitesWired:
                 if cls._call_is_in_direct_body(func_node, node):
                     yield node
 
-    @staticmethod
-    def _call_is_in_direct_body(func_node, call_node):
-        """Verify ``call_node`` sits inside ``func_node`` but not inside
-        any nested function/lambda/generator expression within it."""
+    # iter-504 (Codex): every AST node that introduces a nested scope
+    # where a `Call` could sit without being part of the function's
+    # straight-line runtime flow is a potential escape hatch.  A
+    # refactor could park the live sync inside a
+    # `(synchronize_cgrid_fluxes(...) for _ in ())` generator
+    # expression that is never iterated, or inside a list
+    # comprehension guarded by `if False`.  The test would pass but
+    # the sync would never fire.  Reject calls inside any of these
+    # nested scopes.
+
+    @classmethod
+    def _nested_scope_types(cls):
         import ast
+        return (
+            ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+            ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp,
+        )
+
+    @classmethod
+    def _call_is_in_direct_body(cls, func_node, call_node):
+        """Verify ``call_node`` sits inside ``func_node`` but not inside
+        any nested scope (function/lambda/comprehension/generator)
+        within it."""
+        import ast
+        nested_types = cls._nested_scope_types()
         # Walk the tree rooted at func_node, but stop descending whenever
-        # we hit a nested function or lambda.
+        # we hit a nested scope-introducing construct.
         stack = [(func_node, False)]
         while stack:
             node, inside_nested = stack.pop()
             if node is call_node and not inside_nested:
                 return True
-            if isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-            ) and node is not func_node:
+            if isinstance(node, nested_types) and node is not func_node:
                 inside_nested = True
             for child in ast.iter_child_nodes(node):
                 stack.append((child, inside_nested))
@@ -986,7 +1004,9 @@ class TestFluxSyncCallSitesWired:
                 f"{rel}: function `{func_name}` not found.")
 
             # Collect If nodes inside the target function (not its
-            # nested scopes).
+            # nested scopes — per iter-504 this includes comprehensions
+            # and generator expressions, not only FunctionDef/Lambda).
+            nested_types = self._nested_scope_types()
             if_nodes_by_range = []
             stack = [(func, False)]
             while stack:
@@ -999,9 +1019,7 @@ class TestFluxSyncCallSitesWired:
                     )
                     if_nodes_by_range.append(
                         (node.lineno, end, ast.unparse(node.test)))
-                if isinstance(
-                    node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-                ) and node is not func:
+                if isinstance(node, nested_types) and node is not func:
                     inside_nested = True
                 for child in ast.iter_child_nodes(node):
                     stack.append((child, inside_nested))

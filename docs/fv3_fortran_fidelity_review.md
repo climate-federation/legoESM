@@ -168,6 +168,32 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-504 (2026-04-19)**: closed the final AST escape hatch flagged
+  by Codex stop-time review — "the new AST lock still has a dead
+  generator/comprehension escape hatch".  Iter-503 only marked
+  `FunctionDef`, `AsyncFunctionDef`, and `Lambda` as nested-scope
+  constructs.  A refactor could still park the call inside a
+  `(synchronize_cgrid_fluxes(...) for _ in ())` generator expression
+  that never iterates, or inside `[... for _ in range(1) if False]`,
+  and the test would pass while the sync silently stopped firing.
+
+  Extended the `_nested_scope_types()` list to also cover
+  `GeneratorExp`, `ListComp`, `SetComp`, and `DictComp`.  Applied the
+  extended list to both helpers — the direct-body-call detector and
+  the `if`-gate range collector in the duogrid-gated test — so that
+  all nested-scope constructs are treated consistently.
+
+  Sanity-checked against four regression scenarios that iter-503
+  would have accepted:
+    - dead generator expression (`for _ in ()`);
+    - list comprehension guarded by `if False`;
+    - dict comprehension over empty iterable;
+    - unused lambda (already caught by iter-503, kept as regression).
+  All four are now correctly reported as "call not in direct body".
+  The positive baseline (live straight-line call) is preserved.
+
+  No production-path changes.  179/179 tests pass.
+
 - **iter-503 (2026-04-19)**: strengthened the iter-502 AST test after
   Codex stop-time review flagged it as "can pass after the real
   production call is removed".  iter-502's walker accepted any
