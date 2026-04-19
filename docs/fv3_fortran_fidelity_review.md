@@ -168,6 +168,54 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-516 (2026-04-19)**: audited and locked legacy-edge-handling
+  bypass under duogrid, addressing the user's Critical Duogrid
+  Constraint #2 ("Legacy edge handling must be disabled in duogrid
+  mode via bounded_domain = .true.  Verify that legacy edge paths
+  are actually bypassed").
+
+  **Audit findings**: scanned every `if not use_duogrid` and
+  `if not _bounded_domain` gate in `src/legoesm/core/` and
+  `src/legoesm/grids/cubed_sphere_cdgrid.py`.  All `use_duogrid`
+  flags are correctly derived from `dg is not None and dg.ng >= 2`
+  at the corresponding call sites:
+    - `fv_tp_2d.py:476` for `fv_tp_2d`
+    - `fv3_sw_core.py:64, 1194, 1321, 1684, 1834` for the FB-chain
+      operators
+    - `_deln_flux` derives its own at line 409
+    - `_del6_vt_flux` is called with `_use_dg` from line 1834
+  No silent default-False propagation found in any production caller.
+
+  `_bounded_domain` in `cubed_sphere_cdgrid.py:780` correctly
+  combines `(base.duogrid is not None) or _is_single_face`, matching
+  the Fortran `bounded_domain = (regional .or. nested .or. duogrid)`
+  pattern at fv_arrays.F90:1512.
+
+  **Three new regression locks** in
+  `TestLegacyEdgePathsBypassedUnderDuogrid` (test_duogrid.py):
+
+  1. `test_pert_ppm_iv1_not_called_under_duogrid` — mock-patches
+     `_pert_ppm` in the `fv_tp_2d` namespace and asserts it is NOT
+     invoked when `_ppm_1d` is called with `use_duogrid=True`.
+     Locks the iter-63 wiring of the Fortran tp_core.F90:612 gate.
+
+  2. `test_pert_ppm_iv1_called_in_non_duogrid_path` — symmetric
+     guard asserting `_pert_ppm` IS called exactly 6 times under
+     `use_duogrid=False` (3 left + 3 right boundary cells per
+     Fortran tp_core.F90:629/648).  Prevents the previous test
+     from being vacuously satisfied by an unrelated bug that
+     disables `_pert_ppm` entirely.
+
+  3. `test_rsin_u_panel_edge_override_only_in_non_bounded_domain`
+     — AST-level guard that the rsin_u/rsin_v panel-edge `1/sin`
+     override in `cubed_sphere_cdgrid.py` remains inside the
+     `if not _bounded_domain:` block.  Locks iter-66's
+     Fortran-faithful bounded-domain gating against silent
+     regression by a future "remove conditional" refactor.
+
+  No production-path numerical changes (audit + tests only).
+  191/191 tests pass (188 prior + 3 new).
+
 - **iter-515 (2026-04-19)**: addressed Codex stop-time review of
   iter-514 — "iter-514 still does not match the matrix config it
   claims to lock".  iter-514 used `div_damp` only; matrix line

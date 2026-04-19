@@ -1547,3 +1547,147 @@ class TestPackedHaloDuogrid:
             )
 
         np.testing.assert_array_equal(np.array(r), ref)
+
+
+# =========================================================================
+# Iter-516: Legacy edge handling bypass under duogrid
+# (Ralph-prompt Critical Duogrid Constraint #2)
+# =========================================================================
+
+
+class TestLegacyEdgePathsBypassedUnderDuogrid:
+    """The user's Critical Duogrid Constraint #2 says:
+
+        Legacy edge handling must be disabled in duogrid mode via
+        bounded_domain = .true.  Verify that legacy edge paths are
+        actually bypassed.
+
+    Iter-516 audits the gates and adds behavioural locks for the
+    two legacy paths most likely to be silently re-enabled by a
+    refactor:
+
+      1. `pert_ppm(iv=1)` at face-boundary interior cells in
+         `_ppm_1d` (`fv_tp_2d.py:252-256`).  Fortran tp_core.F90:612
+         gates this on `.not. (bounded_domain .or. duogrid)`.
+      2. `_pert_ppm` is the helper called by that legacy path.  We
+         mock-patch it to record invocations and verify it is
+         NOT called in the duogrid path.
+    """
+
+    def test_pert_ppm_iv1_not_called_under_duogrid(self):
+        """When `_ppm_1d` is called with `use_duogrid=True`, the
+        `_pert_ppm` (iv=1) face-boundary monotonicity helper must
+        NOT fire.  Verified by mock-patching `_pert_ppm` in the
+        `fv_tp_2d` namespace and asserting zero invocations."""
+        import jax.numpy as jnp
+        from unittest import mock
+        from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+
+        # Build a synthetic input matching what `_xppm` passes:
+        # q_h2 has shape (6, n+4, M) where the i-axis (n+4) is
+        # halo-padded; M is the j-strip length.
+        n, M = 8, 8
+        rng = jnp.array(
+            [[[float(i + j) for j in range(M)] for i in range(n + 4)]
+             for _ in range(6)])
+
+        call_count = {"n": 0}
+
+        def counting_pert_ppm(bl, br):
+            call_count["n"] += 1
+            return bl, br
+
+        with mock.patch.object(
+            fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm,
+        ):
+            # Run with use_duogrid=True — the legacy path must NOT fire.
+            fv_tp_2d_mod._ppm_1d(rng, n, use_duogrid=True)
+        assert call_count["n"] == 0, (
+            f"_pert_ppm fired {call_count['n']} times under duogrid "
+            f"— Critical Duogrid Constraint #2 violated.  The "
+            f"`if not use_duogrid:` gate at `fv_tp_2d.py:252` may "
+            f"have been silently weakened."
+        )
+
+    def test_pert_ppm_iv1_called_in_non_duogrid_path(self):
+        """Symmetric guard: when `use_duogrid=False`, `_pert_ppm`
+        MUST fire (otherwise the test above would be vacuously
+        satisfied by an unrelated bug that disables `_pert_ppm`
+        entirely)."""
+        import jax.numpy as jnp
+        from unittest import mock
+        from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+
+        n, M = 8, 8
+        rng = jnp.array(
+            [[[float(i + j) for j in range(M)] for i in range(n + 4)]
+             for _ in range(6)])
+
+        call_count = {"n": 0}
+
+        def counting_pert_ppm(bl, br):
+            call_count["n"] += 1
+            return bl, br
+
+        with mock.patch.object(
+            fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm,
+        ):
+            fv_tp_2d_mod._ppm_1d(rng, n, use_duogrid=False)
+        # Fortran tp_core.F90:629 calls pert_ppm at 6 cells (3 left
+        # + 3 right) per i-strip; Python's loop matches that exactly.
+        assert call_count["n"] == 6, (
+            f"_pert_ppm fired {call_count['n']} times in non-duogrid "
+            f"path; expected 6 (3 left + 3 right boundary cells per "
+            f"Fortran tp_core.F90:629/648).  If the gate is correct "
+            f"under duogrid (above test) but this fails, the legacy "
+            f"path itself has been broken."
+        )
+
+    def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
+        """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
+        override in `cubed_sphere_cdgrid.py` must remain inside the
+        `if not _bounded_domain:` block.  This locks iter-66's
+        Fortran-faithful gating against silent regression by a future
+        "remove conditional" refactor."""
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent.parent
+        src = (root / "src/legoesm/grids/cubed_sphere_cdgrid.py").read_text()
+        tree = ast.parse(src)
+
+        # Find the unique `_bounded_domain = ...` assignment and the
+        # immediately-following `if not _bounded_domain:` block.
+        bounded_assigns = []
+        bounded_if_blocks = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "_bounded_domain"):
+                bounded_assigns.append(node)
+            if (isinstance(node, ast.If)
+                    and isinstance(node.test, ast.UnaryOp)
+                    and isinstance(node.test.op, ast.Not)
+                    and isinstance(node.test.operand, ast.Name)
+                    and node.test.operand.id == "_bounded_domain"):
+                bounded_if_blocks.append(node)
+
+        assert len(bounded_assigns) >= 1, (
+            "`_bounded_domain = ...` not found in cubed_sphere_cdgrid.py "
+            "— iter-66's bounded_domain gating may have been removed."
+        )
+        assert len(bounded_if_blocks) >= 1, (
+            "`if not _bounded_domain:` block not found in "
+            "cubed_sphere_cdgrid.py — the panel-edge `1/sin` override "
+            "may have been removed from its gate, exposing duogrid "
+            "grids to the legacy non-FV3 1/sin convention at panel edges."
+        )
+        # Confirm the if block's body uses rsin_u and/or rsin_v (the
+        # operations the gate guards).
+        block_body_src = ast.unparse(bounded_if_blocks[0])
+        assert "rsin_u" in block_body_src or "rsin_v" in block_body_src, (
+            "`if not _bounded_domain:` block does not appear to gate "
+            "rsin_u/rsin_v panel-edge override — the gate may have "
+            "been pointed at the wrong code."
+        )
