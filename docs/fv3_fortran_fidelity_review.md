@@ -168,6 +168,35 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **Reference note (2026-04-19, user-provided)**:
+  [pyFV3](https://github.com/NOAA-GFDL/pyFV3) — NOAA-GFDL's
+  official Python port of FV3 (gt4py-based, CPU/GPU).  This is
+  an authoritative second source alongside the Fortran oracle
+  for any ambiguous port decisions.
+
+  **Recommended consultation for open items**:
+    - Non-duogrid `_d2a2c_vect` cube-vertex gap (iter-128): read
+      pyFV3's `d2a2c_vect.py` for the explicit cube-corner
+      sign-swap overrides and depth-3 write logic.
+    - PPM limiter divergence (iter-542): read pyFV3's
+      `xppm.py`/`yppm.py` for the `iord`/`mord` branch
+      implementations (Python-native translation of Fortran
+      `tp_core.F90:378-610` + edge formulas).
+    - FB chain halo gaps (iter-132, iter-550): read pyFV3's
+      `_d_sw5_corner_divergence` / `_corner_vorticity`
+      equivalents for how the halo-padded `uc/vc` should be
+      constructed under duogrid.
+    - `fv3_cc2c` convention (iter-518/541): read pyFV3's
+      cell-centre → C-grid pathway for the canonical Python
+      implementation of FV3's symmetric covariant convention.
+
+  pyFV3 uses gt4py stencil DSL (different from our JAX-only
+  approach), so direct code transplant is not straightforward,
+  but its structure and formulas are the authoritative Python
+  mapping of the Fortran oracle.  Future iterations should
+  cross-check against pyFV3 when implementing any of the open
+  architectural items.
+
 - **iter-565 (2026-04-19)**: regression lock for `_pad_halo_auto`
   and `_pad_halo_auto_h2` (previously untested).
 
