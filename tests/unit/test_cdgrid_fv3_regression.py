@@ -2436,15 +2436,20 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         days = 1.0
         dt = 300.0   # matches matrix line 1177
         n_steps = int(days * 86400 / dt)
-        # `_div_damp_cube` from the matrix script — copied inline so
-        # the unit test does not depend on the script's import surface.
-        div_damp = 1.5e7 * (48.0 / n) ** 2  # _div_damp_cube(n)
+        # `_hyperdiff_cube` and `_div_damp_cube` from the matrix script
+        # — copied inline so the unit test does not depend on the
+        # script's import surface.  Iter-515 (Codex) added
+        # `hyperdiff_coeff` after iter-514 omitted it.
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4   # _hyperdiff_cube(n)
+        div_damp = 1.5e7 * (48.0 / n) ** 2          # _div_damp_cube(n)
 
         grid = create_cubed_sphere(n=n, use_duogrid=False)
 
-        # Canonical config: boundary_fix=True, fix_mass=True, div_damp
-        # scaled to n.  Matches matrix line 1178-1181.
+        # Canonical config: boundary_fix=True, fix_mass=True,
+        # hyperdiff and div_damp scaled to n.  Matches matrix lines
+        # 1178-1181.
         cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=hyperdiff_coeff,
             div_damp=div_damp,
             boundary_fix=True,
             # fix_mass and use_conservation_fixer default to True.
@@ -2472,20 +2477,20 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         err = state.h - h0
         L2 = float(jnp.sqrt(jnp.mean(err ** 2)) / h_mean)
 
-        # Measured baselines on the canonical C36 setup, dt=300s, 1 day:
-        #   BUGGY (pre-iter-505):   matrix-reported L2 ≈ 1.53e-3
-        #   FIXED  (post-iter-505): L2 = 3.29e-4   (matrix reports 2.42e-4
-        #                                            after mass fixer,
-        #                                            consistent up to
-        #                                            mass-fixer details)
+        # Measured baselines on the FULL canonical setup
+        # (C36 dt=300s 1d hyperdiff + div_damp + boundary_fix=True
+        # + fix_mass=True):
+        #   BUGGY (pre-iter-505):   L2 = 1.59e-3 (matrix-reported 1.53e-3)
+        #   FIXED  (post-iter-505): L2 = 2.50e-4 (matrix-reported 2.42e-4)
         # Ceiling at 5.0e-4 cleanly separates: passes on FIXED with
-        # ~50% headroom, would fire on BUGGY by 3x.
+        # 100 % headroom, fires on BUGGY by 3.2x.
         self.assertLess(
             L2, 5.0e-4,
             msg=(f"W2 alpha=0 C36 1d (canonical matrix setup) "
                  f"L2={L2:.3e} exceeds 5.0e-4 ceiling — iter-505 "
                  f"axis fix may have regressed.  Pre-iter-505 baseline "
-                 f"on this setup was L2 ≈ 1.53e-3 (matrix-reported)."))
+                 f"on this setup was L2 = 1.59e-3 (matrix-reported "
+                 f"1.53e-3)."))
 
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
@@ -2500,14 +2505,17 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         only a 35 % improvement (vs the matrix's 4x).  Iter-514
         re-pins to the matrix-canonical C36/dt=300 setup.
 
-        Measured at the canonical C36 dt=300s 1 day setup:
-          - boundary_fix=True  : L2 = 3.29e-4
-          - boundary_fix=False : L2 = 1.36e-3
-          - ratio True/False = 0.243   (boundary_fix wins by ~4x)
+        Measured at the FULL canonical setup (C36 dt=300s 1d
+        + hyperdiff_coeff + div_damp + fix_mass=True):
+          - boundary_fix=True  : L2 = 2.50e-4
+          - boundary_fix=False : L2 = 4.76e-4
+          - ratio True/False = 0.525   (boundary_fix wins by ~2x)
 
-        Test asserts True/False ratio < 0.5 — fires if the non-FV3
-        stabilizer is silently disabled or its effectiveness drops
-        by more than half.
+        Hyperdiffusion absorbs some of the boundary error so the
+        improvement is smaller than without it (4x vs 2x).  Test
+        asserts ratio < 0.7 — fires if the stabilizer is silently
+        disabled (ratio drifts to ~1.0) or if a refactor halves
+        its effectiveness.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -2525,7 +2533,10 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         days = 1.0
         dt = 300.0   # matches matrix line 1177
         n_steps = int(days * 86400 / dt)
-        div_damp = 1.5e7 * (48.0 / n) ** 2  # _div_damp_cube(n)
+        # Iter-515 (Codex): include hyperdiff_coeff to match the full
+        # canonical matrix config; iter-514 omitted it.
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4   # _hyperdiff_cube(n)
+        div_damp = 1.5e7 * (48.0 / n) ** 2          # _div_damp_cube(n)
 
         grid = create_cubed_sphere(n=n, use_duogrid=False)
         sw = williamson_test2(grid)
@@ -2535,7 +2546,9 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         results = {}
         for bf in (True, False):
             cfg = CDGridShallowWaterConfig(
-                div_damp=div_damp, boundary_fix=bf)
+                hyperdiff_coeff=hyperdiff_coeff,
+                div_damp=div_damp,
+                boundary_fix=bf)
             model = FV3EdgeShallowWaterModel(grid, config=cfg)
             cdgrid = model.cdgrid
             u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
@@ -2555,14 +2568,17 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
 
         ratio = results[True] / results[False]
         self.assertLess(
-            ratio, 0.5,
+            ratio, 0.7,
             msg=(f"boundary_fix=True L2 ({results[True]:.3e}) is not "
                  f"meaningfully smaller than boundary_fix=False L2 "
                  f"({results[False]:.3e}); ratio = {ratio:.3f}.  On "
-                 f"the canonical C36 dt=300s setup the expected ratio "
-                 f"is ~0.243 (4x improvement) — if it has drifted "
-                 f"above 0.5 the non-FV3 stabilizer was silently "
-                 f"disabled or its effectiveness halved.  Update the "
+                 f"the FULL canonical setup (C36 dt=300s + hyperdiff "
+                 f"+ div_damp + fix_mass) the expected ratio is "
+                 f"~0.525 (2x improvement, smaller than the non-"
+                 f"hyperdiff value because hyperdiff absorbs some of "
+                 f"the boundary error).  If the ratio has drifted "
+                 f"above 0.7 the stabilizer was silently disabled or "
+                 f"a refactor halved its effectiveness.  Update the "
                  f"iter-511 documentation if intentional."))
 
 

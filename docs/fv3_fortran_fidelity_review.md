@@ -168,6 +168,42 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-515 (2026-04-19)**: addressed Codex stop-time review of
+  iter-514 — "iter-514 still does not match the matrix config it
+  claims to lock".  iter-514 used `div_damp` only; matrix line
+  1179-1181 also passes `hyperdiff_coeff=_hyperdiff_cube(n)` to
+  the config.
+
+  Added `hyperdiff_coeff = 1e16 * (48.0 / n) ** 4` to both tests'
+  `CDGridShallowWaterConfig`.  Re-measured baselines on the FULL
+  canonical setup (C36 dt=300s 1d + hyperdiff + div_damp +
+  boundary_fix=True + fix_mass=True):
+
+  ```
+                       boundary_fix=True  boundary_fix=False
+    BUGGY (pre-505)    L2 = 1.59e-3       L2 = 1.60e-3   ratio 0.994
+    FIXED (post-505)   L2 = 2.50e-4       L2 = 4.76e-4   ratio 0.525
+  ```
+
+  Hyperdiffusion absorbs some of the boundary error so the
+  `boundary_fix` improvement is smaller WITH hyperdiff (2x) than
+  WITHOUT (4x at iter-514's setup), but still substantial.  The
+  iter-515 FIXED L2 of **2.50e-4** is essentially identical to
+  the matrix's reported **2.42e-4** — confirming the test now
+  faithfully reproduces the production harness.
+
+  Tightened ceilings:
+    - L2 test: 5.0e-4   (passes FIXED with 100% headroom; fails BUGGY by 3.2x)
+    - ratio test: 0.7    (passes FIXED at 0.525; fails BUGGY at 0.994)
+
+  Also addressed user's directive note about polar-face
+  asymmetry in `fv3_sw_tendencies` — already closed by iter-510
+  (`TestFv3SwTendenciesPolarFaceSymmetry` confirms face4/face5
+  ratios = 1.0000 post-iter-505).
+
+  No production-path numerical changes (test config completion
+  only).  188/188 tests pass.
+
 - **iter-514 (2026-04-19)**: re-pinned both `TestW2BoundaryErrorBudget`
   tests to the canonical production-matrix C36/dt=300s/1d setup
   after Codex stop-time review of iter-513:
