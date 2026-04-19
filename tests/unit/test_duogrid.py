@@ -1574,22 +1574,66 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
          NOT called in the duogrid path.
     """
 
-    def test_pert_ppm_iv1_not_called_under_duogrid(self):
-        """When `_ppm_1d` is called with `use_duogrid=True`, the
-        `_pert_ppm` (iv=1) face-boundary monotonicity helper must
-        NOT fire.  Verified by mock-patching `_pert_ppm` in the
-        `fv_tp_2d` namespace and asserting zero invocations."""
+    @staticmethod
+    def _build_fv_tp_2d_inputs(use_duogrid: bool):
+        """Build the smallest valid inputs to `fv_tp_2d` from a real
+        cubed-sphere CDGrid configured with or without duogrid.  This
+        exercises the FULL production propagation chain
+        (fv_tp_2d → _xppm/_yppm → _ppm_1d) instead of the unit-level
+        `_ppm_1d(..., use_duogrid=...)` shortcut, so a future refactor
+        that breaks the propagation between these layers fires the
+        regression."""
         import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        n = 8
+        # Use ng=4 so duogrid.ng >= 2 (which gates `use_duogrid` inside
+        # fv_tp_2d at line 476).  Default duogrid_ng is None which
+        # means the constructor picks one; we ask explicitly for safety.
+        if use_duogrid:
+            base = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+        else:
+            base = create_cubed_sphere(n=n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(base)
+        # Smooth scalar with a slight x-gradient so PPM does interesting work.
+        q = jnp.ones((6, n, n), dtype=jnp.float64) * 1.0
+        q = q + 0.1 * jnp.arange(n, dtype=jnp.float64)[None, :, None]
+        crx = jnp.full((6, n + 1, n), 0.1, dtype=jnp.float64)
+        cry = jnp.full((6, n, n + 1), 0.1, dtype=jnp.float64)
+        xfx = jnp.full((6, n + 1, n), 0.1, dtype=jnp.float64)
+        yfx = jnp.full((6, n, n + 1), 0.1, dtype=jnp.float64)
+        # ra_x / ra_y just need to be positive non-zero arrays of the
+        # right shape — fv_tp_2d divides q_i / q_j by them.
+        ra_x = jnp.asarray(base.area)
+        ra_y = jnp.asarray(base.area)
+        return q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid
+
+    def test_pert_ppm_iv1_not_called_under_duogrid_via_production_path(self):
+        """Iter-517 (Codex follow-up): exercise the FULL production
+        propagation chain `fv_tp_2d → _xppm/_yppm → _ppm_1d` instead
+        of calling `_ppm_1d` directly with `use_duogrid=...`.  When
+        the CDGrid has duogrid active, `_pert_ppm` must NEVER fire
+        inside any of the four PPM passes that `fv_tp_2d` performs.
+
+        This locks the propagation: if a future refactor breaks the
+        `use_duogrid` propagation between `fv_tp_2d` (line 476) and
+        `_xppm`/`_yppm` (lines 495..513) into `_ppm_1d`'s gate
+        (line 252), this test fires.
+        """
         from unittest import mock
         from legoesm.core import fv_tp_2d as fv_tp_2d_mod
 
-        # Build a synthetic input matching what `_xppm` passes:
-        # q_h2 has shape (6, n+4, M) where the i-axis (n+4) is
-        # halo-padded; M is the j-strip length.
-        n, M = 8, 8
-        rng = jnp.array(
-            [[[float(i + j) for j in range(M)] for i in range(n + 4)]
-             for _ in range(6)])
+        inputs = self._build_fv_tp_2d_inputs(use_duogrid=True)
+        cdgrid = inputs[-1]
+        # Sanity check on the test setup itself.
+        assert cdgrid.base.duogrid is not None, (
+            "Test setup error: cdgrid.base.duogrid is None even after "
+            "create_cubed_sphere(use_duogrid=True).")
+        assert cdgrid.base.duogrid.ng >= 2, (
+            f"Test setup error: cdgrid.base.duogrid.ng = "
+            f"{cdgrid.base.duogrid.ng} < 2; fv_tp_2d gates use_duogrid "
+            f"on `dg.ng >= 2`.")
 
         call_count = {"n": 0}
 
@@ -1600,28 +1644,30 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         with mock.patch.object(
             fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm,
         ):
-            # Run with use_duogrid=True — the legacy path must NOT fire.
-            fv_tp_2d_mod._ppm_1d(rng, n, use_duogrid=True)
+            fv_tp_2d_mod.fv_tp_2d(*inputs)
         assert call_count["n"] == 0, (
-            f"_pert_ppm fired {call_count['n']} times under duogrid "
-            f"— Critical Duogrid Constraint #2 violated.  The "
-            f"`if not use_duogrid:` gate at `fv_tp_2d.py:252` may "
-            f"have been silently weakened."
+            f"_pert_ppm fired {call_count['n']} times when fv_tp_2d "
+            f"was called with a duogrid-enabled CDGrid.  Critical "
+            f"Duogrid Constraint #2 violated: the propagation of "
+            f"`use_duogrid` from fv_tp_2d (line 476) through "
+            f"_xppm/_yppm into _ppm_1d's `if not use_duogrid:` "
+            f"gate (line 252) has been silently broken."
         )
 
-    def test_pert_ppm_iv1_called_in_non_duogrid_path(self):
-        """Symmetric guard: when `use_duogrid=False`, `_pert_ppm`
-        MUST fire (otherwise the test above would be vacuously
-        satisfied by an unrelated bug that disables `_pert_ppm`
-        entirely)."""
-        import jax.numpy as jnp
+    def test_pert_ppm_iv1_called_in_non_duogrid_production_path(self):
+        """Symmetric guard via the production entry: with a non-duogrid
+        CDGrid, `_pert_ppm` MUST fire.  `fv_tp_2d` performs FOUR PPM
+        passes (fy2, fx1, fx2, fy1; lines 495..513), each running 6
+        boundary cells via the `_ppm_1d` loop at line 253.  Expected
+        total = 4 * 6 = 24 calls."""
         from unittest import mock
         from legoesm.core import fv_tp_2d as fv_tp_2d_mod
 
-        n, M = 8, 8
-        rng = jnp.array(
-            [[[float(i + j) for j in range(M)] for i in range(n + 4)]
-             for _ in range(6)])
+        inputs = self._build_fv_tp_2d_inputs(use_duogrid=False)
+        cdgrid = inputs[-1]
+        assert cdgrid.base.duogrid is None, (
+            "Test setup error: cdgrid.base.duogrid is not None for "
+            "non-duogrid run.")
 
         call_count = {"n": 0}
 
@@ -1632,15 +1678,20 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         with mock.patch.object(
             fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm,
         ):
-            fv_tp_2d_mod._ppm_1d(rng, n, use_duogrid=False)
-        # Fortran tp_core.F90:629 calls pert_ppm at 6 cells (3 left
-        # + 3 right) per i-strip; Python's loop matches that exactly.
-        assert call_count["n"] == 6, (
-            f"_pert_ppm fired {call_count['n']} times in non-duogrid "
-            f"path; expected 6 (3 left + 3 right boundary cells per "
-            f"Fortran tp_core.F90:629/648).  If the gate is correct "
-            f"under duogrid (above test) but this fails, the legacy "
-            f"path itself has been broken."
+            fv_tp_2d_mod.fv_tp_2d(*inputs)
+
+        # Each of the four PPM passes runs 6 boundary cells; the loop
+        # in `_ppm_1d:253` is 6 iterations regardless of n.  So total
+        # call count is 4 * 6 = 24.  A different number signals either
+        # (a) a pass was added/removed from fv_tp_2d, or (b) the
+        # legacy iv=1 loop changed shape.
+        assert call_count["n"] == 24, (
+            f"_pert_ppm fired {call_count['n']} times in the non-"
+            f"duogrid production path; expected exactly 24 (4 PPM "
+            f"passes × 6 boundary cells per Fortran tp_core.F90:"
+            f"629/648).  If the duogrid-bypass test passes but this "
+            f"fails, either fv_tp_2d's pass count changed or the "
+            f"legacy iv=1 loop was refactored."
         )
 
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):

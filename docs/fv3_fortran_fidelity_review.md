@@ -168,6 +168,38 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-517 (2026-04-19)**: re-pinned the iter-516 duogrid bypass
+  tests to the FULL production propagation chain after Codex
+  stop-time review: "the new tests do not lock the production
+  duogrid bypass path."
+
+  iter-516's two behavioural tests called `_ppm_1d` directly with
+  `use_duogrid=True/False` as a parameter — bypassing the actual
+  production propagation
+  `fv_tp_2d → _xppm/_yppm → _ppm_1d`.  A future refactor that
+  silently broke `use_duogrid` propagation between any of these
+  layers would not be caught.
+
+  Iter-517 rewrites both tests to:
+    1. Build a real CDGrid via `create_cubed_sphere(use_duogrid=
+       True/False)` + `create_cubed_sphere_cdgrid`.
+    2. Sanity-check the test setup (`cdgrid.base.duogrid is not
+       None` and `dg.ng >= 2` for the duogrid case).
+    3. Mock-patch `_pert_ppm` in the `fv_tp_2d` namespace.
+    4. Call the production `fv_tp_2d(q, crx, cry, xfx, yfx, ra_x,
+       ra_y, cdgrid)` entry point.
+    5. Assert call count = 0 (duogrid) or 24 (non-duogrid; 4 PPM
+       passes × 6 boundary cells per Fortran tp_core.F90:629/648).
+
+  **Sanity-check verified locally**: simulated a regression by
+  monkey-patching `_xppm`/`_yppm` to drop `use_duogrid` (i.e., as
+  if the propagation between `fv_tp_2d` and `_xppm` broke).  With
+  the broken propagation, `_pert_ppm` fired 24 times under
+  duogrid → the test would correctly FAIL.
+
+  No production-path numerical changes (test re-pin only).
+  191/191 tests pass.
+
 - **iter-516 (2026-04-19)**: audited and locked legacy-edge-handling
   bypass under duogrid, addressing the user's Critical Duogrid
   Constraint #2 ("Legacy edge handling must be disabled in duogrid
