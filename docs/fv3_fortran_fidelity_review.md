@@ -168,6 +168,26 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-497 (2026-04-19)**: second step on the ng=3 halo extension
+  prerequisite for the FB-path C36 stability blocker (review-doc
+  item #2).  Added `_fill_corners_h3(padded)` in `grids/halo.py`,
+  the natural 3×3 extension of `_fill_corners_h2`'s inside-out
+  2-point-average corner fill: starts from the interior-adjacent
+  diagonal cell `(2,2)`, propagates outward along each arm, fills
+  the two interior-ward diagonals, then the outermost corner
+  `(0,0)` at each of the 4 corners × 6 faces.  Plumbing only — no
+  caller wires it in yet (full ng=3 path still needs
+  `_pad_halo_local_h3` scalar exchange, h=3 vector pad, and the
+  `pad_halo(halo=3)` / `pad_halo_vector(halo=3)` dispatch cases).
+  Added `TestFillCornersH3` test class with 5 invariants:
+  constant-field preservation, shape preservation, that all 9 cells
+  of each 3×3 corner get populated, that the interior block is
+  untouched, and that the edge-strip halos are untouched.  23/23
+  tests pass on `test_scale_halo.py`; 132/132 on the broader
+  cdgrid_fv3_regression + duogrid suites.  Required evaluations
+  (W2/W5/cosine bell) cannot have changed — no runtime path yet
+  calls `_fill_corners_h3`.
+
 - **iter-128 through iter-131 (2026-04-18)**: Priority-3 audit hardening cycle.
   Each iteration tightened a previously-loose claim about the non-duogrid
   `_d2a2c_vect` cube-vertex gap, in response to Codex stop-time review

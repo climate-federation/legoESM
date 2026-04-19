@@ -243,6 +243,114 @@ class TestHaloInterpOffsets:
 
 
 # ---------------------------------------------------------------------------
+# h3 corner fill (iter-497)
+# ---------------------------------------------------------------------------
+
+class TestFillCornersH3:
+    """Tests for the halo=3 corner fill helper added in iter-497.
+
+    This is plumbing for the ng=3 halo extension (review-doc item #2,
+    FB-path stability on W2 C36).  The fill rule is the inside-out
+    2-point averaging used by `_fill_corners_h2`, generalized to a
+    3x3 corner block.
+    """
+
+    def _build_constant_padded(self, n: int, halo: int, value: float):
+        """Construct an (6, n+2h, n+2h) padded array with interior and
+        edge-strip halos both set to ``value`` and corner blocks left
+        at zero.  Matches what ``_pad_halo_local_h3`` would produce on
+        a constant field before the corner fill step."""
+        padded = jnp.zeros((6, n + 2 * halo, n + 2 * halo), dtype=jnp.float64)
+        # Interior
+        padded = padded.at[:, halo:-halo, halo:-halo].set(value)
+        # Edge halos (skip the 4 corner blocks which are left at 0)
+        for d in range(halo):
+            # WEST, EAST: i = d or n+2h-1-d, j in [halo:-halo]
+            padded = padded.at[:, d, halo:-halo].set(value)
+            padded = padded.at[:, n + 2 * halo - 1 - d, halo:-halo].set(value)
+            # SOUTH, NORTH: j = d or n+2h-1-d, i in [halo:-halo]
+            padded = padded.at[:, halo:-halo, d].set(value)
+            padded = padded.at[:, halo:-halo, n + 2 * halo - 1 - d].set(value)
+        return padded
+
+    def test_constant_field_preserved(self):
+        """Corner fill on a constant edge+interior padded array should
+        leave every cell at the same constant value."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=4.25)
+        filled = _fill_corners_h3(padded)
+        np.testing.assert_allclose(
+            np.asarray(filled), 4.25, atol=1e-12,
+            err_msg="Corner fill should preserve constant fields")
+
+    def test_shape_preserved(self):
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=1.0)
+        filled = _fill_corners_h3(padded)
+        assert filled.shape == (6, n + 6, n + 6)
+
+    def test_zero_corner_cells_get_filled(self):
+        """Before the fill, corner 3x3 blocks are zero; after, they
+        are non-zero (pulled from non-zero edge halos)."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=7.0)
+        # Sanity: corner blocks were left zero by the builder
+        assert float(padded[0, 0, 0]) == 0.0
+        assert float(padded[0, 0, 2]) == 0.0
+        assert float(padded[0, 2, 2]) == 0.0
+        filled = _fill_corners_h3(padded)
+        # All 9 SW corner cells of face 0 should be non-zero
+        for i in range(3):
+            for j in range(3):
+                assert float(filled[0, i, j]) != 0.0
+
+    def test_no_mutation_of_interior(self):
+        """The fill must leave the interior block untouched."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=0.0)
+        # Write a distinct pattern in the interior
+        interior_vals = jnp.arange(
+            6 * n * n, dtype=jnp.float64).reshape(6, n, n)
+        padded = padded.at[:, 3:-3, 3:-3].set(interior_vals)
+        filled = _fill_corners_h3(padded)
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, 3:-3, 3:-3]),
+            np.asarray(interior_vals),
+        )
+
+    def test_no_mutation_of_edge_halos(self):
+        """The fill must leave the edge-strip halos (non-corner) untouched."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        h = 3
+        padded = jnp.zeros((6, n + 2 * h, n + 2 * h), dtype=jnp.float64)
+        # Fill edge halos with unique sentinel patterns
+        rng = np.random.default_rng(42)
+        w = jnp.asarray(rng.standard_normal((6, h, n)))
+        e = jnp.asarray(rng.standard_normal((6, h, n)))
+        s = jnp.asarray(rng.standard_normal((6, n, h)))
+        no = jnp.asarray(rng.standard_normal((6, n, h)))
+        padded = padded.at[:, :h, h:-h].set(w)
+        padded = padded.at[:, -h:, h:-h].set(e)
+        padded = padded.at[:, h:-h, :h].set(s)
+        padded = padded.at[:, h:-h, -h:].set(no)
+        from legoesm.grids.halo import _fill_corners_h3
+        filled = _fill_corners_h3(padded)
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, :h, h:-h]), np.asarray(w))
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, -h:, h:-h]), np.asarray(e))
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, h:-h, :h]), np.asarray(s))
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, h:-h, -h:]), np.asarray(no))
+
+
+# ---------------------------------------------------------------------------
 # JIT compatibility
 # ---------------------------------------------------------------------------
 
