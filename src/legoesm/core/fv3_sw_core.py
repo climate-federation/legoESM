@@ -1738,14 +1738,16 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
         chain callers (`fv3_forward_backward_step`, `fv3_fb_sw_step`)
         that forward it.  NOTE: three SEPARATE paths DO use
         `div_damp` and share `CDGridShallowWaterConfig.div_damp`:
-        `cdgrid_momentum_tendencies` (operators_cdgrid.py:1124),
-        `fv3_sw_tendencies` (operators_cdgrid.py:1384 — the A-L RK3
-        PRODUCTION path), and `fv3_csw_tendencies` (fv3_sw_core.py:
-        1344 — experimental CSW).  The config field therefore
-        remains live across three paths; only the FB chain
-        forwards-and-ignores it.  Future consolidation should drop
-        `div_damp` from the FB entry points only, not from the
-        config or the three live-use paths.
+        `cdgrid_momentum_tendencies` (in operators_cdgrid),
+        `fv3_sw_tendencies` (in operators_cdgrid — the A-L RK3
+        PRODUCTION path), and `fv3_csw_tendencies` (in this module —
+        experimental CSW).  The config field therefore remains live
+        across three paths; only the FB chain forwards-and-ignores
+        it.  Future consolidation should drop `div_damp` from the FB
+        entry points only, not from the config or the three live-
+        use paths.  (Function-name refs only; in-code line numbers
+        were removed in iter-180 because they shifted on every
+        edit.)
     d2_bg : float — FV3 d_sw5 background del-2 coefficient (default 0.0)
     dddmp : float — FV3 d_sw5 adaptive Smagorinsky coefficient (default 0.0)
     d4_bg : float — FV3 d_sw5 background del-4+ coefficient (default 0.16)

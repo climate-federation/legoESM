@@ -67,33 +67,36 @@ class CDGridShallowWaterConfig(NamedTuple):
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0  # Biharmonic hyperdiffusion
-    div_damp: float = 0.0         # Divergence damping coefficient [m^2/s].
-                                  # USED by three live paths that share this
-                                  # field:
-                                  #   - cdgrid_momentum_tendencies
-                                  #     (operators_cdgrid.py:1124) — called
-                                  #     from cdgrid_shallow_water_tendencies
-                                  #     (this file L146), which is itself
-                                  #     invoked by CDGridShallowWaterModel.
-                                  #     tendencies / .step (this file L271,
-                                  #     L285).
-                                  #   - fv3_sw_tendencies
-                                  #     (operators_cdgrid.py:1384) — the
-                                  #     A-L RK3 PRODUCTION path used by
-                                  #     FV3EdgeShallowWaterModel when
-                                  #     use_experimental_csw=False.
-                                  #   - fv3_csw_tendencies
-                                  #     (fv3_sw_core.py:1344) — experimental
-                                  #     CSW path for
-                                  #     use_experimental_csw=True.
-                                  # IGNORED by the FB chain
-                                  # (fv3_forward_backward_step /
-                                  # fv3_fb_sw_step): div_damp is forwarded
-                                  # to _d_sw_native which drops it — that
-                                  # chain uses d_sw5 coefficients
-                                  # (d2_bg/dddmp/d4_bg/nord) below instead.
-                                  # See `_d_sw_native` docstring for the
-                                  # split.
+    div_damp: float = 0.0
+    # Divergence damping coefficient [m^2/s].
+    #
+    # USED by three live call paths that all share this config field.
+    # Line numbers in the same file are intentionally omitted below
+    # because in-file line numbers shift whenever this comment is
+    # itself edited, which made earlier iterations of this note (iter-
+    # 178, 179) out-of-date the moment they were committed.  Refer by
+    # function / class name for the in-file callers and by
+    # module:function name for the cross-file operators; `grep` will
+    # find them reliably.
+    #
+    #   1. `cdgrid_momentum_tendencies` (in legoesm.core.operators_cdgrid)
+    #      — called from `cdgrid_shallow_water_tendencies` in this
+    #      file, which is invoked by `CDGridShallowWaterModel.
+    #      tendencies` and `.step`.
+    #   2. `fv3_sw_tendencies` (in legoesm.core.operators_cdgrid) —
+    #      the A-L RK3 PRODUCTION path used by
+    #      `FV3EdgeShallowWaterModel` when `use_experimental_csw=
+    #      False` (the default).
+    #   3. `fv3_csw_tendencies` (in legoesm.core.fv3_sw_core) — the
+    #      experimental CSW path dispatched when
+    #      `use_experimental_csw=True`.
+    #
+    # IGNORED by the FB chain (`fv3_forward_backward_step` /
+    # `fv3_fb_sw_step` / `_d_sw_native` in legoesm.core.fv3_sw_core):
+    # `div_damp` is accepted and forwarded, but `_d_sw_native` never
+    # reads it.  The FB chain's divergence damping comes from the
+    # d_sw5 coefficients (`d2_bg`/`dddmp`/`d4_bg`/`nord`) below.  See
+    # the `_d_sw_native` docstring for the split.
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
