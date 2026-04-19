@@ -2648,19 +2648,17 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         model.set_initial_mass(state0)
 
         # Pre-compute the matrix's regrid weights (matches
-        # `run_atmosphere_test_matrix.py::_get_cs_weights(n)`).
+        # `run_atmosphere_test_matrix.py::_get_cs_weights(n)`) and
+        # the 4-edge angle averaging via the iter-528 canonical
+        # helper (`cell_centre_angles_from_4edge`) — same path the
+        # matrix uses post iter-529.
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge,
+        )
         w = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
-        cax = np.asarray(cdgrid.cos_angle_edge_x, dtype=np.float64)
-        sax = np.asarray(cdgrid.sin_angle_edge_x, dtype=np.float64)
-        cay = np.asarray(cdgrid.cos_angle_edge_y, dtype=np.float64)
-        say = np.asarray(cdgrid.sin_angle_edge_y, dtype=np.float64)
-        ca_4edge = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
-                           + cay[:, :-1, :] + cay[:, 1:, :])
-        sa_4edge = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
-                           + say[:, :-1, :] + say[:, 1:, :])
-        norm = np.sqrt(ca_4edge ** 2 + sa_4edge ** 2)
-        ca_4edge /= norm
-        sa_4edge /= norm
+        ca_4edge_jax, sa_4edge_jax = cell_centre_angles_from_4edge(cdgrid)
+        ca_4edge = np.asarray(ca_4edge_jax, dtype=np.float64)
+        sa_4edge = np.asarray(sa_4edge_jax, dtype=np.float64)
 
         def _extract_v_ll(s):
             """Reproduce matrix `extract_fn` (run_atmosphere_test_matrix.py:

@@ -1210,27 +1210,31 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # Regrid wind from cell-centre averages of edge-midpoint winds.
         _cs_w = _get_cs_weights(n)
 
+        # iter-528/529: pre-compute the 4-edge averaged cos/sin
+        # angles via the canonical helper.  This replaces the inline
+        # 4-edge averaging that lived here.
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge,
+        )
+        _ca_4edge, _sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+        _ca_4edge_np = np.asarray(_ca_4edge, dtype=np.float64)
+        _sa_4edge_np = np.asarray(_sa_4edge, dtype=np.float64)
+
         def extract_fn(s):
             # Average edge-midpoint winds to cell centres, then regrid.
-            # Use the mean of the 4 surrounding edge angles (2 x-edges +
-            # 2 y-edges) for the rotation, not the cell-centre angle.
-            # Cell-centre angles differ from edge-averaged angles by O(dx),
-            # creating a 0.39 m/s v_north residual for Williamson 2.
-            # The 4-edge mean reduces this to 0.008 m/s (47x improvement).
+            # The cell-centre angles for the rotation come from the
+            # 4-surrounding-edge mean (helper
+            # `cell_centre_angles_from_4edge`).  Cell-centre angles
+            # differ from edge-averaged angles by O(dx), creating a
+            # 0.39 m/s v_north residual for Williamson 2; the 4-edge
+            # mean reduces this to 0.008 m/s at t=0 (47x improvement;
+            # see iter-25/26 of docs/fv3_fortran_fidelity_review.md).
             u_cc = 0.5 * (np.asarray(s.u_d, dtype=np.float64)[:, :, :-1]
                           + np.asarray(s.u_d, dtype=np.float64)[:, :, 1:])
             v_cc = 0.5 * (np.asarray(s.v_d, dtype=np.float64)[:, :-1, :]
                           + np.asarray(s.v_d, dtype=np.float64)[:, 1:, :])
-            cax = np.asarray(cdgrid.cos_angle_edge_x, dtype=np.float64)
-            sax = np.asarray(cdgrid.sin_angle_edge_x, dtype=np.float64)
-            cay = np.asarray(cdgrid.cos_angle_edge_y, dtype=np.float64)
-            say = np.asarray(cdgrid.sin_angle_edge_y, dtype=np.float64)
-            ca = 0.25 * (cax[:,:,:-1] + cax[:,:,1:] + cay[:,:-1,:] + cay[:,1:,:])
-            sa = 0.25 * (sax[:,:,:-1] + sax[:,:,1:] + say[:,:-1,:] + say[:,1:,:])
-            norm = np.sqrt(ca**2 + sa**2)
-            ca /= norm; sa /= norm
-            u_east = ca * u_cc - sa * v_cc
-            v_north = sa * u_cc + ca * v_cc
+            u_east = _ca_4edge_np * u_cc - _sa_4edge_np * v_cc
+            v_north = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
             u_ll = _regrid_2d(u_east, lon_deg, lat_deg, coord_kind)
             v_ll = _regrid_2d(v_north, lon_deg, lat_deg, coord_kind)
             # Expose face-native cell-centre geographic winds for

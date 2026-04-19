@@ -168,6 +168,32 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-529 (2026-04-19)**: completed iter-528's "future work" by
+  switching the two known callers from inline 4-edge angle averaging
+  to `cell_centre_angles_from_4edge`:
+
+  1. `scripts/run_atmosphere_test_matrix.py::run_shallow_water` —
+     pre-computes `_ca_4edge`/`_sa_4edge` once at setup time
+     (outside the JIT-compiled step loop) using the helper, then
+     `extract_fn` uses the precomputed arrays.  Eliminates the
+     inline 12-line averaging block at lines 1224-1231.
+
+  2. `tests/unit/test_cdgrid_fv3_regression.py::test_w2_v_wind_imprint_below_iter505_canonical_ceiling`
+     — replaces the inline averaging with a call to the helper.
+     Saves ~10 lines of duplicated code.
+
+  **Verification**: ran the canonical W2 matrix run and confirmed
+  the metrics are bit-for-bit unchanged: L2=2.42e-04, Linf=1.83e-03
+  (matches iter-505 baseline exactly).  All 3 W2BoundaryErrorBudget
+  tests still pass at the same numerical thresholds.
+
+  Remaining inlined 4-edge averaging: none in production code that
+  the iter-528 audit found.  (Other Python scripts that may use
+  the same pattern are out-of-scope for the FV3-fidelity loop.)
+
+  No production-path numerical changes (refactor only — confirmed
+  bit-for-bit identical).  233/233 tests pass.
+
 - **iter-528 (2026-04-19)**: extracted the matrix's inline 4-edge
   angle averaging into a reusable helper
   `cell_centre_angles_from_4edge(cdgrid)` in `cubed_sphere_cdgrid.py`.
