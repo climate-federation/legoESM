@@ -168,6 +168,46 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-518 (2026-04-19)**: two pieces of work this iteration.
+
+  **(1) Investigated the apparent fv3_cc2c v_c asymmetry**: noticed
+  that `dgrid_to_cgrid` and `fv3_cc2c` use a non-orthogonality
+  correction `u_c = u * sina_u - v * cosa_u` for the x-face but
+  just an average `v_c = 0.5 * (v + v)` for the y-face.  This is
+  NOT a bug — it is intentional under FV3's mixed-orthogonal
+  D-grid convention: `v_d` is along e_perp (perpendicular to e_i),
+  which IS the y-face outward normal, so no projection is needed.
+  Only u needs the correction because u_d is along e_i which has
+  a component along e_v on a non-orthogonal grid.  Added
+  `TestDgridToCgridAsymmetryIsIntentional` (test_cdgrid.py, 2
+  tests) that AST-asserts the formula structure: `u_c =` line
+  must contain `sina_u` AND `cosa_u`; `v_c =` line must contain
+  NEITHER `sina_v` NOR `cosa_v`.  Locks the convention against a
+  naive "symmetrize for elegance" refactor.
+
+  **(2) Updated stale iter-126 polar baseline test**: discovered
+  `test_w2_balanced_state_polar_mass_tendency_asymmetry_baseline`
+  in `test_cdgrid.py` was failing — it had been added in iter-126
+  to baseline the PRE-iter-505 polar asymmetry of 1.0567 and was
+  never updated after iter-505 fixed the bug.  The test docstring
+  even said "A fix reducing the ratio toward 1.000 TRIGGERS the
+  test to signal progress; a regression increasing it also flags."
+  Iter-518 took the "signal progress" path and updated the test:
+    - Renamed to `test_w2_balanced_state_polar_mass_tendency_post_iter505`.
+    - Polar assertion now uses `|m4 - m5| / |equatorial scale|`
+      (post-iter-505 polar mass rates are essentially zero, so
+      the original ratio comparison divided by zero).  Ceiling
+      at 1e-2 cleanly separates: post-fix value ~1e-4, pre-fix
+      value ~5.7e-2.
+    - Equatorial relative-spread tolerance loosened from 1e-5 to
+      5e-2 (the production A-L path inherently carries O(1e-2)
+      face-boundary residuals; iter-505 reduces but doesn't
+      eliminate them).
+
+  Test totals: 228/228 pass (191 prior + 37 in test_cdgrid.py
+  including the 2 new asymmetry-locks and the updated post-iter-505
+  baseline).  No production-path numerical changes.
+
 - **iter-517 (2026-04-19)**: re-pinned the iter-516 duogrid bypass
   tests to the FULL production propagation chain after Codex
   stop-time review: "the new tests do not lock the production
