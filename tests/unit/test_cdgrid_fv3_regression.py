@@ -1060,18 +1060,29 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         import pathlib
         import re
         repo_root = pathlib.Path(__file__).resolve().parents[2]
-        # Patterns that indicate a same-file line-number reference.
-        # `(this file L123)`, `shallow_water_fv3_cdgrid.py:135`,
-        # `L<digits>` next to a div_damp mention.
-        same_file_patterns = [
-            re.compile(r"\bthis file L\d+", re.IGNORECASE),
-            re.compile(r"shallow_water_fv3_cdgrid\.py:\d+"),
+        # Per-file "same-file" patterns.  A line-number reference
+        # to a file IS a same-file reference iff it names the file
+        # whose source the comment lives in.  The iter-178/179 drift
+        # loop involved both files citing their OWN line numbers,
+        # so the check must be keyed on the file being scanned.
+        files_and_patterns = [
+            (
+                "src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py",
+                [
+                    re.compile(r"\bthis file L\d+", re.IGNORECASE),
+                    re.compile(r"shallow_water_fv3_cdgrid\.py:\d+"),
+                ],
+            ),
+            (
+                "src/legoesm/core/fv3_sw_core.py",
+                [
+                    re.compile(r"\bthis file L\d+", re.IGNORECASE),
+                    re.compile(r"fv3_sw_core\.py:\d+"),
+                ],
+            ),
         ]
-        for rel_path, keyword in [
-            ("src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py",
-             "div_damp"),
-            ("src/legoesm/core/fv3_sw_core.py", "div_damp"),
-        ]:
+        keyword = "div_damp"
+        for rel_path, same_file_patterns in files_and_patterns:
             src = (repo_root / rel_path).read_text()
             # Find all lines mentioning div_damp, check a window of
             # +/- 6 lines for forbidden patterns.
