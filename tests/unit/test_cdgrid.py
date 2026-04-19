@@ -1015,6 +1015,101 @@ class TestCgridTracerAdvectionFct(unittest.TestCase):
                  f"1e-3.  If a `return jnp.zeros_like(q)` no-op "
                  f"was introduced, this assertion fires."))
 
+    def test_3d_nonzero_flow_varying_tracer_nonzero_tendency(self):
+        """Iter-563 (Codex follow-up to iter-562): the iter-562 no-op
+        detection only covers the 2D branch (`q.ndim == 3`).  The
+        3D vmap branch can still be silently replaced with
+        `return jnp.zeros_like(q)` and pass all existing tests.
+
+        This test supplies a 3D (6, n, n, nlev=3) input with
+        distinct per-level tracer patterns and uniform flow,
+        asserting the tendency has non-zero magnitude AT EACH
+        LEVEL independently.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_tracer_advection_fct)
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
+        # Per-level distinct 2D patterns amplified so flux
+        # divergence is well above noise floor
+        q_np = np.empty((6, n, n, nlev), dtype=np.float64)
+        for k in range(nlev):
+            scale = 50.0 * (k + 1)
+            q_np[..., k] = 100.0 + scale * np.cos(
+                (2 + k) * lon) * np.cos(lat)
+        q = jnp.asarray(q_np)
+        u_c = jnp.full((6, n + 1, n, nlev), 10.0, dtype=jnp.float64)
+        v_c = jnp.zeros((6, n, n + 1, nlev), dtype=jnp.float64)
+
+        out = np.asarray(cgrid_tracer_advection_fct(
+            q, u_c, v_c, cdgrid))
+        self.assertEqual(out.shape, (6, n, n, nlev))
+
+        # Each level's output must have non-zero magnitude —
+        # catches a 3D-branch-only `return zeros_like(q)` refactor.
+        for k in range(nlev):
+            level_max = float(np.max(np.abs(out[..., k])))
+            self.assertGreater(
+                level_max, 1e-6,
+                msg=(f"3D branch: level {k} tendency max abs = "
+                     f"{level_max:.3e} — effectively zero.  If the "
+                     f"4D branch is a no-op (`return zeros_like(q)` "
+                     f"or similar), this test fires even when the "
+                     f"2D branch is intact."))
+
+    def test_3d_opposite_flows_give_opposite_sign_tendency(self):
+        """Iter-563: the anti-correlation guard on opposite flows
+        extended to the 3D vmap branch.  Catches
+        `return jnp.zeros_like(q)` and `return some_constant_4d`
+        regressions in the 4D path that the 2D iter-562 test
+        misses."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_tracer_advection_fct)
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
+        q_np = np.empty((6, n, n, nlev), dtype=np.float64)
+        for k in range(nlev):
+            scale = 50.0 * (k + 1)
+            q_np[..., k] = 100.0 + scale * np.cos(
+                (2 + k) * lon) * np.cos(lat)
+        q = jnp.asarray(q_np)
+        u_c_pos = jnp.full(
+            (6, n + 1, n, nlev), 10.0, dtype=jnp.float64)
+        u_c_neg = jnp.full(
+            (6, n + 1, n, nlev), -10.0, dtype=jnp.float64)
+        v_c = jnp.zeros((6, n, n + 1, nlev), dtype=jnp.float64)
+
+        out_pos = np.asarray(cgrid_tracer_advection_fct(
+            q, u_c_pos, v_c, cdgrid))
+        out_neg = np.asarray(cgrid_tracer_advection_fct(
+            q, u_c_neg, v_c, cdgrid))
+
+        # Anti-correlation at each level
+        for k in range(nlev):
+            corr = float(np.sum(
+                out_pos[..., k] * out_neg[..., k]))
+            pos_energy = float(np.sum(
+                out_pos[..., k] * out_pos[..., k]))
+            self.assertLess(
+                corr, 0.0,
+                msg=(f"3D level {k}: dot(out_pos, out_neg) = "
+                     f"{corr:.3e} >= 0.  The 4D branch is not "
+                     f"flow-dependent in the expected anti-"
+                     f"correlated sense — fires on a 4D-branch "
+                     f"no-op / return-constant regression."))
+            self.assertGreater(
+                pos_energy, 1e-12,
+                msg=(f"3D level {k}: positive-flow tendency "
+                     f"energy = {pos_energy:.3e}.  Anti-"
+                     f"correlation test above is meaningless if "
+                     f"the level output is essentially zero."))
+
     def test_opposite_flows_give_opposite_sign_tendency(self):
         """Iter-562: verify the function is NOT returning a
         constant-regardless-of-input.  Reversing the flow direction

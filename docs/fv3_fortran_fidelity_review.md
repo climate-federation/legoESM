@@ -168,6 +168,69 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-563 (2026-04-19)**:
+
+  Addressed Codex stop-time review of iter-562: "iter-562 still
+  leaves the separate 3D wrapper path unprotected from the same
+  no-op regression".
+
+  Iter-562 added two no-op-detecting tests but both used 2D
+  inputs `(6, n, n)`.  The 3D vmap branch (`q.ndim == 4`) can
+  still be silently replaced with `return jnp.zeros_like(q)` and
+  pass all iter-561/562 tests.
+
+  Iter-563 adds two 3D-specific no-op guards:
+    (a) `test_3d_nonzero_flow_varying_tracer_nonzero_tendency`:
+        3D input `(6, n, n, nlev=3)` with distinct per-level
+        tracer patterns and uniform flow `u_c = 10` must produce
+        non-zero tendency AT EACH LEVEL independently.
+    (b) `test_3d_opposite_flows_give_opposite_sign_tendency`:
+        3D anti-correlation guard extended from iter-562.
+
+  **Sanity-checked**: replaced the 3D branch body with
+  `return jnp.zeros_like(q)`.  Both new 3D tests fire
+  (`max abs = 0` and `dot product = 0`).  The iter-562 2D no-op
+  tests still pass (confirming they don't touch the 3D branch).
+  Restored production code; all 9 tests pass.
+
+  No production-path numerical changes.  77/77 tests pass in
+  `test_cdgrid.py` (75 prior + 2 new).
+
+  **User-provided W2 v-wind state summary (2026-04-19)**: the
+  current remaining W2 v-wind cube-face imprint is:
+    - NOT the old polar PPM asymmetry (fixed iter-505)
+    - NOT a diagnostic conversion bug (mostly gone via iter-528
+      4-edge helper — reduces t=0 conversion residual to ~0.008
+      m/s; see `src/legoesm/grids/cubed_sphere_cdgrid.py:1117`)
+    - YES a symmetric cube-face dynamical imprint generated
+      DURING INTEGRATION by the non-FV3 production path
+      (`fv3_sw_tendencies`): halo-exchanged corner winds +
+      Arakawa-Lamb gradient + cell-centre-to-edge projection +
+      the explicit non-FV3 `boundary_fix` smoother (comment at
+      `operators_cdgrid.py:1455` acknowledges boundary cells
+      have larger imbalance from halo interpolation and need
+      smoothing on this path).
+
+  The true FV3-faithful forward-backward path
+  (`FV3FBShallowWaterModel` / `fv3_fb_sw_step` at
+  `shallow_water_fv3_cdgrid.py:329`) is the right fidelity
+  target, but it remains unstable at C36 (first-order upwind
+  mass error amplification in `_c_sw` + cross-face halo gap in
+  `_d_sw5_corner_divergence` / `_corner_vorticity`).  Until
+  FB chain is stabilized at C36, the production path runs on
+  the non-faithful A-L + RK3 chain with `boundary_fix=True` as
+  a load-bearing stabilizer.
+
+  **Explicit stopping-condition status**: W2 visible v-wind
+  cube-face imprint persists as a function of architecture
+  choice, not a bug.  Fix requires either:
+    1. Stabilize the FB chain at C36 (port proper halo-padded
+       `uc`/`vc` for `_d_sw5` iterated Laplacian; possibly
+       deeper halo via iter-496..533 ng=3 infrastructure), OR
+    2. Accept the non-FV3 production path with the boundary_fix
+       stabilizer as a deliberate deviation (which the user's
+       own audit rejects per the Ralph prompt).
+
 - **iter-562 (2026-04-19)**: addressed Codex stop-time review of
   iter-561: "the new `cgrid_tracer_advection_fct` tests do not
   actually lock the public wrapper against a no-op regression".
