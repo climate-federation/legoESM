@@ -32,14 +32,16 @@ wandb/
 # Exceptions: the `.nc` files under
 # `src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/`
 # are package-bundled optics tables that must be tracked for RRTMGP
-# radiation to work.  The `src/legoesm/ml/data/` Python source is
-# library code that happened to match the `data/` exclude.  Both
-# have been tracked in history despite matching the patterns above;
-# add explicit negations so they survive a hypothetical `git clean
-# -X` and don't confuse `git ls-files -i -c`.
+# radiation to work.  The `src/legoesm/ml/data/` *.py files are
+# library source code that happened to match the `data/` exclude.
+# Both have been tracked in history despite matching the patterns
+# above; add narrow, extension-scoped negations so only the real
+# package contents survive (NOT transient `.nc`, `.zarr`,
+# `__pycache__/`, etc. a user might create under the directory).
 !src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/*.nc
 !src/legoesm/ml/data/
-!src/legoesm/ml/data/**
+!src/legoesm/ml/data/*.py
+!src/legoesm/ml/data/**/*.py
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
