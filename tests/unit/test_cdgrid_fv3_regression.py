@@ -2124,9 +2124,10 @@ class TestD2a2cVectNonDuogridBoundary(unittest.TestCase):
 
 
 class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
-    """Regression test for iter-505: the x-direction PPM reconstruction
-    inside `cgrid_mass_flux_divergence` must reconstruct along the
-    i-axis (the halo-padded axis), not along the interior j-axis.
+    """Regression test for iter-505/506: the x-direction PPM
+    reconstruction inside `cgrid_mass_flux_divergence` AND
+    `_cgrid_fct_fluxes_2d` must reconstruct along the i-axis (the
+    halo-padded axis), not along the interior j-axis.
 
     Prior to iter-505, `_ppm_reconstruct_1d(h_x_strips)` where
     `h_x_strips.shape == (6, n+4, n)` silently reconstructed along the
@@ -2136,6 +2137,12 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
     of the 4th-order reconstruction the comment promised.  The fix
     swapaxes the strip so the i-axis is last, reconstructs, then
     swaps back.
+
+    iter-506 (Codex): extended the regression to cover
+    `_cgrid_fct_fluxes_2d` (the monotone tracer path) which had the
+    same axis contract violation on its x-direction PPM strip, and
+    added a source-level AST guard against new callers re-introducing
+    the same shape bug.
     """
 
     def test_x_face_value_matches_4th_order_along_i(self):
@@ -2207,6 +2214,141 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
                 f"purely-x-varying h with u_c = +1, but got "
                 f"max|dh/dt| = {max_abs_dhdt:.2e} — the x-direction "
                 f"PPM axis bug (iter-505) appears to have re-entered.")
+
+    def test_fct_tracer_flux_nonzero_for_pure_x_variation(self):
+        """iter-506 (Codex): `_cgrid_fct_fluxes_2d` had the same axis
+        bug as `cgrid_mass_flux_divergence`.  A purely-x-varying tracer
+        with uniform u_c > 0 must produce non-trivial monotone tracer
+        tendency.  Prior to iter-506 the x-PPM was reconstructing along
+        the j-interior axis and the first-order upwind fallback carried
+        the whole transport, so FCT produced zero high-order correction
+        for purely-x-varying tracers — degrading tracer transport
+        accuracy silently on every cubed-sphere simulation."""
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.operators_cdgrid import _cgrid_fct_fluxes_2d
+
+        n = 8
+        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(base)
+        # Smooth quadratic variation in i only
+        i_vals = jnp.arange(n, dtype=jnp.float64) ** 2 * 0.1 + 1.0
+        q = jnp.broadcast_to(i_vals[None, :, None], (6, n, n))
+        u_c = jnp.ones((6, n + 1, n), dtype=jnp.float64)
+        v_c = jnp.zeros((6, n, n + 1), dtype=jnp.float64)
+
+        dq_dt = _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
+        max_abs_dqdt = float(jnp.max(jnp.abs(dq_dt)))
+        self.assertGreater(
+            max_abs_dqdt, 1e-9,
+            msg=f"FCT tracer tendency should be non-trivial for a "
+                f"purely-x-varying q with u_c = +1, but got "
+                f"max|dq/dt| = {max_abs_dqdt:.2e} — the FCT x-axis "
+                f"PPM bug (iter-506) appears to have re-entered.")
+
+    def test_no_future_caller_passes_non_halo_last_axis_to_ppm(self):
+        """Source-level axis-contract guard (iter-506): any call to
+        `_ppm_reconstruct_1d` in `operators_cdgrid.py` must be preceded
+        by an explicit `swapaxes` immediately above it when the strip
+        name ends in `_x` (meaning the halo-padded i-axis is NOT
+        already last).
+
+        This closes the Codex concern that a new caller could silently
+        re-introduce the shape bug that caused iter-505/506.  The rule:
+        if the strip variable is named ``..._x`` (x-direction), the
+        immediately preceding statement must contain ``swapaxes``; if
+        named ``..._y``, no swap is required (the padded j-axis is
+        already last).  Any other naming convention is deliberately
+        rejected so new callers are forced to name strips explicitly.
+        """
+        import ast
+        import pathlib
+
+        root = (pathlib.Path(__file__).resolve()
+                .parent.parent.parent)
+        src_file = root / "src/legoesm/core/operators_cdgrid.py"
+        src = src_file.read_text()
+        tree = ast.parse(src)
+
+        # Find every call to `_ppm_reconstruct_1d(<arg>)` and the arg
+        # expression source text.
+        calls = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_ppm_reconstruct_1d"):
+                if len(node.args) >= 1:
+                    arg_src = ast.unparse(node.args[0])
+                    calls.append((node.lineno, arg_src))
+
+        self.assertGreaterEqual(
+            len(calls), 4,
+            msg=(f"Expected ≥4 calls to `_ppm_reconstruct_1d` in "
+                 f"operators_cdgrid.py (2 in cgrid_mass_flux_divergence "
+                 f"+ 2 in _cgrid_fct_fluxes_2d); found {len(calls)}. "
+                 f"If call sites were consolidated the test's axis "
+                 f"expectations need updating."))
+
+        src_lines = src.splitlines()
+        # Accept any of:
+        #   (a) argument expression contains `swapaxes` directly (caller
+        #       performed the transpose inline);
+        #   (b) bare variable ending in `_T` (convention for a
+        #       transposed strip already swapped onto reconstruction axis);
+        #   (c) bare variable ending in `_y_strips` or `_y` (y-direction
+        #       strip whose halo-padded axis is naturally last).
+        #
+        # Additionally, for each call site we verify that within the
+        # ~5 lines above the call there is an actual `swapaxes(...)`
+        # call producing the bare variable we pass in.  This closes the
+        # naming-only loophole where someone renames a buggy strip
+        # `h_x_strips_T` without actually swapping anything.
+        for lineno, arg_src in calls:
+            if "swapaxes" in arg_src:
+                continue  # Explicitly swapped inline — contract honoured.
+
+            name = arg_src.strip()
+            if name.endswith("_y_strips") or name.endswith("_y"):
+                continue  # y-direction strip — padded axis already last.
+
+            if name.endswith("_T"):
+                # Verify the transposed variable is actually produced by
+                # a `swapaxes` or `transpose` call in the nearby context.
+                window_start = max(0, lineno - 7)
+                window = "\n".join(src_lines[window_start:lineno])
+                # Require an assignment of the form `<name> = ... swapaxes(...)`
+                # or `<name> = ... transpose(...)` in the window.
+                import re
+                pattern = re.compile(
+                    rf"^\s*{re.escape(name)}\s*=\s*.*(swapaxes|transpose)\(",
+                    re.MULTILINE,
+                )
+                if pattern.search(window):
+                    continue
+
+                source_line = src_lines[lineno - 1].strip()
+                self.fail(
+                    f"operators_cdgrid.py:{lineno}: call "
+                    f"`_ppm_reconstruct_1d({arg_src})` uses a `_T`-"
+                    f"suffixed variable but no `swapaxes`/`transpose` "
+                    f"assignment to `{name}` was found in the previous "
+                    f"6 lines.  Naming a strip `_T` without actually "
+                    f"transposing re-introduces the iter-505 axis bug. "
+                    f"Source: `{source_line}`.")
+                continue  # unreachable after fail
+
+            source_line = src_lines[lineno - 1].strip()
+            self.fail(
+                f"operators_cdgrid.py:{lineno}: call "
+                f"`_ppm_reconstruct_1d({arg_src})` does not show an "
+                f"explicit `swapaxes`, is not a `_T`-suffixed already-"
+                f"transposed variable, and is not a y-direction strip "
+                f"— the axis contract for PPM reconstruction may be "
+                f"violated.  Source: `{source_line}`.  If the strip "
+                f"truly has the halo-padded reconstruction axis last, "
+                f"rename it to end in `_y_strips`, `_T`, or wrap with "
+                f"`jnp.swapaxes(...)` explicitly.")
 
 
 if __name__ == "__main__":

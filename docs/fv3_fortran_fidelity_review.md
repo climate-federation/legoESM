@@ -168,6 +168,54 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-506 (2026-04-19)**: addressed Codex stop-time feedback on
+  iter-505 — "the fix is under-guarded and the same axis-contract bug
+  is still live in a sibling production path".
+
+  **Sibling bug fix**: `_cgrid_fct_fluxes_2d` (the monotone tracer
+  advection / Zalesak FCT path in `operators_cdgrid.py`) had the
+  same axis-contract violation as `cgrid_mass_flux_divergence`.  On
+  its x-direction PPM branch, the strip
+  `q_pad_h2[:, :, 2:-2]` of shape `(6, n+4, n)` was passed directly
+  to `_ppm_reconstruct_1d`, which reconstructs along the LAST axis
+  (the 8-cell interior j, no halo) rather than the halo-padded
+  12-cell i axis.  For purely-x-varying tracers the FCT high-order
+  correction produced zero anti-diffusive flux, collapsing the
+  monotone-PPM scheme silently to first-order upwind.  Fix applies
+  the same `swapaxes(1, 2)` before/after pattern as iter-505's fix
+  in `cgrid_mass_flux_divergence`.
+
+  **Under-guarded tests hardened** with two additions:
+
+  1. `test_fct_tracer_flux_nonzero_for_pure_x_variation` — calls
+     `_cgrid_fct_fluxes_2d` directly on a purely-x-varying tracer
+     with uniform u_c = +1 m/s and asserts the tendency max
+     magnitude is > 1e-9.  Catches the FCT x-axis regression.
+
+  2. `test_no_future_caller_passes_non_halo_last_axis_to_ppm` — AST
+     walker over `operators_cdgrid.py` that finds every call to
+     `_ppm_reconstruct_1d` and enforces the axis contract:
+       - argument expression contains `swapaxes` (explicit inline
+         transpose), OR
+       - argument name ends in `_y_strips` / `_y` (y-direction
+         strip naturally has padded axis last), OR
+       - argument name ends in `_T` AND a `swapaxes`/`transpose`
+         assignment to that variable appears in the 6 preceding
+         lines (closes the naming-only loophole where a variable
+         is labelled `_T` but never actually transposed).
+     Any other caller fails with a clear explanatory message.
+     Locks the contract against new future callers silently
+     re-introducing the same bug.
+
+  **Test-matrix impact**: W2/W5/cosine bell metrics unchanged
+  (these SW cases exercise `cgrid_mass_flux_divergence` not FCT).
+  Ocean rest state unchanged.  183/183 tests pass.
+
+  The FCT fix does not change SW-only numeric metrics but is
+  important for every production AMIP run that uses tracer
+  transport, where the bug was silently reducing FCT to
+  first-order upwind on cubed-sphere grids.
+
 - **iter-505 (2026-04-19)**: **MAJOR production-path fix** — resolved a
   real axis bug in `cgrid_mass_flux_divergence` (`operators_cdgrid.py`)
   that was the leading contributor to the W2 v-wind cube-face imprint

@@ -594,9 +594,18 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     # ----------------------------------------------------------------
     q_pad_h2 = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4)
 
-    # X-direction PPM
-    q_x_strips = q_pad_h2[:, :, 2:-2]
-    q_L_x, q_R_x = _ppm_reconstruct_1d(q_x_strips)
+    # X-direction PPM — same axis-contract fix as
+    # `cgrid_mass_flux_divergence` (iter-505): `_ppm_reconstruct_1d`
+    # operates on the LAST axis, so transpose the strip to put the
+    # halo-padded i-axis last, reconstruct, then transpose back.
+    # Without this swap the FCT high-order flux used j-direction
+    # reconstructions at x-interfaces, making the FCT path silently
+    # mis-direction-ed on any cubed-sphere tracer transport.
+    q_x_strips = q_pad_h2[:, :, 2:-2]                   # (6, n+4, n)
+    q_x_strips_T = jnp.swapaxes(q_x_strips, 1, 2)        # (6, n, n+4)
+    q_L_x_T, q_R_x_T = _ppm_reconstruct_1d(q_x_strips_T)
+    q_L_x = jnp.swapaxes(q_L_x_T, 1, 2)                  # (6, n+4, n)
+    q_R_x = jnp.swapaxes(q_R_x_T, 1, 2)                  # (6, n+4, n)
     q_R_left = q_R_x[:, 1:n+2, :]
     q_L_right = q_L_x[:, 2:n+3, :]
     q_face_hi_x = jnp.where(u_c > 0, q_R_left, q_L_right)
@@ -606,7 +615,9 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     q_face_max_x = jnp.maximum(q_left_x, q_right_x)
     q_face_hi_x = jnp.clip(q_face_hi_x, q_face_min_x, q_face_max_x)
 
-    # Y-direction PPM
+    # Y-direction PPM — the strip shape (6, n, n+4) already has the
+    # halo-padded j-axis last, so `_ppm_reconstruct_1d` naturally
+    # reconstructs along y.  No swap needed.
     q_y_strips = q_pad_h2[:, 2:-2, :]
     q_L_y, q_R_y = _ppm_reconstruct_1d(q_y_strips)
     q_R_bottom = q_R_y[:, :, 1:n+2]
