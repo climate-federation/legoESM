@@ -2363,17 +2363,13 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         f_corner_np = np.asarray(cdgrid.f_corner)
         expected = f_corner_np + rarea_c_np * vort_raw
 
-        # Production output must match this "no-correction"
-        # reproduction AT THE 4 CUBE VERTICES within float32
-        # precision.  If the gate were broken (correction fires
-        # in duogrid mode), production would equal
-        # expected + delta instead.
+        # --- Under-duogrid check: production must match the
+        # "no-correction" reproduction at cube vertices.  Catches
+        # gate INVERSION (where the correction would wrongly
+        # fire in duogrid mode).
         for (ci, cj) in [(0, 0), (n, 0), (n, n), (0, n)]:
             diff = float(np.max(np.abs(
                 vort_prod[:, ci, cj] - expected[:, ci, cj])))
-            # Tolerance: float32 precision on inputs with
-            # magnitude ~ 10 gives diffs ~ 1e-6 at the scale
-            # of the computation.
             assert diff < 1e-5, (
                 f"Cube-vertex ({ci},{cj}): production output "
                 f"differs from 'no-correction' reproduction by "
@@ -2382,6 +2378,66 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
                 f"mode — the `if not use_duogrid:` gate at "
                 f"fv3_sw_core.py:1129 is broken.  Constraint "
                 f"#2 violated.")
+
+        # --- Iter-584 (Codex follow-up): complementary
+        # non-duogrid check.  If the correction BODY is
+        # silently DELETED (empty if-block, or correction
+        # removed from the function entirely), the above
+        # duogrid check still passes (no correction → matches
+        # no-correction reproduction).
+        #
+        # Verify that under non-duogrid, production output
+        # EQUALS (no-correction reproduction + correction
+        # delta) — proving the correction body IS executing
+        # in the non-duogrid path.
+        vort_nonduogrid = np.asarray(
+            _corner_vorticity(uc, vc, cdgrid, use_duogrid=False))
+
+        # Under non-duogrid, line 1118 linear-extrapolation
+        # override fires, so fx_pad/fy_pad differ from the
+        # duogrid 'mode=edge' version.  Rebuild them:
+        fx_pad_nd = np.pad(
+            fx_circ_np, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        fy_pad_nd = np.pad(
+            fy_circ_np, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        if n > 2:
+            fx_pad_nd[:, :, 0] = (2 * fx_circ_np[:, :, 0]
+                                   - fx_circ_np[:, :, 1])
+            fx_pad_nd[:, :, n + 1] = (2 * fx_circ_np[:, :, n - 1]
+                                       - fx_circ_np[:, :, n - 2])
+            fy_pad_nd[:, 0, :] = (2 * fy_circ_np[:, 0, :]
+                                   - fy_circ_np[:, 1, :])
+            fy_pad_nd[:, n + 1, :] = (2 * fy_circ_np[:, n - 1, :]
+                                       - fy_circ_np[:, n - 2, :])
+
+        vort_raw_nd = (
+            fx_pad_nd[:, :, :-1] - fx_pad_nd[:, :, 1:]
+            - fy_pad_nd[:, :-1, :] + fy_pad_nd[:, 1:, :])
+
+        # Expected non-duogrid output with correction applied:
+        vort_raw_nd_with = vort_raw_nd.copy()
+        vort_raw_nd_with[:, 0, 0] += fy_pad_nd[:, 0, 0]
+        vort_raw_nd_with[:, n, 0] -= fy_pad_nd[:, n + 1, 0]
+        vort_raw_nd_with[:, n, n] -= fy_pad_nd[:, n + 1, n]
+        vort_raw_nd_with[:, 0, n] += fy_pad_nd[:, 0, n]
+        expected_nd_with_correction = (
+            f_corner_np + rarea_c_np * vort_raw_nd_with)
+
+        for (ci, cj) in [(0, 0), (n, 0), (n, n), (0, n)]:
+            diff_nd = float(np.max(np.abs(
+                vort_nonduogrid[:, ci, cj]
+                - expected_nd_with_correction[:, ci, cj])))
+            assert diff_nd < 1e-5, (
+                f"Cube-vertex ({ci},{cj}) under "
+                f"use_duogrid=False: production differs from "
+                f"'WITH-correction' reproduction by "
+                f"{diff_nd:.3e}.  This means the legacy corner "
+                f"correction body is NOT executing under "
+                f"non-duogrid mode either — the body may have "
+                f"been silently DELETED or moved outside the "
+                f"`if not use_duogrid:` block.  Constraint #2 "
+                f"requires the body to fire in the non-duogrid "
+                f"path.")
 
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`

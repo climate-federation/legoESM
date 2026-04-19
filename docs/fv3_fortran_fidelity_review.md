@@ -197,6 +197,53 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-584 (2026-04-20)**: addressed Codex stop-time review of
+  iter-583: "iter-583 still does not lock the correction-body
+  deletion case".
+
+  Iter-583's under-duogrid check (production matches no-
+  correction reproduction) PASSES if the correction body is
+  silently DELETED (empty `if not use_duogrid: pass`) — because
+  with a deleted body, the correction never fires and
+  production always matches the no-correction reproduction.
+
+  Iter-584 adds a COMPLEMENTARY non-duogrid check:
+    - Run production with `use_duogrid=False`.
+    - Reproduce the non-duogrid output with the correction
+      APPLIED (using the iter-552 linear-extrapolated
+      `fx_pad`/`fy_pad` and the 4 cube-vertex `fy_pad`
+      add/subtract deltas).
+    - Assert production at the 4 cube vertices EQUALS the
+      with-correction reproduction to 1e-5.
+
+  If the correction body is deleted, production under non-
+  duogrid LACKS the delta but the reproduction HAS it, so the
+  test fires.
+
+  **Three-stage sanity check**:
+    (i)  Gate removed (`if not use_duogrid:` → bare body):
+         iter-581 AST fires (0 vs 1 gates).
+    (ii) Gate inverted (`if not use_duogrid:` → `if use_duogrid:`):
+         iter-581 AST fires AND iter-583 under-duogrid
+         behavioral fires (diff 2.904e-05).
+    (iii) Body deleted (gate preserved, body → `pass`):
+          iter-581 AST still passes (1 gate present), iter-583
+          under-duogrid still passes (correction doesn't fire
+          in either mode), but iter-584 non-duogrid check
+          FIRES (diff 6.484e-05).
+
+  Combined, iter-581 + iter-583 + iter-584 now catch:
+    (a) gate removal
+    (b) gate inversion
+    (c) correction body relocation
+    (d) correction body deletion
+
+  This is a comprehensive four-mode regression lock for
+  Constraint #2 on `_corner_vorticity`.
+
+  No production-path numerical changes.  105/105 tests pass in
+  `test_duogrid.py`.
+
 - **iter-583 (2026-04-20)**: addressed Codex stop-time review of
   iter-582: "iter-582's new test does not actually fail when the
   `_corner_vorticity` corner-correction body is removed".
