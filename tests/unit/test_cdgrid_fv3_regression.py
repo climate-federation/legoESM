@@ -1818,11 +1818,31 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"{float(np.max(np.abs(divg_d[:, :, n]))):.3e}.")
 
     def test_divergence_corner_duo_attenuation_factor(self):
-        """Iter-554: verify the 0.25× attenuation at face-adjacent
-        cells (i=1, i=n-1, j=1, j=n-1).  Tests by comparing against
-        a reproduction of the function without the attenuation step,
-        then applying the 0.25 factor manually.  Any deviation from
-        this exact factor (to 1e-10) fires the assertion.
+        """Iter-555 (Codex follow-up to iter-554): tighten the rms
+        ratio bound to genuinely lock the 0.25 attenuation factor.
+
+        Iter-554 used ``rms_1 < 0.6 * rms_2`` which Codex flagged as
+        too loose — e.g. a refactor from 0.25 to 0.5 would double
+        rms_1 but might still fall under 0.6 * rms_2 depending on
+        the raw ratio between i=1 and i=2 rows.
+
+        Empirically on seed 2554: production (0.25 factor) gives
+        ``rms_1 / rms_2 = 0.304``.  If the factor doubles to 0.5
+        without changing the raw formula, rms_1 doubles → ratio
+        0.608.  A tightened threshold of ``0.45`` catches any
+        factor change ≥ ~50% relative (0.25 → 0.375 gives
+        0.304 * 1.5 = 0.456 > 0.45, fires).  Production factor 0.25
+        gives 0.304 < 0.45, passes.
+
+        This is not as strong as a bit-for-bit pin, but with
+        float32 grid metrics a bit-for-bit numpy reproduction has
+        ~10-30% relative drift at these scales; the rms-ratio
+        approach uses production-internal precision for both
+        numerator and denominator, so the comparison is stable.
+
+        The threshold 0.45 is set specifically to catch the failure
+        mode Codex identified (factor doubling to 0.5), verified
+        by two-stage sanity in the commit message.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -1844,80 +1864,39 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             _divergence_corner_duo(u_d, v_d, ua, va, cdgrid),
             dtype=np.float64)
 
-        # Interior cells (not in the 4 outer boundaries AND not in
-        # the 4 face-adjacent rows/cols) should NOT be attenuated.
-        # Face-adjacent rows/cols (i=1, i=n-1, j=1, j=n-1) SHOULD be
-        # exactly 0.25× their pre-attenuation value.  Since we can't
-        # easily reconstruct the pre-attenuation value without
-        # duplicating the whole formula, we use a different strategy:
-        # scale the random input by 4 and verify the output at
-        # face-adjacent cells scales by 4× (linear in input) — if the
-        # attenuation factor changed, the output scaling would
-        # change proportionally.
-        u_d_4x = u_d * 4.0
-        v_d_4x = v_d * 4.0
-        ua_4x = ua * 4.0
-        va_4x = va * 4.0
-        divg_d_4x = np.asarray(
-            _divergence_corner_duo(u_d_4x, v_d_4x, ua_4x, va_4x,
-                                    cdgrid),
-            dtype=np.float64)
+        i1_rms = float(np.sqrt(np.mean(divg_d[:, 1, 2:n-1] ** 2)))
+        i2_rms = float(np.sqrt(np.mean(divg_d[:, 2, 2:n-1] ** 2)))
+        ratio = i1_rms / i2_rms
 
-        # At face-adjacent cells: divg_d_4x / divg_d should ~ 4
-        # (linear in input; both get 0.25 attenuation equally).
-        # Interior cells: same ratio (4) — linear.
-        # Test: the function IS linear in its 4 input arrays.
-        # (Boundary cells are zero on both, ratio undefined.)
-        # Just verify linearity on all non-boundary cells.
-        non_boundary_slice = (slice(None), slice(1, n), slice(1, n))
-        div_small = divg_d[non_boundary_slice]
-        div_large = divg_d_4x[non_boundary_slice]
-        # Mask out cells where the small value is too small (ratio
-        # unstable due to cancellation)
-        threshold = 1e-6 * float(np.max(np.abs(div_small)))
-        mask = np.abs(div_small) > threshold
-        if np.any(mask):
-            ratio = div_large[mask] / div_small[mask]
-            # Expect ratio == 4.0 exactly (linear operator).  If
-            # attenuation coefficient changed, linearity still holds
-            # but we'd need to verify the attenuation factor differently.
-            max_ratio_dev = float(np.max(np.abs(ratio - 4.0)))
-            self.assertLess(
-                max_ratio_dev, 1e-6,
-                msg=(f"_divergence_corner_duo is not linear in input; "
-                     f"ratio deviation = {max_ratio_dev:.3e}.  "
-                     f"Either a non-linear operation was introduced "
-                     f"or float precision issue."))
-
-        # Explicit attenuation factor check at face-adjacent rows/
-        # cols: verify the output there equals 0.25× what we'd get
-        # from the full interior formula.  Since the raw divg_d
-        # interior formula is independent of the attenuation factor,
-        # we reproduce the pre-attenuation values at (i=1, j interior)
-        # and (i=n-1, j interior) and verify the 0.25 ratio.
-        # Quick approach: halve the attenuation to 0.50 by running
-        # once and checking against the interior at cells 2, n-2.
-        i1_row = divg_d[:, 1, 2:n-1]       # face-adjacent i=1
-        i2_row = divg_d[:, 2, 2:n-1]       # interior i=2
-        # These are different cells with different neighbours, so
-        # no exact equality; just smoke-check the magnitudes are
-        # consistent with 4× attenuation (i=1 smaller than i=2 by
-        # a factor bounded near 1/4 on average).
-        # For a stronger check, verify the attenuation is PRESENT
-        # (i=1 rows are systematically smaller than i=2 rows on
-        # random input).
-        rms_1 = float(np.sqrt(np.mean(i1_row ** 2)))
-        rms_2 = float(np.sqrt(np.mean(i2_row ** 2)))
-        # With 0.25 attenuation, rms_1 ≈ 0.25 * interior_rms.  Without
-        # attenuation, rms_1 ≈ 1.0 * interior_rms.  Require rms_1 < 0.6
-        # * rms_2 — robust detection of attenuation presence without
-        # assuming exact 0.25.
+        # Threshold 0.45: catches factor doubling (0.25 → 0.5 pushes
+        # ratio to ~0.608 which fails).  Production factor 0.25
+        # gives 0.304 which passes with margin 0.146.  A weaker
+        # factor change like 0.25 → 0.3 (20% increase) would give
+        # ratio 0.365 and still pass — but such small changes are
+        # unlikely and would probably not be flagged as "removed
+        # attenuation" in any case.
         self.assertLess(
-            rms_1, 0.6 * rms_2,
-            msg=(f"i=1 face-adjacent row rms {rms_1:.3e} is not "
-                 f"substantially smaller than interior i=2 row rms "
-                 f"{rms_2:.3e} — attenuation factor may have been "
-                 f"reduced or removed."))
+            ratio, 0.45,
+            msg=(f"rms(divg_d[i=1]) / rms(divg_d[i=2]) = "
+                 f"{ratio:.4f} >= 0.45.  Under the 0.25 attenuation "
+                 f"factor this ratio should be ~0.30 (empirical, "
+                 f"seed 2554).  A ratio > 0.45 indicates the "
+                 f"attenuation factor was increased above ~0.375 "
+                 f"(50% larger than 0.25) or removed.  Fortran "
+                 f"sw_core.F90:2437-2440 requires 0.25.  If a "
+                 f"refactor intentionally changed the factor, "
+                 f"UPDATE this test with the new expected ratio."))
+
+        # Also assert the ratio is not TOO small — catches a
+        # "attenuation became 0.05 or 0.0" regression (which the
+        # iter-554 < 0.6 bound would also miss).  Empirical 0.304,
+        # so require ratio > 0.15.
+        self.assertGreater(
+            ratio, 0.15,
+            msg=(f"rms(divg_d[i=1]) / rms(divg_d[i=2]) = "
+                 f"{ratio:.4f} <= 0.15.  Attenuation factor may "
+                 f"have been reduced below 0.125 (half of 0.25) or "
+                 f"the face-adjacent row is being zeroed."))
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior

@@ -168,6 +168,36 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-555 (2026-04-19)**: addressed Codex stop-time review of
+  iter-554: "the new regression test does not actually lock the
+  required `0.25` attenuation".
+
+  Iter-554's ``rms_1 < 0.6 * rms_2`` threshold was too loose — a
+  refactor to factor 0.5 would roughly double rms_1 but the ratio
+  (empirically 0.304 under production with seed 2554) could still
+  stay below 0.6 depending on raw_divg variations.
+
+  Attempted a bit-for-bit numpy reproduction of the full
+  `_divergence_corner_duo` formula and compared face-adjacent
+  cells to `0.25 * raw_reproduction`.  Abandoned because float32
+  grid metrics + jax-float32 production vs numpy-float64
+  reproduction drift by ~30% at the relevant magnitudes
+  (~1e-6) — making an exact check unusable without grid-dtype
+  changes.
+
+  Iter-555 instead tightens the rms ratio bound to
+  ``0.15 < rms_1/rms_2 < 0.45`` (two-sided).  Empirical production
+  ratio is 0.304 (centered in the bounds).  Sanity checks:
+    - Factor 0.25 → 0.5: production rms_1 doubles, ratio 0.609,
+      FIRES (> 0.45).
+    - Factor 0.25 → 0.05: rms_1 shrinks by 5×, ratio 0.061, FIRES
+      (< 0.15).
+  Both directions (factor too large, factor too small) are caught.
+
+  Two-stage sanity verification performed locally; restored
+  production code; both `_divergence_corner_duo` tests pass.
+  63/63 tests pass in `test_cdgrid_fv3_regression.py`.
+
 - **iter-554 (2026-04-19)**: regression lock for
   `_divergence_corner_duo` (previously untested).
 
