@@ -211,6 +211,25 @@ class TestHaloInterpOffsets:
         offsets = compute_halo_interp_offsets_h2(N)
         assert offsets.shape == (6, 4, 2, N)
 
+    def test_offset_shape_h3(self):
+        """Iter-496: halo=3 interp-offset scaffolding for FB-chain
+        stability work.  The h3 offsets are a strict extension of h2:
+        depths 0-1 match h2 bitwise; depth 2 is new.
+        """
+        from legoesm.grids.halo import compute_halo_interp_offsets_h3
+        offsets_h1 = compute_halo_interp_offsets(N)
+        offsets_h2 = compute_halo_interp_offsets_h2(N)
+        offsets_h3 = compute_halo_interp_offsets_h3(N)
+        assert offsets_h3.shape == (6, 4, 3, N)
+        # h1 ≡ h2[depth=0] ≡ h3[depth=0]
+        np.testing.assert_array_equal(
+            np.asarray(offsets_h2[:, :, 0, :]), np.asarray(offsets_h1))
+        # h2 ≡ h3[depth=:2]
+        np.testing.assert_array_equal(
+            np.asarray(offsets_h3[:, :, :2, :]), np.asarray(offsets_h2))
+        # Depth 2 offsets are bounded (O(1) near cube vertices, typically <3)
+        assert float(jnp.max(jnp.abs(offsets_h3[:, :, 2, :]))) < 3.0
+
     def test_interpolated_constant_field(self):
         """With interpolation offsets, constant field should still be exact."""
         offsets = compute_halo_interp_offsets(N)

@@ -238,18 +238,56 @@ def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
         that the true fractional index on the neighbour strip at that
         depth is ``j + δ``.
     """
+    return _compute_halo_interp_offsets_hN(n, halo=2)
+
+
+def compute_halo_interp_offsets_h3(n: int) -> jnp.ndarray:
+    """Precompute fractional-index offsets for halo=3 exchange.
+
+    Like :func:`compute_halo_interp_offsets_h2` but returns offsets for
+    three halo depths (depth 0 = adjacent to interior, depth 2 = outer).
+
+    This supports the FB-path stability work that requires deeper halos
+    to reach stable c_sw/d_sw stencils at C36 resolution.
+
+    Parameters
+    ----------
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    offsets : jax.Array, shape (6, 4, 3, n)
+        ``offsets[face, edge_idx, depth, j]`` is the correction δ such
+        that the true fractional index on the neighbour strip at that
+        depth is ``j + δ``.
+    """
+    return _compute_halo_interp_offsets_hN(n, halo=3)
+
+
+def _compute_halo_interp_offsets_hN(n: int, halo: int) -> jnp.ndarray:
+    """General N-depth halo interp-offset precomputation.
+
+    Shared implementation for :func:`compute_halo_interp_offsets_h2`
+    and :func:`compute_halo_interp_offsets_h3` — folded into a single
+    function so the per-depth gnomonic→neighbour mapping logic is in
+    one place.
+    """
+    if halo < 1:
+        raise ValueError(f"halo must be >= 1, got {halo}")
+
     dalpha = np.pi / (2 * n)
     alpha = np.linspace(-np.pi / 4, np.pi / 4, n, endpoint=False) + dalpha / 2
 
     edges = [WEST, EAST, SOUTH, NORTH]
-    offsets = np.zeros((6, 4, 2, n), dtype=np.float64)
+    offsets = np.zeros((6, 4, halo, n), dtype=np.float64)
 
     for face in range(6):
         for edge_idx, edge in enumerate(edges):
             nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
 
-            for depth in range(2):
-                # Distance from boundary: depth=0 → dα/2, depth=1 → 3dα/2
+            for depth in range(halo):
+                # Distance from boundary: depth=0 → dα/2, depth=k → (2k+1)dα/2
                 d = dalpha / 2 + depth * dalpha
 
                 for j in range(n):
