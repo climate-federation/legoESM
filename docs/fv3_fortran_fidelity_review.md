@@ -168,6 +168,37 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-523 (2026-04-19)**: addressed Codex stop-time review of
+  iter-522: "the new 'drift' assertion is tautological and does
+  not actually protect against matrix snapshot-step drift."
+  iter-522's `len(per_snap) == len(snap_steps)` check was
+  tautological because both sides were derived from the SAME
+  local copy of `_snapshot_steps` — drift between the local
+  copy and the matrix's real function could not be detected.
+
+  iter-523 fix: extract `_snapshot_steps` directly from the
+  matrix script via AST.  Approach:
+    - parse `scripts/run_atmosphere_test_matrix.py`
+    - locate the `_snapshot_steps` `FunctionDef` node
+    - compile + exec into an isolated namespace
+    - call the resulting function with `(n_steps=288, n_snaps=10)`
+  This avoids importing the whole matrix module (which contains
+  module-level dataclasses that break dynamic exec on Python 3.14).
+
+  Replaced the tautological `len()` check with a hard-pin to the
+  EXACT expected step set:
+  `{0, 28, 57, 86, 115, 144, 172, 201, 230, 259, 288}`.
+  Any drift in the matrix's `_snapshot_steps` formula now fires
+  the test with the actual vs expected sorted lists side by side.
+
+  Sanity-checked drift detection by simulating a hypothetical
+  matrix refactor (`int()` → `round()`): produces
+  `[0, 29, 58, 86, 115, 144, 173, 202, 230, 259, 288]` which
+  differs from the expectation in 5 of 11 entries → test
+  correctly fires.
+
+  No production-path numerical changes.  229/229 tests pass.
+
 - **iter-522 (2026-04-19)**: addressed Codex stop-time review of
   iter-521: "iter-521 does not actually sample the matrix's
   snapshot times".  iter-521 used

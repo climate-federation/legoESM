@@ -2673,28 +2673,43 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             v_north_cc = sa_4edge * u_cc + ca_4edge * v_cc
             return apply_cubedsphere_to_latlon(v_north_cc, w)
 
-        # Iter-521 (Codex): track v_ll across the matrix's actual
-        # snapshot times (`_snapshot_steps(n_steps, n_snaps=10)`) —
-        # the visible artifact in `snapshots_v.png` is the temporal
-        # evolution, not just the final state.  Lock the max across
-        # ALL matrix snapshot times so a regression that shifts the
-        # peak to an intermediate time still fires.
-        # iter-522 (Codex follow-up): replicate the matrix's
-        # `_snapshot_steps` formula EXACTLY (truncate, not round; i
-        # starts at 1, not 0; include both endpoints 0 and n_steps).
-        # iter-521's `round((i+1) * n_steps / n_snaps)` produced a
-        # different set of steps from the matrix's
-        # `int(i * n_steps / n_snaps)`.
-        def _matrix_snapshot_steps(n_steps_, n_snaps_=10):
-            """EXACT copy of `run_atmosphere_test_matrix.py::_snapshot_steps`."""
-            if n_steps_ <= 0:
-                return set()
-            s = {0, n_steps_}
-            for i_ in range(1, n_snaps_):
-                s.add(max(1, int(i_ * n_steps_ / n_snaps_)))
-            return s
-
-        snap_steps = _matrix_snapshot_steps(n_steps, n_snaps_=10)
+        # Iter-521/522/523: track v_ll across the matrix's actual
+        # snapshot times — the visible artifact in `snapshots_v.png`
+        # is the temporal evolution, not just the final state.
+        #
+        # iter-523 (Codex follow-up): import the matrix's actual
+        # `_snapshot_steps` instead of a local copy, so any change to
+        # the matrix function automatically propagates here.
+        # iter-522's tautological `len(per_snap) == len(snap_steps)`
+        # check could not detect drift between the test's local copy
+        # of the formula and the matrix's real one.  Real drift
+        # detection requires using the SAME function.
+        #
+        # The matrix script is at scripts/, not on the package path.
+        # Parse just `_snapshot_steps` out via AST and exec it in an
+        # isolated namespace — avoids importing the whole script (which
+        # contains module-level dataclasses that break dynamic exec).
+        import ast
+        import pathlib
+        repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
+        matrix_src = (repo_root / "scripts/run_atmosphere_test_matrix.py"
+                      ).read_text()
+        matrix_tree = ast.parse(matrix_src)
+        snap_func_def = next(
+            (n for n in matrix_tree.body
+             if isinstance(n, ast.FunctionDef)
+             and n.name == "_snapshot_steps"),
+            None,
+        )
+        self.assertIsNotNone(
+            snap_func_def,
+            msg="Matrix's `_snapshot_steps` function not found — "
+                "the matrix script may have been refactored.")
+        local_ns: dict = {}
+        exec(compile(ast.Module(body=[snap_func_def], type_ignores=[]),
+                     filename="<matrix _snapshot_steps>", mode="exec"),
+             local_ns)
+        snap_steps = local_ns["_snapshot_steps"](n_steps, n_snaps=10)
 
         # Snapshot at step 0 (initial state) is always present.
         max_v_ll_per_snap = []
@@ -2710,13 +2725,24 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                     (step_done,
                      float(np.max(np.abs(_extract_v_ll(state))))))
 
-        # Sanity-check that we hit exactly the expected number of
-        # snapshot steps; if `_snapshot_steps` ever changes, this fires.
+        # Lock the EXACT step set against drift in the matrix
+        # function: pin the expected step set explicitly so changing
+        # `_snapshot_steps` (in the matrix script) without updating
+        # this expectation triggers the test.  Listing the exact
+        # values is the only way to detect drift in the formula
+        # itself — a `len(...) == ...` check would be tautological
+        # because we built `max_v_ll_per_snap` by iterating
+        # `snap_steps`.
+        expected_snap_steps = {0, 28, 57, 86, 115, 144, 172, 201,
+                               230, 259, 288}  # n_steps=288, n_snaps=10
         self.assertEqual(
-            len(max_v_ll_per_snap), len(snap_steps),
-            msg=(f"Snapshot count mismatch: collected "
-                 f"{len(max_v_ll_per_snap)} but expected "
-                 f"{len(snap_steps)} from matrix _snapshot_steps."))
+            snap_steps, expected_snap_steps,
+            msg=(f"Matrix `_snapshot_steps` produced {sorted(snap_steps)} "
+                 f"for n_steps=288 n_snaps=10; expected "
+                 f"{sorted(expected_snap_steps)}.  If you changed the "
+                 f"matrix's `_snapshot_steps` formula, update this "
+                 f"expectation AND verify the saved snapshots_*.npz "
+                 f"files in `results/atmosphere/.../C36/` still align."))
 
         max_v_ll_overall = max(v for _, v in max_v_ll_per_snap)
 
