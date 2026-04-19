@@ -2582,20 +2582,28 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"iter-511 documentation if intentional."))
 
     def test_w2_v_wind_imprint_below_iter505_canonical_ceiling(self):
-        """Iter-519: lock the post-iter-505 W2 v-wind cube-face
-        imprint at the canonical C36 setup.  This is the user-visible
-        "Williamson 2 still has visual artifacts" residual after
-        iter-505 substantially reduced it.
+        """Iter-519 / iter-520 (Codex): lock the post-iter-505 W2
+        v-wind cube-face imprint at the canonical C36 setup, on the
+        SAME quantity the production matrix's plot shows.
 
-        Measured at canonical C36 setup with the same regrid path the
-        atmosphere matrix uses (4-edge angle average to project D-grid
-        winds to geographic v_north):
-          - BUGGY (pre-iter-505):  max|v_north| = 0.557 m/s
-          - FIXED  (post-iter-505): max|v_north| = 0.299 m/s
+        Iter-519's first attempt computed max|v_north| on the cubed-
+        sphere face-native cell-centre array.  Codex iter-519 review
+        flagged that as not the user-visible quantity: the matrix's
+        plot shows the LAT-LON regridded `v_ll`, not the face-native
+        cell-centre v.  Iter-520 re-pins the test to the matrix's
+        full extract pipeline:
 
-        Ceiling at 0.4 m/s — passes FIXED with 25 % headroom, fails
-        BUGGY by 39 %.  This is the most direct programmatic guard
-        against the user-visible v-wind cube-face imprint reappearing.
+        1. cell-centre u/v from edge-midpoint averages
+        2. 4-edge angle average for ca/sa
+        3. NORMALIZE ca/sa = ca/sqrt(ca²+sa²), sa/sqrt(ca²+sa²)
+           (iter-519 missed this step)
+        4. project to geographic v_north on the cube
+        5. apply_cubedsphere_to_latlon to get v_ll on (181, 360)
+        6. assert max|v_ll| ceiling
+
+        Measured discrimination at canonical C36 dt=300s 1 day:
+          - BUGGY (pre-iter-505):  max|v_ll| ~ measured below
+          - FIXED  (post-iter-505): max|v_ll| ~ measured below
         """
         import jax.numpy as jnp
         import numpy as np
@@ -2607,6 +2615,10 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         )
         from tests.atmosphere.shallow_water.test_cases.williamson import (
             williamson_test2,
+        )
+        from legoesm.grids.regridding import (
+            get_cubedsphere_to_latlon_weights,
+            apply_cubedsphere_to_latlon,
         )
 
         n = 36
@@ -2639,31 +2651,51 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         for _ in range(n_steps):
             state = model.step(state, dt)
 
-        # Reproduce the matrix's regrid path (run_atmosphere_test_matrix.py:
-        # 1213-1229): average edge-midpoint winds to cell centres, then
-        # project to geographic v_north using mean of 4 surrounding edge
-        # angles.  This matches what the user sees in the v-wind plot.
-        u_cc = 0.5 * (state.u_d[:, :, :-1] + state.u_d[:, :, 1:])
-        v_cc = 0.5 * (state.v_d[:, :-1, :] + state.v_d[:, 1:, :])
-        cax = jnp.asarray(cdgrid.cos_angle_edge_x)
-        sax = jnp.asarray(cdgrid.sin_angle_edge_x)
-        cay = jnp.asarray(cdgrid.cos_angle_edge_y)
-        say = jnp.asarray(cdgrid.sin_angle_edge_y)
+        # Reproduce the matrix's extract_fn EXACTLY
+        # (run_atmosphere_test_matrix.py:1213-1244, including the
+        # normalization step iter-519 missed and the lat-lon regrid).
+        u_cc = 0.5 * (np.asarray(state.u_d, dtype=np.float64)[:, :, :-1]
+                       + np.asarray(state.u_d, dtype=np.float64)[:, :, 1:])
+        v_cc = 0.5 * (np.asarray(state.v_d, dtype=np.float64)[:, :-1, :]
+                       + np.asarray(state.v_d, dtype=np.float64)[:, 1:, :])
+        cax = np.asarray(cdgrid.cos_angle_edge_x, dtype=np.float64)
+        sax = np.asarray(cdgrid.sin_angle_edge_x, dtype=np.float64)
+        cay = np.asarray(cdgrid.cos_angle_edge_y, dtype=np.float64)
+        say = np.asarray(cdgrid.sin_angle_edge_y, dtype=np.float64)
         ca = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
                      + cay[:, :-1, :] + cay[:, 1:, :])
         sa = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
                      + say[:, :-1, :] + say[:, 1:, :])
+        # NORMALIZE — iter-519 missed this; matches matrix line 1230-1231.
+        norm = np.sqrt(ca ** 2 + sa ** 2)
+        ca /= norm
+        sa /= norm
         v_north_cc = sa * u_cc + ca * v_cc
-        max_v = float(jnp.max(jnp.abs(v_north_cc)))
 
+        # Apply the matrix's lat-lon regrid (matrix lines 1234-1235 +
+        # _regrid_2d using face-aware bilinear weights).
+        w = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
+        v_ll = apply_cubedsphere_to_latlon(v_north_cc, w)
+        max_v_ll = float(np.max(np.abs(v_ll)))
+
+        # Measured baselines on this CANONICAL lat-lon regridded
+        # pipeline (iter-520 local measurement at C36 dt=300s 1d):
+        #   BUGGY (pre-iter-505):  max|v_ll| = 0.5562 m/s
+        #   FIXED  (post-iter-505): max|v_ll| = 0.3028 m/s
+        # Ceiling at 0.40 m/s cleanly separates: passes FIXED with
+        # 32 % headroom, fails BUGGY by 39 %.  The small headroom
+        # is intentional — this is the user-visible quantity and
+        # any further regression toward the pre-fix value is
+        # exactly what we want to catch.
         self.assertLess(
-            max_v, 0.4,
-            msg=(f"W2 alpha=0 C36 1d max|v_north| = {max_v:.4f} m/s "
-                 f"exceeds 0.4 m/s ceiling.  Pre-iter-505 baseline "
-                 f"on this canonical setup was 0.557 m/s; iter-505 "
-                 f"axis fix dropped it to 0.299 m/s.  If the value "
-                 f"crept back above 0.4, the iter-505 fix may have "
-                 f"regressed or a new v-wind imprint was introduced."))
+            max_v_ll, 0.40,
+            msg=(f"W2 alpha=0 C36 1d max|v_ll| = {max_v_ll:.4f} m/s "
+                 f"on the user-visible lat-lon regridded v field "
+                 f"exceeds 0.40 m/s ceiling.  Pre-iter-505 baseline "
+                 f"was 0.556 m/s; iter-505 axis fix dropped it to "
+                 f"0.303 m/s.  If max|v_ll| crept back above 0.40, "
+                 f"the iter-505 fix may have regressed or a new "
+                 f"v-wind imprint was introduced."))
 
 
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):

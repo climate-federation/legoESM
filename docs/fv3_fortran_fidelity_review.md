@@ -168,6 +168,38 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-520 (2026-04-19)**: re-pinned the iter-519 v-wind regression
+  to the canonical user-visible lat-lon regridded quantity, after
+  Codex stop-time review: "iter-519's new regression test does not
+  actually lock the canonical matrix quantity it claims to guard."
+
+  Iter-519 measured `max|v_north|` on the cubed-sphere face-native
+  cell-centre array.  But the matrix's W2 v-wind plot
+  (`results/.../snapshots_v.png`) shows the LAT-LON regridded
+  `v_ll`, not the face-native cell-centre v.  Iter-519 also missed
+  the matrix's normalization step (`norm = sqrt(ca²+sa²); ca/=norm;
+  sa/=norm` at run_atmosphere_test_matrix.py:1230-1231).
+
+  Iter-520 reproduces the matrix's `extract_fn` EXACTLY:
+    1. cell-centre u/v from edge-midpoint averages
+    2. 4-edge angle average for `ca`/`sa`
+    3. **normalize `ca`/`sa`** (was missing in iter-519)
+    4. project to geographic v_north on the cube
+    5. `apply_cubedsphere_to_latlon` (face-aware bilinear weights
+       from `legoesm.grids.regridding`) — gives `v_ll` of shape
+       (181, 360)
+    6. assert `max|v_ll| < 0.4 m/s`
+
+  Re-measured baselines on the FULL canonical lat-lon path:
+    - BUGGY (pre-iter-505):  max|v_ll| = 0.5562 m/s
+    - FIXED  (post-iter-505): max|v_ll| = 0.3028 m/s
+
+  Ceiling at 0.40 m/s — passes FIXED with 32 % headroom, fails
+  BUGGY by 39 %.  This is now the canonical user-visible quantity.
+
+  No production-path numerical changes (test re-pin only).
+  229/229 tests pass.
+
 - **iter-519 (2026-04-19)**: regenerated and inspected the W2 visual
   state post-iter-505, then locked the user-visible v-wind cube-face
   imprint at the canonical C36 setup as a regression guard.
