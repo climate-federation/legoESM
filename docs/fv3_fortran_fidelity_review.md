@@ -197,6 +197,55 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-568 (2026-04-19)**: addressed Codex stop-time review of
+  iter-567: "boundary-diff assertion is driven by unused
+  outer-edge cells, not production flux inputs".
+
+  Iter-567's stencil was `[1, 2, 3, 4, 3, 2, 1]` (length 7) and
+  the divergence assertion targeted cells i=0, 1, 5, 6.  But
+  production `cgrid_mass_flux_divergence` slices
+  `q_R[1:n+2]` and `q_L[2:n+3]` from a HALO=2-padded strip of
+  length `n+4`.  The outermost cells (i=0 and i=n+3) are NOT
+  consumed by production fluxes.
+
+  Iter-568 rewrites the test:
+    - Stencil length = `n+4 = 9` (n=5), mimicking the halo-2-
+      padded strip that `cgrid_mass_flux_divergence` receives.
+    - Non-trivial "halo" values at indices 0, 1, n+2, n+3
+      (different from `mode='edge'` extrapolation, so the
+      limiter is actually exercised).
+    - Assertion now asserts divergence in the
+      **PRODUCTION-USED RANGE** `q_R[1:n+2]`, `q_L[2:n+3]`
+      (inclusive, using slices `slice(1, n+2)` and
+      `slice(2, n+3)`).
+
+  **Empirical divergence in the production range** on the new
+  stencil `[0.5, 1, 2, 3, 4, 3, 2, 1.5, 0.75]`:
+    - CW q_R[1:7]: `[1.458, 2.500, 3.667, 4.000, 2.458, 1.083]`
+    - i8 q_R[1:7]: `[1.458, 2.500, 3.667, 4.000, 2.458, 1.729]`
+    - Diff at index 6 (next to halo): 0.646
+    - CW q_L[2:8]: `[1.458, 2.500, 4.000, 3.667, 2.458, 2.333]`
+    - i8 q_L[2:8]: `[1.458, 2.500, 4.000, 3.667, 2.458, 1.729]`
+    - Diff at index 7 (next to halo): 0.604
+
+  **Key insight**: the iter-542 documented CW-vs-iord==8
+  divergence DOES manifest in the production-used range, but
+  ONLY at the halo-boundary cells (the cells immediately
+  adjacent to the outermost halo).  This is exactly where CW's
+  `mode='edge'` padding disagrees with iord==8's dm-slope
+  extrapolation.  Interior cells (peak at i=4, shoulder at
+  i=3) remain IDENTICAL between the two schemes because both
+  use the 4th-order interior interpolant and both flatten at
+  local maxima.
+
+  Interior invariants locked via `assertAlmostEqual` at i=3
+  and i=4: future iord==8 ports should NOT change these.  The
+  divergence is expected ONLY at the halo-boundary cells,
+  which is where the porter's attention should be focused.
+
+  No production-path numerical changes.  64/64 tests pass in
+  `test_cdgrid_fv3_regression.py`.
+
 - **iter-567 (2026-04-19)**: concrete measurable divergence
   test for CW vs iord==8 PPM limiters.
 

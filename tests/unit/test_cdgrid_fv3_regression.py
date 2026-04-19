@@ -2995,16 +2995,42 @@ class TestPpmCwVsFv3Iord8Divergence(unittest.TestCase):
     implementation against the same stencil.
     """
 
-    def test_cw_vs_fv3_iord8_smooth_extremum_stencil(self):
-        """Stencil [1, 2, 3, 4, 3, 2, 1] — a smooth triangle with a
-        peak at i=3.  CW flattens at the peak; iord==8 uses the
-        dm-weighted slope-limited parabola."""
+    def test_cw_vs_fv3_iord8_on_production_halo_sliced_range(self):
+        """Iter-568 (Codex follow-up to iter-567): production's
+        `cgrid_mass_flux_divergence` slices `q_R[1:n+2]` and
+        `q_L[2:n+3]` from a halo=2-padded strip of length `n+4`.
+        The outermost cells (i=0 and i=n+3) are NOT used by
+        production fluxes.
+
+        Iter-567's stencil `[1,2,3,4,3,2,1]` (length 7) asserted
+        divergence at outer cells (i=0, i=6) which are OUTSIDE the
+        production-sliced range.  Codex correctly flagged this as
+        misleading — the divergence there doesn't affect W2/W5/cosine.
+
+        Iter-568 fixes this: construct a length-`n+4 = 9` strip
+        (n=5) with non-trivial "halo" values at indices 0, 1, n+2,
+        n+3, and compare CW vs iord==8 ONLY over the production-
+        used range (q_R at [1, n+1], q_L at [2, n+2]).  Assert
+        divergence in this range.
+
+        Production-used indices with n=5:
+          q_R[1:6] = q_R at indices 1, 2, 3, 4, 5  (n+1 faces)
+          q_L[2:7] = q_L at indices 2, 3, 4, 5, 6  (n+1 faces)
+        """
         import jax.numpy as jnp
         import numpy as np
         from legoesm.core.operators_cdgrid import _ppm_reconstruct_1d
 
+        n = 5
+        # Length-9 strip mimicking a halo-2-padded row.  Halo cells
+        # (0, 1, n+2=7, n+3=8) carry NON-TRIVIAL values (from
+        # a neighbouring face's interior), different from what
+        # mode='edge' would produce.  Interior (indices 2..n+1 =
+        # 2..6) is the actual face interior.
         q_np = np.array(
-            [1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0], dtype=np.float64)
+            [0.5, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.5, 0.75],
+            dtype=np.float64)
+        assert q_np.size == n + 4, "Stencil length must be n+4 = 9"
 
         # --- Path (A): our production CW ---
         q = jnp.asarray(q_np[None, :])
@@ -3012,18 +3038,25 @@ class TestPpmCwVsFv3Iord8Divergence(unittest.TestCase):
         q_L_cw = np.asarray(q_L[0], dtype=np.float64)
         q_R_cw = np.asarray(q_R[0], dtype=np.float64)
 
-        # CW flattens at the local max (i=3): q_L[3] = q_R[3] = 4.0
+        # The interior peak (q=4) is at index 4 on this stencil.
+        # CW flattens at the local max: q_L[4] = q_R[4] = 4.0
         self.assertAlmostEqual(
-            float(q_L_cw[3]), 4.0, places=10,
-            msg=(f"Production CW should flatten at local max; "
-                 f"got q_L[3] = {q_L_cw[3]:.6f}."))
+            float(q_L_cw[4]), 4.0, places=10,
+            msg=f"CW flattening at peak: q_L[4] = {q_L_cw[4]:.6f}.")
         self.assertAlmostEqual(
-            float(q_R_cw[3]), 4.0, places=10,
-            msg=f"CW flattening: q_R[3] = {q_R_cw[3]:.6f}.")
+            float(q_R_cw[4]), 4.0, places=10,
+            msg=f"CW flattening at peak: q_R[4] = {q_R_cw[4]:.6f}.")
 
         # --- Path (B): in-test reproduction of pyFV3 iord==8 ---
-        # pyFV3 xppm.py:80-97 (translated to numpy).
+        # pyFV3 xppm.py:80-97 (translated to numpy).  Note: both
+        # paths (A) and (B) operate on the SAME length-9 strip
+        # `q_np` as input.  Path A applies its internal
+        # `mode='edge'` padding; path B uses explicit halo cells
+        # at positions 0, 1, n+2, n+3 (already in q_np).
         N = q_np.size
+        # For iord==8 reproduction, we pad with mode='edge' just
+        # to have the 2-cell stencil context at the outermost
+        # strip cells.  Interior cells 2..n+1 use real neighbours.
         q_pad = np.pad(q_np, (2, 2), mode='edge')
 
         def dm_iord8plus(q_seq, i):
@@ -3057,58 +3090,67 @@ class TestPpmCwVsFv3Iord8Divergence(unittest.TestCase):
             q_L_iord8[i] = q_pad[k] + bl
             q_R_iord8[i] = q_pad[k] + br
 
-        # --- Assertion (2): iord==8 and CW DIVERGE at boundary cells
-        # where the two schemes handle the edge differently.
-        # Interior cells (shoulder i=2 and peak i=3) are identical on
-        # this triangular stencil because:
-        #   - at the peak, CW flattens AND iord==8's dm→0
-        #   - at the shoulder, the 4th-order interpolant gives the
-        #     same value as iord==8's linear-limited formula
-        # But at the BOUNDARY cells (i=0 and i=6), CW's mode='edge'
-        # padding produces different face values from iord==8's
-        # dm-slope extrapolation.
-        #
-        # Empirical values on [1,2,3,4,3,2,1]:
-        #   CW:    q_L = [0.92, 1.42, 2.50, 4.00, 3.67, 2.50, 1.42]
-        #   iord8: q_L = [1.00, 1.33, 2.50, 4.00, 3.67, 2.50, 1.00]
-        #   CW:    q_R = [1.17, 2.50, 3.67, 4.00, 2.50, 1.42, 0.17]
-        #   iord8: q_R = [1.00, 2.50, 3.67, 4.00, 2.50, 1.33, 1.00]
-        # Clear divergence at i=0, 1, 5, 6.
-        boundary_diff_L = max(
-            abs(q_L_iord8[i] - q_L_cw[i]) for i in [0, 1, 5, 6])
-        boundary_diff_R = max(
-            abs(q_R_iord8[i] - q_R_cw[i]) for i in [0, 1, 5, 6])
-        boundary_diff = max(boundary_diff_L, boundary_diff_R)
-        self.assertGreater(
-            boundary_diff, 0.05,
-            msg=(f"iord==8 vs CW on stencil [1,2,3,4,3,2,1]: "
-                 f"boundary diff_L = {boundary_diff_L:.4f}, "
-                 f"boundary diff_R = {boundary_diff_R:.4f}.  "
-                 f"Expected the two limiter classes to differ "
-                 f"measurably at boundary cells (i=0,1,5,6) where "
-                 f"CW uses mode='edge' padding and iord==8 uses "
-                 f"dm-slope extrapolation.  If they converge, the "
-                 f"iord==8 reproduction formula may be wrong or CW "
-                 f"has been replaced by an iord==8 port — in which "
-                 f"case UPDATE this test with the new expected "
-                 f"values."))
+        # --- Production range: slice the output exactly as
+        # `cgrid_mass_flux_divergence` does.
+        #   q_R_left  = q_R_x[:, 1:n+2, :]  → strip indices 1..n+1
+        #   q_L_right = q_L_x[:, 2:n+3, :]  → strip indices 2..n+2
+        # For n=5: q_R[1:7], q_L[2:8].
+        prod_q_R_range = slice(1, n + 2)   # [1..n+1] inclusive
+        prod_q_L_range = slice(2, n + 3)   # [2..n+2] inclusive
 
-        # --- Assertion (3): the interior cells (peak i=3, shoulder
-        # i=2) are IDENTICAL on this particular stencil.  Document
-        # this fact explicitly so future porters don't look for
-        # divergence at those cells.
+        diff_R_prod = float(np.max(np.abs(
+            q_R_iord8[prod_q_R_range] - q_R_cw[prod_q_R_range])))
+        diff_L_prod = float(np.max(np.abs(
+            q_L_iord8[prod_q_L_range] - q_L_cw[prod_q_L_range])))
+
+        # --- KEY ASSERTION: the documented iter-542 divergence
+        # DOES manifest inside the production-used range.
+        # Specifically, at the halo-boundary cells (index n+1=6 for
+        # q_R, index n+2=7 for q_L — the cells right next to the
+        # outermost halo), CW's mode='edge' padding gives a
+        # different limiter response than iord==8's dm-slope
+        # extrapolation.
+        # Empirical values (stencil [0.5, 1, 2, 3, 4, 3, 2, 1.5, 0.75]):
+        #   CW q_R[1:7]: [1.458, 2.500, 3.667, 4.000, 2.458, 1.083]
+        #   i8 q_R[1:7]: [1.458, 2.500, 3.667, 4.000, 2.458, 1.729]
+        #   Diff at index 6: 0.646
+        #   CW q_L[2:8]: [1.458, 2.500, 4.000, 3.667, 2.458, 2.333]
+        #   i8 q_L[2:8]: [1.458, 2.500, 4.000, 3.667, 2.458, 1.729]
+        #   Diff at index 7: 0.604
+        diff_prod = max(diff_R_prod, diff_L_prod)
+        self.assertGreater(
+            diff_prod, 0.05,
+            msg=(f"CW vs iord==8 in production-used range "
+                 f"(q_R[1:{n+2}], q_L[2:{n+3}]): max diff_R = "
+                 f"{diff_R_prod:.4f}, max diff_L = {diff_L_prod:.4f}. "
+                 f"Expected the two limiter schemes to differ "
+                 f"measurably at halo-boundary cells (next to the "
+                 f"outermost halo).  If they converge, either the "
+                 f"iord==8 reproduction is wrong OR CW has been "
+                 f"replaced by an iord==8 port — UPDATE this test "
+                 f"with the new expected formula."))
+
+        # --- Interior-peak invariant: on a smooth local max, both
+        # schemes flatten.  Locking i=4 (the peak) ensures future
+        # iord==8 ports don't change the peak-flattening.
+        self.assertAlmostEqual(
+            float(q_L_cw[4]), float(q_L_iord8[4]), places=10,
+            msg=(f"Peak cell (i=4) q_L differs: CW={q_L_cw[4]:.4f} "
+                 f"vs iord8={q_L_iord8[4]:.4f}.  Both schemes "
+                 f"should flatten at the smooth local max."))
+
+        # --- Interior-shoulder invariant: at non-extremum cells
+        # well inside the production range, both schemes use the
+        # same 4th-order interior interpolant.  Lock i=3 (cell of
+        # value 3.0, not an extremum) to confirm the interior
+        # 4th-order formula is preserved.
         self.assertAlmostEqual(
             float(q_L_cw[3]), float(q_L_iord8[3]), places=10,
-            msg=(f"Peak cell (i=3) q_L differs: CW={q_L_cw[3]:.4f} "
-                 f"vs iord8={q_L_iord8[3]:.4f}.  On this triangle "
-                 f"stencil both schemes should flatten at the peak "
-                 f"(CW via extremum detection, iord==8 via dm→0)."))
-        self.assertAlmostEqual(
-            float(q_L_cw[2]), float(q_L_iord8[2]), places=10,
-            msg=(f"Shoulder cell (i=2) q_L differs: CW="
-                 f"{q_L_cw[2]:.4f} vs iord8={q_L_iord8[2]:.4f}.  "
-                 f"On a smooth ramp both 4th-order interpolants "
-                 f"should give the same value."))
+            msg=(f"Interior shoulder (i=3) q_L differs: CW="
+                 f"{q_L_cw[3]:.4f} vs iord8={q_L_iord8[3]:.4f}.  "
+                 f"Both should use the same 4th-order "
+                 f"`(7*(q[i-1]+q[i]) - (q[i-2]+q[i+1]))/12` "
+                 f"interpolant at non-extremum interior cells."))
 
 
 class TestPpmLimiterAtSmoothExtremum(unittest.TestCase):
