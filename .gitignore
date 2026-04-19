@@ -41,16 +41,18 @@ wandb/
 !src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/*.nc
 # `!src/legoesm/ml/data/` is the minimum un-ignore needed for git to
 # descend into the directory (since `data/` above ignores it).  That
-# ALONE would allow arbitrary non-`.py` files in.  Immediately
-# re-ignore everything inside, then re-allow only `*.py`.
+# ALONE would allow arbitrary non-`.py` files in.  Re-ignore
+# everything inside (including ALL nested subpaths via `**`), then
+# re-allow:
+#   1. All subdirectories at any depth (so git can descend to find
+#      `.py` children).
+#   2. All `.py` files at any depth.
+# Ordering is critical — later patterns override earlier ones, so
+# the `!` rules must come AFTER the re-ignore rule.
 !src/legoesm/ml/data/
-src/legoesm/ml/data/*
-!src/legoesm/ml/data/*.py
-src/legoesm/ml/data/**/*
+src/legoesm/ml/data/**
+!src/legoesm/ml/data/**/
 !src/legoesm/ml/data/**/*.py
-# Directories are re-allowed in the patterns above only so git can
-# descend to find `*.py` children.
-!src/legoesm/ml/data/*/
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
