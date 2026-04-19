@@ -168,6 +168,36 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-564 (2026-04-19)**: addressed Codex stop-time review of
+  iter-563: "new 3D tests still miss level-routing regressions in
+  the 4D wrapper".
+
+  Iter-563's 3D tests verified per-level non-zero-ness and
+  per-level anti-correlation under opposite flows, but did NOT
+  check that the output at level k actually came from the input
+  at level k.  A wrapper that transposes levels or broadcasts a
+  single level to all others would pass these tests silently.
+
+  Iter-564 adds `test_3d_per_level_consistency_with_2d_slice`:
+  constructs a per-level-distinct input (different tracer
+  patterns AND different flow magnitudes at each level), runs
+  the 4D path, then runs the 2D path on each level's slice
+  independently.  Asserts 4D[..., k] matches 2D(slice_k) to
+  1e-6 relative.  Catches:
+    - Level permutation (e.g., reversed axis in moveaxis)
+    - Broadcast of one level to all (`out[...,k] = out[...,0]`)
+    - Wrong vmap axis
+
+  **Sanity-checked**: replaced the 4D branch body with
+  `broadcast_to(fct_fn(q[..., 0], ...), q.shape)`.  The new
+  consistency test correctly fires with diff 9.702e-04 vs scale
+  1.028e-03 (~100% relative error).  iter-561/562/563 tests
+  still pass, confirming they don't distinguish between levels.
+  Restored production code; all 10 tests pass.
+
+  No production-path numerical changes.  78/78 tests pass in
+  `test_cdgrid.py` (77 prior + 1 new).
+
 - **iter-563 (2026-04-19)**:
 
   Addressed Codex stop-time review of iter-562: "iter-562 still

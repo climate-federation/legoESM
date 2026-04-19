@@ -1060,6 +1060,69 @@ class TestCgridTracerAdvectionFct(unittest.TestCase):
                      f"or similar), this test fires even when the "
                      f"2D branch is intact."))
 
+    def test_3d_per_level_consistency_with_2d_slice(self):
+        """Iter-564 (Codex follow-up to iter-563): verify the 3D
+        wrapper routes levels correctly.  The existing iter-563
+        3D tests only check per-level non-zero-ness, which still
+        passes if the wrapper transposes levels or broadcasts a
+        single level to all others.
+
+        This test runs the 4D path on a per-level-distinct input,
+        then runs the 2D path on each level's slice, and asserts
+        the 4D output at level k matches the 2D output for the
+        k-th slice to machine precision.  A level-routing bug
+        (level permutation, wrong vmap axis, broadcast instead
+        of map) fires this test.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_tracer_advection_fct)
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
+
+        # Per-level-distinct input: different tracer pattern AND
+        # different flow magnitude at each level, so a level swap
+        # produces distinctly different output.
+        q_np = np.empty((6, n, n, nlev), dtype=np.float64)
+        u_c_np = np.empty(
+            (6, n + 1, n, nlev), dtype=np.float64)
+        v_c_np = np.empty(
+            (6, n, n + 1, nlev), dtype=np.float64)
+        for k in range(nlev):
+            scale = 50.0 * (k + 1)
+            q_np[..., k] = 100.0 + scale * np.cos(
+                (2 + k) * lon) * np.cos(lat)
+            u_c_np[..., k] = 10.0 * (k + 1)  # level-distinct flow
+            v_c_np[..., k] = 0.0
+
+        q_3d = jnp.asarray(q_np)
+        u_c_3d = jnp.asarray(u_c_np)
+        v_c_3d = jnp.asarray(v_c_np)
+
+        out_3d = np.asarray(cgrid_tracer_advection_fct(
+            q_3d, u_c_3d, v_c_3d, cdgrid))
+        self.assertEqual(out_3d.shape, (6, n, n, nlev))
+
+        for k in range(nlev):
+            q_2d = jnp.asarray(q_np[..., k])
+            u_c_2d = jnp.asarray(u_c_np[..., k])
+            v_c_2d = jnp.asarray(v_c_np[..., k])
+            out_2d = np.asarray(cgrid_tracer_advection_fct(
+                q_2d, u_c_2d, v_c_2d, cdgrid))
+
+            diff = float(np.max(np.abs(out_3d[..., k] - out_2d)))
+            scale_k = float(max(np.max(np.abs(out_2d)), 1e-30))
+            self.assertLess(
+                diff, 1e-6 * scale_k,
+                msg=(f"3D wrapper output at level {k} differs from "
+                     f"2D single-level call by {diff:.3e} (scale "
+                     f"{scale_k:.3e}).  Level routing may be "
+                     f"broken: possible causes include a level "
+                     f"permutation in the vmap axis, broadcast of "
+                     f"one level to all, or a reversed-axis bug."))
+
     def test_3d_opposite_flows_give_opposite_sign_tendency(self):
         """Iter-563: the anti-correlation guard on opposite flows
         extended to the 3D vmap branch.  Catches
