@@ -168,6 +168,46 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-552 (2026-04-19)**: **production numerical change** —
+  gate `_corner_vorticity` linear-extrapolation on
+  `not use_duogrid` per Fortran convention.
+
+  Iter-550 documented that
+  `_corner_vorticity` (`src/legoesm/core/fv3_sw_core.py:1108-1115`)
+  applied its linear-extrapolation padding UNCONDITIONALLY
+  (gated only on `n > 2`).  In Fortran (`sw_core.F90:396-400`), the
+  non-physical linear-extrapolation overrides are explicitly gated
+  on the non-duogrid path — under duogrid the solver relies on
+  halo-exchanged cross-face data, and applying linear extrapolation
+  on top of that introduces an O(1) cross-face jump that is NOT
+  what the oracle does.
+
+  Iter-552 minimal fix: change the gate from `if n > 2:` to
+  `if (not use_duogrid) and n > 2:`.  Under duogrid, the code now
+  falls back to plain `mode='edge'` padding (still not perfect —
+  the architectural fix is proper halo-padded `uc`/`vc`, tracked
+  with the iter-132 `_d_sw5_corner_divergence` halo gap — but this
+  is CLOSER to Fortran than the linear-extrapolation override for
+  cross-face neighbours).
+
+  **Impact verification**:
+    - Quick SW matrix (W2/W5/cosine bell at C36): baselines
+      unchanged (L2=2.42e-04, mass drift=1.74e-05,
+      L1=1.20e-01) — iter-552 affects `_c_sw` and
+      `_c_sw_tendencies` in the FB chain, NOT the A-L production
+      path which doesn't call `_corner_vorticity`.
+    - 219/219 tests pass in `test_duogrid.py` +
+      `test_cdgrid_fv3_regression.py` + `test_cdgrid.py`.  The
+      iter-103 `test_fb_path_component_vs_scalar_sync_propagates_
+      to_wind` expected-value test still passes because both sync
+      paths apply the same `_corner_vorticity` change, so the
+      DIFFERENCE between them is invariant.
+
+  Cumulative: FB chain duogrid path now skips the non-physical
+  linear-extrapolation override.  Remaining FB-chain halo gap:
+  the `mode='edge'` fallback still does not deliver true cross-
+  face cells (tracked for future architectural work at iter-132).
+
 - **iter-551 (2026-04-19)**: addressed Codex stop-time review of
   iter-550: "the new `_corner_vorticity` tests do not actually lock
   the implementation".
