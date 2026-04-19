@@ -2616,6 +2616,141 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
                 f"by {diff:.3e}.  vort_y at edge {label} is "
                 f"being computed BEFORE the fx1 override.")
 
+    def test_ke_upwind_legacy_boundary_override_gated(self):
+        """Iter-588: behavioral lock for `_ke_upwind`'s 4 non-
+        duogrid boundary overrides (fv3_sw_core.py:731-749).
+
+        Fortran `sw_core.F90:325-365` replaces pure upwind with
+        sin_sg/cos_sg-weighted combinations at panel-edge
+        boundary cells under non-duogrid.  The override applies
+        when the associated upwind direction points INTO the
+        boundary (ua > 0 at i=0; ua <= 0 at i=n-1; etc.).
+
+        Under duogrid, `ke_u` and `ke_v` use plain
+        `jnp.where(ua/va > 0, uc/vc[:, :-1], uc/vc[:, 1:])`
+        everywhere — no sin_sg/cos_sg involvement.
+
+        Test covers all 4 overrides (ke_u[0], ke_u[n-1],
+        ke_v[0], ke_v[n-1]) at BOTH the upwind-direction cases
+        — ensuring gate deletion, inversion, body removal at
+        specific boundaries, and per-edge omissions all get
+        caught.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _ke_upwind
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(588)
+        # Use constant-sign ua/va to force the override branch
+        # deterministically at each boundary (instead of random
+        # signs).  This isolates the gate from the sign-
+        # dependent conditional.
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        # ua positive at i=0 (trigger west override branch) and
+        # negative at i=n-1 (trigger east override branch)
+        ua_np = np.full((6, n, n), -1.0)
+        ua_np[:, 0, :] = +1.0
+        # va positive at j=0 (south override) and negative at j=n-1
+        # (north override)
+        va_np = np.full((6, n, n), -1.0)
+        va_np[:, :, 0] = +1.0
+        ua = jnp.asarray(ua_np)
+        va = jnp.asarray(va_np)
+
+        sg_np = np.asarray(cdgrid.sin_sg)
+        cg_np = np.asarray(cdgrid.cos_sg)
+        uc_np = np.asarray(uc)
+        vc_np = np.asarray(vc)
+        u_d_np = np.asarray(u_d)
+        v_d_np = np.asarray(v_d)
+
+        # --- Under duogrid: ke_u/ke_v are pure upwind everywhere.
+        ke_u_dg, ke_v_dg = _ke_upwind(
+            uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid=True)
+        ke_u_dg_np = np.asarray(ke_u_dg)
+        ke_v_dg_np = np.asarray(ke_v_dg)
+
+        # Expected pure upwind at each of the 4 boundary cells.
+        # ke_u has shape (6, n, n); boundary cells are [:, 0, :]
+        # and [:, n-1, :].
+        # ua[:, 0, :] = +1 → ke_u[:, 0, :] = uc[:, 0, :] (upwind)
+        # ua[:, n-1, :] = -1 → ke_u[:, n-1, :] = uc[:, n, :]
+        # Analogous for ke_v.
+        expected_ke_u_0_dg = uc_np[:, 0, :]
+        expected_ke_u_nm1_dg = uc_np[:, n, :]
+        expected_ke_v_0_dg = vc_np[:, :, 0]
+        expected_ke_v_nm1_dg = vc_np[:, :, n]
+
+        for (actual, expected, label) in [
+            (ke_u_dg_np[:, 0, :], expected_ke_u_0_dg, "ke_u[:,0,:]"),
+            (ke_u_dg_np[:, n - 1, :], expected_ke_u_nm1_dg,
+             "ke_u[:,n-1,:]"),
+            (ke_v_dg_np[:, :, 0], expected_ke_v_0_dg, "ke_v[:,:,0]"),
+            (ke_v_dg_np[:, :, n - 1], expected_ke_v_nm1_dg,
+             "ke_v[:,:,n-1]"),
+        ]:
+            diff = float(np.max(np.abs(actual - expected)))
+            assert diff < 1e-10, (
+                f"Under duogrid=True, {label} deviates from pure "
+                f"upwind by {diff:.3e}.  The sin_sg/cos_sg "
+                f"legacy override appears to be firing under "
+                f"duogrid — gate INVERTED.")
+
+        # --- Under non-duogrid: the legacy overrides fire at
+        # each boundary.  Verify specific expected values.
+        ke_u_nd, ke_v_nd = _ke_upwind(
+            uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid=False)
+        ke_u_nd_np = np.asarray(ke_u_nd)
+        ke_v_nd_np = np.asarray(ke_v_nd)
+
+        # ke_u[:, 0, :] with ua>0 → sin_sg(W) * uc[:, 0, :] +
+        #                            cos_sg(W) * v_d[:, 0, :]
+        expected_ke_u_0_nd = (
+            uc_np[:, 0, :] * sg_np[:, 0, :, 0]
+            + v_d_np[:, 0, :] * cg_np[:, 0, :, 0])
+        # ke_u[:, n-1, :] with ua<0 → sin_sg(E) * uc[:, n, :] +
+        #                              cos_sg(E) * v_d[:, n, :]
+        expected_ke_u_nm1_nd = (
+            uc_np[:, n, :] * sg_np[:, n - 1, :, 2]
+            + v_d_np[:, n, :] * cg_np[:, n - 1, :, 2])
+        # ke_v[:, :, 0] with va>0 → sin_sg(S) * vc[:, :, 0] +
+        #                            cos_sg(S) * u_d[:, :, 0]
+        expected_ke_v_0_nd = (
+            vc_np[:, :, 0] * sg_np[:, :, 0, 1]
+            + u_d_np[:, :, 0] * cg_np[:, :, 0, 1])
+        # ke_v[:, :, n-1] with va<0 → sin_sg(N) * vc[:, :, n] +
+        #                              cos_sg(N) * u_d[:, :, n]
+        expected_ke_v_nm1_nd = (
+            vc_np[:, :, n] * sg_np[:, :, n - 1, 3]
+            + u_d_np[:, :, n] * cg_np[:, :, n - 1, 3])
+
+        for (actual, expected, label) in [
+            (ke_u_nd_np[:, 0, :], expected_ke_u_0_nd,
+             "ke_u[:,0,:] (ua>0)"),
+            (ke_u_nd_np[:, n - 1, :], expected_ke_u_nm1_nd,
+             "ke_u[:,n-1,:] (ua<0)"),
+            (ke_v_nd_np[:, :, 0], expected_ke_v_0_nd,
+             "ke_v[:,:,0] (va>0)"),
+            (ke_v_nd_np[:, :, n - 1], expected_ke_v_nm1_nd,
+             "ke_v[:,:,n-1] (va<0)"),
+        ]:
+            diff = float(np.max(np.abs(actual - expected)))
+            assert diff < 1e-5, (
+                f"Under duogrid=False, {label} deviates from the "
+                f"sin_sg/cos_sg-weighted expected formula by "
+                f"{diff:.3e}.  The override body may have been "
+                f"DELETED at this boundary, or the gate may have "
+                f"been moved.")
+
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
         override in `cubed_sphere_cdgrid.py` must remain inside the

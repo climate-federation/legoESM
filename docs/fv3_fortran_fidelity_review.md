@@ -197,6 +197,40 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-588 (2026-04-20)**: extended the 4-mode behavioral lock
+  pattern to the final Constraint #2 gate: `_ke_upwind`
+  (fv3_sw_core.py:731).
+
+  Added `test_ke_upwind_legacy_boundary_override_gated`:
+    - Uses constant-sign `ua`/`va` to deterministically
+      trigger the override branch at each boundary.
+    - Under duogrid=True: 4 boundary cells (ke_u[:,0,:],
+      ke_u[:,n-1,:], ke_v[:,:,0], ke_v[:,:,n-1]) must use
+      PURE UPWIND (no sin_sg/cos_sg involvement).
+    - Under duogrid=False: each boundary cell must equal the
+      specific sin_sg/cos_sg-weighted expected formula:
+        West  (ua>0):  uc[:,0,:] * sin_sg[W] + v_d[:,0,:] * cos_sg[W]
+        East  (ua<0):  uc[:,n,:] * sin_sg[E] + v_d[:,n,:] * cos_sg[E]
+        South (va>0):  vc[:,:,0] * sin_sg[S] + u_d[:,:,0] * cos_sg[S]
+        North (va<0):  vc[:,:,n] * sin_sg[N] + u_d[:,:,n] * cos_sg[N]
+
+  **Sanity-checked**: removed the west-edge override body
+  (kept the outer `if not use_duogrid:` gate).  Test correctly
+  fires with diff 11.64 at ke_u[:,0,:] (ua>0) under non-duogrid.
+
+  All 4 Constraint #2 gates in `fv3_sw_core.py` now have
+  behavioral locks matching the iter-584/585 pattern:
+    - `_corner_vorticity` (iter-584)
+    - `_vorticity_flux` × 2 gates (iter-585/586/587)
+    - `_ke_upwind` (iter-588)
+  Plus the `_pert_ppm` gate in `fv_tp_2d.py` (iter-516).
+
+  Critical Duogrid Constraint #2 is now comprehensively locked
+  across all 5 production gates.
+
+  No production-path numerical changes.  107/107 tests pass in
+  `test_duogrid.py` (106 prior + 1 new).
+
 - **iter-587 (2026-04-20)**: addressed Codex stop-time review of
   iter-586: "iter-586 only locks the `0`-edge upwind override".
 
