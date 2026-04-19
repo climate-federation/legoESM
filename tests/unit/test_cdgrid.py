@@ -836,6 +836,156 @@ class TestInterpCornerToCenter(unittest.TestCase):
                  f"plain-arithmetic variant."))
 
 
+class TestPadHaloAutoWrappers(unittest.TestCase):
+    """Iter-565: regression lock for `_pad_halo_auto` and
+    `_pad_halo_auto_h2` (`src/legoesm/core/operators_cdgrid.py:
+    39-72`).
+
+    Thin wrappers around `pad_halo`/`pad_halo_4d` that:
+      - Select `interp_offsets` based on duogrid presence
+      - Dispatch to 2D or 4D pad based on `field.ndim`
+
+    Used on EVERY production path (A-L SW, ocean PE, atmosphere
+    PE, compressible Euler, FB chain) for cell-centre halo
+    exchange.  Previously had NO direct tests.
+
+    Locks:
+      (a) h1 2D shape: `(6, n, n)` → `(6, n+2, n+2)`.
+      (b) h1 4D shape: `(6, n, n, nlev)` → `(6, n+2, n+2, nlev)`.
+      (c) h2 2D shape: `(6, n, n)` → `(6, n+4, n+4)`.
+      (d) h2 4D shape: `(6, n, n, nlev)` → `(6, n+4, n+4, nlev)`.
+      (e) Constant-field preservation: constant input stays
+          constant in both interior AND halo regions (to the
+          extent supported by the halo's interpolation accuracy).
+      (f) 2D vs 4D per-level consistency: the k-th level of the
+          4D-padded output matches the 2D-padded version of the
+          k-th level slice.
+    """
+
+    def _build(self, n=6):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        return n, cdgrid
+
+    def test_h1_2d_shape(self):
+        from legoesm.core.operators_cdgrid import _pad_halo_auto
+        n, cdgrid = self._build(n=6)
+        f = jnp.zeros((6, n, n))
+        out = _pad_halo_auto(f, cdgrid)
+        self.assertEqual(out.shape, (6, n + 2, n + 2))
+
+    def test_h1_4d_shape(self):
+        from legoesm.core.operators_cdgrid import _pad_halo_auto
+        n, cdgrid = self._build(n=6)
+        nlev = 4
+        f = jnp.zeros((6, n, n, nlev))
+        out = _pad_halo_auto(f, cdgrid)
+        self.assertEqual(out.shape, (6, n + 2, n + 2, nlev))
+
+    def test_h2_2d_shape(self):
+        from legoesm.core.operators_cdgrid import _pad_halo_auto_h2
+        n, cdgrid = self._build(n=6)
+        f = jnp.zeros((6, n, n))
+        out = _pad_halo_auto_h2(f, cdgrid)
+        self.assertEqual(out.shape, (6, n + 4, n + 4))
+
+    def test_h2_4d_shape(self):
+        from legoesm.core.operators_cdgrid import _pad_halo_auto_h2
+        n, cdgrid = self._build(n=6)
+        nlev = 4
+        f = jnp.zeros((6, n, n, nlev))
+        out = _pad_halo_auto_h2(f, cdgrid)
+        self.assertEqual(out.shape, (6, n + 4, n + 4, nlev))
+
+    def test_constant_field_preserved(self):
+        """A constant cell-centre field must remain constant
+        throughout the entire halo-padded output (interior +
+        halo) — the halo interpolation is linear and preserves
+        constants exactly."""
+        from legoesm.core.operators_cdgrid import (
+            _pad_halo_auto, _pad_halo_auto_h2)
+        n, cdgrid = self._build(n=6)
+        f = jnp.full((6, n, n), 7.5, dtype=jnp.float64)
+        out_h1 = _pad_halo_auto(f, cdgrid)
+        out_h2 = _pad_halo_auto_h2(f, cdgrid)
+        max_dev_h1 = float(jnp.max(jnp.abs(out_h1 - 7.5)))
+        max_dev_h2 = float(jnp.max(jnp.abs(out_h2 - 7.5)))
+        self.assertLess(
+            max_dev_h1, 1e-10,
+            msg=f"h1 pad did not preserve constant field; max "
+                f"dev {max_dev_h1:.3e}.")
+        self.assertLess(
+            max_dev_h2, 1e-10,
+            msg=f"h2 pad did not preserve constant field; max "
+                f"dev {max_dev_h2:.3e}.")
+
+    def test_interior_preserved(self):
+        """The interior (non-halo) region of the padded output
+        must equal the input — the halo helpers must not modify
+        interior cells."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _pad_halo_auto, _pad_halo_auto_h2)
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(565)
+        f_np = rng.standard_normal((6, n, n)).astype(np.float64)
+        f = jnp.asarray(f_np)
+
+        out_h1 = np.asarray(_pad_halo_auto(f, cdgrid))
+        # h1: interior at [:, 1:n+1, 1:n+1]
+        diff_h1 = float(np.max(np.abs(out_h1[:, 1:n+1, 1:n+1] - f_np)))
+        self.assertLess(
+            diff_h1, 1e-10,
+            msg=f"h1 pad modified interior; max dev {diff_h1:.3e}.")
+
+        out_h2 = np.asarray(_pad_halo_auto_h2(f, cdgrid))
+        # h2: interior at [:, 2:n+2, 2:n+2]
+        diff_h2 = float(np.max(np.abs(out_h2[:, 2:n+2, 2:n+2] - f_np)))
+        self.assertLess(
+            diff_h2, 1e-10,
+            msg=f"h2 pad modified interior; max dev {diff_h2:.3e}.")
+
+    def test_4d_per_level_consistency_with_2d(self):
+        """The k-th level of a 4D-padded output must equal the 2D
+        pad of the k-th level slice.  Catches level-routing bugs
+        in `pad_halo_4d` (e.g., if it silently broadcasts one level
+        to all, or transposes the level axis)."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _pad_halo_auto, _pad_halo_auto_h2)
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(1565)
+        # Per-level-distinct input
+        f_np = rng.standard_normal(
+            (6, n, n, nlev)).astype(np.float64)
+        # Add level-dependent offset so each level is distinct
+        for k in range(nlev):
+            f_np[..., k] += 100.0 * (k + 1)
+        f = jnp.asarray(f_np)
+
+        for wrapper, h in [
+            (_pad_halo_auto, 1),
+            (_pad_halo_auto_h2, 2),
+        ]:
+            out_4d = np.asarray(wrapper(f, cdgrid))
+            for k in range(nlev):
+                slc = jnp.asarray(f_np[..., k])
+                out_2d = np.asarray(wrapper(slc, cdgrid))
+                diff = float(np.max(np.abs(
+                    out_4d[..., k] - out_2d)))
+                scale = float(np.max(np.abs(out_2d)))
+                self.assertLess(
+                    diff, 1e-6 * max(scale, 1.0),
+                    msg=(f"h{h}, level {k}: 4D-padded output "
+                         f"differs from 2D-padded k-th slice by "
+                         f"{diff:.3e} (scale {scale:.3e}).  Level "
+                         f"routing in `pad_halo_4d` may be broken."))
+
+
 class TestCgridTracerAdvectionFct(unittest.TestCase):
     """Iter-561: regression lock for `cgrid_tracer_advection_fct`
     (`src/legoesm/core/operators_cdgrid.py:756-804`).

@@ -168,6 +168,35 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-565 (2026-04-19)**: regression lock for `_pad_halo_auto`
+  and `_pad_halo_auto_h2` (previously untested).
+
+  Thin wrappers in `operators_cdgrid.py:39-72` that dispatch
+  halo padding based on field.ndim and select interp_offsets
+  based on duogrid presence.  Used on EVERY production path
+  (A-L SW, ocean PE, atmosphere PE, compressible Euler, FB
+  chain).  Had NO direct tests.
+
+  Added `TestPadHaloAutoWrappers` (7 tests in `test_cdgrid.py`):
+    (a) `test_h1_2d_shape`: `(6, n, n)` → `(6, n+2, n+2)`
+    (b) `test_h1_4d_shape`: `(6, n, n, nlev)` →
+        `(6, n+2, n+2, nlev)`
+    (c) `test_h2_2d_shape`: `(6, n, n)` → `(6, n+4, n+4)`
+    (d) `test_h2_4d_shape`: `(6, n, n, nlev)` →
+        `(6, n+4, n+4, nlev)`
+    (e) `test_constant_field_preserved`: constant input stays
+        constant throughout the entire padded output (interior
+        + halo) for both h1 and h2 wrappers.
+    (f) `test_interior_preserved`: the interior region
+        (`[:, 1:n+1, 1:n+1]` for h1, `[:, 2:n+2, 2:n+2]` for h2)
+        of the padded output equals the input.
+    (g) `test_4d_per_level_consistency_with_2d`: k-th level of
+        4D-padded output matches 2D-padded k-th slice (catches
+        level-routing bugs in `pad_halo_4d`).
+
+  No production-path numerical changes.  85/85 tests pass in
+  `test_cdgrid.py` (78 prior + 7 new).
+
 - **iter-564 (2026-04-19)**: addressed Codex stop-time review of
   iter-563: "new 3D tests still miss level-routing regressions in
   the 4D wrapper".
