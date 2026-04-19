@@ -168,6 +168,48 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-511 (2026-04-19)**: added end-to-end W2 error-budget
+  regression to lock the iter-505 axis-fix benefit at the
+  full-model level (not just the unit-level
+  `cgrid_mass_flux_divergence` test from iter-505/506).
+
+  Direct measurement of `FV3EdgeShallowWaterModel` at C16, dt=300s,
+  1 day with default config (`fix_mass=False` to surface raw
+  numerics):
+    - BUGGY (pre-iter-505):  L2 = 2.61e-3, Linf = 9.80e-3
+    - FIXED (post-iter-505): L2 = 1.71e-3, Linf = 9.65e-3
+  L2 is the discriminating signal at C16 (Linf is dominated by the
+  cube-vertex corner-fill behaviour both before and after the
+  axis fix and shows essentially no change).
+
+  New test
+  `TestW2BoundaryErrorBudget::test_w2_alpha0_c16_1day_l2_below_iter505_baseline`
+  asserts L2 < 2.0e-3.  Verified to FAIL on pre-iter-505 code
+  (L2=2.61e-3 vs ceiling 2.0e-3) and PASS on fixed code (L2=1.71e-3
+  with 17 % headroom).
+
+  Also investigated whether `boundary_fix=True` (a non-FV3
+  smoothing of the outermost cell tendency with the adjacent
+  interior cell, line `shallow_water_fv3_cdgrid.py:104`) is
+  load-bearing.  Direct measurement at C36, dt=60s, 1 day:
+    - boundary_fix=True:  L2 = 5.64e-4, Linf = 4.53e-3
+    - boundary_fix=False: L2 = 1.36e-3, Linf = 8.51e-3
+  So the non-FV3 boundary blend gives a **2.4× L2 / 1.9× Linf**
+  improvement.  Removing it as a "remove improvisation" pass
+  per the user's directive would significantly degrade W2 — the
+  hack is masking a real face-boundary error in the corner-wind
+  / Bernoulli-gradient pipeline.  Documenting here as a known
+  non-FV3 stabilizer that the iter-505 axis fix did NOT
+  obviate.
+
+  Tried adding a `max|v_north|` ceiling test as well, but at C16
+  the buggy/fixed gap (2.21 vs 1.95 m/s) is too small to
+  discriminate cleanly — abandoned in favour of the L2 test
+  alone.  At C36 the v_north discrimination IS clear (~0.96 vs
+  ~0.3 m/s) but C36 1-day is too slow for a unit test.
+
+  No production-path numerical changes.  187/187 tests pass.
+
 - **iter-510 (2026-04-19)**: **closed the polar-face asymmetry
   investigation** that the user named as "the more actionable
   production-path bug" pointing to `fv3_sw_tendencies`.  Direct
