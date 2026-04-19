@@ -168,6 +168,42 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-509 (2026-04-19)**: addressed Codex stop-time review of
+  iter-508 — "AST guard no longer enforces the PPM axis contract".
+  iter-508's check accepted any call with `axis=...`, but
+  `axis=-1` (the buggy default) would silently slip through, as
+  would `axis=0` (the face axis).
+
+  Hardening at the API level:
+    - Removed the `axis: int = -1` default from
+      `_ppm_reconstruct_1d`; the kwarg is now keyword-only AND
+      required.  Calling without `axis=` raises `TypeError` at
+      runtime.
+    - Updated the two y-direction callers
+      (`cgrid_mass_flux_divergence`, `_cgrid_fct_fluxes_2d`) to
+      pass `axis=2` explicitly instead of relying on the removed
+      default.
+
+  Hardening at the AST level
+  (`test_no_future_caller_passes_non_halo_last_axis_to_ppm`):
+    - Parses each `_ppm_reconstruct_1d` call and extracts the
+      literal integer value of the `axis=` kwarg (handling both
+      `ast.Constant` and unary-minus-on-Constant for negatives).
+    - Fails with a clear message if `axis=` is missing, is not a
+      literal int, or is < 1.  Removed the older
+      `swapaxes`/`_T`/`_y_strips` heuristic-based escape hatches —
+      `axis=` is now the SOLE sanctioned form.
+
+  Sanity-checked against five regression scenarios:
+    - missing kwarg          → FAIL (correct)
+    - axis=-1 (buggy default) → FAIL (correct)
+    - axis=0 (face axis)      → FAIL (correct)
+    - axis=1                  → PASS
+    - axis=2                  → PASS
+
+  No production-path numerical changes (refactor + tighter test).
+  W2 L2=2.42e-04 unchanged from iter-505.  184/184 tests pass.
+
 - **iter-508 (2026-04-19)**: addressed the root cause of the
   iter-505 axis bug class by making `_ppm_reconstruct_1d`'s
   reconstruction axis EXPLICIT instead of an implicit "operates on

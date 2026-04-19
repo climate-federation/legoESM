@@ -83,33 +83,31 @@ def _broadcast_metric(metric, field):
 # PPM (Piecewise Parabolic Method) transport
 # ==============================================================================
 
-def _ppm_reconstruct_1d(q, axis: int = -1):
+def _ppm_reconstruct_1d(q, *, axis: int):
     """PPM face-value reconstruction along ``axis``.
 
     Given cell averages along ``axis``, compute left and right face
     values (q_L, q_R) for each cell using 4th-order interpolation with
     monotonicity constraints (Colella & Woodward 1984).
 
-    iter-508: previously this function operated implicitly on the
-    LAST axis only.  Several callers in this module relied on that
-    convention but extracted strips with the halo-padded axis on
-    axis 1 (e.g., ``h_pad[:, :, 2:-2]`` of shape ``(6, n+4, n)``),
-    silently reconstructing along the WRONG axis (the n-cell interior
-    j-direction with no halo).  iter-505 / iter-506 fixed
-    `cgrid_mass_flux_divergence` and `_cgrid_fct_fluxes_2d` with
-    explicit `swapaxes` wrappers; iter-508 makes the contract
-    explicit by accepting an `axis` argument so future callers must
-    decide the reconstruction axis at the call site.  The default
-    `axis=-1` preserves backward compatibility with all existing
-    callers that already pass axis-last data.
+    iter-509 (Codex): ``axis`` is a REQUIRED keyword-only argument.
+    Earlier iterations (505/506/508) had to repair x-direction call
+    sites that silently reconstructed along the wrong axis because
+    the reconstruction axis was implicit (LAST axis by default).
+    Removing the default forces every caller to declare the axis at
+    the call site so the bug class cannot reappear.  The previous
+    iter-508 default of ``axis=-1`` was the same value that produced
+    the original bug for x-direction strips of shape ``(6, n+4, n)``,
+    so leaving it as a default just papered over the issue.
 
     Parameters
     ----------
     q : jax.Array, shape (..., N, ...)
         Cell averages.  Requires the size along ``axis`` to be N >= 4.
-    axis : int, optional
-        Axis along which to reconstruct face values.  Default is the
-        LAST axis (``-1``) for backward compatibility.
+    axis : int
+        REQUIRED keyword.  Axis along which to reconstruct face values.
+        Use ``axis=1`` for x-direction strips of shape ``(6, n+4, n)``;
+        use ``axis=2`` for y-direction strips of shape ``(6, n, n+4)``.
 
     Returns
     -------
@@ -515,9 +513,10 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     h_face_x = jnp.where(u_c > 0, q_R_left, q_L_right)
 
     # --- Y-direction PPM ---
+    # Strip shape (6, n, n+4) puts the halo-padded j-axis at axis=2;
+    # pass `axis=2` explicitly per the iter-509 PPM contract.
     h_y_strips = h_pad[:, 2:-2, :]  # (6, n, n+4)
-
-    q_L_y, q_R_y = _ppm_reconstruct_1d(h_y_strips)
+    q_L_y, q_R_y = _ppm_reconstruct_1d(h_y_strips, axis=2)
 
     q_R_bottom = q_R_y[:, :, 1:n+2]   # (6, n, n+1)
     q_L_top = q_L_y[:, :, 2:n+3]      # (6, n, n+1)
@@ -639,11 +638,10 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     q_face_max_x = jnp.maximum(q_left_x, q_right_x)
     q_face_hi_x = jnp.clip(q_face_hi_x, q_face_min_x, q_face_max_x)
 
-    # Y-direction PPM — the strip shape (6, n, n+4) already has the
-    # halo-padded j-axis last, so `_ppm_reconstruct_1d` naturally
-    # reconstructs along y.  No swap needed.
+    # Y-direction PPM — strip shape (6, n, n+4) puts the halo-padded
+    # j-axis at axis=2; pass `axis=2` explicitly per iter-509 contract.
     q_y_strips = q_pad_h2[:, 2:-2, :]
-    q_L_y, q_R_y = _ppm_reconstruct_1d(q_y_strips)
+    q_L_y, q_R_y = _ppm_reconstruct_1d(q_y_strips, axis=2)
     q_R_bottom = q_R_y[:, :, 1:n+2]
     q_L_top = q_L_y[:, :, 2:n+3]
     q_face_hi_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)

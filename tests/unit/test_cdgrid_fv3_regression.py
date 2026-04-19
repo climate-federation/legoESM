@@ -2157,11 +2157,11 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         i_vals = jnp.arange(n + 4, dtype=jnp.float64) ** 2 * 0.1
         h_pad = jnp.broadcast_to(i_vals[None, :, None], (6, n + 4, n + 4))
 
-        # Reproduce the fixed code's x-direction extraction + transpose
+        # Reproduce the fixed code's x-direction extraction.  After
+        # iter-509 the helper requires `axis=` explicitly; pass
+        # `axis=1` (the halo-padded i-axis on a (6, n+4, n) strip).
         h_x_strips = h_pad[:, :, 2:-2]                 # (6, n+4, n)
-        h_x_strips_T = jnp.swapaxes(h_x_strips, 1, 2)   # (6, n, n+4)
-        q_L_T, q_R_T = _ppm_reconstruct_1d(h_x_strips_T)
-        q_R_x = jnp.swapaxes(q_R_T, 1, 2)               # (6, n+4, n)
+        _, q_R_x = _ppm_reconstruct_1d(h_x_strips, axis=1)
 
         # 4th-order face value between padded-i cells 5 and 6
         # (interior i=3 and i=4 post-halo):
@@ -2324,9 +2324,10 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         src = src_file.read_text()
         tree = ast.parse(src)
 
-        # Find every call to `_ppm_reconstruct_1d(<arg>, [axis=...])`
-        # and capture the positional arg expression + whether `axis=`
-        # was passed.
+        # Find every call to `_ppm_reconstruct_1d(<arg>, axis=<lit>)`
+        # and capture the positional arg expression and the literal
+        # integer value of the `axis=` kwarg (or None if missing /
+        # not a literal).  iter-509 (Codex): `axis=` is REQUIRED.
         calls = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call)
@@ -2334,9 +2335,20 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
                     and node.func.id == "_ppm_reconstruct_1d"):
                 if len(node.args) >= 1:
                     arg_src = ast.unparse(node.args[0])
-                    has_axis_kwarg = any(
-                        kw.arg == "axis" for kw in node.keywords)
-                    calls.append((node.lineno, arg_src, has_axis_kwarg))
+                    axis_value = None
+                    for kw in node.keywords:
+                        if kw.arg == "axis":
+                            # Accept literal int (positive or negative
+                            # via UnaryOp(USub, Constant)).
+                            if (isinstance(kw.value, ast.Constant)
+                                    and isinstance(kw.value.value, int)):
+                                axis_value = kw.value.value
+                            elif (isinstance(kw.value, ast.UnaryOp)
+                                  and isinstance(kw.value.op, ast.USub)
+                                  and isinstance(kw.value.operand, ast.Constant)
+                                  and isinstance(kw.value.operand.value, int)):
+                                axis_value = -kw.value.operand.value
+                    calls.append((node.lineno, arg_src, axis_value))
 
         self.assertGreaterEqual(
             len(calls), 4,
@@ -2347,66 +2359,37 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
                  f"expectations need updating."))
 
         src_lines = src.splitlines()
-        # Accept any of:
-        #   (a) the call passes `axis=...` explicitly (iter-508 — the
-        #       sanctioned way to disambiguate the reconstruction
-        #       direction at the call site);
-        #   (b) argument expression contains `swapaxes` directly
-        #       (caller performed the transpose inline);
-        #   (c) bare variable ending in `_T` (convention for a
-        #       transposed strip already swapped onto recon axis);
-        #   (d) bare variable ending in `_y_strips` or `_y`
-        #       (y-direction strip whose halo-padded axis is last).
-        #
-        # For (c) we additionally verify a swapaxes/transpose
-        # assignment to that name in the 6 preceding lines.
-        for lineno, arg_src, has_axis_kwarg in calls:
-            if has_axis_kwarg:
-                continue  # Explicit axis= — contract honoured.
-            if "swapaxes" in arg_src:
-                continue  # Explicitly swapped inline — contract honoured.
-
-            name = arg_src.strip()
-            if name.endswith("_y_strips") or name.endswith("_y"):
-                continue  # y-direction strip — padded axis already last.
-
-            if name.endswith("_T"):
-                # Verify the transposed variable is actually produced by
-                # a `swapaxes` or `transpose` call in the nearby context.
-                window_start = max(0, lineno - 7)
-                window = "\n".join(src_lines[window_start:lineno])
-                # Require an assignment of the form `<name> = ... swapaxes(...)`
-                # or `<name> = ... transpose(...)` in the window.
-                import re
-                pattern = re.compile(
-                    rf"^\s*{re.escape(name)}\s*=\s*.*(swapaxes|transpose)\(",
-                    re.MULTILINE,
-                )
-                if pattern.search(window):
-                    continue
-
+        # iter-509 contract: every call to `_ppm_reconstruct_1d` MUST
+        # pass `axis=<positive integer literal>` explicitly.  The
+        # iter-508 `axis=-1` default has been removed from the function
+        # signature, but we additionally enforce here that:
+        #   - the kwarg is present;
+        #   - the value is a literal int (statically known);
+        #   - the value is in range [1, q.ndim - 1] — explicitly NOT
+        #     `-1` or `0` (face axis), since those are either the
+        #     buggy default or the face dimension.
+        # No other escape hatches (swapaxes / `_T` / `_y_strips`) are
+        # accepted: the explicit `axis=` is now the only sanctioned
+        # form.
+        for lineno, arg_src, axis_value in calls:
+            if axis_value is None:
                 source_line = src_lines[lineno - 1].strip()
                 self.fail(
                     f"operators_cdgrid.py:{lineno}: call "
-                    f"`_ppm_reconstruct_1d({arg_src})` uses a `_T`-"
-                    f"suffixed variable but no `swapaxes`/`transpose` "
-                    f"assignment to `{name}` was found in the previous "
-                    f"6 lines.  Naming a strip `_T` without actually "
-                    f"transposing re-introduces the iter-505 axis bug. "
-                    f"Source: `{source_line}`.")
-                continue  # unreachable after fail
-
-            source_line = src_lines[lineno - 1].strip()
-            self.fail(
-                f"operators_cdgrid.py:{lineno}: call "
-                f"`_ppm_reconstruct_1d({arg_src})` does not show an "
-                f"explicit `swapaxes`, is not a `_T`-suffixed already-"
-                f"transposed variable, and is not a y-direction strip "
-                f"— the axis contract for PPM reconstruction may be "
-                f"violated.  Source: `{source_line}`.  If the strip "
-                f"truly has the halo-padded reconstruction axis last, "
-                f"rename it to end in `_y_strips`, `_T`, or wrap with "
-                f"`jnp.swapaxes(...)` explicitly.")
+                    f"`_ppm_reconstruct_1d({arg_src}, ...)` is missing "
+                    f"a literal `axis=<int>` kwarg.  iter-509 contract: "
+                    f"`axis=` is required and must be a positive "
+                    f"integer literal naming the halo-padded "
+                    f"reconstruction axis.  Source: `{source_line}`.")
+            if axis_value < 1:
+                source_line = src_lines[lineno - 1].strip()
+                self.fail(
+                    f"operators_cdgrid.py:{lineno}: call uses "
+                    f"`axis={axis_value}`, which is either the buggy "
+                    f"default (-1) or the face axis (0).  Pass a "
+                    f"positive integer naming the halo-padded "
+                    f"reconstruction axis (typically 1 for x, 2 for "
+                    f"y).  Source: `{source_line}`.")
 
 
 if __name__ == "__main__":
