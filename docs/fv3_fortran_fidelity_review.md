@@ -197,6 +197,36 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-573 (2026-04-19)**: addressed Codex stop-time review of
+  iter-572: "4D `_arakawa_lamb_gradient` behavior is still
+  effectively uncovered".
+
+  Iter-572's shape-3d test used ZERO input, which doesn't
+  exercise the 4D branch's arithmetic.  All behavior tests
+  (no-op, anti-symmetry, linearity, padded-bypass) were 2D-only.
+  A refactor breaking only the 4D branch (e.g., `return zeros`
+  on ndim==4) would pass all iter-572 tests silently.
+
+  Added 3 new tests:
+    (a) `test_3d_non_zero_output_on_varying_field`: per-level-
+        distinct varying fields, assert every level has non-zero
+        gradient (max > 1e-7).
+    (b) `test_3d_matches_2d_per_level`: 4D output at level k
+        matches 2D-branch output on the k-th slice to 1e-6
+        relative.  Catches level-routing bugs (permutation,
+        broadcast-to-all, wrong axis).
+    (c) `test_3d_anti_symmetry_negation`: 4D version of the
+        iter-572 anti-symmetry test.
+
+  **Sanity-checked**: patched the 4D branch to zero out all
+  stencil reads (`B_sw = jnp.zeros_like(B_pad[..., :])` etc.).
+  Tests (a) and (b) correctly fire; iter-572 2D tests still
+  pass confirming they don't touch the 4D branch.  Restored
+  production; all 9 tests pass.
+
+  No production-path numerical changes.  94/94 tests pass in
+  `test_cdgrid.py` (91 prior + 3 new).
+
 - **iter-572 (2026-04-19)**: regression lock for
   `_arakawa_lamb_gradient` — went from 2 trivial tests
   (constant → 0) to 6 comprehensive behavior locks.

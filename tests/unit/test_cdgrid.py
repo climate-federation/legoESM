@@ -993,6 +993,105 @@ class TestArakawaLambGradient(unittest.TestCase):
             msg=(f"padded= bypass differs from internal pad on dy; "
                  f"max dev {diff_y:.3e}."))
 
+    def test_3d_non_zero_output_on_varying_field(self):
+        """Iter-573 (Codex follow-up to iter-572): 4D branch was
+        effectively uncovered by shape-only 3D test.  A refactor
+        breaking only the 4D branch (e.g., returning zeros on
+        ndim==4) would pass iter-572 but fail real 3D
+        computation.
+
+        This test exercises the 4D branch on distinct-per-level
+        varying fields and asserts every level has non-zero
+        gradient.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
+        B_np = np.empty((6, n, n, nlev), dtype=np.float64)
+        for k in range(nlev):
+            # Per-level-distinct varying field
+            B_np[..., k] = 100.0 + 50.0 * (k + 1) * np.cos(
+                (2 + k) * lon) * np.sin(lat)
+        B = jnp.asarray(B_np)
+        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        self.assertEqual(dB_dx.shape, (6, n + 1, n + 1, nlev))
+        for k in range(nlev):
+            max_grad_k = max(
+                float(jnp.max(jnp.abs(dB_dx[..., k]))),
+                float(jnp.max(jnp.abs(dB_dy[..., k]))))
+            self.assertGreater(
+                max_grad_k, 1e-7,
+                msg=(f"3D branch level {k} gave zero gradient; "
+                     f"max = {max_grad_k:.3e}.  If the 4D branch "
+                     f"is a no-op, this fires."))
+
+    def test_3d_matches_2d_per_level(self):
+        """Iter-573: the 3D branch output at level k must match
+        the 2D branch output on the same level's slice.  Catches
+        level-routing bugs in the 4D branch: permutations,
+        broadcast-one-level-to-all, or wrong axis."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(3572)
+        B_np = rng.standard_normal(
+            (6, n, n, nlev)).astype(np.float64)
+        # Amplify and offset per level so cross-level mixing is
+        # measurable against per-level signals.
+        for k in range(nlev):
+            B_np[..., k] = 100.0 * (k + 1) + 50.0 * B_np[..., k]
+        B = jnp.asarray(B_np)
+
+        dx_4d, dy_4d = _arakawa_lamb_gradient(B, cdgrid)
+        dx_4d_np = np.asarray(dx_4d)
+        dy_4d_np = np.asarray(dy_4d)
+
+        for k in range(nlev):
+            slc = jnp.asarray(B_np[..., k])
+            dx_2d, dy_2d = _arakawa_lamb_gradient(slc, cdgrid)
+            diff_x = float(jnp.max(jnp.abs(
+                jnp.asarray(dx_4d_np[..., k]) - dx_2d)))
+            diff_y = float(jnp.max(jnp.abs(
+                jnp.asarray(dy_4d_np[..., k]) - dy_2d)))
+            scale = max(
+                float(jnp.max(jnp.abs(dx_2d))),
+                float(jnp.max(jnp.abs(dy_2d))),
+                1e-30)
+            self.assertLess(
+                max(diff_x, diff_y), 1e-6 * scale,
+                msg=(f"Level {k}: 3D branch output differs from "
+                     f"2D-per-slice by {max(diff_x, diff_y):.3e} "
+                     f"(scale {scale:.3e}).  Level-routing bug in "
+                     f"the 4D branch (permutation, broadcast-one-"
+                     f"level-to-all, or wrong axis)."))
+
+    def test_3d_anti_symmetry_negation(self):
+        """Iter-573: anti-symmetry on the 4D branch."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(4572)
+        B_np = rng.standard_normal((6, n, n, nlev)).astype(np.float64)
+        B_pos = jnp.asarray(B_np)
+        B_neg = jnp.asarray(-B_np)
+        dx_pos, dy_pos = _arakawa_lamb_gradient(B_pos, cdgrid)
+        dx_neg, dy_neg = _arakawa_lamb_gradient(B_neg, cdgrid)
+        diff_x = float(jnp.max(jnp.abs(
+            jnp.asarray(dx_pos) + jnp.asarray(dx_neg))))
+        diff_y = float(jnp.max(jnp.abs(
+            jnp.asarray(dy_pos) + jnp.asarray(dy_neg))))
+        self.assertLess(
+            diff_x, 1e-10,
+            msg=f"3D dx anti-symmetry failed; max dev {diff_x:.3e}.")
+        self.assertLess(
+            diff_y, 1e-10,
+            msg=f"3D dy anti-symmetry failed; max dev {diff_y:.3e}.")
+
 
 class TestPadHaloAutoWrappers(unittest.TestCase):
     """Iter-565: regression lock for `_pad_halo_auto` and
