@@ -168,6 +168,54 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-543 (2026-04-19)**: source-level lock for the BGRID_NE
+  component sync site.
+
+  Codex fidelity audit for Critical Duogrid Constraint #1 (cube-edge
+  flux sync before update).  Verified all four sync call sites are
+  wired:
+    (i)  `cgrid_mass_flux_divergence` → `synchronize_cgrid_fluxes`
+         (operators_cdgrid.py:539-540)
+    (ii) `fv_tp_2d`                   → `synchronize_cgrid_fluxes`
+         (fv_tp_2d.py:535-536)
+    (iii)`_c_sw`                      → `synchronize_cgrid_fluxes`
+         (fv3_sw_core.py:1243-1244)
+    (iv) `_bgrid_ke_transport`        → `synchronize_bgrid_ne_corner_geo`
+         (fv3_sw_core.py:1700-1701)
+
+  Sites (i), (ii), (iii) already have source-level locks via
+  `TestFluxSyncCallSitesWired` (iter-502-504).  Site (iv) had only a
+  runtime mock-patch lock at n=8 seed=2026 (`test_duogrid.py:1221-
+  1239`).  A relocation of the BGRID sync into a nested helper, a
+  dead code branch, or a different function could still pass the
+  runtime test if the output happened to match.
+
+  Iter-543 adds `TestBgridNeCornerSyncCallSiteWired` with two tests
+  mirroring `TestFluxSyncCallSitesWired`:
+    (a) `test_bgrid_sync_called_inside_bgrid_ke_transport`: the
+        sync call must live in `_bgrid_ke_transport`'s direct
+        straight-line body (not in nested functions, lambdas, or
+        comprehensions).
+    (b) `test_bgrid_sync_call_is_duogrid_gated`: the sync call must
+        be inside an `if` whose test mentions `duogrid` or `dg`.
+
+  **Sanity-checked**: relocated the sync into a nested helper
+  function inside the `if use_duogrid:` block.  Test (a) correctly
+  fires with "must contain a live call to
+  `synchronize_bgrid_ne_corner_geo` in its direct body".  Restored
+  production code; both tests pass.
+
+  Codex's proposed alternative (Constraint #2 legacy-bypass gate
+  in `fv_tp_2d.py` — `use_duogrid = dg is not None and dg.ng >= 2`
+  vs. Fortran's `dg%is_initialized`) is PRACTICALLY UNREACHABLE:
+  the Python grid factory at `cubed_sphere.py:291-295` only
+  initializes `grid.duogrid` when `n >= 4`, and sets `ng =
+  min(3, n // 2)` by default, so ng >= 2 whenever duogrid is not
+  None.  The ng ≥ 2 check is defensive, not a fidelity gap.
+
+  No production-path numerical changes.  96/96 tests pass in
+  test_duogrid.py.
+
 - **iter-542 (2026-04-19)**: documented and locked the Python PPM
   limiter divergence from Fortran FV3 ``mord``/``iord`` variants.
 

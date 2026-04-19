@@ -1045,6 +1045,157 @@ class TestFluxSyncCallSitesWired:
                     f"flux sync must be gated on duogrid active.")
 
 
+class TestBgridNeCornerSyncCallSiteWired:
+    """Iter-543: source-level lock for the BGRID_NE component sync.
+
+    The production B-grid KE transport path (`_bgrid_ke_transport` in
+    `src/legoesm/core/fv3_sw_core.py`) must call
+    `synchronize_bgrid_ne_corner_geo` on the duogrid branch BEFORE
+    combining (ubb*vbb) and (ubbtemp*vbbtemp) into the KE corner
+    average.  Without this sync, adjacent faces see subtly different
+    transported B-grid wind components at shared corners, which breaks
+    the Lin-Rood dot-product average and propagates through the
+    d_sw6 wind update.
+
+    Existing coverage:
+      - `TestBgridNeCornerSync` (geometric helper tests)
+      - Mock-patch runtime lock in `TestFbPathSyncBehavior` (n=8 seed-
+        2026) verifies the output CHANGES when the sync is a no-op.
+
+    iter-543 adds a SOURCE-LEVEL lock so a refactor that silently
+    relocates the sync to a different (possibly unreached) host
+    function, or replaces it with a no-op helper, fires a clear
+    regression instead of depending on the runtime mock-patch test.
+    Structurally identical to `TestFluxSyncCallSitesWired` but for
+    the BGRID_NE vector sync.
+    """
+
+    REQUIRED_SITES = (
+        # (file, required enclosing function, required callee)
+        ("src/legoesm/core/fv3_sw_core.py",
+         "_bgrid_ke_transport",
+         "synchronize_bgrid_ne_corner_geo"),
+    )
+
+    def _repo_root(self):
+        import pathlib
+        here = pathlib.Path(__file__).resolve()
+        return here.parent.parent.parent
+
+    @staticmethod
+    def _find_function(tree, name):
+        import ast
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        return None
+
+    @staticmethod
+    def _nested_scope_types():
+        import ast
+        return (
+            ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+            ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp,
+        )
+
+    def _iter_direct_calls(self, func_node, callee_name):
+        """Yield Call nodes to ``callee_name`` that appear in the direct
+        straight-line body of ``func_node`` (not inside a nested
+        function, lambda, or comprehension)."""
+        import ast
+        nested = self._nested_scope_types()
+        stack = [(func_node, False)]
+        while stack:
+            node, inside_nested = stack.pop()
+            if (not inside_nested
+                    and isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == callee_name):
+                yield node
+            if isinstance(node, nested) and node is not func_node:
+                inside_nested = True
+            for child in ast.iter_child_nodes(node):
+                stack.append((child, inside_nested))
+
+    def test_bgrid_sync_called_inside_bgrid_ke_transport(self):
+        """The sync must live inside the target function's direct body.
+        A relocation to a nested helper, a docstring reference, or a
+        different function must fail this test.
+        """
+        import ast
+
+        root = self._repo_root()
+        for rel, func_name, callee in self.REQUIRED_SITES:
+            path = root / rel
+            tree = ast.parse(path.read_text())
+            func = self._find_function(tree, func_name)
+            assert func is not None, (
+                f"{rel}: expected module-level function `{func_name}`; "
+                f"not found.  If the function was renamed, update "
+                f"REQUIRED_SITES with the new name.")
+            calls = list(self._iter_direct_calls(func, callee))
+            assert calls, (
+                f"{rel}:{func_name}: must contain a live call to "
+                f"`{callee}` in its direct body (Ralph Critical "
+                f"Duogrid Constraint #1, BGRID_NE component sync "
+                f"before KE Lin-Rood average).  Docstring references "
+                f"or calls in nested helpers do NOT count."
+            )
+
+    def test_bgrid_sync_call_is_duogrid_gated(self):
+        """The sync call must be inside an `if` whose test mentions
+        `duogrid` or `dg`.  Unconditional BGRID sync would
+        unnecessarily cost time in non-duogrid paths and could mask
+        test-only issues in the non-duogrid fallback."""
+        import ast
+
+        root = self._repo_root()
+        for rel, func_name, callee in self.REQUIRED_SITES:
+            path = root / rel
+            src = path.read_text()
+            tree = ast.parse(src)
+            func = self._find_function(tree, func_name)
+            assert func is not None, f"{rel}: `{func_name}` not found."
+
+            # Collect enclosing-If ranges in the direct body.
+            nested = self._nested_scope_types()
+            if_ranges = []
+            stack = [(func, False)]
+            while stack:
+                node, inside_nested = stack.pop()
+                if isinstance(node, ast.If) and not inside_nested:
+                    end = max(
+                        (getattr(c, "lineno", node.lineno)
+                         for c in ast.walk(node)),
+                        default=node.lineno,
+                    )
+                    if_ranges.append(
+                        (node.lineno, end, ast.unparse(node.test)))
+                if isinstance(node, nested) and node is not func:
+                    inside_nested = True
+                for child in ast.iter_child_nodes(node):
+                    stack.append((child, inside_nested))
+
+            calls = list(self._iter_direct_calls(func, callee))
+            src_lines = src.splitlines()
+            for call_node in calls:
+                lineno = call_node.lineno
+                enclosing = [(s, e, t) for (s, e, t) in if_ranges
+                             if s <= lineno <= e]
+                assert enclosing, (
+                    f"{rel}:{func_name}:{lineno}: `{callee}` call is "
+                    f"not inside an `if` — must be gated on duogrid "
+                    f"active.  Source: "
+                    f"{src_lines[lineno - 1].strip()}")
+                innermost = max(enclosing, key=lambda t: t[0])
+                gate_src = innermost[2]
+                assert ("duogrid" in gate_src or "dg" in gate_src), (
+                    f"{rel}:{func_name}:{lineno}: enclosing `if` "
+                    f"test ('{gate_src}') does not mention `duogrid` "
+                    f"or `dg` — BGRID_NE sync must be gated on "
+                    f"duogrid active.")
+
+
 # =========================================================================
 # T9: BGRID_NE vector corner sync (iter-100, Priority 2 scaffold)
 # =========================================================================
