@@ -5154,3 +5154,25 @@ FV3 uses TWO different metric factors:
 The FV3 comment at sw_core.F90:417 says: "we only divide by sin instead of sin²".
 The c_sw and fv3_csw_tendencies vorticity flux now correctly uses `/sina` (1/sin).
 Note: the full 5-day Williamson 2 test has a pre-existing NaN blowup unrelated to these changes.
+
+### Iter-590 (2026-04-19): symmetric ke_v zero-sign coverage for Constraint #2
+
+**Codex stop-time review (iter-589):** "Iter-589 claims exhaustive zero-sign coverage, but it only tests `ke_u` and leaves the symmetric `ke_v` drift unguarded."  The prior iteration only locked the `ua > 0` / `ua <= 0` strict/inclusive boundary on the west (`ke_u[:, 0, :]`) and east (`ke_u[:, n-1, :]`) edges; it did not verify the matching `va > 0` / `va <= 0` strict/inclusive boundary on the south (`ke_v[:, :, 0]`) and north (`ke_v[:, :, n-1]`) edges.  A silent `>` → `>=` refactor on either south or north would therefore pass.
+
+**Change:** extended `test_ke_upwind_legacy_boundary_override_gated` in `tests/unit/test_duogrid.py` with two zero-sign ke_v checks:
+1. **South edge with va=0 at j=0**: under `duogrid=False`, `ke_v[:, :, 0]` MUST equal pure downwind `vc[:, :, 1]` at every (i, k).  The south override (`va > 0`) is strict, so at va=0 the override must NOT fire.  A `va >= 0` refactor would silently apply the override at zero-wind cells (24.87 unit deviation measured during sanity check).
+2. **North edge with va=0 at j=n-1**: under `duogrid=False`, `ke_v[:, :, n-1]` MUST equal `ke_bdy_t = vc[:, :, n]*sin_sg[N] + u_d[:, :, n]*cos_sg[N]`.  The north override (`va <= 0`) is inclusive, so at va=0 the override MUST fire.  A `va < 0` refactor would silently leave zero-wind cells on the upwind branch.
+
+Both ke_v checks use the same construction pattern as the earlier ke_u south/north checks: synthetic inputs with controlled sign on va, plus sin_sg/cos_sg metric tensors that make `ke_bdy_t` deterministic.
+
+**Sanity check fired:** patched `fv3_sw_core.py:745` `va[:, :, 0] > 0` → `>= 0`.  Test fired with `AssertionError: Under duogrid=False with va=0, ke_v[:,:,0] deviates from PURE UPWIND (vc[:,:,1]) by 2.487e+01.  The south override should NOT fire at va=0 (condition `va > 0` is strict).`  Production code restored; all 107 test_duogrid.py tests pass.
+
+**Constraint #2 coverage summary across 5 gates:**
+- `_ke_upwind` (fv3_sw_core.py:731): 4 boundary overrides (W/E on ke_u; S/N on ke_v) × {gate-removal, gate-inversion, body-relocation, body-deletion, zero-sign strict vs inclusive}.  All 6 regression modes now locked in `test_ke_upwind_legacy_boundary_override_gated`.
+- `_corner_vorticity` (fv3_sw_core.py:1129): 4 cube-vertex corrections locked in `test_corner_vorticity_legacy_correction_not_applied_under_duogrid` with AST + behavioral checks across 4 regression modes.
+- `_vorticity_flux` (fv3_sw_core.py:1156, 1162): fy1/fx1 panel-edge overrides locked in `test_vorticity_flux_legacy_overrides_gated_both_sides` across dual-edge + body-reorder regressions.
+- `_ppm_transport_1d` iord==8 pert_ppm path (fv3_sw_core.py): bounded_domain gating locked in `test_pert_ppm_iv1_not_called_under_duogrid_via_production_path`.
+- `rsin_u` panel-edge override (operators_cdgrid.py): locked in `test_rsin_u_panel_edge_override_only_in_non_bounded_domain`.
+
+With iter-590, all five Constraint #2 gates have both AST-level and behavioral coverage that fires on realistic regression patterns (gate flip, gate removal, body move, body delete, operator refactor).
+

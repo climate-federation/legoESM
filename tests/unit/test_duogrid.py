@@ -2809,6 +2809,45 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
             f"(via jnp.where(ua > 0, interior, override)), so "
             f"ua=0 SHOULD trigger the override.")
 
+        # --- Iter-590 (Codex follow-up to iter-589): symmetric
+        # zero-sign checks for ke_v (south/north edges).  The
+        # iter-589 cases only covered ke_u; ke_v has the same
+        # strict-inequality structure and is equally vulnerable
+        # to a `>= 0` refactor.
+        #
+        # With va = 0 at j=0:
+        #   line 729: ke_v[:, :, 0] = vc[:, :, 1]  (downwind)
+        #   line 744-745: jnp.where(0 > 0, ke_bdy_b, ke_v)
+        #                = ke_v = vc[:, :, 1]  (no override)
+        # So ke_v[:, :, 0] should equal vc[:, :, 1].
+        # A `>= 0` refactor would give ke_bdy_b instead.
+        expected_ke_v_0_zero = vc_np[:, :, 1]  # downwind
+        diff_s = float(np.max(np.abs(
+            ke_v_zero_np[:, :, 0] - expected_ke_v_0_zero)))
+        # With va = 0 at j=n-1:
+        #   line 729: ke_v[:, :, n-1] = vc[:, :, n]  (downwind)
+        #   line 748-749: jnp.where(0 > 0, ke_v, ke_bdy_t)
+        #                = ke_bdy_t (override fires)
+        # So ke_v[:, :, n-1] SHOULD equal ke_bdy_t.
+        expected_ke_v_nm1_zero = (
+            vc_np[:, :, n] * sg_np[:, :, n - 1, 3]
+            + u_d_np[:, :, n] * cg_np[:, :, n - 1, 3])
+        diff_n_edge = float(np.max(np.abs(
+            ke_v_zero_np[:, :, n - 1] - expected_ke_v_nm1_zero)))
+
+        assert diff_s < 1e-5, (
+            f"Under duogrid=False with va=0, ke_v[:,:,0] "
+            f"deviates from PURE UPWIND (vc[:,:,1]) by "
+            f"{diff_s:.3e}.  The south override should NOT "
+            f"fire at va=0 (condition `va > 0` is strict).  "
+            f"A `>= 0` refactor would silently apply the "
+            f"override at zero-wind cells.")
+        assert diff_n_edge < 1e-5, (
+            f"Under duogrid=False with va=0, ke_v[:,:,n-1] "
+            f"deviates from ke_bdy_t (north override) by "
+            f"{diff_n_edge:.3e}.  The north branch fires at "
+            f"va<=0, so va=0 SHOULD trigger it.")
+
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
         override in `cubed_sphere_cdgrid.py` must remain inside the
