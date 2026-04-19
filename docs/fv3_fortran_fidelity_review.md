@@ -168,6 +168,47 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-514 (2026-04-19)**: re-pinned both `TestW2BoundaryErrorBudget`
+  tests to the canonical production-matrix C36/dt=300s/1d setup
+  after Codex stop-time review of iter-513:
+  "the new boundary-fix regression is pinned to a non-canonical
+  setup, so it does not actually lock the production harness it
+  claims to guard."
+
+  iter-513's `boundary_fix` test ran at C16/dt=300s and reported
+  only a 35 % L2 improvement (ratio 0.65), substantially weaker
+  than the matrix's actual 4× improvement (ratio 0.243) at C36.
+  The C16 proxy did not faithfully exercise the production code
+  path the test claimed to guard.
+
+  Iter-514 changes both tests to `n=36, dt=300.0, days=1.0` —
+  exactly matching `run_atmosphere_test_matrix.py:1177-1194`.
+  Re-measured baselines:
+
+  ```
+  W2 alpha=0 C36 dt=300s 1d (canonical):
+                       boundary_fix=True  boundary_fix=False
+    BUGGY (pre-505)    L2 = 1.60e-3       L2 = 1.67e-3   ratio 0.96
+    FIXED (post-505)   L2 = 3.29e-4       L2 = 1.36e-3   ratio 0.243
+  ```
+
+  Test 1 (`test_w2_alpha0_c36_1day_canonical_l2_post_iter505`):
+    - Ceiling: L2 < 5.0e-4
+    - PASS on FIXED (3.29e-4, ~50% headroom);
+    - FAIL on BUGGY (1.60e-3, exceeds by 3.2x).
+
+  Test 2 (`test_boundary_fix_is_load_bearing_for_w2_l2`):
+    - Ceiling: True/False ratio < 0.5
+    - PASS on FIXED (ratio 0.243, well below);
+    - FAIL on BUGGY (ratio 0.96 — the axis bug is so dominant that
+      `boundary_fix` no longer makes a meaningful difference).
+
+  Cost: 2 tests × ~3s each = ~6s added to CI.  Both runs share
+  the canonical IC builder and share JIT compile when run together.
+
+  No production-path numerical changes (test re-pin only).
+  188/188 tests pass.
+
 - **iter-513 (2026-04-19)**: documented and locked the non-FV3
   `boundary_fix=True` stabilizer in `fv3_sw_tendencies` step (j).
 

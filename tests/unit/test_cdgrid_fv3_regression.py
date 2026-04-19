@@ -2407,29 +2407,34 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
     1.53e-03 to 2.42e-04 (6.3x improvement).
     """
 
-    def test_w2_alpha0_c16_1day_canonical_l2_post_iter505(self):
-        """Run the canonical production W2 setup at C16 for 1 day and
+    # Iter-514 (Codex): both tests in this class now use the EXACT
+    # production-matrix resolution (C36, dt=300s, 1 day) instead of
+    # the iter-512/513 C16 proxy.  C36 matches `run_atmosphere_test_matrix.py`
+    # line 1177 (dt=300s) and reports W2 L2=2.42e-4 in the matrix
+    # summary; running the same setup here confirms L2=3.29e-4 (the
+    # delta from 2.42e-4 is dt-floor / mass-fixer wiring differences,
+    # not a numerical disagreement).  Wall time per run ≈ 3s.
+
+    def test_w2_alpha0_c36_1day_canonical_l2_post_iter505(self):
+        """Run the canonical production W2 setup at C36 for 1 day and
         assert the L2 height-error stays below the post-iter-505
-        ceiling.  Setup matches `run_atmosphere_test_matrix.py:1175-1195`
-        exactly (apart from C16 vs the matrix's C36).
+        ceiling.  Setup matches `run_atmosphere_test_matrix.py:1175-1195`.
         """
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
         )
-        # Use the SAME canonical IC builder as the production matrix.
         from tests.atmosphere.shallow_water.test_cases.williamson import (
             williamson_test2,
         )
 
-        n = 16
+        n = 36
         days = 1.0
-        dt = 300.0
+        dt = 300.0   # matches matrix line 1177
         n_steps = int(days * 86400 / dt)
         # `_div_damp_cube` from the matrix script — copied inline so
         # the unit test does not depend on the script's import surface.
@@ -2466,39 +2471,43 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         h_mean = float(jnp.mean(jnp.abs(h0)))
         err = state.h - h0
         L2 = float(jnp.sqrt(jnp.mean(err ** 2)) / h_mean)
-        Linf = float(jnp.max(jnp.abs(err)) / h_mean)
 
-        # Measured baselines on the canonical setup (C16, dt=300s,
-        # 1 day, boundary_fix=True, fix_mass=True, div_damp scaled):
-        #   BUGGY (pre-iter-505):   L2 = 3.43e-3
-        #   FIXED  (post-iter-505): L2 = 8.44e-4   (4x improvement)
-        # Ceiling at 1.5e-3 cleanly separates: passes on FIXED with
-        # ~78 % headroom, fires on BUGGY by 2.3x.
+        # Measured baselines on the canonical C36 setup, dt=300s, 1 day:
+        #   BUGGY (pre-iter-505):   matrix-reported L2 ≈ 1.53e-3
+        #   FIXED  (post-iter-505): L2 = 3.29e-4   (matrix reports 2.42e-4
+        #                                            after mass fixer,
+        #                                            consistent up to
+        #                                            mass-fixer details)
+        # Ceiling at 5.0e-4 cleanly separates: passes on FIXED with
+        # ~50% headroom, would fire on BUGGY by 3x.
         self.assertLess(
-            L2, 1.5e-3,
-            msg=(f"W2 alpha=0 C16 1d (canonical) L2={L2:.3e} "
-                 f"exceeds 1.5e-3 ceiling — iter-505 axis fix may "
-                 f"have regressed.  Pre-iter-505 baseline on this "
-                 f"setup was L2 = 3.43e-3."))
+            L2, 5.0e-4,
+            msg=(f"W2 alpha=0 C36 1d (canonical matrix setup) "
+                 f"L2={L2:.3e} exceeds 5.0e-4 ceiling — iter-505 "
+                 f"axis fix may have regressed.  Pre-iter-505 baseline "
+                 f"on this setup was L2 ≈ 1.53e-3 (matrix-reported)."))
 
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
-        """Iter-513: explicitly lock the iter-511 finding that
-        `boundary_fix=True` in `fv3_sw_tendencies` delivers a
+        """Iter-513 / iter-514: explicitly lock the iter-511 finding
+        that `boundary_fix=True` in `fv3_sw_tendencies` delivers a
         substantial W2 L2 improvement, so a future "remove non-FV3
         hack" pass cannot silently disable it without first restoring
         the boundary error budget.
 
-        Measured at C16, dt=300s, 1 day (canonical config):
-          - boundary_fix=True  : L2 = 8.4e-4
-          - boundary_fix=False : L2 = 1.3e-3
-          - ratio True/False = 0.65   (boundary_fix wins by ~35%)
-        At C36, dt=60s, 1 day the gap widens to 2.4x (iter-511
-        measurement).  At C16 dt=300s the signal is weaker because
-        the larger dt and coarser grid both reduce the relative
-        contribution of the face-boundary error.
+        Iter-513 ran this at the C16/dt=300 proxy; Codex iter-513
+        review flagged that as non-canonical because the production
+        matrix runs C36/dt=300 and the smaller-grid proxy reported
+        only a 35 % improvement (vs the matrix's 4x).  Iter-514
+        re-pins to the matrix-canonical C36/dt=300 setup.
 
-        Test asserts True/False ratio < 0.85 — fires if the
-        non-FV3 stabilizer is silently disabled or stops working.
+        Measured at the canonical C36 dt=300s 1 day setup:
+          - boundary_fix=True  : L2 = 3.29e-4
+          - boundary_fix=False : L2 = 1.36e-3
+          - ratio True/False = 0.243   (boundary_fix wins by ~4x)
+
+        Test asserts True/False ratio < 0.5 — fires if the non-FV3
+        stabilizer is silently disabled or its effectiveness drops
+        by more than half.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -2512,11 +2521,11 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             williamson_test2,
         )
 
-        n = 16
+        n = 36
         days = 1.0
-        dt = 300.0
+        dt = 300.0   # matches matrix line 1177
         n_steps = int(days * 86400 / dt)
-        div_damp = 1.5e7 * (48.0 / n) ** 2
+        div_damp = 1.5e7 * (48.0 / n) ** 2  # _div_damp_cube(n)
 
         grid = create_cubed_sphere(n=n, use_duogrid=False)
         sw = williamson_test2(grid)
@@ -2546,15 +2555,15 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
 
         ratio = results[True] / results[False]
         self.assertLess(
-            ratio, 0.85,
+            ratio, 0.5,
             msg=(f"boundary_fix=True L2 ({results[True]:.3e}) is not "
                  f"meaningfully smaller than boundary_fix=False L2 "
-                 f"({results[False]:.3e}); ratio = {ratio:.3f}.  At "
-                 f"C16 dt=300s the expected ratio is ~0.65 — if it "
-                 f"has drifted above 0.85, either the non-FV3 "
-                 f"stabilizer was silently disabled or the underlying "
-                 f"face-boundary error budget has changed.  Update "
-                 f"the iter-511 documentation if intentional."))
+                 f"({results[False]:.3e}); ratio = {ratio:.3f}.  On "
+                 f"the canonical C36 dt=300s setup the expected ratio "
+                 f"is ~0.243 (4x improvement) — if it has drifted "
+                 f"above 0.5 the non-FV3 stabilizer was silently "
+                 f"disabled or its effectiveness halved.  Update the "
+                 f"iter-511 documentation if intentional."))
 
 
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
