@@ -320,10 +320,10 @@ class LatLonCGridOceanState(NamedTuple):
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
     """Diagnostic fields for debugging ocean dynamics on lat-lon C-grid.
-    
+
     These fields are computed during tendency calculation for analysis purposes
     but are not part of the prognostic state.
-    
+
     Fields
     ------
     w : Field
@@ -346,7 +346,7 @@ class LatLonCGridOceanDiagnostics(NamedTuple):
         Physics tendency [degC/s]. Shape (n_lat, n_lon, nlev).
     wind_stress_x : Field
         Zonal wind stress applied [Pa]. Shape (n_lat, n_lon).
-    wind_stress_y : Field  
+    wind_stress_y : Field
         Meridional wind stress applied [Pa]. Shape (n_lat, n_lon).
     """
     w: Field

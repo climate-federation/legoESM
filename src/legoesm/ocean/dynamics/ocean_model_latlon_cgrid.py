@@ -447,11 +447,11 @@ class LatLonCGridOceanModel:
             else:
                 S_corrected = tr_new
 
-        # Include vertical velocity diagnostic in state  
+        # Include vertical velocity diagnostic in state
         # w_baro has shape (..., nlev+1) on half levels, interpolate to full levels (..., nlev)
         w_full = 0.5 * (w_baro[..., :-1] + w_baro[..., 1:])  # Average adjacent half levels
         w_field = state.w.replace(data=w_full, name="w")
-        
+
         state_new = state_new._replace(
             T=state_new.T.replace(data=T_corrected),
             S=state_new.S.replace(data=S_corrected),

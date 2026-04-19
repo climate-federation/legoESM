@@ -1,7 +1,7 @@
 """Stommel Gyre with Passive Tracer Ocean Experiment.
 
 A combined circulation and tracer transport test case based on Hecht et al. (2000)
-that studies passive tracer advection in a wind-driven gyre circulation. This 
+that studies passive tracer advection in a wind-driven gyre circulation. This
 experiment validates both the circulation dynamics and the numerical properties
 of tracer transport schemes.
 
@@ -41,7 +41,7 @@ Validation Criteria:
 - Conservation of tracer bounds (monotonicity)
 
 References:
-- Hecht et al. (2000), "A comparison of tracer advection in stationary and time-varying 
+- Hecht et al. (2000), "A comparison of tracer advection in stationary and time-varying
   ocean circulations", Ocean Modelling 2, 1-15. DOI: 10.1016/S1463-5003(00)00004-4
 - Standard ocean model validation for tracer transport
 - NEMO and MOM tracer transport benchmarking studies
@@ -62,39 +62,39 @@ from legoesm.core.field import Field
 @dataclass
 class StommelGyreTracerConfig:
     """Configuration parameters for Stommel gyre tracer experiment.
-    
+
     Combines wind-driven gyre circulation with passive tracer transport.
     """
     # Background circulation (inherits from wind_gyre)
     T_surface: float = 20.0        # Surface temperature [°C]
-    T_deep: float = 2.0            # Deep ocean temperature [°C] 
+    T_deep: float = 2.0            # Deep ocean temperature [°C]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
     H_max: float = 5500.0          # Maximum ocean depth [m]
     land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
-    
+
     # Tracer blob parameters
     S_background: float = 35.0     # Background salinity [PSU]
     S_amplitude: float = 2.0       # Tracer perturbation amplitude [PSU]
     blob_center_lat: float = 30.0  # Blob center latitude [degrees]
     blob_center_lon: float = -30.0 # Blob center longitude [degrees]
     blob_width_deg: float = 10.0   # Blob width [degrees]
-    
+
     # Surface/subsurface structure
     surface_tracer_only: bool = True  # Apply tracer only at surface
-    
+
     # Validation thresholds
     max_integral_drift: float = 1e-3  # Maximum tracer integral drift
     max_overshoot: float = 0.1        # Maximum spurious overshoot [PSU]
     max_undershoot: float = 0.1       # Maximum spurious undershoot [PSU]
 
 
-def create_initial_conditions(grid_type: str, grid, z_coord, 
+def create_initial_conditions(grid_type: str, grid, z_coord,
                             config: StommelGyreTracerConfig = None):
     """Create Stommel gyre tracer initial conditions for any grid type.
-    
+
     Sets up a wind-driven gyre circulation with a passive salinity tracer
     blob that will be advected by the flow.
-    
+
     Parameters
     ----------
     grid_type : str
@@ -105,12 +105,12 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         Vertical coordinate system
     config : StommelGyreTracerConfig, optional
         Configuration parameters. Uses defaults if None.
-        
+
     Returns
     -------
     OceanState
         Initial state with gyre circulation + tracer blob
-        
+
     Notes
     -----
     - Spectral grid not supported (complex tracer implementation)
@@ -120,23 +120,23 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     """
     if config is None:
         config = StommelGyreTracerConfig()
-    
+
     if grid_type == "spectral":
         raise NotImplementedError(
             "Stommel gyre tracer not implemented for spectral grid")
-    
+
     # First create rest state background
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
-            grid, z_coord, 
+            grid, z_coord,
             T_surface=config.T_surface,
             T_deep=config.T_deep,
             S_uniform=config.S_background,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
@@ -147,24 +147,24 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
             T_surface=config.T_surface,
-            T_deep=config.T_deep, 
+            T_deep=config.T_deep,
             S_uniform=config.S_background,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     else:
         raise ValueError(f"Unknown grid type: {grid_type}")
-    
+
     # Add wind-driven gyre circulation
     state = _add_wind_gyre_circulation(state, grid_type, grid, z_coord, config)
-    
+
     # Add passive tracer blob
     return _add_tracer_blob(state, grid_type, grid, z_coord, config)
 
@@ -172,28 +172,28 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
 def _add_wind_gyre_circulation(state, grid_type: str, grid, z_coord,
                              config: StommelGyreTracerConfig):
     """Add wind-driven gyre circulation to the state.
-    
+
     Uses the same logic as wind_gyre experiment to establish circulation.
     """
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import wind_driven_gyre_init
         return wind_driven_gyre_init(grid, z_coord)
-        
+
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import wind_driven_gyre_latlon_cgrid
         return wind_driven_gyre_latlon_cgrid(grid, z_coord)
-        
+
     elif grid_type == "mpas":
         # MPAS doesn't have dedicated gyre init; use rest state with wind forcing
         return state
-    
+
     return state
 
 
 def _add_tracer_blob(state, grid_type: str, grid, z_coord,
                    config: StommelGyreTracerConfig):
     """Add Gaussian tracer blob to the salinity field."""
-    
+
     # Get coordinates
     if grid_type == "mpas":
         lat = np.asarray(grid.latCell, dtype=np.float64)
@@ -205,26 +205,26 @@ def _add_tracer_blob(state, grid_type: str, grid, z_coord,
     else:  # cubed_sphere
         lat = np.asarray(grid.lat, dtype=np.float64)
         lon = np.asarray(grid.lon, dtype=np.float64)
-    
+
     # Convert blob parameters to radians
     lat_c = np.radians(config.blob_center_lat)
     lon_c = np.radians(config.blob_center_lon)
     sigma = np.radians(config.blob_width_deg)
     S_bg = config.S_background
     S_amp = config.S_amplitude
-    
+
     # Compute Gaussian blob on sphere
     # Use spherical distance for proper shape
     r2 = (lat - lat_c)**2 + (np.cos(lat_c) * (lon - lon_c))**2
     S_blob = S_bg + S_amp * np.exp(-r2 / (2.0 * sigma**2))
-    
+
     # Apply to salinity field
     S_data = np.array(state.S.data, dtype=np.float64, copy=True)
     if hasattr(state, 'land_mask'):
         mask = np.asarray(state.land_mask.data, dtype=np.float64)
     else:
         mask = 1.0
-    
+
     if config.surface_tracer_only:
         # Surface-intensified tracer
         S_data[..., 0] = S_blob * mask
@@ -233,18 +233,18 @@ def _add_tracer_blob(state, grid_type: str, grid, z_coord,
         nlev = S_data.shape[-1]
         for k in range(nlev):
             S_data[..., k] = S_blob * mask
-    
+
     return state._replace(S=Field(jnp.array(S_data), name="S",
                                 dims=state.S.dims, units="PSU"))
 
 
 def create_forcings(grid_type: str, grid, config: StommelGyreTracerConfig = None):
     """Create forcing functions for Stommel gyre tracer experiment.
-    
+
     The experiment uses wind-driven gyre circulation with passive tracer
     transport. Wind forcing is handled by the model's surface forcing
     infrastructure.
-    
+
     Returns
     -------
     None
@@ -255,7 +255,7 @@ def create_forcings(grid_type: str, grid, config: StommelGyreTracerConfig = None
 
 def create_domain_config(config: StommelGyreTracerConfig = None) -> Dict[str, Any]:
     """Create domain configuration parameters.
-    
+
     Returns
     -------
     Dict[str, Any]
@@ -263,7 +263,7 @@ def create_domain_config(config: StommelGyreTracerConfig = None) -> Dict[str, An
     """
     if config is None:
         config = StommelGyreTracerConfig()
-        
+
     return {
         "H_max": config.H_max,
         "land_lat_threshold": config.land_lat_threshold,
@@ -278,7 +278,7 @@ def compute_tracer_conservation_metrics(state, grid_type: str, grid,
                                       config: StommelGyreTracerConfig
                                       ) -> Dict[str, float]:
     """Compute tracer conservation metrics for current state.
-    
+
     Parameters
     ----------
     state : OceanState
@@ -291,78 +291,78 @@ def compute_tracer_conservation_metrics(state, grid_type: str, grid,
         Initial tracer statistics for comparison
     config : StommelGyreTracerConfig
         Configuration parameters
-        
+
     Returns
     -------
     Dict[str, float]
         Tracer conservation metrics
     """
     metrics = {}
-    
+
     # Get area weights and masks
     if grid_type == "mpas":
         area = np.asarray(grid.areaCell, dtype=np.float64)
     else:
         area = np.asarray(grid.area, dtype=np.float64)
-        
+
     if hasattr(state, 'land_mask'):
         mask = np.asarray(state.land_mask.data, dtype=np.float64)
     else:
         mask = 1.0
-    
+
     ocean = mask > 0.5
-    
+
     # Current surface salinity
     S_sfc = np.asarray(state.S.data[..., 0], dtype=np.float64)
-    
+
     # Integral conservation
     S_integral = float(np.sum(S_sfc * area * mask))
     metrics["S_integral"] = S_integral
-    
+
     if abs(initial_values.get("S_integral", 0)) > 1e-30:
         S_integral_init = initial_values["S_integral"]
         integral_drift = abs(S_integral - S_integral_init) / abs(S_integral_init)
         metrics["S_integral_drift"] = integral_drift
-    
+
     # Extrema preservation
     S_min = float(np.min(S_sfc[ocean]))
     S_max = float(np.max(S_sfc[ocean]))
     metrics["S_min"] = S_min
     metrics["S_max"] = S_max
-    
+
     # Check for spurious extrema
     S_min_init = initial_values.get("S_min", S_min)
     S_max_init = initial_values.get("S_max", S_max)
-    
+
     overshoot = max(0, S_max - S_max_init)
     undershoot = max(0, S_min_init - S_min)
     metrics["overshoot"] = overshoot
     metrics["undershoot"] = undershoot
-    
+
     return metrics
 
 
-def compute_transport_metrics(diagnostics: Dict[str, list], 
+def compute_transport_metrics(diagnostics: Dict[str, list],
                             initial_values: Dict[str, float],
                             config: StommelGyreTracerConfig) -> Dict[str, float]:
     """Compute tracer transport metrics from time series diagnostics.
-    
+
     Parameters
-    ---------- 
+    ----------
     diagnostics : Dict[str, list]
         Time series diagnostics from simulation
     initial_values : Dict[str, float]
         Initial tracer statistics
     config : StommelGyreTracerConfig
         Configuration parameters
-        
+
     Returns
     -------
     Dict[str, float]
         Transport metrics for validation
     """
     metrics = {}
-    
+
     # Integral conservation over time
     S_integral_list = diagnostics.get("S_integral", [])
     if len(S_integral_list) >= 2:
@@ -371,51 +371,51 @@ def compute_transport_metrics(diagnostics: Dict[str, list],
         if abs(S_int_init) > 1e-30:
             integral_drift = abs(S_int_final - S_int_init) / abs(S_int_init)
             metrics["integral_drift"] = integral_drift
-    
+
     # Extrema evolution
     S_min_list = diagnostics.get("S_min", [])
     S_max_list = diagnostics.get("S_max", [])
-    
+
     if len(S_min_list) >= 1 and len(S_max_list) >= 1:
         S_min_final = S_min_list[-1]
         S_max_final = S_max_list[-1]
-        
+
         S_min_init = initial_values.get("S_min", S_min_final)
         S_max_init = initial_values.get("S_max", S_max_final)
-        
+
         overshoot = max(0, S_max_final - S_max_init)
         undershoot = max(0, S_min_init - S_min_final)
-        
+
         metrics["overshoot_final"] = overshoot
         metrics["undershoot_final"] = undershoot
         metrics["S_min_final"] = S_min_final
         metrics["S_max_final"] = S_max_final
-        
+
     return metrics
 
 
-def validate_results(final_state, diagnostics: Dict[str, list], 
+def validate_results(final_state, diagnostics: Dict[str, list],
                    config: StommelGyreTracerConfig = None,
                    **validation_kwargs) -> Tuple[bool, str]:
     """Validate Stommel gyre tracer experiment results.
-    
+
     Success criteria:
     - Tracer integral conservation within tight bounds
     - Minimal spurious extrema (overshoot/undershoot)
     - No NaN or infinite values
     - Realistic tracer evolution and transport
-    
+
     Parameters
     ----------
     final_state : OceanState
         Final model state
-    diagnostics : Dict[str, list] 
+    diagnostics : Dict[str, list]
         Time series diagnostics
     config : StommelGyreTracerConfig, optional
         Configuration parameters
     **validation_kwargs
         Additional validation parameters (initial_values)
-        
+
     Returns
     -------
     bool
@@ -425,7 +425,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
     """
     if config is None:
         config = StommelGyreTracerConfig()
-    
+
     # Check for NaN/infinite values
     if hasattr(final_state, 'S') and not jnp.all(jnp.isfinite(final_state.S.data)):
         return False, "NaN/Inf detected in final salinity field"
@@ -433,18 +433,18 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         return False, "NaN/Inf detected in final temperature field"
     if hasattr(final_state, 'eta') and not jnp.all(jnp.isfinite(final_state.eta.data)):
         return False, "NaN/Inf detected in final eta field"
-    
+
     # Compute transport metrics
     initial_values = validation_kwargs.get("initial_values", {})
     if initial_values and diagnostics:
         metrics = compute_transport_metrics(diagnostics, initial_values, config)
     else:
         metrics = {}
-    
+
     # Validation
     success = True
     notes_parts = []
-    
+
     # Integral conservation check
     if "integral_drift" in metrics:
         drift = metrics["integral_drift"]
@@ -452,7 +452,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         if drift > config.max_integral_drift:
             success = False
             notes_parts.append("FAIL: excessive tracer drift")
-    
+
     # Spurious extrema check
     if "overshoot_final" in metrics:
         overshoot = metrics["overshoot_final"]
@@ -460,28 +460,28 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         if overshoot > config.max_overshoot:
             success = False
             notes_parts.append("FAIL: excessive overshoot")
-    
+
     if "undershoot_final" in metrics:
         undershoot = metrics["undershoot_final"]
         notes_parts.append(f"undershoot={undershoot:.3f}")
         if undershoot > config.max_undershoot:
             success = False
             notes_parts.append("FAIL: excessive undershoot")
-    
+
     # Final extrema values
     if "S_min_final" in metrics and "S_max_final" in metrics:
         S_min = metrics["S_min_final"]
         S_max = metrics["S_max_final"]
         notes_parts.append(f"S_range=[{S_min:.2f},{S_max:.2f}]PSU")
-    
+
     notes = ", ".join(notes_parts)
-    
+
     return success, notes
 
 
 def get_diagnostic_field_specs() -> list:
     """Get field specifications for diagnostic output.
-    
+
     Returns
     -------
     list
@@ -496,7 +496,7 @@ def get_diagnostic_field_specs() -> list:
 
 def get_scalar_units() -> Dict[str, str]:
     """Get units for scalar diagnostic quantities.
-    
+
     Returns
     -------
     Dict[str, str]
@@ -505,7 +505,7 @@ def get_scalar_units() -> Dict[str, str]:
     return {
         "mean_eta": "m",
         "max_abs_eta": "m",
-        "mean_T": "degC", 
+        "mean_T": "degC",
         "mean_S": "PSU",
         "S_min": "PSU",
         "S_max": "PSU",
@@ -528,7 +528,7 @@ EXPERIMENT_CONFIG = {
     "get_field_specs": get_diagnostic_field_specs,
     "get_scalar_units": get_scalar_units,
     "default_duration": 60.0,   # days
-    "quick_duration": 5.0,      # days  
+    "quick_duration": 5.0,      # days
     "expected_metrics": {
         "integral_drift": "< 1e-3",
         "overshoot_final": "< 0.1 PSU",
@@ -536,7 +536,7 @@ EXPERIMENT_CONFIG = {
     },
     "grid_support": {
         "cubed_sphere": True,
-        "latlon": True, 
+        "latlon": True,
         "mpas": True,
         "spectral": False  # Complex tracer implementation
     },

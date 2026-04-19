@@ -41,7 +41,7 @@ Validation Criteria:
 - Conservation properties appropriate for forced system
 
 References:
-- Phillips (1954), "Energy transformations and meridional circulations 
+- Phillips (1954), "Energy transformations and meridional circulations
   associated with simple baroclinic waves"
 - Gill (1982), "Atmosphere-Ocean Dynamics" - baroclinic instability theory
 - Pedlosky (1987), "Geophysical Fluid Dynamics" - two-layer models
@@ -61,14 +61,14 @@ from legoesm.core.field import Field
 
 
 # Physical constants for calculations
-_A_EARTH = 6.371e6  # Earth radius [m] 
+_A_EARTH = 6.371e6  # Earth radius [m]
 _G_EARTH = 9.80616  # Gravitational acceleration [m/s^2]
 
 
 @dataclass
 class PhillipsTwoLayerConfig:
     """Configuration parameters for Phillips two-layer experiment.
-    
+
     All parameters have physically meaningful defaults based on the
     classic Phillips (1954) setup.
     """
@@ -77,38 +77,38 @@ class PhillipsTwoLayerConfig:
     H_max: float = 3500.0          # Total ocean depth [m] (shallower than default)
     land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
     spectral_land_lat_threshold: float = 90.0  # No land for spectral grid
-    
-    # Jet parameters  
+
+    # Jet parameters
     jet_speed_upper: float = 0.30      # Upper layer jet speed [m/s]
     jet_speed_lower_factor: float = -0.20  # Lower layer factor (negative = opposite)
     jet_center_lat: float = 45.0       # Jet center latitude [degrees]
     jet_width: float = 14.0            # Jet width (degrees)
-    
+
     # Temperature profiles (target for relaxation)
     T_upper_equator: float = 16.0      # Upper layer equatorial temperature [°C]
     T_upper_gradient: float = 10.0     # Upper layer meridional gradient [°C]
-    T_lower_equator: float = 8.0       # Lower layer equatorial temperature [°C]  
+    T_lower_equator: float = 8.0       # Lower layer equatorial temperature [°C]
     T_lower_gradient: float = 4.0      # Lower layer meridional gradient [°C]
-    
+
     # SSH perturbation (to trigger instability)
     eta_perturbation_amplitude: float = 0.05  # SSH perturbation amplitude [m]
     eta_wave_lon: float = 3.0          # Longitudinal wavenumber
     eta_wave_lat: float = 2.0          # Latitudinal wavenumber
-    
+
     # Relaxation parameters
     tau_relax: float = 15.0            # Temperature relaxation timescale [days]
     drag_timescale: float = 25.0       # Momentum damping timescale [days]
 
 
-def create_initial_conditions(grid_type: str, grid, z_coord, 
+def create_initial_conditions(grid_type: str, grid, z_coord,
                             config: PhillipsTwoLayerConfig = None):
     """Create Phillips two-layer initial conditions for any grid type.
-    
+
     This creates a two-layer ocean state with:
-    - Zonal jet structure (upper eastward, lower westward)  
+    - Zonal jet structure (upper eastward, lower westward)
     - Temperature profiles consistent with thermal wind balance
     - SSH perturbation to trigger baroclinic instability
-    
+
     Parameters
     ----------
     grid_type : str
@@ -119,31 +119,31 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         Vertical coordinate system (should have nlev=2)
     config : PhillipsTwoLayerConfig, optional
         Configuration parameters. Uses defaults if None.
-        
+
     Returns
     -------
     OceanState
         Initial state with Phillips two-layer setup
-        
+
     Notes
     -----
     - Requires exactly 2 vertical levels
-    - Spectral grid: uses vorticity/divergence formulation  
+    - Spectral grid: uses vorticity/divergence formulation
     - FV grids: direct velocity assignment
     - All grids: apply land mask consistently
     """
     if config is None:
         config = PhillipsTwoLayerConfig()
-    
+
     # First create rest state background with 2 levels and reduced depth
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
-            grid, z_coord, 
+            grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
@@ -151,7 +151,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
@@ -159,7 +159,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
@@ -167,10 +167,10 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.spectral_land_lat_threshold
         )
-        
+
     else:
         raise ValueError(f"Unknown grid type: {grid_type}")
-    
+
     # Add Phillips perturbation (jet + temperature + SSH)
     return _add_phillips_perturbation(state, grid_type, grid, z_coord, config)
 
@@ -178,7 +178,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
 def _add_phillips_perturbation(state, grid_type: str, grid, z_coord,
                              config: PhillipsTwoLayerConfig):
     """Add Phillips two-layer perturbation: jet + SSH + temperature profiles."""
-    
+
     if grid_type == "spectral":
         return _add_phillips_perturbation_spectral(state, grid, z_coord, config)
     else:
@@ -190,67 +190,67 @@ def _add_phillips_perturbation_spectral(state, grid, z_coord, config):
     from legoesm.grids.gaussian import (
         sh_analysis, sh_analysis_3d, sh_synthesis_3d,
         sh_analysis_oc2_3d, sh_analysis_dmu_3d)
-    
+
     lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
     lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
     lon_2d, lat_2d = np.meshgrid(lon, lat, indexing='xy')
     mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
     nlev = 2
-    
+
     # Temperature profiles
     T_hat = state.T_hat.data
     T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
-    
-    # Upper layer temperature  
-    T_upper = (config.T_upper_equator - 
+
+    # Upper layer temperature
+    T_upper = (config.T_upper_equator -
                config.T_upper_gradient * np.sin(np.radians(lat_2d)) ** 2)
     T_grid[..., 0] = T_upper * mask
-    
+
     # Lower layer temperature
     if nlev > 1:
-        T_lower = (config.T_lower_equator - 
+        T_lower = (config.T_lower_equator -
                    config.T_lower_gradient * np.sin(np.radians(lat_2d)) ** 2)
         T_grid[..., 1] = T_lower * mask
-    
+
     new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
-    
+
     # Zonal jet -> vorticity/divergence
     cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
-    
+
     # Upper layer: eastward jet
-    u_upper = (config.jet_speed_upper * 
+    u_upper = (config.jet_speed_upper *
                np.exp(-((lat_2d - config.jet_center_lat) / config.jet_width) ** 2))
     u_grid = np.zeros(T_grid.shape, dtype=np.float64)
     u_grid[..., 0] = u_upper * mask
-    
+
     # Lower layer: westward jet
     if nlev > 1:
         u_grid[..., 1] = config.jet_speed_lower_factor * u_upper * mask
-    
+
     # Convert to vorticity/divergence
     u_cos = jnp.array(u_grid * cos_lat[..., None])
     v_cos = jnp.zeros_like(u_cos)
-    
+
     a = grid.radius
     im_over_a = 1j * grid.ms.astype(jnp.float64) / a
     one_over_a = 1.0 / a
-    
+
     vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos) +
                one_over_a * sh_analysis_dmu_3d(grid, u_cos))
     div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos) -
                one_over_a * sh_analysis_dmu_3d(grid, v_cos))
-    
+
     # SSH perturbation
-    eta_pert = (config.eta_perturbation_amplitude * 
-                np.sin(config.eta_wave_lon * np.radians(lon_2d)) * 
+    eta_pert = (config.eta_perturbation_amplitude *
+                np.sin(config.eta_wave_lon * np.radians(lon_2d)) *
                 np.cos(config.eta_wave_lat * np.radians(lat_2d)) * mask)
-    
+
     # Remove area-weighted mean
     w = np.asarray(grid.weights, dtype=np.float64)[:, None] * mask
     eta_pert -= np.sum(eta_pert * w) / np.maximum(np.sum(w), 1e-30)
-    
+
     eta_hat = state.eta_hat.data + sh_analysis(grid, jnp.array(eta_pert))
-    
+
     return state._replace(
         vor_hat=Field(vor_hat, name="vor_hat", dims=state.vor_hat.dims, units="s^-1"),
         div_hat=Field(div_hat, name="div_hat", dims=state.div_hat.dims, units="s^-1"),
@@ -273,50 +273,50 @@ def _add_phillips_perturbation_fv(state, grid_type: str, grid, z_coord, config):
             lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
         else:  # cubed_sphere
             lat_2d, lon_2d = lat_1d, lon_1d  # Already 2D for cubed sphere
-    
+
     # Temperature profiles
     T_data = np.asarray(state.T.data, dtype=np.float64)
     nlev = T_data.shape[-1]
-    
+
     # Upper layer
-    T_upper = (config.T_upper_equator - 
+    T_upper = (config.T_upper_equator -
                config.T_upper_gradient * np.sin(np.radians(lat_2d)) ** 2)
     T_data[..., 0] = T_upper
-    
+
     # Lower layer
     if nlev > 1:
-        T_lower = (config.T_lower_equator - 
+        T_lower = (config.T_lower_equator -
                    config.T_lower_gradient * np.sin(np.radians(lat_2d)) ** 2)
         T_data[..., 1] = T_lower
-    
+
     # Velocity: zonal jet
     if hasattr(state, 'u'):
         u_data = np.asarray(state.u.data, dtype=np.float64)
         v_data = np.asarray(state.v.data, dtype=np.float64)
-        
+
         # Upper layer jet
-        u_upper = (config.jet_speed_upper * 
+        u_upper = (config.jet_speed_upper *
                    np.exp(-((lat_2d - config.jet_center_lat) / config.jet_width) ** 2))
         u_data[..., 0] = u_upper
         v_data[..., 0] = 0.0  # Pure zonal flow
-        
-        # Lower layer  
+
+        # Lower layer
         if nlev > 1:
             u_data[..., 1] = config.jet_speed_lower_factor * u_upper
             v_data[..., 1] = 0.0
-        
+
         state = state._replace(
             u=Field(jnp.array(u_data), name="u", dims=state.u.dims, units="m/s"),
             v=Field(jnp.array(v_data), name="v", dims=state.v.dims, units="m/s")
         )
-    
+
     # SSH perturbation
-    eta_pert = (config.eta_perturbation_amplitude * 
-                np.sin(config.eta_wave_lon * np.radians(lon_2d)) * 
+    eta_pert = (config.eta_perturbation_amplitude *
+                np.sin(config.eta_wave_lon * np.radians(lon_2d)) *
                 np.cos(config.eta_wave_lat * np.radians(lat_2d)))
-    
+
     new_eta = state.eta.data + jnp.array(eta_pert)
-    
+
     return state._replace(
         T=Field(jnp.array(T_data), name="T", dims=state.T.dims, units="K"),
         eta=Field(new_eta, name="eta", dims=state.eta.dims, units="m")
@@ -325,10 +325,10 @@ def _add_phillips_perturbation_fv(state, grid_type: str, grid, z_coord, config):
 
 def create_forcings(grid_type: str, grid, config: PhillipsTwoLayerConfig = None):
     """Create forcing functions for Phillips two-layer experiment.
-    
+
     The Phillips experiment uses temperature relaxation forcing toward
     prescribed profiles and momentum damping.
-    
+
     Parameters
     ----------
     grid_type : str
@@ -337,12 +337,12 @@ def create_forcings(grid_type: str, grid, config: PhillipsTwoLayerConfig = None)
         Grid object
     config : PhillipsTwoLayerConfig, optional
         Configuration parameters
-        
+
     Returns
     -------
     dict
         Forcing configuration parameters
-        
+
     Notes
     -----
     Returns relaxation parameters that are used by the model's
@@ -350,12 +350,12 @@ def create_forcings(grid_type: str, grid, config: PhillipsTwoLayerConfig = None)
     """
     if config is None:
         config = PhillipsTwoLayerConfig()
-        
+
     return {
         "temperature_relaxation": {
             "tau_relax_days": config.tau_relax,
             "T_upper_equator": config.T_upper_equator,
-            "T_upper_gradient": config.T_upper_gradient, 
+            "T_upper_gradient": config.T_upper_gradient,
             "T_lower_equator": config.T_lower_equator,
             "T_lower_gradient": config.T_lower_gradient,
         },
@@ -367,7 +367,7 @@ def create_forcings(grid_type: str, grid, config: PhillipsTwoLayerConfig = None)
 
 def create_domain_config(config: PhillipsTwoLayerConfig = None) -> Dict[str, Any]:
     """Create domain configuration parameters.
-    
+
     Returns
     -------
     Dict[str, Any]
@@ -375,7 +375,7 @@ def create_domain_config(config: PhillipsTwoLayerConfig = None) -> Dict[str, Any
     """
     if config is None:
         config = PhillipsTwoLayerConfig()
-        
+
     return {
         "nlev": config.nlev,
         "H_max": config.H_max,
@@ -386,35 +386,35 @@ def create_domain_config(config: PhillipsTwoLayerConfig = None) -> Dict[str, Any
     }
 
 
-def compute_instability_metrics(diagnostics: Dict[str, list], 
+def compute_instability_metrics(diagnostics: Dict[str, list],
                               config: PhillipsTwoLayerConfig) -> Dict[str, float]:
     """Compute baroclinic instability metrics for validation.
-    
+
     Parameters
-    ---------- 
+    ----------
     diagnostics : Dict[str, list]
         Time series diagnostics from simulation
     config : PhillipsTwoLayerConfig
         Configuration parameters
-        
+
     Returns
     -------
     Dict[str, float]
         Instability metrics for validation
     """
     metrics = {}
-    
+
     # Temperature evolution (with relaxation forcing)
     mean_T_list = diagnostics.get("mean_T", [])
     if len(mean_T_list) >= 2:
         T_drift = abs(mean_T_list[-1] - mean_T_list[0])
         metrics["T_drift_absolute"] = T_drift
-        
+
         # Temperature variability (measure of instability development)
         if len(mean_T_list) > 10:
             T_std = np.std(mean_T_list[-10:])  # Last 10 points
             metrics["T_variability"] = T_std
-    
+
     # SSH amplitude - measure of instability growth
     max_eta_list = diagnostics.get("max_abs_eta", [])
     if len(max_eta_list) >= 2:
@@ -424,29 +424,29 @@ def compute_instability_metrics(diagnostics: Dict[str, list],
         if eta_initial > 1e-10:
             eta_growth = eta_final / eta_initial
             metrics["eta_growth"] = eta_growth
-        
+
     return metrics
 
 
-def validate_results(final_state, diagnostics: Dict[str, list], 
+def validate_results(final_state, diagnostics: Dict[str, list],
                    config: PhillipsTwoLayerConfig = None) -> Tuple[bool, str]:
     """Validate Phillips two-layer experiment results.
-    
+
     Success criteria:
     - Temperature drift acceptable (system has relaxation forcing)
     - Some instability development (SSH growth or temperature variability)
     - No excessive values or numerical instabilities
     - Two-layer structure maintained
-    
+
     Parameters
     ----------
     final_state : OceanState
         Final model state
-    diagnostics : Dict[str, list] 
+    diagnostics : Dict[str, list]
         Time series diagnostics
     config : PhillipsTwoLayerConfig, optional
         Configuration parameters
-        
+
     Returns
     -------
     bool
@@ -456,40 +456,40 @@ def validate_results(final_state, diagnostics: Dict[str, list],
     """
     if config is None:
         config = PhillipsTwoLayerConfig()
-    
+
     # Compute instability metrics
     metrics = compute_instability_metrics(diagnostics, config)
-    
+
     # Check for NaN/infinite values in final state
     if hasattr(final_state, 'T') and not jnp.all(jnp.isfinite(final_state.T.data)):
         return False, "NaN/Inf detected in final temperature field"
     if hasattr(final_state, 'eta') and not jnp.all(jnp.isfinite(final_state.eta.data)):
         return False, "NaN/Inf detected in final eta field"
-    
+
     # Validation thresholds (relaxed due to forcing)
     max_T_drift = 5.0         # °C - relaxed due to relaxation forcing
     min_eta_growth = 0.8      # Minimum growth (instability or maintenance)
     max_eta_growth = 10.0     # Maximum growth (prevent explosion)
     max_eta_amplitude = 5.0   # m - maximum reasonable SSH
-    
+
     # Check validation criteria
     success = True
     notes_parts = []
-    
+
     if "T_drift_absolute" in metrics:
         T_drift = metrics["T_drift_absolute"]
         notes_parts.append(f"T_drift={T_drift:.2f}°C")
         if T_drift > max_T_drift:
             success = False
             notes_parts.append("FAIL: excessive T drift")
-            
+
     if "max_eta_final" in metrics:
         eta_max = metrics["max_eta_final"]
         notes_parts.append(f"max_eta={eta_max:.3f}m")
         if eta_max > max_eta_amplitude:
             success = False
             notes_parts.append("FAIL: excessive SSH")
-            
+
     if "eta_growth" in metrics:
         eta_growth = metrics["eta_growth"]
         notes_parts.append(f"eta_growth={eta_growth:.2f}")
@@ -499,19 +499,19 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         elif eta_growth > max_eta_growth:
             success = False
             notes_parts.append("FAIL: excessive growth")
-            
+
     if "T_variability" in metrics:
         T_var = metrics["T_variability"]
         notes_parts.append(f"T_var={T_var:.3f}")
-    
+
     notes = ", ".join(notes_parts)
-    
+
     return success, notes
 
 
 def get_diagnostic_field_specs() -> list:
     """Get field specifications for diagnostic output.
-    
+
     Returns
     -------
     list
@@ -525,7 +525,7 @@ def get_diagnostic_field_specs() -> list:
 
 def get_scalar_units() -> Dict[str, str]:
     """Get units for scalar diagnostic quantities.
-    
+
     Returns
     -------
     Dict[str, str]
@@ -534,7 +534,7 @@ def get_scalar_units() -> Dict[str, str]:
     return {
         "mean_eta": "m",
         "max_abs_eta": "m",
-        "mean_T": "degC", 
+        "mean_T": "degC",
         "mean_S": "PSU"
     }
 
@@ -561,7 +561,7 @@ EXPERIMENT_CONFIG = {
     },
     "grid_support": {
         "cubed_sphere": True,
-        "latlon": True, 
+        "latlon": True,
         "mpas": True,
         "spectral": True
     },

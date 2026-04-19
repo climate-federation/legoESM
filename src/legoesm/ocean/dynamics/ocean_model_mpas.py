@@ -292,7 +292,7 @@ class MPASOceanModel:
         mask_e = mask[:, jnp.newaxis]
         T_final = jnp.where(mask_e > 0.5, T_new, 0.0)
         S_final = jnp.where(mask_e > 0.5, S_new, 0.0)
-        
+
         state_new = MPASOceanState(
             u=state.u.replace(data=u_3d_new),
             T=state.T.replace(data=T_final),
