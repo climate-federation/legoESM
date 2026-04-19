@@ -197,6 +197,31 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-587 (2026-04-20)**: addressed Codex stop-time review of
+  iter-586: "iter-586 only locks the `0`-edge upwind override".
+
+  Iter-586's vort_x/vort_y upwind checks only covered the i=0
+  and j=0 edges.  The `if not use_duogrid:` block overrides
+  fy1 at BOTH i=0 AND i=n, and fx1 at BOTH j=0 AND j=n.  A
+  refactor breaking only the i=n or j=n side would slip
+  through iter-586.
+
+  Iter-587 extends the checks to cover both edges:
+    - `vort_x[:, 0, :]` and `vort_x[:, n, :]`: each must match
+      the upwind picked by `sign(v_d[:, edge, :])`.
+    - `vort_y[:, :, 0]` and `vort_y[:, :, n]`: each must match
+      upwind picked by `sign(u_d[:, :, edge])`.
+
+  **Sanity-checked**: removed ONLY the `i=n` fy1 override
+  (kept i=0).  The iter-585 fy1 non-duogrid check at i=n
+  fires with diff 7.735 (fy1[:, n, :] no longer equals
+  v_d[:, n, :] as the override is missing).  Combined with
+  iter-587's dual-edge upwind checks, both sides of both
+  overrides are now covered.
+
+  No production-path numerical changes.  106/106 tests pass in
+  `test_duogrid.py`.
+
 - **iter-586 (2026-04-20)**: addressed Codex stop-time review of
   iter-585: "new `_vorticity_flux` lock still misses a real
   body-relocation escape hatch".

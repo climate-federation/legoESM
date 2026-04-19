@@ -2579,44 +2579,42 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         vort_y_nd_np = np.asarray(vort_y_nd)
         vort_abs_np = np.asarray(vort_abs)
 
-        # At i=0 boundary: sign(v_d[:, 0, :]) picks between
-        # vort_abs[:, :, :-1] and vort_abs[:, :, 1:].
-        # With fy1 overridden to v_d, the upwind is
-        #   vort_x_nd[:, 0, j] = (
-        #     vort_abs[:, 0, j]   if v_d[:, 0, j] > 0
-        #     else vort_abs[:, 0, j+1])
-        # where vort_x_nd indexing: vort_x is (6, n+1, n)
-        # (face, i_corner, j_cell).  vort_abs is (6, n+1, n+1).
-        # v_d is (6, n+1, n).
-        expected_vort_x_at_0 = np.where(
-            v_d_np[:, 0, :] > 0.0,
-            vort_abs_np[:, 0, :-1],
-            vort_abs_np[:, 0, 1:])
-        diff_vx = float(np.max(np.abs(
-            vort_x_nd_np[:, 0, :] - expected_vort_x_at_0)))
-        # If the refactor moved vort_x computation BEFORE the
-        # fy1 override, vort_x[:, 0, :] would reflect
-        # sign(corrected_fy1[:, 0, :]) instead of sign(v_d).
-        assert diff_vx < 1e-10, (
-            f"Under duogrid=False, vort_x[:, 0, :] upwind "
-            f"deviates from sign(v_d[:, 0, :]) by {diff_vx:.3e}. "
-            f"This means vort_x is being computed BEFORE the "
-            f"fy1 panel-edge override — a body-relocation bug "
-            f"that bypasses the override's effect on upwind "
-            f"selection.")
+        # Iter-587 (Codex follow-up to iter-586): cover BOTH
+        # edges of each override.  iter-586 only checked i=0
+        # (and j=0 for fx1); a refactor breaking only the i=n
+        # or j=n side would slip through.
+        #
+        # vort_x is (6, n+1, n) with face/i_corner/j_cell
+        # indexing.  vort_abs is (6, n+1, n+1).
+        # v_d is (6, n+1, n).  Check both i=0 and i=n.
+        for edge_i, label in [(0, "i=0"), (n, f"i={n}")]:
+            expected = np.where(
+                v_d_np[:, edge_i, :] > 0.0,
+                vort_abs_np[:, edge_i, :-1],
+                vort_abs_np[:, edge_i, 1:])
+            diff = float(np.max(np.abs(
+                vort_x_nd_np[:, edge_i, :] - expected)))
+            assert diff < 1e-10, (
+                f"Under duogrid=False, vort_x[:, {edge_i}, :] "
+                f"upwind deviates from sign(v_d[:, {edge_i}, :]) "
+                f"by {diff:.3e}.  vort_x at edge {label} is "
+                f"being computed BEFORE the fy1 panel-edge "
+                f"override — a body-relocation bug that bypasses "
+                f"the override's effect on upwind selection.")
 
-        # Analogous check for vort_y at j=0 boundary under fx1
-        # override.
-        expected_vort_y_at_0 = np.where(
-            u_d_np[:, :, 0] > 0.0,
-            vort_abs_np[:, :-1, 0],
-            vort_abs_np[:, 1:, 0])
-        diff_vy = float(np.max(np.abs(
-            vort_y_nd_np[:, :, 0] - expected_vort_y_at_0)))
-        assert diff_vy < 1e-10, (
-            f"Under duogrid=False, vort_y[:, :, 0] upwind "
-            f"deviates from sign(u_d[:, :, 0]) by {diff_vy:.3e}. "
-            f"vort_y is being computed BEFORE the fx1 override.")
+        # vort_y is (6, n, n+1); check both j=0 and j=n.
+        for edge_j, label in [(0, "j=0"), (n, f"j={n}")]:
+            expected = np.where(
+                u_d_np[:, :, edge_j] > 0.0,
+                vort_abs_np[:, :-1, edge_j],
+                vort_abs_np[:, 1:, edge_j])
+            diff = float(np.max(np.abs(
+                vort_y_nd_np[:, :, edge_j] - expected)))
+            assert diff < 1e-10, (
+                f"Under duogrid=False, vort_y[:, :, {edge_j}] "
+                f"upwind deviates from sign(u_d[:, :, {edge_j}]) "
+                f"by {diff:.3e}.  vort_y at edge {label} is "
+                f"being computed BEFORE the fx1 override.")
 
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
