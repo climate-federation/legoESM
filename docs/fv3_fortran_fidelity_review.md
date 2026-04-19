@@ -168,6 +168,37 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-519 (2026-04-19)**: regenerated and inspected the W2 visual
+  state post-iter-505, then locked the user-visible v-wind cube-face
+  imprint at the canonical C36 setup as a regression guard.
+
+  **Visual inspection** (results/atmosphere/.../C36/snapshots_*.png):
+    - **Wind speed**: CLEAN — no visible cube-face artifacts, no
+      striping or seams.  Solid-body symmetric throughout 1 day.
+    - **Height**: CLEAN — no visible cube-face artifacts.
+    - **v-wind component (geographic, 4-edge-angle regrid)**:
+      residual 4-fold cube-face pattern at ~0.3 m/s (visible in
+      the v-only snapshot but not in wind speed or height).  Per
+      iter-25 analysis, ~65 % of this is a diagnostic-representation
+      artifact (D-grid → geographic conversion uses cell-centre
+      angles) and ~35 % is real dynamics.
+
+  **New regression test**
+  `test_w2_v_wind_imprint_below_iter505_canonical_ceiling` runs the
+  canonical C36 W2 setup, regrids using the matrix's exact
+  4-surrounding-edge-angle path
+  (`run_atmosphere_test_matrix.py:1213-1229`), and asserts
+  `max|v_north| < 0.4 m/s`.  Measured discrimination:
+    - BUGGY (pre-iter-505):  max|v_north| = 0.557 m/s (fails)
+    - FIXED  (post-iter-505): max|v_north| = 0.299 m/s (passes 25 % below)
+
+  Test totals: 229/229 pass (228 prior + 1 new).  This is the most
+  direct programmatic guard against the user-visible v-wind imprint
+  reappearing — complementing the existing L2 ceiling and
+  boundary_fix-load-bearing tests in the same class.
+
+  No production-path numerical changes.
+
 - **iter-518 (2026-04-19)**: two pieces of work this iteration.
 
   **(1) Investigated the apparent fv3_cc2c v_c asymmetry**: noticed

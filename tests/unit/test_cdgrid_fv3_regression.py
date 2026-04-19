@@ -2566,13 +2566,13 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                        / float(jnp.mean(jnp.abs(h0))))
             results[bf] = L2
 
-        ratio = results[True] / results[False]
+        ratio_local = results[True] / results[False]
         self.assertLess(
-            ratio, 0.7,
+            ratio_local, 0.7,
             msg=(f"boundary_fix=True L2 ({results[True]:.3e}) is not "
                  f"meaningfully smaller than boundary_fix=False L2 "
-                 f"({results[False]:.3e}); ratio = {ratio:.3f}.  On "
-                 f"the FULL canonical setup (C36 dt=300s + hyperdiff "
+                 f"({results[False]:.3e}); ratio = {ratio_local:.3f}.  "
+                 f"On the FULL canonical setup (C36 dt=300s + hyperdiff "
                  f"+ div_damp + fix_mass) the expected ratio is "
                  f"~0.525 (2x improvement, smaller than the non-"
                  f"hyperdiff value because hyperdiff absorbs some of "
@@ -2580,6 +2580,90 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"above 0.7 the stabilizer was silently disabled or "
                  f"a refactor halved its effectiveness.  Update the "
                  f"iter-511 documentation if intentional."))
+
+    def test_w2_v_wind_imprint_below_iter505_canonical_ceiling(self):
+        """Iter-519: lock the post-iter-505 W2 v-wind cube-face
+        imprint at the canonical C36 setup.  This is the user-visible
+        "Williamson 2 still has visual artifacts" residual after
+        iter-505 substantially reduced it.
+
+        Measured at canonical C36 setup with the same regrid path the
+        atmosphere matrix uses (4-edge angle average to project D-grid
+        winds to geographic v_north):
+          - BUGGY (pre-iter-505):  max|v_north| = 0.557 m/s
+          - FIXED  (post-iter-505): max|v_north| = 0.299 m/s
+
+        Ceiling at 0.4 m/s — passes FIXED with 25 % headroom, fails
+        BUGGY by 39 %.  This is the most direct programmatic guard
+        against the user-visible v-wind cube-face imprint reappearing.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+
+        n = 36
+        dt = 300.0
+        n_steps = int(86400 / dt)
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4
+        div_damp = 1.5e7 * (48.0 / n) ** 2
+
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        sw = williamson_test2(grid)
+        h0 = sw.h.data
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=hyperdiff_coeff,
+            div_damp=div_damp,
+            boundary_fix=True,
+        )
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        state0 = FV3EdgeShallowWaterState(
+            h=h0, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state0)
+
+        state = state0
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        # Reproduce the matrix's regrid path (run_atmosphere_test_matrix.py:
+        # 1213-1229): average edge-midpoint winds to cell centres, then
+        # project to geographic v_north using mean of 4 surrounding edge
+        # angles.  This matches what the user sees in the v-wind plot.
+        u_cc = 0.5 * (state.u_d[:, :, :-1] + state.u_d[:, :, 1:])
+        v_cc = 0.5 * (state.v_d[:, :-1, :] + state.v_d[:, 1:, :])
+        cax = jnp.asarray(cdgrid.cos_angle_edge_x)
+        sax = jnp.asarray(cdgrid.sin_angle_edge_x)
+        cay = jnp.asarray(cdgrid.cos_angle_edge_y)
+        say = jnp.asarray(cdgrid.sin_angle_edge_y)
+        ca = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
+                     + cay[:, :-1, :] + cay[:, 1:, :])
+        sa = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
+                     + say[:, :-1, :] + say[:, 1:, :])
+        v_north_cc = sa * u_cc + ca * v_cc
+        max_v = float(jnp.max(jnp.abs(v_north_cc)))
+
+        self.assertLess(
+            max_v, 0.4,
+            msg=(f"W2 alpha=0 C36 1d max|v_north| = {max_v:.4f} m/s "
+                 f"exceeds 0.4 m/s ceiling.  Pre-iter-505 baseline "
+                 f"on this canonical setup was 0.557 m/s; iter-505 "
+                 f"axis fix dropped it to 0.299 m/s.  If the value "
+                 f"crept back above 0.4, the iter-505 fix may have "
+                 f"regressed or a new v-wind imprint was introduced."))
 
 
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
