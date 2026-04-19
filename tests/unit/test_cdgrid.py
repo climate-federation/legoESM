@@ -741,6 +741,83 @@ class TestInterpCornerToCenter(unittest.TestCase):
                      f"{float(np.max(np.abs(lv - (k + 1)))):.3e}.  "
                      f"Cross-level averaging detected."))
 
+    def test_exact_4_point_arithmetic_average_4d(self):
+        """Iter-545 (Codex follow-up): the 4D (ndim==4) branch is
+        production-hot (used by `fv3_sw_tendencies` for Bernoulli and
+        divergence-damping projections whenever the SW model is
+        driven with a vertical dimension).  Iter-544's 2D exact-value
+        test hits `ndim==3` via the `(6, n+1, n+1)` shape; the 4D
+        branch uses different slicing (`field_d[..., :-1, :]` etc.)
+        and was NOT covered by an exact-value arithmetic check.  A
+        refactor that silently broke the 4D branch could slip
+        through.
+
+        This test generates a distinct-value-per-corner 4D stencil
+        `(6, n+1, n+1, nlev)` with a non-trivial dependence on ALL
+        four axes (face, i, j, k) and asserts the 4D output matches
+        `0.25*(SW+SE+NW+NE)` applied per-level, to 1e-10.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _interp_corner_to_center)
+        n, _ = self._build()
+        nlev = 3
+        rng = np.random.default_rng(2544)
+        # Distinct-value 4D field: random with a full (6, n+1, n+1,
+        # nlev) shape.  Every corner (face, i, j, k) is unique, so the
+        # output is uniquely determined by the 4-point averaging
+        # formula applied INDEPENDENTLY at each (face, k) layer.
+        field_np = rng.standard_normal(
+            (6, n + 1, n + 1, nlev)).astype(np.float64)
+        field_4d = jnp.asarray(field_np)
+
+        # Confirm the test exercises the 4D branch (not accidentally
+        # the 3D branch) by asserting input ndim is 4.
+        self.assertEqual(
+            field_4d.ndim, 4,
+            msg="Test must exercise the ndim==4 branch.")
+
+        out = np.asarray(
+            _interp_corner_to_center(field_4d), dtype=np.float64)
+        self.assertEqual(
+            out.shape, (6, n, n, nlev),
+            msg="4D output shape must collapse (n+1, n+1) -> (n, n).")
+
+        expected = 0.25 * (
+            field_np[:, :-1, :-1, :]      # SW corner
+            + field_np[:, 1:, :-1, :]     # SE
+            + field_np[:, :-1, 1:, :]     # NW
+            + field_np[:, 1:, 1:, :]      # NE
+        )
+        max_diff = float(np.max(np.abs(out - expected)))
+        self.assertLess(
+            max_diff, 1e-10,
+            msg=(f"4D `_interp_corner_to_center` deviates from "
+                 f"per-level `0.25*(SW+SE+NW+NE)` by {max_diff:.3e}. "
+                 f"The production SW-with-vertical paths assume "
+                 f"plain arithmetic per-level averaging on 4D fields. "
+                 f"If an area-weighted or index-shifted 4D variant "
+                 f"was introduced, UPDATE this test with the new "
+                 f"formula and document in fidelity review."))
+
+        # Also verify that the 4D output at any single level matches
+        # what we would get by pulling that level out to a 3D field
+        # and running `_interp_corner_to_center` on the 3D branch.
+        # Catches silent divergence between the two branches.
+        for k in range(nlev):
+            level_3d = field_4d[..., k]              # (6, n+1, n+1)
+            out_3d = np.asarray(
+                _interp_corner_to_center(level_3d),
+                dtype=np.float64)
+            max_diff_branch = float(
+                np.max(np.abs(out[..., k] - out_3d)))
+            self.assertLess(
+                max_diff_branch, 1e-10,
+                msg=(f"Level {k}: 4D branch output differs from 3D "
+                     f"branch applied to the same level by "
+                     f"{max_diff_branch:.3e}.  The two branches "
+                     f"must produce identical values per level."))
+
     def test_area_independence(self):
         """The helper takes `field_d` only — no grid argument — so the
         grid's `area_corner` cannot affect the result.  Confirming the

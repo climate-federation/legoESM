@@ -168,6 +168,42 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-545 (2026-04-19)**: addressed Codex stop-time review of
+  iter-544: "the new tests do not actually lock the 4D
+  `_interp_corner_to_center` branch used in production".
+
+  Iter-544's `test_exact_4_point_arithmetic_average_2d` uses a field
+  of shape `(6, n+1, n+1)` which exercises the `ndim == 3` branch.
+  The `ndim == 4` branch (`(6, n+1, n+1, nlev)` — the 3D model's
+  production shape) has DIFFERENT slicing (`field_d[:, :-1, :-1, :]`
+  etc.) and was NOT covered by an exact-value arithmetic check.  The
+  iter-544 `test_3d_applies_per_level_independently` uses constant-
+  per-level fields — all 4 corners in each level are equal, so the
+  averaging is trivially satisfied.  A regression that silently
+  broke the 4D branch (e.g. a skewed weight, a transposed slice)
+  would slip through.
+
+  Iter-545 adds
+  `test_exact_4_point_arithmetic_average_4d`:
+    (a) Builds a random distinct-value 4D field
+        `(6, n+1, n+1, nlev=3)`.
+    (b) Pre-guards that `field.ndim == 4` (so the test cannot
+        silently exercise the 3D branch if the dispatch rule
+        changes).
+    (c) Asserts output matches per-level `0.25*(SW+SE+NW+NE)` to
+        1e-10 on the full 6×n×n×nlev output.
+    (d) Cross-branch parity: pulling a single level to a 3D slice
+        and running the 3D branch must match the 4D branch's
+        level output to 1e-10 — catches silent branch divergence.
+
+  **Sanity-checked**: patched the 4D branch to 40/20/20/20 skewed
+  weights.  The new 4D test correctly fires with `max diff 5.306e-01`
+  (5.3e9 × the 1e-10 threshold).  Restored production code; all 6
+  tests pass.
+
+  No production-path numerical changes.  47/47 tests pass in
+  `test_cdgrid.py` (46 prior + 1 new 4D lock).
+
 - **iter-544 (2026-04-19)**: regression lock for
   `_interp_corner_to_center` (previously untested).
 
