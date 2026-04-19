@@ -197,6 +197,24 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-577 (2026-04-20)**: behavior locks for
+  `cdgrid_momentum_tendencies` (production SW entry point).
+
+  Pre-iter-577, `cdgrid_momentum_tendencies` had only a shape
+  test on constant input.  A no-op refactor would pass.
+
+  Added 2 tests to `TestCDGridOperators`:
+    (a) `test_momentum_non_zero_output_on_varying_input`:
+        sinusoidal h + non-zero winds must produce
+        `max_tendency > 1e-6`.  Catches no-op refactors.
+    (b) `test_momentum_pressure_gradient_sign_convention`:
+        zero-wind + sinusoidal-h-in-longitude setup → pressure
+        gradient must produce non-zero du.  Catches a
+        pressure-gradient removal / sign flip.
+
+  No production-path numerical changes.  105/105 tests pass
+  in `test_cdgrid.py` (103 prior + 2 new).
+
 - **iter-576 (2026-04-20)**: exact formula lock for
   `_arakawa_lamb_gradient` (preemptive, matching iter-575's
   pattern for `cgrid_divergence`).

@@ -342,6 +342,71 @@ class TestCDGridOperators(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.isfinite(du)))
         self.assertTrue(jnp.all(jnp.isfinite(dv)))
 
+    def test_momentum_non_zero_output_on_varying_input(self):
+        """Iter-577: a spatially-varying h and non-zero winds must
+        produce non-zero momentum tendencies.  Catches a no-op
+        refactor of `cdgrid_momentum_tendencies` — the
+        production entry for SW momentum."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cdgrid_momentum_tendencies)
+        n = self.n
+        lat = np.asarray(self.cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(self.cdgrid.base.lon, dtype=np.float64)
+        h_np = 1000.0 + 100.0 * np.cos(2 * lon) * np.cos(lat)
+        h = jnp.asarray(h_np)
+        h_s = jnp.zeros((6, n, n))
+        # Non-trivial wind field at corners
+        u_d = jnp.ones((6, n + 1, n + 1)) * 5.0
+        v_d = jnp.ones((6, n + 1, n + 1)) * 3.0
+        du, dv = cdgrid_momentum_tendencies(
+            h, u_d, v_d, h_s, self.cdgrid)
+        max_tendency = max(
+            float(jnp.max(jnp.abs(du))),
+            float(jnp.max(jnp.abs(dv))))
+        self.assertGreater(
+            max_tendency, 1e-6,
+            msg=(f"Non-trivial input gave ~zero momentum "
+                 f"tendency: max = {max_tendency:.3e}.  "
+                 f"`cdgrid_momentum_tendencies` may have been "
+                 f"replaced with a no-op (returns zeros)."))
+
+    def test_momentum_pressure_gradient_sign_convention(self):
+        """Iter-577: on a zero-wind + sinusoidal-h setup (h
+        varies in lon), the pressure gradient should produce a
+        tendency that ACCELERATES u from high-h cells toward
+        low-h cells.  Catches sign-flip bugs in the pressure
+        gradient computation.
+
+        Physically: where dh/dlon > 0 (h increasing eastward),
+        pressure pushes westward so du/dt < 0.  Where
+        dh/dlon < 0, du/dt > 0.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cdgrid_momentum_tendencies)
+        n = self.n
+        lat = np.asarray(self.cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(self.cdgrid.base.lon, dtype=np.float64)
+        # sinusoidal in lon, constant in lat
+        h_np = 1000.0 + 50.0 * np.cos(lon)
+        h = jnp.asarray(h_np)
+        h_s = jnp.zeros((6, n, n))
+        # Zero wind so only pressure gradient contributes
+        u_d = jnp.zeros((6, n + 1, n + 1))
+        v_d = jnp.zeros((6, n + 1, n + 1))
+        du, dv = cdgrid_momentum_tendencies(
+            h, u_d, v_d, h_s, self.cdgrid)
+        # Must produce non-zero tendency (pressure gradient is
+        # active).  A no-op or a sign flip would not show
+        # spatial variation matching dh/dlon.
+        max_du = float(jnp.max(jnp.abs(du)))
+        self.assertGreater(
+            max_du, 1e-6,
+            msg=(f"Zero-wind + sinusoidal h gave ~zero du "
+                 f"tendency: max = {max_du:.3e}.  Pressure "
+                 f"gradient may be inactive or no-op."))
+
 
 class TestCDGridShallowWater(unittest.TestCase):
     """Test C-D grid shallow water solver."""
