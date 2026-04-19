@@ -197,6 +197,38 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-576 (2026-04-20)**: exact formula lock for
+  `_arakawa_lamb_gradient` (preemptive, matching iter-575's
+  pattern for `cgrid_divergence`).
+
+  Iter-572/573 locked structural properties (linearity, anti-
+  symmetry, no-op, 4D branch, per-level) but not the EXACT
+  4-point stencil formula.  A refactor to a different linear
+  anti-symmetric stencil would pass those tests.
+
+  Added `test_exact_4point_stencil_formula`:
+    - Float32 bit-exact reproduction of:
+      ```
+      B_sw = B_pad[:, :-1, :-1]; B_se = B_pad[:, 1:, :-1]
+      B_nw = B_pad[:, :-1, 1:];  B_ne = B_pad[:, 1:, 1:]
+      dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)
+      dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)
+      dB_dx      = c00 * dB_raw_x + c01 * dB_raw_y
+      dB_dy_perp = c10 * dB_raw_x + c11 * dB_raw_y
+      ```
+    - Uses `padded=` bypass so halo-exchange precision is
+      isolated (we compare the stencil + matrix against a
+      reproduction using the same input pad).
+    - Assertion: diff == 0.0 exactly (bit-for-bit in float32).
+
+  **Sanity-checked**: swapped `B_se` and `B_nw` in production.
+  The new test correctly fires with diff 7.855e-06 (100%
+  relative, completely different stencil).  Restored production;
+  all tests pass.
+
+  No production-path numerical changes.  103/103 tests pass in
+  `test_cdgrid.py` (102 prior + 1 new).
+
 - **iter-575 (2026-04-20)**: addressed Codex stop-time review of
   iter-574: "new tests still don't constrain the actual flux-form
   divergence formula".

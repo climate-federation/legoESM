@@ -1288,6 +1288,79 @@ class TestArakawaLambGradient(unittest.TestCase):
                      f"the 4D branch (permutation, broadcast-one-"
                      f"level-to-all, or wrong axis)."))
 
+    def test_exact_4point_stencil_formula(self):
+        """Iter-576: pin the EXACT 4-point Arakawa-Lamb stencil
+        and the 2x2 grad matrix formula via float32 bit-exact
+        reproduction.
+
+        Matching iter-575's pattern for `cgrid_divergence`:
+        structural tests (linearity, anti-symmetry, no-op) would
+        pass on any linear-anti-symmetric refactor — e.g., a
+        simple `(B[i+1] - B[i-1]) / dx` 2-point gradient would
+        be linear and anti-symmetric but use a DIFFERENT stencil
+        than FV3's 4-point A-L.
+
+        This test pins the exact formula:
+            B_sw = B_pad[:, :-1, :-1]
+            B_se = B_pad[:, 1:, :-1]
+            B_nw = B_pad[:, :-1, 1:]
+            B_ne = B_pad[:, 1:, 1:]
+            dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)
+            dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)
+            dB_dx      = c00 * dB_raw_x + c01 * dB_raw_y
+            dB_dy_perp = c10 * dB_raw_x + c11 * dB_raw_y
+        using the precomputed `grad_c00..c11` metrics.
+
+        Uses the `padded=` bypass so the halo-exchange precision
+        is isolated — we don't need to match the halo-interp
+        operations bit-for-bit.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _arakawa_lamb_gradient, _pad_halo_auto)
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(6576)
+        B_np = rng.standard_normal((6, n, n)).astype(np.float32)
+        B = jnp.asarray(B_np)
+
+        # Use the SAME pre-padded field for both paths so halo
+        # precision cancels out.
+        B_pad = _pad_halo_auto(B, cdgrid)
+        B_pad_np = np.asarray(B_pad).astype(np.float32)
+
+        dx_prod, dy_prod = _arakawa_lamb_gradient(
+            B, cdgrid, padded=B_pad)
+        dx_prod_np = np.asarray(dx_prod).astype(np.float32)
+        dy_prod_np = np.asarray(dy_prod).astype(np.float32)
+
+        # Reproduce in float32 bit-for-bit.
+        B_sw = B_pad_np[:, :-1, :-1]
+        B_se = B_pad_np[:, 1:, :-1]
+        B_nw = B_pad_np[:, :-1, 1:]
+        B_ne = B_pad_np[:, 1:, 1:]
+        dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)
+        dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)
+        c00 = np.asarray(cdgrid.grad_c00).astype(np.float32)
+        c01 = np.asarray(cdgrid.grad_c01).astype(np.float32)
+        c10 = np.asarray(cdgrid.grad_c10).astype(np.float32)
+        c11 = np.asarray(cdgrid.grad_c11).astype(np.float32)
+        expected_dx = c00 * dB_raw_x + c01 * dB_raw_y
+        expected_dy = c10 * dB_raw_x + c11 * dB_raw_y
+
+        diff_x = float(np.max(np.abs(dx_prod_np - expected_dx)))
+        diff_y = float(np.max(np.abs(dy_prod_np - expected_dy)))
+        self.assertEqual(
+            diff_x, 0.0,
+            msg=(f"dB_dx differs from the exact 4-point A-L "
+                 f"formula by {diff_x:.3e}.  Possible causes: "
+                 f"stencil axis swap, grad_c00/c01 metric "
+                 f"change, or raw dB_raw_x sign flip."))
+        self.assertEqual(
+            diff_y, 0.0,
+            msg=(f"dB_dy_perp differs from the exact formula by "
+                 f"{diff_y:.3e}.  Possible causes: grad_c10/c11 "
+                 f"metric change or raw dB_raw_y sign flip."))
+
     def test_3d_anti_symmetry_negation(self):
         """Iter-573: anti-symmetry on the 4D branch."""
         import numpy as np
