@@ -168,6 +168,35 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-512 (2026-04-19)**: re-pinned the iter-511 W2 regression to
+  the canonical production harness after Codex stop-time review:
+  "new W2 regression is pinned to a non-canonical, noisier setup
+  instead of the production harness it claims to lock".
+
+  Iter-511's setup used `fix_mass=False` and a hand-built D-grid IC
+  via simple opposing-edge averaging — neither of which matches
+  what `scripts/run_atmosphere_test_matrix.py:1175-1195` actually
+  runs.  Iter-512 rewrites the test to import
+  `williamson_test2(grid)` (the same canonical IC builder the matrix
+  uses), construct `u_d`/`v_d` analytically at edge-midpoint
+  positions via `cdgrid.lat_edge_x` + `cos_angle_edge_x` etc., set
+  `boundary_fix=True` + `fix_mass=True` (defaults) + `div_damp =
+  1.5e7 * (48/n)**2` (the matrix's `_div_damp_cube(n)`), and call
+  `model.set_initial_mass(state)`.
+
+  Re-measured baselines on this canonical setup at C16, 1 day:
+    - BUGGY (pre-iter-505):   L2 = 3.43e-3
+    - FIXED  (post-iter-505): L2 = 8.44e-4   (4x improvement)
+
+  Updated test ceiling to 1.5e-3 — passes on fixed code with ~78 %
+  headroom, fires on buggy code by 2.3x.  The signal at the
+  canonical configuration is sharper than at iter-511's
+  non-canonical configuration (4x vs 1.5x gap), so the test is
+  both more faithful AND a stronger discriminator.
+
+  No production-path numerical changes (test only).  187/187 tests
+  pass.
+
 - **iter-511 (2026-04-19)**: added end-to-end W2 error-budget
   regression to lock the iter-505 axis-fix benefit at the
   full-model level (not just the unit-level

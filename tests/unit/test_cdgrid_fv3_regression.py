@@ -2393,86 +2393,93 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
 
 
 class TestW2BoundaryErrorBudget(unittest.TestCase):
-    """Iter-511: lock the post-iter-505 Williamson 2 error budget so any
-    regression in the production `FV3EdgeShallowWaterModel` path is
-    detected automatically.
+    """Iter-511 / iter-512: lock the post-iter-505 Williamson 2 error
+    budget on the CANONICAL production harness used by
+    `scripts/run_atmosphere_test_matrix.py` (Codex iter-511 follow-up:
+    the iter-511 setup with `fix_mass=False` and a hand-built D-grid
+    IC was non-canonical; iter-512 re-pins to the production
+    williamson_test2 + edge-midpoint D-grid IC + `boundary_fix=True` +
+    `fix_mass=True` + `div_damp=_div_damp_cube(n)` setup so the test
+    actually locks what the harness reports).
 
     Iter-505 fixed an x-direction PPM axis bug in
-    `cgrid_mass_flux_divergence`, dropping the W2 C36 1-day L2 error
-    from 1.53e-03 to 2.42e-04 (6.3x improvement) and the visible
-    v-wind cube-face imprint from ~0.577 m/s to ~0.3 m/s.  This test
-    pins a slightly-loose ceiling on the L2 / Linf at C16 so any
-    silent re-introduction of the axis bug (or a similar production-
-    path regression) is caught quickly without needing the full C36
-    test matrix run.
+    `cgrid_mass_flux_divergence`, dropping the W2 C36 1-day L2 from
+    1.53e-03 to 2.42e-04 (6.3x improvement).
     """
 
-    def test_w2_alpha0_c16_1day_l2_below_iter505_baseline(self):
-        """W2 alpha=0 at C16 for 1 day with default config must hold
-        L2 < 8e-3 and Linf < 4e-2.  Both ceilings are loose: pre-
-        iter-505 the same configuration had ~6x worse L2; the
-        ceilings sit comfortably above the post-fix value (~2e-3 L2
-        observed at C16) but trip immediately on a regression."""
+    def test_w2_alpha0_c16_1day_canonical_l2_post_iter505(self):
+        """Run the canonical production W2 setup at C16 for 1 day and
+        assert the L2 height-error stays below the post-iter-505
+        ceiling.  Setup matches `run_atmosphere_test_matrix.py:1175-1195`
+        exactly (apart from C16 vs the matrix's C36).
+        """
         import jax.numpy as jnp
+        import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
             CDGridShallowWaterConfig,
             FV3EdgeShallowWaterModel,
             FV3EdgeShallowWaterState,
+        )
+        # Use the SAME canonical IC builder as the production matrix.
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
         )
 
         n = 16
         days = 1.0
         dt = 300.0
         n_steps = int(days * 86400 / dt)
+        # `_div_damp_cube` from the matrix script — copied inline so
+        # the unit test does not depend on the script's import surface.
+        div_damp = 1.5e7 * (48.0 / n) ** 2  # _div_damp_cube(n)
 
-        g, omega, a, u0 = 9.80616, 7.292e-5, 6.37e6, 38.0
-        grid = create_cubed_sphere(n=n, radius=a, omega=omega,
-                                   use_duogrid=False)
-        lat = grid.lat
-        u_east = u0 * jnp.cos(lat)
-        v_north = jnp.zeros_like(u_east)
-        ca = jnp.cos(grid.angle); sa = jnp.sin(grid.angle)
-        u_cc = ca * u_east + sa * v_north
-        v_cc = -sa * u_east + ca * v_north
-        h = 5960.0 - (a * omega * u0 + 0.5 * u0 ** 2) * jnp.sin(lat) ** 2 / g
-        h_s = jnp.zeros_like(h)
-        u_d = jnp.zeros((6, n, n + 1))
-        v_d = jnp.zeros((6, n + 1, n))
-        u_d = u_d.at[:, :, 1:-1].set(0.5 * (u_cc[:, :, :-1] + u_cc[:, :, 1:]))
-        u_d = u_d.at[:, :, 0].set(u_cc[:, :, 0])
-        u_d = u_d.at[:, :, -1].set(u_cc[:, :, -1])
-        v_d = v_d.at[:, 1:-1, :].set(0.5 * (v_cc[:, :-1, :] + v_cc[:, 1:, :]))
-        v_d = v_d.at[:, 0, :].set(v_cc[:, 0, :])
-        v_d = v_d.at[:, -1, :].set(v_cc[:, -1, :])
-        state0 = FV3EdgeShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
 
-        cfg = CDGridShallowWaterConfig(fix_mass=False)
+        # Canonical config: boundary_fix=True, fix_mass=True, div_damp
+        # scaled to n.  Matches matrix line 1178-1181.
+        cfg = CDGridShallowWaterConfig(
+            div_damp=div_damp,
+            boundary_fix=True,
+            # fix_mass and use_conservation_fixer default to True.
+        )
         model = FV3EdgeShallowWaterModel(grid, config=cfg)
-        state = state0
+        cdgrid = model.cdgrid
+
+        # Canonical IC: williamson_test2 for h/h_s, edge-midpoint
+        # analytic for u_d/v_d.  Matches matrix lines 1185-1194.
+        sw = williamson_test2(grid)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+
+        h0 = state.h
         for _ in range(n_steps):
             state = model.step(state, dt)
 
-        h_mean = float(jnp.mean(jnp.abs(h)))
-        err = state.h - h
+        h_mean = float(jnp.mean(jnp.abs(h0)))
+        err = state.h - h0
         L2 = float(jnp.sqrt(jnp.mean(err ** 2)) / h_mean)
         Linf = float(jnp.max(jnp.abs(err)) / h_mean)
 
-        # Empirical baselines on fresh runs (dt=300s, 1 day):
-        #   BUGGY (pre-iter-505):   L2 = 2.61e-3, Linf = 9.80e-3
-        #   FIXED  (post-iter-505): L2 = 1.71e-3, Linf = 9.65e-3
-        # The L2 gap is the discriminating signal at C16 (Linf is
-        # essentially the same because the worst-case point is at a
-        # cube vertex and the corner-fill behaviour dominates there
-        # both before and after the axis fix).  Ceiling at 2.0e-3
-        # cleanly separates: passes on FIXED with 17% headroom,
-        # fires on BUGGY by 30%.
+        # Measured baselines on the canonical setup (C16, dt=300s,
+        # 1 day, boundary_fix=True, fix_mass=True, div_damp scaled):
+        #   BUGGY (pre-iter-505):   L2 = 3.43e-3
+        #   FIXED  (post-iter-505): L2 = 8.44e-4   (4x improvement)
+        # Ceiling at 1.5e-3 cleanly separates: passes on FIXED with
+        # ~78 % headroom, fires on BUGGY by 2.3x.
         self.assertLess(
-            L2, 2.0e-3,
-            msg=(f"W2 alpha=0 C16 1d L2={L2:.3e} exceeds 2.0e-3 "
-                 f"ceiling — iter-505 axis fix may have regressed. "
-                 f"Pre-iter-505 baseline at this resolution was "
-                 f"L2 ≈ 2.6e-3."))
+            L2, 1.5e-3,
+            msg=(f"W2 alpha=0 C16 1d (canonical) L2={L2:.3e} "
+                 f"exceeds 1.5e-3 ceiling — iter-505 axis fix may "
+                 f"have regressed.  Pre-iter-505 baseline on this "
+                 f"setup was L2 = 3.43e-3."))
 
 
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
