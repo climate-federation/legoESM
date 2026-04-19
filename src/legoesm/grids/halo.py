@@ -1540,7 +1540,9 @@ def compute_padded_angle(n: int, halo: int = 1) -> jax.Array:
     n : int
         Number of cells per face edge (interior grid).
     halo : int
-        Halo width (1 or 2).
+        Halo width (1, 2, or 3 — iter-530 confirmed halo=3 numerically
+        consistent with the halo=2 output at the overlapping interior
+        region; supports the iter-496..501 ng=3 halo extension).
 
     Returns
     -------
@@ -1652,7 +1654,9 @@ def compute_padded_half_metrics(
     radius : float
         Sphere radius [m].
     halo : int
-        Halo width (1 or 2).
+        Halo width (1, 2, or 3 — iter-530 confirmed halo=3
+        numerically consistent with halo=2 at overlapping interior
+        cells; supports the iter-496..501 ng=3 halo extension).
 
     Returns
     -------

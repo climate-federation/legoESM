@@ -496,6 +496,52 @@ class TestPadHaloLocalH3:
 
 
 # ---------------------------------------------------------------------------
+# Padded angle / metrics consistency between halo=2 and halo=3 (iter-530)
+# ---------------------------------------------------------------------------
+
+class TestPaddedAngleHaloConsistency:
+    """The `compute_padded_angle` and `compute_padded_half_metrics`
+    helpers accept any halo depth.  iter-530: lock the invariant that
+    the halo=3 output matches the halo=2 output at the overlapping
+    interior region (positions [1:-1, 1:-1] of halo=2 = positions
+    [2:-2, 2:-2] of halo=3).  This is a critical correctness guard:
+    halo=3 must agree with halo=2 wherever they overlap, otherwise
+    the iter-496..501 ng=3 scaffolding is broken.
+    """
+
+    def test_compute_padded_angle_h2_h3_consistent(self):
+        from legoesm.grids.halo import compute_padded_angle
+        n = 8
+        a_h2 = compute_padded_angle(n, halo=2)
+        a_h3 = compute_padded_angle(n, halo=3)
+        assert a_h2.shape == (6, n + 4, n + 4)
+        assert a_h3.shape == (6, n + 6, n + 6)
+        # The halo=2 array's interior + 2-cell halo corresponds to
+        # the halo=3 array's interior + 1..3-deep halo at offset (1, 1).
+        # I.e., a_h3[1:-1, 1:-1] should equal a_h2 at every cell.
+        np.testing.assert_allclose(
+            np.asarray(a_h3[:, 1:-1, 1:-1]),
+            np.asarray(a_h2),
+            atol=1e-12,
+            err_msg="compute_padded_angle(h=3) interior does not "
+                    "match compute_padded_angle(h=2) — h3 scaffolding "
+                    "would propagate inconsistency to the FB chain.")
+
+    def test_compute_padded_half_metrics_h2_h3_consistent(self):
+        from legoesm.grids.halo import compute_padded_half_metrics
+        n = 8
+        radius = 6.371229e6
+        hx2, hy2 = compute_padded_half_metrics(n, radius, halo=2)
+        hx3, hy3 = compute_padded_half_metrics(n, radius, halo=3)
+        assert hx2.shape == (6, n + 4, n + 4)
+        assert hx3.shape == (6, n + 6, n + 6)
+        np.testing.assert_allclose(
+            np.asarray(hx3[:, 1:-1, 1:-1]), np.asarray(hx2), atol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(hy3[:, 1:-1, 1:-1]), np.asarray(hy2), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Public pad_halo(halo=3) dispatch (iter-499)
 # ---------------------------------------------------------------------------
 

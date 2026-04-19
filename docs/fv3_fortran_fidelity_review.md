@@ -168,6 +168,39 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-530 (2026-04-19)**: validated halo=3 readiness of
+  `compute_padded_angle` and `compute_padded_half_metrics` — the
+  two grid-helper functions that the iter-496..501 ng=3 halo
+  scaffolding will need at the FB-chain wiring step.
+
+  Both functions already accept `halo` as a parameter and produce
+  the correct shape `(6, n+2*halo, n+2*halo)` for halo=3 (verified
+  numerically: shapes (6, 14, 14) for n=8 halo=3, all values
+  finite).  Their docstrings only said "Halo width (1 or 2)";
+  iter-530 widens to "Halo width (1, 2, or 3)" with a pointer to
+  the iter-496..501 ng=3 work.
+
+  Added `TestPaddedAngleHaloConsistency` (2 tests in
+  `test_scale_halo.py`) that locks the critical correctness
+  invariant: halo=3 outputs MUST equal halo=2 outputs at the
+  overlapping interior region (positions `[1:-1, 1:-1]` of halo=3
+  = positions `[:, :]` of halo=2).  If the halo=3 computation
+  ever diverges from halo=2 at the interior, the iter-496..501
+  ng=3 scaffolding would propagate inconsistent metrics into the
+  FB chain.
+
+  This iteration is one of the remaining preconditions before
+  the FB chain can be re-wired to use ng=3 halos.  Remaining
+  iter-496 plan items still TODO:
+    - Wire `CubedSphereGrid.halo_interp_offsets_h3` through (the
+      iter-496 offsets exist but are not exposed as a precomputed
+      attribute).
+    - Update `_d2a2c_vect_duogrid` to use h=3 for deeper stencils.
+    - FB chain replacement in `FV3EdgeShallowWaterModel`.
+
+  No production-path numerical changes (validation + docs).
+  235/235 tests pass.
+
 - **iter-529 (2026-04-19)**: completed iter-528's "future work" by
   switching the two known callers from inline 4-edge angle averaging
   to `cell_centre_angles_from_4edge`:
