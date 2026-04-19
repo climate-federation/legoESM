@@ -168,6 +168,49 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-525 (2026-04-19)**: locked the cosine bell positivity
+  invariant on the canonical production matrix path
+  (`run_atmosphere_test_matrix.py:1517-1545`).
+
+  **Discovery**: the cosine bell uses a DIFFERENT path than W2/W5
+  in the matrix.  The matrix calls `transport_step(h, ut, vt, dt,
+  cdgrid, mass_target=...)` directly — NOT
+  `FV3EdgeShallowWaterModel.step`.  `transport_step` includes a
+  positivity-clipping mass fixer at `fv_tp_2d.py:558-568`:
+    ```
+    h_pos = jnp.maximum(h_new, 0.0)
+    mass_pos = jnp.sum(h_pos * area)
+    scale = mass_target / jnp.maximum(mass_pos, 1.0)
+    h_new = h_pos * scale
+    ```
+  This is what enforces the visible h_min = 0.000 in
+  `snapshots_native.npz`; the iter-524 documentation incorrectly
+  attributed it to `_pert_ppm_iv0` alone.
+
+  Direct test of the production model path (cosine bell IC →
+  `FV3EdgeShallowWaterModel.step` × 48 steps at dt=1800s)
+  produces h_min = -30.4 m at step 24 — meaningful negative
+  values, confirming PPM iv=0 alone is NOT enough to keep the
+  bell positive on the cubed sphere.  The matrix's cosine bell
+  test passes only because it uses `transport_step` with the
+  mass_target clip, not the model's `step`.
+
+  **New regression test**
+  `TestCosineBellPositivity::test_cosine_bell_h_nonnegative_throughout_1day_canonical`:
+    - Reproduces matrix lines 1535-1545 exactly
+      (`_d2a2c_vect` → frozen `ut`/`vt` → `transport_step` loop).
+    - Samples h.min() at 5 steps spread across 1 day.
+    - Asserts worst h_min > -1e-9 × h_max_init.
+
+  **Sanity-checked locally**: removing the
+  `jnp.maximum(h_new, 0.0)` clip from `transport_step` produces
+  h_min = -0.01054 m at step 48 → test FAILS with a clear
+  "clip removed" diagnostic message pointing back at
+  `fv_tp_2d.py:558-568`.
+
+  No production-path numerical changes (test only).
+  230/230 tests pass.
+
 - **iter-524 (2026-04-19)**: comprehensive visual inspection of the
   three required-evaluation cases per Ralph step 5.  Inspected the
   most recent snapshots at C36 dt=300s 1 day with the canonical

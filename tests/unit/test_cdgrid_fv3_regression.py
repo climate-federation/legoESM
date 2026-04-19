@@ -2766,6 +2766,79 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"iter-505 axis fix dropped it to 0.303 m/s."))
 
 
+class TestCosineBellPositivity(unittest.TestCase):
+    """Iter-525: lock the cosine bell positivity invariant on the
+    canonical production matrix path
+    (`run_atmosphere_test_matrix.py:1517-1545`).
+
+    The matrix's cosine bell uses `transport_step(h, ut, vt, dt,
+    cdgrid, mass_target=_mass_target)` directly, NOT
+    `FV3EdgeShallowWaterModel.step`.  `transport_step` clips
+    negatives to zero and rescales (`fv_tp_2d.py:558-568`):
+
+        h_pos = jnp.maximum(h_new, 0.0)
+        mass_pos = jnp.sum(h_pos * area)
+        scale = mass_target / jnp.maximum(mass_pos, 1.0)
+        h_new = h_pos * scale
+
+    This is what enforces the visible h_min = 0.000 in the saved
+    snapshots.  The test locks the canonical mass_target-based
+    positivity-clipping path against silent removal.
+    """
+
+    def test_cosine_bell_h_nonnegative_throughout_1day_canonical(self):
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv_tp_2d import transport_step
+        from tests.test_cases.cosine_bell import cosine_bell_cubesphere
+
+        n = 36
+        dt = 1800.0  # matches matrix line 1517
+        n_steps = int(86400 / dt)
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        state = cosine_bell_cubesphere(grid, cdgrid)
+        h_max_init = float(jnp.max(state.h))
+
+        # Pre-compute contravariant velocities (winds frozen for
+        # cosine bell) — matches matrix lines 1535-1539.
+        _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
+            state.u_d, state.v_d, cdgrid)
+        _mass_target = float(jnp.sum(state.h * grid.area))
+
+        # Sample h.min() across the trajectory; clipped path should
+        # keep h_min ≥ 0 at every step.
+        sample_steps = {n_steps // 8, n_steps // 4, n_steps // 2,
+                        3 * n_steps // 4, n_steps}
+        h = state.h
+        h_mins = [(0, float(jnp.min(h)))]
+        for i in range(n_steps):
+            h = transport_step(h, ut, vt, dt, cdgrid,
+                               mass_target=_mass_target)
+            if (i + 1) in sample_steps:
+                h_mins.append((i + 1, float(jnp.min(h))))
+
+        # Tolerance: allow a tiny negative excursion (1e-9 of h_max)
+        # to absorb pure float-precision noise; anything larger is
+        # a real positivity violation that means transport_step's
+        # `jnp.maximum(h_new, 0.0)` clip (line 564) was removed.
+        tol = -1e-9 * h_max_init
+        worst = min(h_mins, key=lambda t: t[1])
+        self.assertGreater(
+            worst[1], tol,
+            msg=(f"Cosine bell h went negative beyond tolerance "
+                 f"({tol:.2e}): worst h_min = {worst[1]:.3e} at "
+                 f"step {worst[0]}.  Per-sample h_min: "
+                 f"{[(s, round(v, 9)) for s, v in h_mins]}.  "
+                 f"This indicates the `jnp.maximum(h_new, 0.0)` "
+                 f"clip in `transport_step` (fv_tp_2d.py:558-568) "
+                 f"was removed.  Restore it OR add a documented "
+                 f"FCT-equivalent positivity guarantee elsewhere."))
+
+
 class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
     """Regression test for iter-510: lock in the polar-face symmetry
     of `fv3_sw_tendencies` on a balanced Williamson-2 (alpha=0) state.
