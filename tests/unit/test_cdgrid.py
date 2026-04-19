@@ -623,6 +623,142 @@ class TestCDGrid3DOperators(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.isfinite(dh)))
 
 
+class TestInterpCornerToCenter(unittest.TestCase):
+    """Iter-544: regression lock for `_interp_corner_to_center`.
+
+    This helper (src/legoesm/core/operators_cdgrid.py:895-910) is
+    load-bearing in the production A-L path: it is the final step that
+    projects corner gradient / divergence-damping contributions back
+    to cell centres before the momentum update in
+    `fv3_sw_tendencies` (at lines 1421-1422 for Bernoulli gradient and
+    1436-1437 for the divergence-damping contribution).
+
+    Before iter-544 the function had NO tests.  A silent refactor to
+    an area-weighted average, a skewed 3-point average, or an
+    accidental index shift would propagate directly into W2/W5
+    tendencies without any regression trip.
+
+    Locks:
+      (a) 2D shape: (6, n+1, n+1) -> (6, n, n)
+      (b) 3D shape: (6, n+1, n+1, nlev) -> (6, n, n, nlev)
+      (c) EXACT arithmetic 4-point average (no area weighting):
+          out[i,j] = 0.25*(f[i,j] + f[i+1,j] + f[i,j+1] + f[i+1,j+1])
+          on a known non-trivial field.
+      (d) Independent application per level in 3D.
+      (e) Area-independence: substituting a different `cdgrid` with
+          different `area_corner` must NOT change the result (the
+          helper takes `field_d` only, no grid argument).
+    """
+
+    def _build(self):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        n = 6
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        return n, cdgrid
+
+    def test_shape_2d_and_3d(self):
+        from legoesm.core.operators_cdgrid import (
+            _interp_corner_to_center)
+        n, _ = self._build()
+        nlev = 5
+        field_2d = jnp.zeros((6, n + 1, n + 1))
+        field_3d = jnp.zeros((6, n + 1, n + 1, nlev))
+        self.assertEqual(
+            _interp_corner_to_center(field_2d).shape, (6, n, n))
+        self.assertEqual(
+            _interp_corner_to_center(field_3d).shape, (6, n, n, nlev))
+
+    def test_constant_preservation(self):
+        from legoesm.core.operators_cdgrid import (
+            _interp_corner_to_center)
+        n, _ = self._build()
+        field = jnp.ones((6, n + 1, n + 1)) * 7.5
+        out = _interp_corner_to_center(field)
+        self.assertTrue(jnp.all(out == 7.5),
+                        msg="Constant input must be preserved exactly.")
+
+    def test_exact_4_point_arithmetic_average_2d(self):
+        """Distinct-value stencil check: the function must compute
+        exactly `0.25*(SW + SE + NW + NE)` — not a weighted variant.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _interp_corner_to_center)
+        n, _ = self._build()
+        # Build a field where each corner has a unique value so the
+        # exact averaging formula is unambiguous.
+        rng = np.random.default_rng(544)
+        field_np = rng.standard_normal((6, n + 1, n + 1)).astype(
+            np.float64)
+        field = jnp.asarray(field_np)
+        out = np.asarray(_interp_corner_to_center(field),
+                         dtype=np.float64)
+        expected = 0.25 * (
+            field_np[:, :-1, :-1]      # SW corner
+            + field_np[:, 1:, :-1]     # SE
+            + field_np[:, :-1, 1:]     # NW
+            + field_np[:, 1:, 1:]      # NE
+        )
+        max_diff = float(np.max(np.abs(out - expected)))
+        self.assertLess(
+            max_diff, 1e-10,
+            msg=(f"`_interp_corner_to_center` deviates from "
+                 f"`0.25*(SW+SE+NW+NE)` by {max_diff:.3e}.  If the "
+                 f"implementation changed to an area-weighted or "
+                 f"non-uniform average, UPDATE this test with the "
+                 f"new expected formula and document the change in "
+                 f"docs/fv3_fortran_fidelity_review.md.  The two "
+                 f"production call sites in `fv3_sw_tendencies` "
+                 f"assume plain arithmetic averaging."))
+
+    def test_3d_applies_per_level_independently(self):
+        """Each vertical level must be averaged independently -- no
+        cross-level mixing."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _interp_corner_to_center)
+        n, _ = self._build()
+        nlev = 4
+        rng = np.random.default_rng(1544)
+        # Different field on each level: level k has constant k+1
+        per_level = (
+            np.arange(1, nlev + 1, dtype=np.float64)[None, None, None, :]
+            + np.zeros((6, n + 1, n + 1, nlev))
+        )
+        field_3d = jnp.asarray(per_level)
+        out = np.asarray(_interp_corner_to_center(field_3d))
+        # Constant-per-level input must yield constant output matching
+        # the level value (no cross-level averaging).
+        for k in range(nlev):
+            lv = np.asarray(out[..., k])
+            self.assertTrue(
+                np.all(np.abs(lv - (k + 1)) < 1e-10),
+                msg=(f"Level {k} output deviates from expected "
+                     f"constant {k + 1}; max dev = "
+                     f"{float(np.max(np.abs(lv - (k + 1)))):.3e}.  "
+                     f"Cross-level averaging detected."))
+
+    def test_area_independence(self):
+        """The helper takes `field_d` only — no grid argument — so the
+        grid's `area_corner` cannot affect the result.  Confirming the
+        API surface has no hidden area weighting."""
+        import inspect
+        from legoesm.core.operators_cdgrid import (
+            _interp_corner_to_center)
+        sig = inspect.signature(_interp_corner_to_center)
+        self.assertEqual(
+            list(sig.parameters), ["field_d"],
+            msg=(f"`_interp_corner_to_center` signature = "
+                 f"{list(sig.parameters)}.  If an area-weighted "
+                 f"variant is introduced, it should live under a new "
+                 f"name (e.g. `_interp_corner_to_center_weighted`) "
+                 f"and this lock should be kept pointing at the "
+                 f"plain-arithmetic variant."))
+
+
 class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
     """Iter-518: lock the structural asymmetry between u_c and v_c
     formulas in `dgrid_to_cgrid` and `fv3_cc2c` as INTENTIONAL.

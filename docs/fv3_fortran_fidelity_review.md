@@ -168,6 +168,40 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-544 (2026-04-19)**: regression lock for
+  `_interp_corner_to_center` (previously untested).
+
+  Codex audit recommended test-hardening target after finding no
+  narrow production numerical gap.  `_interp_corner_to_center`
+  (`src/legoesm/core/operators_cdgrid.py:895-910`) is the corner-to-
+  center 4-point arithmetic average used in the production
+  A-L path via `fv3_sw_tendencies` to project the Bernoulli gradient
+  (line 1421-1422) and the divergence-damping contribution (line
+  1436-1437) back to cell centres before the momentum update.  Before
+  iter-544 the function had ZERO direct tests.  A silent refactor to
+  an area-weighted variant, a skewed 3-point average, or an index
+  shift would propagate directly into W2/W5 tendencies without any
+  regression trip.
+
+  Iter-544 adds `TestInterpCornerToCenter` (5 tests in
+  `tests/unit/test_cdgrid.py`):
+    (a) Shape invariants for 2D `(6, n+1, n+1)` → `(6, n, n)` and 3D
+        `(6, n+1, n+1, nlev)` → `(6, n, n, nlev)`.
+    (b) Constant-field preservation.
+    (c) Exact arithmetic 4-point average on random 6×7×7 stencil
+        with `1e-10` tolerance.
+    (d) 3D: per-level independence (no cross-level mixing).
+    (e) API surface: signature takes `field_d` only (no grid
+        argument) — proof that no hidden area weighting can be
+        introduced silently.
+
+  **Sanity-checked**: patched the 2D branch to a 40/20/20/20 skewed
+  average.  Test (c) correctly fires with `max diff 4.749e-01 vs
+  threshold 1e-10`.  Restored production code; all 5 tests pass.
+
+  No production-path numerical changes.  46/46 tests pass in
+  `test_cdgrid.py` (41 prior + 5 new).
+
 - **iter-543 (2026-04-19)**: source-level lock for the BGRID_NE
   component sync site.
 
