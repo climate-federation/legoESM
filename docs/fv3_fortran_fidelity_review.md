@@ -168,6 +168,54 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-541 (2026-04-19)**: behavioral lock on the iter-518
+  convention-asymmetry finding.
+
+  Codex fidelity audit in iter-541 flagged "fv3_cc2c applies a
+  non-orthogonality correction to u_c but not to v_c — Fortran
+  d2a2c_vect treats both symmetrically (sw_core.F90:3560-3561,
+  3691-3692)".  I verified the symmetric-v_c variant empirically:
+  on the C36 quick SW matrix, adding
+  `v_c = v_avg*sina_v - u_at_v*cosa_v` DEGRADES W2 L2 by ~200x
+  (2.42e-04 → 4.79e-02) and W5 mass drift by ~6x.
+
+  Root cause: Python's cubed-sphere D-grid uses a mixed-orthogonal
+  convention where `u_d` is along e_i but `v_d` is along e_perp
+  (NOT along e_j).  This is a different convention from Fortran
+  FV3 (symmetric covariant u,v along e_i,e_j).  Iter-518 locked
+  the Python-side asymmetry with AST checks
+  (`test_dgrid_to_cgrid_u_has_correction_v_does_not`,
+  `test_fv3_cc2c_u_has_correction_v_does_not`).  A future refactor
+  could route the u_c correction through a helper function and
+  pass the AST check while silently changing behaviour.
+
+  Iter-541 adds a BEHAVIORAL lock:
+  `test_fv3_cc2c_v_c_is_plain_average_behaviorally` on a real
+  cdgrid (n=8) with a non-trivial wind (u_cc=cos(lat),
+  v_cc=0.1*sin(2*lon)).  Verifies at cube-face interior (i,j in
+  [2, n-2]):
+    (a) `v_c[0, i, j] == 0.5*(v_cc[0, i, j-1] + v_cc[0, i, j])`
+        to 1e-6 (NO non-orthogonality correction)
+    (b) `max|u_c - 0.5*(u_cc[i-1]+u_cc[i])| > 1e-5`
+        (correction IS applied)
+
+  Sanity-checked: replaced production
+  `v_c = 0.5*(v_pad[...] + v_pad[...])` with the symmetric variant
+  `v_c = v_avg*sina_v - u_at_v*cosa_v`.  Test correctly fires with
+  max deviation = 1.031e-01 (5 orders above the 1e-6 threshold).
+  Restored production code; test passes.
+
+  Also documents the CONVENTION DIVERGENCE explicitly: full FV3
+  fidelity here would require changing u_d/v_d from mixed-
+  orthogonal to symmetric covariant throughout (fv3_d2cc,
+  fv3_cc2c, dgrid_to_cgrid, cgrid_to_dgrid, and the D-grid
+  corner-wind pipeline).  That is a cross-cutting architectural
+  change; left as a future item.
+
+  No production-path numerical changes.  95/95 tests pass in
+  test_cdgrid.py + test_cdgrid_fv3_regression.py.  W2 L2 at C36
+  unchanged at 2.42e-04.
+
 - **iter-540 (2026-04-19)**: production-path fidelity audit found a
   small live W5 initializer mismatch in the code path used by the SW
   matrix / CLI (`tests.test_cases.williamson` is imported at runtime).

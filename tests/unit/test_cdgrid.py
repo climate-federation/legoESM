@@ -754,6 +754,105 @@ class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
                 return ast.unparse(node)
         raise AssertionError(f"Function `{name}` not found in source.")
 
+    def test_fv3_cc2c_v_c_is_plain_average_behaviorally(self):
+        """Iter-541 BEHAVIORAL lock of iter-518's convention finding.
+
+        iter-518 locked the convention asymmetry via an AST check.  But a
+        refactor that routes the asymmetric correction through a helper
+        (e.g., `_apply_cc2c_correction(u_cc, v_cc, cdgrid)`) could pass
+        the AST check while silently changing behavior.  This test
+        exercises `fv3_cc2c` on a real cdgrid with a specific non-
+        trivial cell-centre wind pattern, and verifies:
+
+          (a) v_c at INTERIOR (non-cube-edge) positions equals the plain
+              2-point average of v_cc between adjacent cells — NO
+              non-orthogonality correction applied.
+
+          (b) u_c at INTERIOR positions differs from the plain 2-point
+              average of u_cc — non-orthogonality correction IS applied
+              (at minimum, `u_c != u_avg` measurably when v_cc != 0).
+
+        Iter-541 verified empirically that adding a symmetric
+        `v_c = v_avg*sina_v - u_at_v*cosa_v` correction degrades W2 L2
+        by 200x (4.79e-2 vs 2.42e-4 baseline).  This behavioural lock
+        makes that regression catchable at unit-test scope.
+        """
+        from legoesm.core.operators_cdgrid import fv3_cc2c
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+        )
+        import jax.numpy as jnp
+        import numpy as np
+
+        n = 8
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Non-trivial cell-centre wind: u_cc depends on lat, v_cc on lon
+        # (both non-zero, no symmetry that would accidentally hide the
+        # correction/no-correction behaviour).
+        lat = cdgrid.base.lat
+        lon = cdgrid.base.lon
+        u_cc = jnp.cos(lat)            # (6, n, n)
+        v_cc = 0.1 * jnp.sin(2.0 * lon)  # (6, n, n)  non-zero to
+                                        # trigger the u-correction term
+
+        u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
+
+        # (a) v_c at INTERIOR (non-cube-edge) should be the plain
+        # 2-point average of v_cc.  Take an interior y-face: face 0, at
+        # interior i and interior j (avoid cube edges where halo data
+        # enters).
+        interior_i = slice(2, n - 2)
+        interior_j = slice(2, n - 2)  # j=2..n-3 for v_c (shape (6,n,n+1))
+
+        # v_c[face, i, j] = 0.5 * (v_cc[face, i, j-1] + v_cc[face, i, j])
+        # for interior y-faces.  Check on face 0.
+        v_c_interior = np.asarray(v_c)[0, interior_i, interior_j]
+        v_avg_expected = 0.5 * (
+            np.asarray(v_cc)[0, interior_i, 1:n - 3]
+            + np.asarray(v_cc)[0, interior_i, 2:n - 2]
+        )
+        max_abs_dev_v = float(np.max(np.abs(v_c_interior - v_avg_expected)))
+        # Tolerance 1e-6 = 4 orders of magnitude below the magnitude
+        # of a real correction term (v_avg*sina_v - u_at_v*cosa_v
+        # yields ~0.01 deviation at cube-face interior for this field).
+        # Actual production precision on v_c is float32 (~1e-8 noise).
+        self.assertLess(
+            max_abs_dev_v, 1e-6,
+            msg=(f"v_c at cube-face interior must equal the plain "
+                 f"0.5*(v_cc[j-1] + v_cc[j]) average (NO non-"
+                 f"orthogonality correction).  Max deviation = "
+                 f"{max_abs_dev_v:.3e}.  If a 'symmetrize' refactor "
+                 f"added a `v_c = v_avg*sina_v - u_at_v*cosa_v` term, "
+                 f"REVERT IT and see iter-541 + iter-518 convention "
+                 f"notes in docs/fv3_fortran_fidelity_review.md."))
+
+        # (b) u_c at INTERIOR should DIFFER from plain 2-point average
+        # of u_cc (non-orthogonality correction IS applied).
+        # u_c[face, i, j] corresponds to an x-face at x-position i.
+        u_c_interior = np.asarray(u_c)[0, interior_i, interior_j]
+        # Reconstruct the plain-average of u_cc at x-face positions:
+        # u_avg_plain[i, j] = 0.5 * (u_cc[i-1, j] + u_cc[i, j])
+        # For face 0, interior u-face i in [2, n-2]:
+        u_avg_plain = 0.5 * (
+            np.asarray(u_cc)[0, 1:n - 3, interior_j]
+            + np.asarray(u_cc)[0, 2:n - 2, interior_j]
+        )
+        max_abs_dev_u = float(np.max(np.abs(u_c_interior - u_avg_plain)))
+        # Non-strict: just require measurably non-zero correction.
+        # cos(alpha) is O(0.1) near cube edges, smaller at interior;
+        # the correction is v_at_u * cosa_u ~ 0.1 * 0.01 = 1e-3 at
+        # cube-face interior.
+        self.assertGreater(
+            max_abs_dev_u, 1e-5,
+            msg=(f"u_c at cube-face interior must DIFFER from the "
+                 f"plain 0.5*(u_cc[i-1] + u_cc[i]) average — the non-"
+                 f"orthogonality correction must be active.  Max "
+                 f"deviation = {max_abs_dev_u:.3e} < 1e-5 threshold.  "
+                 f"If the correction term was removed, RESTORE IT."))
+
 
 class TestCellCentreAnglesFrom4Edge(unittest.TestCase):
     """Iter-528: regression for the new `cell_centre_angles_from_4edge`
