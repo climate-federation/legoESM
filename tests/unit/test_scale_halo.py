@@ -496,6 +496,84 @@ class TestPadHaloLocalH3:
 
 
 # ---------------------------------------------------------------------------
+# Public pad_halo(halo=3) dispatch (iter-499)
+# ---------------------------------------------------------------------------
+
+class TestPadHaloH3Dispatch:
+    """Tests that the public `pad_halo(halo=3)` dispatch wires through
+    to `_pad_halo_local_h3` on the single-node path.
+    """
+
+    def test_dispatch_delegates_to_local_h3(self):
+        """Calling pad_halo(..., halo=3) must equal a direct
+        `_pad_halo_local_h3` call when no interp_offsets/duogrid and
+        no distributed backend is active."""
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.arange(
+            6 * N * N, dtype=jnp.float64).reshape(6, N, N)
+        p_dispatch = pad_halo(data, halo=3)
+        p_direct = _pad_halo_local_h3(data)
+        np.testing.assert_array_equal(
+            np.asarray(p_dispatch), np.asarray(p_direct))
+
+    def test_shape(self):
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        padded = pad_halo(data, halo=3)
+        assert padded.shape == (6, N + 6, N + 6)
+
+    def test_constant_field_preserved(self):
+        data = jnp.ones((6, N, N), dtype=jnp.float64) * 3.5
+        padded = pad_halo(data, halo=3)
+        np.testing.assert_allclose(
+            np.asarray(padded), 3.5, atol=1e-12)
+
+    def test_halo4_raises_notimplemented(self):
+        """halo=4 should still raise NotImplementedError — iter-499 only
+        extended dispatch to halo=3."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError):
+            pad_halo(data, halo=4)
+
+    def test_interp_offsets_h3_forwarded(self):
+        """When interp_offsets with h3 shape (6,4,3,n) is passed, the
+        dispatch must feed it through to `_pad_halo_local_h3` — on a
+        constant field the result should still be exact."""
+        from legoesm.grids.halo import compute_halo_interp_offsets_h3
+        offsets = compute_halo_interp_offsets_h3(N)
+        data = jnp.ones((6, N, N), dtype=jnp.float64) * 1.75
+        padded = pad_halo(data, halo=3, interp_offsets=offsets)
+        np.testing.assert_allclose(
+            np.asarray(padded), 1.75, atol=1e-6)
+
+    def test_single_face_panel_uses_wall_bc(self):
+        """For a (1, n, n) regional panel, halo=3 must use wall BCs
+        (Neumann) and produce shape (1, n+6, n+6)."""
+        data = jnp.arange(
+            1 * N * N, dtype=jnp.float64).reshape(1, N, N)
+        padded = pad_halo(data, halo=3)
+        assert padded.shape == (1, N + 6, N + 6)
+        # Interior preserved bit-exactly
+        np.testing.assert_array_equal(
+            np.asarray(padded[:, 3:-3, 3:-3]), np.asarray(data))
+        # Boundary rows are edge-replicated (Neumann / zero-gradient)
+        np.testing.assert_array_equal(
+            np.asarray(padded[0, 0, 3:-3]), np.asarray(data[0, 0, :]))
+        np.testing.assert_array_equal(
+            np.asarray(padded[0, -1, 3:-3]), np.asarray(data[0, -1, :]))
+
+    def test_duogrid_at_halo3_raises(self):
+        """Duo-Grid remap at halo=3 not yet implemented — must error
+        clearly rather than silently call the halo=2 remap path."""
+        # Build a tiny DuoGridData-shaped object sufficient to trip the
+        # guard — the duogrid-None check runs before any remap call.
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        class _FakeDuogrid:
+            pass
+        with pytest.raises(NotImplementedError, match="Duo-Grid"):
+            pad_halo(data, halo=3, duogrid=_FakeDuogrid())
+
+
+# ---------------------------------------------------------------------------
 # JIT compatibility
 # ---------------------------------------------------------------------------
 

@@ -168,6 +168,42 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-499 (2026-04-19)**: fourth step on the ng=3 halo extension —
+  wired `halo=3` into the public `pad_halo()` dispatch on
+  `grids/halo.py`.  Extended the accepted halo set to `(1, 2, 3)`,
+  added the `halo == 3` branch delegating to `_pad_halo_local_h3`
+  (iter-498), and added `NotImplementedError` guards for the
+  combinations we do not yet support:
+    - MPI backend at halo=3 — needs parallel.halo_exchange rework;
+    - SPMD backend at halo=3 — needs cubesphere_exchange rework;
+    - Duo-Grid remap at halo=3 — needs `cube_rmp_vectorized(halo=3)`
+      and `fill_corner_region(halo=3)` which currently assume
+      halo ∈ {1, 2}.
+  The single-face regional-panel path flows through `_pad_halo_wall`
+  which already supports arbitrary halo via `jnp.pad(..., mode='edge')`,
+  so halo=3 works there with no change.
+
+  Tests (`TestPadHaloH3Dispatch`, 7 assertions):
+    - `pad_halo(data, halo=3)` equals a direct
+      `_pad_halo_local_h3(data)` call on the single-node path;
+    - shape `(6, n + 6, n + 6)` on the 6-face path;
+    - constant field preserved to 1e-12;
+    - `halo=4` still raises `NotImplementedError` (dispatch only
+      extended to 3, not arbitrary n);
+    - `interp_offsets` with h3 shape `(6, 4, 3, n)` is forwarded
+      through to `_pad_halo_local_h3` (constant field still exact
+      under interpolation);
+    - single-face regional panel uses wall BCs (Neumann) and yields
+      shape `(1, n + 6, n + 6)` with interior preserved and
+      boundary rows edge-replicated;
+    - Duo-Grid `halo=3` raises `NotImplementedError` with the
+      expected message (guard against silent halo=2 fallback).
+
+  Test totals: 37/37 on `test_scale_halo.py` (30 prior + 7 new),
+  132/132 on `test_cdgrid_fv3_regression.py + test_duogrid.py`.
+  Required evaluations (W2/W5/cosine bell) unchanged from
+  iter-112 baseline — no production-path caller uses `halo=3` yet.
+
 - **iter-498 (2026-04-19)**: third step on the ng=3 halo extension —
   added `_pad_halo_local_h3(data, interp_offsets=None)` in
   `grids/halo.py`.  Generalizes `_pad_halo_local_h2` to 3 halo

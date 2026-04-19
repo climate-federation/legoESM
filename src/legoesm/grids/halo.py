@@ -507,8 +507,9 @@ def pad_halo(
         raise ValueError(
             "interp_offsets and duogrid are mutually exclusive"
         )
-    if halo not in (1, 2):
-        raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+    if halo not in (1, 2, 3):
+        raise NotImplementedError(
+            f"Only halo=1, halo=2, and halo=3 are supported, got {halo}")
 
     # When duogrid is active, suppress interp_offsets (use nearest copy + remap)
     offsets = None if duogrid is not None else interp_offsets
@@ -519,19 +520,33 @@ def pad_halo(
 
     # MPI dispatch.
     if _halo_backend == "mpi":
+        if halo == 3:
+            raise NotImplementedError(
+                "MPI halo=3 exchange not yet implemented; "
+                "halo=3 is only available on the single-node local path.")
         from legoesm.parallel.halo_exchange import pad_halo_mpi
         padded = pad_halo_mpi(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
+        if halo == 3:
+            raise NotImplementedError(
+                "SPMD halo=3 exchange not yet implemented; "
+                "halo=3 is only available on the single-node local path.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
         padded = explicit_pad_halo(data, _spmd_mesh, halo=halo)
     elif halo == 1:
         padded = _pad_halo_local(data, offsets)
-    else:
+    elif halo == 2:
         padded = _pad_halo_local_h2(data, offsets)
+    else:  # halo == 3
+        padded = _pad_halo_local_h3(data, offsets)
 
     # Duo-Grid post-processing: kinked→extended remap + corner fill
     if duogrid is not None:
+        if halo == 3:
+            raise NotImplementedError(
+                "Duo-Grid remap at halo=3 not yet implemented; "
+                "use interp_offsets for the h3 scalar path.")
         from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
         padded = cube_rmp_vectorized(padded, duogrid, halo)
         padded = fill_corner_region(padded, duogrid, halo)
