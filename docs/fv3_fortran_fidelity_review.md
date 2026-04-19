@@ -168,6 +168,39 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-536 (2026-04-19)**: addressed Codex stop-time review of
+  iter-535: "iter-535 still leaves the halo=3 outer ring only
+  partially covered".
+
+  iter-535 only checked the depth=2 EDGE STRIPS (positions
+  `[0, 3:-3]` etc.).  The depth=2 CORNER cells of the outermost
+  3×3 corner blocks (12 cells per cube vertex × 4 corners × 6
+  faces = 288 unchecked cells per grid) were not verified.
+
+  Iter-536 adds
+  `test_duogrid_at_halo3_third_ring_corner_cells_in_face_value_range`:
+  on a face-unique constant field (face f → value f+1.0), every
+  cell of the OUTERMOST RING `[0, :]`, `[-1, :]`, `[:, 0]`,
+  `[:, -1]` of the halo=3 padded array MUST be:
+    (a) finite (catches NaN/Inf);
+    (b) within `[1.0, 6.0]` ± 1e-5 (the face-value range — catches
+        out-of-range values that would only appear if some path
+        produced garbage);
+    (c) NOT identically zero on any cell (catches the specific
+        failure mode where a corner block stays at the
+        `_pad_halo_local_h3` zero initialization).
+
+  **Sanity-checked locally**: monkey-patched BOTH `_fill_corners_h3`
+  AND `fill_corner_region` to no-op (the duogrid path's two corner-
+  fill stages).  Result: 120 zero cells in the third ring → the
+  iter-536 zero-count assertion correctly fires.
+
+  Together iter-535 (edge strips) + iter-536 (corner cells) now
+  cover EVERY cell of the halo=3 outer ring for the duogrid path.
+
+  No production-path numerical changes (test only).
+  240/240 tests pass.
+
 - **iter-535 (2026-04-19)**: addressed Codex stop-time review of
   iter-534: "the new regression never checks halo=3's third ring".
 

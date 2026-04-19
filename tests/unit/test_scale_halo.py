@@ -661,6 +661,75 @@ class TestPadHaloH3Dispatch:
             np.asarray(padded), 5.0, atol=1e-12,
             err_msg="duogrid+halo=3 broke constant-field preservation")
 
+    def test_duogrid_at_halo3_third_ring_corner_cells_in_face_value_range(self):
+        """Iter-536 (Codex follow-up to iter-535): the iter-535 test
+        only checks the EDGE STRIPS of the depth=2 ring (positions
+        `[0, 3:-3]` etc.), missing the depth=2 CORNER cells (the
+        outermost cells of each 3×3 corner block: 12 cells per
+        cube vertex × 4 corners × 6 faces = 288 cells per grid).
+
+        On a face-unique constant field (face f → value f+1.0):
+          - Edge strips contain a single neighbour face's value
+            (covered by iter-535 test).
+          - Corner cells are filled by `_fill_corners_h3` averaging
+            of adjacent edge halos.  Each corner cell's value is
+            therefore some average of the host face's value (from
+            interior-side neighbours) and 1-2 neighbour faces'
+            values (from the cross-face edge halos).
+
+        A correctly-populated corner cell MUST be:
+          (a) finite (catches "stays at NaN/Inf");
+          (b) within [1.0, 6.0] = [min face value, max face value]
+              (catches "stays at zero" — initialization value);
+          (c) NOT identically zero on any cell of the third ring.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+        data = jnp.zeros((6, n, n), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+
+        p_h3 = pad_halo(data, halo=3, duogrid=grid.duogrid)
+        p_h3_np = np.asarray(p_h3)
+
+        # The "third ring" is the outermost layer: i ∈ {0, n+5} OR
+        # j ∈ {0, n+5}.  Build a mask for those cells.
+        np_p3 = n + 6
+        ring_mask = np.zeros((np_p3, np_p3), dtype=bool)
+        ring_mask[0, :] = True
+        ring_mask[-1, :] = True
+        ring_mask[:, 0] = True
+        ring_mask[:, -1] = True
+
+        ring_vals = p_h3_np[:, ring_mask]   # (6, ring_count)
+        # (a) finite
+        assert np.all(np.isfinite(ring_vals)), (
+            "halo=3 third ring contains NaN/Inf — duogrid h3 path "
+            "blew up at the outermost ring.")
+        # (b) within face-value range [1.0, 6.0]
+        ring_min = float(np.min(ring_vals))
+        ring_max = float(np.max(ring_vals))
+        # Tiny float-drift tolerance because the duogrid Lagrange
+        # remap weights only sum to 1 in exact arithmetic.
+        assert ring_min >= 1.0 - 1e-5, (
+            f"halo=3 third ring min = {ring_min} < 1.0 — value "
+            f"escaped the face-value range, likely zeroed by an "
+            f"unpopulated cell.")
+        assert ring_max <= 6.0 + 1e-5, (
+            f"halo=3 third ring max = {ring_max} > 6.0 — value "
+            f"overshot the face-value range.")
+        # (c) NOT identically zero on ANY cell.  This catches the
+        # specific failure mode where a per-corner block is silently
+        # left at the `_pad_halo_local_h3` zero initialization.
+        zero_count = int(np.sum(np.abs(ring_vals) < 1e-10))
+        assert zero_count == 0, (
+            f"halo=3 third ring contains {zero_count} zero cells "
+            f"(out of {ring_vals.size} total).  This indicates "
+            f"the duogrid h3 corner-fill or edge-strip path left "
+            f"some cells at the zero initialization value.")
+
     def test_duogrid_at_halo3_third_ring_carries_neighbour_data(self):
         """Iter-535 (Codex follow-up to iter-534): the iter-534
         edge-match test only checks `p_h3[1:-1, 1:-1]` — the overlap
