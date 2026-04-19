@@ -197,6 +197,29 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-579 (2026-04-20)**: regression locks for
+  `dgrid_to_center_vector` and `center_to_dgrid_vector`
+  (previously untested).
+
+  Both helpers in `src/legoesm/core/operators_cdgrid.py`:190-255
+  are used across PE, compressible Euler, and ocean PE paths.
+  Neither had direct tests before iter-579.
+
+  Added `TestDgridCenterVectorConversions` (8 tests):
+    `dgrid_to_center_vector` (D→A, simple 4-point):
+      (a) Shape 2D `(6, n+1, n+1)` → `(6, n, n)`
+      (b) Shape 3D
+      (c) Exact 4-point average formula to 1e-10
+      (d) 4D per-level consistency
+    `center_to_dgrid_vector` (A→D, halo-aware):
+      (e) Shape 2D `(6, n, n)` → `(6, n+1, n+1)`
+      (f) Zero input → zero output
+      (g) Non-trivial input → non-zero output (no-op detection)
+      (h) 4D per-level consistency (uses vmap over nlev)
+
+  No production-path numerical changes.  113/113 tests pass in
+  `test_cdgrid.py` (105 prior + 8 new).
+
 - **iter-578 (2026-04-20)**: addressed Codex stop-time review of
   iter-577: "claimed pressure-gradient sign regression is not
   actually enforced".

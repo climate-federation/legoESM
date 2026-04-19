@@ -988,6 +988,179 @@ class TestInterpCornerToCenter(unittest.TestCase):
                  f"plain-arithmetic variant."))
 
 
+class TestDgridCenterVectorConversions(unittest.TestCase):
+    """Iter-579: regression locks for `dgrid_to_center_vector` and
+    `center_to_dgrid_vector` (previously untested production
+    helpers used in PE, compressible Euler, and ocean PE paths).
+
+    `dgrid_to_center_vector` (`src/legoesm/core/operators_cdgrid.py:
+    237-255`): simple 4-point D-grid-corner → cell-centre
+    average.  No halo exchange.
+
+    `center_to_dgrid_vector` (lines 190-234): halo-padded 4-point
+    cell-centre → D-grid-corner interpolation.  Uses
+    `pad_halo_vector` for vector-aware cross-face rotation.
+    """
+
+    def _build(self, n=6):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        return n, cdgrid
+
+    # --- dgrid_to_center_vector ---
+
+    def test_d2c_vector_shape_2d(self):
+        from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+        n, _ = self._build(n=6)
+        u_d = jnp.zeros((6, n + 1, n + 1))
+        v_d = jnp.zeros((6, n + 1, n + 1))
+        u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
+        self.assertEqual(u_cc.shape, (6, n, n))
+        self.assertEqual(v_cc.shape, (6, n, n))
+
+    def test_d2c_vector_shape_3d(self):
+        from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+        n, _ = self._build(n=6)
+        nlev = 4
+        u_d = jnp.zeros((6, n + 1, n + 1, nlev))
+        v_d = jnp.zeros((6, n + 1, n + 1, nlev))
+        u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
+        self.assertEqual(u_cc.shape, (6, n, n, nlev))
+        self.assertEqual(v_cc.shape, (6, n, n, nlev))
+
+    def test_d2c_vector_exact_4point_formula(self):
+        """Exact formula lock: u_cc[f,i,j] = 0.25*(u_d[f,i,j] +
+        u_d[f,i+1,j] + u_d[f,i,j+1] + u_d[f,i+1,j+1])."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+        n, _ = self._build(n=6)
+        rng = np.random.default_rng(579)
+        u_d_np = rng.standard_normal(
+            (6, n + 1, n + 1)).astype(np.float64)
+        v_d_np = rng.standard_normal(
+            (6, n + 1, n + 1)).astype(np.float64)
+        u_cc, v_cc = dgrid_to_center_vector(
+            jnp.asarray(u_d_np), jnp.asarray(v_d_np))
+        exp_u = 0.25 * (
+            u_d_np[:, :-1, :-1] + u_d_np[:, 1:, :-1]
+            + u_d_np[:, :-1, 1:] + u_d_np[:, 1:, 1:])
+        exp_v = 0.25 * (
+            v_d_np[:, :-1, :-1] + v_d_np[:, 1:, :-1]
+            + v_d_np[:, :-1, 1:] + v_d_np[:, 1:, 1:])
+        self.assertLess(
+            float(np.max(np.abs(np.asarray(u_cc) - exp_u))),
+            1e-10, msg="u_cc diverges from 4-point average.")
+        self.assertLess(
+            float(np.max(np.abs(np.asarray(v_cc) - exp_v))),
+            1e-10, msg="v_cc diverges from 4-point average.")
+
+    def test_d2c_vector_4d_matches_2d_per_level(self):
+        """4D branch at level k matches 2D branch on k-th slice."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+        n, _ = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(1579)
+        u_d_np = rng.standard_normal(
+            (6, n + 1, n + 1, nlev)).astype(np.float64)
+        v_d_np = rng.standard_normal(
+            (6, n + 1, n + 1, nlev)).astype(np.float64)
+        # Distinct per level
+        for k in range(nlev):
+            u_d_np[..., k] += 10.0 * (k + 1)
+        u_cc_4d, v_cc_4d = dgrid_to_center_vector(
+            jnp.asarray(u_d_np), jnp.asarray(v_d_np))
+        for k in range(nlev):
+            u_2d, v_2d = dgrid_to_center_vector(
+                jnp.asarray(u_d_np[..., k]),
+                jnp.asarray(v_d_np[..., k]))
+            diff_u = float(jnp.max(jnp.abs(
+                jnp.asarray(u_cc_4d)[..., k] - u_2d)))
+            diff_v = float(jnp.max(jnp.abs(
+                jnp.asarray(v_cc_4d)[..., k] - v_2d)))
+            self.assertLess(
+                max(diff_u, diff_v), 1e-10,
+                msg=f"Level {k} routing bug in 4D branch.")
+
+    # --- center_to_dgrid_vector ---
+
+    def test_c2d_vector_shape_2d(self):
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+        n, cdgrid = self._build(n=6)
+        u_cc = jnp.zeros((6, n, n))
+        v_cc = jnp.zeros((6, n, n))
+        u_d, v_d = center_to_dgrid_vector(u_cc, v_cc, cdgrid)
+        self.assertEqual(u_d.shape, (6, n + 1, n + 1))
+        self.assertEqual(v_d.shape, (6, n + 1, n + 1))
+
+    def test_c2d_vector_constant_preserved(self):
+        """A uniform cell-centre vector must stay uniform at D-grid
+        corners after halo exchange + 4-point average.  (Halo
+        exchange for VECTORS may rotate, but a uniform scalar
+        field stays uniform.)"""
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+        n, cdgrid = self._build(n=6)
+        # Zero both is trivially uniform
+        u_cc = jnp.zeros((6, n, n))
+        v_cc = jnp.zeros((6, n, n))
+        u_d, v_d = center_to_dgrid_vector(u_cc, v_cc, cdgrid)
+        self.assertLess(
+            float(jnp.max(jnp.abs(u_d))), 1e-10,
+            msg="Zero input gave non-zero D-grid u.")
+        self.assertLess(
+            float(jnp.max(jnp.abs(v_d))), 1e-10,
+            msg="Zero input gave non-zero D-grid v.")
+
+    def test_c2d_vector_non_zero_on_varying_input(self):
+        """Non-trivial input → non-zero output (no-op detection)."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(2579)
+        u_cc = jnp.asarray(rng.standard_normal((6, n, n)) * 10.0)
+        v_cc = jnp.asarray(rng.standard_normal((6, n, n)) * 10.0)
+        u_d, v_d = center_to_dgrid_vector(u_cc, v_cc, cdgrid)
+        max_out = max(
+            float(jnp.max(jnp.abs(u_d))),
+            float(jnp.max(jnp.abs(v_d))))
+        self.assertGreater(
+            max_out, 1e-9,
+            msg=(f"Non-trivial input gave ~zero output: "
+                 f"{max_out:.3e}.  No-op detection."))
+
+    def test_c2d_vector_4d_matches_2d_per_level(self):
+        """4D branch at level k matches 2D branch on k-th slice."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(3579)
+        u_np = rng.standard_normal((6, n, n, nlev)).astype(np.float64)
+        v_np = rng.standard_normal((6, n, n, nlev)).astype(np.float64)
+        # Distinct per level
+        for k in range(nlev):
+            u_np[..., k] += 10.0 * (k + 1)
+        u_d_4d, v_d_4d = center_to_dgrid_vector(
+            jnp.asarray(u_np), jnp.asarray(v_np), cdgrid)
+        for k in range(nlev):
+            u_d_2d, v_d_2d = center_to_dgrid_vector(
+                jnp.asarray(u_np[..., k]),
+                jnp.asarray(v_np[..., k]), cdgrid)
+            diff_u = float(jnp.max(jnp.abs(
+                jnp.asarray(u_d_4d)[..., k] - u_d_2d)))
+            diff_v = float(jnp.max(jnp.abs(
+                jnp.asarray(v_d_4d)[..., k] - v_d_2d)))
+            scale = max(
+                float(jnp.max(jnp.abs(u_d_2d))),
+                float(jnp.max(jnp.abs(v_d_2d))), 1e-30)
+            self.assertLess(
+                max(diff_u, diff_v), 1e-6 * scale,
+                msg=f"Level {k} routing bug in 4D branch.")
+
+
 class TestCgridDivergenceBehavior(unittest.TestCase):
     """Iter-574: comprehensive locks for `cgrid_divergence`
     (`src/legoesm/core/operators_cdgrid.py:420-441`).
