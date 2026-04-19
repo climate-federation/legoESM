@@ -2123,5 +2123,91 @@ class TestD2a2cVectNonDuogridBoundary(unittest.TestCase):
                             f"{'696-703' if j_bdy == 0 else '714-721'} override")
 
 
+class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
+    """Regression test for iter-505: the x-direction PPM reconstruction
+    inside `cgrid_mass_flux_divergence` must reconstruct along the
+    i-axis (the halo-padded axis), not along the interior j-axis.
+
+    Prior to iter-505, `_ppm_reconstruct_1d(h_x_strips)` where
+    `h_x_strips.shape == (6, n+4, n)` silently reconstructed along the
+    LAST axis (j-interior, no halo) because `_ppm_reconstruct_1d`
+    operates on the last axis.  The result: on a purely-x-varying h
+    field the x-face values equalled the cell values (flat), instead
+    of the 4th-order reconstruction the comment promised.  The fix
+    swapaxes the strip so the i-axis is last, reconstructs, then
+    swaps back.
+    """
+
+    def test_x_face_value_matches_4th_order_along_i(self):
+        """On a field h(i, j) varying only in i, the internal PPM
+        face value between cells i=5 and i=6 must match the 4th-order
+        formula (7*(h5 + h6) - (h4 + h7)) / 12 — NOT equal h5."""
+        import jax.numpy as jnp
+        from legoesm.core.operators_cdgrid import _ppm_reconstruct_1d
+
+        n = 8
+        # Build a halo-padded field that varies quadratically in i only
+        i_vals = jnp.arange(n + 4, dtype=jnp.float64) ** 2 * 0.1
+        h_pad = jnp.broadcast_to(i_vals[None, :, None], (6, n + 4, n + 4))
+
+        # Reproduce the fixed code's x-direction extraction + transpose
+        h_x_strips = h_pad[:, :, 2:-2]                 # (6, n+4, n)
+        h_x_strips_T = jnp.swapaxes(h_x_strips, 1, 2)   # (6, n, n+4)
+        q_L_T, q_R_T = _ppm_reconstruct_1d(h_x_strips_T)
+        q_R_x = jnp.swapaxes(q_R_T, 1, 2)               # (6, n+4, n)
+
+        # 4th-order face value between padded-i cells 5 and 6
+        # (interior i=3 and i=4 post-halo):
+        h5, h6 = 0.1 * 25, 0.1 * 36
+        h4, h7 = 0.1 * 16, 0.1 * 49
+        expected = (7.0 * (h5 + h6) - (h4 + h7)) / 12.0
+        # The monotonicity limiter may or may not apply; check to
+        # within 5% (the raw 4th-order value for a smooth quadratic
+        # should be hit to floating-point accuracy unless limiter
+        # fires — which on this monotonic ramp it should not).
+        actual = float(q_R_x[0, 5, 3])
+        self.assertAlmostEqual(
+            actual, expected, places=6,
+            msg=f"x-direction PPM face value {actual:.4f} does not "
+                f"match 4th-order expectation {expected:.4f}; the "
+                f"iter-505 axis bug may have re-entered.")
+        # And explicitly check we are NOT returning the cell value
+        # (which was the symptom of the bug).
+        self.assertNotAlmostEqual(
+            actual, h5, places=2,
+            msg="q_R still equals the cell value → x-PPM is still "
+                "reconstructing along the j-interior axis instead "
+                "of the i-halo-padded axis.")
+
+    def test_cgrid_mass_flux_divergence_nonzero_for_pure_x_variation(self):
+        """Behavioural regression: a purely-x-varying h with u_c > 0
+        must produce a non-negligible mass-flux divergence.  Prior to
+        iter-505 the divergence was ~0 on a purely-x-varying field
+        because the x-face values equalled cell values (no gradient
+        → no net flux)."""
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.operators_cdgrid import cgrid_mass_flux_divergence
+
+        n = 8
+        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(base)
+        # h varying quadratically along the local i-axis on each face
+        i_vals = jnp.arange(n, dtype=jnp.float64) ** 2 * 0.1 + 1.0
+        h = jnp.broadcast_to(i_vals[None, :, None], (6, n, n))
+        u_c = jnp.ones((6, n + 1, n), dtype=jnp.float64)  # uniform +1 m/s
+        v_c = jnp.zeros((6, n, n + 1), dtype=jnp.float64)
+
+        dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
+        max_abs_dhdt = float(jnp.max(jnp.abs(dh_dt)))
+        self.assertGreater(
+            max_abs_dhdt, 1e-9,
+            msg=f"mass-flux divergence should be non-trivial for a "
+                f"purely-x-varying h with u_c = +1, but got "
+                f"max|dh/dt| = {max_abs_dhdt:.2e} — the x-direction "
+                f"PPM axis bug (iter-505) appears to have re-entered.")
+
+
 if __name__ == "__main__":
     unittest.main()

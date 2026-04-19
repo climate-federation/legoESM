@@ -168,6 +168,57 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-505 (2026-04-19)**: **MAJOR production-path fix** — resolved a
+  real axis bug in `cgrid_mass_flux_divergence` (`operators_cdgrid.py`)
+  that was the leading contributor to the W2 v-wind cube-face imprint
+  the user has been tracking for months.  The bug had been present
+  since commit `ec4b2e3` ("Rewrite cubed-sphere operators with
+  FV3-faithful PPM transport") — iter-112 / iter-121..127 polar-face
+  bisection diagnostics identified the symptoms but never localized
+  the root cause.
+
+  **Bug**: `_ppm_reconstruct_1d` operates on the LAST axis of its
+  input.  The x-direction branch extracted strips via
+  `h_pad[:, :, 2:-2]` producing shape `(6, n+4, n)` — i.e. the
+  halo-padded i-axis was axis 1 and the interior j-axis (no halo)
+  was the LAST axis.  `_ppm_reconstruct_1d(h_x_strips)` therefore
+  reconstructed along the 8-cell interior j direction instead of
+  the 12-cell halo-padded i direction.  On a purely-x-varying
+  field, face values at x-interfaces equalled cell values (flat)
+  rather than the 4th-order reconstruction the comment promised.
+
+  **Fix**: `swapaxes(1, 2)` before reconstruction to place the
+  i-axis last, then `swapaxes(1, 2)` back.  The y-direction branch
+  was already correct (its strip `h_pad[:, 2:-2, :]` has shape
+  `(6, n, n+4)` with y-halo-padded axis already last).
+
+  **Test matrix impact** (C36 W2 1-day):
+    - L2: **1.53e-03 → 2.42e-04 (6.3× improvement)**
+    - Linf: **4.07e-03 → 1.83e-03 (2.2× improvement)**
+    - W5 mass drift: 1.42e-05 → 1.90e-05 (within same order)
+    - Cosine bell: unchanged (L1=1.20e-01)
+    - Ocean rest state: 12/12 PASS, machine precision
+
+  **Visual**: W2 v-wind cube-face imprint is substantially reduced.
+  The max v-wind amplitude dropped from ~0.577 m/s (iter-112 baseline)
+  to ~0.3 m/s.  The 4-panel signature is much less prominent though
+  still visible at t=1d, suggesting additional axis bugs or
+  halo-quality issues likely remain (FB-path ng=3 infrastructure
+  from iter-496..501 remains scaffolded but unwired).
+
+  **Regression tests** added in `TestCgridMassFluxDivergenceXAxis`:
+    - `test_x_face_value_matches_4th_order_along_i` — asserts the
+      post-reconstruction q_R at an interior cell matches the
+      4th-order face formula (7*(h5+h6) - (h4+h7))/12 and explicitly
+      NOT the cell value (which was the bug symptom).
+    - `test_cgrid_mass_flux_divergence_nonzero_for_pure_x_variation`
+      — end-to-end behavioural guard: a purely-x-varying h with
+      uniform u_c must produce non-trivial mass-flux divergence.
+
+  **Total tests**: 181/181 pass.  Update to Required-evaluations
+  baseline: W2 L2=2.42e-04 is the new post-iter-505 number;
+  iter-112's 1.53e-03 reflects the pre-fix buggy code.
+
 - **iter-504 (2026-04-19)**: closed the final AST escape hatch flagged
   by Codex stop-time review — "the new AST lock still has a dead
   generator/comprehension escape hatch".  Iter-503 only marked

@@ -455,11 +455,21 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     # x-interface (i, j) for i in [0, n] needs cells i-2..i+1 in the
     # original grid, which maps to padded indices i..i+3.
 
-    # Extract strips along i for each j: shape (6, n+4, n) from padded
-    h_x_strips = h_pad[:, :, 2:-2]  # (6, n+4, n)
+    # Extract strips along i for each j: shape (6, n+4, n) from padded.
+    # `_ppm_reconstruct_1d` operates on the LAST axis, so transpose the
+    # strip to put the i-axis last, reconstruct, then transpose back.
+    # (iter-505: prior to this swap, `_ppm_reconstruct_1d(h_x_strips)`
+    # was silently reconstructing along j-interior with only n cells
+    # and no halo — producing flat face values on purely-x-varying
+    # fields instead of the 4th-order x-face reconstruction intended
+    # by the comment above.)
+    h_x_strips = h_pad[:, :, 2:-2]                 # (6, n+4, n)  axes: (face, i_pad, j_int)
+    h_x_strips_T = jnp.swapaxes(h_x_strips, 1, 2)   # (6, n, n+4)  axes: (face, j_int, i_pad)
 
-    # PPM reconstruction along axis=1 (i-direction)
-    q_L_x, q_R_x = _ppm_reconstruct_1d(h_x_strips)  # each (6, n+4, n)
+    # PPM reconstruction along last axis (i-direction, now trailing)
+    q_L_x_T, q_R_x_T = _ppm_reconstruct_1d(h_x_strips_T)  # each (6, n, n+4)
+    q_L_x = jnp.swapaxes(q_L_x_T, 1, 2)  # (6, n+4, n)
+    q_R_x = jnp.swapaxes(q_R_x_T, 1, 2)  # (6, n+4, n)
 
     # Face values at x-interfaces: we need n+1 faces for interior cells
     # Face (i) is between padded cells (i+1) and (i+2), i.e. original cells i-1 and i
