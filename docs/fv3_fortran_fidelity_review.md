@@ -168,6 +168,43 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-528 (2026-04-19)**: extracted the matrix's inline 4-edge
+  angle averaging into a reusable helper
+  `cell_centre_angles_from_4edge(cdgrid)` in `cubed_sphere_cdgrid.py`.
+
+  **Background**: per iter-25/26, converting D-grid edge-midpoint
+  winds to geographic v_north on the cubed sphere requires care
+  with the rotation angle.  Cell-centre angles differ from
+  edge-midpoint angles by O(dx), introducing a 0.39 m/s spurious
+  v_north residual on Williamson 2 at t=0.  Averaging the 4
+  surrounding edge angles (2 x-edges + 2 y-edges) and
+  renormalizing reduces the residual 47× to ~0.008 m/s at t=0.
+
+  This averaging was inline in `run_atmosphere_test_matrix.py:1213-1233`
+  only — copy-pasted into the iter-519/520 v-wind regression test
+  and into any other diagnostic tool.  Iter-528 extracts it as a
+  proper API that takes a `cdgrid` and returns
+  `(cos_alpha, sin_alpha)` of shape `(6, n, n)`.
+
+  Added `TestCellCentreAnglesFrom4Edge` (3 tests in `test_cdgrid.py`):
+    - `test_4edge_helper_matches_matrix_inline_formula` — bit-for-bit
+      (within float32 1e-6) equivalence with the matrix's inline
+      formula.
+    - `test_4edge_helper_outputs_unit_magnitude` — cos² + sin² = 1
+      to float32 precision (the renormalization step).
+    - `test_4edge_shape` — output shape `(6, n, n)`.
+
+  Future work: switch the matrix's `extract_fn` and the iter-520
+  v-wind regression test to call this helper instead of inlining
+  the formula — eliminates code duplication.
+
+  No production-path numerical changes (new diagnostic-only API).
+  233/233 tests pass.
+
+- **iter-527 (2026-04-19)** (doc-only refresh — see updated
+  "Evaluation metrics" section near line 1896 for the post-iter-505
+  baseline table).
+
 - **iter-526 (2026-04-19)**: addressed Codex stop-time review of
   iter-525: "the new regression can still pass on sampled NaNs and
   it does not actually check positivity throughout the 1-day run".

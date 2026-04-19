@@ -1108,3 +1108,48 @@ def create_cubed_sphere_cdgrid(
         rdxa=rdxa.astype(_prec),
         rdya=rdya.astype(_prec),
     )
+
+
+# ==============================================================================
+# Diagnostic helper: 4-edge angle averaging for D-grid → geographic regrid
+# ==============================================================================
+
+def cell_centre_angles_from_4edge(cdgrid):
+    """4-surrounding-edge mean of grid angle for cell-centre D→geo regrid.
+
+    Returns (cos_alpha, sin_alpha) of shape (6, n, n) where each
+    cell-centre angle is the average of the 4 surrounding edge-midpoint
+    angles (2 x-edges + 2 y-edges).  This is the matrix's W2 v-wind
+    regrid path (see `run_atmosphere_test_matrix.py:1213-1233`):
+    using cell-centre angles instead introduces an O(dx) v_north
+    residual on Williamson 2 (~0.39 m/s); the 4-edge mean reduces
+    this to ~0.008 m/s at t=0 (47x improvement, see iter-25/26 of
+    docs/fv3_fortran_fidelity_review.md).
+
+    Iter-528: extracted from the matrix's inline `extract_fn` so any
+    diagnostic code that converts D-grid winds to geographic on the
+    cubed sphere can use the same higher-fidelity rotation without
+    duplicating the code.
+
+    Parameters
+    ----------
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    cos_alpha : jax.Array, shape (6, n, n)
+    sin_alpha : jax.Array, shape (6, n, n)
+    """
+    cax = cdgrid.cos_angle_edge_x  # (6, n, n+1)
+    sax = cdgrid.sin_angle_edge_x  # (6, n, n+1)
+    cay = cdgrid.cos_angle_edge_y  # (6, n+1, n)
+    say = cdgrid.sin_angle_edge_y  # (6, n+1, n)
+    ca = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
+                 + cay[:, :-1, :] + cay[:, 1:, :])
+    sa = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
+                 + say[:, :-1, :] + say[:, 1:, :])
+    # Renormalize to unit magnitude (4-point average on a unit
+    # circle does not preserve length exactly; the matrix does this
+    # at run_atmosphere_test_matrix.py:1230-1231).
+    norm = jnp.sqrt(ca ** 2 + sa ** 2)
+    return ca / norm, sa / norm

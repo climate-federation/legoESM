@@ -755,5 +755,73 @@ class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
         raise AssertionError(f"Function `{name}` not found in source.")
 
 
+class TestCellCentreAnglesFrom4Edge(unittest.TestCase):
+    """Iter-528: regression for the new `cell_centre_angles_from_4edge`
+    helper extracted from `run_atmosphere_test_matrix.py:1213-1231`."""
+
+    def test_4edge_helper_matches_matrix_inline_formula(self):
+        """The helper's output must equal the matrix's exact inline
+        formula on a real cdgrid."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+            cell_centre_angles_from_4edge,
+        )
+        import numpy as np
+
+        n = 8
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Reproduce matrix's inline formula
+        cax = np.asarray(cdgrid.cos_angle_edge_x, dtype=np.float64)
+        sax = np.asarray(cdgrid.sin_angle_edge_x, dtype=np.float64)
+        cay = np.asarray(cdgrid.cos_angle_edge_y, dtype=np.float64)
+        say = np.asarray(cdgrid.sin_angle_edge_y, dtype=np.float64)
+        ca_ref = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
+                         + cay[:, :-1, :] + cay[:, 1:, :])
+        sa_ref = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
+                         + say[:, :-1, :] + say[:, 1:, :])
+        norm = np.sqrt(ca_ref ** 2 + sa_ref ** 2)
+        ca_ref /= norm
+        sa_ref /= norm
+
+        ca, sa = cell_centre_angles_from_4edge(cdgrid)
+        np.testing.assert_allclose(np.asarray(ca), ca_ref, atol=1e-6)
+        np.testing.assert_allclose(np.asarray(sa), sa_ref, atol=1e-6)
+
+    def test_4edge_helper_outputs_unit_magnitude(self):
+        """The post-renormalization (cos, sin) pair must satisfy
+        cos² + sin² = 1 to machine precision."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+            cell_centre_angles_from_4edge,
+        )
+        import numpy as np
+
+        for n in (8, 16):
+            grid = create_cubed_sphere(n)
+            cdgrid = create_cubed_sphere_cdgrid(grid)
+            ca, sa = cell_centre_angles_from_4edge(cdgrid)
+            mag = np.asarray(ca ** 2 + sa ** 2)
+            np.testing.assert_allclose(
+                mag, 1.0, atol=1e-6,
+                err_msg=f"4-edge angle helper output not unit magnitude at n={n}")
+
+    def test_4edge_shape(self):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+            cell_centre_angles_from_4edge,
+        )
+        n = 12
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        ca, sa = cell_centre_angles_from_4edge(cdgrid)
+        self.assertEqual(ca.shape, (6, n, n))
+        self.assertEqual(sa.shape, (6, n, n))
+
+
 if __name__ == "__main__":
     unittest.main()
