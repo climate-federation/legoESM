@@ -168,6 +168,40 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-557 (2026-04-19)**: addressed Codex stop-time review of
+  iter-556: "exact-factor gate still skips the double-attenuated
+  corner cells".
+
+  Iter-556's exact bit-for-bit reproduction test covered:
+    - Interior cells (not face-adjacent, not boundary)
+    - Face-adjacent STRIPS (single attenuation)
+
+  but EXCLUDED the 4 "double-attenuated" corners at
+  (i=1, j=1), (i=1, j=n-1), (n-1, 1), (n-1, n-1) where BOTH the
+  row and column `.multiply(0.25)` apply.  Codex correctly noted
+  these are the most constrained cells (factor^2 = 0.0625) and
+  should be locked independently.
+
+  Iter-557 adds a third check:
+    ```python
+    expected = np.float32(0.25) * (np.float32(0.25) * raw_divg[slc])
+    ```
+  mirroring the production order of operations (row multiply THEN
+  column multiply, each cast to float32).  At each of the 4 cube
+  corners, production output must equal this EXACTLY (bit-for-bit
+  in float32).
+
+  **Sanity-checked**: the addition is well-placed after the strip
+  check.  Applied a patch that removes the column attenuation
+  (rows only): the j=1 strip check fires first (at `prod ≠ 0.25 *
+  raw` for the column strip), proving the test detects the
+  regression.  If SOMEHOW a refactor preserved the strips but
+  broke only the corners, the new corner check would fire
+  independently.
+
+  Restored production code; both `divergence_corner_duo` tests
+  pass (63/63 in `test_cdgrid_fv3_regression.py`).
+
 - **iter-556 (2026-04-19)**: addressed Codex stop-time review of
   iter-554/555: "attenuation test still does not lock the required
   `0.25` factor".

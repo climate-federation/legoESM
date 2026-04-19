@@ -1934,11 +1934,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                  f"reproduction to match."))
 
         # --- Check 2: at face-adjacent cells, prod == 0.25 * raw ---
-        # Exclude the 8 "double-attenuated" corners (i ∈ {1, n-1} AND
-        # j ∈ {1, n-1}) where BOTH row and column attenuation apply
-        # (so prod = 0.25 * 0.25 * raw).
-        # Test strips: (i=1, j=2..n-2), (i=n-1, j=2..n-2),
-        #               (i=2..n-2, j=1), (i=2..n-2, j=n-1).
+        # Strips (single-attenuation): i=1 AND j∈[2, n-2], etc.
         strips = [
             ("i=1",   (slice(None), 1,      slice(2, n - 1))),
             ("i=n-1", (slice(None), n - 1,  slice(2, n - 1))),
@@ -1959,6 +1955,50 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                      f"changed the factor to any other value "
                      f"(including 0.2, 0.3, 0.5, 0) produces "
                      f"non-zero diff.  UPDATE if intentional."))
+
+        # --- Check 3 (iter-557, Codex follow-up): the 4
+        # "double-attenuated" corners where BOTH row and column
+        # attenuation apply.  Each is multiplied by 0.25 twice:
+        #   prod[:, i, j] = 0.25 * 0.25 * raw = 0.0625 * raw
+        # for (i, j) in {(1, 1), (1, n-1), (n-1, 1), (n-1, n-1)}.
+        #
+        # This additional check specifically locks the factor^2
+        # behaviour: a refactor to 0.3 would give prod = 0.09 * raw
+        # at corners (not 0.0625).  Strips alone (Check 2) catch
+        # the linear factor change, but Check 3 adds an independent
+        # cross-check at the double-application cells.
+        double_corners = [
+            ("(i=1, j=1)",       (slice(None), 1,      1)),
+            ("(i=1, j=n-1)",     (slice(None), 1,      n - 1)),
+            ("(i=n-1, j=1)",     (slice(None), n - 1,  1)),
+            ("(i=n-1, j=n-1)",   (slice(None), n - 1,  n - 1)),
+        ]
+        for label, slc in double_corners:
+            prod_vals = prod[slc].astype(np.float32)
+            # The 0.25 factor is applied TWICE (once by row-wise
+            # multiply, once by column-wise multiply) in sequence:
+            # divg_d[:, 1, :] *= 0.25   →  row-1 values become 0.25×raw
+            # divg_d[:, :, 1] *= 0.25   →  col-1 values become 0.25×prev
+            # At the intersection (e.g., [:, 1, 1]), both apply.
+            # In float32 arithmetic: 0.25 * 0.25 = 0.0625 exactly
+            # (both are exactly representable).  But the OPERATION
+            # ORDER matters: prod[:, 1, 1] = 0.25 * (0.25 * raw)
+            # which, due to float32 rounding, may differ from
+            # (0.25 * 0.25) * raw = 0.0625 * raw.  To mirror
+            # production ordering, we apply the 0.25 factor twice
+            # sequentially to the reproduction.
+            expected = np.float32(0.25) * (
+                np.float32(0.25) * raw_divg[slc])
+            diff = float(np.max(np.abs(prod_vals - expected)))
+            self.assertEqual(
+                diff, 0.0,
+                msg=(f"Double-corner {label}: prod != 0.25 * (0.25 "
+                     f"* raw) (float32 bit-exact), diff = "
+                     f"{diff:.3e}.  Either the attenuation factor "
+                     f"is not 0.25, OR the row/column attenuation "
+                     f"is not applied sequentially (both required "
+                     f"at cube corners per Fortran sw_core.F90:"
+                     f"2437-2440).  UPDATE if intentional."))
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
