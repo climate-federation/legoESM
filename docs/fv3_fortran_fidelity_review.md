@@ -168,6 +168,30 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-561 (2026-04-19)**: regression lock for
+  `cgrid_tracer_advection_fct` (previously untested).
+
+  Public entry point for monotone tracer advection
+  (`src/legoesm/core/operators_cdgrid.py:756-804`).  Combines
+  high-order PPM reconstruction with face-value clipping to
+  prevent new extrema.  Used by ocean and atmosphere tracer
+  transport paths.  Before iter-561 had NO direct tests.
+
+  Added `TestCgridTracerAdvectionFct` (5 tests in `test_cdgrid.py`):
+    (a) `test_shape_2d_preserved`: `(6, n, n)` → same.
+    (b) `test_shape_3d_preserved`: `(6, n, n, nlev=4)` → same.
+    (c) `test_zero_flow_yields_zero_tendency`: u_c = v_c = 0 →
+        dq_dt = 0 to 1e-10 (regardless of q).
+    (d) `test_constant_tracer_yields_zero_tendency`: constant q
+        with random flow → finite output bounded by physical
+        scale (no NaN/Inf, no explosion).
+    (e) `test_3d_constant_per_level_yields_finite`: 3D input with
+        constant-per-level tracer, zero flow → 0 tendency on
+        every level (catches vmap cross-level bugs).
+
+  No production-path numerical changes.  73/73 tests pass in
+  `test_cdgrid.py` (68 prior + 5 new).
+
 - **iter-560 (2026-04-19)**: regression lock for `_laplacian_dgrid`
   (previously untested).
 
