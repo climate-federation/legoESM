@@ -168,6 +168,48 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-546 (2026-04-19)**: direct behavior locks for
+  `synchronize_corner_scalar` (previously no direct tests).
+
+  Codex audit suggested checking `_d_sw5_corner_divergence` halo
+  handling (mode='edge' vs Fortran halo).  Verified that gap is
+  already documented via iter-132 marker test in
+  `test_d_sw5_iterated_laplacian_halo_gap_documentation_marker`
+  and the source carries an explicit iter-132 fidelity note.  No
+  new work needed there.
+
+  Pivoted to `synchronize_corner_scalar`
+  (`src/legoesm/grids/halo.py:1800-1907`): a two-pass corner-field
+  sync helper that (a) averages all 12 shared cube edges pairwise,
+  then (b) takes a 3-face unbiased mean at all 8 cube vertices
+  using pre-edge-averaging (ORIGINAL) values.  The helper is used
+  indirectly by FB-chain comparison tests but had NO direct tests.
+  A regression where Pass-2 reads already-averaged values (bug
+  class: Pass-1 contamination) would produce silently-biased
+  vertex means.
+
+  Added `TestSynchronizeCornerScalar` (6 tests in
+  `test_duogrid.py`):
+    (a) Constant-field preservation.
+    (b) Shape invariance.
+    (c) Interior-cell unchanged (only boundaries/vertices touched).
+    (d) All 24 (face, edge) post-sync agreement to 1e-10 with
+        correct CONNECTIVITY reversal (8 reversed seams + 16 non-
+        reversed).
+    (e) All 8 cube vertices agree across 3 faces to 1e-10.
+    (f) Critical: vertex output EQUALS the 3-face mean of ORIGINAL
+        (pre-Pass-1) input values — catches the Pass-1 contamination
+        bug class.
+
+  **Sanity-checked**: patched the Pass-2 vertex loop to read
+  `field[...]` instead of `orig_corners[...]`.  Test (f) correctly
+  fires: `Vertex (face=0, i=0, j=0) output 0.201402 differs from
+  3-face mean of ORIGINAL values -0.054441 by 2.558e-01`.  Restored
+  production code; all 6 tests pass.
+
+  No production-path numerical changes.  102/102 tests pass in
+  `test_duogrid.py` (96 prior + 6 new).
+
 - **iter-545 (2026-04-19)**: addressed Codex stop-time review of
   iter-544: "the new tests do not actually lock the 4D
   `_interp_corner_to_center` branch used in production".

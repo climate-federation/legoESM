@@ -835,6 +835,239 @@ class TestSynchronizeCgridFluxes:
 
 
 # =========================================================================
+# T8a: synchronize_corner_scalar (iter-546)
+# =========================================================================
+
+
+class TestSynchronizeCornerScalar:
+    """Iter-546: direct behavior locks for `synchronize_corner_scalar`
+    (`src/legoesm/grids/halo.py:1800-1907`).
+
+    The helper averages a scalar corner field `(6, n+1, n+1)` at:
+      - Pass 1: all 12 shared cube edges between adjacent face pairs
+        (pairwise average with correct reversal from CONNECTIVITY).
+      - Pass 2: all 8 cube-vertex corners where 3 faces meet
+        (3-face unbiased mean from ORIGINAL pre-edge-averaged values).
+
+    Before iter-546 the function had NO direct tests.  Callers in
+    the FB chain (indirect mock-patch tests at lines 1277-1464) can
+    pass even if the helper is a no-op on specific random inputs.
+    A refactor that silently weakens the two-pass logic or introduces
+    a sign/index bug at the 8 cube vertices would go undetected.
+
+    Locks:
+      (a) Constant-field preservation: a uniform `v = 5.0` input
+          stays uniform `5.0` at every cell.
+      (b) Shape / dtype preservation.
+      (c) Boundary agreement after sync at all 24 (face, edge) pairs,
+          with the correct CONNECTIVITY reversal for the 8 reversed
+          seams.
+      (d) 8 cube vertices agree across 3 faces to machine precision.
+      (e) Interior cells (away from any edge) are UNCHANGED.
+      (f) Cube-vertex mean is a 3-way unbiased mean — NOT
+          contaminated by Pass-1 edge averaging.
+    """
+
+    def _build(self, n=6):
+        import jax.numpy as jnp
+        import numpy as np
+        rng = np.random.default_rng(546)
+        field = jnp.asarray(rng.standard_normal((6, n + 1, n + 1))
+                            .astype(np.float64))
+        return n, field
+
+    def test_constant_field_preserved(self):
+        import jax.numpy as jnp
+        from legoesm.grids.halo import synchronize_corner_scalar
+        n = 6
+        field = jnp.full((6, n + 1, n + 1), 5.0, dtype=jnp.float64)
+        out = synchronize_corner_scalar(field, n)
+        assert jnp.all(out == 5.0), (
+            f"Constant input not preserved; max dev = "
+            f"{float(jnp.max(jnp.abs(out - 5.0))):.3e}.")
+
+    def test_shape_preserved(self):
+        from legoesm.grids.halo import synchronize_corner_scalar
+        n, field = self._build(n=8)
+        out = synchronize_corner_scalar(field, n)
+        assert out.shape == field.shape
+
+    def test_interior_cells_unchanged(self):
+        """Pure-interior cells (not on any panel edge) must equal the
+        input exactly — only boundary/vertex cells are touched."""
+        import jax.numpy as jnp
+        from legoesm.grids.halo import synchronize_corner_scalar
+        n, field = self._build(n=8)
+        out = synchronize_corner_scalar(field, n)
+        # Interior = i in [1, n-1] AND j in [1, n-1]
+        interior_slice = (slice(None), slice(1, n), slice(1, n))
+        max_dev = float(jnp.max(jnp.abs(
+            out[interior_slice] - field[interior_slice])))
+        assert max_dev == 0.0, (
+            f"Interior cells modified; max dev = {max_dev:.3e}.  "
+            f"`synchronize_corner_scalar` must only touch boundary "
+            f"and vertex cells.")
+
+    def test_all_24_edges_agree_after_sync(self):
+        """For every (face, edge) pair, the non-vertex interior of the
+        edge after sync must equal the averaged value on both adjacent
+        faces (with reversal applied per CONNECTIVITY)."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.halo import (
+            CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
+            synchronize_corner_scalar,
+        )
+        n, field = self._build(n=6)
+        out = synchronize_corner_scalar(field, n)
+
+        def _bdy(arr, f, edge):
+            if edge == WEST:
+                return arr[f, 0, :]
+            if edge == EAST:
+                return arr[f, n, :]
+            if edge == SOUTH:
+                return arr[f, :, 0]
+            return arr[f, :, n]
+
+        for face in range(6):
+            for edge in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+                local = np.asarray(_bdy(out, face, edge))
+                nbr = np.asarray(_bdy(out, nbr_face, nbr_edge))
+                if rev:
+                    nbr = nbr[::-1]
+                # Exclude the 2 endpoints (cube vertices) because the
+                # vertex 3-face mean is a separate invariant tested
+                # below.  Check the n-1 interior edge cells.
+                diff = np.max(np.abs(local[1:-1] - nbr[1:-1]))
+                assert diff < 1e-10, (
+                    f"face {face} edge {edge}: post-sync edge "
+                    f"interior disagrees with neighbour face "
+                    f"{nbr_face} edge {nbr_edge} (rev={rev}); "
+                    f"max dev = {diff:.3e}.")
+
+    def test_all_8_cube_vertices_agree_across_3_faces(self):
+        """Each of the 8 cube vertices is shared by 3 faces.  After
+        sync, all 3 faces' corner cells at that vertex must equal the
+        same value to machine precision."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.halo import (
+            CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
+            synchronize_corner_scalar,
+        )
+        n, field = self._build(n=6)
+        out = synchronize_corner_scalar(field, n)
+
+        # Collect every cube-vertex triple via the CONNECTIVITY table.
+        edge_for_i = {0: WEST, n: EAST}
+        edge_for_j = {0: SOUTH, n: NORTH}
+
+        def _neighbour_corner(face_a, ci, cj, edge):
+            nbr_f, nbr_e, rev = CONNECTIVITY[face_a][edge]
+            if edge in (WEST, EAST):
+                pos = cj
+            else:
+                pos = ci
+            if rev:
+                pos = n - pos
+            if nbr_e == WEST:
+                return nbr_f, 0, pos
+            if nbr_e == EAST:
+                return nbr_f, n, pos
+            if nbr_e == SOUTH:
+                return nbr_f, pos, 0
+            return nbr_f, pos, n
+
+        seen = set()
+        triples = []
+        for face_a in range(6):
+            for ci in (0, n):
+                for cj in (0, n):
+                    fb, bi, bj = _neighbour_corner(
+                        face_a, ci, cj, edge_for_i[ci])
+                    fc, ci_c, cj_c = _neighbour_corner(
+                        face_a, ci, cj, edge_for_j[cj])
+                    key = tuple(sorted(
+                        [(face_a, ci, cj), (fb, bi, bj),
+                         (fc, ci_c, cj_c)]))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    triples.append(
+                        [(face_a, ci, cj), (fb, bi, bj),
+                         (fc, ci_c, cj_c)])
+
+        assert len(triples) == 8, (
+            f"Expected 8 unique cube-vertex triples; got "
+            f"{len(triples)}.")
+
+        out_np = np.asarray(out)
+        for tri in triples:
+            vals = [float(out_np[f, i, j]) for (f, i, j) in tri]
+            dev = max(vals) - min(vals)
+            assert dev < 1e-10, (
+                f"Cube vertex {tri}: values {vals} disagree, "
+                f"range = {dev:.3e}.")
+
+    def test_cube_vertex_is_unbiased_3_face_mean_of_ORIGINAL(self):
+        """Critical: the 3-face mean at each cube vertex must use the
+        ORIGINAL (pre-edge-averaged) values.  Regression against a
+        bug where Pass 1 overwrites the vertex cells and Pass 2 reads
+        the already-averaged value, producing a non-uniform weighting.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.halo import (
+            CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
+            synchronize_corner_scalar,
+        )
+        n, field = self._build(n=6)
+        field_np = np.asarray(field)
+        out = synchronize_corner_scalar(field, n)
+        out_np = np.asarray(out)
+
+        # Reproduce the vertex-triple mapping and verify each vertex
+        # output = mean of the 3 ORIGINAL input values at that triple.
+        edge_for_i = {0: WEST, n: EAST}
+        edge_for_j = {0: SOUTH, n: NORTH}
+
+        def _neighbour_corner(face_a, ci, cj, edge):
+            nbr_f, nbr_e, rev = CONNECTIVITY[face_a][edge]
+            pos = cj if edge in (WEST, EAST) else ci
+            if rev:
+                pos = n - pos
+            if nbr_e == WEST:
+                return nbr_f, 0, pos
+            if nbr_e == EAST:
+                return nbr_f, n, pos
+            if nbr_e == SOUTH:
+                return nbr_f, pos, 0
+            return nbr_f, pos, n
+
+        for face_a in range(6):
+            for ci in (0, n):
+                for cj in (0, n):
+                    fb, bi, bj = _neighbour_corner(
+                        face_a, ci, cj, edge_for_i[ci])
+                    fc, ci_c, cj_c = _neighbour_corner(
+                        face_a, ci, cj, edge_for_j[cj])
+                    expected = (
+                        field_np[face_a, ci, cj]
+                        + field_np[fb, bi, bj]
+                        + field_np[fc, ci_c, cj_c]) / 3.0
+                    actual = out_np[face_a, ci, cj]
+                    dev = abs(float(actual - expected))
+                    assert dev < 1e-10, (
+                        f"Vertex (face={face_a}, i={ci}, j={cj}) "
+                        f"output {actual:.6f} differs from 3-face "
+                        f"mean of ORIGINAL values {expected:.6f} "
+                        f"by {dev:.3e}.  Pass-1 edge averaging may "
+                        f"be contaminating Pass-2 vertex reads.")
+
+
+# =========================================================================
 # T8b: Flux-sync call-site AST lock (Ralph-prompt Critical Duogrid #1)
 # =========================================================================
 
