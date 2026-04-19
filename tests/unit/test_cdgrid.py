@@ -976,7 +976,8 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
     def test_non_vertex_cells_unchanged(self):
         """Only the 4 cube vertices are modified.  Any other cell
         must equal its input.  Regression against a bug where the
-        function modifies edges or interior."""
+        function modifies edges or interior.  Checks BOTH `du` and
+        `dv` outputs."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
             _extrapolate_boundary_corners)
@@ -987,21 +988,154 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         du = jnp.asarray(du_np)
         dv = jnp.asarray(dv_np)
 
-        du_out = _extrapolate_boundary_corners(du, dv, n)[0]
+        du_out, dv_out = _extrapolate_boundary_corners(du, dv, n)
         du_out_np = np.asarray(du_out)
+        dv_out_np = np.asarray(dv_out)
 
         # Non-vertex cells
         mask = np.ones((6, n + 1, n + 1), dtype=bool)
         for ci in (0, n):
             for cj in (0, n):
                 mask[:, ci, cj] = False
-        diff_nv = float(np.max(np.abs(
-            du_out_np[mask] - du_np[mask])))
+        diff_du = float(np.max(np.abs(du_out_np[mask] - du_np[mask])))
+        diff_dv = float(np.max(np.abs(dv_out_np[mask] - dv_np[mask])))
         self.assertEqual(
-            diff_nv, 0.0,
-            msg=(f"Non-vertex cells modified; max diff {diff_nv:.3e}. "
-                 f"`_extrapolate_boundary_corners` must only touch "
-                 f"the 4 cube-vertex corners."))
+            diff_du, 0.0,
+            msg=(f"Non-vertex du cells modified; max diff "
+                 f"{diff_du:.3e}."))
+        self.assertEqual(
+            diff_dv, 0.0,
+            msg=(f"Non-vertex dv cells modified; max diff "
+                 f"{diff_dv:.3e}."))
+
+    def test_dv_exact_formula_at_all_4_vertices(self):
+        """Iter-559 (Codex follow-up to iter-558): the iter-558
+        `test_exact_formula_at_all_4_vertices` checks `du` only.
+        A refactor that breaks only `dv` (swaps indices, flips sign,
+        or drops the `dv` update) would slip through.  This test
+        mirrors the `du` exact-formula check for the `dv` output.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _extrapolate_boundary_corners)
+        n = self._build_n()
+        rng = np.random.default_rng(3559)
+        du_np = rng.standard_normal((6, n + 1, n + 1))
+        dv_np = rng.standard_normal((6, n + 1, n + 1)).astype(
+            np.float64)
+        du = jnp.asarray(du_np)
+        dv = jnp.asarray(dv_np)
+
+        dv_out_np = np.asarray(
+            _extrapolate_boundary_corners(du, dv, n)[1],
+            dtype=np.float64)
+
+        specs = [
+            ("(0, 0)",   (0, 0),   (1, 0),       (0, 1),       (1, 1)),
+            ("(n, 0)",   (n, 0),   (n - 1, 0),   (n, 1),       (n - 1, 1)),
+            ("(0, n)",   (0, n),   (1, n),       (0, n - 1),   (1, n - 1)),
+            ("(n, n)",   (n, n),   (n - 1, n),   (n, n - 1),   (n - 1, n - 1)),
+        ]
+        for label, (ci, cj), (e1i, e1j), (e2i, e2j), (di, dj) in specs:
+            actual = dv_out_np[:, ci, cj]
+            expected = (
+                dv_np[:, e1i, e1j]
+                + dv_np[:, e2i, e2j]
+                - dv_np[:, di, dj]
+            )
+            diff = float(np.max(np.abs(actual - expected)))
+            self.assertLess(
+                diff, 1e-12,
+                msg=(f"dv corner {label}: output differs from "
+                     f"`dv[{e1i},{e1j}] + dv[{e2i},{e2j}] - "
+                     f"dv[{di},{dj}]` by {diff:.3e}.  Either the "
+                     f"dv formula is not applied or its source "
+                     f"indices / signs differ from the du formula."))
+
+    def test_shape_preserved_4d_with_nlev(self):
+        """Iter-559 (Codex follow-up to iter-558): the 3D production
+        path `(6, n+1, n+1, nlev)` (used by ocean PE and 3D
+        atmosphere) was not exercised.  Verify shape preservation
+        and that each level is handled independently."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _extrapolate_boundary_corners)
+        n = self._build_n()
+        nlev = 5
+        rng = np.random.default_rng(4559)
+        du_np = rng.standard_normal((6, n + 1, n + 1, nlev))
+        dv_np = rng.standard_normal((6, n + 1, n + 1, nlev))
+        du = jnp.asarray(du_np)
+        dv = jnp.asarray(dv_np)
+
+        du_out, dv_out = _extrapolate_boundary_corners(du, dv, n)
+        self.assertEqual(
+            du_out.shape, (6, n + 1, n + 1, nlev),
+            msg="4D du output shape does not preserve nlev axis.")
+        self.assertEqual(
+            dv_out.shape, (6, n + 1, n + 1, nlev),
+            msg="4D dv output shape does not preserve nlev axis.")
+
+    def test_exact_formula_at_all_4_vertices_4d(self):
+        """Iter-559: the 4D branch must apply the same bilinear
+        formula per-level, independently for each vertical level k.
+        Checks BOTH du and dv on random 4D input."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _extrapolate_boundary_corners)
+        n = self._build_n()
+        nlev = 3
+        rng = np.random.default_rng(5559)
+        du_np = rng.standard_normal((6, n + 1, n + 1, nlev)).astype(
+            np.float64)
+        dv_np = rng.standard_normal((6, n + 1, n + 1, nlev)).astype(
+            np.float64)
+        du = jnp.asarray(du_np)
+        dv = jnp.asarray(dv_np)
+
+        du_out_np = np.asarray(
+            _extrapolate_boundary_corners(du, dv, n)[0],
+            dtype=np.float64)
+        dv_out_np = np.asarray(
+            _extrapolate_boundary_corners(du, dv, n)[1],
+            dtype=np.float64)
+
+        specs = [
+            ("(0, 0)",   (0, 0),   (1, 0),       (0, 1),       (1, 1)),
+            ("(n, 0)",   (n, 0),   (n - 1, 0),   (n, 1),       (n - 1, 1)),
+            ("(0, n)",   (0, n),   (1, n),       (0, n - 1),   (1, n - 1)),
+            ("(n, n)",   (n, n),   (n - 1, n),   (n, n - 1),   (n - 1, n - 1)),
+        ]
+        for label, (ci, cj), (e1i, e1j), (e2i, e2j), (di, dj) in specs:
+            for k in range(nlev):
+                # du
+                actual_u = du_out_np[:, ci, cj, k]
+                expected_u = (
+                    du_np[:, e1i, e1j, k]
+                    + du_np[:, e2i, e2j, k]
+                    - du_np[:, di, dj, k]
+                )
+                diff_u = float(np.max(np.abs(actual_u - expected_u)))
+                self.assertLess(
+                    diff_u, 1e-12,
+                    msg=(f"4D du corner {label} level {k}: output "
+                         f"differs from bilinear formula by "
+                         f"{diff_u:.3e}.  Either the 4D branch "
+                         f"mixes levels or drops the `dv` half of "
+                         f"the update."))
+                # dv
+                actual_v = dv_out_np[:, ci, cj, k]
+                expected_v = (
+                    dv_np[:, e1i, e1j, k]
+                    + dv_np[:, e2i, e2j, k]
+                    - dv_np[:, di, dj, k]
+                )
+                diff_v = float(np.max(np.abs(actual_v - expected_v)))
+                self.assertLess(
+                    diff_v, 1e-12,
+                    msg=(f"4D dv corner {label} level {k}: output "
+                         f"differs from bilinear formula by "
+                         f"{diff_v:.3e}."))
 
 
 class TestBroadcastMetric(unittest.TestCase):

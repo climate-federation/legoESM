@@ -168,6 +168,42 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-559 (2026-04-19)**: addressed Codex stop-time review of
+  iter-558: "the new regression lock leaves the production 4D/`dv`
+  behavior unverified".
+
+  Iter-558's 4 tests only exercised:
+    - `du` output (not `dv`)
+    - 2D shape `(6, n+1, n+1)` (not 4D `(6, n+1, n+1, nlev)`)
+
+  A refactor that broke only `dv`'s update, or only the 4D branch,
+  would pass all iter-558 tests.  Codex correctly flagged this.
+
+  Iter-559 adds 3 tests:
+    (a) `test_dv_exact_formula_at_all_4_vertices`: mirror of the
+        `du` exact-formula check applied to `dv`.  Uses random
+        input and checks all 4 cube-vertex specs against the
+        bilinear formula to 1e-12.
+    (b) `test_shape_preserved_4d_with_nlev`: asserts 4D shape
+        `(6, n+1, n+1, nlev=5)` is preserved for BOTH `du` and
+        `dv` outputs.
+    (c) `test_exact_formula_at_all_4_vertices_4d`: per-level,
+        per-vertex exact-formula check on random 4D input
+        (nlev=3), for BOTH `du` and `dv`.  Catches cross-level
+        mixing AND `dv`-only breakage in the 4D branch.
+    (d) Also extended `test_non_vertex_cells_unchanged` to check
+        BOTH `du` and `dv`.
+
+  **Sanity-checked**: commented out the `dv` update line in
+  production.  Tests (a) and (c) correctly fire with max diff
+  ~4.5 on random input.  `du`-only tests still pass (the `du`
+  update was preserved).  Restored production code; all 7
+  `TestExtrapolateBoundaryCorners` tests pass (4 from iter-558 +
+  3 new).
+
+  No production-path numerical changes.  63/63 tests pass in
+  `test_cdgrid.py` (60 prior + 3 new).
+
 - **iter-558 (2026-04-19)**: regression lock for
   `_extrapolate_boundary_corners` (previously untested).
 
