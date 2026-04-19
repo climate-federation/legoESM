@@ -804,6 +804,39 @@ class TestPadHaloH3Dispatch:
                     f"fill did not blend in neighbour faces "
                     f"{nbr_a} (={v_a}) and {nbr_b} (={v_b})."
                 )
+                # (3) Iter-538 (Codex follow-up): TWO-face blend.
+                # The cross-face check above passes if all cells
+                # equal a SINGLE neighbour's value v_a.  To prove
+                # actual blending of BOTH neighbours, at least one
+                # cell must be STRICTLY BETWEEN v_a and v_b — i.e.,
+                # in (lo, hi) open interval, distinct from both
+                # endpoints.  This rules out the
+                # "single-neighbour propagation" failure mode.
+                gap = hi - lo
+                # Only meaningful when v_a != v_b (which is always
+                # true for face-unique values; CONNECTIVITY never
+                # has both neighbours equal).
+                assert gap > 1e-6, (
+                    f"Test setup error: face {face} {label} adjacent "
+                    f"neighbours have equal value (v_a={v_a}, "
+                    f"v_b={v_b}); face-unique field cannot exercise "
+                    f"two-face blend.")
+                # Strictly between lo and hi — at least 5% of the
+                # gap from each endpoint, generous enough to allow
+                # corner cells that get a 1/4 weight from one side
+                # (e.g., a 3:1 weighted average).
+                margin = 0.05 * gap
+                in_open_interval = bool(np.any(
+                    (block > lo + margin) & (block < hi - margin)))
+                assert in_open_interval, (
+                    f"face {face} {label} corner block: NO cell "
+                    f"lies strictly between neighbours v_a={v_a} "
+                    f"and v_b={v_b} (gap={gap:.3f}); cells: "
+                    f"{sorted(set(block.flatten().tolist()))}.  "
+                    f"Corner fill propagated a single neighbour's "
+                    f"value instead of blending both — "
+                    f"single-neighbour-propagation failure mode."
+                )
 
     def test_duogrid_at_halo3_third_ring_carries_neighbour_data(self):
         """Iter-535 (Codex follow-up to iter-534): the iter-534

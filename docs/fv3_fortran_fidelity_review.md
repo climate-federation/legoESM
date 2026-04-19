@@ -168,6 +168,36 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-538 (2026-04-19)**: addressed Codex stop-time review of
+  iter-537: "iter-537's new test does not actually prove
+  two-face corner blending".
+
+  iter-537's checks (convex-hull + cross-face-blend) were
+  insufficient because both pass even if the corner fill
+  silently propagates a SINGLE neighbour's value into all 9
+  cells of the corner block (e.g., all cells = v_a = 4.0).  The
+  cross-face-blend check passes because v_a ≠ host, but no
+  blending of v_b actually occurred.
+
+  Iter-538 adds a third assertion (3) STRICT-BETWEEN: at least
+  one cell of the corner block must be strictly between v_a and
+  v_b — i.e., in the open interval `(lo + 5%·gap, hi - 5%·gap)`.
+  The 5% margin tolerates corner cells that get only a 1/4
+  weight from one side (e.g., a 3:1 weighted average).
+
+  **Sanity-checked locally**: monkey-patched both corner-fill
+  paths to copy the W-side depth-0 strip value (= single
+  neighbour) into the entire corner block.  Result: face 0 SW
+  block all 9 cells = 4.0 (face 3) → iter-538 strict-between
+  assertion correctly fires (no cell between 4.0 and 6.0).
+
+  Now the test detects all three classes of corner-fill failure:
+    - cell stays at zero / NaN / Inf (smoke-test from iter-536)
+    - cell equals host face value only (cross-face-blend from iter-537)
+    - cell equals a single neighbour's value only (strict-between iter-538)
+
+  No production-path numerical changes.  241/241 tests pass.
+
 - **iter-537 (2026-04-19)**: addressed Codex stop-time review of
   iter-536: "the added regression only smoke-tests the outer
   ring and does not verify corner correctness".
