@@ -2139,6 +2139,98 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
             f"legacy iv=1 loop was refactored."
         )
 
+    def test_fv3_sw_core_legacy_gates_on_not_use_duogrid(self):
+        """Iter-581: AST-level lock for the 4 non-duogrid legacy
+        edge gates in `src/legoesm/core/fv3_sw_core.py`.
+
+        Fortran `sw_core.F90` has several legacy face-boundary
+        overrides gated on `.not. (bounded_domain .or.
+        duogrid)`.  Python ports them under `if not use_duogrid:`
+        in four production functions:
+
+          1. `_ke_upwind` (line ~731): sin_sg/cos_sg face-
+             boundary overrides.  Fortran sw_core.F90:325-365.
+          2. `_corner_vorticity` (line ~1129): 4 cube-vertex
+             corrections.  Fortran sw_core.F90:396-400.
+          3. `_vorticity_flux` fy1 boundary (line ~1156):
+             panel-edge fy1 override.  Fortran
+             sw_core.F90:445-449 / 458-461.
+          4. `_vorticity_flux` fx1 boundary (line ~1162):
+             panel-edge fx1 override.  Fortran
+             sw_core.F90:431-438 / 471-475.
+
+        A refactor that SILENTLY REMOVES any of these gates
+        (leaving the non-duogrid override active in BOTH modes)
+        would break Critical Duogrid Constraint #2.  This test
+        enforces that each of the 4 gates is present in its
+        target function.
+        """
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent.parent
+        src = (root / "src/legoesm/core/fv3_sw_core.py").read_text()
+        tree = ast.parse(src)
+
+        REQUIRED_GATES = [
+            ("_ke_upwind", "sin_sg/cos_sg face-boundary override"),
+            ("_corner_vorticity", "cube-vertex corrections"),
+            ("_vorticity_flux",
+             "fy1 and fx1 panel-edge overrides (expects 2 gates)"),
+        ]
+
+        def _find_func(tree, name):
+            for node in tree.body:
+                if (isinstance(node, ast.FunctionDef)
+                        and node.name == name):
+                    return node
+            return None
+
+        def _count_not_use_duogrid_ifs(func):
+            """Count `if not use_duogrid:` statements in the
+            direct body of `func` (excluding nested scopes)."""
+            count = 0
+            nested = (ast.FunctionDef, ast.AsyncFunctionDef,
+                      ast.Lambda, ast.GeneratorExp,
+                      ast.ListComp, ast.SetComp, ast.DictComp)
+            stack = [(func, False)]
+            while stack:
+                node, inside_nested = stack.pop()
+                if (not inside_nested
+                        and isinstance(node, ast.If)
+                        and isinstance(node.test, ast.UnaryOp)
+                        and isinstance(node.test.op, ast.Not)
+                        and isinstance(node.test.operand, ast.Name)
+                        and node.test.operand.id == "use_duogrid"):
+                    count += 1
+                if isinstance(node, nested) and node is not func:
+                    inside_nested = True
+                for child in ast.iter_child_nodes(node):
+                    stack.append((child, inside_nested))
+            return count
+
+        # Expected counts per function
+        expected = {
+            "_ke_upwind": 1,
+            "_corner_vorticity": 1,
+            "_vorticity_flux": 2,
+        }
+        for name, expected_n in expected.items():
+            func = _find_func(tree, name)
+            assert func is not None, (
+                f"Function `{name}` not found in fv3_sw_core.py — "
+                f"may have been renamed.")
+            count = _count_not_use_duogrid_ifs(func)
+            assert count == expected_n, (
+                f"`{name}` has {count} `if not use_duogrid:` "
+                f"gates; expected {expected_n}.  Critical "
+                f"Duogrid Constraint #2 requires each legacy "
+                f"face-boundary override to be gated on "
+                f"`not use_duogrid` so it is bypassed in "
+                f"duogrid mode.  If a legitimate refactor "
+                f"restructured the gating (e.g., unified into "
+                f"a helper), UPDATE this test.")
+
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
         override in `cubed_sphere_cdgrid.py` must remain inside the

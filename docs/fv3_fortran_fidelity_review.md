@@ -197,6 +197,37 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-581 (2026-04-20)**: AST-level lock for 4 legacy-path
+  `if not use_duogrid:` gates in `fv3_sw_core.py`.
+
+  Critical Duogrid Constraint #2: "Legacy edge handling must be
+  disabled in duogrid mode".  Iter-516 locked the `_pert_ppm`
+  gate in `fv_tp_2d.py` via mock-patch runtime tests.  Iter-581
+  extends source-level lock to 4 gates in `fv3_sw_core.py`:
+
+    1. `_ke_upwind` (line ~731): sin_sg/cos_sg face-boundary
+       override (Fortran sw_core.F90:325-365).  Expected: 1
+       `if not use_duogrid:` gate.
+    2. `_corner_vorticity` (line ~1129): 4 cube-vertex
+       corrections (Fortran sw_core.F90:396-400).  Expected: 1
+       gate.
+    3. `_vorticity_flux` fy1 and fx1 panel-edge overrides
+       (lines ~1156, 1162; Fortran sw_core.F90:431-475).
+       Expected: 2 gates.
+
+  Added `test_fv3_sw_core_legacy_gates_on_not_use_duogrid`:
+  AST walker counts `if not use_duogrid:` statements in each
+  target function's direct body (excluding nested scopes) and
+  verifies the expected count.
+
+  **Sanity-checked**: removed the `if not use_duogrid:` gate in
+  `_corner_vorticity`.  Test correctly fires with `_corner_
+  vorticity has 0 gates; expected 1`.  Restored production;
+  all 4 legacy-bypass tests pass.
+
+  No production-path numerical changes.  104/104 tests pass in
+  `test_duogrid.py` (103 prior + 1 new).
+
 - **iter-580 (2026-04-20)**: addressed Codex stop-time review of
   iter-579: "`center_to_dgrid_vector` is still not meaningfully
   locked on the default production path".
