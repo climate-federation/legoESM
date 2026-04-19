@@ -906,6 +906,76 @@ def _pad_halo_local_h2(
     return padded
 
 
+def _pad_halo_local_h3(
+    data: jax.Array,
+    interp_offsets: jax.Array | None = None,
+) -> jax.Array:
+    """Local (single-node) scalar halo exchange for halo=3.
+
+    Generalizes :func:`_pad_halo_local_h2` to 3 halo depths.  This is
+    plumbing for the FB-path C36 stability work (review-doc item #2),
+    which requires ng=3-equivalent halo quality to reach Fortran-
+    faithful stability on the `_c_sw` first-order upwind mass flux.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n)
+    interp_offsets : jax.Array or None, shape (6, 4, 3, n)
+        Precomputed fractional-index offsets for 3 halo depths (see
+        :func:`compute_halo_interp_offsets_h3`).
+
+    Returns
+    -------
+    padded : jax.Array, shape (6, n+6, n+6)
+    """
+    n = data.shape[1]
+    padded = jnp.zeros((6, n + 6, n + 6), dtype=data.dtype)
+
+    # Place interior data
+    padded = padded.at[:, 3:-3, 3:-3].set(data)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for depth in range(3):
+                # Extract neighbour strip at this depth
+                strip = _extract_edge_strip_at_depth(
+                    data, nbr_face, nbr_edge, depth,
+                )
+
+                if is_reversed:
+                    strip = strip[::-1]
+
+                # Interpolate to correct physical position if offsets provided
+                if interp_offsets is not None:
+                    strip = _interp_strip(
+                        strip, interp_offsets[face, edge_idx, depth],
+                    )
+
+                # Place in halo: depth=0 → adjacent to interior; depth=2 → outer
+                # Interior is at [3:-3, 3:-3], so:
+                #   WEST  halo positions: i = 2 - depth (2, 1, 0 for depths 0..2)
+                #   EAST  halo positions: i = n + 3 + depth
+                #   SOUTH halo positions: j = 2 - depth
+                #   NORTH halo positions: j = n + 3 + depth
+                if edge == WEST:
+                    padded = padded.at[face, 2 - depth, 3:-3].set(strip)
+                elif edge == EAST:
+                    padded = padded.at[face, n + 3 + depth, 3:-3].set(strip)
+                elif edge == SOUTH:
+                    padded = padded.at[face, 3:-3, 2 - depth].set(strip)
+                elif edge == NORTH:
+                    padded = padded.at[face, 3:-3, n + 3 + depth].set(strip)
+
+    # Fill L-shaped 3×3 corner regions (9 cells × 4 corners × 6 faces)
+    padded = _fill_corners_h3(padded)
+
+    return padded
+
+
 # ==============================================================================
 # Precomputed index tables for vectorized halo exchange
 # ==============================================================================

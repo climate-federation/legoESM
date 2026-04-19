@@ -168,6 +168,35 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-498 (2026-04-19)**: third step on the ng=3 halo extension —
+  added `_pad_halo_local_h3(data, interp_offsets=None)` in
+  `grids/halo.py`.  Generalizes `_pad_halo_local_h2` to 3 halo
+  depths: places interior at `[3:-3, 3:-3]`, then for each of 6
+  faces × 4 edges × 3 depths extracts the neighbour strip via
+  `_extract_edge_strip_at_depth`, applies CONNECTIVITY reversal,
+  optional 3-point Lagrange interpolation using h3 offsets, and
+  writes to `i = 2 - depth` (WEST) / `i = n + 3 + depth` (EAST) /
+  symmetric for S/N.  Closes with `_fill_corners_h3` added in
+  iter-497.  Plumbing only — still no caller wires it in.
+
+  Tests (`TestPadHaloLocalH3`, 7 assertions):
+    - constant-field preservation at every cell of (6, n+6, n+6);
+    - interior block bit-identical after exchange;
+    - shape equals `(6, n + 6, n + 6)`;
+    - depth-0 and depth-1 edge-halo strips are bit-identical to
+      those produced by `_pad_halo_local_h2` (so the new h3 path
+      cannot silently drift from the existing h2 behaviour on the
+      overlap depths);
+    - depth-2 strips pull from the expected neighbour row
+      (`_extract_edge_strip_at_depth(..., depth=2)`) across all
+      24 face/edge combinations;
+    - JIT-compiles and differentiates cleanly under `jax.grad`.
+
+  Test totals: 30/30 on `test_scale_halo.py` (23 prior + 7 new),
+  132/132 on `test_cdgrid_fv3_regression.py + test_duogrid.py`.
+  Required evaluations (W2/W5/cosine bell) cannot have changed —
+  no runtime path calls `_pad_halo_local_h3` yet.
+
 - **iter-497 (2026-04-19)**: second step on the ng=3 halo extension
   prerequisite for the FB-path C36 stability blocker (review-doc
   item #2).  Added `_fill_corners_h3(padded)` in `grids/halo.py`,

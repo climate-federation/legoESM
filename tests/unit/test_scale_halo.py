@@ -351,6 +351,151 @@ class TestFillCornersH3:
 
 
 # ---------------------------------------------------------------------------
+# h3 local scalar exchange (iter-498)
+# ---------------------------------------------------------------------------
+
+class TestPadHaloLocalH3:
+    """Tests for the halo=3 local scalar exchange added in iter-498.
+
+    The implementation generalizes `_pad_halo_local_h2` to 3 halo
+    depths, using `_fill_corners_h3` for the 3x3 L-shaped corner
+    blocks.
+    """
+
+    def test_constant_field(self):
+        """Constant field at interior should propagate to all halo cells."""
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.ones((6, N, N), dtype=jnp.float64) * 9.0
+        padded = _pad_halo_local_h3(data)
+        assert padded.shape == (6, N + 6, N + 6)
+        np.testing.assert_allclose(
+            np.asarray(padded), 9.0, atol=1e-12,
+            err_msg="h3 local exchange must preserve constant fields")
+
+    def test_interior_preservation(self):
+        """Interior data must be bit-identical after halo exchange."""
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.arange(
+            6 * N * N, dtype=jnp.float64).reshape(6, N, N)
+        padded = _pad_halo_local_h3(data)
+        np.testing.assert_array_equal(
+            np.asarray(padded[:, 3:-3, 3:-3]), np.asarray(data))
+
+    def test_shape(self):
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.zeros((6, N, N), dtype=jnp.float64)
+        padded = _pad_halo_local_h3(data)
+        assert padded.shape == (6, N + 6, N + 6)
+
+    def test_face_unique_depth0_edges_match_h2_depth0(self):
+        """Depth-0 (interior-adjacent) edge strip values must match the
+        existing `_pad_halo_local_h2` depth-0 strip — both reference
+        the same physical neighbour-strip row, so they cannot differ."""
+        from legoesm.grids.halo import (
+            _pad_halo_local_h2, _pad_halo_local_h3,
+        )
+        data = jnp.zeros((6, N, N), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+        p_h2 = _pad_halo_local_h2(data)
+        p_h3 = _pad_halo_local_h3(data)
+        # West depth=0 strip: p_h2[face, 1, 2:-2] vs p_h3[face, 2, 3:-3]
+        for f in range(6):
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 2, 3:-3]),
+                np.asarray(p_h2[f, 1, 2:-2]),
+                err_msg=f"face {f} WEST depth=0 differs between h2 and h3")
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, N + 3, 3:-3]),
+                np.asarray(p_h2[f, N + 2, 2:-2]),
+                err_msg=f"face {f} EAST depth=0 differs between h2 and h3")
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, 2]),
+                np.asarray(p_h2[f, 2:-2, 1]),
+                err_msg=f"face {f} SOUTH depth=0 differs between h2 and h3")
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, N + 3]),
+                np.asarray(p_h2[f, 2:-2, N + 2]),
+                err_msg=f"face {f} NORTH depth=0 differs between h2 and h3")
+
+    def test_face_unique_depth1_matches_h2_depth1(self):
+        """Depth-1 edge strip values must match h2 depth-1 (also both
+        reference the second row from the neighbour interior)."""
+        from legoesm.grids.halo import (
+            _pad_halo_local_h2, _pad_halo_local_h3,
+        )
+        data = jnp.zeros((6, N, N), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+        p_h2 = _pad_halo_local_h2(data)
+        p_h3 = _pad_halo_local_h3(data)
+        for f in range(6):
+            # h2 WEST depth=1 at i=0; h3 WEST depth=1 at i=1
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 1, 3:-3]),
+                np.asarray(p_h2[f, 0, 2:-2]))
+            # EAST depth=1: h2 i=n+3, h3 i=n+4
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, N + 4, 3:-3]),
+                np.asarray(p_h2[f, N + 3, 2:-2]))
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, 1]),
+                np.asarray(p_h2[f, 2:-2, 0]))
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, N + 4]),
+                np.asarray(p_h2[f, 2:-2, N + 3]))
+
+    def test_depth2_edge_strip_pulls_from_neighbour(self):
+        """Depth-2 halo strip must pull from the 3rd row into the
+        neighbour's interior (i.e., row index 2 or -3 on that face)."""
+        from legoesm.grids.halo import (
+            _pad_halo_local_h3,
+            CONNECTIVITY,
+            _extract_edge_strip_at_depth,
+        )
+        data = jnp.arange(
+            6 * N * N, dtype=jnp.float64).reshape(6, N, N)
+        padded = _pad_halo_local_h3(data)
+        edges = [WEST, EAST, SOUTH, NORTH]
+        for face in range(6):
+            for edge_idx, edge in enumerate(edges):
+                nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+                expected = _extract_edge_strip_at_depth(
+                    data, nbr_face, nbr_edge, 2)
+                if is_reversed:
+                    expected = expected[::-1]
+                # Extract halo slice at depth=2
+                if edge == WEST:
+                    actual = padded[face, 0, 3:-3]
+                elif edge == EAST:
+                    actual = padded[face, N + 5, 3:-3]
+                elif edge == SOUTH:
+                    actual = padded[face, 3:-3, 0]
+                else:
+                    actual = padded[face, 3:-3, N + 5]
+                np.testing.assert_array_equal(
+                    np.asarray(actual), np.asarray(expected),
+                    err_msg=(
+                        f"face={face} edge={edge} depth=2 mismatch"),
+                )
+
+    def test_jittable_and_differentiable(self):
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        # JIT path
+        p_jit = jax.jit(_pad_halo_local_h3)(data)
+        p_eager = _pad_halo_local_h3(data)
+        np.testing.assert_allclose(
+            np.asarray(p_jit), np.asarray(p_eager), atol=1e-14)
+        # Gradient path
+        def loss(x):
+            return jnp.sum(_pad_halo_local_h3(x) ** 2)
+        grad = jax.grad(loss)(data)
+        assert grad.shape == data.shape
+        assert jnp.all(jnp.isfinite(grad))
+
+
+# ---------------------------------------------------------------------------
 # JIT compatibility
 # ---------------------------------------------------------------------------
 
