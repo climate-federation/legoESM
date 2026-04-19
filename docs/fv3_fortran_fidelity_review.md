@@ -168,6 +168,41 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-522 (2026-04-19)**: addressed Codex stop-time review of
+  iter-521: "iter-521 does not actually sample the matrix's
+  snapshot times".  iter-521 used
+  `round((i+1) * n_steps / n_snaps)` for `i in range(n_snaps)`,
+  but the matrix's `_snapshot_steps`
+  (`run_atmosphere_test_matrix.py:190-197`) uses
+  `int(i * n_steps / n_snaps)` for `i in range(1, n_snaps)`,
+  plus the explicit endpoints `{0, n_steps}`.  Different
+  formulas → different snapshot step sets → my test sampled
+  steps that don't match what the saved npz file contains.
+
+  Iter-522 copies the matrix's `_snapshot_steps` formula EXACTLY
+  inline (no import — keeps the test self-contained).  Now the
+  step set is `{0, 28, 57, 86, 115, 144, 172, 201, 230, 259,
+  288}` — verified to match the saved
+  `snapshots_latlon.npz`'s `steps` array exactly.  Per-snapshot
+  max|v_ll| values from the test now match the npz to 4 decimal
+  places: `[0.008, 0.043, 0.073, 0.108, 0.140, 0.177, 0.208,
+  0.232, 0.255, 0.280, 0.303]` (FIXED).
+
+  Also added a sanity assertion `len(max_v_ll_per_snap) ==
+  len(snap_steps)` so any future drift in the matrix formula
+  fires immediately.
+
+  Failure message now includes (step, max_v) tuples for every
+  snapshot so the time evolution is directly readable.
+
+  Buggy-code per-snapshot trace verified:
+  `[(0, 0.008), (28, 0.086), (57, 0.187), (86, 0.261),
+   (115, 0.276), (144, 0.292), (172, 0.342), (201, 0.389),
+   (230, 0.452), (259, 0.514), (288, 0.556)]`.
+  Test correctly fires (peak 0.556 > 0.40 ceiling).
+
+  No production-path numerical changes.  229/229 tests pass.
+
 - **iter-521 (2026-04-19)**: extended iter-520 to track `v_ll`
   across all 11 matrix snapshot timesteps after Codex stop-time
   review: "iter-520 still does not lock the actual

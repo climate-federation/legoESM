@@ -2673,27 +2673,52 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             v_north_cc = sa_4edge * u_cc + ca_4edge * v_cc
             return apply_cubedsphere_to_latlon(v_north_cc, w)
 
-        # Iter-521 (Codex follow-up): track v_ll across the 11 snapshot
-        # times the matrix saves (t=0, then 10 evenly-spaced steps to
-        # t=1d) — the visible artifact in `snapshots_v.png` is the
-        # temporal evolution, not just the final state.  Lock the max
-        # across ALL snapshots so a regression that shifts the peak
-        # to an intermediate time still fires.
-        n_snaps = 10
-        # Match matrix `_snapshot_steps(n_steps, n_snaps)` — evenly
-        # spaced from 1 to n_steps inclusive.
-        snap_steps = set(int(round((i + 1) * n_steps / n_snaps))
-                         for i in range(n_snaps))
+        # Iter-521 (Codex): track v_ll across the matrix's actual
+        # snapshot times (`_snapshot_steps(n_steps, n_snaps=10)`) —
+        # the visible artifact in `snapshots_v.png` is the temporal
+        # evolution, not just the final state.  Lock the max across
+        # ALL matrix snapshot times so a regression that shifts the
+        # peak to an intermediate time still fires.
+        # iter-522 (Codex follow-up): replicate the matrix's
+        # `_snapshot_steps` formula EXACTLY (truncate, not round; i
+        # starts at 1, not 0; include both endpoints 0 and n_steps).
+        # iter-521's `round((i+1) * n_steps / n_snaps)` produced a
+        # different set of steps from the matrix's
+        # `int(i * n_steps / n_snaps)`.
+        def _matrix_snapshot_steps(n_steps_, n_snaps_=10):
+            """EXACT copy of `run_atmosphere_test_matrix.py::_snapshot_steps`."""
+            if n_steps_ <= 0:
+                return set()
+            s = {0, n_steps_}
+            for i_ in range(1, n_snaps_):
+                s.add(max(1, int(i_ * n_steps_ / n_snaps_)))
+            return s
 
-        max_v_ll_per_snap = [float(np.max(np.abs(_extract_v_ll(state0))))]
+        snap_steps = _matrix_snapshot_steps(n_steps, n_snaps_=10)
+
+        # Snapshot at step 0 (initial state) is always present.
+        max_v_ll_per_snap = []
+        if 0 in snap_steps:
+            max_v_ll_per_snap.append(
+                (0, float(np.max(np.abs(_extract_v_ll(state0))))))
         state = state0
         for i in range(n_steps):
             state = model.step(state, dt)
-            if (i + 1) in snap_steps:
+            step_done = i + 1
+            if step_done in snap_steps:
                 max_v_ll_per_snap.append(
-                    float(np.max(np.abs(_extract_v_ll(state)))))
+                    (step_done,
+                     float(np.max(np.abs(_extract_v_ll(state))))))
 
-        max_v_ll_overall = max(max_v_ll_per_snap)
+        # Sanity-check that we hit exactly the expected number of
+        # snapshot steps; if `_snapshot_steps` ever changes, this fires.
+        self.assertEqual(
+            len(max_v_ll_per_snap), len(snap_steps),
+            msg=(f"Snapshot count mismatch: collected "
+                 f"{len(max_v_ll_per_snap)} but expected "
+                 f"{len(snap_steps)} from matrix _snapshot_steps."))
+
+        max_v_ll_overall = max(v for _, v in max_v_ll_per_snap)
 
         # Measured baselines on the CANONICAL lat-lon path across all
         # 11 snapshot times (iter-521).  Pattern is monotone-increasing
@@ -2707,10 +2732,10 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         self.assertLess(
             max_v_ll_overall, 0.40,
             msg=(f"W2 alpha=0 C36 1d peak max|v_ll| = "
-                 f"{max_v_ll_overall:.4f} m/s across the 11 matrix "
-                 f"snapshot times exceeds 0.40 m/s ceiling.  Per-snap "
-                 f"max|v_ll|: "
-                 f"{[f'{x:.3f}' for x in max_v_ll_per_snap]}.  "
+                 f"{max_v_ll_overall:.4f} m/s across the matrix's "
+                 f"{len(snap_steps)} snapshot times exceeds 0.40 m/s "
+                 f"ceiling.  Per-step max|v_ll|: "
+                 f"{[(s, round(v, 3)) for s, v in max_v_ll_per_snap]}.  "
                  f"Pre-iter-505 baseline was 0.556 m/s (at t=1d); "
                  f"iter-505 axis fix dropped it to 0.303 m/s."))
 
