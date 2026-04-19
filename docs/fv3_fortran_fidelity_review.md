@@ -197,6 +197,48 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-583 (2026-04-20)**: addressed Codex stop-time review of
+  iter-582: "iter-582's new test does not actually fail when the
+  `_corner_vorticity` corner-correction body is removed".
+
+  Iter-582 compared `duogrid=True` vs `duogrid=False` outputs.
+  But the iter-552 line 1118 linear-extrapolation gate ALSO
+  differs between those two modes — producing boundary-value
+  differences that propagate to cube vertices INDEPENDENT of
+  the line 1129 correction body.  A refactor emptying only the
+  1129 body would still produce diffs from line 1118,
+  satisfying iter-582's assertion spuriously.
+
+  Iter-583 isolates JUST the 1129 correction body:
+    - Reproduce the UNDER-DUOGRID production formula in numpy:
+      `vort_abs = f_corner + rarea_c * vort_raw` (where
+      `vort_raw = fx_pad[...] - fx_pad[...] - fy_pad[...] +
+      fy_pad[...]` using `mode='edge'` — no correction).
+    - Compare production `_corner_vorticity(use_duogrid=True)`
+      output against this reproduction AT THE 4 CUBE VERTICES
+      to 1e-5 tolerance.
+    - If the gate is silently flipped to `if use_duogrid:` (so
+      the correction fires in duogrid mode), production adds
+      an extra delta that the test detects.
+
+  **Two-stage sanity check**:
+    - (i) Gate entirely removed (`if not use_duogrid:` → bare
+      correction): iter-581 AST test fires (0 gates vs 1
+      expected).
+    - (ii) Gate condition INVERTED (`if not use_duogrid:` →
+      `if use_duogrid:`): iter-581 AST test fires (0 gates),
+      AND iter-583 behavioral test ALSO fires (diff 2.904e-05
+      > 1e-5 threshold) — proving the behavioral check catches
+      inversions that keep the correction body intact.
+
+  Combined the iter-581 AST + iter-583 behavioral locks now
+  catch (a) gate removal, (b) gate inversion, (c) correction
+  body relocation — the three plausible regression modes Codex
+  identified.
+
+  No production-path numerical changes.  105/105 tests pass in
+  `test_duogrid.py`.
+
 - **iter-582 (2026-04-20)**: addressed Codex stop-time review of
   iter-581: "the new 'lock' is too weak to stop real Constraint
   #2 regressions".

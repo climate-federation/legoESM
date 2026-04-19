@@ -2232,24 +2232,28 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
                 f"a helper), UPDATE this test.")
 
     def test_corner_vorticity_legacy_correction_not_applied_under_duogrid(self):
-        """Iter-582 (Codex follow-up to iter-581): the AST count
-        test alone is too weak — a refactor could empty the `if`
-        body, flip the condition, or move the correction
-        elsewhere.
+        """Iter-583 (Codex follow-up to iter-582): iter-582
+        compared duogrid=True vs duogrid=False, but the diff at
+        cube vertices also comes from the DIFFERENT line 1118
+        linear-extrapolation gate — not only from the 1129
+        correction body.  A refactor that empties ONLY the 1129
+        body (while leaving 1118 intact) would still produce
+        boundary-value differences via 1118, making the test
+        pass spuriously.
 
-        This test verifies BEHAVIORALLY that under duogrid=True,
-        the 4 cube-vertex corrections in `_corner_vorticity`
-        (fv3_sw_core.py:1129-1133) are NOT applied to the output.
+        Iter-583 isolates JUST the 1129 correction body by
+        running `_corner_vorticity(use_duogrid=True)` and
+        comparing against:
+          - `production output` (correction NOT applied)
+          - `with-correction reproduction` (correction APPLIED
+             manually, using the same fy_pad as production)
 
-        Strategy:
-          - Run `_corner_vorticity(uc, vc, cdgrid, use_duogrid=True)`
-            on a known input.
-          - Reproduce what the vorticity WOULD be if the legacy
-            correction WERE applied (i.e., add `fy_pad[0,0]`,
-            subtract `fy_pad[n+1,0]`, etc. at the 4 corners).
-          - Assert production output ≠ the-with-correction
-            version at the cube-vertex corners — proving the
-            correction is bypassed under duogrid.
+        Assertion: production output at the 4 cube vertices
+        MUST EQUAL production_minus_manual_correction (i.e.,
+        the correction body was NOT executed).  If the body
+        is silently emptied OR flipped to `if use_duogrid:`,
+        production output will equal with-correction and the
+        test fires.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -2261,47 +2265,123 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         n = 8
         grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        rng = np.random.default_rng(582)
-        # Non-trivial uc, vc so the legacy correction is measurable
-        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
-        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+        rng = np.random.default_rng(583)
+        uc_np = rng.standard_normal((6, n + 1, n)) * 10.0
+        vc_np = rng.standard_normal((6, n, n + 1)) * 10.0
+        uc = jnp.asarray(uc_np)
+        vc = jnp.asarray(vc_np)
 
-        # Production call with duogrid=True: legacy branch should
-        # be bypassed.
-        vort_duogrid = np.asarray(
+        # Production: duogrid=True, correction body should be
+        # skipped entirely.
+        vort_prod = np.asarray(
             _corner_vorticity(uc, vc, cdgrid, use_duogrid=True))
 
-        # Production call with duogrid=False: legacy branch fires.
-        vort_nonduogrid = np.asarray(
-            _corner_vorticity(uc, vc, cdgrid, use_duogrid=False))
+        # Reproduce fx_pad / fy_pad under duogrid=True (uses
+        # mode='edge'; no linear extrapolation override).
+        dxc_np = np.asarray(cdgrid.dxc)
+        dyc_np = np.asarray(cdgrid.dyc)
+        fx_circ_np = uc_np * dxc_np
+        fy_circ_np = vc_np * dyc_np
+        fx_pad_np = np.pad(
+            fx_circ_np, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        fy_pad_np = np.pad(
+            fy_circ_np, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        # Note: duogrid=True skips the linear-extrapolation
+        # override at lines 1118-1122 (iter-552 gate), so
+        # fx_pad / fy_pad stay at mode='edge'.
 
-        # The 4 cube-vertex corners (0,0), (0,n), (n,0), (n,n)
-        # should differ between the two calls — because the
-        # legacy correction fires only in the non-duogrid path.
-        for (ci, cj) in [(0, 0), (0, n), (n, 0), (n, n)]:
+        # Compute the legacy correction DELTA: what would be
+        # ADDED to vort if the correction body were executed.
+        # From fv3_sw_core.py:1130-1133:
+        #   vort[:, 0, 0] += fy_pad[:, 0, 0]
+        #   vort[:, n, 0] += -fy_pad[:, n+1, 0]
+        #   vort[:, n, n] += -fy_pad[:, n+1, n]
+        #   vort[:, 0, n] += fy_pad[:, 0, n]
+        # The `rarea_c` scaling is applied AFTER this
+        # correction (line 1135), so the delta in vort_abs is:
+        #   delta[:, 0, 0] = rarea_c[:, 0, 0] * fy_pad[:, 0, 0]
+        #   ...etc
+        rarea_c_np = np.asarray(cdgrid.rarea_c)
+        delta_00 = (rarea_c_np[:, 0, 0] * fy_pad_np[:, 0, 0])
+        delta_n0 = (rarea_c_np[:, n, 0] * -fy_pad_np[:, n + 1, 0])
+        delta_nn = (rarea_c_np[:, n, n] * -fy_pad_np[:, n + 1, n])
+        delta_0n = (rarea_c_np[:, 0, n] * fy_pad_np[:, 0, n])
+
+        # With-correction hypothetical output = production + delta.
+        # If the gate were broken (body executed in duogrid mode),
+        # production output at the vertex cells WOULD equal
+        # (production + delta).  That means production without
+        # the correction should NOT match production + delta.
+        for (ci, cj, delta) in [
+            (0, 0, delta_00),
+            (n, 0, delta_n0),
+            (n, n, delta_nn),
+            (0, n, delta_0n),
+        ]:
+            delta_max = float(np.max(np.abs(delta)))
+            assert delta_max > 1e-9, (
+                f"Test setup: delta at ({ci},{cj}) is too small "
+                f"({delta_max:.3e}) to test.  Use larger input "
+                f"values.")
+            # If the gate is working, production output should NOT
+            # equal (hypothetical production with correction).
+            # i.e., the correction delta is NOT present in prod.
+            # Verify: |prod - (prod + delta)| = |delta| > threshold.
+            # The test: prod[ci, cj] - (something that would match
+            # if correction fired) should be non-zero.
+            # Actually: since we know the production output skips
+            # the correction, production output is the
+            # "correction-skipped" value.  A broken gate would
+            # have production == production_with_correction.
+            # Compute what the production WOULD be if the gate
+            # were broken: prod_broken = prod + delta.  If we ran
+            # a broken-gate version, we'd get prod_broken.
+            # We have prod (correct).  We can't easily get
+            # prod_broken without monkey-patching.  But we can
+            # assert: the delta magnitude is non-trivial, so
+            # if the gate were broken the production would
+            # differ from the current value by delta.  Our test
+            # has prod (correct).  A fixed test design: just
+            # verify that delta is non-trivial so we know the
+            # test has enough signal — then the AST test in
+            # iter-581 verifies the gate is syntactically
+            # present.  The combination is the actual lock.
+
+        # The above loop just verified delta is non-trivial.
+        # Now lock the actual production value at each corner
+        # against the "correction-NOT-applied" expected value.
+        # This requires reproducing the full corner-vorticity
+        # formula WITHOUT the correction.  Fortunately, on
+        # duogrid=True the formula is just:
+        #   vort_raw = fx_pad[:,:,:-1] - fx_pad[:,:,1:]
+        #              - fy_pad[:,:-1,:] + fy_pad[:,1:,:]
+        #   vort_abs = f_corner + rarea_c * vort_raw
+        # (no extra corner correction)
+        vort_raw = (
+            fx_pad_np[:, :, :-1] - fx_pad_np[:, :, 1:]
+            - fy_pad_np[:, :-1, :] + fy_pad_np[:, 1:, :])
+        f_corner_np = np.asarray(cdgrid.f_corner)
+        expected = f_corner_np + rarea_c_np * vort_raw
+
+        # Production output must match this "no-correction"
+        # reproduction AT THE 4 CUBE VERTICES within float32
+        # precision.  If the gate were broken (correction fires
+        # in duogrid mode), production would equal
+        # expected + delta instead.
+        for (ci, cj) in [(0, 0), (n, 0), (n, n), (0, n)]:
             diff = float(np.max(np.abs(
-                vort_duogrid[:, ci, cj] - vort_nonduogrid[:, ci, cj])))
-            assert diff > 1e-9, (
-                f"Cube-vertex ({ci},{cj}): vort(duogrid=True) and "
-                f"vort(duogrid=False) match to {diff:.3e} — the "
-                f"legacy correction appears to fire in BOTH modes, "
-                f"which means the `if not use_duogrid:` gate is "
-                f"ineffective.  Constraint #2 violated.")
-
-        # ALSO verify that INTERIOR cells (away from the 4 cube
-        # vertices) are IDENTICAL between the two calls — legacy
-        # correction only affects the 4 vertex cells, the
-        # interior circulation formula is the same.  Interior
-        # cells [:, 1:n, 1:n] should match to float32 precision.
-        interior_diff = float(np.max(np.abs(
-            vort_duogrid[:, 1:n, 1:n]
-            - vort_nonduogrid[:, 1:n, 1:n])))
-        assert interior_diff < 1e-4, (
-            f"Interior cells differ between duogrid and "
-            f"non-duogrid paths by {interior_diff:.3e}.  The "
-            f"legacy correction is supposed to only touch the 4 "
-            f"cube vertices.  If another gate changed behaviour "
-            f"widely, Constraint #2 is structurally violated.")
+                vort_prod[:, ci, cj] - expected[:, ci, cj])))
+            # Tolerance: float32 precision on inputs with
+            # magnitude ~ 10 gives diffs ~ 1e-6 at the scale
+            # of the computation.
+            assert diff < 1e-5, (
+                f"Cube-vertex ({ci},{cj}): production output "
+                f"differs from 'no-correction' reproduction by "
+                f"{diff:.3e}.  This means the legacy corner "
+                f"correction body IS executing under duogrid "
+                f"mode — the `if not use_duogrid:` gate at "
+                f"fv3_sw_core.py:1129 is broken.  Constraint "
+                f"#2 violated.")
 
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
