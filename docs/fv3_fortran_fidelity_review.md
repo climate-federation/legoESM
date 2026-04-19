@@ -168,6 +168,41 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-535 (2026-04-19)**: addressed Codex stop-time review of
+  iter-534: "the new regression never checks halo=3's third ring".
+
+  iter-534's edge-match test only compared `p_h3[1:-1, 1:-1]`
+  (the overlap with halo=2).  The OUTERMOST ring of halo=3 — i.e.,
+  the depth=2 edge strip + depth-2 corners — was unchecked.  A
+  refactor that silently skipped depth=2 in
+  `cube_rmp_vectorized` (e.g., changing
+  `for d in range(min(halo, ng))` → `range(min(halo, ng) - 1)`)
+  would not be caught.
+
+  Iter-535 adds
+  `test_duogrid_at_halo3_third_ring_carries_neighbour_data`:
+    - face-unique constant field (face f → value `f + 1.0`)
+    - calls `pad_halo(halo=3, duogrid=...)` with `duogrid_ng=4`
+    - for each face × each edge, asserts the depth=2 edge strip
+      (positions `[face, 0, 3:-3]` for WEST etc.) contains the
+      neighbour-face's value to `rtol=1e-5, atol=1e-6`
+
+  This works because under a face-unique constant field, the
+  Lagrange remap at depth=2 must produce the neighbour-face's
+  constant exactly (Lagrange weights sum to 1).  If the third
+  ring is unpopulated, the strip stays at zero (initialization
+  value from `_pad_halo_local_h3`), and the test fires with a
+  clear "halo=3 path is silently broken at depth=2" message.
+
+  **Sanity-checked locally**: simulated a regression by
+  monkey-patching `cube_rmp_vectorized` to zero the depth=2 ring
+  after running.  Test correctly reports max diff = 4.000 (face 0
+  WEST → neighbour face 3 → expected value 4.0; observed 0.0)
+  vs tolerance ~1e-6 → FAIL.
+
+  No production-path numerical changes (test only).
+  239/239 tests pass.
+
 - **iter-534 (2026-04-19)**: addressed Codex stop-time review of
   iter-533: "halo=3 duogrid was enabled more broadly than the
   implementation and tests support".

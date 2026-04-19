@@ -661,6 +661,76 @@ class TestPadHaloH3Dispatch:
             np.asarray(padded), 5.0, atol=1e-12,
             err_msg="duogrid+halo=3 broke constant-field preservation")
 
+    def test_duogrid_at_halo3_third_ring_carries_neighbour_data(self):
+        """Iter-535 (Codex follow-up to iter-534): the iter-534
+        edge-match test only checks `p_h3[1:-1, 1:-1]` — the overlap
+        with halo=2.  The OUTERMOST ring of halo=3 (depth=2 edge
+        strip + depth-2 corners) is never verified.
+
+        This test uses a face-unique constant field (each face set
+        to its face index) so that the depth-2 edge strip MUST
+        contain the neighbour-face's value (because depth=2 pulls
+        from the 3rd row of the neighbour's interior, which under a
+        face-unique field equals that neighbour's face index for
+        every cell).
+
+        The duogrid Lagrange remap on a face-unique field also
+        preserves neighbour-face values exactly (the Lagrange weights
+        sum to 1, and a constant input gives the same constant
+        output).  So the depth-2 edge strip of p_h3 MUST match the
+        neighbour face's value, not stay at zero (which would
+        indicate the duogrid-h3 path silently skipped depth 2).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+
+        # Face-unique constant field: each face = (face + 1.0).
+        data = jnp.zeros((6, n, n), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+
+        p_h3 = pad_halo(data, halo=3, duogrid=grid.duogrid)
+        p_h3_np = np.asarray(p_h3)
+        assert p_h3_np.shape == (6, n + 6, n + 6)
+
+        # Depth=2 strip positions in halo=3 padded array (interior at
+        # [3:-3, 3:-3]):
+        #   WEST  depth=2 → i=0
+        #   EAST  depth=2 → i=n+5
+        #   SOUTH depth=2 → j=0
+        #   NORTH depth=2 → j=n+5
+        # Strip range along the orthogonal axis: [3:-3] (interior j or i).
+        # Each cell of these strips should equal the neighbour face's
+        # constant value (= nbr_face + 1.0).
+        for face in range(6):
+            for edge in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, nbr_edge, _rev = CONNECTIVITY[face][edge]
+                expected = float(nbr_face) + 1.0
+                if edge == WEST:
+                    strip = p_h3_np[face, 0, 3:-3]
+                elif edge == EAST:
+                    strip = p_h3_np[face, n + 5, 3:-3]
+                elif edge == SOUTH:
+                    strip = p_h3_np[face, 3:-3, 0]
+                else:
+                    strip = p_h3_np[face, 3:-3, n + 5]
+                # Allow small float drift from the Lagrange remap
+                # (weights sum to 1 in exact arithmetic; float32
+                # gives ~1e-6 drift).
+                np.testing.assert_allclose(
+                    strip, expected, rtol=1e-5, atol=1e-6,
+                    err_msg=(f"face {face} edge {edge} depth=2 "
+                             f"strip = {strip} but expected "
+                             f"neighbour face {nbr_face} value "
+                             f"= {expected}.  iter-533 halo=3 path "
+                             f"is silently broken at depth=2 — "
+                             f"`cube_rmp_vectorized`'s loop or the "
+                             f"underlying `_pad_halo_local_h3` did "
+                             f"not populate the third ring."))
+
     def test_duogrid_at_halo3_h2_h3_edge_match(self):
         """Iter-534 (Codex follow-up to iter-533): the constant-field
         test alone is too weak — it would pass even if the duogrid
