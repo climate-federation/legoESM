@@ -168,6 +168,44 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-560 (2026-04-19)**: regression lock for `_laplacian_dgrid`
+  (previously untested).
+
+  `_laplacian_dgrid` (`src/legoesm/core/operators_cdgrid.py:921-
+  956`) computes the Laplacian of a D-grid field via corner →
+  centre → laplacian_compact → centre → corner round-trip.  Used
+  in production SW (via `cdgrid_momentum_tendencies` for A_h
+  viscosity and biharmonic hyperdiffusion at
+  operators_cdgrid.py:1158-1164) and compressible Euler
+  (compressible_euler_cdgrid.py:181-182).  Previously had NO
+  direct tests.
+
+  Added `TestLaplacianDgrid` (5 tests in `test_cdgrid.py`):
+    (a) `test_constant_field_zero_laplacian_2d`: Laplacian of a
+        uniform field is ~0 (halo-interpolation precision bound
+        1e-6).
+    (b) `test_shape_2d_preserved`: `(6, n+1, n+1)` output shape.
+    (c) `test_shape_3d_preserved`: `(6, n+1, n+1, nlev=5)` output
+        shape for 4D input.
+    (d) `test_3d_constant_per_level_yields_zero_per_level`:
+        different constant per level → every output level is ~0
+        (catches cross-level mixing in the vmap dispatch).
+    (e) `test_2d_vs_3d_consistency`: large-amplitude random input
+        (×1e6) → 3D path output at level k matches 2D path
+        applied to the k-th slice to 1e-4 relative.
+
+  **Sanity-checked**: patched the 3D branch to `u_sum =
+  jnp.sum(u_d, axis=-1, keepdims=True)` before the vmap (cross-
+  level mixing).  Test (e) correctly fires with max diff
+  1.780e-06 vs scale 1.513e-06 (100% relative error).  Tests (a),
+  (b), (c), (d) still pass — because constant-per-level input
+  sums to a constant and Lap(constant) = 0, which is exactly the
+  pattern (d) expects.  This is a real limitation of (d) but (e)
+  catches it.  Restored production code; all 5 tests pass.
+
+  No production-path numerical changes.  68/68 tests pass in
+  `test_cdgrid.py` (63 prior + 5 new).
+
 - **iter-559 (2026-04-19)**: addressed Codex stop-time review of
   iter-558: "the new regression lock leaves the production 4D/`dv`
   behavior unverified".

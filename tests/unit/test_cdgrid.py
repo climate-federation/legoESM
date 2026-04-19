@@ -836,6 +836,135 @@ class TestInterpCornerToCenter(unittest.TestCase):
                  f"plain-arithmetic variant."))
 
 
+class TestLaplacianDgrid(unittest.TestCase):
+    """Iter-560: regression lock for `_laplacian_dgrid`
+    (`src/legoesm/core/operators_cdgrid.py:921-956`).
+
+    Computes a Laplacian of a D-grid `(6, n+1, n+1[, nlev])` field
+    via cell-centre round-trip:
+      1. D-grid → cell centres (4-point average)
+      2. `laplacian_compact` at cell centres (with proper halo
+         exchange)
+      3. Cell centres → D-grid (4-point average, halo-aware)
+
+    Used in production SW
+    (`operators_cdgrid.py:1158-1164` via `cdgrid_momentum_tendencies`
+    for A_h viscosity and biharmonic hyperdiffusion) and
+    compressible Euler (`compressible_euler_cdgrid.py:181-182`).
+    Previously had NO direct tests.
+
+    Locks:
+      (a) Constant field → zero Laplacian (both 2D and 3D).
+      (b) Shape preservation: 2D `(6, n+1, n+1)` → same;
+          3D `(6, n+1, n+1, nlev)` → same.
+      (c) 3D per-level independence: applying to a 3D input with
+          a constant-per-level field yields output that is zero on
+          every level (not a cross-level mixing).
+      (d) 2D vs 3D consistency: taking level k of a 3D input and
+          running the 2D path matches the 3D path's level-k output.
+    """
+
+    def _build(self, n=6):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        return n, cdgrid
+
+    def test_constant_field_zero_laplacian_2d(self):
+        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        n, cdgrid = self._build(n=6)
+        u_d = jnp.full((6, n + 1, n + 1), 3.14, dtype=jnp.float64)
+        out = _laplacian_dgrid(u_d, cdgrid)
+        max_abs = float(jnp.max(jnp.abs(out)))
+        self.assertLess(
+            max_abs, 1e-6,
+            msg=(f"Constant field gives non-zero Laplacian; max "
+                 f"abs = {max_abs:.3e}.  Expected ~0 to within "
+                 f"halo-interpolation precision."))
+
+    def test_shape_2d_preserved(self):
+        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        n, cdgrid = self._build(n=6)
+        u_d = jnp.zeros((6, n + 1, n + 1))
+        out = _laplacian_dgrid(u_d, cdgrid)
+        self.assertEqual(out.shape, (6, n + 1, n + 1))
+
+    def test_shape_3d_preserved(self):
+        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        n, cdgrid = self._build(n=6)
+        nlev = 5
+        u_d = jnp.zeros((6, n + 1, n + 1, nlev))
+        out = _laplacian_dgrid(u_d, cdgrid)
+        self.assertEqual(out.shape, (6, n + 1, n + 1, nlev))
+
+    def test_3d_constant_per_level_yields_zero_per_level(self):
+        """A 3D field that is CONSTANT on each level (but differing
+        between levels) must produce zero Laplacian on EVERY level —
+        catches cross-level mixing in the vmap dispatch."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        n, cdgrid = self._build(n=6)
+        nlev = 4
+        # Level k = constant value (k + 1.0) everywhere
+        u_d_np = np.zeros((6, n + 1, n + 1, nlev))
+        for k in range(nlev):
+            u_d_np[..., k] = float(k + 1)
+        u_d = jnp.asarray(u_d_np)
+        out = np.asarray(_laplacian_dgrid(u_d, cdgrid))
+        for k in range(nlev):
+            level_max = float(np.max(np.abs(out[..., k])))
+            self.assertLess(
+                level_max, 1e-6,
+                msg=(f"Level {k} Laplacian on constant-per-level "
+                     f"field has max abs = {level_max:.3e}.  Either "
+                     f"the 3D branch mixes levels or drops the halo "
+                     f"exchange."))
+
+    def test_2d_vs_3d_consistency(self):
+        """A 3D field's k-th level Laplacian must equal the 2D
+        Laplacian of that level's slice.  Catches vmap/axis bugs,
+        cross-level mixing, and broadcasting errors.
+
+        Uses large-amplitude random fields scaled per-level so
+        (i) the Laplacian output is above numerical noise floor
+        for physical grid metrics, and (ii) a cross-level mixing
+        bug (e.g., summing levels before applying the Laplacian)
+        would produce distinctly different output on each level
+        compared to the per-level 2D path.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        n, cdgrid = self._build(n=6)
+        nlev = 3
+        rng = np.random.default_rng(560)
+        # Distinct per-level random fields — scaled up so signal is
+        # well above the grid-metric noise floor.
+        u_d_np = rng.standard_normal(
+            (6, n + 1, n + 1, nlev)).astype(np.float64) * 1e6
+        u_d = jnp.asarray(u_d_np)
+
+        out_3d = np.asarray(
+            _laplacian_dgrid(u_d, cdgrid), dtype=np.float64)
+
+        for k in range(nlev):
+            level = jnp.asarray(u_d_np[..., k])
+            out_2d = np.asarray(
+                _laplacian_dgrid(level, cdgrid), dtype=np.float64)
+            scale_k = max(float(np.max(np.abs(out_2d))), 1e-30)
+            diff = float(np.max(np.abs(out_3d[..., k] - out_2d)))
+            # Tolerance 1e-4 * scale: absorbs float32 vmap/grid
+            # metric drift while catching cross-level mixing
+            # (which gives diff ~ scale itself = 100% error).
+            self.assertLess(
+                diff, 1e-4 * scale_k,
+                msg=(f"Level {k}: 3D path output differs from "
+                     f"2D-per-level by {diff:.3e} (scale "
+                     f"{scale_k:.3e}).  The 3D branch should apply "
+                     f"the Laplacian independently on each level."))
+
+
 class TestExtrapolateBoundaryCorners(unittest.TestCase):
     """Iter-558: regression lock for `_extrapolate_boundary_corners`
     (`src/legoesm/core/operators_cdgrid.py:963-1006`).
