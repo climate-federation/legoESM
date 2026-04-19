@@ -168,6 +168,40 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-549 (2026-04-19)**: regression lock for `_broadcast_metric`
+  (`src/legoesm/core/operators_cdgrid.py:75-79`).
+
+  Utility that inserts a trailing singleton axis on a 2D metric when
+  the consumer field has higher ndim (adds ``nlev`` for 3D model
+  paths).  Used on EVERY 3D-compatible operator: `dgrid_vorticity`,
+  `_arakawa_lamb_gradient`, `cgrid_mass_flux_divergence`,
+  `dgrid_to_cgrid`, `fv3_cc2c`, etc.  A silent refactor that inserted
+  the singleton at the WRONG position (e.g. `metric[None, ...]`
+  instead of `metric[..., None]`) would produce either broadcast
+  errors OR silently wrong element-wise products — the former being
+  a loud crash, the latter being a silent numerical regression.
+
+  Before iter-549 this helper had NO direct tests.
+
+  Added `TestBroadcastMetric` (4 tests in `test_cdgrid.py`):
+    (a) Same-ndim: metric returned unchanged.
+    (b) Field 1-d higher: trailing singleton axis at correct
+        position (shape `(6, 8, 8) -> (6, 8, 8, 1)`, NOT
+        `(1, 6, 8, 8)`).
+    (c) Broadcast product `metric * field` matches per-level
+        element-wise on random distinct-value arrays.
+    (d) All-ones field times arbitrary metric replicates the
+        metric across the level dim to 1e-12.
+
+  **Sanity-checked**: patched to `metric[None, ...]` (wrong axis).
+  Tests (b), (c), (d) correctly fire — test (b) with "Expected
+  trailing singleton axis for 3D-field input; got shape
+  (1, 6, 8, 8)".  Test (a) still passes (same-ndim path unchanged).
+  Restored production code; all 4 tests pass.
+
+  No production-path numerical changes.  56/56 tests pass in
+  `test_cdgrid.py` (52 prior + 4 new).
+
 - **iter-548 (2026-04-19)**: regression lock for
   `_interp_center_to_corner` (previously untested).
 

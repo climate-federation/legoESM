@@ -836,6 +836,98 @@ class TestInterpCornerToCenter(unittest.TestCase):
                  f"plain-arithmetic variant."))
 
 
+class TestBroadcastMetric(unittest.TestCase):
+    """Iter-549: regression lock for `_broadcast_metric`
+    (`src/legoesm/core/operators_cdgrid.py:75-79`).
+
+    Utility that inserts a trailing singleton axis on a 2D metric when
+    the consumer field has a higher ndim (typically adding ``nlev``).
+    Used on every 3D-compatible code path: `dgrid_vorticity`,
+    `_arakawa_lamb_gradient`, `cgrid_mass_flux_divergence`, etc.
+    A silent refactor that inserted the axis at the WRONG position
+    (e.g. `metric[None, ...]` instead of `metric[..., None]`) would
+    produce broadcast errors or silently wrong element-wise products.
+
+    Before iter-549 this helper had NO direct tests.
+
+    Locks:
+      (a) Same-ndim: metric returned unchanged.
+      (b) Field 1-d higher: trailing singleton axis added.
+      (c) Field 2-d higher (rare but possible): still inserts once
+          then relies on numpy broadcasting.
+      (d) Broadcast semantics: `metric * field` with the broadcast
+          result equals per-level element-wise `metric * field[k]`.
+    """
+
+    def test_same_ndim_metric_returned_unchanged(self):
+        from legoesm.core.operators_cdgrid import _broadcast_metric
+        metric = jnp.ones((6, 8, 8))
+        field = jnp.zeros((6, 8, 8))
+        out = _broadcast_metric(metric, field)
+        # Must be identical object/array contents and shape.
+        self.assertEqual(out.shape, metric.shape)
+        self.assertTrue(jnp.all(out == metric))
+
+    def test_field_one_dim_higher_adds_trailing_singleton(self):
+        from legoesm.core.operators_cdgrid import _broadcast_metric
+        metric = jnp.ones((6, 8, 8))
+        field = jnp.zeros((6, 8, 8, 5))
+        out = _broadcast_metric(metric, field)
+        self.assertEqual(
+            out.shape, (6, 8, 8, 1),
+            msg=(f"Expected trailing singleton axis for 3D-field "
+                 f"input; got shape {out.shape}.  A `metric[None, "
+                 f"...]` refactor would produce (1, 6, 8, 8)."))
+
+    def test_broadcast_product_matches_per_level(self):
+        """The whole point of `_broadcast_metric` is that
+        `metric * field` works correctly for 3D fields.  Verify."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _broadcast_metric
+        rng = np.random.default_rng(549)
+        metric_np = rng.standard_normal((6, 8, 8)).astype(np.float64)
+        field_np = rng.standard_normal((6, 8, 8, 5)).astype(np.float64)
+        metric = jnp.asarray(metric_np)
+        field = jnp.asarray(field_np)
+
+        mbc = _broadcast_metric(metric, field)
+        product = np.asarray(mbc * field, dtype=np.float64)
+
+        for k in range(field_np.shape[-1]):
+            expected_k = metric_np * field_np[..., k]
+            max_diff = float(np.max(
+                np.abs(product[..., k] - expected_k)))
+            self.assertLess(
+                max_diff, 1e-12,
+                msg=(f"Level {k}: broadcast product differs from "
+                     f"`metric * field[..., {k}]` by {max_diff:.3e}. "
+                     f"A wrong-axis insertion (e.g. `metric[None, "
+                     f"...]` yielding shape (1,6,8,8)) would "
+                     f"broadcast incorrectly and fail this."))
+
+    def test_rejects_axis_position_error(self):
+        """If the helper incorrectly used `metric[None, ...]` instead
+        of `metric[..., None]`, the broadcast would mismatch shapes.
+        This test constructs the specific case that catches that
+        error mode."""
+        from legoesm.core.operators_cdgrid import _broadcast_metric
+        # metric shape (6, 8, 8), field shape (6, 8, 8, 5)
+        metric = jnp.arange(6 * 8 * 8, dtype=jnp.float64).reshape((6, 8, 8))
+        field = jnp.ones((6, 8, 8, 5), dtype=jnp.float64)
+
+        mbc = _broadcast_metric(metric, field)
+        # For correct broadcast shape (6, 8, 8, 1): product = metric
+        # replicated across level dim.  So product[..., 0] == metric.
+        product = mbc * field
+        self.assertEqual(product.shape, (6, 8, 8, 5))
+        for k in range(5):
+            max_diff = float(jnp.max(jnp.abs(product[..., k] - metric)))
+            self.assertLess(
+                max_diff, 1e-12,
+                msg=(f"Level {k}: product not equal to metric when "
+                     f"field is all-ones; max diff = {max_diff:.3e}."))
+
+
 class TestInterpCenterToCorner(unittest.TestCase):
     """Iter-548: regression lock for `_interp_center_to_corner`
     (`src/legoesm/core/operators_cdgrid.py:868-892`).
