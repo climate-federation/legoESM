@@ -197,6 +197,54 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-569 (2026-04-19)**: pyFV3 cross-reference for iter-128
+  non-duogrid `_d2a2c_vect` cube-vertex override gap.
+
+  Iter-128 architectural bound documented that Fortran
+  `sw_core.F90:3527-3545` writes 3 halo cells per corner-axis
+  (i=-2..0 and 0..2 per vertex, each encoded with a specific
+  sign), and that our `_fill_corners_h2` Python path can only
+  represent 2 cells per axis (architecturally blocked without
+  h=3 halo infrastructure).
+
+  Fetched pyFV3 `pyfv3/stencils/d2a2c_vect.py` (697 lines) and
+  confirmed the canonical port in pyFV3 uses:
+  ```python
+  from ndsl.stencils import corners
+  def fill_corners_x(utmp, vtmp, ua, va):
+      utmp = corners.fill_corners_3cells_mult_x(
+          utmp, vtmp,
+          sw_mult=-1, se_mult=1, ne_mult=-1, nw_mult=1)
+      ua = corners.fill_corners_2cells_mult_x(
+          ua, va,
+          sw_mult=-1, se_mult=1, ne_mult=-1, nw_mult=1)
+  ```
+
+  Two canonical multiplier tables:
+    - **utmp / vtmp** get the **3-cell** fill (matching Fortran
+      `sw_core.F90:3527-3545, 3620-3640` i=-2..0 loops).
+    - **ua / va** get the **2-cell** fill (matching Fortran
+      `sw_core.F90:3567-3582` ua(-1, 0) = -va(0, 2) etc.).
+    - Multipliers per corner (same for both 3-cell and 2-cell,
+      applied to `utmp` in x; symmetric for `vtmp` in y):
+        sw_corner: -1  (x-direction: utmp(-i, 0) = -vtmp(0, 1+i))
+        se_corner: +1  (utmp(npx+i, 0) = +vtmp(npx, i+1))
+        ne_corner: -1  (utmp(npx+i, npy) = -vtmp(npx, je-i))
+        nw_corner: +1  (utmp(-i, npy) = +vtmp(0, je-i))
+
+  The `3cells` helper is the 3-deep Fortran-faithful version we
+  cannot currently implement with h=2 halo.  The `2cells`
+  helper for ua/va is the subset our current `_fill_corners_h2`
+  can reach.
+
+  **Actionable next step for a future iter**: when the iter-496
+  h=3 halo infrastructure (already scaffolded in iter-530-533) is
+  wired into `_d2a2c_vect`, port `fill_corners_3cells_mult_x`
+  directly using the multiplier table above.  No more
+  architectural bound.
+
+  Doc-only; no code or test changes.
+
 - **iter-568 (2026-04-19)**: addressed Codex stop-time review of
   iter-567: "boundary-diff assertion is driven by unused
   outer-edge cells, not production flux inputs".
