@@ -400,6 +400,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_salt: bool = True
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
+    barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
     max_abs_eta_m: float = 1.0e4

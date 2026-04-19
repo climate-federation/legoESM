@@ -136,6 +136,15 @@ def barotropic_substeps_mpas(
             0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2])
         )
 
+    # Divergence damping on barotropic velocity: grad(div(u_bar)).
+    # Targets the divergent mode that creates the eta checkerboard (#205).
+    use_div_damp = config.barotropic_div_damp > 0.0
+    if use_div_damp:
+        div_damp_coeff = jnp.asarray(
+            config.barotropic_div_damp, dtype=eta.dtype,
+        ) * (dt_baro / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+        div_damp_area_edge = 0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2])
+
     # --- Fix 3: Semi-implicit Coriolis (trapezoidal predictor-corrector) ---
     # On Voronoi meshes, the (u, v_tangential) decomposition doesn't
     # allow a direct Crank-Nicolson solve. Instead, use a trapezoidal
@@ -203,6 +212,15 @@ def barotropic_substeps_mpas(
             v_t_old = tangential_velocity(u_bar_c, mesh)
             u_bar_next = u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * v_t_old
+            ) * edge_mask
+
+        # Divergence damping: add nu * grad(div(u_bar)) (#205).
+        if use_div_damp:
+            div_ubar = divergence_cell(u_bar_next * edge_mask, mesh) * mask
+            div_filled = _fill_land_cells_mpas(div_ubar, mask)
+            grad_div = gradient_edge(div_filled, mesh)
+            u_bar_next = (
+                u_bar_next + div_damp_coeff * div_damp_area_edge * grad_div
             ) * edge_mask
 
         # Optional barotropic damping (Rayleigh drag)

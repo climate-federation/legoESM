@@ -97,6 +97,7 @@ class ACCChannelConfig:
     K_h: float = 1e3                # tracer diffusivity [m^2/s]
 
     barotropic_diffusion_alpha: float = 0.05
+    barotropic_div_damp: float = 0.05
 
     @property
     def ridge_lon_center_deg(self) -> float:

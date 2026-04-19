@@ -179,6 +179,27 @@ def barotropic_substeps_latlon_cgrid(
             [zero_row_m, diff_v_mask_interior, zero_row_m], axis=0,
         )
 
+    # Divergence damping on barotropic velocity: grad(div(u_bar)).
+    # Targets the divergent mode that creates the eta checkerboard,
+    # while leaving geostrophic (rotational) flow untouched (#205).
+    use_div_damp = config.barotropic_div_damp > 0.0
+    if use_div_damp:
+        div_damp_coeff = jnp.asarray(
+            config.barotropic_div_damp, dtype=eta.dtype,
+        ) * (dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+        _area = grid.area  # (n_lat, n_lon)
+        # u-face area: average of adjacent cells
+        div_damp_area_u = 0.5 * (jnp.roll(_area, 1, axis=1) + _area)
+        div_damp_area_u = jnp.concatenate(
+            [div_damp_area_u, div_damp_area_u[:, 0:1]], axis=1,
+        )
+        # v-face area: average of adjacent cells
+        div_damp_area_v_int = 0.5 * (_area[:-1] + _area[1:])
+        zero_row_dd = jnp.zeros((1, _area.shape[1]), dtype=eta.dtype)
+        div_damp_area_v = jnp.concatenate(
+            [zero_row_dd, div_damp_area_v_int, zero_row_dd], axis=0,
+        )
+
     # Accumulators for time-averaged barotropic transport (Phase 2a, issue #102).
     # These accumulate the mass fluxes H*U_bar at each substep so the tracer
     # equation can use transport consistent with the barotropic continuity.
@@ -251,6 +272,23 @@ def barotropic_substeps_latlon_cgrid(
             [zero_row_u, U_new_at_v_interior, zero_row_u], axis=0,
         )
         V_bar_new = (V_bar_c + dt_s * (-f_v * U_new_at_v - g * deta_dy)) * v_mask
+
+        # Divergence damping: add nu * grad(div(U_bar, V_bar)).
+        # Applied to updated velocity to damp the divergent component
+        # before it enters the next substep's continuity equation (#205).
+        if use_div_damp:
+            div_uv = divergence_cgrid(
+                U_bar_new, V_bar_new, grid,
+                u_mask=u_mask, v_mask=v_mask,
+            ).astype(eta.dtype)
+            grad_div_x = gradient_x_cgrid(div_uv * mask, grid).astype(eta.dtype)
+            grad_div_y = gradient_y_cgrid(div_uv * mask, grid).astype(eta.dtype)
+            U_bar_new = (
+                U_bar_new + div_damp_coeff * div_damp_area_u * grad_div_x
+            ) * u_mask
+            V_bar_new = (
+                V_bar_new + div_damp_coeff * div_damp_area_v * grad_div_y
+            ) * v_mask
 
         # Bottom drag on barotropic velocity: -r * U_bar / H_total.
         # r is in [m/s] — the stress tau = rho_0 * r * u is resolution-

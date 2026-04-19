@@ -1537,6 +1537,7 @@ def run_acc_channel(tc: TestCase, output_dir: Path, days: float
                 S_ref=acc_config.S_uniform,
             ),
             barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=acc_config.barotropic_div_damp,
         ))
 
     state = acc_ic(tc.grid_type, grid, z_coord, acc_config)
@@ -1648,6 +1649,7 @@ def run_acc_channel_rest(tc: TestCase, output_dir: Path, days: float
                 S_ref=acc_config.S_uniform,
             ),
             barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=acc_config.barotropic_div_damp,
         ))
 
     state = acc_ic(tc.grid_type, grid, z_coord, acc_config)

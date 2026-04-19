@@ -45,7 +45,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         bottom_drag_r: float | None = None,
                         eos: str | None = None,
                         eos_linear=None,
-                        barotropic_diffusion_alpha: float | None = None):
+                        barotropic_diffusion_alpha: float | None = None,
+                        barotropic_div_damp: float | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -210,6 +211,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["eos_linear"] = eos_linear
         if barotropic_diffusion_alpha is not None:
             kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
         cfg = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
@@ -251,6 +254,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["eos_linear"] = eos_linear
         if barotropic_diffusion_alpha is not None:
             kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
