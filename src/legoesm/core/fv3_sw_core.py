@@ -1401,11 +1401,15 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     cdgrid : CubedSphereCDGrid
     dt : float — full time step
     g : float
-    div_damp : float — LEGACY, UNUSED.  Forwarded to `_d_sw_native`
-        which ignores it (see `_d_sw_native` docstring).  The FB
-        chain uses the d_sw5 divergence damping via `d2_bg/dddmp/
-        d4_bg/nord`, not this field.  Accepted for back-compat with
-        existing callers.
+    div_damp : float — LEGACY, UNUSED in this FB-chain entry point.
+        Forwarded to `_d_sw_native` which ignores it.  See
+        `_d_sw_native` docstring for the split across paths (three
+        LIVE-use paths at `cdgrid_momentum_tendencies`,
+        `fv3_sw_tendencies` A-L production, and `fv3_csw_tendencies`
+        experimental CSW — they share
+        `CDGridShallowWaterConfig.div_damp`).  The FB chain's
+        divergence damping comes from d_sw5 coefficients
+        (d2_bg/dddmp/d4_bg/nord), not this field.
     hyperdiff_coeff : float — biharmonic hyperdiffusion coefficient
 
     Returns
@@ -1732,13 +1736,16 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
         validated in the body of `_d_sw_native`; it is kept in the
         signature only for backward compatibility with the FB
         chain callers (`fv3_forward_backward_step`, `fv3_fb_sw_step`)
-        that forward it.  NOTE: `fv3_csw_tendencies` is a SEPARATE
-        experimental-CSW path that DOES use `div_damp` (see
-        fv3_sw_core.py:1344-1350) — the `CDGridShallowWaterConfig.
-        div_damp` field therefore remains live for that path.
-        Future consolidation should drop `div_damp` from the FB
-        entry points only, not from `fv3_csw_tendencies` or
-        `CDGridShallowWaterConfig`.
+        that forward it.  NOTE: three SEPARATE paths DO use
+        `div_damp` and share `CDGridShallowWaterConfig.div_damp`:
+        `cdgrid_momentum_tendencies` (operators_cdgrid.py:1124),
+        `fv3_sw_tendencies` (operators_cdgrid.py:1384 — the A-L RK3
+        PRODUCTION path), and `fv3_csw_tendencies` (fv3_sw_core.py:
+        1344 — experimental CSW).  The config field therefore
+        remains live across three paths; only the FB chain
+        forwards-and-ignores it.  Future consolidation should drop
+        `div_damp` from the FB entry points only, not from the
+        config or the three live-use paths.
     d2_bg : float — FV3 d_sw5 background del-2 coefficient (default 0.0)
     dddmp : float — FV3 d_sw5 adaptive Smagorinsky coefficient (default 0.0)
     d4_bg : float — FV3 d_sw5 background del-4+ coefficient (default 0.16)
@@ -1853,11 +1860,12 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     dt, g : float
     div_damp : float — LEGACY, UNUSED in the FB chain.  Forwarded to
         `_d_sw_native` which ignores it; see `_d_sw_native` docstring
-        for the split (this FB chain unused; separate
-        `fv3_csw_tendencies` path still uses `div_damp` — they share
-        the same `CDGridShallowWaterConfig.div_damp` field).  The FB
-        chain's divergence damping comes from `d2_bg/dddmp/d4_bg/
-        nord` (d_sw5 coefficients).
+        for the split (this FB chain unused; three separate paths —
+        `cdgrid_momentum_tendencies`, `fv3_sw_tendencies` A-L RK3
+        production, `fv3_csw_tendencies` experimental CSW — all use
+        `div_damp` and share `CDGridShallowWaterConfig.div_damp`).
+        The FB chain's divergence damping comes from `d2_bg/dddmp/
+        d4_bg/nord` (d_sw5 coefficients).
     d2_bg : float — FV3 background del-2 coefficient (default 0.0)
     dddmp : float — FV3 adaptive Smagorinsky coefficient (default 0.0)
     d4_bg : float — FV3 background del-4+ coefficient (default 0.16)
