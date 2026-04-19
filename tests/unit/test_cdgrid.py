@@ -836,6 +836,164 @@ class TestInterpCornerToCenter(unittest.TestCase):
                  f"plain-arithmetic variant."))
 
 
+class TestArakawaLambGradient(unittest.TestCase):
+    """Iter-572: regression lock for `_arakawa_lamb_gradient`
+    (`src/legoesm/core/operators_cdgrid.py:811-861`).
+
+    Production-critical helper used in `fv3_sw_tendencies` step (d)
+    to compute the Bernoulli gradient at D-grid corners.  Pre-iter-
+    572 tests only verified the constant-field → zero invariant;
+    no tests caught a no-op or sign-flip regression on non-zero
+    input.
+
+    Locks:
+      (a) Shape: `(6, n, n)` → `(6, n+1, n+1)` (2D), `(6, n, n,
+          nlev)` → `(6, n+1, n+1, nlev)` (3D).
+      (b) No-op detection: spatially-varying input must produce
+          non-zero output.
+      (c) Anti-symmetry: B → -B produces negated gradient.
+      (d) Linearity: scaling B by α scales the gradient by α.
+      (e) `padded=` bypass: when caller pre-pads, the result
+          matches the internal-pad result on the same input.
+    """
+
+    def _build(self, n=6):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        return n, cdgrid
+
+    def test_shape_2d(self):
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        B = jnp.zeros((6, n, n))
+        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        self.assertEqual(dB_dx.shape, (6, n + 1, n + 1))
+        self.assertEqual(dB_dy.shape, (6, n + 1, n + 1))
+
+    def test_shape_3d(self):
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        nlev = 4
+        B = jnp.zeros((6, n, n, nlev))
+        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        self.assertEqual(dB_dx.shape, (6, n + 1, n + 1, nlev))
+        self.assertEqual(dB_dy.shape, (6, n + 1, n + 1, nlev))
+
+    def test_non_zero_output_on_varying_field(self):
+        """A spatially-varying field must produce non-zero
+        gradient — rules out a `return zeros_like(B)` refactor
+        that would pass only the constant-field test."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
+        lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
+        B_np = 100.0 + 50.0 * np.cos(2 * lon) * np.sin(lat)
+        B = jnp.asarray(B_np)
+        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        max_grad = max(
+            float(jnp.max(jnp.abs(dB_dx))),
+            float(jnp.max(jnp.abs(dB_dy))))
+        # Physical gradient scale: 50 / R_earth ~ 8e-6 per cell,
+        # so threshold 1e-7 cleanly distinguishes real gradient
+        # from a no-op (which would give exactly 0).
+        self.assertGreater(
+            max_grad, 1e-7,
+            msg=(f"Spatially-varying field produced ~zero gradient; "
+                 f"max = {max_grad:.3e}.  If the function was "
+                 f"replaced with a no-op (return zeros), this "
+                 f"assertion fires."))
+
+    def test_anti_symmetry_negation(self):
+        """_arakawa_lamb_gradient(B) == -_arakawa_lamb_gradient(-B).
+        Catches sign bugs in the 4-point stencil."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(572)
+        B_np = rng.standard_normal((6, n, n)).astype(np.float64)
+        B_pos = jnp.asarray(B_np)
+        B_neg = jnp.asarray(-B_np)
+        dx_pos, dy_pos = _arakawa_lamb_gradient(B_pos, cdgrid)
+        dx_neg, dy_neg = _arakawa_lamb_gradient(B_neg, cdgrid)
+        # Constant offset in B would break this if the function
+        # had a bias, but with -B being exact negation, the output
+        # should be exact negation.
+        diff_x = float(jnp.max(jnp.abs(
+            jnp.asarray(dx_pos) + jnp.asarray(dx_neg))))
+        diff_y = float(jnp.max(jnp.abs(
+            jnp.asarray(dy_pos) + jnp.asarray(dy_neg))))
+        self.assertLess(
+            diff_x, 1e-10,
+            msg=f"dx anti-symmetry failed; max dev {diff_x:.3e}.")
+        self.assertLess(
+            diff_y, 1e-10,
+            msg=f"dy anti-symmetry failed; max dev {diff_y:.3e}.")
+
+    def test_linearity_scaling(self):
+        """grad(α*B) == α*grad(B).  Catches a non-linear
+        refactor (e.g., if a clip or max operation was added)."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(1572)
+        B_np = rng.standard_normal((6, n, n)).astype(np.float64)
+        B = jnp.asarray(B_np)
+        B_5x = jnp.asarray(5.0 * B_np)
+
+        dx_1, dy_1 = _arakawa_lamb_gradient(B, cdgrid)
+        dx_5, dy_5 = _arakawa_lamb_gradient(B_5x, cdgrid)
+
+        diff_x = float(jnp.max(jnp.abs(
+            jnp.asarray(dx_5) - 5.0 * jnp.asarray(dx_1))))
+        diff_y = float(jnp.max(jnp.abs(
+            jnp.asarray(dy_5) - 5.0 * jnp.asarray(dy_1))))
+        scale = float(jnp.max(jnp.abs(jnp.asarray(dx_5))))
+        self.assertLess(
+            diff_x, 1e-6 * max(scale, 1.0),
+            msg=(f"Linearity failed on dx; diff {diff_x:.3e} "
+                 f"scale {scale:.3e}.  Non-linear refactor?"))
+        self.assertLess(
+            diff_y, 1e-6 * max(scale, 1.0),
+            msg=(f"Linearity failed on dy; diff {diff_y:.3e}."))
+
+    def test_padded_bypass_matches_internal_pad(self):
+        """Providing `padded=` must produce the same result as
+        calling without `padded=` on a matching input.  Catches
+        bypass bugs where the pre-padded path diverges from the
+        internal-padding path."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            _arakawa_lamb_gradient, _pad_halo_auto)
+        n, cdgrid = self._build(n=6)
+        rng = np.random.default_rng(2572)
+        B_np = rng.standard_normal((6, n, n)).astype(np.float64)
+        B = jnp.asarray(B_np)
+
+        # Path A: internal pad
+        dx_a, dy_a = _arakawa_lamb_gradient(B, cdgrid)
+        # Path B: pre-padded via _pad_halo_auto
+        B_pad = _pad_halo_auto(B, cdgrid)
+        dx_b, dy_b = _arakawa_lamb_gradient(
+            B, cdgrid, padded=B_pad)
+
+        diff_x = float(jnp.max(jnp.abs(
+            jnp.asarray(dx_a) - jnp.asarray(dx_b))))
+        diff_y = float(jnp.max(jnp.abs(
+            jnp.asarray(dy_a) - jnp.asarray(dy_b))))
+        self.assertLess(
+            diff_x, 1e-10,
+            msg=(f"padded= bypass differs from internal pad on dx; "
+                 f"max dev {diff_x:.3e}."))
+        self.assertLess(
+            diff_y, 1e-10,
+            msg=(f"padded= bypass differs from internal pad on dy; "
+                 f"max dev {diff_y:.3e}."))
+
+
 class TestPadHaloAutoWrappers(unittest.TestCase):
     """Iter-565: regression lock for `_pad_halo_auto` and
     `_pad_halo_auto_h2` (`src/legoesm/core/operators_cdgrid.py:

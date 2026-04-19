@@ -197,6 +197,32 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-572 (2026-04-19)**: regression lock for
+  `_arakawa_lamb_gradient` — went from 2 trivial tests
+  (constant → 0) to 6 comprehensive behavior locks.
+
+  Pre-iter-572 tests for `_arakawa_lamb_gradient` only verified
+  `test_gradient_constant_field` and `test_gradient_3d_constant`
+  (both just the constant-input-→-zero invariant).  A `return
+  jnp.zeros_like(B)` no-op refactor would pass both.
+
+  Added `TestArakawaLambGradient` (6 tests):
+    (a) 2D shape: `(6, n, n)` → `(6, n+1, n+1)`.
+    (b) 3D shape: `(6, n, n, nlev)` → `(6, n+1, n+1, nlev)`.
+    (c) No-op detection: spatially-varying input `100 + 50 *
+        cos(2*lon) * sin(lat)` must produce max gradient
+        > 1e-7 (physical scale ~50/R_earth = 8e-6, empirical
+        2.3e-5).
+    (d) Anti-symmetry: `grad(-B) == -grad(B)` to 1e-10.
+    (e) Linearity: `grad(5B) == 5*grad(B)` to 1e-6 relative —
+        catches non-linear refactors (e.g., unexpected clips).
+    (f) `padded=` bypass parity: `_arakawa_lamb_gradient(B,
+        cdgrid, padded=_pad_halo_auto(B, cdgrid))` matches the
+        internal-pad path bit-for-bit.
+
+  No production-path numerical changes.  91/91 tests pass in
+  `test_cdgrid.py` (85 prior + 6 new).
+
 - **iter-571 (2026-04-19)**: pyFV3 cross-reference for iter-552
   `_corner_vorticity` gate + halo-exchange gap diagnosis.
 
