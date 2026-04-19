@@ -168,6 +168,36 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-534 (2026-04-19)**: addressed Codex stop-time review of
+  iter-533: "halo=3 duogrid was enabled more broadly than the
+  implementation and tests support".
+
+  iter-533's only test for the new path was `pad_halo(constant,
+  halo=3, duogrid=...)` → constant.  That preserves the iter-499
+  guard's removal but is far too weak — a function that silently
+  did nothing on the outer halo cells would still pass.
+
+  Iter-534 adds a stronger test
+  `test_duogrid_at_halo3_h2_h3_edge_match` that:
+    - builds a real cdgrid + smooth NON-constant field
+      (`cos(lat)² + 0.1*lon`) with two duogrid_ng configurations
+      (ng=4 → full Lagrange at all 3 halo depths; ng=2 → Lagrange
+      + averaging-fallback at outer halo);
+    - calls `pad_halo(halo=2, duogrid=dg)` and `pad_halo(halo=3,
+      duogrid=dg)` on the same field;
+    - asserts that the EDGE-STRIP cells of `p_h3[1:-1, 1:-1]`
+      match `p_h2[:, :]` to `rtol=1e-6, atol=1e-6` — explicitly
+      excluding the four 2×2 corner blocks (which legitimately
+      differ because corner-fill rules depend on halo depth).
+
+  **Sanity-checked locally**: restoring the iter-499 guard
+  (`raise NotImplementedError`) makes the test fire — confirming
+  the test DOES exercise the new path.  Without the guard
+  (post-iter-533), it passes for both ng=4 and ng=2.
+
+  No production-path numerical changes (test only).
+  238/238 tests pass.
+
 - **iter-533 (2026-04-19)**: extended `pad_halo` to support
   `halo=3` together with `duogrid` — completing one more iter-496..501
   precondition for the `_d2a2c_vect_duogrid` upgrade to h=3.

@@ -646,26 +646,80 @@ class TestPadHaloH3Dispatch:
         np.testing.assert_array_equal(
             np.asarray(padded[0, -1, 3:-3]), np.asarray(data[0, -1, :]))
 
-    def test_duogrid_at_halo3_works_with_real_duogrid(self):
-        """Iter-533 (was iter-499): halo=3 is now ALLOWED for the
-        duogrid path because `cube_rmp_vectorized` and
-        `fill_corner_region` already loop over halo depth.  This test
-        verifies a real duogrid build accepts halo=3 and produces a
-        finite, correctly-shaped output on a constant field."""
+    def test_duogrid_at_halo3_constant_field_preserved(self):
+        """Iter-533 / iter-534: halo=3 is allowed for the duogrid path
+        because `cube_rmp_vectorized` and `fill_corner_region` already
+        loop over halo depth.  Constant-field preservation guard."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        # Build a real cubed sphere with duogrid enabled (ng=4 covers
-        # the full 3-deep Lagrange path).
         n = 8
         grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
         assert grid.duogrid is not None
         data = jnp.ones((6, n, n), dtype=jnp.float64) * 5.0
         padded = pad_halo(data, halo=3, duogrid=grid.duogrid)
         assert padded.shape == (6, n + 6, n + 6)
-        # Constant field: every padded cell must remain 5.0 (no halo
-        # path can introduce non-trivial variation).
         np.testing.assert_allclose(
             np.asarray(padded), 5.0, atol=1e-12,
             err_msg="duogrid+halo=3 broke constant-field preservation")
+
+    def test_duogrid_at_halo3_h2_h3_edge_match(self):
+        """Iter-534 (Codex follow-up to iter-533): the constant-field
+        test alone is too weak — it would pass even if the duogrid
+        halo=3 path silently did nothing on the outer halo cells.
+
+        Stronger guard: on a smooth non-constant field, the halo=3
+        output's EDGE-STRIP region (the cells filled by face-to-face
+        edge exchange + Lagrange remap, EXCLUDING cube-vertex
+        corner cells) must match the halo=2 output at the
+        corresponding interior-overlap positions.
+
+        Cube-vertex corner cells of `p_h3[1:-1, 1:-1]` and
+        `p_h2[:, :]` differ legitimately because corner-fill rules
+        depend on halo depth (the corner-fill recursion fills the
+        interior-most diagonal first, then propagates outward;
+        h=3's depth-1 cell uses different neighbours from h=2's
+        outermost-cell corner-fill).
+
+        This test masks out the cube-vertex corner cells and asserts
+        the remaining edge cells match.  Verified for both ng=4
+        (full Lagrange at all 3 halo depths) and ng=2 (Lagrange +
+        averaging fallback at outer halo).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        n = 8
+        for ng in (4, 2):
+            grid = create_cubed_sphere(
+                n=n, use_duogrid=True, duogrid_ng=ng)
+            data = jnp.cos(grid.lat) ** 2 + 0.1 * grid.lon
+            p_h2 = pad_halo(data, halo=2, duogrid=grid.duogrid)
+            p_h3 = pad_halo(data, halo=3, duogrid=grid.duogrid)
+            assert p_h2.shape == (6, n + 4, n + 4)
+            assert p_h3.shape == (6, n + 6, n + 6)
+            inner_h3 = np.asarray(p_h3[:, 1:-1, 1:-1])  # (6, n+4, n+4)
+            ref_h2 = np.asarray(p_h2)                    # (6, n+4, n+4)
+            # Mask: cell (i, j) is a corner-fill cell (depends on halo
+            # depth) iff BOTH i and j are inside one of the 2-cell
+            # halo strips at the array boundary (i.e., the four 2×2
+            # corner blocks at [0..1, 0..1], [0..1, n+2..n+3], etc.).
+            # The remaining cells are either interior or pure
+            # edge-strip cells, which DO match between halo=2 and the
+            # iter-533 halo=3 inner overlap.
+            np_p2 = n + 4
+            halo_w = 2
+            in_i_halo = lambda i: i < halo_w or i >= np_p2 - halo_w
+            mask = np.ones((np_p2, np_p2), dtype=bool)
+            for i in range(np_p2):
+                for j in range(np_p2):
+                    if in_i_halo(i) and in_i_halo(j):
+                        mask[i, j] = False
+            np.testing.assert_allclose(
+                inner_h3[:, mask], ref_h2[:, mask],
+                rtol=1e-6, atol=1e-6,
+                err_msg=(f"duogrid_ng={ng}: halo=3 edge-strip / "
+                         f"interior cells do not match halo=2.  "
+                         f"iter-533 path is silently broken at edge "
+                         f"halos.  (Corner 2×2 blocks excluded — "
+                         f"those legitimately differ by halo depth.)"))
 
 
 # ---------------------------------------------------------------------------
