@@ -197,6 +197,48 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-567 (2026-04-19)**: concrete measurable divergence
+  test for CW vs iord==8 PPM limiters.
+
+  Iter-566 documented the divergence with code snippets.  Iter-567
+  converts that documentation into an executable, reproducible
+  regression target.
+
+  Added
+  `TestPpmCwVsFv3Iord8Divergence::test_cw_vs_fv3_iord8_smooth_extremum_stencil`:
+    - Input stencil: `[1, 2, 3, 4, 3, 2, 1]` (triangle).
+    - Computes q_L, q_R via two paths:
+      (A) production `_ppm_reconstruct_1d` (CW)
+      (B) in-test numpy reproduction of pyFV3 `dm_iord8plus` +
+          `al_iord8plus` + `blbr_iord8` (exact translation of
+          `xppm.py:79-97`)
+    - Empirical values on this stencil:
+      ```
+      CW:    q_L = [0.92, 1.42, 2.50, 4.00, 3.67, 2.50, 1.42]
+      iord8: q_L = [1.00, 1.33, 2.50, 4.00, 3.67, 2.50, 1.00]
+      CW:    q_R = [1.17, 2.50, 3.67, 4.00, 2.50, 1.42, 0.17]
+      iord8: q_R = [1.00, 2.50, 3.67, 4.00, 2.50, 1.33, 1.00]
+      ```
+    - Interior cells (peak i=3, shoulder i=2) are IDENTICAL —
+      locked explicitly via `assertAlmostEqual`.  Both schemes
+      flatten at the peak (CW via extremum detection, iord==8
+      via dm→0) and give the same 4th-order interpolant on the
+      shoulder.
+    - Boundary cells (i=0, 1, 5, 6) DIVERGE — max abs diff ≥
+      0.05 due to CW's `mode='edge'` padding vs iord==8's dm-
+      slope extrapolation.
+
+  **Meaning for future porters**: a correct iord==8 port into
+  `_ppm_reconstruct_1d` must CHANGE this test's expected values
+  at boundary cells (but leave interior-cell assertions intact
+  if the port doesn't alter the mord==3/8 flattening behavior).
+  The test will fire, requiring an update — exactly the signal
+  needed to validate that the port reproduces the documented
+  iord==8 formula.
+
+  No production-path numerical changes.  64/64 tests pass in
+  `test_cdgrid_fv3_regression.py` (63 prior + 1 new).
+
 - **iter-566 cross-reference: pyFV3's xppm.py vs our
   `_ppm_reconstruct_1d`** (concrete evidence for iter-542
   documented divergence):
