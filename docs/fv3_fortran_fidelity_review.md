@@ -168,6 +168,45 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-554 (2026-04-19)**: regression lock for
+  `_divergence_corner_duo` (previously untested).
+
+  `_divergence_corner_duo` (`src/legoesm/core/fv3_sw_core.py:
+  827-921`) is the duogrid-specific corner divergence helper used
+  by `_d_sw5_corner_divergence`'s nord>0 branch.  Per Fortran
+  `sw_core.F90:2431-2440`, it applies two specific Fortran-faithful
+  boundary treatments AFTER the corner divergence formula:
+    1. Zero the 4 face boundaries (i=0, i=n, j=0, j=n)
+    2. Multiply the 4 face-adjacent rows/cols (i=1, i=n-1, j=1,
+       j=n-1) by 0.25
+
+  Before iter-554, these had NO direct regression tests.  A
+  silent refactor that (i) reversed the order (attenuate then
+  zero), (ii) changed the 0.25 factor to 0.5 or 1.0, or (iii)
+  dropped either step would go undetected in the FB-chain runtime
+  tests.
+
+  Added 2 tests to `TestFvTp2dCornerInvariant`:
+    (a) `test_divergence_corner_duo_face_boundary_zeroing`: random
+        non-trivial input must yield EXACTLY zero at the 4 face
+        boundaries.  Shape check included.
+    (b) `test_divergence_corner_duo_attenuation_factor`: via
+        linearity scaling (4× input → 4× output at non-boundary
+        cells) plus a rms comparison between i=1 (face-adjacent)
+        and i=2 (interior) rows: rms_1 < 0.6 * rms_2 confirms
+        attenuation is active (0.25-factor collapses i=1 magnitude).
+
+  **Two-stage sanity check**:
+    (i) Dropped the 4 boundary `.set(0.0)` lines.  Test (a) fires
+        with "divg_d[:, 0, :] not zero; max abs = 5.181e-05".
+    (ii) Changed attenuation factor 0.25 → 1.0.  Test (b) fires
+         with "rms 2.227e-06 not substantially smaller than
+         interior rms 1.830e-06".
+
+  Restored production code; all 2 tests pass.  No production-path
+  numerical changes.  63/63 tests pass in
+  `test_cdgrid_fv3_regression.py` (61 prior + 2 new).
+
 - **iter-553 (2026-04-19)**: addressed Codex stop-time review of
   iter-552: "the iter-552 code change is still untested on the only
   branch it modified".
