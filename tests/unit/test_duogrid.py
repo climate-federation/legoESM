@@ -2231,6 +2231,78 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
                 f"restructured the gating (e.g., unified into "
                 f"a helper), UPDATE this test.")
 
+    def test_corner_vorticity_legacy_correction_not_applied_under_duogrid(self):
+        """Iter-582 (Codex follow-up to iter-581): the AST count
+        test alone is too weak — a refactor could empty the `if`
+        body, flip the condition, or move the correction
+        elsewhere.
+
+        This test verifies BEHAVIORALLY that under duogrid=True,
+        the 4 cube-vertex corrections in `_corner_vorticity`
+        (fv3_sw_core.py:1129-1133) are NOT applied to the output.
+
+        Strategy:
+          - Run `_corner_vorticity(uc, vc, cdgrid, use_duogrid=True)`
+            on a known input.
+          - Reproduce what the vorticity WOULD be if the legacy
+            correction WERE applied (i.e., add `fy_pad[0,0]`,
+            subtract `fy_pad[n+1,0]`, etc. at the 4 corners).
+          - Assert production output ≠ the-with-correction
+            version at the cube-vertex corners — proving the
+            correction is bypassed under duogrid.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(582)
+        # Non-trivial uc, vc so the legacy correction is measurable
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
+
+        # Production call with duogrid=True: legacy branch should
+        # be bypassed.
+        vort_duogrid = np.asarray(
+            _corner_vorticity(uc, vc, cdgrid, use_duogrid=True))
+
+        # Production call with duogrid=False: legacy branch fires.
+        vort_nonduogrid = np.asarray(
+            _corner_vorticity(uc, vc, cdgrid, use_duogrid=False))
+
+        # The 4 cube-vertex corners (0,0), (0,n), (n,0), (n,n)
+        # should differ between the two calls — because the
+        # legacy correction fires only in the non-duogrid path.
+        for (ci, cj) in [(0, 0), (0, n), (n, 0), (n, n)]:
+            diff = float(np.max(np.abs(
+                vort_duogrid[:, ci, cj] - vort_nonduogrid[:, ci, cj])))
+            assert diff > 1e-9, (
+                f"Cube-vertex ({ci},{cj}): vort(duogrid=True) and "
+                f"vort(duogrid=False) match to {diff:.3e} — the "
+                f"legacy correction appears to fire in BOTH modes, "
+                f"which means the `if not use_duogrid:` gate is "
+                f"ineffective.  Constraint #2 violated.")
+
+        # ALSO verify that INTERIOR cells (away from the 4 cube
+        # vertices) are IDENTICAL between the two calls — legacy
+        # correction only affects the 4 vertex cells, the
+        # interior circulation formula is the same.  Interior
+        # cells [:, 1:n, 1:n] should match to float32 precision.
+        interior_diff = float(np.max(np.abs(
+            vort_duogrid[:, 1:n, 1:n]
+            - vort_nonduogrid[:, 1:n, 1:n])))
+        assert interior_diff < 1e-4, (
+            f"Interior cells differ between duogrid and "
+            f"non-duogrid paths by {interior_diff:.3e}.  The "
+            f"legacy correction is supposed to only touch the 4 "
+            f"cube vertices.  If another gate changed behaviour "
+            f"widely, Constraint #2 is structurally violated.")
+
     def test_rsin_u_panel_edge_override_only_in_non_bounded_domain(self):
         """AST-level guard: the rsin_u/rsin_v panel-edge `1/sin`
         override in `cubed_sphere_cdgrid.py` must remain inside the

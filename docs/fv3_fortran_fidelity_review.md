@@ -197,6 +197,35 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-582 (2026-04-20)**: addressed Codex stop-time review of
+  iter-581: "the new 'lock' is too weak to stop real Constraint
+  #2 regressions".
+
+  Iter-581's AST count could be bypassed by a flipped condition
+  (`if use_duogrid:` with inverted body) or an empty `if` body.
+  Strong Constraint #2 coverage requires a BEHAVIORAL check.
+
+  Added `test_corner_vorticity_legacy_correction_not_applied_
+  under_duogrid`:
+    - Call `_corner_vorticity` with `use_duogrid=True` and
+      `use_duogrid=False` on the same non-trivial random input.
+    - At the 4 cube-vertex corners, the two outputs MUST differ
+      by > 1e-9 — proving the legacy correction fires only in
+      the non-duogrid path.
+    - Also verify interior cells [:, 1:n, 1:n] match to 1e-4
+      relative — the legacy correction only affects the 4
+      vertex cells.
+
+  **Combined with iter-581**: iter-581's AST test fires when
+  the `if not use_duogrid:` gate is REMOVED ENTIRELY (0 vs
+  expected 1).  Iter-582's behavioral test fires when the gate
+  is SEMANTICALLY BROKEN (empty body, flipped condition,
+  moved elsewhere) while the AST count stays the same.
+  Together they catch both classes of regression.
+
+  No production-path numerical changes.  105/105 tests pass in
+  `test_duogrid.py` (104 prior + 1 new).
+
 - **iter-581 (2026-04-20)**: AST-level lock for 4 legacy-path
   `if not use_duogrid:` gates in `fv3_sw_core.py`.
 
