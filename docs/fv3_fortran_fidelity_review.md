@@ -197,6 +197,39 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-586 (2026-04-20)**: addressed Codex stop-time review of
+  iter-585: "new `_vorticity_flux` lock still misses a real
+  body-relocation escape hatch".
+
+  The escape hatch Codex identified: a refactor that computes
+  `vort_x = jnp.where(fy1 > 0, ...)` BEFORE the `if not
+  use_duogrid:` panel-edge override would use the CORRECTED-
+  formula sign for upwind selection instead of the OVERRIDDEN
+  sign.  The fy1 values AT boundaries would still match the
+  expected correctness checks (iter-585 under-duogrid and
+  non-duogrid assertions both pass), but vort_x's upwind
+  selection would silently change.
+
+  Added iter-586 check inside the iter-585 test:
+    - Under duogrid=False, vort_x[:, 0, :] must equal the
+      upwind choice based on `sign(v_d[:, 0, :])` (the
+      OVERRIDE value), not sign of the corrected formula.
+    - Analogous for vort_y[:, :, 0] based on sign(u_d[:, :, 0]).
+
+  **Sanity-checked**: moved vort_x = jnp.where(...)
+  computation from AFTER the override to BEFORE.  New check
+  correctly fires with diff 2.086e-03 (the upwind selection
+  picked by corrected-formula sign vs v_d sign differs at
+  boundary cells where the two have opposite sign).
+
+  Combined with iter-585's under-duogrid + non-duogrid
+  checks, the test now catches body-relocation bugs that
+  separate vort_x computation from the override, not just
+  deletion/inversion of the override itself.
+
+  No production-path numerical changes.  106/106 tests pass in
+  `test_duogrid.py`.
+
 - **iter-585 (2026-04-20)**: extended the 4-mode behavioral lock
   pattern to `_vorticity_flux`'s two `if not use_duogrid:`
   gates (fv3_sw_core.py:1156-1158 and 1162-1164).
