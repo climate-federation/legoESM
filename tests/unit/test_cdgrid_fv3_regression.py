@@ -1041,6 +1041,60 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             "on the non-duogrid FB path has NOT been quantified.",
         )
 
+    def test_div_damp_comments_have_no_same_file_line_numbers(self):
+        """Iter-181 regression: iter-178/179 had a drift loop where
+        the `CDGridShallowWaterConfig.div_damp` comment in
+        shallow_water_fv3_cdgrid.py and the `_d_sw_native` /
+        `fv3_forward_backward_step` / `fv3_fb_sw_step` docstrings in
+        fv3_sw_core.py kept pointing at in-file line numbers that
+        shifted whenever the comment itself was edited.
+
+        Iter-180 resolved the loop by dropping ALL in-file
+        line-number references and using function/class names only.
+        Prevent reintroduction: for each commented-out `div_damp`
+        occurrence in these two files, scan a small window before
+        and after, and fail if an `(this file L<N>)`- or
+        `shallow_water_fv3_cdgrid.py:<N>`-style same-file reference
+        reappears.
+        """
+        import pathlib
+        import re
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        # Patterns that indicate a same-file line-number reference.
+        # `(this file L123)`, `shallow_water_fv3_cdgrid.py:135`,
+        # `L<digits>` next to a div_damp mention.
+        same_file_patterns = [
+            re.compile(r"\bthis file L\d+", re.IGNORECASE),
+            re.compile(r"shallow_water_fv3_cdgrid\.py:\d+"),
+        ]
+        for rel_path, keyword in [
+            ("src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py",
+             "div_damp"),
+            ("src/legoesm/core/fv3_sw_core.py", "div_damp"),
+        ]:
+            src = (repo_root / rel_path).read_text()
+            # Find all lines mentioning div_damp, check a window of
+            # +/- 6 lines for forbidden patterns.
+            lines = src.splitlines()
+            for lineno, line in enumerate(lines):
+                if keyword not in line:
+                    continue
+                window_start = max(0, lineno - 6)
+                window_end = min(len(lines), lineno + 7)
+                block = "\n".join(lines[window_start:window_end])
+                for pat in same_file_patterns:
+                    m = pat.search(block)
+                    if m:
+                        raise AssertionError(
+                            f"{rel_path}:{lineno + 1} ± 6 — a "
+                            f"`div_damp` comment reintroduced a "
+                            f"same-file line-number reference "
+                            f"matching /{pat.pattern}/: {m.group()!r}. "
+                            f"Iter-180 removed these because they "
+                            f"drift on every edit.  Use function / "
+                            f"class names instead; readers can grep."
+                        )
+
     def test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound(self):
         """Iter-128 (Priority 3): guard the halo-depth invariant that
         locks out the deepest Fortran cube-vertex override.
