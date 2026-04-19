@@ -197,6 +197,73 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-571 (2026-04-19)**: pyFV3 cross-reference for iter-552
+  `_corner_vorticity` gate + halo-exchange gap diagnosis.
+
+  Fetched pyFV3 `pyfv3/stencils/c_sw.py` and extracted
+  `circulation_cgrid` (lines 379-410).
+
+  Key findings:
+
+  1. **Formula structure matches exactly**.  pyFV3:
+     ```python
+     fx = dxc * uc
+     fy = dyc * vc
+     fx1 = dxc[0, -1] * uc[0, -1, 0]   # shifted
+     fy1 = dyc[-1, 0] * vc[-1, 0, 0]   # shifted
+     vort_c = fx1 - fx - fy1 + fy
+     ```
+     Equivalent to our Python:
+     ```python
+     vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
+             - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
+     ```
+     The `fx_pad[:, :, :-1]` corresponds to pyFV3's `fx1` (shifted
+     by -1 in j-direction, our index 0..n), and
+     `fx_pad[:, :, 1:]` corresponds to `fx` (current cell).
+     Formula match confirmed.
+
+  2. **Corner-override gating VERIFIED CORRECT** against Fortran
+     `sw_core.F90:395-401`:
+     ```fortran
+     if (.not. flagstruct%duogrid) then
+         if ( sw_corner ) vort(1,   1) = vort(1,  1) + fy(0,  1)
+         if ( se_corner ) vort(npx, 1) = vort(npx,1) - fy(npx,1)
+         if ( ne_corner ) vort(npx,npy) = vort(npx,npy) - fy(npx,npy)
+         if ( nw_corner ) vort(1, npy) = vort(1, npy) + fy(0, npy)
+     endif
+     ```
+     Our Python `_corner_vorticity` at
+     `src/legoesm/core/fv3_sw_core.py:1129-1133`:
+     ```python
+     if not use_duogrid:
+         vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
+         vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+         vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
+         vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
+     ```
+     Signs and positions match Fortran exactly.  Gate is
+     `.not. duogrid` in both.
+
+  3. **Remaining gap — staggered-C-grid halo exchange**.  pyFV3's
+     `circulation_cgrid` stencil uses gt4py relative indexing
+     `uc[0, -1, 0]` and `vc[-1, 0, 0]` — these rely on a prior
+     halo exchange of `uc` and `vc` (via `mpp_update_domains
+     (CGRID_NE)` upstream).  Our Python uses `jnp.pad(...,
+     mode='edge')` as a FALLBACK because we don't have a
+     staggered-C-grid halo helper.  In duogrid mode, Fortran's
+     halo has real cross-face data; our `mode='edge'` gives a
+     copy of the boundary cell.
+
+     Impact: FB-chain `_c_sw` path only (non-production).
+     Architectural fix requires implementing a
+     `pad_halo_cgrid_vector(uc, vc, ...)` helper analogous to
+     the cell-centre `pad_halo_vector`.
+
+  Doc-only; no code or test changes.  This finalizes the
+  correctness audit of `_corner_vorticity` — formula and gating
+  are right, only the halo-fill method differs.
+
 - **iter-570 (2026-04-19)**: exact ndsl.corners cell mapping for
   the iter-128/569 d2a2c_vect cube-vertex override.
 
