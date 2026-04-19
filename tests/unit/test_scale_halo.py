@@ -537,6 +537,35 @@ class TestPaddedAngleHaloConsistency:
                     "match compute_padded_angle(h=2) — h3 scaffolding "
                     "would propagate inconsistency to the FB chain.")
 
+    def test_grid_halo_interp_offsets_h3_wired_and_consistent(self):
+        """Iter-532: `CubedSphereGrid.halo_interp_offsets_h3` must be
+        present on every cubed-sphere grid built by
+        `create_cubed_sphere`, and its values must match the
+        free-function `compute_halo_interp_offsets_h3(n)` (so a
+        future caller can use either path interchangeably)."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import compute_halo_interp_offsets_h3
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        assert grid.halo_interp_offsets_h3 is not None
+        assert grid.halo_interp_offsets_h3.shape == (6, 4, 3, n)
+        # Bit-equality with the free function (both compute the same
+        # offsets, so they must agree to dtype precision).
+        ref = compute_halo_interp_offsets_h3(n)
+        np.testing.assert_allclose(
+            np.asarray(grid.halo_interp_offsets_h3),
+            np.asarray(ref),
+            rtol=1e-5,  # float32 precision under default backend
+        )
+
+    def test_grid_panel_halo_interp_offsets_h3_is_none(self):
+        """Single-face regional panel uses wall BCs; `_h3` should be
+        None like `_h1` and `_h2`."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+        n = 8
+        panel = create_cubed_sphere_panel(n=n, face_id=0)
+        assert panel.halo_interp_offsets_h3 is None
+
     def test_compute_padded_half_metrics_h2_h3_consistent(self):
         from legoesm.grids.halo import compute_padded_half_metrics
         n = 8

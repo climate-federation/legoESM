@@ -28,6 +28,7 @@ from legoesm.grids.halo import (
     compute_padded_half_metrics,
     compute_halo_interp_offsets,
     compute_halo_interp_offsets_h2,
+    compute_halo_interp_offsets_h3,
 )
 
 
@@ -98,6 +99,11 @@ class CubedSphereGrid(NamedTuple):
         Half dy on halo=2 extended grid, shape (6, n+4, n+4).
     halo_interp_offsets_h2 : jax.Array
         Interpolation offsets for halo=2 exchange, shape (6, 4, 2, n).
+    halo_interp_offsets_h3 : jax.Array
+        Interpolation offsets for halo=3 exchange, shape (6, 4, 3, n).
+        Iter-532: precomputed for the iter-496..501 ng=3 halo
+        extension that supports the FB-chain stability work
+        (review-doc item #2).
     duogrid : DuoGridData or None
         Duo-Grid kinked-to-extended remapping data. When not None,
         pad_halo applies the Duo-Grid remap instead of interp_offsets.
@@ -129,6 +135,7 @@ class CubedSphereGrid(NamedTuple):
     hx_ext_h2: jax.Array
     hy_ext_h2: jax.Array
     halo_interp_offsets_h2: jax.Array
+    halo_interp_offsets_h3: jax.Array
     duogrid: object  # DuoGridData | None — use object to avoid circular import
 
     @property
@@ -271,6 +278,10 @@ def create_cubed_sphere(
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
     halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
 
+    # halo=3 quantities for the iter-496..501 ng=3 halo extension
+    # (FB-chain stability prerequisite, review-doc item #2).
+    halo_offsets_h3 = compute_halo_interp_offsets_h3(n)
+
     # Optional: Duo-Grid kinked-to-extended remapping data.
     # Duo-Grid requires ng >= 2 so both halo depths used by the FV3
     # d2a2c_vect and PPM transport paths are remapped. Since ng <= n//2,
@@ -323,6 +334,7 @@ def create_cubed_sphere(
         hx_ext_h2=hx_ext_h2.astype(_dt),
         hy_ext_h2=hy_ext_h2.astype(_dt),
         halo_interp_offsets_h2=halo_offsets_h2.astype(_dt),
+        halo_interp_offsets_h3=halo_offsets_h3.astype(_dt),
         duogrid=duogrid,
     )
 
@@ -724,6 +736,7 @@ def create_cubed_sphere_panel(
         hx_ext_h2=_repad(_s(full.hx_ext_h2), halo=2),
         hy_ext_h2=_repad(_s(full.hy_ext_h2), halo=2),
         halo_interp_offsets_h2=None,  # not needed — wall BC
+        halo_interp_offsets_h3=None,  # not needed — wall BC
         duogrid=None,  # regional panel: no cross-face duogrid data
     )
 

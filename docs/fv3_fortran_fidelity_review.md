@@ -168,6 +168,40 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-532 (2026-04-19)**: wired `halo_interp_offsets_h3` as a
+  precomputed `CubedSphereGrid` attribute, completing one of the
+  three remaining iter-496..501 ng=3 plan items.
+
+  Iter-496 added the `compute_halo_interp_offsets_h3(n)` helper but
+  did not expose the result as a precomputed grid attribute (the
+  way iter-1's `halo_interp_offsets` and an earlier iter's
+  `halo_interp_offsets_h2` are exposed).  Future ng=3 callers would
+  have had to recompute the offsets every step.
+
+  Changes to `src/legoesm/grids/cubed_sphere.py`:
+    - import `compute_halo_interp_offsets_h3`
+    - add `halo_interp_offsets_h3: jax.Array` to the `CubedSphereGrid`
+      NamedTuple (with docstring noting iter-532 wiring)
+    - call `compute_halo_interp_offsets_h3(n)` inside
+      `create_cubed_sphere`, cast to grid's storage dtype, pass to
+      the constructor
+    - set `halo_interp_offsets_h3=None` on the single-face panel
+      (`create_cubed_sphere_panel`) — wall BCs don't need offsets
+
+  Two new tests in `TestPaddedAngleHaloConsistency`:
+    - `test_grid_halo_interp_offsets_h3_wired_and_consistent` —
+      verifies `grid.halo_interp_offsets_h3` is non-None, has shape
+      `(6, 4, 3, n)`, and matches the free-function output.
+    - `test_grid_panel_halo_interp_offsets_h3_is_none` — verifies
+      the panel build sets it to None (matching `_h2`).
+
+  Remaining iter-496 plan items still TODO:
+    - Update `_d2a2c_vect_duogrid` to use h=3 for deeper stencils.
+    - FB chain replacement in `FV3EdgeShallowWaterModel`.
+
+  No production-path numerical changes (new precomputed attribute
+  is unused by any current caller).  237/237 tests pass.
+
 - **iter-531 (2026-04-19)**: addressed Codex stop-time review of
   iter-530: "iter-530's new regression only passes with x64 enabled".
 
