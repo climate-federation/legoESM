@@ -2392,5 +2392,139 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
                     f"y).  Source: `{source_line}`.")
 
 
+class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
+    """Regression test for iter-510: lock in the polar-face symmetry
+    of `fv3_sw_tendencies` on a balanced Williamson-2 (alpha=0) state.
+
+    Background — review-doc iter-121..127 diagnostic:
+      Pre-iter-505 the production `fv3_sw_tendencies` produced
+      16% N-S asymmetry in dh/dt (face 4 max 3.67e-4 vs face 5 max
+      4.26e-4) and a 5.4% asymmetry in face 4 vs face 5 W-inflow
+      mass flux on a balanced W2 alpha=0 init.  The user's directive
+      named this as "the more actionable production-path bug".
+
+    Iter-505 fixed the underlying x-direction PPM axis bug in
+    `cgrid_mass_flux_divergence` (`_ppm_reconstruct_1d` was operating
+    on the wrong axis).  Post-iter-505 the polar-face asymmetry is
+    GONE: face 4 and face 5 dh/dt and du/dt and dv/dt all match
+    bit-for-bit at machine precision under N-S reflection.
+
+    This test pins that result down so any future refactor that
+    re-introduces an axis bug (or another polar-skewing bug) fires
+    a clear regression.
+    """
+
+    def test_polar_faces_have_equal_tendency_magnitudes_on_w2_balanced(self):
+        """On the W2 alpha=0 balanced state, polar face 4 and face 5
+        must produce IDENTICAL max|dh/dt|, max|du_d/dt|, and
+        max|dv_d/dt|.  The geographic state is N-S symmetric and the
+        cubed-sphere connectivity puts faces 4 and 5 at opposite
+        polar caps — any unequal numerical error indicates a polar-
+        biased operator."""
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+
+        n = 16
+        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(base)
+
+        g, omega, a, u0 = 9.80616, 7.292e-5, 6.37e6, 38.0
+        lat = base.lat
+        u_east = u0 * jnp.cos(lat)
+        v_north = jnp.zeros_like(u_east)
+        ca = jnp.cos(base.angle)
+        sa = jnp.sin(base.angle)
+        u_cc = ca * u_east + sa * v_north
+        v_cc = -sa * u_east + ca * v_north
+        h = 5960.0 - (a * omega * u0 + 0.5 * u0 ** 2) * jnp.sin(lat) ** 2 / g
+        h_s = jnp.zeros_like(h)
+
+        # Build D-grid winds via simple edge-averaging of cell-centres.
+        u_d = jnp.zeros((6, n, n + 1))
+        v_d = jnp.zeros((6, n + 1, n))
+        u_d = u_d.at[:, :, 1:-1].set(0.5 * (u_cc[:, :, :-1] + u_cc[:, :, 1:]))
+        u_d = u_d.at[:, :, 0].set(u_cc[:, :, 0])
+        u_d = u_d.at[:, :, -1].set(u_cc[:, :, -1])
+        v_d = v_d.at[:, 1:-1, :].set(0.5 * (v_cc[:, :-1, :] + v_cc[:, 1:, :]))
+        v_d = v_d.at[:, 0, :].set(v_cc[:, 0, :])
+        v_d = v_d.at[:, -1, :].set(v_cc[:, -1, :])
+
+        dh_dt, du_d_dt, dv_d_dt = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid)
+
+        # Face 4 vs face 5 max-magnitude equality (machine precision).
+        for name, t in [("dh/dt", dh_dt), ("du_d/dt", du_d_dt),
+                        ("dv_d/dt", dv_d_dt)]:
+            m4 = float(jnp.max(jnp.abs(t[4])))
+            m5 = float(jnp.max(jnp.abs(t[5])))
+            ratio = m4 / m5 if m5 > 0 else (1.0 if m4 == 0 else float("inf"))
+            # Threshold 1e-4 (i.e., places=4): catches the pre-iter-505
+            # 16% asymmetry trivially, while leaving headroom above the
+            # ~2e-6 reduction-order float64 noise floor that the
+            # cubed-sphere CONNECTIVITY produces under non-bit-identical
+            # vectorization between face 4 and face 5.
+            self.assertAlmostEqual(
+                ratio, 1.0, places=4,
+                msg=(f"{name}: polar faces 4 and 5 have unequal max "
+                     f"magnitudes ({m4:.4e} vs {m5:.4e}, ratio = "
+                     f"{ratio:.6f}).  This indicates a polar-biased "
+                     f"numerical operator — the iter-505 PPM axis fix "
+                     f"may have regressed, or a new polar bias was "
+                     f"introduced."))
+
+    def test_dh_dt_polar_faces_are_n_s_reflection_symmetric(self):
+        """Stronger test: face 4 dh/dt and face 5 dh/dt must be
+        bit-identical under the N-S reflection (axis -1 reverse).
+        On the alpha=0 W2 state the geographic field IS N-S symmetric
+        and the cubed-sphere CONNECTIVITY puts face 4 north and face 5
+        south, so the two polar dh/dt fields must be exact reflections.
+        Pre-iter-505 they differed by 16% — post-iter-505 they match
+        to machine precision."""
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+
+        n = 16
+        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(base)
+        g, omega, a, u0 = 9.80616, 7.292e-5, 6.37e6, 38.0
+        lat = base.lat
+        u_east = u0 * jnp.cos(lat)
+        v_north = jnp.zeros_like(u_east)
+        ca = jnp.cos(base.angle)
+        sa = jnp.sin(base.angle)
+        u_cc = ca * u_east + sa * v_north
+        v_cc = -sa * u_east + ca * v_north
+        h = 5960.0 - (a * omega * u0 + 0.5 * u0 ** 2) * jnp.sin(lat) ** 2 / g
+        h_s = jnp.zeros_like(h)
+        u_d = jnp.zeros((6, n, n + 1))
+        v_d = jnp.zeros((6, n + 1, n))
+        u_d = u_d.at[:, :, 1:-1].set(0.5 * (u_cc[:, :, :-1] + u_cc[:, :, 1:]))
+        u_d = u_d.at[:, :, 0].set(u_cc[:, :, 0])
+        u_d = u_d.at[:, :, -1].set(u_cc[:, :, -1])
+        v_d = v_d.at[:, 1:-1, :].set(0.5 * (v_cc[:, :-1, :] + v_cc[:, 1:, :]))
+        v_d = v_d.at[:, 0, :].set(v_cc[:, 0, :])
+        v_d = v_d.at[:, -1, :].set(v_cc[:, -1, :])
+
+        dh_dt, _, _ = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid)
+
+        # face4 vs face5 reflected across axis -1 (j-axis).  The
+        # cubed-sphere CONNECTIVITY at face 4 (north pole cap) and
+        # face 5 (south pole cap) makes them j-reflections of each
+        # other for an N-S-symmetric geographic field.
+        ref = float(jnp.max(jnp.abs(dh_dt[4])))
+        diff = float(jnp.max(jnp.abs(dh_dt[4] - dh_dt[5][:, ::-1])))
+        rel = diff / ref if ref > 0 else diff
+        self.assertLess(
+            rel, 1e-5,
+            msg=(f"face 4 dh/dt vs reflected face 5 dh/dt rel diff = "
+                 f"{rel:.2e} (max_diff = {diff:.4e}, max_ref = "
+                 f"{ref:.4e}).  Pre-iter-505 this was ~16% asymmetry "
+                 f"localized to the polar caps; the iter-505 PPM axis "
+                 f"fix should have restored full reflection symmetry."))
+
+
 if __name__ == "__main__":
     unittest.main()

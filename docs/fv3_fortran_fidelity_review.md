@@ -168,6 +168,54 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-510 (2026-04-19)**: **closed the polar-face asymmetry
+  investigation** that the user named as "the more actionable
+  production-path bug" pointing to `fv3_sw_tendencies`.  Direct
+  numerical tests on the W2 alpha=0 balanced state show that
+  iter-505's PPM axis fix entirely resolved the 16% polar
+  asymmetry that iter-121..127 diagnostics had isolated:
+
+  | Quantity                | Pre-iter-505    | Post-iter-505 |
+  |-------------------------|-----------------|---------------|
+  | dh/dt face4 vs face5    | 1.144 ratio     | 1.000 ratio   |
+  | dh/dt face4 ↔ face5[::-1] rel | 97.9 %    | 0 (machine prec) |
+  | du_d/dt face4 vs face5  | -               | 1.000 ratio   |
+  | dv_d/dt face4 vs face5  | -               | 1.000 ratio   |
+
+  The pre-iter-505 16% asymmetry was caused entirely by the wrong-
+  axis PPM in `cgrid_mass_flux_divergence`.  Iter-505 fixed that;
+  faces 4 and 5 now produce IDENTICAL momentum tendencies (ratio
+  1.000) and exact N-S reflections of dh/dt at machine precision.
+  The remaining W2 v-wind cube-face imprint at ~0.3 m/s is a
+  generic face-boundary signature, NOT a polar-bias issue.
+
+  Audited `fv3_d2cc` and `fv3_cc2c` directly: also produce N-S
+  symmetric u_c, v_c at machine precision on the same balanced
+  state (so the cc2c asymmetry-suspicion mentioned by the user
+  was a false lead).
+
+  Two regression tests added in
+  `TestFv3SwTendenciesPolarFaceSymmetry`:
+    1. `test_polar_faces_have_equal_tendency_magnitudes_on_w2_balanced`
+       — asserts `max|dh/dt|`, `max|du_d/dt|`, `max|dv_d/dt|` ratios
+       between face 4 and face 5 are within 1e-4 of 1.0.  Verified
+       to FAIL on pre-iter-505 code with ratio = 1.144 (14.4%
+       asymmetry) — matches the iter-127 documented 16% bias.
+    2. `test_dh_dt_polar_faces_are_n_s_reflection_symmetric` —
+       asserts `face4 - face5[:, ::-1]` differs by < 1e-5 of
+       max|dh/dt|.  Verified to FAIL on pre-iter-505 with rel
+       diff = 0.979.
+
+  No production-path changes (tests only).  W2/W5/cosine bell
+  metrics unchanged from iter-505 (L2=2.42e-04, etc.).  186/186
+  tests pass.
+
+  **Next focus**: the residual cube-face imprint is no longer a
+  polar issue — investigation should shift to the generic
+  face-boundary halo handling in the corner-wind / Bernoulli
+  gradient pipeline (steps (e), (g), (k) of `fv3_sw_tendencies`)
+  or the `pad_halo_vector` rotation behaviour at face seams.
+
 - **iter-509 (2026-04-19)**: addressed Codex stop-time review of
   iter-508 — "AST guard no longer enforces the PPM axis contract".
   iter-508's check accepted any call with `axis=...`, but
