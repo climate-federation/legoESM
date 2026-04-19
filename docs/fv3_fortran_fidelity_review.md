@@ -168,6 +168,38 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-547 (2026-04-19)**: addressed Codex stop-time review of
+  iter-546: "new tests do not actually lock Pass-1 edge averaging".
+
+  iter-546's `test_all_24_edges_agree_after_sync` asserts that
+  face A's post-sync edge agrees with face B's post-sync edge.
+  Codex observed that symmetric refactors preserving agreement
+  would still pass: e.g. `avgs = 0.5*(local + nbr) * 1.01` yields
+  identical values on both faces (both set the edge to the same
+  scaled average), so the agreement test is satisfied while the
+  averaging formula has silently drifted.
+
+  Iter-547 adds `test_pass1_edge_is_exactly_0p5_of_input_local_plus_nbr`:
+    - Compares post-sync edge values against the EXACT
+      `0.5*(input_local + input_nbr[::rev])` formula using the
+      **ORIGINAL INPUT** values (not just faces-agree).
+    - Excludes the 2 endpoints (Pass-2 vertex 3-face means
+      overwrite them, a separate invariant).
+
+  **Two-stage sanity check**:
+    (i) Patched Pass-1 to `0.3*local + 0.7*nbr` (biased): BOTH
+        tests fire (iter-546's edge-agreement test correctly
+        catches asymmetric bias).
+    (ii) Patched Pass-1 to `0.5*(local + nbr) * 1.01` (SYMMETRIC
+         bias): iter-546's agreement test still PASSES (both
+         sides agree), but the NEW iter-547 test correctly FIRES
+         with max dev 1.611e-02 at face-0 west edge.  This is the
+         regression mode Codex identified.
+
+  Restored production code.  All 7 `TestSynchronizeCornerScalar`
+  tests pass.  No production-path numerical changes.  103/103
+  tests pass in `test_duogrid.py` (102 prior + 1 new).
+
 - **iter-546 (2026-04-19)**: direct behavior locks for
   `synchronize_corner_scalar` (previously no direct tests).
 

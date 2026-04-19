@@ -908,6 +908,67 @@ class TestSynchronizeCornerScalar:
             f"`synchronize_corner_scalar` must only touch boundary "
             f"and vertex cells.")
 
+    def test_pass1_edge_is_exactly_0p5_of_input_local_plus_nbr(self):
+        """Iter-547 (Codex follow-up to iter-546): lock the SPECIFIC
+        Pass-1 formula `0.5*(input_local + input_nbr[::rev])`.
+
+        iter-546's `test_all_24_edges_agree_after_sync` only verifies
+        that post-sync, face A's edge = face B's edge — both sides
+        agree.  But a refactor that changes Pass-1 from
+        `0.5*(local + nbr)` to a biased weighted average like
+        `0.3*local + 0.7*nbr` would ALSO make both sides agree
+        (each face sets its edge to the same biased value), and
+        iter-546's test would incorrectly pass.
+
+        This test compares the post-sync edge values against the
+        EXACT `0.5*(input_local + input_nbr[::rev_maybe])` formula
+        on INPUT values.  A weighted or biased variant would fail
+        here even though the two post-sync faces still agree.
+
+        Excludes the 2 endpoints (cube vertices) because Pass-2
+        overwrites them with 3-face means.
+        """
+        import numpy as np
+        from legoesm.grids.halo import (
+            CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
+            synchronize_corner_scalar,
+        )
+        n, field = self._build(n=6)
+        field_np = np.asarray(field)
+        out = np.asarray(synchronize_corner_scalar(field, n))
+
+        def _bdy(arr, f, edge):
+            if edge == WEST:
+                return arr[f, 0, :]
+            if edge == EAST:
+                return arr[f, n, :]
+            if edge == SOUTH:
+                return arr[f, :, 0]
+            return arr[f, :, n]
+
+        for face in range(6):
+            for edge in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+                inp_local = _bdy(field_np, face, edge)        # INPUT
+                inp_nbr = _bdy(field_np, nbr_face, nbr_edge)   # INPUT
+                if rev:
+                    inp_nbr = inp_nbr[::-1]
+                expected = 0.5 * (inp_local + inp_nbr)
+                out_edge = _bdy(out, face, edge)
+                # Exclude endpoints (3-face vertex means override).
+                max_dev = float(np.max(np.abs(
+                    out_edge[1:-1] - expected[1:-1])))
+                assert max_dev < 1e-10, (
+                    f"face {face} edge {edge}: post-sync edge "
+                    f"interior differs from `0.5*(input_local + "
+                    f"input_nbr[::rev={rev}])` by {max_dev:.3e}.  "
+                    f"Pass-1 formula changed from the arithmetic "
+                    f"2-face mean to a biased/weighted variant.  "
+                    f"A legitimate change should UPDATE this test "
+                    f"with the new formula and document the new "
+                    f"behaviour in docs/fv3_fortran_fidelity_"
+                    f"review.md.")
+
     def test_all_24_edges_agree_after_sync(self):
         """For every (face, edge) pair, the non-vertex interior of the
         edge after sync must equal the averaged value on both adjacent
