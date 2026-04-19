@@ -39,9 +39,18 @@ wandb/
 # package contents survive (NOT transient `.nc`, `.zarr`,
 # `__pycache__/`, etc. a user might create under the directory).
 !src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/*.nc
+# `!src/legoesm/ml/data/` is the minimum un-ignore needed for git to
+# descend into the directory (since `data/` above ignores it).  That
+# ALONE would allow arbitrary non-`.py` files in.  Immediately
+# re-ignore everything inside, then re-allow only `*.py`.
 !src/legoesm/ml/data/
+src/legoesm/ml/data/*
 !src/legoesm/ml/data/*.py
+src/legoesm/ml/data/**/*
 !src/legoesm/ml/data/**/*.py
+# Directories are re-allowed in the patterns above only so git can
+# descend to find `*.py` children.
+!src/legoesm/ml/data/*/
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
