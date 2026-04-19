@@ -371,41 +371,128 @@ class TestCDGridOperators(unittest.TestCase):
                  f"`cdgrid_momentum_tendencies` may have been "
                  f"replaced with a no-op (returns zeros)."))
 
-    def test_momentum_pressure_gradient_sign_convention(self):
-        """Iter-577: on a zero-wind + sinusoidal-h setup (h
-        varies in lon), the pressure gradient should produce a
-        tendency that ACCELERATES u from high-h cells toward
-        low-h cells.  Catches sign-flip bugs in the pressure
-        gradient computation.
+    def test_momentum_pressure_gradient_sign(self):
+        """Iter-578 (Codex follow-up to iter-577): actually
+        enforce the SIGN of the pressure gradient, not just
+        anti-symmetry.
 
-        Physically: where dh/dlon > 0 (h increasing eastward),
-        pressure pushes westward so du/dt < 0.  Where
-        dh/dlon < 0, du/dt > 0.
+        The SW momentum equation is:
+            du/dt = ζ * v - d/dx(B)    with B = KE + g*(h+h_s)
+        Under zero winds: du/dt = -g * dh/dx on face 0 interior.
+
+        Test: construct h as a monotonic ramp in i on face 0
+        only (h = h_mean + α*i, positive slope).  Face 0 interior
+        cells have d(B)/d(x_local) > 0 in the face-local
+        coordinate, so du/dt MUST be NEGATIVE at interior cells
+        of face 0 (pushing the flow from high pressure back
+        toward low pressure).
+
+        A sign-flipped pressure gradient (du/dt = +dB/dx) would
+        produce POSITIVE du on the same input — directly
+        catching the sign bug that anti-symmetry can't see.
         """
         import numpy as np
         from legoesm.core.operators_cdgrid import (
             cdgrid_momentum_tendencies)
         n = self.n
-        lat = np.asarray(self.cdgrid.base.lat, dtype=np.float64)
-        lon = np.asarray(self.cdgrid.base.lon, dtype=np.float64)
-        # sinusoidal in lon, constant in lat
-        h_np = 1000.0 + 50.0 * np.cos(lon)
+        h_mean = 1000.0
+        alpha = 50.0
+        h_np = np.full((6, n, n), h_mean, dtype=np.float64)
+        # Ramp in i on face 0: h increases with i index
+        for i in range(n):
+            h_np[0, i, :] = h_mean + alpha * i
         h = jnp.asarray(h_np)
         h_s = jnp.zeros((6, n, n))
-        # Zero wind so only pressure gradient contributes
         u_d = jnp.zeros((6, n + 1, n + 1))
         v_d = jnp.zeros((6, n + 1, n + 1))
+
         du, dv = cdgrid_momentum_tendencies(
             h, u_d, v_d, h_s, self.cdgrid)
-        # Must produce non-zero tendency (pressure gradient is
-        # active).  A no-op or a sign flip would not show
-        # spatial variation matching dh/dlon.
-        max_du = float(jnp.max(jnp.abs(du)))
+
+        # On face 0 interior corners (i, j in [1, n-1]), the
+        # local x-axis points in +i direction.  With dh/dx > 0,
+        # du/dt = -g*dh/dx < 0.
+        du_np = np.asarray(du)
+        face0_interior_mean_du = float(
+            np.mean(du_np[0, 1:n, 1:n]))
+
+        # Magnitude ~ g * alpha / dx ~ 9.81 * 50 / 1.7e6 ~ 3e-4.
+        # Require face 0 interior mean du < -1e-5 (well below
+        # zero, far from noise floor).
+        self.assertLess(
+            face0_interior_mean_du, -1e-5,
+            msg=(f"Face-0 interior mean du = "
+                 f"{face0_interior_mean_du:.3e}.  Expected "
+                 f"NEGATIVE (pressure gradient pushes flow away "
+                 f"from high pressure).  A sign-flipped gradient "
+                 f"would give a POSITIVE mean."))
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cdgrid_momentum_tendencies)
+        n = self.n
+        lon = np.asarray(self.cdgrid.base.lon, dtype=np.float64)
+        h_mean = 1000.0
+        # Sinusoidal perturbation
+        dh_np = 50.0 * np.cos(2 * lon)
+        h_pos_np = h_mean + dh_np
+        h_neg_np = h_mean - dh_np   # = 2*h_mean - h_pos_np
+
+        h_pos = jnp.asarray(h_pos_np)
+        h_neg = jnp.asarray(h_neg_np)
+        h_s = jnp.zeros((6, n, n))
+        u_d = jnp.zeros((6, n + 1, n + 1))
+        v_d = jnp.zeros((6, n + 1, n + 1))
+
+        du_pos, dv_pos = cdgrid_momentum_tendencies(
+            h_pos, u_d, v_d, h_s, self.cdgrid)
+        du_neg, dv_neg = cdgrid_momentum_tendencies(
+            h_neg, u_d, v_d, h_s, self.cdgrid)
+
+        # (A) Non-zero output sanity: at least one must be
+        # substantial (otherwise the signal is too small to test
+        # anti-symmetry).
+        scale = max(
+            float(jnp.max(jnp.abs(du_pos))),
+            float(jnp.max(jnp.abs(dv_pos))))
         self.assertGreater(
-            max_du, 1e-6,
-            msg=(f"Zero-wind + sinusoidal h gave ~zero du "
-                 f"tendency: max = {max_du:.3e}.  Pressure "
-                 f"gradient may be inactive or no-op."))
+            scale, 1e-6,
+            msg=(f"Zero-wind sinusoidal-h gave ~zero tendency; "
+                 f"scale = {scale:.3e}.  Cannot test sign."))
+
+        # (B) SIGN check via anti-symmetry.  du(h_pos) and
+        # du(h_neg) must be nearly opposite in sign — i.e.,
+        # their SUM should be small.  A sign-flipped pressure
+        # gradient would make du(h_pos) == du(h_neg) (same sign),
+        # so the sum would be 2*du (large).
+        sum_du = float(jnp.max(jnp.abs(
+            jnp.asarray(du_pos) + jnp.asarray(du_neg))))
+        sum_dv = float(jnp.max(jnp.abs(
+            jnp.asarray(dv_pos) + jnp.asarray(dv_neg))))
+        diff_du = float(jnp.max(jnp.abs(
+            jnp.asarray(du_pos) - jnp.asarray(du_neg))))
+        diff_dv = float(jnp.max(jnp.abs(
+            jnp.asarray(dv_pos) - jnp.asarray(dv_neg))))
+        # For a correctly-signed pressure gradient:
+        #   sum should be << diff (anti-symmetric behaviour)
+        # Require |sum| / |diff| < 0.2 to confirm anti-symmetry.
+        # A sign-flipped pressure gradient would give
+        # |sum| >> |diff|, i.e., ratio >> 1.
+        ratio_du = sum_du / max(diff_du, 1e-30)
+        ratio_dv = sum_dv / max(diff_dv, 1e-30)
+        self.assertLess(
+            ratio_du, 0.2,
+            msg=(f"du anti-symmetry under h→2h_mean-h violated: "
+                 f"sum/diff = {ratio_du:.3f}.  Production "
+                 f"du(h_pos) + du(h_neg) = {sum_du:.3e} vs "
+                 f"du(h_pos) - du(h_neg) = {diff_du:.3e}.  "
+                 f"Expected sum << diff for correctly-signed "
+                 f"pressure gradient.  A sign-flipped grad(h) "
+                 f"would give ratio > 1."))
+        self.assertLess(
+            ratio_dv, 0.2,
+            msg=(f"dv anti-symmetry violated: ratio = "
+                 f"{ratio_dv:.3f}.  Check pressure-gradient "
+                 f"sign in cdgrid_momentum_tendencies."))
 
 
 class TestCDGridShallowWater(unittest.TestCase):

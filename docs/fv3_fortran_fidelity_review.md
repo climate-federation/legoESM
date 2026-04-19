@@ -197,6 +197,39 @@ Latest iteration work:
   cross-check against pyFV3 when implementing any of the open
   architectural items.
 
+- **iter-578 (2026-04-20)**: addressed Codex stop-time review of
+  iter-577: "claimed pressure-gradient sign regression is not
+  actually enforced".
+
+  Iter-577's `test_momentum_pressure_gradient_sign_convention`
+  only asserted `max|du| > 1e-6` — a sign-flipped gradient
+  would still produce non-zero du at the same magnitude, so the
+  test didn't actually enforce sign.
+
+  Also attempted an anti-symmetry formulation (flip h → 2h_mean
+  - h, check tendency negates) — but this just verifies
+  LINEARITY in h, which holds regardless of the SIGN of
+  -g*grad(h) in the momentum equation.  Codex's critique was
+  spot-on.
+
+  Iter-578 replaces the weak test with a genuine sign check
+  `test_momentum_pressure_gradient_sign`:
+    - Construct `h` as a monotonic i-ramp on face 0 only
+      (h = h_mean + α*i, positive slope).
+    - With zero winds, the SW equation reduces to du/dt =
+      -g*∂h/∂x on face 0 interior.
+    - With ∂h/∂x > 0, du/dt MUST be NEGATIVE (flow pushed from
+      high to low pressure).
+    - Assert face 0 interior MEAN du < -1e-5.
+
+  **Sanity-checked**: flipped `du_d_dt = zeta*v - dB_dx` to
+  `+ dB_dx` in production.  Test correctly fires with mean
+  du = +4.194e-04 (positive, should be negative).  Restored
+  production; all 105 tests pass.
+
+  No production-path numerical changes.  105/105 tests pass in
+  `test_cdgrid.py`.
+
 - **iter-577 (2026-04-20)**: behavior locks for
   `cdgrid_momentum_tendencies` (production SW entry point).
 
