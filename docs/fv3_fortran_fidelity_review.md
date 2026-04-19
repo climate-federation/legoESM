@@ -168,6 +168,41 @@ These require infrastructure-level rework beyond the priority list.
 
 Latest iteration work:
 
+- **iter-558 (2026-04-19)**: regression lock for
+  `_extrapolate_boundary_corners` (previously untested).
+
+  Pivoting away from `_divergence_corner_duo` (locked via iter-554-
+  557) to a DIFFERENT production helper:
+  `_extrapolate_boundary_corners`
+  (`src/legoesm/core/operators_cdgrid.py:963-1006`).  Applies
+  linear extrapolation at the 4 cube-vertex corners of momentum
+  tendencies `(du, dv)`:
+      tend(0, 0) = tend(1, 0) + tend(0, 1) - tend(1, 1)
+  Used in production SW
+  (`shallow_water_fv3_cdgrid.py:163`) and ocean PE
+  (`ocean_pe_cdgrid.py:225`).  Had NO direct tests.
+
+  Added `TestExtrapolateBoundaryCorners` (4 tests):
+    (a) Shape 2D: `(6, n+1, n+1)` preserved.
+    (b) On a LINEAR field `f(i,j) = a + b*i + c*j` (no cross
+        term), extrapolation is EXACT at all 4 cube vertices.
+        Note: the docstring says "bilinear" but the formula only
+        recovers the linear component — a true bilinear field
+        `a + b*i + c*j + d*i*j` would fail (recovers `a - d`).
+    (c) On random input, output at each of the 4 vertices equals
+        the bilinear formula applied to the 3 source cells, to
+        1e-12 absolute.  Four specs verified individually.
+    (d) Non-vertex cells (edges, interior) unchanged — only the
+        4 cube vertices touched.
+
+  **Sanity-checked**: flipped the sign on the `du` formula from
+  `- du[:, di, dj]` to `+ du[:, di, dj]`.  Tests (b) and (c) both
+  fire with max diff 1.36 and 2.56 respectively.  Restored
+  production code; all 4 pass.
+
+  No production-path numerical changes.  60/60 tests pass in
+  `test_cdgrid.py` (56 prior + 4 new).
+
 - **iter-557 (2026-04-19)**: addressed Codex stop-time review of
   iter-556: "exact-factor gate still skips the double-attenuated
   corner cells".
