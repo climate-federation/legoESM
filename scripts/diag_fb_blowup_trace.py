@@ -1,21 +1,38 @@
-"""Iter-658 FB-chain blowup localization diagnostic.
+"""Iter-658 / iter-659 FB-chain blowup trace diagnostic.
 
 Traces per-step max|h|, max|u_d|, max|v_d|, max|v_err|, and the
 (face, i, j) location of the max v-error for the first 30 steps of
 a Williamson 2 run at C36 through ``FV3FBShallowWaterModel``.
 
-Iter-658 observed trajectory:
-  step 1:  v_err=3.14  at face 0, i=36, j=0   (SE cube vertex of face 0)
+Iter-658 observed trajectory (where MAX v_err lives each step):
+  step 1:  v_err=3.14  at face 0, i=36, j=0
   step 4:  v_err=12.4  at face 3, i=0,  j=0
-  step 14: v_err=67    at face 1, i=0,  j=0   (exponential growth begins)
-  step 24: v_err=898   at face 1, i=1,  j=3
-  step 26: v_err=1e14  (NaN at step 27)
+  step 14: v_err=67    at face 1, i=0,  j=0   (exp growth begins)
+  step 26: v_err=1e14  at face 0, i=0,  j=0
+  step 27: NaN
 
-The blowup is concentrated at cube VERTICES (3-face meeting points),
-not face edges.  Indicates the bug is in cube-vertex handling of one
-of the FB-chain helpers — most likely `_d_sw1_recompute_ut_vt` or
-`_d2a2c_vect`'s cube-vertex treatment, both of which have documented
-gaps versus Fortran in review doc Priority 3 / architectural item #2.
+**Iter-659 correction (Codex finding)**: the initial iter-658
+claim "localize to cube vertices" was WRONG.  An error-distribution
+histogram at step 1 showed:
+  max at cube VERTICES (24 cells): 3.16 m/s
+  max at cube EDGES   (828 cells): 3.00 m/s
+  max at INTERIOR    (7140 cells): 2.15 m/s
+  mean at vertices:  2.40 m/s
+  mean at edges:     1.45 m/s
+  mean at interior:  1.04 m/s
+  cells with v_err > 1.0 m/s: 4432 of ~8000 (55%)
+
+The error is FIELD-WIDE, not localized.  Vertices are 1.5-2× the
+interior magnitude, but the interior dominates total error by cell
+count.  The MAX location tracking only reports a single point and
+gives a misleading "localization" impression.
+
+Real diagnosis: the FB chain produces a widespread velocity bias
+on the near-balanced Williamson 2 IC at step 1, suggesting the bias
+is NOT at cube vertices but inherent to the FB chain's momentum
+balance on this IC (or an IC-scheme inconsistency at D-grid edge
+midpoint positions).  Future work should analyse the forcing at
+interior cells — most of the error lives there.
 """
 import os
 os.environ["JAX_ENABLE_X64"] = "1"; os.environ["JAX_PLATFORMS"] = "cpu"

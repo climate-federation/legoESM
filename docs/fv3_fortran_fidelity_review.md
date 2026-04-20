@@ -419,3 +419,31 @@ Under C36+duogrid the "Priority 3 GAP" is supposed to be RESOLVED via the Duo-Gr
 **Next iter target**: A/B test whether replacing the `jnp.pad(vc, [(0,0),(1,1),(0,0)], mode='edge')` at `_d_sw1_recompute_ut_vt:75` with a proper cross-face halo (halo.pad_halo_vector or an edge-midpoint halo helper) reduces the step-1 `v_err` from 3.14 to a value more consistent with machine noise for a well-balanced IC.
 
 **Tests**: all 118 regression tests still pass.  The diagnostic script is non-invasive (script only, no source changes).
+
+### Iter-659 — correct iter-658 cube-vertex localization overclaim
+
+**Codex stop-time finding on iter-658**: "tracer does not actually localize the blowup to cube vertices."
+
+**Reality check**: built an error-distribution histogram at step 1.  The cell counts and magnitudes do NOT support "localized to cube vertices":
+
+| region                                       | count | max v_err (m/s) | mean v_err |
+|:---------------------------------------------|------:|----------------:|-----------:|
+| cube VERTICES (i∈{0, n} AND j∈{0, n−1})      |    24 |            3.16 |       2.40 |
+| cube EDGES (XOR of i-boundary and j-boundary)|   828 |            3.00 |       1.45 |
+| INTERIOR (rest)                              |  7140 |            2.15 |       1.04 |
+| cells with v_err > 1.0 m/s                   |  4432 |               — |          — |
+
+The error is **field-wide** — 55% of cells have v_err > 1.0 m/s, not a few cube-vertex cells.  Vertices are 1.5-2× the interior magnitude but the total error by cell count is dominated by interior cells.
+
+**What iter-658 got wrong**: tracking only the MAX location gives a misleading "localization" impression.  The max happens to land at a cube vertex because vertices are 1.5× noisier, but the SIGNAL is everywhere.
+
+**Corrected diagnosis**: the FB chain produces a **widespread velocity bias** on the near-balanced Williamson 2 IC at step 1.  Plausible causes (all field-wide, not vertex-local):
+1. Momentum balance residual: the FB chain's forward-backward coupling (c_sw half-step + p_grad_c backward + d_sw full-step) may not exactly preserve a geostrophically balanced state even at rest.
+2. IC inconsistency: the u_d / v_d initial conditions computed at D-grid edge-midpoint positions from the analytic Williamson 2 formula may not be exactly consistent with what the d2a2c_vect + d_sw1 pipeline expects as a balanced state.
+3. Scheme design: the FB chain inherently includes temporal-scheme residual at this time step size.
+
+**Next iter target** (revised): quantify the step-1 FORCING (tendency magnitude) rather than the error.  If the tendency at t=0 is O(1 m/s²) while it should be O(epsilon), the IC-scheme consistency hypothesis is confirmed.  This is more diagnostic than chasing specific cube-vertex bugs.
+
+**Updated script docstring**: the `scripts/diag_fb_blowup_trace.py` header now documents the iter-659 correction and warns that MAX-location tracking can mislead when the signal is broadly distributed.
+
+**Tests**: no source-code changes; all 118 regression tests still pass.  This iter is a documentation correction only.
