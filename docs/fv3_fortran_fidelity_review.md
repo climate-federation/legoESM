@@ -1125,3 +1125,17 @@ Next iteration can: (a) mirror steps 1+4 into the tiled helper; OR (b) implement
 
 All 65 `test_scale_halo.py` tests pass (plus 58 tests in `test_halo.py` / `test_async_halo.py` unchanged).  The ng=3 FB-chain infrastructure now has zero known MPI-path holes.
 
+### Iter-631 — guard silent-drop of `interp_offsets` on the MPI backend
+
+**Codex stop-time finding on iter-630**: "removed MPI halo=3 guards expose incorrect interpolated halo behavior."
+
+**Root cause**: `pad_halo_mpi` and `pad_halo_mpi_4d` do NOT accept or honor `interp_offsets`.  They perform nearest-index strip placement only.  Before iter-630, the combination `interp_offsets != None + MPI + halo=3` was unreachable because the halo=3 MPI guard rejected it up front.  Iter-630 removed that guard to enable the FB-chain ng=3 unlock, but did so without replacing the implicit protection: a caller passing `interp_offsets=<array>` under the MPI backend now silently gets nearest-index placement — a correctness hazard flagged by Codex.
+
+**Fix** (`src/legoesm/grids/halo.py`): in the MPI dispatch branch of `pad_halo`, if `offsets is not None` (i.e., the caller passed `interp_offsets` and it survived the `duogrid`-suppression at line 541), raise `NotImplementedError` with a message naming `interp_offsets` and explaining the two supported alternatives (teach the MPI helpers to carry offsets, or pre-interpolate before `pad_halo`).  The guard fires for halo=1 / halo=2 / halo=3 equally — the hazard was latent on all three widths, just unreached because no active caller paired offsets + MPI before iter-630.
+
+**Test added**: `test_pad_halo_interp_offsets_mpi_backend_refused_iter631` — exercises the guard at all three halo widths using the iter-500 offset-shape conventions; asserts `NotImplementedError` with an "interp_offsets" substring.
+
+**Scope note**: `pad_halo_4d` already has its own `halo == 3` guard ("Use `pad_halo` on individual levels as a workaround"), so the 4D path is unaffected.  `pad_halo_vector` uses nearest-index placement by construction (it passes packed (u, v) through `pad_halo_mpi_4d` without offsets), so it is unaffected as well.
+
+66 `test_scale_halo.py` tests pass (65 pre-iter-631 + 1 new lock).
+

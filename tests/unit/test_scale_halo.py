@@ -1983,6 +1983,42 @@ class TestPadHaloH3Guardrails:
                     f"halo v does NOT match expected.  "
                     f"max diff = {v_diff:.3e}.")
 
+    def test_pad_halo_interp_offsets_mpi_backend_refused_iter631(self):
+        """Iter-631 (Codex stop-time finding on iter-630): removing the
+        MPI halo=3 `NotImplementedError` guard in `pad_halo` newly
+        exposed a silent-drop hazard — `pad_halo_mpi` does NOT accept
+        or honor `interp_offsets`, so a caller passing offsets under
+        the MPI backend was getting nearest-index placement without
+        any error.  Iter-631 restores an explicit guard: if both the
+        MPI backend is active AND `interp_offsets` is provided, raise
+        `NotImplementedError` with a clear message explaining the
+        missing capability and the supported alternatives.
+
+        This test verifies: (1) the guard fires for halo=3 (the newly
+        exposed case), (2) the guard fires for halo=1 / halo=2 too
+        (the hazard was latent for those widths as well, but unreached
+        because no active caller paired offsets + MPI before iter-630),
+        and (3) the error message mentions `interp_offsets` so users
+        can find the guard by searching.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        for halo in (1, 2, 3):
+            n = N
+            data = jnp.ones((6, n, n), dtype=jnp.float64)
+            offsets = jnp.zeros((6, 4, halo, n), dtype=jnp.float64)
+            # Iter-500 shape lock for halo=3; halo=1/2 accept
+            # (6, 4, n) so we construct the right shape here.
+            if halo != 3:
+                offsets = jnp.zeros((6, 4, n), dtype=jnp.float64)
+
+            with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+                with pytest.raises(NotImplementedError,
+                                   match="interp_offsets"):
+                    halo_mod.pad_halo(
+                        data, halo=halo, interp_offsets=offsets)
+
     def test_pad_halo_vector_halo3_mpi_guard_lifted_iter630(self):
         """Iter-630: the `halo=3 and _halo_backend == "mpi"` guard in
         `pad_halo_vector` was removed after `pad_halo_mpi_4d(halo=3)`

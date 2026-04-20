@@ -551,6 +551,25 @@ def pad_halo(
         # (`_pad_halo_mpi_4d_face_only` / `_pad_halo_mpi_4d_tiled`) paths
         # all handle three halo depths, and corner cells are filled by
         # `_fill_corners_h3`.
+        #
+        # Iter-631 (Codex stop-time finding on iter-630): the MPI helpers
+        # do NOT honor `interp_offsets` — they do a nearest-index copy
+        # only.  Before iter-630 this silent-drop was unreachable on the
+        # halo=3 path because of the halo=3 guard; removing that guard
+        # newly exposed the hazard.  Refuse with a clear error instead of
+        # silently producing wrong results.  `duogrid` is handled below
+        # in the MPI path via the scalar `pad_halo_mpi` + post-dispatch
+        # `cube_rmp_vectorized` (offsets is None there by construction of
+        # line 541), so it is NOT affected.
+        if offsets is not None:
+            raise NotImplementedError(
+                "pad_halo(interp_offsets=...) is not supported on the "
+                "MPI backend: `pad_halo_mpi` does a nearest-index copy "
+                "only.  If you need interpolated halo placement under "
+                "MPI, either (a) teach `pad_halo_mpi` / `pad_halo_mpi_4d` "
+                "to carry offsets and apply `_interp_strip_*` on the "
+                "receive side, or (b) pre-interpolate before calling "
+                "pad_halo.  Single-device backend supports this today.")
         from legoesm.parallel.halo_exchange import pad_halo_mpi
         padded = pad_halo_mpi(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
