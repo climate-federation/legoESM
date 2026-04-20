@@ -719,3 +719,26 @@ This is the EXACT path the matrix script takes internally for cubed-sphere field
 
 **Regression**: 10 W2/polar/imprint/angle tests pass.  Mode-4 measurement unchanged (2.551e-3 m/s at both ±30°).  Sanity-verification (iter-609) that tightening the ceiling to 1e-3 fires is preserved by the identical weight computation.
 
+### Iter-611 (2026-04-20): explicit halo=3 guard on pad_halo_mpi_4d
+
+**Motivation**: the FV3 FB-chain ng=3 unlock status (from iter-595) had one remaining item: `pad_halo_mpi_4d(halo=3)` was not implemented, but the function SILENTLY accepted halo=3 — the underlying helpers branch on `halo == 1` vs else (assuming halo=2), extracting only depths 0 and 1 and calling `_fill_corners_h2`.  At halo=3 this would silently drop depth-2 strips and corner cells that `_fill_corners_h3` provides.
+
+**Fix**: added an explicit `NotImplementedError` guard in `pad_halo_mpi_4d` (`src/legoesm/parallel/halo_exchange.py:868-890`) that rejects `halo=3` with a clear pointer to:
+1. The missing infrastructure (`_fill_corners_h3` + depth-2 strip extraction).
+2. The non-MPI alternative (`pad_halo_vector(halo=3)` from iter-595).
+3. The fact that the FB-chain unlock currently requires the single-device backend.
+
+**Lock added**: `test_pad_halo_mpi_4d_halo3_raises_notimplemented` in `tests/unit/test_scale_halo.py::TestPadHaloH3Guardrails`.  Verifies the guard fires with a matching message when someone tries `pad_halo_mpi_4d(data, topology, halo=3)`.
+
+**Regression**: 59 `test_scale_halo` tests pass.  No change to halo=1 or halo=2 MPI paths (guard placed BEFORE the existing halo branches).
+
+**FV3 FB-chain ng=3 unlock status (updated)**:
+- ✅ Scalar `pad_halo(halo=3)` (iter-499).
+- ✅ `halo_interp_offsets_h3` (iter-532).
+- ✅ Padded grid-angle + half-metrics at h=3 (iter-595).
+- ✅ Vector `pad_halo_vector(halo=3)` on non-MPI backend (iter-595).
+- ⚠️ `pad_halo_mpi_4d(halo=3)` EXPLICITLY GUARDED with `NotImplementedError` (iter-611, THIS).  Previously silently wrong; now clearly fails.
+- ❌ Wiring h=3 into `_d2a2c_vect` / `fv3_fb_sw_step` callers (callers still h=2).
+
+The FB-chain is now UNLOCKED on the single-device (non-MPI) backend — callers can flip from halo=2 to halo=3 without hitting an infrastructure wall.  The MPI backend is UNCHANGED but the missing piece is now clearly enumerated instead of silently wrong.
+

@@ -1045,6 +1045,33 @@ class TestPadHaloH3Guardrails:
         with pytest.raises(NotImplementedError, match="pad_halo_4d"):
             pad_halo_4d(data, halo=3)
 
+    def test_pad_halo_mpi_4d_halo3_raises_notimplemented(self):
+        """Iter-611: the MPI 4D halo exchange must explicitly reject
+        halo=3.  The underlying face-only/tiled helpers branch on
+        `halo == 1` vs else (=halo=2), extracting only depths 0 and 1
+        and filling corners via `_fill_corners_h2`.  For halo=3 they
+        would silently drop the depth-2 strip and the 3x3 corner
+        cells that `_fill_corners_h3` provides — producing wrong
+        halos rather than erroring.
+
+        This test locks the iter-611 explicit guard so future refactors
+        cannot silently re-enable halo=3 on the MPI path without
+        first implementing the depth-2 strip + `_fill_corners_h3`
+        wiring.  This is the last piece of the ng=3 FB-chain MPI
+        unlock (non-MPI was completed in iter-595).
+        """
+        import numpy as np
+        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+
+        # Minimal CommTopology stub — the guard raises before topology
+        # is used.
+        class _Stub:
+            tiling = (1, 1)
+        data = jnp.ones((6, N, N, 2), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError,
+                            match="pad_halo_mpi_4d"):
+            pad_halo_mpi_4d(data, _Stub(), halo=3)
+
     def test_pad_halo_vector_halo3_works_on_local_backend(self):
         """Iter-595: pad_halo_vector(halo=3) is SUPPORTED on the
         single-device (non-MPI) backend.  Callers must supply

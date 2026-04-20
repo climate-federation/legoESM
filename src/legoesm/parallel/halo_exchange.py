@@ -866,6 +866,34 @@ def pad_halo_mpi_4d(
     -------
     padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    # Iter-611: explicit halo=3 guard.  The underlying helpers
+    # `_pad_halo_mpi_face_only_4d` / `_pad_halo_mpi_tiled_4d` branch on
+    # `halo == 1` vs else, with the else path assuming halo=2 (extracts
+    # only depths 0 and 1 and calls `_fill_corners_h2`).  For halo=3
+    # they would silently drop the depth-2 strip AND the 3x3 corner
+    # cells that `_fill_corners_h3` fills in.  Rather than silently
+    # producing wrong halos under MPI at halo=3, raise here.  This is
+    # the last remaining piece of the ng=3 FB-chain infrastructure
+    # unlock (iter-595 enabled non-MPI; this gate documents the
+    # remaining MPI gap clearly at the call site).
+    if halo == 3:
+        raise NotImplementedError(
+            "pad_halo_mpi_4d(halo=3) is not yet implemented.  The "
+            "underlying face-only / tiled 4D halo helpers extract only "
+            "depths 0 and 1 and fill corners via `_fill_corners_h2` — "
+            "extending to depth 2 + `_fill_corners_h3` is the last "
+            "remaining piece of the ng=3 MPI infrastructure.  For the "
+            "non-MPI single-device backend, halo=3 is supported via "
+            "`pad_halo_vector(halo=3)` (iter-595).  The FV3 FB-chain "
+            "unlock path therefore currently requires the single-"
+            "device backend."
+        )
+    if halo not in (1, 2):
+        raise NotImplementedError(
+            f"pad_halo_mpi_4d supports only halo=1 and halo=2, got "
+            f"halo={halo}."
+        )
+
     try:
         import mpi4jax
         from mpi4py import MPI
