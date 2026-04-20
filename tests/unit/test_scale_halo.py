@@ -2019,6 +2019,81 @@ class TestPadHaloH3Guardrails:
                     halo_mod.pad_halo(
                         data, halo=halo, interp_offsets=offsets)
 
+    def test_pad_halo_4d_interp_offsets_mpi_refused_iter632(self):
+        """Iter-632 (Codex stop-time finding on iter-631): the iter-631
+        guard only covered scalar `pad_halo` — `pad_halo_4d`,
+        `pad_halo_vector_4d`, and `pad_halo_vector` all still silently
+        dropped `interp_offsets` under MPI because `pad_halo_mpi_4d`
+        does not carry or honor offsets.  Iter-632 adds matching
+        guards at all three call sites.
+
+        This test covers `pad_halo_4d`: offsets under MPI at halo=1/2
+        must raise NotImplementedError with "interp_offsets" in the
+        message (halo=3 is already rejected by the pad_halo_4d
+        halo=3 guard so we do not exercise it here).
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        nlev = 2
+        for halo in (1, 2):
+            data = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
+            offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
+            with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+                with pytest.raises(NotImplementedError,
+                                   match="interp_offsets"):
+                    halo_mod.pad_halo_4d(
+                        data, halo=halo, interp_offsets=offsets)
+
+    def test_pad_halo_vector_4d_interp_offsets_mpi_refused_iter632(self):
+        """Iter-632: `pad_halo_vector_4d` MPI branch must raise when
+        `interp_offsets` is provided, for the same reason as iter-631
+        (scalar `pad_halo`) — `pad_halo_mpi_4d` drops the offsets
+        silently otherwise.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        nlev = 2
+        u = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N, nlev), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
+        offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with pytest.raises(NotImplementedError,
+                               match="interp_offsets"):
+                halo_mod.pad_halo_vector_4d(
+                    u, v, ca, sa, cap, sap,
+                    interp_offsets=offsets, halo=1)
+
+    def test_pad_halo_vector_interp_offsets_mpi_refused_iter632(self):
+        """Iter-632: `pad_halo_vector` MPI branch must raise when
+        `interp_offsets` is provided (and no `duogrid` suppression
+        wipes them to None first) — closes the last silent-drop
+        call site identified in Codex's iter-631 follow-up review.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        u = jnp.ones((6, N, N), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
+        offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with pytest.raises(NotImplementedError,
+                               match="interp_offsets"):
+                halo_mod.pad_halo_vector(
+                    u, v, ca, sa, cap, sap,
+                    interp_offsets=offsets, halo=1)
+
     def test_pad_halo_vector_halo3_mpi_guard_lifted_iter630(self):
         """Iter-630: the `halo=3 and _halo_backend == "mpi"` guard in
         `pad_halo_vector` was removed after `pad_halo_mpi_4d(halo=3)`

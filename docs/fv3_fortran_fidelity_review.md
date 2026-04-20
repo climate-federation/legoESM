@@ -1139,3 +1139,22 @@ All 65 `test_scale_halo.py` tests pass (plus 58 tests in `test_halo.py` / `test_
 
 66 `test_scale_halo.py` tests pass (65 pre-iter-631 + 1 new lock).
 
+### Iter-632 — extend the iter-631 guard to the other MPI halo paths
+
+**Codex stop-time finding on iter-631**: "MPI still silently drops `interp_offsets` outside the new scalar guard."
+
+**Root cause**: iter-631 only covered scalar `pad_halo`.  Three other public MPI paths continued to drop `interp_offsets` silently because `pad_halo_mpi_4d` does not carry or honor offsets:
+
+1. `pad_halo_4d` — MPI branch at halo=1/2 (halo=3 already rejected up-front).
+2. `pad_halo_vector_4d` — MPI branch, all halo widths.
+3. `pad_halo_vector` — MPI branch, all halo widths.
+
+**Fix** (`src/legoesm/grids/halo.py`): added matching guards at each of the three MPI dispatch sites.  For `pad_halo_vector`, the check runs AFTER the `duogrid is not None -> offsets := None` suppression so that `pad_halo_vector(interp_offsets=..., duogrid=<grid>)` under MPI is still accepted — matches the analogous suppression on the scalar path.  All three guards raise `NotImplementedError` with an "interp_offsets" substring and a pointer to the two supported remediation routes (teach the MPI helpers to carry offsets, or pre-interpolate).
+
+**Tests added** (3 new locks in `TestPadHaloH3Dispatch`):
+- `test_pad_halo_4d_interp_offsets_mpi_refused_iter632` — halo=1/2 coverage.
+- `test_pad_halo_vector_4d_interp_offsets_mpi_refused_iter632` — 4D vector coverage.
+- `test_pad_halo_vector_interp_offsets_mpi_refused_iter632` — 2D vector coverage.
+
+69 `test_scale_halo.py` tests pass (66 pre-iter-632 + 3 new locks); 58 `test_halo.py` / `test_async_halo.py` tests pass (unchanged).  The silent-drop hazard on `interp_offsets` under MPI is now closed across all four public halo-dispatch surfaces (`pad_halo`, `pad_halo_4d`, `pad_halo_vector`, `pad_halo_vector_4d`).
+
