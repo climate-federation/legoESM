@@ -5206,5 +5206,133 @@ class TestDel6VtFluxFortranFormula(unittest.TestCase):
                  f"max_diff={fy_diff:.3e}, rms={fy_rms:.3e}."))
 
 
+class TestDSw1RecomputeUtVtFortranFormula(unittest.TestCase):
+    """Iter-622: direct Fortran-formula lock for `_d_sw1_recompute_ut_vt`.
+
+    Ports FV3 `sw_core.F90:618-812` which recomputes contravariant
+    transport velocities (ut, vt) from covariant C-grid (uc, vc).
+    Interior formula (4-cell average):
+      ut(I,j) = (uc(I,j) - 0.25*cosa_u*(vc(I-1,j) + vc(I,j)
+                                         + vc(I-1,j+1) + vc(I,j+1)))
+                * rsin_u
+      vt(i,J) = (vc(i,J) - 0.25*cosa_v*(uc(i,J-1) + uc(i+1,J-1)
+                                         + uc(i,J) + uc(i+1,J)))
+                * rsin_v
+
+    Previously no direct regression test — only indirect coverage
+    via the FB chain runtime.  The duogrid branch RETURNS
+    immediately after the interior formula (no face-boundary
+    overrides), so this is the cleanest path to lock.
+    """
+
+    def test_duogrid_interior_matches_4cell_average_formula(self):
+        """For duogrid mode, constant uc = C1 and constant vc = C2:
+        - vc 4-cell avg = 4*C2 everywhere.
+        - ut = (C1 - cosa_u * C2) * rsin_u.
+        - vt = (C2 - cosa_v * C1) * rsin_v.
+
+        Iterate through the full ut/vt arrays and verify each cell
+        matches the formula exactly.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _d_sw1_recompute_ut_vt
+
+        n = 8
+        # use_duogrid=True so the function returns immediately
+        # after Part 1 (interior 4-cell average).
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        C1, C2 = 3.7, -1.25
+        uc = jnp.full((6, n + 1, n), C1)
+        vc = jnp.full((6, n, n + 1), C2)
+        dt = 1.0
+
+        ut, vt = _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt)
+        cosa_u = np.asarray(cdgrid.cosa_u)
+        cosa_v = np.asarray(cdgrid.cosa_v)
+        rsin_u = np.asarray(cdgrid.rsin_u)
+        rsin_v = np.asarray(cdgrid.rsin_v)
+
+        ut_expected = (C1 - cosa_u * C2) * rsin_u
+        vt_expected = (C2 - cosa_v * C1) * rsin_v
+
+        ut_diff = float(np.max(np.abs(
+            np.asarray(ut) - ut_expected)))
+        vt_diff = float(np.max(np.abs(
+            np.asarray(vt) - vt_expected)))
+        ut_rms = float(np.sqrt(np.mean(ut_expected ** 2)))
+        vt_rms = float(np.sqrt(np.mean(vt_expected ** 2)))
+        self.assertLess(
+            ut_diff / max(ut_rms, 1e-20), 1e-10,
+            msg=(f"Constant uc={C1}, vc={C2} → ut deviates from "
+                 f"(C1 - cosa_u*C2)*rsin_u by {ut_diff:.3e} "
+                 f"(rms={ut_rms:.3e}).  Check the 4-cell vc average "
+                 f"and the Fortran formula at sw_core.F90:625-635."))
+        self.assertLess(
+            vt_diff / max(vt_rms, 1e-20), 1e-10,
+            msg=(f"Constant uc={C1}, vc={C2} → vt deviates from "
+                 f"(C2 - cosa_v*C1)*rsin_v by {vt_diff:.3e} "
+                 f"(rms={vt_rms:.3e})."))
+
+    def test_duogrid_random_inputs_match_numpy_reference(self):
+        """Random (uc, vc) test: reproduce the 4-cell-average
+        formula in numpy and compare the full-field production
+        output bit-for-bit (within 1e-10 relative tolerance).
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _d_sw1_recompute_ut_vt
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(622)
+        uc_np = rng.standard_normal((6, n + 1, n))
+        vc_np = rng.standard_normal((6, n, n + 1))
+        uc = jnp.asarray(uc_np)
+        vc = jnp.asarray(vc_np)
+
+        ut, vt = _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt=1.0)
+
+        # Numpy reference of Fortran sw_core.F90:625-635.
+        cosa_u = np.asarray(cdgrid.cosa_u)
+        cosa_v = np.asarray(cdgrid.cosa_v)
+        rsin_u = np.asarray(cdgrid.rsin_u)
+        rsin_v = np.asarray(cdgrid.rsin_v)
+
+        vc_pad = np.pad(vc_np, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        vc_avg = (vc_pad[:, :-1, :-1] + vc_pad[:, 1:, :-1]
+                   + vc_pad[:, :-1, 1:] + vc_pad[:, 1:, 1:])
+        ut_ref = (uc_np - 0.25 * cosa_u * vc_avg) * rsin_u
+
+        uc_pad = np.pad(uc_np, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        uc_avg = (uc_pad[:, :-1, :-1] + uc_pad[:, 1:, :-1]
+                   + uc_pad[:, :-1, 1:] + uc_pad[:, 1:, 1:])
+        vt_ref = (vc_np - 0.25 * cosa_v * uc_avg) * rsin_v
+
+        ut_diff = float(np.max(np.abs(np.asarray(ut) - ut_ref)))
+        vt_diff = float(np.max(np.abs(np.asarray(vt) - vt_ref)))
+        ut_rms = float(np.sqrt(np.mean(ut_ref ** 2)))
+        vt_rms = float(np.sqrt(np.mean(vt_ref ** 2)))
+        self.assertLess(
+            ut_diff / max(ut_rms, 1e-20), 1e-10,
+            msg=(f"Random input ut deviates from Fortran formula by "
+                 f"{ut_diff:.3e} (rms={ut_rms:.3e}).  Check: cosa_u "
+                 f"access, rsin_u factor, vc edge-pad convention, "
+                 f"or the 4-cell average indexing in "
+                 f"sw_core.F90:625-635."))
+        self.assertLess(
+            vt_diff / max(vt_rms, 1e-20), 1e-10,
+            msg=(f"Random input vt deviates from Fortran formula by "
+                 f"{vt_diff:.3e} (rms={vt_rms:.3e})."))
+
+
 if __name__ == "__main__":
     unittest.main()

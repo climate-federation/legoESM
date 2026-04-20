@@ -902,3 +902,22 @@ Asserts `max|production - reference| / rms(reference) < 1e-10` on both fx2 and f
 
 4 tests pass.  The helper now has structural + sign-level + full-field coverage.
 
+### Iter-622 (2026-04-20): Fortran-formula lock for `_d_sw1_recompute_ut_vt`
+
+**Motivation**: `_d_sw1_recompute_ut_vt` (`fv3_sw_core.py:39-230`) ports FV3 `sw_core.F90:618-812` — recomputes contravariant transport velocities (ut, vt) from covariant C-grid (uc, vc) using a 4-cell cross-velocity average + face-boundary overrides + adjacent-strip recomputation + corner 2×2 solve.  Interior formula:
+```
+ut(I,j) = (uc(I,j) - 0.25*cosa_u*(vc(I-1,j) + vc(I,j) + vc(I-1,j+1) + vc(I,j+1)))*rsin_u
+vt(i,J) = (vc(i,J) - 0.25*cosa_v*(uc(i,J-1) + uc(i+1,J-1) + uc(i,J) + uc(i+1,J)))*rsin_v
+```
+Previously no direct regression test — only indirect coverage via FB chain runtime.
+
+**Lock added**: `TestDSw1RecomputeUtVtFortranFormula` with 2 tests:
+1. `test_duogrid_interior_matches_4cell_average_formula`: constant `uc=C1, vc=C2` → `ut = (C1 - cosa_u*C2)*rsin_u`, `vt = (C2 - cosa_v*C1)*rsin_v`.  Exact formula reproduction.
+2. `test_duogrid_random_inputs_match_numpy_reference`: random (uc, vc) input → full-field numpy reproduction compared bit-for-bit to production (rel < 1e-10).
+
+**Sanity-verified**: dropping the `0.25` factor in the interior formula fires the constant-input test with relative diff 0.54.
+
+**Coverage**: duogrid INTERIOR path locked.  Non-duogrid branch (face-boundary sin_sg upwind, adjacent-strip recompute, corner 2×2 solve) has more complex dependencies and is architecturally bound to the Priority 3 non-duogrid cube-vertex gap — covered structurally by existing tests.
+
+2 new tests pass.  Iter-550..622 Fortran-formula-lock inventory now includes `_d_sw1_recompute_ut_vt` (interior, duogrid path).
+
