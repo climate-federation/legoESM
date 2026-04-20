@@ -988,10 +988,28 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
     da_min_c = jnp.min(1.0 / rarea_c)  # minimum corner area
 
-    # Pad ua, va for cross-velocity averages at boundaries
-    # Fortran: va(i,j-1)+va(i,j) — need j-1 to j stencil
-    ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    va_pad = jnp.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    # Pad ua, va for cross-velocity averages at boundaries.
+    # Iter-655: switched from jnp.pad(mode='edge') to pad_halo with
+    # proper cross-face halo exchange.  Fortran fills ua/va halos via
+    # mpp_update_domains(DGRID_NE) before d_sw5 fires, so the stencil
+    # at cube edges reads actual neighbour-face values rather than
+    # extended boundary values.  `mode='edge'` was a same-face 1D
+    # extension — NOT Fortran-faithful and a documented fidelity gap
+    # in review doc architectural item #2 (FB-path C36 instability).
+    #
+    # Strategy: do a full 2D halo=1 pad (pad_halo) and slice to the
+    # 1D strip each side of the stencil needs.  Keeps downstream
+    # indexing unchanged.
+    from legoesm.grids.halo import pad_halo as _pad_halo
+    dg = cdgrid.base.duogrid
+    _offs = None if dg is not None else cdgrid.base.halo_interp_offsets
+    ua_full = _pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
+    va_full = _pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
+    # Match the shape of the old jnp.pad call to preserve downstream
+    # slicing: ua_pad is (6, n+2, n) — halo along axis 1 only; va_pad
+    # is (6, n, n+2) — halo along axis 2 only.
+    ua_pad = ua_full[:, :, 1:-1]
+    va_pad = va_full[:, 1:-1, :]
 
     if nord == 0:
         # --- Del-2 divergence damping (sw_core.F90:1644-1724) ---
@@ -1010,7 +1028,14 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
 
         # delpc(i,j) = vort(i,j-1) - vort(i,j) + ptc(i-1,j) - ptc(i,j)
         # vort: (6, n+1, n), ptc: (6, n, n+1)
-        # Corner stagger: need vort at j-1 and j, ptc at i-1 and i
+        # Corner stagger: need vort at j-1 and j, ptc at i-1 and i.
+        # Iter-655: vort/ptc live on D-grid face midpoints (non-cell-
+        # centre).  `pad_halo` is cell-centre; mode='edge' here is a
+        # same-face extension that survives pending a proper edge-
+        # midpoint halo exchange.  This is an acknowledged gap —
+        # upgrading it requires an edge-midpoint halo helper that
+        # does cross-face interpolation for u-edge / v-edge fields.
+        # Flagged for future iter.
         vort_pad = jnp.pad(vort, [(0, 0), (0, 0), (1, 1)], mode='edge')
         ptc_pad = jnp.pad(ptc, [(0, 0), (1, 1), (0, 0)], mode='edge')
 
