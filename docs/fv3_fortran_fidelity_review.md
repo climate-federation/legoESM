@@ -759,3 +759,29 @@ This is a deliberate Python design choice consistent with Fortran at leading ord
 **FB chain stability remains at step 25 (iter-670)** — the residual has shifted from PGF (iter-666 fix removed that amplification source) to operators whose contribution was previously masked (likely `d_sw_native` vorticity + B-grid KE paths).  The PGF/metric fidelity gap is CLOSED; further stability work requires per-operator tendency diagnostics.
 
 **Tests**: no source changes in iter-671.  All 123 regression tests pass.  Audit-only iteration.
+
+### Iter-672 — boundary_fix effect is shrinking post iter-666/670
+
+**Motivation**: `boundary_fix` in `operators_cdgrid.py:1475-1483` is documented as a NON-FV3 hack that smooths A-L tendencies at cube-boundary cells (`du_cc[:, 0, :] = 0.5*(du_cc[:, 0, :] + du_cc[:, 1, :])` and symmetric).  Per the Ralph directive "do not improvise", this should eventually be removed.  iter-511 had measured a 2.4× L2 penalty for disabling it; is the penalty still that large after iter-666/670's metric fixes closed the PGF and `rarea_c` cube-boundary gaps?
+
+**Experiment**: W2 at C36 with `dt=300s` 1-day through `FV3EdgeShallowWaterModel`.
+
+| quantity          | `bfix=True`   | `bfix=False`  | ratio without/with |
+|:------------------|--------------:|--------------:|-------------------:|
+| W2 L2             | 1.98e-3       | 2.06e-3       | 1.04× |
+| W2 Linf           | 6.41e-3       | 6.52e-3       | 1.02× |
+| `max|v_err|`      | 0.62 m/s      | 0.86 m/s      | 1.39× |
+
+**Comparison to iter-511** (at different dt=60s, so not an apples-to-apples comparison, but indicative):
+- iter-511 L2 ratio: 1.36e-3 / 5.64e-4 = **2.41×** (boundary_fix WAS essential)
+- iter-672 L2 ratio: 2.06e-3 / 1.98e-3 = **1.04×** (boundary_fix now marginal)
+
+So the iter-666/670 metric fixes have absorbed most of the cube-boundary artifact that `boundary_fix` was compensating for.  The 1.04× L2 ratio is within regression noise.  The 1.39× v_err ratio shows `boundary_fix` still helps v-wind cleanup but much less than pre-iter-666.
+
+**Directive interpretation**: `boundary_fix` is a non-Fortran hack.  Pre-iter-666 it was LOAD-BEARING (2.4× L2 penalty for removing it).  Post-iter-666/670 it's a small-but-nonzero helper (1.04× L2 penalty) whose removal is PHYSICALLY CLOSER TO NEUTRAL but still makes v_err 1.4× worse.  Full removal should wait for either:
+(a) the FB chain to stabilise (architectural item #2) so production can switch paths entirely, or
+(b) further A-L boundary-fidelity fixes (no low-hanging candidates identified in iter-671's audit).
+
+**Iter-672 is an observation**, not a code change.  `boundary_fix=True` remains the default.  The iter-511 lock test (`test_w2_alpha0_c16_1day_boundary_fix_load_bearing`) may need re-calibration at a future iter — the original lock asserted ~2.4× worse without, which is no longer true at C36.  Not re-tuning it yet because lowering the threshold would weaken regression protection.
+
+**Tests**: no source changes.  All 123 regression tests pass.  Diagnostic observation iter.
