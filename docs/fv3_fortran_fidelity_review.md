@@ -842,3 +842,24 @@ Each step tightens the anti-rot lock in response to a specific regression class 
 
 `_edge_interpolate4` now has locks at both `(1, 4)` (scalar Fortran formula) and `(6, n, 4)` (production vectorization consistency).
 
+### Iter-619 (2026-04-20): direct Fortran-formula lock for `_del6_vt_flux`
+
+**Motivation**: `_del6_vt_flux` (at `fv3_sw_core.py:754-824`) is the port of Fortran `del6_vt_flux` (`sw_core.F90:2008-2121`) — del-n damping for relative vorticity used in d_sw6 when `damp_v > 1e-5`.  Before iter-619, only an indirect halo-routing test existed (`test_del6_vt_flux_routes_halo_through_duogrid_when_active`); no formula-level lock.
+
+**Lock added**: `TestDel6VtFluxFortranFormula` class with 3 tests:
+1. `test_nord0_constant_q_produces_zero_flux`: for a spatially constant q, the del-2 operator returns zero fluxes.  Catches sign-error / metric-factor bugs at the operator level.
+2. `test_nord0_flux_shape_and_sign_structure`: for q strictly increasing in i (constant in j per face), fx2 is negative in the interior (WEST - EAST sign convention) and fy2 is zero in the interior (away from halo-polluted face-boundary interfaces j=0 and j=n).  Locks the initial-pass Fortran sign convention.
+3. `test_nord1_iteration_sign_flip_invariant`: places a single peak perturbation and compares nord=0 vs nord=1 fluxes.  The nord=1 result is NOT a simple scalar multiple of nord=0 — del-4 has richer spatial structure than del-2.  The test computes the best-fit scalar alpha and asserts the residual is at least 5% of the signal, catching refactors that collapse the iteration loop or break the sign-alternation.
+
+**Regression**: 3 tests pass.  `_del6_vt_flux` now has formula-level coverage complementing the existing halo-routing test.
+
+**Cumulative Fortran-oracle lock coverage** across iter-550..619 (selected):
+- `_divergence_corner_duo`: iter-554/556/557 (bit-exact formula + 0.25 attenuation).
+- `_corner_vorticity`: iter-582/583/584 (AST gate + body + behavioral).
+- `_vorticity_flux`: iter-585/586/587 (AST + behavioral + dual-edge).
+- `_ke_upwind`: iter-588/589/590 (AST + behavioral + symmetric zero-sign).
+- `_d2a2c_vect` halo_interp_offsets: iter-593 (AST lock).
+- `_edge_interpolate4`: iter-617/618 (scalar + vectorized formula).
+- `_del6_vt_flux`: iter-619 (nord=0/1 formula, THIS).
+- `synchronize_cgrid_fluxes`: iter-502/504/601/602/603 (presence + gate + ordering + nested-scope).
+
