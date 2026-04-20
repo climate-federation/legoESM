@@ -2074,7 +2074,9 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             msg=(f"Interior divg_d output differs from float32 "
                  f"reproduction by {interior_diff:.3e}.  The "
                  f"reproduction mirrors fv3_sw_core.py:847-909 and "
-                 f"should match production at float64 round-off.  If the "
+                 f"should match production exactly (both sides cast "
+                 f"to float32 before subtraction, assertEqual to 0.0 "
+                 f"verifies IEEE-identity after cast).  If the "
                  f"production formula changed, UPDATE this "
                  f"reproduction to match."))
 
@@ -4779,8 +4781,8 @@ class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
 
     Used by `_d2a2c_vect` at face boundaries (sw_core.F90:3587, 3603)
     where the standard 4th-order Lagrange stencil straddles the
-    face boundary.  Formula must match Fortran at float64 round-off in the
-    expression structure; numerical invariants below lock it.
+    face boundary.  Formula must match Fortran to 12 decimal places
+    in the expression structure; numerical invariants below lock it.
 
     No direct regression test existed before iter-617 — only
     indirect coverage via `_d2a2c_vect` output.
@@ -4825,7 +4827,8 @@ class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
 
     def test_non_uniform_dxa_matches_explicit_fortran_formula(self):
         """Non-uniform dxa: reproduce the Fortran formula explicitly
-        via numpy and compare at float64 round-off to the Python helper."""
+        via numpy and compare to 12 decimal places against the Python
+        helper."""
         import jax.numpy as jnp
         import numpy as np
         from legoesm.core.fv3_sw_core import _edge_interpolate4
@@ -5281,7 +5284,9 @@ class TestDSw1RecomputeUtVtFortranFormula(unittest.TestCase):
     def test_duogrid_random_inputs_match_numpy_reference(self):
         """Random (uc, vc) test: reproduce the 4-cell-average
         formula in numpy and compare the full-field production
-        output at float64 round-off (within 1e-10 relative tolerance).
+        output at 1e-10 relative tolerance (NOT float64 round-off —
+        the test uses `diff / rms < 1e-10`, which is well above
+        round-off ε ≈ 1e-15).
         """
         import jax.numpy as jnp
         import numpy as np
@@ -5378,8 +5383,8 @@ class TestPGradCFortranFormula(unittest.TestCase):
 
     def test_random_input_matches_numpy_reference(self):
         """Random h_star + h_s: reproduce the Fortran formula in
-        numpy and verify the production output matches at float64 round-off
-        (rel < 1e-10)."""
+        numpy and verify the production output matches at
+        `rel < 1e-10` relative tolerance (not IEEE bit identity)."""
         import jax.numpy as jnp
         import numpy as np
         from legoesm.core.fv3_sw_core import _p_grad_c, _pad_halo_auto
@@ -5481,7 +5486,8 @@ class TestComputeTransportQuantitiesFortranFormula(unittest.TestCase):
 
     def test_full_field_matches_numpy_reference(self):
         """Random (ut, vt) → reproduce the Fortran formula in numpy
-        and verify production output matches at float64 round-off."""
+        and verify production output matches at `rel < 1e-10`
+        relative tolerance (not IEEE bit identity)."""
         import jax.numpy as jnp
         import numpy as np
         from legoesm.core.fv_tp_2d import compute_transport_quantities

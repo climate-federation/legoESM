@@ -1506,3 +1506,25 @@ All 6 stencil tests pass at the new tolerance.  The lock detection power is unch
 
 No test logic changes; documentation-only completion of the iter-650 scrub.
 
+### Iter-652 — correct iter-651's false-precision claims for looser tolerances
+
+**Codex stop-time finding on iter-651**: "iter-651's blanket wording change still makes false claims about what the tests enforce."
+
+**Root cause**: iter-651 did a blanket `bit-for-bit → at float64 round-off` replacement across 18 test docstrings, but six of the resulting claims are wrong about the actual enforced tolerance:
+
+- `test_duogrid_random_inputs_match_numpy_reference` (iter-622): enforces `diff / rms < 1e-10` — that's `rtol < 1e-10` relative, not float64 round-off (~1e-15).
+- `test_random_input_matches_numpy_reference` (iter-623): same, `rel < 1e-10`.
+- `test_full_field_matches_numpy_reference` (iter-624): same, `rel < 1e-10`.
+- `test_non_uniform_dxa_matches_explicit_fortran_formula` (iter-617): uses `assertAlmostEqual(places=12)` → 12 decimal places (1e-12 absolute), close to round-off but better described by the places count.
+- The `TestEdgeInterpolate4FortranFormula` class docstring: same `places=12` context.
+- One error message in the iter-554 `test_divergence_corner_duo_face_boundary_zeroing` which uses `assertEqual(interior_diff, 0.0)` after float32 cast — that's IEEE-identity-after-cast, not "float64 round-off".
+
+**Fix** (targeted per-test, NOT blanket):
+- 3 `rel < 1e-10` tests: rewrote to "at `rel < 1e-10` relative tolerance (not IEEE bit identity)".
+- 2 `places=12` tests: rewrote to "to 12 decimal places".
+- 1 `assertEqual(..., 0.0)` error message: rewrote to "match production exactly (both sides cast to float32 before subtraction, assertEqual to 0.0 verifies IEEE-identity after cast)".
+
+Remaining 12 test docstrings that say "at float64 round-off" all pair with actual `atol ∈ [1e-14, 1e-12]` — close enough to float64 round-off on O(1) values that the description is accurate (the iter-649 measurement showed 4 ULPs ≈ 4e-16 is the natural floor for the stencil in question; `atol=1e-12` is ~10^4 ULPs but well within the reordering-round-off tolerance for linear combinations with more operands).
+
+All 118 tests still pass.  The test-docstring tolerance claims now match the actual enforced tolerances at each call site.
+
