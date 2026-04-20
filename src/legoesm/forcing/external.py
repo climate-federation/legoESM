@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 
 
-_TIME_REF_RE = re.compile(r"since\s+(\d{4})-(\d{1,2})-(\d{1,2})")
+_TIME_REF_RE = re.compile(r"since\s+(\d{4})-(\d{1,2})-(\d{1,2})", re.IGNORECASE)
 
 
 def _parse_time_ref_year(units: str) -> int | None:
@@ -741,7 +741,12 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
     ----------
     config : OzoneConfig
     day : float
-        Day of year (fractional).
+        Simulation day (fractional) counted from
+        ``<config.start_year>-01-01``. For 12-month climatology files the
+        cyclic branch reduces this modulo 365.25, so callers may equally
+        pass a day-of-year value; for multi-year files (e.g. CMIP6
+        input4MIPs) it must be an absolute simulation day since
+        ``start_year`` so interannual evolution is aligned correctly.
     lat_grid : jax array or None
         Model grid latitudes [radians]. If provided, interpolates
         the zonal-mean climatology to these latitudes.

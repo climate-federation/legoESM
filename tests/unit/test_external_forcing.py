@@ -440,3 +440,195 @@ class TestExternalForcingConfig:
 
         assert get_ozone_at_time(cfg.ozone, day=0.0) is None
         assert get_aerosol_at_time(cfg.aerosol, day=0.0) is None
+
+
+# ==============================================================================
+# Regression tests for CMIP6 / input4MIPs ingestion (see issue #207)
+# ==============================================================================
+
+class TestCFTimeUnits:
+    """_to_days_float must honor CF ``units`` (months/hours/seconds)."""
+
+    def test_months_since_scales_by_month_length(self):
+        from legoesm.forcing.external import _to_days_float
+        days = _to_days_float(np.array([0.0, 12.0]), "months since 1850-01-01")
+        assert np.isclose(days[1], 12 * 30.4375)
+
+    def test_hours_since_scales_by_24(self):
+        from legoesm.forcing.external import _to_days_float
+        days = _to_days_float(np.array([0.0, 48.0]), "hours since 2000-01-01")
+        assert np.isclose(days[1], 2.0)
+
+    def test_seconds_since(self):
+        from legoesm.forcing.external import _to_days_float
+        days = _to_days_float(np.array([0.0, 86400.0]), "seconds since 1970-01-01")
+        assert np.isclose(days[1], 1.0)
+
+    def test_parse_ref_year_case_insensitive(self):
+        # Regex is case-insensitive so a capitalized CF units string still
+        # yields a valid reference year for the non-cyclic ozone alignment.
+        from legoesm.forcing.external import _parse_time_ref_year
+        assert _parse_time_ref_year("Months since 1850-01-01") == 1850
+        assert _parse_time_ref_year("DAYS SINCE 1979-01-01") == 1979
+        assert _parse_time_ref_year("") is None
+
+    def test_months_since_nc_roundtrip(self, tmp_path):
+        """End-to-end: write a tiny NetCDF with numeric time+units, load it."""
+        import netCDF4
+        from legoesm.forcing.external import _load_monthly_zonal_with_levels
+        path = str(tmp_path / "months.nc")
+        with netCDF4.Dataset(path, "w") as ds:
+            ds.createDimension("time", 24)
+            ds.createDimension("lat", 3)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = np.arange(24.0)
+            t.units = "months since 1850-01-01"
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = [-60.0, 0.0, 60.0]
+            v = ds.createVariable("vmro3", "f8", ("time", "lat"))
+            v[:] = np.zeros((24, 3))
+        mid, lat, plev, data, ref = _load_monthly_zonal_with_levels(path, "vmro3")
+        assert ref == 1850
+        assert mid.shape == (24,)
+        # 24 months → roughly two years in days
+        assert np.isclose(mid[-1], 23 * 30.4375)
+
+
+class TestSolarSpectralCaseInsensitive:
+    """_load_time_gpt resolves ``TSI``/``SSI_frac`` when defaults are lowercase."""
+
+    def test_uppercase_variable_names(self, tmp_path):
+        import netCDF4
+        from legoesm.forcing.external import _load_time_gpt
+        path = str(tmp_path / "solar.nc")
+        ntime, ngpt = 6, 14
+        with netCDF4.Dataset(path, "w") as ds:
+            ds.createDimension("time", ntime)
+            ds.createDimension("band", ngpt)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = np.arange(ntime, dtype=float)
+            # Capitalized per MPI-M CMIP6 convention.
+            tsi = ds.createVariable("TSI", "f8", ("time",))
+            tsi[:] = 1360.0 + np.arange(ntime)
+            ssi = ds.createVariable("SSI_frac", "f8", ("time", "band"))
+            ssi[:] = np.full((ntime, ngpt), 1.0 / ngpt)
+        # Pass lowercase defaults; case-insensitive lookup must resolve both.
+        times, tsi_vals, spec = _load_time_gpt(path, "tsi", "ssi_frac")
+        assert tsi_vals is not None
+        assert tsi_vals[0] == 1360.0
+        assert spec.shape == (ntime, ngpt)
+
+
+class TestDescendingLatInterp:
+    """_interp_zonal_to_grid must handle descending source latitudes (Kinne)."""
+
+    def test_descending_source_preserves_signal(self):
+        from legoesm.forcing.external import _interp_zonal_to_grid
+        lat_src = np.array([89.5, 30.0, 0.0, -30.0, -89.5])
+        field = np.array([1.0, 2.0, 3.0, 4.0, 5.0])  # monotonic S→N reversed
+        # Target in radians, covering N→S so we can compare to source pattern
+        lat_tgt_deg = np.array([89.5, 0.0, -89.5])
+        lat_tgt = jnp.radians(jnp.asarray(lat_tgt_deg))
+        out = np.asarray(_interp_zonal_to_grid(lat_src, field, lat_tgt))
+        # After internal reversal, N pole → 1.0, equator → 3.0, S pole → 5.0
+        assert np.isclose(out[0], 1.0)
+        assert np.isclose(out[1], 3.0)
+        assert np.isclose(out[-1], 5.0)
+
+    def test_ascending_source_unchanged(self):
+        from legoesm.forcing.external import _interp_zonal_to_grid
+        lat_src = np.array([-89.5, 0.0, 89.5])
+        field = np.array([10.0, 50.0, 90.0])
+        lat_tgt = jnp.radians(jnp.asarray([-89.5, 0.0, 89.5]))
+        out = np.asarray(_interp_zonal_to_grid(lat_src, field, lat_tgt))
+        assert np.allclose(out, [10.0, 50.0, 90.0])
+
+
+class TestCMIP6VolcanicIngestion:
+    """_load_volcanic_cmip6 integrates ext_sun on altitude → column AOD."""
+
+    def _write_minimal_cmip6_volcanic(self, path):
+        """Write a tiny CMIP6-style volcanic file with a known vertical integral."""
+        import netCDF4
+        nbands, nlat, nalt, nmon = 2, 3, 4, 12
+        with netCDF4.Dataset(path, "w") as ds:
+            ds.createDimension("solar_bands", nbands)
+            ds.createDimension("latitude", nlat)
+            ds.createDimension("altitude", nalt)
+            ds.createDimension("month", nmon)
+            la = ds.createVariable("latitude", "f8", ("latitude",))
+            la[:] = [-60.0, 0.0, 60.0]
+            alt = ds.createVariable("altitude", "f8", ("altitude",))
+            alt[:] = [10.0, 15.0, 20.0, 25.0]  # km
+            alt.units = "km"
+            ext = ds.createVariable(
+                "ext_sun", "f8",
+                ("solar_bands", "latitude", "altitude", "month"),
+            )
+            # Uniform extinction so the expected column is easy to predict.
+            # 0.01 [1/km] × total Δz spanning 10→25 km.
+            ext[:] = np.full((nbands, nlat, nalt, nmon), 0.01)
+        return nbands, nlat, nalt, nmon
+
+    def test_dispatcher_detects_cmip6_schema(self, tmp_path):
+        from legoesm.forcing.external import _is_cmip6_volcanic_file
+        path = str(tmp_path / "volc.nc")
+        self._write_minimal_cmip6_volcanic(path)
+        assert _is_cmip6_volcanic_file(path) is True
+
+    def test_column_aod_matches_vertical_integral(self, tmp_path):
+        from legoesm.forcing.external import _load_volcanic_cmip6
+        path = str(tmp_path / "volc.nc")
+        self._write_minimal_cmip6_volcanic(path)
+        mid_days, lat, aod = _load_volcanic_cmip6(path)
+        # altitude 10→25 km, ext = 0.01 [1/km] ⇒ integral ≈ 0.01 × 15 km = 0.15.
+        # The centered Δz over [10,15,20,25] spans ~15 km total via
+        # dz = [5, 5, 5, 5] km for end/center rule, so expected ≈ 0.01 × 20 = 0.20.
+        assert aod.shape == (12, 3)
+        assert 0.1 < aod.mean() < 0.3
+        # All months uniform because we used a constant ext field.
+        assert np.std(aod) < 1e-10
+
+    def test_auto_dispatcher_to_cmip6_branch(self, tmp_path):
+        from legoesm.forcing.external import _load_volcanic_aerosol
+        path = str(tmp_path / "volc.nc")
+        self._write_minimal_cmip6_volcanic(path)
+        mid_days, lat, aod = _load_volcanic_aerosol(path)
+        assert aod.shape == (12, 3)
+
+
+class TestNonCyclicOzone:
+    """Multi-year ozone files must preserve interannual evolution."""
+
+    def test_longer_than_12_months_uses_linear_branch(self, tmp_path):
+        import netCDF4
+        from legoesm.forcing.external import get_ozone_at_time, OzoneConfig
+        path = str(tmp_path / "ozone_multi.nc")
+        nmon = 36  # 3 years
+        nlat, nlev = 4, 5
+        # Construct a field that grows linearly in time so interannual
+        # evolution is distinguishable across successive Januaries.
+        data = (np.arange(nmon)[:, None, None] *
+                np.ones((nmon, nlat, nlev))).astype(np.float64) * 1e-7
+        with netCDF4.Dataset(path, "w") as ds:
+            ds.createDimension("time", nmon)
+            ds.createDimension("lat", nlat)
+            ds.createDimension("plev", nlev)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = np.arange(nmon, dtype=float)
+            t.units = "months since 1990-01-01"
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = np.linspace(-60.0, 60.0, nlat)
+            p = ds.createVariable("plev", "f8", ("plev",))
+            p[:] = np.linspace(100.0, 100000.0, nlev)
+            v = ds.createVariable("vmro3", "f8", ("time", "lat", "plev"))
+            v[:] = data
+
+        cfg_y1 = OzoneConfig(enabled=True, source="climatology",
+                             path=path, start_year=1990)
+        cfg_y3 = OzoneConfig(enabled=True, source="climatology",
+                             path=path, start_year=1992)
+        out_y1 = get_ozone_at_time(cfg_y1, day=15.0)
+        out_y3 = get_ozone_at_time(cfg_y3, day=15.0)
+        # Field grows with time, so year-3 January must exceed year-1 January.
+        assert out_y3["ozone"].mean() > out_y1["ozone"].mean()
