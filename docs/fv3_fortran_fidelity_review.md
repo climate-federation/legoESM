@@ -1290,3 +1290,26 @@ Pre-iter-638, only behavioural tests existed (`test_corner_vorticity_legacy_corr
 
 All 3 tests pass.  Cumulative Fortran-formula lock inventory now **18 helpers**: `_corner_vorticity` added.
 
+### Iter-639 — Fortran-formula lock for `_xppm` / `_yppm` flux formula
+
+**Motivation**: `_xppm` (fv_tp_2d.py:261-278) and `_yppm` (fv_tp_2d.py:281-293) contain the inner PPM flux formula matching `tp_core.F90:519-524`:
+
+    if ( c(i,j) > 0. ) then
+         fx1(i) = (1.-c)*(br(i-1) - c*b0(i-1))
+         flux(i,j) = q1(i-1)
+    else
+         fx1(i) = (1.+c)*(bl(i)   + c*b0(i))
+         flux(i,j) = q1(i)
+    endif
+    ! after loop: flux = flux + fx1
+
+where `b0 = bl + br`.  Pre-iter-639 the flux formula had no direct numerical lock — only integration-level coverage via SW matrix runs.  A regression that flipped `crx > 0` to `crx < 0`, swapped `bl` ↔ `br` in the c>0 branch, used `q_R` instead of `q_L` upwind, or changed the `swapaxes(1, 2)` indices in `_yppm` would silently break transport at atol levels invisible in integration tests until errors accumulated.
+
+**Tests added** (`TestPpmFluxFortranFormula`, 3 total):
+- `_ref_xppm_flux`: numpy reproduction of the flux formula.
+- `test_xppm_flux_formula_matches_fortran`: patches `_ppm_1d` to return controlled (bl, br, q_c) stubs, then calls `_xppm` and verifies bit-for-bit match against `_ref_xppm_flux` on a random (6, 10, 6) grid at `atol=1e-14`.  Isolates the flux formula from the `_ppm_1d` reconstruction logic (which already has its own locks via `TestPertPpmFortranFormula` at iter-635).
+- `test_yppm_flux_formula_matches_fortran`: same pattern for `_yppm`, including a `swapaxes(1, 2)` round-trip on the Courant number.  Catches regressions in the y-sweep axis handling.
+- `test_ppm_flux_upwind_selection_iter639`: with `bl = br = 0`, the flux formula reduces to `q_L` (c>0) or `q_R` (c<0).  Uses alternating `+0.3 / -0.3` Courant numbers across face positions and asserts the flux tracks the correct upwind cell mean at each face — directly locks the `crx > 0` sign + L/R indexing.
+
+All 3 tests pass at `atol=1e-14`.  Cumulative Fortran-formula lock inventory now **19 helpers**: `_xppm` / `_yppm` flux formula added.
+

@@ -6502,5 +6502,201 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
                      f"fv3_sw_core.py:1133 has been silently dropped."))
 
 
+class TestPpmFluxFortranFormula(unittest.TestCase):
+    """Iter-639: direct Fortran-formula lock for the `_xppm` / `_yppm`
+    flux formula in ``src/legoesm/core/fv_tp_2d.py`` (lines 276-278,
+    291-293) against ``tp_core.F90:519-524``.
+
+    Fortran reference (tp_core.F90 xppm inner loop)::
+
+        if ( c(i,j) > 0. ) then
+             fx1(i)    = (1.-c(i,j))*(br(i-1) - c(i,j)*b0(i-1))
+             flux(i,j) = q1(i-1)
+        else
+             fx1(i)    = (1.+c(i,j))*(bl(i)   + c(i,j)*b0(i)  )
+             flux(i,j) = q1(i)
+        endif
+        ! after loop: flux = flux + fx1
+
+    where ``b0 = bl + br``.  So the total flux is::
+
+        flux_pos = q_L + (1 - c) * (br_L - c * (bl_L + br_L))   # c > 0
+        flux_neg = q_R + (1 + c) * (bl_R + c * (bl_R + br_R))   # c <= 0
+
+    with q_L / q_R being the upwind cell means.
+
+    This test locks the flux formula independently of `_ppm_1d`'s
+    reconstruction logic by patching `_ppm_1d` to return controlled
+    bl / br / q_c.  Pre-iter-639, the flux formula had no direct
+    numerical lock — only integration-level coverage via SW matrix
+    runs.  A regression that flipped a sign on `c`, used `bl` instead
+    of `br` for c>0, or mis-indexed q_L / q_R would silently break
+    transport at atol levels invisible in integration tests until the
+    error propagated over many steps.
+    """
+
+    @staticmethod
+    def _ref_xppm_flux(bl, br, q_c, crx, n):
+        """Numpy reproduction of the `_xppm` flux formula (fv_tp_2d.py
+        lines 273-278)."""
+        import numpy as np
+        bl_L = bl[:, :n + 1, :]
+        br_L = br[:, :n + 1, :]
+        q_L = q_c[:, :n + 1, :]
+        bl_R = bl[:, 1:n + 2, :]
+        br_R = br[:, 1:n + 2, :]
+        q_R = q_c[:, 1:n + 2, :]
+        fx_pos = q_L + (1.0 - crx) * (br_L - crx * (bl_L + br_L))
+        fx_neg = q_R + (1.0 + crx) * (bl_R + crx * (bl_R + br_R))
+        return np.where(crx > 0, fx_pos, fx_neg)
+
+    def test_xppm_flux_formula_matches_fortran(self):
+        """Patch `_ppm_1d` to return controlled (bl, br, q_c) and
+        verify `_xppm` applies the Fortran flux formula bit-for-bit.
+        """
+        import numpy as np
+        from unittest import mock
+        from legoesm.core import fv_tp_2d
+
+        n = 8
+        # Construct stub (bl, br, q_c) with the exact shapes _xppm
+        # expects from `_ppm_1d`: (6, n+2, M) each.
+        M = 6  # cross-sweep dimension
+        rng = np.random.default_rng(639)
+        bl = rng.standard_normal((6, n + 2, M))
+        br = rng.standard_normal((6, n + 2, M))
+        q_c = rng.standard_normal((6, n + 2, M))
+        crx = rng.standard_normal((6, n + 1, M))  # courant at faces
+
+        # q_h2 shape is (6, n+4, M) — _xppm passes it to _ppm_1d,
+        # which we patch so the content doesn't matter.
+        q_h2 = jnp.zeros((6, n + 4, M), dtype=jnp.float64)
+
+        def _stub_ppm_1d(q, n_, *args, **kwargs):
+            return (jnp.asarray(bl), jnp.asarray(br), jnp.asarray(q_c))
+
+        with mock.patch.object(fv_tp_2d, "_ppm_1d",
+                                side_effect=_stub_ppm_1d):
+            flux = fv_tp_2d._xppm(q_h2, jnp.asarray(crx), n)
+
+        flux_ref = self._ref_xppm_flux(bl, br, q_c, crx, n)
+        np.testing.assert_allclose(
+            np.asarray(flux), flux_ref, atol=1e-14,
+            err_msg=("_xppm flux formula diverges from tp_core.F90:"
+                     "519-524 reference.  Expected flux_pos = q_L + "
+                     "(1-c)*(br_L - c*(bl_L+br_L)) for c>0."))
+
+    def test_yppm_flux_formula_matches_fortran(self):
+        """`_yppm` is `_xppm` with a pre/post swapaxes (1<->2).  Patch
+        `_ppm_1d` and verify the flux formula output matches.
+        """
+        import numpy as np
+        from unittest import mock
+        from legoesm.core import fv_tp_2d
+
+        n = 8
+        M = 6
+        rng = np.random.default_rng(640)
+        # After swapaxes in _yppm, _ppm_1d sees q with shape
+        # (6, n+2, M) — same as _xppm.  bl/br/q_c come out at (6, n+2, M).
+        bl = rng.standard_normal((6, n + 2, M))
+        br = rng.standard_normal((6, n + 2, M))
+        q_c = rng.standard_normal((6, n + 2, M))
+        cry = rng.standard_normal((6, M, n + 1))    # pre-swap shape
+        # After swapaxes cry → c_t of shape (6, n+1, M).
+        c_t = np.swapaxes(cry, 1, 2)
+
+        q_h2 = jnp.zeros((6, M, n + 4), dtype=jnp.float64)
+
+        def _stub_ppm_1d(q, n_, *args, **kwargs):
+            return (jnp.asarray(bl), jnp.asarray(br), jnp.asarray(q_c))
+
+        with mock.patch.object(fv_tp_2d, "_ppm_1d",
+                                side_effect=_stub_ppm_1d):
+            flux_y = fv_tp_2d._yppm(q_h2, jnp.asarray(cry), n)
+
+        # flux_y is the post-swap output: shape (6, M, n+1).
+        # The reference flux was computed in the POST-swap frame
+        # (axis 1 holds the sweep direction).  Apply the reference in
+        # that frame, then swap back.
+        flux_ref_t = self._ref_xppm_flux(bl, br, q_c, c_t, n)  # (6, n+1, M)
+        flux_ref = np.swapaxes(flux_ref_t, 1, 2)                # (6, M, n+1)
+
+        np.testing.assert_allclose(
+            np.asarray(flux_y), flux_ref, atol=1e-14,
+            err_msg=("_yppm flux formula diverges from tp_core.F90:"
+                     "519-524 reference (after swapaxes).  The y-sweep "
+                     "is just an x-sweep on transposed data; a "
+                     "regression in the swap indices would fire here."))
+
+    def test_ppm_flux_upwind_selection_iter639(self):
+        """Explicit lock: when c > 0 the flux should depend on the
+        LEFT cell (q_L, bl_L, br_L); when c < 0 it should depend on
+        the RIGHT cell.  Construct inputs where L and R differ by a
+        large constant, then verify the flux tracks the right side.
+        """
+        import numpy as np
+        from unittest import mock
+        from legoesm.core import fv_tp_2d
+
+        n = 4
+        M = 2
+        # Left cell: all q_c = 100, bl = br = 0.  Right cell: q_c = -50,
+        # bl = br = 0.  With bl = br = 0, the flux simplifies to just
+        # q_L (c > 0) or q_R (c <= 0).
+        bl = np.zeros((6, n + 2, M))
+        br = np.zeros((6, n + 2, M))
+        q_c = np.zeros((6, n + 2, M))
+        q_c[:, :n + 1, :] = 100.0   # "left" cells hold 100
+        q_c[:, 1:n + 2, :] = -50.0  # "right" cells hold -50 (overlaps)
+        # Use a pattern where the upwind selection is unambiguous at
+        # all face indices.  Set q_c alternating:
+        q_c = np.full((6, n + 2, M), 100.0)
+        q_c[:, 1:n + 2, :] = -50.0   # overwrite — right cells are -50
+        # Courant: test both signs at alternating face positions.
+        crx = np.zeros((6, n + 1, M))
+        crx[:, 0::2, :] = 0.3    # c > 0 → flux from left (100)
+        crx[:, 1::2, :] = -0.3   # c < 0 → flux from right (-50)
+
+        q_h2 = jnp.zeros((6, n + 4, M), dtype=jnp.float64)
+
+        def _stub_ppm_1d(q, n_, *args, **kwargs):
+            return (jnp.asarray(bl), jnp.asarray(br), jnp.asarray(q_c))
+
+        with mock.patch.object(fv_tp_2d, "_ppm_1d",
+                                side_effect=_stub_ppm_1d):
+            flux = np.asarray(fv_tp_2d._xppm(
+                q_h2, jnp.asarray(crx), n))
+
+        # Note: because q_c changes between left-slice (indices
+        # 0..n) and right-slice (indices 1..n+1), the overlap at
+        # indices 1..n sees DIFFERENT values.  Specifically:
+        #   q_L at face k takes q_c[k]   (indices 0..n)   — 100 only at k=0
+        #   q_R at face k takes q_c[k+1] (indices 1..n+1) — always -50
+        q_L_expected = np.full((6, n + 1, M), -50.0)
+        q_L_expected[:, 0, :] = 100.0      # only face 0 has q_L = 100
+        q_R_expected = np.full((6, n + 1, M), -50.0)
+
+        # With bl = br = 0, flux formula simplifies to q_L or q_R.
+        # k=0: c=0.3>0 → flux = q_L[0] = 100, so expect 100.
+        # k=1: c=-0.3<0 → flux = q_R[1] = -50.
+        # k=2: c=0.3>0 → flux = q_L[2] = -50.
+        # k=3: c=-0.3<0 → flux = q_R[3] = -50.
+        # k=4: c=0.3>0 → flux = q_L[4] = -50.
+        for k in range(n + 1):
+            if crx[0, k, 0] > 0:
+                expected_val = q_L_expected[0, k, 0]
+            else:
+                expected_val = q_R_expected[0, k, 0]
+            np.testing.assert_allclose(
+                flux[:, k, :], expected_val, atol=1e-14,
+                err_msg=(f"Upwind selection broken at k={k}: with "
+                         f"bl=br=0 the flux should equal q_upwind, "
+                         f"got {flux[0, k, 0]} instead of "
+                         f"{expected_val} (crx={crx[0, k, 0]}).  A "
+                         f"regression flipping the `crx > 0` sign or "
+                         f"swapping L/R indices would fire here."))
+
+
 if __name__ == "__main__":
     unittest.main()
