@@ -1487,12 +1487,22 @@ All 6 stencil tests pass at the new tolerance.  The lock detection power is unch
 
 **Root cause**: iter-649 fixed the iter-647/648 entries but left "bit-for-bit" in 9+ other entries dating back to iter-618.  Most paired the phrase with a nonzero `atol` or `rtol < 1e-10` — the same contradiction pattern iter-649 identified.  Any reader skimming the doc would still see "bit-for-bit at atol=1e-12" and draw the wrong conclusion about what the tests actually enforce.
 
-**Fix**: scrubbed every reminaing "bit-for-bit" claim that was paired with a nonzero tolerance (9 occurrences across iter-618, iter-621, iter-622, iter-623, iter-629, iter-630, iter-634, iter-636, iter-637, iter-638, iter-639, iter-641, iter-642, iter-644, iter-647).  Standard replacements:
+**Fix (iter-650, review-doc scope ONLY)**: scrubbed every "bit-for-bit at atol=X" claim in the REVIEW DOC (9 occurrences across iter-618, iter-621, iter-622, iter-623, iter-629, iter-630, iter-634, iter-636, iter-637, iter-638, iter-639, iter-641, iter-642, iter-644, iter-647).  Standard replacements:
 - "bit-for-bit at `atol=X`" → "float64 round-off match at `atol=X` (not IEEE bit identity)"
 - "bit-for-bit equal" → "matches ... to within float64 round-off"
 - "compared bit-for-bit (rel < 1e-10)" → "compared at rtol < 1e-10 (round-off match, not IEEE bit identity)"
 
-Remaining `bit-for-bit` occurrences in the doc are all in the iter-647/648/649 correction narratives where the phrase is explicitly quoted as a historical finding or fix description — those are intentional and clear from context.
+**Iter-650 was incomplete (Codex finding on iter-650)**: the "scrubbed every remaining" phrasing in the original iter-650 entry was wrong — it only covered the review doc, not the 18+ "bit-for-bit" occurrences that remained in test docstrings under `tests/unit/test_cdgrid_fv3_regression.py`.  That gap was closed in iter-651 below.
 
-No test changes in this iter; this is a documentation cleanup correcting an inconsistent claim that predates iter-649.
+### Iter-651 — scrub remaining "bit-for-bit" claims from test docstrings
+
+**Codex stop-time finding on iter-650**: "iter-650's cleanup is incomplete; its new 'scrubbed every remaining …' claim is false."
+
+**Root cause**: iter-650 operated on `docs/fv3_fortran_fidelity_review.md` only.  `tests/unit/test_cdgrid_fv3_regression.py` still had 18 docstring/comment claims of "bit-for-bit" paired with nonzero tolerances — the same contradiction pattern iter-649 identified, now in test docstrings rather than the review doc.
+
+**Fix**: systematic replacement of "bit-for-bit" → "at float64 round-off" (or "float64 round-off match") across 18 test docstrings, then a follow-up pass to restore the intentionally quoted occurrences inside the iter-649 correction paragraph (lines 7575-7584, 7638) which explicitly document the historical overclaiming phrase.  Three docstrings with damaged grammar (post-blanket-replace) were also rewritten to read cleanly.
+
+**Verification**: full `test_cdgrid_fv3_regression.py` suite (118 tests) runs green after the edits.  A final repo-wide `grep "bit-for-bit"` shows occurrences only in: (a) the iter-647/648/649/650 correction narratives (intentional quotes), (b) the iter-649 correction paragraph inside `test_d2a2c_vect_interior_stencil_output_matches_inline_formula_iter647`'s docstring (intentional quote), and (c) one pre-existing legitimate use at `docs/fv3_fortran_fidelity_review.md:916` where iter-650 already annotated the qualification.
+
+No test logic changes; documentation-only completion of the iter-650 scrub.
 

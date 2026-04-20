@@ -2074,7 +2074,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             msg=(f"Interior divg_d output differs from float32 "
                  f"reproduction by {interior_diff:.3e}.  The "
                  f"reproduction mirrors fv3_sw_core.py:847-909 and "
-                 f"should match production bit-for-bit.  If the "
+                 f"should match production at float64 round-off.  If the "
                  f"production formula changed, UPDATE this "
                  f"reproduction to match."))
 
@@ -4094,7 +4094,7 @@ class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
     `cgrid_mass_flux_divergence` (`_ppm_reconstruct_1d` was operating
     on the wrong axis).  Post-iter-505 the polar-face asymmetry is
     GONE: face 4 and face 5 dh/dt and du/dt and dv/dt all match
-    bit-for-bit at machine precision under N-S reflection.
+    at machine precision under N-S reflection.
 
     This test pins that result down so any future refactor that
     re-introduces an axis bug (or another polar-skewing bug) fires
@@ -4779,7 +4779,7 @@ class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
 
     Used by `_d2a2c_vect` at face boundaries (sw_core.F90:3587, 3603)
     where the standard 4th-order Lagrange stencil straddles the
-    face boundary.  Formula must match Fortran bit-for-bit in the
+    face boundary.  Formula must match Fortran at float64 round-off in the
     expression structure; numerical invariants below lock it.
 
     No direct regression test existed before iter-617 — only
@@ -4825,7 +4825,7 @@ class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
 
     def test_non_uniform_dxa_matches_explicit_fortran_formula(self):
         """Non-uniform dxa: reproduce the Fortran formula explicitly
-        via numpy and compare bit-for-bit to the Python helper."""
+        via numpy and compare at float64 round-off to the Python helper."""
         import jax.numpy as jnp
         import numpy as np
         from legoesm.core.fv3_sw_core import _edge_interpolate4
@@ -5102,7 +5102,7 @@ class TestDel6VtFluxFortranFormula(unittest.TestCase):
         wrong divergence, missing rarea, etc.) would pass iter-620
         silently.
 
-        This test adds a FULL-FIELD bit-for-bit numpy reproduction
+        This test adds a FULL-FIELD (round-off-level) numpy reproduction
         of the Fortran nord=1 algorithm, covering every interior
         (face, i, j) cell.  The reference uses the same `pad_halo`
         calls as production (so cross-face halo exchange is
@@ -5281,7 +5281,7 @@ class TestDSw1RecomputeUtVtFortranFormula(unittest.TestCase):
     def test_duogrid_random_inputs_match_numpy_reference(self):
         """Random (uc, vc) test: reproduce the 4-cell-average
         formula in numpy and compare the full-field production
-        output bit-for-bit (within 1e-10 relative tolerance).
+        output at float64 round-off (within 1e-10 relative tolerance).
         """
         import jax.numpy as jnp
         import numpy as np
@@ -5378,7 +5378,7 @@ class TestPGradCFortranFormula(unittest.TestCase):
 
     def test_random_input_matches_numpy_reference(self):
         """Random h_star + h_s: reproduce the Fortran formula in
-        numpy and verify the production output matches bit-for-bit
+        numpy and verify the production output matches at float64 round-off
         (rel < 1e-10)."""
         import jax.numpy as jnp
         import numpy as np
@@ -5481,7 +5481,7 @@ class TestComputeTransportQuantitiesFortranFormula(unittest.TestCase):
 
     def test_full_field_matches_numpy_reference(self):
         """Random (ut, vt) → reproduce the Fortran formula in numpy
-        and verify production output matches bit-for-bit."""
+        and verify production output matches at float64 round-off."""
         import jax.numpy as jnp
         import numpy as np
         from legoesm.core.fv_tp_2d import compute_transport_quantities
@@ -5730,7 +5730,7 @@ class TestPertPpmFortranFormula(unittest.TestCase):
 
     def test_pert_ppm_iv1_matches_fortran_on_branch_probes(self):
         """Hand-crafted (bl, br) pairs that exercise each Fortran
-        branch bit-for-bit against the JAX implementation.
+        branch at float64 round-off against the JAX implementation.
         """
         import numpy as np
         from legoesm.core.fv_tp_2d import _pert_ppm
@@ -5755,7 +5755,7 @@ class TestPertPpmFortranFormula(unittest.TestCase):
 
     def test_pert_ppm_iv1_matches_fortran_on_random_grid(self):
         """Random (bl, br) over a broad dynamic range must match the
-        Fortran formula bit-for-bit.  Seeded so a regression reproduces.
+        Fortran formula at float64 round-off.  Seeded so a regression reproduces.
         """
         import numpy as np
         from legoesm.core.fv_tp_2d import _pert_ppm
@@ -5915,7 +5915,7 @@ class TestKeUpwindFortranFormula(unittest.TestCase):
         return uc, vc, ua, va, u_d, v_d
 
     def test_ke_upwind_matches_fortran_non_duogrid(self):
-        """Random inputs → numpy reproduction bit-for-bit match on the
+        """Random inputs → numpy reproduction at float64 round-off match on the
         non-duogrid path (all 4 face-edge overrides active)."""
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -6098,7 +6098,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
         return v_d, u_d, uc, vc, vort_abs
 
     def test_vorticity_flux_matches_fortran_non_duogrid(self):
-        """Random inputs + non-duogrid CDGrid → bit-for-bit match
+        """Random inputs + non-duogrid CDGrid → float64 round-off match
         against the numpy reference.  Both face-boundary overrides
         and the upwind selection are exercised.
         """
@@ -6350,7 +6350,7 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
         return uc, vc
 
     def test_corner_vorticity_matches_fortran_non_duogrid(self):
-        """Random inputs + non-duogrid CDGrid → bit-for-bit against the
+        """Random inputs + non-duogrid CDGrid → float64 round-off match against the
         numpy reference.  Linear extrapolation + 4 corner additions
         both active."""
         import numpy as np
@@ -6552,7 +6552,7 @@ class TestPpmFluxFortranFormula(unittest.TestCase):
 
     def test_xppm_flux_formula_matches_fortran(self):
         """Patch `_ppm_1d` to return controlled (bl, br, q_c) and
-        verify `_xppm` applies the Fortran flux formula bit-for-bit.
+        verify `_xppm` applies the Fortran flux formula at float64 round-off.
         """
         import numpy as np
         from unittest import mock
@@ -6790,7 +6790,7 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
         return sina_u, sina_v
 
     def test_sina_u_v_from_sin_sg_matches_fortran(self):
-        """Real CDGrid → bit-for-bit match against the numpy reference.
+        """Real CDGrid → float64 round-off match against the numpy reference.
         Exercises all three regions (i=0 boundary, interior, i=n
         boundary) in both axes."""
         import numpy as np
@@ -6960,7 +6960,7 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
         return out
 
     def test_fill_corners_h1_matches_reference(self):
-        """Random padded input → bit-for-bit against the numpy
+        """Random padded input → float64 round-off match against the numpy
         reference.  Covers all 24 (face, corner) pairs."""
         import numpy as np
         from legoesm.grids.halo import _fill_corners_h1
@@ -7039,7 +7039,7 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
         return out
 
     def test_fill_corners_h2_matches_reference(self):
-        """Random halo=2 padded array → bit-for-bit against the
+        """Random halo=2 padded array → float64 round-off match against the
         inside-out numpy reference."""
         import numpy as np
         from legoesm.grids.halo import _fill_corners_h2
@@ -7200,7 +7200,7 @@ class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
         return divg_d
 
     def test_divergence_corner_duo_matches_fortran(self):
-        """Random inputs + duogrid CDGrid → bit-for-bit match against
+        """Random inputs + duogrid CDGrid → float64 round-off match against
         the full numpy reproduction of sw_core.F90:2413-2442."""
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -7579,9 +7579,9 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         float64 machine epsilon (ε = 1.11e-16), which arises from
         reordering of floating-point additions between the two
         pipelines.  This is float64 round-off identity, NOT IEEE-754
-        bit-for-bit identity.  Iter-649 sets atol=1e-14 (≈ 100
-        ULPs — well below any semantic change but well above the
-        observed round-off floor) and drops the "bit-for-bit" claims.
+        bit identity.  Iter-649 sets atol=1e-14 (≈ 100 ULPs — well
+        below any semantic change but well above the observed
+        round-off floor) and drops the "bit-for-bit" claims.
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
