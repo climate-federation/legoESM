@@ -801,3 +801,21 @@ The FB-chain is now UNLOCKED on the single-device (non-MPI) backend — callers 
 
 **Final state**: all 7 port-spec anchors (4 face-only + 3 tiled) are now explicit inline comments at their code sites.  A future refactor moving ANY site breaks the test with a specific missing-anchor message, enabling direct fix or spec update.
 
+### Iter-616 (2026-04-20): close false-positive hole in anchor test (Codex)
+
+**Codex stop-time review on iter-615 (commit 7c3d4c2)**: the anchor test used plain `in text` string search.  A contributor could satisfy the test by adding the anchor string inside a docstring or a string literal while deleting the real `#` comment — the test would pass but no actual code comment would guard the refactor.
+
+**Fix**: switched from `text.read_text()` + substring search to `tokenize.tokenize()` + `tok.type == tokenize.COMMENT` filter.  Only real Python comment tokens are scanned, so a string literal containing the anchor text DOESN'T satisfy the test.
+
+**Sanity-verified**: replacing the real `corner-fill-tiled-late` anchor comment with a Python assignment `_fake_string = "ANCHOR iter-613: corner-fill-tiled-late"` (containing the anchor text as a STRING literal, not a comment) fires the test with `missing = ['corner-fill-tiled-late']`.  The plain-text test from iter-615 would have PASSED this regression because the string appears in the file text.
+
+Production restored; 61 `test_scale_halo` tests pass.
+
+**Iteration-over-iteration hardening trajectory**:
+- iter-613: port spec with line numbers (rot-prone).
+- iter-614: port spec with anchor names; 4 explicit comments + 3 docstring mentions.
+- iter-615: all 7 anchors as explicit code-site comments; docstring fallback removed.
+- iter-616 (THIS): anchor test uses `tokenize` to distinguish comments from string literals.
+
+Each step tightens the anti-rot lock in response to a specific regression class Codex identified.
+

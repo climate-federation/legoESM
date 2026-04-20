@@ -1091,6 +1091,7 @@ class TestPadHaloH3Guardrails:
           - `corner-fill-tiled-late` (tiled docstring)
         """
         import pathlib
+        import tokenize
         src = pathlib.Path(
             __file__).resolve().parent.parent.parent / (
             "src/legoesm/parallel/halo_exchange.py")
@@ -1104,16 +1105,23 @@ class TestPadHaloH3Guardrails:
             "corner-fill-tiled-early",
             "corner-fill-tiled-late",
         )
-        # Iter-615 (Codex follow-up): REQUIRE every anchor to be
-        # planted as an explicit `[ANCHOR iter-613: <name>]` comment
-        # AT THE CODE SITE.  Iter-614's fallback that accepted bare
-        # anchor names in the tiled-helper docstring was too loose —
-        # a refactor moving the tiled code sites would not break the
-        # docstring, so the anti-rot lock was incomplete for the 3
-        # tiled anchors.  iter-615 planted explicit comments at all
-        # 3 tiled code sites, so the fallback is no longer needed.
+        # Iter-616 (Codex follow-up): require each anchor to appear
+        # in a Python COMMENT token, not in a string literal or
+        # docstring.  Iter-615's plain-text search had a false-
+        # positive hole: a contributor could add the anchor string
+        # inside a docstring or unrelated string literal while
+        # deleting the real code comment, and the test would still
+        # pass.  Using `tokenize.tokenize` filters to COMMENT
+        # tokens, which are guaranteed to be real source-level `#`
+        # comments — the only place a legitimate anchor can live.
+        comment_texts: list[str] = []
+        with src.open("rb") as fh:
+            for tok in tokenize.tokenize(fh.readline):
+                if tok.type == tokenize.COMMENT:
+                    comment_texts.append(tok.string)
+        comments_joined = "\n".join(comment_texts)
         missing = [a for a in required_anchors
-                    if f"ANCHOR iter-613: {a}" not in text]
+                    if f"ANCHOR iter-613: {a}" not in comments_joined]
         assert not missing, (
             f"iter-613 port-spec anchors missing in "
             f"`src/legoesm/parallel/halo_exchange.py`: {missing}. "
