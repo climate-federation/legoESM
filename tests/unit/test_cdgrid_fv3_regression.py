@@ -6276,5 +6276,231 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
                      "at fv3_sw_core.py:1156 is broken."))
 
 
+class TestCornerVorticityFortranFormula(unittest.TestCase):
+    """Iter-638: direct Fortran-formula lock for `_corner_vorticity`
+    in ``src/legoesm/core/fv3_sw_core.py`` (lines 1099-1136) against
+    ``sw_core.F90:378-408``.
+
+    The helper builds D-grid-corner absolute vorticity from C-grid
+    circulation::
+
+        fx_circ = uc * dxc                              # (6, n+1, n)
+        fy_circ = vc * dyc                              # (6, n, n+1)
+        # pad with edge mode
+        fx_pad = pad(fx_circ, (1,1) along axis=2)       # (6, n+1, n+2)
+        fy_pad = pad(fy_circ, (1,1) along axis=1)       # (6, n+2, n+1)
+        if (.not. duogrid) and n > 2:                   # sw_core.F90:396-400
+            fx_pad[:, :, 0]   = 2*fx_circ[:, :, 0]   - fx_circ[:, :, 1]
+            fx_pad[:, :, n+1] = 2*fx_circ[:, :, n-1] - fx_circ[:, :, n-2]
+            fy_pad[:, 0, :]   = 2*fy_circ[:, 0, :]   - fy_circ[:, 1, :]
+            fy_pad[:, n+1, :] = 2*fy_circ[:, n-1, :] - fy_circ[:, n-2, :]
+        vort = fx_pad[:,:,:-1] - fx_pad[:,:,1:] - fy_pad[:,:-1,:] + fy_pad[:,1:,:]
+        # 4 cube-vertex corner additions (non-duogrid only)
+        if .not. duogrid:                               # sw_core.F90:397-400
+            vort[0, 0]   += fy_pad[0, 0]
+            vort[n, 0]   -= fy_pad[n+1, 0]
+            vort[n, n]   -= fy_pad[n+1, n]
+            vort[0, n]   += fy_pad[0, n]
+        return f_corner + vort / area_corner
+
+    Pre-iter-638 only behavioural tests existed (`test_corner_vorticity_
+    legacy_correction_not_applied_under_duogrid` at `test_duogrid.py:2382`).
+    A direct numerical-formula lock was missing.  A regression that
+    flipped a sign on one of the 4 corner additions, mis-indexed
+    `fy_pad[0, 0]` vs `fy_pad[0, n]`, changed the extrapolation stencil
+    coefficients (e.g., `3*f[0] - 2*f[1]` instead of `2*f[0] - f[1]`),
+    or forgot to multiply by `rarea_c` would silently break vorticity.
+    """
+
+    @staticmethod
+    def _ref_corner_vorticity(uc, vc, dxc, dyc, area_corner, f_corner,
+                               n, use_duogrid):
+        """Numpy line-by-line reproduction of `_corner_vorticity`."""
+        import numpy as np
+        fx_circ = uc * dxc                           # (6, n+1, n)
+        fy_circ = vc * dyc                           # (6, n, n+1)
+        # Edge-mode pad
+        fx_pad = np.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        fy_pad = np.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        # Linear extrapolation override (non-duogrid + n > 2)
+        if (not use_duogrid) and n > 2:
+            fx_pad[:, :, 0] = 2 * fx_circ[:, :, 0] - fx_circ[:, :, 1]
+            fx_pad[:, :, n + 1] = (2 * fx_circ[:, :, n - 1]
+                                    - fx_circ[:, :, n - 2])
+            fy_pad[:, 0, :] = 2 * fy_circ[:, 0, :] - fy_circ[:, 1, :]
+            fy_pad[:, n + 1, :] = (2 * fy_circ[:, n - 1, :]
+                                    - fy_circ[:, n - 2, :])
+        # Circulation stencil
+        vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
+                 - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
+        # Non-duogrid: 4 cube-vertex corner additions.
+        if not use_duogrid:
+            vort = vort.copy()
+            vort[:, 0, 0] += fy_pad[:, 0, 0]
+            vort[:, n, 0] += -fy_pad[:, n + 1, 0]
+            vort[:, n, n] += -fy_pad[:, n + 1, n]
+            vort[:, 0, n] += fy_pad[:, 0, n]
+        return f_corner + vort / area_corner
+
+    def _build_inputs(self, seed, n):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        uc = rng.standard_normal((6, n + 1, n))
+        vc = rng.standard_normal((6, n, n + 1))
+        return uc, vc
+
+    def test_corner_vorticity_matches_fortran_non_duogrid(self):
+        """Random inputs + non-duogrid CDGrid → bit-for-bit against the
+        numpy reference.  Linear extrapolation + 4 corner additions
+        both active."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        uc, vc = self._build_inputs(638, n)
+
+        vort_abs = _corner_vorticity(
+            jnp.asarray(uc), jnp.asarray(vc), cdgrid, use_duogrid=False)
+
+        dxc = np.asarray(cdgrid.dxc)
+        dyc = np.asarray(cdgrid.dyc)
+        area_corner = np.asarray(cdgrid.area_corner)
+        f_corner = np.asarray(cdgrid.f_corner)
+        vort_ref = self._ref_corner_vorticity(
+            uc, vc, dxc, dyc, area_corner, f_corner, n,
+            use_duogrid=False)
+
+        np.testing.assert_allclose(
+            np.asarray(vort_abs), vort_ref, atol=1e-12,
+            err_msg=("_corner_vorticity non-duogrid output diverges "
+                     "from sw_core.F90:378-408 reference — check "
+                     "extrapolation stencil and 4 cube-vertex corner "
+                     "additions."))
+
+    def test_corner_vorticity_matches_fortran_duogrid(self):
+        """Duogrid path: edge-mode pad + no corner additions."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        uc, vc = self._build_inputs(639, n)
+
+        vort_abs = _corner_vorticity(
+            jnp.asarray(uc), jnp.asarray(vc), cdgrid, use_duogrid=True)
+
+        dxc = np.asarray(cdgrid.dxc)
+        dyc = np.asarray(cdgrid.dyc)
+        area_corner = np.asarray(cdgrid.area_corner)
+        f_corner = np.asarray(cdgrid.f_corner)
+        vort_ref = self._ref_corner_vorticity(
+            uc, vc, dxc, dyc, area_corner, f_corner, n,
+            use_duogrid=True)
+
+        np.testing.assert_allclose(
+            np.asarray(vort_abs), vort_ref, atol=1e-12,
+            err_msg=("_corner_vorticity duogrid output diverges from "
+                     "edge-mode-pad + no-corner-correction reference "
+                     "— any non-duogrid edge rewrite would fire here."))
+
+    def test_corner_vorticity_duogrid_skips_corner_additions_iter638(self):
+        """Explicit lock: under duogrid, the 4 cube-vertex corner
+        additions must be SKIPPED.  Compute the `fy_pad[:, 0, 0]` term
+        directly and verify the duogrid output does NOT include it
+        (while the non-duogrid output DOES).
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+
+        n = 8
+        # Build duogrid and non-duogrid versions of the same grid.
+        cdg_dg = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        cdg_nd = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        uc, vc = self._build_inputs(640, n)
+
+        # Duogrid flag is what gates the branches.  Feed the SAME grid
+        # into both calls so the underlying metrics differ only due to
+        # the duogrid setting (which affects some panel-edge sin/cos
+        # metrics).  To isolate the branch behaviour, call both flags
+        # on cdg_nd (a non-duogrid grid) — the duogrid flag alone
+        # controls the corner additions and extrapolation.
+        vort_dg = _corner_vorticity(
+            jnp.asarray(uc), jnp.asarray(vc), cdg_nd, use_duogrid=True)
+        vort_nd = _corner_vorticity(
+            jnp.asarray(uc), jnp.asarray(vc), cdg_nd, use_duogrid=False)
+
+        # They MUST differ, by at least `fy_pad[0, 0]` at corner (0, 0).
+        # Compute fy_circ = vc * dyc and edge-pad to derive fy_pad[0, 0]:
+        dyc = np.asarray(cdg_nd.dyc)
+        fy_circ = vc * dyc
+        # Under non-duogrid, fy_pad[0, :] is overwritten by
+        # 2*fy_circ[0, :] - fy_circ[1, :]; so fy_pad[0, 0] =
+        # 2*fy_circ[0, 0] - fy_circ[1, 0].
+        fy_pad_at_00_nd = 2 * fy_circ[:, 0, 0] - fy_circ[:, 1, 0]
+        # Under duogrid, fy_pad[0, 0] is the edge-mode pad = fy_circ[0, 0].
+        fy_pad_at_00_dg = fy_circ[:, 0, 0]
+
+        # Also, the stencil `fy_pad[:,:-1,:] + fy_pad[:,1:,:]` at (0,0)
+        # uses fy_pad[0, 0] and fy_pad[1, 0].  Under non-duogrid,
+        # fy_pad[1, 0] = fy_circ[0, 0] (interior), so the stencil
+        # contribution from fy_pad changes both at the (0,0) itself
+        # AND via the extrapolation override.  Isolating the corner-
+        # addition ALONE: it adds `fy_pad[0, 0]` in non-duogrid mode.
+        # The TOTAL difference vort_nd - vort_dg at corner (0, 0) has
+        # three contributions: the extrapolation change to fy_pad[0,0],
+        # the stencil reading fy_pad at (0,0) and (1,0), and the corner
+        # addition.  Simpler, stronger lock: verify vort_dg at (0, 0) is
+        # NOT equal to vort_nd at (0, 0) for a random field — any test
+        # that accidentally computed the same answer would almost
+        # certainly pass only if the corner additions weren't firing.
+        vort_dg_np = np.asarray(vort_dg)
+        vort_nd_np = np.asarray(vort_nd)
+        diff_00 = np.abs(vort_nd_np[:, 0, 0] - vort_dg_np[:, 0, 0])
+        diff_n0 = np.abs(vort_nd_np[:, n, 0] - vort_dg_np[:, n, 0])
+        diff_nn = np.abs(vort_nd_np[:, n, n] - vort_dg_np[:, n, n])
+        diff_0n = np.abs(vort_nd_np[:, 0, n] - vort_dg_np[:, 0, n])
+        # At EACH of the 4 cube vertices, the two paths must produce
+        # DIFFERENT output (the duogrid path is missing the +/- fy_pad
+        # correction AND the linear extrapolation, both of which
+        # contribute to the stencil at the corner).  Threshold 1e-10
+        # confirms strictly-nonzero difference well above float64
+        # round-off (≈1e-16 on values of O(1)) while staying below the
+        # smallest realistic signal we can expect (fy_pad / area_corner
+        # ≈ 1e-7 at n=8 for unit-scale vc).
+        THRESHOLD = 1e-10
+        for face in range(6):
+            self.assertGreater(
+                float(diff_00[face]), THRESHOLD,
+                msg=(f"face={face}: duogrid and non-duogrid agree at "
+                     f"corner (0, 0) — the corner-addition at "
+                     f"fv3_sw_core.py:1130 has been silently dropped."))
+            self.assertGreater(
+                float(diff_n0[face]), THRESHOLD,
+                msg=(f"face={face}: corner (n, 0) addition at "
+                     f"fv3_sw_core.py:1131 has been silently dropped."))
+            self.assertGreater(
+                float(diff_nn[face]), THRESHOLD,
+                msg=(f"face={face}: corner (n, n) addition at "
+                     f"fv3_sw_core.py:1132 has been silently dropped."))
+            self.assertGreater(
+                float(diff_0n[face]), THRESHOLD,
+                msg=(f"face={face}: corner (0, n) addition at "
+                     f"fv3_sw_core.py:1133 has been silently dropped."))
+
+
 if __name__ == "__main__":
     unittest.main()

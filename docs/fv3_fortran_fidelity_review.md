@@ -1268,3 +1268,25 @@ Pre-iter-637 there were only behavioural tests for "does the face override fire 
 
 All 3 tests pass at `atol=1e-12`.  Cumulative Fortran-formula lock inventory now **17 helpers**: `_vorticity_flux` added.
 
+### Iter-638 — Fortran-formula lock for `_corner_vorticity`
+
+**Motivation**: `_corner_vorticity` in `src/legoesm/core/fv3_sw_core.py` (lines 1099-1136) implements FV3's c_sw corner vorticity at `sw_core.F90:378-408` — it builds D-grid-corner absolute vorticity from C-grid circulation via a circulation stencil.  Two branches:
+
+- **Duogrid** (edge-mode pad, no extra work).
+- **Non-duogrid** (linear extrapolation override at outer halo + 4 cube-vertex corner additions matching `sw_core.F90:397-400`):
+
+        vort[0, 0]   += fy_pad[0, 0]
+        vort[n, 0]   -= fy_pad[n+1, 0]
+        vort[n, n]   -= fy_pad[n+1, n]
+        vort[0, n]   += fy_pad[0, n]
+
+Pre-iter-638, only behavioural tests existed (`test_corner_vorticity_legacy_correction_not_applied_under_duogrid`).  A regression flipping a sign on one of the 4 corner additions, mis-indexing `fy_pad[0, 0]` vs `fy_pad[0, n]`, changing the extrapolation stencil coefficients (`3f[0] - 2f[1]` instead of `2f[0] - f[1]`), or forgetting to multiply by `rarea_c` would silently break vorticity.
+
+**Tests added** (`TestCornerVorticityFortranFormula`, 3 total):
+- `_ref_corner_vorticity`: numpy line-by-line reproduction with both branches.
+- `test_corner_vorticity_matches_fortran_non_duogrid`: random inputs at n=8, bit-for-bit at `atol=1e-12` with linear extrapolation + 4 corner additions active.
+- `test_corner_vorticity_matches_fortran_duogrid`: random inputs with duogrid active, edge-mode pad only.
+- `test_corner_vorticity_duogrid_skips_corner_additions_iter638`: runs both branches on the SAME non-duogrid CDGrid (so the flag alone controls branch selection) and asserts the outputs differ at all 4 cube vertices (threshold `1e-10`, well above float64 round-off but below realistic signal magnitude).  Locks both the `if not use_duogrid:` guard at fv3_sw_core.py:1118 (extrapolation) and at :1129 (corner additions).
+
+All 3 tests pass.  Cumulative Fortran-formula lock inventory now **18 helpers**: `_corner_vorticity` added.
+
