@@ -1325,6 +1325,17 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         `halo_interp_offsets`).  If a refactor reverts the fix
         (e.g. in search of "fewer attributes"), this assertion
         fires with a pointer to the Fortran anchor + past-bug doc.
+
+        **Iter-594 Codex follow-up**: the iter-593 version only
+        checked `halo=2` calls and skipped any call whose `halo`
+        could not be resolved to the literal 2 (e.g. halo computed
+        from a function or indirect variable).  It also passed
+        silently if NO halo=2 call existed at all.  This version
+        requires POSITIVE confirmation: exactly one h=2 halo path
+        in `_d2a2c_vect` exists AND uses `halo_interp_offsets_h2`.
+        If the halo value can't be resolved, the test fails with a
+        message requiring the AST probe be updated rather than
+        silently passing.
         """
         import ast
         import inspect
@@ -1345,50 +1356,93 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             "`_d2a2c_vect`.  Has the function been refactored?",
         )
 
-        # Extract the halo and interp_offsets kwargs from each call.
-        for call in pad_calls:
+        def resolve_halo_value(kw_value, tree):
+            """Resolve halo= kwarg to an int literal; None if unresolvable."""
+            if isinstance(kw_value, ast.Constant) and isinstance(kw_value.value, int):
+                return kw_value.value
+            if isinstance(kw_value, ast.Name):
+                # Walk assignments in the function body; take the FIRST
+                # assignment (halo is declared once at the top).
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Assign)
+                        and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)
+                        and node.targets[0].id == kw_value.id
+                        and isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, int)):
+                        return node.value.value
+            return None
+
+        # Collect (halo_val, offsets_attr) for every pad_halo_vector call.
+        # halo_val = None means unresolvable (test fails).
+        h2_calls_ok = 0
+        for idx, call in enumerate(pad_calls):
             halo_val = None
             offsets_attr = None
+            offsets_resolvable = False
             for kw in call.keywords:
-                if kw.arg == "halo" and isinstance(kw.value, ast.Constant):
-                    halo_val = kw.value.value
-                if (kw.arg == "interp_offsets"
-                    and isinstance(kw.value, ast.Attribute)):
-                    offsets_attr = kw.value.attr
+                if kw.arg == "halo":
+                    halo_val = resolve_halo_value(kw.value, tree)
+                if kw.arg == "interp_offsets":
+                    offsets_resolvable = True
+                    if isinstance(kw.value, ast.Attribute):
+                        offsets_attr = kw.value.attr
 
-            # Fall back to scanning for `halo=h` as a Name, and resolve
-            # via inspecting assignments (the existing test at
-            # test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound
-            # already does this for halo=2 specifically).
-            if halo_val is None:
-                for kw in call.keywords:
-                    if kw.arg == "halo" and isinstance(kw.value, ast.Name):
-                        for node in ast.walk(tree):
-                            if (isinstance(node, ast.Assign)
-                                and len(node.targets) == 1
-                                and isinstance(node.targets[0], ast.Name)
-                                and node.targets[0].id == kw.value.id
-                                and isinstance(node.value, ast.Constant)):
-                                halo_val = node.value.value
-                                break
+            # Require halo= to be resolvable to a concrete int.  If the
+            # halo value is obfuscated, the AST probe cannot do its job
+            # — fail loudly rather than silently skip.
+            self.assertIsNotNone(
+                halo_val,
+                msg=(f"pad_halo_vector call #{idx} in `_d2a2c_vect` "
+                     f"has an unresolvable `halo=` kwarg.  The AST "
+                     f"probe cannot verify the offset-table shape "
+                     f"invariant.  Update this test to handle the "
+                     f"new halo resolution pattern, or use a simpler "
+                     f"literal `halo=2` in `_d2a2c_vect`."))
 
-            # Only enforce for halo=2 calls — halo=1 calls correctly
-            # use `halo_interp_offsets` (shape (6, 4, n)).
             if halo_val == 2:
+                self.assertTrue(
+                    offsets_resolvable,
+                    msg=(f"pad_halo_vector(halo=2) call #{idx} in "
+                         f"`_d2a2c_vect` lacks an `interp_offsets=` "
+                         f"kwarg.  The h=2 halo cannot interpolate "
+                         f"halo strips at the correct physical "
+                         f"positions without offsets."))
                 self.assertEqual(
                     offsets_attr, "halo_interp_offsets_h2",
-                    msg=(f"`_d2a2c_vect` pad_halo_vector(halo=2) passes "
-                         f"`interp_offsets=grid.{offsets_attr}`, but "
-                         f"halo=2 requires `halo_interp_offsets_h2` "
-                         f"(shape (6, 4, 2, n)).  Passing "
-                         f"`halo_interp_offsets` (shape (6, 4, n)) "
-                         f"silently reduces the offset table to a "
-                         f"scalar per edge, degrading the halo "
-                         f"interpolation to a uniform shift.  Prior "
-                         f"bug fixed in commit 959454d (April 2026); "
-                         f"Fortran anchor: sw_core.F90:3587 "
+                    msg=(f"`_d2a2c_vect` pad_halo_vector(halo=2) "
+                         f"call #{idx} passes `interp_offsets="
+                         f"grid.{offsets_attr}`, but halo=2 requires "
+                         f"`halo_interp_offsets_h2` (shape (6, 4, 2, "
+                         f"n)).  Passing `halo_interp_offsets` (shape "
+                         f"(6, 4, n)) silently reduces the offset "
+                         f"table to a scalar per edge, degrading the "
+                         f"halo interpolation to a uniform shift.  "
+                         f"Prior bug fixed in commit 959454d (April "
+                         f"2026); Fortran anchor: sw_core.F90:3587 "
                          f"(edge_interpolate4 needs halo=2 neighbour "
                          f"data per sw_core.F90:3528-3530)."))
+                h2_calls_ok += 1
+
+        # POSITIVE invariant: `_d2a2c_vect` MUST have at least one
+        # halo=2 call with the correct offsets.  The existing test
+        # `test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound`
+        # (earlier in this file) already locks `actual_halo >= 1` and
+        # `< 3`; iter-593 adds this bound: `== 2` as the concrete
+        # halo depth, plus the offset-table identity.  A refactor
+        # that silently dropped the halo=2 path (e.g., reverted to
+        # halo=1) would satisfy the earlier test but leave
+        # `edge_interpolate4` without the halo it needs.
+        self.assertGreaterEqual(
+            h2_calls_ok, 1,
+            msg=("`_d2a2c_vect` contains NO `pad_halo_vector(halo=2)` "
+                 "call with `interp_offsets=grid.halo_interp_offsets_h2`. "
+                 "Fortran sw_core.F90:3587 requires halo=2 neighbour "
+                 "data for edge_interpolate4 at face boundaries.  If "
+                 "the halo depth was legitimately reduced (e.g., to "
+                 "halo=1), update the Fortran-fidelity claim in "
+                 "docs/fv3_fortran_fidelity_review.md accordingly; "
+                 "otherwise restore the halo=2 path."))
 
     def test_d2a2c_vect_reached_by_experimental_csw_and_fb_model(self):
         """Iter-130 (Priority 3 complement): positive-case runtime
