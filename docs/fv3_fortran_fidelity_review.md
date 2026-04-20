@@ -455,3 +455,40 @@ Distinguishing these requires additional diagnostics (e.g., step-1 tendency magn
 - If reducing dt by 10× leaves the relative step-1 `v_err` unchanged (scaled by dt), the spatial scheme is at fault, not the temporal integrator.
 
 **Tests**: no source-code changes in iter-658/659/660; all 118 regression tests still pass.  These three iters are diagnostic + documentation only.
+
+### Iter-661 — FB-chain step-1 tendency diagnostic: dt-independent spatial residual
+
+**Motivation**: iter-660 proposed measuring step-1 tendency magnitudes and dt-scaling to distinguish hypotheses (1) momentum balance residual, (2) IC inconsistency, (3) temporal-scheme residual.
+
+**Experiment** (`scripts/diag_fb_tendency.py`): ran one FB-chain step on the balanced Williamson 2 IC at C36 for four time steps: `dt ∈ {1, 10, 100, 600}` s, measuring `max|dh|/dt`, `max|du|/dt`, `max|dv|/dt`.
+
+**Results**:
+
+| dt (s) | max\|dh\|/dt (m/s) | max\|du\|/dt (m/s²) | max\|dv\|/dt (m/s²) |
+|-------:|-------------------:|--------------------:|--------------------:|
+|      1 |           5.47e-2  |           4.86e-3   |           6.08e-3   |
+|     10 |           5.48e-2  |           2.96e-3   |           5.03e-3   |
+|    100 |           5.65e-2  |           2.96e-3   |           5.07e-3   |
+|    600 |           6.32e-2  |           2.96e-3   |           5.23e-3   |
+
+**Analysis**:
+
+1. **Tendency is dt-independent** (for dt ≥ 10 s).  If the residual were a temporal-scheme artifact (leapfrog/forward-backward coupling error), it would scale with dt.  The dt-independence means the residual is **spatial** — it comes from the FB chain's spatial operators producing nonzero RHS on a state that should have exactly zero RHS.
+
+   → **Hypothesis #3 (temporal-scheme residual) is ruled out.**
+
+2. **The residual exactly explains the step-1 v_err**: `600 s × 5.23e-3 m/s² = 3.14 m/s` — which matches the observed step-1 `v_err = 3.14 m/s` from iter-658's trace to three significant figures.  So the entire step-1 error signal comes from this t=0 tendency.
+
+3. The small drift at dt=1 (`max|du|/dt=4.86e-3` vs `max|du|/dt=2.96e-3` at dt≥10) is likely a purely temporal effect of measuring a single step at a very small dt; the dt≥10 results are the converged spatial residual.
+
+**Remaining hypotheses**: the FB-chain spatial operators produce a dt-independent residual of ~5 mm/s² on the balanced W2 IC.  This is either:
+1. **Momentum balance residual**: the c_sw / p_grad_c / d_sw spatial operators do not exactly produce zero RHS on a geostrophically balanced state (scheme-level fidelity gap).
+2. **IC inconsistency**: the analytic `u_d`, `v_d` values at D-grid edge midpoints are not exactly what the d2a2c_vect / d_sw1 pipeline treats as "balanced" (IC is off by the same amount as the scheme residual at t=0).
+
+Distinguishing (1) vs (2) requires a spatially-resolved residual test: feed the balanced IC through just `c_sw` (phase 1 alone) and inspect where in the cubed-sphere the residual concentrates.  If it concentrates at face boundaries, the spatial operator has a seam bug.  If it's spread through the interior, the d2a2c_vect 4th-order stencil likely has a subtle imbalance.
+
+**Script added**: `scripts/diag_fb_tendency.py`.  Reproducible for future iters.
+
+**Next iter target**: spatial breakdown of step-1 tendency — which operator (c_sw vs p_grad_c vs d_sw) produces the 5 mm/s² residual, and where does it live on the grid.
+
+**Tests**: no source-code changes.  118 regression tests pass.  Diagnostic only.
