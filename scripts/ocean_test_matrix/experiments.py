@@ -1382,6 +1382,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
             A_h=eu_config.A_h, B_h=eu_config.B_h,
             C_smag=eu_config.C_smag,
             K_h=eu_config.K_h, K_bih=eu_config.K_bih,
+            A_v=eu_config.A_v, K_v=eu_config.K_v,
             bottom_drag_r=eu_config.bottom_drag_coeff,
             eos="linear",
             eos_linear=LinearEOSConfig(

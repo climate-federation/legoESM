@@ -71,17 +71,20 @@ class EadyUniformConfig:
     jet_depth_scale: float = 5500.0
 
     # Perturbation: zonal wavenumber k seeds the most-unstable Eady
-    # mode (l=0, k≠0). k=2 gives λ=500km, k×L_d≈1.9 — near maximum.
-    T_perturbation_K: float = 0.01
-    perturbation_wavenumber: int = 2
+    # mode (l=0, k≠0). k=3 is the most unstable mode fitting in the
+    # domain (μ=2.00, near μ_max=1.92). τ_undamped ≈ 5.7 days.
+    T_perturbation_K: float = 0.1   # Large enough to dominate over discrete-balance noise
+    perturbation_wavenumber: int = 3
 
     # Physics
     A_h: float = 0.0
     B_h: float = 1e10
-    C_smag: float = 0.1
-    K_h: float = 10.0                # small Laplacian tracer diffusion
-    K_bih: float = 1e10
-    bottom_drag_coeff: float = 0.01  # Linear bottom drag [m/s]; τ_bt≈6d
+    C_smag: float = 0.2
+    K_h: float = 0.0                 # TVD advection handles grid-scale noise
+    K_bih: float = 0.0
+    A_v: float = 1.0e-5              # vertical viscosity [m^2/s]
+    K_v: float = 5.0e-6              # vertical tracer diffusivity [m^2/s]
+    bottom_drag_coeff: float = 0.001  # Linear bottom drag [m/s]; τ_bt≈64d, 4% of σ_Eady
 
     # Sponge layer: absorbs eddy energy near walls to prevent
     # Kelvin wave trapping and nonlinear steepening at boundaries.
@@ -167,9 +170,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     if grid_type == "latlon_channel":
         state = _rest_state_latlon(grid, z_coord, config)
         state = _set_uniform_stratification(state, z_coord, config, grid)
-        # Thermal wind IC available but starting from rest is more stable
-        # for the geostrophic adjustment on the correct narrow domain.
-        # state = _set_linear_shear_latlon(state, grid, z_coord, config)
+        state = _set_linear_shear_latlon(state, grid, z_coord, config)
         state = _add_perturbation_latlon(state, grid, config)
         return state
 
@@ -226,13 +227,17 @@ def _jet_envelope(lat_deg, config):
 
 
 def _set_uniform_stratification(state, z_coord, config, grid):
-    """Set T = background stratification + surface-intensified meridional gradient.
+    """Set T = background stratification + depth-uniform meridional gradient.
 
-    T(y,z) = T_ref + dTdz*z + dTdy * y_integrated_envelope(y) * exp(z/D)
+    T(y,z) = T_ref + dTdz*z + dTdy * y_integrated_envelope(y)
 
-    where D = jet_depth_scale concentrates dT/dy near the surface.
-    The meridional gradient is localized by the jet envelope so that
-    far from the jet center, T depends only on z (resting stratified state).
+    Classical Eady: dT/dy is depth-uniform, so N² is unaffected by the
+    meridional gradient and the interior PV is zero.  The instability
+    comes purely from the boundary temperature gradients (Eady 1949).
+
+    Previous version used exp(z/D) weighting, which made dT/dy contribute
+    to dT/dz and caused N² < 0 (convective instability) on the cold side
+    of the jet when U_surface was large enough.
     """
     z_full = np.asarray(z_coord.z_full_ref)
     nlev = len(z_full)
@@ -251,13 +256,10 @@ def _set_uniform_stratification(state, z_coord, config, grid):
         dy = y[i] - y[i - 1]
         T_anomaly[i] = T_anomaly[i - 1] + config.dTdy * 0.5 * (envelope[i] + envelope[i - 1]) * dy
 
-    D = config.jet_depth_scale
-    depth_weight = np.exp(z_full / D)
-
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
         T_zk = config.T_ref + config.dTdz * z_full[k]
-        T_data[:, :, k] = (T_zk + T_anomaly[:, np.newaxis] * depth_weight[k]) * mask
+        T_data[:, :, k] = (T_zk + T_anomaly[:, np.newaxis]) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",
                                   dims=state.T.dims, units=state.T.units))
@@ -287,13 +289,11 @@ def _set_uniform_stratification_mpas(state, z_coord, config, mesh):
     T_anomaly = np.zeros(len(y), dtype=np.float64)
     T_anomaly[sort_idx] = T_anom_sorted
 
-    D = config.jet_depth_scale
-    depth_weight = np.exp(z_full / D)
-
+    # Depth-uniform dT/dy (classical Eady: no exp(z/D) weighting)
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
         T_zk = config.T_ref + config.dTdz * z_full[k]
-        T_data[:, k] = (T_zk + T_anomaly * depth_weight[k]) * mask
+        T_data[:, k] = (T_zk + T_anomaly) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",
                                   dims=state.T.dims, units=state.T.units))
@@ -304,11 +304,21 @@ def _set_uniform_stratification_mpas(state, z_coord, config, mesh):
 # ---------------------------------------------------------------------------
 
 def _set_linear_shear_latlon(state, grid, z_coord, config):
-    """Set u = Λz * envelope(y), remove depth mean, balance η."""
+    """Set purely baroclinic velocity u = Λ(z + H/2) * envelope(y), eta = 0.
+
+    The depth-mean is removed so the initial state is purely baroclinic
+    with zero barotropic velocity and zero SSH.  This avoids the large
+    (~1.5 m) geostrophic SSH signal from the depth-mean that would
+    dominate over the perturbation and create confusing adjustment dynamics.
+
+    The Eady instability operates on the baroclinic shear and boundary
+    temperature gradients — it does not require a barotropic component.
+    """
     z_full = np.asarray(z_coord.z_full_ref)
     dz = np.asarray(z_coord.dz_ref)
     nlev = len(z_full)
 
+    # Purely baroclinic: remove depth-mean, don't put it into eta
     U_profile = config.Lambda * z_full
     H_col = np.sum(dz)
     U_bar = np.sum(U_profile * dz) / H_col
@@ -330,28 +340,10 @@ def _set_linear_shear_latlon(state, grid, z_coord, config):
         u_mask = np.ones(u_data.shape[:2], dtype=np.float64)
     u_data *= u_mask[:, :, np.newaxis]
 
-    # Geostrophic SSH: f(lat) * U_bar_envelope(y) = -g * deta/dy
-    lat_center_rad = np.radians(config.lat_center)
-    R = 6.371e6
-    y = (lat_rad - lat_center_rad) * R
-    f_lat = 2.0 * Omega * np.sin(lat_rad)
-    U_bar_env = U_bar * envelope
-    eta_1d = np.zeros(n_lat, dtype=np.float64)
-    for i in range(1, n_lat):
-        dy = y[i] - y[i - 1]
-        f_mid = 0.5 * (f_lat[i] + f_lat[i - 1])
-        U_mid = 0.5 * (U_bar_env[i] + U_bar_env[i - 1])
-        eta_1d[i] = eta_1d[i - 1] - (f_mid / g) * U_mid * dy
-    ocean = mask > 0.5
-    eta_1d_ocean = eta_1d[ocean[:, 0]] if ocean.any() else eta_1d
-    eta_1d -= np.mean(eta_1d_ocean)
-    eta_data = eta_1d[:, np.newaxis] * np.ones((1, grid.n_lon)) * mask
-
+    # eta = 0: no barotropic component, no geostrophic SSH needed
     return state._replace(
         u=Field(jnp.array(u_data), name="u",
-                dims=state.u.dims, units=state.u.units),
-        eta=Field(jnp.array(eta_data), name="eta",
-                  dims=state.eta.dims, units=state.eta.units))
+                dims=state.u.dims, units=state.u.units))
 
 
 def _set_linear_shear_mpas(state, mesh, z_coord, config):
@@ -416,7 +408,11 @@ def _add_perturbation_latlon(state, grid, config):
     envelope = np.exp(-((lat_rad - lat_center_rad) / lat_width_rad) ** 2)
 
     k = config.perturbation_wavenumber
-    zonal = np.sin(k * lon_rad)
+    # Fit k complete wavelengths in the periodic domain
+    lon_west_rad = np.radians(config.lon_west)
+    lon_east_rad = np.radians(config.lon_east)
+    lon_frac = (lon_rad - lon_west_rad) / (lon_east_rad - lon_west_rad)
+    zonal = np.sin(2.0 * np.pi * k * lon_frac)
     pert = config.T_perturbation_K * envelope[:, np.newaxis] * zonal[np.newaxis, :] * mask
     T_data[:, :, 0] += pert
 
@@ -440,7 +436,11 @@ def _add_perturbation_mpas(state, mesh, config):
     mask = np.asarray(state.land_mask.data)
     T_data = np.array(state.T.data, dtype=np.float64)
 
-    pert = config.T_perturbation_K * np.sin(k * lon_cell) * envelope * mask
+    # Fit k complete wavelengths in the periodic domain
+    lon_west_rad = np.radians(config.lon_west)
+    lon_east_rad = np.radians(config.lon_east)
+    lon_frac = (lon_cell - lon_west_rad) / (lon_east_rad - lon_west_rad)
+    pert = config.T_perturbation_K * np.sin(2.0 * np.pi * k * lon_frac) * envelope * mask
     T_data[:, 0] += pert
 
     return state._replace(
