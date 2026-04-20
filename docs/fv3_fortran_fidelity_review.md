@@ -588,3 +588,22 @@ No divergence between tests' nested-scope handling.  108 `test_duogrid` tests pa
 
 **Iter-604 deliverable**: diagnostic breakdown + root-cause localization (above).  No code fix committed — the fix choice is an architectural decision.  The analysis provides the grounds to revisit Priority 3 (polar-face cube-vertex overrides) once ng=3 halo is wired into the dycore.
 
+### Iter-605 (2026-04-20): regression lock for W2 pole-cell magnitude
+
+**Motivation**: iter-604 identified the polar-cap v artifact as an inherent A-L + RK3 pole-singularity feature.  Without an architectural fix, the magnitude can only get worse with future dycore tweaks (hyperdiff coefficient drift, halo refactors, limiter changes).  Iter-605 adds a regression lock that catches any future amplification.
+
+**Lock added**: `test_w2_pole_cell_v_north_ceiling_at_1day` in `TestW2CubeFaceImprintCharacterization`.  Runs canonical W2 C36 dt=300s 1-day integration, extracts face-native `v_cc_north` via the 4-edge-angle helper, and asserts:
+1. `max|v_cc_north|` on face 4 < 0.40 m/s (iter-604 baseline: 0.307 m/s; ~25% headroom).
+2. Face 4 / face 5 max|v| N-S mirror symmetry: relative diff < 5e-3 (currently machine precision — the pole artifact is N-S symmetric by grid topology).
+
+**Sanity-verified**: tightening the ceiling to 0.25 m/s fires the test with the observed 0.307 m/s measurement — confirms the lock catches amplifications within ~20% of the current baseline.  Production restored to 0.40 m/s ceiling.
+
+**Cost**: ~11 seconds per run at C36 dt=300s 1day (one JAX trace + 288 time steps).  3 `TestW2CubeFaceImprintCharacterization` tests pass.
+
+**Coverage status for user-visible W2 artifacts**:
+- t=0 diagnostic-angle bound: `test_w2_t0_v_north_diagnostic_angle_bounded` (iter-592).
+- N/S mirror symmetry after 10 steps: `test_w2_short_run_v_north_N_S_mirror_symmetry` (iter-592).
+- Pole-cell magnitude after 1 day: `test_w2_pole_cell_v_north_ceiling_at_1day` (iter-605, THIS).
+
+These three locks together cover the top-three user-visible failure modes (pre-iter-26 diagnostic bug, pre-iter-505 PPM polar asymmetry, and the current pole-cell artifact).  A new failure mode would appear visually in the snapshots and the test matrix would continue to PASS — but the magnitude of that specific failure mode would be outside the locked ceilings.  Future iterations can then add targeted locks for any new failure mode discovered.
+

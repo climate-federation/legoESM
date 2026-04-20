@@ -4388,6 +4388,106 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
                  f"source of N/S asymmetry was introduced.  Currently "
                  f"measured at ~2.3e-3 (4x headroom)."))
 
+    def test_w2_pole_cell_v_north_ceiling_at_1day(self):
+        """Iter-605 (from iter-604 user-reported polar-cap artifact):
+        lock the magnitude of the face-4 pole-cell v_north after a
+        full 1-day W2 C36 integration.
+
+        The north pole sits at the intersection of 4 face-4 cells
+        (i, j) ∈ {17, 18} × {17, 18} (lat = 88.23°).  After 1 day
+        of canonical W2 integration, these cells develop a 2×2
+        checkerboard pattern in v_north with |max| ≈ 0.23 m/s (and
+        ±0.307 m/s at lat=86°, cell (19, 17)) — manifests as a
+        mode-2 polar-cap artifact in the regridded latlon snapshot.
+
+        This is an inherent A-L + RK3 pole-singularity artifact
+        NOT eliminable within the production path without
+        architectural changes (see fidelity-review iter-604).  The
+        iter-605 ceiling locks it so a regression that *worsens*
+        the pole-cell magnitude is caught immediately.
+
+        Ceiling: max|v_cc_north| on face 4 < 0.40 m/s.  Currently
+        measured at 0.307 m/s (~25% headroom).  Pre-iter-605 this
+        was the first numerical lock on the pole-cell artifact.
+
+        Cost: ~3 seconds runtime at C36 dt=300s 1day.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+            cell_centre_angles_from_4edge,
+        )
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+
+        n = 36
+        days = 1.0
+        dt = 300.0
+        n_steps = int(days * 86400 / dt)
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4
+        div_damp = 1.5e7 * (48.0 / n) ** 2
+
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=hyperdiff_coeff, div_damp=div_damp,
+            boundary_fix=True)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+
+        sw = williamson_test2(grid)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        # Extract face-native v_cc_north via the canonical 4-edge
+        # angle helper, as used by the test matrix snapshot path.
+        ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+        u_cc = 0.5 * (state.u_d[:, :, :-1] + state.u_d[:, :, 1:])
+        v_cc = 0.5 * (state.v_d[:, :-1, :] + state.v_d[:, 1:, :])
+        v_north = np.asarray(sa_4edge * u_cc + ca_4edge * v_cc)
+
+        f4_max_v = float(np.max(np.abs(v_north[4])))
+        self.assertLess(
+            f4_max_v, 0.40,
+            msg=(f"W2 C36 1d: face-4 max|v_cc_north| = {f4_max_v:.3e} "
+                 f"m/s exceeds 0.40 m/s ceiling.  The pole-cell "
+                 f"checkerboard artifact has worsened; iter-604 "
+                 f"baseline was 0.307 m/s.  A change in the dycore "
+                 f"(hyperdiff coefficient, PPM limiter, halo "
+                 f"exchange, or boundary_fix) has amplified the "
+                 f"A-L + RK3 pole-singularity signature."))
+
+        # Complementary ceiling: N-S mirror symmetry of face 4 vs
+        # face 5 (which is also hit by the same pole singularity
+        # but at the south pole).
+        f5_max_v = float(np.max(np.abs(v_north[5])))
+        rel = abs(f4_max_v - f5_max_v) / max(f4_max_v, f5_max_v, 1e-12)
+        self.assertLess(
+            rel, 5e-3,
+            msg=(f"W2 C36 1d: face 4 max|v| = {f4_max_v:.3e}, "
+                 f"face 5 max|v| = {f5_max_v:.3e}, rel diff = "
+                 f"{rel:.3e}.  Exceeds 5e-3 ceiling — the pole "
+                 f"artifact should be N-S symmetric for the alpha=0 "
+                 f"zonal IC.  If this fires, a new N/S asymmetry "
+                 f"source has been introduced (distinct from the "
+                 f"pole-cell artifact itself)."))
+
 
 if __name__ == "__main__":
     unittest.main()
