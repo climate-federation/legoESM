@@ -476,7 +476,7 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets,
+        interp_offsets=grid.halo_interp_offsets_h2,
         halo=h,
     )  # each (6, n+4, n+4)
 
