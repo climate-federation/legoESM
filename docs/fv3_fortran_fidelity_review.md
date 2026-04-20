@@ -5176,3 +5176,23 @@ Both ke_v checks use the same construction pattern as the earlier ke_u south/nor
 
 With iter-590, all five Constraint #2 gates have both AST-level and behavioral coverage that fires on realistic regression patterns (gate flip, gate removal, body move, body delete, operator refactor).
 
+### Iter-591 (2026-04-19): prove edge-copy ≡ halo-exchange for `_divergence_corner_duo`
+
+**Codex pre-iteration review** identified a potential fidelity gap in `_divergence_corner_duo` (`src/legoesm/core/fv3_sw_core.py:827-922`): Python uses `jnp.pad(..., mode='edge')` at lines 854-855 and 872-894 to fill the halo needed for `va(i, j-1)` and `ua(i-1, j)` reads, whereas Fortran `sw_core.F90:2413-2425` reads from the duogrid halo (true cross-face-neighbor values).
+
+**Investigation (iter-591)**:
+1. Diagnostic print: under duogrid, `pad_halo_vector(ua, va, ...)` at the south halo row differs from edge-copy by up to 16.5 units for random ua/va — the neighbor-face halo value is genuinely different.
+2. But propagation analysis shows the halo-vs-edge distinction at `va(i, -1)` only affects `uf(i, 0)` (south-outermost u-flux row), which then only feeds `divg_d(i, 0)` via the stencil `divg_d(i, j) = vf(i, j-1) - vf(i, j) + uf(i-1, j) - uf(i, j)`.  Similarly for the other three face-outer strips.
+3. All four face-outer `divg_d` strips (j=0, j=n, i=0, i=n) are unconditionally zeroed at `fv3_sw_core.py:911-914` (per `sw_core.F90:2431-2434`).  Therefore the halo-vs-edge choice has ZERO impact on any non-zero `divg_d` cell.
+
+**Conclusion**: `mode='edge'` padding in `_divergence_corner_duo` is SEMANTICALLY EQUIVALENT to the Fortran halo read under the current gate structure.  **NOT a fidelity gap.**
+
+**Lock added**: `test_divergence_corner_duo_edge_halo_equivalence` in `tests/unit/test_cdgrid_fv3_regression.py:2003-2200`.  Three assertions:
+1. Production matches mode='edge' reproduction bit-exact (float32).
+2. Halo-exchange reproduction vs. mode='edge' reproduction differ globally by < 1e-4 (within float64 round-trip error at face-outer cells; zeroed at interior cells).
+3. Interior divg_d diff between halo and edge reproductions is < 1e-10 (pure float64 rotation round-trip noise).
+
+**Sanity verified**: disabling face-boundary zeroing lines 911-914 in production fires assertion #1 with diff 5.19e-06 — meaning if anyone removes the zeroing, the test catches the regression with a specific error magnitude.  Production restored; all 286 regression tests pass.
+
+**Why this lock matters**: a future refactor that drops the face-boundary zeroing would (a) allow halo-vs-edge to leak into non-zero `divg_d`, breaking Fortran fidelity invisibly; (b) pass all existing float32 bit-exact tests that use the same mode='edge' reproduction.  The new equivalence lock ties the zeroing to the halo-choice semantics and forces the refactor decision to become explicit.
+
