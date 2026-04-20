@@ -1186,6 +1186,91 @@ class TestPadHaloH3Guardrails:
         assert jnp.all(padded_w[0, 3:, :3, :] == 0.0), (
             "WEST placement must not touch SE corner (different side)")
 
+    def test_pad_halo_mpi_face_only_halo3_single_rank_iter630(self):
+        """Iter-630 (Codex follow-up): `_pad_halo_mpi_face_only` (2D
+        scalar) was still hard-failing on halo=3 in its `else:` branch
+        even after iter-627/628 lifted halo=3 on the 4D helpers.  With
+        the 2D path now taught to use `_place_strip_h3` for local edges
+        and the 3*n-chunk recv layout for remote edges, the single-
+        rank (all-local) scalar path must match `_pad_halo_local_h3`
+        bit-for-bit.
+        """
+        from legoesm.parallel.halo_exchange import (
+            _pad_halo_mpi_face_only)
+        from legoesm.parallel.comm import build_comm_topology
+        from legoesm.grids.halo import _pad_halo_local_h3
+
+        topology = build_comm_topology(rank=0, n_processes=1)
+        assert len(topology.local_face_ids) == 6, (
+            "Single-rank topology should have all 6 faces local")
+
+        n = N
+        rng = np.random.default_rng(630)
+        data = jnp.asarray(rng.standard_normal((6, n, n)))
+
+        padded_mpi = _pad_halo_mpi_face_only(
+            data, topology, halo=3, mpi4jax=None, MPI=None)
+        padded_ref = np.asarray(_pad_halo_local_h3(data))
+
+        assert padded_mpi.shape == padded_ref.shape == (6, n + 6, n + 6)
+        diff = float(np.max(np.abs(
+            np.asarray(padded_mpi) - padded_ref)))
+        assert diff < 1e-12, (
+            f"2D MPI face-only halo=3 deviates from scalar h3 ref by "
+            f"{diff:.3e}.  Check: local-edge branch uses "
+            f"_place_strip_h3, corner fill uses _fill_corners_h3, "
+            f"strip extraction uses _extract_edge_strip_at_depth for "
+            f"depths 0, 1, AND 2.")
+
+    def test_place_strip_h3_index_conventions_iter630(self):
+        """Iter-630: lock the 2D depth-to-index mapping for the new
+        `_place_strip_h3` helper (scalar analogue of iter-627's
+        `_place_strip_h3_4d`).
+
+        Depth conventions (same as 4D version, minus the nlev axis):
+          depth 0 = adjacent to interior
+          depth 1 = middle halo ring
+          depth 2 = outermost halo ring
+        """
+        from legoesm.parallel.halo_exchange import _place_strip_h3
+
+        n = 4
+        padded = jnp.zeros((6, n + 6, n + 6), dtype=jnp.float64)
+        strip_d0 = jnp.full((n,), 1.0)  # adjacent-to-interior
+        strip_d1 = jnp.full((n,), 2.0)  # middle
+        strip_d2 = jnp.full((n,), 3.0)  # outermost
+
+        # WEST
+        padded_w = _place_strip_h3(
+            padded, 0, WEST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_w[0, 2, 3:-3] == 1.0)
+        assert jnp.all(padded_w[0, 1, 3:-3] == 2.0)
+        assert jnp.all(padded_w[0, 0, 3:-3] == 3.0)
+
+        # EAST
+        padded_e = _place_strip_h3(
+            padded, 1, EAST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_e[1, n + 3, 3:-3] == 1.0)
+        assert jnp.all(padded_e[1, n + 4, 3:-3] == 2.0)
+        assert jnp.all(padded_e[1, n + 5, 3:-3] == 3.0)
+
+        # SOUTH
+        padded_s = _place_strip_h3(
+            padded, 2, SOUTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_s[2, 3:-3, 2] == 1.0)
+        assert jnp.all(padded_s[2, 3:-3, 1] == 2.0)
+        assert jnp.all(padded_s[2, 3:-3, 0] == 3.0)
+
+        # NORTH
+        padded_n = _place_strip_h3(
+            padded, 3, NORTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_n[3, 3:-3, n + 3] == 1.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 4] == 2.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 5] == 3.0)
+
+        # Interior unaffected by any single-side placement.
+        assert jnp.all(padded_w[0, 3:-3, 3:-3] == 0.0)
+
     def test_iter613_mpi_halo3_port_anchors_present(self):
         """Iter-614 (Codex follow-up to iter-613): the iter-613 port
         spec referenced line numbers (e.g., "line ~670") that ROT on
@@ -1898,11 +1983,14 @@ class TestPadHaloH3Guardrails:
                     f"halo v does NOT match expected.  "
                     f"max diff = {v_diff:.3e}.")
 
-    def test_pad_halo_vector_halo3_rejects_mpi_backend(self):
-        """Iter-595: halo=3 is still unsupported on the MPI backend
-        because `pad_halo_mpi_4d(halo=3)` is not yet implemented.  The
-        check must use the backend-specific gate, not a blanket
-        NotImplementedError.
+    def test_pad_halo_vector_halo3_mpi_guard_lifted_iter630(self):
+        """Iter-630: the `halo=3 and _halo_backend == "mpi"` guard in
+        `pad_halo_vector` was removed after `pad_halo_mpi_4d(halo=3)`
+        (iter-627/628) and the 2D MPI scalar paths (iter-630) gained
+        halo=3 support.  Verify that calling `pad_halo_vector(halo=3)`
+        under the MPI backend no longer raises the historical "MPI
+        backend" NotImplementedError -- the call is routed through
+        `pad_halo_mpi_4d` instead.
         """
         from unittest import mock
         import legoesm.grids.halo as halo_mod
@@ -1913,15 +2001,26 @@ class TestPadHaloH3Guardrails:
         cap = jnp.ones((6, N + 6, N + 6), dtype=jnp.float64)
         sap = jnp.zeros((6, N + 6, N + 6), dtype=jnp.float64)
 
-        # Flip the module-level backend to "mpi" for the duration of
-        # this test; halo=3 must raise under MPI until
-        # pad_halo_mpi_4d(halo=3) is implemented.
-        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
-            with pytest.raises(
-                    NotImplementedError, match="MPI backend"):
-                halo_mod.pad_halo_vector(
-                    u, v, ca, sa, cap, sap,
-                    interp_offsets=None, halo=3)
+        # Stub `pad_halo_mpi_4d` so we do not require a live MPI
+        # runtime; we only want to confirm the removed guard no longer
+        # intercepts the call.
+        def _stub_pad_halo_mpi_4d(data, topology, halo):
+            n = data.shape[1]
+            h2 = 2 * halo
+            shape = (data.shape[0], n + h2, n + h2) + data.shape[3:]
+            return jnp.zeros(shape, dtype=data.dtype)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch(
+                    "legoesm.parallel.halo_exchange.pad_halo_mpi_4d",
+                    side_effect=_stub_pad_halo_mpi_4d):
+            # Must NOT raise NotImplementedError now that iter-630
+            # lifted the guard.
+            u_p, v_p = halo_mod.pad_halo_vector(
+                u, v, ca, sa, cap, sap,
+                interp_offsets=None, halo=3)
+            assert u_p.shape == (6, N + 6, N + 6)
+            assert v_p.shape == (6, N + 6, N + 6)
 
 
 # ---------------------------------------------------------------------------

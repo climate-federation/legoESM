@@ -1099,3 +1099,29 @@ Next iteration can: (a) mirror steps 1+4 into the tiled helper; OR (b) implement
 
 63 `test_scale_halo` tests pass.
 
+### Iter-630 — 2D scalar MPI halo=3 paths + remove public guards
+
+**Codex stop-time finding**: "previous turn claims MPI halo=3 is complete, but the public MPI halo=3 paths still hard-fail."  Iter-629 had only extended the 4D helpers (`_pad_halo_mpi_face_only_4d`, `_pad_halo_mpi_tiled_4d`).  The 2D scalar helpers (`_pad_halo_mpi_face_only`, `_pad_halo_mpi_tiled`) still collapsed their halo dispatch to an `else:` branch assuming halo==2, and the public `pad_halo` / `pad_halo_vector` dispatchers still carried `NotImplementedError` guards for the MPI backend.
+
+**Changes** (four call-sites):
+1. **New helper `_place_strip_h3`** (scalar analogue of iter-627's `_place_strip_h3_4d`, same depth conventions: d0 adjacent, d1 middle, d2 outermost).  Added right after `_place_strip_h2`.
+2. **`_pad_halo_mpi_face_only`**: three-way dispatch added in local-edge loop, remote-recv unpack loop, and both corner-fill call sites.  Remote-recv now increments offset by `3 * n` for halo==3.
+3. **`_pad_halo_mpi_tiled`**: three-way dispatch in early corner-fill, remote-recv unpack, and late corner-fill.
+4. **`src/legoesm/grids/halo.py`** — removed two public guards:
+   - `pad_halo(halo=3)` + `_halo_backend == "mpi"`: `NotImplementedError("MPI halo=3 exchange not yet implemented")` — REMOVED.
+   - `pad_halo_vector(halo=3)` + `_halo_backend == "mpi"`: `NotImplementedError("halo=3 is not yet supported for pad_halo_vector under the MPI backend")` — REMOVED.
+5. **SPMD guard kept**: `explicit_pad_halo` only handles halo=1/2, so the SPMD path retains its halo=3 guard pending a separate SPMD port.
+
+**Tests added** (`tests/unit/test_scale_halo.py`):
+- `test_pad_halo_mpi_face_only_halo3_single_rank_iter630`: single-rank all-local 2D helper must equal `_pad_halo_local_h3` bit-for-bit.
+- `test_place_strip_h3_index_conventions_iter630`: locks the 2D depth-to-index mapping mirroring the 4D lock test.
+- `test_pad_halo_vector_halo3_rejects_mpi_backend` → `test_pad_halo_vector_halo3_mpi_guard_lifted_iter630`: renamed and repurposed to assert the historical guard no longer fires; stubs `pad_halo_mpi_4d` so no live MPI is required.
+
+**Complete MPI halo=3 port (both 2D and 4D)**:
+- ✅ 4D: `_pad_halo_mpi_face_only_4d`, `_pad_halo_mpi_tiled_4d` (iter-627..629).
+- ✅ 2D: `_pad_halo_mpi_face_only`, `_pad_halo_mpi_tiled` (THIS ITER).
+- ✅ Public dispatchers: `pad_halo` / `pad_halo_vector` guards removed (THIS ITER).
+- ❌ SPMD: `explicit_pad_halo` halo=3 still pending; not blocking FB-chain MPI work.
+
+All 65 `test_scale_halo.py` tests pass (plus 58 tests in `test_halo.py` / `test_async_halo.py` unchanged).  The ng=3 FB-chain infrastructure now has zero known MPI-path holes.
+

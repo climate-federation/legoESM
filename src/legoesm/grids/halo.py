@@ -546,10 +546,11 @@ def pad_halo(
 
     # MPI dispatch.
     if _halo_backend == "mpi":
-        if halo == 3:
-            raise NotImplementedError(
-                "MPI halo=3 exchange not yet implemented; "
-                "halo=3 is only available on the single-node local path.")
+        # iter-630: MPI halo=3 is now supported end-to-end.  The 2D scalar
+        # (`_pad_halo_mpi_face_only` / `_pad_halo_mpi_tiled`) and 4D tensor
+        # (`_pad_halo_mpi_4d_face_only` / `_pad_halo_mpi_4d_tiled`) paths
+        # all handle three halo depths, and corner cells are filled by
+        # `_fill_corners_h3`.
         from legoesm.parallel.halo_exchange import pad_halo_mpi
         padded = pad_halo_mpi(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
@@ -1470,17 +1471,10 @@ def pad_halo_vector(
     # `pad_halo(halo=3)` path has been validated since iter-499; the
     # vector round-trip just reuses that scalar exchange twice.
     #
-    # Iter-500's original guard cited two missing pieces: (a) padded
-    # angles at h=3 — now provided via
-    # `CubedSphereGrid.cos_angle_padded_h3` / `sin_angle_padded_h3`,
-    # and (b) `pad_halo_mpi_4d(halo=3)` — NOT yet implemented, so the
-    # MPI backend still refuses halo=3 below.
-    if halo == 3 and _halo_backend == "mpi":
-        raise NotImplementedError(
-            "halo=3 is not yet supported for pad_halo_vector under "
-            "the MPI backend; pad_halo_mpi_4d(halo=3) is not yet "
-            "implemented.  Use the single-device backend "
-            "(_halo_backend='local') for halo=3 vector exchanges.")
+    # Iter-630: `pad_halo_mpi_4d(halo=3)` was added in iter-627/628 and
+    # the 2D scalar MPI paths gained halo=3 support in iter-630, so the
+    # MPI backend now handles halo=3 end-to-end.  The prior
+    # `NotImplementedError` guard that lived here has been removed.
     if halo not in (1, 2, 3):
         raise NotImplementedError(
             f"Only halo=1, halo=2 and halo=3 are supported for "

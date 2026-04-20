@@ -210,6 +210,36 @@ def _place_strip_h2(
     return padded
 
 
+def _place_strip_h3(
+    padded: jax.Array, face: int, edge: int,
+    strip_d0: jax.Array, strip_d1: jax.Array, strip_d2: jax.Array,
+) -> jax.Array:
+    """Iter-630: place three received strips into halo=3 positions
+    of a 2D scalar padded array.  Same depth conventions as
+    `_place_strip_h3_4d` but without the nlev axis.
+
+    Depth 0 = adjacent to interior, depth 1 = middle, depth 2 = outer.
+    """
+    n = padded.shape[1] - 6
+    if edge == WEST:
+        padded = padded.at[face, 2, 3:-3].set(strip_d0)
+        padded = padded.at[face, 1, 3:-3].set(strip_d1)
+        padded = padded.at[face, 0, 3:-3].set(strip_d2)
+    elif edge == EAST:
+        padded = padded.at[face, n + 3, 3:-3].set(strip_d0)
+        padded = padded.at[face, n + 4, 3:-3].set(strip_d1)
+        padded = padded.at[face, n + 5, 3:-3].set(strip_d2)
+    elif edge == SOUTH:
+        padded = padded.at[face, 3:-3, 2].set(strip_d0)
+        padded = padded.at[face, 3:-3, 1].set(strip_d1)
+        padded = padded.at[face, 3:-3, 0].set(strip_d2)
+    elif edge == NORTH:
+        padded = padded.at[face, 3:-3, n + 3].set(strip_d0)
+        padded = padded.at[face, 3:-3, n + 4].set(strip_d1)
+        padded = padded.at[face, 3:-3, n + 5].set(strip_d2)
+    return padded
+
+
 # ======================================================================
 # Face-only MPI halo exchange (≤6 ranks)
 # ======================================================================
@@ -256,20 +286,32 @@ def _pad_halo_mpi_face_only(
             if is_reversed:
                 strip = strip[::-1]
             padded = _place_strip(padded, face, edge, strip)
-        else:
+        elif halo == 2:
             strip_d0 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 0)
             strip_d1 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 1)
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
             padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+        else:  # halo == 3 (iter-630)
+            strip_d0 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 0)
+            strip_d1 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 1)
+            strip_d2 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 2)
+            if is_reversed:
+                strip_d0 = strip_d0[::-1]
+                strip_d1 = strip_d1[::-1]
+                strip_d2 = strip_d2[::-1]
+            padded = _place_strip_h3(padded, face, edge,
+                                       strip_d0, strip_d1, strip_d2)
 
     if not remote_edges:
         # Still need to fill corner cells (matching local implementation).
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3
+            padded = _fill_corners_h3(padded)
         return padded
 
     # --- Batched neighbor sendrecv for remote edges ---
@@ -325,7 +367,7 @@ def _pad_halo_mpi_face_only(
                 if is_reversed:
                     strip = strip[::-1]
                 padded = _place_strip(padded, face, edge, strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + n]
                 strip_d1 = recv_buf[offset + n:offset + 2 * n]
                 offset += 2 * n
@@ -333,13 +375,26 @@ def _pad_halo_mpi_face_only(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+            else:  # halo == 3 (iter-630)
+                strip_d0 = recv_buf[offset:offset + n]
+                strip_d1 = recv_buf[offset + n:offset + 2 * n]
+                strip_d2 = recv_buf[offset + 2 * n:offset + 3 * n]
+                offset += 3 * n
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3(padded, face, edge,
+                                           strip_d0, strip_d1, strip_d2)
 
     # Fill corner cells by averaging adjacent edge-halo values
     # (matching the local implementation).
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -396,8 +451,10 @@ def _pad_halo_mpi_tiled(
     if not edge_info:
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3 (iter-630)
+            padded = _fill_corners_h3(padded)
         return padded
 
     # Group by neighbor rank for batching.
@@ -445,7 +502,7 @@ def _pad_halo_mpi_tiled(
                 if is_reversed:
                     recv_strip = recv_strip[::-1]
                 padded = _place_strip(padded, face, edge, recv_strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + n]
                 strip_d1 = recv_buf[offset + n:offset + 2 * n]
                 offset += 2 * n
@@ -453,12 +510,25 @@ def _pad_halo_mpi_tiled(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+            else:  # halo == 3 (iter-630)
+                strip_d0 = recv_buf[offset:offset + n]
+                strip_d1 = recv_buf[offset + n:offset + 2 * n]
+                strip_d2 = recv_buf[offset + 2 * n:offset + 3 * n]
+                offset += 3 * n
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3(padded, face, edge,
+                                           strip_d0, strip_d1, strip_d2)
 
     # Fill corner cells by averaging adjacent edge-halo values.
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -485,7 +555,8 @@ def pad_halo_mpi(
     topology : CommTopology
         Pre-computed communication topology.
     halo : int
-        Halo width (1 or 2).
+        Halo width (1, 2, or 3 — halo=3 was added in iter-630 so the
+        FB-chain ng=3 path works under MPI).
 
     Returns
     -------
