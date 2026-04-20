@@ -972,3 +972,39 @@ Previously no direct regression test — only indirect coverage via `fv_tp_2d` /
 
 2 new tests pass.  Simple but catches silent index slip (e.g., off-by-one in the slicing).
 
+### Iter-626 (2026-04-20): Fortran-formula lock inventory index
+
+Consolidation of the iter-550..625 Fortran-formula lock campaign into a single indexed list.  Each entry gives: Python helper, Fortran oracle file:line, Python file:line, test class, iter numbers.
+
+| Helper | Fortran oracle | Python location | Test class | Iter |
+|---|---|---|---|---|
+| `_divergence_corner_duo` | `sw_core.F90:2345-2447` | `fv3_sw_core.py:827-922` | `TestFvTp2dCornerInvariant` | 554/555/556/557/591 |
+| `_corner_vorticity` | `sw_core.F90:378-408, 3527-3545` | `fv3_sw_core.py:1095-1150` | `TestLegacyEdgePathsBypassedUnderDuogrid` | 582/583/584 |
+| `_vorticity_flux` | `sw_core.F90:416-480` | `fv3_sw_core.py:1153-1200` | `TestLegacyEdgePathsBypassedUnderDuogrid` | 585/586/587 |
+| `_ke_upwind` | `sw_core.F90:303-372, 420-480` | `fv3_sw_core.py:718-751` | `TestLegacyEdgePathsBypassedUnderDuogrid` | 588/589/590 |
+| `_d2a2c_vect` halo offsets | `sw_core.F90:3587` | `fv3_sw_core.py:475-481` | `TestFvTp2dCornerInvariant::test_d2a2c_vect_interp_offsets_match_halo_depth` | 593/594 |
+| `_edge_interpolate4` | `sw_core.F90:3709-3720` | `fv3_sw_core.py:237-247` | `TestEdgeInterpolate4FortranFormula` | 617/618 |
+| `_del6_vt_flux` | `sw_core.F90:2008-2121` | `fv3_sw_core.py:754-824` | `TestDel6VtFluxFortranFormula` | 619/620/621 |
+| `_d_sw1_recompute_ut_vt` (interior, duogrid) | `sw_core.F90:618-812` | `fv3_sw_core.py:39-230` | `TestDSw1RecomputeUtVtFortranFormula` | 622 |
+| `_p_grad_c` | `sw_core.F90` (p_grad_c equivalent) | `fv3_sw_core.py:1451-1476` | `TestPGradCFortranFormula` | 623 |
+| `compute_transport_quantities` | `sw_core.F90:830-862` | `fv_tp_2d.py:300-364` | `TestComputeTransportQuantitiesFortranFormula` | 624 |
+| `fv3_d2cc` | N/A (simple 2-point avg) | `operators_cdgrid.py:1276-1296` | `TestFv3D2ccFortranFormula` | 625 |
+| `synchronize_cgrid_fluxes` | `dyn_core.F90:853-900` | `halo.py:1733-1784` | `TestFluxSyncCallSitesWired` + `TestSynchronizeCgridFluxes` | 502/504/601/602/603 |
+| `synchronize_bgrid_ne_corner_geo` | `dyn_core.F90:968-1019` | `halo.py:1910-...` | `TestBgridNeCornerSync` | 102/103 |
+| `halo=3 MPI port-spec anchors` | `sw_core.F90:3527-3545, 3620-3640` | `halo_exchange.py:848-891` (guard) | `TestPadHaloH3Guardrails::test_iter613_mpi_halo3_port_anchors_present` | 613/614/615/616 |
+
+**Remaining SW-core helpers without dedicated formula locks** (have indirect coverage via production/FB runtime):
+- `_c_sw` (the FB-chain half-step itself — it's the integrator, covered by `test_fb_path_component_vs_scalar_sync_propagates_to_wind`).
+- `_bgrid_ke_transport` (has BGRID_NE sync tests; the KE computation proper inherits from ytp_v/xtp_u tests).
+- `_ppm_reconstruct_1d` (has axis-contract + smt5/smt6 negative tests).
+- `_ppm_transport_1d` (has iord gating tests).
+- `fv3_cc2c` (has `test_fv3_cc2c_u_has_correction_v_does_not` + `test_fv3_cc2c_v_c_is_plain_average_behaviorally`).
+- `dgrid_vorticity` (has vector-calculus identity tests; it's a production A-L helper, not a Fortran port).
+
+**Iteration budget consumed**: iter-617..625 = 9 consecutive iterations of Fortran-formula lock additions, each ~60-150 lines of test code.  The inventory above represents approximately 30 new regression tests added during this campaign.
+
+**Next-tier architectural work** (not coverable by more formula locks):
+- Wire h=3 into `_d2a2c_vect` / `fv3_fb_sw_step` callers (infrastructure unlocked iter-595..600).
+- Port `pad_halo_mpi_4d(halo=3)` (port spec documented at `halo_exchange.py:850-900` with 7 anchors).
+- Stabilize FB-chain at C36 (the architectural W2 v-imprint resolution).
+
