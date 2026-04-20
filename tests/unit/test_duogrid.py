@@ -1281,6 +1281,102 @@ class TestFluxSyncCallSitesWired:
                 f"function name."
             )
 
+    def test_flux_sync_call_lexically_precedes_divergence_consumption(self):
+        """Iter-601 Critical Duogrid Constraint #1 addendum: the sync
+        call must happen BEFORE the flux-divergence stencil that
+        consumes the synced fluxes.  Otherwise the sync is a silent
+        no-op for the current timestep — the stencil reads the
+        UNSYNCED values and the sync result is overwritten or
+        discarded.
+
+        For each REQUIRED_SITE, scan the function body for:
+        1. The lineno of the `synchronize_cgrid_fluxes` call.
+        2. The lineno of any Subscript-based difference expression
+           that consumes `fx` or similar names in a divergence stencil
+           shape (`fx[1:] - fx[:-1]`, `fy[1:] - fy[:-1]`, or the
+           patterns in `_c_sw`: `fx[:, :-1, :] - fx[:, 1:, :]`).
+        3. Assert sync lineno < consumption lineno.
+
+        For `fv_tp_2d` the consumption happens in the CALLER (the
+        function returns synced fluxes), so the sync position only
+        needs to be inside the function body.  For
+        `cgrid_mass_flux_divergence` and `_c_sw`, the consumption is
+        in the same function body and the ordering matters.
+        """
+        import ast
+        root = self._repo_root()
+
+        # Functions where the consumption stencil lives IN THE SAME
+        # function body (so lexical ordering matters).  `fv_tp_2d` is
+        # excluded because the caller consumes.
+        SAME_BODY_SITES = (
+            ("src/legoesm/core/operators_cdgrid.py",
+             "cgrid_mass_flux_divergence"),
+            ("src/legoesm/core/fv3_sw_core.py", "_c_sw"),
+        )
+
+        for rel, func_name in SAME_BODY_SITES:
+            path = root / rel
+            tree = ast.parse(path.read_text())
+            func = self._find_function(tree, func_name)
+            assert func is not None, (
+                f"{rel}: module-level function `{func_name}` "
+                f"not found.")
+            sync_calls = list(
+                self._iter_calls_in_function(
+                    func, "synchronize_cgrid_fluxes"))
+            assert sync_calls, (
+                f"{rel}:{func_name}: no `synchronize_cgrid_fluxes` "
+                f"call found (covered by earlier test; re-check).")
+            sync_linenos = [c.lineno for c in sync_calls]
+            first_sync = min(sync_linenos)
+
+            # Find the earliest divergence-stencil consumption.
+            # Pattern: a BinOp(Sub) whose operands are Subscript
+            # nodes on the same Name ending in `_x`/`_y`/`flux_x`/
+            # `flux_y`/`fx`/`fy` (name doesn't matter for the shape,
+            # but it MUST read indexes like `[1:]` / `[:-1]` on the
+            # SAME array).
+            consumption_linenos = []
+            for node in ast.walk(func):
+                if (isinstance(node, ast.BinOp)
+                    and isinstance(node.op, ast.Sub)
+                    and isinstance(node.left, ast.Subscript)
+                    and isinstance(node.right, ast.Subscript)):
+                    # Both sides must subscript the same Name (array).
+                    def _name_of(sub):
+                        v = sub.value
+                        if isinstance(v, ast.Name):
+                            return v.id
+                        return None
+                    ln = _name_of(node.left)
+                    rn = _name_of(node.right)
+                    if ln is not None and ln == rn:
+                        # Only count if the name looks like a flux:
+                        # fx / fy / flux_x / flux_y / fx_something /
+                        # fy_something.
+                        if (ln in ("fx", "fy")
+                            or ln.startswith("flux_")
+                            or ln.startswith("fx_")
+                            or ln.startswith("fy_")):
+                            consumption_linenos.append(node.lineno)
+
+            assert consumption_linenos, (
+                f"{rel}:{func_name}: no flux-difference stencil "
+                f"(`fx[...] - fx[...]` or similar) found in function "
+                f"body.  If the divergence now lives in a helper, "
+                f"update this test to probe the helper.")
+            first_consumption = min(consumption_linenos)
+
+            assert first_sync < first_consumption, (
+                f"{rel}:{func_name}: `synchronize_cgrid_fluxes` call "
+                f"at line {first_sync} happens AT/AFTER the earliest "
+                f"flux-difference consumption at line "
+                f"{first_consumption}.  The sync must precede the "
+                f"divergence stencil; otherwise it is a no-op for "
+                f"the current timestep and Constraint #1 is "
+                f"violated silently.")
+
     def test_every_flux_sync_site_is_duogrid_gated(self):
         """Inside the host function the call must be inside an `if`
         whose test mentions `duogrid` or `dg`.  Unconditional sync
