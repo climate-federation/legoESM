@@ -5846,5 +5846,190 @@ class TestPertPpmFortranFormula(unittest.TestCase):
         np.testing.assert_array_equal(np.asarray(br_out), np.zeros_like(br))
 
 
+class TestKeUpwindFortranFormula(unittest.TestCase):
+    """Iter-636: direct Fortran-formula lock for `_ke_upwind` in
+    ``src/legoesm/core/fv3_sw_core.py``.  The helper implements FV3's
+    c_sw KE upwind-selection at ``sw_core.F90:303-365``.
+
+    Two branches:
+      1. **bounded_domain / duogrid path** (sw_core.F90:303-321): simple
+         interior upwind — `ke_u = uc(i-1) if ua > 0 else uc(i)`,
+         `ke_v = vc(j-1) if va > 0 else vc(j)`, with NO sin_sg/cos_sg
+         rotation at the face boundaries.
+      2. **non-bounded path** (sw_core.F90:322-364): applies
+         sin_sg/cos_sg rotation at i==1 / i==npx / j==1 / j==npy
+         BEFORE taking the upwind selection.
+
+    Pre-iter-636 there was no direct test locking the numerical output
+    of this helper against the Fortran formula.  Correct upwind
+    selection is critical for KE conservation; a regression that flipped
+    a `>` to `>=`, swapped an `i-1` / `i` index, or mis-indexed `sin_sg`
+    / `cos_sg` at a face would silently shift the KE tendency.
+    """
+
+    @staticmethod
+    def _ref_ke_upwind(uc, vc, ua, va, u_d, v_d, sg, cg, n, use_duogrid):
+        """Numpy reproduction of `_ke_upwind` (fv3_sw_core.py:721-751)
+        mirroring the Fortran sw_core.F90:303-365 logic.
+
+        - Interior upwind: standard directional selection.
+        - Face-boundary non-duogrid overrides: west/east on ua,
+          south/north on va with matching sin_sg/cos_sg indexing.
+        """
+        import numpy as np
+        ke_u = np.where(ua > 0, uc[:, :-1, :], uc[:, 1:, :])
+        ke_v = np.where(va > 0, vc[:, :, :-1], vc[:, :, 1:])
+        if not use_duogrid:
+            # West edge (i=0 in Python, cell 0 where ua>0 means inflow
+            # from face-west halo).
+            ke_bdy_l = (uc[:, 0, :] * sg[:, 0, :, 0]
+                         + v_d[:, 0, :] * cg[:, 0, :, 0])
+            ke_u[:, 0, :] = np.where(ua[:, 0, :] > 0,
+                                      ke_bdy_l, ke_u[:, 0, :])
+            # East edge (i=n-1 cell, ua<=0 means outflow to face-east).
+            ke_bdy_r = (uc[:, n, :] * sg[:, n - 1, :, 2]
+                         + v_d[:, n, :] * cg[:, n - 1, :, 2])
+            ke_u[:, n - 1, :] = np.where(ua[:, n - 1, :] > 0,
+                                          ke_u[:, n - 1, :], ke_bdy_r)
+            # South edge (j=0 cell, va>0 means inflow from face-south).
+            ke_bdy_b = (vc[:, :, 0] * sg[:, :, 0, 1]
+                         + u_d[:, :, 0] * cg[:, :, 0, 1])
+            ke_v[:, :, 0] = np.where(va[:, :, 0] > 0,
+                                      ke_bdy_b, ke_v[:, :, 0])
+            # North edge (j=n-1 cell, va<=0 means outflow to face-north).
+            ke_bdy_t = (vc[:, :, n] * sg[:, :, n - 1, 3]
+                         + u_d[:, :, n] * cg[:, :, n - 1, 3])
+            ke_v[:, :, n - 1] = np.where(va[:, :, n - 1] > 0,
+                                          ke_v[:, :, n - 1], ke_bdy_t)
+        return ke_u, ke_v
+
+    def _build_inputs(self, seed, n):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        uc = rng.standard_normal((6, n + 1, n))       # C-grid u
+        vc = rng.standard_normal((6, n, n + 1))       # C-grid v
+        ua = rng.standard_normal((6, n, n))           # A-grid ua
+        va = rng.standard_normal((6, n, n))           # A-grid va
+        u_d = rng.standard_normal((6, n, n + 1))      # D-grid u
+        v_d = rng.standard_normal((6, n + 1, n))      # D-grid v
+        return uc, vc, ua, va, u_d, v_d
+
+    def test_ke_upwind_matches_fortran_non_duogrid(self):
+        """Random inputs → numpy reproduction bit-for-bit match on the
+        non-duogrid path (all 4 face-edge overrides active)."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _ke_upwind
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        uc, vc, ua, va, u_d, v_d = self._build_inputs(636, n)
+
+        ke_u, ke_v = _ke_upwind(
+            jnp.asarray(uc), jnp.asarray(vc),
+            jnp.asarray(ua), jnp.asarray(va),
+            jnp.asarray(u_d), jnp.asarray(v_d),
+            cdgrid, use_duogrid=False)
+
+        sg = np.asarray(cdgrid.sin_sg)
+        cg = np.asarray(cdgrid.cos_sg)
+        ke_u_ref, ke_v_ref = self._ref_ke_upwind(
+            uc, vc, ua, va, u_d, v_d, sg, cg, n, use_duogrid=False)
+
+        np.testing.assert_allclose(
+            np.asarray(ke_u), ke_u_ref, atol=1e-13,
+            err_msg=("_ke_upwind non-duogrid ke_u diverges from "
+                     "sw_core.F90:303-365 reference — check face-edge "
+                     "overrides at i=0, i=n-1, and the ua>0 / ua<=0 "
+                     "branch logic."))
+        np.testing.assert_allclose(
+            np.asarray(ke_v), ke_v_ref, atol=1e-13,
+            err_msg=("_ke_upwind non-duogrid ke_v diverges from "
+                     "sw_core.F90:303-365 reference — check face-edge "
+                     "overrides at j=0, j=n-1, and the va>0 / va<=0 "
+                     "branch logic."))
+
+    def test_ke_upwind_matches_fortran_duogrid(self):
+        """Duogrid path: the 4 face-edge overrides must be skipped,
+        leaving only the simple interior upwind selection
+        (sw_core.F90:303-321)."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _ke_upwind
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        uc, vc, ua, va, u_d, v_d = self._build_inputs(637, n)
+
+        ke_u, ke_v = _ke_upwind(
+            jnp.asarray(uc), jnp.asarray(vc),
+            jnp.asarray(ua), jnp.asarray(va),
+            jnp.asarray(u_d), jnp.asarray(v_d),
+            cdgrid, use_duogrid=True)
+
+        sg = np.asarray(cdgrid.sin_sg)
+        cg = np.asarray(cdgrid.cos_sg)
+        ke_u_ref, ke_v_ref = self._ref_ke_upwind(
+            uc, vc, ua, va, u_d, v_d, sg, cg, n, use_duogrid=True)
+
+        np.testing.assert_allclose(
+            np.asarray(ke_u), ke_u_ref, atol=1e-13,
+            err_msg=("_ke_upwind duogrid path ke_u diverges from "
+                     "simple-interior-upwind reference — any face-edge "
+                     "override under duogrid would break this test."))
+        np.testing.assert_allclose(
+            np.asarray(ke_v), ke_v_ref, atol=1e-13,
+            err_msg=("_ke_upwind duogrid path ke_v diverges from "
+                     "simple-interior-upwind reference."))
+
+    def test_ke_upwind_duogrid_skips_edge_rotation_iter636(self):
+        """Explicit lock: with duogrid active, swapping sin_sg / cos_sg
+        to arbitrary nonsense values must NOT change the output,
+        because the duogrid path doesn't read them.  A regression that
+        forgot the `if not use_duogrid` guard would fire here.
+        """
+        import numpy as np
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _ke_upwind
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        uc, vc, ua, va, u_d, v_d = self._build_inputs(638, n)
+        args = (jnp.asarray(uc), jnp.asarray(vc),
+                jnp.asarray(ua), jnp.asarray(va),
+                jnp.asarray(u_d), jnp.asarray(v_d))
+
+        ke_u_real, ke_v_real = _ke_upwind(
+            *args, cdgrid, use_duogrid=True)
+
+        # Replace sin_sg / cos_sg with sentinel nonsense values.
+        poisoned = cdgrid._replace(
+            sin_sg=jnp.full_like(cdgrid.sin_sg, -999.0),
+            cos_sg=jnp.full_like(cdgrid.cos_sg, +999.0))
+        ke_u_poisoned, ke_v_poisoned = _ke_upwind(
+            *args, poisoned, use_duogrid=True)
+
+        np.testing.assert_array_equal(
+            np.asarray(ke_u_real), np.asarray(ke_u_poisoned),
+            err_msg=("Duogrid path of _ke_upwind reads sin_sg/cos_sg "
+                     "— `if not use_duogrid:` guard at fv3_sw_core.py:731 "
+                     "is broken."))
+        np.testing.assert_array_equal(
+            np.asarray(ke_v_real), np.asarray(ke_v_poisoned),
+            err_msg=("Duogrid path of _ke_upwind reads sin_sg/cos_sg "
+                     "— `if not use_duogrid:` guard at fv3_sw_core.py:731 "
+                     "is broken."))
+
+
 if __name__ == "__main__":
     unittest.main()

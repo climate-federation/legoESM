@@ -1231,3 +1231,21 @@ endif
 
 All 5 tests pass at `atol=1e-14`, giving bit-for-bit equivalence between the JAX implementation and a line-by-line Fortran reproduction.  Any future edit to `_pert_ppm` / `_pert_ppm_iv0` that drifts from `tp_core.F90` will fail these tests.
 
+### Iter-636 — Fortran-formula lock for `_ke_upwind`
+
+**Motivation**: `_ke_upwind` in `src/legoesm/core/fv3_sw_core.py` implements FV3's c_sw KE upwind-selection at `sw_core.F90:303-365`.  Two branches:
+  1. **bounded_domain / duogrid path** (lines 303-321): simple interior upwind with no face-boundary rotation.
+  2. **non-bounded path** (lines 322-364): applies sin_sg/cos_sg rotation at i==1 / i==npx / j==1 / j==npy.
+
+Pre-iter-636 no Fortran-formula lock existed on this helper.  Correct upwind selection is critical for KE conservation; a regression that flipped `>` to `>=`, swapped an `i-1 / i` index, or mis-indexed `sin_sg(..., 0)` (W-edge) vs `sin_sg(..., 2)` (E-edge) would silently shift the KE tendency.
+
+**Tests added** (`tests/unit/test_cdgrid_fv3_regression.py::TestKeUpwindFortranFormula`, 3 total):
+- `_ref_ke_upwind`: numpy reproduction of the Fortran logic, covering both branches and all 4 face-edge overrides.
+- `test_ke_upwind_matches_fortran_non_duogrid`: random inputs at n=8, bit-for-bit match at `atol=1e-13`.  Exercises all 4 face-edge overrides (W/E/S/N with matching `ua>0 / va>0` branch selection).
+- `test_ke_upwind_matches_fortran_duogrid`: random inputs with duogrid active — simple interior upwind only, no edge rotation.
+- `test_ke_upwind_duogrid_skips_edge_rotation_iter636`: poisons `sin_sg` / `cos_sg` with sentinel nonsense (-999, +999) on the duogrid path and asserts output is UNCHANGED — directly locks the `if not use_duogrid:` guard at `fv3_sw_core.py:731`.  A regression that dropped the guard would consume the poisoned metrics and fail visibly.
+
+All 3 tests pass at `atol=1e-13`.  `_ke_upwind` is now Fortran-formula locked against `sw_core.F90:303-365`.
+
+Cumulative Fortran-formula lock inventory (iter-617..636): 16 helpers covered — `edge_interpolate4`, `_del6_vt_flux`, `_dsw1_recompute_ut_vt`, `_pgrad_c`, `compute_transport_quantities`, `fv3_d2cc`, `_pert_ppm` (iv=0 and iv=1), and now `_ke_upwind`.  Plus behavioural locks on which code paths call `_pert_ppm` / `_pert_ppm_iv0`.
+
