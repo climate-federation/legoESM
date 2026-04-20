@@ -561,3 +561,30 @@ This catches ANY pre-sync read of a rebinded flux array — including subscripts
 
 No divergence between tests' nested-scope handling.  108 `test_duogrid` tests pass; production restored.
 
+### Iter-604 (2026-04-20): polar-cap v-wind artifact — root cause isolated
+
+**User-reported visible artifact** on W2 C36 1-day `snapshots_v.png`: strong alternating ±0.3 m/s patches at high latitudes (|lat| > 75°) visible from t=0.5d onwards — dominates over the mid-latitude mode-4 cube-face imprint analyzed in iter-592.
+
+**Diagnostic** on the saved `snapshots_latlon.npz` + `snapshots_native.npz`:
+1. **Polar-cap signal is 3× the mid-latitude mode-4**: at t=1d, `rms|v|` for |lat|>75° reaches 0.092 m/s with max 0.303 m/s.  Mid-latitude (±30°) mode-4 at the same time was 0.053 m/s.
+2. **Face-by-face at t=1d**: faces 0-3 (equatorial) have max|v_cc_north| ≈ 0.087 m/s.  Faces 4 (north polar) and 5 (south polar) have max|v_cc_north| = 0.307 m/s — **3.5× the equatorial faces**.  N-S mirror-symmetry (face 4 vs face 5 reflected): 1.1% relative — NOT the old polar-axis bug.
+3. **FFT at lat=±85°** shows dominant mode-2 (amplitude 0.20 m/s at t=1d), not mode-4.  Mode-4 at pole is 0.06.  This is different from the ±30° signature (mode-4 dominant).
+4. **Root cause localized to the 4 pole-adjacent cells of face 4** (and face 5 by symmetry).  Face 4 has n=36 cells; the north pole sits at the MID-CELL INTERSECTION (i, j) ∈ {17, 18} × {17, 18}.  At t=1d:
+   - Cells (17,17), (18,18): u_east_actual = 1.178 m/s vs expected 1.191 m/s; v_north_actual = +0.229 m/s.
+   - Cells (17,18), (18,17): u_east_actual = 1.332 m/s vs expected 1.191 m/s; v_north_actual = −0.195 m/s.
+   - **Checkerboard pattern**: u_east error = ±0.14 m/s (12% relative), v_north = ±0.23 m/s at 4 cells at lon = ±45°, ±135°.
+5. **The 4-cell checkerboard at 4 quadrant longitudes produces mode-2 in longitude FFT** at fixed high latitude (alternating +,−,+,− around the circle = cos(2λ)).  This matches the observed mode-2 dominance at lat=±85°.
+
+**Mechanism**: the cubed-sphere discretization places the pole at the intersection of 4 face-4 cells.  Each cell's grid-local orientation differs by π/2 from its neighbours (gnomonic angles collapse at the pole).  The dycore's momentum integration produces grid-aligned `(u_cc, v_cc)` that are not quite consistent between the 4 cells — a checkerboard velocity error accumulates at ~O(dx²·u₀/R·t).  When diagnostically rotated to geographic `(u_east, v_north)` via cell-centre angles, the checkerboard becomes a visible mode-2 polar-cap artifact.
+
+**This is DISTINCT from the mid-latitude mode-4 cube-face imprint** (iter-592): mid-latitude is at face seams (lat ≈ ±30°), polar is at the pole singularity inside face 4/5.  Both are production A-L + RK3 path artifacts; neither eliminates within the non-FV3 framework.
+
+**W5 C36 comparison**: face 4 max|v_cc_north| = 7.75 m/s (physical Rossby wave dominates), face 5 = 0.31 m/s.  The 7.75 is mostly the W5 mountain-induced wave signal on face 4; the pole-cell 4-checkerboard adds ~0.15 m/s on top.  Face 5's 0.31 m/s is consistent with the pure polar-cell artifact.
+
+**Actionable fix paths** (architectural, not iterable in one Ralph iteration):
+- (a) Replace A-L + RK3 with FV3 FB chain (needs ng=3 halo — iter-595..603 unblocked the infrastructure).  The c_sw + d_sw boundary handling at polar faces specifically treats the pole singularity via cube-vertex corner overrides (`sw_corner`, `ne_corner` etc. in `sw_core.F90:3528-3545`).  Python's current `_d2a2c_vect` is architecturally bound from representing these (see Priority 3 history).
+- (b) Add a pole-cell diagnostic smoother (non-FV3) that averages the 4 pole-adjacent cells — similar pattern to the `boundary_fix` at face seams.  Would eliminate the visible artifact at cost of diagnostic-only smoothing.
+- (c) Accept and lock the magnitude, matching the iter-592 pattern for mid-latitude.
+
+**Iter-604 deliverable**: diagnostic breakdown + root-cause localization (above).  No code fix committed — the fix choice is an architectural decision.  The analysis provides the grounds to revisit Priority 3 (polar-face cube-vertex overrides) once ng=3 halo is wired into the dycore.
+
