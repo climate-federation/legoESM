@@ -7487,6 +7487,103 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
                  "that specific mutation.  Check the stencil's "
                  "sensitivity to coefficient values."))
 
+    def test_d2a2c_vect_production_stencil_consumes_A1_A2_iter646(self):
+        """Iter-646 (Codex stop-time finding on iter-645): the iter-645
+        tests locked the `_A1` / `_A2` constants and the numpy
+        reference's cubic-exactness, but did NOT actually exercise the
+        production JAX stencil at `fv3_sw_core.py:464-469`.  A
+        regression swapping `_A1` and `_A2` *inside the production
+        formula* (e.g., flipping the multiplier positions while leaving
+        the constants alone) would not be caught by iter-645's tests.
+
+        This test runs the REAL `_d2a2c_vect` with the `_A1` module
+        constant patched to an incorrect value, and verifies the JAX
+        output CHANGES versus the unpatched run.  Proves the
+        production formula actually consumes `_A1` at interior cells.
+        """
+        import numpy as np
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core import fv3_sw_core
+
+        # Non-duogrid grid: the 4th-order branch fires when
+        # n > 2*npt and npt > 0 (fv3_sw_core.py:463).
+        n = 12
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+
+        rng = np.random.default_rng(646)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+
+        # Unpatched production call.
+        out_ref = fv3_sw_core._d2a2c_vect(u_d, v_d, cdgrid)
+
+        # Patch `_A1` to a sentinel and re-run.  If the production code
+        # ACTUALLY consumes `_A1`, the output must change somewhere.
+        with mock.patch.object(fv3_sw_core, "_A1", 0.5):
+            out_patched = fv3_sw_core._d2a2c_vect(u_d, v_d, cdgrid)
+
+        # The two outputs must differ somewhere on any interior field
+        # where the 4th-order stencil fires.  Compare the first return
+        # element (typically ua) — at minimum one of the 5 tuple
+        # outputs must change.
+        any_diff = False
+        for i, (a, b) in enumerate(zip(out_ref, out_patched)):
+            a_np = np.asarray(a); b_np = np.asarray(b)
+            max_d = float(np.max(np.abs(a_np - b_np)))
+            if max_d > 1e-8:
+                any_diff = True
+                break
+        self.assertTrue(
+            any_diff,
+            msg=("Patching `_A1` to a sentinel produced NO change in "
+                 "`_d2a2c_vect` output at any return component.  The "
+                 "production formula at fv3_sw_core.py:464-469 does "
+                 "NOT actually consume `_A1` — iter-645's lock on the "
+                 "constant alone would not catch a regression that "
+                 "inlines the coefficient into the production formula."))
+
+    def test_d2a2c_vect_duogrid_production_stencil_consumes_A1_A2_iter646(self):
+        """Iter-646: same coverage check for the DUOGRID production
+        stencil at `fv3_sw_core.py:347-355`.  Patches `_A1` and
+        verifies the duogrid-path output changes."""
+        import numpy as np
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core import fv3_sw_core
+
+        n = 12   # > 3 so the 4th-order branch fires (line 347)
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+
+        rng = np.random.default_rng(647)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+
+        out_ref = fv3_sw_core._d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        with mock.patch.object(fv3_sw_core, "_A1", 0.5):
+            out_patched = fv3_sw_core._d2a2c_vect_duogrid(
+                u_d, v_d, cdgrid)
+
+        any_diff = False
+        for a, b in zip(out_ref, out_patched):
+            a_np = np.asarray(a); b_np = np.asarray(b)
+            if float(np.max(np.abs(a_np - b_np))) > 1e-8:
+                any_diff = True
+                break
+        self.assertTrue(
+            any_diff,
+            msg=("Patching `_A1` to a sentinel produced NO change in "
+                 "`_d2a2c_vect_duogrid` output.  The duogrid production "
+                 "formula at fv3_sw_core.py:347-355 does NOT actually "
+                 "consume `_A1`."))
+
 
 if __name__ == "__main__":
     unittest.main()

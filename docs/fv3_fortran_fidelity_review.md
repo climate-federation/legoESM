@@ -1419,3 +1419,18 @@ A regression that changed `A1` to 0.5 (2nd-order 2-point avg), swapped `A1` ↔ 
 
 All 3 tests pass.  Cumulative Fortran-formula lock inventory: **22 helpers** (iter-644's 21 + the 4th-order D→A stencil).
 
+### Iter-646 — strengthen iter-645 stencil lock to exercise production JAX code
+
+**Codex stop-time finding on iter-645**: "the new 'Fortran-formula lock' does not actually exercise the production stencil."
+
+**Analysis**: iter-645's three tests locked (a) the `_A1` / `_A2` module constants, (b) the numpy reference's cubic-exactness, and (c) coefficient-swap sensitivity of the numpy reference.  None of these actually called the JAX production code at `fv3_sw_core.py:464-469` (`_d2a2c_vect`) or `:347-355` (`_d2a2c_vect_duogrid`) — a regression that inlined the literal `0.5625` value into the production formula (while leaving the `_A1` constant untouched) would not have been caught.
+
+**Fix**: added two production-consumption tests (`test_d2a2c_vect_production_stencil_consumes_A1_A2_iter646` and `test_d2a2c_vect_duogrid_production_stencil_consumes_A1_A2_iter646`) that:
+1. Call the real JAX `_d2a2c_vect` / `_d2a2c_vect_duogrid` on random `(u_d, v_d)` at n=12 (where the 4th-order branch fires).
+2. Then patch `fv3_sw_core._A1` to a sentinel value (`0.5`) and re-run.
+3. Assert the output at AT LEAST ONE return element changes by `>1e-8`.
+
+A regression that inlined the literal and dropped the symbol reference would produce identical output in patched and unpatched runs — the tests would then fail visibly.
+
+All 5 tests (3 from iter-645 + 2 from iter-646) pass on the correct code.  The production stencils are now demonstrably consuming `_A1` at the sites the lock claims to cover.
+
