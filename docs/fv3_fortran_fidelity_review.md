@@ -832,3 +832,13 @@ Each step tightens the anti-rot lock in response to a specific regression class 
 
 3 tests pass.  Production restored.  `_edge_interpolate4` now has a directly-auditable Fortran-oracle lock independent of `_d2a2c_vect` execution.
 
+### Iter-618 (2026-04-20): test `_edge_interpolate4` at production shape (Codex)
+
+**Codex stop-time review on iter-617 (commit 9fac151)**: the 3 tests used input shape `(1, 4)` (single stencil), but the real production call in `_d2a2c_vect` uses shape `(6, n, 4)` — 6 faces × n transverse cells × 4 stencil cells (at `fv3_sw_core.py:536-541`).  A vectorization/broadcasting bug that affects the real call but not the scalar case would pass iter-617's tests silently.
+
+**Lock added**: `test_production_shape_6_n_4_matches_per_cell_scalar`.  Fills a `(6, n, 4)` batch with random `ua4` and `dxa4`, calls `_edge_interpolate4` once, then iterates over all 48 scalar (face, cell) outputs and verifies each equals the scalar Fortran formula applied to that (face, cell)'s 4 stencil values.
+
+**Sanity-verified**: swapping `dxa4[..., k]` → `dxa4[k, ...]` (a realistic wrong-axis refactor) fires the test with 1.88 diff on the linear case — AND fires the new batched check.  Production restored; 4 tests pass.
+
+`_edge_interpolate4` now has locks at both `(1, 4)` (scalar Fortran formula) and `(6, n, 4)` (production vectorization consistency).
+

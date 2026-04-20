@@ -4849,6 +4849,58 @@ class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
                      f"ua={ua.tolist()}, dxa={dxa.tolist()}, "
                      f"result={result} vs expected={float(expected)}"))
 
+    def test_production_shape_6_n_4_matches_per_cell_scalar(self):
+        """Iter-618 (Codex follow-up): test at the real production
+        call shape (6, n, 4).
+
+        `_d2a2c_vect` calls `_edge_interpolate4` with shape
+        `(6, n, 4)` — 6 faces, n transverse cells, 4 stencil cells
+        (at `fv3_sw_core.py:536-541`).  Iter-617 tests used
+        `(1, 4)` which doesn't exercise the broadcasting/vectorized
+        behavior that production relies on.
+
+        This test fills a `(6, n, 4)` batch with random inputs and
+        verifies each of the 6*n scalar outputs equals the scalar
+        Fortran formula applied per (face, cell).  If the helper's
+        vectorization had a broadcasting bug (e.g., summing along
+        the wrong axis), this test catches it.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _edge_interpolate4
+
+        n = 8
+        rng = np.random.default_rng(618)
+        ua4 = rng.standard_normal((6, n, 4))
+        dxa4 = rng.uniform(0.1, 10.0, (6, n, 4))
+
+        result_batch = np.asarray(_edge_interpolate4(
+            jnp.asarray(ua4), jnp.asarray(dxa4)))
+        assert result_batch.shape == (6, n), (
+            f"Batch shape {result_batch.shape} != expected (6, {n}) "
+            f"— vectorization broke")
+
+        # Per-cell scalar reproduction.
+        for f in range(6):
+            for c in range(n):
+                ua = ua4[f, c, :]
+                dxa = dxa4[f, c, :]
+                t1 = dxa[0] + dxa[1]
+                t2 = dxa[2] + dxa[3]
+                expected = 0.5 * (
+                    ((t1 + dxa[1]) * ua[1] - dxa[1] * ua[0]) / t1
+                    + ((t2 + dxa[2]) * ua[2] - dxa[2] * ua[3]) / t2
+                )
+                self.assertAlmostEqual(
+                    float(result_batch[f, c]), float(expected),
+                    places=12,
+                    msg=(f"Batch (6, {n}, 4) cell (face={f}, c={c}): "
+                         f"result={result_batch[f, c]} vs "
+                         f"scalar expected={float(expected)}.  "
+                         f"Vectorized broadcasting is incorrect — "
+                         f"the helper's axis-handling differs "
+                         f"between scalar and batched calls."))
+
 
 if __name__ == "__main__":
     unittest.main()
