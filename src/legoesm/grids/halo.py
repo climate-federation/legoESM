@@ -1463,24 +1463,28 @@ def pad_halo_vector(
     v_padded : jax.Array, shape (6, n+2*halo, n+2*halo)
         Padded grid-aligned y-velocity.
     """
-    # iter-500: halo=3 added to scalar `pad_halo` in iter-499 has not
-    # been extended to the vector path — the packed-MPI path uses
-    # `pad_halo_mpi_4d` which does not support halo=3, and the fallback
-    # calls `pad_halo(halo=3)` twice (no shape issue, but
-    # `compute_padded_angle`/`compute_padded_half_metrics` must be in
-    # the (n+6)x(n+6) shape, which the callers do not yet produce).
-    # Raise explicitly rather than silently riding through an
-    # under-validated vector rotation path.
-    if halo == 3:
+    # Iter-595: halo=3 support for the non-MPI single-device path.
+    # Requires the caller to pass `cos_angle_padded_h3` /
+    # `sin_angle_padded_h3` (shape (6, n+6, n+6)) as the
+    # `cos_angle_padded` / `sin_angle_padded` args.  The scalar
+    # `pad_halo(halo=3)` path has been validated since iter-499; the
+    # vector round-trip just reuses that scalar exchange twice.
+    #
+    # Iter-500's original guard cited two missing pieces: (a) padded
+    # angles at h=3 — now provided via
+    # `CubedSphereGrid.cos_angle_padded_h3` / `sin_angle_padded_h3`,
+    # and (b) `pad_halo_mpi_4d(halo=3)` — NOT yet implemented, so the
+    # MPI backend still refuses halo=3 below.
+    if halo == 3 and _halo_backend == "mpi":
         raise NotImplementedError(
-            "halo=3 is not yet supported for pad_halo_vector; "
-            "needs h=3 padded grid-angle + half-metrics and "
-            "pad_halo_mpi_4d(halo=3) before the vector rotation "
-            "round-trip is correct.")
-    if halo not in (1, 2):
+            "halo=3 is not yet supported for pad_halo_vector under "
+            "the MPI backend; pad_halo_mpi_4d(halo=3) is not yet "
+            "implemented.  Use the single-device backend "
+            "(_halo_backend='local') for halo=3 vector exchanges.")
+    if halo not in (1, 2, 3):
         raise NotImplementedError(
-            f"Only halo=1 and halo=2 are supported for pad_halo_vector, "
-            f"got {halo}")
+            f"Only halo=1, halo=2 and halo=3 are supported for "
+            f"pad_halo_vector, got {halo}")
 
     _EPS = float(jnp.finfo(jnp.float32).eps)
 

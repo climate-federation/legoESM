@@ -104,6 +104,15 @@ class CubedSphereGrid(NamedTuple):
         Iter-532: precomputed for the iter-496..501 ng=3 halo
         extension that supports the FB-chain stability work
         (review-doc item #2).
+    cos_angle_padded_h3 : jax.Array
+        Cosine of padded grid angle for halo=3, shape (6, n+6, n+6).
+        Iter-595: added for the ng=3 vector halo round-trip.
+    sin_angle_padded_h3 : jax.Array
+        Sine of padded grid angle for halo=3, shape (6, n+6, n+6).
+    hx_ext_h3 : jax.Array
+        Half dx on halo=3 extended grid, shape (6, n+6, n+6).
+    hy_ext_h3 : jax.Array
+        Half dy on halo=3 extended grid, shape (6, n+6, n+6).
     duogrid : DuoGridData or None
         Duo-Grid kinked-to-extended remapping data. When not None,
         pad_halo applies the Duo-Grid remap instead of interp_offsets.
@@ -136,6 +145,10 @@ class CubedSphereGrid(NamedTuple):
     hy_ext_h2: jax.Array
     halo_interp_offsets_h2: jax.Array
     halo_interp_offsets_h3: jax.Array
+    cos_angle_padded_h3: jax.Array
+    sin_angle_padded_h3: jax.Array
+    hx_ext_h3: jax.Array
+    hy_ext_h3: jax.Array
     duogrid: object  # DuoGridData | None — use object to avoid circular import
 
     @property
@@ -281,6 +294,13 @@ def create_cubed_sphere(
     # halo=3 quantities for the iter-496..501 ng=3 halo extension
     # (FB-chain stability prerequisite, review-doc item #2).
     halo_offsets_h3 = compute_halo_interp_offsets_h3(n)
+    # Iter-595: add grid-angle + half-metrics at halo=3 so the vector
+    # halo round-trip has the padded-angle reference needed to enable
+    # `pad_halo_vector(halo=3)` on the non-MPI backend.
+    angle_padded_h3 = compute_padded_angle(n, halo=3)
+    hx_ext_h3, hy_ext_h3 = compute_padded_half_metrics(n, radius, halo=3)
+    cos_angle_padded_h3_val = jnp.cos(angle_padded_h3)
+    sin_angle_padded_h3_val = jnp.sin(angle_padded_h3)
 
     # Optional: Duo-Grid kinked-to-extended remapping data.
     # Duo-Grid requires ng >= 2 so both halo depths used by the FV3
@@ -335,6 +355,10 @@ def create_cubed_sphere(
         hy_ext_h2=hy_ext_h2.astype(_dt),
         halo_interp_offsets_h2=halo_offsets_h2.astype(_dt),
         halo_interp_offsets_h3=halo_offsets_h3.astype(_dt),
+        cos_angle_padded_h3=cos_angle_padded_h3_val.astype(_dt),
+        sin_angle_padded_h3=sin_angle_padded_h3_val.astype(_dt),
+        hx_ext_h3=hx_ext_h3.astype(_dt),
+        hy_ext_h3=hy_ext_h3.astype(_dt),
         duogrid=duogrid,
     )
 
@@ -737,6 +761,10 @@ def create_cubed_sphere_panel(
         hy_ext_h2=_repad(_s(full.hy_ext_h2), halo=2),
         halo_interp_offsets_h2=None,  # not needed — wall BC
         halo_interp_offsets_h3=None,  # not needed — wall BC
+        cos_angle_padded_h3=jnp.cos(_repad(_s(full.angle), halo=3)),
+        sin_angle_padded_h3=jnp.sin(_repad(_s(full.angle), halo=3)),
+        hx_ext_h3=_repad(_s(full.hx_ext_h3), halo=3),
+        hy_ext_h3=_repad(_s(full.hy_ext_h3), halo=3),
         duogrid=None,  # regional panel: no cross-face duogrid data
     )
 

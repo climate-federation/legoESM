@@ -5230,3 +5230,33 @@ Iteration 592 chose (b) as the realistic short-term guard; (a) is tracked as the
 
 **Why this matters**: without an AST-level lock, a well-intentioned "attribute cleanup" refactor that removed `halo_interp_offsets_h2` (reading the code superficially as a duplicate of `halo_interp_offsets`) could quietly regress the halo=2 interpolation accuracy in `_d2a2c_vect`, which is reached by both the experimental csw path AND the FB shallow-water model.  The test pins down the shape invariant structurally, not just numerically.
 
+### Iter-595 (2026-04-20): enable halo=3 vector pad on non-MPI backend (FB-path prereq)
+
+**Motivation**: review-doc item #2 — the FB chain (FV3 forward-backward `c_sw + p_grad_c + d_sw`) is unstable at C36 because it needs ng=3 halo depth.  `pad_halo_vector(halo=3)` was explicitly blocked at `halo.py:1474-1479` citing two missing pieces:
+(a) h=3 padded grid-angle + half-metrics,
+(b) `pad_halo_mpi_4d(halo=3)`.
+
+Piece (a) is small: `compute_padded_angle(n, halo=3)` and `compute_padded_half_metrics(n, radius, halo=3)` already support halo=3 (since iter-530).  The missing piece was wiring the precomputed values into `CubedSphereGrid` and exposing them to the vector halo path.
+
+**Changes (this iteration)**:
+1. Added 4 new fields to `CubedSphereGrid` (`src/legoesm/grids/cubed_sphere.py`): `cos_angle_padded_h3`, `sin_angle_padded_h3`, `hx_ext_h3`, `hy_ext_h3` — each shape `(6, n+6, n+6)`.
+2. Computed them in `create_cubed_sphere` via the existing `compute_padded_angle(halo=3)` / `compute_padded_half_metrics(halo=3)` helpers.
+3. Wired them into the single-face panel constructor (wall-BC path) at `cubed_sphere.py:735` using the existing `_repad` helper for Neumann boundaries.
+4. Relaxed the halo=3 `NotImplementedError` in `pad_halo_vector` (`src/legoesm/grids/halo.py:1474-1483`) to raise ONLY under the MPI backend (piece (b) is still missing).  Non-MPI now accepts halo=3.
+
+**Locks added**:
+- `test_pad_halo_vector_halo3_works_on_local_backend` in `tests/unit/test_scale_halo.py::TestPadHaloH3Guardrails`: constructs a C8 grid, runs a constant-field round-trip through `pad_halo_vector(halo=3)` using the new `cos_angle_padded_h3`/`sin_angle_padded_h3`, and asserts the interior is preserved within 1e-10 (float64 rotation round-trip noise).
+- `test_pad_halo_vector_halo3_rejects_mpi_backend` (replaces the iter-500 unconditional-raise lock): monkey-patches `_halo_backend='mpi'` and verifies the NotImplementedError message cites "MPI backend".
+
+**Regression**: 343 tests pass across `test_scale_halo.py`, `test_cdgrid_fv3_regression.py`, `test_duogrid.py`, `test_cdgrid.py`.
+
+**Status of FB-chain ng=3 unlock (review-doc item #2)**:
+- ✅ Scalar `pad_halo(halo=3)` (since iter-499).
+- ✅ Halo interp offsets at h=3 (`halo_interp_offsets_h3`, since iter-532).
+- ✅ Padded grid-angle + half-metrics at h=3 (THIS ITERATION).
+- ✅ Vector `pad_halo_vector(halo=3)` on non-MPI backend (THIS ITERATION).
+- ❌ `pad_halo_mpi_4d(halo=3)` — remaining piece for the MPI path.
+- ❌ Wiring h=3 into `_d2a2c_vect` and `fv3_fb_sw_step` — the ng=3 callers still use halo=2.  Iter-596+ can now flip callers without hitting the infrastructure wall.
+
+The halo=3 infrastructure is no longer the blocking dependency on the non-MPI single-device path, which is what the W2/W5 test matrix uses.
+

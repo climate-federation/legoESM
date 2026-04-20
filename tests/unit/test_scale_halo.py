@@ -1045,20 +1045,67 @@ class TestPadHaloH3Guardrails:
         with pytest.raises(NotImplementedError, match="pad_halo_4d"):
             pad_halo_4d(data, halo=3)
 
-    def test_pad_halo_vector_halo3_raises_notimplemented(self):
-        """The vector rotation round-trip needs h=3 grid angles and
-        half-metrics; with neither in place, pad_halo_vector at halo=3
-        must error rather than produce wrong numbers."""
+    def test_pad_halo_vector_halo3_works_on_local_backend(self):
+        """Iter-595: pad_halo_vector(halo=3) is SUPPORTED on the
+        single-device (non-MPI) backend.  Callers must supply
+        `cos_angle_padded_h3` / `sin_angle_padded_h3` (shape
+        (6, n+6, n+6)) — the scalar `pad_halo(halo=3)` internal
+        call has been validated since iter-499.
+
+        Round-trip bit-exactness: for constant u=1, v=0 and identity
+        rotation (ca=1, sa=0), the output interior must equal the
+        input, and the cross-face halo is filled via pad_halo(halo=3).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.halo import pad_halo_vector
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        # Constant-field round-trip
+        u = jnp.ones((6, n, n), dtype=jnp.float64)
+        v = jnp.zeros((6, n, n), dtype=jnp.float64)
+        up, vp = pad_halo_vector(
+            u, v,
+            grid.cos_angle.astype(jnp.float64),
+            grid.sin_angle.astype(jnp.float64),
+            grid.cos_angle_padded_h3.astype(jnp.float64),
+            grid.sin_angle_padded_h3.astype(jnp.float64),
+            interp_offsets=grid.halo_interp_offsets_h3,
+            halo=3,
+        )
+        assert up.shape == (6, n + 6, n + 6)
+        assert vp.shape == (6, n + 6, n + 6)
+        # Interior preserved: rotation round-trip has ~eps float noise;
+        # accept up to 1e-10 for x64 inputs.
+        np.testing.assert_allclose(
+            np.asarray(up[:, 3:-3, 3:-3]), np.asarray(u), atol=1e-10)
+        np.testing.assert_allclose(
+            np.asarray(vp[:, 3:-3, 3:-3]), np.asarray(v), atol=1e-10)
+
+    def test_pad_halo_vector_halo3_rejects_mpi_backend(self):
+        """Iter-595: halo=3 is still unsupported on the MPI backend
+        because `pad_halo_mpi_4d(halo=3)` is not yet implemented.  The
+        check must use the backend-specific gate, not a blanket
+        NotImplementedError.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
         u = jnp.ones((6, N, N), dtype=jnp.float64)
         v = jnp.zeros((6, N, N), dtype=jnp.float64)
         ca = jnp.ones((6, N, N), dtype=jnp.float64)
         sa = jnp.zeros((6, N, N), dtype=jnp.float64)
         cap = jnp.ones((6, N + 6, N + 6), dtype=jnp.float64)
         sap = jnp.zeros((6, N + 6, N + 6), dtype=jnp.float64)
-        with pytest.raises(NotImplementedError, match="pad_halo_vector"):
-            pad_halo_vector(
-                u, v, ca, sa, cap, sap, interp_offsets=None, halo=3)
+
+        # Flip the module-level backend to "mpi" for the duration of
+        # this test; halo=3 must raise under MPI until
+        # pad_halo_mpi_4d(halo=3) is implemented.
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with pytest.raises(
+                    NotImplementedError, match="MPI backend"):
+                halo_mod.pad_halo_vector(
+                    u, v, ca, sa, cap, sap,
+                    interp_offsets=None, halo=3)
 
 
 # ---------------------------------------------------------------------------
