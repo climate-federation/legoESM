@@ -650,3 +650,19 @@ The two ceilings probe different physics:
 
 **Rejected Codex suggestion**: the proposed `qsmith` moist-pressure correction in `src/legoesm/thermo.py` does not apply to the current Python callers.  Fortran `qsmith` is a free-atmosphere saturation formula that takes `q_v` as input (microphysics-internal); Python callers (land slab, multilayer land, simple ocean) compute SURFACE saturation where no q_v is available — they need a (T, p) formula.  Adopting the Fortran formula would make Python less accurate in context.  Documented for future reference if a microphysics scheme is ported.
 
+### Iter-608 (2026-04-20): W5 Rossby-wave signal floor (Codex)
+
+**Codex stop-time review on iter-607 (commit b442dea)**: the W5 face-4 lock has only an UPPER bound (`f4_max_v < 10.0 m/s`).  A regression that over-damps the mountain-induced Rossby wave (excessive hyperdiff, wrong mountain forcing, broken vorticity-gradient coupling) could drop the face-4 signal from 7.75 m/s to e.g. 0.5 m/s and the test would PASS silently — the Rossby wave is the PHYSICAL signal of W5 and its loss is a fidelity regression.
+
+**Fix**: added a lower-bound assertion `f4_max_v > 4.0 m/s` (~50% of the 7.75 m/s baseline).  A drop below 4 m/s indicates the wave has been substantially damped or its generation has been broken.
+
+**Sanity-verified**: tightening the floor to 8.0 fires with measured 7.75 m/s.  Production restored to 4.0.
+
+**Bounded face-5 intentionally one-sided**: face 5 has only an upper bound (< 1.0 m/s) because its baseline of 0.31 m/s is a pure pole-cell artifact.  A drop to zero there would be an IMPROVEMENT (the artifact is gone), not a regression — so there's no corresponding floor.
+
+**Physical vs artifactual signal distinction**: the iter-608 two-sided bound on face 4 expresses a fidelity claim — W5's Rossby wave IS a physical signal that the dycore must produce AND must not amplify.  Face 5 is the opposite: a non-physical pole-cell artifact that we tolerate but never want to grow.
+
+4 user-visible-artifact regression tests pass (3 W2 + 1 W5).  Coverage class hierarchy now:
+- W2 diagnostic-angle / N-S mirror / 1-day pole magnitude + mirror (iter-592/605/606).
+- W5 mountain-wave preservation + pole-cell ceiling (iter-607/608).
+

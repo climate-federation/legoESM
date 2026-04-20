@@ -4581,6 +4581,7 @@ class TestW5PolarFaceMagnitude(unittest.TestCase):
         v_north = np.asarray(sa_4edge * u_cc + ca_4edge * v_cc)
 
         f4_max_v = float(np.max(np.abs(v_north[4])))
+        # **Upper bound** (iter-607): catches amplification.
         self.assertLess(
             f4_max_v, 10.0,
             msg=(f"W5 C36 1d: face-4 max|v_cc_north| = {f4_max_v:.3e} "
@@ -4589,10 +4590,31 @@ class TestW5PolarFaceMagnitude(unittest.TestCase):
                  f"+ pole-cell artifact).  Exceeding the ceiling means "
                  f"the dycore has amplified the polar-face response "
                  f"beyond the expected Rossby signal."))
+        # **Lower bound** (iter-608 Codex follow-up): catches signal
+        # LOSS.  A regression that over-damps (too-large hyperdiff,
+        # wrong mountain forcing, broken vorticity generation) could
+        # drop the face-4 Rossby-wave signal well below baseline
+        # while iter-607's upper-bound-only check passes silently.
+        # Floor 4.0 m/s: ~50% of the 7.75 m/s baseline.  A drop below
+        # 4 m/s would indicate the face-4 Rossby wave has been
+        # substantially damped or dispersed away.
+        self.assertGreater(
+            f4_max_v, 4.0,
+            msg=(f"W5 C36 1d: face-4 max|v_cc_north| = {f4_max_v:.3e} "
+                 f"m/s falls below 4.0 m/s floor.  Iter-604 baseline "
+                 f"was 7.75 m/s; a drop this large indicates the "
+                 f"mountain-induced Rossby wave has been excessively "
+                 f"damped (hyperdiff, div_damp, or boundary_fix "
+                 f"miscalibration) or a regression has broken the "
+                 f"vorticity/gradient coupling that generates the "
+                 f"wave.  Signal preservation and amplification "
+                 f"bounds are both required for physical fidelity."))
 
         # Also lock face 5 (south polar, clear of mountain wave).
         # Should be close to the pure pole-cell magnitude ~0.31 m/s
-        # (same as W2).
+        # (same as W2).  Upper bound catches wave leakage; no lower
+        # bound — face 5 is quiet and reducing the artifact to near
+        # zero would be an improvement, not a regression.
         f5_max_v = float(np.max(np.abs(v_north[5])))
         self.assertLess(
             f5_max_v, 1.0,
