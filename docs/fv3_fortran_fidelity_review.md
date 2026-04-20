@@ -1468,3 +1468,16 @@ Added a note in the `err_msg` documenting the iter-648 tightening.
 
 All 6 tests in `TestD2A2C4thOrderStencilFortranFormula` now pass at the tightened tolerance.  The 4th-order D→A stencil lock is genuinely bit-for-bit against the explicit inline formula.
 
+### Iter-649 — stop overclaiming exactness; set tolerance at real float64 round-off floor
+
+**Codex stop-time finding on iter-648**: "iter-648 still overclaims exactness; the new lock is not actually bit-for-bit."
+
+**Root cause**: iter-647 and iter-648's docstrings used the phrase "bit-for-bit".  The actual measured max `|JAX - numpy|` diff on a random n=12 grid is `4.44e-16`, which is 4 ULPs of float64 machine epsilon (`ε = 1.11e-16`).  This arises from reordering of floating-point additions between the two pipelines and does NOT meet IEEE-754 bit identity (which would require `atol=0`).  The overclaiming language is misleading.
+
+**Fix**:
+1. Tightened `atol` from `1e-13` to `1e-14` (≈ 100 ULPs — well below any semantic change, well above the observed 4-ULP round-off floor).  `rtol=0.0` stays.
+2. Replaced every "bit-for-bit" / "truly bit-for-bit" / "genuinely bit-for-bit" claim with "float64 round-off identity" / "~4 ULPs of float64 ε" / "at the float64 round-off floor" — accurate descriptions of what the test actually enforces.
+3. The test docstring now includes a dedicated iter-649 paragraph documenting the measured discrepancy and why atol=1e-14 is the appropriate threshold.
+
+All 6 stencil tests pass at the new tolerance.  The lock detection power is unchanged (the iter-647 mutation verification at 100% mismatch still triggers under the tightened threshold), but the stated strength now matches the enforced strength.
+

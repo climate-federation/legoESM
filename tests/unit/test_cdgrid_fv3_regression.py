@@ -7564,12 +7564,24 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
             ua[i, j] = A1 * (u_d[i, j]   + u_d[i, j+1])
                      + A2 * (u_d[i, j-1] + u_d[i, j+2])
 
-        bit-for-bit.  Under the orthogonal override `cos_sg5 = 0` and
-        `rsin2 = 1`, the cov→contra step is the identity, so
-        `ua = utmp` at interior cells where the 4th-order override
-        fires.  A regression that mis-indexed the stencil, swapped
-        coefficients, or dropped the 4th-order override would fail
-        this test even if some OTHER `_A1` usage remained dynamic.
+        at the float64 round-off floor (a few ULPs).  Under the
+        orthogonal override `cos_sg5 = 0` and `rsin2 = 1`, the
+        cov→contra step is the identity, so `ua = utmp` at interior
+        cells where the 4th-order override fires.  A regression that
+        mis-indexed the stencil, swapped coefficients, or dropped the
+        4th-order override would fail this test even if some OTHER
+        `_A1` usage remained dynamic.
+
+        Iter-649 (Codex stop-time follow-up): the iter-647 docstring
+        claimed "bit-for-bit" at atol=1e-10 and iter-648 tightened to
+        atol=1e-13, but both overclaimed exactness.  The measured max
+        diff between JAX and numpy is 4.44e-16 — about 4 ULPs of
+        float64 machine epsilon (ε = 1.11e-16), which arises from
+        reordering of floating-point additions between the two
+        pipelines.  This is float64 round-off identity, NOT IEEE-754
+        bit-for-bit identity.  Iter-649 sets atol=1e-14 (≈ 100
+        ULPs — well below any semantic change but well above the
+        observed round-off floor) and drops the "bit-for-bit" claims.
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -7621,19 +7633,24 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         ua_interior = ua[:, 2:-2, npt:n - npt]
         expected_interior = expected_utmp_interior[:, 2:-2, :]
 
-        # Iter-648 (Codex stop-time correction): the iter-647 test
-        # used `atol=1e-10` alone, which defaults to `rtol=1e-7`; the
-        # effective tolerance on values of O(1) is 1e-7 — orders of
-        # magnitude above float64 round-off for a 4-term linear
-        # combination.  The stencil is a simple linear combination in
-        # float64, so true bit-for-bit requires `rtol=0` and an
-        # absolute tolerance at the float64 round-off floor (~1e-15
-        # for O(1) values, stretched to 1e-13 for 4-term accumulation).
+        # Iter-647 initially used atol=1e-10 alone (rtol default 1e-7),
+        # which allowed 1e-7 relative error.  Iter-648 tightened to
+        # atol=1e-13, but still overclaimed "bit-for-bit".  Iter-649
+        # measured the actual JAX-vs-numpy discrepancy at 4.44e-16
+        # (4 ULPs of float64 ε = 1.11e-16), caused by reordering of
+        # floating-point additions between the pipelines.  That is
+        # float64 round-off identity, NOT IEEE-754 bit identity.
+        # Tolerance is set to atol=1e-14 (≈ 100 ULPs — well below any
+        # semantic change, well above the observed round-off floor).
+        # rtol=0 because the test values span O(1) and a relative
+        # tolerance would let large outputs drift more than the
+        # absolute round-off floor.
         np.testing.assert_allclose(
-            ua_interior, expected_interior, rtol=0.0, atol=1e-13,
+            ua_interior, expected_interior, rtol=0.0, atol=1e-14,
             err_msg=("_d2a2c_vect interior `ua` does NOT match the "
                      "explicit 4th-order Lagrange formula "
-                     "A1*(u[j]+u[j+1]) + A2*(u[j-1]+u[j+2]).  "
+                     "A1*(u[j]+u[j+1]) + A2*(u[j-1]+u[j+2]) within "
+                     "float64 round-off (~4 ULPs, threshold 1e-14).  "
                      "Under cos_sg[...,4]=0 and rsin2=1 the production "
                      "pipeline reduces to `ua = utmp` at interior "
                      "cells, so this check directly locks the 4th-order "
@@ -7641,10 +7658,7 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
                      "against the coefficients from _A1/_A2.  A "
                      "regression that inlines or mis-indexes the "
                      "stencil here fails this test even if other "
-                     "_A1 usages remain dynamic.  Iter-648 tightened "
-                     "tolerance to rtol=0, atol=1e-13 (float64 "
-                     "round-off floor) so the 'bit-for-bit' claim is "
-                     "truly bit-for-bit."))
+                     "_A1 usages remain dynamic."))
 
     def test_d2a2c_vect_duogrid_production_stencil_consumes_A1_A2_iter646(self):
         """Iter-646: same coverage check for the DUOGRID production
