@@ -5425,5 +5425,140 @@ class TestPGradCFortranFormula(unittest.TestCase):
                  f"{dp_y_diff:.3e} (rms={dp_y_rms:.3e})."))
 
 
+class TestComputeTransportQuantitiesFortranFormula(unittest.TestCase):
+    """Iter-624: Fortran-formula lock for
+    `compute_transport_quantities` at `fv_tp_2d.py:300-364`.
+
+    Ports FV3 `sw_core.F90:830-862` — computes Courant numbers
+    (crx/cry), area fluxes (xfx/yfx), and swept areas (ra_x/ra_y)
+    for the Lin-Rood fv_tp_2d transport scheme.  Formula:
+      crx = dt*ut * rdxa(upwind cell)
+      xfx = dt*ut * dy * sin_sg(upwind)
+      ra_x = area + xfx[W] - xfx[E]
+
+    No direct regression test before iter-624 — only indirect
+    coverage via fv_tp_2d / d_sw_native runtime.
+    """
+
+    def _build_grid(self, n=8, use_duogrid=False):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n=n, use_duogrid=use_duogrid)
+        return create_cubed_sphere_cdgrid(grid)
+
+    def test_zero_velocity_produces_zero_transport_and_ra_equals_area(self):
+        """With ut = vt = 0, all transport quantities are zero:
+        crx = cry = xfx = yfx = 0; and ra_x = ra_y = area (no
+        transport → no swept area adjustment)."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv_tp_2d import compute_transport_quantities
+
+        cdgrid = self._build_grid(n=8)
+        n = cdgrid.n
+        ut = jnp.zeros((6, n + 1, n))
+        vt = jnp.zeros((6, n, n + 1))
+        crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
+            ut, vt, dt=300.0, cdgrid=cdgrid)
+        area = np.asarray(cdgrid.base.area)
+        for name, arr in (("crx", crx), ("cry", cry),
+                           ("xfx", xfx), ("yfx", yfx)):
+            self.assertLess(
+                float(jnp.max(jnp.abs(arr))), 1e-10,
+                msg=f"Zero velocity → {name} should be 0, got "
+                    f"max={float(jnp.max(jnp.abs(arr))):.3e}")
+        ra_x_diff = float(np.max(np.abs(np.asarray(ra_x) - area)))
+        ra_y_diff = float(np.max(np.abs(np.asarray(ra_y) - area)))
+        self.assertLess(
+            ra_x_diff, 1e-6,
+            msg=f"Zero velocity → ra_x should equal area, "
+                f"max diff = {ra_x_diff:.3e}.")
+        self.assertLess(
+            ra_y_diff, 1e-6,
+            msg=f"Zero velocity → ra_y should equal area, "
+                f"max diff = {ra_y_diff:.3e}.")
+
+    def test_full_field_matches_numpy_reference(self):
+        """Random (ut, vt) → reproduce the Fortran formula in numpy
+        and verify production output matches bit-for-bit."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv_tp_2d import compute_transport_quantities
+        from legoesm.grids.halo import pad_halo
+
+        cdgrid = self._build_grid(n=8, use_duogrid=False)
+        n = cdgrid.n
+        rng = np.random.default_rng(624)
+        ut_np = rng.standard_normal((6, n + 1, n)) * 5.0
+        vt_np = rng.standard_normal((6, n, n + 1)) * 5.0
+        ut = jnp.asarray(ut_np)
+        vt = jnp.asarray(vt_np)
+        dt = 300.0
+
+        crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
+            ut, vt, dt, cdgrid)
+
+        # Numpy reference of Fortran formula.
+        offsets = cdgrid.base.halo_interp_offsets
+        dy = np.asarray(cdgrid.dy_edge_x)
+        dx = np.asarray(cdgrid.dx_edge_y)
+        area = np.asarray(cdgrid.base.area)
+
+        rdxa_pad = np.asarray(
+            pad_halo(cdgrid.rdxa, interp_offsets=offsets))
+        rdya_pad = np.asarray(
+            pad_halo(cdgrid.rdya, interp_offsets=offsets))
+        sg = np.asarray(cdgrid.sin_sg)
+        se_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 2]), interp_offsets=offsets))
+        sw_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 0]), interp_offsets=offsets))
+        sn_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 3]), interp_offsets=offsets))
+        ss_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 1]), interp_offsets=offsets))
+
+        xfx_raw = dt * ut_np
+        yfx_raw = dt * vt_np
+        crx_ref = xfx_raw * np.where(
+            ut_np > 0,
+            rdxa_pad[:, :n + 1, 1:-1],
+            rdxa_pad[:, 1:n + 2, 1:-1])
+        xfx_ref = xfx_raw * dy * np.where(
+            ut_np > 0,
+            se_pad[:, :n + 1, 1:-1],
+            sw_pad[:, 1:n + 2, 1:-1])
+        cry_ref = yfx_raw * np.where(
+            vt_np > 0,
+            rdya_pad[:, 1:-1, :n + 1],
+            rdya_pad[:, 1:-1, 1:n + 2])
+        yfx_ref = yfx_raw * dx * np.where(
+            vt_np > 0,
+            sn_pad[:, 1:-1, :n + 1],
+            ss_pad[:, 1:-1, 1:n + 2])
+        ra_x_ref = area + xfx_ref[:, :-1, :] - xfx_ref[:, 1:, :]
+        ra_y_ref = area + yfx_ref[:, :, :-1] - yfx_ref[:, :, 1:]
+
+        checks = (
+            ("crx", crx, crx_ref),
+            ("cry", cry, cry_ref),
+            ("xfx", xfx, xfx_ref),
+            ("yfx", yfx, yfx_ref),
+            ("ra_x", ra_x, ra_x_ref),
+            ("ra_y", ra_y, ra_y_ref),
+        )
+        for name, arr_prod, arr_ref in checks:
+            diff = float(np.max(np.abs(
+                np.asarray(arr_prod) - arr_ref)))
+            rms = float(np.sqrt(np.mean(arr_ref ** 2)))
+            self.assertLess(
+                diff / max(rms, 1e-20), 1e-10,
+                msg=(f"{name} deviates from Fortran formula by "
+                     f"{diff:.3e} (rms={rms:.3e}).  Check: upwind "
+                     f"selection in rdxa / sin_sg, xfx = dt*ut*dy*"
+                     f"sin(upwind), ra = area + net flux."))
+
+
 if __name__ == "__main__":
     unittest.main()

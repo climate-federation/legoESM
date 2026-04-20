@@ -939,3 +939,26 @@ Previously no direct regression test.
 
 2 new tests pass.  The FB-chain pressure-gradient step now has a direct Fortran-oracle lock.
 
+### Iter-624 (2026-04-20): Fortran-formula lock for `compute_transport_quantities`
+
+**Motivation**: `compute_transport_quantities` at `fv_tp_2d.py:300-364` ports FV3 `sw_core.F90:830-862` — computes Courant numbers (crx/cry), area fluxes (xfx/yfx), and swept areas (ra_x/ra_y) for the Lin-Rood fv_tp_2d transport scheme.  Formula:
+```
+crx = dt*ut * rdxa(upwind_cell)
+xfx = dt*ut * dy * sin_sg(upwind)
+cry = dt*vt * rdya(upwind_cell)
+yfx = dt*vt * dx * sin_sg(upwind)
+ra_x = area + xfx[W] - xfx[E]
+ra_y = area + yfx[S] - yfx[N]
+```
+Previously no direct regression test — only indirect coverage via `fv_tp_2d` / `_d_sw_native` runtime.
+
+**Lock added**: `TestComputeTransportQuantitiesFortranFormula` with 2 tests:
+1. `test_zero_velocity_produces_zero_transport_and_ra_equals_area`: ut=vt=0 → crx=cry=xfx=yfx=0 and ra_x=ra_y=area.
+2. `test_full_field_matches_numpy_reference`: random (ut, vt) input → numpy reproduction of ALL 6 output quantities matches production bit-for-bit (rel < 1e-10 each).
+
+**Sanity-verified**: swapping the upwind direction on `rdxa_pad` selection (`ut > 0 → cell i` instead of `cell i-1`) fires the full-field test with relative diff 0.38 for `crx`.
+
+**Cumulative Fortran-formula-lock inventory** across iter-550..624 now covers the key FB-chain helpers: `_divergence_corner_duo`, `_corner_vorticity`, `_vorticity_flux`, `_ke_upwind`, `_d2a2c_vect` halo offsets, `_edge_interpolate4`, `_del6_vt_flux`, `_d_sw1_recompute_ut_vt`, `_p_grad_c`, `compute_transport_quantities` (THIS), `synchronize_cgrid_fluxes`.
+
+2 new tests pass.
+
