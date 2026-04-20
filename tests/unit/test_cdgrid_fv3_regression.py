@@ -5093,6 +5093,118 @@ class TestDel6VtFluxFortranFormula(unittest.TestCase):
                  f"nord=0 sign={east_of_peak_sign_0}, nord=1 "
                  f"sign={east_of_peak_sign_1}."))
 
+    def test_nord1_full_field_matches_numpy_reproduction(self):
+        """Iter-621 (Codex follow-up to iter-620): the sign-alternation
+        test checks only 2 interface points (west/east of peak),
+        narrower than iter-619's full-face residual check.  A
+        refactor that fixes the sign at those 2 points but breaks
+        spatial structure elsewhere (wrong metric at face edges,
+        wrong divergence, missing rarea, etc.) would pass iter-620
+        silently.
+
+        This test adds a FULL-FIELD bit-for-bit numpy reproduction
+        of the Fortran nord=1 algorithm, covering every interior
+        (face, i, j) cell.  The reference uses the same `pad_halo`
+        calls as production (so cross-face halo exchange is
+        identical) but implements the rest of the algorithm
+        explicitly in numpy.  Any deviation from the Fortran
+        formula shows up as a non-zero residual at the mismatched
+        cell.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _del6_vt_flux
+        from legoesm.grids.halo import pad_halo
+
+        cdgrid = self._build_grid(n=8)
+        n = cdgrid.n
+        rng = np.random.default_rng(621)
+        q = jnp.asarray(rng.standard_normal((6, n, n)))
+        damp = 0.25
+
+        # Production output.
+        fx_prod, fy_prod = _del6_vt_flux(
+            nord=1, damp=damp, q=q, cdgrid=cdgrid, use_duogrid=False)
+
+        # Numpy reference — follow Fortran sw_core.F90:2064-2119 path
+        # step-by-step.
+        sg = np.asarray(cdgrid.sin_sg)
+        dy = np.asarray(cdgrid.dy_edge_x)
+        dx = np.asarray(cdgrid.dx_edge_y)
+        rdxc = np.asarray(cdgrid.rdxc)
+        rdyc = np.asarray(cdgrid.rdyc)
+        rarea = 1.0 / np.asarray(cdgrid.base.area)
+
+        # Step 1: initial d2 = damp * q, halo-exchanged.
+        d2_init = damp * np.asarray(q)
+        d2_init_pad = np.asarray(
+            pad_halo(jnp.asarray(d2_init),
+                      interp_offsets=cdgrid.base.halo_interp_offsets))
+        se_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 2]),
+            interp_offsets=cdgrid.base.halo_interp_offsets))
+        sw_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 0]),
+            interp_offsets=cdgrid.base.halo_interp_offsets))
+        sn_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 3]),
+            interp_offsets=cdgrid.base.halo_interp_offsets))
+        ss_pad = np.asarray(pad_halo(
+            jnp.asarray(sg[:, :, :, 1]),
+            interp_offsets=cdgrid.base.halo_interp_offsets))
+
+        sin_uv_x = 0.5 * (se_pad[:, :n + 1, 1:-1]
+                           + sw_pad[:, 1:n + 2, 1:-1])
+        sin_uv_y = 0.5 * (sn_pad[:, 1:-1, :n + 1]
+                           + ss_pad[:, 1:-1, 1:n + 2])
+
+        # Step 2: initial pass, WEST - EAST sign.
+        fx2_init = (sin_uv_x * dy
+                     * (d2_init_pad[:, :-1, 1:-1]
+                        - d2_init_pad[:, 1:, 1:-1])
+                     * rdxc)
+        fy2_init = (sin_uv_y * dx
+                     * (d2_init_pad[:, 1:-1, :-1]
+                        - d2_init_pad[:, 1:-1, 1:])
+                     * rdyc)
+
+        # Step 3: divergence → d2_new, halo-exchanged.
+        d2_new = (fx2_init[:, :-1, :] - fx2_init[:, 1:, :]
+                   + fy2_init[:, :, :-1] - fy2_init[:, :, 1:]) * rarea
+        d2_new_pad = np.asarray(
+            pad_halo(jnp.asarray(d2_new),
+                      interp_offsets=cdgrid.base.halo_interp_offsets))
+
+        # Step 4: iteration pass, EAST - WEST sign (FLIPPED).
+        fx_ref = (sin_uv_x * dy
+                   * (d2_new_pad[:, 1:, 1:-1]
+                      - d2_new_pad[:, :-1, 1:-1])
+                   * rdxc)
+        fy_ref = (sin_uv_y * dx
+                   * (d2_new_pad[:, 1:-1, 1:]
+                      - d2_new_pad[:, 1:-1, :-1])
+                   * rdyc)
+
+        # Compare production to numpy reference, full field.
+        fx_diff = float(np.max(np.abs(np.asarray(fx_prod) - fx_ref)))
+        fy_diff = float(np.max(np.abs(np.asarray(fy_prod) - fy_ref)))
+        # Relative to flux RMS — catches scale-preserving bugs.
+        fx_rms = float(np.sqrt(np.mean(fx_ref ** 2)))
+        fy_rms = float(np.sqrt(np.mean(fy_ref ** 2)))
+        self.assertLess(
+            fx_diff / max(fx_rms, 1e-20), 1e-10,
+            msg=(f"fx_prod deviates from numpy-reproduced Fortran "
+                 f"nord=1 formula: max_diff={fx_diff:.3e}, "
+                 f"rms={fx_rms:.3e}.  Production fluxes no longer "
+                 f"match the Fortran sw_core.F90:2064-2119 "
+                 f"algorithm step-by-step.  Check: sign convention "
+                 f"on both passes, divergence formula, metric "
+                 f"factors, rarea application, pad_halo calls."))
+        self.assertLess(
+            fy_diff / max(fy_rms, 1e-20), 1e-10,
+            msg=(f"fy_prod deviates from numpy reference: "
+                 f"max_diff={fy_diff:.3e}, rms={fy_rms:.3e}."))
+
 
 if __name__ == "__main__":
     unittest.main()

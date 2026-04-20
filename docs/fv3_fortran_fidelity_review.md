@@ -881,3 +881,24 @@ For a single-cell peak `q[4,4]=2, others=1`, the Fortran iteration semantics:
 
 Production restored; 3 tests pass.  The nord=1 iteration now has a bit-level sign-flip lock.
 
+### Iter-621 (2026-04-20): full-field numpy reproduction complements sign-flip lock (Codex)
+
+**Codex stop-time review on iter-620 (commit 1a312fb)**: the sign-alternation test checked only 2 interface points (west/east of peak).  A refactor that fixed the sign at those 2 points but broke spatial structure elsewhere (wrong metric at interior cells, scaling error, wrong divergence form, missing `rarea`) would pass iter-620 silently.
+
+**Lock added**: `test_nord1_full_field_matches_numpy_reproduction`.  Runs `_del6_vt_flux(nord=1)` on random input, then reproduces the Fortran algorithm step-by-step in numpy:
+1. Initial `d2 = damp * q`, halo-exchanged via `pad_halo`.
+2. Initial pass: `fx2 = sin_uv_x * dy * (d2_W - d2_E) * rdxc`, `fy2 = sin_uv_y * dx * (d2_S - d2_N) * rdyc`.
+3. Divergence: `d2_new = (fx2_W - fx2_E + fy2_S - fy2_N) * rarea`, halo-exchanged.
+4. Iteration: `fx2 = sin_uv_x * dy * (d2_E - d2_W) * rdxc` (SIGN FLIPPED).
+
+Asserts `max|production - reference| / rms(reference) < 1e-10` on both fx2 and fy2.
+
+**Sanity-verified**: introducing a 1% scale error on `rdxc` in the iteration (`* rdxc * 1.01`) fires the test with relative diff 4.0e-2 — well above the 1e-10 threshold.  The sign-alternation test alone would PASS this regression (the sign is still correct; only magnitude is wrong by 1%).
+
+**Coverage trajectory for `_del6_vt_flux`**:
+- iter-619: basic nord=0/1 structural checks (but nord=1 residual-vs-scalar-multiple was too weak).
+- iter-620: sign-alternation invariant (2-point check).
+- iter-621: full-field Fortran bit-for-bit reproduction (THIS).
+
+4 tests pass.  The helper now has structural + sign-level + full-field coverage.
+
