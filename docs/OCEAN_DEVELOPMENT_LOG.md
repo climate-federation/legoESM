@@ -164,6 +164,42 @@ New `tests/ocean/unit/test_smagorinsky.py` covering both grids:
 
 ---
 
+## 2026-04-19: Biharmonic Tracer Diffusion (K_bih) — Issue #203
+
+### Problem: 2Δx SST Checkerboard Noise
+
+The 500-day Eady runs showed 2Δx checkerboard patterns in SST despite strong momentum viscosity (B_h, Smagorinsky). Root cause: **momentum viscosity does not act on tracers.** With K_h=0 (default) and TVD advection (minimal implicit diffusion in smooth regions), there was zero horizontal tracer diffusion.
+
+The EOS-pressure gradient feedback loop amplifies 2Δx tracer noise:
+1. 2Δx noise in T → 2Δx noise in ρ (via EOS)
+2. C-grid compact pressure gradient converts this to maximum face-point gradients
+3. Convergent/divergent velocity reinforces the tracer pattern
+4. TVD advection provides minimal implicit diffusion to counter this
+
+### Solution: Biharmonic Tracer Diffusion
+
+Added `K_bih` (m⁴/s) — the tracer analog of `B_h` for momentum. Scale-selective: damps 2Δx (20km) in 1.7 min while barely touching the Eady temperature front (428km damping: 171 days).
+
+Implementation: `bilaplacian_cgrid(f, grid)` applies `laplacian_cgrid` twice. Tendency: `dtr_dt -= K_bih * bilaplacian(tr)`. Added to `LatLonCGridOceanConfig` and wired through setup/runner.
+
+### Why K_h (Laplacian) was insufficient
+
+K_h=10 damps 2Δx in 12 days — too slow. K_h=100+ starts damping the physical temperature front. Biharmonic K_bih=1e10 provides the necessary scale selectivity.
+
+### Expert recommendation
+
+Ocean expert audit confirmed: TVD Van Leer is not ideal for eddy-resolving (MOM6 uses PPM). Biharmonic tracer diffusion is the standard fix for 2Δx EOS-pressure gradient noise on C-grids. Typical values: K_bih = 1e9-1e11 at 10km resolution.
+
+### Files changed
+
+- `latlon_cgrid_operators.py` — new `bilaplacian_cgrid()` function
+- `ocean_pe_latlon_cgrid.py` — K_bih tendency in tracer equation
+- `state.py` — `K_bih: float = 0.0` in `LatLonCGridOceanConfig`
+- `eady_uniform.py` — K_bih default for Eady experiment
+- `setup.py` / `experiments.py` — K_bih passthrough
+
+---
+
 ## 2026-04-18: Classical Eady — 500 Days Stable
 
 ### Breakthrough

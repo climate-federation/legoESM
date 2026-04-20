@@ -159,10 +159,21 @@ def barotropic_substeps_mpas(
     eta_floor = (min_water_col - H_bathy) * mask
     _area_cell = mesh.areaCell  # for mass-conserving floor clamp (#176)
 
+    # Cosine time filter and BEBT/MAXVEL parameters
+    bebt = config.bebt
+    _maxvel = config.maxvel_barotropic
+    use_maxvel = _maxvel > 0.0
+
+    _i = jnp.arange(n_substeps, dtype=eta.dtype)
+    use_cosine_filter = config.barotropic_time_filter == "cosine"
+    if use_cosine_filter:
+        w_filter = 1.0 + jnp.cos(
+            2.0 * jnp.pi * (_i - 0.5 * n_substeps) / n_substeps)
+    else:
+        w_filter = jnp.ones(n_substeps, dtype=eta.dtype)
+    w_total = jnp.sum(w_filter)
+
     # Accumulators for time-averaged barotropic fields (issues #145, #149, #102).
-    # Hu_sum: depth-integrated edge transport for tracer advection consistency.
-    # eta_sum, ubar_sum: for time-averaged eta/u_bar coupling to baroclinic
-    # step, filtering fast barotropic gravity waves (Higdon 2005).
     Hu_sum = jnp.zeros_like(u_bar)
     eta_sum = jnp.zeros_like(eta)
     ubar_sum = jnp.zeros_like(u_bar)
@@ -171,7 +182,7 @@ def barotropic_substeps_mpas(
     _eta_dtype = eta.dtype
     _ubar_dtype = u_bar.dtype
 
-    def _substep(carry, _):
+    def _substep(carry, w_i):
         eta_c, u_bar_c, Hu_sum_c, eta_sum_c, ubar_sum_c = carry
 
         # Total depth at edges (updated with current eta)
@@ -188,8 +199,9 @@ def barotropic_substeps_mpas(
         eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
 
         # Backward: update u_bar using new eta
-        # Fill land cells before gradient to prevent spurious PGF
-        eta_filled = _fill_land_cells_mpas(eta_next, mask)
+        # BEBT: blend new/old eta for semi-implicit PGF (#205)
+        eta_pgf = (1.0 - bebt) * eta_next + bebt * eta_c
+        eta_filled = _fill_land_cells_mpas(eta_pgf, mask)
         grad_eta = gradient_edge(eta_filled, mesh)
 
         # PGF + slow forcing (+ standalone Coriolis only in legacy mode)
@@ -233,6 +245,10 @@ def barotropic_substeps_mpas(
             drag = 1.0 - dt_baro * config.bottom_drag_r / jnp.maximum(H_e_c, 1e-10)
             u_bar_next = u_bar_next * drag
 
+        # MAXVEL clipping
+        if use_maxvel:
+            u_bar_next = jnp.clip(u_bar_next, -_maxvel, _maxvel)
+
         # Barotropic Laplacian diffusion on eta (flux-form: conservative).
         # Uses div(nu_edge * grad(eta)) instead of nu_cell * div(grad(eta))
         # so that volume is exactly conserved by the divergence theorem.
@@ -245,9 +261,9 @@ def barotropic_substeps_mpas(
             ) * mask
             eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
 
-        # Accumulate eta and u_bar AFTER diffusion for time-averaging
-        eta_sum_new = eta_sum_c + eta_next.astype(_eta_dtype)
-        ubar_sum_new = ubar_sum_c + u_bar_next.astype(_eta_dtype)
+        # Accumulate eta and u_bar with cosine filter weights
+        eta_sum_new = eta_sum_c + w_i * eta_next.astype(_eta_dtype)
+        ubar_sum_new = ubar_sum_c + w_i * u_bar_next.astype(_eta_dtype)
 
         # Cast back to input dtype (mesh ops may promote to float64)
         return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype),
@@ -256,13 +272,13 @@ def barotropic_substeps_mpas(
 
     (eta_new, u_bar_new, Hu_sum_f, eta_sum_f, ubar_sum_f), _ = jax.lax.scan(
         _substep, (eta, u_bar, Hu_sum, eta_sum, ubar_sum),
-        None, length=n_substeps,
+        w_filter, length=n_substeps,
     )
 
     # Time-averaged barotropic fields
-    Hu_avg = Hu_sum_f / n_substeps
-    eta_avg = eta_sum_f / n_substeps
-    u_bar_avg = ubar_sum_f / n_substeps
+    Hu_avg = Hu_sum_f / n_substeps  # transport: always box-filtered
+    eta_avg = eta_sum_f / w_total   # eta/velocity: cosine or box filtered
+    u_bar_avg = ubar_sum_f / w_total
 
     return eta_avg, u_bar_avg, Hu_avg
 

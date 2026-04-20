@@ -57,8 +57,8 @@ class EadyUniformConfig:
     rho_0: float = 1025.0
 
     # Shear: U = Λz (zero at bottom, U_surface at top)
-    # U_surface=0.2 gives τ≈20 days (fast enough to see instability).
-    U_surface: float = 0.2
+    # U_surface=0.8 gives τ≈5 days (classical Eady e-folding time).
+    U_surface: float = 0.8
 
     # Jet envelope: Gaussian half-width in degrees. The jet and dT/dy
     # are localized around lat_center; the ocean outside the envelope
@@ -79,9 +79,9 @@ class EadyUniformConfig:
     A_h: float = 0.0
     B_h: float = 1e10
     C_smag: float = 0.1
-    K_h: float = 0.0
+    K_h: float = 10.0                # small Laplacian tracer diffusion
     K_bih: float = 1e10
-    bottom_drag_coeff: float = 1e-4
+    bottom_drag_coeff: float = 0.01  # Linear bottom drag [m/s]; τ_bt≈6d
 
     # Sponge layer: absorbs eddy energy near walls to prevent
     # Kelvin wave trapping and nonlinear steepening at boundaries.
@@ -90,6 +90,7 @@ class EadyUniformConfig:
     sponge_timescale_days: float = 1.0
 
     barotropic_diffusion_alpha: float = 0.05
+    barotropic_div_damp: float = 0.05
 
     @property
     def Lambda(self) -> float:
@@ -166,6 +167,9 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     if grid_type == "latlon_channel":
         state = _rest_state_latlon(grid, z_coord, config)
         state = _set_uniform_stratification(state, z_coord, config, grid)
+        # Thermal wind IC available but starting from rest is more stable
+        # for the geostrophic adjustment on the correct narrow domain.
+        # state = _set_linear_shear_latlon(state, grid, z_coord, config)
         state = _add_perturbation_latlon(state, grid, config)
         return state
 

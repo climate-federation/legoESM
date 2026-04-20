@@ -334,9 +334,50 @@ class LatLonCGridOceanModel:
         T_new = state.T.data + dt * tend.dT_dt.data
         S_new = state.S.data + dt * tend.dS_dt.data
 
-        # 3. Update 3D velocity with non-Coriolis tendency
-        u_star = state.u.data + dt * tend.du_dt.data
-        v_star = state.v.data + dt * tend.dv_dt.data
+        # 3. Slow-forcing coupling (#205): split baroclinic tendency into
+        # depth-averaged (slow forcing for barotropic solver) and
+        # perturbation (applied to 3D velocity before barotropic step).
+        #
+        # Current approach (without slow-forcing): apply full tendency
+        # to u_star, then barotropic solver sees initial U_bar that
+        # already includes the depth-averaged tendency.  The problem:
+        # the barotropic solver doesn't know about this forcing, so
+        # the baroclinic-barotropic coupling is only through the initial
+        # velocity — not updated as eta evolves during substeps.
+        #
+        # MOM6 approach: pass depth-averaged tendency as F_slow_u to the
+        # barotropic solver, which applies it at each substep.  This
+        # couples the slow forcing to the evolving barotropic state.
+        du_dt = tend.du_dt.data
+        dv_dt = tend.dv_dt.data
+
+        # Compute layer thickness at u/v faces for depth-averaging
+        h_k_pre = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m,
+        )
+        # h at u-faces
+        h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
+        h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
+        H_u_pre = jnp.maximum(jnp.sum(h_u_pre, axis=-1), 1e-10)
+        # h at v-faces
+        h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
+        _n_lon = h_k_pre.shape[1]
+        _nlev = h_k_pre.shape[2]
+        _z_row = jnp.zeros((1, _n_lon, _nlev), dtype=h_k_pre.dtype)
+        h_v_pre = jnp.concatenate([_z_row, h_v_pre_int, _z_row], axis=0)
+        H_v_pre = jnp.maximum(jnp.sum(h_v_pre, axis=-1), 1e-10)
+
+        # Depth-averaged tendency → slow forcing for barotropic solver
+        F_slow_u = jnp.sum(du_dt * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
+        F_slow_v = jnp.sum(dv_dt * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+
+        # Perturbation tendency (depth-mean removed) → applied to 3D
+        du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
+        dv_dt_pert = dv_dt - F_slow_v[..., jnp.newaxis]
+
+        u_star = state.u.data + dt * du_dt_pert
+        v_star = state.v.data + dt * dv_dt_pert
 
         # 4. Forward-backward Coriolis on perturbation velocity
         #
@@ -353,9 +394,6 @@ class LatLonCGridOceanModel:
         )
 
         # Enforce periodic wrap column: u[:,n_lon] must equal u[:,0].
-        # Prevents floating-point drift across all operators, not just
-        # the strain rate stencil.  Belt-and-suspenders with the structural
-        # fix inside strain_rate_cgrid.
         u_star = u_star.at[:, -1].set(u_star[:, 0])
 
         state_mid = state._replace(
@@ -371,7 +409,7 @@ class LatLonCGridOceanModel:
             min_water_column_m=self.config.min_water_column_m,
         )
 
-        # 6. Barotropic substeps (returns averaged transport for tracer update)
+        # 6. Barotropic substeps with slow-forcing coupling
         dt_s = dt / self.config.n_barotropic_substeps
 
         # Freshwater mass flux for barotropic continuity equation
@@ -385,6 +423,8 @@ class LatLonCGridOceanModel:
             state_mid, dt_s, self.config.n_barotropic_substeps,
             self.grid, self.z_coord, self.config,
             F_slow_eta=F_slow_eta,
+            F_slow_u=F_slow_u,
+            F_slow_v=F_slow_v,
         )
 
         # 7. Flux-form tracer update using full 3D velocity

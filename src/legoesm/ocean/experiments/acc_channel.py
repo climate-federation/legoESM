@@ -89,12 +89,17 @@ class ACCChannelConfig:
     T_perturbation_K: float = 1e-3
 
     # Physics / dissipation
-    # A_h = 1e4 keeps grid Reynolds number ~1 at 50 km / 0.1 m/s.
-    # C_smag adds flow-dependent biharmonic dissipation for sharper features.
-    A_h: float = 1e4                # Laplacian viscosity [m^2/s]
-    B_h: float = 0.0                # biharmonic viscosity
-    C_smag: float = 0.1             # Smagorinsky coefficient
-    K_h: float = 1e3                # tracer diffusivity [m^2/s]
+    # MOM6-inspired: biharmonic Smagorinsky only, no Laplacian viscosity
+    # or tracer diffusion.  C_smag^2 ≈ MOM6 SMAG_BI_CONST (0.06).
+    # Vertical mixing matches MOM6 background values (KV=1e-5, KD=5e-6).
+    A_h: float = 0.0                # Laplacian viscosity [m^2/s]
+    B_h: float = 0.0                # biharmonic viscosity (constant)
+    C_smag: float = 0.25            # Smagorinsky coeff; C_smag^2 ≈ 0.06
+    K_h: float = 0.0                # tracer diffusivity [m^2/s]
+
+    # Vertical mixing (explicit solver)
+    A_v: float = 1.0e-5             # vertical viscosity [m^2/s]
+    K_v: float = 5.0e-6             # vertical tracer diffusivity [m^2/s]
 
     barotropic_diffusion_alpha: float = 0.05
     barotropic_div_damp: float = 0.05
@@ -290,7 +295,7 @@ def create_forcings(grid_type: str, grid, config: ACCChannelConfig = None):
         vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),
-        convection=OceanConvectionConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme="enhanced_diffusion"),
         shortwave_penetration=None,
     )
 

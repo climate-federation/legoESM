@@ -1391,6 +1391,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
                 S_ref=eu_config.S_uniform,
             ),
             barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=eu_config.barotropic_div_damp,
         ))
 
     state = eu_ic(tc.grid_type, grid, z_coord, eu_config)
@@ -1528,6 +1529,7 @@ def run_acc_channel(tc: TestCase, output_dir: Path, days: float
             physics=physics,
             A_h=acc_config.A_h, B_h=acc_config.B_h,
             C_smag=acc_config.C_smag, K_h=acc_config.K_h,
+            A_v=acc_config.A_v, K_v=acc_config.K_v,
             bottom_drag_r=acc_config.bottom_drag_coeff,
             eos="linear",
             eos_linear=LinearEOSConfig(
