@@ -1008,3 +1008,30 @@ Consolidation of the iter-550..625 Fortran-formula lock campaign into a single i
 - Port `pad_halo_mpi_4d(halo=3)` (port spec documented at `halo_exchange.py:850-900` with 7 anchors).
 - Stabilize FB-chain at C36 (the architectural W2 v-imprint resolution).
 
+### Iter-627 (2026-04-20): implement `_place_strip_h3_4d` (MPI halo=3 step 7)
+
+**Motivation**: iter-613's port spec for `pad_halo_mpi_4d(halo=3)` lists 7 steps.  Steps 1-5 describe changes within the existing helpers (`_pad_halo_mpi_face_only_4d`, `_pad_halo_mpi_tiled_4d`) and can only be made alongside the end-to-end wiring.  Steps 6-7 are standalone additions:
+- Step 6: reuse existing `_fill_corners_h3` (already done).
+- Step 7: write `_place_strip_h3_4d` — a new 3-depth placement helper.
+
+**Iter-627 delivers step 7**.  Added `_place_strip_h3_4d` at `halo_exchange.py:634-...` mirroring `_place_strip_h2_4d` with 3 depth slices per edge.  Depth conventions:
+- depth 0 = adjacent to interior
+- depth 1 = middle halo ring
+- depth 2 = outermost halo ring
+
+For halo=3 shape `(6, n+6, n+6, nlev)`:
+- WEST: i=2 (d0) → i=1 (d1) → i=0 (d2)
+- EAST: i=n+3 (d0) → i=n+4 (d1) → i=n+5 (d2)
+- SOUTH/NORTH analogous on j axis.
+
+**Lock added**: `test_place_strip_h3_4d_index_conventions` in `TestPadHaloH3Guardrails`.  Builds 3 distinctively-valued strips (1.0, 2.0, 3.0), places them, and verifies each cell holds the right depth value across all 4 sides.  Also verifies interior and cross-axis corners are UNCHANGED (1D placement discipline).
+
+62 `test_scale_halo` tests pass.
+
+**MPI halo=3 port status updated**:
+- ✅ Step 6: `_fill_corners_h3` (existing).
+- ✅ Step 7: `_place_strip_h3_4d` (THIS ITER).
+- ❌ Steps 1-5: wiring into helper bodies (requires end-to-end implementation).
+
+The placement helper is now available for future iterations to call from `_pad_halo_mpi_face_only_4d` and `_pad_halo_mpi_tiled_4d` when extending the `halo == 2` branches to halo == 3.
+

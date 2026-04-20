@@ -631,6 +631,49 @@ def _place_strip_h2_4d(
     return padded
 
 
+def _place_strip_h3_4d(
+    padded: jax.Array, face: int, edge: int,
+    strip_d0: jax.Array, strip_d1: jax.Array, strip_d2: jax.Array,
+) -> jax.Array:
+    """Iter-627: place three strips (n, nlev) into halo=3 positions of
+    a 4D padded array.
+
+    Depth conventions:
+      depth 0 = adjacent to interior
+      depth 1 = middle
+      depth 2 = outermost
+
+    Interior is at [3:-3, 3:-3].  Halo cell index layout per side:
+
+      WEST:   i=2 (d0, adjacent) → i=1 (d1, middle) → i=0 (d2, outer)
+      EAST:   i=n+3 (d0) → i=n+4 (d1) → i=n+5 (d2)
+      SOUTH:  j=2 (d0) → j=1 (d1) → j=0 (d2)
+      NORTH:  j=n+3 (d0) → j=n+4 (d1) → j=n+5 (d2)
+
+    This helper is part of step #7 of the iter-613 port spec for
+    `pad_halo_mpi_4d(halo=3)` (see the anchor comments in
+    `_pad_halo_mpi_face_only_4d` and `_pad_halo_mpi_tiled_4d`).
+    """
+    n = padded.shape[1] - 6
+    if edge == WEST:
+        padded = padded.at[face, 2, 3:-3, :].set(strip_d0)
+        padded = padded.at[face, 1, 3:-3, :].set(strip_d1)
+        padded = padded.at[face, 0, 3:-3, :].set(strip_d2)
+    elif edge == EAST:
+        padded = padded.at[face, n + 3, 3:-3, :].set(strip_d0)
+        padded = padded.at[face, n + 4, 3:-3, :].set(strip_d1)
+        padded = padded.at[face, n + 5, 3:-3, :].set(strip_d2)
+    elif edge == SOUTH:
+        padded = padded.at[face, 3:-3, 2, :].set(strip_d0)
+        padded = padded.at[face, 3:-3, 1, :].set(strip_d1)
+        padded = padded.at[face, 3:-3, 0, :].set(strip_d2)
+    elif edge == NORTH:
+        padded = padded.at[face, 3:-3, n + 3, :].set(strip_d0)
+        padded = padded.at[face, 3:-3, n + 4, :].set(strip_d1)
+        padded = padded.at[face, 3:-3, n + 5, :].set(strip_d2)
+    return padded
+
+
 def _pad_halo_mpi_face_only_4d(
     data: jax.Array,
     topology: CommTopology,

@@ -1069,6 +1069,77 @@ class TestPadHaloH3Guardrails:
                             match="pad_halo_mpi_4d"):
             packed_pad_halo_mpi_4d(a, b, topology=_Stub(), halo=3)
 
+    def test_place_strip_h3_4d_index_conventions(self):
+        """Iter-627: lock the depth-to-index mapping for the new
+        `_place_strip_h3_4d` helper (step #7 of the iter-613 port
+        spec for `pad_halo_mpi_4d(halo=3)`).
+
+        Depth conventions:
+          depth 0 = adjacent to interior
+          depth 1 = middle halo ring
+          depth 2 = outermost halo ring
+
+        For halo=3 shape (6, n+6, n+6, nlev), interior at [3:-3, 3:-3],
+        halo indices per side:
+          WEST:  i=2 (d0) / i=1 (d1) / i=0 (d2)
+          EAST:  i=n+3 (d0) / i=n+4 (d1) / i=n+5 (d2)
+          SOUTH: j=2 (d0) / j=1 (d1) / j=0 (d2)
+          NORTH: j=n+3 (d0) / j=n+4 (d1) / j=n+5 (d2)
+
+        Test strategy: build 3 distinctively-valued strips (all 1s,
+        2s, 3s), place them, then verify each cell holds the right
+        depth value.
+        """
+        from legoesm.parallel.halo_exchange import _place_strip_h3_4d
+
+        n = 4
+        nlev = 2
+        padded = jnp.zeros((6, n + 6, n + 6, nlev), dtype=jnp.float64)
+        strip_d0 = jnp.full((n, nlev), 1.0)  # adjacent-to-interior
+        strip_d1 = jnp.full((n, nlev), 2.0)  # middle
+        strip_d2 = jnp.full((n, nlev), 3.0)  # outermost
+
+        # WEST:
+        padded_w = _place_strip_h3_4d(
+            padded, 0, WEST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_w[0, 2, 3:-3, :] == 1.0), (
+            "WEST depth-0 (i=2) should hold strip_d0 (1.0)")
+        assert jnp.all(padded_w[0, 1, 3:-3, :] == 2.0), (
+            "WEST depth-1 (i=1) should hold strip_d1 (2.0)")
+        assert jnp.all(padded_w[0, 0, 3:-3, :] == 3.0), (
+            "WEST depth-2 (i=0, outermost) should hold strip_d2 (3.0)")
+
+        # EAST:
+        padded_e = _place_strip_h3_4d(
+            padded, 1, EAST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_e[1, n + 3, 3:-3, :] == 1.0), (
+            "EAST depth-0 (i=n+3) should hold strip_d0")
+        assert jnp.all(padded_e[1, n + 4, 3:-3, :] == 2.0), (
+            "EAST depth-1 (i=n+4) should hold strip_d1")
+        assert jnp.all(padded_e[1, n + 5, 3:-3, :] == 3.0), (
+            "EAST depth-2 (i=n+5, outermost) should hold strip_d2")
+
+        # SOUTH:
+        padded_s = _place_strip_h3_4d(
+            padded, 2, SOUTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_s[2, 3:-3, 2, :] == 1.0)
+        assert jnp.all(padded_s[2, 3:-3, 1, :] == 2.0)
+        assert jnp.all(padded_s[2, 3:-3, 0, :] == 3.0)
+
+        # NORTH:
+        padded_n = _place_strip_h3_4d(
+            padded, 3, NORTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_n[3, 3:-3, n + 3, :] == 1.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 4, :] == 2.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 5, :] == 3.0)
+
+        # Interior and cross-axis halo cells should be UNCHANGED
+        # (placement is 1D, preserves other strips).
+        assert jnp.all(padded_w[0, 3:-3, 3:-3, :] == 0.0), (
+            "WEST placement must not touch interior")
+        assert jnp.all(padded_w[0, 3:, :3, :] == 0.0), (
+            "WEST placement must not touch SE corner (different side)")
+
     def test_iter613_mpi_halo3_port_anchors_present(self):
         """Iter-614 (Codex follow-up to iter-613): the iter-613 port
         spec referenced line numbers (e.g., "line ~670") that ROT on
