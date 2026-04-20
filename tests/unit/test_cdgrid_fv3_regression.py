@@ -6629,34 +6629,45 @@ class TestPpmFluxFortranFormula(unittest.TestCase):
                      "is just an x-sweep on transposed data; a "
                      "regression in the swap indices would fire here."))
 
-    def test_ppm_flux_upwind_selection_iter639(self):
-        """Explicit lock: when c > 0 the flux should depend on the
-        LEFT cell (q_L, bl_L, br_L); when c < 0 it should depend on
-        the RIGHT cell.  Construct inputs where L and R differ by a
-        large constant, then verify the flux tracks the right side.
+    def test_ppm_flux_formula_survives_mutation_suite_iter640(self):
+        """Iter-640 (Codex stop-time finding on iter-639): the iter-639
+        upwind-selection test used ``bl = br = 0`` which collapsed
+        the flux formula to ``q_L`` (c>0) or ``q_R`` (c<0).  That
+        masked any regression in the (bl, br, c)-dependent
+        coefficients of the formula — e.g., a `bl_L ↔ br_L` swap in
+        the c>0 branch, or a `(1-c) → (1+c)` sign flip, both of
+        which leave the `bl=br=0` case numerically unchanged.
+
+        Iter-640 replaces the weak upwind test with a mutation suite:
+        for each of SIX candidate regressions that the flux formula
+        would plausibly suffer in a refactor, compute the output of
+        the MUTATED formula and verify it differs from the correct
+        JAX output by a measurable amount.  The mutations:
+          M1: `crx > 0` → `crx < 0` (upwind-selection sign flip)
+          M2: `bl_L ↔ br_L` inside the c>0 branch
+          M3: `bl_R ↔ br_R` inside the c<0 branch
+          M4: `(1 - crx)` → `(1 + crx)` in the c>0 branch
+          M5: `q_L` → `q_R` in the c>0 branch (L/R slice swap)
+          M6: sign flip on the inner `- crx * (bl_L + br_L)` term
+
+        Each mutation produces a different reference; all must differ
+        from the real output.  Uses nonzero asymmetric bl / br / q_c
+        so every coefficient in the formula carries weight.
         """
         import numpy as np
         from unittest import mock
         from legoesm.core import fv_tp_2d
 
-        n = 4
-        M = 2
-        # Left cell: all q_c = 100, bl = br = 0.  Right cell: q_c = -50,
-        # bl = br = 0.  With bl = br = 0, the flux simplifies to just
-        # q_L (c > 0) or q_R (c <= 0).
-        bl = np.zeros((6, n + 2, M))
-        br = np.zeros((6, n + 2, M))
-        q_c = np.zeros((6, n + 2, M))
-        q_c[:, :n + 1, :] = 100.0   # "left" cells hold 100
-        q_c[:, 1:n + 2, :] = -50.0  # "right" cells hold -50 (overlaps)
-        # Use a pattern where the upwind selection is unambiguous at
-        # all face indices.  Set q_c alternating:
-        q_c = np.full((6, n + 2, M), 100.0)
-        q_c[:, 1:n + 2, :] = -50.0   # overwrite — right cells are -50
-        # Courant: test both signs at alternating face positions.
-        crx = np.zeros((6, n + 1, M))
-        crx[:, 0::2, :] = 0.3    # c > 0 → flux from left (100)
-        crx[:, 1::2, :] = -0.3   # c < 0 → flux from right (-50)
+        n = 6
+        M = 3
+        rng = np.random.default_rng(640)
+        # Asymmetric bl / br / q_c to maximise detection power.
+        bl = rng.standard_normal((6, n + 2, M)) * 0.7
+        br = rng.standard_normal((6, n + 2, M)) * 1.3  # distinct scale
+        q_c = rng.standard_normal((6, n + 2, M)) * 2.0
+        # Courant covers both signs, well away from 0 so (1-c)(1+c)
+        # factors carry weight.
+        crx = rng.standard_normal((6, n + 1, M)) * 0.3
 
         q_h2 = jnp.zeros((6, n + 4, M), dtype=jnp.float64)
 
@@ -6668,34 +6679,62 @@ class TestPpmFluxFortranFormula(unittest.TestCase):
             flux = np.asarray(fv_tp_2d._xppm(
                 q_h2, jnp.asarray(crx), n))
 
-        # Note: because q_c changes between left-slice (indices
-        # 0..n) and right-slice (indices 1..n+1), the overlap at
-        # indices 1..n sees DIFFERENT values.  Specifically:
-        #   q_L at face k takes q_c[k]   (indices 0..n)   — 100 only at k=0
-        #   q_R at face k takes q_c[k+1] (indices 1..n+1) — always -50
-        q_L_expected = np.full((6, n + 1, M), -50.0)
-        q_L_expected[:, 0, :] = 100.0      # only face 0 has q_L = 100
-        q_R_expected = np.full((6, n + 1, M), -50.0)
+        # Correct reference (for sanity).
+        bl_L = bl[:, :n + 1, :];  br_L = br[:, :n + 1, :]
+        q_L = q_c[:, :n + 1, :]
+        bl_R = bl[:, 1:n + 2, :]; br_R = br[:, 1:n + 2, :]
+        q_R = q_c[:, 1:n + 2, :]
+        fx_pos = q_L + (1.0 - crx) * (br_L - crx * (bl_L + br_L))
+        fx_neg = q_R + (1.0 + crx) * (bl_R + crx * (bl_R + br_R))
+        ref = np.where(crx > 0, fx_pos, fx_neg)
+        np.testing.assert_allclose(
+            flux, ref, atol=1e-14,
+            err_msg="Baseline reference formula disagrees with _xppm.")
 
-        # With bl = br = 0, flux formula simplifies to q_L or q_R.
-        # k=0: c=0.3>0 → flux = q_L[0] = 100, so expect 100.
-        # k=1: c=-0.3<0 → flux = q_R[1] = -50.
-        # k=2: c=0.3>0 → flux = q_L[2] = -50.
-        # k=3: c=-0.3<0 → flux = q_R[3] = -50.
-        # k=4: c=0.3>0 → flux = q_L[4] = -50.
-        for k in range(n + 1):
-            if crx[0, k, 0] > 0:
-                expected_val = q_L_expected[0, k, 0]
-            else:
-                expected_val = q_R_expected[0, k, 0]
-            np.testing.assert_allclose(
-                flux[:, k, :], expected_val, atol=1e-14,
-                err_msg=(f"Upwind selection broken at k={k}: with "
-                         f"bl=br=0 the flux should equal q_upwind, "
-                         f"got {flux[0, k, 0]} instead of "
-                         f"{expected_val} (crx={crx[0, k, 0]}).  A "
-                         f"regression flipping the `crx > 0` sign or "
-                         f"swapping L/R indices would fire here."))
+        # M1: invert upwind selection.
+        ref_m1 = np.where(crx > 0, fx_neg, fx_pos)
+        self.assertGreater(
+            np.max(np.abs(flux - ref_m1)), 1e-3,
+            msg=("M1: swap of upwind branch (crx>0 vs crx<0) should "
+                 "produce a MEASURABLE difference from correct flux."))
+
+        # M2: bl_L ↔ br_L in c>0 branch (pos formula only).
+        fx_pos_m2 = q_L + (1.0 - crx) * (bl_L - crx * (bl_L + br_L))
+        ref_m2 = np.where(crx > 0, fx_pos_m2, fx_neg)
+        self.assertGreater(
+            np.max(np.abs(flux - ref_m2)), 1e-6,
+            msg=("M2: bl_L ↔ br_L swap in the c>0 branch should be "
+                 "visible; if it isn't, the test inputs have bl≈br."))
+
+        # M3: bl_R ↔ br_R in c<0 branch.
+        fx_neg_m3 = q_R + (1.0 + crx) * (br_R + crx * (bl_R + br_R))
+        ref_m3 = np.where(crx > 0, fx_pos, fx_neg_m3)
+        self.assertGreater(
+            np.max(np.abs(flux - ref_m3)), 1e-6,
+            msg="M3: bl_R ↔ br_R swap in the c<0 branch not detected.")
+
+        # M4: (1 - crx) → (1 + crx) in c>0 branch.
+        fx_pos_m4 = q_L + (1.0 + crx) * (br_L - crx * (bl_L + br_L))
+        ref_m4 = np.where(crx > 0, fx_pos_m4, fx_neg)
+        self.assertGreater(
+            np.max(np.abs(flux - ref_m4)), 1e-6,
+            msg=("M4: sign flip on (1-c) factor in c>0 branch not "
+                 "detected."))
+
+        # M5: q_L → q_R in c>0 branch (L/R cell-mean slice swap).
+        fx_pos_m5 = q_R + (1.0 - crx) * (br_L - crx * (bl_L + br_L))
+        ref_m5 = np.where(crx > 0, fx_pos_m5, fx_neg)
+        self.assertGreater(
+            np.max(np.abs(flux - ref_m5)), 1e-6,
+            msg="M5: q_L ↔ q_R swap in c>0 branch not detected.")
+
+        # M6: sign flip on inner `- crx * (bl_L + br_L)` (c>0).
+        fx_pos_m6 = q_L + (1.0 - crx) * (br_L + crx * (bl_L + br_L))
+        ref_m6 = np.where(crx > 0, fx_pos_m6, fx_neg)
+        self.assertGreater(
+            np.max(np.abs(flux - ref_m6)), 1e-6,
+            msg=("M6: sign flip on `- c*(bl+br)` in c>0 branch not "
+                 "detected — the inner coefficient is load-bearing."))
 
 
 if __name__ == "__main__":

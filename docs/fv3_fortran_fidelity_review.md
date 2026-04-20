@@ -1313,3 +1313,24 @@ where `b0 = bl + br`.  Pre-iter-639 the flux formula had no direct numerical loc
 
 All 3 tests pass at `atol=1e-14`.  Cumulative Fortran-formula lock inventory now **19 helpers**: `_xppm` / `_yppm` flux formula added.
 
+### Iter-640 — strengthen iter-639 flux formula lock (mutation suite)
+
+**Codex stop-time finding on iter-639**: "iter-639's new formula-lock tests miss real regressions they claim to cover."
+
+**Root cause**: the iter-639 `test_ppm_flux_upwind_selection_iter639` used ``bl = br = 0`` to simplify the formula to ``flux = q_upwind``.  That simplification MASKED any regression in the (bl, br, c)-dependent coefficients — e.g., swapping `bl_L` ↔ `br_L` in the c>0 branch leaves the output unchanged when bl=br=0, even though the formula has drifted from `tp_core.F90`.  The docstring claimed the test caught sign flips on `crx > 0` and L/R swaps, but only the L/R swap at face 0 was actually detectable.
+
+**Fix**: replaced the weak upwind test with `test_ppm_flux_formula_survives_mutation_suite_iter640`, which constructs **nonzero asymmetric** bl / br / q_c inputs and exercises SIX candidate regressions directly:
+
+- **M1** — `crx > 0` → `crx < 0` (upwind-branch sign flip)
+- **M2** — `bl_L` ↔ `br_L` swap inside the c>0 branch
+- **M3** — `bl_R` ↔ `br_R` swap inside the c<0 branch
+- **M4** — `(1 - crx)` → `(1 + crx)` in the c>0 branch
+- **M5** — `q_L` → `q_R` in the c>0 branch (L/R slice swap)
+- **M6** — sign flip on the inner `- crx * (bl + br)` term
+
+Each mutation is computed as a separate reference; the test asserts the actual JAX output differs from each mutated reference by a measurable amount (`≥ 1e-6` or `≥ 1e-3` depending on signal magnitude).  Since bl / br / q_c / crx are drawn from ``rng.standard_normal`` with distinct scales, every coefficient carries weight — no formula component can silently drift without triggering at least one mutation.
+
+**Verification**: deliberately applying M2 (swap `bl_L` ↔ `br_L`) to the real `_xppm` source and re-running the suite confirms `test_xppm_flux_formula_matches_fortran` AND `test_ppm_flux_formula_survives_mutation_suite_iter640` both FAIL with `atol=1e-14` mismatches — proving detection power.  After the mutation test the source is restored and the suite returns to green.
+
+All 3 tests in `TestPpmFluxFortranFormula` pass on the correct code.  Mutation suite detects all 6 candidate regressions that the iter-639 bl=br=0 test would silently miss.
+
