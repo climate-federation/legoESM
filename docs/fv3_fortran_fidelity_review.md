@@ -1361,19 +1361,27 @@ Each mutation produces a measurably different reference.  All 5 detected with `>
 
 Both tests pass.  Cumulative Fortran-formula lock inventory now **20 helpers**: `_sina_u_v_from_sin_sg` added.
 
-### Iter-642 — Fortran-formula lock for `_fill_corners_h1` / `_fill_corners_h2`
+### Iter-642 — behavioral lock for `_fill_corners_h1` / `_fill_corners_h2`  (Python-only; not Fortran-formula)
 
-**Motivation**: `_fill_corners_h1` and `_fill_corners_h2` in `src/legoesm/grids/halo.py` (lines 1182-1309) synthesise cube-vertex corner cells that the edge-strip halo exchange does NOT fill (no single neighbour face owns a cube-vertex cell).  Cube-vertex corners are consumed by the Arakawa-Lamb gradient (`B_pad` stencil at all 24 `(f, i, j)` combinations), so any drift silently propagates into B-grid KE and the v-wind signature.
+**Motivation**: `_fill_corners_h1` and `_fill_corners_h2` in `src/legoesm/grids/halo.py` (lines 1182-1309) synthesise cube-vertex corner cells that the edge-strip halo exchange does NOT fill.  Cube-vertex corners are read by the Arakawa-Lamb B-grid gradient stencil, so any drift silently propagates into B-grid KE and the v-wind signature.
 
-Pre-iter-642 there was NO direct formula lock — only integration-level coverage via `pad_halo` tests.  A regression swapping adjacent-halo indices, changing the 0.5 averaging factor, or dropping one of the inside-out steps in h2 (where each step reads values set by the previous) would silently degrade corner values.
+**Scope correction (iter-643, Codex stop-time finding on iter-642)**: these helpers are **NOT** Fortran-formula equivalents.  Per the source comment at `halo.py:1188-1202`, Fortran uses `copy_corners(dir=1/2)` at `tp_core.F90:243-299` — a directional rotated copy that writes different values at the same cube-vertex cell depending on X-sweep vs Y-sweep.  The Python 2-point average is a direction-invariant single value with no Fortran oracle.  Its only consumer is the Arakawa-Lamb gradient, which is itself a non-FV3 Python operator.  So iter-642's classification as "Fortran-formula lock" was wrong — these are **Python behavioral locks**, not fidelity locks.  The test class has been renamed to `TestFillCornersPythonBehavioralLock` and the docstring updated to flag this.
 
-**Tests added** (`TestFillCornersFortranFormula`, 4 total):
-- `_ref_fill_corners_h1`: numpy reproduction of the 24-corner 2-point average.
-- `_ref_fill_corners_h2`: numpy reproduction of the inside-out 4-step fill per corner (16 cells per face × 6 faces).
-- `test_fill_corners_h1_matches_reference`: random padded input, bit-for-bit at atol=1e-14.
-- `test_fill_corners_h1_mutation_suite_iter642`: M1 (factor 1.0 instead of 0.5) + M3 (helper is a no-op — corners retain input) are detected.
-- `test_fill_corners_h2_matches_reference`: random halo=2 padded input, bit-for-bit at atol=1e-14.
-- `test_fill_corners_h2_sequence_dependency_iter642`: LOAD-BEARING test of the inside-out ordering.  Applies the real helper and a manually-reordered reference that swaps step 4 (outer corner) with step 1 (inner corner).  Asserts the real output DIFFERS from the reordered reference at (0, 0) — locks the sequence dependency where the outer corner reads (0, 1) and (1, 0) AFTER they've been set from (1, 1).
+**Tests added** (`TestFillCornersPythonBehavioralLock`, 4 total):
+- `_ref_fill_corners_h1`: numpy reproduction of the Python 24-corner 2-point average.
+- `_ref_fill_corners_h2`: numpy reproduction of the Python inside-out 4-step fill per corner (16 cells per face × 6 faces).
+- `test_fill_corners_h1_matches_reference`: random padded input, bit-for-bit against the Python reference at `atol=1e-14`.
+- `test_fill_corners_h1_mutation_suite_iter642`: M1 (factor 1.0 instead of 0.5) + M3 (helper is a no-op — corners retain input) detected.
+- `test_fill_corners_h2_matches_reference`: random halo=2 input, bit-for-bit against the Python reference.
+- `test_fill_corners_h2_sequence_dependency_iter642`: LOAD-BEARING test of the inside-out ordering.  Applies the real helper and a manually-reordered reference (step 4 before step 1); asserts outputs differ at (0, 0) — locks the sequence where the outer corner reads values set from the inner corner.
 
-All 4 tests pass.  Cumulative Fortran-formula lock inventory now **22 helpers**: `_fill_corners_h1` and `_fill_corners_h2` added.
+All 4 tests pass.  These are Python behavioral locks guarding against Python-side regressions in cube-vertex synthesis used by Arakawa-Lamb KE — NOT Fortran-formula locks.
+
+**Cumulative Fortran-formula lock inventory unchanged from iter-641: 20 helpers.**  Plus 2 Python-only behavioral locks for cube-vertex corner synthesis (`_fill_corners_h1`, `_fill_corners_h2`).
+
+### Iter-643 — reclassify iter-642 locks as Python-only (Codex correction)
+
+**Codex stop-time finding on iter-642**: "misclassified Python-only locks as Fortran-formula coverage."
+
+**Action**: renamed `TestFillCornersFortranFormula` to `TestFillCornersPythonBehavioralLock`, updated its docstring to quote the source comment at `halo.py:1188-1202` documenting that Fortran's `copy_corners` is directional while the Python helper is direction-invariant, and corrected the cumulative counter in this review doc (20 Fortran-formula locks + 2 Python-only behavioral locks, NOT 22 Fortran-formula locks).  No change to the test logic — the tests themselves are valid Python behavioral locks; only the classification was wrong.
 

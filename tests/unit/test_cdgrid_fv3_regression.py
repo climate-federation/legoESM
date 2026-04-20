@@ -6902,26 +6902,42 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
                  "detected."))
 
 
-class TestFillCornersFortranFormula(unittest.TestCase):
-    """Iter-642: direct formula lock for `_fill_corners_h1` and
-    `_fill_corners_h2` in ``src/legoesm/grids/halo.py`` (lines
-    1182-1309).
+class TestFillCornersPythonBehavioralLock(unittest.TestCase):
+    """Iter-642 / iter-643 (Codex stop-time correction): behavioral
+    lock for `_fill_corners_h1` and `_fill_corners_h2` in
+    ``src/legoesm/grids/halo.py`` (lines 1182-1309).
 
-    These helpers synthesise cube-vertex corner cells that the
-    edge-strip MPI/local halo exchange does NOT fill (there is no
-    single neighbour face that owns a cube-vertex cell).  The fill
-    is a 2-point average of the two adjacent edge halos — for h1 a
-    single pass, for h2 an inside-out sequence of 4 averages per
-    corner.
+    **IMPORTANT — this is NOT a Fortran-formula lock.**  The iter-642
+    classification as "Fortran-formula" was wrong and Codex flagged
+    it in the iter-642 stop-time review.  Per the source docstring
+    at `halo.py:1188-1202`:
 
-    Pre-iter-642 there was NO direct Fortran-formula lock — only
-    integration-level coverage via `pad_halo` tests.  A regression
-    swapping `padded[0, 1]` ↔ `padded[1, 0]` in the h1 average,
-    changing the 0.5 factor, or dropping one of the 4 inside-out
-    steps in h2 would silently degrade cube-vertex corner values.
-    Cube-vertex corners are consumed by the Arakawa-Lamb gradient
-    (B_pad stencil at all 24 (f, i, j) combinations), so drift here
-    propagates into B-grid KE and the v-wind signature.
+        "the Fortran transport path uses `copy_corners(dir=1/2)` in
+        `tp_core.F90:243-299` — a directional rotated copy tailored
+        to X-sweep vs Y-sweep of PPM.  That mechanism writes
+        DIFFERENT values at the same cube-vertex cell for different
+        sweep directions.  Our 2-point average is a direction-
+        invariant single value."
+
+        "The corner fill IS read by Arakawa-Lamb gradient
+        (`B_pad[:, :-1, :-1]` includes corner cells), but that
+        gradient is a non-FV3 Python operator and there is no
+        Fortran reference to match."
+
+    So `_fill_corners_h1` / `_fill_corners_h2` are Python-only cube-
+    vertex synthesizers with no Fortran oracle.  They guarantee a
+    deterministic direction-invariant value for the Arakawa-Lamb
+    B-grid gradient, not a bit-match against Fortran's
+    `copy_corners`.  These tests lock the Python implementation
+    against a numpy reproduction of the PYTHON behavior — not against
+    Fortran.  They catch Python-side regressions (swapped indices,
+    wrong averaging coefficient, dropped inside-out step) but do NOT
+    establish FV3 fidelity for this helper.
+
+    A regression swapping `padded[0, 1]` ↔ `padded[1, 0]` in the h1
+    average, changing the 0.5 factor, or dropping one of the 4
+    inside-out steps in h2 would silently degrade cube-vertex corner
+    values — the Arakawa-Lamb KE gradient reads these.
     """
 
     @staticmethod
