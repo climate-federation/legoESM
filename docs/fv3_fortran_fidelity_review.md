@@ -626,3 +626,27 @@ The mirror convention `-v[:, ::-1]` is the one iter-592 validated at the 10-step
 
 3 W2-characterization tests pass.  Coverage for user-visible W2 artifacts now uses field-level comparisons throughout.
 
+### Iter-607 (2026-04-20): W5 face-4 polar magnitude regression lock
+
+**Motivation**: iter-604 measured W5 C36 1-day face-4 max|v_cc_north| = 7.75 m/s (mountain-induced Rossby wave on face 4 + pole-cell artifact), face-5 = 0.31 m/s (pure pole-cell, same as W2).  Without a lock, a dycore regression that amplifies polar-face response (numerical dispersion, wrong hyperdiff scaling, broken pole-singularity handling) would go undetected.
+
+**Lock added**: `test_w5_face4_v_north_ceiling_at_1day` in new `TestW5PolarFaceMagnitude` class.  Runs canonical W5 C36 dt=300s 1-day integration and asserts:
+1. `max|v_cc_north|` on face 4 < 10.0 m/s (baseline 7.75; ~29% headroom).
+2. `max|v_cc_north|` on face 5 < 1.0 m/s (baseline 0.31; ~3× headroom).
+
+The two ceilings probe different physics:
+- Face 4 ceiling catches Rossby-wave amplification (polar-face nonlinear dispersion from mountain forcing).
+- Face 5 ceiling catches spurious wave propagation, face-to-face reflection, or pole-cell artifact amplification in a quiet polar cap.
+
+**Sanity-verified**: tightening the face-4 ceiling to 5 m/s fires with measured 7.75 m/s.  Production restored to 10.0 ceiling.
+
+**Cost**: ~12 seconds per run at C36 dt=300s 1-day (one JAX trace + 288 time steps).
+
+**User-visible artifact coverage now spans W2 + W5**:
+- `test_w2_t0_v_north_diagnostic_angle_bounded` (iter-592): t=0 angle helper.
+- `test_w2_short_run_v_north_N_S_mirror_symmetry` (iter-592): 10-step N/S mirror.
+- `test_w2_pole_cell_v_north_ceiling_at_1day` (iter-605/606): 1-day W2 pole-cell magnitude + field-level mirror.
+- `test_w5_face4_v_north_ceiling_at_1day` (iter-607, THIS): 1-day W5 polar-face magnitude (both face 4 active wave + face 5 quiet cap).
+
+**Rejected Codex suggestion**: the proposed `qsmith` moist-pressure correction in `src/legoesm/thermo.py` does not apply to the current Python callers.  Fortran `qsmith` is a free-atmosphere saturation formula that takes `q_v` as input (microphysics-internal); Python callers (land slab, multilayer land, simple ocean) compute SURFACE saturation where no q_v is available — they need a (T, p) formula.  Adopting the Fortran formula would make Python less accurate in context.  Documented for future reference if a microphysics scheme is ported.
+

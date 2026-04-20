@@ -4507,5 +4507,103 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
                  f"equal maxima would have passed.)"))
 
 
+class TestW5PolarFaceMagnitude(unittest.TestCase):
+    """Iter-607: lock Williamson-5 face-4 v magnitude at C36 1 day.
+
+    W5 is the flow-over-mountain test case.  The mountain (centered at
+    lat=30°N) generates a Rossby wave that propagates over the north
+    polar face.  At t=1d the face-4 max|v_cc_north| reaches ~7.75 m/s
+    (mountain Rossby wave + O(0.3) pole-cell artifact).  Face-5 (south,
+    clear of the wave) stays near the pure pole-cell artifact (0.31).
+
+    This class guards the W5 face-4 signal magnitude so a dycore
+    regression that AMPLIFIES the polar-face Rossby response (e.g.,
+    numerical dispersion, wrong hyperdiff scaling, or broken pole-
+    singularity handling) is caught.
+
+    Cost: ~15 s / run at C36 dt=300s 1 day.
+    """
+
+    def test_w5_face4_v_north_ceiling_at_1day(self):
+        """Lock max|v_cc_north| on face 4 at the end of W5 1-day C36.
+
+        Iter-604 measurement: 7.75 m/s.  Ceiling 10 m/s allows ~30%
+        headroom.  A regression that blows the ceiling indicates
+        the polar-face momentum integration has become unstable
+        or the Rossby wave has been spuriously amplified.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+            cell_centre_angles_from_4edge,
+        )
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test5,
+        )
+
+        n = 36
+        days = 1.0
+        dt = 300.0
+        n_steps = int(days * 86400 / dt)
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4
+        div_damp = 1.5e7 * (48.0 / n) ** 2
+
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=hyperdiff_coeff, div_damp=div_damp,
+            boundary_fix=True)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+
+        sw = williamson_test5(grid)
+        u0 = 20.0  # W5 uses 20 m/s (not W2's 38.6 m/s)
+        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+        u_cc = 0.5 * (state.u_d[:, :, :-1] + state.u_d[:, :, 1:])
+        v_cc = 0.5 * (state.v_d[:, :-1, :] + state.v_d[:, 1:, :])
+        v_north = np.asarray(sa_4edge * u_cc + ca_4edge * v_cc)
+
+        f4_max_v = float(np.max(np.abs(v_north[4])))
+        self.assertLess(
+            f4_max_v, 10.0,
+            msg=(f"W5 C36 1d: face-4 max|v_cc_north| = {f4_max_v:.3e} "
+                 f"m/s exceeds 10 m/s ceiling.  Iter-604 baseline was "
+                 f"7.75 m/s (mountain-induced Rossby wave on face 4 "
+                 f"+ pole-cell artifact).  Exceeding the ceiling means "
+                 f"the dycore has amplified the polar-face response "
+                 f"beyond the expected Rossby signal."))
+
+        # Also lock face 5 (south polar, clear of mountain wave).
+        # Should be close to the pure pole-cell magnitude ~0.31 m/s
+        # (same as W2).
+        f5_max_v = float(np.max(np.abs(v_north[5])))
+        self.assertLess(
+            f5_max_v, 1.0,
+            msg=(f"W5 C36 1d: face-5 max|v_cc_north| = {f5_max_v:.3e} "
+                 f"m/s exceeds 1.0 m/s ceiling.  Iter-604 baseline was "
+                 f"0.31 m/s (pure pole-cell artifact, no mountain "
+                 f"wave).  Exceeding means the south polar face has "
+                 f"developed either a spurious wave, or a reflection "
+                 f"from the face-4 mountain signal, or an amplified "
+                 f"pole-cell artifact."))
+
+
 if __name__ == "__main__":
     unittest.main()
