@@ -350,3 +350,24 @@ The full 2D halo=1 pad delivers cross-face neighbour data.  Slicing to 1D preser
 3. Re-run FB diag to check C36 stability.
 
 Also `_d_sw5_corner_divergence` at lines 1014-1015 (the `vort_pad` / `ptc_pad` inside the nord=0 branch) still uses `mode='edge'` for D-grid face-midpoint fields — those need an edge-midpoint halo helper, which doesn't yet exist.
+
+### Iter-656 — close the `nord=1` `_divergence_corner_duo` gap + Codex iter-655 scope fix
+
+**Codex stop-time finding on iter-655**: "nord=0 fix leaks into the default nord=1 path."
+
+**Root cause**: iter-655 placed the new `pad_halo` call BEFORE the `if nord == 0:` branch in `_d_sw5_corner_divergence`, so it fired unconditionally — wasted work plus a silent halo dependency that didn't previously exist on the nord>=1 default path.
+
+**Fix A** (scope correction): moved the `pad_halo(ua)` / `pad_halo(va)` + `ua_pad` / `va_pad` slicing INSIDE the `if nord == 0:` branch.  The pad now fires only when the nord=0 del-2 branch is active.  For nord>=1 (default FB-chain config), the pad is never computed.
+
+**Fix B** (close the nord=1 default-path gap): applied the same `mode='edge' → pad_halo` replacement inside `_divergence_corner_duo` at fv3_sw_core.py:877-879.  This is the helper called by the nord>=1 branch of `_d_sw5_corner_divergence` (the default FB-chain damping path).
+
+**iter-644 reference update**: `_ref_divergence_corner_duo` numpy reproduction in `tests/unit/test_cdgrid_fv3_regression.py` now accepts an optional `cdgrid=` argument.  When passed, it uses `pad_halo(halo=1, duogrid=dg)` matching the production code.  When `cdgrid=None` (iter-644 mutation-suite tests that swap sin_sg tables), it falls back to the legacy `mode='edge'` — those tests aren't halo-sensitive and the sin_sg swap exercises only the coefficient-selection branches.
+
+**Tests**: all 118 regression tests pass, including both iter-644 tests (`test_divergence_corner_duo_matches_fortran` and `test_divergence_corner_duo_mutation_suite_iter644`).
+
+**FB-chain stability**: still blows up at step 26 at C36.  The halo-fidelity gap was real (iter-655/656 closes it), but the C36 instability is NOT bottlenecked on halo padding.  Other plausible sources:
+- Divergence damping coefficient mismatch vs Fortran default (`d4_bg=0.16` may be too low for C36 stability given the FB chain coupling).
+- Phase ordering between c_sw → p_grad_c → d_sw may differ in a subtle way from FV3 dyn_core.F90.
+- `_d_sw1_recompute_ut_vt` adjacent-strip recomputation may have a cube-vertex gap not captured by existing tests.
+
+Next iter: profile the step-26 blowup with more diagnostic output (max|v_d| per step, max|divg| per step) to localise the amplifier.

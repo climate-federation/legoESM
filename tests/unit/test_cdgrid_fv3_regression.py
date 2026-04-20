@@ -7150,8 +7150,18 @@ class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
 
     @staticmethod
     def _ref_divergence_corner_duo(u_d, v_d, ua, va, cos_sg, sin_sg,
-                                     dxc, dyc, rarea_c, n):
-        """Numpy line-by-line reproduction of `_divergence_corner_duo`."""
+                                     dxc, dyc, rarea_c, n,
+                                     cdgrid=None):
+        """Numpy line-by-line reproduction of `_divergence_corner_duo`.
+
+        Iter-656: `ua` / `va` halos are now filled via `pad_halo`
+        (cross-face halo exchange, matching Fortran mpp_update_domains
+        (DGRID_NE)), not `mode='edge'` (same-face 1D extension).  The
+        reference therefore also calls `pad_halo` when a `cdgrid` is
+        passed.  For legacy tests that pass no cdgrid, `mode='edge'`
+        remains the fallback — those are Python-only regression tests
+        that don't claim Fortran fidelity on the halo step.
+        """
         import numpy as np
         # Unpack sin/cos_sg edges (indices 0=W, 1=S, 2=E, 3=N)
         cos_W = cos_sg[..., 0]; cos_S = cos_sg[..., 1]
@@ -7159,9 +7169,26 @@ class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
         sin_W = sin_sg[..., 0]; sin_S = sin_sg[..., 1]
         sin_E = sin_sg[..., 2]; sin_N = sin_sg[..., 3]
 
-        # Edge-pad ua, va along the cross axes for the 2-cell averages.
-        ua_pad = np.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')
-        va_pad = np.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        # Halo-pad ua, va for the 2-cell cross-velocity averages.
+        if cdgrid is not None:
+            from legoesm.grids.halo import pad_halo as _pad_halo
+            dg = cdgrid.base.duogrid
+            _offs = (None if dg is not None
+                     else cdgrid.base.halo_interp_offsets)
+            ua_full = np.asarray(_pad_halo(
+                jnp.asarray(ua), halo=1,
+                interp_offsets=_offs, duogrid=dg))
+            va_full = np.asarray(_pad_halo(
+                jnp.asarray(va), halo=1,
+                interp_offsets=_offs, duogrid=dg))
+            ua_pad = ua_full[:, :, 1:-1]
+            va_pad = va_full[:, 1:-1, :]
+        else:
+            # Legacy / Python-only fallback (e.g., mutation-suite
+            # tests that swap sin_sg tables to exercise coefficient
+            # sensitivity — iter-644's M2/M3 branches).
+            ua_pad = np.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')
+            va_pad = np.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')
 
         # Edge-pad sin_sg/cos_sg the same way.
         cos_N_pad = np.pad(cos_N, [(0, 0), (0, 0), (1, 1)], mode='edge')
@@ -7235,7 +7262,8 @@ class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
         rarea_c = np.asarray(cdgrid.rarea_c)
 
         divg_d_ref = self._ref_divergence_corner_duo(
-            u_d, v_d, ua, va, cos_sg, sin_sg, dxc, dyc, rarea_c, n)
+            u_d, v_d, ua, va, cos_sg, sin_sg, dxc, dyc, rarea_c, n,
+            cdgrid=cdgrid)
 
         np.testing.assert_allclose(
             np.asarray(divg_d), divg_d_ref, atol=1e-12,

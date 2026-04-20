@@ -874,9 +874,19 @@ def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
     dyc = cdgrid.dyc   # (6, n, n+1) centre-to-centre in y
     rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
 
-    # Pad ua, va for cross-velocity averages at boundaries
-    ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n)
-    va_pad = jnp.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n, n+2)
+    # Pad ua, va for cross-velocity averages at boundaries.
+    # Iter-656 (paired with iter-655): replaced mode='edge' with
+    # pad_halo so cube-edge stencil reads cross-face neighbour values,
+    # matching Fortran mpp_update_domains(DGRID_NE) before d_sw5.
+    # Slices to 1D strips preserve downstream (6, n+2, n) / (6, n, n+2)
+    # shapes so the stencil indexing below stays unchanged.
+    from legoesm.grids.halo import pad_halo as _pad_halo
+    dg = cdgrid.base.duogrid
+    _offs = None if dg is not None else cdgrid.base.halo_interp_offsets
+    ua_full = _pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
+    va_full = _pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
+    ua_pad = ua_full[:, :, 1:-1]   # (6, n+2, n)
+    va_pad = va_full[:, 1:-1, :]   # (6, n, n+2)
 
     # --- uf: u-direction flux at v-face positions (sw_core.F90:2413-2418) ---
     # uf(i,j) = (u(i,j) - 0.25*(va(i,j-1)+va(i,j))*(cos_sg(i,j-1,N)+cos_sg(i,j,S)))
@@ -988,31 +998,33 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
     da_min_c = jnp.min(1.0 / rarea_c)  # minimum corner area
 
-    # Pad ua, va for cross-velocity averages at boundaries.
-    # Iter-655: switched from jnp.pad(mode='edge') to pad_halo with
-    # proper cross-face halo exchange.  Fortran fills ua/va halos via
-    # mpp_update_domains(DGRID_NE) before d_sw5 fires, so the stencil
-    # at cube edges reads actual neighbour-face values rather than
-    # extended boundary values.  `mode='edge'` was a same-face 1D
-    # extension — NOT Fortran-faithful and a documented fidelity gap
-    # in review doc architectural item #2 (FB-path C36 instability).
-    #
-    # Strategy: do a full 2D halo=1 pad (pad_halo) and slice to the
-    # 1D strip each side of the stencil needs.  Keeps downstream
-    # indexing unchanged.
-    from legoesm.grids.halo import pad_halo as _pad_halo
-    dg = cdgrid.base.duogrid
-    _offs = None if dg is not None else cdgrid.base.halo_interp_offsets
-    ua_full = _pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
-    va_full = _pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
-    # Match the shape of the old jnp.pad call to preserve downstream
-    # slicing: ua_pad is (6, n+2, n) — halo along axis 1 only; va_pad
-    # is (6, n, n+2) — halo along axis 2 only.
-    ua_pad = ua_full[:, :, 1:-1]
-    va_pad = va_full[:, 1:-1, :]
+    # Iter-656 (Codex correction on iter-655): move the ua/va padding
+    # INSIDE the `if nord == 0:` branch.  Iter-655 placed the
+    # pad_halo call at module scope here, which fired unconditionally
+    # even on the default `nord=1` path — wasted work plus a silent
+    # halo dependency that didn't previously exist on that path.
 
     if nord == 0:
         # --- Del-2 divergence damping (sw_core.F90:1644-1724) ---
+        # Pad ua, va for cross-velocity averages at boundaries.
+        # Fortran FV3 fills ua/va halos via mpp_update_domains
+        # (DGRID_NE) before d_sw5 fires; `mode='edge'` (the pre-iter-655
+        # behaviour here) was a same-face 1D extension, NOT the
+        # cross-face halo the Fortran oracle expects.  Iter-655 fixed
+        # this for the nord=0 branch (only nord>=1 branch still uses
+        # `_divergence_corner_duo` which has its own `mode='edge'`
+        # gap flagged as unresolved).
+        from legoesm.grids.halo import pad_halo as _pad_halo
+        dg = cdgrid.base.duogrid
+        _offs = None if dg is not None else cdgrid.base.halo_interp_offsets
+        ua_full = _pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
+        va_full = _pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
+        # Match the shape of the old jnp.pad call to preserve
+        # downstream slicing: ua_pad is (6, n+2, n) — halo along
+        # axis 1 only; va_pad is (6, n, n+2) — halo along axis 2.
+        ua_pad = ua_full[:, :, 1:-1]
+        va_pad = va_full[:, 1:-1, :]
+
         # Duogrid/bounded_domain path (lines 1644-1658):
         # ptc(i,j) = (u(i,j) - 0.5*(va(i,j-1)+va(i,j))*cosa_v(i,j))
         #            * dyc(i,j) * sina_v(i,j)
