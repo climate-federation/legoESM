@@ -5344,3 +5344,31 @@ For each of 6 faces × 4 sides, the test:
 
 Production restored.  5 h=3 vector tests pass.  Only non-constant *interpolation-weight* correctness at the outer ring (which only matters when interp_offsets_h3 is used in a spatially-varying context) remains unvalidated — deferred until h=3 is actually wired into a dycore path.
 
+### Iter-600 (2026-04-20): interpolated-branch axis-reversal at h=3 outer ring
+
+**Codex stop-time review on iter-599 (commit 1b53689)**: iter-599's axis-reversal test only exercises `interp_offsets=None` (nearest-cell copy).  Production callers pass `halo_interp_offsets_h3`, which activates `_interp_strip` AFTER the reversal.  A refactor that swapped reversal/interp order, or that indexed into the wrong offsets slice, would pass iter-599 silently.
+
+**Lock added**: `test_pad_halo_vector_halo3_outer_ring_axis_reversal_interpolated` uses the SAME field as iter-599 (linear along both axes, face-unique) but passes `grid.halo_interp_offsets_h3`.  Because the field is linear in the strip direction, 3-point Lagrange interpolation is EXACT — enabling analytical prediction:
+
+```
+strip = _extract_edge_strip_at_depth(u_east, nbr, nbr_edge, 2)
+if is_reversed: strip = strip[::-1]
+strip_interp = _interp_strip(strip, offsets[face, edge_idx, 2])
+expected_u = cos_angle_padded_h3[face, outer_ring] * strip_interp
+expected_v = -sin_angle_padded_h3[face, outer_ring] * strip_interp
+```
+
+For 6 faces × 4 sides, the test asserts `max|actual - expected| < 1e-4`.
+
+**Sanity-verified**: disabling the reversal branch (`if False and is_reversed:`) fires the test on face=1 side=S with diff 0.194 (vs 1e-4 ceiling, 1940×).  The earlier swap-reversal-with-interp attempt (sanity attempt A) did NOT fire because for linear fields with mirror-symmetric offsets, `interp(strip[::-1]) ≈ interp(strip)[::-1]` (both equal the reversed linear).  This is a known limitation: the swap-order bug is only detectable with *non-symmetric* offsets, which halo_interp_offsets_h3 may or may not have (depends on gnomonic geometry near corners).
+
+**Full h=3 vector outer-ring coverage** across iter-595–600:
+- (a) **interior preserved** (iter-595)
+- (b) **inner rings ≡ h=2** (iter-596)
+- (c) **rotation via constant geographic wind** (iter-597)
+- (d) **CONNECTIVITY neighbour face** (iter-598)
+- (e) **axis-reversal, nearest-cell branch** (iter-599)
+- (f) **interpolated-branch with reversal** (iter-600)
+
+6 h=3 vector tests pass.  The remaining structural gap is the swap-reversal-before-interp bug on non-symmetric offsets — catching it requires constructing a test field where `interp(strip[::-1]) ≠ interp(strip)[::-1]`, which in turn requires verifying asymmetry of the per-face offsets at the relevant halo depth.  Deferred as a harder test.
+

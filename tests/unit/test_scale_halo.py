@@ -1546,6 +1546,136 @@ class TestPadHaloH3Guardrails:
                     f"(neighbour strip with reversal={is_reversed} "
                     f"applied)`.  max diff = {v_diff:.3e}.")
 
+    def test_pad_halo_vector_halo3_outer_ring_axis_reversal_interpolated(self):
+        """Iter-600 (Codex stop-time review on iter-599): the iter-599
+        axis-reversal test only exercises `interp_offsets=None` —
+        the nearest-cell-copy branch.  Production callers pass
+        `grid.halo_interp_offsets_h3`, which activates the
+        `_interp_strip` Lagrange interpolation after the reversal.
+
+        A bug that applies interp_offsets BEFORE reversal (wrong
+        order) or that skips interp on the reversed branch would
+        pass iter-599 silently.
+
+        This test uses the SAME field as iter-599 (linear along
+        both axes with face-unique offsets) but passes the
+        production `halo_interp_offsets_h3`.  Because the field is
+        LINEAR in the strip direction, 3-point Lagrange
+        interpolation is EXACT (quadratic stencil fits linear with
+        zero residual), so we can predict the interpolated halo
+        analytically via `_interp_strip(strip_after_reversal,
+        offsets_1d)`.
+
+        Expected chain at face A's outermost halo ring (depth=2):
+          1. strip = _extract_edge_strip_at_depth(u_east, nbr, nbr_edge, 2)
+          2. if is_reversed: strip = strip[::-1]
+          3. strip_interp = _interp_strip(strip, offsets[A, side, 2])
+          4. u_halo = cos_angle_padded_h3[A, halo] * strip_interp
+          5. v_halo = -sin_angle_padded_h3[A, halo] * strip_interp
+
+        This validates: (a) interp is applied AFTER reversal, not
+        before; (b) interp reads from the right (face, side, depth)
+        offsets table slice; (c) the reversal flag on the
+        reversed-connection faces propagates through the interp
+        stage.
+
+        Sanity regression this catches (not covered by iter-599):
+        swapping reversal and interp order in `_pad_halo_local_h3`
+        would give `interp(strip[::-1])` vs `interp(strip)[::-1]`,
+        which differ for non-symmetric offsets tables.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import (
+            pad_halo_vector,
+            CONNECTIVITY,
+            WEST, EAST, SOUTH, NORTH,
+            _extract_edge_strip_at_depth,
+            _interp_strip,
+        )
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = np.asarray(grid.cos_angle_padded_h3, dtype=np.float64)
+        sap3 = np.asarray(grid.sin_angle_padded_h3, dtype=np.float64)
+        offsets_h3 = grid.halo_interp_offsets_h3  # (6, 4, 3, n)
+
+        # Same field as iter-599: linear in both axes, face-unique.
+        f_idx = jnp.arange(6, dtype=jnp.float64)[:, None, None]
+        i_idx = jnp.arange(n, dtype=jnp.float64)[None, :, None]
+        j_idx = jnp.arange(n, dtype=jnp.float64)[None, None, :]
+        u_east = 100.0 * f_idx + 0.5 * i_idx + 0.1 * j_idx
+        v_north = jnp.zeros((6, n, n), dtype=jnp.float64)
+
+        u_grid = ca * u_east + sa * v_north
+        v_grid = -sa * u_east + ca * v_north
+
+        # Production call: interp_offsets_h3 active.
+        up, vp = pad_halo_vector(
+            u_grid, v_grid, ca, sa,
+            jnp.asarray(cap3), jnp.asarray(sap3),
+            interp_offsets=offsets_h3,
+            halo=3,
+        )
+        up_np = np.asarray(up)
+        vp_np = np.asarray(vp)
+
+        # Map side → edge_idx used by _pad_halo_local_h3 offset index.
+        # From halo.py edges = [WEST, EAST, SOUTH, NORTH] → [0, 1, 2, 3].
+        side_edge_idx = {WEST: 0, EAST: 1, SOUTH: 2, NORTH: 3}
+        side_info = {
+            WEST:  {"name": "W", "slicer": lambda f: (f, 0, slice(3, -3))},
+            EAST:  {"name": "E", "slicer": lambda f: (f, -1, slice(3, -3))},
+            SOUTH: {"name": "S", "slicer": lambda f: (f, slice(3, -3), 0)},
+            NORTH: {"name": "N", "slicer": lambda f: (f, slice(3, -3), -1)},
+        }
+
+        for face in range(6):
+            for side, info in side_info.items():
+                nbr_face, nbr_edge, is_reversed = (
+                    CONNECTIVITY[face][side])
+                # Step 1: extract neighbour strip at outermost depth.
+                strip = np.asarray(
+                    _extract_edge_strip_at_depth(
+                        u_east, nbr_face, nbr_edge, depth=2))
+                # Step 2: apply reversal BEFORE interpolation.
+                if is_reversed:
+                    strip = strip[::-1]
+                # Step 3: interpolate using this face × side × depth=2 offsets.
+                edge_idx = side_edge_idx[side]
+                offsets_1d = np.asarray(
+                    offsets_h3[face, edge_idx, 2, :])
+                strip_interp = np.asarray(
+                    _interp_strip(jnp.asarray(strip),
+                                   jnp.asarray(offsets_1d)))
+
+                sl = info["slicer"](face)
+                cap_slice = cap3[sl]
+                sap_slice = sap3[sl]
+                expected_u_grid = cap_slice * strip_interp
+                expected_v_grid = -sap_slice * strip_interp
+
+                u_diff = float(np.max(np.abs(
+                    up_np[sl] - expected_u_grid)))
+                v_diff = float(np.max(np.abs(
+                    vp_np[sl] - expected_v_grid)))
+                assert u_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost h=3 "
+                    f"halo u does NOT match "
+                    f"`cos_angle_padded_h3 * _interp_strip("
+                    f"reversed_strip, offsets[f, edge_idx, 2])`. "
+                    f"max diff = {u_diff:.3e}.  This covers the "
+                    f"interpolated branch that iter-599 skipped — "
+                    f"a refactor that swapped reversal and interp "
+                    f"order (interp before reverse) or that read "
+                    f"the wrong `offsets[f, edge_idx, depth]` slice "
+                    f"would fire here.")
+                assert v_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost h=3 "
+                    f"halo v does NOT match expected.  "
+                    f"max diff = {v_diff:.3e}.")
+
     def test_pad_halo_vector_halo3_rejects_mpi_backend(self):
         """Iter-595: halo=3 is still unsupported on the MPI backend
         because `pad_halo_mpi_4d(halo=3)` is not yet implemented.  The
