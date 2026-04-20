@@ -492,3 +492,46 @@ Distinguishing (1) vs (2) requires a spatially-resolved residual test: feed the 
 **Next iter target**: spatial breakdown of step-1 tendency — which operator (c_sw vs p_grad_c vs d_sw) produces the 5 mm/s² residual, and where does it live on the grid.
 
 **Tests**: no source-code changes.  118 regression tests pass.  Diagnostic only.
+
+### Iter-662 — per-phase FB-chain residual breakdown on balanced W2 IC
+
+**Motivation**: iter-661 localized the FB-chain step-1 residual to the SPATIAL discretization (dt-independent).  Per iter-661's next target, ran each FB phase in isolation to identify which operator produces the residual and where it concentrates.
+
+**Experiment** (`scripts/diag_fb_phase_breakdown.py`): feeds the balanced Williamson 2 IC through `_c_sw` alone, `_p_grad_c` alone, and `_d_sw_native` alone (with c_sw+p_grad_c's uc/vc updates), measuring tendencies at each phase and classifying the residual into cube-vertex / cube-edge / interior cells.
+
+**Results at dt=600 s**:
+
+| phase                      | tendency                                         |
+|:---------------------------|:-------------------------------------------------|
+| c_sw (dt/2)                | `max\|dh\|/dt = 4.61e-2 m/s`                     |
+| p_grad_c (dt/2)            | `max\|dp_x\|/dt = 2.95e-3 m/s²`, `max\|dp_y\|/dt = 3.43e-3 m/s²` |
+| d_sw_native (full dt)      | `max\|du\|/dt = 2.96e-3 m/s²`, `max\|dv\|/dt = 5.23e-3 m/s²` |
+
+Spatial distribution of `dp_y/dt`:
+- cube VERTICES max: 3.43e-3 m/s²
+- cube EDGES max:    3.26e-3 m/s²  (≈95% of vertex)
+- INTERIOR max:      1.47e-3 m/s²  (≈43% of vertex)
+
+Spatial distribution of full-step `dv/dt`:
+- cube VERTICES:  5.23e-3 m/s²
+- cube EDGES:     4.99e-3 m/s²
+- INTERIOR:       3.58e-3 m/s²
+
+**Key observations**:
+
+1. **PGF is the dominant u-tendency**: `p_grad_c`'s `max|dp_x|/dt = 2.95e-3` matches the full-step `max|du|/dt = 2.96e-3` to 3 decimal places.  The u-direction momentum change at step 1 is dominated by the pressure-gradient force.
+
+2. **v gets contributions from both p_grad_c and d_sw**: `p_grad_c` alone gives `max|dp_y|/dt = 3.43e-3`, but the full step gives `max|dv|/dt = 5.23e-3`.  `d_sw_native` (vorticity transport + wind replacement) adds ~1.8e-3.
+
+3. **Residual is NOT overwhelmingly cube-vertex dominated**: for dp_y, the interior max is 43% of the vertex max; for dv, the interior is 68% of the vertex.  This is consistent with iter-659's histogram: interior is noisier than pure machine-eps but not "localized".
+
+4. **Geostrophic cancellation is imperfect**: for a truly balanced state, PGF + Coriolis + metric should cancel to O(ε).  The observed `max|dp_x|` = `max|du|` means cancellation DOES NOT happen at the operator level — the net du/dt at the end of a step is approximately equal to the PGF contribution.  Either:
+   a) Coriolis + metric contribute negligibly at this FB scheme step.
+   b) The Coriolis is meant to cancel PGF on a DIFFERENT time-averaged state (backward-coupled FB), so instantaneous cancellation isn't expected.
+   c) There is a missing Coriolis contribution.
+
+**Interpretation caveat (per iter-660's discipline)**: the experiment measures which operators CONTRIBUTE to the tendency.  It does NOT by itself prove which is WRONG — PGF being O(3e-3) m/s² is expected for a 29400 m/s² gradient on the W2 profile, and the FB scheme is inherently backward-coupled (PGF acts against a partially-updated state).  Definitive attribution requires a reference tendency from a known-correct implementation (e.g., FV3 Fortran at the same IC + grid + dt) — which I cannot easily produce here.
+
+**Next iter target**: computed `-f × u` Coriolis term on the same IC and compare to PGF.  If `|Coriolis + PGF|` at the edge/interior is `~5e-3` m/s² on cells where PGF alone is `~3e-3`, Coriolis is PARTIALLY cancelling (good sign; expected imbalance from backward coupling).  If the two are both 3e-3 and DON'T cancel, the balance is structurally broken.
+
+**Tests**: no source-code changes in iter-662.  118 regression tests pass.  Diagnostic script added.
