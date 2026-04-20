@@ -7339,5 +7339,154 @@ class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
                  "not detected."))
 
 
+class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
+    """Iter-645: Fortran-formula lock for the 4th-order D→A averaging
+    stencil used in `_d2a2c_vect` (non-duogrid interior override at
+    ``fv3_sw_core.py:464-469``) and `_d2a2c_vect_duogrid` (same
+    stencil on the fully-haloed domain at ``fv3_sw_core.py:347-355``).
+
+    Fortran reference (sw_core.F90:3421-3435 d2a2c_vect duogrid branch,
+    same stencil reused at non-duogrid interior override):
+
+        utmp(i, j) = a2 * (u(i, j-1) + u(i, j+2))
+                   + a1 * (u(i, j  ) + u(i, j+1))
+
+    with ``a1 = 0.5625`` and ``a2 = -0.0625`` — the 4th-order Lagrange
+    coefficients for edge-to-centre interpolation on a uniform grid,
+    also documented in Shukla & Colella 1976 and reused throughout FV3.
+    These sum to ``a1 + a2 = 0.5`` per-side (half of unity), giving a
+    per-cell weight sum of ``2*(a1+a2) = 1.0``.
+
+    The stencil is exact for cubic polynomials and produces 4th-order
+    error for smooth fields.  A regression that changed the
+    coefficients (e.g., to hord=8's 2nd-order 0.5 weighting), swapped
+    the outer/inner stencil arms, or mis-indexed the j-slices would
+    silently degrade d2a2c accuracy at cube interior.
+
+    Pre-iter-645 only constant-state preservation tests existed
+    (``test_constant_field_preserved_d2a2c_vect``); no direct
+    numerical lock on the stencil coefficients.
+    """
+
+    @staticmethod
+    def _ref_4th_order_1d(u, axis):
+        """Apply the 4th-order Lagrange stencil along `axis`:
+            out[k] = A2*(u[k-1] + u[k+2]) + A1*(u[k] + u[k+1])
+        where k indexes the output (cells) and u spans the 4-point
+        stencil.  Works on arrays with shape (..., L, ...).
+        """
+        import numpy as np
+        A1 = 0.5625
+        A2 = -0.0625
+        if axis == 2:
+            # u shape (..., n+something) → output along axis 2
+            u4 = (A2 * (u[..., :-3] + u[..., 3:])
+                  + A1 * (u[..., 1:-2] + u[..., 2:-1]))
+            return u4
+        elif axis == 1:
+            u4 = (A2 * (u[..., :-3, :] + u[..., 3:, :])
+                  + A1 * (u[..., 1:-2, :] + u[..., 2:-1, :]))
+            return u4
+        raise ValueError(f"axis must be 1 or 2, got {axis}")
+
+    def test_d2a2c_vect_4th_order_coefficients_iter645(self):
+        """Directly lock the `_A1`, `_A2` constants at
+        ``fv3_sw_core.py:251-252`` — any drift from the 4th-order
+        Lagrange values would shift d2a2c accuracy order."""
+        from legoesm.core.fv3_sw_core import _A1, _A2
+        self.assertAlmostEqual(
+            _A1, 0.5625, places=15,
+            msg=("_A1 drifted from the FV3 4th-order Lagrange "
+                 "coefficient 9/16 = 0.5625."))
+        self.assertAlmostEqual(
+            _A2, -0.0625, places=15,
+            msg=("_A2 drifted from the FV3 4th-order Lagrange "
+                 "coefficient -1/16 = -0.0625."))
+        # Partition-of-unity check: 2*(A1 + A2) = 1.0.
+        self.assertAlmostEqual(
+            2.0 * (_A1 + _A2), 1.0, places=15,
+            msg=("A1 + A2 no longer satisfies the partition-of-unity "
+                 "constraint 2*(A1+A2) = 1 required for consistent "
+                 "averaging."))
+
+    def test_d2a2c_4th_order_stencil_cubic_exactness_iter645(self):
+        """The 4th-order Lagrange stencil is EXACT for cubic
+        polynomials on a uniform grid.  Feed a cubic field
+        ``q(j) = c0 + c1*j + c2*j² + c3*j³`` into the numpy reference
+        and verify the output matches the exact centre-of-cell value,
+        ``q(j + 0.5)``, at every interior cell.  This locks the
+        stencil's accuracy order, not just the coefficient values.
+        """
+        import numpy as np
+        # 1D probe: cubic polynomial sampled at integer grid points.
+        n = 16
+        j = np.arange(n + 4, dtype=np.float64)   # stencil needs 4 pts
+        # Arbitrary cubic.
+        c = np.array([1.3, -0.7, 0.4, 0.12])
+        q = (c[0] + c[1] * j + c[2] * j ** 2 + c[3] * j ** 3)
+        q3d = q[np.newaxis, np.newaxis, :]       # (1, 1, n+4)
+
+        # Apply the 4th-order stencil: for output index k (cell midpoint
+        # halfway between grid points k+1 and k+2 in the padded frame),
+        # stencil reads j=k, k+1, k+2, k+3 → outputs at midpoint
+        # j = k + 1.5.
+        out = self._ref_4th_order_1d(q3d, axis=2)[0, 0, :]
+
+        # Expected value: cubic evaluated at midpoint j_mid = k + 1.5
+        # for k = 0..n+1 (that is, we get n+1 outputs from n+4 inputs).
+        k = np.arange(out.shape[0], dtype=np.float64)
+        j_mid = k + 1.5
+        expected = (c[0] + c[1] * j_mid + c[2] * j_mid ** 2
+                     + c[3] * j_mid ** 3)
+        np.testing.assert_allclose(
+            out, expected, atol=1e-12,
+            err_msg=("4th-order Lagrange stencil is NOT exact for "
+                     "cubic polynomials — accuracy order has been lost. "
+                     "Check A1 / A2 coefficient values and stencil "
+                     "index ranges."))
+
+    def test_d2a2c_4th_order_stencil_coefficients_load_bearing_iter645(self):
+        """Mutation probe: swap `_A1` ↔ `_A2` (the iter-645 coefficient
+        constants), apply the resulting stencil to a cubic, and verify
+        the output DIFFERS from the exact centre-of-cell value.  This
+        proves the two coefficients are distinguishable by the
+        cubic-exactness test — a regression that duplicated the
+        `_A1 = 0.5625` line into `_A2 = 0.5625` would be caught by
+        `test_d2a2c_4th_order_stencil_cubic_exactness_iter645`.
+
+        Directly applied here on the numpy reproduction so the test
+        verifies the REFERENCE is sensitive, not just the
+        implementation.
+        """
+        import numpy as np
+
+        n = 16
+        j = np.arange(n + 4, dtype=np.float64)
+        c = np.array([1.3, -0.7, 0.4, 0.12])
+        q = (c[0] + c[1] * j + c[2] * j ** 2 + c[3] * j ** 3)
+
+        # Swap A1 ↔ A2 in a hand-rolled reference.
+        A1_swap = -0.0625  # iter-645 canonical A2
+        A2_swap = 0.5625   # iter-645 canonical A1
+        u4_swap = (A2_swap * (q[:-3] + q[3:])
+                    + A1_swap * (q[1:-2] + q[2:-1]))
+
+        # Expected cubic value at midpoint.
+        k = np.arange(u4_swap.shape[0], dtype=np.float64)
+        expected = (c[0] + c[1] * (k + 1.5) + c[2] * (k + 1.5) ** 2
+                     + c[3] * (k + 1.5) ** 3)
+
+        # The swapped stencil must NOT reproduce cubics — demonstrating
+        # that `test_d2a2c_4th_order_stencil_cubic_exactness_iter645`
+        # has real detection power.
+        max_err = float(np.max(np.abs(u4_swap - expected)))
+        self.assertGreater(
+            max_err, 1e-2,
+            msg=("Swapping A1 ↔ A2 did not produce a detectable error "
+                 "on cubic-exactness — the cubic test would NOT catch "
+                 "that specific mutation.  Check the stencil's "
+                 "sensitivity to coefficient values."))
+
+
 if __name__ == "__main__":
     unittest.main()

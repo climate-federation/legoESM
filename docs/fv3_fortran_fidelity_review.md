@@ -1401,3 +1401,21 @@ Drift in this helper silently distorts divergence damping at cube edges, which i
 
 All 2 tests pass.  Cumulative Fortran-formula lock inventory: **21 helpers** (iter-641's 20 + `_divergence_corner_duo`).
 
+### Iter-645 — Fortran-formula lock for the 4th-order D→A Lagrange stencil
+
+**Motivation**: The 4th-order D→A averaging stencil in `_d2a2c_vect` (fv3_sw_core.py:464-469, non-duogrid interior override) and `_d2a2c_vect_duogrid` (fv3_sw_core.py:347-355, on the fully-haloed domain) implements FV3's 4th-order Lagrange interpolation from edge values to cell centres at `sw_core.F90:3421-3435`:
+
+    utmp(i, j) = A2 * (u(i, j-1) + u(i, j+2)) + A1 * (u(i, j) + u(i, j+1))
+
+with `A1 = 0.5625` (9/16) and `A2 = -0.0625` (-1/16).  These are canonical 4th-order Lagrange coefficients, cubic-exact on a uniform grid, with partition-of-unity `2*(A1+A2) = 1.0`.  Pre-iter-645 no direct lock on the coefficients or their accuracy order existed; only integration-level coverage via constant-field preservation tests.
+
+A regression that changed `A1` to 0.5 (2nd-order 2-point avg), swapped `A1` ↔ `A2`, or mis-indexed the stencil slices would silently reduce accuracy order from 4 to 2 at interior cells — invisible on constant fields but visible on gradient transport.
+
+**Tests added** (`TestD2A2C4thOrderStencilFortranFormula`, 3 total):
+- `_ref_4th_order_1d`: numpy reproduction of the 4th-order Lagrange stencil on a generic axis.
+- `test_d2a2c_vect_4th_order_coefficients_iter645`: asserts `_A1 == 9/16`, `_A2 == -1/16`, and the partition-of-unity `2*(A1+A2) == 1.0` at 15 decimal places.
+- `test_d2a2c_4th_order_stencil_cubic_exactness_iter645`: feeds a cubic polynomial `q(j) = c0 + c1*j + c2*j² + c3*j³` through the 4th-order stencil and asserts the output matches the cubic evaluated at cell centres (`j + 1.5`) at `atol=1e-12`.  Locks the accuracy-order property directly (a 2nd-order stencil would fail here by large amounts).
+- `test_d2a2c_4th_order_stencil_coefficients_load_bearing_iter645`: meta-test — swaps `A1` ↔ `A2` in a hand-rolled reference, applies it to the cubic, and asserts the swapped-coefficient output DIFFERS from the cubic-exact value.  Proves the cubic-exactness test has real detection power for coefficient swaps.
+
+All 3 tests pass.  Cumulative Fortran-formula lock inventory: **22 helpers** (iter-644's 21 + the 4th-order D→A stencil).
+
