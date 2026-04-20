@@ -696,3 +696,26 @@ The two ceilings probe different physics:
 
 11 W2/W5 artifact-characterization tests now pass (including iter-609's mode-4 ceiling).  The full W2 ceiling stack now catches: t=0 diagnostic bug, short-run N/S symmetry, short-run mode-4 at ±30° (NEW), 1-day pole-cell magnitude + field mirror, and the height L2 baseline.
 
+### Iter-610 (2026-04-20): remove script-module import from iter-609 test (Codex)
+
+**Codex stop-time review on iter-609 (commit a071070)**: the new `test_w2_short_run_mode4_at_pm30deg_lat_ceiling` imports `from scripts.run_atmosphere_test_matrix import _regrid_2d`.  The script has top-level side effects on import:
+- `jax.config.update("jax_enable_x64", True)` (line 49)
+- `ensure_metal_or_fallback()` (line 52)
+- `matplotlib.use("Agg")` (line 59)
+
+These MUTATE global state when a unit test imports the module — unacceptable from a test that should be hermetic.
+
+**Fix**: replaced the script import with a direct call to the underlying `legoesm.grids.regridding` helpers:
+```python
+from legoesm.grids.regridding import (
+    get_cubedsphere_to_latlon_weights,
+    apply_cubedsphere_to_latlon,
+)
+cs_weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
+v_ll = apply_cubedsphere_to_latlon(v_north_native, cs_weights)
+```
+
+This is the EXACT path the matrix script takes internally for cubed-sphere fields (`_regrid_2d` → `_get_cs_weights` → `get_cubedsphere_to_latlon_weights` + `apply_cubedsphere_to_latlon`).  No global-state mutation; identical weights.
+
+**Regression**: 10 W2/polar/imprint/angle tests pass.  Mode-4 measurement unchanged (2.551e-3 m/s at both ±30°).  Sanity-verification (iter-609) that tightening the ceiling to 1e-3 fires is preserved by the identical weight computation.
+

@@ -4438,7 +4438,18 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
         from tests.atmosphere.shallow_water.test_cases.williamson import (
             williamson_test2,
         )
-        from scripts.run_atmosphere_test_matrix import _regrid_2d
+        # Iter-610 Codex follow-up: replaced
+        # `from scripts.run_atmosphere_test_matrix import _regrid_2d`
+        # with direct use of `legoesm.grids.regridding` helpers.  The
+        # script has top-level side effects (jax_enable_x64, matplotlib
+        # backend, Metal fallback) that MUTATE global state on import
+        # — unacceptable from a unit test module.  The library-level
+        # helpers compute identical weights (matrix script calls them
+        # via `_get_cs_weights` → `get_cubedsphere_to_latlon_weights`).
+        from legoesm.grids.regridding import (
+            get_cubedsphere_to_latlon_weights,
+            apply_cubedsphere_to_latlon,
+        )
 
         n = 36
         dt = 300.0
@@ -4472,9 +4483,12 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
         v_cc = 0.5 * (state.v_d[:, :-1, :] + state.v_d[:, 1:, :])
         v_north_native = np.asarray(sa_4 * u_cc + ca_4 * v_cc)
 
-        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
-        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
-        v_ll = _regrid_2d(v_north_native, lon_deg, lat_deg, "cube")
+        # Direct library call — matches matrix script's cubed-sphere
+        # branch in `_regrid_2d`: `apply_cubedsphere_to_latlon(arr,
+        # _get_cs_weights(n))`.  No global state mutation on import.
+        cs_weights = get_cubedsphere_to_latlon_weights(
+            n, n_lon=360, n_lat=181)
+        v_ll = apply_cubedsphere_to_latlon(v_north_native, cs_weights)
 
         # FFT mode-4 at lat=±30°, equator-symmetric check.
         lat_ll = np.linspace(-90.0, 90.0, v_ll.shape[0])
