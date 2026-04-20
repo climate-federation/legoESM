@@ -1299,6 +1299,97 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             f"overrides at sw_core.F90:3527-3545 and 3620-3640.",
         )
 
+    def test_d2a2c_vect_interp_offsets_match_halo_depth(self):
+        """Iter-593 (Codex fidelity review): lock that `_d2a2c_vect`
+        passes the CORRECT offset-table shape to `pad_halo_vector`.
+
+        Fortran `edge_interpolate4` at face boundaries needs halo=2
+        neighbour data.  `_d2a2c_vect` requests `halo=2` via
+        `pad_halo_vector(..., halo=2)`.  The corresponding offset
+        table must be the 2-halo version:
+          - `halo_interp_offsets` shape `(6, 4, n)` — halo=1 only
+          - `halo_interp_offsets_h2` shape `(6, 4, 2, n)` — halo=2
+
+        A PRIOR BUG (fixed in commit 959454d, April 2026) passed
+        `halo_interp_offsets` (halo=1 shape) to `pad_halo_vector(halo=2)`.
+        The h2 pad path (`_pad_halo_local_h2` at `halo.py:942`)
+        indexes `interp_offsets[face, edge_idx, depth]`.  On the
+        wrong (6, 4, n) shape, this 3-dim index yields a SCALAR
+        instead of a per-cell array of n offsets — silently
+        broadcasting ONE offset to every edge cell.  The halo
+        interpolation degenerates to a uniform shift, introducing
+        O(Δα) position error at the cube-face halo boundary.
+
+        This test reads the AST of `_d2a2c_vect` and verifies the
+        interp_offsets kwarg uses `halo_interp_offsets_h2` (not
+        `halo_interp_offsets`).  If a refactor reverts the fix
+        (e.g. in search of "fewer attributes"), this assertion
+        fires with a pointer to the Fortran anchor + past-bug doc.
+        """
+        import ast
+        import inspect
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+
+        src = inspect.getsource(_d2a2c_vect)
+        tree = ast.parse(src)
+        # Find the pad_halo_vector call inside _d2a2c_vect.
+        pad_calls = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "pad_halo_vector"):
+                pad_calls.append(node)
+        self.assertGreaterEqual(
+            len(pad_calls), 1,
+            "Could not locate `pad_halo_vector(...)` call in "
+            "`_d2a2c_vect`.  Has the function been refactored?",
+        )
+
+        # Extract the halo and interp_offsets kwargs from each call.
+        for call in pad_calls:
+            halo_val = None
+            offsets_attr = None
+            for kw in call.keywords:
+                if kw.arg == "halo" and isinstance(kw.value, ast.Constant):
+                    halo_val = kw.value.value
+                if (kw.arg == "interp_offsets"
+                    and isinstance(kw.value, ast.Attribute)):
+                    offsets_attr = kw.value.attr
+
+            # Fall back to scanning for `halo=h` as a Name, and resolve
+            # via inspecting assignments (the existing test at
+            # test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound
+            # already does this for halo=2 specifically).
+            if halo_val is None:
+                for kw in call.keywords:
+                    if kw.arg == "halo" and isinstance(kw.value, ast.Name):
+                        for node in ast.walk(tree):
+                            if (isinstance(node, ast.Assign)
+                                and len(node.targets) == 1
+                                and isinstance(node.targets[0], ast.Name)
+                                and node.targets[0].id == kw.value.id
+                                and isinstance(node.value, ast.Constant)):
+                                halo_val = node.value.value
+                                break
+
+            # Only enforce for halo=2 calls — halo=1 calls correctly
+            # use `halo_interp_offsets` (shape (6, 4, n)).
+            if halo_val == 2:
+                self.assertEqual(
+                    offsets_attr, "halo_interp_offsets_h2",
+                    msg=(f"`_d2a2c_vect` pad_halo_vector(halo=2) passes "
+                         f"`interp_offsets=grid.{offsets_attr}`, but "
+                         f"halo=2 requires `halo_interp_offsets_h2` "
+                         f"(shape (6, 4, 2, n)).  Passing "
+                         f"`halo_interp_offsets` (shape (6, 4, n)) "
+                         f"silently reduces the offset table to a "
+                         f"scalar per edge, degrading the halo "
+                         f"interpolation to a uniform shift.  Prior "
+                         f"bug fixed in commit 959454d (April 2026); "
+                         f"Fortran anchor: sw_core.F90:3587 "
+                         f"(edge_interpolate4 needs halo=2 neighbour "
+                         f"data per sw_core.F90:3528-3530)."))
+
     def test_d2a2c_vect_reached_by_experimental_csw_and_fb_model(self):
         """Iter-130 (Priority 3 complement): positive-case runtime
         tripwire proving the EXPERIMENTAL paths DO reach `_d2a2c_vect`.

@@ -5218,3 +5218,15 @@ User directive: the production shallow-water path (`FV3EdgeShallowWaterModel` at
 
 Iteration 592 chose (b) as the realistic short-term guard; (a) is tracked as the long-term architectural item.
 
+### Iter-593 (2026-04-19): AST lock on `_d2a2c_vect` interp_offsets shape
+
+**Codex pre-iter-593 pointed at `fv3_sw_core.py:475-481`** — `_d2a2c_vect` requests `halo=2` in `pad_halo_vector` and the offset-table argument must be `halo_interp_offsets_h2` (shape `(6, 4, 2, n)`).  A prior bug (fixed in commit `959454d`, April 2026) passed `halo_interp_offsets` (shape `(6, 4, n)`) to the halo=2 path; the h2 halo implementation indexes `interp_offsets[face, edge_idx, depth]` which on the wrong-shape table yields a SCALAR broadcast per edge rather than the required per-cell array.  Result: halo interpolation degenerated to a uniform shift, injecting O(Δα) position error at face-boundary halos.
+
+**Verification**: the fix is in place at the current HEAD, but no structural test guards against a refactor silently reverting it.
+
+**Lock added**: `test_d2a2c_vect_interp_offsets_match_halo_depth` in `tests/unit/test_cdgrid_fv3_regression.py` (new test inside `TestFvTp2dCornerInvariant`).  Parses the AST of `_d2a2c_vect`, finds every `pad_halo_vector(...)` call, and for any call with `halo=2` asserts `interp_offsets=grid.halo_interp_offsets_h2`.
+
+**Sanity verified**: reverting line 479 to `interp_offsets=grid.halo_interp_offsets` (the buggy version) fires the assertion with a clear pointer to the prior bug and the Fortran anchor (`sw_core.F90:3587` + `3528-3530` for `edge_interpolate4`).  Production restored; all 68 `test_cdgrid_fv3_regression` tests pass.
+
+**Why this matters**: without an AST-level lock, a well-intentioned "attribute cleanup" refactor that removed `halo_interp_offsets_h2` (reading the code superficially as a duplicate of `halo_interp_offsets`) could quietly regress the halo=2 interpolation accuracy in `_d2a2c_vect`, which is reached by both the experimental csw path AND the FB shallow-water model.  The test pins down the shape invariant structurally, not just numerically.
+
