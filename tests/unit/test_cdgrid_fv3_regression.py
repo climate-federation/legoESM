@@ -5560,5 +5560,72 @@ class TestComputeTransportQuantitiesFortranFormula(unittest.TestCase):
                      f"sin(upwind), ra = area + net flux."))
 
 
+class TestFv3D2ccFortranFormula(unittest.TestCase):
+    """Iter-625: direct lock for `fv3_d2cc` — D-grid edge-midpoint
+    winds to cell-centre averages.  Simple formula:
+      u_cc[:, i, j] = 0.5 * (u_d[:, i, j] + u_d[:, i, j+1])
+      v_cc[:, i, j] = 0.5 * (v_d[:, i, j] + v_d[:, i+1, j])
+
+    No direct test before iter-625; only indirect via production
+    A-L path runtime (`fv3_sw_tendencies`).
+    """
+
+    def test_constant_d_grid_gives_constant_cc(self):
+        """Constant u_d = U, v_d = V → u_cc = U, v_cc = V."""
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.operators_cdgrid import fv3_d2cc
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        U, V = 3.7, -1.25
+        u_d = jnp.full((6, n, n + 1), U)
+        v_d = jnp.full((6, n + 1, n), V)
+        u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
+        self.assertEqual(u_cc.shape, (6, n, n))
+        self.assertEqual(v_cc.shape, (6, n, n))
+        self.assertLess(
+            float(jnp.max(jnp.abs(u_cc - U))), 1e-12,
+            msg=f"Constant u_d={U} → u_cc should be {U}, got "
+                f"max diff = {float(jnp.max(jnp.abs(u_cc - U))):.3e}")
+        self.assertLess(
+            float(jnp.max(jnp.abs(v_cc - V))), 1e-12,
+            msg=f"Constant v_d={V} → v_cc should be {V}")
+
+    def test_random_input_matches_edge_average_formula(self):
+        """Random (u_d, v_d) → bit-exact numpy reproduction of the
+        2-point edge average formula."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.operators_cdgrid import fv3_d2cc
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        rng = np.random.default_rng(625)
+        u_d_np = rng.standard_normal((6, n, n + 1))
+        v_d_np = rng.standard_normal((6, n + 1, n))
+        u_cc, v_cc = fv3_d2cc(jnp.asarray(u_d_np),
+                                jnp.asarray(v_d_np), cdgrid)
+        u_cc_ref = 0.5 * (u_d_np[:, :, :-1] + u_d_np[:, :, 1:])
+        v_cc_ref = 0.5 * (v_d_np[:, :-1, :] + v_d_np[:, 1:, :])
+        u_diff = float(np.max(np.abs(np.asarray(u_cc) - u_cc_ref)))
+        v_diff = float(np.max(np.abs(np.asarray(v_cc) - v_cc_ref)))
+        self.assertLess(
+            u_diff, 1e-12,
+            msg=f"u_cc deviates from 0.5*(u_d[:, :, :-1] + "
+                f"u_d[:, :, 1:]) by {u_diff:.3e}.")
+        self.assertLess(
+            v_diff, 1e-12,
+            msg=f"v_cc deviates from 0.5*(v_d[:, :-1, :] + "
+                f"v_d[:, 1:, :]) by {v_diff:.3e}.")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -962,3 +962,13 @@ Previously no direct regression test — only indirect coverage via `fv_tp_2d` /
 
 2 new tests pass.
 
+### Iter-625 (2026-04-20): Fortran-formula lock for `fv3_d2cc`
+
+**Motivation**: `fv3_d2cc` (`operators_cdgrid.py:1276-1296`) — D-grid edge-midpoint winds → cell-centre averages — is a simple helper used in the production A-L path (`fv3_sw_tendencies`).  No direct test before iter-625; only indirect coverage via production runtime.
+
+**Lock added**: `TestFv3D2ccFortranFormula` with 2 tests:
+1. Constant `u_d=U, v_d=V` → `u_cc=U, v_cc=V` (averaging preserves constants).
+2. Random input → bit-exact numpy reproduction of `0.5*(u_d[:, :, :-1] + u_d[:, :, 1:])`.
+
+2 new tests pass.  Simple but catches silent index slip (e.g., off-by-one in the slicing).
+
