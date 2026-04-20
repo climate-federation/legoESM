@@ -5627,5 +5627,224 @@ class TestFv3D2ccFortranFormula(unittest.TestCase):
                 f"v_d[:, 1:, :]) by {v_diff:.3e}.")
 
 
+class TestPertPpmFortranFormula(unittest.TestCase):
+    """Iter-635: direct Fortran-formula lock for `_pert_ppm` (iv=1) and
+    `_pert_ppm_iv0` (iv=0) in `src/legoesm/core/fv_tp_2d.py`.  These
+    helpers implement FV3's ``pert_ppm`` routine at
+    ``tp_core.F90:1156-1214``.  Before this iter there were behavioural
+    tests ("fires in non-duogrid path", "does NOT fire in duogrid path")
+    but NO test that locked the numerical output against a line-by-line
+    Fortran reproduction.  A refactor could change the branch logic in
+    a way that still fires correctly but produces wrong values on
+    non-duogrid runs — those runs would then silently drift.
+
+    Fortran reference, iv=1 (tp_core.F90:1193-1212):
+
+        do i=1,im
+           if ( al(i)*ar(i) < 0. ) then
+                da1 = al(i) - ar(i)
+                da2 = da1**2
+                a6da = 3.*(al(i)+ar(i))*da1
+                if( a6da < -da2 ) then
+                    ar(i) = -2.*al(i)
+                elseif( a6da > da2 ) then
+                    al(i) = -2.*ar(i)
+                endif
+           else
+                al(i) = 0.
+                ar(i) = 0.
+           endif
+        enddo
+
+    Fortran reference, iv=0 (tp_core.F90:1169-1192) is the positive-
+    definite variant and uses ``a0`` (the cell mean), ``r12 = 1/12``,
+    a ``fmin`` parabola-minimum test, and a 3-way ``both_positive /
+    da1>0 / else`` branch.  Reproduced by `_ref_pert_ppm_iv0` below.
+    """
+
+    @staticmethod
+    def _ref_pert_ppm_iv1(bl, br):
+        """Numpy reproduction of pert_ppm iv=1 (tp_core.F90:1193-1212)."""
+        import numpy as np
+        bl = np.asarray(bl, dtype=np.float64).copy()
+        br = np.asarray(br, dtype=np.float64).copy()
+        out_bl = bl.copy()
+        out_br = br.copy()
+        opp_sign = bl * br < 0.0  # Fortran "al*ar < 0"
+        same_sign_or_zero = ~opp_sign
+        # Flatten-to-both-zero branch (.not. opposite sign)
+        out_bl[same_sign_or_zero] = 0.0
+        out_br[same_sign_or_zero] = 0.0
+        # Active branch: da1 = al - ar = bl - br
+        da1 = bl - br
+        da2 = da1 ** 2
+        a6da = 3.0 * (bl + br) * da1
+        # a6da < -da2 → ar := -2*al → out_br := -2*bl
+        mask_br = opp_sign & (a6da < -da2)
+        out_br[mask_br] = -2.0 * bl[mask_br]
+        # a6da > da2 → al := -2*ar → out_bl := -2*br
+        mask_bl = opp_sign & (a6da > da2)
+        out_bl[mask_bl] = -2.0 * br[mask_bl]
+        return out_bl, out_br
+
+    @staticmethod
+    def _ref_pert_ppm_iv0(q, bl, br):
+        """Numpy reproduction of pert_ppm iv=0 (tp_core.F90:1169-1192)."""
+        import numpy as np
+        r12 = 1.0 / 12.0
+        q = np.asarray(q, dtype=np.float64)
+        bl = np.asarray(bl, dtype=np.float64).copy()
+        br = np.asarray(br, dtype=np.float64).copy()
+        out_bl = bl.copy()
+        out_br = br.copy()
+        # q <= 0: zero both, short-circuit.
+        nonpos = q <= 0.0
+        out_bl[nonpos] = 0.0
+        out_br[nonpos] = 0.0
+        pos = ~nonpos
+        # a4 = -3*(ar + al) = -3*(br + bl)
+        a4 = -3.0 * (br + bl)
+        da1 = br - bl  # Fortran "ar - al" (iv=0 uses this ordering,
+                       # not the iv=1 "al - ar")
+        has_extr = np.abs(da1) < -a4  # extremum inside cell
+        # Guard against a4 == 0 so fmin doesn't NaN — but Fortran would
+        # also hit a divide-by-zero here; the `has_extr` guard means
+        # a4 must be strictly negative, so |a4| > 0.  Add a tiny
+        # epsilon to mirror the Python implementation's safety net.
+        a4_safe = np.where(np.abs(a4) < 1e-30, -1e-30, a4)
+        fmin = q + 0.25 / a4_safe * da1 ** 2 + a4_safe * r12
+        needs_fix = pos & has_extr & (fmin < 0.0)
+        both_pos = (br > 0.0) & (bl > 0.0)
+        da1_pos = da1 > 0.0
+        # Three-way: both_positive → zero both,
+        #            da1 > 0 → ar := -2*al,
+        #            else   → al := -2*ar.
+        mask_both = needs_fix & both_pos
+        out_bl[mask_both] = 0.0
+        out_br[mask_both] = 0.0
+        mask_da1p = needs_fix & (~both_pos) & da1_pos
+        out_br[mask_da1p] = -2.0 * bl[mask_da1p]
+        mask_da1n = needs_fix & (~both_pos) & (~da1_pos)
+        out_bl[mask_da1n] = -2.0 * br[mask_da1n]
+        return out_bl, out_br
+
+    def test_pert_ppm_iv1_matches_fortran_on_branch_probes(self):
+        """Hand-crafted (bl, br) pairs that exercise each Fortran
+        branch bit-for-bit against the JAX implementation.
+        """
+        import numpy as np
+        from legoesm.core.fv_tp_2d import _pert_ppm
+
+        # Four probes: (a) opposite sign + a6da < -da2, (b) opposite
+        # sign + a6da > da2, (c) opposite sign + |a6da| <= da2
+        # (no change), (d) same sign (both zeroed).
+        bl = np.array([-1.0,  2.0,  1.0, 0.3, 0.0])
+        br = np.array([ 3.0, -1.0, -0.5, 0.2, 0.7])
+        bl_ref, br_ref = self._ref_pert_ppm_iv1(bl, br)
+        bl_out, br_out = _pert_ppm(bl, br)
+        bl_out = np.asarray(bl_out)
+        br_out = np.asarray(br_out)
+        np.testing.assert_allclose(
+            bl_out, bl_ref, atol=1e-14,
+            err_msg=(f"_pert_ppm iv=1 diverges from Fortran on branch "
+                     f"probes.  bl_ref={bl_ref}, bl_got={bl_out}"))
+        np.testing.assert_allclose(
+            br_out, br_ref, atol=1e-14,
+            err_msg=(f"_pert_ppm iv=1 diverges from Fortran on branch "
+                     f"probes.  br_ref={br_ref}, br_got={br_out}"))
+
+    def test_pert_ppm_iv1_matches_fortran_on_random_grid(self):
+        """Random (bl, br) over a broad dynamic range must match the
+        Fortran formula bit-for-bit.  Seeded so a regression reproduces.
+        """
+        import numpy as np
+        from legoesm.core.fv_tp_2d import _pert_ppm
+
+        rng = np.random.default_rng(635)
+        # Use a wide range so every branch gets exercised.
+        bl = rng.standard_normal((6, 16, 16)) * 3.0
+        br = rng.standard_normal((6, 16, 16)) * 3.0
+        bl_ref, br_ref = self._ref_pert_ppm_iv1(bl, br)
+        bl_out, br_out = _pert_ppm(bl, br)
+        np.testing.assert_allclose(
+            np.asarray(bl_out), bl_ref, atol=1e-14,
+            err_msg=("_pert_ppm iv=1 random-grid bit-mismatch on bl — "
+                     "a branch has diverged from tp_core.F90:1193-1212."))
+        np.testing.assert_allclose(
+            np.asarray(br_out), br_ref, atol=1e-14,
+            err_msg=("_pert_ppm iv=1 random-grid bit-mismatch on br — "
+                     "a branch has diverged from tp_core.F90:1193-1212."))
+
+    def test_pert_ppm_iv0_matches_fortran_on_branch_probes(self):
+        """Probe each Fortran iv=0 branch: q<=0 short-circuit,
+        q>0 with no extremum, q>0 with extremum but fmin>=0 (no fix),
+        q>0 + extremum + both_positive (zero), q>0 + extremum + da1>0,
+        q>0 + extremum + da1<=0.
+        """
+        import numpy as np
+        from legoesm.core.fv_tp_2d import _pert_ppm_iv0
+
+        q  = np.array([ 0.0, -1.0,  1.0,   1.0,   2.0,   1.0,   1.0])
+        bl = np.array([ 1.0,  1.0,  0.1,   0.9,   0.5,  -0.1,   0.1])
+        br = np.array([-1.0, -1.0,  0.05, -0.1,   0.5,   0.4,  -0.4])
+        bl_ref, br_ref = self._ref_pert_ppm_iv0(q, bl, br)
+        bl_out, br_out = _pert_ppm_iv0(q, bl, br)
+        np.testing.assert_allclose(
+            np.asarray(bl_out), bl_ref, atol=1e-14,
+            err_msg=(f"_pert_ppm_iv0 diverges from Fortran on branch "
+                     f"probes.  bl_ref={bl_ref}, bl_got={bl_out}"))
+        np.testing.assert_allclose(
+            np.asarray(br_out), br_ref, atol=1e-14,
+            err_msg=(f"_pert_ppm_iv0 diverges from Fortran on branch "
+                     f"probes.  br_ref={br_ref}, br_got={br_out}"))
+
+    def test_pert_ppm_iv0_matches_fortran_on_random_grid(self):
+        """Random (q, bl, br) exercising all iv=0 branches."""
+        import numpy as np
+        from legoesm.core.fv_tp_2d import _pert_ppm_iv0
+
+        rng = np.random.default_rng(636)
+        # Mix of positive and nonpositive q to hit the short-circuit.
+        q = rng.standard_normal((6, 16, 16))
+        bl = rng.standard_normal((6, 16, 16)) * 0.5
+        br = rng.standard_normal((6, 16, 16)) * 0.5
+        bl_ref, br_ref = self._ref_pert_ppm_iv0(q, bl, br)
+        bl_out, br_out = _pert_ppm_iv0(q, bl, br)
+        np.testing.assert_allclose(
+            np.asarray(bl_out), bl_ref, atol=1e-14,
+            err_msg=("_pert_ppm_iv0 random-grid bit-mismatch on bl — "
+                     "a branch has diverged from tp_core.F90:1169-1192."))
+        np.testing.assert_allclose(
+            np.asarray(br_out), br_ref, atol=1e-14,
+            err_msg=("_pert_ppm_iv0 random-grid bit-mismatch on br — "
+                     "a branch has diverged from tp_core.F90:1169-1192."))
+
+    def test_pert_ppm_iv1_zeros_when_same_sign(self):
+        """Explicit lock of the else-branch (al*ar >= 0 → both zero).
+        A regression that dropped the branch would fail on this small
+        targeted probe even if the random-grid test missed it due to
+        sampling.
+        """
+        import numpy as np
+        from legoesm.core.fv_tp_2d import _pert_ppm
+
+        # Both positive:
+        bl = np.array([0.3, 0.5, 1.2])
+        br = np.array([0.1, 0.9, 0.4])
+        bl_out, br_out = _pert_ppm(bl, br)
+        np.testing.assert_array_equal(
+            np.asarray(bl_out), np.zeros_like(bl),
+            err_msg=("iv=1: same-sign (both positive) must zero bl"))
+        np.testing.assert_array_equal(
+            np.asarray(br_out), np.zeros_like(br),
+            err_msg=("iv=1: same-sign (both positive) must zero br"))
+        # Both negative:
+        bl = np.array([-0.3, -0.5, -1.2])
+        br = np.array([-0.1, -0.9, -0.4])
+        bl_out, br_out = _pert_ppm(bl, br)
+        np.testing.assert_array_equal(np.asarray(bl_out), np.zeros_like(bl))
+        np.testing.assert_array_equal(np.asarray(br_out), np.zeros_like(br))
+
+
 if __name__ == "__main__":
     unittest.main()

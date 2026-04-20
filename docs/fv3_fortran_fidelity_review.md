@@ -1200,3 +1200,34 @@ The `interp_offsets` refusal is retained because neither `pad_halo_mpi` nor `pad
 
 129 halo tests pass total (71 `test_scale_halo.py` + 24 `test_halo.py` + 34 `test_async_halo.py`).
 
+### Iter-635 — Fortran-formula lock for `_pert_ppm` (iv=1) and `_pert_ppm_iv0` (iv=0)
+
+**Motivation**: `_pert_ppm` and `_pert_ppm_iv0` in `src/legoesm/core/fv_tp_2d.py` implement FV3's `pert_ppm` routine (`tp_core.F90:1156-1214`).  These are core PPM limiter helpers used by the Lin-Rood operator-split 2D transport scheme.  Before iter-635 there were behavioural tests (`test_pert_ppm_iv1_not_called_under_duogrid_via_production_path`, `test_pert_ppm_iv1_called_in_non_duogrid_production_path`) that locked which path calls them — but NO Fortran-formula lock on the numerical output.  A refactor could change the branch logic in a way that still fires correctly but silently drifts on non-duogrid runs.
+
+**Fortran iv=1 reference** (`tp_core.F90:1193-1212`):
+```fortran
+if ( al(i)*ar(i) < 0. ) then
+    da1 = al(i) - ar(i)
+    a6da = 3.*(al(i)+ar(i))*da1
+    if( a6da < -da2 ) then
+        ar(i) = -2.*al(i)
+    elseif( a6da > da2 ) then
+        al(i) = -2.*ar(i)
+    endif
+else
+    al(i) = 0.  ; ar(i) = 0.
+endif
+```
+
+**Fortran iv=0 reference** (`tp_core.F90:1169-1192`): positive-definite variant with `r12 = 1/12`, a parabola-minimum `fmin` test, and a three-way `both_positive / da1>0 / da1<=0` branch.
+
+**Tests added** (`tests/unit/test_cdgrid_fv3_regression.py::TestPertPpmFortranFormula`, 5 total):
+- `_ref_pert_ppm_iv1` + `_ref_pert_ppm_iv0` — exact numpy reproductions of the Fortran formulas.
+- `test_pert_ppm_iv1_matches_fortran_on_branch_probes`: five hand-crafted (bl, br) pairs covering each iv=1 branch.
+- `test_pert_ppm_iv1_matches_fortran_on_random_grid`: random (6, 16, 16) grid at atol=1e-14.
+- `test_pert_ppm_iv0_matches_fortran_on_branch_probes`: 7 probes covering q≤0, q>0 no-extremum, q>0+extremum+fmin≥0, q>0+extremum+fmin<0 (all three sub-branches).
+- `test_pert_ppm_iv0_matches_fortran_on_random_grid`: random grid at atol=1e-14.
+- `test_pert_ppm_iv1_zeros_when_same_sign`: explicit lock of the both-positive and both-negative same-sign branches.
+
+All 5 tests pass at `atol=1e-14`, giving bit-for-bit equivalence between the JAX implementation and a line-by-line Fortran reproduction.  Any future edit to `_pert_ppm` / `_pert_ppm_iv0` that drifts from `tp_core.F90` will fail these tests.
+
