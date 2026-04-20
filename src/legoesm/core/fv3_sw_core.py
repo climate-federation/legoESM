@@ -281,9 +281,16 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     from legoesm.grids.duogrid import ext_vector_dgrid
 
     n = cdgrid.n
-    h = 2  # halo depth for 4th-order A→C stencil
     grid = cdgrid.base
     dg = grid.duogrid
+    # Iter-654: upgrade halo depth from h=2 to h=3 when the duogrid
+    # structure has at least 3 halo cells (ng>=3).  This is the
+    # FB-chain ng=3 wiring documented in docs/fv3_fortran_fidelity_review.md
+    # architectural item #2: `_c_sw` first-order upwind at cube edges
+    # amplifies face-boundary halo divergence, and Fortran FV3 delivers
+    # halo-quality data 3 rings deep via `mpp_update_domains(DGRID_NE)`.
+    # Fall back to h=2 for small grids where ng<3.
+    h = 3 if (dg is not None and dg.ng >= 3) else 2
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
 
@@ -336,27 +343,35 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     # utmp(i, j_cell) = a2*(u(i,j-1)+u(i,j+2)) + a1*(u(i,j)+u(i,j+1))
     # Same 4th-order stencil applied uniformly to ALL cells (interior +
     # i-halo) using ONE halo field.  Matches FV3 sw_core.F90:3421-3435
-    # duogrid branch exactly: the loop range is (isd..ied, jsd+1..jed-1)
-    # — here we cover (i=-h..n+h-1, j_cell=0..n-1).
+    # duogrid branch exactly.
     #
-    # u_d_full has shape (6, n+2h, n+2h-1).  j-edge padded indices
-    # 0..n+2h-2 correspond to cdgrid edges -h+1..n+h-1.  For a given
-    # j_cell in [0, n-1], the stencil reads cdgrid j-edges
-    # [j_cell-1, j_cell, j_cell+1, j_cell+2] → padded [j_cell, j_cell+1,
-    # j_cell+2, j_cell+3].
+    # Iter-654 generalisation: u_d_full has shape (6, n+2h, n+2h-1).
+    # j-edge padded index p corresponds to cdgrid edge (p - (h-1)).
+    # So cdgrid edges [j_cell-1, j_cell, j_cell+1, j_cell+2] map to
+    # padded [j_cell + (h-2), j_cell + (h-1), j_cell + h, j_cell + (h+1)].
+    # For j_cell in [0, n-1]: padded ranges
+    #   [h-2:h-2+n, h-1:h-1+n, h:h+n, h+1:h+1+n]
+    # At h=2 these collapse to [0:n, 1:n+1, 2:n+2, 3:n+3] (original code).
     if n > 3:
         utmp_full = (
-            _A2 * (u_d_full[:, :, 0:n] + u_d_full[:, :, 3:3 + n])
-            + _A1 * (u_d_full[:, :, 1:1 + n] + u_d_full[:, :, 2:2 + n])
+            _A2 * (u_d_full[:, :, h - 2:h - 2 + n]
+                   + u_d_full[:, :, h + 1:h + 1 + n])
+            + _A1 * (u_d_full[:, :, h - 1:h - 1 + n]
+                     + u_d_full[:, :, h:h + n])
         )  # (6, n+2h, n) — i-halo full, j-interior only
         vtmp_full = (
-            _A2 * (v_d_full[:, 0:n, :] + v_d_full[:, 3:3 + n, :])
-            + _A1 * (v_d_full[:, 1:1 + n, :] + v_d_full[:, 2:2 + n, :])
+            _A2 * (v_d_full[:, h - 2:h - 2 + n, :]
+                   + v_d_full[:, h + 1:h + 1 + n, :])
+            + _A1 * (v_d_full[:, h - 1:h - 1 + n, :]
+                     + v_d_full[:, h:h + n, :])
         )  # (6, n, n+2h) — j-halo full, i-interior only
     else:
-        # Tiny grid fallback: 2-point average without 4th-order stencil
-        utmp_full = 0.5 * (u_d_full[:, :, 1:1 + n] + u_d_full[:, :, 2:2 + n])
-        vtmp_full = 0.5 * (v_d_full[:, 1:1 + n, :] + v_d_full[:, 2:2 + n, :])
+        # Tiny grid fallback: 2-point average without 4th-order stencil.
+        # Read edges [j_cell, j_cell+1] → padded [j_cell+(h-1), j_cell+h].
+        utmp_full = 0.5 * (u_d_full[:, :, h - 1:h - 1 + n]
+                            + u_d_full[:, :, h:h + n])
+        vtmp_full = 0.5 * (v_d_full[:, h - 1:h - 1 + n, :]
+                            + v_d_full[:, h:h + n, :])
 
     # ---- Step 3: Covariant→contravariant at cell centres (interior) ----
     # FV3 sw_core.F90:3451-3452:
@@ -370,15 +385,24 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
 
     # ---- Step 4: 4th-order A→C interpolation ----
     # uc(i+1/2, j) = a2*(utmp(i-1,j)+utmp(i+2,j)) + a1*(utmp(i,j)+utmp(i+1,j))
-    # utmp_full already has i-halo of depth h — read it directly via a
-    # sliding window stencil, producing uc at all n+1 u-edges.
-    uc = (_A2 * (utmp_full[:, :-3, :] + utmp_full[:, 3:, :])
-          + _A1 * (utmp_full[:, 1:-2, :] + utmp_full[:, 2:-1, :]))  # (6, n+1, n)
+    # utmp_full has shape (6, n+2h, n).  Padded i-index p maps to cell
+    # (p - h).  For u-face k in [0, n], the stencil reads cells
+    # [k-2, k-1, k, k+1] → padded [k-2+h, k-1+h, k+h, k+1+h].
+    # For k in [0, n] (n+1 faces): padded ranges
+    #   [h-2:h-1+n, h-1:h+n, h:h+n+1, h+1:h+2+n]
+    # At h=2 these collapse to [0:n+1, 1:n+2, 2:n+3, 3:n+4] == the
+    # original `[:-3, 1:-2, 2:-1, 3:]` slicing of length (n+4).
+    uc = (_A2 * (utmp_full[:, h - 2:h - 1 + n, :]
+                 + utmp_full[:, h + 1:h + 2 + n, :])
+          + _A1 * (utmp_full[:, h - 1:h + n, :]
+                   + utmp_full[:, h:h + n + 1, :]))  # (6, n+1, n)
 
     ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
 
-    vc = (_A2 * (vtmp_full[:, :, :-3] + vtmp_full[:, :, 3:])
-          + _A1 * (vtmp_full[:, :, 1:-2] + vtmp_full[:, :, 2:-1]))  # (6, n, n+1)
+    vc = (_A2 * (vtmp_full[:, :, h - 2:h - 1 + n]
+                 + vtmp_full[:, :, h + 1:h + 2 + n])
+          + _A1 * (vtmp_full[:, :, h - 1:h + n]
+                   + vtmp_full[:, :, h:h + n + 1]))  # (6, n, n+1)
 
     vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 

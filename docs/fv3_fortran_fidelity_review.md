@@ -1551,3 +1551,26 @@ Also changed the comment at line 2334 to describe the actual `~1e-13 round-trip 
 
 All 118 tests still pass.  The test-docstring tolerance claims now cite the literal `atol` value enforced at each call site — no more subjective "close enough to round-off" language.
 
+### Iter-654 — FB-chain halo=3 wiring, part 1: `_d2a2c_vect_duogrid`
+
+**Motivation**: user directive to implement (a) FB-chain halo=3 wiring to attack the W2 v-wind artifacts (polar-cap + mid-latitude cube-face imprint).  Review doc item #2: the C36-instability blocker requires ng=3 halo throughout the FB chain.  Smallest first piece: generalise `_d2a2c_vect_duogrid` so its halo depth can be flipped from 2 to 3 when the duogrid structure supports it.
+
+**Change** (`src/legoesm/core/fv3_sw_core.py:283-385`):
+- Replaced the literal `h = 2` at line 284 with `h = 3 if (dg is not None and dg.ng >= 3) else 2`.
+- Rewrote the 4th-order D→A stencil slices at lines 347-355 from hard-coded `[0:n, 1:n+1, 2:n+2, 3:n+3]` to `h`-parameterised `[h-2:h-2+n, h-1:h-1+n, h:h+n, h+1:h+1+n]` (identical at h=2, correct at h=3).
+- Rewrote the 4th-order A→C stencil slices at lines 375-381 from `[:-3, 1:-2, 2:-1, 3:]` to `h`-parameterised `[h-2:h-1+n, h-1:h+n, h:h+n+1, h+1:h+2+n]`.
+- Tiny-grid fallback at lines 358-359 also generalised.
+
+**Tests**: all 118 regression tests pass.  Small-n tests exercise h=2 (backward-compatible); n≥6 tests exercise h=3.
+
+**W2 result**: the SW test matrix at C36 is UNCHANGED (L2=2.42e-04, Linf=1.83e-03).  Reason: the production W2 path runs `FV3EdgeShallowWaterModel.tendencies` → `fv3_sw_tendencies` (A-L + RK3), NOT the FB chain.  `_d2a2c_vect_duogrid` is consumed only by `_c_sw` / `_d_sw_native` / `fv3_fb_sw_step`.
+
+**FB-chain stability**: ran `scripts/diag_williamson2_fb.py` at C36 — FB chain still **BLOWS UP at step 26** (4.3h in).  Iter-654's change to `_d2a2c_vect_duogrid` alone is NOT sufficient to stabilise the FB chain at C36.  Further h=3 wiring is needed at other sites:
+- `_c_sw` (fv3_sw_core.py:1198): uses `fv3_d2cc` / `fv3_cc2c` + `cgrid_mass_flux_divergence` which all run at halo=2.
+- `_d_sw_native` (fv3_sw_core.py:1742): complex orchestration with many halo=2 call sites.
+- `fv3_fb_sw_step` (fv3_sw_core.py:1874): top-level orchestrator.
+
+**Next iter target**: identify which specific halo=2 site in `_c_sw` amplifies the cube-edge error most, and upgrade that next.  Likely candidates: `cgrid_mass_flux_divergence`, the sin_sg halo exchange for upwind selection, or `_d_sw5_corner_divergence`.
+
+**Pending**: visual inspection of W2 v-wind after the FB-chain is stable.  Today's iter-654 is infrastructure only — no visible W2 change, no regression.
+
