@@ -78,6 +78,7 @@ from legoesm.grids.halo import (
     _extract_edge_strip_at_depth,
     _fill_corners_h1,
     _fill_corners_h2,
+    _fill_corners_h3,  # iter-628: needed for halo=3 MPI port
 )
 from legoesm.parallel.comm import CommTopology
 from legoesm.parallel.reductions import _mpi4jax_array_result
@@ -705,28 +706,40 @@ def _pad_halo_mpi_face_only_4d(
 
     # Handle local edges
     for face, edge, nbr_face, nbr_edge, is_reversed, _ in local_edges:
-        # [ANCHOR iter-613: local-edge-depth-extraction] — extend
-        # the halo==2 branch to halo==3 here: add strip_d2 + place.
+        # [ANCHOR iter-613: local-edge-depth-extraction] — iter-628
+        # extended to halo=3 via `_place_strip_h3_4d` + 3-depth strips.
         if halo == 1:
             strip = _extract_edge_strip_4d(data, nbr_face, nbr_edge)
             if is_reversed:
                 strip = strip[::-1]
             padded = _place_strip_4d(padded, face, edge, strip)
-        else:
+        elif halo == 2:
             strip_d0 = _extract_edge_strip_at_depth_4d(data, nbr_face, nbr_edge, 0)
             strip_d1 = _extract_edge_strip_at_depth_4d(data, nbr_face, nbr_edge, 1)
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
             padded = _place_strip_h2_4d(padded, face, edge, strip_d0, strip_d1)
+        else:  # halo == 3
+            strip_d0 = _extract_edge_strip_at_depth_4d(data, nbr_face, nbr_edge, 0)
+            strip_d1 = _extract_edge_strip_at_depth_4d(data, nbr_face, nbr_edge, 1)
+            strip_d2 = _extract_edge_strip_at_depth_4d(data, nbr_face, nbr_edge, 2)
+            if is_reversed:
+                strip_d0 = strip_d0[::-1]
+                strip_d1 = strip_d1[::-1]
+                strip_d2 = strip_d2[::-1]
+            padded = _place_strip_h3_4d(padded, face, edge,
+                                          strip_d0, strip_d1, strip_d2)
 
-    # [ANCHOR iter-613: corner-fill-face-only] — extend to halo==3
-    # with _fill_corners_h3.
+    # [ANCHOR iter-613: corner-fill-face-only] — iter-628 extended
+    # to halo=3 via `_fill_corners_h3`.
     if not remote_edges:
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3
+            padded = _fill_corners_h3(padded)
         return padded
 
     # Batched neighbor sendrecv — one message per neighbor for all levels

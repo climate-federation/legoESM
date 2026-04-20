@@ -1069,6 +1069,58 @@ class TestPadHaloH3Guardrails:
                             match="pad_halo_mpi_4d"):
             packed_pad_halo_mpi_4d(a, b, topology=_Stub(), halo=3)
 
+    def test_pad_halo_mpi_face_only_4d_halo3_single_rank(self):
+        """Iter-628: `_pad_halo_mpi_face_only_4d` now supports halo=3
+        for the single-rank (all-local-edge) case.
+
+        Single-rank topology has `len(local_face_ids) == 6` and NO
+        remote edges.  In this case the sendrecv path is never
+        triggered (`if not remote_edges: return padded`), so
+        mpi4jax isn't required.  The local-edge loop now uses
+        `_place_strip_h3_4d` for halo=3 (iter-627 helper).
+
+        Test: build single-rank topology, call the helper with
+        random (6, n, n, nlev) input, verify the output matches
+        the local scalar `_pad_halo_local_h3` applied level-by-
+        level — the two paths should produce identical halo
+        exchange for a single-rank all-local configuration.
+        """
+        from legoesm.parallel.halo_exchange import (
+            _pad_halo_mpi_face_only_4d)
+        from legoesm.parallel.comm import build_comm_topology
+        from legoesm.grids.halo import _pad_halo_local_h3
+
+        topology = build_comm_topology(rank=0, n_processes=1)
+        assert len(topology.local_face_ids) == 6, (
+            "Single-rank topology should have all 6 faces local")
+
+        n = N
+        nlev = 2
+        rng = np.random.default_rng(628)
+        data = jnp.asarray(
+            rng.standard_normal((6, n, n, nlev)))
+
+        # Call the 4D helper (no mpi4jax / MPI needed when no
+        # remote edges).
+        padded_4d = _pad_halo_mpi_face_only_4d(
+            data, topology, halo=3, mpi4jax=None, MPI=None)
+        assert padded_4d.shape == (6, n + 6, n + 6, nlev)
+
+        # Reference: apply scalar `_pad_halo_local_h3` level-by-level
+        # and stack.
+        refs = [np.asarray(_pad_halo_local_h3(data[..., lev]))
+                for lev in range(nlev)]
+        padded_ref = np.stack(refs, axis=-1)
+
+        diff = float(np.max(np.abs(
+            np.asarray(padded_4d) - padded_ref)))
+        assert diff < 1e-12, (
+            f"4D halo=3 helper deviates from scalar h3 ref by "
+            f"{diff:.3e}.  Check: local-edge branch uses "
+            f"_place_strip_h3_4d, corner fill uses _fill_corners_h3, "
+            f"strip extraction uses _extract_edge_strip_at_depth_4d "
+            f"for depths 0, 1, AND 2.")
+
     def test_place_strip_h3_4d_index_conventions(self):
         """Iter-627: lock the depth-to-index mapping for the new
         `_place_strip_h3_4d` helper (step #7 of the iter-613 port

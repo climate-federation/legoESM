@@ -1035,3 +1035,31 @@ For halo=3 shape `(6, n+6, n+6, nlev)`:
 
 The placement helper is now available for future iterations to call from `_pad_halo_mpi_face_only_4d` and `_pad_halo_mpi_tiled_4d` when extending the `halo == 2` branches to halo == 3.
 
+### Iter-628 (2026-04-20): wire halo=3 into `_pad_halo_mpi_face_only_4d` (local path)
+
+**Building on iter-627**: now that `_place_strip_h3_4d` exists, I can wire it into the MPI face-only helper.  Step 1 (local-edge-depth-extraction) and step 4 (corner-fill-face-only) of the iter-613 port spec are now IMPLEMENTED.
+
+**Changes**:
+1. Import `_fill_corners_h3` alongside the h1/h2 variants at module top.
+2. Local-edge branch: extend `if halo == 1 / else` to three-way dispatch `if halo == 1 / elif halo == 2 / else halo == 3`.  For halo==3, extract 3 depth strips via `_extract_edge_strip_at_depth_4d`, apply reversal to each, place via `_place_strip_h3_4d`.
+3. Corner-fill (early-return branch): three-way dispatch to `_fill_corners_h3` for halo==3.
+
+**Public guard remains**: `pad_halo_mpi_4d(halo=3)` still raises `NotImplementedError` at the public entry point because the REMOTE send/recv path (steps 3, the depth-2 strip in the recv loop) is not yet implemented.  Single-rank calls that don't trigger remote edges would work, but the public API continues to reject halo=3 until all 7 spec steps are complete.
+
+**Lock added**: `test_pad_halo_mpi_face_only_4d_halo3_single_rank`.  Directly calls the internal helper `_pad_halo_mpi_face_only_4d` with halo=3 and a single-rank topology (`n_processes=1` → all 6 faces local).  Compares the output level-by-level to the scalar `_pad_halo_local_h3` reference: bit-for-bit match (< 1e-12 diff).
+
+**Sanity**: passing mpi4jax=None, MPI=None is safe for this call because `if not remote_edges: return padded` short-circuits before any sendrecv would happen.
+
+63 `test_scale_halo` tests pass.
+
+**MPI halo=3 port progress**:
+- ✅ Step 1: local-edge-depth-extraction (THIS ITER).
+- ✅ Step 4: corner-fill-face-only (THIS ITER).
+- ✅ Step 6: `_fill_corners_h3` (existing).
+- ✅ Step 7: `_place_strip_h3_4d` (iter-627).
+- ❌ Step 2: remote-edge send loop (already generic — no change needed; but step 3 gates the public API).
+- ❌ Step 3: remote-edge recv loop (depth-2 strip extraction).
+- ❌ Step 5: same 3 changes in `_pad_halo_mpi_tiled_4d` (corner-fill-tiled-* anchors).
+
+Next iteration can: (a) mirror steps 1+4 into the tiled helper; OR (b) implement step 3 to unlock multi-rank halo=3.
+
