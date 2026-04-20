@@ -5260,3 +5260,20 @@ Piece (a) is small: `compute_padded_angle(n, halo=3)` and `compute_padded_half_m
 
 The halo=3 infrastructure is no longer the blocking dependency on the non-MPI single-device path, which is what the W2/W5 test matrix uses.
 
+### Iter-596 (2026-04-20): validate the halo cells iter-595 exposed
+
+**Codex stop-time review on iter-595 (commit e087f33)**: the iter-595 test `test_pad_halo_vector_halo3_works_on_local_backend` removed the halo=3 guard without validating the halo cells it just exposed — it only checked interior preservation, which is the trivial identity portion of the rotation round-trip.  The new halo cells (indices [0..2] and [-3..-1] in the padded output) had ZERO explicit validation.
+
+**Enhanced test coverage**:
+1. **Interior preservation** (iter-595 invariant, kept): `up[:, 3:-3, 3:-3]` ≈ input u within 1e-10.
+2. **Inner two halo rings match halo=2 output** (new): for random inputs, the INNER TWO rings of the halo=3 output (indices [1, 2] and [-3, -2]) must agree with the validated halo=2 output at the overlapping physical cells — per direction (W/E/S/N) and per component (u/v) — to within 1e-10.  This anchors the h=3 path to the already-validated h=2 path at the two overlapping rings.
+3. **Outermost halo ring is non-trivial** (new): for random unit-variance inputs, the outermost halo ring (index [0] and [-1]) must be finite AND have max magnitude > 0.1 on each of the 4 sides — catches bugs where the outer ring is zero, NaN, or silently dropped.
+
+**Sanity-verified both new checks fire**:
+- Zeroing `u_east_padded[:, 0/-1, :]` / `v_north_padded[:, :, 0/-1]` at h=3 produces outermost-ring magnitude 0.0 on face 0, firing check-3 with the message "h=3 outermost W ring has near-zero magnitude (0.000e+00)".
+- Perturbing the inner ring `u_east_padded[:, 1, :] += 10.0` at h=3 produces 9.96 diff vs h=2, firing check-2 with the message "h=3 inner halo rings on W u diverge from validated h=2 output by 9.963e+00".
+
+Production halo.py restored after each sanity-check.  All 54 halo tests pass.
+
+**Note**: check-2 has a subtle implicit invariant — the halo=2 reference path must itself be correct.  `TestPadHaloH3Dispatch` elsewhere in the file validates the halo=2 pad (and the iter-103 BGRID_NE sync + iter-107 duogrid constant-field checks extend that coverage).  The h=3 → h=2 anchor chain makes iter-596 a tight composition lock rather than an independent check.
+

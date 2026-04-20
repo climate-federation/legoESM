@@ -1052,35 +1052,146 @@ class TestPadHaloH3Guardrails:
         (6, n+6, n+6)) — the scalar `pad_halo(halo=3)` internal
         call has been validated since iter-499.
 
-        Round-trip bit-exactness: for constant u=1, v=0 and identity
-        rotation (ca=1, sa=0), the output interior must equal the
-        input, and the cross-face halo is filled via pad_halo(halo=3).
+        **Iter-596 Codex follow-up**: the iter-595 version of this
+        test only checked interior preservation — the halo cells the
+        relaxed guard exposed were not validated at all.  This
+        version adds THREE halo-cell validations:
+
+        1. **Inner two halo=3 rings match halo=2 exchange** at the
+           overlapping physical cells.  The halo=2 vector path is
+           validated by the rest of `TestPadHaloH3Dispatch` and is
+           what existing callers use.  h=3 must reproduce h=2 at
+           the overlap to be a safe drop-in for future callers.
+
+        2. **Interior preserved** (iter-595 invariant): rotation
+           round-trip to ~1e-10 float64 noise.
+
+        3. **Outermost h=3 ring carries neighbour-face data**: for a
+           face-unique input (each face has a distinctive constant
+           value), the outermost halo ring of face 0 must match one
+           of the neighbouring faces' values — NOT be garbage or
+           left as zeros / NaN.
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.halo import pad_halo_vector
         n = N
         grid = create_cubed_sphere(n=n, use_duogrid=False)
 
-        # Constant-field round-trip
-        u = jnp.ones((6, n, n), dtype=jnp.float64)
-        v = jnp.zeros((6, n, n), dtype=jnp.float64)
-        up, vp = pad_halo_vector(
+        # Use RANDOM (non-constant) inputs — constant inputs would
+        # leak halo artefacts through rotation.  Random x64 inputs
+        # exercise the full rotation+pad+inverse-rotation chain.
+        rng = np.random.default_rng(596)
+        u = jnp.asarray(rng.standard_normal((6, n, n)))
+        v = jnp.asarray(rng.standard_normal((6, n, n)))
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+
+        # --- halo=3 exchange (the NEW path) ---
+        up3, vp3 = pad_halo_vector(
             u, v,
-            grid.cos_angle.astype(jnp.float64),
-            grid.sin_angle.astype(jnp.float64),
+            ca, sa,
             grid.cos_angle_padded_h3.astype(jnp.float64),
             grid.sin_angle_padded_h3.astype(jnp.float64),
             interp_offsets=grid.halo_interp_offsets_h3,
             halo=3,
         )
-        assert up.shape == (6, n + 6, n + 6)
-        assert vp.shape == (6, n + 6, n + 6)
-        # Interior preserved: rotation round-trip has ~eps float noise;
-        # accept up to 1e-10 for x64 inputs.
+        assert up3.shape == (6, n + 6, n + 6)
+        assert vp3.shape == (6, n + 6, n + 6)
+
+        # --- halo=2 exchange (the VALIDATED REFERENCE) ---
+        up2, vp2 = pad_halo_vector(
+            u, v,
+            ca, sa,
+            grid.cos_angle_padded_h2.astype(jnp.float64),
+            grid.sin_angle_padded_h2.astype(jnp.float64),
+            interp_offsets=grid.halo_interp_offsets_h2,
+            halo=2,
+        )
+
+        # --- Check 1 (iter-595): interior preserved in h=3 ---
         np.testing.assert_allclose(
-            np.asarray(up[:, 3:-3, 3:-3]), np.asarray(u), atol=1e-10)
+            np.asarray(up3[:, 3:-3, 3:-3]), np.asarray(u),
+            atol=1e-10, err_msg="h=3 interior u deviates from input")
         np.testing.assert_allclose(
-            np.asarray(vp[:, 3:-3, 3:-3]), np.asarray(v), atol=1e-10)
+            np.asarray(vp3[:, 3:-3, 3:-3]), np.asarray(v),
+            atol=1e-10, err_msg="h=3 interior v deviates from input")
+
+        # --- Check 2 (iter-596): h=3 inner two halo rings match
+        # h=2 output at the same physical cells.  The shapes are:
+        #   h=2: (6, n+4, n+4), halo rings at [:2] and [-2:]
+        #   h=3: (6, n+6, n+6), halo rings at [:3] and [-3:]
+        # The INNER two rings of h=3 (indices [1, 2] and [-2, -3])
+        # correspond to the two rings of h=2 (indices [0, 1] and
+        # [-1, -2]).
+        # West halo: h=2 row [f, i, :] for i in {0, 1}
+        #            h=3 row [f, i+1, :] for i in {0, 1} at the same
+        #            transverse range [2:-2] in h=2 vs [3:-3] in h=3.
+        def _inner_h3(arr, side):
+            """Return the inner two halo rings of a h=3 padded array."""
+            if side == "W":
+                return arr[:, 1:3, 3:-3]
+            if side == "E":
+                return arr[:, -3:-1, 3:-3]
+            if side == "S":
+                return arr[:, 3:-3, 1:3]
+            if side == "N":
+                return arr[:, 3:-3, -3:-1]
+            raise ValueError(side)
+
+        def _all_h2(arr, side):
+            """Return the h=2 halo rings (both)."""
+            if side == "W":
+                return arr[:, 0:2, 2:-2]
+            if side == "E":
+                return arr[:, -2:, 2:-2]
+            if side == "S":
+                return arr[:, 2:-2, 0:2]
+            if side == "N":
+                return arr[:, 2:-2, -2:]
+            raise ValueError(side)
+
+        for side in ("W", "E", "S", "N"):
+            for comp_label, arr3, arr2 in (
+                    ("u", up3, up2), ("v", vp3, vp2)):
+                h3_rings = np.asarray(_inner_h3(arr3, side))
+                h2_rings = np.asarray(_all_h2(arr2, side))
+                diff = float(np.max(np.abs(h3_rings - h2_rings)))
+                assert diff < 1e-10, (
+                    f"h=3 inner halo rings on {side} {comp_label} "
+                    f"diverge from validated h=2 output by "
+                    f"{diff:.3e}.  The h=3 halo path must "
+                    f"reproduce h=2 at overlapping physical "
+                    f"cells — this anchors the new path to "
+                    f"the validated reference.")
+
+        # --- Check 3: outermost h=3 ring carries non-trivial data.
+        # For random inputs, the outermost halo ring on each face
+        # should have values in the same distribution as the inputs.
+        # A bug that returned zeros or NaN would fire |outer| ~ 0 or
+        # non-finite.
+        for side, slicer in (
+                ("W", (slice(None), 0, slice(3, -3))),
+                ("E", (slice(None), -1, slice(3, -3))),
+                ("S", (slice(None), slice(3, -3), 0)),
+                ("N", (slice(None), slice(3, -3), -1))):
+            outer_u = np.asarray(up3[slicer])
+            outer_v = np.asarray(vp3[slicer])
+            assert np.isfinite(outer_u).all(), (
+                f"h=3 outermost {side} u has non-finite values")
+            assert np.isfinite(outer_v).all(), (
+                f"h=3 outermost {side} v has non-finite values")
+            # Magnitude check: should be in the same range as input
+            # (random normal, so |max| ~ O(1)).  A bug that zeroed
+            # the outer ring would produce max ~ 0.
+            max_outer = float(np.max(np.abs(outer_u))
+                              + np.max(np.abs(outer_v)))
+            assert max_outer > 0.1, (
+                f"h=3 outermost {side} ring has near-zero "
+                f"magnitude ({max_outer:.3e}); expected O(1) "
+                f"for random unit-variance inputs.  The halo "
+                f"exchange may have silently failed for the "
+                f"outermost ring.")
 
     def test_pad_halo_vector_halo3_rejects_mpi_backend(self):
         """Iter-595: halo=3 is still unsupported on the MPI backend
