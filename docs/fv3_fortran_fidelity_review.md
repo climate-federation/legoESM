@@ -742,3 +742,11 @@ This is the EXACT path the matrix script takes internally for cubed-sphere field
 
 The FB-chain is now UNLOCKED on the single-device (non-MPI) backend — callers can flip from halo=2 to halo=3 without hitting an infrastructure wall.  The MPI backend is UNCHANGED but the missing piece is now clearly enumerated instead of silently wrong.
 
+### Iter-612 (2026-04-20): lock `packed_pad_halo_mpi_4d` halo=3 delegation
+
+**Motivation**: iter-611 added the halo=3 guard on `pad_halo_mpi_4d`.  `packed_pad_halo_mpi_4d` delegates to it via BOTH the single-field path (line 952) and the multi-field concat-split path (line 959).  A future refactor that bypasses the delegation (e.g., implementing a dedicated packed path for performance) could silently re-enable halo=3 without the underlying infrastructure.
+
+**Lock added**: `test_packed_pad_halo_mpi_4d_halo3_raises_notimplemented` in `TestPadHaloH3Guardrails`.  Exercises BOTH delegation paths (1 field → single delegation; 2 fields → multi-field concat delegation) and verifies each propagates the `NotImplementedError`.
+
+**60 `test_scale_halo` tests pass**.  Both iter-611 and iter-612 guards active; `pad_halo_mpi_4d(halo=3)` and `packed_pad_halo_mpi_4d(halo=3)` both raise with the same actionable message pointing to the missing `_fill_corners_h3` + depth-2 strip wiring.
+

@@ -1045,6 +1045,30 @@ class TestPadHaloH3Guardrails:
         with pytest.raises(NotImplementedError, match="pad_halo_4d"):
             pad_halo_4d(data, halo=3)
 
+    def test_packed_pad_halo_mpi_4d_halo3_raises_notimplemented(self):
+        """Iter-612: `packed_pad_halo_mpi_4d` delegates to
+        `pad_halo_mpi_4d` via both single-field (line 952) and
+        multi-field (line 959) code paths.  Both must propagate the
+        iter-611 halo=3 NotImplementedError.  A future refactor that
+        bypasses the delegation (e.g., implementing a dedicated
+        packed path) could silently re-enable halo=3 without the
+        underlying infrastructure.  This lock catches that.
+        """
+        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+
+        class _Stub:
+            tiling = (1, 1)
+        # Single-field path
+        a = jnp.ones((6, N, N, 2), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError,
+                            match="pad_halo_mpi_4d"):
+            packed_pad_halo_mpi_4d(a, topology=_Stub(), halo=3)
+        # Multi-field path (2 fields → concat path)
+        b = jnp.ones((6, N, N, 3), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError,
+                            match="pad_halo_mpi_4d"):
+            packed_pad_halo_mpi_4d(a, b, topology=_Stub(), halo=3)
+
     def test_pad_halo_mpi_4d_halo3_raises_notimplemented(self):
         """Iter-611: the MPI 4D halo exchange must explicitly reject
         halo=3.  The underlying face-only/tiled helpers branch on
