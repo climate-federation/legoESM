@@ -1418,6 +1418,134 @@ class TestPadHaloH3Guardrails:
                     f"-sin_angle_padded_h3 * u_east[nbr={nbr_face}] "
                     f"(={expected_u_east}).  max diff = {v_diff:.3e}.")
 
+    def test_pad_halo_vector_halo3_outer_ring_axis_reversal(self):
+        """Iter-599 (Codex stop-time review on iter-598): the iter-598
+        face-unique-constant test does not actually exercise
+        axis-reversal — reversing a constant-along-strip field gives
+        the same constant, so a bug that FORGOT to apply `is_reversed`
+        from CONNECTIVITY at the outermost halo ring would pass.
+
+        This test uses a field that varies ALONG THE STRIP direction
+        with face-unique offsets, so (a) reversed vs non-reversed
+        strips give different output values and (b) reading the wrong
+        neighbour face gives a different offset.
+
+        Field: `u_east[f, i, j] = 100*f + 0.5*i + 0.1*j` (no
+        duplicate values; varies along both axes; different offset
+        per face).  v_north = 0 so the grid-aligned input reduces to
+        u_grid = cos_angle * u_east, v_grid = -sin_angle * u_east.
+
+        `interp_offsets=None` — skip the offset interpolation so the
+        halo values are nearest-cell copies of the neighbour strip
+        (possibly reversed), which we can predict exactly with
+        `_extract_edge_strip_at_depth` + `[::-1]` if `is_reversed`.
+
+        For each face × side × depth-2 (outermost h=3 halo), we
+        compute the expected u_east strip directly from CONNECTIVITY
+        and check the grid-aligned output matches
+        `cos_angle_padded_h3 * expected_u_east`.
+
+        Sanity-regression this catches that iter-598 misses:
+        a refactor of `_pad_halo_local_h3` that drops the
+        `strip = strip[::-1] if is_reversed else strip` line would
+        leave all connections unreversed; a field varying along the
+        strip would produce different expected vs actual values
+        on every `is_reversed=True` side (e.g., face 1 SOUTH,
+        face 2 SOUTH/NORTH, face 3 NORTH, face 4 NORTH/EAST,
+        face 5 EAST/SOUTH per CONNECTIVITY).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import (
+            pad_halo_vector,
+            CONNECTIVITY,
+            WEST, EAST, SOUTH, NORTH,
+            _extract_edge_strip_at_depth,
+        )
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = np.asarray(grid.cos_angle_padded_h3, dtype=np.float64)
+        sap3 = np.asarray(grid.sin_angle_padded_h3, dtype=np.float64)
+
+        # Build face-unique, varying-along-strip u_east:
+        # u_east[f, i, j] = 100*f + 0.5*i + 0.1*j
+        f_idx = jnp.arange(6, dtype=jnp.float64)[:, None, None]
+        i_idx = jnp.arange(n, dtype=jnp.float64)[None, :, None]
+        j_idx = jnp.arange(n, dtype=jnp.float64)[None, None, :]
+        u_east = 100.0 * f_idx + 0.5 * i_idx + 0.1 * j_idx
+        v_north = jnp.zeros((6, n, n), dtype=jnp.float64)
+
+        # Inverse rotation to grid-aligned
+        u_grid = ca * u_east + sa * v_north
+        v_grid = -sa * u_east + ca * v_north
+
+        # Vector halo=3 WITH interp_offsets=None to bypass
+        # interpolation — we want to validate the plain strip
+        # reversal + neighbour-face selection, not the weights.
+        up, vp = pad_halo_vector(
+            u_grid, v_grid, ca, sa,
+            jnp.asarray(cap3), jnp.asarray(sap3),
+            interp_offsets=None,
+            halo=3,
+        )
+        up_np = np.asarray(up)
+        vp_np = np.asarray(vp)
+        u_east_data = np.asarray(u_east)
+
+        # Outermost halo=3 ring at depth=2 for each side.
+        # Transverse slice [3:-3] corresponds to `n` interior cells
+        # per face — same number as the strip.
+        side_info = {
+            WEST:  {"name": "W", "slicer": lambda f: (f, 0, slice(3, -3))},
+            EAST:  {"name": "E", "slicer": lambda f: (f, -1, slice(3, -3))},
+            SOUTH: {"name": "S", "slicer": lambda f: (f, slice(3, -3), 0)},
+            NORTH: {"name": "N", "slicer": lambda f: (f, slice(3, -3), -1)},
+        }
+
+        for face in range(6):
+            for side, info in side_info.items():
+                nbr_face, nbr_edge, is_reversed = (
+                    CONNECTIVITY[face][side])
+                # Extract neighbour strip at depth=2 (the outermost
+                # h=3 halo at depth 2 from the boundary).
+                strip = np.asarray(
+                    _extract_edge_strip_at_depth(
+                        jnp.asarray(u_east_data),
+                        nbr_face, nbr_edge, depth=2))
+                if is_reversed:
+                    strip = strip[::-1]
+
+                sl = info["slicer"](face)
+                cap_slice = cap3[sl]
+                sap_slice = sap3[sl]
+                expected_u_grid = cap_slice * strip
+                expected_v_grid = -sap_slice * strip
+
+                u_diff = float(np.max(np.abs(
+                    up_np[sl] - expected_u_grid)))
+                v_diff = float(np.max(np.abs(
+                    vp_np[sl] - expected_v_grid)))
+                # Tolerance 1e-4 accounts for u_east ~O(600) max and
+                # float32 storage of grid angles (eps_f32 * 600 ≈ 1e-4).
+                # Still ~4 orders of magnitude below expected sanity-
+                # check diffs (O(1) - O(100) for reversal/face bugs).
+                assert u_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost halo "
+                    f"u does NOT match `cos_angle_padded_h3 * "
+                    f"(neighbour strip with reversal={is_reversed} "
+                    f"applied)`.  max diff = {u_diff:.3e}.  This "
+                    f"catches bugs where `is_reversed` is ignored at "
+                    f"the outermost h=3 ring (iter-598 test "
+                    f"wouldn't fire because it used a constant-"
+                    f"along-strip field).")
+                assert v_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost halo "
+                    f"v does NOT match `-sin_angle_padded_h3 * "
+                    f"(neighbour strip with reversal={is_reversed} "
+                    f"applied)`.  max diff = {v_diff:.3e}.")
+
     def test_pad_halo_vector_halo3_rejects_mpi_backend(self):
         """Iter-595: halo=3 is still unsupported on the MPI backend
         because `pad_halo_mpi_4d(halo=3)` is not yet implemented.  The

@@ -5316,3 +5316,31 @@ This validates:
 
 4 h=3 tests pass.  Production restored.
 
+### Iter-599 (2026-04-20): axis-reversal + neighbour-strip correctness at h=3 outer ring
+
+**Codex stop-time review on iter-598 (commit 8970b35)**: the face-unique-but-constant-per-face test CAN'T catch bugs in `is_reversed` handling, because reversing a constant-along-strip field gives back the same constant.  A refactor that dropped `strip = strip[::-1]` from `_pad_halo_local_h3` would pass iter-598 silently.
+
+**Lock added**: `test_pad_halo_vector_halo3_outer_ring_axis_reversal` uses a field that varies along BOTH axes with face-unique offsets:
+```
+u_east[f, i, j] = 100*f + 0.5*i + 0.1*j     v_north = 0
+```
+With `interp_offsets=None` (nearest-cell copy), the outermost h=3 halo at each side pulls from the neighbour strip at depth=2 via CONNECTIVITY; the strip is reversed if `is_reversed=True`.
+
+For each of 6 faces × 4 sides, the test:
+1. Reads `(nbr_face, nbr_edge, is_reversed)` from `CONNECTIVITY[face][side]`.
+2. Extracts the neighbour strip via `_extract_edge_strip_at_depth(..., depth=2)`.
+3. Applies reversal if needed.
+4. Computes expected grid-aligned output: `cos_angle_padded_h3 * strip` (and `-sin_angle_padded_h3 * strip` for v).
+5. Asserts max diff < 1e-4 (accounts for `u_east ~ O(600)` max times float32 storage noise ~1e-7 → 6e-5 floor).
+
+**Sanity-verified**: replacing `if is_reversed:` with `if False and is_reversed:` in `_pad_halo_local_h3:1005` fires the test on face=1 side=S with diff 0.547 — 5400× the 1e-4 ceiling.  This is the exact regression Codex worried about, and iter-598 would have missed it entirely.
+
+**Coverage summary across iter-595/596/597/598/599** for the halo=3 vector path:
+- (a) **interior preservation** (iter-595): trivially `up[:, 3:-3, 3:-3] == u_grid` to 1e-10.
+- (b) **inner-ring h=3 ≡ h=2** (iter-596): random non-constant inputs agree at overlapping rings.
+- (c) **outer-ring exact rotation** (iter-597): constant geographic wind predicts `cos_angle_padded_h3 * u_east`.
+- (d) **outer-ring CONNECTIVITY** (iter-598): face-unique constants verify correct neighbour selection.
+- (e) **outer-ring axis reversal** (iter-599): varying-along-strip field verifies `is_reversed` handling.
+
+Production restored.  5 h=3 vector tests pass.  Only non-constant *interpolation-weight* correctness at the outer ring (which only matters when interp_offsets_h3 is used in a spatially-varying context) remains unvalidated — deferred until h=3 is actually wired into a dycore path.
+
