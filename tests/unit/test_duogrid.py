@@ -1328,6 +1328,29 @@ class TestFluxSyncCallSitesWired:
             ("src/legoesm/core/fv3_sw_core.py", "_c_sw"),
         )
 
+        # Iter-603 Codex follow-up: a naive `ast.walk(func)` would
+        # descend into nested `FunctionDef` / `Lambda` / comprehensions
+        # (the iter-504 escape-hatch class).  Use a pre-order walk
+        # that tracks `inside_nested` and skips inner scopes entirely,
+        # matching the `_iter_calls_in_function` pattern in this
+        # class.
+        nested_types = self._nested_scope_types()
+
+        def _direct_body_nodes(root_func):
+            """Yield every node directly inside `root_func`'s runtime
+            body, STOPPING at any nested scope (FunctionDef, Lambda,
+            GeneratorExp, ListComp, SetComp, DictComp)."""
+            stack = [(root_func, False)]
+            while stack:
+                node, inside_nested = stack.pop()
+                if not inside_nested:
+                    yield node
+                for child in ast.iter_child_nodes(node):
+                    child_nested = (inside_nested
+                                     or (isinstance(node, nested_types)
+                                         and node is not root_func))
+                    stack.append((child, child_nested))
+
         for rel, func_name in SAME_BODY_SITES:
             path = root / rel
             tree = ast.parse(path.read_text())
@@ -1336,12 +1359,16 @@ class TestFluxSyncCallSitesWired:
                 f"{rel}: module-level function `{func_name}` "
                 f"not found.")
 
+            # Walk direct-body nodes only (no nested scopes).
+            body_nodes = list(_direct_body_nodes(func))
+
             # Find sync calls AND extract the LHS names the call
             # rebinds.  Pattern: `Assign(targets=[Tuple(Name, ...)],
-            # value=Call(synchronize_cgrid_fluxes))`.
+            # value=Call(synchronize_cgrid_fluxes))` — but ONLY if
+            # the Assign is in the direct body (not a nested scope).
             sync_calls = []
             rebound_names: set[str] = set()
-            for node in ast.walk(func):
+            for node in body_nodes:
                 if not isinstance(node, ast.Assign):
                     continue
                 value = node.value
@@ -1350,7 +1377,6 @@ class TestFluxSyncCallSitesWired:
                         and value.func.id == "synchronize_cgrid_fluxes"):
                     continue
                 sync_calls.append(value)
-                # Extract LHS tuple names
                 for tgt in node.targets:
                     if isinstance(tgt, ast.Tuple):
                         for elt in tgt.elts:
@@ -1359,10 +1385,11 @@ class TestFluxSyncCallSitesWired:
 
             assert sync_calls, (
                 f"{rel}:{func_name}: no `synchronize_cgrid_fluxes` "
-                f"call found inside an Assign.  The call must be "
-                f"used as `(fx, fy) = synchronize_cgrid_fluxes(...)` "
-                f"so the rebinded names can be tracked for "
-                f"consumption-ordering.")
+                f"call found inside an Assign in the DIRECT function "
+                f"body.  The call must be used as `(fx, fy) = "
+                f"synchronize_cgrid_fluxes(...)` at function scope "
+                f"(not inside a nested helper, lambda, or "
+                f"comprehension).")
             assert rebound_names, (
                 f"{rel}:{func_name}: `synchronize_cgrid_fluxes` "
                 f"call exists but no LHS tuple Names were found.  "
@@ -1370,10 +1397,13 @@ class TestFluxSyncCallSitesWired:
 
             first_sync = min(c.lineno for c in sync_calls)
 
-            # Find earliest Subscript of any rebinded name.
+            # Find Subscript of any rebinded name IN DIRECT BODY
+            # only.  A read inside a nested scope is OK — nested
+            # scopes don't run at the outer scope's step flow unless
+            # they're also called, which would be a separate bug.
             consumption_linenos = []
             consumption_names = []
-            for node in ast.walk(func):
+            for node in body_nodes:
                 if (isinstance(node, ast.Subscript)
                     and isinstance(node.value, ast.Name)
                     and node.value.id in rebound_names):
@@ -1383,23 +1413,21 @@ class TestFluxSyncCallSitesWired:
             assert consumption_linenos, (
                 f"{rel}:{func_name}: no Subscript of any sync-"
                 f"rebinded name ({sorted(rebound_names)}) found in "
-                f"the function body.  The sync returns values that "
-                f"are never consumed — unreachable state.")
+                f"the direct function body.  The sync returns values "
+                f"that are never consumed at function scope — "
+                f"unreachable state.")
 
-            # The LATEST consumption before sync (if any) identifies
-            # the bug.  We check: EVERY consumption lineno must be
-            # >= sync call lineno.
             pre_sync = [(n, ln) for n, ln in
                          zip(consumption_names, consumption_linenos)
                          if ln < first_sync]
             assert not pre_sync, (
                 f"{rel}:{func_name}: `synchronize_cgrid_fluxes` "
                 f"call at line {first_sync} does NOT precede these "
-                f"Subscript consumptions of rebinded names: "
-                f"{sorted(set(pre_sync))}.  The sync must precede "
-                f"ALL consumptions of ALL rebinded flux names; "
-                f"otherwise Constraint #1 is silently violated for "
-                f"the ones consumed pre-sync.")
+                f"Subscript consumptions of rebinded names "
+                f"(direct body): {sorted(set(pre_sync))}.  The sync "
+                f"must precede ALL direct-body consumptions of ALL "
+                f"rebinded flux names; otherwise Constraint #1 is "
+                f"silently violated for those consumed pre-sync.")
 
     def test_every_flux_sync_site_is_duogrid_gated(self):
         """Inside the host function the call must be inside an `if`

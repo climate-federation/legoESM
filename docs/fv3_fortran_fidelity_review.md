@@ -543,3 +543,21 @@ This catches ANY pre-sync read of a rebinded flux array — including subscripts
 
 108 `test_duogrid` tests pass.  Production restored.
 
+### Iter-603 (2026-04-20): close nested-scope escape hatch in ordering test (Codex)
+
+**Codex stop-time review on iter-602 (commit 761f3c3)**: the iter-602 ordering test used `ast.walk(func)` which descends into nested `FunctionDef` / `Lambda` / comprehension scopes — the exact "iter-504 escape-hatch class" the surrounding tests explicitly close via the `_nested_scope_types()` helper.  A refactor that hid the sync call inside a `def _deadhelper():` that is never invoked would satisfy iter-602's test while leaving the direct-body consumption unsynced.
+
+**Fix**: replaced `ast.walk` with a pre-order walk that tracks `inside_nested` using the class's existing `_nested_scope_types()` helper (covers `FunctionDef`, `AsyncFunctionDef`, `Lambda`, `GeneratorExp`, `ListComp`, `SetComp`, `DictComp`).  The test now:
+1. Enumerates DIRECT-body nodes only (stopping at nested scopes).
+2. Restricts sync-call detection to `Assign` nodes in the direct body.
+3. Restricts `Subscript` consumption detection to the direct body.
+
+**Sanity-verified**: relocating the `_c_sw` sync into a nested `def _deadhelper():` inside `_c_sw` fires the test with the explicit message "no `synchronize_cgrid_fluxes` call found inside an Assign in the DIRECT function body.  The call must be used as `(fx, fy) = synchronize_cgrid_fluxes(...)` at function scope (not inside a nested helper, lambda, or comprehension)."  Iter-602 would have PASSED this regression silently.
+
+**Constraint #1 ordering coverage** now matches the nested-scope rigor of the surrounding tests:
+- Site presence (iter-502/503): direct-body-only via `_iter_calls_in_function`.
+- Gate correctness (iter-504): direct-body-only via `_nested_scope_types()`.
+- **Ordering** (iter-601/602/603, THIS): direct-body-only via the same `_nested_scope_types()` helper.
+
+No divergence between tests' nested-scope handling.  108 `test_duogrid` tests pass; production restored.
+
