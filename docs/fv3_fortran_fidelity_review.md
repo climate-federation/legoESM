@@ -1063,3 +1063,39 @@ The placement helper is now available for future iterations to call from `_pad_h
 
 Next iteration can: (a) mirror steps 1+4 into the tiled helper; OR (b) implement step 3 to unlock multi-rank halo=3.
 
+### Iter-629 (2026-04-20): complete MPI halo=3 port (steps 3, 5; guard removed)
+
+**Work**: finished all remaining steps of the iter-613 MPI halo=3 port spec.
+
+**Changes**:
+1. **Step 3 (face-only remote-recv loop)**: extended the halo==2 branch to halo==3 in the recv-buffer unpacking loop — extracts `strip_d0`, `strip_d1`, `strip_d2` (three `n * nlev` slices), applies reversal, places via `_place_strip_h3_4d`.  Increments offset by `3 * chunk` instead of `2 * chunk`.
+2. **Step 4 (face-only post-recv corner fill)**: three-way dispatch to `_fill_corners_h3` for halo==3.
+3. **Step 5 (tiled helper)**: mirrored the same 4 changes (local-edge, early corner-fill, remote-recv, late corner-fill) into `_pad_halo_mpi_tiled_4d`.  Tiled helper's send loop is already generic (`for depth in range(halo)`).
+
+**Guard removed**: `pad_halo_mpi_4d(halo=3)` no longer raises `NotImplementedError`.  All 7 steps of the iter-613 port spec are now implemented; halo=3 is LIVE on the MPI backend.  The only remaining guard is on unsupported halos (4+).
+
+**Tests updated**:
+- `test_pad_halo_mpi_4d_halo3_raises_notimplemented` → `test_pad_halo_mpi_4d_halo4_raises_notimplemented`: the "unsupported halo raises" contract is still locked, now at halo=4.
+- `test_packed_pad_halo_mpi_4d_halo3_raises_notimplemented` → `test_packed_pad_halo_mpi_4d_halo4_raises_notimplemented`: delegation-propagation lock also updated to halo=4.
+
+**Complete MPI halo=3 port progress**:
+- ✅ Step 1: local-edge-depth-extraction (iter-628).
+- ✅ Step 2: remote-edge send loop (already generic).
+- ✅ Step 3: remote-edge recv loop (THIS ITER).
+- ✅ Step 4: face-only corner fill (iter-628 + THIS ITER).
+- ✅ Step 5: tiled helper — all 3 anchors wired (THIS ITER).
+- ✅ Step 6: reuse `_fill_corners_h3` (existing).
+- ✅ Step 7: `_place_strip_h3_4d` (iter-627).
+
+**FV3 FB-chain ng=3 status**:
+- ✅ scalar `pad_halo(halo=3)` (iter-499).
+- ✅ `halo_interp_offsets_h3` (iter-532).
+- ✅ padded grid-angle + half-metrics at h=3 (iter-595).
+- ✅ vector `pad_halo_vector(halo=3)` on non-MPI backend (iter-595).
+- ✅ 4D MPI halo=3: `pad_halo_mpi_4d(halo=3)` (THIS ITER).
+- ❌ Wiring h=3 into `_d2a2c_vect` / `fv3_fb_sw_step` callers (still h=2).
+
+**Infrastructure is now complete** for the FB-chain ng=3 unlock.  Callers can finally flip from halo=2 to halo=3 without hitting an infrastructure wall — neither on single-device nor on MPI backends.
+
+63 `test_scale_halo` tests pass.
+

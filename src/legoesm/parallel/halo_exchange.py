@@ -784,9 +784,9 @@ def _pad_halo_mpi_face_only_4d(
 
         offset = 0
         chunk = n * nlev
-        # [ANCHOR iter-613: remote-recv-depth-extraction] — extend
-        # halo==2 branch to halo==3: extract strip_d0/d1/d2, place
-        # via _place_strip_h3_4d.
+        # [ANCHOR iter-613: remote-recv-depth-extraction] — iter-629
+        # extended halo==2 branch to halo==3: extract strip_d0/d1/d2
+        # (3 * chunk bytes), place via _place_strip_h3_4d.
         for face, edge, nbr_face, nbr_edge, is_reversed, _ in recv_order:
             if halo == 1:
                 strip = recv_buf[offset:offset + chunk].reshape(n, nlev)
@@ -794,7 +794,7 @@ def _pad_halo_mpi_face_only_4d(
                 if is_reversed:
                     strip = strip[::-1]
                 padded = _place_strip_4d(padded, face, edge, strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
                 offset += 2 * chunk
@@ -802,13 +802,26 @@ def _pad_halo_mpi_face_only_4d(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2_4d(padded, face, edge, strip_d0, strip_d1)
+            else:  # halo == 3
+                strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
+                strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
+                strip_d2 = recv_buf[offset + 2 * chunk:offset + 3 * chunk].reshape(n, nlev)
+                offset += 3 * chunk
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3_4d(padded, face, edge,
+                                             strip_d0, strip_d1, strip_d2)
 
-    # [ANCHOR iter-613: corner-fill-face-only-post-recv] — extend to
-    # halo==3 with _fill_corners_h3.
+    # [ANCHOR iter-613: corner-fill-face-only-post-recv] — iter-629
+    # extended to halo==3 via _fill_corners_h3.
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -852,13 +865,15 @@ def _pad_halo_mpi_tiled_4d(
             nbr_rank = topology.neighbor_ranks[(face, edge)]
             edge_info.append((edge, nbr_rank, nbr_edge, is_reversed, False))
 
-    # [ANCHOR iter-613: corner-fill-tiled-early] — extend to halo==3
-    # with _fill_corners_h3.
+    # [ANCHOR iter-613: corner-fill-tiled-early] — iter-629 extended
+    # to halo==3 via _fill_corners_h3.
     if not edge_info:
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3
+            padded = _fill_corners_h3(padded)
         return padded
 
     from collections import defaultdict
@@ -897,8 +912,9 @@ def _pad_halo_mpi_tiled_4d(
         )
 
         offset = 0
-        # [ANCHOR iter-613: tiled-remote-depth-extraction] — extend
-        # halo==2 branch to halo==3: strip_d2 + _place_strip_h3_4d.
+        # [ANCHOR iter-613: tiled-remote-depth-extraction] — iter-629
+        # extended halo==2 branch to halo==3: extract strip_d0/d1/d2,
+        # place via _place_strip_h3_4d.
         for edge, _, nbr_edge, is_reversed, is_tile_nbr in recv_order:
             if halo == 1:
                 recv_strip = recv_buf[offset:offset + chunk].reshape(n, nlev)
@@ -906,7 +922,7 @@ def _pad_halo_mpi_tiled_4d(
                 if is_reversed:
                     recv_strip = recv_strip[::-1]
                 padded = _place_strip_4d(padded, face, edge, recv_strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
                 offset += 2 * chunk
@@ -914,13 +930,26 @@ def _pad_halo_mpi_tiled_4d(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2_4d(padded, face, edge, strip_d0, strip_d1)
+            else:  # halo == 3
+                strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
+                strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
+                strip_d2 = recv_buf[offset + 2 * chunk:offset + 3 * chunk].reshape(n, nlev)
+                offset += 3 * chunk
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3_4d(padded, face, edge,
+                                             strip_d0, strip_d1, strip_d2)
 
-    # [ANCHOR iter-613: corner-fill-tiled-late] — extend to halo==3
-    # with _fill_corners_h3.
+    # [ANCHOR iter-613: corner-fill-tiled-late] — iter-629 extended
+    # to halo==3 via _fill_corners_h3.
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -946,77 +975,23 @@ def pad_halo_mpi_4d(
     -------
     padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
-    # Iter-611: explicit halo=3 guard.  The underlying helpers
-    # `_pad_halo_mpi_face_only_4d` / `_pad_halo_mpi_tiled_4d` branch on
-    # `halo == 1` vs else, with the else path assuming halo=2 (extracts
-    # only depths 0 and 1 and calls `_fill_corners_h2`).  For halo=3
-    # they would silently drop the depth-2 strip AND the 3x3 corner
-    # cells that `_fill_corners_h3` fills in.  Rather than silently
-    # producing wrong halos under MPI at halo=3, raise here.  This is
-    # the last remaining piece of the ng=3 FB-chain infrastructure
-    # unlock (iter-595 enabled non-MPI; this gate documents the
-    # remaining MPI gap clearly at the call site).
-    if halo == 3:
-        # Iter-613/614: port spec for the halo=3 MPI extension.
-        # Iter-614 replaced the iter-613 line-number refs with stable
-        # `[ANCHOR iter-613: <name>]` comment tags placed inside the
-        # two helper bodies — grep for them to find the exact site:
-        #
-        #   1. Local-edge branch in `_pad_halo_mpi_face_only_4d`:
-        #        ANCHOR `local-edge-depth-extraction`
-        #      Extend the halo==2 branch to halo==3: call
-        #      `_extract_edge_strip_at_depth_4d(data, nbr_face,
-        #      nbr_edge, 2)`, apply reversal, place via new helper
-        #      `_place_strip_h3_4d`.
-        #
-        #   2. Remote-edge send loop in `_pad_halo_mpi_face_only_4d`:
-        #      already uses `for depth in range(halo)` — generic.
-        #      No ANCHOR; no change needed.
-        #
-        #   3. Remote-edge recv loop in `_pad_halo_mpi_face_only_4d`:
-        #        ANCHOR `remote-recv-depth-extraction`
-        #      Extend halo==2 branch to halo==3: extract strip_d0,
-        #      strip_d1, strip_d2 (3 slices of `chunk = n * nlev`),
-        #      apply reversal to each, place via `_place_strip_h3_4d`.
-        #
-        #   4. Corner fill in `_pad_halo_mpi_face_only_4d`:
-        #        ANCHORs `corner-fill-face-only`
-        #                `corner-fill-face-only-post-recv`
-        #      Replace two-way `h1/h2` dispatch with three-way
-        #      dispatch that picks `_fill_corners_h3` for halo==3.
-        #
-        #   5. Same 3 changes in `_pad_halo_mpi_tiled_4d`:
-        #        ANCHORs (see docstring of `_pad_halo_mpi_tiled_4d`):
-        #          `tiled-remote-depth-extraction`
-        #          `corner-fill-tiled-early`
-        #          `corner-fill-tiled-late`
-        #
-        #   6. Scalar `_fill_corners_h3` already exists in
-        #      `src/legoesm/grids/halo.py` — import it alongside
-        #      `_fill_corners_h1` / `_fill_corners_h2` and use
-        #      directly.
-        #
-        #   7. Write new helper `_place_strip_h3_4d` in this file,
-        #      mirroring `_place_strip_h2_4d` but placing 3 depth-
-        #      slices per edge into the correct padded positions
-        #      (depth=0 → adjacent to interior, depth=2 → outermost
-        #      ring).
+    # Iter-629: halo=3 MPI path now fully implemented (all 7 steps of
+    # the iter-613 port spec done — see `[ANCHOR iter-613: <name>]`
+    # comments in `_pad_halo_mpi_face_only_4d` and
+    # `_pad_halo_mpi_tiled_4d` for the insertion sites).  Progression:
+    #   iter-611: explicit halo=3 NotImplementedError guard.
+    #   iter-613: 7-step inline port spec.
+    #   iter-614..616: stable ANCHOR comments + tokenize-based
+    #                  anti-rot test (`test_iter613_mpi_halo3_port_
+    #                  anchors_present`).
+    #   iter-627: added `_place_strip_h3_4d` helper (step 7).
+    #   iter-628: wired halo=3 into `_pad_halo_mpi_face_only_4d`'s
+    #             local-edge branch + corner-fill (steps 1, 4).
+    #   iter-629 (THIS): extended face-only remote-recv + tiled helper
+    #             (steps 3, 5).  Guard removed; halo=3 MPI is LIVE.
+    if halo not in (1, 2, 3):
         raise NotImplementedError(
-            "pad_halo_mpi_4d(halo=3) is not yet implemented.  The "
-            "underlying face-only / tiled 4D halo helpers extract only "
-            "depths 0 and 1 and fill corners via `_fill_corners_h2` — "
-            "extending to depth 2 + `_fill_corners_h3` is the last "
-            "remaining piece of the ng=3 MPI infrastructure.  See the "
-            "iter-613/614 inline port-spec above; `grep '[ANCHOR "
-            "iter-613:'` to locate each insertion site.  For the "
-            "non-MPI single-device backend, halo=3 is supported via "
-            "`pad_halo_vector(halo=3)` (iter-595).  The FV3 FB-chain "
-            "unlock path therefore currently requires the single-"
-            "device backend."
-        )
-    if halo not in (1, 2):
-        raise NotImplementedError(
-            f"pad_halo_mpi_4d supports only halo=1 and halo=2, got "
+            f"pad_halo_mpi_4d supports only halo=1, 2, or 3, got "
             f"halo={halo}."
         )
 
