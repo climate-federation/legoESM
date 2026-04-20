@@ -353,19 +353,22 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
         # Cell center (i,j) at supergrid (2i+1, 2j+1)
         # dxc at x-face (i,j): dist from (2(i-1)+1, 2j+1) to (2i+1, 2j+1)
         # = dist from (2i-1, 2j+1) to (2i+1, 2j+1) for i=1..n-1, j=0..n-1
-        # Iter-666/667 fix: at i=0 and i=n (cube boundary u-faces),
+        # Iter-666/667/669 fix: at i=0 and i=n (cube boundary u-faces),
         # the pre-iter-666 `max(2*i-1, 0)` / `min(2*i+1, 2*n)`
         # clamping gave sj spans of 1 supergrid cell = HALF the
         # interior cell width.  That made rdxc at cube boundaries 2×
         # the interior value, which amplified PGF by 2× at cube
         # edges — the direct cause of the FB-chain step-1 residual
         # (measured 2.93 interior vs 5.87 boundary; ratio exactly
-        # 2.0, iter-665).  The Fortran FV3 convention is that dxc
-        # at a cube-boundary u-face is the centre-to-centre distance
-        # ACROSS the cube edge; absent neighbour-face metrics here,
-        # extrapolate from the adjacent interior value (exact for
-        # uniform cubed-sphere spacing, matches Fortran
-        # "halo-exchanged dxc" at leading order).
+        # 2.0, iter-665).
+        #
+        # Iter-669 verification: Fortran oracle at
+        # `atmos_cubed_sphere-symmetryclean/tools/fv_grid_tools.F90:
+        # 894-914` does exactly this — compute great-circle distance
+        # for interior i only (`do i=isd+1,ied`), then extrapolate:
+        #     dxc(isd,j)   = dxc(isd+1,j)
+        #     dxc(ied+1,j) = dxc(ied,j)
+        # The iter-666 fix below is the direct Python equivalent.
         #
         # Iter-667 (Codex correction on iter-666): the extrapolation
         # requires adjacent interior cells (i=1, i=n-1) to exist,

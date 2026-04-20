@@ -654,3 +654,45 @@ So `dyc` at cube boundaries was HALF its interior value, which made `rdyc = 1/dy
 - All 118 regression tests pass.
 
 **Commits**: 1 source change (cubed_sphere_cdgrid.py:357-410), no test changes.
+
+### Iter-668 — regression-lock iter-666/667 fix
+
+Added `TestCdgridDxcDycBoundaryIter666` with 4 tests that protect the iter-666/667 fixes:
+1. `test_dyc_boundary_not_half_interior_iter666`: `dyc[j=0] == dyc[j=1]` and `dyc[j=n] == dyc[j=n-1]` (atol=1e-10).
+2. `test_dxc_boundary_not_half_interior_iter666`: same for `dxc` at i=0 and i=n.
+3. `test_iter666_pgf_matches_analytic_at_cube_boundaries`: integration lock — scheme `max|PGF|` on W2 balanced IC at C36 matches analytic `ω·u₀ + u₀²/(2R) ≈ 2.93e-3` within 5% (pre-iter-666 was 2×).
+4. `test_iter667_n1_metrics_nonzero`: n=1 fallback preserves non-zero dxc/dyc.
+
+Regression suite grew from 118 to 122 tests.
+
+### Iter-669 — Fortran oracle verification of iter-666 fix
+
+**Oracle citation**: `atmos_cubed_sphere-symmetryclean/tools/fv_grid_tools.F90:894-914` does EXACTLY what iter-666 implemented:
+
+```fortran
+do j=jsd,jed
+   do i=isd+1,ied               ! interior only
+      dxc(i,j) = great_circle_dist(agrid(i,j,:), agrid(i-1,j,:), radius)
+   enddo
+   dxc(isd,j)   = dxc(isd+1,j)   ! west cube boundary (extrapolate)
+   dxc(ied+1,j) = dxc(ied,j)     ! east cube boundary (extrapolate)
+enddo
+
+do j=jsd+1,jed
+   do i=isd,ied
+      dyc(i,j) = great_circle_dist(agrid(i,j,:), agrid(i,j-1,:), radius)
+   enddo
+enddo
+do i=isd,ied
+   dyc(i,jsd)   = dyc(i,jsd+1)   ! south boundary extrapolate
+   dyc(i,jed+1) = dyc(i,jed)     ! north boundary extrapolate
+end do
+```
+
+The Python port is now the direct translation of this.  Added the Fortran line-range citation to:
+- `src/legoesm/grids/cubed_sphere_cdgrid.py` iter-666 comment block (source).
+- `TestCdgridDxcDycBoundaryIter666` class docstring (test).
+
+This closes the ambiguity about whether iter-666's extrapolation was "Fortran-faithful or a reasonable approximation" — it IS Fortran-faithful, confirmed by direct oracle inspection.
+
+**No source-logic changes in iter-669**; comment-only update.  All 122 regression tests still pass.

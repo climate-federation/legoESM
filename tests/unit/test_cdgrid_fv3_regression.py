@@ -7714,9 +7714,22 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
 
 
 class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
-    """Iter-666/667 regression lock: `dxc` and `dyc` at cube-boundary
-    u/v-faces must NOT be clamped to half the interior cell width.
+    """Iter-666/667/669 regression lock: `dxc` and `dyc` at
+    cube-boundary u/v-faces must NOT be clamped to half the interior
+    cell width.
 
+    **Fortran oracle** (iter-669 verification): `tools/fv_grid_tools.F90:
+    894-914` in ``atmos_cubed_sphere-symmetryclean`` does EXACTLY what
+    iter-666's fix does — compute great-circle centre-to-centre
+    distance on the INTERIOR loop (``i=isd+1,ied`` and ``j=jsd+1,jed``),
+    then extrapolate at boundaries::
+
+        dxc(isd,j)   = dxc(isd+1,j)   ! west cube boundary
+        dxc(ied+1,j) = dxc(ied,j)     ! east cube boundary
+        dyc(i,jsd)   = dyc(i,jsd+1)   ! south cube boundary
+        dyc(i,jed+1) = dyc(i,jed)     ! north cube boundary
+
+    The iter-666 fix brings the Python port in line with this oracle.
     Pre-iter-666, `cubed_sphere_cdgrid.py` used ``sj0 = max(2*j-1, 0)``
     / ``sj1 = min(2*j+1, 2*n)`` supergrid-index clamping.  At j=0 the
     span was 1 supergrid cell = HALF interior, making `rdyc` 2× at
