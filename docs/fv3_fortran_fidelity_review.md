@@ -921,3 +921,21 @@ Previously no direct regression test — only indirect coverage via FB chain run
 
 2 new tests pass.  Iter-550..622 Fortran-formula-lock inventory now includes `_d_sw1_recompute_ut_vt` (interior, duogrid path).
 
+### Iter-623 (2026-04-20): Fortran-formula lock for `_p_grad_c`
+
+**Motivation**: `_p_grad_c` (`fv3_sw_core.py:1451-1476`) computes the FB-chain Phase-2 backward pressure gradient at C-grid positions:
+```
+p = g * (h_star + h_s)
+dp_x = dt2 * rdxc * (p_W - p_E)   at u-faces
+dp_y = dt2 * rdyc * (p_S - p_N)   at v-faces
+```
+Previously no direct regression test.
+
+**Lock added**: `TestPGradCFortranFormula` with 2 tests:
+1. `test_constant_p_produces_zero_gradient`: constant `h_star + h_s` → `dp_x = dp_y = 0` (gradient of constant = 0).
+2. `test_random_input_matches_numpy_reference`: random input → full-field numpy reproduction (using the same `_pad_halo_auto` halo exchange) compared bit-for-bit to production (rel < 1e-10).
+
+**Sanity-verified**: flipping the sign convention (`(p_E - p_W)` instead of `(p_W - p_E)`) fires the test with relative diff 7.56 — well above the 1e-10 threshold.
+
+2 new tests pass.  The FB-chain pressure-gradient step now has a direct Fortran-oracle lock.
+

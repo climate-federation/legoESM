@@ -5334,5 +5334,96 @@ class TestDSw1RecomputeUtVtFortranFormula(unittest.TestCase):
                  f"{vt_diff:.3e} (rms={vt_rms:.3e})."))
 
 
+class TestPGradCFortranFormula(unittest.TestCase):
+    """Iter-623: Fortran-formula lock for `_p_grad_c`.
+
+    `_p_grad_c(h_star, h_s, cdgrid, dt2, g)` computes the backward-
+    in-time pressure gradient at C-grid positions, used in the FB
+    chain's Phase 2 (`fv3_sw_core.py:1891-1895`).  Formula:
+      p = g * (h_star + h_s)
+      p_pad = halo-exchanged p
+      dp_x = dt2 * rdxc * (p_W - p_E)  at u-faces
+      dp_y = dt2 * rdyc * (p_S - p_N)  at v-faces
+
+    Previously no direct regression test.  The helper is reached
+    only via `fv3_fb_sw_step` (the experimental FB chain).
+    """
+
+    def _build_grid(self, n=8):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        return create_cubed_sphere_cdgrid(grid)
+
+    def test_constant_p_produces_zero_gradient(self):
+        """For spatially constant h_star and h_s, the pressure
+        p = g*(h_star + h_s) is constant, so dp_x = dp_y = 0."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _p_grad_c
+
+        cdgrid = self._build_grid(n=8)
+        n = cdgrid.n
+        h_star = jnp.full((6, n, n), 1000.0)
+        h_s = jnp.full((6, n, n), 10.0)
+        dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid,
+                                 dt2=150.0, g=9.81)
+        self.assertLess(
+            float(jnp.max(jnp.abs(dp_x))), 1e-10,
+            msg=f"Constant p → dp_x should be 0; got max={float(jnp.max(jnp.abs(dp_x))):.3e}")
+        self.assertLess(
+            float(jnp.max(jnp.abs(dp_y))), 1e-10,
+            msg=f"Constant p → dp_y should be 0; got max={float(jnp.max(jnp.abs(dp_y))):.3e}")
+
+    def test_random_input_matches_numpy_reference(self):
+        """Random h_star + h_s: reproduce the Fortran formula in
+        numpy and verify the production output matches bit-for-bit
+        (rel < 1e-10)."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _p_grad_c, _pad_halo_auto
+
+        cdgrid = self._build_grid(n=8)
+        n = cdgrid.n
+        rng = np.random.default_rng(623)
+        h_star_np = rng.standard_normal((6, n, n)) * 10.0
+        h_s_np = rng.standard_normal((6, n, n)) * 2.0
+        h_star = jnp.asarray(h_star_np)
+        h_s = jnp.asarray(h_s_np)
+        dt2 = 150.0
+        g = 9.81
+
+        dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
+
+        # Numpy reference: p = g*(h_star + h_s), halo-exchanged via
+        # the same _pad_halo_auto helper used in production.
+        p = g * (h_star_np + h_s_np)
+        p_pad = np.asarray(_pad_halo_auto(jnp.asarray(p), cdgrid))
+        rdxc = np.asarray(cdgrid.rdxc)
+        rdyc = np.asarray(cdgrid.rdyc)
+        dp_x_ref = dt2 * rdxc * (p_pad[:, :-1, 1:-1]
+                                   - p_pad[:, 1:, 1:-1])
+        dp_y_ref = dt2 * rdyc * (p_pad[:, 1:-1, :-1]
+                                   - p_pad[:, 1:-1, 1:])
+
+        dp_x_diff = float(np.max(np.abs(
+            np.asarray(dp_x) - dp_x_ref)))
+        dp_y_diff = float(np.max(np.abs(
+            np.asarray(dp_y) - dp_y_ref)))
+        dp_x_rms = float(np.sqrt(np.mean(dp_x_ref ** 2)))
+        dp_y_rms = float(np.sqrt(np.mean(dp_y_ref ** 2)))
+        self.assertLess(
+            dp_x_diff / max(dp_x_rms, 1e-20), 1e-10,
+            msg=(f"dp_x deviates from Fortran formula by "
+                 f"{dp_x_diff:.3e} (rms={dp_x_rms:.3e}).  Check: "
+                 f"p = g*(h_star + h_s), rdxc factor, sign of "
+                 f"(p_W - p_E), dt2 multiplier."))
+        self.assertLess(
+            dp_y_diff / max(dp_y_rms, 1e-20), 1e-10,
+            msg=(f"dp_y deviates from Fortran formula by "
+                 f"{dp_y_diff:.3e} (rms={dp_y_rms:.3e})."))
+
+
 if __name__ == "__main__":
     unittest.main()
