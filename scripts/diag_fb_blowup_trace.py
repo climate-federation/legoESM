@@ -22,17 +22,20 @@ histogram at step 1 showed:
   mean at interior:  1.04 m/s
   cells with v_err > 1.0 m/s: 4432 of ~8000 (55%)
 
-The error is FIELD-WIDE, not localized.  Vertices are 1.5-2× the
-interior magnitude, but the interior dominates total error by cell
-count.  The MAX location tracking only reports a single point and
-gives a misleading "localization" impression.
+The error is FIELD-WIDE, not concentrated at a few cells.  Vertices
+are 1.5-2× the interior magnitude, but the interior dominates total
+error by cell count.  The MAX location tracking only reports a
+single point and gives a misleading "localization" impression.
 
-Real diagnosis: the FB chain produces a widespread velocity bias
-on the near-balanced Williamson 2 IC at step 1, suggesting the bias
-is NOT at cube vertices but inherent to the FB chain's momentum
-balance on this IC (or an IC-scheme inconsistency at D-grid edge
-midpoint positions).  Future work should analyse the forcing at
-interior cells — most of the error lives there.
+**Iter-660 (Codex correction on iter-659)**: the histogram data
+above only supports the observation "step-1 v_err is widespread".
+It does NOT by itself prove any specific cause.  Propagation-speed
+arguments (wind ~23 km/step, gravity waves ~100 km/step, dx~600 km
+at C36) rule out a single-cell bug spreading field-wide in one step,
+but candidate root causes (IC-scheme mismatch vs. FB coupling
+residual vs. temporal-scheme residual) need additional diagnostics
+(e.g., step-1 tendency magnitudes, dt-scaling of residuals) to
+separate — those are future work.
 """
 import os
 os.environ["JAX_ENABLE_X64"] = "1"; os.environ["JAX_PLATFORMS"] = "cpu"

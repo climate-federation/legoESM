@@ -437,13 +437,21 @@ The error is **field-wide** — 55% of cells have v_err > 1.0 m/s, not a few cub
 
 **What iter-658 got wrong**: tracking only the MAX location gives a misleading "localization" impression.  The max happens to land at a cube vertex because vertices are 1.5× noisier, but the SIGNAL is everywhere.
 
-**Corrected diagnosis**: the FB chain produces a **widespread velocity bias** on the near-balanced Williamson 2 IC at step 1.  Plausible causes (all field-wide, not vertex-local):
-1. Momentum balance residual: the FB chain's forward-backward coupling (c_sw half-step + p_grad_c backward + d_sw full-step) may not exactly preserve a geostrophically balanced state even at rest.
-2. IC inconsistency: the u_d / v_d initial conditions computed at D-grid edge-midpoint positions from the analytic Williamson 2 formula may not be exactly consistent with what the d2a2c_vect + d_sw1 pipeline expects as a balanced state.
-3. Scheme design: the FB chain inherently includes temporal-scheme residual at this time step size.
+**What the histogram actually supports**: the step-1 `v_err` distribution is consistent with a widespread error signal, not a few outlier corner cells.  That is all the histogram data alone can tell us — the histogram does NOT identify a cause.
 
-**Next iter target** (revised): quantify the step-1 FORCING (tendency magnitude) rather than the error.  If the tendency at t=0 is O(1 m/s²) while it should be O(epsilon), the IC-scheme consistency hypothesis is confirmed.  This is more diagnostic than chasing specific cube-vertex bugs.
+**Upper bound on propagation in one step** (separate argument, not from the histogram): at C36 with dt=600s, wind speeds ~38 m/s advect by ~23 km per step; gravity-wave phase speed √(gh) ≈ 172 m/s propagates ~100 km per step.  Cell size dx ≈ 600 km.  So information travels at most ~20% of a grid cell in one step.  A bug concentrated at cube vertices CANNOT reach the grid interior in a single step via normal transport/gravity-wave dynamics — which argues against vertex-local bugs as the cause of the field-wide step-1 signature, but does not prove any specific alternative.
 
-**Updated script docstring**: the `scripts/diag_fb_blowup_trace.py` header now documents the iter-659 correction and warns that MAX-location tracking can mislead when the signal is broadly distributed.
+**Candidate causes (hypotheses, not conclusions)**:
+1. Momentum balance residual in the FB chain's forward-backward coupling.
+2. IC inconsistency at D-grid edge-midpoint positions (analytic W2 formula vs. d2a2c_vect + d_sw1 pipeline expectation).
+3. Temporal-scheme residual at this time step.
 
-**Tests**: no source-code changes; all 118 regression tests still pass.  This iter is a documentation correction only.
+Distinguishing these requires additional diagnostics (e.g., step-1 tendency magnitudes, balanced-IC residual norms) — not available from the current tracer.
+
+**Iter-660 (Codex correction on iter-659)**: tightened the language above.  Iter-659 wrote "plausible causes (all field-wide, not vertex-local)" which suggested the histogram proved "not vertex-local".  The histogram alone does not prove that — only the separate propagation-speed argument does, and even that is a bound, not a proof.
+
+**Next iter target** (unchanged): quantify step-1 tendency magnitudes to separate the hypotheses.  Specifically:
+- If `max|dh/dt|`, `max|du_d/dt|`, `max|dv_d/dt|` at t=0 are O(1) instead of O(ε), hypothesis 1 or 2 is active.
+- If reducing dt by 10× leaves the relative step-1 `v_err` unchanged (scaled by dt), the spatial scheme is at fault, not the temporal integrator.
+
+**Tests**: no source-code changes in iter-658/659/660; all 118 regression tests still pass.  These three iters are diagnostic + documentation only.
