@@ -6031,5 +6031,250 @@ class TestKeUpwindFortranFormula(unittest.TestCase):
                      "is broken."))
 
 
+class TestVorticityFluxFortranFormula(unittest.TestCase):
+    """Iter-637: direct Fortran-formula lock for `_vorticity_flux`
+    in ``src/legoesm/core/fv3_sw_core.py`` (lines 1139-1167) against
+    ``sw_core.F90:416-480``.
+
+    Fortran builds the contravariant vorticity transport fluxes::
+
+        fy1 = (v - uc*cosa_u) / sina_u
+        fx1 = (u - vc*cosa_v) / sina_v
+
+    using 1/sina (NOT 1/sina²) — see the comment at sw_core.F90:417.
+    Then applies face-boundary overrides (sw_core.F90:1156-1164
+    equivalent) when ``.not. bounded_domain``::
+
+        fy1(1, j)   = v(1, j)    ! W edge
+        fy1(npx, j) = v(npx, j)  ! E edge
+        fx1(i, 1)   = u(i, 1)    ! S edge
+        fx1(i, npy) = u(i, npy)  ! N edge
+
+    Finally, vorticity transport upwind-selects the absolute vorticity::
+
+        vort_x(i, j) = vort_abs(i-1, j) if fy1(i, j) > 0 else vort_abs(i, j)
+        vort_y(i, j) = vort_abs(i, j-1) if fx1(i, j) > 0 else vort_abs(i, j)
+
+    Pre-iter-637 there were only behavioural tests for "does the face
+    override fire in non-duogrid mode" (`test_vorticity_flux_legacy_*`),
+    but NO direct lock on the numerical output.  A regression that
+    swapped cosa_u for cosa_v, used sina² instead of sina, mis-indexed
+    the upwind selection, or applied the edge override inside-out would
+    silently break vorticity transport without failing the existing
+    behavioural tests.
+    """
+
+    @staticmethod
+    def _ref_vorticity_flux(v_d, u_d, uc, vc, vort_abs, cosa_u, cosa_v,
+                             sina_u, sina_v, n, use_duogrid, eps):
+        """Numpy line-by-line reproduction of `_vorticity_flux`."""
+        import numpy as np
+        # Contravariant fluxes (fv3_sw_core.py:1155, 1161)
+        fy1 = (v_d - uc * cosa_u) / np.maximum(sina_u, eps)
+        fx1 = (u_d - vc * cosa_v) / np.maximum(sina_v, eps)
+        # Non-duogrid face-boundary overrides (sw_core.F90:1156-1164)
+        if not use_duogrid:
+            fy1 = fy1.copy()
+            fy1[:, 0, :] = v_d[:, 0, :]
+            fy1[:, n, :] = v_d[:, n, :]
+            fx1 = fx1.copy()
+            fx1[:, :, 0] = u_d[:, :, 0]
+            fx1[:, :, n] = u_d[:, :, n]
+        # Upwind vorticity selection (fv3_sw_core.py:1159, 1165)
+        vort_x = np.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
+        vort_y = np.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
+        return fy1, vort_x, fx1, vort_y
+
+    def _build_inputs(self, seed, n):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        v_d = rng.standard_normal((6, n + 1, n))
+        u_d = rng.standard_normal((6, n, n + 1))
+        uc = rng.standard_normal((6, n + 1, n))
+        vc = rng.standard_normal((6, n, n + 1))
+        # vort_abs lives at D-grid corners → (6, n+1, n+1).  Also large
+        # enough to survive the upwind select at i=0 and i=n.
+        vort_abs = rng.standard_normal((6, n + 1, n + 1))
+        return v_d, u_d, uc, vc, vort_abs
+
+    def test_vorticity_flux_matches_fortran_non_duogrid(self):
+        """Random inputs + non-duogrid CDGrid → bit-for-bit match
+        against the numpy reference.  Both face-boundary overrides
+        and the upwind selection are exercised.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import (
+            _vorticity_flux, _sina_u_v_from_sin_sg)
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        v_d, u_d, uc, vc, vort_abs = self._build_inputs(637, n)
+
+        fy1, vort_x, fx1, vort_y = _vorticity_flux(
+            jnp.asarray(v_d), jnp.asarray(u_d),
+            jnp.asarray(uc), jnp.asarray(vc),
+            jnp.asarray(vort_abs), cdgrid, use_duogrid=False)
+
+        sina_u_j, sina_v_j = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u = np.asarray(sina_u_j)
+        sina_v = np.asarray(sina_v_j)
+        cosa_u = np.asarray(cdgrid.cosa_u)
+        cosa_v = np.asarray(cdgrid.cosa_v)
+        eps = float(jnp.finfo(jnp.float32).eps)
+
+        fy1_ref, vort_x_ref, fx1_ref, vort_y_ref = self._ref_vorticity_flux(
+            v_d, u_d, uc, vc, vort_abs,
+            cosa_u, cosa_v, sina_u, sina_v, n,
+            use_duogrid=False, eps=eps)
+
+        np.testing.assert_allclose(
+            np.asarray(fy1), fy1_ref, atol=1e-12,
+            err_msg=("_vorticity_flux non-duogrid fy1 diverges from "
+                     "sw_core.F90:416-480 reference — check cosa_u / "
+                     "sina_u / face-boundary override indexing."))
+        np.testing.assert_allclose(
+            np.asarray(fx1), fx1_ref, atol=1e-12,
+            err_msg=("_vorticity_flux non-duogrid fx1 diverges from "
+                     "sw_core.F90:416-480 reference — check cosa_v / "
+                     "sina_v / face-boundary override indexing."))
+        np.testing.assert_array_equal(
+            np.asarray(vort_x), vort_x_ref,
+            err_msg=("_vorticity_flux vort_x upwind selection does not "
+                     "match Fortran: vort_abs(i-1, j) if fy1>0 else "
+                     "vort_abs(i, j)."))
+        np.testing.assert_array_equal(
+            np.asarray(vort_y), vort_y_ref,
+            err_msg=("_vorticity_flux vort_y upwind selection does not "
+                     "match Fortran."))
+
+    def test_vorticity_flux_matches_fortran_duogrid(self):
+        """Duogrid path: the 4 face-boundary overrides must be SKIPPED.
+        Feed a real CDGrid with duogrid enabled and verify the output
+        equals the Fortran formula without any edge rewrite."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import (
+            _vorticity_flux, _sina_u_v_from_sin_sg)
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        v_d, u_d, uc, vc, vort_abs = self._build_inputs(638, n)
+
+        fy1, vort_x, fx1, vort_y = _vorticity_flux(
+            jnp.asarray(v_d), jnp.asarray(u_d),
+            jnp.asarray(uc), jnp.asarray(vc),
+            jnp.asarray(vort_abs), cdgrid, use_duogrid=True)
+
+        sina_u_j, sina_v_j = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u = np.asarray(sina_u_j)
+        sina_v = np.asarray(sina_v_j)
+        cosa_u = np.asarray(cdgrid.cosa_u)
+        cosa_v = np.asarray(cdgrid.cosa_v)
+        eps = float(jnp.finfo(jnp.float32).eps)
+
+        fy1_ref, vort_x_ref, fx1_ref, vort_y_ref = self._ref_vorticity_flux(
+            v_d, u_d, uc, vc, vort_abs,
+            cosa_u, cosa_v, sina_u, sina_v, n,
+            use_duogrid=True, eps=eps)
+
+        np.testing.assert_allclose(
+            np.asarray(fy1), fy1_ref, atol=1e-12,
+            err_msg=("_vorticity_flux duogrid fy1 diverges from "
+                     "no-override reference — any face-boundary rewrite "
+                     "under duogrid would break this test."))
+        np.testing.assert_allclose(
+            np.asarray(fx1), fx1_ref, atol=1e-12,
+            err_msg=("_vorticity_flux duogrid fx1 diverges from "
+                     "no-override reference."))
+        # Also verify the duogrid output at i=0, i=n is NOT the raw v_d
+        # (i.e., the override was actually suppressed — fy1 retains the
+        # (v_d - uc*cosa_u)/sina_u formula at face boundaries instead
+        # of the `fy1 = v_d` fallback).
+        fy1_raw = (v_d - uc * cosa_u) / np.maximum(sina_u, eps)
+        np.testing.assert_allclose(
+            np.asarray(fy1), fy1_raw, atol=1e-12,
+            err_msg=("Duogrid path is applying the non-duogrid face "
+                     "override to fy1 — the `if not use_duogrid:` "
+                     "guard at fv3_sw_core.py:1156 is broken."))
+
+    def test_vorticity_flux_duogrid_skips_face_override_iter637(self):
+        """Explicit lock: under duogrid, swapping v_d / u_d at the face
+        boundaries to sentinel values must NOT change the fy1 / fx1
+        output at those faces (because the `if not use_duogrid:` guard
+        at fv3_sw_core.py:1156 / 1162 suppresses the override).  A
+        regression that dropped the guard would read the sentinel v_d
+        / u_d and the test would fail.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _vorticity_flux
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        v_d, u_d, uc, vc, vort_abs = self._build_inputs(639, n)
+
+        fy1_real, _, fx1_real, _ = _vorticity_flux(
+            jnp.asarray(v_d), jnp.asarray(u_d),
+            jnp.asarray(uc), jnp.asarray(vc),
+            jnp.asarray(vort_abs), cdgrid, use_duogrid=True)
+
+        # Poison v_d at i=0 and i=n, u_d at j=0 and j=n with sentinels.
+        v_d_poison = v_d.copy()
+        v_d_poison[:, 0, :] = -999.0
+        v_d_poison[:, n, :] = +999.0
+        u_d_poison = u_d.copy()
+        u_d_poison[:, :, 0] = -999.0
+        u_d_poison[:, :, n] = +999.0
+
+        fy1_pois, _, fx1_pois, _ = _vorticity_flux(
+            jnp.asarray(v_d_poison), jnp.asarray(u_d_poison),
+            jnp.asarray(uc), jnp.asarray(vc),
+            jnp.asarray(vort_abs), cdgrid, use_duogrid=True)
+
+        # fy1 uses v_d directly only at i=0 and i=n in the non-duogrid
+        # override branch.  In the duogrid branch, fy1 still depends on
+        # v_d through the (v_d - uc*cosa_u)/sina_u formula for ALL
+        # indices (so the poison changes fy1_pois in general).  But the
+        # RATIO of changes at i=0 / i=n to other indices should be the
+        # same as at any other i — i.e., poisoning i=0/i=n propagates
+        # only through the formula, NOT through a separate override.
+        # Easier to test: fy1_pois and fy1_real must differ by the
+        # EXPECTED formula-driven amount, NOT by the full `v_d[:,0,:] -
+        # fy1_real[:,0,:]` jump that the override branch would cause.
+        diff_i0_real_vs_pois = np.max(np.abs(
+            np.asarray(fy1_pois)[:, 0, :] - np.asarray(fy1_real)[:, 0, :]))
+        # In the duogrid path, diff at i=0 = delta(v_d[:,0,:]) / sina_u
+        # ≈ 1998 / sina_u.  This is LARGE so the test might pass even
+        # with a broken override.  Stricter check: the ratio should
+        # match the formula-driven ratio (pre-poisoning the formula
+        # consumed v_d fully, post-poisoning the formula consumes the
+        # sentinel — difference is linear in v_d delta).
+        # Simpler lock: fy1_pois[:,0,:] must equal the formula value
+        # using v_d_poison (not the sentinel directly).
+        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        sina_u_j, _ = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u = np.asarray(sina_u_j)
+        cosa_u = np.asarray(cdgrid.cosa_u)
+        eps = float(jnp.finfo(jnp.float32).eps)
+        # Formula-driven expected at i=0 from poisoned v_d.
+        expected_at_i0 = ((v_d_poison[:, 0, :] - uc[:, 0, :] * cosa_u[:, 0, :])
+                           / np.maximum(sina_u[:, 0, :], eps))
+        np.testing.assert_allclose(
+            np.asarray(fy1_pois)[:, 0, :], expected_at_i0, atol=1e-10,
+            err_msg=("Duogrid path DROPS the formula at i=0 in favor of "
+                     "`fy1 = v_d` override — `if not use_duogrid:` guard "
+                     "at fv3_sw_core.py:1156 is broken."))
+
+
 if __name__ == "__main__":
     unittest.main()

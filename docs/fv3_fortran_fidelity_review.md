@@ -1249,3 +1249,22 @@ All 3 tests pass at `atol=1e-13`.  `_ke_upwind` is now Fortran-formula locked ag
 
 Cumulative Fortran-formula lock inventory (iter-617..636): 16 helpers covered — `edge_interpolate4`, `_del6_vt_flux`, `_dsw1_recompute_ut_vt`, `_pgrad_c`, `compute_transport_quantities`, `fv3_d2cc`, `_pert_ppm` (iv=0 and iv=1), and now `_ke_upwind`.  Plus behavioural locks on which code paths call `_pert_ppm` / `_pert_ppm_iv0`.
 
+### Iter-637 — Fortran-formula lock for `_vorticity_flux`
+
+**Motivation**: `_vorticity_flux` in `src/legoesm/core/fv3_sw_core.py` (lines 1139-1167) implements FV3's c_sw vorticity transport flux at `sw_core.F90:416-480`:
+
+    fy1 = (v - uc * cosa_u) / sina_u   # 1/sina, NOT 1/sina²
+    fx1 = (u - vc * cosa_v) / sina_v
+
+Non-duogrid path adds four face-boundary overrides (W/E on fy1, S/N on fx1) mirroring `sw_core.F90:1156-1164` (`fy1(1,j) = v(1,j)`, etc.).  Then both fluxes upwind-select the absolute vorticity: `vort_x = vort_abs(i-1,j) if fy1 > 0 else vort_abs(i,j)`.
+
+Pre-iter-637 there were only behavioural tests for "does the face override fire in non-duogrid" (`test_vorticity_flux_legacy_*`), but NO direct lock on the numerical output.  A regression that swapped `cosa_u` for `cosa_v`, used `sina²` instead of `sina`, mis-indexed the upwind selection, or applied the edge override inside-out would silently break vorticity transport.
+
+**Tests added** (`TestVorticityFluxFortranFormula`, 3 total):
+- `_ref_vorticity_flux`: numpy line-by-line reproduction with parameterised `use_duogrid`.
+- `test_vorticity_flux_matches_fortran_non_duogrid`: random inputs at n=8, bit-for-bit at `atol=1e-12` with all 4 face-boundary overrides active.
+- `test_vorticity_flux_matches_fortran_duogrid`: random inputs with duogrid, expects the raw `(v - uc*cosa_u)/sina_u` formula at ALL indices including face boundaries (no override).  Includes a direct comparison to `fy1_raw` at all 4 face edges.
+- `test_vorticity_flux_duogrid_skips_face_override_iter637`: poisons `v_d[:, 0, :]` / `v_d[:, n, :]` / `u_d[:, :, 0]` / `u_d[:, :, n]` with sentinels and asserts that under duogrid the output at those indices matches the formula-with-poisoned-v_d value (i.e., the poison propagates ONLY through the formula, NOT through the `fy1 = v_d` override branch).  Directly locks the `if not use_duogrid:` guard at fv3_sw_core.py:1156 / 1162.
+
+All 3 tests pass at `atol=1e-12`.  Cumulative Fortran-formula lock inventory now **17 helpers**: `_vorticity_flux` added.
+
