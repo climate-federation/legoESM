@@ -2094,6 +2094,61 @@ class TestPadHaloH3Guardrails:
                     u, v, ca, sa, cap, sap,
                     interp_offsets=offsets, halo=1)
 
+    def test_pad_halo_vector_duogrid_mpi_refused_iter633(self):
+        """Iter-633 (Codex stop-time finding on iter-632): iter-632's
+        `pad_halo_vector` guard suppressed offsets to None when
+        `duogrid` was set, bypassing the guard.  But the MPI branch
+        doesn't apply `cube_rmp_vectorized` / `fill_corner_region`
+        after the packed exchange — so `pad_halo_vector(duogrid=<grid>)`
+        under MPI was silently getting nearest-index halo cells
+        WITHOUT the duogrid remap.  Iter-633 refuses the combination
+        explicitly.  This test locks the refusal.
+        """
+        from unittest import mock
+        from types import SimpleNamespace
+        import legoesm.grids.halo as halo_mod
+
+        u = jnp.ones((6, N, N), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
+        # Lightweight duogrid stub — guard fires on `is not None` alone.
+        dg = SimpleNamespace(ng=2)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with pytest.raises(NotImplementedError, match="duogrid"):
+                halo_mod.pad_halo_vector(
+                    u, v, ca, sa, cap, sap,
+                    interp_offsets=None, halo=1, duogrid=dg)
+
+    def test_pad_halo_vector_4d_duogrid_mpi_refused_iter633(self):
+        """Iter-633: `pad_halo_vector_4d` had the same escape hatch as
+        `pad_halo_vector`.  The packed 4D MPI vector path doesn't
+        apply duogrid post-processing after `pad_halo_mpi_4d`, so
+        passing `duogrid=<grid>` under MPI silently dropped the remap.
+        Iter-633 refuses the combination.
+        """
+        from unittest import mock
+        from types import SimpleNamespace
+        import legoesm.grids.halo as halo_mod
+
+        nlev = 2
+        u = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N, nlev), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
+        dg = SimpleNamespace(ng=2)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with pytest.raises(NotImplementedError, match="duogrid"):
+                halo_mod.pad_halo_vector_4d(
+                    u, v, ca, sa, cap, sap,
+                    interp_offsets=None, halo=1, duogrid=dg)
+
     def test_pad_halo_vector_halo3_mpi_guard_lifted_iter630(self):
         """Iter-630: the `halo=3 and _halo_backend == "mpi"` guard in
         `pad_halo_vector` was removed after `pad_halo_mpi_4d(halo=3)`

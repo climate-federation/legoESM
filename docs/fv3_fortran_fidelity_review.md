@@ -1158,3 +1158,21 @@ All 65 `test_scale_halo.py` tests pass (plus 58 tests in `test_halo.py` / `test_
 
 69 `test_scale_halo.py` tests pass (66 pre-iter-632 + 3 new locks); 58 `test_halo.py` / `test_async_halo.py` tests pass (unchanged).  The silent-drop hazard on `interp_offsets` under MPI is now closed across all four public halo-dispatch surfaces (`pad_halo`, `pad_halo_4d`, `pad_halo_vector`, `pad_halo_vector_4d`).
 
+### Iter-633 — close the `pad_halo_vector` duogrid escape hatch
+
+**Codex stop-time finding on iter-632**: "`pad_halo_vector` still has an MPI escape hatch that bypasses the new guard."
+
+**Root cause**: iter-632 wrote `offsets_mpi = None if duogrid is not None else interp_offsets`, then raised on `offsets_mpi is not None`.  So a caller passing `duogrid=<grid>` had `offsets_mpi` suppressed to `None`, sailed past the guard, and reached the packed MPI branch — which does NOT apply `cube_rmp_vectorized` / `fill_corner_region` after `pad_halo_mpi_4d`.  The duogrid kinked→extended remap is therefore silently dropped under MPI.  The same escape hatch existed in `pad_halo_vector_4d` (iter-632 commented "duogrid is not suppressed here because … it is a separate unsupported combination" but never actually refused it).
+
+**Scalar `pad_halo` / `pad_halo_4d` are unaffected**: both apply duogrid post-processing after dispatch (scalar at `halo.py:580-583`, 4D at `halo.py:689-703`), so the duogrid remap runs regardless of which backend ran the exchange.  Only the packed vector MPI paths lacked this post-processing.
+
+**Fix**: in both `pad_halo_vector` and `pad_halo_vector_4d` MPI branches, refuse BOTH `interp_offsets != None` AND `duogrid != None` as separate checks.  Callers that need duogrid on MPI must either (a) teach the MPI vector branch to apply `cube_rmp_vectorized` post-dispatch (mirroring `pad_halo_4d`), or (b) call scalar `pad_halo` / `pad_halo_4d` per component under MPI — both paths already apply duogrid correctly.
+
+**Tests added** (2 new locks in `TestPadHaloH3Dispatch`):
+- `test_pad_halo_vector_duogrid_mpi_refused_iter633`
+- `test_pad_halo_vector_4d_duogrid_mpi_refused_iter633`
+
+71 `test_scale_halo.py` tests pass (69 pre-iter-633 + 2 new).  The MPI vector-halo path now fails loudly on duogrid instead of silently producing nearest-index halos without the kinked→extended remap.
+
+**Known active caller**: `src/legoesm/core/operators_3d.py::vorticity_3d` / `divergence_3d` pass `duogrid=dg` into `pad_halo_vector_4d`.  Under MPI with `grid.duogrid is not None`, these helpers will now raise.  If that combination is needed, the follow-up fix is to apply `cube_rmp_vectorized` + `fill_corner_region` per-component after `pad_halo_mpi_4d` in the vector MPI branch.  Logged here as an unresolved follow-up rather than silently accepted.
+
