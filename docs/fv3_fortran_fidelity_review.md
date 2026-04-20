@@ -568,3 +568,37 @@ Spatial distribution of full-step `dv/dt`:
 Distinguishing these would require computing `-f × u` at the same grid positions and comparing against the residual.  But either way, the conclusion stands: the FB chain on W2 IC has ~3-5 mm/s² dt-independent residual that drives step-26 instability.
 
 **Tests**: diagnostic-only change; no source code modified.  118 regression tests pass.
+
+### Iter-665 — PGF diagnostic: scheme delivers ~2× analytic balanced value
+
+**Motivation**: per iter-663/664, the FB-chain residual tendency is dt-independent (~3-5 mm/s²) and comes from the PGF being larger than the Coriolis cancellation.  To test whether the scheme's PGF is consistent with the analytic Williamson 2 balanced PGF, ran `_p_grad_c` directly on the **ORIGINAL h** (bypassing `c_sw`) and compared to the analytic formula.
+
+**Analytic balanced PGF** (geostrophic, Williamson 2):
+
+    |PGF_max| = (ω·u₀ + u₀²/(2R)) · max{sin(2·lat)}
+             = (7.29e-5 · 38.6 + 38.6²/(2·6.37e6)) · 1
+             ≈ 2.82e-3 + 1.17e-4
+             ≈ 2.93e-3 m/s²  at lat = 45°
+
+**Scheme PGF on original h** (`scripts/diag_fb_pgf_vs_analytic.py`):
+- `max|PGF_u|/dt2 = 5.86e-3 m/s²`
+- `max|PGF_v|/dt2 = 5.87e-3 m/s²`
+
+**Scheme PGF on h_star** (after c_sw half-step):
+- `max|PGF_u|/dt2 = 5.90e-3 m/s²`  (slight increase from c_sw's 14m max h tendency)
+- `max|PGF_v|/dt2 = 6.85e-3 m/s²`
+
+**Key finding**: the scheme's PGF is **~2× the analytic balanced value** even on the unmodified `h` — NOT a c_sw artifact.  The discrete gradient operator `(p_W - p_E) · rdxc` applied to the W2 balanced h field gives 5.86e-3 where 2.93e-3 is expected.
+
+**Coriolis consistency check**: analytic max `|Coriolis_v| = f · u₀ · cos(lat)` peaks at lat = 45° with value `ω·u₀ = 2.82e-3 m/s²`.  The scheme's effective Coriolis (computed via `-uc·cosa_u` and `-vc·cosa_v` structures in c_sw / d_sw) should deliver this.  Measured scheme Coriolis via analytic formula at D-grid edges matches: `max|Coriolis_v| = 2.81e-3 m/s²`.
+
+**Net imbalance**: on an "ideally balanced" IC, PGF + Coriolis should cancel to O(ε).  The scheme's PGF (5.86e-3) minus Coriolis (2.81e-3) leaves a residual of **~3 mm/s²** — precisely matching the observed step-1 u-tendency of `max|du|/dt = 2.96e-3 m/s²`.
+
+**Hypotheses for the 2× PGF factor**:
+1. The discrete gradient operator has a factor-of-2 error in the metric coefficient `rdxc` (off-by-one in cell-to-cell distance definition, or interpolation factor).
+2. The analytic `|PGF_max|` derivation is correct but the scheme's max happens at a cube-boundary cell where the gradient is numerically amplified — not a factor of 2 globally but a spatial concentration artefact.
+3. The Williamson 2 h formula is being interpreted differently between the IC and the PGF operator (unit mismatch, factor of g somewhere).
+
+**Next iter target**: inspect the PGF field per-cell to see WHERE the max lives.  If max is at cube edges or corners, hypothesis 2.  If max is at lat=45° interior cells, hypothesis 1 or 3 (global factor).  Also check `rdxc` values vs the expected `1/dx_centre-to-centre` at a specific grid point.
+
+**Tests**: diagnostic-only; no source code changes.  Script added: `scripts/diag_fb_pgf_vs_analytic.py`.  118 regression tests pass.
