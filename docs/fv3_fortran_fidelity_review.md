@@ -696,3 +696,35 @@ The Python port is now the direct translation of this.  Added the Fortran line-r
 This closes the ambiguity about whether iter-666's extrapolation was "Fortran-faithful or a reasonable approximation" — it IS Fortran-faithful, confirmed by direct oracle inspection.
 
 **No source-logic changes in iter-669**; comment-only update.  All 122 regression tests still pass.
+
+### Iter-670 — fix `area_corner` cube-boundary underestimation
+
+**Finding**: at cube vertices and cube edges, Python's `area_corner` was computed by summing only the on-face supergrid cells around each dual-cell corner.  At a cube vertex (i=0, j=0), only 1 of 4 surrounding supergrid cells is on-face (the other 3 live on neighbouring faces), so Python reported `area_corner ≈ 0.22 × interior`.  At cube edges (i=0, 1≤j≤n-1), 2 of 4 are on-face → `≈ 0.43 × interior`.
+
+The consequent `rarea_c = 1/area_corner` was 2-4× too large at cube boundaries.  `rarea_c` is used in `operators_cdgrid.py::dgrid_vorticity` via `circ / cdgrid.area_corner`, which feeds into `fv3_sw_tendencies` (the A-L production W2 path) at step (f).
+
+**Fortran oracle** (`tools/fv_grid_tools.F90:1084-1087, 1561-1564`) extrapolates `area_c` at cube boundaries from adjacent interior, same pattern as `dxc`/`dyc`:
+
+```fortran
+area_c(isd,j)           = area_c(isd+1,j)
+area_c(ied+1,j)         = area_c(ied,j)
+if (js == 1)     area_c(isd,jsd)   = area_c(isd+1,jsd+1)
+if (js == npy-1) area_c(isd,jed+1) = area_c(isd+1,jed)
+```
+
+**Fix**: in `src/legoesm/grids/cubed_sphere_cdgrid.py:336-360`, after the partial-quadrant loop, extrapolate at cube boundaries for n≥2:
+- West/east edges: `area_c[0, 1:n] = area_c[1, 1:n]`; `area_c[n, 1:n] = area_c[n-1, 1:n]`
+- South/north edges: similar.
+- Corners (cube vertices): `area_c[0, 0] = area_c[1, 1]`, etc. (diagonal neighbour).
+
+For n<2, keep the partial-quadrant sum (toy-regional fallback).
+
+**Verification**:
+- All 122 regression tests pass (plus 1 new `test_iter670_area_corner_boundary_matches_interior`).
+- Ratio corner/interior measured 0.22 (pre-fix) → 1.00 (post-fix).
+- SW matrix at C36 production (A-L) path: metrics UNCHANGED (L2=2.42e-04, Linf=1.83e-03, max|v| ±0.3 m/s).  The A-L path's vorticity operator reads `area_corner` but its visible W2 artifact is dominated by a different source (architectural A-L + boundary_fix residual per review doc item #1).
+- FB chain: blows up at step 25, slightly later than iter-666's step 22 but still unstable.  Progressive improvements since iter-665's step 26 → iter-666's step 22 → iter-670's step 25 (non-monotonic because the C36 residual is a mix of multiple sources).
+
+**Regression-lock test** added (`test_iter670_area_corner_boundary_matches_interior`): asserts `area_corner[i=0, 1..n-1] == area_corner[i=1, 1..n-1]` (edge extrapolation), `area_corner[0,0] == area_corner[1,1]` (corner diagonal), and `corner_mean / interior_mean > 0.5` (integration check — pre-fix ratio was 0.22).
+
+Regression suite grew from 122 to 123 tests.

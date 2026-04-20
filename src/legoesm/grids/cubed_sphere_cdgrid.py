@@ -333,6 +333,30 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
         # For i,j = 0..n: need 2i-1 >= 0 and 2i <= 2n-1 → i = 1..n-1 for interior
         # Boundaries use available cells only
 
+        # Iter-670 fix: at cube boundaries/vertices, the 4-quadrant
+        # supergrid sum misses contributions from neighbour faces
+        # (1 or 3 of the 4 quadrants are off-face).  This gave
+        # area_corner ≈ 0.22× interior at cube vertices and 0.43× at
+        # cube edges — which amplified rarea_corner by 2-4× at
+        # boundaries and propagated into every operator that uses
+        # `cdgrid.rarea_c` (e.g., `cdgrid_momentum_tendencies` at
+        # `operators_cdgrid.py:1090`).
+        #
+        # Fortran oracle (`tools/fv_grid_tools.F90:1084-1087, 1561-1564`)
+        # extrapolates the metric at cube boundaries:
+        #     area_c(isd,j)         = area_c(isd+1,j)          ! west edge
+        #     area_c(ied+1,j)       = area_c(ied,j)            ! east edge
+        #     area_c(i,jsd)         = area_c(i,jsd+1)          ! south edge
+        #     area_c(i,jed+1)       = area_c(i,jed)            ! north edge
+        #     area_c(isd,jsd)       = area_c(isd+1,jsd+1)      ! SW corner
+        #     area_c(isd,jed+1)     = area_c(isd+1,jed)        ! NW corner
+        #     area_c(ied+1,jsd)     = area_c(ied,jsd+1)        ! SE corner
+        #     area_c(ied+1,jed+1)   = area_c(ied,jed)          ! NE corner
+        # (exact match at leading order for uniform cubed-sphere; the
+        # neighbour-face area is identical.)
+        #
+        # For n >= 2, extrapolate interior values to the boundary.
+        # For n < 2, fall back to the partial-quadrant sum.
         area_c = np.zeros((n + 1, n + 1))
         for i in range(n + 1):
             for j in range(n + 1):
@@ -347,6 +371,17 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
                 if si < 2 * n and sj < 2 * n:
                     total += sg_area[si, sj]
                 area_c[i, j] = total
+        if n >= 2:
+            # Extrapolate edges from adjacent interior.
+            area_c[0, 1:n]    = area_c[1, 1:n]        # west edge
+            area_c[n, 1:n]    = area_c[n - 1, 1:n]    # east edge
+            area_c[1:n, 0]    = area_c[1:n, 1]        # south edge
+            area_c[1:n, n]    = area_c[1:n, n - 1]    # north edge
+            # Extrapolate corners from the diagonal interior cell.
+            area_c[0, 0]     = area_c[1, 1]
+            area_c[0, n]     = area_c[1, n - 1]
+            area_c[n, 0]     = area_c[n - 1, 1]
+            area_c[n, n]     = area_c[n - 1, n - 1]
         all_area_c.append(area_c)
 
         # --- dxc: distance between cell centers (i-1,j) and (i,j) ---
