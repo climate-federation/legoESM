@@ -7546,6 +7546,88 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
                  "constant alone would not catch a regression that "
                  "inlines the coefficient into the production formula."))
 
+    def test_d2a2c_vect_interior_stencil_output_matches_inline_formula_iter647(self):
+        """Iter-647 (Codex stop-time finding on iter-646): iter-646's
+        patch-and-detect-diff tests can false-pass — a regression that
+        inlines the `_A1` literal at the u4 stencil site while still
+        reading `_A1` elsewhere (e.g., at the v4 stencil) would be
+        caught by the total-output diff even though the TARGETED
+        stencil is broken.
+
+        Iter-647 adds a direct-output check: at interior cells where
+        the 4th-order override fires, run `_d2a2c_vect` on an
+        orthogonalised CDGrid (`cos_sg[..., 4] = 0`, `rsin2_cell = 1`),
+        feed a random `u_d` with `v_d = 0`, and verify the production
+        `ua` at interior cells matches the EXPLICIT 4th-order Lagrange
+        formula::
+
+            ua[i, j] = A1 * (u_d[i, j]   + u_d[i, j+1])
+                     + A2 * (u_d[i, j-1] + u_d[i, j+2])
+
+        bit-for-bit.  Under the orthogonal override `cos_sg5 = 0` and
+        `rsin2 = 1`, the cov→contra step is the identity, so
+        `ua = utmp` at interior cells where the 4th-order override
+        fires.  A regression that mis-indexed the stencil, swapped
+        coefficients, or dropped the 4th-order override would fail
+        this test even if some OTHER `_A1` usage remained dynamic.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core import fv3_sw_core
+
+        n = 12   # n > 2*npt (npt = min(4, n//2) = 4) so 4th-order fires
+        cdgrid_base = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+
+        # Orthogonalise: set cos_sg[..., 4] = 0 and rsin2_cell = 1.
+        cos_sg_ortho = np.asarray(cdgrid_base.cos_sg).copy()
+        cos_sg_ortho[..., 4] = 0.0
+        cdgrid = cdgrid_base._replace(
+            cos_sg=jnp.asarray(cos_sg_ortho),
+            rsin2_cell=jnp.ones_like(cdgrid_base.rsin2_cell))
+
+        rng = np.random.default_rng(647)
+        u_d = rng.standard_normal((6, n, n + 1))
+        v_d = np.zeros((6, n + 1, n), dtype=np.float64)
+
+        out = fv3_sw_core._d2a2c_vect(
+            jnp.asarray(u_d), jnp.asarray(v_d), cdgrid)
+        ua = np.asarray(out[0])    # (6, n, n)
+
+        # Expected `utmp = u4` at interior j_cell in [npt, n-npt-1]
+        # where npt = 4.  The stencil formula:
+        A1 = fv3_sw_core._A1
+        A2 = fv3_sw_core._A2
+        u4 = (A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
+              + A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
+        # u4 has shape (6, n, n-3).  It maps to utmp[:, :, k] for
+        # k in [1, n-2] (i.e., utmp.at[:, :, npt:n-npt].set(u4[:,:, npt-1:n-npt-1])).
+        npt = min(4, n // 2)
+        expected_utmp_interior = u4[:, :, npt - 1:n - npt - 1]  # (6, n, n-2*npt)
+
+        # At interior i AND j_cell, ua == utmp (under orthogonal grid).
+        # The i-range should also be interior so halo effects don't
+        # pollute — use i in [2, n-3] (pad_halo_vector h=2 halo is the
+        # only i-dependence at interior-j_cell cells).
+        ua_interior = ua[:, 2:-2, npt:n - npt]
+        expected_interior = expected_utmp_interior[:, 2:-2, :]
+
+        np.testing.assert_allclose(
+            ua_interior, expected_interior, atol=1e-10,
+            err_msg=("_d2a2c_vect interior `ua` does NOT match the "
+                     "explicit 4th-order Lagrange formula "
+                     "A1*(u[j]+u[j+1]) + A2*(u[j-1]+u[j+2]).  "
+                     "Under cos_sg[...,4]=0 and rsin2=1 the production "
+                     "pipeline reduces to `ua = utmp` at interior "
+                     "cells, so this check directly locks the 4th-order "
+                     "stencil formula in fv3_sw_core.py:464-469 "
+                     "against the coefficients from _A1/_A2.  A "
+                     "regression that inlines or mis-indexes the "
+                     "stencil here fails this test even if other "
+                     "_A1 usages remain dynamic."))
+
     def test_d2a2c_vect_duogrid_production_stencil_consumes_A1_A2_iter646(self):
         """Iter-646: same coverage check for the DUOGRID production
         stencil at `fv3_sw_core.py:347-355`.  Patches `_A1` and

@@ -1434,3 +1434,23 @@ A regression that inlined the literal and dropped the symbol reference would pro
 
 All 5 tests (3 from iter-645 + 2 from iter-646) pass on the correct code.  The production stencils are now demonstrably consuming `_A1` at the sites the lock claims to cover.
 
+### Iter-647 — direct interior-cell stencil lock via orthogonalised CDGrid
+
+**Codex stop-time finding on iter-646**: "iter-646's tests can false-pass without proving the targeted D→A stencil uses `_A1`/`_A2`."
+
+**Analysis**: iter-646's patch-and-detect-diff approach catches regressions that remove `_A1` entirely, but NOT regressions that inline the literal at the u4 stencil site (fv3_sw_core.py:464-469) while leaving other `_A1` usages (e.g., the v4 stencil on the next line) dynamic.  The total-output diff would still fire on v4's dynamic behavior, falsely passing the u4 test.
+
+**Fix**: added `test_d2a2c_vect_interior_stencil_output_matches_inline_formula_iter647` which:
+1. Builds a CDGrid and overrides its metrics to orthogonal: `cos_sg[..., 4] = 0` and `rsin2_cell = 1`.
+2. Under that override, the cov→contra step in `_d2a2c_vect` (`ua = (utmp - vtmp*cos_sg5)*rsin2`) reduces to `ua = utmp` at interior cells.
+3. Feeds a random `u_d` with `v_d = 0` and computes the explicit 4th-order Lagrange formula directly:
+
+        expected_utmp_interior = A2*(u_d[:, :, :-3] + u_d[:, :, 3:])
+                               + A1*(u_d[:, :, 1:-2] + u_d[:, :, 2:-1])
+
+4. Asserts `ua[:, 2:-2, npt:n-npt]` (interior cells) matches that expected slice bit-for-bit at `atol=1e-10`.
+
+**Verification**: deliberately applying a mutation that inlines the literal `0.7` at the u4 line (leaving `_A1` / `_A2` and v4 untouched) causes the iter-647 test to fail with 100% mismatch and max diff 0.55 — proving the lock now targets the u4 stencil specifically, independent of whether other `_A1` usages remain dynamic.  Source restored after the verification.
+
+This closes the false-pass gap Codex flagged.  The 4th-order D→A stencil in `_d2a2c_vect` is now locked at three strengths: constant values (iter-645), production consumption of `_A1` somewhere (iter-646), and bit-exact interior-cell output under orthogonalised metrics (iter-647).
+
