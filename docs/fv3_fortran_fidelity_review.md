@@ -607,3 +607,22 @@ No divergence between tests' nested-scope handling.  108 `test_duogrid` tests pa
 
 These three locks together cover the top-three user-visible failure modes (pre-iter-26 diagnostic bug, pre-iter-505 PPM polar asymmetry, and the current pole-cell artifact).  A new failure mode would appear visually in the snapshots and the test matrix would continue to PASS — but the magnitude of that specific failure mode would be outside the locked ceilings.  Future iterations can then add targeted locks for any new failure mode discovered.
 
+### Iter-606 (2026-04-20): field-level mirror-symmetry fix for iter-605 (Codex)
+
+**Codex stop-time review on iter-605 (commit 6efd914)**: the "N-S mirror symmetry" assertion in `test_w2_pole_cell_v_north_ceiling_at_1day` compared scalar `max|v|` between face 4 and face 5 only.  Two completely different field patterns can share the same scalar max while being non-mirror-images — a scalar comparison cannot detect that regression class.
+
+**Fix**: replaced the scalar-max comparison with a FIELD-LEVEL check identical in convention to iter-592's `test_w2_short_run_v_north_N_S_mirror_symmetry`:
+```
+field_diff = max|v_north[4] - (-v_north[5][:, ::-1])|
+rel = field_diff / max|v_north[4]|
+assert rel < 3e-2
+```
+
+The mirror convention `-v[:, ::-1]` is the one iter-592 validated at the 10-step mark, and the 1-day baseline measures `rel = 1.139e-2`.  Ceiling 3e-2 allows ~2.6× headroom.
+
+**Sanity-verified**: tightening the ceiling to 1e-3 fires the test with measured 1.139e-2 — confirms field-level comparison sees the actual pattern difference (the scalar maxima were identical at 0.307 m/s both faces and would have PASSED iter-605's original assertion regardless).  Production ceiling restored to 3e-2.
+
+**Scalar-max vs field-level distinction**: iter-605 baselined face 4 max = face 5 max = 0.3068 (identical to 4 sig figs from grid-topology mirror).  If a hypothetical future bug introduced a perturbation that preserved face-4 max but DISTORTED its shape (e.g., moved the peak to a different cell), the old scalar-max assertion would not fire.  The new field-level comparison fires if the shape itself drifts, not just the max magnitude.
+
+3 W2-characterization tests pass.  Coverage for user-visible W2 artifacts now uses field-level comparisons throughout.
+

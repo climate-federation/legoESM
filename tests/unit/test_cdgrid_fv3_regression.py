@@ -4473,20 +4473,38 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
                  f"exchange, or boundary_fix) has amplified the "
                  f"A-L + RK3 pole-singularity signature."))
 
-        # Complementary ceiling: N-S mirror symmetry of face 4 vs
-        # face 5 (which is also hit by the same pole singularity
-        # but at the south pole).
-        f5_max_v = float(np.max(np.abs(v_north[5])))
-        rel = abs(f4_max_v - f5_max_v) / max(f4_max_v, f5_max_v, 1e-12)
+        # Complementary ceiling (Iter-606 Codex follow-up): FIELD-level
+        # N-S mirror symmetry, not just scalar maxima.  Two different
+        # field patterns on face 4 vs face 5 could share the same
+        # max|v| while looking completely different — a scalar-max
+        # comparison cannot detect that regression class.
+        #
+        # For W2 alpha=0 zonal flow, face 4 (north polar) and face 5
+        # (south polar) should satisfy v_north[4, i, j] ≈
+        # -v_north[5, i, n-1-j] (axis-flipped, sign-flipped), matching
+        # the convention used in `test_w2_short_run_v_north_N_S_mirror_symmetry`.
+        # At 1 day baseline: rel diff ≈ 1.14e-2 (measured on iter-604
+        # saved snapshot).  Ceiling 3e-2 allows ~2.6x headroom.
+        v4_field = np.asarray(v_north[4])
+        v5_mirror = -np.asarray(v_north[5][:, ::-1])
+        field_diff = float(np.max(np.abs(v4_field - v5_mirror)))
+        ref = max(float(np.max(np.abs(v4_field))),
+                   float(np.max(np.abs(v5_mirror))),
+                   1e-12)
+        rel = field_diff / ref
         self.assertLess(
-            rel, 5e-3,
-            msg=(f"W2 C36 1d: face 4 max|v| = {f4_max_v:.3e}, "
-                 f"face 5 max|v| = {f5_max_v:.3e}, rel diff = "
-                 f"{rel:.3e}.  Exceeds 5e-3 ceiling — the pole "
-                 f"artifact should be N-S symmetric for the alpha=0 "
-                 f"zonal IC.  If this fires, a new N/S asymmetry "
-                 f"source has been introduced (distinct from the "
-                 f"pole-cell artifact itself)."))
+            rel, 3e-2,
+            msg=(f"W2 C36 1d: field-level mirror symmetry "
+                 f"|v_north[4] - (-v_north[5][:, ::-1])| rel = "
+                 f"{rel:.3e} exceeds 3e-2 ceiling.  max diff = "
+                 f"{field_diff:.3e}, ref = {ref:.3e}.  The pole "
+                 f"artifact pattern on face 4 differs from face 5's "
+                 f"reflected pattern by more than 3% — a new source "
+                 f"of N/S asymmetric error has been introduced at the "
+                 f"polar faces.  Pre-iter-605 baseline was 1.14e-2. "
+                 f"(Iter-605's original scalar-max comparison could "
+                 f"miss this — two different field patterns with "
+                 f"equal maxima would have passed.)"))
 
 
 if __name__ == "__main__":
