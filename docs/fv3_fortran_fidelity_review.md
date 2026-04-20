@@ -1176,3 +1176,27 @@ All 65 `test_scale_halo.py` tests pass (plus 58 tests in `test_halo.py` / `test_
 
 **Known active caller**: `src/legoesm/core/operators_3d.py::vorticity_3d` / `divergence_3d` pass `duogrid=dg` into `pad_halo_vector_4d`.  Under MPI with `grid.duogrid is not None`, these helpers will now raise.  If that combination is needed, the follow-up fix is to apply `cube_rmp_vectorized` + `fill_corner_region` per-component after `pad_halo_mpi_4d` in the vector MPI branch.  Logged here as an unresolved follow-up rather than silently accepted.
 
+### Iter-634 — wire MPI+duogrid vector halo fallback instead of hard-failing
+
+**Codex stop-time finding on iter-633**: "MPI+duogrid vector halos now hard-fail even though a correct fallback already exists."
+
+**Why iter-633's refusal was overcautious**: scalar `pad_halo` / `pad_halo_4d` already apply `cube_rmp_vectorized` + `fill_corner_region` *after dispatch* regardless of which backend ran the exchange (see `halo.py:580-583` for scalar, `689-703` for 4D).  So a per-component scalar fallback under MPI — `pad_halo(u_east, duogrid=<grid>)` + `pad_halo(v_north, duogrid=<grid>)` — is drop-in correct.  It pays 2 MPI messages instead of the packed 1, but the duogrid remap runs correctly.
+
+**Fix**: in both `pad_halo_vector` and `pad_halo_vector_4d` MPI branches, replace the iter-633 `duogrid is not None` refusal with a per-component scalar fallback:
+
+```python
+if duogrid is not None:
+    u_east_padded = pad_halo[_4d](u_east, halo=halo, duogrid=duogrid)
+    v_north_padded = pad_halo[_4d](v_north, halo=halo, duogrid=duogrid)
+else:
+    <existing packed pad_halo_mpi[_4d] path>
+```
+
+The `interp_offsets` refusal is retained because neither `pad_halo_mpi` nor `pad_halo_mpi_4d` honors offsets — the scalar fallback would hit the iter-631/632 guards.
+
+**Tests rewritten** (2 new `_fallback_iter634` tests replacing iter-633's `_refused_iter633` tests): each builds a real `create_cubed_sphere(n=8, use_duogrid=True)` grid, stubs `pad_halo_mpi[_4d]` to call the local helper (so the test runs single-process), and asserts bit-for-bit match between the MPI branch (via fallback) and the non-MPI branch.  The match is exact because both paths now run the same scalar `pad_halo` → local exchange → `cube_rmp_vectorized` → `fill_corner_region` pipeline.
+
+**Backlog update**: the "Known active caller" note above is now RESOLVED — `operators_3d.py::vorticity_3d` / `divergence_3d` will work under MPI with duogrid because the fallback path is correct.
+
+129 halo tests pass total (71 `test_scale_halo.py` + 24 `test_halo.py` + 34 `test_async_halo.py`).
+

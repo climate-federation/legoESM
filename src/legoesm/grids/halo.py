@@ -850,16 +850,13 @@ def pad_halo_vector_4d(
     # When MPI is active, pack both components along the level axis and
     # do one exchange instead of two, halving MPI message count.
     if _halo_backend == "mpi":
-        # Iter-632 / Iter-633 (Codex stop-time findings on iter-631/632):
-        # `pad_halo_mpi_4d` does NOT honor `interp_offsets` (nearest-
-        # index only) or the duogrid kinked→extended remap (cube_rmp +
-        # corner fill).  Non-MPI branch forwards both to `pad_halo_4d`,
-        # which applies duogrid post-processing AFTER dispatch.  The
-        # packed MPI branch here never calls `cube_rmp_vectorized` /
-        # `fill_corner_region`, so a caller passing `duogrid=<grid>`
-        # under MPI was silently getting nearest-index halo cells
-        # WITHOUT the duogrid remap.  Refuse both combinations — same
-        # pattern as iter-633 for `pad_halo_vector`.
+        # Iter-632/633 refused both `interp_offsets != None` and
+        # `duogrid != None`.  Iter-634 (Codex stop-time follow-up):
+        # `pad_halo_4d` already applies `cube_rmp_vectorized` +
+        # `fill_corner_region` post-dispatch regardless of backend,
+        # so per-component fallback under MPI is drop-in correct.
+        # Reinstate the duogrid path via that fallback; keep refusing
+        # `interp_offsets` because no path under MPI honors offsets.
         if interp_offsets is not None:
             raise NotImplementedError(
                 "pad_halo_vector_4d(interp_offsets=...) is not supported "
@@ -871,21 +868,19 @@ def pad_halo_vector_4d(
                 "pad_halo_vector_4d.  Single-device backend supports "
                 "this today.")
         if duogrid is not None:
-            raise NotImplementedError(
-                "pad_halo_vector_4d(duogrid=...) is not supported on "
-                "the MPI backend: the packed MPI vector path does NOT "
-                "apply `cube_rmp_vectorized` / `fill_corner_region` "
-                "after the exchange, so the duogrid kinked→extended "
-                "remap is silently dropped.  Either teach the MPI "
-                "vector branch to apply duogrid post-processing "
-                "(mirroring `pad_halo_4d`), or call scalar "
-                "`pad_halo_4d(duogrid=...)` per component under MPI.")
-        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
-        packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
-        packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
-        nlev = u_data.shape[-1]
-        u_east_padded = packed_padded[..., :nlev]
-        v_north_padded = packed_padded[..., nlev:]
+            # Iter-634: per-component scalar `pad_halo_4d` fallback.
+            # Pays 2 MPI messages instead of 1 packed exchange, but
+            # exercises `pad_halo_4d`'s validated duogrid post-
+            # processing so the kinked→extended remap actually runs.
+            u_east_padded = pad_halo_4d(u_east, halo=halo, duogrid=duogrid)
+            v_north_padded = pad_halo_4d(v_north, halo=halo, duogrid=duogrid)
+        else:
+            from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+            packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
+            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            nlev = u_data.shape[-1]
+            u_east_padded = packed_padded[..., :nlev]
+            v_north_padded = packed_padded[..., nlev:]
     else:
         u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets,
                                      duogrid=duogrid)
@@ -1563,51 +1558,39 @@ def pad_halo_vector(
     # When MPI is active, pack both into a single 4D exchange to halve
     # the MPI message count (one exchange instead of two).
     if _halo_backend == "mpi":
-        # Iter-633 (Codex stop-time finding on iter-632): `pad_halo_mpi_4d`
-        # does NOT apply either `interp_offsets` (nearest-index only) or
-        # the duogrid kinked→extended remap (cube_rmp + corner fill).
-        # The non-MPI branch below forwards both to `pad_halo`, which
-        # applies duogrid post-processing AFTER dispatch.  The packed
-        # MPI path here never calls `cube_rmp_vectorized` /
-        # `fill_corner_region`, so a caller passing `duogrid=<grid>`
-        # under MPI was silently getting nearest-index halo cells
-        # WITHOUT the duogrid remap — exactly the "escape hatch" Codex
-        # flagged, where the iter-632 `offsets_mpi = None if duogrid ...`
-        # suppression bypassed the guard but left the duogrid
-        # semantics silently broken.
-        #
-        # Close the hatch: refuse BOTH `interp_offsets != None` AND
-        # `duogrid != None` under MPI.  Callers that need duogrid on
-        # MPI must either (a) teach the vector MPI branch to apply
-        # `cube_rmp_vectorized` post-dispatch (mirroring the scalar
-        # `pad_halo_4d` duogrid post-processing), or (b) use the scalar
-        # `pad_halo` path per-component (pays 2 MPI messages but
-        # exercises the validated duogrid post-processing).
+        # Iter-633 refused both `interp_offsets != None` and
+        # `duogrid != None` under MPI because the packed MPI vector
+        # path does NOT honor offsets or apply the duogrid
+        # kinked→extended remap.  Iter-634 (Codex stop-time follow-up):
+        # the duogrid refusal was overcautious — scalar `pad_halo`
+        # already runs `cube_rmp_vectorized` + `fill_corner_region`
+        # after dispatch regardless of backend, so per-component
+        # fallback is correct.  The `interp_offsets` refusal stays
+        # because `pad_halo_mpi` (invoked by the scalar fallback) does
+        # not carry offsets either.
         if interp_offsets is not None:
             raise NotImplementedError(
                 "pad_halo_vector(interp_offsets=...) is not supported "
-                "on the MPI backend: `pad_halo_mpi_4d` does "
-                "nearest-index copy only.  If you need interpolated "
-                "halo placement under MPI, either teach `pad_halo_mpi_4d` "
+                "on the MPI backend: `pad_halo_mpi` / `pad_halo_mpi_4d` "
+                "do nearest-index copy only.  If you need interpolated "
+                "halo placement under MPI, either teach the MPI helpers "
                 "to carry offsets and apply `_interp_strip_*` on the "
                 "receive side, or pre-interpolate before calling "
                 "pad_halo_vector.  Single-device backend supports this "
                 "today.")
         if duogrid is not None:
-            raise NotImplementedError(
-                "pad_halo_vector(duogrid=...) is not supported on the "
-                "MPI backend: the packed MPI vector path does NOT apply "
-                "`cube_rmp_vectorized` / `fill_corner_region` after "
-                "the exchange, so the duogrid kinked→extended remap is "
-                "silently dropped.  Either teach the MPI vector branch "
-                "to apply duogrid post-processing (mirroring "
-                "`pad_halo_4d`), or call scalar `pad_halo(duogrid=...)` "
-                "per component under MPI.")
-        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
-        packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
-        packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
-        u_east_padded = packed_padded[..., 0]
-        v_north_padded = packed_padded[..., 1]
+            # Iter-634: per-component scalar fallback.  Pays 2 MPI
+            # messages instead of 1 packed exchange, but exercises
+            # `pad_halo`'s validated duogrid post-processing so the
+            # kinked→extended remap actually runs.  Drop-in correct.
+            u_east_padded = pad_halo(u_east, halo=halo, duogrid=duogrid)
+            v_north_padded = pad_halo(v_north, halo=halo, duogrid=duogrid)
+        else:
+            from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+            packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
+            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            u_east_padded = packed_padded[..., 0]
+            v_north_padded = packed_padded[..., 1]
     else:
         u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
                                   duogrid=duogrid)

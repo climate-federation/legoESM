@@ -2094,60 +2094,110 @@ class TestPadHaloH3Guardrails:
                     u, v, ca, sa, cap, sap,
                     interp_offsets=offsets, halo=1)
 
-    def test_pad_halo_vector_duogrid_mpi_refused_iter633(self):
-        """Iter-633 (Codex stop-time finding on iter-632): iter-632's
-        `pad_halo_vector` guard suppressed offsets to None when
-        `duogrid` was set, bypassing the guard.  But the MPI branch
-        doesn't apply `cube_rmp_vectorized` / `fill_corner_region`
-        after the packed exchange — so `pad_halo_vector(duogrid=<grid>)`
-        under MPI was silently getting nearest-index halo cells
-        WITHOUT the duogrid remap.  Iter-633 refuses the combination
-        explicitly.  This test locks the refusal.
+    def test_pad_halo_vector_duogrid_mpi_fallback_iter634(self):
+        """Iter-634 (Codex stop-time finding on iter-633): iter-633
+        refused `pad_halo_vector(duogrid=<grid>)` under MPI, but scalar
+        `pad_halo` already applies `cube_rmp_vectorized` +
+        `fill_corner_region` post-dispatch regardless of backend.  So
+        a per-component scalar fallback is drop-in correct — the
+        refusal was overcautious.  Iter-634 wires the fallback:
+        `pad_halo(u_east, duogrid=<grid>)` + `pad_halo(v_north, ...)`.
+
+        This test verifies the MPI vector + duogrid path now runs and
+        produces the same result as the non-MPI path on a real
+        cubed-sphere grid (no actual MPI needed — we stub
+        `pad_halo_mpi` to fall through to the local helpers).
         """
         from unittest import mock
-        from types import SimpleNamespace
         import legoesm.grids.halo as halo_mod
+        from legoesm.grids.halo import (
+            _pad_halo_local, _pad_halo_local_h2)
 
-        u = jnp.ones((6, N, N), dtype=jnp.float64)
-        v = jnp.zeros((6, N, N), dtype=jnp.float64)
-        ca = jnp.ones((6, N, N), dtype=jnp.float64)
-        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
-        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
-        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
-        # Lightweight duogrid stub — guard fires on `is not None` alone.
-        dg = SimpleNamespace(ng=2)
+        # Stub `pad_halo_mpi` to call the local h1/h2 helpers (because
+        # the fallback pad_halo under MPI would otherwise need a live
+        # topology).  For halo=1/2 the local path is the SAME as what
+        # a single-rank MPI run would produce before duogrid
+        # post-processing.
+        def _stub_pad_halo_mpi(data, topology, halo):
+            if halo == 1:
+                return _pad_halo_local(data, None)
+            return _pad_halo_local_h2(data, None)
 
-        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
-            with pytest.raises(NotImplementedError, match="duogrid"):
-                halo_mod.pad_halo_vector(
-                    u, v, ca, sa, cap, sap,
-                    interp_offsets=None, halo=1, duogrid=dg)
+        # Build a real cubed-sphere grid with duogrid for ground truth.
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        u = jnp.ones((6, n, n), dtype=jnp.float64)
+        v = jnp.zeros((6, n, n), dtype=jnp.float64)
 
-    def test_pad_halo_vector_4d_duogrid_mpi_refused_iter633(self):
-        """Iter-633: `pad_halo_vector_4d` had the same escape hatch as
-        `pad_halo_vector`.  The packed 4D MPI vector path doesn't
-        apply duogrid post-processing after `pad_halo_mpi_4d`, so
-        passing `duogrid=<grid>` under MPI silently dropped the remap.
-        Iter-633 refuses the combination.
+        # Non-MPI reference.
+        u_ref, v_ref = halo_mod.pad_halo_vector(
+            u, v, grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        # MPI path with stub.
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch(
+                    "legoesm.parallel.halo_exchange.pad_halo_mpi",
+                    side_effect=_stub_pad_halo_mpi):
+            u_mpi, v_mpi = halo_mod.pad_halo_vector(
+                u, v, grid.cos_angle, grid.sin_angle,
+                grid.cos_angle_padded, grid.sin_angle_padded,
+                interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        # The fallback must produce a bit-for-bit match for this
+        # configuration (same inputs, same scalar pad_halo + duogrid
+        # post-processing run on both branches).
+        np.testing.assert_allclose(
+            np.asarray(u_mpi), np.asarray(u_ref), atol=1e-14,
+            err_msg="MPI+duogrid fallback diverges from non-MPI path")
+        np.testing.assert_allclose(
+            np.asarray(v_mpi), np.asarray(v_ref), atol=1e-14,
+            err_msg="MPI+duogrid fallback diverges from non-MPI path")
+
+    def test_pad_halo_vector_4d_duogrid_mpi_fallback_iter634(self):
+        """Iter-634: `pad_halo_vector_4d(duogrid=<grid>)` under MPI
+        falls back to per-component `pad_halo_4d`, which applies the
+        duogrid kinked→extended remap correctly.  Verify the fallback
+        does not raise and produces shaped output.
         """
         from unittest import mock
-        from types import SimpleNamespace
         import legoesm.grids.halo as halo_mod
+        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
 
+        # Stub `pad_halo_mpi_4d` to call the local h=1 4D helper.
+        def _stub_pad_halo_mpi_4d(data, topology, halo):
+            assert halo == 1
+            return _pad_halo_local_4d(data, None)
+
+        n = 8
         nlev = 2
-        u = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
-        v = jnp.zeros((6, N, N, nlev), dtype=jnp.float64)
-        ca = jnp.ones((6, N, N), dtype=jnp.float64)
-        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
-        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
-        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
-        dg = SimpleNamespace(ng=2)
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        u = jnp.ones((6, n, n, nlev), dtype=jnp.float64)
+        v = jnp.zeros((6, n, n, nlev), dtype=jnp.float64)
 
-        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
-            with pytest.raises(NotImplementedError, match="duogrid"):
-                halo_mod.pad_halo_vector_4d(
-                    u, v, ca, sa, cap, sap,
-                    interp_offsets=None, halo=1, duogrid=dg)
+        u_ref, v_ref = halo_mod.pad_halo_vector_4d(
+            u, v, grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch(
+                    "legoesm.parallel.halo_exchange.pad_halo_mpi_4d",
+                    side_effect=_stub_pad_halo_mpi_4d):
+            u_mpi, v_mpi = halo_mod.pad_halo_vector_4d(
+                u, v, grid.cos_angle, grid.sin_angle,
+                grid.cos_angle_padded, grid.sin_angle_padded,
+                interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        np.testing.assert_allclose(
+            np.asarray(u_mpi), np.asarray(u_ref), atol=1e-14,
+            err_msg="MPI+duogrid 4D fallback diverges from non-MPI path")
+        np.testing.assert_allclose(
+            np.asarray(v_mpi), np.asarray(v_ref), atol=1e-14,
+            err_msg="MPI+duogrid 4D fallback diverges from non-MPI path")
 
     def test_pad_halo_vector_halo3_mpi_guard_lifted_iter630(self):
         """Iter-630: the `halo=3 and _halo_backend == "mpi"` guard in
