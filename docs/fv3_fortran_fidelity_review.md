@@ -819,3 +819,16 @@ Production restored; 61 `test_scale_halo` tests pass.
 
 Each step tightens the anti-rot lock in response to a specific regression class Codex identified.
 
+### Iter-617 (2026-04-20): Fortran-formula lock for `_edge_interpolate4`
+
+**Motivation**: `_edge_interpolate4` (at `fv3_sw_core.py:237-247`) is the exact port of Fortran `edge_interpolate4(ua, dxa)` at `sw_core.F90:3709-3720` — used by `_d2a2c_vect` at face boundaries (sw_core.F90:3587, 3603) where the standard 4th-order Lagrange stencil straddles the face boundary.  Before iter-617 there was NO direct regression test, only indirect coverage via `_d2a2c_vect` end-to-end output.
+
+**Lock added**: `TestEdgeInterpolate4FortranFormula` class in `tests/unit/test_cdgrid_fv3_regression.py` with three tests:
+1. `test_linear_input_exact`: for a linear `ua = a + b*i` on uniform `dxa`, result equals `a + b*1.5` (the formula averages two linear extrapolations and is exact for linear fields).
+2. `test_uniform_dxa_reduces_to_3_4_weighted_average`: for uniform `dxa = [d,d,d,d]`, the closed-form reduction `(3*(ua[1]+ua[2]) - (ua[0]+ua[3]))/4` is reproduced across multiple d values.
+3. `test_non_uniform_dxa_matches_explicit_fortran_formula`: for 5 random `(ua, dxa)` pairs, the result is bit-for-bit equal to an explicit numpy reproduction of the Fortran formula.
+
+**Sanity-verified**: swapping `dxa4[..., 1]` → `dxa4[..., 0]` in the first term's numerator (a realistic off-by-one refactor) fires the non-uniform test with diff 0.43 on the first random case.
+
+3 tests pass.  Production restored.  `_edge_interpolate4` now has a directly-auditable Fortran-oracle lock independent of `_d2a2c_vect` execution.
+

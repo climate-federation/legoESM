@@ -4764,5 +4764,91 @@ class TestW5PolarFaceMagnitude(unittest.TestCase):
                  f"pole-cell artifact."))
 
 
+class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
+    """Iter-617: Fortran-formula lock for `_edge_interpolate4`.
+
+    `_edge_interpolate4(ua4, dxa4)` is the exact port of Fortran
+    `edge_interpolate4(ua, dxa)` at `sw_core.F90:3709-3720`.  It
+    averages two LINEAR extrapolations (from cells 1+2 and 3+4) to
+    the interface between cells 2 and 3:
+
+      t1 = dxa(1) + dxa(2)
+      t2 = dxa(3) + dxa(4)
+      result = 0.5 * (((t1+dxa(2))*ua(2) - dxa(2)*ua(1))/t1
+                      + ((t2+dxa(3))*ua(3) - dxa(3)*ua(4))/t2)
+
+    Used by `_d2a2c_vect` at face boundaries (sw_core.F90:3587, 3603)
+    where the standard 4th-order Lagrange stencil straddles the
+    face boundary.  Formula must match Fortran bit-for-bit in the
+    expression structure; numerical invariants below lock it.
+
+    No direct regression test existed before iter-617 — only
+    indirect coverage via `_d2a2c_vect` output.
+    """
+
+    def test_linear_input_exact(self):
+        """For a linear ua = a + b*i on uniform dxa, the result must
+        equal a + b * 1.5 (exact linear interpolation to the
+        interface between cells 2 (index 1) and cell 3 (index 2))."""
+        import jax.numpy as jnp
+        from legoesm.core.fv3_sw_core import _edge_interpolate4
+
+        a, b = 3.7, -1.25
+        ua4 = jnp.array([a + b * i for i in range(4)])[None, :]
+        dxa4 = jnp.ones((1, 4))
+        result = float(_edge_interpolate4(ua4, dxa4)[0])
+        expected = a + b * 1.5
+        self.assertAlmostEqual(
+            result, expected, places=12,
+            msg=(f"Linear ua = {a} + {b}*i: result {result} != "
+                 f"expected {expected}.  `_edge_interpolate4` must "
+                 f"reproduce exact linear interpolation."))
+
+    def test_uniform_dxa_reduces_to_3_4_weighted_average(self):
+        """With uniform dxa = [d, d, d, d], the Fortran formula
+        reduces to (3*(ua[1]+ua[2]) - (ua[0]+ua[3])) / 4.  Lock the
+        closed-form reduction so a refactor cannot silently change
+        the coefficients."""
+        import jax.numpy as jnp
+        from legoesm.core.fv3_sw_core import _edge_interpolate4
+
+        for d in (1.0, 2.5, 100.0):
+            ua4 = jnp.array([[0.1, 1.7, -2.3, 4.2]])
+            dxa4 = jnp.full((1, 4), d)
+            result = float(_edge_interpolate4(ua4, dxa4)[0])
+            expected = (3.0 * (ua4[0, 1] + ua4[0, 2])
+                        - (ua4[0, 0] + ua4[0, 3])) / 4.0
+            self.assertAlmostEqual(
+                result, float(expected), places=12,
+                msg=(f"Uniform dxa={d}: result {result} != expected "
+                     f"(3*inner - outer)/4 = {float(expected)}"))
+
+    def test_non_uniform_dxa_matches_explicit_fortran_formula(self):
+        """Non-uniform dxa: reproduce the Fortran formula explicitly
+        via numpy and compare bit-for-bit to the Python helper."""
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _edge_interpolate4
+
+        rng = np.random.default_rng(617)
+        for _ in range(5):
+            ua = rng.standard_normal(4)
+            dxa = rng.uniform(0.1, 10.0, 4)  # positive widths
+            t1 = dxa[0] + dxa[1]
+            t2 = dxa[2] + dxa[3]
+            expected = 0.5 * (
+                ((t1 + dxa[1]) * ua[1] - dxa[1] * ua[0]) / t1
+                + ((t2 + dxa[2]) * ua[2] - dxa[2] * ua[3]) / t2
+            )
+            result = float(_edge_interpolate4(
+                jnp.asarray(ua)[None, :],
+                jnp.asarray(dxa)[None, :])[0])
+            self.assertAlmostEqual(
+                result, float(expected), places=12,
+                msg=(f"Non-uniform Fortran formula mismatch: "
+                     f"ua={ua.tolist()}, dxa={dxa.tolist()}, "
+                     f"result={result} vs expected={float(expected)}"))
+
+
 if __name__ == "__main__":
     unittest.main()
