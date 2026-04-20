@@ -877,12 +877,40 @@ def pad_halo_mpi_4d(
     # unlock (iter-595 enabled non-MPI; this gate documents the
     # remaining MPI gap clearly at the call site).
     if halo == 3:
+        # Iter-613: concrete port spec for the future iteration that
+        # enables this path.  Each step references the exact line in
+        # `_pad_halo_mpi_face_only_4d` / `_pad_halo_mpi_tiled_4d`:
+        #   1. Local-edge branch (line ~670): add depth-2 strip
+        #      extraction via `_extract_edge_strip_at_depth_4d(
+        #      data, nbr_face, nbr_edge, 2)`, apply reversal, and
+        #      place via new helper `_place_strip_h3_4d`.
+        #   2. Remote-edge send loop (line ~708): already handles
+        #      `for depth in range(halo)` for arbitrary halo — no
+        #      change needed on send side.
+        #   3. Remote-edge recv loop (line ~734): extend the
+        #      halo==2 case to halo==3: extract strip_d0, strip_d1,
+        #      strip_d2 (3 slices of `chunk = n * nlev`), apply
+        #      reversal to each, call `_place_strip_h3_4d`.
+        #   4. Corner fill (lines ~680, ~743): replace `if halo == 1:
+        #      _fill_corners_h1 else _fill_corners_h2` with an
+        #      explicit three-way dispatch that selects
+        #      `_fill_corners_h3(padded)` for halo==3.
+        #   5. Same 4 changes in `_pad_halo_mpi_tiled_4d`.
+        #   6. Scalar `_fill_corners_h3` already exists in
+        #      `src/legoesm/grids/halo.py:1251` — use it directly.
+        #   7. Write a new helper `_place_strip_h3_4d` that mirrors
+        #      `_place_strip_h2_4d` but places 3 depth-slices per
+        #      edge into the correct padded positions (depth=0 →
+        #      adjacent to interior, depth=2 → outermost ring).
         raise NotImplementedError(
             "pad_halo_mpi_4d(halo=3) is not yet implemented.  The "
             "underlying face-only / tiled 4D halo helpers extract only "
             "depths 0 and 1 and fill corners via `_fill_corners_h2` — "
             "extending to depth 2 + `_fill_corners_h3` is the last "
-            "remaining piece of the ng=3 MPI infrastructure.  For the "
+            "remaining piece of the ng=3 MPI infrastructure.  See the "
+            "iter-613 inline port-spec above (7-step plan referencing "
+            "each line in `_pad_halo_mpi_face_only_4d` / "
+            "`_pad_halo_mpi_tiled_4d` that needs extension).  For the "
             "non-MPI single-device backend, halo=3 is supported via "
             "`pad_halo_vector(halo=3)` (iter-595).  The FV3 FB-chain "
             "unlock path therefore currently requires the single-"

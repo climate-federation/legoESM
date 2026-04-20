@@ -750,3 +750,20 @@ The FB-chain is now UNLOCKED on the single-device (non-MPI) backend — callers 
 
 **60 `test_scale_halo` tests pass**.  Both iter-611 and iter-612 guards active; `pad_halo_mpi_4d(halo=3)` and `packed_pad_halo_mpi_4d(halo=3)` both raise with the same actionable message pointing to the missing `_fill_corners_h3` + depth-2 strip wiring.
 
+### Iter-613 (2026-04-20): inline port-spec for MPI halo=3 extension
+
+**Motivation**: iter-611 added the halo=3 guard with a one-sentence description.  Iter-613 replaces that with a concrete 7-step port-spec embedded in the code itself — enumerating the exact line numbers and helper-function names that a future iteration needs to extend.
+
+**Spec** (inside `pad_halo_mpi_4d`, `src/legoesm/parallel/halo_exchange.py`):
+1. Local-edge branch: extract depth-2 strip, apply reversal, place via new `_place_strip_h3_4d`.
+2. Remote-edge send loop: already generic (`for depth in range(halo)`) — no change needed.
+3. Remote-edge recv loop: extract strip_d0, strip_d1, strip_d2; apply reversal; call new `_place_strip_h3_4d`.
+4. Corner fill: three-way dispatch to `_fill_corners_h3`.
+5. Same 4 changes in `_pad_halo_mpi_tiled_4d`.
+6. Scalar `_fill_corners_h3` already exists (`src/legoesm/grids/halo.py:1251`).
+7. Write `_place_strip_h3_4d` mirroring `_place_strip_h2_4d` with 3 depth-slices per edge.
+
+**Value**: next iteration has a turn-key checklist.  No more ambiguity about "extending to depth 2 and _fill_corners_h3".  The spec is in the code, not in docs, so it doesn't rot when files are renamed.
+
+60 `test_scale_halo` tests continue to pass.
+
