@@ -557,7 +557,7 @@ Spatial distribution of full-step `dv/dt`:
 - PGF is about **2× the full-step u-tendency** and **1.26× the full-step v-tendency**.
 - Coriolis + other terms partially cancel PGF: ~50% cancellation for u, ~21% for v.
 - For true geostrophic balance, cancellation should be ~100% (net tendency ≈ O(ε)).
-- The **residual ~3 m/s² (u) / ~5 m/s² (v)** after 1 step integrates linearly until nonlinear instability triggers around step 14 (matches iter-658's observed trajectory).
+- The **residual tendency** is `max|du|/dt ≈ 2.96e-3 m/s²` and `max|dv|/dt ≈ 5.27e-3 m/s²` — a few **mm/s²**, not m/s².  Over a `dt = 600 s` step the v-tendency integrates to `600 × 5.27e-3 = 3.16` m/s per step, which matches iter-658's observed step-1 `v_err = 3.14` m/s to three significant figures.  Near-linear accumulation over 14 steps gives ~44 m/s, transitioning into nonlinear instability around step 14 (iter-658 trace showed `v_err = 67` at step 14 — slightly super-linear by that point).
 
 **What iter-662 got wrong**: iter-662 claimed "PGF dominates u-tendency" because it compared `max|dp_x|/dt` to `max|du|/dt` and got identical 2.95e-3 — but this was a spurious match from the wrong scaling.  With correct scaling, PGF is 2× the u-tendency, meaning Coriolis actually provides significant (but incomplete) cancellation.
 
