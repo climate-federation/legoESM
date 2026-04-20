@@ -1528,3 +1528,26 @@ Remaining 12 test docstrings that say "at float64 round-off" all pair with actua
 
 All 118 tests still pass.  The test-docstring tolerance claims now match the actual enforced tolerances at each call site.
 
+### Iter-653 — replace remaining "float64 round-off" claims with actual atol
+
+**Codex stop-time finding on iter-652**: "iter-652 still makes a false 'remaining docstrings are accurate' precision claim."
+
+**Root cause**: iter-652 defended the remaining 10+ "at float64 round-off" docstrings by arguing `atol ∈ [1e-14, 1e-12]` is "close enough to round-off".  For `atol=1e-14` on O(1) values this is reasonable (~100 ULPs above float64 ε ≈ 1e-16), but for `atol=1e-12` or `atol=1e-13` the claim overstates the strictness — those are 10^3 to 10^4 ULPs above round-off, and calling them "float64 round-off" is misleading.
+
+**Fix**: replaced every remaining "at float64 round-off" / "float64 round-off match" docstring claim with the literal `atol` value used in that test:
+
+- `test_pert_ppm_iv1_matches_fortran_on_branch_probes` (iter-635): → "at `atol=1e-14`"
+- `test_pert_ppm_iv1_matches_fortran_on_random_grid` (iter-635): → "at `atol=1e-14`"
+- `test_ke_upwind_matches_fortran_non_duogrid` (iter-636): → "`atol=1e-13` match"
+- `test_vorticity_flux_matches_fortran_non_duogrid` (iter-637): → "`atol=1e-12` match"
+- `test_corner_vorticity_matches_fortran_non_duogrid` (iter-638): → "`atol=1e-12` match"
+- `test_xppm_flux_formula_matches_fortran` (iter-639): → "at `atol=1e-14`"
+- `test_sina_u_v_from_sin_sg_matches_fortran` (iter-641): → "`atol=1e-14` match"
+- `test_fill_corners_h1_matches_reference` (iter-642): → "`atol=1e-14` match"
+- `test_fill_corners_h2_matches_reference` (iter-642): → "`atol=1e-14` match"
+- `test_divergence_corner_duo_matches_fortran` (iter-644): → "`atol=1e-12` match"
+
+Also changed the comment at line 2334 to describe the actual `~1e-13 round-trip noise` accurately instead of "float64 round-off".
+
+All 118 tests still pass.  The test-docstring tolerance claims now cite the literal `atol` value enforced at each call site — no more subjective "close enough to round-off" language.
+
