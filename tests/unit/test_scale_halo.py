@@ -1300,6 +1300,124 @@ class TestPadHaloH3Guardrails:
                 f"-sin_angle_padded_h3 by {v_outer_diff:.3e} — "
                 f"outermost-ring correctness regression.")
 
+    def test_pad_halo_vector_halo3_outer_ring_face_unique_connectivity(self):
+        """Iter-598 (Codex stop-time review on iter-597): the iter-597
+        constant-u_east test doesn't exercise interpolation because
+        `interp(constant) = constant` regardless of offset weights.
+        A bug in the interp_offsets dispatch for the outermost ring
+        (e.g., reading wrong depth or wrong neighbour face) would
+        pass iter-597 silently.
+
+        This test uses FACE-UNIQUE inputs (each face has a distinct
+        u_east value) to validate two additional correctness
+        properties at the outermost halo ring:
+
+        1. **CONNECTIVITY**: the halo cell on face A's WEST ring
+           must pull from the neighbour face specified by
+           `CONNECTIVITY[A][WEST][0]` — NOT another face.  A bug
+           that swapped neighbour faces would give a different
+           u_east constant and fire the check.
+        2. **Rotation anchor**: the grid-aligned output must equal
+           `cos_angle_padded_h3[A, halo_cell] * nbr_face_u_east` —
+           this checks the INVERSE rotation uses the correct
+           padded-angle value at each halo cell (not, e.g., a
+           transverse position or a wrong-face angle).
+
+        Input setup: u_east[f] = f+1 (constant per face, different
+        between faces).  v_north = 0.  The grid-aligned input is
+        u_grid = (f+1)*cos_angle, v_grid = -(f+1)*sin_angle.
+
+        Expected output at face A's WEST outermost halo (i=0):
+          u_grid_out[A, 0, j] = cos_angle_padded_h3[A, 0, j] * (nbr+1)
+          v_grid_out[A, 0, j] = -sin_angle_padded_h3[A, 0, j] * (nbr+1)
+        where nbr = CONNECTIVITY[A][WEST][0].
+
+        Because `u_east` is constant per face (but varies between
+        faces), the interp_offsets interpolation AT the halo cells
+        still returns the neighbour-face constant (it interpolates
+        between identical source values).  So this test validates
+        CONNECTIVITY and rotation but NOT non-constant interpolation
+        weights — that separate test would need a spatially varying
+        geographic wind and is out of scope here.  Combined with
+        iter-596 inner-ring h2 anchor + iter-597 exact-rotation
+        lock, this iter-598 test closes the correctness gap for
+        the NEW outermost-ring cells.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import (
+            pad_halo_vector, CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
+        )
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = np.asarray(grid.cos_angle_padded_h3, dtype=np.float64)
+        sap3 = np.asarray(grid.sin_angle_padded_h3, dtype=np.float64)
+
+        # u_east[f] = f+1, v_north = 0  (face-unique geographic wind)
+        face_vals = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                               dtype=jnp.float64)
+        u_east = face_vals[:, None, None] * jnp.ones((6, n, n),
+                                                       dtype=jnp.float64)
+        v_north = jnp.zeros((6, n, n), dtype=jnp.float64)
+        # Convert to grid-aligned inputs (inverse rotation):
+        u_grid = ca * u_east + sa * v_north
+        v_grid = -sa * u_east + ca * v_north
+
+        up, vp = pad_halo_vector(
+            u_grid, v_grid, ca, sa,
+            jnp.asarray(cap3), jnp.asarray(sap3),
+            interp_offsets=grid.halo_interp_offsets_h3,
+            halo=3,
+        )
+        up_np = np.asarray(up)
+        vp_np = np.asarray(vp)
+        face_vals_np = np.asarray(face_vals)
+
+        # For each face and each side, verify the outermost halo
+        # ring uses the correct NEIGHBOUR face's u_east constant.
+        # Per-side slicing for h=3:
+        #   WEST outer: [f, 0, 3:-3]
+        #   EAST outer: [f, -1, 3:-3] = [f, n+5, 3:-3]
+        #   SOUTH outer: [f, 3:-3, 0]
+        #   NORTH outer: [f, 3:-3, -1]
+        side_slicers = {
+            WEST:  lambda f: (f, 0, slice(3, -3)),
+            EAST:  lambda f: (f, -1, slice(3, -3)),
+            SOUTH: lambda f: (f, slice(3, -3), 0),
+            NORTH: lambda f: (f, slice(3, -3), -1),
+        }
+        side_names = {WEST: "W", EAST: "E", SOUTH: "S", NORTH: "N"}
+
+        for face in range(6):
+            for side in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, _, _ = CONNECTIVITY[face][side]
+                expected_u_east = face_vals_np[nbr_face]
+                # Expected grid-aligned output at outermost ring
+                sl = side_slicers[side](face)
+                cap_slice = cap3[sl]
+                sap_slice = sap3[sl]
+                expected_u = cap_slice * expected_u_east
+                expected_v = -sap_slice * expected_u_east
+
+                u_diff = float(np.max(np.abs(up_np[sl] - expected_u)))
+                v_diff = float(np.max(np.abs(vp_np[sl] - expected_v)))
+                assert u_diff < 1e-6, (
+                    f"face={face} side={side_names[side]} outermost "
+                    f"halo u does NOT equal "
+                    f"cos_angle_padded_h3 * u_east[nbr={nbr_face}] "
+                    f"(={expected_u_east}).  max diff = {u_diff:.3e}. "
+                    f"Either CONNECTIVITY selected the wrong "
+                    f"neighbour face, the rotation used the wrong "
+                    f"padded-angle cell, or axis-reversal was "
+                    f"applied incorrectly.")
+                assert v_diff < 1e-6, (
+                    f"face={face} side={side_names[side]} outermost "
+                    f"halo v does NOT equal "
+                    f"-sin_angle_padded_h3 * u_east[nbr={nbr_face}] "
+                    f"(={expected_u_east}).  max diff = {v_diff:.3e}.")
+
     def test_pad_halo_vector_halo3_rejects_mpi_backend(self):
         """Iter-595: halo=3 is still unsupported on the MPI backend
         because `pad_halo_mpi_4d(halo=3)` is not yet implemented.  The

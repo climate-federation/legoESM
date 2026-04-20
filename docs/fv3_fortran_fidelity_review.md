@@ -5297,3 +5297,22 @@ at EVERY padded cell including the outermost halo ring.  This is an EXACT analyt
 
 Production restored.  3 h=3 tests pass (interior + h2-anchor + exact-correctness).  The outermost halo=3 vector ring is now locked to an EXACT analytical reference, closing the correctness gap Codex flagged.
 
+### Iter-598 (2026-04-20): outer-ring CONNECTIVITY + rotation correctness
+
+**Codex stop-time review on iter-597 (commit 616aa83)**: the constant-u_east test doesn't exercise interpolation coefficients — `interp(constant) = constant` regardless of offset weights.  A bug in the neighbour-face dispatch or axis-reversal for the outermost ring would pass iter-597 silently.
+
+**New lock**: `test_pad_halo_vector_halo3_outer_ring_face_unique_connectivity` uses FACE-UNIQUE u_east values (face f has u_east = f+1, v_north = 0).  For each face and each of 4 sides, the test looks up `CONNECTIVITY[face][side]` to get the expected neighbour face and asserts:
+- `u_grid_out[face, outer_ring, :] == cos_angle_padded_h3[face, outer_ring, :] * (nbr_face + 1)`
+- `v_grid_out[face, outer_ring, :] == -sin_angle_padded_h3[face, outer_ring, :] * (nbr_face + 1)`
+
+This validates:
+1. **CONNECTIVITY correctness**: the outermost halo pulls from the correct neighbour face (a bug swapping faces would read the wrong constant).
+2. **Rotation correctness**: the INVERSE rotation uses the correct padded-angle cell (not a transverse position, not a wrong face angle).
+3. **Axis-reversal correctness**: for reversed connections (e.g., face-1 SOUTH → face-5 EAST reversed), the halo still reads the right face's constant (since the test uses constant-per-face inputs, reversal of a constant strip is still the same constant).
+
+**Sanity-verified**: scaling u_padded outer ring by 1.25 on the WEST side fires the test with diff 0.996 (vs 1e-6 ceiling).  Catches amplitude/CONNECTIVITY errors iter-597 would miss.
+
+**What this iter does NOT cover**: interpolation of NON-constant fields (varying along the strip).  This would require spatially-varying geographic inputs with a known analytical halo prediction and is deferred as a separate harder test — combined with iter-596's h=3 → h=2 anchor (which validates that the inner rings match h=2 for random non-constant inputs), the three iter-596/597/598 locks cover (a) interior preservation, (b) inner-ring consistency with h=2, (c) outer-ring rotation correctness, (d) outer-ring CONNECTIVITY correctness.  Only non-constant interpolation weights at the outermost ring remain unvalidated structurally; they are exercised by actual W2/W5 production tests at halo=2 (where they matter for the current model) and would be locked separately if/when halo=3 is wired into the dycore.
+
+4 h=3 tests pass.  Production restored.
+
