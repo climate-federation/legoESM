@@ -6737,5 +6737,170 @@ class TestPpmFluxFortranFormula(unittest.TestCase):
                  "detected — the inner coefficient is load-bearing."))
 
 
+class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
+    """Iter-641: Fortran-formula lock for `_sina_u_v_from_sin_sg` in
+    ``src/legoesm/core/fv3_sw_core.py`` (lines 685-718) against
+    ``fv_grid_utils.F90:505-518``.
+
+    The helper constructs edge-midpoint `sina_u` (6, n+1, n) and
+    `sina_v` (6, n, n+1) from the 9-stencil sub-grid `sin_sg`
+    (6, n, n, 9):
+
+        sg[..., 0] = W,  sg[..., 1] = S,  sg[..., 2] = E,  sg[..., 3] = N
+
+    Interior faces (Fortran fv_grid_utils.F90:505-511):
+        sina_u(i,j) = 0.5 * (sin_sg(i-1, j, 3) + sin_sg(i, j, 1))
+                    = 0.5 * (sin_E[i-1, j]    + sin_W[i, j])
+        sina_v(i,j) = 0.5 * (sin_sg(i, j-1, 4) + sin_sg(i, j, 2))
+                    = 0.5 * (sin_N[i, j-1]    + sin_S[i, j])
+
+    Panel-edge faces use the single-side sub-grid value:
+        sina_u at i=0   → sin_W[0, j]         (interior edge on right)
+        sina_u at i=n   → sin_E[n-1, j]       (interior edge on left)
+        sina_v at j=0   → sin_S[i, 0]
+        sina_v at j=n   → sin_N[i, n-1]
+
+    This differs from `sqrt(1 - cosa_u**2)` because `cosa_u` is a
+    halo-averaged quantity whose values no longer satisfy the exact
+    trigonometric identity; using `sin_sg` averages keeps the
+    Fortran-faithful metric.
+    """
+
+    @staticmethod
+    def _ref_sina_u_v(sin_sg, n):
+        """Numpy reproduction."""
+        import numpy as np
+        sin_W = sin_sg[:, :, :, 0]
+        sin_S = sin_sg[:, :, :, 1]
+        sin_E = sin_sg[:, :, :, 2]
+        sin_N = sin_sg[:, :, :, 3]
+        # sina_u: (6, n+1, n) — interior is 0.5*(sin_E[i-1] + sin_W[i]),
+        # outer edges use the single-side values.
+        sina_u = np.empty((sin_sg.shape[0], n + 1, n))
+        sina_u[:, 0, :] = sin_W[:, 0, :]              # i=0 boundary
+        sina_u[:, 1:n, :] = 0.5 * (sin_E[:, :-1, :]
+                                     + sin_W[:, 1:, :])
+        sina_u[:, n, :] = sin_E[:, n - 1, :]          # i=n boundary
+        # sina_v: (6, n, n+1)
+        sina_v = np.empty((sin_sg.shape[0], n, n + 1))
+        sina_v[:, :, 0] = sin_S[:, :, 0]              # j=0 boundary
+        sina_v[:, :, 1:n] = 0.5 * (sin_N[:, :, :-1]
+                                     + sin_S[:, :, 1:])
+        sina_v[:, :, n] = sin_N[:, :, n - 1]          # j=n boundary
+        return sina_u, sina_v
+
+    def test_sina_u_v_from_sin_sg_matches_fortran(self):
+        """Real CDGrid → bit-for-bit match against the numpy reference.
+        Exercises all three regions (i=0 boundary, interior, i=n
+        boundary) in both axes."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+
+        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+        sin_sg_np = np.asarray(cdgrid.sin_sg)
+        sina_u_ref, sina_v_ref = self._ref_sina_u_v(sin_sg_np, n)
+
+        np.testing.assert_allclose(
+            np.asarray(sina_u), sina_u_ref, atol=1e-14,
+            err_msg=("_sina_u_v_from_sin_sg sina_u diverges from "
+                     "fv_grid_utils.F90:505-518 reference — check the "
+                     "interior sin_E[i-1] + sin_W[i] averaging AND the "
+                     "panel-edge single-side boundaries at i=0, i=n."))
+        np.testing.assert_allclose(
+            np.asarray(sina_v), sina_v_ref, atol=1e-14,
+            err_msg=("_sina_u_v_from_sin_sg sina_v diverges from "
+                     "fv_grid_utils.F90:505-518 reference — check "
+                     "sin_N[j-1] + sin_S[j] averaging AND panel-edge "
+                     "boundaries at j=0, j=n."))
+
+    def test_sina_u_v_formula_survives_mutation_suite_iter641(self):
+        """Mutation suite matching the iter-640 pattern.  Uses nonzero
+        random `sin_sg` (shape (6, n, n, 9)) so that every formula
+        component is load-bearing.  Mutations:
+          M1: sin_E ↔ sin_W in the interior sina_u average
+          M2: sin_N ↔ sin_S in the interior sina_v average
+          M3: panel-edge at i=0 uses sin_E[0] instead of sin_W[0]
+          M4: panel-edge at i=n uses sin_W[n-1] instead of sin_E[n-1]
+          M5: interior coefficient 0.5 → 1.0 in sina_u
+        """
+        import numpy as np
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+
+        n = 6
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+
+        # Replace the sin_sg metric with random nonzero values so the
+        # formula branches all carry weight.  (Geometry-derived
+        # sin_sg at C6 is not guaranteed asymmetric at every face.)
+        rng = np.random.default_rng(641)
+        sin_sg_rand = 0.5 + 0.3 * rng.standard_normal((6, n, n, 9))
+        poisoned = cdgrid._replace(sin_sg=jnp.asarray(sin_sg_rand))
+
+        sina_u, sina_v = _sina_u_v_from_sin_sg(poisoned)
+        sina_u = np.asarray(sina_u); sina_v = np.asarray(sina_v)
+        sin_W = sin_sg_rand[..., 0]
+        sin_S = sin_sg_rand[..., 1]
+        sin_E = sin_sg_rand[..., 2]
+        sin_N = sin_sg_rand[..., 3]
+
+        # Correct reference (for sanity)
+        sina_u_ref, sina_v_ref = self._ref_sina_u_v(sin_sg_rand, n)
+        np.testing.assert_allclose(
+            sina_u, sina_u_ref, atol=1e-14)
+        np.testing.assert_allclose(
+            sina_v, sina_v_ref, atol=1e-14)
+
+        # M1: sin_E ↔ sin_W in interior sina_u → interior values become
+        # 0.5*(sin_W[i-1] + sin_E[i]) instead of 0.5*(sin_E[i-1] + sin_W[i]).
+        sina_u_m1 = sina_u_ref.copy()
+        sina_u_m1[:, 1:n, :] = 0.5 * (sin_W[:, :-1, :] + sin_E[:, 1:, :])
+        self.assertGreater(
+            np.max(np.abs(sina_u - sina_u_m1)), 1e-6,
+            msg="M1: sin_E ↔ sin_W swap in interior sina_u not detected.")
+
+        # M2: sin_N ↔ sin_S in interior sina_v.
+        sina_v_m2 = sina_v_ref.copy()
+        sina_v_m2[:, :, 1:n] = 0.5 * (sin_S[:, :, :-1] + sin_N[:, :, 1:])
+        self.assertGreater(
+            np.max(np.abs(sina_v - sina_v_m2)), 1e-6,
+            msg="M2: sin_N ↔ sin_S swap in interior sina_v not detected.")
+
+        # M3: panel-edge at i=0 uses sin_E[0] instead of sin_W[0].
+        sina_u_m3 = sina_u_ref.copy()
+        sina_u_m3[:, 0, :] = sin_E[:, 0, :]
+        self.assertGreater(
+            np.max(np.abs(sina_u[:, 0, :] - sina_u_m3[:, 0, :])), 1e-6,
+            msg=("M3: panel-edge i=0 uses sin_E[0] instead of sin_W[0] "
+                 "not detected."))
+
+        # M4: panel-edge at i=n uses sin_W[n-1] instead of sin_E[n-1].
+        sina_u_m4 = sina_u_ref.copy()
+        sina_u_m4[:, n, :] = sin_W[:, n - 1, :]
+        self.assertGreater(
+            np.max(np.abs(sina_u[:, n, :] - sina_u_m4[:, n, :])), 1e-6,
+            msg=("M4: panel-edge i=n uses sin_W[n-1] instead of "
+                 "sin_E[n-1] not detected."))
+
+        # M5: interior coefficient 0.5 → 1.0.
+        sina_u_m5 = sina_u_ref.copy()
+        sina_u_m5[:, 1:n, :] = 1.0 * (sin_E[:, :-1, :] + sin_W[:, 1:, :])
+        self.assertGreater(
+            np.max(np.abs(sina_u - sina_u_m5)), 1e-6,
+            msg=("M5: interior coefficient 0.5 → 1.0 in sina_u not "
+                 "detected."))
+
+
 if __name__ == "__main__":
     unittest.main()

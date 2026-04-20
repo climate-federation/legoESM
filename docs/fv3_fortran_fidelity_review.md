@@ -1334,3 +1334,30 @@ Each mutation is computed as a separate reference; the test asserts the actual J
 
 All 3 tests in `TestPpmFluxFortranFormula` pass on the correct code.  Mutation suite detects all 6 candidate regressions that the iter-639 bl=br=0 test would silently miss.
 
+### Iter-641 — Fortran-formula lock for `_sina_u_v_from_sin_sg`
+
+**Motivation**: `_sina_u_v_from_sin_sg` in `src/legoesm/core/fv3_sw_core.py` (lines 685-718) constructs edge-midpoint `sina_u` / `sina_v` from the 9-stencil sub-grid `sin_sg` per `fv_grid_utils.F90:505-518`:
+
+    sina_u(i,j) = 0.5 * (sin_sg(i-1, j, E=3) + sin_sg(i, j, W=1))   # interior
+    sina_u(0,j) = sin_sg(0, j, W=1)                                  # panel edge
+    sina_u(n,j) = sin_sg(n-1, j, E=3)
+    sina_v(i,j) = 0.5 * (sin_sg(i, j-1, N=4) + sin_sg(i, j, S=2))   # interior
+    sina_v(i,0) = sin_sg(i, 0, S=2)
+    sina_v(i,n) = sin_sg(i, n-1, N=4)
+
+This differs from `sqrt(1 - cosa_u**2)` because `cosa_u` is a halo-averaged quantity whose values no longer satisfy the exact trigonometric identity.  Using `sin_sg` averages keeps the Fortran-faithful metric.  This helper is consumed by `_vorticity_flux` (iter-637) and `_d_sw5_corner_divergence` — any drift here silently corrupts vorticity.
+
+**Tests added** (`TestSinaUVFromSinSgFortranFormula`, 2 total):
+- `_ref_sina_u_v`: numpy reproduction.
+- `test_sina_u_v_from_sin_sg_matches_fortran`: real CDGrid bit-for-bit at `atol=1e-14`; exercises all three regions (i=0 boundary, interior, i=n boundary) in both axes.
+- `test_sina_u_v_formula_survives_mutation_suite_iter641`: replaces `sin_sg` with random nonzero values (via `cdgrid._replace(sin_sg=...)`) and runs 5 mutations:
+  - M1: `sin_E ↔ sin_W` in interior `sina_u` averaging
+  - M2: `sin_N ↔ sin_S` in interior `sina_v` averaging
+  - M3: panel-edge at i=0 uses `sin_E[0]` instead of `sin_W[0]`
+  - M4: panel-edge at i=n uses `sin_W[n-1]` instead of `sin_E[n-1]`
+  - M5: interior coefficient `0.5 → 1.0` in `sina_u`
+
+Each mutation produces a measurably different reference.  All 5 detected with `>= 1e-6` threshold.
+
+Both tests pass.  Cumulative Fortran-formula lock inventory now **20 helpers**: `_sina_u_v_from_sin_sg` added.
+
