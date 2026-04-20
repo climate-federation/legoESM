@@ -7713,5 +7713,147 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
                  "consume `_A1`."))
 
 
+class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
+    """Iter-666/667 regression lock: `dxc` and `dyc` at cube-boundary
+    u/v-faces must NOT be clamped to half the interior cell width.
+
+    Pre-iter-666, `cubed_sphere_cdgrid.py` used ``sj0 = max(2*j-1, 0)``
+    / ``sj1 = min(2*j+1, 2*n)`` supergrid-index clamping.  At j=0 the
+    span was 1 supergrid cell = HALF interior, making `rdyc` 2× at
+    cube boundaries and amplifying PGF by exactly 2× — directly
+    producing the FB-chain step-1 residual of ~3 mm/s² (measured
+    iter-665).  iter-666 fixed by extrapolating the metric from the
+    adjacent interior for n≥2; iter-667 added an n=1 fallback.
+
+    This test asserts:
+      (a) `rdyc` at boundary j=0 equals `rdyc` at interior j=1 for
+          each (face, i) — i.e., the extrapolation produced identical
+          values, NOT 2× the interior.
+      (b) `rdxc` at boundary i=0 equals `rdxc` at interior i=1
+          symmetrically.
+      (c) For n=1, the metrics are non-zero (iter-667 n=1 fallback).
+
+    A regression that re-introduces the supergrid clamp would give
+    rdyc[j=0] ≈ 2 × rdyc[j=1] and fail assertion (a).
+    """
+
+    def test_dyc_boundary_not_half_interior_iter666(self):
+        """Lock: dyc at j=0 (cube boundary) should NOT be half of the
+        interior value."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 12
+        cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
+        dyc = np.asarray(cdgrid.dyc)   # (6, n, n+1)
+
+        # Interior j (1..n-1) and boundary j (0, n).
+        interior_j1 = dyc[:, :, 1]
+        boundary_j0 = dyc[:, :, 0]
+        interior_jnm1 = dyc[:, :, n - 1]
+        boundary_jn = dyc[:, :, n]
+
+        # Iter-666 fix: boundary equals adjacent interior (extrapolation).
+        np.testing.assert_allclose(
+            boundary_j0, interior_j1, rtol=0.0, atol=1e-10,
+            err_msg=("dyc[j=0] does NOT equal dyc[j=1] — extrapolation "
+                     "at cube-boundary v-face has been lost.  Pre-iter-666 "
+                     "supergrid-index clamping regression would make "
+                     "dyc[j=0] ≈ 0.5 × dyc[j=1] (causing PGF 2× "
+                     "amplification at cube boundaries)."))
+        np.testing.assert_allclose(
+            boundary_jn, interior_jnm1, rtol=0.0, atol=1e-10,
+            err_msg=("dyc[j=n] does NOT equal dyc[j=n-1] — cube-boundary "
+                     "extrapolation regression at north v-face."))
+
+    def test_dxc_boundary_not_half_interior_iter666(self):
+        """Lock: dxc at i=0 and i=n (cube boundary) should NOT be half
+        of the interior value."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 12
+        cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
+        dxc = np.asarray(cdgrid.dxc)   # (6, n+1, n)
+
+        interior_i1 = dxc[:, 1, :]
+        boundary_i0 = dxc[:, 0, :]
+        interior_inm1 = dxc[:, n - 1, :]
+        boundary_in = dxc[:, n, :]
+
+        np.testing.assert_allclose(
+            boundary_i0, interior_i1, rtol=0.0, atol=1e-10,
+            err_msg=("dxc[i=0] does NOT equal dxc[i=1] — extrapolation "
+                     "at cube-boundary u-face lost."))
+        np.testing.assert_allclose(
+            boundary_in, interior_inm1, rtol=0.0, atol=1e-10,
+            err_msg=("dxc[i=n] does NOT equal dxc[i=n-1]."))
+
+    def test_iter666_pgf_matches_analytic_at_cube_boundaries(self):
+        """Integration check: on the Williamson 2 balanced IC at C36,
+        the scheme PGF (`_p_grad_c` output / dt2) max should match the
+        analytic balanced max `ω·u₀ + u₀²/(2R) ≈ 2.93e-3 m/s²` at
+        BOTH interior AND cube-boundary cells to within 5% — the 2×
+        boundary amplification from the pre-iter-666 clamping bug is
+        no longer present.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _p_grad_c
+
+        N = 36
+        cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=N))
+        g = 9.80616; omega = 7.292e-5; u_0 = 38.61068276698372
+        h_0 = 29400.0 / g; R = cdgrid.radius
+        lat_c = cdgrid.base.lat
+        h = h_0 - (R * omega * u_0 + 0.5 * u_0**2) * jnp.sin(lat_c)**2 / g
+        h_s = jnp.zeros_like(h)
+
+        dt2 = 300.0
+        dp_x, dp_y = _p_grad_c(h, h_s, cdgrid, dt2, g)
+        pgf_u_max = float(jnp.abs(dp_x).max()) / dt2
+        pgf_v_max = float(jnp.abs(dp_y).max()) / dt2
+        pgf_analytic = omega * u_0 + u_0**2 / (2 * R)   # ≈ 2.93e-3 m/s²
+
+        # iter-666 fix: max PGF should match analytic to within 5%.
+        # Pre-fix: max PGF = 2×analytic = 5.87e-3 (factor-of-2 bug at
+        # boundary).
+        self.assertLess(
+            abs(pgf_u_max - pgf_analytic) / pgf_analytic, 0.05,
+            msg=(f"max|PGF_u|/dt2 = {pgf_u_max:.3e} m/s² does NOT "
+                 f"match analytic balanced {pgf_analytic:.3e} (±5%).  "
+                 f"If ratio ≈ 2.0, the pre-iter-666 supergrid-clamping "
+                 f"bug has returned."))
+        self.assertLess(
+            abs(pgf_v_max - pgf_analytic) / pgf_analytic, 0.05,
+            msg=(f"max|PGF_v|/dt2 = {pgf_v_max:.3e} m/s² does NOT "
+                 f"match analytic balanced {pgf_analytic:.3e} (±5%)."))
+
+    def test_iter667_n1_metrics_nonzero(self):
+        """iter-667 regression lock: n=1 fallback gives non-zero
+        dxc/dyc.  Pre-iter-667 (but post-iter-666) attempt at n=1
+        extrapolation produced zero metrics."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=1))
+        dxc = np.asarray(cdgrid.dxc); dyc = np.asarray(cdgrid.dyc)
+
+        self.assertGreater(
+            float(dxc.min()), 0.0,
+            msg="n=1 dxc has zero entries — iter-667 n=1 fallback broken.")
+        self.assertGreater(
+            float(dyc.min()), 0.0,
+            msg="n=1 dyc has zero entries — iter-667 n=1 fallback broken.")
+
+
 if __name__ == "__main__":
     unittest.main()
