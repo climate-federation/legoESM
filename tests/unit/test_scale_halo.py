@@ -1069,6 +1069,66 @@ class TestPadHaloH3Guardrails:
                             match="pad_halo_mpi_4d"):
             packed_pad_halo_mpi_4d(a, b, topology=_Stub(), halo=3)
 
+    def test_iter613_mpi_halo3_port_anchors_present(self):
+        """Iter-614 (Codex follow-up to iter-613): the iter-613 port
+        spec referenced line numbers (e.g., "line ~670") that ROT on
+        any edit above the anchor.  Iter-614 replaced line refs with
+        stable `[ANCHOR iter-613: <name>]` comment tags placed in
+        the helper bodies; the spec now references the tags by name.
+
+        This test verifies each named anchor is actually present in
+        `src/legoesm/parallel/halo_exchange.py` — so if someone
+        removes or renames an anchor in a refactor, the port spec
+        no longer dangles, and the test fires with a clear message.
+
+        Required anchors (all inside the MPI 4D helpers):
+          - `local-edge-depth-extraction` (face-only)
+          - `remote-recv-depth-extraction` (face-only)
+          - `corner-fill-face-only` (face-only)
+          - `corner-fill-face-only-post-recv` (face-only)
+          - `tiled-remote-depth-extraction` (tiled docstring)
+          - `corner-fill-tiled-early` (tiled docstring)
+          - `corner-fill-tiled-late` (tiled docstring)
+        """
+        import pathlib
+        src = pathlib.Path(
+            __file__).resolve().parent.parent.parent / (
+            "src/legoesm/parallel/halo_exchange.py")
+        text = src.read_text()
+        required_anchors = (
+            "local-edge-depth-extraction",
+            "remote-recv-depth-extraction",
+            "corner-fill-face-only",
+            "corner-fill-face-only-post-recv",
+            "tiled-remote-depth-extraction",
+            "corner-fill-tiled-early",
+            "corner-fill-tiled-late",
+        )
+        # Accept either an explicit inline `[ANCHOR iter-613: <name>]`
+        # tag or a bare anchor-name mention inside the tiled-helper
+        # docstring block (which lists the 3 tiled anchors).  Scan the
+        # text BEFORE the `if halo == 3:` guard so the port-spec's
+        # OWN references to anchor names don't count (those exist
+        # INSIDE the guard block).
+        before_guard = text.split("if halo == 3:")[0]
+        has_tiled_block = "ANCHORS iter-613 for halo=3 port" in before_guard
+        missing = []
+        for a in required_anchors:
+            explicit = f"ANCHOR iter-613: {a}" in text
+            in_docstring = has_tiled_block and a in before_guard
+            if not (explicit or in_docstring):
+                missing.append(a)
+        assert not missing, (
+            f"iter-613 port-spec anchors missing in "
+            f"`src/legoesm/parallel/halo_exchange.py`: {missing}. "
+            f"Iter-614 tagged the 7 insertion sites with stable "
+            f"[ANCHOR iter-613: <name>] comments so the halo=3 "
+            f"port spec (inside `pad_halo_mpi_4d`) can reference "
+            f"them by name.  If an anchor disappears the port "
+            f"spec dangles — restore the anchor or update the "
+            f"spec if the refactor moved the insertion site "
+            f"entirely.")
+
     def test_pad_halo_mpi_4d_halo3_raises_notimplemented(self):
         """Iter-611: the MPI 4D halo exchange must explicitly reject
         halo=3.  The underlying face-only/tiled helpers branch on

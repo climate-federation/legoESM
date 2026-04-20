@@ -767,3 +767,22 @@ The FB-chain is now UNLOCKED on the single-device (non-MPI) backend — callers 
 
 60 `test_scale_halo` tests continue to pass.
 
+### Iter-614 (2026-04-20): fix iter-613 spec rot with symbolic anchors (Codex)
+
+**Codex stop-time review on iter-613 (commit 28ff03a)**: the port spec referenced line numbers (e.g., "line ~670", "line ~708") — these rot on any edit above the anchor.  The anti-rot goal of keeping the spec in code was undermined by the line-number references.
+
+**Fix**: replaced all line-number references in the iter-613 port spec with stable `[ANCHOR iter-613: <name>]` comment tags planted at each insertion site.  The 7 anchors:
+- `local-edge-depth-extraction` (face-only helper body).
+- `remote-recv-depth-extraction` (face-only helper body).
+- `corner-fill-face-only` (face-only helper body).
+- `corner-fill-face-only-post-recv` (face-only helper body).
+- `tiled-remote-depth-extraction` (listed in tiled helper docstring).
+- `corner-fill-tiled-early` (listed in tiled helper docstring).
+- `corner-fill-tiled-late` (listed in tiled helper docstring).
+
+**Lock added**: `test_iter613_mpi_halo3_port_anchors_present` in `TestPadHaloH3Guardrails`.  Reads `halo_exchange.py` and verifies each named anchor appears either as an explicit `[ANCHOR iter-613: <name>]` comment OR as a bare name mention inside the tiled helper docstring (gated on the `ANCHORS iter-613 for halo=3 port` docstring header being present).  The check deliberately scans text BEFORE the `if halo == 3:` guard so the port-spec's OWN references to anchor names don't self-satisfy the test.
+
+**Sanity-verified**: removing the `local-edge-depth-extraction` anchor comment from the face-only helper fires the test with `missing = ['local-edge-depth-extraction']`.  Production restored; 61 `test_scale_halo` tests pass.
+
+**Value**: a refactor that moves the insertion site (renaming the function, reordering the helper body) breaks the test explicitly instead of leaving a silently dangling port spec.  Fixes Codex's "undermines its own anti-rot goal" finding.
+
