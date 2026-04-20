@@ -728,3 +728,34 @@ For n<2, keep the partial-quadrant sum (toy-regional fallback).
 **Regression-lock test** added (`test_iter670_area_corner_boundary_matches_interior`): asserts `area_corner[i=0, 1..n-1] == area_corner[i=1, 1..n-1]` (edge extrapolation), `area_corner[0,0] == area_corner[1,1]` (corner diagonal), and `corner_mean / interior_mean > 0.5` (integration check — pre-fix ratio was 0.22).
 
 Regression suite grew from 122 to 123 tests.
+
+### Iter-671 — metric-extrapolation audit: no more iter-666/670-style gaps
+
+**Motivation**: iter-666 and iter-670 both fixed cube-boundary metric bugs where Python gave 2-4× wrong values because of clamped/partial supergrid sums.  Could there be more of the same pattern elsewhere?
+
+**Audit** of Fortran `tools/fv_grid_tools.F90` for ALL cube-boundary extrapolation lines `X(isd,j) = X(isd+1,j)`:
+
+| Fortran line | Metric | Python status |
+|---:|:---|:---|
+| 899 | dxc | **iter-666 fixed** |
+| 915 | dyc | **iter-666 fixed** |
+| 1084/1561 | area_c | **iter-670 fixed** |
+| 1098/1575 | area_c (j-boundary) | covered by iter-670 |
+| 1593 | dxc (second variant) | iter-666 applies |
+| 1607 | dyc (second variant) | iter-666 applies |
+
+No additional metrics use the `isd+1,j` extrapolation pattern.  The audit is complete for `fv_grid_tools.F90`.
+
+**`cosa_u`/`sina_u` cube-boundary handling** (`cubed_sphere_cdgrid.py:832-855`): Python uses the same-face cell-edge `cos_sg` / `sin_sg` value at cube boundaries, NOT Fortran's halo-exchanged cross-face value.  Per the documented design comment at `cubed_sphere_cdgrid.py:835-837`:
+
+> "Boundary: cos_sg sub-grid positions are face-local, so cross-face halo gives wrong sub-grid values.  Use local cell edge value (geometrically exact: both sides of the face boundary measure the same angle)."
+
+This is a deliberate Python design choice consistent with Fortran at leading order (both faces measure the same physical angle at the shared edge), NOT the same pattern as iter-666/670.
+
+**`grad_c00..c11`** (`cubed_sphere_cdgrid.py:1101-1150`): A-L gradient coefficients use 3D Cartesian displacement vectors from halo-exchanged cell-centre positions.  `pad_halo_auto` already handles cross-face halo correctly at cube boundaries.  No gap.
+
+**Conclusion**: the iter-666/670 fixes cover all known `isd+1,j`-style extrapolation gaps.  No additional metric source-code changes needed for this class of bug.
+
+**FB chain stability remains at step 25 (iter-670)** — the residual has shifted from PGF (iter-666 fix removed that amplification source) to operators whose contribution was previously masked (likely `d_sw_native` vorticity + B-grid KE paths).  The PGF/metric fidelity gap is CLOSED; further stability work requires per-operator tendency diagnostics.
+
+**Tests**: no source changes in iter-671.  All 123 regression tests pass.  Audit-only iteration.
