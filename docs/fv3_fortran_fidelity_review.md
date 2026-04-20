@@ -863,3 +863,21 @@ Each step tightens the anti-rot lock in response to a specific regression class 
 - `_del6_vt_flux`: iter-619 (nord=0/1 formula, THIS).
 - `synchronize_cgrid_fluxes`: iter-502/504/601/602/603 (presence + gate + ordering + nested-scope).
 
+### Iter-620 (2026-04-20): fix nord=1 sign-alternation check (Codex)
+
+**Codex stop-time review on iter-619 (commit 0e512a3)**: the iter-619 nord=1 test asserted that `fx2_nord1` is NOT a scalar multiple of `fx2_nord0` (residual > 5%).  This is a weaker check than claimed — a refactor that drops the sign-alternation in the iteration still produces a flux with DIFFERENT spatial structure (not scalar-proportional), so the residual test passes silently.
+
+**Fix**: `test_nord1_iteration_sign_alternation` replaces the iter-619 residual check with a direct SIGN-FLIP invariant check.
+
+For a single-cell peak `q[4,4]=2, others=1`, the Fortran iteration semantics:
+- nord=0 at the west-of-peak interface (i=4, j=4): d2_W=1, d2_E=2 → `fx2_0 = metric * (d2_W - d2_E) < 0` (NEGATIVE).
+- After iteration: `d2_new[4,4] ≈ -4 * metric * rdxc * rarea` (negative, from divergence of nord=0 fluxes), and `d2_new[3,4] ≈ +1 * metric * rdxc * rarea` (positive ring).
+- Correct-alternation nord=1 at (i=4, j=4): `fx2_1 = metric * (d2_new_E - d2_new_W) = (negative - positive) < 0` (NEGATIVE, **same sign** as nord=0).
+- Buggy-no-alternation nord=1 would use `(d2_new_W - d2_new_E) > 0` (POSITIVE, **opposite sign** to nord=0).
+
+**Invariant**: `sign(fx2_nord1[peak_edge]) == sign(fx2_nord0[peak_edge])`.
+
+**Sanity-verified**: changing the iteration loop sign from `(d2_E - d2_W)` to `(d2_W - d2_E)` (the exact Codex-flagged bug) fires the test with the explicit message "nord=1 at same interface has sign 1.0" vs "nord=0 has sign -1.0".  Iter-619's test would have PASSED this regression silently (the bug produces a different spatial structure that still isn't a scalar multiple of nord=0).
+
+Production restored; 3 tests pass.  The nord=1 iteration now has a bit-level sign-flip lock.
+

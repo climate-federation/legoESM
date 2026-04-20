@@ -5003,19 +5003,36 @@ class TestDel6VtFluxFortranFormula(unittest.TestCase):
                  f"interfaces j=1..n-1 are strictly interior), got "
                  f"max={float(np.max(np.abs(interior_fy2))):.3e}"))
 
-    def test_nord1_iteration_sign_flip_invariant(self):
-        """The Fortran nord>0 iteration flips the sign of the flux
-        difference each step:
-          initial: fx2 = metric * (d2_W - d2_E)  (W - E)
-          iter:    fx2 = metric * (d2_E - d2_W)  (E - W, flipped)
+    def test_nord1_iteration_sign_alternation(self):
+        """Iter-620 (Codex follow-up to iter-619): specifically lock
+        the Fortran nord>0 iteration SIGN ALTERNATION.
 
-        This alternation makes the accumulated del-n operator
-        positive-definite.  A refactor that used the same sign on
-        both passes would break the conservation/positivity of the
-        accumulated damping.
+        Fortran `sw_core.F90:2064-2117` structure:
+          initial pass:  fx2 = metric * (d2_W - d2_E)       (W - E)
+          iteration:     fx2 = metric * (d2_E - d2_W)       (E - W, FLIPPED)
 
-        Test: pass the same input through nord=0 and nord=1; for
-        a specific 2-cell perturbation, the signs should flip.
+        For a single-cell peak q[4,4]=2, others=1:
+          - nord=0 fx2 at interface (i=4, j=4) is NEGATIVE (d2_W=1,
+            d2_E=2, difference = -1).
+          - After iteration: d2_new[4,4] is strongly negative (peak
+            of Laplacian), d2_new[3,4] and d2_new[5,4] are positive.
+          - Correct-alternation nord=1 fx2 at interface (4, 4):
+            metric * (d2_new_E - d2_new_W) = (negative - positive)
+            = VERY NEGATIVE (same sign as nord=0).
+          - Buggy-no-alternation nord=1 would use (d2_new_W -
+            d2_new_E) = (positive - negative) = VERY POSITIVE
+            (OPPOSITE sign to nord=0).
+
+        So sign-alternation invariant: sign(fx2_nord1[peak_edge])
+        must EQUAL sign(fx2_nord0[peak_edge]) — catches buggy
+        iteration that drops the sign flip.
+
+        Iter-619's residual-vs-scalar-multiple check DOES NOT catch
+        this: the bug produces a flux with DIFFERENT SPATIAL STRUCTURE
+        (and different magnitude) from both correct-alternation and
+        scalar-multiple-of-nord=0, so the best-fit residual is still
+        non-zero — the test passed even though the sign-flip bug was
+        present.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -5034,41 +5051,47 @@ class TestDel6VtFluxFortranFormula(unittest.TestCase):
         fx2_nord1, _ = _del6_vt_flux(nord=1, damp=damp, q=q,
                                        cdgrid=cdgrid, use_duogrid=False)
 
-        # The peak is at i=4.  After nord=0, fx2 at x-interfaces
-        # i=4 (west of peak) and i=5 (east of peak) are OPPOSITE
-        # signs (gradient changes across the peak).
-        w = float(fx2_nord0[0, 4, 4])  # west-of-peak flux
-        e = float(fx2_nord0[0, 5, 4])  # east-of-peak flux
+        # nord=0 at the WEST-of-peak interface (i=4 on face 0):
+        # d2_0[3,4]=1, d2_0[4,4]=2 → (W - E) = -1 → fx2_nord0 NEGATIVE.
+        west_of_peak_sign_0 = float(np.sign(float(fx2_nord0[0, 4, 4])))
         self.assertLess(
-            w * e, 0.0,
-            msg=(f"nord=0: peak should produce opposite-sign fluxes "
-                 f"on either side: w={w:.3e}, e={e:.3e}"))
+            float(fx2_nord0[0, 4, 4]), 0.0,
+            msg=(f"Prerequisite: nord=0 at west-of-peak interface "
+                 f"(i=4, j=4) should be NEGATIVE (d2_0_W < d2_0_E), "
+                 f"got {float(fx2_nord0[0, 4, 4]):.3e}.  If this "
+                 f"fires, the nord=0 sign convention itself is "
+                 f"broken — diagnose that first before the "
+                 f"alternation check."))
 
-        # nord=1 applies an additional Laplacian iteration.  The
-        # spatial pattern of the result is DIFFERENT from a scalar
-        # multiple of nord=0 (del-4 is not proportional to del-2
-        # except in trivial cases).  Test: the two fluxes should be
-        # NOT proportional over the full face — the correlation
-        # measure rejects scalar-multiple hypothesis.
-        f0 = np.asarray(fx2_nord0[0])  # (n+1, n)
-        f1 = np.asarray(fx2_nord1[0])
-        # Check that f1 is not simply alpha * f0 for any alpha.
-        norm_sq = float(np.sum(f0 ** 2))
-        if norm_sq > 1e-20:
-            alpha = float(np.sum(f0 * f1) / norm_sq)
-            residual = f1 - alpha * f0
-            residual_rel = (float(np.sqrt(np.sum(residual ** 2)))
-                             / max(float(np.sqrt(np.sum(f1 ** 2))), 1e-20))
-            self.assertGreater(
-                residual_rel, 0.05,
-                msg=(f"nord=1 flux is suspiciously close to a scalar "
-                     f"multiple of nord=0 flux (residual after best-"
-                     f"fit alpha = {residual_rel:.3e} relative, "
-                     f"alpha = {alpha:.3e}).  del-4 iteration should "
-                     f"produce a SPATIALLY DIFFERENT pattern from "
-                     f"del-2.  A refactor that broke the iteration "
-                     f"loop (e.g., iterating 0 times) would pass "
-                     f"with residual=0 and fire this test."))
+        # Sign-alternation invariant: nord=1 at the SAME interface
+        # must have the SAME sign as nord=0 (correct iteration
+        # sign-flip preserves the sign pattern at peaks).  A buggy
+        # iteration without sign-flip would produce OPPOSITE sign.
+        west_of_peak_sign_1 = float(np.sign(float(fx2_nord1[0, 4, 4])))
+        self.assertEqual(
+            west_of_peak_sign_1, west_of_peak_sign_0,
+            msg=(f"Sign-alternation BROKEN: nord=0 at (0, 4, 4) = "
+                 f"{float(fx2_nord0[0, 4, 4]):.3e} has sign "
+                 f"{west_of_peak_sign_0}, but nord=1 at same "
+                 f"interface = {float(fx2_nord1[0, 4, 4]):.3e} has "
+                 f"sign {west_of_peak_sign_1}.  Correct Fortran "
+                 f"sign-alternation (iter flux uses d2_E - d2_W, "
+                 f"flipped from initial W - E) preserves sign at "
+                 f"peaks.  A refactor that drops the sign flip — "
+                 f"keeping W - E on both passes — produces the "
+                 f"OPPOSITE sign pattern.  See sw_core.F90:2070 "
+                 f"(initial) and 2100 (iter, flipped)."))
+
+        # Complementary check at the EAST-of-peak interface: nord=0
+        # is positive (d2_0_W=2, d2_0_E=1, diff = +1).  Alternation
+        # invariant: nord=1 at same interface also positive.
+        east_of_peak_sign_0 = float(np.sign(float(fx2_nord0[0, 5, 4])))
+        east_of_peak_sign_1 = float(np.sign(float(fx2_nord1[0, 5, 4])))
+        self.assertEqual(
+            east_of_peak_sign_1, east_of_peak_sign_0,
+            msg=(f"Sign-alternation BROKEN at east-of-peak: "
+                 f"nord=0 sign={east_of_peak_sign_0}, nord=1 "
+                 f"sign={east_of_peak_sign_1}."))
 
 
 if __name__ == "__main__":
