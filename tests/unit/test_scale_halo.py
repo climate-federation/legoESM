@@ -1104,20 +1104,16 @@ class TestPadHaloH3Guardrails:
             "corner-fill-tiled-early",
             "corner-fill-tiled-late",
         )
-        # Accept either an explicit inline `[ANCHOR iter-613: <name>]`
-        # tag or a bare anchor-name mention inside the tiled-helper
-        # docstring block (which lists the 3 tiled anchors).  Scan the
-        # text BEFORE the `if halo == 3:` guard so the port-spec's
-        # OWN references to anchor names don't count (those exist
-        # INSIDE the guard block).
-        before_guard = text.split("if halo == 3:")[0]
-        has_tiled_block = "ANCHORS iter-613 for halo=3 port" in before_guard
-        missing = []
-        for a in required_anchors:
-            explicit = f"ANCHOR iter-613: {a}" in text
-            in_docstring = has_tiled_block and a in before_guard
-            if not (explicit or in_docstring):
-                missing.append(a)
+        # Iter-615 (Codex follow-up): REQUIRE every anchor to be
+        # planted as an explicit `[ANCHOR iter-613: <name>]` comment
+        # AT THE CODE SITE.  Iter-614's fallback that accepted bare
+        # anchor names in the tiled-helper docstring was too loose —
+        # a refactor moving the tiled code sites would not break the
+        # docstring, so the anti-rot lock was incomplete for the 3
+        # tiled anchors.  iter-615 planted explicit comments at all
+        # 3 tiled code sites, so the fallback is no longer needed.
+        missing = [a for a in required_anchors
+                    if f"ANCHOR iter-613: {a}" not in text]
         assert not missing, (
             f"iter-613 port-spec anchors missing in "
             f"`src/legoesm/parallel/halo_exchange.py`: {missing}. "

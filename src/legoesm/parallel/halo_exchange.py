@@ -796,6 +796,8 @@ def _pad_halo_mpi_tiled_4d(
             nbr_rank = topology.neighbor_ranks[(face, edge)]
             edge_info.append((edge, nbr_rank, nbr_edge, is_reversed, False))
 
+    # [ANCHOR iter-613: corner-fill-tiled-early] — extend to halo==3
+    # with _fill_corners_h3.
     if not edge_info:
         if halo == 1:
             padded = _fill_corners_h1(padded)
@@ -839,6 +841,8 @@ def _pad_halo_mpi_tiled_4d(
         )
 
         offset = 0
+        # [ANCHOR iter-613: tiled-remote-depth-extraction] — extend
+        # halo==2 branch to halo==3: strip_d2 + _place_strip_h3_4d.
         for edge, _, nbr_edge, is_reversed, is_tile_nbr in recv_order:
             if halo == 1:
                 recv_strip = recv_buf[offset:offset + chunk].reshape(n, nlev)
@@ -855,6 +859,8 @@ def _pad_halo_mpi_tiled_4d(
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2_4d(padded, face, edge, strip_d0, strip_d1)
 
+    # [ANCHOR iter-613: corner-fill-tiled-late] — extend to halo==3
+    # with _fill_corners_h3.
     if halo == 1:
         padded = _fill_corners_h1(padded)
     else:

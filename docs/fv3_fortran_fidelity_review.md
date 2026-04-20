@@ -786,3 +786,18 @@ The FB-chain is now UNLOCKED on the single-device (non-MPI) backend — callers 
 
 **Value**: a refactor that moves the insertion site (renaming the function, reordering the helper body) breaks the test explicitly instead of leaving a silently dangling port spec.  Fixes Codex's "undermines its own anti-rot goal" finding.
 
+### Iter-615 (2026-04-20): plant explicit tiled anchors at code sites (Codex)
+
+**Codex stop-time review on iter-614 (commit 256d9a2)**: the 3 tiled anchors (`corner-fill-tiled-early`, `corner-fill-tiled-late`, `tiled-remote-depth-extraction`) were only listed in the `_pad_halo_mpi_tiled_4d` docstring.  A refactor that moved a tiled code site (e.g., dropped the `if not edge_info` short-circuit, reordered the recv loop, or reshaped the corner-fill dispatch) would leave the docstring anchors intact but break the code they reference — the anti-rot lock was incomplete for the tiled helper.
+
+**Fix**: planted explicit `[ANCHOR iter-613: <name>]` comments at the 3 actual tiled code sites:
+- `corner-fill-tiled-early` at the `if not edge_info:` short-circuit branch.
+- `tiled-remote-depth-extraction` at the recv loop inside `by_nbr_rank` dispatch.
+- `corner-fill-tiled-late` at the end-of-function `if halo == 1:` corner fill.
+
+**Tightened test**: iter-615 also simplified `test_iter613_mpi_halo3_port_anchors_present` to require explicit `[ANCHOR iter-613: <name>]` comments for all 7 anchors (no docstring fallback).  The iter-614 fallback was the hole Codex flagged.
+
+**Sanity-verified**: removing the `corner-fill-tiled-late` anchor comment from the tiled helper fires the test with `missing = ['corner-fill-tiled-late']`.  Production restored; 61 `test_scale_halo` tests pass.
+
+**Final state**: all 7 port-spec anchors (4 face-only + 3 tiled) are now explicit inline comments at their code sites.  A future refactor moving ANY site breaks the test with a specific missing-anchor message, enabling direct fix or spec update.
+
