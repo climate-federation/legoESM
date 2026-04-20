@@ -826,7 +826,7 @@ Each step tightens the anti-rot lock in response to a specific regression class 
 **Lock added**: `TestEdgeInterpolate4FortranFormula` class in `tests/unit/test_cdgrid_fv3_regression.py` with three tests:
 1. `test_linear_input_exact`: for a linear `ua = a + b*i` on uniform `dxa`, result equals `a + b*1.5` (the formula averages two linear extrapolations and is exact for linear fields).
 2. `test_uniform_dxa_reduces_to_3_4_weighted_average`: for uniform `dxa = [d,d,d,d]`, the closed-form reduction `(3*(ua[1]+ua[2]) - (ua[0]+ua[3]))/4` is reproduced across multiple d values.
-3. `test_non_uniform_dxa_matches_explicit_fortran_formula`: for 5 random `(ua, dxa)` pairs, the result is bit-for-bit equal to an explicit numpy reproduction of the Fortran formula.
+3. `test_non_uniform_dxa_matches_explicit_fortran_formula`: for 5 random `(ua, dxa)` pairs, the result matches an explicit numpy reproduction of the Fortran formula to within float64 round-off.
 
 **Sanity-verified**: swapping `dxa4[..., 1]` → `dxa4[..., 0]` in the first term's numerator (a realistic off-by-one refactor) fires the non-uniform test with diff 0.43 on the first random case.
 
@@ -898,7 +898,7 @@ Asserts `max|production - reference| / rms(reference) < 1e-10` on both fx2 and f
 **Coverage trajectory for `_del6_vt_flux`**:
 - iter-619: basic nord=0/1 structural checks (but nord=1 residual-vs-scalar-multiple was too weak).
 - iter-620: sign-alternation invariant (2-point check).
-- iter-621: full-field Fortran bit-for-bit reproduction (THIS).
+- iter-621: full-field Fortran reproduction at float64 round-off (THIS).
 
 4 tests pass.  The helper now has structural + sign-level + full-field coverage.
 
@@ -913,7 +913,7 @@ Previously no direct regression test — only indirect coverage via FB chain run
 
 **Lock added**: `TestDSw1RecomputeUtVtFortranFormula` with 2 tests:
 1. `test_duogrid_interior_matches_4cell_average_formula`: constant `uc=C1, vc=C2` → `ut = (C1 - cosa_u*C2)*rsin_u`, `vt = (C2 - cosa_v*C1)*rsin_v`.  Exact formula reproduction.
-2. `test_duogrid_random_inputs_match_numpy_reference`: random (uc, vc) input → full-field numpy reproduction compared bit-for-bit to production (rel < 1e-10).
+2. `test_duogrid_random_inputs_match_numpy_reference`: random (uc, vc) input → full-field numpy reproduction compared to production at `rtol < 1e-10` (well above IEEE bit identity; per iter-649 this is round-off-level match, not truly "bit-for-bit").
 
 **Sanity-verified**: dropping the `0.25` factor in the interior formula fires the constant-input test with relative diff 0.54.
 
@@ -933,7 +933,7 @@ Previously no direct regression test.
 
 **Lock added**: `TestPGradCFortranFormula` with 2 tests:
 1. `test_constant_p_produces_zero_gradient`: constant `h_star + h_s` → `dp_x = dp_y = 0` (gradient of constant = 0).
-2. `test_random_input_matches_numpy_reference`: random input → full-field numpy reproduction (using the same `_pad_halo_auto` halo exchange) compared bit-for-bit to production (rel < 1e-10).
+2. `test_random_input_matches_numpy_reference`: random input → full-field numpy reproduction (using the same `_pad_halo_auto` halo exchange) compared to production at `rtol < 1e-10` (round-off match, not IEEE bit identity).
 
 **Sanity-verified**: flipping the sign convention (`(p_E - p_W)` instead of `(p_W - p_E)`) fires the test with relative diff 7.56 — well above the 1e-10 threshold.
 
@@ -954,7 +954,7 @@ Previously no direct regression test — only indirect coverage via `fv_tp_2d` /
 
 **Lock added**: `TestComputeTransportQuantitiesFortranFormula` with 2 tests:
 1. `test_zero_velocity_produces_zero_transport_and_ra_equals_area`: ut=vt=0 → crx=cry=xfx=yfx=0 and ra_x=ra_y=area.
-2. `test_full_field_matches_numpy_reference`: random (ut, vt) input → numpy reproduction of ALL 6 output quantities matches production bit-for-bit (rel < 1e-10 each).
+2. `test_full_field_matches_numpy_reference`: random (ut, vt) input → numpy reproduction of ALL 6 output quantities matches production at `rtol < 1e-10` each (round-off match, not IEEE bit identity).
 
 **Sanity-verified**: swapping the upwind direction on `rdxa_pad` selection (`ut > 0 → cell i` instead of `cell i-1`) fires the full-field test with relative diff 0.38 for `crx`.
 
@@ -1046,7 +1046,7 @@ The placement helper is now available for future iterations to call from `_pad_h
 
 **Public guard remains**: `pad_halo_mpi_4d(halo=3)` still raises `NotImplementedError` at the public entry point because the REMOTE send/recv path (steps 3, the depth-2 strip in the recv loop) is not yet implemented.  Single-rank calls that don't trigger remote edges would work, but the public API continues to reject halo=3 until all 7 spec steps are complete.
 
-**Lock added**: `test_pad_halo_mpi_face_only_4d_halo3_single_rank`.  Directly calls the internal helper `_pad_halo_mpi_face_only_4d` with halo=3 and a single-rank topology (`n_processes=1` → all 6 faces local).  Compares the output level-by-level to the scalar `_pad_halo_local_h3` reference: bit-for-bit match (< 1e-12 diff).
+**Lock added**: `test_pad_halo_mpi_face_only_4d_halo3_single_rank`.  Directly calls the internal helper `_pad_halo_mpi_face_only_4d` with halo=3 and a single-rank topology (`n_processes=1` → all 6 faces local).  Compares the output level-by-level to the scalar `_pad_halo_local_h3` reference: float64 round-off match (< 1e-12 diff; not IEEE bit identity).
 
 **Sanity**: passing mpi4jax=None, MPI=None is safe for this call because `if not remote_edges: return padded` short-circuits before any sendrecv would happen.
 
@@ -1113,7 +1113,7 @@ Next iteration can: (a) mirror steps 1+4 into the tiled helper; OR (b) implement
 5. **SPMD guard kept**: `explicit_pad_halo` only handles halo=1/2, so the SPMD path retains its halo=3 guard pending a separate SPMD port.
 
 **Tests added** (`tests/unit/test_scale_halo.py`):
-- `test_pad_halo_mpi_face_only_halo3_single_rank_iter630`: single-rank all-local 2D helper must equal `_pad_halo_local_h3` bit-for-bit.
+- `test_pad_halo_mpi_face_only_halo3_single_rank_iter630`: single-rank all-local 2D helper must equal `_pad_halo_local_h3` to within float64 round-off.
 - `test_place_strip_h3_index_conventions_iter630`: locks the 2D depth-to-index mapping mirroring the 4D lock test.
 - `test_pad_halo_vector_halo3_rejects_mpi_backend` → `test_pad_halo_vector_halo3_mpi_guard_lifted_iter630`: renamed and repurposed to assert the historical guard no longer fires; stubs `pad_halo_mpi_4d` so no live MPI is required.
 
@@ -1194,7 +1194,7 @@ else:
 
 The `interp_offsets` refusal is retained because neither `pad_halo_mpi` nor `pad_halo_mpi_4d` honors offsets — the scalar fallback would hit the iter-631/632 guards.
 
-**Tests rewritten** (2 new `_fallback_iter634` tests replacing iter-633's `_refused_iter633` tests): each builds a real `create_cubed_sphere(n=8, use_duogrid=True)` grid, stubs `pad_halo_mpi[_4d]` to call the local helper (so the test runs single-process), and asserts bit-for-bit match between the MPI branch (via fallback) and the non-MPI branch.  The match is exact because both paths now run the same scalar `pad_halo` → local exchange → `cube_rmp_vectorized` → `fill_corner_region` pipeline.
+**Tests rewritten** (2 new `_fallback_iter634` tests replacing iter-633's `_refused_iter633` tests): each builds a real `create_cubed_sphere(n=8, use_duogrid=True)` grid, stubs `pad_halo_mpi[_4d]` to call the local helper (so the test runs single-process), and asserts float64 round-off match between the MPI branch (via fallback) and the non-MPI branch.  The match is tight because both paths now run the same scalar `pad_halo` → local exchange → `cube_rmp_vectorized` → `fill_corner_region` pipeline (not IEEE bit identity — `assert_allclose` atol=1e-14 with default rtol, per iter-649 correction).
 
 **Backlog update**: the "Known active caller" note above is now RESOLVED — `operators_3d.py::vorticity_3d` / `divergence_3d` will work under MPI with duogrid because the fallback path is correct.
 
@@ -1229,7 +1229,7 @@ endif
 - `test_pert_ppm_iv0_matches_fortran_on_random_grid`: random grid at atol=1e-14.
 - `test_pert_ppm_iv1_zeros_when_same_sign`: explicit lock of the both-positive and both-negative same-sign branches.
 
-All 5 tests pass at `atol=1e-14`, giving bit-for-bit equivalence between the JAX implementation and a line-by-line Fortran reproduction.  Any future edit to `_pert_ppm` / `_pert_ppm_iv0` that drifts from `tp_core.F90` will fail these tests.
+All 5 tests pass at `atol=1e-14` — float64 round-off equivalence (not IEEE-754 bit identity, per iter-649 correction) between the JAX implementation and a line-by-line Fortran reproduction.  Any future edit to `_pert_ppm` / `_pert_ppm_iv0` that drifts from `tp_core.F90` beyond round-off will fail these tests.
 
 ### Iter-636 — Fortran-formula lock for `_ke_upwind`
 
@@ -1241,7 +1241,7 @@ Pre-iter-636 no Fortran-formula lock existed on this helper.  Correct upwind sel
 
 **Tests added** (`tests/unit/test_cdgrid_fv3_regression.py::TestKeUpwindFortranFormula`, 3 total):
 - `_ref_ke_upwind`: numpy reproduction of the Fortran logic, covering both branches and all 4 face-edge overrides.
-- `test_ke_upwind_matches_fortran_non_duogrid`: random inputs at n=8, bit-for-bit match at `atol=1e-13`.  Exercises all 4 face-edge overrides (W/E/S/N with matching `ua>0 / va>0` branch selection).
+- `test_ke_upwind_matches_fortran_non_duogrid`: random inputs at n=8, float64 round-off match at `atol=1e-13` (not IEEE bit identity, per iter-649).  Exercises all 4 face-edge overrides (W/E/S/N with matching `ua>0 / va>0` branch selection).
 - `test_ke_upwind_matches_fortran_duogrid`: random inputs with duogrid active — simple interior upwind only, no edge rotation.
 - `test_ke_upwind_duogrid_skips_edge_rotation_iter636`: poisons `sin_sg` / `cos_sg` with sentinel nonsense (-999, +999) on the duogrid path and asserts output is UNCHANGED — directly locks the `if not use_duogrid:` guard at `fv3_sw_core.py:731`.  A regression that dropped the guard would consume the poisoned metrics and fail visibly.
 
@@ -1262,7 +1262,7 @@ Pre-iter-637 there were only behavioural tests for "does the face override fire 
 
 **Tests added** (`TestVorticityFluxFortranFormula`, 3 total):
 - `_ref_vorticity_flux`: numpy line-by-line reproduction with parameterised `use_duogrid`.
-- `test_vorticity_flux_matches_fortran_non_duogrid`: random inputs at n=8, bit-for-bit at `atol=1e-12` with all 4 face-boundary overrides active.
+- `test_vorticity_flux_matches_fortran_non_duogrid`: random inputs at n=8, float64 round-off match at `atol=1e-12` with all 4 face-boundary overrides active.
 - `test_vorticity_flux_matches_fortran_duogrid`: random inputs with duogrid, expects the raw `(v - uc*cosa_u)/sina_u` formula at ALL indices including face boundaries (no override).  Includes a direct comparison to `fy1_raw` at all 4 face edges.
 - `test_vorticity_flux_duogrid_skips_face_override_iter637`: poisons `v_d[:, 0, :]` / `v_d[:, n, :]` / `u_d[:, :, 0]` / `u_d[:, :, n]` with sentinels and asserts that under duogrid the output at those indices matches the formula-with-poisoned-v_d value (i.e., the poison propagates ONLY through the formula, NOT through the `fy1 = v_d` override branch).  Directly locks the `if not use_duogrid:` guard at fv3_sw_core.py:1156 / 1162.
 
@@ -1284,7 +1284,7 @@ Pre-iter-638, only behavioural tests existed (`test_corner_vorticity_legacy_corr
 
 **Tests added** (`TestCornerVorticityFortranFormula`, 3 total):
 - `_ref_corner_vorticity`: numpy line-by-line reproduction with both branches.
-- `test_corner_vorticity_matches_fortran_non_duogrid`: random inputs at n=8, bit-for-bit at `atol=1e-12` with linear extrapolation + 4 corner additions active.
+- `test_corner_vorticity_matches_fortran_non_duogrid`: random inputs at n=8, float64 round-off match at `atol=1e-12` with linear extrapolation + 4 corner additions active.
 - `test_corner_vorticity_matches_fortran_duogrid`: random inputs with duogrid active, edge-mode pad only.
 - `test_corner_vorticity_duogrid_skips_corner_additions_iter638`: runs both branches on the SAME non-duogrid CDGrid (so the flag alone controls branch selection) and asserts the outputs differ at all 4 cube vertices (threshold `1e-10`, well above float64 round-off but below realistic signal magnitude).  Locks both the `if not use_duogrid:` guard at fv3_sw_core.py:1118 (extrapolation) and at :1129 (corner additions).
 
@@ -1307,7 +1307,7 @@ where `b0 = bl + br`.  Pre-iter-639 the flux formula had no direct numerical loc
 
 **Tests added** (`TestPpmFluxFortranFormula`, 3 total):
 - `_ref_xppm_flux`: numpy reproduction of the flux formula.
-- `test_xppm_flux_formula_matches_fortran`: patches `_ppm_1d` to return controlled (bl, br, q_c) stubs, then calls `_xppm` and verifies bit-for-bit match against `_ref_xppm_flux` on a random (6, 10, 6) grid at `atol=1e-14`.  Isolates the flux formula from the `_ppm_1d` reconstruction logic (which already has its own locks via `TestPertPpmFortranFormula` at iter-635).
+- `test_xppm_flux_formula_matches_fortran`: patches `_ppm_1d` to return controlled (bl, br, q_c) stubs, then calls `_xppm` and verifies float64 round-off match against `_ref_xppm_flux` on a random (6, 10, 6) grid at `atol=1e-14`.  Isolates the flux formula from the `_ppm_1d` reconstruction logic (which already has its own locks via `TestPertPpmFortranFormula` at iter-635).
 - `test_yppm_flux_formula_matches_fortran`: same pattern for `_yppm`, including a `swapaxes(1, 2)` round-trip on the Courant number.  Catches regressions in the y-sweep axis handling.
 - `test_ppm_flux_upwind_selection_iter639`: with `bl = br = 0`, the flux formula reduces to `q_L` (c>0) or `q_R` (c<0).  Uses alternating `+0.3 / -0.3` Courant numbers across face positions and asserts the flux tracks the correct upwind cell mean at each face — directly locks the `crx > 0` sign + L/R indexing.
 
@@ -1349,7 +1349,7 @@ This differs from `sqrt(1 - cosa_u**2)` because `cosa_u` is a halo-averaged quan
 
 **Tests added** (`TestSinaUVFromSinSgFortranFormula`, 2 total):
 - `_ref_sina_u_v`: numpy reproduction.
-- `test_sina_u_v_from_sin_sg_matches_fortran`: real CDGrid bit-for-bit at `atol=1e-14`; exercises all three regions (i=0 boundary, interior, i=n boundary) in both axes.
+- `test_sina_u_v_from_sin_sg_matches_fortran`: real CDGrid, float64 round-off match at `atol=1e-14`; exercises all three regions (i=0 boundary, interior, i=n boundary) in both axes.
 - `test_sina_u_v_formula_survives_mutation_suite_iter641`: replaces `sin_sg` with random nonzero values (via `cdgrid._replace(sin_sg=...)`) and runs 5 mutations:
   - M1: `sin_E ↔ sin_W` in interior `sina_u` averaging
   - M2: `sin_N ↔ sin_S` in interior `sina_v` averaging
@@ -1370,9 +1370,9 @@ Both tests pass.  Cumulative Fortran-formula lock inventory now **20 helpers**: 
 **Tests added** (`TestFillCornersPythonBehavioralLock`, 4 total):
 - `_ref_fill_corners_h1`: numpy reproduction of the Python 24-corner 2-point average.
 - `_ref_fill_corners_h2`: numpy reproduction of the Python inside-out 4-step fill per corner (16 cells per face × 6 faces).
-- `test_fill_corners_h1_matches_reference`: random padded input, bit-for-bit against the Python reference at `atol=1e-14`.
+- `test_fill_corners_h1_matches_reference`: random padded input, float64 round-off match against the Python reference at `atol=1e-14`.
 - `test_fill_corners_h1_mutation_suite_iter642`: M1 (factor 1.0 instead of 0.5) + M3 (helper is a no-op — corners retain input) detected.
-- `test_fill_corners_h2_matches_reference`: random halo=2 input, bit-for-bit against the Python reference.
+- `test_fill_corners_h2_matches_reference`: random halo=2 input, float64 round-off match against the Python reference.
 - `test_fill_corners_h2_sequence_dependency_iter642`: LOAD-BEARING test of the inside-out ordering.  Applies the real helper and a manually-reordered reference (step 4 before step 1); asserts outputs differ at (0, 0) — locks the sequence where the outer corner reads values set from the inner corner.
 
 All 4 tests pass.  These are Python behavioral locks guarding against Python-side regressions in cube-vertex synthesis used by Arakawa-Lamb KE — NOT Fortran-formula locks.
@@ -1393,7 +1393,7 @@ Drift in this helper silently distorts divergence damping at cube edges, which i
 
 **Tests added** (`TestDivergenceCornerDuoFortranFormula`, 2 tests):
 - `_ref_divergence_corner_duo`: numpy line-by-line reproduction covering uf (with cross-velocity `-0.25*(va_below + va_above)*(cos_N + cos_S)` correction), vf (with `(ua_left + ua_right)*(cos_E + cos_W)` correction), the corner stencil `(vf[i,j-1] - vf[i,j] + uf[i-1,j] - uf[i,j]) * rarea_c`, the 4-face-boundary zeroing, and the 0.25× attenuation at face-adjacent rows/cols.
-- `test_divergence_corner_duo_matches_fortran`: real duogrid CDGrid at n=8, bit-for-bit against the numpy reference at `atol=1e-12`.
+- `test_divergence_corner_duo_matches_fortran`: real duogrid CDGrid at n=8, float64 round-off match against the numpy reference at `atol=1e-12`.
 - `test_divergence_corner_duo_mutation_suite_iter644`: 3 mutations:
   - M1: `cos_N ↔ cos_S` swap in uf (wrong edge index).  Signal ~2e-8 at C6 — threshold set to 1e-10 because cos_N and cos_S differ by only ~1e-2 at near-axis-aligned cube interior cells.
   - M2: 0.25 attenuation coefficient → 0.5.  Detected at `>1e-6`.
@@ -1448,7 +1448,7 @@ All 5 tests (3 from iter-645 + 2 from iter-646) pass on the correct code.  The p
         expected_utmp_interior = A2*(u_d[:, :, :-3] + u_d[:, :, 3:])
                                + A1*(u_d[:, :, 1:-2] + u_d[:, :, 2:-1])
 
-4. Asserts `ua[:, 2:-2, npt:n-npt]` (interior cells) matches that expected slice bit-for-bit at `atol=1e-10`.
+4. Asserts `ua[:, 2:-2, npt:n-npt]` (interior cells) matches that expected slice at float64 round-off (iter-649: `atol=1e-14, rtol=0`).
 
 **Verification**: deliberately applying a mutation that inlines the literal `0.7` at the u4 line (leaving `_A1` / `_A2` and v4 untouched) causes the iter-647 test to fail with 100% mismatch and max diff 0.55 — proving the lock now targets the u4 stencil specifically, independent of whether other `_A1` usages remain dynamic.  Source restored after the verification.
 
@@ -1462,11 +1462,11 @@ This closes the false-pass gap Codex flagged.  The 4th-order D→A stencil in `_
 
 **Fix**: two changes to `test_d2a2c_vect_interior_stencil_output_matches_inline_formula_iter647`:
 1. Build the CDGrid with `dtype=jnp.float64` so the metrics don't default to float32 and promote downstream computation to float32 (which was producing the ~1e-7 round-off).  The grid metric override for `cos_sg` / `rsin2_cell` also now explicitly uses `dtype=jnp.float64`.
-2. Set `rtol=0.0, atol=1e-13` on `assert_allclose` — true bit-for-bit at the float64 round-off floor for a 4-term linear combination on O(1) values.
+2. Set `rtol=0.0, atol=1e-13` on `assert_allclose` — float64 round-off match (NOT IEEE-754 bit identity; iter-649 measured 4 ULPs of float64 ε).
 
 Added a note in the `err_msg` documenting the iter-648 tightening.
 
-All 6 tests in `TestD2A2C4thOrderStencilFortranFormula` now pass at the tightened tolerance.  The 4th-order D→A stencil lock is genuinely bit-for-bit against the explicit inline formula.
+All 6 tests in `TestD2A2C4thOrderStencilFortranFormula` now pass at the tightened tolerance.  The 4th-order D→A stencil lock matches the explicit inline formula to within float64 round-off (the "bit-for-bit" wording here was corrected in iter-649).
 
 ### Iter-649 — stop overclaiming exactness; set tolerance at real float64 round-off floor
 
@@ -1480,4 +1480,19 @@ All 6 tests in `TestD2A2C4thOrderStencilFortranFormula` now pass at the tightene
 3. The test docstring now includes a dedicated iter-649 paragraph documenting the measured discrepancy and why atol=1e-14 is the appropriate threshold.
 
 All 6 stencil tests pass at the new tolerance.  The lock detection power is unchanged (the iter-647 mutation verification at 100% mismatch still triggers under the tightened threshold), but the stated strength now matches the enforced strength.
+
+### Iter-650 — scrub remaining "bit-for-bit" overclaims in review doc
+
+**Codex stop-time finding on iter-649**: "iter-649 still leaves contradictory 'bit-for-bit' claims in the review doc."
+
+**Root cause**: iter-649 fixed the iter-647/648 entries but left "bit-for-bit" in 9+ other entries dating back to iter-618.  Most paired the phrase with a nonzero `atol` or `rtol < 1e-10` — the same contradiction pattern iter-649 identified.  Any reader skimming the doc would still see "bit-for-bit at atol=1e-12" and draw the wrong conclusion about what the tests actually enforce.
+
+**Fix**: scrubbed every reminaing "bit-for-bit" claim that was paired with a nonzero tolerance (9 occurrences across iter-618, iter-621, iter-622, iter-623, iter-629, iter-630, iter-634, iter-636, iter-637, iter-638, iter-639, iter-641, iter-642, iter-644, iter-647).  Standard replacements:
+- "bit-for-bit at `atol=X`" → "float64 round-off match at `atol=X` (not IEEE bit identity)"
+- "bit-for-bit equal" → "matches ... to within float64 round-off"
+- "compared bit-for-bit (rel < 1e-10)" → "compared at rtol < 1e-10 (round-off match, not IEEE bit identity)"
+
+Remaining `bit-for-bit` occurrences in the doc are all in the iter-647/648/649 correction narratives where the phrase is explicitly quoted as a historical finding or fix description — those are intentional and clear from context.
+
+No test changes in this iter; this is a documentation cleanup correcting an inconsistent claim that predates iter-649.
 
