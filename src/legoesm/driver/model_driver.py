@@ -483,6 +483,7 @@ class ModelDriver:
             enabled=self._ozone_ext_active,
             source="climatology", path=cfg.ozone_file,
             use_reference_if_missing=True,
+            start_year=cfg.start_year,
         )
 
         # Aerosol external forcing

@@ -18,11 +18,23 @@ Status
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+
+
+_TIME_REF_RE = re.compile(r"since\s+(\d{4})-(\d{1,2})-(\d{1,2})")
+
+
+def _parse_time_ref_year(units: str) -> int | None:
+    """Return the reference year from a CF time-units string, or ``None``."""
+    if not units:
+        return None
+    m = _TIME_REF_RE.search(units)
+    return int(m.group(1)) if m else None
 
 
 # ==============================================================================
@@ -45,10 +57,10 @@ def _open_forcing_dataset(path: str):
     return xr.open_dataset(path, decode_times=False)
 
 
-def _to_days_float(time_values) -> np.ndarray:
-    """Convert xarray time values to float days since the first record.
+def _to_days_float(time_values, units: str = "") -> np.ndarray:
+    """Convert xarray time values to float days since the reference date.
 
-    Handles three cases that arise in practice:
+    Handles the four cases that arise in practice:
 
     * ``numpy.datetime64`` arrays — standard CF time within the
       ``datetime64[ns]`` representable range (~year 100–2262).
@@ -56,14 +68,16 @@ def _to_days_float(time_values) -> np.ndarray:
       when dates exceed the ``datetime64[ns]`` range (e.g. 1850–2299
       CMIP6 solar files).  Converted via :class:`datetime.timedelta`
       arithmetic.
-    * Already-numeric arrays (float/int) — returned as-is after a
-      simple ``float64`` cast (e.g. "year as %Y.%f" GHG files).
+    * Numeric arrays with a CF ``units`` attribute such as
+      ``"months since 1850-01-01"`` or ``"hours since ..."`` — values
+      are rescaled to days according to the unit prefix.
+    * Numeric arrays without a unit string (or with "days since ..." /
+      "year as %Y.%f") — returned after a ``float64`` cast.
     """
     arr = np.asarray(time_values)
     if arr.dtype == object and arr.size > 0:
-        # cftime path
         try:
-            import cftime  # noqa: F401 — just to confirm it's available
+            import cftime  # noqa: F401
             ref = arr.flat[0]
             days = np.array(
                 [(t - ref).days + (t - ref).seconds / 86400.0 for t in arr.ravel()],
@@ -75,7 +89,20 @@ def _to_days_float(time_values) -> np.ndarray:
     if np.issubdtype(arr.dtype, np.datetime64):
         t0 = arr.flat[0]
         return ((arr - t0) / np.timedelta64(1, "D")).astype(np.float64)
-    return arr.astype(np.float64)
+    days = arr.astype(np.float64)
+    if units:
+        u = units.strip().lower()
+        if u.startswith("months since") or u == "months":
+            days = days * 30.4375
+        elif u.startswith("hours since") or u == "hours":
+            days = days / 24.0
+        elif u.startswith("minutes since") or u == "minutes":
+            days = days / 1440.0
+        elif u.startswith("seconds since") or u == "seconds":
+            days = days / 86400.0
+        elif u.startswith("years since") or u == "years":
+            days = days * 365.25
+    return days
 
 
 @lru_cache(maxsize=16)
@@ -99,7 +126,9 @@ def _load_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarray, 
     if "time" not in ds.dims:
         ds.close()
         raise ValueError(f"Forcing file {path!r} has no 'time' dimension")
-    times = _to_days_float(ds["time"].values)
+    times = _to_days_float(
+        ds["time"].values, ds["time"].attrs.get("units", "")
+    )
     # Build a case-insensitive lookup for variable names to handle files where
     # conventions differ (e.g., "TSI" in CMIP6 solar files vs. "tsi" default).
     varname_map = {name.lower(): name for name in ds.data_vars}
@@ -168,7 +197,9 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
         ds.close()
         raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
     if "time" in ds:
-        mid_days = _to_days_float(ds["time"].values)
+        mid_days = _to_days_float(
+            ds["time"].values, ds["time"].attrs.get("units", "")
+        )
     else:
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
     ds.close()
@@ -202,8 +233,11 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
 
     Returns
     -------
-    (mid_days, lat, plev, data) where plev is shape (nlev,) in [Pa]
-    or None if no vertical dimension.
+    (mid_days, lat, plev, data, ref_year) where plev is shape (nlev,) in [Pa]
+    or ``None`` if no vertical dimension, and ``ref_year`` is the reference
+    calendar year parsed from the time axis ``units`` attribute (e.g. 1850
+    for ``"months since 1850-01-01"``), or ``None`` if no unit metadata is
+    available.
     """
     ds = _open_forcing_dataset(path)
     if varname not in ds.data_vars:
@@ -220,9 +254,12 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
         ds.close()
         raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
     if "time" in ds:
-        mid_days = _to_days_float(ds["time"].values)
+        time_units = ds["time"].attrs.get("units", "")
+        mid_days = _to_days_float(ds["time"].values, time_units)
+        ref_year = _parse_time_ref_year(time_units)
     else:
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        ref_year = None
 
     plev = None
     for vname in ("plev", "level", "lev"):
@@ -259,7 +296,7 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
                 data = np.swapaxes(data, plev_ax, lat_ax)
 
     ds.close()
-    return mid_days, lat, plev, data
+    return mid_days, lat, plev, data, ref_year
 
 
 @lru_cache(maxsize=16)
@@ -280,26 +317,39 @@ def _load_time_gpt(
     if "time" not in ds:
         ds.close()
         raise ValueError(f"No 'time' variable in spectral solar file {path!r}")
-    times = _to_days_float(ds["time"].values)
-    if spectral_var not in ds.data_vars:
+    times = _to_days_float(
+        ds["time"].values, ds["time"].attrs.get("units", "")
+    )
+    # Case-insensitive lookup — CMIP6 MPI-M files store ``SSI_frac`` / ``TSI``.
+    varname_map = {name.lower(): name for name in ds.data_vars}
+    spectral_actual = (
+        spectral_var
+        if spectral_var in ds.data_vars
+        else varname_map.get(spectral_var.lower())
+    )
+    if spectral_actual is None:
         ds.close()
         raise ValueError(
             f"Spectral variable {spectral_var!r} not found in {path!r}",
         )
-    spec = np.asarray(ds[spectral_var].values, dtype=np.float64)
+    spec = np.asarray(ds[spectral_actual].values, dtype=np.float64)
     if spec.ndim != 2 or spec.shape[0] != times.shape[0]:
         ds.close()
         raise ValueError(
-            f"Spectral variable {spectral_var!r} must have shape (time, ngpt); "
-            f"got {spec.shape}",
+            f"Spectral variable {spectral_actual!r} must have shape "
+            f"(time, ngpt); got {spec.shape}",
         )
+    tsi_actual = (
+        tsi_var if tsi_var in ds.data_vars else varname_map.get(tsi_var.lower())
+    )
     tsi = None
-    if tsi_var in ds.data_vars:
-        tsi = np.asarray(ds[tsi_var].values, dtype=np.float64)
+    if tsi_actual is not None:
+        tsi = np.asarray(ds[tsi_actual].values, dtype=np.float64)
         if tsi.ndim != 1 or tsi.shape[0] != times.shape[0]:
             ds.close()
             raise ValueError(
-                f"TSI variable {tsi_var!r} must have shape (time,); got {tsi.shape}",
+                f"TSI variable {tsi_actual!r} must have shape (time,); "
+                f"got {tsi.shape}",
             )
     ds.close()
     return times, tsi, spec
@@ -326,6 +376,28 @@ def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -
     return (1 - w) * data[idx_left] + w * data[idx_right]
 
 
+def _interp_time_linear(mid_days: np.ndarray, data: np.ndarray, day: float) -> np.ndarray:
+    """Linear interpolation along axis 0, clamped at the endpoints.
+
+    Used for non-cyclic time-varying forcing files (e.g. 600-month CMIP6
+    ozone) where cyclic interpolation would discard interannual evolution.
+    """
+    n = len(mid_days)
+    if n == 0:
+        raise ValueError("Empty time axis in forcing file")
+    if day <= mid_days[0]:
+        return data[0]
+    if day >= mid_days[-1]:
+        return data[-1]
+    idx_right = int(np.searchsorted(mid_days, day))
+    idx_left = idx_right - 1
+    span = mid_days[idx_right] - mid_days[idx_left]
+    if span <= 0:
+        return data[idx_left]
+    w = (day - mid_days[idx_left]) / span
+    return (1 - w) * data[idx_left] + w * data[idx_right]
+
+
 def _interp_zonal_to_grid(lat_src: np.ndarray, field: np.ndarray,
                            lat_grid: jnp.ndarray) -> jnp.ndarray:
     """Interpolate a zonal-mean field to model grid latitudes.
@@ -345,6 +417,13 @@ def _interp_zonal_to_grid(lat_src: np.ndarray, field: np.ndarray,
     jax array with shape (*lat_grid.shape,) or (*lat_grid.shape, *trailing)
     """
     lat_deg = np.asarray(jnp.degrees(lat_grid)).ravel()
+
+    # ``np.interp`` requires strictly increasing source coordinates; some
+    # forcing files (e.g. Kinne aerosol) store latitude north-to-south.
+    lat_src = np.asarray(lat_src)
+    if lat_src.size > 1 and lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        field = field[::-1]
 
     if field.ndim == 1:
         result = np.interp(lat_deg, lat_src, field)
@@ -606,6 +685,7 @@ class OzoneConfig(NamedTuple):
     reference_o3_max_vmr: float = 8.0e-6
     reference_sigma_logp: float = 1.5
     reference_lat_dependence: bool = True
+    start_year: int = 1979
 
 
 def _reference_ozone_profile(
@@ -691,10 +771,18 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
         )
 
     varname = _detect_ozone_varname(config.path)
-    mid_days, lat, plev, data = _load_monthly_zonal_with_levels(
+    mid_days, lat, plev, data, ref_year = _load_monthly_zonal_with_levels(
         config.path, varname
     )
-    ozone_interp = _interp_monthly_cyclic(mid_days, data, day)
+    # 12-month climatologies use cyclic day-of-year interpolation; longer
+    # time axes (e.g. CMIP6 input4MIPs with 600 months) are interpolated
+    # linearly against absolute days so interannual evolution is preserved.
+    if mid_days.shape[0] == 12:
+        ozone_interp = _interp_monthly_cyclic(mid_days, data, day)
+    else:
+        file_ref_year = ref_year if ref_year is not None else config.start_year
+        abs_day = (config.start_year - file_ref_year) * 365.25 + day
+        ozone_interp = _interp_time_linear(mid_days, data, abs_day)
 
     if lat_grid is not None:
         # Interpolate to model grid latitudes
@@ -705,6 +793,113 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
         return ozone_on_grid
     else:
         return {"lat": lat, "ozone": ozone_interp}
+
+
+# ==============================================================================
+# Volcanic aerosol (CMIP6 stratospheric)
+# ==============================================================================
+
+@lru_cache(maxsize=4)
+def _is_cmip6_volcanic_file(path: str) -> bool:
+    """Return True if ``path`` uses the CMIP6 volcanic schema.
+
+    Detected by the per-band extinction variables ``ext_sun``/``ext_earth``
+    combined with an ``altitude`` dimension, which together distinguish
+    CMIP6 stratospheric volcanic files from Kinne-style ``aod`` files.
+    """
+    ds = _open_forcing_dataset(path)
+    has_ext = "ext_sun" in ds.data_vars or "ext_earth" in ds.data_vars
+    has_alt = "altitude" in ds.dims
+    ds.close()
+    return has_ext and has_alt
+
+
+@lru_cache(maxsize=4)
+def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load a CMIP6 stratospheric volcanic file as column AOD.
+
+    The CMIP6 dataset stores per-band extinction
+    ``ext_sun(solar_bands, latitude, altitude, month)`` in units of
+    ``[1/km]`` on an altitude grid (km).  This loader:
+
+    1. integrates vertically ``aod = Σ ext · Δz`` (altitude km → m),
+    2. averages over the solar band axis to yield scalar column AOD,
+    3. returns ``(mid_days, lat, data)`` matching :func:`_load_monthly_zonal`.
+    """
+    ds = _open_forcing_dataset(path)
+    if "ext_sun" not in ds.data_vars:
+        ds.close()
+        raise ValueError(
+            f"CMIP6 volcanic file {path!r} has no 'ext_sun' variable"
+        )
+    ext_var = ds["ext_sun"]
+    ext = np.asarray(ext_var.values, dtype=np.float64)  # [1/km]
+    dims = list(ext_var.dims)
+
+    if "altitude" not in ds:
+        ds.close()
+        raise ValueError(
+            f"CMIP6 volcanic file {path!r} has no 'altitude' coordinate"
+        )
+    alt_vals = np.asarray(ds["altitude"].values, dtype=np.float64)
+    alt_units = ds["altitude"].attrs.get("units", "").strip().lower()
+    if alt_units in ("m", "metre", "meter", "metres", "meters"):
+        alt_m = alt_vals
+    else:
+        alt_m = alt_vals * 1000.0  # default/"km"
+
+    lat_name = "latitude" if "latitude" in ds else ("lat" if "lat" in ds else None)
+    if lat_name is None:
+        ds.close()
+        raise ValueError(
+            f"CMIP6 volcanic file {path!r} has no 'latitude' coordinate"
+        )
+    lat = np.asarray(ds[lat_name].values, dtype=np.float64)
+    mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+    ds.close()
+
+    if alt_m.size >= 2:
+        dz = np.empty_like(alt_m)
+        dz[1:-1] = 0.5 * (alt_m[2:] - alt_m[:-2])
+        dz[0] = alt_m[1] - alt_m[0]
+        dz[-1] = alt_m[-1] - alt_m[-2]
+    else:
+        dz = np.ones_like(alt_m)
+    dz = np.abs(dz)
+
+    ext_per_m = ext / 1000.0  # 1/km → 1/m
+    alt_axis = dims.index("altitude")
+    ext_last = np.moveaxis(ext_per_m, alt_axis, -1)
+    aod_column = np.sum(ext_last * dz, axis=-1)
+    remaining = [d for d in dims if d != "altitude"]
+
+    for band_name in ("solar_bands", "terrestrial_bands", "band", "lnwl"):
+        if band_name in remaining:
+            ax = remaining.index(band_name)
+            aod_column = np.mean(aod_column, axis=ax)
+            remaining.pop(ax)
+            break
+
+    month_name = "month" if "month" in remaining else (
+        "time" if "time" in remaining else None
+    )
+    lat_axis_name = "latitude" if "latitude" in remaining else (
+        "lat" if "lat" in remaining else None
+    )
+    if month_name is None or lat_axis_name is None:
+        raise ValueError(
+            f"Unexpected volcanic file dimensions after reduction: {remaining}"
+        )
+    if remaining.index(month_name) > remaining.index(lat_axis_name):
+        aod_column = np.swapaxes(aod_column, 0, 1)
+    return mid_days, lat, aod_column
+
+
+def _load_volcanic_aerosol(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Auto-dispatch volcanic aerosol file loader (CMIP6 vs Kinne-style)."""
+    if _is_cmip6_volcanic_file(path):
+        return _load_volcanic_cmip6(path)
+    return _load_monthly_zonal(path, "aod")
 
 
 # ==============================================================================
@@ -812,7 +1007,7 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     # Optional volcanic contribution.
     if config.volcanic_enabled:
         if config.volcanic_path:
-            mid_days_v, lat_v, data_v = _load_monthly_zonal(config.volcanic_path, "aod")
+            mid_days_v, lat_v, data_v = _load_volcanic_aerosol(config.volcanic_path)
             aod_v = _interp_monthly_cyclic(mid_days_v, data_v, day) * config.volcanic_scale
             if lat_grid is not None:
                 volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
