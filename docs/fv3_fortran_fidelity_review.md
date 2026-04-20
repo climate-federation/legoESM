@@ -371,3 +371,26 @@ Also `_d_sw5_corner_divergence` at lines 1014-1015 (the `vort_pad` / `ptc_pad` i
 - `_d_sw1_recompute_ut_vt` adjacent-strip recomputation may have a cube-vertex gap not captured by existing tests.
 
 Next iter: profile the step-26 blowup with more diagnostic output (max|v_d| per step, max|divg| per step) to localise the amplifier.
+
+### Iter-657 — revert iter-656 Fix B (hot-path no-op) per Codex finding
+
+**Codex stop-time finding on iter-656**: "Fix B is a hot-path no-op with no demonstrated behavioral gain."
+
+**Verification**: measured `|divg_d_pad_halo - divg_d_mode=edge|` on random C36 input and confirmed `max diff = 0.0` bit-for-bit.  The upstream halo choice DOES produce different `uf` / `vf` at j=0 and j=n cells (measured ~1e6 absolute diff on random O(10) input), but those cells' contributions to `divg_d` are ZEROED at the face-boundary zeroing step (`divg_d.at[:, 0, :].set(0.0)` etc.).  The zeroing cancels the halo difference entirely.
+
+Codex is right — Fix B was a numerical no-op in `_divergence_corner_duo`, despite appearing to improve Fortran fidelity at the code-surface level.
+
+**Revert**:
+1. Reverted `_divergence_corner_duo` at fv3_sw_core.py:877-889 back to `jnp.pad(mode='edge')` (original pre-iter-656 behaviour).
+2. Reverted iter-644's `_ref_divergence_corner_duo` numpy reference to drop the `cdgrid=` kwarg and go back to unconditional `np.pad(mode='edge')`.
+
+**Iter-655/656 Fix A (scope correction) is KEPT**: the `_d_sw5_corner_divergence` nord=0 branch still uses `pad_halo` inside the `if nord == 0:` block.  That change is also a numerical no-op (same face-boundary-zeroing logic applies) — so it too could be reverted.  But the nord=0 branch is not hot under default config (nord=1), so the wasted work is negligible, and the pad_halo call documents the Fortran-oracle intent for future readers.  Leaving it for now.
+
+**Lesson for future halo changes**: before claiming a halo-source change improves Fortran fidelity, A/B test the end-to-end numerical output on realistic input.  Many FV3 helpers perform face-boundary zeroing or attenuation that cancels upstream halo differences.  Apparent code-level fidelity gains can be numerical no-ops.
+
+**Regression tests**: all 118 tests pass after the revert.  W2 SW matrix metrics unchanged (still L2=2.42e-04, Linf=1.83e-03).  FB chain still blows up at step 26 — the C36 instability is NOT bottlenecked on halo padding in `_divergence_corner_duo`.
+
+**FB-chain stability next-step candidates** (unchanged from iter-656):
+- Divergence damping coefficients (`d4_bg=0.16` may be too low for C36 coupling).
+- Phase ordering between `c_sw` / `p_grad_c` / `d_sw`.
+- `_d_sw1_recompute_ut_vt` adjacent-strip cube-vertex gap.

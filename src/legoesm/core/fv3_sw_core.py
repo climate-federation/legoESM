@@ -875,18 +875,18 @@ def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
     rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
 
     # Pad ua, va for cross-velocity averages at boundaries.
-    # Iter-656 (paired with iter-655): replaced mode='edge' with
-    # pad_halo so cube-edge stencil reads cross-face neighbour values,
-    # matching Fortran mpp_update_domains(DGRID_NE) before d_sw5.
-    # Slices to 1D strips preserve downstream (6, n+2, n) / (6, n, n+2)
-    # shapes so the stencil indexing below stays unchanged.
-    from legoesm.grids.halo import pad_halo as _pad_halo
-    dg = cdgrid.base.duogrid
-    _offs = None if dg is not None else cdgrid.base.halo_interp_offsets
-    ua_full = _pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
-    va_full = _pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
-    ua_pad = ua_full[:, :, 1:-1]   # (6, n+2, n)
-    va_pad = va_full[:, 1:-1, :]   # (6, n, n+2)
+    # Iter-657 (reverting iter-656 Fix B, per Codex "no-op" finding):
+    # the halo-source choice here is a numerical no-op.  uf differs
+    # between `pad_halo(cross-face)` and `mode='edge'(same-face)` at
+    # j=0 and j=n cells (measured ~1e6 absolute diff on random input
+    # at C36), but those cells' contribution to `divg_d` is ZEROED
+    # by the face-boundary zeroing step below (`.at[:, 0, :].set(0)`
+    # etc.).  Measured `|divg_d_pad_halo - divg_d_edge|` at C36 is
+    # 0.0 bit-for-bit.  `mode='edge'` is retained because it is
+    # cheaper and equivalent for THIS helper; the apparent fidelity
+    # claim in iter-656 did not survive an A/B numerical test.
+    ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n)
+    va_pad = jnp.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n, n+2)
 
     # --- uf: u-direction flux at v-face positions (sw_core.F90:2413-2418) ---
     # uf(i,j) = (u(i,j) - 0.25*(va(i,j-1)+va(i,j))*(cos_sg(i,j-1,N)+cos_sg(i,j,S)))
