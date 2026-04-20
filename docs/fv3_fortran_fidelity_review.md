@@ -535,3 +535,36 @@ Spatial distribution of full-step `dv/dt`:
 **Next iter target**: computed `-f × u` Coriolis term on the same IC and compare to PGF.  If `|Coriolis + PGF|` at the edge/interior is `~5e-3` m/s² on cells where PGF alone is `~3e-3`, Coriolis is PARTIALLY cancelling (good sign; expected imbalance from backward coupling).  If the two are both 3e-3 and DON'T cancel, the balance is structurally broken.
 
 **Tests**: no source-code changes in iter-662.  118 regression tests pass.  Diagnostic script added.
+
+### Iter-663 — correct iter-662 PGF scaling error (Codex finding)
+
+**Codex stop-time finding on iter-662**: "Phase-2 PGF values are divided by the wrong timestep, so the iter-662 diagnostic's main conclusions are not trustworthy."
+
+**Root cause**: `_p_grad_c` at `fv3_sw_core.py:1512-1537` returns `dp_x, dp_y` that are ALREADY multiplied by `dt2` (`dp_x = dt2 * rdxc * (p_W - p_E)`).  They represent the PGF *increment* over a half-step, not a tendency.  To recover the tendency one must divide by `dt2`, NOT by `dt`.  Iter-662 divided by `dt`, halving the reported PGF magnitude.
+
+**Fix**: updated `scripts/diag_fb_phase_breakdown.py` to divide by `dt2` and reran.
+
+**Corrected results at dt=600 s**:
+
+| quantity                   | value (corrected)           | iter-662 (buggy)           |
+|:---------------------------|:----------------------------|:---------------------------|
+| `max\|du_pgf\|/dt`         | **5.90e-3 m/s²**           | 2.95e-3 (half of truth)    |
+| `max\|dv_pgf\|/dt`         | **6.63e-3 m/s²**           | 3.43e-3 (half of truth)    |
+| full-step `max\|du\|/dt`   |  2.96e-3 m/s² (unchanged)   |  2.96e-3                   |
+| full-step `max\|dv\|/dt`   |  5.27e-3 m/s² (unchanged)   |  5.23e-3                   |
+
+**Corrected interpretation**:
+- PGF is about **2× the full-step u-tendency** and **1.26× the full-step v-tendency**.
+- Coriolis + other terms partially cancel PGF: ~50% cancellation for u, ~21% for v.
+- For true geostrophic balance, cancellation should be ~100% (net tendency ≈ O(ε)).
+- The **residual ~3 m/s² (u) / ~5 m/s² (v)** after 1 step integrates linearly until nonlinear instability triggers around step 14 (matches iter-658's observed trajectory).
+
+**What iter-662 got wrong**: iter-662 claimed "PGF dominates u-tendency" because it compared `max|dp_x|/dt` to `max|du|/dt` and got identical 2.95e-3 — but this was a spurious match from the wrong scaling.  With correct scaling, PGF is 2× the u-tendency, meaning Coriolis actually provides significant (but incomplete) cancellation.
+
+**Remaining hypotheses** (revised):
+1. Coriolis/metric cancellation at this FB phase-ordering is STRUCTURALLY imperfect (scheme-level fidelity gap).
+2. The IC u_d/v_d + h at D-grid edge-midpoints is not exactly the "balanced state" the discrete spatial scheme expects; closer to ~50-80% balance.
+
+Distinguishing these would require computing `-f × u` at the same grid positions and comparing against the residual.  But either way, the conclusion stands: the FB chain on W2 IC has ~3-5 mm/s² dt-independent residual that drives step-26 instability.
+
+**Tests**: diagnostic-only change; no source code modified.  118 regression tests pass.

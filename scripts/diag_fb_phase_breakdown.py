@@ -74,13 +74,16 @@ print(f'  max|vc_new|  = {float(jnp.abs(vc_new).max()):.3e}')
 
 # --- Phase 2: p_grad_c alone ---
 dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
-print(f'\n--- Phase 2 (p_grad_c, dt/2) ---')
-# dp_x is the PGF increment already multiplied by dt2.
-# So dp_x/dt gives the pgf tendency.
-print(f'  max|dp_x|/dt = {float(jnp.abs(dp_x).max())/dt:.3e} m/s²')
-print(f'  max|dp_y|/dt = {float(jnp.abs(dp_y).max())/dt:.3e} m/s²')
-dp_y_cls = classify(np.asarray(dp_y) / dt, N)
-print(f'  dp_y/dt dist: vertex max={dp_y_cls["vertex_max"]:.3e}  '
+# Iter-663 (Codex correction on iter-662): `_p_grad_c` at
+# fv3_sw_core.py:1512-1537 returns `dp_x = dt2 * rdxc * (p_W - p_E)`
+# — the PGF *increment* over dt/2, NOT the tendency.  The tendency
+# is `dp_x / dt2`, not `dp_x / dt`.  Iter-662 divided by `dt`,
+# reporting half the true PGF magnitude.
+print(f'\n--- Phase 2 (p_grad_c, dt/2 increment → tendency) ---')
+print(f'  PGF tendency max|du_pgf|/dt = {float(jnp.abs(dp_x).max())/dt2:.3e} m/s²')
+print(f'  PGF tendency max|dv_pgf|/dt = {float(jnp.abs(dp_y).max())/dt2:.3e} m/s²')
+dp_y_cls = classify(np.asarray(dp_y) / dt2, N)
+print(f'  dv_pgf/dt dist: vertex max={dp_y_cls["vertex_max"]:.3e}  '
       f'edge max={dp_y_cls["edge_max"]:.3e}  interior max={dp_y_cls["interior_max"]:.3e}')
 
 # --- Phase 3: d_sw_native alone ---
