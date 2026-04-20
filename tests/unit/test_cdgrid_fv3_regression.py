@@ -7104,5 +7104,240 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
                  "which means the sequence dependency is broken."))
 
 
+class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
+    """Iter-644: full Fortran-formula lock for `_divergence_corner_duo`
+    in ``src/legoesm/core/fv3_sw_core.py`` (lines 827-922) against
+    ``sw_core.F90:2345-2447``.
+
+    The iter-554 `test_divergence_corner_duo_face_boundary_zeroing`
+    locks only the 4-boundary zeroing + 0.25× attenuation post-
+    processing.  Pre-iter-644 there was NO direct numerical lock on
+    the interior formula — uf, vf, the corner-divergence stencil, or
+    the cross-velocity correction coefficients were only
+    integration-covered.
+
+    Fortran reference (sw_core.F90:2413-2442):
+
+        uf(i,j) = (u(i,j) - 0.25*(va(i,j-1) + va(i,j)) *
+                   (cos_sg(i, j-1, N) + cos_sg(i, j, S))
+                  ) * dyc(i, j) * 0.5 * (sin_sg(i, j-1, N) + sin_sg(i, j, S))
+
+        vf(i,j) = (v(i,j) - 0.25*(ua(i-1,j) + ua(i,j)) *
+                   (cos_sg(i-1, j, E) + cos_sg(i, j, W))
+                  ) * dxc(i, j) * 0.5 * (sin_sg(i-1, j, E) + sin_sg(i, j, W))
+
+        divg_d(i,j) = (vf(i,j-1) - vf(i,j) + uf(i-1,j) - uf(i,j)) * rarea_c(i,j)
+        divg_d(0,:) = divg_d(n,:) = divg_d(:,0) = divg_d(:,n) = 0
+        divg_d(1,:)   *= 0.25
+        divg_d(n-1,:) *= 0.25
+        divg_d(:,1)   *= 0.25
+        divg_d(:,n-1) *= 0.25
+
+    This helper is called by `_d_sw5_corner_divergence` for the
+    duogrid nord>0 branch and drives del-n divergence damping — a
+    regression in the cross-velocity correction (wrong cos_sg edge
+    index), the 0.25 coefficient, or the stencil ordering silently
+    distorts damping strength at cube edges, which is exactly the
+    region most prone to v-wind artefacts.
+    """
+
+    @staticmethod
+    def _ref_divergence_corner_duo(u_d, v_d, ua, va, cos_sg, sin_sg,
+                                     dxc, dyc, rarea_c, n):
+        """Numpy line-by-line reproduction of `_divergence_corner_duo`."""
+        import numpy as np
+        # Unpack sin/cos_sg edges (indices 0=W, 1=S, 2=E, 3=N)
+        cos_W = cos_sg[..., 0]; cos_S = cos_sg[..., 1]
+        cos_E = cos_sg[..., 2]; cos_N = cos_sg[..., 3]
+        sin_W = sin_sg[..., 0]; sin_S = sin_sg[..., 1]
+        sin_E = sin_sg[..., 2]; sin_N = sin_sg[..., 3]
+
+        # Edge-pad ua, va along the cross axes for the 2-cell averages.
+        ua_pad = np.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        va_pad = np.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')
+
+        # Edge-pad sin_sg/cos_sg the same way.
+        cos_N_pad = np.pad(cos_N, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        cos_S_pad = np.pad(cos_S, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        sin_N_pad = np.pad(sin_N, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        sin_S_pad = np.pad(sin_S, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        cos_E_pad = np.pad(cos_E, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        cos_W_pad = np.pad(cos_W, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        sin_E_pad = np.pad(sin_E, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        sin_W_pad = np.pad(sin_W, [(0, 0), (1, 1), (0, 0)], mode='edge')
+
+        # uf at (i, j) — requires va/cos_sg/sin_sg at (i, j-1) and (i, j).
+        va_below = va_pad[:, :, :-1]; va_above = va_pad[:, :, 1:]
+        cos_sum_u = cos_N_pad[:, :, :-1] + cos_S_pad[:, :, 1:]
+        sin_sum_u = sin_N_pad[:, :, :-1] + sin_S_pad[:, :, 1:]
+        uf = ((u_d - 0.25 * (va_below + va_above) * cos_sum_u)
+              * dyc * 0.5 * sin_sum_u)
+
+        # vf at (i, j) — requires ua/cos_sg/sin_sg at (i-1, j) and (i, j).
+        ua_left = ua_pad[:, :-1, :]; ua_right = ua_pad[:, 1:, :]
+        cos_sum_v = cos_E_pad[:, :-1, :] + cos_W_pad[:, 1:, :]
+        sin_sum_v = sin_E_pad[:, :-1, :] + sin_W_pad[:, 1:, :]
+        vf = ((v_d - 0.25 * (ua_left + ua_right) * cos_sum_v)
+              * dxc * 0.5 * sin_sum_v)
+
+        # Corner divergence stencil
+        vf_pad = np.pad(vf, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        uf_pad = np.pad(uf, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        divg_d = (vf_pad[:, :, :-1] - vf_pad[:, :, 1:]
+                   + uf_pad[:, :-1, :] - uf_pad[:, 1:, :]) * rarea_c
+
+        # Face-boundary zeroing
+        divg_d = divg_d.copy()
+        divg_d[:, 0, :] = 0.0;  divg_d[:, n, :] = 0.0
+        divg_d[:, :, 0] = 0.0;  divg_d[:, :, n] = 0.0
+
+        # 0.25× attenuation at face-adjacent cells
+        divg_d[:, 1, :]     *= 0.25
+        divg_d[:, n - 1, :] *= 0.25
+        divg_d[:, :, 1]     *= 0.25
+        divg_d[:, :, n - 1] *= 0.25
+
+        return divg_d
+
+    def test_divergence_corner_duo_matches_fortran(self):
+        """Random inputs + duogrid CDGrid → bit-for-bit match against
+        the full numpy reproduction of sw_core.F90:2413-2442."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _divergence_corner_duo
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        rng = np.random.default_rng(644)
+        u_d = rng.standard_normal((6, n, n + 1)) * 5.0
+        v_d = rng.standard_normal((6, n + 1, n)) * 5.0
+        ua = rng.standard_normal((6, n, n)) * 5.0
+        va = rng.standard_normal((6, n, n)) * 5.0
+
+        divg_d = _divergence_corner_duo(
+            jnp.asarray(u_d), jnp.asarray(v_d),
+            jnp.asarray(ua), jnp.asarray(va), cdgrid)
+
+        cos_sg = np.asarray(cdgrid.cos_sg)
+        sin_sg = np.asarray(cdgrid.sin_sg)
+        dxc = np.asarray(cdgrid.dxc)
+        dyc = np.asarray(cdgrid.dyc)
+        rarea_c = np.asarray(cdgrid.rarea_c)
+
+        divg_d_ref = self._ref_divergence_corner_duo(
+            u_d, v_d, ua, va, cos_sg, sin_sg, dxc, dyc, rarea_c, n)
+
+        np.testing.assert_allclose(
+            np.asarray(divg_d), divg_d_ref, atol=1e-12,
+            err_msg=("_divergence_corner_duo diverges from sw_core.F90:"
+                     "2345-2447 reference.  Check uf/vf formulas "
+                     "(cross-velocity correction with 0.25 factor, "
+                     "cos_sg edge indices N=3/S=1 for uf and E=2/W=0 "
+                     "for vf), the corner stencil sign pattern "
+                     "(vf[i,j-1] - vf[i,j] + uf[i-1,j] - uf[i,j]), "
+                     "face-boundary zeroing, and 0.25 attenuation."))
+
+    def test_divergence_corner_duo_mutation_suite_iter644(self):
+        """Mutation suite — verify the lock detects edge-index errors
+        in the cross-velocity correction and the 0.25 attenuation
+        coefficient.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _divergence_corner_duo
+
+        n = 6
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        rng = np.random.default_rng(645)
+        u_d = rng.standard_normal((6, n, n + 1)) * 5.0
+        v_d = rng.standard_normal((6, n + 1, n)) * 5.0
+        ua = rng.standard_normal((6, n, n)) * 5.0
+        va = rng.standard_normal((6, n, n)) * 5.0
+
+        divg_d = np.asarray(_divergence_corner_duo(
+            jnp.asarray(u_d), jnp.asarray(v_d),
+            jnp.asarray(ua), jnp.asarray(va), cdgrid))
+
+        cos_sg = np.asarray(cdgrid.cos_sg)
+        sin_sg = np.asarray(cdgrid.sin_sg)
+        dxc = np.asarray(cdgrid.dxc)
+        dyc = np.asarray(cdgrid.dyc)
+        rarea_c = np.asarray(cdgrid.rarea_c)
+
+        # Mutation M1: swap cos_N ↔ cos_S in uf (wrong edge index).
+        cos_sg_m1 = cos_sg.copy()
+        cos_sg_m1[..., 1], cos_sg_m1[..., 3] = (cos_sg[..., 3].copy(),
+                                                 cos_sg[..., 1].copy())
+        divg_m1 = self._ref_divergence_corner_duo(
+            u_d, v_d, ua, va, cos_sg_m1, sin_sg, dxc, dyc, rarea_c, n)
+        # cos_N and cos_S differ by only ~1e-2 at C6 interior
+        # (sphere tangent is nearly axis-aligned), so the propagated
+        # signal after uf×dyc×sin is ~1e-8.  Threshold 1e-10 confirms
+        # strictly nonzero while staying above float64 round-off.
+        self.assertGreater(
+            np.max(np.abs(divg_d - divg_m1)), 1e-10,
+            msg=("M1: swapping cos_N ↔ cos_S edge indices in uf not "
+                 "detected."))
+
+        # Mutation M2: change 0.25 attenuation to 0.5.  Start from
+        # the correct reference (already attenuated by 0.25) and
+        # multiply the face-adjacent rows/cols by 2.0 so the effective
+        # attenuation becomes 0.5 instead of 0.25.  Corner cells (1,1),
+        # (1,n-1), (n-1,1), (n-1,n-1) get 2.0×2.0 = 4.0× scaling,
+        # consistent with the mutation `0.25 → 0.5` applied to both
+        # row and column masks (0.5*0.5/0.25*0.25 = 4).
+        divg_m2 = self._ref_divergence_corner_duo(
+            u_d, v_d, ua, va, cos_sg, sin_sg, dxc, dyc, rarea_c, n)
+        divg_m2[:, 1, :]     *= 2.0
+        divg_m2[:, n - 1, :] *= 2.0
+        divg_m2[:, :, 1]     *= 2.0
+        divg_m2[:, :, n - 1] *= 2.0
+        self.assertGreater(
+            np.max(np.abs(divg_d - divg_m2)), 1e-6,
+            msg=("M2: changing 0.25 attenuation coefficient to 0.5 "
+                 "at face-adjacent cells not detected."))
+
+        # Mutation M3: sign flip in stencil (vf[i,j] - vf[i,j-1]
+        # instead of vf[i,j-1] - vf[i,j]).  Equivalent to negating
+        # the vf contribution entirely in the numerator.
+        ua_pad = np.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        va_pad = np.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        cos_N_pad = np.pad(cos_sg[..., 3], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        cos_S_pad = np.pad(cos_sg[..., 1], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        sin_N_pad = np.pad(sin_sg[..., 3], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        sin_S_pad = np.pad(sin_sg[..., 1], [(0, 0), (0, 0), (1, 1)], mode='edge')
+        cos_E_pad = np.pad(cos_sg[..., 2], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        cos_W_pad = np.pad(cos_sg[..., 0], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        sin_E_pad = np.pad(sin_sg[..., 2], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        sin_W_pad = np.pad(sin_sg[..., 0], [(0, 0), (1, 1), (0, 0)], mode='edge')
+        uf = ((u_d - 0.25 * (va_pad[:, :, :-1] + va_pad[:, :, 1:])
+                * (cos_N_pad[:, :, :-1] + cos_S_pad[:, :, 1:]))
+              * dyc * 0.5 * (sin_N_pad[:, :, :-1] + sin_S_pad[:, :, 1:]))
+        vf = ((v_d - 0.25 * (ua_pad[:, :-1, :] + ua_pad[:, 1:, :])
+                * (cos_E_pad[:, :-1, :] + cos_W_pad[:, 1:, :]))
+              * dxc * 0.5 * (sin_E_pad[:, :-1, :] + sin_W_pad[:, 1:, :]))
+        vf_pad = np.pad(vf, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        uf_pad = np.pad(uf, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        # M3 flips the sign on the vf contribution
+        divg_m3 = (- vf_pad[:, :, :-1] + vf_pad[:, :, 1:]
+                    + uf_pad[:, :-1, :] - uf_pad[:, 1:, :]) * rarea_c
+        divg_m3[:, 0, :] = 0.0;  divg_m3[:, n, :] = 0.0
+        divg_m3[:, :, 0] = 0.0;  divg_m3[:, :, n] = 0.0
+        divg_m3[:, 1, :]     *= 0.25
+        divg_m3[:, n - 1, :] *= 0.25
+        divg_m3[:, :, 1]     *= 0.25
+        divg_m3[:, :, n - 1] *= 0.25
+        self.assertGreater(
+            np.max(np.abs(divg_d - divg_m3)), 1e-6,
+            msg=("M3: sign flip on vf contribution in corner stencil "
+                 "not detected."))
+
+
 if __name__ == "__main__":
     unittest.main()

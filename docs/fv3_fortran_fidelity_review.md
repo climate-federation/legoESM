@@ -1385,3 +1385,19 @@ All 4 tests pass.  These are Python behavioral locks guarding against Python-sid
 
 **Action**: renamed `TestFillCornersFortranFormula` to `TestFillCornersPythonBehavioralLock`, updated its docstring to quote the source comment at `halo.py:1188-1202` documenting that Fortran's `copy_corners` is directional while the Python helper is direction-invariant, and corrected the cumulative counter in this review doc (20 Fortran-formula locks + 2 Python-only behavioral locks, NOT 22 Fortran-formula locks).  No change to the test logic — the tests themselves are valid Python behavioral locks; only the classification was wrong.
 
+### Iter-644 — full Fortran-formula lock for `_divergence_corner_duo`
+
+**Motivation**: `_divergence_corner_duo` in `src/legoesm/core/fv3_sw_core.py` (lines 827-922) computes the corner divergence for the duogrid nord>0 divergence-damping branch and matches `sw_core.F90:2345-2447`.  Prior to iter-644 only the face-boundary zeroing + 0.25 attenuation post-processing was locked (`test_divergence_corner_duo_face_boundary_zeroing`, iter-554).  The interior formula — uf/vf with cross-velocity correction, corner-divergence stencil, edge-index selection — had no direct numerical lock.
+
+Drift in this helper silently distorts divergence damping at cube edges, which is exactly the region most prone to v-wind artefacts on Williamson 2.
+
+**Tests added** (`TestDivergenceCornerDuoFortranFormula`, 2 tests):
+- `_ref_divergence_corner_duo`: numpy line-by-line reproduction covering uf (with cross-velocity `-0.25*(va_below + va_above)*(cos_N + cos_S)` correction), vf (with `(ua_left + ua_right)*(cos_E + cos_W)` correction), the corner stencil `(vf[i,j-1] - vf[i,j] + uf[i-1,j] - uf[i,j]) * rarea_c`, the 4-face-boundary zeroing, and the 0.25× attenuation at face-adjacent rows/cols.
+- `test_divergence_corner_duo_matches_fortran`: real duogrid CDGrid at n=8, bit-for-bit against the numpy reference at `atol=1e-12`.
+- `test_divergence_corner_duo_mutation_suite_iter644`: 3 mutations:
+  - M1: `cos_N ↔ cos_S` swap in uf (wrong edge index).  Signal ~2e-8 at C6 — threshold set to 1e-10 because cos_N and cos_S differ by only ~1e-2 at near-axis-aligned cube interior cells.
+  - M2: 0.25 attenuation coefficient → 0.5.  Detected at `>1e-6`.
+  - M3: sign flip on the vf contribution in the corner stencil.  Detected at `>1e-6`.
+
+All 2 tests pass.  Cumulative Fortran-formula lock inventory: **21 helpers** (iter-641's 20 + `_divergence_corner_duo`).
+
