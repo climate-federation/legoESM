@@ -1289,19 +1289,32 @@ class TestFluxSyncCallSitesWired:
         UNSYNCED values and the sync result is overwritten or
         discarded.
 
-        For each REQUIRED_SITE, scan the function body for:
-        1. The lineno of the `synchronize_cgrid_fluxes` call.
-        2. The lineno of any Subscript-based difference expression
-           that consumes `fx` or similar names in a divergence stencil
-           shape (`fx[1:] - fx[:-1]`, `fy[1:] - fy[:-1]`, or the
-           patterns in `_c_sw`: `fx[:, :-1, :] - fx[:, 1:, :]`).
-        3. Assert sync lineno < consumption lineno.
+        **Iter-602 Codex follow-up**: the iter-601 version used a
+        narrow `BinOp(Sub) with Subscript on both sides` pattern,
+        which missed the `fy` divergence term in `_c_sw` because
+        Python parses `(fx[a] - fx[b] + fy[c] - fy[d])` as
+        `((fx[a] - fx[b]) + fy[c]) - fy[d]` — the outermost BinOp(Sub)
+        has a BinOp(Add) on the left, not a Subscript.  The test
+        saw only the INNER `fx - fx` BinOp, not the `fy - fy`.
 
-        For `fv_tp_2d` the consumption happens in the CALLER (the
-        function returns synced fluxes), so the sync position only
-        needs to be inside the function body.  For
-        `cgrid_mass_flux_divergence` and `_c_sw`, the consumption is
-        in the same function body and the ordering matters.
+        This version widens the search: ANY Subscript of a flux-like
+        Name counts as a consumption lineno.  All production
+        consumptions of synced fluxes use array slicing
+        (`fx[:, :-1, :]`, `flux_y[:, :, 1:]`), so any Subscript of
+        a flux-like name before the sync is a bug.
+
+        For each REQUIRED_SITE, the test:
+        1. Locates all `synchronize_cgrid_fluxes` call linenos and
+           extracts the LHS tuple names (e.g., `(fx, fy)` or
+           `(flux_x, flux_y)`) from the Assign that contains the
+           call — these are the names production consumes.
+        2. Finds all Subscript nodes whose base Name matches one
+           of those LHS names.
+        3. Asserts the earliest Subscript lineno is strictly greater
+           than the earliest sync call lineno.
+
+        `fv_tp_2d` is excluded from this check because consumption
+        happens in the CALLER — the function returns synced fluxes.
         """
         import ast
         root = self._repo_root()
@@ -1322,60 +1335,71 @@ class TestFluxSyncCallSitesWired:
             assert func is not None, (
                 f"{rel}: module-level function `{func_name}` "
                 f"not found.")
-            sync_calls = list(
-                self._iter_calls_in_function(
-                    func, "synchronize_cgrid_fluxes"))
+
+            # Find sync calls AND extract the LHS names the call
+            # rebinds.  Pattern: `Assign(targets=[Tuple(Name, ...)],
+            # value=Call(synchronize_cgrid_fluxes))`.
+            sync_calls = []
+            rebound_names: set[str] = set()
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Assign):
+                    continue
+                value = node.value
+                if not (isinstance(value, ast.Call)
+                        and isinstance(value.func, ast.Name)
+                        and value.func.id == "synchronize_cgrid_fluxes"):
+                    continue
+                sync_calls.append(value)
+                # Extract LHS tuple names
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Tuple):
+                        for elt in tgt.elts:
+                            if isinstance(elt, ast.Name):
+                                rebound_names.add(elt.id)
+
             assert sync_calls, (
                 f"{rel}:{func_name}: no `synchronize_cgrid_fluxes` "
-                f"call found (covered by earlier test; re-check).")
-            sync_linenos = [c.lineno for c in sync_calls]
-            first_sync = min(sync_linenos)
+                f"call found inside an Assign.  The call must be "
+                f"used as `(fx, fy) = synchronize_cgrid_fluxes(...)` "
+                f"so the rebinded names can be tracked for "
+                f"consumption-ordering.")
+            assert rebound_names, (
+                f"{rel}:{func_name}: `synchronize_cgrid_fluxes` "
+                f"call exists but no LHS tuple Names were found.  "
+                f"Call must rebind via `(a, b) = sync(...)`.")
 
-            # Find the earliest divergence-stencil consumption.
-            # Pattern: a BinOp(Sub) whose operands are Subscript
-            # nodes on the same Name ending in `_x`/`_y`/`flux_x`/
-            # `flux_y`/`fx`/`fy` (name doesn't matter for the shape,
-            # but it MUST read indexes like `[1:]` / `[:-1]` on the
-            # SAME array).
+            first_sync = min(c.lineno for c in sync_calls)
+
+            # Find earliest Subscript of any rebinded name.
             consumption_linenos = []
+            consumption_names = []
             for node in ast.walk(func):
-                if (isinstance(node, ast.BinOp)
-                    and isinstance(node.op, ast.Sub)
-                    and isinstance(node.left, ast.Subscript)
-                    and isinstance(node.right, ast.Subscript)):
-                    # Both sides must subscript the same Name (array).
-                    def _name_of(sub):
-                        v = sub.value
-                        if isinstance(v, ast.Name):
-                            return v.id
-                        return None
-                    ln = _name_of(node.left)
-                    rn = _name_of(node.right)
-                    if ln is not None and ln == rn:
-                        # Only count if the name looks like a flux:
-                        # fx / fy / flux_x / flux_y / fx_something /
-                        # fy_something.
-                        if (ln in ("fx", "fy")
-                            or ln.startswith("flux_")
-                            or ln.startswith("fx_")
-                            or ln.startswith("fy_")):
-                            consumption_linenos.append(node.lineno)
+                if (isinstance(node, ast.Subscript)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id in rebound_names):
+                    consumption_linenos.append(node.lineno)
+                    consumption_names.append(node.value.id)
 
             assert consumption_linenos, (
-                f"{rel}:{func_name}: no flux-difference stencil "
-                f"(`fx[...] - fx[...]` or similar) found in function "
-                f"body.  If the divergence now lives in a helper, "
-                f"update this test to probe the helper.")
-            first_consumption = min(consumption_linenos)
+                f"{rel}:{func_name}: no Subscript of any sync-"
+                f"rebinded name ({sorted(rebound_names)}) found in "
+                f"the function body.  The sync returns values that "
+                f"are never consumed — unreachable state.")
 
-            assert first_sync < first_consumption, (
-                f"{rel}:{func_name}: `synchronize_cgrid_fluxes` call "
-                f"at line {first_sync} happens AT/AFTER the earliest "
-                f"flux-difference consumption at line "
-                f"{first_consumption}.  The sync must precede the "
-                f"divergence stencil; otherwise it is a no-op for "
-                f"the current timestep and Constraint #1 is "
-                f"violated silently.")
+            # The LATEST consumption before sync (if any) identifies
+            # the bug.  We check: EVERY consumption lineno must be
+            # >= sync call lineno.
+            pre_sync = [(n, ln) for n, ln in
+                         zip(consumption_names, consumption_linenos)
+                         if ln < first_sync]
+            assert not pre_sync, (
+                f"{rel}:{func_name}: `synchronize_cgrid_fluxes` "
+                f"call at line {first_sync} does NOT precede these "
+                f"Subscript consumptions of rebinded names: "
+                f"{sorted(set(pre_sync))}.  The sync must precede "
+                f"ALL consumptions of ALL rebinded flux names; "
+                f"otherwise Constraint #1 is silently violated for "
+                f"the ones consumed pre-sync.")
 
     def test_every_flux_sync_site_is_duogrid_gated(self):
         """Inside the host function the call must be inside an `if`

@@ -523,3 +523,23 @@ Production restored.  5 h=3 vector tests pass.  Only non-constant *interpolation
 
 All three must pass simultaneously for Constraint #1 to be structurally honored.
 
+### Iter-602 (2026-04-20): widen ordering test to catch fy consumption (Codex)
+
+**Codex stop-time review on iter-601 (commit 4951c49)**: the iter-601 ordering test used a narrow pattern — `BinOp(Sub)` with `Subscript` on BOTH sides on the same Name — which missed `_c_sw`'s `fy` divergence term.  The reason is Python parsing: `(fx[a] - fx[b] + fy[c] - fy[d])` parses as `((fx[a] - fx[b]) + fy[c]) - fy[d]`, so the OUTERMOST `BinOp(Sub)` has a `BinOp(Add)` on the left (not a Subscript).  The iter-601 test only detected the INNER `fx - fx` pattern and was blind to `fy - fy`.
+
+**Fix**: widened detection to ANY `Subscript` of a rebinded flux name.  The test now:
+1. Locates every `Assign` whose value is `synchronize_cgrid_fluxes(...)`.
+2. Extracts the LHS tuple names (e.g., `(fx, fy)` or `(flux_x, flux_y)`) — these are the names the sync rebinds and the only names subsequent consumptions should use.
+3. Finds all Subscript nodes whose base Name matches one of those LHS names.
+4. Asserts every Subscript lineno ≥ sync call lineno.
+
+This catches ANY pre-sync read of a rebinded flux array — including subscripts that are arguments to other operations, function-call arguments, or inside compound expressions.  A flux name is only rebinded by the sync, so any Subscript of that name has a meaningful consumption semantic.
+
+**Sanity-verified**: inserting `_peek_fy = fy[:, :, 0]` immediately BEFORE the sync in `_c_sw` fires the test with message `"does NOT precede these Subscript consumptions of rebinded names: [('fy', 1249)]"`.  This is the exact regression class Codex flagged — the iter-601 test would have missed it.
+
+**Constraint #1 ordering coverage** now detects both:
+- Structural pattern violations (like the `fy` BinOp(Add) parse bug above).
+- Direct pre-sync subscript reads of any rebinded flux name.
+
+108 `test_duogrid` tests pass.  Production restored.
+
