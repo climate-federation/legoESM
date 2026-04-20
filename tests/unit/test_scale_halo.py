@@ -1193,6 +1193,113 @@ class TestPadHaloH3Guardrails:
                 f"exchange may have silently failed for the "
                 f"outermost ring.")
 
+    def test_pad_halo_vector_halo3_outer_ring_exact_constant_geographic_wind(self):
+        """Iter-597 (Codex stop-time review on iter-596): the iter-596
+        outer-ring check only verified non-triviality (finite, |max| >
+        0.1), not CORRECTNESS.  A bug that produced `0.5 * expected`
+        everywhere in the outer ring would pass iter-596's check but
+        silently halve the halo amplitude.
+
+        This test nails the outer ring to an EXACT reference via a
+        constant-geographic-wind round-trip:
+
+          Input: u_grid = cos_angle, v_grid = -sin_angle.
+          This corresponds to u_east = 1, v_north = 0 everywhere
+          on the sphere (pure zonal flow at constant speed 1).
+
+          After `pad_halo_vector(halo=3)`:
+            - u_east_padded should be 1 everywhere (halo fills from
+              neighbour face's u_east = 1).
+            - v_north_padded should be 0 everywhere.
+            - After inverse rotation via cos_angle_padded_h3 /
+              sin_angle_padded_h3, the grid-aligned outputs are:
+                u_padded[f, i, j] = cos_angle_padded_h3[f, i, j]
+                v_padded[f, i, j] = -sin_angle_padded_h3[f, i, j]
+              at EVERY cell including the outermost halo ring.
+
+        Tolerance 1e-6: `halo_interp_offsets_h3` is stored as float32
+        in the grid (default storage dtype), so the offset arithmetic
+        inside `pad_halo(halo=3)` introduces O(float32 eps) ≈ 1.2e-7
+        error even when the input data is float64.  1e-6 is ~8x above
+        this floor — catches O(1) bugs (wrong rotation, wrong halo
+        cells, missing neighbour data) while tolerating the storage-
+        precision noise.
+
+        This makes the outermost halo ring a PREDICTED value at
+        every cell, closing the iter-596 correctness gap.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo_vector
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = grid.cos_angle_padded_h3.astype(jnp.float64)
+        sap3 = grid.sin_angle_padded_h3.astype(jnp.float64)
+
+        # Constant geographic wind u_east=1, v_north=0:
+        # grid-aligned = inverse rotation of (1, 0)
+        # u_grid = cos(angle) * u_east + sin(angle) * v_north = cos
+        # v_grid = -sin(angle) * u_east + cos(angle) * v_north = -sin
+        u_grid = ca
+        v_grid = -sa
+
+        up, vp = pad_halo_vector(
+            u_grid, v_grid,
+            ca, sa, cap3, sap3,
+            interp_offsets=grid.halo_interp_offsets_h3,
+            halo=3,
+        )
+
+        # Predicted output at every padded cell:
+        #   u_padded = cos_angle_padded_h3  (since u_east=1)
+        #   v_padded = -sin_angle_padded_h3 (since v_north=0)
+        u_expected = cap3
+        v_expected = -sap3
+
+        # Check #1: full padded output matches prediction.
+        u_diff = float(np.max(np.abs(
+            np.asarray(up) - np.asarray(u_expected))))
+        v_diff = float(np.max(np.abs(
+            np.asarray(vp) - np.asarray(v_expected))))
+        assert u_diff < 1e-6, (
+            f"halo=3 vector pad for constant u_east=1, v_north=0 "
+            f"failed: max|u_out - cos_angle_padded_h3| = {u_diff:.3e}. "
+            f"Expected exact rotation round-trip at every padded "
+            f"cell including the outermost halo ring.  If this "
+            f"fires, the halo=3 vector path either has a rotation "
+            f"sign error, the wrong padded angle, or the scalar "
+            f"pad_halo(halo=3) does not propagate constants at the "
+            f"outer ring.")
+        assert v_diff < 1e-6, (
+            f"halo=3 vector pad for constant u_east=1, v_north=0 "
+            f"failed: max|v_out - (-sin_angle_padded_h3)| = "
+            f"{v_diff:.3e}.")
+
+        # Check #2: lock the diff specifically on the OUTERMOST halo
+        # ring (which iter-596 was missing correctness for).  Isolate
+        # the 4 outer strips.
+        for label, slicer in (
+                ("W (i=0)",  (slice(None), 0, slice(None))),
+                ("E (i=-1)", (slice(None), -1, slice(None))),
+                ("S (j=0)",  (slice(None), slice(None), 0)),
+                ("N (j=-1)", (slice(None), slice(None), -1))):
+            u_outer_diff = float(np.max(np.abs(
+                np.asarray(up[slicer])
+                - np.asarray(u_expected[slicer]))))
+            v_outer_diff = float(np.max(np.abs(
+                np.asarray(vp[slicer])
+                - np.asarray(v_expected[slicer]))))
+            assert u_outer_diff < 1e-6, (
+                f"halo=3 outermost {label} u deviates from "
+                f"cos_angle_padded_h3 by {u_outer_diff:.3e} — "
+                f"outermost-ring correctness regression.")
+            assert v_outer_diff < 1e-6, (
+                f"halo=3 outermost {label} v deviates from "
+                f"-sin_angle_padded_h3 by {v_outer_diff:.3e} — "
+                f"outermost-ring correctness regression.")
+
     def test_pad_halo_vector_halo3_rejects_mpi_backend(self):
         """Iter-595: halo=3 is still unsupported on the MPI backend
         because `pad_halo_mpi_4d(halo=3)` is not yet implemented.  The

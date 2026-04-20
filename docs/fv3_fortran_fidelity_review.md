@@ -5277,3 +5277,23 @@ Production halo.py restored after each sanity-check.  All 54 halo tests pass.
 
 **Note**: check-2 has a subtle implicit invariant — the halo=2 reference path must itself be correct.  `TestPadHaloH3Dispatch` elsewhere in the file validates the halo=2 pad (and the iter-103 BGRID_NE sync + iter-107 duogrid constant-field checks extend that coverage).  The h=3 → h=2 anchor chain makes iter-596 a tight composition lock rather than an independent check.
 
+### Iter-597 (2026-04-20): exact correctness check on halo=3 outer ring
+
+**Codex stop-time review on iter-596 (commit 810d089)**: the iter-596 outer-ring check only verified NON-TRIVIALITY (finite, |max| > 0.1), not CORRECTNESS.  A bug that returned `0.5 * expected` everywhere in the outermost ring would produce magnitudes still > 0.1 and pass iter-596 silently.
+
+**Exact-correctness lock added**: `test_pad_halo_vector_halo3_outer_ring_exact_constant_geographic_wind` in `tests/unit/test_scale_halo.py::TestPadHaloH3Guardrails`.
+
+**Key insight**: for a CONSTANT geographic wind (u_east = 1, v_north = 0 everywhere on the sphere), the grid-aligned input is `u_grid = cos_angle`, `v_grid = -sin_angle`.  After `pad_halo_vector(halo=3)`, the padded output must equal:
+- `u_padded[f, i, j] = cos_angle_padded_h3[f, i, j]`
+- `v_padded[f, i, j] = -sin_angle_padded_h3[f, i, j]`
+
+at EVERY padded cell including the outermost halo ring.  This is an EXACT analytical prediction, not a round-trip-to-reference, so it validates the absolute correctness of the outer ring.
+
+**Two assertions**:
+1. Full-array `max|u_out - cos_angle_padded_h3| < 1e-6` (and same for v).  Tolerance 1e-6 reflects the float32 storage precision of `halo_interp_offsets_h3` — 1e-6 is ~8x above the 1.2e-7 precision floor.
+2. Per-side outermost-ring isolation check (W/E/S/N × u/v): same 1e-6 bound, isolates which side a regression is in if it fires.
+
+**Sanity-verified**: halving the outermost ring (`u_padded = u_padded.at[:, 0, :].multiply(0.5)` inside `pad_halo_vector`) fires the test with diff 0.498 vs the 1e-6 ceiling — 5 × 10⁵ × the tolerance.  This kind of amplitude bug would have passed iter-596's non-triviality check (the halved values are still > 0.1) and this iter-597 lock catches it.
+
+Production restored.  3 h=3 tests pass (interior + h2-anchor + exact-correctness).  The outermost halo=3 vector ring is now locked to an EXACT analytical reference, closing the correctness gap Codex flagged.
+
