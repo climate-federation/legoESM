@@ -394,3 +394,28 @@ Codex is right — Fix B was a numerical no-op in `_divergence_corner_duo`, desp
 - Divergence damping coefficients (`d4_bg=0.16` may be too low for C36 coupling).
 - Phase ordering between `c_sw` / `p_grad_c` / `d_sw`.
 - `_d_sw1_recompute_ut_vt` adjacent-strip cube-vertex gap.
+
+### Iter-658 — FB-chain blowup diagnostic: localize to cube vertices
+
+**Motivation**: iter-657 reverted halo changes after A/B showed they were no-ops.  To make further progress on the FB-chain C36 instability, need to pinpoint WHERE the error grows rather than guess.  Added a per-step diagnostic that traces `max|h|`, `max|u_d|`, `max|v_d|`, and `max|v_err|` with the `(face, i, j)` location of the max error.
+
+**Script added**: `scripts/diag_fb_blowup_trace.py`.  Runs Williamson 2 at C36 for 30 steps through `FV3FBShallowWaterModel` and logs per-step diagnostics.
+
+**Finding**: the blowup is concentrated at **cube vertices** (3-face meeting points), not face edges.  Observed trajectory:
+
+| step | v_err (m/s) | location       | regime |
+|-----:|------------:|:---------------|:-------|
+|    1 |       3.14  | face 0, i=36, j=0  (SE cube vertex) | linear bias |
+|    4 |      12.4   | face 3, i=0, j=0  (cube vertex)     | linear growth |
+|   14 |      67     | face 1, i=0, j=0  (cube vertex)     | transition to exp |
+|   24 |     898     | face 1, i=1, j=3                    | exponential  |
+|   26 |     1e14    | face 0, i=0, j=0                    | catastrophic |
+|   27 |     NaN     |                                     | crashed |
+
+**Diagnosis**: the linear-growth phase (steps 1-14) indicates a **bias error** being integrated step-by-step — most likely an incorrect value at cube vertices fed into the momentum equation each step.  The bias originates at cube vertices (3-face meeting points), which is documented in review doc **Priority 3** (`_d2a2c_vect` non-duogrid cube-vertex gap — Python's `_fill_corners_h2` represents 2 halo cells per corner-axis vs Fortran's 3).
+
+Under C36+duogrid the "Priority 3 GAP" is supposed to be RESOLVED via the Duo-Grid kinked-to-extended Lagrange remap — but `_d_sw1_recompute_ut_vt` still uses `jnp.pad(mode='edge')` at its line 75-83 for the vc/uc 4-cell average.  The `mode='edge'` at cube vertices gives the SAME-FACE boundary value, while Fortran/duogrid would give the neighbor-face cross-axis value.  At cube vertices (face boundaries of BOTH axes meeting), the same-face extension can be drastically wrong.
+
+**Next iter target**: A/B test whether replacing the `jnp.pad(vc, [(0,0),(1,1),(0,0)], mode='edge')` at `_d_sw1_recompute_ut_vt:75` with a proper cross-face halo (halo.pad_halo_vector or an edge-midpoint halo helper) reduces the step-1 `v_err` from 3.14 to a value more consistent with machine noise for a well-balanced IC.
+
+**Tests**: all 118 regression tests still pass.  The diagnostic script is non-invasive (script only, no source changes).
