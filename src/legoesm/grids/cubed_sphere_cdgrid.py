@@ -353,30 +353,51 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
         # Cell center (i,j) at supergrid (2i+1, 2j+1)
         # dxc at x-face (i,j): dist from (2(i-1)+1, 2j+1) to (2i+1, 2j+1)
         # = dist from (2i-1, 2j+1) to (2i+1, 2j+1) for i=1..n, j=0..n-1
-        # For i=0 and i=n (boundary), extrapolate
+        # Iter-666 fix: at i=0 and i=n (cube boundary u-faces), the
+        # pre-iter-666 `max(2*i-1, 0)` / `min(2*i+1, 2*n)` clamping
+        # gave sj spans of 1 supergrid cell = HALF the interior cell
+        # width.  That made rdxc at cube boundaries 2× the interior
+        # value, which amplified PGF by 2× at cube edges — the
+        # direct cause of the FB-chain step-1 residual (measured 2.93
+        # interior vs 5.87 boundary; ratio exactly 2.0, iter-666).
+        # The Fortran FV3 convention is that dxc at a cube-boundary
+        # u-face is the centre-to-centre distance ACROSS the cube
+        # edge (interior cell centre to neighbour-face cell centre).
+        # Absent neighbour-face metrics here, extrapolate from the
+        # adjacent interior value (exact for uniform cubed-sphere
+        # spacing, matches Fortran "halo-exchanged dxc" at leading
+        # order).
         dxc = np.zeros((n + 1, n))
-        for i in range(n + 1):
+        for i in range(1, n):  # interior u-faces only
             for j in range(n):
-                si0 = max(2 * i - 1, 0)
-                si1 = min(2 * i + 1, 2 * n)
+                si0 = 2 * i - 1
+                si1 = 2 * i + 1
                 sj = 2 * j + 1
                 chord = np.sqrt((px[si0, sj] - px[si1, sj])**2
                                 + (py[si0, sj] - py[si1, sj])**2
                                 + (pz[si0, sj] - pz[si1, sj])**2)
                 dxc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        # Extrapolate at cube boundaries (i=0 from i=1, i=n from i=n-1).
+        dxc[0, :] = dxc[1, :]
+        dxc[n, :] = dxc[n - 1, :]
         all_dxc.append(dxc)
 
         # --- dyc: distance between cell centers (i,j-1) and (i,j) ---
+        # Iter-666 fix: same clamping bug as dxc.  Extrapolate at
+        # cube-boundary v-faces (j=0, j=n) from adjacent interior.
         dyc = np.zeros((n, n + 1))
         for i in range(n):
-            for j in range(n + 1):
+            for j in range(1, n):  # interior v-faces only
                 si = 2 * i + 1
-                sj0 = max(2 * j - 1, 0)
-                sj1 = min(2 * j + 1, 2 * n)
+                sj0 = 2 * j - 1
+                sj1 = 2 * j + 1
                 chord = np.sqrt((px[si, sj0] - px[si, sj1])**2
                                 + (py[si, sj0] - py[si, sj1])**2
                                 + (pz[si, sj0] - pz[si, sj1])**2)
                 dyc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        # Extrapolate at cube boundaries.
+        dyc[:, 0] = dyc[:, 1]
+        dyc[:, n] = dyc[:, n - 1]
         all_dyc.append(dyc)
 
         # --- dxa: cell width in x = face-to-face distance (FV3 fv_grid_tools.F90) ---

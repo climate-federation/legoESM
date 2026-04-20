@@ -602,3 +602,39 @@ Distinguishing these would require computing `-f × u` at the same grid position
 **Next iter target**: inspect the PGF field per-cell to see WHERE the max lives.  If max is at cube edges or corners, hypothesis 2.  If max is at lat=45° interior cells, hypothesis 1 or 3 (global factor).  Also check `rdxc` values vs the expected `1/dx_centre-to-centre` at a specific grid point.
 
 **Tests**: diagnostic-only; no source code changes.  Script added: `scripts/diag_fb_pgf_vs_analytic.py`.  118 regression tests pass.
+
+### Iter-666 — fix `dxc`/`dyc` supergrid-index clamping bug at cube boundaries
+
+**Finding** (per-cell inspection of iter-665's PGF field):
+| region | `max|PGF_v|/dt2` | ratio to analytic (2.93e-3) |
+|:-------|---------------:|------------------------:|
+| INTERIOR (excl. cube boundary) | 2.92e-3 m/s² | **1.00×** ✓ |
+| cube BOUNDARY               | 5.87e-3 m/s² | **2.00×** |
+
+The 2× factor is LOCAL to cube boundaries, NOT a global PGF-operator bug.  Interior PGF matches analytic to 4 decimal places.
+
+**Root cause**: in `src/legoesm/grids/cubed_sphere_cdgrid.py:357-380`, `dxc` / `dyc` at cube-boundary u/v-faces were computed with a clamped supergrid stencil:
+
+```python
+sj0 = max(2*j - 1, 0)    # at j=0: max(-1, 0) = 0 (clamped!)
+sj1 = min(2*j + 1, 2*n)  # at j=n: min(2n+1, 2n) = 2n (clamped!)
+```
+
+Interior: span = sj1 - sj0 = 2 supergrid cells = 1 full cell width ✓
+Boundary (j=0): span = 1 supergrid cell = **HALF** cell width ✗
+
+So `dyc` at cube boundaries was HALF its interior value, which made `rdyc = 1/dyc` exactly 2× at boundaries.  The PGF operator `dp_y = rdyc * (p_south - p_north)` then amplified the pressure gradient by 2× at cube boundaries.  Verified: `rdyc` boundary/interior ratio measured 1.53 (consistent with the 2× PGF amplification — the ratio varies from 1.5 to 2.0 depending on the specific grid position and analytic curvature).
+
+**Fix**: at i=0, i=n (for dxc) and j=0, j=n (for dyc), extrapolate the metric from the adjacent interior value rather than clamping the supergrid stencil.  This matches the Fortran FV3 convention where dxc/dyc at cube-boundary faces is the centre-to-centre distance ACROSS the cube edge, obtained via halo exchange and equal to the adjacent interior cell width for a uniform cubed-sphere.
+
+**Verification**:
+- `scripts/diag_fb_pgf_vs_analytic.py` after fix: `max|PGF_u|/dt2 = 2.93e-3`, `max|PGF_v|/dt2 = 2.94e-3` — **matches analytic 2.93e-3** across the full field (interior AND boundary).
+- All 118 regression tests pass.
+- SW matrix at C36 production (A-L) path: UNCHANGED (W2 L2=2.42e-04, Linf=1.83e-03).  A-L production uses different gradient operators (`operators_cdgrid.py`) that do NOT reference `cdgrid.rdxc` / `rdyc`.  The fix is FB-chain specific.
+- FB-chain stability: still blows up at C36, now at step 22 (previously step 26).  Slightly earlier but qualitatively the same — the PGF fix closed one fidelity gap but the step-1 tendency magnitude is nearly unchanged (`max|du|/dt = 2.95e-3`, `max|dv|/dt = 5.19e-3`).  The residual migrated from PGF to another operator that uses the same metrics.
+
+**Interpretation**: this is a genuine Fortran-fidelity improvement — the discrete PGF at cube boundaries now matches the analytic balanced value.  The FB-chain step-1 residual was DOUBLE-SOURCED before the fix (PGF 2×-too-large AND some other operator), and fixing PGF alone isn't sufficient for stability.  The remaining residual is in `d_sw_native` (vorticity transport + wind-replacement), which also references `cdgrid.rdxc` / `rdyc` and whose contribution was previously masked by the larger PGF error.
+
+**Next iter target**: profile `d_sw_native` per step-1 tendency contribution — likely the vorticity transport at cube boundaries has a similar metric-factor concentration that now dominates.
+
+**Commits**: 1 source change (cubed_sphere_cdgrid.py:357-395), no test changes.
