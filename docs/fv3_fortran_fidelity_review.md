@@ -638,3 +638,19 @@ So `dyc` at cube boundaries was HALF its interior value, which made `rdyc = 1/dy
 **Next iter target**: profile `d_sw_native` per step-1 tendency contribution — likely the vorticity transport at cube boundaries has a similar metric-factor concentration that now dominates.
 
 **Commits**: 1 source change (cubed_sphere_cdgrid.py:357-395), no test changes.
+
+### Iter-667 — fix iter-666 n=1 metric regression (Codex correction)
+
+**Codex stop-time finding on iter-666**: "iter-666 introduces a real n=1 metric regression."
+
+**Root cause**: iter-666 rewrote the `dxc` / `dyc` loop to iterate only over `range(1, n)` (interior u/v-faces), then extrapolated at i=0/i=n (and j=0/j=n) from the adjacent interior value.  For n=1, `range(1, 1)` is empty — no interior cells computed.  The subsequent `dxc[0, :] = dxc[1, :]` then reads the zero-initialised `dxc[1, :]`, yielding `dxc = 0` everywhere.  Downstream `rdxc = 1/dxc` would then divide by zero (masked by the `_TINY` floor but producing garbage metrics).
+
+**Fix**: guard the extrapolation path with `if n >= 2:`.  For n == 1 fall back to the original clamped-supergrid computation so `dxc` / `dyc` are non-zero.  n == 1 only fires in toy regional tests where the clamped values are acceptable.
+
+**Verification**:
+- n=1: `dxc` and `dyc` both non-zero (`5.00e6 m` at R=6.37e6, consistent with a single cubed-sphere face spanning π/2 radians).
+- n=2: metrics also non-zero.
+- C36 (n=36) FB-chain PGF unchanged from iter-666: `max|PGF_u|/dt2 = 2.93e-3`, `max|PGF_v|/dt2 = 2.94e-3` (matches analytic).
+- All 118 regression tests pass.
+
+**Commits**: 1 source change (cubed_sphere_cdgrid.py:357-410), no test changes.
