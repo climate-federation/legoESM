@@ -1361,3 +1361,19 @@ Each mutation produces a measurably different reference.  All 5 detected with `>
 
 Both tests pass.  Cumulative Fortran-formula lock inventory now **20 helpers**: `_sina_u_v_from_sin_sg` added.
 
+### Iter-642 — Fortran-formula lock for `_fill_corners_h1` / `_fill_corners_h2`
+
+**Motivation**: `_fill_corners_h1` and `_fill_corners_h2` in `src/legoesm/grids/halo.py` (lines 1182-1309) synthesise cube-vertex corner cells that the edge-strip halo exchange does NOT fill (no single neighbour face owns a cube-vertex cell).  Cube-vertex corners are consumed by the Arakawa-Lamb gradient (`B_pad` stencil at all 24 `(f, i, j)` combinations), so any drift silently propagates into B-grid KE and the v-wind signature.
+
+Pre-iter-642 there was NO direct formula lock — only integration-level coverage via `pad_halo` tests.  A regression swapping adjacent-halo indices, changing the 0.5 averaging factor, or dropping one of the inside-out steps in h2 (where each step reads values set by the previous) would silently degrade corner values.
+
+**Tests added** (`TestFillCornersFortranFormula`, 4 total):
+- `_ref_fill_corners_h1`: numpy reproduction of the 24-corner 2-point average.
+- `_ref_fill_corners_h2`: numpy reproduction of the inside-out 4-step fill per corner (16 cells per face × 6 faces).
+- `test_fill_corners_h1_matches_reference`: random padded input, bit-for-bit at atol=1e-14.
+- `test_fill_corners_h1_mutation_suite_iter642`: M1 (factor 1.0 instead of 0.5) + M3 (helper is a no-op — corners retain input) are detected.
+- `test_fill_corners_h2_matches_reference`: random halo=2 padded input, bit-for-bit at atol=1e-14.
+- `test_fill_corners_h2_sequence_dependency_iter642`: LOAD-BEARING test of the inside-out ordering.  Applies the real helper and a manually-reordered reference that swaps step 4 (outer corner) with step 1 (inner corner).  Asserts the real output DIFFERS from the reordered reference at (0, 0) — locks the sequence dependency where the outer corner reads (0, 1) and (1, 0) AFTER they've been set from (1, 1).
+
+All 4 tests pass.  Cumulative Fortran-formula lock inventory now **22 helpers**: `_fill_corners_h1` and `_fill_corners_h2` added.
+

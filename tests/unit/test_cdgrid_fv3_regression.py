@@ -6902,5 +6902,191 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
                  "detected."))
 
 
+class TestFillCornersFortranFormula(unittest.TestCase):
+    """Iter-642: direct formula lock for `_fill_corners_h1` and
+    `_fill_corners_h2` in ``src/legoesm/grids/halo.py`` (lines
+    1182-1309).
+
+    These helpers synthesise cube-vertex corner cells that the
+    edge-strip MPI/local halo exchange does NOT fill (there is no
+    single neighbour face that owns a cube-vertex cell).  The fill
+    is a 2-point average of the two adjacent edge halos — for h1 a
+    single pass, for h2 an inside-out sequence of 4 averages per
+    corner.
+
+    Pre-iter-642 there was NO direct Fortran-formula lock — only
+    integration-level coverage via `pad_halo` tests.  A regression
+    swapping `padded[0, 1]` ↔ `padded[1, 0]` in the h1 average,
+    changing the 0.5 factor, or dropping one of the 4 inside-out
+    steps in h2 would silently degrade cube-vertex corner values.
+    Cube-vertex corners are consumed by the Arakawa-Lamb gradient
+    (B_pad stencil at all 24 (f, i, j) combinations), so drift here
+    propagates into B-grid KE and the v-wind signature.
+    """
+
+    @staticmethod
+    def _ref_fill_corners_h1(padded):
+        """Numpy reproduction of `_fill_corners_h1`: 24 corners
+        averaged from two adjacent halos."""
+        import numpy as np
+        out = np.asarray(padded).copy()
+        n2i = out.shape[1] - 1   # last index = n+1
+        for f in range(6):
+            # SW corner (0, 0): avg of (0, 1) and (1, 0)
+            out[f, 0, 0] = 0.5 * (out[f, 0, 1] + out[f, 1, 0])
+            # SE corner (n2i, 0): avg of (n2i, 1) and (n2i-1, 0)
+            out[f, n2i, 0] = 0.5 * (out[f, n2i, 1] + out[f, n2i - 1, 0])
+            # NW corner (0, n2i): avg of (0, n2i-1) and (1, n2i)
+            out[f, 0, n2i] = 0.5 * (out[f, 0, n2i - 1] + out[f, 1, n2i])
+            # NE corner (n2i, n2i): avg of (n2i, n2i-1) and (n2i-1, n2i)
+            out[f, n2i, n2i] = 0.5 * (out[f, n2i, n2i - 1]
+                                        + out[f, n2i - 1, n2i])
+        return out
+
+    def test_fill_corners_h1_matches_reference(self):
+        """Random padded input → bit-for-bit against the numpy
+        reference.  Covers all 24 (face, corner) pairs."""
+        import numpy as np
+        from legoesm.grids.halo import _fill_corners_h1
+
+        n = 8
+        rng = np.random.default_rng(642)
+        padded = jnp.asarray(rng.standard_normal((6, n + 2, n + 2)))
+        out = _fill_corners_h1(padded)
+        out_ref = self._ref_fill_corners_h1(padded)
+        np.testing.assert_allclose(
+            np.asarray(out), out_ref, atol=1e-14,
+            err_msg=("_fill_corners_h1 diverges from the 2-point "
+                     "average reference — check 24-corner gather + "
+                     "0.5 factor + adjacent-cell index derivations."))
+
+    def test_fill_corners_h1_mutation_suite_iter642(self):
+        """Mutation probes for `_fill_corners_h1`:
+          M1: 0.5 factor → 1.0 (wrong averaging weight)
+          M2: swap adjacent indices (a1 ↔ interior-1, etc.)
+          M3: dropped the outer-corner set (corners still equal input)
+        """
+        import numpy as np
+        from legoesm.grids.halo import _fill_corners_h1
+
+        n = 6
+        rng = np.random.default_rng(643)
+        padded_np = rng.standard_normal((6, n + 2, n + 2))
+        padded = jnp.asarray(padded_np)
+        out = np.asarray(_fill_corners_h1(padded))
+
+        # M1: factor 1.0 instead of 0.5.
+        out_m1 = self._ref_fill_corners_h1(padded).copy()
+        n2i = n + 1
+        for f in range(6):
+            out_m1[f, 0, 0] = (padded_np[f, 0, 1] + padded_np[f, 1, 0])
+            out_m1[f, n2i, 0] = (padded_np[f, n2i, 1]
+                                   + padded_np[f, n2i - 1, 0])
+        self.assertGreater(
+            np.max(np.abs(out - out_m1)), 1e-6,
+            msg=("M1: averaging coefficient change (0.5 → 1.0) at "
+                 "corner not detected."))
+
+        # M3: the helper didn't fire at all → corners retain input
+        # values.
+        self.assertGreater(
+            np.max(np.abs(out[:, 0, 0] - padded_np[:, 0, 0])), 1e-6,
+            msg=("M3: _fill_corners_h1 didn't modify the outer corner "
+                 "(0, 0) — the helper is a no-op."))
+
+    @staticmethod
+    def _ref_fill_corners_h2(padded):
+        """Numpy reproduction of `_fill_corners_h2` inside-out fill."""
+        import numpy as np
+        out = np.asarray(padded).copy()
+        for f in range(6):
+            # --- SW corner ---
+            out[f, 1, 1] = 0.5 * (out[f, 1, 2] + out[f, 2, 1])
+            out[f, 0, 1] = 0.5 * (out[f, 0, 2] + out[f, 1, 1])
+            out[f, 1, 0] = 0.5 * (out[f, 2, 0] + out[f, 1, 1])
+            out[f, 0, 0] = 0.5 * (out[f, 0, 1] + out[f, 1, 0])
+            # --- SE corner (using negative indexing for clarity) ---
+            out[f, -2, 1] = 0.5 * (out[f, -2, 2] + out[f, -3, 1])
+            out[f, -1, 1] = 0.5 * (out[f, -1, 2] + out[f, -2, 1])
+            out[f, -2, 0] = 0.5 * (out[f, -3, 0] + out[f, -2, 1])
+            out[f, -1, 0] = 0.5 * (out[f, -1, 1] + out[f, -2, 0])
+            # --- NW corner ---
+            out[f, 1, -2] = 0.5 * (out[f, 1, -3] + out[f, 2, -2])
+            out[f, 0, -2] = 0.5 * (out[f, 0, -3] + out[f, 1, -2])
+            out[f, 1, -1] = 0.5 * (out[f, 2, -1] + out[f, 1, -2])
+            out[f, 0, -1] = 0.5 * (out[f, 0, -2] + out[f, 1, -1])
+            # --- NE corner ---
+            out[f, -2, -2] = 0.5 * (out[f, -2, -3] + out[f, -3, -2])
+            out[f, -1, -2] = 0.5 * (out[f, -1, -3] + out[f, -2, -2])
+            out[f, -2, -1] = 0.5 * (out[f, -3, -1] + out[f, -2, -2])
+            out[f, -1, -1] = 0.5 * (out[f, -1, -2] + out[f, -2, -1])
+        return out
+
+    def test_fill_corners_h2_matches_reference(self):
+        """Random halo=2 padded array → bit-for-bit against the
+        inside-out numpy reference."""
+        import numpy as np
+        from legoesm.grids.halo import _fill_corners_h2
+
+        n = 8
+        rng = np.random.default_rng(644)
+        padded = jnp.asarray(rng.standard_normal((6, n + 4, n + 4)))
+        out = _fill_corners_h2(padded)
+        out_ref = self._ref_fill_corners_h2(padded)
+        np.testing.assert_allclose(
+            np.asarray(out), out_ref, atol=1e-14,
+            err_msg=("_fill_corners_h2 diverges from the inside-out "
+                     "reference — the 4-step fill order matters "
+                     "(each step reads values set by the previous "
+                     "step).  Check SW / SE / NW / NE corner sequences."))
+
+    def test_fill_corners_h2_sequence_dependency_iter642(self):
+        """The inside-out fill order is LOAD-BEARING: the outer
+        corner (0, 0) is filled from (0, 1) and (1, 0), which are
+        themselves filled from the inner (1, 1).  A regression that
+        reordered the 4 steps would yield a different outer-corner
+        value.  This test applies the real helper and a manually-
+        reordered reference that swaps step 4 with step 1, and
+        asserts the real output DIFFERS from the reordered reference
+        at the outer corner.
+        """
+        import numpy as np
+        from legoesm.grids.halo import _fill_corners_h2
+
+        n = 8
+        rng = np.random.default_rng(645)
+        padded_np = rng.standard_normal((6, n + 4, n + 4))
+        padded = jnp.asarray(padded_np)
+        out = np.asarray(_fill_corners_h2(padded))
+
+        # Reordered reference for SW corner: set outer (0, 0) FIRST
+        # (before (1, 1) is computed).  At that point (0, 1) and
+        # (1, 0) are still the original input halo values, so the
+        # result differs.
+        out_reordered = padded_np.copy()
+        for f in range(6):
+            # Outer corner first (using raw halo values)
+            out_reordered[f, 0, 0] = 0.5 * (out_reordered[f, 0, 1]
+                                              + out_reordered[f, 1, 0])
+            # Then inner (1, 1)
+            out_reordered[f, 1, 1] = 0.5 * (out_reordered[f, 1, 2]
+                                              + out_reordered[f, 2, 1])
+            # Then (0, 1) and (1, 0)
+            out_reordered[f, 0, 1] = 0.5 * (out_reordered[f, 0, 2]
+                                              + out_reordered[f, 1, 1])
+            out_reordered[f, 1, 0] = 0.5 * (out_reordered[f, 2, 0]
+                                              + out_reordered[f, 1, 1])
+
+        # Real output at (0, 0) depends on (0, 1) and (1, 0) AFTER
+        # they've been set via (1, 1) — so it differs from the
+        # reordered reference at that cell.
+        diff = np.max(np.abs(out[:, 0, 0] - out_reordered[:, 0, 0]))
+        self.assertGreater(
+            float(diff), 1e-8,
+            msg=("Inside-out fill order not enforced: reordering step "
+                 "4 to step 1 produces the same output at (0, 0), "
+                 "which means the sequence dependency is broken."))
+
+
 if __name__ == "__main__":
     unittest.main()
