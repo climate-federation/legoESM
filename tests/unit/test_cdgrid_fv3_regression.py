@@ -7578,15 +7578,22 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         from legoesm.core import fv3_sw_core
 
         n = 12   # n > 2*npt (npt = min(4, n//2) = 4) so 4th-order fires
+        # Iter-648: build the grid in float64 explicitly so the stencil
+        # runs at full precision.  Otherwise the grid metrics default
+        # to float32 and JAX promotes downstream computation to
+        # float32, producing ~1e-7 round-off that masquerades as a
+        # tolerance failure when rtol=0 atol=1e-13.
         cdgrid_base = create_cubed_sphere_cdgrid(
-            create_cubed_sphere(n=n, use_duogrid=False))
+            create_cubed_sphere(n=n, use_duogrid=False,
+                                 dtype=jnp.float64))
 
         # Orthogonalise: set cos_sg[..., 4] = 0 and rsin2_cell = 1.
         cos_sg_ortho = np.asarray(cdgrid_base.cos_sg).copy()
         cos_sg_ortho[..., 4] = 0.0
         cdgrid = cdgrid_base._replace(
-            cos_sg=jnp.asarray(cos_sg_ortho),
-            rsin2_cell=jnp.ones_like(cdgrid_base.rsin2_cell))
+            cos_sg=jnp.asarray(cos_sg_ortho, dtype=jnp.float64),
+            rsin2_cell=jnp.ones_like(cdgrid_base.rsin2_cell,
+                                       dtype=jnp.float64))
 
         rng = np.random.default_rng(647)
         u_d = rng.standard_normal((6, n, n + 1))
@@ -7614,8 +7621,16 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         ua_interior = ua[:, 2:-2, npt:n - npt]
         expected_interior = expected_utmp_interior[:, 2:-2, :]
 
+        # Iter-648 (Codex stop-time correction): the iter-647 test
+        # used `atol=1e-10` alone, which defaults to `rtol=1e-7`; the
+        # effective tolerance on values of O(1) is 1e-7 — orders of
+        # magnitude above float64 round-off for a 4-term linear
+        # combination.  The stencil is a simple linear combination in
+        # float64, so true bit-for-bit requires `rtol=0` and an
+        # absolute tolerance at the float64 round-off floor (~1e-15
+        # for O(1) values, stretched to 1e-13 for 4-term accumulation).
         np.testing.assert_allclose(
-            ua_interior, expected_interior, atol=1e-10,
+            ua_interior, expected_interior, rtol=0.0, atol=1e-13,
             err_msg=("_d2a2c_vect interior `ua` does NOT match the "
                      "explicit 4th-order Lagrange formula "
                      "A1*(u[j]+u[j+1]) + A2*(u[j-1]+u[j+2]).  "
@@ -7626,7 +7641,10 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
                      "against the coefficients from _A1/_A2.  A "
                      "regression that inlines or mis-indexes the "
                      "stencil here fails this test even if other "
-                     "_A1 usages remain dynamic."))
+                     "_A1 usages remain dynamic.  Iter-648 tightened "
+                     "tolerance to rtol=0, atol=1e-13 (float64 "
+                     "round-off floor) so the 'bit-for-bit' claim is "
+                     "truly bit-for-bit."))
 
     def test_d2a2c_vect_duogrid_production_stencil_consumes_A1_A2_iter646(self):
         """Iter-646: same coverage check for the DUOGRID production

@@ -1454,3 +1454,17 @@ All 5 tests (3 from iter-645 + 2 from iter-646) pass on the correct code.  The p
 
 This closes the false-pass gap Codex flagged.  The 4th-order D→A stencil in `_d2a2c_vect` is now locked at three strengths: constant values (iter-645), production consumption of `_A1` somewhere (iter-646), and bit-exact interior-cell output under orthogonalised metrics (iter-647).
 
+### Iter-648 — tighten iter-647 tolerance to true float64 round-off
+
+**Codex stop-time finding on iter-647**: "the new 'bit-for-bit' stencil lock still allows `1e-7` relative error."
+
+**Root cause**: iter-647 used `atol=1e-10` alone.  `np.testing.assert_allclose` defaults to `rtol=1e-7`, so the EFFECTIVE tolerance on values of O(1) was `atol + rtol*|desired| ≈ 1e-7` — seven orders of magnitude above float64 round-off and indistinguishable from float32 rounding.  The claim "bit-for-bit" in iter-647's docstring was wrong.
+
+**Fix**: two changes to `test_d2a2c_vect_interior_stencil_output_matches_inline_formula_iter647`:
+1. Build the CDGrid with `dtype=jnp.float64` so the metrics don't default to float32 and promote downstream computation to float32 (which was producing the ~1e-7 round-off).  The grid metric override for `cos_sg` / `rsin2_cell` also now explicitly uses `dtype=jnp.float64`.
+2. Set `rtol=0.0, atol=1e-13` on `assert_allclose` — true bit-for-bit at the float64 round-off floor for a 4-term linear combination on O(1) values.
+
+Added a note in the `err_msg` documenting the iter-648 tightening.
+
+All 6 tests in `TestD2A2C4thOrderStencilFortranFormula` now pass at the tightened tolerance.  The 4th-order D→A stencil lock is genuinely bit-for-bit against the explicit inline formula.
+
