@@ -164,6 +164,146 @@ New `tests/ocean/unit/test_smagorinsky.py` covering both grids:
 
 ---
 
+## 2026-04-19/20: Barotropic Solver — BEBT, Cosine Filter, Slow-Forcing Coupling (#205)
+
+### Problem: Mode-Splitting Instability
+
+The split-explicit barotropic solver constrained the baroclinic timestep far more than expected: `dt ≤ ~0.7 × dx / c_baro`. For the Eady experiment (H=5500m, c=232 m/s) at 10-20 km resolution, this meant dt ≤ 30-60s — the Eady case blew up at day 2 with dt=300s. MOM6 runs at dt=3600s at similar resolution.
+
+**Root cause (diagnosed with ocean expert):**
+1. Frozen baroclinic PGF becomes inconsistent as eta evolves during barotropic substeps
+2. Z-star amplifies this ~1.5-2x (Jacobian J depends on eta for ALL layers, not just the surface)
+3. Box-average time filter has side lobes that alias fast barotropic modes back into baroclinic coupling
+
+### Solution: Three Improvements
+
+**1. BEBT (semi-implicit barotropic PGF)**
+- Blend `eta_new` / `eta_old` when computing pressure gradient: `eta_pgf = (1-bebt)*eta_new + bebt*eta_c`
+- Default `bebt=0.2` (MOM6 default). Damps fast barotropic gravity waves.
+- Fully differentiable (linear blend). No carry tuple changes.
+
+**2. Cosine time filter (Hanning window)**
+- Replace uniform box-average with shaped cosine-bell weights: `w_i = 1 + cos(2π(i-N/2)/N)`
+- Suppresses aliased harmonics that leak through the rectangular filter
+- Transport accumulators (Hu, Hv) remain box-filtered for exact volume conservation
+- Weights passed as `xs` to `jax.lax.scan` / indexed in `fori_loop`
+
+**3. Slow-forcing coupling (MOM6-style)**
+- Split baroclinic tendency into depth-averaged (`F_slow_u/v`) and perturbation parts
+- Perturbation applied to 3D velocity (as before)
+- Depth-averaged part passed to barotropic solver, applied at EACH substep
+- This couples the slow forcing to the evolving barotropic state instead of freezing it for the full baroclinic dt
+- Changed `ocean_model_latlon_cgrid.py` step function to compute the split
+
+Also added `maxvel_barotropic` config (disabled by default) for velocity clipping safety valve.
+
+### Result
+
+Eady uniform (U_surface=0.8, H=5500m) at 100×50 (20 km), dt=300s:
+- **Before**: blowup at day 2 (max_speed=31000 m/s)
+- **After**: PASS 30 days (max_speed=1.05 m/s, physically reasonable Eady growth)
+
+ACC channel at 20×18 (1°), dt=300s: PASS, no regression.
+
+### Key insight
+
+BEBT alone gives ~30-50% improvement. The slow-forcing coupling is the critical piece — it's what allows MOM6 to use dt=3600s. Without it, the baroclinic PGF is frozen for the entire baroclinic step and the barotropic solver overshoots. The next level (not yet implemented) would be eta-dependent PGF correction within substeps, which would unlock even larger timesteps.
+
+### Files changed
+
+- `barotropic_latlon_cgrid.py` — BEBT, cosine filter, F_slow_u/v, MAXVEL
+- `barotropic_mpas.py` — BEBT, cosine filter, MAXVEL
+- `ocean_model_latlon_cgrid.py` — slow-forcing coupling (tendency split)
+- `state.py` — `bebt`, `maxvel_barotropic`, `barotropic_time_filter` config fields
+- `mpas_config.py` — same config fields
+
+---
+
+## 2026-04-19: MOM6-Inspired ACC Channel Parameters
+
+### Comparison with MOM6
+
+Detailed comparison of legoESM vs MOM6 parameter file for a similar ACC channel:
+
+| Parameter | MOM6 | legoESM (old) | legoESM (new) |
+|-----------|------|--------------|--------------|
+| Laplacian viscosity | 0 | 1e4 m²/s | **0** |
+| Biharmonic Smagorinsky | SMAG_BI_CONST=0.06 | C_smag=0.1 | **C_smag=0.25** (C²≈0.06) |
+| Tracer diffusion | KHTR=0 | K_h=1e3 | **0** |
+| Vertical viscosity | KV=1e-5 | A_v=1e-3 | **1e-5** |
+| Vertical diffusivity | KD=5e-6 | K_v=1e-4 | **5e-6** |
+
+Key finding: our Smagorinsky was already biharmonic (matching MOM6's approach), but we were piling Laplacian viscosity and tracer diffusion on top. MOM6 uses zero of both.
+
+### Other structural differences identified
+
+- MOM6 uses **analytic FV PGF** (we use compact 1-cell gradient)
+- MOM6 has **ALE remapping with PLM** each timestep (we have none — acts as implicit diffusion)
+- MOM6 applies wind stress over **HMIX=20m** (we apply to surface layer only)
+- MOM6 has **SST/SSS restoring everywhere** (we have northern sponge only)
+- MOM6's **1st-order vertical tracer advection** vs our 1st-order upwind (similar)
+- MOM6 vertical levels: **30 non-uniform** (10m-230m) vs our 20 uniform
+
+### Result
+
+ACC channel at 88×62 (25 km) with MOM6-like parameters: PASS 30 days, max_speed=9.0 m/s (vs 0.67 with old over-dissipated params). Much more energetic and physically realistic flow.
+
+### Files changed
+
+- `acc_channel.py` — A_h=0, K_h=0, C_smag=0.25, A_v=1e-5, K_v=5e-6, convection enabled
+- `experiments.py` — A_v/K_v passthrough for ACC channel
+
+---
+
+## 2026-04-19: Eady Experiment — Grid Fix Consequences and Re-tuning
+
+### Discovery: Previous Eady Results Were on Wrong Grid
+
+The periodic channel grid fix (commit `1d22eee`) revealed that ALL previous Eady results were running on a **360° grid** instead of the intended 10° domain. At 100×50, dx was ~650 km (not 20 km). The "stable for 200 days" result was an essentially 1D experiment where baroclinic instability couldn't grow in x.
+
+### Fixes applied
+
+1. **Thermal wind IC was never called** for latlon path — `_set_linear_shear_latlon` existed but wasn't called in `create_initial_conditions`. (Currently commented out; starting from rest is more stable for the adjustment.)
+
+2. **Bottom drag units** — the commit `57b81aa` changed units from [1/s] to [m/s], but the Eady config was reverted to `r=1e-4` during editing. With new units, this gives a barotropic damping timescale of 637 days (useless). Corrected to `r=0.01` (τ_bt ≈ 6 days).
+
+3. **U_surface = 0.8** (was 0.2) — gives τ_Eady ≈ 5 days for the most unstable mode.
+
+### Eady growth rate analysis (ocean expert)
+
+For this setup (k=2 seeded, U_surface=0.8, N=1.2e-3, H=5500):
+- k=2: τ_undamped = 7.8 days, τ_with_drag(r=0.01) = 20 days
+- k=3 (most unstable in domain): τ_undamped = 5.7 days, τ_with_drag = 10.2 days
+- Bottom drag absorbs 44-61% of the Eady growth rate at r=0.01
+- Observed τ ≈ 17 days is consistent with k=2+k=3 superposition + drag
+
+### Recommendations for clean Eady validation (not yet implemented)
+
+- Reduce bottom drag to r=0.001 (drag → 4% of growth, τ_eff ≈ 5.9 days)
+- Change perturbation_wavenumber to 3 (most unstable mode in domain)
+- Enable thermal wind IC (eliminate 10-day adjustment transient)
+- Add EKE diagnostic (better than max_speed for measuring instability)
+- Run 60-100 days
+
+---
+
+## 2026-04-19: Divergence Damping in Barotropic Solver (#205)
+
+Added `grad(div(u_bar))` damping to the barotropic velocity equation. Targets the divergent velocity mode that creates the SSH 2Δx checkerboard, while leaving geostrophic (rotational) flow untouched.
+
+- Parameter: `barotropic_div_damp = 0.05` (dimensionless, scaled like `barotropic_diffusion_alpha`)
+- Applied after velocity update, before bottom drag
+- Checkerboard/signal ratio: 0.5 → 0.003 on ACC channel
+
+### Files changed
+
+- `barotropic_latlon_cgrid.py`, `barotropic_mpas.py` — div damping implementation
+- `state.py`, `mpas_config.py` — `barotropic_div_damp` config field
+- `acc_channel.py` — default `barotropic_div_damp=0.05`
+- `setup.py`, `experiments.py` — passthrough
+
+---
+
 ## 2026-04-19: Biharmonic Tracer Diffusion (K_bih) — Issue #203
 
 ### Problem: 2Δx SST Checkerboard Noise
