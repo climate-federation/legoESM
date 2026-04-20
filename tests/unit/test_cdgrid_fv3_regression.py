@@ -4388,6 +4388,129 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
                  f"source of N/S asymmetry was introduced.  Currently "
                  f"measured at ~2.3e-3 (4x headroom)."))
 
+    def test_w2_short_run_mode4_at_pm30deg_lat_ceiling(self):
+        """Iter-609 (from user directive): mode-4 (cube-face imprint)
+        amplitude ceiling at lat=±30° for the W2 v_north field
+        regridded via the matrix's canonical extraction path.
+
+        Cost: short run (20 steps at C36/dt=300s ≈ 100 min simulated)
+        instead of 1-day — per user's "if 1-day is too expensive,
+        short-run mode-4-growth regression and explain the limitation"
+        allowance.
+
+        **Baseline** (iter-609 measurement at 20 steps):
+          lat=±30°: mode-4 amplitude = 2.55e-3 m/s, max|v|=1.97e-2.
+          Mode-4 / mode-0 bulk ratio ≈ 0.13 (cube-face mode is
+          ~13% of the overall zonal variance at ±30°).
+
+        **Ceiling**: mode-4 amplitude < 5e-3 m/s (2× headroom from
+        baseline).  At 1-day the same mode-4 grows to ~0.05 m/s (per
+        iter-592 FFT diagnostic), but that's a separate 1-day lock
+        that the existing pole-cell/mirror tests already bound.
+
+        **What this catches that earlier tests don't**: the iter-592
+        N-S mirror test guards symmetry between face 4 and face 5.
+        The iter-605 pole-cell ceiling guards the max|v| on face 4.
+        Neither directly bounds the MID-LATITUDE mode-4 imprint (at
+        ±30° where cube-face boundaries cross).  This test adds
+        that specific lock — a regression that amplifies the cube-
+        seam dispersion mode-4 without breaking symmetry or pole
+        magnitude would be caught here.
+
+        **Limitation** (20-step vs 1-day): the short-run amplitude
+        is ~20× smaller than the 1-day amplitude, so this test
+        catches order-unity regressions but NOT smaller amplifications
+        (e.g., 50% growth in mid-latitude mode-4 at t=1d would
+        correspond to 50% growth at t=20 steps — still well within
+        the 2× headroom).
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge,
+        )
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+        from scripts.run_atmosphere_test_matrix import _regrid_2d
+
+        n = 36
+        dt = 300.0
+        n_steps = 20
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4
+        div_damp = 1.5e7 * (48.0 / n) ** 2
+
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=hyperdiff_coeff, div_damp=div_damp,
+            boundary_fix=True)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+
+        sw = williamson_test2(grid)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        # Canonical extraction (matches matrix script lines 1219-1239).
+        ca_4, sa_4 = cell_centre_angles_from_4edge(cdgrid)
+        u_cc = 0.5 * (state.u_d[:, :, :-1] + state.u_d[:, :, 1:])
+        v_cc = 0.5 * (state.v_d[:, :-1, :] + state.v_d[:, 1:, :])
+        v_north_native = np.asarray(sa_4 * u_cc + ca_4 * v_cc)
+
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+        v_ll = _regrid_2d(v_north_native, lon_deg, lat_deg, "cube")
+
+        # FFT mode-4 at lat=±30°, equator-symmetric check.
+        lat_ll = np.linspace(-90.0, 90.0, v_ll.shape[0])
+        mode4_per_hemisphere = []
+        for lat_target in (-30.0, +30.0):
+            i = np.argmin(np.abs(lat_ll - lat_target))
+            row = v_ll[i, :]
+            fft = np.fft.rfft(row) / len(row) * 2.0
+            mode4 = float(np.abs(fft[4]))
+            mode4_per_hemisphere.append((lat_target, mode4))
+            self.assertLess(
+                mode4, 5e-3,
+                msg=(f"W2 short-run ({n_steps} steps C36) mode-4 "
+                     f"amplitude at lat={lat_target:+.0f}° = "
+                     f"{mode4:.3e} m/s exceeds 5e-3 ceiling.  "
+                     f"Baseline = 2.55e-3 m/s (iter-609).  Exceeding "
+                     f"means the mid-latitude cube-face mode-4 "
+                     f"dispersion imprint has been amplified by the "
+                     f"production A-L + RK3 path (hyperdiff change, "
+                     f"boundary_fix regression, halo exchange "
+                     f"modification, or pad_halo_vector corner "
+                     f"interpolation break)."))
+
+        # Symmetry: ±30° mode-4 amplitudes should be equal (within
+        # float noise) for the alpha=0 zonal IC.
+        lat_a, m_a = mode4_per_hemisphere[0]
+        lat_b, m_b = mode4_per_hemisphere[1]
+        rel = abs(m_a - m_b) / max(m_a, m_b, 1e-12)
+        self.assertLess(
+            rel, 1e-2,
+            msg=(f"W2 short-run mode-4 amplitudes at "
+                 f"lat={lat_a:+.0f}° ({m_a:.3e}) and lat={lat_b:+.0f}° "
+                 f"({m_b:.3e}) differ by {rel:.3e} relative.  "
+                 f"Exceeds 1e-2 ceiling — N-S symmetric IC should "
+                 f"produce equal hemispheric mode-4 growth."))
+
     def test_w2_pole_cell_v_north_ceiling_at_1day(self):
         """Iter-605 (from iter-604 user-reported polar-cap artifact):
         lock the magnitude of the face-4 pole-cell v_north after a

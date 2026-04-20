@@ -666,3 +666,33 @@ The two ceilings probe different physics:
 - W2 diagnostic-angle / N-S mirror / 1-day pole magnitude + mirror (iter-592/605/606).
 - W5 mountain-wave preservation + pole-cell ceiling (iter-607/608).
 
+### Iter-609 (2026-04-20): mode-4 cube-face imprint ceiling at lat=±30°
+
+**User directive**: address the remaining Williamson-2 v-wind cube-face imprint, with preference for a mode-4 ceiling at ±30° on the canonical 1-day regridded v_ll.  "If 1-day is too expensive, add a short-run mode-4-growth regression and explain the limitation."
+
+**Deliverable**: added `test_w2_short_run_mode4_at_pm30deg_lat_ceiling` in `TestW2CubeFaceImprintCharacterization`.  Runs a short W2 C36 dt=300s 20-step simulation (~100 min simulated), extracts face-native v_north via 4-edge-averaged angles, regrids to the matrix's canonical lat-lon grid via `_regrid_2d`, and enforces:
+
+1. **Mode-4 amplitude at lat=-30°**: FFT along longitude → `|fft[4]|` < 5e-3 m/s.
+2. **Mode-4 amplitude at lat=+30°**: same < 5e-3 m/s.
+3. **Hemispheric symmetry**: relative diff between ±30° mode-4 amplitudes < 1e-2.
+
+**Baseline** (iter-609 measurement): mode-4 = 2.551e-3 m/s at both ±30° (symmetric to 4 decimals), max|v| at those latitudes = 1.97e-2 m/s.  Ceiling 5e-3 is 2× headroom.
+
+**Sanity-verified**: tightening the ceiling to 1e-3 fires with the 2.551e-3 baseline measurement.
+
+**Limitation of short run**: 20 steps gives mid-latitude mode-4 amplitude ~20× smaller than the 1-day diagnostic (iter-592 measurement: 0.053 m/s at t=1d).  The test catches order-unity regressions (2×+ amplification of the mode-4 dispersion growth rate) but NOT small amplifications (<50%).  A 1-day version would cost 5-10× more runtime; user explicitly accepted the short-run trade-off.
+
+**Architectural decision (restating iter-604/592 findings)**:
+- The production A-L + RK3 path CANNOT realistically be pushed to true FV3 fidelity on W2.  The mode-4 imprint at mid-latitudes is inherent to the A-L gradient + halo-interpolation + `boundary_fix` stabilizer chain; any attempt to reduce it further without replacing the operator chain would require adding more non-FV3 smoothing (increasing L2 or breaking the balanced flows that W2 demands).
+- The ONLY honest route to true FV3 fidelity is stabilizing `FV3FBShallowWaterModel` (the FB chain), which requires the ng=3 MPI halo infrastructure (iter-595..600 infrastructure work DONE for non-MPI; `pad_halo_mpi_4d(halo=3)` still missing for MPI).
+
+**No patch to production path attempted this iteration** — per user acceptance criteria, a patch must (a) reduce max|v_ll| below 0.303, (b) not worsen W2 height L2 by >25%, (c) not silently disable boundary_fix.  Prior iterations exhausted the straightforward improvements (angle-helper fix, PPM axis fix) that meet those bounds.  Any further reduction within the A-L path would require non-FV3 additions the user has explicitly forbidden ("do not improvise").
+
+**Exact remaining differences vs Fortran FV3 oracle** (after iter-609):
+- Operator chain: production uses A-L 4-point gradient + compact Laplacian biharmonic + boundary_fix stabilizer.  Fortran uses c_sw (2-point boundary-aware) + p_grad_c + d_sw1..d_sw6 (flux-form) + del6_vt_flux (vorticity-based biharmonic).
+- Time integration: production is RK3.  Fortran is forward-backward splitting.
+- Halo depth: production uses halo=2 everywhere.  Fortran uses ng=3 at polar faces.
+- Polar-face vertex treatment: production has no cube-vertex overrides.  Fortran `sw_core.F90:3527-3545, 3620-3640` writes 3 halo cells per corner-axis (this is the Priority-3 architectural limitation; see iter-107/108).
+
+11 W2/W5 artifact-characterization tests now pass (including iter-609's mode-4 ceiling).  The full W2 ceiling stack now catches: t=0 diagnostic bug, short-run N/S symmetry, short-run mode-4 at ±30° (NEW), 1-day pole-cell magnitude + field mirror, and the height L2 baseline.
+
