@@ -56,24 +56,42 @@ def compute_del6_metrics(cdgrid):
     dx_v = cdgrid.dx_edge_y   # (6, n, n+1)   at v-interface
     dy_u = cdgrid.dy_edge_x   # (6, n+1, n)   at u-interface
 
-    # `dxc, dyc` are Fortran's cell-centre-to-cell-centre distances.
-    # They are NOT stored in cdgrid; construct from `base.dx`, `base.dy`
-    # as halo-averaged cell-centre sums:
-    #   dxc_at_u(i,j) = 0.5 * (dx[i-1, j] + dx[i, j])   at u-interface
-    #   dyc_at_v(i,j) = 0.5 * (dy[i, j-1] + dy[i, j])   at v-interface
-    dx_cc = cdgrid.base.dx    # (6, n, n)
-    dy_cc = cdgrid.base.dy    # (6, n, n)
+    # `dxc, dyc` are Fortran's cell-centre-to-cell-centre distances,
+    # computed as GREAT CIRCLE distances per `fv_grid_tools.F90:894, 907`:
+    #   dxc(i,j) = great_circle_dist(agrid(i,j), agrid(i-1,j), radius)
+    #   dyc(i,j) = great_circle_dist(agrid(i,j), agrid(i,j-1), radius)
+    # NOT cell-centre `base.dx, base.dy` averages (which iter-752b used
+    # incorrectly).  Use the A-grid cell-centre lon/lat via halo-exchange
+    # for the adjacent cell values, then apply Haversine distance.
+    from legoesm.grids.cubed_sphere import great_circle_distance
+    radius = cdgrid.base.radius
+    lon_cc = cdgrid.base.lon   # (6, n, n)  A-grid lon in radians
+    lat_cc = cdgrid.base.lat   # (6, n, n)  A-grid lat in radians
     dg = getattr(cdgrid.base, 'duogrid', None)
     offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
-    dx_cc_pad = pad_halo(dx_cc, interp_offsets=offsets, duogrid=dg)
-    dy_cc_pad = pad_halo(dy_cc, interp_offsets=offsets, duogrid=dg)
-    dyc_at_v = 0.5 * (dy_cc_pad[:, 1:-1, :-1] + dy_cc_pad[:, 1:-1, 1:])   # (6, n, n+1)
-    dxc_at_u = 0.5 * (dx_cc_pad[:, :-1, 1:-1] + dx_cc_pad[:, 1:, 1:-1])   # (6, n+1, n)
+    lon_pad = pad_halo(lon_cc, interp_offsets=offsets, duogrid=dg)
+    lat_pad = pad_halo(lat_cc, interp_offsets=offsets, duogrid=dg)
+
+    # dyc at v-interface (6, n, n+1): distance from A-grid (i, j-1) to (i, j)
+    # Unpadded j ranges 0..n (n+1 v-interfaces).  Padded indexing:
+    #   A-grid (i, j-1) → pad[i+1, j]       (i: 0..n-1 cells, j: 0..n interfaces)
+    #   A-grid (i, j)   → pad[i+1, j+1]
+    lon_jm = lon_pad[:, 1:-1, :-1]    # (6, n, n+1)
+    lat_jm = lat_pad[:, 1:-1, :-1]
+    lon_jp = lon_pad[:, 1:-1, 1:]
+    lat_jp = lat_pad[:, 1:-1, 1:]
+    dyc_at_v = great_circle_distance(lon_jm, lat_jm, lon_jp, lat_jp, radius)
+
+    # dxc at u-interface (6, n+1, n): distance from A-grid (i-1, j) to (i, j).
+    lon_im = lon_pad[:, :-1, 1:-1]    # (6, n+1, n)
+    lat_im = lat_pad[:, :-1, 1:-1]
+    lon_ip = lon_pad[:, 1:, 1:-1]
+    lat_ip = lat_pad[:, 1:, 1:-1]
+    dxc_at_u = great_circle_distance(lon_im, lat_im, lon_ip, lat_ip, radius)
 
     # Fortran formula (fv_grid_utils.F90:713, 725):
     #   del6_u(i,j) = sina_v(i,j) * dx(i,j) / dyc(i,j)    at v-interface
     #   del6_v(i,j) = sina_u(i,j) * dy(i,j) / dxc(i,j)    at u-interface
-    # — using Fortran's edge-stagger dx, dy directly.
     del6_u = sina_v * dx_v / dyc_at_v   # (6, n, n+1)
     del6_v = sina_u * dy_u / dxc_at_u   # (6, n+1, n)
 

@@ -566,3 +566,34 @@ Codex stop-time review on iter-752 flagged: **"standalone del6 port diverges fro
 **Matrix + ocean baselines still unchanged** (standalone unit still not wired into production).
 
 **Process (iter-752 → 752b within same iteration).**  The Codex stop-time catch on iter-752's metric convention is fixed in the same Ralph iteration.  This is the correct cycle: catch before committing the wiring that would use the wrong metric.
+
+### Iter-752c — fix denominator `dxc, dyc` to great-circle distance (Codex stop-time)
+
+Codex stop-time review on iter-752b flagged: **"`compute_del6_metrics` still uses the wrong denominator metrics, so this 'Fortran-convention' fix should not ship yet."**  Correct.  Iter-752b fixed the numerator `dx, dy` to use cdgrid's edge-staggered `dx_edge_y` / `dy_edge_x`, but kept the denominator `dxc, dyc` as cell-centre `base.dx, base.dy` averages — which is NOT what Fortran does.
+
+**Fortran reference** (`fv_grid_tools.F90:894, 907`):
+```fortran
+dxc(i,j) = great_circle_dist(agrid(i,j,:), agrid(i-1,j,:), radius)
+dyc(i,j) = great_circle_dist(agrid(i,j,:), agrid(i,j-1,:), radius)
+```
+
+`dxc, dyc` are **great-circle distances** between A-grid cell-centre lon/lat pairs, NOT simple averages of cell-centre `dx, dy` values.  On a gnomonic_ed cubed sphere, the two differ non-trivially near cube corners and polar faces because cell spacing is non-uniform.
+
+**Fix.**  `compute_del6_metrics` now uses the existing `great_circle_distance` helper (Haversine formula) from `legoesm.grids.cubed_sphere` applied to halo-padded A-grid lon/lat:
+```python
+dyc_at_v = great_circle_distance(lon(i, j-1), lat(i, j-1), lon(i, j), lat(i, j), radius)
+dxc_at_u = great_circle_distance(lon(i-1, j), lat(i-1, j), lon(i, j), lat(i, j), radius)
+```
+
+**Updated regression sentinel.**  `test_del6_metrics_match_fortran_convention` now reconstructs `dyc, dxc` via `great_circle_distance` and asserts machine-precision match.  Pins the Fortran-faithful formula end-to-end so subsequent drift is caught.
+
+**Tests.**  7/7 PASS.
+
+**Matrix + ocean baselines still unchanged** (standalone unit still not wired into production).
+
+**Process.**  Third same-iteration Codex catch on iter-752 → 752b → 752c:
+- iter-752: wrong `dx, dy` (cell-centre averages for numerator).
+- iter-752b: fixed `dx, dy`, but still wrong `dxc, dyc` (cell-centre averages for denominator).
+- iter-752c: fixed `dxc, dyc` to Fortran's great-circle distance.
+
+Iter-753 now wires into `fv3_sw_tendencies` with a fully Fortran-faithful metric.
