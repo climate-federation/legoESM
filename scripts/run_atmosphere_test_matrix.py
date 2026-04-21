@@ -1452,30 +1452,32 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         l2 = float(jnp.sqrt(jnp.sum(err**2 * area) / jnp.sum(h_exact**2 * area)))
         linf = float(jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(h_exact)))
         norms = {"l2": l2, "linf": linf}
-        # Iter-741 (corrects iter-740 per Codex stop-time review):
-        # iter-740's v_Linf compared raw D-grid v_d against its
-        # analytic IC, but the actual VISIBLE artifact in
-        # snapshots_v.png is the GEOGRAPHIC v_north (m/s) after the
-        # cell-centre averaging + 4-edge-angle rotation performed by
-        # extract_fn below (lines 1232-1238).  v_d and v_north differ
-        # because v_north mixes u_d and v_d errors via the rotation
-        # `v_north = sa_4edge * u_cc + ca_4edge * v_cc`.  The
-        # user-facing blocker is v_north, not v_d.
+        # Iter-742 (corrects iter-741 per Codex stop-time review):
+        # iter-740 measured v_d-error, iter-741 corrected to pre-
+        # regrid v_north, but the actual plotted field in
+        # snapshots_v.png is the POST-REGRID v_ll =
+        # _regrid_2d(v_north, lon_deg, lat_deg, coord_kind=cube).
+        # The regrid step interpolates cube-face-native to lat-lon
+        # and can shift/smooth the peak; the PNG colourbar reflects
+        # v_ll magnitude, not v_north magnitude.  Iter-742 measures
+        # the same quantity the snapshot plots — matching the
+        # visual artifact exactly.
         #
-        # The exact solution for W2 geographic v_north is ZERO
-        # everywhere and at all times (steady, purely zonal flow).
-        # Measure max|v_north| directly by replicating extract_fn's
-        # rotation logic on the final state.  This matches the
-        # snapshot used for visual inspection (iter-717, iter-739).
+        # The exact W2 geographic v_north is ZERO everywhere at all
+        # times.  Regridding a zero field yields zero, so max|v_ll|
+        # is itself the error (no subtraction).
         u_cc = 0.5 * (np.asarray(state.u_d, dtype=np.float64)[:, :, :-1]
                       + np.asarray(state.u_d, dtype=np.float64)[:, :, 1:])
         v_cc = 0.5 * (np.asarray(state.v_d, dtype=np.float64)[:, :-1, :]
                       + np.asarray(state.v_d, dtype=np.float64)[:, 1:, :])
-        v_north = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
-        v_linf = float(np.max(np.abs(v_north)))
+        v_north_face = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
+        v_ll = _regrid_2d(v_north_face, lon_deg, lat_deg, coord_kind)
+        v_linf = float(np.max(np.abs(v_ll)))
+        v_north_linf_face = float(np.max(np.abs(v_north_face)))
         norms["v_linf"] = v_linf
         notes = (f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}, "
-                 f"v_north_Linf={v_linf:.2e}")
+                 f"v_ll_Linf={v_linf:.2e} "
+                 f"(pre-regrid {v_north_linf_face:.2e})")
     elif test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_cgrid(grid, days * 86400.0)
         norms = compute_error_norms_cgrid(state, exact, grid)

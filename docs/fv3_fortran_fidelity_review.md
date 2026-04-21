@@ -2203,6 +2203,52 @@ v_north = sa_4edge * u_cc + ca_4edge * v_cc     # ← VISIBLE v
 
 **Reporting only, same as iter-740.**  No pass/fail threshold yet — any fixed threshold either fails every current run or misses worsening.  Iter-742+ sets a threshold after the first concrete fix lands.
 
+### Iter-742 — v_north is still a proxy; measure the regridded v_ll (Codex stop-time)
+
+Codex stop-time review on iter-741 flagged: **"iter-741 still measures a proxy instead of the plotted snapshots_v.png field."**  Correct.
+
+**Chain of proxies so far.**
+- iter-740: measured `max|state.v_d - v_d_exact|` — raw D-grid component-level error, missing u_d cross-coupling.
+- iter-741: measured `max|v_north_face|` where `v_north_face = sa_4edge*u_cc + ca_4edge*v_cc` — pre-regrid geographic v, missing the regrid step.
+- **iter-742:** measures `max|v_ll|` where `v_ll = _regrid_2d(v_north_face, lon_deg, lat_deg, coord_kind="cube")` — exactly the array that `snapshots_v.png` plots.
+
+**Why each intermediate was still a proxy.**  The snapshot pipeline is:
+```
+state.u_d, state.v_d
+  → (cell-centre average)
+  → u_cc, v_cc
+  → (angle rotation)
+  → v_north_face          ← iter-741 stopped here
+  → (_regrid_2d: bilinear cube→latlon)
+  → v_ll                   ← what the PNG colourbar shows
+```
+The `_regrid_2d` step (scripts/run_atmosphere_test_matrix.py:552, coord_kind="cube") bilinearly interpolates from cube-face-native to the lat-lon sampling grid used by the PNG.  For a mode-4 peak at the cube corners, the regrid can shift or slightly smooth the peak.  If an iter claims to reduce the artifact by 5 % in v_north_face, the visible PNG could still show the SAME peak after regrid — or, conversely, an iter that slightly worsens v_north_face but restructures the peak to align with regrid sample points could produce a smaller visible peak.  Measuring the regridded quantity is the only way to match what the eye sees.
+
+**Fix (iter-742).**  Apply `_regrid_2d` to the iter-741 v_north_face before taking the max.  Renamed the notes key to `v_ll_Linf` and retained the pre-regrid value in parentheses for diagnostic contrast.
+
+**Baseline values (iter-742).**
+- `v_ll_Linf` (post-regrid, what snapshots_v.png shows)  = **3.03e-01 m/s**
+- `v_north_Linf` (pre-regrid, iter-741 metric)           =   3.07e-01 m/s
+- Delta: 1.3 % — the bilinear regrid minorly smooths the peak.
+
+Both still match the PNG colourbar of ±0.3 m/s; 3.03e-01 is the more precise match (the bilinear sampler happens to hit a point slightly off the peak).
+
+**Full run.**
+```
+PASS | williamson2/cubed_sphere | L2=2.42e-04, Linf=1.83e-03,
+       v_ll_Linf=3.03e-01 (pre-regrid 3.07e-01)
+```
+All 3 SW CS tests still PASS.
+
+**Reporting-only, same as iter-740/741.**  No pass/fail threshold; iter-743+ sets one after the first fix lands.
+
+**Cumulative process takeaway (iter-740 → 741 → 742).**  Three iters in a row, each corrected by the next Codex stop-time review, to get the sentinel right.  Each step was a real improvement (closer to the visible artifact), but only iter-742 matches the plotted field exactly.  Going forward: **NEW metrics should be validated against the plotted artifact BEFORE being committed.**  The pipeline is:
+1. Identify the field the PNG plots (inspect the plotting callsite).
+2. Replicate its exact computation path (averaging + rotation + regrid + any further processing).
+3. Compute the metric on that exact quantity.
+4. Verify the metric value matches the PNG colourbar/range visually before claiming correctness.
+The iter-742 value 3.03e-01 matches the iter-717/739 visible ±0.3 m/s — **independently confirmed**.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
