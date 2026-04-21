@@ -4056,6 +4056,122 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"See docs/fv3_fortran_fidelity_review.md iter-761 "
                  f"for rationale."))
 
+    def test_fortran_dir_aware_corners_is_known_broken(self):
+        """Iter-765c regression sentinel: the
+        `fortran_dir_aware_corners=True` opt-in path in
+        `fv3_sw_tendencies` is KNOWN BROKEN on the canonical W2
+        matrix config — enabling it makes W2 v_ll_Linf 12× worse
+        (0.159 → 1.88+ m/s) and h_L2 3.7× worse.
+
+        Iter-765 added this opt-in as a diagnostic for future cube-
+        corner halo investigations, but left it unguarded by any
+        regression test.  Codex iter-765b stop-time: if a future
+        edit accidentally FIXES this path (or makes the blowup
+        smaller), we want to know — it would mean the iter-765
+        falsification is no longer valid and mode A might be
+        reducible via dir-aware fills after all.
+
+        This test pins the blowup amplitude.  It FIRES if:
+        (a) someone repairs the dir-aware path and v_ll_Linf drops,
+            meaning iter-765's falsification conclusion no longer
+            applies and the path should be re-examined as a candidate;
+        (b) someone removes or renames the kwarg, which would break
+            future diagnostic opt-in flows.
+
+        If this test fires with a smaller v_ll_Linf, the action is
+        to RE-INVESTIGATE whether dir-aware fills can reduce mode A
+        with whatever change was made — NOT to silently update the
+        pin.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+        import legoesm.core.operators_cdgrid as ocd
+        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid as sw_mod
+
+        # Monkey-patch fv3_sw_tendencies to set dir_aware=True.  We
+        # cannot pass this via config (the config does not expose it);
+        # this reflects the opt-in status of the diagnostic.
+        orig_fn = ocd.fv3_sw_tendencies
+
+        def dir_aware_fn(*args, **kwargs):
+            kwargs["fortran_dir_aware_corners"] = True
+            return orig_fn(*args, **kwargs)
+
+        ocd.fv3_sw_tendencies = dir_aware_fn
+        sw_mod.fv3_sw_tendencies = dir_aware_fn
+        try:
+            # Iter-761 matrix config — the canonical Fortran-faithful
+            # path where we ALSO opt into dir-aware corners.
+            n = 36
+            dt = 300.0
+            n_steps = int(86400 / dt)
+            div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
+            grid = create_cubed_sphere(n=n, use_duogrid=False)
+            cfg = CDGridShallowWaterConfig(
+                hyperdiff_coeff=0.0,
+                div_damp=div_damp,
+                boundary_fix=True,
+                damp_v=0.06,
+                nord_v=2,
+            )
+            model = FV3EdgeShallowWaterModel(grid, config=cfg)
+            cdgrid = model.cdgrid
+            sw = williamson_test2(grid)
+            u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+            u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+            v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+            state = FV3EdgeShallowWaterState(
+                h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+            model.set_initial_mass(state)
+            for _ in range(n_steps):
+                state = model.step(state, dt)
+        finally:
+            # Always restore.
+            ocd.fv3_sw_tendencies = orig_fn
+            sw_mod.fv3_sw_tendencies = orig_fn
+
+        # Extract v_north and regrid.  If the path ever starts
+        # producing a reasonable solution, this max goes down from
+        # its current ~1.88 m/s to near the default 0.159 m/s.  The
+        # test asserts max|v_ll| stays > 1.0 m/s, which FIRES if:
+        #   - the dir-aware path is accidentally repaired (good
+        #     signal to re-examine the hypothesis),
+        #   - the opt-in is silently disabled by a refactor.
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge)
+        ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+        u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
+                       + np.asarray(state.u_d)[:, :, 1:])
+        v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
+                       + np.asarray(state.v_d)[:, 1:, :])
+        v_north = np.asarray(sa_4edge) * u_cc + np.asarray(ca_4edge) * v_cc
+        v_north_linf = float(np.max(np.abs(v_north)))
+
+        # Iter-765b measured v_north_Linf ~ 1.88 m/s with dir-aware
+        # fills.  Pin at > 1.0 m/s; if the dir-aware path is
+        # repaired or disabled, this test fires.
+        self.assertGreater(
+            v_north_linf, 1.0,
+            msg=(f"fortran_dir_aware_corners=True produced "
+                 f"max|v_north|={v_north_linf:.3e} m/s — UNEXPECTEDLY "
+                 f"SMALL.  Iter-765 falsified this path at 12× blowup "
+                 f"(~1.88 m/s).  A new smaller value means either:\n"
+                 f"  (a) the dir-aware path has been repaired — "
+                 f"re-examine whether it now reduces mode A and can "
+                 f"replace the default 2-pt-avg, OR\n"
+                 f"  (b) the opt-in was silently disabled — restore "
+                 f"the kwarg threading in _arakawa_lamb_gradient and "
+                 f"fv3_sw_tendencies per iter-765b."))
+
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
         that `boundary_fix=True` in `fv3_sw_tendencies` delivers a
