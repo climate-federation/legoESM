@@ -1866,6 +1866,50 @@ v_d max error location (shape (6, n+1, n) = (6, 25, 24)):
 
 **Deliverable.**  `scripts/diag_iter732_fb_c24_phase_bisect.py` is checked in as the step-1 regression sentinel.  A future iter that believes it fixed the C24 FB blowup must re-run this script and observe the v_d max|Δ|/max|ref| drop from 5.10e-2 to O(1e-4) or better BEFORE claiming success.  Matching the step-60 blowup number alone is insufficient (iter-730 lesson).
 
+### Iter-733 — correct iter-732 "phase bisect" (Codex stop-time finding)
+
+Codex stop-time review on iter-732 flagged: **"the new 'phase bisect' diagnostic does not actually bisect phases."**  Correct.  Iter-732's script printed per-variable drifts that were (a) only measurable AFTER the full `_d_sw_native` ran (since c_sw / p_grad_c do not touch u_d / v_d), and (b) included C-grid intermediates (uc_new=41 m/s) which are a velocity magnitude not a drift.  The "bisect" label was wrong.
+
+**Iter-733 rewrite.**  `scripts/diag_iter732_fb_c24_phase_bisect.py` now performs a TRUE bisect in four stages:
+
+(A) **FB outer structure.**  Confirm c_sw and p_grad_c do not update u_d / v_d.  Therefore 100 % of step-1 u_d/v_d drift is attributable to `_d_sw_native`.  Printed explicitly.
+
+(B/C) **`_d_sw_native` inner decomposition.**  d_sw6's wind update is `u_d_new = u_d + (ke_diff_u + fy_vort) * rdx_u`.  W2 IC satisfies geostrophic balance so `ke_diff_u + fy_vort` should CANCEL to O(truncation).  The script SEPARATELY evaluates:
+- `|ke_diff_u|` (from `_bgrid_ke_transport` via `ke_corner[:,:-1,:]-ke_corner[:,1:,:]`),
+- `|fy_vort|` (from `_corner_vorticity` + `fv_tp_2d`),
+- `|ke_diff_u + fy_vort|` (the residual that drives the wind update).
+
+(D) **Per-face argmax localisation** of the residual.
+
+(E) **Per-face argmax localisation** of each component separately, so residual localisation can be compared against each component.
+
+**Numerical results at C24, W2, dt=300s, step 1, damp_v=0:**
+
+| Quantity                           | max\|·\|  | argmax (equatorial faces)     |
+|------------------------------------|-----------|-------------------------------|
+| ke_diff_u                          | 1.29e+5   | (23, 0) — NORTH-WEST cell edge|
+| fy_vort                            | 3.79e+5   | (0, 0)  — SOUTH-WEST corner   |
+| **ke_diff_u + fy_vort (residual)** | **3.68e+5**| (1, 0|n-1) — one cell in from W |
+| ke_diff_v                          | 1.06e+5   | (23, 0)                       |
+| fx_vort                            | 4.39e+5   | (0, 0)                        |
+| **ke_diff_v - fx_vort (residual)** | **5.36e+5**| (24, 0) — NW cube vertex      |
+| **residual / \|ke_diff_u\|**       | **2.86**  |                               |
+| **residual / \|ke_diff_v\|**       | **5.07**  |                               |
+
+**Diagnosis (concrete, not overclaimed).**  The residual is LARGER than either component.  On a Fortran-faithful port the ratio should be O(1e-3) or smaller; here it is O(1) → the delicate cancellation between the KE-gradient term and the vorticity-flux term that d_sw6 relies on for W2 geostrophic balance is NOT happening.  The two terms are each O(1e5) while their sum is also O(1e5), meaning they are NOT near-equal-and-opposite as Fortran's formulation requires.
+
+**Candidate root-cause areas (unchanged from iter-732 list).**
+1. `_bgrid_ke_transport` — `ke_corner` at D-grid vertices.
+2. `_corner_vorticity` + `fv_tp_2d` zeta transport — yields `fy_vort`.
+3. `_d_sw1_recompute_ut_vt` — the C-grid transport velocity feeds (2) via ut/vt.
+4. **NEW (iter-733):** the sum-formula stencil itself.  Fortran d_sw6 combines `ke_diff` and `fy_vort` at the SAME D-grid edge stagger; if Python has a stagger-shift off by half a cell, the cancellation is broken even with correct components.  Line 1904 does `ke_corner[:, :-1, :] - ke_corner[:, 1:, :]` and line 1910 does `fv_tp_2d` of cell-centre `zeta_abs` using B-grid-corner-derived `crx/cry`.  A stagger / orientation mismatch between these two routes is a concrete possibility.
+
+**Sanity caveat.**  The script's inner replay reproduces `u_d_new - u_d0` to within 7.1e-2 (≈ 8 % of the drift magnitude).  The residual is not purely from the replay — some comes from replay-vs-`_d_sw_native` routing details.  The O(1) residual / component ratio is nevertheless large enough to conclude the cancellation is broken; what it does NOT conclusively locate is which of the four candidate areas above is responsible.
+
+**Deliverable.**  `scripts/diag_iter732_fb_c24_phase_bisect.py` is the TRUE bisect.  Iter-734+ attacks ONE of the four candidate areas at a time with its own targeted test.  The residual-ratio metric (`resid / |ke_diff|`) is the primary regression gate: a claimed fix that doesn't bring it below ~1e-2 has NOT fixed d_sw6 geostrophic balance.
+
+**Process note.**  Iter-732's "bisect" claim was premature.  Iter-733 scales it back to what the evidence supports AND fixes the script to actually do the job.  Going forward: name diagnostics for what they *measure*, not what the next iter *hopes* they'll prove.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
