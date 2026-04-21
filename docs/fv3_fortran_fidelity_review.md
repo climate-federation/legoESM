@@ -1095,3 +1095,20 @@ No source-code changes; structural lock only.  Regression suite now at **135 tes
 - ⏳ d_sw5 1569: still needs audit.
 - ⏳ d_sw5 1644: still needs audit.
 - ⏳ d_sw5 1742: still needs audit.
+
+### Iter-689 — fix iter-688 structural lock to match repo's actual indexing form
+
+Codex stop-time review flagged iter-688's lock as "blind to the repo's actual indexing form".  Correct: the previous regex `ut\s*\[\s*[^,\]]*,\s*1\s*\]` only matched 2D indexing `ut[i, 1]`, but the repo uses 3D indexing `ut[:, i, j]` (face dim first).  The regex did not match real production code.
+
+**Fix** (iter-689): rewrote the lock with two-signature check requiring BOTH in the same file:
+1. `\bdt\s*/\s*6(?:\.|\b)|\bdt6\s*=` — the `dt/6.` constant from Fortran line 1442, unique to d_sw4 corner fix (present as `dt6 = dt/6.` OR `dt / 6.` OR `dt/6.` variants).
+2. `ut\[[^\]]+,\s*1\s*\] + ut\[[^\]]+,\s*0\s*\]` (and symmetric reverse) — the adjacent-cell ut-sum in the repo's `ut[:, ?, ?]` form.
+
+Also strips Python comments and string literals before matching, so `# no dt/6 here` in a docstring doesn't trigger.
+
+**Verified**:
+- Injected Fortran-transliterated fix using repo indexing: `ke = ke.at[:, 1, 1].set(dt6 * ((ut[:, 1, 1] + ut[:, 1, 0]) * u_d[:, 1, 1]))` → lock fires (`dt6=True, ut_adj=True`).  iter-688 regex would have MISSED this (pattern `ut[i, 1]` without face dim).
+- Legitimate d2a2c_vect patterns like `ut[:, row, jlo-1:jhi] + ut[:, row+1, jlo-1:jhi]` → NOT flagged (slice index, not adjacent-literal sum).
+- Comment `# no dt/6 here` in isolation → NOT flagged (stripped before grep).
+
+No source-code changes; test-only correction.  Regression suite unchanged at 135 tests; all pass.

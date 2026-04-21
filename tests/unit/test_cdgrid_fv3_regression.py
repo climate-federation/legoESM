@@ -8394,40 +8394,76 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                  f"ignoring uc."))
 
     def test_d_sw4_corner_ke_fix_absent_from_python_source(self):
-        """Iter-688: lock the Fortran-fidelity invariant that d_sw4's
+        """Iter-688/689: lock the Fortran-fidelity invariant that d_sw4's
         corner-KE fix (sw_core.F90:1441-1466) is ABSENT in Python.
 
         Fortran applies the corner fix only when
         `.not. bounded_domain .or. .not. duogrid`.  In Python production
         (duogrid + bounded_domain both TRUE), the gate is FALSE and the
-        block is SKIPPED.  Python has NO counterpart for this block —
-        verified by inspection — matching Fortran's SKIP behaviour.
+        block is SKIPPED.  Python has NO counterpart — verified by
+        inspection — matching Fortran's SKIP behaviour.
 
-        Structural lock: grep the Python source for the Fortran-signature
-        formulas (`ut + ut) * u`, `vt + vt) * v`, `ut + vt) * u`) from
-        Fortran line 1444 et al.  Accidentally reintroducing the fix
-        would place such patterns in Python source and fail this test.
+        Iter-689 fix (Codex finding on iter-688): the previous pattern
+        `ut[i, 1] + ut[i, 0]` assumed 2D indexing `ut[i, j]`.  The repo
+        actually uses 3D indexing `ut[:, i, j]` (face dim first).  The
+        regex did not match the real codebase form, so the lock was
+        blind.  This version uses two signatures that BOTH must trigger:
 
-        This closes iter-683 backlog entry "line 1441 STILL NEEDS AUDIT".
+        1. `dt / 6` or `dt/6` — distinctive constant `dt6 = dt/6.` at
+           Fortran line 1442, unique to d_sw4's corner fix.
+        2. A SUM of two `ut[...]` references with adjacent-cell j-indices
+           (e.g. `ut[..., X, k] + ut[..., X, k-1]` or the 1/0 literal
+           pair), in Python's 3D indexing form `ut[:, X, Y]`.
+
+        Both signatures must appear in the SAME file to flag a
+        reintroduction of the fix.  Either alone is too noisy.
         """
         from pathlib import Path
-        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
-        # Signature substrings (tolerating whitespace) that would appear
-        # if someone transliterated Fortran lines 1444-1464:
-        signatures = [
-            # (ut(1,1) + ut(1,0)) * u(1,1) — Fortran SW corner fix
-            'ut[1, 1]',    # index literal occurring at Fortran SW corner
-            'ut[1, 0]',    # adjacent j=0 cell only referenced at this spot
-        ]
-        # Two distinct hits in the same file would indicate the fix is
-        # being reintroduced.  But the indices `[1,1]` and `[1,0]` are
-        # common — use a stronger signature: the SUM `ut[?, 1] + ut[?, 0]`
-        # which is specific to the d_sw4 corner-fix formula.
         import re
-        # Pattern: ut[i, 1] + ut[i, 0] or ut[i, j+1] + ut[i, j] at a
-        # cube-corner cell.  False positives possible but rare.
-        pattern = re.compile(
-            r'\but\s*\[\s*[^,\]]*,\s*1\s*\]\s*\+\s*ut\s*\[\s*[^,\]]*,\s*0\s*\]')
+        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
+
+        # Signature 1: the dt/6. constant unique to d_sw4 corner fix.
+        # Allow `dt/6`, `dt / 6`, `dt6 = dt / 6`, etc.
+        dt6_pattern = re.compile(r'\bdt\s*/\s*6(?:\.|\b)|\bdt6\s*=')
+
+        # Signature 2: a SUM `ut[:, A, B] + ut[:, A, C]` where B/C are
+        # adjacent (0/1, 1/0, or literal-based).  Covers the 3D indexing
+        # form `ut[:, i, j]` that the repo actually uses.  Also covers
+        # trailing-index scalar form `ut[:, 1, 1] + ut[:, 1, 0]`.
+        ut_adj_pattern = re.compile(
+            r'\but\s*\[[^\]]+,\s*1\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*0\s*\]'
+            r'|\but\s*\[[^\]]+,\s*0\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*1\s*\]')
+
+        def strip_comments_and_strings(src):
+            """Remove Python comments and string contents so the signature
+            check only fires on code, not doc-strings or comments that
+            happen to mention `dt/6`."""
+            out = []
+            i = 0; in_str = None; in_triple = None
+            while i < len(src):
+                ch = src[i]
+                nxt3 = src[i:i+3]
+                if in_triple:
+                    if nxt3 == in_triple:
+                        in_triple = None; i += 3; out.append('"""'); continue
+                    i += 1; continue
+                if in_str:
+                    if ch == '\\' and i+1 < len(src):
+                        i += 2; continue
+                    if ch == in_str:
+                        in_str = None; out.append('"'); i += 1; continue
+                    i += 1; continue
+                if nxt3 in ('"""', "'''"):
+                    in_triple = nxt3; i += 3; out.append('"""'); continue
+                if ch in ('"', "'"):
+                    in_str = ch; out.append('"'); i += 1; continue
+                if ch == '#':
+                    # skip to end of line
+                    while i < len(src) and src[i] != '\n':
+                        i += 1
+                    continue
+                out.append(ch); i += 1
+            return ''.join(out)
 
         offenders = []
         for py_file in src_dir.rglob('*.py'):
@@ -8435,17 +8471,21 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 text = py_file.read_text()
             except Exception:
                 continue
-            if pattern.search(text):
+            stripped = strip_comments_and_strings(text)
+            has_dt6 = bool(dt6_pattern.search(stripped))
+            has_ut_sum = bool(ut_adj_pattern.search(stripped))
+            if has_dt6 and has_ut_sum:
                 offenders.append(str(py_file.relative_to(src_dir)))
 
         self.assertEqual(offenders, [],
-            msg=(f"Found `ut[?, 1] + ut[?, 0]` in {offenders} — this "
-                 f"matches the Fortran d_sw4 corner KE fix signature at "
-                 f"sw_core.F90:1444.  That block is gated on "
-                 f"`.not. bounded_domain .or. .not. duogrid` in Fortran "
-                 f"and must stay ABSENT in the Python duogrid-production "
-                 f"path.  If this is an intentional addition, update the "
-                 f"test signature pattern or the iter-688 invariant."))
+            msg=(f"Found BOTH the `dt/6` constant AND a `ut[:, ?, 1] + "
+                 f"ut[:, ?, 0]` adjacent-sum pattern in {offenders} — "
+                 f"jointly these signatures reproduce the Fortran d_sw4 "
+                 f"corner KE fix (sw_core.F90:1441-1466).  That block is "
+                 f"gated on `.not. bounded_domain .or. .not. duogrid` in "
+                 f"Fortran and must stay ABSENT in the Python "
+                 f"duogrid-production path.  If this is an intentional "
+                 f"addition, update the iter-688/689 invariant."))
 
     def test_bgrid_ke_transport_gold_file_non_constant(self):
         """Gold-file regression test: run `_bgrid_ke_transport` on a
