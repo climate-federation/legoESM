@@ -808,7 +808,8 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 # Arakawa-Lamb gradient at D-grid corners
 # ==============================================================================
 
-def _arakawa_lamb_gradient(B, cdgrid, padded=None):
+def _arakawa_lamb_gradient(B, cdgrid, padded=None,
+                           fortran_dir_aware_corners=False):
     """4-point Arakawa-Lamb gradient at D-grid corners.
 
     Returns the gradient in physical (e_x, e_perp) coordinates using a
@@ -826,6 +827,15 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None):
     padded : jax.Array, optional
         Pre-padded field (6, n+2, n+2[, nlev]).  Skips internal halo
         exchange when provided (stage-level packing).
+    fortran_dir_aware_corners : bool, default False
+        Iter-765: when True, replace the 2-pt-avg cube-corner halo
+        cells in the padded field with Fortran-faithful directional
+        inner fills (sw_core.F90:3856-3915 halo=1 inner subset —
+        iter-764d).  x-gradient component uses dir=1 inner fill;
+        y-gradient component uses dir=2 inner fill.  Only affects
+        the 4 cube-vertex halo cells per face; the remaining halo
+        is untouched.  See iter-764/765 review-doc entries.  False
+        preserves the legacy 2-pt-avg behaviour.
 
     Returns
     -------
@@ -834,20 +844,62 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None):
     """
     B_pad = padded if padded is not None else _pad_halo_auto(B, cdgrid)
 
-    if B.ndim == 3:
-        B_sw = B_pad[:, :-1, :-1]
-        B_se = B_pad[:, 1:, :-1]
-        B_nw = B_pad[:, :-1, 1:]
-        B_ne = B_pad[:, 1:, 1:]
+    if fortran_dir_aware_corners:
+        # Build two padded variants differing only at the 4 cube-
+        # corner halo cells per face.  For each corner position,
+        # Fortran's dir=1 inner fill uses the i=0-column value one-j-
+        # inward; dir=2 inner fill uses the j=0-row value one-i-
+        # inward.  The x-gradient stencil uses dir=1; y-gradient
+        # uses dir=2.
+        # SW: padded[:, 0, 0]  — dir1 ← padded[:, 0, 1], dir2 ← padded[:, 1, 0]
+        # SE: padded[:, 0, -1] — dir1 ← padded[:, 0, -2], dir2 ← padded[:, 1, -1]
+        # NW: padded[:, -1, 0] — dir1 ← padded[:, -1, 1], dir2 ← padded[:, -2, 0]
+        # NE: padded[:, -1, -1]— dir1 ← padded[:, -1, -2], dir2 ← padded[:, -2, -1]
+        # (dims: pad is (6, n+2, n+2); here index -1 means n+1.)
+        p = B_pad
+        if B.ndim == 3:
+            p1 = p.at[:, 0, 0].set(p[:, 0, 1])
+            p1 = p1.at[:, 0, -1].set(p[:, 0, -2])
+            p1 = p1.at[:, -1, 0].set(p[:, -1, 1])
+            p1 = p1.at[:, -1, -1].set(p[:, -1, -2])
+            p2 = p.at[:, 0, 0].set(p[:, 1, 0])
+            p2 = p2.at[:, 0, -1].set(p[:, 1, -1])
+            p2 = p2.at[:, -1, 0].set(p[:, -2, 0])
+            p2 = p2.at[:, -1, -1].set(p[:, -2, -1])
+            B_sw_x = p1[:, :-1, :-1]; B_se_x = p1[:, 1:, :-1]
+            B_nw_x = p1[:, :-1, 1:];  B_ne_x = p1[:, 1:, 1:]
+            B_sw_y = p2[:, :-1, :-1]; B_se_y = p2[:, 1:, :-1]
+            B_nw_y = p2[:, :-1, 1:];  B_ne_y = p2[:, 1:, 1:]
+        else:
+            p1 = p.at[:, 0, 0, :].set(p[:, 0, 1, :])
+            p1 = p1.at[:, 0, -1, :].set(p[:, 0, -2, :])
+            p1 = p1.at[:, -1, 0, :].set(p[:, -1, 1, :])
+            p1 = p1.at[:, -1, -1, :].set(p[:, -1, -2, :])
+            p2 = p.at[:, 0, 0, :].set(p[:, 1, 0, :])
+            p2 = p2.at[:, 0, -1, :].set(p[:, 1, -1, :])
+            p2 = p2.at[:, -1, 0, :].set(p[:, -2, 0, :])
+            p2 = p2.at[:, -1, -1, :].set(p[:, -2, -1, :])
+            B_sw_x = p1[:, :-1, :-1, :]; B_se_x = p1[:, 1:, :-1, :]
+            B_nw_x = p1[:, :-1, 1:, :];  B_ne_x = p1[:, 1:, 1:, :]
+            B_sw_y = p2[:, :-1, :-1, :]; B_se_y = p2[:, 1:, :-1, :]
+            B_nw_y = p2[:, :-1, 1:, :];  B_ne_y = p2[:, 1:, 1:, :]
+        dB_raw_x = (B_se_x + B_ne_x) - (B_sw_x + B_nw_x)
+        dB_raw_y = (B_nw_y + B_ne_y) - (B_sw_y + B_se_y)
     else:
-        B_sw = B_pad[:, :-1, :-1, :]
-        B_se = B_pad[:, 1:, :-1, :]
-        B_nw = B_pad[:, :-1, 1:, :]
-        B_ne = B_pad[:, 1:, 1:, :]
+        if B.ndim == 3:
+            B_sw = B_pad[:, :-1, :-1]
+            B_se = B_pad[:, 1:, :-1]
+            B_nw = B_pad[:, :-1, 1:]
+            B_ne = B_pad[:, 1:, 1:]
+        else:
+            B_sw = B_pad[:, :-1, :-1, :]
+            B_se = B_pad[:, 1:, :-1, :]
+            B_nw = B_pad[:, :-1, 1:, :]
+            B_ne = B_pad[:, 1:, 1:, :]
 
-    # Raw 4-point finite-difference quantities
-    dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)  # east − west
-    dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)  # north − south
+        # Raw 4-point finite-difference quantities
+        dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)  # east − west
+        dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)  # north − south
 
     # Precomputed 2×2 gradient matrix (3D Cartesian → face-local)
     c00 = _broadcast_metric(cdgrid.grad_c00, dB_raw_x)
@@ -1354,6 +1406,7 @@ def fv3_sw_tendencies(
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
     zero_mean_correction=False,
+    fortran_dir_aware_corners=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1391,8 +1444,12 @@ def fv3_sw_tendencies(
     KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
     B = KE + g * (h + h_s)
 
-    # (d) Arakawa-Lamb gradient at D-grid corners
-    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
+    # (d) Arakawa-Lamb gradient at D-grid corners.
+    # Iter-765: optionally use Fortran-faithful halo=1 inner dir-aware
+    # corner fill (dir=1 for x-gradient, dir=2 for y-gradient) per
+    # sw_core.F90:3856-3915.  See iter-764d for scope details.
+    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(
+        B, cdgrid, fortran_dir_aware_corners=fortran_dir_aware_corners)
 
     # (e) Corner winds from halo-exchanged cell-centre velocities.
     # Both vorticity and gradient use haloed cell-centre data, giving

@@ -1197,3 +1197,33 @@ These DIFFER from each other — Fortran's directional asymmetry is explicit.  P
 **Iter-764 deliverable.**  `scripts/diag_iter764_fortran_fill_4corners.py` checked in.  Evaluates the halo=1 INNER subset of Fortran's `fill_4corners` formula (the `q(0,0) = q(0,1)` fill only; Fortran's companion `q(-1,0) = q(0,2)` outer fill is NOT evaluated because our halo=1 layout has no corresponding outer cell).  Measures the inner-fill discrepancy vs Python's 2-pt-avg.  Corroborates iter-763b's sensitivity evidence with the best Fortran-formula comparison achievable at halo=1.  No source-code change to production.  Matrix + ocean baselines unchanged.
 
 **Process.**  24th-25th iter in iter-752-764b chain.  Two Codex stop-time catches on iter-764 — first (iter-763b) for using a proxy instead of computing the Fortran formula, second (iter-764b) for overclaiming a halo=1 subset as "the Fortran formula."  Lesson: when porting a Fortran subroutine that uses multi-cell halo fills, be explicit about which cells your shallower-halo environment can cover.
+
+### Iter-765 — dir-aware Fortran corner fill HYPOTHESIS FALSIFIED
+
+Per iter-764d's plan, iter-765 implements the halo=1 Fortran inner dir-aware corner fill in `_arakawa_lamb_gradient` via a new `fortran_dir_aware_corners` kwarg (default False).  When True, the x-gradient stencil uses dir=1 fill (`padded[0, 0] ← padded[0, 1]`) at the 4 cube-corner halo cells per face, and the y-gradient stencil uses dir=2 fill (`padded[0, 0] ← padded[1, 0]`).
+
+**Direct measurement on W2 C36 1d, iter-761 matrix config:**
+
+| Config                         | h_L2     | v_ll_Linf |
+|--------------------------------|----------|-----------|
+| default (2-pt-avg corners)     | 2.07e−4  | 1.59e−01  |
+| dir-aware fills (iter-765 test)| **7.75e−4**| **1.90e+00 (BLOWUP)** |
+
+**Dir-aware fills make W2 12× WORSE, not better.**  The h_L2 also degrades 3.7×.  Hypothesis iter-763/764's sensitivity evidence → Fortran-faithful → mode-A reduction is **FALSIFIED**.
+
+**Why the hypothesis failed.**  Fortran's fill_4corners is used **before PPM sweep operators** — `dir=1` is applied before the X-SWEEP so the PPM 4-point stencil (q(-2), q(-1), q(0), q(1)) has a consistent cube-corner value CONSISTENT with the sweep direction.  Fortran's `dir=2` is applied before Y-SWEEP.  These fills are SWEEP-SPECIFIC — they encode "what value should the cube corner take IF I'm about to slide a 1D PPM stencil across it in direction X".
+
+The A-L gradient is **not a sweep** — it's a simultaneous 4-point 2D stencil at each D-grid corner.  Applying a sweep-specific fill to a non-sweep stencil is algorithmically inconsistent: the stencil expects a "direction-neutral" value (which is precisely what the 2-pt-avg provides as the midpoint of the two sweep-specific values), not a direction-biased one.
+
+**Iter-765 source-code status.**  The `fortran_dir_aware_corners` kwarg is RETAINED in `_arakawa_lamb_gradient` and `fv3_sw_tendencies` (default False) as an opt-in diagnostic path — future iters investigating cube-corner halo behaviour can toggle it.  The matrix default and production path are UNCHANGED (still 2-pt-avg).  Matrix + ocean + 173 regression tests all PASS.
+
+**Broader lesson.**  Sensitivity evidence (iter-763/764: fill choice matters by ~3% of B scale) does NOT imply "Fortran's fill recipe is drop-in compatible with our A-L operator."  Fortran's fill was designed for an operator-split PPM (dir=1 then dir=2, NEVER simultaneously), while our A-L is simultaneous in both directions.  Adopting Fortran's fill in a non-Fortran operator context introduces algorithmic mismatch rather than fixing the artifact.
+
+**Iter-766+ next directions.**
+- Investigate whether the W2 cube-corner artifact has a different structural driver than halo fill.  Candidates: the non-orthogonal metric treatment at the 3-face vertex, halo-rotated vector components via `pad_halo_vector`, or A-L gradient stencil itself at cube corners.
+- Alternative: design a DIRECTION-NEUTRAL Fortran-inspired fill (e.g., the mean of dir=1 and dir=2 values — which is our existing 2-pt-avg).  iter-765 confirms 2-pt-avg was actually well-chosen for the A-L operator.
+- Consider that mode A at 0.159 m/s may be a FUNDAMENTAL LIMIT of the A-L production path, and further reduction requires adopting the FB chain (currently blocked on h=3 halo infrastructure).
+
+**Iter-765 deliverable.**  Source: `fortran_dir_aware_corners` kwarg added to `_arakawa_lamb_gradient` and `fv3_sw_tendencies`, default False.  Matrix + ocean baselines unchanged.  All regression tests pass.
+
+**Process.**  28th iter in iter-752-765 chain.  First iter with an actual code path WIRED (even if opt-in), and first clean negative result (no Codex stop-time catch).  Falsification of the hypothesis is a useful outcome that constrains iter-766+ directions.
