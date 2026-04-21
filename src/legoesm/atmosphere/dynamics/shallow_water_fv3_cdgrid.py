@@ -517,7 +517,15 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 eff_nord_v = (min(2, self.config.nord)
                               if self.config.nord_v < 0
                               else self.config.nord_v)
-                da_min_c = jnp.min(self.cdgrid.base.area)
+                # Fortran gridstruct%da_min_c = min(area_c) where
+                # area_c is the B-GRID CORNER (dual-cell) area, NOT
+                # the A-grid cell area.  Defined at
+                # fv_grid_utils.F90:743:
+                #   global_mx_c(area_c(is:ie,js:je), ..., da_min_c, ...)
+                # In our cdgrid convention, `area_corner` (shape
+                # (6, n+1, n+1)) is the B-grid dual-cell area.  Iter-
+                # 755b fix: use area_corner, not base.area.
+                da_min_c = jnp.min(self.cdgrid.area_corner)
                 damp_step = (self.config.damp_v * da_min_c) ** (eff_nord_v + 1)
                 du_step, dv_step = fv3_del6_vorticity_damping(
                     state_new.u_d, state_new.v_d,

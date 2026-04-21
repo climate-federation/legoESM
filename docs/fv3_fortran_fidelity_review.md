@@ -769,3 +769,31 @@ if self.config.damp_v > 0.0:
 **Status vs Ralph stopping condition.**  True Fortran-faithful best = 0.213 m/s is still a meaningful 30 % reduction from the 0.303 m/s baseline stable since iter-505, but visible W2 artifacts persist at ~0.2 m/s.  Stopping condition NOT met.
 
 **Process.**  Sixth Codex stop-time catch in iter-752-755 chain.  Tendency-vs-post-step is a real semantic difference that only a careful reading of Fortran's d_sw6 structure catches.  The refactor is small (5 lines moved) but the resulting semantic correctness is important.  Iter-754's 45% reduction claim must be retracted; the true Fortran-faithful reduction is 30%.
+
+### Iter-755b — fix da_min_c to use B-grid corner area (Codex stop-time)
+
+Codex stop-time review on iter-755 flagged: **"The new post-step del6 path still diverges from the repo's Fortran reference."**  Correct.
+
+**Root cause.**  Fortran's `gridstruct%da_min_c` is the minimum of the B-GRID CORNER (dual-cell) area `area_c`, NOT the A-grid cell area.  From `fv_grid_utils.F90:743`:
+```fortran
+call global_mx_c(area_c(is:ie,js:je), is, ie, js, je,
+                 Atm%gridstruct%da_min_c, Atm%gridstruct%da_max_c)
+```
+
+My iter-755 wiring used `jnp.min(self.cdgrid.base.area)` (A-grid cell-centre area).  Wrong metric — a cubed-sphere quirk where A-grid and B-grid areas are similar in magnitude but not identical.
+
+**Fix.**  Use `jnp.min(self.cdgrid.area_corner)` — the B-grid dual-cell area already stored in cdgrid (shape `(6, n+1, n+1)`).
+
+**Re-measured (post-fix):**
+
+| Config                        | v_ll_Linf (iter-755b) | iter-755 | Δ          |
+|-------------------------------|------------------------|----------|------------|
+| baseline                      | 3.03e-01              | 3.03e-01 | 0          |
+| del6 damp_v=0.06 nord_v=1     | 2.33e-01              | 2.32e-01 | +0.4 %     |
+| **del6 damp_v=0.06 nord_v=2** | **2.14e-01 (-29.4%)** | 2.13e-01 | +0.5 %     |
+
+Numerical impact ~0.5 % because A-grid `base.area` and B-grid `area_corner` are very close in magnitude on a cubed sphere.  Fortran-fidelity improvement is STRUCTURAL, not quantitative.
+
+**Matrix + ocean baselines unchanged** with `damp_v=0` default.
+
+**Process.**  Seventh Codex stop-time catch in iter-752-755b chain.  A-grid vs B-grid metric confusion is exactly the kind of fidelity drift the iter-752 metric-review sequence should have caught earlier.  With iter-755b in place, all metric inputs to the del6 path now match Fortran's convention.
