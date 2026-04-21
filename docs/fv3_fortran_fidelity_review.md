@@ -1135,3 +1135,18 @@ Codex stop-time review flagged iter-689's lock as "still missing non-1/0 corner 
 The backreference requirement is critical: without `\1`/`\2`, the pattern `ut[..., \w+] + ut[..., \w+-1]` would match unrelated index pairs like `ut[..., i] + ut[..., j-1]` — too many false positives.
 
 No source-code changes; regex widening only.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-691 — add proximity requirement to d_sw4 structural lock
+
+Codex stop-time review flagged iter-690's regex as "still false-positives on non-corner `ut` sums".  Investigation confirmed: grepping the current repo revealed 4 production matches of the `ut[:, ?, 1] + ut[:, ?, 0]` sum pattern in `src/legoesm/core/fv3_sw_core.py` — all inside **legitimate d2a2c_vect 4-cell averaging**, not the d_sw4 corner KE fix.  The iter-689/690 two-signature "both in same file" check happens to pass today only because the Python source doesn't contain `dt/6` anywhere.  If someone ever adds an unrelated `1/6` coefficient (e.g. for a 6th-order filter), the lock would false-positive.
+
+**Fix** (iter-691): add PROXIMITY requirement.  Both signatures must appear within 20 source lines of each other, matching the likely scope of a transliterated d_sw4 corner-fix block (Fortran lines 1442-1466 ≈ 25 F90 lines ≈ 20 Python lines).
+
+**Verified** against 3 test cases:
+- Real d2a2c_vect code (`ut` sum alone, no `dt6` nearby) → NOT flagged.
+- Injected corner fix (`dt6` on line 3, `ut` sum on line 4) → flagged ✓.
+- Distant `dt6` (line 3) and `ut` sum (line 67) > 20 lines apart → NOT flagged.
+
+The proximity filter makes the lock principled: only co-located occurrences — characteristic of an actual d_sw4 corner-fix block — trigger.  Isolated appearances of either signature alone are accepted.
+
+No source-code changes; test-only strengthening.  Regression suite unchanged at 135 tests; all pass.

@@ -8476,6 +8476,14 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 out.append(ch); i += 1
             return ''.join(out)
 
+        def find_line_numbers(pattern, text):
+            lines = text.split('\n')
+            out = []
+            for ln, line in enumerate(lines, start=1):
+                if pattern.search(line):
+                    out.append(ln)
+            return out
+
         offenders = []
         for py_file in src_dir.rglob('*.py'):
             try:
@@ -8483,9 +8491,28 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
             except Exception:
                 continue
             stripped = strip_comments_and_strings(text)
-            has_dt6 = bool(dt6_pattern.search(stripped))
-            has_ut_sum = bool(ut_adj_pattern.search(stripped))
-            if has_dt6 and has_ut_sum:
+            dt6_lines = find_line_numbers(dt6_pattern, stripped)
+            ut_adj_lines = find_line_numbers(ut_adj_pattern, stripped)
+            # Iter-691 (Codex finding on iter-690): the previous joint
+            # check "both signatures in the same file" is too loose —
+            # the repo legitimately contains `ut[...] + ut[...]` sums
+            # inside d2a2c_vect's 4-cell average (fv3_sw_core.py:2996
+            # region) and WOULD false-positive if someone ever added an
+            # unrelated `dt/6` constant to the file.  Require PROXIMITY:
+            # both signatures must appear within 20 source lines of
+            # each other, matching the likely scope of a transliterated
+            # d_sw4 corner-fix block (Fortran lines 1442-1466 → ~25 F90
+            # lines → ~20 Python lines).
+            PROX = 20
+            joint = False
+            for a in dt6_lines:
+                for b in ut_adj_lines:
+                    if abs(a - b) <= PROX:
+                        joint = True
+                        break
+                if joint:
+                    break
+            if joint:
                 offenders.append(str(py_file.relative_to(src_dir)))
 
         self.assertEqual(offenders, [],
