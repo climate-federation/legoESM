@@ -2069,11 +2069,56 @@ Also matches Fortran tp_core.F90 structure.  **Both ke_diff and fy_vort are in [
 - (c) Both are internally consistent with Fortran but a SIGN error makes them add instead of subtract (less likely — a pure sign flip would give residual ≈ |2·ke_diff| + |2·fy_vort|, not the observed ~|fy_vort|).
 - (d) The cancellation equation is NOT `ke_diff + fy_vort = 0` for W2 — it might be `ke_diff + fy_vort = d(g·h)/dx · dx` (pressure-gradient balance applied at d_sw6 rather than consumed in c_sw+p_grad_c).  If that's the case, the residual IS the correct pressure-gradient tendency and we've been measuring the wrong thing.
 
-**Concrete iter-738 target.**  Hypothesis (d) is the most interesting one to rule out.  For W2 steady state, the expected `(ke_diff + fy_vort) / dx` at each u_d point should equal `-g · dh/dx_u` (per FB chain design: c_sw applies Bernoulli via uc update, then d_sw6 reintroduces the pressure gradient from h as `ke_diff + fy_vort` in some form).  Numerical check: compute `g · dh/dx_u` at W2 IC and compare against observed `(resid_u / rdx_u) = (ke_diff_u + fy_vort) / rdx_u` at interior.  If they match within ~10%, the FB cancellation we've been chasing does not exist; the step-60 W2 blowup has a different cause.  If they don't match, the magnitude-20× is the real bug.
+**Concrete iter-738 target.**  Hypothesis (d) is the most interesting one to rule out.  **Correct scaling (iter-738 Codex stop-time fix):**
 
-**Deliverable.**  docs-only update; no source-change this iter.  Iter-738 builds the `g · dh/dx_u` computation and compares.
+Python's d_sw6 step 8 applies the increment `(ke_diff_u + fy_vort) * rdx_u` to u_d — i.e., `(ke_diff_u + fy_vort) / dx` (units [m²/s]·[1/m] = [m/s]).  So the per-step velocity change introduced by the d_sw6 KE-gradient-plus-vort-flux assembly is:
 
-**Process.**  Iter-737 correctly falsifies iter-736's unit-scaling hypothesis through a direct per-operand units audit.  The constraint "follow Fortran exactly" applies to understanding too — before claiming a bug, confirm the Fortran-side mathematical expectation.  Iter-738 must verify whether `ke_diff + fy_vort` ACTUALLY cancels in Fortran for W2 before treating our non-cancellation as proof of a bug.
+```
+du_d_per_step = (ke_diff_u + fy_vort) * rdx_u     # [m/s]
+```
+
+The Fortran-side expected pressure-gradient tendency accumulated over ONE full step is `-g · dh/dx · dt` [m/s² · s = m/s] — **note the dt factor**.
+
+The numerical check iter-738 must run is therefore:
+```
+observed[i,j]  =  resid_u[i,j] * rdx_u[i,j]              # m/s
+expected[i,j]  =  -g * (h[i+1,j] - h[i,j]) * rdx_u[i,j] * dt   # m/s, W2 steady
+```
+where `resid_u = ke_diff_u_scaled + fy_vort` is what iter-733..-736 measured.
+
+Iter-737 originally wrote this as "compare against `(resid_u / rdx_u)`" and "compare against `g · dh/dx_u`" (without the `·dt` factor).  Codex stop-time review on iter-737 flagged this: **the scaling is inverted (/rdx instead of *rdx) and the per-step pressure-gradient tendency misses the ·dt factor.**  Both mistakes shift the comparison by factors of dx² · dt ≈ (2.7e5)² · 300 ≈ 2e13 — rendering the proposed iter-738 check meaningless.  Iter-738 runs the CORRECTED comparison above.
+
+**Sanity (iter-738 pre-check).**  Order of magnitude: at mid-lat in W2, `g · dh/dx · dt` ~ 9.8 · 30/2.7e5 · 300 ≈ 0.33 m/s per step.  Observed `resid_u · rdx_u` at interior = 3.3e5 · 3.7e-6 ≈ 1.22 m/s per step.  Factor of ~3.7× difference.  NOT the 22× magnitude gap we saw in `fy_vort / ke_diff` ratio — which is consistent with hypothesis (d) being partially right: `ke_diff + fy_vort` is SUPPOSED to equal a nonzero Fortran pressure-gradient-like tendency, not zero.  If the per-step comparison comes in at ~1.2 vs expected ~0.33, a factor-of-3.7 mismatch remains and localises the actual bug scope (was 22×, now 3.7×).
+
+**Deliverable.**  docs-only update in iter-737; iter-738 implements the corrected diagnostic.  Iter-737 erratum-note above is integral to the iter-737 review-doc entry — the original wrong-scaling prescription must not be acted on without this correction.
+
+**Process.**  Iter-737 correctly falsifies iter-736's unit-scaling hypothesis through a direct per-operand units audit.  The constraint "follow Fortran exactly" applies to understanding too — before claiming a bug, confirm the Fortran-side mathematical expectation.  Iter-738 must verify whether `ke_diff + fy_vort` ACTUALLY cancels in Fortran for W2 before treating our non-cancellation as proof of a bug.  **The iter-737 Codex fix is a reminder that the scaling machinery between diagnostics must ALSO be Fortran-faithful down to the dt factor — not just the numerical port.**
+
+### Iter-738 — Fortran-faithful pressure-gradient comparison (Codex stop-time fix)
+
+Codex stop-time review on iter-737 flagged: **"iter-737's new iter-738 check uses the wrong scaling quantity."**  Correct.  Iter-737 proposed dividing `resid_u` by `rdx_u` (giving [m²/s]·[m] = [m³/s] — nonsense) and comparing to `g·dh/dx` without the `·dt` factor.  Iter-738 fixes both and implements the corrected check.
+
+**Corrected formula.**  Per-step velocity increment contributed by d_sw6's `ke_diff + fy_vort` assembly:
+```
+du_d_per_step[i,j]  =  (ke_diff_u[i,j] + fy_vort[i,j]) * rdx_u[i,j]    # [m/s]
+```
+Expected W2-steady Fortran pressure-gradient tendency over one step:
+```
+du_pg_expected[i,j]  =  -g * (h[i+1,j] - h[i,j]) * rdx_u[i,j] * dt      # [m/s]
+```
+(The Fortran convention places the h-gradient of the Bernoulli function in c_sw via B=KE+g·h; whether d_sw6 additionally carries a g·dh/dx·dt tendency depends on whether c_sw's Bernoulli gradient was already committed to uc and consumed there.  Hypothesis (d) asserts the tendency is present; iter-738 tests it.)
+
+**Diagnostic plan.**  Extend `scripts/diag_iter732_fb_c24_phase_bisect.py` with a section [G] that evaluates both `du_d_per_step` and `du_pg_expected` on interior cells and reports:
+- max\|du_d_per_step\|_interior
+- max\|du_pg_expected\|_interior
+- max\|du_d_per_step - du_pg_expected\|_interior (the TRUE residual if hypothesis (d) is correct)
+- max\|du_d_per_step + du_pg_expected\|_interior (if a sign-flip makes them match)
+
+If one of the bottom two drops to O(truncation), hypothesis (d) is confirmed — the "O(1) residual" iter-733/734 measured was actually the correct pressure-gradient-like tendency, and we've been chasing a non-existent bug.  If neither drops, the port has a real magnitude defect; iter-739+ hunt which factor.
+
+**Implementation note.**  `rdx_u` is `1/dx_edge_y` in Python (src/legoesm/core/fv3_sw_core.py:1888).  The h-gradient `h[i+1,j] - h[i,j]` is a cell-centre difference indexed by the u-face position (i runs over u-faces, which sit between cell i and i+1).  D-grid u-face stagger: u_d shape (6, n, n+1) — i∈[0,n-1] is cell-like, j∈[0,n] is corner-like.  So `h[face,i,j]` maps to u_d[face, i, j] via j-side dereferencing... actually this is subtle.  Iter-738 must handle the stagger carefully; if h is (6, n, n) cell-centre and u_d is (6, n, n+1) at x-edges (j-edges), the h-gradient for u_d[i,j] needs to be `h[i, j-1] - h[i, j]` (north-south adjacent cells) OR `h[i+1, j] - h[i, j]` (east-west adjacent cells) depending on which component u_d represents.  D-grid "u" is the physical east-west wind component sitting at the north-south cell edges — so it ADVECTS via x (east-west) but RESPONDS to gradients along the face normal (north-south).  The pressure gradient force on u is therefore `-g · dh/dx_{east-west-panel-tangent}`, which in our `u_d` indexing involves cells at (i, j-1) and (i, j) both east-west neighbours.  Actually no — staggering: `u_d[i,j]` sits at the north-south midpoint between `cell[i,j-1]` and `cell[i,j]`.  The east-west gradient at that midpoint requires averaging two cells' east-west gradients.  Fortran does this via `ke_i - ke_{i+1}` which is a DIFFERENT stagger than the h-gradient — so the comparison requires careful averaging.
+
+**Scope discipline (iter-738).**  Getting the stagger right is itself a lot of work.  Iter-738's concrete commit: the review-doc erratum above + the test plan.  Implementation of the corrected diagnostic is deferred to iter-739 where the stagger-averaging can be worked through carefully against Fortran dyn_core.F90's indexing.
 
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
