@@ -1452,7 +1452,22 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         l2 = float(jnp.sqrt(jnp.sum(err**2 * area) / jnp.sum(h_exact**2 * area)))
         linf = float(jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(h_exact)))
         norms = {"l2": l2, "linf": linf}
-        notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+        # Iter-740 Fortran-fidelity gate: W2 v-wind Linf metric.  The
+        # iter-717 user-reported and iter-739 visually-confirmed
+        # mode-4 polar artifact in v is not captured by the h-only
+        # L2/Linf above; the artifact is < 1 % of the wind-speed
+        # magnitude so wind_speed snapshots do not show it.  v_d
+        # exact for W2 steady state is the IC (no change), so we
+        # compare against u_0*cos(lat_edge_y)*(-sin_angle_edge_y)
+        # applied to the CDGrid metrics used at iter-739 line 1192.
+        u_0 = 2.0 * float(np.pi) * float(grid.radius) / (12.0 * 86400.0)
+        v_d_exact = (-cdgrid.sin_angle_edge_y
+                     * u_0 * jnp.cos(cdgrid.lat_edge_y))
+        v_d_final = state.v_d
+        v_linf = float(jnp.max(jnp.abs(v_d_final - v_d_exact)))
+        norms["v_linf"] = v_linf
+        notes = (f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}, "
+                 f"v_Linf={v_linf:.2e}")
     elif test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_cgrid(grid, days * 86400.0)
         norms = compute_error_norms_cgrid(state, exact, grid)

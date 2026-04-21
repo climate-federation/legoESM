@@ -2151,6 +2151,32 @@ Iter-727 through iter-738 all targeted the FB-chain, not production.  The produc
 
 **Process takeaway.**  Iter-727 through iter-738 pursued the FB chain under the user's iter-722 directive "no Arakawa-Lamb + RK3".  That directive still stands, but iter-739 confirms the FB chain is not within reach to replace A-L+RK3 in the near term (task 3 blocked on upstream structural issues per iter-730/731, and the iter-733..-738 diagnostic chain narrowed but didn't localise the blocker).  In the interim, the production path remains the only runnable path and its W2 artifact is the user-facing blocker.  Iter-740+ should explicitly choose between (a) continuing FB investigation with a concrete Fortran-reference comparison and accepting multi-iter latency before any production impact, or (b) directly attacking the A-L+RK3 W2 artifact per iter-729's deferred xtp_u east-edge port candidate OR the iter-732 NW-cube-vertex localisation (which also applies to production via `pad_halo_vector` at `operators_cdgrid.py:1397`).
 
+### Iter-740 — add W2 v-wind Linf gate to test matrix (regression sentinel)
+
+Iter-739 noted that the test-matrix pass criterion on W2 CS is height-only (`L2=2.42e-04, Linf=1.83e-03`), which MET the gate while the v-wind mode-4 artifact was clearly visible.  Iter-740 closes that gap by adding a v-wind Linf metric to the W2 CS error-norm block.
+
+**Change.**  `scripts/run_atmosphere_test_matrix.py::run_shallow_water` at the `test_num == 2 and tc.grid_type == "cubed_sphere"` branch (around line 1445) now additionally computes:
+```python
+u_0 = 2.0 * pi * grid.radius / (12.0 * 86400.0)
+v_d_exact = -cdgrid.sin_angle_edge_y * u_0 * jnp.cos(cdgrid.lat_edge_y)
+v_linf = float(jnp.max(jnp.abs(state.v_d - v_d_exact)))
+```
+The formula matches the W2 IC for v_d (line 1192 in the same file) — W2 steady state means `v_d(t) == v_d(0)`, so the IC is the exact solution at all times.  The result is reported in the notes string as `v_Linf=<value>`.
+
+**Measured baseline.**  Running the updated matrix on W2 CS (`--only sw --grid cubed_sphere --quick --test williamson2`):
+```
+PASS | shallow_water/williamson2/cubed_sphere | L2=2.42e-04, Linf=1.83e-03, v_Linf=2.92e-01
+```
+**v_Linf = 2.92e-01 m/s**.  This matches the iter-717 user-reported and iter-739 visually-observed ±0.3 m/s mode-4 artifact amplitude exactly.  Note: 0.29 m/s on a reference max |v_d| of ~32 m/s (from the -sin_angle_edge_y projection of 38.61 m/s) is 0.9 % relative, which is why the h-based Linf=1.83e-3 does not catch it.
+
+**Pass/fail policy.**  Iter-740 does NOT fail the test when v_Linf is above a threshold — the gate is REPORTING-ONLY for now.  Rationale: (1) the current ~0.3 m/s baseline is the known-broken level, so any threshold would either fail EVERY run (threshold ≤ 0.29) or miss future worsening (threshold > 0.29); (2) a regression-based pass/fail needs a stored baseline with explicit tolerance that future iters can argue against.  Iter-741+ can set the threshold once the production path's v_Linf floor is reduced.
+
+**Regression sentinel usage.**  Future iters claiming to improve the W2 artifact must re-run this matrix and report a smaller v_Linf.  Iters that accidentally worsen the artifact will see v_Linf grow in the notes line — automated early warning even if h-based pass criteria still meet.
+
+**No source numerical change.**  The W2 run itself is unchanged; only the error-norm reporting is extended.  Matrix still runs in 3.5 s (unchanged).  All 3 SW CS tests still PASS.
+
+**Iter-741+ routing (unchanged from iter-739).**  The binary choice remains: (a) multi-iter FB investigation with Fortran-reference comparison, or (b) direct A-L+RK3 W2 attack via iter-729 xtp_u port / iter-732 NW-vertex localisation.  Iter-740's metric supports EITHER: whichever iter produces a smaller v_Linf on this gate has made concrete progress on the user-reported blocker.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
