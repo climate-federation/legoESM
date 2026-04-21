@@ -1937,6 +1937,57 @@ if d2_bg > 1e-10 or dddmp > 1e-10 or d4_bg > 1e-10:
 
 **Evidence integrity takeaway.**  Iter-732 mis-labelled the diagnostic.  Iter-733 fixed the label and the logic but omitted a code-path that was actually active.  Iter-734 closes the last gap — the replay now matches `_d_sw_native` exactly.  Future diagnostics that "replay" production functions must either (a) call the production function itself and compare intermediates via dual-use return tuples, OR (b) assert that the replay matches the production output to machine precision BEFORE drawing conclusions.  The 1.9e-6 sanity value is now the required floor for this kind of diagnostic.
 
+### Iter-735 — Fortran d_sw6 unit investigation: vt = u·dx on entry
+
+Per iter-733 candidate #4 ("stagger/orientation mismatch between ke_diff stencil and fy_vort"), iter-735 traces the Fortran d_sw6 formula against its inputs.
+
+**Fortran reference points.**
+- `sw_core.F90:1937` (d_sw6 wind update):
+  ```fortran
+  u(i,j) = vt(i,j) + ke(i,j) - ke(i+1,j) + fy(i,j)
+  v(i,j) = ut(i,j) + ke(i,j) - ke(i,j+1) - fx(i,j)
+  ```
+  This is **REPLACEMENT**, not an increment.  `u(i,j)` is overwritten with the sum, no pre-existing `u + ...` on the RHS.
+- `sw_core.F90:1584` (d_sw5, called immediately before d_sw6):
+  ```fortran
+  vt(i,j) = u(i,j)*dx(i,j)
+  ut(i,j) = v(i,j)*dy(i,j)     ! line 1589
+  ```
+  So on ENTRY to d_sw6, `vt` holds `u_old · dx` — CIRCULATION form [m²/s], NOT velocity [m/s].
+- `dyn_core.F90:1017-1018` (kee computed from d_sw3 outputs):
+  ```fortran
+  kee(i,j,:) = (ubbtemp(i,j,:)*vbbtemp(i,j,:))
+  kee(i,j,:) = 0.5*(kee(i,j,:) + ubb(i,j,:)*vbb(i,j,:))
+  ```
+  where `vbbtemp` / `vbb` are B-grid Courant numbers in [m] = dt/2·velocity (d_sw3 line 1273) and `ubbtemp` / `ubb` are the y-transported / x-transported velocities in [m/s].  Product [m·(m/s)] = [m²/s] — circulation/flux.
+- `fv_tp_2d(vort, ...)` at `sw_core.F90:1861` produces vorticity fluxes `vortfluxx`, `vortfluxy`.  `vort = wk + f0 = rel_vort + planetary_vort` has units [1/s].  `crx_adv/cry_adv` are dimensionless Courant numbers * mass, `xfx_adv/yfx_adv` are `dt·ut` [m²/s]... (see tp_core.F90 for final units).  The output `vortfluxx` has circulation units [m²/s], aligning with the rest.
+
+**Observation.**  Fortran's d_sw6 assembly line 1937 has ALL four RHS terms (vt, ke_diff_i, ke_diff_{i+1}, fy) in circulation units [m²/s].  The output `u` is therefore in circulation form [m²/s], NOT [m/s].  Downstream usage — del6_vt_flux adding to `u` at line 1992, dyn_core exiting d_sw — preserves this convention.  The conversion back to velocity must happen somewhere after d_sw exits (unit restoration TBD for iter-736).
+
+**Python `_d_sw_native` step 8 (src/legoesm/core/fv3_sw_core.py:1914-1918):**
+```python
+u_d_new = u_d + (ke_diff_u_scaled + fy_vort) * rdx_u
+v_d_new = v_d + (ke_diff_v_scaled - fx_vort) * rdy_v
+```
+This is INCREMENTAL with `·rdx_u` (1/dx) division on the RHS.
+
+**Algebraic compatibility check.**  If Fortran stores `u` in circulation form (u·dx) during d_sw6 and restores elsewhere, Python's form requires:
+```
+u_d_new (velocity) = [u_d·dx + ke_diff + fy_vort] / dx
+                   = [Fortran_u_output / dx]
+```
+which matches IF Python's ke_diff / fy_vort are **also** in circulation form.
+
+**Candidate-4 narrowing.**  Fortran's ke_diff and fy_vort are in [m²/s] (circulation).  Our Python's `ke_corner` comes from `_bgrid_ke_transport` which follows the Fortran `kee = ubbtemp*vbbtemp + ubb*vbb` recipe using our versions of ubbtemp/vbbtemp/ubb/vbb.  If our B-grid Courant ubb/vbb are correctly in [m] and transported winds are in [m/s], our `ke_corner` is in [m²/s] as well.  **Needs concrete per-variable unit check in iter-736.**
+
+**What this iter resolves and does NOT resolve.**
+- Resolves: the literal Fortran d_sw6 formula is a REPLACEMENT with vt in circulation form; Python's incremental form with `·rdx_u` is algebraically equivalent IFF our ke/fy are in matching circulation units.  Candidate #4 is not an algebraic bug per se.
+- Does NOT resolve: whether our Python's `ke_corner` and `fy_vort` actually have circulation units matching Fortran's, OR whether there's a factor-of-`dx` scaling difference.  The iter-733/734 O(1) residual ratio is consistent with a missing/extra `dx` scaling factor in EITHER the `ke_diff` or the `fy_vort` branch.  A factor of `1/dx ~ 1/(R·dθ) ~ 1/(6.4e6·0.065) ~ 2.4e-6` at C24 would explain a 4-5 order-of-magnitude scaling error — matching our observed 2.87-5.10 residual/component ratio.
+
+**Iter-735 deliverable.**  This review-doc entry.  No source change.  Explicitly flags "Python ke_diff and fy_vort units vs Fortran circulation units" as the single most promising iter-736 next investigation.  The 2.87-5.10 residual/component ratio from iter-733/734 is consistent with — but does not uniquely prove — a dx scaling factor mismatch; iter-736 must construct a minimal test that computes ke_diff both ways (with and without `·dx` scaling) and observes which matches Fortran within round-off on a simple W2 input.
+
+**Process discipline (iter-731 + iter-733 + iter-735).**  This iter deliberately does NOT claim "the bug is a dx factor." That's a hypothesis matching the data; confirming it requires an actual numerical test.  The Ralph directive "do not improvise" applies to interpretations as strictly as to source code.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
