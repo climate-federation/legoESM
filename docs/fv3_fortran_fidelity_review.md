@@ -1645,6 +1645,23 @@ No production behavior change for existing callers (all pass `duogrid` which sup
 
 Source change: +13 lines in `_interp_strip` + 11 lines of validation in `pad_halo_4d`.  Regression suite unchanged at 165 tests; all pass.
 
+### Iter-725 — pin the iter-723/724 public `pad_halo_4d(halo=3)` surface
+
+Codex stop-time review flagged iter-723/724: "public `pad_halo_4d(halo=3)` behavior changed without updating the pinned test surface".  Correct: the iter-723 change went from raising `NotImplementedError` to returning a working padded array, and iter-724 made `interp_offsets` work with 4D; but no test locked the new behavior.  A future refactor could silently regress any of these changes.
+
+**Fix** (iter-725): added `TestPadHalo4DHalo3Iter725` in `tests/unit/test_halo.py` with 6 tests covering the iter-723/724 surface:
+
+1. `test_halo3_4d_shape` — `pad_halo_4d(halo=3)` returns `(6, n+6, n+6, nlev)`.
+2. `test_halo3_4d_matches_per_level_2d` — 4D output bit-identical to per-level 2D.
+3. `test_halo3_4d_with_offsets_matches_per_level` — 4D + `interp_offsets` bit-identical to per-level 2D + `interp_offsets` (iter-724 `_interp_strip` fix).
+4. `test_halo3_wrong_offsets_shape_rejected` — wrong-shape offsets raise `ValueError` matching `"halo=3 expects"` (iter-724 validation guard).  Covers `(6, 4, n)` h1-shape, `(6, 4, 3, n+1)` wrong grid size, `(6, 4, 2, n)` h2-shape.
+5. `test_halo1_and_halo2_paths_unchanged` — regression guard that iter-723/724 are additive.
+6. `test_halo2_4d_with_offsets_no_longer_crashes` — locks the latent pre-iter-724 bug closure: halo=2 4D + offsets + no-duogrid pre-iter-724 crashed with broadcast error; now works.
+
+All 6 tests pass.  The iter-723/724 public surface is now pinned; a future refactor that breaks any of these properties will fail CI.
+
+No source-code changes in iter-725; pinned test surface only.  Regression suite now at **171 tests** (165 + 6 new lock tests); all pass.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).

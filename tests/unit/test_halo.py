@@ -2,12 +2,13 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.halo import (
     CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
-    pad_halo, pad_halo_vector, _extract_edge_strip,
+    pad_halo, pad_halo_vector, pad_halo_4d, _extract_edge_strip,
 )
 
 
@@ -277,3 +278,125 @@ class TestEdgeStripExtraction:
         data = jnp.arange(6 * 4 * 4, dtype=jnp.float32).reshape(6, 4, 4)
         strip = _extract_edge_strip(data, 5, NORTH)
         assert jnp.allclose(strip, data[5, :, -1])
+
+
+class TestPadHalo4DHalo3Iter725:
+    """Iter-725 lock: pins the iter-723/724 public-API change where
+    `pad_halo_4d(halo=3)` went from raising `NotImplementedError` to
+    being a working operation.  Codex stop-time review flagged the
+    prior change as "public behavior changed without updating the
+    pinned test surface"; this class is the pinned surface.
+
+    Locks:
+    1. `pad_halo_4d(halo=3)` returns a padded array of shape
+       `(6, n+6, n+6, nlev)`.
+    2. The result is bit-identical to per-level 2D `pad_halo(halo=3)`.
+    3. The same holds WITH `interp_offsets` provided (iter-724 fix
+       to `_interp_strip` that broadcasts weights along trailing dims).
+    4. Wrong-shape interp_offsets raises `ValueError` (iter-724 guard).
+    5. halo=1 and halo=2 4D paths UNCHANGED (iter-723/724 are additive;
+       pins against accidental regression of the working paths).
+    """
+
+    def _data(self, n=8, nlev=3, seed=725):
+        rng = np.random.default_rng(seed)
+        return jnp.asarray(rng.standard_normal((6, n, n, nlev)))
+
+    def test_halo3_4d_shape(self):
+        n = 8
+        data = self._data(n=n)
+        padded = pad_halo_4d(data, halo=3)
+        assert padded.shape == (6, n + 6, n + 6, 3)
+
+    def test_halo3_4d_matches_per_level_2d(self):
+        """halo=3 4D must produce bit-identical output to applying
+        halo=3 2D on each level separately."""
+        n = 8
+        nlev = 3
+        data = self._data(n=n, nlev=nlev)
+        padded_4d = pad_halo_4d(data, halo=3)
+        per_level = jnp.stack(
+            [pad_halo(data[..., k], halo=3) for k in range(nlev)], axis=-1
+        )
+        diff = float(jnp.max(jnp.abs(padded_4d - per_level)))
+        assert diff < 1e-14, (
+            f"halo=3 4D disagrees with per-level 2D halo=3: "
+            f"max diff = {diff:.3e}"
+        )
+
+    def test_halo3_4d_with_offsets_matches_per_level(self):
+        """halo=3 4D + interp_offsets must produce bit-identical output
+        to per-level 2D + interp_offsets.  Exercises the iter-724
+        `_interp_strip` fix that broadcasts weights along trailing
+        dims.  Pre-iter-724 this crashed with a shape broadcast error.
+        """
+        n = 8
+        nlev = 3
+        data = self._data(n=n, nlev=nlev)
+        rng = np.random.default_rng(726)
+        offsets = jnp.asarray(rng.standard_normal((6, 4, 3, n))) * 0.01
+        padded_4d = pad_halo_4d(data, halo=3, interp_offsets=offsets)
+        per_level = jnp.stack(
+            [pad_halo(data[..., k], halo=3, interp_offsets=offsets)
+             for k in range(nlev)], axis=-1
+        )
+        diff = float(jnp.max(jnp.abs(padded_4d - per_level)))
+        assert diff < 1e-14, (
+            f"halo=3 4D+offsets disagrees with per-level 2D+offsets: "
+            f"max diff = {diff:.3e}"
+        )
+
+    def test_halo3_wrong_offsets_shape_rejected(self):
+        """Iter-724 shape validation: halo=3 requires offsets of shape
+        `(6, 4, 3, n)`; wrong shapes must raise ValueError with a
+        clear message (not crash with a cryptic JAX broadcast error)."""
+        n = 8
+        data = self._data(n=n)
+        # h1-shape offsets with halo=3 — reject.
+        with pytest.raises(ValueError, match="halo=3 expects"):
+            pad_halo_4d(data, halo=3, interp_offsets=jnp.zeros((6, 4, n)))
+        # Wrong grid size.
+        with pytest.raises(ValueError, match="halo=3 expects"):
+            pad_halo_4d(data, halo=3, interp_offsets=jnp.zeros((6, 4, 3, n + 1)))
+        # Wrong depth (h2-shape with 2 depths).
+        with pytest.raises(ValueError, match="halo=3 expects"):
+            pad_halo_4d(data, halo=3, interp_offsets=jnp.zeros((6, 4, 2, n)))
+
+    def test_halo1_and_halo2_paths_unchanged(self):
+        """iter-723/724 are additive; verify halo=1 and halo=2 4D paths
+        still produce the expected output shapes and match per-level 2D
+        (regression guard against accidental breakage of the working
+        paths)."""
+        n = 8
+        nlev = 3
+        data = self._data(n=n, nlev=nlev)
+        for halo in (1, 2):
+            padded_4d = pad_halo_4d(data, halo=halo)
+            assert padded_4d.shape == (6, n + 2 * halo, n + 2 * halo, nlev)
+            per_level = jnp.stack(
+                [pad_halo(data[..., k], halo=halo) for k in range(nlev)],
+                axis=-1,
+            )
+            diff = float(jnp.max(jnp.abs(padded_4d - per_level)))
+            assert diff < 1e-14, (
+                f"halo={halo} 4D regressed against per-level 2D: "
+                f"max diff = {diff:.3e}"
+            )
+
+    def test_halo2_4d_with_offsets_no_longer_crashes(self):
+        """Iter-724 also fixed a latent bug in the `_interp_strip`
+        broadcast that affected halo=2 4D when called with offsets AND
+        without duogrid (suppression).  Lock that the fixed call now
+        works.  Pre-iter-724 this crashed with:
+        'Incompatible shapes for broadcasting: shapes=[(8,), (8, 3)]'.
+        """
+        n = 8
+        nlev = 3
+        data = self._data(n=n, nlev=nlev)
+        rng = np.random.default_rng(727)
+        # halo=2 uses h1-shape offsets (6, 4, n) per existing callers'
+        # precedent in pad_halo.
+        offsets = jnp.asarray(rng.standard_normal((6, 4, n))) * 0.01
+        padded = pad_halo_4d(data, halo=2, interp_offsets=offsets)
+        assert padded.shape == (6, n + 4, n + 4, nlev)
+        assert bool(jnp.all(jnp.isfinite(padded)))
