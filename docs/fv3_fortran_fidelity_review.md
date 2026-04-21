@@ -1157,3 +1157,34 @@ This is evidence that corner-fill choice AFFECTS mode A at the right order of ma
 **Iter-763 deliverable.**  `scripts/diag_iter763_corner_fill_comparison.py` checked in.  Demonstrates cube-corner halo-fill sensitivity on a smooth test field; provides a working hypothesis for mode A at the right order of magnitude.  No source-code change.  Matrix + ocean baselines unchanged.
 
 **Process.**  22nd-23rd iter in iter-752-763b chain.  Two Codex stop-time catches on iter-762 (longitude label) and iter-763 (Fortran-vs-proxy overclaim).  Lesson: when claiming a Fortran comparison, actually compute Fortran's formula or clearly label the alternative as a proxy.
+
+### Iter-764 — Fortran `fill_4corners` actually evaluated (not proxy)
+
+Per iter-763b's Codex-flagged shortcoming, iter-764 ports Fortran's exact `fill_4corners` formula (`sw_core.F90:3856-3915`) with the mapping `Fortran q(Fi, Fj) → Python padded[face, Fi, Fj]` (halo=1).
+
+For halo=1 our Python has ONE cube-corner halo cell per face, and Fortran's formula collapses to:
+- dir=1 (x-sweep): `padded[0, 0] = padded[0, 1]`  (y-inward halo value)
+- dir=2 (y-sweep): `padded[0, 0] = padded[1, 0]`  (x-inward halo value)
+
+These DIFFER from each other — Fortran's directional asymmetry is explicit.  Python's `_fill_corners_h1` uses `0.5*(padded[0, 1] + padded[1, 0])` — the average.
+
+**Measurement on W2-exact KE field** (`scripts/diag_iter764_fortran_fill_4corners.py`):
+
+| Face    | 2-pt-avg | dir=1 (y-inner) | dir=2 (x-inner) | diff (dir1 − py) | diff (dir2 − py) |
+|---------|----------|------------------|------------------|------------------|------------------|
+| face 0-3| 496.62   | 518.28           | 474.95           | **+21.66**        | **−21.66**        |
+| face 4-5| 497.56   | 497.56           | 497.56           | 0                | 0                |
+
+**Key findings:**
+- **Fortran dir=1 differs from Python by 21.66 m²/s²** (max, equatorial faces); dir=2 differs by −21.66.  dir=1 and dir=2 differ from EACH OTHER by 43.33 m²/s² — Fortran's explicit directional asymmetry.
+- **2-pt-avg = 0.5*(dir1 + dir2) verified to machine precision** (symmetry check 5.7e−14) — our averaging IS the midpoint of Fortran's two directional values.
+- **Polar faces 4/5 have zero discrepancy** on this smooth IC — an accident where `padded[0, 1]` and `padded[1, 0]` happen to share the same value at polar-face cube corners.
+- **Relative discrepancy**: 2.91 % of B scale (745 m²/s²), matching the iter-763b proxy estimate.
+
+**Implication.**  A Fortran-faithful A-L gradient would use the dir=1 fill for the x-component (`dB_raw_x`) and dir=2 fill for the y-component (`dB_raw_y`), with cube-corner halo values 22 m²/s² different from Python's current averaged value.  The SIGN of the error is opposite between dir=1 and dir=2, so the x-component and y-component of the gradient at cube-corner cells both shift — in a direction-dependent manner.
+
+**Iter-765+ concrete port.**  Modify `_arakawa_lamb_gradient` to accept two `B_pad` variants (one with dir=1 corner fill, one with dir=2) — or equivalently, construct them internally by selectively overwriting the 4 cube-corner cells per face after pad_halo.  Apply dir=1 values to the x-stencil, dir=2 values to the y-stencil.  Run W2 matrix + regression tests to measure mode A reduction.
+
+**Iter-764 deliverable.**  `scripts/diag_iter764_fortran_fill_4corners.py` checked in.  Honestly computes Fortran's `fill_4corners` formula (not a proxy) and measures the discrepancy.  Confirms iter-763b's sensitivity conclusion with a direct Fortran-formula comparison.  No source-code change to production.  Matrix + ocean baselines unchanged.
+
+**Process.**  24th iter in iter-752-764 chain.  This iter addresses Codex's iter-763 catch (overclaim) by actually computing the claimed Fortran formula.  Evidence is now consistent with the labelling.
