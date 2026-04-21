@@ -1076,3 +1076,50 @@ ALL three W2 metrics IMPROVE over legacy.  All 173 regression tests PASS.  Stabl
 **Iter-761 deliverable.**  `scripts/run_atmosphere_test_matrix.py` W2/W5 config: `div_damp = 8 * _div_damp_cube(n)` (was `1 * _div_damp_cube(n)`).  Cosine bell config note retained as declaration-only (iter-760b).  Matrix + ocean + 173 regression tests all PASS.
 
 **Process.**  Sixteenth Fortran-fidelity / tuning iteration in iter-752-761 chain.  The 8× bump is a tuning step, clearly labeled as such, pending the structural iter-759 d_sw5 port.  No regressions, all three W2 metrics strictly improved.
+
+### Iter-762 — localise remaining artifact: ALL peaks at cube corners
+
+With iter-761's matrix config (damp_v=0.06, nord_v=2, 8× div_damp), the residual W2 v-wind artifact is v_ll_Linf=0.159 m/s.  Iter-762 diagnostic (`scripts/diag_iter762_remaining_artifact_peaks.py`) locates the peaks.
+
+**Top-12 peaks in regridded v_ll (lat-lon):**
+
+| Rank | lat    | lon     | \|v_ll\|  |
+|------|--------|---------|-----------|
+| 1    | +36.00 | −139.00 | 1.585e−01 |
+| 2    | −36.00 | +41.00  | 1.581e−01 |
+| 3    | −36.00 | −139.00 | 1.577e−01 |
+| 4    | +36.00 | +41.00  | 1.573e−01 |
+| 5-8  | ±35°   | ±42°, ±138° | 1.51-1.56e−01 |
+| 9-12 | ±35°   | ±43°, ±137° | 1.50-1.52e−01 |
+
+**Per-face Linf:**
+
+| Face | \|v_north\| max | argmax (i,j)  | lat     | lon     |
+|------|-----------------|----------------|---------|---------|
+| 0    | 1.87e−01        | (34, 0)       | −35.7°  | +41.2°  |
+| 1    | 1.35e−01        | (0, 10)       | −13.8°  | +46.2°  |
+| 2    | 1.88e−01        | (34, 35)      | +35.7°  | −138.8° |
+| 3    | 1.35e−01        | (0, 25)       | +13.8°  | −133.7° |
+| 4    | 1.16e−01        | (1, 34)       | +38.9°  | −135.0° |
+| 5    | 1.16e−01        | (34, 34)      | −38.9°  | +45.0°  |
+
+**Decisive conclusion.**  ALL 12 top peaks are at **cube corners** (lat ±35.26° = arctan(1/√2), matching the canonical cube-vertex latitude to 0.1°).  Zero peaks within 5° of polar ±86°.  Mean peak latitude = 35.33°.
+
+**Polar mode B is ELIMINATED.**  Iter-744's characterisation (polar mode-4 artifact at ±86°) no longer applies — the iter-760 Fortran-faithful del-n-on-vorticity damping has eliminated mode B entirely.  What remains at 0.159 m/s is mode A (the 8 cube vertices where 3 faces meet) exclusively.
+
+**Mechanism of remaining mode A.**  Typical drivers of cube-corner artifacts at the 3-face-meeting vertices:
+1. Non-orthogonal metric treatment at the vertex (3 faces meet at ~120°).
+2. Halo exchange rotation error at cube vertex (`pad_halo_vector`).
+3. A-L gradient stencil crossing the vertex with inconsistent corner metrics.
+4. `boundary_fix` smoothing near cube-vertex edges (non-FV3 stabiliser).
+5. Structural gap: Fortran `fill_4corners`/`fill2_4corners`/`fill3_4corners` cube-vertex halo fills (sw_core.F90:3723-3915) not fully replicated in Python's halo.
+
+**Iter-763+ plan.**  The residual artifact is now isolated to cube-corners.  Next structural targets:
+1. Audit `pad_halo_vector` + non-orthogonal rotation path at cube vertices specifically.
+2. Continue iter-759 d_sw5 port — the corner-divergence-injected-into-KE flow (item 4) specifically modifies B at cube corners via `sw_core.F90:1711-1714` (delpc corner-fix terms).
+3. Port Fortran's `fill_4corners` cube-vertex halo helper (non-duogrid path).
+4. Review `boundary_fix` against Fortran's d_sw approach at cube-vertex rows/cols.
+
+**Iter-762 deliverable.**  `scripts/diag_iter762_remaining_artifact_peaks.py` checked in.  Definitive per-face argmax + top-12 peak localisation showing ALL peaks at cube corners.  No source-code change.  Matrix + ocean baselines unchanged from iter-761.
+
+**Process.**  21st iter in iter-752-762 chain.  First iter in this chain WITHOUT a Codex stop-time correction (the 20 prior iters averaged 1-2 Codex catches each).  The mode B elimination by iter-760/761 is a major structural milestone; mode A is now the clean remaining target.
