@@ -785,3 +785,20 @@ So the iter-666/670 metric fixes have absorbed most of the cube-boundary artifac
 **Iter-672 is an observation**, not a code change.  `boundary_fix=True` remains the default.  The iter-511 lock test (`test_w2_alpha0_c16_1day_boundary_fix_load_bearing`) may need re-calibration at a future iter — the original lock asserted ~2.4× worse without, which is no longer true at C36.  Not re-tuning it yet because lowering the threshold would weaken regression protection.
 
 **Tests**: no source changes.  All 123 regression tests pass.  Diagnostic observation iter.
+
+### Iter-673 — correct iter-672's regime-dependent claim about boundary_fix
+
+**Finding**: iter-672's claim "boundary_fix effect shrunk from 2.4× to 1.04×" was regime-limited — measured at `hyperdiff_coeff=0, div_damp=0, A_h=0` (no dissipation at all).  In the PRODUCTION regime with `hyperdiff_coeff ~ 3.16e16`, `div_damp ~ 2.67e7` (canonical C36), the ratio is still **0.525** (exactly matching iter-511's documented value).  The `test_boundary_fix_is_load_bearing_for_w2_l2` lock test (which uses the production dissipation config) continues to pass with `< 0.7` threshold at `ratio = 0.525`.
+
+**Why the regime-dependence**: hyperdiffusion absorbs some of the interior error, so the RATIO of boundary to interior error is amplified.  In the no-dissipation regime, interior errors are larger and boundary_fix's contribution is proportionally smaller.  In the production regime, hyperdiff cleans up the interior and boundary errors dominate → boundary_fix matters more.
+
+**Corrected interpretation**:
+- In the no-hyperdiff diagnostic regime (iter-672): boundary_fix gives 1.04× L2 improvement.
+- In the PRODUCTION regime with hyperdiff+div_damp (iter-673 = iter-511 = current lock test): boundary_fix gives **2× L2 improvement** (ratio 0.525).
+- Both findings are real, just in different regimes.  The production lock remains valid.
+
+**Implication**: `boundary_fix` is still LOAD-BEARING for production W2 even after iter-666/670's metric fixes.  The iter-666/670 fixes reduced the boundary error SOURCE somewhat, but hyperdiff's interaction makes the net `boundary_fix` contribution still significant in production.  Full removal remains gated on the FB-chain C36 stability (review doc item #2), NOT on incremental metric fixes.
+
+**Retraction**: iter-672's phrasing "boundary_fix effect shrunk 2.4× → 1.04×" was accurate for the no-dissipation probe but misleading as a general claim.  The production lock was never weakened.  This iter-673 entry corrects that framing.
+
+**Tests**: no source changes.  Regression suite still at 123 tests, all pass.  Documentation-only correction.
