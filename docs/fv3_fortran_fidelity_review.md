@@ -835,3 +835,29 @@ Audited Python `_c_sw` (`src/legoesm/core/fv3_sw_core.py`) against `sw_core.F90`
 **Conclusion**: c_sw formulas are Fortran-faithful.  Iter-666/670's metric fixes close the remaining cube-boundary source.  The residual W2 artifact is now fully attributable to architectural item #1 (A-L + RK3 + boundary_fix production path) or architectural item #2 (FB chain C36 instability), NOT to a bug in c_sw.
 
 No source-code changes in iter-675; audit-only.  Regression suite at 123 tests; all pass.
+
+### Iter-676 — per-metric boundary/interior ratio audit (no remaining factor-of-2 bugs)
+
+Iter-666 and iter-670 both fixed cube-boundary metric bugs identified by the same pattern: boundary-value/interior-value ratio far outside [0.5, 2.0] (pre-fix dxc ratio = 0.5, pre-fix area_c at cube vertices ratio = 0.22).  Iter-676 ran this diagnostic programmatically across **every remaining cdgrid metric** at C36 (`scripts/diag_iter676_metric_audit.py`):
+
+| metric                | boundary index           | interior     | ratio | status          |
+|-----------------------|--------------------------|--------------|-------|-----------------|
+| `rdxa`                | i ∈ {0, n-1}             | central 1/2  | 0.99  | clean           |
+| `rdya`                | j ∈ {0, n-1}             | central 1/2  | 0.99  | clean           |
+| `dxa` = 1/rdxa        | i ∈ {0, n-1}             | central 1/2  | 1.01  | clean           |
+| `dya` = 1/rdya        | j ∈ {0, n-1}             | central 1/2  | 1.01  | clean           |
+| `dx_edge_y`           | j ∈ {0, n}               | central 1/2  | 0.80  | geometric       |
+| `dy_edge_x`           | i ∈ {0, n}               | central 1/2  | 0.80  | geometric       |
+| `area_corner` (edges) | west/east/south/north    | central 1/2  | 0.80  | geometric (post iter-670) |
+| `area_corner` (verts) | 4 cube vertices per face | central 1/2  | 0.81  | geometric (post iter-670) |
+| `dxc`                 | i ∈ {0, n}               | central 1/2  | 1.00  | clean (post iter-666) |
+| `dyc`                 | j ∈ {0, n}               | central 1/2  | 1.00  | clean (post iter-666) |
+| `sin_sg[:,:,:,0..3]`  | i ∈ {0, n-1}, edge mid   | central 1/2  | 0.96  | geometric       |
+
+**All ratios fall in [0.80, 1.01]** — none in the factor-of-2 flag zone (<0.5 or >2.0).
+
+The 0.80 ratios on `dx_edge_y` / `dy_edge_x` / `area_corner` reflect genuine cubed-sphere geometry: arc lengths along face boundaries and corner areas at cube edges are smaller than at face centres because of the 2× metric-tensor skew of the equiangular projection near the cube seams.  This 0.80 ratio **matches** the Fortran oracle's computation exactly (iter-670 already locked `area_corner` against Fortran's 8-case ghost-cell extrapolation; iter-671 confirmed `dx_edge_y`/`dy_edge_x` also match).  The sin_sg 0.96 ratio reflects the natural variation of cell-corner angle with latitude on a cubed sphere — both Python and Fortran compute from the same supergrid, so the geometric ratio is the oracle.
+
+**Conclusion**: no additional iter-666/670-style metric fidelity gaps remain.  iter-671's audit-by-code-inspection already reached this conclusion; iter-676 confirms it quantitatively end-to-end by running the diagnostic as a programmatic screen.  If another factor-of-2 bug exists in the codebase it is NOT in the grid metrics — it would have to be in an operator (flux form, coefficient wiring, limiter, halo) that uses the now-clean metrics.  iter-675 already audited the c_sw formulas; earlier Ralph iterations audited d_sw1..d_sw6, d2a2c_vect, and the FB chain wiring.
+
+No source-code changes in iter-676; audit-only.  Regression suite at 123 tests; all pass.  Diagnostic `scripts/diag_iter676_metric_audit.py` committed as a reusable screen for future Ralph iterations.
