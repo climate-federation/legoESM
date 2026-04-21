@@ -1250,6 +1250,20 @@ Non-Try compound statements (`If`/`For`/`While`/`With`) retain the uniform MAY-m
 
 No source-code changes; structural lock correctness fix.  Regression suite unchanged at 135 tests; all pass.
 
+### Iter-698 — orelse bindings must not leak into except handlers
+
+Codex stop-time review flagged iter-697: "the new handler env leaks try-else bindings into except analysis".  Correct: Python's `try/except/else` has mutually exclusive paths — `orelse` runs only on body-success, `except` runs only on body-failure.  iter-697 ran `orelse` on `body_env`, then used that (orelse-mutated) `body_env` to seed handlers.  A name assigned in `orelse` cannot be live in a handler at runtime (NameError), so inheriting it into handler env is a false positive source.
+
+**Fix** (iter-698): snapshot `body_env_for_handlers = dict(body_env)` AFTER body completes but BEFORE orelse runs.  Handlers inherit this snapshot; the orelse-updated `body_env` is used only for the success path.
+
+**Verified** against 4 fixtures:
+- `try: a=ut; except: (a+b)*u; else: b=vt` → NOT flagged *(iter-697 false positive closed)*.
+- `try: a=ut; else: b=vt; return (a+b)*u` (violation on success path) → CAUGHT.
+- iter-697 regression case `try: a=ut; risky(); except: b=vt; (a+b)*u` → still CAUGHT.
+- try/except with ambiguous `a`, `finally` has violation → CAUGHT.
+
+No source-code changes; structural lock correctness fix.  Regression suite unchanged at 135 tests; all pass.
+
 ### Iter-697 — handler env starts from body_env, not pre-try
 
 Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like

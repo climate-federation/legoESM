@@ -8534,28 +8534,36 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                         and isinstance(stmt.targets[0], ast.Name):
                     env[stmt.targets[0].id] = classify_rhs(stmt.value)
                 elif isinstance(stmt, ast.Try):
-                    # Iter-697 (Codex iter-696 finding): `except`
-                    # handlers must see any bindings established by a
-                    # PARTIAL body execution before the exception
-                    # fired.  Starting handler_env from pre-try `env`
-                    # loses those bindings — missed a `a = ut[...];
-                    # raise; except: b = vt; (a + b) * u` pattern.
-                    # Conservative MAY-analysis: handler sees the full
-                    # body env (exception could fire anywhere, incl.
-                    # after the last body stmt).
+                    # Iter-698 (Codex iter-697 finding): orelse runs
+                    # ONLY on body-success, handlers run ONLY on
+                    # body-failure — mutually exclusive paths.  Handlers
+                    # MUST NOT inherit orelse bindings (which would be
+                    # a false positive: a name assigned in orelse can
+                    # never be live inside a handler at runtime).
+                    #
+                    # Correct flow:
+                    #   1. Run body on body_env → state after body.
+                    #   2. SNAPSHOT body_env here → this is the
+                    #      pre-branch state that handlers inherit.
+                    #   3. Run orelse on body_env (mutating it further)
+                    #      → state along the success path.
+                    #   4. Each handler inherits body_env_snapshot
+                    #      (NOT the orelse-updated env).
+                    #   5. MAY-merge body_env (success+orelse) AND each
+                    #      handler env into parent.
+                    #   6. finalbody runs sequentially on merged env.
                     body_env = dict(env)
                     if scan_stmt_list(stmt.body, body_env):
                         return True
+                    # Snapshot handler-visible state BEFORE orelse.
+                    body_env_for_handlers = dict(body_env)
                     orelse = getattr(stmt, 'orelse', [])
                     if orelse and scan_stmt_list(orelse, body_env):
                         return True
-                    # body_env now holds the binding state after a
-                    # successful body (+ orelse if present).
+                    # body_env now holds body + orelse (success path).
                     handler_envs = []
                     for handler in getattr(stmt, 'handlers', []):
-                        # Handler starts from body_env (NOT pre-try env)
-                        # — may see any prefix of body's bindings.
-                        h_env = dict(body_env)
+                        h_env = dict(body_env_for_handlers)
                         if scan_stmt_list(handler.body, h_env):
                             return True
                         handler_envs.append(h_env)
