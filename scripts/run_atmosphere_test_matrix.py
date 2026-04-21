@@ -1452,22 +1452,30 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         l2 = float(jnp.sqrt(jnp.sum(err**2 * area) / jnp.sum(h_exact**2 * area)))
         linf = float(jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(h_exact)))
         norms = {"l2": l2, "linf": linf}
-        # Iter-740 Fortran-fidelity gate: W2 v-wind Linf metric.  The
-        # iter-717 user-reported and iter-739 visually-confirmed
-        # mode-4 polar artifact in v is not captured by the h-only
-        # L2/Linf above; the artifact is < 1 % of the wind-speed
-        # magnitude so wind_speed snapshots do not show it.  v_d
-        # exact for W2 steady state is the IC (no change), so we
-        # compare against u_0*cos(lat_edge_y)*(-sin_angle_edge_y)
-        # applied to the CDGrid metrics used at iter-739 line 1192.
-        u_0 = 2.0 * float(np.pi) * float(grid.radius) / (12.0 * 86400.0)
-        v_d_exact = (-cdgrid.sin_angle_edge_y
-                     * u_0 * jnp.cos(cdgrid.lat_edge_y))
-        v_d_final = state.v_d
-        v_linf = float(jnp.max(jnp.abs(v_d_final - v_d_exact)))
+        # Iter-741 (corrects iter-740 per Codex stop-time review):
+        # iter-740's v_Linf compared raw D-grid v_d against its
+        # analytic IC, but the actual VISIBLE artifact in
+        # snapshots_v.png is the GEOGRAPHIC v_north (m/s) after the
+        # cell-centre averaging + 4-edge-angle rotation performed by
+        # extract_fn below (lines 1232-1238).  v_d and v_north differ
+        # because v_north mixes u_d and v_d errors via the rotation
+        # `v_north = sa_4edge * u_cc + ca_4edge * v_cc`.  The
+        # user-facing blocker is v_north, not v_d.
+        #
+        # The exact solution for W2 geographic v_north is ZERO
+        # everywhere and at all times (steady, purely zonal flow).
+        # Measure max|v_north| directly by replicating extract_fn's
+        # rotation logic on the final state.  This matches the
+        # snapshot used for visual inspection (iter-717, iter-739).
+        u_cc = 0.5 * (np.asarray(state.u_d, dtype=np.float64)[:, :, :-1]
+                      + np.asarray(state.u_d, dtype=np.float64)[:, :, 1:])
+        v_cc = 0.5 * (np.asarray(state.v_d, dtype=np.float64)[:, :-1, :]
+                      + np.asarray(state.v_d, dtype=np.float64)[:, 1:, :])
+        v_north = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
+        v_linf = float(np.max(np.abs(v_north)))
         norms["v_linf"] = v_linf
         notes = (f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}, "
-                 f"v_Linf={v_linf:.2e}")
+                 f"v_north_Linf={v_linf:.2e}")
     elif test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_cgrid(grid, days * 86400.0)
         norms = compute_error_norms_cgrid(state, exact, grid)

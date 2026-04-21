@@ -2177,6 +2177,32 @@ PASS | shallow_water/williamson2/cubed_sphere | L2=2.42e-04, Linf=1.83e-03, v_Li
 
 **Iter-741+ routing (unchanged from iter-739).**  The binary choice remains: (a) multi-iter FB investigation with Fortran-reference comparison, or (b) direct A-L+RK3 W2 attack via iter-729 xtp_u port / iter-732 NW-vertex localisation.  Iter-740's metric supports EITHER: whichever iter produces a smaller v_Linf on this gate has made concrete progress on the user-reported blocker.
 
+### Iter-741 — v_Linf measures a proxy; fix to v_north (Codex stop-time)
+
+Codex stop-time review on iter-740 flagged: **"new W2 sentinel measures a proxy, not the matrix's actual visible artifact."**  Correct.
+
+**What iter-740 measured.**  Raw D-grid `v_d` error relative to the analytic IC `v_d_exact = -sin_angle_edge_y · u_0 · cos(lat_edge_y)`.  Value: 2.92e-01 m/s.
+
+**What the visible artifact IS.**  The snapshot `snapshots_v.png` plots GEOGRAPHIC `v_north` (m/s), computed by `extract_fn` (scripts/run_atmosphere_test_matrix.py:1232-1238) via:
+```python
+u_cc = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
+v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
+v_north = sa_4edge * u_cc + ca_4edge * v_cc     # ← VISIBLE v
+```
+`v_north` mixes u_d and v_d errors via the rotation by `sa_4edge` (~sin of the 4-edge-averaged cell-centre angle).  A pure-`v_d`-error metric captures only one component; a pure-`u_d`-error contribution is invisible to it.
+
+**For W2 steady state, exact v_north = 0 everywhere and at all times** (the flow is purely zonal geographic u, with no geographic v).  So `|v_north|` is itself the error, no subtraction needed.
+
+**Fix (iter-741).**  Replace the v_d-vs-v_d_exact computation with an in-matrix replication of the extract_fn rotation.  Value drops 2.92e-01 → 3.07e-01 (0.29 → 0.31, +6 % larger because the cross-coupling term is now included).  The new metric matches the snapshot colourbar of ±0.3 m/s — confirmed directly.
+
+**Measured baseline (iter-741).**  `v_north_Linf = 3.07e-01 m/s` on W2 CS C36 1 day with `hyperdiff_coeff=_hyperdiff_cube(36)`, `div_damp=_div_damp_cube(36)`, `boundary_fix=True` — the current production settings.  This is the Fortran-fidelity regression sentinel going forward.
+
+**Process discipline.**  iter-740's proxy mistake happened because I conflated "v in the state" (D-grid component) with "v in the snapshot" (geographic component after rotation).  The two differ by an O(sin_angle) cross-term that is precisely the source of cube-face rotation effects on the cubed sphere.  Future sentinels must match the quantity the visual inspection EXPECTS, not the nearest arithmetically-convenient substitute.
+
+**Gate name change.**  `v_Linf` → `v_north_Linf` in the notes string, so the regression-history reader can unambiguously distinguish iter-740's (dropped) metric from iter-741+'s.  First-time readers see the "_north" suffix and know it is the geographic component.
+
+**Reporting only, same as iter-740.**  No pass/fail threshold yet — any fixed threshold either fails every current run or misses worsening.  Iter-742+ sets a threshold after the first concrete fix lands.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
