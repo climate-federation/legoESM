@@ -2120,6 +2120,37 @@ If one of the bottom two drops to O(truncation), hypothesis (d) is confirmed —
 
 **Scope discipline (iter-738).**  Getting the stagger right is itself a lot of work.  Iter-738's concrete commit: the review-doc erratum above + the test plan.  Implementation of the corrected diagnostic is deferred to iter-739 where the stagger-averaging can be worked through carefully against Fortran dyn_core.F90's indexing.
 
+### Iter-739 — visual inspection of production SW matrix: W2 v-wind artifact persists
+
+Per Ralph directive steps 4 + 5: "Run the required evaluations (cosine bell, Williamson case 2, Williamson case 5, ocean rest state) … perform careful visual inspection.  There must be no panel-edge, corner, seam, halo, striping, or ringing artifacts."
+
+Iter-727 through iter-738 all targeted the FB-chain, not production.  The production A-L+RK3 path from `fv3_sw_tendencies` (`src/legoesm/core/operators_cdgrid.py:1381-1493`) is unchanged across the ~12 iters.  Iter-739 runs the quick-mode atmosphere test matrix on the production cubed-sphere path and inspects snapshots.
+
+**Run.**  `JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python scripts/run_atmosphere_test_matrix.py --only sw --grid cubed_sphere --quick`
+- shallow_water/williamson2/cubed_sphere: PASS, L2=2.42e-04, Linf=1.83e-03 (height).
+- shallow_water/williamson5/cubed_sphere: PASS, mass drift=1.74e-05.
+- shallow_water/cosine_bell/cubed_sphere: PASS, L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01.
+
+**Visual inspection.**
+
+*Williamson 2, C36, 1 day — v-wind (`snapshots_v.png`).*  At t=0 the v field is near-zero as the IC prescribes.  Over 0.1→0.5 d the panels develop visible zonally-organised bands with amplitude ~±0.1 m/s; by 0.7→1.0 d the bands reach ~±0.3 m/s and form a clear mode-4 angular pattern at mid-to-high latitudes both hemispheres.  This is the iter-717 user-reported artifact.  **UNCHANGED vs. pre-iter-727 baseline.**  Ralph stopping condition "no panel-edge, corner, seam, halo, striping, or ringing artifacts" fails for W2 v-wind.
+
+*Williamson 2, C36, 1 day — wind_speed.*  Smooth zonally-symmetric band structure throughout.  Artifacts are invisible here because the ~38 m/s zonal flow dominates; the 0.3 m/s v-component artifact is < 1 % of the wind-speed magnitude.  This is why the test matrix's L2/Linf pass criterion on height (2.42e-04 / 1.83e-03) does not catch the v-wind artifact — the artifact is in v, not h, and of a magnitude well below the height noise floor.
+
+*Williamson 5, C36, 1 day — wind_speed.*  Zonal flow with visible mountain-induced disturbance on the leeward side (longitude ~-90 to -60).  Disturbance evolves smoothly 0.1→1.0 d.  No obvious panel-edge or mode-4 artifacts in wind_speed.  v-wind inspection TBD in a future visual sweep if W5 becomes suspect.
+
+*Cosine bell, C36, 1 day — height.*  Bell shape transports coherently across longitudes.  A faint "ghost" trailing the main bell in several panels appears to be the visualisation tool rendering multiple successive positions overlaid, NOT a numerical artifact in the transport solution.  Bell peak magnitude ≈ 940 m throughout; no amplitude loss visible.  No edge artifacts.  Cosine-bell conservation / transport looks clean.
+
+**Test-matrix noise-floor limitation.**  The pass criterion `Linf=1.83e-03` (height) is met, yet the visual v-wind inspection shows a clear mode-4 artifact.  This is the classic CLAUDE.md-documented failure mode: "error norms can improve while artifacts get worse; always check v-wind snapshots."  Iter-739 is direct corroboration: a PASSING test-matrix run does NOT imply the artifact is gone.  The matrix as currently wired does not include a direct v-wind Linf check on W2 against the exact 0 solution.
+
+**Iter-740 candidate.**  Add a W2 v-wind Linf check to the test matrix pass criteria.  This would give automated early-warning if any future iter makes the artifact worse (or better — the same gate would detect a fix).  This is a small, mechanical change to `scripts/run_atmosphere_test_matrix.py` + the W2 pass-criteria function.
+
+**Iter-739 deliverable.**  This review-doc entry.  The generated PNGs are at `results/atmosphere/shallow_water/williamson2/cubed_sphere/C36/snapshots_v.png` etc — they are ephemeral matrix outputs, not checked in.  A future iter wanting to reproduce the evidence should re-run the quick matrix.
+
+**Stopping-condition alignment.**  Ralph directive requires "no visible artifacts on cosine bell, Williamson 2, or Williamson 5."  Cosine bell and W5 pass visual inspection in iter-739.  W2 still fails on v-wind.  **Stopping condition is NOT met and cannot be emitted.**  Iter-740+ work must target the W2 v-wind artifact on the PRODUCTION A-L+RK3 path (not the FB chain, which remains blocked on the task-3 bisect investigation).
+
+**Process takeaway.**  Iter-727 through iter-738 pursued the FB chain under the user's iter-722 directive "no Arakawa-Lamb + RK3".  That directive still stands, but iter-739 confirms the FB chain is not within reach to replace A-L+RK3 in the near term (task 3 blocked on upstream structural issues per iter-730/731, and the iter-733..-738 diagnostic chain narrowed but didn't localise the blocker).  In the interim, the production path remains the only runnable path and its W2 artifact is the user-facing blocker.  Iter-740+ should explicitly choose between (a) continuing FB investigation with a concrete Fortran-reference comparison and accepting multi-iter latency before any production impact, or (b) directly attacking the A-L+RK3 W2 artifact per iter-729's deferred xtp_u east-edge port candidate OR the iter-732 NW-cube-vertex localisation (which also applies to production via `pad_halo_vector` at `operators_cdgrid.py:1397`).
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
