@@ -1344,6 +1344,7 @@ def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
+    boundary_fix_mode="sequential",
     zero_mean_correction=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
@@ -1473,14 +1474,43 @@ def fv3_sw_tendencies(
     # Removing this is gated on the FB chain becoming stable at C36
     # (review-doc item #2: ng=3 halo infrastructure).
     if boundary_fix and n > 2:
-        du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
-        du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))
-        du_cc = du_cc.at[:, :, 0].set(0.5 * (du_cc[:, :, 0] + du_cc[:, :, 1]))
-        du_cc = du_cc.at[:, :, n-1].set(0.5 * (du_cc[:, :, n-1] + du_cc[:, :, n-2]))
-        dv_cc = dv_cc.at[:, 0, :].set(0.5 * (dv_cc[:, 0, :] + dv_cc[:, 1, :]))
-        dv_cc = dv_cc.at[:, n-1, :].set(0.5 * (dv_cc[:, n-1, :] + dv_cc[:, n-2, :]))
-        dv_cc = dv_cc.at[:, :, 0].set(0.5 * (dv_cc[:, :, 0] + dv_cc[:, :, 1]))
-        dv_cc = dv_cc.at[:, :, n-1].set(0.5 * (dv_cc[:, :, n-1] + dv_cc[:, :, n-2]))
+        # Iter-721: `boundary_fix_mode` selector.
+        #   - "sequential" (default, production): 4 in-place passes.
+        #     This produces 0.5x smoothing at non-corner edge cells but
+        #     0.25x smoothing at the 4 face-vertex cells (iter-718
+        #     analysis): corners are averaged BOTH by the row pass AND
+        #     the column pass, giving a 2x2 block average.
+        #   - "snapshot" (experimental, iter-721): compute all 4 edge
+        #     updates from the ORIGINAL du_cc/dv_cc.  Uniform 2-cell
+        #     averaging along every edge including corners (0.5x
+        #     everywhere).  Candidate fix for the mode-4 polar v-wind
+        #     artifact (review-doc item #1) — the sequential
+        #     asymmetry breaks 4-fold cube-vertex rotational symmetry
+        #     and may accumulate into the observed mode-4 pattern.
+        if boundary_fix_mode == "sequential":
+            du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
+            du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))
+            du_cc = du_cc.at[:, :, 0].set(0.5 * (du_cc[:, :, 0] + du_cc[:, :, 1]))
+            du_cc = du_cc.at[:, :, n-1].set(0.5 * (du_cc[:, :, n-1] + du_cc[:, :, n-2]))
+            dv_cc = dv_cc.at[:, 0, :].set(0.5 * (dv_cc[:, 0, :] + dv_cc[:, 1, :]))
+            dv_cc = dv_cc.at[:, n-1, :].set(0.5 * (dv_cc[:, n-1, :] + dv_cc[:, n-2, :]))
+            dv_cc = dv_cc.at[:, :, 0].set(0.5 * (dv_cc[:, :, 0] + dv_cc[:, :, 1]))
+            dv_cc = dv_cc.at[:, :, n-1].set(0.5 * (dv_cc[:, :, n-1] + dv_cc[:, :, n-2]))
+        elif boundary_fix_mode == "snapshot":
+            du_orig = du_cc
+            dv_orig = dv_cc
+            du_cc = du_cc.at[:, 0, :].set(0.5 * (du_orig[:, 0, :] + du_orig[:, 1, :]))
+            du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_orig[:, n-1, :] + du_orig[:, n-2, :]))
+            du_cc = du_cc.at[:, :, 0].set(0.5 * (du_orig[:, :, 0] + du_orig[:, :, 1]))
+            du_cc = du_cc.at[:, :, n-1].set(0.5 * (du_orig[:, :, n-1] + du_orig[:, :, n-2]))
+            dv_cc = dv_cc.at[:, 0, :].set(0.5 * (dv_orig[:, 0, :] + dv_orig[:, 1, :]))
+            dv_cc = dv_cc.at[:, n-1, :].set(0.5 * (dv_orig[:, n-1, :] + dv_orig[:, n-2, :]))
+            dv_cc = dv_cc.at[:, :, 0].set(0.5 * (dv_orig[:, :, 0] + dv_orig[:, :, 1]))
+            dv_cc = dv_cc.at[:, :, n-1].set(0.5 * (dv_orig[:, :, n-1] + dv_orig[:, :, n-2]))
+        else:
+            raise ValueError(
+                f"Unknown boundary_fix_mode: {boundary_fix_mode!r}; "
+                f"expected 'sequential' or 'snapshot'.")
 
     # (k) Project cell-centre tendencies to D-grid edge-midpoints via halo exchange
     du_cc_pad, dv_cc_pad = pad_halo_vector(

@@ -1615,6 +1615,32 @@ Codex stop-time review flagged iter-719: "The rewritten diagnostic still overcla
 
 No source-code changes.  Regression suite unchanged at 165 tests; all pass.
 
+### Iter-721 — snapshot `boundary_fix` variant tested; does NOT fix mode-4 artifact
+
+Acted on the iter-718/720 corner-asymmetry hypothesis by:
+1. Adding a new `boundary_fix_mode: "sequential" | "snapshot"` kwarg to `fv3_sw_tendencies` (default `"sequential"` for backward compat).
+2. Temporarily switching the source default to `"snapshot"` to run the full W2 model path.
+3. Comparing W2 metrics at C36 day 1 between the two modes.
+
+**Results**:
+
+| Metric              | Sequential (production) | Snapshot (iter-721 experiment) | Delta   |
+|---------------------|-------------------------|---------------------------------|---------|
+| L2 h-error          | 5.886e-01               | 6.918e-01                       | **+17.5% WORSE** |
+| face-4 max|v_N|     | 0.3068 m/s              | 0.3068 m/s                      | 0       |
+| face-5 max|v_N|     | 0.3067 m/s              | 0.3068 m/s                      | +0.0001 |
+| face-4 mean|v_N|    | 0.0172 m/s              | 0.0181 m/s                      | +5.2% worse |
+
+**Hypothesis FALSIFIED**: the sequential-boundary_fix 2× corner asymmetry is NOT the root cause of the mode-4 polar v-wind artifact.  The mode-4 peak at face-4 max = 0.3068 m/s is IDENTICAL with both variants; snapshot only degrades L2 (+17.5%) and face-4 mean (+5.2%).
+
+**Interpretation**: the mode-4 artifact originates UPSTREAM of `boundary_fix` — likely in the Arakawa-Lamb gradient itself, the halo interpolation at cube vertices, or the `_d2a2c_vect` corner treatment.  The `boundary_fix` is a downstream smoother; no amount of reshuffling its symmetry changes the amplitude of the artifact that feeds into it.
+
+**Retained**: the `boundary_fix_mode` kwarg stays in the source for future experimentation (e.g., testing whether `snapshot` combined with a different upstream fix gives a win).  Default reverted to `"sequential"`.
+
+Source change this iter: added one kwarg + one elif branch, 24 lines in `operators_cdgrid.py:1343-1498`.  All 165 regression tests pass with default sequential.  The snapshot path is tested implicitly via the W2 experiment runs above.
+
+**Blocker status update**: mode-4 polar v-wind at ±0.3 m/s at C36 day 1 is confirmed to originate UPSTREAM of `boundary_fix`.  Next candidate investigation: `_d2a2c_vect` cube-vertex treatment or A-L gradient halo handling.
+
 ### Iter-716 — W5 end-to-end gold-file with area-weighted mass
 
 Added `TestW5ProductionGoldFileIter716` to lock the Williamson-5 (isolated mountain) production-path C36 day-1 state end-to-end.  Existing `TestW5PolarFaceMagnitude` tests face-4 `v_cc_north` in window [4, 10] m/s (amplification + signal-loss bounds) but NO fingerprint lock on:
