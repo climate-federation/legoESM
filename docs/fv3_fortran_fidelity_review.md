@@ -468,3 +468,45 @@ This **confirms** iter-749's "scalar-of-vector" mechanism attribution at the lev
 2. FD `laplacian_compact` matches the analytic formula to 0.41 % at the iter-745 polar peak.
 3. The polar bias is scalar-of-vector, not FD-vs-spherical.
 4. Cube-corner FD errors (112 %) are a separate mode A bug, not the polar driver.
+
+### Iter-751 — iter-750 also premature: FD compounds through bilaplacian
+
+Codex stop-time review on iter-750 flagged: **"iter-750 closes the mechanism story with a control that does not validate the production operator it cites."**  Correct — the production hyperdiff operator is `laplacian_compact(laplacian_compact(u_east))` (bilaplacian), but iter-750 only validated the single Laplacian.  Iter-750's claim "scalar-of-vector mechanism CONFIRMED at bilaplacian level" was premature.
+
+**Iter-751 direct bilaplacian test.**  `scripts/diag_iter751_bilaplacian_validation.py` compares:
+
+(A) `bilap_FD = laplacian_compact(laplacian_compact(u_0*cos(lat)))` — the production.
+(B) `bilap_hybrid = laplacian_compact(analytic_∇²(u_0*cos(lat)))` — FD only on the OUTER Laplacian.
+
+If FD error is negligible (as iter-750 suggested for the single Laplacian), (A) and (B) should agree at the polar peak.
+
+**Result at face 4 (19, 17), lat +86°:**
+
+| Quantity                                | Value        |
+|-----------------------------------------|--------------|
+| (A) `FD(FD(u_0*cos(lat)))`              | 2.07 × 10⁻²² |
+| (B) `FD(analytic_single_Lap)`           | 1.07 × 10⁻²² |
+| **Relative diff (A vs B) at polar cell**| **94 %**     |
+
+The FD bilaplacian and FD(analytic_inner) DISAGREE by 94% at the polar peak cell.  FD error in the single Laplacian (0.41% at the cell, but varying spatial structure) DOES compound through the outer Laplacian to ~factor-2 disagreement.  Iter-750's "scalar-of-vector CONFIRMED at bilaplacian level" is **not supported** by direct test.
+
+**At face 0 (18,18), equator, the (A) vs (B) relative diff is −0.26%** — essentially exact.  So FD error compounds significantly only at face 4, not at face 0.
+
+**What the data actually supports (honest reduction).**  The bilaplacian pipeline is polar-biased (face 4 / face 0 ratio ≥ 28× in all tested forms).  Both FD error compounding AND analytic-scalar-Laplacian pole-singularity contribute; iter-751 does NOT cleanly separate their individual magnitudes.  What IS clear:
+- FD single-Laplacian is 0.41% accurate at the polar peak cell (iter-750 direct).
+- FD bilaplacian is factor-2 different from a hybrid analytic-then-FD at that cell.
+- Both FD and hybrid bilaplacians are polar-biased (28× and 4090× face 4 / face 0 ratios respectively).
+
+**What iter-751 does NOT claim.**  It does not claim scalar-of-vector is or isn't the dominant mechanism; the evidence is mixed.  It does not claim FD compounding is the dominant mechanism.  It claims only that the bilaplacian pipeline is polar-biased in all tested forms, which is sufficient to motivate the Fortran-faithful fix.
+
+**Fix prescription (still unchanged, for robust orthogonal reasons).**  Port `del6_vt_flux` on cell-mean VORTICITY.  This fixes BOTH potential mechanisms at once:
+1. Vorticity is a true scalar with no 1/cos(lat) pole singularity, so the "scalar-of-vector" issue vanishes.
+2. `del6_vt_flux` uses metric-aware flux-form coefficients `del6_u = sina_v*dx/dyc` (`fv_grid_utils.F90:709-734`), avoiding the flat-grid FD compounding.
+
+Either mechanism (or both) drives the polar peak; the Fortran-faithful fix is robust to the actual attribution.  This is why the FIX has been stable since iter-747 while the MECHANISM story has needed six iterations of refinement — the fix doesn't depend on resolving the mechanism debate.
+
+**Process note (6 falsify-own-claim cycles in 7 iters now).**  iter-745→745b (halo rotation), iter-746→746b (tautological test), iter-747→748 (angle rotation mis-attribution), iter-748→749 (metric-form mis-attribution), iter-749→750 (insufficient single-Lap control), iter-750→751 (single-Lap control doesn't validate bilaplacian).  Each Codex stop-time catch found a real methodological gap.
+
+**Hard-stop on further mechanism diagnostic.**  Iter-752 will stop diagnosing and proceed directly to the del6_vt_flux port.  The mechanism story may never be cleanly resolvable without first implementing the fix and seeing which piece changes.  The cost of one more failed mechanism diagnostic exceeds the cost of starting the actual port.
+
+**Iter-751 deliverable.**  `scripts/diag_iter751_bilaplacian_validation.py` checked in.  Honestly reports the mixed evidence and hard-stops further mechanism diagnostic work.
