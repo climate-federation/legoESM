@@ -4,6 +4,84 @@ Running log of ocean dynamics work — what we tried, what worked, what didn't, 
 
 ---
 
+## 2026-04-20: TVD Van Leer Vertical Tracer Advection (#209)
+
+### Problem: Spurious Deep Ocean Warming
+
+The 200-day Eady experiment showed the deep ocean warming over time. With K_v=5e-6 m²/s (explicit vertical diffusivity), the theoretical diffusion over 200 days is negligible (~0.2 mK). The actual drift was 43-92 mK — orders of magnitude larger.
+
+### Diagnosis
+
+The 1st-order upwind vertical advection has implicit numerical diffusivity:
+```
+K_num = |w| × dz / 2
+```
+With mesoscale eddies generating w ~ 1e-4 m/s and dz = 275 m (20 levels):
+K_num ≈ 0.014 m²/s — **3000× larger than K_v**.
+
+Ocean expert analysis identified three sources of spurious mixing:
+1. **1st-order upwind vertical advection** (dominant) — K_num ~ 0.014 m²/s
+2. **Veronis effect from TVD horizontal advection** — horizontal diffusion projects diapycnally on sloping isopycnals (slope × dx = 120 m ≈ 44% of a layer)
+3. **Split-explicit thickness-tracer consistency** (small, O(dt²))
+
+### Solution: TVD Van Leer Vertical Tracer Advection
+
+Implemented `flux_form_vertical_tracer_advection_tvd` in `vertical.py`:
+- 2nd-order in smooth regions (K_num → 0 when limiter is inactive)
+- Falls back to upwind at discontinuities (monotone)
+- Uses Van Leer limiter: phi(r) = (r + |r|) / (1 + |r|)
+- Ghost-cell boundary handling (JAX-compatible, no Python control flow)
+- Dispatched when `config.tracer_advection == "tvd"` (default)
+
+### Key Finding: Tracers vs Momentum Have Opposite Needs
+
+| | Tracers | Momentum |
+|---|---|---|
+| Upwind → TVD | Less spurious mixing ✓ | **Blowup** (29 days vs 76) |
+| Reason | Don't need viscosity for stability | Need implicit A_v for shear damping |
+| Fix | Higher-order advection | Implicit vertical solver + KPP |
+
+Vertical momentum advection MUST stay upwind until we implement an implicit vertical solver (#204) that can provide the physical viscosity independently.
+
+### Results (200 days, 20 km, 20 levels)
+
+| Config | T_drift | max_speed | Notes |
+|--------|---------|-----------|-------|
+| Upwind + K_bih=1e10 | 0.086 | 8-12 | Artificial diffusion |
+| Upwind + K_bih=0 | 0.043 | 8-13 | Less artificial |
+| **TVD + K_bih=0** | **0.092** | **5-7** | More physical eddy transport |
+
+The larger T_drift with TVD is PHYSICAL — sharper fronts → more effective eddy heat transport → more slumping. The lower max_speed confirms eddies are more organized.
+
+### Resolution Test: 40 Levels
+
+Doubling vertical resolution (40 levels, dz=137.5m) with upwind blew up at day 59 (halved implicit viscosity). With TVD tracer-only, survived to day 76. With TVD for both tracers and momentum: blew up at day 29 (momentum needs the implicit viscosity).
+
+This confirms the model was accidentally relying on upwind numerical diffusion for stability. The MOM6-like A_v=1e-5 only makes sense with an implicit vertical solver + KPP providing the actual mixing.
+
+### Remaining Issue: Veronis Effect
+
+Even with TVD, the front appears to diffuse rather than cleanly slump. The dominant remaining source is the **Veronis effect**: on z-coordinates with sloping isopycnals, horizontal advection inevitably mixes across density surfaces (slope × dx = 120 m per cell). This is geometric, not a scheme error.
+
+Solutions (not yet implemented):
+- GM/Redi parameterization (#192)
+- Higher-order advection: DST-3 with flux limiter + multi-dimensional sweeps (#210)
+- Higher horizontal resolution (reduces slope × dx per cell)
+
+### MITgcm Comparison
+
+MITgcm uses scheme 33 (DST-3 + Sweby limiter, 3rd order) as standard for ocean experiments. This is one order higher than our TVD Van Leer (scheme 77 equivalent). MITgcm also uses multi-dimensional advection (sequential directional sweeps) which our method-of-lines approach lacks.
+
+Issue #210 opened for this upgrade.
+
+### Files Changed
+
+- `vertical.py` — new `flux_form_vertical_tracer_advection_tvd()`, `_van_leer_limiter_vert()`
+- `ocean_model_latlon_cgrid.py` — dispatch to TVD, thread `dt` to tendencies
+- `ocean_pe_latlon_cgrid.py` — accept `dt` parameter, import TVD function
+
+---
+
 ## 2026-04-18: ACC Channel Experiment with Gaussian Ridge
 
 ### Motivation
