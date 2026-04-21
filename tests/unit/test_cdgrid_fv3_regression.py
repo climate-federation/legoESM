@@ -8110,33 +8110,44 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
                      f"{se_cube_vertex} should be +0.5 (sign-flip convention "
                      f"on Fortran pos 7) — _fortran_cos_sg has drifted."))
 
-        # Anchor 4: cube-boundary edge-midpoint antisymmetry.  On the W
-        # cube boundary (i=0), cos_sg at W edge position 0 as a function
-        # of j is antisymmetric about the face centre: cos_sg[f, 0, j, 0]
-        # = -cos_sg[f, 0, n-1-j, 0] by the reflection symmetry of the
-        # equiangular face.  Also the boundary magnitude is significant
-        # (0.1 <= |cos| <= 0.5 at C>=8 boundary cells).  This anchor
-        # catches drift in the edge-midpoint formula that preserves the
-        # corner anchors above.
+        # Anchor 4: cube-boundary edge-midpoint antisymmetry AND
+        # magnitude band, asserted per-face.  On the W cube boundary
+        # (i=0), cos_sg at W edge position 0 as a function of j is
+        # antisymmetric about the face centre:
+        # cos_sg[f, 0, j, 0] = -cos_sg[f, 0, n-1-j, 0]
+        # by the reflection symmetry of the equiangular face.  The
+        # boundary magnitude at the j=0 cell is significant
+        # (0.1 <= |cos| <= 0.5 at C>=8 boundary cells) on EVERY face.
+        # Using per-face min/max (not np.max alone) so a single-face
+        # regression is caught, not masked by the other 5 faces.
         if n >= 4 and n % 2 == 0:
+            nfaces = cos_sg_ft.shape[0]
             w_col = cos_sg_ft[:, 0, :, 0]                # (nfaces, n)
             w_col_rev = w_col[:, ::-1]
-            antisym = np.max(np.abs(w_col + w_col_rev))  # should be ~0
-            self.assertLess(antisym, 1e-10,
-                msg=(f"Fortran reference W-edge at i=0 lacks expected "
-                     f"antisymmetry cos[j] = -cos[n-1-j]: max violation = "
-                     f"{antisym:.3e} — _fortran_cos_sg has drifted."))
-            w_mag = float(np.max(np.abs(w_col[:, 0])))   # j=0 cell
-            self.assertGreater(w_mag, 0.1,
+            # Per-face antisymmetry violation.
+            antisym_per_face = np.max(np.abs(w_col + w_col_rev), axis=1)
+            worst_face_antisym = int(np.argmax(antisym_per_face))
+            self.assertLess(float(antisym_per_face.max()), 1e-10,
+                msg=(f"Fortran reference W-edge at i=0 lacks antisymmetry "
+                     f"cos[j] = -cos[n-1-j] on face {worst_face_antisym}: "
+                     f"max violation = {antisym_per_face.max():.3e} — "
+                     f"_fortran_cos_sg has drifted on at least one face."))
+            # Per-face magnitude band at the j=0 boundary cell.
+            w_mag_per_face = np.abs(w_col[:, 0])         # (nfaces,)
+            w_mag_min = float(w_mag_per_face.min())
+            w_mag_max = float(w_mag_per_face.max())
+            worst_low  = int(np.argmin(w_mag_per_face))
+            worst_high = int(np.argmax(w_mag_per_face))
+            self.assertGreater(w_mag_min, 0.1,
                 msg=(f"Fortran reference W-edge at cube-boundary cell "
-                     f"(0, 0) has |cos| = {w_mag:.3e} < 0.1 — expected "
-                     f">= 0.1 on equiangular cube face; _fortran_cos_sg "
-                     f"has drifted."))
-            self.assertLess(w_mag, 0.5,
+                     f"(0, 0) has |cos| = {w_mag_min:.3e} < 0.1 on face "
+                     f"{worst_low} (per-face values: {w_mag_per_face}) — "
+                     f"_fortran_cos_sg has drifted on at least one face."))
+            self.assertLess(w_mag_max, 0.5,
                 msg=(f"Fortran reference W-edge at cube-boundary cell "
-                     f"(0, 0) has |cos| = {w_mag:.3e} > 0.5 — out of "
-                     f"expected band for equiangular cube face; "
-                     f"_fortran_cos_sg has drifted."))
+                     f"(0, 0) has |cos| = {w_mag_max:.3e} > 0.5 on face "
+                     f"{worst_high} (per-face values: {w_mag_per_face}) — "
+                     f"_fortran_cos_sg has drifted on at least one face."))
 
     def test_fortran_cos_sg_helper_matches_analytical_anchors(self):
         """The `_fortran_cos_sg` helper itself is well-formed at four

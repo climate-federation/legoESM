@@ -919,3 +919,17 @@ Codex stop-time review flagged iter-679's weakening: the sanity check `|cos_sg_f
 These anchors are derived from pure geometry; they cannot be coincidentally satisfied by a broken helper unless the bug very specifically preserves the exact cube-vertex angles AND the face-symmetry structure.  Promoted the anchor-check into its own standalone test (`test_fortran_cos_sg_helper_matches_analytical_anchors`) AND called from the Python-vs-Fortran comparison so any helper drift fails both.
 
 No source-code changes; test-only strengthening.  Regression suite now at **127 tests** (126 + 1 new analytical-anchor test); all pass.
+
+### Iter-681 — tighten iter-680 W-edge anchor to per-face checks
+
+Codex stop-time review flagged iter-680's W-edge anchor (anchor 4) for using `np.max(np.abs(w_col[:, 0]))` — a single-face regression could be masked because `np.max` across all 6 faces passes as long as any one face is correct.
+
+**Fix** (iter-681): switch the W-edge magnitude and antisymmetry checks to per-face assertions:
+- Antisymmetry: `np.max(np.abs(w_col + w_col_rev), axis=1)` — per-face max violation; assert max across faces is small (catches any face).
+- Magnitude band: `w_mag_per_face = np.abs(w_col[:, 0])` — assert `w_mag_per_face.min() > 0.1` AND `w_mag_per_face.max() < 0.5`.  If even ONE face has `|cos| < 0.1` at the cube-boundary cell, the `.min() > 0.1` assertion fails.
+
+Error messages report the offending face index so future debugging is easy.  **Verified** by injecting a single-face regression (`ft_bad[2, 0, :, 0] = 0.0`) in an interactive test — the anchor now fails with "on face 2 (per-face values: [0.43, 0.43, 0.0, 0.43, ...])".  Previously (iter-680) the regression would have slipped through because the other 5 faces pass.
+
+Anchors 1-3 (cube-vertex exact -0.5 / +0.5) are already per-face via `np.testing.assert_allclose` which checks element-wise — no change needed there.
+
+No source-code changes; test-only strengthening.  Regression suite unchanged at 127 tests; all pass.
