@@ -981,3 +981,39 @@ Per iter-758c plan: begin Fortran d_sw5 holistic port (items 3+4 together).  Fol
 - **Iter-763:** Remove the legacy div_damp block and validate that all paths use the new Fortran-faithful d_sw5.
 
 **Process.**  Twelfth Fortran-fidelity work unit in the iter-752-759 chain.  The d_sw5 port is structurally analogous to iter-752's del6_vt_flux port: start with standalone core → validate with tests → wire into production → iterate on stop-time reviews.  Expected ~4-6 sub-iters to land cleanly based on the iter-752-755b del6 experience.
+
+### Iter-760 — switch matrix default to Fortran-faithful del6 vorticity damping
+
+Per user directive: `fv3_sw_tendencies` still uses the non-Fortran-faithful `laplacian_compact`-on-geographic-winds hyperdiff block, while the Fortran-faithful `fv3_del6_vorticity_damping` helper (from iter-752-755b) is ALREADY wired as an optional post-step hook in `FV3EdgeShallowWaterModel.step` when `damp_v > 0`.
+
+**Action.**  Switch the atmosphere test matrix config from `hyperdiff_coeff=_hyperdiff_cube(n), damp_v=0` to `hyperdiff_coeff=0, damp_v=0.06, nord_v=2` for all three cubed-sphere shallow-water test cases (W2, W5, cosine bell).  This makes the Fortran-faithful del-n-on-vorticity damping the DEFAULT for all production benchmarks.
+
+**Results:**
+
+| Metric                         | Legacy (hyperdiff) | Fortran-faithful (del6) | Δ             |
+|--------------------------------|--------------------|--------------------------|---------------|
+| W2 h_L2                        | 2.42e-04           | 2.94e-04                | +21%          |
+| W2 h_Linf                      | 1.83e-03           | 3.14e-03                | +71%          |
+| **W2 v_ll_Linf**               | **3.03e-01**       | **2.14e-01**            | **−29.4%**    |
+| W5 mass drift                  | 1.74e-05           | 1.77e-05                | +1.7%         |
+| Cosine bell L1/L2/Linf         | unchanged          | unchanged               | 0%            |
+| Ocean rest state 12/12         | machine precision  | machine precision       | unchanged     |
+
+**Matrix status**: all three cubed-sphere SW tests PASS.  All 173 regression tests PASS (they use their own direct configs, not the matrix defaults).
+
+**Visual inspection** (`results/atmosphere/shallow_water/williamson2/cubed_sphere/C36/snapshots_v.png` at t=1 d):
+- Colorbar range narrowed from ±0.3 m/s to ±0.2 m/s.
+- Polar mode-4 bands at lat ±75–85° visibly REDUCED (weaker blue/red amplitude).
+- Mid-latitude cube-corner seams at lat ±30–40° STILL VISIBLE (mode A remains).
+
+The mode B (polar) reduction is real and visible.  Mode A (cube-corner) is unaddressed and remains as the blocker preventing the stopping condition.
+
+**Mechanism clarity.**  Fortran `d_sw6` damps relative vorticity (a true scalar) via `del6_vt_flux`; `laplacian_compact`-on-geographic-winds treats vector components as scalars (polar-singular per iter-749/750).  Switching the matrix default eliminates the mechanism mismatch for the default production runs.
+
+**Legacy hyperdiff retained.**  `fv3_sw_tendencies::hyperdiff_coeff` block (`operators_cdgrid.py` line ~1440-1453) kept for now — other callers or configs may still use it.  Deprecation of this block is a future iter (iter-761+) once we verify no non-matrix callers depend on it.
+
+**Iter-760 deliverable.**  `scripts/run_atmosphere_test_matrix.py` default config switched for all three cubed-sphere SW test cases.  Matrix + ocean + visual all PASS with the Fortran-faithful default.
+
+**Ralph stopping condition status.**  Closer but not met.  W2 polar v artifact reduced from 0.303 to 0.214 m/s (-29%).  Mid-latitude cube-corner mode A still visible.  Iter-761+ should continue with mode A work (d_sw5 holistic port continuation from iter-759) or investigate whether additional damping coefficient tuning further reduces visible artifacts.
+
+**Process.**  Thirteenth Fortran-fidelity unit in the iter-752-760 chain.  First time the matrix DEFAULT is switched to the Fortran-faithful path — a structural commitment rather than an optional alternative.  No regression tests broken.  The `damp_v=0.06, nord_v=2` tuning is from iter-755b's ablation sweep and is the current best Fortran-faithful config; further tuning deferred to iter-761+.

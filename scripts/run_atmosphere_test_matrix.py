@@ -1175,10 +1175,22 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
+        # Iter-760: switch to Fortran-faithful del-n vorticity damping
+        # (sw_core.F90:1948-1999) instead of the scalar bilaplacian on
+        # geographic wind components.  del6_vt_flux damps relative
+        # vorticity (a true scalar, no 1/cos(lat) polar singularity)
+        # via the post-step `damp_v > 0` hook in FV3EdgeShallowWaterModel.
+        # Per iter-755b ablation, damp_v=0.06, nord_v=2 reduces W2
+        # v_ll_Linf from 0.303 (legacy hyperdiff) to 0.214 m/s
+        # (-29.4%) — the Fortran-prescribed structural fix.  Legacy
+        # `hyperdiff_coeff`-on-geographic-winds path retained in
+        # fv3_sw_tendencies but disabled by default here.
         config = CDGridShallowWaterConfig(
-            hyperdiff_coeff=_hyperdiff_cube(n),
+            hyperdiff_coeff=0.0,
             div_damp=_div_damp_cube(n),
-            boundary_fix=True)
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
 
@@ -1544,10 +1556,14 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 1800.0
+        # Iter-760: Fortran-faithful del-n vorticity damping.
+        # See williamson2/5 config above for rationale.
         config = CDGridShallowWaterConfig(
-            hyperdiff_coeff=_hyperdiff_cube(n),
+            hyperdiff_coeff=0.0,
             div_damp=_div_damp_cube(n),
-            boundary_fix=True)
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
         state = cosine_bell_cubesphere(grid, cdgrid, beta)
