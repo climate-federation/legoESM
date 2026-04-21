@@ -1615,6 +1615,40 @@ Codex stop-time review flagged iter-719: "The rewritten diagnostic still overcla
 
 No source-code changes.  Regression suite unchanged at 165 tests; all pass.
 
+### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
+
+First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
+
+**Progress tracking** (from iter-722 Path Forward list):
+
+| Task | Status |
+|------|--------|
+| #1. Finish ng=3 halo infrastructure | |
+|   1a. `pad_halo_mpi_4d(halo=3)` | ✅ done iter-630 |
+|   1b. Single-node `_pad_halo_local_h3_4d` | ✅ **done iter-723** (this iter) |
+|   1c. SPMD `explicit_pad_halo_4d(halo=3)` | ⏳ not on critical path |
+|   1d. `_d2a2c_vect` caller flip h=2 → h=3 | ⏳ next iter |
+| #2. Port FV3 dissipation at each phase (c_sw, d_sw1, d_sw3, d_sw5) | ⏳ |
+| #3. Verify FB+duogrid stability at C24 | ⏳ (iter-722 showed NaN at step 246 / C24) |
+| #4. Gold-file FB chain at C24 | ⏳ gated on #3 |
+
+**This iter's change**: added `_pad_halo_local_h3_4d` in `src/legoesm/grids/halo.py` mirroring the existing `_pad_halo_local_h3` (scalar 2D h=3) and `_pad_halo_local_h2_4d` (4D h=2).  Structure:
+
+1. Create padded array `(6, n+6, n+6, nlev)`.
+2. Place interior data at `[:, 3:-3, 3:-3, :]`.
+3. Loop over 6 faces × 4 edges × 3 halo depths; extract neighbour strips (shape `(n, nlev)` for 4D); apply orientation reversal + optional interp_offsets; place at `i = 2 - depth` (WEST), `i = n + 3 + depth` (EAST), etc.
+4. `_fill_corners_h3` fills 9-cell L-shaped corner regions.
+
+Replaced the `pad_halo_4d(halo=3)` `NotImplementedError` guard with a dispatch to the new function.  SPMD halo=3 4D is still rejected (off critical path).
+
+**Verified**:
+- 4D halo=3 output matches per-level 2D halo=3 bit-identically (max diff = 0.0 on a non-trivial random test field).
+- Existing halo=1 and halo=2 4D paths unchanged (regression 165/165 passes).
+
+No production callers switched yet — iter-724 will handle the `_d2a2c_vect` h=2→h=3 caller flip (task 1d) which is the actual consumer for FB-chain stability work.
+
+Source change: +68 lines (one new function + dispatch swap) in `src/legoesm/grids/halo.py`.  Regression suite unchanged at 165 tests; all pass.
+
 ### Iter-722 — user redirect: "implement exact FV3 duogrid, no A-L + RK3" → FB chain C24/C36 blow-up confirmed
 
 User instruction (iter-722): "implement the exact FV3 duogrid and then test again", "no Arakawa-Lamb + RK3".  This aligns with the review-doc architectural plan: replace the non-FV3 A-L + RK3 production path with the Fortran-faithful FB chain.

@@ -637,19 +637,13 @@ def pad_halo_4d(
         raise ValueError(
             "interp_offsets and duogrid are mutually exclusive"
         )
-    if halo == 3:
-        # iter-499 added halo=3 to the 3D `pad_halo` single-node path.
-        # The 4D path has not yet been extended (would need
-        # `_pad_halo_local_h3_4d` + MPI/SPMD 4D equivalents).  Raise
-        # explicitly so callers don't silently get 'halo=3 unsupported'
-        # from the general-range check below.
+    if halo not in (1, 2, 3):
         raise NotImplementedError(
-            "halo=3 is not yet supported for pad_halo_4d; "
-            "the 4D path (needed for multi-level scalar fields) "
-            "still requires an `_pad_halo_local_h3_4d` implementation. "
-            "Use `pad_halo` on individual levels as a workaround.")
-    if halo not in (1, 2):
-        raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+            f"Only halo=1, halo=2, and halo=3 are supported, got {halo}")
+    # iter-723: halo=3 single-node 4D now supported via
+    # `_pad_halo_local_h3_4d` (below).  MPI halo=3 4D already supported
+    # via `pad_halo_mpi_4d` (iter-630).  SPMD halo=3 4D still not
+    # implemented (checked below).
 
     offsets = None if duogrid is not None else interp_offsets
 
@@ -679,12 +673,18 @@ def pad_halo_4d(
         padded = pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
+        if halo == 3:
+            raise NotImplementedError(
+                "SPMD 4D halo=3 exchange not yet implemented; "
+                "halo=3 is only available on MPI and single-node paths.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
         padded = explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
     elif halo == 1:
         padded = _pad_halo_local_4d(data, offsets)
-    else:
+    elif halo == 2:
         padded = _pad_halo_local_h2_4d(data, offsets)
+    else:  # halo == 3 (iter-723)
+        padded = _pad_halo_local_h3_4d(data, offsets)
 
     # Duo-Grid post-processing: apply per-level via vmap
     if duogrid is not None:
@@ -804,6 +804,78 @@ def _pad_halo_local_h2_4d(
                     padded = padded.at[face, 2:-2, n + 2 + depth].set(strip)
 
     padded = _fill_corners_h2(padded)
+    return padded
+
+
+def _pad_halo_local_h3_4d(
+    data: jax.Array,
+    interp_offsets: jax.Array | None = None,
+) -> jax.Array:
+    """Local 4D scalar halo exchange for halo=3.
+
+    Iter-723 port of :func:`_pad_halo_local_h3` (3D scalar halo=3) to
+    the 4D multi-level case.  The 4D form is required for FB-chain
+    production work (review-doc item #2): multi-level scalar fields
+    (e.g., 3D height, vorticity snapshots) need halo=3 quality to
+    match Fortran's ng=3 halo semantic at cube face boundaries and
+    vertices.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n, nlev)
+    interp_offsets : jax.Array or None, shape (6, 4, 3, n)
+        Precomputed fractional-index offsets for 3 halo depths (see
+        :func:`compute_halo_interp_offsets_h3`).
+
+    Returns
+    -------
+    padded : jax.Array, shape (6, n+6, n+6, nlev)
+    """
+    n = data.shape[1]
+    nlev = data.shape[3]
+    padded = jnp.zeros((6, n + 6, n + 6, nlev), dtype=data.dtype)
+
+    # Place interior data
+    padded = padded.at[:, 3:-3, 3:-3, :].set(data)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for depth in range(3):
+                # Extract neighbour strip at this depth — for a 4D
+                # array `data[face, i, j]` returns (nlev,) so the
+                # strip along an edge has shape (n, nlev).
+                strip = _extract_edge_strip_at_depth(
+                    data, nbr_face, nbr_edge, depth,
+                )
+
+                if is_reversed:
+                    strip = strip[::-1]
+
+                if interp_offsets is not None:
+                    strip = _interp_strip(
+                        strip, interp_offsets[face, edge_idx, depth],
+                    )
+
+                # Interior is at [3:-3, 3:-3, :], so:
+                #   WEST  halo positions: i = 2 - depth
+                #   EAST  halo positions: i = n + 3 + depth
+                #   SOUTH halo positions: j = 2 - depth
+                #   NORTH halo positions: j = n + 3 + depth
+                if edge == WEST:
+                    padded = padded.at[face, 2 - depth, 3:-3].set(strip)
+                elif edge == EAST:
+                    padded = padded.at[face, n + 3 + depth, 3:-3].set(strip)
+                elif edge == SOUTH:
+                    padded = padded.at[face, 3:-3, 2 - depth].set(strip)
+                elif edge == NORTH:
+                    padded = padded.at[face, 3:-3, n + 3 + depth].set(strip)
+
+    # Fill 3×3 L-shaped corner regions (9 cells × 4 corners × 6 faces).
+    padded = _fill_corners_h3(padded)
     return padded
 
 
