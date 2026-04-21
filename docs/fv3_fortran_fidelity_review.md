@@ -892,3 +892,15 @@ Closes the Codex stop-time review flag on iter-677 that "``cos_sg`` was excluded
 These lock tests prevent silent drift: future cos_sg changes must either (a) stay within the documented divergence band — meaning they don't break the downstream operator tuning — or (b) demand coordinated operator-side updates verified against W2 L2.
 
 No source-code changes to `src/` in iter-678 (the rewrite was reverted).  Regression suite now at **126 tests** (123 + 3 new Fortran-formula locks); all pass.
+
+### Iter-679 — correct iter-678 lock test: upper-bound-only regression guard
+
+Codex stop-time review flagged iter-678's `test_cos_sg_edge_midpoints_divergence_is_discretization_O_one_over_N` for hard-coding the current mismatch via an `assertGreater(diff, 1e-4)` lower bound.  That bound would REJECT a future fidelity improvement — e.g. if someone later rewrites the downstream operators so that Fortran-exact cos_sg works, reducing the diff below 1e-4, the test would fail despite the code being strictly better.
+
+**Fix** (iter-679): reworked the test as a one-sided regression guard.  `test_cos_sg_edge_midpoints_bounded_against_fortran_formula`:
+- Upper bound `max|diff| < 0.05` at C8 — catches new bugs, welcomes improvements.
+- Lower bound on the **Fortran reference itself** (`|cos_sg_ft|_max > 1e-3`, `≤ 1.0`) — guards against a broken `_fortran_cos_sg` helper (e.g. accidentally returning zeros) that would silently make any Python value "match".  This check is independent of the Python implementation, so it doesn't constrain improvements.
+
+Documentation of the Python-vs-Fortran divergence moves fully into the class docstring and the iter-678 review entry.  Test logic itself no longer enforces the mismatch.
+
+No source-code changes; test-only correction.  Regression suite still at 126 tests; all pass.

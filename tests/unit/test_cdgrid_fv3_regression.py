@@ -8051,18 +8051,20 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
         cos_sg[..., 4] = np.nan   # skip marker
         return cos_sg
 
-    def test_cos_sg_edge_midpoints_divergence_is_discretization_O_one_over_N(self):
-        """Python cos_sg at W/S/E/N edge midpoints deviates from Fortran's
-        cos_angle formula by the expected O(1/N) discretization amount.
+    def test_cos_sg_edge_midpoints_bounded_against_fortran_formula(self):
+        """Python cos_sg at W/S/E/N edge midpoints stays within the
+        documented divergence ceiling vs Fortran's cos_angle formula.
 
-        This DOCUMENTS a known divergence — it is NOT a factor-of-2 bug
-        and NOT strict Fortran fidelity.  See class docstring for why
-        rewriting to Fortran's formula worsens W2 L2.
+        This is a one-sided regression guard: max|diff| must stay below
+        0.05 at C8.  A smaller divergence — including bit-identical
+        match — PASSES and is welcome (indicates a genuine fidelity
+        improvement).  A larger divergence FAILS and flags a new bug.
 
-        Tolerance: 0.025 at C8 (matching measured 2.3%).  Deviations
-        beyond this bound would indicate a NEW bug; values smaller than
-        this would indicate either a genuine fidelity improvement (good)
-        or a different formulation (needs review).
+        To prevent silent acceptance of a broken Fortran reference
+        (e.g. a zeroed ``_fortran_cos_sg`` that trivially matches any
+        Python output), we also verify the Fortran reference itself is
+        well-formed (|cos_sg| <= 1) — this check is independent of the
+        Python implementation.
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -8075,21 +8077,25 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
         cos_sg_py = np.asarray(cdgrid.cos_sg)          # (6, n, n, 9)
         cos_sg_ft = self._fortran_cos_sg(n)            # (6, n, n, 9)
 
+        # Sanity: Fortran reference itself lies in [-1, 1] at edge positions.
+        ft_max_abs = float(np.max(np.abs(cos_sg_ft[..., :4])))
+        self.assertLessEqual(ft_max_abs, 1.0 + 1e-10,
+            msg=(f"Fortran reference |cos_sg_ft| = {ft_max_abs:.4f} > 1 — "
+                 f"_fortran_cos_sg is broken; divergence check is unreliable."))
+        self.assertGreater(ft_max_abs, 1e-3,
+            msg=(f"Fortran reference |cos_sg_ft| = {ft_max_abs:.4e} is near "
+                 f"zero — _fortran_cos_sg likely returned zeros; divergence "
+                 f"check is unreliable."))
+
         for k, label in enumerate(['W', 'S', 'E', 'N']):
             diff = np.max(np.abs(cos_sg_py[..., k] - cos_sg_ft[..., k]))
-            # Ceiling is the known divergence at C8 + headroom.  If
-            # future work brings cos_sg closer to Fortran (good for
-            # fidelity), this upper bound will still pass.
+            # Upper bound only: a smaller diff is ALWAYS welcome — it
+            # indicates cos_sg became closer to Fortran without breaking
+            # downstream operators.  A larger diff flags a regression.
             self.assertLess(diff, 0.05,
                 msg=(f"cos_sg[..., {k}] ({label} edge) divergence from Fortran "
                      f"cos_angle formula at C8 = {diff:.3e} exceeds documented "
                      f"0.05 ceiling — a new cos_sg bug may have been introduced."))
-            # Also assert divergence is POSITIVE and non-trivial (so the
-            # test doesn't silently accept a broken Fortran reference or a
-            # zeroed cos_sg).
-            self.assertGreater(diff, 1e-4,
-                msg=(f"cos_sg[..., {k}] ({label} edge) divergence {diff:.3e} is "
-                     f"suspiciously small — verify test construction."))
 
     def test_cos_sg_corners_match_fortran_formula_absolute(self):
         """Python cos_sg at SW/SE/NE/NW corners match Fortran |.| exactly.
