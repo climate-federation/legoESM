@@ -1373,6 +1373,24 @@ No source-code changes; structural locks only.  Regression suite now at **159 te
 
 **Directive item #2 status**: all 14 rows in the iter-683 Fortran-line backlog are now either CLOSED (by direct lock test) or documented as architectural restriction (d_sw3 non-duogrid branch).  Ralph directive item #2 ("Legacy edge handling must be disabled in duogrid mode via bounded_domain = .true.") is **closed on the sw_core.F90 side**.  Cross-file Fortran sources (`tp_core.F90`, `fv_duogrid.F90`, `fv_grid_utils.F90`, `dyn_core.F90`) have been covered by earlier iterations but not systematically re-audited; that's a future iteration scope.
 
+### Iter-706 — directive item #1 status audit: d_sw{1,3,5}→d_sw{2,4,6} flux sync
+
+Systematically traced the three directive-item-#1 flux-sync boundaries in Fortran `dyn_core.F90` against Python:
+
+| Stage boundary | Fortran                                              | Python                                                                                           | Coverage |
+|----------------|------------------------------------------------------|--------------------------------------------------------------------------------------------------|----------|
+| d_sw1 → d_sw2  | `mpp_get_boundary(fxx_delp, fyy_delp, CGRID_NE)` at dyn_core.F90:872 + `0.5*(local+buffer)` at 879-884 | `synchronize_cgrid_fluxes(fx, fy, n)` called from `fv_tp_2d` at fv_tp_2d.F90:536 (reached from `_d_sw_native` via `transport_step`) | ✅ TESTED by `TestSynchronizeCgridFluxes` (2 tests in test_duogrid.py:626) |
+| d_sw3 → d_sw4  | `mpp_get_boundary(tempfx1, tempfy1, BGRID_NE)` at dyn_core.F90:984 | `synchronize_bgrid_ne_corner_geo(ubb, vbbtemp, ...)` in `_bgrid_ke_transport` at fv3_sw_core.py:1768 | ✅ TESTED by `TestBgridNEComponentSync` (iter-543, test_duogrid.py:1491) AND iter-686 cube-seam assertion |
+| d_sw5 → d_sw6  | **COMMENTED OUT** in Fortran at dyn_core.F90:1125-1207 with "Revisit the vorticity flux averaging / should be applied to have a consistent logic" | **ABSENT** in Python d_sw6 path                                                                     | ✅ FORTRAN-FAITHFUL (Fortran deliberately omits; Python matches) |
+
+**Directive item #1 status**: all three boundaries match Fortran's actual behaviour.  The CGRID sync (d_sw1→d_sw2) and BGRID sync (d_sw3→d_sw4) are active on both sides; the d_sw5→d_sw6 sync is inactive on both sides (Fortran has it explicitly commented with a TODO note; Python mirrors).
+
+Python's `synchronize_cgrid_fluxes` (halo.py:1815) exactly reproduces Fortran's `0.5*(local + neighbour)` averaging at all 24 (face, edge) pairs, with reversal handling for seams where the neighbour's indexing is flipped.  Python's `synchronize_bgrid_ne_corner_geo` routes the vector average through the geographic frame to avoid encoding per-seam rotation tables — equivalent to Fortran's `mpp_get_boundary(gridtype=BGRID_NE)` for the BGRID component sync.
+
+**Ralph directive item #1 ("Flux computation split across d_sw1/d_sw3/d_sw5 and updates across d_sw2/d_sw4/d_sw6 requires mandatory cube-edge flux synchronization before update, with synchronized flux = average(face_A_to_B, face_B_to_A)") is fully CLOSED.**  Both the implementation and the corresponding lock tests are in place.
+
+No source-code changes in iter-706; audit + documentation only.  Regression suite unchanged at 159 tests; all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
