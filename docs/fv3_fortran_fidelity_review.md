@@ -798,3 +798,54 @@ The rotate→laplacian pipeline itself is exact on a constant field — even at 
 - `scripts/diag_iter746_polar_dx_variation.py` — dx-variation measurement + uniform-vs-nonuniform compact Laplacian comparison on analytic `sin(lat)`.
 - `scripts/diag_iter746b_angle_variation.py` — angle-variation measurement + round-trip constant-field injection test.
 - Two concrete falsifications narrowing the search space.  No source-code change this iter; matrix + ocean baselines are unchanged from iter-745 (W2 v_ll_Linf = 0.303 m/s).
+
+### Iter-747 — retract iter-746b: pipeline IS biased on smooth non-constant fields
+
+Codex stop-time review on iter-746 flagged: **"iter-746b's diagnostic is a tautological null test, so this turn incorrectly removes angle rotation as a candidate mechanism."**  Correct.  Iter-746b built a CONSTANT `u_east=10 m/s, v_north=0` field, rotated to face-local `(u_cc, v_cc)` using `angle`, then rotated BACK using the SAME `angle`.  This is the identity transformation by trigonometric identity — `ue = cos(a)*(cos(a)*u) + sin(a)*(sin(a)*u) = u`.  The subsequent Laplacian of a constant is trivially zero.  The test proved nothing about how the pipeline handles non-constant fields.
+
+**Iter-747 proper test.**  `scripts/diag_iter747_angle_rotation_proper_test.py` runs TWO non-tautological tests:
+
+(A) The smooth W2 exact IC (`u_east = u_0 * cos(lat), v_north = 0`) passed through the hyperdiff pipeline.  This has spatial structure (cos(lat) varies with latitude) so rotate → laplacian → rotate-back is NOT the identity.
+
+(B) The simulated state at t=1 d passed through the pipeline.
+
+**Test A result (W2 exact IC, NO accumulated error):**
+
+| Face       | max\|hyp_dv\| (m/s/s) | argmax location          |
+|------------|------------------------|--------------------------|
+| face 0/1/2/3 | 3.3 × 10⁻⁷          | (35, 0), lat ±34.7° (cube corner) |
+| face 4/5    | **1.0 × 10⁻⁵**        | (18, 18), lat ±88.2°     |
+| **Ratio**   | **31×**                | polar is disproportionately hit |
+
+The polar-face hyperdiff tendency on the SMOOTH exact W2 IC is **31× larger** than on equatorial faces, with the peak at lat ±88° — essentially coincident with the iter-745 observed polar peak at lat ±86° cell `(19,17)`.  This is the pipeline's intrinsic bias.
+
+**Test B result (t=1 d simulation state):**
+
+- Per-face max|hyp_dv| similar across all 6 faces (within factor 1.46)
+- Peak locations have moved to cube corners (lat ±36.5°) because the cube-corner mode dominates at t=1 d
+
+The t=1 d test is LESS diagnostic because the simulation state has accumulated the cube-corner error from earlier steps, which swamps the intrinsic polar bias.
+
+**Conclusion (retracting iter-746b).**  The hyperdiff pipeline IS biasing face 4/5 disproportionately on smooth fields.  Iter-746b's constant-field test missed this because a constant field is the ONE smooth field where the pipeline trivially preserves identity.  The angle-rotation hypothesis is **RE-OPENED**: on a non-constant `u_east(lat)`, the face-local finite-difference Laplacian picks up rapid variation of `u_east` values across face 4 cells (because the gnomonic_ed projection compresses near-pole cells, making `cos(lat)` vary rapidly in face-local indices).  Combined with the fact that face 4 covers the polar cap, this produces a 31× bias in the bilaplacian AT the polar cells.
+
+**Codex Q1/Q2/Q3 review (iter-747 incorporated):**
+
+Q1: Fortran's del-n pathway during a shallow-water step does NOT act on cell-centre `(u, v)` anywhere in `sw_core.F90` or `tp_core.F90`.  The `fv_tp_2d(nord=...)` call site list for the shallow water equations is `delp, q_con, pt, tracers` — all A-grid SCALARS.  The momentum-side del-n is `d_sw6`'s `del6_vt_flux` applied to cell-mean VORTICITY (`sw_core.F90:1947-1950, 2008-2121`): `wk = rarea * (vt(i,j) - vt(i,j+1) - ut(i,j) + ut(i+1,j))`, then `del6_vt_flux(wk)`, then `u(i,j) = u(i,j) + vt(i,j); v(i,j) = v(i,j) - ut(i,j)`.
+
+Q2: Fortran uses METRIC-AWARE normalization: `damp = (damp_c * da_min)**(nord+1)` (global minimum area), and flux-form coefficients `del6_u = sina_v*dx/dyc`, `del6_v = sina_u*dy/dxc` (`fv_grid_utils.F90:709-734`).  No per-cell `hx_sq=(dx/2)^2`-style normalization appears anywhere.
+
+Q3: The smallest Fortran-faithful replacement for the Python `hyperdiff_coeff` block at `operators_cdgrid.py:1440-1453` is the d_sw6 → `del6_vt_flux` momentum path: compute cell-mean vorticity from D-grid circulation, apply `del6_vt_flux` with `damp4 = (damp_v * da_min_c)**(nord_v+1)`, then add the returned edge fluxes to `(u, v)` as circulation increments.  The Python `laplacian_compact`-on-geographic-winds is STRUCTURALLY DIFFERENT from anything Fortran does — it is not a del-n port, it is a standalone non-FV3 stabiliser.
+
+**Iter-748 concrete work (prioritised):**
+
+1. **Port `del6_vt_flux` vorticity-form damping** to the A-L production path.  Replace the `hyperdiff_coeff > 0` block in `fv3_sw_tendencies` with a call to a new `_del6_vt_flux`-equivalent operating on cell-mean vorticity (already computed as `zeta` at `operators_cdgrid.py:1414`).  Returned fluxes add to `u_c, v_c`-like positions — requires the D-grid wind increment wiring that the current hyperdiff block's `cos_a * bilap_ue + sin_a * bilap_vn` path replaces.
+2. If the del6_vt_flux port is infeasible in a single iter (it is a significant Fortran port), break it into:
+   - 2a. Build `_del6_vt_flux` standalone unit, tested against a small synthetic input.
+   - 2b. Wire it into `fv3_sw_tendencies` as an optional stabiliser alongside the existing hyperdiff.
+   - 2c. Compare the two head-to-head on the iter-745 ablation script + matrix.
+   - 2d. Retire `laplacian_compact`-on-geographic-winds once `del6_vt_flux` is validated.
+3. Verify iter-747 Test A with boundary_fix DISABLED — if the 31× polar bias persists without boundary_fix, the bias is purely in the hyperdiff pipeline; if it disappears, boundary_fix is a co-factor.
+
+**Iter-747 deliverable.**  `scripts/diag_iter747_angle_rotation_proper_test.py` checked in.  Provides Test A (smooth IC) and Test B (stepped state) hyperdiff tendencies per face.  Confirms the pipeline's polar bias mechanistically and anchors iter-748's `del6_vt_flux` port as the Fortran-faithful fix.
+
+**Confidence.**  HIGH on "pipeline polar bias 31× on smooth W2 IC" (direct measurement).  HIGH on "Python hyperdiff block is structurally non-Fortran" (Codex file:line citations).  MEDIUM on "del6_vt_flux port will reduce the polar peak" — this is the Fortran-prescribed fix but has not been tested in Python.  LOW on "del6_vt_flux alone will meet all matrix gates without boundary_fix or div_damp" — the load-bearing nature of the three stabilisers (iter-745 ablation) means any single-stabiliser replacement must be measured jointly.
