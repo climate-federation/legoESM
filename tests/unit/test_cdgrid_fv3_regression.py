@@ -9121,6 +9121,45 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
         self.assertGreaterEqual(float(h_np.min()), 0.0,
             msg=f"h_min = {float(h_np.min()):.3e} < 0 after 1 day.")
 
+        # (4) Iter-714 strengthening (closes Codex iter-713 finding):
+        # the per-face max + argmax leaves the bell's SHAPE around the
+        # peak unconstrained.  Add 8-neighbor fingerprints to lock the
+        # shape — catches diffusion that widens the bell, directional
+        # asymmetry, and other regressions that preserve the peak
+        # value but distort the bell profile.
+        neighbor_fingerprints = {
+            # 4-connected neighbors
+            (25, 27): 875.10693359375,
+            (27, 27): 883.236572265625,
+            (26, 26): 895.2742919921875,
+            (26, 28): 862.8768310546875,
+            # Diagonal neighbors
+            (25, 26): 878.779296875,
+            (27, 26): 878.5997314453125,
+            (25, 28): 823.8604736328125,
+            (27, 28): 858.3539428710938,
+        }
+        for (i, j), expected in neighbor_fingerprints.items():
+            got = float(h_np[3, i, j])
+            self.assertAlmostEqual(got, expected, places=2,
+                msg=(f"Bell shape fingerprint at face=3 ({i}, {j}) "
+                     f"drifted: got {got:.3f}, expected {expected:.3f}.  "
+                     f"Indicates the bell profile around the peak has "
+                     f"changed — diffusion, directional asymmetry, or "
+                     f"flux-averaging regression."))
+        # 7x7 box sum around the peak: integrated bell mass in a tight
+        # region.  A regression that diffuses mass OUT of the bell core
+        # drops this sum.
+        box_sum = float(h_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4].sum())
+        self.assertAlmostEqual(box_sum, 33991.390625, places=2,
+            msg=f"7x7 box sum around peak drifted: {box_sum:.3f}")
+        # Face 3 total mass (bell-carrying face).
+        self.assertAlmostEqual(float(h_np[3].sum()), 62423.3046875,
+            places=2, msg=f"face-3 total mass drifted: {float(h_np[3].sum()):.3f}")
+        # Face 4 total mass (tail only).
+        self.assertAlmostEqual(float(h_np[4].sum()), 42.07791519165039,
+            places=3, msg=f"face-4 (tail) total mass drifted: {float(h_np[4].sum()):.4f}")
+
 
 class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
     """Iter-711 end-to-end gold-file for `fv3_sw_tendencies` — the

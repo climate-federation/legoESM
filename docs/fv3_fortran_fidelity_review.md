@@ -1507,6 +1507,21 @@ Dropped the too-loose `h.sum()` and `L2²` fingerprints — `mass_target` rescal
 
 No source-code changes; strengthened spatial invariants only.  Regression suite unchanged at 164 tests; all pass.
 
+### Iter-714 — constrain bell shape with neighbor + box + face-total fingerprints
+
+Codex stop-time review flagged iter-713 as "still overclaims spatial coverage and leaves the transported bell shape underconstrained".  Correct: iter-713 locked peak location, per-face max, and zero on unreached faces, but the bell's shape AROUND the peak was unconstrained — a directional-diffusion regression could widen the bell while preserving argmax and face-3 max.
+
+**Fix** (iter-714): added 11 new fingerprints to constrain the bell's shape in the vicinity of the peak:
+- 4-connected neighbor values (N, S, E, W): `h[3, 25, 27] = 875.11`, `h[3, 27, 27] = 883.24`, `h[3, 26, 26] = 895.27`, `h[3, 26, 28] = 862.88` (at `places=2`).
+- 4 diagonal neighbors: `h[3, 25, 26]`, `h[3, 27, 26]`, `h[3, 25, 28]`, `h[3, 27, 28]` (at `places=2`).
+- 7×7 box sum around the peak: `33991.39` — catches diffusion mass out of the bell core (at `places=2`).
+- Face 3 total mass: `62423.30` — tracks bell total separately from global mass (at `places=2`).
+- Face 4 total mass (tail only): `42.08` — catches any tail-path regression (at `places=3`).
+
+**Verified** catches a 0.1% E-W diffusion injected into `transport_step`: the bell peak drops from 896.29 to 893.41 — caught at `places=2`.  Similarly a bell-shape distortion (directional asymmetry) that preserved argmax would still fail one of the 8 neighbor checks.
+
+No source-code changes; spatial fingerprint expansion only.  Regression suite unchanged at 164 tests; all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
