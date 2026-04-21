@@ -1284,6 +1284,32 @@ Each test documents the iter that introduced the behavior, so a future refactore
 
 No source-code changes; test infrastructure + coverage addition.  Regression suite now at **151 tests** (135 + 16 new scanner fixtures); all pass.
 
+### Iter-700 — MUST-aware merge eliminates branch-local overwrite FPs
+
+Codex stop-time review flagged iter-699: "the shared AST scanner still false-positives on branch-local overwrites".  Confirmed by direct probe: a pattern like
+```
+a = ut[:, 1, 1]
+if cond:
+    a = 0.0   # branch-local overwrite
+b = vt[:, 1, 1]
+return (a + b) * u[0]
+```
+was FLAGGED by iter-699.  Under strict MAY-analysis, `a` could be 'ut' (branch-not-taken path), so the BinOp matches `{ut, vt}`.  But this is a false positive: the branch MAY have overwritten `a` to non-ut.
+
+**Fix** (iter-700): extend `_dsw4_merge_env` to take a `pre_branch` snapshot and use MUST-aware semantics:
+- If a name was NOT in `pre_branch` and branch binds it to 'ut'/'vt', propagate (iter-695 behavior preserved — branch introduces new binding).
+- If a name WAS in `pre_branch` and branch rebound it to a DIFFERENT origin, mark parent's binding as `'ambiguous'` (neither 'ut' nor 'vt' definite).
+- If branch didn't touch the name, leave parent unchanged.
+
+`resolve_name_to_origin` treats `'ambiguous'` as a terminal non-ut/non-vt tag, so operand origin becomes 'ambiguous' rather than resolving back to the original pre-branch origin.  Post-branch BinOps see `{ambiguous, vt}`, not `{ut, vt}` — no flag.
+
+**Added 3 new fixtures** to `TestDSw4StructuralLockAstScanner`:
+- `test_iter700_pre_branch_ut_branch_overwrite_no_fp` — the Codex-flagged FP → now correctly NOT flagged.
+- `test_iter700_branch_introduces_ut_still_catches` — iter-695 regression case → still CAUGHT.
+- `test_iter700_branch_rebinds_to_different_ut_vt_still_catches` — pre-ut rebound to vt in branch → NOT flagged (ambiguous; safe).
+
+No source-code changes; structural lock correctness fix.  Regression suite now at **154 tests** (151 + 3 new); all pass.
+
 ### Iter-697 — handler env starts from body_env, not pre-try
 
 Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like

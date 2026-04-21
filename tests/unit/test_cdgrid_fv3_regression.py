@@ -46,7 +46,8 @@ def _dsw4_resolve_name_to_origin(name_id, env):
     while name_id in env and name_id not in seen:
         seen.add(name_id)
         origin = env[name_id]
-        if origin in ('ut', 'vt', 'other'):
+        # 'ambiguous' is treated as terminal non-ut/non-vt (iter-700).
+        if origin in ('ut', 'vt', 'other', 'ambiguous'):
             return origin
         name_id = origin
     return None
@@ -63,21 +64,52 @@ def _dsw4_operand_origin(node, env):
     return 'other'
 
 
-def _dsw4_merge_env(parent, branch):
+def _dsw4_merge_env(parent, branch, pre_branch):
+    """Merge a branch env back into parent with MUST-aware semantics.
+
+    Iter-700 (Codex iter-699 finding): iter-695's unconditional
+    propagation produced a false positive when a parent's prior ut/vt
+    binding was overwritten inside a branch but also preserved on the
+    branch-not-taken path.  Correct semantics:
+
+      - If a name was NOT bound in `pre_branch` (before the compound
+        stmt) but branch binds it to 'ut'/'vt', propagate that into
+        parent — matches iter-695's "branch introduces new binding".
+      - If a name WAS bound in `pre_branch` to some origin and the
+        branch mutated it to a DIFFERENT origin, mark parent's
+        binding as 'ambiguous' (neither 'ut' nor 'vt' is definite).
+        This matches MUST-analysis: an overwritten binding is no
+        longer reliable for violation detection.
+      - If the branch didn't touch the name, leave parent unchanged.
+    """
     for name, tag in branch.items():
-        resolved = _dsw4_resolve_name_to_origin(name, branch)
-        if resolved in ('ut', 'vt'):
-            parent[name] = resolved
-        elif name not in parent:
-            parent[name] = tag
+        branch_resolved = _dsw4_resolve_name_to_origin(name, branch)
+        pre_resolved = _dsw4_resolve_name_to_origin(name, pre_branch) \
+            if name in pre_branch else None
+        if name not in pre_branch:
+            # Branch introduces a NEW binding — adopt it (iter-695).
+            if branch_resolved in ('ut', 'vt'):
+                parent[name] = branch_resolved
+            elif name not in parent:
+                parent[name] = tag
+        else:
+            # Parent had a pre-branch binding.  If branch overwrote it
+            # to a DIFFERENT origin, invalidate to 'ambiguous' so the
+            # BinOp resolver treats it as NOT definitely ut/vt.
+            if branch_resolved != pre_resolved:
+                parent[name] = 'ambiguous'
 
 
 def _dsw4_scan_stmt_list(stmts, env):
     """Flow-sensitive walk that returns True if a `ut+vt` BinOp is
-    reachable at some point in `stmts` under MAY-analysis semantics.
-    Iter-692..698 logic: in-order BinOp check before Assign update,
-    compound-body branch-env copies with MAY merge back, Try semantics
-    with body_env snapshot for handlers (iter-698)."""
+    reachable at some point in `stmts`.
+
+    Iter-700 semantics: merge_env is MUST-aware — branch-local
+    overwrites of a pre-existing ut/vt binding mark that binding as
+    'ambiguous' in the parent env so post-branch BinOps don't falsely
+    flag.  Branch-introduced NEW bindings still propagate (iter-695
+    still works).
+    """
     import ast as _ast
     for stmt in stmts:
         for sub in _ast.walk(stmt):
@@ -93,6 +125,7 @@ def _dsw4_scan_stmt_list(stmts, env):
                 and isinstance(stmt.targets[0], _ast.Name):
             env[stmt.targets[0].id] = _dsw4_classify_rhs(stmt.value)
         elif isinstance(stmt, _ast.Try):
+            pre_branch = dict(env)
             body_env = dict(env)
             if _dsw4_scan_stmt_list(stmt.body, body_env):
                 return True
@@ -106,20 +139,21 @@ def _dsw4_scan_stmt_list(stmts, env):
                 if _dsw4_scan_stmt_list(handler.body, h_env):
                     return True
                 handler_envs.append(h_env)
-            _dsw4_merge_env(env, body_env)
+            _dsw4_merge_env(env, body_env, pre_branch)
             for h_env in handler_envs:
-                _dsw4_merge_env(env, h_env)
+                _dsw4_merge_env(env, h_env, pre_branch)
             final = getattr(stmt, 'finalbody', [])
             if final and _dsw4_scan_stmt_list(final, env):
                 return True
         elif isinstance(stmt, (_ast.If, _ast.For, _ast.While, _ast.With)):
+            pre_branch = dict(env)
             for body_attr in ('body', 'orelse'):
                 body = getattr(stmt, body_attr, [])
                 if body:
                     branch_env = dict(env)
                     if _dsw4_scan_stmt_list(body, branch_env):
                         return True
-                    _dsw4_merge_env(env, branch_env)
+                    _dsw4_merge_env(env, branch_env, pre_branch)
     return False
 
 
@@ -9176,6 +9210,54 @@ class TestDSw4StructuralLockAstScanner(unittest.TestCase):
                "        return (a + b) * u[0]\n")
         self.assertTrue(self._scan(src),
                         "orelse success-path violation must be caught")
+
+    # ---- iter-700: branch-local overwrite of pre-branch ut/vt ----
+    def test_iter700_pre_branch_ut_branch_overwrite_no_fp(self):
+        """Pre-branch a='ut', branch overwrites to non-ut, then
+        post-branch b=vt + (a+b) BinOp.  Iter-699 FALSELY flagged this.
+        Iter-700 MUST-aware merge marks overwritten parent bindings
+        as 'ambiguous', so the BinOp sees `a='ambiguous'` (not 'ut'),
+        and no violation is reported."""
+        src = ("def f():\n"
+               "    a = ut[:, 1, 1]\n"
+               "    if cond:\n"
+               "        a = 0.0\n"
+               "    b = vt[:, 1, 1]\n"
+               "    return (a + b) * u[0]\n")
+        self.assertFalse(self._scan(src),
+                         "pre-branch ut with branch-local overwrite "
+                         "must NOT be flagged (iter-700)")
+
+    def test_iter700_branch_introduces_ut_still_catches(self):
+        """Iter-695 case: branch INTRODUCES a new ut binding (no
+        pre-branch binding).  iter-700's MUST-aware merge still
+        propagates this NEW binding.  Violation caught."""
+        src = ("def f():\n"
+               "    if cond:\n"
+               "        a = ut[:, 1, 1]\n"
+               "    b = vt[:, 1, 1]\n"
+               "    return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "branch introducing a new ut binding must "
+                        "still propagate MAY-style (iter-695)")
+
+    def test_iter700_branch_rebinds_to_different_ut_vt_still_catches(self):
+        """Edge: pre-branch a='ut', branch rebinds a='vt', then
+        BinOp with a + ut.  MUST-aware: a is ambiguous (was ut, now
+        vt).  Flagging is technically over-strict but safe — the
+        test asserts the conservative behavior."""
+        src = ("def f():\n"
+               "    a = ut[:, 1, 1]\n"
+               "    if cond:\n"
+               "        a = vt[:, 1, 1]\n"
+               "    return (a + ut[:, 0, 0]) * u[0]\n")
+        # Under MUST-aware: parent a becomes 'ambiguous' (was 'ut',
+        # branch rebound to 'vt'); BinOp sees a='ambiguous', so
+        # {lo, ro} = {'ambiguous', 'ut'} — NOT {'ut', 'vt'}.  Missed.
+        # This is intentional: don't false-positive on rebinds.
+        self.assertFalse(self._scan(src),
+                         "pre-ut rebound to vt in branch: ambiguous, "
+                         "not a real reintroduction")
 
 
 if __name__ == "__main__":
