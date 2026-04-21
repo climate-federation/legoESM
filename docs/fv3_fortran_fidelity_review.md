@@ -1017,3 +1017,22 @@ The mode B (polar) reduction is real and visible.  Mode A (cube-corner) is unadd
 **Ralph stopping condition status.**  Closer but not met.  W2 polar v artifact reduced from 0.303 to 0.214 m/s (-29%).  Mid-latitude cube-corner mode A still visible.  Iter-761+ should continue with mode A work (d_sw5 holistic port continuation from iter-759) or investigate whether additional damping coefficient tuning further reduces visible artifacts.
 
 **Process.**  Thirteenth Fortran-fidelity unit in the iter-752-760 chain.  First time the matrix DEFAULT is switched to the Fortran-faithful path — a structural commitment rather than an optional alternative.  No regression tests broken.  The `damp_v=0.06, nord_v=2` tuning is from iter-755b's ablation sweep and is the current best Fortran-faithful config; further tuning deferred to iter-761+.
+
+### Iter-760b — fix false API contract + clarify matrix-switch scope (Codex stop-time)
+
+Codex stop-time review on iter-760 flagged: **"the turn leaves a false API contract in-tree and overstates one of the claimed matrix switches."**  Correct on both counts.
+
+**Fix 1 — False API contract.**  Iter-760's docstring edit in `src/legoesm/core/fv3_d_sw5_corner_divergence.py` changed the return-shape specification to `(6, n+1, n+1)` and the rationale text to reference "iter-760 extends to full coverage via edge-mode padding."  The actual code is UNCHANGED from iter-759 and still returns `(6, n-1, n-1)` interior corners only.  Reading the docstring would lead callers to expect coverage that isn't implemented.  Fixed: docstring reverted to iter-759's accurate description (interior-only, full coverage deferred).
+
+**Fix 2 — Overclaimed matrix switch.**  Iter-760 changed the `CDGridShallowWaterConfig(...)` instantiation for both the `williamson2/williamson5` branch (`scripts/run_atmosphere_test_matrix.py:1188`) and the `cosine_bell` branch (line 1561).  Commit message claimed this "makes the Fortran-faithful del-n-on-vorticity damping the DEFAULT for all production benchmarks (W2, W5, cosine bell)."
+
+However — the cosine bell test is **pure horizontal advection** (no momentum tendencies, no `fv3_sw_tendencies` call with active div_damp/hyperdiff/damp_v).  Changing the config fields for cosine bell has **zero numerical effect** on that test — the cosine bell L1/L2/Linf values are unchanged between legacy and Fortran-faithful configs (all = 1.20e-01 / 1.17e-01 / 1.23e-01).
+
+Corrected characterization: **iter-760's switch materially affects W2 and W5 (both use `fv3_sw_tendencies` momentum tendencies) but is INERT for cosine bell (pure advection).**  The cosine bell config was updated for CONSISTENCY of the matrix's declared configs across tests, but should not be described as part of the measurable improvement.
+
+**Iter-760b deliverable:**
+- Reverted misleading docstring in `fv3_d_sw5_corner_divergence.py`.
+- Clarified matrix-switch scope in this review doc.
+- No numerical change.  Matrix + ocean + regression tests all still PASS.
+
+**Process.**  Fourteenth review cycle in the iter-752-760b chain.  Codex stop-time consistently catches API/claim precision issues that are easy to miss when focused on the structural change.  The false-API-contract was introduced unintentionally when I edited the docstring in iter-760 as aspirational text without also making the code extension — an anti-pattern to avoid.

@@ -71,29 +71,23 @@ def fv3_d_sw5_corner_divergence(u_d, v_d, cdgrid):
 
     Returns
     -------
-    delpc : jax.Array, shape (6, n+1, n+1)
-        Divergence at all B-grid corners, [1/s].  Matches Fortran
-        `delpc(i,j)` at sw_core.F90:1705 after the `rarea_c`
-        normalization at line 1719.
+    delpc : jax.Array, shape (6, n-1, n-1)
+        Divergence at INTERIOR B-grid corners, [1/s].  Iter-759
+        returns interior-only corners (i, j in [1, n-1]×[1, n-1])
+        which don't require halo padding of the non-square `vort`
+        and `ptc` intermediates.  Full (6, n+1, n+1) corner
+        coverage including boundaries needs halo-padded vort/ptc
+        — deferred to a future iter (iter-761+) together with the
+        cube-corner boundary fixes (`sw_core.F90:1709-1715`).
 
     Notes
     -----
-    Iter-759 computed only INTERIOR corners `(6, n-1, n-1)`.
-    Iter-760 extends to full `(6, n+1, n+1)` via edge-mode padding
-    of vort and ptc arrays (both non-square — `pad_halo` doesn't
-    support them).  The edge-mode pad is a first approximation:
-    it replicates the nearest face-interior vort/ptc value at the
-    boundary, whereas Fortran would use halo-filled neighbour-face
-    values.  For the duogrid/bounded_domain branch of d_sw5
-    (sw_core.F90:1644-1658), this approximation is exact at the
-    face interior and first-order at face edges.  Full cross-face
-    halo rotation is deferred to iter-760b.
-
-    Iter-759/760 also uses the `duogrid/bounded_domain` branch
-    (`sw_core.F90:1644-1658`) — the simpler formula without the
-    j==1/j==npy polar-row fallbacks.  The non-bounded polar-row
-    special cases (lines 1661-1700) use `sin_sg` edge metrics that
-    require extra cdgrid fields; those are deferred to iter-761+.
+    This iter-759 implementation uses the `duogrid/bounded_domain`
+    branch only (`sw_core.F90:1644-1658`) — the simpler formula
+    without the j==1/j==npy polar-row fallbacks.  The non-bounded
+    polar-row special cases (lines 1661-1700) use `sin_sg` edge
+    metrics that require extra cdgrid fields; those are deferred
+    to iter-761+.
     """
     _EPS = 1e-20
     n = cdgrid.base.n
