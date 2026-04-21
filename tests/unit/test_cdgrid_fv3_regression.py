@@ -9037,6 +9037,92 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                                  f"weights violate partition of unity."))
 
 
+class TestW5ProductionGoldFileIter716(unittest.TestCase):
+    """Iter-716 Williamson-5 end-to-end gold-file for the production
+    path at C36 day 1.
+
+    Existing W5 coverage (`TestW5PolarFaceMagnitude`) tests face-4
+    `v_cc_north` in an upper+lower bound window [4, 10] m/s — catches
+    amplification and excessive damping of the Rossby wave.  But NO
+    fingerprint lock on:
+    - the height field h (mountain-induced height perturbation).
+    - global mass conservation (area-weighted; iter-715 showed raw
+      sums are wrong for non-uniform-area grids).
+    - pointwise wind values (catches phase/shape regressions the
+      magnitude bounds can't detect).
+
+    This class adds a gold-file lock for all three.
+    """
+
+    def test_w5_h_and_mass_gold_file_c36_1day(self):
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState)
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test5,
+        )
+
+        n = 36
+        dt = 300.0
+        n_steps = int(86400 / dt)
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4
+        div_damp = 1.5e7 * (48.0 / n) ** 2
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=hyperdiff_coeff, div_damp=div_damp,
+            boundary_fix=True)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        sw = williamson_test5(grid)
+        u0 = 20.0
+        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+        initial_mass = float(jnp.sum(state.h * grid.area))
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        h = np.asarray(state.h)
+        ud = np.asarray(state.u_d)
+        vd = np.asarray(state.v_d)
+        area = np.asarray(grid.area)
+
+        # Height field fingerprints.
+        self.assertAlmostEqual(float(h.max()), 5966.64697265625, places=2,
+            msg=f"W5 h_max drifted: {float(h.max()):.3f}")
+        self.assertAlmostEqual(float(h.min()), 3886.87548828125, places=2,
+            msg=f"W5 h_min drifted: {float(h.min()):.3f}")
+        # Pointwise h at a specific cell near the mountain.
+        self.assertAlmostEqual(float(h[3, 18, 18]), 5958.076171875,
+            places=2, msg=f"W5 h[3,18,18] drifted: {float(h[3,18,18]):.3f}")
+
+        # Area-weighted mass conservation (iter-715 pattern — NOT
+        # raw cell sum).  W5 has no mass forcing so the integrated
+        # mass should be conserved within float32 accumulation.
+        final_mass = float((h * area).sum())
+        rel_mass_err = abs(final_mass - initial_mass) / initial_mass
+        self.assertLess(rel_mass_err, 1e-6,
+            msg=(f"W5 global mass not conserved: initial={initial_mass:.3e}, "
+                 f"final={final_mass:.3e}, rel_err={rel_mass_err:.3e}"))
+
+        # Wind magnitude fingerprints (tied to the Rossby wave
+        # amplitude; complementary to the [4, 10] face-4 v_cc_north
+        # window in TestW5PolarFaceMagnitude).
+        self.assertAlmostEqual(float(np.abs(ud).max()), 25.8116455078125,
+            places=2, msg=f"W5 max|u_d| drifted: {float(np.abs(ud).max()):.3f}")
+        self.assertAlmostEqual(float(np.abs(vd).max()), 18.756834030151367,
+            places=2, msg=f"W5 max|v_d| drifted: {float(np.abs(vd).max()):.3f}")
+
+
 class TestCosineBellGoldFileIter712(unittest.TestCase):
     """Iter-713 (strengthen iter-712) cosine-bell gold-file for the
     canonical transport path.

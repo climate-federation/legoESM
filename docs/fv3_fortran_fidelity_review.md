@@ -1537,6 +1537,17 @@ All 8 pointwise neighbor fingerprints from iter-714 are retained unchanged — t
 
 No source-code changes; corrected fingerprint semantics only.  Regression suite unchanged at 164 tests; all pass.
 
+### Iter-716 — W5 end-to-end gold-file with area-weighted mass
+
+Added `TestW5ProductionGoldFileIter716` to lock the Williamson-5 (isolated mountain) production-path C36 day-1 state end-to-end.  Existing `TestW5PolarFaceMagnitude` tests face-4 `v_cc_north` in window [4, 10] m/s (amplification + signal-loss bounds) but NO fingerprint lock on:
+- The full height field h (mountain-induced perturbation).
+- Global mass conservation (area-weighted; iter-715 showed raw sums are wrong).
+- Pointwise wind values (phase/shape regressions that magnitude bounds miss).
+
+Records 6 fingerprints at `places=2..-6`: `h.max`, `h.min`, `h[3, 18, 18]`, area-weighted global mass (with `rel_err < 1e-6` conservation tolerance), `max|u_d|`, `max|v_d|`.  Uses iter-715's correct `sum(h * area)` mass formulation.
+
+No source-code changes.  Regression suite now at **165 tests** (164 + 1 new); all pass.  Runtime: ~12s at C36 1-day.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
