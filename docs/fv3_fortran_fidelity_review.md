@@ -1604,6 +1604,17 @@ Part B's snapshot-in-production arm is deferred with explicit note: a proxy appl
 
 No source-code changes.  Regression suite unchanged at 165 tests; all pass.
 
+### Iter-720 — scale back diagnostic claims to match what the script executes
+
+Codex stop-time review flagged iter-719: "The rewritten diagnostic still overclaims a Part B snapshot comparison it never executes".  Correct: iter-719's module docstring claimed "Part B runs W2 with BOTH variants via monkey-patching" but the committed Part B only ran the baseline (sequential) and printed a "deferred" note.  The dead monkey-patch code also suggested an execution path that was never wired up.
+
+**Fix** (iter-720): rewrote the module docstring and Part B body to exactly match what the script executes:
+- Part A (synthetic): executes in full with asserts on the 0.5 ratio + non-corner-edge identity.
+- Part B (W2): runs the sequential baseline ONLY, with an explicit printed note that the snapshot variant is NOT executed and why (source-level swap gated on fingerprint regeneration).
+- Removed the dead `snapshot_tendencies` monkey-patch code — it was written but never called; its presence implied a comparison the script doesn't do.
+
+No source-code changes.  Regression suite unchanged at 165 tests; all pass.
+
 ### Iter-716 — W5 end-to-end gold-file with area-weighted mass
 
 Added `TestW5ProductionGoldFileIter716` to lock the Williamson-5 (isolated mountain) production-path C36 day-1 state end-to-end.  Existing `TestW5PolarFaceMagnitude` tests face-4 `v_cc_north` in window [4, 10] m/s (amplification + signal-loss bounds) but NO fingerprint lock on:

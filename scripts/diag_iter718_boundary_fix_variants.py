@@ -1,22 +1,26 @@
-"""Iter-718/719 diagnostic: compare sequential vs snapshot boundary_fix.
+"""Iter-720 diagnostic: document the sequential boundary_fix asymmetry.
 
-Part A (synthetic): verify numerically that the sequential 4-pass
-boundary_fix in `cdgrid_momentum_tendencies`
-(operators_cdgrid.py:1475-1483) produces a 2x stronger smoothing at
-the 4 face-corner cells than at non-corner edge cells, breaking
-4-fold cube-vertex rotational symmetry.
+Part A (synthetic) — COMMITTED AND EXECUTED:
+Verifies numerically that the sequential 4-pass boundary_fix in
+`cdgrid_momentum_tendencies` (operators_cdgrid.py:1475-1483) produces
+a 2× stronger smoothing at the 4 face-corner cells than at
+non-corner edge cells, breaking 4-fold cube-vertex rotational
+symmetry.  Asserts the ratio is exactly 0.5 and that non-corner
+edges agree identically between variants.
 
-Part B (W2 at C36 day 1): run the Williamson-2 benchmark with BOTH
-variants via monkey-patching, and compare:
-1. L2 h-error vs analytical.
-2. Per-face max|v_cc_north| on faces 4 and 5 (polar faces where the
-   mode-4 artifact is most visible).
-3. Mean |v_cc_north| across face 4 (a rougher pattern-energy proxy).
+Part B (W2 at C36 day 1) — BASELINE ONLY:
+Runs the SEQUENTIAL (production) path and reports L2 h-error,
+face-4/5 max|v_cc_north|, and face-4 mean|v_cc_north|.  Reproduces
+the user's visual evidence: face-4 max ≈ 0.307 m/s at day 1.
 
-If snapshot is comparable-or-better on L2 AND reduces face-4 max
-or pattern energy, it's a candidate Fortran-fidelity fix for the
-mode-4 artifact.  The actual source-code switch is deferred until
-this diagnostic's output supports the change.
+**NOT in this script**: a Part B snapshot arm.  Substituting
+snapshot boundary_fix at the cell-centre level requires a source-
+level edit in `cdgrid_momentum_tendencies`; a proxy applied at
+D-grid edge-midpoints (a different stage) would not be a faithful
+comparison.  The source swap is gated on a dedicated iter that
+regenerates fingerprints across iter-685/687/702/708/710/711/712/
+714/716 gold-files.  Iter-720 LIMITS its claims to Part A + Part B
+baseline.
 """
 import os
 import sys
@@ -146,63 +150,25 @@ def _run_w2(grid, cdgrid, sw, patched):
 
 def part_b_w2():
     print()
-    print("=== Part B: W2 at C36 day 1 — sequential vs snapshot ===")
+    print("=== Part B: W2 at C36 day 1 — sequential baseline ===")
     grid = create_cubed_sphere(n=36, use_duogrid=False)
     cdgrid = create_cubed_sphere_cdgrid(grid)
     sw = williamson_test2(grid)
 
-    # Baseline: sequential (current production).
-    l2_s, f4m_s, f5m_s, f4a_s = _run_w2(grid, cdgrid, sw, patched=False)
+    # Baseline: sequential (current production).  NOT paired with a
+    # snapshot run — see module docstring for why.
+    l2, f4_max, f5_max, f4_mean = _run_w2(
+        grid, cdgrid, sw, patched=False)
     print(f"  Sequential baseline (production):")
-    print(f"    L2 h-error        = {l2_s:.6e}")
-    print(f"    face-4 max|v_N|   = {f4m_s:.4f} m/s")
-    print(f"    face-5 max|v_N|   = {f5m_s:.4f} m/s")
-    print(f"    face-4 mean|v_N|  = {f4a_s:.4f} m/s")
-
-    # Experiment: monkey-patch `cdgrid_momentum_tendencies` inline to
-    # use snapshot-based boundary_fix.  The cleanest way without
-    # editing source is to wrap the production function and override
-    # boundary_fix behaviour — we do this by patching the function
-    # that IS `boundary_fix`-applying directly.
-    import legoesm.core.operators_cdgrid as ops_mod
-    orig_fn = ops_mod.cdgrid_momentum_tendencies
-
-    def snapshot_tendencies(h, u_d, v_d, h_s, grid, cdgrid,
-                             g=9.80616, *args, **kwargs):
-        # Call original WITHOUT boundary_fix applied (set False).
-        kwargs_no_bfix = dict(kwargs)
-        kwargs_no_bfix['boundary_fix'] = False
-        dh_dt, du_d_dt, dv_d_dt = orig_fn(
-            h, u_d, v_d, h_s, grid, cdgrid, g=g, *args, **kwargs_no_bfix)
-        # Apply SNAPSHOT boundary_fix at D-grid edge-midpoint level.
-        # (This is a DIFFERENT location than the source's cell-centre
-        # boundary_fix — the source applies it to du_cc/dv_cc BEFORE
-        # projection to edges.  A true snapshot swap would require
-        # editing the source.  For this diagnostic, apply a similar
-        # snapshot-style edge smoothing to the final D-grid tendencies
-        # as a PROXY for the source-level change.)
-        n = du_d_dt.shape[1]   # u_d is (6, n, n+1)
-        du_orig = du_d_dt
-        du_d_dt = du_d_dt.at[:, 0,   :].set(0.5 * (du_orig[:, 0,   :] + du_orig[:, 1,   :]))
-        du_d_dt = du_d_dt.at[:, n-1, :].set(0.5 * (du_orig[:, n-1, :] + du_orig[:, n-2, :]))
-        # (column averaging is more complex since u_d has n+1 columns; skip)
-        dv_orig = dv_d_dt
-        m = dv_d_dt.shape[1]   # v_d is (6, n+1, n)
-        dv_d_dt = dv_d_dt.at[:, :, 0    ].set(0.5 * (dv_orig[:, :, 0    ] + dv_orig[:, :, 1    ]))
-        dv_d_dt = dv_d_dt.at[:, :, -1   ].set(0.5 * (dv_orig[:, :, -1   ] + dv_orig[:, :, -2   ]))
-        return dh_dt, du_d_dt, dv_d_dt
-
-    # NOTE: the proxy snapshot above operates at a different stage
-    # than the production boundary_fix (cell centre vs edge midpoint)
-    # so results are INDICATIVE, not a direct substitute.  A full
-    # source-level snapshot swap is the path for a confirmed fix.
+    print(f"    L2 h-error        = {l2:.6e}")
+    print(f"    face-4 max|v_N|   = {f4_max:.4f} m/s")
+    print(f"    face-5 max|v_N|   = {f5_max:.4f} m/s")
+    print(f"    face-4 mean|v_N|  = {f4_mean:.4f} m/s")
     print()
-    print("  [Snapshot variant deferred — requires source-level swap")
-    print("   at operators_cdgrid.py:1475-1483 with fingerprint")
-    print("   regeneration across iter-685/687/702/708/710/711/712/")
-    print("   714/716 gold-files.  Part A + baseline establish the")
-    print("   2x corner asymmetry numerically; source swap gated on")
-    print("   a dedicated iter that handles the fingerprint update.]")
+    print("  Snapshot variant NOT executed in this script.  Source-level")
+    print("  swap at operators_cdgrid.py:1475-1483 is gated on a")
+    print("  dedicated iter that regenerates fingerprints across")
+    print("  iter-685/687/702/708/710/711/712/714/716 gold-files.")
 
 
 if __name__ == "__main__":
