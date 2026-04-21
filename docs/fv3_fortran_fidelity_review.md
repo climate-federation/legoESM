@@ -865,3 +865,22 @@ Items 2-4 are deeper structural changes that would mirror the iter-752-755b del6
 - Matrix + ocean baselines unchanged.
 
 **Process.**  Eighth Fortran-fidelity metric fix in the iter-752-757 chain, following the iter-755b pattern (A-grid → B-grid area).  Both del6 and div_damp now use `cdgrid.area_corner` consistently.
+
+### Iter-757b — unify `div_damp` metric across all live paths (Codex stop-time)
+
+Codex stop-time review on iter-757 flagged: **"`div_damp` still has inconsistent area-metric semantics across live paths."**  Correct.  The `CDGridShallowWaterConfig.div_damp` docstring lists THREE live callers:
+1. `cdgrid_momentum_tendencies` (`operators_cdgrid.py:1167`) — used by `CDGridShallowWaterModel`
+2. `fv3_sw_tendencies` (`operators_cdgrid.py:1427`) — used by `FV3EdgeShallowWaterModel` (production)
+3. `fv3_csw_tendencies` (`fv3_sw_core.py:1412`) — experimental CSW path
+
+Iter-757 only fixed path 2.  Path 1 retained `area_min = jnp.min(cdgrid.base.area)` (A-grid), creating metric divergence between two Python paths that share the same `div_damp` config parameter — a self-inconsistent state.
+
+**Fix.**  `cdgrid_momentum_tendencies` block 8 now uses `da_min_c = jnp.min(cdgrid.area_corner)` matching both Fortran `sw_core.F90:1720` and the iter-757 fix to `fv3_sw_tendencies`.
+
+**Path 3 is NOT affected.**  `fv3_csw_tendencies` uses a completely different (simpler) div_damp API: `duc += div_damp * ddiv_x` with `div_damp` as a scalar coefficient in [m²/s].  No `da_min_c` involved; not a Smagorinsky adaptive formula.  This is intentional — experimental CSW path uses a different damping model — not a metric inconsistency.
+
+**Matrix + ocean baselines unchanged** (same observation as iter-755b/757: `base.area ≈ area_corner` on cubed sphere so numerical shift is <0.5%).
+
+**Iter-757b deliverable.**  One-line fix in `cdgrid_momentum_tendencies` unifies the metric convention.  All THREE production paths that use `div_damp` as an adaptive Smagorinsky damping now consistently reference `cdgrid.area_corner` = Fortran `da_min_c`.
+
+**Process.**  Ninth metric fix in iter-752-757b chain.  The inconsistency between paths 1 and 2 is exactly what Codex caught — cross-path consistency is a second-order Fortran-fidelity property that's easy to miss when focusing on a single path.

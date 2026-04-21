@@ -1163,15 +1163,21 @@ def cdgrid_momentum_tendencies(
             dv_d_dt = dv_d_dt - hyperdiff_coeff * _laplacian_dgrid(
                 _laplacian_dgrid(v_d, cdgrid), cdgrid)
 
-    # 8. Divergence damping (FV3-style adaptive Smagorinsky)
+    # 8. Divergence damping (FV3-style adaptive Smagorinsky).
+    # Fortran reference (sw_core.F90:1720):
+    #   damp = gridstruct%da_min_c * max(d2_bg, min(0.20, dddmp*|delpc*dt|))
+    # `da_min_c` is the B-GRID CORNER (dual-cell) area minimum.
+    # Iter-757b: unified with fv3_sw_tendencies to use cdgrid.area_corner
+    # per Fortran convention.  Previously used cdgrid.base.area (A-grid)
+    # creating inconsistent semantics across the two live paths.
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
-        area_min = jnp.min(cdgrid.base.area)
-        d2_bg = div_damp / area_min
+        da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
+        d2_bg = div_damp / da_min_c
         dddmp = 0.2
         div_abs = jnp.abs(div_field)
         div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
-        adaptive_coeff = area_min * jnp.maximum(
+        adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
         ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
         du_d_dt = du_d_dt + adaptive_coeff * ddiv_dx
