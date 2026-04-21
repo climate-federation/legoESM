@@ -1011,6 +1011,7 @@ def cdgrid_momentum_tendencies(
     g=9.80616, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
     rho_0=None, div_v=None, f_3d=None,
     u_prime=None, v_prime=None,
+    dt=None,
 ):
     """D-grid momentum tendencies (vector-invariant form).
 
@@ -1168,8 +1169,11 @@ def cdgrid_momentum_tendencies(
     #   damp = gridstruct%da_min_c * max(d2_bg, min(0.20, dddmp*|delpc*dt|))
     # `da_min_c` is the B-GRID CORNER (dual-cell) area minimum.
     # Iter-757b: unified with fv3_sw_tendencies to use cdgrid.area_corner
-    # per Fortran convention.  Previously used cdgrid.base.area (A-grid)
-    # creating inconsistent semantics across the two live paths.
+    # per Fortran convention.  Iter-758: added Fortran's `*dt` factor
+    # in the adaptive Smag term (previously missing).  Caller must pass
+    # `dt`.  Defaults to None → use legacy formula without *dt for
+    # backward-compat; when dt is provided, the Fortran-faithful form
+    # is used.
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
@@ -1177,8 +1181,15 @@ def cdgrid_momentum_tendencies(
         dddmp = 0.2
         div_abs = jnp.abs(div_field)
         div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
+        if dt is not None:
+            # Fortran-faithful: dddmp * |delpc*dt| inside the cap.
+            smag_term = dddmp * (div_abs_corner * dt)
+        else:
+            # Legacy (pre-iter-758): no dt factor.  Kept for backward-
+            # compatibility when caller doesn't pass dt.
+            smag_term = dddmp * div_abs_corner
         adaptive_coeff = da_min_c * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
+            d2_bg, jnp.minimum(0.20, smag_term))
         ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
         du_d_dt = du_d_dt + adaptive_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + adaptive_coeff * ddiv_dy_perp
@@ -1351,6 +1362,7 @@ def fv3_sw_tendencies(
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
     zero_mean_correction=False,
+    dt=None,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1432,22 +1444,23 @@ def fv3_sw_tendencies(
     # (h) Divergence damping at cell centres.
     # Fortran reference: sw_core.F90:1720
     #   damp = gridstruct%da_min_c * max(d2_bg, min(0.20, dddmp*abs(delpc(i,j)*dt)))
-    # Fortran's `da_min_c` is the B-GRID CORNER (dual-cell) area
-    # minimum, NOT the A-grid cell area minimum.  Iter-757 fixes this
-    # to use cdgrid.area_corner (shape (6, n+1, n+1)), matching the
-    # iter-755b fix to the del6 path.  Remaining divergence from
-    # Fortran: (1) missing `*dt` factor in dddmp branch, (2) cell-
-    # centre div vs Fortran's corner div, (3) direct A-L-gradient-
-    # add vs Fortran's add-to-ke-then-gradient structure.  These
-    # deeper structural fixes are deferred to iter-758+.
+    # Iter-755b/757: use B-grid da_min_c = min(area_corner).
+    # Iter-758: add Fortran's `*dt` factor in the adaptive Smag term.
+    # When dt is None (caller didn't pass it), use legacy formula
+    # without *dt for backward compatibility.  When dt is provided,
+    # the Fortran-faithful form runs.
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
         d2_bg = div_damp / da_min_c
         dddmp = 0.2
         div_abs = jnp.abs(div_field)
+        if dt is not None:
+            smag_term = dddmp * (div_abs * dt)    # Fortran-faithful
+        else:
+            smag_term = dddmp * div_abs           # Legacy pre-iter-758
         adaptive_coeff = da_min_c * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * div_abs))
+            d2_bg, jnp.minimum(0.20, smag_term))
         ddiv_dx, ddiv_dy_perp_cc = _arakawa_lamb_gradient(div_field, cdgrid)
         du_cc = du_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dx)
         dv_cc = dv_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dy_perp_cc)

@@ -884,3 +884,32 @@ Iter-757 only fixed path 2.  Path 1 retained `area_min = jnp.min(cdgrid.base.are
 **Iter-757b deliverable.**  One-line fix in `cdgrid_momentum_tendencies` unifies the metric convention.  All THREE production paths that use `div_damp` as an adaptive Smagorinsky damping now consistently reference `cdgrid.area_corner` = Fortran `da_min_c`.
 
 **Process.**  Ninth metric fix in iter-752-757b chain.  The inconsistency between paths 1 and 2 is exactly what Codex caught — cross-path consistency is a second-order Fortran-fidelity property that's easy to miss when focusing on a single path.
+
+### Iter-758 — add Fortran `*dt` factor to adaptive Smag (item 2 of iter-757 deferred list)
+
+Per iter-757 deferred list item 2: Python `div_damp` block uses `dddmp * |div|` in the adaptive Smag branch, but Fortran uses `dddmp * |delpc*dt|` (`sw_core.F90:1720`).  Missing `*dt` factor makes the adaptive branch ~300× smaller than Fortran for typical dt=300s, so the cap `min(0.20, ...)` never activates and the adaptive term is essentially a no-op — the damping reduces to the constant `d2_bg` background.
+
+**Fix.**  Pass `dt` through the tendency chain:
+- `fv3_sw_tendencies` gains `dt` kwarg (default None for backward-compat).
+- `cdgrid_momentum_tendencies` gains `dt` kwarg.
+- `cdgrid_shallow_water_tendencies` gains `dt` parameter and forwards it.
+- Both `FV3EdgeShallowWaterModel.step` and `CDGridShallowWaterModel.step` pass the integrator's `dt` to `tendency_fn`.
+- When `dt is not None`: use `dddmp * (|div| * dt)` per Fortran.
+- When `dt is None` (legacy callers): fall back to `dddmp * |div|` for backward-compat.
+
+**Numerical impact.**  Matrix + ocean baselines UNCHANGED at `damp_v=0` default: W2 v_ll_Linf=3.03e-1, L2=2.42e-4; W5 mass drift=1.74e-5; cosine bell L1=1.20e-1.  Iter-745 ablation found `div_damp=OFF` changes W2 v_ll_Linf by only 0.5%, which is consistent with the Smag term being saturated below cap — the dt fix doesn't change cap behaviour in the tested range.
+
+**Del6 ablation unchanged.**  `del6 damp_v=0.06 nord_v=2` still gives v_ll_Linf=2.14e-01 (-29.4%) post-fix.  The dt factor fix is orthogonal to del6.
+
+**Deferred remaining div_damp divergences (items 3, 4):**
+- Item 3: Python uses cell-centre divergence `cgrid_divergence(u_c, v_c)`; Fortran `delpc(i,j)` is at B-grid CORNERS.  Requires porting the Fortran `delpc = vort(i,j-1) - vort(i,j) + ptc(i-1,j) - ptc(i,j)` corner formula (`sw_core.F90:1705`).
+- Item 4: Python adds `coeff * grad(div)` directly to tendencies; Fortran injects `damp*delpc` into `ke` which feeds the Bernoulli gradient (`sw_core.F90:1722`).  Structural restructure of the B assembly.
+
+Items 3-4 would fundamentally change how div_damp enters the momentum equation, potentially unlocking further cube-corner artifact reduction (mode A).  Deferred to iter-759+.
+
+**Iter-758 deliverables:**
+- `dt` kwarg added to `fv3_sw_tendencies`, `cdgrid_momentum_tendencies`, `cdgrid_shallow_water_tendencies`.
+- Both production shallow-water step methods pass `dt` through to the tendency layer.
+- Fortran-faithful `dddmp * |div| * dt` formula active when dt is passed.
+
+**Process.**  Tenth Fortran-fidelity fix in iter-752-758 chain.  This fix has no quantitative impact on current benchmarks but plugs a genuine Fortran-semantic gap — once deeper structural div_damp fixes (items 3-4) land, they will depend on the Fortran-faithful adaptive Smag formula being in place.

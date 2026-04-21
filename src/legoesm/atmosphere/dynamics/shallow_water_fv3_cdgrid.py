@@ -126,6 +126,7 @@ def cdgrid_shallow_water_tendencies(
     state: CDGridShallowWaterState,
     cdgrid: CubedSphereCDGrid,
     config: CDGridShallowWaterConfig = CDGridShallowWaterConfig(),
+    dt: float | None = None,
 ):
     """Compute C-D grid shallow water tendencies.
 
@@ -154,6 +155,7 @@ def cdgrid_shallow_water_tendencies(
         g=config.g, A_h=config.A_h,
         hyperdiff_coeff=config.hyperdiff_coeff,
         div_damp=config.div_damp,
+        dt=dt,       # Iter-758: enable Fortran-faithful *dt in Smag
     )
 
     # Boundary-corner fix: halo interpolation gives O(dx) gradient error
@@ -290,6 +292,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         def tendency_fn(s):
             dh, du, dv = cdgrid_shallow_water_tendencies(
                 s, self.cdgrid, self.config,
+                dt=dt,       # Iter-758: pass dt for Fortran Smag factor
             )
             return CDGridShallowWaterState(
                 h=dh, u_d=du, v_d=dv,
@@ -493,6 +496,8 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     div_damp=self.config.div_damp,
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
                     boundary_fix=self.config.boundary_fix,
+                    dt=dt,       # Iter-758: enable Fortran-faithful
+                                 # *dt factor in adaptive Smag term.
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,
