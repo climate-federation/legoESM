@@ -1784,6 +1784,41 @@ Both pass at iter-729 commit time.  Any future iteration porting the xtp_u east-
 - Iter-730b: focus on a different fidelity gap entirely (task 3 of Path Forward — FB + duogrid stability at C24).
 - Iter-730c: file an upstream Fortran issue documenting the likely 2842/2586 typo (out of scope for legoESM; leave as a note).
 
+### Iter-730 — FB C24 W2 stability: dissipation sweep confirms instability is upstream of damping
+
+Task 3 of the iter-722 Path Forward: "Verify FB + duogrid stability at C24 first, then C36."  Iter-727 wired the d_sw1 mass-transport del-n damping via `fv_tp_2d(..., nord=nord_v, damp_c=damp_v)`, closing task 2.  Iter-730 tests whether that port plus damp_v-driven d_sw6 vorticity damping is now sufficient to stabilise the FB chain at C24.
+
+**Diagnostic.**  `scripts/diag_iter730_fb_c24_stability.py` runs Williamson 2 on `FV3FBShallowWaterModel` at C24 for 1 simulated day with dt=300s.  Default FB config (A_h=0, hyperdiff_coeff=0, div_damp=0, d4_bg=0.16, nord=1, dddmp=0) plus a sweep of `damp_v` (which activates BOTH the iter-727 d_sw1 mass-damp path AND the pre-existing step-(9) `_del6_vt_flux` vorticity damping).
+
+**Results at C24, dt=300s:**
+
+| Case | damp_v | Blow-up step / 288 | max\|u_d\| @ step 48 | max\|v_d\| @ step 48 |
+|------|--------|---------------------|---------------------|---------------------|
+| A    | 0.00   | 60 (t=18000s)       | 90.1                | 184.4               |
+| B    | 0.06   | 60 (t=18000s)       | 95.7                | 190.9               |
+| C    | 0.12   | 60 (t=18000s)       | 104.3               | 201.6               |
+| D    | 0.30   | **15** (t=4500s)    | —                   | —                   |
+
+Exact W2 max\|u\| ≈ 38.6 m/s, max\|v\| = 0.  By step 48 the FB chain has already developed winds 2.3-5× the analytic solution; damp_v>0 accelerates the blowup rather than suppressing it.
+
+**Diagnosis.**  The FB C24 instability does NOT live in either dissipation branch that iter-727 / iter-727+8 wired:
+- iter-727 / iter-728 d_sw1 mass damping: acts on h transport via del-n.  Results A vs B show no difference in blowup step — mass damping is not a stabiliser here.
+- step-(9) `_del6_vt_flux` vorticity damping: activated identically by damp_v>0.  Results B/C/D show damp_v makes the blowup EARLIER, not later — the del-n smoother is propagating already-contaminated momentum gradients.
+
+The instability therefore lives UPSTREAM of both damping branches — in `_c_sw` (C-grid half-step) or the `_d_sw_native` B-grid KE / vorticity-flux / wind-update sequence BEFORE step (9).  Stronger dissipation cannot paper over an incorrect momentum increment; task 3 cannot be closed by tuning damping.
+
+**Task-status update.**
+- Task 1 (halo=3 infra + `_d2a2c_vect` caller flip): **DONE**.
+- Task 2 (per-phase dissipation — d_sw1 mass, d_sw5 corner div, d_sw6 vorticity): **DONE**.  Confirmed per Fortran: c_sw and d_sw3 have no dissipation; d_sw1 / d_sw5 / d_sw6 do and are now all wired.
+- Task 3 (FB + duogrid stability at C24): **BLOCKED — upstream momentum bug**.  Cannot proceed via dissipation port alone.  Needs a structural investigation of `_c_sw` / `_d_sw_native` momentum phases against sw_core.F90:c_sw / d_sw1..d_sw6 line-by-line.
+- Task 4 (gold-file FB chain at C24): **NOT STARTED** (gated on task 3).
+
+**Iter-730 deliverable.**  `scripts/diag_iter730_fb_c24_stability.py` is the concrete evidence underlying the task-3 BLOCKED conclusion.  The script is checked in so future iters can re-run it after structural fixes land and confirm the blowup-step number moves.  If a future iter reports FB C24 stable through 288 steps, `diag_iter730_fb_c24_stability.py` is the authoritative regression sentinel.
+
+**Priority reshuffle.**  With task 3 of the iter-722 Path Forward blocked on upstream bugs, iter-731+ should EITHER:
+- (a) root-cause the C24 momentum blowup by bisecting `_c_sw` vs `_d_sw_native` phases at step 1 against Fortran, OR
+- (b) shift focus to the production A-L+RK3 W2 v-wind mode-4 artifact (the user's iter-717 image blocker) since FB replacement is no longer the clear near-term path.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
