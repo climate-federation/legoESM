@@ -1,18 +1,22 @@
-"""Iter-763 diagnostic: measure the difference between Python's
-2-point-averaging cube-corner halo fill and Fortran's directional
-copy-from-interior fill (sw_core.F90:3856-3915 `fill_4corners`).
+"""Iter-763 diagnostic: measure SENSITIVITY of Python's cube-corner
+halo-fill output to a simple alternative (interior-diagonal reflect).
+
+**Caveat (iter-763b).**  This diagnostic does NOT compute Fortran's
+actual `fill_4corners` formula (sw_core.F90:3856-3915).  That
+Fortran fill uses directional copy-from-interior with specific
+index mappings (e.g. `q(-1,0) = q(0,2)` for dir=1 SW corner) that
+require porting the full Fortran halo convention.  For iter-763's
+purpose — establishing whether cube-corner halo fill is a
+SENSITIVE part of the solution — this diagnostic uses a simpler
+PROXY: "interior-diagonal reflect" (`padded[1, 1]` for the
+`padded[0, 0]` corner cell).  If the 2-pt-avg and the proxy differ
+materially, the corner fill IS a sensitive knob and iter-764+
+porting of Fortran's exact `fill_4corners` is worth the effort.
+If they're near-identical, the corner fill is NOT the mode A
+driver and another mechanism should be investigated.
 
 Iter-762 showed the residual W2 v-wind artifact is ENTIRELY at
-the 8 cube vertices (lat ±35°, lon ±45°/±135°).  Iter-763 tests
-whether the cube-corner halo-fill discrepancy between Python
-(_fill_corners_h1: 2-point edge average) and Fortran
-(fill_4corners: directional copy) is materially non-zero on the
-W2-exact-IC B field.
-
-If the difference is large (~O(B)), the corner fill is likely
-contributing to mode A and a Fortran-style directional fill is a
-concrete iter-764+ target.  If negligible, mode A is driven by
-a different mechanism (metric, gradient stencil, etc.).
+the 8 cube vertices (lat ±35°, lon ±45°/±135°).
 """
 import os, sys
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -45,22 +49,19 @@ B = jnp.asarray(KE)
 B_pad_py = pad_halo(B, interp_offsets=grid.halo_interp_offsets,
                     duogrid=grid.duogrid)
 
-# Fortran-style directional copy fill (fill_4corners, dir=1):
-#   sw_corner: q(-1,0) = q(0,2);  q(0,0) = q(0,1)
-#   etc.  In our padded convention with halo=1:
-#     padded index (0, 0) ↔ Fortran q(-1, -1)? or (-1, 0)?
-# The fill_4corners signature specifies specific CELLS at the 4
-# cube corners.  Without replicating the full cube-corner topology,
-# we can approximate: SW-corner halo cell at padded[f, 0, 0] should
-# be q(0, 1) (one cell inward in y) for dir=1.  Our 2-point average
-# sets it to 0.5*(halo_x_edge + halo_y_edge).  If the directional
-# copy gives a different value, we flag it.
+# Sensitivity check: compare the 2-pt-avg to an "interior-diagonal
+# reflect" PROXY (padded[1, 1] for corner padded[0, 0]).  This is
+# NOT Fortran's `fill_4corners` formula — which is
+#    q(-1, 0) = q(0, 2);  q(0, 0) = q(0, 1)
+# (dir=1 at SW corner).  The Fortran formula involves specific
+# Fortran-index → Python-padded-index mappings and directional
+# sweeps that would require a full port to evaluate here.
 #
-# For simplicity in this diagnostic, we compute the "expected
-# interior-reflect" alternative: at padded[:, 0, 0], use the value
-# at padded[:, 1, 1] (2D interior-diagonal).  This is a crude
-# stand-in for Fortran's directional fill — not exact but indicates
-# whether cube-corner values are sensitive to the fill choice.
+# The interior-diagonal proxy is merely a CONCRETE alternative
+# value — if the 2-pt-avg differs significantly from ANY simple
+# alternative, the cube-corner halo fill is a sensitive knob and
+# worth porting properly (iter-764+).  A near-identical result
+# would indicate the corner fill is NOT the mode A driver.
 
 # Corner indices in padded array:
 corners = [(0, 0), (0, -1), (-1, 0), (-1, -1)]  # (SW, NW, SE, NE)

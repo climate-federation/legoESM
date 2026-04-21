@@ -1124,28 +1124,36 @@ With iter-761's matrix config (damp_v=0.06, nord_v=2, 8× div_damp), the residua
 
 **Process.**  21st iter in iter-752-762 chain.  First iter in this chain WITHOUT a Codex stop-time correction (the 20 prior iters averaged 1-2 Codex catches each).  The mode B elimination by iter-760/761 is a major structural milestone; mode A is now the clean remaining target.
 
-### Iter-763 — quantify cube-corner halo-fill discrepancy (Py 2-pt-avg vs Fortran directional copy)
+### Iter-763 — cube-corner halo-fill SENSITIVITY check (interior-reflect proxy)
 
 With iter-762 establishing that the residual artifact is ENTIRELY at the 8 cube vertices, iter-763 investigates mechanism candidate (3) from iter-762's list: **Python `_fill_corners_h1` uses 2-point edge averaging at cube vertices while Fortran `fill_4corners` (`sw_core.F90:3856-3915`) uses directional copy-from-interior.**
+
+**Scope correction (iter-763b).**  This iter's diagnostic does NOT compute Fortran's actual `fill_4corners` output.  Fortran's formula is:
+```
+dir=1 SW: q(-1, 0) = q(0, 2);  q(0, 0) = q(0, 1)
+```
+which needs the Fortran index-origin convention mapped to our Python padded-array indexing.  Iter-763's diagnostic instead uses an "interior-diagonal reflect" PROXY (`padded[1, 1]` for the `padded[0, 0]` corner cell) as a simple alternative value.  If the 2-pt-avg differs materially from ANY reasonable alternative, the corner fill is a sensitive knob worth the effort of porting properly; if near-identical, it's NOT the mode A driver.
 
 The Python halo docstring (`halo.py:1285-1299`) explicitly notes:
 > "The Fortran transport path uses `copy_corners(dir=1/2)` — a directional rotated copy tailored to X-sweep vs Y-sweep of PPM.  That mechanism writes DIFFERENT values at the same cube-vertex cell for different sweep directions.  Our 2-point average is a direction-invariant single value... The corner fill IS read by Arakawa-Lamb gradient, but that gradient is a non-FV3 Python operator and there is no Fortran reference to match."
 
 So our A-L gradient DOES read these cube-vertex halo cells; the 2-pt-avg is a known approximation.
 
-**Quantitative test** (`scripts/diag_iter763_corner_fill_comparison.py`):  built a W2-exact smooth KE field (scale ~745 m²/s²) and measured the discrepancy at 24 cube-corner halo cells between the 2-pt-avg fill and a simple interior-diagonal reflect alternative:
+**Sensitivity measurement** (`scripts/diag_iter763_corner_fill_comparison.py`):  built a W2-exact smooth KE field (scale ~745 m²/s²) and measured the discrepancy at 24 cube-corner halo cells between the 2-pt-avg fill and the interior-diagonal reflect PROXY:
 
-| Face | 2-pt-avg at (0,0) | Interior diagonal (1,1) | Diff |
-|------|-------------------|--------------------------|------|
+| Face | 2-pt-avg at (0,0) | Interior-diagonal PROXY (1,1) | Diff |
+|------|-------------------|--------------------------------|------|
 | face 0-3 | 496.62 m²/s² | 504.26 m²/s² | −7.65 |
 | face 4-5 | 497.56 m²/s² | 482.27 m²/s² | +15.29 |
 
-**Max discrepancy**: 15.3 m²/s² (2.05 % of B scale).  Faces 4/5 (polar) have opposite-sign error vs faces 0-3 (equatorial) — consistent with 3-face-meeting rotation inconsistency at each cube vertex.
+**Max discrepancy against the proxy**: 15.3 m²/s² (2.05 % of B scale).  Faces 4/5 (polar) have opposite-sign error vs faces 0-3 (equatorial).  This is SENSITIVITY to the fill choice, NOT Fortran vs Python per se.
 
-**Implications.**  At cube-corner cells the A-L gradient stencil is `(B_ne + B_se) − (B_nw + B_sw)` where one of `B_sw`, `B_se`, `B_nw`, `B_ne` is a 2-pt-avg halo value.  A 15 m²/s² offset over dx ≈ 555 km (C36) gives a gradient error ~2.7 × 10⁻⁵ m/s².  Integrated over 288 RK3 steps at dt=300s, accumulated tendency is plausibly O(0.1 m/s) — consistent with the observed 0.159 m/s mode A amplitude.
+**Implications.**  The 2-pt-avg fill produces materially different values from a simple interior-reflect alternative.  This indicates the cube-corner fill IS a sensitive knob — a change to Fortran's fill (or any other reasonable alternative) could shift cube-corner halo values by ~O(15 m²/s²) on this smooth field.  A 15 m²/s² offset over dx ≈ 555 km (C36) gives gradient error ~2.7 × 10⁻⁵ m/s²; integrated over 288 RK3 steps at dt=300s, accumulated tendency is plausibly O(0.1 m/s), consistent with the observed 0.159 m/s mode A amplitude.
 
-**Iter-764+ concrete next step.**  Port Fortran's directional `fill_4corners` and replace `_fill_corners_h1` — OR specifically in `_arakawa_lamb_gradient`, compute separate `B_pad_dir_x` and `B_pad_dir_y` variants with the appropriate Fortran dir=1 / dir=2 fills, then use each in the corresponding gradient component.
+This is evidence that corner-fill choice AFFECTS mode A at the right order of magnitude.  It is NOT a direct measurement of Fortran's impact — Fortran's `fill_4corners` would need to be ported to measure that exactly.
 
-**Iter-763 deliverable.**  `scripts/diag_iter763_corner_fill_comparison.py` checked in.  Quantifies the cube-corner halo-fill discrepancy as a plausible mechanism for mode A at the right order of magnitude.  No source-code change.  Matrix + ocean baselines unchanged.
+**Iter-764+ concrete next step.**  Port Fortran's directional `fill_4corners` and replace `_fill_corners_h1` — OR specifically in `_arakawa_lamb_gradient`, compute separate `B_pad_dir_x` and `B_pad_dir_y` variants with the appropriate Fortran dir=1 / dir=2 fills, then use each in the corresponding gradient component.  Iter-763's sensitivity evidence supports spending the effort.
 
-**Process.**  22nd iter in iter-752-763 chain.  Diagnostic-only iter, builds on iter-762's cube-vertex localisation with a concrete mechanism candidate now quantified.
+**Iter-763 deliverable.**  `scripts/diag_iter763_corner_fill_comparison.py` checked in.  Demonstrates cube-corner halo-fill sensitivity on a smooth test field; provides a working hypothesis for mode A at the right order of magnitude.  No source-code change.  Matrix + ocean baselines unchanged.
+
+**Process.**  22nd-23rd iter in iter-752-763b chain.  Two Codex stop-time catches on iter-762 (longitude label) and iter-763 (Fortran-vs-proxy overclaim).  Lesson: when claiming a Fortran comparison, actually compute Fortran's formula or clearly label the alternative as a proxy.
