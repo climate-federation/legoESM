@@ -3880,17 +3880,17 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"1.53e-3)."))
 
     def test_w2_alpha0_c36_1day_iter761_matrix_config(self):
-        """Iter-761 pinned: current matrix default using the Fortran-
-        faithful `del6_vt_flux`-on-vorticity damping path (iter-760)
-        with tuned 8× `div_damp` (iter-761):
+        """Iter-761 pinned: the EXACT iter-761 canonical matrix config
+        produces L2 < 4.0e-4 on W2 C36 1-day:
           hyperdiff_coeff=0,
           div_damp = 8 * _div_damp_cube(n),
           damp_v=0.06, nord_v=2, boundary_fix=True.
 
-        Matches `scripts/run_atmosphere_test_matrix.py` lines 1188-1197
-        (iter-761).  Pins the W2 C36 1-day L2 ceiling for the CURRENT
-        canonical matrix default, separate from the LEGACY ceiling
-        locked by `test_w2_alpha0_c36_1day_canonical_l2_post_iter505`.
+        SCOPE: this test pins the NUMERICAL BEHAVIOUR of the iter-761
+        config when it is applied.  It does NOT detect a matrix-script
+        rollback to legacy values — that is the job of
+        `test_matrix_script_uses_iter761_canonical_config` below,
+        which inspects the matrix source.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -3941,17 +3941,60 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         L2 = float(jnp.sqrt(jnp.mean(err ** 2)) / h_mean)
 
         # Measured (iter-761): L2 = 2.07e-4 on the iter-761 matrix
-        # config.  Ceiling at 4.0e-4 gives ~2x headroom against the
-        # measured value and would cleanly fail if either:
-        # (a) the matrix config regresses back to the legacy 2.42e-4 regime,
-        # (b) the iter-760 del6 or iter-761 div_damp tuning is accidentally
-        #     disabled or reverted,
-        # (c) new numerical regressions inflate the integrated error.
+        # config.  Ceiling at 4.0e-4 pins iter-761's numerical
+        # behaviour; it does NOT pin the matrix-script's default
+        # config (that is done by the source-inspection test below).
         self.assertLess(
             L2, 4.0e-4,
             msg=(f"W2 alpha=0 C36 1d (iter-761 matrix setup) "
                  f"L2={L2:.3e} exceeds 4.0e-4 ceiling.  iter-761 "
                  f"baseline was 2.07e-4."))
+
+    def test_matrix_script_uses_iter761_canonical_config(self):
+        """Iter-761b: source-inspection sentinel that actually detects
+        a rollback of the matrix-default config.
+
+        The iter-761 numerical-ceiling test above runs its own
+        hardcoded config; reverting the matrix script to legacy values
+        would NOT make that test fail.  This source-inspection test
+        reads `scripts/run_atmosphere_test_matrix.py` and verifies
+        the canonical W2/W5 shallow-water CDGridShallowWaterConfig
+        block still contains the iter-761 Fortran-faithful tokens:
+          - `hyperdiff_coeff=0.0` (iter-760: del6 replaces bilaplacian)
+          - `damp_v=0.06` (iter-755b ablation optimum)
+          - `nord_v=2` (iter-755b ablation optimum)
+          - `8.0 * _div_damp_cube(n)` (iter-761 tuning)
+
+        If any of these tokens is absent, a future edit has drifted
+        the canonical config away from the iter-761 tuning and this
+        test fires before the regression accumulates.
+        """
+        import pathlib
+        matrix_path = (
+            pathlib.Path(__file__).resolve().parent.parent.parent
+            / "scripts" / "run_atmosphere_test_matrix.py")
+        assert matrix_path.is_file(), (
+            f"Matrix script not found at {matrix_path}")
+        text = matrix_path.read_text()
+
+        # Locate the W2/W5 SW config block.  The sentinel tokens
+        # should all be present within a reasonable span of each
+        # other in the same CDGridShallowWaterConfig block.
+        required_tokens = [
+            "hyperdiff_coeff=0.0",
+            "damp_v=0.06",
+            "nord_v=2",
+            "8.0 * _div_damp_cube(n)",
+        ]
+        missing = [t for t in required_tokens if t not in text]
+        self.assertEqual(
+            missing, [],
+            msg=(f"scripts/run_atmosphere_test_matrix.py no longer "
+                 f"contains iter-761 canonical tokens: missing={missing}. "
+                 f"A rollback of the iter-760/761 Fortran-faithful "
+                 f"del6 + 8×div_damp tuning has occurred.  See "
+                 f"docs/fv3_fortran_fidelity_review.md iter-761 "
+                 f"for rationale."))
 
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
