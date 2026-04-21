@@ -525,28 +525,48 @@ class LatLonCGridOceanModel:
         for tr_name in ['T', 'S']:
             tr = T_mid if tr_name == 'T' else S_mid
 
-            # Horizontal flux: div(mf_k * T_face)
-            # First-order upwind interpolation prevents new extrema near
-            # sharp gradients (monotonicity-preserving).  The upwind cell
-            # is selected based on the sign of the mass flux.
-            if self.config.tracer_advection == "tvd":
-                tr_u = _tvd_to_u_points(tr, mass_flux_u)
-                tr_v = _tvd_to_v_points(tr, mass_flux_v)
-            else:
-                tr_u = _upwind_to_u_points(tr, mass_flux_u)
-                tr_v = _upwind_to_v_points(tr, mass_flux_v)
-            tracer_flux_u = mass_flux_u * tr_u
-            tracer_flux_v = mass_flux_v * tr_v
-            div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
-
-            # Flux-form vertical advection:
-            # TVD Van Leer reduces implicit numerical diffusion from
-            # K_num~|w|*dz/2 (upwind) to ~0 in smooth regions (#209).
-            if self.config.tracer_advection == "tvd":
-                vert_flux_div = flux_form_vertical_tracer_advection_tvd(
+            if self.config.tracer_advection == "dst3":
+                # DST-3 with Sweby limiter, applied independently per
+                # direction. Third-order in space and time, monotone (#210).
+                from legoesm.ocean.advection import (
+                    dst3_to_u_points, dst3_to_v_points,
+                    flux_form_vertical_tracer_advection_dst3,
+                )
+                tr_u = dst3_to_u_points(tr, mass_flux_u, h_u_old, self.grid, dt)
+                tr_v = dst3_to_v_points(tr, mass_flux_v, h_v_old, self.grid, dt)
+                tracer_flux_u = mass_flux_u * tr_u
+                tracer_flux_v = mass_flux_v * tr_v
+                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
+                vert_flux_div = flux_form_vertical_tracer_advection_dst3(
                     tr, w_baro, h_k_old, dt)
+            elif self.config.tracer_advection == "dst3_multidim":
+                # DST-3 with multi-dimensional transverse correction.
+                # More accurate at diagonal flows but less robust.
+                from legoesm.ocean.advection import multidim_tracer_advection
+                div_hut, vert_flux_div = multidim_tracer_advection(
+                    tr, mass_flux_u, mass_flux_v, w_baro,
+                    h_k_old, h_u_old, h_v_old, self.grid, dt,
+                )
             else:
-                vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
+                # Horizontal flux: div(mf_k * T_face)
+                if self.config.tracer_advection == "tvd":
+                    tr_u = _tvd_to_u_points(tr, mass_flux_u)
+                    tr_v = _tvd_to_v_points(tr, mass_flux_v)
+                else:
+                    tr_u = _upwind_to_u_points(tr, mass_flux_u)
+                    tr_v = _upwind_to_v_points(tr, mass_flux_v)
+                tracer_flux_u = mass_flux_u * tr_u
+                tracer_flux_v = mass_flux_v * tr_v
+                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
+
+                # Flux-form vertical advection:
+                # TVD Van Leer reduces implicit numerical diffusion from
+                # K_num~|w|*dz/2 (upwind) to ~0 in smooth regions (#209).
+                if self.config.tracer_advection == "tvd":
+                    vert_flux_div = flux_form_vertical_tracer_advection_tvd(
+                        tr, w_baro, h_k_old, dt)
+                else:
+                    vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
 
             # Full flux-form tracer update:
             # h_new * T_new = h_old * T_old - dt * vert_flux_div - dt * div_h(mf*T_face)

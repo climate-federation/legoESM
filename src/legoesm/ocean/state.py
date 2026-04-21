@@ -414,7 +414,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
-    tracer_advection: str = "tvd"  # "upwind" or "tvd" (Van Leer, #170)
+    tracer_advection: str = "tvd"  # "upwind", "tvd" (Van Leer), "dst3", "dst3_multidim"
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
