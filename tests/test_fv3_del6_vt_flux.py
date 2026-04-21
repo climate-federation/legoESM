@@ -17,7 +17,8 @@ import pytest
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.fv3_del6_vt_flux import (
-    _del6_vt_flux, compute_del6_metrics)
+    _del6_vt_flux, compute_del6_metrics,
+    fv3_del6_vorticity_damping)
 
 
 @pytest.fixture
@@ -164,3 +165,98 @@ def test_del6_vt_flux_zero_field(cdgrid):
                                   rarea=rarea, cdgrid=cdgrid)
         assert bool(jnp.all(fx2 == 0.0))
         assert bool(jnp.all(fy2 == 0.0))
+
+
+def test_fv3_del6_damping_shapes(cdgrid):
+    """High-level helper returns correctly-staggered updates."""
+    n = cdgrid.base.n
+    u_d = jnp.array(np.random.default_rng(0).normal(size=(6, n, n + 1)))
+    v_d = jnp.array(np.random.default_rng(1).normal(size=(6, n + 1, n)))
+    for nord in (0, 1, 2):
+        du, dv = fv3_del6_vorticity_damping(
+            u_d, v_d, damp=1.0, nord=nord, cdgrid=cdgrid)
+        assert du.shape == (6, n, n + 1)
+        assert dv.shape == (6, n + 1, n)
+
+
+def test_fv3_del6_damping_zero_field(cdgrid):
+    """Zero u_d, v_d → zero damping."""
+    n = cdgrid.base.n
+    u_d = jnp.zeros((6, n, n + 1))
+    v_d = jnp.zeros((6, n + 1, n))
+    for nord in (0, 1, 2):
+        du, dv = fv3_del6_vorticity_damping(
+            u_d, v_d, damp=1.0, nord=nord, cdgrid=cdgrid)
+        assert bool(jnp.all(du == 0.0))
+        assert bool(jnp.all(dv == 0.0))
+
+
+def test_fv3_del6_damping_sign_convention(cdgrid):
+    """Per Fortran sw_core.F90:1992, 1997:
+        u += fy2  (so du_damping == +fy2)
+        v -= fx2  (so dv_damping == -fx2)
+    This test verifies the sign by computing del6 manually and
+    checking that the helper's output matches `+fy2` and `-fx2`.
+    """
+    n = cdgrid.base.n
+    u_d = jnp.array(np.random.default_rng(42).normal(size=(6, n, n + 1)))
+    v_d = jnp.array(np.random.default_rng(43).normal(size=(6, n + 1, n)))
+
+    du, dv = fv3_del6_vorticity_damping(
+        u_d, v_d, damp=1.0, nord=1, cdgrid=cdgrid)
+
+    # Manually construct the same pipeline.
+    del6_u_m, del6_v_m = compute_del6_metrics(cdgrid)
+    rarea = 1.0 / cdgrid.base.area
+    vt = u_d * cdgrid.dx_edge_y
+    ut = v_d * cdgrid.dy_edge_x
+    wk = rarea * (vt[:, :, :-1] - vt[:, :, 1:]
+                  - ut[:, :-1, :] + ut[:, 1:, :])
+    fx2, fy2 = _del6_vt_flux(
+        wk, 1.0, 1, del6_u=del6_u_m, del6_v=del6_v_m,
+        rarea=rarea, cdgrid=cdgrid)
+
+    # Fortran sign convention: u += fy2, v -= fx2.
+    assert bool(jnp.allclose(du, fy2, atol=1e-14)), \
+        "du should equal fy2 (Fortran: u += fy2)"
+    assert bool(jnp.allclose(dv, -fx2, atol=1e-14)), \
+        "dv should equal -fx2 (Fortran: v -= fx2)"
+
+
+def test_fv3_del6_damping_constant_wind_no_damping(cdgrid):
+    """A constant geographic wind has zero vorticity; the del-n
+    damping should therefore be effectively zero (up to halo-
+    rotation artifacts at cube corners).
+
+    This is a weaker test than 'zero output' since cubed-sphere halo
+    rotation of a geographically-constant wind does produce slight
+    non-constancy in the face-local D-grid representation.  Check
+    that the damping is much smaller than |u_d|.
+    """
+    n = cdgrid.base.n
+    # Construct u_d, v_d as face-local projections of a uniform
+    # geographic flow u_east = 10, v_north = 0.
+    u_east = 10.0
+    # Get face-local angle from cdgrid.
+    angle = cdgrid.base.angle   # (6, n, n)
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
+    # u_cc = cos_a * u_east - sin_a * v_north
+    # For u_d at v-edge (6, n, n+1), we need an angle at v-edge.  Use
+    # angle_edge_x (at x-edge = u position at face centre).
+    # NB: this is an approximation; the test allows O(|u|) tolerance
+    # rather than machine zero.
+    u_d = cdgrid.cos_angle_edge_x * u_east  # (6, n, n+1)
+    v_d = -cdgrid.sin_angle_edge_y * u_east  # (6, n+1, n)
+
+    du, dv = fv3_del6_vorticity_damping(
+        u_d, v_d, damp=1.0, nord=1, cdgrid=cdgrid)
+
+    # For a uniform geographic flow on a cubed sphere, the relative
+    # vorticity is zero in a physical sense, so the damping should be
+    # small relative to the wind magnitude.  Allow a fairly loose
+    # tolerance (0.1 m/s) to account for discrete-metric artifacts.
+    max_du = float(jnp.max(jnp.abs(du)))
+    max_dv = float(jnp.max(jnp.abs(dv)))
+    assert max_du < 0.1 * u_east, f"du max {max_du:.3e} vs u_east={u_east}"
+    assert max_dv < 0.1 * u_east, f"dv max {max_dv:.3e} vs u_east={u_east}"

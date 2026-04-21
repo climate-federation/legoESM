@@ -619,3 +619,42 @@ This differs from iter-752c's direct Haversine of A-grid cell centres (`fv_grid_
 - 752d: denominator uses repo-locked `cdgrid.dxc / cdgrid.dyc`.
 
 The iter-752 diff series now gives the correct answer: `del6_u = sina_v × cdgrid.dx_edge_y / cdgrid.dyc`, `del6_v = sina_u × cdgrid.dy_edge_x / cdgrid.dxc` — all metric inputs from the repo-locked cdgrid fields, matching the rest of the CDGrid operator suite.
+
+### Iter-753 — high-level `fv3_del6_vorticity_damping` helper
+
+With the core `_del6_vt_flux` + Fortran-faithful metric locked in iter-752d, iter-753 adds the high-level helper that combines the complete Fortran d_sw6 damping sequence (`sw_core.F90:1582-1597, 1948-1999`) into one self-contained function.  This is the building block iter-754 will wire into `fv3_sw_tendencies`.
+
+**New helper.**  `fv3_del6_vorticity_damping(u_d, v_d, damp, nord, cdgrid) → (du_d, dv_d)`:
+
+```
+1. vt = u_d * cdgrid.dx_edge_y       # u-circulation at v-edge
+2. ut = v_d * cdgrid.dy_edge_x       # v-circulation at u-edge
+3. wk = rarea * (vt_south - vt_north - ut_west + ut_east)  # cell-mean vorticity
+4. fx2, fy2 = _del6_vt_flux(wk, damp, nord, ...)
+5. Return (du_d, dv_d) = (+fy2, -fx2)  # Fortran: u += fy2; v -= fx2
+```
+
+The final sign convention at step 5 matches Fortran `sw_core.F90:1992, 1997` exactly.
+
+**New tests (4 added, all PASS):**
+1. `test_fv3_del6_damping_shapes` — output shapes match D-grid staggers.
+2. `test_fv3_del6_damping_zero_field` — zero winds → zero damping.
+3. `test_fv3_del6_damping_sign_convention` — verifies `du = +fy2` and `dv = −fx2` at machine precision by reconstructing manually.
+4. `test_fv3_del6_damping_constant_wind_no_damping` — uniform geographic u_east on cubed sphere has approximately zero vorticity → damping < 0.1 × |u_east|.
+
+Total test count: 11/11 PASS.
+
+**Note on units (iter-753 unit contract).**  The returned `(du_d, dv_d)` are PER-TIMESTEP velocity updates in Fortran's convention: `u_new = u + du_d` (NOT `u + dt * du_d`).  A caller using a tendency-based integrator like RK3 should divide by dt if they want to express the damping as a continuous tendency.
+
+**Matrix + ocean baselines unchanged.**  Standalone unit still not wired into production:
+- W2 L2=2.42e-04, Linf=1.83e-03, v_ll_Linf=3.03e-01 — PASS.
+- W5 mass drift=1.74e-05 — PASS.
+- Cosine bell L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01 — PASS.
+
+**Iter-754 wiring plan.**  Add `fv3_del6_vorticity_damping` as an optional replacement for the `laplacian_compact`-on-geographic-winds block in `fv3_sw_tendencies` (config-gated).  Compare head-to-head on the iter-745 ablation script + matrix.
+
+**Iter-753 deliverables.**
+- `src/legoesm/core/fv3_del6_vt_flux.py::fv3_del6_vorticity_damping` (~75 lines).
+- `tests/test_fv3_del6_vt_flux.py` — 4 new tests (11/11 PASS total).
+
+**Process.**  Second source-code iter of forward progress (iter-752/752d was iteration 1).  No Codex stop-time correction this iter.  Iter-754 begins wiring.

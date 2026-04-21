@@ -6,8 +6,12 @@ chain.  The returned edge fluxes are added to u, v as circulation
 increments: `u(i,j) += vt(i,j); v(i,j) -= ut(i,j)` where vt, ut are
 derived from the fx, fy outputs.
 
-Iter-752 delivers the CORE standalone algorithm.  Wiring into
-`fv3_sw_tendencies` comes iter-753+.
+Iter-752 delivers the core standalone algorithm.
+Iter-753 adds the high-level `fv3_del6_vorticity_damping` helper
+that combines circulation computation + vorticity + del-n flux + the
+Fortran-faithful application rule `u += fy2; v -= fx2`.
+
+Wiring into `fv3_sw_tendencies` comes iter-754+.
 """
 from __future__ import annotations
 
@@ -180,3 +184,80 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
         fy2 = del6_u * (d2_north - d2_south)         # sign flipped
 
     return fx2, fy2
+
+
+def fv3_del6_vorticity_damping(u_d, v_d, damp, nord, cdgrid):
+    """Fortran-faithful del-n vorticity damping on D-grid winds.
+
+    Combines the full Fortran d_sw6 damping sequence (sw_core.F90:
+    1582-1597, 1948-1999) into a single self-contained step:
+
+    1. Circulation:  `vt = u * dx_at_v`, `ut = v * dy_at_u`.
+    2. Cell-mean vorticity:
+         `wk = rarea * (vt(i,j) - vt(i,j+1) - ut(i,j) + ut(i+1,j))`
+    3. Del-n flux: `(fx2, fy2) = _del6_vt_flux(wk, damp, nord, ...)`
+    4. Return updates in velocity form that the caller adds as
+         `u_d_new = u_d + fy2` (at v-edge)
+         `v_d_new = v_d - fx2` (at u-edge)
+
+    Parameters
+    ----------
+    u_d : jax.Array, shape (6, n, n+1)
+        D-grid u-wind at v-edge positions.
+    v_d : jax.Array, shape (6, n+1, n)
+        D-grid v-wind at u-edge positions.
+    damp : float
+        Fortran `damp4 = (damp_v * da_min_c)^(nord+1)`.  Units
+        `[m^(2*(nord+1))]`.  Caller must supply with correct scaling.
+    nord : int
+        0 = del-2, 1 = del-4, 2 = del-6.
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    du_d_damping : jax.Array, shape (6, n, n+1)
+        Velocity-unit update for u_d.  Caller: `u_d_new = u_d + du_d`.
+    dv_d_damping : jax.Array, shape (6, n+1, n)
+        Velocity-unit update for v_d.  Caller: `v_d_new = v_d + dv_d`
+        (the minus sign from Fortran `v -= fx2` is already applied).
+
+    Notes
+    -----
+    These are PER-TIMESTEP velocity updates (Fortran convention), not
+    continuous tendencies.  To use with a tendency-based integrator,
+    caller should divide by dt.
+    """
+    del6_u_m, del6_v_m = compute_del6_metrics(cdgrid)
+    rarea = 1.0 / cdgrid.base.area
+
+    # Step 1: circulation.
+    vt = u_d * cdgrid.dx_edge_y      # (6, n, n+1)
+    ut = v_d * cdgrid.dy_edge_x      # (6, n+1, n)
+
+    # Step 2: cell-mean vorticity wk.
+    # Fortran: wk(i,j) = rarea * (vt(i,j) - vt(i,j+1) - ut(i,j) + ut(i+1,j))
+    # For cell (i, j):
+    #   vt at v-edge (i, j)  = vt[:, i, j]       (south edge of cell)
+    #   vt at v-edge (i, j+1) = vt[:, i, j+1]    (north edge of cell)
+    #   ut at u-edge (i, j)  = ut[:, i, j]       (west edge of cell)
+    #   ut at u-edge (i+1, j) = ut[:, i+1, j]    (east edge of cell)
+    vt_south = vt[:, :, :-1]     # (6, n, n)
+    vt_north = vt[:, :, 1:]      # (6, n, n)
+    ut_west  = ut[:, :-1, :]     # (6, n, n)
+    ut_east  = ut[:, 1:, :]      # (6, n, n)
+    wk = rarea * (vt_south - vt_north - ut_west + ut_east)
+
+    # Step 3: del-n flux.
+    fx2, fy2 = _del6_vt_flux(
+        wk, damp, nord,
+        del6_u=del6_u_m, del6_v=del6_v_m,
+        rarea=rarea, cdgrid=cdgrid,
+    )
+
+    # Step 4: Apply with Fortran sign convention:
+    #   u(i,j) += fy2(i,j)
+    #   v(i,j) -= fx2(i,j)
+    du_d_damping = fy2    # (6, n, n+1)   same shape as u_d
+    dv_d_damping = -fx2   # (6, n+1, n)   same shape as v_d
+
+    return du_d_damping, dv_d_damping
