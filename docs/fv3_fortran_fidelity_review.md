@@ -1581,6 +1581,29 @@ This is a cross-cutting change; deferring to a dedicated iter so the fingerprint
 
 No source-code changes; diagnostic + documentation.  Regression suite unchanged at 165 tests; all pass.
 
+### Iter-719 — diagnostic now actually produces the evidence iter-718 claimed
+
+Codex stop-time review flagged iter-718: "the committed diagnostic and docs claim evidence that the code in this turn does not actually produce".  Correct: iter-718's script ran only the baseline W2 and asserted the corner asymmetry in prose, but the synthetic 2x-ratio verification was a separate CLI experiment never committed.  The commit message claimed "verified numerically: input [1,2,3,4] at 4 corners → sequential yields [0.25, 0.50, 0.75, 1.00], snapshot yields [0.50, 1.00, 1.50, 2.00]" but the committed script did not produce those numbers.
+
+**Fix** (iter-719): rewrote the diagnostic as two self-contained parts:
+
+- **Part A** (synthetic): constructs an 8×8 field with distinct values at the 4 corners, applies both sequential and snapshot `boundary_fix` variants inline, asserts `sequential_corner / snapshot_corner == 0.5` (the documented 2× asymmetry), and asserts non-corner edges produce identical results.  All three invariants pass with `rtol=1e-12`.
+- **Part B** (W2): runs W2 at C36 day 1 with the sequential production path and reports L2, face-4/5 max|v_N|, face-4 mean|v_N|.  Reproduces the user's visual evidence: face-4 max = 0.3068 m/s at day 1.
+
+Output verified:
+```
+Sequential at corners: 0.2500 / 0.5000 / 0.7500 / 1.0000
+Snapshot   at corners: 0.5000 / 1.0000 / 1.5000 / 2.0000
+Corner-cell ratio (sequential / snapshot) = 0.5000
+CONFIRMED: sequential is 2x stronger at corners (ratio 0.5).
+Non-corner edge (0, 3): sequential=0.0000, snapshot=0.0000, expected=0.0000
+CONFIRMED: non-corner edges agree exactly (diff=0).
+```
+
+Part B's snapshot-in-production arm is deferred with explicit note: a proxy applied at D-grid edge midpoints (different stage than the source boundary_fix) would not be a faithful substitute; the source-level swap requires fingerprint regeneration across iter-685/687/702/708/710/711/712/714/716 gold-files and is gated on a dedicated iter.
+
+No source-code changes.  Regression suite unchanged at 165 tests; all pass.
+
 ### Iter-716 — W5 end-to-end gold-file with area-weighted mass
 
 Added `TestW5ProductionGoldFileIter716` to lock the Williamson-5 (isolated mountain) production-path C36 day-1 state end-to-end.  Existing `TestW5PolarFaceMagnitude` tests face-4 `v_cc_north` in window [4, 10] m/s (amplification + signal-loss bounds) but NO fingerprint lock on:
