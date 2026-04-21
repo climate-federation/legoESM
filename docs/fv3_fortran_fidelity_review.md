@@ -16,17 +16,31 @@ remain in full form below.
 
 ## Architectural unresolved items (carried through all iterations)
 
-1. **W2 v-wind cube-face imprint at C36** — production path
-   (`FV3EdgeShallowWaterModel` → `fv3_sw_tendencies`) uses
-   Arakawa-Lamb + RK3, NOT the FV3 FB chain.  iter-505 reduced
-   amplitude from ~0.56 m/s to ~0.30 m/s by fixing a PPM x-axis
-   bug; the residual 4-fold mode-4/8/12 signature at ±30° is
-   inherent to A-L + halo-interpolation + `boundary_fix` and is
-   NOT eliminable within the production path.  Fix requires
-   either (a) stabilize FV3 FB chain at C36 (needs ng=3 halo
-   infrastructure — partially scaffolded, see iter-496..598
-   below), or (b) accept and lock the imprint magnitude.
-   Iter-592 chose (b) as short-term guard.
+1. **W2 v-wind cube-face imprint at C36** — STILL PRESENT per direct
+   user visual inspection (iter-716, 2026-04-17):
+   - t=0d: |v| < 0.01 m/s (clean initial condition).
+   - t=0.4d: polar caps + mid-latitude cube-seam signature emerging, |v| ~ 0.1 m/s.
+   - t=1.0d: **mode-4 polar artifact + 4 cube-face-corner hot spots**, |v| ≈ ±0.3 m/s.
+   - The 4-fold azimuthal symmetry at each pole matches the 4 cube-corner
+     positions on faces 4 (N pole) and 5 (S pole).
+   - Production path uses Arakawa-Lamb + RK3 + `boundary_fix`, NOT the FV3 FB
+     chain.  iter-505 reduced amplitude from ~0.56 m/s to ~0.30 m/s by fixing a
+     PPM x-axis bug; the residual signature is inherent to the A-L + halo-
+     interpolation + `boundary_fix` non-FV3 path.
+   - **Canonical evaluation is `scripts/run_atmosphere_test_matrix.py`** (user
+     confirmed iter-716): matrix config at line 1178-1181 is
+     `hyperdiff_coeff=_hyperdiff_cube(n)`, `div_damp=_div_damp_cube(n)`,
+     `boundary_fix=True`, `dt=300s`.  The unit tests in
+     `TestW2BoundaryErrorBudget` / `TestW2CubeFaceImprintCharacterization` /
+     `TestW5PolarFaceMagnitude` replicate this config exactly but only lock
+     SCALAR summary statistics (L2, max|v|, face-4 max) — they do NOT catch
+     the VISUAL mode-4 pattern directly.
+   - Fix requires EITHER (a) stabilize the FV3 FB chain at C36 (needs ng=3
+     halo infrastructure — partially scaffolded, see iter-496..598), OR
+     (b) replace the A-L path with a FV3-faithful production alternative.
+     Iter-688..716 added defensive test locks around the current path but
+     do NOT address the architectural root cause.  Iter-688..716 status:
+     locks are solid; the blocker is unresolved.
 
 2. **FB-path C36 instability** — `_c_sw` first-order upwind
    amplifies face-boundary halo divergence; requires ng=3
