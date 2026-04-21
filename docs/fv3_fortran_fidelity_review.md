@@ -987,3 +987,16 @@ Codex stop-time review flagged iter-682's closure claim ("close Ralph directive 
 This list is the concrete backlog for closing directive #2.  Each row is an iteration-sized audit: read the Fortran block, find the Python counterpart, add a lock test.
 
 No source-code changes in iter-683; test strengthening + backlog formalization.  Regression suite now at **131 tests** (130 + 1 new partition-of-unity lock); all pass.
+
+### Iter-684 — strengthen partition-of-unity test to catch zero-filled weights
+
+Codex stop-time review flagged iter-683's partition-of-unity test for being vacuous against zero-filled weights: the inner `if np.any(np.abs(weights) > 1e-300)` skip meant that if a helper returned all zeros, every cell would be skipped and the test would pass trivially.
+
+**Fix** (iter-684):
+1. **Removed the skip**: the loop already iterates only over cells that SHOULD be populated (halo regions X+ `i>=ng+n`, X- `i<ng`, Y+ `j>=ng+n`, Y- `j<ng`).  Every such cell must be populated; no cell should be skipped.
+2. **Added non-trivial magnitude assertion**: `max |weight| > 0.01` per cell.  Correct 4-point Lagrange weights are O(1) in magnitude — a minimum threshold of 0.01 is ~2 orders of magnitude below the spot-checked values (iter-683: [-3.26, 10.75, -12.58, 6.10]) and catches any all-zero / trivial replacement.
+3. **Added empty-range guard**: `assertGreater(len(i_list) * len(j_list), 0)` so an accidentally-empty target range (which would make the loop run 0 iterations and pass vacuously) fails loudly instead.
+
+**Verified** by injecting `corner_xp = jnp.zeros_like(orig)` via monkey-patching: test now fails with `"max |weight| = 0.000e+00 < 0.01 — weights look all-zero/trivial at a target cell that should be populated"`.  Previously (iter-683) this would have passed.
+
+No source-code changes; test strengthening only.  Regression suite unchanged at 131 tests; all pass.

@@ -8380,16 +8380,26 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
 
     def test_duogrid_lagrange_weights_partition_of_unity(self):
         """Lagrange interpolation weights MUST sum to 1 at every target
-        cell — they interpolate the constant function exactly.  This is
-        a necessary mathematical property that any correct
-        implementation of `compute_lagrange_coeff` (fv_duogrid.F90)
-        must satisfy.
+        cell in the halo region — they interpolate the constant
+        function exactly.  This is a necessary mathematical property
+        that any correct implementation of `compute_lagrange_coeff`
+        (fv_duogrid.F90) must satisfy.
 
         Iter-683 strengthening: iter-682's test only verified
         `corner_xp is not None`, which admits dummy zero-filled weights.
-        This test catches weights that are present but computed wrong
-        (wrong abscissae, wrong polynomial formula, missing
-        normalization).
+        Iter-684 strengthening: also verify the weights are NON-TRIVIAL
+        (`max|weight| > some threshold`) at every target so dummy
+        all-zero weights (which sum to 0, not 1) are caught — iter-683's
+        `if np.any(weights) > 1e-300` skip made the test vacuous for
+        zero-filled weights.
+
+        The loops below iterate ONLY over target cells where the
+        helper SHOULD write non-trivial weights (the halo regions X+
+        i>=ng+n, X- i<ng, Y+ j>=ng+n, Y- j<ng for an A-grid scalar).
+        Every such cell must pass both (a) non-trivial magnitude AND
+        (b) partition-of-unity.  Empty loops are a test bug, not a
+        passing signal — we also assert the per-direction iteration
+        covered >0 target cells per face.
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -8400,9 +8410,6 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
         n = dg.n
         n_ext = n + 2 * ng
 
-        # corner_xp shape: (6, 4, n_ext, n_ext).  Only target cells in
-        # the X+ halo region (i >= ng+n) are populated; others are zero
-        # by construction.  Check partition of unity where populated.
         for name, arr, i_range, j_range in [
             ('corner_xp', dg.corner_xp, range(ng + n, n_ext), range(n_ext)),
             ('corner_xm', dg.corner_xm, range(0, ng),        range(n_ext)),
@@ -8410,17 +8417,35 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
             ('corner_ym', dg.corner_ym, range(n_ext), range(0, ng)),
         ]:
             arr_np = np.asarray(arr)
+            # Empty ranges would mean the test loop runs 0 iterations
+            # → false pass.  Assert the target region is non-empty.
+            i_list, j_list = list(i_range), list(j_range)
+            self.assertGreater(len(i_list) * len(j_list), 0,
+                msg=(f"{name}: target range is empty (i={i_list}, "
+                     f"j={j_list}) — the test loop would run 0 iterations "
+                     f"and pass vacuously."))
+
             for face in range(6):
-                for i in i_range:
-                    for j in j_range:
+                for i in i_list:
+                    for j in j_list:
                         weights = arr_np[face, :, i, j]
-                        # Only check cells with non-zero weights (populated).
-                        if np.any(np.abs(weights) > 1e-300):
-                            s = float(np.sum(weights))
-                            self.assertAlmostEqual(s, 1.0, places=10,
-                                msg=(f"{name}[face={face}, :, i={i}, j={j}] "
-                                     f"sum = {s:.10e} != 1.0 — Lagrange "
-                                     f"weights violate partition of unity."))
+                        # (a) non-trivial: at least one weight must be
+                        # large in magnitude.  The correct Lagrange
+                        # weights for a 4-point stencil with unit spacing
+                        # have magnitude ~1, and on the equiangular cube
+                        # face the min |weight_max| is empirically ~0.1.
+                        max_w = float(np.max(np.abs(weights)))
+                        self.assertGreater(max_w, 0.01,
+                            msg=(f"{name}[face={face}, :, i={i}, j={j}] "
+                                 f"max |weight| = {max_w:.3e} < 0.01 — "
+                                 f"weights look all-zero/trivial at a "
+                                 f"target cell that should be populated."))
+                        # (b) partition of unity.
+                        s = float(np.sum(weights))
+                        self.assertAlmostEqual(s, 1.0, places=10,
+                            msg=(f"{name}[face={face}, :, i={i}, j={j}] "
+                                 f"sum = {s:.10e} != 1.0 — Lagrange "
+                                 f"weights violate partition of unity."))
 
 
 if __name__ == "__main__":
