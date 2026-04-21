@@ -1662,6 +1662,21 @@ All 6 tests pass.  The iter-723/724 public surface is now pinned; a future refac
 
 No source-code changes in iter-725; pinned test surface only.  Regression suite now at **171 tests** (165 + 6 new lock tests); all pass.
 
+### Iter-726 — retire legacy `pad_halo_4d(halo=3)` NotImplementedError pin
+
+Codex stop-time review flagged iter-725: "new lock tests pin a public contract that an existing collected test still pins the opposite way".  Correct: `tests/unit/test_scale_halo.py::TestPadHaloH3Guardrails::test_pad_halo_4d_halo3_raises_notimplemented` (iter-500 era) asserted `pad_halo_4d(halo=3)` raises `NotImplementedError`.  After iter-723 inverted that contract, this test FAILS — but it lives in `test_scale_halo.py` which is not part of the narrower `test_cdgrid_fv3_regression.py` suite I was running per iter, so the failure went unnoticed across iter-723/724/725.
+
+Direct probe confirmed: `test_pad_halo_4d_halo3_raises_notimplemented` fails with `DID NOT RAISE <class 'NotImplementedError'>`.
+
+**Fix** (iter-726):
+1. Renamed the method from `test_pad_halo_4d_halo3_raises_notimplemented` to `test_pad_halo_4d_halo3_works_iter723` (semantic rename makes the inversion explicit to readers).
+2. Replaced the `pytest.raises(NotImplementedError)` block with a positive assertion: the call returns a padded array of shape `(6, N+6, N+6, 3)`.
+3. Updated the `TestPadHaloH3Guardrails` class docstring to note the iter-723/724 inversion and cross-reference the fuller lock at `tests/unit/test_halo.py::TestPadHalo4DHalo3Iter725`.
+
+Test now passes.  All 26 `TestPadHaloH3Guardrails` tests pass, confirming the rest of the class was correctly tracking iter-630's halo=3 extensions.
+
+No source-code changes; test-contract alignment only.  Full regression at 266 tests across the halo + cdgrid suites; all pass.  Going forward, iter commits should run `tests/unit/test_halo.py tests/unit/test_scale_halo.py tests/unit/test_cdgrid_fv3_regression.py` together when touching halo code to catch this cross-file contract drift.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).

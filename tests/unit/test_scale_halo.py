@@ -976,7 +976,8 @@ class TestPadHaloH3Dispatch:
 
 
 # ---------------------------------------------------------------------------
-# Public-API guardrails for halo=3 (iter-500, Codex stop-time fix)
+# Public-API guardrails for halo=3 (iter-500, Codex stop-time fix;
+# updated iter-726 after iter-723/724 extended halo=3 to the 4D path)
 # ---------------------------------------------------------------------------
 
 class TestPadHaloH3Guardrails:
@@ -985,8 +986,11 @@ class TestPadHaloH3Guardrails:
 
     1. `pad_halo(halo=3)` validates `interp_offsets` shape — wrong
        shape raises `ValueError` clearly instead of IndexError.
-    2. `pad_halo_4d(halo=3)` raises `NotImplementedError` with a
-       message pointing at the 4D gap.
+    2. `pad_halo_4d(halo=3)` — **changed iter-723/724**: was
+       `NotImplementedError`, now a working path returning
+       `(6, n+6, n+6, nlev)`.  The new contract is pinned here AND
+       at greater length in `tests/unit/test_halo.py::
+       TestPadHalo4DHalo3Iter725`.
     3. `pad_halo_vector(halo=3)` raises `NotImplementedError` — the
        vector rotation round-trip depends on h=3 padded grid angles
        and half-metrics, none of which exist yet.
@@ -1039,11 +1043,19 @@ class TestPadHaloH3Guardrails:
         with pytest.raises(ValueError, match=r"halo=3 expects"):
             pad_halo(data, halo=3, interp_offsets=bad)
 
-    def test_pad_halo_4d_halo3_raises_notimplemented(self):
+    def test_pad_halo_4d_halo3_works_iter723(self):
+        """Iter-723/724 extended halo=3 to the 4D path.  This test
+        (was `test_pad_halo_4d_halo3_raises_notimplemented` before
+        iter-726) pins the inverted contract: the call now returns
+        a padded array of shape `(6, N+6, N+6, 3)` rather than
+        raising.  Full behavioral coverage is in
+        `tests/unit/test_halo.py::TestPadHalo4DHalo3Iter725`; this
+        test keeps a spot-check here so readers of the H3 guardrails
+        class see the current contract without cross-file hopping."""
         from legoesm.grids.halo import pad_halo_4d
         data = jnp.ones((6, N, N, 3), dtype=jnp.float64)
-        with pytest.raises(NotImplementedError, match="pad_halo_4d"):
-            pad_halo_4d(data, halo=3)
+        padded = pad_halo_4d(data, halo=3)
+        assert padded.shape == (6, N + 6, N + 6, 3)
 
     def test_packed_pad_halo_mpi_4d_halo4_raises_notimplemented(self):
         """Iter-629 (was iter-612): halo=3 MPI path now live.  The
