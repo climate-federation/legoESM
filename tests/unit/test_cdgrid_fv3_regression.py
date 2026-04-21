@@ -4004,13 +4004,39 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             msg=("No CDGridShallowWaterConfig(...) block precedes the "
                  "W2/W5 anchor in matrix script."))
 
-        # Collect the config block lines up to matching close paren.
-        # (Shallow: assume the config body ends within ~20 lines.)
+        # Walk forward from the opening paren counting `(` / `)`
+        # until the opener is balanced; the balanced line is the
+        # config block's closing paren.  Strip Python string literals
+        # and comments so parens inside those don't break the count.
+        paren_balance = 0
+        config_close_idx = None
+        started = False
+        for i in range(config_open_idx, min(len(lines),
+                                             config_open_idx + 50)):
+            # Strip trailing `# comment` to avoid counting parens in
+            # comments.  (Does not handle parens in triple-quoted
+            # strings, but those don't appear in this config block.)
+            code = lines[i].split("#", 1)[0]
+            for ch in code:
+                if ch == "(":
+                    paren_balance += 1
+                    started = True
+                elif ch == ")":
+                    paren_balance -= 1
+            if started and paren_balance == 0:
+                config_close_idx = i
+                break
+        self.assertIsNotNone(
+            config_close_idx,
+            msg=(f"CDGridShallowWaterConfig( opened at line "
+                 f"{config_open_idx + 1} has no matching close paren "
+                 f"within 50 lines — matrix script structure has "
+                 f"changed unexpectedly."))
+
+        # Now check required tokens ONLY within the located config
+        # block (inclusive of both opening and closing lines).
         config_body = "\n".join(
-            lines[config_open_idx:config_open_idx + 20])
-        # Truncate at first unbalanced close-paren-followed-by-empty
-        # but simpler: just take the first 20 lines which always
-        # suffice for this small config.
+            lines[config_open_idx:config_close_idx + 1])
 
         required_tokens = [
             "hyperdiff_coeff=0.0",
@@ -4022,13 +4048,13 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         self.assertEqual(
             missing, [],
             msg=(f"scripts/run_atmosphere_test_matrix.py W2/W5 "
-                 f"CDGridShallowWaterConfig block at line "
-                 f"{config_open_idx + 1} is missing iter-761 canonical "
-                 f"tokens: {missing}.  A rollback of the iter-760/761 "
-                 f"Fortran-faithful del6 + 8×div_damp tuning for "
-                 f"W2/W5 has occurred.  See "
-                 f"docs/fv3_fortran_fidelity_review.md iter-761 for "
-                 f"rationale."))
+                 f"CDGridShallowWaterConfig block (lines "
+                 f"{config_open_idx + 1}-{config_close_idx + 1}) is "
+                 f"missing iter-761 canonical tokens: {missing}.  A "
+                 f"rollback of the iter-760/761 Fortran-faithful "
+                 f"del6 + 8×div_damp tuning for W2/W5 has occurred.  "
+                 f"See docs/fv3_fortran_fidelity_review.md iter-761 "
+                 f"for rationale."))
 
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
