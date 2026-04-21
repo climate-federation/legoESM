@@ -1186,3 +1186,23 @@ Codex stop-time review rejected iter-692's "documented edge case" for temp-facto
 - `a=x+y; b=ut[...]; a+b` → correctly NOT flagged (a resolves to 'other').
 
 No source-code changes; structural lock strengthening only.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-694 — flow-sensitive def-use tracking (close iter-693 reassignment gap)
+
+Codex stop-time review rejected iter-693 because "the def-use lock still misses a forbidden ut/vt temp-var reintroduction after later reassignment".  Correct: iter-693 built the env by walking ALL `ast.Assign` statements up-front, then evaluated every `BinOp(Add)` against the final env.  A reassignment LATER in the function (e.g. `a = 5.0` after the violation) would overwrite `env[a]` from `'ut'` to `'other'`, masking the violation retroactively.
+
+**Fix** (iter-694): replaced the two-pass build-then-check with a flow-sensitive statement-ordered walk:
+1. For each statement in order, SCAN its BinOps against the CURRENT env FIRST (so a BinOp at line L uses the env state reflecting only lines < L).
+2. THEN apply the statement's Assign to update env (so subsequent statements see the new binding).
+3. For compound statements (`If`, `For`, `While`, `With`, `Try`), recurse into each branch body with a COPY of the current env so branch-local reassignments don't cross-contaminate siblings.
+4. Nested `FunctionDef`s are skipped inside the walk — they're handled as separate scopes at the top level.
+
+**Verified** against 4 fixtures:
+- Temp-var violation + later reassignment `a=ut; b=vt; (a+b)*u; a=5.0` → CAUGHT *(iter-693 miss now closed)*.
+- Temp-var violation only → CAUGHT *(still works)*.
+- Reassignment inside an `if` branch → CAUGHT *(the main-flow violation `a=ut; b=vt; (a+b)*u` is still visible, since the if-branch reassignment only affects its own branch)*.
+- Legitimate `ut + ut` via temps → correctly NOT flagged.
+
+The iter-694 version is a proper flow-sensitive analysis; it no longer admits ordering tricks.
+
+No source-code changes; structural lock strengthening only.  Regression suite unchanged at 135 tests; all pass.

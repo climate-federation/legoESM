@@ -8448,27 +8448,15 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 name_id = origin
             return None
 
-        def build_origin_env(func_node):
-            """Walk a function body and build a Name → origin map.
-            Origin is 'ut' / 'vt' if Name was assigned from a
-            subscript of `ut` / `vt`, otherwise an alias target name
-            (for transitive resolution) or 'other'."""
-            env = {}
-            for stmt in ast.walk(func_node):
-                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
-                        and isinstance(stmt.targets[0], ast.Name):
-                    target = stmt.targets[0].id
-                    rhs = stmt.value
-                    if is_subscript_of(rhs, 'ut'):
-                        env[target] = 'ut'
-                    elif is_subscript_of(rhs, 'vt'):
-                        env[target] = 'vt'
-                    elif isinstance(rhs, ast.Name):
-                        # Alias: record the aliased name (resolved later).
-                        env[target] = rhs.id
-                    else:
-                        env[target] = 'other'
-            return env
+        def classify_rhs(rhs):
+            """Return origin tag for an assignment RHS."""
+            if is_subscript_of(rhs, 'ut'):
+                return 'ut'
+            if is_subscript_of(rhs, 'vt'):
+                return 'vt'
+            if isinstance(rhs, ast.Name):
+                return rhs.id  # alias — will be resolved later
+            return 'other'
 
         def add_operand_origin(node, env):
             """Classify a BinOp operand as 'ut', 'vt', or 'other'.
@@ -8482,33 +8470,64 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 return resolve_name_to_origin(node.id, env) or 'other'
             return 'other'
 
-        def has_ut_plus_vt_crossterm(tree):
-            """Walk every function in the tree.  For each function,
-            build a local def-use map of Names aliased to ut/vt
-            subscripts.  Then scan BinOp(Add) in the function body
-            and flag if operands resolve to {'ut', 'vt'} in either
-            order — including via single-assignment temp-variable
-            aliasing.
+        def scan_stmt_list(stmts, env):
+            """Flow-sensitive walk of a statement list.  Maintains env
+            by applying each Assign BEFORE evaluating BinOps in
+            subsequent statements.  Returns True as soon as a
+            ut+vt BinOp is detected at the CURRENT env state
+            (so later reassignment cannot mask an earlier violation).
 
-            This closes iter-692's documented gap: a Fortran-style
-            reintroduction that factors `a = ut[...]; b = vt[...];
-            (a + b) * u[...]` is now detected because `a` resolves
-            to 'ut' and `b` resolves to 'vt' via the env.
+            Recurses into compound statements (If/For/While/With/Try).
+            At each branch, uses a local COPY of env so a reassignment
+            in one branch doesn't leak to siblings.
             """
-            # Walk top-level code too: treat the module body as a
-            # pseudo-function scope.
+            for stmt in stmts:
+                # First: scan any BinOps inside this statement's
+                # expression with the CURRENT env (before applying
+                # any assignment this stmt may do).
+                for sub in ast.walk(stmt):
+                    # Stop descending into nested FunctionDef bodies —
+                    # those get their own scope walk.
+                    if sub is not stmt and isinstance(sub,
+                            (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Add):
+                        lo = add_operand_origin(sub.left, env)
+                        ro = add_operand_origin(sub.right, env)
+                        if {lo, ro} == {'ut', 'vt'}:
+                            return True
+                # Then: apply Assign to update env for subsequent stmts.
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                        and isinstance(stmt.targets[0], ast.Name):
+                    env[stmt.targets[0].id] = classify_rhs(stmt.value)
+                elif isinstance(stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+                    # Recurse into compound bodies with env COPIES so
+                    # branch-local reassignments don't cross-contaminate.
+                    for body_attr in ('body', 'orelse', 'finalbody'):
+                        body = getattr(stmt, body_attr, [])
+                        if body and scan_stmt_list(body, dict(env)):
+                            return True
+                    for handler in getattr(stmt, 'handlers', []):
+                        if scan_stmt_list(handler.body, dict(env)):
+                            return True
+            return False
+
+        def has_ut_plus_vt_crossterm(tree):
+            """Flow-sensitive scan: find ut+vt BinOp whose operand
+            origins are valid AT THE STATEMENT LINE where the BinOp
+            appears.  Closes iter-693's gap where a later
+            reassignment could mask an earlier violation.
+
+            Walks each function scope AND the module top level.
+            """
             scopes = [tree]
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     scopes.append(node)
             for scope in scopes:
-                env = build_origin_env(scope)
-                for node in ast.walk(scope):
-                    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-                        lo = add_operand_origin(node.left, env)
-                        ro = add_operand_origin(node.right, env)
-                        if {lo, ro} == {'ut', 'vt'}:
-                            return True
+                body = getattr(scope, 'body', [])
+                if scan_stmt_list(body, {}):
+                    return True
             return False
 
         offenders = []
