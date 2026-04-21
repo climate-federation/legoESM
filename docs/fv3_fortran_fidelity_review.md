@@ -1748,6 +1748,42 @@ Regression: 5 targeted tests pass (both gold-file tests + the three related d_sw
 
 **Process note.**  The iter-727 accretion happened because my first-pass port was "match whatever sw_core.F90 shows most prominently" rather than "match the exact call at lines 886-887."  Codex's HIGH severity was appropriate — even a zero-numerical-impact divergence from literal Fortran is a fidelity failure under the Ralph directive.  Future dissipation-port iters should cite the exact Fortran line with the `call fv_tp_2d(...)` form before choosing whether to add any Python-side guard.
 
+### Iter-729 — document xtp_u/ytp_v east-edge gate asymmetry (likely Fortran typo)
+
+Codex iter-729 faithfulness review picked `_bgrid_ke_transport` duogrid edge transport as the highest-value next fix, citing Fortran `xtp_u`/`ytp_v` edge-fix rewrites that our Python skips via `mode='edge'` padding.
+
+**Fortran gate analysis.**  Reading `../atmos_cubed_sphere-symmetryclean/model/sw_core.F90` at the four edge-fix gates in the `iord>=8` (PPM hord=9) branch of `xtp_u`/`ytp_v`, with `bounded_domain=.true.` and `gridstruct%dg%is_initialized=.true.` (duogrid-on-cubed-sphere):
+
+| Sub    | Edge  | Line | Gate                                                | Eval → Active? |
+| ------ | ----- | ---- | --------------------------------------------------- | -------------- |
+| xtp_u  | west  | 2819 | `.not. bounded_domain .or. .not. dg%is_initialized` | .false. → SKIPPED |
+| xtp_u  | east  | 2842 | `.not. bounded_domain .or.       dg%is_initialized` | **.true. → ACTIVE** |
+| ytp_v  | south | 3239 | `.not. bounded_domain .or. .not. dg%is_initialized` | .false. → SKIPPED |
+| ytp_v  | north | 3279 | `.not. bounded_domain .or. .not. dg%is_initialized` | .false. → SKIPPED |
+
+Line 2842 is missing the `.not.` that the other three gates all have.  The effect is that, in duogrid mode, **xtp_u applies its east-edge one-sided override `xt = s15*u(npx-1,j) + s11*u(npx-2,j) + s14*dm(npx-2)` (followed by `bl/br/pert_ppm` updates at i=npx-2 and i=npx-1)** while its west-edge override is skipped.  ytp_v skips BOTH its edge overrides.  The west/east asymmetry on xtp_u is almost certainly a Fortran source typo — the other three gates form a consistent "skip in duogrid" pattern.  The `iord<8` branch at line 2586 has the same missing-`.not.` pattern, so the typo (if it is one) is not isolated to line 2842 alone.
+
+**Python state (iter-729).**  `src/legoesm/core/fv3_sw_core.py::_ppm_transport_1d` uses `mode='edge'` padding on BOTH axes' BOTH edges and applies NO edge-fix overrides.  This matches Fortran for 3 of the 4 gates (xtp_u west, ytp_v south, ytp_v north) and DIFFERS from Fortran at xtp_u east — where Fortran applies the asymmetric typo-enabled override.
+
+**Decision (iter-729) — DEFER the port.**  Two reasons:
+1. Porting the Fortran typo as-is would introduce the exact kind of asymmetry between panel west and east edges that is consistent with mode-4 W2 v-wind artifacts (4 edges per panel × 6 panels — if only one of the four directions gets an override, the 4-fold symmetry is broken).  Before doing that port we need to isolate whether this gap is contributing to the mode-4 artifact or whether the mode-4 artifact lives entirely elsewhere.
+2. Porting an asymmetric override requires encoding "am I at the east edge of this cube-face's panel?" — which in our axis-sweep `_ppm_transport_1d` is NOT cleanly expressible without knowing the panel decomposition, and the (n+1)-index "east interface" is already the Fortran `(ie+1)==npx` boundary on every single panel.  A half-done port (apply east override globally regardless of panel) is strictly worse than the current clean symmetric mode='edge' path.
+
+**Iter-729 deliverable.**  Two lock tests at `tests/unit/test_cdgrid_fv3_regression.py::TestXtpUYtpVEdgeGateAsymmetryIter729`:
+- `test_ppm_transport_1d_axis1_symmetric_at_panel_edges` — pin current Python symmetry (flux[:, 0, :] ≈ flux[:, n, :] under mirror-symmetric inputs along axis=1).
+- `test_ppm_transport_1d_axis2_symmetric_at_panel_edges` — pin ytp_v symmetry (both Fortran gates skip in duogrid, so Python's symmetric behaviour is Fortran-faithful — this lock should survive even after the xtp_u east-edge port lands).
+
+Both pass at iter-729 commit time.  Any future iteration porting the xtp_u east-edge override will break the axis=1 test (by design); the class docstring documents the porting procedure and the maintainer should update the test/docstring together with the source change.
+
+**Ralph directive item #2 status update.**  "Legacy edge handling must be disabled in duogrid mode via `bounded_domain=.true.`" is:
+- FULLY satisfied for `ytp_v` (both edges confirmed skipped in Fortran; Python matches).
+- PARTIALLY satisfied for `xtp_u` (west edge skipped, east edge Fortran-active due to probable typo; Python's mode='edge' is more symmetric than Fortran but differs from literal-Fortran).
+
+**Next-iter options.**
+- Iter-730a: attempt the literal-Fortran xtp_u east-edge override port, run W2 C36 v-wind inspection, check if mode-4 artifact moves.  If it worsens, revert and document that the typo is NOT the W2 blocker.
+- Iter-730b: focus on a different fidelity gap entirely (task 3 of Path Forward — FB + duogrid stability at C24).
+- Iter-730c: file an upstream Fortran issue documenting the likely 2842/2586 typo (out of scope for legoESM; leave as a note).
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).

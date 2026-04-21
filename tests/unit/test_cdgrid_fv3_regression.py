@@ -8842,6 +8842,149 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
             places=10, msg="ke L2² gold fingerprint changed.")
 
 
+class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
+    """Iter-729 Fortran-fidelity documentation lock: the `xtp_u` /
+    `ytp_v` edge-fix gates at `sw_core.F90:2819-2840`, `2842-2862`,
+    `3239-3277`, `3279-3317` differ between xtp_u and ytp_v, and
+    xtp_u's east gate appears to have a missing `.not.`.
+
+    Fortran pattern with `bounded_domain=.true.` AND
+    `gridstruct%dg%is_initialized=.true.` (duogrid-on-cubed-sphere):
+
+      xtp_u west  (is==1,      line 2819): `.not. BD .or. .not. DG`
+                                           → .false. → SKIPPED.
+      xtp_u east  ((ie+1)==npx,line 2842): `.not. BD .or.       DG`
+                                           → .true.  → ACTIVE.  [1]
+      ytp_v south (js==1,      line 3239): `.not. BD .or. .not. DG`
+                                           → .false. → SKIPPED.
+      ytp_v north ((je+1)==npy,line 3279): `.not. BD .or. .not. DG`
+                                           → .false. → SKIPPED.
+
+      [1] Almost certainly a Fortran typo: line 2842 lacks the
+          `.not.` that the other three gates (2819, 3239, 3279) all
+          have.  The typo makes xtp_u east-edge override ACTIVE in
+          duogrid mode, breaking the symmetry across the four panel
+          edges.
+
+    Python (`src/legoesm/core/fv3_sw_core.py::_ppm_transport_1d`) at
+    iter-729 commit:
+      - Uses `mode='edge'` padding on BOTH sweep axes' BOTH panel
+        edges (west/east for axis=1 xtp_u; south/north for axis=2
+        ytp_v).  NO edge-fix overrides.
+      - This matches Fortran for 3 of the 4 gates (xtp_u west,
+        ytp_v south, ytp_v north).  DIFFERS from Fortran at xtp_u
+        east — where Fortran applies the one-sided
+        `xt = s15*u(npx-1,j) + s11*u(npx-2,j) + s14*dm(npx-2)`
+        override while Python does not.
+
+    Decision deferred to a future iteration: port the typo as-is
+    (iter-729: NO), flag it against the Fortran source (YES —
+    captured here), or upstream a Fortran fix (out of scope).
+    Given the asymmetry, porting it as-is could introduce the very
+    mode-4 artifact we're trying to eliminate on W2 v-wind.  The
+    iter-729 evidence below is what the next iteration needs to
+    make an informed decision.
+
+    Ralph directive item #2 ("legacy edge handling must be
+    disabled in duogrid mode via bounded_domain=.true.") is fully
+    satisfied for ytp_v but PARTIALLY satisfied for xtp_u — the
+    east-edge override would be enabled in literal-Fortran mode.
+
+    This test LOCKS current Python behaviour (symmetric, no edge
+    overrides on either axis).  When the asymmetric xtp_u east
+    override is ported, the test's assertions below will document
+    exactly what moved; the docstring above will be updated in the
+    porting iter.
+    """
+
+    def test_ppm_transport_1d_axis1_symmetric_at_panel_edges(self):
+        """Lock: `_ppm_transport_1d(axis=1)` produces bit-identical
+        flux values at the west (first) and east (last) panel-edge
+        interfaces given symmetric input.
+
+        Any future iteration that applies only the east-edge
+        Fortran override (per the typo) will break this symmetry
+        and this test will fail — intentionally — documenting the
+        moment of divergence so readers can compare the pre/post
+        fingerprints.
+        """
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.core.fv3_sw_core import _ppm_transport_1d
+
+        n = 12
+        rng = np.random.default_rng(729)
+        # SYMMETRIC input: u(i,j) = u(n-1-i,j) (mirrored along axis=1).
+        base = rng.standard_normal((6, n, n))
+        base_mirrored = 0.5 * (base + base[:, ::-1, :])
+        u = jnp.asarray(base_mirrored)
+        # Symmetric Courant at n+1 interfaces.
+        c_base = rng.standard_normal((6, n + 1, n))
+        c_mirrored = 0.5 * (c_base + c_base[:, ::-1, :])
+        c = jnp.asarray(c_mirrored)
+        rd = jnp.ones((6, n, n), dtype=jnp.float64) * 0.5
+
+        flux = _ppm_transport_1d(u, c, rd, axis=1)
+        # flux shape: (6, n+1, n)
+        # With symmetric input, the flux should also be symmetric
+        # along the sweep axis — THIS IS THE LOCK.  West interface
+        # (flux[:, 0, :]) and east interface (flux[:, n, :]) are
+        # BOTH at panel boundaries; with symmetric input + symmetric
+        # transport, they mirror each other.
+        flux_west = np.asarray(flux[:, 0, :])
+        flux_east = np.asarray(flux[:, n, :])
+        max_diff = float(np.max(np.abs(flux_west - flux_east[:, ::-1])))
+        # `flux_east[:, ::-1]` is a no-op since flux_east is shape
+        # (6, n) and we want to mirror along LAST axis?  No — for
+        # axis=1 sweep, the OUTPUT spans axis=1 with n+1 indices;
+        # the SWEEP symmetry only pins flux[:, 0, :] vs flux[:, n, :]
+        # directly (no reversal of the trailing cross-sweep axis).
+        # Re-compute:
+        max_diff = float(np.max(np.abs(flux_west - flux_east)))
+        # Tolerance accounts for round-off in the symmetric
+        # reduction inside _ppm_transport_1d.
+        self.assertLess(max_diff, 1e-10,
+            msg="iter-729: _ppm_transport_1d(axis=1) west-east "
+            "symmetry broken.  If an asymmetric Fortran-typo port "
+            "has been applied to xtp_u east edge, this is EXPECTED "
+            "— update the test and class docstring to reflect the "
+            "new asymmetric contract.")
+
+    def test_ppm_transport_1d_axis2_symmetric_at_panel_edges(self):
+        """Companion lock for axis=2 (ytp_v).  Both Fortran gates
+        (js==1 south, (je+1)==npy north) skip in duogrid mode, so
+        Python's symmetric mode='edge' padding is Fortran-faithful
+        on BOTH edges.  This lock should continue to pass even
+        after the xtp_u east-edge port — it pins ytp_v, not xtp_u.
+        """
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.core.fv3_sw_core import _ppm_transport_1d
+
+        n = 12
+        rng = np.random.default_rng(730)
+        base = rng.standard_normal((6, n, n))
+        base_mirrored = 0.5 * (base + base[:, :, ::-1])
+        v = jnp.asarray(base_mirrored)
+        c_base = rng.standard_normal((6, n, n + 1))
+        c_mirrored = 0.5 * (c_base + c_base[:, :, ::-1])
+        c = jnp.asarray(c_mirrored)
+        rd = jnp.ones((6, n, n), dtype=jnp.float64) * 0.5
+
+        flux = _ppm_transport_1d(v, c, rd, axis=2)
+        # flux shape: (6, n, n+1).  South interface flux[:, :, 0]
+        # vs north interface flux[:, :, n] pinned equal under
+        # axis=2 mirror symmetry of the input.
+        flux_south = np.asarray(flux[:, :, 0])
+        flux_north = np.asarray(flux[:, :, n])
+        max_diff = float(np.max(np.abs(flux_south - flux_north)))
+        self.assertLess(max_diff, 1e-10,
+            msg="iter-729: _ppm_transport_1d(axis=2) south-north "
+            "symmetry broken.  ytp_v should stay symmetric (both "
+            "Fortran gates skip in duogrid); this lock must not "
+            "move even if xtp_u east-edge port lands.")
+
+
 class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
     """Iter-682 Fortran-fidelity locks for the duogrid corner-fill path.
 
