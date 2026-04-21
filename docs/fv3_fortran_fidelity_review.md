@@ -875,3 +875,20 @@ No source-code changes in iter-676; audit-only.  Regression suite at 123 tests; 
 **Corrected conclusion**: the uniform-expected metric population is fully clean of iter-666/670-style bugs (20/20 in the [0.80, 1.25] band).  The non-orthogonality population cannot be screened by boundary/interior ratio, but is covered by direct Fortran-formula locks.  iter-676's stop claim "no remaining metric bugs" is supportable ONLY with this partition explicitly stated — which iter-677 now does.
 
 No source-code changes in iter-677; diagnostic + documentation only.  Regression suite at 123 tests; all pass.
+
+### Iter-678 — cos_sg Fortran-formula direct comparison (documented divergence)
+
+Closes the Codex stop-time review flag on iter-677 that "``cos_sg`` was excluded from the exhaustive audit on a false near-zero-interior premise".  iter-678 adds a **direct Fortran-formula lock test** (``TestCosSgFortranFormulaIter678`` — 3 tests) that reproduces ``fv_grid_utils.F90:2898-2942`` (``cos_angle``) and ``fv_grid_utils.F90:1996-2022`` (``mid_pt3_cart``) verbatim, then computes the complete ``cos_sg(1..9)`` using Fortran's arc-projection formulas and compares pointwise against Python's tangent-vector supergrid implementation.
+
+**Finding**: Python's tangent-vector ``cos_sg`` at edge midpoints (positions 0..3) differs from Fortran's arc-projection ``cos_angle`` by O(1/N) — **2.3% at C8, 0.5% at C36** — a consistent discretization difference, not a factor-of-2 bug.  Corner positions (SW/NE at 5/7) agree with Fortran to <1e-3.  Corner positions SE/NW (6/8) agree in magnitude but Python uses positive-everywhere convention while Fortran has sign flips; these are functionally dead (only read via sign-insensitive ``sin_sg``; verified by grep of all F90 ``cos_sg(:,:,6..9)`` uses).
+
+**Attempted fix, reverted**: rewriting ``_compute_sin_cos_sg`` at `src/legoesm/grids/cubed_sphere_cdgrid.py:144-248` to use Fortran's exact formulas (``cos_angle`` + ``mid_pt3_cart``) **worsened** Williamson 2 alpha=0 C36 1-day L2 from 2.06e-4 to 1.098e-3 (2.2× above the iter-505 lock ceiling of 5.0e-4) and broke 9 regression tests spanning W2/W5 L2 locks, `rsin_u`/`rsin_v` consistency, and transport divergence comparison.  Root cause: downstream operators (c_sw, d2a2c_vect, deln flux, KE, vorticity) have been tuned against Python's tangent-vector cos_sg.  Switching ``cos_sg`` alone creates a MIXED numerical scheme that neither Python nor Fortran has calibrated against.  Full Fortran fidelity on cos_sg requires a coordinated rewrite of the downstream operators — deferred as architectural work under review doc item #1 (W2 A-L + RK3 + boundary_fix path) or item #2 (FB chain redesign).
+
+**Decision**: keep the tangent-vector ``cos_sg`` for numerical stability of the Williamson 2 benchmark.  The 3 new lock tests:
+1. ``test_cos_sg_edge_midpoints_divergence_is_discretization_O_one_over_N`` — documents the known C8 divergence at [1e-4, 0.05].
+2. ``test_cos_sg_corners_match_fortran_formula_absolute`` — SW/NE match sign-exact; SE/NW match in magnitude.
+3. ``test_sin_sg_matches_sqrt_one_minus_cos_sg_squared`` — identity at float32 precision.
+
+These lock tests prevent silent drift: future cos_sg changes must either (a) stay within the documented divergence band — meaning they don't break the downstream operator tuning — or (b) demand coordinated operator-side updates verified against W2 L2.
+
+No source-code changes to `src/` in iter-678 (the rewrite was reverted).  Regression suite now at **126 tests** (123 + 3 new Fortran-formula locks); all pass.

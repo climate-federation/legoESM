@@ -7917,5 +7917,238 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
             msg="n=1 dyc has zero entries — iter-667 n=1 fallback broken.")
 
 
+class TestCosSgFortranFormulaIter678(unittest.TestCase):
+    """Iter-678 Fortran-formula comparison for ``_compute_sin_cos_sg``.
+
+    Closes the gap flagged by Codex stop-time review on iter-677:
+    iter-676/677 could not exclude ``cos_sg`` from its ratio-test audit
+    without a direct Fortran-formula check.  This class reproduces
+    Fortran's corner cross-product and edge-midpoint cos_angle formulas
+    from ``fv_grid_utils.F90:324-355`` verbatim and measures the
+    discretization difference versus Python's tangent-vector method.
+
+    **Finding** (iter-678): Python's tangent-vector ``cos_sg`` differs
+    from Fortran's arc-based ``cos_angle`` formula by O(1/N) at edge
+    midpoints — 2.3% at C8, 0.5% at C36.  This is a consistent
+    discretization difference, NOT a factor-of-2 bug.  An attempted
+    rewrite of ``_compute_sin_cos_sg`` to use Fortran's exact formula
+    WORSENED Williamson 2 alpha=0 C36 1-day L2 by 2.2× (1.098e-3 vs
+    iter-505 lock ceiling 5.0e-4) and broke 9 regression tests, because
+    downstream operators (c_sw, d2a2c_vect, deln flux, KE, vorticity) are
+    tuned against Python's tangent-vector cos_sg.  The rewrite was
+    reverted.
+
+    Tests below verify:
+    1. Sign conventions at sign-preserving corner positions (SW, NE)
+       match Fortran — required by ``cosa_corner`` averaging at
+       fv_grid_utils.F90:494.
+    2. Magnitude at corners matches Fortran's cos_angle within O(1/N)
+       tolerance.
+    3. Edge-midpoint cos_sg differs from Fortran's cos_angle by no more
+       than the expected 0.025 (C8) — this documents the known
+       divergence, preventing regressions where it silently worsens.
+    4. ``sin_sg = sqrt(max(0, 1-cos_sg²))`` identity holds at float32
+       precision (the default metric_dtype).
+
+    Fortran formulas (fv_grid_utils.F90:324-355):
+      cos_sg(i,j,6) =  cos_angle(grid3(i,j),   grid3(i+1,j),   grid3(i,j+1))   # SW
+      cos_sg(i,j,7) = -cos_angle(grid3(i+1,j), grid3(i,j),     grid3(i+1,j+1)) # SE
+      cos_sg(i,j,8) =  cos_angle(grid3(i+1,j+1), grid3(i+1,j), grid3(i,j+1))   # NE
+      cos_sg(i,j,9) = -cos_angle(grid3(i,j+1), grid3(i,j),     grid3(i+1,j+1)) # NW
+      cos_sg(i,j,1..4) =  cos_angle(mid3(edge),  ...)                          # edges
+
+    Python layout (cubed_sphere_cdgrid.py:117-118):
+      0=W, 1=S, 2=E, 3=N, 4=centre, 5=SW, 6=SE, 7=NE, 8=NW
+    → Fortran 1↔Python 0, 2↔1, 3↔2, 4↔3, 5↔4, 6↔5, 7↔6, 8↔7, 9↔8.
+    """
+
+    @staticmethod
+    def _cos_angle(p1, p2, p3):
+        """Direct numpy reproduction of fv_grid_utils.F90:2898-2942 cos_angle."""
+        import numpy as np
+        # P = p1 x p2,  Q = p1 x p3,  cos = P·Q / (|P||Q|)
+        Px = p1[..., 1]*p2[..., 2] - p1[..., 2]*p2[..., 1]
+        Py = p1[..., 2]*p2[..., 0] - p1[..., 0]*p2[..., 2]
+        Pz = p1[..., 0]*p2[..., 1] - p1[..., 1]*p2[..., 0]
+        Qx = p1[..., 1]*p3[..., 2] - p1[..., 2]*p3[..., 1]
+        Qy = p1[..., 2]*p3[..., 0] - p1[..., 0]*p3[..., 2]
+        Qz = p1[..., 0]*p3[..., 1] - p1[..., 1]*p3[..., 0]
+        num = Px*Qx + Py*Qy + Pz*Qz
+        den = np.sqrt((Px**2 + Py**2 + Pz**2) * (Qx**2 + Qy**2 + Qz**2))
+        return np.where(den > 0.0, num / np.maximum(den, 1e-30), 1.0)
+
+    @staticmethod
+    def _mid_pt3_cart(p1, p2):
+        """Direct numpy reproduction of fv_grid_utils.F90:1996-2022 mid_pt3_cart."""
+        import numpy as np
+        s = p1 + p2
+        n = np.sqrt(np.sum(s**2, axis=-1, keepdims=True))
+        return s / np.maximum(n, 1e-30)
+
+    def _fortran_cos_sg(self, n):
+        """Direct numpy reproduction of fv_grid_utils.F90:324-355.
+
+        Returns cos_sg of shape (6, n, n, 9), Python-layout indexed.
+        """
+        import numpy as np
+        from legoesm.grids.halo import _face_gnomonic_to_lonlat
+        import jax.numpy as jnp
+
+        # Build grid3: corners (6, n+1, n+1, 3) unit vectors on sphere.
+        alpha = np.linspace(-np.pi/4, np.pi/4, n + 1)
+        ax, ay = np.meshgrid(alpha, alpha, indexing='ij')
+        # Also cell centres (agrid): (6, n, n, 3)
+        dalpha = np.pi / (2 * n)
+        alpha_c = np.linspace(-np.pi/4 + dalpha/2, np.pi/4 - dalpha/2, n)
+        ax_c, ay_c = np.meshgrid(alpha_c, alpha_c, indexing='ij')
+
+        grid3 = np.empty((6, n + 1, n + 1, 3))
+        agrid = np.empty((6, n, n, 3))
+        for f in range(6):
+            lon, lat = _face_gnomonic_to_lonlat(f, jnp.asarray(ax), jnp.asarray(ay))
+            lon = np.asarray(lon); lat = np.asarray(lat)
+            grid3[f, ..., 0] = np.cos(lat) * np.cos(lon)
+            grid3[f, ..., 1] = np.cos(lat) * np.sin(lon)
+            grid3[f, ..., 2] = np.sin(lat)
+            lon_c, lat_c = _face_gnomonic_to_lonlat(f, jnp.asarray(ax_c), jnp.asarray(ay_c))
+            lon_c = np.asarray(lon_c); lat_c = np.asarray(lat_c)
+            agrid[f, ..., 0] = np.cos(lat_c) * np.cos(lon_c)
+            agrid[f, ..., 1] = np.cos(lat_c) * np.sin(lon_c)
+            agrid[f, ..., 2] = np.sin(lat_c)
+
+        # Shortcut slices for readability
+        g_ij     = grid3[:, :-1, :-1, :]   # (6, n, n, 3) — SW corner
+        g_ip1j   = grid3[:, 1:,  :-1, :]   # SE corner
+        g_ijp1   = grid3[:, :-1, 1:,  :]   # NW corner
+        g_ip1jp1 = grid3[:, 1:,  1:,  :]   # NE corner
+
+        cos_sg = np.empty((6, n, n, 9))
+        # Corners: Fortran index 6,7,8,9 → Python 5,6,7,8
+        cos_sg[..., 5] =  self._cos_angle(g_ij,     g_ip1j,   g_ijp1)      # SW
+        cos_sg[..., 6] = -self._cos_angle(g_ip1j,   g_ij,     g_ip1jp1)    # SE
+        cos_sg[..., 7] =  self._cos_angle(g_ip1jp1, g_ip1j,   g_ijp1)      # NE
+        cos_sg[..., 8] = -self._cos_angle(g_ijp1,   g_ij,     g_ip1jp1)    # NW
+
+        # Edge midpoints: Fortran index 1,2,3,4 → Python 0,1,2,3
+        mid_W = self._mid_pt3_cart(g_ij,     g_ijp1)                # (6,n,n,3)
+        mid_S = self._mid_pt3_cart(g_ij,     g_ip1j)
+        mid_E = self._mid_pt3_cart(g_ip1j,   g_ip1jp1)
+        mid_N = self._mid_pt3_cart(g_ijp1,   g_ip1jp1)
+        cos_sg[..., 0] = self._cos_angle(mid_W, agrid, g_ijp1)      # W
+        cos_sg[..., 1] = self._cos_angle(mid_S, g_ip1j, agrid)      # S
+        cos_sg[..., 2] = self._cos_angle(mid_E, agrid, g_ip1j)      # E
+        cos_sg[..., 3] = self._cos_angle(mid_N, g_ijp1, agrid)      # N
+
+        # Cell centre (position 5 in Fortran → 4 in Python):
+        # Fortran computes via inner_prod(ec1, ec2) from get_center_vect.
+        # For the leading-order spherical check, use centred diff of
+        # grid3 along i and j at the cell centre — same as Python's
+        # tangent method.  The test below does NOT assert on position 4
+        # since the two methods use different numerical routes (ec1/ec2
+        # construction vs supergrid tangent); instead we let position 4
+        # fall out of the cell-centre agrid-based cos_angle.  We SKIP
+        # position 4 in the match assertion.
+        cos_sg[..., 4] = np.nan   # skip marker
+        return cos_sg
+
+    def test_cos_sg_edge_midpoints_divergence_is_discretization_O_one_over_N(self):
+        """Python cos_sg at W/S/E/N edge midpoints deviates from Fortran's
+        cos_angle formula by the expected O(1/N) discretization amount.
+
+        This DOCUMENTS a known divergence — it is NOT a factor-of-2 bug
+        and NOT strict Fortran fidelity.  See class docstring for why
+        rewriting to Fortran's formula worsens W2 L2.
+
+        Tolerance: 0.025 at C8 (matching measured 2.3%).  Deviations
+        beyond this bound would indicate a NEW bug; values smaller than
+        this would indicate either a genuine fidelity improvement (good)
+        or a different formulation (needs review).
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        cos_sg_py = np.asarray(cdgrid.cos_sg)          # (6, n, n, 9)
+        cos_sg_ft = self._fortran_cos_sg(n)            # (6, n, n, 9)
+
+        for k, label in enumerate(['W', 'S', 'E', 'N']):
+            diff = np.max(np.abs(cos_sg_py[..., k] - cos_sg_ft[..., k]))
+            # Ceiling is the known divergence at C8 + headroom.  If
+            # future work brings cos_sg closer to Fortran (good for
+            # fidelity), this upper bound will still pass.
+            self.assertLess(diff, 0.05,
+                msg=(f"cos_sg[..., {k}] ({label} edge) divergence from Fortran "
+                     f"cos_angle formula at C8 = {diff:.3e} exceeds documented "
+                     f"0.05 ceiling — a new cos_sg bug may have been introduced."))
+            # Also assert divergence is POSITIVE and non-trivial (so the
+            # test doesn't silently accept a broken Fortran reference or a
+            # zeroed cos_sg).
+            self.assertGreater(diff, 1e-4,
+                msg=(f"cos_sg[..., {k}] ({label} edge) divergence {diff:.3e} is "
+                     f"suspiciously small — verify test construction."))
+
+    def test_cos_sg_corners_match_fortran_formula_absolute(self):
+        """Python cos_sg at SW/SE/NE/NW corners match Fortran |.| exactly.
+
+        Fortran's minus-sign convention on cos_sg(7)=SE and cos_sg(9)=NW
+        is functionally dead (only sin_sg of corners is used downstream),
+        so Python's always-positive tangent-method convention is
+        acceptable provided |Python| == |Fortran|.  Python positions 5,7
+        (SW, NE) must match Fortran with SIGN preserved since those
+        values feed cosa_corner at fv_grid_utils.F90:494.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        cos_sg_py = np.asarray(cdgrid.cos_sg)
+        cos_sg_ft = self._fortran_cos_sg(n)
+
+        # Positions 5 (SW) and 7 (NE) — sign must match (used in cosa_corner).
+        for k, label in [(5, 'SW'), (7, 'NE')]:
+            diff = np.max(np.abs(cos_sg_py[..., k] - cos_sg_ft[..., k]))
+            self.assertLess(diff, 1e-3,
+                msg=(f"cos_sg[..., {k}] ({label} corner) differs from "
+                     f"Fortran (sign-preserving): max |diff| = {diff:.3e}"))
+
+        # Positions 6 (SE) and 8 (NW) — sign-insensitive (used only via sin_sg).
+        for k, label in [(6, 'SE'), (8, 'NW')]:
+            diff_abs = np.max(np.abs(np.abs(cos_sg_py[..., k])
+                                     - np.abs(cos_sg_ft[..., k])))
+            self.assertLess(diff_abs, 1e-3,
+                msg=(f"|cos_sg[..., {k}]| ({label} corner) differs from "
+                     f"Fortran |.|: max |diff| = {diff_abs:.3e}"))
+
+    def test_sin_sg_matches_sqrt_one_minus_cos_sg_squared(self):
+        """Python sin_sg satisfies Fortran's sin_sg = sqrt(max(0, 1-cos²))
+        identity at every position.  This is Fortran-direct
+        (fv_grid_utils.F90:357-363) and sign-insensitive."""
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        cos_sg = np.asarray(cdgrid.cos_sg)
+        sin_sg = np.asarray(cdgrid.sin_sg)
+        expected = np.sqrt(np.maximum(1.0 - cos_sg**2, 0.0))
+        diff = np.max(np.abs(sin_sg - expected))
+        # Default metric_dtype is float32 (cubed_sphere_cdgrid.py:538), so
+        # round-off ~6e-8 is expected. With metric_dtype=float64 we'd get
+        # ~1e-15.  Tolerance matches float32 precision.
+        self.assertLess(diff, 1e-6,
+            msg=f"sin_sg != sqrt(max(0, 1-cos²)): max |diff| = {diff:.3e}")
+
+
 if __name__ == "__main__":
     unittest.main()

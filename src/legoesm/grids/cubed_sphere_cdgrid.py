@@ -148,6 +148,25 @@ def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
     i-tangent and j-tangent at each sub-grid position via centred
     differences of 3D Cartesian positions.
 
+    **Iter-678 note**: an attempt to replace this with Fortran's exact
+    ``cos_angle`` + ``mid_pt3_cart`` formula from
+    ``fv_grid_utils.F90:324-355`` (pointwise Fortran-faithful) WORSENED
+    Williamson 2 alpha=0 C36 1-day L2 by 2.2× (1.098e-3 vs iter-505 lock
+    ceiling 5.0e-4) and broke 9 regression tests.  Downstream operators
+    (c_sw, d2a2c_vect, deln flux, KE, vorticity) are tuned against this
+    tangent-vector cos_sg.  Switching cos_sg formulas without updating
+    the downstream operators in tandem breaks numerical consistency.
+
+    The ~O(1/N) discretization difference between Python's tangent method
+    and Fortran's cos_angle formula (verified by
+    ``TestCosSgFortranFormulaIter678`` at atol 2e-2 for C8) reflects a
+    CONSISTENT numerical choice: Python uses centred differences; Fortran
+    uses arc-projection.  Both are valid metrics; replacing one without
+    the other creates a MIXED scheme that neither Python nor Fortran has
+    tuned against.  Revisiting this requires a coordinated rewrite of
+    downstream operators, which is deferred architectural work (see
+    review doc item #1).
+
     Parameters
     ----------
     n : int
