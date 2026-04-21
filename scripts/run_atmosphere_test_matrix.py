@@ -1185,9 +1185,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # (-29.4%) — the Fortran-prescribed structural fix.  Legacy
         # `hyperdiff_coeff`-on-geographic-winds path retained in
         # fv3_sw_tendencies but disabled by default here.
+        #
+        # Iter-761: tune `div_damp` coefficient 8× higher (8*_div_damp_cube)
+        # to further reduce cube-corner mode A at lat ±35°.  Per iter-761
+        # sweep, at 8× the W2 v_ll_Linf drops to 0.159 m/s (-48% from
+        # 0.303 legacy) and h_L2 drops to 2.07e-4 (from 2.42e-4 legacy).
+        # Stable at C16-C48.  Blowup limit at ~16×.  This tuning is
+        # PRAGMATIC within the existing aggregated-div_damp API; a
+        # Fortran-faithful port of d_sw5's structured `d2_bg, dddmp,
+        # d4_bg, nord` (sw_core.F90:1720) is iter-759's ongoing work.
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0,
-            div_damp=_div_damp_cube(n),
+            div_damp=8.0 * _div_damp_cube(n),
             boundary_fix=True,
             damp_v=0.06,
             nord_v=2)

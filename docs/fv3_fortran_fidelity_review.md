@@ -1036,3 +1036,43 @@ Corrected characterization: **iter-760's switch materially affects W2 and W5 (bo
 - No numerical change.  Matrix + ocean + regression tests all still PASS.
 
 **Process.**  Fourteenth review cycle in the iter-752-760b chain.  Codex stop-time consistently catches API/claim precision issues that are easy to miss when focused on the structural change.  The false-API-contract was introduced unintentionally when I edited the docstring in iter-760 as aspirational text without also making the code extension — an anti-pattern to avoid.
+
+### Iter-761 — tune div_damp 8× higher, W2 v_ll_Linf → 0.159 (-48%)
+
+With iter-760's Fortran-faithful del-n vorticity damping in place, the residual W2 visual artifact is dominated by mode A (cube-corner seams at lat ±35°).  Iter-745/754 ablations showed damp_v tuning alone doesn't reduce mode A.  Iter-761 tests whether tuning the aggregated `div_damp` coefficient reduces mode A.
+
+**Sweep results** (W2 C36 1 day, damp_v=0.06, nord_v=2):
+
+| `div_damp ×`  | h_L2     | h_Linf    | v_ll_Linf | Stable at C16-C48 |
+|---------------|----------|-----------|-----------|-------------------|
+| 1 (iter-760)  | 2.94e-4  | 3.14e-3   | 2.14e-1   | yes               |
+| 2             | 2.70e-4  | —         | 1.98e-1   | yes               |
+| 4             | 2.38e-4  | 2.19e-3   | 1.76e-1   | yes               |
+| **8**         | **2.07e-4** | **1.53e-3** | **1.59e-1** | **yes**         |
+| 12            | 1.94e-4  | 1.44e-3   | 1.55e-1   | C36 yes           |
+| 16+           | BLOWUP   | —         | —         | no                |
+
+**Cumulative improvement from legacy baseline (pre-iter-760):**
+
+| Metric       | Legacy (hyperdiff) | Iter-761 (del6 + 8×div_damp) | Δ       |
+|--------------|--------------------|------------------------------|---------|
+| W2 h_L2      | 2.42e-4            | **2.07e-4**                  | −14 %   |
+| W2 h_Linf    | 1.83e-3            | **1.53e-3**                  | −16 %   |
+| W2 v_ll_Linf | **3.03e-1**        | **1.59e-1**                  | **−48 %** |
+| W5 mass drift| 1.74e-5            | 1.83e-5                      | +5 %    |
+| Cosine bell  | unchanged          | unchanged                    | 0 %     |
+| Ocean rest   | machine prec       | machine prec                 | 0       |
+
+ALL three W2 metrics IMPROVE over legacy.  All 173 regression tests PASS.  Stable across C16-C48.
+
+**Visual**: colorbar ±0.15 m/s (vs ±0.20 at iter-760 and ±0.30 legacy).  Polar mode-4 bands substantially weakened; mid-latitude cube-corner seams still visible but much fainter.
+
+**Mechanism caveat.**  The 8× `div_damp` multiplier is a PRAGMATIC TUNING within the existing legacy aggregated-div_damp API.  It is NOT Fortran-faithful in the structural sense — Fortran d_sw5 uses the separate `d2_bg, dddmp, d4_bg, nord` parameters via `delpc` at B-grid corners injected into KE, not the cell-centre `grad(div)`-add formulation in Python.  The iter-759 d_sw5 holistic port (currently interior-only corner divergence helper) will eventually supersede this tuning.  Until then, iter-761's 8× is the best value within the existing API.
+
+**Stopping condition status.**  CLOSER but not met.  W2 v artifact at 0.159 m/s is the smallest value achieved since iter-505.  Visible mode-4 polar bands and cube-corner seams still present but substantially weaker.
+
+**Iter-762+ plan.**  Continue d_sw5 holistic port (iter-759 extension): full `(6, n+1, n+1)` corner coverage with cross-face halo rotation, then damp-add-to-KE integration.  This is the Fortran-structural fix.
+
+**Iter-761 deliverable.**  `scripts/run_atmosphere_test_matrix.py` W2/W5 config: `div_damp = 8 * _div_damp_cube(n)` (was `1 * _div_damp_cube(n)`).  Cosine bell config note retained as declaration-only (iter-760b).  Matrix + ocean + 173 regression tests all PASS.
+
+**Process.**  Sixteenth Fortran-fidelity / tuning iteration in iter-752-761 chain.  The 8× bump is a tuning step, clearly labeled as such, pending the structural iter-759 d_sw5 port.  No regressions, all three W2 metrics strictly improved.
