@@ -809,7 +809,8 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 # ==============================================================================
 
 def _arakawa_lamb_gradient(B, cdgrid, padded=None,
-                           fortran_dir_aware_corners=False):
+                           fortran_dir_aware_corners=False,
+                           fortran_a2b_corner_avg=False):
     """4-point Arakawa-Lamb gradient at D-grid corners.
 
     Returns the gradient in physical (e_x, e_perp) coordinates using a
@@ -836,6 +837,30 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None,
         the 4 cube-vertex halo cells per face; the remaining halo
         is untouched.  See iter-764/765 review-doc entries.  False
         preserves the legacy 2-pt-avg behaviour.
+    fortran_a2b_corner_avg : bool, default False
+        Iter-766: when True, replace the 2-pt-avg cube-corner halo
+        cells with Fortran's ``a2b_ord4`` 3-point corner average
+        (``a2b_edge.F90:385-388``).  Fortran's 3-pt formula at the
+        SW cube vertex is
+
+            qout(1,1) = r3*(qin(1,1) + qin(1,0) + qin(0,1))
+
+        — a SCALAR 3-point average that EXCLUDES the diagonal halo
+        cell ``qin(0,0)``.  In our halo=1 convention this maps to
+
+            padded[0,0] = (1/3)*(padded[0,1] + padded[1,0]
+                                  + padded[1,1])
+
+        (and symmetric formulas for SE, NE, NW).  Fortran uses this
+        formula in the A-to-B scalar interpolation that feeds its
+        pressure-gradient machinery — the closest Fortran analogue
+        to our A-L gradient's 4-point stencil at D-grid corners.
+        UNLIKE ``fortran_dir_aware_corners`` (iter-765 falsified),
+        this fill is DIRECTION-NEUTRAL — no sweep-specific variant.
+        Symmetric 2D stencils can consume it consistently.  Only
+        affects the 4 cube-vertex halo cells per face.  See iter-766
+        review-doc entry.  False preserves the legacy 2-pt-avg
+        behaviour.
 
     Returns
     -------
@@ -844,6 +869,52 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None,
     """
     B_pad = padded if padded is not None else _pad_halo_auto(B, cdgrid)
 
+    # Iter-766 Codex 2nd-pass: the two cube-corner opt-ins both
+    # overwrite the same 4 cube-vertex halo cells; applied together
+    # iter-766's a2b mutation is silently discarded by iter-765's
+    # subsequent p1/p2 construction.  Refuse the combination so a
+    # future diagnostic cannot silently get a mixed result.
+    if fortran_a2b_corner_avg and fortran_dir_aware_corners:
+        raise ValueError(
+            "`fortran_a2b_corner_avg=True` and "
+            "`fortran_dir_aware_corners=True` both overwrite the 4 "
+            "cube-corner halo cells of the A-L gradient's padded "
+            "field.  Enabling both silently discards the a2b "
+            "mutation (iter-765's dir-aware p1/p2 construction wins).  "
+            "Pick one diagnostic at a time; do not combine.")
+
+    if fortran_a2b_corner_avg:
+        # Fortran's `a2b_ord4` 3-pt average at the 4 cube-vertex
+        # A-halo cells (a2b_edge.F90:385-388).  Overwrite only those
+        # 4 positions; the remaining halo is unchanged.
+        # Fortran -> Python halo=1 index mapping:
+        #   qin(0,0)   — Python padded[:, 0, 0]    — SW cube halo
+        #   qin(0,1)   — Python padded[:, 0, 1]    — W-edge halo at j=1
+        #   qin(1,0)   — Python padded[:, 1, 0]    — S-edge halo at i=1
+        #   qin(1,1)   — Python padded[:, 1, 1]    — interior diagonal
+        if B.ndim == 3:
+            sw = (B_pad[:, 0, 1] + B_pad[:, 1, 0] + B_pad[:, 1, 1]) / 3.0
+            se = (B_pad[:, -2, 0] + B_pad[:, -1, 1] + B_pad[:, -2, 1]) / 3.0
+            nw = (B_pad[:, 0, -2] + B_pad[:, 1, -1] + B_pad[:, 1, -2]) / 3.0
+            ne = (B_pad[:, -2, -1] + B_pad[:, -1, -2] + B_pad[:, -2, -2]) / 3.0
+            B_pad = B_pad.at[:, 0, 0].set(sw)
+            B_pad = B_pad.at[:, -1, 0].set(se)
+            B_pad = B_pad.at[:, 0, -1].set(nw)
+            B_pad = B_pad.at[:, -1, -1].set(ne)
+        else:
+            sw = (B_pad[:, 0, 1, :] + B_pad[:, 1, 0, :]
+                  + B_pad[:, 1, 1, :]) / 3.0
+            se = (B_pad[:, -2, 0, :] + B_pad[:, -1, 1, :]
+                  + B_pad[:, -2, 1, :]) / 3.0
+            nw = (B_pad[:, 0, -2, :] + B_pad[:, 1, -1, :]
+                  + B_pad[:, 1, -2, :]) / 3.0
+            ne = (B_pad[:, -2, -1, :] + B_pad[:, -1, -2, :]
+                  + B_pad[:, -2, -2, :]) / 3.0
+            B_pad = B_pad.at[:, 0, 0, :].set(sw)
+            B_pad = B_pad.at[:, -1, 0, :].set(se)
+            B_pad = B_pad.at[:, 0, -1, :].set(nw)
+            B_pad = B_pad.at[:, -1, -1, :].set(ne)
+
     if fortran_dir_aware_corners:
         # Build two padded variants differing only at the 4 cube-
         # corner halo cells per face.  For each corner position,
@@ -851,10 +922,16 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None,
         # inward; dir=2 inner fill uses the j=0-row value one-i-
         # inward.  The x-gradient stencil uses dir=1; y-gradient
         # uses dir=2.
-        # SW: padded[:, 0, 0]  — dir1 ← padded[:, 0, 1], dir2 ← padded[:, 1, 0]
-        # SE: padded[:, 0, -1] — dir1 ← padded[:, 0, -2], dir2 ← padded[:, 1, -1]
-        # NW: padded[:, -1, 0] — dir1 ← padded[:, -1, 1], dir2 ← padded[:, -2, 0]
-        # NE: padded[:, -1, -1]— dir1 ← padded[:, -1, -2], dir2 ← padded[:, -2, -1]
+        # Iter-766 (Codex): the `halo.py::_fill_corners_h1` convention
+        # names these 4 cube-vertex halo cells as SW=[0,0], NW=[0,-1],
+        # SE=[-1,0], NE=[-1,-1].  Earlier iter-765 labels here
+        # transposed NW and SE — runtime behaviour was unaffected
+        # (each overwrite still targets the same cell) but combined
+        # iter-765/766 reasoning was harder to follow.  Corrected:
+        # SW: padded[:, 0, 0]   — dir1 ← padded[:, 0, 1],  dir2 ← padded[:, 1, 0]
+        # NW: padded[:, 0, -1]  — dir1 ← padded[:, 0, -2], dir2 ← padded[:, 1, -1]
+        # SE: padded[:, -1, 0]  — dir1 ← padded[:, -1, 1], dir2 ← padded[:, -2, 0]
+        # NE: padded[:, -1, -1] — dir1 ← padded[:, -1, -2],dir2 ← padded[:, -2, -1]
         # (dims: pad is (6, n+2, n+2); here index -1 means n+1.)
         p = B_pad
         if B.ndim == 3:
@@ -1407,6 +1484,7 @@ def fv3_sw_tendencies(
     boundary_fix=False,
     zero_mean_correction=False,
     fortran_dir_aware_corners=False,
+    fortran_a2b_corner_avg=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1448,8 +1526,14 @@ def fv3_sw_tendencies(
     # Iter-765: optionally use Fortran-faithful halo=1 inner dir-aware
     # corner fill (dir=1 for x-gradient, dir=2 for y-gradient) per
     # sw_core.F90:3856-3915.  See iter-764d for scope details.
+    # Iter-766: optionally replace the 2-pt-avg cube-corner halo
+    # cells with Fortran's `a2b_ord4` 3-pt-avg (a2b_edge.F90:385-388)
+    # — the direction-neutral Fortran scalar corner average used in
+    # the A-to-B interpolation feeding the pressure gradient.
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(
-        B, cdgrid, fortran_dir_aware_corners=fortran_dir_aware_corners)
+        B, cdgrid,
+        fortran_dir_aware_corners=fortran_dir_aware_corners,
+        fortran_a2b_corner_avg=fortran_a2b_corner_avg)
 
     # (e) Corner winds from halo-exchanged cell-centre velocities.
     # Both vorticity and gradient use haloed cell-centre data, giving
@@ -1517,9 +1601,11 @@ def fv3_sw_tendencies(
         # Iter-765b: thread fortran_dir_aware_corners flag to this
         # A-L gradient call too, so the flag consistently affects ALL
         # A-L invocations inside fv3_sw_tendencies.
+        # Iter-766: same discipline for fortran_a2b_corner_avg.
         ddiv_dx, ddiv_dy_perp_cc = _arakawa_lamb_gradient(
             div_field, cdgrid,
-            fortran_dir_aware_corners=fortran_dir_aware_corners)
+            fortran_dir_aware_corners=fortran_dir_aware_corners,
+            fortran_a2b_corner_avg=fortran_a2b_corner_avg)
         du_cc = du_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dx)
         dv_cc = dv_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dy_perp_cc)
 

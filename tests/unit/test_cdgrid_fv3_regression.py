@@ -4179,6 +4179,120 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"the kwarg threading in _arakawa_lamb_gradient and "
                  f"fv3_sw_tendencies per iter-765b."))
 
+    def test_fortran_a2b_corner_avg_is_known_worse(self):
+        """Iter-766 regression sentinel: the
+        `fortran_a2b_corner_avg=True` opt-in path in
+        `fv3_sw_tendencies` / `CDGridShallowWaterConfig` is KNOWN
+        WORSE than the default 2-pt-avg on the canonical W2 matrix
+        config — enabling it makes W2 v_ll_Linf 1.89× worse
+        (0.159 → 0.300 m/s) and h_L2 2.17× worse (2.07e-4 → 4.5e-4).
+
+        Iter-766 implemented Fortran's `a2b_ord4` 3-pt cube-corner
+        average (a2b_edge.F90:385-388) — a DIRECTION-NEUTRAL
+        Fortran scalar corner fill — as a candidate replacement for
+        the 2-pt-avg.  It was falsified at 1.89× blowup.
+
+        Iter-766 Codex 2nd-pass: sentinel now runs BOTH the OFF
+        (default) and ON paths and pins the ON/OFF RATIO.  A
+        float-pin on the ON path alone could miss a regression that
+        raises the OFF baseline and preserves the absolute ON floor.
+        The ratio assertion is robust to parallel drift of both.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge)
+        from legoesm.grids.regridding import (
+            get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
+
+        n = 36
+        dt = 300.0
+        n_steps = int(86400 / dt)
+        div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        sw = williamson_test2(grid)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
+
+        def _run_and_measure(flag: bool) -> float:
+            cfg = CDGridShallowWaterConfig(
+                hyperdiff_coeff=0.0,
+                div_damp=div_damp,
+                boundary_fix=True,
+                damp_v=0.06,
+                nord_v=2,
+                fortran_a2b_corner_avg=flag,
+            )
+            model = FV3EdgeShallowWaterModel(grid, config=cfg)
+            cdgrid = model.cdgrid
+            u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+            v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+            state = FV3EdgeShallowWaterState(
+                h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+            model.set_initial_mass(state)
+            for _ in range(n_steps):
+                state = model.step(state, dt)
+            ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+            u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
+                           + np.asarray(state.u_d)[:, :, 1:])
+            v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
+                           + np.asarray(state.v_d)[:, 1:, :])
+            v_north = (np.asarray(sa_4edge) * u_cc
+                        + np.asarray(ca_4edge) * v_cc)
+            v_ll = apply_cubedsphere_to_latlon(v_north, weights)
+            return float(np.max(np.abs(v_ll)))
+
+        v_ll_linf_off = _run_and_measure(flag=False)
+        v_ll_linf_on = _run_and_measure(flag=True)
+
+        # The canonical default matrix result is v_ll_Linf ~0.159 m/s.
+        # Pin OFF baseline to stay near that value so a regression
+        # that raises the OFF floor is also caught.
+        self.assertLess(
+            v_ll_linf_off, 0.20,
+            msg=(f"OFF (default 2-pt-avg) baseline v_ll_Linf="
+                 f"{v_ll_linf_off:.3e} m/s drifted above 0.20 m/s — "
+                 f"the iter-766 measurement (0.159 m/s) no longer "
+                 f"applies.  Regenerate the ON vs OFF ratio."))
+
+        # Iter-766 Codex 3rd-pass: pin ON absolute upper bound too,
+        # so a NaN/blowup to >1 m/s also fails.  Iter-766 measured
+        # ~0.300 m/s; 1.0 m/s is a conservative ceiling.
+        self.assertLess(
+            v_ll_linf_on, 1.0,
+            msg=(f"ON (fortran_a2b_corner_avg=True) v_ll_Linf="
+                 f"{v_ll_linf_on:.3e} m/s exceeded 1.0 m/s — the "
+                 f"iter-766 measurement (0.300 m/s) no longer "
+                 f"applies.  Regenerate the pins."))
+
+        # Pin ON path to be materially worse than OFF (>= 1.5× gap).
+        # Iter-766 measured ratio ~1.89×.  A smaller ratio means the
+        # a2b-corner-avg path was repaired or the ON/OFF gap closed.
+        ratio = v_ll_linf_on / v_ll_linf_off
+        self.assertGreater(
+            ratio, 1.5,
+            msg=(f"fortran_a2b_corner_avg=True v_ll_Linf="
+                 f"{v_ll_linf_on:.3e} m/s produced ratio "
+                 f"{ratio:.3f}× over OFF baseline "
+                 f"({v_ll_linf_off:.3e} m/s) — UNEXPECTEDLY SMALL "
+                 f"gap.  Iter-766 falsified this path at 1.89× "
+                 f"blowup.  A new smaller ratio means either:\n"
+                 f"  (a) the a2b-corner-avg path has been repaired — "
+                 f"re-examine whether it now reduces mode A and can "
+                 f"replace the default 2-pt-avg, OR\n"
+                 f"  (b) the opt-in was silently disabled — restore "
+                 f"the kwarg threading in _arakawa_lamb_gradient and "
+                 f"fv3_sw_tendencies per iter-766."))
+
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
         that `boundary_fix=True` in `fv3_sw_tendencies` delivers a

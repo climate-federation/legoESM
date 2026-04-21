@@ -117,6 +117,19 @@ class CDGridShallowWaterConfig(NamedTuple):
     # Fortran convention instead of locking nord_v to a fixed default.
     nord_v: int = -1           # Vorticity damping order (-1 = derive)
 
+    # Iter-766: Fortran `a2b_ord4` 3-pt cube-corner average in A-L
+    # gradient cube-corner halo (a2b_edge.F90:385-388).  Direction-
+    # neutral; replaces the 2-pt edge-halo-only average at the 4
+    # cube-vertex halo cells per face in `_arakawa_lamb_gradient`.
+    # Default OFF; FALSIFIED as a mode-A fix in iter-766 measurement
+    # (1.89× W2 v_ll_Linf blowup at C36 dt=300).  Retained as an
+    # opt-in diagnostic path for future cube-corner ablation studies.
+    # Do NOT combine with `fortran_dir_aware_corners` — they both
+    # overwrite the same 4 cube-corner halo cells and the iter-766
+    # mutation is silently discarded by iter-765's subsequent p1/p2
+    # construction.
+    fortran_a2b_corner_avg: bool = False
+
 
 # ==============================================================================
 # Tendencies
@@ -493,6 +506,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     div_damp=self.config.div_damp,
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
                     boundary_fix=self.config.boundary_fix,
+                    fortran_a2b_corner_avg=self.config.fortran_a2b_corner_avg,
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,

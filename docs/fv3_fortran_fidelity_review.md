@@ -1252,3 +1252,72 @@ Essentially identical to iter-765's mixed-path result (1.88 vs 1.90 m/s).  The c
 **Iter-765b deliverable.**  One-line edit to thread kwarg through the second A-L call in `fv3_sw_tendencies`.  Matrix + ocean + 173 regression tests all PASS (default path unchanged).
 
 **Process.**  29th iter in iter-752-765b chain.  Codex-flagged partial threading fixed so the falsification claim rests on a clean single-path comparison.  Lesson: when adding a config flag that controls multiple code paths, verify it reaches ALL of them before drawing conclusions.
+
+### Iter-766 — Fortran `a2b_ord4` 3-pt corner average HYPOTHESIS FALSIFIED
+
+Per iter-765b's iter-766+ directions ("the A-L gradient stencil itself at cube corners" candidate) and to continue the Fortran-faithful audit initiated by iter-762-765, iter-766 investigates a DIFFERENT Fortran scalar corner fill: `a2b_ord4` (model/a2b_edge.F90:385-388).
+
+**Fortran reference.**  `a2b_ord4` interpolates A-grid scalars to B-grid vertices for the pressure-gradient machinery.  The interior bulk stencil is a 4-point average of the 4 surrounding A-cells (a2b_edge.F90:380):
+
+```
+qout(i,j) = 0.25*(qin(i-1,j-1) + qin(i,j-1) + qin(i-1,j) + qin(i,j))
+```
+
+At the 4 CUBE VERTICES (lines 385-388), Fortran OVERRIDES this with a 3-point formula that EXCLUDES the cube-corner A-halo cell:
+
+```
+if ( sw_corner ) qout(1,1) = r3*(qin(1,1) + qin(1,0) + qin(0,1))
+```
+
+where `r3 = 1.0/3.0`.  The 3 included cells are the first interior A-cell adjacent to the cube vertex, and the two halo strips adjacent to the cube vertex (NOT the diagonal halo cell qin(0,0)).  This 3-point formula is DIRECTION-NEUTRAL — it does not have a sweep-specific variant (unlike the PPM-related `fill_corners` family investigated iter-763/764/765).
+
+**Iter-766 candidate.**  Use Fortran's a2b_ord4 3-pt formula as the cube-corner halo value in our A-L gradient: replace the 2-pt-avg `padded[0,0] = 0.5*(padded[0,1] + padded[1,0])` with `padded[0,0] = (1/3)*(padded[0,1] + padded[1,0] + padded[1,1])` (and symmetric formulas for SE, NE, NW).  Because this fill is direction-neutral, it should in principle be compatible with our direction-neutral A-L operator (unlike the directional fills iter-765 falsified).
+
+**Magnitude measurement** (`scripts/diag_iter766_fortran_a2b_corner_avg.py`):  at cube corners on the W2-exact KE field, 3-pt-avg differs from 2-pt-avg by up to 5.1 m²/s² (0.68% of B scale), RMS 3.6 m²/s².  Equatorial-face discrepancy +2.5 m²/s², polar-face −5.1 m²/s².  Roughly 4× smaller than iter-764's directional-fill discrepancy (22 m²/s² max).
+
+**Direct measurement on W2 C36 1d, iter-761 matrix config:**
+
+| Config                          | h_L2     | v_ll_Linf |
+|---------------------------------|----------|-----------|
+| default (2-pt-avg corners)      | 2.07e−4  | 1.59e−01  |
+| Fortran a2b 3-pt-avg (iter-766) | **4.50e−4**| **3.00e−01** |
+
+**Fortran a2b 3-pt-avg makes W2 1.89× worse, not better.**  h_L2 degrades 2.17×.  Hypothesis FALSIFIED.
+
+**Why the hypothesis failed.**  Although Fortran's a2b_ord4 3-pt formula IS direction-neutral (unlike `fill_corners`/`fill_4corners`), it was designed for a DIFFERENT operator: A-grid → B-grid SCALAR INTERPOLATION.  Our A-L is a 2D GRADIENT STENCIL that reads 4 surrounding A-cells per D-grid corner.  The 3-pt-avg lowers the weight of the two edge halos (from 0.5 each to 1/3 each) and adds the diagonal interior cell (weight 1/3).  When this substitution is made in the A-L gradient coefficient structure, the gradient at the cube-vertex D-grid corner picks up a different mix of near-field vs far-field values than the 2-pt-avg — and this different mix evidently amplifies the pre-existing mode A rather than damping it.
+
+Working out the stencil coefficients for `dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)` at the cube-corner D-grid corner:
+- With 2-pt-avg: dB_raw_x = +0.5·padded[1,0] − 1.5·padded[0,1] + 1·padded[1,1]
+- With 3-pt-avg: dB_raw_x = +(2/3)·padded[1,0] − (4/3)·padded[0,1] + (2/3)·padded[1,1]
+
+The 2-pt-avg is MORE asymmetric in its treatment of the x-halo (+0.5) vs y-halo (−1.5), while the 3-pt-avg is more balanced.  Apparently our A-L metric coefficients at the cube-corner D-grid corner expect the more-asymmetric 2-pt-avg structure.
+
+**Iter-766 source-code status.**  A `fortran_a2b_corner_avg` kwarg is RETAINED in `_arakawa_lamb_gradient`, `fv3_sw_tendencies`, and `CDGridShallowWaterConfig` (default False) as an opt-in diagnostic path.  The matrix default and production path are UNCHANGED (still 2-pt-avg).  Matrix + ocean + all `tests/unit/test_cdgrid_fv3_regression.py` tests PASS.  (Running test count is not pinned here because the count changes with each new sentinel; see the pytest output of that file for the current pass count.)
+
+**Broader lesson (combining iter-765 and iter-766).**  Two Fortran-inspired cube-corner fills — directional `fill_4corners` (iter-765: 12× W2 blowup) and direction-neutral `a2b_ord4` 3-pt-avg (iter-766: 1.89× W2 blowup) — have both made W2 worse than the 2-pt-avg on the canonical C36 1-day matrix config.  The 2-pt-avg was not tuned for the A-L operator, but both of the Fortran recipes we have direct-measured are strictly worse than it.  The evidence base is two specific Fortran fills, not every conceivable fill — so "2-pt-avg is provably optimal" is OVERREACH.  What we can say: these two Fortran recipes designed for different operators (PPM sweeps and A-to-B scalar interpolation) are not drop-in replacements.
+
+**Scope note (accurate caller inventory, function-name references).**  The `fortran_a2b_corner_avg` flag is implemented in `_arakawa_lamb_gradient` and is THREADED through these callers (file-local grep: `fortran_a2b_corner_avg=`):
+
+- `fv3_sw_tendencies` Bernoulli A-L call (operators_cdgrid.py)
+- `fv3_sw_tendencies` div-damp A-L call (operators_cdgrid.py)
+
+It is NOT threaded through these other direct `_arakawa_lamb_gradient(...)` call sites:
+
+- `cdgrid_momentum_tendencies` in operators_cdgrid.py — KE/p/B/div_field calls (the legacy non-FV3-faithful path; not on the canonical matrix W2 path)
+- `_overlapped_arakawa_lamb_gradient` 3D fallback in operators_cdgrid.py — used by `primitive_eq_cdgrid` only
+- `primitive_eq_cdgrid.py` — direct A-L calls (plus one through `_overlapped_arakawa_lamb_gradient`)
+- `compressible_euler_cdgrid.py` — direct A-L calls (NOT through `_overlapped_arakawa_lamb_gradient`)
+- `ocean_pe_cdgrid.py` — direct A-L calls
+
+(Line numbers intentionally omitted because they drift whenever unrelated edits shift code.  Use `grep -n "_arakawa_lamb_gradient(" src/` for the up-to-date list.)
+
+The iter-766 W2 falsification therefore applies to the shallow-water production path exercised by the matrix (the two `fv3_sw_tendencies` call sites).  Non-SW callers were intentionally left at the default 2-pt-avg because (a) mode A is not visible on those paths, (b) adding a diagnostic-only flag to their signatures would be churn without scientific motivation at this iteration.  A future iter investigating cube-corner mode A on one of those dycores can thread the flag as needed.
+
+**Iter-767+ next directions.**
+- Mode A at v_ll_Linf ≈ 0.159 m/s (−48% from iter-752 legacy 0.303) appears to be a fundamental limit of the A-L + 2-pt-avg production path.  Further reduction requires a STRUCTURAL change, not a corner-fill tweak.
+- Candidates: (a) port Fortran's c_sw + d_sw forward-backward scheme holistically (blocked on ng=3 halo infrastructure); (b) redesign the A-L operator's metric coefficients so that a different corner-fill recipe becomes natural; (c) investigate whether `pad_halo_vector` rotation at cube vertices has a separable contribution to mode A (iter-765b candidate #2, still unexplored).
+- The iter-766 `fortran_a2b_corner_avg` opt-in kwarg is useful for future ablation studies of metric-coefficient alternatives.
+
+**Iter-766 deliverable.**  Source: `fortran_a2b_corner_avg` kwarg added to `_arakawa_lamb_gradient`, `fv3_sw_tendencies`, and `CDGridShallowWaterConfig`, default False.  Runtime guard in `_arakawa_lamb_gradient` rejects `fortran_a2b_corner_avg=True` + `fortran_dir_aware_corners=True` simultaneously (the two opt-ins overwrite the same cells; iter-765's construction wins silently if both are on — the guard prevents that misuse).  Diagnostic scripts `diag_iter766_fortran_a2b_corner_avg.py` (magnitude measurement) and `diag_iter766b_w2_fortran_a2b.py` (W2 impact measurement).  Matrix + ocean + `tests/unit/test_cdgrid_fv3_regression.py` all PASS.
+
+**Process.**  30th iter in iter-752-766 chain.  Second Fortran-corner-fill hypothesis falsified after iter-765.  Combined iter-765/766 result constrains iter-767+: corner-fill tweaks cannot break mode A below ~0.159 m/s; structural change required.
