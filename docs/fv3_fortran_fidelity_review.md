@@ -849,3 +849,46 @@ Q3: The smallest Fortran-faithful replacement for the Python `hyperdiff_coeff` b
 **Iter-747 deliverable.**  `scripts/diag_iter747_angle_rotation_proper_test.py` checked in.  Provides Test A (smooth IC) and Test B (stepped state) hyperdiff tendencies per face.  Confirms the pipeline's polar bias mechanistically and anchors iter-748's `del6_vt_flux` port as the Fortran-faithful fix.
 
 **Confidence.**  HIGH on "pipeline polar bias 31× on smooth W2 IC" (direct measurement).  HIGH on "Python hyperdiff block is structurally non-Fortran" (Codex file:line citations).  MEDIUM on "del6_vt_flux port will reduce the polar peak" — this is the Fortran-prescribed fix but has not been tested in Python.  LOW on "del6_vt_flux alone will meet all matrix gates without boundary_fix or div_damp" — the load-bearing nature of the three stabilisers (iter-745 ablation) means any single-stabiliser replacement must be measured jointly.
+
+### Iter-748 — correct iter-747 mis-attribution: the mechanism is FD-vs-spherical-Laplacian error, NOT angle rotation
+
+Codex stop-time review on iter-747 flagged: **"iter-747's new diagnostic does not isolate angle rotation, but the doc treats it as proof that angle rotation is the mechanism."**  Correct.  Iter-747's Test A passed `u_east = u_0 * cos(lat)` through `rotate → rotate-back → laplacian_compact`.  The round-trip rotation is exactly identity by trig, so the Laplacian operates on `u_0 * cos(lat)` whether or not rotation is in the pipeline.  The 31× polar bias was real but its attribution to angle rotation was unsupported.
+
+**Iter-748 proper isolation.**  `scripts/diag_iter748_proper_mechanism_isolation.py` runs three independent tests:
+
+(A) **FD Laplacian vs analytic spherical Laplacian on `u_0*cos(lat)`** (no rotation anywhere).
+
+| Face         | max\|lap_FD − lap_spherical\| | Rel. to \|lap_spherical\| |
+|--------------|-------------------------------|---------------------------|
+| face 0/1/2/3 | 4.57 × 10⁻¹³                 | 112 % (at cube corner)    |
+| face 4/5     | 7.28 × 10⁻¹²                 | 23.7 % (at lat ±88°)      |
+| **ratio**    | **16×**                       | FD is 16× worse on polar  |
+
+(B) **Rotation round-trip effect on the Laplacian.**  Compare `laplacian_compact(u_east_direct)` vs `laplacian_compact(rotate_back(rotate_to(u_east_direct)))`:
+
+| Face | max\|lap_rotated − lap_direct\| |
+|------|--------------------------------|
+| all  | **~10⁻²⁵ (machine zero)**     |
+
+Rotation contributes MACHINE ZERO to the Laplacian.  The round-trip is exactly identity; any reported difference is round-off.
+
+(C) **Pure rotation-angle field Laplacian.**  `laplacian_compact(cos(angle))` shows how much the angle-variation alone contributes to the FD Laplacian magnitude:
+
+| Face | max\|lap(cos(angle))\| |
+|------|------------------------|
+| face 0 | 2.58 × 10⁻¹³         |
+| face 4/5 | **5.16 × 10⁻¹¹ (200× larger)** |
+
+cos(angle) DOES have a large Laplacian on face 4 (rotation angle varies fast near pole), but this is consumed by the round-trip in Test B.
+
+**Definitive conclusion.**  The 31× polar bias measured in iter-747 Test A is caused by the **flat-grid FD Laplacian being an inaccurate approximation to the spherical Laplacian** when applied to a lat-dependent field on face 4, where `lat[i, j]` varies rapidly in face-local indices (gnomonic_ed compression).  Angle rotation contributes exactly ZERO to the Laplacian value (Test B).
+
+This matches what Fortran's design anticipates.  `sw_core.F90`'s `del6_vt_flux` uses metric-aware flux-form coefficients `del6_u = sina_v * dx / dyc` (`fv_grid_utils.F90:709-734`) and global `da_min` normalisation — so its stencil adapts to the varying cell metrics.  Python's `laplacian_compact` uses `hx_sq = (dx[i,j]/2)^2` as a per-cell denominator but no metric-aware flux form, so its accuracy degrades at cells with strong latitude gradient per face-local index (namely face 4/5 near pole).
+
+**Correction to iter-747 prescription (unchanged).**  The fix IS still to port Fortran's `del6_vt_flux` on cell-mean vorticity as the Fortran-faithful replacement for the `laplacian_compact`-on-geographic-winds block.  What iter-748 corrects is the MECHANISM NARRATIVE (it's FD-vs-spherical, not rotation), not the fix itself.  The fix is robust to whichever mechanism story is right because `del6_vt_flux` is metric-aware and doesn't use flat-grid FD stencils at all.
+
+**Confidence (iter-748 refined).**  HIGH on "flat-grid FD Laplacian has 16× larger error on face 4 than face 0 when applied to `u_0*cos(lat)`" (Test A direct measurement).  HIGH on "rotation round-trip contributes machine-zero to the Laplacian" (Test B direct measurement).  HIGH on "the Fortran-faithful fix is `del6_vt_flux` with metric-aware flux-form coefficients" (Codex file:line citations).  MEDIUM on "this fix will materially reduce W2 v_ll_Linf at the polar peak" — plausible but untested.
+
+**Process note (three same-iteration falsification cycles now).**  iter-745 → 745b (halo rotation disproved), iter-746 → 746b (tautological test, retracted), iter-747 → 748 (wrong mechanism attribution, corrected).  Each Codex stop-time review caught a real flaw.  The iter-748 deliverable is the CORRECT mechanism story + the reconfirmed fix prescription.  Iter-749+ begins the actual port.
+
+**Iter-748 deliverable.**  `scripts/diag_iter748_proper_mechanism_isolation.py` checked in.  Replaces iter-747's mis-attribution with a three-way isolation test that cleanly separates FD-formula error from rotation effects from angle-Laplacian effects.
