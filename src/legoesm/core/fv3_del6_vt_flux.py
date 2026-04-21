@@ -56,38 +56,18 @@ def compute_del6_metrics(cdgrid):
     dx_v = cdgrid.dx_edge_y   # (6, n, n+1)   at v-interface
     dy_u = cdgrid.dy_edge_x   # (6, n+1, n)   at u-interface
 
-    # `dxc, dyc` are Fortran's cell-centre-to-cell-centre distances,
-    # computed as GREAT CIRCLE distances per `fv_grid_tools.F90:894, 907`:
-    #   dxc(i,j) = great_circle_dist(agrid(i,j), agrid(i-1,j), radius)
-    #   dyc(i,j) = great_circle_dist(agrid(i,j), agrid(i,j-1), radius)
-    # NOT cell-centre `base.dx, base.dy` averages (which iter-752b used
-    # incorrectly).  Use the A-grid cell-centre lon/lat via halo-exchange
-    # for the adjacent cell values, then apply Haversine distance.
-    from legoesm.grids.cubed_sphere import great_circle_distance
-    radius = cdgrid.base.radius
-    lon_cc = cdgrid.base.lon   # (6, n, n)  A-grid lon in radians
-    lat_cc = cdgrid.base.lat   # (6, n, n)  A-grid lat in radians
-    dg = getattr(cdgrid.base, 'duogrid', None)
-    offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
-    lon_pad = pad_halo(lon_cc, interp_offsets=offsets, duogrid=dg)
-    lat_pad = pad_halo(lat_cc, interp_offsets=offsets, duogrid=dg)
-
-    # dyc at v-interface (6, n, n+1): distance from A-grid (i, j-1) to (i, j)
-    # Unpadded j ranges 0..n (n+1 v-interfaces).  Padded indexing:
-    #   A-grid (i, j-1) → pad[i+1, j]       (i: 0..n-1 cells, j: 0..n interfaces)
-    #   A-grid (i, j)   → pad[i+1, j+1]
-    lon_jm = lon_pad[:, 1:-1, :-1]    # (6, n, n+1)
-    lat_jm = lat_pad[:, 1:-1, :-1]
-    lon_jp = lon_pad[:, 1:-1, 1:]
-    lat_jp = lat_pad[:, 1:-1, 1:]
-    dyc_at_v = great_circle_distance(lon_jm, lat_jm, lon_jp, lat_jp, radius)
-
-    # dxc at u-interface (6, n+1, n): distance from A-grid (i-1, j) to (i, j).
-    lon_im = lon_pad[:, :-1, 1:-1]    # (6, n+1, n)
-    lat_im = lat_pad[:, :-1, 1:-1]
-    lon_ip = lon_pad[:, 1:, 1:-1]
-    lat_ip = lat_pad[:, 1:, 1:-1]
-    dxc_at_u = great_circle_distance(lon_im, lat_im, lon_ip, lat_ip, radius)
+    # `dxc, dyc` are Fortran's cell-centre-to-cell-centre distances.
+    # cdgrid ALREADY stores these as first-class fields, computed from
+    # the FV3 supergrid per `fv_grid_tools.F90:883`:
+    #   dxc(i,j) = 2 * great_circle_dist(edge_midpoint, cell_center)
+    # Shapes match Fortran's (isd:ied+1, jsd:jed) and
+    # (isd:ied, jsd:jed+1) conventions:
+    #   cdgrid.dxc : shape (6, n+1, n)  at u-interface
+    #   cdgrid.dyc : shape (6, n, n+1)  at v-interface
+    # Using the locked cdgrid fields keeps metric consistency with the
+    # rest of the CDGrid operators (discrete Stokes theorem etc).
+    dxc_at_u = cdgrid.dxc     # (6, n+1, n)
+    dyc_at_v = cdgrid.dyc     # (6, n, n+1)
 
     # Fortran formula (fv_grid_utils.F90:713, 725):
     #   del6_u(i,j) = sina_v(i,j) * dx(i,j) / dyc(i,j)    at v-interface

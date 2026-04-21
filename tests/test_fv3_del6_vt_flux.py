@@ -113,53 +113,43 @@ def test_del6_vt_flux_damp_scales(cdgrid):
 
 
 def test_del6_metrics_match_fortran_convention(cdgrid):
-    """Verify del6_u, del6_v use Fortran's edge-stagger dx, dy AND
-    great-circle-distance dxc, dyc (NOT cell-centre averages).
+    """Verify del6_u, del6_v use Fortran-faithful metrics:
+      numerator:   cdgrid.dx_edge_y / cdgrid.dy_edge_x (edge-stagger dx, dy)
+      denominator: cdgrid.dxc / cdgrid.dyc (supergrid-derived centre-to-
+                   centre distances, matching fv_grid_tools.F90:883)
 
-    Regression sentinel for iter-752 → iter-752c Codex stop-time fix:
-    * iter-752 wrongly averaged base.dx for BOTH numerator and
-      denominator.
-    * iter-752b fixed the numerator to use cdgrid.dx_edge_y but still
-      used 0.5*(dx+dx) averages for the denominator.
-    * iter-752c fixes the denominator to use great-circle distance
-      between A-grid cell centres per fv_grid_tools.F90:894, 907.
+    Regression sentinel for the iter-752 → 752d chain of Codex
+    stop-time fixes:
+    * iter-752:  wrong numerator (cell-centre averages for dx, dy).
+    * iter-752b: fixed numerator; denominator still cell-centre average.
+    * iter-752c: used a direct Haversine of A-grid cells for dxc, dyc —
+                 diverges from the repo-locked cdgrid.dxc/dyc supergrid
+                 formula.
+    * iter-752d: switched to the repo's canonical cdgrid.dxc / cdgrid.dyc
+                 fields.
+
+    Pins the complete Fortran-faithful formula so no future drift is
+    possible without breaking this test.
     """
     import jax.numpy as jnp
-    from legoesm.grids.cubed_sphere import great_circle_distance
-    from legoesm.grids.halo import pad_halo
 
     del6_u, del6_v = compute_del6_metrics(cdgrid)
 
-    # Reconstruct manually using the Fortran formula.
+    # Reconstruct manually using the Fortran formula + cdgrid's locked
+    # metric fields.
     cosa_u = cdgrid.cosa_u
     cosa_v = cdgrid.cosa_v
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, 1e-20))
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, 1e-20))
-    # Numerator: Fortran-faithful edge-stagger dx, dy.
-    dx_v_expected = cdgrid.dx_edge_y
-    dy_u_expected = cdgrid.dy_edge_x
 
-    # Denominator: great-circle distance between A-grid cell centres.
-    radius = cdgrid.base.radius
-    dg = getattr(cdgrid.base, 'duogrid', None)
-    offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
-    lon_pad = pad_halo(cdgrid.base.lon, interp_offsets=offsets, duogrid=dg)
-    lat_pad = pad_halo(cdgrid.base.lat, interp_offsets=offsets, duogrid=dg)
-    dyc_at_v = great_circle_distance(
-        lon_pad[:, 1:-1, :-1], lat_pad[:, 1:-1, :-1],
-        lon_pad[:, 1:-1, 1:], lat_pad[:, 1:-1, 1:], radius)
-    dxc_at_u = great_circle_distance(
-        lon_pad[:, :-1, 1:-1], lat_pad[:, :-1, 1:-1],
-        lon_pad[:, 1:, 1:-1], lat_pad[:, 1:, 1:-1], radius)
-
-    del6_u_expected = sina_v * dx_v_expected / dyc_at_v
-    del6_v_expected = sina_u * dy_u_expected / dxc_at_u
+    del6_u_expected = sina_v * cdgrid.dx_edge_y / cdgrid.dyc
+    del6_v_expected = sina_u * cdgrid.dy_edge_x / cdgrid.dxc
 
     # Must match module output to machine precision.
     assert bool(jnp.allclose(del6_u, del6_u_expected, atol=1e-14)), \
-        "del6_u does not use great-circle dyc as Fortran specifies"
+        "del6_u does not use cdgrid.dx_edge_y / cdgrid.dyc"
     assert bool(jnp.allclose(del6_v, del6_v_expected, atol=1e-14)), \
-        "del6_v does not use great-circle dxc as Fortran specifies"
+        "del6_v does not use cdgrid.dy_edge_x / cdgrid.dxc"
 
 
 def test_del6_vt_flux_zero_field(cdgrid):

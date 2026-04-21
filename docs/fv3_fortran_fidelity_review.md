@@ -597,3 +597,25 @@ dxc_at_u = great_circle_distance(lon(i-1, j), lat(i-1, j), lon(i, j), lat(i, j),
 - iter-752c: fixed `dxc, dyc` to Fortran's great-circle distance.
 
 Iter-753 now wires into `fv3_sw_tendencies` with a fully Fortran-faithful metric.
+
+### Iter-752d — use repo-locked `cdgrid.dxc / cdgrid.dyc` fields (Codex stop-time)
+
+Codex stop-time review on iter-752c flagged: **"boundary `dxc/dyc` still diverge from the repo's locked FV3 metrics."**  Correct.  The legoESM `cdgrid` already stores `dxc, dyc` as first-class fields (`cubed_sphere_cdgrid.py:124-127`), computed from the FV3 supergrid per `fv_grid_tools.F90:883`:
+```
+dxc(i,j) = 2 * great_circle_dist(edge_midpoint, cell_center)
+```
+This differs from iter-752c's direct Haversine of A-grid cell centres (`fv_grid_tools.F90:894`), especially at boundary positions.  The `cdgrid.dxc, cdgrid.dyc` fields are the REPO-LOCKED convention that all other CDGrid operators use for metric consistency (discrete Stokes theorem, `p_grad_c`, corner metrics).
+
+**Fix.**  `compute_del6_metrics` now uses `cdgrid.dxc` and `cdgrid.dyc` directly instead of recomputing Haversine.  Eliminates the ad-hoc halo-pad-then-Haversine code path.
+
+**Updated regression sentinel.**  Tests `del6_u = sina_v × cdgrid.dx_edge_y / cdgrid.dyc` (machine-precision match required).  Pins the repo's locked metric convention end-to-end.
+
+**Tests.**  7/7 PASS.  Module no longer needs `great_circle_distance` or `pad_halo` imports.
+
+**Iter-752 full four-step sequence:**
+- 752: wrong numerator (`0.5*(dx+dx)` averaged).
+- 752b: fixed numerator; denominator still averaged.
+- 752c: denominator used ad-hoc Haversine of A-grid cells.
+- 752d: denominator uses repo-locked `cdgrid.dxc / cdgrid.dyc`.
+
+The iter-752 diff series now gives the correct answer: `del6_u = sina_v × cdgrid.dx_edge_y / cdgrid.dyc`, `del6_v = sina_u × cdgrid.dy_edge_x / cdgrid.dxc` — all metric inputs from the repo-locked cdgrid fields, matching the rest of the CDGrid operator suite.
