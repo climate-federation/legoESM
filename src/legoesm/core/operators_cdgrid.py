@@ -1423,14 +1423,24 @@ def fv3_sw_tendencies(
     du_cc = zeta_abs * v_cc - dB_dx_cc      # (6, n, n)
     dv_cc = -zeta_abs * u_cc - dB_dy_cc     # (6, n, n)
 
-    # (h) Divergence damping at cell centres
+    # (h) Divergence damping at cell centres.
+    # Fortran reference: sw_core.F90:1720
+    #   damp = gridstruct%da_min_c * max(d2_bg, min(0.20, dddmp*abs(delpc(i,j)*dt)))
+    # Fortran's `da_min_c` is the B-GRID CORNER (dual-cell) area
+    # minimum, NOT the A-grid cell area minimum.  Iter-757 fixes this
+    # to use cdgrid.area_corner (shape (6, n+1, n+1)), matching the
+    # iter-755b fix to the del6 path.  Remaining divergence from
+    # Fortran: (1) missing `*dt` factor in dddmp branch, (2) cell-
+    # centre div vs Fortran's corner div, (3) direct A-L-gradient-
+    # add vs Fortran's add-to-ke-then-gradient structure.  These
+    # deeper structural fixes are deferred to iter-758+.
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
-        area_min = jnp.min(cdgrid.base.area)
-        d2_bg = div_damp / area_min
+        da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
+        d2_bg = div_damp / da_min_c
         dddmp = 0.2
         div_abs = jnp.abs(div_field)
-        adaptive_coeff = area_min * jnp.maximum(
+        adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs))
         ddiv_dx, ddiv_dy_perp_cc = _arakawa_lamb_gradient(div_field, cdgrid)
         du_cc = du_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dx)

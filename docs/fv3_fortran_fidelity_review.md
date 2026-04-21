@@ -825,3 +825,43 @@ Next-iter options, ordered by tractability:
 3. **Port Fortran's adaptive Smagorinsky `d2_bg, dddmp, d4_bg` coefficient formula** to match d_sw5 coefficient semantics exactly.  Medium step.
 
 **Iter-756 deliverable.**  `scripts/diag_iter756_best_config_visual.py` + `diagnostics/fv3_visual/iter756_best_config_w2_comparison.png`.  Confirms del6 polar reduction is real but insufficient to meet the stopping condition.  Mode A (cube-corner) is the next structural blocker.
+
+### Iter-757 — fix div_damp metric: A-grid → B-grid `da_min_c`
+
+Per iter-756 plan option (1): audit current Python `div_damp` block against Fortran `d_sw5`, start with the smallest fix.
+
+**Fortran reference** (`sw_core.F90:1720`):
+```fortran
+damp = gridstruct%da_min_c * max(d2_bg, min(0.20, dddmp*abs(delpc(i,j)*dt)))
+```
+
+**Python before iter-757** (`operators_cdgrid.py:1427-1437`):
+```python
+area_min = jnp.min(cdgrid.base.area)    # A-grid — wrong metric
+d2_bg = div_damp / area_min
+adaptive_coeff = area_min * jnp.maximum(
+    d2_bg, jnp.minimum(0.20, dddmp * div_abs))   # missing *dt
+```
+
+**Divergences identified:**
+1. **FIXED (iter-757):** `area_min` uses A-grid `base.area`.  Fortran's `da_min_c` is B-grid CORNER dual-cell area.  Iter-757 uses `cdgrid.area_corner` to match, identical fix to iter-755b for del6.
+2. **Deferred:** missing `*dt` factor in the `dddmp * |div|` branch.  Requires passing `dt` into `fv3_sw_tendencies`, which was reverted in iter-755 for the del6 post-step refactor.
+3. **Deferred:** cell-centre divergence (`cgrid_divergence(u_c, v_c)`) vs Fortran's B-grid corner divergence (`delpc(i,j)` at corners).
+4. **Deferred:** direct tendency add (`du_cc += coeff * grad(div)`) vs Fortran's add-to-KE-then-Bernoulli-gradient structure (`sw_core.F90:1721-1722`): `ke(i,j) = ke(i,j) + vort(i,j)` where `vort = damp*delpc`.
+
+Items 2-4 are deeper structural changes that would mirror the iter-752-755b del6 port pattern for divergence (similar multi-step reconciliation expected).  Iter-757 delivers only item 1 — the smallest Fortran-faithful correction.
+
+**Numerical impact.**  Matrix + ocean baselines UNCHANGED: W2 v_ll_Linf=3.03e-1, L2=2.42e-4; W5 mass drift=1.74e-5; cosine bell L1=1.20e-1; ocean rest 12/12 at machine precision.  Same observation as iter-755b: `base.area ≈ area_corner` on a cubed sphere so the numerical shift is <0.5%.  The Fortran-fidelity improvement is STRUCTURAL.
+
+**Iter-758+ plan (mode A continuation):**
+
+1. **Address item 2 (dt factor):** add `dt` as an optional arg to `fv3_sw_tendencies` OR restructure div_damp as a post-step correction (like del6 in iter-755).  Refactor.
+2. **Address item 3 (corner divergence):** port Fortran's `delpc(i,j)` construction at corners (sw_core.F90:1703-1707) as a new helper.
+3. **Address item 4 (KE-add structure):** inject `damp*delpc` into the Bernoulli function `B = KE + g*h` at the corner stagger so the A-L gradient produces the correct Fortran-equivalent tendency.
+
+**Iter-757 deliverables:**
+- One-line fix in `operators_cdgrid.py::fv3_sw_tendencies` `(h) Divergence damping` block: `base.area` → `area_corner`.
+- Clarifying comment citing `sw_core.F90:1720` and listing the three deferred items.
+- Matrix + ocean baselines unchanged.
+
+**Process.**  Eighth Fortran-fidelity metric fix in the iter-752-757 chain, following the iter-755b pattern (A-grid → B-grid area).  Both del6 and div_damp now use `cdgrid.area_corner` consistently.
