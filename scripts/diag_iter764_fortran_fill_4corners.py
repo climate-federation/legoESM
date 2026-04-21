@@ -110,10 +110,16 @@ B_pad_py = np.asarray(pad_halo(B, interp_offsets=grid.halo_interp_offsets,
 # Similarly for SE/NW/NE corners.
 
 # Extract per-face SW corner info.
-print("Per-face cube-corner halo values: Python 2-pt-avg vs Fortran "
-      "fill_4corners HALO=1 INNER SUBSET (the q(0,0)=q(0,1) rule "
-      "only; the outer q(-1,0)=q(0,2) rule needs halo≥2 and is NOT "
-      "evaluated here).\n")
+print("Per-face cube-corner halo values: Python 2-pt-avg vs the "
+      "HALO=1 INNER-CELL subset of Fortran fill_4corners.\n"
+      "Fortran writes TWO halo cells per corner-direction pair:\n"
+      "  dir=1 SW: q(-1,0) = q(0,2)    OUTER — needs halo≥2\n"
+      "            q( 0,0) = q(0,1)    INNER — evaluated below\n"
+      "  dir=2 SW: q( 0,-1) = q(2,0)   OUTER — needs halo≥2\n"
+      "            q( 0, 0) = q(1,0)   INNER — evaluated below\n"
+      "iter-764 evaluates BOTH inner rules (one per direction) at\n"
+      "halo=1; the two outer rules require halo≥2 and are NOT\n"
+      "covered.\n")
 print(f"  {'face':>5}  {'2-pt-avg':>12}  {'F-h1-inner dir=1':>17}  "
       f"{'F-h1-inner dir=2':>17}  {'diff(1-py)':>12}  {'diff(2-py)':>12}")
 for f in range(6):
@@ -147,8 +153,10 @@ diffs_dir1 = np.array(diffs_dir1)
 diffs_dir2 = np.array(diffs_dir2)
 
 print(f"\nAcross 24 cube-corner cells "
-      f"(halo=1 inner-fill subset only — the q(0,0)=q(0,1) rule; "
-      f"outer rule q(-1,0)=q(0,2) needs halo≥2 and is NOT covered):")
+      f"(halo=1 inner subset: BOTH Fortran inner rules, one per "
+      f"direction — q(0,0)=q(0,1) for dir=1 and q(0,0)=q(1,0) for "
+      f"dir=2; the two outer rules q(-1,0)=q(0,2) and q(0,-1)=q(2,0) "
+      f"need halo≥2 and are NOT covered):")
 print(f"  max |F-h1-inner-dir=1 − Python|: "
       f"{np.max(np.abs(diffs_dir1)):.4e}")
 print(f"  max |F-h1-inner-dir=2 − Python|: "
@@ -168,5 +176,6 @@ print(f"\nB field scale: {B_scale:.4e}")
 print(f"Relative halo=1-inner-dir=1-vs-Python discrepancy: "
       f"{np.max(np.abs(diffs_dir1)) / B_scale:.4%}")
 print(f"NOTE: the full Fortran fill_4corners formula writes TWO "
-      f"halo cells per corner; iter-764 only covers the inner "
-      f"one.  The remaining outer cell discrepancy is not measured.")
+      f"halo cells per corner per direction.  iter-764 covers BOTH "
+      f"inner rules (one per direction) at halo=1 but NOT the two "
+      f"outer rules (which require halo≥2 layouts).")
