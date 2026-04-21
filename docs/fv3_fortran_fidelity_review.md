@@ -817,3 +817,21 @@ Per Ralph directive step 5 (careful visual inspection), reviewed the C36 SW matr
 **W2 architectural blocker unchanged**: the residual ±0.3 m/s is documented in review doc item #1 as inherent to the A-L + RK3 + `boundary_fix` production path.  Iter-666/670 reduced the cube-boundary metric error at the SOURCE level (PGF + rarea_c now match Fortran oracle), but iter-673 confirmed `boundary_fix` is still load-bearing in the production dissipation regime (ratio 0.525, unchanged from iter-511).  The architectural fix remains `boundary_fix` → FB chain path, gated on FB C36 stability (item #2).
 
 **No source changes in iter-674**; visual verification only.  All 123 regression tests pass.  2 of 3 SW cases pass visual inspection clean; W2 carries the open architectural blocker.
+
+### Iter-675 — c_sw KE gradient + vort flux Fortran audit
+
+Audited Python `_c_sw` (`src/legoesm/core/fv3_sw_core.py`) against `sw_core.F90` for the two remaining c_sw formulas:
+
+**1. KE gradient update** (`uc_new = uc + fy1*vort + dke_x`)
+- Fortran `sw_core.F90:485`: `uc(i,j) = uc(i,j) + fy1(i,j)*fy(i,j) + rdxc(i,j)*(ke(i-1,j)-ke(i,j))`
+- Python `_c_sw`: `dke_x = cdgrid.rdxc * (ke_pad[:, :-1, 1:-1] - ke_pad[:, 1:, 1:-1])` then `uc_new = uc + fy1*vort_x + dke_x`
+- Both forms: `dke_x = rdxc * (ke_west - ke_east)`, with `ke_total` pre-scaled by `dt2 * 0.5`.  **MATCHES**.
+
+**2. vorticity flux** (contravariant v-component at u-face)
+- Fortran duogrid branch (`sw_core.F90:423-428`): `fy1(i,j) = dt2*(v(i,j)-uc(i,j)*cosa_u(i,j))/sina_u(i,j)` with upwind `fy = vort(j)` if `fy1>0` else `vort(j+1)`.
+- Python `_vorticity_flux` returns `fy1 = (v_d - uc*cosa_u) / max(sina_u, eps)` (no dt2), then `_c_sw` applies `fy1 = dt2 * fy1` and uses the upwind-selected `vort_x`.
+- Final form: `fy1 = dt2 * (v - uc*cosa_u) / sina_u`, upwind `vort_x`.  **MATCHES**.
+
+**Conclusion**: c_sw formulas are Fortran-faithful.  Iter-666/670's metric fixes close the remaining cube-boundary source.  The residual W2 artifact is now fully attributable to architectural item #1 (A-L + RK3 + boundary_fix production path) or architectural item #2 (FB chain C36 instability), NOT to a bug in c_sw.
+
+No source-code changes in iter-675; audit-only.  Regression suite at 123 tests; all pass.
