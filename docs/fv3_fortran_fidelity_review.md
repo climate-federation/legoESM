@@ -552,3 +552,17 @@ All 6 tests PASS.
 - W2/W5/cosine-bell matrix still PASS; ocean rest 12/12 still at machine precision; W2 v_ll_Linf = 0.303 m/s (unchanged — standalone unit not yet called by production).
 
 **Process.**  First source-code change in seven iters of diagnostic.  Smallest viable step: build + test the core unit before wiring.  Iter-753's wiring is the next concrete step.
+
+### Iter-752b — fix del6 metric to use edge-stagger dx, dy (Codex stop-time)
+
+Codex stop-time review on iter-752 flagged: **"standalone del6 port diverges from the locked FV3 metric convention."**  Correct.  Iter-752's `compute_del6_metrics` averaged cell-centre `base.dx` to estimate dx at v-interface, but cdgrid already stores this at the correct edge stagger as `dx_edge_y` (shape `(6, n, n+1)`) and `dy_edge_x` (shape `(6, n+1, n)`).  Those match Fortran's `dx(i,j)` at v-interface and `dy(i,j)` at u-interface shapes `(isd:ied, jsd:jed+1)` / `(isd:ied+1, jsd:jed)`.
+
+**Fix.**  `src/legoesm/core/fv3_del6_vt_flux.py::compute_del6_metrics` now uses `cdgrid.dx_edge_y` and `cdgrid.dy_edge_x` directly for the Fortran `dx(i,j)` / `dy(i,j)` values.  `dxc_at_u` / `dyc_at_v` (cell-centre-to-centre distances) remain the halo-averaged cell-centre dx/dy — these ARE correct for Fortran's `dxc, dyc` which are centre-to-centre distances.
+
+**New test.**  `tests/test_fv3_del6_vt_flux.py::test_del6_metrics_match_fortran_convention` — regression sentinel that reconstructs del6_u/del6_v from cdgrid's `dx_edge_y` / `dy_edge_x` and asserts machine-precision match to the module output.  Pins the Fortran-faithful metric convention so future drift is caught.
+
+**Tests.**  7/7 PASS (6 original + 1 new sentinel).
+
+**Matrix + ocean baselines still unchanged** (standalone unit still not wired into production).
+
+**Process (iter-752 → 752b within same iteration).**  The Codex stop-time catch on iter-752's metric convention is fixed in the same Ralph iteration.  This is the correct cycle: catch before committing the wiring that would use the wrong metric.

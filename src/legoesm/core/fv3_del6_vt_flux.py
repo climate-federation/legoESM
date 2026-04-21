@@ -47,39 +47,35 @@ def compute_del6_metrics(cdgrid):
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
 
-    dx = cdgrid.base.dx  # (6, n, n)
-    dy = cdgrid.base.dy  # (6, n, n)
-    # dxc, dyc: cell-centre to cell-centre distances at u/v interfaces.
-    # Our cdgrid has dx_edge_y ((6, n, n+1)) and dy_edge_x ((6, n+1, n))
-    # — note these are edge-midpoint distances, not cell-centre
-    # spacings.  For initial port use the simple form:
-    #   dxc ≈ dx at u-interface (shape (6, n+1, n))
-    #   dyc ≈ dy at v-interface (shape (6, n, n+1))
-    # More faithful would be to average adjacent cell dx to get the
-    # cell-centre-to-cell-centre distance.
+    # Fortran's `dx(i,j)` and `dy(i,j)` are at EDGE positions, not
+    # cell centres.  In our cdgrid convention these are stored as
+    # `dx_edge_y` (length of horizontal edge at v-interface,
+    # shape (6, n, n+1)) and `dy_edge_x` (length of vertical edge at
+    # u-interface, shape (6, n+1, n)) — matching Fortran's
+    # (isd:ied, jsd:jed+1) and (isd:ied+1, jsd:jed) shapes.
+    dx_v = cdgrid.dx_edge_y   # (6, n, n+1)   at v-interface
+    dy_u = cdgrid.dy_edge_x   # (6, n+1, n)   at u-interface
 
-    # Pad dx, dy with halo to get neighbour values, then average.
+    # `dxc, dyc` are Fortran's cell-centre-to-cell-centre distances.
+    # They are NOT stored in cdgrid; construct from `base.dx`, `base.dy`
+    # as halo-averaged cell-centre sums:
+    #   dxc_at_u(i,j) = 0.5 * (dx[i-1, j] + dx[i, j])   at u-interface
+    #   dyc_at_v(i,j) = 0.5 * (dy[i, j-1] + dy[i, j])   at v-interface
+    dx_cc = cdgrid.base.dx    # (6, n, n)
+    dy_cc = cdgrid.base.dy    # (6, n, n)
     dg = getattr(cdgrid.base, 'duogrid', None)
     offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
-    dx_pad = pad_halo(dx, interp_offsets=offsets, duogrid=dg)
-    dy_pad = pad_halo(dy, interp_offsets=offsets, duogrid=dg)
+    dx_cc_pad = pad_halo(dx_cc, interp_offsets=offsets, duogrid=dg)
+    dy_cc_pad = pad_halo(dy_cc, interp_offsets=offsets, duogrid=dg)
+    dyc_at_v = 0.5 * (dy_cc_pad[:, 1:-1, :-1] + dy_cc_pad[:, 1:-1, 1:])   # (6, n, n+1)
+    dxc_at_u = 0.5 * (dx_cc_pad[:, :-1, 1:-1] + dx_cc_pad[:, 1:, 1:-1])   # (6, n+1, n)
 
-    # At v-edge (i, j+0.5), shape (6, n, n+1):
-    # dx_at_v = average of dx[i, j] and dx[i, j+1].
-    dx_at_v = 0.5 * (dx_pad[:, 1:-1, :-1] + dx_pad[:, 1:-1, 1:])  # (6, n, n+1)
-    # dyc_at_v = distance from cell-centre (i,j) to cell-centre (i, j+1)
-    # ≈ 0.5*(dy[i,j] + dy[i,j+1]).
-    dyc_at_v = 0.5 * (dy_pad[:, 1:-1, :-1] + dy_pad[:, 1:-1, 1:])  # (6, n, n+1)
-
-    # At u-edge (i+0.5, j), shape (6, n+1, n):
-    dy_at_u = 0.5 * (dy_pad[:, :-1, 1:-1] + dy_pad[:, 1:, 1:-1])  # (6, n+1, n)
-    dxc_at_u = 0.5 * (dx_pad[:, :-1, 1:-1] + dx_pad[:, 1:, 1:-1])  # (6, n+1, n)
-
-    # Fortran formula:
-    #   del6_u(i,j) = sina_v(i,j) * dx(i,j) / dyc(i,j)    — at v-interface
-    #   del6_v(i,j) = sina_u(i,j) * dy(i,j) / dxc(i,j)    — at u-interface
-    del6_u = sina_v * dx_at_v / dyc_at_v   # (6, n, n+1)
-    del6_v = sina_u * dy_at_u / dxc_at_u   # (6, n+1, n)
+    # Fortran formula (fv_grid_utils.F90:713, 725):
+    #   del6_u(i,j) = sina_v(i,j) * dx(i,j) / dyc(i,j)    at v-interface
+    #   del6_v(i,j) = sina_u(i,j) * dy(i,j) / dxc(i,j)    at u-interface
+    # — using Fortran's edge-stagger dx, dy directly.
+    del6_u = sina_v * dx_v / dyc_at_v   # (6, n, n+1)
+    del6_v = sina_u * dy_u / dxc_at_u   # (6, n+1, n)
 
     return del6_u, del6_v
 
