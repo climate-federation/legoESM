@@ -4057,15 +4057,16 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"for rationale."))
 
     def test_fortran_dir_aware_corners_is_known_broken(self):
-        """Iter-765c/d/e regression sentinel: the
+        """Iter-765c/d/e/f regression sentinel: the
         `fortran_dir_aware_corners=True` opt-in path in
         `fv3_sw_tendencies` is KNOWN BROKEN on the canonical W2
         matrix config — enabling it makes W2 v_ll_Linf 12× worse
-        (0.159 → 1.88+ m/s, post-regrid) and h_L2 3.7× worse.
-        The pre-regrid max|v_north| is essentially equal to
-        v_ll_Linf in the blowup regime (~1.88 m/s both); this
-        sentinel uses pre-regrid max|v_north| to avoid a fragile
-        import of `_regrid_2d` from the matrix runner script.
+        (0.159 → 1.88+ m/s) and h_L2 3.7× worse.
+
+        Iter-765f: sentinel measures the documented v_ll_Linf
+        metric using the IN-REPO regrid helpers from
+        `legoesm.grids.regridding` (NOT the fragile `_regrid_2d`
+        import from `scripts/run_atmosphere_test_matrix.py`).
 
         Iter-765 added this opt-in as a diagnostic for future cube-
         corner halo investigations, but left it unguarded by any
@@ -4143,38 +4144,34 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             ocd.fv3_sw_tendencies = orig_fn
             sw_mod.fv3_sw_tendencies = orig_fn
 
-        # Compute pre-regrid `max|v_north|` on the cube-sphere
-        # native grid.  iter-765/765b documented the regression via
-        # v_ll_Linf (post-regrid) = 1.878 m/s, but the pre-regrid
-        # max|v_north| is essentially the same magnitude (1.88 m/s
-        # — within ~1 % of the post-regrid value in the blowup
-        # regime because 12× amplitude isn't sensitive to bilinear
-        # smoothing).  Using pre-regrid avoids a fragile import
-        # from `scripts/run_atmosphere_test_matrix.py` (the
-        # _regrid_2d helper lives in the script, not the library).
+        # Compute post-regrid v_ll_Linf — the EXACT metric iter-765
+        # documented.  Use the in-repo regrid helpers from
+        # `legoesm.grids.regridding` (NOT the `scripts/` script
+        # version, which is fragile to import).
         from legoesm.grids.cubed_sphere_cdgrid import (
             cell_centre_angles_from_4edge)
+        from legoesm.grids.regridding import (
+            get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
         ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
         u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
                        + np.asarray(state.u_d)[:, :, 1:])
         v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
                        + np.asarray(state.v_d)[:, 1:, :])
         v_north = np.asarray(sa_4edge) * u_cc + np.asarray(ca_4edge) * v_cc
-        v_north_linf = float(np.max(np.abs(v_north)))
+        weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
+        v_ll = apply_cubedsphere_to_latlon(v_north, weights)
+        v_ll_linf = float(np.max(np.abs(v_ll)))
 
-        # Iter-765b measured max|v_north| ~ 1.88 m/s with dir-aware
-        # fills (essentially equal to the post-regrid v_ll_Linf
-        # in the blowup regime).  Pin at > 1.0 m/s; if the dir-
-        # aware path is repaired or silently disabled, this
-        # test fires.
+        # Iter-765b measured v_ll_Linf ~ 1.88 m/s with dir-aware
+        # fills.  Pin at > 1.0 m/s; if the dir-aware path is
+        # repaired or silently disabled, this test fires.
         self.assertGreater(
-            v_north_linf, 1.0,
+            v_ll_linf, 1.0,
             msg=(f"fortran_dir_aware_corners=True produced "
-                 f"max|v_north|={v_north_linf:.3e} m/s — UNEXPECTEDLY "
+                 f"v_ll_Linf={v_ll_linf:.3e} m/s — UNEXPECTEDLY "
                  f"SMALL.  Iter-765/765b falsified this path at 12× "
-                 f"blowup (max|v_north| ~ 1.88 m/s, v_ll_Linf ~ 1.88 m/s "
-                 f"in the broken regime).  A new smaller value means "
-                 f"either:\n"
+                 f"blowup (v_ll_Linf ~ 1.88 m/s in the broken "
+                 f"regime).  A new smaller value means either:\n"
                  f"  (a) the dir-aware path has been repaired — "
                  f"re-examine whether it now reduces mode A and can "
                  f"replace the default 2-pt-avg, OR\n"
