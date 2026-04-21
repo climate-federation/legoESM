@@ -1829,6 +1829,43 @@ Task 3 status is therefore **OPEN, NOT CLOSED AND NOT BLOCKED** — the reductio
 - (b) root-cause bisect the C24 momentum blowup by logging per-phase residuals at step 1 against Fortran;
 - (c) shift focus to the production A-L+RK3 W2 v-wind mode-4 artifact (the user's iter-717 image blocker) since that affects the current production path independent of FB.
 
+### Iter-732 — FB C24 step-1 phase bisect: v_d drift localises at cube vertex
+
+Iter-731 option (b): root-cause-bisect the FB C24 W2 blowup by running ONE FB step and measuring per-variable drift from the W2 exact steady-state IC.  Delivered as `scripts/diag_iter732_fb_c24_phase_bisect.py`.
+
+**Setup.**  W2 IC at C24 (u_0=38.61 m/s, h_0=29400/g ≈ 3000 m, v=0 geographic) on a non-duogrid cubed sphere.  Run one FB step with dt=300s (same config as iter-730 case A: damp_v=0, d4_bg=0.16, nord=1).  Since W2 is an exact steady state, after one step an FV3-faithful port should show drift at the level of discretisation truncation (O(1e-6) relative per step typically) — certainly NOT 1% per step.
+
+**Per-variable drift at step 1:**
+
+| Variable | max\|Δ\|   | RMS        | max\|Δ\| / max\|ref\| |
+|----------|------------|------------|---------------------|
+| h        | 1.52e+1 m  | 2.16e+0 m  | **5.08e-3**         |
+| u_d      | 8.84e-1 m/s| 3.30e-1 m/s| **2.29e-2**         |
+| v_d      | 1.39e+0 m/s| 6.20e-1 m/s| **5.10e-2**         |
+
+v_d drifts 5% in ONE step.  Extrapolating multiplicatively: at step 60 the drift is `1.05^60 ≈ 18×` the IC magnitude, consistent with the max|v_d| ≈ 184 m/s observed at iter-730 step 48 (≈ 5× u_0 IC).
+
+**Per-face error localisation at step 1:**
+
+u_d max error location (shape (6, n, n+1) = (6, 24, 25)):
+- face 0-3 (equatorial): max at `i=1, j=0` or `j=n-1`.  `i=1` is adjacent to the WEST panel edge.
+- face 4-5 (polar): max at boundary (i=0 or i=n-1).
+
+v_d max error location (shape (6, n+1, n) = (6, 25, 24)):
+- face 0-3 (equatorial): max at `(i,j) = (24, 0)` on ALL 4 EQUATORIAL FACES.  `i=24` is the NORTH panel boundary; `j=0` is the WEST panel boundary.  That's a cube VERTEX location, shared between NW corners of all 4 equatorial faces + SW corner of face 4 (north polar).
+- face 4-5 (polar): max at (12, 23) — different localisation, consistent with the different metric structure at polar faces.
+
+**Diagnosis.**  The v_d drift is face-consistently concentrated at a specific cube VERTEX (the NW corner of all 4 equatorial faces, which is the same 3-face-meeting point in 3-D).  This is a classic signature of a cube-corner halo bug in `_d_sw_native`'s D-grid wind update phase — the three panels meeting at the vertex produce inconsistent halo values for u_d/v_d and the step-6 `u_d_new = u_d + (ke_diff_u + fy_vort) * rdx_u` incremental update picks up the inconsistency.
+
+**This is evidence, not a fix.**  Iter-732 does NOT attempt a source change.  The error-localisation pattern is concrete enough to narrow future investigation to:
+1. `_bgrid_ke_transport` (step 4 of `_d_sw_native`) — the `ke_corner` field is at D-grid vertices, and its 4-cell NE stencil `ke_corner[:, :-1, :]-ke_corner[:, 1:, :]` at vertices adjacent to a cube corner will see cross-face inconsistency if `ke_corner` isn't properly synchronised.
+2. `_corner_vorticity` + `_vorticity_flux` (steps 3 and 7) — `zeta_abs` at corners uses cell-averaged D-grid circulation; the 4-cell vertex in halo space must agree across three meeting panels.
+3. `_d_sw1_recompute_ut_vt` (step 1) — the C-grid transport velocity computed from uc/vc via the 2×2 corner solve.  Iter-92-ish documented a corner solve here.
+
+**Process constraint (per iter-731 Codex review).**  Do NOT extrapolate from "v_d drift localises at cube vertex" to "the bug IS at _bgrid_ke_transport corner sync".  Three candidate phases identified; iter-733+ must bisect each before claiming a root cause.
+
+**Deliverable.**  `scripts/diag_iter732_fb_c24_phase_bisect.py` is checked in as the step-1 regression sentinel.  A future iter that believes it fixed the C24 FB blowup must re-run this script and observe the v_d max|Δ|/max|ref| drop from 5.10e-2 to O(1e-4) or better BEFORE claiming success.  Matching the step-60 blowup number alone is insufficient (iter-730 lesson).
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
