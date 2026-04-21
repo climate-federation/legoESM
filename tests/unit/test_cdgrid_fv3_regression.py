@@ -9037,6 +9037,82 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                                  f"weights violate partition of unity."))
 
 
+class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
+    """Iter-710 end-to-end gold-file test for `_d_sw_native` —
+    the full d_sw1..d_sw6 chain.
+
+    Existing tests cover pieces (`_d_sw1_recompute_ut_vt`,
+    `_bgrid_ke_transport`, `_d_sw5_corner_divergence`,
+    `_corner_vorticity`, `_vorticity_flux`, etc.) but there is NO
+    end-to-end lock on the full chain including the d_sw6 wind
+    update formula `u_new = u_old + (ke_diff_u + fy_vort) * rdx_u`
+    (sw_core.F90:1935-1944 incremental form).  A regression in the
+    d_sw6 increment formula, the vorticity flux transport, or the
+    stitching between stages would silently pass all per-stage tests
+    while breaking production.
+
+    Records h_new, u_d_new, v_d_new fingerprints at fixed-seed
+    (rng=710) random inputs with a short dt and production-style
+    damping parameters (d4_bg=0.16, nord=1).  Any drift in any
+    stage shifts the fingerprints.
+    """
+
+    def test_d_sw_native_gold_file_nord1(self):
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _d_sw_native
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(710)
+        h = jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        h_s = jnp.zeros((6, n, n))
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        ua = jnp.asarray(rng.standard_normal((6, n, n)))
+        va = jnp.asarray(rng.standard_normal((6, n, n)))
+        dt = 100.0
+        g = 9.80616
+
+        h_new, u_new, v_new = _d_sw_native(
+            h, u_d, v_d, h_s, uc, vc, ua, va,
+            cdgrid, dt, g,
+            div_damp=0.0, d2_bg=0.0, dddmp=0.0,
+            d4_bg=0.16, nord=1, damp_v=0.0, nord_v=0)
+        h_new = np.asarray(h_new)
+        u_new = np.asarray(u_new)
+        v_new = np.asarray(v_new)
+        self.assertEqual(h_new.shape, (6, n, n))
+        self.assertEqual(u_new.shape, (6, n, n + 1))
+        self.assertEqual(v_new.shape, (6, n + 1, n))
+
+        # Fingerprints recorded on CPU x64 at commit time.
+        self.assertAlmostEqual(float(h_new[0, 4, 4]), 998.8888029113577,
+            places=6, msg="h_new[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(u_new[0, 4, 4]), 0.9421720803903066,
+            places=8, msg="u_new[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(v_new[3, 2, 6]),
+            -0.12907376627658967, places=8,
+            msg="v_new[3,2,6] fingerprint changed.")
+        # Global reductions (catch bugs that cancel pointwise).
+        self.assertAlmostEqual(float(h_new.sum()), 383992.34091496095,
+            places=4, msg="h_new.sum() fingerprint changed.")
+        self.assertAlmostEqual(float(u_new.sum()), -14.933919310395979,
+            places=6, msg="u_new.sum() fingerprint changed.")
+        self.assertAlmostEqual(float(v_new.sum()), 18.20325013540518,
+            places=6, msg="v_new.sum() fingerprint changed.")
+        self.assertAlmostEqual(
+            float((u_new ** 2).sum() + (v_new ** 2).sum()),
+            784.4113157657439, places=4,
+            msg="u/v kinetic energy fingerprint changed.")
+
+
 class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
     """Iter-707 document + lock a known Fortran-fidelity gap in the
     adaptive Smagorinsky path of d_sw5.

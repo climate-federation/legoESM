@@ -1448,6 +1448,24 @@ Both are far from the analytical W2 ideal (`v_north ≈ 0`); this is the no-damp
 
 No source-code changes in iter-709; status audit + visual-inspection confirmation.  Regression suite remains at 161 tests; all pass.
 
+### Iter-710 — end-to-end gold-file for `_d_sw_native` (full d_sw1..d_sw6 chain)
+
+Audited Python's `_d_sw_native` at `src/legoesm/core/fv3_sw_core.py:1779-1908` — the full FV3 d_sw1..d_sw6 chain.  Per-stage operators have gold-file coverage:
+- `_d_sw1_recompute_ut_vt` (iter-622).
+- `_bgrid_ke_transport` (iter-685/687).
+- `_d_sw5_corner_divergence` (iter-702/708).
+- `_corner_vorticity`, `_vorticity_flux`, `_ke_upwind` (earlier iters).
+
+But NO end-to-end lock on the full chain, which means a regression in the d_sw6 wind-update formula (`u_new = u_old + (ke_diff_u + fy_vort) * rdx_u` — sw_core.F90:1935-1944 incremental form) OR a bad stitch between stages would silently pass all per-stage tests while corrupting production.
+
+**Added** `TestDSwNativeEndToEndGoldFileIter710` with fixed-seed (rng=710) random inputs at C8, `dt=100s`, `nord=1, d4_bg=0.16`.  Records 7 fingerprints (pointwise `h_new[0,4,4]`, `u_new[0,4,4]`, `v_new[3,2,6]`; global `h_new.sum()`, `u_new.sum()`, `v_new.sum()`, kinetic energy `(u² + v²).sum()`) at `places=4..8`.
+
+**Verified** catches a 0.1% regression: injecting `_d_sw_native → (h, u, 1.001 * v)` on the return fails with a specific fingerprint diff at `v_new[3,2,6]` (1.3e-4 diff vs `places=8` tolerance = 1e-8).
+
+Exercises the d_sw6 wind update combined with all earlier stages — closes the coverage gap for the most production-critical stitch in the full chain.
+
+No source-code changes; end-to-end lock test only.  Regression suite now at **162 tests** (161 + 1 new); all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
