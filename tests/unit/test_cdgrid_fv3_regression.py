@@ -8533,22 +8533,48 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
                         and isinstance(stmt.targets[0], ast.Name):
                     env[stmt.targets[0].id] = classify_rhs(stmt.value)
-                elif isinstance(stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
-                    # Recurse into compound bodies with env COPIES, then
-                    # MERGE branch bindings back so post-compound code
-                    # sees any ut/vt bindings set in branches.
-                    for body_attr in ('body', 'orelse', 'finalbody'):
+                elif isinstance(stmt, ast.Try):
+                    # Iter-696 (Codex iter-695 finding): `finalbody` is
+                    # NOT a branch alternative — it ALWAYS runs after the
+                    # body/handlers complete.  Treat it sequentially on
+                    # the merged alternative-branch state.
+                    #
+                    # Alternatives (body+orelse as one path, each handler
+                    # as another) get MAY-merged; then finalbody runs
+                    # sequentially on the merged env.
+                    body_env = dict(env)
+                    if scan_stmt_list(stmt.body, body_env):
+                        return True
+                    orelse = getattr(stmt, 'orelse', [])
+                    if orelse and scan_stmt_list(orelse, body_env):
+                        return True
+                    # body_env now holds the binding state after a
+                    # successful body (+ orelse if present).
+                    handler_envs = []
+                    for handler in getattr(stmt, 'handlers', []):
+                        h_env = dict(env)
+                        if scan_stmt_list(handler.body, h_env):
+                            return True
+                        handler_envs.append(h_env)
+                    # MAY-merge alternatives into parent env.
+                    merge_env(env, body_env)
+                    for h_env in handler_envs:
+                        merge_env(env, h_env)
+                    # finalbody runs sequentially on the merged env
+                    # (it ALWAYS executes; bindings flow through).
+                    final = getattr(stmt, 'finalbody', [])
+                    if final and scan_stmt_list(final, env):
+                        return True
+                elif isinstance(stmt, (ast.If, ast.For, ast.While, ast.With)):
+                    # True branch/loop-body alternatives: MAY-merge
+                    # branch-local bindings into the parent.
+                    for body_attr in ('body', 'orelse'):
                         body = getattr(stmt, body_attr, [])
                         if body:
                             branch_env = dict(env)
                             if scan_stmt_list(body, branch_env):
                                 return True
                             merge_env(env, branch_env)
-                    for handler in getattr(stmt, 'handlers', []):
-                        branch_env = dict(env)
-                        if scan_stmt_list(handler.body, branch_env):
-                            return True
-                        merge_env(env, branch_env)
             return False
 
         def has_ut_plus_vt_crossterm(tree):

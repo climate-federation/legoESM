@@ -1229,3 +1229,23 @@ This is exactly the right behavior for a reintroduction detector: false positive
 - iter-694 temp-var + later reassign → still CAUGHT.
 
 No source-code changes; structural lock strengthening.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-696 — correct Try-statement handling for `finally` semantics
+
+Codex stop-time review flagged iter-695's `ast.Try` handling as wrong for `finally`.  Correct: iter-695 lumped `body`, `orelse`, `finalbody`, and `handlers` into a uniform MAY-merge loop, but `finalbody` has different semantics — it ALWAYS executes AFTER the body/handlers complete, not as an alternative branch.  A violation in `finally` that depends on bindings made in the try-body was not correctly analyzed.
+
+**Fix** (iter-696): restructured `ast.Try` handling to match Python's actual try/except/else/finally semantics:
+1. Run `body` with an env copy; then `orelse` runs sequentially on the same env (Python semantics: `orelse` runs only if `body` completes without exception, inheriting its bindings).
+2. Each `handler.body` runs with its OWN fresh env copy from the PRE-try state — the exception may fire mid-body, so handler state is NOT derived from completed-body env.
+3. MAY-merge the body+orelse env AND each handler env back into the parent (alternatives).
+4. `finalbody` runs sequentially on the MERGED env — ALWAYS executes, bindings flow through from whichever path ran.
+
+**Verified** against 4 fixtures:
+- Violation inside `try.body` → CAUGHT.
+- `ut` binding in `try`, `vt` binding + violation in `finally` → CAUGHT *(merged env flows into finally correctly)*.
+- Violation inside `except` handler → CAUGHT.
+- `ut` in try, `vt` in finally, NO BinOp → correctly NOT flagged.
+
+Non-Try compound statements (`If`/`For`/`While`/`With`) retain the uniform MAY-merge-on-branches pattern from iter-695 — unchanged.
+
+No source-code changes; structural lock correctness fix.  Regression suite unchanged at 135 tests; all pass.
