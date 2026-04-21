@@ -797,3 +797,31 @@ Numerical impact ~0.5 % because A-grid `base.area` and B-grid `area_corner` are 
 **Matrix + ocean baselines unchanged** with `damp_v=0` default.
 
 **Process.**  Seventh Codex stop-time catch in iter-752-755b chain.  A-grid vs B-grid metric confusion is exactly the kind of fidelity drift the iter-752 metric-review sequence should have caught earlier.  With iter-755b in place, all metric inputs to the del6 path now match Fortran's convention.
+
+### Iter-756 — visual inspection at best post-step config
+
+Iter-755b measured `del6 damp_v=0.06 nord_v=2` as the Fortran-faithful best with v_ll_Linf = 0.214 m/s (-29%).  Iter-756 inspects the SPATIAL pattern visually at t=1 d to determine whether polar mode-4 bands are reduced in pattern, not just Linf amplitude.
+
+**Visual comparison** (`diagnostics/fv3_visual/iter756_best_config_w2_comparison.png`, t=1 d):
+
+| Config                                 | max\|v_ll\| | Visible mode-4 polar bands | Mid-lat cube-corner seams |
+|----------------------------------------|-------------|-----------------------------|----------------------------|
+| baseline (hyperdiff only)              | 3.03e-01    | STRONG at lat ±75-85°       | faint                      |
+| del6 damp_v=0.06 nord_v=2 + hyperdiff  | 2.45e-01    | REDUCED (slightly weaker)    | slightly more visible       |
+| del6 damp_v=0.06 nord_v=2 (no hyp)     | 2.14e-01    | REDUCED                     | **DOMINANT at ±30-40°**     |
+
+**Key finding.**  del6 alone is NOT sufficient.  The polar mode-4 bands are still visible in every configuration tested, though with reduced amplitude.  When hyperdiff is removed, the MID-LATITUDE CUBE-CORNER mode (lat ±30-40°) becomes dominant — hyperdiff was suppressing it.  Per iter-745 mode A analysis: the cube-corner mode at lat ±37° is a DIFFERENT artifact from the polar mode at ±86°.  The del6 port addresses the polar mode (mode B); it does NOT address mode A.
+
+**Ralph stopping condition status.**  "No visible panel-edge, corner, seam, halo, striping, or ringing artifacts" — **NOT met**.  Polar bands + mid-latitude cube-corner seams both visible in every tested config.
+
+**Iter-757 plan: target mode A (cube-corner seams).**  Fortran's defenses against cube-corner seams:
+1. `d_sw5` corner divergence damping with `d2_bg, dddmp, d4_bg, nord` coefficients (adaptive Smagorinsky-style).  Our Python production has `div_damp` but uses a tendency-form that may not be Fortran-faithful.
+2. `fv_tp_2d(nord=...)` on transported mass and tracers (del-n on scalars).  Our production `cgrid_mass_flux_divergence` may differ from Fortran.
+3. The FB chain's native d_sw5 call (architectural item #2, currently blocked by h=3 halo infrastructure).
+
+Next-iter options, ordered by tractability:
+1. **Audit current Python `div_damp` implementation** against Fortran's d_sw5 to identify discrepancies.  Smallest step; pure read.
+2. **Port `_del6_vt_flux` variant for divergence damping** to the A-L production path, similar to iter-752-755b's vorticity port.  Medium step; structural reuse.
+3. **Port Fortran's adaptive Smagorinsky `d2_bg, dddmp, d4_bg` coefficient formula** to match d_sw5 coefficient semantics exactly.  Medium step.
+
+**Iter-756 deliverable.**  `scripts/diag_iter756_best_config_visual.py` + `diagnostics/fv3_visual/iter756_best_config_w2_comparison.png`.  Confirms del6 polar reduction is real but insufficient to meet the stopping condition.  Mode A (cube-corner) is the next structural blocker.
