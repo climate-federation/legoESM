@@ -1050,3 +1050,21 @@ Codex stop-time review flagged iter-685's two d_sw3 tests as "not actually const
 Previously (iter-685) both would have passed because they never dispatched on production's return value.
 
 No source-code changes; test-only strengthening.  Regression suite unchanged at 133 tests; all pass.
+
+### Iter-687 — gold-file test for d_sw3 transport stage
+
+Codex stop-time review flagged iter-686 as "missing transport-stage regressions".  Correct: iter-686's tests used constant winds where PPM reduces to identity — a broken limiter / reconstruction / Courant-inside-PPM bug can pass constant-wind tests while corrupting real runs.
+
+**Fix** (iter-687): added `test_bgrid_ke_transport_gold_file_non_constant` — a gold-file regression test that feeds `_bgrid_ke_transport` a fixed-seed (rng=686) random non-constant field, records specific output fingerprints (`ke[0,0,0]`, `ke[0,4,4]`, `ke[3,2,6]`, `ke[5,8,8]`, `ke.sum()`, `(ke**2).sum()`) at `places=10` (below typical platform round-off), and asserts future runs match bitwise.
+
+Recorded values on CPU x64:
+- `ke[0,0,0] = 0.03657499177967108`
+- `ke[0,4,4] = -0.049255759396560087`
+- `ke[3,2,6] = -0.10461388201351562`
+- `ke[5,8,8] = -0.0202476671471579`
+- `ke.sum() = 1.2952020452387552`
+- `(ke**2).sum() = 4.900956102462542`
+
+The `rng.standard_normal` arrays produce non-constant winds with O(1) standard deviation, so PPM transport is exercised non-trivially.  **Verified** the test catches subtle PPM-stage regressions: injecting `_ppm_transport_1d → 1.01 * original` (a 1% scale change in PPM only) fails with `"0.0369 != 0.0366 within 10 places (3.66e-4 difference)"`.  Iter-686's constant-wind test would PASS the same buggy implementation because PPM on constant is identity regardless of the scale factor.
+
+No source-code changes; test-only strengthening.  Regression suite now at **134 tests** (133 + 1 new gold-file); all pass.

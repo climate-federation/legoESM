@@ -8393,6 +8393,64 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                  f"_bgrid_ke_transport may be a stubbed no-op or silently "
                  f"ignoring uc."))
 
+    def test_bgrid_ke_transport_gold_file_non_constant(self):
+        """Gold-file regression test: run `_bgrid_ke_transport` on a
+        fixed-seed random input (non-constant → exercises PPM transport,
+        not just identity-on-constant) and assert the output matches
+        recorded fingerprint values bitwise.
+
+        Iter-687 (closes Codex iter-686 critique that the previous tests
+        "miss transport-stage regressions"): constant-wind tests have
+        PPM reduce to identity, so any limiter / reconstruction /
+        Courant-inside-PPM bug passes.  This test uses a non-constant
+        input so PPM is exercised non-trivially; a fingerprint
+        regression catches ANY numerical change to PPM, sync, Courant,
+        or KE product.
+
+        Fingerprints recorded at commit time on CPU x64 via
+        ``JAX_PLATFORMS=cpu JAX_ENABLE_X64=1``.  Values are exact float64
+        (not rounded) so bitwise comparison is meaningful.
+        """
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _bgrid_ke_transport
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(686)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        dt = 0.2
+
+        ke = np.asarray(_bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt))
+
+        # Gold fingerprints recorded on CPU x64 at commit time.
+        # Tight tolerance (1e-10) because platforms vary only in the
+        # last few bits; any real algorithmic change moves the value
+        # by much more.  If a platform gives different round-off and
+        # causes this to fail at 1e-10, the tolerance can be relaxed —
+        # but the specific fingerprint values below should stay stable.
+        self.assertEqual(ke.shape, (6, n + 1, n + 1))
+        self.assertAlmostEqual(float(ke[0, 0, 0]), 0.03657499177967108,
+            places=10, msg="ke[0,0,0] gold fingerprint changed.")
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -0.049255759396560087,
+            places=10, msg="ke[0,4,4] gold fingerprint changed.")
+        self.assertAlmostEqual(float(ke[3, 2, 6]), -0.10461388201351562,
+            places=10, msg="ke[3,2,6] gold fingerprint changed.")
+        self.assertAlmostEqual(float(ke[5, 8, 8]), -0.0202476671471579,
+            places=10, msg="ke[5,8,8] gold fingerprint changed.")
+        # Global reductions (catch bugs that average out pointwise).
+        self.assertAlmostEqual(float(ke.sum()), 1.2952020452387552,
+            places=10, msg="ke.sum() gold fingerprint changed.")
+        self.assertAlmostEqual(float((ke ** 2).sum()), 4.900956102462542,
+            places=10, msg="ke L2² gold fingerprint changed.")
+
 
 class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
     """Iter-682 Fortran-fidelity locks for the duogrid corner-fill path.
