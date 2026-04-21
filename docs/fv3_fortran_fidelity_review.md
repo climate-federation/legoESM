@@ -658,3 +658,30 @@ Total test count: 11/11 PASS.
 - `tests/test_fv3_del6_vt_flux.py` — 4 new tests (11/11 PASS total).
 
 **Process.**  Second source-code iter of forward progress (iter-752/752d was iteration 1).  No Codex stop-time correction this iter.  Iter-754 begins wiring.
+
+### Iter-753b — fix units: return velocity-form updates (Codex stop-time)
+
+Codex stop-time review on iter-753 flagged: **"helper returns the wrong units and uses a non-Fortran metric path."**  Correct.  Analysis:
+
+**Unit problem.**  My iter-753 returned `du_d = +fy2, dv_d = -fx2` where `fy2, fx2` are the direct del6_vt_flux outputs.  Unit audit:
+- `damp` has units `[m^(2*(nord+1))]`
+- `wk` has units `[1/s]` (vorticity)
+- After (nord+1) iterations of del-n with dimensionless `del6_u/v` and `rarea [1/m²]`, the final `fx2, fy2` have units `[m²/s]` — CIRCULATION form, not velocity.
+
+**Why Fortran's version works with bare `u += fy2`.**  At the line `u(i,j) = u(i,j) + vt(i,j)` (`sw_core.F90:1992`), Fortran's `u` is STILL in circulation form `u_vel * dx`, not velocity.  The full u vector at this point has units `[m²/s]`, matching `fy2`.  Conversion back to velocity happens later via `*rdx`.
+
+**Our Python convention.**  `u_d, v_d` in `fv3_sw_tendencies` are in VELOCITY form throughout.  Returning circulation-form `fy2` as "velocity update" is a unit mismatch that would silently corrupt the u_d scale.
+
+**Fix.**  Divide fy2, fx2 by the Fortran-convention rdx, rdy metrics (= 1/dx_edge_y, 1/dy_edge_x) at the corresponding edge positions:
+```python
+du_d_damping = +fy2 / cdgrid.dx_edge_y    # [m²/s] / [m] = [m/s]
+dv_d_damping = -fx2 / cdgrid.dy_edge_x    # [m²/s] / [m] = [m/s]
+```
+
+**Updated test.**  `test_fv3_del6_damping_sign_convention_and_units` now verifies both the Fortran sign convention AND the velocity-form conversion at machine precision.
+
+**Tests.**  11/11 PASS.
+
+**Matrix + ocean baselines still unchanged** (standalone unit still not wired into production).
+
+**Process.**  Fifth same-iteration Codex catch across iter-752/753: the unit audit clarifies a subtle point about Fortran's circulation-form `u` inside `d_sw6`.  Future iter-754 wiring into `fv3_sw_tendencies` can now add the returned updates directly to velocity-form tendencies.

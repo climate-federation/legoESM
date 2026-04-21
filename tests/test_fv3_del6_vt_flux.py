@@ -191,12 +191,16 @@ def test_fv3_del6_damping_zero_field(cdgrid):
         assert bool(jnp.all(dv == 0.0))
 
 
-def test_fv3_del6_damping_sign_convention(cdgrid):
-    """Per Fortran sw_core.F90:1992, 1997:
-        u += fy2  (so du_damping == +fy2)
-        v -= fx2  (so dv_damping == -fx2)
-    This test verifies the sign by computing del6 manually and
-    checking that the helper's output matches `+fy2` and `-fx2`.
+def test_fv3_del6_damping_sign_convention_and_units(cdgrid):
+    """Verify Fortran sign convention AND velocity-unit conversion:
+        du = +fy2 / dx_edge_y   (Fortran: u(circulation) += fy2, then
+                                  /dx to convert to velocity form)
+        dv = -fx2 / dy_edge_x   (Fortran: v(circulation) -= fx2)
+
+    The helper must return VELOCITY-form updates so it can be added
+    directly to our velocity-form u_d, v_d.  Fortran performs the
+    update in circulation form and converts later via `*rdx, *rdy`;
+    our helper does the conversion internally for API consistency.
     """
     n = cdgrid.base.n
     u_d = jnp.array(np.random.default_rng(42).normal(size=(6, n, n + 1)))
@@ -216,11 +220,14 @@ def test_fv3_del6_damping_sign_convention(cdgrid):
         wk, 1.0, 1, del6_u=del6_u_m, del6_v=del6_v_m,
         rarea=rarea, cdgrid=cdgrid)
 
-    # Fortran sign convention: u += fy2, v -= fx2.
-    assert bool(jnp.allclose(du, fy2, atol=1e-14)), \
-        "du should equal fy2 (Fortran: u += fy2)"
-    assert bool(jnp.allclose(dv, -fx2, atol=1e-14)), \
-        "dv should equal -fx2 (Fortran: v -= fx2)"
+    # Velocity-form updates: Fortran sign + Fortran rdx/rdy conversion.
+    expected_du = fy2 / cdgrid.dx_edge_y     # [m/s] velocity
+    expected_dv = -fx2 / cdgrid.dy_edge_x    # [m/s] velocity
+
+    assert bool(jnp.allclose(du, expected_du, atol=1e-14)), \
+        "du should equal +fy2/dx_edge_y (velocity-form Fortran update)"
+    assert bool(jnp.allclose(dv, expected_dv, atol=1e-14)), \
+        "dv should equal -fx2/dy_edge_x (velocity-form Fortran update)"
 
 
 def test_fv3_del6_damping_constant_wind_no_damping(cdgrid):

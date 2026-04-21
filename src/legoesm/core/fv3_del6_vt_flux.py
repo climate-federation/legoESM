@@ -196,16 +196,26 @@ def fv3_del6_vorticity_damping(u_d, v_d, damp, nord, cdgrid):
     2. Cell-mean vorticity:
          `wk = rarea * (vt(i,j) - vt(i,j+1) - ut(i,j) + ut(i+1,j))`
     3. Del-n flux: `(fx2, fy2) = _del6_vt_flux(wk, damp, nord, ...)`
-    4. Return updates in velocity form that the caller adds as
-         `u_d_new = u_d + fy2` (at v-edge)
-         `v_d_new = v_d - fx2` (at u-edge)
+    4. Convert circulation-form damping to velocity form:
+         `du_d = +fy2 / dx_edge_y`   (Fortran: u += fy2, but Fortran u
+                                      is in circulation at that point)
+         `dv_d = -fx2 / dy_edge_x`   (Fortran: v -= fx2, circulation)
+
+    Fortran performs `u(i,j) += vt(i,j)` while `u` is in CIRCULATION
+    form (u*dx, units [m²/s]) inside d_sw; the final conversion to
+    velocity happens via `*rdx` later.  Our Python `u_d, v_d` are in
+    VELOCITY form, so step 4 applies the `*rdx = 1/dx_edge_y` and
+    `*rdy = 1/dy_edge_x` conversions to return velocity-form updates
+    directly.  This matches Fortran's `rdx, rdy` metric convention
+    (`fv_grid_utils.F90`) and keeps the helper's output unit contract
+    consistent with the velocity-form input.
 
     Parameters
     ----------
     u_d : jax.Array, shape (6, n, n+1)
-        D-grid u-wind at v-edge positions.
+        D-grid u-wind at v-edge positions, VELOCITY form [m/s].
     v_d : jax.Array, shape (6, n+1, n)
-        D-grid v-wind at u-edge positions.
+        D-grid v-wind at u-edge positions, VELOCITY form [m/s].
     damp : float
         Fortran `damp4 = (damp_v * da_min_c)^(nord+1)`.  Units
         `[m^(2*(nord+1))]`.  Caller must supply with correct scaling.
@@ -216,48 +226,55 @@ def fv3_del6_vorticity_damping(u_d, v_d, damp, nord, cdgrid):
     Returns
     -------
     du_d_damping : jax.Array, shape (6, n, n+1)
-        Velocity-unit update for u_d.  Caller: `u_d_new = u_d + du_d`.
+        Velocity-unit update for u_d [m/s].  Caller:
+        `u_d_new = u_d + du_d`.
     dv_d_damping : jax.Array, shape (6, n+1, n)
-        Velocity-unit update for v_d.  Caller: `v_d_new = v_d + dv_d`
-        (the minus sign from Fortran `v -= fx2` is already applied).
+        Velocity-unit update for v_d [m/s].  Caller:
+        `v_d_new = v_d + dv_d` (Fortran sign `v -= fx2` already
+        baked in via the `-fx2 / dy_edge_x` return).
 
     Notes
     -----
     These are PER-TIMESTEP velocity updates (Fortran convention), not
     continuous tendencies.  To use with a tendency-based integrator,
     caller should divide by dt.
+
+    Unit check (for nord=2, del-6):
+      damp has units [m^6].
+      q = wk has units [1/s].
+      After nord+1=3 iterations of del-n with dimensionless del6_u,v
+      and rarea [1/m²]: final fx2/fy2 have units [m²/s] (circulation).
+      fy2 / dx_edge_y = [m²/s] / [m] = [m/s] — velocity unit.
     """
     del6_u_m, del6_v_m = compute_del6_metrics(cdgrid)
     rarea = 1.0 / cdgrid.base.area
 
     # Step 1: circulation.
-    vt = u_d * cdgrid.dx_edge_y      # (6, n, n+1)
-    ut = v_d * cdgrid.dy_edge_x      # (6, n+1, n)
+    vt = u_d * cdgrid.dx_edge_y      # (6, n, n+1)  [m²/s]
+    ut = v_d * cdgrid.dy_edge_x      # (6, n+1, n)  [m²/s]
 
     # Step 2: cell-mean vorticity wk.
     # Fortran: wk(i,j) = rarea * (vt(i,j) - vt(i,j+1) - ut(i,j) + ut(i+1,j))
-    # For cell (i, j):
-    #   vt at v-edge (i, j)  = vt[:, i, j]       (south edge of cell)
-    #   vt at v-edge (i, j+1) = vt[:, i, j+1]    (north edge of cell)
-    #   ut at u-edge (i, j)  = ut[:, i, j]       (west edge of cell)
-    #   ut at u-edge (i+1, j) = ut[:, i+1, j]    (east edge of cell)
     vt_south = vt[:, :, :-1]     # (6, n, n)
     vt_north = vt[:, :, 1:]      # (6, n, n)
     ut_west  = ut[:, :-1, :]     # (6, n, n)
     ut_east  = ut[:, 1:, :]      # (6, n, n)
-    wk = rarea * (vt_south - vt_north - ut_west + ut_east)
+    wk = rarea * (vt_south - vt_north - ut_west + ut_east)   # [1/s]
 
-    # Step 3: del-n flux.
+    # Step 3: del-n flux.  Outputs are in CIRCULATION units [m²/s].
     fx2, fy2 = _del6_vt_flux(
         wk, damp, nord,
         del6_u=del6_u_m, del6_v=del6_v_m,
         rarea=rarea, cdgrid=cdgrid,
     )
 
-    # Step 4: Apply with Fortran sign convention:
-    #   u(i,j) += fy2(i,j)
-    #   v(i,j) -= fx2(i,j)
-    du_d_damping = fy2    # (6, n, n+1)   same shape as u_d
-    dv_d_damping = -fx2   # (6, n+1, n)   same shape as v_d
+    # Step 4: Apply Fortran sign and convert to velocity via Fortran's
+    # rdx, rdy metrics (fv_grid_utils.F90):
+    #   rdx(i,j) = 1/dx(i,j)    at v-interface
+    #   rdy(i,j) = 1/dy(i,j)    at u-interface
+    # In our cdgrid convention these are 1/cdgrid.dx_edge_y and
+    # 1/cdgrid.dy_edge_x respectively.
+    du_d_damping = fy2 / cdgrid.dx_edge_y       # [m²/s] / [m] = [m/s]
+    dv_d_damping = -fx2 / cdgrid.dy_edge_x      # [m²/s] / [m] = [m/s]
 
     return du_d_damping, dv_d_damping
