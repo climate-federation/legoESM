@@ -55,7 +55,7 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
 from legoesm.grids.regridding import (
     get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
 from tests.atmosphere.shallow_water.test_cases.williamson import (
-    williamson_test2)
+    williamson_test2, williamson_test2_exact)
 
 
 def _div_damp_cube(n, ref_n=48, ref_coeff=1.5e7):
@@ -66,14 +66,24 @@ def _div_damp_cube(n, ref_n=48, ref_coeff=1.5e7):
 # Canonical matrix settings.
 n = 36
 dt = 300.0
-n_steps = int(86400 / dt)      # 288 steps → 1-day integration
-u0 = 2.0 * np.pi * 6.371e6 / (12.0 * 86400.0)
+days = 1
+n_steps = int(days * 86400 / dt)   # 288 steps → 1-day integration
 
 grid = create_cubed_sphere(n)
 # FV3EdgeShallowWaterModel creates its own cdgrid from the grid, and
 # we'll read it back via `model.cdgrid` — mirrors the matrix script.
 
+# Use grid.radius (NOT hardcoded 6.371e6) — iter-766b Codex 2nd-pass
+# flagged the hardcoded value drifted from the canonical grid radius
+# by ~229 m, which propagated a 3.6e-5 relative error into u0.
+u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
 sw = williamson_test2(grid)
+# Matrix reference is the exact solution at t=days (steady for W2,
+# so `williamson_test2_exact = williamson_test2` numerically —
+# but we call the matrix-identical function for source-of-truth
+# parity with `scripts/run_atmosphere_test_matrix.py:1467`).
+exact = williamson_test2_exact(grid, days * 86400.0)
 weights = get_cubedsphere_to_latlon_weights(n, 360, 181)
 
 
@@ -96,16 +106,23 @@ def run_and_measure(fortran_a2b_corner_avg: bool):
         h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
     model.set_initial_mass(state)
 
-    # Reference h at t=days (W2 is steady, so exact = IC).
-    h_exact = np.asarray(sw.h.data)
+    # Matrix reference: `exact.h.data` (from williamson_test2_exact).
+    h_exact = np.asarray(exact.h.data)
     area = np.asarray(grid.area)
 
     for _ in range(n_steps):
         state = model.step(state, dt)
 
     # Area-weighted + normalized norms (matrix convention — see
-    # run_atmosphere_test_matrix.py around line 1473).
-    h_err = np.asarray(state.h) - h_exact
+    # run_atmosphere_test_matrix.py around the
+    # `test_num == 2 and tc.grid_type == "cubed_sphere"` block
+    # that computes the h error from `state.h - exact.h.data`).
+    # `state.h` is the jax.Array member of FV3EdgeShallowWaterState;
+    # matrix uses `state.h if isinstance(state.h, jnp.ndarray) else
+    # state.h.data` — for FV3EdgeShallowWaterState this resolves to
+    # `state.h` directly, which np.asarray converts losslessly.
+    h_final = np.asarray(state.h)
+    h_err = h_final - h_exact
     h_err_l2 = float(np.sqrt(np.sum(h_err ** 2 * area)
                               / np.sum(h_exact ** 2 * area)))
     h_err_linf = float(np.max(np.abs(h_err)) / np.max(np.abs(h_exact)))
