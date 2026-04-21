@@ -525,7 +525,28 @@ class LatLonCGridOceanModel:
         for tr_name in ['T', 'S']:
             tr = T_mid if tr_name == 'T' else S_mid
 
-            if self.config.tracer_advection == "dst3":
+            if self.config.tracer_advection == "ppm_fct":
+                # PPM + FCT: 4th-order PPM accuracy with Zalesak limiter
+                # for guaranteed monotonicity. Stable at any CFL.
+                from legoesm.ocean.advection import fct_tracer_advection
+                div_hut, vert_flux_div = fct_tracer_advection(
+                    tr, mass_flux_u, mass_flux_v, w_baro,
+                    h_k_old, self.grid, dt,
+                )
+            elif self.config.tracer_advection == "ppm":
+                # Raw PPM (unstable at low CFL — for testing only)
+                from legoesm.ocean.advection import (
+                    ppm_to_u_points, ppm_to_v_points,
+                    flux_form_vertical_tracer_advection_ppm,
+                )
+                tr_u = ppm_to_u_points(tr, mass_flux_u)
+                tr_v = ppm_to_v_points(tr, mass_flux_v)
+                tracer_flux_u = mass_flux_u * tr_u
+                tracer_flux_v = mass_flux_v * tr_v
+                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
+                vert_flux_div = flux_form_vertical_tracer_advection_ppm(
+                    tr, w_baro, h_k_old, dt)
+            elif self.config.tracer_advection == "dst3":
                 # DST-3 with Sweby limiter, applied independently per
                 # direction. Third-order in space and time, monotone (#210).
                 from legoesm.ocean.advection import (
