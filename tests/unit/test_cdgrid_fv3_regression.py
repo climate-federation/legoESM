@@ -8271,101 +8271,127 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
     as a known architectural scope restriction (see review doc).
     """
 
-    def test_bgrid_vb_formula_constant_inputs(self):
-        """Constant uc=C1, vc=C2: vb = dt/2*(2*C2 - 2*C1*cosa)*rsina
-        at every corner.  Pins Fortran line 1273 verbatim."""
+    def test_bgrid_ke_transport_matches_fortran_formula_on_constant_winds(self):
+        """Call production `_bgrid_ke_transport` with constant
+        u_d, v_d, uc, vc and verify its output equals the Fortran-formula
+        numpy reference at INTERIOR cube-face corners.
+
+        Iter-686 strengthening (closes Codex's iter-685 critique that my
+        lock tests only compared the formula to itself without
+        constraining production): on constant (u_d, v_d, uc, vc), PPM
+        reconstruction of a constant field is the identity (empirically
+        verified; also guaranteed by PPM's piecewise-parabolic property
+        exactness on constants), so the production-path output reduces
+        to closed-form Fortran formulas at INTERIOR corners:
+
+            vb   = dt/2 * (2*vc_c - 2*uc_c*cosa) * rsina  [F90 line 1273]
+            ub   = dt/2 * (2*uc_c - 2*vc_c*cosa) * rsina  [F90 line 1332]
+            ubbtemp = v_d_c (PPM identity on constant)
+            vbb     = u_d_c (PPM identity on constant)
+            vbbtemp = vb
+            ubb     = ub (at interior only; BGRID_NE sync modifies
+                           values at cube seams)
+            ke_corner = 0.5 * (v_d_c * vb + ub * u_d_c)
+
+        At CUBE-FACE SEAMS, `synchronize_bgrid_ne_corner_geo` averages
+        ubb/vbbtemp across adjacent faces, legitimately changing the
+        corner value.  The sync is Fortran-faithful
+        (`mpp_get_boundary(gridtype=BGRID_NE)`) but introduces values
+        that depend on neighbour-face cosa/rsina, which we do not
+        reproduce in this simple formula reference.  Testing only
+        interior corners (away from the 4 cube-edge strips per face)
+        covers the Courant formula + PPM path directly.  The sync
+        path is covered by other tests (TestBGridNESyncGeo*).
+        """
         import numpy as np
         import jax.numpy as jnp
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _bgrid_ke_transport
 
         n = 8
         grid = create_cubed_sphere(n=n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        C1, C2 = 2.5, -1.3
-        dt = 0.4
-        # Extract just the `vb` formula from `_bgrid_ke_transport` by
-        # inlining the Fortran-line-1273 computation at the Python level.
-        # (The full `_bgrid_ke_transport` also transports u_d/v_d through
-        # PPM; we test the Courant formula in isolation here.)
-        uc = jnp.full((6, n + 1, n), C1)
-        vc = jnp.full((6, n, n + 1), C2)
-        vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-        vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]
-        uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-        uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]
-        cosa = np.asarray(cdgrid.cosa_corner)
-        rsina = np.asarray(cdgrid.rsin2_corner)
-        vb = np.asarray(0.5 * dt * (vc_sum - uc_sum * cosa) * rsina)
-        # Expected: 2*C2 (uniform), 2*C1 (uniform), so
-        # vb = dt/2 * (2*C2 - 2*C1 * cosa) * rsina
-        #    = dt * (C2 - C1 * cosa) * rsina
-        vb_expected = dt * (C2 - C1 * cosa) * rsina
-        max_diff = float(np.max(np.abs(vb - vb_expected)))
-        rms = float(np.sqrt(np.mean(vb_expected ** 2)))
-        self.assertLess(max_diff / max(rms, 1e-20), 1e-12,
-            msg=(f"d_sw3 vb formula deviates from Fortran sw_core.F90:1273 "
-                 f"by {max_diff:.3e} (rms {rms:.3e}) on constant uc, vc "
-                 f"inputs — check _bgrid_ke_transport step 1."))
-
-    def test_bgrid_vb_random_inputs_match_fortran_line_1273(self):
-        """Random uc, vc: Python's d_sw3 vb formula matches Fortran's
-        sw_core.F90:1273 numpy reproduction pointwise."""
-        import numpy as np
-        import jax.numpy as jnp
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.cubed_sphere_cdgrid import (
-            create_cubed_sphere_cdgrid)
-
-        n = 8
-        grid = create_cubed_sphere(n=n, use_duogrid=True)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        rng = np.random.default_rng(685)
-        uc_np = rng.standard_normal((6, n + 1, n))
-        vc_np = rng.standard_normal((6, n, n + 1))
+        Cu, Cv = 1.7, -0.9
+        Cuc, Cvc = 2.3, -1.1
         dt = 0.3
 
-        # Inline Fortran-line-1273 numpy reference.
+        u_d = jnp.full((6, n, n + 1), Cu)
+        v_d = jnp.full((6, n + 1, n), Cv)
+        uc = jnp.full((6, n + 1, n), Cuc)
+        vc = jnp.full((6, n, n + 1), Cvc)
+
+        ke_corner = np.asarray(_bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt))
+
+        # Fortran-formula reference at corners (shape n+1, n+1).
         cosa = np.asarray(cdgrid.cosa_corner)
         rsina = np.asarray(cdgrid.rsin2_corner)
-        vc_pad = np.pad(vc_np, [(0, 0), (1, 1), (0, 0)], mode='edge')
-        vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]        # (6, n+1, n+1)
-        uc_pad = np.pad(uc_np, [(0, 0), (0, 0), (1, 1)], mode='edge')
-        uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]        # (6, n+1, n+1)
-        vb_ref = 0.5 * dt * (vc_sum - uc_sum * cosa) * rsina
-        ub_ref = 0.5 * dt * (uc_sum - vc_sum * cosa) * rsina
+        vb_ref = 0.5 * dt * (2.0 * Cvc - 2.0 * Cuc * cosa) * rsina
+        ub_ref = 0.5 * dt * (2.0 * Cuc - 2.0 * Cvc * cosa) * rsina
+        ke_ref = 0.5 * (Cv * vb_ref + ub_ref * Cu)
 
-        # Same computation replicated via jnp (what _bgrid_ke_transport
-        # does internally before the PPM transport).
-        uc = jnp.asarray(uc_np)
-        vc = jnp.asarray(vc_np)
-        vc_pad_j = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-        vc_sum_j = vc_pad_j[:, :-1, :] + vc_pad_j[:, 1:, :]
-        uc_pad_j = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-        uc_sum_j = uc_pad_j[:, :, :-1] + uc_pad_j[:, :, 1:]
-        vb_j = np.asarray(0.5 * dt * (vc_sum_j - uc_sum_j * jnp.asarray(cosa))
-                          * jnp.asarray(rsina))
-        ub_j = np.asarray(0.5 * dt * (uc_sum_j - vc_sum_j * jnp.asarray(cosa))
-                          * jnp.asarray(rsina))
+        # Compare only at INTERIOR corners, excluding the 4 cube-edge
+        # strips (i=0, i=n, j=0, j=n) where BGRID_NE sync modifies values.
+        interior = (slice(None), slice(1, n), slice(1, n))
+        max_diff_int = float(np.max(np.abs(ke_corner[interior] - ke_ref[interior])))
+        rms_int = float(np.sqrt(np.mean(ke_ref[interior] ** 2)))
+        self.assertLess(max_diff_int / max(rms_int, 1e-20), 1e-6,
+            msg=(f"_bgrid_ke_transport output at INTERIOR corners deviates "
+                 f"from the Fortran-formula reference by {max_diff_int:.3e} "
+                 f"(rms {rms_int:.3e}) on constant winds.  This test "
+                 f"EXERCISES production (Courant formula + PPM) and only "
+                 f"passes if every piece matches Fortran at the interior."))
 
-        vb_diff = float(np.max(np.abs(vb_j - vb_ref)))
-        ub_diff = float(np.max(np.abs(ub_j - ub_ref)))
-        self.assertLess(vb_diff, 1e-12,
-            msg=f"vb(jnp) vs vb(np) diff {vb_diff:.3e} > 1e-12.")
-        self.assertLess(ub_diff, 1e-12,
-            msg=f"ub(jnp) vs ub(np) diff {ub_diff:.3e} > 1e-12.")
+        # Also assert the boundary DOES differ (proving sync is applied,
+        # not a silent no-op) — BGRID_NE sync must leave a fingerprint
+        # on the constant-input case because cosa varies across faces at
+        # cube seams.
+        boundary_mask = np.zeros_like(ke_corner, dtype=bool)
+        boundary_mask[:, 0, :] = True
+        boundary_mask[:, n, :] = True
+        boundary_mask[:, :, 0] = True
+        boundary_mask[:, :, n] = True
+        bdy_diff = float(np.max(np.abs(
+            ke_corner[boundary_mask] - ke_ref[boundary_mask])))
+        self.assertGreater(bdy_diff, 1e-6,
+            msg=(f"BGRID_NE sync did not modify boundary corner values "
+                 f"(max diff {bdy_diff:.3e} < 1e-6) — either the sync is "
+                 f"a no-op (regression) or the test setup is wrong."))
 
-        # Production _bgrid_ke_transport: call it and check the ke_corner
-        # output shape/finiteness (we can't easily extract vb/ub from it,
-        # but we can verify it runs without NaN/Inf on random inputs).
+    def test_bgrid_ke_transport_reacts_to_input_changes(self):
+        """If _bgrid_ke_transport ignored its uc/vc arguments (silent
+        stub), this test catches it: perturbing uc at one cell must
+        change ke_corner output.  Iter-686: added as a complement to
+        the constant-field lock — ensures the function is not
+        short-circuited to a stubbed constant."""
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
         from legoesm.core.fv3_sw_core import _bgrid_ke_transport
-        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
-        ke_corner = _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt)
-        self.assertEqual(ke_corner.shape, (6, n + 1, n + 1))
-        self.assertTrue(bool(jnp.all(jnp.isfinite(ke_corner))),
-            msg="_bgrid_ke_transport returned non-finite KE on random input.")
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        dt = 0.3
+        u_d = jnp.full((6, n, n + 1), 1.5)
+        v_d = jnp.full((6, n + 1, n), -0.7)
+        uc_base = jnp.full((6, n + 1, n), 2.0)
+        vc_base = jnp.full((6, n, n + 1), -1.0)
+
+        ke_base = np.asarray(_bgrid_ke_transport(u_d, v_d,
+                              uc_base, vc_base, cdgrid, dt))
+        uc_pert = uc_base.at[0, 4, 4].set(5.0)
+        ke_pert = np.asarray(_bgrid_ke_transport(u_d, v_d,
+                              uc_pert, vc_base, cdgrid, dt))
+        max_change = float(np.max(np.abs(ke_pert - ke_base)))
+        self.assertGreater(max_change, 1e-6,
+            msg=(f"Perturbing uc at one cell produced max ke_corner "
+                 f"change {max_change:.3e} < 1e-6 — "
+                 f"_bgrid_ke_transport may be a stubbed no-op or silently "
+                 f"ignoring uc."))
 
 
 class TestDuogridCornerFillFidelityIter682(unittest.TestCase):

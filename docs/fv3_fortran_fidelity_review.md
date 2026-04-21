@@ -1033,3 +1033,20 @@ Re-audited iter-683's 14-row "remaining `bounded_domain/duogrid` gates" backlog 
 2. `test_bgrid_vb_random_inputs_match_fortran_line_1273`: random uc/vc → numpy reference matches Python at 1e-12.  Also verifies `_bgrid_ke_transport` runs without NaN/Inf on random input.
 
 No source-code changes; test additions + backlog correction.  Regression suite now at **133 tests** (131 + 2 new); all pass.
+
+### Iter-686 — strengthen iter-685 d_sw3 tests to actually constrain production
+
+Codex stop-time review flagged iter-685's two d_sw3 tests as "not actually constraining production `_bgrid_ke_transport`".  Correct: those tests computed the Fortran formula both ways (numpy + jnp) and compared them to each other — a test of arithmetic, not production.  The only production call was a `all(isfinite(ke_corner))` check which is an extremely weak bar.
+
+**Fix** (iter-686): replace both tests with ones that actually call `_bgrid_ke_transport` and constrain its output:
+
+1. `test_bgrid_ke_transport_matches_fortran_formula_on_constant_winds`: set `u_d, v_d, uc, vc` to constants.  PPM reconstruction of a constant field is the identity, so the production path reduces to `ke_corner = 0.5*(v_d_c * vb + ub * u_d_c)` where `vb`, `ub` follow Fortran lines 1273/1332.  Compare production `ke_corner[interior]` to this formula at `rtol=1e-6`.  Interior only because `synchronize_bgrid_ne_corner_geo` legitimately modifies cube-seam values.
+2. Added a second assertion: `ke_corner[boundary]` MUST differ from the formula by > 1e-6 — this proves the BGRID_NE sync is actually applied, not a silent no-op.
+3. `test_bgrid_ke_transport_reacts_to_input_changes`: perturb uc at one cell; assert `max|Δke_corner| > 1e-6`.  Catches a stubbed-no-op production.
+
+**Verified** by injecting a stub `_bgrid_ke_transport = lambda ...: zeros`:
+- Formula test fails with "1.34 not less than 1e-6 at INTERIOR corners".
+- Reactivity test fails with "max change < 1e-6".
+Previously (iter-685) both would have passed because they never dispatched on production's return value.
+
+No source-code changes; test-only strengthening.  Regression suite unchanged at 133 tests; all pass.
