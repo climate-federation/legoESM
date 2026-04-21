@@ -1551,6 +1551,36 @@ All 8 pointwise neighbor fingerprints from iter-714 are retained unchanged — t
 
 No source-code changes; corrected fingerprint semantics only.  Regression suite unchanged at 164 tests; all pass.
 
+### Iter-718 — isolate corner-asymmetry in `boundary_fix` as candidate W2 mode-4 source
+
+Concrete step toward the W2 v-wind architectural blocker (review-doc item #1).
+
+**Finding** (diagnostic `scripts/diag_iter718_boundary_fix_variants.py`): the `boundary_fix` in `cdgrid_momentum_tendencies` (`operators_cdgrid.py:1475-1483`) applies 4 SEQUENTIAL in-place passes along the 4 boundary edges.  This produces a **2× stronger smoothing at the 4 face-corner cells vs non-corner edge cells**:
+
+| Cell type          | Averaging applied        | Residual coefficient     |
+|--------------------|--------------------------|--------------------------|
+| Non-corner edge    | 2-cell: `0.5*(a + b)`    | 0.5 × original           |
+| Face-vertex corner | 2×2 block: `0.25*(a+b+c+d)` | 0.25 × original          |
+
+Verified numerically on a synthetic field: sequential version produces `[0.25, 0.50, 0.75, 1.00]` at the 4 corners for input `[1, 2, 3, 4]`, while a SNAPSHOT variant (all updates computed from the original `du_cc`) produces `[0.50, 1.00, 1.50, 2.00]`.  Factor-2 asymmetry at corners.
+
+**Hypothesis**: the stronger corner smoothing breaks the rotational symmetry around each cube vertex.  Under the 4-fold cube-vertex symmetry, the 4 cells around a vertex should see the same treatment; the sequential in-place application breaks this.  After 288 timesteps (C36 dt=300s, 1 day), a factor-2 per-step asymmetry could accumulate into the observed mode-4 polar v-wind artifact.
+
+**Baseline numbers at C36 day 1 with sequential boundary_fix (matches user's visual)**:
+- Face-4 max|v_cc_north| = 0.3068 m/s.
+- Face-5 max|v_cc_north| = 0.3067 m/s.
+- L2 h-error = ~3.4e-4.
+
+**Deferred**: actually SWITCHING to snapshot boundary_fix requires:
+1. Verifying W2 L2 ratio stays ≤ 0.7 (iter-513 production lock).
+2. Re-measuring `TestW2CubeFaceImprintCharacterization` pole-cell ceiling (currently 0.40 m/s).
+3. Verifying all 8 W2/W5 canonical lock tests still pass.
+4. Regenerating all iter-685/687/702/708/710/711/712/714/716 gold-file fingerprints (they'll shift).
+
+This is a cross-cutting change; deferring to a dedicated iter so the fingerprint regeneration is a clean commit, not bundled with the AST tests or metric audits.  Iter-718 is FINDING-ONLY — documents the asymmetry as a candidate root cause + diagnostic script for future verification.
+
+No source-code changes; diagnostic + documentation.  Regression suite unchanged at 165 tests; all pass.
+
 ### Iter-716 — W5 end-to-end gold-file with area-weighted mass
 
 Added `TestW5ProductionGoldFileIter716` to lock the Williamson-5 (isolated mountain) production-path C36 day-1 state end-to-end.  Existing `TestW5PolarFaceMagnitude` tests face-4 `v_cc_north` in window [4, 10] m/s (amplification + signal-loss bounds) but NO fingerprint lock on:
