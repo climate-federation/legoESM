@@ -1373,6 +1373,29 @@ No source-code changes; structural locks only.  Regression suite now at **159 te
 
 **Directive item #2 status**: all 14 rows in the iter-683 Fortran-line backlog are now either CLOSED (by direct lock test) or documented as architectural restriction (d_sw3 non-duogrid branch).  Ralph directive item #2 ("Legacy edge handling must be disabled in duogrid mode via bounded_domain = .true.") is **closed on the sw_core.F90 side**.  Cross-file Fortran sources (`tp_core.F90`, `fv_duogrid.F90`, `fv_grid_utils.F90`, `dyn_core.F90`) have been covered by earlier iterations but not systematically re-audited; that's a future iteration scope.
 
+### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
+
+Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
+- `.at[:, 1, 1].add(-uc[:, 1, 0])` — JAX `.add()` immutable update instead of `.set()`.
+- `uc_lap = uc + ...; divg_d.at[...].set(... - uc_lap[...])` — aliased name `uc_lap` hiding the true `uc` reference.
+- `uc_pad = jnp.pad(uc, ...)` — aliased via `jnp.pad`.
+
+Neither form was caught by iter-703's regex-ish match (`.set` only, direct `uc` name only).
+
+**Fix** (iter-704):
+1. `match_jax_at_update` now accepts `.at[...].set()`, `.at[...].add()`, `.at[...].subtract()`, `.at[...].multiply()`, `.at[...].min()`, `.at[...].max()` — the full JAX immutable-update surface.
+2. Added `build_uc_env(func)` def-use tracker: walks the function body and records Names that transitively alias `uc` via direct assignment (`uc_lap = uc + extra`), subscripting (`x = uc[...]`), or call arguments (`uc_pad = jnp.pad(uc, ...)`).  Also catches names whose RHS walks over any reference to an already-aliased name (deeply nested derivations).
+3. `rhs_uses_uc_with_env(rhs, uc_env)` flags if any Name or `Name[...]` subscript in the RHS is either `uc` itself OR has `True` in the per-function uc_env.
+
+**Verified** against injected probe with 3 realistic patterns — all caught:
+- `.at[:, 1, 1].add(-uc[:, 1, 0])` → flagged.
+- `uc_lap = uc + extra; .at[...].set(... - uc_lap[...])` → flagged.
+- `uc_pad = jnp.pad(uc, ...); .at[...].add(uc_pad[...])` → flagged.
+
+Iter-703's test suite still passes (2 existing tests in the class); no regressions.
+
+No source-code changes; structural lock generalization.  Regression suite unchanged at 159 tests; all pass.
+
 ### Iter-697 — handler env starts from body_env, not pre-try
 
 Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like

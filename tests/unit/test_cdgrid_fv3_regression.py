@@ -9085,24 +9085,72 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
             # Last two elts (i, j dimensions in 3D [face, i, j] form).
             return is_corner_bound(elts[-2]) and is_corner_bound(elts[-1])
 
-        def rhs_uses_uc(rhs):
+        # Iter-704 (Codex iter-703 finding): extend rhs_uses_uc to also
+        # recognize aliased names (uc_lap, uc_pad, uc_full, ...) that
+        # the repo uses after halo/Laplacian processing.  Build a
+        # per-function env of Names bound from `uc`, any Subscript of
+        # `uc`, or transitively via Name aliases.  Any Name resolving
+        # to that root counts as `uc`.
+        def build_uc_env(func):
+            """Name → True iff Name is bound (transitively) from uc."""
+            env = {}
+            for stmt in ast.walk(func):
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                        and isinstance(stmt.targets[0], ast.Name):
+                    target = stmt.targets[0].id
+                    rhs = stmt.value
+                    if isinstance(rhs, ast.Name):
+                        env[target] = env.get(rhs.id, rhs.id == 'uc')
+                    elif isinstance(rhs, ast.Subscript) \
+                            and isinstance(rhs.value, ast.Name):
+                        env[target] = (rhs.value.id == 'uc'
+                                        or env.get(rhs.value.id, False))
+                    elif isinstance(rhs, ast.Call) \
+                            and isinstance(rhs.func, ast.Name) \
+                            and any(isinstance(a, ast.Name)
+                                    and (a.id == 'uc' or env.get(a.id, False))
+                                    for a in rhs.args):
+                        # e.g. `uc_pad = jnp.pad(uc, ...)` → uc_pad aliases uc
+                        env[target] = True
+                    else:
+                        # Walk RHS for any reference to uc or aliased name.
+                        for sub in ast.walk(rhs):
+                            if isinstance(sub, ast.Name) and \
+                                    (sub.id == 'uc' or env.get(sub.id, False)):
+                                env[target] = True
+                                break
+                            if isinstance(sub, ast.Subscript) and \
+                                    isinstance(sub.value, ast.Name) and \
+                                    (sub.value.id == 'uc' or env.get(sub.value.id, False)):
+                                env[target] = True
+                                break
+                        else:
+                            env.setdefault(target, False)
+            return env
+
+        def rhs_uses_uc_with_env(rhs, uc_env):
+            """Flag if RHS references `uc` directly OR any alias whose
+            uc_env entry is True."""
             for sub in ast.walk(rhs):
-                if isinstance(sub, ast.Name) and sub.id == 'uc':
-                    return True
-                if isinstance(sub, ast.Subscript) \
-                        and isinstance(sub.value, ast.Name) \
-                        and sub.value.id == 'uc':
-                    return True
+                if isinstance(sub, ast.Name):
+                    if sub.id == 'uc' or uc_env.get(sub.id, False):
+                        return True
+                elif isinstance(sub, ast.Subscript) \
+                        and isinstance(sub.value, ast.Name):
+                    if sub.value.id == 'uc' \
+                            or uc_env.get(sub.value.id, False):
+                        return True
             return False
 
-        def match_jax_at_set(call):
-            """Match `divg_d.at[CORNER, CORNER].set(RHS)` — JAX immutable
-            update form.  Returns (matched, rhs) or (False, None)."""
-            # call.func = Attribute(value=Subscript(value=Attribute(
-            #     value=Name('divg_d'), attr='at'), slice=...), attr='set')
+        def match_jax_at_update(call):
+            """Match `divg_d.at[CORNER, CORNER].{set,add,subtract,multiply}(RHS)`
+            — JAX immutable update forms.  Iter-704 extends iter-703 to
+            cover `.add(...)` (and `.subtract`, `.multiply`).  Returns
+            (matched, rhs) or (False, None)."""
             if not (isinstance(call, ast.Call)
                     and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == 'set'):
+                    and call.func.attr in ('set', 'add', 'subtract',
+                                            'multiply', 'min', 'max')):
                 return False, None
             subs = call.func.value
             if not (isinstance(subs, ast.Subscript)
@@ -9118,13 +9166,30 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
             return True, call.args[0]
 
         # Pattern 1: `divg_d[:, CORNER, CORNER] = ... uc ...` direct mutation.
-        # Pattern 2: `divg_d = divg_d.at[CORNER, CORNER].set(... uc ...)` JAX form.
+        # Pattern 2: `divg_d = divg_d.at[CORNER, CORNER].{set,add,...}(... uc ...)` JAX form.
+        # Iter-704: uc_env resolves aliases like uc_lap, uc_pad, etc.
         offenders = []
         for py_file in src_dir.rglob('*.py'):
             try:
                 tree = ast.parse(py_file.read_text())
             except (SyntaxError, UnicodeDecodeError):
                 continue
+            # Build per-function uc aliasing envs once.
+            func_envs = {}
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    func_envs[id(node)] = build_uc_env(node)
+            module_env = build_uc_env(tree)
+
+            # Find enclosing function for a given node (linear scan).
+            def env_for(node):
+                for fn_node in ast.walk(tree):
+                    if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        for sub in ast.walk(fn_node):
+                            if sub is node:
+                                return func_envs[id(fn_node)]
+                return module_env
+
             for node in ast.walk(tree):
                 # Direct mutation / augassign form.
                 if isinstance(node, (ast.Assign, ast.AugAssign)):
@@ -9135,11 +9200,12 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
                     else:
                         target = node.target
                     rhs = node.value
+                    uc_env = env_for(node)
                     if (isinstance(target, ast.Subscript)
                             and isinstance(target.value, ast.Name)
                             and target.value.id == 'divg_d'
                             and is_corner_index(target.slice)
-                            and rhs_uses_uc(rhs)):
+                            and rhs_uses_uc_with_env(rhs, uc_env)):
                         offenders.append(
                             f"{py_file.relative_to(src_dir)}:{node.lineno}")
                         continue
@@ -9147,8 +9213,8 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
                     if (isinstance(node, ast.Assign)
                             and isinstance(target, ast.Name)
                             and target.id == 'divg_d'):
-                        matched, jax_rhs = match_jax_at_set(rhs)
-                        if matched and rhs_uses_uc(jax_rhs):
+                        matched, jax_rhs = match_jax_at_update(rhs)
+                        if matched and rhs_uses_uc_with_env(jax_rhs, uc_env):
                             offenders.append(
                                 f"{py_file.relative_to(src_dir)}:{node.lineno}")
 
