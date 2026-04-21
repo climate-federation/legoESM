@@ -1164,6 +1164,25 @@ The AST lock walks every `BinOp(op=Add)` and asserts `left` and `right` aren't `
 - Inner-function wrapping (helper returns ut+vt) → CAUGHT ✓
 - Reverse order `vt + ut` → CAUGHT ✓
 - `ut + ut` only (d2a2c_vect legitimate sum) → correctly NOT flagged
-- Temp-variable aliasing `a=ut[...]; b=vt[...]; (a+b)*u` → MISSED (documented edge case; Fortran transliteration rarely introduces this intermediate step).
+- Temp-variable aliasing `a=ut[...]; b=vt[...]; (a+b)*u` → MISSED (documented edge case in iter-692; closed by iter-693 def-use tracking).
 
 No source-code changes; structural lock only.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-693 — extend AST lock with def-use tracking (close iter-692 temp-var edge case)
+
+Codex stop-time review rejected iter-692's "documented edge case" for temp-factored reintroductions and asked me to actually close the gap.  Correct: simply documenting a known miss is not a lock.
+
+**Fix** (iter-693): added def-use tracking to the AST walker.  For each function scope:
+1. Build an `env: Name → origin` map by walking `ast.Assign` nodes: if RHS is `ut[...]`, record `name → 'ut'`; if `vt[...]`, record `name → 'vt'`; if another `Name`, record as an alias (for transitive resolution); else `'other'`.
+2. For each `BinOp(Add)`, resolve the left and right operands: if they're direct subscripts of `ut`/`vt`, use those; if they're `Name` references, follow the env alias chain to the origin.
+3. If `{left_origin, right_origin} == {'ut', 'vt'}`, flag the file.
+
+`resolve_name_to_origin` transitively follows single-assignment alias chains (e.g. `x=ut[...]; a=x; b=vt[...]; (a+b)*...` resolves `a→ut, b→vt`).  A `seen` set prevents infinite loops on self-reference.
+
+**Verified** against 4 fixtures:
+- Temp-var factored `a=ut[...]; b=vt[...]; (a+b)*u` → CAUGHT *(was the iter-692 miss)*.
+- Alias chain `x=ut[...]; a=x; b=vt[...]; (a+b)*u` → CAUGHT.
+- `a=ut[...]; b=ut[...]; a+b` → correctly NOT flagged (both 'ut').
+- `a=x+y; b=ut[...]; a+b` → correctly NOT flagged (a resolves to 'other').
+
+No source-code changes; structural lock strengthening only.  Regression suite unchanged at 135 tests; all pass.

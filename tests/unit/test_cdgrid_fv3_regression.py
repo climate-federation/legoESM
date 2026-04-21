@@ -8429,17 +8429,86 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                     and isinstance(node.value, ast.Name)
                     and node.value.id == name)
 
+        def resolve_name_to_origin(name_id, env):
+            """Transitively resolve a Name to its origin subscript-base
+            name ('ut', 'vt', 'other') by following single-assignment
+            chains within the current function scope.  Handles:
+              a = ut[...]       → 'ut'
+              b = a             → 'ut' (follows aliases)
+              x = foo + bar     → 'other'
+            Returns None if the name is not defined in env.
+            """
+            seen = set()
+            while name_id in env and name_id not in seen:
+                seen.add(name_id)
+                origin = env[name_id]
+                if origin in ('ut', 'vt', 'other'):
+                    return origin
+                # Alias: follow the chain.
+                name_id = origin
+            return None
+
+        def build_origin_env(func_node):
+            """Walk a function body and build a Name → origin map.
+            Origin is 'ut' / 'vt' if Name was assigned from a
+            subscript of `ut` / `vt`, otherwise an alias target name
+            (for transitive resolution) or 'other'."""
+            env = {}
+            for stmt in ast.walk(func_node):
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                        and isinstance(stmt.targets[0], ast.Name):
+                    target = stmt.targets[0].id
+                    rhs = stmt.value
+                    if is_subscript_of(rhs, 'ut'):
+                        env[target] = 'ut'
+                    elif is_subscript_of(rhs, 'vt'):
+                        env[target] = 'vt'
+                    elif isinstance(rhs, ast.Name):
+                        # Alias: record the aliased name (resolved later).
+                        env[target] = rhs.id
+                    else:
+                        env[target] = 'other'
+            return env
+
+        def add_operand_origin(node, env):
+            """Classify a BinOp operand as 'ut', 'vt', or 'other'.
+            Handles direct subscripts AND Name references that
+            transitively alias a ut/vt subscript."""
+            if is_subscript_of(node, 'ut'):
+                return 'ut'
+            if is_subscript_of(node, 'vt'):
+                return 'vt'
+            if isinstance(node, ast.Name):
+                return resolve_name_to_origin(node.id, env) or 'other'
+            return 'other'
+
         def has_ut_plus_vt_crossterm(tree):
-            """Walk the AST looking for `ut[...] + vt[...]` or
-            `vt[...] + ut[...]` — the signature cross-term of d_sw4's
-            corner KE fix from Fortran line 1446."""
+            """Walk every function in the tree.  For each function,
+            build a local def-use map of Names aliased to ut/vt
+            subscripts.  Then scan BinOp(Add) in the function body
+            and flag if operands resolve to {'ut', 'vt'} in either
+            order — including via single-assignment temp-variable
+            aliasing.
+
+            This closes iter-692's documented gap: a Fortran-style
+            reintroduction that factors `a = ut[...]; b = vt[...];
+            (a + b) * u[...]` is now detected because `a` resolves
+            to 'ut' and `b` resolves to 'vt' via the env.
+            """
+            # Walk top-level code too: treat the module body as a
+            # pseudo-function scope.
+            scopes = [tree]
             for node in ast.walk(tree):
-                if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-                    l, r = node.left, node.right
-                    if (is_subscript_of(l, 'ut') and is_subscript_of(r, 'vt')):
-                        return True
-                    if (is_subscript_of(l, 'vt') and is_subscript_of(r, 'ut')):
-                        return True
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scopes.append(node)
+            for scope in scopes:
+                env = build_origin_env(scope)
+                for node in ast.walk(scope):
+                    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                        lo = add_operand_origin(node.left, env)
+                        ro = add_operand_origin(node.right, env)
+                        if {lo, ro} == {'ut', 'vt'}:
+                            return True
             return False
 
         offenders = []
