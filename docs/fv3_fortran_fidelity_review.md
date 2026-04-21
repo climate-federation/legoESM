@@ -1103,7 +1103,7 @@ With iter-761's matrix config (damp_v=0.06, nord_v=2, 8× div_damp), the residua
 | 4    | 1.16e−01        | (1, 34)       | +38.9°  | −135.0° |
 | 5    | 1.16e−01        | (34, 34)      | −38.9°  | +45.0°  |
 
-**Decisive conclusion.**  ALL 12 top peaks are at **cube corners** (lat ±35.26° = arctan(1/√2), matching the canonical cube-vertex latitude to 0.1°).  Zero peaks within 5° of polar ±86°.  Mean peak latitude = 35.33°.
+**Decisive conclusion.**  ALL 12 top peaks are at **cube corners** (lat ±35.26° = arctan(1/√2), matching the canonical cube-vertex latitude to 0.1°).  Zero peaks within 5° of polar ±86°.  Mean peak latitude = 35.33°.  Longitude-distance to nearest cube-vertex longitude (±45° or ±135°): mean 3.00°, max 4.00° — peaks cluster tightly around the 8 cube vertex longitudes.
 
 **Polar mode B is ELIMINATED.**  Iter-744's characterisation (polar mode-4 artifact at ±86°) no longer applies — the iter-760 Fortran-faithful del-n-on-vorticity damping has eliminated mode B entirely.  What remains at 0.159 m/s is mode A (the 8 cube vertices where 3 faces meet) exclusively.
 

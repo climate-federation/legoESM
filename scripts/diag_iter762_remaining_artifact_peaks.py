@@ -101,12 +101,20 @@ near_polar = np.sum(np.abs(np.abs(top_lats) - 86.0) < 5.0)
 print(f"Peaks within 5° of cube-corner ±{cube_lat:.0f}°: {near_cube}/{top_k}")
 print(f"Peaks within 5° of polar ±86°: {near_polar}/{top_k}")
 
-# Longitude distribution (mod 90°)
+# Longitude distribution: distance to nearest cube-corner longitude.
+# On the standard cubed sphere the 8 cube vertices project to
+# lon ∈ {+45, +135, -45, -135}° (i.e. every 90° offset from 45°).
+# Compute the signed distance to the nearest of these: shift by 45°,
+# take mod 90, re-shift so 0 means "exactly at a cube-corner lon".
 top_lons = np.array([lon_target[np.unravel_index(ix, v_ll.shape)[1]]
                      for ix in idx])
-lon_mod90 = np.abs(top_lons) % 90.0
-# Prefer smaller between lon_mod90 and 90 - lon_mod90
-lon_dist_cube = np.minimum(lon_mod90, 90.0 - lon_mod90)
-print(f"\nMean longitude distance-to-nearest-45° axis: "
-      f"{np.mean(lon_dist_cube):.2f}° "
-      f"(cube corners at 45° lon multiples, mid-edge midpoints at 0° or 90°)")
+lon_plus_45 = (top_lons + 45.0) % 90.0       # ∈ [0, 90)
+lon_dist_cube = np.minimum(lon_plus_45, 90.0 - lon_plus_45)
+# This measures the angular distance from each peak to its nearest
+# cube-vertex longitude (±45°, ±135°).  For peaks AT those longitudes
+# the distance is 0.
+print(f"\nMean longitude distance to nearest cube-vertex longitude "
+      f"(±45° or ±135°): {np.mean(lon_dist_cube):.2f}° "
+      f"(0° = exactly at a cube vertex).")
+print(f"Max distance: {np.max(lon_dist_cube):.2f}°; "
+      f"min: {np.min(lon_dist_cube):.2f}°.")
