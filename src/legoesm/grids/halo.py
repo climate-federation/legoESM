@@ -342,11 +342,20 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     idx = jnp.arange(n, dtype=offsets_1d.dtype) + offsets_1d
     idx = jnp.clip(idx, 0.0, n - 1.0)
 
+    # Iter-724: support 4D strips `(n, nlev)` by broadcasting weights
+    # along a trailing level axis.  Prior to iter-724 this function
+    # assumed `strip.shape == (n,)`; callers passing multi-level
+    # strips got a latent broadcast failure when offsets != None
+    # (caught by Codex iter-723 review on the new halo=3 4D path).
+    extra_dims = strip.ndim - 1
+    broadcast_shape = (n,) + (1,) * extra_dims
+
     if n < 3:
         # Fall back to linear for very coarse grids
         lo = jnp.clip(jnp.floor(idx).astype(jnp.int32), 0, n - 2)
         w = jnp.clip(idx - lo.astype(offsets_1d.dtype), 0.0, 1.0)
-        return ((1.0 - w) * strip[lo] + w * strip[lo + 1]).astype(strip.dtype)
+        w_b = w.reshape(broadcast_shape)
+        return ((1.0 - w_b) * strip[lo] + w_b * strip[lo + 1]).astype(strip.dtype)
 
     # 3-point Lagrange: stencil centre clamped to [1, n-2] so all
     # three indices {jc-1, jc, jc+1} are in bounds.
@@ -355,9 +364,9 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     # With float32 offsets + float64 data, the float32 weights have
     # sum(w) = 1 ± O(1e-7), causing ~0.06 Pa error for 6e5 Pa fields.
     f = (idx - jc.astype(offsets_1d.dtype)).astype(strip.dtype)
-    c_m1 = 0.5 * f * (f - 1.0)
-    c_0 = 1.0 - f * f
-    c_p1 = 0.5 * f * (f + 1.0)
+    c_m1 = (0.5 * f * (f - 1.0)).reshape(broadcast_shape)
+    c_0 = (1.0 - f * f).reshape(broadcast_shape)
+    c_p1 = (0.5 * f * (f + 1.0)).reshape(broadcast_shape)
     interp = c_m1 * strip[jc - 1] + c_0 * strip[jc] + c_p1 * strip[jc + 1]
     return interp.astype(strip.dtype)
 
@@ -644,6 +653,22 @@ def pad_halo_4d(
     # `_pad_halo_local_h3_4d` (below).  MPI halo=3 4D already supported
     # via `pad_halo_mpi_4d` (iter-630).  SPMD halo=3 4D still not
     # implemented (checked below).
+
+    # Iter-724 (Codex iter-723 finding): validate halo=3 interp_offsets
+    # shape at the 4D entry mirroring the scalar `pad_halo` guard
+    # (iter-500/501).  Without this, a wrongly-shaped offsets array
+    # would fail cryptically in `_pad_halo_local_h3_4d`'s strip
+    # loop.  Matches the scalar guard at line 531.  halo=1/2 are
+    # NOT checked (legacy callers pass h1-shaped offsets with halo=2
+    # per existing precedent in `pad_halo`).
+    if interp_offsets is not None and halo == 3:
+        n = data.shape[1]
+        expected = (6, 4, 3, n)
+        if tuple(interp_offsets.shape) != expected:
+            raise ValueError(
+                f"halo=3 expects interp_offsets of shape {expected} "
+                f"(6 faces, 4 edges, 3 halo depths, n = data.shape[1]); "
+                f"got shape={tuple(interp_offsets.shape)}.")
 
     offsets = None if duogrid is not None else interp_offsets
 

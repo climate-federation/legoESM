@@ -1615,6 +1615,36 @@ Codex stop-time review flagged iter-719: "The rewritten diagnostic still overcla
 
 No source-code changes.  Regression suite unchanged at 165 tests; all pass.
 
+### Iter-724 — fix broken `pad_halo_4d(halo=3, interp_offsets=...)` from iter-723 + close latent h=2 4D bug
+
+Codex stop-time review flagged iter-723: "pad_halo_4d(halo=3, interp_offsets=...) is broken in the new turn's code".  Confirmed: my new `_pad_halo_local_h3_4d` calls `_interp_strip` which was designed only for 1D strips of shape `(n,)`.  When a 4D strip of shape `(n, nlev)` is passed, broadcasting fails: `c_m1 * strip[jc - 1]` tries to combine `(n,)` weights with `(n, nlev)` strip.
+
+Investigation found the same broken broadcast in the PRE-EXISTING `_pad_halo_local_h2_4d` path — any caller passing `halo=2` 4D data with non-None `interp_offsets` (not suppressed by `duogrid`) would hit the same crash.  Latent bug never exercised because production callers always pass `duogrid`.
+
+**Fix** (iter-724): rewrote `_interp_strip` to handle N-D strips by broadcasting weights along trailing dimensions.  Key change:
+```python
+extra_dims = strip.ndim - 1
+broadcast_shape = (n,) + (1,) * extra_dims
+c_m1 = (0.5 * f * (f - 1.0)).reshape(broadcast_shape)
+# etc.
+interp = c_m1 * strip[jc - 1] + ...
+```
+
+The 1D case (existing callers) is unchanged — `extra_dims = 0`, `broadcast_shape = (n,)`, `reshape((n,))` is a no-op.  The 4D case now works: `broadcast_shape = (n, 1)`, weights broadcast correctly against `(n, nlev)` strips.
+
+**Also added**: halo=3 interp_offsets shape validation at `pad_halo_4d` entry mirroring the scalar `pad_halo` guard (iter-500/501) — catches wrongly-shaped offsets before they reach the interior loop.
+
+**Verified**:
+- halo=3 4D + offsets works, bit-identical to per-level 2D + offsets (max diff = 0.0).
+- halo=2 4D + offsets now works (was latent bug, now fixed).
+- halo=1 4D + offsets unchanged (uses a different inlined interpolation, not `_interp_strip`).
+- Existing 165 regression tests pass.
+- Shape validation rejects `(6, 4, n)` (h1-shape), `(6, 4, 3, n+1)` (wrong grid), `(6, 4, 2, n)` (h2-shape) for halo=3.
+
+No production behavior change for existing callers (all pass `duogrid` which suppresses offsets, OR they use halo=1's inlined path).  The fix unlocks `pad_halo_4d(halo=3, interp_offsets=...)` for future FB-chain callers that need h=3 interpolated halo without going through the MPI path.
+
+Source change: +13 lines in `_interp_strip` + 11 lines of validation in `pad_halo_4d`.  Regression suite unchanged at 165 tests; all pass.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
