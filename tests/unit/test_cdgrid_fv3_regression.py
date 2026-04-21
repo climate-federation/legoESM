@@ -3951,50 +3951,84 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"baseline was 2.07e-4."))
 
     def test_matrix_script_uses_iter761_canonical_config(self):
-        """Iter-761b: source-inspection sentinel that actually detects
-        a rollback of the matrix-default config.
+        """Iter-761b/c: source-inspection sentinel that actually
+        detects a rollback of the matrix-default config for the
+        W2/W5 shallow-water test branch specifically.
 
-        The iter-761 numerical-ceiling test above runs its own
-        hardcoded config; reverting the matrix script to legacy values
-        would NOT make that test fail.  This source-inspection test
-        reads `scripts/run_atmosphere_test_matrix.py` and verifies
-        the canonical W2/W5 shallow-water CDGridShallowWaterConfig
-        block still contains the iter-761 Fortran-faithful tokens:
-          - `hyperdiff_coeff=0.0` (iter-760: del6 replaces bilaplacian)
-          - `damp_v=0.06` (iter-755b ablation optimum)
-          - `nord_v=2` (iter-755b ablation optimum)
-          - `8.0 * _div_damp_cube(n)` (iter-761 tuning)
-
-        If any of these tokens is absent, a future edit has drifted
-        the canonical config away from the iter-761 tuning and this
-        test fires before the regression accumulates.
+        Iter-761c fix: the earlier iter-761b implementation checked
+        required tokens anywhere in the matrix script.  That was
+        insufficient because:
+          - The cosine bell config (line 1561) also has
+            `damp_v=0.06`, `nord_v=2`, `hyperdiff_coeff=0.0`, so a
+            revert of ONLY the W2/W5 block would be missed.
+          - A comment line could incidentally contain the tokens.
+        Iter-761c locates the W2/W5 CDGridShallowWaterConfig BLOCK
+        by anchoring to the `williamson_test2(grid) if test_num == 2`
+        marker (unique to the W2/W5 branch) and verifies the nearest
+        preceding `CDGridShallowWaterConfig(...)` instantiation
+        contains all iter-761 tokens.
         """
         import pathlib
+        import re
         matrix_path = (
             pathlib.Path(__file__).resolve().parent.parent.parent
             / "scripts" / "run_atmosphere_test_matrix.py")
         assert matrix_path.is_file(), (
             f"Matrix script not found at {matrix_path}")
-        text = matrix_path.read_text()
+        lines = matrix_path.read_text().splitlines()
 
-        # Locate the W2/W5 SW config block.  The sentinel tokens
-        # should all be present within a reasonable span of each
-        # other in the same CDGridShallowWaterConfig block.
+        # Locate the W2/W5 branch anchor line.  This text is unique
+        # to the W2/W5 branch of the matrix script.
+        anchor_needle = (
+            "williamson_test2(grid) if test_num == 2 "
+            "else williamson_test5(grid)")
+        anchor_idx = None
+        for i, line in enumerate(lines):
+            if anchor_needle in line:
+                anchor_idx = i
+                break
+        self.assertIsNotNone(
+            anchor_idx,
+            msg=(f"W2/W5 anchor '{anchor_needle}' not found in matrix "
+                 f"script.  Has the W2/W5 test branch been removed?"))
+
+        # Scan backwards from the anchor to find the nearest
+        # `CDGridShallowWaterConfig(` opening paren.
+        config_open_idx = None
+        for i in range(anchor_idx, -1, -1):
+            if re.search(r"CDGridShallowWaterConfig\(", lines[i]):
+                config_open_idx = i
+                break
+        self.assertIsNotNone(
+            config_open_idx,
+            msg=("No CDGridShallowWaterConfig(...) block precedes the "
+                 "W2/W5 anchor in matrix script."))
+
+        # Collect the config block lines up to matching close paren.
+        # (Shallow: assume the config body ends within ~20 lines.)
+        config_body = "\n".join(
+            lines[config_open_idx:config_open_idx + 20])
+        # Truncate at first unbalanced close-paren-followed-by-empty
+        # but simpler: just take the first 20 lines which always
+        # suffice for this small config.
+
         required_tokens = [
             "hyperdiff_coeff=0.0",
             "damp_v=0.06",
             "nord_v=2",
             "8.0 * _div_damp_cube(n)",
         ]
-        missing = [t for t in required_tokens if t not in text]
+        missing = [t for t in required_tokens if t not in config_body]
         self.assertEqual(
             missing, [],
-            msg=(f"scripts/run_atmosphere_test_matrix.py no longer "
-                 f"contains iter-761 canonical tokens: missing={missing}. "
-                 f"A rollback of the iter-760/761 Fortran-faithful "
-                 f"del6 + 8×div_damp tuning has occurred.  See "
-                 f"docs/fv3_fortran_fidelity_review.md iter-761 "
-                 f"for rationale."))
+            msg=(f"scripts/run_atmosphere_test_matrix.py W2/W5 "
+                 f"CDGridShallowWaterConfig block at line "
+                 f"{config_open_idx + 1} is missing iter-761 canonical "
+                 f"tokens: {missing}.  A rollback of the iter-760/761 "
+                 f"Fortran-faithful del6 + 8×div_damp tuning for "
+                 f"W2/W5 has occurred.  See "
+                 f"docs/fv3_fortran_fidelity_review.md iter-761 for "
+                 f"rationale."))
 
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
