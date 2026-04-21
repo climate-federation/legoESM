@@ -510,3 +510,45 @@ Either mechanism (or both) drives the polar peak; the Fortran-faithful fix is ro
 **Hard-stop on further mechanism diagnostic.**  Iter-752 will stop diagnosing and proceed directly to the del6_vt_flux port.  The mechanism story may never be cleanly resolvable without first implementing the fix and seeing which piece changes.  The cost of one more failed mechanism diagnostic exceeds the cost of starting the actual port.
 
 **Iter-751 deliverable.**  `scripts/diag_iter751_bilaplacian_validation.py` checked in.  Honestly reports the mixed evidence and hard-stops further mechanism diagnostic work.
+
+### Iter-752 — port core `_del6_vt_flux` standalone (first source-code step of the Fortran-faithful fix)
+
+Per iter-751's hard-stop on further diagnostic, iter-752 begins the actual Fortran-faithful fix: port `del6_vt_flux` from `sw_core.F90:2008-2121` to Python.  This iter delivers ONLY the core standalone algorithm, tested in isolation.  Wiring into `fv3_sw_tendencies` is iter-753+.
+
+**New module.**  `src/legoesm/core/fv3_del6_vt_flux.py` (155 lines) providing:
+1. `compute_del6_metrics(cdgrid)` → `(del6_u, del6_v)` using Fortran's non-USE_SG formula from `fv_grid_utils.F90:713, 725`:
+   ```
+   del6_u(i,j) = sina_v(i,j) * dx(i,j) / dyc(i,j)    at v-edge (6, n, n+1)
+   del6_v(i,j) = sina_u(i,j) * dy(i,j) / dxc(i,j)    at u-edge (6, n+1, n)
+   ```
+2. `_del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid)` → `(fx2, fy2)` — the Fortran algorithm verbatim:
+   - Initial `d2 = damp * q` (vorticity scaled by damping coefficient).
+   - Pre-loop `fx2 = del6_v * (d2_west - d2_east)`, `fy2 = del6_u * (d2_south - d2_north)`.
+   - Iterate `nord` times: update `d2 = rarea * (fx2 - fx2_east + fy2 - fy2_north)`, then recompute `fx2, fy2` with SIGN FLIPPED as per `sw_core.F90:2099, 2112`.
+   - Return `(fx2, fy2)` — edge diffusive fluxes to be added to (u, v) as circulation increments downstream.
+
+**New tests.**  `tests/test_fv3_del6_vt_flux.py` — 6 unit tests covering:
+- Metric shapes `(6, n, n+1)` / `(6, n+1, n)` correct.
+- Metric values positive (product of sina × dx/dyc positive quantities).
+- Del-2 flux of a CONSTANT field is zero (centred difference of constant).
+- Output shapes correct for all `nord ∈ {0, 1, 2}`.
+- Linearity in `damp` preserved: doubling `damp` doubles output at all `nord`.
+- Zero input gives zero output.
+
+All 6 tests PASS.
+
+**Matrix + ocean baselines unchanged** (the standalone module is not yet wired into the production path).  W2 v_ll_Linf = 0.303 m/s.
+
+**What's left for iter-753+:**
+1. Compute cell-mean vorticity `wk = rarea * (vt - vt_south - ut + ut_east)` where `vt = u*dx, ut = v*dy` (circulation form).  `operators_cdgrid.py` already has `zeta` from `dgrid_vorticity` — can reuse or port Fortran's exact stencil.
+2. Compute `damp4 = (damp_v * da_min_c)^(nord_v+1)` — need a `damp_v` and `nord_v` config entry.  Suggestion: use existing `hyperdiff_coeff` rescaled appropriately for initial smoke test.
+3. Wire `_del6_vt_flux` into `fv3_sw_tendencies` as an OPTIONAL alternative to the existing `laplacian_compact`-on-geographic-winds block (controlled by a config flag, so both paths can be measured head-to-head).
+4. Apply returned fluxes as circulation increments to `u_d, v_d` — this requires mapping the cell-centre fx2, fy2 back to D-grid u, v positions.  Fortran does `u(i,j) += vt(i,j); v(i,j) -= ut(i,j)` at D-grid positions directly.
+5. Run ablation (iter-745 script) + matrix + visual to compare polar peak reduction.
+
+**Iter-752 deliverables.**
+- `src/legoesm/core/fv3_del6_vt_flux.py` — standalone unit (155 lines).
+- `tests/test_fv3_del6_vt_flux.py` — 6 passing unit tests.
+- W2/W5/cosine-bell matrix still PASS; ocean rest 12/12 still at machine precision; W2 v_ll_Linf = 0.303 m/s (unchanged — standalone unit not yet called by production).
+
+**Process.**  First source-code change in seven iters of diagnostic.  Smallest viable step: build + test the core unit before wiring.  Iter-753's wiring is the next concrete step.
