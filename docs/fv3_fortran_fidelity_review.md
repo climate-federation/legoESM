@@ -892,3 +892,45 @@ This matches what Fortran's design anticipates.  `sw_core.F90`'s `del6_vt_flux` 
 **Process note (three same-iteration falsification cycles now).**  iter-745 → 745b (halo rotation disproved), iter-746 → 746b (tautological test, retracted), iter-747 → 748 (wrong mechanism attribution, corrected).  Each Codex stop-time review caught a real flaw.  The iter-748 deliverable is the CORRECT mechanism story + the reconfirmed fix prescription.  Iter-749+ begins the actual port.
 
 **Iter-748 deliverable.**  `scripts/diag_iter748_proper_mechanism_isolation.py` checked in.  Replaces iter-747's mis-attribution with a three-way isolation test that cleanly separates FD-formula error from rotation effects from angle-Laplacian effects.
+
+### Iter-749 — correct iter-748: mechanism is scalar-Laplacian-of-vector-component, NOT FD vs spherical
+
+Codex stop-time review on iter-748 flagged: **"the new diagnostic doesn't test the actual 31× production path, and the checked-in writeup already misstates one of its own results."**  Correct on both counts.  Iter-748 Test A compared single Laplacians (16× face4/face0 ratio on `u_0*cos(lat)`), but iter-747's 31× was on the FULL pipeline `hyp_dv = -hyp_coeff * bilap_u_local` (bilaplacian + rotate-back).  Iter-748 conflated these different quantities when concluding the mechanism.
+
+**Iter-749 direct test.**  `scripts/diag_iter749_full_pipeline_metric_test.py` runs the EXACT production hyperdiff pipeline twice on `u_east = u_0*cos(lat)`:
+
+(A) Production: `laplacian_compact` (flat-grid FD)
+(B) Replacement: metric-aware flux-form FV Laplacian (area-weighted divergence of gradient, Fortran-del6-style)
+
+Both pipelines run rotate → lap → bilap → rotate-back and compute the final `hyp_dv` per face.
+
+**Result:**
+
+| Pipeline                               | face 0 max\|hyp_dv\| | face 4 max\|hyp_dv\| | Face 4 / face 0 ratio |
+|----------------------------------------|-----------------------|-----------------------|-----------------------|
+| (A) `laplacian_compact` (production)   | 3.33 × 10⁻⁷          | 1.03 × 10⁻⁵          | **31.00×**            |
+| (B) fv_laplacian (metric-aware)        | 3.61 × 10⁻⁷          | 1.03 × 10⁻⁵          | **28.68×**            |
+
+**The polar bias is essentially unchanged (31× → 28.68×) when switching from flat-grid FD to a metric-aware flux-form Laplacian.**  The iter-748 attribution ("flat-grid FD vs spherical Laplacian is the mechanism") is **falsified** by this direct test.
+
+**Correct mechanism (iter-749).**  Both `laplacian_compact` and `fv_laplacian` are SCALAR Laplacians.  Applied to `u_east = u_0*cos(lat)` — which is a VECTOR COMPONENT, not a scalar — they produce polar-singular behaviour because:
+
+- The true SCALAR spherical Laplacian of `u_0*cos(lat)` is `∇²f = -u_0 * cos(2*lat) / (cos(lat) * a²)`, which diverges as `lat → ±90°` (1/cos(lat) singularity).
+- Any reasonable approximation to the scalar Laplacian must capture this singularity → large values at the polar face.
+- The VECTOR Laplacian in spherical coordinates has EXTRA metric terms (`Γ`-type Christoffel corrections) that cancel the scalar divergence and give a physically meaningful result for `u_east`.
+- Scalar-Laplacian-applied-to-vector-component is NOT a vector Laplacian; it is not physically meaningful, and its pole behaviour is an ARTIFACT of treating a vector component as a scalar.
+
+This is why Fortran's `d_sw6 → del6_vt_flux` (Codex Q1) damps VORTICITY — a true scalar field that is not pole-singular.  The Fortran design never applies a scalar Laplacian to a vector component, precisely to avoid this issue.
+
+**Fix prescription (unchanged, re-affirmed with correct mechanism).**  The Python production hyperdiff block is structurally wrong because it treats vector components as scalars.  No scalar Laplacian (flat-grid FD, metric-aware FV, or analytic spherical) will fix this.  The ONLY Fortran-faithful replacement is `del6_vt_flux` on cell-mean vorticity — which is what Codex Q3 already recommended.
+
+**Two iter-748 sentences to retract as wrong:**
+
+1. "The 31× polar bias measured in iter-747 Test A is caused by the flat-grid FD Laplacian being an inaccurate approximation to the spherical Laplacian."  — WRONG.  iter-749 shows the metric-aware Laplacian gives 28.68× bias, not <3×.  FD vs spherical is not the primary mechanism.
+2. "Python's `laplacian_compact` uses `hx_sq = (dx[i,j]/2)^2` as a per-cell denominator but no metric-aware flux form, so its accuracy degrades at cells with strong latitude gradient per face-local index."  — TECHNICALLY TRUE but MISLEADING.  Switching to the metric-aware flux form does not fix the polar bias.  The primary driver is the scalar-vs-vector issue, not the metric form.
+
+**Iter-749 deliverable.**  `scripts/diag_iter749_full_pipeline_metric_test.py` checked in.  Runs the full production hyperdiff pipeline twice (flat-grid FD and metric-aware FV) on the W2 exact IC and directly measures the per-face `hyp_dv`.  The near-identity of the two ratios (31× vs 28.68×) is the decisive evidence that the mechanism is scalar-Laplacian-of-vector-component, not FD-vs-spherical.
+
+**Confidence (iter-749 final).**  HIGH on "scalar Laplacian of `u_0*cos(lat)` is polar-singular regardless of FD vs metric-aware form" (Test A+B direct measurement).  HIGH on "the Fortran fix `del6_vt_flux` on vorticity is correct because vorticity is a true scalar with no polar singularity" (structural argument + Codex citations).  HIGH on "iter-748's flat-grid-FD mechanism attribution is wrong" (direct falsification).
+
+**Process note (four falsify-own-claim cycles now in 5 iters).**  iter-745→745b (halo rotation), iter-746→746b (tautological test), iter-747→748 (angle rotation mis-attribution), iter-748→749 (FD-vs-spherical mis-attribution).  Four successive Codex stop-time catches.  The FIX prescription (del6_vt_flux port) has been stable and correct since iter-747; only the MECHANISM story has required iteration.  Iter-750+ should proceed directly to the port without further diagnostic.
