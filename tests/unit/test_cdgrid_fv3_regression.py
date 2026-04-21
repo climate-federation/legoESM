@@ -9037,6 +9037,72 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                                  f"weights violate partition of unity."))
 
 
+class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
+    """Iter-707 document + lock a known Fortran-fidelity gap in the
+    adaptive Smagorinsky path of d_sw5.
+
+    Fortran `sw_core.F90:1795` calls `a2b_ord4(wk, vort, ...)` — a
+    4th-order interpolation of relative vorticity from A-grid cell
+    centres to B-grid corners, used in the composite damping formula
+    `vort = abs(dt) * sqrt(delpc**2 + vort**2)` (line 1799) when
+    `dddmp > 1e-5`.
+
+    Python's counterpart at `_d_sw5_corner_divergence` (fv3_sw_core.py:
+    1085) is `_interp_center_to_corner(wk, cdgrid)` — a simple
+    **4-point (2x2) average** = `0.25 * (f[i,j] + f[i+1,j] + f[i,j+1]
+    + f[i+1,j+1])`, which is 2nd-order accurate.
+
+    **Fidelity gap**: at `dddmp > 1e-5`, Python's Smagorinsky
+    coefficient uses a 2nd-order corner vorticity instead of Fortran's
+    4th-order one.  In configs where `dddmp = 0` (default W2/W5 shallow
+    water), this path is inactive and the gap has no effect.  In configs
+    with adaptive Smag enabled (dry tests, Held-Suarez), Python will
+    give different damping magnitudes at corners.
+
+    This test LOCKS the current Python behavior (2nd-order 4-point
+    average) so silent changes are visible.  If Python is ever upgraded
+    to a 4th-order interpolation, this test will fail — at which point
+    the test should be updated AND the review-doc entry removed.
+    """
+
+    def test_interp_center_to_corner_is_4point_average(self):
+        """Verify Python's _interp_center_to_corner returns the
+        4-point average `0.25*(f[i,j] + f[i+1,j] + f[i,j+1] + f[i+1,j+1])`
+        at an INTERIOR corner (where halo effects are negligible)."""
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.operators_cdgrid import _interp_center_to_corner
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(707)
+        field = jnp.asarray(rng.standard_normal((6, n, n)))
+        field_np = np.asarray(field)
+        corners = np.asarray(_interp_center_to_corner(field, cdgrid))
+        self.assertEqual(corners.shape, (6, n + 1, n + 1))
+
+        # Interior corner (i, j) in [2, n-1] — far from face edges so
+        # halo exchange doesn't perturb the average.
+        for i in range(2, n - 1):
+            for j in range(2, n - 1):
+                expected = 0.25 * (field_np[:, i - 1, j - 1]
+                                    + field_np[:, i, j - 1]
+                                    + field_np[:, i - 1, j]
+                                    + field_np[:, i, j])
+                got = corners[:, i, j]
+                diff = float(np.max(np.abs(got - expected)))
+                self.assertLess(diff, 1e-12,
+                    msg=(f"_interp_center_to_corner at interior corner "
+                         f"({i}, {j}) differs from 4-point average by "
+                         f"{diff:.3e}.  If this is an intentional upgrade "
+                         f"to 4th-order (a2b_ord4), update iter-707 "
+                         f"invariant and review-doc entry."))
+
+
 class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
     """Iter-703 structural lock: Fortran `sw_core.F90:1742-1777`
     d_sw5 non-duogrid corner corrections are ABSENT in Python.

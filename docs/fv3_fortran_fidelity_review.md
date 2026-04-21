@@ -1391,6 +1391,24 @@ Python's `synchronize_cgrid_fluxes` (halo.py:1815) exactly reproduces Fortran's 
 
 No source-code changes in iter-706; audit + documentation only.  Regression suite unchanged at 159 tests; all pass.
 
+### Iter-707 — document Fortran-fidelity gap: `a2b_ord4` 4th-order vs Python 2nd-order
+
+Audit of `_d_sw5_corner_divergence` nord>=1 adaptive Smagorinsky path revealed a Fortran-fidelity gap:
+
+**Fortran** (`sw_core.F90:1795`): `call a2b_ord4(wk, vort, ...)` — **4th-order** interpolation of A-grid relative vorticity to B-grid corners, used in `vort(i,j) = abs(dt)*sqrt(delpc² + vort²)` (line 1799) when `dddmp > 1e-5`.
+
+**Python** (`fv3_sw_core.py:1085`): `wk_corner = _interp_center_to_corner(wk, cdgrid)` — a simple **4-point (2x2) average** at `operators_cdgrid.py:868`: `0.25*(f[i,j] + f[i+1,j] + f[i,j+1] + f[i+1,j+1])`.  This is **2nd-order** accurate, not 4th-order.
+
+**Impact**:
+- In default shallow-water configs (W2, W5, cosine bell: `dddmp = 0`), this path is INACTIVE.  The gap has no effect on current blocker reproductions.
+- In adaptive-Smagorinsky configs (dry tests, Held-Suarez: `dddmp > 1e-5`), Python's damping coefficient at corners uses 2nd-order vorticity instead of 4th-order.  Smagorinsky is a non-linear adaptive quantity, so this O(Δx²) truncation error propagates into damping magnitude.
+
+**Decision**: document as a known fidelity gap (not blocker-relevant for current work).  Upgrading to 4th-order would require porting Fortran's `a2b_ord4` (a2b_edge.F90:50-330) which is a substantial standalone operator with its own cube-corner halo and boundary treatment.  Deferred until a config with adaptive Smagorinsky becomes a blocker.
+
+**Lock** (`TestInterpCenterToCornerOrderIter707`, 1 test): verifies Python's `_interp_center_to_corner` returns the 4-point average at interior corners with `atol=1e-12`.  If Python is ever upgraded to 4th-order, this test fails — at which point it should be updated AND this review-doc entry removed.
+
+No source-code changes; documentation + regression lock.  Regression suite now at **160 tests** (159 + 1 new order lock); all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
