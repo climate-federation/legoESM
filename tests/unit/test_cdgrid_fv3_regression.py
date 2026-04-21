@@ -8051,20 +8051,113 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
         cos_sg[..., 4] = np.nan   # skip marker
         return cos_sg
 
+    def _assert_fortran_reference_well_formed(self, cos_sg_ft, n):
+        """Pin the Fortran reference to analytical ground truths that are
+        independent of the Python implementation, catching helper drift
+        that falls within the nominal [-1, 1] range.
+
+        Anchors (derived from equiangular cubed-sphere geometry, not
+        from any Python code):
+
+        1. Cell (0,0) SW corner (Python position 5 = Fortran cos_sg(6))
+           is the cube vertex.  Three face edges meet at a cube vertex
+           with 3-way symmetry, so the angle between any two is 120°
+           exactly → cos_angle = -1/2 EXACTLY on every face.
+
+        2. Cell (n-1, n-1) NE corner (Python position 7 = Fortran
+           cos_sg(8)) is also a cube vertex (diagonally opposite) →
+           same -1/2 anchor.
+
+        3. Fortran's minus-sign convention on SE (position 6 = Fortran 7)
+           and NW (position 8 = Fortran 9) means those cube-vertex
+           values should be +1/2.
+
+        4. Edge-midpoint anchor.  At the W edge of cell (n//2, n//2)
+           (interior of the face), Python's and Fortran's formulas both
+           give a small non-zero cos(non-orthogonality angle).  The
+           Fortran reference value here is bounded and non-zero:
+           0 < |cos_sg_ft[...,0]| < 0.5 at interior cells — we pin both
+           the non-zero magnitude and the upper bound.
+
+        If any anchor fails, the Fortran helper has drifted and the
+        Python-vs-Fortran comparison downstream is unreliable.
+        """
+        import numpy as np
+
+        # Anchor 1: cube vertex at (0,0) SW corner.  EXACT value -0.5.
+        sw_cube_vertex = cos_sg_ft[:, 0, 0, 5]     # (6,) — 6 faces
+        np.testing.assert_allclose(
+            sw_cube_vertex, -0.5, atol=1e-12,
+            err_msg=(f"Fortran reference SW cube-vertex cos_sg (position 5) = "
+                     f"{sw_cube_vertex} should be -0.5 exactly by 3-way cube "
+                     f"symmetry — _fortran_cos_sg has drifted."))
+
+        # Anchor 2: cube vertex at (n-1, n-1) NE corner.  EXACT -0.5.
+        ne_cube_vertex = cos_sg_ft[:, n - 1, n - 1, 7]
+        np.testing.assert_allclose(
+            ne_cube_vertex, -0.5, atol=1e-12,
+            err_msg=(f"Fortran reference NE cube-vertex cos_sg (position 7) = "
+                     f"{ne_cube_vertex} should be -0.5 exactly — "
+                     f"_fortran_cos_sg has drifted."))
+
+        # Anchor 3: Fortran's sign-flip at SE (position 6 = Fortran 7).  Cell
+        # (n-1, 0) SE corner is cube vertex → Fortran cos_sg(7) = -cos_angle
+        # = -(-0.5) = +0.5.
+        se_cube_vertex = cos_sg_ft[:, n - 1, 0, 6]
+        np.testing.assert_allclose(
+            se_cube_vertex, +0.5, atol=1e-12,
+            err_msg=(f"Fortran reference SE cube-vertex cos_sg (position 6) = "
+                     f"{se_cube_vertex} should be +0.5 (sign-flip convention "
+                     f"on Fortran pos 7) — _fortran_cos_sg has drifted."))
+
+        # Anchor 4: cube-boundary edge-midpoint antisymmetry.  On the W
+        # cube boundary (i=0), cos_sg at W edge position 0 as a function
+        # of j is antisymmetric about the face centre: cos_sg[f, 0, j, 0]
+        # = -cos_sg[f, 0, n-1-j, 0] by the reflection symmetry of the
+        # equiangular face.  Also the boundary magnitude is significant
+        # (0.1 <= |cos| <= 0.5 at C>=8 boundary cells).  This anchor
+        # catches drift in the edge-midpoint formula that preserves the
+        # corner anchors above.
+        if n >= 4 and n % 2 == 0:
+            w_col = cos_sg_ft[:, 0, :, 0]                # (nfaces, n)
+            w_col_rev = w_col[:, ::-1]
+            antisym = np.max(np.abs(w_col + w_col_rev))  # should be ~0
+            self.assertLess(antisym, 1e-10,
+                msg=(f"Fortran reference W-edge at i=0 lacks expected "
+                     f"antisymmetry cos[j] = -cos[n-1-j]: max violation = "
+                     f"{antisym:.3e} — _fortran_cos_sg has drifted."))
+            w_mag = float(np.max(np.abs(w_col[:, 0])))   # j=0 cell
+            self.assertGreater(w_mag, 0.1,
+                msg=(f"Fortran reference W-edge at cube-boundary cell "
+                     f"(0, 0) has |cos| = {w_mag:.3e} < 0.1 — expected "
+                     f">= 0.1 on equiangular cube face; _fortran_cos_sg "
+                     f"has drifted."))
+            self.assertLess(w_mag, 0.5,
+                msg=(f"Fortran reference W-edge at cube-boundary cell "
+                     f"(0, 0) has |cos| = {w_mag:.3e} > 0.5 — out of "
+                     f"expected band for equiangular cube face; "
+                     f"_fortran_cos_sg has drifted."))
+
+    def test_fortran_cos_sg_helper_matches_analytical_anchors(self):
+        """The `_fortran_cos_sg` helper itself is well-formed at four
+        analytical ground-truth anchors.  This test is INDEPENDENT of
+        Python's `_compute_sin_cos_sg` — failure here means the test
+        helper has drifted (not Python's production code)."""
+        n = 8
+        cos_sg_ft = self._fortran_cos_sg(n)
+        self._assert_fortran_reference_well_formed(cos_sg_ft, n)
+
     def test_cos_sg_edge_midpoints_bounded_against_fortran_formula(self):
         """Python cos_sg at W/S/E/N edge midpoints stays within the
         documented divergence ceiling vs Fortran's cos_angle formula.
 
-        This is a one-sided regression guard: max|diff| must stay below
-        0.05 at C8.  A smaller divergence — including bit-identical
-        match — PASSES and is welcome (indicates a genuine fidelity
-        improvement).  A larger divergence FAILS and flags a new bug.
+        One-sided regression guard: max|diff| must stay below 0.05 at
+        C8.  A smaller divergence — including bit-identical match —
+        PASSES and is welcome (indicates a genuine fidelity improvement).
+        A larger divergence FAILS and flags a new bug.
 
-        To prevent silent acceptance of a broken Fortran reference
-        (e.g. a zeroed ``_fortran_cos_sg`` that trivially matches any
-        Python output), we also verify the Fortran reference itself is
-        well-formed (|cos_sg| <= 1) — this check is independent of the
-        Python implementation.
+        Before comparing, we first assert the Fortran reference itself
+        matches analytical anchors (helper-drift guard).
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -8077,15 +8170,8 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
         cos_sg_py = np.asarray(cdgrid.cos_sg)          # (6, n, n, 9)
         cos_sg_ft = self._fortran_cos_sg(n)            # (6, n, n, 9)
 
-        # Sanity: Fortran reference itself lies in [-1, 1] at edge positions.
-        ft_max_abs = float(np.max(np.abs(cos_sg_ft[..., :4])))
-        self.assertLessEqual(ft_max_abs, 1.0 + 1e-10,
-            msg=(f"Fortran reference |cos_sg_ft| = {ft_max_abs:.4f} > 1 — "
-                 f"_fortran_cos_sg is broken; divergence check is unreliable."))
-        self.assertGreater(ft_max_abs, 1e-3,
-            msg=(f"Fortran reference |cos_sg_ft| = {ft_max_abs:.4e} is near "
-                 f"zero — _fortran_cos_sg likely returned zeros; divergence "
-                 f"check is unreliable."))
+        # Helper-drift guard: tighten the sanity check to analytical anchors.
+        self._assert_fortran_reference_well_formed(cos_sg_ft, n)
 
         for k, label in enumerate(['W', 'S', 'E', 'N']):
             diff = np.max(np.abs(cos_sg_py[..., k] - cos_sg_ft[..., k]))

@@ -904,3 +904,18 @@ Codex stop-time review flagged iter-678's `test_cos_sg_edge_midpoints_divergence
 Documentation of the Python-vs-Fortran divergence moves fully into the class docstring and the iter-678 review entry.  Test logic itself no longer enforces the mismatch.
 
 No source-code changes; test-only correction.  Regression suite still at 126 tests; all pass.
+
+### Iter-680 — strengthen iter-679 test: pin Fortran reference to analytical anchors
+
+Codex stop-time review flagged iter-679's weakening: the sanity check `|cos_sg_ft|_max > 1e-3` is too loose — any drift that keeps the helper's output in the wide band [1e-3, 1] can slip through silently.
+
+**Fix** (iter-680): add analytical-anchor pinning derived from equiangular cubed-sphere geometry, independent of the Python implementation.  Four anchors (one of them new):
+
+1. **Cube vertex SW (position 5, cell (0,0))**: exact `-0.5` on every face by 3-way cube-vertex symmetry (3 face edges at 120°).  Tolerance `atol=1e-12`.
+2. **Cube vertex NE (position 7, cell (n-1,n-1))**: exact `-0.5` (diagonal vertex).
+3. **Cube vertex SE (position 6, cell (n-1,0))**: exact `+0.5` (Fortran's sign-flip convention on F90 position 7).
+4. **W-edge antisymmetry at cube boundary**: `cos_sg[f, 0, j, 0] = -cos_sg[f, 0, n-1-j, 0]` by face reflection symmetry, and `0.1 <= |cos_sg[f, 0, 0, 0]| <= 0.5` at C>=8 boundary cells.  This catches drift in the edge-midpoint formula that would preserve the corner anchors.
+
+These anchors are derived from pure geometry; they cannot be coincidentally satisfied by a broken helper unless the bug very specifically preserves the exact cube-vertex angles AND the face-symmetry structure.  Promoted the anchor-check into its own standalone test (`test_fortran_cos_sg_helper_matches_analytical_anchors`) AND called from the Python-vs-Fortran comparison so any helper drift fails both.
+
+No source-code changes; test-only strengthening.  Regression suite now at **127 tests** (126 + 1 new analytical-anchor test); all pass.
