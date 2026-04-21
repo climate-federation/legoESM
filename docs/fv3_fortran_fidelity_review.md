@@ -1419,6 +1419,35 @@ Codex stop-time review flagged iter-707 for shipping a lock that "misses the bra
 
 No source-code changes.  Regression suite now at **161 tests** (160 + 1 new); all pass.
 
+### Iter-709 — W2 status audit + production-lock health check
+
+After the iter-688..708 test-infrastructure sequence, ran a full health check of the W2/W5 production locks AND a fresh visual inspection via `scripts/diag_w2_visual.py` at C24 day 1.
+
+**Visual inspection** (no-damping diagnostic regime, `hyperdiff_coeff=0`, `div_damp=0`):
+- Production path (A-L + RK3): `h_err max=267 m²/s², v_north max=17.5 m/s`.
+- FB chain (csw + duogrid): `h_err max=1658 m²/s², v_north max=107.7 m/s` (4x worse than production).
+
+Both are far from the analytical W2 ideal (`v_north ≈ 0`); this is the no-damping regime where `boundary_fix` effect is small (iter-672 ratio 1.04).  The V-wind magnitudes are large in the diagnostic regime but the CANONICAL production locks (with hyperdiff + div_damp active) all pass:
+- `test_w2_alpha0_c36_1day_canonical_l2_post_iter505`: PASS (L2 under iter-505 ceiling).
+- `test_boundary_fix_is_load_bearing_for_w2_l2`: PASS (ratio 0.525, boundary_fix 2x improvement in production).
+- `test_w2_v_wind_imprint_below_iter505_canonical_ceiling`: PASS.
+- `test_w2_pole_cell_v_north_ceiling_at_1day`: PASS (face-4 max < 0.40 m/s).
+- `test_w5_face4_v_north_ceiling_at_1day`: PASS.
+- `test_w2_short_run_mode4_at_pm30deg_lat_ceiling`: PASS.
+- `test_w2_short_run_v_north_N_S_mirror_symmetry`: PASS.
+- `test_w2_t0_v_north_diagnostic_angle_bounded`: PASS.
+
+**Iter-666/670 metric-fix locks** (`TestCdgridDxcDycBoundaryIter666`, 5 tests): ALL PASS.  The concrete wins from those iters — dxc/dyc cube-boundary extrapolation, area_corner partial-quadrant fix — remain in place.
+
+**Status summary**:
+- Directive item #1 (flux sync): CLOSED (iter-706 audit).
+- Directive item #2 (legacy edge handling disabled): CLOSED on sw_core.F90 side (iter-703).
+- W2 v-wind artifacts: architectural blocker (A-L + RK3 + `boundary_fix` production path not FV3-faithful).  Canonical locks pin current magnitudes; no silent regression.
+- FB chain C36 instability: architectural blocker.  Diagnostic regime at C24 shows FB path diverges 4x faster than production (107.7 vs 17.5 m/s v-wind at day 1 no-damping).
+- Removing `boundary_fix` as a non-FV3 hack is gated on FB chain becoming stable at C36 (review-doc item #2).
+
+No source-code changes in iter-709; status audit + visual-inspection confirmation.  Regression suite remains at 161 tests; all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
