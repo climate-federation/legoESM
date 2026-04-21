@@ -732,3 +732,40 @@ First end-to-end source-code integration of the Fortran-faithful del-n-on-vortic
 - Matrix + ocean baselines unchanged with `damp_v=0` default.
 
 **Process.**  First iter-752→754 chain successfully delivered the Fortran-faithful fix the iter-745/750 diagnosis pointed to.  6-iter metric/unit correction chain (iter-752 → 752b → 752c → 752d → 753 → 753b) was prerequisite for a working wiring.  Confidence HIGH on "del6 port is functional and reduces the polar peak"; MEDIUM on "the full artifact can be eliminated with further tuning"; LOW on "current best 0.168 m/s is the lower bound".
+
+### Iter-755 — refactor del6 to POST-STEP (Codex stop-time: damping semantics)
+
+Codex stop-time review on iter-754 flagged: **"new del6 wiring changes damping semantics."**  Correct.  Iter-754 wired del6 as a TENDENCY inside `fv3_sw_tendencies`, so it was evaluated at every RK3 substep and integrated via the RK3 update formula.  Fortran's `sw_core.F90:1988-1999` applies del6 ONCE per full timestep AFTER d_sw6's main update — a discrete post-step correction, not a continuous tendency.
+
+**Fix.**  Moved del6 out of `fv3_sw_tendencies` (reverted to iter-753's signature) and into `FV3EdgeShallowWaterModel.step` as a post-step update applied AFTER `dispatch_integrator` returns:
+```python
+state_new = dispatch_integrator(state, tendency_fn, dt, ...)
+if self.config.damp_v > 0.0:
+    damp_step = (damp_v * da_min_c) ** (nord_v + 1)
+    du, dv = fv3_del6_vorticity_damping(
+        state_new.u_d, state_new.v_d, damp_step, nord_v, cdgrid)
+    state_new = state_new._replace(
+        u_d=state_new.u_d + du,
+        v_d=state_new.v_d + dv,
+    )
+```
+
+**Re-measured ablation (post-step form):**
+
+| Config                                    | v_ll_Linf | Δ vs baseline | iter-754 tend-form |
+|-------------------------------------------|-----------|---------------|---------------------|
+| baseline (hyperdiff only)                 | 3.03e-01  | 0 %           | same                |
+| del6 damp_v=0.06 nord_v=1 (no hyp)        | 2.32e-01  | −23.2 %       | 0.232 (same)        |
+| del6 damp_v=0.12 nord_v=1                 | 2.96e-01  | −2.3 %        | 0.295 (same)        |
+| **del6 damp_v=0.06 nord_v=2**             | **2.13e-01**| **−29.7 %** | 0.213 (same)        |
+| del6 damp_v=0.12 + hyperdiff              | 2.70e-01  | −11.0 %       | **0.168 (WRONG)**   |
+
+**Important retraction of iter-754 claim.**  Iter-754's "del6 + hyperdiff = 0.168 m/s (-45%)" was a tendency-form artifact, NOT Fortran-faithful.  In the correct post-step form, the same config gives 0.270 m/s (-11%).  True Fortran-faithful best is `del6 damp_v=0.06 nord_v=2` = **0.213 m/s (-30%)**.
+
+**Why tendency-form appeared better.**  Tendency-form couples del6 into each RK3 substep, effectively applying damping 3× per full step with RK3 mixing.  This provides extra smoothing that cleans up the polar residual more aggressively than Fortran.  The cost is a divergence from Fortran's damp_v semantics and different stability limits — exactly what Codex flagged.
+
+**Matrix + ocean baselines unchanged** (damp_v=0 default).
+
+**Status vs Ralph stopping condition.**  True Fortran-faithful best = 0.213 m/s is still a meaningful 30 % reduction from the 0.303 m/s baseline stable since iter-505, but visible W2 artifacts persist at ~0.2 m/s.  Stopping condition NOT met.
+
+**Process.**  Sixth Codex stop-time catch in iter-752-755 chain.  Tendency-vs-post-step is a real semantic difference that only a careful reading of Fortran's d_sw6 structure catches.  The refactor is small (5 lines moved) but the resulting semantic correctness is important.  Iter-754's 45% reduction claim must be retracted; the true Fortran-faithful reduction is 30%.

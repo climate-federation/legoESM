@@ -486,12 +486,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 state, tendency_fn_csw, dt, self.config.time_integrator,
             )
         else:
-            # Fortran derives nord_v = min(2, nord) when sentinel -1;
-            # see Fortran d_sw6 comment in FV3FBShallowWaterModel.step.
-            eff_nord_v = (min(2, self.config.nord)
-                          if self.config.nord_v < 0
-                          else self.config.nord_v)
-
             def tendency_fn(s):
                 dh, du, dv = fv3_sw_tendencies(
                     s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
@@ -499,9 +493,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     div_damp=self.config.div_damp,
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
                     boundary_fix=self.config.boundary_fix,
-                    damp_v=self.config.damp_v,
-                    nord_v=eff_nord_v,
-                    dt=dt,
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,
@@ -511,6 +502,31 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             state_new = dispatch_integrator(
                 state, tendency_fn, dt, self.config.time_integrator,
             )
+
+            # Fortran-faithful POST-STEP del-n vorticity damping
+            # (sw_core.F90:1948-1999).  Fortran applies del6_vt_flux
+            # ONCE per full timestep, AFTER the main d_sw6 update, as
+            # `u += fy2 / dx`.  This is NOT a continuous tendency — it
+            # is a discrete step update applied outside the RK3 loop.
+            # Iter-755 refactored this from a tendency-form (iter-754)
+            # to the Fortran-faithful post-step form to avoid RK3-
+            # multiplied damping semantics.
+            if self.config.damp_v > 0.0:
+                from legoesm.core.fv3_del6_vt_flux import (
+                    fv3_del6_vorticity_damping)
+                eff_nord_v = (min(2, self.config.nord)
+                              if self.config.nord_v < 0
+                              else self.config.nord_v)
+                da_min_c = jnp.min(self.cdgrid.base.area)
+                damp_step = (self.config.damp_v * da_min_c) ** (eff_nord_v + 1)
+                du_step, dv_step = fv3_del6_vorticity_damping(
+                    state_new.u_d, state_new.v_d,
+                    damp=damp_step, nord=eff_nord_v, cdgrid=self.cdgrid,
+                )
+                state_new = state_new._replace(
+                    u_d=state_new.u_d + du_step,
+                    v_d=state_new.v_d + dv_step,
+                )
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
