@@ -9065,6 +9065,55 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
     the test should be updated AND the review-doc entry removed.
     """
 
+    def test_d_sw5_adaptive_smag_gold_file_exercises_interp(self):
+        """Gold-file test on `_d_sw5_corner_divergence` in the adaptive
+        Smagorinsky regime (`nord=1, dddmp > 1e-5`) — the ONLY production
+        path where `_interp_center_to_corner` feeds into the output.
+
+        Iter-708 (Codex iter-707 finding): the standalone
+        `test_interp_center_to_corner_is_4point_average` doesn't cover
+        the production usage — if someone swaps `_interp_center_to_corner`
+        for a different interpolation ONLY inside `_d_sw5_corner_divergence`,
+        the standalone test still passes because it directly calls the
+        function.  This gold-file test records the end-to-end output
+        with the current 2nd-order interpolation baked in: a switch
+        to 4th-order (or any other scheme) WILL shift the fingerprints.
+
+        Fingerprints recorded on CPU x64 with fixed-seed (rng=707)
+        random winds and `dddmp=0.2` (above the 1e-5 threshold).
+        """
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(707)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        ua = jnp.asarray(rng.standard_normal((6, n, n)))
+        va = jnp.asarray(rng.standard_normal((6, n, n)))
+
+        ke = np.asarray(_d_sw5_corner_divergence(
+            u_d, v_d, ua, va, cdgrid, dt=0.1,
+            d2_bg=0.0, dddmp=0.2, d4_bg=0.16, nord=1))
+        self.assertEqual(ke.shape, (6, 9, 9))
+        # Pinned fingerprints — will shift if _interp_center_to_corner
+        # is swapped or wk formula changes.
+        self.assertAlmostEqual(float(ke[0, 4, 4]), 93983.00383117038,
+            places=4, msg="adaptive Smag ke[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 137334.72628142763,
+            places=4, msg="adaptive Smag ke[3,2,6] fingerprint changed.")
+        self.assertAlmostEqual(float(ke.sum()), -15962.03511603897,
+            places=3, msg="adaptive Smag ke.sum() fingerprint changed.")
+        self.assertAlmostEqual(float((ke ** 2).sum()),
+            11366256403441.21, places=-4,
+            msg="adaptive Smag ke L2² fingerprint changed.")
+
     def test_interp_center_to_corner_is_4point_average(self):
         """Verify Python's _interp_center_to_corner returns the
         4-point average `0.25*(f[i,j] + f[i+1,j] + f[i,j+1] + f[i+1,j+1])`

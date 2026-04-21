@@ -1409,6 +1409,16 @@ Audit of `_d_sw5_corner_divergence` nord>=1 adaptive Smagorinsky path revealed a
 
 No source-code changes; documentation + regression lock.  Regression suite now at **160 tests** (159 + 1 new order lock); all pass.
 
+### Iter-708 — gold-file for the adaptive Smag production path (close iter-707 coverage gap)
+
+Codex stop-time review flagged iter-707 for shipping a lock that "misses the branch it claims to protect".  Correct: iter-707's `test_interp_center_to_corner_is_4point_average` directly tested the standalone function with a random field, but the actual vulnerable path is inside `_d_sw5_corner_divergence` where `_interp_center_to_corner` is called ONLY when `nord >= 1 AND dddmp > 1e-5`.  Iter-702's existing gold-file tests use either `nord=0` (wrong branch) or `dddmp=0` (if-branch skipped), so the adaptive-Smag path had ZERO end-to-end coverage.  A swap of `_interp_center_to_corner` only inside `_d_sw5_corner_divergence` would leave the standalone test passing.
+
+**Fix** (iter-708): added `test_d_sw5_adaptive_smag_gold_file_exercises_interp` with fixed-seed random winds + `nord=1, dddmp=0.2` (above the 1e-5 threshold).  Records 4 fingerprints (`ke[0,4,4]`, `ke[3,2,6]`, `ke.sum()`, `(ke**2).sum()`).  Any change to the center-to-corner interpolation, the Smagorinsky formula, the `wk` precomputation, or the final `damp2 * delpc + dd8 * divg_d` combination will shift the fingerprints.
+
+**Verified** catches a swap: injecting `_interp_center_to_corner → 2.0 * original` (a 2x scale only in production) fails the test with a specific fingerprint diff at `ke[3,2,6]`.
+
+No source-code changes.  Regression suite now at **161 tests** (160 + 1 new); all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
