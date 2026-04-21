@@ -1801,23 +1801,33 @@ Task 3 of the iter-722 Path Forward: "Verify FB + duogrid stability at C24 first
 
 Exact W2 max\|u\| ≈ 38.6 m/s, max\|v\| = 0.  By step 48 the FB chain has already developed winds 2.3-5× the analytic solution; damp_v>0 accelerates the blowup rather than suppressing it.
 
-**Diagnosis.**  The FB C24 instability does NOT live in either dissipation branch that iter-727 / iter-727+8 wired:
-- iter-727 / iter-728 d_sw1 mass damping: acts on h transport via del-n.  Results A vs B show no difference in blowup step — mass damping is not a stabiliser here.
-- step-(9) `_del6_vt_flux` vorticity damping: activated identically by damp_v>0.  Results B/C/D show damp_v makes the blowup EARLIER, not later — the del-n smoother is propagating already-contaminated momentum gradients.
+**Observation (what the sweep actually shows).**
+- Turning on the iter-727 d_sw1 mass-damp + step-(9) `_del6_vt_flux` branches via damp_v does NOT eliminate the step-60 blowup for damp_v ∈ {0.00, 0.06, 0.12}.  The blowup step is identical across those three, but the pre-blowup max|u_d| at step 48 increases monotonically with damp_v (90 → 96 → 104 m/s); so damp_v is not a no-op on the trajectory even though it does not change when |h| goes non-finite.
+- damp_v = 0.30 blows up at step 15, much earlier than baseline.  This could be (i) the del-n smoother itself has a CFL limit that is violated at damp_v=0.30, nord=1 on this grid; OR (ii) the smoother is propagating already-contaminated momentum gradients.  The sweep alone does not distinguish these.
 
-The instability therefore lives UPSTREAM of both damping branches — in `_c_sw` (C-grid half-step) or the `_d_sw_native` B-grid KE / vorticity-flux / wind-update sequence BEFORE step (9).  Stronger dissipation cannot paper over an incorrect momentum increment; task 3 cannot be closed by tuning damping.
+**What the sweep does NOT prove** (iter-731 Codex stop-time correction).  The earlier iter-730 entry concluded "Task 3 cannot be closed by tuning damping" and "the instability lives UPSTREAM of both damping branches."  Those statements are stronger than the evidence.  The tested space is narrow:
+- `dddmp`=0 for every case (adaptive Smagorinsky off).  FV3 defaults `dddmp=0.2` in many configurations.
+- `d2_bg`=0 for every case (background del-2 divergence damping off).
+- `nord`=1 only.  FV3 supports nord ∈ {0, 1, 2} and Fortran nord=2 triggers del-6 rather than del-4.
+- dt=300s only.  The blowup at step 60 (t=18000s) could plausibly be a step-count artifact of the specific dt/grid CFL margin.
+- No combination of non-zero `dddmp`, `d2_bg`, and `damp_v` was tested simultaneously.
 
-**Task-status update.**
+Task 3 status is therefore **OPEN, NOT CLOSED AND NOT BLOCKED** — the reduction should read: "dissipation alone at (dddmp=0, d2_bg=0, nord=1, dt=300s) with damp_v ≤ 0.12 does not stabilise FB C24 W2; broader dissipation search + structural investigation both remain valid next-iter moves."
+
+**Corrected task-status.**
 - Task 1 (halo=3 infra + `_d2a2c_vect` caller flip): **DONE**.
-- Task 2 (per-phase dissipation — d_sw1 mass, d_sw5 corner div, d_sw6 vorticity): **DONE**.  Confirmed per Fortran: c_sw and d_sw3 have no dissipation; d_sw1 / d_sw5 / d_sw6 do and are now all wired.
-- Task 3 (FB + duogrid stability at C24): **BLOCKED — upstream momentum bug**.  Cannot proceed via dissipation port alone.  Needs a structural investigation of `_c_sw` / `_d_sw_native` momentum phases against sw_core.F90:c_sw / d_sw1..d_sw6 line-by-line.
+- Task 2 (per-phase dissipation wiring — d_sw1 mass, d_sw5 corner div, d_sw6 vorticity): **DONE wiring**; tuning/combinatorics to stabilise the run is part of task 3, not task 2.
+- Task 3 (FB + duogrid stability at C24): **OPEN**.  Iter-730 ruled out a narrow slice of the (`damp_v`, nord, dt) parameter space; a broader search over `dddmp`, `d2_bg`, `nord`, `dt` combinations and a line-by-line Fortran bisection of `_c_sw` / `_d_sw_native` phases remain in play.
 - Task 4 (gold-file FB chain at C24): **NOT STARTED** (gated on task 3).
 
-**Iter-730 deliverable.**  `scripts/diag_iter730_fb_c24_stability.py` is the concrete evidence underlying the task-3 BLOCKED conclusion.  The script is checked in so future iters can re-run it after structural fixes land and confirm the blowup-step number moves.  If a future iter reports FB C24 stable through 288 steps, `diag_iter730_fb_c24_stability.py` is the authoritative regression sentinel.
+**Iter-730 deliverable (retained).**  `scripts/diag_iter730_fb_c24_stability.py` is the concrete evidence underlying the narrow-slice task-3 ruling.  It is checked in so future iters can re-run it after other dissipation combinations or structural fixes land and confirm the blowup-step number moves.
 
-**Priority reshuffle.**  With task 3 of the iter-722 Path Forward blocked on upstream bugs, iter-731+ should EITHER:
-- (a) root-cause the C24 momentum blowup by bisecting `_c_sw` vs `_d_sw_native` phases at step 1 against Fortran, OR
-- (b) shift focus to the production A-L+RK3 W2 v-wind mode-4 artifact (the user's iter-717 image blocker) since FB replacement is no longer the clear near-term path.
+**Iter-731 correction deliverable.**  This section's "Observation" / "What the sweep does NOT prove" rewrite addresses the Codex stop-time finding: "the checked-in evidence overstates what the `damp_v` sweep proves."  Evidence is retained as-is; the interpretation is scaled back to what the numbers actually support.
+
+**Priority for iter-732+.**  With task 3 neither closed nor blocked, iter-732+ has three valid moves:
+- (a) extend the damp_v sweep to (dddmp, d2_bg, nord, dt) combinations and produce a proper stability map;
+- (b) root-cause bisect the C24 momentum blowup by logging per-phase residuals at step 1 against Fortran;
+- (c) shift focus to the production A-L+RK3 W2 v-wind mode-4 artifact (the user's iter-717 image blocker) since that affects the current production path independent of FB.
 
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
