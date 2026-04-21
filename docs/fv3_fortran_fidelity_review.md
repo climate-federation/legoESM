@@ -1000,3 +1000,36 @@ Codex stop-time review flagged iter-683's partition-of-unity test for being vacu
 **Verified** by injecting `corner_xp = jnp.zeros_like(orig)` via monkey-patching: test now fails with `"max |weight| = 0.000e+00 < 0.01 — weights look all-zero/trivial at a target cell that should be populated"`.  Previously (iter-683) this would have passed.
 
 No source-code changes; test strengthening only.  Regression suite unchanged at 131 tests; all pass.
+
+### Iter-685 — correct iter-683 backlog: most entries are already covered
+
+Re-audited iter-683's 14-row "remaining `bounded_domain/duogrid` gates" backlog by mapping each Fortran line to its subroutine and checking for Python test coverage.  Corrections:
+
+| F90 line | Subroutine | iter-683 status | Corrected status |
+|----------|-----------|-----------------|-----------------|
+| 186, 238 | c_sw — `fill2_4corners` | by-absence OK | ✅ verified absent in Python |
+| 303 | c_sw — KE upwind | NEEDS AUDIT | ✅ `TestKeUpwindFortranFormula` (3 tests) |
+| 395-401 | c_sw — vort corner correction | NEEDS AUDIT | ✅ `TestCornerVorticityFortranFormula` |
+| 420 | c_sw — vort flux | NEEDS AUDIT | ✅ `TestVorticityFluxFortranFormula` |
+| 622-653 | d_sw1 — ut/vt 4-cell avg (duogrid) | NEEDS AUDIT | ✅ `TestDSw1RecomputeUtVtFortranFormula` (iter-622) |
+| 656-813 | d_sw1 — panel-edge overrides (non-duogrid) | NEEDS AUDIT | ✅ `TestD2a2cVectNonDuogridBoundary` + `...AdjacentStrip` |
+| 1260, 1270, 1327 | d_sw3 — B-grid Courant (duogrid) | NEEDS AUDIT | ✅ **CLOSED by iter-685** (`TestBgridKeTransportDuogridIter685`) |
+| 1277-1302 | d_sw3 — non-duogrid panel-edge | NEEDS AUDIT | **NOT reproduced in Python** — documented architectural restriction; `_bgrid_ke_transport` docstring says "duogrid/bounded_domain branch" only |
+| 1441 | d_sw4 | NEEDS AUDIT | STILL NEEDS AUDIT |
+| 1569, 1644 | d_sw5 | NEEDS AUDIT | STILL NEEDS AUDIT |
+| 1742 | d_sw5 | NEEDS AUDIT | STILL NEEDS AUDIT |
+| 2060, 2072, 2093, 2106 | copy_corners | **COVERED by iter-682** | ✅ iter-682/683/684 |
+
+**Correction**: iter-683's backlog was too pessimistic about coverage.  9 of 14 rows were already covered by existing tests that iter-683 failed to map.  Iter-685 closes the d_sw3 duogrid-branch row with a new direct Fortran-line-1273 lock (`TestBgridKeTransportDuogridIter685`, 2 tests) that reproduces the formula numerically and checks random-input agreement at 1e-12.
+
+**Revised backlog** (genuinely uncovered rows):
+- Fortran lines 1277-1302 (d_sw3 non-duogrid): NOT reproduced in Python (architectural scope restriction, documented).
+- Fortran line 1441 (d_sw4 duogrid gate): needs audit.
+- Fortran lines 1569, 1644 (d_sw5 duogrid gates): need audit.
+- Fortran line 1742 (d_sw5 `.not. (bounded_domain .or. duogrid)` legacy): needs audit.
+
+**New lock tests** (`TestBgridKeTransportDuogridIter685`, 2 tests):
+1. `test_bgrid_vb_formula_constant_inputs`: constant uc=C1, vc=C2 → `vb = dt*(C2 - C1*cosa)*rsina` exactly.  Pins Fortran line 1273.
+2. `test_bgrid_vb_random_inputs_match_fortran_line_1273`: random uc/vc → numpy reference matches Python at 1e-12.  Also verifies `_bgrid_ke_transport` runs without NaN/Inf on random input.
+
+No source-code changes; test additions + backlog correction.  Regression suite now at **133 tests** (131 + 2 new); all pass.
