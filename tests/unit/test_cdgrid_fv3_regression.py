@@ -8393,6 +8393,60 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                  f"_bgrid_ke_transport may be a stubbed no-op or silently "
                  f"ignoring uc."))
 
+    def test_d_sw4_corner_ke_fix_absent_from_python_source(self):
+        """Iter-688: lock the Fortran-fidelity invariant that d_sw4's
+        corner-KE fix (sw_core.F90:1441-1466) is ABSENT in Python.
+
+        Fortran applies the corner fix only when
+        `.not. bounded_domain .or. .not. duogrid`.  In Python production
+        (duogrid + bounded_domain both TRUE), the gate is FALSE and the
+        block is SKIPPED.  Python has NO counterpart for this block —
+        verified by inspection — matching Fortran's SKIP behaviour.
+
+        Structural lock: grep the Python source for the Fortran-signature
+        formulas (`ut + ut) * u`, `vt + vt) * v`, `ut + vt) * u`) from
+        Fortran line 1444 et al.  Accidentally reintroducing the fix
+        would place such patterns in Python source and fail this test.
+
+        This closes iter-683 backlog entry "line 1441 STILL NEEDS AUDIT".
+        """
+        from pathlib import Path
+        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
+        # Signature substrings (tolerating whitespace) that would appear
+        # if someone transliterated Fortran lines 1444-1464:
+        signatures = [
+            # (ut(1,1) + ut(1,0)) * u(1,1) — Fortran SW corner fix
+            'ut[1, 1]',    # index literal occurring at Fortran SW corner
+            'ut[1, 0]',    # adjacent j=0 cell only referenced at this spot
+        ]
+        # Two distinct hits in the same file would indicate the fix is
+        # being reintroduced.  But the indices `[1,1]` and `[1,0]` are
+        # common — use a stronger signature: the SUM `ut[?, 1] + ut[?, 0]`
+        # which is specific to the d_sw4 corner-fix formula.
+        import re
+        # Pattern: ut[i, 1] + ut[i, 0] or ut[i, j+1] + ut[i, j] at a
+        # cube-corner cell.  False positives possible but rare.
+        pattern = re.compile(
+            r'\but\s*\[\s*[^,\]]*,\s*1\s*\]\s*\+\s*ut\s*\[\s*[^,\]]*,\s*0\s*\]')
+
+        offenders = []
+        for py_file in src_dir.rglob('*.py'):
+            try:
+                text = py_file.read_text()
+            except Exception:
+                continue
+            if pattern.search(text):
+                offenders.append(str(py_file.relative_to(src_dir)))
+
+        self.assertEqual(offenders, [],
+            msg=(f"Found `ut[?, 1] + ut[?, 0]` in {offenders} — this "
+                 f"matches the Fortran d_sw4 corner KE fix signature at "
+                 f"sw_core.F90:1444.  That block is gated on "
+                 f"`.not. bounded_domain .or. .not. duogrid` in Fortran "
+                 f"and must stay ABSENT in the Python duogrid-production "
+                 f"path.  If this is an intentional addition, update the "
+                 f"test signature pattern or the iter-688 invariant."))
+
     def test_bgrid_ke_transport_gold_file_non_constant(self):
         """Gold-file regression test: run `_bgrid_ke_transport` on a
         fixed-seed random input (non-constant → exercises PPM transport,

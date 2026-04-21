@@ -1068,3 +1068,30 @@ Recorded values on CPU x64:
 The `rng.standard_normal` arrays produce non-constant winds with O(1) standard deviation, so PPM transport is exercised non-trivially.  **Verified** the test catches subtle PPM-stage regressions: injecting `_ppm_transport_1d → 1.01 * original` (a 1% scale change in PPM only) fails with `"0.0369 != 0.0366 within 10 places (3.66e-4 difference)"`.  Iter-686's constant-wind test would PASS the same buggy implementation because PPM on constant is identity regardless of the scale factor.
 
 No source-code changes; test-only strengthening.  Regression suite now at **134 tests** (133 + 1 new gold-file); all pass.
+
+### Iter-688 — close d_sw4 line-1441 backlog entry
+
+Direct audit of iter-685's "STILL NEEDS AUDIT" entry for Fortran `sw_core.F90:1441` (d_sw4 corner KE fix).
+
+**Fortran behaviour**: the block applies corner-cell KE overrides ONLY when `.not. bounded_domain .or. .not. duogrid`.  Truth table:
+
+| bounded_domain | duogrid | gate | block runs? |
+|----------------|---------|------|-------------|
+| T | T | F or F = F | SKIPPED |
+| T | F | F or T = T | executed |
+| F | T | T or F = T | executed |
+| F | F | T or T = T | executed |
+
+Python production (duogrid=T, bounded_domain=T) corresponds to the `SKIPPED` row.  Python's d_sw4 equivalent does NOT contain the corner fix — verified by grepping `src/legoesm/core/fv3_sw_core.py` for the Fortran-signature substrings.  This matches Fortran's SKIPPED behaviour in the production regime.
+
+**Lock** (`test_d_sw4_corner_ke_fix_absent_from_python_source`, 1 new test): regex-grep Python source for `ut[?, 1] + ut[?, 0]` — the specific Fortran line 1444 signature `(ut(1,1) + ut(1,0)) * u(1,1)` transliterated to Python.  The pattern matches the Fortran SW-corner formula and its variants (tested via 4 positive/negative string fixtures) and is absent from production code today.  An accidental reintroduction of the non-duogrid corner fix would fail this test.
+
+**Closed** iter-683 backlog entry "line 1441: STILL NEEDS AUDIT" → "COVERED by iter-688".
+
+No source-code changes; structural lock only.  Regression suite now at **135 tests** (134 + 1 new); all pass.
+
+**Updated backlog**:
+- ✅ d_sw4 1441: closed by iter-688 structural lock.
+- ⏳ d_sw5 1569: still needs audit.
+- ⏳ d_sw5 1644: still needs audit.
+- ⏳ d_sw5 1742: still needs audit.
