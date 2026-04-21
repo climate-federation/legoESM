@@ -1,6 +1,43 @@
-"""Iter-766b: measure W2 C36 1-day with the iter-766 `fortran_a2b_corner_avg`
-flag ON, vs default (OFF).  Direct test whether Fortran's a2b_ord4 3-point
-cube-corner average reduces the mode-A v-wind artifact.
+"""Iter-766b: measure W2 C36 1-day with the iter-766
+`fortran_a2b_corner_avg` flag ON vs OFF (default).  Reproduces the
+CANONICAL MATRIX MEASUREMENT PATH used by
+`scripts/run_atmosphere_test_matrix.py --only sw --grid cubed_sphere
+--quick` at the iter-761 tuned config — so that the OFF/ON numbers
+this script reports are bit-identical to what the production matrix
+would print.
+
+Canonical matrix path (see run_atmosphere_test_matrix.py around the
+`shallow_water/williamson2/cubed_sphere` case):
+- Grid: `create_cubed_sphere(n)`
+- IC: `williamson_test2(grid)` for h & h_s, then
+      `u_d = cdgrid.cos_angle_edge_x * u0 * cos(cdgrid.lat_edge_x)`
+      `v_d = -cdgrid.sin_angle_edge_y * u0 * cos(cdgrid.lat_edge_y)`
+      where u0 = 2*pi*R / (12*86400).
+- dt = 300s, n_steps = 86400/dt = 288 (1-day integration).
+- Config: `CDGridShallowWaterConfig(hyperdiff_coeff=0.0,
+      div_damp=8*_div_damp_cube(n), boundary_fix=True, damp_v=0.06,
+      nord_v=2)`.
+- v_north: via `cell_centre_angles_from_4edge(cdgrid)` then
+      `v_north = sa_4edge * u_cc + ca_4edge * v_cc` using the
+      edge-averaged (not cell-centre) grid angles.
+- Regrid: `get_cubedsphere_to_latlon_weights(n, 360, 181)` then
+      `apply_cubedsphere_to_latlon(v_north, weights)` — the exact
+      iter-765f / iter-766 regression-sentinel helpers.
+
+Iter-766 end-of-iter Codex stop-time flagged the previous version of
+this script (pre-fix): it used `williamson2_initial_condition` from
+the unit-test file (which returns D-grid corner-staggered winds, not
+edge-midpoint), dt=60s (not 300s), and `grid.angle` for v_north
+computation (cell-centre, not edge-averaged).  Those three
+divergences meant the numbers the script printed were NOT the matrix
+numbers.  This rewrite fixes all three so the diag truly reproduces
+the canonical matrix path.
+
+Expected numbers at iter-766 commit time:
+- OFF (2-pt-avg, default): v_ll_Linf ≈ 1.59e-01 m/s, h_L2 ≈ 2.07e-04
+- ON  (a2b 3-pt-avg):      v_ll_Linf ≈ 3.00e-01 m/s, h_L2 ≈ 4.50e-04
+
+Ratio ON/OFF ~ 1.89× — the iter-766 falsification evidence.
 """
 import os, sys
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -11,32 +48,36 @@ import numpy as np
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+from legoesm.grids.cubed_sphere_cdgrid import cell_centre_angles_from_4edge
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-    CDGridShallowWaterConfig, FV3EdgeShallowWaterModel)
+    CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
+    FV3EdgeShallowWaterState)
+from legoesm.grids.regridding import (
+    get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
+from tests.atmosphere.shallow_water.test_cases.williamson import (
+    williamson_test2)
+
+
 def _div_damp_cube(n, ref_n=48, ref_coeff=1.5e7):
     """Match run_atmosphere_test_matrix._div_damp_cube (quadratic, not quartic)."""
     return ref_coeff * (ref_n / n) ** 2
-from legoesm.grids.regridding import (
-    get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "tests", "unit"))
-from test_williamson2_cdgrid import williamson2_initial_condition
 
 
+# Canonical matrix settings.
 n = 36
-nsteps = 86400 // 60
-dt = 60.0
+dt = 300.0
+n_steps = int(86400 / dt)      # 288 steps → 1-day integration
+u0 = 2.0 * np.pi * 6.371e6 / (12.0 * 86400.0)
+
 grid = create_cubed_sphere(n)
-cdgrid = create_cubed_sphere_cdgrid(grid)
+# FV3EdgeShallowWaterModel creates its own cdgrid from the grid, and
+# we'll read it back via `model.cdgrid` — mirrors the matrix script.
 
-h0, u_d0, v_d0, h_s = williamson2_initial_condition(cdgrid)
-
+sw = williamson_test2(grid)
 weights = get_cubedsphere_to_latlon_weights(n, 360, 181)
 
 
-def run(fortran_a2b_corner_avg: bool):
+def run_and_measure(fortran_a2b_corner_avg: bool):
     cfg = CDGridShallowWaterConfig(
         hyperdiff_coeff=0.0,
         div_damp=8.0 * _div_damp_cube(n),
@@ -46,41 +87,48 @@ def run(fortran_a2b_corner_avg: bool):
         fortran_a2b_corner_avg=fortran_a2b_corner_avg,
     )
     model = FV3EdgeShallowWaterModel(grid, config=cfg)
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-        FV3EdgeShallowWaterState)
-    state = FV3EdgeShallowWaterState(h=h0, u_d=u_d0, v_d=v_d0, h_s=h_s)
-    for _ in range(nsteps):
+    cdgrid = model.cdgrid
+
+    # Canonical matrix IC: edge-midpoint D-grid winds.
+    u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+    v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+    state = FV3EdgeShallowWaterState(
+        h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+    model.set_initial_mass(state)
+
+    # Reference h at t=days (W2 is steady, so exact = IC).
+    h_exact = np.asarray(sw.h.data)
+    area = np.asarray(grid.area)
+
+    for _ in range(n_steps):
         state = model.step(state, dt)
-    return state
 
+    # Area-weighted + normalized norms (matrix convention — see
+    # run_atmosphere_test_matrix.py around line 1473).
+    h_err = np.asarray(state.h) - h_exact
+    h_err_l2 = float(np.sqrt(np.sum(h_err ** 2 * area)
+                              / np.sum(h_exact ** 2 * area)))
+    h_err_linf = float(np.max(np.abs(h_err)) / np.max(np.abs(h_exact)))
 
-def measure(state, name):
-    h = np.asarray(state.h)
-    h_err_l2 = float(np.sqrt(np.mean((h - np.asarray(h0)) ** 2)))
-    h_err_linf = float(np.max(np.abs(h - np.asarray(h0))))
-    # Compute v_north via the model's D→A interpolation then local rotation.
-    # Use the same approach as the matrix script: unpack state velocity.
-    from legoesm.core.operators_cdgrid import fv3_d2cc
-    u_cc, v_cc = fv3_d2cc(state.u_d, state.v_d, cdgrid)
-    u_cc_np = np.asarray(u_cc)
-    v_cc_np = np.asarray(v_cc)
-    # Convert grid-aligned -> geographic via grid angle.
-    cos_a = np.cos(np.asarray(grid.angle))
-    sin_a = np.sin(np.asarray(grid.angle))
-    u_east = cos_a * u_cc_np - sin_a * v_cc_np
-    v_north = sin_a * u_cc_np + cos_a * v_cc_np
-    v_ll = np.asarray(apply_cubedsphere_to_latlon(v_north, weights))
-    v_ll_linf = float(np.max(np.abs(v_ll)))
+    # v_north via edge-averaged cell-centre angles (matrix convention).
+    ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+    u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
+                   + np.asarray(state.u_d)[:, :, 1:])
+    v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
+                   + np.asarray(state.v_d)[:, 1:, :])
+    v_north = np.asarray(sa_4edge) * u_cc + np.asarray(ca_4edge) * v_cc
     v_north_linf = float(np.max(np.abs(v_north)))
-    print(f"[{name}] h_L2={h_err_l2:.3e}  h_Linf={h_err_linf:.3e}  "
-          f"v_north_Linf={v_north_linf:.3e}  v_ll_Linf={v_ll_linf:.3e}")
-    return h_err_l2, h_err_linf, v_ll_linf
+    v_ll = apply_cubedsphere_to_latlon(v_north, weights)
+    v_ll_linf = float(np.max(np.abs(v_ll)))
+    return h_err_l2, h_err_linf, v_north_linf, v_ll_linf
 
 
-# Baseline
-state_off = run(fortran_a2b_corner_avg=False)
-measure(state_off, "OFF (2-pt-avg, default)")
+for flag, label in [(False, "OFF (2-pt-avg, default)"),
+                     (True,  "ON  (Fortran a2b 3-pt) ")]:
+    l2, linf, vnlinf, vllinf = run_and_measure(flag)
+    print(f"[{label}]  h_L2={l2:.3e}  h_Linf={linf:.3e}  "
+          f"v_north_Linf={vnlinf:.3e}  v_ll_Linf={vllinf:.3e}")
 
-# With flag
-state_on = run(fortran_a2b_corner_avg=True)
-measure(state_on, "ON  (Fortran a2b 3-pt)  ")
+print("\nMatrix-script canonical reference (iter-766 commit-time):")
+print("  OFF: h_L2=2.07e-04  h_Linf=1.53e-03  v_ll_Linf=1.59e-01")
+print("  ON : h_L2=4.50e-04  h_Linf=3.75e-03  v_ll_Linf=3.00e-01")
