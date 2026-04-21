@@ -4139,32 +4139,35 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             ocd.fv3_sw_tendencies = orig_fn
             sw_mod.fv3_sw_tendencies = orig_fn
 
-        # Extract v_north and regrid.  If the path ever starts
-        # producing a reasonable solution, this max goes down from
-        # its current ~1.88 m/s to near the default 0.159 m/s.  The
-        # test asserts max|v_ll| stays > 1.0 m/s, which FIRES if:
-        #   - the dir-aware path is accidentally repaired (good
-        #     signal to re-examine the hypothesis),
-        #   - the opt-in is silently disabled by a refactor.
+        # Compute v_ll_Linf (post-regrid to lat-lon) — this is the
+        # METRIC USED in iter-765/765b's documented falsification:
+        # v_ll_Linf went from 0.159 (default) to 1.878 (dir-aware).
+        # Using the same metric as the documentation ensures this
+        # sentinel measures what iter-765 claimed.
         from legoesm.grids.cubed_sphere_cdgrid import (
             cell_centre_angles_from_4edge)
+        from scripts.run_atmosphere_test_matrix import _regrid_2d
         ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
         u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
                        + np.asarray(state.u_d)[:, :, 1:])
         v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
                        + np.asarray(state.v_d)[:, 1:, :])
         v_north = np.asarray(sa_4edge) * u_cc + np.asarray(ca_4edge) * v_cc
-        v_north_linf = float(np.max(np.abs(v_north)))
+        lon_deg = np.asarray(grid.lon) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat) * 180 / np.pi
+        v_ll = _regrid_2d(v_north, lon_deg, lat_deg, "cube")
+        v_ll_linf = float(np.max(np.abs(v_ll)))
 
-        # Iter-765b measured v_north_Linf ~ 1.88 m/s with dir-aware
+        # Iter-765b measured v_ll_Linf ~ 1.88 m/s with dir-aware
         # fills.  Pin at > 1.0 m/s; if the dir-aware path is
         # repaired or disabled, this test fires.
         self.assertGreater(
-            v_north_linf, 1.0,
+            v_ll_linf, 1.0,
             msg=(f"fortran_dir_aware_corners=True produced "
-                 f"max|v_north|={v_north_linf:.3e} m/s — UNEXPECTEDLY "
-                 f"SMALL.  Iter-765 falsified this path at 12× blowup "
-                 f"(~1.88 m/s).  A new smaller value means either:\n"
+                 f"v_ll_Linf={v_ll_linf:.3e} m/s — UNEXPECTEDLY "
+                 f"SMALL.  Iter-765/765b falsified this path at 12× "
+                 f"blowup (v_ll_Linf ~ 1.88 m/s).  A new smaller "
+                 f"value means either:\n"
                  f"  (a) the dir-aware path has been repaired — "
                  f"re-examine whether it now reduces mode A and can "
                  f"replace the default 2-pt-avg, OR\n"
