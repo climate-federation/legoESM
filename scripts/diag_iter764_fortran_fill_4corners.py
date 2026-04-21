@@ -111,9 +111,11 @@ B_pad_py = np.asarray(pad_halo(B, interp_offsets=grid.halo_interp_offsets,
 
 # Extract per-face SW corner info.
 print("Per-face cube-corner halo values: Python 2-pt-avg vs Fortran "
-      "dir=1 and dir=2 values.\n")
-print(f"  {'face':>5}  {'2-pt-avg':>12}  {'dir=1 (y-inner)':>16}  "
-      f"{'dir=2 (x-inner)':>16}  {'diff(1-py)':>12}  {'diff(2-py)':>12}")
+      "fill_4corners HALO=1 INNER SUBSET (the q(0,0)=q(0,1) rule "
+      "only; the outer q(-1,0)=q(0,2) rule needs halo≥2 and is NOT "
+      "evaluated here).\n")
+print(f"  {'face':>5}  {'2-pt-avg':>12}  {'F-h1-inner dir=1':>17}  "
+      f"{'F-h1-inner dir=2':>17}  {'diff(1-py)':>12}  {'diff(2-py)':>12}")
 for f in range(6):
     py_sw = B_pad_py[f, 0, 0]
     dir1_sw = B_pad_py[f, 0, 1]   # x-edge halo at j=1-inner
@@ -144,11 +146,15 @@ for f in range(6):
 diffs_dir1 = np.array(diffs_dir1)
 diffs_dir2 = np.array(diffs_dir2)
 
-print(f"\nAcross 24 cube-corner cells:")
-print(f"  max |Fortran_dir=1 - Python|: {np.max(np.abs(diffs_dir1)):.4e}")
-print(f"  max |Fortran_dir=2 - Python|: {np.max(np.abs(diffs_dir2)):.4e}")
-print(f"  max |dir=1 - dir=2| (Fortran self-inconsistency): "
-      f"{np.max(np.abs(diffs_dir1 - diffs_dir2)):.4e}")
+print(f"\nAcross 24 cube-corner cells "
+      f"(halo=1 inner-fill subset only — the q(0,0)=q(0,1) rule; "
+      f"outer rule q(-1,0)=q(0,2) needs halo≥2 and is NOT covered):")
+print(f"  max |F-h1-inner-dir=1 − Python|: "
+      f"{np.max(np.abs(diffs_dir1)):.4e}")
+print(f"  max |F-h1-inner-dir=2 − Python|: "
+      f"{np.max(np.abs(diffs_dir2)):.4e}")
+print(f"  max |dir=1 − dir=2| (Fortran inner-fill directional "
+      f"asymmetry): {np.max(np.abs(diffs_dir1 - diffs_dir2)):.4e}")
 
 # By construction, Python's 2-pt-avg = 0.5*(dir1 + dir2), so
 # (dir1 - py) = 0.5*(dir1 - dir2) and similarly for dir2.
@@ -159,5 +165,8 @@ print(f"  verify 2-pt-avg symmetry (should be ~0): "
 
 B_scale = float(np.max(np.abs(np.asarray(B))))
 print(f"\nB field scale: {B_scale:.4e}")
-print(f"Relative Fortran-dir1-vs-Python discrepancy: "
+print(f"Relative halo=1-inner-dir=1-vs-Python discrepancy: "
       f"{np.max(np.abs(diffs_dir1)) / B_scale:.4%}")
+print(f"NOTE: the full Fortran fill_4corners formula writes TWO "
+      f"halo cells per corner; iter-764 only covers the inner "
+      f"one.  The remaining outer cell discrepancy is not measured.")
