@@ -292,13 +292,14 @@ class LatLonCGridOceanModel:
         return cfl
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
-                   sponge=None):
+                   sponge=None, dt=300.0):
         """Compute baroclinic tendencies."""
         return latlon_cgrid_ocean_baroclinic_tendencies(
             state, self.grid, self.z_coord, self.config,
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
             sponge=sponge,
+            dt=dt,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -328,7 +329,7 @@ class LatLonCGridOceanModel:
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
         # 1. Baroclinic tendencies (non-Coriolis)
-        tend = self.tendencies(state, surface_forcing, sponge=sponge)
+        tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt)
 
         # 2. Update tracers
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -501,6 +502,7 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.vertical import (
             diagnose_w_from_flux_div,
             flux_form_vertical_tracer_advection,
+            flux_form_vertical_tracer_advection_tvd,
         )
 
         h_k_new = compute_layer_thickness(
@@ -538,9 +540,13 @@ class LatLonCGridOceanModel:
             div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
 
             # Flux-form vertical advection:
-            # Returns (F_top - F_bot) for each level, where F = w * T_upwind.
-            # Units: [tracer]*[m/s].  NOT divided by layer thickness.
-            vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
+            # TVD Van Leer reduces implicit numerical diffusion from
+            # K_num~|w|*dz/2 (upwind) to ~0 in smooth regions (#209).
+            if self.config.tracer_advection == "tvd":
+                vert_flux_div = flux_form_vertical_tracer_advection_tvd(
+                    tr, w_baro, h_k_old, dt)
+            else:
+                vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
 
             # Full flux-form tracer update:
             # h_new * T_new = h_old * T_old - dt * vert_flux_div - dt * div_h(mf*T_face)

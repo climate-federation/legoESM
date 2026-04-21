@@ -71,6 +71,7 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
+    flux_form_vertical_tracer_advection_tvd as _flux_form_vertical_advection_tvd,
 )
 
 
@@ -268,6 +269,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     physics_fn=None,
     surface_forcing=None,
     sponge=None,
+    dt: float = 300.0,
 ) -> LatLonCGridOceanTendencies:
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -465,6 +467,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     h_v_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_v[..., jnp.newaxis]
     w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
+    # Vertical momentum advection: keep 1st-order upwind.
+    # The implicit viscosity (~|w|*dz/2) provides essential damping of
+    # baroclinic shear that the explicit A_v=1e-5 cannot.  Upgrading to
+    # TVD removes this and causes blowup.  Proper fix: Richardson-number-
+    # dependent mixing or KPP (issue #204), not higher-order advection.
     du_dt = du_dt + _flux_form_vertical_momentum_advection(
         u_prime, w_u, h_u_old)
     dv_dt = dv_dt + _flux_form_vertical_momentum_advection(
