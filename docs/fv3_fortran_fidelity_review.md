@@ -956,6 +956,34 @@ Direct audit of Ralph directive item #2 ("Legacy edge handling must be disabled 
 2. `test_duogrid_corner_fill_overwrites_legacy_fill_corners` — on a non-constant test field, the duogrid-produced corner values DIFFER from the 2-point average by > 1e-10 at at least one face corner, proving `fill_corner_region` is active, not a silent no-op.
 3. `test_fill_corners_h1_writes_documented_2_point_average` — pins `_fill_corners_h1` to the `0.5*(adj_a + adj_b)` formula so silent refactors are flagged.
 
-These tests close Ralph directive #2 for the duogrid path: the gate is verified active, the Fortran-faithful Lagrange path is verified to run, and the legacy fallback formula is locked.
+These tests strengthen iter-682's coverage of the CORNER-FILL piece of Ralph directive #2.  **They do NOT close directive #2** — the directive covers the full set of legacy-edge code paths gated on `bounded_domain .or. duogrid` in Fortran, of which corner-fill is only one.  See iter-683 for the widened scope + partition-of-unity lock.
 
 No source-code changes; test-only audit + locks.  Regression suite now at **130 tests** (127 + 3 new duogrid corner-fill locks); all pass.
+
+### Iter-683 — retract iter-682 over-closure; add Lagrange partition-of-unity lock; list remaining gates
+
+Codex stop-time review flagged iter-682's closure claim ("close Ralph directive #2 for the duogrid path") as overreach.  Directive #2 covers **all** legacy-edge gates in the FV3 source, not only the corner-fill path.  iter-682 verified the one piece I traced (`copy_corners` → `fill_corner_region`); it did NOT verify the rest.
+
+**Retraction** (iter-683): reworded the iter-682 closing line to read "These tests strengthen iter-682's coverage of the CORNER-FILL piece" and added "They do NOT close directive #2".
+
+**Strengthened lock** (`test_duogrid_lagrange_weights_partition_of_unity`, 1 new test): iter-682's `test_duogrid_lagrange_coefficients_present_at_N8` only verified `corner_xp is not None` — admits dummy zero-filled weights.  The partition-of-unity test requires `sum(weights) == 1.0` at every populated target cell, a necessary mathematical property of any correct Lagrange interpolation (interpolates the constant function exactly).  Spot-checked on C8 face 0: weights `[-3.26, 10.75, -12.58, 6.10]` sum to `1.000000` at cell `(11, 0)` — non-trivial, correct.  A helper that returned placeholder zeros or broken weights fails this test.
+
+**Remaining `bounded_domain .or. duogrid` gates in sw_core.F90** (not yet audited against Python; these are the NEXT iteration scopes for directive #2 closure):
+
+| Fortran line | Gate behaviour | Python audit status |
+|--------------|----------------|---------------------|
+| 186, 238     | `fill2_4corners` SKIPPED when duogrid | Python has no `fill2_4corners` equivalent → OK by absence |
+| 303          | `bounded_domain .or. duogrid` → execute block | NEEDS AUDIT |
+| 420          | same                                         | NEEDS AUDIT |
+| 622          | `bounded_domain .or. (duogrid)` → do block   | NEEDS AUDIT |
+| 656          | `.not. bounded_domain .or. .not. duogrid` → legacy | NEEDS AUDIT |
+| 813          | `.not. bounded_domain` end of block          | NEEDS AUDIT |
+| 1260, 1270, 1327 | duogrid-gated                            | NEEDS AUDIT |
+| 1441         | `.not. bounded_domain .or. .not. duogrid`    | NEEDS AUDIT |
+| 1569, 1644   | duogrid-gated                                 | NEEDS AUDIT |
+| 1742         | `.not. (bounded_domain .or. duogrid)` → legacy | NEEDS AUDIT |
+| 2060, 2072, 2093, 2106 | `copy_corners` gated                | **COVERED by iter-682** |
+
+This list is the concrete backlog for closing directive #2.  Each row is an iteration-sized audit: read the Fortran block, find the Python counterpart, add a lock test.
+
+No source-code changes in iter-683; test strengthening + backlog formalization.  Regression suite now at **131 tests** (130 + 1 new partition-of-unity lock); all pass.

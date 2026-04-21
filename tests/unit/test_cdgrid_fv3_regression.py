@@ -8378,6 +8378,50 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
             msg=("`_fill_corners_h1` SW-corner formula changed from "
                  "0.5*(adjacent_cell_0 + adjacent_cell_1)."))
 
+    def test_duogrid_lagrange_weights_partition_of_unity(self):
+        """Lagrange interpolation weights MUST sum to 1 at every target
+        cell — they interpolate the constant function exactly.  This is
+        a necessary mathematical property that any correct
+        implementation of `compute_lagrange_coeff` (fv_duogrid.F90)
+        must satisfy.
+
+        Iter-683 strengthening: iter-682's test only verified
+        `corner_xp is not None`, which admits dummy zero-filled weights.
+        This test catches weights that are present but computed wrong
+        (wrong abscissae, wrong polynomial formula, missing
+        normalization).
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        grid = create_cubed_sphere(n=8, use_duogrid=True)
+        dg = grid.duogrid
+        ng = dg.ng
+        n = dg.n
+        n_ext = n + 2 * ng
+
+        # corner_xp shape: (6, 4, n_ext, n_ext).  Only target cells in
+        # the X+ halo region (i >= ng+n) are populated; others are zero
+        # by construction.  Check partition of unity where populated.
+        for name, arr, i_range, j_range in [
+            ('corner_xp', dg.corner_xp, range(ng + n, n_ext), range(n_ext)),
+            ('corner_xm', dg.corner_xm, range(0, ng),        range(n_ext)),
+            ('corner_yp', dg.corner_yp, range(n_ext), range(ng + n, n_ext)),
+            ('corner_ym', dg.corner_ym, range(n_ext), range(0, ng)),
+        ]:
+            arr_np = np.asarray(arr)
+            for face in range(6):
+                for i in i_range:
+                    for j in j_range:
+                        weights = arr_np[face, :, i, j]
+                        # Only check cells with non-zero weights (populated).
+                        if np.any(np.abs(weights) > 1e-300):
+                            s = float(np.sum(weights))
+                            self.assertAlmostEqual(s, 1.0, places=10,
+                                msg=(f"{name}[face={face}, :, i={i}, j={j}] "
+                                     f"sum = {s:.10e} != 1.0 — Lagrange "
+                                     f"weights violate partition of unity."))
+
 
 if __name__ == "__main__":
     unittest.main()
