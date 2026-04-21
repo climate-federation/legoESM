@@ -2029,6 +2029,52 @@ These predict different INTERIOR-vs-FULL ratios: an edge defect would make the i
 
 **Confidence calibration.**  Edge/halo hypothesis from iter-732 is DOWN (interior/full ~0.6-0.9 rules out edge-only).  Global scaling hypothesis from iter-735 is UP (residual ratio is larger at interior where ke_diff is smaller, consistent with fy_vort being 20× too big or ke_diff being 20× too small).  But "20× too big" could be one of many factors; iter-737 must nail down WHICH factor in WHICH branch.
 
+### Iter-737 — unit audit of ke_corner and fy_vort: both in m²/s, hypothesis disproven
+
+Per iter-736 next work: "concrete per-variable unit check of `_bgrid_ke_transport`'s four multiplicands" and the `fv_tp_2d` xfx/yfx inputs.
+
+**Python `_bgrid_ke_transport` variable units (src/legoesm/core/fv3_sw_core.py:1702-1776):**
+
+| Variable     | Assignment (line)                        | Units     |
+|--------------|------------------------------------------|-----------|
+| `vb`         | `dt5 * (vc_sum - uc_sum*cosa) * rsina`   | [m] = dt·velocity·(projection) |
+| `ub`         | `dt5 * (uc_sum - vc_sum*cosa) * rsina`   | [m]       |
+| `transported_y` | `_ppm_transport_1d(v_d, vb, rdy, axis=2)` | [m/s] (same as v_d) |
+| `transported_x` | `_ppm_transport_1d(u_d, ub, rdx, axis=1)` | [m/s] (same as u_d) |
+| `ubbtemp`    | `transported_y`                          | [m/s]     |
+| `vbbtemp`    | `vb`                                     | [m]       |
+| `ubb`        | `ub`                                     | [m]       |
+| `vbb`        | `transported_x`                          | [m/s]     |
+| `ke_corner`  | `0.5*(ubbtemp*vbbtemp + ubb*vbb)`        | 0.5·[(m/s)·(m) + (m)·(m/s)] = **[m²/s]** |
+
+Fortran d_sw3 / dyn_core.F90:1017-1018 assembles `kee` with the same multiplicand structure and units.  Python matches Fortran convention.
+
+**Python `fv_tp_2d` → fy_vort units (src/legoesm/core/fv_tp_2d.py:459-538):**
+
+| Input         | Value / formula                        | Units     |
+|---------------|----------------------------------------|-----------|
+| `zeta_abs`    | `zeta + f` (cell-centre vorticity)     | [1/s]     |
+| `crx`         | `dt * ut * rdxa_upwind`                | [1] (dimensionless Courant) |
+| `xfx`         | `dt * ut * dy * sin_x`                 | [m²] (area flux) |
+| `cry`, `yfx`  | symmetric                              | [1], [m²] |
+| `fx`, `fy`    | `0.5*(fx1+fx2) * xfx` with fxi = PPM(q) | [1/s]·[m²] = **[m²/s]** |
+
+Also matches Fortran tp_core.F90 structure.  **Both ke_diff and fy_vort are in [m²/s].**
+
+**Iter-736 hypothesis DISPROVEN.**  There is NO missing `dx` factor or missing `dt` factor in the Python port — the units are consistent with Fortran down to both operands of each multiplication.  The 22× magnitude gap at interior is therefore NOT a unit/scaling bug; it is a genuine magnitude discrepancy between the two terms as computed by our port.
+
+**Revised hypothesis (iter-737).**  For W2 exact steady state, Fortran expects `ke_diff + fy_vort` to APPROXIMATELY cancel on the interior (residual should be O(truncation)).  Our port produces `fy_vort ≈ 22·|ke_diff_u|` at interior — either:
+- (a) Our `fy_vort` is correct in absolute value, but our `ke_diff_u` is ~20× too small (missing a term or a geometric factor inside `_bgrid_ke_transport`), OR
+- (b) Our `ke_diff_u` is correct, but our `fy_vort` is ~20× too big (extra factor in `compute_transport_quantities` or `fv_tp_2d`).
+- (c) Both are internally consistent with Fortran but a SIGN error makes them add instead of subtract (less likely — a pure sign flip would give residual ≈ |2·ke_diff| + |2·fy_vort|, not the observed ~|fy_vort|).
+- (d) The cancellation equation is NOT `ke_diff + fy_vort = 0` for W2 — it might be `ke_diff + fy_vort = d(g·h)/dx · dx` (pressure-gradient balance applied at d_sw6 rather than consumed in c_sw+p_grad_c).  If that's the case, the residual IS the correct pressure-gradient tendency and we've been measuring the wrong thing.
+
+**Concrete iter-738 target.**  Hypothesis (d) is the most interesting one to rule out.  For W2 steady state, the expected `(ke_diff + fy_vort) / dx` at each u_d point should equal `-g · dh/dx_u` (per FB chain design: c_sw applies Bernoulli via uc update, then d_sw6 reintroduces the pressure gradient from h as `ke_diff + fy_vort` in some form).  Numerical check: compute `g · dh/dx_u` at W2 IC and compare against observed `(resid_u / rdx_u) = (ke_diff_u + fy_vort) / rdx_u` at interior.  If they match within ~10%, the FB cancellation we've been chasing does not exist; the step-60 W2 blowup has a different cause.  If they don't match, the magnitude-20× is the real bug.
+
+**Deliverable.**  docs-only update; no source-change this iter.  Iter-738 builds the `g · dh/dx_u` computation and compares.
+
+**Process.**  Iter-737 correctly falsifies iter-736's unit-scaling hypothesis through a direct per-operand units audit.  The constraint "follow Fortran exactly" applies to understanding too — before claiming a bug, confirm the Fortran-side mathematical expectation.  Iter-738 must verify whether `ke_diff + fy_vort` ACTUALLY cancels in Fortran for W2 before treating our non-cancellation as proof of a bug.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
