@@ -534,10 +534,23 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
         level_interfaces = compute_level_interfaces(levels)
 
+        # Compute initial cross-section for reference isotherm contours.
+        # These contour lines show where isotherms STARTED, so the viewer
+        # can distinguish slumping (isotherms tilt) from diffusion (isotherms spread).
+        init_section = all_sections[0]
+        init_bin = all_bin_centers[0]
+
+        # Choose ~8 contour levels spanning the initial field
+        init_finite = init_section[np.isfinite(init_section)]
+        if len(init_finite) > 0:
+            ctr_levels = np.linspace(
+                float(np.nanpercentile(init_finite, 5)),
+                float(np.nanpercentile(init_finite, 95)), 8)
+        else:
+            ctr_levels = None
+
         for ax, step, section, bin_centers in zip(
                 axes_arr, valid_steps, all_sections, all_bin_centers):
-            # Use pcolormesh to show true model grid structure instead of imshow
-            # This accurately represents the variable vertical grid spacing
             bin_interfaces = np.linspace(bin_centers[0] - 0.5 * (bin_centers[1] - bin_centers[0]),
                                        bin_centers[-1] + 0.5 * (bin_centers[-1] - bin_centers[-2]),
                                        len(bin_centers) + 1)
@@ -545,6 +558,13 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             im = ax.pcolormesh(
                 X, Y, section.T, cmap=cmap, shading='flat',
                 vmin=cs_vmin, vmax=cs_vmax)
+
+            # Overlay initial isotherm contour lines (thin gray)
+            if ctr_levels is not None:
+                X_ctr, Y_ctr = np.meshgrid(init_bin, levels)
+                ax.contour(
+                    X_ctr, Y_ctr, init_section.T, levels=ctr_levels,
+                    colors='0.4', linewidths=0.5, linestyles='--')
 
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
@@ -863,6 +883,44 @@ def _save_snapshot_data(
         ds_latlon = _arrays_to_latlon_dataset(latlon_arrays, depth=depth_values)
         save_dataset(ds_latlon, output_dir / "snapshots_latlon",
                      fmt=config.OUTPUT_FORMAT)
+
+
+# ---------------------------------------------------------------------------
+# Restart file
+# ---------------------------------------------------------------------------
+
+def save_restart(state, output_dir, grid_type, step, time_days):
+    """Save model state for restarting a run.
+
+    Saves all state arrays as a compressed NPZ file that can be loaded
+    to continue an integration from where it left off.
+
+    Parameters
+    ----------
+    state : ocean state (LatLonCGridOceanState, MPASOceanState, etc.)
+    output_dir : Path
+    grid_type : str
+    step : int
+    time_days : float
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    restart = {
+        "step": step,
+        "time_days": time_days,
+        "grid_type": grid_type,
+    }
+
+    # Save all Field objects from the state
+    for field_name in state._fields:
+        field_obj = getattr(state, field_name)
+        if hasattr(field_obj, 'data'):
+            restart[field_name] = np.asarray(field_obj.data)
+
+    np.savez_compressed(output_dir / "restart.npz", **restart)
+    print(f"  Restart saved: {output_dir / 'restart.npz'} "
+          f"(step={step}, day={time_days:.1f})")
 
 
 # ---------------------------------------------------------------------------

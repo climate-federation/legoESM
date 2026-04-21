@@ -60,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--days", type=float, default=None,
         help="Override duration in days (overrides both normal and quick mode durations)")
     p.add_argument(
+        "--tag", type=str, default=None,
+        help="Append a tag to the output directory (e.g. --tag dst3_200d)")
+    p.add_argument(
         "--list", action="store_true",
         help="List all test cases and exit")
     p.add_argument(
@@ -172,6 +175,8 @@ def main():
         else:
             days = tc.quick_days if args.quick else tc.duration_days
         out_dir = output_base / tc.output_path
+        if args.tag:
+            out_dir = out_dir / args.tag
 
         label = f"{tc.case}/{tc.grid_type}/{tc.resolution}"
         print(f"\n[{i}/{len(tests)}] {label} ({days:.4g} days)")

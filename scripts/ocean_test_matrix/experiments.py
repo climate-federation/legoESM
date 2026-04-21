@@ -21,7 +21,7 @@ from ocean_test_matrix.extraction import (
 )
 from ocean_test_matrix.diagnostic_io import (
     _write_results_txt, _save_case_diagnostics, _save_velocity_profiles,
-    _save_cross_sections,
+    _save_cross_sections, save_restart,
 )
 from ocean_test_matrix.testcase import TestCase
 
@@ -1491,6 +1491,10 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
             coord_kind, lon_deg, lat_deg, depth, "Depth (m)")
     _save_velocity_profiles(output_dir, case_label, snapshots, dt,
                             depth, "Depth (m)")
+
+    # Save restart file for continuing the run
+    n_steps = int(days * 86400 / dt)
+    save_restart(state, output_dir, tc.grid_type, n_steps, days)
 
     return "PASS" if ok else "FAIL", wall, notes
 
