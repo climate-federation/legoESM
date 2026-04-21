@@ -1345,6 +1345,7 @@ def fv3_sw_tendencies(
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
     zero_mean_correction=False,
+    damp_v=0.0, nord_v=1, dt=None,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1491,6 +1492,28 @@ def fv3_sw_tendencies(
     )
     du_d_dt = 0.5 * (du_cc_pad[:, 1:-1, :-1] + du_cc_pad[:, 1:-1, 1:])   # (6, n, n+1)
     dv_d_dt = 0.5 * (dv_cc_pad[:, :-1, 1:-1] + dv_cc_pad[:, 1:, 1:-1])   # (6, n+1, n)
+
+    # (l) Optional Fortran-faithful del-n vorticity damping (iter-754).
+    # Port of d_sw6 -> del6_vt_flux (sw_core.F90:1948-1999).  This is
+    # the STRUCTURALLY-CORRECT replacement for the hyperdiff block at
+    # step (i) — del6 damps VORTICITY (a true scalar, no 1/cos(lat)
+    # polar singularity) rather than geographic wind components.
+    # Enabled by setting damp_v > 0.  Requires dt.
+    if damp_v > 0.0:
+        if dt is None:
+            raise ValueError(
+                "fv3_sw_tendencies: damp_v > 0 requires dt to be passed "
+                "for the Fortran-faithful del6 damping path."
+            )
+        from legoesm.core.fv3_del6_vt_flux import (
+            fv3_del6_vorticity_damping)
+        da_min_c = jnp.min(cdgrid.base.area)
+        damp_step = (damp_v * da_min_c) ** (nord_v + 1)
+        du_del6_step, dv_del6_step = fv3_del6_vorticity_damping(
+            u_d, v_d, damp=damp_step, nord=nord_v, cdgrid=cdgrid)
+        # Convert per-step velocity updates to per-second tendencies.
+        du_d_dt = du_d_dt + du_del6_step / dt
+        dv_d_dt = dv_d_dt + dv_del6_step / dt
 
     return dh_dt, du_d_dt, dv_d_dt
 

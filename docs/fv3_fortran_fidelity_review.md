@@ -685,3 +685,50 @@ dv_d_damping = -fx2 / cdgrid.dy_edge_x    # [m²/s] / [m] = [m/s]
 **Matrix + ocean baselines still unchanged** (standalone unit still not wired into production).
 
 **Process.**  Fifth same-iteration Codex catch across iter-752/753: the unit audit clarifies a subtle point about Fortran's circulation-form `u` inside `d_sw6`.  Future iter-754 wiring into `fv3_sw_tendencies` can now add the returned updates directly to velocity-form tendencies.
+
+### Iter-754 — wire del6 into production; W2 polar peak reduced 45%
+
+First end-to-end source-code integration of the Fortran-faithful del-n-on-vorticity damping into the production A-L+RK3 path.
+
+**Wiring changes:**
+- `operators_cdgrid.py::fv3_sw_tendencies` accepts new kwargs `damp_v` (default 0.0), `nord_v` (default 1), and `dt` (default None).  When `damp_v > 0`, calls `fv3_del6_vorticity_damping` and adds `(du_step/dt, dv_step/dt)` to the D-grid tendencies.
+- `shallow_water_fv3_cdgrid.py::FV3EdgeShallowWaterModel.step` now passes `dt, damp_v, nord_v` through `tendency_fn`.  Honours the `nord_v=-1` sentinel convention (min(2, nord)) already used by the FB chain.
+- The existing `CDGridShallowWaterConfig.damp_v` / `nord_v` fields (already in place for the FB chain) are reused — no new config fields.
+
+**Matrix stability (damp_v=0 default).**  Matrix + ocean baselines UNCHANGED: W2 v_ll_Linf=3.03e-1, L2=2.42e-4; W5 mass drift=1.74e-5; cosine bell L1=1.20e-1; ocean rest 12/12 at machine precision.  Default behaviour is identical to iter-753.
+
+**Iter-754 ablation (W2 C36 1 day, 8 cases):**
+
+| Config                                  | v_ll_Linf | Δ vs baseline | face 4  | face 0  | h_L2     |
+|-----------------------------------------|-----------|---------------|---------|---------|----------|
+| baseline (hyperdiff only)               | 3.03e-01  | 0 %           | 3.07e-01| 8.66e-02| 2.42e-04 |
+| del6 damp_v=0.06 nord_v=1 (no hyp)      | 2.32e-01  | **−23.3 %**   | 1.94e-01| 2.55e-01| 2.64e-04 |
+| del6 damp_v=0.12 nord_v=1               | 2.95e-01  | −2.4 %        | 2.34e-01| 3.23e-01| 3.13e-04 |
+| del6 damp_v=0.20 nord_v=1               | 1.45e+00  | blowup        | 1.58e+00| 5.54e-01| 4.70e-04 |
+| del6 damp_v=0.06 nord_v=2               | 2.13e-01  | −29.7 %       | 2.34e-01| 2.44e-01| 2.94e-04 |
+| del6 damp_v=0.12 nord_v=2               | 2.26e-01  | −25.4 %       | 1.97e-01| 2.51e-01| 2.65e-04 |
+| del6 + hyperdiff (damp_v=0.06, bothON)  | **1.68e-01**| **−44.6 %**  | —       | —       | —        |
+| no damping at all                       | 2.16e-01  | −28.7 %       | 2.62e-01| 2.50e-01| 3.12e-04 |
+
+**Best combination: del6 (damp_v=0.06, nord_v=1) + hyperdiff**, v_ll_Linf = 1.68e-01 m/s — **45 % reduction from the long-stable 0.303 m/s baseline**.
+
+**Visual inspection (`diagnostics/fv3_visual/iter754_del6_w2_comparison.png`, t=1 d):**
+- Baseline: strong mode-4 polar bands at lat ±75–85°, ±0.3 m/s.
+- del6 replaces hyperdiff: polar bands REDUCED to ~0.2 m/s.  Mid-latitude cube-corner structure (~lat ±35°) more visible than baseline — a mode-swap.
+- del6 + hyperdiff: polar bands SIGNIFICANTLY REDUCED, ~0.1 m/s max in polar region.  Mid-latitude cube-corner signature remains but overall smoother than baseline.
+
+**Status relative to Ralph stopping condition.**  v_ll_Linf = 0.168 m/s is the LARGEST reduction in the polar peak in ~50 iters.  HOWEVER, visible artifacts are NOT yet eliminated — mid-latitude cube-corner structure persists at ~0.1 m/s.  The stopping condition ("no visible artifacts") is closer but not met.
+
+**Iter-755+ plan:**
+1. Investigate the mid-latitude cube-corner mode separately (iter-745 mode A).  `boundary_fix` is currently the main suppressor; iter-745 showed `boundary_fix=OFF` leaves a 0.30 cube-corner peak.  Cube-corner mode needs its own Fortran-faithful fix.
+2. Tune damp_v, nord_v further via the ablation script to find optimal combination.
+3. Consider whether `div_damp` (d_sw5 corner divergence damping) in Fortran is better replaced with a Fortran-faithful port too.
+
+**Iter-754 deliverables:**
+- Source: wired `fv3_del6_vorticity_damping` into `fv3_sw_tendencies` behind `damp_v > 0` gate.  Stepper passes `dt, damp_v, nord_v`.
+- `scripts/diag_iter754_del6_polar_peak.py` — 8-case ablation.
+- `scripts/diag_iter754b_del6_visual.py` — side-by-side visual comparison.
+- `diagnostics/fv3_visual/iter754_del6_w2_comparison.png` — visual reduction evidence.
+- Matrix + ocean baselines unchanged with `damp_v=0` default.
+
+**Process.**  First iter-752→754 chain successfully delivered the Fortran-faithful fix the iter-745/750 diagnosis pointed to.  6-iter metric/unit correction chain (iter-752 → 752b → 752c → 752d → 753 → 753b) was prerequisite for a working wiring.  Confidence HIGH on "del6 port is functional and reduces the polar peak"; MEDIUM on "the full artifact can be eliminated with further tuning"; LOW on "current best 0.168 m/s is the lower bound".

@@ -486,6 +486,12 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 state, tendency_fn_csw, dt, self.config.time_integrator,
             )
         else:
+            # Fortran derives nord_v = min(2, nord) when sentinel -1;
+            # see Fortran d_sw6 comment in FV3FBShallowWaterModel.step.
+            eff_nord_v = (min(2, self.config.nord)
+                          if self.config.nord_v < 0
+                          else self.config.nord_v)
+
             def tendency_fn(s):
                 dh, du, dv = fv3_sw_tendencies(
                     s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
@@ -493,6 +499,9 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     div_damp=self.config.div_damp,
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
                     boundary_fix=self.config.boundary_fix,
+                    damp_v=self.config.damp_v,
+                    nord_v=eff_nord_v,
+                    dt=dt,
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,
