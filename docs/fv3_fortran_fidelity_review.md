@@ -1615,6 +1615,36 @@ Codex stop-time review flagged iter-719: "The rewritten diagnostic still overcla
 
 No source-code changes.  Regression suite unchanged at 165 tests; all pass.
 
+### Iter-722 — user redirect: "implement exact FV3 duogrid, no A-L + RK3" → FB chain C24/C36 blow-up confirmed
+
+User instruction (iter-722): "implement the exact FV3 duogrid and then test again", "no Arakawa-Lamb + RK3".  This aligns with the review-doc architectural plan: replace the non-FV3 A-L + RK3 production path with the Fortran-faithful FB chain.
+
+**Actions this iter**:
+
+1. **Reverted iter-721's `boundary_fix_mode` kwarg** from `fv3_sw_tendencies`.  If A-L is being removed entirely, boundary_fix tweaks are moot; keeping the kwarg was dead-code risk.  Back to single production formula.
+
+2. **Tested `FV3FBShallowWaterModel` (FB chain + duogrid) on W2**:
+
+| Grid | FB-chain config                  | Result                          |
+|------|----------------------------------|---------------------------------|
+| C24  | `d4_bg=0.16, nord=1, dddmp=0.2`, duogrid=True | **NaN at step 246** (~82% through day 1) |
+| C36  | same                             | **NaN at step 173** (~60% through day 1) |
+
+3. **Confirmed the documented blocker (review-doc item #2)**: the FB chain is UNSTABLE at the production grid sizes C24 and C36 without additional dissipation beyond what `d4_bg=0.16, dddmp=0.2` provides.  `FV3FBShallowWaterModel`'s own docstring says "known unstable (85 m/s v-wind after 1 day, 3% mass error)" — iter-722 reproduces this with earlier NaN blowup under the production damping config.
+
+**Why the FB chain blows up**:
+Per review-doc item #2 and the existing `FV3FBShallowWaterModel` docstring: "The forward-backward coupling is unstable for finite dt without additional dissipation at the c_sw/d_sw interface. A faithful port would require FV3's exact dissipation control (del2/del4 at specific phases)."  The existing Python FB chain omits some of FV3's phase-specific dissipation (beyond `d_sw5`'s corner divergence damping), and at C24/C36 with the production dt=300s this results in divergence catastrophe.
+
+**Path forward (multi-iteration architectural work)**:
+- (a) Finish ng=3 halo infrastructure (iter-496..598 scaffolded; needs `pad_halo_mpi_4d(halo=3)` completion and `_d2a2c_vect` caller flip from h=2 to h=3).
+- (b) Audit and port FV3's dissipation injection at each of c_sw, d_sw1, d_sw3, d_sw5 phases (not just d_sw5's corner divergence damping).
+- (c) Verify FB + duogrid stability at C24 first, then C36.
+- (d) Gold-file the FB chain at C24 before switching production.
+
+**Not a single-iteration fix**: the user's request is the correct architectural direction, but the FB chain requires 3-5 more iterations of dissipation/halo work before it can REPLACE the A-L path as production.  Meanwhile the A-L path continues to show the ±0.3 m/s mode-4 artifact the user reported (iter-717).
+
+No source-code changes retained this iter (iter-721's kwarg reverted).  Regression suite unchanged at 165 tests; all pass.
+
 ### Iter-721 — snapshot `boundary_fix` variant tested; does NOT fix mode-4 artifact
 
 Acted on the iter-718/720 corner-asymmetry hypothesis by:
