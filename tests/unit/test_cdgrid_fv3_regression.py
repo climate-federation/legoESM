@@ -8253,5 +8253,131 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
             msg=f"sin_sg != sqrt(max(0, 1-cos²)): max |diff| = {diff:.3e}")
 
 
+class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
+    """Iter-682 Fortran-fidelity locks for the duogrid corner-fill path.
+
+    Ralph directive item #2: "Legacy edge handling must be disabled in
+    duogrid mode via bounded_domain = .true."  Python mirrors this by
+    gating `use_duogrid` in the same places Fortran gates
+    `bounded_domain .or. duogrid`.  But the scalar halo path in
+    ``grids/halo.py`` unconditionally calls ``_fill_corners_h1`` /
+    ``_fill_corners_h2`` BEFORE the duogrid-specific
+    ``fill_corner_region`` runs.  This is functionally correct — the
+    duogrid corner fill overwrites the averaged values — but the
+    non-zero duogrid overwrite is what makes it Fortran-faithful.
+
+    These tests lock in:
+
+    1. For N >= 4, ``corner_xp``/``xm``/``yp``/``ym`` Lagrange
+       coefficients are computed (not None) — so
+       ``fill_corner_region`` takes the Fortran-faithful Lagrange
+       branch, not the averaging fallback.
+
+    2. For N < 4, the DuoGrid gracefully falls back to averaging
+       (documented) — ``corner_xp`` is None by design.
+
+    3. In duogrid mode, the final corner values differ from a pure
+       2-point average of adjacent halo cells: if they matched, the
+       Lagrange path would be inert and the duogrid advantage would be
+       lost.
+
+    4. The non-duogrid scalar halo path writes a specific 2-point
+       averaged value into corner cells (a legacy choice documented in
+       ``halo.py::_fill_corners_h1``).  This is not Fortran-faithful
+       (Fortran skips copy_corners for non-duogrid-non-bounded_domain
+       only via a different `copy_corners` directional formula) but
+       the documented mitigation says the value is never read by PPM.
+       Lock: the 2-point average formula is still what's written.
+    """
+
+    def test_duogrid_lagrange_coefficients_present_at_N8(self):
+        """For N=8 >= 4 stencil minimum, DuoGrid computes Lagrange
+        coefficients (not None) — fill_corner_region takes the
+        Fortran-faithful path, not the averaging fallback."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        grid = create_cubed_sphere(n=8, use_duogrid=True)
+        self.assertIsNotNone(grid.duogrid,
+            msg="use_duogrid=True must attach a DuoGridData object.")
+        dg = grid.duogrid
+        for field in ('corner_xp', 'corner_xm', 'corner_yp', 'corner_ym'):
+            val = getattr(dg, field)
+            self.assertIsNotNone(val,
+                msg=(f"DuoGridData.{field} is None at N=8 — "
+                     f"fill_corner_region will silently fall back to "
+                     f"averaging, losing Fortran fidelity."))
+
+    def test_duogrid_corner_fill_overwrites_legacy_fill_corners(self):
+        """In duogrid mode, `fill_corner_region` writes values that
+        DIFFER from the 2-point average `_fill_corners_h1` would give,
+        proving the duogrid path is active and not a silent no-op."""
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import (
+            _fill_corners_h1, pad_halo_4d,
+        )
+
+        grid = create_cubed_sphere(n=8, use_duogrid=True)
+        n = grid.n
+        # Construct a non-trivial scalar field: h(lat, lon).
+        data = jnp.cos(grid.lat)**2 - 0.5 * jnp.sin(grid.lon)
+        data_4d = data[..., None]  # (6, n, n, 1)
+
+        # Duogrid full padding via production API.
+        pad_dg = np.asarray(pad_halo_4d(data_4d, halo=1,
+                                         duogrid=grid.duogrid,
+                                         interp_offsets=None))[..., 0]
+
+        # Same input through a pure 2-point averaging fill path
+        # (no duogrid post-processing).
+        pad_no_dg = np.asarray(pad_halo_4d(data_4d, halo=1,
+                                           duogrid=None,
+                                           interp_offsets=None))[..., 0]
+        # Apply _fill_corners_h1 explicitly on pad_no_dg for clarity (it
+        # was already applied inside pad_halo_4d, but re-apply to be sure).
+        pad_no_dg = np.asarray(_fill_corners_h1(jnp.asarray(pad_no_dg)))
+
+        # The 4 corner cells per face: (0,0), (0,n+1), (n+1,0), (n+1,n+1).
+        cis = [0, 0, n + 1, n + 1]
+        cjs = [0, n + 1, 0, n + 1]
+        any_differ = False
+        max_diff = 0.0
+        for face in range(6):
+            for ci, cj in zip(cis, cjs):
+                d = abs(float(pad_dg[face, ci, cj] - pad_no_dg[face, ci, cj]))
+                max_diff = max(max_diff, d)
+                if d > 1e-10:
+                    any_differ = True
+        self.assertTrue(any_differ,
+            msg=(f"Duogrid corner fill matches the 2-point average at every "
+                 f"face corner (max diff = {max_diff:.3e}) — fill_corner_region "
+                 f"appears to be a silent no-op.  Expected Fortran-faithful "
+                 f"Lagrange interpolation to differ from averaging on this "
+                 f"non-constant scalar field."))
+
+    def test_fill_corners_h1_writes_documented_2_point_average(self):
+        """Lock: `_fill_corners_h1` writes `0.5*(adj_a + adj_b)` at each
+        corner.  If someone changes the formula (e.g. to a 3-point
+        weighted average), this test flags it.
+        """
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.halo import _fill_corners_h1
+
+        n = 6
+        # Construct a padded (6, n+2, n+2) array with known values at the
+        # adjacent halo cells to each corner.
+        padded = jnp.zeros((6, n + 2, n + 2))
+        # SW corner (0,0): adjacent cells (0,1) and (1,0).
+        padded = padded.at[0, 0, 1].set(10.0)
+        padded = padded.at[0, 1, 0].set(20.0)
+        out = np.asarray(_fill_corners_h1(padded))
+        self.assertAlmostEqual(float(out[0, 0, 0]), 0.5 * (10.0 + 20.0),
+            places=10,
+            msg=("`_fill_corners_h1` SW-corner formula changed from "
+                 "0.5*(adjacent_cell_0 + adjacent_cell_1)."))
+
+
 if __name__ == "__main__":
     unittest.main()

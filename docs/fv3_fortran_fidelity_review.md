@@ -933,3 +933,29 @@ Error messages report the offending face index so future debugging is easy.  **V
 Anchors 1-3 (cube-vertex exact -0.5 / +0.5) are already per-face via `np.testing.assert_allclose` which checks element-wise — no change needed there.
 
 No source-code changes; test-only strengthening.  Regression suite unchanged at 127 tests; all pass.
+
+### Iter-682 — duogrid corner-fill Fortran-fidelity audit
+
+Direct audit of Ralph directive item #2 ("Legacy edge handling must be disabled in duogrid mode via `bounded_domain = .true.`").  Traced Python's halo flow at `src/legoesm/grids/halo.py:684-703` against Fortran's `tp_core.F90:229-306` (`copy_corners`) and `fv_duogrid.F90:1719-1903` (`fill_corner_region_2d`).
+
+**Finding — duogrid mode (N >= 4, production)**:
+- `pad_halo_local_4d` → `_fill_corners_h1` (2-point averaged corners) → `fill_corner_region` (FV3-faithful Lagrange interp).
+- The Lagrange path overwrites the averaged corners, so the final corners match Fortran's `fv_duogrid.F90:1719-1903` — Fortran-faithful.
+- The intermediate `_fill_corners_h1` write is computationally wasted but functionally inert.
+
+**Finding — duogrid mode (N < 4)**:
+- `corner_xp` is None (4-point stencil needs N >= 4), so `fill_corner_region` falls back to `_fill_corner_region_averaging`.  Not Fortran-faithful at this size, but N < 4 is a debug-only case (all production grids are N >= 16).
+
+**Finding — non-duogrid mode**:
+- Fortran's `copy_corners(dir=1/2)` uses DIRECTIONAL rotated copies (different values for X-sweep vs Y-sweep of PPM).  Python's `_fill_corners_h1` uses a single 2-point average (direction-invariant).
+- Documented as functionally inert since the iter-69 Codex review: PPM slices `q_full` to keep either i-halo or j-halo, never both, so corner cells at `(i_halo, j_halo)` are never referenced by any PPM stencil.  Arakawa-Lamb gradient reads corners but is a non-FV3 operator.
+- Non-duogrid is the legacy path; duogrid is the production target.  The gap here is NOT a blocker.
+
+**Added locks** (`TestDuogridCornerFillFidelityIter682` — 3 tests):
+1. `test_duogrid_lagrange_coefficients_present_at_N8` — `corner_xp/xm/yp/ym` non-None at N=8 so the Fortran-faithful Lagrange path runs.
+2. `test_duogrid_corner_fill_overwrites_legacy_fill_corners` — on a non-constant test field, the duogrid-produced corner values DIFFER from the 2-point average by > 1e-10 at at least one face corner, proving `fill_corner_region` is active, not a silent no-op.
+3. `test_fill_corners_h1_writes_documented_2_point_average` — pins `_fill_corners_h1` to the `0.5*(adj_a + adj_b)` formula so silent refactors are flagged.
+
+These tests close Ralph directive #2 for the duogrid path: the gate is verified active, the Fortran-faithful Lagrange path is verified to run, and the legacy fallback formula is locked.
+
+No source-code changes; test-only audit + locks.  Regression suite now at **130 tests** (127 + 3 new duogrid corner-fill locks); all pass.
