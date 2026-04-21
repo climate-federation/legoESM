@@ -1249,3 +1249,26 @@ Codex stop-time review flagged iter-695's `ast.Try` handling as wrong for `final
 Non-Try compound statements (`If`/`For`/`While`/`With`) retain the uniform MAY-merge-on-branches pattern from iter-695 — unchanged.
 
 No source-code changes; structural lock correctness fix.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-697 — handler env starts from body_env, not pre-try
+
+Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like
+```
+try:
+    a = ut[:, 1, 1]
+    risky_call()   # may raise AFTER a is bound
+except Exception:
+    b = vt[:, 1, 1]
+    return (a + b) * u[0]  # a='ut' from partial body — violation!
+```
+was not flagged.
+
+**Fix** (iter-697): change `h_env = dict(env)` to `h_env = dict(body_env)` — the handler inherits bindings that the body may have established before raising.  Conservative MAY-analysis: assume the worst case (all body statements ran), so any binding in `body_env` is visible to the handler.
+
+**Verified** against 4 fixtures:
+- try-body binding flows into except handler → CAUGHT *(iter-696 miss closed)*.
+- Ambiguous `a` after try/except (either 'ut' or 'other' depending on path), `vt` + BinOp in finally → CAUGHT *(merge preserves the `'ut'` possibility)*.
+- ut+vt inside except → still CAUGHT.
+- ut in try, no BinOp → correctly NOT flagged.
+
+No source-code changes; structural lock correctness fix.  Regression suite unchanged at 135 tests; all pass.

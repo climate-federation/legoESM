@@ -8534,14 +8534,15 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                         and isinstance(stmt.targets[0], ast.Name):
                     env[stmt.targets[0].id] = classify_rhs(stmt.value)
                 elif isinstance(stmt, ast.Try):
-                    # Iter-696 (Codex iter-695 finding): `finalbody` is
-                    # NOT a branch alternative — it ALWAYS runs after the
-                    # body/handlers complete.  Treat it sequentially on
-                    # the merged alternative-branch state.
-                    #
-                    # Alternatives (body+orelse as one path, each handler
-                    # as another) get MAY-merged; then finalbody runs
-                    # sequentially on the merged env.
+                    # Iter-697 (Codex iter-696 finding): `except`
+                    # handlers must see any bindings established by a
+                    # PARTIAL body execution before the exception
+                    # fired.  Starting handler_env from pre-try `env`
+                    # loses those bindings — missed a `a = ut[...];
+                    # raise; except: b = vt; (a + b) * u` pattern.
+                    # Conservative MAY-analysis: handler sees the full
+                    # body env (exception could fire anywhere, incl.
+                    # after the last body stmt).
                     body_env = dict(env)
                     if scan_stmt_list(stmt.body, body_env):
                         return True
@@ -8552,7 +8553,9 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                     # successful body (+ orelse if present).
                     handler_envs = []
                     for handler in getattr(stmt, 'handlers', []):
-                        h_env = dict(env)
+                        # Handler starts from body_env (NOT pre-try env)
+                        # — may see any prefix of body's bindings.
+                        h_env = dict(body_env)
                         if scan_stmt_list(handler.body, h_env):
                             return True
                         handler_envs.append(h_env)
