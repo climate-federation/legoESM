@@ -1556,8 +1556,15 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 1800.0
-        # Iter-760: Fortran-faithful del-n vorticity damping.
-        # See williamson2/5 config above for rationale.
+        # NOTE (iter-760b): config is DECLARATION-ONLY for this test.
+        # Cosine bell is PURE HORIZONTAL ADVECTION — `model.step()` is
+        # NEVER called.  Instead, the `step_fn` below uses
+        # `transport_step` directly with pre-computed frozen winds
+        # (_d2a2c_vect output).  The CDGridShallowWaterConfig fields
+        # (div_damp, damp_v, nord_v, hyperdiff_coeff) are NOT READ by
+        # the cosine-bell stepping code.  Kept in sync with the W2/W5
+        # config for declaration consistency but the numerical
+        # behaviour is independent of these fields.
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0,
             div_damp=_div_damp_cube(n),
