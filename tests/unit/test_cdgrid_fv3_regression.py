@@ -9462,28 +9462,33 @@ class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
         self.assertAlmostEqual(float(dh[0, 4, 4]),
             -0.00042746388174206776, places=10,
             msg="production dh[0,4,4] fingerprint changed.")
+        # Iter-757 re-pin: area_min (A-grid) -> area_corner (B-grid
+        # Fortran da_min_c) shifted the gold-file values at 1e-10 to
+        # 1e-12 precision for all fingerprint entries.  The iter-757
+        # fix is Fortran-faithful (fv_grid_utils.F90:743) so these
+        # re-pinned values are the correct post-fix gold-file values.
         self.assertAlmostEqual(float(du[0, 4, 4]),
-            -1.8271880903959876e-05, places=12,
+            -1.8271880504682083e-05, places=12,
             msg="production du[0,4,4] fingerprint changed.")
         self.assertAlmostEqual(float(dv[3, 2, 6]),
-            -1.528400399261777e-05, places=12,
+            -1.528400660199037e-05, places=12,
             msg="production dv[3,2,6] fingerprint changed.")
         # Global reductions (catch bugs that cancel pointwise).
         self.assertAlmostEqual(float(dh.sum()),
             0.005122296389910602, places=10,
             msg="production dh.sum() fingerprint changed.")
         self.assertAlmostEqual(float(du.sum()),
-            -0.007307134353286687, places=10,
+            -0.007307134530367604, places=10,
             msg="production du.sum() fingerprint changed.")
         self.assertAlmostEqual(float(dv.sum()),
-            -0.003963301802401258, places=10,
+            -0.003963301875215937, places=10,
             msg="production dv.sum() fingerprint changed.")
         # Magnitude fingerprints (catch any scale regression).
         self.assertAlmostEqual(float(np.abs(dh).max()),
             0.0016060754230186561, places=10,
             msg="production max|dh| fingerprint changed.")
         self.assertAlmostEqual(float(np.abs(du).max()),
-            0.0005217483222795504, places=10,
+            0.0005217483352837994, places=10,
             msg="production max|du| fingerprint changed.")
 
 

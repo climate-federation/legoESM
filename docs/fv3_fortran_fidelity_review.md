@@ -913,3 +913,33 @@ Items 3-4 would fundamentally change how div_damp enters the momentum equation, 
 - Fortran-faithful `dddmp * |div| * dt` formula active when dt is passed.
 
 **Process.**  Tenth Fortran-fidelity fix in iter-752-758 chain.  This fix has no quantitative impact on current benchmarks but plugs a genuine Fortran-semantic gap — once deeper structural div_damp fixes (items 3-4) land, they will depend on the Fortran-faithful adaptive Smag formula being in place.
+
+### Iter-758c — revert iter-758/758b: *dt factor cannot be applied in isolation (Codex stop-time)
+
+Codex stop-time review on iter-758 flagged: **"RK3 stage wiring makes the new `*dt` div-damping path semantically wrong when it becomes active."**  Correct.  Analysis:
+
+**Iter-758 (add `*dt` factor inside the cap).**
+- Pre-iter-758: cap `min(0.20, dddmp*|div|)` activates at |div| > 1.0 (never in W2).
+- Iter-758: cap `min(0.20, dddmp*|div|*dt)` activates at |div| > 0.20/(0.2·300) = 0.003.
+- In clipped regime, tendency = `da_min_c*0.20*grad(div)`.  Integrated over dt: `dt*da_min_c*0.20*grad(div)`.  Fortran per-step: `da_min_c*0.20*grad(div)`.  **Iter-758 over-damps by dt× when capped.**
+
+**Iter-758b attempt (divide by dt).**
+- Introduce `adaptive_coeff = damp_fortran / dt` to fix clipped regime.
+- **But**: in the UNCLIPPED `d2_bg`-dominant regime, `damp_fortran = da_min_c*d2_bg = div_damp`.  Dividing by dt gives `div_damp/dt`, which is dt× smaller than the legacy `div_damp`.
+- Result: W2 L2 baseline shifted 2.42e-4 → 2.68e-4 (+10.7%), 17 regression tests FAIL.
+
+**Conclusion.**  The Fortran-faithful `*dt` factor CANNOT be added in isolation:
+- Without `/dt` compensation: over-damps when clipped.
+- With `/dt` compensation: under-damps in background regime.
+
+The legacy Python `div_damp` (no `*dt`, no `/dt`) has been effectively `dt`× stronger than Fortran's background — a tuning mismatch, but self-consistent.  The only way to faithfully match Fortran is to ALSO port items 3 (corner divergence) and 4 (KE-injection structure).  Those structural changes control WHERE the damping enters the momentum equation and will naturally include the correct `*dt` scaling.
+
+**Iter-758c action.**  Revert iter-758 and iter-758b's `*dt` / `/dt` logic.  Retain iter-757b's Fortran-faithful `da_min_c = min(area_corner)` metric fix.  Remove the now-unused `dt=None` kwarg from `fv3_sw_tendencies`, `cdgrid_momentum_tendencies`, `cdgrid_shallow_water_tendencies` and their callers.
+
+**Gold-file re-pin.**  Iter-757's metric fix produced 1e-10 to 1e-12 shifts in the pinned values at `TestFv3SwTendenciesProductionGoldFileIter711::test_production_tendencies_gold_file_c8`.  These were not noticed at iter-757 because the matrix doesn't exercise this test.  The re-pinned values match current (Fortran-faithful) output.  Pre-iter-757 values retained in git history.
+
+**Matrix + ocean baselines** restored to iter-757b state: W2 v_ll_Linf=3.03e-01, L2=2.42e-04, Linf=1.83e-03; W5 mass drift=1.74e-05; cosine bell L1=1.20e-01.  All regression tests pass (167+5 unit + matrix).
+
+**Iter-759+ plan.**  Port Fortran d_sw5 holistically (items 3 + 4 together).  `*dt` factor is NOT applied in isolation — it's applied as part of the full `delpc(corner) → damp → ke += damp*delpc → B-gradient` flow.  This is a significant port similar to iter-752-755b for del6_vt_flux; it likely takes 4-6 same-iteration sub-iters to land cleanly.
+
+**Process.**  Eleventh Fortran-fidelity review cycle in iter-752-758c chain.  The lesson: Fortran-fidelity fixes are tightly coupled — you can't atomize them beyond natural structural boundaries.  A "one-line *dt factor fix" that worked in isolation in Fortran doesn't work in isolation in our tendency-form RK3 port.  Items 3+4 will dictate how the *dt factor integrates.
