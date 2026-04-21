@@ -1396,6 +1396,26 @@ Iter-703's test suite still passes (2 existing tests in the class); no regressio
 
 No source-code changes; structural lock generalization.  Regression suite unchanged at 159 tests; all pass.
 
+### Iter-705 — close "named intermediate" escape hatch + "uc-named" heuristic
+
+Codex stop-time review flagged iter-704 for leaving "a real escape hatch in the structural lock".  Confirmed by probe: iter-704's JAX-update match required the assign target to be `Name('divg_d')` itself, missing patterns like:
+- `corrected = divg_d.at[:, 1, 1].add(-uc[:, 1, 0]); divg_d = corrected` (named intermediate).
+- `divg_d.at[:, 1, 1].set(...)` with the Call's result unbound (weird in JAX but AST-detectable).
+- `state['divg_d'] = divg_d.at[...].add(-uc_lap[:, 1, 0])` (dict stash).
+- Closure/module-level `uc_lap` where the per-function env tracker has no binding.
+
+**Fix** (iter-705/706, merged in one iter):
+1. **Target-free Call detection**: the scan now walks ANY `ast.Call` matching `divg_d.at[CORNER, CORNER].{set,add,...}(...)`.  The result's assignment destination (named intermediate, temp, dict, unused) doesn't matter — the CALL itself is the signature.
+2. **uc-naming heuristic** (`name_looks_like_uc`): any Name either exactly `uc` OR starting with `uc_` (e.g. `uc_lap`, `uc_pad`, `uc_full`, `uc_left`, `uc_sum`) counts as a uc-alias without needing a local env binding.  Catches closure/module/argument references where the def-use tracker has nothing to resolve.
+
+**Verified** against injected probe with 4 patterns:
+- Closure `uc_lap` used inside `divg_d.at[...].add(-uc_lap[...])` → CAUGHT *(line 4)*.
+- Named intermediate `corrected = divg_d.at[...].add(-uc[...])` → CAUGHT *(line 8)*.
+- Dict stash `state['divg_d'] = divg_d.at[...].add(-uc_pad[...])` → CAUGHT *(line 13)*.
+- Legitimate interior formula `delpc = uc[:, :-1, :] - uc[:, 1:, :]` → NOT flagged (target isn't a corner divg_d, not a JAX `.at[...].*()` call).
+
+No source-code changes.  Regression suite unchanged at 159 tests; all pass.
+
 ### Iter-697 — handler env starts from body_env, not pre-try
 
 Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like

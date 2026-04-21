@@ -9128,17 +9128,29 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
                             env.setdefault(target, False)
             return env
 
+        def name_looks_like_uc(ident):
+            """Heuristic: identifier is `uc` exactly OR starts with `uc_`
+            (e.g. uc_lap, uc_pad, uc_full, uc_left, uc_sum, uc_avg).
+            Iter-706: catches uc-aliases that come from outside the
+            function scope (closure, module, argument) where the AST
+            env tracker has no binding."""
+            return ident == 'uc' or ident.startswith('uc_')
+
         def rhs_uses_uc_with_env(rhs, uc_env):
-            """Flag if RHS references `uc` directly OR any alias whose
-            uc_env entry is True."""
+            """Flag if RHS references `uc` directly, any alias whose
+            uc_env entry is True, OR any Name that looks like a uc
+            alias by naming convention (iter-706)."""
             for sub in ast.walk(rhs):
                 if isinstance(sub, ast.Name):
-                    if sub.id == 'uc' or uc_env.get(sub.id, False):
+                    if (sub.id == 'uc'
+                            or uc_env.get(sub.id, False)
+                            or name_looks_like_uc(sub.id)):
                         return True
                 elif isinstance(sub, ast.Subscript) \
                         and isinstance(sub.value, ast.Name):
-                    if sub.value.id == 'uc' \
-                            or uc_env.get(sub.value.id, False):
+                    if (sub.value.id == 'uc'
+                            or uc_env.get(sub.value.id, False)
+                            or name_looks_like_uc(sub.value.id)):
                         return True
             return False
 
@@ -9165,33 +9177,50 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
                 return False, None
             return True, call.args[0]
 
-        # Pattern 1: `divg_d[:, CORNER, CORNER] = ... uc ...` direct mutation.
-        # Pattern 2: `divg_d = divg_d.at[CORNER, CORNER].{set,add,...}(... uc ...)` JAX form.
-        # Iter-704: uc_env resolves aliases like uc_lap, uc_pad, etc.
+        # Iter-705 (Codex iter-704 finding): the previous check required
+        # the JAX update's assign target to be Name('divg_d') — this
+        # misses realistic "named intermediate" escape hatches like
+        #     corrected = divg_d.at[:, 1, 1].add(-uc[:, 1, 0])
+        #     divg_d = corrected
+        # where the Call is on an intermediate line not directly
+        # assigned to divg_d.  Iter-705 walks the AST for ANY Call
+        # matching the `divg_d.at[CORNER, CORNER].{set,add,...}(... uc ...)`
+        # pattern, regardless of whether the Call's result is bound to
+        # `divg_d`, a temp, a dict, or unused.  Also walks for direct
+        # Subscript-assign mutations independently.
+        #
+        # For uc resolution, we still use per-function env (a Name inside
+        # a function that aliases uc must be resolved via that function's
+        # env, not a module-level env).
         offenders = []
         for py_file in src_dir.rglob('*.py'):
             try:
                 tree = ast.parse(py_file.read_text())
             except (SyntaxError, UnicodeDecodeError):
                 continue
+
             # Build per-function uc aliasing envs once.
             func_envs = {}
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    func_envs[id(node)] = build_uc_env(node)
+            node_to_fn = {}   # Map each descendant node id → enclosing function
+            for fn_node in ast.walk(tree):
+                if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    env = build_uc_env(fn_node)
+                    func_envs[id(fn_node)] = env
+                    for sub in ast.walk(fn_node):
+                        # First function encountered wins (innermost may
+                        # override if we iterate inner-first; we don't
+                        # guarantee order, but for detection purposes
+                        # outer env is sufficient since uc aliases
+                        # usually propagate through enclosing scopes).
+                        node_to_fn.setdefault(id(sub), fn_node)
             module_env = build_uc_env(tree)
 
-            # Find enclosing function for a given node (linear scan).
             def env_for(node):
-                for fn_node in ast.walk(tree):
-                    if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        for sub in ast.walk(fn_node):
-                            if sub is node:
-                                return func_envs[id(fn_node)]
-                return module_env
+                fn = node_to_fn.get(id(node))
+                return func_envs[id(fn)] if fn is not None else module_env
 
             for node in ast.walk(tree):
-                # Direct mutation / augassign form.
+                # (a) Direct subscript mutation / augassign form.
                 if isinstance(node, (ast.Assign, ast.AugAssign)):
                     if isinstance(node, ast.Assign):
                         if len(node.targets) != 1:
@@ -9199,24 +9228,21 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
                         target = node.targets[0]
                     else:
                         target = node.target
-                    rhs = node.value
-                    uc_env = env_for(node)
                     if (isinstance(target, ast.Subscript)
                             and isinstance(target.value, ast.Name)
                             and target.value.id == 'divg_d'
                             and is_corner_index(target.slice)
-                            and rhs_uses_uc_with_env(rhs, uc_env)):
+                            and rhs_uses_uc_with_env(node.value, env_for(node))):
                         offenders.append(
                             f"{py_file.relative_to(src_dir)}:{node.lineno}")
-                        continue
-                    # JAX form: Assign target is Name('divg_d'), rhs is Call.
-                    if (isinstance(node, ast.Assign)
-                            and isinstance(target, ast.Name)
-                            and target.id == 'divg_d'):
-                        matched, jax_rhs = match_jax_at_update(rhs)
-                        if matched and rhs_uses_uc_with_env(jax_rhs, uc_env):
-                            offenders.append(
-                                f"{py_file.relative_to(src_dir)}:{node.lineno}")
+
+                # (b) JAX immutable-update Call — flag regardless of
+                # assign target (catches named-intermediate escape).
+                if isinstance(node, ast.Call):
+                    matched, jax_rhs = match_jax_at_update(node)
+                    if matched and rhs_uses_uc_with_env(jax_rhs, env_for(node)):
+                        offenders.append(
+                            f"{py_file.relative_to(src_dir)}:{node.lineno}")
 
         self.assertEqual(offenders, [],
             msg=(f"Found cube-corner `divg_d[:, CORNER, CORNER] ± uc` "
