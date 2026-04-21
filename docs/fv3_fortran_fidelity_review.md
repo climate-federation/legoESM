@@ -1227,3 +1227,28 @@ The A-L gradient is **not a sweep** — it's a simultaneous 4-point 2D stencil a
 **Iter-765 deliverable.**  Source: `fortran_dir_aware_corners` kwarg added to `_arakawa_lamb_gradient` and `fv3_sw_tendencies`, default False.  Matrix + ocean baselines unchanged.  All regression tests pass.
 
 **Process.**  28th iter in iter-752-765 chain.  First iter with an actual code path WIRED (even if opt-in), and first clean negative result (no Codex stop-time catch).  Falsification of the hypothesis is a useful outcome that constrains iter-766+ directions.
+
+### Iter-765b — thread dir-aware flag through BOTH A-L calls (Codex stop-time)
+
+Codex stop-time review on iter-765 flagged: **"the new flag is only partially threaded, so the claimed falsification is based on a mixed code path."**  Correct.  My iter-765 threading only reached the Bernoulli A-L gradient call (line 1451) but not the div_damp A-L call (line 1517).  The claimed falsification compared:
+- default (both calls 2-pt-avg)
+- "dir-aware" (Bernoulli dir-aware, div_damp still 2-pt-avg)
+
+This is a MIXED code path — not a clean iter-765 falsification.
+
+**Fix.**  Threaded `fortran_dir_aware_corners` through both A-L gradient calls inside `fv3_sw_tendencies` (Bernoulli at line 1451 AND div_damp at line 1517).  Now when the flag is True, BOTH calls use dir-aware fills consistently.
+
+**Re-measured with fully consistent threading:**
+
+| Config                          | h_L2     | v_ll_Linf |
+|---------------------------------|----------|-----------|
+| default (both 2-pt-avg)         | 2.07e−4  | 1.59e−01  |
+| dir-aware BOTH A-L calls        | 7.69e−4  | **1.88e+00** (BLOWUP) |
+
+Essentially identical to iter-765's mixed-path result (1.88 vs 1.90 m/s).  The conclusion holds: Fortran dir-aware fill in A-L gradient blows up by 12×.  Adding the div_damp A-L call to the dir-aware treatment does NOT materially rescue (or worsen) the failure.
+
+**Falsification stands.**  Hypothesis was: Fortran dir=1/dir=2 inner fill in A-L gradient reduces mode A.  Evidence with FULLY consistent flag threading: FALSIFIED at 12× amplitude, 3.7× h_L2.  Consistency check complete.
+
+**Iter-765b deliverable.**  One-line edit to thread kwarg through the second A-L call in `fv3_sw_tendencies`.  Matrix + ocean + 173 regression tests all PASS (default path unchanged).
+
+**Process.**  29th iter in iter-752-765b chain.  Codex-flagged partial threading fixed so the falsification claim rests on a clean single-path comparison.  Lesson: when adding a config flag that controls multiple code paths, verify it reaches ALL of them before drawing conclusions.

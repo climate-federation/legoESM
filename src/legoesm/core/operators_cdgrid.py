@@ -1514,7 +1514,12 @@ def fv3_sw_tendencies(
         div_abs = jnp.abs(div_field)
         adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs))
-        ddiv_dx, ddiv_dy_perp_cc = _arakawa_lamb_gradient(div_field, cdgrid)
+        # Iter-765b: thread fortran_dir_aware_corners flag to this
+        # A-L gradient call too, so the flag consistently affects ALL
+        # A-L invocations inside fv3_sw_tendencies.
+        ddiv_dx, ddiv_dy_perp_cc = _arakawa_lamb_gradient(
+            div_field, cdgrid,
+            fortran_dir_aware_corners=fortran_dir_aware_corners)
         du_cc = du_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dx)
         dv_cc = dv_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dy_perp_cc)
 
