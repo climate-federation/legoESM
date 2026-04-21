@@ -656,3 +656,65 @@ Iter-743 confirmed the production A-L+RK3 baseline v_ll_Linf = 0.303 m/s.  Iter-
 **Deliverable.**  `scripts/diag_iter744_w2_artifact_localise.py` checked in.  v_ll_Linf sentinel (iter-740..742) plus the iter-744 peak-localisation together give a concrete bug-hunt target: polar-face near-pole v_north in the A-L+RK3 path.
 
 **Confidence.**  HIGH on "peak is at lat±86°, lon ±90° mod 180°" — this is directly measured from 181×360 regridded data.  MEDIUM on "the polar face is the cell-native source" — requires face-native inspection (iter-745).  LOW on which of the 4 candidates (halo, angle average, A-L gradient, boundary_fix) is the actual root cause.
+
+### Iter-745 — stabiliser ablation: polar peak is face-4/5 interior; hyperdiff+boundary_fix co-amplify it
+
+Per iter-744 next-work list: confirm the face-native source of the peak AND bound which stabiliser in `fv3_sw_tendencies` is responsible.  Delivered as `scripts/diag_iter745_polar_peak_ablation.py`.
+
+**Face-native localisation (baseline, all stabilisers on).**  W2 C36 1 day with `hyperdiff_coeff=_hyperdiff_cube(36)`, `div_damp=_div_damp_cube(36)`, `boundary_fix=True`:
+
+- face 4 argmax: `(i=19, j=17)` → lat `+86.05°`, lon `+71.59°`, v_north = `-3.068e-01` m/s
+- face 5 argmax: `(i=19, j=18)` → lat `-86.05°`, lon `+71.59°`, v_north = `+3.067e-01` m/s
+- face 0/1/2/3 max |v_north|: 0.087–0.089 m/s (3.5× smaller than polar)
+
+The peak is **unambiguously on the two polar faces**, at cell-centre indices 1–2 cells from the face centre (the pole).  This is NOT a cube-corner location (cube corners of face 4 are at `(0,0), (0,n-1), (n-1,0), (n-1,n-1)`) and NOT an equatorial-face near-pole cell projected by regrid.  Iter-744 candidate 2 (polar-degenerate halo handling) and candidate 4 (polar-row boundary_fix) are both face-4/5-native.  Candidate 1 (`pad_halo_vector` halo rotation) acts at the cube-edge of face 4 (`i∈{0,n-1}` OR `j∈{0,n-1}`) which is at lat ±35.3° — NOT the peak location.  **Candidate 1 (halo rotation) is therefore DOWN.**
+
+**Stabiliser ablation (v_ll_Linf, W2 C36 1 day):**
+
+| Config                                                    | v_ll_Linf | Δ vs baseline | Peak location          |
+|-----------------------------------------------------------|-----------|---------------|------------------------|
+| baseline (bf=T, dd=_div_damp_cube, hy=_hyperdiff_cube)    | 3.028e-01 | —             | polar face, lat ±86°   |
+| boundary_fix=OFF  (dd/hy on)                              | 3.027e-01 | −0.0 %        | cube corner, lat ±37.6°|
+| div_damp=OFF      (bf/hy on)                              | 3.013e-01 | −0.5 %        | polar face, lat ±86°   |
+| **hyperdiff=OFF** (bf/dd on)                              | **2.158e-01** | **−28.7 %** | cube corner, lat ±37.6°|
+| all stabilisers OFF                                       | 1.518e+00 | +401 %        | cube corner, lat ±37.6°|
+| only div_damp ON                                          | 1.396e+00 | +361 %        | cube corner, lat ±37.6°|
+| only hyperdiff ON                                         | 3.192e-01 | +5.4 %        | cube corner, lat ±37.6°|
+| only boundary_fix ON                                      | 2.481e-01 | −18.0 %       | cube corner, lat ±37.6°|
+
+**Concrete conclusions (narrow, what the numbers support):**
+
+1. **Two distinct failure modes exist in the production path.**  (A) A cube-corner mode at lat ±37.6° that grows to O(1 m/s) when no stabiliser is active.  (B) A polar-face mode at lat ±86° that appears only when `boundary_fix=True` AND `hyperdiff>0`.  They are spatially disjoint and respond differently to the stabilisers — they are not the same bug.
+
+2. **`boundary_fix` shifts the dominant peak from cube corner to polar face.**  Compare "boundary_fix=OFF (0.303 at cube corner)" vs "baseline (0.303 at polar)".  Same magnitude, different location.  The smoother at rows/cols `{0, n-1}` of each face (which correspond to the cube-edge, lat ±35.3°) suppresses mode A; whatever residual remains preferentially accumulates at the polar interior of face 4/5.
+
+3. **`hyperdiff` is the polar-peak amplifier.**  "hyperdiff=OFF" with `boundary_fix`/`div_damp` on drops the Linf 28.7 % AND shifts the peak back to cube corner.  `hyperdiff` is adding ~0.09 m/s at the polar face on top of the residual that `boundary_fix` leaves there.
+
+4. **`div_damp` is a red herring for the polar peak.**  `div_damp=OFF` changes v_ll_Linf by only 0.5 % and does not shift the peak location.  It IS needed to suppress the cube-corner mode under some configurations ("only hyperdiff ON": 0.319 with hyperdiff vs 0.216 without — div_damp is partially doing the `boundary_fix` job when `boundary_fix=False`), but it is not the polar-peak driver.
+
+5. **The core A-L + RK3 tendency is unstable without SOME stabiliser.**  "all stabilisers OFF" gives v_ll_Linf = 1.52 m/s, 5× the baseline.  The stabilisers are load-bearing.  Removing `hyperdiff` wholesale (which would reduce the polar peak) is not viable — it would push the cube-corner mode from suppressed to dominant.
+
+**Smallest-correct Fortran-faithful change this suggests (NOT yet implemented).**  Fortran's production SW path does NOT use a separate biharmonic hyperdiffusion at cell centres.  It relies on (i) `div_damp` (`d2_bg`, `dddmp`, `d4_bg` — adaptive Smagorinsky-style divergence damping inside `_d_sw5_corner_divergence`) and (ii) `damp_v`-driven vorticity damping via `_del6_vt_flux`.  Our Python production path's standalone `laplacian_compact`-based bilaplacian on `(u_east, v_north)` at cell centres is a NON-FV3 stabiliser — introduced to pass L2 gates but structurally foreign to d_sw.  Iter-746+ target: replace the hyperdiff block with a Fortran-faithful `div_damp`-only or `div_damp + damp_v`-combined stabiliser, then re-measure the polar peak and cube-corner mode together.  Two risks: (a) pure `div_damp` may not suppress cube-corner mode A enough to meet gates; (b) `damp_v` requires the full FB chain (the A-L production path has no `del6_vt_flux` equivalent wired).  These must be addressed together, not one at a time — iter-745's ablation already shows partial combinations worsen the overall Linf.
+
+**Confidence calibration (following iter-731/733 process constraint).**  HIGH on the face-native peak location (`face 4 (i=19, j=17)` etc — direct argmax).  HIGH on "hyperdiff is amplifying the polar peak by ~0.09 m/s" (direct ablation measurement).  HIGH on "`boundary_fix` shifts the location" (direct measurement).  MEDIUM on "the smallest-correct fix is to replace the hyperdiff block with a Fortran-faithful stabiliser" — this is reasoning from iter-744 candidate 3 and iter-745 numbers + Codex fidelity review findings; it has not been directly tested.  LOW on "removing hyperdiff alone will meet the test-matrix gates" — plausibly false per the "all stabilisers OFF" 1.52 m/s result.
+
+**What iter-745 does NOT claim.**
+- The artifact is NOT fixed.  v_ll_Linf = 0.303 m/s unchanged.
+- No source-code change was made this iter.  The ablation script is diagnostic evidence; it does not modify `fv3_sw_tendencies`.
+- "Replace hyperdiff with div_damp-only" is a hypothesis, not a tested fix.  An iter that attempts this must ALSO report W2/W5/cosine-bell/ocean-rest results together, not just the polar peak metric, because the stabilisers are load-bearing for multiple gates.
+
+**Matrix + ocean rest-state baselines (iter-745, recorded for regression):**
+- W2 C36 1d: L2 = 2.42e-04, Linf = 1.83e-03, v_ll_Linf = 3.03e-01 (pre-regrid 3.07e-01) — PASS, matches iter-742 baseline.
+- W5 C36 1d: mass drift = 1.74e-05 — PASS.
+- Cosine bell C36 1d: L1 = 1.20e-01, L2 = 1.17e-01, Linf = 1.23e-01 — PASS.
+- Ocean rest state 12/12 PASS (cubed-sphere `eta_drift` ~1e-9, lat-lon / MPAS exact zero).
+
+**Visual inspection.**  `results/atmosphere/shallow_water/williamson2/cubed_sphere/C36/snapshots_v.png` at t=0..1 d shows:
+- t=0 d: v ≈ 0 clean (IC).
+- t=0.1 d: polar bands emerging at ~±0.1 m/s.
+- t=0.5 d: clear mode-4 polar banding at ±0.2 m/s.
+- t=1.0 d: fully developed ±0.3 m/s polar bands at lat ±75–86°.
+
+This is the iter-717 user-reported artifact.  **Ralph stopping condition "no visible artifacts on W2" REMAINS UNMET.**
+
+**Deliverable.**  `scripts/diag_iter745_polar_peak_ablation.py` checked in.  Provides the ablation table above + face-native argmax for each configuration — future iters claiming a fix must re-run this script and show both a reduced `v_ll_Linf` AND a reduced per-face polar-face Linf (face 4/5 dropping from 0.307 toward the face 0/1/2/3 baseline of ~0.09).
