@@ -1150,3 +1150,20 @@ Codex stop-time review flagged iter-690's regex as "still false-positives on non
 The proximity filter makes the lock principled: only co-located occurrences — characteristic of an actual d_sw4 corner-fix block — trigger.  Isolated appearances of either signature alone are accepted.
 
 No source-code changes; test-only strengthening.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-692 — replace regex/proximity lock with AST walk
+
+Codex stop-time review flagged iter-691's proximity scan as "weakens the structural lock and can miss wrapped offending code".  Correct: regex + proximity is a compromise that admits both false positives (wide proximity) and false negatives (strict proximity, misses code spread across helpers).
+
+**Fix** (iter-692): replaced text-based regex with an AST walk that detects the UNIQUE Fortran d_sw4 signature `(ut[...] + vt[...]) * u[...]` — the cross-term from Fortran line 1446 `(ut(1,1) + vt(1,1)) * u(0,1)`.  A sum of `ut`-indexed and `vt`-indexed expressions appears in NO other d_sw operator (`grep -rE 'ut\[.*\]\s*\+\s*vt\['` confirms zero matches in the repo today).
+
+The AST lock walks every `BinOp(op=Add)` and asserts `left` and `right` aren't `{ut, vt}` subscripts in either order.  This is robust to formatting, line wrapping, and comment structure — a property the regex+proximity hybrid could not offer.
+
+**Verified**:
+- Direct inline `(ut[:, 1, 1] + vt[:, 1, 1]) * u[...]` → CAUGHT ✓
+- Inner-function wrapping (helper returns ut+vt) → CAUGHT ✓
+- Reverse order `vt + ut` → CAUGHT ✓
+- `ut + ut` only (d2a2c_vect legitimate sum) → correctly NOT flagged
+- Temp-variable aliasing `a=ut[...]; b=vt[...]; (a+b)*u` → MISSED (documented edge case; Fortran transliteration rarely introduces this intermediate step).
+
+No source-code changes; structural lock only.  Regression suite unchanged at 135 tests; all pass.

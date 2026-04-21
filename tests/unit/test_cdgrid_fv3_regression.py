@@ -8394,8 +8394,8 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                  f"ignoring uc."))
 
     def test_d_sw4_corner_ke_fix_absent_from_python_source(self):
-        """Iter-688/689: lock the Fortran-fidelity invariant that d_sw4's
-        corner-KE fix (sw_core.F90:1441-1466) is ABSENT in Python.
+        """Lock the Fortran-fidelity invariant that d_sw4's corner-KE
+        fix (sw_core.F90:1441-1466) is ABSENT in Python.
 
         Fortran applies the corner fix only when
         `.not. bounded_domain .or. .not. duogrid`.  In Python production
@@ -8403,127 +8403,64 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
         block is SKIPPED.  Python has NO counterpart — verified by
         inspection — matching Fortran's SKIP behaviour.
 
-        Iter-689 fix (Codex finding on iter-688): the previous pattern
-        `ut[i, 1] + ut[i, 0]` assumed 2D indexing `ut[i, j]`.  The repo
-        actually uses 3D indexing `ut[:, i, j]` (face dim first).  The
-        regex did not match the real codebase form, so the lock was
-        blind.  This version uses two signatures that BOTH must trigger:
+        Iter-692 strengthening (closes Codex iter-691 critique that the
+        proximity-based regex "weakens the lock and can miss wrapped
+        offending code"): replaced text/proximity heuristics with an
+        AST walk that detects the UNIQUE Fortran d_sw4 signature
+        `(ut[...] + vt[...]) * u[...]` from Fortran line 1446
+        `(ut(1,1) + vt(1,1)) * u(0,1)`.  This cross-term — a sum of a
+        `ut`-indexed expression and a `vt`-indexed expression —
+        appears in NO other d_sw operator.  AST-based detection is
+        robust to formatting, wrapping, and comment structure.
 
-        1. `dt / 6` or `dt/6` — distinctive constant `dt6 = dt/6.` at
-           Fortran line 1442, unique to d_sw4's corner fix.
-        2. A SUM of two `ut[...]` references with adjacent-cell j-indices
-           (e.g. `ut[..., X, k] + ut[..., X, k-1]` or the 1/0 literal
-           pair), in Python's 3D indexing form `ut[:, X, Y]`.
-
-        Both signatures must appear in the SAME file to flag a
-        reintroduction of the fix.  Either alone is too noisy.
+        Verified against the whole repo: no `ut[...] + vt[...]` node
+        exists today (`grep -rE 'ut\\[.*\\]\\s*\\+\\s*vt\\['` returns
+        empty).  An accidental reintroduction of the Fortran corner
+        fix — regardless of how it's spread across helper functions or
+        formatted — will contain this cross-term and fail the lock.
         """
+        import ast
         from pathlib import Path
-        import re
         src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
 
-        # Signature 1: the dt/6. constant unique to d_sw4 corner fix.
-        # Allow `dt/6`, `dt / 6`, `dt6 = dt / 6`, etc.
-        dt6_pattern = re.compile(r'\bdt\s*/\s*6(?:\.|\b)|\bdt6\s*=')
+        def is_subscript_of(node, name):
+            """True if node is `{name}[...]`."""
+            return (isinstance(node, ast.Subscript)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == name)
 
-        # Signature 2: a SUM `ut[:, A, B] + ut[:, A, C]` where B and C
-        # are adjacent j-indices at a cube corner.  The Fortran d_sw4
-        # corner fix has FOUR corners with different index pairs:
-        #   SW (Fortran i=1,j=1):  ut(1,1)+ut(1,0)    → Python [..., 1] + [..., 0]
-        #   SE (Fortran i=npx,j=1): ut(npx,1)+ut(npx,0) → same index pair
-        #   NE (Fortran i=npx,j=npy): ut(npx,npy)+ut(npx,npy-1) → [..., n] + [..., n-1]
-        #   NW (Fortran i=1,j=npy):  ut(1,npy)+ut(1,npy-1)     → same
-        # Iter-690 (Codex finding on iter-689): pattern must cover BOTH
-        # {0,1} literals AND {n-1, n} literals/expressions (npy-based NE/NW).
-        ut_adj_pattern = re.compile(
-            # SW/SE corners: literal 0/1 pair in either order
-            r'\but\s*\[[^\]]+,\s*1\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*0\s*\]'
-            r'|\but\s*\[[^\]]+,\s*0\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*1\s*\]'
-            # NE/NW corners: n-1 / n pair (or equivalent: X-1 / X where
-            # X is a single-identifier variable that represents last-row
-            # or last-col index).
-            r'|\but\s*\[[^\]]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*-\s*1\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*\1\s*\]'
-            r'|\but\s*\[[^\]]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*\2\s*-\s*1\s*\]')
-
-        def strip_comments_and_strings(src):
-            """Remove Python comments and string contents so the signature
-            check only fires on code, not doc-strings or comments that
-            happen to mention `dt/6`."""
-            out = []
-            i = 0; in_str = None; in_triple = None
-            while i < len(src):
-                ch = src[i]
-                nxt3 = src[i:i+3]
-                if in_triple:
-                    if nxt3 == in_triple:
-                        in_triple = None; i += 3; out.append('"""'); continue
-                    i += 1; continue
-                if in_str:
-                    if ch == '\\' and i+1 < len(src):
-                        i += 2; continue
-                    if ch == in_str:
-                        in_str = None; out.append('"'); i += 1; continue
-                    i += 1; continue
-                if nxt3 in ('"""', "'''"):
-                    in_triple = nxt3; i += 3; out.append('"""'); continue
-                if ch in ('"', "'"):
-                    in_str = ch; out.append('"'); i += 1; continue
-                if ch == '#':
-                    # skip to end of line
-                    while i < len(src) and src[i] != '\n':
-                        i += 1
-                    continue
-                out.append(ch); i += 1
-            return ''.join(out)
-
-        def find_line_numbers(pattern, text):
-            lines = text.split('\n')
-            out = []
-            for ln, line in enumerate(lines, start=1):
-                if pattern.search(line):
-                    out.append(ln)
-            return out
+        def has_ut_plus_vt_crossterm(tree):
+            """Walk the AST looking for `ut[...] + vt[...]` or
+            `vt[...] + ut[...]` — the signature cross-term of d_sw4's
+            corner KE fix from Fortran line 1446."""
+            for node in ast.walk(tree):
+                if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                    l, r = node.left, node.right
+                    if (is_subscript_of(l, 'ut') and is_subscript_of(r, 'vt')):
+                        return True
+                    if (is_subscript_of(l, 'vt') and is_subscript_of(r, 'ut')):
+                        return True
+            return False
 
         offenders = []
         for py_file in src_dir.rglob('*.py'):
             try:
                 text = py_file.read_text()
-            except Exception:
+                tree = ast.parse(text)
+            except (SyntaxError, UnicodeDecodeError):
                 continue
-            stripped = strip_comments_and_strings(text)
-            dt6_lines = find_line_numbers(dt6_pattern, stripped)
-            ut_adj_lines = find_line_numbers(ut_adj_pattern, stripped)
-            # Iter-691 (Codex finding on iter-690): the previous joint
-            # check "both signatures in the same file" is too loose —
-            # the repo legitimately contains `ut[...] + ut[...]` sums
-            # inside d2a2c_vect's 4-cell average (fv3_sw_core.py:2996
-            # region) and WOULD false-positive if someone ever added an
-            # unrelated `dt/6` constant to the file.  Require PROXIMITY:
-            # both signatures must appear within 20 source lines of
-            # each other, matching the likely scope of a transliterated
-            # d_sw4 corner-fix block (Fortran lines 1442-1466 → ~25 F90
-            # lines → ~20 Python lines).
-            PROX = 20
-            joint = False
-            for a in dt6_lines:
-                for b in ut_adj_lines:
-                    if abs(a - b) <= PROX:
-                        joint = True
-                        break
-                if joint:
-                    break
-            if joint:
+            if has_ut_plus_vt_crossterm(tree):
                 offenders.append(str(py_file.relative_to(src_dir)))
 
         self.assertEqual(offenders, [],
-            msg=(f"Found BOTH the `dt/6` constant AND a `ut[:, ?, 1] + "
-                 f"ut[:, ?, 0]` adjacent-sum pattern in {offenders} — "
-                 f"jointly these signatures reproduce the Fortran d_sw4 "
-                 f"corner KE fix (sw_core.F90:1441-1466).  That block is "
-                 f"gated on `.not. bounded_domain .or. .not. duogrid` in "
-                 f"Fortran and must stay ABSENT in the Python "
-                 f"duogrid-production path.  If this is an intentional "
-                 f"addition, update the iter-688/689 invariant."))
+            msg=(f"Found `ut[...] + vt[...]` (or `vt + ut`) cross-term "
+                 f"in {offenders}.  This AST signature is UNIQUE to the "
+                 f"Fortran d_sw4 corner KE fix (sw_core.F90:1446): "
+                 f"`(ut(i,j) + vt(i,j)) * u(...)`.  That block is gated "
+                 f"on `.not. bounded_domain .or. .not. duogrid` and must "
+                 f"stay ABSENT in the Python duogrid-production path.  "
+                 f"If this is an intentional addition, update the "
+                 f"iter-692 invariant."))
 
     def test_bgrid_ke_transport_gold_file_non_constant(self):
         """Gold-file regression test: run `_bgrid_ke_transport` on a
