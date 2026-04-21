@@ -1112,3 +1112,26 @@ Also strips Python comments and string literals before matching, so `# no dt/6 h
 - Comment `# no dt/6 here` in isolation → NOT flagged (stripped before grep).
 
 No source-code changes; test-only correction.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-690 — widen iter-689 structural lock to cover NE/NW corner forms
+
+Codex stop-time review flagged iter-689's lock as "still missing non-1/0 corner forms".  Correct: Fortran d_sw4 has FOUR corners and my pattern only matched the SW (`j=1/0`) and SE (`j=1/0`) cases.  NE and NW corners use `j=npy / j=npy-1` which in Python becomes `[..., n] + [..., n-1]` (or symbolic `npy, npy-1`) — missed by iter-689.
+
+**Fix** (iter-690): added two more alternatives to the regex:
+- `ut[..., X-1] + ut[..., X]` — NE/NW reverse form with single-identifier variable `X`.
+- `ut[..., X] + ut[..., X-1]` — NE/NW forward form.
+- Both use backreferences (`\1`, `\2`) to require the SAME variable on both sides (so `X=n, X-1=n-1` matches but `X=n, Y-1=m-1` doesn't — avoids false positives on unrelated slice arithmetic).
+
+**Verified against 8 string fixtures** (4 corner forms × 2 orders + 2 negatives):
+- SW `ut[:, 1, 1] + ut[:, 1, 0]` → MATCH
+- SE `ut[:, n, 1] + ut[:, n, 0]` → MATCH
+- NE `ut[:, n, n] + ut[:, n, n-1]` → MATCH  *(new)*
+- NE reverse `ut[:, n, n-1] + ut[:, n, n]` → MATCH  *(new)*
+- NW `ut[:, 1, n] + ut[:, 1, n-1]` → MATCH  *(new)*
+- NW (`npy` var) `ut[:, 1, npy] + ut[:, 1, npy-1]` → MATCH  *(new)*
+- Legitimate slice `ut[:, row, jlo-1:jhi] + ut[:, row+1, jlo-1:jhi]` → NO MATCH
+- Different vars `ut[:, 1, n] + ut[:, 1, m-1]` → NO MATCH
+
+The backreference requirement is critical: without `\1`/`\2`, the pattern `ut[..., \w+] + ut[..., \w+-1]` would match unrelated index pairs like `ut[..., i] + ut[..., j-1]` — too many false positives.
+
+No source-code changes; regex widening only.  Regression suite unchanged at 135 tests; all pass.

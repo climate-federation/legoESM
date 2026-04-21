@@ -8426,13 +8426,24 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
         # Allow `dt/6`, `dt / 6`, `dt6 = dt / 6`, etc.
         dt6_pattern = re.compile(r'\bdt\s*/\s*6(?:\.|\b)|\bdt6\s*=')
 
-        # Signature 2: a SUM `ut[:, A, B] + ut[:, A, C]` where B/C are
-        # adjacent (0/1, 1/0, or literal-based).  Covers the 3D indexing
-        # form `ut[:, i, j]` that the repo actually uses.  Also covers
-        # trailing-index scalar form `ut[:, 1, 1] + ut[:, 1, 0]`.
+        # Signature 2: a SUM `ut[:, A, B] + ut[:, A, C]` where B and C
+        # are adjacent j-indices at a cube corner.  The Fortran d_sw4
+        # corner fix has FOUR corners with different index pairs:
+        #   SW (Fortran i=1,j=1):  ut(1,1)+ut(1,0)    → Python [..., 1] + [..., 0]
+        #   SE (Fortran i=npx,j=1): ut(npx,1)+ut(npx,0) → same index pair
+        #   NE (Fortran i=npx,j=npy): ut(npx,npy)+ut(npx,npy-1) → [..., n] + [..., n-1]
+        #   NW (Fortran i=1,j=npy):  ut(1,npy)+ut(1,npy-1)     → same
+        # Iter-690 (Codex finding on iter-689): pattern must cover BOTH
+        # {0,1} literals AND {n-1, n} literals/expressions (npy-based NE/NW).
         ut_adj_pattern = re.compile(
+            # SW/SE corners: literal 0/1 pair in either order
             r'\but\s*\[[^\]]+,\s*1\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*0\s*\]'
-            r'|\but\s*\[[^\]]+,\s*0\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*1\s*\]')
+            r'|\but\s*\[[^\]]+,\s*0\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*1\s*\]'
+            # NE/NW corners: n-1 / n pair (or equivalent: X-1 / X where
+            # X is a single-identifier variable that represents last-row
+            # or last-col index).
+            r'|\but\s*\[[^\]]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*-\s*1\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*\1\s*\]'
+            r'|\but\s*\[[^\]]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*\+\s*ut\s*\[[^\]]+,\s*\2\s*-\s*1\s*\]')
 
         def strip_comments_and_strings(src):
             """Remove Python comments and string contents so the signature
