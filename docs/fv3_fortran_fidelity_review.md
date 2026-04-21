@@ -1988,6 +1988,47 @@ which matches IF Python's ke_diff / fy_vort are **also** in circulation form.
 
 **Process discipline (iter-731 + iter-733 + iter-735).**  This iter deliberately does NOT claim "the bug is a dx factor." That's a hypothesis matching the data; confirming it requires an actual numerical test.  The Ralph directive "do not improvise" applies to interpretations as strictly as to source code.
 
+### Iter-736 — interior vs edge residual split: bug is NOT edge-driven
+
+Iter-735 flagged two hypotheses for the iter-733/734 O(1) `ke_diff + fy_vort` residual:
+- Edge/halo defect in `_bgrid_ke_transport` or `_vorticity_flux` at panel boundaries (local to ≤ 3-cell halo).
+- Global unit/stencil defect (e.g., missing `dx` scaling factor) affecting every cell equally.
+
+These predict different INTERIOR-vs-FULL ratios: an edge defect would make the interior residual small (interior/full ≪ 1) while a global defect would leave it roughly constant.
+
+**Extended diagnostic (iter-736).**  `scripts/diag_iter732_fb_c24_phase_bisect.py` section [F] crops halo depth h=3 from every panel edge and reports interior-only maxes alongside the full-domain maxes.
+
+**Numerical result at C24, W2, dt=300s, step 1, damp_v=0, d4_bg=0.16:**
+
+|                                 | FULL (6, n, n+1) | INTERIOR (6, n-6, n-5) | interior/full |
+|---------------------------------|------------------|--------------------------|---------------|
+| max\|ke_diff_u\|                | 1.28e+5          | 1.46e+4                  | 0.114         |
+| max\|fy_vort\|                  | 3.79e+5          | 3.41e+5                  | 0.899         |
+| max\|resid_u\|                  | 3.68e+5          | 3.28e+5                  | **0.889**     |
+| **resid_u / \|ke_diff_u\|**     | **2.87**         | **22.4**                 |               |
+| max\|ke_diff_v\|                | 1.05e+5          | 1.32e+4                  | 0.125         |
+| max\|fx_vort\|                  | 4.39e+5          | 3.55e+5                  | 0.809         |
+| max\|resid_v\|                  | 5.35e+5          | 3.42e+5                  | **0.640**     |
+| **resid_v / \|ke_diff_v\|**     | **5.10**         | **26.0**                 |               |
+
+**Conclusion (concrete, narrowed).**  The residual is NOT edge-driven:
+- interior/full ratio for `resid_u` is **0.889** — 89 % of the full-domain magnitude survives after stripping all 3-cell halos.
+- interior/full ratio for `resid_v` is **0.640** — 64 %.
+- At interior, `resid / |ke_diff|` is TEN TIMES LARGER than at full (22.4 vs 2.87 for u; 26.0 vs 5.10 for v) — because `|ke_diff|` drops faster (interior/full ≈ 0.12) than the residual does.
+
+`|fy_vort|` interior is ~3.4e5, `|ke_diff_u|` interior is ~1.5e4 — a **22:1 ratio** at points where Fortran-faithful W2 expects them to cancel.  This is either:
+- A global scaling defect (factor of ~20× on one of the two branches), OR
+- A missing/extra `dx` or `dt` factor in the computation pipeline (1/dx·dt at C24 is ~1/(270km·300s) ~ 1.2e-8, so `dx·dt` factor would be far bigger than needed — but `dt` alone ~300 matches order-of-magnitude; `dx·dt` ratio if we had `·dx` instead of `·dx·dt` somewhere ~ dx = 270e3).
+
+**Narrowed candidate root-cause areas (refined from iter-733/734 list):**
+1. **Top candidate (iter-736):** `_bgrid_ke_transport` — produces `ke_corner` ~3-4 orders of magnitude too small relative to `fy_vort`.  The `kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)` formula assumes specific units for each multiplicand; if ubb/vbb (B-grid Courant, supposed to be in [m] = dt/2·velocity) are actually in [1] (dimensionless) or [m/s], the product is short a factor of dt·velocity ~ 300·40 ~ 1.2e4 at C24 — which is in the right ballpark for the observed 22× gap.
+2. **Secondary:** `fy_vort = fv_tp_2d(zeta_abs, crx, cry, xfx, yfx, ...)` — if `xfx/yfx` are passed WITH a `·dt` factor that shouldn't be there, `fy_vort` is oversized by ~300×.
+3. **Tertiary:** interior stencil in either path that introduces a factor-of-dt or factor-of-dx scale.
+
+**Deliverable.**  `scripts/diag_iter732_fb_c24_phase_bisect.py` extended with interior/edge split (section [F]).  Iter-737 next work: concrete per-variable unit check of `_bgrid_ke_transport`'s four multiplicands (ubbtemp, vbbtemp, ubb, vbb) against Fortran d_sw3 outputs at a SINGLE interior cell (e.g., face 0, (i,j)=(n//2, n//2)).
+
+**Confidence calibration.**  Edge/halo hypothesis from iter-732 is DOWN (interior/full ~0.6-0.9 rules out edge-only).  Global scaling hypothesis from iter-735 is UP (residual ratio is larger at interior where ke_diff is smaller, consistent with fy_vort being 20× too big or ke_diff being 20× too small).  But "20× too big" could be one of many factors; iter-737 must nail down WHICH factor in WHICH branch.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).

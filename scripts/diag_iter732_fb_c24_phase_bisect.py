@@ -252,6 +252,55 @@ for face in range(6):
     j = argmax_flat % abs_fy[face].shape[1]
     print(f"    face {face}: max|fy_vort|={fmax:.4e} at (i,j)=({i},{j})")
 
+print("\n[F] Interior vs edge residual (iter-736 split)")
+# Crop halo depth 3 away from every panel edge to isolate interior.
+# For D-grid u-edge (shape (6, n, n+1)) we crop [3:n-3, 3:n-2].
+# For D-grid v-edge (shape (6, n+1, n)) we crop [3:n-2, 3:n-3].
+h = 3
+print(f"  Using halo crop depth h={h} (interior = indices [h:-h-1] per axis)")
+resid_u_int = resid_u[:, h:-h, h:-h]
+resid_v_int = resid_v[:, h:-h, h:-h]
+ke_diff_u_int = ke_diff_u_scaled[:, h:-h, h:-h]
+ke_diff_v_int = ke_diff_v_scaled[:, h:-h, h:-h]
+fy_vort_int = fy_vort[:, h:-h, h:-h]
+fx_vort_int = fx_vort[:, h:-h, h:-h]
+
+resid_u_int_max = float(jnp.max(jnp.abs(resid_u_int)))
+resid_v_int_max = float(jnp.max(jnp.abs(resid_v_int)))
+ke_u_int_max = float(jnp.max(jnp.abs(ke_diff_u_int)))
+ke_v_int_max = float(jnp.max(jnp.abs(ke_diff_v_int)))
+fy_int_max = float(jnp.max(jnp.abs(fy_vort_int)))
+fx_int_max = float(jnp.max(jnp.abs(fx_vort_int)))
+
+print(f"  INTERIOR ({(6, N-2*h, N+1-2*h)} / {(6, N+1-2*h, N-2*h)} cells):")
+print(f"    max|ke_diff_u|_interior = {ke_u_int_max:.4e}")
+print(f"    max|fy_vort|_interior   = {fy_int_max:.4e}")
+print(f"    max|resid_u|_interior   = {resid_u_int_max:.4e}")
+print(f"    resid_u / |ke_diff_u|  (interior) = "
+      f"{resid_u_int_max / max(ke_u_int_max, _EPS):.2e}")
+print(f"    max|ke_diff_v|_interior = {ke_v_int_max:.4e}")
+print(f"    max|fx_vort|_interior   = {fx_int_max:.4e}")
+print(f"    max|resid_v|_interior   = {resid_v_int_max:.4e}")
+print(f"    resid_v / |ke_diff_v|  (interior) = "
+      f"{resid_v_int_max / max(ke_v_int_max, _EPS):.2e}")
+
+edge_u_max = float(jnp.max(jnp.abs(resid_u)))
+edge_v_max = float(jnp.max(jnp.abs(resid_v)))
+print(f"  FULL (including edges):")
+print(f"    max|resid_u|_full = {edge_u_max:.4e}  "
+      f"(interior/full = {resid_u_int_max/max(edge_u_max,_EPS):.3f})")
+print(f"    max|resid_v|_full = {edge_v_max:.4e}  "
+      f"(interior/full = {resid_v_int_max/max(edge_v_max,_EPS):.3f})")
+
+print("\n  Interpretation (iter-736):")
+print("  (i) If interior residual is O(1e-3) or smaller AND interior/full")
+print("      ratio < 0.1, the O(1) full residual is driven by EDGES only;")
+print("      the bug is halo/edge in either _bgrid_ke_transport or")
+print("      _vorticity_flux at panel boundaries.")
+print("  (ii) If interior residual is also O(1) (similar order to full),")
+print("       the bug is a global unit/stencil issue (e.g., missing dx")
+print("       scaling) that affects every cell, edges included.")
+
 print("\n=== Interpretation guidance ===")
 print("  If resid_u / |ke_diff_u| >> 0.01, geostrophic balance is")
 print("  broken at step 1 — the ke_diff and vort_flux paths are")
