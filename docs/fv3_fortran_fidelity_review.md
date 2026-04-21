@@ -1333,6 +1333,26 @@ Renamed the iter-700 fixtures to iter-701 and corrected the expected outcomes:
 
 No source-code changes; revert + test semantic correction.  Regression suite still at 154 tests; all pass.
 
+### Iter-702 — d_sw5 divergence-damping gold-file lock (close backlog entries 1569 & 1644)
+
+Closes iter-683/685 backlog entries for Fortran `sw_core.F90:1569` (d_sw5 duogrid loop-bounds gate) and `sw_core.F90:1644` (duogrid-gated divergence-damping `ptc`/`vort`/`delpc` formula).  Added `TestDSw5CornerDivergenceGoldFileIter702` with 3 tests:
+
+1. **`test_nord0_del2_damping_gold_file`** — fixed-seed random winds through `_d_sw5_corner_divergence(nord=0, d2_bg=0.01, dddmp=0.2)`, exercising the del-2 path (Fortran lines 1644-1724).  Fingerprints pinned: `ke[0,4,4]`, `ke[3,2,6]`, `ke.sum()`, `(ke**2).sum()`.
+2. **`test_nord1_del4_damping_gold_file`** — same input with `nord=1, d4_bg=0.16`, exercising the iterated-Laplacian path (lines 1725-1821) including `_divergence_corner_duo` + metric-weighted composite damping.
+3. **`test_reacts_to_input_changes`** — perturb u_d at one cell; assert `max|Δke_damping| > 1.0` (catches stubbed-no-op regressions).
+
+**Verified** catches a 1% regression: injecting `_d_sw5_corner_divergence → 1.01 * original` fails both gold tests (nord=0 → 56.3 diff; nord=1 → 737 diff).  Any genuine change to any stage (formula, Laplacian iter, metric handling, halo) shifts fingerprints.
+
+Loop-bounds gating at Fortran line 1569 is covered implicitly: Python's vectorized code processes the full array (corresponding to the duogrid `is..ie+1` range).
+
+No source-code changes.  Regression suite now at **157 tests** (154 + 3 new); all pass.
+
+**Updated backlog**:
+- ✅ d_sw4 1441: closed by iter-688..701.
+- ✅ d_sw5 1569: closed by iter-702 (implicit via full-array processing).
+- ✅ d_sw5 1644: closed by iter-702 gold-file.
+- ⏳ d_sw5 1742: still needs audit.
+
 ### Iter-697 — handler env starts from body_env, not pre-try
 
 Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like

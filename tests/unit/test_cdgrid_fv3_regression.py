@@ -9037,6 +9037,100 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                                  f"weights violate partition of unity."))
 
 
+class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
+    """Iter-702 gold-file regression test for `_d_sw5_corner_divergence`
+    (FV3 sw_core.F90:1641-1821 duogrid branch).
+
+    Closes iter-683/685 backlog entries for d_sw5 lines 1569 and 1644
+    by pinning the divergence-damping output to recorded fingerprints
+    at fixed-seed random inputs.  Exercises BOTH the nord=0 del-2
+    path (1644-1724) AND the nord=1 del-4 path (1725-1821).  A subtle
+    change to any stage — del-2 formula, higher-order Laplacian iter,
+    metric-weighted damping composite, pad_halo / fill_corner_region
+    handling — will shift the fingerprints and fail this test.
+    """
+
+    def _setup(self, n=8, seed=702):
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(seed)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        ua = jnp.asarray(rng.standard_normal((6, n, n)))
+        va = jnp.asarray(rng.standard_normal((6, n, n)))
+        return cdgrid, u_d, v_d, ua, va
+
+    def test_nord0_del2_damping_gold_file(self):
+        """nord=0 (del-2 damping): fingerprints recorded on CPU x64."""
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+
+        cdgrid, u_d, v_d, ua, va = self._setup()
+        ke = np.asarray(_d_sw5_corner_divergence(
+            u_d, v_d, ua, va, cdgrid, dt=0.1,
+            d2_bg=0.01, dddmp=0.2, d4_bg=0.0, nord=0))
+        self.assertEqual(ke.shape, (6, 9, 9))
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -5634.741066188088,
+            places=6, msg="nord=0 ke[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 11590.35168441207,
+            places=6, msg="nord=0 ke[3,2,6] fingerprint changed.")
+        self.assertAlmostEqual(float(ke.sum()), -52259.08051452633,
+            places=4, msg="nord=0 ke.sum() fingerprint changed.")
+        self.assertAlmostEqual(float((ke ** 2).sum()), 183580121358.84125,
+            places=-2, msg="nord=0 ke L2² fingerprint changed.")
+
+    def test_nord1_del4_damping_gold_file(self):
+        """nord=1 (del-4 damping): fingerprints recorded on CPU x64.
+
+        nord=1 exercises the iterated-Laplacian path
+        (sw_core.F90:1725-1821) including `_divergence_corner_duo`
+        (iter-655 pad_halo wiring) + metric-weighted composite damping.
+        A regression in ANY of these stages shifts the fingerprints.
+        """
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+
+        cdgrid, u_d, v_d, ua, va = self._setup()
+        ke = np.asarray(_d_sw5_corner_divergence(
+            u_d, v_d, ua, va, cdgrid, dt=0.1,
+            d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
+        self.assertEqual(ke.shape, (6, 9, 9))
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -73741.18999227723,
+            places=6, msg="nord=1 ke[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 136135.2527804066,
+            places=6, msg="nord=1 ke[3,2,6] fingerprint changed.")
+        self.assertAlmostEqual(float(ke.sum()), 18038.82445212739,
+            places=4, msg="nord=1 ke.sum() fingerprint changed.")
+        self.assertAlmostEqual(float((ke ** 2).sum()), 7855642704496.756,
+            places=-4, msg="nord=1 ke L2² fingerprint changed.")
+
+    def test_reacts_to_input_changes(self):
+        """Perturbing one cell of u_d must visibly change ke_damping —
+        catches stubbed-no-op regressions."""
+        import numpy as np
+        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+
+        cdgrid, u_d, v_d, ua, va = self._setup()
+        ke_base = np.asarray(_d_sw5_corner_divergence(
+            u_d, v_d, ua, va, cdgrid, dt=0.1,
+            d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
+        u_pert = u_d.at[0, 4, 4].add(5.0)
+        ke_pert = np.asarray(_d_sw5_corner_divergence(
+            u_pert, v_d, ua, va, cdgrid, dt=0.1,
+            d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
+        max_change = float(np.max(np.abs(ke_pert - ke_base)))
+        self.assertGreater(max_change, 1.0,
+            msg=(f"Perturbing u_d at one cell produced max "
+                 f"Δke_damping {max_change:.3e} < 1.0 — "
+                 f"_d_sw5_corner_divergence may be a stubbed no-op."))
+
+
 class TestDSw4StructuralLockAstScanner(unittest.TestCase):
     """Iter-699: executable coverage for the d_sw4 corner-fix structural
     lock's flow-sensitive AST scanner (developed across iters 692-698).
