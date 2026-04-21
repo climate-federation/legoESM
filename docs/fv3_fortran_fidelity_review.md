@@ -943,3 +943,41 @@ The legacy Python `div_damp` (no `*dt`, no `/dt`) has been effectively `dt`× st
 **Iter-759+ plan.**  Port Fortran d_sw5 holistically (items 3 + 4 together).  `*dt` factor is NOT applied in isolation — it's applied as part of the full `delpc(corner) → damp → ke += damp*delpc → B-gradient` flow.  This is a significant port similar to iter-752-755b for del6_vt_flux; it likely takes 4-6 same-iteration sub-iters to land cleanly.
 
 **Process.**  Eleventh Fortran-fidelity review cycle in iter-752-758c chain.  The lesson: Fortran-fidelity fixes are tightly coupled — you can't atomize them beyond natural structural boundaries.  A "one-line *dt factor fix" that worked in isolation in Fortran doesn't work in isolation in our tendency-form RK3 port.  Items 3+4 will dictate how the *dt factor integrates.
+
+### Iter-759 — start d_sw5 holistic port: standalone corner divergence helper
+
+Per iter-758c plan: begin Fortran d_sw5 holistic port (items 3+4 together).  Following the iter-752 pattern, iter-759 delivers the first source-code unit — a standalone B-grid corner divergence helper — with tests.  No production wiring yet.
+
+**Fortran algorithm** (`sw_core.F90:1641-1719`, nord=0 branch, bounded_domain/duogrid):
+
+1. Circulation: `vt = u*dx`, `ut = v*dy`
+2. Volume-mean vorticity `wk` at cell centres
+3. Corner x-flux `ptc(i,j) = (u(i,j) - 0.5*(va(i,j-1)+va(i,j))*cosa_v(i,j)) * dyc(i,j) * sina_v(i,j)`
+4. Corner y-flux `vort(i,j) = (v(i,j) - 0.5*(ua(i-1,j)+ua(i,j))*cosa_u(i,j)) * dxc(i,j) * sina_u(i,j)`
+5. Corner divergence `delpc(i,j) = vort(i,j-1) - vort(i,j) + ptc(i-1,j) - ptc(i,j)`
+6. Normalize: `delpc(i,j) = rarea_c(i,j) * delpc(i,j)`
+7. [DEFERRED to iter-760+] Adaptive damp: `damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc*dt|))`
+8. [DEFERRED to iter-760+] Inject into KE: `ke(i,j) += damp * delpc(i,j)`
+
+**New module.**  `src/legoesm/core/fv3_d_sw5_corner_divergence.py` (~130 lines):
+- `_cell_centre_winds(u_d, v_d) → (u_cc, v_cc)` = Fortran ua, va via simple D-grid averaging.
+- `fv3_d_sw5_corner_divergence(u_d, v_d, cdgrid) → delpc` at INTERIOR B-grid corners (shape `(6, n-1, n-1)`).
+
+**Interior-only scope.**  Iter-759 computes `delpc` at corners `(i, j) ∈ [1, n-1] × [1, n-1]` which are guaranteed to be interior for both `vort` (shape `(6, n+1, n)`) and `ptc` (shape `(6, n, n+1)`) — no halo padding needed.  Full `(6, n+1, n+1)` corners including boundaries require padded non-square arrays (`pad_halo` doesn't currently support non-square inputs), and cube-corner fixes per `sw_core.F90:1709-1715`.  Both deferred to iter-760.
+
+**Tests.**  `tests/test_fv3_d_sw5_corner_divergence.py` — 6 PASSING tests:
+- Shape `(6, n-1, n-1)`.
+- Zero winds → zero divergence.
+- `_cell_centre_winds` correct shape and averaging.
+- Linearity in `(u_d, v_d)` at machine precision.
+- Magnitude order-of-magnitude sanity check.
+
+**Matrix + ocean baselines unchanged** (standalone helper not wired into production).
+
+**Iter-760+ plan:**
+- **Iter-760:** Extend to full `(6, n+1, n+1)` corner coverage.  Requires handling non-square pad or alternative indexing strategy for the boundary corners.
+- **Iter-761:** Add adaptive damping coefficient `damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc*dt|))` per Fortran step 7.
+- **Iter-762:** Wire into `fv3_sw_tendencies` — inject `damp*delpc` into the B-field at corners, replacing the current Python `coeff * grad(div)` direct tendency add.  This is the structural change item 4.
+- **Iter-763:** Remove the legacy div_damp block and validate that all paths use the new Fortran-faithful d_sw5.
+
+**Process.**  Twelfth Fortran-fidelity work unit in the iter-752-759 chain.  The d_sw5 port is structurally analogous to iter-752's del6_vt_flux port: start with standalone core → validate with tests → wire into production → iterate on stop-time reviews.  Expected ~4-6 sub-iters to land cleanly based on the iter-752-755b del6 experience.
