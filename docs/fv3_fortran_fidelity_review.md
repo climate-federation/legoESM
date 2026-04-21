@@ -1522,6 +1522,21 @@ Codex stop-time review flagged iter-713 as "still overclaims spatial coverage an
 
 No source-code changes; spatial fingerprint expansion only.  Regression suite unchanged at 164 tests; all pass.
 
+### Iter-715 — replace raw cell sums with area-weighted mass integrals
+
+Codex stop-time review flagged iter-714 for using "raw cell sums on a nonuniform-area grid" labeled as "mass".  Correct: on the cubed-sphere, cells near cube corners are smaller than cells near face centers (area ratio ~0.7-1.3).  A raw `h.sum()` is NOT a mass integral — it's a cell-count-weighted sum that can change while the physical mass integral is conserved.
+
+**Fix** (iter-715): replaced the three cell-sum "mass" fingerprints with area-weighted integrals `sum(h * area)`:
+- 7x7 box mass around peak: `2.30e15` (was raw sum 33991).
+- Face 3 mass: `4.19e15` (was raw sum 62423).
+- Face 4 mass: `2.47e12` (was raw sum 42.08).
+
+Tolerances updated from `places=2..3` to `places=-8..-4` (appropriate for the much larger magnitudes).  Also added a global mass-conservation check: `rel_err = |sum(h*area) - mass_target| / mass_target < 1e-6` — directly validates that `transport_step`'s `mass_target` rescale works correctly (not a trivial check since `mass_target` is the target, but float32 accumulation could deviate).
+
+All 8 pointwise neighbor fingerprints from iter-714 are retained unchanged — those ARE pointwise cell values, so raw (not area-weighted) is correct.
+
+No source-code changes; corrected fingerprint semantics only.  Regression suite unchanged at 164 tests; all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:

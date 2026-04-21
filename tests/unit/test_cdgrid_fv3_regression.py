@@ -9147,18 +9147,39 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
                      f"Indicates the bell profile around the peak has "
                      f"changed — diffusion, directional asymmetry, or "
                      f"flux-averaging regression."))
-        # 7x7 box sum around the peak: integrated bell mass in a tight
-        # region.  A regression that diffuses mass OUT of the bell core
-        # drops this sum.
-        box_sum = float(h_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4].sum())
-        self.assertAlmostEqual(box_sum, 33991.390625, places=2,
-            msg=f"7x7 box sum around peak drifted: {box_sum:.3f}")
-        # Face 3 total mass (bell-carrying face).
-        self.assertAlmostEqual(float(h_np[3].sum()), 62423.3046875,
-            places=2, msg=f"face-3 total mass drifted: {float(h_np[3].sum()):.3f}")
-        # Face 4 total mass (tail only).
-        self.assertAlmostEqual(float(h_np[4].sum()), 42.07791519165039,
-            places=3, msg=f"face-4 (tail) total mass drifted: {float(h_np[4].sum()):.4f}")
+        # Iter-715 (Codex iter-714 finding): the previous version used
+        # raw cell sums labeled as "mass", but cell areas on the
+        # cubed-sphere are NON-UNIFORM (cells near cube corners smaller
+        # than cells near face centers).  A raw sum is NOT a mass
+        # integral.  Replaced with area-weighted integrals (true mass):
+        #     mass(region) = sum_{cells in region} h[cell] * area[cell]
+        area_np = np.asarray(grid.area)
+        # 7x7 box mass (area-weighted): mass in a tight region around
+        # the peak.  Diffusion of bell mass OUT of this region reduces
+        # the box mass.
+        box_mass = float(
+            (h_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]
+             * area_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]).sum())
+        self.assertAlmostEqual(box_mass, 2303419146567680.0, places=-8,
+            msg=f"7x7 box MASS around peak drifted: {box_mass:.3e}")
+        # Face 3 mass (bell-carrying face, area-weighted).
+        face3_mass = float((h_np[3] * area_np[3]).sum())
+        self.assertAlmostEqual(face3_mass, 4191998944739328.0,
+            places=-8,
+            msg=f"face-3 area-weighted mass drifted: {face3_mass:.3e}")
+        # Face 4 mass (tail only, area-weighted).
+        face4_mass = float((h_np[4] * area_np[4]).sum())
+        self.assertAlmostEqual(face4_mass, 2473981902848.0, places=-4,
+            msg=f"face-4 (tail) area-weighted mass drifted: {face4_mass:.3e}")
+        # Global mass conservation: integrated mass should match
+        # mass_target enforced by transport_step.  Allow tolerance for
+        # float32 accumulation (~1e-7 relative for this C36 grid).
+        total_mass = float((h_np * area_np).sum())
+        mass_target = float(jnp.sum(state.h * grid.area))
+        rel_err = abs(total_mass - mass_target) / mass_target
+        self.assertLess(rel_err, 1e-6,
+            msg=(f"Global mass not conserved: total={total_mass:.3e}, "
+                 f"target={mass_target:.3e}, rel_err={rel_err:.3e}"))
 
 
 class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
