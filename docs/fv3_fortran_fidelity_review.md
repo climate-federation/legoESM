@@ -619,3 +619,40 @@ The "trivial" path (d) is **ruled out by direct measurement**.
 **v_Linf baseline stability.**  Pre-iter-743, W2 v_ll_Linf has been stable at 0.303 m/s since the iter-505 major production fix.  Iter-743 confirms baseline = 0.303 m/s — unchanged across hundreds of iterations.  Any iter claiming to have reduced the artifact must beat 0.303 without introducing a blowup.
 
 **Deliverable.**  `scripts/diag_iter743_production_duogrid.py` checked in as evidence.  Future iters considering duogrid flips on production see this result in the review doc and know not to repeat the experiment without first fixing the A-L path's duogrid compatibility.
+
+### Iter-744 — localise the W2 v-wind artifact peaks: near-pole (±86°), NOT cube-corner
+
+Iter-743 confirmed the production A-L+RK3 baseline v_ll_Linf = 0.303 m/s.  Iter-744 localises WHERE on the lat-lon grid the peak sits to differentiate cube-corner vs polar vs mid-panel-edge bugs.
+
+**Diagnostic.**  `scripts/diag_iter744_w2_artifact_localise.py` runs the same W2 C36 1 day production case, regrids v_north to lat-lon (181 × 360 mesh), and reports the top 12 |v_ll| peak locations.
+
+**Result.**  All top-12 peaks cluster at:
+- **latitude ±86°** (very close to the pole; NOT the cube-corner lat ±35.3° = arctan(1/√2))
+- **longitude 70° and -110°** (i.e., mod 180°, bucketed to the ±90° longitude bins)
+- magnitude 0.303 m/s (top) down to 0.300 m/s (rank 12) — all within 1 % of the Linf
+- sign symmetry: N-hemisphere peaks sign-opposite to S-hemisphere at the same longitude
+
+**Interpretation.**  The artifact is a **polar-face issue**, NOT a cube-corner halo issue:
+- Cube corners sit at ±35.3° latitude — no top peaks there.
+- Polar cap centres sit at ±90° — peaks are at ±86°, not ±90°.
+- ±86° is 4° from the pole, consistent with the FACE 4 / FACE 5 (polar face) grid geometry where the last interior cell-centre row of the polar face lies a few degrees from the pole at C36.
+- Longitude structure: peaks at ±90° (mod 180°) — 4 peak locations per hemisphere = **mode-4** in longitude, matching the "mode-4 polar" visual description from iter-717.
+
+**Bug localisation.**  The peak sits on the POLAR FACES (face 4 for N, face 5 for S), at the highest-latitude cell row of each face.  Candidate sources:
+1. `pad_halo_vector` handling of the polar-face halo (cube corners meeting at the pole; 4 faces meet at each polar vertex but face 4/5 WRAPS there).
+2. `cell_centre_angles_from_4edge` at polar face (the 4-surrounding-edge angle average may be degenerate at cells that border the pole).
+3. Arakawa-Lamb gradient (`_arakawa_lamb_gradient`) at the polar face interior where `dx/dy` ratios approach 0.
+4. `boundary_fix` averaging at rows 0 and n-1 on face 4/5 where the "boundary" is the pole, not a cube edge.
+
+**Separation from FB-chain bug.**  Iter-732's FB step-1 D-grid drift at cube-vertex `(24, 0)` = NW corner of equatorial faces (lat ~±35.3°) is a DIFFERENT bug.  Two separate paths, two separate failure modes:
+- FB chain failure: cube-vertex D-grid halo at the 3-face-meeting vertex.
+- A-L+RK3 production failure: polar-face near-pole peak.
+
+**Iter-745 candidate targets.**  Attack the A-L production's polar-face peak directly.  Specific concrete first tests:
+- Print `v_ll[face 4, interior]` and `v_ll[face 5, interior]` separately to confirm it's the polar faces (not the equatorial faces near the pole).
+- Test whether `boundary_fix=False` on the polar face rows reduces the peak (bounding the role of boundary_fix).
+- Test whether swapping `cell_centre_angles_from_4edge` with a pole-aware variant at face 4/5 changes the peak.
+
+**Deliverable.**  `scripts/diag_iter744_w2_artifact_localise.py` checked in.  v_ll_Linf sentinel (iter-740..742) plus the iter-744 peak-localisation together give a concrete bug-hunt target: polar-face near-pole v_north in the A-L+RK3 path.
+
+**Confidence.**  HIGH on "peak is at lat±86°, lon ±90° mod 180°" — this is directly measured from 181×360 regridded data.  MEDIUM on "the polar face is the cell-native source" — requires face-native inspection (iter-745).  LOW on which of the 4 candidates (halo, angle average, A-L gradient, boundary_fix) is the actual root cause.
