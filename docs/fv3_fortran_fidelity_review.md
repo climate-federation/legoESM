@@ -1158,15 +1158,24 @@ This is evidence that corner-fill choice AFFECTS mode A at the right order of ma
 
 **Process.**  22nd-23rd iter in iter-752-763b chain.  Two Codex stop-time catches on iter-762 (longitude label) and iter-763 (Fortran-vs-proxy overclaim).  Lesson: when claiming a Fortran comparison, actually compute Fortran's formula or clearly label the alternative as a proxy.
 
-### Iter-764 — Fortran `fill_4corners` actually evaluated (not proxy)
+### Iter-764 — Fortran `fill_4corners` (halo=1-reduced subset only)
 
-Per iter-763b's Codex-flagged shortcoming, iter-764 ports Fortran's exact `fill_4corners` formula (`sw_core.F90:3856-3915`) with the mapping `Fortran q(Fi, Fj) → Python padded[face, Fi, Fj]` (halo=1).
+Per iter-763b's Codex-flagged shortcoming, iter-764 evaluates a SUBSET of Fortran's `fill_4corners` formula (`sw_core.F90:3856-3915`) that applies to our halo=1 infrastructure.
 
-For halo=1 our Python has ONE cube-corner halo cell per face, and Fortran's formula collapses to:
+**Caveat (iter-764b, important).**  Fortran's fill_4corners writes TWO halo cells per corner per direction:
+```
+dir=1 SW:  q(-1, 0) = q(0, 2)   ← OUTER fill, needs halo≥2 to exist
+           q( 0, 0) = q(0, 1)   ← INNER fill
+```
+Our Python halo=1 padded array has ONLY ONE corner halo cell per face (padded[0, 0]); there is no "outer" cell analogous to Fortran's q(-1, 0).  Iter-764's evaluation covers ONLY the inner fill `q(0, 0) = q(0, 1)` mapped to `padded[0, 0] = padded[0, 1]`, not the outer fill.  A full Fortran-faithful port would require running at halo≥2 and implementing both fills.
+
+Thus iter-764 evaluates a REDUCED-SCOPE version of the Fortran formula, NOT the full two-cell directional fill.  The measurement below is the INNER-fill discrepancy only.
+
+For the halo=1 inner-fill reduction:
 - dir=1 (x-sweep): `padded[0, 0] = padded[0, 1]`  (y-inward halo value)
 - dir=2 (y-sweep): `padded[0, 0] = padded[1, 0]`  (x-inward halo value)
 
-These DIFFER from each other — Fortran's directional asymmetry is explicit.  Python's `_fill_corners_h1` uses `0.5*(padded[0, 1] + padded[1, 0])` — the average.
+These DIFFER from each other — Fortran's directional asymmetry is explicit.  Python's `_fill_corners_h1` uses `0.5*(padded[0, 1] + padded[1, 0])` — the average of the two dir-specific inner values.
 
 **Measurement on W2-exact KE field** (`scripts/diag_iter764_fortran_fill_4corners.py`):
 
@@ -1181,10 +1190,10 @@ These DIFFER from each other — Fortran's directional asymmetry is explicit.  P
 - **Polar faces 4/5 have zero discrepancy** on this smooth IC — an accident where `padded[0, 1]` and `padded[1, 0]` happen to share the same value at polar-face cube corners.
 - **Relative discrepancy**: 2.91 % of B scale (745 m²/s²), matching the iter-763b proxy estimate.
 
-**Implication.**  A Fortran-faithful A-L gradient would use the dir=1 fill for the x-component (`dB_raw_x`) and dir=2 fill for the y-component (`dB_raw_y`), with cube-corner halo values 22 m²/s² different from Python's current averaged value.  The SIGN of the error is opposite between dir=1 and dir=2, so the x-component and y-component of the gradient at cube-corner cells both shift — in a direction-dependent manner.
+**Implication (scope-limited to halo=1 inner fill).**  A Fortran-faithful A-L gradient AT HALO=1 would use the dir=1 inner fill for the x-component (`dB_raw_x`) and dir=2 inner fill for the y-component (`dB_raw_y`), with cube-corner halo values 22 m²/s² different from Python's current averaged value.  The SIGN of the error is opposite between dir=1 and dir=2, so the x-component and y-component of the gradient at cube-corner cells both shift in a direction-dependent manner.  A halo≥2 port would additionally implement the outer fill which iter-764 does NOT cover.
 
-**Iter-765+ concrete port.**  Modify `_arakawa_lamb_gradient` to accept two `B_pad` variants (one with dir=1 corner fill, one with dir=2) — or equivalently, construct them internally by selectively overwriting the 4 cube-corner cells per face after pad_halo.  Apply dir=1 values to the x-stencil, dir=2 values to the y-stencil.  Run W2 matrix + regression tests to measure mode A reduction.
+**Iter-765+ concrete port.**  Modify `_arakawa_lamb_gradient` to accept two `B_pad` variants (one with dir=1 inner fill, one with dir=2 inner fill) — or equivalently, construct them internally by selectively overwriting the 4 cube-corner cells per face after pad_halo.  Apply dir=1 values to the x-stencil, dir=2 values to the y-stencil.  This is the halo=1-scoped fix; a future halo=2+ port can add the outer fill.  Run W2 matrix + regression tests to measure mode A reduction.
 
-**Iter-764 deliverable.**  `scripts/diag_iter764_fortran_fill_4corners.py` checked in.  Honestly computes Fortran's `fill_4corners` formula (not a proxy) and measures the discrepancy.  Confirms iter-763b's sensitivity conclusion with a direct Fortran-formula comparison.  No source-code change to production.  Matrix + ocean baselines unchanged.
+**Iter-764 deliverable.**  `scripts/diag_iter764_fortran_fill_4corners.py` checked in.  Evaluates the halo=1 INNER subset of Fortran's `fill_4corners` formula (the `q(0,0) = q(0,1)` fill only; Fortran's companion `q(-1,0) = q(0,2)` outer fill is NOT evaluated because our halo=1 layout has no corresponding outer cell).  Measures the inner-fill discrepancy vs Python's 2-pt-avg.  Corroborates iter-763b's sensitivity evidence with the best Fortran-formula comparison achievable at halo=1.  No source-code change to production.  Matrix + ocean baselines unchanged.
 
-**Process.**  24th iter in iter-752-764 chain.  This iter addresses Codex's iter-763 catch (overclaim) by actually computing the claimed Fortran formula.  Evidence is now consistent with the labelling.
+**Process.**  24th-25th iter in iter-752-764b chain.  Two Codex stop-time catches on iter-764 — first (iter-763b) for using a proxy instead of computing the Fortran formula, second (iter-764b) for overclaiming a halo=1 subset as "the Fortran formula."  Lesson: when porting a Fortran subroutine that uses multi-cell halo fills, be explicit about which cells your shallower-halo environment can cover.

@@ -1,12 +1,22 @@
-"""Iter-764 diagnostic: port Fortran `fill_4corners` (sw_core.F90:
-3856-3915) with best-effort Python padded-index mapping and measure
-the actual discrepancy between Python's 2-pt-avg cube-corner fill
-and Fortran's directional copy-from-interior fill.
+"""Iter-764 diagnostic: evaluate the HALO=1-reduced INNER SUBSET of
+Fortran `fill_4corners` (sw_core.F90:3856-3915) with best-effort
+Python padded-index mapping, and measure the discrepancy from
+Python's 2-pt-avg cube-corner fill.
 
-Iter-763b's diagnostic used an "interior-diagonal reflect" PROXY,
-which was clear but didn't directly evaluate Fortran's formula.
-Iter-764 computes Fortran's actual formula for dir=1 and dir=2 at
-the 4 cube-corner regions on each face and compares to the 2-pt-avg.
+**Scope (iter-764b, important).**  Fortran's fill_4corners writes
+TWO halo cells per corner-direction pair:
+    dir=1 SW:  q(-1, 0) = q(0, 2)   ← OUTER fill, needs halo≥2
+               q( 0, 0) = q(0, 1)   ← INNER fill
+Our Python halo=1 padded array has only ONE corner halo cell per
+face, so iter-764 evaluates ONLY the inner fill.  A full Fortran
+port would need halo≥2 to implement both fills.  The measurement
+below is the inner-fill discrepancy only — NOT the full Fortran
+formula.
+
+Iter-763b's diagnostic used an "interior-diagonal reflect" PROXY.
+Iter-764 replaces the proxy with an evaluation of Fortran's inner
+fill rule, which is the best Fortran-formula comparison achievable
+at halo=1.
 
 Fortran fill_4corners formula (for halo width matching ours):
   dir=1 (x-sweep):
