@@ -50,6 +50,7 @@ from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.fv3_sw_core import (
     _c_sw, _p_grad_c, _d_sw_native,
     _d_sw1_recompute_ut_vt, _bgrid_ke_transport,
+    _d_sw5_corner_divergence,
 )
 from legoesm.core.fv_tp_2d import (
     compute_transport_quantities, fv_tp_2d, transport_step,
@@ -142,8 +143,28 @@ zeta = rarea * (vt_circ[:, :, :-1] - vt_circ[:, :, 1:]
 zeta_abs = zeta + cdgrid.base.f
 
 # Step 4: B-grid KE transport at D-grid corners.
-ke_corner = _bgrid_ke_transport(u_d0, v_d0, uc_final, vc_final, cdgrid, dt)
-# Steps 5 / 9 damping are zero for this run (d2_bg, dddmp, damp_v all 0).
+ke_corner_raw = _bgrid_ke_transport(u_d0, v_d0, uc_final, vc_final, cdgrid, dt)
+# Step 5: d_sw5 corner divergence damping ADDED to ke_corner before step 6.
+# Iter-734 Codex fix: this was omitted in iter-733's replay.  With
+# d4_bg=0.16 and nord=1, `use_d_sw5_damping` in `_d_sw_native` is
+# True (d4_bg > 1e-10), so the d_sw5 damping contribution is
+# non-zero and MUST be included for the replay's ke_corner to
+# match what the actual `_d_sw_native` uses at d_sw6.
+d2_bg = 0.0
+dddmp = 0.0
+d4_bg = 0.16
+nord = 1
+use_d_sw5_damping = (d2_bg > 1e-10 or dddmp > 1e-10 or d4_bg > 1e-10)
+if use_d_sw5_damping:
+    ke_damping = _d_sw5_corner_divergence(
+        u_d0, v_d0, ua, va, cdgrid, dt,
+        d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord)
+    ke_corner = ke_corner_raw + ke_damping
+    print(f"  (Iter-734 fix) d_sw5 damping added: max|ke_damping|="
+          f"{float(jnp.max(jnp.abs(ke_damping))):.4e}")
+else:
+    ke_corner = ke_corner_raw
+# Step 9 damping is zero for this run (damp_v = 0).
 
 # Step 6: KE diff at D-grid edges.
 ke_diff_u_scaled = ke_corner[:, :-1, :] - ke_corner[:, 1:, :]  # (6, n, n+1)

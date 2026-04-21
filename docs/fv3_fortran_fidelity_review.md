@@ -1910,6 +1910,33 @@ Codex stop-time review on iter-732 flagged: **"the new 'phase bisect' diagnostic
 
 **Process note.**  Iter-732's "bisect" claim was premature.  Iter-733 scales it back to what the evidence supports AND fixes the script to actually do the job.  Going forward: name diagnostics for what they *measure*, not what the next iter *hopes* they'll prove.
 
+### Iter-734 — complete the iter-733 replay (add d_sw5 damping; Codex stop-time)
+
+Codex stop-time review on iter-733 flagged: **"iter-733's 'true bisect' omits active `d_sw5` damping, so the reported residual/gate is not the actual `_d_sw_native` update."**  Correct.  `_d_sw_native` at step 5 adds `_d_sw5_corner_divergence` output to `ke_corner` before step 6's `ke_diff_*` stencil when `d4_bg > 1e-10 or d2_bg > 1e-10 or dddmp > 1e-10`.  The diagnostic's call site passes `d4_bg=0.16`, so `use_d_sw5_damping` is True and the d_sw5 contribution is non-zero — but iter-733's replay only used the raw `_bgrid_ke_transport` output for `ke_corner`.  This was the source of the iter-733 sanity-check mismatch of 7.14e-2 (≈ 8 % of the u_d drift magnitude).
+
+**Fix.**  Add the `_d_sw5_corner_divergence` call to the diagnostic's inner replay, conditioned on the same gate as `_d_sw_native`:
+```python
+if d2_bg > 1e-10 or dddmp > 1e-10 or d4_bg > 1e-10:
+    ke_damping = _d_sw5_corner_divergence(
+        u_d0, v_d0, ua, va, cdgrid, dt,
+        d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord)
+    ke_corner = ke_corner_raw + ke_damping
+```
+
+**Re-run result (iter-734, same C24/dt=300s/damp_v=0/d4_bg=0.16/nord=1 config):**
+- Sanity: `|du_from_update - (u_d_new - u_d0)|` = **1.9e-6** (was 7.1e-2).  The replay now matches `_d_sw_native` to numerical round-off.
+- d_sw5 damping contribution: `max|ke_damping|` = 2.45e+4 (≈ 20 % of `|ke_diff_u|` scale).
+- Residual metrics (essentially unchanged from iter-733):
+  - `|ke_diff_u|` = 1.28e+5 (was 1.29e+5 raw, now includes damping in the corners → -0.5 % delta)
+  - `|fy_vort|`   = 3.79e+5 (unchanged)
+  - `|ke_diff_u + fy_vort|` = 3.68e+5 (unchanged to 3 sig figs)
+  - `residual / |ke_diff_u|` = **2.87** (was 2.86 — 0.3 % change)
+  - `residual / |ke_diff_v|` = **5.10** (was 5.07 — 0.6 % change)
+
+**Conclusion standing.**  The iter-733 diagnosis is **confirmed**, not overturned: d_sw6's `ke_diff + vort_flux` cancellation is broken by ~3 orders of magnitude.  The 7.14e-2 iter-733 sanity mismatch was entirely from the omitted d_sw5 damping branch in the replay, not from the diagnosis itself; including d_sw5 barely moves the ratio (2.86 → 2.87) but moves the sanity from O(10 %) to O(1e-6).  Candidate root-cause areas and the iter-733 conclusion about broken W2 geostrophic balance all stand.
+
+**Evidence integrity takeaway.**  Iter-732 mis-labelled the diagnostic.  Iter-733 fixed the label and the logic but omitted a code-path that was actually active.  Iter-734 closes the last gap — the replay now matches `_d_sw_native` exactly.  Future diagnostics that "replay" production functions must either (a) call the production function itself and compare intermediates via dual-use return tuples, OR (b) assert that the replay matches the production output to machine precision BEFORE drawing conclusions.  The 1.9e-6 sanity value is now the required floor for this kind of diagnostic.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).
