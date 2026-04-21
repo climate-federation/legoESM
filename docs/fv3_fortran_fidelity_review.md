@@ -1727,6 +1727,27 @@ Probed fingerprints on CPU x64:
 - Task 3 (FB + duogrid stability at C24): **NOT STARTED**.
 - Task 4 (gold-file FB chain at C24): **NOT STARTED**.
 
+### Iter-728 — remove non-faithful `damp_v > 1e-5` outer guard (Codex finding)
+
+Codex adversarial review on iter-727 flagged HIGH severity:
+
+> `src/legoesm/core/fv3_sw_core.py:1854-1858` is not a literal Fortran gate.  `sw_core.F90:886-887` unconditionally does `call fv_tp_2d(..., nord=nord_v, damp_c=damp_v)`.  The only `sw_core` threshold is later `if ( damp_v>1.E-5 ) then` at `sw_core.F90:1948-1950`; mass damping is internally gated in `tp_core.F90:217-219` by `if ( damp_c > 1.E-4 ) then`.
+
+Correct.  Iter-727's outer Python guard (`if damp_v > 1e-5: transport_step(... nord=nord_v, damp_c=damp_v)`) was reused from the step-(9) `_del6_vt_flux` branch threshold and does not correspond to anything in Fortran's d_sw1.  The Ralph directive is explicit: "Do not improvise.  Follow the Fortran implementation exactly."
+
+**Fix (iter-728).**  Replace the guarded branch with an unconditional forward:
+```python
+h_new = transport_step(h, ut, vt, dt, cdgrid,
+                       nord=nord_v, damp_c=damp_v)
+```
+mirroring `sw_core.F90:886-887`.  The gate now lives where Fortran puts it — inside `fv_tp_2d` at `tp_core.F90:217-219` (Fortran) / `src/legoesm/core/fv_tp_2d.py:528` (Python).  Both gates are `damp_c > 1e-4`, so 0 ≤ damp_v ≤ 1e-4 is a no-op both ways and damp_v > 1e-4 invokes the del-n smoother both ways.  Zero behavioural change for any damp_v value; the pre-existing iter-727 gold-file fingerprints (`test_d_sw_native_gold_file_nord1` at damp_v=0 and `test_d_sw_native_gold_file_damp_v_iter727` at damp_v=0.06) remain exact.
+
+Also updated the inline comment block to (a) cite the Fortran-exact call sites (sw_core.F90:886-887, tp_core.F90:217-219), (b) document the dyn_core.F90:762-770 convention `damp_t = damp_v = damp_vt(k)`, `nord_t = nord_v(k)` so future readers don't see `damp_v` used here and suspect it should be `damp_t` (as the q_con transport at sw_core.F90:942-943 uses), and (c) record the Codex finding that motivated the iter-728 removal.
+
+Regression: 5 targeted tests pass (both gold-file tests + the three related d_sw_native collection); fingerprints unchanged.
+
+**Process note.**  The iter-727 accretion happened because my first-pass port was "match whatever sw_core.F90 shows most prominently" rather than "match the exact call at lines 886-887."  Codex's HIGH severity was appropriate — even a zero-numerical-impact divergence from literal Fortran is a fidelity failure under the Ralph directive.  Future dissipation-port iters should cite the exact Fortran line with the `call fv_tp_2d(...)` form before choosing whether to add any Python-side guard.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).

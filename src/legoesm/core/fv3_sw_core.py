@@ -1838,24 +1838,37 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     ut, vt = _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt)
 
     # === 2. PPM mass transport using ORIGINAL h ===
-    # Fortran d_sw1 (sw_core.F90:886-887) passes
-    # ``nord=nord_v, damp_c=damp_v`` into the delp transport so the
-    # same 4th-order smoother the Fortran FB chain applies to the mass
-    # field gets picked up here.  In dyn_core.F90 (lines 762-770),
-    # ``damp_v`` and ``damp_t`` are both set to ``damp_vt(k) =
-    # flagstruct%vtdm4`` and ``nord_v == nord_t``, so the mass branch
-    # and the vorticity branch share one coefficient pair.  Prior to
-    # iter-727 this port applied ``damp_v`` only at step (9) on
-    # vorticity; the FB chain was therefore missing the d_sw1 mass
-    # damping entirely.  Guarding on ``damp_v > 1e-5`` matches the
-    # Fortran branch threshold (``damp_v < 1e-5`` disables del6_vt
-    # there); fv_tp_2d applies its own ``damp_c > 1e-4`` internal
-    # guard so passing damp_v=0.0 here is safe and a no-op.
-    if damp_v > 1e-5:
-        h_new = transport_step(h, ut, vt, dt, cdgrid,
-                                nord=nord_v, damp_c=damp_v)
-    else:
-        h_new = transport_step(h, ut, vt, dt, cdgrid)
+    # Fortran d_sw1 (sw_core.F90:886-887) UNCONDITIONALLY passes
+    # ``nord=nord_v, damp_c=damp_v`` into the delp transport.  The
+    # actual damping gate lives inside ``fv_tp_2d`` at
+    # tp_core.F90:217-219 (``if ( damp_c > 1.E-4 ) then``), which
+    # our Python ``fv_tp_2d`` mirrors at
+    # ``src/legoesm/core/fv_tp_2d.py:528``.  Iter-727 first-pass had
+    # an outer Python guard ``if damp_v > 1e-5`` here to bypass the
+    # damped branch for damp_v=0 — that threshold matched the
+    # step-(9) ``_del6_vt_flux`` branch (sw_core.F90:1948-1950) but
+    # NOT the d_sw1 mass branch which has no outer threshold in
+    # Fortran.  Codex adversarial review flagged this as a non-
+    # faithful accretion.  Iter-728 removes the guard: always
+    # forward ``nord=nord_v, damp_c=damp_v`` and let the internal
+    # tp_core.F90:217 gate handle damp_v=0.  Fortran-exact; no
+    # behavioural change for any damp_v because both the Python and
+    # the Fortran internal gates are ``> 1e-4`` (so 0 <= damp_v
+    # <= 1e-4 is a no-op both ways, and damp_v > 1e-4 invokes the
+    # del-n smoother both ways).
+    #
+    # NOTE on the Fortran param naming (dyn_core.F90:762-770):
+    #   damp_t = damp_v = damp_vt(k) = flagstruct%vtdm4
+    #   nord_t = nord_v(k)
+    # So mass damping (sw_core.F90:886-887) and vorticity damping
+    # (sw_core.F90:1948) share one coefficient pair.  ``q_con``
+    # transport at sw_core.F90:942-943 uses ``damp_t`` / ``nord_t``
+    # — same numeric value per the dyn_core assignment, but the
+    # code-path names are distinct.  We forward damp_v/nord_v here
+    # because the delp call at sw_core.F90:886-887 names them
+    # literally.
+    h_new = transport_step(h, ut, vt, dt, cdgrid,
+                           nord=nord_v, damp_c=damp_v)
 
     # === 3. Cell-centre vorticity from D-grid circulation ===
     dx_u = cdgrid.dx_edge_y  # (6, n, n+1) — edge length for u_d
