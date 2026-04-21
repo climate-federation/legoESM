@@ -9037,6 +9037,60 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                                  f"weights violate partition of unity."))
 
 
+class TestCosineBellGoldFileIter712(unittest.TestCase):
+    """Iter-712 cosine-bell gold-file for the canonical transport path.
+
+    Iter-525 `TestCosineBellPositivity` locks the non-negativity
+    invariant (h_min > 0 throughout a 1-day transport).  This iter
+    complements with gold-file fingerprints for the ACTUAL h values
+    after 1 day — catching regressions in PPM transport, fv_tp_2d
+    flux averaging, the duogrid sync, or `transport_step`'s mass
+    rescale that would silently preserve non-negativity while
+    shifting the solution.
+
+    Uses the same C36/dt=1800/1day canonical matrix config as iter-525
+    to share the grid construction but asserts different invariants.
+    """
+
+    def test_cosine_bell_h_gold_file_after_1day(self):
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv_tp_2d import transport_step
+        from tests.test_cases.cosine_bell import cosine_bell_cubesphere
+
+        n = 36
+        dt = 1800.0
+        n_steps = int(86400 / dt)
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        state = cosine_bell_cubesphere(grid, cdgrid)
+        _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
+            state.u_d, state.v_d, cdgrid)
+        mass_target = float(jnp.sum(state.h * grid.area))
+
+        h = state.h
+        for _ in range(n_steps):
+            h = transport_step(h, ut, vt, dt, cdgrid,
+                               mass_target=mass_target)
+        h_np = np.asarray(h)
+
+        self.assertEqual(h_np.shape, (6, n, n))
+        # Fingerprints recorded on CPU x64 at commit time.
+        self.assertAlmostEqual(float(h_np.max()), 896.294677734375,
+            places=2, msg="cosine bell h_max fingerprint changed.")
+        self.assertAlmostEqual(float(h_np.min()), 0.0, places=8,
+            msg="cosine bell h_min fingerprint changed (expect ≥ 0).")
+        self.assertAlmostEqual(float(h_np.sum()), 62467.9921875,
+            places=2, msg="cosine bell h.sum() fingerprint changed "
+                          "(mass conservation).")
+        self.assertAlmostEqual(float((h_np ** 2).sum()), 33283156.0,
+            places=-2, msg="cosine bell L2² fingerprint changed.")
+
+
 class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
     """Iter-711 end-to-end gold-file for `fv3_sw_tendencies` — the
     A-L + RK3 PRODUCTION path where W2 runs.

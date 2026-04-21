@@ -1476,6 +1476,20 @@ Added gold-file lock for the actual W2/W5/cosine-bell production tendency functi
 
 No source-code changes; production-path gold-file only.  Regression suite now at **163 tests** (162 + 1 new); all pass.
 
+### Iter-712 — cosine-bell gold-file for canonical transport path
+
+Iter-525 `TestCosineBellPositivity` locks non-negativity (h_min > 0 throughout a 1-day transport), but NO fingerprint lock on the actual h values.  A regression in PPM transport, fv_tp_2d flux averaging, duogrid sync, or `transport_step`'s mass rescale could preserve non-negativity while silently shifting the solution.
+
+**Added** `TestCosineBellGoldFileIter712` at C36/dt=1800s/1day (the canonical matrix config).  Records 4 fingerprints:
+- `h_max` (peak bell amplitude after transport).
+- `h_min` (non-negativity; matches iter-525 invariant).
+- `h.sum()` (mass conservation).
+- `(h**2).sum()` (L2² — catches diffusion/dispersion drift).
+
+Mass-target-based positivity-clipping path from `transport_step` (`fv_tp_2d.py:558-568`) is exercised; any change to flux averaging, PPM reconstruction, or mass rescale shifts the fingerprints.
+
+No source-code changes; transport-path gold-file only.  Regression suite now at **164 tests** (163 + 1 new); all pass.  Runtime: ~23s at C36 1-day.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
