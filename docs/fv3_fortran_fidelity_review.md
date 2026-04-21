@@ -747,3 +747,54 @@ The non-orthogonal halo path **blows up the solution by 128×**.  The artifact m
 5. If (2)–(4) all fail to materially reduce the polar peak, escalate to the FB chain's `_d_sw_native` at C24 (separate unblock path — see architectural items).
 
 **Process note (iter-745 → 745b same-iteration cycle).**  Iter-745 self-review generated a specific falsifiable prediction (non-orthogonal path reduces polar peak).  Iter-745b tested it in the SAME ITERATION and falsified it at 128×.  This is the Ralph adversarial-fix cycle working: every claim must be tested, not just asserted.  The updated ordered work list now promotes candidate 4 (non-uniform-dx bilaplacian) which has NOT been tested.
+
+### Iter-746 — two mechanism hypotheses falsified by direct measurement
+
+Iter-745b falsified the halo-rotation hypothesis.  Iter-746 targets the other two plausible mechanisms for the hyperdiff polar amplification:
+(a) Variable `dx[i,j]` at face 4 near-pole breaks the uniform-spacing assumption in `laplacian_compact` (iter-745 candidate 4).
+(b) Rapid `angle[i,j]` variation at face 4 near-pole makes the `cos_a * u_cc - sin_a * v_cc` rotation inject a 2Δx mode that the bilaplacian amplifies.
+
+**Iter-746a: dx variation at polar cells — FALSIFIED.**  `scripts/diag_iter746_polar_dx_variation.py` measures `grid.dx[face=4, :, :]` at and around the polar peak `(i=19, j=17)`:
+
+| Cell        | dx (m)     | Ratio vs centre |
+|-------------|------------|-----------------|
+| (18, 17)    | 555 862.62 | 1.0000000       |
+| (19, 17)    | 555 863.62 | 1.0000000       |
+| (20, 17)    | 555 865.62 | 1.0000036       |
+
+Relative 2nd-difference of dx across the x-stencil = **5 × 10⁻⁶**.  Same for dy.  The grid spacing is essentially uniform at the polar peak cells.  `laplacian_compact`'s uniform-spacing assumption is **NOT** the source of the polar hyperdiff residual.  An analytic test with `f = sin(lat)` (Fortran-known Laplacian `-2 sin(lat)/a²`) shows the uniform-spacing formula is accurate to 0.02–0.06 % at ALL face 4 polar interior cells.  The only cells with large relative error (~46 %) are the cube-corner cells at lat ±35.3° — NOT the polar peak cells at lat ±86°.  Iter-745 ordered-work item 4 is **disproven**.
+
+**Iter-746b: angle rotation injection — FALSIFIED on constant field.**  `scripts/diag_iter746b_angle_variation.py` measures `grid.angle[face=4]` 2nd-differences at the polar peak cell:
+
+| Stencil       | Δ angle | 2nd diff of angle |
+|---------------|---------|-------------------|
+| x-stencil @ (19,17) | −45.50° | **+18.37°** |
+| y-stencil @ (19,17) | −75.29° | **−31.86°** |
+| x-stencil @ face-0 (18,18) | −0.11° | +5 × 10⁻⁵ ° |
+
+The angle DOES vary rapidly at face 4 near-pole (18° and 32° 2nd difference — three orders of magnitude larger than the equatorial face).  But a DIRECT test feeds a constant geographic `u_east = 10 m/s, v_north = 0` through the full rotate → laplacian → bilaplacian → rotate-back pipeline and checks what comes out.  A pipeline that injects a polar artifact from the rotation would produce a non-zero `Δv` over 1 simulated day; the Fortran-faithful answer is exactly zero.
+
+Result:
+- `max|lap(ue_cc)|`     = 2.24 × 10⁻²⁵ (machine zero)
+- `max|bilap(ue_cc)|`   = 2.39 × 10⁻³⁵ (machine zero)
+- Over 1 day: `max|Δv|` from hyperdiff = **6.2 × 10⁻¹⁴ m/s** (machine precision)
+
+The rotate→laplacian pipeline itself is exact on a constant field — even at the polar face where angle varies rapidly.  The `cos_a, sin_a` round-trip recovers the constant to machine precision.  **The rotation-injection hypothesis is falsified.**
+
+**What iter-746a + 746b collectively rule out.**  The hyperdiff block's polar amplification is NOT explained by (i) variable-dx formula error, (ii) angle-rotation injection on smooth fields, or (iii) the halo rotation (iter-745b).  The remaining viable mechanisms:
+
+1. **Bilaplacian amplifies ACCUMULATED error** that builds up over 288 RK3 steps from another source (e.g., `boundary_fix`'s smoothing at cube-edge rows generates a 2Δx mode at row 1/row n-2 of face 4, which the bilaplacian then amplifies and propagates inward).  Untested.
+2. **PPM transport** (in `cgrid_mass_flux_divergence`) has a near-pole limiter behavior that creates subtle structure in `h`, which feeds `B = KE + g*h` and `dB/dx` through the A-L gradient, producing a polar pressure-gradient residual.  Untested.
+3. **`dgrid_vorticity`** at cell centres uses circulation from corner winds; near the pole the circulation area varies rapidly and a small error in `u_corner, v_corner` gets amplified via `1/Area` normalisation.  Untested.
+4. **`_arakawa_lamb_gradient` grad_c00/c01/c10/c11 matrix** — this is precomputed from 3D Cartesian geometry; at the polar face these matrix coefficients may be ill-conditioned (large condition number) near the pole.  Untested.
+
+**Iter-747 ordered work list (post iter-746 falsifications):**
+
+1. Test if boundary_fix's cube-edge smoothing generates the 2Δx mode that hyperdiff amplifies: compare `bilap_u_local` at face 4 near-pole BEFORE and AFTER boundary_fix application on the ACTUAL simulated state (not a smooth analytic field).  Small diagnostic; falsifiable.
+2. Condition-number test of `_arakawa_lamb_gradient` at face-4 polar interior: check if `grad_c00/c01/c10/c11` coefficients are well-scaled.  Cheap to compute.
+3. If both (1) and (2) come back clean, escalate to the original `fv_tp_2d(nord=...)` Fortran-faithful replacement of the hyperdiff block — structural change, not a targeted diagnostic.
+
+**Iter-746 deliverables.**
+- `scripts/diag_iter746_polar_dx_variation.py` — dx-variation measurement + uniform-vs-nonuniform compact Laplacian comparison on analytic `sin(lat)`.
+- `scripts/diag_iter746b_angle_variation.py` — angle-variation measurement + round-trip constant-field injection test.
+- Two concrete falsifications narrowing the search space.  No source-code change this iter; matrix + ocean baselines are unchanged from iter-745 (W2 v_ll_Linf = 0.303 m/s).
