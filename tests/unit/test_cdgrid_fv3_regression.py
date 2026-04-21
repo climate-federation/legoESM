@@ -9037,6 +9037,82 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                                  f"weights violate partition of unity."))
 
 
+class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
+    """Iter-711 end-to-end gold-file for `fv3_sw_tendencies` — the
+    A-L + RK3 PRODUCTION path where W2 runs.
+
+    `fv3_sw_tendencies` at `operators_cdgrid.py:1343` is the actual
+    production tendency for W2/W5/cosine bell (driven via
+    `FV3EdgeShallowWaterModel` and its RK3 time stepper).  Existing
+    tests cover balanced-flow residual (`TestFv3SwTendenciesBalancedResidual`)
+    and polar symmetry (`TestFv3SwTendenciesPolarFaceSymmetry`), but
+    there is NO gold-file fingerprint lock on the actual tendency
+    values at a non-trivial random input with production config
+    (hyperdiff + div_damp + boundary_fix=True).
+
+    A regression in any of: Arakawa-Lamb gradient, circulation vorticity,
+    halo handling, edge-to-centre-to-edge projection, hyperdiff, or
+    `boundary_fix` would silently pass the residual/symmetry tests while
+    corrupting the production path.  This gold-file catches it.
+    """
+
+    def test_production_tendencies_gold_file_c8(self):
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(711)
+        h = jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        h_s = jnp.zeros((6, n, n))
+
+        hyperdiff_coeff = 1e16 * (48.0 / n) ** 4
+        div_damp = 1.5e7 * (48.0 / n) ** 2
+        dh, du, dv = fv3_sw_tendencies(
+            h, u_d, v_d, h_s, cdgrid, g=9.80616,
+            div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff,
+            boundary_fix=True)
+        dh = np.asarray(dh); du = np.asarray(du); dv = np.asarray(dv)
+        self.assertEqual(dh.shape, (6, n, n))
+        self.assertEqual(du.shape, (6, n, n + 1))
+        self.assertEqual(dv.shape, (6, n + 1, n))
+
+        # Pointwise fingerprints.
+        self.assertAlmostEqual(float(dh[0, 4, 4]),
+            -0.00042746388174206776, places=10,
+            msg="production dh[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(du[0, 4, 4]),
+            -1.8271880903959876e-05, places=12,
+            msg="production du[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(dv[3, 2, 6]),
+            -1.528400399261777e-05, places=12,
+            msg="production dv[3,2,6] fingerprint changed.")
+        # Global reductions (catch bugs that cancel pointwise).
+        self.assertAlmostEqual(float(dh.sum()),
+            0.005122296389910602, places=10,
+            msg="production dh.sum() fingerprint changed.")
+        self.assertAlmostEqual(float(du.sum()),
+            -0.007307134353286687, places=10,
+            msg="production du.sum() fingerprint changed.")
+        self.assertAlmostEqual(float(dv.sum()),
+            -0.003963301802401258, places=10,
+            msg="production dv.sum() fingerprint changed.")
+        # Magnitude fingerprints (catch any scale regression).
+        self.assertAlmostEqual(float(np.abs(dh).max()),
+            0.0016060754230186561, places=10,
+            msg="production max|dh| fingerprint changed.")
+        self.assertAlmostEqual(float(np.abs(du).max()),
+            0.0005217483222795504, places=10,
+            msg="production max|du| fingerprint changed.")
+
+
 class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
     """Iter-710 end-to-end gold-file test for `_d_sw_native` —
     the full d_sw1..d_sw6 chain.

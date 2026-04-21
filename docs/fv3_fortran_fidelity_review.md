@@ -1466,6 +1466,16 @@ Exercises the d_sw6 wind update combined with all earlier stages — closes the 
 
 No source-code changes; end-to-end lock test only.  Regression suite now at **162 tests** (161 + 1 new); all pass.
 
+### Iter-711 — end-to-end gold-file for `fv3_sw_tendencies` (A-L + RK3 production path)
+
+Added gold-file lock for the actual W2/W5/cosine-bell production tendency function `fv3_sw_tendencies` (`operators_cdgrid.py:1343`).  Existing tests cover balanced-flow residual (`TestFv3SwTendenciesBalancedResidual`) and polar symmetry (`TestFv3SwTendenciesPolarFaceSymmetry`), but NO gold-file fingerprint lock on actual tendency values with production config (`hyperdiff + div_damp + boundary_fix=True`).
+
+**Added** `TestFv3SwTendenciesProductionGoldFileIter711` with fixed-seed (rng=711) random inputs at C8.  Records 8 fingerprints (pointwise `dh[0,4,4]`, `du[0,4,4]`, `dv[3,2,6]`; global `dh.sum()`, `du.sum()`, `dv.sum()`; magnitudes `max|dh|`, `max|du|`) at `places=10..12`.
+
+**Verified** catches a silent `boundary_fix=False` disable: forcing the kwarg to False fails `du.sum()` check (6.6e-3 diff at `places=10`).  Similar regressions in the Arakawa-Lamb gradient, circulation vorticity, halo handling, edge-to-centre-to-edge projection, or hyperdiff would shift the fingerprints.
+
+No source-code changes; production-path gold-file only.  Regression suite now at **163 tests** (162 + 1 new); all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:
