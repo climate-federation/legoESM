@@ -522,6 +522,19 @@ class LatLonCGridOceanModel:
         T_mid = state_new.T.data  # tracer after diffusion+physics Euler step
         S_mid = state_new.S.data
 
+        # GM/Redi isopycnal mixing (if configured)
+        if self.config.gm_redi is not None:
+            from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon import (
+                gm_redi_tracer_tendency_latlon,
+            )
+            dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
+                T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                self.grid, self.z_coord, self.config.gm_redi,
+                eos=self.config.eos, eos_linear=self.config.eos_linear,
+            )
+            T_mid = T_mid + dt * dT_gm * mask_3d
+            S_mid = S_mid + dt * dS_gm * mask_3d
+
         for tr_name in ['T', 'S']:
             tr = T_mid if tr_name == 'T' else S_mid
 
