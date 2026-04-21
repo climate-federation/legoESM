@@ -1264,6 +1264,26 @@ Codex stop-time review flagged iter-697: "the new handler env leaks try-else bin
 
 No source-code changes; structural lock correctness fix.  Regression suite unchanged at 135 tests; all pass.
 
+### Iter-699 — executable coverage for iter-692..698 AST flow analysis
+
+Codex stop-time review flagged iter-698 for shipping the Try/except/else fix without executable test coverage.  Correct: iter-692 through iter-698 each developed flow-sensitive semantics for the d_sw4 structural lock, but the verification happened via inline `python -c` one-shots that were NOT committed as tests.  A refactor could silently reintroduce any of the iter-692..698 regressions without CI catching it.
+
+**Fix** (iter-699):
+1. Extracted the AST scanner from its closure inside `test_d_sw4_corner_ke_fix_absent_from_python_source` into a module-level `_dsw4_has_ut_plus_vt_crossterm(tree)` function (plus helpers).
+2. Updated the production lock test to delegate to the module-level helper so any scanner regression is caught by BOTH the production grep AND the new fixture tests.
+3. Added `TestDSw4StructuralLockAstScanner` — **16 tests** encoding the canonical fixtures from each iter:
+   - iter-692 (4 tests): direct `ut+vt`, reverse `vt+ut`, `ut+ut` legit, inner-function wrapping.
+   - iter-693 (2 tests): temp-var factored, alias chain.
+   - iter-694 (2 tests): violation then reassignment, overwrite before violation (legit).
+   - iter-695 (2 tests): if-branch ut flows out, for-loop ut flows out.
+   - iter-696 (2 tests): try.body → finally violation, try/finally no BinOp (legit).
+   - iter-697 (2 tests): try.body binding visible to except, all-in-handler violation.
+   - iter-698 (2 tests): orelse does NOT leak to handler (FP gone), orelse success-path violation.
+
+Each test documents the iter that introduced the behavior, so a future refactorer can grep for `iter-69X` to understand which semantic they might be about to break.
+
+No source-code changes; test infrastructure + coverage addition.  Regression suite now at **151 tests** (135 + 16 new scanner fixtures); all pass.
+
 ### Iter-697 — handler env starts from body_env, not pre-try
 
 Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like

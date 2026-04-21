@@ -16,6 +16,129 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 
+# ============================================================================
+# Module-level AST scanner for the d_sw4 corner-fix structural lock.
+# Factored out of `test_d_sw4_corner_ke_fix_absent_from_python_source`
+# (iter-699) so iter-692..698's flow-sensitive logic has direct executable
+# coverage via `TestDSw4StructuralLockAstScanner`.
+# ============================================================================
+
+def _dsw4_is_subscript_of(node, name):
+    import ast as _ast
+    return (isinstance(node, _ast.Subscript)
+            and isinstance(node.value, _ast.Name)
+            and node.value.id == name)
+
+
+def _dsw4_classify_rhs(rhs):
+    import ast as _ast
+    if _dsw4_is_subscript_of(rhs, 'ut'):
+        return 'ut'
+    if _dsw4_is_subscript_of(rhs, 'vt'):
+        return 'vt'
+    if isinstance(rhs, _ast.Name):
+        return rhs.id  # alias — resolved later
+    return 'other'
+
+
+def _dsw4_resolve_name_to_origin(name_id, env):
+    seen = set()
+    while name_id in env and name_id not in seen:
+        seen.add(name_id)
+        origin = env[name_id]
+        if origin in ('ut', 'vt', 'other'):
+            return origin
+        name_id = origin
+    return None
+
+
+def _dsw4_operand_origin(node, env):
+    import ast as _ast
+    if _dsw4_is_subscript_of(node, 'ut'):
+        return 'ut'
+    if _dsw4_is_subscript_of(node, 'vt'):
+        return 'vt'
+    if isinstance(node, _ast.Name):
+        return _dsw4_resolve_name_to_origin(node.id, env) or 'other'
+    return 'other'
+
+
+def _dsw4_merge_env(parent, branch):
+    for name, tag in branch.items():
+        resolved = _dsw4_resolve_name_to_origin(name, branch)
+        if resolved in ('ut', 'vt'):
+            parent[name] = resolved
+        elif name not in parent:
+            parent[name] = tag
+
+
+def _dsw4_scan_stmt_list(stmts, env):
+    """Flow-sensitive walk that returns True if a `ut+vt` BinOp is
+    reachable at some point in `stmts` under MAY-analysis semantics.
+    Iter-692..698 logic: in-order BinOp check before Assign update,
+    compound-body branch-env copies with MAY merge back, Try semantics
+    with body_env snapshot for handlers (iter-698)."""
+    import ast as _ast
+    for stmt in stmts:
+        for sub in _ast.walk(stmt):
+            if sub is not stmt and isinstance(sub,
+                    (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            if isinstance(sub, _ast.BinOp) and isinstance(sub.op, _ast.Add):
+                lo = _dsw4_operand_origin(sub.left, env)
+                ro = _dsw4_operand_origin(sub.right, env)
+                if {lo, ro} == {'ut', 'vt'}:
+                    return True
+        if isinstance(stmt, _ast.Assign) and len(stmt.targets) == 1 \
+                and isinstance(stmt.targets[0], _ast.Name):
+            env[stmt.targets[0].id] = _dsw4_classify_rhs(stmt.value)
+        elif isinstance(stmt, _ast.Try):
+            body_env = dict(env)
+            if _dsw4_scan_stmt_list(stmt.body, body_env):
+                return True
+            body_env_for_handlers = dict(body_env)
+            orelse = getattr(stmt, 'orelse', [])
+            if orelse and _dsw4_scan_stmt_list(orelse, body_env):
+                return True
+            handler_envs = []
+            for handler in getattr(stmt, 'handlers', []):
+                h_env = dict(body_env_for_handlers)
+                if _dsw4_scan_stmt_list(handler.body, h_env):
+                    return True
+                handler_envs.append(h_env)
+            _dsw4_merge_env(env, body_env)
+            for h_env in handler_envs:
+                _dsw4_merge_env(env, h_env)
+            final = getattr(stmt, 'finalbody', [])
+            if final and _dsw4_scan_stmt_list(final, env):
+                return True
+        elif isinstance(stmt, (_ast.If, _ast.For, _ast.While, _ast.With)):
+            for body_attr in ('body', 'orelse'):
+                body = getattr(stmt, body_attr, [])
+                if body:
+                    branch_env = dict(env)
+                    if _dsw4_scan_stmt_list(body, branch_env):
+                        return True
+                    _dsw4_merge_env(env, branch_env)
+    return False
+
+
+def _dsw4_has_ut_plus_vt_crossterm(tree):
+    """Public entry point for the AST scanner.  Returns True iff the
+    tree contains a reachable `ut[...] + vt[...]` BinOp under MAY
+    semantics (iter-692..698)."""
+    import ast as _ast
+    scopes = [tree]
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            scopes.append(node)
+    for scope in scopes:
+        body = getattr(scope, 'body', [])
+        if _dsw4_scan_stmt_list(body, {}):
+            return True
+    return False
+
+
 def _make_solid_body_corner(cdgrid, Omega=7.292e-5):
     """Solid-body rotation at D-grid corners: u_east = Omega*R*cos(lat)."""
     R = cdgrid.radius
@@ -8423,6 +8546,12 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
         from pathlib import Path
         src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
 
+        # Iter-699: delegate to module-level _dsw4_has_ut_plus_vt_crossterm
+        # so this lock is covered by TestDSw4StructuralLockAstScanner.
+        # The local closures below are kept for backwards compatibility
+        # with any in-flight debugging; the actual scan uses the
+        # factored helper.
+
         def is_subscript_of(node, name):
             """True if node is `{name}[...]`."""
             return (isinstance(node, ast.Subscript)
@@ -8613,7 +8742,7 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 tree = ast.parse(text)
             except (SyntaxError, UnicodeDecodeError):
                 continue
-            if has_ut_plus_vt_crossterm(tree):
+            if _dsw4_has_ut_plus_vt_crossterm(tree):
                 offenders.append(str(py_file.relative_to(src_dir)))
 
         self.assertEqual(offenders, [],
@@ -8878,6 +9007,175 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                             msg=(f"{name}[face={face}, :, i={i}, j={j}] "
                                  f"sum = {s:.10e} != 1.0 — Lagrange "
                                  f"weights violate partition of unity."))
+
+
+class TestDSw4StructuralLockAstScanner(unittest.TestCase):
+    """Iter-699: executable coverage for the d_sw4 corner-fix structural
+    lock's flow-sensitive AST scanner (developed across iters 692-698).
+
+    The scanner `_dsw4_has_ut_plus_vt_crossterm` must flag any reachable
+    `ut[...] + vt[...]` BinOp under MAY-analysis semantics.  Before
+    iter-699, each iter's fix was verified only by inline `python -c`
+    one-shots that didn't land in CI — a refactor could reintroduce any
+    of the iter-692..698 regressions without being caught.
+
+    These tests lock the scanner's behavior on canonical fixtures so
+    future edits to the AST walker cannot silently reintroduce a
+    known-missed pattern.
+    """
+
+    @staticmethod
+    def _scan(src):
+        import ast
+        return _dsw4_has_ut_plus_vt_crossterm(ast.parse(src))
+
+    # ---- iter-692: direct cross-sum ----
+    def test_iter692_direct_ut_plus_vt(self):
+        src = "def f():\n    return (ut[:, 1, 1] + vt[:, 1, 1]) * u[0]\n"
+        self.assertTrue(self._scan(src), "direct ut+vt must be caught")
+
+    def test_iter692_reverse_vt_plus_ut(self):
+        src = "def f():\n    return (vt[:, 1, 1] + ut[:, 1, 1]) * u[0]\n"
+        self.assertTrue(self._scan(src), "reverse vt+ut must be caught")
+
+    def test_iter692_ut_plus_ut_legit(self):
+        src = "def f():\n    return ut[:, 0, 0] + ut[:, 0, 1]\n"
+        self.assertFalse(self._scan(src), "ut+ut must NOT be flagged")
+
+    def test_iter692_inner_function(self):
+        src = ("def outer():\n"
+               "    def helper():\n"
+               "        return ut[:, 1, 1] + vt[:, 1, 1]\n"
+               "    return helper() * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "inner-function wrapping must be caught")
+
+    # ---- iter-693: temp-var alias (closed) ----
+    def test_iter693_temp_var_factored(self):
+        src = ("def f():\n"
+               "    a = ut[:, 1, 1]\n"
+               "    b = vt[:, 1, 1]\n"
+               "    return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "temp-var factored reintroduction must be caught")
+
+    def test_iter693_alias_chain(self):
+        src = ("def f():\n"
+               "    x = ut[:, 1, 1]\n"
+               "    a = x\n"
+               "    b = vt[:, 1, 1]\n"
+               "    return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src), "alias-chain must be caught")
+
+    # ---- iter-694: reassignment AFTER violation ----
+    def test_iter694_violation_then_reassign(self):
+        src = ("def f():\n"
+               "    a = ut[:, 1, 1]\n"
+               "    b = vt[:, 1, 1]\n"
+               "    ke = (a + b) * u[0]\n"
+               "    a = 5.0\n"
+               "    return ke\n")
+        self.assertTrue(self._scan(src),
+                        "violation before later reassignment must be caught")
+
+    def test_iter694_overwrite_before_violation(self):
+        src = ("def f():\n"
+               "    a = ut[:, 1, 1]\n"
+               "    a = 0.0\n"
+               "    b = vt[:, 1, 1]\n"
+               "    return (a + b) * u[0]\n")
+        self.assertFalse(self._scan(src),
+                         "overwrite before violation must NOT be flagged")
+
+    # ---- iter-695: branch binding flows out ----
+    def test_iter695_if_branch_ut_then_violation(self):
+        src = ("def f():\n"
+               "    if cond:\n"
+               "        a = ut[:, 1, 1]\n"
+               "    b = vt[:, 1, 1]\n"
+               "    return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "if-branch ut binding must propagate MAY-style")
+
+    def test_iter695_for_loop_ut_then_violation(self):
+        src = ("def f():\n"
+               "    for i in range(6):\n"
+               "        a = ut[:, i, 1]\n"
+               "    b = vt[:, 0, 0]\n"
+               "    return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "for-loop ut binding must propagate MAY-style")
+
+    # ---- iter-696: Try finally sequential ----
+    def test_iter696_try_body_then_finally_violation(self):
+        src = ("def f():\n"
+               "    try:\n"
+               "        a = ut[:, 1, 1]\n"
+               "    except Exception:\n"
+               "        a = 0.0\n"
+               "    finally:\n"
+               "        b = vt[:, 1, 1]\n"
+               "        return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "finalbody violation on merged env must be caught")
+
+    def test_iter696_try_vt_finally_no_binop_legit(self):
+        src = ("def f():\n"
+               "    try:\n"
+               "        a = ut[:, 1, 1]\n"
+               "    finally:\n"
+               "        b = vt[:, 1, 1]\n"
+               "    return a, b\n")
+        self.assertFalse(self._scan(src),
+                         "ut/vt across try/finally without BinOp must "
+                         "NOT be flagged")
+
+    # ---- iter-697: try.body bindings flow into handler ----
+    def test_iter697_try_body_ut_handler_violation(self):
+        src = ("def f():\n"
+               "    try:\n"
+               "        a = ut[:, 1, 1]\n"
+               "        risky()\n"
+               "    except Exception:\n"
+               "        b = vt[:, 1, 1]\n"
+               "        return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "body binding must be visible to handler")
+
+    def test_iter697_except_only_violation(self):
+        src = ("def f():\n"
+               "    try:\n"
+               "        pass\n"
+               "    except Exception:\n"
+               "        a = ut[:, 1, 1]\n"
+               "        b = vt[:, 1, 1]\n"
+               "        return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "all-in-handler violation must be caught")
+
+    # ---- iter-698: orelse bindings do NOT leak to handler ----
+    def test_iter698_orelse_vt_not_visible_to_handler(self):
+        src = ("def f():\n"
+               "    try:\n"
+               "        a = ut[:, 1, 1]\n"
+               "    except Exception:\n"
+               "        return (a + b) * u[0]\n"
+               "    else:\n"
+               "        b = vt[:, 1, 1]\n")
+        self.assertFalse(self._scan(src),
+                         "orelse binding must NOT leak into handler env")
+
+    def test_iter698_orelse_violation_on_success_path(self):
+        src = ("def f():\n"
+               "    try:\n"
+               "        a = ut[:, 1, 1]\n"
+               "    except Exception:\n"
+               "        pass\n"
+               "    else:\n"
+               "        b = vt[:, 1, 1]\n"
+               "        return (a + b) * u[0]\n")
+        self.assertTrue(self._scan(src),
+                        "orelse success-path violation must be caught")
 
 
 if __name__ == "__main__":
