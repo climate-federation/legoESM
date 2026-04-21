@@ -64,40 +64,34 @@ def _dsw4_operand_origin(node, env):
     return 'other'
 
 
-def _dsw4_merge_env(parent, branch, pre_branch):
-    """Merge a branch env back into parent with MUST-aware semantics.
+def _dsw4_merge_env(parent, branch, pre_branch=None):
+    """Merge branch env back into parent (MAY-analysis).
 
-    Iter-700 (Codex iter-699 finding): iter-695's unconditional
-    propagation produced a false positive when a parent's prior ut/vt
-    binding was overwritten inside a branch but also preserved on the
-    branch-not-taken path.  Correct semantics:
+    Iter-701 revert of iter-700: iter-700's MUST-aware marking was
+    WRONG for this lock's purpose.  Consider:
+        a = ut[:, 1, 1]
+        if cond:
+            a = 0.0
+        b = vt[:, 1, 1]
+        return (a + b) * u[0]
+    On the branch-not-taken path, `a` is still 'ut' at the BinOp, so
+    `(a + b) * u[0]` IS a reachable d_sw4-style reintroduction.  Iter-699
+    correctly MAY-flagged this; iter-700 mislabeled it a "false positive"
+    and codified the flag downgrade to a false negative — the opposite
+    error.
 
-      - If a name was NOT bound in `pre_branch` (before the compound
-        stmt) but branch binds it to 'ut'/'vt', propagate that into
-        parent — matches iter-695's "branch introduces new binding".
-      - If a name WAS bound in `pre_branch` to some origin and the
-        branch mutated it to a DIFFERENT origin, mark parent's
-        binding as 'ambiguous' (neither 'ut' nor 'vt' is definite).
-        This matches MUST-analysis: an overwritten binding is no
-        longer reliable for violation detection.
-      - If the branch didn't touch the name, leave parent unchanged.
+    Correct MAY-analysis for a reintroduction detector: parent binding
+    persists unless the BRANCH resolves the name to ut/vt (in which case
+    adopt branch's stronger claim).  `pre_branch` is accepted for
+    API backward compatibility but unused under MAY.
     """
+    del pre_branch  # unused — kept for API compatibility
     for name, tag in branch.items():
-        branch_resolved = _dsw4_resolve_name_to_origin(name, branch)
-        pre_resolved = _dsw4_resolve_name_to_origin(name, pre_branch) \
-            if name in pre_branch else None
-        if name not in pre_branch:
-            # Branch introduces a NEW binding — adopt it (iter-695).
-            if branch_resolved in ('ut', 'vt'):
-                parent[name] = branch_resolved
-            elif name not in parent:
-                parent[name] = tag
-        else:
-            # Parent had a pre-branch binding.  If branch overwrote it
-            # to a DIFFERENT origin, invalidate to 'ambiguous' so the
-            # BinOp resolver treats it as NOT definitely ut/vt.
-            if branch_resolved != pre_resolved:
-                parent[name] = 'ambiguous'
+        resolved = _dsw4_resolve_name_to_origin(name, branch)
+        if resolved in ('ut', 'vt'):
+            parent[name] = resolved
+        elif name not in parent:
+            parent[name] = tag
 
 
 def _dsw4_scan_stmt_list(stmts, env):
@@ -9211,53 +9205,49 @@ class TestDSw4StructuralLockAstScanner(unittest.TestCase):
         self.assertTrue(self._scan(src),
                         "orelse success-path violation must be caught")
 
-    # ---- iter-700: branch-local overwrite of pre-branch ut/vt ----
-    def test_iter700_pre_branch_ut_branch_overwrite_no_fp(self):
-        """Pre-branch a='ut', branch overwrites to non-ut, then
-        post-branch b=vt + (a+b) BinOp.  Iter-699 FALSELY flagged this.
-        Iter-700 MUST-aware merge marks overwritten parent bindings
-        as 'ambiguous', so the BinOp sees `a='ambiguous'` (not 'ut'),
-        and no violation is reported."""
+    # ---- iter-701: revert iter-700; restore MAY correctness ----
+    def test_iter701_pre_branch_ut_branch_overwrite_is_reachable_violation(self):
+        """Pre-branch a='ut', branch-local overwrite to non-ut, then
+        post-branch b=vt and BinOp (a+b).  Iter-700 called this a "FP"
+        and forced a FN via MUST-aware 'ambiguous' marking.  That was
+        wrong: on the branch-NOT-taken path, `a` is still 'ut' and the
+        BinOp genuinely computes `ut + vt` — a reachable d_sw4
+        reintroduction.  MAY-analysis correctly flags."""
         src = ("def f():\n"
                "    a = ut[:, 1, 1]\n"
                "    if cond:\n"
                "        a = 0.0\n"
                "    b = vt[:, 1, 1]\n"
                "    return (a + b) * u[0]\n")
-        self.assertFalse(self._scan(src),
-                         "pre-branch ut with branch-local overwrite "
-                         "must NOT be flagged (iter-700)")
+        self.assertTrue(self._scan(src),
+                        "pre-branch ut + conditional overwrite + post "
+                        "violation IS a reachable reintroduction on the "
+                        "else path; MAY-flag required")
 
-    def test_iter700_branch_introduces_ut_still_catches(self):
-        """Iter-695 case: branch INTRODUCES a new ut binding (no
-        pre-branch binding).  iter-700's MUST-aware merge still
-        propagates this NEW binding.  Violation caught."""
+    def test_iter701_branch_introduces_ut_still_catches(self):
+        """iter-695 case preserved under iter-701 revert."""
         src = ("def f():\n"
                "    if cond:\n"
                "        a = ut[:, 1, 1]\n"
                "    b = vt[:, 1, 1]\n"
                "    return (a + b) * u[0]\n")
         self.assertTrue(self._scan(src),
-                        "branch introducing a new ut binding must "
-                        "still propagate MAY-style (iter-695)")
+                        "branch-introduced ut propagates MAY-style")
 
-    def test_iter700_branch_rebinds_to_different_ut_vt_still_catches(self):
-        """Edge: pre-branch a='ut', branch rebinds a='vt', then
-        BinOp with a + ut.  MUST-aware: a is ambiguous (was ut, now
-        vt).  Flagging is technically over-strict but safe — the
-        test asserts the conservative behavior."""
+    def test_iter701_branch_rebinds_to_vt_is_also_reachable_violation(self):
+        """Pre a='ut', branch rebinds to vt, then BinOp (a + ut).
+        Branch-NOT-taken path: a='ut', other='ut' → {ut, ut} → NO
+        violation.  Branch-taken path: a='vt', other='ut' → {vt, ut}
+        → VIOLATION.  MAY-flag required because a reachable path
+        contains the cross-term."""
         src = ("def f():\n"
                "    a = ut[:, 1, 1]\n"
                "    if cond:\n"
                "        a = vt[:, 1, 1]\n"
                "    return (a + ut[:, 0, 0]) * u[0]\n")
-        # Under MUST-aware: parent a becomes 'ambiguous' (was 'ut',
-        # branch rebound to 'vt'); BinOp sees a='ambiguous', so
-        # {lo, ro} = {'ambiguous', 'ut'} — NOT {'ut', 'vt'}.  Missed.
-        # This is intentional: don't false-positive on rebinds.
-        self.assertFalse(self._scan(src),
-                         "pre-ut rebound to vt in branch: ambiguous, "
-                         "not a real reintroduction")
+        self.assertTrue(self._scan(src),
+                        "pre-ut rebound to vt: branch-taken path has "
+                        "real violation; MAY-flag required")
 
 
 if __name__ == "__main__":

@@ -1310,6 +1310,29 @@ was FLAGGED by iter-699.  Under strict MAY-analysis, `a` could be 'ut' (branch-n
 
 No source-code changes; structural lock correctness fix.  Regression suite now at **154 tests** (151 + 3 new); all pass.
 
+### Iter-701 — revert iter-700; the "FP" was actually a reachable violation
+
+Codex stop-time review flagged iter-700: "weakens the d_sw4 structural lock by codifying reachable false negatives".  On re-examination: Codex's iter-699 "false-positives on branch-local overwrites" critique referred to this pattern —
+```
+a = ut[:, 1, 1]
+if cond:
+    a = 0.0
+b = vt[:, 1, 1]
+return (a + b) * u[0]
+```
+— which iter-699 correctly MAY-flagged because on the branch-NOT-taken path `a` is still `'ut'` and the BinOp computes a real `ut + vt` cross-term.  That's a genuine reachable d_sw4-style reintroduction, not a false positive.  Iter-700's "fix" marked `a` as `'ambiguous'` and downgraded correct flags to silent misses — the OPPOSITE error.
+
+**Fix** (iter-701): revert `_dsw4_merge_env` to iter-695 MAY semantics — propagate any branch binding of `'ut'`/`'vt'` into the parent unconditionally.  Kept the `pre_branch` arg for API compatibility (unused under MAY).
+
+Renamed the iter-700 fixtures to iter-701 and corrected the expected outcomes:
+- `test_iter701_pre_branch_ut_branch_overwrite_is_reachable_violation` → `assertTrue` (the else-path has a genuine ut+vt cross-term).
+- `test_iter701_branch_introduces_ut_still_catches` → `assertTrue` (iter-695 case).
+- `test_iter701_branch_rebinds_to_vt_is_also_reachable_violation` → `assertTrue` (branch-taken path: `a='vt'`, `+ ut[...]` gives ut+vt cross-term).
+
+**Principle for this lock**: MAY-analysis with over-approximation is the correct semantic for a reintroduction detector.  False positives force a test update (cheap); false negatives silently miss real violations (expensive and dangerous).  Future iterations should add EXACT per-path analysis only if a concrete true-FP is demonstrated, not downgrade to MUST.
+
+No source-code changes; revert + test semantic correction.  Regression suite still at 154 tests; all pass.
+
 ### Iter-697 — handler env starts from body_env, not pre-try
 
 Codex stop-time review flagged iter-696: "except handlers still miss try-body bindings established before the exception".  Correct: iter-696 seeded each `handler.body` env from the PRE-try `env`, losing any bindings the body made before the exception fired.  A pattern like
