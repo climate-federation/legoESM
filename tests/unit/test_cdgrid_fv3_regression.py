@@ -9037,6 +9037,164 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                                  f"weights violate partition of unity."))
 
 
+class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
+    """Iter-703 structural lock: Fortran `sw_core.F90:1742-1777`
+    d_sw5 non-duogrid corner corrections are ABSENT in Python.
+
+    Fortran block (lines 1771-1777) modifies `divg_d` at the 4 cube
+    corners via `divg_d(corner) ± uc(corner)` — gated on
+    `.not. duogrid`.  Python production (duogrid=T) SKIPS this block.
+    Python's d_sw5 implementation (`_d_sw5_corner_divergence`) is
+    documented as duogrid-only and does NOT reproduce the non-duogrid
+    corner correction.  This lock asserts that absence by greping for
+    the unique Fortran signature (corner-indexed `divg_d ± uc[corner]`
+    assignment inside an Assign/AugAssign statement).
+
+    Also locks absence of the `fill_c` gate (line 1742) — the
+    non-duogrid fill_corners call at line 1746/1754/1762 that would
+    feed `vc`/`uc` Laplacian iterations.
+    """
+
+    def test_no_divg_d_corner_modification_in_source(self):
+        import ast
+        from pathlib import Path
+        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
+
+        def is_corner_index(slice_node):
+            """True if a subscript indexes to {0 or n/N/nx/ny/npx/npy/...}
+            in both i and j dimensions — i.e. a cube corner."""
+            if not isinstance(slice_node, ast.Tuple):
+                return False
+            # Expect 3D form: [:, i, j].  Check last two elements are
+            # cube-corner literals/variables.
+            elts = slice_node.elts
+            if len(elts) < 2:
+                return False
+            def is_corner_bound(e):
+                if isinstance(e, ast.Constant) and e.value in (0, 1):
+                    return True
+                if isinstance(e, ast.Name) and e.id in (
+                        'n', 'N', 'nx', 'ny', 'npx', 'npy'):
+                    return True
+                if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Sub) \
+                        and isinstance(e.left, ast.Name) \
+                        and isinstance(e.right, ast.Constant) \
+                        and e.right.value == 1:
+                    return True  # e.g. n-1
+                return False
+            # Last two elts (i, j dimensions in 3D [face, i, j] form).
+            return is_corner_bound(elts[-2]) and is_corner_bound(elts[-1])
+
+        def rhs_uses_uc(rhs):
+            for sub in ast.walk(rhs):
+                if isinstance(sub, ast.Name) and sub.id == 'uc':
+                    return True
+                if isinstance(sub, ast.Subscript) \
+                        and isinstance(sub.value, ast.Name) \
+                        and sub.value.id == 'uc':
+                    return True
+            return False
+
+        def match_jax_at_set(call):
+            """Match `divg_d.at[CORNER, CORNER].set(RHS)` — JAX immutable
+            update form.  Returns (matched, rhs) or (False, None)."""
+            # call.func = Attribute(value=Subscript(value=Attribute(
+            #     value=Name('divg_d'), attr='at'), slice=...), attr='set')
+            if not (isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == 'set'):
+                return False, None
+            subs = call.func.value
+            if not (isinstance(subs, ast.Subscript)
+                    and isinstance(subs.value, ast.Attribute)
+                    and subs.value.attr == 'at'
+                    and isinstance(subs.value.value, ast.Name)
+                    and subs.value.value.id == 'divg_d'):
+                return False, None
+            if not is_corner_index(subs.slice):
+                return False, None
+            if not call.args:
+                return False, None
+            return True, call.args[0]
+
+        # Pattern 1: `divg_d[:, CORNER, CORNER] = ... uc ...` direct mutation.
+        # Pattern 2: `divg_d = divg_d.at[CORNER, CORNER].set(... uc ...)` JAX form.
+        offenders = []
+        for py_file in src_dir.rglob('*.py'):
+            try:
+                tree = ast.parse(py_file.read_text())
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                # Direct mutation / augassign form.
+                if isinstance(node, (ast.Assign, ast.AugAssign)):
+                    if isinstance(node, ast.Assign):
+                        if len(node.targets) != 1:
+                            continue
+                        target = node.targets[0]
+                    else:
+                        target = node.target
+                    rhs = node.value
+                    if (isinstance(target, ast.Subscript)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == 'divg_d'
+                            and is_corner_index(target.slice)
+                            and rhs_uses_uc(rhs)):
+                        offenders.append(
+                            f"{py_file.relative_to(src_dir)}:{node.lineno}")
+                        continue
+                    # JAX form: Assign target is Name('divg_d'), rhs is Call.
+                    if (isinstance(node, ast.Assign)
+                            and isinstance(target, ast.Name)
+                            and target.id == 'divg_d'):
+                        matched, jax_rhs = match_jax_at_set(rhs)
+                        if matched and rhs_uses_uc(jax_rhs):
+                            offenders.append(
+                                f"{py_file.relative_to(src_dir)}:{node.lineno}")
+
+        self.assertEqual(offenders, [],
+            msg=(f"Found cube-corner `divg_d[:, CORNER, CORNER] ± uc` "
+                 f"assignment in {offenders}.  This matches the Fortran "
+                 f"non-duogrid d_sw5 corner correction at sw_core.F90:"
+                 f"1773-1776 (gated on `.not. duogrid`).  Python "
+                 f"production is duogrid; this block MUST stay ABSENT."))
+
+    def test_no_fill_c_gate_with_fill_corners_call(self):
+        """The non-duogrid `fill_c` gate (line 1742) conditions a
+        fill_corners call at line 1746/1754/1762.  Python has no
+        `fill_c`-style variable paired with `fill_corners` calls in
+        d_sw5.  Simple grep-based absence check."""
+        from pathlib import Path
+        import re
+        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
+        # Co-occurrence: `fill_c` identifier + `fill_corners` call
+        # within 20 lines in the same file.
+        fill_c_pattern = re.compile(r'\bfill_c\s*=')
+        fill_corners_call = re.compile(r'\bfill_corners\s*\(')
+        offenders = []
+        for py_file in src_dir.rglob('*.py'):
+            try:
+                text = py_file.read_text()
+            except Exception:
+                continue
+            fc_lines = [i+1 for i, l in enumerate(text.split('\n'))
+                        if fill_c_pattern.search(l)]
+            fx_lines = [i+1 for i, l in enumerate(text.split('\n'))
+                        if fill_corners_call.search(l)]
+            for a in fc_lines:
+                for b in fx_lines:
+                    if abs(a - b) <= 20:
+                        offenders.append(
+                            f"{py_file.relative_to(src_dir)}: fill_c "
+                            f"at line {a}, fill_corners at line {b}")
+                        break
+        self.assertEqual(offenders, [],
+            msg=(f"Found Fortran `fill_c` gate signature in {offenders} "
+                 f"— matches non-duogrid d_sw5 corner-fill gate at "
+                 f"sw_core.F90:1742-1746.  Python d_sw5 is duogrid-only; "
+                 f"this block must stay ABSENT."))
+
+
 class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
     """Iter-702 gold-file regression test for `_d_sw5_corner_divergence`
     (FV3 sw_core.F90:1641-1821 duogrid branch).

@@ -1351,7 +1351,27 @@ No source-code changes.  Regression suite now at **157 tests** (154 + 3 new); al
 - ✅ d_sw4 1441: closed by iter-688..701.
 - ✅ d_sw5 1569: closed by iter-702 (implicit via full-array processing).
 - ✅ d_sw5 1644: closed by iter-702 gold-file.
-- ⏳ d_sw5 1742: still needs audit.
+- ✅ d_sw5 1742: closed by iter-703 (structural lock on absence of non-duogrid corner correction).
+
+### Iter-703 — close d_sw5 line-1742 backlog entry
+
+Direct audit of Fortran `sw_core.F90:1742` (d_sw5 `fill_c` gate) and `sw_core.F90:1771-1777` (non-duogrid `divg_d` corner corrections).  Fortran applies both blocks only when `.not. (bounded_domain .or. duogrid)`.  Python production (duogrid=T) corresponds to the SKIPPED case; Python's `_d_sw5_corner_divergence` is documented as duogrid-only and does NOT reproduce either block — verified by inspection.
+
+**Structural lock** (`TestDSw5NonDuogridCornerCorrectionAbsentIter703`, 2 tests):
+
+1. `test_no_divg_d_corner_modification_in_source`: AST walk that flags cube-corner `divg_d[:, CORNER, CORNER] ± uc[...]` assignments.  Handles BOTH forms the repo uses:
+   - Direct `Assign(Subscript(divg_d, corner))` and `AugAssign` (in-place mutation).
+   - JAX immutable form `divg_d = divg_d.at[:, corner, corner].set(... uc ...)` — matched by walking through `Attribute('at')` → `Subscript` → `Attribute('set')` → `Call`.
+   
+   Corner bounds recognized: literals `0`/`1`, identifiers `n`/`N`/`nx`/`ny`/`npx`/`npy`, and `X-1` expressions.  **Verified** against an injected file with two transliterated Fortran corner corrections (SW via `.at[:, 1, 1].set(... - uc[...])` + NE via `.at[:, npx, npy].set(... + uc[...])`): BOTH lines reported as offenders.
+   
+2. `test_no_fill_c_gate_with_fill_corners_call`: grep-based proximity check for `fill_c = ...` paired with a `fill_corners(...)` call within 20 lines (Fortran signature from lines 1740-1746).  Currently absent; future reintroduction flagged.
+
+**Closed** iter-683 backlog entry "line 1742: STILL NEEDS AUDIT" → fully closed.
+
+No source-code changes; structural locks only.  Regression suite now at **159 tests** (157 + 2 new); all pass.
+
+**Directive item #2 status**: all 14 rows in the iter-683 Fortran-line backlog are now either CLOSED (by direct lock test) or documented as architectural restriction (d_sw3 non-duogrid branch).  Ralph directive item #2 ("Legacy edge handling must be disabled in duogrid mode via bounded_domain = .true.") is **closed on the sw_core.F90 side**.  Cross-file Fortran sources (`tp_core.F90`, `fv_duogrid.F90`, `fv_grid_utils.F90`, `dyn_core.F90`) have been covered by earlier iterations but not systematically re-audited; that's a future iteration scope.
 
 ### Iter-697 — handler env starts from body_env, not pre-try
 
