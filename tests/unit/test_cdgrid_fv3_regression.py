@@ -8470,16 +8470,49 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 return resolve_name_to_origin(node.id, env) or 'other'
             return 'other'
 
+        def merge_env(parent, branch):
+            """MAY-analysis merge: propagate any ut/vt bindings set
+            inside a branch back to the parent so code AFTER the
+            compound statement sees them.  Called after each branch
+            body completes.
+
+            For each name bound in the branch to 'ut' or 'vt' (or an
+            alias chain resolving to one), record that binding in
+            parent — because after the compound statement, the name
+            COULD hold that value (if the branch was taken).  This is
+            an over-approximation: may flag a ut+vt BinOp that only
+            fires in one branch-conditional, which is the correct
+            behaviour for a reintroduction detector.
+            """
+            for name, origin_tag in branch.items():
+                # Resolve alias chains in the branch env to get
+                # concrete origin for the binding.
+                resolved = resolve_name_to_origin(name, branch)
+                if resolved in ('ut', 'vt'):
+                    # A branch set this name to a ut/vt origin; the
+                    # parent must treat it as potentially that value
+                    # after the compound statement.
+                    parent[name] = resolved
+                elif name not in parent:
+                    # Other bindings are recorded so resolve() can
+                    # find them, but not forced to propagate ut/vt.
+                    parent[name] = origin_tag
+
         def scan_stmt_list(stmts, env):
             """Flow-sensitive walk of a statement list.  Maintains env
             by applying each Assign BEFORE evaluating BinOps in
             subsequent statements.  Returns True as soon as a
-            ut+vt BinOp is detected at the CURRENT env state
-            (so later reassignment cannot mask an earlier violation).
+            ut+vt BinOp is detected at the CURRENT env state.
 
-            Recurses into compound statements (If/For/While/With/Try).
-            At each branch, uses a local COPY of env so a reassignment
-            in one branch doesn't leak to siblings.
+            Iter-695 fix (Codex finding on iter-694): compound-statement
+            handling was DROPPING branch-local bindings after the
+            compound stmt finished.  A violation like
+                if cond: a = ut[...]
+                b = vt[...]
+                return (a + b) * u   # post-branch, a='ut' must propagate
+            was missed because `dict(env)` isolated branch writes from
+            the parent scope.  Now MAY-analysis merges branch env back
+            into parent after each branch completes.
             """
             for stmt in stmts:
                 # First: scan any BinOps inside this statement's
@@ -8501,15 +8534,21 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                         and isinstance(stmt.targets[0], ast.Name):
                     env[stmt.targets[0].id] = classify_rhs(stmt.value)
                 elif isinstance(stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
-                    # Recurse into compound bodies with env COPIES so
-                    # branch-local reassignments don't cross-contaminate.
+                    # Recurse into compound bodies with env COPIES, then
+                    # MERGE branch bindings back so post-compound code
+                    # sees any ut/vt bindings set in branches.
                     for body_attr in ('body', 'orelse', 'finalbody'):
                         body = getattr(stmt, body_attr, [])
-                        if body and scan_stmt_list(body, dict(env)):
-                            return True
+                        if body:
+                            branch_env = dict(env)
+                            if scan_stmt_list(body, branch_env):
+                                return True
+                            merge_env(env, branch_env)
                     for handler in getattr(stmt, 'handlers', []):
-                        if scan_stmt_list(handler.body, dict(env)):
+                        branch_env = dict(env)
+                        if scan_stmt_list(handler.body, branch_env):
                             return True
+                        merge_env(env, branch_env)
             return False
 
         def has_ut_plus_vt_crossterm(tree):

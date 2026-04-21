@@ -1206,3 +1206,26 @@ Codex stop-time review rejected iter-693 because "the def-use lock still misses 
 The iter-694 version is a proper flow-sensitive analysis; it no longer admits ordering tricks.
 
 No source-code changes; structural lock strengthening only.  Regression suite unchanged at 135 tests; all pass.
+
+### Iter-695 — MAY-analysis merge of branch-env back to parent
+
+Codex stop-time review flagged iter-694 as "compound-statement handling still misses forbidden ut/vt cross-terms that flow out of a branch".  Correct: iter-694 recursed into branches with `dict(env)` copies and then DISCARDED the branch-local bindings when returning.  So a pattern like
+```
+if cond: a = ut[:, 1, 1]    # branch-local binding, env copy
+b = vt[:, 1, 1]
+return (a + b) * u[0]       # in parent scope, `a` has no ut binding → missed
+```
+was not flagged.
+
+**Fix** (iter-695): added a `merge_env(parent, branch)` helper that runs AFTER each branch body completes.  For every binding in the branch env that resolves to `'ut'` or `'vt'` (directly or via alias chain), it's propagated into the parent env — a conservative MAY-analysis over-approximation.  If a branch COULD have set `a='ut'`, the post-compound code is analyzed as if `a='ut'`.
+
+This is exactly the right behavior for a reintroduction detector: false positives on definitely-safe cases are acceptable; false negatives on potentially-bad cases are not.
+
+**Verified** against 5 fixtures:
+- iter-694 missed case `if: a=ut; b=vt; (a+b)*u` → CAUGHT *(the merge propagates a='ut' out of the if)*.
+- if/else with ut in one branch → CAUGHT.
+- for-loop with ut binding, then violation → CAUGHT.
+- Sequential overwrite `a=ut; a=0.0; b=vt; (a+b)*u` → NOT flagged (`a` overwritten to `'other'` before the BinOp in the same main flow).
+- iter-694 temp-var + later reassign → still CAUGHT.
+
+No source-code changes; structural lock strengthening.  Regression suite unchanged at 135 tests; all pass.
