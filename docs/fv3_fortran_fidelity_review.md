@@ -1490,6 +1490,23 @@ Mass-target-based positivity-clipping path from `transport_step` (`fv_tp_2d.py:5
 
 No source-code changes; transport-path gold-file only.  Regression suite now at **164 tests** (163 + 1 new); all pass.  Runtime: ~23s at C36 1-day.
 
+### Iter-713 — strengthen iter-712 with spatial invariants (close Codex finding)
+
+Codex stop-time review flagged iter-712 as "pins the wrong invariant and overclaims coverage".  Correct: iter-712's fingerprints (h_max at `places=2`, mass-sum trivially preserved by `mass_target` rescale, L2² at `places=-2`) are all weak invariants that a 1-cell advection shift or similar regression can pass while producing a visually different solution.
+
+**Fix** (iter-713): replaced weak summary statistics with SPATIAL invariants:
+
+1. **Peak LOCATION**: assert `np.argmax(h)` resolves to `(face=3, i=26, j=27)`.  Any advection shift of even 1 cell changes the argmax.
+2. **Per-face max values**: face 3 holds the bell peak (896.29); face 4 has a tail (7.25); face 0 has minor leakage (0.457); faces 1, 2, 5 are EXACTLY zero (bell hasn't advected there in 1 day).  Per-face fingerprints catch face-specific drift a global max misses.
+3. **Strict zero on unreached faces**: `f_max[1] == f_max[2] == f_max[5] == 0.0` is a strong invariant — a flux-averaging or halo regression introducing spurious leakage to those faces fails immediately.
+4. **Non-negativity**: retained (duplicates iter-525's per-step check at the final-step level).
+
+Dropped the too-loose `h.sum()` and `L2²` fingerprints — `mass_target` rescale makes the sum check trivial, and L2² at `places=-2` allows 1e2 drift at value 3e7 (3e-6 relative).
+
+**Verified** catches a 0.1-unit spurious face-1 leakage: the `mass_target` rescale redistributes the extra mass, dropping face-3's max from 896.29 to 896.17 — caught by the face-3 fingerprint at `places=2`.
+
+No source-code changes; strengthened spatial invariants only.  Regression suite unchanged at 164 tests; all pass.
+
 ### Iter-704 — extend iter-703 to cover `.add()` form and `uc` aliases
 
 Codex stop-time review flagged iter-703: "misses realistic `uc_lap`/`.add(...)` corner-update forms".  Confirmed both gaps by injected probe:

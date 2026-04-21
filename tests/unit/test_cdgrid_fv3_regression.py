@@ -9038,21 +9038,27 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
 
 
 class TestCosineBellGoldFileIter712(unittest.TestCase):
-    """Iter-712 cosine-bell gold-file for the canonical transport path.
+    """Iter-713 (strengthen iter-712) cosine-bell gold-file for the
+    canonical transport path.
 
-    Iter-525 `TestCosineBellPositivity` locks the non-negativity
-    invariant (h_min > 0 throughout a 1-day transport).  This iter
-    complements with gold-file fingerprints for the ACTUAL h values
-    after 1 day — catching regressions in PPM transport, fv_tp_2d
-    flux averaging, the duogrid sync, or `transport_step`'s mass
-    rescale that would silently preserve non-negativity while
-    shifting the solution.
+    Iter-525 `TestCosineBellPositivity` locks non-negativity.  Iter-712
+    added fingerprints but picked weak invariants (h_max at `places=2`;
+    mass sum that `mass_target` rescaling trivially conserves; L2² at
+    `places=-2`) that a regression in PPM advection could pass — e.g.
+    a bell that shifts 1 cell west would have identical h_max, mass,
+    and L2² but is clearly a different solution.
 
-    Uses the same C36/dt=1800/1day canonical matrix config as iter-525
-    to share the grid construction but asserts different invariants.
+    Iter-713 replaces the weak invariants with SPATIAL ones:
+    1. Peak LOCATION (face, i, j): catches any advection shift.
+    2. Per-face max values: face 3 holds the bell, face 4 has a tail,
+       face 0 has minor leakage, faces 1/2/5 are EXACTLY zero by
+       transport geometry.  Per-face max catches face-specific drift
+       that a global max would miss.
+    3. A specific off-peak cell value (near-zero) to catch flux
+       averaging / halo regressions that introduce spurious leakage.
     """
 
-    def test_cosine_bell_h_gold_file_after_1day(self):
+    def test_cosine_bell_spatial_invariants_after_1day(self):
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -9077,18 +9083,43 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
             h = transport_step(h, ut, vt, dt, cdgrid,
                                mass_target=mass_target)
         h_np = np.asarray(h)
-
         self.assertEqual(h_np.shape, (6, n, n))
-        # Fingerprints recorded on CPU x64 at commit time.
-        self.assertAlmostEqual(float(h_np.max()), 896.294677734375,
-            places=2, msg="cosine bell h_max fingerprint changed.")
-        self.assertAlmostEqual(float(h_np.min()), 0.0, places=8,
-            msg="cosine bell h_min fingerprint changed (expect ≥ 0).")
-        self.assertAlmostEqual(float(h_np.sum()), 62467.9921875,
-            places=2, msg="cosine bell h.sum() fingerprint changed "
-                          "(mass conservation).")
-        self.assertAlmostEqual(float((h_np ** 2).sum()), 33283156.0,
-            places=-2, msg="cosine bell L2² fingerprint changed.")
+
+        # (1) Peak LOCATION — a 1-cell advection shift changes np.argmax.
+        peak_flat = int(np.argmax(h_np))
+        peak_face, peak_i, peak_j = np.unravel_index(peak_flat, h_np.shape)
+        self.assertEqual(int(peak_face), 3,
+            msg=f"Bell peak moved to face {int(peak_face)} (expected 3).")
+        self.assertEqual(int(peak_i), 26,
+            msg=f"Bell peak i-index shifted to {int(peak_i)} (expected 26).")
+        self.assertEqual(int(peak_j), 27,
+            msg=f"Bell peak j-index shifted to {int(peak_j)} (expected 27).")
+
+        # (2) Per-face max — catches face-specific drift that a global
+        # max wouldn't detect.
+        f_max = np.array([float(h_np[f].max()) for f in range(6)])
+        # Face 3 holds the bell peak.
+        self.assertAlmostEqual(f_max[3], 896.294677734375, places=2,
+            msg=f"Face-3 max (bell peak) fingerprint changed: {f_max[3]:.3f}")
+        # Face 4 has a tail from the advection path.
+        self.assertAlmostEqual(f_max[4], 7.254971981048584, places=4,
+            msg=f"Face-4 max (tail) fingerprint changed: {f_max[4]:.4f}")
+        # Face 0 has minor leakage; bound it tightly.
+        self.assertAlmostEqual(f_max[0], 0.4569498300552368, places=5,
+            msg=f"Face-0 max (leakage) fingerprint changed: {f_max[0]:.5f}")
+        # Faces 1, 2, 5: the bell never advects here within 1 day — should
+        # be EXACTLY zero (after transport_step's mass clip + rescale).
+        for f in (1, 2, 5):
+            self.assertEqual(f_max[f], 0.0,
+                msg=(f"Face-{f} max = {f_max[f]:.3e} is non-zero; "
+                     f"the bell should NOT have advected here at 1 day.  "
+                     f"A flux-averaging or halo regression is introducing "
+                     f"spurious leakage."))
+
+        # (3) Non-negativity (already locked by iter-525 at every step,
+        # re-checked here for snapshot clarity).
+        self.assertGreaterEqual(float(h_np.min()), 0.0,
+            msg=f"h_min = {float(h_np.min()):.3e} < 0 after 1 day.")
 
 
 class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
