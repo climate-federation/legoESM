@@ -538,7 +538,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     return fx, fy
 
 
-def transport_step(h, ut, vt, dt, cdgrid, mass_target=None, **_kwargs):
+def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
+                   nord=None, damp_c=None, **_kwargs):
     """Single FV3-style transport step with mass conservation.
 
     Parameters
@@ -548,11 +549,19 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None, **_kwargs):
     dt : timestep
     cdgrid : CubedSphereCDGrid
     mass_target : float or None — if provided, enforce exact mass conservation
+    nord, damp_c : optional del-n damping parameters forwarded to
+        ``fv_tp_2d``.  Matches Fortran sw_core.F90:886-887 which calls
+        ``fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)`` inside
+        ``d_sw1`` so that mass transport picks up the same 4th-order
+        smoother the Fortran FB chain applies.  Both default ``None``
+        (no damping) to preserve legacy behaviour for existing callers
+        that do not pass these kwargs (iter-727).
     """
     area = cdgrid.base.area
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
         ut, vt, dt, cdgrid)
-    fx, fy = fv_tp_2d(h, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid)
+    fx, fy = fv_tp_2d(h, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
+                      nord=nord, damp_c=damp_c)
     h_new = h + (fx[:, :-1, :] - fx[:, 1:, :]
                  + fy[:, :, :-1] - fy[:, :, 1:]) / area
 

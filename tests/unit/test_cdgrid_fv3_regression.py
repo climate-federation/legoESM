@@ -9419,6 +9419,95 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             784.4113157657439, places=4,
             msg="u/v kinetic energy fingerprint changed.")
 
+    def test_d_sw_native_gold_file_damp_v_iter727(self):
+        """Iter-727 lock: ``_d_sw_native`` with ``damp_v=0.06,
+        nord_v=1`` applies the Fortran-faithful mass-transport del-4
+        damping that was added in iter-727.
+
+        Before iter-727 the FB chain's mass transport called
+        ``transport_step(h, ut, vt, dt, cdgrid)`` with no damping
+        kwargs, silently dropping Fortran sw_core.F90:886-887's
+        ``fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)``.  Iter-727
+        threads ``nord=nord_v, damp_c=damp_v`` through
+        ``transport_step`` (when ``damp_v > 1e-5``) so the delp
+        transport picks up the Fortran d_sw1 smoother.  The fix ALSO
+        activates the existing step-(9) vorticity-damping branch via
+        ``damp_v`` so this test captures BOTH paths' combined effect.
+
+        Fingerprints recorded on CPU x64 at iter-727 commit time.  Any
+        drop of the iter-727 ``if damp_v > 1e-5: transport_step(...
+        nord=nord_v, damp_c=damp_v)`` path will shift ``h_new``
+        fingerprints; any drop of the step-(9) del6 branch will shift
+        ``u_new``/``v_new`` fingerprints.  Delta vs. the ``damp_v=0``
+        fingerprints above (``h_new.sum`` = 383992.34, ``u_sq+v_sq``
+        = 784.41) is mandatory: if a refactor makes ``damp_v > 0``
+        equal to ``damp_v = 0`` for this input, both branches were
+        dropped.
+        """
+        import numpy as np
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _d_sw_native
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        rng = np.random.default_rng(710)
+        h = jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0)
+        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        h_s = jnp.zeros((6, n, n))
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+        ua = jnp.asarray(rng.standard_normal((6, n, n)))
+        va = jnp.asarray(rng.standard_normal((6, n, n)))
+        dt = 100.0
+        g = 9.80616
+
+        h_new, u_new, v_new = _d_sw_native(
+            h, u_d, v_d, h_s, uc, vc, ua, va,
+            cdgrid, dt, g,
+            div_damp=0.0, d2_bg=0.0, dddmp=0.0,
+            d4_bg=0.16, nord=1, damp_v=0.06, nord_v=1)
+        h_new = np.asarray(h_new)
+        u_new = np.asarray(u_new)
+        v_new = np.asarray(v_new)
+
+        # Fingerprints at damp_v=0.06, nord_v=1 (iter-727 lock).
+        self.assertAlmostEqual(float(h_new[0, 4, 4]), 998.9866811523005,
+            places=6,
+            msg="iter-727: h_new[0,4,4] fingerprint changed.  "
+            "The mass-transport del-4 damping may have been dropped "
+            "from _d_sw_native step (2).")
+        self.assertAlmostEqual(float(h_new.sum()), 383992.2998335532,
+            places=4,
+            msg="iter-727: h_new.sum fingerprint changed.")
+        self.assertAlmostEqual(float(u_new[0, 4, 4]), 0.8798584827060826,
+            places=8,
+            msg="iter-727: u_new[0,4,4] fingerprint changed.")
+        self.assertAlmostEqual(float(v_new[3, 2, 6]),
+            -0.09038511603576341, places=8,
+            msg="iter-727: v_new[3,2,6] fingerprint changed.")
+        self.assertAlmostEqual(
+            float((u_new ** 2).sum() + (v_new ** 2).sum()),
+            736.6292505227434, places=4,
+            msg="iter-727: u/v kinetic energy fingerprint changed.")
+
+        # Delta check: assert this result DIFFERS from the damp_v=0
+        # baseline at `test_d_sw_native_gold_file_nord1` above.  A
+        # future refactor that accidentally disables BOTH the iter-727
+        # mass-damping branch and the step-(9) del6 branch would make
+        # these equal, silently passing the point fingerprints (if
+        # they also drifted) but failing this delta guard.
+        self.assertNotAlmostEqual(float(h_new[0, 4, 4]), 998.8888029113577,
+            places=3, msg="damp_v path collapsed to the baseline.")
+        self.assertNotAlmostEqual(
+            float((u_new ** 2).sum() + (v_new ** 2).sum()),
+            784.4113157657439, places=2,
+            msg="damp_v path collapsed to the baseline.")
+
 
 class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
     """Iter-707 document + lock a known Fortran-fidelity gap in the

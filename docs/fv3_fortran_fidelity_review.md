@@ -1677,6 +1677,56 @@ Test now passes.  All 26 `TestPadHaloH3Guardrails` tests pass, confirming the re
 
 No source-code changes; test-contract alignment only.  Full regression at 266 tests across the halo + cdgrid suites; all pass.  Going forward, iter commits should run `tests/unit/test_halo.py tests/unit/test_scale_halo.py tests/unit/test_cdgrid_fv3_regression.py` together when touching halo code to catch this cross-file contract drift.
 
+### Iter-727 — port Fortran d_sw1 mass-transport damping (`damp_c=damp_v`)
+
+Task 2 of the iter-722 Path Forward ("Port FV3's dissipation injection at each phase (c_sw, d_sw1, d_sw3, d_sw5) — not just d_sw5's corner divergence damping"), first concrete piece.
+
+**Fortran reference.**  In `sw_core.F90:886-887`, `d_sw1`'s delp (mass) transport calls
+```fortran
+call fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)
+```
+The `damp_v` / `nord_v` pair comes from `dyn_core.F90:762-770`:
+```fortran
+damp_v = damp_vt(k) = flagstruct%vtdm4    ! when do_vort_damp=.true.
+nord_t = nord_v(k)   ! damp_t = damp_v in the default non-sponge branch
+```
+i.e. Fortran reuses the same coefficient for both the mass del-n damping inside `fv_tp_2d` and the final vorticity damping at `d_sw6`.  Our FB chain's step (9) (`_del6_vt_flux`) already picks up `damp_v` for vorticity; step (2) (`transport_step`) did not.
+
+**Pre-iter-727 Python behaviour.**  `_d_sw_native` (src/legoesm/core/fv3_sw_core.py) step 2 calls
+```python
+h_new = transport_step(h, ut, vt, dt, cdgrid)
+```
+`transport_step` in turn calls `fv_tp_2d` without forwarding `nord` / `damp_c`, so the mass-transport del-n damping is inactive no matter what `damp_v` the caller passes.  This is the gap identified as "missing d_sw1 phase dissipation" in the iter-722 / iter-723 backlog.
+
+**Fix (iter-727).**
+1. `src/legoesm/core/fv_tp_2d.py::transport_step` — add explicit `nord=None, damp_c=None` kwargs, forward to `fv_tp_2d`.  `**_kwargs` catchall retained for now (removing it is an unrelated cleanup; it does NOT shadow `nord`/`damp_c` because those are explicit named kwargs so they bind before the catchall).  The internal `fv_tp_2d` already has the `if nord is not None and damp_c is not None and damp_c > 1e-4` guard, so `damp_c=None` / `damp_c=0.0` remains a no-op and legacy callers are unaffected.
+2. `src/legoesm/core/fv3_sw_core.py::_d_sw_native` step 2 — branch on the Fortran threshold (`damp_v > 1e-5`, matching the `del6_vt_flux` branch threshold at step 9):
+   ```python
+   if damp_v > 1e-5:
+       h_new = transport_step(h, ut, vt, dt, cdgrid,
+                               nord=nord_v, damp_c=damp_v)
+   else:
+       h_new = transport_step(h, ut, vt, dt, cdgrid)
+   ```
+   This matches Fortran sw_core.F90:886-887 exactly (`damp_c=damp_v, nord=nord_v`) with the Fortran-side FB-chain guard.
+
+**Test lock (iter-727).**  Added `test_d_sw_native_gold_file_damp_v_iter727` next to the pre-existing `test_d_sw_native_gold_file_nord1` in `tests/unit/test_cdgrid_fv3_regression.py`.  Same fixed-seed (`rng=710`) inputs, same grid (`n=8` duogrid), same `dt=100.0, g=9.80616, nord=1, d4_bg=0.16` baseline, but with `damp_v=0.06, nord_v=1` (FV3 default-ish).  Records six fingerprints — `h_new[0,4,4]`, `h_new.sum()`, `u_new[0,4,4]`, `v_new[3,2,6]`, and `(u_new**2).sum() + (v_new**2).sum()` — plus TWO explicit `assertNotAlmostEqual` guards against the corresponding `damp_v=0` fingerprints to catch "both damping paths silently dropped" regressions that would otherwise make the point fingerprints re-record as identical to the baseline.
+
+Probed fingerprints on CPU x64:
+- `h_new[0,4,4]`: 998.987 (vs 998.889 at `damp_v=0`; delta 0.098)
+- `h_new.sum()`: 383992.30 (vs 383992.34; delta 0.04 — small because damp_v acts INSIDE `fv_tp_2d` as flux-form del-n, so global mass budget is only slightly perturbed by duogrid flux synchronization after the del-n step)
+- `(u_new**2).sum() + (v_new**2).sum()`: 736.63 (vs 784.41 at `damp_v=0`; large delta 47.78 because damp_v=0.06 also activates step (9) del6 on vorticity)
+
+**Regression suite.**  Full 267-test sweep (tests/unit/test_cdgrid_fv3_regression.py + tests/unit/test_halo.py + tests/unit/test_scale_halo.py): all pass.  The pre-existing `test_d_sw_native_gold_file_nord1` fingerprints are unchanged because it passes `damp_v=0.0`, which routes through the `else` branch of the iter-727 guard (exact pre-iter-727 behaviour).
+
+**Effect on FB-chain stability.**  This is necessary but not sufficient.  Mass-transport del-n damping was measured at iter-722 to be absent but the C24/C36 blowup with `d4_bg=0.16, nord=1, dddmp=0.2, damp_v=0` fires in the momentum path (u_d/v_d grow, not h).  Iter-727 enables the d_sw1 branch so future FB-chain runs can be retried with `damp_v > 0` and observe whether the combined-path dissipation stabilises the C24 case (task 3 of the iter-722 Path Forward list).  Iter-727 does NOT on its own re-run the FB chain or flip production to FB; both remain deferred.
+
+**Progress on iter-722 Path Forward.**
+- Task 1 (halo=3 infra + `_d2a2c_vect` caller flip): **DONE** (iter-630 + iter-654 + iter-723 + iter-724).
+- Task 2 (per-phase dissipation): **IN PROGRESS** — d_sw1 mass damping now wired (iter-727).  d_sw5 corner divergence damping was already in place (iter-398-ish).  Remaining: c_sw phase (Fortran has no dissipation there), d_sw3 phase (Fortran has no dissipation there — confirmed by grep `sw_core.F90:1201-1388` for `damp`: no matches; B-grid KE transport is purely conservative).  So task 2 is effectively complete after iter-727 subject to a final audit.
+- Task 3 (FB + duogrid stability at C24): **NOT STARTED**.
+- Task 4 (gold-file FB chain at C24): **NOT STARTED**.
+
 ### Iter-723 — halo=3 4D single-node path (item #1.1 of FB stability plan)
 
 First concrete step on the 4-item path forward from iter-722 (user echoed the list and directed me to start).

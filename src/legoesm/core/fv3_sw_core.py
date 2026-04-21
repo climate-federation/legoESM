@@ -1838,7 +1838,24 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     ut, vt = _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt)
 
     # === 2. PPM mass transport using ORIGINAL h ===
-    h_new = transport_step(h, ut, vt, dt, cdgrid)
+    # Fortran d_sw1 (sw_core.F90:886-887) passes
+    # ``nord=nord_v, damp_c=damp_v`` into the delp transport so the
+    # same 4th-order smoother the Fortran FB chain applies to the mass
+    # field gets picked up here.  In dyn_core.F90 (lines 762-770),
+    # ``damp_v`` and ``damp_t`` are both set to ``damp_vt(k) =
+    # flagstruct%vtdm4`` and ``nord_v == nord_t``, so the mass branch
+    # and the vorticity branch share one coefficient pair.  Prior to
+    # iter-727 this port applied ``damp_v`` only at step (9) on
+    # vorticity; the FB chain was therefore missing the d_sw1 mass
+    # damping entirely.  Guarding on ``damp_v > 1e-5`` matches the
+    # Fortran branch threshold (``damp_v < 1e-5`` disables del6_vt
+    # there); fv_tp_2d applies its own ``damp_c > 1e-4`` internal
+    # guard so passing damp_v=0.0 here is safe and a no-op.
+    if damp_v > 1e-5:
+        h_new = transport_step(h, ut, vt, dt, cdgrid,
+                                nord=nord_v, damp_c=damp_v)
+    else:
+        h_new = transport_step(h, ut, vt, dt, cdgrid)
 
     # === 3. Cell-centre vorticity from D-grid circulation ===
     dx_u = cdgrid.dx_edge_y  # (6, n, n+1) — edge length for u_d
