@@ -802,3 +802,18 @@ So the iter-666/670 metric fixes have absorbed most of the cube-boundary artifac
 **Retraction**: iter-672's phrasing "boundary_fix effect shrunk 2.4× → 1.04×" was accurate for the no-dissipation probe but misleading as a general claim.  The production lock was never weakened.  This iter-673 entry corrects that framing.
 
 **Tests**: no source changes.  Regression suite still at 123 tests, all pass.  Documentation-only correction.
+
+### Iter-674 — SW visual inspection post iter-666/670
+
+Per Ralph directive step 5 (careful visual inspection), reviewed the C36 SW matrix snapshots (`results/atmosphere_iter670/`) after the iter-666/670 metric fixes:
+
+| case            | visual status                                                         |
+|:----------------|:----------------------------------------------------------------------|
+| Cosine bell     | ✅ Clean bell advection, no cube-edge imprints or ringing.           |
+| Williamson 5 wind_speed | ✅ Physical mountain-induced Rossby wave only; no seam artifacts. |
+| Williamson 5 v         | ✅ Clean physical dipole centred on mountain; cube-edge clean. |
+| Williamson 2 v         | ❌ Persistent ±0.3 m/s cube-face imprints at ±30° (mid-lat) AND ±85° polar dipoles at t=1.0 d. |
+
+**W2 architectural blocker unchanged**: the residual ±0.3 m/s is documented in review doc item #1 as inherent to the A-L + RK3 + `boundary_fix` production path.  Iter-666/670 reduced the cube-boundary metric error at the SOURCE level (PGF + rarea_c now match Fortran oracle), but iter-673 confirmed `boundary_fix` is still load-bearing in the production dissipation regime (ratio 0.525, unchanged from iter-511).  The architectural fix remains `boundary_fix` → FB chain path, gated on FB C36 stability (item #2).
+
+**No source changes in iter-674**; visual verification only.  All 123 regression tests pass.  2 of 3 SW cases pass visual inspection clean; W2 carries the open architectural blocker.
