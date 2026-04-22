@@ -540,16 +540,18 @@ Per iter-772b's scope-limits note ("a smaller non-zero value might be better"), 
 | 1.25 | 6.91e−4  | 8.91e−01  | 5.6×            |
 | 1.50 | 1.04e−3  | 1.42e+00  | 9.0×            |
 
-**Observation.**  On the 1D uniform-scale slice (all 16 corners scaled by the same α), v_ll_Linf is monotone decreasing from α=0 to α=1, then monotone increasing from α=1 to α=1.5.  α=1 is the minimum on this slice.
+**Observation.**  Of the 7 discrete α values tested (0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5), α=1.0 produced the smallest v_ll_Linf (0.159 m/s).  The measured points are sorted in ascending α and the v_ll_Linf values form a V shape with the smallest value at the center of the tested range.  The sweep does NOT prove that v_ll_Linf is continuously monotone between the sample points, or that no smaller value exists outside the tested range [0, 1.5] or at a finer-grained α near 1.0 (e.g., α=0.95 or α=1.05 were not measured).
 
-**Scope limits.**  The sweep tested ONE kind of modification: a UNIFORM scalar multiplier applied to all 16 corner c10 values.  It did NOT test:
+**Scope limits.**  The sweep tested ONE kind of modification: a UNIFORM scalar multiplier applied to all 16 corner c10 values, at 7 discrete α values.  It did NOT test:
+- Finer-grained α near 1.0 (only 0.25 steps were used).
+- α outside the tested range [0, 1.5].
 - Non-uniform scale factors (each corner with a different α).
 - Modifications to c01, c00, c11 at these corners.
 - Modifications to cells outside these 16 corners.
 - Modifications to the circulation-vorticity stencil (iter-768 candidate #2, still untested).
 
-**Implication.**  On the specific 1D ablation slice tested, the default grad_c10 magnitude is not dominated by a simple scalar rescaling.  Further mode-A reduction via c10-at-these-corners would require a non-uniform or mixed-coefficient change.  This narrows the search space for iter-774+ but does not close it.
+**Implication.**  Among the 7 α values sampled, the default (α=1.0) gives the smallest W2 v_ll_Linf.  A simple uniform-scale rescaling by any of the 6 other tested factors would not reduce mode A.  This narrows the search space for iter-774+ but does not close it — finer-grained α near 1.0 and non-uniform / multi-coefficient changes remain candidates.
 
 **Deliverable.**  `scripts/diag_iter773_c10_range_sweep.py` + committed output `diagnostics/iter773_output/iter773_c10_range.txt`.  No source-code change.  No new sentinel.  All 10 `TestW2BoundaryErrorBudget` sentinels pass.
 
-**Process.**  37th iter in iter-752-773 chain.  First iter that produced a DEFINITIVE negative result on a parameterized sweep: the default value is optimal on this 1D slice, so uniform rescaling of c10 at the 16 corners is not a single-knob fix.  Iter-774+ candidates: circulation-vorticity stencil at cube corners (iter-768 candidate #2, still untested), or non-uniform / multi-coefficient ablation.
+**Process.**  37th iter in iter-752-773 chain.  First iter that sampled a parameterized sweep of a single knob: among 7 discrete α values of a uniform scale factor on c10 at the 16 corners, the default (α=1.0) produced the smallest W2 v_ll_Linf.  Iter-774+ candidates: circulation-vorticity stencil at cube corners (iter-768 candidate #2, still untested), finer-grained α near 1.0, or non-uniform / multi-coefficient ablation.
