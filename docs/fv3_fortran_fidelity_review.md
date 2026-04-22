@@ -409,12 +409,12 @@ Per iter-769's open direction "investigate cells 1-2 steps inside cube vertices"
 
 **Key finding.**  The top-4 peaks are on EDGE cells at Chebyshev distance 1 from a cube corner (cell indices `(34, 0)`, `(34, n-1)`, etc.).  The next-4 peaks are AT corner cells.  The top peak amplitude (0.188 at edge) is 9.4 % larger than the corner-cell peak (0.172).
 
-**Observation.**  The peak mode-A amplitude is at edge cells 1 step inside from cube corners, NOT at the corner cells themselves.  The `boundary_fix` code applies different operations at these cell categories — this is observable from the source but iter-770 does not demonstrate the code difference EXPLAINS the amplitude difference:
+**Observation.**  Among the top 10 |v_north| peaks on the per-face field at t=1 day, the 4 LARGEST (|v_north| ≈ 0.186-0.188) sit at EDGE cells at Chebyshev distance 1 from a cube corner; the 4 NEXT LARGEST (|v_north| ≈ 0.170-0.172) sit at CORNER cells; the 2 smallest in the top 10 (|v_north| ≈ 0.140) sit at EDGE cells further from corners (Chebyshev distance 4).  The `boundary_fix` code applies different operations at CORNER vs EDGE cells — this is observable from the source but iter-770 does not demonstrate the code difference EXPLAINS the amplitude difference:
 
-- CORNER cells `(0,0)`, `(0,n-1)`, `(n-1,0)`, `(n-1,n-1)`: receive both a row-boundary update and a column-boundary update (cascaded); observed `|v_north|` ≈ 0.17.
-- EDGE cells such as `(n-2, 0)`: receive ONLY the column-boundary update; observed `|v_north|` ≈ 0.19.
+- CORNER cells `(0,0)`, `(0,n-1)`, `(n-1,0)`, `(n-1,n-1)`: receive both a row-boundary update and a column-boundary update (cascaded).
+- EDGE cells such as `(n-2, 0)`: receive ONLY the column-boundary update.
 
-Whether the difference between cascaded and single-pass smoothing is causally responsible for the 0.17-vs-0.19 split would require an ablation (swap single-pass for cascaded at the edge cells, or vice versa) and is deferred to iter-771+.
+Whether the difference between cascaded and single-pass smoothing is causally responsible for the `|v_north|` amplitude split observed in the top 10 peaks would require an ablation (swap single-pass for cascaded at the edge cells, or vice versa) and is deferred to iter-771+.
 
 **Relation to iter-769.**  Iter-769 tested `boundary_fix_skip_corners` which changes only the 4 corner cells per face.  Iter-769's measurement reported v_ll_Linf = 1.04 on the ON path vs 0.159 default (~6.5× increase in the global maximum).  Iter-770 does NOT re-run iter-769's ON configuration with the face-local locator, so the face-local distribution under skip-corners is not verified here.  What iter-770 does establish: the default-path peak (0.188 m/s v_north) is at an edge cell at Chebyshev distance 1 from a corner, which is a different cell-index position than the 4 corner cells iter-769 selectively skipped.
 
@@ -426,4 +426,4 @@ Whether the difference between cascaded and single-pass smoothing is causally re
 
 **Deliverable.**  `scripts/diag_iter770_face_local_peak_locator.py` + committed output at `diagnostics/iter770_output/iter770_face_local_peaks.txt`.  No source-code change.  No new sentinel (iter-768e sentinel already pins v_ll_Linf ≈ 0.159; iter-770 adds only localization detail).
 
-**Process.**  34th iter in iter-752-770 chain.  Purely diagnostic.  Establishes that mode-A peaks are at EDGE cells cheb=1 from corners, not at corner cells — reframing iter-771+ targeting away from corner halo/smoothing (which iter-765/766/767/769 have now exhausted) toward the A-L stencil coefficients at the D-grid corners that update these edge cells.
+**Process.**  34th iter in iter-752-770 chain.  Purely diagnostic.  Reports that the top-4 |v_north| peaks (0.186-0.188) are at EDGE cells at Chebyshev distance 1 from a corner, while the next-4 (0.170-0.172) are at corner cells themselves — a cell-position observation that reframes the iter-771+ candidate list by identifying A-L stencil coefficients at D-grid corners adjacent to cube vertices as an untested target.

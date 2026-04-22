@@ -16,15 +16,19 @@ shape (6, n, n) and reports, for each top-10 |v_north| peak:
 - whether the cell is AT a cube corner, on an edge row/col, or
   strictly interior
 
-This classifies mode A as one of:
-- corner-cell dominant: peaks at (0,0)/(0,n-1)/(n-1,0)/(n-1,n-1).
-  Iter-769's corner-skip hypothesis would have targeted these.
-- edge-cell dominant: peaks on the boundary rows/cols but not at
-  corners.  Iter-769's non-corner boundary_fix smoothing covers
-  these.
-- near-corner interior: peaks at cheb distance 1-2 from a corner
-  cell.  Iter-770 candidate: metric / A-L coefficient behaviour
-  at the D-grid corners near the cube vertex.
+The zone classification per cell is:
+- CORNER: cell is at one of the 4 cube-corner positions
+  (0,0) / (0,n-1) / (n-1,0) / (n-1,n-1).
+- EDGE: cell is on a boundary row/col (index 0 or n-1) but is
+  NOT a corner cell.
+- NEAR-CORNER: cell is strictly interior (not on row 0/n-1 or
+  col 0/n-1) with Chebyshev distance 1-2 from a corner cell.
+- INTERIOR: all other cells.
+
+The zone tally across the top 10 peaks is reported as counts
+only; it does not claim any one zone is "dominant" or that
+mode A is "concentrated" in a particular zone — those would be
+interpretive claims beyond what a peak-location scan shows.
 
 Uses the canonical matrix measurement path (same IC, dt, config,
 v_north convention as iter-766c/767/768/769 diagnostics).  Does
@@ -133,7 +137,11 @@ for rank, idx in enumerate(flat_idx, start=1):
           f"{lat_deg:>7.2f}°  {lon_deg:>7.2f}°  "
           f"{zone:>12}  {int(cheb):>14}")
 
-# Summary: which zone dominates?
+# Zone tally for the top 10 peaks (counts only; no interpretive
+# claim about mechanism or "dominance").  Iter-770 reports zones
+# observationally; the commit message / review-doc may list these
+# as inputs to iter-771+ candidate selection without asserting
+# causation here.
 zones = []
 for idx in flat_idx:
     face, i, j = np.unravel_index(idx, v_north.shape)
@@ -143,26 +151,6 @@ for idx in flat_idx:
 from collections import Counter
 zone_counts = Counter(zones)
 print()
-print(f"Zone distribution across top 10 peaks:")
+print(f"Zone tally across top 10 peaks (counts only, no mechanism claim):")
 for z, count in zone_counts.most_common():
     print(f"  {z}: {count}")
-print()
-if zone_counts.get("CORNER", 0) >= 5:
-    print("-> Mode A is concentrated AT corner cells.  Iter-769's")
-    print("   corner-skip hypothesis would have targeted these — and")
-    print("   iter-769 measured that removing the corner smoothing")
-    print("   makes mode A 6.5x worse.  The current smoothing is")
-    print("   suppressing a much larger latent corner-cell artifact.")
-elif zone_counts.get("EDGE", 0) >= 5:
-    print("-> Mode A is concentrated on EDGE cells (rows 0 or n-1,")
-    print("   cols 0 or n-1, NOT corners).  boundary_fix already")
-    print("   smooths these cells via the non-corner slice.  Further")
-    print("   investigation should look at the non-corner smoothing.")
-elif zone_counts.get("NEAR-CORNER", 0) >= 5:
-    print("-> Mode A is concentrated at cells 1-2 steps INSIDE from")
-    print("   the cube-corner cells.  These are the cells the A-L")
-    print("   gradient stencil at cube-vertex D-grid corners updates")
-    print("   via _interp_corner_to_center — candidate for iter-771.")
-else:
-    print("-> Mode A is distributed across multiple zones.  No single")
-    print("   intervention target; mechanism separation remains open.")
