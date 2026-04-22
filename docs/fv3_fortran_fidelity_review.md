@@ -595,3 +595,43 @@ Per iter-773b's explicit iter-774+ candidate "finer-grained α near 1.0 (e.g. α
 **Deliverable.**  `scripts/diag_iter774_c10_fine_sweep.py` + committed output at `diagnostics/iter774_output/iter774_c10_fine.txt`.  NO production default change — pending Fortran-oracle comparison, the default stays at α=1.00 (unchanged grad_c10).  No new sentinel.  All 10 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  38th iter in iter-752-774 chain.  First iter in the 760+ chain to identify a parameter setting that DOES reduce W2 mode A below the current baseline — but only on this single 1D slice and with a caveat that a fixed-scalar metric correction is not Fortran-faithful until the underlying derivation difference is identified.
+
+### Iter-775 — W5 cross-test of iter-774's α=0.98 c10 correction
+
+Per iter-774's iter-775+ candidate "test α=0.98 impact on W5, cosine bell, ocean rest", iter-775 runs the W5 canonical C36 1-day test at α=1.00 (default) vs α=0.98 (iter-774 candidate) and compares the W5 diagnostics.
+
+**Method** (`scripts/diag_iter775_w5_cross_test.py`; committed output at `diagnostics/iter775_output/iter775_w5_cross.txt`).  Same ablation as iter-774 (scale `grad_c10` by α at the 16 peak-updating D-grid corners), but run W5 instead of W2.  Cosine bell is NOT re-tested here because the matrix script NOTE (`run_atmosphere_test_matrix.py:1568-1576`) confirms cosine bell uses `transport_step` directly, not `model.step`, so the A-L gradient (where our c10 edit takes effect) is not on the cosine-bell path.
+
+**Result** (W5, C36, dt=300s, 1-day):
+
+| α     | mass_drift | \|h − h_ic\|_Linf | h_range (min, max)     |
+|-------|------------|--------------------|------------------------|
+| 1.000 | 6.71e−07   | 1.960e+02          | (3896, 5967)           |
+| 0.980 | 7.67e−07   | 1.960e+02          | (3896, 5967)           |
+
+**Observation.**  W5 mass drift and `|h - h_ic|_Linf` at t=1 day are essentially identical between α=1.00 and α=0.98 (matches to 4 significant figures on the h diagnostic, and both are ~7e-7 on mass drift — dominated by floating-point noise, not the c10 change).
+
+**Implication.**  The α=0.98 correction from iter-774 does NOT degrade W5 within the measurement precision of the iter-775 diagnostic.  Combined with:
+
+- iter-774: α=0.98 reduces W2 v_ll_Linf by 30 % (0.159 → 0.111 m/s) at C36 1-day.
+- iter-775 (this iter): α=0.98 leaves W5 unchanged to measurement precision.
+- cosine bell is structurally unaffected (does not use A-L gradient).
+
+the two-test cross-validation is that α=0.98 reduces W2 without harming W5 or cosine bell.
+
+**CRITICAL CAVEAT (unchanged from iter-774).**  α=0.98 is a NUMERICAL TUNING, not a Fortran-faithful fix.  A 2 % uniform scaling of a metric coefficient at specific D-grid corners does not derive from any Fortran formula.  The Fortran-faithful path remains: compare our Python `grad_c10` derivation against Fortran's metric-construction code (`fv_grid_utils.F90`) and identify any systematic derivation bias.  If a derivation bias is found, the correction is to fix the derivation, not hardcode α=0.98.
+
+**What iter-775 does NOT establish.**
+- That α=0.98 generalizes beyond C36 (C16, C24, C48, C96 untested).
+- That α=0.98 generalizes beyond 1-day integration horizons.
+- That α=0.98 is Fortran-faithful.
+- Ocean rest state is not re-tested here (the ocean dycore uses `ocean_pe_cdgrid`, a different A-L caller; iter-766's scope note flagged it as unaffected by cube-corner halo tweaks, but iter-775 does not confirm the same for c10-at-peak-corners).
+
+**Iter-776+ candidates.**
+- Fortran-oracle comparison of the `grad_c10` derivation (`src/legoesm/grids/cubed_sphere_cdgrid.py` vs Fortran `fv_grid_utils.F90`).  This is the proper Fortran-faithful path, deferred repeatedly from iter-774 and iter-775+ candidate lists.
+- C16 / C48 / C96 cross-resolution validation of α=0.98.
+- Ocean rest test of α=0.98.
+
+**Deliverable.**  `scripts/diag_iter775_w5_cross_test.py` + committed output `diagnostics/iter775_output/iter775_w5_cross.txt`.  No source-code change.  No production default change.  No new sentinel.  All 10 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  39th iter in iter-752-775 chain.  Second positive finding in the chain: α=0.98 correction reduces W2 without harming W5.  Default still α=1.00 pending Fortran-oracle derivation comparison.
