@@ -4,6 +4,60 @@ Running log of ocean dynamics work — what we tried, what worked, what didn't, 
 
 ---
 
+## 2026-04-22: SOM Implementation, Advection Scheme Comparison, PPM-FCT Fix (#210)
+
+### SOM (Prather 1986) — Implemented and Debugged
+
+Full SOM tracer advection implemented in `advection_som.py` (831 lines). Tracks 9 polynomial moments per cell alongside the cell-mean tracer. Near-zero spurious diapycnal mixing, fully differentiable.
+
+**Bugs found and fixed during development:**
+1. **Z-sweep axis reversal**: odd-in-z moments (sz, sxz, syz) must be negated when permuting for the z-sweep because the z-axis direction is flipped (positive=upward vs array-index=downward).
+2. **Receiver merge displacement factors**: the factors (3, 5) from Prather/MITgcm apply directly to our {1, 2ξ, 6ξ²-1/2} basis — the earlier attempt to rescale to (1.5, 5/3, 5/6) was wrong. Verified by roundtrip test: extract half a cell and merge it back now exactly recovers the original polynomial.
+3. **Receiver merge formulas**: `sx_new` needs weighted `alf1*sx + alf*fp_sx + 3*d0` (not simple addition). Cross terms (sxy, sxz) use simple addition (not weighted average).
+4. **Cross-term destruction at zero flux**: the weighted-average formula produces `0*cell + 1*0 = 0` when vol_flux=0, destroying cross terms. Fixed with a guard.
+5. **Pre-sweep moment reconciliation**: physics tendencies (KPP, diffusion) modify T between steps without updating moments. Applying the moment limiter before each sweep prevents the inconsistency from causing overshoots.
+6. **cos(lat) at v-faces**: changed from avg(cos_lat) to cos(avg_lat) to match the divergence operator exactly.
+7. **lax.scan compatibility**: pre-initialize T_som/S_som as Fields (not None→Field transition) to keep pytree structure stable.
+8. **_EPS portability**: 1e-30 → 1e-20 for float32 AD safety.
+
+### Eady Baroclinic Instability Comparison
+
+Ran all 4 advection schemes on the Eady experiment at 100×50 (~20 km), 200 days, KPP on, B_h=2.3e11 (Hill et al. scaling), C_smag=0, no sponge, no explicit tracer diffusion.
+
+| Scheme | Status | Days | T_drift | max_speed | Notes |
+|--------|--------|------|---------|-----------|-------|
+| upwind | PASS | 200 | 3.79e-04 | 8.28 | Maximum implicit diffusion |
+| tvd | PASS | 200 | 6.06e-04 | 5.04 | Good balance |
+| ppm_fct | FAIL→**PASS** | 9→**30** | — | 2.28 | Fixed by Zalesak conservation fix |
+| som | FAIL | 107 | 1.25e-04 | 22.0 | Best conservation; grid-scale PGF noise |
+
+**Key findings:**
+- SOM has **3-5× better conservation** than upwind/tvd (T_drift=1.25e-04).
+- SOM tracks tvd identically through day 95; blowup at day 107 is from grid-scale PGF noise at sharp eddy fronts — inherent to non-diffusive advection at 20 km without a sponge.
+- KPP is active and producing K_v up to 0.98 m²/s at sharp fronts. The instability is horizontal (PGF), not vertical.
+- Visual inspection of `snapshots_speed_sfc.png` confirms velocity spikes originate in the **interior frontal zone** (22-25°N), not at the channel walls.
+- Biharmonic viscosity B_h=2.3e11 was scaled from Hill et al. (9e8 at 5 km, ∝ dx⁴).
+
+### PPM-FCT Conservation Bug — Found and Fixed
+
+PPM-FCT blew up at day 6 with KPP (but was stable without KPP). Investigation revealed a **conservation bug in the Zalesak limiter**: it applied a per-cell blending factor alpha to the anti-diffusive *tendency* (cell-based). Because alpha varies by cell, the anti-diffusive correction doesn't globally cancel — creating systematic heat loss that drives density anomalies and velocity instability.
+
+**Fix**: Limit anti-diffusive *face fluxes* instead of cell tendencies. Each face uses `alpha_face = min(alpha_cell_left, alpha_cell_right)`. One flux per face shared by both cells → conservative by construction. Applied to both horizontal faces and vertical interfaces.
+
+**Verification**: PPM-FCT + KPP conservation now matches TVD + KPP exactly (rel_drift = 8.8e-6 in 10 steps, identical for both schemes). PPM-FCT + KPP survives 30 days on Eady.
+
+### Infrastructure
+
+1. **Test matrix CLI flags**: `--tracer-advection`, `--no-sponge`, `--B-h`, `--C-smag`, `--K-h` for parameter sweeps without modifying config files.
+2. **Sponge moment decay**: both `compare_dst3_eady.py` and `experiments.py` decay SOM moments alongside tracer in sponge regions.
+3. **Experiment documentation**: `docs/ocean_experiments/advection_scheme_comparison.md` — full experiment plan, parameters, commands, and results.
+
+### Performance
+
+SOM is ~1.4× slower per step than TVD (62.7 ms vs 29.4 ms at 100×50). JAX performance expert identified `jnp.where` elimination as the main optimization opportunity (estimated 25-35% speedup). Deferred to future session — an initial attempt with restructured sweeps actually made it 2.1× slower due to extra `concatenate` operations.
+
+---
+
 ## 2026-04-21: Advection Scheme Comparison & Infrastructure (#210)
 
 ### DST-3 Test: Worse Than TVD

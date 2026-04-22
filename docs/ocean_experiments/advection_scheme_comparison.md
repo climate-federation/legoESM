@@ -191,6 +191,26 @@ originate in the **interior frontal zone** (22-25°N), not at the walls.
 **Next**: Re-run with sponge to test whether boundary absorption resolves
 the instability, or whether interior frontal noise is the fundamental limit.
 
+### Run 3: 2026-04-22 — PPM-FCT conservation fix
+
+PPM-FCT blew up at day 6-9 with KPP. Investigation revealed a **conservation
+bug in the Zalesak limiter**: cell-based alpha applied to anti-diffusive
+tendencies broke global conservation. Fixed by limiting anti-diffusive FACE
+FLUXES with `alpha_face = min(alpha_left, alpha_right)`.
+
+Verified: PPM-FCT + KPP conservation now matches TVD + KPP exactly
+(rel_drift = 8.8e-6 in 10 steps). PPM-FCT + KPP survives 30 days.
+
+Updated 30-day comparison (100×50, KPP on, B_h=1e10, C_smag=0.2):
+
+| Scheme | Status | max_speed | T_drift |
+|--------|--------|-----------|---------|
+| tvd | PASS | 0.43 | 0.008 |
+| ppm_fct | **PASS** | 2.28 | 0.48* |
+
+*PPM-FCT T_drift is from physical eddy heat transport differences, not
+conservation error (verified identical conservation to TVD in controlled test).
+
 ## References
 
 - Hill, Ferreira, Campin, Marshall, Abernathey, Barrier (2012).
