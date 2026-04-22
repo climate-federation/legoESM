@@ -521,3 +521,35 @@ These five specific single-knob substitutions each make W2 worse.  The combined 
 **Deliverable.**  `scripts/diag_iter772_ablate_c10_peak_corners.py` with in-place cdgrid metric mutation via `._replace(grad_c10=...)`.  No source-code change.  No new sentinel (the iter-769 sentinel `test_boundary_fix_skip_corners_is_known_worse` already pattern-matches this kind of "zero a load-bearing knob" failure).  All 10 TestW2BoundaryErrorBudget sentinels pass.
 
 **Process.**  36th iter in iter-752-772 chain.  Completes the ablation from iter-771b's revised candidate list.  Fifth single-knob substitution tested; fifth one that made W2 worse than the default.
+
+### Iter-773 — Ranged c10 ablation at peak-updating D-grid corners
+
+Per iter-772b's scope-limits note ("a smaller non-zero value might be better"), iter-773 runs a ranged ablation sweep on `grad_c10` at the 16 peak-updating D-grid corners.
+
+**Method** (`scripts/diag_iter773_c10_range_sweep.py`; committed output at `diagnostics/iter773_output/iter773_c10_range.txt`).  For each scale factor α ∈ {0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5}, set `c10 = α × c10_default` at the 16 D-grid corner positions surrounding the iter-770 top-4 peak cells, and run the canonical W2 C36 1-day config.  All other metric entries unchanged.
+
+**Result** (C36):
+
+| α    | h_L2     | v_ll_Linf | relative to α=1 |
+|------|----------|-----------|-----------------|
+| 0.00 | 2.18e−3  | 4.96e+00  | 31.3×           |
+| 0.25 | 1.77e−3  | 3.35e+00  | 21.1×           |
+| 0.50 | 1.32e−3  | 1.96e+00  | 12.3×           |
+| 0.75 | 6.01e−4  | 7.92e−01  | 5.0×            |
+| **1.00** | **2.07e−4** | **1.59e−01** | **1.000× [default]** |
+| 1.25 | 6.91e−4  | 8.91e−01  | 5.6×            |
+| 1.50 | 1.04e−3  | 1.42e+00  | 9.0×            |
+
+**Observation.**  On the 1D uniform-scale slice (all 16 corners scaled by the same α), v_ll_Linf is monotone decreasing from α=0 to α=1, then monotone increasing from α=1 to α=1.5.  α=1 is the minimum on this slice.
+
+**Scope limits.**  The sweep tested ONE kind of modification: a UNIFORM scalar multiplier applied to all 16 corner c10 values.  It did NOT test:
+- Non-uniform scale factors (each corner with a different α).
+- Modifications to c01, c00, c11 at these corners.
+- Modifications to cells outside these 16 corners.
+- Modifications to the circulation-vorticity stencil (iter-768 candidate #2, still untested).
+
+**Implication.**  On the specific 1D ablation slice tested, the default grad_c10 magnitude is not dominated by a simple scalar rescaling.  Further mode-A reduction via c10-at-these-corners would require a non-uniform or mixed-coefficient change.  This narrows the search space for iter-774+ but does not close it.
+
+**Deliverable.**  `scripts/diag_iter773_c10_range_sweep.py` + committed output `diagnostics/iter773_output/iter773_c10_range.txt`.  No source-code change.  No new sentinel.  All 10 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  37th iter in iter-752-773 chain.  First iter that produced a DEFINITIVE negative result on a parameterized sweep: the default value is optimal on this 1D slice, so uniform rescaling of c10 at the 16 corners is not a single-knob fix.  Iter-774+ candidates: circulation-vorticity stencil at cube corners (iter-768 candidate #2, still untested), or non-uniform / multi-coefficient ablation.
