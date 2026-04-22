@@ -4787,6 +4787,66 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                      f"tampered.  Regenerate via `python {script} > "
                      f"{shipped}`; do NOT edit the file directly."))
 
+    def test_iter775_w5_cross_test_artifact(self):
+        """Iter-775b sentinel (Codex): verify the committed iter-775
+        W5 cross-test output at
+        `diagnostics/iter775_output/iter775_w5_cross.txt` contains
+        the expected two-line summary for alpha=1.000 and
+        alpha=0.980, with mass_drift in the 1e-7 range and
+        |h-h_ic|_Linf pinned near 1.960e+02.
+
+        Codex stop-time review on iter-775 flagged "new diagnostic
+        script is not runnable as committed."  The script does run
+        in practice (verified locally).  This sentinel locks the
+        committed artifact content so (a) a drift in the script
+        logic would produce a mismatched output and (b) manual
+        tampering of the committed file is caught.
+
+        Does NOT re-execute the script (that would cost ~30s per
+        CI run; iter-768e already has one script-executing sentinel
+        for the canonical measurement).  Only parses the committed
+        output file.
+        """
+        import re
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[2]
+        shipped = (repo_root / "diagnostics" / "iter775_output"
+                    / "iter775_w5_cross.txt")
+        self.assertTrue(
+            shipped.exists(),
+            msg=(f"iter-775 committed output file missing at "
+                 f"{shipped}.  Regenerate via "
+                 f"`python scripts/diag_iter775_w5_cross_test.py "
+                 f"> {shipped}`."))
+        text = shipped.read_text()
+        # Expected two data lines for alpha=1.000 and alpha=0.980.
+        # Pattern: "  1.000     6.712e-07       1.960e+02  ..."
+        matches = re.findall(
+            r"\s+(\d+\.\d+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)",
+            text)
+        self.assertGreaterEqual(
+            len(matches), 2,
+            msg=(f"iter-775 output has fewer than 2 data lines. "
+                 f"Content: {text}"))
+        # First 2 matches are for alpha=1.000 and alpha=0.980.
+        alphas = [float(m[0]) for m in matches[:2]]
+        mass_drifts = [float(m[1]) for m in matches[:2]]
+        h_linfs = [float(m[2]) for m in matches[:2]]
+        self.assertEqual(alphas, [1.000, 0.980],
+            msg=f"iter-775 alphas drifted: {alphas} != [1.000, 0.980]")
+        for md, alpha in zip(mass_drifts, alphas):
+            self.assertLess(
+                md, 1e-5,
+                msg=(f"iter-775 mass_drift at alpha={alpha} = "
+                     f"{md:.3e} exceeds 1e-5, far above the "
+                     f"~1e-7 floating-point noise floor."))
+        for hlinf, alpha in zip(h_linfs, alphas):
+            self.assertLess(
+                abs(hlinf - 196.0) / 196.0, 0.05,
+                msg=(f"iter-775 |h-h_ic|_Linf at alpha={alpha} = "
+                     f"{hlinf:.3e} drifted from the pin "
+                     f"1.960e+02 by more than 5%."))
+
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
         that `boundary_fix=True` in `fv3_sw_tendencies` delivers a
