@@ -4,6 +4,32 @@ Running log of ocean dynamics work — what we tried, what worked, what didn't, 
 
 ---
 
+## 2026-04-21: Advection Scheme Comparison & Infrastructure (#210)
+
+### DST-3 Test: Worse Than TVD
+
+Tested DST-3 (MITgcm scheme 33) on the Eady 200-day experiment. Result: blew up at day 129 with more diapycnal mixing than TVD Van Leer. This confirms Hill et al. (2012) Table 2 which shows DST-3 κ_eff = 4.9 × 10⁻⁵ m²/s vs Superbee at 0.017 × 10⁻⁵.
+
+Key insight from Hill et al.: **the order of accuracy doesn't determine diapycnal mixing**. The SOM (Prather 1986) scheme, which tracks 10 sub-cell moments per cell, achieves κ_eff = 0.005 × 10⁻⁵ — 1000x better than DST-3 and below observed ocean values. SOM is also fully differentiable (no limiter needed).
+
+### SOM (Prather) Implementation: NaN Bug
+
+SOM was implemented (by another agent) in `advection_som.py` and wired into the step function. Test: NaN blowup at day 25 at modest max_speed=1.6 m/s. Likely a bug in the moment update formulas (division by near-zero cell volume or CFL exceeding 1 locally). Debug instructions on issue #210.
+
+### Infrastructure Improvements
+
+1. **`--tag` CLI argument**: Appends a tag to output directories so different runs don't overwrite. Usage: `--tag tvd_200d` → `results/.../100x50/tvd_200d/`
+
+2. **Restart files**: `restart.npz` saved at end of each Eady run with full state (u, v, T, S, eta, masks, step, time_days) for continuing integrations.
+
+3. **Initial isotherm contour lines**: T cross-section plots now overlay dashed gray contour lines showing the initial temperature distribution. Makes it easy to distinguish slumping (isotherms tilt) from diffusion (isotherms spread).
+
+### z vs z* for Advection Schemes
+
+Hill et al. (2012) uses MITgcm with fixed z-levels. Our model uses z-star (all layers scale with eta). For the Eady experiment (eta/H ~ 0.03%), the difference is negligible. Would matter more for experiments with large SSH variations.
+
+---
+
 ## 2026-04-20: TVD Van Leer Vertical Tracer Advection (#209)
 
 ### Problem: Spurious Deep Ocean Warming
