@@ -18,12 +18,27 @@ Uses the canonical matrix measurement path identical to
 convention), same as iter-766c / iter-767 diagnostics.
 """
 import os, sys
-os.environ.setdefault("JAX_ENABLE_X64", "1")
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# Iter-768e-5 (Codex stop-time): FORCE canonical precision/backend
+# regardless of how the script is invoked.  Using direct assignment
+# (not setdefault) makes the shipped script's output reproducible
+# even if the invoking shell has set adversarial values
+# (JAX_ENABLE_X64=0, JAX_PLATFORMS=metal, etc.).  Set BEFORE any
+# jax import so jax.config picks up the canonical values.
+os.environ["JAX_ENABLE_X64"] = "1"
+os.environ["JAX_PLATFORMS"] = "cpu"
+# Also remove backend-override env vars that jax might otherwise
+# honour in preference to JAX_PLATFORMS.
+for _stale in ("JAX_PLATFORM_NAME", "JAX_DISABLE_JIT",
+                "JAX_DEBUG_NANS"):
+    os.environ.pop(_stale, None)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
+import jax
 import jax.numpy as jnp
+# Belt-and-braces: explicitly assert x64 after jax import so a
+# partial env-var load doesn't silently fall back to float32.
+jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import cell_centre_angles_from_4edge
