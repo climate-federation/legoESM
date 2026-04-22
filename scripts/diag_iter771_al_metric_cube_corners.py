@@ -1,29 +1,23 @@
 """Iter-771 diagnostic: measure the A-L gradient metric
 coefficients `grad_c00` / `grad_c01` / `grad_c10` / `grad_c11`
-at D-grid corners adjacent to cube vertices vs interior.
+at TWO sets of D-grid corners:
 
-Per iter-770's face-local peak localization, mode-A top-4 |v_north|
-peaks sit at EDGE cells at Chebyshev distance 1 from cube corners.
-These cells are updated by `_interp_corner_to_center(dB_dx, dB_dy)`
-from the 4 D-grid corners surrounding each cell.  For an EDGE cell
-at (n-2, 0), the 4 surrounding D-grid corners are
-  (n-2, 0), (n-2, 1), (n-1, 0), (n-1, 1)  (in D-grid indexing).
+1. The 4 CUBE-VERTEX D-grid corners per face (positions (0,0),
+   (0,n), (n,0), (n,n) in D-grid indexing shape (n+1, n+1)).
+   Iter-771a scope.  NOTE: these D-grid corners update ONLY the
+   4 cube-corner CELLS per face (via `_interp_corner_to_center`),
+   not the top-4 EDGE peak cells identified by iter-770.
 
-The D-grid corner (n-1, 0) is AT the cube vertex.  The A-L
-stencil at this corner uses `grad_c00..c11` metric coefficients.
+2. The D-grid corners that actually update the top-4 EDGE peak
+   cells (e.g. cell (n-2, 0) is updated by the 4 surrounding
+   D-grid corners (n-2, 0), (n-2, 1), (n-1, 0), (n-1, 1), none of
+   which is a cube-vertex corner).  Iter-771b scope, added per
+   Codex stop-time review of iter-771a — "Iter-771 targets the
+   wrong D-grid corners for the observed peak cells."
 
-This diagnostic reports:
-- `grad_c00/c01/c10/c11` at the D-grid corners at cube vertices
-  (i.e. at the 4 cube-corner D-grid positions per face).
-- Same coefficients at 3 nearby D-grid corners 1-2 steps in.
-- Ratio of cube-vertex values to interior median magnitude.
-
-A large ratio (e.g. >5x) would indicate that the A-L stencil at
-the cube-vertex D-grid corner has anomalous metric coefficients
-vs the interior.  This would be a candidate structural explanation
-for why mode A concentrates near those corners despite iter-765/
-766/767/769 corner-fill/smoothing experiments all failing to
-reduce the peak.
+Both sets report `grad_c00..c11` and the ratio (vertex_or_edge /
+interior_reference).  Interior reference = median |grad_c*| over
+cells strictly `5 <= i,j <= n-5`.
 
 Uses the canonical matrix config.  No dycore integration is
 needed — the A-L coefficients are grid-only.
@@ -103,4 +97,52 @@ for face in range(6):
 
 print("Max |grad_c*|/interior_ref across 24 cube-vertex D-grid corners:")
 for k, v in max_ratios.items():
+    print(f"  {k}: {v:.2f}x")
+
+# --- Iter-771b: re-measure at the D-grid corners that ACTUALLY
+# update the top-4 EDGE peak cells identified by iter-770.
+#
+# Iter-770 face-local top-4 peak cells (face index and (i, j)):
+#   face 0: (34, 0), (34, 35)
+#   face 2: (34, 0), (34, 35)
+# For each such cell (i, j), the 4 surrounding D-grid corners are
+# at indices (i, j), (i, j+1), (i+1, j), (i+1, j+1) in the
+# (n+1, n+1) corner array.
+print()
+print("-- Iter-771b (Codex stop-time): metric coefficients at the")
+print("   D-grid corners that update the top-4 EDGE peak cells")
+print("   from iter-770 (cells (34, 0) / (34, 35) on faces 0, 2).")
+print()
+peak_cells = [("face0 (34, 0)",  0, 34, 0),
+              ("face0 (34, 35)", 0, 34, 35),
+              ("face2 (34, 0)",  2, 34, 0),
+              ("face2 (34, 35)", 2, 34, 35)]
+
+edge_max_ratios = {"c00": 0.0, "c01": 0.0, "c10": 0.0, "c11": 0.0}
+for label, face, ci, cj in peak_cells:
+    print(f"{label} — 4 surrounding D-grid corners:")
+    for di in (0, 1):
+        for dj in (0, 1):
+            corner_i = ci + di
+            corner_j = cj + dj
+            c00v = c00[face, corner_i, corner_j]
+            c01v = c01[face, corner_i, corner_j]
+            c10v = c10[face, corner_i, corner_j]
+            c11v = c11[face, corner_i, corner_j]
+            print(f"  corner ({corner_i:>2},{corner_j:>2}): "
+                  f"c00={c00v:+.4e} c01={c01v:+.4e} "
+                  f"c10={c10v:+.4e} c11={c11v:+.4e}")
+            edge_max_ratios["c00"] = max(edge_max_ratios["c00"],
+                                          abs(c00v) / ref_c00)
+            edge_max_ratios["c01"] = max(edge_max_ratios["c01"],
+                                          abs(c01v) / max(ref_c01, 1e-30))
+            edge_max_ratios["c10"] = max(edge_max_ratios["c10"],
+                                          abs(c10v) / max(ref_c10, 1e-30))
+            edge_max_ratios["c11"] = max(edge_max_ratios["c11"],
+                                          abs(c11v) / ref_c11)
+    print()
+
+print("Max |grad_c*|/interior_ref across the 16 D-grid corners that")
+print("update the iter-770 top-4 EDGE peak cells:")
+for k, v in edge_max_ratios.items():
     print(f"  {k}: {v:.2f}x")
