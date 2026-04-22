@@ -304,3 +304,33 @@ All three assume source-cell semantics that our `pad_halo_vector` / `pad_halo` p
 **Iter-767 deliverable.**  Source: `_fortran_agrid_vector_corner_fill` helper + `fortran_vector_corner_fill` kwarg in `operators_cdgrid.py`, config field in `shallow_water_fv3_cdgrid.py`. Diagnostic script `scripts/diag_iter767_fortran_vector_corner_fill.py`. Sentinel `test_fortran_vector_corner_fill_is_known_worse` pins OFF baseline < 0.20, ON < 5.0, and ON/OFF ratio > 5.0 (iter-767 measured ~16×). Matrix + ocean + all regression tests PASS.
 
 **Process.**  31st iter in iter-752-767 chain. Third Fortran-corner-fill hypothesis falsified. Combined iter-765/766/767 result strongly suggests mode A requires a structural dycore change, not a cube-corner-halo tweak.
+
+### Iter-768 — Mode-A decomposition: IC contributes 5%, dynamics 95%
+
+Per iter-767's finding that three Fortran cube-corner halo fills all fail, the natural question is whether mode A originates from (a) the W2 IC reconstruction pipeline at cube vertices, or (b) the dynamics drift over 1 day.  Iter-768 measures both directly.
+
+**Method** (`scripts/diag_iter768_mode_a_at_t0.py`).  Runs the canonical matrix W2 C36 config with n_steps=0 (IC only) and n_steps=288 (1 day), measures v_ll_Linf at each.  Uses identical IC, config, and v_north/regrid conventions to iter-766c/767 diagnostics.
+
+**Result.**
+
+| Snapshot           | v_ll_Linf (m/s) |
+|--------------------|-----------------|
+| IC only (t=0)      | 8.01e−03        |
+| 1-day (t=86400s)   | 1.59e−01        |
+| dynamics δ         | +1.51e−01       |
+| 1-day / IC ratio   | **19.79×**      |
+
+**Interpretation.**  The IC reconstruction pipeline contributes ~5 % of mode A (0.008 of 0.159 m/s, both rounded).  Dynamics drift contributes the remaining ~95 %.  Mode A is PREDOMINANTLY DYNAMICS-DRIVEN; iter-765/766/767 exhaustion of corner-fill tweaks is consistent with a structural driver in the A-L + RK3 + boundary_fix pipeline.  (The decomposition is deterministic — it is a single-run measurement, not a statistical estimate.)
+
+**Peak locator.**  The 10 largest |v_ll| values at t=1 day are all at (lat ≈ ±35°, lon ≈ ±41°-±43° or ±137°-±139°), i.e. within 3.33° GREAT-CIRCLE distance of the 8 cube vertices at (±arcsin(1/√3) ≈ ±35.26°, ±45°/±135°).  This confirms iter-762's localization claim even after iter-752-767 iteration chain.  The ~3° GC offset from the exact cube vertex is explained by (a) 1° regrid binning, (b) cell-centre positions being 1-2 cells inside the cube-vertex corner (~1.3°-2.5° per cell at C36).  The committed script output is in `diagnostics/iter768_output/iter768_mode_a_at_t0.txt`.
+
+**Implication for iter-769+.**  Because dynamics dominates, candidate fixes for iter-769+ should target:
+
+- The A-L 4-point stencil at the cube-vertex D-grid corner (reads cube-corner halo padded[0, 0] + 3 near-interior cells).  All three Fortran halo fills here failed, so the issue is probably the STENCIL STRUCTURE itself or the METRIC coefficients, not the halo values.
+- The circulation-based vorticity at the cube-vertex D-grid corner (reads the same 4 cells).  Geostrophic balance requires `zeta * v - dB/dx = 0`; an asymmetric error in zeta vs dB/dx at cube vertex produces a net v-tendency.
+- The `boundary_fix` smoothing applied to cells at cube-vertex row/column.  The current cascaded `row 0 → column 0` update applies a 4-point average at cube-corner cells that might be either over- or under-correcting.
+- The structural dycore port (c_sw+d_sw FB) remains the long-term goal; iter-768 does not change the priority there.
+
+**Iter-768 deliverable.**  `scripts/diag_iter768_mode_a_at_t0.py` — reproducible measurement of the IC-vs-dynamics decomposition.  No source-code change.  No new sentinel (the existing iter-766/767 sentinels already cover the ON/OFF gaps; iter-768 is purely diagnostic).
+
+**Process.**  32nd iter in iter-752-768 chain.  First iter in the chain that is purely DIAGNOSTIC — no new code path, no new kwarg.  Produces a concrete measurement that constrains iter-769+ hypothesis space (specifically, falsifies "mode A is mainly an IC reconstruction artifact" — IC accounts for only about 5 % of the measured 0.159 m/s).
