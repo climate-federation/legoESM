@@ -4544,6 +4544,59 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                      f"investigate the source drift before updating "
                      f"the pin.  Never silently update."))
 
+        # Iter-768e-2 (Codex stop-time): ALSO lock the shipped output
+        # file.  The inline measurement above only pins what the
+        # measurement SHOULD produce; it does not lock the shipped
+        # artifact `diagnostics/iter768_output/iter768_mode_a_at_t0.txt`
+        # itself.  Someone could hand-edit the shipped file to contain
+        # different numbers, or forget to regenerate it after a source
+        # change — neither is caught by the inline pin alone.  Parse
+        # the shipped file directly and assert its numbers match the
+        # inline measurement + pins.
+        import re
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[2]
+        shipped = (repo_root / "diagnostics" / "iter768_output"
+                    / "iter768_mode_a_at_t0.txt")
+        self.assertTrue(
+            shipped.exists(),
+            msg=(f"iter-768 shipped output file is missing at "
+                 f"{shipped}.  Regenerate via "
+                 f"`python scripts/diag_iter768_mode_a_at_t0.py > "
+                 f"{shipped}`."))
+        text = shipped.read_text()
+        # Parse the structured summary lines.  Expected content:
+        #   t=0      v_ll_Linf  = 8.0118e-03 m/s
+        #   t=1 day  v_ll_Linf  = 1.5852e-01 m/s
+        #   ratio (t=1 day / t=0) = 19.79x
+        m_t0 = re.search(
+            r"t=0\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)\s*m/s", text)
+        m_t1 = re.search(
+            r"t=1 day\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)\s*m/s", text)
+        m_r = re.search(
+            r"ratio\s*\(t=1 day\s*/\s*t=0\)\s*=\s*([\d.]+)\s*x", text)
+        self.assertIsNotNone(m_t0, msg="t=0 line not found in shipped file")
+        self.assertIsNotNone(m_t1, msg="t=1 day line not found in shipped file")
+        self.assertIsNotNone(m_r, msg="ratio line not found in shipped file")
+        file_t0 = float(m_t0.group(1))
+        file_t1 = float(m_t1.group(1))
+        file_ratio = float(m_r.group(1))
+        for label, file_val, live_val in [
+            ("t=0 v_ll_Linf", file_t0, v_ll_linf_t0),
+            ("t=1d v_ll_Linf", file_t1, v_ll_linf_t1d),
+            ("ratio", file_ratio, ratio),
+        ]:
+            rel = abs(file_val - live_val) / max(abs(live_val), 1e-12)
+            self.assertLess(
+                rel, 0.05,
+                msg=(f"iter-768 shipped output file '{label}' = "
+                     f"{file_val:.4e} does not match live measurement "
+                     f"{live_val:.4e} (relative {rel:.2%}).  The "
+                     f"committed artifact `{shipped.name}` is stale "
+                     f"or tampered.  Regenerate via "
+                     f"`python scripts/diag_iter768_mode_a_at_t0.py "
+                     f"> {shipped}`; do NOT edit the file directly."))
+
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
         that `boundary_fix=True` in `fv3_sw_tendencies` delivers a
