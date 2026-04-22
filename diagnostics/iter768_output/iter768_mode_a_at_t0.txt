@@ -19,9 +19,9 @@ matrix config (NO causal attribution claimed):
 
 This is a two-point observable measurement.  The ratio does
 not by itself identify which of the dycore, the measurement
-pipeline, the IC construction, or couplings among them
-produces the t=1-day observable.  Mechanism separation
-requires iter-769+ ablations.
+pipeline, the IC construction, or couplings among them is
+responsible for the t=1-day observable.  Mechanism
+separation requires iter-769+ ablations.
 
 Top 10 |v_ll| locations at t=1 day:
       |v_ll|      lat      lon   GC_dist_to_vertex_deg   near_cube_vertex?

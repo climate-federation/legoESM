@@ -18,13 +18,13 @@ What this diagnostic measures:
 - The ratio (t=1 day) / (t=0) as a single scalar.
 
 What this diagnostic does NOT establish:
-- Whether the 1-day observable is produced by the dycore, the
-  measurement pipeline (D-grid → cell-centre-avg → rotate →
-  regrid), couplings between them, or any combination.  A
-  single-measurement ratio of observables cannot separate those.
-  Iter-769+ ablation work is needed (e.g. re-run with an
+- Which of the dycore, the measurement pipeline (D-grid →
+  cell-centre-avg → rotate → regrid), the IC construction, or
+  couplings among them is responsible for the 1-day observable.
+  A single-measurement ratio of observables cannot separate
+  those.  Iter-769+ ablation work is needed (e.g. re-run with an
   alternate regrid only, re-run with an alternate rotation only,
-  etc., and compare 1-day `v_ll_Linf` growth).
+  etc., and compare 1-day `v_ll_Linf` values).
 
 Uses the canonical matrix measurement path identical to
 `scripts/run_atmosphere_test_matrix.py` (IC, dt, norms, v_north
@@ -138,9 +138,9 @@ print(f"  ratio (t=1 day / t=0) = {ratio:.2f}x")
 print()
 print("This is a two-point observable measurement.  The ratio does")
 print("not by itself identify which of the dycore, the measurement")
-print("pipeline, the IC construction, or couplings among them")
-print("produces the t=1-day observable.  Mechanism separation")
-print("requires iter-769+ ablations.")
+print("pipeline, the IC construction, or couplings among them is")
+print("responsible for the t=1-day observable.  Mechanism")
+print("separation requires iter-769+ ablations.")
 
 # Peak locator: print top 5 |v_ll| values + their (lat, lon).
 # Useful for future iters to verify a fix REDUCED the peak amplitude
