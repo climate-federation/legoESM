@@ -305,15 +305,13 @@ All three assume source-cell semantics that our `pad_halo_vector` / `pad_halo` p
 
 **Process.**  31st iter in iter-752-767 chain. Third Fortran-corner-fill hypothesis falsified. Combined iter-765/766/767 result strongly suggests mode A requires a structural dycore change, not a cube-corner-halo tweak.
 
-### Iter-768 — Two-point v_ll_Linf observable measurement (t=0 vs t=1 day)
+### Iter-768 — Two-point v_ll_Linf measurement (t=0 and t=1 day)
 
-Per iter-767's finding that three Fortran cube-corner halo fills all fail, iter-768 measures `v_ll_Linf` at t=0 (from the analytic W2 IC) and at t=1 day (after 288 RK3 steps in the canonical matrix config) and reports both as observables.  Iter-768 does NOT decompose either observable into causal components.
+Iter-768 is a purely reportage diagnostic.  It runs the canonical matrix W2 C36 config and records `v_ll_Linf` at two time points.  It makes no attribution claim about mechanism.
 
-**Scope clarification (iter-768b, Codex stop-time review).**  This is a two-point observable measurement, not a causal decomposition.  The original iter-768 framing ("IC contributes 5 %, dynamics 95 %") treated a simple ratio of two `v_ll_Linf` values as a causal split — it is not.  At t=0, `u_d err Linf` and `v_d err Linf` are both 0 (state exactly matches the analytic reference), while `v_ll_Linf = 8.0e−3 m/s`; at t=1 day, `v_ll_Linf = 1.59e−1 m/s`.  The ratio 1-day / t=0 = 19.79× is a single scalar observable; it does not by itself identify which of the dycore, the measurement pipeline, the IC construction, or couplings among them is responsible for the t=1 day value.  Causal separation requires follow-up ablations (iter-769+).
+**Scope (iter-768b / 768c, Codex stop-time reviews).**  The original iter-768 framing ("IC contributes 5 %, dynamics 95 %") was a causal claim unsupported by the measurement.  That framing, and subsequent residual "signal / noise-floor / produces / responsible-for" phrasings caught by successive Codex passes, are retracted.  The iter-768 section below is intentionally restricted to numerical reportage plus a list of open investigation directions for iter-769+.
 
-**Method** (`scripts/diag_iter768_mode_a_at_t0.py`).  Runs the canonical matrix W2 C36 config with n_steps=0 (IC only) and n_steps=288 (1 day), measures `v_ll_Linf` at each.  Uses identical IC, config, and v_north/regrid conventions to iter-766c/767 diagnostics.  Also prints `u_d err Linf` / `v_d err Linf` at t=0 to verify the D-grid state itself has zero error vs the analytic IC.
-
-**Result.**
+**Numerical measurement** (`scripts/diag_iter768_mode_a_at_t0.py`; committed output `diagnostics/iter768_output/iter768_mode_a_at_t0.txt`).  Canonical W2 C36 matrix config; the analytic W2 edge-midpoint D-grid IC; measurement of `v_ll_Linf` at n_steps=0 and n_steps=288 (1 day).
 
 | Snapshot           | v_ll_Linf (m/s) |
 |--------------------|-----------------|
@@ -321,20 +319,18 @@ Per iter-767's finding that three Fortran cube-corner halo fills all fail, iter-
 | t=1 day            | 1.59e−01        |
 | ratio (t=1d / t=0) | **19.79×**      |
 
-At t=0 the per-field errors `u_d err Linf` and `v_d err Linf` are both exactly 0 — the stored state matches the analytic IC — while `v_ll_Linf` is 0.008 m/s.  The two numbers are reported as observables; iter-768 does not attempt a causal model of how the latter arises.
+At t=0: `u_d err Linf = 0` and `v_d err Linf = 0` (reported by the script).
 
-**Interpretation.**  The 1-day `v_ll_Linf` observable is ~20× the t=0 observable.  The measurement does not by itself distinguish among candidate mechanisms for the 1-day value: dycore drift at cube vertices, amplification under the dynamics of whatever is captured by the t=0 observable, interactions between the dynamics and the measurement pipeline, or combinations of those.  Separating them requires follow-up ablation studies (deferred to iter-769+) — e.g. re-run with a pipeline change only, re-run with a dycore change only, and compare 1-day `v_ll_Linf` values.
+**Peak locator** (numerical reportage).  The 10 largest |v_ll| values at t=1 day lie at (lat ≈ ±35°, lon ≈ ±41°-±43° or ±137°-±139°).  Each is within 3.33° great-circle distance of one of the 8 cube vertices at (±arcsin(1/√3) ≈ ±35.26°, ±45°/±135°).
 
-**Peak locator.**  The 10 largest |v_ll| values at t=1 day are all at (lat ≈ ±35°, lon ≈ ±41°-±43° or ±137°-±139°), i.e. within 3.33° GREAT-CIRCLE distance of the 8 cube vertices at (±arcsin(1/√3) ≈ ±35.26°, ±45°/±135°).  This confirms iter-762's localization claim even after iter-752-767 iteration chain.  The ~3° GC offset from the exact cube vertex is explained by (a) 1° regrid binning, (b) cell-centre positions being 1-2 cells inside the cube-vertex corner (~1.3°-2.5° per cell at C36).  The committed script output is in `diagnostics/iter768_output/iter768_mode_a_at_t0.txt`.
+**Open investigation directions for iter-769+.**  The measurement does not select among the following.  They remain open questions:
 
-**Implication for iter-769+.**  The two-point observable measurement is consistent with multiple candidate mechanisms and does not prefer any.  Candidate investigations for iter-769+ include:
+- Behaviour of the A-L 4-point stencil at the cube-vertex D-grid corner — stencil structure, metric coefficients, and cube-corner-halo value.  Iter-765/766/767 showed three Fortran halo fills change W2 worse when overlaid on the current pipeline.
+- Behaviour of circulation-based vorticity at the cube-vertex D-grid corner.  Geostrophic balance on W2 is `zeta * v_ex - dB/dx_ex = 0`; any residual imbalance there would drive a v-tendency.
+- `boundary_fix` treatment of the 4 cube-vertex corner cells per face.  The cascaded row-0 then column-0 smoothing computes a 4-point average at those cells.
+- The D-grid → cell-centre-avg → rotate → regrid chain: at t=0 the stored state is exactly the analytic IC (per-field errors 0) and the regridded `v_ll_Linf` is 0.008 m/s.  Whether interactions with the dynamics matter at t=1 day is an ablation question.
+- Structural port of Fortran c_sw + d_sw FB.  Long-term goal, blocked on ng=3 halos.
 
-- The A-L 4-point stencil at the cube-vertex D-grid corner (reads cube-corner halo padded[0, 0] + 3 near-interior cells).  All three Fortran halo fills here failed (iter-765/766/767), so the issue may be in the STENCIL STRUCTURE itself or the METRIC coefficients, not the halo values.
-- The circulation-based vorticity at the cube-vertex D-grid corner (reads the same 4 cells).  Geostrophic balance requires `zeta * v - dB/dx = 0`; an asymmetric error in zeta vs dB/dx at cube vertex would produce a net v-tendency.
-- The `boundary_fix` smoothing applied to cells at cube-vertex row/column.  The current cascaded `row 0 → column 0` update applies a 4-point average at cube-corner cells that might be either over- or under-correcting.
-- The measurement pipeline itself: at t=0 the stored state matches the analytic IC with zero per-field error but the t=0 `v_ll_Linf` observable is 0.008 m/s.  One candidate mechanism is that the D-grid → cell-centre-avg → rotate → regrid chain does not exactly recover `v_north = 0`; iter-769+ ablations would test whether this is a contributor.
-- The structural dycore port (c_sw+d_sw FB) remains the long-term goal; iter-768 does not change that priority.
+**Deliverable.**  `scripts/diag_iter768_mode_a_at_t0.py` + committed output.  No source-code change.  No new sentinel.  iter-767 regression sentinels unchanged and passing 8/8.
 
-**Iter-768 deliverable.**  `scripts/diag_iter768_mode_a_at_t0.py` — reproducible two-point `v_ll_Linf` measurement (t=0 and t=1 day), with committed output at `diagnostics/iter768_output/iter768_mode_a_at_t0.txt`.  No source-code change.  No new sentinel (the existing iter-766/767 sentinels already cover the ON/OFF gaps; iter-768 is purely diagnostic).
-
-**Process.**  32nd iter in iter-752-768 chain.  First iter in the chain that is purely DIAGNOSTIC — no new code path, no new kwarg.  Produces a concrete two-point measurement (t=0 and t=1 day, with committed reproducible output) that establishes the t=1 day observable is ~20× the t=0 observable; mechanism separation is deferred to iter-769+ ablations.  Iter-768b (Codex stop-time) retracted the original "IC 5 % / dynamics 95 %" causal framing and successive residual causal attributions — a ratio of two `v_ll_Linf` observables is not a causal decomposition without an ablation.
+**Process.**  32nd iter in iter-752-768 chain.  First iter that is purely reportage — no code path added.  Successive Codex stop-time passes (iter-768b/c) progressively removed causal language; this entry is the final minimalist form.

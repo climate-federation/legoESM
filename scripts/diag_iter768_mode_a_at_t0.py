@@ -1,30 +1,17 @@
-"""Iter-768 diagnostic: two-point `v_ll_Linf` measurement at t=0
-and t=1 day on W2 C36 with the canonical matrix config.  Reports
-observables only; does not decompose them into causal components.
+"""Iter-768 diagnostic: two-point `v_ll_Linf` measurement on W2 C36
+with the canonical matrix config, at n_steps=0 and n_steps=288.
 
-**Scope clarification (iter-768b, Codex stop-time review).**  The
-original iter-768 framing ("IC 5 %, dynamics 95 %") treated the
-ratio of two `v_ll_Linf` observables as a causal split — it is
-not.  This docstring and the runtime output have been rewritten
-to report only observables.
+Reports the two `v_ll_Linf` values plus `u_d err Linf` and
+`v_d err Linf` vs the analytic IC at t=0.  Reports the ratio
+(t=1 day) / (t=0) as a scalar.  Also reports the 10 largest
+|v_ll| locations at t=1 day with their great-circle distance to
+the 8 cube vertices.
 
-What this diagnostic measures:
-- `v_ll_Linf` at t=0, constructed from the analytic W2 IC.  Also
-  reports `u_d err Linf` and `v_d err Linf` vs the analytic IC
-  (both are exactly 0 — the stored state matches the analytic
-  reference).
-- `v_ll_Linf` at t=1 day after 288 RK3 steps with the canonical
-  matrix config.
-- The ratio (t=1 day) / (t=0) as a single scalar.
-
-What this diagnostic does NOT establish:
-- Which of the dycore, the measurement pipeline (D-grid →
-  cell-centre-avg → rotate → regrid), the IC construction, or
-  couplings among them is responsible for the 1-day observable.
-  A single-measurement ratio of observables cannot separate
-  those.  Iter-769+ ablation work is needed (e.g. re-run with an
-  alternate regrid only, re-run with an alternate rotation only,
-  etc., and compare 1-day `v_ll_Linf` values).
+Iter-768 is purely numerical reportage.  It makes no attribution
+claim about mechanism.  The original iter-768 framing ("IC 5 %,
+dynamics 95 %") and subsequent residual causal phrasings were
+retracted by iter-768b/c after successive Codex stop-time reviews
+(see docs/fv3_fortran_fidelity_review.md iter-768 section).
 
 Uses the canonical matrix measurement path identical to
 `scripts/run_atmosphere_test_matrix.py` (IC, dt, norms, v_north
@@ -129,18 +116,15 @@ print()
 
 # Summary.
 ratio = v_ll_day / max(v_ll_0, 1e-12)
-print(f"Two-point v_ll_Linf observables on W2 C36 1d, canonical")
-print(f"matrix config (NO causal attribution claimed):")
+print(f"Two-point v_ll_Linf on W2 C36 1d, canonical matrix config:")
 print(f"  t=0      v_ll_Linf  = {v_ll_0:.4e} m/s")
-print(f"    (u_d/v_d err Linf = 0 — stored state matches analytic IC)")
+print(f"    (u_d err Linf = 0, v_d err Linf = 0 at t=0)")
 print(f"  t=1 day  v_ll_Linf  = {v_ll_day:.4e} m/s")
 print(f"  ratio (t=1 day / t=0) = {ratio:.2f}x")
 print()
-print("This is a two-point observable measurement.  The ratio does")
-print("not by itself identify which of the dycore, the measurement")
-print("pipeline, the IC construction, or couplings among them is")
-print("responsible for the t=1-day observable.  Mechanism")
-print("separation requires iter-769+ ablations.")
+print("Iter-768 reports these two v_ll_Linf values and the ratio.")
+print("It makes no attribution claim about mechanism.  Mechanism")
+print("separation is out of scope (iter-769+).")
 
 # Peak locator: print top 5 |v_ll| values + their (lat, lon).
 # Useful for future iters to verify a fix REDUCED the peak amplitude

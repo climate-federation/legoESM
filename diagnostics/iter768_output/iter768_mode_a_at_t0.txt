@@ -10,18 +10,15 @@
   u_d  err Linf (vs analytic IC)        = 2.8585e-01
   v_d  err Linf (vs analytic IC)        = 2.7388e-01
 
-Two-point v_ll_Linf observables on W2 C36 1d, canonical
-matrix config (NO causal attribution claimed):
+Two-point v_ll_Linf on W2 C36 1d, canonical matrix config:
   t=0      v_ll_Linf  = 8.0118e-03 m/s
-    (u_d/v_d err Linf = 0 — stored state matches analytic IC)
+    (u_d err Linf = 0, v_d err Linf = 0 at t=0)
   t=1 day  v_ll_Linf  = 1.5852e-01 m/s
   ratio (t=1 day / t=0) = 19.79x
 
-This is a two-point observable measurement.  The ratio does
-not by itself identify which of the dycore, the measurement
-pipeline, the IC construction, or couplings among them is
-responsible for the t=1-day observable.  Mechanism
-separation requires iter-769+ ablations.
+Iter-768 reports these two v_ll_Linf values and the ratio.
+It makes no attribution claim about mechanism.  Mechanism
+separation is out of scope (iter-769+).
 
 Top 10 |v_ll| locations at t=1 day:
       |v_ll|      lat      lon   GC_dist_to_vertex_deg   near_cube_vertex?
