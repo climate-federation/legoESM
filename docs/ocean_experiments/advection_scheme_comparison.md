@@ -158,6 +158,39 @@ conservation timeseries, mean timeseries, and restart data.
 - Compare T cross-sections visually for front sharpness
 - Try higher resolution (200x100) where wall effects are delayed
 
+### Run 2: 2026-04-22 — SOM v2 with corrected receiver merge
+
+After audit, the receiver merge in `_receiver_merge()` had incorrect formulas:
+- `sx_new` used simple addition instead of weighted `alf1*sx + alf*fp_sx + 3*d0`
+- `sxx_new` used wrong factors (1.5, 5/3, 5/6) instead of correct weighted formula
+- Cross terms used weighted average instead of simple addition
+- Roundtrip test (extract + merge = original) failed with old formulas, passes with new
+
+Additional fixes applied:
+- `_EPS`: 1e-30 → 1e-20 (float32 AD safety)
+- Dead `vol` parameter removed from `_limit_moments`
+- cos(lat) at v-faces: changed from avg(cos) to cos(avg) to match divergence operator
+- lax.scan compatibility: pre-initialize T_som/S_som Fields (no None→Field transition)
+
+**Result**: SOM v2 blew up at day ~107 (vs v1 at day 111). Same instability pattern.
+
+| Version | Days survived | max_speed at day 100 | T_drift |
+|---------|---------------|---------------------|---------|
+| v1 (old merge) | 111 | 8.17 | 1.25e-04 |
+| v2 (fixed merge) | 107 | 7.15 | 2.68e-04 |
+
+**Conclusion**: The merge formula fix is mathematically correct (verified by
+roundtrip test) but does NOT affect stability. The day-100 velocity explosion
+is caused by grid-scale pressure gradient noise at sharp eddy fronts — an
+inherent limitation of non-diffusive advection at 20 km resolution without
+a sponge. TVD survives because its implicit diffusion damps this noise.
+
+Visual inspection of `snapshots_speed_sfc.png` confirms the velocity spikes
+originate in the **interior frontal zone** (22-25°N), not at the walls.
+
+**Next**: Re-run with sponge to test whether boundary absorption resolves
+the instability, or whether interior frontal noise is the fundamental limit.
+
 ## References
 
 - Hill, Ferreira, Campin, Marshall, Abernathey, Barrier (2012).

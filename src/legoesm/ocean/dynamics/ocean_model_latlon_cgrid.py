@@ -543,13 +543,24 @@ class LatLonCGridOceanModel:
             from legoesm.ocean.advection_som import som_advect_tracers
             from legoesm.core.field import Field
 
-            # Lazy-initialise moments on first step
-            T_mom = (state.T_som.data
-                     if state.T_som is not None
-                     else jnp.zeros((*T_mid.shape, 9), dtype=T_mid.dtype))
-            S_mom = (state.S_som.data
-                     if state.S_som is not None
-                     else jnp.zeros((*S_mid.shape, 9), dtype=S_mid.dtype))
+            # Initialise moments: use existing Fields, or create from zeros.
+            # Always produce Field output (not None → Field transition) so
+            # the pytree structure is stable for jax.lax.scan.
+            dims_mom = ("lat", "lon", "level", "moment")
+            if state.T_som is not None:
+                T_mom = state.T_som.data
+                S_mom = state.S_som.data
+            else:
+                T_mom = jnp.zeros((*T_mid.shape, 9), dtype=T_mid.dtype)
+                S_mom = jnp.zeros((*S_mid.shape, 9), dtype=S_mid.dtype)
+                # Pre-create Fields on state_new so the output pytree
+                # always has the same structure as the input.
+                state_new = state_new._replace(
+                    T_som=Field(data=T_mom, name="T_som",
+                                dims=dims_mom, units=""),
+                    S_som=Field(data=S_mom, name="S_som",
+                                dims=dims_mom, units=""),
+                )
 
             T_corrected, T_mom_new = som_advect_tracers(
                 T_mid, T_mom, mass_flux_u, mass_flux_v, w_baro,
@@ -560,16 +571,9 @@ class LatLonCGridOceanModel:
                 h_k_old, h_k_new, self.grid, dt, mask,
             )
 
-            dims_mom = ("lat", "lon", "level", "moment")
             state_new = state_new._replace(
-                T_som=(state.T_som.replace(data=T_mom_new)
-                       if state.T_som is not None
-                       else Field(data=T_mom_new, name="T_som",
-                                  dims=dims_mom, units="")),
-                S_som=(state.S_som.replace(data=S_mom_new)
-                       if state.S_som is not None
-                       else Field(data=S_mom_new, name="S_som",
-                                  dims=dims_mom, units="")),
+                T_som=state_new.T_som.replace(data=T_mom_new),
+                S_som=state_new.S_som.replace(data=S_mom_new),
             )
         else:
           for tr_name in ['T', 'S']:

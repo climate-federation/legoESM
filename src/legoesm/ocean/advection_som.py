@@ -37,14 +37,14 @@ IX, IY, IZ = 0, 1, 2
 IXX, IYY, IZZ = 3, 4, 5
 IXY, IXZ, IYZ = 6, 7, 8
 
-_EPS = 1e-30
+_EPS = 1e-20  # Safe for both float32 and float64; 1e-30 overflows in float32 AD
 
 
 # =============================================================================
 # Moment limiter
 # =============================================================================
 
-def _limit_moments(sm_o, mom, vol):
+def _limit_moments(sm_o, mom):
     """Limit moments to prevent the sub-cell polynomial from producing
     extreme (especially negative) tracer values.
 
@@ -183,9 +183,7 @@ def _permute_moments(mom, sweep):
     out = mom[..., [IZ, IY, IX, IZZ, IYY, IXX, IYZ, IXZ, IXY]]
     # Negate the slots that came from odd-in-z moments:
     #   slot 0 ← IZ,  slot 6 ← IYZ,  slot 7 ← IXZ
-    signs = jnp.array([1, 1, 1, 1, 1, 1, 1, 1, 1], dtype=mom.dtype)
-    signs = signs.at[0].set(-1).at[6].set(-1).at[7].set(-1)
-    return out * signs
+    return out * jnp.array([-1, 1, 1, 1, 1, 1, -1, -1, 1], dtype=mom.dtype)
 
 
 def _unpermute_moments(mom, sweep):
@@ -195,9 +193,7 @@ def _unpermute_moments(mom, sweep):
     if sweep == "y":
         return mom[..., [1, 0, 2, 4, 3, 5, 6, 8, 7]]
     # sweep == "z" — undo sign flip, then unpermute
-    signs = jnp.array([1, 1, 1, 1, 1, 1, 1, 1, 1], dtype=mom.dtype)
-    signs = signs.at[0].set(-1).at[6].set(-1).at[7].set(-1)
-    mom = mom * signs
+    mom = mom * jnp.array([-1, 1, 1, 1, 1, 1, -1, -1, 1], dtype=mom.dtype)
     return mom[..., [2, 1, 0, 5, 4, 3, 8, 7, 6]]
 
 
@@ -297,29 +293,17 @@ def _receiver_merge(sm_o, mom, fp_o, fp_mom, vol_cell, vol_flux, from_left):
 
     # Sweep-direction moments
     #
-    # Displacement correction factors for the {1, 2ξ, 6ξ²-1/2} basis.
-    # Prather (1986) / MITgcm use factors (3, 5) for the {1, ξ, ξ²-1/12}
-    # raw-moment basis.  Our expansion coefficients satisfy
-    #   sx = s_x_Prather / 2,   sxx = s_xx_Prather / 6,
-    # so the d0 factor scales from 3 → 3/2, and the d1/d0 factors in the
-    # sxx update scale from 5 → 5/3 (on d1) and 5/6 (on d0).
-    sx_new = sx_cell + fp_sx + 1.5 * d0
-    sxx_new = (sxx_cell + fp_sxx
-               + (5.0 / 3.0) * d1
-               + (5.0 / 6.0) * d0 * sign * (alf1 - alf))
+    # MITgcm (GAD_SOM_ADV_R.F) uses the same {2ξ, 6ξ²-1/2} basis and
+    # factors (3, 5).  The weighted combination alf1*cell + alf*flux
+    # accounts for the sub-cell position of each body in the merged cell.
+    sx_new = alf1 * sx_cell + alf * fp_sx + 3.0 * d0
+    sxx_new = (alf1 ** 2 * sxx_cell + alf ** 2 * fp_sxx
+               + 5.0 * sign * alf * alf1 * (sx_cell - fp_sx)
+               + 5.0 * (alf - alf1) * d0 * sign)
 
-    # Cross terms: weighted average with "crossed" weights.
-    # from_left:  alf * cell + alf1 * flux
-    # from_right: alf1 * cell + alf * flux
-    # Guard: when vol_flux == 0, alf == 0 and the formula would destroy
-    # the cell's cross terms (0 * cell + 1 * 0 = 0).  Keep original value.
-    has_flux = vol_flux > 0
-    w_cell = jnp.where(from_left, alf, alf1)
-    w_flux = jnp.where(from_left, alf1, alf)
-    sxy_merged = w_cell * mom[..., IXY] + w_flux * fp_mom[..., IXY]
-    sxz_merged = w_cell * mom[..., IXZ] + w_flux * fp_mom[..., IXZ]
-    sxy_new = jnp.where(has_flux, sxy_merged, mom[..., IXY])
-    sxz_new = jnp.where(has_flux, sxz_merged, mom[..., IXZ])
+    # Cross terms: simple addition (same as transverse moments).
+    sxy_new = mom[..., IXY] + fp_mom[..., IXY]
+    sxz_new = mom[..., IXZ] + fp_mom[..., IXZ]
 
     # Transverse moments: simple addition (no sweep-direction coupling)
     sy_new = mom[..., IY] + fp_mom[..., IY]
@@ -775,7 +759,7 @@ def som_advect_tracers(
     # Fix: scale moments so that the ratio |moments|/|sm_o| doesn't grow
     # from the physics step.  This is equivalent to MITgcm's approach of
     # applying diffusion to sm_o directly (which preserves moment ratios).
-    moments = _limit_moments(sm_o, moments, vol)
+    moments = _limit_moments(sm_o, moments)
 
     # --- Volume transports ---
     # X: mass_flux_u is h*u at u-faces [m²/s].  Volume transport = h*u * dy_face * dt.
@@ -787,11 +771,14 @@ def som_advect_tracers(
     # Y: mass_flux_v is h*v at v-faces [m²/s].  Volume transport = h*v * dx_face * dt.
     # dx at v-face j = R * dlon * cos(lat_v_j)
     # v-faces: n_lat+1 total, interior = 1..n_lat-1
-    # cos at v-face latitudes: average of adjacent cell latitudes
-    cos_lat_v = 0.5 * (
-        jnp.concatenate([grid.cos_lat[:1], grid.cos_lat], axis=0)
-        + jnp.concatenate([grid.cos_lat, grid.cos_lat[-1:]], axis=0)
-    )  # (n_lat+1,)
+    # Use cos(average latitude) to match the divergence operator exactly
+    # (divergence_cgrid uses cos(0.5*(lat[i]+lat[i+1])), not avg(cos)).
+    lat = grid.lat  # (n_lat,)
+    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
+    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    lat_interior_v = 0.5 * (lat[:-1] + lat[1:])
+    lat_v = jnp.concatenate([lat_south_pole, lat_interior_v, lat_north_pole])
+    cos_lat_v = jnp.cos(lat_v)  # (n_lat+1,)
     face_dx_v = grid.radius * grid.dlon * cos_lat_v  # (n_lat+1,)
     vol_flux_v_all = mass_flux_v * face_dx_v[:, jnp.newaxis, jnp.newaxis] * dt
     # Interior v-faces only (1..n_lat-1), excluding wall boundaries
@@ -809,14 +796,14 @@ def som_advect_tracers(
     # first sweep, so the x-sweep limiter below is for the y/z sweeps.
     sm_o, mom, vol_after_x = _som_x_sweep(sm_o, moments, vol_flux_x, vol)
 
-    mom = _limit_moments(sm_o, mom, vol_after_x)
+    mom = _limit_moments(sm_o, mom)
     sm_o, mom, vol_after_xy = _som_y_sweep(sm_o, mom, vol_flux_y, vol_after_x)
 
-    mom = _limit_moments(sm_o, mom, vol_after_xy)
+    mom = _limit_moments(sm_o, mom)
     sm_o, mom, vol_after_xyz = _som_z_sweep(sm_o, mom, vol_flux_z, vol_after_xy)
 
     # Final limiter after all sweeps
-    mom = _limit_moments(sm_o, mom, vol_after_xyz)
+    mom = _limit_moments(sm_o, mom)
 
     # Recover tracer from volume-weighted mean using h_k_new for
     # consistency with the rest of the model (continuity equation).
