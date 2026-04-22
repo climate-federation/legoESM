@@ -1548,6 +1548,7 @@ def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
+    boundary_fix_skip_corners=False,
     zero_mean_correction=False,
     fortran_dir_aware_corners=False,
     fortran_a2b_corner_avg=False,
@@ -1722,14 +1723,50 @@ def fv3_sw_tendencies(
     # Removing this is gated on the FB chain becoming stable at C36
     # (review-doc item #2: ng=3 halo infrastructure).
     if boundary_fix and n > 2:
-        du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
-        du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))
-        du_cc = du_cc.at[:, :, 0].set(0.5 * (du_cc[:, :, 0] + du_cc[:, :, 1]))
-        du_cc = du_cc.at[:, :, n-1].set(0.5 * (du_cc[:, :, n-1] + du_cc[:, :, n-2]))
-        dv_cc = dv_cc.at[:, 0, :].set(0.5 * (dv_cc[:, 0, :] + dv_cc[:, 1, :]))
-        dv_cc = dv_cc.at[:, n-1, :].set(0.5 * (dv_cc[:, n-1, :] + dv_cc[:, n-2, :]))
-        dv_cc = dv_cc.at[:, :, 0].set(0.5 * (dv_cc[:, :, 0] + dv_cc[:, :, 1]))
-        dv_cc = dv_cc.at[:, :, n-1].set(0.5 * (dv_cc[:, :, n-1] + dv_cc[:, :, n-2]))
+        # Iter-769: optionally skip the 4 cube-corner cells [0,0],
+        # [0,n-1], [n-1,0], [n-1,n-1].  The cascaded row-0/col-0 (and
+        # row-n/col-n) smoothing causes corner cells to receive a
+        # DOUBLE update — effectively a 4-point average of the 2×2
+        # block at the corner.  Iter-762/768 localize mode A at cells
+        # adjacent to the 8 cube vertices (which correspond to these
+        # corner cells), so selectively skipping them isolates whether
+        # the cascaded corner smoothing contributes to mode A.
+        #
+        # Fortran has NO post-tendency smoothing analog (confirmed by
+        # Codex iter-769 review: no equivalent in sw_core.F90 / d_sw
+        # routines).  boundary_fix is a Python-specific stabilizer;
+        # reducing its scope is a step toward Fortran faithfulness.
+        if boundary_fix_skip_corners:
+            # Smooth only the INTERIOR of each boundary row/col, i.e.
+            # leave the 4 corner cells [0,0], [0,n-1], [n-1,0],
+            # [n-1,n-1] untouched.  Skip indices: col 0 and col n-1
+            # for the row operations; row 0 and row n-1 for the col
+            # operations.
+            du_cc = du_cc.at[:, 0, 1:-1].set(
+                0.5 * (du_cc[:, 0, 1:-1] + du_cc[:, 1, 1:-1]))
+            du_cc = du_cc.at[:, n-1, 1:-1].set(
+                0.5 * (du_cc[:, n-1, 1:-1] + du_cc[:, n-2, 1:-1]))
+            du_cc = du_cc.at[:, 1:-1, 0].set(
+                0.5 * (du_cc[:, 1:-1, 0] + du_cc[:, 1:-1, 1]))
+            du_cc = du_cc.at[:, 1:-1, n-1].set(
+                0.5 * (du_cc[:, 1:-1, n-1] + du_cc[:, 1:-1, n-2]))
+            dv_cc = dv_cc.at[:, 0, 1:-1].set(
+                0.5 * (dv_cc[:, 0, 1:-1] + dv_cc[:, 1, 1:-1]))
+            dv_cc = dv_cc.at[:, n-1, 1:-1].set(
+                0.5 * (dv_cc[:, n-1, 1:-1] + dv_cc[:, n-2, 1:-1]))
+            dv_cc = dv_cc.at[:, 1:-1, 0].set(
+                0.5 * (dv_cc[:, 1:-1, 0] + dv_cc[:, 1:-1, 1]))
+            dv_cc = dv_cc.at[:, 1:-1, n-1].set(
+                0.5 * (dv_cc[:, 1:-1, n-1] + dv_cc[:, 1:-1, n-2]))
+        else:
+            du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
+            du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))
+            du_cc = du_cc.at[:, :, 0].set(0.5 * (du_cc[:, :, 0] + du_cc[:, :, 1]))
+            du_cc = du_cc.at[:, :, n-1].set(0.5 * (du_cc[:, :, n-1] + du_cc[:, :, n-2]))
+            dv_cc = dv_cc.at[:, 0, :].set(0.5 * (dv_cc[:, 0, :] + dv_cc[:, 1, :]))
+            dv_cc = dv_cc.at[:, n-1, :].set(0.5 * (dv_cc[:, n-1, :] + dv_cc[:, n-2, :]))
+            dv_cc = dv_cc.at[:, :, 0].set(0.5 * (dv_cc[:, :, 0] + dv_cc[:, :, 1]))
+            dv_cc = dv_cc.at[:, :, n-1].set(0.5 * (dv_cc[:, :, n-1] + dv_cc[:, :, n-2]))
 
     # (k) Project cell-centre tendencies to D-grid edge-midpoints via halo exchange
     du_cc_pad, dv_cc_pad = pad_halo_vector(

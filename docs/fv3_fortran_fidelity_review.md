@@ -334,3 +334,54 @@ At t=0: `u_d err Linf = 0` and `v_d err Linf = 0` (reported by the script).
 **Deliverable.**  `scripts/diag_iter768_mode_a_at_t0.py` + committed output `diagnostics/iter768_output/iter768_mode_a_at_t0.txt`.  Iter-768e added a sentinel `test_iter768_two_point_measurement_pins` that re-runs the measurement inline and pins the three numbers (8.01e−3, 1.59e−1, 19.79×) within ±5 % to catch stale-output drift.  No source-code change.  iter-767 regression sentinels unchanged and passing 8/8; iter-768e sentinel brings the `TestW2BoundaryErrorBudget` count to 9/9.
 
 **Process.**  32nd iter in iter-752-768 chain.  First iter that is purely reportage — no code path added.  Successive Codex stop-time passes (iter-768b/c/d/e) progressively removed causal language and added drift protection; this entry is the current form.  A claim in the iter-768d commit message that the final causal-vocabulary grep "returns NO causal-attribution claims" was imprecise — the grep actually returned matches which the commit message then dismissed as either in other iter sections (iter-765/766/767) or as unrelated uses ("drift whenever unrelated edits shift code"; "would drive a v-tendency" as physics terminology for a mathematical consequence).  Correct reading: the matches-minus-dismissals net to zero in the iter-768 section; the grep itself was non-empty.
+
+### Iter-769 — `boundary_fix_skip_corners` FALSIFIED (6.5x W2 blowup)
+
+Per iter-768's iter-769+ open investigation directions, iter-769 tests candidate #3 (the `boundary_fix` cascaded corner smoothing).
+
+**Fortran oracle comparison.**  Codex iter-769 review confirmed Fortran has NO post-tendency smoothing anywhere in `sw_core.F90` / `dyn_core.F90` / `d_sw` routines analogous to our Python `boundary_fix`.  Fortran achieves boundary correctness structurally via c_sw + flux-sync + d_sw5 corner divergence damping (the FB chain).  Our Python `boundary_fix` is a NON-FV3 stabilizer hack, and `iter-511` already established that removing it ENTIRELY doubles the W2 L2 error.
+
+**Iter-769 specific question.**  The `boundary_fix` cascaded row-0/col-0 (and row-n/col-n) smoothing gives the 4 cube-corner cells `[0,0]`, `[0,n-1]`, `[n-1,0]`, `[n-1,n-1]` a DOUBLE update:
+
+```
+After row-0 op:  du_cc[0,0] = 0.5*(orig[0,0] + orig[1,0])
+After col-0 op:  du_cc[0,0] = 0.5*(row_smoothed[0,0] + row_smoothed[0,1])
+                            = 0.25*(orig[0,0] + orig[1,0]
+                                     + orig[0,1] + orig[1,1])
+```
+
+Since iter-762/768 localize mode A at cells adjacent to the 8 cube vertices, and iter-765/766/767 falsified three Fortran halo-fill candidates at those cells, does the cascaded corner smoothing itself contribute to mode A?
+
+**Iter-769 candidate.**  Add a `boundary_fix_skip_corners` kwarg that leaves the 4 corner cells UNTOUCHED while keeping the non-corner boundary smoothing.  If the corner smoothing is the driver of mode A, skipping it should reduce the artifact.
+
+**Direct measurement on W2 C36 1d, iter-761 matrix config:**
+
+| Config                                         | h_L2     | v_ll_Linf |
+|------------------------------------------------|----------|-----------|
+| default (cascaded corner avg)                  | 2.07e−4  | 1.59e−01  |
+| skip 4 cube-corner cells (iter-769)            | **1.04e−3**| **1.04e+00 (6.5x BLOWUP)** |
+
+**Skipping the corner smoothing makes W2 6.5x worse, not better.**  h_L2 degrades ~5x.  Hypothesis FALSIFIED.
+
+**What this establishes.**  The cascaded 4-point corner average in `boundary_fix` is not merely inherited from the non-corner smoothing — it is LOAD-BEARING on its own.  Without it, mode A grows from 0.159 m/s to 1.04 m/s.  This strengthens iter-511's finding: the cube-corner portion of `boundary_fix` is more critical than the non-corner portion for W2 v-wind stability.
+
+**Broader picture (iter-765/766/767/769).**  Four structural interventions at the 4 cube-corner cells have now been tested:
+
+- iter-765 directional halo fill: W2 12x worse
+- iter-766 a2b 3-pt corner avg: W2 1.89x worse
+- iter-767 vector-swap halo fill: W2 16x worse
+- iter-769 skip corner smoothing: W2 6.5x worse
+
+All four make W2 worse.  The current combination (2-pt halo + cascaded 4-point tendency smoothing at corners) appears to be a local minimum in the stability landscape of the A-L + RK3 + boundary_fix production path at C36.
+
+**Iter-769 source-code status.**  `boundary_fix_skip_corners` kwarg RETAINED in `fv3_sw_tendencies` (default False) and exposed on `CDGridShallowWaterConfig` (default False) as an opt-in diagnostic path.  Matrix default and production path UNCHANGED.  Sentinel `test_boundary_fix_skip_corners_is_known_worse` pins the OFF baseline `< 0.20`, ON path `> 0.50`, and ratio `> 3.0`.
+
+**Iter-770+ next directions.**  The combined iter-765/766/767/769 evidence suggests the current A-L + RK3 + boundary_fix path is at a local minimum for mode A.  Further reduction requires:
+
+- Structural port of Fortran c_sw + d_sw FB (blocked on ng=3 halo infrastructure).
+- Ablation of the A-L metric coefficients at cube-vertex D-grid corners (candidate #1 from iter-768), which has NOT been tested yet.
+- Investigation of the circulation-based vorticity at cube-vertex D-grid corners (candidate #2 from iter-768).
+
+**Deliverable.**  `boundary_fix_skip_corners` kwarg added, diagnostic script `scripts/diag_iter769_boundary_fix_skip_corners.py`, sentinel `test_boundary_fix_skip_corners_is_known_worse`.  All 10 TestW2BoundaryErrorBudget sentinels pass.  Matrix + ocean unchanged.
+
+**Process.**  33rd iter in iter-752-769 chain.  Fourth structural cube-corner intervention falsified.  Combined result confirms the current pipeline is at a local minimum.

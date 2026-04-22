@@ -141,6 +141,20 @@ class CDGridShallowWaterConfig(NamedTuple):
     # iter-767 W2 measurement.
     fortran_vector_corner_fill: bool = False
 
+    # Iter-769: optionally skip the 4 cube-corner cells in the
+    # boundary_fix smoothing.  The cascaded row-0/col-0 (and row-n
+    # /col-n) smoothing gives the corner cells a DOUBLE update —
+    # effectively a 4-point average of the 2×2 block at the corner.
+    # Since iter-762/768 localize mode A at cells adjacent to the 8
+    # cube vertices, this flag isolates whether the cascaded corner
+    # smoothing contributes to mode A.  Fortran has no post-tendency
+    # smoothing at all (Codex iter-769 review), so setting this to
+    # True moves boundary_fix closer to Fortran behavior at the 4
+    # corner cells while keeping the stabilizer at non-corner
+    # boundary cells (iter-511's load-bearing scope).  Default False
+    # pending iter-769 W2 measurement.
+    boundary_fix_skip_corners: bool = False
+
 
 # ==============================================================================
 # Tendencies
@@ -517,6 +531,8 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     div_damp=self.config.div_damp,
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
                     boundary_fix=self.config.boundary_fix,
+                    boundary_fix_skip_corners=(
+                        self.config.boundary_fix_skip_corners),
                     fortran_a2b_corner_avg=self.config.fortran_a2b_corner_avg,
                     fortran_vector_corner_fill=(
                         self.config.fortran_vector_corner_fill),
