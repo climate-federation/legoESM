@@ -680,3 +680,38 @@ User visual inspection (provided mid-iter-775) reported "slight distortion near 
 **Deliverable.**  `scripts/diag_iter776_cosine_bell_1day.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  40th iter in iter-752-776 chain.  First iter to quantify the cosine bell visual artifact the user flagged.  Shifts iter-777+ investigation from W2 mode-A (A-L gradient) to cosine bell transport (PPM).
+
+### Iter-777 — Fortran-faithful `nord`/`damp_c` in cosine bell transport (negligible effect)
+
+Per iter-776b's candidate "Enable `nord`/`damp_c` in cosine bell matrix config (Fortran-faithful 4th-order smoother)", iter-777 tests whether the Fortran `fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)` call from `sw_core.F90:886-887` materially changes the cosine bell C36 1-day error when applied to our `transport_step`.
+
+**Method** (`scripts/diag_iter777_cb_nord_dampc.py`; committed output at `diagnostics/iter777_output/iter777_cb_smoother.txt`).  Same canonical cosine bell C36 1-day setup as iter-776.  Three configs:
+
+- matrix default: `nord=None, damp_c=None` (current)
+- Fortran-faithful: `nord=2, damp_c=0.06` (matches our Config's `nord_v`, `damp_v` per iter-755b)
+- cross-check: `nord=1, damp_c=0.16` (different field — `d4_bg` not `damp_v` — tested as a sanity check)
+
+**Result** (C36, 1-day, cosine bell):
+
+| nord | damp_c | L1        | L2        | Linf      | undershoot |
+|------|--------|-----------|-----------|-----------|------------|
+| None | None   | 1.198e−01 | 1.168e−01 | 1.227e−01 | 9.50 %     |
+| 2    | 0.06   | 1.198e−01 | 1.168e−01 | 1.226e−01 | 9.47 %     |
+| 1    | 0.16   | 1.563e−01 | 1.373e−01 | 1.331e−01 | 11.32 %    |
+
+**Finding.**  The Fortran-faithful `nord=2, damp_c=0.06` configuration produces essentially identical cosine bell error to the matrix default within floating-point noise — Linf changes from 0.1227 to 0.1226, undershoot from 9.50 % to 9.47 %.  The `damp_c=0.06` coefficient is apparently too weak to produce a measurable smoothing effect on the bell at C36 over 1 day.  The cross-check with `nord=1, damp_c=0.16` (a stronger smoother) WORSENS the error by ~10 %, confirming that applying more smoothing does not improve cosine bell — consistent with PPM truncation being the dominant error mechanism, not missing smoothing.
+
+**Implication.**  Enabling the Fortran `nord`/`damp_c` parameters in the matrix cosine bell config would be Fortran-faithful in the sense of matching `sw_core.F90:886-887`, but would not reduce the observable distortion.  This leaves three remaining candidates for cosine bell amplitude reduction (per iter-776b's list):
+- Port the Fortran c_sw+d_sw FB transport chain (blocked on ng=3 halo infrastructure).
+- Audit the non-duogrid `_d2a2c_vect` cube-vertex gap (listed `isolated, not fixed` in Closed priorities; iter-776b flagged it as a cosine bell contributor candidate but iter-777 did not audit it).
+- Test cosine bell at C48/C72/C96 to verify PPM convergence order — if the error drops as expected at higher C, the C36 distortion is a resolution-limit, not a code bug.
+
+**What iter-777 does NOT establish.**
+- That `damp_c=0.06` is never useful — it may matter more at longer horizons or different initial conditions.
+- That our `_deln_flux` (invoked by `fv_tp_2d`) matches Fortran's `deln_flux` exactly.  The negligible effect at `damp_c=0.06` could mean either (a) our implementation matches Fortran's, or (b) our implementation is under-strength.  A Fortran-oracle derivation comparison would distinguish.
+
+**Decision.**  Default `nord=None, damp_c=None` in the matrix cosine bell path is retained — enabling the Fortran-faithful parameters does not improve the test.  Production path UNCHANGED.
+
+**Deliverable.**  `scripts/diag_iter777_cb_nord_dampc.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  41st iter in iter-752-777 chain.  First iter to attempt a Fortran-faithful repair on cosine bell since the user's visual flag; result is negligible improvement.  iter-778+ candidates from iter-776b remain open.
