@@ -535,7 +535,44 @@ class LatLonCGridOceanModel:
             T_mid = T_mid + dt * dT_gm * mask_3d
             S_mid = S_mid + dt * dS_gm * mask_3d
 
-        for tr_name in ['T', 'S']:
+        if self.config.tracer_advection == "som":
+            # SOM (Prather 1986): Second Order Moments advection (#210).
+            # Advects polynomial sub-cell distributions (mean + 9 moments)
+            # via directional sweeps.  Near-zero spurious diapycnal mixing,
+            # fully differentiable (no limiter).
+            from legoesm.ocean.advection_som import som_advect_tracers
+            from legoesm.core.field import Field
+
+            # Lazy-initialise moments on first step
+            T_mom = (state.T_som.data
+                     if state.T_som is not None
+                     else jnp.zeros((*T_mid.shape, 9), dtype=T_mid.dtype))
+            S_mom = (state.S_som.data
+                     if state.S_som is not None
+                     else jnp.zeros((*S_mid.shape, 9), dtype=S_mid.dtype))
+
+            T_corrected, T_mom_new = som_advect_tracers(
+                T_mid, T_mom, mass_flux_u, mass_flux_v, w_baro,
+                h_k_old, h_k_new, self.grid, dt, mask,
+            )
+            S_corrected, S_mom_new = som_advect_tracers(
+                S_mid, S_mom, mass_flux_u, mass_flux_v, w_baro,
+                h_k_old, h_k_new, self.grid, dt, mask,
+            )
+
+            dims_mom = ("lat", "lon", "level", "moment")
+            state_new = state_new._replace(
+                T_som=(state.T_som.replace(data=T_mom_new)
+                       if state.T_som is not None
+                       else Field(data=T_mom_new, name="T_som",
+                                  dims=dims_mom, units="")),
+                S_som=(state.S_som.replace(data=S_mom_new)
+                       if state.S_som is not None
+                       else Field(data=S_mom_new, name="S_som",
+                                  dims=dims_mom, units="")),
+            )
+        else:
+          for tr_name in ['T', 'S']:
             tr = T_mid if tr_name == 'T' else S_mid
 
             if self.config.tracer_advection == "ppm_fct":

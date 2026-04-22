@@ -305,6 +305,12 @@ class LatLonCGridOceanState(NamedTuple):
         Ocean mask at v-points (lat interfaces). Shape (n_lat+1, n_lon).
     w : Field
         Vertical velocity [m/s]. Shape (n_lat, n_lon, nlev). Diagnostic field computed from flux divergence.
+    T_som : Field or None
+        SOM (Prather 1986) moments for temperature. Shape (n_lat, n_lon, nlev, 9).
+        Order: [sx, sy, sz, sxx, syy, szz, sxy, sxz, syz].
+        None when tracer_advection != "som".
+    S_som : Field or None
+        SOM (Prather 1986) moments for salinity. Same shape and order as T_som.
     """
 
     u: Field
@@ -317,6 +323,8 @@ class LatLonCGridOceanState(NamedTuple):
     u_mask: Field
     v_mask: Field
     w: Field
+    T_som: object = None
+    S_som: object = None
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -414,7 +422,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
-    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim"
+    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"

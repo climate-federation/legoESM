@@ -33,6 +33,11 @@ CHANNEL_GRID_TYPES = ["latlon_channel", "mpas_channel"]
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
+TRACER_ADVECTION_OVERRIDE = None  # Set via --tracer-advection CLI flag
+NO_SPONGE = False  # Set via --no-sponge CLI flag
+B_H_OVERRIDE = None  # Set via --B-h CLI flag
+C_SMAG_OVERRIDE = None  # Set via --C-smag CLI flag
+K_H_OVERRIDE = None  # Set via --K-h CLI flag
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"

@@ -1368,7 +1368,29 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
 
     if eu_config is None:
         eu_config = EadyUniformConfig()
+
+    # CLI overrides for experiment parameters
+    overrides = {}
+    if config.TRACER_ADVECTION_OVERRIDE is not None:
+        overrides["tracer_advection"] = config.TRACER_ADVECTION_OVERRIDE
+    if config.B_H_OVERRIDE is not None:
+        overrides["B_h"] = config.B_H_OVERRIDE
+    if config.C_SMAG_OVERRIDE is not None:
+        overrides["C_smag"] = config.C_SMAG_OVERRIDE
+    if config.K_H_OVERRIDE is not None:
+        overrides["K_h"] = config.K_H_OVERRIDE
+    if overrides:
+        fields = {f: getattr(eu_config, f) for f in eu_config.__dataclass_fields__}
+        fields.update(overrides)
+        eu_config = eu_config.__class__(**fields)
+
     physics = eu_forcings(tc.grid_type, None, eu_config)
+
+    # Enable KPP for physical boundary layer mixing.
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    physics = physics._replace(
+        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+    )
 
     # Pass domain bounds from experiment config into run_kwargs
     tc.run_kwargs.setdefault("lat_south", eu_config.lat_south)
@@ -1434,18 +1456,30 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
                                   include_velocity_3d=True)
 
+    use_sponge = not config.NO_SPONGE
+
     def step_fn(s, dt_):
         s_new = model.step(s, dt_)
+        if not use_sponge:
+            return s_new
         # Sponge: relax T toward initial, damp u/v
         T_new = s_new.T.data * decay_T + T_init_jnp * (1.0 - decay_T)
         u_new = s_new.u.data * decay_u
-        s_new = s_new._replace(
+        sponge_kw = dict(
             u=Field(u_new, name="u", dims=s_new.u.dims, units=s_new.u.units),
             T=Field(T_new, name="T", dims=s_new.T.dims, units=s_new.T.units))
         if hasattr(s_new, 'v') and decay_v is not None:
             v_new = s_new.v.data * decay_v
-            s_new = s_new._replace(
-                v=Field(v_new, name="v", dims=s_new.v.dims, units=s_new.v.units))
+            sponge_kw["v"] = Field(v_new, name="v", dims=s_new.v.dims,
+                                   units=s_new.v.units)
+        # SOM moments must also be decayed by the sponge
+        if getattr(s_new, 'T_som', None) is not None:
+            sponge_kw["T_som"] = s_new.T_som.replace(
+                data=s_new.T_som.data * decay_T[..., jnp.newaxis])
+        if getattr(s_new, 'S_som', None) is not None:
+            sponge_kw["S_som"] = s_new.S_som.replace(
+                data=s_new.S_som.data * decay_T[..., jnp.newaxis])
+        s_new = s_new._replace(**sponge_kw)
         return s_new
 
     state, snapshots, diag, wall, ok = _run_timeloop(

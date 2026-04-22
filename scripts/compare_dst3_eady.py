@@ -35,6 +35,14 @@ def run_eady(scheme: str, n_lat: int, n_lon: int, days: float, dt: float = 300.0
         periodic_x=True)
 
     physics = eu_forcings("latlon_channel", None, eu_config)
+
+    # Enable KPP for all schemes — it is a physical parameterization
+    # (boundary layer mixing, interior shear instability) not a numerical fix.
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    physics = physics._replace(
+        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+    )
+
     kw = dict(
         n_barotropic_substeps=30,
         A_h=eu_config.A_h, B_h=eu_config.B_h, C_smag=eu_config.C_smag,
@@ -79,10 +87,19 @@ def run_eady(scheme: str, n_lat: int, n_lon: int, days: float, dt: float = 300.0
         T_new = state.T.data * decay_T + T_init * (1.0 - decay_T)
         u_new = state.u.data * decay_u
         v_new = state.v.data * decay_v
-        state = state._replace(
+        sponge_kw = dict(
             u=Field(u_new, name="u", dims=state.u.dims, units=state.u.units),
             v=Field(v_new, name="v", dims=state.v.dims, units=state.v.units),
             T=Field(T_new, name="T", dims=state.T.dims, units=state.T.units))
+        # SOM moments must also be decayed by the sponge to stay consistent
+        # with the relaxed tracer mean.  decay_T is exp(-dt*gamma).
+        if state.T_som is not None:
+            sponge_kw["T_som"] = state.T_som.replace(
+                data=state.T_som.data * decay_T[..., jnp.newaxis])
+        if state.S_som is not None:
+            sponge_kw["S_som"] = state.S_som.replace(
+                data=state.S_som.data * decay_T[..., jnp.newaxis])
+        state = state._replace(**sponge_kw)
 
         if (i + 1) % diag_every == 0:
             jax.block_until_ready(state.T.data)
