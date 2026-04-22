@@ -108,6 +108,7 @@ class PhysicsPipeline:
     def __init__(
         self,
         adapter,
+        sigma_coord,
         sigma_full,
         sigma_half,
         dsigma,
@@ -121,6 +122,8 @@ class PhysicsPipeline:
         albedo_ocean=0.06,
         emissivity_ice=0.95,
         emissivity_ocean=0.97,
+        albedo_land=0.2,
+        emissivity_land=0.96,
         micro_fn=None,
         micro_config=None,
         dynamic_albedo=False,
@@ -129,8 +132,10 @@ class PhysicsPipeline:
         gwd_fn=None,
         gwd_config=None,
         physics_parameterization=None,
+        land_fraction=None,
     ):
         self.adapter = adapter
+        self.sigma_coord = sigma_coord
         self.sigma_full = sigma_full
         self.sigma_half = sigma_half
         self.dsigma = dsigma
@@ -144,6 +149,8 @@ class PhysicsPipeline:
         self.albedo_ocean = albedo_ocean
         self.emissivity_ice = emissivity_ice
         self.emissivity_ocean = emissivity_ocean
+        self.albedo_land = albedo_land
+        self.emissivity_land = emissivity_land
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         self.dynamic_albedo = dynamic_albedo
@@ -152,6 +159,7 @@ class PhysicsPipeline:
         self.gwd_fn = gwd_fn
         self.gwd_config = gwd_config
         self.physics_parameterization = physics_parameterization
+        self.land_fraction = land_fraction
         self._cloud_scheme = "none"  # set by build_physics_pipeline
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
@@ -172,8 +180,8 @@ class PhysicsPipeline:
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
 
-        p_full = p_s[..., None] * self.sigma_full
-        p_half = p_s[..., None] * self.sigma_half
+        p_full = self.sigma_coord.pressure_at_full(p_s)
+        p_half = self.sigma_coord.pressure_at_half(p_s)
 
         # Flatten to columns via adapter
         T_col = ad.flatten_3d(T)
@@ -188,9 +196,9 @@ class PhysicsPipeline:
         if (self.physics_parameterization is not None
                 or self.turbulence_fn is not None
                 or self.gwd_fn is not None):
-            from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+            from legoesm.atmosphere.physics._shared import compute_heights_from_sigma, virtual_temperature
 
-            z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
+            z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         _conv_cfg = self.convection_config
 
@@ -229,7 +237,7 @@ class PhysicsPipeline:
 
             T_sfc_col = ad.flatten_2d(T_sfc)
             q_sat_sfc_col = ad.flatten_2d(saturation_specific_humidity(T_sfc, p_s))
-            rho_col_phys = p_full_col / (constants.R_d * T_col)
+            rho_col_phys = p_full_col / (constants.R_d * virtual_temperature(T_col, q_v_col))
             closure = diagnose_mass_flux_closure(
                 T=T_col,
                 q_v=q_v_col,
@@ -312,7 +320,7 @@ class PhysicsPipeline:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
-            rho_col = p_full_col / (constants.R_d * T_col)
+            rho_col = p_full_col / (constants.R_d * virtual_temperature(T_col, q_v_col))
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
             dz_col = dp_col / (rho_col * constants.g)
             _z = jnp.zeros_like(q_c_col)
@@ -365,24 +373,43 @@ class PhysicsPipeline:
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
 
-        # Boundary layer exchange (grid-agnostic: uses [..., -1] indexing)
-        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T[..., -1])
-        wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0)
-        dp_low = p_s * (self.sigma_half[-1] - self.sigma_half[-2])
-
-        shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
-        q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
-        lhflx = rho_low * constants.L_v * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
-        evap_rate = lhflx / constants.L_v
-
-        dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
-        dq_BL = constants.g * evap_rate / dp_low
-
         dT_dt = dT_dt_rad + dT_dt_conv + dT_dt_micro
-        dT_dt = dT_dt.at[..., -1].add(dT_BL)
-
         dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
-        dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
+        shflx = jnp.zeros(shape_2d, dtype=_sd)
+        lhflx = jnp.zeros(shape_2d, dtype=_sd)
+
+        # Apply an explicit bulk surface exchange only when no turbulence
+        # backend is active. Turbulence schemes already compute/apply the same
+        # surface sensible/latent fluxes internally, so adding them again here
+        # would double count boundary-layer exchange.
+        if self.turbulence_fn is None and turb_out is None:
+            from legoesm.atmosphere.physics._shared import virtual_temperature
+
+            rho_low = p_full[..., -1] / (
+                constants.R_d * virtual_temperature(T[..., -1], q_v[..., -1])
+            )
+            # Match the turbulence surface-layer bulk formula: use a tiny
+            # numerical floor to avoid division by zero, not an implicit
+            # 1 m/s gustiness boost.
+            wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0e-4)
+            dp_low = p_half[..., -1] - p_half[..., -2]
+
+            shflx = (
+                rho_low * constants.c_pd * _C_H * wind_speed
+                * (T_sfc - T[..., -1])
+            )
+            q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
+            lhflx = (
+                rho_low * constants.L_v * _C_E * wind_speed
+                * (q_sat_sfc - q_v[..., -1])
+            )
+            evap_rate = lhflx / constants.L_v
+
+            dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
+            dq_BL = constants.g * evap_rate / dp_low
+
+            dT_dt = dT_dt.at[..., -1].add(dT_BL)
+            dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
         # Momentum tendencies from turbulence and GWD
         du_dt = jnp.zeros(shape_3d, dtype=_sd)
@@ -391,16 +418,20 @@ class PhysicsPipeline:
         if (self.turbulence_fn is not None and turb_out is None) or self.gwd_fn is not None:
             u_col = ad.flatten_3d(u)
             v_col = ad.flatten_3d(v)
-            rho_col_phys = p_full_col / (constants.R_d * T_col)
+            from legoesm.atmosphere.physics._shared import virtual_temperature
+
+            rho_col_phys = p_full_col / (constants.R_d * virtual_temperature(T_col, q_v_col))
             if z_full_col is None or z_half_col is None:
                 from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
-                z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
+                z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         if turb_out is not None:
             du_dt = du_dt + ad.unflatten_3d(turb_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
             dq_v_dt = dq_v_dt + ad.unflatten_3d(turb_out.dq_v_dt)
+            shflx = ad.unflatten_2d(turb_out.shflx)
+            lhflx = ad.unflatten_2d(turb_out.lhflx)
         elif self.turbulence_fn is not None:
             T_sfc_col = ad.flatten_2d(T_sfc)
             q_sat_sfc_col = ad.flatten_2d(
@@ -417,6 +448,8 @@ class PhysicsPipeline:
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
             dq_v_dt = dq_v_dt + ad.unflatten_3d(turb_out.dq_v_dt)
+            shflx = ad.unflatten_2d(turb_out.shflx)
+            lhflx = ad.unflatten_2d(turb_out.lhflx)
 
         if self.gwd_fn is not None:
             lat_col = ad.flatten_2d(lat)
@@ -479,10 +512,28 @@ class PhysicsPipeline:
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
         albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
-        emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
+        emissivity = blend_surface_property(
+            sic,
+            self.emissivity_ice,
+            self.emissivity_ocean,
+        )
+        if self.land_fraction is not None:
+            land_fraction = jnp.clip(
+                jnp.asarray(self.land_fraction, dtype=albedo.dtype),
+                0.0,
+                1.0,
+            )
+            albedo = (
+                (1.0 - land_fraction) * albedo
+                + land_fraction * self.albedo_land
+            )
+            emissivity = (
+                (1.0 - land_fraction) * emissivity
+                + land_fraction * self.emissivity_land
+            )
 
-        p_full = p_s[..., None] * self.sigma_full
-        p_half = p_s[..., None] * self.sigma_half
+        p_full = self.sigma_coord.pressure_at_full(p_s)
+        p_half = self.sigma_coord.pressure_at_half(p_s)
 
         # Flatten to columns via adapter
         T_col = ad.flatten_3d(T)
@@ -712,7 +763,7 @@ def _build_gray_radiation_fn(config):
 
 def _build_rrtmgp_radiation_fn(config):
     """Build a JIT-compiled RRTMGP radiation wrapper from config."""
-    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.config import OzoneProfileConfig, RRTMGPConfig
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation, daylight_fraction,
@@ -721,6 +772,7 @@ def _build_rrtmgp_radiation_fn(config):
 
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
+    ozone_cfg = OzoneProfileConfig(source=getattr(config, "ozone_source", "standard"))
 
     rrtmg_config = RRTMGPConfig(
         co2_ppmv=config.co2_ppmv,
@@ -763,15 +815,29 @@ def _build_rrtmgp_radiation_fn(config):
             )
             _sw_scale = f_day
 
+        o3_override = o3_vmr_col
+        if o3_override is None:
+            if ozone_cfg.source == "none":
+                o3_override = jnp.full_like(p_full_col, 1.0e-10)
+            elif ozone_cfg.source == "analytical":
+                p_hPa = p_full_col / 100.0
+                o3_override = ozone_cfg.o3_max_vmr * jnp.exp(
+                    -0.5 * ((jnp.log(p_hPa) - jnp.log(ozone_cfg.p_peak_hPa)) / ozone_cfg.sigma_logp) ** 2
+                )
+                if ozone_cfg.lat_dependence:
+                    o3_override = o3_override * (1.0 + 0.5 * jnp.sin(lat_col) ** 2)[:, None]
+                o3_override = jnp.clip(o3_override, 1.0e-10, None)
+
         result = solver.solve_columns(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_col,
             cos_zenith=cos_zenith,
             sfc_albedo=albedo_col,
             sfc_emissivity=emis_col,
-            o3_vmr=o3_vmr_col,
+            o3_vmr=o3_override,
             aerosol_optical_depth=aerosol_od_col,
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,
+            solar_constant=s_0,
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
             cloud_path_ice=cloud_path_ice,
@@ -969,7 +1035,7 @@ def _resolve_physics_parameterization(config, nlev: int):
 # Top-level builder
 # ---------------------------------------------------------------------------
 
-def build_physics_pipeline(grid, sigma, config):
+def build_physics_pipeline(grid, sigma, config, *, land_fraction=None):
     """Build a PhysicsPipeline from an ExperimentConfig.
 
     All scheme selection happens here via registries; the resulting
@@ -1017,6 +1083,7 @@ def build_physics_pipeline(grid, sigma, config):
 
     pipeline = PhysicsPipeline(
         adapter=adapter,
+        sigma_coord=sigma,
         sigma_full=sigma.sigma_full,
         sigma_half=sigma.sigma_half,
         dsigma=sigma.dsigma,
@@ -1030,6 +1097,7 @@ def build_physics_pipeline(grid, sigma, config):
         albedo_ocean=config.albedo_ocean,
         emissivity_ice=config.emissivity_ice,
         emissivity_ocean=config.sfc_emissivity,
+        land_fraction=land_fraction,
         micro_fn=micro_fn,
         micro_config=micro_config,
         dynamic_albedo=config.dynamic_albedo,

@@ -32,10 +32,13 @@ class DycoreConfig(NamedTuple):
     model_type: str = "hydrostatic"       # hydrostatic, nonhydrostatic, spectral_pe
     discretization: str = "cdgrid"        # cdgrid, spectral, sfno, mpas
     dt: float = 600.0
+    A_h_scale: float = 1.0
     hyperdiff_scale: float = 1.0
     div_damp_scale: float = 1.0
     conservation_fixer: bool = True
     fix_mass: bool = True
+    sponge_sigma: float = 0.15
+    sponge_tau_sec: float = 3600.0
 
 
 class OutputConfig(NamedTuple):
@@ -118,6 +121,7 @@ class ExperimentConfig(NamedTuple):
 
     # Conservation
     fix_moisture: bool = False
+    sat_adjust_without_microphysics: bool = True
 
     # Topography
     topography: str = "flat"
@@ -189,6 +193,8 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"grid.p_top_Pa must be > 0, got {g.p_top_Pa}")
         if d.dt <= 0:
             errors.append(f"dycore.dt must be > 0, got {d.dt}")
+        if d.A_h_scale < 0:
+            errors.append(f"dycore.A_h_scale must be >= 0, got {d.A_h_scale}")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
@@ -306,6 +312,7 @@ class ExperimentConfig(NamedTuple):
         )
         dycore = DycoreConfig(
             dt=amip_cfg.dt,
+            A_h_scale=getattr(amip_cfg, 'A_h_scale', 1.0),
             hyperdiff_scale=getattr(amip_cfg, 'hyperdiff_scale', 1.0),
         )
         output = OutputConfig(
@@ -359,6 +366,11 @@ class ExperimentConfig(NamedTuple):
             turbulence=getattr(amip_cfg, 'turbulence', 'none'),
             gravity_wave_drag=getattr(amip_cfg, 'gravity_wave_drag', 'none'),
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
+            sat_adjust_without_microphysics=getattr(
+                amip_cfg,
+                'sat_adjust_without_microphysics',
+                True,
+            ),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
@@ -417,6 +429,7 @@ class ExperimentConfig(NamedTuple):
             resolution=self.grid.resolution,
             nlev=self.grid.nlev,
             dt=self.dycore.dt,
+            A_h_scale=self.dycore.A_h_scale,
             vertical_coord=self.grid.vertical_coord,
             p_top_Pa=self.grid.p_top_Pa,
             stretching=self.grid.stretching,
@@ -461,6 +474,7 @@ class ExperimentConfig(NamedTuple):
             turbulence=self.turbulence,
             gravity_wave_drag=self.gravity_wave_drag,
             fix_moisture=self.fix_moisture,
+            sat_adjust_without_microphysics=self.sat_adjust_without_microphysics,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,

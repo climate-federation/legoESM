@@ -40,13 +40,15 @@ class SBMConfig(NamedTuple):
     T_min_convect : float
         Minimum temperature [K] for convection (default 200.0).
     smooth_trigger_sharpness : float
-        Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.01).
+        Sigmoid sharpness for smooth trigger [1/(J/kg)].
+        The default is chosen so columns well below the CAPE threshold are
+        effectively off, rather than retaining a large background activation.
     """
     tau_c: float = 7200.0
     RH_ref: float = 0.7
     CAPE_threshold: float = 70.0
     T_min_convect: float = 200.0
-    smooth_trigger_sharpness: float = 0.01
+    smooth_trigger_sharpness: float = 0.1
 
 
 class DCAConfig(NamedTuple):

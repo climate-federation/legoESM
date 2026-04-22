@@ -27,11 +27,13 @@ from legoesm.driver.compiled_segments import (
     pack_carry,
     unpack_carry,
     compute_segment_length,
+    forcing_requires_single_step_segments,
     build_segment_fn,
     pack_forcing,
 )
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.vertical import create_sigma_coordinate
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +52,7 @@ def _copy_carry(carry):
 
 # Create a real cubed-sphere grid once (expensive to rebuild per test)
 _GRID = create_cubed_sphere(N)
+_SIGMA = create_sigma_coordinate(NLEV)
 
 
 def _make_field_3d(name="test", fill=1.0):
@@ -85,6 +88,22 @@ class _MockModel:
             data=state.T.data + self._increment * dt / 86400.0
         )
         return state._replace(T=new_T)
+
+
+class _TracerAdvectingMockModel:
+    """Minimal dynamics model that increments q_v inside ``state.tracers``."""
+
+    _state_type = HydrostaticState
+
+    def __init__(self, increment=1.0e-9):
+        self._increment = increment
+
+    def step(self, state, dt):
+        tracers = dict(state.tracers or {})
+        q_v_field = tracers["q_v"]
+        q_v_arr = q_v_field.data if hasattr(q_v_field, "data") else q_v_field
+        tracers["q_v"] = q_v_field.replace(data=q_v_arr + self._increment * dt)
+        return state._replace(tracers=tracers)
 
 
 def _mock_step_unified(
@@ -178,6 +197,50 @@ class TestComputeSegmentLength:
         assert compute_segment_length(a, b, c) == expected
 
 
+class TestCompiledForcingCadenceGuard:
+    """Time-varying forcing should collapse compiled segments to one step."""
+
+    def test_constant_forcing_does_not_require_single_step_segments(self):
+        assert not forcing_requires_single_step_segments(
+            dataset="analytical",
+            diurnal_cycle=False,
+            solar_source="constant",
+            ozone_forcing="inline",
+            aerosol_forcing="off",
+            ghg_forcing="constant",
+        )
+
+    def test_diurnal_cycle_requires_single_step_segments(self):
+        assert forcing_requires_single_step_segments(
+            dataset="analytical",
+            diurnal_cycle=True,
+            solar_source="constant",
+            ozone_forcing="inline",
+            aerosol_forcing="off",
+            ghg_forcing="constant",
+        )
+
+    def test_custom_surface_forcing_requires_single_step_segments(self):
+        assert forcing_requires_single_step_segments(
+            dataset="custom",
+            diurnal_cycle=False,
+            solar_source="constant",
+            ozone_forcing="inline",
+            aerosol_forcing="off",
+            ghg_forcing="constant",
+        )
+
+    def test_external_radiation_forcing_requires_single_step_segments(self):
+        assert forcing_requires_single_step_segments(
+            dataset="analytical",
+            diurnal_cycle=False,
+            solar_source="file",
+            ozone_forcing="external",
+            aerosol_forcing="external",
+            ghg_forcing="external",
+        )
+
+
 # ===========================================================================
 # 2. SegmentCarry pack/unpack
 # ===========================================================================
@@ -263,6 +326,8 @@ class TestSegmentCarryRoundtrip:
         assert new_state.T.name == "T"
         assert new_state.T.units == "K"
         assert new_state.u.dims == ("face", "x", "y", "level")
+        assert new_state.tracers is not None
+        assert set(new_state.tracers) == {"q_v", "q_c", "q_r"}
 
     def test_step_index_is_int32(self):
         state = _make_hydrostatic_state()
@@ -311,8 +376,9 @@ def _make_segment_fn_args(fix_moisture=False):
         model=_MockModel(increment=1.0),
         step_unified=_mock_step_unified,
         grid=_GRID,
-        sigma_full=jnp.linspace(0.1, 1.0, NLEV),
-        dsigma=jnp.full((NLEV,), 1.0 / NLEV),
+        sigma_coord=_SIGMA,
+        sigma_full=_SIGMA.sigma_full,
+        dsigma=_SIGMA.dsigma,
         dt=DT,
         rad_update_steps=1,
         microphysics="none",
@@ -419,6 +485,39 @@ class TestBuildSegmentFn:
         assert np.all(T_final > T_init), "Temperature should increase"
         assert np.all(np.isfinite(T_final)), "Temperature should be finite"
 
+    def test_tracers_are_advected_when_present_in_state(self):
+        args = _make_segment_fn_args()
+        increment = 1.0e-9
+        args["model"] = _TracerAdvectingMockModel(increment=increment)
+        run_segment = build_segment_fn(**args)
+
+        state = _make_hydrostatic_state()
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+        q_v = jnp.ones(shape_3d, dtype=jnp.float32) * 1.0e-4
+        carry = pack_carry(
+            state,
+            q_v=q_v,
+            q_c=jnp.zeros(shape_3d),
+            q_r=jnp.zeros(shape_3d),
+            held_dT_rad=jnp.zeros(shape_3d),
+            held_sw_net_sfc=jnp.zeros(shape_2d),
+            held_lw_net_sfc=jnp.zeros(shape_2d),
+            held_sw_up_toa=jnp.zeros(shape_2d),
+            held_lw_up_toa=jnp.zeros(shape_2d),
+            held_sw_down_toa=jnp.zeros(shape_2d),
+            step_index=0,
+        )
+        q_v_init = np.asarray(q_v)
+
+        result = run_segment(carry, 1, _FORCING)
+        np.testing.assert_allclose(
+            np.asarray(result.q_v),
+            q_v_init + increment * DT,
+            rtol=1e-6,
+            atol=1e-9,
+        )
+
     def test_output_all_finite(self):
         """All carry fields remain finite after a segment run."""
         args = _make_segment_fn_args()
@@ -486,7 +585,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
     Replicates the logic inside _single_step but without lax.scan,
     so we can compare results for equivalence testing.
     """
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
     from legoesm import constants
     from legoesm.core.operators_3d import hyperdiffusion_3d
     from legoesm.driver.compiled_segments import _rebuild_state
@@ -544,7 +643,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         # Saturation adjustment
         if do_sat_adjust:
             p_full = p_s_new[..., None] * sigma_full
-            q_sat = saturation_mixing_ratio(T_upd, p_full)
+            q_sat = saturation_specific_humidity(T_upd, p_full)
             excess = jnp.maximum(q_v_upd - q_sat, 0.0)
             q_v_upd = q_v_upd - excess
             T_upd = T_upd + constants.L_v * excess / constants.c_pd

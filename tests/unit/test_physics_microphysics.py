@@ -24,7 +24,10 @@ from legoesm.atmosphere.physics.microphysics.config import (
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState, make_zero_hydrometeors,
 )
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import (
+    saturation_mixing_ratio,
+    saturation_specific_humidity,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +53,7 @@ def _make_column(nlev=20, ncol=4, T_sfc=280.0, q_c_val=1e-4, supersaturated=Fals
     dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     dz = jnp.abs(dz)
 
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     if supersaturated:
         q_v = 1.2 * q_sat
     else:
@@ -152,6 +155,35 @@ def test_saturation_adjustment_vapor_decreases(scheme):
     min_dqv = float(jnp.min(out.dq_v_dt))
     assert min_dqv < 0.0, (
         f"{scheme}: no condensation in supersaturated column, min dq_v_dt = {min_dqv:.2e}"
+    )
+
+
+def test_sundqvist_does_not_condense_subsaturated_columns():
+    """Sundqvist should not condense when RH is below 100%.
+
+    RH_crit only controls the smooth onset of condensation; it should not cause
+    the kernel to remove vapor from a column that is still subsaturated.
+    """
+    T, _q_v_unused, hydro, p_full, p_half, rho, dz = _make_column(
+        supersaturated=False, q_c_val=0.0
+    )
+    q_sat = saturation_specific_humidity(T, p_full)
+    q_v = 0.9 * q_sat  # above RH_crit=0.8 but still below saturation
+    out = sundqvist_microphysics(
+        T,
+        q_v,
+        hydro,
+        p_full,
+        p_half,
+        rho,
+        dz,
+        300.0,
+        config=SundqvistConfig(),
+    )
+    min_dqv = float(jnp.min(out.dq_v_dt))
+    assert min_dqv >= -1e-12, (
+        "Sundqvist condensed a subsaturated column: "
+        f"min dq_v_dt = {min_dqv:.2e}"
     )
 
 

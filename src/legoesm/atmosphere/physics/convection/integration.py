@@ -148,8 +148,8 @@ def _make_hydrostatic_convection(
         shape_2d = p_s.shape
 
         # Pressure at full and half levels
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns: (6,n,n,...) -> (ncol, ...)
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -429,10 +429,8 @@ def _make_spectral_pe_convection(
         n_lat, n_lon = p_s.shape
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = n_lat * n_lon

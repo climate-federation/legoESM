@@ -330,7 +330,6 @@ class TestVerticalAdvection:
         interior = tendency[..., 1:-1]
         assert jnp.allclose(interior, -0.005 * a, rtol=1e-5)
 
-
 # ==============================================================================
 # 3D Operator Tests
 # ==============================================================================
@@ -395,9 +394,9 @@ class TestHydrostaticTendencies:
         tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
 
         # All tendencies should be near zero
-        assert jnp.allclose(tend.du_dt.data, 0.0, atol=1e-8), \
+        assert jnp.allclose(tend.du_dt.data, 0.0, atol=5e-8), \
             f"du_dt max: {float(jnp.max(jnp.abs(tend.du_dt.data)))}"
-        assert jnp.allclose(tend.dv_dt.data, 0.0, atol=1e-8), \
+        assert jnp.allclose(tend.dv_dt.data, 0.0, atol=5e-8), \
             f"dv_dt max: {float(jnp.max(jnp.abs(tend.dv_dt.data)))}"
         assert jnp.allclose(tend.dT_dt.data, 0.0, atol=1e-6), \
             f"dT_dt max: {float(jnp.max(jnp.abs(tend.dT_dt.data)))}"

@@ -243,6 +243,11 @@ class TestIssue3_MicrophysicsRateSemantics:
         mod = importlib.import_module(f"legoesm.atmosphere.physics.microphysics.{scheme_name}")
         fn = getattr(mod, scheme_fn)
         T, q_v, hydrometeors, p_full, p_half, rho, dz = _make_warm_micro_columns()
+        if scheme_name == "sundqvist":
+            # Sundqvist should remain inactive in subsaturated columns. Push this
+            # one backend slightly supersaturated so the dt-sensitive
+            # condensation path is actually exercised.
+            q_v = q_v * (1.05 / 0.95)
         out1 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=60.0)
         out2 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=600.0)
 
@@ -457,6 +462,48 @@ class TestIssue8_OceanBulkTauY:
         # If tau_y != 0, dv_dt would be nonzero.
         # We verify the output has the correct shape and the pathway exists.
         assert out.dv_dt.shape == shape_3d
+
+    def test_bulk_formula_uses_specific_humidity_not_mixing_ratio(self):
+        """Latent flux contract should use saturation specific humidity."""
+        from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
+        from legoesm.ocean.physics.surface_forcing.bulk_formulas import bulk_formula_surface_forcing
+        from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.thermo import saturation_specific_humidity
+
+        nlev = 4
+        n = 3
+        shape_3d = (6, n, n, nlev)
+        shape_2d = (6, n, n)
+
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=200.0)
+        jacobian = jnp.ones(shape_2d)
+
+        # Warm surface so the mixing-ratio vs specific-humidity difference is
+        # large enough to detect in the implied net heat flux.
+        T = jnp.full(shape_3d, 28.0)
+        S = jnp.full(shape_3d, 35.0)
+        cfg = BulkFormulaConfig(
+            bulk_scheme="constant",
+            T_a=300.0,
+            q_a=0.010,
+            U_a=8.0,
+            SW_down=250.0,
+            LW_down=320.0,
+        )
+
+        out = bulk_formula_surface_forcing(T, S, z_coord, jacobian, cfg)
+
+        T_s = T[..., 0] + 273.15
+        q_sat = saturation_specific_humidity(T_s, jnp.full_like(T_s, 101325.0))
+        q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * cfg.U_a * (q_sat - cfg.q_a)
+        q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * cfg.U_a * (T_s - cfg.T_a)
+        q_lw_up = 0.97 * constants.sigma_sb * T_s ** 4
+        q_net = cfg.SW_down - q_lw_up + cfg.LW_down - q_sh - q_lh
+
+        dz_0 = z_coord.dz_ref[0] * jacobian
+        dT_expected = q_net / (rho_0_ref * c_sw * dz_0)
+        assert jnp.allclose(out.dT_dt[..., 0], dT_expected, rtol=1e-6, atol=1e-6)
 
 
 # ======================================================================

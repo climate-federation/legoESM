@@ -35,6 +35,8 @@ _P_MAX = 2.0e7          # [Pa]
 # full atmosphere.physics package.  Re-exported here for backward compatibility.
 from legoesm.thermo import saturation_mixing_ratio as saturation_mixing_ratio  # noqa: F401
 from legoesm.thermo import saturation_mixing_ratio_ice as saturation_mixing_ratio_ice  # noqa: F401
+from legoesm.thermo import saturation_specific_humidity as saturation_specific_humidity  # noqa: F401
+from legoesm.thermo import saturation_specific_humidity_ice as saturation_specific_humidity_ice  # noqa: F401
 
 
 def temperature_from_theta(
@@ -181,15 +183,34 @@ def moist_adiabat_lapse_rate(
     """
     R_d = constants.R_d
     c_pd = constants.c_pd
-    L_v = constants.L_v
     R_v = constants.R_v
 
-    q_sat = saturation_mixing_ratio(T, p)
+    # Keep the moist adiabat on the simplified warm-cloud closure used by the
+    # original SBM trigger. Phase-aware saturation is applied later in the
+    # reference-moisture/enthalpy adjustment path, but using it here makes the
+    # coarse-grid CAPE trigger too aggressive.
+    q_sat = saturation_specific_humidity(T, p)
+    latent_heat = constants.L_v
 
-    numerator = 1.0 + L_v * q_sat / (R_d * T)
-    denominator = 1.0 + L_v ** 2 * q_sat / (c_pd * R_v * T ** 2)
+    numerator = 1.0 + latent_heat * q_sat / (R_d * T)
+    denominator = 1.0 + latent_heat ** 2 * q_sat / (c_pd * R_v * T ** 2)
 
     return (R_d * T / (c_pd * p)) * numerator / denominator
+
+
+def saturation_specific_humidity_phase_aware(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Return saturation specific humidity over liquid or ice by temperature."""
+    q_sat_liq = saturation_specific_humidity(T, p)
+    q_sat_ice = saturation_specific_humidity_ice(T, p)
+    return jnp.where(T < constants.T_freeze, q_sat_ice, q_sat_liq)
+
+
+def phase_aware_latent_heat(T: jax.Array) -> jax.Array:
+    """Return latent heat of vaporization or sublimation by temperature."""
+    return jnp.where(T < constants.T_freeze, constants.L_s, constants.L_v)
 
 
 def compute_moist_adiabat(

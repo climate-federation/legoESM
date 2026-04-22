@@ -14,7 +14,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.ocean.mpas_config import MPASSimpleOceanConfig
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 
 class MPASSlabOceanState(NamedTuple):
@@ -74,7 +74,7 @@ def _slab_step(state, forcing, config, dt):
     )
 
     # Surface humidity: saturated
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    q_sfc = saturation_specific_humidity(T_sfc, forcing.p_surface)
 
     # Bulk fluxes (positive upward)
     rho = forcing.rho_lowest
@@ -114,7 +114,7 @@ def _two_layer_step(state, forcing, config, dt):
     )
 
     # Fluxes (same as slab)
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    q_sfc = saturation_specific_humidity(T_sfc, forcing.p_surface)
     rho = forcing.rho_lowest
     shflx = rho * constants.c_pd * config.Ch_ocean * wind * (
         T_sfc - forcing.T_lowest

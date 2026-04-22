@@ -31,10 +31,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
+    phase_aware_latent_heat,
+    saturation_specific_humidity_phase_aware,
 )
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -78,9 +79,19 @@ def sbm_convection(
         jnp.asarray(config.CAPE_threshold, dtype=T.dtype),
         (ncol,),
     )
+    T_min_convect = jnp.broadcast_to(
+        jnp.asarray(config.T_min_convect, dtype=T.dtype),
+        (ncol,),
+    )
 
-    # 1. Surface temperature as parcel starting point
-    T_base = T[:, -1]  # (ncol,)
+    # 1. Parcel source temperature from the lowest resolved tropospheric layer.
+    #    On coarse sigma grids the very lowest model level can be too noisy and
+    #    aggressively trigger convection, so use a shallow low-level mean when
+    #    available.
+    if nlev >= 2:
+        T_base = 0.5 * (T[:, -1] + T[:, -2])  # (ncol,)
+    else:
+        T_base = T[:, -1]
 
     # 2. Compute moist adiabatic temperature profile
     T_moist = compute_moist_adiabat(T_base, p_full)  # (ncol, nlev)
@@ -88,36 +99,39 @@ def sbm_convection(
     # 3. Identify the convective layer: only levels where the moist adiabat
     #    is warmer than the environment (conditional instability).
     #    This prevents adjusting the stable stratosphere (Frierson 2007).
-    cloud_mask = (T_moist >= T).astype(T.dtype)  # (ncol, nlev)
+    temp_mask = (T >= T_min_convect[:, None]).astype(T.dtype)
+    cloud_mask = ((T_moist > T).astype(T.dtype) * temp_mask)  # (ncol, nlev)
 
-    # 4. Compute CAPE from the RAW moist adiabat (before enthalpy correction)
-    #    to avoid artificial CAPE from the Newton correction.
-    cape = compute_cape(T, T_moist, p_full, p_half)  # (ncol,)
-
-    # 5. Enthalpy-conserving correction (Newton iteration)
+    # 4. Enthalpy-conserving correction (Newton iteration)
     #    Only over the cloud layer (masked levels).
     def _newton_step(T_trial):
-        q_trial = RH_ref[:, None] * saturation_mixing_ratio(T_trial, p_full)
+        q_trial = RH_ref[:, None] * saturation_specific_humidity_phase_aware(T_trial, p_full)
+        latent_heat = phase_aware_latent_heat(T_trial)
         residual = jnp.sum(
             cloud_mask * (constants.c_pd * (T_trial - T)
-                          + constants.L_v * (q_trial - q_v)) * dp,
+                          + latent_heat * (q_trial - q_v)) * dp,
             axis=1,
         )  # (ncol,)
-        q_sat_trial = saturation_mixing_ratio(T_trial, p_full)
-        dqsat_dT = constants.L_v * q_sat_trial / (constants.R_v * T_trial ** 2)
+        q_sat_trial = saturation_specific_humidity_phase_aware(T_trial, p_full)
+        dqsat_dT = latent_heat * q_sat_trial / (constants.R_v * T_trial ** 2)
         jacobian = jnp.sum(
             cloud_mask * (constants.c_pd
-                          + constants.L_v * RH_ref[:, None] * dqsat_dT) * dp,
+                          + latent_heat * RH_ref[:, None] * dqsat_dT) * dp,
             axis=1,
         )  # (ncol,)
         dT = -residual / jnp.clip(jacobian, 1.0, None)
         return T_trial + dT[:, None]
 
-    T_ref = _newton_step(T_moist)  # first iteration
-    T_ref = _newton_step(T_ref)    # second iteration
+    T_ref = _newton_step(T_moist)
+    T_ref = _newton_step(T_ref)
+    T_ref = _newton_step(T_ref)
 
     # Reference moisture at converged temperature
-    q_ref = RH_ref[:, None] * saturation_mixing_ratio(T_ref, p_full)
+    q_ref = RH_ref[:, None] * saturation_specific_humidity_phase_aware(T_ref, p_full)
+
+    # 5. CAPE from the RAW moist adiabat (before enthalpy correction)
+    #    to avoid artificial CAPE from the Newton correction.
+    cape = compute_cape(T, T_moist, p_full, p_half)  # (ncol,)
 
     # 6. Smooth trigger: sigmoid(sharpness * (CAPE - threshold))
     trigger = jax.nn.sigmoid(

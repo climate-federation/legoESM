@@ -22,6 +22,7 @@ import optax
 from legoesm.driver.compiled_segments import build_segment_fn
 from legoesm.training.losses import combined_loss, LossConfig
 from legoesm.training.dycore_rollout import single_day_rollout
+from legoesm.grids.vertical import create_sigma_coordinate
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,15 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs
     Encapsulates the boilerplate kwargs shared by all training modes.
     Returns the compiled segment function (use ``.raw`` for AD).
     """
-    sigma_full = jnp.asarray(sigma.sigma_full)
+    sigma_coord = sigma if sigma is not None else create_sigma_coordinate(8)
+    sigma_full = jnp.asarray(sigma_coord.sigma_full)
     return build_segment_fn(
         model=model,
         step_unified=step_unified,
         grid=grid,
+        sigma_coord=sigma_coord,
         sigma_full=sigma_full,
-        dsigma=jnp.asarray(sigma.dsigma),
+        dsigma=jnp.asarray(sigma_coord.dsigma),
         dt=dt,
         rad_update_steps=1,
         microphysics="none",
@@ -53,6 +56,7 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs
         lat=grid.lat,
         lon=grid.lon,
         start_day=0.0,
+        sat_adjust_without_microphysics=False,
         gradient_checkpoint=True,
         **extra_kwargs,
     )

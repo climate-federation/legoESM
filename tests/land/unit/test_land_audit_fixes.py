@@ -173,7 +173,7 @@ class TestTileResponseConsistency(unittest.TestCase):
     def test_q_surface_matches_end_of_step_state(self):
         """q_surface should be consistent with end-of-step T and moisture."""
         from legoesm.land.slab_land import step_land
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import saturation_specific_humidity
 
         ncol = 4
         config = LandConfig()
@@ -183,7 +183,7 @@ class TestTileResponseConsistency(unittest.TestCase):
         state2, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=3600.0)
 
         # q_surface should be beta_new * q_sat(T_new, p)
-        q_sat = saturation_mixing_ratio(resp.T_surface, forcing.p_surface)
+        q_sat = saturation_specific_humidity(resp.T_surface, forcing.p_surface)
         # beta_new from post-step W
         W_new = state2.W_bucket.data
         w_frac = jnp.clip(W_new / config.W_max, 0.0, 1.0)

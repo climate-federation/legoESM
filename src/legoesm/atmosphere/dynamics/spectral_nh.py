@@ -1050,7 +1050,7 @@ def dcmip25_tc3_init_spectral(
     from legoesm.grids.vertical import (
         create_height_coordinate, compute_terrain_metric,
     )
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
 
     p = {**TC3_PARAMS, **(params or {})}
     factor = p["small_earth_factor"]
@@ -1091,7 +1091,7 @@ def dcmip25_tc3_init_spectral(
     RH_profile = jnp.clip(
         p["RH_low"] * jnp.exp(-z_full / p["RH_transition_z"]),
         p["RH_high"], p["RH_low"])
-    q_v_profile = RH_profile * saturation_mixing_ratio(T_sounding, p_sounding)
+    q_v_profile = RH_profile * saturation_specific_humidity(T_sounding, p_sounding)
 
     q_v_grid = jnp.ones((n_lat, n_lon, nlev), dtype=jnp.float64) * q_v_profile[None, None, :]
     q_c_grid = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)

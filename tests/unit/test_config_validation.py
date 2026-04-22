@@ -1,5 +1,7 @@
 """Tests for ExperimentConfig.validate() cross-checking."""
 
+import pytest
+
 from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
 
 
@@ -55,3 +57,8 @@ class TestConfigValidate:
         )
         warns = cfg.validate()
         assert any("physics_parameterization='ml'" in w for w in warns)
+
+    def test_negative_A_h_scale_fails_strict_validation(self):
+        cfg = ExperimentConfig(dycore=DycoreConfig(A_h_scale=-0.1))
+        with pytest.raises(ValueError, match="A_h_scale"):
+            cfg.validate_strict()

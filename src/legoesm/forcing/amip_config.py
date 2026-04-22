@@ -50,6 +50,7 @@ class AMIPExperimentConfig(NamedTuple):
     sic_scale: float = 1.0
 
     # Atmosphere
+    A_h_scale: float = 1.0
     hyperdiff_scale: float = 5e16
     T_init: float = 280.0
     RH_init: float = 0.6
@@ -101,6 +102,7 @@ class AMIPExperimentConfig(NamedTuple):
     turbulence: str = "none"
     gravity_wave_drag: str = "none"
     fix_moisture: bool = False
+    sat_adjust_without_microphysics: bool = True
 
     # Topography
     topography: str = "flat"  # "flat", "gaussian", or path to NetCDF file
@@ -322,6 +324,14 @@ def load_checkpoint(
     # Restore hydrometeor fields if present
     q_c = jnp.array(data["q_c"], dtype=_storage_dtype) if "q_c" in data.files else None
     q_r = jnp.array(data["q_r"], dtype=_storage_dtype) if "q_r" in data.files else None
+    tracer_fields = {
+        "q_v": Field(data=q_v, name="q_v", dims=dims_3d, units="kg/kg"),
+    }
+    if q_c is not None:
+        tracer_fields["q_c"] = Field(data=q_c, name="q_c", dims=dims_3d, units="kg/kg")
+    if q_r is not None:
+        tracer_fields["q_r"] = Field(data=q_r, name="q_r", dims=dims_3d, units="kg/kg")
+    state = state._replace(tracers=tracer_fields)
 
     # Restore carry auxiliary fields (held radiation, etc.)
     carry_aux = {}

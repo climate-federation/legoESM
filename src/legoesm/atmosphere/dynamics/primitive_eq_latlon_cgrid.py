@@ -254,10 +254,14 @@ def cgrid_latlon_hydrostatic_tendencies(
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
 
     # --- 2. Geopotential via hydrostatic integration ---
+    q_v = None
+    if tracers and "q_v" in tracers:
+        q_v = tracers["q_v"].data if hasattr(tracers["q_v"], "data") else tracers["q_v"]
     if _hybrid:
-        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis, q_v=q_v)
     else:
-        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis, q_v=q_v)
+    T_hydro = T if q_v is None else T * (1.0 + 0.61 * q_v)
 
     # --- 3. KE at cell centres from C-grid face velocities ---
     u_c = _face_to_cell_u(u)
@@ -276,8 +280,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     dln_dx = gradient_x_cgrid(ln_ps, grid)  # 2D
     dln_dy = gradient_y_cgrid(ln_ps, grid)  # 2D
 
-    T_u = interp_cell_to_uface(T)
-    T_v = interp_cell_to_vface(T)
+    T_u = interp_cell_to_uface(T_hydro)
+    T_v = interp_cell_to_vface(T_hydro)
 
     pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
     pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]

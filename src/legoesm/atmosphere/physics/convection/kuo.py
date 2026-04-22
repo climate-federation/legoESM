@@ -30,7 +30,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
@@ -72,8 +72,8 @@ def kuo_convection(
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
 
-    # 1. Saturation mixing ratio
-    q_sat = saturation_mixing_ratio(T, p_full)  # (ncol, nlev)
+    # 1. Saturation specific humidity
+    q_sat = saturation_specific_humidity(T, p_full)  # (ncol, nlev)
 
     # 2. Column moisture excess: positive part only (zero when subsaturated)
     excess = jnp.maximum(q_v - q_sat, 0.0)  # (ncol, nlev)

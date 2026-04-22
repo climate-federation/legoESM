@@ -112,6 +112,30 @@ class TestC1RestStateInvariance:
         tend = compute(state)
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
 
+    def test_cdgrid_returns_tracer_tendencies_when_tracers_present(self):
+        grid = create_cubed_sphere(6)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sigma = create_sigma_coordinate(4)
+        state = _make_hydrostatic_state(grid, sigma, T_val=285.0, u_val=5.0, v_val=1.0)
+        q_v = jnp.linspace(
+            1.0e-4,
+            4.0e-4,
+            6 * grid.n * grid.n * sigma.n_levels,
+            dtype=jnp.float32,
+        ).reshape((6, grid.n, grid.n, sigma.n_levels))
+        state = state._replace(
+            tracers={
+                "q_v": Field(data=q_v, name="q_v", dims=("face", "x", "y", "level"), units="kg/kg")
+            }
+        )
+        config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
+
+        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
+
+        assert tend.tracer_tendencies is not None
+        assert "q_v" in tend.tracer_tendencies
+        assert jnp.all(jnp.isfinite(tend.tracer_tendencies["q_v"].data))
+
 
 # =========================================================================
 # C2: Diffusion-only column test (Thomas solver)

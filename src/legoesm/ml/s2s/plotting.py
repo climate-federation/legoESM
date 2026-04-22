@@ -15,6 +15,22 @@ import xarray as xr
 EXPERIMENT_COLORS = {"coupled": "#1f77b4", "uncoupled": "#ff7f0e"}
 
 
+def normalize_longitude_data(
+    data: xr.DataArray | xr.Dataset,
+) -> xr.DataArray | xr.Dataset:
+    """Return data with longitudes normalized to [-180, 180) and sorted."""
+    if "longitude" not in data.coords:
+        return data
+    longitude = np.asarray(data["longitude"], dtype=float)
+    normalized = ((longitude + 180.0) % 360.0) - 180.0
+    return data.assign_coords(longitude=normalized).sortby("longitude")
+
+
+def _normalize_longitude_field(field: xr.DataArray) -> xr.DataArray:
+    """Backward-compatible field wrapper around `normalize_longitude_data`."""
+    return normalize_longitude_data(field)
+
+
 def plot_latlon_map(
     ax: plt.Axes,
     field: xr.DataArray,
@@ -24,7 +40,7 @@ def plot_latlon_map(
     vmax: float,
     cmap: str = "viridis",
 ) -> None:
-    plot_field = field.transpose("latitude", "longitude")
+    plot_field = normalize_longitude_data(field).transpose("latitude", "longitude")
     plot_field.plot(
         ax=ax,
         x="longitude",
@@ -57,4 +73,9 @@ def frame_to_image(
     return imageio.imread(buffer)
 
 
-__all__ = ["EXPERIMENT_COLORS", "frame_to_image", "plot_latlon_map"]
+__all__ = [
+    "EXPERIMENT_COLORS",
+    "frame_to_image",
+    "normalize_longitude_data",
+    "plot_latlon_map",
+]

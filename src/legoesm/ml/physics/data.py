@@ -117,8 +117,8 @@ def capture_physics_teacher_snapshot(
     q_c = driver.q_c
     q_r = driver.q_r
     nlev = driver.config.grid.nlev
-    p_full = p_s[..., None] * driver.sigma.sigma_full
-    p_half = p_s[..., None] * driver.sigma.sigma_half
+    p_full = driver.sigma.pressure_at_full(p_s)
+    p_half = driver.sigma.pressure_at_half(p_s)
     T_col = ad.flatten_3d(T)
     u_col = ad.flatten_3d(u)
     v_col = ad.flatten_3d(v)
@@ -127,7 +127,7 @@ def capture_physics_teacher_snapshot(
     q_r_col = ad.flatten_3d(jnp.zeros_like(q_v) if q_r is None else q_r)
     p_full_col = ad.flatten_3d(p_full)
     p_half_col = p_half.reshape(ad.ncol, nlev + 1)
-    z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
+    z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col, q_v_col)
     p_s_col = ad.flatten_2d(p_s)
 
     lat_field = getattr(driver, "_physics_lat", None)
@@ -142,7 +142,7 @@ def capture_physics_teacher_snapshot(
     q_sfc = saturation_specific_humidity(T_sfc, p_s)
     T_sfc_col = ad.flatten_2d(T_sfc)
     q_sfc_col = ad.flatten_2d(q_sfc)
-    rho_col = p_full_col / (constants.R_d * T_col)
+    rho_col = p_full_col / (constants.R_d * (T_col * (1.0 + 0.61 * q_v_col)))
 
     conv_prog = driver._carry_aux.get("conv_prog")
     if conv_prog is None:

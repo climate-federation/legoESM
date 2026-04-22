@@ -670,7 +670,12 @@ def compute_hydrostatic_energy(
     ie_col = jnp.sum(ie_3d, axis=-1)
 
     # Potential energy
-    Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+    q_v = None
+    tracers = getattr(state, "tracers", None) or {}
+    if "q_v" in tracers:
+        tracer = tracers["q_v"]
+        q_v = tracer.data if hasattr(tracer, "data") else tracer
+    Phi = compute_geopotential(T, p_s, sigma_coord, phis, q_v=q_v)
     pe_3d = Phi * mass_weight
     pe_col = jnp.sum(pe_3d, axis=-1)
 

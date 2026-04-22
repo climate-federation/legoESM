@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     moist_adiabat_lapse_rate,
     compute_cape,
@@ -135,8 +135,8 @@ def _adjust_one_iteration(
         T_adj_below = T_below + blend * (T_new_below - T_below)
 
         # Moisture adjustment: saturate at the new temperature
-        q_sat_upper = saturation_mixing_ratio(T_adj_upper, p_upper)
-        q_sat_below = saturation_mixing_ratio(T_adj_below, p_below)
+        q_sat_upper = saturation_specific_humidity(T_adj_upper, p_upper)
+        q_sat_below = saturation_specific_humidity(T_adj_below, p_below)
 
         # Remove excess moisture (precipitation)
         q_new_upper = jnp.minimum(q_upper, q_sat_upper)

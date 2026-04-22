@@ -52,6 +52,7 @@ def rrtmgp_radiation(
     cloud_r_eff_ice: jnp.ndarray | None = None,
     aerosol_optical_depth: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
+    solar_constant: jnp.ndarray | float | None = None,
     ghg_vmr_override: dict | None = None,
 ) -> RadiationOutput:
     """Compute radiation using jax-rrtmgp (compatibility shim).
@@ -75,5 +76,6 @@ def rrtmgp_radiation(
         cloud_r_eff_ice=cloud_r_eff_ice,
         aerosol_optical_depth=aerosol_optical_depth,
         solar_spectral_fraction=solar_spectral_fraction,
+        solar_constant=solar_constant,
         ghg_vmr_override=ghg_vmr_override,
     )

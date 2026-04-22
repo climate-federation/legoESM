@@ -535,6 +535,7 @@ class RRTMGP:
       cloud_fraction: jnp.ndarray | None = None,
       aerosol_optical_depth: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
+      solar_constant: jnp.ndarray | float | None = None,
       ghg_vmr_override: dict | None = None,
   ):
       """Compute radiation for legoESM column arrays.
@@ -580,6 +581,9 @@ class RRTMGP:
           Prescribed aerosol optical depth per layer (ncol, nlev).
       solar_spectral_fraction : jnp.ndarray | None
           Per-g-point solar source weights (ngpt_sw,).
+      solar_constant : jnp.ndarray | float | None
+          Runtime total solar irradiance [W/m^2]. When omitted, falls back to
+          the configured constant used when the solver was built.
       ghg_vmr_override : dict | None
           Runtime GHG VMR overrides (e.g. ``{"co2": 4.15e-4}``).
 
@@ -673,7 +677,11 @@ class RRTMGP:
           sfc_emis=eff_emis,
           sfc_alb=eff_albedo,
           zenith=zenith_col,
-          irrad=config.S_0,
+          irrad=(
+              jnp.asarray(solar_constant, dtype=p_3d.dtype)
+              if solar_constant is not None
+              else jnp.asarray(config.S_0, dtype=p_3d.dtype)
+          ),
           vmr=vmr_lib,
           toa_flux_lw=0.0,
       )

@@ -414,6 +414,8 @@ def create_experiment_config(
             output_ov["checkpoint_days"] = v
         elif k == "hyperdiff_scale":
             dycore_ov["hyperdiff_scale"] = v
+        elif k == "A_h_scale":
+            dycore_ov["A_h_scale"] = v
         else:
             raise TypeError(
                 f"Invalid ExperimentConfig field: {k!r}"

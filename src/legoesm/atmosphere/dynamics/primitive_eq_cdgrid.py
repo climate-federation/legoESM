@@ -185,6 +185,7 @@ def fv3_hydrostatic_tendencies(
     T = state.T.data       # (6, n, n, nlev)
     p_s = state.p_s.data   # (6, n, n)
     phis = state.phis.data
+    tracers = state.tracers or {}
 
     R_d = constants.R_d
     kappa = constants.kappa
@@ -208,10 +209,14 @@ def fv3_hydrostatic_tendencies(
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
 
     # --- 3. Geopotential via hydrostatic integration ---
+    q_v = None
+    if "q_v" in tracers:
+        q_v = tracers["q_v"].data if hasattr(tracers["q_v"], "data") else tracers["q_v"]
     if _hybrid:
-        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis, q_v=q_v)
     else:
-        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis, q_v=q_v)
+    T_hydro = T if q_v is None else T * (1.0 + 0.61 * q_v)
 
     # --- 4. KE at cell centres from C-grid velocities ---
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
@@ -226,7 +231,7 @@ def fv3_hydrostatic_tendencies(
     # === Stage-level packed halo exchange #1 ===
     # Pack {zeta_abs, B, 1/T} into one collective instead of 3 separate.
     ln_ps = jnp.log(p_s)
-    inv_T = 1.0 / T
+    inv_T = 1.0 / T_hydro
     from legoesm.grids.halo import _halo_backend
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
@@ -387,6 +392,24 @@ def fv3_hydrostatic_tendencies(
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
 
+    # --- 11b. Tracer transport ---
+    tracer_tends: dict[str, Field] | None = None
+    if tracers:
+        tracer_tends = {}
+        for name, q_field in tracers.items():
+            q = q_field.data if hasattr(q_field, "data") else q_field
+            dq_dx = _gradient_x_3d(q, grid)
+            dq_dy = _gradient_y_3d(q, grid)
+            horiz_adv_q = -(u_cell * dq_dx + v_cell * dq_dy)
+            if _hybrid:
+                vert_adv_q = vertical_advection_hybrid(q, mass_flux, p_s, sigma_coord)
+            else:
+                vert_adv_q = vertical_advection(q, sigma_dot, sigma_coord)
+            dq_dt = horiz_adv_q + vert_adv_q
+            if config.hyperdiff_coeff > 0:
+                dq_dt = dq_dt + _hyperdiffusion_3d(q, grid, config.hyperdiff_coeff)
+            tracer_tends[name] = q_field.replace(data=dq_dt)
+
     # --- 11b. Velocity-dependent temperature dissipation ---
     if config.T_diss_coeff > 0:
         wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
@@ -454,6 +477,12 @@ def fv3_hydrostatic_tendencies(
         dv_d_dt = dv_d_dt + physics_tendency.dv_d_dt.data
         dT_dt_data = dT_dt_data + physics_tendency.dT_dt.data
         dp_s_dt_data = dp_s_dt_data + physics_tendency.dp_s_dt.data
+        if physics_tendency.tracer_tendencies is not None and tracer_tends is not None:
+            for name, dq_field in physics_tendency.tracer_tendencies.items():
+                if name in tracer_tends:
+                    tracer_tends[name] = tracer_tends[name].replace(
+                        data=tracer_tends[name].data + dq_field.data,
+                    )
 
     dims_3d_corner = ("face", "x", "y", "level")
     dims_3d = ("face", "x", "y", "level")
@@ -467,6 +496,7 @@ def fv3_hydrostatic_tendencies(
         dphis_dt=Field(
             data=jnp.zeros_like(phis), name="dphis_dt", dims=dims_2d, units="m^2/s^3"
         ),
+        tracer_tendencies=tracer_tends,
     )
 
 
@@ -492,6 +522,93 @@ def fv3_to_hydrostatic(
         phis=state.phis,
         tracers=state.tracers,
     )
+
+
+def _sync_fv3_corner_winds_owner_copy(
+    u_d,
+    v_d,
+    cdgrid: CubedSphereCDGrid,
+):
+    """Enforce shared-edge continuity for a D-grid corner wind field.
+
+    ``_interp_center_to_corner`` operates face by face, so converting a
+    cell-centre wind field to D-grid corners can leave slightly different
+    values on the two sides of a shared cubed-sphere edge. The FV3 D-grid
+    state should represent a single global vector field, so shared corners
+    and edge strips must carry one physical geographic wind. We therefore
+    convert to geographic components, copy the owner face values onto the
+    non-owner faces along shared edges/vertices, then rotate back.
+    """
+    from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+    n = cdgrid.n
+    ca = cdgrid.cos_angle_corner[..., None]
+    sa = cdgrid.sin_angle_corner[..., None]
+    u_east = ca * u_d - sa * v_d
+    v_north = sa * u_d + ca * v_d
+
+    def _get_strip(arr, face, edge):
+        if edge == WEST:
+            return arr[face, 0, :, :]
+        if edge == EAST:
+            return arr[face, n, :, :]
+        if edge == SOUTH:
+            return arr[face, :, 0, :]
+        return arr[face, :, n, :]
+
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            if nbr_face >= face:
+                continue
+            nbr_u = _get_strip(u_east, nbr_face, nbr_edge)
+            nbr_v = _get_strip(v_north, nbr_face, nbr_edge)
+            if is_reversed:
+                nbr_u = nbr_u[::-1, :]
+                nbr_v = nbr_v[::-1, :]
+            if edge == WEST:
+                u_east = u_east.at[face, 0, :, :].set(nbr_u)
+                v_north = v_north.at[face, 0, :, :].set(nbr_v)
+            elif edge == EAST:
+                u_east = u_east.at[face, n, :, :].set(nbr_u)
+                v_north = v_north.at[face, n, :, :].set(nbr_v)
+            elif edge == SOUTH:
+                u_east = u_east.at[face, :, 0, :].set(nbr_u)
+                v_north = v_north.at[face, :, 0, :].set(nbr_v)
+            else:
+                u_east = u_east.at[face, :, n, :].set(nbr_u)
+                v_north = v_north.at[face, :, n, :].set(nbr_v)
+
+    vertices = (
+        ((0, 0, 0), (3, n, 0), (5, 0, n)),
+        ((0, n, 0), (1, 0, 0), (5, n, n)),
+        ((0, 0, n), (3, n, n), (4, 0, 0)),
+        ((0, n, n), (1, 0, n), (4, n, 0)),
+        ((1, n, 0), (2, 0, 0), (5, n, 0)),
+        ((1, n, n), (2, 0, n), (4, n, n)),
+        ((2, n, 0), (3, 0, 0), (5, 0, 0)),
+        ((2, n, n), (3, 0, n), (4, 0, n)),
+    )
+    for owner, *others in vertices:
+        u_owner = u_east[owner[0], owner[1], owner[2], :]
+        v_owner = v_north[owner[0], owner[1], owner[2], :]
+        for face, i, j in others:
+            u_east = u_east.at[face, i, j, :].set(u_owner)
+            v_north = v_north.at[face, i, j, :].set(v_owner)
+
+    u_synced = ca * u_east + sa * v_north
+    v_synced = -sa * u_east + ca * v_north
+    return u_synced, v_synced
+
+
+def _hydrostatic_state_to_fv3_fields(
+    state: HydrostaticState,
+    cdgrid: CubedSphereCDGrid,
+):
+    """Convert cell-centre winds to a shared-edge continuous D-grid field."""
+    u_d = _interp_center_to_corner(state.u.data, cdgrid)
+    v_d = _interp_center_to_corner(state.v.data, cdgrid)
+    return _sync_fv3_corner_winds_owner_copy(u_d, v_d, cdgrid)
 
 
 # ==============================================================================
@@ -607,6 +724,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     dT_dt=phys_cc.dT_dt,
                     dp_s_dt=phys_cc.dp_s_dt,
                     dphis_dt=phys_cc.dphis_dt,
+                    tracer_tendencies=phys_cc.tracer_tendencies,
                 )
 
             tend = fv3_hydrostatic_tendencies(
@@ -621,6 +739,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 T=s.T.replace(data=tend.dT_dt.data),
                 p_s=s.p_s.replace(data=tend.dp_s_dt.data),
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
+                tracers=tend.tracer_tendencies,
             )
 
         state_new = dispatch_integrator(
@@ -676,8 +795,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         D-grid corners at entry and back to cell centres at exit;
         internally the dycore operates entirely on D-grid winds.
         """
-        u_d = _interp_center_to_corner(state.u.data, self.cdgrid)
-        v_d = _interp_center_to_corner(state.v.data, self.cdgrid)
+        u_d, v_d = _hydrostatic_state_to_fv3_fields(state, self.cdgrid)
         fv3_state = FV3HydrostaticState(
             u_d=state.u.replace(data=u_d, name="u_d"),
             v_d=state.v.replace(data=v_d, name="v_d"),
@@ -721,8 +839,7 @@ def cdgrid_hydrostatic_tendencies(
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
 
     # HydrostaticState path: convert cell-centre -> D-grid
-    u_d = _interp_center_to_corner(state.u.data, cdgrid)
-    v_d = _interp_center_to_corner(state.v.data, cdgrid)
+    u_d, v_d = _hydrostatic_state_to_fv3_fields(state, cdgrid)
     fv3_state = FV3HydrostaticState(
         u_d=state.u.replace(data=u_d, name="u_d"),
         v_d=state.v.replace(data=v_d, name="v_d"),
@@ -745,6 +862,7 @@ def cdgrid_hydrostatic_tendencies(
         dT_dt=fv3_tend.dT_dt,
         dp_s_dt=fv3_tend.dp_s_dt,
         dphis_dt=fv3_tend.dphis_dt,
+        tracer_tendencies=fv3_tend.tracer_tendencies,
     )
 
 
@@ -756,8 +874,7 @@ def hydrostatic_to_fv3(
 
     Uses centre-to-corner interpolation for the wind components.
     """
-    u_d = _interp_center_to_corner(state.u.data, cdgrid)
-    v_d = _interp_center_to_corner(state.v.data, cdgrid)
+    u_d, v_d = _hydrostatic_state_to_fv3_fields(state, cdgrid)
     return FV3HydrostaticState(
         u_d=state.u.replace(data=u_d, name="u_d"),
         v_d=state.v.replace(data=v_d, name="v_d"),

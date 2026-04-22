@@ -17,7 +17,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.core.field import Field
 from legoesm.coupler.coupling_fields import AtmToSurface
 
@@ -104,7 +104,7 @@ def _slab_step(
     )
 
     # Surface humidity: saturated
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    q_sfc = saturation_specific_humidity(T_sfc, forcing.p_surface)
 
     # Bulk fluxes (positive upward)
     rho = forcing.rho_lowest
@@ -153,7 +153,7 @@ def _two_layer_step(
     )
 
     # Surface humidity: saturated
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    q_sfc = saturation_specific_humidity(T_sfc, forcing.p_surface)
 
     # Bulk fluxes (positive upward)
     rho = forcing.rho_lowest

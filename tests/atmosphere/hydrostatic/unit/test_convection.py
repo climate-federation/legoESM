@@ -19,7 +19,9 @@ from legoesm.atmosphere.physics.thermodynamics import (
     moist_adiabat_lapse_rate,
     compute_moist_adiabat,
     compute_cape,
+    saturation_specific_humidity_phase_aware,
 )
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_ice
 from legoesm.atmosphere.physics.convection.config import (
     SBMConfig,
     DCAConfig,
@@ -194,6 +196,17 @@ class TestThermodynamics:
         g = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(g))
 
+    def test_phase_aware_qsat_switches_to_ice_below_freezing(self):
+        """Phase-aware saturation should follow ice below freezing."""
+        T = jnp.array([260.0, 276.0])
+        p = jnp.full_like(T, 6.0e4)
+        q_phase = saturation_specific_humidity_phase_aware(T, p)
+        q_liq = saturation_specific_humidity(T, p)
+        q_ice = saturation_specific_humidity_ice(T, p)
+        assert jnp.allclose(q_phase[0], q_ice[0], rtol=1e-6)
+        assert jnp.allclose(q_phase[1], q_liq[1], rtol=1e-6)
+        assert float(q_phase[0]) < float(q_liq[0])
+
 
 # ===========================================================================
 # SBM convection tests
@@ -268,6 +281,35 @@ class TestSBM:
         config = SBMConfig()
         out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
+
+    def test_source_level_is_not_convectively_adjusted(self):
+        """The parcel source level should not self-trigger on equality.
+
+        The moist adiabat is initialized from the lowest model level, so the
+        source level should only enter the convective mask if it is strictly
+        warmer than the environment after the parcel construction, not merely
+        equal by definition.
+        """
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol=1, nlev=10)
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=SBMConfig())
+        assert float(jnp.abs(out.dT_dt[0, -1])) < 1e-12
+        assert float(jnp.abs(out.dq_v_dt[0, -1])) < 1e-12
+
+    def test_zero_cape_columns_have_near_zero_trigger(self):
+        """Columns far below the CAPE threshold should not retain a large gate."""
+        T, q_v, p_full, p_half = _make_stable_columns()
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+        assert float(jnp.max(out.convective_mask)) < 0.05
+
+    def test_columns_below_min_convect_temperature_do_not_adjust(self):
+        """T_min_convect should actually suppress convective tendencies."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        T_cold = jnp.full_like(T, 180.0)
+        config = SBMConfig(T_min_convect=200.0)
+        out = sbm_convection(T_cold, q_v, p_full, p_half, dt=300.0, config=config)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) < 1e-12
+        assert float(jnp.max(jnp.abs(out.dq_v_dt))) < 1e-12
 
     def test_differentiable(self):
         """jax.grad should work through SBM convection."""

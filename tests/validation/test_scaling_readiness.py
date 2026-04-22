@@ -27,6 +27,7 @@ from legoesm.driver.compiled_segments import (
 from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig, OutputConfig
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.physics_pipeline import PhysicsOutput
+from legoesm.grids.vertical import create_sigma_coordinate
 
 
 _OPTIONAL_3D_OUTPUT_FIELDS = (
@@ -58,7 +59,7 @@ def _zero_physics_output(T, p_s):
         if field_name in PhysicsOutput._fields:
             kwargs[field_name] = jnp.zeros(T.shape)
     if "conv_prog" in PhysicsOutput._fields:
-        kwargs["conv_prog"] = jnp.asarray(0.0, dtype=T.dtype)
+        kwargs["conv_prog"] = jnp.zeros((p_s.size,), dtype=T.dtype)
     return kwargs
 
 
@@ -72,6 +73,7 @@ class TestScalingReadiness:
             u=jnp.zeros(s3), v=jnp.zeros(s3), T=jnp.zeros(s3),
             p_s=jnp.zeros(s2), phis=jnp.zeros(s2),
             q_v=jnp.zeros(s3), q_c=jnp.zeros(s3), q_r=jnp.zeros(s3),
+            conv_prog=jnp.zeros((6 * 8 * 8,)),
             held_dT_rad=jnp.zeros(s3),
             held_sw_net_sfc=jnp.zeros(s2), held_lw_net_sfc=jnp.zeros(s2),
             held_sw_up_toa=jnp.zeros(s2), held_lw_up_toa=jnp.zeros(s2),
@@ -138,6 +140,7 @@ class TestScalingReadiness:
             u=jnp.zeros(s3), v=jnp.zeros(s3), T=jnp.zeros(s3),
             p_s=jnp.zeros(s2), phis=jnp.zeros(s2),
             q_v=jnp.zeros(s3), q_c=jnp.zeros(s3), q_r=jnp.zeros(s3),
+            conv_prog=jnp.zeros((6 * 8 * 8,)),
             held_dT_rad=jnp.zeros(s3),
             held_sw_net_sfc=jnp.zeros(s2), held_lw_net_sfc=jnp.zeros(s2),
             held_sw_up_toa=jnp.zeros(s2), held_lw_up_toa=jnp.zeros(s2),
@@ -170,13 +173,16 @@ class TestScalingReadiness:
             p = PhysicsOutput(**_zero_physics_output(T, p_s))
             return p, (a[16], a[17], a[18], a[19], a[20], a[21])
 
+        sigma = create_sigma_coordinate(3)
         fn = build_segment_fn(
             model=M(), step_unified=mock, grid=grid,
-            sigma_full=jnp.linspace(0.1, 1.0, 3),
-            dsigma=jnp.full(3, 1.0/3), dt=600.0, rad_update_steps=1,
+            sigma_coord=sigma,
+            sigma_full=jnp.asarray(sigma.sigma_full),
+            dsigma=jnp.asarray(sigma.dsigma), dt=600.0, rad_update_steps=1,
             microphysics="none", fix_moisture=False, fix_mass=False,
             fric_decay=jnp.ones(3), qv_smooth_coeff=0.0,
             lat=grid.lat, lon=grid.lon, start_day=0.0,
+            sat_adjust_without_microphysics=False,
         )
         assert callable(fn)
         assert hasattr(fn, 'raw'), "Missing .raw attribute for training"

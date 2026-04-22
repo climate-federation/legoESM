@@ -124,3 +124,25 @@ def saturation_specific_humidity(
     """
     w_sat = saturation_mixing_ratio(T, p)
     return w_sat / (1.0 + w_sat)
+
+
+def saturation_specific_humidity_ice(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Compute saturation specific humidity over ice.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Ice saturation specific humidity [kg/kg].
+    """
+    w_sat_ice = saturation_mixing_ratio_ice(T, p)
+    return w_sat_ice / (1.0 + w_sat_ice)

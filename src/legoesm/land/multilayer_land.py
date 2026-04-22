@@ -32,7 +32,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+from legoesm.thermo import (
+    saturation_specific_humidity,
+    saturation_specific_humidity_ice,
+)
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
@@ -167,8 +170,8 @@ def step_multilayer_land(
     stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
 
     # --- Surface saturation humidity: use ice saturation over snow ---
-    q_sat_liq = saturation_mixing_ratio(T_surface, forcing.p_surface)
-    q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
+    q_sat_liq = saturation_specific_humidity(T_surface, forcing.p_surface)
+    q_sat_ice = saturation_specific_humidity_ice(T_surface, forcing.p_surface)
     has_snow = snow > 1e-6  # kg/m2 threshold
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Over snow, moisture is freely available from the snowpack (beta=1)
@@ -366,8 +369,8 @@ def step_multilayer_land(
         )
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
     beta_new = stomatal_ratio * beta_soil_new
-    q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
-    q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
+    q_sat_liq_new = saturation_specific_humidity(T_surface_new, forcing.p_surface)
+    q_sat_ice_new = saturation_specific_humidity_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
     # Over snow, moisture is freely available (beta=1)

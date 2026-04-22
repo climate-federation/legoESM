@@ -856,7 +856,9 @@ class TestMultilayerLandStep(unittest.TestCase):
 
         # The returned q_surface should be LESS than fully saturated
         T_sfc = response.T_surface
-        q_sat = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+        from legoesm.thermo import saturation_specific_humidity
+
+        q_sat = saturation_specific_humidity(T_sfc, forcing.p_surface)
 
         # q_surface should be strictly less than q_sat (stomata limiting)
         ratio = response.q_surface / jnp.maximum(q_sat, 1e-20)

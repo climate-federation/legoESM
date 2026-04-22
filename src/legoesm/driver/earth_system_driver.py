@@ -17,6 +17,7 @@ from pathlib import Path
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import ExperimentConfig
 
@@ -115,9 +116,8 @@ class EarthSystemDriver:
         u_low = state.u.data[..., -1]
         v_low = state.v.data[..., -1]
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
-        sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
-        p_low = p_s * sigma_full[-1]
-        rho_low = p_low / (constants.R_d * T_low)
+        p_low = self._atm.sigma.pressure_at_full(p_s)[..., -1]
+        rho_low = p_low / (constants.R_d * virtual_temperature(T_low, q_low))
 
         # Extract real radiation and precipitation from last atmosphere physics
         aux = getattr(self._atm, '_carry_aux', {})

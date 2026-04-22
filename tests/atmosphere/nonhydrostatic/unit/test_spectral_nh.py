@@ -31,12 +31,14 @@ from legoesm.atmosphere.dynamics.spectral_nh import (
     spectral_nh_slow_tendencies,
     _acoustic_substeps_grid,
     nh_rest_state_spectral,
+    dcmip25_tc3_init_spectral,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
 )
 from legoesm.core.field import Field
 from legoesm import constants
+from legoesm.thermo import saturation_specific_humidity
 
 
 # Enable float64 for spectral transforms
@@ -129,6 +131,32 @@ class TestSpectralNHState:
         assert float(jnp.max(jnp.abs(rest_state.w_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(rest_state.theta_prime_hat.data))) == 0.0
         assert float(jnp.max(jnp.abs(rest_state.rho_prime_hat.data))) == 0.0
+
+    def test_tc3_init_uses_specific_humidity_profile(self, grid):
+        """TC3 initialization should populate q_v as specific humidity."""
+        from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3 import (
+            TC3_PARAMS, _squall_line_sounding,
+        )
+
+        state, height_coord, _ = dcmip25_tc3_init_spectral(grid, n_levels=8)
+        q_v_grid = sh_synthesis_3d(grid, state.tracers_hat.data[..., 0]).real
+
+        p = dict(TC3_PARAMS)
+        z_full = height_coord.z_full
+        T_sounding, _, p_sounding = _squall_line_sounding(z_full, p)
+        RH_profile = jnp.clip(
+            p["RH_low"] * jnp.exp(-z_full / p["RH_transition_z"]),
+            p["RH_high"], p["RH_low"],
+        )
+        q_v_expected = RH_profile * saturation_specific_humidity(T_sounding, p_sounding)
+
+        q_v_profile = jnp.mean(q_v_grid, axis=(0, 1))
+        np.testing.assert_allclose(
+            np.array(q_v_profile),
+            np.array(q_v_expected),
+            rtol=1e-6,
+            atol=1e-8,
+        )
 
 
 # =============================================================================

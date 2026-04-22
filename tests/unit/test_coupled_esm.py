@@ -13,6 +13,8 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
+
 # Ensure test_cases importable
 _root = Path(__file__).resolve().parents[2]
 if str(_root) not in sys.path:
@@ -128,6 +130,7 @@ class TestSlabEnergyConservation(unittest.TestCase):
             SimpleOceanConfig, _slab_step, init_slab_state,
         )
         from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.thermo import saturation_specific_humidity
 
         shape = (6, 4, 4)
         cfg = SimpleOceanConfig(mode="slab", h_mix=50.0)
@@ -164,6 +167,30 @@ class TestSlabEnergyConservation(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.isfinite(dE)))
         self.assertGreater(float(jnp.max(jnp.abs(dE))), 0.0,
                            "Energy change should be non-zero")
+
+        # Latent flux must use specific humidity, not mixing ratio, so the
+        # implied slab-ocean tendency matches the coupler moisture contract.
+        q_sfc_expected = saturation_specific_humidity(T_before, forcing.p_surface)
+        wind = jnp.sqrt(forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + cfg.U_min ** 2)
+        lh_expected = (
+            forcing.rho_lowest * constants.L_v * cfg.Ch_ocean * wind
+            * (q_sfc_expected - forcing.q_lowest)
+        )
+        sw_net = (1.0 - cfg.albedo_ocean) * forcing.sw_down
+        lw_net = (
+            cfg.emissivity_ocean * forcing.lw_down
+            - cfg.emissivity_ocean * constants.sigma_sb * T_before ** 4
+        )
+        sh_expected = (
+            forcing.rho_lowest * constants.c_pd * cfg.Ch_ocean * wind
+            * (T_before - forcing.T_lowest)
+        )
+        dT_expected = (sw_net + lw_net - sh_expected - lh_expected + cfg.Q_flux) / (
+            cfg.rho_ocean * cfg.c_ocean * cfg.h_mix
+        )
+        self.assertTrue(
+            jnp.allclose(T_new, T_before + dt * dT_expected, rtol=1e-6, atol=1e-6)
+        )
 
 
 class TestPresetConfigs(unittest.TestCase):

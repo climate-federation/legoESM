@@ -41,6 +41,7 @@ from legoesm.driver.compiled_segments import (
 )
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.vertical import create_sigma_coordinate
 
 
 # ---------------------------------------------------------------------------
@@ -158,22 +159,25 @@ def _make_forcing() -> SegmentForcing:
 
 def _make_segment_fn_args() -> dict:
     """Build all arguments for build_segment_fn with mock components."""
+    sigma = create_sigma_coordinate(NLEV)
     return dict(
         model=_MockModel(increment=1.0),
         step_unified=_mock_step_unified,
         grid=_GRID,
-        sigma_full=jnp.linspace(0.1, 1.0, NLEV),
-        dsigma=jnp.full((NLEV,), 1.0 / NLEV),
+        sigma_coord=sigma,
+        sigma_full=jnp.asarray(sigma.sigma_full),
+        dsigma=jnp.asarray(sigma.dsigma),
         dt=DT,
         rad_update_steps=1,
         microphysics="none",
         fix_moisture=False,
-                    fix_mass=False,
+        fix_mass=False,
         fric_decay=jnp.ones((NLEV,)),
         qv_smooth_coeff=0.0,
         lat=_GRID.lat,
         lon=_GRID.lon,
         start_day=0.0,
+        sat_adjust_without_microphysics=False,
     )
 
 

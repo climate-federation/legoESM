@@ -161,8 +161,8 @@ def _make_hydrostatic_microphysics(
             )
 
         # Pressure at full and half levels
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -181,8 +181,8 @@ def _make_hydrostatic_microphysics(
         # Extract water vapor from tracers if available; else assume dry.
         q_v_col = _get_tracer("q_v")
 
-        rho = _compute_rho(T_col, p_full_col)
-        dz = _compute_heights_from_sigma(T_col, p_half_col)
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
+        dz = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         # Extract actual hydrometeor state from tracers (fall back to zero
         # for any species not present in the tracer registry).
@@ -441,10 +441,8 @@ def _make_spectral_pe_microphysics(
             )
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = n_lat * n_lon
@@ -453,8 +451,8 @@ def _make_spectral_pe_microphysics(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         q_v_col = jnp.zeros((ncol, nlev))
 
-        rho = _compute_rho(T_col, p_full_col)
-        dz = _compute_heights_from_sigma(T_col, p_half_col)
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
+        dz = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         hydrometeors = make_zero_hydrometeors(ncol, nlev)
 

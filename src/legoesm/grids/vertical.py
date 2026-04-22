@@ -191,6 +191,7 @@ def compute_geopotential(
     p_s: jax.Array,
     sigma_coord: SigmaCoordinate,
     phis: jax.Array,
+    q_v: jax.Array | None = None,
 ) -> jax.Array:
     """Compute geopotential at full levels via Simmons-Burridge integration.
 
@@ -225,6 +226,9 @@ def compute_geopotential(
         Vertical coordinate.
     phis : jax.Array
         Surface geopotential (g·z_s), shape (6, n, n).
+    q_v : jax.Array | None
+        Specific humidity [kg/kg], same shape as ``T``. When provided,
+        thickness is integrated using virtual temperature.
 
     Returns
     -------
@@ -237,9 +241,11 @@ def compute_geopotential(
     ln_ratio = sigma_coord.ln_ratio  # (nlev,)
     alpha = sigma_coord.alpha  # (nlev,)
 
+    T_hydro = T if q_v is None else T * (1.0 + 0.61 * q_v)
+
     # Geopotential thickness of each full layer (interface to interface):
     # ΔΦ_k = R_d · T_k · ln(σ_{k+1/2} / σ_{k-1/2})
-    dPhi = R_d * T * ln_ratio  # (...,nlev)
+    dPhi = R_d * T_hydro * ln_ratio  # (...,nlev)
 
     # Geopotential at the BOTTOM interface of each layer:
     # Φ_bottom_interface[k] = phis + Σ_{k'=k}^{nlev-1} ΔΦ_{k'}
@@ -262,7 +268,7 @@ def compute_geopotential(
         [Phi_above[..., 1:], phis[..., None]], axis=-1
     )  # (6,n,n,nlev) — bottom interface of each layer
 
-    Phi_full = Phi_below + alpha * R_d * T  # (...,nlev)
+    Phi_full = Phi_below + alpha * R_d * T_hydro  # (...,nlev)
 
     return Phi_full
 
@@ -879,6 +885,7 @@ def compute_geopotential_hybrid(
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
     phis: jax.Array,
+    q_v: jax.Array | None = None,
 ) -> jax.Array:
     """Compute geopotential using Simmons-Burridge for hybrid coordinates.
 
@@ -894,6 +901,9 @@ def compute_geopotential_hybrid(
     coord : HybridSigmaPressureCoordinate
     phis : jax.Array
         Surface geopotential, shape (...,).
+    q_v : jax.Array | None
+        Specific humidity [kg/kg], same shape as ``T``. When provided,
+        thickness is integrated using virtual temperature.
 
     Returns
     -------
@@ -914,8 +924,10 @@ def compute_geopotential_hybrid(
     dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
     alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
 
+    T_hydro = T if q_v is None else T * (1.0 + 0.61 * q_v)
+
     # Geopotential thickness of each full layer
-    dPhi = R_d * T * ln_ratio  # (..., nlev)
+    dPhi = R_d * T_hydro * ln_ratio  # (..., nlev)
 
     # Cumulative sum from bottom: Phi_above[k] = sum from k to nlev-1
     dPhi_reversed = dPhi[..., ::-1]
@@ -929,7 +941,7 @@ def compute_geopotential_hybrid(
         [Phi_above[..., 1:], phis[..., None]], axis=-1
     )
 
-    Phi_full = Phi_below + alpha * R_d * T
+    Phi_full = Phi_below + alpha * R_d * T_hydro
 
     return Phi_full
 

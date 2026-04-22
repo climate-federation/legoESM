@@ -791,7 +791,7 @@ def test_ocean_albedo_constant_honoured():
 
 def test_land_q_surface_uses_updated_temperature():
     """Slab land q_surface should be consistent with updated T_surface."""
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
 
     state = _make_land_state(T=280.0, W=75.0)
     forcing = _make_forcing(T_lowest=300.0, sw=400.0)  # strong warming
@@ -803,7 +803,7 @@ def test_land_q_surface_uses_updated_temperature():
     T_new = resp.T_surface
     assert not jnp.allclose(T_new, 280.0, atol=0.01), "T should have changed"
 
-    q_sat_new = saturation_mixing_ratio(T_new, forcing.p_surface)
+    q_sat_new = saturation_specific_humidity(T_new, forcing.p_surface)
     w_frac = jnp.clip(new_state.W_bucket.data / config.W_max, 0.0, 1.0)
     beta = config.beta_min + (1.0 - config.beta_min) * w_frac
     q_expected = beta * q_sat_new
@@ -812,7 +812,7 @@ def test_land_q_surface_uses_updated_temperature():
 
 def test_ice_q_surface_uses_updated_temperature():
     """Sea ice q_surface should be consistent with updated T_surface."""
-    from legoesm.thermo import saturation_mixing_ratio_ice
+    from legoesm.thermo import saturation_specific_humidity_ice
 
     state = _make_ice_state(h=1.0, T=260.0, conc=0.8)
     forcing = _make_forcing(T_lowest=250.0, sw=100.0)
@@ -824,7 +824,7 @@ def test_ice_q_surface_uses_updated_temperature():
         config, U_min=1.0, dt=DT)
 
     T_new = resp.T_surface
-    q_expected = saturation_mixing_ratio_ice(T_new, forcing.p_surface)
+    q_expected = saturation_specific_humidity_ice(T_new, forcing.p_surface)
     assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
 
 
@@ -865,7 +865,7 @@ def test_lake_freezing_energy_conservation():
 
 def test_lake_q_surface_uses_updated_temperature():
     """Lake q_surface should be consistent with updated T_surface."""
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
 
     state = _make_lake_state(T_epi=285.0, T_hypo=278.0)
     forcing = _make_forcing(T_lowest=300.0, sw=400.0)  # strong warming
@@ -876,7 +876,7 @@ def test_lake_q_surface_uses_updated_temperature():
     T_new = resp.T_surface
     assert not jnp.allclose(T_new, 285.0, atol=0.01), "T should have changed"
 
-    q_expected = saturation_mixing_ratio(T_new, forcing.p_surface)
+    q_expected = saturation_specific_humidity(T_new, forcing.p_surface)
     assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
 
 

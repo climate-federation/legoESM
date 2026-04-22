@@ -143,6 +143,7 @@ class FV3HydrostaticTendencies(NamedTuple):
     dT_dt: Field     # (6, n, n, nlev)
     dp_s_dt: Field   # (6, n, n)
     dphis_dt: Field  # (6, n, n) — always zero
+    tracer_tendencies: dict[str, Field] | None = None
 
 
 # PhysicsState is defined in legoesm.atmosphere.physics.physics_state

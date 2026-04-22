@@ -23,6 +23,7 @@ from legoesm.driver.compiled_segments import (
 )
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.vertical import create_sigma_coordinate
 
 N = 4
 NLEV = 3
@@ -56,7 +57,7 @@ def _zero_physics_output(T, p_s):
         if field_name in PhysicsOutput._fields:
             kwargs[field_name] = jnp.zeros(T.shape)
     if "conv_prog" in PhysicsOutput._fields:
-        kwargs["conv_prog"] = jnp.asarray(0.0, dtype=T.dtype)
+        kwargs["conv_prog"] = jnp.zeros((p_s.size,), dtype=T.dtype)
     return kwargs
 
 
@@ -69,10 +70,11 @@ class _MockModel:
         return state._replace(T=state.T.replace(data=state.T.data + self._inc * dt / 86400.0))
 
 
-def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, u, v,
+def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
                        sst, sic, lat, lon, doy, sod, dt, sw, s0, o3, aer,
                        h_dT, h_sw_sfc, h_lw_sfc, h_sw_toa, h_lw_toa, h_sw_dtoa,
                        **kw):
+    del conv_prog
     tau = kw.get("tau_equator", jnp.float32(7.2))
     kwargs = _zero_physics_output(T, p_s)
     kwargs["dT_dt"] = jnp.full(T.shape, 1e-5) * tau / 7.2
@@ -109,13 +111,16 @@ _FORCING = pack_forcing(
 
 
 def _build(gradient_checkpoint, tau_equator=7.2):
+    sigma = create_sigma_coordinate(NLEV)
     return build_segment_fn(
         model=_MockModel(), step_unified=_mock_step_unified, grid=_GRID,
-        sigma_full=jnp.linspace(0.1, 1.0, NLEV),
-        dsigma=jnp.full(NLEV, 1.0/NLEV), dt=600.0, rad_update_steps=1,
+        sigma_coord=sigma,
+        sigma_full=jnp.asarray(sigma.sigma_full),
+        dsigma=jnp.asarray(sigma.dsigma), dt=600.0, rad_update_steps=1,
         microphysics="none", fix_moisture=False, fix_mass=False,
         fric_decay=jnp.ones(NLEV), qv_smooth_coeff=0.0,
         lat=_GRID.lat, lon=_GRID.lon, start_day=0.0,
+        sat_adjust_without_microphysics=False,
         gradient_checkpoint=gradient_checkpoint,
         tau_equator=tau_equator,
     )

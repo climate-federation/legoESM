@@ -106,8 +106,8 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     grid : Grid object
         Must expose a ``dx`` attribute (minimum grid spacing in metres).
     dc : DycoreConfig
-        Dycore configuration with ``dt``, ``hyperdiff_scale``,
-        ``div_damp_scale``.
+        Dycore configuration with ``dt``, ``A_h_scale``,
+        ``hyperdiff_scale``, ``div_damp_scale``.
 
     Returns
     -------
@@ -123,7 +123,7 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     DT = dc.dt
 
     # Laplacian viscosity: CFL-safe Smagorinsky-like default
-    A_h = 0.05 * dx_min ** 2 / DT
+    A_h = dc.A_h_scale * 0.05 * dx_min ** 2 / DT
 
     # Biharmonic: e-folding time for grid-scale noise
     tau_efold = 24.0 * 3600.0
@@ -210,6 +210,8 @@ def create_atmosphere_dycore(
             div_damp_coeff=diff.div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
+            sponge_sigma=dc.sponge_sigma,
+            sponge_tau_sec=dc.sponge_tau_sec,
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 

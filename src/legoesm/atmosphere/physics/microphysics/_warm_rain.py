@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 
 def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0):
@@ -21,7 +21,7 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0):
     T : array (ncol, nlev)
         Temperature [K].
     q_v : array (ncol, nlev)
-        Water vapor mixing ratio [kg/kg].
+        Water vapor specific humidity [kg/kg].
     p_full : array (ncol, nlev)
         Pressure [Pa].
     dt : float
@@ -34,9 +34,9 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0):
     condensation : array (ncol, nlev)
         Condensation tendency [kg/kg/s].
     q_sat : array (ncol, nlev)
-        Saturation mixing ratio [kg/kg].
+        Saturation specific humidity [kg/kg].
     """
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     excess = q_v - q_sat
     cond_frac = jax.nn.sigmoid(sharpness * excess)
     condensation = cond_frac * excess / dt
@@ -159,11 +159,11 @@ def rain_evaporation(q_v, q_r, q_sat, evap_coeff):
     Parameters
     ----------
     q_v : array
-        Water vapor mixing ratio [kg/kg].
+        Water vapor specific humidity [kg/kg].
     q_r : array
         Rain mixing ratio [kg/kg].
     q_sat : array
-        Saturation mixing ratio [kg/kg].
+        Saturation specific humidity [kg/kg].
     evap_coeff : float
         Evaporation rate coefficient.
 

@@ -20,7 +20,11 @@ from legoesm.atmosphere.physics.convection.edmf import edmf_convection
 from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, KuoConfig, MassFluxConfig, EDMFConfig,
 )
-from legoesm.atmosphere.physics.thermodynamics import compute_cape, compute_moist_adiabat
+from legoesm.atmosphere.physics.thermodynamics import (
+    compute_cape,
+    compute_moist_adiabat,
+    phase_aware_latent_heat,
+)
 from legoesm.thermo import saturation_mixing_ratio
 
 
@@ -119,12 +123,15 @@ def test_moisture_conservation(scheme):
 # ============================================================================
 
 def test_sbm_energy_conservation():
-    """SBM: column-integrated MSE tendency ~ 0 (cp*dT + Lv*dq_v)."""
+    """SBM: column-integrated MSE tendency ~ 0 with phase-aware latent heat."""
     T, q_v, p_full, p_half = _make_unstable_column()
     out = _call_scheme("sbm", T, q_v, p_full, p_half)
 
     dp = p_half[:, 1:] - p_half[:, :-1]
-    mse_tend = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
+    mse_tend = (
+        constants.c_pd * out.dT_dt
+        + phase_aware_latent_heat(T) * out.dq_v_dt
+    )
     col_mse = jnp.sum(mse_tend * dp / constants.g, axis=1)
 
     max_imbalance = float(jnp.max(jnp.abs(col_mse)))

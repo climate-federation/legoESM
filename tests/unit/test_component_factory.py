@@ -131,6 +131,18 @@ class TestDiffusionCoeffs:
         diff = compute_diffusion(grid, dc)
         assert diff.A_h > 0.0
 
+    def test_A_h_scale_zero_disables_laplacian_viscosity(self):
+        grid = _make_cubed_sphere_grid()
+        dc = DycoreConfig(dt=600.0, A_h_scale=0.0)
+        diff = compute_diffusion(grid, dc)
+        assert diff.A_h == 0.0
+
+    def test_A_h_scale_scales_laplacian_viscosity(self):
+        grid = _make_cubed_sphere_grid()
+        base = compute_diffusion(grid, DycoreConfig(dt=600.0, A_h_scale=1.0))
+        half = compute_diffusion(grid, DycoreConfig(dt=600.0, A_h_scale=0.5))
+        assert half.A_h == pytest.approx(0.5 * base.A_h)
+
     def test_hyperdiff_positive(self):
         grid = _make_cubed_sphere_grid()
         dc = DycoreConfig(dt=600.0, hyperdiff_scale=1.0)

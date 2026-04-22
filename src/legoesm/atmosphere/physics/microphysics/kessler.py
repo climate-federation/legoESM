@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -46,7 +46,7 @@ def kessler_microphysics(
     T : jax.Array
         Temperature [K], shape (ncol, nlev).
     q_v : jax.Array
-        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).
+        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
     hydrometeors : HydrometeorState
         Hydrometeor state (only q_c, q_r used).
     p_full : jax.Array
@@ -70,8 +70,8 @@ def kessler_microphysics(
     q_r = hydrometeors.q_r
     sharpness = config.saturation_sharpness
 
-    # Saturation mixing ratio
-    q_sat = saturation_mixing_ratio(T, p_full)
+    # Saturation specific humidity
+    q_sat = saturation_specific_humidity(T, p_full)
 
     # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s]
     excess = q_v - q_sat

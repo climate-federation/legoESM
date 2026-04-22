@@ -16,7 +16,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
@@ -41,7 +41,7 @@ def step_lake(
     )
 
     # Surface humidity: saturated at epilimnion temperature
-    q_sfc = saturation_mixing_ratio(T_epi, forcing.p_surface)
+    q_sfc = saturation_specific_humidity(T_epi, forcing.p_surface)
 
     # Bulk fluxes
     rho = forcing.rho_lowest
@@ -120,7 +120,7 @@ def step_lake(
     )
 
     # Recompute q_surface from updated epilimnion temperature for consistency
-    q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
+    q_sfc_new = saturation_specific_humidity(T_epi_new, forcing.p_surface)
 
     response = TileResponse(
         T_surface=T_epi_new,

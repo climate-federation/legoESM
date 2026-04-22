@@ -13,12 +13,18 @@ Validates:
 
 from __future__ import annotations
 
+import types
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
 import pytest
 
+from legoesm import constants
+from legoesm.core.field import Field
+from legoesm.core.state import HydrostaticState
+from legoesm.coupler.surface_exchange import extract_atm_to_surface
 from legoesm.driver.grid_adapters import (
     ColumnAdapter,
     SingleColumnGrid,
@@ -37,6 +43,7 @@ from legoesm.driver.physics_pipeline import (
     HeldRadiation,
     build_physics_pipeline,
 )
+from legoesm.atmosphere.physics._shared import compute_heights_from_sigma, compute_rho
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.latlon import create_latlon_grid
 
@@ -76,6 +83,12 @@ def _make_sigma(nlev):
             self.sigma_full = jnp.linspace(0.1, 0.95, nlev)
             self.sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
             self.dsigma = jnp.diff(self.sigma_half)
+
+        def pressure_at_full(self, p_s):
+            return p_s[..., None] * self.sigma_full
+
+        def pressure_at_half(self, p_s):
+            return p_s[..., None] * self.sigma_half
     return _Sigma(nlev)
 
 
@@ -374,6 +387,126 @@ class TestPhysicsStepSingleColumn:
         out, _ = _run_physics_step(sc_grid)
         assert jnp.all(jnp.isfinite(out.dT_dt))
         assert jnp.all(jnp.isfinite(out.precip))
+
+
+def test_turbulence_surface_fluxes_are_not_double_counted(sc_grid):
+    """With an active turbulence backend, physics_step_no_rad should use the
+    turbulence tendencies directly instead of adding a second bulk BL flux.
+    """
+    nlev = NLEV
+    dt = 600.0
+    sigma = _make_sigma(nlev)
+    config = _make_config(turbulence="louis", convection="none", microphysics="none")
+    pipeline = build_physics_pipeline(sc_grid, sigma, config)
+    ad = pipeline.adapter
+    shape_2d = ad.shape_2d
+    shape_3d = (*shape_2d, nlev)
+
+    T = jnp.asarray([[250.0, 260.0, 270.0, 280.0, 290.0]], dtype=jnp.float32)
+    p_s = jnp.full(shape_2d, 1e5, dtype=jnp.float32)
+    q_v = jnp.full(shape_3d, 0.005, dtype=jnp.float32)
+    q_c = jnp.zeros(shape_3d, dtype=jnp.float32)
+    q_r = jnp.zeros(shape_3d, dtype=jnp.float32)
+    u = jnp.full(shape_3d, 5.0, dtype=jnp.float32)
+    v = jnp.zeros(shape_3d, dtype=jnp.float32)
+    sst = jnp.full(shape_2d, 300.0, dtype=jnp.float32)
+    sic = jnp.zeros(shape_2d, dtype=jnp.float32)
+    lat = jnp.zeros(shape_2d, dtype=jnp.float32)
+    held_zero_3d = jnp.zeros(shape_3d, dtype=jnp.float32)
+    held_zero_2d = jnp.zeros(shape_2d, dtype=jnp.float32)
+
+    out = pipeline.physics_step_no_rad(
+        T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v,
+        sst, sic, lat, dt,
+        held_zero_3d, held_zero_2d, held_zero_2d,
+        held_zero_2d, held_zero_2d, held_zero_2d,
+    )
+
+    T_col = ad.flatten_3d(T)
+    q_v_col = ad.flatten_3d(q_v)
+    u_col = ad.flatten_3d(u)
+    v_col = ad.flatten_3d(v)
+    p_full = pipeline.sigma_coord.pressure_at_full(p_s)
+    p_half = pipeline.sigma_coord.pressure_at_half(p_s)
+    p_full_col = ad.flatten_3d(p_full)
+    p_half_col = p_half.reshape(ad.ncol, nlev + 1)
+    z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col, q_v_col)
+    from legoesm.thermo import saturation_specific_humidity
+
+    rho_col = compute_rho(T_col, p_full_col, q_v_col)
+    T_sfc_col = ad.flatten_2d(jnp.where(sic > 0.5, pipeline.T_ice, sst))
+    q_sfc_col = ad.flatten_2d(saturation_specific_humidity(sst, p_s))
+
+    turb_out = pipeline.turbulence_fn(
+        u=u_col,
+        v=v_col,
+        T=T_col,
+        q_v=q_v_col,
+        p_full=p_full_col,
+        p_half=p_half_col,
+        z_full=z_full_col,
+        z_half=z_half_col,
+        T_sfc=T_sfc_col,
+        q_sfc=q_sfc_col,
+        rho=rho_col,
+        dt=dt,
+        config=pipeline.turbulence_config,
+    )
+
+    npt.assert_allclose(
+        np.asarray(ad.flatten_3d(out.dT_dt)),
+        np.asarray(turb_out.dT_dt),
+        atol=1e-6,
+    )
+    npt.assert_allclose(
+        np.asarray(ad.flatten_3d(out.dq_v_dt)),
+        np.asarray(turb_out.dq_v_dt),
+        atol=1e-6,
+    )
+
+
+def test_compute_heights_and_density_use_virtual_temperature():
+    T_col = jnp.asarray([[280.0, 275.0]], dtype=jnp.float32)
+    q_v_col = jnp.asarray([[0.02, 0.01]], dtype=jnp.float32)
+    p_half_col = jnp.asarray([[20000.0, 60000.0, 100000.0]], dtype=jnp.float32)
+    p_full_col = 0.5 * (p_half_col[:, :-1] + p_half_col[:, 1:])
+
+    z_full_dry, _ = compute_heights_from_sigma(T_col, p_half_col)
+    z_full_moist, _ = compute_heights_from_sigma(T_col, p_half_col, q_v_col)
+    rho_dry = compute_rho(T_col, p_full_col)
+    rho_moist = compute_rho(T_col, p_full_col, q_v_col)
+
+    assert jnp.all(z_full_moist > z_full_dry)
+    assert jnp.all(rho_moist < rho_dry)
+
+
+def test_extract_atm_to_surface_uses_virtual_temperature_for_density():
+    sigma = _make_sigma(2)
+    shape_2d = (6, 2, 2)
+    shape_3d = shape_2d + (2,)
+    T = jnp.full(shape_3d, 280.0, dtype=jnp.float32)
+    q_v = jnp.zeros(shape_3d, dtype=jnp.float32).at[..., -1].set(0.02)
+    p_s = jnp.full(shape_2d, 100000.0, dtype=jnp.float32)
+    dims_3d = ("face", "x", "y", "level")
+    dims_2d = ("face", "x", "y")
+
+    state = HydrostaticState(
+        u=Field(jnp.zeros(shape_3d, dtype=jnp.float32), name="u", dims=dims_3d, units="m/s"),
+        v=Field(jnp.zeros(shape_3d, dtype=jnp.float32), name="v", dims=dims_3d, units="m/s"),
+        T=Field(T, name="T", dims=dims_3d, units="K"),
+        p_s=Field(p_s, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(jnp.zeros(shape_2d, dtype=jnp.float32), name="phis", dims=dims_2d, units="m^2/s^2"),
+        tracers={"q_v": Field(q_v, name="q_v", dims=dims_3d, units="kg/kg")},
+    )
+
+    forcing = extract_atm_to_surface(
+        state,
+        sigma,
+        types.SimpleNamespace(co2_ppmv_default=400.0),
+    )
+    p_low = sigma.pressure_at_full(p_s)[..., -1]
+    rho_expected = p_low / (constants.R_d * (280.0 * (1.0 + 0.61 * 0.02)))
+    npt.assert_allclose(np.asarray(forcing.rho_lowest), rho_expected, rtol=1e-6)
 
 
 # ===================================================================

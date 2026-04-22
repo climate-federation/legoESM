@@ -127,6 +127,7 @@ def mpas_hydrostatic_tendencies(
     T_3d = state.T.data        # (nCells, nlev)
     p_s = state.p_s.data       # (nCells,)
     phis = state.phis.data     # (nCells,)
+    tracers = state.tracers or {}
 
     R_d = constants.R_d
     kappa = constants.kappa
@@ -141,10 +142,14 @@ def mpas_hydrostatic_tendencies(
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
 
     # --- 2. Geopotential ---
+    q_v = None
+    if "q_v" in tracers:
+        q_v = tracers["q_v"].data if hasattr(tracers["q_v"], "data") else tracers["q_v"]
     if _hybrid:
-        Phi = compute_geopotential_hybrid(T_3d, p_s, sigma_coord, phis)
+        Phi = compute_geopotential_hybrid(T_3d, p_s, sigma_coord, phis, q_v=q_v)
     else:
-        Phi = compute_geopotential(T_3d, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T_3d, p_s, sigma_coord, phis, q_v=q_v)
+    T_hydro = T_3d if q_v is None else T_3d * (1.0 + 0.61 * q_v)
 
     # --- 3. Precompute ln(p_s) gradient at edges ---
     ln_ps = jnp.log(p_s)
@@ -163,7 +168,7 @@ def mpas_hydrostatic_tendencies(
     # Pressure gradient correction: R_d * T_edge * grad_eta(ln p)
     # In sigma coords: grad_eta(ln p) = grad(ln p_s).
     # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    T_edge_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
+    T_edge_3d = cell_to_edge_avg_3d(T_hydro, mesh)  # (nEdges, nlev)
     pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
     if _hybrid:
         p_full_edge = cell_to_edge_avg_3d(p_full, mesh)  # (nEdges, nlev)

@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity_ice
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
@@ -128,7 +128,7 @@ def _step_slab(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
     )
     rho = forcing.rho_lowest
-    q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+    q_sfc = saturation_specific_humidity_ice(T_ice, forcing.p_surface)
 
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         from legoesm.coupler.bulk_flux import compute_most_fluxes
@@ -179,7 +179,7 @@ def _step_slab(
         forcing.sw_down, forcing.lw_down, T_ice_new, alpha_ice,
         config.emissivity_ice,
     )
-    q_sfc_new = saturation_mixing_ratio_ice(T_ice_new, forcing.p_surface)
+    q_sfc_new = saturation_specific_humidity_ice(T_ice_new, forcing.p_surface)
 
     response = TileResponse(
         T_surface=T_ice_new,
@@ -390,7 +390,7 @@ def _thermo_single(
             forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
         )
         rho = forcing.rho_lowest
-        q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+        q_sfc = saturation_specific_humidity_ice(T_ice, forcing.p_surface)
         _, _, shflx, lhflx = simple_bulk_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
@@ -475,7 +475,7 @@ def _build_response(
     U_min: float,
 ) -> TileResponse:
     """Build coupler response from aggregated ice fields."""
-    q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+    q_sfc = saturation_specific_humidity_ice(T_ice, forcing.p_surface)
 
     if config.temp_dependent_albedo:
         alpha_ice = compute_ice_albedo(T_ice, config.ice_albedo)

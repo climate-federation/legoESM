@@ -41,11 +41,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
 )
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.convection.config import EDMFConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
@@ -90,9 +91,10 @@ def edmf_convection(
 
     # 1. Heights and density from hydrostatic balance
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+    T_hydro = virtual_temperature(T, q_v)
+    dz = constants.R_d * T_hydro * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     dz = jnp.abs(dz)  # (ncol, nlev)
-    rho = p_full / (constants.R_d * jnp.clip(T, 1.0, None))  # (ncol, nlev)
+    rho = p_full / (constants.R_d * jnp.clip(T_hydro, 1.0, None))  # (ncol, nlev)
 
     # Cumulative height from surface
     dz_rev = dz[:, ::-1]
@@ -101,7 +103,7 @@ def edmf_convection(
     # 2. CAPE and moist adiabat
     T_base = T[:, -1]
     T_moist = compute_moist_adiabat(T_base, p_full)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     cape = compute_cape(T, T_moist, p_full, p_half)  # (ncol,)
 
     # 3. Diagnosed equilibrium updraft area fraction
@@ -117,7 +119,7 @@ def edmf_convection(
     # 5. Entraining updraft properties (exponential dilution)
     dilution = jnp.exp(-config.epsilon_0 * z)  # (ncol, nlev)
     T_u = dilution * T_moist + (1.0 - dilution) * T
-    q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_moist = saturation_specific_humidity(T_moist, p_full)
     q_u = dilution * q_sat_moist + (1.0 - dilution) * q_v
 
     # 6. Buoyancy: B = g * (T_v_u - T_v_env) / T_v_env
@@ -167,7 +169,7 @@ def edmf_convection(
     dq_v_dt = dq_subsidence + dq_detrain
 
     # 10. Precipitation from condensate detrainment
-    condensate = jnp.clip(q_u - saturation_mixing_ratio(T_u, p_full), 0.0, None)
+    condensate = jnp.clip(q_u - saturation_specific_humidity(T_u, p_full), 0.0, None)
     # Precipitation: delta_0 [1/m] * M_u [kg/m^2/s] * condensate [kg/kg] * dz [m]
     # gives [kg/m^2/s]. Using dp/g would introduce an extra density factor.
     precipitation = jnp.clip(

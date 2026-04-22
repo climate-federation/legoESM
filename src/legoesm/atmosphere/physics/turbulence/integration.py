@@ -45,7 +45,7 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
     reconstruct_half_level_pressure_hydrostatic,
@@ -155,8 +155,8 @@ def _make_hydrostatic_turbulence(
         shape_2d = p_s.shape
 
         # Pressure
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -187,12 +187,12 @@ def _make_hydrostatic_turbulence(
             ), tke_out
 
         # Heights and density
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
 
         # Surface conditions
         T_sfc = T_col[:, -1]
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        q_sfc = saturation_specific_humidity(T_sfc, p_half_col[:, -1])
 
         if needs_tke:
             # Read TKE from explicit PhysicsState if provided.
@@ -340,7 +340,7 @@ def _make_nonhydrostatic_turbulence(
             q_v_col = tracers[..., 0].reshape(ncol, nlev)
 
         T_sfc = T_col[:, -1]
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        q_sfc = saturation_specific_humidity(T_sfc, p_half[:, -1])
 
         if needs_tke:
             if phys_state is not None:
@@ -436,10 +436,8 @@ def _make_spectral_pe_turbulence(
         n_lat, n_lon = p_s.shape
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns
         ncol = n_lat * n_lon
@@ -463,11 +461,11 @@ def _make_spectral_pe_turbulence(
             ), tke_out
 
         # Heights and density
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
 
         T_sfc = T_col[:, -1]
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        q_sfc = saturation_specific_humidity(T_sfc, p_half_col[:, -1])
 
         if needs_tke:
             if phys_state is not None:

@@ -10,6 +10,7 @@ from typing import Callable, Mapping, Sequence
 import numpy as np
 import xarray as xr
 
+from legoesm import constants
 from legoesm.ml.s2s.neuralgcm_slab.evaluation import (
     DEFAULT_S2S_WINDOWS,
     LeadTimeWindow,
@@ -25,6 +26,7 @@ class FieldSpec:
     variable: str
     level: int | None = None
     level_name: str = "level"
+    scale: float = 1.0
 
 
 MetricFunction = Callable[[xr.DataArray, xr.DataArray], float]
@@ -40,7 +42,7 @@ class MetricSpec:
 
 DEFAULT_FIELD_SPECS = (
     FieldSpec("temperature_850", "temperature", 850),
-    FieldSpec("geopotential_500", "geopotential", 500),
+    FieldSpec("geopotential_500", "geopotential", 500, scale=1.0 / constants.g),
     FieldSpec("specific_humidity_700", "specific_humidity", 700),
     FieldSpec("sea_surface_temperature", "sea_surface_temperature"),
 )
@@ -81,7 +83,10 @@ def weighted_rmse(
     reshape = [1] * squared.ndim
     reshape[lat_axis] = weights.shape[0]
     weighted = squared * weights.reshape(reshape)
-    return float(np.sqrt(np.mean(weighted)))
+    valid = np.isfinite(weighted)
+    if not np.any(valid):
+        return float("nan")
+    return float(np.sqrt(np.mean(weighted[valid])))
 
 
 def weighted_mae(
@@ -96,7 +101,10 @@ def weighted_mae(
     reshape = [1] * absolute.ndim
     reshape[lat_axis] = weights.shape[0]
     weighted = absolute * weights.reshape(reshape)
-    return float(np.mean(weighted))
+    valid = np.isfinite(weighted)
+    if not np.any(valid):
+        return float("nan")
+    return float(np.mean(weighted[valid]))
 
 
 DEFAULT_METRIC_SPECS = {
@@ -131,6 +139,8 @@ def _select_field(dataset: xr.Dataset, spec: FieldSpec) -> xr.DataArray:
     field = dataset[spec.variable]
     if spec.level is not None:
         field = field.sel({spec.level_name: spec.level}, method="nearest")
+    if spec.scale != 1.0:
+        field = field * float(spec.scale)
     return field
 
 

@@ -42,7 +42,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 logger = logging.getLogger(__name__)
 
@@ -190,12 +190,24 @@ def unpack_carry(carry, state_template):
     state, q_v, q_c, q_r, conv_prog, held_tuple, step_index, precip_accum,
     shflx_accum, lhflx_accum
     """
+    from legoesm.core.field import Field
+
+    tracer_template = getattr(state_template, "tracers", None) or {}
+    dims_3d = getattr(state_template.T, "dims", ("face", "x", "y", "level"))
+    tracer_state = {}
+    for name, arr in (("q_v", carry.q_v), ("q_c", carry.q_c), ("q_r", carry.q_r)):
+        if name in tracer_template:
+            tracer_state[name] = tracer_template[name].replace(data=arr)
+        else:
+            tracer_state[name] = Field(data=arr, name=name, dims=dims_3d, units="kg/kg")
+
     new_state = state_template._replace(
         u=state_template.u.replace(data=carry.u),
         v=state_template.v.replace(data=carry.v),
         T=state_template.T.replace(data=carry.T),
         p_s=state_template.p_s.replace(data=carry.p_s),
         phis=state_template.phis.replace(data=carry.phis),
+        tracers=tracer_state,
     )
     held_tuple = (
         carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
@@ -253,6 +265,31 @@ def compute_segment_length(
     return max(seg, 1)
 
 
+def forcing_requires_single_step_segments(
+    *,
+    dataset: str,
+    diurnal_cycle: bool,
+    solar_source: str,
+    ozone_forcing: str,
+    aerosol_forcing: str,
+    ghg_forcing: str,
+) -> bool:
+    """Whether compiled segments must collapse to one step for correctness.
+
+    The compiled scan currently holds one ``SegmentForcing`` fixed for an entire
+    segment. Any forcing that evolves within the segment must therefore force a
+    single-step segment until forcing is updated inside the scan body.
+    """
+    return bool(
+        diurnal_cycle
+        or dataset == "custom"
+        or solar_source != "constant"
+        or ozone_forcing == "external"
+        or aerosol_forcing == "external"
+        or ghg_forcing == "external"
+    )
+
+
 # ======================================================================
 # Compiled segment builder
 # ======================================================================
@@ -277,8 +314,8 @@ class SegmentForcing(NamedTuple):
     seconds_of_day: jax.Array
     solar_weights: jax.Array
     s_0: jax.Array
-    o3_vmr: jax.Array
-    aerosol_od: jax.Array
+    o3_vmr: jax.Array | None
+    aerosol_od: jax.Array | None
     ghg_vmr: jax.Array  # shape (n_species,); empty (0,) when inactive
 
 
@@ -324,6 +361,9 @@ def pack_forcing(
 
     Parameters
     ----------
+    o3_vmr, aerosol_od : jax.Array or None
+        Optional per-layer radiation overrides. ``None`` preserves the
+        configured inline ozone/aerosol defaults inside the radiation solver.
     ghg_vmr : dict, jax.Array, or None
         GHG volume mixing ratios.  Accepts a dict (auto-converted via
         :func:`ghg_dict_to_array`), a pre-packed array, or None.
@@ -341,8 +381,8 @@ def pack_forcing(
         seconds_of_day=jnp.asarray(seconds_of_day),
         solar_weights=jnp.asarray(solar_weights),
         s_0=jnp.asarray(s_0),
-        o3_vmr=jnp.asarray(o3_vmr),
-        aerosol_od=jnp.asarray(aerosol_od),
+        o3_vmr=None if o3_vmr is None else jnp.asarray(o3_vmr),
+        aerosol_od=None if aerosol_od is None else jnp.asarray(aerosol_od),
         ghg_vmr=_ghg,
     )
 
@@ -351,6 +391,7 @@ def build_segment_fn(
     model,
     step_unified,
     grid,
+    sigma_coord,
     sigma_full,
     dsigma,
     dt: float,
@@ -363,6 +404,7 @@ def build_segment_fn(
     lat,
     lon,
     start_day: float,
+    sat_adjust_without_microphysics: bool = True,
     gradient_checkpoint: bool | None = None,
     hyperdiffusion_3d_fn=None,
     tau_equator=None,
@@ -396,6 +438,8 @@ def build_segment_fn(
         JIT-compiled physics step from ``PhysicsPipeline.build_step_unified()``.
     grid
         Cubed-sphere or lat-lon grid.
+    sigma_coord
+        Vertical coordinate object providing ``pressure_at_full``.
     sigma_full, dsigma : jax.Array
         Vertical coordinate arrays.
     dt : float
@@ -443,7 +487,7 @@ def build_segment_fn(
     else:
         hyperdiffusion_3d = hyperdiffusion_3d_fn
 
-    do_sat_adjust = (microphysics == "none")
+    do_sat_adjust = bool(sat_adjust_without_microphysics) and (microphysics == "none")
 
     # Convert static scalars to JAX arrays once (these don't change per segment).
     _dt = jnp.asarray(dt)
@@ -496,6 +540,13 @@ def build_segment_fn(
             u_new = dyn_state.u.data
             v_new = dyn_state.v.data
             p_s_new = dyn_state.p_s.data
+            dyn_tracers = getattr(dyn_state, "tracers", None) or {}
+            q_v_dyn = dyn_tracers.get("q_v", carry.q_v)
+            q_c_dyn = dyn_tracers.get("q_c", carry.q_c)
+            q_r_dyn = dyn_tracers.get("q_r", carry.q_r)
+            q_v_dyn = q_v_dyn.data if hasattr(q_v_dyn, "data") else q_v_dyn
+            q_c_dyn = q_c_dyn.data if hasattr(q_c_dyn, "data") else q_c_dyn
+            q_r_dyn = q_r_dyn.data if hasattr(q_r_dyn, "data") else q_r_dyn
 
             # --- Dry mass fixer (target-anchored) ---
             if fix_mass:
@@ -519,7 +570,7 @@ def build_segment_fn(
                 phys_out, held_new_local = step_unified(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
-                    carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
+                    q_v_dyn[_ofi], q_c_dyn[_ofi], q_r_dyn[_ofi],
                     carry.conv_prog,
                     u_new[_ofi], v_new[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
@@ -545,13 +596,13 @@ def build_segment_fn(
                         T_new[_ofi], p_s_new[_ofi], lat[_ofi])
                 T_upd = T_new.at[_ofi].set(T_new[_ofi] + _dt * _phys_dT)
                 q_v_upd = carry.q_v.at[_ofi].set(
-                    jnp.maximum(carry.q_v[_ofi] + _dt * phys_out.dq_v_dt, 0.0)
+                    jnp.maximum(q_v_dyn[_ofi] + _dt * phys_out.dq_v_dt, 0.0)
                 )
                 q_c_upd = carry.q_c.at[_ofi].set(
-                    jnp.maximum(carry.q_c[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
+                    jnp.maximum(q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
                 )
                 q_r_upd = carry.q_r.at[_ofi].set(
-                    jnp.maximum(carry.q_r[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
+                    jnp.maximum(q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
                 )
                 conv_prog_upd = phys_out.conv_prog
 
@@ -578,7 +629,7 @@ def build_segment_fn(
                 phys_out, held_new = step_unified(
                     need_rad,
                     T_new, p_s_new,
-                    carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
+                    q_v_dyn, q_c_dyn, q_r_dyn, carry.conv_prog,
                     u_new, v_new,
                     forcing.sst, forcing.sic, lat, lon,
                     forcing.day_of_year, forcing.seconds_of_day, _dt,
@@ -598,9 +649,9 @@ def build_segment_fn(
                 if hs_newtonian_relax is not None:
                     _phys_dT_dt = _phys_dT_dt + hs_newtonian_relax(T_new, p_s_new, lat)
                 T_upd = T_new + _dt * _phys_dT_dt
-                q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
-                q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
-                q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
+                q_v_upd = jnp.maximum(q_v_dyn + _dt * phys_out.dq_v_dt, 0.0)
+                q_c_upd = jnp.maximum(q_c_dyn + _dt * phys_out.dq_c_dt, 0.0)
+                q_r_upd = jnp.maximum(q_r_dyn + _dt * phys_out.dq_r_dt, 0.0)
                 conv_prog_upd = phys_out.conv_prog
 
                 # --- Accumulate precipitation ---
@@ -615,8 +666,8 @@ def build_segment_fn(
 
             # --- Saturation adjustment ---
             if do_sat_adjust:
-                p_full = p_s_new[..., None] * sigma_full
-                q_sat = saturation_mixing_ratio(T_upd, p_full)
+                p_full = sigma_coord.pressure_at_full(p_s_new)
+                q_sat = saturation_specific_humidity(T_upd, p_full)
                 excess = jnp.maximum(q_v_upd - q_sat, 0.0)
                 q_v_upd = q_v_upd - excess
                 T_upd = T_upd + constants.L_v * excess / constants.c_pd
@@ -746,5 +797,10 @@ def _rebuild_state(carry: SegmentCarry, model):
     T_f = Field(carry.T, name="T", dims=("face", "x", "y", "level"), units="K")
     p_s_f = Field(carry.p_s, name="p_s", dims=("face", "x", "y"), units="Pa")
     phis_f = Field(carry.phis, name="phis", dims=("face", "x", "y"), units="m2/s2")
+    tracers = {
+        "q_v": Field(carry.q_v, name="q_v", dims=("face", "x", "y", "level"), units="kg/kg"),
+        "q_c": Field(carry.q_c, name="q_c", dims=("face", "x", "y", "level"), units="kg/kg"),
+        "q_r": Field(carry.q_r, name="q_r", dims=("face", "x", "y", "level"), units="kg/kg"),
+    }
 
-    return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f)
+    return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f, tracers=tracers)

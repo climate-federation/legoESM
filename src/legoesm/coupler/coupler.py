@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
@@ -177,7 +177,7 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    q_sfc = saturation_mixing_ratio(ocean_sst, forcing.p_surface)
+    q_sfc = saturation_specific_humidity(ocean_sst, forcing.p_surface)
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("coare3", "large_yeager"):

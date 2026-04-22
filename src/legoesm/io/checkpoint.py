@@ -258,6 +258,14 @@ def load_checkpoint_zarr(
 
     q_c = jnp.array(root["q_c"][:], dtype=_storage_dtype) if "q_c" in root else None
     q_r = jnp.array(root["q_r"][:], dtype=_storage_dtype) if "q_r" in root else None
+    tracer_fields = {
+        "q_v": Field(data=q_v, name="q_v", dims=dims_3d, units="kg/kg"),
+    }
+    if q_c is not None:
+        tracer_fields["q_c"] = Field(data=q_c, name="q_c", dims=dims_3d, units="kg/kg")
+    if q_r is not None:
+        tracer_fields["q_r"] = Field(data=q_r, name="q_r", dims=dims_3d, units="kg/kg")
+    state = state._replace(tracers=tracer_fields)
 
     return state, q_v, step, day, config, diag_accumulators, q_c, q_r
 

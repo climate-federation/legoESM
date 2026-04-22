@@ -16,7 +16,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.core.field import Field
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.time_utils import day_to_calendar
 
 from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
@@ -143,6 +144,38 @@ class ModelDriver:
     @q_g.setter
     def q_g(self, value):
         self.tracers["q_g"] = value
+
+    def _build_state_tracer_fields(self, state) -> dict[str, Field] | None:
+        """Wrap driver tracer arrays as ``Field`` objects for dynamics.
+
+        The hydrostatic dycores only advect tracers that are present in
+        ``state.tracers``. The driver historically kept moisture in the side
+        ``self.tracers`` dict, which meant moisture could bypass advection.
+        """
+        if not hasattr(state, "tracers"):
+            return None
+        dims_3d = getattr(state.T, "dims", ("face", "x", "y", "level"))
+        tracer_fields: dict[str, Field] = {}
+        for name, arr in self.tracers.items():
+            if arr is None:
+                continue
+            units = "1/kg" if name.startswith("N_") else "kg/kg"
+            tracer_fields[name] = Field(data=arr, name=name, dims=dims_3d, units=units)
+        return tracer_fields or None
+
+    def _attach_driver_tracers_to_state(self, state):
+        """Return *state* with current driver tracer arrays attached."""
+        if state is None or not hasattr(state, "tracers"):
+            return state
+        return state._replace(tracers=self._build_state_tracer_fields(state))
+
+    def _sync_driver_tracers_from_state(self, state) -> None:
+        """Copy advected tracers from ``state.tracers`` back into the driver."""
+        state_tracers = getattr(state, "tracers", None)
+        if not state_tracers:
+            return
+        for name, field in state_tracers.items():
+            self.tracers[name] = field.data if hasattr(field, "data") else field
 
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
@@ -410,9 +443,14 @@ class ModelDriver:
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
-            p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
-            q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
-            self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
+            p_full_init = self.sigma.pressure_at_full(self.state.p_s.data)
+            q_sat_init = saturation_specific_humidity(self.state.T.data, p_full_init)
+            sigma_like = jnp.clip(
+                p_full_init / self.state.p_s.data[..., None],
+                0.0,
+                1.0,
+            )
+            self.tracers["q_v"] = cfg.RH_init * q_sat_init * sigma_like ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
             mean_qv = float(jnp.mean(self.tracers["q_v"])) * 1000.0
@@ -422,6 +460,8 @@ class ModelDriver:
             logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
+
+        self.state = self._attach_driver_tracers_to_state(self.state)
 
     def _create_ensemble(self) -> None:
         """Create ensemble members if ensemble_size > 1.
@@ -449,12 +489,18 @@ class ModelDriver:
                 self.tracers[name] = jnp.broadcast_to(
                     arr[None], (self._ensemble_size,) + arr.shape
                 ).copy()  # copy so each member can diverge
+        self.state = self._attach_driver_tracers_to_state(self.state)
 
         logger.info(f"  Ensemble: {self._ensemble_size} members (IC perturbation scale=0.01)")
 
     def _create_physics(self) -> None:
         """Build the physics pipeline."""
-        self.physics = build_physics_pipeline(self.grid, self.sigma, self.config)
+        self.physics = build_physics_pipeline(
+            self.grid,
+            self.sigma,
+            self.config,
+            land_fraction=self._f_land,
+        )
         rad_str = self.config.radiation or "none"
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
@@ -569,20 +615,20 @@ class ModelDriver:
         shape_2d = p_s.shape
         ncol = int(np.prod(np.array(shape_2d)))
 
-        p_full = p_s[..., None] * self.sigma.sigma_full
-        p_half = p_s[..., None] * self.sigma.sigma_half
+        p_full = self.sigma.pressure_at_full(p_s)
+        p_half = self.sigma.pressure_at_half(p_s)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
         lat_col = lat.reshape(ncol)
 
-        o3_vmr = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
+        o3_vmr = None
         if self._ozone_ext_active:
             o3_vmr = jnp.asarray(get_ozone_at_time(
                 self._ozone_ext_config, day,
                 lat_grid=lat_col, p_grid=p_full_col,
             ))
 
-        aerosol_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
+        aerosol_od = None
         if self._aerosol_active:
             aerosol_col = get_aerosol_at_time(
                 self._aerosol_config, day, lat_grid=lat_col,
@@ -792,7 +838,7 @@ class ModelDriver:
                 Handles arbitrary lat shapes: (6,n,n) for cubed-sphere,
                 (n_lat, n_lon) for lat-lon, (n_lat,) for Gaussian.
                 """
-                p_full = p_s[..., None] * sigma_full
+                p_full = self.sigma.pressure_at_full(p_s)
                 # Expand lat to broadcast with (... , nlev)
                 n_expand = p_full.ndim - lat.ndim
                 lat_exp = lat
@@ -1066,6 +1112,7 @@ class ModelDriver:
                     self.q_c = jnp.asarray(arrays["q_c"])
                 if "q_r" in arrays:
                     self.q_r = jnp.asarray(arrays["q_r"])
+                self.state = self._attach_driver_tracers_to_state(self.state)
                 logger.info(
                     f"  Loaded distributed restart: step={step}, day={day}, "
                     f"rank={topology.rank}"
@@ -1084,6 +1131,7 @@ class ModelDriver:
         if q_r is not None:
             self.q_r = q_r
         self._carry_aux = carry_aux if carry_aux else {}
+        self.state = self._attach_driver_tracers_to_state(self.state)
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
@@ -1122,7 +1170,17 @@ class ModelDriver:
             return self._run_spectral(start_step, start_day)
         if compiled:
             return self._run_compiled(start_step, start_day)
+        if self._use_native_cdgrid_perstep_runtime():
+            return self._run_per_step_cdgrid_native(start_step, start_day)
         return self._run_per_step(start_step, start_day)
+
+    def _use_native_cdgrid_perstep_runtime(self) -> bool:
+        """Whether to use native FV3/D-grid runtime for uncompiled cdgrid runs."""
+        return (
+            self.config.grid.grid_type == "cubed_sphere"
+            and self.config.dycore.discretization == "cdgrid"
+            and hasattr(self.model, "cdgrid")
+        )
 
     # ==================================================================
     # MPAS execution path (uses unified physics pipeline)
@@ -1199,7 +1257,9 @@ class ModelDriver:
         t_start = time.time()
 
         for step in range(start_step, n_steps_total):
+            self.state = self._attach_driver_tracers_to_state(self.state)
             self.state = self.model.step(self.state, DT, physics_fn=physics_fn)
+            self._sync_driver_tracers_from_state(self.state)
 
             # Diagnostics at intervals
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
@@ -1298,8 +1358,8 @@ class ModelDriver:
                 sic = jnp.broadcast_to(sic[:, None], shape_2d)
             T_sfc = blend_surface_temperature(sst, sic, T_ice)
 
-            p_full = p_s_g[..., None] * sigma_full
-            p_half = p_s_g[..., None] * self.sigma.sigma_half
+            p_full = self.sigma.pressure_at_full(p_s_g)
+            p_half = self.sigma.pressure_at_half(p_s_g)
             T_col = T_g.reshape(-1, cfg.grid.nlev)
             p_full_col = p_full.reshape(-1, cfg.grid.nlev)
             p_half_col = p_half.reshape(-1, cfg.grid.nlev + 1)
@@ -1530,6 +1590,7 @@ class ModelDriver:
         from legoesm.driver.compiled_segments import (
             SegmentCarry, pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
+            forcing_requires_single_step_segments,
         )
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
@@ -1565,6 +1626,19 @@ class ModelDriver:
         segment_length = compute_segment_length(
             diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
         )
+        if forcing_requires_single_step_segments(
+            dataset=cfg.dataset,
+            diurnal_cycle=cfg.diurnal_cycle,
+            solar_source=cfg.solar_source,
+            ozone_forcing=cfg.ozone_forcing,
+            aerosol_forcing=cfg.aerosol_forcing,
+            ghg_forcing=cfg.ghg_forcing,
+        ) and segment_length > 1:
+            logger.warning(
+                "Compiled segments reduced to single-step mode because forcing "
+                "varies within a segment (diurnal/custom/external forcing).",
+            )
+            segment_length = 1
         n_steps_remaining = n_steps_total - start_step
         n_segments = (n_steps_remaining + segment_length - 1) // segment_length
 
@@ -1612,11 +1686,13 @@ class ModelDriver:
             model=self.model,
             step_unified=step_unified,
             grid=self.grid,
+            sigma_coord=self.sigma,
             sigma_full=sigma_full,
             dsigma=dsigma,
             dt=DT,
             rad_update_steps=RAD_UPDATE_STEPS,
             microphysics=cfg.microphysics,
+            sat_adjust_without_microphysics=cfg.sat_adjust_without_microphysics,
             fix_moisture=cfg.fix_moisture,
             fix_mass=cfg.dycore.fix_mass,
             fric_decay=self._fric_decay,
@@ -1659,16 +1735,18 @@ class ModelDriver:
             day_of_year, seconds_of_day = day_to_calendar(day)
             sst, sic = self.get_sst_sic(day)
 
-            # Update external forcing at segment boundary (if radiation-aligned)
-            if RAD_UPDATE_STEPS > 1 and seg_idx > 0:
-                solar_now = get_solar_forcing_at_time(self._solar_config, day)
-                current_s_0 = float(solar_now["tsi"])
-                if self._use_solar_spectral:
-                    solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
-                _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
-                o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-                    day, _phys_p_s, _phys_lat,
-                )
+            # Update forcing at the segment boundary using the segment's own
+            # timestamp. This is required when compiled segments are forced to
+            # single-step mode for time-varying forcing, and it also keeps the
+            # first segment consistent with the warmup/per-step paths.
+            solar_now = get_solar_forcing_at_time(self._solar_config, day)
+            current_s_0 = float(solar_now["tsi"])
+            if self._use_solar_spectral:
+                solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
+            _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+            o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+                day, _phys_p_s, _phys_lat,
+            )
 
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
@@ -1854,11 +1932,23 @@ class ModelDriver:
                     segment_length = compute_segment_length(
                         diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
                     )
+                    if forcing_requires_single_step_segments(
+                        dataset=cfg.dataset,
+                        diurnal_cycle=cfg.diurnal_cycle,
+                        solar_source=cfg.solar_source,
+                        ozone_forcing=cfg.ozone_forcing,
+                        aerosol_forcing=cfg.aerosol_forcing,
+                        ghg_forcing=cfg.ghg_forcing,
+                    ) and segment_length > 1:
+                        segment_length = 1
                     run_segment = build_segment_fn(
                         model=self.model, step_unified=step_unified,
-                        grid=self.grid, sigma_full=sigma_full, dsigma=dsigma,
+                        grid=self.grid, sigma_coord=self.sigma,
+                        sigma_full=sigma_full, dsigma=dsigma,
                         dt=DT, rad_update_steps=RAD_UPDATE_STEPS,
-                        microphysics=cfg.microphysics, fix_moisture=cfg.fix_moisture,
+                        microphysics=cfg.microphysics,
+                        sat_adjust_without_microphysics=cfg.sat_adjust_without_microphysics,
+                        fix_moisture=cfg.fix_moisture,
                         fix_mass=cfg.dycore.fix_mass,
                         fric_decay=self._fric_decay, qv_smooth_coeff=self._qv_smooth_coeff,
                         lat=_seg_lat, lon=_seg_lon, start_day=START_DAY,
@@ -1911,12 +2001,17 @@ class ModelDriver:
         hyperdiffusion_3d = self._hyperdiffusion_3d_fn
         from legoesm.forcing.external import get_solar_forcing_at_time
 
-        ctx = self._prepare_run_context(start_step, start_day, restore_carry=False)
+        ctx = self._prepare_run_context(
+            start_step,
+            start_day,
+            restore_carry=bool(start_step and start_step > 0),
+        )
         cfg = ctx["cfg"]
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
         START_DAY = ctx["START_DAY"]
         MICROPHYSICS = cfg.microphysics
+        DO_SAT_ADJUST = bool(cfg.sat_adjust_without_microphysics) and MICROPHYSICS == "none"
         RAD_UPDATE_STEPS = ctx["RAD_UPDATE_STEPS"]
         n_steps_total = ctx["n_steps_total"]
         diag_interval = ctx["diag_interval"]
@@ -1956,8 +2051,18 @@ class ModelDriver:
         day = START_DAY + (start_step + 1) * DT / 86400.0
         day_of_year, seconds_of_day = day_to_calendar(day)
         sst, sic = self.get_sst_sic(day)
+        solar_now = get_solar_forcing_at_time(self._solar_config, day)
+        current_s_0 = float(solar_now["tsi"])
+        if self._use_solar_spectral:
+            solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
+        _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+        o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+            day, _phys_p_s, _phys_lat,
+        )
 
+        self.state = self._attach_driver_tracers_to_state(self.state)
         self.state = self.model.step_with_physics(self.state, DT)
+        self._sync_driver_tracers_from_state(self.state)
 
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
@@ -1985,12 +2090,17 @@ class ModelDriver:
         self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
         self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
 
-        if MICROPHYSICS == "none":
-            p_full = self.state.p_s.data[..., None] * sigma_full
-            q_sat = saturation_mixing_ratio(new_T, p_full)
+        if DO_SAT_ADJUST:
+            p_full = self.sigma.pressure_at_full(self.state.p_s.data)
+            q_sat = saturation_specific_humidity(new_T, p_full)
             excess = jnp.maximum(self.q_v - q_sat, 0.0)
             self.q_v = self.q_v - excess
             new_T = new_T + constants.L_v * excess / constants.c_pd
+            precip_ls = jnp.sum(
+                excess * self.state.p_s.data[..., None] * dsigma, axis=-1
+            ) / (constants.g * DT)
+        else:
+            precip_ls = jnp.zeros(shape_2d, dtype=new_T.dtype)
 
         self.state = self.state._replace(T=self.state.T.replace(data=new_T))
         if hasattr(phys_out, 'du_dt') and phys_out.du_dt is not None:
@@ -2005,10 +2115,22 @@ class ModelDriver:
             u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
             v=self.state.v.replace(data=self.state.v.data * self._fric_decay),
         )
+        self.state = self._attach_driver_tracers_to_state(self.state)
 
         jax.block_until_ready(self.state.u.data)
         t_jit = time.time() - t_jit_start
         logger.info(f"  JIT compiled in {t_jit:.1f}s")
+
+        _diag_dtype = self.state.p_s.data.dtype
+        _diag_zero = jnp.zeros(shape_2d, dtype=_diag_dtype)
+        diag_precip_accum = (phys_out.precip + precip_ls) * DT
+        diag_shflx_accum = (
+            phys_out.shflx if phys_out.shflx is not None else _diag_zero
+        ) * DT
+        diag_lhflx_accum = (
+            phys_out.lhflx if phys_out.lhflx is not None else _diag_zero
+        ) * DT
+        diag_elapsed_sec = float(DT)
 
         # --- Main time loop ---
         t_start = time.time()
@@ -2020,7 +2142,9 @@ class ModelDriver:
             sst, sic = self.get_sst_sic(day)
 
             # (a) Dynamics
+            self.state = self._attach_driver_tracers_to_state(self.state)
             self.state = self.model.step_with_physics(self.state, DT)
+            self._sync_driver_tracers_from_state(self.state)
 
             # (b) Physics with radiation sub-cycling
             need_rad_py = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
@@ -2088,9 +2212,9 @@ class ModelDriver:
                 )
 
             # Saturation adjustment
-            if MICROPHYSICS == "none":
-                p_full = self.state.p_s.data[..., None] * sigma_full
-                q_sat = saturation_mixing_ratio(new_T, p_full)
+            if DO_SAT_ADJUST:
+                p_full = self.sigma.pressure_at_full(self.state.p_s.data)
+                q_sat = saturation_specific_humidity(new_T, p_full)
                 excess = jnp.maximum(self.q_v - q_sat, 0.0)
                 self.q_v = self.q_v - excess
                 new_T = new_T + constants.L_v * excess / constants.c_pd
@@ -2131,10 +2255,25 @@ class ModelDriver:
                 u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
                 v=self.state.v.replace(data=self.state.v.data * self._fric_decay),
             )
+            self.state = self._attach_driver_tracers_to_state(self.state)
+
+            diag_precip_accum = diag_precip_accum + (phys_out.precip + precip_ls) * DT
+            diag_shflx_accum = diag_shflx_accum + (
+                phys_out.shflx if phys_out.shflx is not None else _diag_zero
+            ) * DT
+            diag_lhflx_accum = diag_lhflx_accum + (
+                phys_out.lhflx if phys_out.lhflx is not None else _diag_zero
+            ) * DT
+            diag_elapsed_sec += float(DT)
 
             # Diagnostics
             elapsed_day = day - START_DAY
             if (step + 1) % diag_interval == 0:
+                window_sec = max(float(diag_elapsed_sec), 1.0)
+                seg_precip = diag_precip_accum
+                seg_shflx = diag_shflx_accum / window_sec
+                seg_lhflx = diag_lhflx_accum / window_sec
+
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
@@ -2144,7 +2283,7 @@ class ModelDriver:
                     q_r=self.q_r,
                     sst=sst,
                     sic=sic,
-                    precip_total=phys_out.precip + precip_ls,
+                    precip_total=seg_precip / window_sec,
                     sw_up_toa=phys_out.sw_up_toa,
                     lw_up_toa=phys_out.lw_up_toa,
                     sw_net_sfc=phys_out.sw_net_sfc,
@@ -2152,6 +2291,8 @@ class ModelDriver:
                     sw_down_toa=phys_out.sw_down_toa,
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
+                    shflx=seg_shflx,
+                    lhflx=seg_lhflx,
                 )
 
                 logger.info(f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "
@@ -2169,18 +2310,428 @@ class ModelDriver:
                 self._carry_aux = {
                     "held_sw_net_sfc": phys_out.sw_net_sfc,
                     "held_lw_net_sfc": phys_out.lw_net_sfc,
+                    "held_sw_up_toa": phys_out.sw_up_toa,
+                    "held_lw_up_toa": phys_out.lw_up_toa,
+                    "held_sw_down_toa": phys_out.sw_down_toa,
                     "conv_prog": conv_prog,
-                    "seg_precip": phys_out.precip,
+                    "seg_precip": seg_precip,
+                    "seg_shflx": diag_shflx_accum,
+                    "seg_lhflx": diag_lhflx_accum,
                 }
 
                 # Segment callback for coupled integration
                 if self._segment_callback is not None:
-                    self._segment_callback(self, day, DT)
+                    self._segment_callback(self, day, window_sec)
+
+                diag_precip_accum = jnp.zeros_like(diag_precip_accum)
+                diag_shflx_accum = jnp.zeros_like(diag_shflx_accum)
+                diag_lhflx_accum = jnp.zeros_like(diag_lhflx_accum)
+                diag_elapsed_sec = 0.0
 
             # Checkpoint
             if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:
                 self.save_checkpoint(step + 1, day)
 
+        return self._finalize_run(
+            run_status, t_jit, t_start,
+            n_steps_total, START_DAY, N_DAYS, checkpoint_interval,
+        )
+
+    def _run_per_step_cdgrid_native(self, start_step: int = 0, start_day: float | None = None) -> str:
+        """Run per-step cdgrid integrations with native FV3 D-grid winds.
+
+        This avoids the legacy HydrostaticState -> FV3HydrostaticState ->
+        HydrostaticState roundtrip on every dynamics step. The driver still
+        exposes ``self.state`` as a cell-centre HydrostaticState snapshot for
+        diagnostics, callbacks, and checkpointing, but the prognostic
+        dynamics state remains in FV3/D-grid form throughout the loop.
+        """
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import fv3_to_hydrostatic, hydrostatic_to_fv3
+        from legoesm.core.state import FV3HydrostaticState
+        from legoesm.core.precision import cast_pytree
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+        from legoesm.forcing.external import get_solar_forcing_at_time
+
+        hyperdiffusion_3d = self._hyperdiffusion_3d_fn
+
+        ctx = self._prepare_run_context(
+            start_step,
+            start_day,
+            restore_carry=bool(start_step and start_step > 0),
+        )
+        cfg = ctx["cfg"]
+        DT = ctx["DT"]
+        N_DAYS = ctx["N_DAYS"]
+        START_DAY = ctx["START_DAY"]
+        MICROPHYSICS = cfg.microphysics
+        DO_SAT_ADJUST = bool(cfg.sat_adjust_without_microphysics) and MICROPHYSICS == "none"
+        RAD_UPDATE_STEPS = ctx["RAD_UPDATE_STEPS"]
+        n_steps_total = ctx["n_steps_total"]
+        diag_interval = ctx["diag_interval"]
+        checkpoint_interval = ctx["checkpoint_interval"]
+        dsigma = ctx["dsigma"]
+        shape_2d = ctx["shape_2d"]
+        current_s_0 = ctx["current_s_0"]
+        solar_weights = ctx["solar_weights"]
+        step_unified = ctx["step_unified"]
+        held_dT_rad = ctx["held_dT_rad"]
+        held_sw_net_sfc = ctx["held_sw_net_sfc"]
+        held_lw_net_sfc = ctx["held_lw_net_sfc"]
+        held_sw_up_toa = ctx["held_sw_up_toa"]
+        held_lw_up_toa = ctx["held_lw_up_toa"]
+        held_sw_down_toa = ctx["held_sw_down_toa"]
+        conv_prog = ctx["conv_prog"]
+        o3_vmr = ctx["o3_vmr"]
+        aerosol_od = ctx["aerosol_od"]
+        ghg_vmr = ctx["ghg_vmr"]
+        lat_deg_grid = ctx["lat_deg_grid"]
+
+        FIX_MOISTURE = cfg.fix_moisture
+        if FIX_MOISTURE:
+            target_moisture = compute_global_moisture(
+                self.q_v, self.state.p_s.data, dsigma, self.grid,
+            )
+
+        run_status = "COMPLETED"
+        logger.info(
+            "Starting native cdgrid per-step run: "
+            f"{n_steps_total - start_step} steps, {N_DAYS} days"
+        )
+
+        hydro_state = self._attach_driver_tracers_to_state(self.state)
+        dyn_state = hydrostatic_to_fv3(hydro_state, self.model.cdgrid)
+
+        def _sync_hydro_snapshot_from_dyn(state_fv3: FV3HydrostaticState):
+            state_h = fv3_to_hydrostatic(state_fv3, self.model.cdgrid)
+            self._sync_driver_tracers_from_state(state_h)
+            state_h = self._attach_driver_tracers_to_state(state_h)
+            self.state = state_h
+            return state_h
+
+        def _apply_physics_to_dyn(
+            state_fv3: FV3HydrostaticState,
+            state_h,
+            *,
+            day_of_year: float,
+            seconds_of_day: float,
+            sst,
+            sic,
+            need_rad_jax,
+            current_s_0_value,
+            solar_weights_value,
+            o3_vmr_value,
+            aerosol_od_value,
+            ghg_vmr_value,
+            held_tuple,
+            conv_prog_value,
+        ):
+            (
+                held_dT_rad_value,
+                held_sw_net_sfc_value,
+                held_lw_net_sfc_value,
+                held_sw_up_toa_value,
+                held_lw_up_toa_value,
+                held_sw_down_toa_value,
+            ) = held_tuple
+
+            phys_out, held_new = step_unified(
+                need_rad_jax,
+                state_h.T.data, state_h.p_s.data,
+                self.q_v, self.q_c, self.q_r, conv_prog_value,
+                state_h.u.data, state_h.v.data,
+                sst, sic, self._grid_lat, self._grid_lon,
+                day_of_year, seconds_of_day, DT,
+                solar_weights_value, current_s_0_value,
+                o3_vmr_value, aerosol_od_value,
+                held_dT_rad_value, held_sw_net_sfc_value, held_lw_net_sfc_value,
+                held_sw_up_toa_value, held_lw_up_toa_value, held_sw_down_toa_value,
+                ghg_vmr_override=ghg_vmr_value,
+            )
+            conv_prog_next = phys_out.conv_prog
+
+            new_T = state_h.T.data + DT * phys_out.dT_dt
+            if self._hs_newtonian_relax is not None:
+                new_T = new_T + DT * self._hs_newtonian_relax(
+                    state_h.T.data, state_h.p_s.data, self._grid_lat,
+                )
+
+            self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+            self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
+            self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+
+            if self.tracer_registry.has("q_i"):
+                self.q_i = jnp.maximum(self.q_i + DT * phys_out.dq_i_dt, 0.0)
+                self.q_s = jnp.maximum(self.q_s + DT * phys_out.dq_s_dt, 0.0)
+                self.q_g = jnp.maximum(self.q_g + DT * phys_out.dq_g_dt, 0.0)
+                self.tracers["N_c"] = jnp.maximum(
+                    self.tracers["N_c"] + DT * phys_out.dN_c_dt, 0.0,
+                )
+                self.tracers["N_r"] = jnp.maximum(
+                    self.tracers["N_r"] + DT * phys_out.dN_r_dt, 0.0,
+                )
+                self.tracers["N_i"] = jnp.maximum(
+                    self.tracers["N_i"] + DT * phys_out.dN_i_dt, 0.0,
+                )
+
+            if DO_SAT_ADJUST:
+                p_full = self.sigma.pressure_at_full(state_h.p_s.data)
+                q_sat = saturation_specific_humidity(new_T, p_full)
+                excess = jnp.maximum(self.q_v - q_sat, 0.0)
+                self.q_v = self.q_v - excess
+                new_T = new_T + constants.L_v * excess / constants.c_pd
+                precip_ls = jnp.sum(
+                    excess * state_h.p_s.data[..., None] * dsigma, axis=-1
+                ) / (constants.g * DT)
+            else:
+                precip_ls = jnp.zeros(shape_2d, dtype=new_T.dtype)
+
+            if FIX_MOISTURE:
+                self.q_v = fix_moisture_hydrostatic(
+                    self.q_v, target_moisture,
+                    state_h.p_s.data, dsigma, self.grid,
+                )
+
+            self.q_v = jnp.maximum(
+                self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff),
+                0.0,
+            )
+
+            u_d_next = state_fv3.u_d.data
+            v_d_next = state_fv3.v_d.data
+            if hasattr(phys_out, "du_dt") and phys_out.du_dt is not None:
+                du_d_dt, dv_d_dt = center_to_dgrid_vector(
+                    phys_out.du_dt,
+                    phys_out.dv_dt,
+                    self.model.cdgrid,
+                )
+                u_d_next = u_d_next + DT * du_d_dt
+                v_d_next = v_d_next + DT * dv_d_dt
+
+            u_d_next = u_d_next * self._fric_decay
+            v_d_next = v_d_next * self._fric_decay
+
+            tracer_fields = self._build_state_tracer_fields(state_h)
+            state_fv3_next = state_fv3._replace(
+                u_d=state_fv3.u_d.replace(data=u_d_next),
+                v_d=state_fv3.v_d.replace(data=v_d_next),
+                T=state_fv3.T.replace(data=new_T),
+                p_s=state_fv3.p_s.replace(data=state_h.p_s.data),
+                phis=state_fv3.phis.replace(data=state_h.phis.data),
+                tracers=tracer_fields,
+            )
+
+            state_h_next = state_h._replace(
+                T=state_h.T.replace(data=new_T),
+                u=state_h.u.replace(data=fv3_to_hydrostatic(state_fv3_next, self.model.cdgrid).u.data),
+                v=state_h.v.replace(data=fv3_to_hydrostatic(state_fv3_next, self.model.cdgrid).v.data),
+                tracers=tracer_fields,
+            )
+            self.state = state_h_next
+
+            return state_fv3_next, state_h_next, phys_out, held_new, conv_prog_next, precip_ls
+
+        # --- JIT warmup ---
+        t_jit_start = time.time()
+        day = START_DAY + (start_step + 1) * DT / 86400.0
+        day_of_year, seconds_of_day = day_to_calendar(day)
+        sst, sic = self.get_sst_sic(day)
+        solar_now = get_solar_forcing_at_time(self._solar_config, day)
+        current_s_0 = float(solar_now["tsi"])
+        if self._use_solar_spectral:
+            solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
+        _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+        o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+            day, _phys_p_s, _phys_lat,
+        )
+
+        dyn_state = self.model.step(dyn_state, DT)
+        hydro_state = _sync_hydro_snapshot_from_dyn(dyn_state)
+        dyn_state, hydro_state, phys_out, held_new, conv_prog, precip_ls = _apply_physics_to_dyn(
+            dyn_state,
+            hydro_state,
+            day_of_year=day_of_year,
+            seconds_of_day=seconds_of_day,
+            sst=sst,
+            sic=sic,
+            need_rad_jax=jnp.bool_(True),
+            current_s_0_value=current_s_0,
+            solar_weights_value=solar_weights,
+            o3_vmr_value=o3_vmr,
+            aerosol_od_value=aerosol_od,
+            ghg_vmr_value=ghg_vmr,
+            held_tuple=(
+                held_dT_rad,
+                held_sw_net_sfc,
+                held_lw_net_sfc,
+                held_sw_up_toa,
+                held_lw_up_toa,
+                held_sw_down_toa,
+            ),
+            conv_prog_value=conv_prog,
+        )
+        (
+            held_dT_rad,
+            held_sw_net_sfc,
+            held_lw_net_sfc,
+            held_sw_up_toa,
+            held_lw_up_toa,
+            held_sw_down_toa,
+        ) = held_new
+
+        jax.block_until_ready(dyn_state.u_d.data)
+        t_jit = time.time() - t_jit_start
+        logger.info(f"  JIT compiled in {t_jit:.1f}s")
+
+        _diag_dtype = hydro_state.p_s.data.dtype
+        _diag_zero = jnp.zeros(shape_2d, dtype=_diag_dtype)
+        diag_precip_accum = (phys_out.precip + precip_ls) * DT
+        diag_shflx_accum = (
+            phys_out.shflx if phys_out.shflx is not None else _diag_zero
+        ) * DT
+        diag_lhflx_accum = (
+            phys_out.lhflx if phys_out.lhflx is not None else _diag_zero
+        ) * DT
+        diag_elapsed_sec = float(DT)
+
+        # --- Main time loop ---
+        t_start = time.time()
+        for step in range(start_step + 1, n_steps_total):
+            day = START_DAY + (step + 1) * DT / 86400.0
+            day_of_year, seconds_of_day = day_to_calendar(day)
+            sst, sic = self.get_sst_sic(day)
+
+            dyn_state = self.model.step(dyn_state, DT)
+            hydro_state = _sync_hydro_snapshot_from_dyn(dyn_state)
+
+            need_rad_py = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
+            need_rad_jax = jnp.bool_(need_rad_py)
+            if need_rad_py:
+                solar_now = get_solar_forcing_at_time(self._solar_config, day)
+                current_s_0 = float(solar_now["tsi"])
+                if self._use_solar_spectral:
+                    solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
+                _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+                o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+                    day, _phys_p_s, _phys_lat,
+                )
+
+            dyn_state, hydro_state, phys_out, held_new, conv_prog, precip_ls = _apply_physics_to_dyn(
+                dyn_state,
+                hydro_state,
+                day_of_year=day_of_year,
+                seconds_of_day=seconds_of_day,
+                sst=sst,
+                sic=sic,
+                need_rad_jax=need_rad_jax,
+                current_s_0_value=current_s_0,
+                solar_weights_value=solar_weights,
+                o3_vmr_value=o3_vmr,
+                aerosol_od_value=aerosol_od,
+                ghg_vmr_value=ghg_vmr,
+                held_tuple=(
+                    held_dT_rad,
+                    held_sw_net_sfc,
+                    held_lw_net_sfc,
+                    held_sw_up_toa,
+                    held_lw_up_toa,
+                    held_sw_down_toa,
+                ),
+                conv_prog_value=conv_prog,
+            )
+            (
+                held_dT_rad,
+                held_sw_net_sfc,
+                held_lw_net_sfc,
+                held_sw_up_toa,
+                held_lw_up_toa,
+                held_sw_down_toa,
+            ) = held_new
+
+            diag_precip_accum = diag_precip_accum + (phys_out.precip + precip_ls) * DT
+            diag_shflx_accum = diag_shflx_accum + (
+                phys_out.shflx if phys_out.shflx is not None else _diag_zero
+            ) * DT
+            diag_lhflx_accum = diag_lhflx_accum + (
+                phys_out.lhflx if phys_out.lhflx is not None else _diag_zero
+            ) * DT
+            diag_elapsed_sec += float(DT)
+
+            elapsed_day = day - START_DAY
+            if (step + 1) % diag_interval == 0:
+                window_sec = max(float(diag_elapsed_sec), 1.0)
+                seg_precip = diag_precip_accum
+                seg_shflx = diag_shflx_accum / window_sec
+                seg_lhflx = diag_lhflx_accum / window_sec
+
+                diag_info = self._sync_and_collect_diagnostics(
+                    elapsed_day=elapsed_day,
+                    day=day,
+                    state=hydro_state,
+                    q_v=self.q_v,
+                    q_c=self.q_c,
+                    q_r=self.q_r,
+                    sst=sst,
+                    sic=sic,
+                    precip_total=seg_precip / window_sec,
+                    sw_up_toa=held_sw_up_toa,
+                    lw_up_toa=held_lw_up_toa,
+                    sw_net_sfc=held_sw_net_sfc,
+                    lw_net_sfc=held_lw_net_sfc,
+                    sw_down_toa=held_sw_down_toa,
+                    T_ice=cfg.T_ice,
+                    lat_deg_grid=lat_deg_grid,
+                    shflx=seg_shflx,
+                    lhflx=seg_lhflx,
+                )
+
+                _is_root = (self._mpi_rank is None or self._mpi_rank == 0)
+                if _is_root:
+                    elapsed_wall = time.time() - t_start
+                    rate = elapsed_day / (elapsed_wall + 1e-10)
+                    logger.info(
+                        f"  Day {elapsed_day:6.0f}: T={diag_info.get('mean_T', 0):.1f}K, "
+                        f"max_v={diag_info.get('max_v', 0):.1f}m/s "
+                        f"({rate:.1f} sim-days/s)"
+                    )
+
+                if _is_root:
+                    error = self.diagnostics.check_stability(self.state, elapsed_day)
+                else:
+                    error = None
+                if self._mpi_rank is not None:
+                    from mpi4py import MPI
+                    error = MPI.COMM_WORLD.bcast(error, root=0)
+                if error:
+                    if _is_root:
+                        logger.warning(f"  {error}")
+                    run_status = error
+                    break
+
+                self._carry_aux = {
+                    "held_sw_net_sfc": phys_out.sw_net_sfc,
+                    "held_lw_net_sfc": phys_out.lw_net_sfc,
+                    "held_sw_up_toa": phys_out.sw_up_toa,
+                    "held_lw_up_toa": phys_out.lw_up_toa,
+                    "held_sw_down_toa": phys_out.sw_down_toa,
+                    "conv_prog": conv_prog,
+                    "seg_precip": seg_precip,
+                    "seg_shflx": diag_shflx_accum,
+                    "seg_lhflx": diag_lhflx_accum,
+                }
+
+                if self._segment_callback is not None:
+                    self._segment_callback(self, day, window_sec)
+
+                diag_precip_accum = jnp.zeros_like(diag_precip_accum)
+                diag_shflx_accum = jnp.zeros_like(diag_shflx_accum)
+                diag_lhflx_accum = jnp.zeros_like(diag_lhflx_accum)
+                diag_elapsed_sec = 0.0
+
+            if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:
+                self.save_checkpoint(step + 1, day)
+
+        self.state = hydro_state
+        self.state = self._attach_driver_tracers_to_state(self.state)
         return self._finalize_run(
             run_status, t_jit, t_start,
             n_steps_total, START_DAY, N_DAYS, checkpoint_interval,

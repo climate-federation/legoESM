@@ -12,12 +12,16 @@ from legoesm import constants
 from legoesm.coupler.config import CouplerConfig
 from legoesm.coupler.coupling_fields import AtmToSurface
 from legoesm.core.state import HydrostaticState, NonHydrostaticState
-from legoesm.grids.vertical import SigmaCoordinate
+from legoesm.grids.protocol import VerticalCoordProtocol
+
+
+def _virtual_temperature(T, q_v):
+    return T * (1.0 + 0.61 * q_v)
 
 
 def extract_atm_to_surface(
     state: HydrostaticState,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: VerticalCoordProtocol,
     config: CouplerConfig,
     sw_down: jnp.ndarray | None = None,
     lw_down: jnp.ndarray | None = None,
@@ -35,7 +39,7 @@ def extract_atm_to_surface(
     ----------
     state : HydrostaticState
         Current atmospheric state.
-    sigma_coord : SigmaCoordinate
+    sigma_coord : VerticalCoordProtocol
         Vertical coordinate for pressure reconstruction.
     config : CouplerConfig
         Coupler configuration.
@@ -49,8 +53,8 @@ def extract_atm_to_surface(
     shape = state.p_s.data.shape  # (6, n, n)
     p_s = state.p_s.data
 
-    # Lowest-level pressure from sigma coordinate
-    p_lowest = sigma_coord.sigma_full[-1] * p_s
+    # Lowest-level pressure from the active vertical coordinate.
+    p_lowest = sigma_coord.pressure_at_full(p_s)[..., -1]
 
     # Lowest-level fields
     T_lowest = state.T.data[..., -1]
@@ -66,7 +70,7 @@ def extract_atm_to_surface(
         q_lowest = jnp.zeros(shape)
 
     # Air density from ideal gas law
-    rho_lowest = p_lowest / (constants.R_d * T_lowest)
+    rho_lowest = p_lowest / (constants.R_d * _virtual_temperature(T_lowest, q_lowest))
 
     # Default unavailable fields to zero with flags
     zero = jnp.zeros(shape)

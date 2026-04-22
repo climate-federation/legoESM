@@ -12,11 +12,18 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
+def virtual_temperature(T, q_v=None):
+    """Return virtual temperature for moist-hydrostatic geometry."""
+    if q_v is None:
+        return T
+    return T * (1.0 + 0.61 * q_v)
+
+
 # ---------------------------------------------------------------------------
 # Height / thickness from hydrostatic balance
 # ---------------------------------------------------------------------------
 
-def compute_heights_from_sigma(T, p_half):
+def compute_heights_from_sigma(T, p_half, q_v=None):
     """Approximate full- and half-level heights from hydrostatic balance.
 
     Parameters
@@ -25,6 +32,9 @@ def compute_heights_from_sigma(T, p_half):
         Temperature at full levels [K].
     p_half : array (ncol, nlev+1)
         Pressure at half levels [Pa], TOA-first.
+    q_v : array (ncol, nlev), optional
+        Specific humidity [kg/kg]. When provided, virtual temperature is
+        used in the hypsometric thickness.
 
     Returns
     -------
@@ -37,8 +47,9 @@ def compute_heights_from_sigma(T, p_half):
 
     dp = p_half[:, 1:] - p_half[:, :-1]
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T_hydro = virtual_temperature(T, q_v)
     dz = jnp.abs(
-        constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+        constants.R_d * T_hydro * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
 
     # Integrate from surface upward
@@ -50,7 +61,7 @@ def compute_heights_from_sigma(T, p_half):
     return z_full, z_half
 
 
-def compute_layer_dz(T, p_half):
+def compute_layer_dz(T, p_half, q_v=None):
     """Approximate layer thicknesses from hydrostatic balance.
 
     Parameters
@@ -59,6 +70,9 @@ def compute_layer_dz(T, p_half):
         Temperature at full levels [K].
     p_half : array (ncol, nlev+1)
         Pressure at half levels [Pa], TOA-first.
+    q_v : array (ncol, nlev), optional
+        Specific humidity [kg/kg]. When provided, virtual temperature is
+        used in the hypsometric thickness.
 
     Returns
     -------
@@ -67,8 +81,9 @@ def compute_layer_dz(T, p_half):
     """
     dp = p_half[:, 1:] - p_half[:, :-1]
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T_hydro = virtual_temperature(T, q_v)
     return jnp.abs(
-        constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+        constants.R_d * T_hydro * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
 
 
@@ -76,8 +91,8 @@ def compute_layer_dz(T, p_half):
 # Density from ideal-gas law
 # ---------------------------------------------------------------------------
 
-def compute_rho(T, p_full):
-    """Compute air density from the ideal gas law: rho = p / (R_d * T).
+def compute_rho(T, p_full, q_v=None):
+    """Compute air density from the ideal gas law.
 
     Parameters
     ----------
@@ -85,12 +100,16 @@ def compute_rho(T, p_full):
         Temperature [K].
     p_full : array
         Pressure at full levels [Pa].
+    q_v : array, optional
+        Specific humidity [kg/kg]. When provided, density uses virtual
+        temperature.
 
     Returns
     -------
     array : Density [kg/m^3].
     """
-    return p_full / (constants.R_d * jnp.clip(T, 1.0, None))
+    T_hydro = virtual_temperature(T, q_v)
+    return p_full / (constants.R_d * jnp.clip(T_hydro, 1.0, None))
 
 
 # ---------------------------------------------------------------------------
@@ -231,10 +250,8 @@ def extract_spectral_pe_columns(fields, sigma_coord, state=None):
     nlev = sigma_coord.n_levels
     n_lat, n_lon = p_s.shape
 
-    sigma_full = sigma_coord.sigma_full
-    sigma_half = sigma_coord.sigma_half
-    p_full = p_s[..., None] * sigma_full
-    p_half = p_s[..., None] * sigma_half
+    p_full = sigma_coord.pressure_at_full(p_s)
+    p_half = sigma_coord.pressure_at_half(p_s)
 
     ncol = n_lat * n_lon
     T_col = T.reshape(ncol, nlev)

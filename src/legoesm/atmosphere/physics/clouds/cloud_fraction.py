@@ -29,7 +29,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm import constants
 
 
@@ -156,7 +156,7 @@ def compute_cloud_properties(
         Cloud fraction and water/ice paths for radiation.
     """
     # Saturation mixing ratio and relative humidity
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 
     # --- Cloud fraction ---

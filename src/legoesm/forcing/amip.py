@@ -469,10 +469,14 @@ def get_forcing_at_time(
     times = forcing.times
     ntime = times.shape[0]
 
-    # Wrap day cyclically so multi-year runs repeat the annual cycle
-    # instead of clamping at the last record.
-    period = times[-1] - times[0]
-    day = jnp.where(period > 0, times[0] + (day - times[0]) % period, day)
+    if forcing.config.dataset == "custom":
+        # Initialized / case-specific forcing should not wrap back to day 0 at
+        # the final prepared timestamp. Clamp to the prepared window instead.
+        day = jnp.clip(day, times[0], times[-1])
+    else:
+        # Climatological AMIP forcing repeats annually for multi-year runs.
+        period = times[-1] - times[0]
+        day = jnp.where(period > 0, times[0] + (day - times[0]) % period, day)
 
     # Find bracketing indices
     idx = jnp.searchsorted(times, day, side="right") - 1

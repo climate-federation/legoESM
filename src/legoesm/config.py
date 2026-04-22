@@ -237,6 +237,7 @@ class Config:
             model_type=dynamics,
             discretization=discretization,
             dt=float(atm.get("dt_seconds", 600)),
+            A_h_scale=float(atm.get("A_h_scale", 1.0)),
             hyperdiff_scale=float(atm.get("hyperdiffusion_coeff", 1.0)),
             conservation_fixer=d.get("conservation", {}).get("fix_mass", True),
             fix_mass=d.get("conservation", {}).get("fix_mass", True),

@@ -153,8 +153,8 @@ def _make_hydrostatic_gwd(
         shape_3d = T.shape
         shape_2d = p_s.shape
 
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
         T_col = T.reshape(ncol, nlev)
@@ -176,8 +176,8 @@ def _make_hydrostatic_gwd(
             )
             return tendencies, gwd_spectrum_out
 
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
 
         # Latitude: use grid.lat_face if available, else zeros
         lat = _get_lat_hydrostatic(grid, ncol)
@@ -428,10 +428,8 @@ def _make_spectral_pe_gwd(
         nlev = sigma_coord.n_levels
         n_lat, n_lon = p_s.shape
 
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full
-        p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         ncol = n_lat * n_lon
         T_col = T.reshape(ncol, nlev)
@@ -453,8 +451,8 @@ def _make_spectral_pe_gwd(
             )
             return tendencies, gwd_spectrum_out
 
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
 
         # Latitude from Gaussian grid
         lat = jnp.broadcast_to(grid.lat[:, None], (n_lat, n_lon)).reshape(ncol)

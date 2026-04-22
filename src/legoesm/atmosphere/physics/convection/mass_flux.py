@@ -30,11 +30,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
 )
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.convection.config import MassFluxConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
@@ -62,13 +63,13 @@ def diagnose_mass_flux_closure(
     config: MassFluxConfig = MassFluxConfig(),
 ) -> MassFluxClosureDiagnostics:
     """Diagnose closure terms before computing mass-flux tendencies."""
-    del q_v  # retained for interface symmetry with full convection call
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
 
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+    T_hydro = virtual_temperature(T, q_v)
+    dz = constants.R_d * T_hydro * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     dz = jnp.abs(dz)
-    rho = p_full / (constants.R_d * jnp.clip(T, 1.0, None))
+    rho = p_full / (constants.R_d * jnp.clip(T_hydro, 1.0, None))
 
     dz_rev = dz[:, ::-1]
     z = jnp.cumsum(dz_rev, axis=1)[:, ::-1]
@@ -127,8 +128,8 @@ def mass_flux_convection_from_closure(
 
     # Updraft moisture starts from a saturated cloud-base parcel and is then
     # diluted toward the environmental humidity profile by entrainment.
-    q_sat_u = saturation_mixing_ratio(T_u, p_full)
-    q_sat_base = saturation_mixing_ratio(T[:, -1:], p_full[:, -1:])
+    q_sat_u = saturation_specific_humidity(T_u, p_full)
+    q_sat_base = saturation_specific_humidity(T[:, -1:], p_full[:, -1:])
     q_u = dilution * q_sat_base + (1.0 - dilution) * q_v
 
     dT_dz = jnp.zeros_like(T)
@@ -153,7 +154,7 @@ def mass_flux_convection_from_closure(
     dT_dt = dT_subsidence + dT_detrain  # (ncol, nlev)
     dq_v_dt = dq_subsidence + dq_detrain  # (ncol, nlev)
 
-    condensate = jnp.clip(q_u - saturation_mixing_ratio(T_u, p_full), 0.0, None)
+    condensate = jnp.clip(q_u - saturation_specific_humidity(T_u, p_full), 0.0, None)
     precipitation = jnp.clip(
         jnp.sum(
             config.delta_0 * M_profile * condensate * dz,

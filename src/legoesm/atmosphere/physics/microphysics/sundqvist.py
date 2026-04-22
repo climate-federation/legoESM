@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -54,13 +54,20 @@ def diagnose_sundqvist_process_rates(
     sharpness = config.sigmoid_sharpness
 
     # Saturation
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     RH = q_v / jnp.clip(q_sat, 1e-10)
 
-    # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
+    # 1. Smooth condensation activation.
+    #
+    # RH_crit controls the onset of large-scale condensation via the smooth
+    # activation factor ``f``.  The actual condensed amount must still be the
+    # supersaturated excess above q_sat, not the excess above RH_crit * q_sat;
+    # otherwise the scheme spuriously condenses in subsaturated columns whenever
+    # RH lies between RH_crit and 1.  That produces unphysical heating/rain
+    # spikes in initialized forecasts.
     f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
     condensation = (
-        f * jnp.maximum(q_v - config.RH_crit * q_sat, 0.0) / dt
+        f * jnp.maximum(q_v - q_sat, 0.0) / dt
     )  # [kg/kg/s]
 
     # 2. Autoconversion
