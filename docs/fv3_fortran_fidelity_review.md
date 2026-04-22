@@ -372,11 +372,11 @@ Since iter-762/768 localize mode A at cells adjacent to the 8 cube vertices, and
 - iter-767 vector-swap halo fill: W2 16x worse
 - iter-769 skip corner smoothing: W2 6.5x worse
 
-All four make W2 worse.  The current combination (2-pt halo + cascaded 4-point tendency smoothing at corners) appears to be a local minimum in the stability landscape of the A-L + RK3 + boundary_fix production path at C36.
+All four substitutions tested make W2 worse.  (Iter-772b note: this does not establish the current combination is a global "local minimum"; many other substitutions remain untested.  The accurate statement is that these four specific single-knob swaps were each worse.)
 
 **Iter-769 source-code status.**  `boundary_fix_skip_corners` kwarg RETAINED in `fv3_sw_tendencies` (default False) and exposed on `CDGridShallowWaterConfig` (default False) as an opt-in diagnostic path.  Matrix default and production path UNCHANGED.  Sentinel `test_boundary_fix_skip_corners_is_known_worse` pins the OFF baseline `< 0.20`, ON path `> 0.50`, and ratio `> 3.0`.
 
-**Iter-770+ next directions.**  The combined iter-765/766/767/769 evidence suggests the current A-L + RK3 + boundary_fix path is at a local minimum for mode A.  Further reduction requires:
+**Iter-770+ next directions.**  The four substitutions tested through iter-769 each made W2 worse.  Candidates still untested:
 
 - Structural port of Fortran c_sw + d_sw FB (blocked on ng=3 halo infrastructure).
 - Ablation of the A-L metric coefficients at cube-vertex D-grid corners (candidate #1 from iter-768), which has NOT been tested yet.
@@ -384,7 +384,7 @@ All four make W2 worse.  The current combination (2-pt halo + cascaded 4-point t
 
 **Deliverable.**  `boundary_fix_skip_corners` kwarg added, diagnostic script `scripts/diag_iter769_boundary_fix_skip_corners.py`, sentinel `test_boundary_fix_skip_corners_is_known_worse`.  All 10 TestW2BoundaryErrorBudget sentinels pass.  Matrix + ocean unchanged.
 
-**Process.**  33rd iter in iter-752-769 chain.  Fourth structural cube-corner intervention falsified.  Combined result confirms the current pipeline is at a local minimum.
+**Process.**  33rd iter in iter-752-769 chain.  Fourth structural cube-corner substitution tested; fourth one that made W2 worse than the current default.
 
 ### Iter-770 — Face-local localization of mode-A peaks
 
@@ -494,9 +494,12 @@ Per iter-771b's revised candidate list ("Ablation: force grad_c10 = 0 at the 16 
 | OFF (unablated default)            | 2.07e−4  | 1.53e−3  | 1.59e−01  |
 | ON (`c10 = 0` at 16 peak corners)  | **2.18e−3**| **1.54e−2**| **4.96e+00 (31× BLOWUP)** |
 
-**Finding.**  Zeroing `grad_c10` at the 16 peak-updating D-grid corners makes W2 v_ll_Linf ~31× worse, h_L2 ~10.5× worse.  The c10 off-diagonal coefficient is GEOMETRICALLY LOAD-BEARING at these corners — removing it causes the stencil to misrepresent the grid metric and amplifies error.
+**Observation.**  Zeroing `grad_c10` at the 16 peak-updating D-grid corners makes W2 v_ll_Linf ~31× worse, h_L2 ~10.5× worse.  The ablation shows that the ZERO substitution at these corners is strictly worse than the current value.  It does NOT show that the current magnitude of c10 is geometrically optimal — only that the specific substitution `c10 → 0` is harmful.
 
-**Interpretation.**  The iter-771b observation (|c10| ~ 9× interior magnitude at peak-updating corners) reflects a GEOMETRICALLY CORRECT metric representation of the non-orthogonal cubed-sphere grid at those positions, not a correctable numerical error.  The amplification does not indicate a bug in the metric construction.
+**Scope limits (iter-772b, Codex stop-time review).**  The ablation tested ONE substitution (full zero) at ONE set of 16 corners.  It does NOT establish:
+- That the current c10 magnitude is the best possible at these corners (e.g. a smaller non-zero value might be better).
+- That other substitutions (reducing c10 to 0.5× current, zeroing c01 instead, modifying c00/c11) would also be worse.
+- That the off-diagonal coupling at these corners is "the correct geometric representation" of the cubed-sphere non-orthogonality — verifying that requires comparing our derivation against the Fortran oracle, which iter-772 did not do.
 
 **What iter-772 established (combined with 765/766/767/769/771).**  Five distinct structural candidates at cube-corner / near-corner D-grid positions have now been tested and found to be either load-bearing or already Fortran-faithful in magnitude:
 
@@ -508,7 +511,7 @@ Per iter-771b's revised candidate list ("Ablation: force grad_c10 = 0 at the 16 
 | 769  | skip boundary_fix corner smoothing        | 6.5× blowup — CONFIRMED LOAD-BEARING |
 | 772  | zero grad_c10 at peak-updating corners    | 31× blowup — CONFIRMED LOAD-BEARING |
 
-The current combination of (2-pt halo corner fill + cascaded 4-point corner smoothing + non-orthogonal metric at near-corner D-grid corners) is simultaneously a LOCAL MINIMUM for W2 v-wind stability AND the correct metric representation.  Further mode-A reduction cannot be achieved by tuning any one of these five knobs; it requires a joint structural change.
+These five specific single-knob substitutions each make W2 worse.  The combined result does NOT prove that "no single-knob fix exists" (many other knobs — c01, c00, c11, partial-zero c10, alternative corner-fill recipes, different smoothing weights — are untested), nor that the current values are "geometrically correct".  What the evidence DOES support: the specific substitutions tested across iter-765/766/767/769/772 all fail to reduce mode A.  Further investigation should either (a) test a substitution that has not yet been ablated, or (b) step outside the single-knob-at-a-time paradigm.
 
 **Iter-773+ next directions.**
 - Circulation-based vorticity stencil at cube-vertex D-grid corners (iter-768 candidate #2, still untested).  This is the only remaining low-cost structural diagnostic.
@@ -517,4 +520,4 @@ The current combination of (2-pt halo corner fill + cascaded 4-point corner smoo
 
 **Deliverable.**  `scripts/diag_iter772_ablate_c10_peak_corners.py` with in-place cdgrid metric mutation via `._replace(grad_c10=...)`.  No source-code change.  No new sentinel (the iter-769 sentinel `test_boundary_fix_skip_corners_is_known_worse` already pattern-matches this kind of "zero a load-bearing knob" failure).  All 10 TestW2BoundaryErrorBudget sentinels pass.
 
-**Process.**  36th iter in iter-752-772 chain.  Completes the ablation from iter-771b's revised candidate list.  Fifth structural mode-A knob confirmed to be either load-bearing or correct — no single-knob fix available.
+**Process.**  36th iter in iter-752-772 chain.  Completes the ablation from iter-771b's revised candidate list.  Fifth single-knob substitution tested; fifth one that made W2 worse than the default.
