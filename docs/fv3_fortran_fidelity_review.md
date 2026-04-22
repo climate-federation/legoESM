@@ -385,3 +385,45 @@ All four make W2 worse.  The current combination (2-pt halo + cascaded 4-point t
 **Deliverable.**  `boundary_fix_skip_corners` kwarg added, diagnostic script `scripts/diag_iter769_boundary_fix_skip_corners.py`, sentinel `test_boundary_fix_skip_corners_is_known_worse`.  All 10 TestW2BoundaryErrorBudget sentinels pass.  Matrix + ocean unchanged.
 
 **Process.**  33rd iter in iter-752-769 chain.  Fourth structural cube-corner intervention falsified.  Combined result confirms the current pipeline is at a local minimum.
+
+### Iter-770 — Face-local localization of mode-A peaks
+
+Per iter-769's open direction "investigate cells 1-2 steps inside cube vertices", iter-770 extends the iter-768 peak locator from regridded lat-lon coordinates to the pre-regrid per-face `v_north` field, reporting face index + face-local `(i, j)` + Chebyshev distance to the nearest cube-corner cell.
+
+**Method** (`scripts/diag_iter770_face_local_peak_locator.py`; committed output at `diagnostics/iter770_output/iter770_face_local_peaks.txt`).  Canonical W2 C36 matrix config at t=1 day.  `v_north` via `cell_centre_angles_from_4edge`.  Chebyshev distance computed against the 4 cube-corner cell positions per face `{(0,0), (0,n-1), (n-1,0), (n-1,n-1)}`.
+
+**Result** (top 10 peaks, C36):
+
+| rank | \|v_north\| | face | (i, j)    | lat     | lon       | zone       | cheb |
+|------|-----------|------|-----------|---------|-----------|------------|------|
+| 1    | 1.879e−01 | 2    | (34, 35)  | 35.74°  | −138.75°  | **EDGE**   | 1    |
+| 2    | 1.873e−01 | 0    | (34, 0)   | −35.74° | 41.25°    | **EDGE**   | 1    |
+| 3    | 1.866e−01 | 2    | (34, 0)   | −35.74° | −138.75°  | **EDGE**   | 1    |
+| 4    | 1.860e−01 | 0    | (34, 35)  | 35.74°  | 41.25°    | **EDGE**   | 1    |
+| 5    | 1.718e−01 | 2    | (35, 35)  | 34.66°  | −136.25°  | CORNER     | 0    |
+| 6    | 1.712e−01 | 0    | (35, 0)   | −34.66° | 43.75°    | CORNER     | 0    |
+| 7    | 1.710e−01 | 2    | (35, 0)   | −34.66° | −136.25°  | CORNER     | 0    |
+| 8    | 1.703e−01 | 0    | (35, 35)  | 34.66°  | 43.75°    | CORNER     | 0    |
+| 9    | 1.404e−01 | 2    | (35, 31)  | 25.77°  | −136.25°  | EDGE       | 4    |
+| 10   | 1.402e−01 | 0    | (35, 4)   | −25.77° | 43.75°    | EDGE       | 4    |
+
+**Key finding.**  The top-4 peaks are on EDGE cells at Chebyshev distance 1 from a cube corner (cell indices `(34, 0)`, `(34, n-1)`, etc.).  The next-4 peaks are AT corner cells.  The top peak amplitude (0.188 at edge) is 9.4 % larger than the corner-cell peak (0.172).
+
+**Observation.**  The peak mode-A amplitude is at edge cells 1 step inside from cube corners, NOT at the corner cells themselves.  The `boundary_fix` code applies different operations at these cell categories — this is observable from the source but iter-770 does not demonstrate the code difference EXPLAINS the amplitude difference:
+
+- CORNER cells `(0,0)`, `(0,n-1)`, `(n-1,0)`, `(n-1,n-1)`: receive both a row-boundary update and a column-boundary update (cascaded); observed `|v_north|` ≈ 0.17.
+- EDGE cells such as `(n-2, 0)`: receive ONLY the column-boundary update; observed `|v_north|` ≈ 0.19.
+
+Whether the difference between cascaded and single-pass smoothing is causally responsible for the 0.17-vs-0.19 split would require an ablation (swap single-pass for cascaded at the edge cells, or vice versa) and is deferred to iter-771+.
+
+**Relation to iter-769.**  Iter-769 tested `boundary_fix_skip_corners` which changes only the 4 corner cells per face.  Iter-769's measurement reported v_ll_Linf = 1.04 on the ON path vs 0.159 default (~6.5× increase in the global maximum).  Iter-770 does NOT re-run iter-769's ON configuration with the face-local locator, so the face-local distribution under skip-corners is not verified here.  What iter-770 does establish: the default-path peak (0.188 m/s v_north) is at an edge cell at Chebyshev distance 1 from a corner, which is a different cell-index position than the 4 corner cells iter-769 selectively skipped.
+
+**Iter-771+ next directions.**  The near-corner edge cells are updated by the A-L gradient + vorticity stencils at D-grid corners adjacent to the cube vertex.  Candidate targets:
+
+- A-L metric coefficients (`grad_c00`/`c01`/`c10`/`c11`) at the D-grid corners near cube vertices.  Do they have a different magnitude or sign pattern than interior coefficients that could asymmetrically amplify v-wind?
+- Circulation-vorticity formula at cube-vertex D-grid corners (iter-768 candidate #2, still untested).
+- Whether an additional single-pass smoothing at the 4 near-corner edge cells per boundary segment reduces their mode-A amplitude without destabilizing the rest.  (Non-Fortran-faithful; only worth pursuing if iter-771/772 metric work does not resolve.)
+
+**Deliverable.**  `scripts/diag_iter770_face_local_peak_locator.py` + committed output at `diagnostics/iter770_output/iter770_face_local_peaks.txt`.  No source-code change.  No new sentinel (iter-768e sentinel already pins v_ll_Linf ≈ 0.159; iter-770 adds only localization detail).
+
+**Process.**  34th iter in iter-752-770 chain.  Purely diagnostic.  Establishes that mode-A peaks are at EDGE cells cheb=1 from corners, not at corner cells — reframing iter-771+ targeting away from corner halo/smoothing (which iter-765/766/767/769 have now exhausted) toward the A-L stencil coefficients at the D-grid corners that update these edge cells.
