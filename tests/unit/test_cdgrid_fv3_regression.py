@@ -4577,13 +4577,24 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"{shipped}.  Regenerate via "
                  f"`python {script} > {shipped}`."))
 
-        # Execute the shipped script as a subprocess.
+        # Execute the shipped script as a subprocess.  Codex iter-
+        # 768e-3 stop-time: use a CANONICAL env, not setdefault, so
+        # that invoking pytest with JAX_ENABLE_X64=0 or JAX_PLATFORMS=
+        # metal cannot drift the subprocess output.
         venv_python = repo_root / ".venv" / "bin" / "python"
         interpreter = (str(venv_python) if venv_python.exists()
                         else sys.executable)
         env = os.environ.copy()
-        env.setdefault("JAX_ENABLE_X64", "1")
-        env.setdefault("JAX_PLATFORMS", "cpu")
+        # FORCE (not setdefault) canonical precision + backend.  This
+        # makes the subprocess output reproducible across pytest
+        # invocation environments.
+        env["JAX_ENABLE_X64"] = "1"
+        env["JAX_PLATFORMS"] = "cpu"
+        # Also remove backend overrides that jax might otherwise see
+        # via other env vars.
+        for stale in ("JAX_PLATFORM_NAME", "JAX_DISABLE_JIT",
+                       "JAX_DEBUG_NANS"):
+            env.pop(stale, None)
         result = subprocess.run(
             [interpreter, str(script)],
             cwd=str(repo_root),
