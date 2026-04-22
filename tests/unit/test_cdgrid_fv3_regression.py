@@ -4787,6 +4787,120 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                      f"tampered.  Regenerate via `python {script} > "
                      f"{shipped}`; do NOT edit the file directly."))
 
+    def test_iter775_script_is_runnable_subprocess(self):
+        """Iter-775c sentinel (Codex stop-time): actually EXECUTE
+        `scripts/diag_iter775_w5_cross_test.py` as a subprocess
+        and verify its stdout matches the committed output and
+        the pinned values.
+
+        Iter-775b added a file-content sentinel that parses the
+        committed output but does NOT run the script.  Codex's
+        "new diagnostic script is not runnable as committed"
+        concern was that a script could have a syntax error or
+        import failure that the file-content sentinel would miss
+        (since the committed file is static).
+
+        This sentinel closes that gap by running the shipped
+        script end-to-end and asserting:
+        1. subprocess exits 0 (script is runnable).
+        2. stdout parses to alphas [1.000, 0.980] and pinned
+           mass_drift / h_linf ranges.
+        3. stdout agrees with committed output file content.
+
+        Environment: forces canonical JAX_ENABLE_X64=1 and
+        JAX_PLATFORMS=cpu per iter-768e-5 pattern.  Uses
+        .venv/bin/python if available.  300-second timeout.
+
+        Runtime: ~35-45s (similar to iter-768 subprocess sentinel).
+        Yes, this adds CI cost, but the alternative (silently
+        shipping a broken diagnostic) is worse.
+        """
+        import os
+        import re
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        script = (repo_root / "scripts"
+                   / "diag_iter775_w5_cross_test.py")
+        shipped = (repo_root / "diagnostics" / "iter775_output"
+                    / "iter775_w5_cross.txt")
+        self.assertTrue(script.exists(),
+            msg=f"iter-775 script missing at {script}")
+        self.assertTrue(shipped.exists(),
+            msg=f"iter-775 committed output missing at {shipped}")
+
+        venv_python = repo_root / ".venv" / "bin" / "python"
+        interpreter = (str(venv_python) if venv_python.exists()
+                        else sys.executable)
+        env = os.environ.copy()
+        env["JAX_ENABLE_X64"] = "1"
+        env["JAX_PLATFORMS"] = "cpu"
+        for stale in ("JAX_PLATFORM_NAME", "JAX_DISABLE_JIT",
+                       "JAX_DEBUG_NANS"):
+            env.pop(stale, None)
+        result = subprocess.run(
+            [interpreter, str(script)],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            msg=(f"iter-775 script failed to run (exit "
+                 f"{result.returncode}).\nstderr:\n"
+                 f"{result.stderr}"))
+        stdout = result.stdout
+
+        def _parse_two_lines(text: str, source: str):
+            matches = re.findall(
+                r"\s+(\d+\.\d+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)",
+                text)
+            self.assertGreaterEqual(
+                len(matches), 2,
+                msg=(f"{source} has fewer than 2 data lines."))
+            alphas = [float(m[0]) for m in matches[:2]]
+            mds = [float(m[1]) for m in matches[:2]]
+            hlinfs = [float(m[2]) for m in matches[:2]]
+            return alphas, mds, hlinfs
+
+        live_alphas, live_mds, live_hlinfs = _parse_two_lines(
+            stdout, "script stdout")
+        self.assertEqual(live_alphas, [1.000, 0.980],
+            msg=f"script stdout alphas: {live_alphas}")
+
+        # Pin mass_drifts and h_linfs to the same thresholds as
+        # test_iter775_w5_cross_test_artifact.
+        for md in live_mds:
+            self.assertLess(md, 1e-5)
+        for hlinf in live_hlinfs:
+            self.assertLess(abs(hlinf - 196.0) / 196.0, 0.05)
+
+        # Cross-check: script stdout matches committed file within
+        # 1% on mass_drift and h_linf.
+        file_alphas, file_mds, file_hlinfs = _parse_two_lines(
+            shipped.read_text(), f"committed file {shipped.name}")
+        self.assertEqual(live_alphas, file_alphas)
+        for md_l, md_f, alpha in zip(live_mds, file_mds, live_alphas):
+            rel = abs(md_l - md_f) / max(md_f, 1e-30)
+            # mass_drift is at noise floor; 50% tolerance because
+            # it's a relative error metric near zero.
+            self.assertLess(
+                rel, 0.5,
+                msg=(f"mass_drift alpha={alpha}: script {md_l:.3e} "
+                     f"vs committed {md_f:.3e}, rel {rel:.2%}.  "
+                     f"Regenerate the committed file via "
+                     f"`python {script} > {shipped}`."))
+        for hl_l, hl_f, alpha in zip(live_hlinfs, file_hlinfs, live_alphas):
+            rel = abs(hl_l - hl_f) / max(hl_f, 1e-30)
+            self.assertLess(
+                rel, 0.01,
+                msg=(f"h_linf alpha={alpha}: script {hl_l:.3e} vs "
+                     f"committed {hl_f:.3e}, rel {rel:.2%}."))
+
     def test_iter775_w5_cross_test_artifact(self):
         """Iter-775b sentinel (Codex): verify the committed iter-775
         W5 cross-test output at
