@@ -635,3 +635,41 @@ the two-test cross-validation is that α=0.98 reduces W2 without harming W5 or c
 **Deliverable.**  `scripts/diag_iter775_w5_cross_test.py` + committed output `diagnostics/iter775_output/iter775_w5_cross.txt`.  No source-code change.  No production default change.  No new sentinel.  All 10 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  39th iter in iter-752-775 chain.  Second positive finding in the chain: α=0.98 correction reduces W2 without harming W5.  Default still α=1.00 pending Fortran-oracle derivation comparison.
+
+### Iter-776 — Cosine bell C36 1-day transport distortion quantified
+
+User visual inspection (provided mid-iter-775) reported "slight distortion near 1 day" on the cosine bell height snapshot.  Iter-776 quantifies that observation.
+
+**Method** (`scripts/diag_iter776_cosine_bell_1day.py`; committed output at `diagnostics/iter776_output/iter776_cb_1day.txt`).  Runs the canonical matrix cosine bell config (C36, dt=1800s, β=π/4, `transport_step` + frozen `_d2a2c_vect` winds) for 1 day, then compares to the analytic exact solution (`cosine_bell_exact` — Eq. 25 of PL07 evaluated at reverse-rotated coordinates).  Cosine bell does NOT use the A-L gradient, so iter-774's `grad_c10` correction is irrelevant here.
+
+**Result** (C36, 1-day):
+
+| Metric        | Value      |
+|---------------|------------|
+| L1            | 1.198e−01  |
+| L2            | 1.168e−01  |
+| Linf          | 1.227e−01  |
+| Peak (exact)  | 990.43 m   |
+| Peak (C36 1d) | 896.29 m   |
+| Undershoot    | 9.50 %     |
+| Peak cell shift | 1 cell in j direction |
+
+**Observation.**  At t=1 day the cosine bell has lost ~9.5 % of its peak amplitude and the peak cell position has shifted by 1 cell (~2.4° lat).  The L1/L2/Linf error norms are ≈ 0.12.
+
+**Not a regression.**  These values match the matrix script's canonical PASS output (`L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01`) — they have been the reported matrix-PASS values since at least iter-760.  The matrix PASS threshold does not fire on this level of distortion, but the user's visual confirms it is observable and worth tracking.
+
+**Mechanism candidates** (untested in iter-776 — this iter is purely quantitative).
+- PPM truncation in the Lin-Rood operator-split sweep (`fv_tp_2d` at `src/legoesm/core/fv_tp_2d.py:459`).  PPM has inherent shape preservation limits; 10 % amplitude loss per day is high for a linear PPM but plausible at C36.
+- Halo handling at cube-corner passages via `pad_halo(halo=2)` in `fv_tp_2d`.  The bell crosses cube edges during the 1-day integration (start lon=−90°, end lat/lon depending on β=π/4 flow).
+- `_d2a2c_vect` contravariant-velocity computation at cube-corner cells.  Frozen winds are computed once at t=0; any cube-corner error in that computation propagates for the whole integration.
+
+**Cosine bell is different from W2 mode-A.**  W2's mode-A lives in `fv3_sw_tendencies`'s A-L gradient and vorticity chain.  Cosine bell's distortion lives in `fv_tp_2d`'s transport chain.  The two are structurally distinct; iter-765-774's cube-corner work on A-L does not affect cosine bell.
+
+**Iter-777+ candidates.**
+- Compare `fv_tp_2d` PPM sweep boundary handling to Fortran `tp_core.F90` (`fv_tp_2d` subroutine) at cube-corner cells.  Our Python `pad_halo(halo=2)` vs Fortran's `copy_corners` — is the boundary-halo treatment at cube corners faithful?
+- Measure the bell's peak amplitude at t=0.5, 1, 2, 3 days to characterize the amplitude-loss rate.  If it's uniform (not jump at cube-corner passage), the distortion is PPM truncation, not cube-corner-specific.
+- Test cosine bell at C48, C72, C96 to verify the expected PPM convergence order.
+
+**Deliverable.**  `scripts/diag_iter776_cosine_bell_1day.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  40th iter in iter-752-776 chain.  First iter to quantify the cosine bell visual artifact the user flagged.  Shifts iter-777+ investigation from W2 mode-A (A-L gradient) to cosine bell transport (PPM).
