@@ -427,3 +427,39 @@ Whether the difference between cascaded and single-pass smoothing is causally re
 **Deliverable.**  `scripts/diag_iter770_face_local_peak_locator.py` + committed output at `diagnostics/iter770_output/iter770_face_local_peaks.txt`.  No source-code change.  No new sentinel (iter-768e sentinel already pins v_ll_Linf ≈ 0.159; iter-770 adds only localization detail).
 
 **Process.**  34th iter in iter-752-770 chain.  Purely diagnostic.  Reports that the top-4 |v_north| peaks (0.186-0.188) are at EDGE cells at Chebyshev distance 1 from a corner, while the next-4 (0.170-0.172) are at corner cells themselves — a cell-position observation that reframes the iter-771+ candidate list by identifying A-L stencil coefficients at D-grid corners adjacent to cube vertices as an untested target.
+
+### Iter-771 — A-L metric coefficients at cube-vertex D-grid corners
+
+Per iter-770's observation that mode-A top-4 |v_north| peaks sit at EDGE cells at Chebyshev distance 1 from a cube corner, iter-771 measures the A-L gradient metric coefficients `grad_c00` / `grad_c01` / `grad_c10` / `grad_c11` AT the D-grid corners adjacent to cube vertices vs interior reference values.
+
+**Method** (`scripts/diag_iter771_al_metric_cube_corners.py`; committed output `diagnostics/iter771_output/iter771_al_metric_cube_corners.txt`).  No dycore integration — coefficients are grid-only.  Interior reference: median `|grad_c*|` over cells strictly `5 ≤ i,j ≤ n-5`.  Cube-vertex positions: `(0,0)`, `(0,n)`, `(n,0)`, `(n,n)` per face (D-grid corner indexing).
+
+**Measurement** (C36):
+
+| Coefficient | Interior median \|·\| | Cube-vertex \|·\| | Ratio (vertex / interior) |
+|-------------|-----------------------|---------------------|---------------------------|
+| c00         | 1.86e−06              | 2.81e−06            | 1.51×                     |
+| **c01**     | **9.75e−11**          | **8.99e−07**        | **9223×**                 |
+| **c10**     | 1.20e−07              | 2.66e−06            | **22.2×**                 |
+| c11         | 1.87e−06              | 3.76e−06            | 2.01×                     |
+
+**Observation.**  The diagonal coefficients `c00`, `c11` at cube-vertex D-grid corners are modestly larger than interior (~1.5-2×).  The OFF-DIAGONAL coefficients `c01`, `c10` are 22× to 9223× larger.  At cube vertices, `|c01| / |c00| ≈ 0.32`; in the interior that ratio is ~5e-5.
+
+**Structural context.**  The A-L gradient stencil is (see `_arakawa_lamb_gradient` in `src/legoesm/core/operators_cdgrid.py`):
+
+```
+dB_dx     = c00 * dB_raw_x + c01 * dB_raw_y
+dB_dy_perp= c10 * dB_raw_x + c11 * dB_raw_y
+```
+
+where `dB_raw_x`, `dB_raw_y` are face-local finite-difference combinations of B at 4 surrounding cell centres.  In the interior, `c01 ≈ c10 ≈ 0` to working precision (orthogonal grid) — the stencil is diagonal.  At cube-vertex D-grid corners, `c01` and `c10` are O(0.3) * diagonal — cross-couplings are a substantial fraction of the diagonal contribution.
+
+**Implication for mode A (observational, no causal claim).**  Small per-cell errors in `dB_raw_x` or `dB_raw_y` at D-grid corners NEAR the cube vertex get redistributed between `dB_dx` and `dB_dy_perp` through the off-diagonal cross-couplings.  In the interior, errors propagate straight through (no cross-coupling).  This is a REPRESENTATIONAL difference — whether it CAUSALLY amplifies mode A requires an ablation (e.g. force `c01 = c10 = 0` at cube-vertex D-grid corners and measure the change in mode A).
+
+**Iter-772+ candidates.**
+- Ablation: force `grad_c01 = grad_c10 = 0` at the 4 cube-vertex D-grid corners per face.  Measure the change in W2 v_ll_Linf.  If mode A drops, the off-diagonal cross-coupling is a causal contributor.  If unchanged, the off-diagonal is benign.
+- Fortran oracle comparison: does Fortran's `a2b_ord4` (or its B-grid gradient analog) use a non-orthogonal metric with similar off-diagonal behaviour at cube vertices?  Or does Fortran special-case the cube vertex to skip the cross-coupling?  This is a concrete Codex review question for iter-772.
+
+**Deliverable.**  `scripts/diag_iter771_al_metric_cube_corners.py` + committed output.  No source-code change.  Zero interference with existing sentinels (grid metrics are static).
+
+**Process.**  35th iter in iter-752-771 chain.  First iter to identify a structural candidate mechanism (off-diagonal metric coefficient amplification at cube vertices) that is observationally distinct from the halo-fill / smoothing surface exhausted by iter-765/766/767/769.
