@@ -658,17 +658,24 @@ User visual inspection (provided mid-iter-775) reported "slight distortion near 
 
 **Not a regression.**  These values match the matrix script's canonical PASS output (`L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01`) — they have been the reported matrix-PASS values since at least iter-760.  The matrix PASS threshold does not fire on this level of distortion, but the user's visual confirms it is observable and worth tracking.
 
-**Mechanism candidates** (untested in iter-776 — this iter is purely quantitative).
+**Mechanism candidates** (untested in iter-776 — this iter is purely quantitative; candidate list is deliberately broad and not exhaustive).
+
 - PPM truncation in the Lin-Rood operator-split sweep (`fv_tp_2d` at `src/legoesm/core/fv_tp_2d.py:459`).  PPM has inherent shape preservation limits; 10 % amplitude loss per day is high for a linear PPM but plausible at C36.
 - Halo handling at cube-corner passages via `pad_halo(halo=2)` in `fv_tp_2d`.  The bell crosses cube edges during the 1-day integration (start lon=−90°, end lat/lon depending on β=π/4 flow).
 - `_d2a2c_vect` contravariant-velocity computation at cube-corner cells.  Frozen winds are computed once at t=0; any cube-corner error in that computation propagates for the whole integration.
+- `fv_tp_2d`'s optional del-n damping (`nord`, `damp_c`) is NOT used by the matrix cosine bell path (both are None).  If Fortran's `sw_core.F90:886-887` applies a 4th-order smoother in its transport path, enabling it in our cosine bell could change the error distribution — untested.
+- The initial-condition projection onto the cubed-sphere cells.  `cosine_bell_cubesphere` in `tests/test_cases/cosine_bell.py` evaluates the analytic bell at cell centres; any cell-average vs point-value discrepancy could contribute.
+- `transport_step`'s `mass_target` renormalization path (`fv_tp_2d.py:568`).  Mass-conservation clipping can redistribute error between cells; this is active in the matrix cosine bell config.
+- Relation to W2 mode-A: the two are structurally distinct code paths, but both involve cube-corner cells, and any `pad_halo` / `_d2a2c_vect` / metric-coefficient finding from the W2 investigation might also be relevant to the transport path.  iter-765-775's cube-corner work did NOT modify `fv_tp_2d` or `_d2a2c_vect`, but future fixes in those paths could affect cosine bell.
 
-**Cosine bell is different from W2 mode-A.**  W2's mode-A lives in `fv3_sw_tendencies`'s A-L gradient and vorticity chain.  Cosine bell's distortion lives in `fv_tp_2d`'s transport chain.  The two are structurally distinct; iter-765-774's cube-corner work on A-L does not affect cosine bell.
+**Iter-777+ candidates (broad, not prioritized).**
 
-**Iter-777+ candidates.**
-- Compare `fv_tp_2d` PPM sweep boundary handling to Fortran `tp_core.F90` (`fv_tp_2d` subroutine) at cube-corner cells.  Our Python `pad_halo(halo=2)` vs Fortran's `copy_corners` — is the boundary-halo treatment at cube corners faithful?
-- Measure the bell's peak amplitude at t=0.5, 1, 2, 3 days to characterize the amplitude-loss rate.  If it's uniform (not jump at cube-corner passage), the distortion is PPM truncation, not cube-corner-specific.
-- Test cosine bell at C48, C72, C96 to verify the expected PPM convergence order.
+- Compare `fv_tp_2d` PPM sweep boundary handling to Fortran `tp_core.F90` at cube-corner cells.  Our Python `pad_halo(halo=2)` vs Fortran's `copy_corners` (tp_core.F90:229) — is the boundary-halo treatment at cube corners faithful?
+- Measure the bell's peak amplitude at t=0.5, 1, 2, 3 days to characterize the amplitude-loss rate.  If it's uniform (not jump at cube-corner passage), the distortion has more diffuse origins; if it's stepped at cube-corner crossings, that localizes the cause.
+- Test cosine bell at C48, C72, C96 to verify PPM convergence order.
+- Enable `nord` / `damp_c` in the cosine bell matrix config (currently both None).  Fortran's d_sw1 calls `fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)` per `sw_core.F90:886-887`.  A Fortran-faithful cosine bell run would include that 4th-order smoother.
+- Port the Fortran c_sw+d_sw FB transport chain (blocked on ng=3 halo infrastructure, same as the W2 long-term fix).
+- Audit `_d2a2c_vect` cube-corner behaviour: the "Non-duogrid `_d2a2c_vect` cube-vertex gap" is listed as `isolated, not fixed` in the Closed priorities section — it may be contributing to the frozen-wind error on cosine bell.
 
 **Deliverable.**  `scripts/diag_iter776_cosine_bell_1day.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
 
