@@ -130,6 +130,17 @@ class CDGridShallowWaterConfig(NamedTuple):
     # construction.
     fortran_a2b_corner_avg: bool = False
 
+    # Iter-767: Fortran `fill_corners_agrid_r8` VECTOR cube-corner
+    # fill (fv_mp_mod.F90:1433-1457 with mySign=-1).  Overwrites the
+    # 4 cube-vertex halo cells of (u_cc_pad, v_cc_pad) output by
+    # `pad_halo_vector` with Fortran's direct cross-component swap +
+    # sign flip (`u ← ±v`, `v ← ±u`).  Fortran uses this for non-
+    # duogrid cube-corner fills because the rotate-pad-rotate scalar
+    # chain is inconsistent at the 3-face cube vertex where face-
+    # local grid angle is discontinuous.  Default OFF pending
+    # iter-767 W2 measurement.
+    fortran_vector_corner_fill: bool = False
+
 
 # ==============================================================================
 # Tendencies
@@ -507,6 +518,8 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
                     boundary_fix=self.config.boundary_fix,
                     fortran_a2b_corner_avg=self.config.fortran_a2b_corner_avg,
+                    fortran_vector_corner_fill=(
+                        self.config.fortran_vector_corner_fill),
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,

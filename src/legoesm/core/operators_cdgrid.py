@@ -1478,6 +1478,72 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
     return u_c, v_c
 
 
+def _fortran_agrid_vector_corner_fill(u_pad, v_pad):
+    """Fortran `fill_corners_agrid_r8` (fv_mp_mod.F90:1433-1457) applied
+    to an already-padded A-grid vector pair (u_pad, v_pad) at the 4
+    cube-vertex halo cells of each face.
+
+    Fortran VECTOR fill (mySign = -1) at the SW cube vertex:
+        x(0,0) = -y(0,1)
+        y(0,0) = -x(1,0)
+
+    — the cube-corner halo cell of one component equals ± the
+    edge-halo cell of the OTHER component (cross-component swap
+    with sign flip).  The sign pattern across the 4 corners is
+    {SW: -, SE: +, NW: +, NE: -}.
+
+    Python halo=1 index mapping (padded shape (6, n+2, n+2),
+    interior at [1..n, 1..n]):
+      SW cube-corner halo padded[:, 0, 0]  ← Fortran qin(0, 0)
+      SE cube-corner halo padded[:, -1, 0] ← Fortran qin(npx, 0)
+      NW cube-corner halo padded[:, 0, -1] ← Fortran qin(0, npy)
+      NE cube-corner halo padded[:, -1, -1]← Fortran qin(npx, npy)
+      W-edge halo at j=1   padded[:, 0, 1]
+      S-edge halo at i=1   padded[:, 1, 0]
+      E-edge halo at j=1   padded[:, -1, 1]
+      S-edge halo at i=npx-1 padded[:, -2, 0]
+      (etc. by symmetry — see iter-767 review-doc entry.)
+
+    Parameters
+    ----------
+    u_pad, v_pad : jax.Array, shape (6, n+2, n+2)
+        A-grid padded vector components (grid-aligned, face-local
+        frame) — typically the output of `pad_halo_vector`.
+
+    Returns
+    -------
+    (u_pad_new, v_pad_new) : same shape
+        Identical to inputs EXCEPT at the 4 cube-vertex halo cells
+        per face, which are overwritten with Fortran's VECTOR
+        `fill_corners_agrid_r8` values.
+    """
+    # SW: x(0,0) = -y(0,1), y(0,0) = -x(1,0)
+    u_new_sw = -v_pad[:, 0, 1]
+    v_new_sw = -u_pad[:, 1, 0]
+    # SE (mySign=+1 for both components):
+    #   x(npx, 0) = y(npx, 1),  y(npx, 0) = x(npx-1, 0)
+    u_new_se = v_pad[:, -1, 1]
+    v_new_se = u_pad[:, -2, 0]
+    # NW (mySign=+1 for both):
+    #   x(0, npy) = y(0, npy-1),  y(0, npy) = x(1, npy)
+    u_new_nw = v_pad[:, 0, -2]
+    v_new_nw = u_pad[:, 1, -1]
+    # NE (mySign=-1 for both):
+    #   x(npx, npy) = -y(npx, npy-1),  y(npx, npy) = -x(npx-1, npy)
+    u_new_ne = -v_pad[:, -1, -2]
+    v_new_ne = -u_pad[:, -2, -1]
+
+    u_pad = u_pad.at[:, 0, 0].set(u_new_sw)
+    u_pad = u_pad.at[:, -1, 0].set(u_new_se)
+    u_pad = u_pad.at[:, 0, -1].set(u_new_nw)
+    u_pad = u_pad.at[:, -1, -1].set(u_new_ne)
+    v_pad = v_pad.at[:, 0, 0].set(v_new_sw)
+    v_pad = v_pad.at[:, -1, 0].set(v_new_se)
+    v_pad = v_pad.at[:, 0, -1].set(v_new_nw)
+    v_pad = v_pad.at[:, -1, -1].set(v_new_ne)
+    return u_pad, v_pad
+
+
 def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
@@ -1485,6 +1551,7 @@ def fv3_sw_tendencies(
     zero_mean_correction=False,
     fortran_dir_aware_corners=False,
     fortran_a2b_corner_avg=False,
+    fortran_vector_corner_fill=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1550,6 +1617,15 @@ def fv3_sw_tendencies(
         grid.cos_angle_padded, grid.sin_angle_padded,
         interp_offsets=offsets, duogrid=dg,
     )
+    # Iter-767: optionally overwrite the 4 cube-vertex halo cells of
+    # (u_cc_pad, v_cc_pad) with Fortran's `fill_corners_agrid_r8`
+    # VECTOR formula (fv_mp_mod.F90:1433-1457 with mySign=-1).
+    # Fortran's direct cross-component swap+sign avoids the rotate-
+    # pad-rotate mismatch at the 3-face cube vertex where face-local
+    # grid angle is discontinuous.  See iter-767 review-doc entry.
+    if fortran_vector_corner_fill:
+        u_cc_pad, v_cc_pad = _fortran_agrid_vector_corner_fill(
+            u_cc_pad, v_cc_pad)
     u_corner = 0.25 * (u_cc_pad[:, :-1, :-1] + u_cc_pad[:, 1:, :-1]
                         + u_cc_pad[:, :-1, 1:] + u_cc_pad[:, 1:, 1:])
     v_corner = 0.25 * (v_cc_pad[:, :-1, :-1] + v_cc_pad[:, 1:, :-1]
@@ -1662,6 +1738,14 @@ def fv3_sw_tendencies(
         grid.cos_angle_padded, grid.sin_angle_padded,
         interp_offsets=offsets, duogrid=dg,
     )
+    # Iter-767: same Fortran vector cube-corner fill applied to the
+    # tendency projection halo exchange — keeps the treatment
+    # consistent across every pad_halo_vector call inside this
+    # function (both the wind halo in step (e) and the tendency
+    # projection here in step (k)).
+    if fortran_vector_corner_fill:
+        du_cc_pad, dv_cc_pad = _fortran_agrid_vector_corner_fill(
+            du_cc_pad, dv_cc_pad)
     du_d_dt = 0.5 * (du_cc_pad[:, 1:-1, :-1] + du_cc_pad[:, 1:-1, 1:])   # (6, n, n+1)
     dv_d_dt = 0.5 * (dv_cc_pad[:, :-1, 1:-1] + dv_cc_pad[:, 1:, 1:-1])   # (6, n+1, n)
 
