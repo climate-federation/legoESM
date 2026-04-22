@@ -801,25 +801,59 @@ def fct_tracer_advection(
 
     eps = 1e-30
 
-    # --- Step 1: First-order upwind (inherently monotone) ---
+    # --- Step 1: Horizontal face fluxes (low and high order) ---
     tr_u_low = _upwind_to_u_points(tracer, mass_flux_u)
     tr_v_low = _upwind_to_v_points(tracer, mass_flux_v)
     flux_u_low = mass_flux_u * tr_u_low
     flux_v_low = mass_flux_v * tr_v_low
     div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
-    vert_div_low = flux_form_vertical_tracer_advection(tracer, w_half)
 
-    # --- Step 2: High-order PPM ---
     tr_u_hi = ppm_to_u_points(tracer, mass_flux_u)
     tr_v_hi = ppm_to_v_points(tracer, mass_flux_v)
     flux_u_hi = mass_flux_u * tr_u_hi
     flux_v_hi = mass_flux_v * tr_v_hi
-    div_h_hi = divergence_cgrid(flux_u_hi, flux_v_hi, grid)
-    vert_div_hi = flux_form_vertical_tracer_advection_ppm(tracer, w_half, h_k, dt)
 
-    # Total tendencies (both horiz + vert combined for Zalesak limiting)
+    # --- Step 2: Vertical interface fluxes (low and high order) ---
+    nlev = tracer.shape[-1]
+    w_int = w_half[..., 1:nlev]  # interior interfaces (..., nlev-1)
+    T_below = tracer[..., 1:]    # (..., nlev-1)
+    T_above = tracer[..., :-1]   # (..., nlev-1)
+
+    # Upwind interface flux
+    T_face_low = jnp.where(w_int > 0.0, T_below, T_above)
+    F_vert_low_int = w_int * T_face_low  # (..., nlev-1)
+
+    # PPM interface flux
+    from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
+    f_pad = jnp.concatenate(
+        [tracer[..., 1::-1], tracer, tracer[..., -1:-3:-1]], axis=-1)
+    f_pad_2d = f_pad[..., jnp.newaxis]
+    q_hat = _ppm_edge_values(f_pad_2d)[..., 0]
+    a_L = q_hat[..., :-1]
+    a_R = q_hat[..., 1:]
+    q_c = f_pad[..., 1:-1]
+    a_L_2d, a_R_2d = _ppm_limit(
+        q_c[..., jnp.newaxis], a_L[..., jnp.newaxis], a_R[..., jnp.newaxis])
+    a_L, a_R = a_L_2d[..., 0], a_R_2d[..., 0]
+    q_R_above = a_R[..., 1:nlev]
+    q_L_below = a_L[..., 2:nlev + 1]
+    T_face_hi = jnp.where(w_int > 0.0, q_L_below, q_R_above)
+    T_face_hi = jnp.clip(T_face_hi,
+                          jnp.minimum(T_above, T_below),
+                          jnp.maximum(T_above, T_below))
+    F_vert_hi_int = w_int * T_face_hi
+
+    # Vertical divergences for Zalesak bounds computation
+    zeros_v = jnp.zeros((*tracer.shape[:-1], 1), dtype=tracer.dtype)
+    F_vert_low = jnp.concatenate([zeros_v, F_vert_low_int, zeros_v], axis=-1)
+    F_vert_hi = jnp.concatenate([zeros_v, F_vert_hi_int, zeros_v], axis=-1)
+    vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+    vert_div_hi = F_vert_hi[..., :-1] - F_vert_hi[..., 1:]
+
+    # Total tendencies for Zalesak bounds
     dq_low = -(div_h_low + vert_div_low) / jnp.maximum(h_k, eps)
-    dq_hi = -(div_h_hi + vert_div_hi) / jnp.maximum(h_k, eps)
+    dq_hi_h = divergence_cgrid(flux_u_hi, flux_v_hi, grid)
+    dq_hi = -(dq_hi_h + vert_div_hi) / jnp.maximum(h_k, eps)
 
     # --- Step 3: Zalesak limiter ---
     # Anti-diffusive tendency
@@ -865,27 +899,51 @@ def fct_tracer_advection(
     )
     alpha = jnp.clip(alpha, 0.0, 1.0)
 
-    # Limited total tendency (in flux-divergence form for the step function)
-    # dq_total = dq_low + alpha * ad = -(div_low + vert_low)/h + alpha*(-(div_hi+vert_hi)/h + (div_low+vert_low)/h)
-    # The step function expects: hT_new = h*T - dt*(div_h + vert_div)
-    # So we return the limited flux divergences directly.
-    # total_flux_div = (1-alpha)*total_low + alpha*total_hi
-    total_low = div_h_low + vert_div_low
-    total_hi = div_h_hi + vert_div_hi
-    total_limited = total_low + alpha * h_k * ad  # = total_low + alpha*(total_hi - total_low)...
-    # Actually: dq_limited = dq_low + alpha*ad = -(total_low)/h + alpha*(-(total_hi-total_low)/h)
-    # → -(total_low + alpha*(total_hi - total_low))/h = -total_limited/h
-    # total_limited = total_low + alpha*(total_hi - total_low)
-    total_limited = total_low + alpha * (total_hi - total_low)
+    # --- Step 4: Face-based flux limiting (Zalesak 1979) ---
+    # Apply the cell-based alpha to each FACE as the minimum of the two
+    # adjacent cells.  This ensures conservation: each face has ONE
+    # limited flux shared by both cells.
+    #
+    # Anti-diffusive face fluxes:
+    ad_flux_u = flux_u_hi - flux_u_low  # (n_lat, n_lon+1, nlev)
+    ad_flux_v = flux_v_hi - flux_v_low  # (n_lat+1, n_lon, nlev)
 
-    # Split back into horizontal + vertical (approximate: scale both proportionally)
-    # For the step function which expects separate div_h and vert_div:
-    frac_h = jnp.where(
-        jnp.abs(total_low) > eps,
-        div_h_low / total_low,
-        0.5,
-    )
-    div_h_fct = total_limited * frac_h
-    vert_div_fct = total_limited * (1.0 - frac_h)
+    # Alpha at u-faces: min of left and right cell alpha
+    # u-face j sits between cell (j-1)%n_lon and cell j
+    alpha_left_u = jnp.roll(alpha, 1, axis=1)  # alpha of cell j-1
+    alpha_right_u = alpha                        # alpha of cell j
+    alpha_u = jnp.minimum(alpha_left_u, alpha_right_u)
+    # Wrap for periodic: face n_lon = face 0
+    alpha_u_full = jnp.concatenate([alpha_u, alpha_u[:, :1, :]], axis=1)
+
+    # Alpha at v-faces: min of south and north cell alpha
+    # v-face j sits between cell j-1 (south) and cell j (north)
+    # Interior faces 1..n_lat-1:
+    alpha_v_int = jnp.minimum(alpha[:-1, :, :], alpha[1:, :, :])  # (n_lat-1, ...)
+    # Wall faces: use adjacent cell alpha (wall flux is zero anyway)
+    alpha_v = jnp.concatenate([
+        alpha[:1, :, :],       # south wall face
+        alpha_v_int,           # interior faces
+        alpha[-1:, :, :],      # north wall face
+    ], axis=0)  # (n_lat+1, n_lon, nlev)
+
+    # Limited face fluxes
+    flux_u_fct = flux_u_low + alpha_u_full * ad_flux_u
+    flux_v_fct = flux_v_low + alpha_v * ad_flux_v
+
+    # Horizontal divergence from limited fluxes (conservative by construction)
+    div_h_fct = divergence_cgrid(flux_u_fct, flux_v_fct, grid)
+
+    # Vertical: face-based limiting at each interface
+    # Anti-diffusive interface flux
+    ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
+    # Alpha at interface k: min of cell above (k-1) and cell below (k)
+    alpha_cell_above = alpha[..., :-1]  # cells 0..nlev-2
+    alpha_cell_below = alpha[..., 1:]   # cells 1..nlev-1
+    alpha_vert_face = jnp.minimum(alpha_cell_above, alpha_cell_below)
+    # Limited interface flux
+    F_vert_fct_int = F_vert_low_int + alpha_vert_face * ad_vert_int
+    F_vert_fct = jnp.concatenate([zeros_v, F_vert_fct_int, zeros_v], axis=-1)
+    vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
 
     return div_h_fct, vert_div_fct
