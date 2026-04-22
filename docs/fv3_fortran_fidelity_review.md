@@ -555,3 +555,43 @@ Per iter-772b's scope-limits note ("a smaller non-zero value might be better"), 
 **Deliverable.**  `scripts/diag_iter773_c10_range_sweep.py` + committed output `diagnostics/iter773_output/iter773_c10_range.txt`.  No source-code change.  No new sentinel.  All 10 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  37th iter in iter-752-773 chain.  First iter that sampled a parameterized sweep of a single knob: among 7 discrete α values of a uniform scale factor on c10 at the 16 corners, the default (α=1.0) produced the smallest W2 v_ll_Linf.  Iter-774+ candidates: circulation-vorticity stencil at cube corners (iter-768 candidate #2, still untested), finer-grained α near 1.0, or non-uniform / multi-coefficient ablation.
+
+### Iter-774 — Fine-grained c10 sweep near α=1.0 (potential 30% mode-A reduction, BUT NOT Fortran-faithful)
+
+Per iter-773b's explicit iter-774+ candidate "finer-grained α near 1.0 (e.g. α=0.95, 1.05) were not measured", iter-774 runs the same sweep on 9 alpha values near 1.0.
+
+**Method** (`scripts/diag_iter774_c10_fine_sweep.py`; committed output at `diagnostics/iter774_output/iter774_c10_fine.txt`).  Same protocol as iter-773 but α ∈ {0.90, 0.95, 0.98, 0.99, 1.00, 1.01, 1.02, 1.05, 1.10}.
+
+**Result** (C36):
+
+| α     | h_L2     | v_ll_Linf | relative to α=1 |
+|-------|----------|-----------|-----------------|
+| 0.900 | 2.04e−4  | 2.66e−1   | 1.675×          |
+| 0.950 | 1.59e−4  | 1.43e−1   | 0.899×          |
+| **0.980** | **1.79e−4**  | **1.11e−1**   | **0.697× (−30%)** |
+| 0.990 | 1.92e−4  | 1.33e−1   | 0.838×          |
+| 1.000 | 2.07e−4  | 1.59e−1   | 1.000× [default]|
+| 1.010 | 2.24e−4  | 1.85e−1   | 1.166×          |
+| 1.020 | 2.41e−4  | 2.17e−1   | 1.369×          |
+| 1.050 | 2.99e−4  | 3.13e−1   | 1.972×          |
+| 1.100 | 3.99e−4  | 4.66e−1   | 2.942×          |
+
+**Observation.**  Among these 9 α values, the smallest W2 v_ll_Linf occurs at α=0.98 (not α=1.00).  Applying a uniform 0.98× scale to `grad_c10` at the 16 peak-updating D-grid corners reduces v_ll_Linf by ~30 % (0.159 → 0.111 m/s).  h_L2 also reduces at α=0.95 (1.59e−4) and α=0.98 (1.79e−4) relative to default (2.07e−4).
+
+**CRITICAL CAVEAT — NOT Fortran-faithful.**  A 2 % uniform scalar correction to the metric coefficient at specific D-grid corners is a NUMERICAL TUNING, not a port of a Fortran formula.  The Fortran oracle computes `c10` (or its analog) from geometric constructs derived from the cubed-sphere grid vertices.  Our default `c10` is the Python analog of that same derivation.  A 0.98× correction that happens to reduce mode A on one test case is NOT automatically Fortran-faithful — the right Fortran-faithful direction is to compare our Python `c10` formula against Fortran's analog and identify any systematic derivation difference.
+
+**What iter-774 does and does NOT establish.**
+- DOES: uniformly scaling `c10` by 0.98 at the 16 corners reduces C36 1-d W2 v_ll_Linf by ~30 %.
+- DOES NOT: establish this scaling generalizes to W5, cosine bell, ocean rest state, or other C resolutions.
+- DOES NOT: establish this scaling is Fortran-faithful.
+- DOES NOT: establish that α=0.98 is the true continuous minimum — the 0.01-step sweep only samples 9 points.
+- DOES NOT: explain the mechanism — a 30 % reduction from a 2 % corner coefficient perturbation suggests a sensitivity that our current metric derivation may be mis-capturing, but this is inferential.
+
+**Iter-775+ candidates.**
+- Fortran-oracle comparison of `grad_c10` derivation (`src/legoesm/grids/cubed_sphere_cdgrid.py::create_cubed_sphere_cdgrid` vs Fortran `fv_grid_utils.F90` metric construction).  If our Python derivation has a systematic +2 % bias at peak-updating corners, the correction is to fix the derivation, not to hardcode α=0.98.
+- Test whether α=0.98 at 16 corners affects W5, cosine bell, ocean rest.  If it harms any of them, the correction is not universal.
+- Non-uniform per-corner optimization (vs uniform scalar).
+
+**Deliverable.**  `scripts/diag_iter774_c10_fine_sweep.py` + committed output at `diagnostics/iter774_output/iter774_c10_fine.txt`.  NO production default change — pending Fortran-oracle comparison, the default stays at α=1.00 (unchanged grad_c10).  No new sentinel.  All 10 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  38th iter in iter-752-774 chain.  First iter in the 760+ chain to identify a parameter setting that DOES reduce W2 mode A below the current baseline — but only on this single 1D slice and with a caveat that a fixed-scalar metric correction is not Fortran-faithful until the underlying derivation difference is identified.
