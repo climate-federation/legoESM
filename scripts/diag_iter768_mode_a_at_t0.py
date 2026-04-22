@@ -1,34 +1,30 @@
-"""Iter-768 diagnostic: quantify mode A decomposition into (a) IC
-reconstruction error at t=0 and (b) 1-day dynamics drift.
+"""Iter-768 diagnostic: two-point `v_ll_Linf` measurement at t=0
+and t=1 day on W2 C36 with the canonical matrix config.  Reports
+observables only; does not decompose them into causal components.
 
-Mode A (W2 v_ll_Linf ≈ 0.159 m/s at 8 cube vertices) persisted
-across iter-765/766/767 despite three different Fortran cube-
-corner halo fill attempts.  This diagnostic splits the total into
-its IC and dynamics components:
+**Scope clarification (iter-768b, Codex stop-time review).**  The
+original iter-768 framing ("IC 5 %, dynamics 95 %") treated the
+ratio of two `v_ll_Linf` observables as a causal split — it is
+not.  This docstring and the runtime output have been rewritten
+to report only observables.
 
-1. Measure v_ll_Linf from the W2 IC at t=0 (0 time steps).  If
-   this is already ~0.159 m/s, the artifact is an IC reconstruction
-   artifact (face-local D-grid init → cell-centre rotation → regrid
-   round-trip), NOT a dynamics drift.
+What this diagnostic measures:
+- `v_ll_Linf` at t=0, constructed from the analytic W2 IC.  Also
+  reports `u_d err Linf` and `v_d err Linf` vs the analytic IC
+  (both are exactly 0 — the stored state matches the analytic
+  reference).
+- `v_ll_Linf` at t=1 day after 288 RK3 steps with the canonical
+  matrix config.
+- The ratio (t=1 day) / (t=0) as a single scalar.
 
-2. Measure v_ll_Linf after 1-day integration (the canonical matrix
-   measurement).  Subtract.  The difference is the dynamics
-   contribution.
-
-3. As a sanity check, also measure v_ll_Linf on the RAW D-grid
-   winds (u_d, v_d at t=0) with no cell-centre averaging, to
-   separate stagger-averaging noise from intrinsic IC reconstruction
-   error.
-
-Interpretation guide:
-- v_ll_Linf(t=0) ≈ 0.159 m/s: mode A is an IC/regrid artifact,
-  future iters should target the measurement pipeline or IC
-  construction, not the dynamics.
-- v_ll_Linf(t=0) ≪ 0.159 m/s: mode A is dynamics-driven, and
-  iter-765/766/767 exhaustion confirms it needs a structural fix
-  (c_sw+d_sw FB port or A-L metric redesign).
-- Intermediate: both contribute; iter-769+ should quantify each
-  separately.
+What this diagnostic does NOT establish:
+- Whether the 1-day observable is produced by the dycore, the
+  measurement pipeline (D-grid → cell-centre-avg → rotate →
+  regrid), couplings between them, or any combination.  A
+  single-measurement ratio of observables cannot separate those.
+  Iter-769+ ablation work is needed (e.g. re-run with an
+  alternate regrid only, re-run with an alternate rotation only,
+  etc., and compare 1-day `v_ll_Linf` growth).
 
 Uses the canonical matrix measurement path identical to
 `scripts/run_atmosphere_test_matrix.py` (IC, dt, norms, v_north
@@ -133,20 +129,18 @@ print()
 
 # Summary.
 ratio = v_ll_day / max(v_ll_0, 1e-12)
-print(f"Mode-A decomposition on W2 C36 1d, matrix config:")
-print(f"  IC-only v_ll_Linf (t=0)     = {v_ll_0:.4e} m/s")
-print(f"  1-day v_ll_Linf (t=86400s)  = {v_ll_day:.4e} m/s")
-print(f"  dynamics contribution       = {v_ll_day - v_ll_0:+.4e} m/s")
-print(f"  1-day / IC ratio            = {ratio:.2f}x")
+print(f"Two-point v_ll_Linf observables on W2 C36 1d, canonical")
+print(f"matrix config (NO causal attribution claimed):")
+print(f"  t=0      v_ll_Linf  = {v_ll_0:.4e} m/s")
+print(f"    (u_d/v_d err Linf = 0 — stored state matches analytic IC)")
+print(f"  t=1 day  v_ll_Linf  = {v_ll_day:.4e} m/s")
+print(f"  ratio (t=1 day / t=0) = {ratio:.2f}x")
 print()
-if v_ll_0 > 0.1 * v_ll_day:
-    print("-> IC reconstruction contributes MEANINGFULLY to mode A.")
-    print("   Future iters should investigate IC/regrid pipeline, not")
-    print("   just the dynamics.")
-else:
-    print("-> IC reconstruction is a small fraction of mode A.")
-    print("   Mode A is predominantly dynamics-driven; iter-765/766/767")
-    print("   exhaustion confirms structural fix is required.")
+print("This is a two-point observable measurement.  The ratio does")
+print("not by itself identify which of the dycore, the measurement")
+print("pipeline, the IC construction, or couplings among them")
+print("produces the t=1-day observable.  Mechanism separation")
+print("requires iter-769+ ablations.")
 
 # Peak locator: print top 5 |v_ll| values + their (lat, lon).
 # Useful for future iters to verify a fix REDUCED the peak amplitude

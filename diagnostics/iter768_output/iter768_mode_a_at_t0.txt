@@ -10,15 +10,18 @@
   u_d  err Linf (vs analytic IC)        = 2.8585e-01
   v_d  err Linf (vs analytic IC)        = 2.7388e-01
 
-Mode-A decomposition on W2 C36 1d, matrix config:
-  IC-only v_ll_Linf (t=0)     = 8.0118e-03 m/s
-  1-day v_ll_Linf (t=86400s)  = 1.5852e-01 m/s
-  dynamics contribution       = +1.5051e-01 m/s
-  1-day / IC ratio            = 19.79x
+Two-point v_ll_Linf observables on W2 C36 1d, canonical
+matrix config (NO causal attribution claimed):
+  t=0      v_ll_Linf  = 8.0118e-03 m/s
+    (u_d/v_d err Linf = 0 — stored state matches analytic IC)
+  t=1 day  v_ll_Linf  = 1.5852e-01 m/s
+  ratio (t=1 day / t=0) = 19.79x
 
--> IC reconstruction is a small fraction of mode A.
-   Mode A is predominantly dynamics-driven; iter-765/766/767
-   exhaustion confirms structural fix is required.
+This is a two-point observable measurement.  The ratio does
+not by itself identify which of the dycore, the measurement
+pipeline, the IC construction, or couplings among them
+produces the t=1-day observable.  Mechanism separation
+requires iter-769+ ablations.
 
 Top 10 |v_ll| locations at t=1 day:
       |v_ll|      lat      lon   GC_dist_to_vertex_deg   near_cube_vertex?
