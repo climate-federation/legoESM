@@ -480,3 +480,41 @@ In the interior, `c01 ≈ c10 ≈ 0` to working precision (orthogonal grid).  At
 **Deliverable.**  `scripts/diag_iter771_al_metric_cube_corners.py` (iter-771a + 771b) + committed output.  No source-code change.  Zero interference with existing sentinels (grid metrics are static).
 
 **Process.**  35th iter in iter-752-771b chain.  Iter-771a's dramatic "9223×" finding RETRACTED as not applicable to the peak cells; iter-771b gives the corrected amplification at the correct D-grid corners.  No structural mechanism uniquely identified yet; iter-772+ should focus on either the c10 coupling at peak-updating corners or re-examine the circulation-vorticity stencil.
+
+### Iter-772 — Ablation: grad_c10 = 0 at peak-updating D-grid corners
+
+Per iter-771b's revised candidate list ("Ablation: force grad_c10 = 0 at the 16 D-grid corners surrounding the top-4 peak cells"), iter-772 runs the canonical W2 C36 matrix config with the ablation in place and measures v_ll_Linf vs unablated.
+
+**Method** (`scripts/diag_iter772_ablate_c10_peak_corners.py`).  Constructs cdgrid, mutates `grad_c10` to 0 at the 16 D-grid corner positions that surround the iter-770 top-4 peak cells: `{face0 (34,0), face0 (34,35), face2 (34,0), face2 (34,35)}` × 4 surrounding corners each.  Runs the standard W2 loop with the modified metric.
+
+**Measurement** (C36 dt=300s 1d):
+
+| Config                             | h_L2     | h_Linf   | v_ll_Linf |
+|------------------------------------|----------|----------|-----------|
+| OFF (unablated default)            | 2.07e−4  | 1.53e−3  | 1.59e−01  |
+| ON (`c10 = 0` at 16 peak corners)  | **2.18e−3**| **1.54e−2**| **4.96e+00 (31× BLOWUP)** |
+
+**Finding.**  Zeroing `grad_c10` at the 16 peak-updating D-grid corners makes W2 v_ll_Linf ~31× worse, h_L2 ~10.5× worse.  The c10 off-diagonal coefficient is GEOMETRICALLY LOAD-BEARING at these corners — removing it causes the stencil to misrepresent the grid metric and amplifies error.
+
+**Interpretation.**  The iter-771b observation (|c10| ~ 9× interior magnitude at peak-updating corners) reflects a GEOMETRICALLY CORRECT metric representation of the non-orthogonal cubed-sphere grid at those positions, not a correctable numerical error.  The amplification does not indicate a bug in the metric construction.
+
+**What iter-772 established (combined with 765/766/767/769/771).**  Five distinct structural candidates at cube-corner / near-corner D-grid positions have now been tested and found to be either load-bearing or already Fortran-faithful in magnitude:
+
+| Iter | Candidate                                 | Outcome                       |
+|------|-------------------------------------------|-------------------------------|
+| 765  | directional cube-corner halo fill         | 12× blowup — FALSIFIED        |
+| 766  | a2b_ord4 3-pt corner avg                  | 1.89× blowup — FALSIFIED      |
+| 767  | vector-swap cube-corner halo fill         | 16× blowup — FALSIFIED        |
+| 769  | skip boundary_fix corner smoothing        | 6.5× blowup — CONFIRMED LOAD-BEARING |
+| 772  | zero grad_c10 at peak-updating corners    | 31× blowup — CONFIRMED LOAD-BEARING |
+
+The current combination of (2-pt halo corner fill + cascaded 4-point corner smoothing + non-orthogonal metric at near-corner D-grid corners) is simultaneously a LOCAL MINIMUM for W2 v-wind stability AND the correct metric representation.  Further mode-A reduction cannot be achieved by tuning any one of these five knobs; it requires a joint structural change.
+
+**Iter-773+ next directions.**
+- Circulation-based vorticity stencil at cube-vertex D-grid corners (iter-768 candidate #2, still untested).  This is the only remaining low-cost structural diagnostic.
+- Structural port of Fortran c_sw + d_sw FB chain (blocked on ng=3 halo infrastructure).  The long-term Fortran-faithful solution.
+- Document mode-A v_ll_Linf ≈ 0.159 m/s as the stabilized research baseline of the A-L + RK3 + boundary_fix production path.  This is a provisional conclusion pending iter-773 vorticity check.
+
+**Deliverable.**  `scripts/diag_iter772_ablate_c10_peak_corners.py` with in-place cdgrid metric mutation via `._replace(grad_c10=...)`.  No source-code change.  No new sentinel (the iter-769 sentinel `test_boundary_fix_skip_corners_is_known_worse` already pattern-matches this kind of "zero a load-bearing knob" failure).  All 10 TestW2BoundaryErrorBudget sentinels pass.
+
+**Process.**  36th iter in iter-752-772 chain.  Completes the ablation from iter-771b's revised candidate list.  Fifth structural mode-A knob confirmed to be either load-bearing or correct — no single-knob fix available.
