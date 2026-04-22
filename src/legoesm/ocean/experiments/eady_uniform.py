@@ -94,7 +94,7 @@ class EadyUniformConfig:
 
     barotropic_diffusion_alpha: float = 0.05
     barotropic_div_damp: float = 0.05
-    tracer_advection: str = "tvd"     # "upwind", "tvd", "dst3", "dst3_multidim"
+    tracer_advection: str = "tvd"     # "upwind", "tvd", "dst3", "dst3_multidim", "som"
 
     @property
     def Lambda(self) -> float:
