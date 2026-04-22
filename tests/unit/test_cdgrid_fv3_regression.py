@@ -7,6 +7,8 @@ Tests:
 4. Metric consistency: rsin_u matches sqrt(1-cosa_u^2)
 """
 
+import os
+import sys
 import unittest
 import warnings
 
@@ -4544,58 +4546,117 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                      f"investigate the source drift before updating "
                      f"the pin.  Never silently update."))
 
-        # Iter-768e-2 (Codex stop-time): ALSO lock the shipped output
-        # file.  The inline measurement above only pins what the
-        # measurement SHOULD produce; it does not lock the shipped
-        # artifact `diagnostics/iter768_output/iter768_mode_a_at_t0.txt`
-        # itself.  Someone could hand-edit the shipped file to contain
-        # different numbers, or forget to regenerate it after a source
-        # change — neither is caught by the inline pin alone.  Parse
-        # the shipped file directly and assert its numbers match the
-        # inline measurement + pins.
+        # Iter-768e-3 (Codex stop-time): LOCK THE SHIPPED ARTIFACT
+        # END-TO-END by actually EXECUTING the shipped diagnostic
+        # script as a subprocess, parsing its stdout, and asserting
+        # its numbers match both the pins and the committed output
+        # file.  This closes three drift modes:
+        # (a) script-value drift: script code changes so it produces
+        #     numbers that no longer match the pins.
+        # (b) committed-output drift: someone hand-edits the
+        #     committed file without re-running the script.
+        # (c) script-vs-committed-output divergence: someone updates
+        #     the script without regenerating the committed output.
         import re
+        import subprocess
         from pathlib import Path
+
         repo_root = Path(__file__).resolve().parents[2]
+        script = (repo_root / "scripts"
+                   / "diag_iter768_mode_a_at_t0.py")
         shipped = (repo_root / "diagnostics" / "iter768_output"
                     / "iter768_mode_a_at_t0.txt")
+
+        self.assertTrue(
+            script.exists(),
+            msg=(f"iter-768 diagnostic script is missing at "
+                 f"{script}.  The shipped artifact is gone."))
         self.assertTrue(
             shipped.exists(),
-            msg=(f"iter-768 shipped output file is missing at "
+            msg=(f"iter-768 committed output file is missing at "
                  f"{shipped}.  Regenerate via "
-                 f"`python scripts/diag_iter768_mode_a_at_t0.py > "
-                 f"{shipped}`."))
-        text = shipped.read_text()
-        # Parse the structured summary lines.  Expected content:
-        #   t=0      v_ll_Linf  = 8.0118e-03 m/s
-        #   t=1 day  v_ll_Linf  = 1.5852e-01 m/s
-        #   ratio (t=1 day / t=0) = 19.79x
-        m_t0 = re.search(
-            r"t=0\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)\s*m/s", text)
-        m_t1 = re.search(
-            r"t=1 day\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)\s*m/s", text)
-        m_r = re.search(
-            r"ratio\s*\(t=1 day\s*/\s*t=0\)\s*=\s*([\d.]+)\s*x", text)
-        self.assertIsNotNone(m_t0, msg="t=0 line not found in shipped file")
-        self.assertIsNotNone(m_t1, msg="t=1 day line not found in shipped file")
-        self.assertIsNotNone(m_r, msg="ratio line not found in shipped file")
-        file_t0 = float(m_t0.group(1))
-        file_t1 = float(m_t1.group(1))
-        file_ratio = float(m_r.group(1))
-        for label, file_val, live_val in [
-            ("t=0 v_ll_Linf", file_t0, v_ll_linf_t0),
-            ("t=1d v_ll_Linf", file_t1, v_ll_linf_t1d),
-            ("ratio", file_ratio, ratio),
+                 f"`python {script} > {shipped}`."))
+
+        # Execute the shipped script as a subprocess.
+        venv_python = repo_root / ".venv" / "bin" / "python"
+        interpreter = (str(venv_python) if venv_python.exists()
+                        else sys.executable)
+        env = os.environ.copy()
+        env.setdefault("JAX_ENABLE_X64", "1")
+        env.setdefault("JAX_PLATFORMS", "cpu")
+        result = subprocess.run(
+            [interpreter, str(script)],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            msg=(f"iter-768 diagnostic script failed with exit "
+                 f"{result.returncode}.\nstderr:\n{result.stderr}"))
+        script_stdout = result.stdout
+
+        def _parse_three_numbers(text, source):
+            """Return (t0, t1, ratio) from the canonical summary."""
+            m_t0 = re.search(
+                r"t=0\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)", text)
+            m_t1 = re.search(
+                r"t=1 day\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)", text)
+            m_r = re.search(
+                r"ratio\s*\(t=1 day\s*/\s*t=0\)\s*=\s*([\d.]+)", text)
+            self.assertIsNotNone(
+                m_t0, msg=f"t=0 v_ll_Linf line not found in {source}")
+            self.assertIsNotNone(
+                m_t1, msg=f"t=1 day v_ll_Linf line not found in {source}")
+            self.assertIsNotNone(
+                m_r, msg=f"ratio line not found in {source}")
+            return (float(m_t0.group(1)),
+                    float(m_t1.group(1)),
+                    float(m_r.group(1)))
+
+        script_t0, script_t1, script_ratio = _parse_three_numbers(
+            script_stdout, "shipped-script stdout")
+        file_t0, file_t1, file_ratio = _parse_three_numbers(
+            shipped.read_text(), f"committed file {shipped.name}")
+
+        # Assert shipped SCRIPT output matches pins (mode a).
+        for label, script_val, pin in [
+            ("t=0 v_ll_Linf", script_t0, 8.01e-3),
+            ("t=1d v_ll_Linf", script_t1, 1.59e-1),
+            ("ratio", script_ratio, 19.79),
         ]:
-            rel = abs(file_val - live_val) / max(abs(live_val), 1e-12)
+            rel = abs(script_val - pin) / pin
             self.assertLess(
                 rel, 0.05,
-                msg=(f"iter-768 shipped output file '{label}' = "
-                     f"{file_val:.4e} does not match live measurement "
-                     f"{live_val:.4e} (relative {rel:.2%}).  The "
-                     f"committed artifact `{shipped.name}` is stale "
-                     f"or tampered.  Regenerate via "
-                     f"`python scripts/diag_iter768_mode_a_at_t0.py "
-                     f"> {shipped}`; do NOT edit the file directly."))
+                msg=(f"iter-768 SHIPPED SCRIPT '{label}' = "
+                     f"{script_val:.4e} drifted from pin "
+                     f"{pin:.4e} (relative {rel:.2%}).  The script "
+                     f"at {script.relative_to(repo_root)} was "
+                     f"modified in a way that changed its measured "
+                     f"values.  Investigate before updating the "
+                     f"pin."))
+
+        # Assert committed OUTPUT FILE matches shipped-script output
+        # (modes b and c).  Using exact-match tolerance because the
+        # script should be deterministic; if the file drifted from
+        # the script's output it's either stale or tampered.
+        for label, file_val, script_val in [
+            ("t=0 v_ll_Linf", file_t0, script_t0),
+            ("t=1d v_ll_Linf", file_t1, script_t1),
+            ("ratio", file_ratio, script_ratio),
+        ]:
+            rel = abs(file_val - script_val) / max(abs(script_val), 1e-12)
+            self.assertLess(
+                rel, 0.01,
+                msg=(f"iter-768 committed file '{label}' = "
+                     f"{file_val:.4e} does not match shipped-script "
+                     f"stdout {script_val:.4e} (relative {rel:.2%}).  "
+                     f"The committed artifact "
+                     f"`{shipped.relative_to(repo_root)}` is stale or "
+                     f"tampered.  Regenerate via `python {script} > "
+                     f"{shipped}`; do NOT edit the file directly."))
 
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
