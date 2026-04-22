@@ -4438,6 +4438,112 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"re-examine whether the fill has been partially "
                  f"repaired."))
 
+    def test_iter768_two_point_measurement_pins(self):
+        """Iter-768e sentinel: pins the three numbers reported by
+        the iter-768 diagnostic (`scripts/diag_iter768_mode_a_at_t0.py`)
+        against drift.
+
+        Codex iter-768d stop-time flagged stale-report risk: the
+        committed output in `diagnostics/iter768_output/...` could
+        diverge from the script's current runtime output if any
+        of the IC construction, config defaults, matrix measurement
+        chain, or dycore behaviour changes, and nothing in CI would
+        catch it.
+
+        This test re-runs the same measurement inline (canonical
+        W2 C36 matrix config at t=0 and t=1 day) and pins:
+        - v_ll_Linf at t=0 ≈ 8.01e-3 m/s
+        - v_ll_Linf at t=1 day ≈ 1.59e-1 m/s
+        - ratio ≈ 19.79x
+
+        Tolerance: ±5 % on each pin.  If any pin fires, EITHER the
+        diagnostic script and committed output need to be updated
+        together, OR an unintended dycore/pipeline/IC change has
+        leaked in and should be investigated BEFORE updating the
+        pins.  Never silently update the pins.
+
+        Iter-768 is a purely reportage diagnostic: the numbers in
+        the doc table and the committed output file are the
+        measurement itself.  This sentinel ensures they remain
+        bit-reproducible against source drift.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge)
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+        from legoesm.grids.regridding import (
+            get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
+
+        n = 36
+        dt = 300.0
+        n_steps = int(86400 / dt)
+        div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        sw = williamson_test2(grid)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
+
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            div_damp=div_damp,
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2,
+        )
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+
+        ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+
+        def _v_ll_linf(state):
+            u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
+                           + np.asarray(state.u_d)[:, :, 1:])
+            v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
+                           + np.asarray(state.v_d)[:, 1:, :])
+            v_north = (np.asarray(sa_4edge) * u_cc
+                        + np.asarray(ca_4edge) * v_cc)
+            v_ll = apply_cubedsphere_to_latlon(v_north, weights)
+            return float(np.max(np.abs(v_ll)))
+
+        v_ll_linf_t0 = _v_ll_linf(state)
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+        v_ll_linf_t1d = _v_ll_linf(state)
+        ratio = v_ll_linf_t1d / v_ll_linf_t0
+
+        # Iter-768 measurement on this config: 0.008, 0.159, 19.79.
+        # ±5 % tolerance — generous enough to absorb normal floating-
+        # point reshuffling but tight enough to catch real drift.
+        for label, value, pin in [
+            ("t=0 v_ll_Linf", v_ll_linf_t0, 8.01e-3),
+            ("t=1d v_ll_Linf", v_ll_linf_t1d, 1.59e-1),
+            ("ratio", ratio, 19.79),
+        ]:
+            rel = abs(value - pin) / pin
+            self.assertLess(
+                rel, 0.05,
+                msg=(f"iter-768 pin '{label}' drifted: measured "
+                     f"{value:.4e}, pin {pin:.4e}, relative error "
+                     f"{rel:.2%}.  EITHER update the diagnostic "
+                     f"committed output + review-doc table together "
+                     f"(if this is an intentional change) OR "
+                     f"investigate the source drift before updating "
+                     f"the pin.  Never silently update."))
+
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
         that `boundary_fix=True` in `fv3_sw_tendencies` delivers a
