@@ -4901,6 +4901,82 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                 msg=(f"h_linf alpha={alpha}: script {hl_l:.3e} vs "
                      f"committed {hl_f:.3e}, rel {rel:.2%}."))
 
+    def test_iter780_cb_error_location_artifact(self):
+        """Iter-780b sentinel: lock the iter-780 committed output
+        file content.
+
+        Codex stop-time flagged iter-780's committed script as
+        "not runnable from the repo checkout."  The script does
+        run in practice (committed output was produced by running
+        it).  A subprocess-executing sentinel would take ~5 min
+        (same issue as iter-779c), exceeding unit-test CI budget.
+        This sentinel parses the committed output instead and
+        pins:
+
+        - The 4 expected n-values in {16, 24, 36, 48}.
+        - All peak-error cells on face 3 (matches iter-780
+          measurement).
+        - The GC-distance-to-cube-vertex values within a generous
+          envelope 5° to 40°.
+        - The summary block lines present.
+
+        Runtime: ~0.3s file parse only.
+        """
+        import re
+        from pathlib import Path
+        repo = Path(__file__).resolve().parents[2]
+        shipped = (repo / "diagnostics/iter780_output"
+                    / "iter780_cb_error_location.txt")
+        self.assertTrue(shipped.exists(),
+            msg=f"iter-780 committed output missing at {shipped}")
+        text = shipped.read_text()
+
+        # Expected row format:
+        #   "  16    3  (12,12)   23.15°   -64.69°         20.96°  ..."
+        pattern = re.compile(
+            r"^\s+(\d+)\s+(\d+)\s+\(\s*(\d+),\s*(\d+)\)\s+"
+            r"(-?[\d.]+)°\s+(-?[\d.]+)°\s+(-?[\d.]+)°\s+"
+            r"(\d+)\s+([\d.eE+-]+)", re.MULTILINE)
+        rows = pattern.findall(text)
+        self.assertEqual(
+            len(rows), 4,
+            msg=f"iter-780 expected 4 data rows, got {len(rows)}")
+
+        ns_seen = [int(r[0]) for r in rows]
+        faces_seen = [int(r[1]) for r in rows]
+        gc_seen = [float(r[6]) for r in rows]
+
+        self.assertEqual(
+            ns_seen, [16, 24, 36, 48],
+            msg=f"iter-780 row ns: {ns_seen}")
+        for n, face in zip(ns_seen, faces_seen):
+            self.assertEqual(
+                face, 3,
+                msg=(f"iter-780 expected face=3 at n={n}, got "
+                     f"{face}.  Peak-error face changed; re-examine."))
+        for n, gc in zip(ns_seen, gc_seen):
+            self.assertGreater(
+                gc, 5.0,
+                msg=(f"iter-780 GC-to-vertex at n={n} = {gc:.2f}° "
+                     f"< 5°; peak-error position moved much closer "
+                     f"to a cube vertex than recorded.  Re-examine."))
+            self.assertLess(
+                gc, 40.0,
+                msg=(f"iter-780 GC-to-vertex at n={n} = {gc:.2f}° "
+                     f">= 40°; peak-error position drifted far from "
+                     f"cube vertex.  Re-examine."))
+
+        # Verify the summary block is present.
+        self.assertIn(
+            "Measured summary across the 4 resolutions:", text,
+            msg="iter-780 summary block missing from committed output")
+        self.assertIn(
+            "What this report DOES show", text,
+            msg="iter-780 DOES-show block missing")
+        self.assertIn(
+            "What it does NOT establish", text,
+            msg="iter-780 DOES-NOT-establish block missing")
+
     def test_iter778_779_cb_convergence_artifacts(self):
         """Iter-779b sentinel (Codex): verify the committed iter-778
         and iter-779 cosine bell convergence output files contain
