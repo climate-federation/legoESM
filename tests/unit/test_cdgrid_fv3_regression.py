@@ -5041,6 +5041,29 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             "cell to edge   peak|err|", text,
             msg="iter-780 header line shape changed")
 
+        # Iter-780d ultimate lock: SHA256 of the committed file.
+        # Any byte change (whitespace, line order, added / removed
+        # lines) fires.  If the sentinel fires BUT the per-value
+        # pins above all pass, that means a formatting change
+        # happened without any value drift — update the hash
+        # below when intentional.
+        import hashlib
+        expected_sha256 = (
+            "62a32ff947a9e9a25086798887fedc0e2f4b31f2daa386b69572f4b8b2f92d14"
+        )
+        actual_sha256 = hashlib.sha256(
+            shipped.read_bytes()).hexdigest()
+        self.assertEqual(
+            actual_sha256, expected_sha256,
+            msg=(f"iter-780 committed file SHA256 changed:\n"
+                 f"  expected: {expected_sha256}\n"
+                 f"  actual:   {actual_sha256}\n"
+                 f"If this is an INTENTIONAL formatting change "
+                 f"(whitespace, line order, label rename), update "
+                 f"the expected hash here.  If it's a value drift "
+                 f"also change, the per-value pins above will "
+                 f"separately fire."))
+
     def test_iter778_779_cb_convergence_artifacts(self):
         """Iter-779b sentinel (Codex): verify the committed iter-778
         and iter-779 cosine bell convergence output files contain
