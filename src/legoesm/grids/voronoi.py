@@ -532,13 +532,17 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
             vertex_cells[v_idx].append(int(c))
             cell_vertices[int(c)].append(v_idx)
 
-    # For each vertex, find its edges (edges of the Delaunay triangle)
+    # For each vertex, find its edges (edges of the Delaunay triangle).
+    # A triangle's edge may have been dropped from edge_dict as a periodic
+    # half-edge; skip it here (the final edgesOnVertex is rebuilt later
+    # with the same `if key in edge_dict` guard at line ~645).
     for v_idx, tri in enumerate(triangles):
         for i in range(3):
             c1, c2 = int(tri[i]), int(tri[(i + 1) % 3])
             key = (min(c1, c2), max(c1, c2))
-            e_idx = edge_dict[key]
-            vertex_edges_list[v_idx].append(e_idx)
+            e_idx = edge_dict.get(key, -1)
+            if e_idx >= 0:
+                vertex_edges_list[v_idx].append(e_idx)
 
     # --- Rebuild cell_edges and cell_vertices from cellsOnEdge / triangles ---
     # cellsOnEdge is the source of truth for edge→cell adjacency; derive
@@ -1271,7 +1275,24 @@ def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False,
         Filtered triangle vertex indices.
     """
     d_rad = resolution_km * 1000.0 / radius
-    max_edge = 3.0 * d_rad
+    # Oversize-edge cutoff for Delaunay triangle acceptance.  The correct
+    # value is path-dependent:
+    #   - sub-360° periodic (unroll+ghost):  1.5·d_rad.  The unroll+ghost
+    #     Delaunay in (u·cos(lat_c), lat) coordinates produces pathological
+    #     seam triangles with a meridional third leg of exactly 2·d_rad
+    #     (two rows at identical lon).  These pass a looser 3·d_rad
+    #     threshold and poison TRiSK with phantom edges (issue #211).
+    #     1.5·d_rad is a comfortable margin above legitimate edges
+    #     (~1.0–1.15·d_rad) and well below the 2·d_rad pathology.
+    #   - bounded / full-360°:  3·d_rad.  The stereographic-projection
+    #     path produces legitimate convex-hull boundary triangles with
+    #     edge lengths up to ~2·d_rad; tightening to 1.5·d_rad here
+    #     filter-orphans them and breaks antisymmetry.
+    _sub360_periodic = (
+        periodic_x and lon_range is not None
+        and abs(np.radians(lon_range[1] - lon_range[0]) - 2.0 * np.pi) > 1e-6
+    )
+    max_edge = (1.5 if _sub360_periodic else 3.0) * d_rad
 
     if periodic_x:
         # Decide between full-360° stereographic-annulus and sub-360°
@@ -1305,7 +1326,8 @@ def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False,
         tri = Delaunay(xy)
         triangles = tri.simplices.copy()
 
-    # Filter degenerate triangles: any edge > 3x angular resolution.
+    # Filter degenerate triangles: any edge > max_edge (1.5x for sub-360°
+    # periodic, 3x otherwise — see max_edge definition above).
     # For sub-360° periodic, use seam-aware distances so valid seam
     # triangles are retained.
     L_for_shift = None

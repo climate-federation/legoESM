@@ -48,6 +48,23 @@ def channel_mesh():
 
 
 @pytest.fixture(scope="module")
+def channel_mesh_20km():
+    """Finer-resolution (20 km) regional periodic channel — matches the
+    production Eady setup. This resolution exposes pathological 2·d_rad
+    seam triangles that a looser oversize-edge cutoff (3·d_rad) lets
+    through. Those triangles introduced phantom edges with
+    verticesOnEdge[1] = -1, poisoning TRiSK walks near (but not on) the
+    seam and producing O(1) Thuburn-antisymmetry violations on ~420
+    stencil pairs. The 1.5·d_rad filter in the sub-360° periodic path
+    drops them cleanly. See issue #211."""
+    from legoesm.grids.voronoi import create_regional_voronoi_mesh
+    return create_regional_voronoi_mesh(
+        lon_range=(0.0, 10.0), lat_range=(16.0, 34.0),
+        resolution_km=20.0, periodic_x=True,
+    )
+
+
+@pytest.fixture(scope="module")
 def arrays(mesh):
     """Pull all TRiSK arrays into float64 numpy."""
     return dict(
@@ -337,4 +354,61 @@ class TestChannelMesh:
         assert rel < 1e-2, (
             f"Channel-mesh stationary geostrophic mode violated: "
             f"rel={rel:.3e}"
+        )
+
+    def test_channel_20km_antisymmetry(self, channel_mesh_20km):
+        """The production-resolution (20 km) Eady channel mesh must hit
+        machine-precision TRiSK antisymmetry — it is the mesh where
+        issue #211's day-1.9 blowup occurred. A looser oversize-edge
+        filter (3·d_rad) let pathological 2·d_rad meridional triangles
+        through near the seam, introducing phantom half-edges that
+        broke antisymmetry at exactly 0.408 on ~420 stencil pairs.
+        Tightening to 1.5·d_rad in the sub-360° periodic path removes
+        them. Regression guard: any reversion that re-loosens the filter
+        (or that allows phantom half-edges from some other source) must
+        trip this test."""
+        w = np.asarray(channel_mesh_20km.weightsOnEdge, dtype=np.float64)
+        eoe = np.asarray(channel_mesh_20km.edgesOnEdge, dtype=np.int64)
+        nEOE = np.asarray(channel_mesh_20km.nEdgesOnEdge, dtype=np.int64)
+        dv = np.asarray(channel_mesh_20km.dvEdge, dtype=np.float64)
+        dc = np.asarray(channel_mesh_20km.dcEdge, dtype=np.float64)
+        max_viol = 0.0
+        n_pairs = 0
+        for e in range(channel_mesh_20km.nEdges):
+            for k in range(int(nEOE[e])):
+                ep = int(eoe[k, e])
+                if ep < 0:
+                    continue
+                wT_e_ep = w[k, e] * dc[e] / dv[ep]
+                wT_ep_e = None
+                for kk in range(int(nEOE[ep])):
+                    if int(eoe[kk, ep]) == e:
+                        wT_ep_e = w[kk, ep] * dc[ep] / dv[e]
+                        break
+                if wT_ep_e is None:
+                    continue
+                viol = abs(wT_e_ep + wT_ep_e)
+                if viol > max_viol:
+                    max_viol = viol
+                n_pairs += 1
+        assert max_viol < 1e-6, (
+            f"20 km channel-mesh Thuburn antisymmetry violation: "
+            f"max={max_viol:.3e} over {n_pairs} pairs. Expected machine "
+            f"precision (~1e-7). If this fails, oversize-edge filter is "
+            f"likely reverted to 3·d_rad or phantom half-edges re-appeared."
+        )
+
+    def test_channel_20km_no_interior_phantom_cells(self, channel_mesh_20km):
+        """No interior cell should have nEdgesOnCell outside {4, 5, 6, 7}.
+        Interior hex cells are 6-edge. Boundary-row cells are 4 or 5.
+        Any cell with 8+ edges indicates phantom edges sneaking through
+        a too-loose oversize filter — the exact signature that drove the
+        issue #211 blowup before the 1.5·d_rad fix (24 cells had 8 edges
+        clustered at lon 0.3–0.7° and 9.3–9.7°)."""
+        nEOC = np.asarray(channel_mesh_20km.nEdgesOnCell, dtype=np.int64)
+        n_phantom = int((nEOC > 7).sum())
+        assert n_phantom == 0, (
+            f"20 km channel mesh has {n_phantom} cells with nEdgesOnCell "
+            f">7 — indicates phantom edges from a too-loose oversize "
+            f"filter in _regional_delaunay (see issue #211)."
         )
