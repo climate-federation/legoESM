@@ -145,8 +145,27 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        # K_bih not supported by MPASOceanConfig — skip silently
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
         cfg = MPASOceanConfig(**kw)
@@ -235,8 +254,13 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         res_km = params["resolution_km"]
         lat_s = tc.run_kwargs.get("lat_south", 25.0)
         lat_n = tc.run_kwargs.get("lat_north", 65.0)
+        # Periodic-x zonal extent: defaults to the full 360° (legacy) but
+        # can be overridden via run_kwargs to match a lat-lon channel
+        # (e.g. the Eady lon_west/lon_east bounds).
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 360.0)
         mesh = create_regional_voronoi_mesh(
-            (0, 360), (lat_s, lat_n), resolution_km=res_km,
+            (lon_w, lon_e), (lat_s, lat_n), resolution_km=res_km,
             periodic_x=True)
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
