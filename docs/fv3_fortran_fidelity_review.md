@@ -722,3 +722,54 @@ Per iter-776b's candidate "Enable `nord`/`damp_c` in cosine bell matrix config",
 **Deliverable.**  `scripts/diag_iter777_cb_nord_dampc.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  41st iter in iter-752-777 chain.  Three discrete `(nord, damp_c)` samples were tested on the cosine bell C36 1-day case; the `(2, 0.06)` sample produced no measurable change and the `(1, 0.16)` sample increased the error.  Iter-778+ candidates from iter-776b remain open.  Iter-777b (Codex stop-time) retracted the "4th-order smoother" mis-nomenclature, the "too weak" mechanism attribution, and the "falsifying 'missing smoothing'" strong conclusion from only 3 discrete points.
+
+### Iter-778 — Cosine bell cross-resolution convergence: error plateaus, not converging
+
+Per iter-777b's iter-778+ candidate "Sweep cosine bell at C48/C72/C96 to measure PPM convergence order", iter-778 runs the canonical cosine bell setup at C16, C24, C36, C48 and measures observed convergence order.
+
+**Method** (`scripts/diag_iter778_cb_convergence.py`; committed output at `diagnostics/iter778_output/iter778_cb_convergence.txt`).  Same β=π/4, 1 day integration.  `dt = 1800 × (36/n)` (CFL-scaled from the C36 matrix default).  Reports L1/L2/Linf and observed order `p = log(err(n1)/err(n2)) / log(n2/n1)` between consecutive resolutions.
+
+**Result**:
+
+| n  | dt     | steps | L1        | L2        | Linf      | undershoot |
+|----|--------|-------|-----------|-----------|-----------|------------|
+| 16 | 4114   | 21    | 1.722e−01 | 1.517e−01 | 1.727e−01 | 15.00 %    |
+| 24 | 2700   | 32    | 1.239e−01 | 1.156e−01 | 1.174e−01 | 11.20 %    |
+| 36 | 1800   | 48    | 1.198e−01 | 1.168e−01 | 1.227e−01 | 9.50 %     |
+| 48 | 1350   | 64    | 1.214e−01 | 1.195e−01 | 1.267e−01 | 8.75 %     |
+
+**Convergence order** (log ratio / log resolution ratio):
+
+| pair     | p(L1)  | p(L2)  | p(Linf) |
+|----------|--------|--------|---------|
+| 16→24    | +0.811 | +0.671 | +0.953  |
+| 24→36    | +0.083 | −0.026 | −0.110  |
+| 36→48    | −0.045 | −0.077 | −0.111  |
+
+**Observation.**  The error norms decrease from C16 to C24 (sub-1st-order convergence on this transition).  Above C24, L2 and Linf INCREASE at higher resolution — negative "convergence order" on the last two transitions.  L1 is approximately flat after C24.  The peak-undershoot fraction decreases monotonically with n, which is the only monotone trend observed.
+
+**Scope limits.**
+- 4 resolutions tested.  Further points (C72, C96) would refine the picture.
+- 1 test case (β=π/4 cosine bell), 1 horizon (1 day).  Different ICs or horizons might behave differently.
+- The dt scaling with (36/n) is a choice; a different dt policy would shift per-step error budgets and the measured p could change.  An additional sweep at fixed dt or fixed Courant number would distinguish spatial-truncation from dt-dependent error.
+- PPM formal accuracy is ~3rd order for smooth linear advection; the cosine bell is smooth except where the C² term reaches the bell radius.  This is not a fully regular advection test.
+
+**What iter-778 does and does not support.**
+- DOES support: between C16 and C24, error decreases.  Above C24, error norms are roughly flat-to-increasing.
+- DOES NOT support (yet): a blanket claim that "convergence is broken" or "there is a structural bug."  A non-monotone error plateau has multiple candidate mechanisms:
+  (a) a resolution-invariant structural error (candidate bug).
+  (b) dt scaling vs spatial-error crossover (as resolution increases, time-discretization error grows relative to spatial).
+  (c) cube-vertex-localized error whose magnitude is set by face-count (constant 8) and whose shape gets finer but does not get smaller at higher n.
+  (d) PPM shape-preserving limiter kicking in at different ratios with n.
+
+Distinguishing among these requires further diagnostics (iter-779+).
+
+**Iter-779+ candidates.**
+- Run the same sweep at FIXED dt across all resolutions (e.g. dt=450s — CFL-safe at C64).  If error still plateaus, dt scaling is not the cause.
+- Measure where in the field the error concentrates at each resolution — if the peak error stays near a cube-vertex passage independent of n, that's (c).
+- Audit `_d2a2c_vect` non-duogrid cube-vertex gap (iter-776b's repair candidate still unaudited).
+- Port Fortran c_sw+d_sw FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter778_cb_convergence.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  42nd iter in iter-752-778 chain.  Measures the question iter-777b deferred ("test C48/C72/C96 to verify PPM convergence order"); result is a non-monotone error plateau that has multiple candidate mechanisms.
