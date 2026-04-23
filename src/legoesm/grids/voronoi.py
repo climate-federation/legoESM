@@ -254,6 +254,44 @@ def _xyz_to_latlon(x, y, z):
     return lat, lon
 
 
+def _wrap_dlon(dlon, L_rad):
+    """Wrap a longitude difference into the interval (-L_rad/2, L_rad/2]."""
+    if L_rad is None:
+        return dlon
+    half = 0.5 * L_rad
+    # Avoid Python-level while loops for speed — use modular arithmetic.
+    return ((dlon + half) % L_rad) - half
+
+
+def _shift_near(ref_xyz, other_xyz, L_rad):
+    """Return ``other_xyz`` shifted zonally so it lies within ±L_rad/2 of
+    the longitude of ``ref_xyz``.
+
+    Used for sub-360° periodic meshes where seam edges and seam triangles
+    involve cells whose true 3D positions sit on opposite sides of the
+    periodic zonal extent. After shifting, the usual 3D great-circle,
+    midpoint, and cross-product formulas give the correct *through-the-
+    seam* geometry instead of the *the-long-way-around* geometry.
+
+    For non-periodic meshes or full 360° meshes (L_rad None or ~2π), the
+    input is returned unchanged.
+    """
+    if L_rad is None or abs(L_rad - 2.0 * np.pi) < 1e-10:
+        return other_xyz
+    lat_r = np.arcsin(np.clip(ref_xyz[2], -1.0, 1.0))
+    lon_r = np.arctan2(ref_xyz[1], ref_xyz[0])
+    lat_o = np.arcsin(np.clip(other_xyz[2], -1.0, 1.0))
+    lon_o = np.arctan2(other_xyz[1], other_xyz[0])
+    dlon = _wrap_dlon(lon_o - lon_r, L_rad)
+    lon_shifted = lon_r + dlon
+    cos_lat_o = np.cos(lat_o)
+    return np.array([
+        cos_lat_o * np.cos(lon_shifted),
+        cos_lat_o * np.sin(lon_shifted),
+        np.sin(lat_o),
+    ])
+
+
 def _great_circle_distance(p1, p2, radius=1.0):
     """Great-circle distance between two 3D points on a sphere."""
     dot = np.clip(np.sum(p1 * p2, axis=-1), -1.0, 1.0)
@@ -330,7 +368,7 @@ def _order_indices_ccw(center_xyz, neighbor_xyz):
 # ============================================================================
 
 def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
-                                triangles=None):
+                                triangles=None, periodic_L_rad=None):
     """Build complete MPAS mesh from generator points on the unit sphere.
 
     Parameters
@@ -345,21 +383,38 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
         Pre-computed Delaunay triangles (nTriangles, 3). If ``None``,
         uses ``ConvexHull`` (only valid for global meshes covering the
         full sphere).
+    periodic_L_rad : float or None
+        When provided (and not equal to 2π), the mesh is treated as
+        a zonally-periodic channel with periodic extent ``L_rad``. All
+        per-edge, per-triangle, and per-vertex geometric computations
+        shift neighbouring points across the seam so the resulting
+        lengths, midpoints, angles, and areas reflect the correct
+        through-the-seam geometry rather than the long-way-around
+        great-circle on the full sphere. Leave as None for closed
+        basins or full-sphere meshes.
 
     Returns
     -------
     dict : All mesh arrays needed for VoronoiMesh.
     """
     nCells = len(cell_xyz)
+    # Seam-shift flag; None disables all periodic corrections.
+    _L = periodic_L_rad if (
+        periodic_L_rad is not None
+        and abs(periodic_L_rad - 2.0 * np.pi) > 1e-6
+    ) else None
 
     if triangles is None:
         # --- Delaunay triangulation via ConvexHull ---
         hull = ConvexHull(cell_xyz)
         triangles = hull.simplices.copy()
 
-    # Orient triangles outward
+    # Orient triangles outward (uses seam-shifted positions when needed so
+    # the outward normal of a seam triangle is correct).
     for i, tri in enumerate(triangles):
-        a, b, c = cell_xyz[tri[0]], cell_xyz[tri[1]], cell_xyz[tri[2]]
+        a = cell_xyz[tri[0]]
+        b = _shift_near(a, cell_xyz[tri[1]], _L)
+        c = _shift_near(a, cell_xyz[tri[2]], _L)
         normal = np.cross(b - a, c - a)
         if np.dot(normal, a) < 0:
             triangles[i] = [tri[0], tri[2], tri[1]]
@@ -369,7 +424,9 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     # --- Compute vertex positions (circumcenters of Delaunay triangles) ---
     vertex_xyz = np.zeros((nVertices, 3), dtype=np.float64)
     for v, tri in enumerate(triangles):
-        a, b, c = cell_xyz[tri[0]], cell_xyz[tri[1]], cell_xyz[tri[2]]
+        a = cell_xyz[tri[0]]
+        b = _shift_near(a, cell_xyz[tri[1]], _L)
+        c = _shift_near(a, cell_xyz[tri[2]], _L)
         # Circumcenter: point equidistant from a, b, c on the sphere
         # cc · (a-b) = 0 and cc · (b-c) = 0 => cc = cross(a-b, b-c)
         n1 = a - b
@@ -427,14 +484,18 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
         v0, v1 = verticesOnEdge[0, e_idx], verticesOnEdge[1, e_idx]
         if v0 < 0 or v1 < 0:
             continue
+        c1_pos = cell_xyz[c1]
+        c2_pos = _shift_near(c1_pos, cell_xyz[c2], _L)
         # Normal direction: c1 → c2
-        n_vec = cell_xyz[c2] - cell_xyz[c1]
+        n_vec = c2_pos - c1_pos
         # Tangent: k × n (where k is radial at edge midpoint)
-        edge_mid = (cell_xyz[c1] + cell_xyz[c2])
+        edge_mid = (c1_pos + c2_pos)
         edge_mid /= np.linalg.norm(edge_mid)
         t_vec = np.cross(edge_mid, n_vec)
-        # v0→v1 direction
-        v_dir = vertex_xyz[v1] - vertex_xyz[v0]
+        # v0→v1 direction, with v1 shifted near v0 if on opposite sides of seam
+        v0_pos = vertex_xyz[v0]
+        v1_pos = _shift_near(v0_pos, vertex_xyz[v1], _L)
+        v_dir = v1_pos - v0_pos
         if np.dot(v_dir, t_vec) < 0:
             verticesOnEdge[0, e_idx] = v1
             verticesOnEdge[1, e_idx] = v0
@@ -443,7 +504,9 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     edge_xyz = np.zeros((nEdges, 3), dtype=np.float64)
     for e_idx in range(nEdges):
         c1, c2 = cellsOnEdge[0, e_idx], cellsOnEdge[1, e_idx]
-        mid = (cell_xyz[c1] + cell_xyz[c2]) * 0.5
+        c1_pos = cell_xyz[c1]
+        c2_pos = _shift_near(c1_pos, cell_xyz[c2], _L)
+        mid = (c1_pos + c2_pos) * 0.5
         norm = np.linalg.norm(mid)
         if norm > 1e-15:
             mid /= norm
@@ -492,9 +555,13 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
         n = nEdgesOnCell_arr[c]
         if n == 0:
             continue
-        # Get vertex positions and order CCW
+        # Get vertex positions and order CCW (seam-shift vertices near cell c)
         v_indices = list(set(cell_vertices[c]))
-        v_xyz = vertex_xyz[v_indices]
+        if _L is None:
+            v_xyz = vertex_xyz[v_indices]
+        else:
+            v_xyz = np.array([_shift_near(cell_xyz[c], vertex_xyz[v], _L)
+                               for v in v_indices])
         order = _order_indices_ccw(cell_xyz[c], v_xyz)
         ordered_verts = [v_indices[i] for i in order]
 
@@ -538,9 +605,13 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
 
     for v_idx in range(nVertices):
         tri = triangles[v_idx]
-        # Order cells CCW around vertex
+        # Order cells CCW around vertex (seam-shift cells near the vertex)
         c_indices = [int(tri[0]), int(tri[1]), int(tri[2])]
-        c_xyz = cell_xyz[c_indices]
+        if _L is None:
+            c_xyz = cell_xyz[c_indices]
+        else:
+            c_xyz = np.array([_shift_near(vertex_xyz[v_idx], cell_xyz[ci], _L)
+                               for ci in c_indices])
         order = _order_indices_ccw(vertex_xyz[v_idx], c_xyz)
         ordered_cells = [c_indices[i] for i in order]
 
@@ -556,44 +627,51 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
                 edgesOnVertex[k, v_idx] = edge_dict[key]
 
     # --- Compute geometric quantities ---
-    # dcEdge: great-circle distance between cell centers
+    # dcEdge: great-circle distance between cell centers (seam-shifted)
     dcEdge = np.zeros(nEdges, dtype=np.float64)
     for e in range(nEdges):
         c1, c2 = cellsOnEdge[0, e], cellsOnEdge[1, e]
-        dcEdge[e] = _great_circle_distance(cell_xyz[c1], cell_xyz[c2], radius)
+        c1_pos = cell_xyz[c1]
+        c2_pos = _shift_near(c1_pos, cell_xyz[c2], _L)
+        dcEdge[e] = _great_circle_distance(c1_pos, c2_pos, radius)
 
-    # dvEdge: great-circle distance between vertices
+    # dvEdge: great-circle distance between vertices (seam-shifted)
     dvEdge = np.zeros(nEdges, dtype=np.float64)
     for e in range(nEdges):
         v0, v1 = verticesOnEdge[0, e], verticesOnEdge[1, e]
         if v0 >= 0 and v1 >= 0:
-            dvEdge[e] = _great_circle_distance(vertex_xyz[v0], vertex_xyz[v1],
-                                                radius)
+            v0_pos = vertex_xyz[v0]
+            v1_pos = _shift_near(v0_pos, vertex_xyz[v1], _L)
+            dvEdge[e] = _great_circle_distance(v0_pos, v1_pos, radius)
 
     # angleEdge: angle of edge normal (c1→c2 direction) relative to local east
+    # At the edge midpoint the local frame is well-defined; the direction
+    # vector uses the seam-shifted c2 so it points the short way across
+    # the seam rather than the long way around the sphere.
     angleEdge = np.zeros(nEdges, dtype=np.float64)
     for e in range(nEdges):
         c1, c2 = cellsOnEdge[0, e], cellsOnEdge[1, e]
-        dx = cell_xyz[c2, 0] - cell_xyz[c1, 0]
-        dy = cell_xyz[c2, 1] - cell_xyz[c1, 1]
-        dz = cell_xyz[c2, 2] - cell_xyz[c1, 2]
+        c1_pos = cell_xyz[c1]
+        c2_pos = _shift_near(c1_pos, cell_xyz[c2], _L)
+        dx = c2_pos[0] - c1_pos[0]
+        dy = c2_pos[1] - c1_pos[1]
+        dz = c2_pos[2] - c1_pos[2]
         ex, ey, ez = edge_xyz[e]
         angleEdge[e] = _angle_from_east(ex, ey, ez, dx, dy, dz)
 
-    # areaTriangle: spherical triangle area for each vertex (Delaunay triangle)
+    # areaTriangle: spherical triangle area for each vertex (seam-shifted)
     areaTriangle = np.zeros(nVertices, dtype=np.float64)
     for v in range(nVertices):
         tri = triangles[v]
-        a = cell_xyz[tri[0]] * radius
-        b = cell_xyz[tri[1]] * radius
-        c = cell_xyz[tri[2]] * radius
-        areaTriangle[v] = _spherical_triangle_area(
-            a / radius, b / radius, c / radius, radius)
+        a = cell_xyz[tri[0]]
+        b = _shift_near(a, cell_xyz[tri[1]], _L)
+        c = _shift_near(a, cell_xyz[tri[2]], _L)
+        areaTriangle[v] = _spherical_triangle_area(a, b, c, radius)
 
     # --- Kite areas ---
     kiteAreasOnVertex = _compute_kite_areas(
         nVertices, vertexDegree, cellsOnVertex, vertex_xyz, cell_xyz,
-        verticesOnEdge, edgesOnVertex, edge_xyz, radius)
+        verticesOnEdge, edgesOnVertex, edge_xyz, radius, periodic_L_rad=_L)
 
     # areaCell: sum of kite areas for each cell
     areaCell = np.zeros(nCells, dtype=np.float64)
@@ -608,7 +686,7 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
         nCells, maxEdges, nEdgesOnCell_arr, edgesOnCell, cellsOnEdge)
     edgeSignOnVertex = _compute_edge_sign_on_vertex(
         nVertices, vertexDegree, edgesOnVertex, cellsOnVertex, cellsOnEdge,
-        vertex_xyz, cell_xyz)
+        vertex_xyz, cell_xyz, periodic_L_rad=_L)
 
     # --- edgesOnEdge and weightsOnEdge ---
     maxEdges2 = 2 * maxEdges - 2
@@ -685,12 +763,18 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
 
 def _compute_kite_areas(nVertices, vertexDegree, cellsOnVertex,
                          vertex_xyz, cell_xyz, verticesOnEdge,
-                         edgesOnVertex, edge_xyz, radius):
+                         edgesOnVertex, edge_xyz, radius,
+                         periodic_L_rad=None):
     """Compute kite areas at each vertex for each adjacent cell.
 
     A kite at vertex v for cell c is the quadrilateral formed by:
     vertex v, midpoint of edge between v and next cell, cell center c,
     midpoint of edge between v and prev cell.
+
+    When ``periodic_L_rad`` is set, kites near the seam have their four
+    corners (vertex, two edge midpoints, cell center) seam-shifted
+    relative to the vertex so the two spherical-triangle sub-areas
+    reflect the true through-the-seam geometry.
     """
     kiteAreas = np.zeros((vertexDegree, nVertices), dtype=np.float64)
 
@@ -707,17 +791,18 @@ def _compute_kite_areas(nVertices, vertexDegree, cellsOnVertex,
             if e_prev < 0 or e_curr < 0:
                 continue
 
-            # Kite: vertex_v, edge_midpoint_prev, cell_center_c, edge_midpoint_curr
-            p_v = vertex_xyz[v] * radius
-            p_eprev = edge_xyz[e_prev] * radius
-            p_c = cell_xyz[c] * radius
-            p_ecurr = edge_xyz[e_curr] * radius
+            # Kite: vertex_v, edge_midpoint_prev, cell_center_c, edge_midpoint_curr.
+            # Anchor on the vertex; shift the other three points into the
+            # vertex's longitude window so the great-circle geometry is
+            # correct for seam kites.
+            p_v = vertex_xyz[v]
+            p_eprev = _shift_near(p_v, edge_xyz[e_prev], periodic_L_rad)
+            p_c = _shift_near(p_v, cell_xyz[c], periodic_L_rad)
+            p_ecurr = _shift_near(p_v, edge_xyz[e_curr], periodic_L_rad)
 
             # Area as sum of two spherical triangles
-            a1 = _spherical_triangle_area(
-                p_v / radius, p_eprev / radius, p_c / radius, radius)
-            a2 = _spherical_triangle_area(
-                p_v / radius, p_c / radius, p_ecurr / radius, radius)
+            a1 = _spherical_triangle_area(p_v, p_eprev, p_c, radius)
+            a2 = _spherical_triangle_area(p_v, p_c, p_ecurr, radius)
             kiteAreas[k, v] = a1 + a2
 
     return kiteAreas
@@ -742,7 +827,7 @@ def _compute_edge_sign_on_cell(nCells, maxEdges, nEdgesOnCell, edgesOnCell,
 
 def _compute_edge_sign_on_vertex(nVertices, vertexDegree, edgesOnVertex,
                                   cellsOnVertex, cellsOnEdge,
-                                  vertex_xyz, cell_xyz):
+                                  vertex_xyz, cell_xyz, periodic_L_rad=None):
     """Compute edgeSignOnVertex for curl computation.
 
     edgeSignOnVertex(k, v) = +1 if the edge contributes positively to
@@ -750,20 +835,26 @@ def _compute_edge_sign_on_vertex(nVertices, vertexDegree, edgesOnVertex,
 
     The sign is +1 if the edge normal (c1→c2) is oriented such that
     traversing from c1 to c2 is counterclockwise around vertex v.
+
+    When ``periodic_L_rad`` is set, seam vertices shift their two
+    bounding cells into the vertex's longitude window before the
+    cross-product sign test.
     """
     edgeSignOnVertex = np.zeros((vertexDegree, nVertices), dtype=np.float64)
     for v in range(nVertices):
+        v_pos = vertex_xyz[v]
         for k in range(vertexDegree):
             e = edgesOnVertex[k, v]
             if e < 0:
                 continue
             c1 = cellsOnEdge[0, e]
             c2 = cellsOnEdge[1, e]
-            # Check if c1→c2 is CCW around v
-            # Use cross product: (c1 - v) × (c2 - v) should be same direction as v
-            v_pos = vertex_xyz[v]
-            vec1 = cell_xyz[c1] - v_pos
-            vec2 = cell_xyz[c2] - v_pos
+            # Shift cells near this vertex so (c - v) vectors are correct
+            # across the seam.
+            c1_pos = _shift_near(v_pos, cell_xyz[c1], periodic_L_rad)
+            c2_pos = _shift_near(v_pos, cell_xyz[c2], periodic_L_rad)
+            vec1 = c1_pos - v_pos
+            vec2 = c2_pos - v_pos
             cross = np.cross(vec1, vec2)
             if np.dot(cross, v_pos) > 0:
                 edgeSignOnVertex[k, v] = 1.0   # c1→c2 is CCW
@@ -949,16 +1040,20 @@ def _seed_regional_generators(lon_range, lat_range, resolution_km, radius,
     degenerate Voronoi edges at row boundaries. A buffer ring of ~1.5x
     resolution is added around the domain.
 
-    When ``periodic_x=True``, longitude spans the full 360° with no
-    buffer or duplicate generators at the seam.  Only latitude gets
-    a buffer ring.  This creates a channel-like mesh that is naturally
-    periodic on the sphere.
+    When ``periodic_x=True`` with ``lon_range`` spanning the full 360°,
+    longitude wraps around the sphere with no duplicate generators at the
+    seam.  When ``periodic_x=True`` with a smaller zonal range, generators
+    are seeded within ``lon_range`` and the east/west boundaries are
+    identified (zonally-periodic regional channel on the sphere).  Only
+    latitude gets a buffer ring in either periodic case.
 
     Parameters
     ----------
     lon_range : tuple[float, float]
-        Longitude range in degrees [lon_min, lon_max].
-        Ignored when ``periodic_x=True``.
+        Longitude range in degrees [lon_min, lon_max]. When
+        ``periodic_x=True`` this is the periodic zonal extent; generators
+        live within [lon_min, lon_max) and lon_max is identified with
+        lon_min.
     lat_range : tuple[float, float]
         Latitude range in degrees [lat_min, lat_max].
     resolution_km : float
@@ -966,7 +1061,7 @@ def _seed_regional_generators(lon_range, lat_range, resolution_km, radius,
     radius : float
         Sphere radius in m.
     periodic_x : bool
-        If True, seed generators around the full 360° longitude.
+        If True, seed generators around the periodic zonal extent.
 
     Returns
     -------
@@ -990,15 +1085,28 @@ def _seed_regional_generators(lon_range, lat_range, resolution_km, radius,
     lats = np.arange(lat_min_buf, lat_max_buf + 0.5 * dlat, dlat)
 
     if periodic_x:
-        # Full 360° longitude: exact integer number of cells, no buffer.
-        # Use dlon spacing, rounded so n_lon * dlon = 2π exactly.
-        n_lon = max(1, int(np.round(2.0 * np.pi / dlon)))
-        dlon_exact = 2.0 * np.pi / n_lon
+        # Periodic in longitude. Full 360° or sub-360° zonal extent.
+        lon_min_rad = np.radians(lon_range[0])
+        lon_max_rad = np.radians(lon_range[1])
+        L_rad = lon_max_rad - lon_min_rad
+        if L_rad <= 0 or L_rad > 2.0 * np.pi + 1e-10:
+            raise ValueError(
+                f"periodic-x requires 0 < L_rad ≤ 2π, got {L_rad} rad "
+                f"(lon_range={lon_range})"
+            )
+        # Exact integer number of cells around the periodic extent.
+        # Force ``n_lon`` even so that the hex row-offset staggering
+        # (lons shifted by dlon/2 on odd rows) closes consistently at
+        # the seam.
+        n_lon = max(2, int(np.round(L_rad / dlon)))
+        if n_lon % 2 == 1:
+            n_lon += 1
+        dlon_exact = L_rad / n_lon
 
         generators = []
         for i_row, lat in enumerate(lats):
             offset = 0.5 * dlon_exact if (i_row % 2 == 1) else 0.0
-            lons = offset + np.arange(n_lon) * dlon_exact
+            lons = lon_min_rad + offset + np.arange(n_lon) * dlon_exact
             for lon in lons:
                 x = np.cos(lat) * np.cos(lon)
                 y = np.cos(lat) * np.sin(lon)
@@ -1028,15 +1136,27 @@ def _seed_regional_generators(lon_range, lat_range, resolution_km, radius,
     return cell_xyz
 
 
-def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False):
+def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False,
+                       lon_range=None):
     """Compute Delaunay triangulation for regional points.
 
     For closed basins (``periodic_x=False``), uses stereographic projection
     from the centroid + 2D Delaunay.
 
-    For zonal bands (``periodic_x=True``), uses 3D ConvexHull on the
-    sphere, which naturally handles the east-west wrap.  This works
-    because a latitude band spanning < 180° is convex in 3D.
+    For a full 360° zonal band (``periodic_x=True`` with L ≈ 2π), uses
+    stereographic projection through the centroid (which sits on the
+    z-axis by zonal symmetry) to form an annulus in 2D; the annular
+    Delaunay naturally connects the east-west seam.
+
+    For a sub-360° zonal band (``periodic_x=True`` with L < 2π − ε), the
+    centroid is not on the z-axis and the stereographic annulus does not
+    close, so we use an **unroll-and-ghost** 2D triangulation: cells
+    within ~3 Δx of each seam are duplicated on the opposite side as
+    ghosts, a 2D Delaunay over the unrolled (u=lon−lon_min, lat)
+    rectangle connects real cells to ghosts of their seam partners, and
+    the resulting triangles are mapped back to originals and
+    deduplicated.  This yields a triangulation that is Delaunay-correct
+    on the periodic cylinder topology.
 
     Parameters
     ----------
@@ -1047,27 +1167,38 @@ def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False):
     radius : float
         Sphere radius in m.
     periodic_x : bool
-        If True, use 3D ConvexHull for zonal periodicity.
+        If True, use an approach suited to zonal periodicity.
+    lon_range : tuple[float, float] or None
+        Required when ``periodic_x=True`` and L < 360°: the (lon_min,
+        lon_max) of the periodic zonal extent in degrees. Ignored when
+        L ≈ 360° or when ``periodic_x=False``.
 
     Returns
     -------
     triangles : ndarray, shape (M, 3)
         Filtered triangle vertex indices.
     """
-    if periodic_x:
-        # Full zonal band: stereographic from the z-axis antipode.
-        # For a 360° band, the centroid is at (0, 0, sin(lat_center))
-        # by symmetry (x,y average to zero).  Projecting from (0, 0, -z)
-        # maps the band to an annulus in the xy-plane.  The 2D Delaunay
-        # on this annulus naturally connects the east-west seam because
-        # lon=0° and lon=360° map to the same azimuthal position.
-        centroid = cell_xyz.mean(axis=0)
-        centroid /= np.linalg.norm(centroid)
-        pole = centroid  # project FROM -centroid (antipodal)
+    d_rad = resolution_km * 1000.0 / radius
+    max_edge = 3.0 * d_rad
 
-        xy = _stereo_project(cell_xyz, pole)
-        tri = Delaunay(xy)
-        triangles = tri.simplices.copy()
+    if periodic_x:
+        # Decide between full-360° stereographic-annulus and sub-360°
+        # unroll-and-ghost path based on the zonal extent.
+        if lon_range is None:
+            L_rad = 2.0 * np.pi  # legacy full-360° default
+        else:
+            L_rad = np.radians(lon_range[1] - lon_range[0])
+        if abs(L_rad - 2.0 * np.pi) < 1e-6:
+            # Full zonal band: stereographic from the centroid's antipode.
+            centroid = cell_xyz.mean(axis=0)
+            centroid /= np.linalg.norm(centroid)
+            xy = _stereo_project(cell_xyz, centroid)
+            tri = Delaunay(xy)
+            triangles = tri.simplices.copy()
+        else:
+            triangles = _periodic_unroll_delaunay(
+                cell_xyz, lon_range, resolution_km, radius
+            )
     else:
         centroid = cell_xyz.mean(axis=0)
         centroid /= np.linalg.norm(centroid)
@@ -1082,16 +1213,28 @@ def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False):
         tri = Delaunay(xy)
         triangles = tri.simplices.copy()
 
-    # Filter degenerate triangles: any edge > 3x angular resolution
-    d_rad = resolution_km * 1000.0 / radius
-    max_edge = 3.0 * d_rad
+    # Filter degenerate triangles: any edge > 3x angular resolution.
+    # For sub-360° periodic, use seam-aware distances so valid seam
+    # triangles are retained.
+    L_for_shift = None
+    if periodic_x and lon_range is not None:
+        _L = np.radians(lon_range[1] - lon_range[0])
+        if abs(_L - 2.0 * np.pi) > 1e-6:
+            L_for_shift = _L
 
     keep = []
     for t in triangles:
         i0, i1, i2 = int(t[0]), int(t[1]), int(t[2])
-        d01 = np.arccos(np.clip(np.dot(cell_xyz[i0], cell_xyz[i1]), -1, 1))
-        d12 = np.arccos(np.clip(np.dot(cell_xyz[i1], cell_xyz[i2]), -1, 1))
-        d20 = np.arccos(np.clip(np.dot(cell_xyz[i2], cell_xyz[i0]), -1, 1))
+        p0 = cell_xyz[i0]
+        if L_for_shift is None:
+            p1 = cell_xyz[i1]
+            p2 = cell_xyz[i2]
+        else:
+            p1 = _shift_near(p0, cell_xyz[i1], L_for_shift)
+            p2 = _shift_near(p0, cell_xyz[i2], L_for_shift)
+        d01 = np.arccos(np.clip(np.dot(p0, p1), -1, 1))
+        d12 = np.arccos(np.clip(np.dot(p1, p2), -1, 1))
+        d20 = np.arccos(np.clip(np.dot(p2, p0), -1, 1))
         if d01 <= max_edge and d12 <= max_edge and d20 <= max_edge:
             keep.append(t)
 
@@ -1102,6 +1245,107 @@ def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False):
         )
 
     return np.array(keep, dtype=np.int64)
+
+
+def _periodic_unroll_delaunay(cell_xyz, lon_range, resolution_km, radius):
+    """Delaunay triangulation on a sub-360° periodic-x zonal band.
+
+    Unrolls the cells into a 2D rectangle ``(u, lat)`` with
+    ``u = lon − lon_min ∈ [0, L)``, duplicates cells within a buffer of
+    each seam on the opposite side (ghost cells at u ± L), and
+    triangulates the combined point set using scipy's 2D Delaunay. The
+    resulting triangles are mapped back from ghost indices to their
+    original cell indices and deduplicated.
+
+    The returned triangle list is Delaunay-correct on the periodic
+    cylinder topology — cells near the east seam connect to cells near
+    the west seam through the ghost copies. The caller still performs
+    an oversize-edge filter using seam-aware great-circle distances.
+
+    Parameters
+    ----------
+    cell_xyz : ndarray, shape (N, 3)
+        Points on the unit sphere.
+    lon_range : tuple[float, float]
+        (lon_min, lon_max) in degrees for the periodic zonal extent.
+    resolution_km : float
+        Target cell spacing in km; sets the ghost-buffer width.
+    radius : float
+        Sphere radius in m.
+
+    Returns
+    -------
+    triangles : ndarray, shape (M, 3)
+        Triangle vertex indices into the original ``cell_xyz`` array.
+    """
+    N = len(cell_xyz)
+    lon_min_rad = np.radians(lon_range[0])
+    lon_max_rad = np.radians(lon_range[1])
+    L_rad = lon_max_rad - lon_min_rad
+    d_rad = resolution_km * 1000.0 / radius
+    # Ghost ring width. Must be ≥ a few cells so the unrolled Delaunay
+    # has enough overlap on each side to produce the correct seam
+    # connectivity; 3.5 cells is comfortable.
+    buffer_rad = 3.5 * d_rad
+
+    lat = np.arcsin(np.clip(cell_xyz[:, 2], -1.0, 1.0))
+    lon = np.arctan2(cell_xyz[:, 1], cell_xyz[:, 0])
+    # Bring lon into [lon_min_rad, lon_min_rad + 2π)
+    lon_wrapped = np.mod(lon - lon_min_rad, 2.0 * np.pi) + lon_min_rad
+    u = lon_wrapped - lon_min_rad  # in [0, L_rad) for cells that belong
+
+    # Sanity check — cells must lie within the periodic extent.  Allow a
+    # small tolerance for rounding near the seam.
+    if (u < -1e-6).any() or (u > L_rad + 1e-6).any():
+        raise ValueError(
+            "Some generators fall outside the periodic zonal extent "
+            f"[lon_min, lon_max)={lon_range}. Check the seeding step."
+        )
+    u = np.clip(u, 0.0, L_rad - 1e-12)
+
+    # Build unrolled 2D points: (u, lat) in radians. Scale u by
+    # cos(lat_center) to roughly undo the meridional stretch of pure
+    # (u, lat) so Delaunay sees near-isotropic distances. This only
+    # affects triangulation quality (never metric quantities, which are
+    # always computed on the sphere in _build_mesh_from_generators).
+    lat_center = 0.5 * (lat.min() + lat.max())
+    u_scale = max(np.cos(lat_center), 0.1)
+    pts = np.column_stack([u * u_scale, lat])
+    orig_idx = np.arange(N, dtype=np.int64)
+
+    # Left-seam ghosts: cells with u < buffer → duplicate at u + L
+    left_mask = u < buffer_rad
+    if left_mask.any():
+        ghost_u = (u[left_mask] + L_rad) * u_scale
+        ghost_lat = lat[left_mask]
+        pts = np.vstack([pts, np.column_stack([ghost_u, ghost_lat])])
+        orig_idx = np.concatenate([orig_idx, np.arange(N)[left_mask]])
+
+    # Right-seam ghosts: cells with u > L - buffer → duplicate at u - L
+    right_mask = u > L_rad - buffer_rad
+    if right_mask.any():
+        ghost_u = (u[right_mask] - L_rad) * u_scale
+        ghost_lat = lat[right_mask]
+        pts = np.vstack([pts, np.column_stack([ghost_u, ghost_lat])])
+        orig_idx = np.concatenate([orig_idx, np.arange(N)[right_mask]])
+
+    tri = Delaunay(pts)
+    mapped = orig_idx[tri.simplices]  # shape (M, 3) into original cells
+
+    # Deduplicate and drop triangles that become degenerate after the
+    # ghost→original remap (two vertices with the same original index).
+    seen = set()
+    unique_tris = []
+    for t in mapped:
+        a, b, c = int(t[0]), int(t[1]), int(t[2])
+        if a == b or b == c or a == c:
+            continue
+        key = tuple(sorted((a, b, c)))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_tris.append((a, b, c))
+    return np.array(unique_tris, dtype=np.int64)
 
 
 def create_regional_voronoi_mesh(
@@ -1120,19 +1364,25 @@ def create_regional_voronoi_mesh(
     (outside the target domain) serve as buffer/land cells via the
     existing lat/lon land-mask mechanism.
 
-    When ``periodic_x=True``, generators span the full 360° longitude
-    (no east/west buffer or duplicates).  The spherical geometry
-    naturally provides zonal periodicity.  Only latitude has buffer
-    cells.  Use this for channel-like experiments (e.g. Eady
-    baroclinic instability).
+    When ``periodic_x=True``, generators are seeded within
+    ``lon_range`` and the east/west meridians are identified — topologically
+    a cylindrical channel on the sphere.  When ``lon_range`` spans the
+    full 360°, this is a zonal annular channel (no seam corrections
+    needed).  When ``lon_range`` is sub-360°, an "unroll-and-ghost"
+    Delaunay and seam-aware edge/triangle geometry are used so a
+    regional channel of arbitrary zonal extent can be built — the
+    east/west meridians wrap correctly and TRiSK operators see the
+    intended through-the-seam distances, midpoints, and areas.  Use this
+    for channel-like experiments (e.g. Eady baroclinic instability).
 
     Unlike the global ``create_voronoi_mesh``, this function:
 
     - Seeds generators only in the target region (+ buffer ring)
     - Uses uniform angular dlon spacing (same cell count per row) to
       avoid degenerate Voronoi edges at row boundaries
-    - Uses Delaunay triangulation via stereographic projection instead
-      of ConvexHull (which requires a full sphere)
+    - Uses Delaunay triangulation via stereographic projection (closed
+      basin), via a stereographic annulus (full 360° periodic), or via
+      an unroll-and-ghost 2D triangulation (sub-360° periodic)
     - Filters degenerate hull triangles (edge > 3x resolution)
     - Skips Lloyd relaxation (distorts boundary cells)
     - Sets safety floors on dvEdge and areaTriangle for boundary cells
@@ -1140,8 +1390,10 @@ def create_regional_voronoi_mesh(
     Parameters
     ----------
     lon_range : tuple[float, float]
-        Longitude range in degrees [lon_min, lon_max].
-        Ignored when ``periodic_x=True``.
+        Longitude range in degrees [lon_min, lon_max]. When
+        ``periodic_x=True``, this is also the periodic zonal extent: the
+        east meridian at ``lon_max`` is identified with the west meridian
+        at ``lon_min``.
     lat_range : tuple[float, float]
         Latitude range in degrees [lat_min, lat_max].
     resolution_km : float
@@ -1151,7 +1403,9 @@ def create_regional_voronoi_mesh(
     omega : float
         Rotation rate [rad/s]. Default: Earth rotation.
     periodic_x : bool
-        If True, generators span 360° longitude for channel geometry.
+        If True, the east/west meridians of ``lon_range`` are
+        identified.  Sub-360° periodic-x is fully supported — see
+        "unroll-and-ghost" note above.
 
     Returns
     -------
@@ -1170,18 +1424,34 @@ def create_regional_voronoi_mesh(
     - Issue #88: regional mesh for ocean dynamics testing
     - Ringler, T. D., et al. (2010). J. Comput. Phys., 229(9), 3065-3090.
     """
+    # Compute the zonal-periodic extent (if any) so downstream steps know
+    # how to handle seam edges / triangles.
+    if periodic_x:
+        L_rad = np.radians(lon_range[1] - lon_range[0])
+        if L_rad <= 0 or L_rad > 2.0 * np.pi + 1e-10:
+            raise ValueError(
+                f"periodic_x=True requires 0 < L ≤ 360°, got lon_range={lon_range}"
+            )
+        periodic_L_rad = L_rad if abs(L_rad - 2.0 * np.pi) > 1e-6 else None
+    else:
+        periodic_L_rad = None
+
     # Step 1: Seed generators in the target region + buffer
     cell_xyz = _seed_regional_generators(lon_range, lat_range,
                                          resolution_km, radius,
                                          periodic_x=periodic_x)
 
-    # Step 2: Delaunay triangulation (stereographic for closed, ConvexHull for periodic)
+    # Step 2: Delaunay triangulation (stereographic for closed,
+    # stereographic-annulus for full 360° periodic, unroll-and-ghost for
+    # sub-360° periodic).
     triangles = _regional_delaunay(cell_xyz, resolution_km, radius,
-                                    periodic_x=periodic_x)
+                                    periodic_x=periodic_x,
+                                    lon_range=lon_range)
 
-    # Step 3: Build complete mesh using pre-computed triangles
+    # Step 3: Build complete mesh with seam-aware geometry when periodic.
     mesh = _build_mesh_from_generators(cell_xyz, radius, omega,
-                                       triangles=triangles)
+                                       triangles=triangles,
+                                       periodic_L_rad=periodic_L_rad)
 
     # Step 4: Apply safety floors on dvEdge and areaTriangle
     # Boundary edges may have only one adjacent triangle, giving
