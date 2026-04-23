@@ -4,6 +4,105 @@ Running log of ocean dynamics work — what we tried, what worked, what didn't, 
 
 ---
 
+## 2026-04-22 (PM): GPU runs, Var(T) diagnostic, Ro regime analysis, weak-forcing validation
+
+First session with `jax[cuda12]` on V100S × 2. A 200-day Eady run at
+100×50 × 20 lvl now costs ~3 min wall vs ~16 min on Mac CPU, enabling
+rapid parameter sweeps. See
+`docs/ocean_experiments/advection_scheme_comparison.md` for the full
+updated results.
+
+### Scheme comparison (strong forcing, same as prior entry)
+
+Full 200-day matrix completed on GPU. Time-matched Var(T) destruction
+(the non-diffusive invariant — ∫T² dV is an exact inviscid conserved
+quantity in our closed-domain zero-K_h setup, so Var(T) drift is pure
+numerical mixing):
+
+| t | upwind | tvd | som | som+Csmag |
+|---|---|---|---|---|
+| 100 d | 28% | 8% | 1.4% | 1.1% |
+| 200 d | 86% | 70% | (died d107) | 46% |
+
+SOM is 6–20× less diffusive than TVD at day 100 — Hill et al. direction
+confirmed, magnitude modest at 20 km.
+
+### SOM + Smagorinsky = first 200-day non-diffusive PASS
+
+Plain SOM blew up at day ~107 from grid-scale PGF noise at sharp eddy
+fronts (no sponge). Adding C_smag=0.2 damped the momentum noise without
+injecting tracer diffusion, giving the first stable 200-day SOM run.
+Tracer-mixing cost of Smagorinsky at day 100 is zero (1.1% vs 1.4%).
+
+Late-time SOM+Csmag mixing accelerates sharply (1.1% at d100 → 46% at
+d200) — likely the moment limiter firing on wall-reflected eddy fronts.
+Setup issue, not scheme issue.
+
+### PPM-FCT still broken after parameter retry
+
+Ocean-expert diagnosed that the `alpha_face = min(alpha_left, alpha_right)`
+heuristic is not strict Zalesak monotonicity (conservation-preserving but
+not sign-split). Predicted the known-good B_h=1e10 + C_smag=0.2 would
+give 200 days; actual result was a day-45 blowup. Fixing this is a
+code-level rewrite in `src/legoesm/ocean/advection.py` — task #9.
+**PPM-FCT is non-functional on Eady at any parameter set until that lands.**
+
+### Hi-res (200×100) SOM blows up early
+
+Two attempts: Hill-scaled B_h=1.44e10 with and without C_smag=0.2. Both
+failed by day ~20–40. Hill's dx⁴ B_h scaling assumes fixed
+resolved-eddy sharpness; at 10 km the eddies sharpen and need
+proportionally more damping, not less. No stable hi-res recipe yet.
+
+### The big insight: absolute mixing is regime-set, not scheme-set
+
+Our default Eady (U=0.8 m/s, τ=5 d) sits in a submesoscale regime —
+saturated max_speed 5–10 m/s, p95 |Ro| ≈ 1.5–3.0 at all depths, APE
+density ~10¹⁰ J/m³. Thomas et al. 2013 / McWilliams 2016: at Ro ~ 1
+the flow uses ageostrophic pathways (frontogenesis, symmetric
+instability, IGW emission) that force diapycnal mixing *regardless of
+advection scheme*. So a week of scheme-by-scheme debugging was real
+work (bug fixes: Zalesak face-flux, SOM moment formulas, halo safety)
+but the absolute Var(T) losses we were chasing were set by too much
+APE, not poor numerics.
+
+**Weak-forcing test confirmed this** (U=0.2 m/s, τ=20 d, everything
+else identical, 600 days = same saturation e-folds as the 200 d strong
+run):
+
+| Scheme | Status | max_speed | Var(T) lost (600 d) | p95 Ro (deep) |
+|--------|--------|-----------|---------------------|---------------|
+| upwind | PASS | 0.11 m/s | 12% | 0.054 |
+| tvd | PASS | 0.17 m/s | 6.4% | 0.053 |
+| som + Csmag | PASS | 0.14 m/s | **2.9%** | 0.096 |
+
+Ro dropped ~40×; Var(T) loss dropped 7–30× across all schemes. Every
+scheme survives; ranking is unchanged but the absolute mixing is now
+at ocean-interior levels. Even plain upwind preserved 88.5% of Var(T)
+over 600 d.
+
+### Infrastructure additions
+
+1. `--U-surface` CLI flag on the test matrix runner (threads through
+   `run_eady_uniform`'s override dict).
+2. `scripts/plot_T_volumetric_census.py` — volumetric T-histogram plus
+   Var(T), T-range, <T> scalars; matched-time comparison across runs;
+   "slumping vs diffusion" cross-section figure.
+3. `scripts/plot_rossby_number.py` — ζ/f from cell-centered u_3d, v_3d;
+   percentiles per layer; zonal-mean field (nearly empty, confirming
+   eddy cancellation — the info is in the distribution).
+
+### Standing recommendations
+
+- Production default: **tvd** (safe, robust, 2% overhead vs upwind)
+- Science runs needing low tracer diffusion: **som + C_smag=0.2**
+- For an "adiabatic interior" Eady demo: run at **U_surface=0.2 m/s,
+  600+ days** — this is the scientifically defensible regime.
+- The 0.8 m/s Eady default is atmospheric-synoptic parameter; consider
+  making 0.2 m/s the ocean default and doubling standard duration.
+
+---
+
 ## 2026-04-22: SOM Implementation, Advection Scheme Comparison, PPM-FCT Fix (#210)
 
 ### SOM (Prather 1986) — Implemented and Debugged
