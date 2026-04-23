@@ -4942,29 +4942,54 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             len(rows), 4,
             msg=f"iter-780 expected 4 data rows, got {len(rows)}")
 
-        ns_seen = [int(r[0]) for r in rows]
-        faces_seen = [int(r[1]) for r in rows]
-        gc_seen = [float(r[6]) for r in rows]
-
-        self.assertEqual(
-            ns_seen, [16, 24, 36, 48],
-            msg=f"iter-780 row ns: {ns_seen}")
-        for n, face in zip(ns_seen, faces_seen):
+        # Iter-780b measurement pins per row.
+        # (n, face, ci, cj, lat, lon, gc, cell_to_edge, peak_err)
+        expected = [
+            (16, 3, 12, 12, 23.15, -64.69, 20.96, 3, 1.68e+02),
+            (24, 3, 18, 17, 18.92, -65.62, 24.48, 5, 1.15e+02),
+            (36, 3, 30, 32, 32.08, -58.75, 11.87, 3, 1.21e+02),
+            (48, 3, 39, 43, 32.95, -60.94, 13.38, 4, 1.26e+02),
+        ]
+        for (n_exp, face_exp, ci_exp, cj_exp, lat_exp, lon_exp,
+             gc_exp, ced_exp, pe_exp), row in zip(expected, rows):
+            n_s, face_s, ci_s, cj_s = (int(row[0]), int(row[1]),
+                                        int(row[2]), int(row[3]))
+            lat_s, lon_s, gc_s = (float(row[4]), float(row[5]),
+                                   float(row[6]))
+            ced_s, pe_s = int(row[7]), float(row[8])
+            # Exact pins on integer fields:
             self.assertEqual(
-                face, 3,
-                msg=(f"iter-780 expected face=3 at n={n}, got "
-                     f"{face}.  Peak-error face changed; re-examine."))
-        for n, gc in zip(ns_seen, gc_seen):
-            self.assertGreater(
-                gc, 5.0,
-                msg=(f"iter-780 GC-to-vertex at n={n} = {gc:.2f}° "
-                     f"< 5°; peak-error position moved much closer "
-                     f"to a cube vertex than recorded.  Re-examine."))
+                n_s, n_exp,
+                msg=f"iter-780 row n mismatch: {n_s} != {n_exp}")
+            self.assertEqual(
+                face_s, face_exp,
+                msg=(f"iter-780 n={n_s} face={face_s} expected "
+                     f"{face_exp}.  Peak-error face changed."))
+            self.assertEqual(
+                (ci_s, cj_s), (ci_exp, cj_exp),
+                msg=(f"iter-780 n={n_s} cell ({ci_s},{cj_s}) "
+                     f"expected ({ci_exp},{cj_exp}).  Peak-error "
+                     f"cell shifted."))
+            self.assertEqual(
+                ced_s, ced_exp,
+                msg=(f"iter-780 n={n_s} cell-to-edge {ced_s} "
+                     f"expected {ced_exp}."))
+            # Numeric pins with small tolerances:
+            self.assertAlmostEqual(
+                lat_s, lat_exp, delta=0.1,
+                msg=f"iter-780 n={n_s} lat {lat_s} vs {lat_exp}")
+            self.assertAlmostEqual(
+                lon_s, lon_exp, delta=0.1,
+                msg=f"iter-780 n={n_s} lon {lon_s} vs {lon_exp}")
+            self.assertAlmostEqual(
+                gc_s, gc_exp, delta=0.1,
+                msg=(f"iter-780 n={n_s} GC-to-vertex {gc_s:.2f}° "
+                     f"vs expected {gc_exp:.2f}°"))
+            rel = abs(pe_s - pe_exp) / pe_exp
             self.assertLess(
-                gc, 40.0,
-                msg=(f"iter-780 GC-to-vertex at n={n} = {gc:.2f}° "
-                     f">= 40°; peak-error position drifted far from "
-                     f"cube vertex.  Re-examine."))
+                rel, 0.05,
+                msg=(f"iter-780 n={n_s} peak |err| {pe_s:.3e} vs "
+                     f"expected {pe_exp:.3e}, rel {rel:.2%}"))
 
         # Verify the summary block is present.
         self.assertIn(
