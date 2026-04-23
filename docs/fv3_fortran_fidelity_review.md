@@ -773,3 +773,56 @@ Distinguishing among these requires further diagnostics (iter-779+).
 **Deliverable.**  `scripts/diag_iter778_cb_convergence.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  42nd iter in iter-752-778 chain.  Measures the question iter-777b deferred ("test C48/C72/C96 to verify PPM convergence order"); result is a non-monotone error plateau that has multiple candidate mechanisms.
+
+### Iter-779 — Cosine bell fixed-dt convergence: plateau persists
+
+Per iter-778's iter-779+ candidate "Run the same sweep at FIXED dt across all resolutions (e.g. dt=1350s — CFL-safe at C48)", iter-779 re-runs iter-778's 4-resolution sweep at a uniform `dt=1350s` to discriminate among the plateau candidates.
+
+**Method** (`scripts/diag_iter779_cb_fixed_dt.py`; committed output at `diagnostics/iter779_output/iter779_cb_fixed_dt.txt`).  Same β=π/4, 1 day, same `cosine_bell_cubesphere` IC + `transport_step` at each of n=16, 24, 36, 48.  `dt=1350s` for ALL resolutions (CFL-safe at C48; at lower n the Courant number is smaller — more margin, not instability).
+
+**Result** (fixed-dt):
+
+| n  | dt     | steps | L1        | L2        | Linf      | undershoot |
+|----|--------|-------|-----------|-----------|-----------|------------|
+| 16 | 1350   | 64    | 1.786e−01 | 1.558e−01 | 1.793e−01 | 13.81 %    |
+| 24 | 1350   | 64    | 1.276e−01 | 1.148e−01 | 1.182e−01 | 11.44 %    |
+| 36 | 1350   | 64    | 1.197e−01 | 1.165e−01 | 1.225e−01 | 9.62 %     |
+| 48 | 1350   | 64    | 1.214e−01 | 1.195e−01 | 1.267e−01 | 8.75 %     |
+
+**Convergence order** (fixed-dt):
+
+| pair     | p(L1)  | p(L2)  | p(Linf) |
+|----------|--------|--------|---------|
+| 16→24    | +0.830 | +0.753 | +1.028  |
+| 24→36    | +0.157 | −0.036 | −0.087  |
+| 36→48    | −0.050 | −0.088 | −0.119  |
+
+**Side-by-side with iter-778 (CFL-scaled dt)**:
+
+| n  | iter-778 Linf | iter-779 Linf | difference |
+|----|---------------|---------------|------------|
+| 16 | 1.73e−01      | 1.79e−01      | +3 %       |
+| 24 | 1.17e−01      | 1.18e−01      | +0.3 %     |
+| 36 | 1.23e−01      | 1.23e−01      | 0.0 %      |
+| 48 | 1.27e−01      | 1.27e−01      | 0.0 %      |
+
+**Observation.**  The plateau above C24 PERSISTS at fixed dt.  L1/L2/Linf above C24 are within 1 % between iter-778 (CFL-scaled) and iter-779 (fixed-dt).  The convergence-order pattern (p ≈ 0 or slightly negative between C24→C36 and C36→C48) is preserved at both dt policies.
+
+**What iter-779 does and does NOT establish.**
+- DOES support (combining with iter-778): the plateau above C24 is not an artifact of the dt-scaling policy.  Candidate (b) "dt scaling vs spatial-error crossover" from iter-778's list does not explain the observed plateau at these 4 resolutions.
+- DOES NOT establish: that dt-scaling is irrelevant in other regimes (e.g. much higher C, or longer horizons).
+- DOES NOT establish: which of the remaining candidates (a), (c), (d) is the cause.
+
+**Remaining iter-778 plateau candidates after iter-779.**
+- (a) resolution-invariant structural error (candidate bug).
+- (c) cube-vertex-localized error set by face count (constant 8) whose shape shrinks but whose integrated magnitude does not.
+- (d) PPM shape-preserving limiter activating at different ratios with n.
+
+**Iter-780+ candidates** (continuing iter-778's list).
+- Measure where in the field the error concentrates at each resolution — if the peak error stays localized near cube-vertex passages independent of n, that's (c).
+- Audit `_d2a2c_vect` non-duogrid cube-vertex gap.
+- Port Fortran c_sw+d_sw FB transport chain (blocked on ng=3 halos).
+
+**Deliverable.**  `scripts/diag_iter779_cb_fixed_dt.py` + committed output.  No source-code change.  No new sentinel.  All 12 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  43rd iter in iter-752-779 chain.  Rules out iter-778 candidate (b) (dt scaling) as the sole cause of the plateau; candidates (a), (c), (d) remain open.
