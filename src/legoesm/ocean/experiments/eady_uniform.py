@@ -348,7 +348,16 @@ def _set_linear_shear_latlon(state, grid, z_coord, config):
 
 
 def _set_linear_shear_mpas(state, mesh, z_coord, config):
-    """Set edge-normal velocity from zonal U = Λz * envelope(y), balance η."""
+    """Set edge-normal velocity from the purely-baroclinic U = Λ(z + H/2)·env(y).
+
+    Matches the lat-lon IC (`_set_linear_shear_latlon`): removes the
+    depth-mean from the shear so the initial state is purely baroclinic
+    with zero barotropic velocity and zero SSH. This avoids the large
+    geostrophic SSH signal (~2 m for U_surface=0.8 m/s) that would
+    dominate the BCI perturbation and inject a barotropic adjustment
+    shock at t=0 — particularly destabilising on sub-360° periodic
+    channels where that adjustment can't spread across the globe.
+    """
     z_full = np.asarray(z_coord.z_full_ref)
     dz = np.asarray(z_coord.dz_ref)
     nlev = len(z_full)
@@ -372,16 +381,8 @@ def _set_linear_shear_mpas(state, mesh, z_coord, config):
     for k in range(nlev):
         u_data[:, k] = U_baroclinic[k] * np.cos(angle) * edge_mask * envelope_edge
 
-    # Geostrophic SSH
-    lat_cell = np.asarray(mesh.latCell)
-    lat_center_rad = np.radians(config.lat_center)
-    R = 6.371e6
-    y_offset = (lat_cell - lat_center_rad) * R
-    eta_data = -(config.f0 / g) * U_bar_val * y_offset
-    ocean = mask > 0.5
-    if np.any(ocean):
-        eta_data -= np.mean(eta_data[ocean])
-    eta_data *= mask
+    # Purely baroclinic IC: eta = 0 (matches lat-lon IC).
+    eta_data = np.zeros_like(state.eta.data, dtype=np.float64) * mask
 
     return state._replace(
         u=Field(jnp.array(u_data), name="u",
