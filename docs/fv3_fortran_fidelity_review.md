@@ -417,3 +417,41 @@ Observed p(Linf) in iter-779: 16→24: +1.03, 24→36: −0.09, 36→48: −0.12
 **Deliverable.**  `scripts/diag_iter779_cb_fixed_dt.py` + committed output + iter-779b sentinel.  No source-code change.  All 13 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  43rd iter in chain; rules out iter-778 candidate (b).  iter-780+ candidates: measure error LOCATION at each resolution; audit `_d2a2c_vect` cube-vertex gap.
+
+### Iter-780 — Cosine bell peak-error location across C16/C24/C36/C48
+
+Per iter-779's iter-780+ candidate "Measure where in the field the error concentrates at each resolution", iter-780 runs the same 4-resolution sweep and reports the face-local cell where `|h - h_exact|` is maximum.
+
+**Method** (`scripts/diag_iter780_cb_error_location.py`; committed output at `diagnostics/iter780_output/iter780_cb_error_location.txt`).  Same β=π/4, 1 day, dt=1350s as iter-779.  At each resolution reports peak-error face + `(i, j)` + lat/lon + great-circle distance to nearest cube vertex + cell-distance to nearest face edge + peak |err| amplitude.
+
+**Result** (C16/C24/C36/C48, fixed dt=1350s):
+
+| n  | face | (i, j)    | lat      | lon       | GC to vertex | cell to edge | peak \|err\| |
+|----|------|-----------|----------|-----------|--------------|--------------|--------------|
+| 16 | 3    | (12, 12)  | 23.15°   | −64.69°   | 20.96°       | 3            | 1.68e+02     |
+| 24 | 3    | (18, 17)  | 18.92°   | −65.62°   | 24.48°       | 5            | 1.15e+02     |
+| 36 | 3    | (30, 32)  | 32.08°   | −58.75°   | 11.87°       | 3            | 1.21e+02     |
+| 48 | 3    | (39, 43)  | 32.95°   | −60.94°   | 13.38°       | 4            | 1.26e+02     |
+
+Summary (from committed output): GC-distance to the nearest cube vertex ranges `11.87° – 24.48°` (span 12.62°); cell-distance to face edge ranges `3 – 5`; peak `|err|` ranges `115 – 168`.
+
+**Observation.**  At each of the 4 tested resolutions, the peak-error cell is on face 3 but at a lat/lon position in the middle of that face (not on face edges, not at face corners).  The cell-distance to the nearest face edge is 3–5 cells.  The GC-distance to the nearest of 8 cube vertices varies by 12°+ across the 4 resolutions.
+
+**What iter-780 DOES show** (observational only).
+- The peak-error cell position in face-local indices at each n.
+- The peak-error great-circle distance to the nearest cube vertex.
+- The peak-error cell-distance to the face edge.
+
+**What iter-780 does NOT establish.**
+- Whether the peak-error cell is also where the error was ACCUMULATED (vs a downstream collection of errors propagated from upstream).
+- Whether the peak-error position is stable in time (this is a single end-of-day snapshot).
+- Which of iter-778's candidate mechanisms (a)/(c)/(d) is supported.  Candidate (c) "cube-vertex-localized error set by face count" would predict the peak-error location to stay within a small GC-distance of a cube vertex at all resolutions; iter-780's 12°-24° range does NOT directly match that prediction, but iter-780 also does not DISPROVE (c) because the peak-error LOCATION at t=1 day is not the same as the error-ACCUMULATION location at cube-vertex CROSSINGS earlier in the trajectory.
+
+**Iter-781+ candidates**:
+- Trajectory diagnostic: measure the error location every ~0.1 day during the 1-day integration.  If the peak-error cell moves with the bell and its distance to cube vertices is transient but pronounced during cube crossings, that is consistent with (c).
+- Audit `_d2a2c_vect` non-duogrid cube-vertex gap — still unaudited.
+- Port Fortran c_sw+d_sw FB transport chain (blocked on ng=3 halos).
+
+**Deliverable.**  `scripts/diag_iter780_cb_error_location.py` + committed output.  No source-code change.  No new sentinel.  All 13 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  44th iter in iter-752-780 chain.  Observational-only location reporting with explicit scope-limits; does not distinguish candidates (a)/(c)/(d) but provides data for iter-781+ trajectory-vs-snapshot follow-up.
