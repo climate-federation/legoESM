@@ -4,11 +4,15 @@ Split-explicit forward-backward substeps for the barotropic mode.
 Updates sea surface height (eta) and depth-averaged normal velocity
 (u_bar) using the fast gravity-wave CFL.
 
-No explicit F_slow for velocity: the 3D baroclinic tendency has already
-been applied to u before this function is called, so u_bar is computed
-from the updated state. Including F_slow would double-count the
-depth-averaged baroclinic tendency. (Same pattern as cubed-sphere
-barotropic.py.)
+Coriolis treatment: ``f·v_t(u_bar)`` is applied at every substep with
+the *current-substep* ``u_bar`` (evolving, semi-implicit Heun option).
+``F_slow_u`` passed in by the caller is the depth-mean of the full 3D
+baroclinic tendency with the planetary-Coriolis part subtracted (see
+``ocean_pe_mpas.py``), so the barotropic substep can add online
+evolving Coriolis without double-counting. This matches the lat-lon
+C-grid pattern. Without this split, a frozen-Coriolis F_slow_u
+accumulates over 30 substeps per baroclinic step and grows a
+near-inertial numerical mode (τ ~ 1/f, ~0.2 days at mid-latitudes).
 
 References
 ----------
@@ -108,8 +112,10 @@ def barotropic_substeps_mpas(
 
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta)
-    # When F_slow_u carries Coriolis via PV flux, suppress standalone f*v_t (#160)
-    _has_slow_u = F_slow_u is not None
+    # F_slow_u is PGF+KE+zeta-advection+viscosity+bottom-drag with the
+    # planetary Coriolis contribution EXCLUDED (see ocean_pe_mpas.py).
+    # The barotropic substep applies online evolving f·v_t(u_bar) below,
+    # matching the lat-lon C-grid pattern.
     if F_slow_u is None:
         F_slow_u = jnp.zeros_like(u_bar)
 
@@ -204,26 +210,27 @@ def barotropic_substeps_mpas(
         eta_filled = _fill_land_cells_mpas(eta_pgf, mask)
         grad_eta = gradient_edge(eta_filled, mesh)
 
-        # PGF + slow forcing (+ standalone Coriolis only in legacy mode)
-        if _has_slow_u:
-            # MOM6-style: Coriolis enters through F_slow_u only (#160)
-            u_bar_next = u_bar_c + dt_baro * (
-                -g * grad_eta + F_slow_u
-            ) * edge_mask
-        elif use_semi_implicit:
-            # Legacy: Heun predictor-corrector (#172 docs fix)
+        # PGF + evolving Coriolis + slow forcing.
+        # F_slow_u now has the depth-mean planetary Coriolis subtracted
+        # in ocean_pe_mpas.py, so we always apply online f·v_t(u_bar) here
+        # — otherwise the barotropic u_bar loses its rotational restoring
+        # torque inside the substep loop and a near-inertial numerical
+        # mode (τ ~ 1/f) grows on the order of 0.2 days at mid-latitudes.
+        if use_semi_implicit:
+            # Heun predictor-corrector for Coriolis (#172 docs fix)
             v_t_old = tangential_velocity(u_bar_c, mesh)
             u_star = u_bar_c + dt_baro * (
-                -g * grad_eta + mesh.fEdge * v_t_old
+                -g * grad_eta + mesh.fEdge * v_t_old + F_slow_u
             ) * edge_mask
             v_t_star = tangential_velocity(u_star, mesh)
             u_bar_next = u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * 0.5 * (v_t_old + v_t_star)
+                + F_slow_u
             ) * edge_mask
         else:
             v_t_old = tangential_velocity(u_bar_c, mesh)
             u_bar_next = u_bar_c + dt_baro * (
-                -g * grad_eta + mesh.fEdge * v_t_old
+                -g * grad_eta + mesh.fEdge * v_t_old + F_slow_u
             ) * edge_mask
 
         # Divergence damping: add nu * grad(div(u_bar)) (#205).

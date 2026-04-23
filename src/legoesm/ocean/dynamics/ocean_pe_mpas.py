@@ -203,15 +203,21 @@ def mpas_ocean_baroclinic_tendencies(
     # Pressure gradient + Bernoulli
     grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
 
-    # PV flux: TOTAL PV = (f + ζ(u_total)) / h using the TRiSK helper.
-    # Restores Ringler et al. (2010) energy-conservation identity (#160).
-    q_total = potential_vorticity_vertex_3d(
-        u_3d, h_k, mesh.fVertex, mesh,
-    )  # (nVertices, nlev)
+    # PV flux: RELATIVE vorticity only, q = ζ(u)/h. Planetary Coriolis is
+    # applied separately (a) as online f·v_t(u_bar) in the barotropic
+    # substep and (b) as a forward-backward Matsuno correction on the
+    # 3D perturbation in the step() function. This matches the lat-lon
+    # C-grid pattern and sidesteps the frozen-Coriolis instability that
+    # follows from carrying planetary Coriolis in the baroclinic-step
+    # depth-mean forcing (τ ~ 1/f ≈ 0.2 days at mid-latitudes; see #160).
+    zero_f = jnp.zeros_like(mesh.fVertex)
+    q_relative = potential_vorticity_vertex_3d(
+        u_3d, h_k, zero_f, mesh,
+    )  # (nVertices, nlev); equals ζ/h_v
     if config.pv_scheme == "energy":
-        pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_total, mesh)
+        pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_relative, mesh)
     else:
-        pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_total, mesh)
+        pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_relative, mesh)
 
     # Horizontal viscosity on perturbation velocity (shear, not depth-mean)
     visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
@@ -242,11 +248,18 @@ def mpas_ocean_baroclinic_tendencies(
         du_dt_full = du_dt_full.at[:, -1].add(
             -config.bottom_drag_r * u_3d[:, -1] / dz_bot_e * edge_mask)
 
-    # Depth-mean → slow forcing for barotropic solver
+    # Depth-mean → slow forcing for barotropic solver.
+    # du_dt_full now carries only (PGF + relative-vorticity PV flux +
+    # viscosity + vertical-advection + bottom-drag), NO planetary
+    # Coriolis. So F_slow_u passed to the barotropic solver contains no
+    # planetary Coriolis either, and the barotropic substep applies
+    # evolving f·v_t(u_bar) online.
     F_slow_u = jnp.sum(du_dt_full * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)
     F_slow_u = F_slow_u * edge_mask  # (nEdges,)
 
-    # Baroclinic perturbation = full minus depth-mean
+    # Baroclinic perturbation = full minus depth-mean. Planetary Coriolis
+    # on this perturbation is applied via forward-backward Matsuno in the
+    # step() function (see _forward_backward_coriolis_mpas_3d).
     du_dt_3d = (du_dt_full - F_slow_u[:, jnp.newaxis]) * edge_mask[:, jnp.newaxis]
 
     # ---- Tracer tendencies (diffusion + physics only) ----

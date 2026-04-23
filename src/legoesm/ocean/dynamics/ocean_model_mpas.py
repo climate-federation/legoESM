@@ -246,13 +246,28 @@ class MPASOceanModel:
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
 
         # 3. Update 3D velocity with baroclinic perturbation tendency.
-        # Coriolis is now in the PV flux (full (f+ζ)/h, #160).
-        u_baro = state.u.data + dt * tend.du_dt.data
+        # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
+        # planetary Coriolis) — Coriolis on the 3D perturbation is
+        # applied via forward-backward Matsuno below. Matches lat-lon
+        # pattern (#160).
+        u_star = state.u.data + dt * tend.du_dt.data
+
+        # 3b. Forward-backward (trapezoidal predictor-corrector) Coriolis
+        # on the 3D perturbation velocity. Unconditionally stable for
+        # inertial oscillations; mirrors the lat-lon
+        # _forward_backward_coriolis_3d call in ocean_model_latlon_cgrid.py.
+        u_baro = _forward_backward_coriolis_mpas_3d(
+            u_star, dt, mesh, z_coord, config,
+            mask, state.eta.data, state.H_bathy.data,
+        )
 
         # 4. Barotropic substeps
-        # The baroclinic tendency is already applied to u_baro, so the
-        # barotropic solver computes u_bar from the updated velocity.
-        # No F_slow_u is needed (same pattern as cubed-sphere barotropic.py).
+        # The 3D baroclinic tendency has been applied to u_baro above.
+        # F_slow_u (depth-mean of du_dt_full, with planetary Coriolis
+        # subtracted) is passed to the barotropic solver so it can
+        # apply *online evolving* f·v_t(u_bar) during each substep —
+        # matching the lat-lon C-grid pattern. See ocean_pe_mpas.py and
+        # barotropic_mpas.py for the split and its rationale.
         n_sub = config.n_barotropic_substeps
         dt_baro = dt / n_sub
 
