@@ -88,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--K-h", type=float, default=None,
         help="Override Laplacian tracer diffusivity [m^2/s]")
+    p.add_argument(
+        "--U-surface", type=float, default=None,
+        help="Override Eady surface velocity [m/s] (reduces APE / slows BCI)")
     return p
 
 
@@ -142,6 +145,8 @@ def main():
         config.C_SMAG_OVERRIDE = args.C_smag
     if args.K_h is not None:
         config.K_H_OVERRIDE = args.K_h
+    if args.U_surface is not None:
+        config.U_SURFACE_OVERRIDE = args.U_surface
 
     tests = filter_tests(TEST_MATRIX, args)
 
