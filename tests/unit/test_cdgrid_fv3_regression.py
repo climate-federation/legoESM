@@ -5041,26 +5041,35 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             "cell to edge   peak|err|", text,
             msg="iter-780 header line shape changed")
 
-        # Iter-780d ultimate lock: SHA256 of the committed file.
-        # Any byte change (whitespace, line order, added / removed
-        # lines) fires.  If the sentinel fires BUT the per-value
-        # pins above all pass, that means a formatting change
-        # happened without any value drift — update the hash
-        # below when intentional.
+        # Iter-780f: NORMALIZED SHA256 of the committed file
+        # (Codex stop-time on iter-780e flagged raw-byte SHA256
+        # as checkout-dependent — CRLF vs LF or trailing-whitespace
+        # differences across platforms or git autocrlf settings
+        # would break the raw hash).  Normalization is: convert
+        # CRLF -> LF, strip trailing whitespace per line, remove
+        # empty trailing lines, append a single final LF.  The
+        # same normalized byte stream is produced on any checkout.
         import hashlib
+        raw = shipped.read_bytes()
+        lines = raw.replace(b"\r\n", b"\n").split(b"\n")
+        lines = [ln.rstrip() for ln in lines]
+        while lines and not lines[-1]:
+            lines.pop()
+        normalized = b"\n".join(lines) + b"\n"
+
         expected_sha256 = (
             "62a32ff947a9e9a25086798887fedc0e2f4b31f2daa386b69572f4b8b2f92d14"
         )
-        actual_sha256 = hashlib.sha256(
-            shipped.read_bytes()).hexdigest()
+        actual_sha256 = hashlib.sha256(normalized).hexdigest()
         self.assertEqual(
             actual_sha256, expected_sha256,
-            msg=(f"iter-780 committed file SHA256 changed:\n"
+            msg=(f"iter-780 committed file normalized-SHA256 "
+                 f"changed:\n"
                  f"  expected: {expected_sha256}\n"
                  f"  actual:   {actual_sha256}\n"
                  f"If this is an INTENTIONAL formatting change "
-                 f"(whitespace, line order, label rename), update "
-                 f"the expected hash here.  If it's a value drift "
+                 f"(added lines, renamed labels), update the "
+                 f"expected hash here.  If it's a value drift "
                  f"also change, the per-value pins above will "
                  f"separately fire."))
 
