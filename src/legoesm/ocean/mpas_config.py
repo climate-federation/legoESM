@@ -77,11 +77,16 @@ class MPASOceanConfig(NamedTuple):
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
-    pv_scheme: str = "energy"
+    # Default to enstrophy-conserving PV flux — avoids the ζ-checkerboard
+    # null mode of the energy-conserving scheme (Ringler et al. 2010).
+    # Use "energy" if total-KE conservation is required and the ζ null
+    # mode can be controlled by other means.
+    pv_scheme: str = "enstrophy"
     apvm_dt: float = 0.0  # APVM damping timescale [s]; set to baroclinic dt
                           # to enable the Anticipated PV Method upstream
                           # bias (damps ζ-checkerboard null mode of the
                           # energy-conserving PV flux). 0 = disabled.
+                          # Set automatically by the test matrix to dt.
     use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True

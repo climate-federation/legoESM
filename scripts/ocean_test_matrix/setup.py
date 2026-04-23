@@ -168,6 +168,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
+        # pv_scheme defaults to "enstrophy" in MPASOceanConfig.
+        # apvm_dt left at 0 (disabled); see mpas_channel branch notes.
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
@@ -288,6 +290,10 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
+        # pv_scheme defaults to "enstrophy" in MPASOceanConfig — suppresses
+        # the ζ-checkerboard null mode of the energy-conserving scheme.
+        # APVM is left disabled (``apvm_dt=0``); enabling it on top of
+        # enstrophy was found to *destabilise* Eady channel simulations.
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
