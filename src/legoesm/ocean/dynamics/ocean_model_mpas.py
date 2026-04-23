@@ -21,6 +21,11 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
+    flux_form_vertical_tracer_advection_tvd,
+)
+from legoesm.ocean.dynamics.advection_mpas import (
+    compute_upup_cells,
+    tvd_tracer_to_edges,
 )
 from legoesm.core.operators_voronoi import divergence_cell_3d
 from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
@@ -122,6 +127,14 @@ class MPASOceanModel:
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
+
+        # Precompute upwind-of-upwind cell indices for TVD advection.
+        # This is a one-time mesh topology operation stored as static data.
+        if self.config.tracer_advection == "tvd":
+            self._upup_pos, self._upup_neg = compute_upup_cells(mesh)
+        else:
+            self._upup_pos = None
+            self._upup_neg = None
 
         if self.config.physics is not None:
             from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
@@ -333,20 +346,32 @@ class MPASOceanModel:
         # This matches the latlon C-grid algorithm (ocean_model_latlon_cgrid.py).
         mask_3d = mask[:, jnp.newaxis]  # (nCells, 1)
 
+        use_tvd = config.tracer_advection == "tvd"
+
         for tr_name in ['T', 'S']:
             tr = T_new if tr_name == 'T' else S_new
 
-            # Horizontal flux: upwind interpolation to edges
+            # Horizontal flux: reconstruct tracer at edges
             # MPAS convention: u > 0 means flow from c1 to c2 (edge normal).
-            # Upwind: use tracer from the upstream cell.
-            tr_c1 = tr[c1]  # (nEdges, nlev)
-            tr_c2 = tr[c2]  # (nEdges, nlev)
-            tr_upwind = jnp.where(mass_flux > 0, tr_c1, tr_c2)
-            tracer_flux = mass_flux * tr_upwind  # (nEdges, nlev)
+            if use_tvd:
+                tr_edge = tvd_tracer_to_edges(
+                    tr, mass_flux, mesh,
+                    self._upup_pos, self._upup_neg,
+                )
+            else:
+                # First-order upwind
+                tr_c1 = tr[c1]  # (nEdges, nlev)
+                tr_c2 = tr[c2]  # (nEdges, nlev)
+                tr_edge = jnp.where(mass_flux > 0, tr_c1, tr_c2)
+            tracer_flux = mass_flux * tr_edge  # (nEdges, nlev)
             div_hut = divergence_cell_3d(tracer_flux, mesh)  # (nCells, nlev)
 
-            # Vertical flux divergence (upwind, zero at surface/bottom)
-            vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
+            # Vertical flux divergence
+            if use_tvd:
+                vert_flux_div = flux_form_vertical_tracer_advection_tvd(
+                    tr, w, h_k_old, dt)
+            else:
+                vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
 
             # Full flux-form tracer update:
             # h_new * T_new = h_old * T_mid - dt * vert - dt * horiz

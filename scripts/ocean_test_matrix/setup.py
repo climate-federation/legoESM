@@ -120,6 +120,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
@@ -145,6 +147,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
@@ -247,8 +251,7 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["K_v"] = K_v
         if K_h is not None:
             kw["K_h"] = K_h
-        if K_bih is not None:
-            kw["K_bih"] = K_bih
+        # K_bih not supported by MPASOceanConfig — skip silently
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
         if eos is not None:
@@ -259,6 +262,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
         if barotropic_div_damp is not None:
             kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"

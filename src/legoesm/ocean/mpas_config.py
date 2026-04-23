@@ -61,6 +61,11 @@ class MPASOceanConfig(NamedTuple):
         "none": ignore freshwater forcing.
     S_ref : float
         Reference salinity [PSU] for virtual salt flux.
+    tracer_advection : str
+        Tracer advection scheme: "upwind" or "tvd".
+        "upwind" uses first-order donor-cell reconstruction.
+        "tvd" uses second-order Van Leer limiter (less diffusive,
+        monotone) for both horizontal and vertical advection.
     """
     g: float = 9.80616           # = constants.g
     rho_0: float = 1025.0        # = eos.rho_0
@@ -91,6 +96,7 @@ class MPASOceanConfig(NamedTuple):
     physics: object = None  # OceanPhysicsConfig or None
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    tracer_advection: str = "upwind"
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False
     temperature_min_c: float = -5.0
