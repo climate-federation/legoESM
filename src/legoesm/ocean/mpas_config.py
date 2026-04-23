@@ -19,7 +19,19 @@ class MPASOceanConfig(NamedTuple):
     rho_0 : float
         Reference seawater density [kg/m³].
     A_h : float
-        Horizontal viscosity [m²/s].
+        Horizontal (harmonic) viscosity [m²/s].
+    B_h : float
+        Horizontal biharmonic viscosity [m⁴/s].  Applied as a constant-
+        coefficient ``B_h * del4(u)`` operator.
+    C_smag : float
+        Smagorinsky coefficient (dimensionless, typical 0.01-0.15).
+        When > 0, enables flow-dependent biharmonic Smagorinsky viscosity
+        ``-del2(A_smag * del2(u))`` where ``A_smag = (C_smag * Δ)² |D|``.
+    bottom_drag_r : float
+        Linear bottom drag coefficient [m/s].  Applied as ``-r * u / dz_bot``
+        at the bottom level in the baroclinic tendency and as
+        ``-r * U_bar / H`` in the barotropic substeps.  Matches MITgcm's
+        ``bottomDragLinear`` convention.
     K_h : float
         Horizontal tracer diffusivity [m²/s].
     A_v : float
@@ -49,15 +61,32 @@ class MPASOceanConfig(NamedTuple):
         "none": ignore freshwater forcing.
     S_ref : float
         Reference salinity [PSU] for virtual salt flux.
+    tracer_advection : str
+        Tracer advection scheme: "upwind" or "tvd".
+        "upwind" uses first-order donor-cell reconstruction.
+        "tvd" uses second-order Van Leer limiter (less diffusive,
+        monotone) for both horizontal and vertical advection.
     """
     g: float = 9.80616           # = constants.g
     rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
-    K_h: float = 1.0e3
+    B_h: float = 0.0
+    C_smag: float = 0.0
+    bottom_drag_r: float = 0.0
+    K_h: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
-    pv_scheme: str = "energy"
+    # Default to enstrophy-conserving PV flux — avoids the ζ-checkerboard
+    # null mode of the energy-conserving scheme (Ringler et al. 2010).
+    # Use "energy" if total-KE conservation is required and the ζ null
+    # mode can be controlled by other means.
+    pv_scheme: str = "enstrophy"
+    apvm_dt: float = 0.0  # APVM damping timescale [s]; set to baroclinic dt
+                          # to enable the Anticipated PV Method upstream
+                          # bias (damps ζ-checkerboard null mode of the
+                          # energy-conserving PV flux). 0 = disabled.
+                          # Set automatically by the test matrix to dt.
     use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
@@ -66,12 +95,17 @@ class MPASOceanConfig(NamedTuple):
     barotropic_damping: float = 0.0
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
+    barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
+    bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
+    maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled.
+    barotropic_time_filter: str = "cosine"  # "box" or "cosine"
     semi_implicit_coriolis: bool = True
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0
     physics: object = None  # OceanPhysicsConfig or None
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    tracer_advection: str = "upwind"
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False
     temperature_min_c: float = -5.0

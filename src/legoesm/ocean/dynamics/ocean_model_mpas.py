@@ -21,6 +21,11 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
+    flux_form_vertical_tracer_advection_tvd,
+)
+from legoesm.ocean.dynamics.advection_mpas import (
+    compute_upup_cells,
+    tvd_tracer_to_edges,
 )
 from legoesm.core.operators_voronoi import divergence_cell_3d
 from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
@@ -123,6 +128,14 @@ class MPASOceanModel:
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
 
+        # Precompute upwind-of-upwind cell indices for TVD advection.
+        # This is a one-time mesh topology operation stored as static data.
+        if self.config.tracer_advection == "tvd":
+            self._upup_pos, self._upup_neg = compute_upup_cells(mesh)
+        else:
+            self._upup_pos = None
+            self._upup_neg = None
+
         if self.config.physics is not None:
             from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
             self._physics_fn = make_mpas_ocean_physics(self.config.physics)
@@ -171,6 +184,7 @@ class MPASOceanModel:
         state: MPASOceanState,
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanTendencies:
         """Compute baroclinic tendencies."""
         return mpas_ocean_baroclinic_tendencies(
@@ -178,6 +192,7 @@ class MPASOceanModel:
             freshwater=freshwater,
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
+            sponge=sponge,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -187,6 +202,7 @@ class MPASOceanModel:
         dt: float,
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanState:
         """Advance one full timestep (baroclinic + barotropic).
 
@@ -213,7 +229,8 @@ class MPASOceanModel:
 
         # 1. Compute baroclinic tendencies
         tend = self.tendencies(state, freshwater=freshwater,
-                               surface_forcing=surface_forcing)
+                               surface_forcing=surface_forcing,
+                               sponge=sponge)
 
         # 2. Update tracers (forward Euler)
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -229,13 +246,28 @@ class MPASOceanModel:
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
 
         # 3. Update 3D velocity with baroclinic perturbation tendency.
-        # Coriolis is now in the PV flux (full (f+ζ)/h, #160).
-        u_baro = state.u.data + dt * tend.du_dt.data
+        # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
+        # planetary Coriolis) — Coriolis on the 3D perturbation is
+        # applied via forward-backward Matsuno below. Matches lat-lon
+        # pattern (#160).
+        u_star = state.u.data + dt * tend.du_dt.data
+
+        # 3b. Forward-backward (trapezoidal predictor-corrector) Coriolis
+        # on the 3D perturbation velocity. Unconditionally stable for
+        # inertial oscillations; mirrors the lat-lon
+        # _forward_backward_coriolis_3d call in ocean_model_latlon_cgrid.py.
+        u_baro = _forward_backward_coriolis_mpas_3d(
+            u_star, dt, mesh, z_coord, config,
+            mask, state.eta.data, state.H_bathy.data,
+        )
 
         # 4. Barotropic substeps
-        # The baroclinic tendency is already applied to u_baro, so the
-        # barotropic solver computes u_bar from the updated velocity.
-        # No F_slow_u is needed (same pattern as cubed-sphere barotropic.py).
+        # The 3D baroclinic tendency has been applied to u_baro above.
+        # F_slow_u (depth-mean of du_dt_full, with planetary Coriolis
+        # subtracted) is passed to the barotropic solver so it can
+        # apply *online evolving* f·v_t(u_bar) during each substep —
+        # matching the lat-lon C-grid pattern. See ocean_pe_mpas.py and
+        # barotropic_mpas.py for the split and its rationale.
         n_sub = config.n_barotropic_substeps
         dt_baro = dt / n_sub
 
@@ -329,20 +361,32 @@ class MPASOceanModel:
         # This matches the latlon C-grid algorithm (ocean_model_latlon_cgrid.py).
         mask_3d = mask[:, jnp.newaxis]  # (nCells, 1)
 
+        use_tvd = config.tracer_advection == "tvd"
+
         for tr_name in ['T', 'S']:
             tr = T_new if tr_name == 'T' else S_new
 
-            # Horizontal flux: upwind interpolation to edges
+            # Horizontal flux: reconstruct tracer at edges
             # MPAS convention: u > 0 means flow from c1 to c2 (edge normal).
-            # Upwind: use tracer from the upstream cell.
-            tr_c1 = tr[c1]  # (nEdges, nlev)
-            tr_c2 = tr[c2]  # (nEdges, nlev)
-            tr_upwind = jnp.where(mass_flux > 0, tr_c1, tr_c2)
-            tracer_flux = mass_flux * tr_upwind  # (nEdges, nlev)
+            if use_tvd:
+                tr_edge = tvd_tracer_to_edges(
+                    tr, mass_flux, mesh,
+                    self._upup_pos, self._upup_neg,
+                )
+            else:
+                # First-order upwind
+                tr_c1 = tr[c1]  # (nEdges, nlev)
+                tr_c2 = tr[c2]  # (nEdges, nlev)
+                tr_edge = jnp.where(mass_flux > 0, tr_c1, tr_c2)
+            tracer_flux = mass_flux * tr_edge  # (nEdges, nlev)
             div_hut = divergence_cell_3d(tracer_flux, mesh)  # (nCells, nlev)
 
-            # Vertical flux divergence (upwind, zero at surface/bottom)
-            vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
+            # Vertical flux divergence
+            if use_tvd:
+                vert_flux_div = flux_form_vertical_tracer_advection_tvd(
+                    tr, w, h_k_old, dt)
+            else:
+                vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
 
             # Full flux-form tracer update:
             # h_new * T_new = h_old * T_mid - dt * vert - dt * horiz
@@ -400,6 +444,7 @@ class MPASOceanModel:
         dt: float,
         freshwater=None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanState:
         """Advance one timestep with host-side runtime validation.
 
@@ -410,7 +455,8 @@ class MPASOceanModel:
             self.check_barotropic_cfl(dt)
             self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
-                              surface_forcing=surface_forcing)
+                              surface_forcing=surface_forcing,
+                              sponge=sponge)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new

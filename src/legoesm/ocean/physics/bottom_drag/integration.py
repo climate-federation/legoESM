@@ -50,7 +50,8 @@ def _make_linear(config: BottomDragConfig) -> Callable:
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
-        out = linear_bottom_drag(state.u.data, state.v.data, cfg)
+        J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+        out = linear_bottom_drag(state.u.data, state.v.data, z_coord, J, cfg)
         return _wrap_tendencies(out.du_dt, out.dv_dt, state)
     return physics_fn
 

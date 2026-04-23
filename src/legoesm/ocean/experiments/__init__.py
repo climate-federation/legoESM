@@ -34,6 +34,7 @@ Available Experiments:
 - geostrophic_adjustment: Geostrophic adjustment from temperature front
 - global_barotropic_wind: Global barotropic wind-driven circulation
 - eady_instability: Eady baroclinic instability from meridional temperature front
+- acc_channel: ACC-like channel with Gaussian ridge and wind forcing
 
 Design Principles:
 1. Each experiment is self-documenting with scientific context
@@ -56,6 +57,7 @@ from . import stommel_gyre_tracer
 from . import geostrophic_adjustment
 from . import global_barotropic_wind
 from . import eady_instability
+from . import acc_channel
 
 # Registry of all available experiments
 AVAILABLE_EXPERIMENTS = {
@@ -72,6 +74,7 @@ AVAILABLE_EXPERIMENTS = {
     "geostrophic_adjustment": geostrophic_adjustment.EXPERIMENT_CONFIG,
     "global_barotropic_wind": global_barotropic_wind.EXPERIMENT_CONFIG,
     "eady_instability": eady_instability.EXPERIMENT_CONFIG,
+    "acc_channel": acc_channel.EXPERIMENT_CONFIG,
 }
 
 __all__ = [
@@ -88,5 +91,6 @@ __all__ = [
     "geostrophic_adjustment",
     "global_barotropic_wind",
     "eady_instability",
+    "acc_channel",
     "AVAILABLE_EXPERIMENTS",
 ]

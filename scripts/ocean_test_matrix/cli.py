@@ -60,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--days", type=float, default=None,
         help="Override duration in days (overrides both normal and quick mode durations)")
     p.add_argument(
+        "--tag", type=str, default=None,
+        help="Append a tag to the output directory (e.g. --tag dst3_200d)")
+    p.add_argument(
         "--list", action="store_true",
         help="List all test cases and exit")
     p.add_argument(
@@ -69,6 +72,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-format", type=str, default="netcdf",
         choices=["netcdf", "zarr", "npz"],
         help="Snapshot output format: netcdf (default), zarr, or npz (legacy)")
+    p.add_argument(
+        "--tracer-advection", type=str, default=None,
+        choices=["upwind", "tvd", "dst3", "dst3_multidim", "ppm", "ppm_fct", "som"],
+        help="Override tracer advection scheme for Eady experiments")
+    p.add_argument(
+        "--no-sponge", action="store_true",
+        help="Disable sponge relaxation in Eady experiments")
+    p.add_argument(
+        "--B-h", type=float, default=None,
+        help="Override biharmonic viscosity [m^4/s]")
+    p.add_argument(
+        "--C-smag", type=float, default=None,
+        help="Override Smagorinsky coefficient")
+    p.add_argument(
+        "--K-h", type=float, default=None,
+        help="Override Laplacian tracer diffusivity [m^2/s]")
+    p.add_argument(
+        "--U-surface", type=float, default=None,
+        help="Override Eady surface velocity [m/s] (reduces APE / slows BCI)")
     return p
 
 
@@ -113,6 +135,18 @@ def main():
     config.DEFAULT_NLEV = args.levels
     config.DEFAULT_DT = args.dt
     config.OUTPUT_FORMAT = args.output_format
+    if args.tracer_advection:
+        config.TRACER_ADVECTION_OVERRIDE = args.tracer_advection
+    if args.no_sponge:
+        config.NO_SPONGE = True
+    if args.B_h is not None:
+        config.B_H_OVERRIDE = args.B_h
+    if args.C_smag is not None:
+        config.C_SMAG_OVERRIDE = args.C_smag
+    if args.K_h is not None:
+        config.K_H_OVERRIDE = args.K_h
+    if args.U_surface is not None:
+        config.U_SURFACE_OVERRIDE = args.U_surface
 
     tests = filter_tests(TEST_MATRIX, args)
 
@@ -172,6 +206,8 @@ def main():
         else:
             days = tc.quick_days if args.quick else tc.duration_days
         out_dir = output_base / tc.output_path
+        if args.tag:
+            out_dir = out_dir / args.tag
 
         label = f"{tc.case}/{tc.grid_type}/{tc.resolution}"
         print(f"\n[{i}/{len(tests)}] {label} ({days:.4g} days)")

@@ -21,6 +21,7 @@ from ocean_test_matrix.extraction import (
 )
 from ocean_test_matrix.diagnostic_io import (
     _write_results_txt, _save_case_diagnostics, _save_velocity_profiles,
+    _save_cross_sections, save_restart,
 )
 from ocean_test_matrix.testcase import TestCase
 
@@ -1349,6 +1350,412 @@ def run_eady_instability(tc: TestCase, output_dir: Path, days: float
 
 
 # ===========================================================================
+# Runner: Classical Eady (uniform N², linear shear)
+# ===========================================================================
+
+def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
+                     eu_config=None,
+                     ) -> tuple[str, float, str]:
+    """Classical Eady instability: uniform N², linear shear, linear EOS."""
+    if tc.grid_type not in ("mpas_channel", "latlon_channel"):
+        raise NotImplementedError(
+            f"eady_uniform only for channel grids, not {tc.grid_type}")
+
+    from legoesm.ocean.experiments.eady_uniform import (
+        EadyUniformConfig, create_initial_conditions as eu_ic,
+        create_forcings as eu_forcings)
+    from legoesm.ocean.eos import LinearEOSConfig
+
+    if eu_config is None:
+        eu_config = EadyUniformConfig()
+
+    # CLI overrides for experiment parameters
+    overrides = {}
+    if config.TRACER_ADVECTION_OVERRIDE is not None:
+        overrides["tracer_advection"] = config.TRACER_ADVECTION_OVERRIDE
+    if config.B_H_OVERRIDE is not None:
+        overrides["B_h"] = config.B_H_OVERRIDE
+    if config.C_SMAG_OVERRIDE is not None:
+        overrides["C_smag"] = config.C_SMAG_OVERRIDE
+    if config.K_H_OVERRIDE is not None:
+        overrides["K_h"] = config.K_H_OVERRIDE
+    if config.U_SURFACE_OVERRIDE is not None:
+        overrides["U_surface"] = config.U_SURFACE_OVERRIDE
+    if overrides:
+        fields = {f: getattr(eu_config, f) for f in eu_config.__dataclass_fields__}
+        fields.update(overrides)
+        eu_config = eu_config.__class__(**fields)
+
+    physics = eu_forcings(tc.grid_type, None, eu_config)
+
+    # Enable KPP for physical boundary layer mixing.
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    physics = physics._replace(
+        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+    )
+
+    # Pass domain bounds from experiment config into run_kwargs
+    tc.run_kwargs.setdefault("lat_south", eu_config.lat_south)
+    tc.run_kwargs.setdefault("lat_north", eu_config.lat_north)
+    tc.run_kwargs.setdefault("lon_west", eu_config.lon_west)
+    tc.run_kwargs.setdefault("lon_east", eu_config.lon_east)
+
+    grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(
+            tc, nlev=20, physics=physics,
+            A_h=eu_config.A_h, B_h=eu_config.B_h,
+            C_smag=eu_config.C_smag,
+            K_h=eu_config.K_h, K_bih=eu_config.K_bih,
+            A_v=eu_config.A_v, K_v=eu_config.K_v,
+            bottom_drag_r=eu_config.bottom_drag_coeff,
+            eos="linear",
+            eos_linear=LinearEOSConfig(
+                alpha_T=eu_config.alpha_T,
+                rho_ref=eu_config.rho_0,
+                T_ref=eu_config.T_ref,
+                S_ref=eu_config.S_uniform,
+            ),
+            barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=eu_config.barotropic_div_damp,
+            tracer_advection=eu_config.tracer_advection,
+        ))
+
+    state = eu_ic(tc.grid_type, grid, z_coord, eu_config)
+
+    dt = config.DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    # Sponge layer: relax T toward IC and u,v toward zero near walls
+    from legoesm.ocean.experiments.eady_uniform import compute_sponge_mask
+    from legoesm.core.field import Field
+    gamma = compute_sponge_mask(grid, eu_config)
+    T_init = np.array(state.T.data)
+    r_drag = eu_config.bottom_drag_coeff
+
+    if tc.grid_type == "latlon_channel":
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_cell_to_uface, interp_cell_to_vface)
+        decay_T = jnp.array(np.exp(-dt * gamma)[..., np.newaxis])
+        T_init_jnp = jnp.array(T_init)
+        decay_u = jnp.array(np.exp(-dt * np.array(
+            interp_cell_to_uface(jnp.array(gamma))))[..., np.newaxis])
+        decay_v = jnp.array(np.exp(-dt * np.array(
+            interp_cell_to_vface(jnp.array(gamma))))[..., np.newaxis])
+    else:
+        # MPAS: gamma is 1D (nCells), T is (nCells, nlev)
+        decay_T = jnp.array(np.exp(-dt * gamma)[:, np.newaxis])
+        T_init_jnp = jnp.array(T_init)
+        # For u on edges: average gamma from adjacent cells
+        c1 = np.asarray(grid.cellsOnEdge[0])
+        c2 = np.asarray(grid.cellsOnEdge[1])
+        gamma_edge = 0.5 * (gamma[c1] + gamma[c2])
+        decay_u = jnp.array(np.exp(-dt * gamma_edge)[:, np.newaxis])
+        decay_v = None  # MPAS has no separate v
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
+                                  include_velocity_3d=True)
+
+    use_sponge = not config.NO_SPONGE
+
+    def step_fn(s, dt_):
+        s_new = model.step(s, dt_)
+        if not use_sponge:
+            return s_new
+        # Sponge: relax T toward initial, damp u/v
+        T_new = s_new.T.data * decay_T + T_init_jnp * (1.0 - decay_T)
+        u_new = s_new.u.data * decay_u
+        sponge_kw = dict(
+            u=Field(u_new, name="u", dims=s_new.u.dims, units=s_new.u.units),
+            T=Field(T_new, name="T", dims=s_new.T.dims, units=s_new.T.units))
+        if hasattr(s_new, 'v') and decay_v is not None:
+            v_new = s_new.v.data * decay_v
+            sponge_kw["v"] = Field(v_new, name="v", dims=s_new.v.dims,
+                                   units=s_new.v.units)
+        # SOM moments must also be decayed by the sponge
+        if getattr(s_new, 'T_som', None) is not None:
+            sponge_kw["T_som"] = s_new.T_som.replace(
+                data=s_new.T_som.data * decay_T[..., jnp.newaxis])
+        if getattr(s_new, 'S_som', None) is not None:
+            sponge_kw["S_som"] = s_new.S_som.replace(
+                data=s_new.S_som.data * decay_T[..., jnp.newaxis])
+        s_new = s_new._replace(**sponge_kw)
+        return s_new
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Eady Uniform ({tc.grid_type})", total_days=days)
+
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    T_vals = diag.get("mean_T", [])
+    T_drift = abs(T_vals[-1] - T_vals[0]) if len(T_vals) >= 2 else 0
+    notes = (f"max_speed={max_speed:.4f}m/s, T_drift={T_drift:.2e}, "
+             f"Ld={eu_config.Ld_km:.0f}km, tau={eu_config.efolding_days:.0f}d")
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+    case_label = f"Eady Uniform {tc.grid_type} {tc.resolution}"
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+
+    _save_case_diagnostics(
+        output_dir, case_label,
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("speed_sfc", "Surface Speed (m/s)", "plasma"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
+
+    # Velocity cross-sections (u, speed lat-depth evolution)
+    for fkey in ("u_3d", "speed_3d"):
+        _save_cross_sections(
+            output_dir, case_label, snapshots, dt, fkey,
+            coord_kind, lon_deg, lat_deg, depth, "Depth (m)")
+    _save_velocity_profiles(output_dir, case_label, snapshots, dt,
+                            depth, "Depth (m)")
+
+    # Save restart file for continuing the run
+    n_steps = int(days * 86400 / dt)
+    save_restart(state, output_dir, tc.grid_type, n_steps, days)
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
+# Runner: ACC Channel with Gaussian Ridge
+# ===========================================================================
+
+def run_acc_channel(tc: TestCase, output_dir: Path, days: float
+                    ) -> tuple[str, float, str]:
+    """ACC-like channel with Gaussian ridge (Zhang et al. 2024 inspired).
+
+    Wind-driven stratified channel on the sphere with a meridional
+    Gaussian ridge.  Northern boundary sponge restores temperature
+    toward the initial exponential profile.
+    """
+    if tc.grid_type not in ("mpas_channel", "latlon_channel"):
+        raise NotImplementedError(
+            f"acc_channel only for channel grids, not {tc.grid_type}")
+
+    from legoesm.ocean.experiments.acc_channel import (
+        ACCChannelConfig, create_initial_conditions as acc_ic,
+        create_forcings as acc_forcings, create_sponge as acc_sponge)
+    from legoesm.ocean.eos import LinearEOSConfig
+
+    acc_config = ACCChannelConfig()
+    physics = acc_forcings(tc.grid_type, None, acc_config)
+
+    # Pass domain bounds into run_kwargs
+    tc.run_kwargs.setdefault("lat_south", acc_config.lat_south)
+    tc.run_kwargs.setdefault("lat_north", acc_config.lat_north)
+    tc.run_kwargs.setdefault("lon_west", acc_config.lon_west)
+    tc.run_kwargs.setdefault("lon_east", acc_config.lon_east)
+
+    grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(
+            tc, nlev=20, H_max=acc_config.H_max,
+            physics=physics,
+            A_h=acc_config.A_h, B_h=acc_config.B_h,
+            C_smag=acc_config.C_smag, K_h=acc_config.K_h,
+            A_v=acc_config.A_v, K_v=acc_config.K_v,
+            bottom_drag_r=acc_config.bottom_drag_coeff,
+            eos="linear",
+            eos_linear=LinearEOSConfig(
+                alpha_T=acc_config.alpha_T,
+                rho_ref=acc_config.rho_0,
+                T_ref=acc_config.T_ref,
+                S_ref=acc_config.S_uniform,
+            ),
+            barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=acc_config.barotropic_div_damp,
+        ))
+
+    state = acc_ic(tc.grid_type, grid, z_coord, acc_config)
+    sponge = acc_sponge(tc.grid_type, grid, z_coord, acc_config)
+
+    dt = config.DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
+                                  include_velocity_3d=True)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_, sponge=sponge)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"ACC Channel ({tc.grid_type})", total_days=days)
+
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_vals = diag.get("mean_T", [])
+    T_drift = abs(T_vals[-1] - T_vals[0]) if len(T_vals) >= 2 else 0
+    notes = (f"max_speed={max_speed:.4f}m/s, eta_drift={eta_drift:.2e}, "
+             f"T_drift={T_drift:.2e}")
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+    case_label = f"ACC Channel {tc.grid_type} {tc.resolution}"
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+
+    _save_case_diagnostics(
+        output_dir, case_label,
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("speed_sfc", "Surface Speed (m/s)", "plasma"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
+
+    _save_velocity_profiles(output_dir, case_label, snapshots, dt,
+                            depth, "Depth (m)")
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
+# Runner: ACC Channel Rest State (no forcing, no diffusion)
+# ===========================================================================
+
+def run_acc_channel_rest(tc: TestCase, output_dir: Path, days: float
+                         ) -> tuple[str, float, str]:
+    """ACC channel rest state: stratification + ridge, no forcing.
+
+    Tests whether the ACC channel initial condition (exponential
+    stratification + Gaussian ridge bathymetry) maintains steady state
+    with all forcing and diffusion turned off.  Any drift exposes
+    numerical issues (pressure-gradient errors over topography,
+    spurious vertical mixing, z-star Jacobian problems).
+    """
+    if tc.grid_type not in ("mpas_channel", "latlon_channel"):
+        raise NotImplementedError(
+            f"acc_channel_rest only for channel grids, not {tc.grid_type}")
+
+    from legoesm.ocean.experiments.acc_channel import (
+        ACCChannelConfig, create_initial_conditions as acc_ic)
+    from legoesm.ocean.eos import LinearEOSConfig
+
+    # Zero perturbation: rest state should be exactly in balance
+    acc_config = ACCChannelConfig(T_perturbation_K=0.0)
+
+    tc.run_kwargs.setdefault("lat_south", acc_config.lat_south)
+    tc.run_kwargs.setdefault("lat_north", acc_config.lat_north)
+    tc.run_kwargs.setdefault("lon_west", acc_config.lon_west)
+    tc.run_kwargs.setdefault("lon_east", acc_config.lon_east)
+
+    # Zero all diffusion — pure dynamics only
+    # A_v and K_v must also be zero: in z-star with varying bathymetry,
+    # vertical diffusion operates at different effective rates over the
+    # ridge vs flat bottom (layers are thinner where H_bathy < H_max),
+    # which breaks horizontal T uniformity and drives spurious flow.
+    grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(
+            tc, nlev=20, H_max=acc_config.H_max,
+            A_h=0.0, B_h=0.0, C_smag=0.0, K_h=0.0,
+            A_v=0.0, K_v=0.0,
+            bottom_drag_r=0.0,
+            eos="linear",
+            eos_linear=LinearEOSConfig(
+                alpha_T=acc_config.alpha_T,
+                rho_ref=acc_config.rho_0,
+                T_ref=acc_config.T_ref,
+                S_ref=acc_config.S_uniform,
+            ),
+            barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=acc_config.barotropic_div_damp,
+        ))
+
+    state = acc_ic(tc.grid_type, grid, z_coord, acc_config)
+
+    dt = config.DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
+                                  include_velocity_3d=True)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"ACC Rest ({tc.grid_type})", total_days=days)
+
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_vals = diag.get("mean_T", [])
+    T_drift = abs(T_vals[-1] - T_vals[0]) if len(T_vals) >= 2 else 0
+    notes = (f"max_speed={max_speed:.4f}m/s, eta_drift={eta_drift:.2e}, "
+             f"T_drift={T_drift:.2e}")
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+    case_label = f"ACC Rest {tc.grid_type} {tc.resolution}"
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+
+    _save_case_diagnostics(
+        output_dir, case_label,
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("speed_sfc", "Surface Speed (m/s)", "plasma"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
+
+    _save_velocity_profiles(output_dir, case_label, snapshots, dt,
+                            depth, "Depth (m)")
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
 # Runner dispatch
 # ===========================================================================
 
@@ -1372,4 +1779,7 @@ RUNNERS: dict[str, Callable] = {
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
     "eady_instability": run_eady_instability,
+    "eady_uniform": run_eady_uniform,
+    "acc_channel": run_acc_channel,
+    "acc_channel_rest": run_acc_channel_rest,
 }

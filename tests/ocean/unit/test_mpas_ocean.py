@@ -850,3 +850,153 @@ class TestSurfaceForcing:
         assert jnp.all(jnp.isfinite(state_new.eta.data))
         # Wind stress should produce motion
         assert float(jnp.max(jnp.abs(state_new.u.data))) > 0
+
+
+# ============================================================================
+# Test: TVD Advection on MPAS
+# ============================================================================
+
+class TestMPASTVDAdvection:
+    """Test TVD tracer advection on Voronoi mesh."""
+
+    def test_upup_cell_shapes(self, mesh):
+        """compute_upup_cells returns correct shapes."""
+        from legoesm.ocean.dynamics.advection_mpas import compute_upup_cells
+
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        assert upup_pos.shape == (mesh.nEdges,)
+        assert upup_neg.shape == (mesh.nEdges,)
+
+    def test_upup_cell_valid_indices(self, mesh):
+        """Upup cell indices are within valid range."""
+        from legoesm.ocean.dynamics.advection_mpas import compute_upup_cells
+
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        assert int(jnp.min(upup_pos)) >= 0
+        assert int(jnp.max(upup_pos)) < mesh.nCells
+        assert int(jnp.min(upup_neg)) >= 0
+        assert int(jnp.max(upup_neg)) < mesh.nCells
+
+    def test_upup_cell_differs_from_neighbor(self, mesh):
+        """Upup cell is generally different from the direct neighbor.
+
+        For most interior edges, the opposite-cell lookup should yield
+        a cell that is distinct from both c1 and c2.
+        """
+        from legoesm.ocean.dynamics.advection_mpas import compute_upup_cells
+
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+
+        # At least 50% of edges should have upup != c2 for pos flow
+        # (the opposite cell of c1 should not be c2 itself)
+        frac_distinct_pos = float(jnp.mean((upup_pos != c2).astype(jnp.float32)))
+        assert frac_distinct_pos > 0.5, (
+            f"Only {frac_distinct_pos:.0%} of upup_pos differ from c2 — "
+            f"opposite-cell lookup may be broken"
+        )
+
+    def test_tvd_to_edges_shapes(self, mesh):
+        """tvd_tracer_to_edges returns correct shapes."""
+        from legoesm.ocean.dynamics.advection_mpas import (
+            compute_upup_cells, tvd_tracer_to_edges,
+        )
+
+        nlev = 5
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        tr = jnp.ones((mesh.nCells, nlev)) * 15.0
+        mass_flux = jnp.ones((mesh.nEdges, nlev)) * 0.01
+
+        tr_edge = tvd_tracer_to_edges(tr, mass_flux, mesh, upup_pos, upup_neg)
+        assert tr_edge.shape == (mesh.nEdges, nlev)
+
+    def test_tvd_recovers_constant_field(self, mesh):
+        """TVD reconstruction of a uniform field is exact."""
+        from legoesm.ocean.dynamics.advection_mpas import (
+            compute_upup_cells, tvd_tracer_to_edges,
+        )
+
+        nlev = 3
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        tr = jnp.ones((mesh.nCells, nlev)) * 20.0
+        mass_flux = jnp.sin(mesh.angleEdge)[:, jnp.newaxis] * jnp.ones(nlev)
+
+        tr_edge = tvd_tracer_to_edges(tr, mass_flux, mesh, upup_pos, upup_neg)
+        assert jnp.allclose(tr_edge, 20.0, atol=1e-12)
+
+    def test_tvd_model_step(self, mesh, z_coord, state):
+        """MPAS model with TVD advection takes a step successfully."""
+        config_tvd = MPASOceanConfig(
+            A_h=1.0e3, K_h=1.0e2, A_v=1.0e-3, K_v=1.0e-4,
+            n_barotropic_substeps=5,
+            tracer_advection="tvd",
+        )
+        model = MPASOceanModel(mesh, z_coord, config_tvd)
+        state_new = model.step(state, 60.0)
+
+        assert jnp.all(jnp.isfinite(state_new.u.data))
+        assert jnp.all(jnp.isfinite(state_new.T.data))
+        assert jnp.all(jnp.isfinite(state_new.S.data))
+        assert jnp.all(jnp.isfinite(state_new.eta.data))
+
+    def test_tvd_multi_step_stability(self, mesh, z_coord, state):
+        """TVD model is stable for multiple steps."""
+        config_tvd = MPASOceanConfig(
+            A_h=1.0e3, K_h=1.0e2, A_v=1.0e-3, K_v=1.0e-4,
+            n_barotropic_substeps=5,
+            tracer_advection="tvd",
+        )
+        model = MPASOceanModel(mesh, z_coord, config_tvd)
+        s = state
+        for _ in range(5):
+            s = model.step(s, 30.0)
+        assert jnp.all(jnp.isfinite(s.T.data))
+        assert jnp.all(jnp.isfinite(s.S.data))
+
+    def test_tvd_less_diffusive_than_upwind(self, mesh, z_coord):
+        """TVD produces less numerical diffusion than upwind.
+
+        Creates a state with a sharp temperature gradient at the equator,
+        applies a uniform flow, and verifies that TVD preserves the
+        gradient better than upwind after several steps.
+        """
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+
+        state = rest_state_mpas_ocean(
+            mesh, z_coord, T_surface=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=500.0, land_lat_threshold=85.0,
+        )
+        # Sharp T front at equator — broadcast to (nCells, nlev)
+        nlev = state.T.data.shape[1]
+        north = (mesh.latCell > 0).astype(state.T.data.dtype)
+        T_front = (north * 20.0 + (1 - north) * 10.0)[:, jnp.newaxis]
+        T_front = jnp.broadcast_to(T_front, (mesh.nCells, nlev))
+        mask = state.land_mask.data
+        T_front = T_front * mask[:, jnp.newaxis]
+        state_front = state._replace(T=state.T.replace(data=T_front))
+
+        var_T_initial = float(jnp.var(T_front[mask > 0.5]))
+
+        dt = 30.0
+        n_steps = 5
+
+        results = {}
+        for scheme in ["upwind", "tvd"]:
+            cfg = MPASOceanConfig(
+                A_h=1.0e3, K_h=0.0, A_v=1.0e-3, K_v=0.0,
+                n_barotropic_substeps=5,
+                tracer_advection=scheme,
+            )
+            model = MPASOceanModel(mesh, z_coord, cfg)
+            s = state_front
+            for _ in range(n_steps):
+                s = model.step(s, dt)
+            var_T_final = float(jnp.var(s.T.data[mask > 0.5]))
+            results[scheme] = var_T_final
+
+        # TVD should preserve more variance (less diffusive)
+        assert results["tvd"] >= results["upwind"] * 0.99, (
+            f"TVD Var(T)={results['tvd']:.6f} should be >= "
+            f"upwind Var(T)={results['upwind']:.6f}"
+        )

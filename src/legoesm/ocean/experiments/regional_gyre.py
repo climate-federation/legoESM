@@ -85,7 +85,7 @@ class RegionalGyreConfig:
 
     # Physics
     A_h: float = 5e5               # Horizontal viscosity [m²/s]
-    bottom_drag_coeff: float = 1e-4  # Linear bottom drag [s⁻¹]
+    bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag [m/s]
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord, 

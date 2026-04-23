@@ -61,7 +61,7 @@ class GlobalBarotropicWindConfig:
 
     # Physics
     A_h: float = 5e5               # Lateral viscosity [m²/s]
-    bottom_drag_coeff: float = 1e-4  # Linear bottom drag [s⁻¹]
+    bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag [m/s]
 
 
 def _create_simplified_continent_mask(lon_deg, lat_deg, config):
@@ -148,16 +148,11 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     # Apply simplified continent mask
     mask = _create_simplified_continent_mask(lon_deg, lat_deg, config)
     mask_typed = np.asarray(mask).astype(np.asarray(state.eta.data).dtype)
-    state = state._replace(land_mask=Field(data=jnp.array(mask_typed)))
-
-    # Latlon grids also need face masks for u/v
     if grid_type == "latlon":
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
-        u_mask_new, v_mask_new = compute_face_masks(mask_typed)
-        state = state._replace(
-            u_mask=Field(data=u_mask_new),
-            v_mask=Field(data=v_mask_new),
-        )
+        from legoesm.ocean.init_latlon_cgrid import replace_land_mask
+        state = replace_land_mask(state, jnp.array(mask_typed))
+    else:
+        state = state._replace(land_mask=Field(data=jnp.array(mask_typed)))
 
     return state
 

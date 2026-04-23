@@ -42,7 +42,8 @@ from ocean_test_matrix.extraction import (  # noqa: F401
 )
 from ocean_test_matrix.diagnostic_io import (  # noqa: F401
     _write_results_txt, _save_case_diagnostics,
-    _save_velocity_profiles, _ensure_required_artifacts,
+    _save_velocity_profiles, _save_cross_sections,
+    _ensure_required_artifacts,
 )
 from ocean_test_matrix.experiments import RUNNERS  # noqa: F401
 from ocean_test_matrix.cli import main, build_parser, filter_tests  # noqa: F401

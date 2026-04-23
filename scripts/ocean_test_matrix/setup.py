@@ -36,7 +36,18 @@ def _parse_resolution(tc):
 def _create_ocean_setup(tc, nlev: int | None = None,
                         H_max: float | None = None, physics=None,
                         A_h: float | None = None,
-                        A_v: float | None = None):
+                        B_h: float | None = None,
+                        C_smag: float | None = None,
+                        A_v: float | None = None,
+                        K_h: float | None = None,
+                        K_v: float | None = None,
+                        K_bih: float | None = None,
+                        bottom_drag_r: float | None = None,
+                        eos: str | None = None,
+                        eos_linear=None,
+                        barotropic_diffusion_alpha: float | None = None,
+                        barotropic_div_damp: float | None = None,
+                        tracer_advection: str | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -109,6 +120,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
@@ -132,8 +145,31 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        # K_bih not supported by MPASOceanConfig — skip silently
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
+        # pv_scheme defaults to "enstrophy" in MPASOceanConfig.
+        # apvm_dt left at 0 (disabled); see mpas_channel branch notes.
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
@@ -173,13 +209,38 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         n_lat, n_lon = params["n_lat"], params["n_lon"]
         lat_s = tc.run_kwargs.get("lat_south", 25.0)
         lat_n = tc.run_kwargs.get("lat_north", 65.0)
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 360.0)
         grid, wall_mask = create_regional_latlon_grid(
-            n_lat, n_lon, lat_s, lat_n, periodic_x=True)
+            n_lat, n_lon, lat_s, lat_n,
+            lon_west=lon_w, lon_east=lon_e, periodic_x=True)
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
         cfg = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
@@ -195,14 +256,44 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         res_km = params["resolution_km"]
         lat_s = tc.run_kwargs.get("lat_south", 25.0)
         lat_n = tc.run_kwargs.get("lat_north", 65.0)
+        # Periodic-x zonal extent: defaults to the full 360° (legacy) but
+        # can be overridden via run_kwargs to match a lat-lon channel
+        # (e.g. the Eady lon_west/lon_east bounds).
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 360.0)
         mesh = create_regional_voronoi_mesh(
-            (0, 360), (lat_s, lat_n), resolution_km=res_km,
+            (lon_w, lon_e), (lat_s, lat_n), resolution_km=res_km,
             periodic_x=True)
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        # K_bih not supported by MPASOceanConfig — skip silently
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
+        # pv_scheme defaults to "enstrophy" in MPASOceanConfig — suppresses
+        # the ζ-checkerboard null mode of the energy-conserving scheme.
+        # APVM is left disabled (``apvm_dt=0``); enabling it on top of
+        # enstrophy was found to *destabilise* Eady channel simulations.
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"

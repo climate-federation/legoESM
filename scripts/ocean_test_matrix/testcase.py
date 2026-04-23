@@ -163,6 +163,28 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "eady_instability", g, res[g], 60.0, 5.0))
 
+    # --- Classical Eady (uniform N², linear shear): 1000x2000 km channel ---
+    # 200x100 latlon ≈ 10 km resolution; L_d ≈ 97 km, λ_max ≈ 390 km
+    eady_u_res = {"latlon_channel": "200x100", "mpas_channel": "10km"}
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "eady_uniform", g, eady_u_res[g], 120.0, 10.0))
+
+    # --- ACC channel with Gaussian ridge (Zhang et al. 2024 inspired) ---
+    # ~1 degree isotropic (20 lat x 18 lon over 20x18 deg domain at 40S).
+    # ~111 km meridional, ~85 km zonal.
+    acc_res = {"latlon_channel": "20x18", "mpas_channel": "100km"}
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "acc_channel", g, acc_res[g], 30.0, 2.0))
+
+    # --- ACC channel rest state (no forcing, no diffusion) ---
+    # Same IC as acc_channel but with all forcing/diffusion off.
+    # Tests whether stratification + ridge bathymetry maintain steady state.
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "acc_channel_rest", g, acc_res[g], 10.0, 1.0))
+
     return matrix
 
 

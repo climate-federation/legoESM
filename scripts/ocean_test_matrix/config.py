@@ -33,6 +33,12 @@ CHANNEL_GRID_TYPES = ["latlon_channel", "mpas_channel"]
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
+TRACER_ADVECTION_OVERRIDE = None  # Set via --tracer-advection CLI flag
+NO_SPONGE = False  # Set via --no-sponge CLI flag
+B_H_OVERRIDE = None  # Set via --B-h CLI flag
+C_SMAG_OVERRIDE = None  # Set via --C-smag CLI flag
+K_H_OVERRIDE = None  # Set via --K-h CLI flag
+U_SURFACE_OVERRIDE = None  # Set via --U-surface CLI flag (Eady)
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"
@@ -105,6 +111,16 @@ FIELD_RANGES = {
         "eta": (-0.02, 0.02),      # meters - gyre circulation (small during spin-up)
         "SST": (1.5, 21.0),        # °C
         "SSS": (33, 37),            # PSU - tracer salinity range
+    },
+    "acc_channel": {
+        "eta": (-0.1, 0.1),        # meters - wind-driven SSH response
+        "speed_sfc": (0, 0.2),      # m/s - zonal flow over ridge
+        "SST": (0, 9),              # °C - Abernathey profile range
+    },
+    "acc_channel_rest": {
+        "eta": (-1e-4, 1e-4),      # meters - should stay near zero
+        "speed_sfc": (0, 0.01),     # m/s - should stay near zero
+        "SST": (0, 9),              # °C - should maintain initial profile
     },
 }
 

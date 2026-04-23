@@ -94,7 +94,7 @@ class OceanConfig(NamedTuple):
     g: float = 9.80616           # = constants.g
     rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
-    K_h: float = 1.0e3           # Horizontal tracer diffusivity [m^2/s]
+    K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
     A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]
     K_v: float = 1.0e-4          # Vertical tracer diffusivity [m^2/s]
     n_barotropic_substeps: int = 30
@@ -169,7 +169,7 @@ class SpectralOceanConfig(NamedTuple):
     g: float = 9.80616
     rho_0: float = 1025.0
     A_h: float = 1.0e4
-    K_h: float = 1.0e3
+    K_h: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     # Reserved for future split-explicit spectral stepping; currently ignored.
@@ -242,7 +242,7 @@ class LatLonOceanConfig(NamedTuple):
     g: float = 9.80616
     rho_0: float = 1025.0
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
-    K_h: float = 1.0e3           # Horizontal tracer diffusivity [m^2/s]
+    K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
     A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]
     K_v: float = 1.0e-4          # Vertical tracer diffusivity [m^2/s]
     n_barotropic_substeps: int = 30
@@ -305,6 +305,12 @@ class LatLonCGridOceanState(NamedTuple):
         Ocean mask at v-points (lat interfaces). Shape (n_lat+1, n_lon).
     w : Field
         Vertical velocity [m/s]. Shape (n_lat, n_lon, nlev). Diagnostic field computed from flux divergence.
+    T_som : Field or None
+        SOM (Prather 1986) moments for temperature. Shape (n_lat, n_lon, nlev, 9).
+        Order: [sx, sy, sz, sxx, syy, szz, sxy, sxz, syz].
+        None when tracer_advection != "som".
+    S_som : Field or None
+        SOM (Prather 1986) moments for salinity. Same shape and order as T_som.
     """
 
     u: Field
@@ -317,6 +323,8 @@ class LatLonCGridOceanState(NamedTuple):
     u_mask: Field
     v_mask: Field
     w: Field
+    T_som: object = None
+    S_som: object = None
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -385,7 +393,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     g: float = 9.80616
     rho_0: float = 1025.0
     A_h: float = 1.0e4
-    K_h: float = 1.0e3
+    B_h: float = 0.0
+    C_smag: float = 0.0
+    bottom_drag_r: float = 0.0
+    K_h: float = 0.0
+    K_bih: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
@@ -396,6 +408,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_salt: bool = True
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
+    barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
+    bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
+    maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
+    barotropic_time_filter: str = "cosine"  # "box" or "cosine" (shaped filter for time-averaging)
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
     max_abs_eta_m: float = 1.0e4
@@ -406,7 +422,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
-    tracer_advection: str = "tvd"  # "upwind" or "tvd" (Van Leer, #170)
+    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som"
+    gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None

@@ -214,9 +214,9 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                     finite = ocean_vals[np.isfinite(ocean_vals)]
                     vmin = float(finite.min()) if finite.size else None
                     vmax = float(finite.max()) if finite.size else None
-                # Force symmetric colorscale centered at 0 for velocity
-                # and w fields (diverging quantities)
-                _sym = ("w_" in field_key or field_key in ("u_sfc", "v_sfc"))
+                # Force symmetric colorscale centered at 0 for diverging fields
+                _sym = ("w_" in field_key
+                        or field_key in ("u_sfc", "v_sfc", "eta"))
                 if vmin is not None and vmax is not None and _sym:
                     vlim = max(abs(vmin), abs(vmax))
                     vmin, vmax = -vlim, vlim
@@ -270,9 +270,9 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                         vmin, vmax = float(panel_finite.min()), float(panel_finite.max())
                     else:
                         vmin, vmax = None, None
-                # Force symmetric colorscale centered at 0 for velocity
-                # and w fields (diverging quantities)
-                _sym = ("w_" in field_key or field_key in ("u_sfc", "v_sfc"))
+                # Force symmetric colorscale centered at 0 for diverging fields
+                _sym = ("w_" in field_key
+                        or field_key in ("u_sfc", "v_sfc", "eta"))
                 if vmin is not None and vmax is not None and _sym:
                     vlim = max(abs(vmin), abs(vmax))
                     vmin, vmax = -vlim, vlim
@@ -446,15 +446,27 @@ def _bin_cross_section(
         ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
 
     section = np.nanmean(ll, axis=mean_axis)
+    # Use actual coordinate ranges from the data, not global defaults
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
     if mean_axis == 0:
-        return section, np.linspace(0, 360, section.shape[0])
-    return section, np.linspace(-90, 90, section.shape[0])
+        # Averaged over lat → lon-vertical section
+        if coord_kind in ("latlon", "gaussian"):
+            return section, np.unique(lon_flat)[:section.shape[0]]
+        return section, np.linspace(lon_flat.min(), lon_flat.max(),
+                                    section.shape[0])
+    # Averaged over lon → lat-vertical section
+    if coord_kind in ("latlon", "gaussian"):
+        return section, np.unique(lat_flat)[:section.shape[0]]
+    return section, np.linspace(lat_flat.min(), lat_flat.max(),
+                                section.shape[0])
 
 
 def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
                          dt: float, field_3d_key: str, coord_kind: str,
                          lon_deg: np.ndarray, lat_deg: np.ndarray,
-                         levels: np.ndarray, level_label: str):
+                         levels: np.ndarray, level_label: str,
+                         cmap: str = "RdBu_r"):
     """Save latitude-vertical and longitude-vertical cross-sections."""
     valid_steps = sorted(
         s for s in snapshots if field_3d_key in snapshots[s])
@@ -466,9 +478,10 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    fld_tag = field_3d_key.replace("_3d", "")
     for fname, mean_axis, xlabel in [
-        ("latitude_vertical_cross_sections.png", 1, "Latitude"),
-        ("longitude_vertical_cross_sections.png", 0, "Longitude"),
+        (f"{fld_tag}_latitude_vertical_cross_sections.png", 1, "Latitude"),
+        (f"{fld_tag}_longitude_vertical_cross_sections.png", 0, "Longitude"),
     ]:
         nc = len(valid_steps)
         fig, axes_arr = plt.subplots(
@@ -500,6 +513,11 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             cs_vmin, cs_vmax = float(np.nanmin(all_finite)), float(np.nanmax(all_finite))
         else:
             cs_vmin, cs_vmax = None, None
+        # Symmetric color limits for diverging fields (zero = white)
+        _is_diverging = any(k in field_3d_key for k in ("u", "v", "w", "eta"))
+        if _is_diverging and cs_vmin is not None and cs_vmax is not None:
+            vlim = max(abs(cs_vmin), abs(cs_vmax))
+            cs_vmin, cs_vmax = -vlim, vlim
 
         # Compute level interfaces for pcolormesh (accurate vertical grid representation)
         def compute_level_interfaces(level_centers):
@@ -516,17 +534,37 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
         level_interfaces = compute_level_interfaces(levels)
 
+        # Compute initial cross-section for reference isotherm contours.
+        # These contour lines show where isotherms STARTED, so the viewer
+        # can distinguish slumping (isotherms tilt) from diffusion (isotherms spread).
+        init_section = all_sections[0]
+        init_bin = all_bin_centers[0]
+
+        # Choose ~8 contour levels spanning the initial field
+        init_finite = init_section[np.isfinite(init_section)]
+        if len(init_finite) > 0:
+            ctr_levels = np.linspace(
+                float(np.nanpercentile(init_finite, 5)),
+                float(np.nanpercentile(init_finite, 95)), 8)
+        else:
+            ctr_levels = None
+
         for ax, step, section, bin_centers in zip(
                 axes_arr, valid_steps, all_sections, all_bin_centers):
-            # Use pcolormesh to show true model grid structure instead of imshow
-            # This accurately represents the variable vertical grid spacing
             bin_interfaces = np.linspace(bin_centers[0] - 0.5 * (bin_centers[1] - bin_centers[0]),
                                        bin_centers[-1] + 0.5 * (bin_centers[-1] - bin_centers[-2]),
                                        len(bin_centers) + 1)
             X, Y = np.meshgrid(bin_interfaces, level_interfaces)
             im = ax.pcolormesh(
-                X, Y, section.T, cmap="RdBu_r", shading='flat',
+                X, Y, section.T, cmap=cmap, shading='flat',
                 vmin=cs_vmin, vmax=cs_vmax)
+
+            # Overlay initial isotherm contour lines (thin gray)
+            if ctr_levels is not None:
+                X_ctr, Y_ctr = np.meshgrid(init_bin, levels)
+                ax.contour(
+                    X_ctr, Y_ctr, init_section.T, levels=ctr_levels,
+                    colors='0.4', linewidths=0.5, linestyles='--')
 
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
@@ -776,8 +814,14 @@ def _save_snapshot_data(
         latlon_arrays["source_lat_range"] = np.array(
             [domain_extent[2], domain_extent[3]])
     else:
+        src_lon_min, src_lon_max = float(src_lon.min()), float(src_lon.max())
+        if src_lon_min < 0:
+            src_lon_min = src_lon_min % 360
+            src_lon_max = src_lon_max % 360
+            if src_lon_max <= src_lon_min:
+                src_lon_min, src_lon_max = 0.0, 360.0
         latlon_arrays["source_lon_range"] = np.array(
-            [float(src_lon.min()), float(src_lon.max())])
+            [src_lon_min, src_lon_max])
         latlon_arrays["source_lat_range"] = np.array(
             [float(src_lat.min()), float(src_lat.max())])
 
@@ -842,6 +886,44 @@ def _save_snapshot_data(
 
 
 # ---------------------------------------------------------------------------
+# Restart file
+# ---------------------------------------------------------------------------
+
+def save_restart(state, output_dir, grid_type, step, time_days):
+    """Save model state for restarting a run.
+
+    Saves all state arrays as a compressed NPZ file that can be loaded
+    to continue an integration from where it left off.
+
+    Parameters
+    ----------
+    state : ocean state (LatLonCGridOceanState, MPASOceanState, etc.)
+    output_dir : Path
+    grid_type : str
+    step : int
+    time_days : float
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    restart = {
+        "step": step,
+        "time_days": time_days,
+        "grid_type": grid_type,
+    }
+
+    # Save all Field objects from the state
+    for field_name in state._fields:
+        field_obj = getattr(state, field_name)
+        if hasattr(field_obj, 'data'):
+            restart[field_name] = np.asarray(field_obj.data)
+
+    np.savez_compressed(output_dir / "restart.npz", **restart)
+    print(f"  Restart saved: {output_dir / 'restart.npz'} "
+          f"(step={step}, day={time_days:.1f})")
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -898,9 +980,11 @@ def _save_case_diagnostics(
         domain_extent=domain_extent, depth_values=level_values)
 
     if field_3d_key and level_values is not None:
+        _cs_cmap = "RdYlBu_r" if "T" in field_3d_key else "RdBu_r"
         _save_cross_sections(
             output_dir, case_name, snapshots, dt, field_3d_key,
-            coord_kind, lon_deg, lat_deg, level_values, level_label)
+            coord_kind, lon_deg, lat_deg, level_values, level_label,
+            cmap=_cs_cmap)
         _save_profiles(
             output_dir, case_name, snapshots, dt, field_3d_key,
             level_values, level_label)
