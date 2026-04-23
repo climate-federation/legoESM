@@ -39,6 +39,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.core.operators_voronoi import (
+    apvm_correction_3d,
     divergence_cell_3d,
     gradient_edge_3d,
     curl_vertex_3d,
@@ -214,6 +215,15 @@ def mpas_ocean_baroclinic_tendencies(
     q_relative = potential_vorticity_vertex_3d(
         u_3d, h_k, zero_f, mesh,
     )  # (nVertices, nlev); equals ζ/h_v
+
+    # APVM (Anticipated Potential Vorticity Method, Sadourny & Basdevant
+    # 1985; Ringler et al. 2010) upstream-biases q by dt_apvm/2 to damp
+    # the ζ-checkerboard null mode of the energy-conserving PV flux.
+    # Without it, a 2Δx vortex mode at vertices amplifies through
+    # nonlinear interactions (observed: τ ~ 1 d at U=0.2 m/s on 20 km).
+    if config.apvm_dt > 0.0:
+        q_relative = apvm_correction_3d(q_relative, u_3d, mesh, config.apvm_dt)
+
     if config.pv_scheme == "energy":
         pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_relative, mesh)
     else:

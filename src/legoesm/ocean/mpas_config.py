@@ -78,6 +78,10 @@ class MPASOceanConfig(NamedTuple):
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
     pv_scheme: str = "energy"
+    apvm_dt: float = 0.0  # APVM damping timescale [s]; set to baroclinic dt
+                          # to enable the Anticipated PV Method upstream
+                          # bias (damps ζ-checkerboard null mode of the
+                          # energy-conserving PV flux). 0 = disabled.
     use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
