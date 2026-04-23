@@ -455,3 +455,44 @@ Summary (from committed output): GC-distance to the nearest cube vertex ranges `
 **Deliverable.**  `scripts/diag_iter780_cb_error_location.py` + committed output.  No source-code change.  No new sentinel.  All 13 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  44th iter in iter-752-780 chain.  Observational-only location reporting with explicit scope-limits; does not distinguish candidates (a)/(c)/(d) but provides data for iter-781+ trajectory-vs-snapshot follow-up.
+
+### Iter-781 — Cosine bell peak-error trajectory at 0.1-day intervals (C36)
+
+Per iter-780's iter-781+ candidate "Trajectory diagnostic: measure the error location every ~0.1 day during the 1-day integration", iter-781 samples peak-error position + GC distance to nearest cube vertex + peak |err| amplitude every 0.1 days during a C36 1-day run.
+
+**Method** (`scripts/diag_iter781_cb_error_trajectory.py`; committed output at `diagnostics/iter781_output/iter781_cb_error_trajectory.txt`).  Same β=π/4, dt=1350s, C36 as iter-779/780.  11 samples at t = 0.0, 0.1, ..., 1.0 days.  Also reports the bell centre's GC-distance to nearest cube vertex (as a proxy for where the bell is in its trajectory).
+
+**Result** (selected rows; full 11-row trajectory in committed output):
+
+| t (d) | peak cell | GC to vertex | peak |err|  | bell centre GC to vertex |
+|-------|-----------|--------------|-------------|---------------------------|
+| 0.00  | (0, 0)    | 1.19°        | 0.00e+00    | 52.97°                    |
+| 0.10  | (17, 17)  | 52.97°       | 2.37e+01    | 52.97°                    |
+| 0.30  | (23, 20)  | 40.96°       | 5.28e+01    | 45.93°                    |
+| 0.50  | (20, 20)  | 45.93°       | 9.11e+01    | 39.02°                    |
+| 0.70  | (26, 24)  | 29.24°       | 1.22e+02    | 32.33°                    |
+| 1.00  | (29, 27)  | 20.09°       | 1.77e+02    | 25.93°                    |
+
+**Observation.**  Peak |err| grows approximately monotonically from 0 at t=0 to ~177 at t=1.0 (rate ~18 per 0.1 day).  No sharp spike at any single sample point.  Peak-error cell moves steadily across face 3 as the bell advects.  The bell CENTRE's GC-to-vertex also decreases monotonically from 52.97° to 25.93°.
+
+**Scope limit — the bell does NOT pass over any cube vertex in this 1-day run.**  The bell centre's GC-to-vertex remains > 25° throughout.  A cube-vertex-crossing event would require GC-distance ~2-3° transiently, which this 1-day trajectory does not contain.  Therefore iter-781 does NOT directly test candidate (c) ("cube-vertex-localized error set by face count") at a cube-crossing event — the bell never crosses one in this window.
+
+**What iter-781 DOES show.**
+- 11 sample points of peak-error location and amplitude during a 1-day cosine bell trajectory at C36.
+- Peak |err| grows smoothly without visible spikes.
+- Bell centre approaches but does not cross any cube vertex.
+
+**What iter-781 does NOT establish.**
+- Candidate (c) cannot be directly tested here because no cube-vertex-crossing occurs in 1 day.
+- Longer horizons (3-12 days, including multiple cube crossings) are needed to see whether peak |err| spikes at crossings.
+- A smooth growth curve is consistent with multiple mechanisms including (a), (d), or (c)-that-simply-doesn't-fire-in-this-window.
+
+**Iter-782+ candidates.**
+- Extend the trajectory to 3 days (bell rotates 90° of its 12-day period — crosses at least 1 cube vertex if β=π/4 passes over (45°, 35°)).
+- 12-day trajectory sampled every 0.5 day (would catch all cube crossings in a full revolution).
+- Audit `_d2a2c_vect` non-duogrid cube-vertex gap (still unaudited from iter-776b).
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter781_cb_error_trajectory.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  45th iter in iter-752-781 chain.  Observational-only trajectory report.  Notes explicit scope-limit: the 1-day window doesn't include a cube-vertex crossing, so candidate (c) remains untested by iter-781.

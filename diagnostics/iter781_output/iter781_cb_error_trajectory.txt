@@ -1,0 +1,28 @@
+Iter-781 cosine bell error trajectory at C36, dt=1350.0s
+β=π/4, 1 day, sampled every 0.1 days
+
+  t (d)  face      (i, j)      lat       lon   GC-to-vertex    peak|err|   bell_pos_GC
+-------------------------------------------------------------------------------------
+   0.00    0  ( 0, 0)  -34.66°   -43.75°         1.19°    0.000e+00       52.97°
+   0.10    3  (17,17)   -1.25°   -91.25°        52.97°    2.365e+01       52.97°
+   0.20    3  (18,18)    1.25°   -88.75°        52.97°    4.107e+01       49.44°
+   0.30    3  (23,20)    6.07°   -76.25°        40.96°    5.280e+01       45.93°
+   0.40    3  (19,19)    3.74°   -86.25°        49.44°    7.591e+01       42.46°
+   0.50    3  (20,20)    6.21°   -83.75°        45.93°    9.107e+01       39.02°
+   0.60    3  (26,23)   12.85°   -68.75°        31.02°    1.048e+02       35.65°
+   0.70    3  (26,24)   15.20°   -68.75°        29.24°    1.220e+02       32.33°
+   0.80    3  (27,25)   17.26°   -66.25°        26.10°    1.407e+02       32.33°
+   0.90    3  (28,26)   19.23°   -63.75°        23.05°    1.591e+02       29.09°
+   1.00    3  (29,27)   21.10°   -61.25°        20.09°    1.769e+02       25.93°
+
+Interpretation cues (observational only):
+- Trends in 'GC-to-vertex' column show whether peak error
+  position tracks cube vertices over time.
+- Trends in 'peak|err|' column show growth rate: spikes at
+  cube crossings would support candidate (c); approximately
+  monotone growth suggests (a) or (d).
+- 'bell_pos_GC' = GC distance of the bell CENTRE (taken from
+  the exact solution's peak) to the nearest cube vertex.
+  When this is small, the bell is passing over a cube vertex.
+Iter-781 is observational only; the report makes no mechanism
+claim beyond the measured numbers.
