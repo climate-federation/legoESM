@@ -136,17 +136,92 @@ def _zonal_mean(T_3d: np.ndarray, land_mask: np.ndarray) -> np.ndarray:
 
 
 def _volume_scalars(T_3d, volume, land_mask):
-    """Volume-weighted <T>, <T^2>, Var(T), T_min, T_max per snapshot."""
-    w = volume * land_mask[..., None]  # (nt, nx, ny, nz)
-    W = w.sum(axis=(1, 2, 3))
-    Tw = (T_3d * w).sum(axis=(1, 2, 3)) / W
-    T2w = (T_3d**2 * w).sum(axis=(1, 2, 3)) / W
+    """Volume-weighted <T>, <T^2>, Var(T), T_min, T_max per snapshot.
+
+    Handles both 4-D lat-lon snapshots (nt, nlat+2, nlon, nlev) and
+    3-D MPAS snapshots (nt, nCells, nlev) by summing over all spatial
+    axes regardless of rank.
+    """
+    w = volume * land_mask[..., None]  # broadcasts to T_3d's shape
+    spatial = tuple(range(1, T_3d.ndim))
+    W = w.sum(axis=spatial)
+    Tw = (T_3d * w).sum(axis=spatial) / W
+    T2w = (T_3d**2 * w).sum(axis=spatial) / W
     var = T2w - Tw**2
-    # Min/max over ocean cells only
     T_masked = np.where(land_mask[..., None] > 0, T_3d, np.nan)
-    Tmin = np.nanmin(T_masked, axis=(1, 2, 3))
-    Tmax = np.nanmax(T_masked, axis=(1, 2, 3))
+    Tmin = np.nanmin(T_masked, axis=spatial)
+    Tmax = np.nanmax(T_masked, axis=spatial)
     return dict(mean=Tw, meansq=T2w, var=var, Tmin=Tmin, Tmax=Tmax, V_total=W)
+
+
+def _mpas_cell_volumes(run_dir: Path, T_3d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return (cell volumes, lat of each cell) for an MPAS snapshot.
+
+    Rebuilds the Voronoi mesh from EadyUniformConfig + the resolution
+    encoded in the run directory path (e.g. ``.../100km/<tag>``) to
+    recover ``areaCell`` and ``latCell``. Volume = areaCell × dz_ref.
+    """
+    # Resolution string is the directory TWO LEVELS up from the tag
+    # (e.g. .../mpas_channel/100km/<tag>)
+    res_str = run_dir.parent.name  # "100km"
+    if not res_str.endswith("km"):
+        raise ValueError(
+            f"Cannot infer MPAS resolution from {run_dir} (expected …/<N>km/<tag>)"
+        )
+    resolution_km = int(res_str.replace("km", ""))
+
+    # JAX-free reconstruction using the same function the runner uses
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    from legoesm.grids.voronoi import create_regional_voronoi_mesh
+
+    cfg = EadyUniformConfig()
+    mesh = create_regional_voronoi_mesh(
+        (0, 360), (cfg.lat_south, cfg.lat_north),
+        resolution_km=resolution_km, periodic_x=True,
+    )
+    area = np.asarray(mesh.areaCell, dtype=np.float64)  # (nCells,)
+    lat = np.degrees(np.asarray(mesh.latCell, dtype=np.float64))  # (nCells,)
+
+    nt, nCells, nlev = T_3d.shape
+    assert nCells == len(area), (
+        f"MPAS mesh has {len(area)} cells but snapshot has {nCells}"
+    )
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=cfg.H_max)
+    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
+    volume = area[:, None] * dz[None, :]  # (nCells, nlev)
+    return volume, lat
+
+
+def _mpas_zonal_bands(
+    T_3d: np.ndarray, land_mask: np.ndarray, lat_cell: np.ndarray,
+    cfg: EadyUniformConfig, n_bands: int = 50,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bin MPAS cells into latitude bands and average T per band.
+
+    Returns (T_banded, lat_band_centers) where T_banded has shape
+    (nt, n_bands, nlev). Cells outside [lat_south, lat_north] or with
+    land_mask==0 are excluded.
+    """
+    band_edges = np.linspace(cfg.lat_south, cfg.lat_north, n_bands + 1)
+    band_centers = 0.5 * (band_edges[:-1] + band_edges[1:])
+    # Assign each cell to a band (or -1 if outside)
+    band_idx = np.digitize(lat_cell, band_edges) - 1
+    valid = (band_idx >= 0) & (band_idx < n_bands)
+
+    nt, nCells, nlev = T_3d.shape
+    T_banded = np.full((nt, n_bands, nlev), np.nan, dtype=np.float64)
+    for b in range(n_bands):
+        in_band = valid & (band_idx == b)
+        if not np.any(in_band):
+            continue
+        cells_in = np.where(in_band)[0]
+        for t in range(nt):
+            w = land_mask[t, cells_in]  # (cells,)
+            T_cells = T_3d[t, cells_in, :]  # (cells, nlev)
+            ww = w > 0
+            if ww.any():
+                T_banded[t, b, :] = T_cells[ww].mean(axis=0)
+    return T_banded, band_centers
 
 
 def process(run_dir: Path) -> dict:
@@ -155,30 +230,46 @@ def process(run_dir: Path) -> dict:
     land_mask = np.asarray(snaps["land_mask"], dtype=np.float64)
     times = np.asarray(snaps["times_days"], dtype=np.float64)
 
-    # Native snapshot layout is (nt, nlat+2 walls, nlon periodic, nlev)
-    nt, nlat_padded, nlon, nlev = T_3d.shape
-    nlat = nlat_padded - 2
-
     cfg = EadyUniformConfig()
-    volume = _cell_volumes(cfg, nlat=nlat, nlon=nlon, nlev=nlev)
+
+    # Grid type: MPAS snapshots are 3D (nt, nCells, nlev) whereas
+    # lat-lon snapshots are 4D (nt, nlat+2, nlon, nlev).
+    is_mpas = T_3d.ndim == 3
+    if is_mpas:
+        nt, nCells, nlev = T_3d.shape
+        cell_vol_2d, lat_cell = _mpas_cell_volumes(run_dir, T_3d)
+        # Reshape to match (T_3d.shape) broadcast convention used by
+        # _compute_histogram: we pass a (nCells, nlev) volume array and a
+        # (nt, nCells) land_mask.
+        volume = cell_vol_2d  # (nCells, nlev)
+    else:
+        nt, nlat_padded, nlon, nlev = T_3d.shape
+        nlat = nlat_padded - 2
+        volume = _cell_volumes(cfg, nlat=nlat, nlon=nlon, nlev=nlev)
 
     # Auto-bin from initial snapshot
     edges = _auto_bins(T_3d[0], volume * land_mask[0][..., None])
     H = _compute_histogram(T_3d, volume, land_mask, edges)
 
     scalars = _volume_scalars(T_3d, volume, land_mask)
-    T_zm = _zonal_mean(T_3d, land_mask)  # (nt, nlat+2, nlev)
 
-    # Full lat axis including wall cells (matches T_zm's leading spatial dim)
-    lat_interior = cfg.lat_south + (np.arange(nlat) + 0.5) * (
-        (cfg.lat_north - cfg.lat_south) / nlat
-    )
-    dlat_deg = (cfg.lat_north - cfg.lat_south) / nlat
-    lat_centers = np.concatenate([
-        [cfg.lat_south - 0.5 * dlat_deg],
-        lat_interior,
-        [cfg.lat_north + 0.5 * dlat_deg],
-    ])
+    if is_mpas:
+        # Use 50 latitude bands for the zonal-mean cross-section equivalent
+        T_zm, lat_centers = _mpas_zonal_bands(
+            T_3d, land_mask, lat_cell, cfg, n_bands=50,
+        )
+    else:
+        T_zm = _zonal_mean(T_3d, land_mask)  # (nt, nlat+2, nlev)
+        # Full lat axis including wall cells (matches T_zm's leading spatial dim)
+        lat_interior = cfg.lat_south + (np.arange(nlat) + 0.5) * (
+            (cfg.lat_north - cfg.lat_south) / nlat
+        )
+        dlat_deg = (cfg.lat_north - cfg.lat_south) / nlat
+        lat_centers = np.concatenate([
+            [cfg.lat_south - 0.5 * dlat_deg],
+            lat_interior,
+            [cfg.lat_north + 0.5 * dlat_deg],
+        ])
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=cfg.H_max)
     depth = -np.asarray(z_coord.z_full_ref, dtype=np.float64)
 
