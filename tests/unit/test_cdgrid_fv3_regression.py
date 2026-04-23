@@ -5002,6 +5002,45 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
             "What it does NOT establish", text,
             msg="iter-780 DOES-NOT-establish block missing")
 
+        # Iter-780c tighter pins on the summary-block numbers.
+        # Expected from the committed output (see
+        # diagnostics/iter780_output/iter780_cb_error_location.txt).
+        summary_pins = [
+            (r"GC-distance to nearest cube vertex\s*:\s*"
+             r"min=([\d.]+)°, max=([\d.]+)°, span=([\d.]+)°",
+             (11.87, 24.48, 12.62), "GC-to-vertex summary"),
+            (r"cell-distance to face edge\s*:\s*"
+             r"min=(\d+), max=(\d+)",
+             (3, 5), "cell-to-edge summary"),
+            (r"peak \|err\|\s*:\s*"
+             r"min=([\d.eE+-]+), max=([\d.eE+-]+)",
+             (1.151e+02, 1.675e+02), "peak |err| summary"),
+        ]
+        for pattern, expected, label in summary_pins:
+            m = re.search(pattern, text)
+            self.assertIsNotNone(
+                m, msg=f"iter-780 {label} not found in committed output")
+            for i, exp in enumerate(expected):
+                val_s = m.group(i + 1)
+                val = float(val_s) if "." in val_s or "e" in val_s.lower() else int(val_s)
+                if isinstance(exp, float):
+                    rel = abs(val - exp) / exp
+                    self.assertLess(
+                        rel, 0.01,
+                        msg=(f"iter-780 {label} value {i+1}={val} vs "
+                             f"expected {exp}, rel {rel:.2%}"))
+                else:
+                    self.assertEqual(
+                        val, exp,
+                        msg=(f"iter-780 {label} value {i+1}={val} vs "
+                             f"expected {exp}"))
+
+        # Lock the header row too so column shuffles fire.
+        self.assertIn(
+            "n  face      (i, j)      lat       lon    GC to vertex  "
+            "cell to edge   peak|err|", text,
+            msg="iter-780 header line shape changed")
+
     def test_iter778_779_cb_convergence_artifacts(self):
         """Iter-779b sentinel (Codex): verify the committed iter-778
         and iter-779 cosine bell convergence output files contain
