@@ -460,39 +460,46 @@ Summary (from committed output): GC-distance to the nearest cube vertex ranges `
 
 Per iter-780's iter-781+ candidate "Trajectory diagnostic: measure the error location every ~0.1 day during the 1-day integration", iter-781 samples peak-error position + GC distance to nearest cube vertex + peak |err| amplitude every 0.1 days during a C36 1-day run.
 
-**Method** (`scripts/diag_iter781_cb_error_trajectory.py`; committed output at `diagnostics/iter781_output/iter781_cb_error_trajectory.txt`).  Same β=π/4, dt=1350s, C36 as iter-779/780.  11 samples at t = 0.0, 0.1, ..., 1.0 days.  Also reports the bell centre's GC-distance to nearest cube vertex (as a proxy for where the bell is in its trajectory).
+**Method** (`scripts/diag_iter781_cb_error_trajectory.py`; committed output at `diagnostics/iter781_output/iter781_cb_error_trajectory.txt`).  Same β=π/4 and C36 as iter-779/780.  **dt=1440s** (changed from iter-780's 1350s) so that each 0.1-day sample is exactly 6 timesteps of 1440s = 8640s = 0.1 day; an integer-step assertion in the script guarantees this alignment.  The earlier iter-781a draft used dt=1350s, which advances 6×1350s = 8100s = 0.0938 day per "0.1 day" label — Codex flagged the time misalignment and the pre-alignment numbers were retracted before the committed output was written.  11 samples at t = 0.00, 0.10, ..., 1.00 days.  Also reports the bell centre's GC-distance to nearest cube vertex (taken from the argmax of the exact solution on the grid) as a proxy for where the bell is in its trajectory.
 
-**Result** (selected rows; full 11-row trajectory in committed output):
+**Result** (full 11-row trajectory; committed output `diagnostics/iter781_output/iter781_cb_error_trajectory.txt`):
 
-| t (d) | peak cell | GC to vertex | peak |err|  | bell centre GC to vertex |
-|-------|-----------|--------------|-------------|---------------------------|
-| 0.00  | (0, 0)    | 1.19°        | 0.00e+00    | 52.97°                    |
-| 0.10  | (17, 17)  | 52.97°       | 2.37e+01    | 52.97°                    |
-| 0.30  | (23, 20)  | 40.96°       | 5.28e+01    | 45.93°                    |
-| 0.50  | (20, 20)  | 45.93°       | 9.11e+01    | 39.02°                    |
-| 0.70  | (26, 24)  | 29.24°       | 1.22e+02    | 32.33°                    |
-| 1.00  | (29, 27)  | 20.09°       | 1.77e+02    | 25.93°                    |
+| t (d) | peak cell | GC to vertex | peak \|err\| | bell centre GC to vertex |
+|-------|-----------|--------------|--------------|---------------------------|
+| 0.00  | face 0 (0, 0)   |  1.19°  | 0.000e+00 | 52.97° |
+| 0.10  | face 3 (17, 17) | 52.97°  | 1.208e+01 | 52.97° |
+| 0.20  | face 3 (18, 18) | 52.97°  | 2.286e+01 | 49.44° |
+| 0.30  | face 3 (20, 20) | 45.93°  | 2.747e+01 | 45.93° |
+| 0.40  | face 3 (21, 21) | 42.46°  | 3.721e+01 | 42.46° |
+| 0.50  | face 3 (22, 22) | 39.02°  | 4.472e+01 | 39.02° |
+| 0.60  | face 3 (23, 23) | 35.65°  | 5.186e+01 | 35.65° |
+| 0.70  | face 3 (24, 24) | 32.33°  | 5.976e+01 | 32.33° |
+| 0.80  | face 3 (27, 30) | 18.99°  | 7.453e+01 | 32.33° |
+| 0.90  | face 3 (29, 31) | 14.49°  | 9.478e+01 | 29.09° |
+| 1.00  | face 3 (30, 32) | 11.87°  | 1.213e+02 | 25.93° |
 
-**Observation.**  Peak |err| grows approximately monotonically from 0 at t=0 to ~177 at t=1.0 (rate ~18 per 0.1 day).  No sharp spike at any single sample point.  Peak-error cell moves steadily across face 3 as the bell advects.  The bell CENTRE's GC-to-vertex also decreases monotonically from 52.97° to 25.93°.
+**Observation — numerical reportage only.**  Peak |err| grows monotonically from 0 at t=0 to 121.3 at t=1.0.  Step-to-step increments (t=0.1→1.0): 10.78, 4.61, 9.74, 7.51, 7.14, 7.90, 14.77, 20.25, 26.52 — the increment rises through the second half of the day (14.8 at t=0.7→0.8, 20.3 at t=0.8→0.9, 26.5 at t=0.9→1.0).  No sharp spike at a single sample point.  For t ≤ 0.7 the peak-error cell and the bell centre are at the same face-local (i, j) and same GC-to-vertex; for t ≥ 0.8 the peak-error cell is closer to the nearest cube vertex than the bell centre is (e.g. t=1.0: peak at 11.87°, bell centre at 25.93°).
 
-**Scope limit — the bell does NOT pass over any cube vertex in this 1-day run.**  The bell centre's GC-to-vertex remains > 25° throughout.  A cube-vertex-crossing event would require GC-distance ~2-3° transiently, which this 1-day trajectory does not contain.  Therefore iter-781 does NOT directly test candidate (c) ("cube-vertex-localized error set by face count") at a cube-crossing event — the bell never crosses one in this window.
+**Scope limit — the bell does NOT pass over any cube vertex in this 1-day run.**  The bell centre's GC-to-vertex remains ≥ 25.93° throughout (minimum at t=1.0).  A cube-vertex-crossing event would require GC-distance ~2–3° transiently, which this 1-day trajectory does not contain.  Therefore iter-781 does NOT directly test candidate (c) ("cube-vertex-localized error set by face count") at a cube-crossing event — the bell never crosses one in this window.
 
 **What iter-781 DOES show.**
-- 11 sample points of peak-error location and amplitude during a 1-day cosine bell trajectory at C36.
-- Peak |err| grows smoothly without visible spikes.
-- Bell centre approaches but does not cross any cube vertex.
+- 11 time-aligned sample points of peak-error location and amplitude during a 1-day cosine bell trajectory at C36.
+- Peak |err| grows smoothly without visible spikes across all 10 step-to-step increments.
+- Bell centre approaches a cube vertex (from 52.97° to 25.93°) but does not cross one.
+- For t ≥ 0.8 the peak-error cell is closer to the nearest cube vertex than the bell centre (peak-cell "leads" bell-centre toward the vertex).
 
 **What iter-781 does NOT establish.**
 - Candidate (c) cannot be directly tested here because no cube-vertex-crossing occurs in 1 day.
-- Longer horizons (3-12 days, including multiple cube crossings) are needed to see whether peak |err| spikes at crossings.
+- Longer horizons (3–12 days, including multiple cube crossings) are needed to see whether peak |err| spikes at crossings.
 - A smooth growth curve is consistent with multiple mechanisms including (a), (d), or (c)-that-simply-doesn't-fire-in-this-window.
+- The "peak-cell leads bell-centre toward the vertex" pattern seen for t ≥ 0.8 is a single-trajectory observation; it does not by itself attribute the leading offset to any specific mechanism and it does not persist backwards in time (t ≤ 0.7 has peak and bell at the same cell).
 
 **Iter-782+ candidates.**
-- Extend the trajectory to 3 days (bell rotates 90° of its 12-day period — crosses at least 1 cube vertex if β=π/4 passes over (45°, 35°)).
+- Extend the trajectory to 3 days (bell rotates 90° of its 12-day period — may cross a cube vertex if β=π/4 path passes near (45°, ±35.26°)).
 - 12-day trajectory sampled every 0.5 day (would catch all cube crossings in a full revolution).
 - Audit `_d2a2c_vect` non-duogrid cube-vertex gap (still unaudited from iter-776b).
 - Port Fortran FB transport chain (blocked on ng=3).
 
 **Deliverable.**  `scripts/diag_iter781_cb_error_trajectory.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
-**Process.**  45th iter in iter-752-781 chain.  Observational-only trajectory report.  Notes explicit scope-limit: the 1-day window doesn't include a cube-vertex crossing, so candidate (c) remains untested by iter-781.
+**Process.**  45th iter in iter-752-781 chain.  Observational-only trajectory report.  dt was changed from 1350s (iter-779/780) to 1440s specifically so that 0.1-day sample labels correspond to an integer number of dt steps; a script-level assertion prevents future drift.  Explicit scope-limit: the 1-day window doesn't include a cube-vertex crossing, so candidate (c) remains untested by iter-781.

@@ -71,9 +71,15 @@ def _gc_dist_to_nearest_cube_vertex_deg(lat_deg, lon_deg):
 
 
 n = 36
-dt = 1350.0
+# iter-781b: choose dt so that sample_every (0.1 day = 8640s) is
+# an integer multiple of dt.  Previous iter-781 had dt=1350s which
+# gave 6 steps × 1350s = 8100s per "0.1 day" label — the
+# reported times were 6.25% SHORTER than labeled.  Codex caught
+# this as time-misalignment.  Fix: dt=1440s so that 6*1440=8640s
+# exactly equals 0.1 day.
+dt = 1440.0
 days = 1.0
-sample_every = 0.1  # days
+sample_every = 0.1  # days — now exactly 6 dt steps
 beta = jnp.pi / 4.0
 grid = create_cubed_sphere(n)
 cfg = CDGridShallowWaterConfig(
@@ -99,7 +105,13 @@ print(f"{'t (d)':>7}  {'face':>4}  {'(i, j)':>10}  {'lat':>7}  {'lon':>8}  "
 print("-" * 85)
 
 h = state.h
-steps_per_sample = int(round(sample_every * 86400 / dt))
+# iter-781b: use EXACT integer step count and assert alignment.
+_raw = sample_every * 86400 / dt
+steps_per_sample = int(round(_raw))
+assert abs(_raw - steps_per_sample) < 1e-9, (
+    f"sample_every={sample_every} day and dt={dt} s do not "
+    f"produce an integer steps_per_sample (got {_raw}).  "
+    f"Adjust dt so sample_every*86400 is an integer multiple.")
 total_samples = int(days / sample_every) + 1
 
 for sample_idx in range(total_samples):
