@@ -1877,3 +1877,45 @@ The halo fix made the DUOGRID Path B dh/dt error 16 % WORSE at cube vertices.  N
 **Deliverable.**  Updated `scripts/diag_iter841_transport_paths.py` (added LEGACY + DUOGRID side-by-side).  No production source-code change (fix was REVERTED).  All 14 W2 sentinels pass.  Doc entry documents the negative result; the Fortran oracle gap is characterised but remains a HYPOTHESIS that `ext_vector` CGRID semantics are specifically required.
 
 **Process.**  102nd iter in iter-752-842 chain.  Attempted the iter-841b (a) halo fix using the iter-836b pattern; reverted after measuring a 16 % DUOGRID Path B regression.  Genuine scientific learning: the iter-836b pattern is NOT a universal Fortran-fidelity fix for all halo-same-face bugs.  Whether `ext_vector` CGRID semantics are specifically required (or some other approach would work) remains a HYPOTHESIS, not established by iter-842.  Continues the pattern of iter-839, iter-841 ruling out drop-in fixes via direct test — 3 ruled out now.
+
+### Iter-843 — Part 1: relabel iter-842 diag (reverted fix).  Part 2: `fv3_cc2c` covariant halo fix RULED OUT
+
+**Part 1** (stop-hook cleanup).  iter-842c left `scripts/diag_iter841_transport_paths.py` with a stale label "DUOGRID variant (exercises iter-842 `_d_sw1_recompute_ut_vt` halo fix)".  That iter-842 fix was REVERTED; the diag now runs production (`mode='edge'`) code in the duogrid branch.  iter-843 relabels to "DUOGRID variant (production mode='edge' halo; iter-842 halo fix was REVERTED after a +16 % regression)" and adds a matching inline docstring comment at `_run_w2` (line 88-93).
+
+**Part 2** (new fidelity audit, rules out a drop-in).  Per iter-842c's iter-843+ candidate to audit the A-L production path, iter-843 tested a fix in `fv3_cc2c` at `src/legoesm/core/operators_cdgrid.py:1460-1465`.  Hypothesis: `u_cc`/`v_cc` are COVARIANT cell-centre winds (averages of covariant D-grid u_d/v_d), so the `pad_halo_vector` call should activate its covariant branch (analogous to iter-837's fix for `_corner_vorticity`) by passing `cos_theta=cdgrid.cosa_cell`, `sin_theta=cdgrid.sina_cell`.
+
+**Method.**  Applied the 2-line change and ran `TestW2BoundaryErrorBudget` (14 sentinels).
+
+**Result — HYPOTHESIS RULED OUT.**
+
+| test                                                | baseline      | iter-843 fv3_cc2c covariant halo |
+|-----------------------------------------------------|--------------:|--------------------------------:|
+| `test_boundary_fix_is_load_bearing_for_w2_l2`       | ratio ~0.525  | **1.023** (FAILS, cap 0.7)       |
+| W2 C36 1d L2 (boundary_fix=True)                    | ~2.18e−4      | **2.687e−02** (122× regression)  |
+
+The covariant branch of `pad_halo_vector` in `fv3_cc2c` blows up W2 LEGACY L2 by 122×.  Reverted immediately; all 14 sentinels pass after revert.
+
+**Interpretation.**
+- `fv3_cc2c`'s ORTHOGONAL rotation (current code) is load-bearing for W2 LEGACY.  Swapping it to the covariant branch — even with the correct cell-centre non-orthogonality metrics — catastrophically regresses.
+- Combined with iter-839 (symmetric v_c: 220× regression) and iter-841/842 (ut/vt swap + halo pattern port: both worse), this is the FOURTH ruled-out drop-in fidelity fix on this pipeline.
+- The production A-L path is NOT a naive straight port of FV3 Fortran.  Its current `fv3_cc2c` + `cgrid_mass_flux_divergence` + `_arakawa_lamb_gradient` convention mix implicitly tunes the pipeline to produce the 2.18e−4 L2 — ANY single-point "Fortran-faithful" fix (symmetric projection, covariant halo, ut/vt transport swap) breaks this tuning.
+
+**Mechanism hypothesis (not established by iter-843).**  `fv3_cc2c`'s output `u_c` has face-normal projection `u_avg · sina_u − v_at_u · cosa_u` that implicitly mixes CURRENT halo values (orthogonal) with the face-normal geometry.  Activating the covariant halo branch provides HALO values with DIFFERENT rotation semantics than what the face-normal projection downstream expects.  A proper fix would require both: (a) covariant halo AND (b) consistent downstream operators.  Neither is a single-iter change.
+
+**What iter-843 DOES show.**
+- The `fv3_cc2c` orthogonal rotation is not a pure bug — it's load-bearing, even if non-fidelity-faithful in an absolute sense.
+- Four drop-in fidelity candidates ruled out: iter-839 symmetric v_c, iter-841 ut/vt swap, iter-842 iter-836b pattern port to `_d_sw1_recompute_ut_vt`, iter-843 covariant halo in `fv3_cc2c`.
+- The A-L production pipeline is an INTEGRATED system whose convention mix is internally consistent but not a straight Fortran port.
+
+**What iter-843 does NOT establish.**
+- Whether a COMBINED fix (covariant halo + consistent downstream operators) would work.
+- Where exactly in the pipeline the iter-793/796 cube-vertex cancellation residual breaks — the iter-841 observations of the production path's dh/dt mid-face peak and the iter-820 v_ll stripe pattern suggest the issue is in the momentum/Bernoulli computation, not the mass transport.
+
+**Iter-844+ candidates.**
+- Audit `_arakawa_lamb_gradient` for halo/corner handling bugs (iter-765/766 tested Fortran corner fills and all worsened W2, but a pad_halo_vector call inside may have a different issue).
+- Direct t=0 dv/dt measurement at cube vertices on the A-L production path to characterise the mode-A mechanism more precisely than iter-793/796 did (with current iter-808 sign-flip sync in place).
+- Multi-iter: full `c_sw`+`d_sw1` port as an alternative production path, with consistent conventions.
+
+**Deliverable.**  `scripts/diag_iter841_transport_paths.py` relabel (removed stale iter-842 language).  No production source-code change in iter-843 (Part 2 fix was REVERTED).  All 14 W2 sentinels pass.
+
+**Process.**  103rd iter in iter-752-843 chain.  Part 1: cleanup of iter-842c's stale diag label per Codex stop-time review.  Part 2: tested and ruled out the "covariant halo in `fv3_cc2c`" Fortran-fidelity drop-in (122× W2 L2 regression).  FOURTH drop-in fidelity fix ruled out in 5 iters; convergent evidence that the W2 LEGACY production pipeline is a tuned system whose single-point changes catastrophically regress.  Architectural fixes (multi-iter) remain the only established path forward.

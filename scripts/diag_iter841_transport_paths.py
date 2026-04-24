@@ -85,9 +85,12 @@ def _peak_with_location(arr, cdgrid):
 
 def main(n=36, dt=300.0, use_duogrid=False):
     # iter-761 canonical config (matches W2 LEGACY sentinel when
-    # use_duogrid=False).  iter-842 adds duogrid toggle to exercise
-    # `_d_sw1_recompute_ut_vt`'s duogrid branch where iter-842's halo
-    # fix is wired.
+    # use_duogrid=False).  iter-842 added the duogrid toggle to
+    # exercise `_d_sw1_recompute_ut_vt`'s duogrid branch.  iter-842's
+    # halo fix was REVERTED (it regressed DUOGRID Path B by 16 %), so
+    # the duogrid branch here runs with the production `mode='edge'`
+    # halo.  The toggle is retained because it was useful for
+    # measuring the revert impact; iter-843 relabels accordingly.
     grid = create_cubed_sphere(n=n, use_duogrid=use_duogrid)
     div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
     cfg = CDGridShallowWaterConfig(
@@ -177,7 +180,7 @@ if __name__ == "__main__":
     main(use_duogrid=False)
     print()
     print("=" * 72)
-    print("DUOGRID variant (exercises iter-842 `_d_sw1_recompute_ut_vt` "
-          "halo fix)")
+    print("DUOGRID variant (production mode='edge' halo; iter-842 halo "
+          "fix was REVERTED after a +16 % regression)")
     print("=" * 72)
     main(use_duogrid=True)
