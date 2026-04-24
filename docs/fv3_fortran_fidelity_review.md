@@ -1328,3 +1328,57 @@ DUOGRID h_pad peak at polar cube corner (face 4, padded (0,0)) = **2469.24 m** �
 **Deliverable.**  `scripts/diag_iter801_duogrid_h_pad_inspection.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  65th iter in iter-752-801 chain.  Localises the DUOGRID t=0 W2 blowup to `fill_corner_region`'s Lagrange extrapolation overshooting by up to 84 m (144 m above interior max at polar cube corners).  The fix path is a monotonicity clip, which is a targeted source change with a clear diagnostic test (re-run iter-800 and iter-787 after the fix).
+
+### Iter-802 — Monotonicity clip attempt on `fill_corner_region`: dh/dt UNCHANGED
+
+Per iter-801's iter-802+ candidate, iter-802 adds an opt-in `monotone_clip=True` parameter to `fill_corner_region` (`src/legoesm/grids/duogrid.py:868`) and tests whether the DUOGRID dh/dt blowup drops.
+
+**Source change.**  Added `monotone_clip: bool = False` parameter to `fill_corner_region`.  When True, each Lagrange-extrapolated cube-corner cell is clipped to `[min, max]` of its 4 padded-array neighbours (i_p±1, j_p) and (i_p, j_p±1).  Default False preserves FV3-faithful behaviour.
+
+**Test** (`scripts/diag_iter802_duogrid_monotone_clip.py`; committed output at `diagnostics/iter802_output/iter802_duogrid_monotone_clip.txt`).  Monkey-patch `duogrid.fill_corner_region` to force `monotone_clip=True`.  Run iter-799's t=0 tendency audit on C36 W2.
+
+**Result.**
+
+| variant                     | dh/dt peak   | du/dt peak   | dv/dt peak   |
+|-----------------------------|--------------|--------------|--------------|
+| LEGACY (clip off)           | 1.329e−04    | 1.404e−05    | 1.903e−05    |
+| DUOGRID (clip off, baseline)| 1.557e−01    | 4.700e−05    | 8.446e−05    |
+| DUOGRID (clip ON)           | 1.557e−01    | 2.816e−05    | 4.857e−05    |
+
+- DUOGRID dh/dt: UNCHANGED (1.557e−1 → 1.557e−1).
+- DUOGRID du/dt: 40% reduction (4.7e−5 → 2.8e−5).
+- DUOGRID dv/dt: 42% reduction (8.4e−5 → 4.9e−5).
+
+**Observation — numerical reportage only.**  The monotone clip as implemented does NOT fix the DUOGRID dh/dt blowup.  It does partially reduce the du/dt and dv/dt peaks.  The dh/dt peak at face 2 (0, 0) is unchanged to 4 significant digits.
+
+**Root cause of clip ineffectiveness.**  The clip used neighbours `padded[i_p±1, j_p]` and `padded[i_p, j_p±1]` inside the 2×2 cube-corner block.  AT the extreme corner cell (e.g., face 4 padded [0, 0]), two of those neighbours are:
+- `padded[−1, 0]` → wrapped via `max(0, ...)` to `padded[0, 0]` (self-reference).
+- `padded[0, −1]` → wrapped to `padded[0, 0]` (self-reference).
+
+And the two valid neighbours `padded[1, 0]`, `padded[0, 1]` are ADJACENT cube-corner halo cells, which ALSO overshoot.  So the clip range is dominated by already-overshooting cells, and the clip becomes a no-op.
+
+A correctly-designed monotonicity clip must reference:
+- The nearest INTERIOR cell (at `[halo, halo]` for SW corner).
+- The edge-halo cells OUTSIDE the cube-corner 2×2 block (e.g. at row i=halo, or col j=halo for SW).
+
+iter-803 will re-implement the clip with a correct neighbour set.
+
+**What iter-802 DOES show.**
+- The implemented clip (using padded-array neighbours in the 2×2 corner block) is INEFFECTIVE for dh/dt because the clip range is dominated by adjacent cube-corner cells that also overshoot.
+- The clip DOES partially help du/dt and dv/dt (40–42% reduction) — those tendencies read from wider halo regions where the clip's effect on a subset of cube-corner cells matters.
+- The DUOGRID dh/dt blowup IS driven by cube-corner halo cells (confirmed by iter-800/801), but the specific clip neighbour set must exclude other cube-corner cells.
+
+**What iter-802 does NOT establish.**
+- Whether a correctly-implemented clip (using edge-halo or nearest-interior as the clip range) will fix dh/dt.
+- Whether a completely different fix (e.g. reverting `fill_corner_region` to `_fill_corner_region_averaging` at halo=2 specifically) would work.
+- Whether Fortran FV3 has a different mechanism for avoiding the overshoot issue entirely.
+
+**Iter-803+ candidates.**
+- Re-implement the clip using NEAREST INTERIOR cell as the reference (e.g. for SW corner at [0, 0], clip to `[padded[halo, halo], padded[halo, halo]]` or a small window around it).
+- Alternative: at halo=2 with duogrid active, bypass `fill_corner_region` and use `_fill_corner_region_averaging` (the legacy 2-pt-avg fallback already available).  Compare impact.
+- Audit Fortran d_sw PPM transport for how it handles cube-corner halo (does it skip corner cells, use a different fill, or apply a limiter?).
+- Port Fortran FB transport chain (blocked on ng=3 and FB-chain stability).
+
+**Deliverable.**  Source change in `src/legoesm/grids/duogrid.py` (added `monotone_clip` opt-in parameter, default False so existing callers are unchanged) + `scripts/diag_iter802_duogrid_monotone_clip.py` + committed output.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  66th iter in iter-752-802 chain.  First SOURCE-CODE CHANGE in this diagnostic chain — adds a backward-compatible `monotone_clip` parameter to `fill_corner_region`.  The implemented clip is INEFFECTIVE for dh/dt due to neighbour-set design flaw.  Next iter needs to redesign the clip or try an entirely different approach (averaging fallback).
