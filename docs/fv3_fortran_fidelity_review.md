@@ -1166,3 +1166,38 @@ Per iter-823's iter-824+ candidate, iter-824 generates W5 lat-lon plots (h_chang
 **Deliverable.**  `scripts/diag_iter824_w5_visual.py` + 3 new PNGs (`w5_h_production_latlon.png`, `w5_h_change_latlon.png`, `w5_vnorth_production_latlon.png`).  No source-code change.  No new sentinel.
 
 **Process.**  86th iter in iter-752-824 chain.  Completes Ralph-loop visual-inspection sweep across all 3 test cases.  Summary: cosine bell clean; W2 and W5 both show cube-vertex meridian artifacts consistent with iter-793/796 mechanism.  W5's artifacts are ~20 m (proportionally small vs 250 m mountain wave); W2's are the full LEGACY mode-A signature.
+
+### Iter-825 — Combined Fortran corner-fill knob re-test post iter-808: no improvement
+
+Per iter-824's structural conclusion, iter-825 re-tests all combinations of the two config-configurable Fortran corner-fill flags (`fortran_a2b_corner_avg`, `fortran_vector_corner_fill`) under LEGACY W2 C36 1-day, now that iter-808's sign-flip sync has landed.  iter-760-767 tested these individually and found each worsened W2; iter-825 checks if the post-iter-808 codebase changes that.
+
+**Method** (`scripts/diag_iter825_combined_fortran_fills.py`).  4 combinations of the 2 flags; iter-761 canonical base config otherwise.
+
+**Result.**
+
+| fortran_a2b | fortran_vec | L2        | v_ll_Linf | vs baseline |
+|-------------|-------------|-----------|-----------|-------------|
+| F           | F           | 2.176e−04 | 0.159 m/s | — (baseline) |
+| F           | T           | 2.226e−03 | **2.555 m/s** | 16× worse   |
+| T           | F           | 4.844e−04 | 0.300 m/s | 1.9× worse  |
+| T           | T           | 1.443e−03 | 2.370 m/s | 15× worse   |
+
+**Observation — numerical reportage only.**  Every non-baseline combination WORSENS W2.  The (a2b=F, vec=F) baseline remains optimal at 0.159 m/s.  This is consistent with iter-765-767 which tested the flags individually — the iter-808 sign-flip sync did not change their individual behaviour enough to overcome their correctness issues.
+
+(Note: `fortran_dir_aware_corners` was a third knob, but it's an internal `_arakawa_lamb_gradient` parameter not exposed in `CDGridShallowWaterConfig` — only measurable via direct code patching, which iter-765 already did and found catastrophic.)
+
+**What iter-825 DOES show.**
+- None of the 3 Fortran-inspired corner-fill flags (individually or in combination) improve W2 mode-A post iter-808.
+- The current LEGACY baseline (all knobs False, iter-761 canonical damping) remains the best tested config.
+
+**What iter-825 does NOT establish.**
+- Whether a new Fortran-faithful fix (beyond these 3 existing knobs) could help.
+- Whether these 3 knobs interact with DUOGRID differently (iter-808 enabled DUOGRID; these flags may have different semantics there).
+
+**Iter-826+ candidates.**
+- Accept 0.159 m/s LEGACY as the current floor without deeper work (iter-793/796 mechanism structural; iter-822 resolution-invariant).
+- Architectural fixes deferred: FB chain port, Fortran c_sw KE upwind construction, d_sw5 corner divergence damping.
+
+**Deliverable.**  `scripts/diag_iter825_combined_fortran_fills.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  87th iter in iter-752-825 chain.  Re-tests the known Fortran-corner-fill flags under the iter-808 fix.  All 4 non-baseline combinations still worsen W2; baseline optimum preserved.  This closes the "flags-alone can fix W2 mode-A" hypothesis.
