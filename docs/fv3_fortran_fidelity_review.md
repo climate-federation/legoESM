@@ -1127,3 +1127,42 @@ Per Ralph loop step 5 (visual inspection on all 3 tests), iter-823 generates cos
 **Deliverable.**  `scripts/diag_iter823_cb_visual.py` + 3 new PNGs in `diagnostics/fv3_visual/` (`cb_h_production_latlon.png`, `cb_h_exact_latlon.png`, `cb_h_err_latlon.png`).  No source-code change.  No new sentinel.
 
 **Process.**  85th iter in iter-752-823 chain.  Visual inspection confirms cosine bell's 121 m residual is a LOCALISED dispersion dipole at the bell's position — not a cube-sphere artifact.  Rest of the sphere is visually clean.  This should be re-classified: cosine bell does NOT have "cube-edge / corner / seam / halo / striping / ringing" artifacts per the Ralph-loop criterion.
+
+### Iter-824 — W5 visual at C36 day 3: mountain wave + faint cube-vertex ringing
+
+Per iter-823's iter-824+ candidate, iter-824 generates W5 lat-lon plots (h_change, v_north) at C36 day 3 LEGACY.
+
+**Method** (`scripts/diag_iter824_w5_visual.py`).  W5 mountain initial condition with u0=20 m/s solid-body + Gaussian mountain at (30°N, 90°W).  C36, dt=300s, 3 days, iter-761 canonical config.
+
+**Observations.**
+- **Dominant feature (physical)**: mountain-wave dipole around (lon −100° to −50°, lat 20° to 50°) with amplitude ±250 m.  Negative lee wave + positive windward wave — classic Rossby-wave pattern from the mountain.
+- **Faint cube-vertex features (numerical)**: small "checkerboard"/ringing pattern visible at cube-vertex meridians (|lon| ≈ 45°, 135°) between ±20° and ±45° lat, peak amplitude ~10–30 m.  Most visible as faint vertical stripes at −135° longitude.
+- **Small blobs at cube-vertex points** (±35° lat, ±135°/±45° lon): roughly 20-40 m amplitude, localised.
+- **Polar regions clean**.
+
+**Comparison of the three Ralph-loop test cases' visible cube-sphere artifacts.**
+
+| test       | Linf / L2       | cube-sphere artifacts?             |
+|------------|------------------|--------------------------------------|
+| cosine bell (iter-823)  | Linf ≈ 121 m     | NO — localised dispersion dipole only |
+| W2 LEGACY (iter-820)    | v_ll ≈ 0.159 m/s | YES — vertical stripes at 4 cube-vertex meridians, ±0.15 m/s |
+| W5 LEGACY (iter-824)    | Linf ≈ 250 m (physical mountain wave) + ~20 m artifacts | YES — faint ringing at cube-vertex meridians, ~20 m amplitude on top of 250 m physical signal |
+
+**Interpretation.**  Cosine bell passes the Ralph-loop "no visible artifacts" criterion.  W2 and W5 both have cube-vertex meridian artifacts (the iter-793/796 mechanism).  W5's artifacts are proportionally small (~8% of the mountain wave's 250 m); W2's are fundamental (no physical signal to compare against for solid-body v_north = 0 analytical).
+
+**What iter-824 DOES show.**
+- W5 C36 day 3 has a clean physical mountain-wave pattern.
+- W5 has faint cube-vertex meridian ringing at ~20 m amplitude superposed on the mountain wave.
+- Artifacts are similar in location to W2 (cube-vertex meridians, ±20° to ±45° lat).
+
+**What iter-824 does NOT establish.**
+- Whether W5 DUOGRID would show the same, similar 8-cube-vertex dipoles as W2 DUOGRID (iter-809 showed DUOGRID W5 metrics within 1% of LEGACY, suggesting similar).
+- Whether longer W5 integration amplifies the cube-vertex ringing.
+
+**Iter-825+ candidates.**
+- Accept cosine bell as visually clean, W2 and W5 as having structural cube-vertex artifacts (both consistent with iter-793/796 mechanism).
+- The path to "visually clean W2/W5" requires the structural fix: Fortran FB chain port, or c_sw-style cube-vertex-consistent cancellation.
+
+**Deliverable.**  `scripts/diag_iter824_w5_visual.py` + 3 new PNGs (`w5_h_production_latlon.png`, `w5_h_change_latlon.png`, `w5_vnorth_production_latlon.png`).  No source-code change.  No new sentinel.
+
+**Process.**  86th iter in iter-752-824 chain.  Completes Ralph-loop visual-inspection sweep across all 3 test cases.  Summary: cosine bell clean; W2 and W5 both show cube-vertex meridian artifacts consistent with iter-793/796 mechanism.  W5's artifacts are ~20 m (proportionally small vs 250 m mountain wave); W2's are the full LEGACY mode-A signature.
