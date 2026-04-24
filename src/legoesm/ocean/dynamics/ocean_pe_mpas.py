@@ -5,7 +5,7 @@ on MPAS Voronoi (C-grid) meshes. Uses the TRiSK discretization from
 Ringler et al. (2010).
 
 Equations (per layer k):
-    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) - w·du'/dz + A_h·del2(u) + A_v·d²u/dz²
+    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) - w·du'/dz + A_h·del2(u) + B_h·del4(u) - del2(A_smag·del2(u)) + A_v·d²u/dz²
     d(h·T)/dt = -div(h·u·T) + K_h·h·lap(T) + K_v·d²T/dz²
     d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) + K_v·d²S/dz²
     dη/dt = -Σ_k div(h_k · u_k)
@@ -39,6 +39,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.core.operators_voronoi import (
+    apvm_correction_3d,
     divergence_cell_3d,
     gradient_edge_3d,
     curl_vertex_3d,
@@ -46,7 +47,9 @@ from legoesm.core.operators_voronoi import (
     potential_vorticity_vertex_3d,
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
+    smagorinsky_biharmonic_3d,
     vector_laplacian_del2_3d,
+    vector_laplacian_del4_3d,
     vertex_thickness_3d,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
@@ -73,6 +76,7 @@ def mpas_ocean_baroclinic_tendencies(
     freshwater: FreshwaterForcing | None = None,
     physics_fn=None,
     surface_forcing=None,
+    sponge=None,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -84,6 +88,8 @@ def mpas_ocean_baroclinic_tendencies(
     config : MPASOceanConfig
     freshwater : FreshwaterForcing or None
         Freshwater forcing. If None, no freshwater terms are applied.
+    sponge : SpongeForcing, optional
+        Sponge layer relaxation fields.
 
     Returns
     -------
@@ -198,18 +204,41 @@ def mpas_ocean_baroclinic_tendencies(
     # Pressure gradient + Bernoulli
     grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
 
-    # PV flux: TOTAL PV = (f + ζ(u_total)) / h using the TRiSK helper.
-    # Restores Ringler et al. (2010) energy-conservation identity (#160).
-    q_total = potential_vorticity_vertex_3d(
-        u_3d, h_k, mesh.fVertex, mesh,
-    )  # (nVertices, nlev)
+    # PV flux: RELATIVE vorticity only, q = ζ(u)/h. Planetary Coriolis is
+    # applied separately (a) as online f·v_t(u_bar) in the barotropic
+    # substep and (b) as a forward-backward Matsuno correction on the
+    # 3D perturbation in the step() function. This matches the lat-lon
+    # C-grid pattern and sidesteps the frozen-Coriolis instability that
+    # follows from carrying planetary Coriolis in the baroclinic-step
+    # depth-mean forcing (τ ~ 1/f ≈ 0.2 days at mid-latitudes; see #160).
+    zero_f = jnp.zeros_like(mesh.fVertex)
+    q_relative = potential_vorticity_vertex_3d(
+        u_3d, h_k, zero_f, mesh,
+    )  # (nVertices, nlev); equals ζ/h_v
+
+    # APVM (Anticipated Potential Vorticity Method, Sadourny & Basdevant
+    # 1985; Ringler et al. 2010) upstream-biases q by dt_apvm/2 to damp
+    # the ζ-checkerboard null mode of the energy-conserving PV flux.
+    # Without it, a 2Δx vortex mode at vertices amplifies through
+    # nonlinear interactions (observed: τ ~ 1 d at U=0.2 m/s on 20 km).
+    if config.apvm_dt > 0.0:
+        q_relative = apvm_correction_3d(q_relative, u_3d, mesh, config.apvm_dt)
+
     if config.pv_scheme == "energy":
-        pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_total, mesh)
+        pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_relative, mesh)
     else:
-        pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_total, mesh)
+        pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_relative, mesh)
 
     # Horizontal viscosity on perturbation velocity (shear, not depth-mean)
     visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
+
+    # Constant biharmonic viscosity
+    if config.B_h > 0:
+        visc = visc + config.B_h * vector_laplacian_del4_3d(u_prime_3d, mesh)
+
+    # Flow-dependent Smagorinsky biharmonic viscosity
+    if config.C_smag > 0:
+        visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
@@ -220,11 +249,27 @@ def mpas_ocean_baroclinic_tendencies(
     # Full nonlinear momentum tendency
     du_dt_full = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
 
-    # Depth-mean → slow forcing for barotropic solver
+    # Bottom drag on full velocity (not perturbation) — the ocean floor
+    # sees the total flow.  Applied before F_slow_u computation so the
+    # depth-averaged drag enters the barotropic solver via slow forcing.
+    # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
+    if config.bottom_drag_r > 0:
+        dz_bot_e = jnp.maximum(h_e_3d[:, -1], 1e-10)
+        du_dt_full = du_dt_full.at[:, -1].add(
+            -config.bottom_drag_r * u_3d[:, -1] / dz_bot_e * edge_mask)
+
+    # Depth-mean → slow forcing for barotropic solver.
+    # du_dt_full now carries only (PGF + relative-vorticity PV flux +
+    # viscosity + vertical-advection + bottom-drag), NO planetary
+    # Coriolis. So F_slow_u passed to the barotropic solver contains no
+    # planetary Coriolis either, and the barotropic substep applies
+    # evolving f·v_t(u_bar) online.
     F_slow_u = jnp.sum(du_dt_full * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)
     F_slow_u = F_slow_u * edge_mask  # (nEdges,)
 
-    # Baroclinic perturbation = full minus depth-mean
+    # Baroclinic perturbation = full minus depth-mean. Planetary Coriolis
+    # on this perturbation is applied via forward-backward Matsuno in the
+    # step() function (see _forward_backward_coriolis_mpas_3d).
     du_dt_3d = (du_dt_full - F_slow_u[:, jnp.newaxis]) * edge_mask[:, jnp.newaxis]
 
     # ---- Tracer tendencies (diffusion + physics only) ----
@@ -234,10 +279,14 @@ def mpas_ocean_baroclinic_tendencies(
     h_safe = jnp.maximum(h_k, 1e-10)  # (nCells, nlev)
 
     # Horizontal tracer diffusion: K_h * lap(T)
-    grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dT_dt_3d = config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
-    grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dS_dt_3d = config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
+    if config.K_h > 0:
+        grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
+        dT_dt_3d = config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
+        grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
+        dS_dt_3d = config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
+    else:
+        dT_dt_3d = jnp.zeros_like(T_3d)
+        dS_dt_3d = jnp.zeros_like(S_3d)
 
     # Mask land cells
     dT_dt_3d = dT_dt_3d * mask[:, jnp.newaxis]
@@ -285,6 +334,20 @@ def mpas_ocean_baroclinic_tendencies(
         dz_0 = h_k[:, 0]  # top layer thickness (nCells,)
         dS_fw = virtual_salt_flux(freshwater, config.S_ref, dz_0, config.rho_0)
         dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_fw * mask)
+
+    # ---- Sponge layer relaxation ----
+    # Cast sponge arrays to state dtype to prevent float64 promotion when
+    # the precision policy stores state in float32 (crashes barotropic scan).
+    if sponge is not None:
+        _dt = T_3d.dtype
+        gamma_3d = sponge.gamma.astype(_dt)[:, jnp.newaxis]  # (nCells, 1)
+        dT_dt_3d = dT_dt_3d + gamma_3d * (sponge.T_ref.astype(_dt) - T_3d) * mask[:, jnp.newaxis]
+        dS_dt_3d = dS_dt_3d + gamma_3d * (sponge.S_ref.astype(_dt) - S_3d) * mask[:, jnp.newaxis]
+        # Edge velocity sponge (if reference velocity provided)
+        if sponge.u_ref is not None:
+            gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
+            gamma_edge_3d = gamma_edge[:, jnp.newaxis]
+            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
 
     return MPASOceanTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",

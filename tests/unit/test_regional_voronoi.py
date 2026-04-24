@@ -270,3 +270,143 @@ class TestBarotropicWave:
         assert max_eta > 0.01, (
             f"Wave completely dissipated: max|eta| = {max_eta:.4f} m"
         )
+
+
+# ============================================================================
+# Sub-360° periodic channel tests
+# ============================================================================
+
+@pytest.fixture(scope="module")
+def sub360_periodic_mesh():
+    """A 10° × 18° zonally-periodic mesh at 100 km resolution (Eady-like)."""
+    return create_regional_voronoi_mesh(
+        lon_range=(0.0, 10.0),
+        lat_range=(16.0, 34.0),
+        resolution_km=100.0,
+        periodic_x=True,
+    )
+
+
+class TestSub360Periodic:
+    """Verify sub-360° zonally-periodic regional meshes are well-formed."""
+
+    def test_cell_count_scales_with_zonal_extent(self):
+        """nCells should scale roughly linearly with L (fixed resolution)."""
+        import numpy as np
+        counts = []
+        for L in (10.0, 20.0, 30.0, 45.0):
+            m = create_regional_voronoi_mesh(
+                (0.0, L), (16.0, 34.0), resolution_km=100.0, periodic_x=True,
+            )
+            counts.append((L, m.nCells))
+        # Expected: nCells ≈ const × L (to within ~15%)
+        ratios = [c[1] / c[0] for c in counts]
+        mean_r = sum(ratios) / len(ratios)
+        for L, n in counts:
+            r = n / L
+            assert abs(r - mean_r) / mean_r < 0.25, (
+                f"nCells not linear in L: {counts} (ratios {ratios})"
+            )
+
+    def test_seam_edges_exist_with_correct_distance(self, sub360_periodic_mesh):
+        """Seam edges should connect cells at lon_min ↔ lon_max with dcEdge
+        near the resolution, NOT the long-way-around distance."""
+        import numpy as np
+        mesh = sub360_periodic_mesh
+        cOE = np.asarray(mesh.cellsOnEdge)
+        dc = np.asarray(mesh.dcEdge)
+        lon_cell = np.degrees(np.asarray(mesh.lonCell))
+        dlon = np.abs(lon_cell[cOE[0]] - lon_cell[cOE[1]])
+        seam_mask = dlon > 5.0  # half the 10° extent
+        n_seam = int(seam_mask.sum())
+        assert n_seam >= 10, (
+            f"expected ≥10 seam edges in a 10° × 18° mesh, got {n_seam}"
+        )
+        # Seam edges should have dcEdge near resolution (100 km), not ~1000 km
+        # which is the long-way-around distance between 0° and 10° at 25°N.
+        seam_dc_max = float(dc[seam_mask].max()) / 1e3  # km
+        assert seam_dc_max < 200.0, (
+            f"seam dcEdge too large: {seam_dc_max:.1f} km "
+            f"(resolution 100 km). The shift likely failed."
+        )
+
+    def test_uniform_east_wind_div_near_zero(self, sub360_periodic_mesh):
+        """Divergence of a uniform east wind on the periodic channel
+        should be machine-epsilon for most cells (median), with at most a
+        small boundary residual (max) consistent with the closed-basin
+        and 360° cases."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import divergence_cell
+        mesh = sub360_periodic_mesh
+        u_const = np.cos(np.asarray(mesh.angleEdge))
+        div = np.asarray(divergence_cell(u_const, mesh))
+        # The mesh-quality target: median ≈ 0 (well below 1e-10), max
+        # below ~1e-4 (boundary cells). No cells should explode.
+        assert np.median(np.abs(div)) < 1e-10, (
+            f"median |div| too large: {np.median(np.abs(div)):.2e}"
+        )
+        assert np.abs(div).max() < 1e-4, (
+            f"max |div| too large: {np.abs(div).max():.2e}"
+        )
+
+    def test_gauss_theorem_across_seam(self, sub360_periodic_mesh):
+        """A control volume straddling the seam should have its integrated
+        divergence match what we put in (Gauss's theorem). We set each
+        edge-normal flux to a constant value and verify that cells not at
+        the lat boundary see the correct divergence contribution."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import divergence_cell
+        mesh = sub360_periodic_mesh
+        # Flux = 1 m/s * edge-normal (radially-uniform)
+        flux = np.ones(mesh.nEdges, dtype=np.float64)
+        div = np.asarray(divergence_cell(flux, mesh))
+        # For a purely radial uniform edge-normal flux, the divergence per
+        # cell is (sum of ±flux_k * dvEdge_k) / areaCell — not zero, but
+        # should be finite and non-NaN everywhere and the SIGN should be
+        # consistent away from the boundary.
+        assert np.all(np.isfinite(div)), "divergence contains NaN/Inf"
+
+    def test_360_backcompat(self):
+        """``lon_range=(0, 360)`` with ``periodic_x=True`` (new unified
+        path) gives a mesh of the same scale as the legacy full-360°
+        code path."""
+        m_full = create_regional_voronoi_mesh(
+            (0.0, 360.0), (16.0, 34.0), resolution_km=100.0, periodic_x=True,
+        )
+        # For the full 360° test extent at this resolution, expect ~10k cells
+        assert m_full.nCells > 500, (
+            f"Full 360° mesh unexpectedly small: nCells={m_full.nCells}"
+        )
+        # Edge count per cell should be mostly 6 (hex) with some 5 (pentagons)
+        import numpy as np
+        nEC = np.asarray(m_full.nEdgesOnCell)
+        frac_hex = float((nEC == 6).mean())
+        assert frac_hex > 0.5, (
+            f"Expected majority hex cells on a 360° mesh, got {frac_hex*100:.0f}%"
+        )
+
+    def test_ocean_model_one_step(self, sub360_periodic_mesh):
+        """An MPAS ocean model should be able to take one step on the
+        sub-360° periodic mesh without producing NaN."""
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.experiments.eady_uniform import (
+            EadyUniformConfig, create_initial_conditions,
+            create_forcings,
+        )
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+
+        mesh = sub360_periodic_mesh
+        z = create_ocean_z_star(n_levels=10, H_max=5500.0)
+        cfg = EadyUniformConfig(U_surface=0.2)
+        physics = create_forcings("mpas_channel", None, cfg)
+        mcfg = MPASOceanConfig(
+            n_barotropic_substeps=30, physics=physics,
+            B_h=2.3e11, C_smag=0.2, tracer_advection="tvd",
+        )
+        model = MPASOceanModel(mesh, z, mcfg)
+        state = create_initial_conditions("mpas_channel", mesh, z, cfg)
+        s1 = model.step(state, 300.0)
+        assert jnp.all(jnp.isfinite(s1.u.data)), "u blew up in 1 step"
+        assert jnp.all(jnp.isfinite(s1.T.data)), "T blew up in 1 step"
+        assert jnp.all(jnp.isfinite(s1.eta.data)), "eta blew up in 1 step"

@@ -55,16 +55,15 @@ def _run_timeloop(
     label: str = "",
     total_days: float = 0,
     blowup_threshold: float = 100.0,
+    max_speed_threshold: float = 50.0,
     n_snaps: int = 10,
 ) -> tuple[Any, dict, dict, float, bool]:
-    """Run time loop with diagnostics.
+    """Run time loop with diagnostics and runtime CFL monitoring.
 
     Returns (final_state, snapshots, diag, wall_time, ok).
     """
     snap_targets = _snapshot_steps(n_steps, n_snaps)
     snapshots: dict[int, dict[str, np.ndarray]] = {0: extract_fn(state)}
-    # Record step-0 diagnostics so conservation plots have the true
-    # initial value (important for perturbation variables starting at 0).
     scalars_0 = scalar_fn(state)
     diag: dict[str, list] = {"times": [0.0], "steps": [0]}
     for k, v in scalars_0.items():
@@ -84,7 +83,7 @@ def _run_timeloop(
         if step % 100 == 0:
             is_finite, metric = check_fn(state)
             if not is_finite or metric > blowup_threshold:
-                print(f"  BLOWUP at step {step}, metric={metric:.1f}")
+                print(f"  BLOWUP at step {step}, metric={metric}")
                 blown_up = True
                 break
 
@@ -96,11 +95,19 @@ def _run_timeloop(
             for k, v in scalars.items():
                 diag.setdefault(k, []).append(v)
 
+            max_spd = scalars.get("max_speed", 0.0)
+            if max_spd > max_speed_threshold:
+                print(f"  BLOWUP at step {step}: max_speed={max_spd:.2f} m/s "
+                      f"exceeds threshold {max_speed_threshold}")
+                blown_up = True
+                break
+
             now = time.time()
             if now - last_print > 30:
                 summary = " | ".join(
                     f"{k}={v:.4g}" for k, v in list(scalars.items())[:3])
-                print(f"    Day {day:7.1f}/{total_days} | {summary}")
+                spd_str = f"max_spd={max_spd:.4f}"
+                print(f"    Day {day:7.1f}/{total_days} | {summary} | {spd_str}")
                 last_print = now
 
     jax.block_until_ready(key_array_fn(state))

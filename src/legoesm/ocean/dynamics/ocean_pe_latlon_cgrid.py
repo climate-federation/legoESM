@@ -55,18 +55,23 @@ from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    biharmonic_scaling_factor,
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
+    bilaplacian_cgrid,
     laplacian_cgrid,
+    vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
     curl_vertex_cgrid,
+    smagorinsky_biharmonic_tendency_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
+    flux_form_vertical_tracer_advection_tvd as _flux_form_vertical_advection_tvd,
 )
 
 
@@ -263,6 +268,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     config: LatLonCGridOceanConfig = LatLonCGridOceanConfig(),
     physics_fn=None,
     surface_forcing=None,
+    sponge=None,
+    dt: float = 300.0,
 ) -> LatLonCGridOceanTendencies:
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -274,6 +281,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     config : LatLonCGridOceanConfig
     physics_fn : callable, optional
     surface_forcing : optional
+    sponge : SpongeForcing, optional
+        Sponge layer relaxation fields (gamma, T_ref, S_ref, u_ref, v_ref).
 
     Returns
     -------
@@ -458,6 +467,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     h_v_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_v[..., jnp.newaxis]
     w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
+    # Vertical momentum advection: keep 1st-order upwind.
+    # The implicit viscosity (~|w|*dz/2) provides essential damping of
+    # baroclinic shear that the explicit A_v=1e-5 cannot.  Upgrading to
+    # TVD removes this and causes blowup.  Proper fix: Richardson-number-
+    # dependent mixing or KPP (issue #204), not higher-order advection.
     du_dt = du_dt + _flux_form_vertical_momentum_advection(
         u_prime, w_u, h_u_old)
     dv_dt = dv_dt + _flux_form_vertical_momentum_advection(
@@ -477,6 +491,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
+        if config.K_bih > 0:
+            dtr_dt = dtr_dt - config.K_bih * bilaplacian_cgrid(tr, grid, mask=mask)
         # Vertical tracer diffusion: always applied regardless of physics
         # pipeline state. The physics pipeline's vertical_mixing module is
         # a separate concept (e.g., KPP). Baseline K_v diffusion should
@@ -484,7 +500,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         if config.K_v > 0 and tr.shape[-1] >= 2:
             jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
             dz_actual_loc = z_coord.dz_ref * jac_v
-            dtr_dz_half = jnp.diff(tr, axis=-1) / (
+            dtr_dz_half = (tr[..., :-1] - tr[..., 1:]) / (
                 z_coord.dz_half_ref * jac_v
             )
             flux = config.K_v * dtr_dz_half
@@ -514,11 +530,37 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt = du_dt + config.A_h * vlap_u
         dv_dt = dv_dt + config.A_h * vlap_v
 
+    if config.B_h > 0:
+        bilap_u, bilap_v = vector_bilaplacian_cgrid(
+            u_prime, v_prime, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
+        # CFL violation near poles where dx shrinks (MOM6 convention).
+        scale_u, scale_v = biharmonic_scaling_factor(grid)
+        du_dt = du_dt - config.B_h * scale_u[:, None, None] * bilap_u
+        dv_dt = dv_dt - config.B_h * scale_v[:, None, None] * bilap_v
+
+    if config.C_smag > 0:
+        smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
+            u_prime, v_prime, grid, config.C_smag,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt - smag_u
+        dv_dt = dv_dt - smag_v
+
+    if config.bottom_drag_r > 0:
+        # Drag acts on the full velocity (not perturbation) — the ocean
+        # floor sees the total flow.  Consistent with MPAS and MOM6.
+        # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
+        dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
+        dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
+        du_dt = du_dt.at[..., -1].add(-config.bottom_drag_r * u[..., -1] / dz_bot_u)
+        dv_dt = dv_dt.at[..., -1].add(-config.bottom_drag_r * v[..., -1] / dz_bot_v)
+
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
         jac_v_v = jnp.maximum(_interp_to_v_points(J)[..., jnp.newaxis], 1e-10)
         for vel, jac, is_u in [(u_prime, jac_v_u, True), (v_prime, jac_v_v, False)]:
-            dv_dz_half = jnp.diff(vel, axis=-1) / (
+            dv_dz_half = (vel[..., :-1] - vel[..., 1:]) / (
                 z_coord.dz_half_ref * jac
             )
             flux = config.A_v * dv_dz_half
@@ -549,6 +591,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = dv_dt + _interp_to_v_points(phys.dv_dt.data)
         dT_dt = dT_dt + phys.dT_dt.data
         dS_dt = dS_dt + phys.dS_dt.data
+
+    # --- 10c. Sponge layer relaxation ---
+    # Cast sponge arrays to state dtype to prevent float64 promotion when
+    # the precision policy stores state in float32 (crashes barotropic scan).
+    if sponge is not None:
+        _dt = T.dtype
+        gamma_3d = sponge.gamma.astype(_dt)[..., jnp.newaxis]
+        dT_dt = dT_dt + gamma_3d * (sponge.T_ref.astype(_dt) - T)
+        dS_dt = dS_dt + gamma_3d * (sponge.S_ref.astype(_dt) - S)
+        if sponge.u_ref is not None:
+            gamma_u = interp_cell_to_uface(sponge.gamma.astype(_dt))[..., jnp.newaxis]
+            du_dt = du_dt + gamma_u * (sponge.u_ref.astype(_dt) - u)
+        if sponge.v_ref is not None:
+            gamma_v = _interp_to_v_points(sponge.gamma.astype(_dt))[..., jnp.newaxis]
+            dv_dt = dv_dt + gamma_v * (sponge.v_ref.astype(_dt) - v)
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d

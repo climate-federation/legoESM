@@ -768,6 +768,62 @@ def vector_laplacian_del4_3d(u_edge_3d, mesh):
     return -vector_laplacian_del2_3d(del2_u, mesh)
 
 
+def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag):
+    """Smagorinsky biharmonic viscosity: ``-del2(A_smag * del2(u))``.
+
+    Flow-dependent biharmonic viscosity using the Smagorinsky (1963)
+    formulation.  The strain rate is decomposed into divergence (tension)
+    at cell centres and curl (shearing) at vertices, then averaged to
+    edges where the velocity lives.
+
+    The two-pass structure places the spatially varying coefficient
+    *between* the two Laplacian applications, following the standard
+    MPAS-Ocean / ICON-O approach::
+
+        del2(u)  ->  multiply by A_smag  ->  del2 again  ->  negate
+
+    This is NOT equivalent to ``A_smag * del4(u)`` when A_smag varies
+    in space.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+        Normal velocity at edges.
+    mesh : VoronoiMesh
+        Mesh connectivity and geometry.
+    C_smag : float
+        Dimensionless Smagorinsky coefficient (typical 0.01-0.15).
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+        Viscous tendency (to be ADDED to du/dt).
+    """
+    # --- Strain rate at native TRiSK locations ---
+    div_c = divergence_cell_3d(u_edge_3d, mesh)   # (nCells, nlev) — tension
+    curl_v = curl_vertex_3d(u_edge_3d, mesh)       # (nVertices, nlev) — shearing
+
+    # --- Average to edges ---
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    D_T_edge = 0.5 * (div_c[c1] + div_c[c2])      # (nEdges, nlev)
+
+    v0, v1 = mesh.verticesOnEdge[0], mesh.verticesOnEdge[1]
+    D_S_edge = 0.5 * (curl_v[v0] + curl_v[v1])    # (nEdges, nlev)
+
+    # Small epsilon prevents NaN gradient of sqrt at zero (boundary edges).
+    deformation = jnp.sqrt(D_T_edge**2 + D_S_edge**2 + 1e-30)
+
+    # --- Smagorinsky coefficient [m²/s] at edges ---
+    # Geometric mean of primal/dual edge lengths as grid scale.
+    delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)  # (nEdges,)
+    A_smag = (C_smag * delta_edge[:, None]) ** 2 * deformation  # (nEdges, nlev)
+
+    # --- Two-pass biharmonic: -del2(A_smag * del2(u)) ---
+    del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)  # (nEdges, nlev)
+    intermediate = A_smag * del2_u                        # (nEdges, nlev)
+    return -vector_laplacian_del2_3d(intermediate, mesh)  # (nEdges, nlev)
+
+
 def apvm_correction_3d(q_vertex_3d, u_edge_3d, mesh, dt):
     """Anticipated PV Method correction for all levels.
 

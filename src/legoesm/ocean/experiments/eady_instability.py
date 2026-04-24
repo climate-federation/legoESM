@@ -88,7 +88,7 @@ class EadyInstabilityConfig:
 
     # Physics
     A_h: float = 5e5               # Horizontal viscosity [m²/s]
-    bottom_drag_coeff: float = 1e-4  # Linear bottom drag [s⁻¹]
+    bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag [m/s]
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord,
@@ -151,28 +151,19 @@ def _meridional_taper(lat_deg, config: EadyInstabilityConfig):
 
 
 def _channel_rest_state_latlon(grid, z_coord, config: EadyInstabilityConfig):
-    """Create rest state for a latlon channel (periodic-x, walls at N/S).
-
-    The grid was created with ``periodic_x=True``, so wall_mask has walls
-    only at rows 0 and -1. We build a rest state with uniform T/S and
-    apply the wall mask as land_mask.
-    """
+    """Create rest state for a latlon channel (periodic-x, walls at N/S)."""
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-    state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, H_max=config.H_max,
-        T_surface=config.T_surface, T_deep=config.T_deep,
-        S_uniform=config.S_uniform,
-        land_lat_threshold=90.0,  # no polar land caps — walls handle it
-    )
-    # Override land_mask with channel wall mask (walls at N/S rows only)
     n_lat = grid.n_lat
     n_lon = grid.n_lon
     wall_mask = np.ones((n_lat, n_lon), dtype=np.float32)
     wall_mask[0, :] = 0.0   # south wall
     wall_mask[-1, :] = 0.0  # north wall
-    return state._replace(
-        land_mask=Field(jnp.array(wall_mask), name="land_mask",
-                        dims=state.land_mask.dims, units="1"))
+    return rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=config.H_max,
+        T_surface=config.T_surface, T_deep=config.T_deep,
+        S_uniform=config.S_uniform,
+        land_mask_override=wall_mask,
+    )
 
 
 def _channel_rest_state_mpas(mesh, z_coord, config: EadyInstabilityConfig):

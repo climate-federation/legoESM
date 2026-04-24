@@ -4,11 +4,15 @@ Split-explicit forward-backward substeps for the barotropic mode.
 Updates sea surface height (eta) and depth-averaged normal velocity
 (u_bar) using the fast gravity-wave CFL.
 
-No explicit F_slow for velocity: the 3D baroclinic tendency has already
-been applied to u before this function is called, so u_bar is computed
-from the updated state. Including F_slow would double-count the
-depth-averaged baroclinic tendency. (Same pattern as cubed-sphere
-barotropic.py.)
+Coriolis treatment: ``f·v_t(u_bar)`` is applied at every substep with
+the *current-substep* ``u_bar`` (evolving, semi-implicit Heun option).
+``F_slow_u`` passed in by the caller is the depth-mean of the full 3D
+baroclinic tendency with the planetary-Coriolis part subtracted (see
+``ocean_pe_mpas.py``), so the barotropic substep can add online
+evolving Coriolis without double-counting. This matches the lat-lon
+C-grid pattern. Without this split, a frozen-Coriolis F_slow_u
+accumulates over 30 substeps per baroclinic step and grows a
+near-inertial numerical mode (τ ~ 1/f, ~0.2 days at mid-latitudes).
 
 References
 ----------
@@ -108,8 +112,10 @@ def barotropic_substeps_mpas(
 
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta)
-    # When F_slow_u carries Coriolis via PV flux, suppress standalone f*v_t (#160)
-    _has_slow_u = F_slow_u is not None
+    # F_slow_u is PGF+KE+zeta-advection+viscosity+bottom-drag with the
+    # planetary Coriolis contribution EXCLUDED (see ocean_pe_mpas.py).
+    # The barotropic substep applies online evolving f·v_t(u_bar) below,
+    # matching the lat-lon C-grid pattern.
     if F_slow_u is None:
         F_slow_u = jnp.zeros_like(u_bar)
 
@@ -136,6 +142,15 @@ def barotropic_substeps_mpas(
             0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2])
         )
 
+    # Divergence damping on barotropic velocity: grad(div(u_bar)).
+    # Targets the divergent mode that creates the eta checkerboard (#205).
+    use_div_damp = config.barotropic_div_damp > 0.0
+    if use_div_damp:
+        div_damp_coeff = jnp.asarray(
+            config.barotropic_div_damp, dtype=eta.dtype,
+        ) * (dt_baro / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+        div_damp_area_edge = 0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2])
+
     # --- Fix 3: Semi-implicit Coriolis (trapezoidal predictor-corrector) ---
     # On Voronoi meshes, the (u, v_tangential) decomposition doesn't
     # allow a direct Crank-Nicolson solve. Instead, use a trapezoidal
@@ -150,10 +165,21 @@ def barotropic_substeps_mpas(
     eta_floor = (min_water_col - H_bathy) * mask
     _area_cell = mesh.areaCell  # for mass-conserving floor clamp (#176)
 
+    # Cosine time filter and BEBT/MAXVEL parameters
+    bebt = config.bebt
+    _maxvel = config.maxvel_barotropic
+    use_maxvel = _maxvel > 0.0
+
+    _i = jnp.arange(n_substeps, dtype=eta.dtype)
+    use_cosine_filter = config.barotropic_time_filter == "cosine"
+    if use_cosine_filter:
+        w_filter = 1.0 + jnp.cos(
+            2.0 * jnp.pi * (_i - 0.5 * n_substeps) / n_substeps)
+    else:
+        w_filter = jnp.ones(n_substeps, dtype=eta.dtype)
+    w_total = jnp.sum(w_filter)
+
     # Accumulators for time-averaged barotropic fields (issues #145, #149, #102).
-    # Hu_sum: depth-integrated edge transport for tracer advection consistency.
-    # eta_sum, ubar_sum: for time-averaged eta/u_bar coupling to baroclinic
-    # step, filtering fast barotropic gravity waves (Higdon 2005).
     Hu_sum = jnp.zeros_like(u_bar)
     eta_sum = jnp.zeros_like(eta)
     ubar_sum = jnp.zeros_like(u_bar)
@@ -162,7 +188,7 @@ def barotropic_substeps_mpas(
     _eta_dtype = eta.dtype
     _ubar_dtype = u_bar.dtype
 
-    def _substep(carry, _):
+    def _substep(carry, w_i):
         eta_c, u_bar_c, Hu_sum_c, eta_sum_c, ubar_sum_c = carry
 
         # Total depth at edges (updated with current eta)
@@ -179,35 +205,56 @@ def barotropic_substeps_mpas(
         eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
 
         # Backward: update u_bar using new eta
-        # Fill land cells before gradient to prevent spurious PGF
-        eta_filled = _fill_land_cells_mpas(eta_next, mask)
+        # BEBT: blend new/old eta for semi-implicit PGF (#205)
+        eta_pgf = (1.0 - bebt) * eta_next + bebt * eta_c
+        eta_filled = _fill_land_cells_mpas(eta_pgf, mask)
         grad_eta = gradient_edge(eta_filled, mesh)
 
-        # PGF + slow forcing (+ standalone Coriolis only in legacy mode)
-        if _has_slow_u:
-            # MOM6-style: Coriolis enters through F_slow_u only (#160)
-            u_bar_next = u_bar_c + dt_baro * (
-                -g * grad_eta + F_slow_u
-            ) * edge_mask
-        elif use_semi_implicit:
-            # Legacy: Heun predictor-corrector (#172 docs fix)
+        # PGF + evolving Coriolis + slow forcing.
+        # F_slow_u now has the depth-mean planetary Coriolis subtracted
+        # in ocean_pe_mpas.py, so we always apply online f·v_t(u_bar) here
+        # — otherwise the barotropic u_bar loses its rotational restoring
+        # torque inside the substep loop and a near-inertial numerical
+        # mode (τ ~ 1/f) grows on the order of 0.2 days at mid-latitudes.
+        if use_semi_implicit:
+            # Heun predictor-corrector for Coriolis (#172 docs fix)
             v_t_old = tangential_velocity(u_bar_c, mesh)
             u_star = u_bar_c + dt_baro * (
-                -g * grad_eta + mesh.fEdge * v_t_old
+                -g * grad_eta + mesh.fEdge * v_t_old + F_slow_u
             ) * edge_mask
             v_t_star = tangential_velocity(u_star, mesh)
             u_bar_next = u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * 0.5 * (v_t_old + v_t_star)
+                + F_slow_u
             ) * edge_mask
         else:
             v_t_old = tangential_velocity(u_bar_c, mesh)
             u_bar_next = u_bar_c + dt_baro * (
-                -g * grad_eta + mesh.fEdge * v_t_old
+                -g * grad_eta + mesh.fEdge * v_t_old + F_slow_u
+            ) * edge_mask
+
+        # Divergence damping: add nu * grad(div(u_bar)) (#205).
+        if use_div_damp:
+            div_ubar = divergence_cell(u_bar_next * edge_mask, mesh) * mask
+            div_filled = _fill_land_cells_mpas(div_ubar, mask)
+            grad_div = gradient_edge(div_filled, mesh)
+            u_bar_next = (
+                u_bar_next + div_damp_coeff * div_damp_area_edge * grad_div
             ) * edge_mask
 
         # Optional barotropic damping (Rayleigh drag)
         if config.barotropic_damping > 0:
             u_bar_next = u_bar_next * (1.0 - dt_baro * config.barotropic_damping)
+
+        # Bottom drag on barotropic velocity: -r * U_bar / H_total.
+        # r is in [m/s] — resolution-independent bottom stress.
+        if config.bottom_drag_r > 0:
+            drag = 1.0 - dt_baro * config.bottom_drag_r / jnp.maximum(H_e_c, 1e-10)
+            u_bar_next = u_bar_next * drag
+
+        # MAXVEL clipping
+        if use_maxvel:
+            u_bar_next = jnp.clip(u_bar_next, -_maxvel, _maxvel)
 
         # Barotropic Laplacian diffusion on eta (flux-form: conservative).
         # Uses div(nu_edge * grad(eta)) instead of nu_cell * div(grad(eta))
@@ -221,9 +268,9 @@ def barotropic_substeps_mpas(
             ) * mask
             eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
 
-        # Accumulate eta and u_bar AFTER diffusion for time-averaging
-        eta_sum_new = eta_sum_c + eta_next.astype(_eta_dtype)
-        ubar_sum_new = ubar_sum_c + u_bar_next.astype(_eta_dtype)
+        # Accumulate eta and u_bar with cosine filter weights
+        eta_sum_new = eta_sum_c + w_i * eta_next.astype(_eta_dtype)
+        ubar_sum_new = ubar_sum_c + w_i * u_bar_next.astype(_eta_dtype)
 
         # Cast back to input dtype (mesh ops may promote to float64)
         return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype),
@@ -232,13 +279,13 @@ def barotropic_substeps_mpas(
 
     (eta_new, u_bar_new, Hu_sum_f, eta_sum_f, ubar_sum_f), _ = jax.lax.scan(
         _substep, (eta, u_bar, Hu_sum, eta_sum, ubar_sum),
-        None, length=n_substeps,
+        w_filter, length=n_substeps,
     )
 
     # Time-averaged barotropic fields
-    Hu_avg = Hu_sum_f / n_substeps
-    eta_avg = eta_sum_f / n_substeps
-    u_bar_avg = ubar_sum_f / n_substeps
+    Hu_avg = Hu_sum_f / n_substeps  # transport: always box-filtered
+    eta_avg = eta_sum_f / w_total   # eta/velocity: cosine or box filtered
+    u_bar_avg = ubar_sum_f / w_total
 
     return eta_avg, u_bar_avg, Hu_avg
 

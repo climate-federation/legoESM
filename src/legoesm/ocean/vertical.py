@@ -480,3 +480,97 @@ def flux_form_vertical_tracer_advection(
     vert_flux_div = F[..., :-1] - F[..., 1:]  # (..., nlev)
 
     return vert_flux_div
+
+
+def _van_leer_limiter_vert(r: jnp.ndarray) -> jnp.ndarray:
+    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|)."""
+    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+
+
+def flux_form_vertical_tracer_advection_tvd(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with TVD Van Leer scheme.
+
+    Second-order accurate in smooth regions, falls back to first-order
+    upwind at discontinuities.  Monotone (no new extrema).  The implicit
+    numerical diffusivity is dramatically reduced compared to first-order
+    upwind: K_num ~ 0 in smooth regions vs K_num ~ |w|*dz/2 for upwind.
+
+    Same output semantics as flux_form_vertical_tracer_advection.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Tracer at full levels.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels [m/s].
+        Positive = upward. Zero at surface and bottom.
+    h_k : array, shape (..., nlev)
+        Layer thickness [m] at full levels (z-star actual thickness).
+    dt : float
+        Time step [s], for CFL computation.
+
+    Returns
+    -------
+    vert_flux_div : array, shape (..., nlev)
+        Vertical flux divergence F_top[k] - F_bot[k] for each level.
+        Units: [tracer]*[m/s] (NOT divided by layer thickness).
+    """
+    eps = 1e-30
+    nlev = field.shape[-1]
+
+    # Interior interface values: k = 1..nlev-1
+    w_interior = w_half[..., 1:nlev]   # (..., nlev-1)
+    T_below = field[..., 1:]           # field[k]   for k=1..nlev-1
+    T_above = field[..., :-1]          # field[k-1] for k=1..nlev-1
+
+    # --- First-order upwind flux ---
+    T_upwind = jnp.where(w_interior > 0.0, T_below, T_above)
+    F_upwind = w_interior * T_upwind
+
+    # --- CFL number at each interface ---
+    h_below = h_k[..., 1:]            # h[k]   for k=1..nlev-1
+    h_above = h_k[..., :-1]           # h[k-1] for k=1..nlev-1
+    h_donor = jnp.where(w_interior > 0.0, h_below, h_above)
+    CFL = jnp.abs(w_interior) * dt / jnp.maximum(h_donor, eps)
+    CFL = jnp.minimum(CFL, 1.0)
+
+    # --- Smoothness ratio r ---
+    # Local gradient across interface k:
+    delta = T_above - T_below          # field[k-1] - field[k]
+
+    # Upwind-of-upwind gradient:
+    # For upward flow (w>0), donor=k(below): need field[k]-field[k+1]
+    # For downward flow (w<=0), donor=k-1(above): need field[k-2]-field[k-1]
+    # Use ghost cells at boundaries (copy of boundary value → delta=0 → r=0 → upwind)
+    field_bot_ghost = jnp.concatenate(
+        [field, field[..., -1:]], axis=-1)     # ghost at bottom
+    field_top_ghost = jnp.concatenate(
+        [field[..., :1], field], axis=-1)      # ghost at top
+
+    # Upwind gradient for upward flow: field[k] - field[k+1]
+    delta_upwind_up = field_bot_ghost[..., 1:nlev] - field_bot_ghost[..., 2:nlev + 1]
+    # Upwind gradient for downward flow: field[k-2] - field[k-1]
+    delta_upwind_down = field_top_ghost[..., :nlev - 1] - field_top_ghost[..., 1:nlev]
+
+    delta_upwind = jnp.where(w_interior > 0.0, delta_upwind_up, delta_upwind_down)
+
+    # r = upwind_gradient / local_gradient
+    r = delta_upwind / jnp.where(jnp.abs(delta) > eps, delta, eps)
+
+    # --- Van Leer limiter and TVD correction ---
+    phi = _van_leer_limiter_vert(r)
+    F_interior = F_upwind + 0.5 * jnp.abs(w_interior) * (1.0 - CFL) * phi * delta
+
+    # Full flux array with zero boundaries
+    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
+    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+
+    # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
+    vert_flux_div = F[..., :-1] - F[..., 1:]
+
+    return vert_flux_div

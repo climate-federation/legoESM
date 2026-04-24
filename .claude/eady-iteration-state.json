@@ -1,0 +1,34 @@
+{
+  "iteration": "COMPLETE",
+  "status": "SUCCESS — Eady instability stable at 200 days with bottom drag",
+  "winning_config": {
+    "B_h": 1e11,
+    "bottom_drag_coeff": 1e-4,
+    "A_v": "1e-3 (config default)",
+    "barotropic_diffusion_alpha": 0.05,
+    "A_h": 0.0,
+    "C_smag": 0.0,
+    "resolution": "100x50 (20km)",
+    "grid": "latlon_channel 16-34N, 0-10E"
+  },
+  "results": {
+    "120d_20km": "PASS — instability peaks day 36, saturates by day 84",
+    "200d_20km": "PASS — stable equilibrium with max_speed=0.31 m/s"
+  },
+  "physics_summary": "Bottom drag r=1e-4 provides barotropic energy sink for nonlinear saturation. Without it, baroclinic->barotropic energy cascade causes SSH blowup at day ~80-87 regardless of horizontal viscosity.",
+  "remaining_items": [
+    "10km resolution test (blocked by 30+ min XLA compile time)",
+    "Wire Smagorinsky into tendency (blocked by NamedTuple compile issue)",
+    "User preference: reduce A_v to 1e-4, K_v to 1e-5 (more physical)",
+    "Test with lower B_h (1e10) to allow stronger instability growth"
+  ],
+  "files_changed": [
+    "src/legoesm/ocean/experiments/eady_uniform.py — updated defaults",
+    "src/legoesm/ocean/dynamics/latlon_cgrid_operators.py — Smagorinsky operators added",
+    "src/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py — Smagorinsky import (not wired)",
+    "scripts/ocean_test_matrix/experiments.py — eu_config parameter, velocity cross-sections",
+    "scripts/ocean_test_matrix/diagnostic_io.py — symmetric colorbars, field-tagged filenames",
+    "scripts/ocean_test_matrix/timeloop.py — max_speed monitoring",
+    "scripts/ocean_test_matrix/setup.py — domain bounds passthrough"
+  ]
+}

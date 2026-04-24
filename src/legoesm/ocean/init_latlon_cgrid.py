@@ -58,6 +58,7 @@ def rest_state_latlon_cgrid_ocean(
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
+    land_mask_override: jnp.ndarray | None = None,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -77,7 +78,12 @@ def rest_state_latlon_cgrid_ocean(
     H_max : float
         Maximum ocean depth [m].
     land_lat_threshold : float
-        Latitude threshold for land [degrees].
+        Latitude threshold for land [degrees].  Ignored when
+        *land_mask_override* is provided.
+    land_mask_override : array (n_lat, n_lon), optional
+        If provided, use this as the land mask (1=ocean, 0=land) instead
+        of deriving one from *land_lat_threshold*.  Face masks (u_mask,
+        v_mask) are computed from it automatically.
 
     Returns
     -------
@@ -87,9 +93,13 @@ def rest_state_latlon_cgrid_ocean(
     n_lon = grid.n_lon
     nlev = z_coord.n_levels
 
-    H_bathy, land_mask = idealized_bathymetry_latlon_cgrid(
-        grid, H_max, land_lat_threshold,
-    )
+    if land_mask_override is not None:
+        land_mask = jnp.asarray(land_mask_override)
+        H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=jnp.float64)
+    else:
+        H_bathy, land_mask = idealized_bathymetry_latlon_cgrid(
+            grid, H_max, land_lat_threshold,
+        )
 
     # Exponential T stratification
     T_profile = T_deep + (T_surface - T_deep) * jnp.exp(
@@ -272,4 +282,25 @@ def regional_rest_state_latlon_cgrid(
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
         w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
+    )
+
+
+def replace_land_mask(
+    state: LatLonCGridOceanState,
+    new_land_mask: jnp.ndarray,
+) -> LatLonCGridOceanState:
+    """Replace land_mask and recompute u_mask/v_mask atomically.
+
+    Use this instead of ``state._replace(land_mask=...)`` to ensure
+    face masks stay consistent with the cell mask.
+    """
+    new_land_mask = jnp.asarray(new_land_mask)
+    u_mask, v_mask = compute_face_masks(new_land_mask)
+    return state._replace(
+        land_mask=Field(data=new_land_mask, name="land_mask",
+                        dims=state.land_mask.dims, units=""),
+        u_mask=Field(data=u_mask, name="u_mask",
+                     dims=state.u_mask.dims, units=""),
+        v_mask=Field(data=v_mask, name="v_mask",
+                     dims=state.v_mask.dims, units=""),
     )
