@@ -1018,9 +1018,9 @@ Per iter-818's iter-819+ candidate, iter-819 sweeps `damp_v` ∈ {0, 0.001, 0.00
 
 Prior visual scripts (iter-797/812/813/814) used `rotate_winds_grid_to_geo(u_cc, v_cc, grid.angle)` for v_north projection.  The production W2 sentinel (`tests/unit/test_cdgrid_fv3_regression.py:4157`) uses `cell_centre_angles_from_4edge(cdgrid)` instead.  The two conventions differ: the visual script reported post-regrid `v_ll_Linf = 0.382 m/s` while iter-787's sentinel-equivalent script reported 0.159 m/s on the same C36 1-day LEGACY config.
 
-Additionally the prior visual script used an INLINE analytical `h = h0 - (1/G)*(R*omega*u0 + 0.5*u0^2)*sin_lat^2` instead of `williamson_test2(grid).h.data`.
+**Causal attribution (Codex iter-820 review).**  Only the v_north PROJECTION change matters for the `v_ll_Linf` mismatch.  The h IC change (inline analytical `h = h0 − (R Ω u0 + u0²/2)·sin²lat/g` → `williamson_test2(grid).h.data`) is cosmetic: both compute the same W2 geostrophic balance formula with the same constants (`constants.Omega = 7.292e−5` = inline `omega`, `constants.g` = `G`, same `u_0 = 2π R / (12·86400)`).  The iter-820 commit message and prior doc framing implied both fixes contributed; the Codex review correctly flagged that as a false causal claim.  The h IC substitution is kept for code-sharing and readability, not because it numerically changes the result.
 
-iter-820 fixes both: uses `williamson_test2(grid)` for h + `cell_centre_angles_from_4edge(cdgrid)` for v_north projection.  After the fix:
+iter-820 fix summary: **v_north projection convention change** is the single effective fix.  After the fix:
 - LEGACY post-regrid `v_ll_Linf = 0.159 m/s` (matches iter-787 baseline exactly).
 - DUOGRID post-regrid `v_ll_Linf = 1.197 m/s` (matches iter-787's 1.20 m/s).
 
