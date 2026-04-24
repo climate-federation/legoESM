@@ -1208,3 +1208,41 @@ Max |h_err| is NON-CONVERGENT: 4.5 at C24, 4.6 at C36, 6.6 at C48.  This is cons
 **Deliverable.**  `scripts/diag_iter798_w2_checkerboard_scaling.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  62nd iter in iter-752-798 chain.  Downgrades iter-797's "2dx checkerboard" concern: the checkerboard amplitude is ~1000× smaller than max |h_err|, and max |h_err| is non-convergent across resolutions — consistent with the structural-error plateau we've documented for cosine bell (iter-778/779) and W2 (iter-782 through iter-796).  The mode-A and h_err residuals are all manifestations of the same underlying discretisation issue: the A-L+RK3 pipeline cannot fully eliminate cube-vertex cancellation residuals without the Fortran c_sw construction.
+
+### Iter-799 — DUOGRID dh/dt at t=0 is 1172× LEGACY (mass transport is catastrophically broken)
+
+Per iter-787's finding that DUOGRID W2 is 800× worse than LEGACY after 1 day, iter-799 localises the broken operator by measuring t=0 tendencies.
+
+**Method** (`scripts/diag_iter799_duogrid_t0_tendency.py`; committed output at `diagnostics/iter799_output/iter799_duogrid_t0_tendency.txt`).  C36, iter-761 config, analytical W2 IC.  Compute tendencies ONCE at t=0 under `use_duogrid=False` and `use_duogrid=True`; report peak magnitudes.
+
+**Result.**
+
+| path    | dh/dt peak    | du/dt peak    | dv/dt peak    |
+|---------|---------------|---------------|---------------|
+| LEGACY  | 1.329e−04     | 1.404e−05     | 1.903e−05     |
+| DUOGRID | 1.557e−01     | 4.700e−05     | 8.446e−05     |
+| ratio   | **1171.57×**  | 3.35×         | 4.44×         |
+
+**Observation — numerical reportage only.**  At t=0 for steady-state W2, analytical tendencies are ALL ZERO.  The LEGACY numerical tendencies are tiny (~1e−4 to 1e−5).  The DUOGRID numerical tendencies are **three orders of magnitude larger for dh/dt** (0.16 m/s mass tendency at t=0, which over 86400s gives 1.4e4 m h-drift — approaching the mean h0 ~ 3000 m).  du/dt and dv/dt are only 3-4× worse, suggesting the momentum side is less broken than mass transport.
+
+**Implication.**  The DUOGRID path's `cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)` produces a catastrophic non-zero divergence at t=0 on steady-state input.  Since dh/dt is driven by the mass flux divergence, and u_c / v_c come from `fv3_cc2c(u_cc, v_cc, cdgrid)` with duogrid halo (line 1458: `offsets = None if dg is not None else grid.halo_interp_offsets`), the DUOGRID halo of (u_cc, v_cc) must produce u_c, v_c whose divergence is LARGE near cube vertices.
+
+This is a CONCRETE t=0 signature of the duogrid path breakage — it's not from time-step accumulation, the halo-exchange chain is broken immediately.
+
+**What iter-799 DOES show.**
+- DUOGRID's t=0 dh/dt peak is 1172× LEGACY's.  Catastrophic at the mass transport step.
+- The breakage is INSTANT — not from accumulation.  The duogrid halo dispatch in `fv3_cc2c` (or upstream via `pad_halo_vector(duogrid=dg)`) is producing u_c, v_c that have large spurious divergence near cube vertices for steady-state input.
+
+**What iter-799 does NOT establish.**
+- WHICH specific duogrid-mode component is broken: (a) `pad_halo_vector(duogrid=dg)` at cube corners, (b) the A-grid-like scalar halo for h inside `cgrid_mass_flux_divergence`, (c) a missing `bounded_domain` gate in one of the downstream operators.
+- Whether the du/dt, dv/dt 3-4× worsening is a separate issue or downstream of the mass-transport breakage.
+
+**Iter-800+ candidates.**
+- Measure u_c, v_c from `fv3_cc2c` at t=0 under LEGACY vs DUOGRID directly; compare to analytical.  If DUOGRID u_c, v_c have cube-vertex spikes, the `pad_halo_vector(duogrid=dg)` is confirmed broken.
+- Check the divergence of analytical solid-body (u_c, v_c) vs numerical at cube vertices under both paths.
+- Audit `cgrid_mass_flux_divergence`'s handling of `base.duogrid is not None` (does it switch halo paths?).
+- Audit the Ralph-loop-flagged critical duogrid constraint: "Legacy edge handling must be disabled in duogrid mode via `bounded_domain = .true.`" — confirm every relevant operator consults `_bounded_domain`.
+
+**Deliverable.**  `scripts/diag_iter799_duogrid_t0_tendency.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  63rd iter in iter-752-799 chain.  Major DUOGRID diagnostic finding: the mass-transport chain (`fv3_cc2c` → `cgrid_mass_flux_divergence`) produces a t=0 dh/dt 1172× larger than LEGACY on steady-state W2.  This is an INSTANT halo/operator breakage, not time-step accumulation.  iter-800+ should localise which specific duogrid halo or operator produces the spurious divergence.
