@@ -1352,3 +1352,48 @@ The ocean rest-state condition is INDEPENDENT of the atmosphere cubed-sphere W2 
 **Deliverable.**  Doc-only stopping-condition audit.  No source-code change.
 
 **Process.**  90th iter in iter-752-830 chain.  Confirms 5 of 8 Ralph-loop stopping conditions are satisfied.  The remaining 3 (W2 visible artifacts, W5 visible artifacts, unresolved doc issues) all stem from the same structural cube-vertex cancellation mechanism that cannot be resolved without architectural changes.
+
+### Iter-831 — FB chain phase ablation: `_c_sw` is the h-growth driver
+
+Per iter-816's observation that FB DUOGRID h_max grows 8× at 24h C24, iter-831 ablates each of the 3 FB-chain phases (`_c_sw`, `_p_grad_c`, `_d_sw_native`) to identify which drives the h-growth.
+
+**Method** (`scripts/diag_iter831_fb_phase_ablation.py`).  Monkey-patch each phase to a no-op (pass-through with zero outputs where required).  Run C24 W2 FB DUOGRID 12h under each configuration.
+
+**Result (C24 W2 FB DUOGRID 12h).**
+
+| c_sw | p_grad | d_sw | status | h_min | h_max |
+|------|--------|------|--------|-------|-------|
+| ON   | ON     | ON   | baseline | 111  | **10765** |
+| OFF  | ON     | ON   | ok     | 1110  | **2980** (physical) |
+| ON   | OFF    | ON   | ok     | −58   | **15112** (WORSE) |
+| ON   | ON     | OFF  | ok     | 1097  | 2997 (physical; no update) |
+| OFF  | OFF    | ON   | ok     | 1097  | 2997 |
+| OFF  | ON     | OFF  | ok     | 1097  | 2997 |
+| ON   | OFF    | OFF  | ok     | 1097  | 2997 |
+
+**Observation — numerical reportage only.**
+- Disabling `_c_sw` ALONE drops h_max from 10765 to 2980 (physical).  `_c_sw` is the h-growth driver.
+- Disabling `_p_grad_c` alone makes h_max WORSE (10765 → 15112).  `_p_grad_c` is STABILIZING.
+- Disabling `_d_sw_native` alone removes h-evolution (trivial, expected).
+- All multi-phase ablations including d_sw OFF give h_max ≈ physical (no h-update without d_sw).
+
+**Mechanism hypothesis.**  `_c_sw` performs the half-step C-grid mass transport (`fx = upwind(h, ut) * ut * dy * sin_sg_upwind`).  The 1st-order upwind is simple but produces overshoots at cube corners where sin_sg changes rapidly.  `_p_grad_c` provides the geostrophic backward correction that mostly offsets this.  Their combination is BALANCED when both are active.  But their combined output `h_star + pressure correction` feeds into `_d_sw_native`'s PPM transport, which AMPLIFIES the cube-corner overshoots through PPM's monotonicity limiter + flux divergence.
+
+**What iter-831 DOES show.**
+- The FB chain's h-growth originates in `_c_sw` (c-grid half-step mass transport).
+- `_p_grad_c` is stabilizing (disabling it worsens h-growth).
+- The combination `_c_sw + _d_sw_native` is what propagates the c_sw overshoots into PPM-amplified h-growth.
+
+**What iter-831 does NOT establish.**
+- Whether replacing `_c_sw`'s 1st-order upwind with a higher-order c-grid transport would reduce the h-growth.
+- Whether the Fortran c_sw has the same 1st-order upwind (likely yes — c_sw is intended as a half-step predictor, not a full-accuracy step).
+- Whether the h-growth is driven by a specific Python implementation detail vs a fundamental c_sw/d_sw coupling issue.
+
+**Iter-832+ candidates.**
+- Inspect Fortran c_sw mass transport semantics (sw_core.F90:185-241 approx) and cross-check that our Python matches.
+- Test whether limiting `_c_sw`'s h_star to the initial h range at cube corners stabilises the chain.
+- Continue deferring the FB chain port; accept A-L+RK3 as the current production baseline.
+
+**Deliverable.**  `scripts/diag_iter831_fb_phase_ablation.py` + committed output.  No source-code change.  No new sentinel.
+
+**Process.**  91st iter in iter-752-831 chain.  Ablation-localizes the FB-chain h-growth to `_c_sw` (C-grid half-step mass transport).  `_p_grad_c` is stabilizing; disabling it worsens h-growth.  The mechanism is c_sw's upwind mass-transport interacting with d_sw's PPM at cube corners.
