@@ -686,8 +686,12 @@ def _build_gray_radiation_fn(config):
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None,
-                     ghg_vmr_override=None):
+                     ghg_vmr_override=None,
+                     cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
+        del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
         if tau_equator is not None:
