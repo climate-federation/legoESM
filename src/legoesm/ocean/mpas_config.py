@@ -112,6 +112,14 @@ class MPASOceanConfig(NamedTuple):
     temperature_max_c: float = 45.0
     salinity_min_psu: float = 0.0
     salinity_max_psu: float = 50.0
+    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
+    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
+    # ``A_L = (C_L · Δ_e)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
+    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Appended
+    # at the END of the NamedTuple so existing positional call sites
+    # keep working.
+    C_leith: float = 0.0
+    C_leith_modified: bool = False
 
 
 class MPASSimpleOceanConfig(NamedTuple):

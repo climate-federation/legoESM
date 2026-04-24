@@ -48,6 +48,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
     smagorinsky_biharmonic_3d,
+    leith_biharmonic_3d,
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
     vertex_thickness_3d,
@@ -239,6 +240,12 @@ def mpas_ocean_baroclinic_tendencies(
     # Flow-dependent Smagorinsky biharmonic viscosity
     if config.C_smag > 0:
         visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
+
+    # Flow-dependent Leith biharmonic viscosity
+    if getattr(config, "C_leith", 0.0) > 0:
+        visc = visc + leith_biharmonic_3d(
+            u_prime_3d, mesh, config.C_leith,
+            modified=getattr(config, "C_leith_modified", False))
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)

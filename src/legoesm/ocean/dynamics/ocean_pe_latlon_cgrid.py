@@ -66,6 +66,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     interp_cell_to_uface,
     curl_vertex_cgrid,
     smagorinsky_biharmonic_tendency_cgrid,
+    leith_biharmonic_tendency_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -546,6 +547,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         du_dt = du_dt - smag_u
         dv_dt = dv_dt - smag_v
+
+    if getattr(config, "C_leith", 0.0) > 0:
+        leith_u, leith_v = leith_biharmonic_tendency_cgrid(
+            u_prime, v_prime, grid, config.C_leith,
+            modified=getattr(config, "C_leith_modified", False),
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt - leith_u
+        dv_dt = dv_dt - leith_v
 
     if config.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
