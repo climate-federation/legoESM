@@ -1039,3 +1039,43 @@ Per iter-793's iter-794+ candidate, iter-794 sweeps `div_damp` on the LEGACY pat
 **Deliverable.**  `scripts/diag_iter794_w2_divdamp_sweep.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  58th iter in iter-752-794 chain.  Confirms iter-761's 8× div_damp is near-optimal for W2 at C36; the residual 0.159 m/s mode-A cannot be reduced by div_damp tuning alone.  Further improvement requires structural cross-term halo consistency (iter-795+) or the FB chain port.
+
+### Iter-795 — Component-consistent B-halo hypothesis REFUTED for smooth W2 IC
+
+Per iter-794's iter-795+ candidate "probe the cube-vertex cancellation hypothesis directly: compute B at cube-vertex halo cells from HALO'd (u_cc, v_cc, h, h_s) components rather than halo'ing the combined B as a scalar", iter-795 tests this directly at t=0 on the W2 IC.
+
+**Method** (`scripts/diag_iter795_w2_consistent_B_halo.py`; committed output at `diagnostics/iter795_output/iter795_w2_consistent_B_halo.txt`).  C36, β=0.  Construct B_pad_consistent: start from `pad_halo(B)` (default), then at the 4 cube-vertex halo cells per face, overwrite with `0.5*(u_halo² + v_halo²) + g*(h_halo + h_s_halo)` where u_halo, v_halo come from `pad_halo_vector` and h_halo, h_s_halo come from `pad_halo`.  Pass this padded B to `_arakawa_lamb_gradient(B, cdgrid, padded=B_pad_consistent)` via its explicit `padded` parameter (already supported for stage-level packing).  Compare dv_cc residual (without div damp) to the default path.
+
+**Result.**
+
+| variant              | max \|dB_dy_cc_cons − dB_dy_cc_def\| | max \|dv_cc\| (no div damp) | peak location           |
+|----------------------|---------------------------------------|-----------------------------|-------------------------|
+| default halo         | —                                     | 2.516e-05                   | (5, 0, 0), −36.45°, −135°  |
+| consistent B halo    | 3.83e-07 m/s²                         | 2.516e-05                   | (4, 35, 35), +36.45°, +135° |
+
+Ratio (consistent / default) = 1.000.
+
+**Observation — numerical reportage only.**  At t=0 for the smooth W2 IC, the difference between scalar B halo and component-consistent B halo at cube-vertex cells is ~4e-7 m/s² — four orders of magnitude smaller than the dv_cc residual (2.5e-5).  The dv_cc peak is UNCHANGED to 4 significant digits; only the peak location shifts from one cube vertex to the symmetric mirror (SW ↔ NE).  The hypothesis that B-halo inconsistency drives the W2 mode-A is REFUTED for smooth steady-state input.
+
+**Why the hypothesis failed.**  For solid-body rotation, u_cc, v_cc, h, h_s are all smooth across cube vertices.  The scalar 2-pt average `0.5*(B_A + B_B)` at a cube-vertex halo cell is nearly identical to `0.5*(u_A² + v_A² + u_B² + v_B²) + g*0.5*(h_A + h_B + h_s_A + h_s_B)` because the quadratic terms u² and v² are also smooth.  The difference would show up for non-smooth fields (e.g. cosine bell near its edge) but not for solid-body rotation.
+
+**What iter-795 DOES show.**
+- B-halo choice (scalar vs component-consistent) does not drive the W2 cube-vertex mode-A for smooth IC.
+- The cube-vertex residual (2.5e-5) comes from another mechanism, NOT from the B halo treatment.
+
+**What iter-795 does NOT establish.**
+- Whether the component-consistent halo matters for NON-SMOOTH cases (cosine bell, breaking waves).
+- What the actual cube-vertex mechanism is.  Remaining candidates:
+  (i) Corner-wind interpolation — u_corner, v_corner from 4-point avg of halo'd u_cc, v_cc; this enters zeta which enters Coriolis.
+  (ii) A-L gradient stencil ITSELF has cube-vertex behaviour that differs from interior.
+  (iii) `_interp_corner_to_center` (corner → cell centre projection, used for dB_dx_cc and dB_dy_cc).
+
+**Iter-796+ candidates.**
+- Zero-out `u_corner`, `v_corner` contribution at cube vertices — compute zeta from analytical (exactly zero for solid body) and see if dv_cc residual drops.
+- Replace `_interp_corner_to_center` with a smoother/different operator at cube-vertex-adjacent cells.
+- Direct W2 measurement at C48/C72 to see if residual scales with grid spacing (would indicate truncation-level, otherwise structural).
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter795_w2_consistent_B_halo.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  59th iter in iter-752-795 chain.  Rules out scalar-vs-component B-halo inconsistency as the W2 mode-A mechanism for smooth solid-body rotation IC (the candidate contributed only 4e-7 m/s² difference, 4 orders below the residual).  Remaining candidate mechanisms: corner-wind interpolation, A-L gradient stencil itself, `_interp_corner_to_center`.
