@@ -1079,3 +1079,46 @@ Ratio (consistent / default) = 1.000.
 **Deliverable.**  `scripts/diag_iter795_w2_consistent_B_halo.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  59th iter in iter-752-795 chain.  Rules out scalar-vs-component B-halo inconsistency as the W2 mode-A mechanism for smooth solid-body rotation IC (the candidate contributed only 4e-7 m/s² difference, 4 orders below the residual).  Remaining candidate mechanisms: corner-wind interpolation, A-L gradient stencil itself, `_interp_corner_to_center`.
+
+### Iter-796 — Numerical zeta is REQUIRED for Cor+press+KE cancellation (reversed sign!)
+
+Per iter-795's iter-796+ candidate "zero-out u_corner, v_corner contribution at cube vertices — compute zeta from analytical (exactly zero for solid body) and see if dv_cc residual drops", iter-796 tests this directly at t=0 on the W2 IC.
+
+**Method** (`scripts/diag_iter796_w2_zeta_zero.py`; committed output at `diagnostics/iter796_output/iter796_w2_zeta_zero.txt`).  C36, β=0, LEGACY path, no div damp applied.  Compute dv_cc with numerical zeta (default) and with zeta replaced by analytical ZERO.
+
+**Result.**
+
+| variant                   | peak       | face,(i,j) | lat     | lon      | GC      | hot  | near_vert      |
+|---------------------------|------------|------------|---------|----------|---------|------|----------------|
+| default (numerical zeta)  | 2.516e-05  | (5, 0, 0)  | −36.45° | −135.00° | **1.19°** | 8    | 8 (**100%**)   |
+| zeta = 0 (analytical)     | 2.307e-04  | (1, 17, 0) | −43.74° | +88.75°  | 34.38°  | 4896 | 528 (10.8%)    |
+
+Ratio (zeta_zero / default) = **9.17×** — zeroing zeta makes the residual ~10× LARGER!
+
+**Observation — numerical reportage only.**  REVERSED expectation: setting zeta = 0 (analytical for solid-body) makes the dv_cc residual peak 10× LARGER (2.5e-5 → 2.3e-4), not smaller.  Also, the peak location MOVES from cube vertex (GC=1.19°) to mid-face (GC=34.38°), and hot-cell cube-vertex concentration drops from 100% to 10.8%.
+
+**Interpretation.**  Numerical zeta (relative vorticity) provides CRUCIAL CANCELLATION of the Coriolis + pressure + KE gradient imbalance produced by `_arakawa_lamb_gradient` at cell centres.  Specifically:
+- dv_Cor+press+KE (without zeta*u) = 2.3e-4 at mid-face.
+- Adding −zeta*u_cc (numerical zeta) provides an opposite-signed mid-face term that cancels 90%+ of the imbalance.
+- The cancellation is near-perfect at mid-face but fails at cube vertices, leaving the 2.5e-5 cube-vertex residual.
+
+This is a concrete mechanistic understanding: the A-L+RK3 pipeline achieves geostrophic balance for W2 through a FORTUITOUS CANCELLATION between the gradient-of-B truncation error and the corner-wind-derived zeta truncation error.  The cancellation is grid-dependent and only fully works at mid-face; cube vertices are where the cancellation breaks down, producing the observed 0.159 m/s v_ll_Linf mode-A.
+
+**What iter-796 DOES show.**
+- The W2 mode-A at 0.159 m/s is NOT a single-operator bug.  It's the CUBE-VERTEX BREAKDOWN of a grid-global cancellation between two independent truncation errors (gradient-of-B and zeta).
+- Numerical zeta is REQUIRED for the current balance to work; removing it breaks W2 by an order of magnitude.
+- The remaining cube-vertex residual cannot be repaired by fixing either operator in isolation — they must be made CONSISTENT at cube vertices.
+
+**What iter-796 does NOT establish.**
+- A specific Fortran-faithful fix.  The Fortran c_sw chain achieves the balance differently (via upwind ke formula with sin_sg/cos_sg blending at face boundaries, sw_core.F90:295-339), avoiding the A-L+RK3 cancellation dependency.  Porting this is blocked on ng=3 and FB-chain stability (iter-787 showed current FB chain is broken at C36).
+- Whether a different discretisation of zeta (e.g., via circulation form, which is used in `dgrid_vorticity` — check its cube-vertex behaviour) would improve the cancellation.
+
+**Iter-797+ candidates.**
+- Audit `dgrid_vorticity` (circulation form of zeta) against a Fortran-equivalent vorticity operator — check if the cube-vertex cancellation can be improved.
+- Test whether the Fortran `fill_corners_agrid_r8` applied to both u_cc/v_cc halo (for zeta) AND h halo (for pressure gradient) simultaneously could shift the cancellation sweet spot from mid-face to uniform.
+- Visual inspection of the current W2 v-wind at C36 — is 0.159 m/s v_ll_Linf actually VISIBLE in the snapshot, or is it below the display threshold?  Update `diagnostics/fv3_visual/*.png` if visual inspection is ambiguous.
+- Port Fortran FB transport chain (blocked on ng=3 and FB-chain stability — iter-787 showed current FB is broken at C36).
+
+**Deliverable.**  `scripts/diag_iter796_w2_zeta_zero.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  60th iter in iter-752-796 chain.  Mechanistic clarification: the W2 mode-A emerges from a grid-global Cor+press+KE+zeta cancellation whose cube-vertex breakdown is the 0.159 m/s residual.  Numerical zeta is a LOAD-BEARING component of this cancellation; zeroing it makes W2 10× worse.  A Fortran-faithful fix requires either (a) porting Fortran's c_sw KE/vort construction that avoids the A-L cancellation dependency, or (b) making zeta and the gradient-of-B operators cube-vertex-consistent.
