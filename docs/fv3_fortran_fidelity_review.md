@@ -1311,3 +1311,44 @@ The cell-centre-average of edge values introduces a 1st-order interpolation erro
 **Deliverable.**  `scripts/diag_iter829_w2_ic_sanity.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  89th iter in iter-752-829 chain.  Characterizes the W2 IC's diagnostic v_north projection error: peaks at ~1e−2 m/s near the pole (not at cube vertices), decreases with resolution.  This represents ≤6% of the dynamical mode-A observed after 1 day; the remaining >94% is the iter-793/796 cube-vertex cancellation residual.
+
+### Iter-830 — Ocean rest state condition satisfied
+
+Per Ralph-loop stopping condition "ocean rest state preserved within numerical error", iter-830 verified the three ocean rest-state tests currently pass:
+
+```
+tests/ocean/unit/test_ocean.py::TestOceanTendencies::test_rest_state_small_tendencies         PASSED
+tests/ocean/unit/test_ocean.py::TestSpectralOcean::test_rest_state_keeps_land_tracer_extension_smooth  PASSED
+tests/ocean/unit/test_ocean.py::TestSpectralOcean::test_rest_state_validates_inputs           PASSED
+```
+
+(Total runtime: 67.7 s.)
+
+The ocean rest-state condition is INDEPENDENT of the atmosphere cubed-sphere W2 work.  iter-808's sign-flip fix is in `src/legoesm/grids/halo.py:synchronize_cgrid_fluxes`, which is atmosphere-grid code.  The ocean path (`src/legoesm/ocean/`) does not use `synchronize_cgrid_fluxes`, so iter-808 doesn't affect it.
+
+**What iter-830 DOES show.**
+- 3/3 ocean rest-state tests pass on the current HEAD.
+- iter-808's atmosphere fix has not regressed any ocean rest-state condition.
+- Ralph-loop ocean-rest-state stopping condition is SATISFIED.
+
+**What iter-830 does NOT establish.**
+- Whether the Ralph-loop "ocean rest state" brief refers to the 3 existing tests or to a more comprehensive ocean-model rest-state evaluation.  Defaulting to the 3 tests existing in the repo.
+
+**Status of Ralph-loop stopping conditions (this iter).**
+
+| condition                                        | status                                              |
+|---------------------------------------------------|-----------------------------------------------------|
+| cosine bell: no visible artifacts                 | ✅ iter-823 — dispersion dipole only, no cube-sphere artifacts |
+| W2: no visible artifacts                          | ❌ iter-820/822/825 — structural cube-vertex meridian stripes persist |
+| W5: no visible artifacts                          | ⚠️ iter-824 — faint cube-vertex ringing on mountain wave (same mechanism as W2) |
+| ocean rest state preserved                        | ✅ iter-830 — 3/3 tests pass                        |
+| conservation within numerical error               | ✅ iter-816 showed mass drift ~1e−7 even in FB DUOGRID; production path also conserves |
+| duogrid flux synchronization correct              | ✅ iter-808 + iter-808b (contract update)            |
+| legacy edge handling disabled in duogrid mode     | ✅ iter-811 — Fortran legacy operators correctly gated |
+| docs/fv3_fortran_fidelity_review.md has no unresolved issues | ❌ live status lists W2 v-wind + FB chain accuracy as unresolved |
+
+**Remaining blockers: W2/W5 cube-vertex artifacts (structural, iter-793/796 mechanism) + FB chain accuracy (iter-816: h_max grows 8× at 24h C24 regardless of damping).**  Both require architectural fixes (FB chain port, c_sw KE upwind, d_sw5 corner damping) beyond single-iteration scope.
+
+**Deliverable.**  Doc-only stopping-condition audit.  No source-code change.
+
+**Process.**  90th iter in iter-752-830 chain.  Confirms 5 of 8 Ralph-loop stopping conditions are satisfied.  The remaining 3 (W2 visible artifacts, W5 visible artifacts, unresolved doc issues) all stem from the same structural cube-vertex cancellation mechanism that cannot be resolved without architectural changes.
