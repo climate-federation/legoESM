@@ -1047,3 +1047,49 @@ The corrected lat-lon plot shows:
 **Deliverable.**  Updated `scripts/diag_w2_visual.py` (IC + projection convention fix) + regenerated 4 lat-lon PNGs.  No source-code change to production paths.  No new sentinel.
 
 **Process.**  83rd iter in iter-752-820 chain.  Visual diagnostic now MATCHES production sentinel exactly on both v_ll_Linf number and the underlying v_north projection convention.  The W2 artifact geometry is now clearly: vertical stripes at 4 cube-vertex meridians between ±20° and ±45° lat, ±0.15 m/s peak.  Polar and equatorial regions clean.
+
+### Iter-822 — W2 LEGACY convergence plateaus at C36; v_ll_Linf INCREASES from C36 to C48
+
+Per iter-820's iter-821+ candidate to confirm the structural nature of the W2 residual, iter-822 runs W2 at C24/C36/C48 under LEGACY and measures convergence order.
+
+**Method** (`scripts/diag_iter822_w2_resolution_scan.py`).  LEGACY, 1 day, dt=300s, iter-761 canonical config (scaled `_div_damp_cube(n)` with 8× factor).
+
+**Result.**
+
+| n  | dx [km] | L2        | v_ll_Linf | v_cc_Linf |
+|----|---------|-----------|-----------|-----------|
+| 24 | 417.0   | 3.391e−04 | 2.113e−01 | 2.189e−01 |
+| 36 | 278.0   | 2.176e−04 | 1.585e−01 | 1.879e−01 |
+| 48 | 208.5   | 2.131e−04 | 1.815e−01 | 2.149e−01 |
+
+**Convergence analysis.**
+
+| pair     | L2 order | v_ll_Linf order | v_cc_Linf order |
+|----------|----------|-----------------|-----------------|
+| C24→C36  | p ≈ 1.09 | p ≈ 0.71        | p ≈ 0.38        |
+| C36→C48  | p ≈ 0.07 | p = nan (INCREASES) | p = nan (INCREASES) |
+
+**Observation — numerical reportage only.**
+- C24→C36: all metrics DECREASE (convergent, p ∈ [0.38, 1.09]).
+- C36→C48: L2 essentially flat (p ≈ 0.07); v_ll_Linf and v_cc_Linf INCREASE slightly (0.159 → 0.182 m/s, 0.188 → 0.215 m/s).
+- The mode-A amplitude plateaus or grows slightly between C36 and C48.
+
+**Structural confirmation.**  The W2 LEGACY mode-A at ~0.159 m/s is NOT a truncation error that refinement can reduce.  It's structural — matches iter-793/796's cube-vertex cancellation residual which doesn't depend on grid spacing.  This aligns with iter-778/779's earlier "cosine bell plateau above C24" finding.
+
+**What iter-822 DOES show.**
+- W2 LEGACY v_ll_Linf at C48 (0.182 m/s) is slightly WORSE than at C36 (0.159 m/s).
+- The apparent convergence from C24 (0.211) to C36 (0.159) is not sustained to C48 (0.182).
+- Resolution alone cannot close the W2 mode-A gap — structural fix required.
+
+**What iter-822 does NOT establish.**
+- Whether C72 or C96 continues the plateau or eventually converges.
+- Which specific structural mechanism drives the C48 increase (candidate: halo-interpolation error at cube vertices that grows with resolution in the current A-L+RK3 discretisation).
+
+**Iter-823+ candidates.**
+- Test C72 to see if the plateau extends further.
+- Accept 0.159 m/s as the structural A-L+RK3 floor; focus on algorithmic fixes (Fortran c_sw port, proper d_sw5 corner damping).
+- Port Fortran FB transport chain as the long-term solution.
+
+**Deliverable.**  `scripts/diag_iter822_w2_resolution_scan.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  84th iter in iter-752-822 chain.  Confirms W2 LEGACY residual is STRUCTURAL (not truncation): resolution refinement from C36 to C48 does not decrease v_ll_Linf; it slightly increases (0.159 → 0.182 m/s).  The mode-A's cube-vertex localisation is a discretisation-level artifact, not a numerical precision issue.
