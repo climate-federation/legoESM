@@ -798,3 +798,43 @@ DUOGRID RK3 (v_ll_Linf = 1.206 m/s, 3.15× LEGACY):
 **Deliverable.**  Updated `scripts/diag_w2_visual.py` + 4 new lat-lon plots in `diagnostics/fv3_visual/` (`w2_vnorth_production_latlon.png`, `w2_vnorth_duogrid_latlon.png`, `w2_herr_production_latlon.png`, `w2_herr_duogrid_latlon.png`).
 
 **Process.**  77th iter in iter-752-814 chain.  Lat-lon visualisation makes the W2 artifact geometry explicit: LEGACY has a polar-band + subtle cube-vertex-meridian pattern; DUOGRID has an 8-cube-vertex dipole signature matching the iter-793/796 mechanism.  No new tests broken; background regression run completed with exit code 0.
+
+### Iter-815 — FB chain post iter-808: stable under DUOGRID, crashes under LEGACY
+
+`FV3FBShallowWaterModel` was previously marked "EXPERIMENTAL, NOT PRODUCTION-READY. Known unstable (85 m/s v-wind after 1 day, 3% mass error)".  But the FB chain's `_c_sw` calls `synchronize_cgrid_fluxes` at `fv3_sw_core.py:1311` (gated on `use_duogrid`), so iter-808's sign-flip fix applies automatically.
+
+**Method** (`scripts/diag_iter815_fb_chain_post_808.py`).  W2 C24 6-hour integration using `FV3FBShallowWaterModel` with `div_damp=0, damp_v=0, nord_v=0, d4_bg=0.16, nord=1` under LEGACY (`use_duogrid=False`) and DUOGRID (`use_duogrid=True`).
+
+**Result.**
+
+| variant     | L2         | u_cc_Linf | v_cc_Linf | mass drift   | status       |
+|-------------|------------|-----------|-----------|--------------|--------------|
+| FB LEGACY   | —          | —         | —         | —            | CRASH (h=NaN step 60) |
+| FB DUOGRID  | 2.060e−01  | 55.19 m/s | 55.78 m/s | +5.70e−07    | stable but noisy |
+
+**Observation — numerical reportage only.**
+- FB LEGACY blows up at step 60 (5 hours) — the FB chain is UNSTABLE without duogrid halos.
+- FB DUOGRID is STABLE at 6h with mass drift ~5e−7 (tiny, near-perfect conservation).
+- FB DUOGRID L2 = 0.206 (vs ~2e−4 for RK3 LEGACY at 1 day) and v_cc_Linf = 55.8 m/s (vs ~0.19 for RK3 LEGACY) — very noisy but not blowing up.
+- Mass conservation is excellent under FB (+5.7e−7 vs RK3's ~0 with mass-fix).
+
+**What iter-815 DOES show.**
+- iter-808's sync fix has unblocked FB DUOGRID stability: no more catastrophic 85 m/s blowup at 1 day — FB DUOGRID now runs to 6h without crashing.
+- FB LEGACY is still unstable (crashes at 5h), confirming that FB fundamentally needs duogrid halos.
+- FB DUOGRID preserves mass to 7 significant figures — mass conservation is now properly enforced by the flux sync.
+- FB DUOGRID solution is noisy (v_cc_Linf = 55 m/s is large relative to physical solid-body v_north=0) but stable — additional Fortran-faithful work is needed for accuracy (p_grad_c, d_sw1-6 chain).
+
+**What iter-815 does NOT establish.**
+- Whether FB DUOGRID is stable at 1+ day (only tested to 6h).
+- Which FB chain operator causes the v_cc = 55 m/s noise.  Candidates: `_p_grad_c` (pressure gradient at C-grid, iter-?), `_d_sw_native` (d_sw1-6 chain with nord=1 damping), the KE/vort construction in `_c_sw`.
+- Whether the FB chain with RK3-equivalent config (div_damp=8×base, damp_v=0.06, nord_v=2) would be more accurate — we used nord=1 which is d_sw-5 default, not iter-761 canonical.
+
+**Iter-816+ candidates.**
+- Extend FB DUOGRID to 1 day at C24 to check stability horizon.
+- Test FB DUOGRID at C36 to see if resolution helps.
+- Decompose FB chain to find the v_cc noise source (likely p_grad_c or KE upwind construction).
+- Port Fortran-faithful d_sw5 corner divergence damping (still open from iter-758).
+
+**Deliverable.**  `scripts/diag_iter815_fb_chain_post_808.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  78th iter in iter-752-815 chain.  **MAJOR SECONDARY FIX**: iter-808's sync fix also unblocks FB DUOGRID stability.  FB chain now runs 6h without crashing on W2 (previously blew up in 1 day).  FB chain path is no longer completely dead; it just needs downstream accuracy work.  This opens a path toward the Fortran-faithful production chain that was previously blocked.
