@@ -2027,7 +2027,7 @@ Per iter-844b/845's iter-846+ candidate: measure the 4-term pure-dynamics residu
 | peak |value|               | **1.148e−05** m/s²   | **1.903e−05** m/s²   |
 | face, (i, j)               | 5, (0, 0)             | 0, (2, 34)            |
 | lat, lon                   | −35.84°, −133.76°   | +33.90°, −40.00°    |
-| **GC to nearest cube vertex** | **1.16° (AT vertex)** | **4.34° (vertex-adjacent)** |
+| **GC to nearest cube vertex** | **1.16° (vertex-adjacent, edge-midpoint)** | **4.34° (vertex-adjacent)** |
 
 **Cross-location values.**
 - At the FULL peak (face 0, (2,34), GC=4.34°): pure-dynamics = −2.71e−06 (small residual), div_damp = −1.63e−05 (dominant), boundary_fix = 0 → full = −1.90e−05.
@@ -2048,7 +2048,7 @@ Per iter-844b/845's iter-846+ candidate: measure the 4-term pure-dynamics residu
 | **actual dv/dt**              | **−7.077e−06**             |
 
 **Interpretation.**
-- Pure-dynamics cancellation residual peaks AT a cube vertex (GC=1.16°, lat≈−35.3°, lon=−135°) — structurally consistent with iter-793/796's cube-vertex cancellation hypothesis.
+- Pure-dynamics cancellation residual peaks 1.16° from the nearest cube vertex (at the D-grid y-edge midpoint adjacent to the face-5 SW cube-vertex corner) — structurally consistent with iter-793/796's cube-vertex cancellation hypothesis.  NOTE (Codex a87dd12522c0e0e0d): the sampling position is `cdgrid.lat_edge_y/lon_edge_y` which places the point at an EDGE MIDPOINT, not the cube vertex itself.  The 1.16° GC is because the nearest cube vertex is one half-cell away at (−35.26°, −135°).
 - Full-term peak is at GC=4.34° because damping (div_damp) is the dominant non-cancelling term there, while pure-dynamics happens to be NEAR zero (−2.7e−06).
 - The full peak location is largely SET BY the damping: wherever div_damp is locally large AND pure-dynamics happens to have a zero-crossing, the full |dv/dt| gets a div_damp-sized spike.
 - At the pure-dynamics peak (cube vertex), div_damp and boundary_fix collectively PARTIALLY CANCEL the +1.15e−05 dynamics residual, bringing the full |dv/dt| down to 7.08e−06.  Damping+boundary_fix act as a partial-but-imperfect correction AT the vertex.

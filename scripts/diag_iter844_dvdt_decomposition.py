@@ -511,10 +511,24 @@ def main():
         "boundary_fix",
     ):
         print(f"    {name:>26} = {pure_peak_values[name]:.12e}")
-    print(
-        f"  Mode-A decision threshold = {mode_a_threshold:.12e} m s^-2; "
-        f"candidate = {mode_a_candidate}"
-    )
+    # iter-847 label fix (Codex a87dd12522c0e0e0d): the earlier single-
+    # label "candidate = damping-tuning" collapsed a location-dependent
+    # picture into one global conclusion.  Damping REDUCES the full
+    # |dv/dt| at the cube-vertex-adjacent pure-dynamics peak but
+    # CREATES the full peak at the separate vertex-adjacent location
+    # where div_damp is uncancelled.  A single "candidate" label cannot
+    # capture this sign- and location-dependence, so replace the
+    # hardcoded threshold-to-label mapping with an observational
+    # summary.
+    print("  Decision note (location-dependent):")
+    print(f"    Pure-dynamics peak magnitude   = {pure_peak['peak_abs']:.6e} m s^-2")
+    print(f"    Full-term peak magnitude       = {peak['peak_abs']:.6e} m s^-2")
+    print(f"    Reference threshold            = {mode_a_threshold:.6e} m s^-2")
+    print(f"    At the pure-dynamics peak, damping partially CANCELS")
+    print(f"    (sum of damp+bfix opposes pure); at the full-term peak")
+    print(f"    damping is UNCANCELLED (pure-dyn near zero, div_damp")
+    print(f"    dominates).  Mitigation is LOCATION-DEPENDENT — uniform")
+    print(f"    damping tuning cannot reduce both peaks at once.")
     print()
     print("Balance checks:")
     print(f"  max|dv_ref - project(total_cc)| = {residual_total:.12e}")
