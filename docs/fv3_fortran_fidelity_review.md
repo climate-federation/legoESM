@@ -894,3 +894,38 @@ FB DUOGRID: **completed 24 h without NaN**, but h_max grew substantially:
 **Deliverable.**  `scripts/diag_iter816_fb_1day.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  79th iter in iter-752-816 chain.  Extends iter-815's 6h snapshot to 24h with 1h sampling.  Confirms that on this C24 run: FB DUOGRID does NOT crash at 1 day but DOES show substantial accuracy loss (h_max grows 8×).  FB LEGACY still crashes at ~5h.  The prior "unstable 85 m/s at 1 day" claim is partially confirmed (v_cc order-of-magnitude matches) — but refined as "finite-but-inaccurate" rather than "crashed".
+
+### Iter-817 — FB with iter-761 damping crashes SOONER; no-damping is the least-bad FB config
+
+Per iter-816's iter-817+ candidate, iter-817 re-runs FB C24 W2 24h with iter-761-equivalent damping enabled (damp_v=0.06, nord_v=2, d4_bg=0.16, nord=2) to test whether iter-816's 8× h growth is suppressed.
+
+**Result (C24, 24h).**
+
+| variant                             | status                   |
+|-------------------------------------|--------------------------|
+| FB DUOGRID, no damping (iter-816)   | h_max=24040 at 24h (finite but inaccurate) |
+| FB DUOGRID, iter-761 damping        | CRASH at step 95 (≈7.9 h) |
+| FB LEGACY, iter-761 damping         | CRASH at step 52 (≈4.3 h) |
+
+**Observation — numerical reportage only.**  Adding iter-761-style damping to the FB chain makes it CRASH SOONER (7.9h vs 24h stable under no-damping).  This is counter-intuitive: damping should stabilise, not destabilise.  The likely cause: the FB chain's internal `div_damp` parameter is documented as "LEGACY, UNUSED" in `fv3_fb_sw_step`, and the iter-761 canonical config uses `damp_v=0.06, nord_v=2, d4_bg=0.16, nord=2` — these apply within FB but may interact badly with the FB-specific `_c_sw + p_grad_c + d_sw_native` chain.
+
+The iter-816 no-damping config (damp_v=0, nord_v=0, d4_bg=0.16, nord=1) appears to be the LEAST-BAD tested FB DUOGRID config: it's finite at 24h despite the 8× h-growth.
+
+**What iter-817 DOES show.**
+- Adding iter-761-equivalent damping to FB DUOGRID at C24 makes the chain crash within 8 hours.
+- FB LEGACY with the same damping crashes within 5 hours — similar failure pattern as no-damping FB LEGACY.
+- The no-damping FB DUOGRID (iter-816) remains the least-bad tested FB config at C24/24h.
+
+**What iter-817 does NOT establish.**
+- Which specific damping knob (damp_v, nord_v, d4_bg, nord) causes the FB crash.
+- Whether an FB-specific damping tuning (different from iter-761) would stabilise + improve accuracy.
+- Whether C36 or finer resolutions would behave differently.
+
+**Iter-818+ candidates.**
+- Knob-at-a-time: test FB DUOGRID with ONLY damp_v=0.06 (vs default 0), ONLY nord=2, etc. to isolate the crash trigger.
+- Investigate whether the `nord=2` d_sw damping uses `div_damp` internally or a different coefficient scaling under duogrid.
+- Port Fortran-faithful d_sw5 corner divergence damping (long open).
+
+**Deliverable.**  `scripts/diag_iter817_fb_with_damping.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  80th iter in iter-752-817 chain.  Shows that iter-761-style damping destabilises the FB chain (crashes sooner).  The FB chain appears to have its own damping requirements distinct from RK3.  The least-bad FB DUOGRID config remains iter-816's no-damping variant (finite-but-inaccurate at 24h).
