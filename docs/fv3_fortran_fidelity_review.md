@@ -1953,7 +1953,9 @@ Bit-for-bit match with iter-792/diagnostics/iter792_output/iter792_w2_t0_tendenc
 | **sum(projected terms)**    | **−1.903e−05**           | —          |
 | **actual dv/dt**            | **−1.903e−05**           | —          |
 
-Balance residual: `|sum(projected_terms) − actual dv/dt| = 6.8e−10` (above the 1e−10 JAX-float64 noise floor but well below the peak magnitude).
+Balance residual: `|sum(projected_terms) − actual dv/dt| = 6.8e−10` (above the 1e−10 JAX-float64 noise floor but 5 orders of magnitude below the peak).
+
+**Decomposition caveat (Codex a06f94d706d52915d).**  The diagnostic defines `pressure_gradient = −(dBernoulli − dKE)` then re-adds `ke_gradient` separately — this is an algebraic partition of the Bernoulli gradient, not independently replayed production operators.  Production computes `−dBernoulli` in one pass and never splits it.  The 6.8e−10 replay residual comes from this partition-then-reassociate step (half from the Bernoulli split itself, half from summing projected term fields separately).  The per-term magnitudes remain MECHANISM-FAITHFUL for understanding which physical contributions are near-cancelling at the cube-vertex stencil, but they are NOT bit-for-bit equivalent to replaying production operators term-by-term.
 
 **Mechanism characterisation (post-iter-808).**
 - **Coriolis and pressure gradient near-cancel**: residual `+9.5e−05` (4.8 % of each individual magnitude).  This is the classic solid-body rotation Cor+press balance that should be exact for W2; numerical imperfection leaves the 9.5e−05 residual.
@@ -1975,10 +1977,13 @@ Balance residual: `|sum(projected_terms) − actual dv/dt| = 6.8e−10` (above t
 - Whether iter-765/766-style Fortran corner fills (which worsened W2 individually) could help when COMBINED.
 
 **Iter-845+ candidates.**
-- Audit each of the 4 near-cancelling terms (Cor, press, rel-vort, KE) against Fortran for specific cube-vertex handling differences.  The one with the biggest deviation is the best candidate.
-- Measure the 4-term cancellation residual SEPARATELY (without div_damp / boundary_fix / hyperdiff) to isolate the "pure dynamics" residual from the damping/correction contributions.
-- Inspect `_arakawa_lamb_gradient` for cube-vertex-specific pressure-gradient operator behaviour.
+- Per-term cube-vertex audits against Fortran.  Note (Codex a06f94d706d52915d): Fortran has no 1:1 analogue of `fv3_sw_tendencies` — Cor/pressure are split across FB phases (c_sw / p_grad_c / d_sw), so the audit is not a line-by-line compare but an operator-correspondence check.  Concrete entry points:
+  - KE (A-L production uses cell-centre `0.5*(u_cc² + v_cc²)` + halo-pad + 4-point gradient): Fortran `sw_core.F90:303-372` for KE upwind construction in `c_sw`.
+  - Relative vorticity transport (A-L production uses corner vort from D-grid circulation): Fortran `sw_core.F90:378-408` (corner vorticity) and `416-480` (vort flux).
+  - Pressure gradient / Bernoulli halo: Fortran `sw_core.F90:3419-3454` (d2a2c_vect duogrid branch), `3560` (uc 4th-order), `3691` (vc 4th-order).
+  - `_arakawa_lamb_gradient` cube-vertex corner handling: prior iter-765/766 tested Fortran corner fills; a HALO inspection may find a different issue.
+- Measure the 4-term cancellation residual SEPARATELY (without div_damp / boundary_fix / hyperdiff) to isolate the "pure dynamics" residual from the damping/correction contributions.  (Use the current diag's mask; compute the 4-term sum restricted to the 5° cube-vertex stencil.)
 
 **Deliverable.**  `scripts/diag_iter844_dvdt_decomposition.py` (Codex-drafted, validated by post-iter-843 run).  No production source-code change.  All 14 W2 sentinels unaffected (no code change).
 
-**Process.**  104th iter in iter-752-844 chain.  First post-iter-808 W2 LEGACY dv/dt measurement.  Confirms iter-808/836-838 code changes do NOT affect the W2 LEGACY mode-A signature (iter-808 is duogrid-only, iter-836-838 are FB-chain-only).  Characterises mode-A as a multi-term imperfect-cancellation residual at the cube-vertex stencil, NOT a single-operator bug.  Opens iter-845+ scope to per-term cube-vertex audits (Cor / press / rel-vort / KE / div_damp separately).
+**Process.**  104th iter in iter-752-844 chain.  First post-iter-808 W2 LEGACY dv/dt measurement.  Confirms iter-808/836-838 code changes do NOT affect the W2 LEGACY mode-A signature (iter-808 is duogrid-only, iter-836-838 are FB-chain-only).  Characterises mode-A as a multi-term imperfect-cancellation residual at the cube-vertex stencil, NOT a single-operator bug.  Opens iter-845+ scope to per-term cube-vertex audits (Cor / press / rel-vort / KE / div_damp separately).  Refines (not contradicts) iter-793 (which localised the large constituent errors) and iter-796 (which showed zeta/KE are load-bearing cancellation terms).  Codex adversarial review a06f94d706d52915d: mechanism attribution clean, with caveats on the Bernoulli partition (noted inline) and on the fact that Fortran has no 1:1 analogue of the A-L tendency (cited iter-845+ entry points).
