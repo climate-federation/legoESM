@@ -1167,3 +1167,44 @@ The prior plots were displaying a mis-configured run, not production.  The new p
 **Deliverable.**  Updated `scripts/diag_w2_visual.py` + regenerated PNG plots in `diagnostics/fv3_visual/`.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  61st iter in iter-752-797 chain.  Fixes the W2 visual diagnostic to accurately reflect production behaviour.  Surfaces 3 distinct visible artifacts previously masked by the misconfig: cube-vertex v_north edge striping (the mode-A we've been tracking), pole-coordinate X-pattern, and interior 2dx h checkerboard.  The checkerboard is a new observation and should be investigated in iter-798+.
+
+### Iter-798 — W2 h-checkerboard amplitude vs resolution: small and non-monotone
+
+Per iter-797's iter-798+ candidate "investigate 2dx h checkerboard origin and scaling", iter-798 measures the 2dx checkerboard amplitude in W2 1-day h_err at C24/C36/C48 with identical iter-761 config.
+
+**Method** (`scripts/diag_iter798_w2_checkerboard_scaling.py`; committed output at `diagnostics/iter798_output/iter798_w2_checkerboard_scaling.txt`).  W2 alpha=0 1-day, iter-761 canonical.  At each resolution extract face-averaged checkerboard amplitude via `sign = (-1)^(i+j)` applied to interior cells (3-cell boundary buffer), then absolute mean.
+
+**Result.**
+
+| n  | dx [km] | max \|h_err\| [m] | face-avg checker amp | face-4 max \|h_err\| |
+|----|---------|------------------|----------------------|-----------------------|
+| 24 | 417.0   | 4.515            | 2.486e−03            | 4.515                 |
+| 36 | 278.0   | 4.588            | 4.833e−04            | 4.569                 |
+| 48 | 208.5   | 6.598            | 1.464e−03            | 6.551                 |
+
+Scaling ratios:
+- C24→C36 (dx ratio 0.67×): checkerboard amp ratio = 0.19 (faster than dx² = 0.44).
+- C36→C48 (dx ratio 0.75×): checkerboard amp ratio = 3.03 (INCREASES with resolution).
+
+**Observation — numerical reportage only.**  The 2dx checkerboard amplitude is small (~1e-3) compared to max |h_err| (~5 m) at all three resolutions — i.e. the "checkerboard" I described visually in iter-797 is not the dominant h_err pattern.  The dominant pattern is a broader equatorial/polar bell-shaped deviation with max ~5 m amplitude.  The checkerboard amplitude scales non-monotonically (shrinks C24→C36, grows C36→C48), suggesting grid-resolution-specific interactions with the boundary_fix cascaded smoothing or PPM transport, rather than a pure truncation-level error.
+
+Max |h_err| is NON-CONVERGENT: 4.5 at C24, 4.6 at C36, 6.6 at C48.  This is consistent with iter-778/779's cosine-bell plateau finding — the structural W2 h error does not reduce with grid refinement, indicating the residual comes from the discretisation, not resolution-dependent truncation.
+
+**What iter-798 DOES show.**
+- The 2dx checkerboard in h_err is small (amp ~ 1e-3) compared to the overall h_err (~5 m).
+- Max |h_err| does NOT decrease with resolution from C24 to C48 — consistent with structural, not truncation, error.
+- The checkerboard does not scale as dx² at C36→C48 (it grows 3× instead of shrinking to 0.56×) — not pure truncation.
+
+**What iter-798 does NOT establish.**
+- Whether the checkerboard comes from PPM's 2dx null mode, the boundary_fix smoothing, or A-L aliasing.
+- Whether the C48 checkerboard growth is a genuine structural increase or a specific-grid fluke.
+
+**Iter-799+ candidates.**
+- Investigate why h_err is non-convergent from C24 to C48.  The residual h_err is ~5-7 m regardless of grid — same structural signature as cosine bell plateau.
+- Test the Fortran FB chain at C48 — if it's stable there, it could be used as a production path for finer grids even if broken at C36.
+- Combine multi-knob Fortran corner fills (vector + a2b scalar) — currently only single-knob tests exist, all making W2 worse.
+- Port Fortran FB transport chain (blocked on ng=3 and FB-chain stability).
+
+**Deliverable.**  `scripts/diag_iter798_w2_checkerboard_scaling.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  62nd iter in iter-752-798 chain.  Downgrades iter-797's "2dx checkerboard" concern: the checkerboard amplitude is ~1000× smaller than max |h_err|, and max |h_err| is non-convergent across resolutions — consistent with the structural-error plateau we've documented for cosine bell (iter-778/779) and W2 (iter-782 through iter-796).  The mode-A and h_err residuals are all manifestations of the same underlying discretisation issue: the A-L+RK3 pipeline cannot fully eliminate cube-vertex cancellation residuals without the Fortran c_sw construction.
