@@ -1861,13 +1861,13 @@ The halo fix made the DUOGRID Path B dh/dt error 16 % WORSE at cube vertices.  N
 **Interpretation.**  Cross-face halo via `pad_halo_vector` with covariant cell-centre metrics is NOT the same as Fortran's `ext_vector` CGRID path.  Fortran's CGRID halo does `mpp_update_domains(CGRID_NE)` + `c2l_ord2_cgrid` (metric-weighted A-grid conversion with `a11..a22` coefficients that carry `1/sin_sg` geometry) + `cubed_a2c_halo` (`fv_duogrid.F90:2590-2668, 2765-2830`).  Our `pad_halo_vector` covariant branch uses cell-centre `cosa_cell`/`sina_cell` non-orthogonality metrics only — an insufficient approximation for the full CGRID halo semantics required here.  Piecemeal halo fixes in one operator can regress when the downstream (`transport_step` + PPM) assumes the specific `ext_vector` halo convention.
 
 **What iter-842 DOES show.**
-- A direct port of the iter-836b halo-fix pattern does NOT work for `_d_sw1_recompute_ut_vt`.  The two operators' halo semantics differ.
-- `_d_sw1_recompute_ut_vt`'s current `mode='edge'` halo is load-bearing under the combined `_d_sw1_recompute_ut_vt` + `transport_step` + PPM pipeline.
-- A Fortran-faithful fix requires porting the full `ext_vector` CGRID path (c2l_ord2_cgrid + cubed_a2c_halo), not just a drop-in pad_halo_vector call.
+- A direct port of the iter-836b halo-fix pattern does NOT work for `_d_sw1_recompute_ut_vt`.  The two operators' halo semantics differ (one counterexample; universality claim scoped).
+- `_d_sw1_recompute_ut_vt`'s current `mode='edge'` halo is load-bearing under the combined `_d_sw1_recompute_ut_vt` + `transport_step` + PPM pipeline at C36 DUOGRID W2 IC (one tested configuration).
 
 **What iter-842 does NOT establish.**
-- Whether a correctly-ported `ext_vector` CGRID halo would fix the cube-vertex dh/dt spike.
+- Whether a correctly-ported `ext_vector` CGRID halo (the hypothesised full Fortran-faithful path — not yet ported in Python) would fix the cube-vertex dh/dt spike.  This remains a HYPOTHESIS: the iter-842 negative result shows iter-836b's pattern is insufficient but does not prove that `ext_vector` CGRID specifically is the remedy.
 - Whether the 400× dh/dt excess is primarily a halo issue, a PPM-limiter issue, or a `transport_step` mass-fixer absence.
+- Whether the iter-842 result generalises beyond C36 DUOGRID W2 IC.
 
 **Iter-843+ candidates.**
 - Port `ext_vector` CGRID path (or a stripped-down version that only does the 1-halo CGRID exchange) as a dedicated Python helper.  Multi-iter.
