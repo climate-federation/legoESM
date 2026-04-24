@@ -1790,7 +1790,7 @@ Baseline L2 = 2.18e−4 vs sentinel's measured 2.07e−4 — within 5 % (expecte
 
 **Process.**  100th iter in iter-752-840 chain.  Addresses Codex stop-time review: the iter-839b reproducibility diag now reproduces the pinned iter-761 canonical matrix sentinel baseline.  No new fidelity finding; observational infrastructure hardening only.
 
-### Iter-841 — ut/vt transport path RULES OUT as a drop-in improvement (40,000× worse dh/dt error at cube vertices)
+### Iter-841 — Current-form ut/vt swap is NOT a drop-in improvement (400× worse one-step dh/dt at cube vertices)
 
 Per iter-839b's top iter-840+ candidate (Codex ae42d036a93fa70f4: "compare `compute_transport_quantities` + `transport_step` (covariant ut/vt path) vs current `fv3_cc2c` + `cgrid_mass_flux_divergence`") and iter-841's Codex scoping audit (aae6135c09d2c35ff).
 
@@ -1811,9 +1811,10 @@ W2 solid-body rotation has EXACT `dh/dt = 0` everywhere — both paths report nu
 | lat, lon                       | +46.24°, +1.31°     | −37.61°, +42.49°   | — |
 | **GC to nearest cube vertex**  | **34.38°** (mid-face) | **3.09°** (AT vertex) | — |
 
-- Path A peak is at mid-face (34° from cube vertex), consistent with the W2 mode-A being a face-interior numerical signature.
-- Path B peak is AT a cube vertex (GC = 3.09°), with amplitude 418× larger than Path A.
+- Path A peak is at mid-face (34° from cube vertex) — a mass-transport error signature, NOT the W2 mode-A mechanism.  Prior iter-792/796 established that W2 mode-A shows up in `dv/dt` at cube vertices (GC ≈ 4.3°), not in `dh/dt`; mode-A is a momentum artefact, not a mass-transport one.
+- Path B peak is AT a cube vertex (GC = 3.09°), with amplitude 418× larger than Path A's `dh/dt`.
 - Delta `dh_dt_B − dh_dt_A` peak is 5.545e−02 (41 724 % of Path A's peak).
+- Codex adversarial cross-check (dt sweep 1s..300s): peak_B / peak_A ≈ 417-418× at every dt, so the 418× ratio is NOT a 300 s accumulation artefact — it's a genuine one-step discretisation difference.
 
 **Observation — numerical reportage only.**  Path B's dh/dt error is DOMINATED by cube-vertex-localised behaviour at 400× Path A's scale.  Even though Path B matches Fortran's covariant→contravariant→transport pipeline more faithfully in principle, its specific Python implementation produces catastrophic cube-vertex errors on W2 IC.  Candidate reasons (not tested in iter-841):
 
@@ -1822,13 +1823,14 @@ W2 solid-body rotation has EXACT `dh/dt = 0` everywhere — both paths report nu
 3. **PPM hord choice**: `transport_step`'s internal `fv_tp_2d` uses PPM with specific flux limiting; this may behave differently at cube vertices than `cgrid_mass_flux_divergence` which has its own path.
 
 **What iter-841 DOES show.**
-- The ut/vt path is NOT a drop-in improvement.  Swapping `fv3_sw_tendencies` step (b) to Path B would catastrophically regress W2 LEGACY (400× dh/dt growth at cube vertices).
-- The current Path A has LESS W2 error than Path B — the iter-839 "load-bearing asymmetry" is load-bearing in a deeper sense: the current `fv3_cc2c` output convention implicitly tunes mass transport to minimise cube-vertex W2 error.
-- Codex iter-839b's recommendation is RULED OUT as a drop-in path.
+- The CURRENT-FORM ut/vt swap (via `_d_sw1_recompute_ut_vt` + `transport_step` with their current halo handling) is NOT a drop-in improvement.  Swapping `fv3_sw_tendencies` step (b) to this specific Path B variant would produce 400× larger one-step dh/dt error at cube vertices.
+- The current Path A has LESS one-step dh/dt error than this Path B variant.  NOTE: this is about mass-transport error; the W2 mode-A (dv/dt stripe mechanism from iter-792/796) is a SEPARATE momentum artefact that iter-841 does not address.
+- Codex iter-839b's specific drop-in recommendation is ruled out IN ITS CURRENT FORM.  A halo-fixed variant of Path B (see iter-842+ candidates) may still be worth testing.
 
 **What iter-841 does NOT establish.**
 - Whether fixing the halo gap in `_d_sw1_recompute_ut_vt` (line 75 `mode='edge'` on vc_pad) would bring Path B's cube-vertex error down below Path A's.
 - Whether the Fortran `c_sw`+`d_sw1` full pipeline (including Fortran's own halo-exchanged uc/vc from ext_vector and its specific d_sw1 boundary solves) produces cube-vertex W2 error comparable to Path A or Path B.
+- Whether Path A's OR Path B's dh/dt error is the relevant metric for W2 mode-A.  Mode-A is a dv/dt phenomenon (iter-792/796: peak dv/dt at cube vertex, GC=4.3°); iter-841's dh/dt comparison may be orthogonal to the actual W2 LEGACY blocker.  iter-842+ should cross-check with the dv/dt signature.
 
 **Iter-842+ candidates.**
 - Audit and fix `_d_sw1_recompute_ut_vt`'s halo at panel edges (mode='edge' on vc_pad/uc_pad at lines 75, 83).  If this brings Path B error under Path A, the ut/vt path becomes a real candidate.
@@ -1837,4 +1839,6 @@ W2 solid-body rotation has EXACT `dh/dt = 0` everywhere — both paths report nu
 
 **Deliverable.**  `scripts/diag_iter841_transport_paths.py` + committed output.  No source-code change.  All 14 W2 sentinels unaffected (no production change).
 
-**Process.**  101st iter in iter-752-841 chain.  Rules out the ut/vt drop-in as a W2 LEGACY improvement: Path B gives 400× worse dh/dt error at cube vertices.  Reveals that `_d_sw1_recompute_ut_vt` has its own halo fidelity gap (mode='edge' on cross-face vc/uc).  Narrows iter-842+ scope to halo fixes on the ut/vt path rather than a path swap.  Two drop-in fixes now ruled out in two iters (iter-839 symmetric v_c: 220× regression; iter-841 ut/vt swap: 400× regression at dh/dt).
+**Process.**  101st iter in iter-752-841 chain.  Rules out the CURRENT-FORM ut/vt drop-in as a W2 LEGACY improvement: Path B gives 400× worse one-step dh/dt at cube vertices.  Reveals that `_d_sw1_recompute_ut_vt` has its own halo fidelity gap (mode='edge' on cross-face vc/uc at lines 75, 83).  Narrows iter-842+ scope to: (a) halo fixes on the ut/vt path, (b) checking whether dh/dt is the right proxy for W2 mode-A (which is a dv/dt phenomenon per iter-792/796).  Two drop-in fixes now ruled out in two iters (iter-839 symmetric v_c: 220× L2 regression; iter-841 ut/vt swap: 400× one-step dh/dt regression at cube vertices).
+
+**iter-841b (adversarial-review fixes).**  Codex abee51290df2cd7af flagged two WEAKENS: (1) my rule-out wording was too broad (tests one variant); (2) my attribution of Path A's mid-face dh/dt peak to the W2 mode-A mechanism was WRONG — mode-A is a dv/dt cube-vertex phenomenon, not dh/dt.  Title and claims above rewritten to scope the rule-out to "current-form swap" and explicitly distinguish mass-transport error (dh/dt) from the mode-A momentum artefact (dv/dt).  Codex dt-sweep cross-check (dt=1,3,10,30,100,300 s) confirmed 418× ratio is not a time-accumulation artefact.
