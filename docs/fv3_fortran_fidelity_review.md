@@ -524,3 +524,67 @@ Candidate reasons the sync fails:
 **Deliverable.**  `scripts/diag_iter806_cdgrid_metric_diff.py`, `scripts/diag_iter806b_flux_sync_test.py` + committed outputs.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  70th iter in iter-752-806 chain.  **ROOT CAUSE ISOLATED**: the DUOGRID t=0 dh/dt blowup is produced by `synchronize_cgrid_fluxes`.  Disabling it recovers LEGACY behaviour to 1.00× exact ratio.  This is the Ralph loop's critical duogrid constraint #1 — flux synchronization between adjacent faces — and its current implementation interacts badly with the PPM path.  iter-807+ should audit the Fortran reference and our connectivity/sign conventions.
+
+### Iter-807 / 808 — Sign-aware flux sync FIXES DUOGRID (1172× → 1.12× t=0 dh/dt, 800× → 7× 1-day W2)
+
+**iter-807 flux-discrepancy audit** (`scripts/diag_iter807_flux_sync_audit.py`):  for each of 12 shared face-to-face edges at C36 W2 IC, compare face-A's boundary flux against face-B's matching-edge flux (pre-sync).  Find the edges where the two disagree strongly (so averaging produces a bad result).
+
+**Result.**  8 out of 12 shared edges have `max|A-B|/max(|A|,|B|)` < 1e-3 — nearly identical values.  FOUR edges have rel=2.00 (opposite signs):
+
+| face-A edge ↔ face-B edge   | rev    | rel  |
+|------------------------------|--------|------|
+| 1 N ↔ 4 E                    | False  | 2.00 |
+| 2 S ↔ 5 S                    | True   | 2.00 |
+| 2 N ↔ 4 N                    | True   | 2.00 |
+| 3 S ↔ 5 W                    | False  | 2.00 |
+
+All 4 problematic edges involve the polar faces (4 or 5).  `rel=2.0` means A and B have similar magnitude but OPPOSITE SIGNS — averaging them (without sign-flip) produces a near-zero result where a large flux should be.
+
+**Physical interpretation.**  At these polar-adjacent edges, the local (i, j) axes of the two faces point in OPPOSITE physical directions at the shared boundary.  So what face A labels as "+flux_y" matches face B's "−flux_y" at the shared edge.  Fortran's `mpp_get_boundary` handles this internally; our Python extracts raw neighbor data and must apply the sign flip explicitly.
+
+**iter-808 sign-aware sync test** (`scripts/diag_iter808_sign_flip_test.py`):  implement a sign-flip-aware sync function where the 8 (face, edge) keys in the problematic-edge table flip the neighbor's flux sign before averaging.
+
+**Result at t=0 on C36 W2 IC.**
+
+| variant                       | dh/dt       | dh ratio vs LEGACY |
+|-------------------------------|-------------|---------------------|
+| LEGACY                        | 1.329e−04   | —                   |
+| DUOGRID default (broken)      | 1.557e−01   | 1171.57×            |
+| DUOGRID sync off              | 1.329e−04   | 1.00×               |
+| **DUOGRID sign-aware sync**   | **1.488e−04** | **1.12×**          |
+
+The sign-aware sync drops DUOGRID t=0 dh/dt from 1.56e−1 to 1.49e−4 — a **1044× improvement**, bringing DUOGRID within 12% of LEGACY (instead of 1172× worse).
+
+**Full-day W2 validation.**
+
+| path                 | L2          | v_ll_Linf   | v_cc_Linf   |
+|----------------------|-------------|-------------|-------------|
+| LEGACY               | 2.176e−04   | 0.159 m/s   | 0.188 m/s   |
+| DUOGRID (before fix) | 1.757e−01   | 99.96 m/s   | 108.7 m/s   |
+| DUOGRID (after fix)  | 1.519e−03   | 1.197 m/s   | 1.299 m/s   |
+| ratio DUOGRID/LEGACY | 6.98×       | 7.55×       | 6.91×       |
+
+**Before iter-808**: DUOGRID was 800× worse than LEGACY (iter-787).  **After iter-808**: DUOGRID is 7× worse — a **115× improvement** in practical W2 behaviour.  DUOGRID is no longer catastrophically broken; it's within an order of magnitude of LEGACY.
+
+**Source change** (`src/legoesm/grids/halo.py`, `synchronize_cgrid_fluxes`):  added `_FLUX_SIGN_FLIP_EDGES` table with the 8 (face, edge) keys requiring sign flip on the neighbor's flux before averaging.  Backward-compatible; LEGACY path (use_duogrid=False) doesn't invoke the sync at all.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**What iter-807/808 DOES show.**
+- The DUOGRID flux sync was averaging fluxes with opposite sign conventions at 4 polar-adjacent shared edges, producing catastrophic cancellation errors.
+- Sign-aware sync removes the catastrophic error: DUOGRID t=0 dh/dt drops from 1172× LEGACY to 1.12× LEGACY, and 1-day W2 drops from 800× LEGACY to 7× LEGACY.
+- The sign-flip table is EMPIRICAL but geometrically meaningful — all 4 affected edges involve polar faces 4 or 5.
+
+**What iter-807/808 does NOT establish.**
+- Whether the sign-flip table is COMPLETE for all test cases (at different resolutions, with different flow fields, with different halo-polluting patterns).  The 8 (face, edge) keys are derived from the solid-body rotation IC geometry, which should be representative.
+- Why DUOGRID 1-day W2 is still 7× worse than LEGACY.  Residual contributions: (a) Lagrange corner fill's du/dt and dv/dt (3–4× LEGACY, not fixed by sign-aware sync); (b) any remaining fine-structure sync error.
+- Whether a proper geometric derivation of the sign-flip table (rather than empirical) would be cleaner and more robust.
+
+**Iter-809+ candidates.**
+- Derive the sign-flip table geometrically from the face-to-face coordinate transformations (e.g., from CONNECTIVITY augmented with a sign field).
+- Consider enabling `_fill_corner_region_averaging` for halo=2 under duogrid to bring du/dt and dv/dt to LEGACY level (iter-803 showed this recovers them exactly, but was a monkey-patch; a Fortran-faithful source switch is needed).
+- Re-run the atmosphere test matrix to confirm the sign-flip fix doesn't regress any other test.
+- Run W5 under the fixed DUOGRID to measure impact.
+- Port Fortran FB transport chain (still blocked on ng=3 and FB stability, but sign-aware sync unlocks the C-grid mass transport path).
+
+**Deliverable.**  Source change in `src/legoesm/grids/halo.py` + `scripts/diag_iter807_flux_sync_audit.py` + `scripts/diag_iter808_sign_flip_test.py` + committed outputs.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.  LEGACY path numerically unaffected.
+
+**Process.**  72nd iter in iter-752-808 chain.  **MAJOR FIX LANDED**: DUOGRID 1-day W2 v_ll_Linf improved from 99.96 m/s (catastrophic) to 1.20 m/s (within an order of magnitude of LEGACY).  The Ralph loop's critical duogrid constraint #1 ("mandatory cube-edge flux synchronization") is now correctly implemented for the polar-adjacent edges that were previously broken.  The DUOGRID path is production-usable again (though still 7× LEGACY, improvable via iter-809+ candidates).

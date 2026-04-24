@@ -1,0 +1,18 @@
+Iter-808 sign-aware flux sync test
+C36 W2 IC, iter-761 config
+
+                                      variant   dh/dt peak   du/dt peak   dv/dt peak
+-------------------------------------------------------------------------------------
+                    LEGACY (sync not applied)    1.329e-04    1.404e-05    1.903e-05
+      DUOGRID (default sync, broken baseline)    1.557e-01    4.700e-05    8.446e-05
+                           DUOGRID (sync off)    1.329e-04    4.700e-05    8.446e-05
+                    DUOGRID (sign-aware sync)    1.488e-04    4.700e-05    8.446e-05
+
+  DUOGRID (default sync, broken baseline): dh 1171.57x, du 3.35x, dv 4.44x
+  DUOGRID (sync off): dh 1.00x, du 3.35x, dv 4.44x
+  DUOGRID (sign-aware sync): dh 1.12x, du 3.35x, dv 4.44x
+
+Interpretation cues (observational only):
+- If sign-aware sync dh/dt ≈ LEGACY: sign-flip is the fix.
+- If still too large: the fix is more nuanced (more edges
+  need treatment, or sign-flip alone doesn't suffice).

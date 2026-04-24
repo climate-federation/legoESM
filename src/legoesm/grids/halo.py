@@ -1909,6 +1909,29 @@ def compute_padded_half_metrics(
 # CGRID flux synchronization (duogrid face-boundary averaging)
 # ==============================================================================
 
+# Iter-808: empirical sign-flip table for `synchronize_cgrid_fluxes`.
+# Certain face-to-face adjacencies (all involving polar faces 4 or 5)
+# use OPPOSITE sign conventions for the mass flux across the shared
+# edge, because the local (i, j) axes on the two faces point in
+# different physical directions at the shared edge.  When averaging
+# face A's flux with face B's flux, we need to sign-flip B's flux
+# at these edges to obtain the physically-correct conservation
+# average.
+#
+# iter-807 measured |A - B| / max(|A|, |B|) for all shared edges on
+# W2 IC at C36.  Most edges had rel ~ 0 (both faces agree).  Four
+# edges had rel = 2.00, indicating opposite signs: identified below.
+#
+# Fortran's mpp_get_boundary handles this internally; our Python
+# extracts raw neighbor data and must apply the sign-flip explicitly.
+_FLUX_SIGN_FLIP_EDGES = frozenset({
+    (1, NORTH), (4, EAST),
+    (2, SOUTH), (5, SOUTH),
+    (2, NORTH), (4, NORTH),
+    (3, SOUTH), (5, WEST),
+})
+
+
 def synchronize_cgrid_fluxes(fx, fy, n):
     """Average C-grid fluxes at shared face boundaries (duogrid conservation fix).
 
@@ -1920,6 +1943,14 @@ def synchronize_cgrid_fluxes(fx, fy, n):
     This is required for conservation when using duogrid halo exchange,
     because each face computes boundary fluxes independently using its own
     extended grid, producing slightly different values at shared edges.
+
+    Iter-808: polar-adjacent shared edges require a sign flip on the
+    neighbor's flux before averaging, because the local (i, j) axes on
+    the two faces point in opposite physical directions at those shared
+    edges.  See ``_FLUX_SIGN_FLIP_EDGES`` above for the empirical table
+    (derived from iter-807 flux-discrepancy measurements).  Without the
+    sign flip, the sync reduced DUOGRID W2 t=0 dh/dt by 1172× vs the
+    signed version (iter-806b/807/808).
 
     Parameters
     ----------
@@ -1945,6 +1976,8 @@ def synchronize_cgrid_fluxes(fx, fy, n):
             nbr_bdy = _extract_cgrid_boundary(fx, fy, nbr_face, nbr_edge, n)
             if rev:
                 nbr_bdy = nbr_bdy[::-1]
+            if (face, edge) in _FLUX_SIGN_FLIP_EDGES:
+                nbr_bdy = -nbr_bdy
             avgs[(face, edge)] = 0.5 * (local_bdy + nbr_bdy)
 
     # Write all averaged values back.
