@@ -546,3 +546,51 @@ Per iter-781's iter-782+ candidate "Audit `_d2a2c_vect` non-duogrid cube-vertex 
 **Deliverable.**  `scripts/diag_iter782_d2a2c_fidelity.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  46th iter in iter-752-782 chain.  First observational measurement of `_d2a2c_vect` absolute error since the iter-776b audit flag was raised.  The 11% relative cube-vertex error is a concrete, quantified artifact that iter-783+ can attempt to repair or rule out.
+
+### Iter-783 — Targeted `_d2a2c_vect` override rules out cube-vertex error as cosine bell driver
+
+Per iter-782's iter-783+ candidate "targeted test: replace ut/vt with analytical values at cube-vertex cells only, re-run 1-day cosine bell, measure Linf vs baseline", iter-783 runs the 1-day C36 cosine bell four times:
+
+- **BASELINE**: unmodified `_d2a2c_vect` output.
+- **OVERRIDE GC ≤ 5°**: 144 cells per field replaced with analytical ut_exact / vt_exact.
+- **OVERRIDE GC ≤ 10°**: 576 cells per field replaced.
+- **OVERRIDE GC ≤ 20°**: 2136 cells per field replaced.
+
+The override is a DIAGNOSTIC-ONLY analytical injection (not a production fix).  ut_exact / vt_exact are computed from the solid-body rotation geographic winds and the same covariant→contravariant formula `_d2a2c_vect` uses internally.
+
+**Method** (`scripts/diag_iter783_cb_mask_override.py`; committed output at `diagnostics/iter783_output/iter783_cb_mask_override.txt`).  C36, β=π/4, dt=1440s (time-aligned per iter-781b), 1 day.  Same `CDGridShallowWaterConfig` as iter-779/780/781.
+
+**Result.**
+
+| case              | L_inf     | L2        | peak cell       | overrides        | ΔLinf vs baseline |
+|-------------------|-----------|-----------|-----------------|------------------|-------------------|
+| BASELINE          | 1.213e+02 | 1.165e-01 | face 3 (30, 32) | 0                | —                 |
+| OVERRIDE GC ≤ 5°  | 1.213e+02 | 1.165e-01 | face 3 (30, 32) | ut=144, vt=144   | +0.0%             |
+| OVERRIDE GC ≤ 10° | 1.213e+02 | 1.165e-01 | face 3 (30, 32) | ut=576, vt=576   | +0.0%             |
+| OVERRIDE GC ≤ 20° | 1.260e+02 | 1.184e-01 | face 3 (30, 32) | ut=2136, vt=2136 | +3.9%             |
+
+**Observation — numerical reportage only.**  Overriding `_d2a2c_vect`'s output at cube-vertex-proximal cells with analytical values does not reduce the 1-day C36 cosine bell Linf:
+- At GC ≤ 5° (144 cells, where iter-782 measured the largest absolute errors of ~5–6 m/s): Linf unchanged to 4 significant digits.
+- At GC ≤ 10° (576 cells, covering 100% of hot points from iter-782): Linf unchanged.
+- At GC ≤ 20° (2136 cells, a large halo around each cube vertex): Linf slightly WORSE (+3.9%), consistent with the override introducing artificial discontinuity at the mask boundary where ut/vt jumps from analytical to interpolated.
+- Peak-error cell position is unchanged at face 3 (30, 32), which corresponds to GC ≈ 11.87° from the nearest cube vertex (iter-780 finding) — outside the 10° override zone.
+
+**What iter-783 DOES show.**
+- The ~6 m/s / 11% relative `_d2a2c_vect` cube-vertex error measured in iter-782 is NOT the dominant driver of the C36 1-day cosine bell Linf at 121.  Removing it entirely (via analytical injection) does not reduce Linf.
+- The cosine bell's trajectory in 1 day does not pass through the 10°-radius cube-vertex error zone, so the localised transport bias does not imprint on the bell's actual path.
+- Introducing the override over an even larger zone (20°) WORSENS Linf because it creates artificial discontinuity.
+
+**What iter-783 does NOT establish.**
+- Which OTHER mechanism causes the observed cosine bell distortion.  Remaining iter-778 candidates: (a) resolution-invariant structural error, (c) cube-vertex-localized error set by face count, (d) PPM limiter.  iter-778/779's plateau above C24 is consistent with (a) or (d).
+- Whether the `_d2a2c_vect` cube-vertex error becomes important for LONGER integrations (multi-day, multi-cube-crossing trajectories).
+- Whether a production-quality fix to `_d2a2c_vect` (e.g., ordering of `fill_corner_region` to match Fortran `veltemp`/`veltempp` snapshot semantics) would improve W2 or ocean-rest-state.
+
+**Iter-784+ candidates.**
+- Test the A→C stencil directly: toggle 4th-order vs 2nd-order A→C interpolation; measure Linf impact.
+- Test the PPM limiter: swap the PPM limiter in `fv_tp_2d` for an unlimited polynomial; measure impact (candidate d).
+- Test fill_corner_region ordering: port Fortran `veltemp`/`veltempp` snapshot semantics and re-run iter-782 to see if the ~6 m/s error drops (does not help the C36 1-day cosine bell per iter-783, but would improve Fortran fidelity for longer horizons).
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter783_cb_mask_override.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  47th iter in iter-752-783 chain.  Rules OUT iter-782's candidate (cube-vertex `_d2a2c_vect` error) as cause of the C36 1-day cosine bell distortion.  Points iter-784+ attention toward candidates (a) and (d).
