@@ -1501,6 +1501,344 @@ def smagorinsky_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+# =============================================================================
+# Leith viscosity (Leith 1996; Fox-Kemper & Menemenlis 2008)
+# =============================================================================
+# Leith is a flow-adaptive horizontal viscosity whose magnitude scales with
+# the gradient of the relative vorticity.  At cell centres
+#
+#     A_L = (C_L * Δ)³ * |∇ζ|                    (classical Leith)
+#     A_L = (C_L * Δ)³ * sqrt(|∇ζ|² + |∇δ|²)      (modified Leith, incl.
+#                                                  divergence gradient)
+#
+# with Δ = sqrt(cell area), ζ = ∂v/∂x − ∂u/∂y the relative vorticity at
+# vertices, and δ = ∂u/∂x + ∂v/∂y the horizontal divergence at cell centres.
+# The classical form targets quasi-nondivergent flows; the modified form adds
+# a divergence-gradient term and is preferred when the simulated flow has
+# strong vertical motions (Fox-Kemper & Menemenlis 2008 §2.3).
+#
+# Units check: (m)³ · (1/(m·s)) = m²/s, matching a harmonic (Laplacian)
+# viscosity coefficient.  Feeding A_L into ``viscous_tendency_cgrid`` gives
+# a ∇·(A_L ∇u)-type tendency; feeding it into the two-pass
+# ``leith_biharmonic_tendency_cgrid`` below gives the Leith-biharmonic
+# operator ∇²(A_L ∇²u) with effective coefficient (C_L)³ Δ⁵ |∇ζ|.
+
+def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇ζ| at cell centres from ζ at vertices.
+
+    Parameters
+    ----------
+    zeta_q : (n_lat+1, n_lon+1, ...) relative vorticity at vertices.
+    grid : LatLonGrid.
+
+    Returns
+    -------
+    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    dlat = grid.dlat
+    cos_lat = grid.cos_lat
+
+    if zeta_q.ndim == 3:
+        cos_lat_b = cos_lat[:, jnp.newaxis, jnp.newaxis]
+    else:
+        cos_lat_b = cos_lat[:, jnp.newaxis]
+
+    # Cell-centre spacings.  cos_lat evaluated at cell-centre latitudes.
+    dx_h = R * cos_lat_b * dlon                           # (n_lat,1[,1])
+    dy_h = R * dlat                                       # scalar
+
+    # ∂ζ/∂x at (i,j): average of north/south vertex-pair zonal differences.
+    dz_dx = 0.5 * ((zeta_q[:-1, 1:] - zeta_q[:-1, :-1])
+                   + (zeta_q[1:, 1:] - zeta_q[1:, :-1])) / dx_h
+    # ∂ζ/∂y at (i,j): average of west/east vertex-pair meridional differences.
+    dz_dy = 0.5 * ((zeta_q[1:, :-1] - zeta_q[:-1, :-1])
+                   + (zeta_q[1:, 1:] - zeta_q[:-1, 1:])) / dy_h
+
+    return jnp.sqrt(dz_dx ** 2 + dz_dy ** 2 + 1e-30)
+
+
+def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇δ| at cell centres from δ at cell centres (periodic in lon).
+
+    Uses centred differences with periodic wrap in longitude and one-sided
+    reflection at the poles (so the magnitude remains non-negative).
+
+    Parameters
+    ----------
+    div_h : (n_lat, n_lon, ...) horizontal divergence at cell centres.
+    grid : LatLonGrid.
+
+    Returns
+    -------
+    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    dlat = grid.dlat
+    cos_lat = grid.cos_lat
+
+    if div_h.ndim == 3:
+        cos_lat_b = cos_lat[:, jnp.newaxis, jnp.newaxis]
+    else:
+        cos_lat_b = cos_lat[:, jnp.newaxis]
+
+    dx_h = R * cos_lat_b * dlon
+    dy_h = R * dlat
+
+    # Zonal gradient: centred difference with periodic wrap (works for any ndim).
+    dd_dx = (jnp.roll(div_h, -1, axis=1) - jnp.roll(div_h, 1, axis=1)) / (2.0 * dx_h)
+
+    # Meridional gradient: centred in interior, one-sided at pole rows.
+    dd_dy_interior = (div_h[2:] - div_h[:-2]) / (2.0 * dy_h)
+    dd_dy_south = (div_h[1:2] - div_h[0:1]) / dy_h
+    dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_h
+    dd_dy = jnp.concatenate([dd_dy_south, dd_dy_interior, dd_dy_north], axis=0)
+
+    return jnp.sqrt(dd_dx ** 2 + dd_dy ** 2 + 1e-30)
+
+
+def leith_viscosity_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: "LatLonGrid",
+    C_leith: float,
+    *,
+    modified: bool = False,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Leith viscosity coefficient at cell centres (h-points).
+
+    ``A_L = (C_L * Δ)³ * |∇ζ|`` (classical) or
+    ``A_L = (C_L * Δ)³ * sqrt(|∇ζ|² + |∇δ|²)`` (modified).
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev) u-face velocity.
+    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev) v-face velocity.
+    grid : LatLonGrid.
+    C_leith : dimensionless Leith coefficient (typical 1.0–2.0).
+    modified : if True, include the divergence-gradient term.
+    mask : cell-centre land mask, optional.
+    u_mask, v_mask : face masks, optional.
+
+    Returns
+    -------
+    A_leith : (n_lat, n_lon, ...) viscosity [m²/s] at h-points.
+    """
+    is_3d = u.ndim == 3
+
+    # Apply face masks to input velocities (same convention as Smagorinsky).
+    u_eff = u if u_mask is None else u * u_mask
+    v_eff = v if v_mask is None else v * v_mask
+
+    # 1. Relative vorticity at vertices.
+    zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)
+    grad_zeta = _grad_zeta_mag_h(zeta_q, grid)
+
+    total_sq = grad_zeta ** 2
+    if modified:
+        # Divergence at cell centres.  Includes boundary-safe spherical
+        # metric terms already.
+        div_h = divergence_cgrid(u_eff, v_eff, grid,
+                                 u_mask=u_mask, v_mask=v_mask)
+        total_sq = total_sq + _grad_div_mag_h(div_h, grid) ** 2
+
+    # Epsilon guards sqrt-gradient at zero (already added to grad_zeta).
+    norm = jnp.sqrt(total_sq + 1e-30)
+
+    Delta = jnp.sqrt(grid.area)
+    if is_3d:
+        Delta = Delta[..., jnp.newaxis]
+
+    A_leith = (C_leith * Delta) ** 3 * norm
+
+    if mask is not None:
+        m = mask[..., jnp.newaxis] if is_3d else mask
+        A_leith = A_leith * m
+
+    return A_leith
+
+
+def leith_viscosity_q_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: "LatLonGrid",
+    C_leith: float,
+    *,
+    modified: bool = False,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Leith viscosity coefficient at vertices (q-points).
+
+    Evaluated from ``|∇ζ|`` on the q-point grid itself: centred differences
+    of ζ between adjacent vertices, normalised by the vertex dual-cell
+    length scale Δ_q = sqrt(A_vertex).
+
+    Parameters
+    ----------
+    u, v, grid, C_leith, modified, mask, u_mask, v_mask — see
+    ``leith_viscosity_cgrid``.
+
+    Returns
+    -------
+    A_leith_q : (n_lat+1, n_lon+1, ...) [m²/s] at vertices.
+    """
+    is_3d = u.ndim == 3
+
+    u_eff = u if u_mask is None else u * u_mask
+    v_eff = v if v_mask is None else v * v_mask
+
+    zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)   # (n_lat+1, n_lon+1[, nlev])
+
+    # --- ∇ζ magnitude AT q-points via centred differences of ζ itself ---
+    R = grid.radius
+    dlat = grid.dlat
+    dlon = grid.dlon
+
+    # Latitudes at q-points: south pole, cell-interface latitudes, north pole.
+    lat = grid.lat
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])
+    lat_q = jnp.concatenate([
+        jnp.array([-jnp.pi / 2], dtype=lat.dtype),
+        lat_interior,
+        jnp.array([jnp.pi / 2], dtype=lat.dtype),
+    ])
+    cos_lat_q = jnp.maximum(jnp.cos(lat_q), 1e-10)
+
+    if is_3d:
+        cos_lat_q_b = cos_lat_q[:, jnp.newaxis, jnp.newaxis]
+    else:
+        cos_lat_q_b = cos_lat_q[:, jnp.newaxis]
+
+    dx_q = R * cos_lat_q_b * dlon
+    dy_q = R * dlat
+
+    # Zonal difference of ζ at q-points.  ``zeta_q`` has shape
+    # ``(n_lat+1, n_lon+1)`` with the wrap column ``[:, n_lon] == [:, 0]``;
+    # rolling the full array would make column 0's west neighbour be the
+    # duplicate, not column ``n_lon-1``.  Do the centred difference on the
+    # first ``n_lon`` columns and restore the wrap at the end.
+    n_lon = grid.n_lon
+    zeta_core = zeta_q[:, :n_lon]
+    zeta_e_core = jnp.roll(zeta_core, -1, axis=1)
+    zeta_w_core = jnp.roll(zeta_core, 1, axis=1)
+    dx_q_core = dx_q[..., :n_lon] if dx_q.ndim > 1 else dx_q
+    dz_dx_core = (zeta_e_core - zeta_w_core) / (2.0 * dx_q_core)
+    dz_dx_q = jnp.concatenate(
+        [dz_dx_core, dz_dx_core[:, 0:1]], axis=1)
+
+    # Meridional difference of ζ at q-points.  Pad poles with their own row
+    # so the centred stencil collapses to a one-sided difference there.
+    zeta_south = jnp.concatenate([zeta_q[0:1], zeta_q[:-1]], axis=0)
+    zeta_north = jnp.concatenate([zeta_q[1:], zeta_q[-1:]], axis=0)
+    dz_dy_q = (zeta_north - zeta_south) / (2.0 * dy_q)
+
+    total_sq = dz_dx_q ** 2 + dz_dy_q ** 2
+    if modified:
+        div_h = divergence_cgrid(u_eff, v_eff, grid,
+                                 u_mask=u_mask, v_mask=v_mask)
+        grad_div_h = _grad_div_mag_h(div_h, grid)
+        # Interpolate h→q with the same 4-point average used for D_T_q,
+        # then pad pole rows and the wrap column with zeros.
+        if is_3d:
+            gd_q_int = 0.25 * (grad_div_h[:-1, :, :] + grad_div_h[1:, :, :]
+                               + jnp.roll(grad_div_h, 1, axis=1)[:-1, :, :]
+                               + jnp.roll(grad_div_h, 1, axis=1)[1:, :, :])
+            zero_row = jnp.zeros((1, grad_div_h.shape[1], grad_div_h.shape[2]),
+                                 dtype=grad_div_h.dtype)
+        else:
+            gd_q_int = 0.25 * (grad_div_h[:-1, :] + grad_div_h[1:, :]
+                               + jnp.roll(grad_div_h, 1, axis=1)[:-1, :]
+                               + jnp.roll(grad_div_h, 1, axis=1)[1:, :])
+            zero_row = jnp.zeros((1, grad_div_h.shape[1]),
+                                 dtype=grad_div_h.dtype)
+        grad_div_q = jnp.concatenate([zero_row, gd_q_int, zero_row], axis=0)
+        grad_div_q = jnp.concatenate(
+            [grad_div_q, grad_div_q[:, 0:1]], axis=1)
+        total_sq = total_sq + grad_div_q ** 2
+
+    norm_q = jnp.sqrt(total_sq + 1e-30)
+
+    A_vert = _vertex_area(grid)                          # (n_lat+1,)
+    Delta_q = jnp.sqrt(A_vert)
+    if is_3d:
+        Delta_q = Delta_q[:, jnp.newaxis, jnp.newaxis]
+    else:
+        Delta_q = Delta_q[:, jnp.newaxis]
+
+    A_leith_q = (C_leith * Delta_q) ** 3 * norm_q
+
+    # Zero at pole vertices and land-adjacent vertices, matching
+    # smagorinsky_viscosity_q_cgrid.
+    zero_first = jnp.zeros_like(A_leith_q[0:1])
+    zero_last = jnp.zeros_like(A_leith_q[-1:])
+    A_leith_q = jnp.concatenate(
+        [zero_first, A_leith_q[1:-1], zero_last], axis=0)
+
+    if mask is not None:
+        vmask = _compute_vertex_mask(mask)
+        if is_3d:
+            vmask = vmask[..., jnp.newaxis]
+        A_leith_q = A_leith_q * vmask
+
+    return A_leith_q
+
+
+def leith_biharmonic_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: "LatLonGrid",
+    C_leith: float,
+    *,
+    modified: bool = False,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Leith-biharmonic viscosity via the MOM6 two-pass stress formulation.
+
+    Mirrors ``smagorinsky_biharmonic_tendency_cgrid`` but with a
+    vorticity-gradient coefficient.  The effective biharmonic coefficient
+    is ``(C_L)³ · Δ⁵ · |∇ζ|`` (or with the divergence-gradient term when
+    ``modified=True``).  Energy-stable by construction because the first
+    pass is unnormalised and the second pass uses the same discrete
+    adjoint ``stress_divergence_cgrid`` as the Smagorinsky biharmonic.
+
+    Caller convention: ``du/dt -= tend_u`` (dissipative when SUBTRACTED).
+
+    Returns
+    -------
+    tend_u, tend_v : same shapes as u, v.
+    """
+    # 1. Leith coefficients at h- and q-points.
+    A_h = leith_viscosity_cgrid(
+        u, v, grid, C_leith,
+        modified=modified, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    A_q = leith_viscosity_q_cgrid(
+        u, v, grid, C_leith,
+        modified=modified, mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+    # 2. First pass: unit-coefficient, UNNORMALISED stress-divergence.
+    u_star, v_star = viscous_tendency_cgrid(
+        u, v, grid, 1.0, 1.0,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+        normalize=False)
+
+    # 3. Second pass: A_leith-weighted, NORMALISED stress-divergence.
+    tend_u, tend_v = viscous_tendency_cgrid(
+        u_star, v_star, grid, A_h, A_q,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+        normalize=True)
+
+    return tend_u, tend_v
+
+
 def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     """Compute vertex mask: wet only if all four surrounding cells are wet.
 

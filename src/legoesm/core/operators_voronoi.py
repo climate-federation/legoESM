@@ -768,6 +768,67 @@ def vector_laplacian_del4_3d(u_edge_3d, mesh):
     return -vector_laplacian_del2_3d(del2_u, mesh)
 
 
+def laplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
+    """Scalar Laplacian ``∇²f = div(grad(f))`` at cell centres, all levels.
+
+    Uses the native MPAS TRiSK C-grid stencil:
+    ``gradient_edge_3d`` then ``divergence_cell_3d``.  When a cell mask is
+    supplied, the edge mask is derived as ``mask[c1] * mask[c2]`` so that
+    gradients vanish at coastlines, and the final Laplacian is zeroed on
+    land cells — mirroring the latlon ``laplacian_cgrid`` convention.
+
+    Parameters
+    ----------
+    f_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+    mask : jax.Array, optional, shape (nCells,)
+        Cell mask (1 on ocean, 0 on land). When supplied, the edge mask
+        is derived internally to zero gradients across land-ocean
+        boundaries, and the returned Laplacian is multiplied by ``mask``.
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev)
+    """
+    grad_f = gradient_edge_3d(f_cell_3d, mesh)  # (nEdges, nlev)
+    if mask is not None:
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = mask[c1] * mask[c2]         # (nEdges,)
+        grad_f = grad_f * edge_mask[:, None]
+
+    lap = divergence_cell_3d(grad_f, mesh)      # (nCells, nlev)
+
+    if mask is not None:
+        lap = lap * mask[:, None]
+    return lap
+
+
+def bilaplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
+    """Scalar bilaplacian ``∇⁴f = ∇²(∇²f)`` at cell centres, all levels.
+
+    Applies :func:`laplacian_cell_3d` twice.  Used as the kernel of
+    biharmonic tracer diffusion: ``dtr/dt -= K_bih * bilaplacian_cell_3d(tr)``.
+    Same sign convention as the latlon ``bilaplacian_cgrid``: the operator
+    returns ``∇²(∇²f)`` (positive-definite eigenvalues), so the physical
+    dissipation sign is applied at the call site.
+
+    Parameters
+    ----------
+    f_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+    mask : jax.Array, optional, shape (nCells,)
+        Cell mask applied inside each Laplacian pass (boundary gradient
+        zeroing + land-cell zeroing of the intermediate Laplacian).
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev)
+    """
+    lap_f = laplacian_cell_3d(f_cell_3d, mesh, mask=mask)
+    return laplacian_cell_3d(lap_f, mesh, mask=mask)
+
+
 def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag):
     """Smagorinsky biharmonic viscosity: ``-del2(A_smag * del2(u))``.
 
@@ -822,6 +883,97 @@ def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag):
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)  # (nEdges, nlev)
     intermediate = A_smag * del2_u                        # (nEdges, nlev)
     return -vector_laplacian_del2_3d(intermediate, mesh)  # (nEdges, nlev)
+
+
+# ---------------------------------------------------------------------------
+# Leith viscosity for MPAS TRiSK C-grid (Leith 1996;
+# Fox-Kemper & Menemenlis 2008).
+# ---------------------------------------------------------------------------
+# On the TRiSK staggering ζ lives at vertices (dual cells) and δ lives at
+# cell centres, so the natural place to evaluate the gradients that make up
+# A_L is at the edges where u is stored:
+#
+#   ∂ζ/∂t   ≈  (ζ[v1] − ζ[v0]) / dvEdge         (tangential along dual edge)
+#   ∂δ/∂n   ≈  (δ[c2] − δ[c1]) / dcEdge          (normal along primal edge)
+#
+# A fully-rigorous TRiSK reconstruction of both components of ∇ζ and ∇δ at
+# an edge is non-trivial because the orthogonal components of each live on
+# different grid elements.  We keep the practically-used approximation
+# (common in MPAS-Ocean Leith implementations): use the tangential ζ
+# gradient as the dominant contribution, multiplied by √2 to account for
+# an isotropic-mesh assumption that |∂ζ/∂n| ≈ |∂ζ/∂t|.  For the modified
+# form the normal δ gradient (which *is* native at edges) is added in
+# quadrature.  The C_L coefficient should be tuned with this convention
+# in mind; the default C_L ≈ 1–2 matches MPAS-Ocean.
+
+def leith_viscosity_edge_3d(u_edge_3d, mesh, C_leith, *, modified=False):
+    """Leith viscosity coefficient at edges.
+
+    ``A_L = (C_L * Δ_e)³ * |∇ζ|``  (classical) or
+    ``A_L = (C_L * Δ_e)³ * sqrt(|∇ζ|² + |∇δ|²)``  (modified),
+
+    with the edge length scale ``Δ_e = sqrt(dcEdge * dvEdge)`` and
+    ``|∇ζ|_edge ≈ √2 · |ζ[v1] − ζ[v0]| / dvEdge`` (isotropic approximation).
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+    C_leith : float
+        Dimensionless Leith coefficient (typical 1.0–2.0).
+    modified : bool, default False
+        Include the divergence-gradient term (Fox-Kemper & Menemenlis 2008).
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev) — ``A_L`` in m²/s.
+    """
+    v0 = mesh.verticesOnEdge[0]
+    v1 = mesh.verticesOnEdge[1]
+
+    zeta_v = curl_vertex_3d(u_edge_3d, mesh)                 # (nVertices, nlev)
+    dv = jnp.maximum(mesh.dvEdge, 1e-10)
+    grad_zeta_tan = (zeta_v[v1] - zeta_v[v0]) / dv[:, None]  # (nEdges, nlev)
+
+    # Isotropic-mesh factor of 2: |∇ζ|² ≈ 2 · |∂ζ/∂t|².
+    grad_mag_sq = 2.0 * grad_zeta_tan ** 2
+
+    if modified:
+        div_c = divergence_cell_3d(u_edge_3d, mesh)          # (nCells, nlev)
+        grad_div_norm = gradient_edge_3d(div_c, mesh)         # (nEdges, nlev)
+        # The normal component is native at edges; symmetrise with the same
+        # isotropy factor as the vorticity gradient for consistency.
+        grad_mag_sq = grad_mag_sq + 2.0 * grad_div_norm ** 2
+
+    norm = jnp.sqrt(grad_mag_sq + 1e-30)
+
+    delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)          # (nEdges,)
+    return (C_leith * delta_edge[:, None]) ** 3 * norm        # (nEdges, nlev)
+
+
+def leith_biharmonic_3d(u_edge_3d, mesh, C_leith, *, modified=False):
+    """Leith-biharmonic viscosity: ``-del2(A_L * del2(u))``.
+
+    Two-pass structure mirroring ``smagorinsky_biharmonic_3d``: the
+    spatially varying Leith coefficient is inserted between the two
+    vector-Laplacians.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+    C_leith : float
+    modified : bool
+        Include the divergence-gradient term.
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev) — viscous tendency to ADD to du/dt.
+    """
+    A_L = leith_viscosity_edge_3d(u_edge_3d, mesh, C_leith, modified=modified)
+    del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)
+    intermediate = A_L * del2_u
+    return -vector_laplacian_del2_3d(intermediate, mesh)
 
 
 def apvm_correction_3d(q_vertex_3d, u_edge_3d, mesh, dt):

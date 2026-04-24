@@ -84,6 +84,11 @@ class ExperimentConfig(NamedTuple):
     radiation: str = "gray"
     rad_update_steps: int = 1
     diurnal_cycle: bool = False
+    # RRTMGP column recurrence implementation:
+    #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
+    #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but
+    #           reduces compile time and is preferred for large nlev or AD)
+    rrtmgp_use_scan: bool = False
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0

@@ -39,9 +39,11 @@ import jax.numpy as jnp
 from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
+from legoesm.ocean.eos import compute_buoyancy_frequency, rho_0 as _RHO_0_DEFAULT
+from legoesm import constants
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
@@ -94,6 +96,82 @@ def _compute_tapered_slopes(
     return S_x, S_y, taper
 
 
+def compute_visbeck_kappa_gm(
+    rho: jnp.ndarray,
+    S_x: jnp.ndarray,
+    S_y: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+    f_coriolis: jnp.ndarray,
+    cfg: VisbeckConfig,
+    rho_ref: float = _RHO_0_DEFAULT,
+) -> jnp.ndarray:
+    """Visbeck (1997) adaptive GM coefficient.
+
+    ``κ_Visbeck(x, y) = α · L² · ⟨N · |S|⟩_z`` with the depth-average
+    weighted by the local interface thickness, optionally using the
+    local first-baroclinic Rossby radius as the mixing length.
+
+    Parameters
+    ----------
+    rho : (..., nlev) in-situ density.
+    S_x, S_y : (..., nlev-1) tapered isopycnal slopes at interfaces.
+    z_coord : OceanZStarCoordinate.
+    jacobian : (...,) z* Jacobian at cell centres.
+    f_coriolis : (...,) Coriolis parameter (same horizontal shape as
+        ``jacobian``, broadcastable).
+    cfg : VisbeckConfig.
+
+    Returns
+    -------
+    kappa : (...,) horizontally-varying κ_GM [m²/s], clamped to the
+        configured bounds.  Shape matches ``jacobian`` — i.e. one value
+        per column.
+    """
+    eps = _EPS
+    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    # Interior interface thicknesses (used as weights for the depth-avg).
+    dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+
+    # --- Local growth rate σ_Eady ≈ N · |S| at each interior interface ---
+    # compute_buoyancy_frequency returns ``-(g/rho_ref) · drho/dz``; we
+    # must pass the Boussinesq reference density ``rho_0`` so that N²
+    # has the correct O(1e-5) magnitude for seawater.  Using rho_ref=1
+    # overstates N² by ~10³ (Boussinesq reference density) and destroys
+    # both σ and the Rossby-radius length scale.
+    N2 = compute_buoyancy_frequency(
+        rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
+    )
+    N = jnp.sqrt(jnp.maximum(N2, 0.0))
+    # Regularise the square-root gradient at zero slope with a value much
+    # smaller than any realistic ocean slope (≥ 1e-6).  The float32 eps
+    # (1.19e-7) was too large and produced an apparent |S| ≈ 3e-4 even
+    # for exactly-zero inputs, which pushed κ well above ``kappa_min``.
+    S_mag = jnp.sqrt(S_x ** 2 + S_y ** 2 + 1e-30)
+    sigma = N * S_mag                                   # (..., nlev-1)
+
+    # --- Depth-weighted average of σ_Eady ---
+    w_total = jnp.sum(dz_half, axis=-1)
+    sigma_bar = jnp.sum(sigma * dz_half, axis=-1) / jnp.maximum(w_total, eps)
+
+    # --- Mixing length L ---
+    if cfg.use_rossby_radius:
+        # Arithmetic depth-average of N itself — NOT sqrt(<N²>), which is
+        # always ≥ <N> and would over-estimate the Rossby radius for any
+        # vertically varying stratification.  Using <N> matches the
+        # standard WKB scale (1/H)·∫N dz used in textbook Rossby-radius
+        # definitions (Chelton et al. 1998, Gill 1982).
+        N_bar = jnp.sum(N * dz_half, axis=-1) / jnp.maximum(w_total, eps)
+        H_col = jnp.sum(dz_actual, axis=-1)
+        f_safe = jnp.maximum(jnp.abs(f_coriolis), cfg.f_min)
+        L = jnp.clip(N_bar * H_col / f_safe, cfg.L_min, cfg.L_max)
+    else:
+        L = jnp.full_like(sigma_bar, cfg.L_fixed)
+
+    kappa = cfg.alpha * L ** 2 * sigma_bar
+    return jnp.clip(kappa, cfg.kappa_min, cfg.kappa_max)
+
+
 def _tracer_tendency_gm_redi(
     q: jnp.ndarray,
     S_x: jnp.ndarray,
@@ -101,7 +179,7 @@ def _tracer_tendency_gm_redi(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     grid: CubedSphereGrid,
-    kappa_GM: float,
+    kappa_GM,
     kappa_Redi: float,
 ) -> jnp.ndarray:
     """Compute GM+Redi tendency for a single tracer.
@@ -125,6 +203,16 @@ def _tracer_tendency_gm_redi(
     nlev = q.shape[-1]
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
+    # Accept ``kappa_GM`` as either a scalar or an array.  When it is a
+    # per-column field (shape matching ``jacobian``) add a trailing
+    # singleton so it broadcasts against the (..., nlev-1) slope and
+    # flux arrays; scalar and arrays that already carry the nlev axis
+    # are left unchanged.
+    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == jacobian.ndim:
+        kappa_GM_b = kappa_GM[..., jnp.newaxis]
+    else:
+        kappa_GM_b = kappa_GM
+
     # Horizontal tracer gradients at full levels
     dq_dx = gradient_x_3d(q, grid)
     dq_dy = gradient_y_3d(q, grid)
@@ -147,8 +235,8 @@ def _tracer_tendency_gm_redi(
     # When kappa_GM == kappa_Redi the off-diagonal vanishes identically.
 
     # Off-diagonal flux at interfaces: (kR - kG) * S * dq/dz
-    off_diag_x = (kappa_Redi - kappa_GM) * S_x * dq_dz_half
-    off_diag_y = (kappa_Redi - kappa_GM) * S_y * dq_dz_half
+    off_diag_x = (kappa_Redi - kappa_GM_b) * S_x * dq_dz_half
+    off_diag_y = (kappa_Redi - kappa_GM_b) * S_y * dq_dz_half
 
     # Average interface values to full levels (pad boundaries with zero)
     z_pad = jnp.zeros((*off_diag_x.shape[:-1], 1), dtype=off_diag_x.dtype)
@@ -170,7 +258,7 @@ def _tracer_tendency_gm_redi(
     # === Vertical flux ===
     # F_z at interfaces = (kR + kG) * (Sx*dq/dx + Sy*dq/dy) + kR * S^2 * dq/dz
     S2_half = S_x**2 + S_y**2
-    F_z = ((kappa_Redi + kappa_GM) * (S_x * dq_dx_half + S_y * dq_dy_half)
+    F_z = ((kappa_Redi + kappa_GM_b) * (S_x * dq_dx_half + S_y * dq_dy_half)
            + kappa_Redi * S2_half * dq_dz_half)
 
     # Vertical flux divergence at full levels: dF_z/dz
@@ -212,12 +300,21 @@ def gm_redi_lateral_mixing(
     # Compute tapered isopycnal slopes at interfaces
     S_x, S_y, taper = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
 
+    # GM coefficient: scalar from config, or Visbeck-adaptive field.
+    if cfg.visbeck.enabled:
+        f_coriolis = jnp.asarray(grid.grid_coriolis)
+        kappa_GM = compute_visbeck_kappa_gm(
+            rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+        )
+    else:
+        kappa_GM = cfg.kappa_GM
+
     # Tracer tendencies with full GM+Redi tensor
     dT_dt = _tracer_tendency_gm_redi(
-        T, S_x, S_y, z_coord, jacobian, grid, cfg.kappa_GM, cfg.kappa_Redi
+        T, S_x, S_y, z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi
     )
     dS_dt = _tracer_tendency_gm_redi(
-        S, S_x, S_y, z_coord, jacobian, grid, cfg.kappa_GM, cfg.kappa_Redi
+        S, S_x, S_y, z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi
     )
 
     # GM/Redi does not produce momentum tendencies

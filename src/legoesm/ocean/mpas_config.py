@@ -34,6 +34,12 @@ class MPASOceanConfig(NamedTuple):
         ``bottomDragLinear`` convention.
     K_h : float
         Horizontal tracer diffusivity [m²/s].
+    K_bih : float
+        Horizontal biharmonic tracer diffusivity [m⁴/s].  Applied as
+        ``-K_bih * ∇⁴(tr)`` on cell-centered tracers using the scalar
+        bilaplacian ``bilaplacian_cell_3d`` (two applications of the
+        cell-centered scalar Laplacian ``div(grad(·))``).  Scale-selective
+        dissipation with weaker damping of large scales than ``K_h``.
     A_v : float
         Vertical viscosity [m²/s].
     K_v : float
@@ -74,6 +80,7 @@ class MPASOceanConfig(NamedTuple):
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
     K_h: float = 0.0
+    K_bih: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
@@ -125,6 +132,17 @@ class MPASOceanConfig(NamedTuple):
     temperature_max_c: float = 45.0
     salinity_min_psu: float = 0.0
     salinity_max_psu: float = 50.0
+    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
+    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
+    # ``A_L = (C_L · Δ_e)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
+    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Historically
+    # appended at the END of the NamedTuple for positional-call stability.
+    # Note: all in-tree constructors use keyword arguments and the
+    # ``K_bih`` field inserted above deliberately mirrors the field order
+    # of :class:`LatLonCGridOceanConfig`; positional stability is not
+    # relied on at MPAS call sites.
+    C_leith: float = 0.0
+    C_leith_modified: bool = False
 
 
 class MPASSimpleOceanConfig(NamedTuple):

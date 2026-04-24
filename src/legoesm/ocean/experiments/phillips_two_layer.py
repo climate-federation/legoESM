@@ -274,8 +274,10 @@ def _add_phillips_perturbation_fv(state, grid_type: str, grid, z_coord, config):
         else:  # cubed_sphere
             lat_2d, lon_2d = lat_1d, lon_1d  # Already 2D for cubed sphere
     
-    # Temperature profiles
-    T_data = np.asarray(state.T.data, dtype=np.float64)
+    # Temperature profiles.
+    # ``np.asarray`` on a JAX array returns a read-only view; take an
+    # explicit writable copy so the subsequent in-place assignments work.
+    T_data = np.array(state.T.data, dtype=np.float64, copy=True)
     nlev = T_data.shape[-1]
     
     # Upper layer
@@ -289,22 +291,61 @@ def _add_phillips_perturbation_fv(state, grid_type: str, grid, z_coord, config):
                    config.T_lower_gradient * np.sin(np.radians(lat_2d)) ** 2)
         T_data[..., 1] = T_lower
     
-    # Velocity: zonal jet
-    if hasattr(state, 'u'):
-        u_data = np.asarray(state.u.data, dtype=np.float64)
-        v_data = np.asarray(state.v.data, dtype=np.float64)
-        
-        # Upper layer jet
-        u_upper = (config.jet_speed_upper * 
-                   np.exp(-((lat_2d - config.jet_center_lat) / config.jet_width) ** 2))
-        u_data[..., 0] = u_upper
-        v_data[..., 0] = 0.0  # Pure zonal flow
-        
-        # Lower layer  
+    # Velocity: zonal jet (writable copies of the underlying JAX arrays).
+    # On the latlon C-grid, u lives at east faces (n_lat, n_lon+1) and v at
+    # north faces (n_lat+1, n_lon); the jet depends only on latitude so we
+    # reconstruct lat_u / lat_v at the face positions.
+    # MPAS uses edge-normal velocity (single `u` on edges, no `v`).  We
+    # project the zonal jet onto each edge using ``angleEdge``.
+    if grid_type == "mpas":
+        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
+        lat_e_deg = np.asarray(grid.latEdge, dtype=np.float64) * 180 / np.pi
+        angle = np.asarray(grid.angleEdge, dtype=np.float64)
+        u_upper_edge = (
+            config.jet_speed_upper *
+            np.exp(-((lat_e_deg - config.jet_center_lat) /
+                     config.jet_width) ** 2))
+        u_edge_up = u_upper_edge * np.cos(angle)
+        u_data[..., 0] = u_edge_up
         if nlev > 1:
-            u_data[..., 1] = config.jet_speed_lower_factor * u_upper
-            v_data[..., 1] = 0.0
-        
+            u_data[..., 1] = config.jet_speed_lower_factor * u_edge_up
+        state = state._replace(
+            u=Field(jnp.array(u_data), name="u",
+                    dims=state.u.dims, units="m/s"))
+    elif hasattr(state, 'u'):
+        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
+        v_data = np.array(state.v.data, dtype=np.float64, copy=True)
+
+        if grid_type == "latlon":
+            n_lat = u_data.shape[0]
+            n_u_lon = u_data.shape[1]
+            n_v_lat = v_data.shape[0]
+            lat_u_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+            dlat_deg = float(grid.dlat) * 180 / np.pi
+            lat_v_1d = lat_u_1d[0] + dlat_deg * (np.arange(n_v_lat) + 0.5)
+            lat_u_2d = np.broadcast_to(lat_u_1d[:, None], (n_lat, n_u_lon))
+            lat_v_2d = np.broadcast_to(
+                lat_v_1d[:, None], (n_v_lat, v_data.shape[1]))
+            u_upper = (config.jet_speed_upper *
+                       np.exp(-((lat_u_2d - config.jet_center_lat) /
+                                config.jet_width) ** 2))
+            u_data[..., 0] = u_upper
+            v_data[..., 0] = 0.0
+            if nlev > 1:
+                u_data[..., 1] = config.jet_speed_lower_factor * u_upper
+                v_data[..., 1] = 0.0
+            # v_2d not strictly needed (jet is zonal) but kept for clarity.
+            _ = lat_v_2d
+        else:
+            u_upper = (config.jet_speed_upper *
+                       np.exp(-((lat_2d - config.jet_center_lat) /
+                                config.jet_width) ** 2))
+            u_data[..., 0] = u_upper
+            v_data[..., 0] = 0.0
+            if nlev > 1:
+                u_data[..., 1] = config.jet_speed_lower_factor * u_upper
+                v_data[..., 1] = 0.0
+
         state = state._replace(
             u=Field(jnp.array(u_data), name="u", dims=state.u.dims, units="m/s"),
             v=Field(jnp.array(v_data), name="v", dims=state.v.dims, units="m/s")

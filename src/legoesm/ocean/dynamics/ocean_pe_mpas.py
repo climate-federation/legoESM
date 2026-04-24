@@ -6,8 +6,8 @@ Ringler et al. (2010).
 
 Equations (per layer k):
     du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) - w·du'/dz + A_h·del2(u) + B_h·del4(u) - del2(A_smag·del2(u)) + A_v·d²u/dz²
-    d(h·T)/dt = -div(h·u·T) + K_h·h·lap(T) + K_v·d²T/dz²
-    d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) + K_v·d²S/dz²
+    d(h·T)/dt = -div(h·u·T) + K_h·h·lap(T) - K_bih·h·bilap(T) + K_v·d²T/dz²
+    d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) - K_bih·h·bilap(S) + K_v·d²S/dz²
     dη/dt = -Σ_k div(h_k · u_k)
 
 TRiSK split status (see issue #160)
@@ -41,6 +41,7 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.core.operators_voronoi import (
     apvm_correction_3d,
     biharmonic_vorticity_del4_3d,
+    bilaplacian_cell_3d,
     divergence_cell_3d,
     gradient_edge_3d,
     curl_vertex_3d,
@@ -49,6 +50,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
     smagorinsky_biharmonic_3d,
+    leith_biharmonic_3d,
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
     vertex_thickness_3d,
@@ -251,6 +253,12 @@ def mpas_ocean_baroclinic_tendencies(
     if config.C_smag > 0:
         visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
 
+    # Flow-dependent Leith biharmonic viscosity
+    if getattr(config, "C_leith", 0.0) > 0:
+        visc = visc + leith_biharmonic_3d(
+            u_prime_3d, mesh, config.C_leith,
+            modified=getattr(config, "C_leith_modified", False))
+
     # Biharmonic dissipation on relative vorticity ζ (scale-selective damping
     # of grid-scale vorticity patterns — notably the ζ-checkerboard null
     # mode of the energy-conserving PV flux).  This is applied to the total
@@ -309,6 +317,20 @@ def mpas_ocean_baroclinic_tendencies(
     else:
         dT_dt_3d = jnp.zeros_like(T_3d)
         dS_dt_3d = jnp.zeros_like(S_3d)
+
+    # Biharmonic tracer diffusion: -K_bih * bilap(T).  Same sign convention
+    # as the latlon ``bilaplacian_cgrid`` wiring (ocean_pe_latlon_cgrid.py):
+    # ``bilaplacian_cell_3d`` returns ``∇²(∇²T)`` so the physical dissipation
+    # sign is applied here.  The ``mask`` kwarg zeros gradients at coastlines
+    # and the intermediate Laplacian on land on both passes.  The trailing
+    # ``/ h_safe * h_k`` factor is an ``≈1`` identity on wet cells
+    # (``h_safe == h_k``) and a dry-cell safety guard where ``h_k → 0`` —
+    # matching the K_h branch above, not a thickness-flux form.
+    if config.K_bih > 0:
+        bilap_T = bilaplacian_cell_3d(T_3d, mesh, mask=mask)
+        bilap_S = bilaplacian_cell_3d(S_3d, mesh, mask=mask)
+        dT_dt_3d = dT_dt_3d - config.K_bih * bilap_T / h_safe * h_k
+        dS_dt_3d = dS_dt_3d - config.K_bih * bilap_S / h_safe * h_k
 
     # Mask land cells
     dT_dt_3d = dT_dt_3d * mask[:, jnp.newaxis]

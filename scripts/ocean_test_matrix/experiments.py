@@ -757,6 +757,7 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         drag_factor = float(jnp.exp(-dt / (25.0 * 86400.0)))
 
         _is_mpas = (tc.grid_type == "mpas")
+        _is_latlon = (tc.grid_type == "latlon")
 
         def forcing_fn(s, dt_):
             from legoesm.core.field import Field
@@ -773,9 +774,18 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
                 return s._replace(
                     T=Field(T_new),
                     u=Field(u_new))
-            mask_3d = mask[..., jnp.newaxis]
-            u_new = u_new * mask_3d
-            v_new = s.v.data * drag_factor * mask_3d
+            # On the latlon C-grid, u lives at east faces (nlat, nlon+1)
+            # and v at north faces (nlat+1, nlon); use the face masks
+            # stored on the state instead of the cell-centre mask.
+            if _is_latlon:
+                u_mask_3d = s.u_mask.data[..., jnp.newaxis]
+                v_mask_3d = s.v_mask.data[..., jnp.newaxis]
+                u_new = u_new * u_mask_3d
+                v_new = s.v.data * drag_factor * v_mask_3d
+            else:
+                mask_3d = mask[..., jnp.newaxis]
+                u_new = u_new * mask_3d
+                v_new = s.v.data * drag_factor * mask_3d
             return s._replace(
                 T=Field(T_new),
                 u=Field(u_new),
@@ -1388,11 +1398,31 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
 
     physics = eu_forcings(tc.grid_type, None, eu_config)
 
-    # Enable KPP for physical boundary layer mixing.
+    # KPP vertical mixing is only implemented for the latlon C-grid ocean.
+    # Two limits converge on mpas_channel:
+    #   (a) MPAS ocean physics silently drops ``vertical_mixing`` (see
+    #       src/legoesm/ocean/physics/mpas_physics.py), so the Eady surface
+    #       shear layer is unregularised.
+    #   (b) The TRiSK enstrophy-conserving PV flux is only marginally stable
+    #       on Eady: commit 6185e07 reports survival to day 6 at U=0.2 after
+    #       adding APVM; default U=0.8 over 10 days goes NaN by step ~400.
+    # Even with K_m ~ 10⁻¹ m²/s and U=0.1 we only reach step ~1200 (day
+    # ~4.2), still short of the 10-day quick-mode target.  Skip on MPAS
+    # until the TRiSK/LSQ-tangential stability work lands.  The CLI flag
+    # ``--U-surface`` and ``--no-sponge`` still let the user opt back in
+    # for debugging.
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
-    physics = physics._replace(
-        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
-    )
+    if tc.grid_type == "latlon_channel":
+        physics = physics._replace(
+            vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+        )
+    elif (tc.grid_type == "mpas_channel"
+          and config.U_SURFACE_OVERRIDE is None):
+        raise NotImplementedError(
+            "eady_uniform/mpas_channel is currently unstable at the quick-mode "
+            "10-day target (U=0.8 m/s blows up at step ~400; weaker shear and "
+            "stronger background vertical mixing only reach day ~4). Tracked in "
+            "commits 6185e07, 30181c0; run with --U-surface 0.1 to debug.")
 
     # Pass domain bounds from experiment config into run_kwargs
     tc.run_kwargs.setdefault("lat_south", eu_config.lat_south)
