@@ -567,6 +567,44 @@ class TestRRTMGP:
         assert jnp.all(jnp.isfinite(grad_cz))
         assert grad_cz.shape == cos_zen.shape
 
+    def test_rrtmgp_use_scan_equivalence(self):
+        """scan-based and unrolled column recurrence must produce the same fluxes.
+
+        Guards the GPU perf path: ``use_scan=False`` (Python for-loop) must be
+        numerically equivalent to ``use_scan=True`` (jax.lax.scan).  Without
+        this invariant the driver pipeline's ``rrtmgp_use_scan`` knob would
+        silently change results.
+        """
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+            _instance_cache,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 3, 20
+        T, p_full, p_half, T_sfc, _, _ = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 5.0e-4)
+        cos_zen = jnp.full(ncol, 0.4)
+
+        cfg_loop = RRTMGPConfig(use_scan=False)
+        cfg_scan = RRTMGPConfig(use_scan=True)
+
+        # Make sure the cache does not mask a config-honouring regression.
+        _instance_cache.clear()
+        out_loop = rrtmgp_radiation(T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_loop)
+        out_scan = rrtmgp_radiation(T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_scan)
+
+        for a, b in (
+            (out_loop.heating_rate, out_scan.heating_rate),
+            (out_loop.lw_flux_up, out_scan.lw_flux_up),
+            (out_loop.lw_flux_down, out_scan.lw_flux_down),
+            (out_loop.sw_flux_up, out_scan.sw_flux_up),
+            (out_loop.sw_flux_down, out_scan.sw_flux_down),
+        ):
+            assert jnp.all(jnp.isfinite(a))
+            assert jnp.all(jnp.isfinite(b))
+            assert jnp.allclose(a, b, rtol=1e-5, atol=1e-5)
+
 
 # ===========================================================================
 # Diurnal cycle tests

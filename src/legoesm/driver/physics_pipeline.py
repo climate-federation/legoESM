@@ -722,6 +722,9 @@ def _build_rrtmgp_radiation_fn(config):
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
 
+    # GPU default: Python for-loop unroll over columns (use_scan=False).
+    # Honour the experiment-level override so training/AD workflows can switch
+    # to jax.lax.scan without editing this file.
     rrtmg_config = RRTMGPConfig(
         co2_ppmv=config.co2_ppmv,
         ch4_ppbv=config.ch4_ppbv,
@@ -729,7 +732,7 @@ def _build_rrtmgp_radiation_fn(config):
         sfc_emissivity=config.sfc_emissivity,
         sfc_albedo=config.albedo_ocean,
         S_0=S_0,
-        use_scan=True,
+        use_scan=bool(getattr(config, 'rrtmgp_use_scan', False)),
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
