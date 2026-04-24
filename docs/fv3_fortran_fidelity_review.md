@@ -841,3 +841,56 @@ DUOGRID RK3 (v_ll_Linf = 1.206 m/s, 3.15× LEGACY):
 **Deliverable.**  `scripts/diag_iter815_fb_chain_post_808.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  78th iter in iter-752-815 chain.  Short-horizon snapshot of FB chain post iter-808.  Codex iter-815 review flagged prior overclaim on (a) general stability from a single 6h run and (b) mass-conservation causality.  This doc entry retracts those overclaims; the result stands as a narrow numerical report only.
+
+### Iter-816 — FB DUOGRID 1-day at C24: no crash, but h_max grows 8×
+
+Per iter-815b's tightened scope note, iter-816 extends the FB chain test to 1 day (288 steps, dt=300s) at C24, sampling every 1h.
+
+**Method** (`scripts/diag_iter816_fb_1day.py`).  `FV3FBShallowWaterModel`, W2 alpha=0 IC, `hyperdiff=0, div_damp=0, boundary_fix=True, damp_v=0, nord_v=0, d4_bg=0.16, nord=1`.  Run under LEGACY and DUOGRID; log hourly h_max, u_cc_Linf, v_cc_Linf, mass_drift.
+
+**Result.**
+
+FB LEGACY: **crashed at step 59 (≈4.9 h)**, matching iter-815's C24 result.  At hour 4, h_max=3527 (from initial 2967), u_cc=52 m/s, v_cc=144 m/s — h grew and u/v blew up progressively before NaN.
+
+FB DUOGRID: **completed 24 h without NaN**, but h_max grew substantially:
+
+| hour | h_max  | u_cc_Linf | v_cc_Linf | mass drift  |
+|------|--------|-----------|-----------|-------------|
+| 1    | 3074   | 38.69     | 27.77     | +2.3e−7     |
+| 4    | 3800   | 39.15     | 53.00     | −6.8e−7     |
+| 8    | 5471   | 62.06     | 46.24     | +3.4e−7     |
+| 12   | 10765  | 60.05     | 46.79     | −3.4e−7     |
+| 16   | 17971  | 61.31     | 52.20     | −1.1e−7     |
+| 20   | 21788  | 69.89     | 51.88     | +1.1e−7     |
+| 24   | 24040  | 87.57     | 60.11     | −1.1e−7     |
+
+**Observation — numerical reportage only.**
+- FB LEGACY crashes at ~5h (confirms iter-815).
+- FB DUOGRID at C24/1-day does NOT crash (finite h at hour 24).  But h_max grows from 3074 at hour 1 to **24040 at hour 24** — an 8× growth beyond the physical ceiling (W2 analytical h_max ≈ 2960 m).
+- u_cc_Linf grows from 38.7 to 87.6 m/s (~2.2× physical u0).
+- v_cc_Linf grows from 27.8 to 60.1 m/s (physical v_north = 0).
+- Mass drift remains tiny (~1e−7 throughout).
+
+**Scope-limited interpretation (observational only).**
+- On this C24 single run: FB DUOGRID is **finite-at-1-day but massively inaccurate** (h grows 8×, v_cc = 60 m/s where physical is 0).
+- Mass is conserved to 7 significant figures on this run.  Whether this generalises to other ICs/resolutions/horizons is not established.
+- The prior "85 m/s v-wind at 1 day" report: this iter measured v_cc_Linf = 60 m/s at hour 24 — same order of magnitude as "85 m/s".  "Crash/blowup" vs "stable but inaccurate" depends on where one draws the line.  At hour 24, h_max of 24040 m is unphysical and would likely lead to CFL violation in an extended run.
+
+**What iter-816 DOES show (tight scope).**
+- On this C24 1-day single run: FB DUOGRID finishes 288 steps without NaN, but with h_max = 24040 (8× initial) and v_cc_Linf = 60 m/s.
+- FB LEGACY crashes at step 59 (~5h).
+- Mass drift on FB DUOGRID stays tiny (~1e−7) across all 24 hours sampled.
+
+**What iter-816 does NOT establish.**
+- Whether FB DUOGRID remains finite past 24h (the h_max growth trajectory suggests further growth).
+- Whether the 8× h growth is driven by FB chain discretisation or by the lack of damping (div_damp=0, damp_v=0 in this test).  Adding damping might stabilise the accuracy.
+- Whether C36 or C48 would show different behaviour.
+
+**Iter-817+ candidates.**
+- Re-run FB DUOGRID with iter-761-equivalent damping (div_damp, damp_v, nord_v) to see if h growth is suppressed.
+- Test FB DUOGRID at C36 to see whether finer resolution helps.
+- Decompose FB chain per-step to locate the h-growth mechanism.
+
+**Deliverable.**  `scripts/diag_iter816_fb_1day.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  79th iter in iter-752-816 chain.  Extends iter-815's 6h snapshot to 24h with 1h sampling.  Confirms that on this C24 run: FB DUOGRID does NOT crash at 1 day but DOES show substantial accuracy loss (h_max grows 8×).  FB LEGACY still crashes at ~5h.  The prior "unstable 85 m/s at 1 day" claim is partially confirmed (v_cc order-of-magnitude matches) — but refined as "finite-but-inaccurate" rather than "crashed".
