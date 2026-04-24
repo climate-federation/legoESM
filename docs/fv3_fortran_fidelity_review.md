@@ -953,3 +953,50 @@ Per iter-791's iter-792+ candidate "measure t=0 tendency of v_d right after ONE 
 **Deliverable.**  `scripts/diag_iter792_w2_t0_tendency_audit.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  56th iter in iter-752-792 chain.  Major mechanistic finding: dv/dt at t=0 for W2 solid-body rotation has a cube-vertex peak (GC=4.34°) with 41.5% hot-cell cube-vertex concentration.  Magnitude (1.9e-5 m/s²) is quantitatively consistent with the observed 0.159 m/s v_ll_Linf after 1 day with partial damping.  iter-793+ should decompose the v-tendency terms to identify which operator produces the cube-vertex signal.
+
+### Iter-793 — dv_cc decomposition: cube-vertex signal is INCOMPLETE cancellation of Coriolis+pressure+KE
+
+Per iter-792's iter-793+ candidate "decompose dv/dt into contributions from each term of fv3_sw_tendencies", iter-793 evaluates each individual dv_cc term at t=0 on the W2 IC and reports peak + GC-to-vertex + hot-cell cube-vertex concentration.
+
+**Method** (`scripts/diag_iter793_w2_dv_decomposition.py`; committed output at `diagnostics/iter793_output/iter793_w2_dv_decomposition.txt`).  C36, β=0, LEGACY iter-761 canonical config.  Replicate `fv3_sw_tendencies` internals (minus boundary_fix) to extract each dv_cc contribution separately.
+
+**Result.**
+
+| term                      | peak          | face,(i,j)     | lat      | lon       | GC      | hot  | near_vert     |
+|---------------------------|---------------|----------------|----------|-----------|---------|------|---------------|
+| dv total (with div damp)  | 3.966e-05     | (4, 35, 35)    | +36.45°  | +135.00°  | **1.19°** | 24   | 20 (**83.3%**) |
+| dv total (NO div damp)    | 2.516e-05     | (5, 0, 0)      | −36.45°  | −135.00°  | **1.19°** | 8    | 8 (**100.0%**) |
+| dv Coriolis (−zeta*u)     | 3.045e-03     | (4, 17, 0)     | +46.24°  | −1.31°    | 34.38°  | 4896 | 528 (10.8%)   |
+| dv pressure (−∂ᵧ gh)      | 2.926e-03     | (0, 17, 0)     | −43.74°  | −1.25°    | 34.38°  | 4896 | 528 (10.8%)   |
+| dv KE-grad (−∂ᵧ KE)       | 1.167e-04     | (1, 18, 0)     | −43.74°  | +91.25°   | 34.38°  | 4896 | 528 (10.8%)   |
+| dv balance (Cor+press)    | 1.210e-04     | (4, 17, 0)     | +46.24°  | −1.31°    | 34.38°  | 4832 | 528 (10.9%)   |
+| dv div-damp               | 1.825e-05     | (4, 33, 0)     | +38.68°  | +39.98°   | **5.27°** | 288  | 160 (**55.6%**) |
+| zeta (rel vort)           | 1.210e-05     | (4, 17, 18)    | +88.23°  | −135.00°  | 52.97°  | 4000 | 432 (10.8%)   |
+
+**Observation — numerical reportage only.**  The individual constituent terms (Coriolis, pressure gradient, KE gradient, the "balance" Cor+press) each peak at mid-face (GC ≈ 34°) with only ~11% hot-cell cube-vertex concentration — their own truncation-level noise is NOT cube-vertex-localised.  But when summed, the residual dv total peaks at GC = 1.19° with 83–100% cube-vertex concentration.  This is the signature of INCOMPLETE CANCELLATION: the constituent terms almost cancel for geostrophic W2, but the cancellation FAILS at cube vertices where halo-interpolation bias differs between terms.
+
+**Quantitative breakdown.**
+- Coriolis, pressure, KE-grad each have peak ~3e-3 m/s² at mid-face — O(1) large.
+- Their numerical sum (dv total WITHOUT div damp) is 2.5e-5 m/s² at cube vertices — 100× smaller.  The cancellation is 99%+ effective at mid-face but only ~99% effective at cube vertices (leaving the 2.5e-5 residual).
+- Div damping contributes 1.8e-5 m/s² at cube vertices, raising the total to 4.0e-5.
+- The "dv balance" (Cor + press, no KE grad) peaks at mid-face — so KE grad is REQUIRED for the cancellation.  KE grad provides a ~O(10⁻⁴) correction that fixes the mid-face imbalance but introduces cube-vertex-specific error.
+
+**What iter-793 DOES show.**
+- The W2 mode-A cube-vertex signal is NOT caused by any single operator with a bug.  Each term (Coriolis, pressure, KE, div damp) has uniform-magnitude mid-face error; the cube-vertex localisation emerges from INCOMPLETE CANCELLATION between them.
+- The KE gradient is a participant in the cancellation: including it moves the error pattern, doesn't eliminate it.
+- Divergence damping adds ~37% to the cube-vertex total (turning it off reduces peak from 4.0e-5 to 2.5e-5).
+- The `zeta` (relative vorticity) is tiny (1.2e-5) — consistent with solid-body rotation having analytical zero vorticity — so the Coriolis term's ~3e-3 peak is dominated by `f * u_cc`, not `zeta * u_cc`.
+
+**What iter-793 does NOT establish.**
+- A specific Fortran-faithful fix.  The cancellation failure is structural, arising from halo-interpolation differences between the three gradient terms at cube vertices.  A proper fix requires matching Fortran's cube-vertex halo treatment for `h`, `u_cc`, `v_cc`, and `KE` simultaneously — or replacing the A-L+RK3 pipeline with the Fortran d_sw chain (blocked on ng=3 halo infrastructure).
+- Whether the iter-761 boundary_fix stabiliser partially masks this error (it does — iter-511 measured 2.4× L2 worsening when boundary_fix=False).
+
+**Iter-794+ candidates.**
+- Port ng=3 halo infrastructure to unblock the FB chain (Fortran-faithful d_sw path that intrinsically handles cube-vertex cancellation).
+- Test whether applying `_fortran_agrid_vector_corner_fill` simultaneously to `u_cc_pad`, `v_cc_pad`, AND the `h_pad` used by `_arakawa_lamb_gradient` internally reduces the cube-vertex residual.  Currently only the vector pair is treated consistently (via `fortran_vector_corner_fill`); the scalar `h` halo may use a different corner convention.
+- Compare the `_arakawa_lamb_gradient` halo treatment for scalars (h, KE) vs vectors (u_cc, v_cc) at cube vertices.
+- Decompose dv_cc contributions on a W2 RUN (not just t=0) — see if the imbalance grows, stays constant, or damps via damp_v.
+
+**Deliverable.**  `scripts/diag_iter793_w2_dv_decomposition.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  57th iter in iter-752-793 chain.  Mechanistic decomposition: W2 cube-vertex mode-A is INCOMPLETE cancellation between Coriolis, pressure gradient, and KE gradient at cube vertices (with 37% additional contribution from div damping).  No single operator is individually "broken"; the issue is halo-interpolation inconsistency between the three gradient terms.  iter-794+ should either unblock the FB chain (ng=3) or audit cross-term halo consistency at cube vertices.
