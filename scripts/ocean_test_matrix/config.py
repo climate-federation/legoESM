@@ -43,6 +43,8 @@ PV_SCHEME_OVERRIDE = None  # Set via --pv-scheme CLI flag (MPAS only)
 APVM_DT_OVERRIDE = None    # Set via --apvm-dt CLI flag (MPAS only; seconds; 0 disables)
 PV_ALPHA_OVERRIDE = None   # Set via --pv-alpha CLI flag (MPAS only; used when pv_scheme="mixed")
 K_ZETA_BIH_OVERRIDE = None # Set via --K-zeta-bih CLI flag (MPAS only; m⁴/s; biharmonic ζ damping)
+C_LEITH_OVERRIDE = None    # Set via --C-leith CLI flag (MPAS only; flow-dependent biharmonic viscosity)
+C_LEITH_MODIFIED_OVERRIDE = None  # Set via --C-leith-modified CLI flag (uses |∇(ζ+Q_d)| instead of |∇ζ|)
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"

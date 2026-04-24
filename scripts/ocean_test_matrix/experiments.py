@@ -1452,6 +1452,8 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
             apvm_dt=config.APVM_DT_OVERRIDE,
             pv_alpha=config.PV_ALPHA_OVERRIDE,
             K_zeta_bih=config.K_ZETA_BIH_OVERRIDE,
+            C_leith=config.C_LEITH_OVERRIDE,
+            C_leith_modified=config.C_LEITH_MODIFIED_OVERRIDE,
         ))
 
     state = eu_ic(tc.grid_type, grid, z_coord, eu_config)

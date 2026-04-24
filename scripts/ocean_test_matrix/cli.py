@@ -106,6 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--K-zeta-bih", type=float, default=None,
         help="Biharmonic dissipation coefficient on relative vorticity ζ "
              "[m⁴/s] (MPAS only; targets ζ-checkerboard null mode; default: 0)")
+    p.add_argument(
+        "--C-leith", type=float, default=None,
+        help="Leith biharmonic viscosity coefficient (MPAS only; "
+             "flow-dependent, scales with |∇ζ|; typical 1.0–2.0; default: 0)")
+    p.add_argument(
+        "--C-leith-modified", action="store_true",
+        help="Use modified Leith |∇(ζ + Q_d)| rather than plain |∇ζ| "
+             "(MPAS only; default: False)")
     return p
 
 
@@ -170,6 +178,10 @@ def main():
         config.PV_ALPHA_OVERRIDE = args.pv_alpha
     if args.K_zeta_bih is not None:
         config.K_ZETA_BIH_OVERRIDE = args.K_zeta_bih
+    if args.C_leith is not None:
+        config.C_LEITH_OVERRIDE = args.C_leith
+    if args.C_leith_modified:
+        config.C_LEITH_MODIFIED_OVERRIDE = True
 
     tests = filter_tests(TEST_MATRIX, args)
 
