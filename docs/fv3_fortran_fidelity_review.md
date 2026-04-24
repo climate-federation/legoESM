@@ -929,3 +929,49 @@ The iter-816 no-damping config (damp_v=0, nord_v=0, d4_bg=0.16, nord=1) appears 
 **Deliverable.**  `scripts/diag_iter817_fb_with_damping.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  80th iter in iter-752-817 chain.  Shows that iter-761-style damping destabilises the FB chain (crashes sooner).  The FB chain appears to have its own damping requirements distinct from RK3.  The least-bad FB DUOGRID config remains iter-816's no-damping variant (finite-but-inaccurate at 24h).
+
+### Iter-818 — `damp_v=0.06` is the FB-chain crash trigger
+
+Per iter-817's iter-818+ candidate, iter-818 tests individual damping knobs on FB DUOGRID C24 W2 24h to locate the crash trigger.
+
+**Method** (`scripts/diag_iter818_fb_damping_knobs.py`).  Start from iter-816 no-damping baseline; add one knob at a time from the iter-761 config `(damp_v=0.06, nord_v=2, nord=2, d4_bg=0.16)`.
+
+**Result (C24 24h, starting from iter-816 baseline).**
+
+| variant                            | status            | h_max | u_cc_Linf | v_cc_Linf |
+|------------------------------------|-------------------|-------|-----------|-----------|
+| baseline (iter-816)                | ok at 24h         | 24040 | 87.57     | 60.11     |
+| + `damp_v=0.06`                    | ok at 24h         | 47002 | **1037.61** | **1602.50** |
+| + `nord_v=2`                       | ok at 24h         | 24040 | 87.57     | 60.11     |
+| + `nord=2`                         | ok at 24h         | 21548 | 102.16    | 54.93     |
+| − `d4_bg=0.0` (off)                | ok at 24h         | 20216 | 120.55    | 119.42    |
+| + `damp_v=0.06 + nord_v=2`         | **CRASH at 7.8 h** | —     | —         | —         |
+| + `nord=2 + damp_v=0.06 + nord_v=2`| **CRASH at 7.9 h** | —     | —         | —         |
+
+**Observation — numerical reportage only.**
+- `damp_v=0.06` alone produces u_cc = 1037 m/s and v_cc = 1602 m/s at 24h (vs 87 / 60 in no-damp baseline).  The chain is finite but catastrophically inaccurate.
+- `nord_v=2` alone has no effect (expected — nord_v is the damping ORDER, but with `damp_v=0` the damping is turned off).
+- `nord=2` alone: small improvement (h_max 24040 → 21548).
+- `d4_bg=0.0` (turn del-4 background OFF): similar to baseline.
+- `damp_v=0.06 + nord_v=2`: CRASH at step 94 (7.8 h).
+
+The pattern: `damp_v=0.06` alone is on the edge of numerical stability (finite but unphysical u/v).  Adding `nord_v=2` pushes it to crash.
+
+**What iter-818 DOES show.**
+- `damp_v=0.06` is the crash trigger for FB chain in duogrid mode.  Without it, FB DUOGRID runs finite to 24h.  With it, u_cc/v_cc blow up to >1000 m/s.
+- The `nord_v=2` order modifier alone has no effect — it's a modifier on `damp_v`'s del-n operator, so it only matters when `damp_v > 0`.
+- `nord` and `d4_bg` alone do not trigger crash or blowup.
+
+**What iter-818 does NOT establish.**
+- Why `damp_v=0.06` destabilises FB but stabilises RK3 (iter-761 canonical uses `damp_v=0.06` and RK3 is stable).
+- Whether a smaller `damp_v` (e.g., 0.01) would avoid crash while still providing vorticity damping.
+- Whether the `fv3_del6_vorticity_damping` post-step hook (iter-755) works correctly under FB's time-splitting (FB applies it differently than RK3).
+
+**Iter-819+ candidates.**
+- Sweep `damp_v` in small steps (0.001, 0.01, 0.03, 0.06) under FB to find the stable range.
+- Inspect how `damp_v`'s post-step vorticity damping is applied under FB vs RK3 — likely a mismatch in the time-splitting integration.
+- Port Fortran-faithful d_sw5 corner divergence damping.
+
+**Deliverable.**  `scripts/diag_iter818_fb_damping_knobs.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  81st iter in iter-752-818 chain.  Isolates `damp_v=0.06` as the FB-chain crash trigger.  The `damp_v=0.06 + nord_v=2` combination crashes at 7.9h; `damp_v=0.06` alone produces catastrophic u/v (>1000 m/s) but stays finite at 24h.  The other damping knobs (`nord_v`, `nord`, `d4_bg`) have minimal effect individually.
