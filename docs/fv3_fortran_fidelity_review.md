@@ -634,3 +634,45 @@ The monkey-patch is diagnostic-only.  Without the limiter, h can go negative; th
 **Deliverable.**  `scripts/diag_iter784_cb_limiter_bypass.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  48th iter in iter-752-784 chain.  Rules OUT candidate (d) "PPM limiter" as primary driver.  With (b) "dt scaling" (iter-779), (c)-in-1-day (iter-781), `_d2a2c_vect` cube-vertex (iter-783), and (d) PPM limiter (iter-784) all ruled out, remaining candidate (a) "resolution-invariant structural error" is the most likely residual driver.  iter-785+ should probe time-splitting, cross-term handling, and the mass-target fix.
+
+### Iter-785 — mass_target fix bypass rules out Python-specific post-fix
+
+Per iter-784's iter-785+ candidate "test mass-target fix: run WITHOUT the clip-and-rescale step", iter-785 runs the C36 1-day cosine bell three times:
+
+- **BASELINE**: normal mass-target fix (`mass_target=mass_init` → clip h < 0 to 0, then rescale positive values to total mass).
+- **NO_MASS_FIX**: `mass_target=None` — no clip, no rescale.  Raw PPM output.
+- **CLIP_ONLY**: clip h < 0 to 0, but no rescale.
+
+The mass-target fix is a Python-specific, non-Fortran-faithful post-step correction (FV3 `fv_tp_2d` does not apply this rescale).
+
+**Method** (`scripts/diag_iter785_cb_mass_target_bypass.py`; committed output at `diagnostics/iter785_output/iter785_cb_mass_target_bypass.txt`).  Same C36, β=π/4, dt=1440s, 1 day.
+
+**Result.**
+
+| case         | L_inf     | L2        | peak cell       | peak err signed | h_min  | h_max  | mass drift   |
+|--------------|-----------|-----------|-----------------|-----------------|--------|--------|--------------|
+| BASELINE     | 1.213e+02 | 1.165e-01 | face 3 (30, 32) | +1.213e+02      |  0.00  | 895.40 | 0.000e+00    |
+| NO_MASS_FIX  | 1.214e+02 | 1.164e-01 | face 3 (30, 32) | +1.214e+02      | −0.01  | 895.70 | +3.39e-04    |
+| CLIP_ONLY    | 1.214e+02 | 1.164e-01 | face 3 (30, 32) | +1.214e+02      |  0.00  | 895.70 | +3.39e-04    |
+
+**Observation — numerical reportage only.**  Bypassing the mass-target fix changes Linf by only +0.1% and L2 by −0.1%.  Mass drift without the fix is +3.39e-4 (0.034% gain in 1 day — truncation-level, indicating the PPM scheme is inherently nearly-conservative).  h_min in NO_MASS_FIX is only −0.01 (negligible compared to h_max ≈ 896).
+
+**What iter-785 DOES show.**
+- The non-Fortran-faithful mass-target fix is COSMETIC for the cosine bell: its removal changes Linf by only +0.1%.
+- The PPM scheme is inherently nearly-conservative (mass drift ~3e-4 over 1 day at C36 without any post-fix).
+- Raw PPM output produces only trivial negatives (h_min = −0.01), so positivity is essentially preserved without the clip.
+
+**What iter-785 does NOT establish.**
+- Whether the mass-target fix should be removed from production.  It's cosmetic for cosine bell but may matter for more demanding cases or longer horizons.  That's a fidelity question requiring W2/W5/ocean-rest-state cross-checks.
+- Which remaining part of the transport pipeline produces the residual 121 m peak error.
+- Whether `fv_tp_2d`'s Lin-Rood cross-term handling, face-boundary PPM interpolation, or the underlying time-splitting ordering is the dominant contributor.
+
+**Iter-786+ candidates.**
+- Compare the Python duogrid path against the legacy path by forcing `dg.ng < 2` on the state.  If legacy is similar to duogrid, both paths have the same residual error; if different, the duogrid path introduces an extra error source.
+- Inspect `fv_tp_2d` cross-term (Lin-Rood) timestep splitting for ordering differences vs Fortran.
+- Run the cosine bell at even higher resolution (C72, C96) to pin the structural error floor more precisely.
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter785_cb_mass_target_bypass.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  49th iter in iter-752-785 chain.  Rules OUT the mass-target fix as contributor to the cosine bell distortion.  Five candidates are now ruled out or non-dominant: (b) dt scaling (iter-779), (c)-in-1-day (iter-781), `_d2a2c_vect` cube-vertex (iter-783), (d) PPM limiter (iter-784), mass-target fix (iter-785).  The residual ~121 m at t=1 day C36 comes from the underlying Lin-Rood / PPM scheme + time-splitting on the cubed sphere at moderate resolution — consistent with iter-778's "plateau above C24" and with candidate (a) "resolution-invariant structural error".
