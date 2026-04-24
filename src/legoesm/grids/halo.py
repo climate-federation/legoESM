@@ -1698,8 +1698,19 @@ def pad_halo_vector(
     cap, sap = cos_angle_padded, sin_angle_padded
     if cos_theta is not None and sin_theta is not None:
         # Non-orthogonal back-rotation: vtmp = cos_beta*u_east + sin_beta*v_north
-        ct_pad = jnp.pad(cos_theta, [(0, 0), (halo, halo), (halo, halo)], mode='edge')
-        st_pad = jnp.pad(sin_theta, [(0, 0), (halo, halo), (halo, halo)], mode='edge')
+        # Iter-838 (Codex stop-time review): replace `mode='edge'` padding
+        # of `cos_theta`/`sin_theta` (same-face extension, loses cross-
+        # face metric values at panel boundaries) with proper cross-face
+        # halo exchange via `pad_halo`.  The non-orthogonality metrics
+        # are scalar cell-centre fields, continuous across panel seams,
+        # but their numerical values on face F's halo at a seam with
+        # face G should come from G's metric, not a copy of F's.  Matches
+        # Fortran's halo-exchanged `gridstruct%sin_sg(:,:,5)` /
+        # `cos_sg(:,:,5)` semantics at panel boundaries.
+        ct_pad = pad_halo(cos_theta, halo=halo, interp_offsets=interp_offsets,
+                          duogrid=duogrid)
+        st_pad = pad_halo(sin_theta, halo=halo, interp_offsets=interp_offsets,
+                          duogrid=duogrid)
         cos_beta = cap * ct_pad - sap * st_pad
         sin_beta = sap * ct_pad + cap * st_pad
         u_padded = cap * u_east_padded + sap * v_north_padded

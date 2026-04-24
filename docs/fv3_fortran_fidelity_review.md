@@ -1668,3 +1668,42 @@ Codex stop-time review of iter-836b: "iter-836b's duogrid halo fix still rotates
 **Deliverable.**  Two-argument addition to `src/legoesm/core/fv3_sw_core.py::_corner_vorticity`.  `scripts/diag_iter836_corner_vort_halo.py` unchanged.  All 14 W2 sentinels pass.
 
 **Process.**  97th iter in iter-752-837 chain.  Addresses Codex iter-836b WEAKENS finding #2 (covariant-vs-grid-aligned rotation).  Activates the existing covariant branch of `pad_halo_vector` rather than inventing new code.  Remaining iter-836b WEAKENS #1 (cell-centre averaging O(dx²) loss) and WEAKENS #3 (metric edge-pad) are carried forward to iter-838+.
+
+### Iter-838 — Cross-face metric halo in `pad_halo_vector`'s covariant back-rotation
+
+Codex stop-time review of iter-837: "the new covariant halo path still back-rotates with copied same-face metrics, not neighbor-face halo metrics."  `pad_halo_vector`'s covariant branch computed the padded non-orthogonality metrics with `jnp.pad(cos_theta, ..., mode='edge')` — same-face extension, which at a panel seam copies face F's own metric rather than using face G's (neighbor) metric.  The Fortran oracle halo-exchanges `gridstruct%sin_sg(:,:,5)` as a scalar field (continuous across seams but with NEIGHBOR-face values at halo positions).
+
+**Fix.**  Replace `mode='edge'` metric padding with `pad_halo(cos_theta, ...)` / `pad_halo(sin_theta, ...)` — same scalar halo exchange the wind components use, with the same `interp_offsets` and `duogrid` settings.  Edit in `src/legoesm/grids/halo.py::pad_halo_vector` covariant back-rotation block.
+
+**Scope.**  The covariant branch is activated ONLY when `cos_theta`/`sin_theta` are passed.  Before iter-837, no caller used it.  After iter-837, only `_corner_vorticity`'s duogrid branch does.  So the iter-838 change to `pad_halo_vector` only affects `_corner_vorticity` — existing non-covariant callers are untouched.
+
+**Post-iter-838 result (same W2 IC, C24, duogrid).**
+
+| quantity                              | iter-837 (edge metric) | iter-838 (halo metric) |
+|---------------------------------------|-----------------------:|-----------------------:|
+| peak |Δ| vs mode='edge'                | 57.2 %                  | **55.0 %**              |
+| peak location GC-to-vertex             | 3.5°                    | 0.0° (back at cube vertex) |
+| interior corners delta                  | 0                       | 0                       |
+| W2 sentinels (14)                       | 14/14                   | 14/14                   |
+| FB DUOGRID C24 W2 12h h_max             | 10779                   | **10775** (−0.04 %)     |
+
+**Observation — numerical reportage only.**
+- Cross-face metric halo brings the back-rotation 2.2 pp closer to Fortran-faithful: delta vs mode='edge' dropped from 57.2 % to 55.0 %, and peak location moved from 3.5 °-off-vertex (iter-837's 1-cell metric-stencil-shift signature) back to exactly 0.0 ° at the cube vertex.
+- FB h_max slightly better than iter-837 (10775 vs 10779), still within noise band of the pre-iter-836 baseline (10765).
+- Interior corners delta still 0.0 (no regression on the iter-836b interior-preservation guarantee).
+
+**What iter-838 DOES show.**
+- The covariant back-rotation now uses cross-face neighbor metrics, closing iter-836b WEAKENS finding #3.
+- All existing callers of `pad_halo_vector` without `cos_theta`/`sin_theta` are unaffected.
+- W2 sentinels + FB chain remain stable.
+
+**What iter-838 does NOT establish.**
+- Whether the cell-centre-averaging in `_corner_vorticity` (iter-836b WEAKENS #1) is still load-bearing.  That would require a higher-fidelity direct 4th-order A→C halo reconstruction, beyond single-iter scope.
+
+**Iter-839+ candidates.**
+- Direct 2D-halo `utmp_full`/`vtmp_full` + halo-extended `uc`/`vc` from `_d2a2c_vect_duogrid` (iter-836b WEAKENS #1 — higher-fidelity than cell-centre averaging).
+- Audit `_ke_upwind` / `_vorticity_flux` halo usage (next unablated operators from iter-835 list).
+
+**Deliverable.**  `src/legoesm/grids/halo.py::pad_halo_vector` covariant branch update (two-line change: `jnp.pad(..., mode='edge')` → `pad_halo(...)` for `cos_theta`/`sin_theta`).  All 14 W2 sentinels pass.
+
+**Process.**  98th iter in iter-752-838 chain.  Closes iter-836b WEAKENS finding #3 (metric edge-pad in covariant back-rotation) per Codex stop-time review.  Cross-face neighbor-metric halo now used for the covariant rotation on every covariant call.  Only iter-837's `_corner_vorticity` activates this code path, so no regression risk.
