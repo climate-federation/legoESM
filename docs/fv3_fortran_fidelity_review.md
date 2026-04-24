@@ -753,3 +753,50 @@ The DUOGRID v_ll_Linf of ~100 m/s is comparable to the solid-body rotation wind 
 **Deliverable.**  `scripts/diag_iter787_w2_legacy_vs_duogrid.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass (they exercise LEGACY only).
 
 **Process.**  51st iter in iter-752-787 chain.  Major production-relevant finding: the DUOGRID path is catastrophically broken for W2 (800× worse than LEGACY).  This clarifies that the production W2 sentinels' 0.159 m/s mode-A artifact is the LEGACY-path residual; the DUOGRID path — intended as the Fortran-faithful branch — is not presently a production alternative.  iter-788+ should decompose the duogrid shallow-water chain to isolate the broken component and audit the Ralph-loop-flagged duogrid constraints (bounded_domain, cube-edge flux synchronization).
+
+### Iter-788 — W2 DUOGRID config sweep: brokenness is invariant to damping/boundary knobs
+
+Per iter-787's iter-788+ candidate "verify Ralph-loop-flagged duogrid constraints" and "binary-search the duogrid chain", iter-788 runs the W2 alpha=0 C36 6-hour integration under the DUOGRID path with six different config knob combinations to narrow down which knob (if any) drives the blowup.
+
+**Method** (`scripts/diag_iter788_w2_duogrid_config_sweep.py`; committed output at `diagnostics/iter788_output/iter788_w2_duogrid_config_sweep.txt`).  n=36, dt=300s, 6 hours.  Configs tested:
+1. iter-761 canonical (boundary_fix=True, damp_v=0.06, nord_v=2, div_damp=8×base, hyperdiff=0).
+2. boundary_fix=False, otherwise canonical.
+3. damp_v=0, nord_v=0, otherwise canonical.
+4. div_damp=0, otherwise canonical.
+5. div_damp=1×base (unscaled), otherwise canonical.
+6. All damping off (boundary_fix=False, damp_v=0, nord_v=0, div_damp=0, hyperdiff=0).
+
+**Result.**
+
+| DUOGRID config         | L2        | v_cc_Linf   | status  |
+|------------------------|-----------|-------------|---------|
+| iter-761 canonical     | 8.894e-02 | 4.165e+01   | broken  |
+| boundary_fix=False     | 1.078e-01 | 8.922e+01   | broken  |
+| damp_v=0 nord_v=0      | 8.894e-02 | 4.259e+01   | broken  |
+| div_damp=0             | 7.588e-02 | 8.602e+01   | broken  |
+| div_damp=base (1×)     | 7.102e-02 | 7.568e+01   | broken  |
+| all damping off        | 1.147e-01 | 2.556e+02   | broken  |
+
+Reference: LEGACY iter-761 canonical at 6h gives L2 = 1.225e-4, v_cc_Linf = 4.31e-2 m/s.
+
+**Observation — numerical reportage only.**  All six DUOGRID config variants produce v_cc_Linf > 30 m/s at 6 hours (classified "broken").  The LEGACY baseline at 6h is 4.3e-2 m/s (~1000× smaller).  Disabling boundary_fix makes DUOGRID WORSE (89 m/s vs canonical 42 m/s), consistent with boundary_fix providing at least some partial stabilisation.  Disabling all damping is the worst (256 m/s).  Even the "all damping off" case has L2 ~ 0.11 (~900× LEGACY's 1.2e-4).
+
+**What iter-788 DOES show.**
+- The DUOGRID brokenness is INVARIANT to the 5 damping/boundary knobs tested — no config toggle recovers near-LEGACY performance.
+- boundary_fix, damp_v/nord_v, and div_damp each provide partial damping of the duogrid failure mode (turning them off makes things worse), but none of them CAUSES the failure — the failure exists at baseline config and persists across variants.
+- The failure is not in the config, it's in the duogrid-path operator wiring or dispatch.
+
+**What iter-788 does NOT establish.**
+- WHICH operator's duogrid dispatch is broken.  Candidates remain: `_d2a2c_vect_duogrid`, `dgrid_to_cgrid` duogrid branch, `cgrid_mass_flux_divergence` duogrid branch, `cdgrid_momentum_tendencies` duogrid branch, or the halo-exchange chain for vectors.
+- Whether the brokenness is a missing operator change (new code needed for Fortran-faithful behaviour) or a bug (existing code is mis-wired).
+- Whether the "critical duogrid constraint" from the Ralph loop brief — "Flux computation split across d_sw1/d_sw3/d_sw5 and updates across d_sw2/d_sw4/d_sw6 requires mandatory cube-edge flux synchronization before update, with synchronized flux = average(face_A_to_B, face_B_to_A)" — is correctly implemented in the duogrid path.
+
+**Iter-789+ candidates.**
+- First-step diagnosis: measure `cdgrid_shallow_water_tendencies(h, u_d, v_d, ...)` output under DUOGRID vs LEGACY at t=0 on the W2 IC; compare dh_dt, du_dt, dv_dt.  If DUOGRID tendencies have large spurious values at t=0, the wiring bug is in the tendency operator.
+- Audit `_d2a2c_vect_duogrid` corner fills vs Fortran: port `veltemp`/`veltempp` snapshot semantics and re-run iter-786 + iter-787 to see if cube-vertex error drops.
+- Audit the "cube-edge flux synchronization" constraint in d_sw1/d_sw3/d_sw5 against Fortran.
+- Verify `bounded_domain = True` is consistently used in every duogrid-active operator.
+
+**Deliverable.**  `scripts/diag_iter788_w2_duogrid_config_sweep.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  52nd iter in iter-752-788 chain.  Rules out config-level fixes for the DUOGRID W2 blowup: the brokenness is invariant across 6 damping/boundary variants.  The failure is in operator dispatch/wiring, not config.  iter-789+ should measure t=0 tendencies under DUOGRID vs LEGACY to isolate the broken operator.
