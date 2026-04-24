@@ -800,3 +800,45 @@ Reference: LEGACY iter-761 canonical at 6h gives L2 = 1.225e-4, v_cc_Linf = 4.31
 **Deliverable.**  `scripts/diag_iter788_w2_duogrid_config_sweep.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  52nd iter in iter-752-788 chain.  Rules out config-level fixes for the DUOGRID W2 blowup: the brokenness is invariant across 6 damping/boundary variants.  The failure is in operator dispatch/wiring, not config.  iter-789+ should measure t=0 tendencies under DUOGRID vs LEGACY to isolate the broken operator.
+
+### Iter-789 — Monkey-patch of `_d2a2c_vect` fires ZERO times in W2; function is not in production W2 path
+
+Per iter-787/788's iter-789+ candidate "replace ut/vt with analytical at every step and measure v_ll_Linf", iter-789 monkey-patches `legoesm.core.fv3_sw_core._d2a2c_vect` to inject the analytical solid-body rotation ut/vt, then runs W2 alpha=0 C36 24h under LEGACY and compares to BASELINE.
+
+**Result (null).**
+
+| case             | L2         | v_ll_Linf   | v_cc_Linf   |
+|------------------|------------|-------------|-------------|
+| BASELINE         | 2.176e-04  | 1.585e-01   | 1.879e-01   |
+| ANALYTICAL ut/vt | 2.176e-04  | 1.585e-01   | 1.879e-01   |
+| Δ                | +0.0%      | +0.0%       | +0.0%       |
+
+Debug probe inside the patched function (`_patched_trace_hits[0]`) reports **zero** calls during the W2 integration.  The patch is installed on both `fv3_sw_core._d2a2c_vect` and `operators_cdgrid._d2a2c_vect` (the latter does not import the name), so the call site is not in either module's dispatch.
+
+**Key correction to iter-782/786 framing.**  Inspection of the call graph (`src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:526-539` + `src/legoesm/core/operators_cdgrid.py:1187`) shows:
+- `FV3EdgeShallowWaterModel.step` → `fv3_sw_tendencies` (from `operators_cdgrid`) → `dgrid_to_cgrid` (also in `operators_cdgrid`, line 298) → RK3 integrator.
+- `_d2a2c_vect` (in `fv3_sw_core.py`) is NOT in this path.  It IS in the `fv3_fb_sw_step` path (used by `FV3FBShallowWaterModel`) but W2 production uses the RK3 edge-midpoint `FV3EdgeShallowWaterModel`.
+- The W2 sentinels (`test_w2_alpha0_c36_1day_*`) use `FV3EdgeShallowWaterModel`, so the RK3 path with `dgrid_to_cgrid` is what actually runs.
+
+**What iter-789 DOES establish (observational only).**
+- `_d2a2c_vect` fires ZERO times during a W2 production run.  The 11% cube-vertex error measured in iter-782/786 on that function does NOT affect the W2 mode-A artifact.
+- The W2 mode-A at v_ll_Linf = 0.159 m/s must originate in a different operator: `dgrid_to_cgrid`, `cdgrid_momentum_tendencies`, or downstream ops in `fv3_sw_tendencies`.
+
+**What iter-789 does NOT establish.**
+- Which operator in the `fv3_sw_tendencies` pipeline produces the W2 mode-A — iter-782/786's measurement was of the WRONG function.
+- Whether `dgrid_to_cgrid` has an analogous cube-vertex error.  That is iter-790's test.
+
+**Corrections to earlier iter claims (must re-visit).**
+- iter-782 documented "`_d2a2c_vect` on the analytical solid-body rotation IC at C36 has ~6 m/s (~11% relative) error at cube vertices".  This observation IS correct for `_d2a2c_vect` in isolation, but the IMPLICATION that it's the cause of the W2 artifact was wrong — W2 doesn't call `_d2a2c_vect`.
+- iter-783 override test's null result for cosine bell is unaffected (cosine bell uses `transport_step` → `fv_tp_2d`, not `_d2a2c_vect`... wait, actually the cosine bell script DOES call `_d2a2c_vect` explicitly at the top, then passes ut/vt to `transport_step`).  So iter-783's null result is valid for the cosine bell.
+- iter-786's DUOGRID-vs-LEGACY `_d2a2c_vect` ratio is still valid data about that function, but the inference that DUOGRID would break W2 via this mechanism was wrong — W2 doesn't call `_d2a2c_vect`.  The DUOGRID W2 breakage observed in iter-787 must come from a different duogrid dispatch (in `dgrid_to_cgrid`, `fv3_sw_tendencies`, or their downstream ops).
+
+**Iter-790+ candidates.**
+- Re-run iter-782-style fidelity test for `dgrid_to_cgrid` (the actual W2 production D→C operator).  If `dgrid_to_cgrid` has cube-vertex error, THAT is the candidate mechanism for W2 mode-A.
+- Run iter-789-style monkey-patch on `dgrid_to_cgrid` to test the analytical-injection-vs-computed W2 result.
+- Re-examine DUOGRID's `dgrid_to_cgrid` and `fv3_sw_tendencies` branches for the source of the iter-787 800× blowup.
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter789_w2_analytical_ut_vt.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  53rd iter in iter-752-789 chain.  KEY CORRECTION: `_d2a2c_vect` (the function measured in iter-782/786) is NOT in the production W2 pipeline.  W2 uses `dgrid_to_cgrid` in `operators_cdgrid.py`.  iter-790+ must redo the fidelity audit for `dgrid_to_cgrid` to identify the actual W2 mode-A source.
