@@ -842,3 +842,36 @@ Debug probe inside the patched function (`_patched_trace_hits[0]`) reports **zer
 **Deliverable.**  `scripts/diag_iter789_w2_analytical_ut_vt.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  53rd iter in iter-752-789 chain.  KEY CORRECTION: `_d2a2c_vect` (the function measured in iter-782/786) is NOT in the production W2 pipeline.  W2 uses `dgrid_to_cgrid` in `operators_cdgrid.py`.  iter-790+ must redo the fidelity audit for `dgrid_to_cgrid` to identify the actual W2 mode-A source.
+
+### Iter-790 — `dgrid_to_cgrid` shape-mismatch: W2 production uses `fv3_d2cc` + `fv3_cc2c`
+
+Attempted to redo the iter-782 fidelity measurement for `dgrid_to_cgrid`, but the function raised a shape-mismatch error: `dgrid_to_cgrid` expects u_d/v_d at shape `(6, n+1, n+1)` (corner-D convention), whereas `FV3EdgeShallowWaterState.u_d` is `(6, n, n+1)` and `v_d` is `(6, n+1, n)` (edge-midpoint-D convention).  `dgrid_to_cgrid` as called directly cannot process the production state.
+
+**Call-graph trace (`operators_cdgrid.py:1547-1584`).**  The ACTUAL D→C pipeline in `fv3_sw_tendencies` (which is what `FV3EdgeShallowWaterModel.step` uses) is:
+
+```
+fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid, ...)
+  ↓
+  u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)         # operators_cdgrid.py:1414
+  u_c,  v_c  = fv3_cc2c(u_cc, v_cc, cdgrid)        # operators_cdgrid.py:1437
+  dh_dt      = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
+  # [+ KE, Bernoulli gradient, Arakawa-Lamb momentum tendencies]
+```
+
+`fv3_d2cc` is a simple 2-point average to cell centres (no non-orthogonality correction).  `fv3_cc2c` goes cell centre → C-grid via `pad_halo_vector` + 2nd-order interpolation + non-orthogonality correction via `cosa_u` / `sina_u`.  Neither operator matches the `_d2a2c_vect` 4th-order-with-Lagrange path.
+
+The `dgrid_to_cgrid` name in `operators_cdgrid.py:298` is a DIFFERENT operator used in the "corner-D" path (`FV3FBShallowWaterModel`), not the "edge-midpoint-D" path (`FV3EdgeShallowWaterModel`) used by W2 sentinels.
+
+**What iter-790 DOES establish (corrective only).**
+- The W2 production D→C operators are `fv3_d2cc` + `fv3_cc2c` (not `_d2a2c_vect` or `dgrid_to_cgrid`).
+- The stagger convention in `FV3EdgeShallowWaterState` is edge-midpoint, not corner-D, so the function named `dgrid_to_cgrid` is inapplicable.
+
+**Iter-791+ candidates.**
+- Measure `fv3_cc2c`'s cube-vertex fidelity: at each C-grid stagger cell, compare computed u_c / v_c against analytical projection of solid-body rotation (u_east, v_north) onto C-grid edge normals.  Report peak |err| + GC-to-vertex.
+- Monkey-patch `fv3_cc2c` (not `_d2a2c_vect`) to inject analytical u_c / v_c and measure W2 v_ll_Linf.
+- Audit the `cosa_u` / `sina_u` metrics at cube vertices — if they have extreme non-orthogonality, `fv3_cc2c`'s 2-point-avg-with-correction will amplify that error.
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter790_dgrid_to_cgrid_fidelity.py` (fails at the shape-mismatch line, output shows error) + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  54th iter in iter-752-790 chain.  Inconclusive but CORRECTIVE: rules out `dgrid_to_cgrid` as the W2 D→C operator (it's shape-incompatible with `FV3EdgeShallowWaterState`).  Identifies `fv3_d2cc` + `fv3_cc2c` as the actual W2 D→C operators; iter-791+ should audit their cube-vertex fidelity.
