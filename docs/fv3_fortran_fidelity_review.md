@@ -1246,3 +1246,43 @@ This is a CONCRETE t=0 signature of the duogrid path breakage — it's not from 
 **Deliverable.**  `scripts/diag_iter799_duogrid_t0_tendency.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  63rd iter in iter-752-799 chain.  Major DUOGRID diagnostic finding: the mass-transport chain (`fv3_cc2c` → `cgrid_mass_flux_divergence`) produces a t=0 dh/dt 1172× larger than LEGACY on steady-state W2.  This is an INSTANT halo/operator breakage, not time-step accumulation.  iter-800+ should localise which specific duogrid halo or operator produces the spurious divergence.
+
+### Iter-800 — DUOGRID blowup is in `cgrid_mass_flux_divergence` PPM halo at cube vertices
+
+Per iter-799's finding, iter-800 decomposes the DUOGRID mass-transport chain at t=0 on W2 IC, measuring u_c, v_c, ∇·u_c (raw divergence), and mass flux divergence dh/dt separately.
+
+**Method** (`scripts/diag_iter800_duogrid_uc_vc_divergence.py`; committed output at `diagnostics/iter800_output/iter800_duogrid_uc_vc_divergence.txt`).  C36 W2 IC.  Under LEGACY and DUOGRID separately: compute `u_cc, v_cc = fv3_d2cc(u_d, v_d)`; `u_c, v_c = fv3_cc2c(u_cc, v_cc)`; `div = cgrid_divergence(u_c, v_c)`; `mass_div = cgrid_mass_flux_divergence(h, u_c, v_c)`.
+
+**Result.**
+
+| quantity                     | LEGACY peak             | DUOGRID peak            | ratio     | peak location (DUOGRID)     |
+|------------------------------|-------------------------|-------------------------|-----------|-----------------------------|
+| u_c                          | 38.60 m/s (GC=34°)     | 38.60 m/s (GC=34°)      | 1.00×     | face 0 (0, 17), mid-face    |
+| v_c                          | 26.68 m/s (GC=35°)     | 26.68 m/s (GC=35°)      | 1.00×     | face 4 (0, 18), mid-face    |
+| ∇·u_c (bare divergence)      | 3.30e−08 (GC=5°)       | 3.60e−08 (GC=5°)        | 1.09×     | face 0 (2, 0)               |
+| **mass_div (∇·(h·u))**       | **1.33e−04 (GC=34°)**  | **1.57e−01 (GC=1.19°)** | **1172×** | **face 2 (0, 0), GC=1.19°** |
+
+**Observation — numerical reportage only.**  u_c and v_c from `fv3_cc2c` are BYTE-IDENTICAL between LEGACY and DUOGRID at t=0 on the smooth W2 IC.  Their bare divergence is also identical (both ~3e-8, truncation-level).  But the PPM mass flux divergence `cgrid_mass_flux_divergence` gives:
+- LEGACY: peak 1.33e-4 at mid-face (GC=34°, face 4 (18, 0)).
+- DUOGRID: peak 1.57e-1 at CUBE VERTEX (GC=1.19°, face 2 (0, 0)) — exactly adjacent to cube-vertex position.
+
+**Localisation.**  The blowup is NOT in u_c, v_c, or bare divergence.  It IS in `cgrid_mass_flux_divergence`'s PPM stencil applied to h with halo=2 via `_pad_halo_auto_h2(h, cdgrid)` → `pad_halo(h, halo=2, duogrid=dg)` → `cube_rmp_vectorized + fill_corner_region`.  Under DUOGRID, the h-halo at cube-vertex cells produces a PPM reconstruction that gives a large spurious face value, which the flux divergence picks up.
+
+**What iter-800 DOES show.**
+- The DUOGRID t=0 dh/dt blowup is ISOLATED to the scalar h-halo path with halo=2 (PPM stencil).  Vector halo (for u_c, v_c) is fine.
+- The blowup peak is at GC=1.19° from a cube vertex — confirms it's a halo-corner-specific issue.
+- Identical u_c, v_c between paths means `pad_halo_vector(duogrid=dg)` for vector halo in `fv3_cc2c` is not the culprit.
+
+**What iter-800 does NOT establish.**
+- WHICH specific routine in the duogrid h-halo chain produces the spurious value: `cube_rmp_vectorized` Lagrange remap, `fill_corner_region` Lagrange corner fill at halo=2, or the underlying `_pad_halo_local_h2` dispatch.
+- Whether the DUOGRID halo=2 scalar path works correctly for non-smooth h (the smooth W2 h already fails; non-smooth is worse).
+
+**Iter-801+ candidates.**
+- Inspect h_pad from `pad_halo(h, halo=2, duogrid=dg)` at the 4 cube-vertex halo cells on each face.  Report values vs LEGACY.  A large mismatch confirms the halo is broken.
+- Toggle `cube_rmp_vectorized` and `fill_corner_region` individually (e.g., skip one and keep the other) to isolate which produces the spurious cube-vertex h halo values.
+- Cross-check the Fortran equivalent: at halo=2, what cube-corner fill does FV3 apply to a scalar A-grid field?
+- Port Fortran FB transport chain (blocked on ng=3 and FB-chain stability).
+
+**Deliverable.**  `scripts/diag_iter800_duogrid_uc_vc_divergence.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  64th iter in iter-752-800 chain.  Localises the DUOGRID t=0 blowup to `cgrid_mass_flux_divergence`'s halo=2 scalar h-halo path at cube vertices.  Vector halo (u_cc/v_cc → u_c/v_c) is fine.  iter-801+ should inspect the h_pad cube-corner values directly and compare LEGACY vs DUOGRID to identify the specific broken routine.
