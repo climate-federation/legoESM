@@ -1286,3 +1286,45 @@ Per iter-799's finding, iter-800 decomposes the DUOGRID mass-transport chain at 
 **Deliverable.**  `scripts/diag_iter800_duogrid_uc_vc_divergence.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  64th iter in iter-752-800 chain.  Localises the DUOGRID t=0 blowup to `cgrid_mass_flux_divergence`'s halo=2 scalar h-halo path at cube vertices.  Vector halo (u_cc/v_cc → u_c/v_c) is fine.  iter-801+ should inspect the h_pad cube-corner values directly and compare LEGACY vs DUOGRID to identify the specific broken routine.
+
+### Iter-801 — DUOGRID `fill_corner_region` OVERSHOOTS by 84 m at polar cube corners
+
+Per iter-800's iter-801+ candidate, iter-801 inspects the h_pad cube-corner 2×2 blocks directly under LEGACY (use_duogrid=False → `_fill_corners_h2` averaging) vs DUOGRID (use_duogrid=True → `fill_corner_region` Lagrange extrapolation).
+
+**Method** (`scripts/diag_iter801_duogrid_h_pad_inspection.py`; committed output at `diagnostics/iter801_output/iter801_duogrid_h_pad_inspection.txt`).  C36 W2 h-field (smooth with polar-dominant gradient).  Compute h_pad via `pad_halo(h, halo=2, interp_offsets=..., duogrid=dg)` and compare the 4 cube-corner 2×2 blocks per face.
+
+**Result.**
+
+| face region | corner 2×2 block LEGACY range | corner 2×2 block DUOGRID range | max \|Δ\| (m) |
+|-------------|-------------------------------|--------------------------------|---------------|
+| equatorial (faces 0-3) | 2295.09 – 2408.76 | 2268.01 – 2384.46 | 42.01 |
+| polar (faces 4-5)      | 2364.63 – 2385.21 | 2399.70 – 2469.24 | **84.02** |
+
+Interior h on polar face 4: min=1094.64, max=2325.54.
+DUOGRID h_pad peak at polar cube corner (face 4, padded (0,0)) = **2469.24 m** — **144 m ABOVE the interior maximum** (2325.54).  Clear overshoot.
+
+**Observation — numerical reportage only.**  The DUOGRID `fill_corner_region` Lagrange corner extrapolation produces h_pad values at polar cube-vertex halo cells that exceed the interior physical range by up to 144 m.  This overshoot is a concrete failure mode of 4-pt Lagrange extrapolation at high-curvature geographic regions (near the pole where h has large meridional gradient).  The LEGACY path's simple 2-point averaging at cube corners stays WITHIN the interior range (max 2408 < interior max).
+
+**Mechanism.**  When the PPM stencil in `cgrid_mass_flux_divergence` reads h at cube-vertex halo positions:
+- LEGACY: h ∈ [2295, 2408] — within interior range, PPM behaves reasonably.
+- DUOGRID: h ∈ [2268, 2469] — overshoots interior max, PPM reconstructs a parabola that attains large face values, giving spurious fluxes.
+- Result: dh/dt peak at DUOGRID face-2 cube vertex = 1.57e-1 (iter-800), 1172× LEGACY.
+
+**What iter-801 DOES show.**
+- The DUOGRID `fill_corner_region` overshoots the interior h range by up to 144 m at polar cube corners.  This is a concrete, quantified failure of the Lagrange extrapolation.
+- LEGACY's simpler 2-pt averaging (`_fill_corners_h2`) stays within the interior range and avoids the overshoot.
+- Fix direction: the Lagrange corner fill needs a MONOTONICITY constraint (clip to local interior min/max), or should fall back to 2-pt averaging for specific high-curvature fields.
+
+**What iter-801 does NOT establish.**
+- Whether clipping the Lagrange output to the local interior range (monotone-preserving fix) restores DUOGRID W2 to LEGACY-equivalent behaviour.
+- Whether FV3 Fortran's `fill_corner_region_2d` has an analogous monotonicity constraint that we've missed in the port.
+
+**Iter-802+ candidates.**
+- Add a monotonicity clip to `fill_corner_region`: after Lagrange computes the 2×2 corner block, clip each cell to `[min(neighbouring interior + edge-halo cells), max(...)]`.  Re-run iter-800 and iter-787 to measure impact.
+- Audit Fortran `fill_corner_region_2d` (fv_duogrid.F90:1719-1903) for any clipping or monotonicity logic; cross-check against our Python.
+- Test a simpler fallback: when duogrid is active, use the LEGACY `_fill_corners_h2` averaging only at cube corners (keep Lagrange for non-corner halo cells).
+- Port Fortran FB transport chain (blocked on ng=3 and FB-chain stability).
+
+**Deliverable.**  `scripts/diag_iter801_duogrid_h_pad_inspection.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  65th iter in iter-752-801 chain.  Localises the DUOGRID t=0 W2 blowup to `fill_corner_region`'s Lagrange extrapolation overshooting by up to 84 m (144 m above interior max at polar cube corners).  The fix path is a monotonicity clip, which is a targeted source change with a clear diagnostic test (re-run iter-800 and iter-787 after the fix).
