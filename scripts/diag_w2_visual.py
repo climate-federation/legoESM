@@ -24,10 +24,12 @@ from legoesm import constants
 OUT = os.path.join(os.path.dirname(__file__), '..', 'diagnostics', 'fv3_visual')
 os.makedirs(OUT, exist_ok=True)
 
-N = 24
+N = 36
 # Iter-797: match the production matrix dt (run_atmosphere_test_matrix.py
 # line 1177) which uses dt=300s for W2/W5.  dt=600s (prior value) with
 # the iter-761 canonical config was numerically unstable at C24.
+# Iter-813: bumped N to 36 to match the production W2 sentinel resolution
+# (test_w2_alpha0_c36_1day_iter761_matrix_config uses n=36).
 DT = 300.0
 G = constants.g
 NSTEPS = int(86400 / DT)  # 1 day
