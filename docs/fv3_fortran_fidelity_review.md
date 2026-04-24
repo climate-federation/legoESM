@@ -10,14 +10,25 @@ form below.
 
 ## Live status
 
-- **W2 v-wind artifact at C36 remains unresolved.**
+- **W2 v-wind artifact at C36 remains unresolved (structural).**
   Production still runs `FV3EdgeShallowWaterModel` ->
   `fv3_sw_tendencies` (Arakawa-Lamb + RK3 + `boundary_fix`), not
-  the FV3 FB chain. Current canonical W2 baseline after iter-505:
-  `L2=2.42e-04`, `Linf=1.83e-03`, `max|v_ll|≈3.03e-01 m/s`.
-- **FB-path C24/C36 stability remains unresolved.**
-  Halo=3 scaffolding is partly in place, but the FB chain still
-  needs full h=3 caller rollout and the remaining stability work.
+  the FV3 FB chain.  Current canonical W2 baseline after iter-761:
+  `L2=2.18e-04`, `v_ll_Linf=1.585e-01 m/s` (iter-787 verified).
+  Visible as vertical stripes at 4 cube-vertex meridians
+  (|lon|≈45°, 135°, lat ±20°–±45°, peak ±0.15 m/s) per iter-820.
+  Mechanism is structural cube-vertex Cor+press+KE+zeta cancellation
+  residual (iter-793/796); resolution-invariant (iter-822 showed
+  C36→C48 gives SLIGHT INCREASE 0.159 → 0.182 m/s); knob-invariant
+  (iter-825 showed all Fortran corner-fill combinations worsen).
+  Fix requires architectural port (FB chain, c_sw KE upwind, d_sw5
+  corner damping).
+- **FB chain accuracy at C24/C36 remains unresolved.**
+  Halo=3 scaffolding is in place.  iter-808's sign-flip sync fixes
+  stability enough that FB DUOGRID completes 24h at C24 without
+  NaN (iter-816), but h_max grows 8x (24040 vs 2960 physical) and
+  damp_v tuning does not help (iter-819: damp_v > 0.03 crashes;
+  damp_v ≤ 0.03 gives <1% h_max reduction).
 
 ## Closed priorities
 
@@ -27,11 +38,33 @@ form below.
 - **d_sw3 BGRID_NE sync**: resolved. Python now routes the corner
   sync through the geographic-frame seam handler instead of the old
   scalar KE fallback.
+- **Duogrid cube-edge flux synchronization (Ralph-loop constraint #1)**:
+  resolved by iter-807/808's sign-flip flux sync
+  (`_FLUX_SIGN_FLIP_EDGES` in `src/legoesm/grids/halo.py`).  DUOGRID
+  W2 v_ll_Linf improved 99.96 m/s → 1.20 m/s (83× reduction).  All
+  122 tests pass.  Per iter-808b, test contracts updated to match
+  new sign-flip semantics at polar-adjacent seams.
+- **Legacy edge handling disabled in duogrid mode (Ralph-loop constraint #2)**:
+  verified by iter-811.  Fortran legacy edge handling operators
+  (`rsin_u/v` panel-edge override, `fv_tp_2d` duogrid halo path,
+  `_c_sw` / `_d_sw_native` corner-override gating) are all
+  correctly gated on `bounded_domain` / `duogrid`.
 - **Non-duogrid `_d2a2c_vect` cube-vertex gap**: isolated, not
   fixed. It is architectural and requires halo=3, but it does not
-  affect the default A-L production path.
+  affect the default A-L production path (iter-789 confirmed
+  `_d2a2c_vect` is NOT in the RK3+`fv3_sw_tendencies` production
+  path).
 - **Old W2 polar face-4 vs face-5 asymmetry**: resolved by the
   iter-505 PPM-axis fix.
+- **Visual diagnostic correctness (iter-797/820)**: `diag_w2_visual.
+  py` now uses production config + IC + dt + projection convention;
+  post-regrid v_ll_Linf matches sentinel exactly (0.159 m/s LEGACY,
+  1.197 m/s DUOGRID).
+- **Cosine bell visual cleanliness (iter-823)**: C36 1-day cosine
+  bell error is a CLEAN dispersion dipole at the bell location
+  (leading-edge overshoot + trailing-edge undershoot).  No cube-
+  vertex stripes, no polar bands, no seams.  Classic PPM transport
+  signature, not a cube-sphere artifact.
 
 ## Key production fix
 
