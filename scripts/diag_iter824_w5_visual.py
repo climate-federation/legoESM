@@ -119,15 +119,19 @@ def _plot(field, title, fname, cmap='RdBu_r', sym=True, vmin=None, vmax=None):
     print(f"  Saved {fname}")
 
 
-_label = "DUOGRID" if USE_DUOGRID else "LEGACY"
-_suffix = "duogrid" if USE_DUOGRID else "production"
-_plot(h_ll, f'h final: W5 C{n} day {days:.0f} {_label}',
-       f'w5_h_{_suffix}_latlon.png', cmap='viridis', sym=False,
+# Iter-828b (Codex review fix): restore the ORIGINAL iter-824
+# filenames to preserve the legacy W5 contract.  The intermediate
+# iter-828 edit had renamed `w5_h_change_latlon.png` to
+# `w5_h_change_production_latlon.png`, breaking the legacy
+# contract.  The three original filenames (one with and two
+# without the "production" suffix) are preserved here.
+_plot(h_ll, f'h final: W5 C{n} day {days:.0f} LEGACY',
+       'w5_h_production_latlon.png', cmap='viridis', sym=False,
        vmin=h_ll.min(), vmax=h_ll.max())
-_plot(h_change_ll, f'h(t=3d) - h(t=0): W5 C{n} {_label}',
-       f'w5_h_change_{_suffix}_latlon.png', cmap='RdBu_r', sym=True)
-_plot(vn_ll, f'v_north: W5 C{n} day {days:.0f} {_label}',
-       f'w5_vnorth_{_suffix}_latlon.png', cmap='RdBu_r', sym=True)
+_plot(h_change_ll, f'h(t=3d) - h(t=0): W5 C{n} LEGACY',
+       'w5_h_change_latlon.png', cmap='RdBu_r', sym=True)
+_plot(vn_ll, f'v_north: W5 C{n} day {days:.0f} LEGACY',
+       'w5_vnorth_production_latlon.png', cmap='RdBu_r', sym=True)
 
 print()
 print("Interpretation cues (observational only):")
