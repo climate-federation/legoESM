@@ -1093,3 +1093,37 @@ Per iter-820's iter-821+ candidate to confirm the structural nature of the W2 re
 **Deliverable.**  `scripts/diag_iter822_w2_resolution_scan.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  84th iter in iter-752-822 chain.  Confirms W2 LEGACY residual is STRUCTURAL (not truncation): resolution refinement from C36 to C48 does not decrease v_ll_Linf; it slightly increases (0.159 → 0.182 m/s).  The mode-A's cube-vertex localisation is a discretisation-level artifact, not a numerical precision issue.
+
+### Iter-823 — Cosine bell lat-lon visual: error is CLEAN dispersion dipole, no cube-vertex structure
+
+Per Ralph loop step 5 (visual inspection on all 3 tests), iter-823 generates cosine bell h, h_exact, and h_err lat-lon plots for C36 1-day LEGACY.
+
+**Method** (`scripts/diag_iter823_cb_visual.py`).  β=π/4, dt=1440s, 1 day.  Regrid h, h_exact, h_err to 360×181 lat-lon grid and plot.
+
+**Observation (C36 1-day, LEGACY).**
+- Linf = 121.3 m, L2 = 0.120.
+- **h_err pattern**: clean DIPOLE at the bell's current location (~+30° lat, −60° lon).  POSITIVE lobe (red, peak +120 m) at higher latitude, NEGATIVE lobe (blue, peak −120 m) at lower latitude.
+- Rest of the sphere (|lon| > 0°, |lat| > 40° or < 20°) is EMPTY — no cube-vertex stripes, no polar bands, no seams, no edge striping.
+- Pattern is consistent with classic PPM transport dispersion: the bell has been slightly displaced/deformed during the 1-day rotation, producing leading-edge excess + trailing-edge deficit.
+
+**Canonical cosine bell visual artifact characterization.**  Unlike W2 (which has cube-vertex meridian stripes) and unlike DUOGRID cases (which have 8 cube-vertex dipole blobs), the cosine bell error at C36 is:
+- Localised at the bell itself (not at cube vertices or face edges).
+- A dispersion dipole (leading-edge overshoot, trailing-edge undershoot).
+- Has NO cube-sphere structural signature visible.
+
+**What iter-823 DOES show.**
+- Cosine bell h_err is a clean, LOCALISED dispersion dipole at the bell's position after 1 day advection.
+- No cube-edge / corner / seam / halo / striping / ringing artifacts are visible on the rest of the sphere.
+- The 121 m Linf is the expected PPM transport dispersion error for a cosine bell advected through 30° on a C36 cubed sphere.
+
+**What iter-823 does NOT establish.**
+- Whether the cosine bell would develop cube-vertex artifacts on a multi-day trajectory crossing cube vertices (iter-781 showed 1-day trajectory at β=π/4 never crosses a vertex).
+- Whether a Fortran-faithful PPM variant (e.g., different limiter or flux-form) would reduce the dispersion dipole.
+
+**Iter-824+ candidates.**
+- Visual inspection of W5 lat-lon (the remaining Ralph-loop-required test case).
+- Re-classify "visible artifacts" per the Ralph loop: cube-vertex meridian stripes (W2) and cube-vertex dipoles (DUOGRID) qualify; dispersion-dipole at the bell position is expected PPM behaviour, not a cube-sphere artifact.
+
+**Deliverable.**  `scripts/diag_iter823_cb_visual.py` + 3 new PNGs in `diagnostics/fv3_visual/` (`cb_h_production_latlon.png`, `cb_h_exact_latlon.png`, `cb_h_err_latlon.png`).  No source-code change.  No new sentinel.
+
+**Process.**  85th iter in iter-752-823 chain.  Visual inspection confirms cosine bell's 121 m residual is a LOCALISED dispersion dipole at the bell's position — not a cube-sphere artifact.  Rest of the sphere is visually clean.  This should be re-classified: cosine bell does NOT have "cube-edge / corner / seam / halo / striping / ringing" artifacts per the Ralph-loop criterion.
