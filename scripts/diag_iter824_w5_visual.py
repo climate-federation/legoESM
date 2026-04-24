@@ -43,7 +43,11 @@ days = 3.0
 dt = 300.0
 n_steps = int(round(days * 86400 / dt))
 
-grid = create_cubed_sphere(n=n, use_duogrid=False)
+# Iter-828: also run DUOGRID (post iter-808 sign-flip sync) for
+# side-by-side visual comparison.
+USE_DUOGRID = True
+
+grid = create_cubed_sphere(n=n, use_duogrid=USE_DUOGRID)
 cfg = CDGridShallowWaterConfig(
     hyperdiff_coeff=0.0, div_damp=8.0 * _div_damp_cube(n),
     boundary_fix=True, damp_v=0.06, nord_v=2)
@@ -112,13 +116,15 @@ def _plot(field, title, fname, cmap='RdBu_r', sym=True, vmin=None, vmax=None):
     print(f"  Saved {fname}")
 
 
-_plot(h_ll, f'h final: W5 C{n} day {days:.0f} LEGACY',
-       'w5_h_production_latlon.png', cmap='viridis', sym=False,
+_label = "DUOGRID" if USE_DUOGRID else "LEGACY"
+_suffix = "duogrid" if USE_DUOGRID else "production"
+_plot(h_ll, f'h final: W5 C{n} day {days:.0f} {_label}',
+       f'w5_h_{_suffix}_latlon.png', cmap='viridis', sym=False,
        vmin=h_ll.min(), vmax=h_ll.max())
-_plot(h_change_ll, f'h(t=3d) - h(t=0): W5 C{n} LEGACY',
-       'w5_h_change_latlon.png', cmap='RdBu_r', sym=True)
-_plot(vn_ll, f'v_north: W5 C{n} day {days:.0f} LEGACY',
-       'w5_vnorth_production_latlon.png', cmap='RdBu_r', sym=True)
+_plot(h_change_ll, f'h(t=3d) - h(t=0): W5 C{n} {_label}',
+       f'w5_h_change_{_suffix}_latlon.png', cmap='RdBu_r', sym=True)
+_plot(vn_ll, f'v_north: W5 C{n} day {days:.0f} {_label}',
+       f'w5_vnorth_{_suffix}_latlon.png', cmap='RdBu_r', sym=True)
 
 print()
 print("Interpretation cues (observational only):")
