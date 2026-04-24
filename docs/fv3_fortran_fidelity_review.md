@@ -1882,7 +1882,9 @@ The halo fix made the DUOGRID Path B dh/dt error 16 % WORSE at cube vertices.  N
 
 **Part 1** (stop-hook cleanup).  iter-842c left `scripts/diag_iter841_transport_paths.py` with a stale label "DUOGRID variant (exercises iter-842 `_d_sw1_recompute_ut_vt` halo fix)".  That iter-842 fix was REVERTED; the diag now runs production (`mode='edge'`) code in the duogrid branch.  iter-843 relabels to "DUOGRID variant (production mode='edge' halo; iter-842 halo fix was REVERTED after a +16 % regression)" and adds a matching inline docstring comment at `_run_w2` (line 88-93).
 
-**Part 2** (new fidelity audit, rules out a drop-in).  Per iter-842c's iter-843+ candidate to audit the A-L production path, iter-843 tested a fix in `fv3_cc2c` at `src/legoesm/core/operators_cdgrid.py:1460-1465`.  Hypothesis: `u_cc`/`v_cc` are COVARIANT cell-centre winds (averages of covariant D-grid u_d/v_d), so the `pad_halo_vector` call should activate its covariant branch (analogous to iter-837's fix for `_corner_vorticity`) by passing `cos_theta=cdgrid.cosa_cell`, `sin_theta=cdgrid.sina_cell`.
+**Part 2** (new fidelity audit, rules out a drop-in).  Per iter-842c's iter-843+ candidate to audit the A-L production path, iter-843 tested a fix in `fv3_cc2c` at `src/legoesm/core/operators_cdgrid.py:1460-1465`.  Hypothesis (TENTATIVE — see "Retraction" below): `u_cc`/`v_cc` are COVARIANT cell-centre winds (averages of covariant D-grid u_d/v_d), so the `pad_halo_vector` call should activate its covariant branch (analogous to iter-837's fix for `_corner_vorticity`) by passing `cos_theta=cdgrid.cosa_cell`, `sin_theta=cdgrid.sina_cell`.
+
+**Retraction (Codex adversarial review a9cf212edbd0efccf).**  The hypothesis is NOT supported by the production-path code itself.  `fv3_d2cc` at `src/legoesm/core/operators_cdgrid.py:1418-1420` explicitly states: *"D-grid winds use the orthogonal-rotation convention (geographic wind projected using the grid angle), so no non-orthogonality correction is needed."*  Under this convention u_d / v_d are GRID-ALIGNED PHYSICAL (not covariant); averaged to cell centres they are still grid-aligned physical; the ORTHOGONAL halo rotation in `pad_halo_vector` IS correct for these inputs.  iter-843's Part 2 fix therefore tested a WRONG hypothesis — applying a covariant rotation to grid-aligned-physical inputs is the error, not the fix.  The 122× regression is not evidence of a "tuned pipeline" — it's evidence that iter-843 misdiagnosed the convention.
 
 **Method.**  Applied the 2-line change and ran `TestW2BoundaryErrorBudget` (14 sentinels).
 
@@ -1895,27 +1897,27 @@ The halo fix made the DUOGRID Path B dh/dt error 16 % WORSE at cube vertices.  N
 
 The covariant branch of `pad_halo_vector` in `fv3_cc2c` blows up W2 LEGACY L2 by 122×.  Reverted immediately; all 14 sentinels pass after revert.
 
-**Interpretation.**
-- `fv3_cc2c`'s ORTHOGONAL rotation (current code) is load-bearing for W2 LEGACY.  Swapping it to the covariant branch — even with the correct cell-centre non-orthogonality metrics — catastrophically regresses.
-- Combined with iter-839 (symmetric v_c: 220× regression) and iter-841/842 (ut/vt swap + halo pattern port: both worse), this is the FOURTH ruled-out drop-in fidelity fix on this pipeline.
-- The production A-L path is NOT a naive straight port of FV3 Fortran.  Its current `fv3_cc2c` + `cgrid_mass_flux_divergence` + `_arakawa_lamb_gradient` convention mix implicitly tunes the pipeline to produce the 2.18e−4 L2 — ANY single-point "Fortran-faithful" fix (symmetric projection, covariant halo, ut/vt transport swap) breaks this tuning.
+**Interpretation (post-retraction).**
+- `fv3_cc2c`'s ORTHOGONAL rotation (current code) is CORRECT for the production convention: D-grid u_d/v_d are grid-aligned physical (per `fv3_d2cc` comment), so the orthogonal halo rotation is the right one.  iter-843's fix applied a COVARIANT rotation to GRID-ALIGNED inputs — a convention mismatch, not a "tuned pipeline" trade-off.
+- This DOES NOT add a new "ruled-out drop-in fidelity fix" to the running count.  iter-843 Part 2's regression reflects the tested hypothesis being WRONG (convention misdiagnosed), not the current code being non-faithful.
+- iter-839 (symmetric v_c: 220× regression) and iter-841 (ut/vt transport swap) are still valid rule-outs; iter-842 (iter-836b pattern on `_d_sw1_recompute_ut_vt`) also tested a different operator.  iter-843 Part 2 is NOT a rule-out — it's a self-correction.
 
-**Mechanism hypothesis (not established by iter-843).**  `fv3_cc2c`'s output `u_c` has face-normal projection `u_avg · sina_u − v_at_u · cosa_u` that implicitly mixes CURRENT halo values (orthogonal) with the face-normal geometry.  Activating the covariant halo branch provides HALO values with DIFFERENT rotation semantics than what the face-normal projection downstream expects.  A proper fix would require both: (a) covariant halo AND (b) consistent downstream operators.  Neither is a single-iter change.
+**Mechanism (no longer a hypothesis, post-retraction).**  The production path intentionally uses the orthogonal-rotation convention for D-grid u_d / v_d (see `fv3_d2cc:1418-1420`).  This is not a bug; the covariant rotation is wrong for these inputs.  The comment above about "pipeline tuning" was an over-interpretation.
 
 **What iter-843 DOES show.**
-- The `fv3_cc2c` orthogonal rotation is not a pure bug — it's load-bearing, even if non-fidelity-faithful in an absolute sense.
-- Four drop-in fidelity candidates ruled out: iter-839 symmetric v_c, iter-841 ut/vt swap, iter-842 iter-836b pattern port to `_d_sw1_recompute_ut_vt`, iter-843 covariant halo in `fv3_cc2c`.
-- The A-L production pipeline is an INTEGRATED system whose convention mix is internally consistent but not a straight Fortran port.
+- The `fv3_cc2c` orthogonal rotation is CORRECT for the production convention (D-grid u_d/v_d are grid-aligned physical).  There is no Fortran-fidelity bug at this call site.
+- Three drop-in fidelity candidates ruled out across iter-839/841/842: symmetric v_c in `fv3_cc2c`, ut/vt transport swap, iter-836b pattern port to `_d_sw1_recompute_ut_vt`.  iter-843 Part 2 does NOT add a new rule-out — the tested fix targeted a non-bug (convention misdiagnosis).
+- The A-L production path's halo-exchange at `fv3_cc2c:1460-1465` is consistent with the stated `fv3_d2cc` convention — not a fidelity gap to fix.
 
 **What iter-843 does NOT establish.**
 - Whether a COMBINED fix (covariant halo + consistent downstream operators) would work.
 - Where exactly in the pipeline the iter-793/796 cube-vertex cancellation residual breaks — the iter-841 observations of the production path's dh/dt mid-face peak and the iter-820 v_ll stripe pattern suggest the issue is in the momentum/Bernoulli computation, not the mass transport.
 
-**Iter-844+ candidates.**
-- Audit `_arakawa_lamb_gradient` for halo/corner handling bugs (iter-765/766 tested Fortran corner fills and all worsened W2, but a pad_halo_vector call inside may have a different issue).
-- Direct t=0 dv/dt measurement at cube vertices on the A-L production path to characterise the mode-A mechanism more precisely than iter-793/796 did (with current iter-808 sign-flip sync in place).
-- Multi-iter: full `c_sw`+`d_sw1` port as an alternative production path, with consistent conventions.
+**Iter-844+ candidates (Codex a9cf212edbd0efccf ranked most→least tractable).**
+- **Most tractable**: direct t=0 dv/dt measurement at cube vertices on the A-L production path.  Targets the actual W2 LEGACY blocker (mode-A is a dv/dt phenomenon per iter-792/796/841b) and characterises the mechanism more precisely than iter-793/796 did, with the current iter-808 sign-flip sync in place.
+- Medium: audit `_arakawa_lamb_gradient` halo/corner handling.  iter-765/766 tested Fortran corner fills and all worsened W2, but a pad_halo_vector call inside may still have a convention-consistent issue.
+- Least tractable: full `c_sw`+`d_sw1` port as an alternative production path.  Multi-iter.
 
 **Deliverable.**  `scripts/diag_iter841_transport_paths.py` relabel (removed stale iter-842 language).  No production source-code change in iter-843 (Part 2 fix was REVERTED).  All 14 W2 sentinels pass.
 
-**Process.**  103rd iter in iter-752-843 chain.  Part 1: cleanup of iter-842c's stale diag label per Codex stop-time review.  Part 2: tested and ruled out the "covariant halo in `fv3_cc2c`" Fortran-fidelity drop-in (122× W2 L2 regression).  FOURTH drop-in fidelity fix ruled out in 5 iters; convergent evidence that the W2 LEGACY production pipeline is a tuned system whose single-point changes catastrophically regress.  Architectural fixes (multi-iter) remain the only established path forward.
+**Process.**  103rd iter in iter-752-843 chain.  Part 1: cleanup of iter-842c's stale diag label per Codex stop-time review.  Part 2: tested a "covariant halo in `fv3_cc2c`" Fortran-fidelity hypothesis (122× W2 L2 regression), then RETRACTED after Codex adversarial review showed the hypothesis was based on a convention misdiagnosis (D-grid u_d/v_d are grid-aligned physical per the production comment at `fv3_d2cc:1418-1420`, not covariant).  Self-correcting iter: iter-843 Part 2 produces no new rule-out but removes a non-existent "bug" from the candidate list.  The tally of genuinely-tested-and-ruled-out drop-in fixes stands at 3: iter-839 symmetric v_c, iter-841 ut/vt swap, iter-842 iter-836b pattern on `_d_sw1_recompute_ut_vt`.
