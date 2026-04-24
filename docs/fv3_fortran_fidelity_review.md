@@ -1013,3 +1013,37 @@ Per iter-818's iter-819+ candidate, iter-819 sweeps `damp_v` ∈ {0, 0.001, 0.00
 **Deliverable.**  `scripts/diag_iter819_fb_damp_v_sweep.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  82nd iter in iter-752-819 chain.  Tuning `damp_v` cannot fix FB-chain accuracy — the 8× h-growth is structural.  Stable range is `damp_v ≤ 0.03` with only 0.5% h_max reduction.  FB chain needs deeper work beyond damping tuning.
+
+### Iter-820 — Visual v_north projection corrected to match production sentinel
+
+Prior visual scripts (iter-797/812/813/814) used `rotate_winds_grid_to_geo(u_cc, v_cc, grid.angle)` for v_north projection.  The production W2 sentinel (`tests/unit/test_cdgrid_fv3_regression.py:4157`) uses `cell_centre_angles_from_4edge(cdgrid)` instead.  The two conventions differ: the visual script reported post-regrid `v_ll_Linf = 0.382 m/s` while iter-787's sentinel-equivalent script reported 0.159 m/s on the same C36 1-day LEGACY config.
+
+Additionally the prior visual script used an INLINE analytical `h = h0 - (1/G)*(R*omega*u0 + 0.5*u0^2)*sin_lat^2` instead of `williamson_test2(grid).h.data`.
+
+iter-820 fixes both: uses `williamson_test2(grid)` for h + `cell_centre_angles_from_4edge(cdgrid)` for v_north projection.  After the fix:
+- LEGACY post-regrid `v_ll_Linf = 0.159 m/s` (matches iter-787 baseline exactly).
+- DUOGRID post-regrid `v_ll_Linf = 1.197 m/s` (matches iter-787's 1.20 m/s).
+
+**New canonical visual (post iter-820, C36 W2 1-day, LEGACY).**
+
+The corrected lat-lon plot shows:
+- **Polar regions clean** (|lat| > 60°): prior "polar bands" were a projection artifact of the wrong angle convention.
+- **Equatorial band clean** (|lat| < 15°).
+- **Dominant artifact**: vertical stripes at 4 cube-vertex meridians (|lon| ≈ 45°, 135°), located between ±20° and ±45° latitude.  Peak magnitude ±0.15 m/s.  Broad red/blue alternation at centre of each face region, sharp stripes adjacent to cube-vertex meridians.
+- This matches iter-793/796's mechanism: cube-vertex cancellation residual at lat ±arcsin(1/√3) ≈ ±35.26°.
+
+**What iter-820 DOES show.**
+- The production W2 visible artifact is vertical stripes at 4 cube-vertex meridians, localised to latitudes ±20° to ±45°, with peak ±0.15 m/s.
+- Polar regions are CLEAN — prior "polar band" artifact was a coordinate-rotation projection quirk.
+- Visual v_ll_Linf now matches sentinel v_ll_Linf exactly (0.159 m/s).
+
+**What iter-820 does NOT establish.**
+- Whether the vertical stripes can be reduced further without the FB chain port.
+
+**Iter-821+ candidates.**
+- Port Fortran-faithful d_sw5 corner divergence damping (long open).
+- Accept 0.159 m/s as the structural A-L+RK3 floor on C36 W2 and move focus to other tests.
+
+**Deliverable.**  Updated `scripts/diag_w2_visual.py` (IC + projection convention fix) + regenerated 4 lat-lon PNGs.  No source-code change to production paths.  No new sentinel.
+
+**Process.**  83rd iter in iter-752-820 chain.  Visual diagnostic now MATCHES production sentinel exactly on both v_ll_Linf number and the underlying v_north projection convention.  The W2 artifact geometry is now clearly: vertical stripes at 4 cube-vertex meridians between ±20° and ±45° lat, ±0.15 m/s peak.  Polar and equatorial regions clean.

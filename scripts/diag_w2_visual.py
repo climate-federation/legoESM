@@ -35,19 +35,24 @@ G = constants.g
 NSTEPS = int(86400 / DT)  # 1 day
 
 def make_state(grid, cdgrid):
-    # Iter-797: use the SAME IC construction as the production W2
-    # sentinel (tests/unit/test_cdgrid_fv3_regression.py:3930-3934)
-    # so the visual plot is representative of production behaviour.
+    # Iter-820: use williamson_test2(grid) for h exactly as the
+    # production W2 sentinel does (tests/unit/test_cdgrid_fv3_
+    # regression.py:3929 → `sw = williamson_test2(grid)`).  Prior
+    # iter-797 used an inline analytical h formula which differed
+    # from williamson_test2's h by ~2.4× on the post-regrid v_ll_
+    # Linf metric (0.382 vs 0.159 iter-787 baseline).
+    #
     # u_d, v_d at edge midpoints using analytical cos_angle_edge_*
-    # and lat_edge_* is accurate to machine precision, unlike the
-    # cell-centre-rotate-then-pad-average approach used before.
+    # and lat_edge_* is accurate to machine precision; matches the
+    # production sentinel exactly.
+    from tests.atmosphere.shallow_water.test_cases.williamson import (
+        williamson_test2)
+    sw = williamson_test2(grid)
     u0 = 2*jnp.pi*grid.radius/(12*86400)
-    h0 = 2.94e4/G
-    omega = 7.292e-5
-    h = h0 - (1/G)*(grid.radius*omega*u0 + 0.5*u0**2)*grid.sin_lat**2
     u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
     v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-    return FV3EdgeShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=jnp.zeros_like(h)), h
+    return FV3EdgeShallowWaterState(
+        h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data), sw.h.data
 
 def _div_damp_cube(n, ref_n=48, ref_coeff=1.5e7):
     return ref_coeff * (ref_n / n) ** 2
@@ -108,10 +113,18 @@ state0_p, h0_p = make_state(grid_p, cdgrid_p)
 state_p = run_sim(grid_p, cdgrid_p, state0_p, use_csw=False)
 
 h_err_p = np.asarray(state_p.h - h0_p)
-u_cc_p = 0.5*(state_p.u_d[:,:,:-1]+state_p.u_d[:,:,1:])
-v_cc_p = 0.5*(state_p.v_d[:,:-1,:]+state_p.v_d[:,1:,:])
-_, vn_p = rotate_winds_grid_to_geo(u_cc_p, v_cc_p, grid_p.angle)
-vn_p = np.asarray(vn_p)
+# Iter-820: use cell_centre_angles_from_4edge(cdgrid) for v_north
+# projection exactly as the production W2 sentinel does (tests/
+# unit/test_cdgrid_fv3_regression.py:4157).  Prior use of
+# `grid.angle` / `rotate_winds_grid_to_geo` gave a ~2.4x larger
+# v_ll_Linf number (0.382 vs iter-787 baseline 0.159) because the
+# 4-edge-angle convention is what the sentinel computes against.
+from legoesm.grids.cubed_sphere_cdgrid import (
+    cell_centre_angles_from_4edge)
+ca_4edge_p, sa_4edge_p = cell_centre_angles_from_4edge(cdgrid_p)
+u_cc_p = 0.5*(np.asarray(state_p.u_d)[:,:,:-1]+np.asarray(state_p.u_d)[:,:,1:])
+v_cc_p = 0.5*(np.asarray(state_p.v_d)[:,:-1,:]+np.asarray(state_p.v_d)[:,1:,:])
+vn_p = np.asarray(sa_4edge_p) * u_cc_p + np.asarray(ca_4edge_p) * v_cc_p
 
 # Iter-812: compare RK3+duogrid (post iter-808 sign-flip sync fix) —
 # NOT the old csw+duogrid path (use_experimental_csw=True), which goes
@@ -125,10 +138,11 @@ state0_d, h0_d = make_state(grid_d, cdgrid_d)
 state_d = run_sim(grid_d, cdgrid_d, state0_d, use_csw=False)
 
 h_err_d = np.asarray(state_d.h - h0_d)
-u_cc_d = 0.5*(state_d.u_d[:,:,:-1]+state_d.u_d[:,:,1:])
-v_cc_d = 0.5*(state_d.v_d[:,:-1,:]+state_d.v_d[:,1:,:])
-_, vn_d = rotate_winds_grid_to_geo(u_cc_d, v_cc_d, grid_d.angle)
-vn_d = np.asarray(vn_d)
+# Iter-820: use cell_centre_angles_from_4edge(cdgrid) per sentinel.
+ca_4edge_d, sa_4edge_d = cell_centre_angles_from_4edge(cdgrid_d)
+u_cc_d = 0.5*(np.asarray(state_d.u_d)[:,:,:-1]+np.asarray(state_d.u_d)[:,:,1:])
+v_cc_d = 0.5*(np.asarray(state_d.v_d)[:,:-1,:]+np.asarray(state_d.v_d)[:,1:,:])
+vn_d = np.asarray(sa_4edge_d) * u_cc_d + np.asarray(ca_4edge_d) * v_cc_d
 
 print(f"\nProduction (LEGACY): h_err max={np.abs(h_err_p).max():.2f}, v_north max={np.abs(vn_p).max():.2f}")
 print(f"DUOGRID (RK3 post-iter-808): h_err max={np.abs(h_err_d).max():.2f}, v_north max={np.abs(vn_d).max():.2f}")
