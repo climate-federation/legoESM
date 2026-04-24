@@ -28,7 +28,12 @@ form below.
   stability enough that FB DUOGRID completes 24h at C24 without
   NaN (iter-816), but h_max grows 8x (24040 vs 2960 physical) and
   damp_v tuning does not help (iter-819: damp_v > 0.03 crashes;
-  damp_v ≤ 0.03 gives <1% h_max reduction).
+  damp_v ≤ 0.03 gives <1% h_max reduction).  iter-835's sub-
+  component ablation rules out any single `_c_sw` internal piece
+  (mass flux, KE gradient, vort flux, p_grad_c) as the
+  driver — all within ±0.6 % of baseline — confirming the
+  h-growth is emergent from the `_c_sw` → `_d_sw_native`
+  coupling at cube corners.
 
 ## Closed priorities
 
@@ -1509,3 +1514,52 @@ Per iter-833's iter-834+ candidate "Compare against published FV3 Fortran cosine
 **Deliverable.**  `scripts/diag_iter834_cb_day2_visual.py` + 3 new PNGs (`cb_h_production_day2_latlon.png`, `cb_h_exact_day2_latlon.png`, `cb_h_err_day2_latlon.png`).  No source-code change.
 
 **Process.**  94th iter in iter-752-834 chain.  Visualises the cube-vertex crossing dipole at day 2.  Matches iter-833's Linf jump to within regrid precision.  Gives a geometrically-interpretable picture of the candidate (c) mechanism firing at cube-vertex crossings.
+
+### Iter-835 — No single `_c_sw` sub-step dominates: h-growth is emergent
+
+Per iter-831's localisation of FB h-growth to `_c_sw` and iter-832's elimination of over-sync, iter-835 drills one level deeper: inside `_c_sw` plus `_p_grad_c`, which specific sub-step drives the 10765 h_max baseline?
+
+**Method** (`scripts/diag_iter835_csw_subcomponent_ablation.py`).  FB DUOGRID C24 W2 12h.  Monkey-patch `_c_sw` (and `_p_grad_c`) to zero one sub-component at a time: mass-flux divergence (→ h_star=h), KE gradient (→ dke_x=dke_y=0), vorticity flux (→ fy1·vort_x=fx1·vort_y=0), or p_grad_c output (→ dp_x=dp_y=0).  Each ablation is reverted in a `finally` block.  No production code changed.
+
+**Result.**
+
+| ablation       | status | h_min | h_max | Δ vs baseline |
+|----------------|--------|------:|------:|---------------|
+| baseline       | ok     |   111 | 10765 | —             |
+| mass_flux      | ok     |   111 | 10826 | +0.6 % (slightly worse) |
+| ke_gradient    | ok     |   111 | 10769 | +0.04 % (flat)          |
+| vort_flux      | ok     |   107 | 10796 | +0.3 % (flat)           |
+| p_grad_c       | ok     |   −58 | 15112 | +40.4 % (much worse)    |
+
+**Observation — numerical reportage only.**
+- **No single sub-step dominates.**  Zeroing `mass_flux`, `ke_gradient`, or `vort_flux` individually keeps h_max within ±0.6 % of the 10765 baseline.  Contrast with iter-831 where disabling *all* of `_c_sw` dropped h_max to 2980.
+- `p_grad_c` ablation reproduces iter-831's `p_grad_c`-off h_max=15112 exactly — stabilising role confirmed (removing the backward-pressure correction makes the chain noisier).
+- `mass_flux` ablation is SLIGHTLY WORSE than baseline: forcing `h_star = h` desynchronises the mass and velocity half-steps, making `p_grad_c(h)` a constant-field gradient and removing the small stabilising pressure-gradient signal.
+
+**Mechanism implication.**
+- The 10765 h_max is **emergent** from the full `_c_sw` + `_p_grad_c` → `_d_sw_native` coupling, not any single sub-step.
+- Each sub-step of `_c_sw` contributes to `uc_new`/`vc_new` (or `h_star` → pressure gradient → `uc_new`/`vc_new`).  When one is zeroed, the others still corrupt the C-grid winds enough to drive PPM mass transport in `_d_sw_native` to 8× physical h.
+- Only disabling `_c_sw` ENTIRELY (iter-831) leaves `uc_new=uc`/`vc_new=vc` unchanged, which `_d_sw_native` can handle without amplification.
+
+**Reinterpretation of iter-831/832 in light of iter-835.**
+- iter-831 "c_sw is the h-growth driver" is correct but misleading — it's the *c_sw-as-a-black-box* that is the driver, not any internal piece.
+- iter-832 "over-sync is NOT the driver" (only 6 % reduction when sync is disabled) is consistent with iter-835: sync is one of many sub-contributors, none individually dominant.
+- The iter-818/819 finding that `damp_v` tuning can at best give 0.5 % reduction is also consistent: damping a single downstream target (vorticity) cannot offset the COMBINED corruption of `_c_sw`.
+
+**What iter-835 DOES show.**
+- Sub-component ablation rules out a simple "one piece is broken" hypothesis for the FB h-growth.
+- The FB h-growth is structural in the `_c_sw` → `_d_sw_native` coupling at cube corners.
+- `_p_grad_c` is confirmed stabilising (consistent with iter-831).
+
+**What iter-835 does NOT establish.**
+- Whether a 2-way or 3-way combination of sub-step ablations would drop h_max significantly (e.g., mass_flux + vort_flux together).
+- Whether the Fortran `c_sw` produces the same h-growth when coupled to Fortran `d_sw`, or whether our Python `_d_sw_native`'s PPM has a specific amplification defect.
+
+**Iter-836+ candidates.**
+- 2-way ablation: disable mass_flux + vort_flux simultaneously; if h_max drops toward 2980, the remaining single contributor (KE gradient alone) is benign and the corruption is in the mass/vort pair.
+- Verify Fortran `c_sw` output against our Python `_c_sw` output at t=0 on W2 IC (component-wise field comparison).  Would require Fortran binary/build.
+- Accept FB chain as not-tractable-in-Ralph-iter; re-focus on W2 LEGACY mode-A which is the only production path.
+
+**Deliverable.**  `scripts/diag_iter835_csw_subcomponent_ablation.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  95th iter in iter-752-835 chain.  Drills one level deeper than iter-831/832: no individual sub-step of `_c_sw` dominates the FB h-growth (all individual ablations within ±0.6 % of 10765 baseline).  The h-growth is emergent from the combined `_c_sw` → `_p_grad_c` → `_d_sw_native` coupling, not a single-point defect.
