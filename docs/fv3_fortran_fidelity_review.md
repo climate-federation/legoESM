@@ -679,3 +679,49 @@ iter-808's sign-flip fix is a CLEAR NET POSITIVE across all three test cases.  W
 **Deliverable.**  `scripts/diag_iter810_cb_legacy_vs_duogrid.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  74th iter in iter-752-810 chain.  Completes the cross-test validation round for iter-808: DUOGRID works cleanly on W2 (7× LEGACY), W5 (1% LEGACY), and cosine bell (13% LEGACY).  The fix is solid, backward-compatible, and matches the Ralph loop's critical duogrid constraint #1.
+
+### Iter-811 — `boundary_fix` is load-bearing even under DUOGRID
+
+Per Ralph loop constraint #2 ("Legacy edge handling must be disabled in duogrid mode via bounded_domain = .true."), iter-811 audits whether the Python-specific `boundary_fix` smoothing should be disabled under DUOGRID now that iter-808 provides proper Fortran-faithful flux synchronization.
+
+**Method** (`scripts/diag_iter811_boundary_fix_under_duogrid.py`).  C36 W2 1-day under 4 variants: {LEGACY, DUOGRID} × {boundary_fix=True, False}.
+
+**Result.**
+
+| variant                           | L2        | v_ll_Linf | v_cc_Linf | ratio vs LEGACY/bf=True |
+|-----------------------------------|-----------|-----------|-----------|--------------------------|
+| LEGACY, boundary_fix=True         | 2.176e−04 | 0.159 m/s | 0.188 m/s | —                        |
+| LEGACY, boundary_fix=False        | 1.162e−03 | 0.887 m/s | 1.043 m/s | 5.34× L2, 5.59× v_ll    |
+| DUOGRID, boundary_fix=True        | 1.519e−03 | 1.197 m/s | 1.299 m/s | 6.98× L2, 7.55× v_ll    |
+| DUOGRID, boundary_fix=False       | 1.940e−03 | 1.678 m/s | 1.889 m/s | 8.92× L2, 10.58× v_ll   |
+
+**Observation — numerical reportage only.**  Disabling `boundary_fix` makes W2 WORSE on BOTH paths:
+- LEGACY: 5.34× worse without boundary_fix (confirms iter-511 finding; boundary_fix is a load-bearing stabilizer on the A-L+RK3 path).
+- DUOGRID: 1.40× worse without boundary_fix (1.68 m/s vs 1.20 m/s v_ll_Linf).
+
+Even with iter-808's Fortran-faithful flux sync, boundary_fix is still useful under DUOGRID — it's NOT redundant.
+
+**Interpretation of Ralph loop constraint #2.**  The constraint refers to FORTRAN legacy edge handling (e.g., `copy_corners`, `fill_4corners`, the `rsin_u`/`rsin_v` panel-edge override), which are already correctly gated on `bounded_domain` in our Python:
+- `rsin_u` / `rsin_v` panel-edge override at `cubed_sphere_cdgrid.py:891` is gated on `not _bounded_domain`.
+- `fv_tp_2d` duogrid halo path at `operators_cdgrid.py:320-323` is gated on `_use_dg = dg is not None and dg.ng >= 2`.
+- `_c_sw` and `_d_sw_native` paths in `fv3_sw_core.py` gate their corner-override steps on `.not. dg%is_initialized` (matching Fortran).
+
+`boundary_fix` is a separate PYTHON-SPECIFIC post-hoc smoothing for the A-L+RK3 production path.  It mitigates cube-corner imbalance in the KE/pressure/Coriolis cancellation residual (iter-793/796 mechanism) that exists REGARDLESS of halo treatment.  Disabling it under DUOGRID doesn't buy Fortran fidelity (it's not a Fortran operator we're skipping); it just exposes the A-L+RK3 cube-vertex imbalance.
+
+**What iter-811 DOES show.**
+- The Fortran legacy edge handling paths ARE correctly gated on bounded_domain / duogrid in our code (constraint #2 satisfied).
+- `boundary_fix` is a Python-specific stabiliser that remains load-bearing under DUOGRID.  It's not covered by constraint #2 because it's not a Fortran legacy operator.
+- The A-L+RK3 cube-vertex imbalance (iter-793/796) manifests under both LEGACY and DUOGRID halos; boundary_fix smooths it on both paths.
+
+**What iter-811 does NOT establish.**
+- Whether boundary_fix can be REPLACED by a Fortran-faithful equivalent (e.g. porting the c_sw + flux-sync + d_sw5 chain that achieves the same effect in Fortran without post-hoc smoothing).
+- Whether the 7× DUOGRID/LEGACY gap is fully from the iter-793 cube-vertex residual or has additional contributions.
+
+**Iter-812+ candidates.**
+- Visual inspection of DUOGRID W2 v_north at C36 to compare qualitatively with LEGACY.
+- Investigate why DUOGRID is 7× LEGACY on W2 when W5 matches to 1%: possibly a specific interaction with the W2 solid-body rotation's cube-vertex geometry.
+- Port Fortran FB transport chain (still blocked, but with iter-808's sync fix some pieces are now in place).
+
+**Deliverable.**  `scripts/diag_iter811_boundary_fix_under_duogrid.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  75th iter in iter-752-811 chain.  Confirms Ralph loop constraint #2 is satisfied (Fortran legacy edge handling IS bypassed under duogrid).  `boundary_fix` is a separate Python-specific stabiliser that remains load-bearing under both halo paths; it cannot be disabled without making W2 worse.

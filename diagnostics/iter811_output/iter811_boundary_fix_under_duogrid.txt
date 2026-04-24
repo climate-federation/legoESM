@@ -1,0 +1,29 @@
+Iter-811 boundary_fix under DUOGRID (W2 C36 1-day)
+Per Ralph loop constraint #2: legacy edge paths should be
+disabled in duogrid mode.  `boundary_fix` is a Python-
+specific legacy smoothing.
+
+                               variant           L2    v_ll_Linf    v_cc_Linf
+------------------------------------------------------------------------------
+  LEGACY, boundary_fix=True (baseline)    2.176e-04    1.585e-01    1.879e-01
+            LEGACY, boundary_fix=False    1.162e-03    8.869e-01    1.043e+00
+            DUOGRID, boundary_fix=True    1.519e-03    1.197e+00    1.299e+00
+           DUOGRID, boundary_fix=False    1.940e-03    1.678e+00    1.889e+00
+
+  LEGACY, boundary_fix=False vs baseline: L2 = 5.34x
+  LEGACY, boundary_fix=False vs baseline: v_ll_linf = 5.59x
+  LEGACY, boundary_fix=False vs baseline: v_cc_linf = 5.55x
+  DUOGRID, boundary_fix=True vs baseline: L2 = 6.98x
+  DUOGRID, boundary_fix=True vs baseline: v_ll_linf = 7.55x
+  DUOGRID, boundary_fix=True vs baseline: v_cc_linf = 6.91x
+  DUOGRID, boundary_fix=False vs baseline: L2 = 8.92x
+  DUOGRID, boundary_fix=False vs baseline: v_ll_linf = 10.58x
+  DUOGRID, boundary_fix=False vs baseline: v_cc_linf = 10.05x
+
+Interpretation cues (observational only):
+- If DUOGRID+bf=False is BETTER than DUOGRID+bf=True:
+  boundary_fix is a legacy hack now unnecessary under duogrid.
+- If DUOGRID+bf=False is WORSE:
+  boundary_fix is load-bearing even with duogrid halos.
+- If LEGACY+bf=False blows up (2.4x per iter-511):
+  confirms legacy path still needs boundary_fix.
