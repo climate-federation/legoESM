@@ -13,9 +13,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from legoesm.grids.cubed_sphere import create_cubed_sphere, rotate_winds_geo_to_grid, rotate_winds_grid_to_geo
+# Iter-820b cleanup: removed `rotate_winds_geo_to_grid`,
+# `rotate_winds_grid_to_geo`, and `pad_halo` imports — all unused
+# after iter-820 switched to `williamson_test2(grid)` +
+# `cell_centre_angles_from_4edge(cdgrid)`.
+from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-from legoesm.grids.halo import pad_halo
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig, FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
 )
