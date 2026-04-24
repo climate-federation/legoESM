@@ -1264,3 +1264,50 @@ Additionally, full W2BoundaryErrorBudget sentinel suite passes (14/14) as of thi
 **Deliverable.**  Doc-only audit confirming sentinel coverage.  No source-code change.  No new sentinel.
 
 **Process.**  88th iter in iter-752-827 chain.  Confirms iter-808's fix is durably locked by 3 helper tests in `test_duogrid.py` plus the broader `TestW2BoundaryErrorBudget` suite (14/14 pass).  Session-total production fix (iter-808) is protected against silent regression.
+
+### Iter-829 — W2 IC v_north is ~1e−2 m/s at t=0 (small but non-zero projection error)
+
+Sanity check: for the W2 alpha=0 analytical IC, v_north is exactly 0 everywhere.  iter-829 measures the peak |v_north| at t=0 to check whether the production IC construction has any projection error.
+
+**Method** (`scripts/diag_iter829_w2_ic_sanity.py`).  Build u_d, v_d at edge midpoints via the standard IC formulas; average to cell centres; project to v_north via `cell_centre_angles_from_4edge(cdgrid)`.
+
+**Result.**
+
+| n   | peak |v_north| at t=0 | location     | GC to vertex |
+|-----|------------------------|--------------|--------------|
+| 24  | 1.277e−02 m/s          | face 4 (10, 11), lat +84.07°, lon −71.61° | 49.49° |
+| 36  | 8.193e−03 m/s          | face 4 (19, 17), lat +86.05°, lon +71.59° | 51.22° |
+| 48  | 6.059e−03 m/s          | face 4 (22, 23), lat +87.04°, lon −71.58° | 52.10° |
+
+**Observation — numerical reportage only.**  The W2 IC has non-zero v_north at t=0, peaking ~0.006–0.013 m/s near the geographic pole on face 4.  Decreases monotonically with resolution (~1/n scaling, consistent with 1st-order projection error).  Peak location is 49°–52° GC from the nearest cube vertex — NOT at cube vertices.
+
+**Origin of the projection error.**  The IC construction is:
+```
+u_d at edge_x = cos_angle_edge_x * u0 * cos(lat_edge_x)
+v_d at edge_y = -sin_angle_edge_y * u0 * cos(lat_edge_y)
+```
+Both accurate to machine precision at their respective edge positions.  But the v_north diagnostic uses:
+```
+u_cc = 0.5 * (u_d[i,j] + u_d[i,j+1])     # average over j at fixed i
+v_cc = 0.5 * (v_d[i,j] + v_d[i+1,j])     # average over i at fixed j
+v_north = sa_4edge * u_cc + ca_4edge * v_cc
+```
+The cell-centre-average of edge values introduces a 1st-order interpolation error near the pole where cos(lat) varies rapidly within a cell.  This is a DIAGNOSTIC projection error, not a dynamical IC error — the u_d, v_d themselves are exact at edge positions.
+
+**Impact on W2 mode-A.**  The t=0 diagnostic v_north peak ~1e−2 m/s is ~20× smaller than the 0.159 m/s v_ll_Linf observed after 1 day.  The IC projection contributes at most ~6% of the observed mode-A; the remaining 94%+ comes from the dynamical cube-vertex cancellation failure (iter-793/796).
+
+**What iter-829 DOES show.**
+- The W2 analytical IC has a 1st-order projection error in v_north ~1e−2 m/s near the pole.
+- This is a DIAGNOSTIC artifact (cell-centre v_north reconstruction), not an error in the edge-stored u_d/v_d.
+- Peak IC v_north decreases with resolution (0.013 → 0.006 from C24 to C48), consistent with 1st-order convergence.
+
+**What iter-829 does NOT establish.**
+- Whether a higher-order v_north reconstruction (e.g., 4-point interpolation instead of 2-point average) would remove the projection error.
+- Whether the IC projection contributes to the mode-A beyond the 6% estimate above.
+
+**Iter-830+ candidates.**
+- Defer: the IC projection error is small relative to the dynamical residual.  Higher-order v_north diagnostic would not change the production sentinel (which uses the same 2-point average).
+
+**Deliverable.**  `scripts/diag_iter829_w2_ic_sanity.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  89th iter in iter-752-829 chain.  Characterizes the W2 IC's diagnostic v_north projection error: peaks at ~1e−2 m/s near the pole (not at cube vertices), decreases with resolution.  This represents ≤6% of the dynamical mode-A observed after 1 day; the remaining >94% is the iter-793/796 cube-vertex cancellation residual.
