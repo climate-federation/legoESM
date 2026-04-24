@@ -1477,3 +1477,35 @@ Per iter-781's 1-day scope limit ("bell centre stays > 25° from nearest cube ve
 **Deliverable.**  `scripts/diag_iter833_cb_multiday.py` + committed output.  No source-code change.  No new sentinel.
 
 **Process.**  93rd iter in iter-752-833 chain.  Confirms iter-778's candidate (c) "cube-vertex-localized error" — bell crossings at days 2/4/8/10 produce sharp Linf jumps.  Reinterprets iter-781's smooth-1-day result as "bell hasn't crossed yet in that window".  Long-horizon cosine bell at C36 is dominated by cube-vertex crossing events.
+
+### Iter-834 — Cosine bell day 2 visual: h_err DIPOLE localised AT cube vertex
+
+Per iter-833's iter-834+ candidate "Compare against published FV3 Fortran cosine bell results", iter-834 first generates the LAT-LON visual at day 2 (first cube-vertex crossing) to document the crossing's spatial signature.
+
+**Method** (`scripts/diag_iter834_cb_day2_visual.py`).  C36, β=π/4, dt=1440s, days=2.  Regrid h, h_exact, h_err to lat-lon; mark 8 cube-vertex positions with black X's on the plot.
+
+**Observation (h_err lat-lon at day 2).**
+- **Dipole at the cube vertex** (+35.26°, −45°): negative lobe (blue, −550 m) coincident with the vertex; positive lobe (red, +550 m) slightly above (lat ~50°).
+- Peak |h_err| ≈ 550 m (matches iter-833's Linf = 592 to within regrid precision).
+- Rest of the sphere is EMPTY (no broader artifacts).
+- Bell's exact centre at day 2 lands right at the cube vertex (visible black X is inside the negative lobe).
+
+**Mechanism interpretation.**  The crossing of the cosine bell through a cube vertex produces a LOCALISED DISPLACEMENT dipole: the numerical bell has been slightly shifted relative to the exact bell during the ~1-day crossing window.  Leading edge (upper-right, toward next cube region) has extra h; trailing edge (at the cube vertex itself) has less h.  This matches iter-778's candidate (c) "cube-vertex-localized error set by face count": at the moment the bell crosses, the PPM reconstruction at the cube-vertex halo interpolation fails to preserve the bell's shape.
+
+**What iter-834 DOES show.**
+- Day-2 h_err is a CUBE-VERTEX-LOCALISED dipole, ~±550 m amplitude.
+- Peak error coincides with bell's exact position at the cube vertex.
+- No visible cube-sphere artifacts elsewhere on the sphere (e.g., no cube-vertex stripes at lat ±20°-45°, |lon|=45°/135° like W2).
+- Candidate (c) mechanism fires AT crossings (vs iter-781's "quiet" 1-day window).
+
+**What iter-834 does NOT establish.**
+- Whether published Fortran FV3 cosine bell C36 day 2 results show similar amplitude.
+- Whether the crossing dipole is reducible via a different limiter or flux construction.
+
+**Iter-835+ candidates.**
+- Accept the cosine bell cube-vertex crossing dipole as a known structural artifact of the A-L+RK3 + PPM pipeline at crossings.
+- Compare against FV3 published results if available.
+
+**Deliverable.**  `scripts/diag_iter834_cb_day2_visual.py` + 3 new PNGs (`cb_h_production_day2_latlon.png`, `cb_h_exact_day2_latlon.png`, `cb_h_err_day2_latlon.png`).  No source-code change.
+
+**Process.**  94th iter in iter-752-834 chain.  Visualises the cube-vertex crossing dipole at day 2.  Matches iter-833's Linf jump to within regrid precision.  Gives a geometrically-interpretable picture of the candidate (c) mechanism firing at cube-vertex crossings.
