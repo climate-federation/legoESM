@@ -1,14 +1,16 @@
-"""Iter-824 diagnostic: W5 (mountain) lat-lon visual inspection.
+"""Iter-828 diagnostic: W5 DUOGRID (post iter-808 sign-flip sync)
+lat-lon visual.
 
-Per Ralph loop step 5 (visual inspection on all 3 tests), iter-
-824 completes the set by generating W5 h and v_north lat-lon
-plots for C36 at day 3 LEGACY (matches iter-809's config).
+Companion to `scripts/diag_iter824_w5_visual.py` (which produces
+the LEGACY plots).  This script produces the DUOGRID equivalents
+by setting `use_duogrid=True` while sharing the same cdgrid
+config and IC construction.
 
-W5 has no analytical time-dependent solution (mountain-driven
-flow evolves non-trivially), so we plot h_final and v_north_final.
-Any cube-sphere structural artifacts (stripes, polar bands,
-cube-vertex features) would be visible against the mountain-wave
-background.
+iter-828b note (Codex review): the previous version of
+diag_iter824_w5_visual.py had been edited to toggle USE_DUOGRID=
+True in-place, which silently broke its "reproduce legacy W5
+visuals" contract.  This separate script keeps the DUOGRID run
+cleanly isolated.
 """
 import os, sys
 os.environ["JAX_ENABLE_X64"] = "1"
@@ -43,14 +45,7 @@ days = 3.0
 dt = 300.0
 n_steps = int(round(days * 86400 / dt))
 
-# Iter-828b (Codex-review fix): restore iter-824's original LEGACY-
-# only behaviour.  iter-828 had flipped USE_DUOGRID to True in
-# this same script, breaking the "reproduce legacy W5 visuals"
-# contract.  DUOGRID W5 visuals are now in
-# `scripts/diag_iter828_w5_duogrid_visual.py` (separate script).
-USE_DUOGRID = False
-
-grid = create_cubed_sphere(n=n, use_duogrid=USE_DUOGRID)
+grid = create_cubed_sphere(n=n, use_duogrid=True)
 cfg = CDGridShallowWaterConfig(
     hyperdiff_coeff=0.0, div_damp=8.0 * _div_damp_cube(n),
     boundary_fix=True, damp_v=0.06, nord_v=2)
@@ -58,7 +53,7 @@ model = FV3EdgeShallowWaterModel(grid, config=cfg)
 cdgrid = model.cdgrid
 
 sw = williamson_test5(grid)
-u0 = 20.0  # W5 uses u0=20 m/s (not 40 like W2)
+u0 = 20.0
 u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
 v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
 state = FV3EdgeShallowWaterState(
@@ -85,13 +80,11 @@ v_north = np.asarray(sa_4edge) * u_cc + np.asarray(ca_4edge) * v_cc
 
 weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
 h_ll = apply_cubedsphere_to_latlon(h_np, weights)
-hs_ll = apply_cubedsphere_to_latlon(h_s_np, weights)
 vn_ll = apply_cubedsphere_to_latlon(v_north, weights)
 h_change_ll = apply_cubedsphere_to_latlon(h_np - np.asarray(h0), weights)
 
-print(f"Iter-824 W5 C{n} day {days:.0f} LEGACY visual inspection")
+print(f"Iter-828 W5 DUOGRID C{n} day {days:.0f} visual")
 print(f"  h range: [{h_np.min():.1f}, {h_np.max():.1f}]")
-print(f"  h_s range: [{h_s_np.min():.1f}, {h_s_np.max():.1f}]")
 print(f"  v_north Linf: {float(np.max(np.abs(vn_ll))):.3f}")
 print(f"  |h - h0| RMS: {float(np.sqrt(np.mean((h_np-np.asarray(h0))**2))):.2f}")
 
@@ -119,21 +112,10 @@ def _plot(field, title, fname, cmap='RdBu_r', sym=True, vmin=None, vmax=None):
     print(f"  Saved {fname}")
 
 
-_label = "DUOGRID" if USE_DUOGRID else "LEGACY"
-_suffix = "duogrid" if USE_DUOGRID else "production"
-_plot(h_ll, f'h final: W5 C{n} day {days:.0f} {_label}',
-       f'w5_h_{_suffix}_latlon.png', cmap='viridis', sym=False,
+_plot(h_ll, f'h final: W5 C{n} day {days:.0f} DUOGRID',
+       'w5_h_duogrid_latlon.png', cmap='viridis', sym=False,
        vmin=h_ll.min(), vmax=h_ll.max())
-_plot(h_change_ll, f'h(t=3d) - h(t=0): W5 C{n} {_label}',
-       f'w5_h_change_{_suffix}_latlon.png', cmap='RdBu_r', sym=True)
-_plot(vn_ll, f'v_north: W5 C{n} day {days:.0f} {_label}',
-       f'w5_vnorth_{_suffix}_latlon.png', cmap='RdBu_r', sym=True)
-
-print()
-print("Interpretation cues (observational only):")
-print("- h final should show mountain-driven wave structure.")
-print("- h_change shows mountain-induced deviation from initial.")
-print("- v_north Linf ~25 m/s is the mountain-wave amplitude, not")
-print("  a cube-sphere artifact.")
-print("- Check for stripes / corner blobs / polar bands superposed")
-print("  on the wave pattern.")
+_plot(h_change_ll, f'h(t=3d) - h(t=0): W5 C{n} DUOGRID',
+       'w5_h_change_duogrid_latlon.png', cmap='RdBu_r', sym=True)
+_plot(vn_ll, f'v_north: W5 C{n} day {days:.0f} DUOGRID',
+       'w5_vnorth_duogrid_latlon.png', cmap='RdBu_r', sym=True)
