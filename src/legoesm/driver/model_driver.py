@@ -633,6 +633,7 @@ class ModelDriver:
             n_days=self.config.days,
             output_dir=self._output_dir,
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
+            start_year=self.config.start_year,
         )
         # Configure CMIP spatial regridding weights
         if self.config.output.cmip_output:
@@ -640,6 +641,14 @@ class ModelDriver:
                 grid_type=self.config.grid.grid_type,
                 grid=self.grid,
                 start_year=self.config.start_year,
+            )
+            # Register time-invariant fields for the CMIP6 ``fx`` file.
+            # Topography was set up earlier in ``_create_topography``; we
+            # materialize to host arrays so the accumulator owns no JAX
+            # references and the driver remains free to free device buffers.
+            self.diagnostics.set_fixed_fields(
+                phis=np.asarray(self._phis_data),
+                land_fraction=np.asarray(self._f_land),
             )
 
     def _sync_and_collect_diagnostics(self, **kwargs) -> dict:

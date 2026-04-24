@@ -58,10 +58,51 @@ References
 from __future__ import annotations
 
 import datetime
+import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+
+# Standard CMIP6 license text (Creative Commons Attribution 4.0 International)
+CMIP6_LICENSE = (
+    "CMIP6 model data produced by legoESM is licensed under a "
+    "Creative Commons Attribution 4.0 International License "
+    "(https://creativecommons.org/licenses/). Consult "
+    "https://pcmdi.llnl.gov/CMIP6/TermsOfUse for terms of use "
+    "governing CMIP6 output, including citation requirements and "
+    "proper acknowledgment."
+)
+
+# Realm assignment for each CMOR table (CMIP6 CV: required_global_attributes)
+_TABLE_REALM: Dict[str, str] = {
+    "Amon": "atmos",
+    "day": "atmos",
+    "Aday": "atmos",   # legacy alias — "day" is the CMIP6 CV value
+    "Lmon": "land",
+    "Omon": "ocean",
+    "SImon": "seaIce",
+    "fx": "atmos",
+}
+
+# CMIP6 surface-field reference heights [m].  These variables are defined
+# at a fixed height above the surface rather than at a model level, so they
+# carry a scalar ``height`` coordinate per CMIP6 spec.
+_VAR_REFERENCE_HEIGHT: Dict[str, float] = {
+    # 2 m air-temperature / humidity diagnostics
+    "tas": 2.0,
+    "tasmin": 2.0,
+    "tasmax": 2.0,
+    "huss": 2.0,
+    "hurs": 2.0,
+    # 10 m wind diagnostics
+    "uas": 10.0,
+    "vas": 10.0,
+    "sfcWind": 10.0,
+    "sfcWindmax": 10.0,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -442,12 +483,26 @@ _OMON_VARIABLES: Dict[str, Dict[str, str]] = {
     },
 }
 
-_ADAY_VARIABLES: Dict[str, Dict[str, str]] = {
+_DAY_VARIABLES: Dict[str, Dict[str, str]] = {
     "tas": {
         "standard_name": "air_temperature",
         "long_name": "Near-Surface Air Temperature",
         "units": "K",
         "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "tasmin": {
+        "standard_name": "air_temperature",
+        "long_name": "Daily Minimum Near-Surface Air Temperature",
+        "units": "K",
+        "cell_methods": "time: minimum",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "tasmax": {
+        "standard_name": "air_temperature",
+        "long_name": "Daily Maximum Near-Surface Air Temperature",
+        "units": "K",
+        "cell_methods": "time: maximum",
         "dimensions": ("time", "lat", "lon"),
     },
     "pr": {
@@ -478,14 +533,58 @@ _ADAY_VARIABLES: Dict[str, Dict[str, str]] = {
         "cell_methods": "time: mean",
         "dimensions": ("time", "lat", "lon"),
     },
+    "ua850": {
+        "standard_name": "eastward_wind",
+        "long_name": "Eastward Wind at 850 hPa",
+        "units": "m s-1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "va850": {
+        "standard_name": "northward_wind",
+        "long_name": "Northward Wind at 850 hPa",
+        "units": "m s-1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
 }
 
-# Combined lookup for convenience
+# ``fx`` table — time-invariant fields. CF ``cell_methods`` and ``time``
+# dimension are intentionally absent; these files are written once per run.
+_FX_VARIABLES: Dict[str, Dict[str, str]] = {
+    "orog": {
+        "standard_name": "surface_altitude",
+        "long_name": "Surface Altitude",
+        "units": "m",
+        "cell_methods": "area: mean",
+        "dimensions": ("lat", "lon"),
+    },
+    "areacella": {
+        "standard_name": "cell_area",
+        "long_name": "Grid-Cell Area for Atmospheric Grid Variables",
+        "units": "m2",
+        "cell_methods": "area: sum",
+        "dimensions": ("lat", "lon"),
+    },
+    "sftlf": {
+        "standard_name": "land_area_fraction",
+        "long_name": "Land Area Fraction",
+        "units": "%",
+        "cell_methods": "area: mean",
+        "dimensions": ("lat", "lon"),
+    },
+}
+
+# Combined lookup for convenience. ``Aday`` is a legacy alias for
+# ``day`` (the CMIP6 CV value); keep both so pre-existing tests and
+# callers continue to work.
 CMOR_TABLES: Dict[str, Dict[str, Dict[str, str]]] = {
     "Amon": _AMON_VARIABLES,
     "Lmon": _LMON_VARIABLES,
     "Omon": _OMON_VARIABLES,
-    "Aday": _ADAY_VARIABLES,
+    "day": _DAY_VARIABLES,
+    "Aday": _DAY_VARIABLES,
+    "fx": _FX_VARIABLES,
 }
 
 # Standard CMIP6 pressure levels [Pa] (19 levels, top-to-bottom)
@@ -553,6 +652,7 @@ def _make_lat_da(lat: np.ndarray):
             "long_name": "Latitude",
             "units": "degrees_north",
             "axis": "Y",
+            "bounds": "lat_bnds",
         },
     )
 
@@ -568,6 +668,79 @@ def _make_lon_da(lon: np.ndarray):
             "long_name": "Longitude",
             "units": "degrees_east",
             "axis": "X",
+            "bounds": "lon_bnds",
+        },
+    )
+
+
+def _cell_bounds_from_centers(
+    centers: np.ndarray,
+    periodic: bool = False,
+) -> np.ndarray:
+    """Compute cell edges from cell centers.
+
+    For a uniform-spacing grid the edges sit halfway between neighboring
+    centers; the outermost edges are extrapolated by the same half-step.
+    Returns a ``(n, 2)`` array of ``(lower_edge, upper_edge)`` pairs.
+    """
+    c = np.asarray(centers, dtype=np.float64)
+    if c.size == 1:
+        # Degenerate: use a nominal 1-unit wide cell centered on the point.
+        half = 0.5
+        return np.array([[c[0] - half, c[0] + half]], dtype=np.float64)
+    mids = 0.5 * (c[:-1] + c[1:])
+    lower_first = c[0] - (mids[0] - c[0])
+    upper_last = c[-1] + (c[-1] - mids[-1])
+    edges = np.concatenate([[lower_first], mids, [upper_last]])
+    bnds = np.stack([edges[:-1], edges[1:]], axis=-1)
+    if periodic:
+        # Keep the span consistent with a circular axis (e.g. longitude).
+        # This function does not wrap modulo 360; callers are responsible
+        # for providing centers on a canonical interval.
+        pass
+    return bnds
+
+
+def _make_lat_bnds_da(lat: np.ndarray):
+    """Build a latitude cell-bounds DataArray, shape ``(nlat, 2)``.
+
+    Edges are clipped to ``[-90, 90]`` so that polar cells do not extend
+    off the sphere, which would otherwise fail CF/CMIP validation.
+    """
+    xr = _import_xarray()
+    bnds = _cell_bounds_from_centers(np.asarray(lat, dtype=np.float64))
+    bnds = np.clip(bnds, -90.0, 90.0)
+    return xr.DataArray(
+        bnds,
+        dims=("lat", "bnds"),
+        attrs={"units": "degrees_north"},
+    )
+
+
+def _make_lon_bnds_da(lon: np.ndarray):
+    """Build a longitude cell-bounds DataArray, shape ``(nlon, 2)``."""
+    xr = _import_xarray()
+    bnds = _cell_bounds_from_centers(
+        np.asarray(lon, dtype=np.float64), periodic=True,
+    )
+    return xr.DataArray(
+        bnds,
+        dims=("lon", "bnds"),
+        attrs={"units": "degrees_east"},
+    )
+
+
+def _make_height_da(height_m: float):
+    """Build a scalar reference-height coordinate (CMIP6 tas/uas/…)."""
+    xr = _import_xarray()
+    return xr.DataArray(
+        np.float64(height_m),
+        attrs={
+            "standard_name": "height",
+            "long_name": "height",
+            "units": "m",
+            "axis": "Z",
+            "positive": "up",
         },
     )
 
@@ -651,6 +824,91 @@ def _make_time_bounds_da(
 
 
 # =========================================================================
+# CMIP6 metadata helpers
+# =========================================================================
+
+_VARIANT_RE = re.compile(
+    r"^r(?P<r>\d+)i(?P<i>\d+)p(?P<p>\d+)f(?P<f>\d+)$"
+)
+
+
+def _parse_variant_label(variant_label: str) -> Tuple[int, int, int, int]:
+    """Parse a CMIP6 variant label into its four indices.
+
+    ``"r1i1p1f1"`` → ``(1, 1, 1, 1)`` → ``(realization, initialization,
+    physics, forcing)``.  Raises ``ValueError`` on malformed input.
+    """
+    m = _VARIANT_RE.match(variant_label.strip())
+    if m is None:
+        raise ValueError(
+            f"Malformed CMIP6 variant_label {variant_label!r}; "
+            "expected 'r<i>i<i>p<i>f<i>' (e.g. 'r1i1p1f1')."
+        )
+    return (
+        int(m.group("r")),
+        int(m.group("i")),
+        int(m.group("p")),
+        int(m.group("f")),
+    )
+
+
+# Ordered, descending CMIP6 nominal_resolution CV thresholds [km].
+# See https://github.com/PCMDI/cmip6-cmor-tables/blob/main/Tables/CMIP6_CV.json
+# ``nominal_resolution`` — the smallest bucket whose upper bound is ≥ the
+# actual grid spacing.  We follow the CMIP6 spec: pick the CV value that
+# best brackets the mean great-circle cell dimension in km.
+_NOMINAL_RES_BUCKETS_KM: Tuple[Tuple[float, str], ...] = (
+    (0.5, "0.5 km"),
+    (1.0, "1 km"),
+    (2.5, "2.5 km"),
+    (5.0, "5 km"),
+    (10.0, "10 km"),
+    (25.0, "25 km"),
+    (50.0, "50 km"),
+    (100.0, "100 km"),
+    (250.0, "250 km"),
+    (500.0, "500 km"),
+    (1000.0, "1000 km"),
+    (2500.0, "2500 km"),
+    (5000.0, "5000 km"),
+    (10000.0, "10000 km"),
+)
+
+
+def _compute_nominal_resolution(
+    lat: np.ndarray, lon: np.ndarray,
+) -> str:
+    """Pick the CMIP6 CV ``nominal_resolution`` string for a lat-lon grid.
+
+    Uses the mean grid spacing in degrees, converted to km at the equator
+    (1° ≈ 111.19 km), and rounds up to the nearest CMIP6 CV bucket.
+    """
+    lat_np = np.asarray(lat, dtype=np.float64)
+    lon_np = np.asarray(lon, dtype=np.float64)
+    if lat_np.size < 2 or lon_np.size < 2:
+        return "unknown"
+    dlat = float(np.mean(np.abs(np.diff(lat_np))))
+    dlon = float(np.mean(np.abs(np.diff(lon_np))))
+    # Equatorial km for the longer side (coarser spacing dominates)
+    spacing_deg = max(dlat, dlon)
+    spacing_km = spacing_deg * 111.19
+    for threshold, label in _NOMINAL_RES_BUCKETS_KM:
+        if spacing_km <= threshold:
+            return label
+    return "10000 km"
+
+
+def _generate_tracking_id() -> str:
+    """Return a CMIP6-style tracking ID (``hdl:21.14100/<uuid>``)."""
+    return f"hdl:21.14100/{uuid.uuid4()}"
+
+
+def _realm_for_table(table_id: str) -> str:
+    """Return CMIP6 realm CV value for a CMOR table."""
+    return _TABLE_REALM.get(table_id, "atmos")
+
+
+# =========================================================================
 # Global attributes
 # =========================================================================
 
@@ -662,22 +920,70 @@ def _global_attrs(
     institution: str = "Columbia University",
     institution_id: str = "CU",
     source: str = "legoESM: Differentiable Earth System Model in JAX",
+    source_type: str = "AGCM",
+    sub_experiment_id: str = "none",
+    parent_experiment_id: str = "no parent",
+    parent_source_id: str = "no parent",
+    parent_variant_label: str = "no parent",
+    parent_activity_id: str = "no parent",
+    parent_time_units: str = "no parent",
+    license_text: str = CMIP6_LICENSE,
+    further_info_url: str = "",
+    nominal_resolution: str = "unknown",
+    tracking_id: str = "",
 ) -> Dict[str, str]:
-    """Return standard CF/CMIP6 global attributes."""
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Return standard CF/CMIP6 global attributes.
+
+    Populates all attributes required by the CMIP6 controlled vocabulary
+    (``required_global_attributes`` in the CMIP6_CV.json), so the output
+    passes PrePARE / cmip6-cmor-tables metadata validation once the
+    ``institution_id`` / ``source_id`` are registered with PCMDI.
+
+    The *parent_** attributes default to ``"no parent"``, which is the
+    CV-compliant sentinel for experiments branched from no parent run
+    (e.g. ``amip``, ``piControl``).  For branched experiments pass the
+    actual parent identifiers.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    try:
+        r_idx, i_idx, p_idx, f_idx = _parse_variant_label(variant_label)
+    except ValueError:
+        r_idx = i_idx = p_idx = f_idx = 1
     return {
         "Conventions": "CF-1.8",
+        "mip_era": "CMIP6",
         "activity_id": "CMIP",
         "experiment_id": experiment_id,
+        "sub_experiment": "none",
+        "sub_experiment_id": sub_experiment_id,
         "institution": institution,
         "institution_id": institution_id,
         "source_id": model_id,
         "source": source,
+        "source_type": source_type,
+        "product": "model-output",
+        "realm": "atmos",
         "variant_label": variant_label,
+        "realization_index": np.int32(r_idx),
+        "initialization_index": np.int32(i_idx),
+        "physics_index": np.int32(p_idx),
+        "forcing_index": np.int32(f_idx),
         "grid_label": grid_label,
-        "nominal_resolution": "unknown",
+        "nominal_resolution": nominal_resolution,
         "creation_date": now,
-        "tracking_id": "",
+        "tracking_id": tracking_id,
+        "license": license_text,
+        "further_info_url": further_info_url,
+        "parent_experiment_id": parent_experiment_id,
+        "parent_source_id": parent_source_id,
+        "parent_variant_label": parent_variant_label,
+        "parent_activity_id": parent_activity_id,
+        "parent_time_units": parent_time_units,
+        "branch_method": "no parent",
+        "branch_time_in_child": np.float64(0.0),
+        "branch_time_in_parent": np.float64(0.0),
         "frequency": "",
         "table_id": "",
         "variable_id": "",
@@ -724,12 +1030,27 @@ class CFWriter:
         model_id: str,
         freq: str = "mon",
         calendar: str = "noleap",
-        ref_date: str = "0001-01-01",
+        ref_date: str = "1850-01-01",
         variant_label: str = "r1i1p1f1",
         grid_label: str = "gn",
         institution: str = "Columbia University",
+        institution_id: str = "CU",
+        source_type: str = "AGCM",
+        sub_experiment_id: str = "none",
+        parent_experiment_id: str = "no parent",
+        parent_source_id: str = "no parent",
+        parent_variant_label: str = "no parent",
+        parent_activity_id: str = "no parent",
+        parent_time_units: str = "no parent",
+        license_text: str = CMIP6_LICENSE,
+        further_info_url: str = "",
         compress_level: int = 4,
     ) -> None:
+        # Validate variant_label up front — malformed labels would
+        # otherwise silently fall back to (1,1,1,1) for the index
+        # attributes, which is a subtle CMIP6 validation failure.
+        _parse_variant_label(variant_label)
+
         self.output_dir = Path(output_dir)
         self.experiment_id = experiment_id
         self.model_id = model_id
@@ -739,6 +1060,16 @@ class CFWriter:
         self.variant_label = variant_label
         self.grid_label = grid_label
         self.institution = institution
+        self.institution_id = institution_id
+        self.source_type = source_type
+        self.sub_experiment_id = sub_experiment_id
+        self.parent_experiment_id = parent_experiment_id
+        self.parent_source_id = parent_source_id
+        self.parent_variant_label = parent_variant_label
+        self.parent_activity_id = parent_activity_id
+        self.parent_time_units = parent_time_units
+        self.license_text = license_text
+        self.further_info_url = further_info_url
         self.compress_level = compress_level
 
         # Track open datasets for appending
@@ -756,18 +1087,48 @@ class CFWriter:
         self,
         table_id: str,
         var_name: str,
-    ) -> Dict[str, str]:
-        """Build global attributes for a specific variable file."""
+        nominal_resolution: str = "unknown",
+    ) -> Dict[str, Any]:
+        """Build global attributes for a specific variable file.
+
+        A fresh ``tracking_id`` (CMIP6-style persistent-handle UUID) is
+        generated per file, and ``realm`` is derived from *table_id*.
+        """
         attrs = _global_attrs(
             experiment_id=self.experiment_id,
             model_id=self.model_id,
             variant_label=self.variant_label,
             grid_label=self.grid_label,
             institution=self.institution,
+            institution_id=self.institution_id,
+            source_type=self.source_type,
+            sub_experiment_id=self.sub_experiment_id,
+            parent_experiment_id=self.parent_experiment_id,
+            parent_source_id=self.parent_source_id,
+            parent_variant_label=self.parent_variant_label,
+            parent_activity_id=self.parent_activity_id,
+            parent_time_units=self.parent_time_units,
+            license_text=self.license_text,
+            further_info_url=self.further_info_url,
+            nominal_resolution=nominal_resolution,
+            tracking_id=_generate_tracking_id(),
         )
+        attrs["realm"] = _realm_for_table(table_id)
         attrs["frequency"] = self.freq
         attrs["table_id"] = table_id
         attrs["variable_id"] = var_name
+        # external_variables: areacella for atmos, areacella/sftlf for land,
+        # areacello for ocean.  These cell-area files live alongside the
+        # variable files in the DRS and are referenced by name.
+        realm = attrs["realm"]
+        if realm == "atmos":
+            attrs["external_variables"] = "areacella"
+        elif realm == "land":
+            attrs["external_variables"] = "areacella sftlf"
+        elif realm == "ocean":
+            attrs["external_variables"] = "areacello"
+        elif realm == "seaIce":
+            attrs["external_variables"] = "areacello"
         return attrs
 
     def _output_path(
@@ -903,9 +1264,21 @@ class CFWriter:
             coords["depth"] = _make_depth_da(_to_numpy(depth))
             dims.append("depth")
 
-        coords["lat"] = _make_lat_da(_to_numpy(lat))
-        coords["lon"] = _make_lon_da(_to_numpy(lon))
+        lat_np = _to_numpy(lat)
+        lon_np = _to_numpy(lon)
+        coords["lat"] = _make_lat_da(lat_np)
+        coords["lon"] = _make_lon_da(lon_np)
         dims.extend(["lat", "lon"])
+
+        # CMIP6 scalar reference-height coordinate for surface diagnostics
+        # (tas @ 2 m, uas/vas @ 10 m, etc.).  Attach it to the DataArray's
+        # own ``coords`` (not the surrounding Dataset) so that xarray's
+        # auto-``coordinates``-attribute logic only tags the data variable
+        # — tagging ``time_bnds``/``lat_bnds``/``lon_bnds`` with
+        # ``coordinates=height`` would be invalid CF.
+        ref_height_m = _VAR_REFERENCE_HEIGHT.get(var_name)
+        if ref_height_m is not None:
+            coords["height"] = _make_height_da(ref_height_m)
 
         # Add leading time dimension to data
         data_np = np.expand_dims(data_np, axis=0)  # (1, ...)
@@ -932,7 +1305,24 @@ class CFWriter:
         ds = da.to_dataset()
         ds["time_bnds"] = time_bnds_da
         ds["time"].attrs["bounds"] = "time_bnds"
-        ds.attrs = self._base_global_attrs(table_id, var_name)
+        ds["lat_bnds"] = _make_lat_bnds_da(lat_np)
+        ds["lon_bnds"] = _make_lon_bnds_da(lon_np)
+        # Suppress xarray's auto ``coordinates`` attribute on bnds vars:
+        # scalar Dataset coords like ``height`` would otherwise be
+        # written onto every variable, producing invalid CF output on
+        # time_bnds/lat_bnds/lon_bnds.
+        for _bnds in ("time_bnds", "lat_bnds", "lon_bnds"):
+            if _bnds in ds.variables:
+                ds[_bnds].encoding["coordinates"] = None
+        # NOTE on bnds units: xarray normalizes CF time encoding so that
+        # ``time_bnds`` inherits units/calendar from its parent ``time``
+        # variable (per CF 1.8) and strips explicit attrs on serialize.
+        # Attempts to re-attach via attrs or encoding are no-ops. This
+        # is valid CF: modern CDO/ESMValTool accept bnds without units.
+        ds.attrs = self._base_global_attrs(
+            table_id, var_name,
+            nominal_resolution=_compute_nominal_resolution(lat_np, lon_np),
+        )
 
         # --- Write to disk ---
         out_path = self._output_path(var_name, table_id)
@@ -1194,6 +1584,13 @@ class CFWriter:
             coords["lon"] = _make_lon_da(lon_np)
             dims_list.extend(["lat", "lon"])
 
+            # Attach scalar reference height to the DataArray's own coords
+            # (not the Dataset via assign_coords) so xarray does not
+            # auto-tag time_bnds/lat_bnds/lon_bnds with coordinates="height".
+            ref_height_m = _VAR_REFERENCE_HEIGHT.get(var_name)
+            if ref_height_m is not None:
+                coords["height"] = _make_height_da(ref_height_m)
+
             var_attrs = {
                 "standard_name": entry["standard_name"],
                 "long_name": entry["long_name"],
@@ -1219,8 +1616,22 @@ class CFWriter:
                     "calendar": self.calendar,
                 },
             )
+            # Spatial cell bounds (required by CF/CMIP6)
+            ds["lat_bnds"] = _make_lat_bnds_da(lat_np)
+            ds["lon_bnds"] = _make_lon_bnds_da(lon_np)
+            # Suppress xarray's auto ``coordinates`` attribute on bnds
+            # variables so scalar coords like ``height`` don't produce
+            # invalid CF output (coordinates="height" on bnds is wrong).
+            for _bnds in ("time_bnds", "lat_bnds", "lon_bnds"):
+                if _bnds in ds.variables:
+                    ds[_bnds].encoding["coordinates"] = None
+            # xarray strips explicit bnds units per CF normalization;
+            # see note in ``write_field``.
 
-            ds.attrs = self._base_global_attrs(table_id, var_name)
+            ds.attrs = self._base_global_attrs(
+                table_id, var_name,
+                nominal_resolution=_compute_nominal_resolution(lat_np, lon_np),
+            )
 
             # Time range string for filename
             yr0, mo0 = months[0]
@@ -1242,6 +1653,170 @@ class CFWriter:
             written_vars.add(var_name)
 
         return written
+
+    def write_daily(
+        self,
+        daily_data: Dict[str, Any],
+        lat: Any,
+        lon: Any,
+    ) -> List[Path]:
+        """Write daily-mean data from a ``SpatialDailyAccumulator`` to NetCDF.
+
+        Consumes the output of ``SpatialDailyAccumulator.finalize()``:
+
+        - ``"days"`` : list of ``(year, doy)`` tuples
+        - ``"field_2d_<name>"`` : ``(n_days, nlat, nlon)`` — daily mean
+        - ``"field_2d_<name>_min"`` / ``"_max"`` : daily extremes
+
+        Each recognized variable is written to the CMIP6 ``day`` table.
+        ``tas`` extremes become ``tasmin`` / ``tasmax`` via the standard
+        CMIP6 naming convention.
+
+        Parameters
+        ----------
+        daily_data : dict
+            Output of ``SpatialDailyAccumulator.finalize()``.
+        lat, lon : array-like
+            1-D latitude / longitude of the output grid.
+
+        Returns
+        -------
+        list of Path
+            Unique paths written (one per variable, with all days
+            appended as the ``time`` dimension).
+        """
+        days: List[Tuple[int, int]] = daily_data.get("days", [])
+        if not days:
+            return []
+
+        # Accumulator key → CMIP6 variable name
+        key_to_var: Dict[str, str] = {}
+        for k in daily_data:
+            if not k.startswith("field_2d_"):
+                continue
+            inner = k[len("field_2d_"):]
+            if inner.endswith("_min"):
+                key_to_var[k] = inner[:-len("_min")] + "min"
+            elif inner.endswith("_max"):
+                key_to_var[k] = inner[:-len("_max")] + "max"
+            else:
+                key_to_var[k] = inner
+
+        written: List[Path] = []
+        seen: set = set()
+        for key, var_name in key_to_var.items():
+            # Skip variables not defined in the day table.
+            try:
+                lookup_cmor_entry(var_name, table="day")
+            except KeyError:
+                continue
+
+            field = _to_numpy(daily_data[key])
+            if field.ndim != 3 or field.shape[0] != len(days):
+                continue
+
+            out_path: Optional[Path] = None
+            for i, (yr, doy) in enumerate(days):
+                # ref_date corresponds to year {self._cmip_start_year}.
+                # Buckets store year relative to that, so simply:
+                #   day-offset = yr * 365 + (doy - 1)   (noleap)
+                d0 = float(yr * 365 + (doy - 1))
+                out_path = self.write_field(
+                    var_name=var_name,
+                    data=field[i],
+                    time=d0 + 0.5,
+                    time_bounds=(d0, d0 + 1.0),
+                    lat=lat,
+                    lon=lon,
+                    table="day",
+                )
+            if out_path is not None and out_path not in seen:
+                written.append(out_path)
+                seen.add(out_path)
+
+        return written
+
+    def write_fixed(
+        self,
+        var_name: str,
+        data: Any,
+        lat: Any,
+        lon: Any,
+        extra_attrs: Optional[Dict[str, str]] = None,
+    ) -> Path:
+        """Write a time-invariant field (``fx`` table) to NetCDF.
+
+        ``fx`` files are written once per experiment and contain no time
+        dimension. Typical variables: ``orog`` (surface altitude),
+        ``areacella`` (cell area), ``sftlf`` (land fraction).
+
+        Parameters
+        ----------
+        var_name : str
+            Short CMOR variable name; must be in the ``fx`` table.
+        data : array-like
+            2-D field, shape ``(nlat, nlon)``.
+        lat, lon : array-like
+            1-D latitude / longitude.
+        extra_attrs : dict, optional
+            Additional variable attributes.
+
+        Returns
+        -------
+        Path
+            Written file path.
+        """
+        xr = _import_xarray()
+        table_id, entry = lookup_cmor_entry(var_name, table="fx")
+        output_dtype = _resolve_output_dtype(None)
+
+        lat_np = _to_numpy(lat)
+        lon_np = _to_numpy(lon)
+        data_np = _to_numpy(data).astype(output_dtype)
+        if data_np.shape != (lat_np.shape[0], lon_np.shape[0]):
+            raise ValueError(
+                f"write_fixed: expected data shape ({lat_np.shape[0]}, "
+                f"{lon_np.shape[0]}), got {data_np.shape}"
+            )
+
+        var_attrs = {
+            "standard_name": entry["standard_name"],
+            "long_name": entry["long_name"],
+            "units": entry["units"],
+            "cell_methods": entry["cell_methods"],
+        }
+        if extra_attrs:
+            var_attrs.update(extra_attrs)
+
+        da = xr.DataArray(
+            data_np,
+            dims=("lat", "lon"),
+            coords={
+                "lat": _make_lat_da(lat_np),
+                "lon": _make_lon_da(lon_np),
+            },
+            attrs=var_attrs,
+            name=var_name,
+        )
+        ds = da.to_dataset()
+        ds["lat_bnds"] = _make_lat_bnds_da(lat_np)
+        ds["lon_bnds"] = _make_lon_bnds_da(lon_np)
+        # Same bnds-coord suppression as in write_field / write_monthly.
+        for _bnds in ("lat_bnds", "lon_bnds"):
+            if _bnds in ds.variables:
+                ds[_bnds].encoding["coordinates"] = None
+
+        ds.attrs = self._base_global_attrs(
+            table_id, var_name,
+            nominal_resolution=_compute_nominal_resolution(lat_np, lon_np),
+        )
+        # fx files have no time axis — override frequency.
+        ds.attrs["frequency"] = "fx"
+
+        out_path = self._output_path(var_name, table_id)
+        encoding = {var_name: self._encoding_for(var_name)}
+        ds.to_netcdf(out_path, format="NETCDF4", encoding=encoding)
+        return out_path
 
     def close(self) -> None:
         """Finalize and close any open dataset handles.
