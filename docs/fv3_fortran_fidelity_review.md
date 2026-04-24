@@ -1562,7 +1562,7 @@ Per iter-831's localisation of FB h-growth to `_c_sw` and iter-832's elimination
 
 **Process.**  95th iter in iter-752-835 chain.  Rules out four coarse sub-step ablations (mass_flux, ke_gradient, vort_flux) as individual drivers of the FB h-growth at C24 12h.  Reproduces iter-831's `p_grad_c` stabilising role.  Scope-limited to the four tested targets — the universal "no single piece dominates" conclusion requires additional ablations before it can be claimed.  Iter-835b rewording addresses Codex adversarial-review findings on sample-space coverage and prose overclaim.
 
-### Iter-836 — `_corner_vorticity` duogrid halo fix: 15.6 % rotation error at cube-vertex corners
+### Iter-836 — `_corner_vorticity` duogrid halo fix: 49.4 % rotation error at cube-vertex corners
 
 Per iter-835's iter-836+ candidate "individually ablate the unablated operators (`_corner_vorticity` …) one per iter" and Codex inline fidelity check (agentId a56dfc70cb22ec09d), iter-836 audited `_corner_vorticity`'s halo strategy.
 
@@ -1570,50 +1570,60 @@ Per iter-835's iter-836+ candidate "individually ablate the unablated operators 
 
 **Python gap (pre-iter-836)**: `src/legoesm/core/fv3_sw_core.py::_corner_vorticity:1177-1178` used `jnp.pad(..., mode='edge')` on `fx_circ`/`fy_circ` in the duogrid branch — a SAME-FACE extrapolation that ignores the cross-face rotation convention.
 
-**Diagnostic** (`scripts/diag_iter836_corner_vort_halo.py`).  At C24 on W2 IC (duogrid), computed `vort_abs` two ways: (a) current code with mode='edge', (b) proposed fix with `pad_halo_vector` on cell-centre-averaged `(uc, vc)`.  Measured |Δvort_abs|.
+**Fix strategy (iter-836b, after Codex adversarial review).**  Initial iter-836 attempt used `pad_halo_vector` on cell-centre-averaged `(uc, vc)` AND reconstructed face-position `uc`/`vc` by symmetric averaging of the padded cell centres.  Codex (agentId a0c32716e755fc1dd) flagged this as INVALIDATING because it 1-2-1-smoothed the INTERIOR `uc`/`vc` (replacing the 4th-order A→C values with `0.25*uc[i-1] + 0.5*uc[i] + 0.25*uc[i+1]`).  iter-836b refactored to preserve interior `fx_circ`/`fy_circ` EXACTLY and only reconstruct the halo rows at j=-1, j=n (for fx) and i=-1, i=n (for fy) from the rotated cell-centre halo.
 
-**Pre-fix result.**
+**Diagnostic** (`scripts/diag_iter836_corner_vort_halo.py`).  At C24 on W2 IC (duogrid), compares `_corner_vorticity` output under the OLD mode='edge' (reproduced locally from the pre-iter-836 code path) against the POST-iter-836b implementation.
+
+**Post-iter-836b result.**
 
 | quantity                                      | value           |
 |-----------------------------------------------|-----------------|
 | max |vort_abs_edge| (interior scale)          | 1.580e−04 /s    |
-| peak |Δ| (edge vs rotated)                    | 2.467e−05 /s    |
-| relative peak                                 | **15.62 %**      |
-| peak location                                 | face 4, cube vertex at (35.26°, −135.00°) |
-| panel-edge corners peak                       | 2.467e−05 /s    |
-| interior corners peak                         | 3.473e−06 /s    |
+| peak |Δ| (edge vs iter-836b fix)               | 7.810e−05 /s    |
+| **relative peak**                             | **49.45 %**      |
+| peak location                                 | face 0, cube vertex at (−35.26°, −45.00°), GC-to-vertex = 0.00° |
+| panel-edge corners peak                       | 7.810e−05 /s    |
+| **interior corners peak**                     | **0.000e+00 /s** (exact preservation) |
+
+The 49 % peak is the TRUE magnitude of the halo rotation error.  iter-836a's 15.6 % figure was contaminated by the interior smoothing in the comparison "rotated" branch.
 
 **Observation — numerical reportage only.**
-- The `mode='edge'` padding produces a 15.6 % error RELATIVE to the interior `vort_abs` scale at the cube-vertex corners of the face.  Localised to i∈{0,n} or j∈{0,n} (panel-edge ring).
-- Interior corners have much smaller delta (2.2 % of interior scale), indicating the error is concentrated at the cube-vertex ring as expected.
-- The peak location is exactly AT a cube vertex (GC-to-nearest-vertex = 0.00°), consistent with the structural iter-793/796 cube-vertex-localised signature.
+- `mode='edge'` padding produces a 49 % error at cube-vertex panel-edge corners on W2 IC; interior corners are unaffected by the fix (0 % delta).
+- Peak location is exactly AT a cube vertex (GC = 0.00°), matching the iter-793/796 structural cube-vertex-localised signature.
+- The magnitude is much larger than iter-836a reported because interior smoothing in that version artificially reduced the measured delta.
 
-**Fix** (applied in this commit).  For the duogrid branch of `_corner_vorticity`, replaced `mode='edge'` padding with `pad_halo_vector` on cell-centre-averaged `(uc, vc)`.  The cell-centre averaging is lossy (O(dx²) in smooth fields) but cross-face rotation-correct; still much closer to Fortran's direct reconstruction from halo `u`/`v` than the rotation-blind `mode='edge'`.  Non-duogrid branch unchanged (Fortran's own non-duogrid path uses linear extrapolation that our code already mirrors).
+**Fix** (iter-836b, applied in this commit chain):
+- Non-duogrid branch: unchanged (`mode='edge'` + Fortran-faithful linear extrapolation at 4 corner rings).
+- Duogrid branch: halo-ONLY reconstruction.  Interior `fx_circ`/`fy_circ` preserved exactly.  Halo rows at `j ∈ {−1, n}` (for `fx_pad`) and `i ∈ {−1, n}` (for `fy_pad`) derived from `pad_halo_vector` applied to cell-centre-averaged `(uc_cc, vc_cc)`, then reconstructed face-staggered at the halo row only.  `dxc`/`dyc` at halo rows uses edge-mode (continuous-metric leading-order, small O(dx) error).
+
+Residual O(dx²) approximation (cell-centre averaging vs Fortran's direct 4th-order A→C on halo `u`/`v`) and covariant-vs-grid-aligned rotation convention (Codex WEAKENS findings) remain as iter-837+ candidates for a higher-fidelity port.
 
 **Downstream impact.**
 
-| quantity                                                | pre-iter-836 | post-iter-836 | Δ   |
+| quantity                                                | pre-iter-836 | post-iter-836b | Δ   |
 |---------------------------------------------------------|-------------:|-------------:|-----|
 | W2 sentinels (`TestW2BoundaryErrorBudget`, 14 tests)    | 14 pass      | 14 pass      | —   |
-| FB DUOGRID C24 W2 12h baseline h_max                    | 10765        | 10776        | +0.1 % |
-| iter-836 diagnostic Δvort_abs peak                       | 15.6 %       | 0.0 %        | −15.6 % |
+| FB DUOGRID C24 W2 12h baseline h_max                    | 10765        | 10775        | +0.09 % |
+| iter-836 diagnostic Δ (panel-edge peak)                  | 49 % (true mag) | n/a (IS the new code) | — |
 
 `_corner_vorticity` is only called from `_c_sw` and `fv3_csw_tendencies` (both in the FB chain).  Neither the A-L RK3 production path (W2 LEGACY) nor the cosine-bell `transport_step` path uses `_corner_vorticity`, so cosine-bell/W5/ocean-rest-state/W2-LEGACY are unaffected — the fix is Fortran-fidelity-only for the FB chain.
 
-**What iter-836 DOES show.**
-- `_corner_vorticity` mode='edge' halo was a concrete Fortran-fidelity bug (15.6 % local error at cube-vertex corners of the FB-chain `vort_abs`).
-- The fix reduces the diagnostic Δ to zero and does not regress any production sentinel.
-- FB h_max at C24 12h shifts by +0.1 % — the halo bug was NOT a dominant contributor to the 8× h-growth.
+**What iter-836/836b DOES show.**
+- `_corner_vorticity` mode='edge' halo was a concrete Fortran-fidelity bug with 49 % local rotation error at cube-vertex corners on W2 IC (4× larger than iter-836a's contaminated 15.6 % figure).
+- iter-836b preserves interior exactly (0 % interior delta) while fixing the halo rotation (first Codex finding addressed).
+- FB h_max at C24 12h shifts by +0.09 % — the halo bug was NOT a dominant contributor to the 8× FB h-growth.
 
-**What iter-836 does NOT establish.**
-- Whether the cell-centre-averaging approximation in the fix (O(dx²) error) is sufficient for longer horizons or finer resolutions.  The ideal Fortran-faithful fix would derive halo `uc`/`vc` directly from halo-extended `u_d`/`v_d` via the 4th-order A→C stencil (like `_d2a2c_vect_duogrid` step 4), not via cell-centre averaging.
-- Whether fixing halo bugs in the other unablated operators (`_ke_upwind`, `_vorticity_flux`, `_d_sw5_corner_divergence`, etc.) would collectively drop FB h_max below 10765.
+**What iter-836b does NOT establish.**
+- Whether the cell-centre-averaging approximation in the halo (O(dx²) relative to direct 4th-order A→C reconstruction from halo `u`/`v`) is sufficient for longer horizons or finer resolutions.
+- Whether `pad_halo_vector`'s rotation (designed for grid-aligned velocity components) is the CORRECT rotation for FV3 covariant `uc`/`vc` winds.  Codex's Issue 2 WEAKENS flag notes that Fortran's `ext_vector_dgrid` for covariant inputs first does covariant→contravariant conversion (`rsin2` + `cosa_s`) before rotating; iter-836b skips that conversion.
+- Whether fixing halo bugs in other unablated operators (`_ke_upwind`, `_vorticity_flux`, etc.) would collectively drop FB h_max.
 
 **Iter-837+ candidates.**
-- Full 2D-halo utmp/vtmp in `_d2a2c_vect_duogrid` + halo-extended `uc`/`vc` returned alongside interior — replaces the iter-836 cell-centre averaging with direct A→C reconstruction (higher-order Fortran-faithful).
-- Audit `_ke_upwind` duogrid halo (currently only computes interior; panel-edge cells may use neighbor-face uc via halo).
+- Higher-fidelity halo: extend `_d2a2c_vect_duogrid` to return halo-extended `uc`/`vc` directly (2D-halo `utmp_full` → full 4th-order A→C on halo rows), replacing iter-836b's cell-centre averaging.
+- Correct rotation convention: apply covariant→contravariant conversion before halo rotation, then back (matches Fortran `ext_vector_dgrid` for covariant inputs).
+- Audit `_ke_upwind` duogrid halo.
 - Audit `_vorticity_flux` halo usage.
 
-**Deliverable.**  `scripts/diag_iter836_corner_vort_halo.py` + committed output.  `src/legoesm/core/fv3_sw_core.py::_corner_vorticity` duogrid branch rewritten; non-duogrid branch unchanged.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+**Deliverable.**  `scripts/diag_iter836_corner_vort_halo.py` + committed output.  `src/legoesm/core/fv3_sw_core.py::_corner_vorticity` duogrid branch rewritten (iter-836 initial + iter-836b interior-preserving refactor); non-duogrid branch unchanged.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
-**Process.**  96th iter in iter-752-836 chain.  First Fortran-fidelity CODE FIX since iter-808's sign-flip sync.  Closes a concrete 15.6 % halo rotation error in `_corner_vorticity`'s duogrid branch.  FB C24 12h baseline essentially unchanged (+0.1 %), consistent with iter-835's finding that no single operator dominates the FB h-growth.
+**Process.**  96th iter in iter-752-836 chain.  First Fortran-fidelity CODE FIX since iter-808's sign-flip sync.  Closes a concrete 49 % halo rotation error in `_corner_vorticity`'s duogrid branch at cube-vertex corners.  Codex adversarial review caught and corrected an interior-smoothing bug in the iter-836a initial attempt (iter-836b preserves interior exactly).  FB C24 12h baseline essentially unchanged (+0.09 %), consistent with iter-835's finding that no single operator dominates FB h-growth.

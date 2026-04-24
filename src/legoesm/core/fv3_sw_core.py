@@ -1178,7 +1178,14 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
     #   (uc, vc) — cross-face rotation-correct to leading order.
     if use_duogrid and n >= 2:
         from legoesm.grids.halo import pad_halo_vector as _phv
-        # Average uc/vc to cell centres for the vector halo exchange.
+        # Halo-only fix (iter-836b after Codex adversarial review):
+        # compute HALO fx/fy values from cross-face-rotated uc/vc
+        # cell-centre averages, but PRESERVE interior fx_circ/fy_circ
+        # exactly (do NOT smooth interior through an average-pad-average
+        # round-trip).  Interior uc/vc came from the 4th-order A→C
+        # stencil in `_d2a2c_vect_duogrid`; replacing them with 1-2-1-
+        # smoothed versions would introduce an O(dx²) error in the
+        # interior vort_abs that is NOT Fortran-faithful.
         uc_cc = 0.5 * (uc[:, :-1, :] + uc[:, 1:, :])   # (6, n, n)
         vc_cc = 0.5 * (vc[:, :, :-1] + vc[:, :, 1:])   # (6, n, n)
         grid = cdgrid.base
@@ -1189,20 +1196,40 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
             grid.cos_angle_padded, grid.sin_angle_padded,
             interp_offsets=None, duogrid=dg, halo=1,
         )  # (6, n+2, n+2) each — cross-face rotation-aware
-        # Reconstruct face-staggered uc/vc over 1-halo in the direction
-        # we need: fx_pad needs j-halo (axis 2), fy_pad needs i-halo
-        # (axis 1).  Face values = 0.5 * (left_cc + right_cc).
-        uc_face_pad = 0.5 * (uc_cc_pad[:, :-1, :]
-                              + uc_cc_pad[:, 1:, :])   # (6, n+1, n+2)
-        vc_face_pad = 0.5 * (vc_cc_pad[:, :, :-1]
-                              + vc_cc_pad[:, :, 1:])   # (6, n+2, n+1)
-        # Metric halo: dxc/dyc are continuous across seams to leading
-        # order; edge-mode here introduces O(dx) error at the panel edge
-        # but is small compared to the 15.6 % uc rotation error.
-        dxc_pad = jnp.pad(cdgrid.dxc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-        dyc_pad = jnp.pad(cdgrid.dyc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-        fx_pad = uc_face_pad * dxc_pad   # (6, n+1, n+2)
-        fy_pad = vc_face_pad * dyc_pad   # (6, n+2, n+1)
+        # Extract HALO rows only and reconstruct face-staggered values.
+        # uc_cc_pad[:, :, 0]   = uc_cc at j_cell = −1 (south halo)
+        # uc_cc_pad[:, :, n+1] = uc_cc at j_cell =  n (north halo)
+        uc_halo_j_below = 0.5 * (uc_cc_pad[:, :-1, 0] + uc_cc_pad[:, 1:, 0])
+        uc_halo_j_above = 0.5 * (uc_cc_pad[:, :-1, n + 1]
+                                  + uc_cc_pad[:, 1:, n + 1])
+        vc_halo_i_left = 0.5 * (vc_cc_pad[:, 0, :-1] + vc_cc_pad[:, 0, 1:])
+        vc_halo_i_right = 0.5 * (vc_cc_pad[:, n + 1, :-1]
+                                  + vc_cc_pad[:, n + 1, 1:])
+        # Metric halo: dxc/dyc continuous across seams; edge-mode for
+        # the halo row (O(dx) error, much smaller than the 15.6 % uc
+        # rotation error that mode='edge' on fx_circ produced).
+        dxc_halo_j_below = cdgrid.dxc[:, :, 0]    # (6, n+1)
+        dxc_halo_j_above = cdgrid.dxc[:, :, -1]   # (6, n+1)
+        dyc_halo_i_left = cdgrid.dyc[:, 0, :]     # (6, n+1)
+        dyc_halo_i_right = cdgrid.dyc[:, -1, :]   # (6, n+1)
+
+        fx_halo_j_below = uc_halo_j_below * dxc_halo_j_below   # (6, n+1)
+        fx_halo_j_above = uc_halo_j_above * dxc_halo_j_above   # (6, n+1)
+        fy_halo_i_left = vc_halo_i_left * dyc_halo_i_left      # (6, n+1)
+        fy_halo_i_right = vc_halo_i_right * dyc_halo_i_right   # (6, n+1)
+
+        # Interior fx_pad = fx_circ; halo rows at j=-1 and j=n ONLY are
+        # replaced with the rotated values.  Interior values unchanged.
+        fx_pad = jnp.concatenate([
+            fx_halo_j_below[:, :, jnp.newaxis],   # (6, n+1, 1) j=-1
+            fx_circ,                               # (6, n+1, n) interior
+            fx_halo_j_above[:, :, jnp.newaxis],   # (6, n+1, 1) j=n
+        ], axis=2)  # (6, n+1, n+2)
+        fy_pad = jnp.concatenate([
+            fy_halo_i_left[:, jnp.newaxis, :],    # (6, 1, n+1) i=-1
+            fy_circ,                               # (6, n, n+1) interior
+            fy_halo_i_right[:, jnp.newaxis, :],   # (6, 1, n+1) i=n
+        ], axis=1)  # (6, n+2, n+1)
     else:
         # Non-duogrid path: edge padding + linear extrapolation at the 4
         # panel-edge boundaries (sw_core.F90:396-400).

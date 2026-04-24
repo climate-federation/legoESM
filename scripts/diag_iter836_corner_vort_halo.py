@@ -46,56 +46,17 @@ from tests.atmosphere.shallow_water.test_cases.williamson import (
     williamson_test2)
 
 
-def _vort_abs_rotated_halo(uc, vc, cdgrid):
-    """Halo-exchange-aware vort_abs using pad_halo_vector on cell-centre
-    averages of uc/vc.  Cross-face rotation-correct (unlike mode='edge').
+def _vort_abs_edge_mode(uc, vc, cdgrid):
+    """Reproduce the PRE-iter-836 mode='edge' padding path so the
+    diagnostic can measure the halo-strategy error without relying on
+    the current `_corner_vorticity` implementation.  Interior
+    fx_circ/fy_circ are preserved EXACTLY; halo rows use plain
+    mode='edge' copy (same-face extension, no cross-face rotation).
     """
-    n = cdgrid.n
     fx_circ = uc * cdgrid.dxc   # (6, n+1, n)
     fy_circ = vc * cdgrid.dyc   # (6, n, n+1)
-
-    # Average uc/vc to cell centres for halo exchange
-    uc_cc = 0.5 * (uc[:, :-1, :] + uc[:, 1:, :])    # (6, n, n)
-    vc_cc = 0.5 * (vc[:, :, :-1] + vc[:, :, 1:])    # (6, n, n)
-
-    grid = cdgrid.base
-    dg = grid.duogrid
-    offs = None if dg is not None else grid.halo_interp_offsets
-    uc_cc_pad, vc_cc_pad = pad_halo_vector(
-        uc_cc, vc_cc,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=offs, duogrid=dg, halo=1,
-    )  # (6, n+2, n+2) each
-
-    # Pad dxc (which has shape (6, n+1, n)) in axis=2 by halo=1 to get
-    # (6, n+1, n+2).  Use edge-mode: dxc is a metric, continuous across
-    # panel boundaries to leading order.
-    dxc_pad_j = jnp.pad(cdgrid.dxc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    dyc_pad_i = jnp.pad(cdgrid.dyc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-
-    # Interior + j-halo fx_circ: uc_face * dxc
-    # Face position (i_face, j_cell) for j_cell=-1..n:
-    #   - interior j_cell=0..n-1: use original uc (i_face=0..n, j_cell=0..n-1)
-    #   - halo j_cell=-1: uc_face[:, i_face, -1] = 0.5*(uc_cc_pad[i_face-1+1, 0]
-    #                                                   + uc_cc_pad[i_face+1, 0])
-    #     where the "+1" offset accounts for pad_halo_vector's halo=1.
-    #     For i_face=0: uc_cc_pad[0, 0] and uc_cc_pad[1, 0] (corner uses halo in
-    #     BOTH dimensions).
-    #   - halo j_cell=n: similar, uc_cc_pad[..., n+1].
-    # Simplify by slicing uc_cc_pad at axis 1 into face positions directly.
-    # uc_cc_pad has shape (6, n+2, n+2).  Face position i_face corresponds to
-    # averaging uc_cc_pad[:, i_face, :] and uc_cc_pad[:, i_face+1, :] (with
-    # pad_halo_vector's halo=1 offset).
-    uc_face_pad = 0.5 * (uc_cc_pad[:, :-1, :] + uc_cc_pad[:, 1:, :])
-    # (6, n+1, n+2) — i_face=0..n, j_cell=-1..n
-    vc_face_pad = 0.5 * (vc_cc_pad[:, :, :-1] + vc_cc_pad[:, :, 1:])
-    # (6, n+2, n+1) — i_cell=-1..n, j_face=0..n
-
-    fx_pad = uc_face_pad * dxc_pad_j   # (6, n+1, n+2)
-    fy_pad = vc_face_pad * dyc_pad_i   # (6, n+2, n+1)
-
-    # Direct corner vorticity
+    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
     vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
             - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
     rarea_c = 1.0 / cdgrid.area_corner
@@ -151,10 +112,10 @@ def main(n=24):
     # Get uc, vc from d2a2c_vect (duogrid path)
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
 
-    # Current code: mode='edge' padding
-    vort_abs_edge = _corner_vorticity(uc, vc, cdgrid, use_duogrid=True)
-    # Proposed fix: pad_halo_vector rotation
-    vort_abs_rot = _vort_abs_rotated_halo(uc, vc, cdgrid)
+    # PRE-iter-836 mode='edge' path (reconstructed locally)
+    vort_abs_edge = _vort_abs_edge_mode(uc, vc, cdgrid)
+    # POST-iter-836b fix: current _corner_vorticity with use_duogrid=True
+    vort_abs_rot = _corner_vorticity(uc, vc, cdgrid, use_duogrid=True)
 
     vort_abs_edge_np = np.asarray(vort_abs_edge)
     vort_abs_rot_np = np.asarray(vort_abs_rot)
