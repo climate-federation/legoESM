@@ -768,6 +768,67 @@ def vector_laplacian_del4_3d(u_edge_3d, mesh):
     return -vector_laplacian_del2_3d(del2_u, mesh)
 
 
+def laplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
+    """Scalar Laplacian ``∇²f = div(grad(f))`` at cell centres, all levels.
+
+    Uses the native MPAS TRiSK C-grid stencil:
+    ``gradient_edge_3d`` then ``divergence_cell_3d``.  When a cell mask is
+    supplied, the edge mask is derived as ``mask[c1] * mask[c2]`` so that
+    gradients vanish at coastlines, and the final Laplacian is zeroed on
+    land cells — mirroring the latlon ``laplacian_cgrid`` convention.
+
+    Parameters
+    ----------
+    f_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+    mask : jax.Array, optional, shape (nCells,)
+        Cell mask (1 on ocean, 0 on land). When supplied, the edge mask
+        is derived internally to zero gradients across land-ocean
+        boundaries, and the returned Laplacian is multiplied by ``mask``.
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev)
+    """
+    grad_f = gradient_edge_3d(f_cell_3d, mesh)  # (nEdges, nlev)
+    if mask is not None:
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = mask[c1] * mask[c2]         # (nEdges,)
+        grad_f = grad_f * edge_mask[:, None]
+
+    lap = divergence_cell_3d(grad_f, mesh)      # (nCells, nlev)
+
+    if mask is not None:
+        lap = lap * mask[:, None]
+    return lap
+
+
+def bilaplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
+    """Scalar bilaplacian ``∇⁴f = ∇²(∇²f)`` at cell centres, all levels.
+
+    Applies :func:`laplacian_cell_3d` twice.  Used as the kernel of
+    biharmonic tracer diffusion: ``dtr/dt -= K_bih * bilaplacian_cell_3d(tr)``.
+    Same sign convention as the latlon ``bilaplacian_cgrid``: the operator
+    returns ``∇²(∇²f)`` (positive-definite eigenvalues), so the physical
+    dissipation sign is applied at the call site.
+
+    Parameters
+    ----------
+    f_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+    mask : jax.Array, optional, shape (nCells,)
+        Cell mask applied inside each Laplacian pass (boundary gradient
+        zeroing + land-cell zeroing of the intermediate Laplacian).
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev)
+    """
+    lap_f = laplacian_cell_3d(f_cell_3d, mesh, mask=mask)
+    return laplacian_cell_3d(lap_f, mesh, mask=mask)
+
+
 def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag):
     """Smagorinsky biharmonic viscosity: ``-del2(A_smag * del2(u))``.
 

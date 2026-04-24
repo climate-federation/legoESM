@@ -262,6 +262,223 @@ class TestBaroclinicTendencies:
             assert jnp.allclose(tend.deta_dt.data[land_cells], 0.0)
 
 
+class TestScalarLaplacianOperators:
+    """Unit tests for ``laplacian_cell_3d`` / ``bilaplacian_cell_3d``."""
+
+    def test_laplacian_of_constant_is_zero(self, mesh):
+        """div(grad(const)) == 0 for cell-centered constant field."""
+        from legoesm.core.operators_voronoi import laplacian_cell_3d
+        nlev = 4
+        f = jnp.full((mesh.nCells, nlev), 3.7)
+        lap = laplacian_cell_3d(f, mesh)
+        assert float(jnp.max(jnp.abs(lap))) == 0.0
+
+    def test_bilaplacian_of_constant_is_zero(self, mesh):
+        """Bilaplacian of a constant field is identically zero."""
+        from legoesm.core.operators_voronoi import bilaplacian_cell_3d
+        nlev = 3
+        f = jnp.full((mesh.nCells, nlev), -1.25)
+        bilap = bilaplacian_cell_3d(f, mesh)
+        assert float(jnp.max(jnp.abs(bilap))) == 0.0
+
+    def test_bilaplacian_equals_lap_of_lap(self, mesh):
+        """``bilaplacian_cell_3d(f) == laplacian_cell_3d(laplacian_cell_3d(f))``."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            laplacian_cell_3d, bilaplacian_cell_3d,
+        )
+        rng = np.random.default_rng(0)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 5)))
+        direct = bilaplacian_cell_3d(f, mesh)
+        chained = laplacian_cell_3d(laplacian_cell_3d(f, mesh), mesh)
+        assert jnp.allclose(direct, chained)
+
+    def test_mask_zeroes_land_output(self, mesh):
+        """Cell mask zeroes the output on land and gradients at coastlines."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            laplacian_cell_3d, bilaplacian_cell_3d,
+        )
+        rng = np.random.default_rng(1)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 4)))
+        land = jnp.arange(mesh.nCells) < mesh.nCells // 4
+        mask = (~land).astype(jnp.float64)
+        lap = laplacian_cell_3d(f, mesh, mask=mask)
+        bilap = bilaplacian_cell_3d(f, mesh, mask=mask)
+        assert jnp.allclose(lap[land], 0.0)
+        assert jnp.allclose(bilap[land], 0.0)
+
+    def test_mask_matches_hand_applied_mask(self, mesh):
+        """mask= kw equals explicitly applying edge+cell masks step by step."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            laplacian_cell_3d, divergence_cell_3d, gradient_edge_3d,
+        )
+        rng = np.random.default_rng(2)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 3)))
+        land = jnp.arange(mesh.nCells) < mesh.nCells // 3
+        mask = (~land).astype(jnp.float64)
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = mask[c1] * mask[c2]
+        grad = gradient_edge_3d(f, mesh) * edge_mask[:, None]
+        lap_manual = divergence_cell_3d(grad, mesh) * mask[:, None]
+        lap_op = laplacian_cell_3d(f, mesh, mask=mask)
+        assert jnp.allclose(lap_manual, lap_op)
+
+
+class TestBiharmonicTracerDiffusion:
+    """Issue #206: scalar biharmonic tracer diffusion (K_bih) on MPAS."""
+
+    def _perturbed_state(self, state, seed=0, amp=0.1):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        noise = jnp.asarray(rng.normal(size=state.T.data.shape)) * amp
+        return state._replace(T=state.T.replace(data=state.T.data + noise))
+
+    def test_config_default_is_zero(self):
+        """K_bih defaults to 0 — no behaviour change when unused."""
+        assert MPASOceanConfig().K_bih == 0.0
+
+    def test_kbih_zero_reproduces_explicit_harmonic_formula(self, state, mesh, z_coord):
+        """K_bih=0 must reproduce the K_h-only harmonic tracer tendency *formula*.
+
+        Instead of comparing two semantically identical configs, rebuild the
+        pre-K_bih horizontal tracer tendency directly from its algebraic
+        definition
+
+            dT/dt_horiz = K_h * div(grad(T) * edge_mask) / h_safe * h_k
+
+        on a minimal setup (no vertical mixing, no harmonic advection) and
+        assert the MPAS tendency equals this formula when K_bih=0.  If the
+        new branch ever leaks computation into K_bih=0, the hand-derived
+        reference will diverge.
+        """
+        from legoesm.core.operators_voronoi import (
+            divergence_cell_3d, gradient_edge_3d,
+        )
+        from legoesm.ocean.vertical import compute_layer_thickness
+
+        K_h = 1.0e2
+        cfg = MPASOceanConfig(K_h=K_h, K_bih=0.0, A_v=0.0, K_v=0.0,
+                               n_barotropic_substeps=5)
+        perturbed = self._perturbed_state(state)
+        tend = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg)
+
+        # Hand-computed harmonic horizontal tracer tendency.
+        cell_mask = state.land_mask.data
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = cell_mask[c1] * cell_mask[c2]
+        h_k = compute_layer_thickness(
+            perturbed.eta.data, perturbed.H_bathy.data, z_coord,
+            min_water_column_m=cfg.min_water_column_m,
+        )
+        h_safe = jnp.maximum(h_k, 1e-10)
+
+        def _kh_lap(f):
+            grad = gradient_edge_3d(f, mesh) * edge_mask[:, jnp.newaxis]
+            return (K_h * divergence_cell_3d(grad, mesh) / h_safe * h_k
+                    * cell_mask[:, jnp.newaxis])
+
+        expected_dT = _kh_lap(perturbed.T.data)
+        expected_dS = _kh_lap(perturbed.S.data)
+        assert jnp.allclose(tend.dT_dt.data, expected_dT, atol=0.0, rtol=0.0)
+        assert jnp.allclose(tend.dS_dt.data, expected_dS, atol=0.0, rtol=0.0)
+
+    def test_kbih_activation_changes_tracer_tendency(self, state, mesh, z_coord):
+        """K_bih>0 must measurably alter the tracer tendency."""
+        cfg_off = MPASOceanConfig(K_h=0.0, K_bih=0.0, A_v=0.0, K_v=0.0,
+                                   n_barotropic_substeps=5)
+        cfg_on = MPASOceanConfig(K_h=0.0, K_bih=1.0e10, A_v=0.0, K_v=0.0,
+                                  n_barotropic_substeps=5)
+        perturbed = self._perturbed_state(state)
+        t_off = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_off)
+        t_on = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_on)
+        diff = jnp.max(jnp.abs(t_on.dT_dt.data - t_off.dT_dt.data))
+        assert float(diff) > 0.0
+        assert jnp.all(jnp.isfinite(t_on.dT_dt.data))
+        assert jnp.all(jnp.isfinite(t_on.dS_dt.data))
+
+    def test_kbih_respects_land_mask(self, state, mesh, z_coord):
+        """Bilaplacian diffusion must not inject tendency on land cells."""
+        cfg_on = MPASOceanConfig(K_h=0.0, K_bih=1.0e10, A_v=0.0, K_v=0.0,
+                                  n_barotropic_substeps=5)
+        perturbed = self._perturbed_state(state)
+        tend = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_on)
+        land = state.land_mask.data < 0.5
+        if jnp.any(land):
+            assert jnp.allclose(tend.dT_dt.data[land], 0.0)
+            assert jnp.allclose(tend.dS_dt.data[land], 0.0)
+
+    def test_kbih_opposes_harmonic_sign_on_perturbation(self, state, mesh, z_coord):
+        """K_bih applies ``-K_bih * ∇⁴T`` (scale-selective dissipation).
+
+        For a small-scale tracer perturbation, bilap(T) has the same sign
+        as T at the perturbation peak, so the biharmonic tendency damps
+        the peak (opposite sign to the perturbation), matching the
+        latlon ``bilaplacian_cgrid`` convention in ocean_pe_latlon_cgrid.
+        """
+        mask = state.land_mask.data
+        ocean_idx = int(jnp.argmax(mask))
+        bump = jnp.zeros_like(state.T.data).at[ocean_idx, 0].set(1.0)
+        perturbed = state._replace(T=state.T.replace(data=state.T.data + bump))
+        cfg_on = MPASOceanConfig(K_h=0.0, K_bih=1.0e10, A_v=0.0, K_v=0.0,
+                                  n_barotropic_substeps=5)
+        cfg_off = MPASOceanConfig(K_h=0.0, K_bih=0.0, A_v=0.0, K_v=0.0,
+                                   n_barotropic_substeps=5)
+        t_on = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_on)
+        t_off = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_off)
+        delta = t_on.dT_dt.data - t_off.dT_dt.data
+        # Damping at the bump location (top level where the bump lives):
+        # with -K_bih*bilap and bump at centre → ΔdT/dt < 0 at centre.
+        assert float(delta[ocean_idx, 0]) < 0.0
+
+    def test_bilaplacian_area_sum_near_zero_on_closed_mesh(self, mesh):
+        """``Σ_c A_c · bilap(T)_c ≈ 0`` on a closed (unmasked) mesh.
+
+        Two passes of ``div(grad(·))`` telescope on a closed manifold:
+        the area-weighted sum of the divergence of a cell-centred field
+        is zero by discrete Stokes. This is the finite-volume
+        conservation property that prevents the biharmonic from leaking
+        area-integrated tracer mass/heat/salt in the open ocean interior.
+        """
+        import numpy as np
+        from legoesm.core.operators_voronoi import bilaplacian_cell_3d
+        rng = np.random.default_rng(123)
+        nlev = 3
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, nlev)))
+        bilap = bilaplacian_cell_3d(f, mesh)
+        area_weighted_sum = jnp.sum(mesh.areaCell[:, None] * bilap, axis=0)
+        scale = float(jnp.sum(mesh.areaCell)) * float(jnp.max(jnp.abs(f)))
+        # Discrete Stokes identity — tolerance scaled to area·peak magnitude.
+        assert float(jnp.max(jnp.abs(area_weighted_sum))) < 1e-10 * max(scale, 1.0)
+
+    def test_bilaplacian_quadratic_form_dissipative(self, mesh):
+        """``∫ f·∇⁴f dA = ∫ (∇²f)² dA ≥ 0`` — the key damping property.
+
+        For a closed Voronoi mesh, integration by parts yields
+        ``⟨f, bilap(f)⟩_A = ⟨lap(f), lap(f)⟩_A ≥ 0`` (for the scalar
+        Laplacian built from ``div(grad())``).  Therefore
+        ``-K_bih · bilap`` dissipates the quadratic tracer variance
+        ``⟨f, f⟩_A`` at a scale-selective rate proportional to ``k⁴`` —
+        the defining feature of scale-selective biharmonic damping.
+        """
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            bilaplacian_cell_3d, laplacian_cell_3d,
+        )
+        rng = np.random.default_rng(7)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 1)))
+        bilap = bilaplacian_cell_3d(f, mesh)
+        lap = laplacian_cell_3d(f, mesh)
+        lhs = float(jnp.sum(mesh.areaCell[:, None] * f * bilap))
+        rhs = float(jnp.sum(mesh.areaCell[:, None] * lap * lap))
+        assert lhs >= 0.0
+        # Integration-by-parts identity (closed mesh, no coastlines).
+        assert abs(lhs - rhs) < 1e-10 * max(abs(rhs), 1.0)
+
+
 # ============================================================================
 # Test: Barotropic Substeps
 # ============================================================================
