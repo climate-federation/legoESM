@@ -875,3 +875,40 @@ The `dgrid_to_cgrid` name in `operators_cdgrid.py:298` is a DIFFERENT operator u
 **Deliverable.**  `scripts/diag_iter790_dgrid_to_cgrid_fidelity.py` (fails at the shape-mismatch line, output shows error) + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  54th iter in iter-752-790 chain.  Inconclusive but CORRECTIVE: rules out `dgrid_to_cgrid` as the W2 D→C operator (it's shape-incompatible with `FV3EdgeShallowWaterState`).  Identifies `fv3_d2cc` + `fv3_cc2c` as the actual W2 D→C operators; iter-791+ should audit their cube-vertex fidelity.
+
+### Iter-791 — `fv3_cc2c` cube-vertex fidelity: peak error is near the POLE, not cube vertices
+
+Per iter-790's iter-791+ candidate "measure fv3_cc2c's cube-vertex fidelity", iter-791 feeds analytical cell-centre (u_cc, v_cc) for solid-body rotation into `fv3_cc2c` and measures the error in (u_c, v_c) against the analytical C-grid stagger values computed via the same non-orthogonality formula used inside `fv3_cc2c`.
+
+**Method** (`scripts/diag_iter791_fv3_cc2c_fidelity.py`; committed output at `diagnostics/iter791_output/iter791_fv3_cc2c_fidelity.txt`).  C36, β=π/4.  Analytical input: u_east/v_north at cell centres projected to grid-axis (u_cc, v_cc).  Expected output: u_c_exact = u_cov_at_uc * sina_u - v_cov_at_uc * cosa_u at the u_c stagger (shape (6, n+1, n)), and v_c_exact at the v_c stagger (shape (6, n, n+1)) with no non-orthogonality correction (y-edge is along e_perp).
+
+**Result.**
+
+| path    | u_c peak (rel %)      | u_c location                         | v_c peak (rel %)      | v_c location                         |
+|---------|-----------------------|--------------------------------------|-----------------------|--------------------------------------|
+| LEGACY  | 9.05e-01 m/s (2.34%)  | face 4 (18, 18), lat +88.75°, lon -180°, GC 53.86° | 3.64e+00 m/s (10.88%) | face 4 (17, 17), lat +87.21°, lon -26.55°, GC 52.09° |
+| DUOGRID | 9.05e-01 m/s (2.34%)  | face 4 (18, 18), same location       | 3.64e+00 m/s (10.88%) | face 4 (17, 17), same location       |
+
+**Observation — numerical reportage only.**  Peak |u_c - u_c_exact| is 0.90 m/s (2.3% rel) at lat=+88.75°, lon=-180° — that's on face 4 (north face) near the north pole.  Peak |v_c - v_c_exact| is 3.64 m/s (10.9% rel) at lat=+87.21°, lon=-26.55° — also on face 4 near the pole.  Both peak locations are 52–54° GC from the nearest cube vertex (which is at arcsin(1/√3) ≈ 35.26° lat), NOT adjacent to a cube vertex.  LEGACY and DUOGRID give BYTE-IDENTICAL results for this analytical-input test.
+
+**What iter-791 DOES show (observational).**
+- `fv3_cc2c`'s peak error on analytical solid-body rotation input at C36 lives near the POLE on face 4, NOT at cube vertices.
+- The LEGACY and DUOGRID halo paths give identical outputs for this particular analytical input — any difference from duogrid dispatch does not appear in `fv3_cc2c` alone on a smooth cell-centre-analytical input.
+
+**What iter-791 does NOT establish.**
+- Whether `fv3_cc2c`'s BEHAVIOUR on production W2 data (h/u_d/v_d fields that have accumulated corner-specific errors from momentum tendencies over many timesteps) shows different error localisation.  iter-791 only tests `fv3_cc2c` on smooth analytical input at t=0.
+- Whether downstream operators (momentum tendencies `cdgrid_momentum_tendencies`, KE gradient via `_arakawa_lamb_gradient`, vorticity flux) amplify small upstream errors into the W2 mode-A at cube vertices.
+- Whether the pole-region error in `fv3_cc2c` (~1–4 m/s) propagates into the pole region of the W2 field (which would be a DIFFERENT artifact than the cube-vertex mode-A).
+
+**Iter-792+ candidates.**
+- Measure the W2 field's v_north at t=0 right after ONE call to `fv3_sw_tendencies`: compare to zero to see which OPERATOR first produces a cube-vertex spike.  Options:
+  (i) `cdgrid_momentum_tendencies` (called as part of the pipeline or separately).
+  (ii) `_arakawa_lamb_gradient` on the Bernoulli function B = KE + g*(h + h_s) at D-grid corners.
+  (iii) `cgrid_mass_flux_divergence` (PPM mass transport — less likely since mass conserves).
+- Monkey-patch `fv3_cc2c` with analytical u_c / v_c injection and see if W2 v_ll_Linf changes (should not, given iter-791's pole-not-cube-vertex finding).
+- Audit the KE gradient computation — nonlinear in cell-centre winds, so small cube-vertex noise in u_cc/v_cc amplifies quadratically in KE.
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter791_fv3_cc2c_fidelity.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  55th iter in iter-752-791 chain.  Rules out `fv3_cc2c` as the direct W2 cube-vertex mode-A source: its peak error on analytical input localises near the pole, not at cube vertices.  iter-792+ should audit `_arakawa_lamb_gradient` on the Bernoulli function and `cdgrid_momentum_tendencies` for cube-vertex amplification of the quadratic KE term.

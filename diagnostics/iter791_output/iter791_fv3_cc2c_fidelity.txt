@@ -1,0 +1,24 @@
+Iter-791 `fv3_cc2c` fidelity at C36, β=π/4 solid-body rotation
+
+LEGACY (use_duogrid=False):
+  u_c peak=9.051e-01  face=4  (i,j)=(18,18)  lat=+88.75°  lon=-180.00°  GC=53.86°  rel=2.34%
+  v_c peak=3.638e+00  face=4  (i,j)=(17,17)  lat=+87.21°  lon=-26.55°  GC=52.09°  rel=10.88%
+
+DUOGRID (use_duogrid=True):
+  u_c peak=9.051e-01  face=4  (i,j)=(18,18)  lat=+88.75°  lon=-180.00°  GC=53.86°  rel=2.34%
+  v_c peak=3.638e+00  face=4  (i,j)=(17,17)  lat=+87.21°  lon=-26.55°  GC=52.09°  rel=10.88%
+
+Interpretation cues (observational only):
+- If peak |err| in u_c/v_c lives at GC ≲ 2°: fv3_cc2c has a
+  cube-vertex bug that directly feeds the W2 mode-A artifact.
+- If peak |err| is mid-face: fv3_cc2c is not the W2 mode-A
+  primary source and another operator must be audited.
+
+What iter-791 DOES measure (observational only):
+- fv3_cc2c's peak |u_c - u_c_exact| and |v_c - v_c_exact|
+  on the analytical solid-body rotation cell-centre IC.
+What it does NOT establish:
+- Whether the measured fv3_cc2c error is large enough to
+  explain v_ll_Linf ≈ 0.159 m/s on the actual W2 run.
+- Which part of fv3_cc2c (pad_halo_vector, averaging,
+  non-orthogonality correction) contributes most.
