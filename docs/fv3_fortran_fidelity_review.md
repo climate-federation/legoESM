@@ -1122,3 +1122,48 @@ This is a concrete mechanistic understanding: the A-L+RK3 pipeline achieves geos
 **Deliverable.**  `scripts/diag_iter796_w2_zeta_zero.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  60th iter in iter-752-796 chain.  Mechanistic clarification: the W2 mode-A emerges from a grid-global Cor+press+KE+zeta cancellation whose cube-vertex breakdown is the 0.159 m/s residual.  Numerical zeta is a LOAD-BEARING component of this cancellation; zeroing it makes W2 10× worse.  A Fortran-faithful fix requires either (a) porting Fortran's c_sw KE/vort construction that avoids the A-L cancellation dependency, or (b) making zeta and the gradient-of-B operators cube-vertex-consistent.
+
+### Iter-797 — Fix `diag_w2_visual.py` to use production config + accurate IC; new visual observations
+
+Per iter-796's iter-797+ candidate "Visual inspection of the current W2 v-wind at C36 — is 0.159 m/s v_ll_Linf actually VISIBLE in the snapshot, or is it below the display threshold?", iter-797 audited the `scripts/diag_w2_visual.py` harness and found two bugs that made the committed visual plots UNREPRESENTATIVE of production:
+
+1. **Config drift**: The script used `CDGridShallowWaterConfig(use_experimental_csw=use_csw, boundary_fix=True)` which defaults `div_damp=0.0`, `damp_v=0.0`, `nord_v=-1`.  The production matrix uses iter-761 canonical: `div_damp=8*_div_damp_cube(n)`, `damp_v=0.06`, `nord_v=2`.
+2. **IC construction inaccuracy**: The script built u_d, v_d by rotating cell-centre (u_east, v_north) to grid axes, padding, and averaging to edges — a cell-centre-mediated approximation.  The production sentinel uses the analytical formulas `u_d = cos_angle_edge_x * u0 * cos(lat_edge_x)` and `v_d = -sin_angle_edge_y * u0 * cos(lat_edge_y)` directly at edge positions (accurate to machine precision).
+3. **dt mismatch**: The script used dt=600s, 144 steps; production uses dt=300s, 288 steps.
+
+**Fix.**  Updated `diag_w2_visual.py` to use the iter-761 canonical config, match the production IC construction, and match dt=300s.  Regenerated all plots (`w2_vnorth_production.png`, `w2_herr_production.png`, `w2_herr_csw_dg.png`, `w2_vnorth_csw_dg.png`, `w2_herr_improvement.png`).
+
+**Before vs after.**
+
+| metric                     | before fix     | after fix    |
+|----------------------------|----------------|--------------|
+| C24 day 1 h_err max        | 225 m          | 5 m          |
+| C24 day 1 v_north max      | 57.2 m/s       | 0.6 m/s      |
+
+The prior plots were displaying a mis-configured run, not production.  The new plots reflect the actual production state at C24.
+
+**New visual observations on the corrected plots.**
+- **v_north**: colour scale ~±0.6 m/s.  Equatorial faces (0, 1, 2, 3) show subtle edge striping near cube vertices (the mode-A we've characterised).  Polar faces (4, 5) show a distinct X-shaped pattern at the pole where face-local coordinates become singular — this is a pole-coordinate artifact, NOT a cube-vertex one.
+- **h_err**: colour scale ~±4 m.  Equatorial faces show a clear 2dx CHECKERBOARD pattern in the interior — a grid-scale mode that the iter-761 config does not fully damp.  Cube-vertex-adjacent cells have stronger checkerboard + edge striping.  Polar faces show edge-striping along cube-vertex rows.
+
+**The 2dx checkerboard in h_err is a NEW visible artifact that earlier iterations did not surface.**  It was masked in the prior plot by the much larger ±225 m scaling.  At C24 with iter-761 config, this grid-scale h noise exists at ~1-2 m amplitude in the interior.  It is likely driven by insufficient dissipation of 2dx modes in the PPM mass transport or the boundary_fix smoothing pattern.
+
+**What iter-797 DOES show.**
+- The committed production W2 visual was a mis-configured run, not production state.  After fix, C24 v_north max drops from 57 to 0.6 m/s.
+- The REAL production W2 visual artifacts at C24 are: (i) mild cube-vertex edge striping in v_north (~0.5 m/s), (ii) pole-coordinate X-pattern in v_north at the geographic pole (~0.5 m/s), (iii) 2dx checkerboard in h_err interior (~1-2 m).
+- The W2 mode-A at 0.159 m/s v_ll_Linf (C36) or equivalent at C24 IS visible but mild.
+
+**What iter-797 does NOT establish.**
+- Whether the 2dx h checkerboard is always present or specific to C24.  Should check C36 / C48 plots to see resolution scaling.
+- The origin of the h checkerboard: PPM transport, boundary_fix cascaded smoothing, or aliasing from the Arakawa-Lamb operator.
+- Whether the pole X-pattern is related to the cube-vertex mode-A or a distinct pole-singularity artifact.
+
+**Iter-798+ candidates.**
+- Regenerate visual plots at C36 and C48 (matching the production grid) — document the artifact scaling.
+- Investigate the 2dx h checkerboard origin (is it from PPM transport's inherent 2dx null mode, or from the boundary_fix cascaded smoothing pattern?).
+- Audit the pole-coordinate X-pattern on faces 4, 5 — document as known pole artifact vs investigate if it's tied to mode-A.
+- Port Fortran FB transport chain (blocked on ng=3 and FB-chain stability).
+
+**Deliverable.**  Updated `scripts/diag_w2_visual.py` + regenerated PNG plots in `diagnostics/fv3_visual/`.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  61st iter in iter-752-797 chain.  Fixes the W2 visual diagnostic to accurately reflect production behaviour.  Surfaces 3 distinct visible artifacts previously masked by the misconfig: cube-vertex v_north edge striping (the mode-A we've been tracking), pole-coordinate X-pattern, and interior 2dx h checkerboard.  The checkerboard is a new observation and should be investigated in iter-798+.

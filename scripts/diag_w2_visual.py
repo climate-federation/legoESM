@@ -25,25 +25,46 @@ OUT = os.path.join(os.path.dirname(__file__), '..', 'diagnostics', 'fv3_visual')
 os.makedirs(OUT, exist_ok=True)
 
 N = 24
-DT = 600.0
+# Iter-797: match the production matrix dt (run_atmosphere_test_matrix.py
+# line 1177) which uses dt=300s for W2/W5.  dt=600s (prior value) with
+# the iter-761 canonical config was numerically unstable at C24.
+DT = 300.0
 G = constants.g
-NSTEPS = 144
+NSTEPS = int(86400 / DT)  # 1 day
 
-def make_state(grid):
+def make_state(grid, cdgrid):
+    # Iter-797: use the SAME IC construction as the production W2
+    # sentinel (tests/unit/test_cdgrid_fv3_regression.py:3930-3934)
+    # so the visual plot is representative of production behaviour.
+    # u_d, v_d at edge midpoints using analytical cos_angle_edge_*
+    # and lat_edge_* is accurate to machine precision, unlike the
+    # cell-centre-rotate-then-pad-average approach used before.
     u0 = 2*jnp.pi*grid.radius/(12*86400)
     h0 = 2.94e4/G
     omega = 7.292e-5
     h = h0 - (1/G)*(grid.radius*omega*u0 + 0.5*u0**2)*grid.sin_lat**2
-    u_east = u0*grid.cos_lat
-    v_north = jnp.zeros_like(u_east)
-    u_grid, v_grid = rotate_winds_geo_to_grid(u_east, v_north, grid.angle)
-    u_pad = pad_halo(u_grid); v_pad = pad_halo(v_grid)
-    u_d = 0.5*(u_pad[:,1:-1,:-1]+u_pad[:,1:-1,1:])
-    v_d = 0.5*(v_pad[:,:-1,1:-1]+v_pad[:,1:,1:-1])
+    u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+    v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
     return FV3EdgeShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=jnp.zeros_like(h)), h
 
-def run_sim(grid, cdgrid, state0, use_csw):
-    config = CDGridShallowWaterConfig(use_experimental_csw=use_csw, boundary_fix=True)
+def _div_damp_cube(n, ref_n=48, ref_coeff=1.5e7):
+    return ref_coeff * (ref_n / n) ** 2
+
+
+def run_sim(grid, cdgrid, state0, use_csw, n=N):
+    # Iter-797: match the iter-761 canonical matrix config
+    # (run_atmosphere_test_matrix.py:1197-1202) that the production
+    # W2 sentinel uses, so the visual plot reflects the PRODUCTION
+    # state, not the default-config state that has much worse
+    # artifacts.  iter-761: hyperdiff=0, div_damp=8*base, damp_v=0.06,
+    # nord_v=2, boundary_fix=True.
+    config = CDGridShallowWaterConfig(
+        use_experimental_csw=use_csw,
+        hyperdiff_coeff=0.0,
+        div_damp=8.0 * _div_damp_cube(n),
+        boundary_fix=True,
+        damp_v=0.06,
+        nord_v=2)
     model = FV3EdgeShallowWaterModel(grid, config)
     model.set_initial_mass(state0)
     state = state0
@@ -81,7 +102,7 @@ print(f"=== W2 Visual Diagnostic at C{N}, 1 day ===")
 # Production (no duogrid)
 grid_p = create_cubed_sphere(N)
 cdgrid_p = create_cubed_sphere_cdgrid(grid_p)
-state0_p, h0_p = make_state(grid_p)
+state0_p, h0_p = make_state(grid_p, cdgrid_p)
 state_p = run_sim(grid_p, cdgrid_p, state0_p, use_csw=False)
 
 h_err_p = np.asarray(state_p.h - h0_p)
@@ -93,7 +114,7 @@ vn_p = np.asarray(vn_p)
 # csw+duogrid
 grid_d = create_cubed_sphere(N, use_duogrid=True)
 cdgrid_d = create_cubed_sphere_cdgrid(grid_d)
-state0_d, h0_d = make_state(grid_d)
+state0_d, h0_d = make_state(grid_d, cdgrid_d)
 state_d = run_sim(grid_d, cdgrid_d, state0_d, use_csw=True)
 
 h_err_d = np.asarray(state_d.h - h0_d)
