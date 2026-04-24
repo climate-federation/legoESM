@@ -1234,3 +1234,33 @@ Per iter-824's structural conclusion, iter-825 re-tests all combinations of the 
 **Deliverable.**  `scripts/diag_iter825_combined_fortran_fills.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  87th iter in iter-752-825 chain.  Re-tests the known Fortran-corner-fill flags under the iter-808 fix.  All 4 non-baseline combinations still worsen W2; baseline optimum preserved.  This closes the "flags-alone can fix W2 mode-A" hypothesis.
+
+### Iter-827 — Sentinel-coverage audit for iter-808 sign-flip fix
+
+Sentinel coverage verification: `_FLUX_SIGN_FLIP_EDGES` (the sign-flip table in `src/legoesm/grids/halo.py:1927`) is pinned by 3 tests in `tests/unit/test_duogrid.py::TestSynchronizeCgridFluxes`:
+
+1. **`test_post_sync_all_12_edges_agree`** (line 655): imports `_FLUX_SIGN_FLIP_EDGES` and asserts post-sync boundary invariant — at sign-flip seams, `|local + nbr_rotated| < 1e−12`; elsewhere, `|local − nbr_rotated| < 1e−12`.  Regresses if the sign-flip is removed.
+2. **`test_sync_is_exact_average_at_every_seam`** (line 720): computes expected `0.5*(local ± nbr_rotated)` with the sign determined by table membership.  Bit-identical match required.  Regresses if the sign-flip logic is altered.
+3. **`test_sync_hardcoded_oracle_all_12_seams`** (line 760): contains 4 hardcoded oracle values for the sign-flip seams `(f1 N, f3 S, f2 N, f2 S)` using `0.5*(a − b)` instead of `0.5*(a + b)`.  Regresses if any sign-flip seam's sign convention is changed.
+
+Additionally, full W2BoundaryErrorBudget sentinel suite passes (14/14) as of this iter confirming no silent regressions from iter-808 through iter-825:
+- `test_w2_alpha0_c36_1day_iter761_matrix_config` pins `L2 < 4.0e−4` (current: ~2.18e−4).
+- `test_w2_alpha0_c36_1day_canonical_l2_post_iter505` pins `L2 < 5e−3` (very loose canonical cap).
+- `test_w2_v_wind_imprint_below_iter505_canonical_ceiling` pins `v_ll_Linf < 0.35 m/s` (current 0.159).
+- iter-768 two-point measurement, iter-775 W5 cross-test, iter-778/779 cosine bell, iter-780 CB error location — all content-pinned and still passing.
+
+**What iter-827 DOES show.**
+- iter-808's sign-flip fix is properly sentinel-locked.  A silent revert would fail 3 tests in `TestSynchronizeCgridFluxes`.
+- All 14 `TestW2BoundaryErrorBudget` sentinels pass after the session's iter-781b through iter-825 work — no silent regressions.
+- The production W2 path (LEGACY, iter-761 canonical) remains at L2=2.18e−4, v_ll_Linf=0.159 m/s.
+
+**What iter-827 does NOT establish.**
+- Whether the `_FLUX_SIGN_FLIP_EDGES` entries are comprehensively correct for all future test cases beyond W2 solid-body rotation, W5 mountain, and cosine bell.  iter-809/810 cross-validated at C36.
+
+**Iter-828+ candidates.**
+- Architectural fix paths (FB chain port, c_sw KE upwind, d_sw5 corner damping) remain the only known routes to reduce W2 mode-A below 0.159 m/s.
+- No remaining tractable observational diagnostics within the existing A-L+RK3 production path.
+
+**Deliverable.**  Doc-only audit confirming sentinel coverage.  No source-code change.  No new sentinel.
+
+**Process.**  88th iter in iter-752-827 chain.  Confirms iter-808's fix is durably locked by 3 helper tests in `test_duogrid.py` plus the broader `TestW2BoundaryErrorBudget` suite (14/14 pass).  Session-total production fix (iter-808) is protected against silent regression.
