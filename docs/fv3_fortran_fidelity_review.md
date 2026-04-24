@@ -912,3 +912,44 @@ Per iter-790's iter-791+ candidate "measure fv3_cc2c's cube-vertex fidelity", it
 **Deliverable.**  `scripts/diag_iter791_fv3_cc2c_fidelity.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  55th iter in iter-752-791 chain.  Rules out `fv3_cc2c` as the direct W2 cube-vertex mode-A source: its peak error on analytical input localises near the pole, not at cube vertices.  iter-792+ should audit `_arakawa_lamb_gradient` on the Bernoulli function and `cdgrid_momentum_tendencies` for cube-vertex amplification of the quadratic KE term.
+
+### Iter-792 — W2 t=0 tendency audit: dv/dt peak is AT a cube vertex (smoking gun for W2 mode-A)
+
+Per iter-791's iter-792+ candidate "measure t=0 tendency of v_d right after ONE fv3_sw_tendencies call on W2 IC; locate the operator that first produces a cube-vertex spike", iter-792 calls `fv3_sw_tendencies` once at t=0 on the exact W2 solid-body rotation IC and reports the peak tendency magnitudes and locations.  For steady-state W2, analytical tendencies are ALL ZERO, so any non-zero numerical tendency is error.
+
+**Method** (`scripts/diag_iter792_w2_t0_tendency_audit.py`; committed output at `diagnostics/iter792_output/iter792_w2_t0_tendency_audit.txt`).  C36, β=0 (polar-axis rotation), iter-761 canonical config.  Apply `fv3_sw_tendencies` once, report peak |dh/dt|, |du/dt|, |dv/dt| with location + GC-to-vertex + hot-cell (|tend| > 0.5*peak) cube-vertex / pole proximity counts.
+
+**Result.**
+
+| field | peak           | face, (i, j)    | lat       | lon       | GC-to-vertex | hot | near_vertex (GC<10°) | near_pole (|lat|>80°) |
+|-------|----------------|------------------|-----------|-----------|--------------|-----|----------------------|-----------------------|
+| dh/dt | 1.329e-04 m/s  | face 4 (18, 0)  | +46.24°   | +1.31°    | 34.38°       | 216 | 40 (18.5%)          | 0                     |
+| du/dt | 1.404e-05 m/s² | face 4 (0, 25)  | +44.77°   | −108.23°  | 22.46°       | 100 | 8 (8.0%)            | 0                     |
+| dv/dt | **1.903e-05 m/s²** | **face 0 (2, 34)** | **+33.90°** | **−40.00°** | **4.34°**    | **328** | **136 (41.5%)**     | **0**                 |
+
+**Observation — numerical reportage only.**  The v-wind tendency dv/dt at t=0 peaks at (face 0, i=2, j=34) with lat=+33.90°, lon=−40.00°, which is 4.34° GC from the nearest cube vertex at (+arcsin(1/√3)≈+35.26°, −45°).  41.5% (136 of 328) of hot cells (|dv/dt| > 0.5 × peak) are within 10° GC of a cube vertex — the strongest cube-vertex concentration among the three tendency fields.  dh/dt and du/dt have weaker cube-vertex concentration (18.5% / 8.0%) and peak farther from vertices (34° / 22°).
+
+**Crude accumulation estimate.**  If dv/dt = 1.9e-5 m/s² held constant, integrated over 1 day (86400 s), Δv = 1.64 m/s.  The observed W2 v_ll_Linf is 0.159 m/s — about 10% of the raw accumulation.  The factor-10 reduction is consistent with the damp_v=0.06 vorticity damping providing partial suppression of the accumulating mode-A.
+
+**What iter-792 DOES show.**
+- The W2 mode-A artifact at v_ll_Linf = 0.159 m/s has a CONCRETE t=0 origin: dv/dt peaks at 4.34° GC from a cube vertex on face 0, with 41.5% of hot cells near cube vertices.
+- The v-tendency operator is more cube-vertex-localised than the h- or u-tendency operators.
+- The artifact magnitude is quantitatively consistent with accumulating the t=0 tendency over 1 day with partial damping by damp_v.
+
+**What iter-792 does NOT establish.**
+- Which SPECIFIC operator INSIDE `fv3_sw_tendencies` produces the dv/dt cube-vertex peak.  Candidates:
+  (i) `_arakawa_lamb_gradient(B, ...)` with B = KE + g*(h+h_s) at D-grid corners (nonlinear in u_cc/v_cc).
+  (ii) Corner winds from halo-exchanged cell-centre velocities (line 1607).
+  (iii) Vorticity transport (Coriolis × u_d cross-product).
+  (iv) Divergence damping (div_damp = 8 × _div_damp_cube(n)).
+- Whether a Fortran-faithful fix to any ONE of those sub-operators would reduce dv/dt at cube vertices and propagate to a W2 v_ll_Linf reduction.
+
+**Iter-793+ candidates.**
+- Decompose dv/dt into contributions from each term of `fv3_sw_tendencies` (lines 1601-1700-ish): gradient-of-B, Coriolis-u_d, vorticity transport, divergence damping.  Report each term's peak and cube-vertex concentration.
+- Toggle `fortran_dir_aware_corners`, `fortran_a2b_corner_avg`, `fortran_vector_corner_fill` individually and measure dv/dt cube-vertex peak change.
+- Audit `_arakawa_lamb_gradient`'s halo handling vs Fortran `sw_core.F90:3856-3915`.
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter792_w2_t0_tendency_audit.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  56th iter in iter-752-792 chain.  Major mechanistic finding: dv/dt at t=0 for W2 solid-body rotation has a cube-vertex peak (GC=4.34°) with 41.5% hot-cell cube-vertex concentration.  Magnitude (1.9e-5 m/s²) is quantitatively consistent with the observed 0.159 m/s v_ll_Linf after 1 day with partial damping.  iter-793+ should decompose the v-tendency terms to identify which operator produces the cube-vertex signal.
