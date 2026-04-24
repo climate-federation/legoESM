@@ -1000,3 +1000,42 @@ Per iter-792's iter-793+ candidate "decompose dv/dt into contributions from each
 **Deliverable.**  `scripts/diag_iter793_w2_dv_decomposition.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  57th iter in iter-752-793 chain.  Mechanistic decomposition: W2 cube-vertex mode-A is INCOMPLETE cancellation between Coriolis, pressure gradient, and KE gradient at cube vertices (with 37% additional contribution from div damping).  No single operator is individually "broken"; the issue is halo-interpolation inconsistency between the three gradient terms.  iter-794+ should either unblock the FB chain (ng=3) or audit cross-term halo consistency at cube vertices.
+
+### Iter-794 — W2 LEGACY div_damp sweep: damping SUPPRESSES mode-A, doesn't amplify it
+
+Per iter-793's iter-794+ candidate, iter-794 sweeps `div_damp` on the LEGACY path to measure v_ll_Linf sensitivity.  iter-793 showed `dv div-damp` contributes ~37% of the cube-vertex residual at t=0; iter-794 tests whether this carries through to the 1-day v_ll_Linf.
+
+**Method** (`scripts/diag_iter794_w2_divdamp_sweep.py`; committed output at `diagnostics/iter794_output/iter794_w2_divdamp_sweep.txt`).  C36, 24h, dt=300s, iter-761 config but varying div_damp ∈ {0, 1×, 4×, 8×, 16×} × `_div_damp_cube(n)`.
+
+**Result.**
+
+| div_damp      | L2          | v_ll_Linf   | v_cc_Linf   | Δ vs 8× (iter-761)     |
+|---------------|-------------|-------------|-------------|------------------------|
+| 0 (none)      | 3.438e-04   | 2.337e-01   | 2.707e-01   | L2 +58%, v_ll +47%     |
+| 1× base       | 3.092e-04   | 2.139e-01   | 2.447e-01   | L2 +42%, v_ll +35%     |
+| 4× base       | 2.506e-04   | 1.757e-01   | 2.069e-01   | L2 +15%, v_ll +11%     |
+| 8× (iter-761) | 2.176e-04   | 1.585e-01   | 1.879e-01   | —                      |
+| 16× base      | NaN         | NaN         | NaN         | blow-up (unstable)      |
+
+**Observation — numerical reportage only.**  v_ll_Linf DECREASES monotonically with INCREASING div_damp (from 0.234 m/s at div_damp=0 to 0.159 m/s at 8×).  L2 also decreases.  16× blows up to NaN (too much damping destabilises).  iter-761's 8× is indeed near the sweet spot — both L2 and v_ll_Linf are minimised at 8×, with L2 degrading 15% / v_ll_Linf degrading 11% at 4×, and both degrading ~50% at div_damp=0.
+
+**Reconciliation with iter-793.**  Iter-793 reported `dv div-damp` contributes +37% to the t=0 cube-vertex residual.  Iter-794 shows div_damp REDUCES the 1-day v_ll_Linf by ~47%.  These are CONSISTENT: div_damp at t=0 has a non-zero cube-vertex signal (a TRANSIENT amplification), but over many timesteps its DISSIPATIVE nature dominates — damping out the cube-vertex mode-A faster than it accumulates.  iter-793's t=0 snapshot over-emphasised div_damp's role; the time-integrated behaviour is NET suppression.
+
+**What iter-794 DOES show.**
+- iter-761's 8× div_damp scaling is near-optimal for W2 at C36.  No improvement from smaller or larger values within stability.
+- div_damp is NET STABILISING: more damping → smaller artifact, until 16× destabilises.
+- The residual W2 mode-A at 0.159 m/s cannot be meaningfully reduced by tuning div_damp alone.
+
+**What iter-794 does NOT establish.**
+- Whether a DIFFERENT stabiliser (e.g. del-4 vorticity damping, a different Smag cap) would further reduce mode-A without the 16× blow-up.
+- Whether the 8× sweet spot at C36 is also optimal at C48/C72.
+- Whether reducing mode-A below 0.159 m/s requires structural operator changes (FB chain port, consistent cross-term halo fills), not config tuning.
+
+**Iter-795+ candidates.**
+- Probe the cube-vertex cancellation hypothesis directly: compute B at cube-vertex halo cells from HALO'd (u_cc, v_cc, h, h_s) components rather than halo'ing the combined B as a scalar.  If this changes the cube-vertex residual in the predicted direction, implement a Fortran-faithful halo ordering for B.
+- Audit Fortran `c_sw` KE construction (sw_core.F90:295-370) — uses `ua*ke + va*vort` with upwind sin_sg blending at face boundaries.  This is NOT the same as our cell-centre `0.5*(u² + v²)` + A-L gradient.  A direct port of Fortran's c_sw KE term would change the KE-gradient semantics.
+- Investigate whether the DUOGRID path in `fv3_sw_tendencies` (iter-787 blowup) has a different cross-term halo convention that could be backported to LEGACY without the blowup.
+
+**Deliverable.**  `scripts/diag_iter794_w2_divdamp_sweep.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  58th iter in iter-752-794 chain.  Confirms iter-761's 8× div_damp is near-optimal for W2 at C36; the residual 0.159 m/s mode-A cannot be reduced by div_damp tuning alone.  Further improvement requires structural cross-term halo consistency (iter-795+) or the FB chain port.
