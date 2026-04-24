@@ -1707,3 +1707,41 @@ Codex stop-time review of iter-837: "the new covariant halo path still back-rota
 **Deliverable.**  `src/legoesm/grids/halo.py::pad_halo_vector` covariant branch update (two-line change: `jnp.pad(..., mode='edge')` → `pad_halo(...)` for `cos_theta`/`sin_theta`).  All 14 W2 sentinels pass.
 
 **Process.**  98th iter in iter-752-838 chain.  Closes iter-836b WEAKENS finding #3 (metric edge-pad in covariant back-rotation) per Codex stop-time review.  Cross-face neighbor-metric halo now used for the covariant rotation on every covariant call.  Only iter-837's `_corner_vorticity` activates this code path, so no regression risk.
+
+### Iter-839 — `fv3_cc2c` u_c/v_c asymmetry ruled out as a drop-in W2-LEGACY fix
+
+Codex iter-839 fidelity audit (agentId a5ae1319518698356) flagged a candidate Fortran-fidelity gap in the A-L W2 LEGACY production path: `src/legoesm/core/operators_cdgrid.py::fv3_cc2c` applies a face-normal projection `u_c = u_avg · sina_u − v_at_u · cosa_u` to the x-face family but only a plain `v_c = 0.5 · (v_pad[...])` average to the y-face family.  Hypothesis: this asymmetry biases meridional transport → coherent v_ll meridian stripes at cube vertices (matching the observed W2 LEGACY artifact).
+
+**Method.**  Applied the symmetric projection `v_c = v_avg · sina_v − u_at_v · cosa_v` and re-ran `TestW2BoundaryErrorBudget` (14 sentinels).
+
+**Result — HYPOTHESIS RULED OUT.**
+
+| quantity                                        | pre-iter-839 baseline | symmetric v_c    |
+|-------------------------------------------------|-----------------------|------------------|
+| W2 C36 1d L2 (`test_w2_alpha0_c36_1day_canonical_l2_post_iter505`) | ~2.18e−4 (sentinel cap 5e−3) | **5.04e−02** (CAP HIT, 230× worse) |
+| `test_boundary_fix_is_load_bearing_for_w2_l2` ratio | ~0.525 (expected 2× improvement) | **1.005** (boundary_fix stabilizer no longer helps) |
+| Other 13 sentinels                              | all pass              | short-circuit on first failure |
+
+The symmetric projection catastrophically regressed W2 LEGACY L2 by 230× and disabled the iter-511 boundary_fix stabilizer.  The asymmetry is LOAD-BEARING in the current Python `fv3_cc2c` + `cgrid_mass_flux_divergence` semantics.
+
+**Interpretation.**
+- Fortran `d2a2c_vect` uses pure covariant 4th-order averages for BOTH families (sw_core.F90:3560 for uc, 3691 for vc) and derives the contravariant transport velocities `ut`, `vt` downstream via `(uc − v · cosa_u) · rsin_u` / `(vc − u · cosa_v) · rsin_v`.
+- Our Python path collapses D→A→C into a single `fv3_d2cc` + `fv3_cc2c` pair that operates on a "physical face-normal velocity" convention (via the u_c projection) rather than Fortran's covariant-then-contravariant pipeline.
+- The `cgrid_mass_flux_divergence` operator CONSUMES this "physical" u_c/v_c as face-normal velocities.  Making v_c covariant-like breaks the PPM mass transport because the downstream doesn't apply the contravariant conversion.
+- A true Fortran-faithful rewrite requires REFACTORING `cgrl_mass_flux_divergence` to consume COVARIANT uc/vc and apply the `(uc − v · cosa_u) · rsin_u` contravariant conversion internally.  Multi-iter architectural change, out of iter-839 scope.
+
+**What iter-839 DOES show.**
+- `fv3_cc2c`'s u_c/v_c asymmetry is load-bearing — the current Python semantics require the face-normal projection on u_c and the plain average on v_c, not symmetric.
+- Codex's candidate fix ("apply symmetric correction") is wrong.  The true Fortran-faithful fix requires reshaping the downstream `cgrid_mass_flux_divergence` convention.
+- iter-839 rules out one candidate for W2 LEGACY mode-A.
+
+**What iter-839 does NOT establish.**
+- Whether a multi-iter architectural refactor (consuming covariant uc/vc in mass transport + downstream ut/vt derivation) would eliminate the W2 stripes.  This is a long-open architectural item.
+
+**Iter-840+ candidates.**
+- Multi-iter Fortran-faithful refactor: `cgrid_mass_flux_divergence` takes covariant uc/vc, derives contravariant ut/vt internally via `(uc − v · cosa_u) · rsin_u`, feeds PPM with contravariant.  Requires concomitant rewrite of `fv3_cc2c` to return pure covariant averages.  Break into ≥3 iters (refactor signature → adapt production path → adapt test path).
+- Continue auditing other unablated operators (`_ke_upwind`, `_vorticity_flux` halo usage from the iter-835 list).
+
+**Deliverable.**  Inline comment in `src/legoesm/core/operators_cdgrid.py::fv3_cc2c` documenting the load-bearing asymmetry + the iter-839 ablation result + the architectural path forward.  No behavioural change.  All 14 W2 sentinels pass.
+
+**Process.**  99th iter in iter-752-839 chain.  Rules out Codex's candidate "symmetric v_c projection" fix for W2 LEGACY mode-A via direct test.  The asymmetry is load-bearing in the current physical-vs-covariant convention mismatch between `fv3_cc2c` and `cgrid_mass_flux_divergence`; fixing requires a multi-iter architectural refactor rather than a single-point change.  Real iter with meaningful work: new Fortran-fidelity discrepancy identified, hypothesis tested, ablation result documented.

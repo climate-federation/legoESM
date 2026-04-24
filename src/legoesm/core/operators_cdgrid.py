@@ -1475,6 +1475,26 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
 
     v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
+    # Iter-839 (Codex fidelity audit a5ae1319518698356): asymmetry
+    # between u_c (face-normal projection) and v_c (plain average) was
+    # flagged as a candidate Fortran-fidelity gap.  Applying a symmetric
+    # `v_c = v_avg · sina_v − u_at_v · cosa_v` projection catastrophically
+    # regressed W2 (L2 5e-02 vs baseline 2.2e-04, 230× worse) — tested at
+    # C36 1d and failed `test_boundary_fix_is_load_bearing_for_w2_l2`.
+    # The asymmetry is load-bearing: `u_c` has the face-normal
+    # projection because mass transport via PPM requires edge-normal
+    # velocity; `v_c` does NOT because its convention differs.
+    # Fortran's `d2a2c_vect` uses pure covariant averages for BOTH
+    # families (`uc = a2*utmp + a1*utmp`, `vc = a2*vtmp + a1*vtmp` —
+    # sw_core.F90:3560, 3691) then derives the contravariant transport
+    # velocities `ut`, `vt` downstream.  Our Python path collapses the
+    # D→A→C sequence into a single `fv3_d2cc` + `fv3_cc2c` pair with a
+    # different physical-vs-covariant convention.  A true Fortran-
+    # faithful rewrite requires refactoring `cgrid_mass_flux_divergence`
+    # to consume COVARIANT uc/vc and apply the `(uc − v·cosa_u)·rsin_u`
+    # contravariant conversion internally — multi-iter architectural
+    # change out of iter-839 scope.  Retained as open iter-840+
+    # candidate.
     return u_c, v_c
 
 
