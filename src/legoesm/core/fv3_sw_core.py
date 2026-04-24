@@ -1190,12 +1190,21 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
         vc_cc = 0.5 * (vc[:, :, :-1] + vc[:, :, 1:])   # (6, n, n)
         grid = cdgrid.base
         dg = grid.duogrid
+        # iter-837 (Codex fidelity fix): uc/vc are FV3 COVARIANT winds
+        # (velocity dotted with face basis vectors), NOT grid-aligned
+        # physical velocity.  Activate `pad_halo_vector`'s covariant
+        # branch by passing `cos_theta`/`sin_theta` (the cell-centre
+        # non-orthogonality metrics).  Without these, the default path
+        # rotates as if the inputs were grid-aligned — the wrong
+        # quantity per Codex WEAKENS finding iter-836b.
         uc_cc_pad, vc_cc_pad = _phv(
             uc_cc, vc_cc,
             grid.cos_angle, grid.sin_angle,
             grid.cos_angle_padded, grid.sin_angle_padded,
             interp_offsets=None, duogrid=dg, halo=1,
-        )  # (6, n+2, n+2) each — cross-face rotation-aware
+            cos_theta=cdgrid.cosa_cell,
+            sin_theta=cdgrid.sina_cell,
+        )  # (6, n+2, n+2) each — covariant-aware cross-face rotation
         # Extract HALO rows only and reconstruct face-staggered values.
         # uc_cc_pad[:, :, 0]   = uc_cc at j_cell = −1 (south halo)
         # uc_cc_pad[:, :, n+1] = uc_cc at j_cell =  n (north halo)

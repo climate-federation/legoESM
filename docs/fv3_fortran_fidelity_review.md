@@ -1627,3 +1627,44 @@ Residual O(dx²) approximation (cell-centre averaging vs Fortran's direct 4th-or
 **Deliverable.**  `scripts/diag_iter836_corner_vort_halo.py` + committed output.  `src/legoesm/core/fv3_sw_core.py::_corner_vorticity` duogrid branch rewritten (iter-836 initial + iter-836b interior-preserving refactor); non-duogrid branch unchanged.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  96th iter in iter-752-836 chain.  First Fortran-fidelity CODE FIX since iter-808's sign-flip sync.  Closes a concrete 49 % halo rotation error in `_corner_vorticity`'s duogrid branch at cube-vertex corners.  Codex adversarial review caught and corrected an interior-smoothing bug in the iter-836a initial attempt (iter-836b preserves interior exactly).  FB C24 12h baseline essentially unchanged (+0.09 %), consistent with iter-835's finding that no single operator dominates FB h-growth.
+
+### Iter-837 — Covariant-aware rotation in `_corner_vorticity` halo
+
+Codex stop-time review of iter-836b: "iter-836b's duogrid halo fix still rotates the wrong quantity."  FV3 `uc`/`vc` are COVARIANT winds (`V · x_hat`, `V · y_hat` with face basis vectors), NOT grid-aligned physical velocity.  Plain `pad_halo_vector` (iter-836b call) used the default orthogonal rotation `u_east = cos_angle * u - sin_angle * v`, which is the rotation for grid-aligned inputs — the wrong quantity on a non-orthogonal cubed-sphere face.
+
+**Oracle** (Codex a63dd772d3033588f).  Fortran `ext_vector` in `tools/fv_duogrid.F90:626-975` (CGRID branch): `mpp_update_domains(CGRID_NE)` → `c2l_ord2_cgrid` (metric-weighted `u1/v1` via `a11..a22` coefficients that carry the `1/sin_sg` geometry) → halo-exchange lat/lon winds as scalars → `cubed_a2c_halo` (`2590-2668`) projects back to covariant `uc/vc`.  The metric-weighted step is the covariant→grid-geographic conversion that's missing in a plain grid-aligned rotation.
+
+**Fix (Option D in Codex's ranked list).**  `pad_halo_vector`'s own covariant branch (`src/legoesm/grids/halo.py:1642-1648, 1699-1706`) activates when `cos_theta`/`sin_theta` are passed — it applies the non-orthogonal rotation `u_east = ca * u + sa * (u * ct − v) / st`, `v_north = sa * u + ca * (v − u * ct) / st`, which IS the covariant projection on a non-orthogonal grid.  Patch: pass `cdgrid.cosa_cell`/`cdgrid.sina_cell` (the cell-centre non-orthogonality metrics, = `cos_sg[:, :, :, 4]` / `sin_sg[:, :, :, 4]`) as the `cos_theta`/`sin_theta` args.  Two-argument addition at `src/legoesm/core/fv3_sw_core.py::_corner_vorticity`.
+
+**Post-iter-837 result (same W2 IC, C24, duogrid).**
+
+| quantity                                 | pre-iter-836 (edge) | iter-836b (grid-aligned rot) | iter-837 (covariant rot) |
+|------------------------------------------|--------------------:|------------------------------:|-------------------------:|
+| peak |Δ| vs mode='edge'                  | baseline (0)        | 49.4 %                        | **57.2 %**                |
+| panel-edge peak location GC-to-vertex    | n/a                 | 0.0°                          | 3.5°                     |
+| interior corners delta                    | 0                   | 0                             | 0                        |
+| W2 sentinels (14)                         | 14/14               | 14/14                         | 14/14                    |
+| FB DUOGRID C24 W2 12h h_max               | 10765               | 10775                         | 10779                    |
+| FB Δ vs pre-iter-836                      | 0                   | +0.09 %                       | +0.13 %                  |
+
+**Observation — numerical reportage only.**
+- The covariant-aware rotation moves the halo values 57.2 %-of-interior-scale away from the original mode='edge' (vs 49.4 % for grid-aligned rotation).  The extra 7.8 pp is the covariant-vs-grid-aligned correction magnitude at cube-vertex corners.
+- Peak location shifted from exactly at a cube vertex (0.0° in iter-836b) to 3.5° off-vertex — a 1-cell stencil shift consistent with the non-orthogonal rotation using cell-centre metrics.
+- FB h_max change is still noise-level (+0.04 pp over iter-836b, +0.13 pp over pre-iter-836).
+
+**What iter-837 DOES show.**
+- `_corner_vorticity`'s duogrid halo is now Fortran-faithful in BOTH cross-face rotation (iter-836) AND covariant-conversion convention (iter-837).
+- The extra covariant correction is real (7.8 pp) and localised to the cube-vertex panel-edge ring.
+- FB h_max is not the main beneficiary — consistent with iter-835's finding that no single piece of `_c_sw` dominates.
+
+**What iter-837 does NOT establish.**
+- Whether `cdgrid.cosa_cell`/`sina_cell` (cell-centre `cos_sg/sin_sg[..., 4]`) is the EXACT metric that Fortran's `c2l_ord2_cgrid`→`cubed_a2c_halo` applies; Fortran uses `a11..a22` lat-lon projection coefficients (`fv_duogrid.F90:2765-2830`) which mix `sin_sg` from the 4 edges.  Our `cos_sg[..., 4]`/`sin_sg[..., 4]` is the cell-centre non-orthogonality angle, a simpler approximation.  O(dx²) agreement expected.
+- Whether the cell-centre-averaging approximation in `(uc, vc) → (uc_cc, vc_cc)` is sufficient for longer horizons (unchanged from iter-836b caveats).
+
+**Iter-838+ candidates.**
+- Direct 2D-halo `utmp_full`/`vtmp_full` + halo-extended `uc`/`vc` from `_d2a2c_vect_duogrid` (higher-fidelity than cell-centre averaging).
+- Audit `_ke_upwind` / `_vorticity_flux` halo usage (next in the iter-835 unablated-operators list).
+
+**Deliverable.**  Two-argument addition to `src/legoesm/core/fv3_sw_core.py::_corner_vorticity`.  `scripts/diag_iter836_corner_vort_halo.py` unchanged.  All 14 W2 sentinels pass.
+
+**Process.**  97th iter in iter-752-837 chain.  Addresses Codex iter-836b WEAKENS finding #2 (covariant-vs-grid-aligned rotation).  Activates the existing covariant branch of `pad_halo_vector` rather than inventing new code.  Remaining iter-836b WEAKENS #1 (cell-centre averaging O(dx²) loss) and WEAKENS #3 (metric edge-pad) are carried forward to iter-838+.
