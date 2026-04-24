@@ -1842,3 +1842,38 @@ W2 solid-body rotation has EXACT `dh/dt = 0` everywhere — both paths report nu
 **Process.**  101st iter in iter-752-841 chain.  Rules out the CURRENT-FORM ut/vt drop-in as a W2 LEGACY improvement: Path B gives 400× worse one-step dh/dt at cube vertices.  Reveals that `_d_sw1_recompute_ut_vt` has its own halo fidelity gap (mode='edge' on cross-face vc/uc at lines 75, 83).  Narrows iter-842+ scope to: (a) halo fixes on the ut/vt path, (b) checking whether dh/dt is the right proxy for W2 mode-A (which is a dv/dt phenomenon per iter-792/796).  Two drop-in fixes now ruled out in two iters (iter-839 symmetric v_c: 220× L2 regression; iter-841 ut/vt swap: 400× one-step dh/dt regression at cube vertices).
 
 **iter-841b (adversarial-review fixes).**  Codex abee51290df2cd7af flagged two WEAKENS: (1) my rule-out wording was too broad (tests one variant); (2) my attribution of Path A's mid-face dh/dt peak to the W2 mode-A mechanism was WRONG — mode-A is a dv/dt cube-vertex phenomenon, not dh/dt.  Title and claims above rewritten to scope the rule-out to "current-form swap" and explicitly distinguish mass-transport error (dh/dt) from the mode-A momentum artefact (dv/dt).  Codex dt-sweep cross-check (dt=1,3,10,30,100,300 s) confirmed 418× ratio is not a time-accumulation artefact.
+
+### Iter-842 — `_d_sw1_recompute_ut_vt` duogrid halo fix: attempted, REVERTED (made things worse)
+
+Per iter-841b's (a) candidate: fix `_d_sw1_recompute_ut_vt` halo gaps at lines 75 and 83 (`jnp.pad(..., mode='edge')` on vc/uc).  Codex iter-842 scoping review (agentId a700331dbcbf2c6a1) confirmed the Fortran oracle: `dyn_core.F90:629-655` populates uc/vc halo via `mpp_update_domains(CGRID_NE)` (non-duogrid) or `ext_vector(..., CGRID_NE)` (duogrid) BEFORE `d_sw1` runs; `d_sw1` itself expects already-haloed uc/vc.  Recommended fix: iter-836b pattern (pad_halo_vector + covariant metrics + halo-only reconstruction).
+
+**Method.**  Applied the iter-836b pattern to `_d_sw1_recompute_ut_vt` (before the Part 1 4-cell average) for the duogrid branch.  Cell-centre averaged uc/vc, halo-exchanged via `pad_halo_vector(..., cos_theta=cosa_cell, sin_theta=sina_cell)`, reconstructed halo face values at panel-edge rows (i=-1, i=n) for vc_pad and cols (j=-1, j=n) for uc_pad.  Interior preserved.  Re-ran `scripts/diag_iter841_transport_paths.py` in DUOGRID mode.
+
+**Result — FIX REGRESSES, REVERTED.**
+
+| variant (DUOGRID C36 W2 IC, dt=300s) | pre-iter-842 | post-iter-842 fix  |
+|--------------------------------------|-------------:|-------------------:|
+| Path A peak |dh/dt|                   | 1.488e−04    | 1.488e−04 (same)    |
+| **Path B peak |dh/dt|**               | **2.064e−01**| **2.395e−01 (+16 %)** |
+
+The halo fix made the DUOGRID Path B dh/dt error 16 % WORSE at cube vertices.  Non-duogrid LEGACY variant is unchanged (fix only touches the duogrid branch).  The production change was REVERTED; the iter-842 commit history carries only the negative result in docs + diag script updates.
+
+**Interpretation.**  Cross-face halo via `pad_halo_vector` with covariant cell-centre metrics is NOT the same as Fortran's `ext_vector` CGRID path.  Fortran's CGRID halo does `mpp_update_domains(CGRID_NE)` + `c2l_ord2_cgrid` (metric-weighted A-grid conversion with `a11..a22` coefficients that carry `1/sin_sg` geometry) + `cubed_a2c_halo` (`fv_duogrid.F90:2590-2668, 2765-2830`).  Our `pad_halo_vector` covariant branch uses cell-centre `cosa_cell`/`sina_cell` non-orthogonality metrics only — an insufficient approximation for the full CGRID halo semantics required here.  Piecemeal halo fixes in one operator can regress when the downstream (`transport_step` + PPM) assumes the specific `ext_vector` halo convention.
+
+**What iter-842 DOES show.**
+- A direct port of the iter-836b halo-fix pattern does NOT work for `_d_sw1_recompute_ut_vt`.  The two operators' halo semantics differ.
+- `_d_sw1_recompute_ut_vt`'s current `mode='edge'` halo is load-bearing under the combined `_d_sw1_recompute_ut_vt` + `transport_step` + PPM pipeline.
+- A Fortran-faithful fix requires porting the full `ext_vector` CGRID path (c2l_ord2_cgrid + cubed_a2c_halo), not just a drop-in pad_halo_vector call.
+
+**What iter-842 does NOT establish.**
+- Whether a correctly-ported `ext_vector` CGRID halo would fix the cube-vertex dh/dt spike.
+- Whether the 400× dh/dt excess is primarily a halo issue, a PPM-limiter issue, or a `transport_step` mass-fixer absence.
+
+**Iter-843+ candidates.**
+- Port `ext_vector` CGRID path (or a stripped-down version that only does the 1-halo CGRID exchange) as a dedicated Python helper.  Multi-iter.
+- Cross-check dv/dt at cube vertices with both transport paths (per iter-841b WEAKENS #2: mode-A is a dv/dt phenomenon).
+- Shelve ut/vt-path exploration; audit the A-L production path directly (`_arakawa_lamb_gradient`, `cgrid_mass_flux_divergence`) for W2 LEGACY mode-A mechanism.
+
+**Deliverable.**  Updated `scripts/diag_iter841_transport_paths.py` (added LEGACY + DUOGRID side-by-side).  No production source-code change (fix was REVERTED).  All 14 W2 sentinels pass.  Doc entry documents the negative result + the Fortran oracle gap that a drop-in fix cannot close.
+
+**Process.**  102nd iter in iter-752-842 chain.  Attempted the iter-841b (a) halo fix using the iter-836b pattern; reverted after measuring a 16 % DUOGRID Path B regression.  Genuine scientific learning: the iter-836b pattern is NOT a universal Fortran-fidelity fix for all halo-same-face bugs; some operators require the full `ext_vector` CGRID semantics.  Continues the pattern of iter-839, iter-841 ruling out drop-in fixes via direct test — 3 ruled out now.

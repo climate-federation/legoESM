@@ -83,9 +83,12 @@ def _peak_with_location(arr, cdgrid):
     return peak, face, i, j, lat_d, lon_d, min_d
 
 
-def main(n=36, dt=300.0):
-    # iter-761 canonical config (non-duogrid, matches W2 LEGACY sentinel)
-    grid = create_cubed_sphere(n=n, use_duogrid=False)
+def main(n=36, dt=300.0, use_duogrid=False):
+    # iter-761 canonical config (matches W2 LEGACY sentinel when
+    # use_duogrid=False).  iter-842 adds duogrid toggle to exercise
+    # `_d_sw1_recompute_ut_vt`'s duogrid branch where iter-842's halo
+    # fix is wired.
+    grid = create_cubed_sphere(n=n, use_duogrid=use_duogrid)
     div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
     cfg = CDGridShallowWaterConfig(
         hyperdiff_coeff=0.0, div_damp=div_damp,
@@ -118,8 +121,9 @@ def main(n=36, dt=300.0):
     peak_B = float(np.max(np.abs(dh_dt_B_np)))
     peak_delta = float(np.max(np.abs(delta)))
 
+    grid_tag = "DUOGRID" if use_duogrid else "LEGACY (iter-761 canonical)"
     print(f"Iter-841 dh/dt comparison at t=0 on W2 IC, C{n}, dt={dt}s, "
-          f"LEGACY (iter-761 canonical)")
+          f"{grid_tag}")
     print()
     print(f"Path A (current production: fv3_cc2c + cgrid_mass_flux_divergence):")
     print(f"  peak |dh_dt_A|       = {peak_A:.3e} kg m-2 s-1")
@@ -167,4 +171,13 @@ def main(n=36, dt=300.0):
 
 
 if __name__ == "__main__":
-    main()
+    print("=" * 72)
+    print("LEGACY variant (iter-761 canonical, matches W2 sentinel)")
+    print("=" * 72)
+    main(use_duogrid=False)
+    print()
+    print("=" * 72)
+    print("DUOGRID variant (exercises iter-842 `_d_sw1_recompute_ut_vt` "
+          "halo fix)")
+    print("=" * 72)
+    main(use_duogrid=True)
