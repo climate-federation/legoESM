@@ -2013,3 +2013,62 @@ Codex stop-time review of iter-844b: "the new diagnostic still overstates and mi
 **Deliverable.**  Updated `scripts/diag_iter844_dvdt_decomposition.py` (labels + threshold + docstring + inline comment).  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  105th iter in iter-752-845 chain.  Diagnostic honesty pass: relabelled Bernoulli-partition terms and fixed the misleading WARNING threshold.  No behavioural change to the measurement itself; iter-844's mechanism characterisation remains valid.
+
+### Iter-846 — 4-term pure-dynamics residual peaks AT cube vertex; damping shifts the full peak
+
+Per iter-844b/845's iter-846+ candidate: measure the 4-term pure-dynamics residual (planetary Coriolis + Bernoulli partition + relative-vort transport) separately from damping/boundary_fix/hyperdiff contributions, to isolate the structural cube-vertex cancellation signature from the damping-driven component.
+
+**Method** (Codex a3b0c83fb8ba91f1e, extended `scripts/diag_iter844_dvdt_decomposition.py`).  Added a reporting-only pure-dynamics section that sums only the 4 "dynamics" terms (planetary_coriolis, bernoulli_minus_ke, ke_part, relative_vort_transport) at every D-grid v point, then reports the peak magnitude + location + GC-to-vertex + per-term at that peak.  Also reports the pure-dynamics value AT the full-term peak, plus the damping values AT the pure-dynamics peak.
+
+**Result — peaks are at DIFFERENT locations, and damping moves the full peak.**
+
+| quantity                  | pure-dynamics peak  | full-term peak      |
+|---------------------------|--------------------:|--------------------:|
+| peak |value|               | **1.148e−05** m/s²   | **1.903e−05** m/s²   |
+| face, (i, j)               | 5, (0, 0)             | 0, (2, 34)            |
+| lat, lon                   | −35.84°, −133.76°   | +33.90°, −40.00°    |
+| **GC to nearest cube vertex** | **1.16° (AT vertex)** | **4.34° (vertex-adjacent)** |
+
+**Cross-location values.**
+- At the FULL peak (face 0, (2,34), GC=4.34°): pure-dynamics = −2.71e−06 (small residual), div_damp = −1.63e−05 (dominant), boundary_fix = 0 → full = −1.90e−05.
+- At the PURE-DYNAMICS peak (face 5, (0,0), GC=1.16°): pure-dynamics = +1.148e−05, div_damp = −1.01e−05, boundary_fix = −8.49e−06, sum = −7.08e−06.
+
+**Per-term values at the pure-dynamics peak (face 5, (0,0), GC=1.16°).**
+
+| term                          | value (m/s²)            |
+|-------------------------------|--------------------------:|
+| planetary_coriolis            | −2.278e−03                |
+| bernoulli_minus_ke (partition) | +2.379e−03               |
+| relative_vort_transport       | −1.833e−04                |
+| ke_part (partition)           | +9.440e−05                |
+| **4-term pure-dynamics sum**  | **+1.148e−05**             |
+| div_damp                      | −1.006e−05                |
+| boundary_fix                  | −8.494e−06                |
+| hyperdiff                     | 0                         |
+| **actual dv/dt**              | **−7.077e−06**             |
+
+**Interpretation.**
+- Pure-dynamics cancellation residual peaks AT a cube vertex (GC=1.16°, lat≈−35.3°, lon=−135°) — structurally consistent with iter-793/796's cube-vertex cancellation hypothesis.
+- Full-term peak is at GC=4.34° because damping (div_damp) is the dominant non-cancelling term there, while pure-dynamics happens to be NEAR zero (−2.7e−06).
+- The full peak location is largely SET BY the damping: wherever div_damp is locally large AND pure-dynamics happens to have a zero-crossing, the full |dv/dt| gets a div_damp-sized spike.
+- At the pure-dynamics peak (cube vertex), div_damp and boundary_fix collectively PARTIALLY CANCEL the +1.15e−05 dynamics residual, bringing the full |dv/dt| down to 7.08e−06.  Damping+boundary_fix act as a partial-but-imperfect correction AT the vertex.
+- The two peaks being at DIFFERENT locations means W2 mode-A mitigation via damping-tuning alone is fundamentally LIMITED: reducing div_damp would lower the full peak AT (2,34) (where damping is the dominant term) but would also INCREASE the net at (0,0) (cube vertex) since damping there currently CANCELS part of the dynamics residual.
+
+**What iter-846 DOES show.**
+- The W2 LEGACY mode-A cube-vertex signature is structural: pure-dynamics 4-term residual peaks AT a cube vertex (1.16°) at magnitude 1.15e−05.
+- The full-dv/dt peak location (4.34° cube-vertex-adjacent) is NOT the structural mode-A mechanism location; it's where damping happens to be unbalanced.
+- Damping (div_damp) and boundary_fix are LOCATION-DEPENDENT modifiers: they reduce the cube-vertex peak by ~40 % but add a larger non-cancelling spike at vertex-adjacent locations.
+
+**What iter-846 does NOT establish.**
+- Which of the 4 pure-dynamics terms is the biggest culprit at the cube vertex (all 4 have O(10⁻³-10⁻⁴) magnitudes; the residual is their net).  Per-term cube-vertex deep audit remains iter-847+ scope.
+- Whether a location-dependent damping (larger at (2,34), smaller at (0,0)) would reduce BOTH peaks simultaneously.
+- Whether the mode-A in late-time visualisation (iter-820's v_ll stripes) is more like the pure-dynamics peak or the full peak structurally.
+
+**Iter-847+ candidates.**
+- Per-term cube-vertex audit at Fortran entry points (sw_core.F90:303-372 KE, :378-408 + :416-480 vort, :3419-3454 / :3560 / :3691 d2a2c_vect halo).  Start with the term showing biggest fidelity drift vs Fortran at the cube vertex.
+- Compare iter-820's v_ll stripe peak location to the pure-dynamics peak location here (face 5 (0,0), lat=−35.8°, lon=−133.8°).  If the v_ll stripe peaks near a cube vertex, the structural mode-A is a pure-dynamics residual, not damping-driven.
+- Sweep div_damp on W2 LEGACY to verify: does reducing div_damp CENTRE the full peak at the cube vertex (pure-dynamics peak location)?  If yes, the current damping is artificially moving the peak away from its structural source.
+
+**Deliverable.**  Extended `scripts/diag_iter844_dvdt_decomposition.py` (pure-dynamics reporting section added by Codex).  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  106th iter in iter-752-846 chain.  Separates the pure-dynamics cancellation residual from damping-driven contributions to the full dv/dt peak.  Key finding: the pure-dynamics peak (1.148e−05 AT cube vertex, GC=1.16°) is ~40 % smaller than the full peak (1.903e−05 at GC=4.34°), and the two peaks are at DIFFERENT locations.  Damping shifts the peak location away from the structural cube-vertex source by partially cancelling the dynamics residual AT the vertex while being uncancelled at vertex-adjacent points.

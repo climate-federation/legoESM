@@ -379,6 +379,31 @@ def main():
         peak_values[name] = value
         peak_abs_sum += abs(value)
 
+    pure_dynamics_names = (
+        "planetary_coriolis",
+        "bernoulli_minus_ke (partition)",
+        "relative_vort_transport",
+        "ke_part (partition)",
+    )
+    pure_dynamics_dv = jnp.zeros_like(dv_ref)
+    for name in pure_dynamics_names:
+        pure_dynamics_dv = pure_dynamics_dv + term_pairs_d[name][1]
+    pure_peak = _peak_info(pure_dynamics_dv, lat_v, lon_v)
+    pure_peak_idx = (pure_peak["face"], pure_peak["i"], pure_peak["j"])
+    pure_peak_values = {}
+    for name, (_, dv_term) in term_pairs_d.items():
+        pure_peak_values[name] = float(np.asarray(dv_term)[pure_peak_idx])
+    pure_peak_full_value = float(np.asarray(dv_ref)[pure_peak_idx])
+    pure_at_full_peak = float(np.asarray(pure_dynamics_dv)[peak_idx])
+    pure_matches_full_peak = pure_peak_idx == peak_idx
+    mode_a_threshold = 1.9e-05
+    if pure_peak["peak_abs"] < mode_a_threshold:
+        mode_a_candidate = "damping-tuning"
+    elif pure_peak["peak_abs"] > mode_a_threshold:
+        mode_a_candidate = "dynamics-term fidelity"
+    else:
+        mode_a_candidate = "threshold tie; needs manual review"
+
     term_vertex_linf = {}
     for name, (_, dv_term) in term_pairs_d.items():
         dv_np = np.asarray(dv_term)
@@ -448,6 +473,48 @@ def main():
         f"{float(np.asarray(dv_sum_terms)[peak_idx]):>16.12e}"
     )
     print(f"{'actual dv/dt':>26}  {peak['value']:>16.12e}")
+    print()
+    print("Pure-dynamics 4-term audit:")
+    print(f"  peak |sum4| = {pure_peak['peak_abs']:.12e} m s^-2")
+    print(f"  signed sum4 = {pure_peak['value']:.12e} m s^-2")
+    print(f"  face={pure_peak['face']}  (i,j)=({pure_peak['i']},{pure_peak['j']})")
+    print(
+        f"  lat={pure_peak['lat_deg']:+.6f} deg  "
+        f"lon={pure_peak['lon_deg']:+.6f} deg"
+    )
+    print(
+        f"  nearest cube vertex = ({pure_peak['vertex_lat_deg']:+.6f}, "
+        f"{pure_peak['vertex_lon_deg']:+.6f}) deg"
+    )
+    print(f"  GC-to-vertex = {pure_peak['gc_deg']:.6f} deg")
+    print(
+        f"  full-term peak |dv/dt| = {peak['peak_abs']:.12e} m s^-2 "
+        f"at face={peak['face']} (i,j)=({peak['i']},{peak['j']}) "
+        f"GC={peak['gc_deg']:.6f} deg"
+    )
+    print(f"  pure-dynamics value at full-term peak = {pure_at_full_peak:.12e} m s^-2")
+    if pure_matches_full_peak:
+        print("  peak-location comparison = SAME as full-term peak")
+    else:
+        print("  peak-location comparison = DIFFERENT from full-term peak")
+        print(
+            f"  full dv/dt at pure-dynamics peak = {pure_peak_full_value:.12e} m s^-2"
+        )
+    print("  per-term values at pure-dynamics peak:")
+    for name in (
+        "planetary_coriolis",
+        "bernoulli_minus_ke (partition)",
+        "relative_vort_transport",
+        "ke_part (partition)",
+        "div_damp",
+        "hyperdiff",
+        "boundary_fix",
+    ):
+        print(f"    {name:>26} = {pure_peak_values[name]:.12e}")
+    print(
+        f"  Mode-A decision threshold = {mode_a_threshold:.12e} m s^-2; "
+        f"candidate = {mode_a_candidate}"
+    )
     print()
     print("Balance checks:")
     print(f"  max|dv_ref - project(total_cc)| = {residual_total:.12e}")
