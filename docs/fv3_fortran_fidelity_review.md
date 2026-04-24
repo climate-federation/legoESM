@@ -466,3 +466,61 @@ But iter-800 showed u_c, v_c are byte-identical between LEGACY and DUOGRID.  u_c
 **Deliverable.**  `scripts/diag_iter805_duogrid_h_halo_interp.py` + committed output.  No source-code change.  No new sentinel.
 
 **Process.**  69th iter in iter-752-805 chain.  Three consecutive iters (803/804/805) have ruled out Lagrange corner fill, cube_rmp, AND the interp_offsets difference as the dh/dt blowup cause — yet dh/dt remains 1172× LEGACY.  The residual must come from a cdgrid metric field or a cgrid_mass_flux_divergence path we haven't yet inspected.  iter-806+ should compare cdgrid metric fields BETWEEN paths directly.
+
+### Iter-806 / 806b — ROOT CAUSE FOUND: `synchronize_cgrid_fluxes` is the DUOGRID dh/dt blowup source
+
+**iter-806 cdgrid metric comparison** (`scripts/diag_iter806_cdgrid_metric_diff.py`): compared all 28 cdgrid+base metric fields between LEGACY and DUOGRID at C36.  Only TWO differ:
+- `rsin_u`: max |Δ|=1.68e−1, 13% relative at panel edges.
+- `rsin_v`: max |Δ|=1.68e−1, 13% relative at panel edges.
+
+But `rsin_u` / `rsin_v` are used ONLY in `fv3_sw_core.py` (`_d2a2c_vect` and related), NOT in `fv3_sw_tendencies` or `cgrid_mass_flux_divergence`.  So metric differences cannot explain the dh/dt blowup.
+
+**Inspection of `cgrid_mass_flux_divergence`** (`src/legoesm/core/operators_cdgrid.py:530-540`) reveals a DUOGRID-specific branch:
+```python
+dg = cdgrid.base.duogrid
+if dg is not None and dg.ng >= 2:
+    from legoesm.grids.halo import synchronize_cgrid_fluxes
+    flux_x, flux_y = synchronize_cgrid_fluxes(flux_x, flux_y, n)
+```
+
+**iter-806b test** (`scripts/diag_iter806b_flux_sync_test.py`): monkey-patch `synchronize_cgrid_fluxes` to a no-op and measure DUOGRID t=0 dh/dt.
+
+**Result.**
+
+| variant                           | dh/dt peak    | dh ratio vs LEGACY |
+|-----------------------------------|---------------|---------------------|
+| LEGACY (sync not applied)         | 1.329e−04     | —                   |
+| DUOGRID (baseline, sync ON)       | 1.557e−01     | **1171.57×**        |
+| DUOGRID (sync DISABLED, monkey-patched no-op) | 1.329e−04   | **1.00×** |
+
+**Smoking gun.**  Disabling `synchronize_cgrid_fluxes` drops DUOGRID dh/dt from 1.557e−1 to 1.329e−4 — the EXACT LEGACY value, 1.00× ratio.  The flux synchronization operator IS the DUOGRID dh/dt blowup source.
+
+**Context — this IS the Ralph loop's critical duogrid constraint #1.**  The Ralph loop brief states:
+> Flux computation split across d_sw1/d_sw3/d_sw5 and updates across d_sw2/d_sw4/d_sw6 requires mandatory cube-edge flux synchronization before update, with synchronized flux = average(face_A_to_B, face_B_to_A).
+
+Our code HAS this sync (operators_cdgrid.py:538-540) and its comment says it matches `FV3 dyn_core.F90:853-900`.  But the implementation is causing a 1172× dh/dt error on the smooth W2 IC at t=0 — so it's broken.
+
+Candidate reasons the sync fails:
+1. **PPM boundary asymmetry**: the code comment at operators_cdgrid.py:534-536 explicitly warns `"PPM boundary asymmetry is a feature of the higher-order reconstruction, and averaging reduces accuracy (tested: unconditional sync causes 110× W2 regression)"`.  The sync was only enabled under DUOGRID, but it clearly interacts badly with the PPM path.
+2. **Connectivity / reversal bug**: `CONNECTIVITY[face][edge]` may give the wrong neighbor edge or the `rev` flag may be misapplied.
+3. **Flux sign convention mismatch**: `fx` at a shared edge may have opposite signs between faces (one says "flux leaving", the other "flux entering") and averaging without sign-flip destroys conservation.
+4. **Cube-corner cell pollution**: at cube vertices where 3 faces meet, the sync averages 2-face edge values that aren't semantically-matched.
+
+**What iter-806/806b DOES show.**
+- `synchronize_cgrid_fluxes` is the CONCRETE, ISOLATED cause of the DUOGRID dh/dt blowup.
+- Disabling it reproduces LEGACY behavior exactly (dh/dt 1.00× LEGACY).
+- The implementation in halo.py:1912-1963 has a bug or interaction-with-PPM issue.
+
+**What iter-806/806b does NOT establish.**
+- Whether the sync is INHERENTLY incompatible with PPM's higher-order asymmetry (i.e. the averaging breaks conservation-preserving PPM properties) or whether there's a specific bug in `synchronize_cgrid_fluxes`.
+- Whether Fortran FV3 applies its flux sync BEFORE PPM reconstruction (on raw mass fluxes) or AFTER (as our code does).  This ordering could be critical.
+
+**Iter-807+ candidates.**
+- Audit FV3 Fortran `dyn_core.F90:853-900` for the exact flux sync semantics, ordering, and sign conventions.
+- Audit `synchronize_cgrid_fluxes` connectivity lookups (CONNECTIVITY table, rev flag) at the 8 cube-vertex edges.
+- Check whether PPM-style face values should be computed from a SHARED halo BEFORE sync, not synced AFTER.
+- Port Fortran FB transport chain (blocked on ng=3 and FB-chain stability).
+
+**Deliverable.**  `scripts/diag_iter806_cdgrid_metric_diff.py`, `scripts/diag_iter806b_flux_sync_test.py` + committed outputs.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  70th iter in iter-752-806 chain.  **ROOT CAUSE ISOLATED**: the DUOGRID t=0 dh/dt blowup is produced by `synchronize_cgrid_fluxes`.  Disabling it recovers LEGACY behaviour to 1.00× exact ratio.  This is the Ralph loop's critical duogrid constraint #1 — flux synchronization between adjacent faces — and its current implementation interacts badly with the PPM path.  iter-807+ should audit the Fortran reference and our connectivity/sign conventions.
