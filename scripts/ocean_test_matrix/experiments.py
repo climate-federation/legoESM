@@ -1418,6 +1418,10 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
             barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
             barotropic_div_damp=eu_config.barotropic_div_damp,
             tracer_advection=eu_config.tracer_advection,
+            pv_scheme=config.PV_SCHEME_OVERRIDE,
+            apvm_dt=config.APVM_DT_OVERRIDE,
+            pv_alpha=config.PV_ALPHA_OVERRIDE,
+            K_zeta_bih=config.K_ZETA_BIH_OVERRIDE,
         ))
 
     state = eu_ic(tc.grid_type, grid, z_coord, eu_config)
@@ -1505,6 +1509,8 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s"})
 
+    eady_extent = (eu_config.lon_west, eu_config.lon_east,
+                   eu_config.lat_south, eu_config.lat_north)
     _save_case_diagnostics(
         output_dir, case_label,
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -1518,6 +1524,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
                       "mean_T": "degC", "mean_S": "PSU"},
+        domain_extent=eady_extent,
         mesh=grid if coord_kind == "mpas" else None)
 
     # Velocity cross-sections (u, speed lat-depth evolution)

@@ -91,6 +91,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--U-surface", type=float, default=None,
         help="Override Eady surface velocity [m/s] (reduces APE / slows BCI)")
+    p.add_argument(
+        "--pv-scheme", type=str, default=None,
+        choices=["enstrophy", "energy", "mixed"],
+        help="Override MPAS TRiSK PV flux scheme (default: enstrophy)")
+    p.add_argument(
+        "--apvm-dt", type=float, default=None,
+        help="Override MPAS APVM damping timescale [s]; 0 disables (default: 0)")
+    p.add_argument(
+        "--pv-alpha", type=float, default=None,
+        help="Weight on energy-conserving PV flux when --pv-scheme=mixed "
+             "(α·energy + (1−α)·enstrophy; default: 1.0)")
+    p.add_argument(
+        "--K-zeta-bih", type=float, default=None,
+        help="Biharmonic dissipation coefficient on relative vorticity ζ "
+             "[m⁴/s] (MPAS only; targets ζ-checkerboard null mode; default: 0)")
     return p
 
 
@@ -147,6 +162,14 @@ def main():
         config.K_H_OVERRIDE = args.K_h
     if args.U_surface is not None:
         config.U_SURFACE_OVERRIDE = args.U_surface
+    if args.pv_scheme is not None:
+        config.PV_SCHEME_OVERRIDE = args.pv_scheme
+    if args.apvm_dt is not None:
+        config.APVM_DT_OVERRIDE = args.apvm_dt
+    if args.pv_alpha is not None:
+        config.PV_ALPHA_OVERRIDE = args.pv_alpha
+    if args.K_zeta_bih is not None:
+        config.K_ZETA_BIH_OVERRIDE = args.K_zeta_bih
 
     tests = filter_tests(TEST_MATRIX, args)
 

@@ -39,6 +39,10 @@ B_H_OVERRIDE = None  # Set via --B-h CLI flag
 C_SMAG_OVERRIDE = None  # Set via --C-smag CLI flag
 K_H_OVERRIDE = None  # Set via --K-h CLI flag
 U_SURFACE_OVERRIDE = None  # Set via --U-surface CLI flag (Eady)
+PV_SCHEME_OVERRIDE = None  # Set via --pv-scheme CLI flag (MPAS only)
+APVM_DT_OVERRIDE = None    # Set via --apvm-dt CLI flag (MPAS only; seconds; 0 disables)
+PV_ALPHA_OVERRIDE = None   # Set via --pv-alpha CLI flag (MPAS only; used when pv_scheme="mixed")
+K_ZETA_BIH_OVERRIDE = None # Set via --K-zeta-bih CLI flag (MPAS only; m⁴/s; biharmonic ζ damping)
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"

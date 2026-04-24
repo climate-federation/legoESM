@@ -40,6 +40,7 @@ from legoesm.core.field import Field
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.core.operators_voronoi import (
     apvm_correction_3d,
+    biharmonic_vorticity_del4_3d,
     divergence_cell_3d,
     gradient_edge_3d,
     curl_vertex_3d,
@@ -226,6 +227,16 @@ def mpas_ocean_baroclinic_tendencies(
 
     if config.pv_scheme == "energy":
         pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_relative, mesh)
+    elif config.pv_scheme == "mixed":
+        # Weighted blend: α·F_energy + (1−α)·F_enstrophy. α=1 reverts to
+        # pure energy-conserving; α=0 to pure enstrophy-conserving. For the
+        # Eady ζ-checkerboard null mode, α ≈ 0.6–0.9 preserves most of the
+        # BCI growth rate while inheriting the enstrophy scheme's stability.
+        alpha = config.pv_alpha
+        pv_flux = (
+            alpha * pv_flux_energy_conserving_3d(u_3d, h_k, q_relative, mesh)
+            + (1.0 - alpha)
+              * pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_relative, mesh))
     else:
         pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_relative, mesh)
 
@@ -239,6 +250,17 @@ def mpas_ocean_baroclinic_tendencies(
     # Flow-dependent Smagorinsky biharmonic viscosity
     if config.C_smag > 0:
         visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
+
+    # Biharmonic dissipation on relative vorticity ζ (scale-selective damping
+    # of grid-scale vorticity patterns — notably the ζ-checkerboard null
+    # mode of the energy-conserving PV flux).  This is applied to the total
+    # velocity u_3d (not u_prime_3d) because ζ is a derived quantity and the
+    # full ζ (including the planetary-Coriolis-free baroclinic+barotropic ζ)
+    # carries the null-mode amplitude.  Invisible to ``B_h·del4(u)`` because
+    # the null mode lives in the kernel of the discrete curl-to-velocity map.
+    if config.K_zeta_bih > 0:
+        visc = visc + config.K_zeta_bih * biharmonic_vorticity_del4_3d(
+            u_3d, mesh)
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
