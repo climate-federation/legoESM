@@ -594,3 +594,43 @@ The override is a DIAGNOSTIC-ONLY analytical injection (not a production fix).  
 **Deliverable.**  `scripts/diag_iter783_cb_mask_override.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  47th iter in iter-752-783 chain.  Rules OUT iter-782's candidate (cube-vertex `_d2a2c_vect` error) as cause of the C36 1-day cosine bell distortion.  Points iter-784+ attention toward candidates (a) and (d).
+
+### Iter-784 — PPM limiter bypass rules out candidate (d) as cosine bell driver
+
+Per iter-783's iter-784+ candidate "test the PPM limiter: swap the PPM limiter in `fv_tp_2d` for an unlimited polynomial; measure impact (candidate d)", iter-784 runs the 1-day C36 cosine bell twice:
+
+- **BASELINE**: normal `_pert_ppm_iv0` (positive-definite, FV3 hord=9) + face-boundary `_pert_ppm(iv=1)`.
+- **NO_LIMITER**: monkey-patched so both limiters return bl, br unchanged.
+
+The monkey-patch is diagnostic-only.  Without the limiter, h can go negative; the `mass_target` fix then re-clips negatives to zero and rescales — so the reported Linf is on the re-clipped field.
+
+**Method** (`scripts/diag_iter784_cb_limiter_bypass.py`; committed output at `diagnostics/iter784_output/iter784_cb_limiter_bypass.txt`).  Same C36, β=π/4, dt=1440s, 1 day.
+
+**Result.**
+
+| case                  | L_inf     | L2        | peak cell       | peak err signed | h_min | h_max  | Δ vs base         |
+|-----------------------|-----------|-----------|-----------------|-----------------|-------|--------|-------------------|
+| BASELINE (limiter ON) | 1.213e+02 | 1.165e-01 | face 3 (30, 32) | +1.213e+02      | 0.00  | 895.40 | —                 |
+| NO_LIMITER            | 1.204e+02 | 1.172e-01 | face 3 (30, 32) | +1.204e+02      | 0.00  | 893.42 | Linf −0.8%, L2 +0.6% |
+
+**Observation — numerical reportage only.**  Bypassing the PPM limiter changes Linf by −0.8% (virtually unchanged) and L2 by +0.6% (slightly worse).  Peak-error sign is POSITIVE (+121 m) in both cases, indicating the numerical bell has h > h_exact at the peak-error cell — consistent with phase or shape distortion rather than monotone clipping.  h_max remains ~895 in both cases (about 10.5% amplitude loss from H0=1000 due to numerical diffusion).
+
+**What iter-784 DOES show.**
+- The PPM limiter (`_pert_ppm_iv0` + face-boundary `_pert_ppm`) is NOT the dominant driver of the C36 1-day cosine bell distortion.  Turning it off entirely gives essentially the same Linf.
+- h_min = 0 in both cases (the mass-target fix clips negatives even when the limiter is off), so physical positivity is preserved.
+- Peak-error sign is positive in both cases — the numerical bell is displaced or distorted, not simply limiter-clipped.
+
+**What iter-784 does NOT establish.**
+- Whether a DIFFERENT limiter (e.g. hord=8 2*dm monotone, hord=10 pmp/lac) would outperform hord=9.  iter-784 only tests OFF vs ON.
+- Whether the mass-target fix's "clip then rescale" is contributing to the observed error.
+- Which specific part of the advection scheme (PPM reconstruction stencil, flux integration, time-splitting ordering, cross-term coupling) is the main contributor.
+
+**Iter-785+ candidates.**
+- Test time-splitting: run with Strang vs 1st-order operator splitting in `fv_tp_2d` (candidate a).
+- Test cross-term handling: compare flux-form Lin-Rood (current) against fully 2D PPM (if available).
+- Test mass-target fix: run WITHOUT the clip-and-rescale step and measure impact.
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter784_cb_limiter_bypass.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  48th iter in iter-752-784 chain.  Rules OUT candidate (d) "PPM limiter" as primary driver.  With (b) "dt scaling" (iter-779), (c)-in-1-day (iter-781), `_d2a2c_vect` cube-vertex (iter-783), and (d) PPM limiter (iter-784) all ruled out, remaining candidate (a) "resolution-invariant structural error" is the most likely residual driver.  iter-785+ should probe time-splitting, cross-term handling, and the mass-target fix.
