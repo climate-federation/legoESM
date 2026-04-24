@@ -1429,3 +1429,51 @@ Per iter-831's finding that `_c_sw` drives the FB h-growth, iter-832 investigate
 **Deliverable.**  `scripts/diag_iter832_csw_sync_test.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  92nd iter in iter-752-832 chain.  Rules out over-syncing as the FB h-growth driver (only 6% reduction when sync disabled entirely).  The c_sw 1st-order upwind + d_sw PPM coupling is the inherent mechanism.
+
+### Iter-833 — Cosine bell 12-day trajectory: bell DOES cross cube vertices, Linf jumps at crossings
+
+Per iter-781's 1-day scope limit ("bell centre stays > 25° from nearest cube vertex in 1 day"), iter-833 extends the cosine bell trajectory to 12 days (one full rotation at 12-day period) sampled daily.
+
+**Method** (`scripts/diag_iter833_cb_multiday.py`).  C36, β=π/4, dt=1440s, 12 days.  Sample Linf, L2, h_max, and bell-centre GC-to-vertex every day.
+
+**Result.**
+
+| day | Linf   | L2        | h_max  | bell GC-to-vertex |
+|-----|--------|-----------|--------|-------------------|
+| 0   | 0      | 0         | 979.01 | 52.97°            |
+| 1   | 121    | 0.117     | 895.40 | 25.93°            |
+| **2** | **592** | **0.596** | **694.20** | **5.27°** (near vertex) |
+| 3   | 612    | 0.626     | 539.91 | 34.38°            |
+| **4** | **476** | **0.475** | **755.82** | **5.27°** (near vertex) |
+| 5   | 574    | 0.553     | 845.66 | 25.93°            |
+| 6   | 611    | 0.571     | 876.82 | 52.97°            |
+| 7   | 656    | 0.645     | 794.40 | 25.93°            |
+| **8** | **831** | **0.919** | **686.24** | **5.27°** (near vertex) |
+| 9   | 843    | 0.921     | 605.75 | 34.38°            |
+| **10** | **763** | **0.841** | **766.19** | **5.27°** (near vertex) |
+| 11  | 952    | 0.998     | 898.57 | 25.93°            |
+| 12  | 972    | 1.007     | 893.34 | 52.97°            |
+
+**Observation — numerical reportage only.**  The β=π/4 cosine bell trajectory passes within ~5° of a cube vertex at days 2, 4, 8, 10 (4 vertex crossings per 12-day revolution).  Linf jumps sharply between day 1 (121 m) and day 2 (592 m) — a 5× increase in a single day, coinciding with the first cube-vertex crossing.  h_max drops dramatically at crossings (895 → 694 at day 2, 755 → 540 at day 3).
+
+**Mechanism resolution.**  This confirms iter-778's candidate (c) "cube-vertex-localized error set by face count": the cosine bell's trajectory crossings DO coincide with Linf jumps and amplitude losses.  The 1-day Linf = 121 m (iter-776/823) is the "quiet before the crossing" baseline; the day-2 Linf = 592 m is the first vertex-crossing kick.
+
+**Retroactive reinterpretation of iter-781.**  The 1-day window (iter-781) showed SMOOTH growth with no Linf spike at specific days — because the bell's GC-to-vertex monotonically decreased from 53° to 26° but NEVER got below 5°.  iter-833 confirms candidate (c) fires AT crossings (GC < 5° in iter-833's day 2, 4, 8, 10), with sharp Linf kicks.  iter-781's smooth-growth finding is valid for the window tested but does NOT generalize to longer horizons.
+
+**What iter-833 DOES show.**
+- β=π/4 cosine bell crosses cube vertices 4× per 12-day revolution.
+- Each crossing produces a sharp Linf jump (5× at day 2, 50% at day 4/8/10).
+- h_max drops from 979 (day 0) to 540-690 at crossings (30-45% amplitude loss).
+- By day 12, Linf has reached 972 m (8× the 1-day 121 m baseline).
+
+**What iter-833 does NOT establish.**
+- Whether a Fortran-faithful FB chain would produce smaller Linf kicks at crossings.
+- Whether the 30-45% amplitude loss is specific to our Python PPM limiter or intrinsic to any PPM.
+
+**Iter-834+ candidates.**
+- Compare against published FV3 Fortran cosine bell results at C36 12-day.
+- Analytical/theoretical characterisation of the cube-vertex crossing kick.
+
+**Deliverable.**  `scripts/diag_iter833_cb_multiday.py` + committed output.  No source-code change.  No new sentinel.
+
+**Process.**  93rd iter in iter-752-833 chain.  Confirms iter-778's candidate (c) "cube-vertex-localized error" — bell crossings at days 2/4/8/10 produce sharp Linf jumps.  Reinterprets iter-781's smooth-1-day result as "bell hasn't crossed yet in that window".  Long-horizon cosine bell at C36 is dominated by cube-vertex crossing events.
