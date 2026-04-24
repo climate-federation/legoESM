@@ -228,10 +228,17 @@ def _run_fb(n, ablation, hours=12.0, dt=300.0):
         raise ValueError(f"unknown ablation {ablation!r}")
 
     # -------- actual run --------
+    # Codex iter-835b correction: disable the conservation fixer so
+    # h_max is reported pre-correction.  The fixer adds a SCALAR
+    # correction (mass_target - mass_new)/total_area to every cell,
+    # which preserves h_max − h_min ordering but shifts absolute
+    # h_max across ablations.  Observational runs should report raw
+    # pre-fixer state to avoid conflating the fixer with the
+    # ablation signal.
     grid = create_cubed_sphere(n=n, use_duogrid=True)
     cfg = CDGridShallowWaterConfig(
         hyperdiff_coeff=0.0, div_damp=0.0, boundary_fix=True,
-        damp_v=0.0, nord_v=0, d4_bg=0.16, nord=1)
+        damp_v=0.0, nord_v=0, d4_bg=0.16, nord=1, fix_mass=False)
     model = FV3FBShallowWaterModel(grid, config=cfg)
     cdgrid = model.cdgrid
 
