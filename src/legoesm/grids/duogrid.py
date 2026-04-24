@@ -958,7 +958,18 @@ def fill_corner_region(
 
     def _fill_one_corner(padded, x_interp, y_interp, x_coefs, y_coefs,
                          get_ip, get_jp):
-        """Fill one h×h corner block with FV3 ordering."""
+        """Fill one h×h corner block with FV3 ordering.
+
+        Iter-803: adds Fortran-faithful veltemp/veltempp snapshot
+        semantics for pass-2 diagonal cells.  Fortran
+        `fill_corner_region_2d` (fv_duogrid.F90:1759-1779) captures
+        `veltemp = vel` and `veltempp = vel` ONCE after pass-1 and
+        BEFORE any pass-2 diagonal writes, so every pass-2 diagonal
+        reads from a SNAPSHOT unaffected by earlier pass-2 writes.
+        Python's previous pass-2 loop updated `padded` in place, so
+        a later pass-2 diagonal could read an earlier pass-2 diagonal
+        value — a subtle compounding that is NOT in Fortran.
+        """
         # Pass 1: non-diagonal cells (d1 != d2)
         for d1 in range(1, h + 1):
             for d2 in range(1, h + 1):
@@ -975,15 +986,25 @@ def fill_corner_region(
                 val = _maybe_clip(val, padded, i_p, j_p)
                 padded = padded.at[:, i_p, j_p].set(val)
 
-        # Pass 2: diagonal cells (d1 == d2), averaged from X and Y
-        # on separate copies (FV3 uses veltemp/veltempp)
+        # Iter-803: Fortran-faithful snapshot.  Fortran pattern:
+        #   veltemp = vel   ! snapshot after pass-1
+        #   veltempp = vel
+        #   do each diagonal cell (i_p, j_p):
+        #       lagrange_poly_interp(veltemp, i_p, j_p, 'X+')
+        #       lagrange_poly_interp(veltempp, i_p, j_p, 'Y+')
+        #       vel(i_p, j_p) = 0.5 * (veltemp(i_p, j_p) + veltempp(i_p, j_p))
+        # Key: each lagrange_poly_interp reads from the SNAPSHOT.  We
+        # capture the padded state AFTER pass-1 and BEFORE writing any
+        # pass-2 diagonal, then read from that snapshot.
+        padded_snapshot = padded
+
         for d in range(1, h + 1):
             i_p = get_ip(d)
             j_p = get_jp(d)
             i_e = i_p + offset
             j_e = j_p + offset
-            val_x = x_interp(padded, x_coefs, i_e, j_e, j_p, n, h)
-            val_y = y_interp(padded, y_coefs, i_e, j_e, i_p, n, h)
+            val_x = x_interp(padded_snapshot, x_coefs, i_e, j_e, j_p, n, h)
+            val_y = y_interp(padded_snapshot, y_coefs, i_e, j_e, i_p, n, h)
             val = 0.5 * (val_x + val_y)
             val = _maybe_clip(val, padded, i_p, j_p)
             padded = padded.at[:, i_p, j_p].set(val)

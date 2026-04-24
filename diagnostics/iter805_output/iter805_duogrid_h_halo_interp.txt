@@ -1,0 +1,10 @@
+Iter-805 DUOGRID h halo interp_offsets test
+C36 W2 IC, iter-761 config
+
+                                      variant   dh/dt peak   du/dt peak   dv/dt peak
+-------------------------------------------------------------------------------------
+                   LEGACY (use_duogrid=False)    1.329e-04    1.404e-05    1.903e-05
+               DUOGRID (baseline, no offsets)    1.557e-01    4.700e-05    8.446e-05
+    DUOGRID (force offsets, LEGACY-like halo)    1.557e-01    1.404e-05    1.903e-05
+
+  DUOGRID (baseline, no offsets): dh 1171.57x, du 3.35x, dv 4.44x
