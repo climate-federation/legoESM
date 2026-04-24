@@ -1921,3 +1921,64 @@ The covariant branch of `pad_halo_vector` in `fv3_cc2c` blows up W2 LEGACY L2 by
 **Deliverable.**  `scripts/diag_iter841_transport_paths.py` relabel (removed stale iter-842 language).  No production source-code change in iter-843 (Part 2 fix was REVERTED).  All 14 W2 sentinels pass.
 
 **Process.**  103rd iter in iter-752-843 chain.  Part 1: cleanup of iter-842c's stale diag label per Codex stop-time review.  Part 2: tested a "covariant halo in `fv3_cc2c`" Fortran-fidelity hypothesis (122× W2 L2 regression), then RETRACTED after Codex adversarial review showed the hypothesis was based on a convention misdiagnosis (D-grid u_d/v_d are grid-aligned physical per the production comment at `fv3_d2cc:1418-1420`, not covariant).  Self-correcting iter: iter-843 Part 2 produces no new rule-out but removes a non-existent "bug" from the candidate list.  The tally of genuinely-tested-and-ruled-out drop-in fixes stands at 3: iter-839 symmetric v_c, iter-841 ut/vt swap, iter-842 iter-836b pattern on `_d_sw1_recompute_ut_vt`.
+
+### Iter-844 — Post-iter-808 W2 LEGACY dv/dt decomposition at cube vertex
+
+Per iter-843c's top-ranked iter-844+ candidate (Codex a9cf212edbd0efccf): direct t=0 dv/dt measurement at cube vertices on the A-L production path with current iter-808/836-838 code in place.  iter-792/793/796 did this measurement PRE iter-808's sign-flip flux sync; iter-844 re-measures POST to check whether any of the intervening production changes (iter-808 sync, iter-836-838 `_corner_vorticity` halo) affected the W2 LEGACY mode-A `dv/dt` signature.
+
+**Method** (`scripts/diag_iter844_dvdt_decomposition.py`).  C36, LEGACY (`use_duogrid=False`), iter-761 canonical config (hyperdiff_coeff=0, div_damp=8·base, boundary_fix=True, damp_v=0.06, nord_v=2).  Call `fv3_sw_tendencies()` directly on the W2 IC state.  Decompose `dv_cc` into the 7 contributing terms (planetary Coriolis, pressure gradient, relative-vort transport, KE gradient, div_damp, hyperdiff, boundary_fix), project each to D-grid via the same halo-averaging step as production, and report per-term magnitudes at the peak |dv/dt| D-grid v-point.
+
+**Result — POST iter-808 dv/dt is UNCHANGED from pre-iter-808.**
+
+| quantity                        | iter-792 (pre-808) | iter-844 (post-808) |
+|---------------------------------|-------------------:|--------------------:|
+| peak \|dv/dt\|                    | 1.903e−05 m/s²     | **1.903e−05 m/s²**   |
+| peak face, (i, j)                | (0, 2, 34)          | (0, 2, 34)           |
+| peak lat, lon                    | +33.90°, −40.00°    | +33.90°, −40.00°     |
+| GC to nearest cube vertex        | 4.34°               | **4.34°**            |
+
+Bit-for-bit match with iter-792/diagnostics/iter792_output/iter792_w2_t0_tendency_audit.txt.  This confirms iter-808's sign-flip flux sync is GATED to DUOGRID mass transport only (`src/legoesm/core/operators_cdgrid.py:530-540`, `src/legoesm/grids/halo.py:1946-1964`) and does not reach the LEGACY A-L tendency path.  Similarly, iter-836-838's `_corner_vorticity` halo fixes only affect the FB chain (they're called from `_c_sw` / `fv3_csw_tendencies`, not from `fv3_sw_tendencies`).
+
+**Per-term decomposition at the peak D-grid v-point (face 0, i=2, j=34, lat +33.9°, GC = 4.34°).**
+
+| term                        | value (m/s²)            | abs share |
+|-----------------------------|-------------------------:|----------:|
+| planetary_coriolis          | −2.360e−03               | 46.0 %     |
+| pressure_gradient           | +2.455e−03               | 47.9 %     |
+| relative_vort_transport     | −1.960e−04               |  3.82 %    |
+| ke_gradient                 | +9.792e−05               |  1.91 %    |
+| div_damp                    | −1.632e−05               |  0.32 %    |
+| hyperdiff                   |  0 (coefficient=0 in config) | 0      |
+| boundary_fix                |  0 at peak (L_inf in 5° vertex stencil = 1.35e−05) | 0 |
+| **sum(projected terms)**    | **−1.903e−05**           | —          |
+| **actual dv/dt**            | **−1.903e−05**           | —          |
+
+Balance residual: `|sum(projected_terms) − actual dv/dt| = 6.8e−10` (above the 1e−10 JAX-float64 noise floor but well below the peak magnitude).
+
+**Mechanism characterisation (post-iter-808).**
+- **Coriolis and pressure gradient near-cancel**: residual `+9.5e−05` (4.8 % of each individual magnitude).  This is the classic solid-body rotation Cor+press balance that should be exact for W2; numerical imperfection leaves the 9.5e−05 residual.
+- **Relative-vort transport PARTIALLY cancels the Cor+press residual**: `−1.96e−04` opposes the Cor+press residual, over-correcting so that Cor+press+rel-vort = `−1.00e−04`.
+- **KE gradient further cancels**: `+9.79e−05` adds back so Cor+press+rel-vort+KE = `−3e−06` (near zero).
+- **div_damp adds −1.6e−05** (dominant non-cancelling term).
+- **Remaining signal to 1.9e−05** comes from the 3e−06 residual + div_damp + the non-peak boundary_fix contributions (L_inf = 1.35e−05 in the 5° vertex stencil).
+
+**Structural conclusion.**  The W2 LEGACY mode-A at cube vertices is NOT from a single "broken" operator.  It's the net of a multi-term imperfect cancellation where each of Cor, press, rel-vort, KE is ~100× larger than the final residual (1.9e−05), and the cancellation quality degrades specifically at the cube-vertex stencil geometry.  Because the mechanism is a cancellation residual of four O(10⁻³-10⁻⁴) terms, improving it requires either: (a) a lower-order residual of the 4-term combination (e.g., higher-order Cor or press at cube vertices), OR (b) removal/suppression via damping (div_damp / boundary_fix) tuned at the cube-vertex stencil.
+
+**What iter-844 DOES show.**
+- Post-iter-808 W2 LEGACY dv/dt is BIT-FOR-BIT identical to iter-792's pre-iter-808 measurement.  iter-808 + iter-836-838 do NOT touch this path.
+- Mode-A peak is at GC = 4.34° from cube vertex (cube-vertex-adjacent, not exactly AT vertex).
+- Four O(10⁻³-10⁻⁴) terms near-cancel; the net 1.9e−05 is a cancellation residual, not a single-term signature.
+- div_damp (`-1.6e-05`) is the dominant non-cancelling term at the peak — any reduction there would directly move the total by that amount.
+
+**What iter-844 does NOT establish.**
+- Whether the cancellation quality can be improved at cube vertices via operator-specific fixes (e.g., higher-order Coriolis or pressure-gradient at corners).
+- Whether iter-765/766-style Fortran corner fills (which worsened W2 individually) could help when COMBINED.
+
+**Iter-845+ candidates.**
+- Audit each of the 4 near-cancelling terms (Cor, press, rel-vort, KE) against Fortran for specific cube-vertex handling differences.  The one with the biggest deviation is the best candidate.
+- Measure the 4-term cancellation residual SEPARATELY (without div_damp / boundary_fix / hyperdiff) to isolate the "pure dynamics" residual from the damping/correction contributions.
+- Inspect `_arakawa_lamb_gradient` for cube-vertex-specific pressure-gradient operator behaviour.
+
+**Deliverable.**  `scripts/diag_iter844_dvdt_decomposition.py` (Codex-drafted, validated by post-iter-843 run).  No production source-code change.  All 14 W2 sentinels unaffected (no code change).
+
+**Process.**  104th iter in iter-752-844 chain.  First post-iter-808 W2 LEGACY dv/dt measurement.  Confirms iter-808/836-838 code changes do NOT affect the W2 LEGACY mode-A signature (iter-808 is duogrid-only, iter-836-838 are FB-chain-only).  Characterises mode-A as a multi-term imperfect-cancellation residual at the cube-vertex stencil, NOT a single-operator bug.  Opens iter-845+ scope to per-term cube-vertex audits (Cor / press / rel-vort / KE / div_damp separately).
