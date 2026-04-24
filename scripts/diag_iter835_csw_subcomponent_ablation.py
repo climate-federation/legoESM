@@ -8,10 +8,13 @@ deeper: inside `_c_sw`, which specific sub-step drives the h-growth?
 Sub-components ablated (one at a time):
 
   (A) mass_flux     : zero the mass-flux divergence → h_star = h.
-                     p_grad_c then computes gradient of CONSTANT h, so
-                     dp_x/dp_y ≈ 0 and uc_new/vc_new come ONLY from
-                     c_sw's KE+vort updates.  Isolates whether the
-                     first-order upwind h_star construction is a driver.
+                     p_grad_c then computes gradient of the (pre-
+                     transport) h field, which still varies spatially
+                     for W2 (sin²(lat) structure, NOT constant); the
+                     pair desynchronises from the actual transported h,
+                     mis-timing the stabilising pressure-gradient
+                     correction.  Isolates whether the first-order
+                     upwind h_star construction is a driver.
   (B) ke_gradient   : zero the KE contribution (dke_x = dke_y = 0).
                      uc_new = uc + fy1*vort_x (vort flux only).
   (C) vort_flux     : zero the vort-flux contribution
@@ -60,6 +63,14 @@ from tests.atmosphere.shallow_water.test_cases.williamson import (
     williamson_test2)
 
 
+# Capture originals at script-top time.  For correctness, the process
+# must enter this script with pristine fv3_sw_core bindings — i.e. no
+# prior monkey-patch has installed a stub at `fv3_mod._c_sw`.  This is
+# the intended use (standalone CLI invocation).  The `finally` block
+# restores from this snapshot at script exit; if another script patches
+# _c_sw before this one is invoked in the same session, the
+# restoration would restore the patched stub, not the pristine
+# production function (Codex iter-835b minor caveat).
 orig_c_sw = fv3_mod._c_sw
 orig_p_grad_c = fv3_mod._p_grad_c
 
