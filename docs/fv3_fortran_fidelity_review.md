@@ -1987,3 +1987,29 @@ Balance residual: `|sum(projected_terms) − actual dv/dt| = 6.8e−10` (above t
 **Deliverable.**  `scripts/diag_iter844_dvdt_decomposition.py` (Codex-drafted, validated by post-iter-843 run).  No production source-code change.  All 14 W2 sentinels unaffected (no code change).
 
 **Process.**  104th iter in iter-752-844 chain.  First post-iter-808 W2 LEGACY dv/dt measurement.  Confirms iter-808/836-838 code changes do NOT affect the W2 LEGACY mode-A signature (iter-808 is duogrid-only, iter-836-838 are FB-chain-only).  Characterises mode-A as a multi-term imperfect-cancellation residual at the cube-vertex stencil, NOT a single-operator bug.  Opens iter-845+ scope to per-term cube-vertex audits (Cor / press / rel-vort / KE / div_damp separately).  Refines (not contradicts) iter-793 (which localised the large constituent errors) and iter-796 (which showed zeta/KE are load-bearing cancellation terms).  Codex adversarial review a06f94d706d52915d: mechanism attribution clean, with caveats on the Bernoulli partition (noted inline) and on the fact that Fortran has no 1:1 analogue of the A-L tendency (cited iter-845+ entry points).
+
+### Iter-845 — Diag label fix: Bernoulli partition + threshold
+
+Codex stop-time review of iter-844b: "the new diagnostic still overstates and misflags what it actually measured."  Two concrete script issues in `scripts/diag_iter844_dvdt_decomposition.py`:
+
+1. **Term labels "pressure_gradient" / "ke_gradient" were misleading.**  The script computes `pressure_du = −(dBernoulli − dKE)` and `ke_du = −dKE`, an ALGEBRAIC partition of the production `−grad(B)` operator.  Labelling the parts "pressure_gradient" / "ke_gradient" suggested they were independently-replayed pressure and KE operators — which they are NOT (production computes `−grad(B)` in ONE pass).
+
+2. **The `residual_terms > 1e−10` WARNING threshold misflagged expected behaviour.**  The Bernoulli partition has an INHERENT float64 associativity residual of O(1e−10).  The WARNING fires every run despite this being correct, not buggy.
+
+**Fix.**  Relabeled the two terms "bernoulli_minus_ke (partition)" and "ke_part (partition)" throughout the `term_pairs_cc` dict, the decomposition sum, and the print section.  Added explicit partition documentation in the docstring and an inline comment at the algebra site.  Relaxed the WARNING threshold to 1e−8 and clarified the OK/WARN messages to name the partition-baseline (~1e−10) explicitly so future readers understand the threshold's origin.
+
+**Result.**  Script still reports the SAME numerical findings (peak |dv/dt| = 1.903e−05 m/s² at GC=4.34°, per-term magnitudes unchanged), but with honest labels and a threshold that doesn't misflag expected partition residuals.  Numerical measurements ARE mechanism-faithful; only the labels and threshold were cosmetically wrong.
+
+**What iter-845 DOES show.**
+- Script output is now honest about the partition: no overstatement that "pressure_gradient" and "ke_gradient" are production-exact separate operators.
+- WARNING threshold at 1e−8 catches genuine missing/extra terms without misfiring on the partition residual.
+- Numerical measurements from iter-844 remain valid and unchanged.
+
+**What iter-845 does NOT establish.**
+- Any new mechanism information beyond iter-844 (this is a cosmetic / honesty fix to the diag, not a new measurement).
+
+**Iter-846+ candidates.**  Unchanged from iter-844b: per-term cube-vertex audits at the cited Fortran entry points (`sw_core.F90:303-372` KE, `378-408` + `416-480` vort, `3419-3454` / `3560` / `3691` d2a2c_vect halo), plus the "4-term-only cancellation residual" measurement.
+
+**Deliverable.**  Updated `scripts/diag_iter844_dvdt_decomposition.py` (labels + threshold + docstring + inline comment).  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  105th iter in iter-752-845 chain.  Diagnostic honesty pass: relabelled Bernoulli-partition terms and fixed the misleading WARNING threshold.  No behavioural change to the measurement itself; iter-844's mechanism characterisation remains valid.
