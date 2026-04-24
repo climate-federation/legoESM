@@ -1789,3 +1789,52 @@ Baseline L2 = 2.18e−4 vs sentinel's measured 2.07e−4 — within 5 % (expecte
 **Deliverable.**  Updated `scripts/diag_iter839_fv3_cc2c_asymmetry.py` (`_run_w2` rewritten to use iter-761 canonical config + sentinel L2 formula).  No source-code change.  All 14 W2 sentinels pass.  Baseline L2 now matches pinned sentinel to 5 %.
 
 **Process.**  100th iter in iter-752-840 chain.  Addresses Codex stop-time review: the iter-839b reproducibility diag now reproduces the pinned iter-761 canonical matrix sentinel baseline.  No new fidelity finding; observational infrastructure hardening only.
+
+### Iter-841 — ut/vt transport path RULES OUT as a drop-in improvement (40,000× worse dh/dt error at cube vertices)
+
+Per iter-839b's top iter-840+ candidate (Codex ae42d036a93fa70f4: "compare `compute_transport_quantities` + `transport_step` (covariant ut/vt path) vs current `fv3_cc2c` + `cgrid_mass_flux_divergence`") and iter-841's Codex scoping audit (aae6135c09d2c35ff).
+
+**Method** (`scripts/diag_iter841_transport_paths.py`).  At t=0 on W2 IC, C36 non-duogrid (iter-761 canonical config), compute dh/dt from two paths:
+
+- **Path A** (current production):
+  `u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)` → `u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)` → `dh_dt_A = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)`.
+- **Path B** (Fortran-faithful ut/vt): `_, _, uc_cov, vc_cov, _, _ = _d2a2c_vect(u_d, v_d, cdgrid)` → `ut, vt = _d_sw1_recompute_ut_vt(uc_cov, vc_cov, cdgrid, dt)` → `h_new = transport_step(h, ut, vt, dt, cdgrid)` → `dh_dt_B = (h_new − h) / dt`.
+
+W2 solid-body rotation has EXACT `dh/dt = 0` everywhere — both paths report numerical error, the smaller is more Fortran-faithful.
+
+**Result.**
+
+| quantity                       | Path A (production) | Path B (ut/vt)     | ratio B/A |
+|--------------------------------|--------------------:|-------------------:|----------:|
+| peak |dh/dt| (W2 error scale)  | 1.329e−04 kg/m²/s   | **5.550e−02 kg/m²/s** | **418×**   |
+| peak location                  | face 4 (i,j)=(18,0) | face 5 (i,j)=(34,35) | — |
+| lat, lon                       | +46.24°, +1.31°     | −37.61°, +42.49°   | — |
+| **GC to nearest cube vertex**  | **34.38°** (mid-face) | **3.09°** (AT vertex) | — |
+
+- Path A peak is at mid-face (34° from cube vertex), consistent with the W2 mode-A being a face-interior numerical signature.
+- Path B peak is AT a cube vertex (GC = 3.09°), with amplitude 418× larger than Path A.
+- Delta `dh_dt_B − dh_dt_A` peak is 5.545e−02 (41 724 % of Path A's peak).
+
+**Observation — numerical reportage only.**  Path B's dh/dt error is DOMINATED by cube-vertex-localised behaviour at 400× Path A's scale.  Even though Path B matches Fortran's covariant→contravariant→transport pipeline more faithfully in principle, its specific Python implementation produces catastrophic cube-vertex errors on W2 IC.  Candidate reasons (not tested in iter-841):
+
+1. **`_d_sw1_recompute_ut_vt` halo gaps**: line 75 uses `jnp.pad(vc, ..., mode='edge')` for vc and similarly line 83 for uc.  These are SAME-FACE halo (analogous to the iter-836 `_corner_vorticity` bug), giving wrong cross-face values at panel edges.  For a non-duogrid run (as in W2 LEGACY), Part 2 corrections apply — but the duogrid early-return at line 89 means duogrid has NO boundary corrections at all.
+2. **`transport_step` mass fixer differences**: no `mass_target` passed here (mass NOT rescaled), so numerical mass drift at cube vertices accumulates in h_new.
+3. **PPM hord choice**: `transport_step`'s internal `fv_tp_2d` uses PPM with specific flux limiting; this may behave differently at cube vertices than `cgrid_mass_flux_divergence` which has its own path.
+
+**What iter-841 DOES show.**
+- The ut/vt path is NOT a drop-in improvement.  Swapping `fv3_sw_tendencies` step (b) to Path B would catastrophically regress W2 LEGACY (400× dh/dt growth at cube vertices).
+- The current Path A has LESS W2 error than Path B — the iter-839 "load-bearing asymmetry" is load-bearing in a deeper sense: the current `fv3_cc2c` output convention implicitly tunes mass transport to minimise cube-vertex W2 error.
+- Codex iter-839b's recommendation is RULED OUT as a drop-in path.
+
+**What iter-841 does NOT establish.**
+- Whether fixing the halo gap in `_d_sw1_recompute_ut_vt` (line 75 `mode='edge'` on vc_pad) would bring Path B's cube-vertex error down below Path A's.
+- Whether the Fortran `c_sw`+`d_sw1` full pipeline (including Fortran's own halo-exchanged uc/vc from ext_vector and its specific d_sw1 boundary solves) produces cube-vertex W2 error comparable to Path A or Path B.
+
+**Iter-842+ candidates.**
+- Audit and fix `_d_sw1_recompute_ut_vt`'s halo at panel edges (mode='edge' on vc_pad/uc_pad at lines 75, 83).  If this brings Path B error under Path A, the ut/vt path becomes a real candidate.
+- Port the full Fortran `c_sw`+`d_sw1` sequence as an alternative W2 LEGACY entry point (multi-iter).
+- Continue auditing other A-L production operators (`_arakawa_lamb_gradient` corner handling).
+
+**Deliverable.**  `scripts/diag_iter841_transport_paths.py` + committed output.  No source-code change.  All 14 W2 sentinels unaffected (no production change).
+
+**Process.**  101st iter in iter-752-841 chain.  Rules out the ut/vt drop-in as a W2 LEGACY improvement: Path B gives 400× worse dh/dt error at cube vertices.  Reveals that `_d_sw1_recompute_ut_vt` has its own halo fidelity gap (mode='edge' on cross-face vc/uc).  Narrows iter-842+ scope to halo fixes on the ut/vt path rather than a path swap.  Two drop-in fixes now ruled out in two iters (iter-839 symmetric v_c: 220× regression; iter-841 ut/vt swap: 400× regression at dh/dt).
