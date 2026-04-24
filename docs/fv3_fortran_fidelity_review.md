@@ -676,3 +676,39 @@ The mass-target fix is a Python-specific, non-Fortran-faithful post-step correct
 **Deliverable.**  `scripts/diag_iter785_cb_mass_target_bypass.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  49th iter in iter-752-785 chain.  Rules OUT the mass-target fix as contributor to the cosine bell distortion.  Five candidates are now ruled out or non-dominant: (b) dt scaling (iter-779), (c)-in-1-day (iter-781), `_d2a2c_vect` cube-vertex (iter-783), (d) PPM limiter (iter-784), mass-target fix (iter-785).  The residual ~121 m at t=1 day C36 comes from the underlying Lin-Rood / PPM scheme + time-splitting on the cubed sphere at moderate resolution — consistent with iter-778's "plateau above C24" and with candidate (a) "resolution-invariant structural error".
+
+### Iter-786 — `_d2a2c_vect` legacy vs duogrid path: duogrid is 3-4× WORSE at cube vertices
+
+Follow-up to iter-782 — a re-audit revealed that iter-782's C36 measurement was taken with `create_cubed_sphere(n)` using the DEFAULT `use_duogrid=False`, so it measured the LEGACY (non-duogrid) `_d2a2c_vect` path.  The W2 production sentinels (`test_w2_alpha0_c36_1day_iter761_matrix_config`, `test_cdgrid_fv3_regression.py:3916`) also use `use_duogrid=False`, so they too hit the LEGACY path.  iter-786 compares the LEGACY path against the DUOGRID path side-by-side on the same solid-body rotation IC.
+
+**Method** (`scripts/diag_iter786_d2a2c_legacy_vs_duogrid.py`; committed output at `diagnostics/iter786_output/iter786_d2a2c_legacy_vs_duogrid.txt`).  Same C36, β=π/4.  Two grids: `create_cubed_sphere(n, use_duogrid=False)` and `create_cubed_sphere(n, use_duogrid=True)` (ng=3).  For each, call `_d2a2c_vect` and compare against the analytical ut_exact / vt_exact.
+
+**Result.**
+
+| field | LEGACY peak \|err\| (rel %) | LEGACY peak location     | DUOGRID peak \|err\| (rel %) | DUOGRID peak location     | D/L ratio |
+|-------|-----------------------------|--------------------------|-------------------------------|---------------------------|-----------|
+| ut    | 5.740 m/s (11.69%)          | face 0 (36, 35), GC 1.16° | 1.931e+01 m/s (38.30%)       | face 0 (0, 34), GC 3.45°   | 3.363     |
+| vt    | 6.174 m/s (11.40%)          | face 1 (0, 36), GC 1.16°  | 2.785e+01 m/s (49.44%)       | face 5 (0, 0), GC 1.16°    | 4.511     |
+
+**Observation — numerical reportage only.**  Enabling `use_duogrid=True` INCREASES the peak absolute error in `_d2a2c_vect` by 3.4× (ut) and 4.5× (vt).  Relative errors jump from ~11% to 38–49%.  Both paths place peak errors at GC ≲ 3.5° of a cube vertex.  The DUOGRID path — which uses Lagrange polynomial corner fill (`fill_corner_region` in `src/legoesm/grids/duogrid.py:868`) in the `c2l_ord2 + pad_halo + cubed_a2d_halo` chain — produces LARGER cube-vertex errors than the LEGACY path's simpler 2-point corner averaging (`pad_halo_vector` + `_fill_corners_h2`).
+
+**What iter-786 DOES show.**
+- iter-782's earlier C36 measurement was on the LEGACY path (because `create_cubed_sphere(n)` defaults to `use_duogrid=False`), NOT on the duogrid path as the code comment in `fv3_sw_core.py:477-478` suggests (that comment says "Duogrid path (via `_d2a2c_vect_duogrid`, which Fortran also skips via `dg%is_initialized`) is unaffected by this gap" — but iter-786 shows the duogrid path has 3-4× MORE cube-vertex error, not less).
+- The production W2 sentinels run the LEGACY path and observe v_ll_Linf ≈ 0.159 m/s at 8 cube vertices — a mode-A artifact that is consistent with the 11% `_d2a2c_vect` cube-vertex error in the LEGACY path.
+- The DUOGRID path's Lagrange corner fill does NOT reduce the cube-vertex error; it increases it.
+
+**What iter-786 does NOT establish.**
+- WHY the duogrid path has larger cube-vertex error.  Candidates: (i) Lagrange corner fill overshoots at high-curvature corners; (ii) compounding error in the c2l_ord2 + scalar halo + cubed_a2d_halo chain; (iii) 4th-order A→C stencil amplifies error at non-orthogonal cells; (iv) `fill_corner_region` ordering difference from Fortran (Python pass-2 diagonal cells use updated padded; Fortran uses `veltemp`/`veltempp` snapshots).
+- Whether switching W2 sentinels to `use_duogrid=True` would reduce or increase the W2 mode-A artifact.  Given duogrid's 3-4× larger cube-vertex error in `_d2a2c_vect`, a switch would likely make W2 worse, not better.
+- Whether the duogrid path changes OTHER parts of the shallow-water pipeline (halo exchanges for scalars, momentum tendencies) in ways that offset the `_d2a2c_vect` degradation.
+
+**Iter-787+ candidates.**
+- Run a W2 1-hour integration under LEGACY vs DUOGRID and compare v_ll_Linf.  If DUOGRID W2 is much worse than LEGACY W2, that confirms duogrid's cube-vertex error dominates W2 behaviour.
+- Decompose the duogrid `_d2a2c_vect` chain: measure the intermediate fields (A-grid lat/lon after `pad_halo`, D-grid after `cubed_a2d_halo`) to find which step introduces the cube-vertex error.
+- Cross-check `fill_corner_region` ordering against Fortran `fv_duogrid.F90:1719-1903` — Python's pass-2 diagonal loop reads from padded which already contains pass-1 AND earlier pass-2 diagonal updates, while Fortran `veltemp`/`veltempp` snapshot only pass-1.
+- Audit `_d2a2c_vect_duogrid` against FV3 sw_core.F90:3419-3454 for the 4th-order A→C stencil at non-orthogonal cube-vertex cells.
+- Port Fortran FB transport chain (blocked on ng=3).
+
+**Deliverable.**  `scripts/diag_iter786_d2a2c_legacy_vs_duogrid.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  50th iter in iter-752-786 chain.  Major finding: iter-782's 11% cube-vertex error was on the LEGACY path (the W2 sentinels' actual path), not the duogrid path.  The DUOGRID path has 3-4× LARGER cube-vertex error than the LEGACY path, contrary to the expectation that the more sophisticated Lagrange corner fill would improve accuracy.  iter-787+ should decompose the duogrid `_d2a2c_vect` chain to isolate which component introduces the degradation, and cross-check the `fill_corner_region` ordering against Fortran.
