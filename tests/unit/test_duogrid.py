@@ -625,19 +625,36 @@ class TestLagrangeCornerFill:
 
 class TestSynchronizeCgridFluxes:
     """Verify the duogrid CGRID flux sync:
-      sync'd boundary flux = 0.5 * (flux_from_face_A + flux_from_face_B)
+      sync'd boundary flux = 0.5 * (flux_from_face_A ± flux_from_face_B)
 
     Matches FV3 dyn_core.F90:853-900 mpp_get_boundary(..., gridtype=CGRID_NE)
     followed by 0.5*(local + buffer) averaging at all 12 shared cube edges.
+
+    Iter-808: at 4 polar-adjacent shared edges the two faces use opposite
+    sign conventions for the mass flux across the common boundary (their
+    local (i, j) axes point in opposite physical directions at the seam),
+    so the neighbour flux must be sign-flipped before averaging.  The
+    8 directed seams requiring this sign flip are listed in
+    ``_FLUX_SIGN_FLIP_EDGES`` in ``src/legoesm/grids/halo.py``.  Fortran's
+    ``mpp_get_boundary`` handles the convention internally; our Python
+    extracts raw neighbour data, so explicit sign flip is needed.
+
     Ralph-prompt critical constraint #1.
     """
 
     def test_post_sync_all_12_edges_agree(self):
         """After sync, every shared face boundary shows matching fx/fy
-        on both sides of each seam (with index reversal where required).
+        on both sides of each seam (with index reversal where required
+        AND sign flip at the 4 polar-adjacent sign-flip pairs).
+
         Covers all 24 (face, edge) pairs = 12 cube edges read both ways.
+
+        At sign-flip edges, the two faces store the same physical mass
+        flux but with OPPOSITE signs (each in its own local convention),
+        so the post-sync contract is ``local == -nbr_rotated`` there.
         """
-        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        from legoesm.grids.halo import (
+            synchronize_cgrid_fluxes, _FLUX_SIGN_FLIP_EDGES)
         n = 8
         # Random asymmetric fluxes so that initial boundaries disagree
         rng = np.random.default_rng(42)
@@ -669,24 +686,41 @@ class TestSynchronizeCgridFluxes:
                     nbr = fy_sync[nbr_face, :, n]
                 if rev:
                     nbr = nbr[::-1]
-                diff = float(jnp.max(jnp.abs(local - nbr)))
-                assert diff < 1e-12, (
-                    f"Post-sync disagreement at face={face} edge={edge} "
-                    f"(nbr face={nbr_face} edge={nbr_edge} rev={rev}): "
-                    f"max |local - nbr| = {diff:.2e}"
-                )
+                # At sign-flip seams, local and nbr have opposite signs
+                # in their respective local conventions; for a physical
+                # consistency check we compare local to -nbr_rotated.
+                if (face, edge) in _FLUX_SIGN_FLIP_EDGES:
+                    diff = float(jnp.max(jnp.abs(local + nbr)))
+                    assert diff < 1e-12, (
+                        f"Post-sync disagreement (sign-flip seam) at "
+                        f"face={face} edge={edge} (nbr face={nbr_face} "
+                        f"edge={nbr_edge} rev={rev}): "
+                        f"max |local + nbr_rotated| = {diff:.2e} "
+                        f"(expected opposite signs)"
+                    )
+                else:
+                    diff = float(jnp.max(jnp.abs(local - nbr)))
+                    assert diff < 1e-12, (
+                        f"Post-sync disagreement at face={face} edge={edge} "
+                        f"(nbr face={nbr_face} edge={nbr_edge} rev={rev}): "
+                        f"max |local - nbr| = {diff:.2e}"
+                    )
 
     def test_sync_is_exact_average_at_every_seam(self):
-        """Bit-identical: sync'd boundary = 0.5*(pre_A + pre_B_rotated) for
+        """Bit-identical: sync'd boundary = 0.5*(pre_A ± pre_B_rotated) for
         EVERY one of the 24 (face, edge) pairs.  Matches FV3 dyn_core.F90
         mpp_get_boundary(..., gridtype=CGRID_NE) + 0.5*(local + buffer).
 
+        Iter-808: at sign-flip seams the ± is a MINUS (the neighbour's
+        flux is sign-flipped before averaging).  Elsewhere it is a PLUS.
+
         This is tighter than test_post_sync_all_12_edges_agree, which only
         checks that the two post-sync sides agree: here we check the
-        post-sync value matches the exact 0.5*(pre_A + pre_B_rotated)
+        post-sync value matches the exact 0.5*(pre_A ± pre_B_rotated)
         formula with zero tolerance.
         """
-        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        from legoesm.grids.halo import (
+            synchronize_cgrid_fluxes, _FLUX_SIGN_FLIP_EDGES)
         n = 6
         rng = np.random.default_rng(7)
         fx_pre = jnp.asarray(rng.standard_normal((6, n + 1, n)))
@@ -710,13 +744,15 @@ class TestSynchronizeCgridFluxes:
                 nbr_pre = _boundary(fx_pre, fy_pre, nbr_face, nbr_edge)
                 if rev:
                     nbr_pre = nbr_pre[::-1]
-                expected = 0.5 * (local_pre + nbr_pre)
+                sign = -1.0 if (face, edge) in _FLUX_SIGN_FLIP_EDGES else 1.0
+                expected = 0.5 * (local_pre + sign * nbr_pre)
                 actual = _boundary(fx_sync, fy_sync, face, edge)
                 # Bit-identical (atol=0) — the sync is implemented as a
-                # pure 0.5 * (a + b) JAX primitive, no rounding needed.
+                # pure 0.5 * (a ± b) JAX primitive, no rounding needed.
                 assert bool(jnp.array_equal(actual, expected)), (
                     f"Sync value at face={face} edge={edge} differs from "
-                    f"0.5*(pre_local + pre_nbr_rotated). max diff = "
+                    f"0.5*(pre_local {'+' if sign>0 else '-'} "
+                    f"pre_nbr_rotated). max diff = "
                     f"{float(jnp.max(jnp.abs(actual - expected))):.2e}"
                 )
 
@@ -798,40 +834,44 @@ class TestSynchronizeCgridFluxes:
         _chk("f0 S", fy_sync[0, :, 0], exp)
         _chk("f5 N", fy_sync[5, :, n], exp)
 
-        # --- 2 polar seams to face 3 (cross-axis ±reversal) ---
-        # f3 N ↔ f4 W (rev=True: going +y along f3's north edge maps
-        # to going -y along f4's west edge)
+        # --- 2 polar seams to face 3 (cross-axis) ---
+        # f3 N ↔ f4 W (rev=True, SAME sign convention: going +y along
+        # f3's north edge maps to going -y along f4's west edge, same
+        # physical orientation, no sign flip needed)
         exp = 0.5 * (fy[3, :, n] + fx[4, 0, :][::-1])
         _chk("f3 N", fy_sync[3, :, n], exp)
         _chk("f4 W", fx_sync[4, 0, :], exp[::-1])
-        # f3 S ↔ f5 W (no reversal: -y face's south meets -z face's west
-        # with consistent index direction)
-        exp = 0.5 * (fy[3, :, 0] + fx[5, 0, :])
+        # f3 S ↔ f5 W (iter-808 SIGN-FLIP seam: -y face's south meets
+        # -z face's west with OPPOSITE sign conventions at shared edge)
+        # Face 3 stores +0.5*(fy_pre[3,:,0] - fx_pre[5,0,:])
+        # Face 5 stores +0.5*(fx_pre[5,0,:] - fy_pre[3,:,0]) = -exp
+        exp = 0.5 * (fy[3, :, 0] - fx[5, 0, :])
         _chk("f3 S", fy_sync[3, :, 0], exp)
-        _chk("f5 W", fx_sync[5, 0, :], exp)
+        _chk("f5 W", fx_sync[5, 0, :], -exp)
 
         # --- 2 polar seams to face 1 (cross-axis) ---
-        # f1 N ↔ f4 E (rev=False: +y face's north meets +z face's east,
-        # same index direction)
-        exp = 0.5 * (fy[1, :, n] + fx[4, n, :])
+        # f1 N ↔ f4 E (iter-808 SIGN-FLIP seam: +y face's north meets
+        # +z face's east with OPPOSITE sign conventions)
+        exp = 0.5 * (fy[1, :, n] - fx[4, n, :])
         _chk("f1 N", fy_sync[1, :, n], exp)
-        _chk("f4 E", fx_sync[4, n, :], exp)
-        # f1 S ↔ f5 E (rev=True: +y face's south meets -z face's east,
-        # opposite index direction)
+        _chk("f4 E", fx_sync[4, n, :], -exp)
+        # f1 S ↔ f5 E (rev=True, SAME sign convention: +y face's south
+        # meets -z face's east, opposite index direction but same sign)
         exp = 0.5 * (fy[1, :, 0] + fx[5, n, :][::-1])
         _chk("f1 S", fy_sync[1, :, 0], exp)
         _chk("f5 E", fx_sync[5, n, :], exp[::-1])
 
-        # --- 2 polar seams to face 2 (same-axis S/N with reversal) ---
-        # f2 N ↔ f4 N (rev=True: -x face's north meets +z face's north
-        # going opposite longitudinal directions)
-        exp = 0.5 * (fy[2, :, n] + fy[4, :, n][::-1])
+        # --- 2 polar seams to face 2 (same-axis S/N with reversal
+        # AND iter-808 SIGN-FLIP at both seams) ---
+        # f2 N ↔ f4 N (rev=True AND sign flip: -x face's north meets
+        # +z face's north with opposite longitudinal AND sign direction)
+        exp = 0.5 * (fy[2, :, n] - fy[4, :, n][::-1])
         _chk("f2 N", fy_sync[2, :, n], exp)
-        _chk("f4 N", fy_sync[4, :, n], exp[::-1])
-        # f2 S ↔ f5 S (rev=True)
-        exp = 0.5 * (fy[2, :, 0] + fy[5, :, 0][::-1])
+        _chk("f4 N", fy_sync[4, :, n], -exp[::-1])
+        # f2 S ↔ f5 S (rev=True AND sign flip)
+        exp = 0.5 * (fy[2, :, 0] - fy[5, :, 0][::-1])
         _chk("f2 S", fy_sync[2, :, 0], exp)
-        _chk("f5 S", fy_sync[5, :, 0], exp[::-1])
+        _chk("f5 S", fy_sync[5, :, 0], -exp[::-1])
 
 
 # =========================================================================
