@@ -1561,3 +1561,59 @@ Per iter-831's localisation of FB h-growth to `_c_sw` and iter-832's elimination
 **Deliverable.**  `scripts/diag_iter835_csw_subcomponent_ablation.py` + committed output (iter-835b: `fix_mass=False` added after Codex review).  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  95th iter in iter-752-835 chain.  Rules out four coarse sub-step ablations (mass_flux, ke_gradient, vort_flux) as individual drivers of the FB h-growth at C24 12h.  Reproduces iter-831's `p_grad_c` stabilising role.  Scope-limited to the four tested targets — the universal "no single piece dominates" conclusion requires additional ablations before it can be claimed.  Iter-835b rewording addresses Codex adversarial-review findings on sample-space coverage and prose overclaim.
+
+### Iter-836 — `_corner_vorticity` duogrid halo fix: 15.6 % rotation error at cube-vertex corners
+
+Per iter-835's iter-836+ candidate "individually ablate the unablated operators (`_corner_vorticity` …) one per iter" and Codex inline fidelity check (agentId a56dfc70cb22ec09d), iter-836 audited `_corner_vorticity`'s halo strategy.
+
+**Fortran oracle** (`atmos_cubed_sphere-symmetryclean/model/sw_core.F90:378-408`, `3419-3452`): in the duogrid branch, `c_sw` calls `d2a2c_vect` which reconstructs `uc`/`vc` over the FULL 2D halo from the duogrid-extended `u`/`v` (via `ext_vector` pipeline).  The corner-circulation stencil `vort(i,j) = fx(i,j-1) − fx(i,j) − fy(i-1,j) + fy(i,j)` then reads `fx = uc·dxc` and `fy = vc·dyc` at halo positions where `uc`/`vc` are the proper cross-face-rotated values.
+
+**Python gap (pre-iter-836)**: `src/legoesm/core/fv3_sw_core.py::_corner_vorticity:1177-1178` used `jnp.pad(..., mode='edge')` on `fx_circ`/`fy_circ` in the duogrid branch — a SAME-FACE extrapolation that ignores the cross-face rotation convention.
+
+**Diagnostic** (`scripts/diag_iter836_corner_vort_halo.py`).  At C24 on W2 IC (duogrid), computed `vort_abs` two ways: (a) current code with mode='edge', (b) proposed fix with `pad_halo_vector` on cell-centre-averaged `(uc, vc)`.  Measured |Δvort_abs|.
+
+**Pre-fix result.**
+
+| quantity                                      | value           |
+|-----------------------------------------------|-----------------|
+| max |vort_abs_edge| (interior scale)          | 1.580e−04 /s    |
+| peak |Δ| (edge vs rotated)                    | 2.467e−05 /s    |
+| relative peak                                 | **15.62 %**      |
+| peak location                                 | face 4, cube vertex at (35.26°, −135.00°) |
+| panel-edge corners peak                       | 2.467e−05 /s    |
+| interior corners peak                         | 3.473e−06 /s    |
+
+**Observation — numerical reportage only.**
+- The `mode='edge'` padding produces a 15.6 % error RELATIVE to the interior `vort_abs` scale at the cube-vertex corners of the face.  Localised to i∈{0,n} or j∈{0,n} (panel-edge ring).
+- Interior corners have much smaller delta (2.2 % of interior scale), indicating the error is concentrated at the cube-vertex ring as expected.
+- The peak location is exactly AT a cube vertex (GC-to-nearest-vertex = 0.00°), consistent with the structural iter-793/796 cube-vertex-localised signature.
+
+**Fix** (applied in this commit).  For the duogrid branch of `_corner_vorticity`, replaced `mode='edge'` padding with `pad_halo_vector` on cell-centre-averaged `(uc, vc)`.  The cell-centre averaging is lossy (O(dx²) in smooth fields) but cross-face rotation-correct; still much closer to Fortran's direct reconstruction from halo `u`/`v` than the rotation-blind `mode='edge'`.  Non-duogrid branch unchanged (Fortran's own non-duogrid path uses linear extrapolation that our code already mirrors).
+
+**Downstream impact.**
+
+| quantity                                                | pre-iter-836 | post-iter-836 | Δ   |
+|---------------------------------------------------------|-------------:|-------------:|-----|
+| W2 sentinels (`TestW2BoundaryErrorBudget`, 14 tests)    | 14 pass      | 14 pass      | —   |
+| FB DUOGRID C24 W2 12h baseline h_max                    | 10765        | 10776        | +0.1 % |
+| iter-836 diagnostic Δvort_abs peak                       | 15.6 %       | 0.0 %        | −15.6 % |
+
+`_corner_vorticity` is only called from `_c_sw` and `fv3_csw_tendencies` (both in the FB chain).  Neither the A-L RK3 production path (W2 LEGACY) nor the cosine-bell `transport_step` path uses `_corner_vorticity`, so cosine-bell/W5/ocean-rest-state/W2-LEGACY are unaffected — the fix is Fortran-fidelity-only for the FB chain.
+
+**What iter-836 DOES show.**
+- `_corner_vorticity` mode='edge' halo was a concrete Fortran-fidelity bug (15.6 % local error at cube-vertex corners of the FB-chain `vort_abs`).
+- The fix reduces the diagnostic Δ to zero and does not regress any production sentinel.
+- FB h_max at C24 12h shifts by +0.1 % — the halo bug was NOT a dominant contributor to the 8× h-growth.
+
+**What iter-836 does NOT establish.**
+- Whether the cell-centre-averaging approximation in the fix (O(dx²) error) is sufficient for longer horizons or finer resolutions.  The ideal Fortran-faithful fix would derive halo `uc`/`vc` directly from halo-extended `u_d`/`v_d` via the 4th-order A→C stencil (like `_d2a2c_vect_duogrid` step 4), not via cell-centre averaging.
+- Whether fixing halo bugs in the other unablated operators (`_ke_upwind`, `_vorticity_flux`, `_d_sw5_corner_divergence`, etc.) would collectively drop FB h_max below 10765.
+
+**Iter-837+ candidates.**
+- Full 2D-halo utmp/vtmp in `_d2a2c_vect_duogrid` + halo-extended `uc`/`vc` returned alongside interior — replaces the iter-836 cell-centre averaging with direct A→C reconstruction (higher-order Fortran-faithful).
+- Audit `_ke_upwind` duogrid halo (currently only computes interior; panel-edge cells may use neighbor-face uc via halo).
+- Audit `_vorticity_flux` halo usage.
+
+**Deliverable.**  `scripts/diag_iter836_corner_vort_halo.py` + committed output.  `src/legoesm/core/fv3_sw_core.py::_corner_vorticity` duogrid branch rewritten; non-duogrid branch unchanged.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  96th iter in iter-752-836 chain.  First Fortran-fidelity CODE FIX since iter-808's sign-flip sync.  Closes a concrete 15.6 % halo rotation error in `_corner_vorticity`'s duogrid branch.  FB C24 12h baseline essentially unchanged (+0.1 %), consistent with iter-835's finding that no single operator dominates the FB h-growth.

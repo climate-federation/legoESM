@@ -1166,21 +1166,53 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
     fx_circ = uc * cdgrid.dxc    # (6, n+1, n)
     fy_circ = vc * cdgrid.dyc    # (6, n, n+1)
 
-    # Boundary padding for the circulation halo.  FV3 non-duogrid path
-    # (sw_core.F90:396-400) applies linear extrapolation.  The duogrid
-    # path relies on halo-exchanged cross-face data; this Python helper
-    # does not do halo exchange on `fx_circ`/`fy_circ`, so under
-    # duogrid we fall back to plain `mode='edge'` (closer to Fortran
-    # than the linear-extrapolation override which is non-physical on
-    # cross-face neighbours).  Iter-552 fix: gate the extrapolation on
-    # `not use_duogrid` per Fortran convention.
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    if (not use_duogrid) and n > 2:
-        fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
-        fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
-        fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
-        fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
+    # Boundary padding for the circulation halo.
+    # - Non-duogrid path: Fortran (sw_core.F90:396-400) applies linear
+    #   extrapolation, so we start from mode='edge' then overwrite.
+    # - Duogrid path (iter-836): Fortran relies on cross-face halo-
+    #   exchanged uc/vc from `d2a2c_vect` applied to halo-filled u/v
+    #   (`ext_vector`).  Plain `mode='edge'` on fx_circ/fy_circ loses
+    #   the cross-face rotation and produces a 15.6 %-of-interior-
+    #   scale error at cube-vertex corners on W2 IC (iter-836 diag).
+    #   Replaced here by `pad_halo_vector` on cell-centre-averaged
+    #   (uc, vc) — cross-face rotation-correct to leading order.
+    if use_duogrid and n >= 2:
+        from legoesm.grids.halo import pad_halo_vector as _phv
+        # Average uc/vc to cell centres for the vector halo exchange.
+        uc_cc = 0.5 * (uc[:, :-1, :] + uc[:, 1:, :])   # (6, n, n)
+        vc_cc = 0.5 * (vc[:, :, :-1] + vc[:, :, 1:])   # (6, n, n)
+        grid = cdgrid.base
+        dg = grid.duogrid
+        uc_cc_pad, vc_cc_pad = _phv(
+            uc_cc, vc_cc,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=None, duogrid=dg, halo=1,
+        )  # (6, n+2, n+2) each — cross-face rotation-aware
+        # Reconstruct face-staggered uc/vc over 1-halo in the direction
+        # we need: fx_pad needs j-halo (axis 2), fy_pad needs i-halo
+        # (axis 1).  Face values = 0.5 * (left_cc + right_cc).
+        uc_face_pad = 0.5 * (uc_cc_pad[:, :-1, :]
+                              + uc_cc_pad[:, 1:, :])   # (6, n+1, n+2)
+        vc_face_pad = 0.5 * (vc_cc_pad[:, :, :-1]
+                              + vc_cc_pad[:, :, 1:])   # (6, n+2, n+1)
+        # Metric halo: dxc/dyc are continuous across seams to leading
+        # order; edge-mode here introduces O(dx) error at the panel edge
+        # but is small compared to the 15.6 % uc rotation error.
+        dxc_pad = jnp.pad(cdgrid.dxc, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        dyc_pad = jnp.pad(cdgrid.dyc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        fx_pad = uc_face_pad * dxc_pad   # (6, n+1, n+2)
+        fy_pad = vc_face_pad * dyc_pad   # (6, n+2, n+1)
+    else:
+        # Non-duogrid path: edge padding + linear extrapolation at the 4
+        # panel-edge boundaries (sw_core.F90:396-400).
+        fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        if n > 2:
+            fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
+            fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
+            fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
+            fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
 
     # Direct corner vorticity: vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)
     vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
