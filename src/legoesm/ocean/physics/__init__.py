@@ -23,6 +23,7 @@ from legoesm.ocean.physics.lateral_mixing import (
     BiharmonicConfig,
     GMRediConfig,
     VisbeckConfig,
+    BackscatterConfig,
 )
 from legoesm.ocean.physics.surface_forcing import (
     SurfaceForcingConfig,
@@ -53,6 +54,7 @@ __all__ = [
     "BiharmonicConfig",
     "GMRediConfig",
     "VisbeckConfig",
+    "BackscatterConfig",
     "SurfaceForcingConfig",
     "PrescribedForcingConfig",
     "RestoringConfig",
