@@ -1745,6 +1745,47 @@ The symmetric projection catastrophically regressed W2 LEGACY L2 by 230× and di
 - If a broader refactor is needed: `cgrid_mass_flux_divergence` takes covariant uc/vc, derives contravariant ut/vt internally.  Multi-iter.
 - Continue auditing other A-L production path operators: `_arakawa_lamb_gradient` + mass-transport consistency (next-iter scope per Codex audit).
 
-**Deliverable.**  Inline comment in `src/legoesm/core/operators_cdgrid.py::fv3_cc2c` + `scripts/diag_iter839_fv3_cc2c_asymmetry.py` (reproducibility) + iter-839 doc entry.  No behavioural change.  All 14 W2 sentinels pass.  Reproducibility diag confirms baseline L2 = 3.05e−4 vs symmetric L2 = 4.82e−2 (158× regression at C36 1d).
+**Deliverable.**  Inline comment in `src/legoesm/core/operators_cdgrid.py::fv3_cc2c` + `scripts/diag_iter839_fv3_cc2c_asymmetry.py` (reproducibility, iter-840-aligned to pinned sentinel config) + iter-839 doc entry.  No behavioural change.  All 14 W2 sentinels pass.  Reproducibility diag (iter-840 fix, iter-761 canonical matrix config: hyperdiff=0, div_damp=8·base, boundary_fix=True, damp_v=0.06, nord_v=2, use_duogrid=False, sentinel L2 formula) confirms **baseline L2 = 2.18e−4** (matches pinned `test_w2_alpha0_c36_1day_iter761_matrix_config` measurement of 2.07e−4 to 5%) vs **symmetric_vc L2 = 4.81e−2** (221× regression).
 
 **Process.**  99th iter in iter-752-839 chain.  Rules out Codex's candidate "symmetric v_c projection" fix for W2 LEGACY mode-A via direct test.  The asymmetry is load-bearing in the current physical-vs-covariant convention mismatch between `fv3_cc2c` and `cgrid_mass_flux_divergence`; fixing requires a multi-iter architectural refactor rather than a single-point change.  Real iter with meaningful work: new Fortran-fidelity discrepancy identified, hypothesis tested, ablation result documented.
+
+### Iter-840 — Align iter-839 diag to pinned canonical sentinel baseline
+
+Codex stop-time review of iter-839b: "the new iter-839 reproducibility script is not actually reproducing a pinned repo baseline."  iter-839b's `scripts/diag_iter839_fv3_cc2c_asymmetry.py` used config `hyperdiff_coeff=1.0e15, div_damp=_div_damp_cube(n)` which gave baseline L2 = 3.05e−4 — close-but-not-matching the pinned iter-761 canonical matrix sentinel (measured L2 = 2.07e−4, cap 4.0e−4).  The 50 % L2 shift is purely from the config mismatch; without a pinned baseline, the diag's relative-regression claim can't be cross-checked against the repo's canonical numerical state.
+
+**Fix.**  Rewrote `_run_w2` in the diagnostic to use the EXACT iter-761 canonical matrix config from `test_w2_alpha0_c36_1day_iter761_matrix_config`:
+
+```python
+hyperdiff_coeff=0.0,
+div_damp=8.0 * 1.5e7 * (48/n)**2,   # iter-761 8× bump
+boundary_fix=True,
+damp_v=0.06,
+nord_v=2,
+```
+
+Also swapped the L2 formula to match the sentinel's: `L2 = sqrt(mean(err**2)) / mean(|h0|)` (RMSE / mean magnitude), where `h0` is the initial h (W2 is steady so h_exact == h0).
+
+**Result (iter-840 diag re-run).**
+
+| variant       | status | L2              | h_max |
+|---------------|--------|----------------:|------:|
+| baseline      | ok     | **2.176e−04**    | 2998  |
+| symmetric_vc  | ok     | **4.808e−02**    | 3050  |
+
+Baseline L2 = 2.18e−4 vs sentinel's measured 2.07e−4 — within 5 % (expected: sentinel uses `use_duogrid=False` via `create_cubed_sphere(n=n, use_duogrid=False)`, same here; any tiny residual could be from JAX/metal vs CPU dtype or a recent harmless commit).  Symmetric regression confirmed: 221× worse than baseline.  This reproduces the sentinel's pinned numerical state AND the iter-839 hypothesis test simultaneously.
+
+**What iter-840 DOES show.**
+- iter-839's symmetric-v_c regression hypothesis test is now baselined against the canonical iter-761 sentinel.
+- Diag script is a valid reproducibility artifact: running it in any future session will produce ~2.18e−4 for the baseline (matching `test_w2_alpha0_c36_1day_iter761_matrix_config`) and ~4.81e−2 for the symmetric variant.
+
+**What iter-840 does NOT establish.**
+- Anything about the underlying Fortran-fidelity question (addressed in iter-839/839b).
+- Whether the remaining 5 % L2 gap (2.18 vs 2.07) indicates any code drift.
+
+**Iter-841+ candidates.**
+- Compare `compute_transport_quantities` + `transport_step` (covariant ut/vt path in `fv_tp_2d.py`) vs the current `fv3_cc2c` + `cgrid_mass_flux_divergence` pair on W2 LEGACY, per iter-839's Codex-prioritised candidate.
+- Continue auditing `_arakawa_lamb_gradient` corner handling.
+
+**Deliverable.**  Updated `scripts/diag_iter839_fv3_cc2c_asymmetry.py` (`_run_w2` rewritten to use iter-761 canonical config + sentinel L2 formula).  No source-code change.  All 14 W2 sentinels pass.  Baseline L2 now matches pinned sentinel to 5 %.
+
+**Process.**  100th iter in iter-752-840 chain.  Addresses Codex stop-time review: the iter-839b reproducibility diag now reproduces the pinned iter-761 canonical matrix sentinel baseline.  No new fidelity finding; observational infrastructure hardening only.

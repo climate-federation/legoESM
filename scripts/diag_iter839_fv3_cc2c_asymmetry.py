@@ -74,8 +74,16 @@ def _fv3_cc2c_symmetric(u_cc, v_cc, cdgrid):
 
 
 def _run_w2(n, variant, dt=300.0, days=1.0):
-    """Run W2 at C{n} for `days` days.  variant ∈ {'baseline',
-    'symmetric_vc'}."""
+    """Run W2 at C{n} for `days` days under the iter-761 canonical
+    matrix config (pinned by `test_w2_alpha0_c36_1day_iter761_matrix_config`
+    in `tests/unit/test_cdgrid_fv3_regression.py`).
+
+    variant ∈ {'baseline', 'symmetric_vc'}
+
+    L2 formula matches the sentinel exactly:
+        L2 = sqrt(mean(err**2)) / mean(|h0|)
+    where err = state.h (after n_steps) − h0 (initial).
+    """
     if variant == 'baseline':
         ocd.fv3_cc2c = orig_fv3_cc2c
     elif variant == 'symmetric_vc':
@@ -84,10 +92,21 @@ def _run_w2(n, variant, dt=300.0, days=1.0):
         raise ValueError(variant)
 
     n_steps = int(round(days * 86400 / dt))
-    grid = create_cubed_sphere(n=n)
+
+    # iter-761 canonical matrix config (pinned sentinel reproduction):
+    #   hyperdiff_coeff = 0, div_damp = 8 * _div_damp_cube(n),
+    #   boundary_fix = True, damp_v = 0.06, nord_v = 2, NO duogrid.
+    div_damp_base = 1.5e7 * (48.0 / n) ** 2
+    div_damp = 8.0 * div_damp_base
+
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
     cfg = CDGridShallowWaterConfig(
-        hyperdiff_coeff=1.0e15, div_damp=1.5e7 * (48 / n) ** 2,
-        boundary_fix=True, fix_mass=True)
+        hyperdiff_coeff=0.0,
+        div_damp=div_damp,
+        boundary_fix=True,
+        damp_v=0.06,
+        nord_v=2,
+    )
     model = FV3EdgeShallowWaterModel(grid, config=cfg)
     cdgrid = model.cdgrid
 
@@ -99,6 +118,7 @@ def _run_w2(n, variant, dt=300.0, days=1.0):
         h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
     model.set_initial_mass(state)
 
+    h0 = state.h
     crashed = None
     for step in range(n_steps):
         state = model.step(state, dt)
@@ -109,20 +129,22 @@ def _run_w2(n, variant, dt=300.0, days=1.0):
     if crashed is not None:
         return {'crashed_at_step': crashed}
 
-    # Compute L2 error relative to analytical h
+    # Sentinel-exact L2 formula.
+    h0_np = np.asarray(h0)
     h_np = np.asarray(state.h)
-    h_exact = np.asarray(sw.h.data)
-    area = np.asarray(grid.area)
-    L2 = float(np.sqrt(
-        np.sum(area * (h_np - h_exact) ** 2) / np.sum(area * h_exact ** 2)))
+    h_mean = float(np.mean(np.abs(h0_np)))
+    err = h_np - h0_np
+    L2 = float(np.sqrt(np.mean(err ** 2)) / h_mean)
     return {'L2': L2, 'h_max': float(np.max(np.abs(h_np)))}
 
 
 n = 36
 days = 1.0
 
-print(f"Iter-839 `fv3_cc2c` symmetric v_c projection hypothesis test")
-print(f"W2 C{n} {days}d, iter-761 canonical config")
+print(f"Iter-839 (iter-840 fix) `fv3_cc2c` symmetric v_c projection test")
+print(f"W2 C{n} {days}d, iter-761 canonical matrix config")
+print(f"(pinned by test_w2_alpha0_c36_1day_iter761_matrix_config,")
+print(f" sentinel cap 4.0e-4, measured baseline 2.07e-4)")
 print()
 print(f"{'variant':>15}  {'status':>18}  {'L2':>10}  {'h_max':>8}")
 print("-" * 60)
