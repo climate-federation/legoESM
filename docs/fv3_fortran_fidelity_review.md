@@ -760,3 +760,41 @@ Per iter-811's iter-812+ candidate "Visual inspection of DUOGRID W2 v_north at C
 **Deliverable.**  Updated `scripts/diag_w2_visual.py` + regenerated PNG plots in `diagnostics/fv3_visual/`.  No source-code change.  No new sentinel.
 
 **Process.**  76th iter in iter-752-812 chain.  Confirms via visual inspection that DUOGRID at C24 has ~5× larger v_north artifact than LEGACY.  iter-808 eliminates the catastrophic failure but doesn't close the quality gap at this resolution.  LEGACY remains the visually-cleaner production path at C24.
+
+### Iter-814 — Lat-lon regridded visuals: DUOGRID shows crisp 8-cube-vertex dipole pattern
+
+Per iter-813, added lat-lon regridded v_north and h_err visualisations to `diag_w2_visual.py`, separating physical signal from cubed-sphere native-grid rotation artifacts.
+
+**Method.**  After regridding to 360×181 lat-lon grid via `apply_cubedsphere_to_latlon`, plot single-panel v_north and h_err.  This eliminates the pole X-pattern (a coordinate-rotation quirk on face 4's native grid) and shows the true physical error pattern.
+
+**Observations (C36 W2 1-day post iter-808).**
+
+LEGACY (v_ll_Linf = 0.382 m/s):
+- Polar bands at |lat| > 80° showing alternating ± pattern in 4 longitudinal zones (projection of face 4/5 pole X-pattern).
+- Very faint vertical stripes at cube-vertex meridians (lon = ±45°, ±135°) in mid-latitudes.
+- Equatorial/tropical regions nearly clean.
+
+DUOGRID RK3 (v_ll_Linf = 1.206 m/s, 3.15× LEGACY):
+- **8 crisp dipole blobs at (±35°, ±45° / ±135°)** — exactly the 8 cube vertices.  Each blob has peak ~±1.2 m/s.
+- Vertical striping between cube-vertex blobs along meridians.
+- Less polar-band visibility than LEGACY (different mode character).
+
+**Key insight.**  The DUOGRID cube-vertex dipole blobs ARE the iter-793/796 "incomplete cube-vertex cancellation" signature.  At polar-adjacent cube vertices (lat = ±35.26°), the A-L+RK3 cancellation of Coriolis+pressure+KE+zeta fails more visibly in DUOGRID than in LEGACY.  This is consistent with iter-810's 13% cosine bell degradation under DUOGRID (driven by Lagrange corner-fill contaminating the cancellation).
+
+**What iter-814 DOES show.**
+- Lat-lon projection cleanly reveals the W2 artifact geometry: LEGACY has polar bands + faint cube-vertex meridian stripes; DUOGRID has crisp 8-blob cube-vertex dipoles at ±35° lat.
+- The visible W2 artifact in LEGACY is ~0.3-0.4 m/s (regrid-interpolated) from the polar region.
+- The DUOGRID residual is concentrated at all 8 cube vertices; LEGACY is distributed more broadly (polar bands + meridian stripes).
+
+**What iter-814 does NOT establish.**
+- Whether any further config tuning can eliminate the polar bands in LEGACY.
+- Whether the DUOGRID cube-vertex dipoles can be addressed by Lagrange-fill replacement (iter-803 showed averaging fallback helps du/dv at t=0 but broader-run impact untested).
+
+**Iter-815+ candidates.**
+- Test ocean rest state (the remaining Ralph loop evaluation I haven't validated post iter-808).
+- Investigate LEGACY polar-band origin: is it the pole-coordinate singularity in the regrid, or a real dynamical mode?
+- Port Fortran FB transport chain (long-term; still blocked).
+
+**Deliverable.**  Updated `scripts/diag_w2_visual.py` + 4 new lat-lon plots in `diagnostics/fv3_visual/` (`w2_vnorth_production_latlon.png`, `w2_vnorth_duogrid_latlon.png`, `w2_herr_production_latlon.png`, `w2_herr_duogrid_latlon.png`).
+
+**Process.**  77th iter in iter-752-814 chain.  Lat-lon visualisation makes the W2 artifact geometry explicit: LEGACY has a polar-band + subtle cube-vertex-meridian pattern; DUOGRID has an 8-cube-vertex dipole signature matching the iter-793/796 mechanism.  No new tests broken; background regression run completed with exit code 0.

@@ -142,6 +142,57 @@ plot_6faces(vn_d, f'v_north: DUOGRID RK3 C{N} day 1', 'w2_vnorth_csw_dg.png')
 h_diff = np.abs(h_err_d) - np.abs(h_err_p)
 plot_6faces(h_diff, f'|h_err| DUOGRID - LEGACY C{N}', 'w2_herr_improvement.png')
 
+# Iter-814: add lat-lon regridded v_north plots to separate the
+# physical signal from native-grid visualization artifacts (face 4's
+# X-pattern at the geographic pole is a coordinate-rotation quirk,
+# not a physical artifact).  After regridding to lat-lon, the pole
+# is represented cleanly as a single point.
+from legoesm.grids.regridding import (
+    get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
+weights = get_cubedsphere_to_latlon_weights(N, n_lon=360, n_lat=181)
+vn_p_ll = apply_cubedsphere_to_latlon(vn_p, weights)
+vn_d_ll = apply_cubedsphere_to_latlon(vn_d, weights)
+h_err_p_ll = apply_cubedsphere_to_latlon(h_err_p, weights)
+h_err_d_ll = apply_cubedsphere_to_latlon(h_err_d, weights)
+
+print(f"  Post-regrid v_ll_Linf:  LEGACY {np.abs(vn_p_ll).max():.3e},"
+      f" DUOGRID {np.abs(vn_d_ll).max():.3e}")
+
+
+def _plot_latlon(field, title, fname, cmap='RdBu_r', sym=True):
+    """Plot lat-lon field as one panel."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    if sym:
+        vmax = np.abs(field).max()
+        vmin = -vmax
+    else:
+        vmin, vmax = field.min(), field.max()
+    im = ax.imshow(field, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax,
+                    extent=(-180, 180, -90, 90), aspect='auto')
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(title)
+    # Overlay lat/lon reference lines.
+    for lat in (-60, -30, 0, 30, 60):
+        ax.axhline(lat, color='gray', linewidth=0.3, alpha=0.5)
+    for lon in (-90, 0, 90):
+        ax.axvline(lon, color='gray', linewidth=0.3, alpha=0.5)
+    plt.colorbar(im, ax=ax, shrink=0.8, format='%.3f')
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT, fname), dpi=150)
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
+_plot_latlon(vn_p_ll, f'v_north lat-lon: Production LEGACY C{N} day 1',
+              'w2_vnorth_production_latlon.png')
+_plot_latlon(vn_d_ll, f'v_north lat-lon: DUOGRID RK3 C{N} day 1',
+              'w2_vnorth_duogrid_latlon.png')
+_plot_latlon(h_err_p_ll, f'h_err lat-lon: Production LEGACY C{N} day 1',
+              'w2_herr_production_latlon.png')
+_plot_latlon(h_err_d_ll, f'h_err lat-lon: DUOGRID RK3 C{N} day 1',
+              'w2_herr_duogrid_latlon.png')
+
 print(f"\nImprovement: h_err max reduced by {(1-np.abs(h_err_d).max()/np.abs(h_err_p).max())*100:.0f}%")
 print(f"  Production edge/int ratio: {vn_p[:,[0,-1],:].std() / (vn_p[:,2:-2,2:-2].std()+1e-30):.2f}")
 print(f"  csw+dg edge/int ratio: {vn_d[:,[0,-1],:].std() / (vn_d[:,2:-2,2:-2].std()+1e-30):.2f}")
