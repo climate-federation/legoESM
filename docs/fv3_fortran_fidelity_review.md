@@ -503,3 +503,46 @@ Per iter-780's iter-781+ candidate "Trajectory diagnostic: measure the error loc
 **Deliverable.**  `scripts/diag_iter781_cb_error_trajectory.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  45th iter in iter-752-781 chain.  Observational-only trajectory report.  dt was changed from 1350s (iter-779/780) to 1440s specifically so that 0.1-day sample labels correspond to an integer number of dt steps; a script-level assertion prevents future drift.  Explicit scope-limit: the 1-day window doesn't include a cube-vertex crossing, so candidate (c) remains untested by iter-781.
+
+### Iter-782 — `_d2a2c_vect` cube-vertex error audit on solid-body rotation IC (C36)
+
+Per iter-781's iter-782+ candidate "Audit `_d2a2c_vect` non-duogrid cube-vertex gap (still unaudited from iter-776b)", iter-782 measures the absolute error in `_d2a2c_vect`'s output (ut, vt) on the ANALYTICAL solid-body rotation initial condition at t=0, i.e., BEFORE any time integration.
+
+**Rationale.**  For the cosine bell test, `_d2a2c_vect` is called once at t=0 and the resulting ut/vt are held constant for the whole integration.  Any error in (ut, vt) at t=0 therefore imprints a CONSTANT bias on the transport winds for all 60 timesteps of a 1-day C36 run.  Iter-782 quantifies that bias and localises it.
+
+**Method** (`scripts/diag_iter782_d2a2c_fidelity.py`; committed output at `diagnostics/iter782_output/iter782_d2a2c_fidelity.txt`).  C36, β=π/4.  Build state via `cosine_bell_cubesphere` (which uses the analytical solid-body rotation winds for u_d, v_d).  Call `_d2a2c_vect(state.u_d, state.v_d, cdgrid)` to obtain numerical (ua, va, uc, vc, ut, vt).  Compute ut_exact / vt_exact at each C-grid stagger position by the same formula `_d2a2c_vect` uses at line 400 (`ut = (uc - v_d * cosa_u) * rsin_u` and the vt analog) but substituting the analytical covariant u/v at that stagger for the interpolated uc/vc.  This isolates the A→C interpolation error, amplified by rsin_u / rsin_v.
+
+**Result.**
+
+| field | peak \|err\| | face, (i, j)    | lat     | lon     | GC-to-vertex | cell-to-edge |
+|-------|--------------|-----------------|---------|---------|--------------|--------------|
+| ut    | 5.740 m/s    | 0, (36, 35)     | +34.10° | +45.00° | 1.16°        | 0            |
+| vt    | 6.174 m/s    | 1, (0, 36)      | +35.84° | +46.24° | 1.16°        | 0            |
+
+- max \|ut_exact\| = 49.09 m/s → max \|ut - ut_exact\| = 11.69% relative
+- max \|vt_exact\| = 54.17 m/s → max \|vt - vt_exact\| = 11.40% relative
+- Hot points (\|err\| > 0.5 * peak): 60 in ut, 30 in vt.  100% of ut hot points and 100% of vt hot points are within 10° GC of a cube vertex; 46.7% / 53.3% are within 5° GC.
+- Peak-error cells are at C-grid stagger positions exactly adjacent to cube-vertex corners (cell-to-face-edge = 0, GC to nearest cube vertex = 1.16°).
+
+**Observation — numerical reportage only.**  At C36 on the analytical solid-body rotation IC, `_d2a2c_vect` produces ut/vt with peak absolute error ~6 m/s localised at all 8 cube vertices (GC ≈ 1°), falling off with GC distance such that all points with \|err\| > 0.5 * peak lie within 10° GC of a cube vertex.  The relative error is ~11% of peak wind.  This measurement is taken at t=0, with no time integration performed.
+
+**What iter-782 DOES show.**
+- `_d2a2c_vect`'s output on the exact solid-body rotation IC has nontrivial error at cube vertices — ~6 m/s absolute, ~11% relative, all within 10° GC of the 8 cube vertices.
+- The error is imprinted on the transport winds for the entire cosine bell run (because ut/vt are computed once and held constant).
+- The error is localised; most of each face has much smaller error.
+
+**What iter-782 does NOT establish.**
+- Whether this ~6 m/s localised error is large enough to CAUSE the cosine bell Linf ≈ 121 at t=1 day.  That requires advecting the h-field through the error-biased wind and comparing to the clean case — iter-782 does not run this test.
+- Whether the error comes from `fill_corner_region` (Lagrange corner fill) or from the 4th-order A→C stencil's unresolved neighbours at cube vertices — iter-782 cannot decompose those contributions.
+- Whether the cosine bell trajectory at β=π/4 actually PASSES THROUGH a 10°-radius zone of a cube vertex during 1 day.  From iter-781's trajectory, the bell centre's GC-to-vertex minimum at t=1 day is 25.93°, well OUTSIDE the 10° error zone — so the bell centre itself does not advect through the error zone in 1 day.  However, the bell's FOOTPRINT (radius R/3 ≈ 33° on a sphere) overlaps the error zone for much of the run.
+- Whether a single-trajectory cosine bell tests this mechanism (since iter-781 showed no crossing happens).
+
+**Iter-783+ candidates.**
+- Targeted test: replace ut/vt with analytical values at cube-vertex cells only (override `_d2a2c_vect` output where GC < 10°), re-run 1-day cosine bell, measure Linf vs baseline.  If Linf drops ≥ 50%, strong evidence this mechanism is primary.
+- Investigate whether the error comes from `fill_corner_region` (Lagrange corner fill) or from the A→C stencil by toggling the corner fill method on a controlled input.
+- Measure the same `_d2a2c_vect` error on W2 IC (zonal wind) to check whether the cube-vertex error also correlates with the W2 mode-A artifact.
+- Cross-check Python `fill_corner_region_2d` against Fortran `fv_duogrid.F90:1719-1903` for ordering differences (Python pass-2 diagonal cells use CURRENT padded; Fortran uses `veltemp`/`veltempp` snapshots captured AFTER pass-1 non-diagonal fills).
+
+**Deliverable.**  `scripts/diag_iter782_d2a2c_fidelity.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  46th iter in iter-752-782 chain.  First observational measurement of `_d2a2c_vect` absolute error since the iter-776b audit flag was raised.  The 11% relative cube-vertex error is a concrete, quantified artifact that iter-783+ can attempt to repair or rule out.
