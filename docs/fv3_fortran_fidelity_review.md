@@ -725,3 +725,38 @@ Even with iter-808's Fortran-faithful flux sync, boundary_fix is still useful un
 **Deliverable.**  `scripts/diag_iter811_boundary_fix_under_duogrid.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  75th iter in iter-752-811 chain.  Confirms Ralph loop constraint #2 is satisfied (Fortran legacy edge handling IS bypassed under duogrid).  `boundary_fix` is a separate Python-specific stabiliser that remains load-bearing under both halo paths; it cannot be disabled without making W2 worse.
+
+### Iter-812 — Visual inspection DUOGRID RK3 vs LEGACY at C24: DUOGRID has large cube-corner artifacts
+
+Per iter-811's iter-812+ candidate "Visual inspection of DUOGRID W2 v_north at C36 to compare qualitatively with LEGACY", iter-812 updates `scripts/diag_w2_visual.py` to compare LEGACY vs iter-808-fixed DUOGRID RK3 (not the old `csw+duogrid` path that went through the known-broken experimental `fv3_csw_tendencies`).
+
+**Visual observation (C24, W2 1-day, post-iter-808 sign-flip sync).**
+
+| path        | h_err max | v_north max |
+|-------------|-----------|-------------|
+| LEGACY      | 4.52      | 0.6         |
+| DUOGRID RK3 | 42.96     | 2.66        |
+
+- LEGACY (see `diagnostics/fv3_visual/w2_vnorth_production.png`): ±0.6 m/s scale, mild cube-vertex edge striping on equatorial faces, pole-singularity X-pattern on polar faces.
+- DUOGRID RK3 (see `w2_vnorth_csw_dg.png`): ±2.5 m/s scale, strong cube-corner blobs at all 4 corners of each face, heavy edge striping along all equatorial face edges, large polar-face X-pattern.
+
+**Observation — numerical reportage only.**  At C24, DUOGRID RK3 has ~5× larger v_north peak and substantially more visible cube-corner artifacts than LEGACY.  This is consistent with iter-810's cosine-bell C36 result (DUOGRID 13% worse).  At C24's coarser resolution, the duogrid-specific cube-corner contamination is amplified.  Visual inspection confirms LEGACY remains the better production choice at this resolution.
+
+**What iter-812 DOES show.**
+- Updated `diag_w2_visual.py` to compare LEGACY vs iter-808-fixed DUOGRID RK3 (replacing the broken `csw+duogrid` comparison).
+- DUOGRID at C24 has visibly worse cube-corner artifacts than LEGACY, with v_north max ~5× larger.
+- The iter-808 sign-flip fix makes DUOGRID USABLE (not catastrophic) but not BETTER than LEGACY.
+
+**What iter-812 does NOT establish.**
+- Why DUOGRID at C24 is worse than LEGACY despite the sync fix — likely the Lagrange corner-fill contribution to du/dv tendencies (iter-803 showed averaging fallback fixes those, but averaging isn't Fortran-faithful).
+- Whether a finer resolution (C48+) would bring DUOGRID visually closer to LEGACY.
+- Whether the FB chain port would produce cleaner DUOGRID visuals.
+
+**Iter-813+ candidates.**
+- Regenerate W2 visuals at C36 (matching production sentinel resolution) to see if DUOGRID quality improves.
+- Investigate DUOGRID du/dv residual (iter-803 identified Lagrange corner-fill as the cause).
+- Port Fortran FB transport chain (still the ultimate solution).
+
+**Deliverable.**  Updated `scripts/diag_w2_visual.py` + regenerated PNG plots in `diagnostics/fv3_visual/`.  No source-code change.  No new sentinel.
+
+**Process.**  76th iter in iter-752-812 chain.  Confirms via visual inspection that DUOGRID at C24 has ~5× larger v_north artifact than LEGACY.  iter-808 eliminates the catastrophic failure but doesn't close the quality gap at this resolution.  LEGACY remains the visually-cleaner production path at C24.

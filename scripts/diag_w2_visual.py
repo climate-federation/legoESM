@@ -111,11 +111,16 @@ v_cc_p = 0.5*(state_p.v_d[:,:-1,:]+state_p.v_d[:,1:,:])
 _, vn_p = rotate_winds_grid_to_geo(u_cc_p, v_cc_p, grid_p.angle)
 vn_p = np.asarray(vn_p)
 
-# csw+duogrid
+# Iter-812: compare RK3+duogrid (post iter-808 sign-flip sync fix) —
+# NOT the old csw+duogrid path (use_experimental_csw=True), which goes
+# through fv3_csw_tendencies and is known unstable.  The iter-808 fix
+# is in synchronize_cgrid_fluxes, exercised by fv3_sw_tendencies, which
+# is what FV3EdgeShallowWaterModel.step calls with use_experimental_csw=
+# False (default).  So we flip use_csw=False and use_duogrid=True.
 grid_d = create_cubed_sphere(N, use_duogrid=True)
 cdgrid_d = create_cubed_sphere_cdgrid(grid_d)
 state0_d, h0_d = make_state(grid_d, cdgrid_d)
-state_d = run_sim(grid_d, cdgrid_d, state0_d, use_csw=True)
+state_d = run_sim(grid_d, cdgrid_d, state0_d, use_csw=False)
 
 h_err_d = np.asarray(state_d.h - h0_d)
 u_cc_d = 0.5*(state_d.u_d[:,:,:-1]+state_d.u_d[:,:,1:])
@@ -123,17 +128,17 @@ v_cc_d = 0.5*(state_d.v_d[:,:-1,:]+state_d.v_d[:,1:,:])
 _, vn_d = rotate_winds_grid_to_geo(u_cc_d, v_cc_d, grid_d.angle)
 vn_d = np.asarray(vn_d)
 
-print(f"\nProduction: h_err max={np.abs(h_err_p).max():.0f}, v_north max={np.abs(vn_p).max():.1f}")
-print(f"csw+dg:    h_err max={np.abs(h_err_d).max():.0f}, v_north max={np.abs(vn_d).max():.1f}")
+print(f"\nProduction (LEGACY): h_err max={np.abs(h_err_p).max():.2f}, v_north max={np.abs(vn_p).max():.2f}")
+print(f"DUOGRID (RK3 post-iter-808): h_err max={np.abs(h_err_d).max():.2f}, v_north max={np.abs(vn_d).max():.2f}")
 
-plot_6faces(h_err_p, f'h error: Production C{N} day 1', 'w2_herr_production.png')
-plot_6faces(h_err_d, f'h error: csw+duogrid C{N} day 1', 'w2_herr_csw_dg.png')
-plot_6faces(vn_p, f'v_north: Production C{N} day 1', 'w2_vnorth_production.png')
-plot_6faces(vn_d, f'v_north: csw+duogrid C{N} day 1', 'w2_vnorth_csw_dg.png')
+plot_6faces(h_err_p, f'h error: Production LEGACY C{N} day 1', 'w2_herr_production.png')
+plot_6faces(h_err_d, f'h error: DUOGRID RK3 C{N} day 1', 'w2_herr_csw_dg.png')
+plot_6faces(vn_p, f'v_north: Production LEGACY C{N} day 1', 'w2_vnorth_production.png')
+plot_6faces(vn_d, f'v_north: DUOGRID RK3 C{N} day 1', 'w2_vnorth_csw_dg.png')
 
 # Difference plot (improvement)
 h_diff = np.abs(h_err_d) - np.abs(h_err_p)
-plot_6faces(h_diff, f'|h_err| improvement (csw+dg - prod) C{N}', 'w2_herr_improvement.png')
+plot_6faces(h_diff, f'|h_err| DUOGRID - LEGACY C{N}', 'w2_herr_improvement.png')
 
 print(f"\nImprovement: h_err max reduced by {(1-np.abs(h_err_d).max()/np.abs(h_err_p).max())*100:.0f}%")
 print(f"  Production edge/int ratio: {vn_p[:,[0,-1],:].std() / (vn_p[:,2:-2,2:-2].std()+1e-30):.2f}")
