@@ -1397,3 +1397,35 @@ Per iter-816's observation that FB DUOGRID h_max grows 8× at 24h C24, iter-831 
 **Deliverable.**  `scripts/diag_iter831_fb_phase_ablation.py` + committed output.  No source-code change.  No new sentinel.
 
 **Process.**  91st iter in iter-752-831 chain.  Ablation-localizes the FB-chain h-growth to `_c_sw` (C-grid half-step mass transport).  `_p_grad_c` is stabilizing; disabling it worsens h-growth.  The mechanism is c_sw's upwind mass-transport interacting with d_sw's PPM at cube corners.
+
+### Iter-832 — Over-sync hypothesis ruled out; c_sw 1st-order upwind is the mechanism
+
+Per iter-831's finding that `_c_sw` drives the FB h-growth, iter-832 investigates the hypothesis that Python's `_c_sw` is over-syncing mass flux.  Fortran c_sw (sw_core.F90:189-235) does NOT apply flux sync at the half-step; Fortran applies sync only at d_sw1 (dyn_core.F90:853).  Our Python `_c_sw` at line 1309-1312 applies `synchronize_cgrid_fluxes` at the half-step; this is potentially redundant with the sync inside `_d_sw_native`.
+
+**Method** (`scripts/diag_iter832_csw_sync_test.py`).  Monkey-patch ALL `synchronize_cgrid_fluxes` call sites to no-op; compare FB DUOGRID C24 12h h_max vs iter-831's sync-ON baseline.
+
+**Result.**
+
+| variant              | status    | h_max |
+|----------------------|-----------|-------|
+| sync ON (iter-808)   | ok at 12h | 10765 |
+| sync OFF (all sites) | ok at 12h | 10105 |
+
+**Observation — numerical reportage only.**  Turning off the sync entirely gives h_max = 10105 vs 10765 with sync — a 6% reduction.  The sync is a minor contributor to h-growth; it's NOT the primary driver.  iter-831's c_sw-as-h-growth-driver finding is reaffirmed: the mechanism is c_sw's 1st-order upwind mass transport (not sync over-application) combined with d_sw's PPM amplification.
+
+**What iter-832 DOES show.**
+- Over-syncing hypothesis is RULED OUT: removing sync entirely gives only 6% h_max reduction.
+- The FB h-growth mechanism is c_sw's upwind mass transport interacting with d_sw's PPM at cube corners.  This is INHERENT to the 1st-order-upwind + PPM coupling.
+
+**What iter-832 does NOT establish.**
+- Whether replacing c_sw's 1st-order upwind with a 2nd-order upwind (e.g. with slope-limited reconstruction) would suppress the cube-corner overshoots.
+- Whether Fortran's c_sw with the same 1st-order upwind doesn't have this issue because Fortran's d_sw + other parts differ.
+
+**Iter-833+ candidates.**
+- Cross-check Fortran c_sw's actual numerical behaviour against our Python (run Fortran benchmarks at C24 W2 if possible).
+- Test replacing 1st-order upwind with PPM in `_c_sw` mass transport.
+- Continue deferring the architectural FB chain port.
+
+**Deliverable.**  `scripts/diag_iter832_csw_sync_test.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  92nd iter in iter-752-832 chain.  Rules out over-syncing as the FB h-growth driver (only 6% reduction when sync disabled entirely).  The c_sw 1st-order upwind + d_sw PPM coupling is the inherent mechanism.

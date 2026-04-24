@@ -1,0 +1,12 @@
+Iter-832 FB DUOGRID C24 12.0h: sync ON (iter-808) vs OFF
+
+                  variant                  status     h_max
+------------------------------------------------------------
+       sync ON (iter-808)                ok (12h)     10765
+                 sync OFF                ok (12h)     10105
+
+Interpretation cues (observational only):
+- If sync OFF gives h_max near physical (~2980):
+  the sync itself (or its placement in c_sw as well as d_sw)
+  is driving h-growth.  Next iter: sync-only-in-d_sw.
+- If sync OFF crashes or worsens: the sync isn't the culprit.
