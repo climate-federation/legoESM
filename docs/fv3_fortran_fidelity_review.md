@@ -712,3 +712,44 @@ Follow-up to iter-782 — a re-audit revealed that iter-782's C36 measurement wa
 **Deliverable.**  `scripts/diag_iter786_d2a2c_legacy_vs_duogrid.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  50th iter in iter-752-786 chain.  Major finding: iter-782's 11% cube-vertex error was on the LEGACY path (the W2 sentinels' actual path), not the duogrid path.  The DUOGRID path has 3-4× LARGER cube-vertex error than the LEGACY path, contrary to the expectation that the more sophisticated Lagrange corner fill would improve accuracy.  iter-787+ should decompose the duogrid `_d2a2c_vect` chain to isolate which component introduces the degradation, and cross-check the `fill_corner_region` ordering against Fortran.
+
+### Iter-787 — W2 under LEGACY vs DUOGRID: duogrid is 800× WORSE (production-broken)
+
+Per iter-786's iter-787+ candidate "Run a W2 1-hour integration under LEGACY vs DUOGRID and compare v_ll_Linf", iter-787 runs the full W2 alpha=0 1-day C36 integration under both paths with the iter-761 canonical config (boundary_fix=True, damp_v=0.06, nord_v=2, div_damp = 8 × _div_damp_cube(n), hyperdiff=0).
+
+**Method** (`scripts/diag_iter787_w2_legacy_vs_duogrid.py`; committed output at `diagnostics/iter787_output/iter787_w2_legacy_vs_duogrid.txt`).  Same n=36, dt=300s, 1 day.  Only difference: `create_cubed_sphere(n, use_duogrid=False)` vs `create_cubed_sphere(n, use_duogrid=True)`.  Measure L2 in h-drift and v_ll_Linf (iter-765 mode-A metric).
+
+**Result.**
+
+| path            | L2 (h drift)   | v_ll_Linf   | v_cc_Linf   |
+|-----------------|----------------|-------------|-------------|
+| LEGACY          | 2.176e-04      | 1.585e-01   | 1.879e-01   |
+| DUOGRID         | 1.757e-01      | 9.996e+01   | 1.087e+02   |
+| ratio (D / L)   | 807            | 630         | 578         |
+
+**Observation — numerical reportage only.**  DUOGRID W2 is catastrophically worse than LEGACY W2 across all three metrics:
+- L2 h-drift: 2.18e-4 → 1.76e-1 (807× worse).
+- v_ll_Linf: 0.159 m/s → 100 m/s (630× worse).
+- v_cc_Linf: 0.188 m/s → 109 m/s (578× worse).
+
+The DUOGRID v_ll_Linf of ~100 m/s is comparable to the solid-body rotation wind magnitude (u0 ≈ 40 m/s), indicating gross spurious v-wind oscillation, not a small-amplitude mode-A artifact.
+
+**What iter-787 DOES show.**
+- Enabling `use_duogrid=True` in the full shallow-water pipeline at C36 produces an 800× degradation in W2 L2 and a 600× degradation in v_ll_Linf.
+- The production W2 sentinels' LEGACY path gives v_ll_Linf = 0.159 m/s (iter-765 documented baseline, recovered exactly here).
+- The ~100 m/s v_ll_Linf under DUOGRID indicates the duogrid path, as currently wired in the full SW operators, is PRODUCTION-BROKEN — not merely less accurate than legacy.
+
+**What iter-787 does NOT establish.**
+- Which specific operator in the duogrid shallow-water chain breaks W2.  Candidates: (a) `_d2a2c_vect_duogrid` (iter-786: 3-4× cube-vertex error); (b) `dgrid_to_cgrid` or mass-flux divergence operator in duogrid mode; (c) momentum tendencies (`cdgrid_momentum_tendencies`) in duogrid mode; (d) halo exchange chain (`pad_halo` with duogrid + `cube_rmp_vectorized` + `fill_corner_region`) for vector fields; (e) config knob incompatibility (e.g., `boundary_fix=True` under duogrid has an unintended interaction).
+- Whether the DUOGRID failure mode is fixable by a known change to any ONE of those operators.
+- Whether the Fortran-faithful intent of duogrid (`dg%is_initialized` branch in sw_core.F90) can be recovered by isolating and repairing the broken component.
+
+**Iter-788+ candidates.**
+- Binary-search the duogrid chain: disable duogrid-mode dispatch in individual operators (e.g., force `_d2a2c_vect_duogrid` off while keeping duogrid elsewhere) and measure which single operator's duogrid dispatch causes the W2 blowup.
+- Compare `cdgrid_momentum_tendencies` and `fv3_sw_tendencies` under duogrid vs legacy at t=0 on W2 IC to find where NaN/blowup begins.
+- Verify the critical duogrid constraint from the Ralph loop: "Legacy edge handling must be disabled in duogrid mode via `bounded_domain = .true.`".  Check `_bounded_domain = (base.duogrid is not None) or _is_single_face` at `cubed_sphere_cdgrid.py:890` is being consulted by every relevant operator.
+- Cross-check `cube-edge flux synchronization` constraint: "Flux computation split across d_sw1/d_sw3/d_sw5 and updates across d_sw2/d_sw4/d_sw6 requires mandatory cube-edge flux synchronization before update, with synchronized flux = average(face_A_to_B, face_B_to_A)".  Audit the duogrid path for this synchronization step.
+
+**Deliverable.**  `scripts/diag_iter787_w2_legacy_vs_duogrid.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass (they exercise LEGACY only).
+
+**Process.**  51st iter in iter-752-787 chain.  Major production-relevant finding: the DUOGRID path is catastrophically broken for W2 (800× worse than LEGACY).  This clarifies that the production W2 sentinels' 0.159 m/s mode-A artifact is the LEGACY-path residual; the DUOGRID path — intended as the Fortran-faithful branch — is not presently a production alternative.  iter-788+ should decompose the duogrid shallow-water chain to isolate the broken component and audit the Ralph-loop-flagged duogrid constraints (bounded_domain, cube-edge flux synchronization).
