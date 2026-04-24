@@ -975,3 +975,41 @@ The pattern: `damp_v=0.06` alone is on the edge of numerical stability (finite b
 **Deliverable.**  `scripts/diag_iter818_fb_damping_knobs.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  81st iter in iter-752-818 chain.  Isolates `damp_v=0.06` as the FB-chain crash trigger.  The `damp_v=0.06 + nord_v=2` combination crashes at 7.9h; `damp_v=0.06` alone produces catastrophic u/v (>1000 m/s) but stays finite at 24h.  The other damping knobs (`nord_v`, `nord`, `d4_bg`) have minimal effect individually.
+
+### Iter-819 — damp_v sweep on FB DUOGRID: stable range ≤0.03, minimal accuracy benefit
+
+Per iter-818's iter-819+ candidate, iter-819 sweeps `damp_v` ∈ {0, 0.001, 0.003, 0.01, 0.03, 0.06} on FB DUOGRID C24 W2 24h (with `nord_v=2` when `damp_v > 0`).
+
+**Result.**
+
+| damp_v | status            | h_max | u_cc_Linf | v_cc_Linf |
+|--------|-------------------|-------|-----------|-----------|
+| 0.000  | ok at 24h         | 24040 | 87.57     | 60.11     |
+| 0.001  | ok at 24h         | 24040 | 87.57     | 60.11     |
+| 0.003  | ok at 24h         | 24040 | 87.57     | 60.10     |
+| 0.010  | ok at 24h         | 24036 | 87.55     | 60.01     |
+| 0.030  | ok at 24h         | 23923 | 87.19     | 57.67     |
+| 0.060  | **CRASH 7.8 h**   | —     | —         | —         |
+
+**Observation — numerical reportage only.**  FB DUOGRID is stable for `damp_v ≤ 0.03`.  At `damp_v = 0.06` the chain crashes at step 94.  Between `damp_v = 0` and `damp_v = 0.03`, h_max decreases from 24040 to 23923 — a 0.5% improvement.  `v_cc_Linf` drops from 60.1 to 57.7 (4% improvement).  These are marginal.
+
+**Conclusion.**  Tuning `damp_v` alone cannot close the FB-chain accuracy gap.  The 8× h-growth at 24h is intrinsic to the FB chain discretisation on our current Python port; damping is not the dominant mechanism.
+
+**What iter-819 DOES show.**
+- FB DUOGRID stable range: `damp_v ∈ [0, 0.03]`.
+- Maximum achievable h_max reduction via `damp_v` tuning: 0.5% (from 24040 to 23923).
+- `damp_v = 0.06` exceeds the FB stability threshold (crash at 7.8h).
+
+**What iter-819 does NOT establish.**
+- Whether higher `nord_v` (e.g., nord_v=1 instead of 2) with `damp_v=0.06` would avoid the crash.
+- Whether a different damping operator (`d4_bg`, `dddmp`, or an FB-specific one) would produce meaningful h-growth reduction.
+- Whether the FB chain's 8× h-growth is from `_c_sw`, `_p_grad_c`, or `_d_sw_native` internals.
+
+**Iter-820+ candidates.**
+- Decompose FB chain per-step by disabling `_p_grad_c` temporarily to see if h-growth drops — isolates pressure-gradient's contribution.
+- Fortran-faithful d_sw5 port (still open).
+- Accept FB chain as not-yet-production-ready; focus on other fidelity issues.
+
+**Deliverable.**  `scripts/diag_iter819_fb_damp_v_sweep.py` + committed output.  No source-code change.  No new sentinel.  All 14 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  82nd iter in iter-752-819 chain.  Tuning `damp_v` cannot fix FB-chain accuracy — the 8× h-growth is structural.  Stable range is `damp_v ≤ 0.03` with only 0.5% h_max reduction.  FB chain needs deeper work beyond damping tuning.
