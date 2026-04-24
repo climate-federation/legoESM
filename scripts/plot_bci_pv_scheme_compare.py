@@ -17,8 +17,8 @@ RUNS = [
     ("lat-lon tvd (reference)",
      RESULTS / "latlon_channel/100x50/tvd_nosponge_200d",
      dict(color="C3", lw=2.5)),
-    ("MPAS pv=enstrophy (baseline — no BCI growth)",
-     RESULTS / "mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.0_200d",
+    ("MPAS pv=enstrophy (600d → blowup d252)",
+     RESULTS / "mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.0_600d",
      dict(color="C0", lw=2.0)),
     ("MPAS pv=energy (no ζ-damp — blew d57)",
      RESULTS / "mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.0_pvenergy_apvm300_80d",
@@ -66,15 +66,15 @@ for label, d, style in RUNS:
 
 axes[0].set_xlabel("time (d)"); axes[0].set_ylabel("max |u| (m/s)")
 axes[0].set_title("max_speed"); axes[0].grid(alpha=0.3)
-axes[0].set_xlim(0, 200)
+axes[0].set_xlim(0, 300)
 
 axes[1].set_xlabel("time (d)"); axes[1].set_ylabel("mean KE (m²/s²)")
 axes[1].set_title("mean_ke (log)"); axes[1].grid(alpha=0.3, which="both")
-axes[1].set_xlim(0, 200)
+axes[1].set_xlim(0, 300)
 
 axes[2].set_xlabel("time (d)"); axes[2].set_ylabel("max |η| (m)")
 axes[2].set_title("max_abs_eta — checkerboard proxy")
-axes[2].grid(alpha=0.3); axes[2].set_xlim(0, 200)
+axes[2].grid(alpha=0.3); axes[2].set_xlim(0, 300)
 
 axes[0].legend(fontsize=8, loc="upper left", frameon=False)
 
