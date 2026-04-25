@@ -1701,9 +1701,22 @@ def fv3_sw_tendencies(
     # port requires pairing (*dt factor) with items 3 (corner
     # divergence delpc) and 4 (KE-add structure) — deferred to a
     # dedicated iter that ports d_sw5 holistically.
-    if div_damp > 0:
+    # Iter-872b (Codex Finding 1): the gate must fire when EITHER the
+    # background coefficient (`div_damp` → `d2_bg`) OR the adaptive
+    # Smagorinsky coefficient (`dddmp`) is non-zero.  Pre-iter-872b
+    # the gate was `if div_damp > 0:`, which silently zeroed the
+    # adaptive Smagorinsky path whenever `div_damp = 0` — Fortran
+    # sw_core.F90:1720 computes `damp = da_min_c * max(d2_bg,
+    # min(0.20, dddmp * |delpc * dt|))` unconditionally inside the
+    # `nord==0` branch, so a Fortran user can run `d2_bg=0, dddmp>0`
+    # (pure adaptive Smagorinsky) and still get damping.  Our
+    # previous Python gate refused that valid configuration.
+    if div_damp > 0 or dddmp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
+        # When `div_damp = 0` the dimensionless `d2_bg = 0` exactly,
+        # so `max(0, min(0.20, dddmp * |div|))` reduces to pure
+        # adaptive-only damping (matches Fortran).
         d2_bg = div_damp / da_min_c
         # Iter-872: `dddmp` is now a kwarg (default 0.2 preserves
         # pre-iter-872 behaviour).  Fortran fv_arrays.F90:360 has

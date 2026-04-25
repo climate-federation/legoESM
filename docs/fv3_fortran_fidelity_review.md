@@ -1067,3 +1067,24 @@ W2 v_ll + mode-4 sentinel (`test_w2_iter761_matrix_v_ll_and_mode4_baseline`) sti
 **What iter-872 does NOT change.**  No numerical change to W2/W5/cosine-bell sentinels.  No change to FB-chain code paths.  No change to mode-4 imprint magnitude (still ~0.16 m/s v_ll, the iter-863 documented infrastructure-level floor of the production A-L + RK3 path).
 
 **Process.**  132nd iter in iter-752-872 chain.  A small Fortran-fidelity surface refactor that closes an iter-867 audit observation; sized to be addressable in a single iter without disturbing the W2 sentinel baseline.
+
+### Iter-872b — Codex follow-up: fix gate so `dddmp>0` activates adaptive damping with `div_damp=0`
+
+Codex adversarial-review on iter-872 flagged two findings:
+
+**Finding 1 (high) — `dddmp` is silent no-op when `div_damp=0`.**  The production damping path was gated `if div_damp > 0:`, so a Fortran-valid configuration like `d2_bg=0, dddmp>0` (pure adaptive Smagorinsky) silently produced zero damping.  Fortran `sw_core.F90:1720` evaluates `damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc*dt|))` unconditionally inside the `nord==0` branch, so the gate was a real Fortran-fidelity bug.
+
+**Fix (iter-872b).**  Expand the gate to `if div_damp > 0 or dddmp > 0:`.  When `div_damp=0` the dimensionless `d2_bg = div_damp / da_min_c` evaluates to exactly 0, so the formula reduces to pure-adaptive `max(0, min(0.20, dddmp*|div|))` — matches Fortran.  Existing W2 sentinel (which uses `div_damp = 8 × _div_damp_cube(n) > 0`) is unaffected.  Default config (`div_damp=0`, `dddmp_prod=0.2`) NOW activates the adaptive Smagorinsky path — pre-iter-872b it silently produced no damping.  Verified by audit: no numeric-comparison test uses `FV3EdgeShallowWaterModel(default_config)`; the only default-config test (`test_w2_iter761_matrix_v_ll_and_mode4_baseline`) overrides `div_damp` explicitly via the matrix runner; the unrelated `CDGridShallowWaterModel` (used by `test_diff_atmosphere_dynamics`) has its own different code path.
+
+**Regression test** (`tests/test_fv3_dddmp_kwarg_iter872.py::test_iter872b_dddmp_active_when_div_damp_zero`): with `div_damp=0`, the runs `dddmp=0.2` and `dddmp=0.0` MUST give measurably different tendencies (pins the gate fix; would fail if the gate regresses to the pre-iter-872b form).
+
+**Finding 2 (high) — `dddmp_prod` not wired through driver/CLI.**  iter-872 wired `dddmp_prod` into `FV3EdgeShallowWaterModel.step` only.  The repo's standard run surfaces (`Config.to_experiment_config`, `DycoreConfig`, `component_factory`, `cli`) instantiate `CDGridShallowWaterModel` (NOT `FV3EdgeShallowWaterModel`), so YAML/driver/CLI users cannot reach `dddmp_prod`.
+
+**Scope clarification (iter-872b).**  iter-872 deliberately scoped to per-model (`FV3EdgeShallowWaterModel`) wiring because:
+1. The W2/W5/cosine-bell sentinel and atmosphere test matrix use `FV3EdgeShallowWaterModel` (the production A-L + RK3 path), which is what iter-872 needed to reach.
+2. `CDGridShallowWaterModel` is a different code path (`cdgrid_shallow_water_tendencies`, NOT `fv3_sw_tendencies`) that does NOT have the `dddmp` hardcoded literal.  Wiring `dddmp_prod` through the driver/CLI for `CDGridShallowWaterModel` would either be a no-op or require also exposing the literal in `cdgrid_shallow_water_tendencies` first — a separate Fortran-fidelity question.
+3. End-to-end driver/CLI plumbing (`DycoreConfig` field, `Config.to_experiment_config` mapping, `component_factory` wiring, CLI arg) is a multi-touch refactor that's better deferred to a focused iter that addresses the `CDGridShallowWaterModel` ↔ `FV3EdgeShallowWaterModel` divergence holistically.
+
+iter-872 is therefore **explicitly per-model**: direct `FV3EdgeShallowWaterModel(grid, config_with_dddmp_prod=X)` callers see the new knob; YAML/driver/CLI users see the historic 0.2 value (no behaviour change).  The W2 sentinel uses `FV3EdgeShallowWaterModel` directly via the matrix runner, so iter-872 covers the live Fortran-fidelity surface.
+
+**Deliverable.**  iter-872 + iter-872b together: gate fix + regression test + scope clarification.  No driver/CLI wiring (deferred).

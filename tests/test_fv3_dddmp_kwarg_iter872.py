@@ -259,3 +259,47 @@ def test_config_dddmp_prod_default_is_zero_point_two():
         f"this silently invalidates every production W2/W5/cosine-bell "
         f"baseline.  Update the test ONLY if a deliberate Fortran-"
         f"fidelity refactor changes the production default.")
+
+
+# ---------------------------------------------------------------------
+# Iter-872b (Codex Finding 1): adaptive damping when div_damp=0
+# ---------------------------------------------------------------------
+
+def test_iter872b_dddmp_active_when_div_damp_zero():
+    """Iter-872b regression: with ``div_damp = 0`` and ``dddmp > 0``,
+    the adaptive Smagorinsky path MUST still produce non-trivial
+    damping.  Pre-iter-872b the production gate was ``if div_damp
+    > 0:`` which silently zeroed the adaptive path whenever the
+    background coefficient was disabled.  Fortran sw_core.F90:1720
+    ALWAYS evaluates ``damp = da_min_c * max(d2_bg, min(0.20,
+    dddmp * |delpc * dt|))`` inside the `nord==0` branch, so the
+    valid configuration ``d2_bg = 0, dddmp > 0`` (pure adaptive
+    Smagorinsky) was incorrectly refused by our Python gate.
+
+    This test pins the iter-872b gate fix: ``div_damp = 0,
+    dddmp = 0.2`` and ``div_damp = 0, dddmp = 0.0`` produce
+    measurably different tendencies (proves the adaptive path is
+    actually firing when the background coefficient is zero).
+    """
+    cdgrid, h, u_d, v_d, h_s = _grid_and_state(n=8, seed=43)
+
+    # Pure adaptive (Fortran-faithful regime that pre-iter-872b
+    # silently zeroed).
+    _, du_adap, dv_adap = fv3_sw_tendencies(
+        h, u_d, v_d, h_s, cdgrid, div_damp=0.0, dddmp=0.2)
+    # Both coefficients zero — no damping (identity baseline).
+    _, du_none, dv_none = fv3_sw_tendencies(
+        h, u_d, v_d, h_s, cdgrid, div_damp=0.0, dddmp=0.0)
+
+    diff_u = float(jnp.max(jnp.abs(du_adap - du_none)))
+    diff_v = float(jnp.max(jnp.abs(dv_adap - dv_none)))
+    assert (diff_u > 1e-8) or (diff_v > 1e-8), (
+        f"Iter-872b gate fix regression: with `div_damp=0`, the "
+        f"adaptive Smagorinsky path is silently zeroed when `dddmp` "
+        f"is non-zero.  The gate `if div_damp > 0:` is back to its "
+        f"pre-iter-872b form.  Codex Finding 1 was correct: Fortran "
+        f"sw_core.F90:1720 evaluates `max(d2_bg, min(0.20, "
+        f"dddmp*|delpc*dt|))` unconditionally inside `nord==0`, so "
+        f"`d2_bg=0, dddmp>0` is a valid Fortran configuration and "
+        f"must NOT be silently no-op'd.  max |Δdu|={diff_u:.3e}, "
+        f"max |Δdv|={diff_v:.3e}")
