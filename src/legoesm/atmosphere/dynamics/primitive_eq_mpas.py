@@ -403,11 +403,25 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
 
 
 def _fix_mass_mpas_hydro(state_new, state_old, mesh):
-    """Fix mass conservation: uniform additive correction to p_s."""
+    """Fix mass conservation: uniform additive correction to p_s.
+
+    The 3 sums (mass_old, mass_new, total_area) are computed locally
+    and reduced together — this collapses 3 MPI allreduces into 1
+    when the MPAS mesh is sharded across ranks.  ``total_area`` is
+    constant per mesh; reduce it alongside the masses to keep the
+    helper signature simple, and rely on XLA constant-folding for
+    the case where it can.
+    """
     area = mesh.areaCell
-    mass_old = jnp.sum(state_old.p_s.data * area)
-    mass_new = jnp.sum(state_new.p_s.data * area)
-    total_area = jnp.sum(area)
+    local = jnp.stack([
+        jnp.sum(state_old.p_s.data * area),
+        jnp.sum(state_new.p_s.data * area),
+        jnp.sum(area),
+    ])
+    if jax.process_count() > 1:
+        from legoesm.parallel.reductions import global_sum_mpi
+        local = global_sum_mpi(local)
+    mass_old, mass_new, total_area = local[0], local[1], local[2]
     correction = (mass_old - mass_new) / total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)

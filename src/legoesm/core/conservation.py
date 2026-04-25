@@ -293,6 +293,9 @@ def fix_mass_hydrostatic_latlon(
     """Fix mass conservation for the hydrostatic PE on a lat-lon grid.
 
     Same logic as fix_mass_hydrostatic but uses lat-lon global integral.
+    Batches the two mass sums into a single MPI allreduce — was
+    previously two separate ``jnp.sum`` calls, which doubled the
+    reduction latency at every fixer call under multi-rank runs.
 
     Parameters
     ----------
@@ -307,10 +310,9 @@ def fix_mass_hydrostatic_latlon(
     -------
     HydrostaticState : Mass-conserving state.
     """
-    acc = _accumulation_dtype()
-    mass_old = jnp.sum(state_old.p_s.data.astype(acc) * grid.area.astype(acc))
-    mass_new = jnp.sum(state_new.p_s.data.astype(acc) * grid.area.astype(acc))
-
+    mass_old, mass_new = _batch_global_area_sums(
+        [state_old.p_s.data, state_new.p_s.data], grid,
+    )
     correction = (mass_old - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
 

@@ -641,7 +641,11 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             from legoesm.core.conservation import _accumulation_dtype
             acc = _accumulation_dtype()
             area = self.grid.area.astype(acc)
-            total_area = jnp.sum(area)
+            # ``grid_total_area`` is a precomputed scalar on the grid;
+            # avoids recomputing ``jnp.sum(area)`` every step (one
+            # extra reduction in serial, one extra allreduce under
+            # latlon SPMD sharding).
+            total_area = self.grid.grid_total_area.astype(acc)
             if target_mass is not None:
                 mass_target = target_mass
             elif pre_state is not None:
