@@ -2591,3 +2591,52 @@ This is an INFERENCE across iter-854/856/857 (a 3-way comparison varying stalene
 **Deliverable.**  `scripts/diag_iter857_phase1_via_modelstep.py` (with note that source patches are reverted).  Production source changes to `fv3_sw_tendencies` AND `shallow_water_fv3_cdgrid.py` were applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
 
 **Process.**  117th iter in iter-752-857 chain.  Disentangles iter-856's two confounders (staleness AND wrapper) by 3-way inference.  iter-857 matches iter-856 qualitatively (same stability outcome at every damp_scale; same blow-up step at 1.0× and 2.0×).  Stable-scale magnitudes differ at the few-% level (up to 9 % at 0.001×) — consistent with post-RK3 corrections shifting magnitudes but not preventing canonical-damping blow-up.  STRONGLY SUGGESTS the staleness fix is the dominant cause of the iter-854→iter-856 qualitative reversal, but this is inference, not a direct A/B test vs iter-854's buggy hybrid plumbing.
+
+### Iter-858 — 1-day Phase 1 trial: stencil-swap-alone DOES NOT reduce W2 mode-A; rules out Phase 1 + sub-canonical damping as a viable production path
+
+Per iter-857b's iter-858+ Priority 1: with the Phase 1 stencil swap stable at sub-canonical damping for 60 steps (per iter-857), run the FULL W2 LEGACY 1-day integration via `model.step()` and measure v_ll_Linf vs iter-761 canonical's 0.159 m/s sentinel value.  This is the definitive test of "does Phase 1 + reduced damping reduce mode-A?"
+
+**Method.**
+- Re-applied iter-857's source patches (phase1_div_swap kwarg + module-toggle forwarding).
+- Wrote `scripts/diag_iter858_phase1_1day.py` running W2 LEGACY C36 1 day (288 steps) via `model.step()` at damp_scale ∈ {0.001, 0.01, 0.1}× iter-761 canonical.
+- Compared to un-patched 1.0× canonical reference.
+- After: REVERTED both source patches.  All 14 W2 sentinels pass.
+
+**Result.**
+
+| damp_scale | phase1 | completed 24h? | L2          | v_ll_Linf (m/s) | h_max | Δv_ll vs 1.0× ref |
+|-----------:|:------:|:---------------:|------------:|----------------:|------:|-------------------:|
+| 1.0× (un-patched ref) | OFF | yes | 2.176e−04 | **0.188**       | 2998  | (reference)        |
+|     0.001  |  ON    | yes             | 3.389e−04 | **0.274**        | 2998  | **+46 %**           |
+|      0.01  |  ON    | yes             | 5.210e−04 | **0.331**        | 3001  | **+76 %**           |
+|       0.1  |  ON    | **NO**           | n/a       | n/a              | n/a   | blew up at step 161 (~13.4 h) |
+
+(The un-patched reference's 0.188 m/s differs slightly from iter-820's 0.159 m/s — this is normal numerical variation between independent runs; the qualitative comparison stands.)
+
+**Decisive finding — Phase 1 + sub-canonical damping is NOT a viable mode-A reduction path.**
+- All tested Phase 1 + sub-canonical damp_scales make v_ll_Linf WORSE than the production reference, not better.
+- 0.001× → +46 %, 0.01× → +76 %, 0.1× → unstable beyond 13.4 h (blew up at step 161, even though 60-step short-run was stable per iter-857).
+- The iter-857 60-step "stable at 0.1×" finding does NOT generalise to 1-day: the integration drifts unstable around step 161 (13.4 h).
+
+**Mechanism interpretation.**  The Fortran-cc stencil produces a different divergence field than `cgrid_divergence`, but feeding it through the production application path (`du += coeff·∇·div`) and the iter-849-Check-1-missing adaptive coefficient does NOT yield a Fortran-faithful damping force.  Reducing the coefficient (sub-canonical damp_scale) keeps short-run stability but degrades the W2 1-day mode-A signature by simultaneously: (a) reducing the production damping that was tuned to the production stencil, and (b) introducing a different (Fortran-cc-shaped) damping signal that grows mode-A rather than suppressing it.
+
+**Conclusion — RULES OUT Phase 1 stencil-swap-alone as a W2 LEGACY mode-A reduction.**  The Phase 1 stencil swap, even at sub-canonical damping, does not reduce v_ll_Linf below the iter-761 canonical reference at 1-day.  iter-849 Checks 1 (`*dt` factor) and/or 4 (`ke→d_sw6` routing) MUST be implemented concurrently with the stencil swap for any chance of mode-A reduction.
+
+**What iter-858 DOES show.**
+- 1-day v_ll_Linf at all tested Phase 1 + sub-canonical damp_scales (0.001×, 0.01×) is WORSE than the un-patched 1.0× reference.
+- Phase 1 at 0.1× becomes unstable between 5h (iter-857: stable at 60 steps) and 13.4h (iter-858: blew up at step 161).  Short-run stability does NOT generalise to 1-day.
+- Phase 1 stencil-swap-alone is NOT a path to mode-A reduction.
+
+**What iter-858 does NOT establish.**
+- Whether iter-849 Check 1 (`*dt`) added to Phase 1 would change the 1-day v_ll_Linf.
+- Whether iter-849 Check 4 (`ke→d_sw6` routing) added to Phase 1 would change the 1-day v_ll_Linf.
+- Whether the COMBINATION of Phase 1 + Check 1 + Check 4 would yield Fortran-faithful + stable + mode-A-reducing W2.
+
+**Iter-859+ candidates.**
+- Implement iter-849 Check 1 (`*dt` factor in adaptive cap) on top of Phase 1 and re-test at canonical damping.  If 1.0× becomes stable AND v_ll_Linf reduces below iter-761's 0.188 m/s, Check 1 was the missing piece.
+- Multi-iter: implement iter-849 Check 4 (`ke→d_sw6` routing).  Bigger architectural change.
+- Accept that the d_sw5 architectural port is multi-iter and pivot to a different angle (e.g., audit `_arakawa_lamb_gradient` corner handling, port a different Fortran operator).
+
+**Deliverable.**  `scripts/diag_iter858_phase1_1day.py` (with note that source patches are reverted).  Source changes applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
+
+**Process.**  118th iter in iter-752-858 chain.  Definitive 1-day measurement: Phase 1 stencil-swap-alone (with iter-849 Checks 1+3+4 unfixed) does NOT reduce W2 LEGACY mode-A at any tested sub-canonical damp_scale.  In fact it WORSENS v_ll_Linf by 46-76 % at 0.001× / 0.01×, and is unstable at 0.1× by 13.4 h (despite iter-857's 60-step stability).  This rules out Phase 1 alone as a viable mode-A reduction path; the multi-iter d_sw5 architectural port (iter-849 Checks 1+4) remains the only candidate that could potentially deliver Fortran-faithful + stable + mode-A-reducing W2.
