@@ -91,6 +91,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--U-surface", type=float, default=None,
         help="Override Eady surface velocity [m/s] (reduces APE / slows BCI)")
+    p.add_argument(
+        "--barotropic-div-damp", type=float, default=None,
+        help=(
+            "Dimensionless divergence damping on barotropic velocity. "
+            "Targets grid-scale compressible modes directly without "
+            "smearing momentum.  Knob #3 in the issue #213 hi-res SOM "
+            "Eady investigation recipe."
+        ))
     return p
 
 
@@ -147,6 +155,8 @@ def main():
         config.K_H_OVERRIDE = args.K_h
     if args.U_surface is not None:
         config.U_SURFACE_OVERRIDE = args.U_surface
+    if args.barotropic_div_damp is not None:
+        config.BAROTROPIC_DIV_DAMP_OVERRIDE = args.barotropic_div_damp
 
     tests = filter_tests(TEST_MATRIX, args)
 

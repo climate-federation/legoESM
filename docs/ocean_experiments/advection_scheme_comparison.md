@@ -394,10 +394,59 @@ operational throughput.
   leaks through and is amplified by the PGF. Needs code-level fix in
   `src/legoesm/ocean/advection.py` (implement sign-split incoming /
   outgoing flux limiter per Zalesak 1979 / Kuzmin et al.).
-- **Hi-res SOM recipe**: at 200×100 (~10 km) no tested parameter set
-  produces a stable 200-day run. Hill's dx⁴ B_h scaling is too weak
-  at 10 km given sharper eddies; stronger momentum dissipation is
-  needed. Not yet explored.
+- **Hi-res SOM recipe** (issue #213): at 200×100 (~10 km) no tested
+  parameter set produces a stable 200-day run.  Hill's `B_h ∝ dx⁴`
+  scaling assumes fixed resolved-eddy sharpness; at finer dx the
+  eddies physically sharpen (`L_d / dx` grows from ~5 at 20 km to ~11
+  at 10 km), so grid-scale momentum damping needs to grow *faster*
+  than `dx⁴`, not slower.  SOM's near-zero implicit diffusion gives
+  no cushion: any momentum-side grid noise immediately seeds a runaway
+  PGF mode.  Diagnostic recipe (CLI knobs are wired:
+  `--B-h / --C-smag / --barotropic-div-damp / --dt / --U-surface`):
+
+  ```bash
+  COMMON="--only eady_uniform --grid latlon_channel --resolution 200x100 \
+          --tracer-advection som --no-sponge --days 30 --tag investigation"
+
+  # 1. B_h sensitivity sweep at strong forcing — find the smallest Bh
+  #    that survives 30 days, then check whether it is physically
+  #    reasonable (dimensional analysis vs. eddy decay time):
+  for BH in 5e10 1e11 2.3e11 5e11; do
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+      $COMMON --B-h $BH --C-smag 0.2
+  done
+
+  # 2. C_smag sensitivity at moderate B_h:
+  for CSMAG in 0.1 0.2 0.3 0.4; do
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+      $COMMON --B-h 5e10 --C-smag $CSMAG
+  done
+
+  # 3. Divergence damping as an alternative knob — targets grid-scale
+  #    compressible modes directly without smearing momentum:
+  for DD in 0.01 0.05 0.1 0.2 0.5; do
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+      $COMMON --B-h 1e10 --C-smag 0.0 --barotropic-div-damp $DD
+  done
+
+  # 4. Timestep sensitivity (current dt=150s ≈ CFL 0.8 at u=1 m/s):
+  for DT in 75 150; do
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+      $COMMON --B-h 1.44e10 --C-smag 0.2 --dt $DT
+  done
+
+  # 5. Weak-forcing fallback: scheme stress-test independent of strong
+  #    forcing.  If 5e10 / 0.2 still blows under U=0.2, the regime is
+  #    not the issue — the scheme/dissipation budget is.
+  JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    $COMMON --B-h 1.44e10 --C-smag 0.2 --U-surface 0.2 --days 200
+  ```
+
+  Document the smallest `B_h` (and largest `barotropic_div_damp`) that
+  yields a 200-day PASS, then either record the recipe here or
+  conclude with "SOM is not recommended at 10 km without X" if no
+  parameter set works.  The actual sweep awaits compute resources to
+  run the 200×100 200-day cases (each ~hours of wall time at fp64).
 - **Grid geometry**: cells at 25°N are ~20 km (meridional) × ~22 km
   (zonal) — nearly isotropic. The `100x50` resolution string maps to
   n_lat=100, n_lon=50 (not n_lat=50, n_lon=100 as one might expect
