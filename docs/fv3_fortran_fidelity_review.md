@@ -1466,3 +1466,50 @@ The sentinel correctly identified the single buggy Compare among the 3 squared-s
 **Deliverable.**  Tightened AST scan in `tests/test_ppm_limiter_consistency_iter879.py` (changes "any signed-product LHS" to "no non-signed-product LHS") + this doc entry recording the verification chain: iter-879 (existence-only, false-passes) → iter-879b (structural but "any") → iter-879c (structural and "all"), each pass tightening to address the prior Codex stop-time finding.
 
 **Process.**  141st iter in the iter-752-879c chain.  Three-pass progressive sentinel tightening driven by Codex stop-time critiques.  The final iter-879c form is structurally tight: the regression class is caught by walking every Compare in the function and rejecting any with bare `q_6` (or equivalent) LHS against a squared-span RHS.  No more false-pass paths identified.
+
+### Iter-879d — Codex iter-879c stop-time: catch reverse-direction Compares + honest scope documentation
+
+**Codex iter-879c stop-time finding.**  "iter-879c still leaves a false-pass path in the tightened AST sentinel."
+
+**Issue.**  iter-879c's sentinel only checked Compares with squared-span on the RHS.  A regression that writes the equivalent reversed form, e.g. `dq_sq < q_6` (mathematically identical to `q_6 > dq_sq`), would have:
+- LHS = `dq_sq` (squared-span Name)
+- RHS (comparator) = `q_6` (parabolic Name, NOT squared-span)
+
+iter-879c's scan only added the Compare to `constraint_compares` if the RHS matched squared-span.  This Compare's RHS does NOT match → it's NOT added → iter-879c silently passes despite the bug.
+
+**Fix (iter-879d).**  Add a SECOND scan direction: if Compare LHS is squared-span AND RHS references a parabolic term (`q_6`, `d6`, signed-product alias, or signed-product BinOp), treat it as a constraint Compare with the parabolic side flipped to LHS-position for the signed-product check.
+
+```python
+# Direction A: LHS=parabolic-side, RHS=squared-span (iter-879c form).
+if _is_squared_span(comparator, squared_span_aliases):
+    if _references_parabolic_or_signed_product(lhs):
+        constraint_compares.append((lhs, comparator))
+# Direction B: LHS=squared-span, RHS=parabolic-side (iter-879d add).
+elif _is_squared_span(lhs, squared_span_aliases):
+    if _references_parabolic_or_signed_product(comparator):
+        constraint_compares.append((comparator, lhs))  # swapped
+```
+
+**Sentinel verification.**  iter-879d includes a manual verification:
+```bash
+# Injected reverse-direction bug:
+#   _iter879d_reverse_bad = dq_sq < q_6
+# Result:
+FAILED test_iter879_both_limiters_use_signed_product_in_overshoot_compare
+  Bad compares (1 of 3):
+    parabolic-side=q_6 (against squared-span=dq_sq)
+```
+
+The sentinel correctly identified the reverse-direction bug after the LHS/RHS swap.
+
+**Honest scope documentation (iter-879d).**  In addition to the source fix, iter-879d adds an explicit scope-limitation comment in the test file documenting what the AST sentinel does NOT catch:
+
+- Function calls that bypass `Compare` AST nodes: `jax.lax.gt(q_6, dq_sq)` instead of `q_6 > dq_sq`.
+- Algebraic rewrites that hide the structure: `(q_6 - dq_sq) > 0` instead of `q_6 > dq_sq`.
+- Variable renames that diverge from the iter-879 vocabulary (`q_6`, `d6`, `dq`, `dm`, etc.).
+
+For these obfuscated forms, the BEHAVIOURAL test (`test_iter879_ppm_reconstruct_1d_matches_ppm_limit`) is the safety net: a regression that changes ANY of the limiter semantics will fail the bit-match check at 1e-12 rtol regardless of how the source is written.
+
+**On restored source.**  All 4 iter-879d tests + 4 iter-878 tests pass (8 total).
+
+**Process.**  142nd iter in the iter-752-879d chain.  Four-pass progressive sentinel tightening (iter-879 → 879b → 879c → 879d), each addressing a real false-pass path identified by Codex stop-time review.  The final iter-879d form catches both forward and reverse Compare directions, with explicit documentation of the residual obfuscation classes that fall outside the AST sentinel's reach (delegated to the behavioural cross-implementation test).

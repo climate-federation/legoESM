@@ -212,19 +212,44 @@ def test_iter879_both_limiters_use_signed_product_in_overshoot_compare():
                                     and r.value == 2):
                                 squared_span_aliases.add(target.id)
 
-        # Walk every Compare node; an overshoot constraint is one
-        # where the RHS (or comparator) looks like a squared span
-        # AND the LHS is (or resolves to) a signed product.
+        # Iter-879d (Codex iter-879c stop-time): also catch reverse
+        # comparisons (`squared_span < q_6` instead of
+        # `q_6 > squared_span`).  Walk every Compare and consider
+        # BOTH directions: if EITHER the LHS is squared-span and
+        # RHS is parabolic, OR vice versa, treat it as a candidate
+        # constraint Compare.  The "parabolic-side" operand must be
+        # a signed product; the "squared-span-side" operand is
+        # already checked against the squared-span pattern.
+        def _references_parabolic_or_signed_product(node):
+            """Return True if `node` mentions q_6, d6, or a Name in
+            ``intermediates`` (i.e., a signed-product alias).  Used
+            to identify the 'parabolic side' of a Compare."""
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+                return _references_parabolic_or_signed_product(node.operand)
+            if isinstance(node, ast.Name):
+                return (node.id in parabolic_names
+                        or node.id in intermediates)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+                # Includes the bare `q_6 * dq` BinOp form.
+                return _is_signed_product(node, set())
+            return False
+
         constraint_compares = []
         for node in ast.walk(fn):
             if not isinstance(node, ast.Compare):
                 continue
-            # Compare may have multiple comparators; check each
-            # against the LHS in turn.
             lhs = node.left
             for comparator in node.comparators:
+                # Direction A: LHS=parabolic-side, RHS=squared-span.
                 if _is_squared_span(comparator, squared_span_aliases):
-                    constraint_compares.append((lhs, comparator))
+                    if _references_parabolic_or_signed_product(lhs):
+                        constraint_compares.append((lhs, comparator))
+                # Direction B: LHS=squared-span, RHS=parabolic-side.
+                elif _is_squared_span(lhs, squared_span_aliases):
+                    if _references_parabolic_or_signed_product(comparator):
+                        # Swap so the "parabolic side" is always
+                        # checked uniformly below.
+                        constraint_compares.append((comparator, lhs))
 
         assert constraint_compares, (
             f"Function `{fn_name}` in {rel_path} has no Compare "
@@ -255,11 +280,32 @@ def test_iter879_both_limiters_use_signed_product_in_overshoot_compare():
             f"iter-878 missing-product regression.  Per CW84 eq. "
             f"1.10 the LHS must be `q_6 * dq` (or `d6 * dm`); "
             f"pre-iter-878 the LHS was bare `q_6` (no span factor).  "
-            f"Iter-879c requires ALL squared-span compares to have "
-            f"signed-product LHS so a co-existing 'good' Compare "
-            f"cannot mask a buggy one.\n"
+            f"Iter-879c+d require ALL squared-span compares (both "
+            f"directions) to have signed-product on the parabolic "
+            f"side so a co-existing 'good' Compare cannot mask a "
+            f"buggy one.\n"
             f"Bad compares ({len(bad_compares)} of "
             f"{len(constraint_compares)}):\n"
-            + "\n".join(f"  LHS={ast.unparse(lhs)} (against "
-                       f"RHS={ast.unparse(rhs)})"
+            + "\n".join(f"  parabolic-side={ast.unparse(lhs)} "
+                       f"(against squared-span={ast.unparse(rhs)})"
                        for lhs, rhs in bad_compares))
+
+
+# Iter-879d (Codex iter-879c stop-time): the AST sentinel above
+# catches the iter-878 regression class for the canonical syntactic
+# forms (`q_6 > dq_sq`, `dq_sq < q_6`, with various operator+sign
+# variants).  It does NOT catch obfuscated forms such as:
+#
+# - `jax.lax.gt(q_6, dq_sq)` (function call instead of Compare)
+# - `(q_6 - dq_sq) > 0` (algebraic rewrite that hides the structure)
+# - Renaming `q_6` / `dq` / `q6_dq` / `dq_sq` to non-vocabulary names
+#   (the scan only knows the documented variable names)
+#
+# These are out-of-scope for a structural sentinel — catching them
+# would require partial evaluation or theorem proving.  For
+# behavioural coverage of regressions in any form, the
+# `test_iter879_ppm_reconstruct_1d_matches_ppm_limit` test above
+# compares actual function output against the cross-implementation
+# reference (`_ppm_limit`) on random inputs — a regression that
+# changes ANY of the limiter semantics will fail the bit-match
+# check at 1e-12 rtol, regardless of how the source is written.
