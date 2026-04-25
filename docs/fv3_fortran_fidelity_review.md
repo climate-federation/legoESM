@@ -2175,7 +2175,7 @@ LOWERING div_damp from canonical (8× base) WORSENS the 1-day v_ll_Linf (0.159 �
 
 | # | check                          | gap                                                    |
 |---|--------------------------------|--------------------------------------------------------|
-| 1 | adaptive coefficient formula   | Fortran has `*dt` factor in cap argument; Python does NOT. (Acknowledged at iter-758c comment lines 1677-1689 — applying `*dt` ALONE breaks because the 0.20 cap activates at wrong magnitude in RK3 form.) |
+| 1 | adaptive coefficient formula   | Fortran `sw_core.F90:1720` has `damp = da_min_c*max(d2_bg, min(0.20, dddmp*abs(delpc(i,j)*dt)))` — note the `*dt` factor in the cap argument.  Python `operators_cdgrid.py:1696-1697` has `adaptive_coeff = da_min_c*max(d2_bg, min(0.20, dddmp*abs(div_field)))` — NO `*dt`.  (Acknowledged at iter-758c comment lines 1677-1689 — applying `*dt` ALONE breaks because the 0.20 cap activates at wrong magnitude in RK3 form.) |
 | 2 | corner divergence definition   | Fortran builds corner `delpc` from edge-by-edge `ptc`/`vort` with metric weights; Python uses `cgrid_divergence` cell-centre flux-form stencil + 4-point centre→corner average. Not equivalent at corners. |
 | 3 | corner correction stencil      | Fortran has explicit `delpc(1,1) -= vort(1,0)` at sw_corner (and 3 other corners); Python has NO directly comparable correction. |
 | 4 | application to velocity        | Fortran adds damping to `ke` then differentiates `ke` in `d_sw6` to update `u,v`; Python adds damping DIRECTLY to `du_cc, dv_cc` in `fv3_sw_tendencies`. Structural bypass. |
@@ -2193,9 +2193,9 @@ LOWERING div_damp from canonical (8× base) WORSENS the 1-day v_ll_Linf (0.159 �
 - Whether wiring `_d_sw5_corner_divergence` into the A-L production path with RK3-compatible velocity application would resolve the cube-vertex |dv/dt| amplification.  This is a multi-iter architectural change.
 - Whether the stop-hook's "the script still ships REFUTED" was the only residual issue or whether other diagnostic scripts have similar overstatement.
 
-**Iter-850+ candidates.**
-- Architectural item (multi-iter): port full d_sw5 to A-L production.  Phase 1: replace `cgrid_divergence` cell-centre stencil with `_d_sw5_corner_divergence` corner-stencil delpc (Check 2).  Phase 2: add the explicit corner corrections (Check 3).  Phase 3: re-route the damping through a `ke`-differencing form compatible with RK3 (Check 4).  Each phase is testable against the iter-761 sentinel.
-- Continue documentary cleanup pass over older diag scripts to catch any residual overclaims.
+**Iter-850+ candidates (re-prioritised).**
+- **Priority 1 (cleanup before architecture)**: documentary pass over older diag scripts.  iter-849 caught a residual "REFUTED" claim in the iter-848 script header that survived iter-848c's doc-only fix.  Other older diag scripts may have similar residual overclaims worth catching with a single grep pass before deeper fidelity work begins.
+- **Priority 2 (multi-iter architecture)**: port full d_sw5 to A-L production.  Phase 1: replace `cgrid_divergence` cell-centre stencil with `_d_sw5_corner_divergence` corner-stencil delpc (Check 2).  Phase 2: add the explicit corner corrections (Check 3).  Phase 3: re-route the damping through a `ke`-differencing form compatible with RK3 (Check 4).  Each phase is testable against the iter-761 sentinel.
 - Time-history attribution diagnostic (per iter-848c re-ranked priority) — measure how div_damp vs boundary_fix evolve over 0..1h on W2 LEGACY.
 
 **Deliverable.**  Updated `scripts/diag_iter848_damp_sweep.py` (REFUTED claim removed).  Doc audit of 4 d_sw5 fidelity gaps + inventory of existing `_d_sw5_corner_divergence` helper.  No production source-code change.  All 14 W2 sentinels unaffected.

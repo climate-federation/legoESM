@@ -17,8 +17,12 @@ this sign-structure hypothesis directly by scaling div_damp across
   - |dv/dt| at the iter-846 pure-dynamics peak  (face 5 (0,0))
 
 If reducing div_damp lowers the (2,34) signal but grows the (0,0)
-signal, the iter-846 hypothesis is supported.  If both move in the
-same direction, it is refuted.
+signal on the tested 0..2× range, iter-846's reasoning is consistent
+with the data.  If both move in the same direction, the prediction is
+NOT SUPPORTED on the tested range — though five samples do not exclude
+a narrow non-monotone sub-interval, and this t=0 measurement does NOT
+predict the 1-day v_ll stripe behaviour (iter-794's 24h sweep at the
+same div_damp scales WORSENS v_ll_Linf when div_damp is reduced).
 
 Observational only.  No source-code change.
 """
