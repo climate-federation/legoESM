@@ -5503,6 +5503,169 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"iter-505 axis fix dropped it to 0.303 m/s."))
 
 
+    def test_w2_iter761_matrix_v_ll_and_mode4_baseline(self):
+        """Iter-862 (per user reframe): pin the THREE user-visible W2
+        artifact metrics on the CURRENT iter-761 canonical matrix
+        config (hyperdiff_coeff=0, div_damp=8*..., damp_v=0.06,
+        nord_v=2, boundary_fix=True), measured at t=1 day:
+
+          1.  ``max|v_ll|``       — peak of the matrix's lat-lon
+                                    regridded v_north over the day.
+                                    Saved baseline = 1.585e-01 m/s.
+                                    Ceiling: 2.0e-1 m/s (~25% head).
+          2.  ``mode-4 amp at lat=±30°`` — ZONAL FFT amplitude of the
+                                    cube-face mode-4 imprint at the
+                                    ±30° latitudes where face seams
+                                    cross.  Saved baseline ≈
+                                    2.297e-2 m/s.  Ceiling: 3.0e-2
+                                    m/s (~30 % head).  Equator-
+                                    symmetric to within 1 ulp.
+          3.  ``face4_maxabs vs face5_maxabs mirror`` —
+                                    ``|f4 - f5| / max(f4, f5)``.
+                                    Saved baseline 0.115776 vs
+                                    0.115852 → relative
+                                    difference 6.5e-4.  Ceiling
+                                    1.0e-2 (~15× head) so a real N/S
+                                    asymmetry regression triggers
+                                    while normal noise does not.
+
+        Why this test exists.  Per user iter-862 reframe message: the
+        live W2 artifact is dynamically generated (t=0 ~8e-3 m/s →
+        t=1d ~1.6e-1 m/s), is NOT the old polar-axis asymmetry, NOT
+        a t=0 diagnostic bug, but a structural cube-face mode-4
+        imprint produced by the production A-L + RK3 path
+        (`fv3_sw_tendencies` + boundary_fix + RK3).  The existing
+        sentinels (``test_w2_alpha0_c36_1day_iter761_matrix_config``
+        on L2 alone, ``test_w2_v_wind_imprint_below_iter505_canonical_ceiling``
+        on a LEGACY-config max|v_ll| at 0.40 m/s) do NOT pin the
+        post-iter-761 matrix config or the user-visible mode-4
+        amplitude.  This test closes that gap.
+
+        Cost: 1 day of W2 LEGACY at C36 (288 steps at dt=300s),
+        ≈ 14 s on CPU x64.  Same cost class as the existing iter-761
+        L2 test.
+
+        Acceptance criteria from user iter-862 reframe:
+        - keep canonical W2 h_L2 within 25% of 2.07e-04 → already
+          locked by the L2 test above.
+        - final max|v_ll| < 1.585e-01 m/s OR mode-4(|lat|=30°) <
+          2.297e-02 m/s — to BEAT this test, a future patch must
+          improve at least one metric below its baseline.  The
+          ceilings here are the regression sentinels; the
+          improvement targets are the saved baseline values.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
+        )
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+        from legoesm.grids.regridding import (
+            get_cubedsphere_to_latlon_weights,
+            apply_cubedsphere_to_latlon,
+        )
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge,
+        )
+
+        n = 36
+        days = 1.0
+        dt = 300.0
+        n_steps = int(days * 86400 / dt)
+        div_damp_base = 1.5e7 * (48.0 / n) ** 2
+        div_damp = 8.0 * div_damp_base               # iter-761
+
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            div_damp=div_damp,
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2,
+        )
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+
+        sw = williamson_test2(grid)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        # --- Native (pre-regrid) v_cc_north ---
+        ca_4_jax, sa_4_jax = cell_centre_angles_from_4edge(cdgrid)
+        ca_4 = np.asarray(ca_4_jax, dtype=np.float64)
+        sa_4 = np.asarray(sa_4_jax, dtype=np.float64)
+        u_d_np = np.asarray(state.u_d, dtype=np.float64)
+        v_d_np = np.asarray(state.v_d, dtype=np.float64)
+        u_cc = 0.5 * (u_d_np[:, :, :-1] + u_d_np[:, :, 1:])
+        v_cc = 0.5 * (v_d_np[:, :-1, :] + v_d_np[:, 1:, :])
+        v_north_native = sa_4 * u_cc + ca_4 * v_cc
+        face4_maxabs = float(np.max(np.abs(v_north_native[4])))
+        face5_maxabs = float(np.max(np.abs(v_north_native[5])))
+        face_mirror_rel = (
+            abs(face4_maxabs - face5_maxabs)
+            / max(face4_maxabs, face5_maxabs))
+
+        # --- Lat-lon regridded v_ll ---
+        weights = get_cubedsphere_to_latlon_weights(
+            n, n_lon=360, n_lat=181)
+        v_ll = apply_cubedsphere_to_latlon(v_north_native, weights)
+        max_v_ll = float(np.max(np.abs(v_ll)))
+
+        # --- Mode-4 amplitude at lat=±30° ---
+        lat_axis = np.linspace(-90.0, 90.0, v_ll.shape[0])
+        j_pos = int(np.argmin(np.abs(lat_axis - 30.0)))
+        j_neg = int(np.argmin(np.abs(lat_axis + 30.0)))
+        nlon = v_ll.shape[1]
+        mode4_pos = float(np.abs(np.fft.fft(v_ll[j_pos])[4]) / nlon)
+        mode4_neg = float(np.abs(np.fft.fft(v_ll[j_neg])[4]) / nlon)
+
+        # Ceilings.  Baselines (April 2026 saved):
+        #   max_v_ll       = 1.585e-1 m/s
+        #   mode4_pos      = 2.297e-2 m/s
+        #   mode4_neg      = 2.297e-2 m/s
+        #   face_mirror    = 6.5e-4
+        # Ceilings carry small headroom so any meaningful regression
+        # trips the test while normal numerical noise does not.
+        self.assertLess(
+            max_v_ll, 2.0e-1,
+            msg=(f"W2 iter-761 matrix 1-day max|v_ll| = "
+                 f"{max_v_ll:.4e} m/s exceeds 2.0e-1 ceiling.  Saved "
+                 f"baseline = 1.585e-1 m/s.  A regression here means "
+                 f"the user-visible W2 v-wind imprint has grown."))
+        self.assertLess(
+            mode4_pos, 3.0e-2,
+            msg=(f"W2 iter-761 matrix 1-day mode-4 amplitude at "
+                 f"+30°N = {mode4_pos:.4e} m/s exceeds 3.0e-2 ceiling. "
+                 f"Saved baseline = 2.297e-2 m/s.  Mode-4 amplification "
+                 f"would indicate the production A-L + RK3 path's cube-"
+                 f"face imprint has worsened."))
+        self.assertLess(
+            mode4_neg, 3.0e-2,
+            msg=(f"W2 iter-761 matrix 1-day mode-4 amplitude at "
+                 f"-30°S = {mode4_neg:.4e} m/s exceeds 3.0e-2 ceiling. "
+                 f"Saved baseline = 2.297e-2 m/s."))
+        self.assertLess(
+            face_mirror_rel, 1.0e-2,
+            msg=(f"W2 iter-761 matrix 1-day face4/face5 max|v_cc_north| "
+                 f"mirror asymmetry: face4={face4_maxabs:.4e}, "
+                 f"face5={face5_maxabs:.4e}, rel diff={face_mirror_rel:.3e} "
+                 f"exceeds 1.0e-2 ceiling.  Saved baseline rel diff "
+                 f"= 6.5e-4.  A regression here would re-introduce "
+                 f"the pre-iter-505 polar-axis asymmetry."))
+
+
 class TestCosineBellPositivity(unittest.TestCase):
     """Iter-525: lock the cosine bell positivity invariant on the
     canonical production matrix path
