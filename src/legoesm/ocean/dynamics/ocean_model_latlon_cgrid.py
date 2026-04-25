@@ -622,6 +622,28 @@ class LatLonCGridOceanModel:
                     tr, mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_u_old, h_v_old, self.grid, dt,
                 )
+            elif self.config.tracer_advection in ("weno5", "weno7"):
+                # WENO-Z high-order reconstruction (Silvestri et al. 2024).
+                # Purely spatial, no CFL dependence. Like PPM but higher
+                # order with ENO oscillation suppression via nonlinear weights.
+                from legoesm.ocean.advection import (
+                    weno5_to_u_points, weno5_to_v_points,
+                    weno7_to_u_points, weno7_to_v_points,
+                    flux_form_vertical_tracer_advection_weno5,
+                    flux_form_vertical_tracer_advection_weno7,
+                )
+                _u_fn, _v_fn, _vert_fn = {
+                    "weno5": (weno5_to_u_points, weno5_to_v_points,
+                              flux_form_vertical_tracer_advection_weno5),
+                    "weno7": (weno7_to_u_points, weno7_to_v_points,
+                              flux_form_vertical_tracer_advection_weno7),
+                }[self.config.tracer_advection]
+                tr_u = _u_fn(tr, mass_flux_u)
+                tr_v = _v_fn(tr, mass_flux_v)
+                tracer_flux_u = mass_flux_u * tr_u
+                tracer_flux_v = mass_flux_v * tr_v
+                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
+                vert_flux_div = _vert_fn(tr, w_baro, h_k_old, dt)
             else:
                 # Horizontal flux: div(mf_k * T_face)
                 if self.config.tracer_advection == "tvd":
