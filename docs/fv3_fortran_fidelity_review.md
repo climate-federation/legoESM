@@ -2053,3 +2053,47 @@ iter-885's 6 tests substantially overlap iter-617's coverage (uniform spacing, n
 **Deliverable.**  Delete `tests/test_edge_interpolate4_fortran_faithful_iter885.py` + this doc correction.
 
 **Process.**  158th iter in the iter-752-885b chain.  Codex stop-time review caught that iter-885 was based on an incorrect coverage audit.  iter-885b honestly acknowledges the false premise, reverts the duplicate test file, and documents the failed audit method so future sentinels can avoid the same mistake.  No source-code change.  The lesson: per-function coverage audits must look INSIDE the test files, not just count references — references include comments, docstrings, and unrelated code that passes a grep filter but doesn't actually exercise the function.
+
+### Iter-886 — Master inventory of existing cross-Fortran sentinels (iter-885b audit method follow-up)
+
+**Motivation.**  iter-885b's failed-audit lesson: per-function coverage checks must enumerate matching test classes inside test files, not just count grep references.  iter-886 catalogs the existing direct cross-Fortran sentinels in the iter chain, so future iters can FIRST consult this inventory before claiming "missing coverage."
+
+**Direct cross-Fortran sentinels** (function ↔ Fortran reference ↔ test class):
+
+| Python function | File | Fortran reference | Test class | Iter |
+|-----------------|------|-------------------|------------|------|
+| `_ppm_reconstruct_1d` | `core/operators_cdgrid.py` | CW84 eq. 1.10 / `tp_core.F90:1199` | `test_ppm_overshoot_constraint_iter878.py` (4 tests) | iter-878 |
+| `_ppm_reconstruct_1d` ↔ `_ppm_limit` | (same + `core/operators_fv.py`) | cross-implementation consistency | `test_ppm_limiter_consistency_iter879.py` (15 tests) | iter-879g/h |
+| `_ppm_edge_values` | `core/operators_fv.py` | `tp_core.F90:353-355` | `test_ppm_edge_values_clip_iter880.py` (6 tests) | iter-880b |
+| `_ppm_1d` boundary indices | `core/fv_tp_2d.py` | `tp_core.F90:629/648` | `test_ppm_1d_boundary_indices_iter884.py` (3 tests) | iter-884b |
+| `_pert_ppm_iv0` | `core/fv_tp_2d.py` | `tp_core.F90:1169-1192` | `test_pert_ppm_iv0_fortran_faithful_iter881.py` (4 tests, 6 branches) | iter-881d |
+| `_pert_ppm` (iv=1) | `core/fv_tp_2d.py` | `tp_core.F90:1193-1212` | `test_pert_ppm_iv1_fortran_faithful_iter882.py` (4 tests, 4 branches) | iter-882 |
+| `_edge_interpolate4` | `core/fv3_sw_core.py` | `sw_core.F90:3709-3720` | `TestEdgeInterpolate4FortranFormula` in `tests/unit/test_cdgrid_fv3_regression.py:6471-6628` (4 tests) | iter-617 |
+| `_d_sw1_recompute_ut_vt` (interior formula) | `core/fv3_sw_core.py` | `sw_core.F90:618-812` | `TestDSw1RecomputeUtVtFortranFormula` in `tests/unit/test_cdgrid_fv3_regression.py` | iter-622 |
+| `_xppm` flux formula | `core/fv_tp_2d.py` | `tp_core.F90:670-677` | `TestFlux*Fortran*` (iter-639 lock) in `tests/unit/test_cdgrid_fv3_regression.py:8214+` | iter-639 |
+| `_corner_vorticity` boundary gates | `core/fv3_sw_core.py` | `sw_core.F90:divergence_corner` | iter-553 lock `test_corner_vorticity_*` in `tests/unit/test_cdgrid_fv3_regression.py:1735+` | iter-553 |
+| `_divergence_corner_duo` | `core/fv3_sw_core.py` | `sw_core.F90:2345-2447` | `test_divergence_corner_duo_*` in `tests/unit/test_cdgrid_fv3_regression.py:2058+` | iter-554/556 |
+| `_apply_legacy_d_sw4_corner_ke_fix` | `core/fv3_sw_core.py` | `sw_core.F90:1438-1466` | `tests/test_d_sw4_corner_ke_fix_iter869.py` (4 tests) | iter-869b |
+
+**Other regression sentinels** (not direct cross-Fortran, but pin Fortran-fidelity properties):
+
+| Sentinel | Coverage | Iter |
+|----------|----------|------|
+| `tests/test_fortran_fidelity_default_flags_iter873.py` | Default-OFF state of 6 opt-in Fortran-fidelity flags + matrix runner / W2 sentinel AST scans | iter-873 |
+| `tests/test_da_min_c_fortran_fidelity_iter867.py` | `da_min_c = jnp.min(area_corner)` Fortran-faithful definition | iter-867 |
+| `tests/test_fv3_dddmp_kwarg_iter872.py` | `dddmp` kwarg + `dddmp_prod` config plumbing | iter-872c-take5 |
+| `tests/test_fv3_boundary_fix_duogrid_gate_iter865.py` | Boundary-fix duogrid gate semantics | iter-865 |
+| `tests/test_fv3_d_sw5_corner_corrections.py` | iter-862/869b/871b/c FB-chain corner-correction flag plumbing | iter-862-871c |
+| `tests/test_fv3_fv_tp_2d_flux_sync_iter864.py` | iter-864 flux sync gate | iter-864 |
+
+**Audit method for future "missing coverage" claims.**  Before adding a new cross-Fortran sentinel:
+1. Grep for the function name across `tests/`.
+2. For EACH file matched, READ the file's test class names (search `class Test*` and `def test_*`).
+3. Read at least the docstring of each test method that mentions the function.
+4. If the existing tests cover the formula via Fortran reference comparison → existing coverage is sufficient.
+5. If the existing tests only cover gates/locality/AST-scans without a direct formula reference → a cross-Fortran sentinel adds value.
+6. If existing coverage is unclear → quote the existing test docstrings in the new sentinel's iter doc entry to make the gap explicit.
+
+**Deliverable.**  This doc inventory entry.  No source or test code change.
+
+**Process.**  159th iter in the iter-752-886 chain.  Doc-only iter that catalogs the existing iter chain's cross-Fortran sentinels into a master inventory.  Closes the iter-885 audit-method gap by giving future iters an explicit pre-existing-test enumeration to consult.  No new sentinel because iter-885b's audit method (read test files, not just grep counts) shows that the iter-878-885 chain has now sentineled the major FB chain operators sufficient for the regression-prevention goal.  Future fidelity work should target either (a) the deferred multi-iter cross-face halo helper, (b) the deferred d_sw5 holistic port, or (c) FB-chain stabilisation — all multi-iter architectural items per the iter-849-868 chain.
