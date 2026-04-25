@@ -1013,20 +1013,41 @@ class DiagnosticCollector:
         str or None
             Error message if blow-up detected, None if stable.
         """
-        if not jnp.all(jnp.isfinite(state.u.data)):
-            return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
+        # Fuse all device→host syncs into one ``jnp.stack`` so the
+        # blowup probe (called every diagnostic interval inside the
+        # integration loop) costs one GPU stall per call instead of
+        # 6-7.  The boolean ``isfinite`` checks on u and T are folded
+        # into the same stack as 0/1 floats.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
+            wind_term = jnp.max(jnp.abs(state.u.data))
+        has_p_s = hasattr(state, 'p_s')
+        terms = [
+            jnp.all(jnp.isfinite(state.u.data)).astype(state.T.data.dtype),
+            jnp.all(jnp.isfinite(state.T.data)).astype(state.T.data.dtype),
+            wind_term.astype(state.T.data.dtype),
+            jnp.min(state.T.data).astype(state.T.data.dtype),
+            jnp.max(state.T.data).astype(state.T.data.dtype),
+        ]
+        if has_p_s:
+            terms.append(jnp.min(state.p_s.data).astype(state.T.data.dtype))
+            terms.append(jnp.max(state.p_s.data).astype(state.T.data.dtype))
+        host = np.asarray(jnp.stack(terms))
+        u_finite = bool(host[0] > 0.5)
+        T_finite = bool(host[1] > 0.5)
+        max_v = float(host[2])
+        T_min_val = float(host[3])
+        T_max_val = float(host[4])
+
+        if not u_finite:
+            return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
         if max_v > 500:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
-        if not jnp.all(jnp.isfinite(state.T.data)):
+        if not T_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
 
         # Temperature bounds (physical range for Earth atmosphere)
-        T_min_val = float(jnp.min(state.T.data))
-        T_max_val = float(jnp.max(state.T.data))
         if T_min_val < 100.0 or T_max_val > 400.0:
             return (
                 f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical bounds "
@@ -1035,9 +1056,9 @@ class DiagnosticCollector:
             )
 
         # Surface pressure bounds
-        if hasattr(state, 'p_s'):
-            ps_min = float(jnp.min(state.p_s.data))
-            ps_max = float(jnp.max(state.p_s.data))
+        if has_p_s:
+            ps_min = float(host[5])
+            ps_max = float(host[6])
             if ps_min < 40000.0 or ps_max > 115000.0:
                 return (
                     f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of bounds "

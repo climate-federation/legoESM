@@ -415,10 +415,17 @@ class ModelDriver:
             self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
-            mean_qv = float(jnp.mean(self.tracers["q_v"])) * 1000.0
-            cwv = float(jnp.mean(
-                column_water_vapor(self.tracers["q_v"], self.state.p_s.data, self.sigma.dsigma)
-            ))
+            # Fuse the two diagnostic means into one host transfer.
+            _stats = jnp.stack([
+                jnp.mean(self.tracers["q_v"]),
+                jnp.mean(column_water_vapor(
+                    self.tracers["q_v"], self.state.p_s.data,
+                    self.sigma.dsigma,
+                )),
+            ])
+            _h = np.asarray(_stats)
+            mean_qv = float(_h[0]) * 1000.0
+            cwv = float(_h[1])
             logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
