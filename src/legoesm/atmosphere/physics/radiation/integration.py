@@ -177,13 +177,21 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None):
     Returns (q_v_col, q_cloud_col, q_ice_col) all shaped (ncol, nlev).
     """
     if dtype is None:
-        # Try to infer dtype from state.T or state.T_hat
+        # Try to infer dtype from state.T or state.T_hat.  Fall back to
+        # the configured compute precision rather than hardcoding fp64
+        # — the latter would force radiation to allocate fp64 zeros on
+        # Metal/fp32 backends, which then upcast the whole RRTMGP
+        # column to fp64 via dtype promotion.
         if hasattr(state, "T"):
             dtype = state.T.data.dtype
         elif hasattr(state, "T_hat"):
-            dtype = jnp.float64  # spectral states typically use fp64
+            # Spectral state stores complex T_hat; the corresponding
+            # real-valued T column should match the spectral grid's
+            # real dtype.
+            dtype = state.T_hat.data.real.dtype
         else:
-            dtype = jnp.float64
+            from legoesm.core.precision import get_policy
+            dtype = get_policy().compute
     T_col_shape = (ncol, nlev)
     q_v_col = jnp.zeros(T_col_shape, dtype=dtype)
     q_cloud_col = None
