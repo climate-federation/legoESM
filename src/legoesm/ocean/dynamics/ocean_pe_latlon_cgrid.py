@@ -523,11 +523,12 @@ def _weno_cell_to_vface(
 
     # V-face i (i=1,...,n_lat-1) sits between cell i-1 and cell i.
     # WENO needs cells i-hw, ..., i+hw-1.
-    # In extended array: index hw + cell => positions i, ..., i+2*hw-1.
-    # For face i=1: ext indices 1,...,2*hw.  Slice [s : n_lat-1+s].
-    phi_stencil = [phi_ext[s: n_lat - 1 + s, :, :]
+    # In extended array: cell c maps to ext[hw+c], so cell i-hw maps
+    # to ext[i].  For all n_lat-1 interior faces (i=1,...,n_lat-1),
+    # output index m = i-1, so stencil[s][m] = ext[m+1+s].
+    phi_stencil = [phi_ext[1 + s: n_lat + s, :, :]
                    for s in range(2 * hw)]
-    psi_stencil = [psi_ext[s: n_lat - 1 + s, :, :]
+    psi_stencil = [psi_ext[1 + s: n_lat + s, :, :]
                    for s in range(2 * hw)]
 
     phi_plus, phi_minus = weno_reconstruct_split(
@@ -779,7 +780,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     _mom_adv = config.momentum_advection
     if _mom_adv in ("weno5", "weno7"):
         # WENO5 {u²;u} and {v²;v} reconstruction (Silvestri et al. 2024,
-        # Phase 4b K-term).  Replaces centered interpolation with upwind
+        # Phase 4b K-term, Table 2: always WENO5 for K regardless of
+        # config order).  Replaces centered interpolation with upwind
         # bias: computes avg(u²) not (avg(u))², adding O((ΔU)²) implicit
         # KE dissipation at velocity fronts.
         u_sq_cell = _weno_usq_to_cell(u, order=5)

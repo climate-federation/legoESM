@@ -489,6 +489,29 @@ class TestWENODivAtU:
         result = _weno_cell_to_uface(D, D, u, order=5)
         assert jnp.allclose(result[:, -1, :], result[:, 0, :], atol=1e-15)
 
+    def test_linear_field_interior(self):
+        """Linear D(lon) → WENO5 reconstructs exactly at interior u-faces."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_cell_to_uface,
+        )
+        n_lat, n_lon, nlev = 8, 24, 3
+        # Linear in axis 1: D[j] = a + b*j
+        lon_idx = jnp.arange(n_lon, dtype=jnp.float64)
+        D = (1.0 + 0.01 * lon_idx)[jnp.newaxis, :, jnp.newaxis]
+        D = jnp.broadcast_to(D, (n_lat, n_lon, nlev)).copy()
+        u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        result = _weno_cell_to_uface(D, D, u, order=5)
+        # u-face j between cell j-1 and cell j: expected = a + b*(j-0.5)
+        face_idx = jnp.arange(n_lon, dtype=jnp.float64)
+        expected = (1.0 + 0.01 * (face_idx - 0.5))[jnp.newaxis, :, jnp.newaxis]
+        expected = jnp.broadcast_to(expected, (n_lat, n_lon, nlev))
+        # Check core faces (skip near periodic wrap boundary)
+        interior = slice(3, n_lon - 3)
+        assert jnp.allclose(
+            result[:, interior, :], expected[:, interior, :], atol=1e-12), (
+            f"Max interior error: "
+            f"{float(jnp.max(jnp.abs(result[:, interior, :] - expected[:, interior, :])))}")
+
     def test_finite_values(self):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             _weno_cell_to_uface,
@@ -534,6 +557,29 @@ class TestWENODivAtV:
         # Boundary faces should be zero (wall BC)
         assert jnp.allclose(result[0], 0.0, atol=1e-15)
         assert jnp.allclose(result[-1], 0.0, atol=1e-15)
+
+    def test_linear_field_interior(self):
+        """Linear D(lat) → WENO5 reconstructs exactly at interior v-faces."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_cell_to_vface,
+        )
+        n_lat, n_lon, nlev = 20, 10, 3
+        # Linear in axis 0: D[i] = a + b*i
+        lat_idx = jnp.arange(n_lat, dtype=jnp.float64)
+        D = (1.0 + 0.01 * lat_idx)[:, jnp.newaxis, jnp.newaxis]
+        D = jnp.broadcast_to(D, (n_lat, n_lon, nlev)).copy()
+        v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        result = _weno_cell_to_vface(D, D, v, order=5)
+        # v-face i between cell i-1 and cell i: expected = a + b*(i-0.5)
+        face_idx = jnp.arange(1, n_lat, dtype=jnp.float64)
+        expected = (1.0 + 0.01 * (face_idx - 0.5))[:, jnp.newaxis, jnp.newaxis]
+        expected = jnp.broadcast_to(expected, (n_lat - 1, n_lon, nlev))
+        # Skip faces near boundaries where ghosts degrade accuracy
+        interior = slice(3, n_lat - 1 - 3)
+        assert jnp.allclose(
+            result[1:-1][interior], expected[interior], atol=1e-12), (
+            f"Max interior error: "
+            f"{float(jnp.max(jnp.abs(result[1:-1][interior] - expected[interior])))}")
 
     def test_finite_values(self):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
@@ -700,6 +746,23 @@ class TestWENOPhase4bAD:
             return jnp.sum(r)
 
         g = jax.grad(loss)(u)
+        assert jnp.all(jnp.isfinite(g)), "Gradient has non-finite values"
+
+    def test_ad_vsq_to_cell_finite(self):
+        """Gradient through _weno_vsq_to_cell is finite and nonzero."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_vsq_to_cell,
+        )
+        n_lat, n_lon, nlev = 8, 16, 3
+        key = jax.random.PRNGKey(84)
+        v = jax.random.uniform(key, (n_lat + 1, n_lon, nlev),
+                               minval=-0.5, maxval=0.5)
+
+        def loss(v_in):
+            r = _weno_vsq_to_cell(v_in, order=5)
+            return jnp.sum(r)
+
+        g = jax.grad(loss)(v)
         assert jnp.all(jnp.isfinite(g)), "Gradient has non-finite values"
         assert float(jnp.max(jnp.abs(g))) > 1e-15, "Gradient is zero"
 
