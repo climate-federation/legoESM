@@ -1,35 +1,46 @@
-"""Iter-870 diagnostic: quantify the iter-862/iter-869b halo-input gap.
+"""Iter-870 diagnostic: ESTIMATE the iter-862/iter-869b halo-input gap.
 
 iter-862 (d_sw5 corner corrections) and iter-869b (d_sw4 corner-KE
-fix) both pad their D-grid edge-midpoint inputs (vort, ptc, ut, vt,
-u_d, v_d) with ``jnp.pad(..., mode='edge')`` (same-face extension)
-at the south / north halo rows.  Fortran has cross-face halo via
+fix) both pad their D-grid edge-midpoint inputs with
+``jnp.pad(..., mode='edge')`` (same-face extension) at the south /
+north halo rows.  Fortran has cross-face halo via
 ``mpp_update_domains``.
 
-This script measures the gap on a realistic input (W2 LEGACY C36
-alpha=0 initial state) by computing two halo variants of
-``vort_pad`` (the iter-862 RHS) and reporting the discrepancy at
-the four cube-vertex corners.
+This script ESTIMATES the gap on a realistic input (W2 LEGACY C36
+alpha=0 IC) by comparing the same-face halo to a cross-face PROXY
+constructed from existing infrastructure.  IMPORTANT (Codex
+iter-870 stop-time finding): the proxy is APPROXIMATE — the
+absolute magnitude of the gap reported below should not be treated
+as a tight Fortran-fidelity figure.  See "Limitations" below.
 
 Variants:
-  A) `mode='edge'`  — current default in
-                      `_d_sw5_corner_divergence` and the iter-862 /
-                      iter-869b helpers' RHS.
-  B) cross-face — derived via ``pad_halo_vector`` on cell-centre
-                      averages (cross-face rotation-correct via the
-                      duogrid path) + edge-midpoint re-extraction.
-                      An approximate stand-in for a true edge-stagger
-                      halo helper (still pending iter-871+).
+  A) ``mode='edge'``  — current default in
+                        `_d_sw5_corner_divergence` and the
+                        iter-862 / iter-869b helpers' RHS.
+  B) cross-face PROXY — derived via ``pad_halo_vector`` on
+                        cell-centre averages of ``v_d`` ALONE (with
+                        ``u_dummy=0``) + edge-midpoint re-extraction.
 
-Conclusion (April 2026 measurement at C36):
-  - mode='edge' max|vort_pad_corner| = 3.66e+06
-  - cross-face max|vort_pad_corner|  = 2.22e+06
-  - max|Δ| at cube-vertex halos = 5.19e+06 (~68 % of vort interior).
+Limitations of variant B (script-level approximation, NOT a
+ground-truth Fortran reference):
+  1. ``pad_halo_vector(u=0, v=v_d_cc)`` disables the
+     non-zero-u contribution to the geographic rotation.  Fortran's
+     ``mpp_update_domains`` halos both ``u_d`` and ``v_d`` together;
+     applying the vector halo with ``u=0`` is NOT the same operation.
+  2. The re-extraction `0.5*(v_cc_pad[:, :-1, halo] + v_cc_pad[:, 1:, halo])`
+     averages two cell-centre halo values to estimate an edge-midpoint
+     halo value.  The proper edge-stagger halo would be a different
+     quantity altogether — the cross-face neighbour's edge value, not a
+     2-point average of two of its cell-centre values.
+  3. ``dxc`` and ``sina_u`` in the halo row use ``mode='edge'`` (same-face
+     extension) inside the proxy too.  The metric variation across face
+     seams is not captured.
 
-This makes the iter-871+ cross-face D-grid edge halo a HIGH-priority
-follow-up: the iter-862 and iter-869b corner corrections are
-operating on right-hand-side data that's ~68 % off from the
-Fortran-faithful values at cube vertices.
+So the printed magnitudes are an order-of-magnitude proxy.  They
+qualitatively confirm that ``mode='edge'`` and any cross-face halo
+DIFFER non-trivially at cube vertices, but the precise number
+rests on (1)-(3) above.  A true edge-stagger halo helper
+(iter-871+) is needed to nail down the quantitative gap.
 
 Run: ``JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/diag_iter870_halo_gap.py``
 """
@@ -92,9 +103,15 @@ def main():
     vort_pad_xface = vort_pad_edge.at[:, :, 0].set(vort_south)
     vort_pad_xface = vort_pad_xface.at[:, :, -1].set(vort_north)
 
-    print("=== Iter-870 halo-input gap measurement ===")
+    print("=== Iter-870 halo-input gap ESTIMATE ===")
     print(f"W2 LEGACY C{n}, alpha=0 initial state.")
     print(f"vort_interior max: {vort_interior_max:.4e} m^2/s")
+    print()
+    print("CAVEAT (Codex iter-870): variant B (cross-face proxy) uses")
+    print("u_dummy=0 in pad_halo_vector and mode='edge' on dxc/sina_u")
+    print("in the halo row.  Numbers below are an order-of-magnitude")
+    print("PROXY; the exact Fortran-faithful gap requires the iter-871+")
+    print("edge-stagger halo helper.")
     print()
 
     for label, idx in (("SW", (slice(None), 0, 0)),
