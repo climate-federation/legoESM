@@ -88,7 +88,8 @@ def _pert_ppm_iv0(q, bl, br):
 
 def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None,
-            use_duogrid=False):
+            use_duogrid=False,
+            apply_fortran_xppm_boundary=False):
     """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
@@ -112,6 +113,22 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
             all cells and instead handles any residual non-uniformity via
             explicit ``bl/br`` rewrites (which we also skip for duogrid,
             matching the Fortran gate).
+    apply_fortran_xppm_boundary : bool, default False
+        Iter-888: when True AND ``not use_duogrid``, overwrite the bl/br
+        values at the 6 face-boundary cells (indices 0, 1, 2 and -3, -2,
+        -1) with Fortran's s11/s14/s15 + 4-point boundary formulas from
+        ``tp_core.F90:614-628`` (left) and ``:632-647`` (right).
+        Constants: ``s11 = 11/14, s14 = 4/7, s15 = 3/14`` (tp_core.F90:58).
+        The 4-point xt formula uses the UNIFORM-GRID simplification
+        ``xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))``, which collapses
+        the Fortran ``dxa``-weighted formula at lines 616-617/638-639
+        when cell widths are uniform.  Cubed-sphere boundary cells have
+        non-uniform ``dxa`` near corners so this is a partial Fortran-
+        fidelity fix; the full ``dxa``-weighted formula is deferred until
+        ``dxa`` plumbing through ``_xppm/_yppm/fv_tp_2d`` is added.  The
+        overrides apply BEFORE ``pert_ppm(iv=1)`` so the limiter sees
+        Fortran-faithful boundary bl/br (matches Fortran's lines 614-629
+        + 632-648 ordering).  Default False preserves prior behaviour.
 
     Returns
     -------
@@ -271,6 +288,119 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 
     # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
     bl, br = _pert_ppm_iv0(q_c, bl, br)
+
+    # Iter-888: optional Fortran-faithful boundary `bl/br` overrides
+    # via the s11/s14/s15 + 4-point xt formulas (tp_core.F90:614-628
+    # left, :632-647 right).  Constants: s11 = 11/14, s14 = 4/7,
+    # s15 = 3/14 (tp_core.F90:58).  Only fires for the legacy non-
+    # duogrid path AND when `apply_fortran_xppm_boundary=True`.
+    # Default False preserves pre-iter-888 behaviour (current
+    # production runs do NOT pass this flag).
+    #
+    # Index map (qe has halo=3 padding so qe[k+1] is the cell at our
+    # q-array index k):
+    #   Fortran q1(-1) = qe[1] (halo depth-1)
+    #   Fortran q1(0)  = qe[2] (halo depth-0) = q_c[0]
+    #   Fortran q1(1)  = qe[3] (interior 0)   = q_c[1]
+    #   Fortran q1(2)  = qe[4] (interior 1)   = q_c[2]
+    #   Fortran q1(npx-2) = qe[n+1] (interior n-2) = q_c[n-1]
+    #   Fortran q1(npx-1) = qe[n+2] (interior n-1) = q_c[n]
+    #   Fortran q1(npx)   = qe[n+3] (halo depth-0) = q_c[n+1]
+    #   Fortran q1(npx+1) = qe[n+4] (halo depth-1)
+    # And for dm (shape (n+4), dm[k] = slope at qe[k+1]):
+    #   Fortran dm(-1) = dm[0]
+    #   Fortran dm(0)  = dm[1]
+    #   Fortran dm(2)  = dm[3]
+    #   Fortran dm(npx-2) = dm[n]
+    #   Fortran dm(npx+1) = dm[n+3]
+    if apply_fortran_xppm_boundary and not use_duogrid:
+        s11 = 11.0 / 14.0
+        s14 = 4.0 / 7.0
+        s15 = 3.0 / 14.0
+
+        # --- LEFT boundary (tp_core.F90:614-628) ---
+        # Line 614: bl(0) = s14*dm(-1) + s11*(q1(-1)-q1(0))
+        bl_0_L = s14 * dm[:, 0, :] + s11 * (qe[:, 1, :] - qe[:, 2, :])
+
+        # Lines 616-617: 4-point xt (uniform-grid simplification of the
+        # dxa-weighted formula).  For uniform dxa:
+        #   xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
+        xt_L = (0.75 * (qe[:, 2, :] + qe[:, 3, :])
+                - 0.25 * (qe[:, 1, :] + qe[:, 4, :]))
+        # Lines 619-620: clip xt to within range of q1(-1..2)
+        q_lo_L = jnp.minimum(jnp.minimum(qe[:, 1, :], qe[:, 2, :]),
+                             jnp.minimum(qe[:, 3, :], qe[:, 4, :]))
+        q_hi_L = jnp.maximum(jnp.maximum(qe[:, 1, :], qe[:, 2, :]),
+                             jnp.maximum(qe[:, 3, :], qe[:, 4, :]))
+        xt_L = jnp.clip(xt_L, q_lo_L, q_hi_L)
+
+        # Line 622: br(0) = xt - q1(0)
+        br_0_L = xt_L - qe[:, 2, :]
+        # Line 623: bl(1) = xt - q1(1)
+        bl_1_L = xt_L - qe[:, 3, :]
+
+        # Line 624: xt2 = s15*q1(1) + s11*q1(2) - s14*dm(2)
+        xt2_L = (s15 * qe[:, 3, :] + s11 * qe[:, 4, :]
+                 - s14 * dm[:, 3, :])
+        # Line 625: br(1) = xt2 - q1(1)
+        br_1_L = xt2_L - qe[:, 3, :]
+        # Line 626: bl(2) = xt2 - q1(2)
+        bl_2_L = xt2_L - qe[:, 4, :]
+
+        # Line 628: br(2) = al(3) - q1(2) — UNCHANGED from standard
+        # (already computed by `br = al_R - q_c` above; al_R[2] = al[3]
+        # and q_c[2] = qe[4] so br[2] = al[3] - qe[4] which equals
+        # Fortran's br(2)).  No override needed.
+
+        bl = bl.at[:, 0, :].set(bl_0_L)
+        br = br.at[:, 0, :].set(br_0_L)
+        bl = bl.at[:, 1, :].set(bl_1_L)
+        br = br.at[:, 1, :].set(br_1_L)
+        bl = bl.at[:, 2, :].set(bl_2_L)
+        # br[2] left as-is (Fortran-faithful by construction).
+
+        # --- RIGHT boundary (tp_core.F90:632-647) ---
+        # Line 632: bl(npx-2) = al(npx-2) - q1(npx-2) — UNCHANGED
+        # (al[n-1] - q_c[n-1] = al[n-1] - qe[n+1] which is what bl[n-1]
+        # already holds.)
+
+        # Line 634: xt = s15*q1(npx-1) + s11*q1(npx-2) + s14*dm(npx-2)
+        xt_R = (s15 * qe[:, n + 2, :] + s11 * qe[:, n + 1, :]
+                + s14 * dm[:, n, :])
+        # Line 635: br(npx-2) = xt - q1(npx-2)
+        br_nm2_R = xt_R - qe[:, n + 1, :]
+        # Line 636: bl(npx-1) = xt - q1(npx-1)
+        bl_nm1_R = xt_R - qe[:, n + 2, :]
+
+        # Lines 638-639: 4-point xt (uniform-grid simplification).
+        # For uniform dxa: xt = 0.75*(q1(npx-1)+q1(npx))
+        #                       - 0.25*(q1(npx-2)+q1(npx+1))
+        xt2_R = (0.75 * (qe[:, n + 2, :] + qe[:, n + 3, :])
+                 - 0.25 * (qe[:, n + 1, :] + qe[:, n + 4, :]))
+        # Lines 641-642: clip
+        q_lo_R = jnp.minimum(jnp.minimum(qe[:, n + 1, :], qe[:, n + 2, :]),
+                             jnp.minimum(qe[:, n + 3, :], qe[:, n + 4, :]))
+        q_hi_R = jnp.maximum(jnp.maximum(qe[:, n + 1, :], qe[:, n + 2, :]),
+                             jnp.maximum(qe[:, n + 3, :], qe[:, n + 4, :]))
+        xt2_R = jnp.clip(xt2_R, q_lo_R, q_hi_R)
+
+        # Line 644: br(npx-1) = xt - q1(npx-1)
+        br_nm1_R = xt2_R - qe[:, n + 2, :]
+        # Line 645: bl(npx) = xt - q1(npx)
+        bl_n_R = xt2_R - qe[:, n + 3, :]
+
+        # Line 647: br(npx) = s11*(q1(npx+1)-q1(npx)) - s14*dm(npx+1)
+        br_n_R = (s11 * (qe[:, n + 4, :] - qe[:, n + 3, :])
+                  - s14 * dm[:, n + 3, :])
+
+        # Right-side overrides (positive indices for clarity):
+        # bl/br shape is (n+2); index n-1 = -3, n = -2, n+1 = -1.
+        # bl[n-1] (left as-is, line 632)
+        br = br.at[:, n - 1, :].set(br_nm2_R)
+        bl = bl.at[:, n, :].set(bl_nm1_R)
+        br = br.at[:, n, :].set(br_nm1_R)
+        bl = bl.at[:, n + 1, :].set(bl_n_R)
+        br = br.at[:, n + 1, :].set(br_n_R)
 
     # pert_ppm(iv=1) at face-boundary cells: extra monotonicity for
     # the three cells whose PPM stencil crosses a face boundary.

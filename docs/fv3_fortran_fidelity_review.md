@@ -2130,3 +2130,72 @@ Our Python implements item 2 as a 2-point position-aware average `(0.5*q_hm1 + h
 **Verification.**  Recent PPM sentinel suite (iter-878 + iter-880 + iter-881 + iter-882 + iter-884) re-run: all 21 tests pass.
 
 **Process.**  160th iter.  Codex stop-time review of iter-886 caught two BLOCK findings (MD-only + terminology); iter-887 corrects both with a real source-code comment that documents an actual Fortran-fidelity gap not previously catalogued.
+
+### Iter-888 — `_ppm_1d` `s11/s14/s15` boundary formula (uniform-grid simplification, default-OFF kwarg)
+
+**Codex iter-887 stop-time hint.**  iter-887 (commit 4f04e76) documented the `s11/s14/s15` boundary-formula gap in `_ppm_1d` but deferred the fix.  Codex's iter-887 ALLOW review remarked: "looks like a contained future patch rather than something inherently multi-iter."  iter-888 implements the fix at the smallest tractable scope.
+
+**Codex iter-888 fidelity review (Fortran oracle scan).**  Identified 3 candidate gaps:
+1. `boundary_fix` post-tendency smoother in `operators_cdgrid.py:1851` — predicted HIGH W2 cube-imprint impact, small.  **Empirical falsification.**  Setting `boundary_fix_skip_corners=True` on the W2 LEGACY config makes v_north Linf WORSE: 0.28 → 1.30 m/s (+369%).  The cascaded corner double-update is load-bearing for stability — the iter-769 doc had this measurement deferred and iter-888 closes it: `skip_corners=True` is NOT a single-iter improvement.
+2. `cgrid_divergence` cell-centre branch vs Fortran's corner-`delpc` `d_sw5` path — flagged as LARGE / multi-iter.  Deferred, matches the existing project_w2_mode_a_structural.md memo.
+3. `_fill_corners_h1` 2-pt vs Fortran `a2b_ord4` 3-pt corner formula — already-disproven by iter-766/iter-825 (iter-873 sentinel locks `fortran_a2b_corner_avg=True` as KNOWN-WORSE at 1.89× v_ll Linf).
+
+iter-888 therefore pivots to iter-887's deferred gap, which has not been previously attempted.
+
+**Implementation.**  New kwarg `apply_fortran_xppm_boundary` on `_ppm_1d` (default `False`).  When `True` AND `not use_duogrid`, the bl/br at the 6 face-boundary cells are overwritten with Fortran's explicit boundary formulas from `tp_core.F90:614-628` (left) and `:632-647` (right):
+
+| Override | Fortran line | Formula |
+|----------|--------------|---------|
+| `bl[0]`  | 614 | `s14*dm(-1) + s11*(q1(-1) - q1(0))` |
+| `br[0]`  | 622 | `xt - q1(0)` where xt is 4-point clipped boundary value |
+| `bl[1]`  | 623 | `xt - q1(1)` |
+| `br[1]`  | 625 | `xt2 - q1(1)` where `xt2 = s15*q1(1) + s11*q1(2) - s14*dm(2)` |
+| `bl[2]`  | 626 | `xt2 - q1(2)` |
+| `br[2]`  | 628 (UNCHANGED) | already equals `al(3) - q1(2)` from standard al |
+| `br[-3]` | 635 | `xt - q1(npx-2)` where `xt = s15*q1(npx-1) + s11*q1(npx-2) + s14*dm(npx-2)` |
+| `bl[-2]` | 636 | `xt - q1(npx-1)` |
+| `br[-2]` | 644 | `xt2 - q1(npx-1)` (4-point xt) |
+| `bl[-1]` | 645 | `xt2 - q1(npx)` |
+| `br[-1]` | 647 | `s11*(q1(npx+1) - q1(npx)) - s14*dm(npx+1)` |
+
+Constants: `s11 = 11/14, s14 = 4/7, s15 = 3/14` (`tp_core.F90:58`).
+
+**Uniform-grid simplification.**  Fortran's 4-point xt at lines 616-617/638-639 uses `dxa`-weighted averages.  For uniform `dxa(-1)=dxa(0)=dxa(1)=dxa(2)`, this collapses to `0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))`.  iter-888 implements only the uniform-grid simplification — cubed-sphere boundary cells have non-uniform `dxa` near corners so this is a partial Fortran-fidelity fix.  The full `dxa`-weighted formula requires plumbing `dxa` through `_xppm/_yppm/fv_tp_2d` (multi-iter; deferred).  The simplification is exact when `dxa` is uniform along a strip and a strict improvement over the pre-iter-888 2-point average even on non-uniform strips (more cells of context inform the boundary edge value).
+
+**Default-OFF preservation.**  No production caller passes the new kwarg.  Default `False` preserves pre-iter-888 numerics bit-for-bit:
+- Production `fv3_sw_tendencies` does NOT call `_ppm_1d` (uses `_ppm_reconstruct_1d` in `operators_cdgrid.py`); unaffected.
+- FB-chain `transport_step` (`fv_tp_2d.py`) and `fv3_sw_core.py` callers all use the kwarg-free signature; unaffected.
+- The kwarg is reachable only via direct callers of `_ppm_1d` who explicitly opt in.
+
+**Tests** (`tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`, 5 tests):
+1. `test_iter888_default_off_preserves_prior_behaviour` — kwarg-omitted output bit-equals `kwarg=False`.
+2. `test_iter888_on_path_applies_fortran_formula_at_left_boundary` — kwarg=True changes bl/br at the 6 boundary indices and bit-equals OFF at far-interior indices.
+3. `test_iter888_on_path_matches_fortran_formula_predictions` — on a smooth quadratic input, the actual ON-path output bit-equals the predicted s11/s14/s15 + iv=1 formula at indices 0/1.
+4. `test_iter888_duogrid_path_unaffected` — `use_duogrid=True` makes the kwarg a no-op (matches Fortran's `.not. (bounded_domain .or. duogrid)` gate at line 612).
+5. `test_iter888_constants_match_fortran` — AST scan: `_ppm_1d` source contains `BinOp(Div)` literal pairs `(11.0, 14.0)`, `(4.0, 7.0)`, `(3.0, 14.0)`.  Catches a regression that drifts the constants (e.g., `11.0/16.0`) or replaces them with decimal precision-loss approximations.
+
+**Verification.**  All 36 PPM sentinel tests (iter-878/879/880/881/882/884) + 5 new iter-888 tests pass.  Total: 111 top-level Fortran-fidelity tests pass (see `pytest tests/test_*.py`).  Pre-existing failure in `tests/unit/test_cdgrid_fv3_regression.py::TestFvTp2dCornerInvariant::test_corner_vorticity_boundary_gates_linear_extrapolation_on_not_use_duogrid` confirmed unrelated to iter-888 (reproduces on parent commit 4f04e76 via `git stash`).
+
+**Iter-873 sentinel inventory update.**  `apply_fortran_xppm_boundary` is the 7th opt-in Fortran-fidelity kwarg.  Unlike the 6 on `CDGridShallowWaterConfig`, it lives at the `_ppm_1d` function level (matches `dddmp` precedent — function-level kwargs that change behaviour only when explicitly opted in).  No iter-873 sentinel update is required because that sentinel covers `CDGridShallowWaterConfig` fields only (per its iter-873 doc entry).
+
+**What iter-888 DOES show.**
+- The s11/s14/s15 boundary formula is now reachable (default-OFF) for callers that want Fortran-faithful FB-chain transport.
+- The uniform-grid simplification is the exact Fortran formula for uniform-`dxa` strips and a strict improvement over the pre-iter-888 2-point average for non-uniform strips.
+- The kwarg-default-OFF pattern preserves all existing tests bit-for-bit.
+
+**What iter-888 does NOT establish.**
+- W2 cube-imprint reduction (the kwarg only affects FB-chain consumers; production W2 LEGACY uses `_ppm_reconstruct_1d` via `cgrid_mass_flux_divergence`, untouched).
+- FB-chain stability at C36 with the new boundary formula.  No FB-chain caller currently opts in.  Future iter that wires `apply_fortran_xppm_boundary=True` into FB-chain paths must measure the impact.
+- The full `dxa`-weighted Fortran formula for non-uniform-dxa boundary strips.  This is deferred to a future iter alongside `_xppm/_yppm/fv_tp_2d` plumbing.
+
+**Iter-888+ candidates.**
+- Wire `apply_fortran_xppm_boundary=True` into FB-chain `transport_step` and measure FB-chain stability at C24/C36.
+- Plumb `dxa` through `_xppm/_yppm/fv_tp_2d` to enable the full `dxa`-weighted Fortran formula.
+- The W2 cube-imprint architectural gap (production runs A-L+RK3, not FV3 FB chain).  No single-iter fix established by iter-755..888.
+
+**Deliverable.**
+- `src/legoesm/core/fv_tp_2d.py`: new `apply_fortran_xppm_boundary` kwarg on `_ppm_1d` + ~85 lines of override logic gated behind it.
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: 5 tests covering default-OFF, ON-path formula prediction, duogrid no-op, and AST constant scan.
+- This doc entry.
+
+**Process.**  161st iter.  Codex iter-888 fidelity review identified 3 candidates; #1 was empirically falsified by iter-888's own measurement (skip_corners makes W2 worse), #2 is multi-iter (deferred), #3 is already-disproven (iter-825).  Pivoted to iter-887's deferred s11/s14/s15 gap, which Codex iter-887 ALLOW review hinted was contained-not-multi-iter.  Implementation is single-iter (~85 lines + 5 tests + doc); default-OFF preserves all existing behaviour; future iter can opt FB-chain callers in for measurement.
