@@ -2338,3 +2338,45 @@ The 73×–403× figure mixes (a) genuine Fortran-vs-Python stencil-construction
 **iter-852 deliverable.**  Doc: replaced iter-851 conclusion with caveat-laden observation; added explicit Caveats block.  Script: caveat block in printed output and in module docstring.  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  112th iter in iter-752-852 chain.  Self-correction iter on the previous self-correction: iter-851 retracted iter-850's invalid comparison but its apples-to-apples REPLACEMENT also has caveats that iter-851 did not adequately surface.  iter-852 makes those caveats explicit in both doc and script.  The path forward (iter-853+ trial wire-in of `_d_sw5_corner_divergence` into A-L production) is unchanged — and remains the only definitive test for W2 LEGACY mode-A.
+
+### Iter-853 — Phase 1 trial wire-in (t=0 only): RULES OUT stencil-swap-alone as a viable W2 fix
+
+Per iter-852's iter-853+ priority: trial-replace the production cell-centre `cgrid_divergence` with a Fortran-faithful divergence (Fortran corner delpc → 4-pt-avg to cell centres, iter-851's Fortran-cc construction) and measure how the production t=0 dv/dt peak changes on W2 LEGACY.  This is a SAFETY CHECK before any 1-day trial: if the t=0 peak explodes, a 1-day integration would destabilise.
+
+**Method** (`scripts/diag_iter853_phase1_trial.py`).  Monkey-patch `legoesm.core.operators_cdgrid.cgrid_divergence` at module level to return the Fortran-cc divergence (built via `_d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt, d2_bg=1, dddmp=0, nord=0)` with closure-bound `u_d, v_d, ua, va, dt`, then `delpc_corner / da_min_c → 4-pt centre average`).  Call `fv3_sw_tendencies()` once with the patch active and once without.  Compare peak |dv/dt| and peak location.
+
+**Result (W2 IC, C36, LEGACY, iter-761 canonical, dt=300s).**
+
+| variant                                    | peak \|dv/dt\| (m/s²) | peak location          | GC-to-vertex |
+|--------------------------------------------|---------------------:|------------------------|-------------:|
+| Baseline (production `cgrid_divergence`)   | **1.903e−05**         | face 0 (2, 34)         |  4.34°        |
+| Patched (Fortran-cc divergence, Phase 1)   | **3.422e−03**         | face 1 (1, 0)          |  2.04°        |
+
+- **Peak ratio = 180×.**
+- **Sign of peak FLIPPED**: baseline = −1.903e−05, patched = +3.422e−03.  Damping now ADDS velocity at the peak instead of opposing the structural residual.
+- Peak LOCATION shifted from face 0 (2,34) GC=4.34° to face 1 (1,0) GC=2.04° (closer to cube vertex).
+
+**Stability implication.**  At dt=300s with peak |dv/dt| = 3.42e−03, one RK3 substep adds ~1 m/s to the v field at the peak point — comparable in magnitude to the full W2 wind speed (u0 ≈ 40 m/s).  Within a few steps, the perturbation would saturate the regridding back-projection or hit a CFL violation.  The Phase 1 stencil-swap-alone configuration would destabilise W2 LEGACY in tens to hundreds of timesteps.
+
+**Conclusion.**  The Phase 1 stencil swap WITHOUT concurrent fixes to iter-849 Checks 1 (`*dt` factor in adaptive cap), 3 (corner correction stencil), and 4 (ke→d_sw6 application path) is NOT a viable W2 fix.  The 180× peak amplification + sign flip indicate that the Fortran-cc divergence, when fed through the production damping coefficient and A-L gradient pipeline, produces a tendency contribution OF THE WRONG MAGNITUDE AND OFTEN WRONG SIGN.
+
+This RULES OUT the simplest possible d_sw5 port path (drop-in stencil replacement).  A proper port must do at MINIMUM Checks 1+2+4 together: (1) include `*dt` in the adaptive cap so the coefficient magnitude matches Fortran; (2) use the corner-routed delpc as Fortran does (already done in this trial); (4) re-route the damping through a `ke`-differencing form compatible with RK3.
+
+**What iter-853 DOES show.**
+- The Fortran-cc divergence stencil amplifies the production t=0 dv/dt by 180× when used as a drop-in for `cgrid_divergence` in `fv3_sw_tendencies`.
+- The peak location is at a cube-vertex-adjacent v-point (GC=2.04°), confirming that the Fortran corner-stencil's amplification IS at cube-vertex-adjacent regions (consistent with iter-851).
+- The sign flip indicates that the damping mechanism reverses character with this swap — a direct consequence of the production formula `du += adaptive_coeff·grad(div_field)` not being equivalent to Fortran's `ke += damp·delpc → u += rdxc·(ke[i-1] − ke[i])`.
+
+**What iter-853 does NOT establish.**
+- Whether a Phase 1+4 port (stencil + ke-application path) would be stable.
+- How much of the 180× amplification is from each of iter-849 Check 1 (`*dt` missing), Check 4 (application path), or the Fortran helper's own `mode='edge'` halo gap.
+- Whether iter-849 Check 3 (corner correction stencil at sw_corner/se_corner/etc.) materially changes the magnitude.
+
+**Iter-854+ candidates.**
+- Add the `*dt` factor to the patched cgrid_divergence's downstream usage (Check 1) and re-measure.  If this reduces the 180× to ~10×, Check 1 dominates.
+- Refactor the patched path to do `ke += damp·delpc → corner-rdxc-grad` instead of `du += coeff·grad(div_centre)` (Check 4).  This requires non-trivial reorganisation but is the only way to test the application-path effect in isolation.
+- Continue with t=0 instrumentation; defer 1-day trial until t=0 peak ratio is < 10×.
+
+**Deliverable.**  `scripts/diag_iter853_phase1_trial.py` + run output.  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  113th iter in iter-752-853 chain.  Direct measurement of the simplest Phase 1 stencil-swap shows a 180× peak amplification with sign flip — RULES OUT Phase-1-alone as a viable d_sw5 port path.  Confirms iter-849's analysis that all 4 d_sw5 fidelity gaps must be fixed CONCURRENTLY (especially Checks 1+4) for a Fortran-faithful port.  Provides a concrete amplification number (180×) that anchors the magnitude of "structural" change required.
