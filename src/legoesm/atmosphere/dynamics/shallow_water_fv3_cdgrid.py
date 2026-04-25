@@ -169,6 +169,16 @@ class CDGridShallowWaterConfig(NamedTuple):
     apply_legacy_d_sw4_corner_ke_fix: bool = False
     apply_legacy_d_sw5_corner_corrections: bool = False
 
+    # Iter-872: production divergence-damping `dddmp` coefficient
+    # (Fortran `flagstruct%dddmp`, fv_arrays.F90:360).  Fortran's
+    # strict default is 0.0 (no adaptive Smagorinsky); 0.2 is the
+    # typical production config.  Exposing this as a config field
+    # mirrors Fortran's user-configurability semantics.  Default 0.2
+    # preserves pre-iter-872 production behaviour bit-for-bit.  Used
+    # only by `fv3_sw_tendencies` (production W2 path); the FB chain
+    # passes `dddmp` to `_d_sw5_corner_divergence` directly.
+    dddmp_prod: float = 0.2
+
 
 # ==============================================================================
 # Tendencies
@@ -560,6 +570,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     fortran_a2b_corner_avg=self.config.fortran_a2b_corner_avg,
                     fortran_vector_corner_fill=(
                         self.config.fortran_vector_corner_fill),
+                    dddmp=self.config.dddmp_prod,
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,

@@ -1573,6 +1573,7 @@ def fv3_sw_tendencies(
     fortran_dir_aware_corners=False,
     fortran_a2b_corner_avg=False,
     fortran_vector_corner_fill=False,
+    dddmp=0.2,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1704,7 +1705,13 @@ def fv3_sw_tendencies(
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
         d2_bg = div_damp / da_min_c
-        dddmp = 0.2
+        # Iter-872: `dddmp` is now a kwarg (default 0.2 preserves
+        # pre-iter-872 behaviour).  Fortran fv_arrays.F90:360 has
+        # `dddmp = 0.0` as the strict default with a comment naming
+        # 0.2 as the typical config.  Exposing the kwarg matches
+        # Fortran's `flagstruct%dddmp` configurability semantics
+        # while preserving our previous hardcoded value as the
+        # default for backward compatibility.
         div_abs = jnp.abs(div_field)
         adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs))

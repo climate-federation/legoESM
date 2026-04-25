@@ -1041,3 +1041,29 @@ All 16 iter-862 / iter-869 / iter-871b/c tests + 15 W2 LEGACY sentinels pass.  P
 **Deliverable.**  `scripts/diag_iter871_corner_correction_active.py` + this doc entry recording the qualitative non-zero finding.  No source change.
 
 **Process.**  131st iter in iter-752-871 chain (with iter-871b and iter-871c follow-ons).  Closes a natural follow-up from the iter-870 chain — confirms the opt-in flags are impactful (not no-ops) without committing specific magnitudes to the doc.  iter-871b/c progressively close the wiring chain Codex caught: iter-862 had added the flag only on the inner helper; iter-871b plumbed `_d_sw_native`; iter-871c plumbed both wrappers (`fv3_fb_sw_step`, `fv3_forward_backward_step`) and the `CDGridShallowWaterConfig` config + `FV3FBShallowWaterModel.step`.  Both opt-in flags now reach all FB entry points.  Reinforces the default-OFF semantics is correct until the cross-face halo lands.
+
+### Iter-872 — Expose production `dddmp` divergence-damping coefficient as a configurable kwarg
+
+iter-867's da_min_c audit noted that `fv3_sw_tendencies` had `dddmp = 0.2` hardcoded inline at the divergence-damping branch (operators_cdgrid.py line ~1708 pre-iter-872), with no user knob and no comment.  Fortran `fv_arrays.F90:360` declares `flagstruct%dddmp` as a user-configurable namelist parameter (strict default 0.0; 0.2 is the typical production setting).  iter-872 closes that small Fortran-fidelity gap: the parameter is now reachable from `CDGridShallowWaterConfig.dddmp_prod` while preserving pre-iter-872 numerics bit-for-bit through a default of 0.2.
+
+**Change.**
+- `fv3_sw_tendencies` (operators_cdgrid.py): adds `dddmp=0.2` kwarg.  The hardcoded inline literal is removed; the kwarg threads into the existing `adaptive_coeff = da_min_c * max(d2_bg, min(0.20, dddmp * |div|))` formula unchanged.
+- `CDGridShallowWaterConfig` (shallow_water_fv3_cdgrid.py): adds `dddmp_prod: float = 0.2` field with comment block citing Fortran semantics.  The field is named `dddmp_prod` (not just `dddmp`) to avoid colliding with the existing `dddmp: float = 0.0` field — that one is the FB-chain `_d_sw5_corner_divergence` knob (Fortran-strict default 0.0), which is a different code path.  Production A-L path uses `dddmp_prod`; FB chain uses `dddmp`.
+- `FV3EdgeShallowWaterModel.step` (shallow_water_fv3_cdgrid.py): forwards `dddmp=self.config.dddmp_prod` into the production `fv3_sw_tendencies` call.
+
+**Behavioural impact.**  Bit-identical to pre-iter-872 production runs.  The default 0.2 reproduces the historic hardcoded value exactly; existing W2/W5/cosine-bell baselines unchanged.
+
+**Tests** (`tests/test_fv3_dddmp_kwarg_iter872.py`).
+- `test_default_kwarg_reproduces_pre_iter872_hardcoded_value`: `dddmp=0.2` (the kwarg default) gives bit-for-bit identical tendencies to passing `dddmp=0.2` explicitly.
+- `test_dddmp_zero_changes_tendencies_when_cap_can_bite`: `dddmp=0.0` produces measurably different du/dv from `dddmp=0.2` when divergence is non-zero — proves the kwarg is wired into the adaptive cap, not silently shadowed by a leftover literal.
+- `test_dddmp_zero_matches_background_only_path`: two runs with `dddmp=0.0` give identical output (deterministic).
+- `test_production_step_forwards_dddmp_prod`: AST scan confirms `FV3EdgeShallowWaterModel.step` forwards `dddmp=<self.config.*>` (rejects bare literals).
+- `test_config_dddmp_prod_default_is_zero_point_two`: default value pinned at 0.2.
+
+W2 v_ll + mode-4 sentinel (`test_w2_iter761_matrix_v_ll_and_mode4_baseline`) still passes.
+
+**Why this matters for Fortran fidelity.**  The hardcoded `dddmp = 0.2` was a documented gap in iter-867's audit but had no functional consequence under the default config (production runs use 0.2 anyway).  iter-872 makes the parameter reachable from the config layer, which (a) brings the API closer to Fortran's namelist semantics, (b) enables future ablation studies without monkey-patching the source, and (c) prepares the ground for a possible future iter that switches the default to Fortran-strict 0.0 with a separate W2 baseline.
+
+**What iter-872 does NOT change.**  No numerical change to W2/W5/cosine-bell sentinels.  No change to FB-chain code paths.  No change to mode-4 imprint magnitude (still ~0.16 m/s v_ll, the iter-863 documented infrastructure-level floor of the production A-L + RK3 path).
+
+**Process.**  132nd iter in iter-752-872 chain.  A small Fortran-fidelity surface refactor that closes an iter-867 audit observation; sized to be addressable in a single iter without disturbing the W2 sentinel baseline.
