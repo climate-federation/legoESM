@@ -243,9 +243,12 @@ def cdgrid_compressible_euler_slow_tendencies(
     dw_dy = gradient_y_3d(w_full, grid)
     horiz_adv_w = -(u * dw_dx + v * dw_dy)
 
-    horiz_adv_w_half = jnp.zeros_like(w)
-    horiz_adv_w_half = horiz_adv_w_half.at[..., 1:-1].set(
-        0.5 * (horiz_adv_w[..., :-1] + horiz_adv_w[..., 1:])
+    # Pad zero at top/bottom interfaces (rigid BC).  Single Pad HLO op
+    # replaces alloc-zeros + scatter.
+    pad_axes_w = ((0, 0),) * (w.ndim - 1)
+    horiz_adv_w_half = jnp.pad(
+        0.5 * (horiz_adv_w[..., :-1] + horiz_adv_w[..., 1:]),
+        (*pad_axes_w, (1, 1)),
     )
 
     dw_dt = horiz_adv_w_half - sponge_half * w

@@ -500,13 +500,15 @@ class DiagnosticCollector:
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
         # Lat-lon:      (nlat,nlon,nlev) → mean over (0,1) → (nlev,)
+        # Stacked into one ``np.asarray`` host transfer (same dtype as
+        # T) so the two profile means share a single device→host sync.
         spatial_axes = tuple(range(state.T.data.ndim - 1))
-        self.profiles_T.append(
-            np.asarray(jnp.mean(state.T.data, axis=spatial_axes))
-        )
-        self.profiles_qv.append(
-            np.asarray(jnp.mean(q_v, axis=spatial_axes)) * 1000.0
-        )
+        _profiles_host = np.asarray(jnp.stack([
+            jnp.mean(state.T.data, axis=spatial_axes),
+            jnp.mean(q_v, axis=spatial_axes).astype(state.T.data.dtype),
+        ]))
+        self.profiles_T.append(_profiles_host[0])
+        self.profiles_qv.append(_profiles_host[1] * 1000.0)
 
         # Snapshots
         iday = int(round(elapsed_day))

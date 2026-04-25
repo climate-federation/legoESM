@@ -515,15 +515,15 @@ def _acoustic_substeps_grid_semi_implicit(
         # --- Tridiagonal coefficients ---
         alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
 
-        a_tri = jnp.zeros_like(alpha)
-        a_tri = a_tri.at[..., 1:].set(-alpha[..., 1:])
-
-        b_tri = 1.0 + 2.0 * alpha
-        b_tri = b_tri.at[..., 0].set(1.0 + alpha[..., 0])
-        b_tri = b_tri.at[..., -1].set(1.0 + alpha[..., -1])
-
-        c_tri = jnp.zeros_like(alpha)
-        c_tri = c_tri.at[..., :-1].set(-alpha[..., :-1])
+        # Sub/super-diagonals: Pad HLO op replaces alloc-zeros + scatter.
+        # Main diagonal: 1 + alpha + alpha_interior collapses two
+        # boundary scatters + one full-interior expression into a single
+        # add over Pad-of-slice (and the original full-array ``2*alpha``).
+        pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
+        a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
+        alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
+        b_tri = 1.0 + alpha + alpha_interior
+        c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
 
         w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
         w_new = w_c.at[..., 1:-1].set(w_inner_new)
