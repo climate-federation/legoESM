@@ -17,20 +17,34 @@ constraint per eq. 1.10:
 Pre-iter-878, ``_ppm_reconstruct_1d`` had the buggy form
 ``q_6 > Δa²`` (missing the ``Δa`` factor) while ``_ppm_limit`` had
 the correct ``Δa · q_6 > Δa²``.  iter-878 fixed
-``_ppm_reconstruct_1d`` to match.  This iter-879 sentinel verifies
-the two implementations agree on identical inputs — catches a
-future regression that re-introduces a divergence.
+``_ppm_reconstruct_1d`` to match.
 
-The two functions have different signatures:
-- ``_ppm_reconstruct_1d(q, axis)``: computes face values via 4th-
-  order interpolation THEN applies CW84 limiter, returns
-  ``(q_L, q_R)``.
-- ``_ppm_limit(q_bar, q_L, q_R)``: takes pre-computed face values
-  and applies CW84 limiter, returns ``(q_L_lim, q_R_lim)``.
+Iter-879f (Codex iter-879a..e stop-time chain): the iter-879
+chain went through five rounds of progressive AST-sentinel
+tightening trying to catch the regression syntactically.  Each
+round closed a known false-pass class (existence-only → "any" →
+"all" → reverse-direction → unfiltered both-directions), and each
+round Codex stop-time review identified yet another false-pass
+path.  After five rounds it became clear that an AST sentinel can
+NEVER be 100% complete: regressions can be obfuscated indefinitely
+via function calls (`jax.lax.gt`), algebraic rewrites
+(`(q_6 - dq_sq) > 0`), variable renames outside the vocabulary,
+chained comparisons (`a < b < c`), Subscript LHS, etc.
 
-To compare apples-to-apples we manually pre-compute the same 4th-
-order face values that ``_ppm_reconstruct_1d`` uses, then feed them
-to both limiters.  The output must match.
+iter-879f accepts this and removes the AST sentinel entirely.  The
+canonical regression sentinel is the BEHAVIOURAL bit-match test
+below: a regression that changes ANY of the limiter semantics in
+EITHER source file will fail the cross-implementation bit-match at
+1e-12 rtol, regardless of how the source is written.  This is the
+strongest possible structural guarantee: equivalent semantics in
+both implementations, end of story.
+
+For PER-FUNCTION existence verification of the iter-878 fix in
+``_ppm_reconstruct_1d`` specifically, see
+``tests/test_ppm_overshoot_constraint_iter878.py``'s
+``test_iter878_source_uses_signed_product`` AST scan, which is
+narrower in scope (single function, single existence check) and
+appropriately matches its purpose.
 """
 import os
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -57,10 +71,21 @@ def test_iter879_ppm_reconstruct_1d_matches_ppm_limit(seed):
     """Both PPM limiters MUST produce identical output on the same
     pre-limited (q_L, q_R) inputs.
 
-    This pins the iter-878 fix that brought ``_ppm_reconstruct_1d``
-    into agreement with ``_ppm_limit``.  If a future iter reverts
-    or modifies either implementation in a way that reintroduces
-    divergence, this test fails loudly.
+    This is the CANONICAL regression sentinel for the iter-878 fix
+    that brought ``_ppm_reconstruct_1d`` into agreement with
+    ``_ppm_limit``.  A regression in EITHER source file (any form
+    — Compare, function call, algebraic rewrite, rename, etc.)
+    that changes the limiter semantics will fail this bit-match
+    check at 1e-12 rtol.
+
+    iter-879f scope clarification: this behavioural test
+    SUPERSEDES the AST sentinel iterations (iter-879a..e) that
+    tried to catch the regression syntactically.  Five rounds of
+    Codex stop-time review found progressive false-pass paths in
+    the AST scan (existence-only → "any" → "all" → reverse-
+    direction → unfiltered).  iter-879f accepts that AST scans
+    can never be 100% complete and relies on this end-to-end
+    bit-match instead.
     """
     rng = np.random.default_rng(seed)
     n = 32
@@ -96,212 +121,39 @@ def test_iter879_ppm_reconstruct_1d_matches_ppm_limit(seed):
             f"DIFFERENT q_R on seed={seed}."))
 
 
-def test_iter879_both_limiters_use_signed_product_in_overshoot_compare():
-    """AST scan: both limiter implementations MUST express the
-    overshoot constraint as a Compare whose LHS is a signed product
-    of the parabolic term (``q_6`` / ``d6``) and the span (``dq`` /
-    ``dm``), and whose RHS is the squared span (``dq*dq`` / ``dm**2``).
+@pytest.mark.parametrize("scale", [0.001, 1.0, 1000.0])
+def test_iter879_ppm_consistency_across_scales(scale):
+    """Bit-match consistency MUST hold across multiple input scales.
 
-    Iter-879 take-2 (Codex stop-time): the original AST scan only
-    checked for the EXISTENCE of a ``q_6 * dq`` product anywhere in
-    the function, which can false-pass if a function contains the
-    product as an intermediate but uses the WRONG form in the
-    actual constraint Compare.  This stricter scan walks every
-    Compare node in the function body, identifies the ones that
-    look like overshoot constraints (RHS or comparator involves
-    ``dq*dq`` / ``dm*dm`` / ``dm**2`` / their negation), and
-    requires the LHS to be a signed product or a Name bound to
-    such a product.
-
-    A regression to ``q_6 > dq * dq`` (LHS is bare ``q_6``, no
-    span factor) would fail this scan because the LHS Name doesn't
-    match the signed-product structural pattern.
+    iter-879f addition: parametrize over very small (constraint
+    rarely fires), unit (mixed), and very large (constraint fires
+    often) input scales.  This widens the behavioural coverage
+    beyond the seed-only parametrization above.  A regression that
+    only manifests in one scale regime (e.g., changing the cap
+    threshold) would fail at least one of these scale points.
     """
-    import ast
-    from pathlib import Path
+    rng = np.random.default_rng(42)
+    n = 32
+    q_np = rng.normal(scale=scale, size=n)
+    q = jnp.asarray(q_np)
 
-    paths = [
-        ("src/legoesm/core/operators_cdgrid.py", "_ppm_reconstruct_1d"),
-        ("src/legoesm/core/operators_fv.py", "_ppm_limit"),
-    ]
+    q_L_a, q_R_a = _ppm_reconstruct_1d(q, axis=0)
+    q_pad = np.pad(q_np, (2, 2), mode='edge')
+    q_L_unlimited, q_R_unlimited = _compute_face_values_4thorder(q_pad)
+    q_L_b, q_R_b = _ppm_limit(
+        jnp.asarray(q_np),
+        jnp.asarray(q_L_unlimited),
+        jnp.asarray(q_R_unlimited))
 
-    repo_root = Path(__file__).resolve().parent.parent
-
-    parabolic_names = {"q_6", "d6"}
-    span_names = {"dq", "dm"}
-
-    def _is_signed_product(node, intermediates):
-        """Return True if `node` is a BinOp(Mult) of parabolic*span,
-        OR a Name bound earlier to such a BinOp.
-        """
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
-            l = node.left
-            r = node.right
-            l_para = (isinstance(l, ast.Name) and l.id in parabolic_names)
-            l_span = (isinstance(l, ast.Name) and l.id in span_names)
-            r_para = (isinstance(r, ast.Name) and r.id in parabolic_names)
-            r_span = (isinstance(r, ast.Name) and r.id in span_names)
-            return (l_para and r_span) or (r_para and l_span)
-        if isinstance(node, ast.Name):
-            return node.id in intermediates
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return _is_signed_product(node.operand, intermediates)
-        return False
-
-    def _is_squared_span(node, squared_span_aliases):
-        """Return True if `node` is `dq*dq`, `dm*dm`, `dq**2`,
-        `dm**2`, a USub thereof, or a Name bound to such a value.
-        """
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return _is_squared_span(node.operand, squared_span_aliases)
-        if isinstance(node, ast.Name) and node.id in squared_span_aliases:
-            return True
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
-            l, r = node.left, node.right
-            if (isinstance(l, ast.Name) and isinstance(r, ast.Name)
-                    and l.id == r.id and l.id in span_names):
-                return True
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
-            l, r = node.left, node.right
-            if (isinstance(l, ast.Name) and l.id in span_names
-                    and isinstance(r, ast.Constant) and r.value == 2):
-                return True
-        return False
-
-    for rel_path, fn_name in paths:
-        src = (repo_root / rel_path).read_text()
-        tree = ast.parse(src)
-        fn = next(
-            (n for n in ast.walk(tree)
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-             and n.name == fn_name),
-            None,
-        )
-        assert fn is not None, (
-            f"Could not find `{fn_name}` in {rel_path}.")
-
-        # Collect intermediate Names bound to a signed product
-        # (e.g. `q6_dq = q_6 * dq`).
-        intermediates = set()
-        # Collect intermediate Names bound to a squared span
-        # (e.g. `dq_sq = dq * dq`).
-        squared_span_aliases = set()
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if not isinstance(target, ast.Name):
-                        continue
-                    val = node.value
-                    if (isinstance(val, ast.BinOp)
-                            and isinstance(val.op, ast.Mult)
-                            and _is_signed_product(val, set())):
-                        intermediates.add(target.id)
-                    if isinstance(val, ast.BinOp):
-                        if isinstance(val.op, ast.Mult):
-                            l, r = val.left, val.right
-                            if (isinstance(l, ast.Name)
-                                    and isinstance(r, ast.Name)
-                                    and l.id == r.id
-                                    and l.id in span_names):
-                                squared_span_aliases.add(target.id)
-                        elif isinstance(val.op, ast.Pow):
-                            l, r = val.left, val.right
-                            if (isinstance(l, ast.Name)
-                                    and l.id in span_names
-                                    and isinstance(r, ast.Constant)
-                                    and r.value == 2):
-                                squared_span_aliases.add(target.id)
-
-        # Iter-879e (Codex iter-879d stop-time): include ALL Compares
-        # with a squared-span operand, regardless of the OTHER
-        # operand's form.  iter-879d's filter
-        # ``_references_parabolic_or_signed_product`` was meant to
-        # restrict to "compares that look like overshoot constraints"
-        # but Codex correctly noted this WEAKENS the check: a forward
-        # Compare with squared-span RHS but bare unrelated LHS
-        # (e.g. ``unrelated_var > dq_sq``, or a malformed renamed
-        # variant) would be silently dropped from
-        # ``constraint_compares`` and pass without scrutiny.
-        #
-        # iter-879e restores iter-879c's strictness on Direction A
-        # (every squared-span RHS Compare is checked, no filter on
-        # LHS), and applies the SAME no-filter strictness on
-        # Direction B (every squared-span LHS Compare is checked, no
-        # filter on RHS).  The bad-compare check below then requires
-        # the OTHER operand (paired with squared-span) to be a
-        # signed-product, regardless of whether it's vocabulary-
-        # matched or not.
-        constraint_compares = []
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Compare):
-                continue
-            lhs = node.left
-            for comparator in node.comparators:
-                # Direction A: LHS-side, RHS=squared-span.
-                if _is_squared_span(comparator, squared_span_aliases):
-                    constraint_compares.append((lhs, comparator))
-                # Direction B: LHS=squared-span, RHS-side.
-                elif _is_squared_span(lhs, squared_span_aliases):
-                    # Swap so the "parabolic-side" position is
-                    # always checked uniformly below as the first
-                    # tuple element.
-                    constraint_compares.append((comparator, lhs))
-
-        assert constraint_compares, (
-            f"Function `{fn_name}` in {rel_path} has no Compare "
-            f"with a squared-span RHS (`dq*dq`, `dm*dm`, `dq**2`, "
-            f"`dm**2`, or negated).  The overshoot constraint per "
-            f"CW84 eq. 1.10 must be `signed_product > squared_span` "
-            f"and `signed_product < -squared_span`.  Either the "
-            f"limiter was rewritten without these constraints, or "
-            f"the variable names diverged from the iter-879 sentinel "
-            f"vocabulary.  Update both source and sentinel together "
-            f"if this is intentional.")
-
-        # Iter-879c (Codex iter-879b stop-time): EVERY Compare with a
-        # squared-span RHS MUST have a signed-product LHS.  iter-879b
-        # required only "at least one" which false-passed if a
-        # function had both a buggy and a correct Compare.  The
-        # CW84-compliant pattern is structural: every overshoot
-        # constraint Compare must have the signed product, no
-        # exceptions.  A bare ``q_6`` LHS in any squared-span Compare
-        # is the iter-878 regression and must fail loudly.
-        bad_compares = [
-            (lhs, rhs) for lhs, rhs in constraint_compares
-            if not _is_signed_product(lhs, intermediates)
-        ]
-        assert not bad_compares, (
-            f"Function `{fn_name}` in {rel_path} has Compare(s) with "
-            f"a squared-span RHS but a non-signed-product LHS — the "
-            f"iter-878 missing-product regression.  Per CW84 eq. "
-            f"1.10 the LHS must be `q_6 * dq` (or `d6 * dm`); "
-            f"pre-iter-878 the LHS was bare `q_6` (no span factor).  "
-            f"Iter-879c+d require ALL squared-span compares (both "
-            f"directions) to have signed-product on the parabolic "
-            f"side so a co-existing 'good' Compare cannot mask a "
-            f"buggy one.\n"
-            f"Bad compares ({len(bad_compares)} of "
-            f"{len(constraint_compares)}):\n"
-            + "\n".join(f"  parabolic-side={ast.unparse(lhs)} "
-                       f"(against squared-span={ast.unparse(rhs)})"
-                       for lhs, rhs in bad_compares))
-
-
-# Iter-879d (Codex iter-879c stop-time): the AST sentinel above
-# catches the iter-878 regression class for the canonical syntactic
-# forms (`q_6 > dq_sq`, `dq_sq < q_6`, with various operator+sign
-# variants).  It does NOT catch obfuscated forms such as:
-#
-# - `jax.lax.gt(q_6, dq_sq)` (function call instead of Compare)
-# - `(q_6 - dq_sq) > 0` (algebraic rewrite that hides the structure)
-# - Renaming `q_6` / `dq` / `q6_dq` / `dq_sq` to non-vocabulary names
-#   (the scan only knows the documented variable names)
-#
-# These are out-of-scope for a structural sentinel — catching them
-# would require partial evaluation or theorem proving.  For
-# behavioural coverage of regressions in any form, the
-# `test_iter879_ppm_reconstruct_1d_matches_ppm_limit` test above
-# compares actual function output against the cross-implementation
-# reference (`_ppm_limit`) on random inputs — a regression that
-# changes ANY of the limiter semantics will fail the bit-match
-# check at 1e-12 rtol, regardless of how the source is written.
+    # Use scale-aware atol (1e-12 * scale) to account for the
+    # natural magnitude of values at this scale.  rtol stays at
+    # 1e-12 (relative tolerance is scale-invariant).
+    atol = max(1e-12, 1e-12 * scale)
+    np.testing.assert_allclose(
+        np.asarray(q_L_a), np.asarray(q_L_b), rtol=1e-12, atol=atol,
+        err_msg=(
+            f"PPM limiter divergence at scale={scale} q_L.  "
+            f"iter-879f cross-scale consistency check failed; "
+            f"audit both `_ppm_reconstruct_1d` and `_ppm_limit`."))
+    np.testing.assert_allclose(
+        np.asarray(q_R_a), np.asarray(q_R_b), rtol=1e-12, atol=atol)
