@@ -1,11 +1,24 @@
 """Iter-850 diagnostic: compare divergence stencils at t=0 W2 IC.
 
+***RETRACTED INTERPRETATION (iter-851):*** the stencil comparison
+below is APPLES-TO-ORANGES.  Production's `fv3_sw_tendencies` NEVER
+evaluates "divergence at corners" — it computes
+`cgrid_divergence(u_c, v_c)` at cell centres ONLY, then differentiates
+that field via `_arakawa_lamb_gradient` to get corner GRADIENTS, and
+finally uses `_interp_corner_to_center` to fold the contribution back
+into cell-centre tendency `dv_cc`.  The 4-point `mode='edge'` average
+to corners that this script computes is a FABRICATED quantity not in
+the production pipeline.  The 30×–2200× same-location ratios reported
+below mix stencil-construction differences with conversion-method
+differences and cannot disentangle them.  See iter-851 in
+docs/fv3_fortran_fidelity_review.md for full retraction context.
+
 Per iter-849's Priority 2 architecture audit: the current A-L
 production path uses `cgrid_divergence` (cell-centre flux-form
-stencil at `operators_cdgrid.py:420-441`) + 4-point centre→corner
-average for div_damp.  Fortran d_sw5 uses an edge-by-edge
-ptc/vort stencil with metric weights (sw_core.F90:1644-1707) to
-compute corner `delpc` directly.
+stencil at `operators_cdgrid.py:420-441`) + (production proper) corner
+GRADIENTS via A-L, NOT corner DIVERGENCE values.  Fortran d_sw5 uses
+an edge-by-edge ptc/vort stencil with metric weights
+(sw_core.F90:1644-1707) to compute corner `delpc` directly.
 
 iter-850 measures the difference between the two stencils at
 t=0 on the W2 IC, focusing on the cube-vertex-adjacent corner

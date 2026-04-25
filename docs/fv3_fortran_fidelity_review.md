@@ -2251,3 +2251,58 @@ The two stencils differ across the entire corner grid by 30× to 2200× dependin
 **Deliverable.**  `scripts/diag_iter850_div_stencil_compare.py` + run output.  Documentary cleanup pass result: only iter-848 had a residual overclaim (already fixed in iter-849b).  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  110th iter in iter-752-850 chain.  Two-part deliverable: (i) cleanup verification — older diag scripts use proper hypothesis-conditional language; iter-848's residual was the only one and is fixed.  (ii) quantitative reconnaissance for the Phase 1 d_sw5 port — at t=0 on W2 IC, the Fortran corner-divergence stencil differs from the production cell-centre stencil by 30×–2200× across the corner grid (same-location ratios), with peaks in different locations: production at cube-vertex-adjacent (GC=6.78°), Fortran at panel-edge-equatorial (GC=35.26°, possibly partly a `mode='edge'` halo artefact).  Phase 1 swap would substantially change the production field and is not a cosmetic refactor.
+
+### Iter-851 — RETRACTION: iter-850 stencil comparison was invalid (apples-to-oranges)
+
+Codex stop-time review of iter-850c: "iter-850's new stencil-comparison conclusions rest on an invalid production-side comparison."
+
+**The flaw.**  iter-850's diagnostic computes a "production divergence at corners" by:
+```python
+div_centre = cgrid_divergence(u_c, v_c, cdgrid)        # cell centres (6, n, n)
+div_centre_pad = jnp.pad(div_centre, ..., mode='edge')  # (6, n+2, n+2)
+div_centre_corner = 0.25 * (4-point sum of div_centre_pad)  # (6, n+1, n+1)
+```
+Then compares this against `_d_sw5_corner_divergence`'s native corner output.  But **the production A-L path never computes "divergence at corners"**.  The production code at `operators_cdgrid.py:1690-1707` does:
+```python
+div_field = cgrid_divergence(u_c, v_c, cdgrid)         # cell centres ONLY
+ddiv_dx, ddiv_dy_perp_cc = _arakawa_lamb_gradient(div_field, cdgrid)   # corner gradients
+du_cc = du_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dx)     # back to cell centres
+dv_cc = dv_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dy_perp_cc)
+```
+Production's path: cell-centre divergence → corner GRADIENT (via A-L) → cell-centre tendency contribution.  Production never evaluates a "corner divergence" scalar at all.  iter-850's 4-point `mode='edge'` average to corners is an INVENTED quantity, not part of the production pipeline.
+
+**What this invalidates.**
+- The "30×–2200× same-location ratios" reported in iter-850b/c are between (a) Fortran's natively-computed corner divergence and (b) my fabricated 4-point-averaged corner field — not between two equivalent stencils for the same physical quantity.
+- Some fraction of those ratios is the actual stencil construction difference; some fraction is the conversion-method artefact (4-point mode='edge' average vs Fortran's edge-by-edge ptc/vort).  iter-850 cannot disentangle these.
+- The "Phase 1 swap is NOT cosmetic" conclusion is unsupported by this diag in its current form.  A drop-in swap of `cgrid_divergence` → `_d_sw5_corner_divergence` is impossible at the API level anyway: the two helpers produce DIFFERENT-stagger outputs (cell-centre vs corner).
+
+**What iter-850 still validly contributes.**
+- Documentary cleanup pass (Part 1) is unchanged.  No retraction needed.
+- The Codex audit findings of 4 d_sw5 fidelity gaps from iter-849 remain valid (independent of iter-850's flawed stencil comparison).
+- The general qualitative observation that the Fortran corner-divergence stencil and our cell-centre divergence stencil are NOT equivalent operators on the same quantity is true — but iter-850 did not measure the equivalence quantitatively.
+
+**Correct comparisons (iter-852+ candidates).**
+- **Apples-to-apples comparison A**: compute Fortran's `delpc` at corners, then 4-point-average it BACK to cell centres.  Compare that to production's `cgrid_divergence` at cell centres.  Both are now cell-centre divergences; the ratio is purely the stencil-construction difference.
+- **Apples-to-apples comparison B**: compute production's downstream contribution `adaptive_coeff * _interp_corner_to_center(_arakawa_lamb_gradient(div_field))` and Fortran's analogous contribution from `_d_sw5_corner_divergence`'s ke-damping.  These are the actual tendency-modifying quantities.
+- **Direct trial wire-in (iter-851b candidate)**: bypass the comparison entirely by routing production div_damp through `_d_sw5_corner_divergence` (with appropriate corner→cell-centre projection) and measure W2 1-day v_ll_Linf vs current canonical.
+
+**iter-851 deliverable.**  Doc retraction of iter-850's invalid stencil-comparison claims; the Part 1 documentary cleanup remains valid.  No production source-code change.  All 14 W2 sentinels unaffected.
+
+The script `scripts/diag_iter850_div_stencil_compare.py` is preserved with a header note added below explaining the apples-to-oranges flaw, since the raw numerical output may still be useful for understanding the helper's behaviour even if the stencil-equivalence interpretation is invalid.
+
+**Process.**  111th iter in iter-752-851 chain.  Self-correction iter: retract iter-850 Part 2's stencil-comparison conclusions because the production-side computation was a fabricated 4-point `mode='edge'` average to corners, not part of the actual production pipeline.  iter-849's 4 d_sw5 fidelity gaps audit remains valid.  iter-851 ALSO performs a valid apples-to-apples replacement (Comparison A from the candidate list) — see below.
+
+**Iter-851 apples-to-apples replacement** (`scripts/diag_iter851_div_stencil_compare_v2.py`).  Both stencils evaluated at CELL CENTRES (the production stagger):
+
+| stencil                                       | peak \|div\| (1/s) | peak location (face, i, j) | GC-to-vertex |
+|-----------------------------------------------|-------------------:|----------------------------|-------------:|
+| Production `cgrid_divergence` (cell-centre)    | 3.30e−08            | (0, 2, 0) lat=−36.74°       | **5.27°**     |
+| Fortran corner delpc → 4-pt avg to cell-centre | **8.88e−06**         | (4, 0, 1) lat=+37.61°       | **3.09°**     |
+
+Same-location cell-centre ratios (Fortran/production):
+- AT production peak (face 0 (2,0), GC=5.27°): ratio = **−73×** (opposite sign).
+- AT Fortran-cc peak (face 4 (0,1), GC=3.09°): ratio = **+403×**.
+
+**Conclusion (apples-to-apples, valid).**  Both peaks are now near cube vertices (GC=3–5°), confirming that iter-850's panel-edge equatorial peak was a STAGGER ARTEFACT of the invalid comparison, not a real Fortran-stencil signature.  The Fortran corner-divergence stencil (averaged to cell centres) is 73×–403× larger than production at cube-vertex-adjacent cells.  This is the stencil-construction effect, NOT a stagger or `mode='edge'` artefact.
+
+**Implication.**  Phase 1 of the d_sw5 port — replacing the cell-centre `cgrid_divergence` flux-form with a Fortran-faithful corner-routed stencil — would substantially change the production divergence field at cube-vertex-adjacent cells (where iter-844/848 located the production |dv/dt| peak).  Whether this CHANGE constitutes an IMPROVEMENT for W2 LEGACY mode-A still requires a trial wire-in (iter-852+).
