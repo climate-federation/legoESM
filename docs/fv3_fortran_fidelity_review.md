@@ -2471,3 +2471,64 @@ iter-855 itself does NO new measurement.  This is purely a doc-honesty pass — 
 **Deliverable.**  Doc-only retraction strengthening on the iter-854 section.  No script change (the script's docstring already carries the staleness-bug notice from iter-854b).  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  115th iter in iter-752-855 chain.  Honesty discipline: when a measurement is invalidated by a plumbing bug, the right response is RETRACTION at the top of the section, not a caveat at the bottom.  iter-854's quantitative claims are now visibly retracted; only the qualitative "hybrid was stable for 60 steps" observation remains, with explicit scope-limit.
+
+### Iter-856 — Properly-plumbed Phase 1 trial: BLOWS UP at canonical damping (validates iter-853 prediction)
+
+Per iter-855's iter-856+ Priority 1: take the iter-853 Phase 1 stencil swap and run it with PROPER state plumbing (no RK3 staleness) so each substep sees the actual intermediate u_d/v_d.
+
+**Method.**
+- Temporarily added an opt-in `phase1_div_swap=False` and `phase1_dt=300.0` kwargs to `fv3_sw_tendencies` (default-off; production unchanged).  When `phase1_div_swap=True`, the divergence-damping branch used `_d_sw5_corner_divergence` with the call-site `u_d, v_d` to compute Fortran-cc divergence.
+- Wrote `scripts/diag_iter856_phase1_proper.py` running its OWN SSP-RK3 loop (not the model's wrapper), calling `fv3_sw_tendencies` directly so each substep saw the correct intermediate state.
+- W2 LEGACY at C36, dt=300s, 60 steps.  Damping sweep at {0, 0.001, 0.01, 0.1, 1.0, 2.0} × iter-761 canonical.
+- After measurement: REVERTED the `fv3_sw_tendencies` source change (kwargs removed; production code identical to pre-iter-856).  All 14 W2 sentinels pass after revert.  The diag script now warns that re-running requires re-applying the temporary patch.
+
+**Result (PROPERLY-PLUMBED, no staleness).**
+
+| damp_scale | completed 60 steps? | final \|h − h₀\| (m) | note          |
+|-----------:|---------------------:|--------------------:|---------------|
+| (un-patched 1.0× reference) | yes | 0.691                | baseline       |
+|       0.0  | yes                  | 0.857                | stable         |
+|     0.001  | yes                  | 0.807                | stable         |
+|      0.01  | yes                  | 3.02                  | stable         |
+|       0.1  | yes                  | 67.4                  | stable         |
+|       1.0  | **NO**                | 1.09e+07               | **blew up at step 10 (~50 min)** |
+|       2.0  | **NO**                | 1.20e+08               | **blew up at step 6 (~30 min)** |
+
+**Comparison to iter-854 (BUGGY hybrid, RETRACTED in iter-855).**
+- iter-854 1.0×: stable, 301 m (470× worse than baseline).
+- **iter-856 1.0×: BLEW UP at step 10.**  Hybrid was MASKING actual instability.
+- iter-854 2.0×: stable, 639 m.
+- **iter-856 2.0×: BLEW UP at step 6.**  Same masking.
+- iter-854 0.001×: stable, 0.886 m (≈ baseline).
+- iter-856 0.001×: stable, 0.807 m (≈ baseline).  Sub-canonical damping behaviour MATCHES.
+
+The staleness bug was numerically CONSEQUENTIAL at canonical damping: it spuriously stabilised an otherwise-unstable configuration by feeding stale start-of-step winds to the divergence in RK3 substeps 2/3.  At sub-canonical damping (where the damping term is weak enough that it doesn't drive instability), the staleness was inconsequential.
+
+**Validates iter-853's prediction.**  iter-853's t=0-only "would destabilise in tens to hundreds of timesteps" extrapolation from the 180× peak ratio is now validated by direct measurement: the properly-plumbed Phase 1 swap at canonical damping blows up at step 10 (about 50 min).  iter-854's "destabilise was wrong" conclusion was an artefact of the buggy hybrid; iter-855's retraction stands; iter-856 now provides the corrected measurement.
+
+**Refined conclusion.**
+- The Phase 1 stencil swap with iter-761 canonical damping IS unstable in the A-L production path (blows up at step 10 with proper plumbing).
+- The Phase 1 stencil swap with damp_scale ≤ 0.1× is stable for at least 5h, with integration error growing roughly linearly with damp_scale (0.001× ≈ baseline; 0.1× → 67 m, 100× worse).
+- A "stable AND Fortran-faithful" combination requires fixing iter-849 Checks 1 (`*dt` factor) and 4 (`ke→d_sw6` routing) concurrently — a multi-iter architectural port.
+- Phase 1 alone at damp_scale ~ 0.001× IS stable + baseline-quality for 5h, but is NOT Fortran-faithful and would not necessarily reduce the W2 LEGACY mode-A signature at 1-day (the v_ll stripe peak is a 24h cumulative phenomenon, not a 5h short-run signal).
+
+**What iter-856 DOES show.**
+- Direct measurement of the (properly-plumbed) Phase 1 swap.  No staleness bug.
+- At canonical damping (1.0×), the swap destabilises within ~10 RK3 steps.
+- At sub-canonical damping (≤ 0.1×), the swap is stable for at least 5h.
+- iter-853's t=0 prediction of instability was correct; iter-854's contrary finding was a hybrid artefact.
+
+**What iter-856 does NOT establish.**
+- Whether at sub-canonical damping (e.g., 0.001×) the swap improves the 1-day W2 LEGACY v_ll_Linf vs the canonical 0.159 m/s sentinel.
+- Whether iter-849 Checks 1+4 (concurrent fixes) would yield a stable + Fortran-faithful + accurate W2 swap.
+- Whether the cosine bell or W5 results would be similarly affected by Phase 1 at sub-canonical damping.
+
+**Iter-857+ candidates.**
+- 1-day (288-step) Phase 1 trial at damp_scale=0.001× to measure v_ll_Linf — IF it improves on 0.159 m/s, the Phase 1 stencil + reduced-coefficient path is a viable mode-A reduction (at the cost of partial Fortran fidelity).
+- Implement iter-849 Check 1 (`*dt` factor in adaptive cap) on top of Phase 1 to test whether the magnitude alone is the destabiliser.  If 1.0× becomes stable with `*dt`, Check 1 dominates; if not, Check 4 is also needed.
+- Run cosine-bell + W5 evaluations on Phase 1 + damp_scale=0.001× to check for regressions before any production wire-in.
+- Continue iter-849 Check 4 architectural port (multi-iter).
+
+**Deliverable.**  `scripts/diag_iter856_phase1_proper.py` (with note that the source patch is reverted).  Production source change to `fv3_sw_tendencies` was applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
+
+**Process.**  116th iter in iter-752-856 chain.  First HONEST Phase 1 trial.  Validates iter-853's "destabilise" prediction with direct measurement (canonical damping blows up at step 10).  iter-854's contrary "stable at all damp_scales" finding is now fully retracted as a buggy-hybrid artefact (iter-855 retraction confirmed).  Sub-canonical damping (≤0.1×) is stable but the stencil swap alone is NOT a Fortran-faithful path to mode-A reduction.
