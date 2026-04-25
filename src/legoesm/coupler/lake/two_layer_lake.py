@@ -125,11 +125,17 @@ def step_lake(
     # Recompute q_surface from updated epilimnion temperature for consistency
     q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
 
+    # ``jnp.full(shape, scalar, dtype=...)`` lowers to a single
+    # ``Broadcast`` HLO op, whereas ``jnp.broadcast_to(jnp.array(scalar), ...)``
+    # also forces a ``ConvertElementType`` for the implicit dtype
+    # promotion of the Python float.  Tiny per-call savings but
+    # this fires every coupler step.
+    _t_dtype = T_epi.dtype
     response = TileResponse(
         T_surface=T_epi_new,
-        albedo=jnp.broadcast_to(jnp.array(config.albedo_lake), T_epi.shape),
-        emissivity=jnp.broadcast_to(jnp.array(config.emissivity_lake), T_epi.shape),
-        z0=jnp.broadcast_to(jnp.array(config.z0_lake), T_epi.shape),
+        albedo=jnp.full(T_epi.shape, config.albedo_lake, dtype=_t_dtype),
+        emissivity=jnp.full(T_epi.shape, config.emissivity_lake, dtype=_t_dtype),
+        z0=jnp.full(T_epi.shape, config.z0_lake, dtype=_t_dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx,
