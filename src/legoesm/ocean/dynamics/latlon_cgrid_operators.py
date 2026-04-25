@@ -92,12 +92,11 @@ def cell_to_cgrid_winds(
     u_face = interp_cell_to_uface(u_cell)
     # v at poles is zero (wall BC), not the average of adjacent cells.
     v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
-    if v_cell.ndim >= 3:
-        zero = jnp.zeros((1, v_cell.shape[1], v_cell.shape[2]),
-                         dtype=v_cell.dtype)
-    else:
-        zero = jnp.zeros((1, v_cell.shape[1]), dtype=v_cell.dtype)
-    v_face = jnp.concatenate([zero, v_interior, zero], axis=0)
+    # ``jnp.pad`` with zero fill is one Pad HLO op; the previous form
+    # alloc-zeros + concatenate-of-three is two HLO ops.  Wall-BC at
+    # poles is preserved (pole rows are zero).
+    pad_axes = ((0, 0),) * (v_interior.ndim - 1)
+    v_face = jnp.pad(v_interior, ((1, 1), *pad_axes))
     return u_face, v_face
 
 
@@ -179,13 +178,10 @@ def gradient_y_cgrid(
     # Interior v-faces: i=1..n_lat-1
     df_interior = (f[1:] - f[:-1]) / dy_v  # (n_lat-1, n_lon, ...)
 
-    # Boundary faces at poles: zero gradient (wall BC)
-    if f.ndim == 2:
-        zero_row = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    else:
-        zero_row = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-
-    df_dy = jnp.concatenate([zero_row, df_interior, zero_row], axis=0)
+    # Boundary faces at poles: zero gradient (wall BC).
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    pad_axes = ((0, 0),) * (df_interior.ndim - 1)
+    df_dy = jnp.pad(df_interior, ((1, 1), *pad_axes))
     return df_dy
 
 
@@ -361,8 +357,6 @@ def coriolis_cgrid(
     f_cell = grid.f  # (n_lat, n_lon)
 
     is_3d = u.ndim == 3
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
 
     # --- f at u-points ---
     # u-point at face j is between cell (j-1) mod n_lon and cell j.
@@ -398,12 +392,10 @@ def coriolis_cgrid(
     # Average: u_at_v = 0.25 * (u[i,j] + u[i,j+1] + u[i+1,j] + u[i+1,j+1])
     u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
     # u_avg_interior shape: (n_lat-1, n_lon, ...)
-    # Boundary: at poles (j=0 and j=n_lat), u_at_v = 0 (v=0 at poles anyway)
-    if is_3d:
-        zero_row = jnp.zeros((1, n_lon, u.shape[2]), dtype=u.dtype)
-    else:
-        zero_row = jnp.zeros((1, n_lon), dtype=u.dtype)
-    u_at_v = jnp.concatenate([zero_row, u_avg_interior, zero_row], axis=0)
+    # Boundary: at poles, u_at_v = 0 (v=0 at poles anyway).
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    pad_axes = ((0, 0),) * (u_avg_interior.ndim - 1)
+    u_at_v = jnp.pad(u_avg_interior, ((1, 1), *pad_axes))
 
     # --- Coriolis terms ---
     if is_3d:
@@ -471,9 +463,10 @@ def laplacian_cgrid(
         # Zero gradient at land-ocean boundaries
         u_mask = mask * jnp.roll(mask, 1, axis=1)
         u_mask = jnp.concatenate([u_mask, u_mask[:, 0:1]], axis=1)
+        # Pole rows of v_mask are zero (wall BC); single Pad HLO op
+        # replaces alloc-zeros + concatenate-of-three.
         v_mask_interior = mask[:-1] * mask[1:]
-        zero_row = jnp.zeros((1, mask.shape[1]), dtype=mask.dtype)
-        v_mask = jnp.concatenate([zero_row, v_mask_interior, zero_row], axis=0)
+        v_mask = jnp.pad(v_mask_interior, ((1, 1), (0, 0)))
         grad_x = grad_x * u_mask
         grad_y = grad_y * v_mask
 
@@ -526,8 +519,6 @@ def curl_vertex_cgrid(
     dlat = grid.dlat
     lat = grid.lat  # cell-center latitudes (n_lat,)
     cos_lat = grid.cos_lat  # (n_lat,)
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
 
     # Vertex area: A_v(i) = R^2 * dlon * |sin(lat_cell[i]) - sin(lat_cell[i-1])|
     # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole)
@@ -564,14 +555,10 @@ def curl_vertex_cgrid(
 
     # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i]
     # u shape: (n_lat, n_lon+1). Vertex row i uses u rows i-1 and i.
-    # Pad with zeros at poles (u at pole vertex has no cell row beyond)
-    zero_u = jnp.zeros((1, n_lon + 1), dtype=u.dtype)
-    u_ext = jnp.concatenate([zero_u, u, zero_u], axis=0)  # (n_lat+2, n_lon+1)
-    dx_ext = jnp.concatenate([
-        jnp.zeros(1, dtype=lat.dtype),
-        dx_cell,
-        jnp.zeros(1, dtype=lat.dtype),
-    ])  # (n_lat+2,)
+    # Pad with zeros at poles (u at pole vertex has no cell row beyond).
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    u_ext = jnp.pad(u, ((1, 1), (0, 0)))  # (n_lat+2, n_lon+1)
+    dx_ext = jnp.pad(dx_cell, (1, 1))  # (n_lat+2,)
 
     # u_south = u_ext[i] = u[i-1] for vertex row i (0-indexed)
     # u_north = u_ext[i+1] = u[i] for vertex row i
@@ -595,8 +582,9 @@ def curl_vertex_cgrid(
     # under jax.grad (issue #173).
     circ_interior = circ[1:-1, :]  # (n_lat-1, n_lon+1)
     zeta_interior = circ_interior / A_vertex_interior[:, jnp.newaxis]
-    zero_row = jnp.zeros((1, circ.shape[1]), dtype=circ.dtype)
-    zeta = jnp.concatenate([zero_row, zeta_interior, zero_row], axis=0)
+    # Pole rows are zero; single Pad HLO op replaces alloc-zeros +
+    # concatenate-of-three.
+    zeta = jnp.pad(zeta_interior, ((1, 1), (0, 0)))
 
     return zeta
 
@@ -653,15 +641,16 @@ def _gradient_curl_to_v(
     # zeta[:, j+1] - zeta[:, j] for j=0..n_lon-1
     dzeta = zeta[:, 1:] - zeta[:, :-1]  # (n_lat+1, n_lon [, nlev])
 
-    # Compute gradient only on interior rows (1..n_lat-1), pad poles with 0
+    # Compute gradient only on interior rows (1..n_lat-1), pad poles
+    # with zero.  Single Pad HLO op replaces alloc-zeros + concatenate-
+    # of-three.
     dzeta_int = dzeta[1:-1]  # (n_lat-1, n_lon [, nlev])
     if zeta.ndim == 2:
         grad_int = dzeta_int / dx_v_int[:, jnp.newaxis]
-        zero_row = jnp.zeros((1, dzeta.shape[1]), dtype=zeta.dtype)
     else:
         grad_int = dzeta_int / dx_v_int[:, jnp.newaxis, jnp.newaxis]
-        zero_row = jnp.zeros((1, dzeta.shape[1], dzeta.shape[2]), dtype=zeta.dtype)
-    return jnp.concatenate([zero_row, grad_int, zero_row], axis=0)
+    pad_axes = ((0, 0),) * (grad_int.ndim - 1)
+    return jnp.pad(grad_int, ((1, 1), *pad_axes))
 
 
 def vector_laplacian_cgrid(
@@ -887,7 +876,6 @@ def strain_rate_cgrid(
     dlat = grid.dlat
     lat = grid.lat
     cos_lat = grid.cos_lat
-    n_lat = grid.n_lat
     n_lon = grid.n_lon
 
     u_eff = u if u_mask is None else u * u_mask
@@ -944,11 +932,9 @@ def strain_rate_cgrid(
     # du/dy at vertex: sign FLIPPED vs curl
     # curl uses: u_south*dx_south - u_north*dx_north
     # shear uses: u_north*dx_north - u_south*dx_south
-    zero_u = jnp.zeros((1, n_lon + 1), dtype=u.dtype)
-    u_ext = jnp.concatenate([zero_u, u_eff, zero_u], axis=0)
-    dx_ext = jnp.concatenate([
-        jnp.zeros(1, dtype=lat.dtype), dx_cell, jnp.zeros(1, dtype=lat.dtype),
-    ])
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    u_ext = jnp.pad(u_eff, ((1, 1), (0, 0)))
+    dx_ext = jnp.pad(dx_cell, (1, 1))
     u_south = u_ext[:-1, :]
     u_north = u_ext[1:, :]
     dx_south = dx_ext[:-1]
@@ -957,8 +943,9 @@ def strain_rate_cgrid(
                - u_south * dx_south[:, jnp.newaxis])
 
     D_S = (dv_circ_full + du_circ) / A_vertex[:, jnp.newaxis]
-    D_S = D_S.at[0, :].set(0.0)
-    D_S = D_S.at[-1, :].set(0.0)
+    # Pole rows zero (wall BC).  Slice + single Pad HLO op replaces two
+    # scatter ops.
+    D_S = jnp.pad(D_S[1:-1, :], ((1, 1), (0, 0)))
 
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
@@ -1078,8 +1065,6 @@ def stress_divergence_cgrid(
     dlat = grid.dlat
     lat = grid.lat
     cos_lat = grid.cos_lat
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
 
     dy = R * dlat       # face_dy: meridional edge length
     dy_edge = R * dlat  # same as dy (edge length for vertex circulation)
@@ -1146,14 +1131,13 @@ def stress_divergence_cgrid(
     # For interior v-faces (m=1..n_lat-1):
     dsh_merid = stress_h[:-1, :] - stress_h[1:, :]  # sh[m-1,j]-sh[m,j] for m=1..n_lat-1
     if is_3d:
-        zero_row = jnp.zeros((1, stress_h.shape[1], stress_h.shape[2]),
-                             dtype=stress_h.dtype)
         tend_v_DT_interior = dx_v[1:-1, jnp.newaxis, jnp.newaxis] * dsh_merid
     else:
-        zero_row = jnp.zeros((1, stress_h.shape[1]), dtype=stress_h.dtype)
         tend_v_DT_interior = dx_v[1:-1, jnp.newaxis] * dsh_merid
-    # Pole boundaries: zero (wall BC)
-    tend_v_DT = jnp.concatenate([zero_row, tend_v_DT_interior, zero_row], axis=0)
+    # Pole boundaries: zero (wall BC).  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
+    pad_axes = ((0, 0),) * (tend_v_DT_interior.ndim - 1)
+    tend_v_DT = jnp.pad(tend_v_DT_interior, ((1, 1), *pad_axes))
 
     # =====================================================================
     # tend_v: contribution from D_S adjoint
@@ -1375,12 +1359,10 @@ def smagorinsky_viscosity_q_cgrid(
                          + jnp.roll(D_T, 1, axis=1)[1:, :])
 
     # D_T_q shape: (n_lat-1, n_lon, ...). Need (n_lat+1, n_lon+1, ...).
-    # Pad pole rows with zero (degenerate vertices)
-    if is_3d:
-        zero_row = jnp.zeros((1, D_T.shape[1], D_T.shape[2]), dtype=D_T.dtype)
-    else:
-        zero_row = jnp.zeros((1, D_T.shape[1]), dtype=D_T.dtype)
-    D_T_q = jnp.concatenate([zero_row, D_T_q, zero_row], axis=0)
+    # Pad pole rows with zero (degenerate vertices).  Single Pad HLO op
+    # replaces alloc-zeros + concatenate-of-three.
+    pad_axes = ((0, 0),) * (D_T_q.ndim - 1)
+    D_T_q = jnp.pad(D_T_q, ((1, 1), *pad_axes))
     # Append periodic wrap column
     D_T_q = jnp.concatenate(
         [D_T_q, D_T_q[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1, ...)
@@ -1750,15 +1732,14 @@ def leith_viscosity_q_cgrid(
             gd_q_int = 0.25 * (grad_div_h[:-1, :, :] + grad_div_h[1:, :, :]
                                + jnp.roll(grad_div_h, 1, axis=1)[:-1, :, :]
                                + jnp.roll(grad_div_h, 1, axis=1)[1:, :, :])
-            zero_row = jnp.zeros((1, grad_div_h.shape[1], grad_div_h.shape[2]),
-                                 dtype=grad_div_h.dtype)
         else:
             gd_q_int = 0.25 * (grad_div_h[:-1, :] + grad_div_h[1:, :]
                                + jnp.roll(grad_div_h, 1, axis=1)[:-1, :]
                                + jnp.roll(grad_div_h, 1, axis=1)[1:, :])
-            zero_row = jnp.zeros((1, grad_div_h.shape[1]),
-                                 dtype=grad_div_h.dtype)
-        grad_div_q = jnp.concatenate([zero_row, gd_q_int, zero_row], axis=0)
+        # Pole rows zero; single Pad HLO op replaces alloc-zeros +
+        # concatenate-of-three.
+        pad_axes = ((0, 0),) * (gd_q_int.ndim - 1)
+        grad_div_q = jnp.pad(gd_q_int, ((1, 1), *pad_axes))
         grad_div_q = jnp.concatenate(
             [grad_div_q, grad_div_q[:, 0:1]], axis=1)
         total_sq = total_sq + grad_div_q ** 2
@@ -1774,12 +1755,11 @@ def leith_viscosity_q_cgrid(
 
     A_leith_q = (C_leith * Delta_q) ** 3 * norm_q
 
-    # Zero at pole vertices and land-adjacent vertices, matching
-    # smagorinsky_viscosity_q_cgrid.
-    zero_first = jnp.zeros_like(A_leith_q[0:1])
-    zero_last = jnp.zeros_like(A_leith_q[-1:])
-    A_leith_q = jnp.concatenate(
-        [zero_first, A_leith_q[1:-1], zero_last], axis=0)
+    # Zero at pole vertices, matching smagorinsky_viscosity_q_cgrid.
+    # Slice + single Pad HLO op replaces zeros_like-of-slice ×2 +
+    # concatenate-of-three.
+    pad_axes = ((0, 0),) * (A_leith_q.ndim - 1)
+    A_leith_q = jnp.pad(A_leith_q[1:-1], ((1, 1), *pad_axes))
 
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
@@ -1862,10 +1842,9 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     interior_full = jnp.concatenate(
         [interior, interior[:, 0:1]], axis=1)  # (n_lat-1, n_lon+1)
 
-    # Pole rows: zero (degenerate vertices)
-    zero_row = jnp.zeros((1, n_lon + 1), dtype=m.dtype)
-
-    return jnp.concatenate([zero_row, interior_full, zero_row], axis=0)
+    # Pole rows zero (degenerate vertices); single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
+    return jnp.pad(interior_full, ((1, 1), (0, 0)))
 
 
 # =============================================================================
@@ -1898,10 +1877,10 @@ def compute_face_masks(
         [u_mask_interior, u_mask_interior[:, 0:1]], axis=1,
     )
 
-    # v-face i is between cell i and cell i+1
+    # v-face i is between cell i and cell i+1.
+    # Pole boundaries: v=0 (always masked).  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
-    # Pole boundaries: v=0 (always masked)
-    zero_row = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
-    v_mask = jnp.concatenate([zero_row, v_mask_interior, zero_row], axis=0)
+    v_mask = jnp.pad(v_mask_interior, ((1, 1), (0, 0)))
 
     return u_mask, v_mask

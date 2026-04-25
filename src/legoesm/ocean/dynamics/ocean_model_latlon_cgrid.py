@@ -107,10 +107,10 @@ def _forward_backward_coriolis_3d(
     h_u = 0.5 * (h_west + h_k)
     h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)
 
-    # h at v-faces
+    # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
+    # replaces alloc-zeros + concatenate-of-three.
     h_v_interior = 0.5 * (h_k[:-1] + h_k[1:])
-    zero_h = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
-    h_v = jnp.concatenate([zero_h, h_v_interior, zero_h], axis=0)
+    h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     # --- Depth-averaged velocity (barotropic component) ---
     H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
@@ -146,13 +146,14 @@ def _forward_backward_coriolis_3d(
     u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis] * v_at_u) * u_mask_3d
 
     # --- Backward step: update v' using NEW u' ---
-    # Average u'_new to v-points (Sadourny 4-point average)
+    # Average u'_new to v-points (Sadourny 4-point average).
+    # Pole rows are zero (wall BC); single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
     u_at_v_interior = 0.25 * (
         u_prime_new[:-1, :-1] + u_prime_new[:-1, 1:]
         + u_prime_new[1:, :-1] + u_prime_new[1:, 1:]
     )
-    zero_row = jnp.zeros((1, n_lon, nlev), dtype=u.dtype)
-    u_at_v = jnp.concatenate([zero_row, u_at_v_interior, zero_row], axis=0)
+    u_at_v = jnp.pad(u_at_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 
@@ -362,12 +363,10 @@ class LatLonCGridOceanModel:
         h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
         h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
         H_u_pre = jnp.maximum(jnp.sum(h_u_pre, axis=-1), 1e-10)
-        # h at v-faces
+        # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
+        # replaces alloc-zeros + concatenate-of-three.
         h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
-        _n_lon = h_k_pre.shape[1]
-        _nlev = h_k_pre.shape[2]
-        _z_row = jnp.zeros((1, _n_lon, _nlev), dtype=h_k_pre.dtype)
-        h_v_pre = jnp.concatenate([_z_row, h_v_pre_int, _z_row], axis=0)
+        h_v_pre = jnp.pad(h_v_pre_int, ((1, 1), (0, 0), (0, 0)))
         H_v_pre = jnp.maximum(jnp.sum(h_v_pre, axis=-1), 1e-10)
 
         # Depth-averaged tendency → slow forcing for barotropic solver

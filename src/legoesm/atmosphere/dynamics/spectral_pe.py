@@ -158,12 +158,14 @@ def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
 
     sigma_dot_inner = fractional_sigma * D_total - cumsum_div
 
-    # Pad with one zero on the top boundary; XLA lowers ``jnp.pad`` to
-    # a single ``Pad`` HLO op instead of materialising a fresh
-    # ``jnp.zeros`` buffer and concatenating.
-    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 0),)
-    sigma_dot = jnp.pad(sigma_dot_inner, pad_axes)
-    sigma_dot = sigma_dot.at[..., -1].set(0.0)
+    # Top BC: σ̇=0; bottom BC: zero by construction
+    # (frac_sigma[-1]=1, cumsum_div[-1]=D_total → sigma_dot_inner[-1]=0).
+    # Drop the (∼0) trailing element + pad with zeros on both ends in
+    # one ``jnp.pad`` — replaces ``jnp.pad`` + scatter (2 HLO ops) with
+    # slice + Pad (2 HLO ops) but eliminates the float roundoff in
+    # sigma_dot[-1].
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
+    sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
     return sigma_dot
 
 

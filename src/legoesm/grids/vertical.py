@@ -326,13 +326,12 @@ def compute_sigma_dot(
         fractional_sigma * D_total - cumsum_div
     )  # (...,nlev)
 
-    # Prepend top (σ̇=0)
-    shape_horiz = div_3d.shape[:-1]  # spatial dims
-    zero_top = jnp.zeros((*shape_horiz, 1))
-    sigma_dot = jnp.concatenate([zero_top, sigma_dot_inner], axis=-1)  # (...,nlev+1)
-
-    # Force bottom boundary (should be zero by construction, enforce for safety)
-    sigma_dot = sigma_dot.at[..., -1].set(0.0)
+    # Prepend top (σ̇=0) and force bottom boundary (zero by construction).
+    # Drop the (∼0) last element + pad with zeros on both ends in one
+    # ``jnp.pad`` — replaces alloc-zeros + concatenate + scatter (3 HLO
+    # ops) with slice + Pad (2 HLO ops).
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1)
+    sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], (*pad_axes, (1, 1)))
 
     return sigma_dot
 
@@ -974,13 +973,12 @@ def compute_mass_flux_hybrid(
     frac_B = (coord.B_half[1:] - B_top) / coord.B_range  # (nlev,)
     mass_flux_inner = frac_B * D_total_p - cumsum_div  # (..., nlev)
 
-    # Prepend top (F=0)
-    shape_horiz = div_3d.shape[:-1]
-    zero_top = jnp.zeros((*shape_horiz, 1))
-    mass_flux = jnp.concatenate([zero_top, mass_flux_inner], axis=-1)
-
-    # Force bottom boundary
-    mass_flux = mass_flux.at[..., -1].set(0.0)
+    # Prepend top (F=0) and force bottom boundary (zero by construction).
+    # Drop the (∼0) last element + pad with zeros on both ends in one
+    # ``jnp.pad`` — replaces alloc-zeros + concatenate + scatter (3 HLO
+    # ops) with slice + Pad (2 HLO ops).
+    pad_axes = ((0, 0),) * (mass_flux_inner.ndim - 1)
+    mass_flux = jnp.pad(mass_flux_inner[..., :-1], (*pad_axes, (1, 1)))
 
     return mass_flux
 

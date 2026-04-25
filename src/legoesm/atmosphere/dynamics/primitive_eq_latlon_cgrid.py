@@ -344,12 +344,12 @@ def cgrid_latlon_hydrostatic_tendencies(
         _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
         _cumsum = jnp.cumsum(div_dp, axis=-1)
         _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum
-        # Pad top with zero (top BC) instead of allocating a fresh
-        # zero buffer + concatenate.  Bottom BC remains an explicit
-        # ``.at[-1].set(0.0)``.
-        _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 0),)
-        mass_flux = jnp.pad(_mf_inner, _pad_axes)
-        mass_flux = mass_flux.at[..., -1].set(0.0)
+        # Top BC: F=0; bottom BC: zero by construction
+        # (frac_B[-1]=1, cumsum[-1]=D_total_p → _mf_inner[-1]=0).  Drop
+        # the trailing (∼0) element + pad both ends in one Pad HLO op
+        # (replaces Pad + scatter, also eliminates the float roundoff).
+        _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 1),)
+        mass_flux = jnp.pad(_mf_inner[..., :-1], _pad_axes)
         mf_u = interp_cell_to_uface(mass_flux)
         mf_v = interp_cell_to_vface(mass_flux)
         ps_u = interp_cell_to_uface(p_s[..., jnp.newaxis])[..., 0]

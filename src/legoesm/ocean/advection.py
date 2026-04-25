@@ -259,9 +259,9 @@ def dst3_to_v_points(
     # Select based on flow direction
     f_face = jnp.where(mf_int > 0, f_face_pos, f_face_neg)
 
-    # Solid wall at poles: zero flux
-    zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_face, zero], axis=0)
+    # Solid wall at poles: zero flux.  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three (DST-3 hot path).
+    return jnp.pad(f_face, ((1, 1), (0, 0), (0, 0)))
 
 
 # =============================================================================
@@ -662,9 +662,9 @@ def ppm_to_v_points(
     f_face = jnp.clip(f_face, jnp.minimum(f_south, f_north),
                        jnp.maximum(f_south, f_north))
 
-    # Solid wall: zero at poles
-    zero = jnp.zeros((1, n_lon, nlev), dtype=f.dtype)
-    return jnp.concatenate([zero, f_face, zero], axis=0)
+    # Solid wall at poles: zero flux.  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three (PPM hot path).
+    return jnp.pad(f_face, ((1, 1), (0, 0), (0, 0)))
 
 
 def flux_form_vertical_tracer_advection_ppm(

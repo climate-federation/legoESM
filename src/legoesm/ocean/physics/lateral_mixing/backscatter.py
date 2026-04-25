@@ -114,8 +114,10 @@ def _A_bs_q_cgrid(E: jnp.ndarray, grid, c_bs: float) -> jnp.ndarray:
     E_wrap = jnp.roll(E, 1, axis=-1)
     E_q_int = 0.25 * (E[..., :-1, :] + E[..., 1:, :]
                       + E_wrap[..., :-1, :] + E_wrap[..., 1:, :])
-    zero_row = jnp.zeros(E_q_int.shape[:-2] + (1, n_lon), dtype=E.dtype)
-    E_q = jnp.concatenate([zero_row, E_q_int, zero_row], axis=-2)
+    # Pole rows zero (wall BC); single Pad HLO op replaces alloc-zeros
+    # + concatenate-of-three.
+    pad_axes = ((0, 0),) * (E_q_int.ndim - 2)
+    E_q = jnp.pad(E_q_int, (*pad_axes, (1, 1), (0, 0)))
     E_q = jnp.concatenate([E_q, E_q[..., 0:1]], axis=-1)
 
     A_vert = _vertex_area(grid)                         # (n_lat+1,) [m²]

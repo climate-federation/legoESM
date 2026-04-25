@@ -470,9 +470,9 @@ def _som_y_sweep(sm_o, moments, vol_flux_y, vol):
     # For cell j: left face = face j-1, right face = face j
     # Using padded array: face index i between cell i and cell i+1 (0-based)
 
-    # Pad with zero-flux walls
-    zero_face = jnp.zeros((1, n_lon, nlev), dtype=sm_o.dtype)
-    vf_padded = jnp.concatenate([zero_face, vol_flux_y, zero_face], axis=0)
+    # Pad with zero-flux walls.  Single Pad HLO op replaces alloc-zeros
+    # + concatenate-of-three.
+    vf_padded = jnp.pad(vol_flux_y, ((1, 1), (0, 0), (0, 0)))
     # vf_padded shape: (n_lat+1, n_lon, nlev)
     # vf_padded[0] = south wall (zero), vf_padded[n_lat] = north wall (zero)
     # vf_padded[j] = face between cell j-1 and cell j (for j=1..n_lat-1)
@@ -510,12 +510,11 @@ def _som_y_sweep(sm_o, moments, vol_flux_y, vol):
 
     fp_o_int, fp_mom_int = _extract_flux(sm_o_donor, mom_donor, alpha, sign_edge)
 
-    # Pad face fluxes with zeros at walls
-    zero_fp = jnp.zeros((1, n_lon, nlev), dtype=sm_o.dtype)
-    zero_fp9 = jnp.zeros((1, n_lon, nlev, 9), dtype=sm_o.dtype)
-    fp_o_all = jnp.concatenate([zero_fp, fp_o_int, zero_fp], axis=0)
-    fp_mom_all = jnp.concatenate([zero_fp9, fp_mom_int, zero_fp9], axis=0)
-    alpha_all = jnp.concatenate([zero_fp, alpha, zero_fp], axis=0)
+    # Pad face fluxes with zeros at walls.  Single Pad HLO op each
+    # replaces alloc-zeros + concatenate-of-three.
+    fp_o_all = jnp.pad(fp_o_int, ((1, 1), (0, 0), (0, 0)))
+    fp_mom_all = jnp.pad(fp_mom_int, ((1, 1), (0, 0), (0, 0), (0, 0)))
+    alpha_all = jnp.pad(alpha, ((1, 1), (0, 0), (0, 0)))
 
     # --- Step 2: Per-cell incoming/outgoing ---
     # For cell j: left face = index j, right face = index j+1
@@ -609,9 +608,9 @@ def _som_z_sweep(sm_o, moments, vol_flux_z, vol):
     # FLIP the sign so positive = downward:
     vf_int = -vol_flux_z  # (n_lat, n_lon, nlev-1), positive = downward
 
-    # Pad with zero-flux boundaries at surface (above level 0) and bottom (below level nlev-1)
-    zero_face = jnp.zeros((n_lat, n_lon, 1), dtype=sm_o.dtype)
-    vf_padded = jnp.concatenate([zero_face, vf_int, zero_face], axis=2)
+    # Pad with zero-flux boundaries at surface and bottom.
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    vf_padded = jnp.pad(vf_int, ((0, 0), (0, 0), (1, 1)))
     # vf_padded[:, :, k] = face between level k-1 and level k (k=1..nlev-1 interior)
     # vf_padded[:, :, 0] = surface wall, vf_padded[:, :, nlev] = bottom wall
 
@@ -639,11 +638,9 @@ def _som_z_sweep(sm_o, moments, vol_flux_z, vol):
 
     fp_o_int, fp_mom_int = _extract_flux(sm_o_donor, mom_donor, alpha, sign_edge)
 
-    # Pad
-    zero_fp = jnp.zeros((n_lat, n_lon, 1), dtype=sm_o.dtype)
-    zero_fp9 = jnp.zeros((n_lat, n_lon, 1, 9), dtype=sm_o.dtype)
-    fp_o_all = jnp.concatenate([zero_fp, fp_o_int, zero_fp], axis=2)
-    fp_mom_all = jnp.concatenate([zero_fp9, fp_mom_int, zero_fp9], axis=2)
+    # Pad with zeros at surface/bottom walls.  Single Pad HLO op each.
+    fp_o_all = jnp.pad(fp_o_int, ((0, 0), (0, 0), (1, 1)))
+    fp_mom_all = jnp.pad(fp_mom_int, ((0, 0), (0, 0), (1, 1), (0, 0)))
 
     fp_o_at_left = fp_o_all[:, :, :-1]
     fp_mom_at_left = fp_mom_all[:, :, :-1, :]

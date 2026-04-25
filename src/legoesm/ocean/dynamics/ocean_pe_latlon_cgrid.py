@@ -95,11 +95,9 @@ def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
     f_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, n_lon, ...)
-    if f.ndim >= 3:
-        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    else:
-        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_interior, zero], axis=0)
+    # Pole rows zero (wall BC); single Pad HLO op.
+    pad_axes = ((0, 0),) * (f_interior.ndim - 1)
+    return jnp.pad(f_interior, ((1, 1), *pad_axes))
 
 
 def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
@@ -141,11 +139,9 @@ def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray) -> jnp.ndarray:
     f_pos = f_south + 0.5 * _van_leer_limiter(r_pos) * delta_pos
     f_neg = f_north + 0.5 * _van_leer_limiter(r_neg) * delta_neg
     f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
-    if f.ndim >= 3:
-        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    else:
-        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_tvd, zero], axis=0)
+    # Pole rows zero (wall BC); single Pad HLO op.
+    pad_axes = ((0, 0),) * (f_tvd.ndim - 1)
+    return jnp.pad(f_tvd, ((1, 1), *pad_axes))
 
 
 def _upwind_to_u_points(
@@ -208,11 +204,9 @@ def _upwind_to_v_points(
     mf_interior = mass_flux_v[1:-1]
     f_upwind = jnp.where(mf_interior > 0, f_south, f_north)
 
-    if f.ndim >= 3:
-        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    else:
-        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_upwind, zero], axis=0)
+    # Pole rows zero (wall BC); single Pad HLO op.
+    pad_axes = ((0, 0),) * (f_upwind.ndim - 1)
+    return jnp.pad(f_upwind, ((1, 1), *pad_axes))
 
 
 def _neumann_fill_cgrid(
@@ -428,11 +422,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     v_at_u = jnp.concatenate(
         [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
 
-    # Average u' to v-points (4-point average, zero-padded at poles)
-    n_lon_loc = u_prime.shape[1]  # n_lon+1
-    nlev_loc = u_prime.shape[2]
-    zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u_prime.dtype)
-    u_ext = jnp.concatenate([zero_u, u_prime, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
+    # Average u' to v-points (4-point average, zero-padded at poles).
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    u_ext = jnp.pad(u_prime, ((1, 1), (0, 0), (0, 0)))  # (n_lat+2, n_lon+1, nlev)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
