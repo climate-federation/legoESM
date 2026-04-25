@@ -55,15 +55,28 @@ import pytest
 from legoesm.core.operators_fv import _ppm_edge_values
 
 
-def _ppm_edge_values_with_clip(q_1d):
-    """Pre-iter-880 reference: same 4th-order formula + the removed
-    clip step.  Used to verify iter-880's fix produces measurably
-    different output on inputs where the clip would have fired."""
+def _ppm_edge_values_with_clip(q_1d, blend_edges=False):
+    """Pre-iter-880 reference: same `_ppm_edge_values` body but WITH
+    the clip step that iter-880 removed.  Mirrors the production
+    signature (`blend_edges=False` by default) so the only
+    behavioural difference vs the iter-880 function is the clip
+    step itself.
+
+    Iter-880b (Codex iter-880 stop-time fix): pre-iter-880b this
+    reference unconditionally applied the blend-edges branch (`if
+    M >= 7:`) regardless of the `blend_edges` flag.  That confused
+    the diff in `test_iter880_high_frequency_field_differs_from_clipped`
+    — the divergence came from BOTH the blend (extra in reference)
+    AND the clip (extra in reference).  iter-880b restores the
+    Fortran-faithful gating ``if blend_edges and M >= 7:`` so the
+    reference differs from the production function ONLY by the
+    clip step.
+    """
     q_pad = q_1d
     M = q_pad.shape[-2]
     q_hat_inner = ((7.0 / 12.0) * (q_pad[..., 1:-2, :] + q_pad[..., 2:-1, :])
                    - (1.0 / 12.0) * (q_pad[..., :-3, :] + q_pad[..., 3:, :]))
-    if M >= 7:
+    if blend_edges and M >= 7:
         q_os_lo = (
             15.0 * q_pad[..., 2:3, :]
             - 10.0 * q_pad[..., 3:4, :]
@@ -115,36 +128,90 @@ def test_iter880_linear_field_unchanged():
         np.asarray(q_hat), np.asarray(expected), atol=1e-10)
 
 
-def test_iter880_high_frequency_field_differs_from_clipped():
-    """Sharp/zigzag input: 4th-order formula overshoots local
-    [min, max], and the pre-iter-880 clip would flatten those
-    overshoots.  Iter-880's unclipped output MUST differ from the
-    clipped reference on this input — proving the fix is firing.
+@pytest.mark.parametrize("blend_edges", [False, True])
+def test_iter880_overshoot_input_differs_from_clipped(blend_edges):
+    """Input designed to trigger the 4th-order overshoot: `[0, 0,
+    10, 0, 0, 10, 0, 0, 10, 0, 0, 10]` (every-third-cell impulse).
 
-    The downstream CW84 constraint handles the unclipped overshoots
-    correctly; pre-iter-880's pre-flatten step made the scheme
-    MORE diffusive than Fortran by removing the overshoot before
-    the constraint could see it.
+    The 4th-order edge formula `(7/12)*(q[i]+q[i+1]) -
+    (1/12)*(q[i-1]+q[i+2])` produces edge values that overshoot the
+    local ``[min(q[i], q[i+1]), max(q[i], q[i+1])]`` range whenever
+    there's a non-monotonic feature in the 4-cell stencil.
+
+    Iter-880b (Codex iter-880 stop-time fix): the original zigzag
+    `[10, -10, 10, -10, ...]` input does NOT actually overshoot —
+    the 4th-order formula at the (10, -10) edge reduces to
+    ``(7/12)*0 - (1/12)*0 = 0`` which IS inside the [-10, 10]
+    range.  iter-880b switches to an every-third-cell impulse
+    pattern that DOES produce overshoots: at the edge between two
+    zeros adjacent to an impulse, the formula picks up the impulse
+    contribution via the `(1/12)*(q[i-1]+q[i+2])` term, yielding
+    a non-zero edge that the clip step would flatten to zero.
+
+    Both `blend_edges` modes are tested to ensure the iter-880
+    fix fires regardless of edge-blending choice.
     """
     n = 8
-    # Zigzag: alternates between -10 and +10 every cell.
-    x = jnp.array([(-1.0) ** i * 10.0
-                   for i in range(n + 4)], dtype=jnp.float64)
+    # Every-third-cell impulse: 0, 0, 10, 0, 0, 10, ... (period 3).
+    x = jnp.array(
+        [10.0 if (i % 3 == 2) else 0.0 for i in range(n + 4)],
+        dtype=jnp.float64)
     q = jnp.broadcast_to(x[None, :, None], (6, n + 4, n))
 
-    q_hat_unclipped = _ppm_edge_values(q)
-    q_hat_clipped = _ppm_edge_values_with_clip(q)
+    q_hat_unclipped = _ppm_edge_values(q, blend_edges=blend_edges)
+    q_hat_clipped = _ppm_edge_values_with_clip(q, blend_edges=blend_edges)
 
     diff = float(jnp.max(jnp.abs(q_hat_unclipped - q_hat_clipped)))
     assert diff > 1e-6, (
-        f"Iter-880 fix invisible: `_ppm_edge_values` output bit-"
-        f"matches the pre-iter-880 clipped reference on a zigzag "
-        f"input (max |Δ|={diff:.3e}).  Either the fix was reverted "
-        f"or the input doesn't trigger the clip-vs-no-clip "
-        f"divergence.  The 4th-order PPM edge formula on a "
-        f"high-frequency input MUST overshoot the local [min, max] "
+        f"Iter-880 fix invisible (blend_edges={blend_edges}): "
+        f"`_ppm_edge_values` output bit-matches the pre-iter-880 "
+        f"clipped reference on an impulse input "
+        f"(max |Δ|={diff:.3e}). Either the fix was reverted or the "
+        f"input doesn't trigger the clip-vs-no-clip divergence.  "
+        f"The 4th-order PPM edge formula at edges flanking an "
+        f"isolated impulse MUST overshoot the local [min, max] "
         f"range; iter-880's unclipped output should differ from "
-        f"the clipped reference on those overshoot cells.")
+        f"the clipped reference on those overshoot cells, in BOTH "
+        f"`blend_edges` modes.")
+
+
+def test_iter880b_reference_isolates_clip_only_diff():
+    """Iter-880b: on a SMOOTH input (linear ramp) the iter-880
+    function and the iter-880b reference (with clip but otherwise
+    identical) must agree exactly — because the clip step is a
+    no-op on smooth data.  This pins that the reference correctly
+    isolates the clip behaviour from any other source of
+    divergence (such as the blend-edges branch).
+    """
+    n = 8
+    x = jnp.arange(n + 4, dtype=jnp.float64)
+    q = jnp.broadcast_to(x[None, :, None], (6, n + 4, n))
+
+    for blend_edges in (False, True):
+        q_hat_unclipped = _ppm_edge_values(q, blend_edges=blend_edges)
+        q_hat_clipped = _ppm_edge_values_with_clip(q,
+                                                   blend_edges=blend_edges)
+        # On a linear ramp the 4th-order formula is exact, the
+        # blend-edges 3rd-order extrapolation is also exact, and
+        # the clip is a no-op (edge values are inside [min,max]).
+        # So both functions must agree exactly.
+        np.testing.assert_allclose(
+            np.asarray(q_hat_unclipped), np.asarray(q_hat_clipped),
+            rtol=1e-12, atol=1e-12,
+            err_msg=(
+                f"Iter-880b reference does NOT isolate the clip "
+                f"step (blend_edges={blend_edges}): on a smooth "
+                f"linear ramp where the clip is a no-op, the "
+                f"iter-880 function and the reference disagree.  "
+                f"This means the reference has SOME other "
+                f"behavioural difference besides the clip — "
+                f"audit the reference's `if blend_edges and M >= "
+                f"7:` gate, the 4th-order formula, and the "
+                f"boundary edges to ensure they match the "
+                f"production function exactly except for the clip "
+                f"step.  Without this isolation the iter-880 "
+                f"high-frequency test could pass for the wrong "
+                f"reason."))
 
 
 def test_iter880_source_no_jnp_clip_in_ppm_edge_values():

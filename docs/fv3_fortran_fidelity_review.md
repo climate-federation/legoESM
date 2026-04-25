@@ -1701,3 +1701,36 @@ Fortran's `xppm` does NOT clip the 4th-order edge values; it passes them directl
 **Deliverable.**  Source fix (1-line removal + 8-line iter-880 comment) + 4 regression tests + this doc entry.
 
 **Process.**  147th iter in the iter-752-880 chain.  Concrete operator-level Fortran-fidelity bug fix in the FV transport stack.  Smaller scope than iter-878's CW84 constraint fix but the same class: a documented Fortran formula is followed by an extra Python-side step that doesn't exist in Fortran.
+
+### Iter-880b — Codex iter-880 stop-time: fix iter-880's false-positive regression test
+
+**Codex iter-880 stop-time finding.**  "The new iter-880 regression test is a false positive and does not actually validate the shipped behavior change."
+
+**Issue.**  iter-880's `test_iter880_high_frequency_field_differs_from_clipped` had two real bugs:
+
+1. **Reference function unconditionally blends edges.**  `_ppm_edge_values_with_clip` (the local pre-iter-880 reference) had `if M >= 7:` (no `blend_edges` parameter check), so it ALWAYS applied the blend-edges branch.  The production function `_ppm_edge_values(q)` defaults to `blend_edges=False` (NO blend).  The diff between actual and reference on a zigzag input therefore measured (a) the missing blend in the reference + (b) the missing clip in the actual — conflated, not isolated.
+
+2. **Zigzag input doesn't trigger the clip overshoot.**  The 4th-order edge formula at the (10, -10) edge of a `[10, -10, 10, -10, ...]` zigzag reduces to `(7/12)*0 - (1/12)*0 = 0`, which IS inside the [-10, 10] range.  The clip step is a no-op on this input.  So the iter-880 test claim "iter-880's unclipped output should differ from the clipped reference on zigzag" was demonstrably false.
+
+These two bugs cancelled each other in iter-880's published test (the reference's blend made the diff non-zero even though the clip was inactive), creating a false-positive that PASSED but didn't actually validate the iter-880 fix.
+
+**Fix (iter-880b).**  Two changes:
+
+1. **Add `blend_edges` parameter to `_ppm_edge_values_with_clip`** matching the production signature, so the reference differs from the production function ONLY by the clip step.
+
+2. **Switch test input to an every-third-cell impulse pattern** `[0, 0, 10, 0, 0, 10, ...]` that DOES trigger 4th-order overshoot at edges flanking the impulse (the formula picks up the impulse contribution via the `(1/12)*(q[i-1]+q[i+2])` term, yielding edges outside the local [0, 0] range).
+
+3. **Parametrize the overshoot test over both `blend_edges=False` and `blend_edges=True`** to ensure the iter-880 fix fires regardless of edge-blending choice.
+
+4. **Add `test_iter880b_reference_isolates_clip_only_diff`** that exercises both `blend_edges` modes on a SMOOTH linear ramp where the clip is a no-op.  Both production and reference must agree exactly — this pins the property that the reference isolates the clip step alone, not a combination of clip + blend differences.
+
+**Sentinel verification.**  iter-880b includes a manual verification:
+- Re-injected the iter-880 clip step.
+- Result: 3 of 6 tests fail (both `blend_edges` variants of the overshoot test + the AST scan).
+- Restored source: 6 of 6 pass.
+
+The iter-880b sentinel correctly fires on the clip-re-injection regression, in both `blend_edges` modes.
+
+**Deliverable.**  Three test changes in `tests/test_ppm_edge_values_clip_iter880.py`: (a) add `blend_edges` parameter to reference function; (b) switch overshoot input to every-third-cell impulse; (c) add `test_iter880b_reference_isolates_clip_only_diff` for cross-mode isolation guard.
+
+**Process.**  148th iter in the iter-752-880b chain.  Codex stop-time review caught real test-correctness bugs in iter-880's regression test — the test passed for the wrong reasons.  iter-880b isolates the clip step in both reference function design and input choice, then verifies the sentinel actually catches the iter-880 regression class via deliberate clip re-injection.
