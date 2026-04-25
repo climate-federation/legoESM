@@ -429,6 +429,217 @@ def _flux_form_vertical_momentum_advection_weno(
     return -vert_flux_div / h_u_safe
 
 
+# =============================================================================
+# WENO D-term (divergence flux) and K-term (KE) helpers — Phase 4b
+# =============================================================================
+
+def _weno_cell_to_uface(
+    phi: jnp.ndarray,
+    psi: jnp.ndarray,
+    u_upwind: jnp.ndarray,
+    order: int = 5,
+) -> jnp.ndarray:
+    """WENO reconstruction of a cell-center field to u-faces (zonal, periodic).
+
+    Reconstructs *phi* from cell centers (n_lat, n_lon, nlev) to u-faces
+    (n_lat, n_lon+1, nlev) using the {phi; psi} smoothness-optimised stencil.
+
+    Used for the D term: divergence at cells → divergence at u-faces.
+
+    Parameters
+    ----------
+    phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
+    psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
+    u_upwind : (n_lat, n_lon+1, nlev)  velocity at u-faces (upwind sign).
+    order : {5, 7}
+
+    Returns
+    -------
+    phi_at_u : (n_lat, n_lon+1, nlev)
+    """
+    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+
+    hw = {5: 3, 7: 4}[order]
+    n_lon = phi.shape[1]
+
+    # Periodic stencil along axis 1 (longitude).
+    # U-face j is between cell j-1 and cell j.  WENO at the face between
+    # cells (j-1) and j needs cells j-hw, ..., j+hw-1.
+    # Roll offset for stencil position s: hw - s places cell j-hw+s at
+    # position j.
+    phi_stencil = [jnp.roll(phi, hw - s, axis=1)
+                   for s in range(2 * hw)]
+    psi_stencil = [jnp.roll(psi, hw - s, axis=1)
+                   for s in range(2 * hw)]
+
+    phi_plus, phi_minus = weno_reconstruct_split(
+        phi_stencil, psi_stencil, order=order)
+
+    # Upwind selection: u > 0 => flow from west => left-biased (f_plus)
+    # n_lon output values (one per periodic u-face), then append wrap.
+    phi_at_u_core = weno_upwind(
+        phi_plus, phi_minus, u_upwind[:, :n_lon, :])
+    return jnp.concatenate(
+        [phi_at_u_core, phi_at_u_core[:, 0:1, :]], axis=1)
+
+
+def _weno_cell_to_vface(
+    phi: jnp.ndarray,
+    psi: jnp.ndarray,
+    v_upwind: jnp.ndarray,
+    order: int = 5,
+) -> jnp.ndarray:
+    """WENO reconstruction of a cell-center field to v-faces (meridional, wall BC).
+
+    Reconstructs *phi* from cell centers (n_lat, n_lon, nlev) to v-faces
+    (n_lat+1, n_lon, nlev) using the {phi; psi} smoothness-optimised stencil.
+    Boundary v-faces (south/north poles) are set to zero (wall BC: v=0).
+
+    Used for the D term: divergence at cells → divergence at v-faces.
+
+    Parameters
+    ----------
+    phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
+    psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
+    v_upwind : (n_lat+1, n_lon, nlev)  velocity at v-faces (upwind sign).
+    order : {5, 7}
+
+    Returns
+    -------
+    phi_at_v : (n_lat+1, n_lon, nlev)
+    """
+    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+
+    hw = {5: 3, 7: 4}[order]
+    n_lat = phi.shape[0]
+    nlev = phi.shape[2]
+    n_lon = phi.shape[1]
+
+    # Ghost cells (Neumann BC) along axis 0 for meridional stencil.
+    phi_ext = jnp.concatenate(
+        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
+    psi_ext = jnp.concatenate(
+        [psi[:1, :, :]] * hw + [psi] + [psi[-1:, :, :]] * hw, axis=0)
+
+    # V-face i (i=1,...,n_lat-1) sits between cell i-1 and cell i.
+    # WENO needs cells i-hw, ..., i+hw-1.
+    # In extended array: index hw + cell => positions i, ..., i+2*hw-1.
+    # For face i=1: ext indices 1,...,2*hw.  Slice [s : n_lat-1+s].
+    phi_stencil = [phi_ext[s: n_lat - 1 + s, :, :]
+                   for s in range(2 * hw)]
+    psi_stencil = [psi_ext[s: n_lat - 1 + s, :, :]
+                   for s in range(2 * hw)]
+
+    phi_plus, phi_minus = weno_reconstruct_split(
+        phi_stencil, psi_stencil, order=order)
+
+    # Upwind: v > 0 => flow from south => left-biased (f_plus).
+    # Interior faces only (n_lat-1 values).
+    phi_at_v_interior = weno_upwind(
+        phi_plus, phi_minus, v_upwind[1:-1, :, :])
+
+    # Boundary v-faces = 0 (wall BC: v=0 at poles, so D*v=0 regardless).
+    zero = jnp.zeros((1, n_lon, nlev), dtype=phi.dtype)
+    return jnp.concatenate([zero, phi_at_v_interior, zero], axis=0)
+
+
+def _weno_usq_to_cell(
+    u: jnp.ndarray,
+    order: int = 5,
+) -> jnp.ndarray:
+    """WENO reconstruction of u² from u-faces to cell centers (zonal, periodic).
+
+    Uses {u²; u} smoothness-optimised stencil (Silvestri et al. 2024):
+    smoothness indicators from velocity u, reconstruction of u².
+    Replaces the centered ``(0.5*(u[j]+u[j+1]))²`` with WENO upwind
+    ``avg(u²)`` for shock-capturing KE dissipation.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1, nlev) velocity at u-faces.
+    order : {5, 7}
+
+    Returns
+    -------
+    u_sq_cell : (n_lat, n_lon, nlev)  u² reconstructed to cell centers.
+    """
+    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+
+    hw = {5: 3, 7: 4}[order]
+    n_lon = u.shape[1] - 1  # n_lon+1 u-faces => n_lon cells
+
+    u_sq = u ** 2
+
+    # Cell center j is between u-face j and u-face j+1.
+    # Standard WENO at face j+1/2 uses cells j-hw+1, ..., j+hw.
+    # Use n_lon core u-face values (periodic: face n_lon == face 0).
+    u_sq_core = u_sq[:, :n_lon, :]
+    u_core = u[:, :n_lon, :]
+
+    # Roll offset hw-1-s: same pattern as _weno_zeta_at_v.
+    phi_stencil = [jnp.roll(u_sq_core, hw - 1 - s, axis=1)
+                   for s in range(2 * hw)]
+    psi_stencil = [jnp.roll(u_core, hw - 1 - s, axis=1)
+                   for s in range(2 * hw)]
+
+    phi_plus, phi_minus = weno_reconstruct_split(
+        phi_stencil, psi_stencil, order=order)
+
+    # Upwind velocity at cell centers.
+    u_at_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+    return weno_upwind(phi_plus, phi_minus, u_at_cell)
+
+
+def _weno_vsq_to_cell(
+    v: jnp.ndarray,
+    order: int = 5,
+) -> jnp.ndarray:
+    """WENO reconstruction of v² from v-faces to cell centers (meridional, wall BC).
+
+    Uses {v²; v} smoothness-optimised stencil (Silvestri et al. 2024):
+    smoothness indicators from velocity v, reconstruction of v².
+    Replaces the centered ``(0.5*(v[i]+v[i+1]))²`` with WENO upwind
+    ``avg(v²)`` for shock-capturing KE dissipation.
+
+    Parameters
+    ----------
+    v : (n_lat+1, n_lon, nlev) velocity at v-faces.
+    order : {5, 7}
+
+    Returns
+    -------
+    v_sq_cell : (n_lat, n_lon, nlev)  v² reconstructed to cell centers.
+    """
+    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+
+    hw = {5: 3, 7: 4}[order]
+    n_lat = v.shape[0] - 1  # n_lat+1 v-faces => n_lat cells
+
+    v_sq = v ** 2
+
+    # Ghost cells (Neumann BC) along axis 0.
+    v_sq_ext = jnp.concatenate(
+        [v_sq[:1, :, :]] * hw + [v_sq] + [v_sq[-1:, :, :]] * hw, axis=0)
+    v_ext = jnp.concatenate(
+        [v[:1, :, :]] * hw + [v] + [v[-1:, :, :]] * hw, axis=0)
+
+    # Cell center i is between v-face i and v-face i+1.
+    # Standard WENO at face i+1/2 uses cells i-hw+1, ..., i+hw.
+    # In ext: index hw+face => positions 1+s, ..., n_lat+s.
+    # Same pattern as _weno_zeta_at_u.
+    phi_stencil = [v_sq_ext[1 + s: n_lat + 1 + s, :, :]
+                   for s in range(2 * hw)]
+    psi_stencil = [v_ext[1 + s: n_lat + 1 + s, :, :]
+                   for s in range(2 * hw)]
+
+    phi_plus, phi_minus = weno_reconstruct_split(
+        phi_stencil, psi_stencil, order=order)
+
+    # Upwind velocity at cell centers.
+    v_at_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+    return weno_upwind(phi_plus, phi_minus, v_at_cell)
+
+
 def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
@@ -565,9 +776,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # MOM6-style: KE from total u, not perturbation u'. The depth-mean
     # contribution enters F_slow for the barotropic solver; the
     # perturbation is applied to 3D velocity in the step function.
-    u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
-    v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
-    KE = 0.5 * (u_cell**2 + v_cell**2)
+    _mom_adv = config.momentum_advection
+    if _mom_adv in ("weno5", "weno7"):
+        # WENO5 {u²;u} and {v²;v} reconstruction (Silvestri et al. 2024,
+        # Phase 4b K-term).  Replaces centered interpolation with upwind
+        # bias: computes avg(u²) not (avg(u))², adding O((ΔU)²) implicit
+        # KE dissipation at velocity fronts.
+        u_sq_cell = _weno_usq_to_cell(u, order=5)
+        v_sq_cell = _weno_vsq_to_cell(v, order=5)
+        KE = 0.5 * (u_sq_cell + v_sq_cell)
+    else:
+        u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+        v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+        KE = 0.5 * (u_cell**2 + v_cell**2)
 
     KE_t = jnp.moveaxis(KE, -1, 0)
     dKE_dx_t = jax.vmap(lambda ke2d: gradient_x_cgrid(ke2d, grid))(KE_t)
@@ -647,7 +868,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
     # Reconstruct q from vertices to velocity points
-    _mom_adv = config.momentum_advection
     if _mom_adv in ("weno5", "weno7"):
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
         q_at_u = _weno_zeta_at_u(
@@ -661,6 +881,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     du_dt = du_dt + q_at_u * Fv_at_u
     dv_dt = dv_dt - q_at_v * Fu_at_v
+
+    # --- 7c. Divergence flux (D term, Silvestri et al. 2024 Eqs. 31-32) ---
+    # WENO reconstruction of velocity divergence to faces adds implicit
+    # dissipation of the divergent mode, complementing the Z-term's
+    # rotational dissipation.  WENO5 always (Table 2).
+    if _mom_adv in ("weno5", "weno7"):
+        vel_div = divergence_cgrid(u * u_mask_3d, v * v_mask_3d, grid)
+        D_at_u = _weno_cell_to_uface(vel_div, vel_div, u, order=5)
+        D_at_v = _weno_cell_to_vface(vel_div, vel_div, v, order=5)
+        du_dt = du_dt + D_at_u * u * u_mask_3d
+        dv_dt = dv_dt + D_at_v * v * v_mask_3d
 
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
     # Issue #171 Level-1 fix: use interface-upwind flux-form momentum
