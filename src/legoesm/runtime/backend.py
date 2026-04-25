@@ -207,6 +207,49 @@ def _set_xla_flags(flags: dict[str, str]) -> None:
         os.environ["XLA_FLAGS"] = combined
 
 
+def _detect_gpu_vendor_pre_init() -> str | None:
+    """Detect GPU vendor *without* triggering ``jax.devices()``.
+
+    Once ``jax.devices()`` runs, the XLA client is initialised and any
+    further mutations of ``os.environ['XLA_FLAGS']`` no longer take
+    effect.  The latency-hiding scheduler flags applied below
+    (``_NVIDIA_GPU_XLA_FLAGS``, ``_AMD_GPU_XLA_FLAGS``) are critical for
+    multi-GPU scaling, so we must set them before JAX is initialised.
+
+    Returns ``"nvidia"`` / ``"amd"`` if a vendor is unambiguously
+    identifiable from environment hints, otherwise ``None`` and the
+    caller should fall back to the post-init JAX-based detection (which
+    will at least pick the right matmul precision even if ``XLA_FLAGS``
+    is too late to alter).
+    """
+    # SLURM and Nvidia commonly set ``CUDA_VISIBLE_DEVICES=-1`` or
+    # ``CUDA_VISIBLE_DEVICES=NoDevFiles`` to mask GPUs on CPU-only
+    # allocations.  Those values are non-empty strings, so a naive
+    # truthiness check would mis-detect NVIDIA and inject GPU XLA flags
+    # into the CPU backend.  Reject them explicitly.
+    _CUDA_DISABLED = {"-1", "NoDevFiles", ""}
+
+    cuda = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    hip = os.environ.get("HIP_VISIBLE_DEVICES", "")
+    rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "")
+
+    has_cuda = cuda not in _CUDA_DISABLED and not cuda.startswith("-")
+    has_hip = (hip not in _CUDA_DISABLED and not hip.startswith("-")) or (
+        rocr not in _CUDA_DISABLED and not rocr.startswith("-")
+    )
+
+    if has_cuda and not has_hip:
+        return "nvidia"
+    if has_hip:
+        return "amd"
+    platforms = os.environ.get("JAX_PLATFORMS", "").lower()
+    if platforms.startswith("cuda"):
+        return "nvidia"
+    if platforms.startswith("rocm"):
+        return "amd"
+    return None
+
+
 def _is_nvidia_gpu() -> bool:
     """Return ``True`` if the default GPU device is an NVIDIA (CUDA) GPU."""
     import jax
@@ -261,16 +304,45 @@ def configure_backend(backend: str | None = None) -> str:
             jax.config.update("jax_spmd_mode", "allow_all")
 
     elif backend == "gpu":
-        devices = jax.devices()
-        vendor = gpu_vendor()
-        # Apply XLA flags unconditionally — latency hiding and GEMM fusion
-        # benefit single-GPU and MPI-per-rank setups too.
-        if vendor == "nvidia":
-            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
-        elif vendor == "amd":
-            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+        # Detect vendor BEFORE ``jax.devices()`` so the XLA scheduler
+        # flags below land in the env var that the XLA client will
+        # consume on first init.  Once ``jax.devices()`` runs, mutating
+        # ``os.environ['XLA_FLAGS']`` is silently ineffective on most
+        # JAX versions — the latency-hiding flags are critical for
+        # multi-GPU scaling, so we cannot afford that race.
         if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
             os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
+
+        pre_init_vendor = _detect_gpu_vendor_pre_init()
+        if pre_init_vendor == "nvidia":
+            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        elif pre_init_vendor == "amd":
+            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+
+        devices = jax.devices()
+        vendor = gpu_vendor()
+        if pre_init_vendor is None:
+            # Vendor was only known after JAX init; XLA_FLAGS already
+            # locked in.  Still apply best-effort matmul precision
+            # below, and warn so the user can pre-set ``CUDA_VISIBLE_DEVICES``
+            # / ``HIP_VISIBLE_DEVICES`` for the next run.
+            if vendor == "nvidia":
+                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+                logger.warning(
+                    "GPU vendor detected post-init; XLA scheduler flags "
+                    "may not take effect this run.  Set "
+                    "CUDA_VISIBLE_DEVICES or JAX_PLATFORMS=cuda before "
+                    "import to enable latency-hiding flags.",
+                )
+            elif vendor == "amd":
+                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+                logger.warning(
+                    "GPU vendor detected post-init; XLA scheduler flags "
+                    "may not take effect this run.  Set "
+                    "HIP_VISIBLE_DEVICES before import to enable "
+                    "latency-hiding flags.",
+                )
+
         # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).
         # AMD GPUs do not have TF32 hardware; use default float32.
         if vendor == "nvidia":

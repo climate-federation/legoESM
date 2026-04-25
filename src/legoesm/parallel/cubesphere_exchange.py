@@ -33,6 +33,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
@@ -456,10 +457,15 @@ def packed_pad_halo_4d(*fields, mesh):
     if len(fields) == 1:
         return [explicit_pad_halo_4d(fields[0], mesh)]
 
-    splits = [f.shape[-1] for f in fields]
+    # Use plain Python ints for split indices so JAX treats them as
+    # static constants — passing a traced ``jnp.cumsum`` to ``jnp.split``
+    # forces a host evaluation in older JAX and outright errors in newer
+    # versions.  This mirrors the MPI-side fix in ``halo_exchange.py``.
+    splits = [int(f.shape[-1]) for f in fields]
+    split_indices = np.cumsum(splits[:-1]).tolist()
     stacked = jnp.concatenate(fields, axis=-1)
     padded = explicit_pad_halo_4d(stacked, mesh, halo=1)
-    return list(jnp.split(padded, jnp.cumsum(jnp.array(splits[:-1])), axis=-1))
+    return list(jnp.split(padded, split_indices, axis=-1))
 
 
 # ===================================================================

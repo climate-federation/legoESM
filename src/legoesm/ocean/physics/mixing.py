@@ -6,12 +6,15 @@ Vertical: Explicit second-order diffusion.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
-from legoesm.core.operators import laplacian
+from legoesm.core.operators_3d import (
+    divergence_3d,
+    gradient_x_3d,
+    gradient_y_3d,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo_4d
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
@@ -20,10 +23,16 @@ def laplacian_viscosity_3d(
     grid: CubedSphereGrid,
     coeff: float,
 ) -> jnp.ndarray:
-    """Compute A_h * nabla^2(field) vmapped over levels.
+    """Compute ``coeff · ∇² f`` for all levels using the native 4D path.
 
-    Reuses the 2D laplacian operator from core/operators.py,
-    same vmap-over-levels pattern as operators_3d.hyperdiffusion_3d.
+    Mathematically identical to the previous ``vmap(laplacian)`` over
+    the level axis (``div(grad(f))`` with the same centred metric-aware
+    operators), but runs the cubed-sphere halo exchange once over all
+    levels through ``pad_halo_4d`` / ``pad_halo_vector_4d`` instead of
+    once per level.  Under MPI this collapses ``nlev`` separate messages
+    into a constant number, which is the dominant cost on multi-GPU
+    runs (CLAUDE.md ``Parallel and HPC Rules`` flag the per-level
+    ``vmap(pad_halo)`` pattern explicitly).
 
     Parameters
     ----------
@@ -38,13 +47,16 @@ def laplacian_viscosity_3d(
     -------
     array : Laplacian tendency, shape (6, n, n, nlev).
     """
-    def single_level(f_k):
-        f_field = Field(data=f_k, name="f", dims=("face", "x", "y"), units="")
-        return laplacian(f_field, grid).data
-
-    f_t = jnp.moveaxis(field_3d, -1, 0)   # (nlev, 6, n, n)
-    result = jax.vmap(single_level)(f_t)   # (nlev, 6, n, n)
-    return coeff * jnp.moveaxis(result, 0, -1)
+    # Pre-pad the input field once so both ``gradient_x_3d`` and
+    # ``gradient_y_3d`` skip their internal halo exchange — saves one
+    # MPI message in distributed runs.  ``divergence_3d`` still issues
+    # its own vector halo exchange on the gradient outputs.
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
+    gx = gradient_x_3d(field_3d, grid, padded=padded)
+    gy = gradient_y_3d(field_3d, grid, padded=padded)
+    return coeff * divergence_3d(gx, gy, grid)
 
 
 def vertical_diffusion(

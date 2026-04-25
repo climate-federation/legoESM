@@ -801,7 +801,7 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
         ``exchange(state) -> state`` that applies halo exchange to
         all face-dimensioned fields in the state pytree.
     """
-    from legoesm.grids.halo import pad_halo
+    from legoesm.grids.halo import pad_halo, pad_halo_4d
 
     def _exchange(state):
         """Apply halo exchange to face-dimensioned arrays.
@@ -810,8 +810,11 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
         data from neighbors, then strips the halos back to ``(6, n, n)``.
         This ensures boundary values are fresh after a dynamics step.
 
-        For 3D fields ``(6, n, n, nlev)``, the exchange is applied
-        independently at each level via vmap.
+        For 3D fields ``(6, n, n, nlev)`` the exchange uses the native
+        4D halo path (``pad_halo_4d``) which fetches halos for every
+        level in one MPI message — see CLAUDE.md ``Parallel and HPC
+        Rules``.  The previous ``vmap(pad_halo)`` per level pattern is
+        forbidden because it issues ``nlev`` separate messages.
         """
         def _exchange_leaf(leaf):
             if not isinstance(leaf, (jax.Array, jnp.ndarray)):
@@ -825,17 +828,9 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
                 return padded[:, 1:-1, 1:-1]
 
             elif leaf.ndim == 4:
-                # 3D field: (6, n, n, nlev) — exchange per level
-                nlev = leaf.shape[-1]
-
-                def _exchange_level(level_data):
-                    padded = pad_halo(level_data)
-                    return padded[:, 1:-1, 1:-1]
-
-                # Transpose to (nlev, 6, n, n), vmap, transpose back
-                transposed = jnp.moveaxis(leaf, -1, 0)  # (nlev, 6, n, n)
-                exchanged = jax.vmap(_exchange_level)(transposed)
-                return jnp.moveaxis(exchanged, 0, -1)   # (6, n, n, nlev)
+                # 3D field: (6, n, n, nlev) — single 4D halo exchange.
+                padded = pad_halo_4d(leaf)
+                return padded[:, 1:-1, 1:-1, :]
 
             return leaf
 
@@ -881,6 +876,14 @@ def make_ppermute_halo_exchange(grid, config: DeviceConfig):
             if leaf.ndim == 3:
                 return jax_native_halo_exchange(leaf, grid, mesh=config.mesh)
             elif leaf.ndim == 4:
+                # NOTE: jax_native_halo_exchange / _ppermute_halo_exchange
+                # are documented as a 2D-only legacy path.  When the
+                # SPMD backend in cubesphere_exchange.py is active the
+                # production code does not enter this branch — it goes
+                # through the native 4D ``packed_pad_halo_4d``.  Keep
+                # the per-level vmap here as a documented fallback;
+                # extending the legacy ppermute kernel to 4D is tracked
+                # separately.
                 transposed = jnp.moveaxis(leaf, -1, 0)
                 def _ex_level(lev):
                     return jax_native_halo_exchange(lev, grid, mesh=config.mesh)
@@ -1209,33 +1212,30 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         local_cells = np.concatenate([owned_cells, halo_cells])
         local_cells_set = set(local_cells.tolist())
 
-        # ----- Halo edges: edges connected to local cells ----- #
-        local_edges_set = set()
-        for e in range(nEdges):
-            c0 = int(cellsOnEdge_np[0, e])
-            c1 = int(cellsOnEdge_np[1, e])
-            if c0 in local_cells_set or c1 in local_cells_set:
-                local_edges_set.add(e)
-        halo_edges = np.array(
-            sorted(local_edges_set - owned_edges_set), dtype=np.int64,
+        # ----- Halo edges: edges connected to local cells (vectorised) ----- #
+        # Original Python loop over nEdges scaled poorly at MPAS resolutions
+        # (1M+ cells); replace with a single ``np.isin`` on the cellsOnEdge
+        # neighbour arrays so the whole partition setup is O(nEdges) numpy.
+        local_cells_arr = local_cells
+        edge_in_local = np.isin(cellsOnEdge_np[0], local_cells_arr) | np.isin(
+            cellsOnEdge_np[1], local_cells_arr,
+        )
+        local_edges_arr = np.flatnonzero(edge_in_local).astype(np.int64)
+        halo_edges = np.setdiff1d(
+            local_edges_arr, owned_edges, assume_unique=True,
         )
         local_edges = np.concatenate([owned_edges, halo_edges])
 
         # ----- Halo vertices: vertices connected to local cells/edges ----- #
-        local_verts_set = set()
-        for c in local_cells:
-            for j in range(maxEdges):
-                v = int(verticesOnCell_np[j, c])
-                if 0 <= v < nVertices:
-                    local_verts_set.add(v)
-        for e in local_edges:
-            for j in range(2):
-                v = int(verticesOnEdge_np[j, e])
-                if 0 <= v < nVertices:
-                    local_verts_set.add(v)
-        owned_verts_set = set(owned_vertices.tolist())
-        halo_vertices = np.array(
-            sorted(local_verts_set - owned_verts_set), dtype=np.int64,
+        # Vectorised gather: collect verticesOnCell over local cells and
+        # verticesOnEdge over local edges in one pass each, then dedupe.
+        verts_from_cells = verticesOnCell_np[:, local_cells].reshape(-1)
+        verts_from_edges = verticesOnEdge_np[:, local_edges].reshape(-1)
+        candidate_verts = np.concatenate([verts_from_cells, verts_from_edges])
+        valid = (candidate_verts >= 0) & (candidate_verts < nVertices)
+        local_verts_arr = np.unique(candidate_verts[valid]).astype(np.int64)
+        halo_vertices = np.setdiff1d(
+            local_verts_arr, owned_vertices, assume_unique=True,
         )
         local_vertices = np.concatenate([owned_vertices, halo_vertices])
 
