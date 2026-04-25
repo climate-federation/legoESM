@@ -746,31 +746,13 @@ def _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid):
     """FV3 c_sw KE upwind selection (sw_core.F90:303-365).
 
     Returns ke_u, ke_v — the upwind-selected covariant velocities for KE.
-    Non-bounded-domain path applies sin_sg/cos_sg conversion at face
-    boundaries.
-
-    Iter-875: Fortran gate is
-    ``if (bounded_domain .or. grid_type>=3 .or. duogrid)`` for the
-    PLAIN branch, ELSE the sin_sg branch.  Equivalent: SIN_SG branch
-    only when NEITHER ``bounded_domain`` NOR ``duogrid`` is set
-    (grid_type<3 always for cubed-sphere).
-
-    Iter-876 (Codex iter-875 stop-time fix): the ``use_duogrid``
-    parameter contract is preserved — callers passing
-    ``use_duogrid=True`` with a non-bounded-domain cdgrid (e.g.,
-    direct unit-test invocations on a default cubed-sphere) get the
-    PLAIN branch as documented.  The gate combines both predicates:
-    legacy applied iff ``not use_duogrid AND not bounded_domain``.
-    This restores the tests/unit caller contract while still
-    closing the regional/nested non-duogrid fidelity gap (a caller
-    with ``bounded_domain=True, use_duogrid=False`` now correctly
-    takes the PLAIN branch instead of the legacy branch).
+    Non-duogrid path applies sin_sg/cos_sg conversion at face boundaries.
     """
     n = cdgrid.n
     ke_u = jnp.where(ua > 0, uc[:, :-1, :], uc[:, 1:, :])
     ke_v = jnp.where(va > 0, vc[:, :, :-1], vc[:, :, 1:])
 
-    if not use_duogrid and not cdgrid.base.bounded_domain:
+    if not use_duogrid:
         sg = cdgrid.sin_sg
         cg = cdgrid.cos_sg
         # West edge (cell 0, ua > 0): uc*sin_sg(W) + v*cos_sg(W)
@@ -1316,16 +1298,8 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # ``apply_legacy_corner_corrections=True`` (default False).
         # Arithmetic factored into `_apply_legacy_d_sw5_corner_corrections`
         # so its sign/index contract is testable on synthetic inputs.
-        # Iter-875: Fortran gate for the legacy corner corrections is
-        # ``not bounded_domain`` (sw_core.F90 corner-correction blocks
-        # are inside ``if (.not. bounded_domain ...)`` branches).
-        # Pre-iter-875 the gate was ``cdgrid.base.duogrid is None``,
-        # which silently applies the legacy correction in
-        # regional/nested non-duogrid mode (where Fortran skips).
-        # Widened to ``not cdgrid.base.bounded_domain`` per
-        # CLAUDE.md duogrid constraint #2.
         if (apply_legacy_corner_corrections
-                and not cdgrid.base.bounded_domain):
+                and cdgrid.base.duogrid is None):
             delpc = _apply_legacy_d_sw5_corner_corrections(delpc, vort_pad)
 
         delpc = rarea_c * delpc
@@ -1450,10 +1424,8 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
             # behind the ``apply_legacy_corner_corrections`` opt-in
             # flag (default False) so callers cannot accidentally
             # apply Fortran-structure with Fortran-incomplete data.
-            # Iter-875: same widened gate as the nord==0 branch above
-            # — see iter-875 comment there.
             if (apply_legacy_corner_corrections
-                    and not cdgrid.base.bounded_domain):
+                    and cdgrid.base.duogrid is None):
                 divg_d = _apply_legacy_d_sw5_corner_corrections(
                     divg_d, uc_lap)
 
@@ -1563,18 +1535,8 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
     vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
             - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
 
-    # Corner corrections for non-bounded-domain (FV3 sw_core.F90:396-400
-    # under the larger ``divergence_corner`` legacy branch gate
-    # ``not bounded_domain``).  Iter-875: pre-iter-875 the gate was
-    # ``not use_duogrid``, which silently applies the legacy corner
-    # correction in regional/nested non-duogrid mode.
-    # Iter-876 (Codex iter-875 stop-time fix): combine both
-    # predicates to preserve the caller-side ``use_duogrid``
-    # contract (unit tests pass ``use_duogrid=True/False`` directly
-    # to test gate behaviour) while still closing the regional/
-    # nested non-duogrid fidelity gap.  Legacy applied iff NEITHER
-    # ``use_duogrid`` NOR ``cdgrid.base.bounded_domain`` is True.
-    if not use_duogrid and not cdgrid.base.bounded_domain:
+    # Corner corrections for non-duogrid (FV3 sw_core.F90:396-400)
+    if not use_duogrid:
         vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
         vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
         vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
@@ -1600,23 +1562,14 @@ def _vorticity_flux(v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid):
     n = cdgrid.n
     sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
 
-    # Iter-875/876: Fortran gate is
-    # ``if (bounded_domain .or. grid_type>=3 .or. duogrid)`` for
-    # PLAIN branch (sw_core.F90:420), ELSE the face-boundary special-
-    # case (i==1 or i==npx → fy1 = dt2*v).  Equivalent: face-boundary
-    # special-case only when NEITHER ``bounded_domain`` NOR
-    # ``duogrid`` is set.  Iter-876 (Codex iter-875 stop-time fix)
-    # combines both predicates so the caller-side ``use_duogrid``
-    # contract is preserved while regional/nested non-duogrid mode
-    # also takes the PLAIN branch (closing the iter-875 gap).
     fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
-    if not use_duogrid and not cdgrid.base.bounded_domain:
+    if not use_duogrid:
         fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
         fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
     fx1 = (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
-    if not use_duogrid and not cdgrid.base.bounded_domain:
+    if not use_duogrid:
         fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
         fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
     vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])

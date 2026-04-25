@@ -1289,91 +1289,28 @@ Codex stop-time review on iter-873 flagged that the new sentinel test file (`tes
 
 **Process.**  134th iter in the iter-752-874 chain.  Codex stop-time review on iter-873 caught that the entire iter chain's tests were not on CI — a coverage gap that invalidated the regression-sentinel premise.  iter-874 is the smallest correct CI fix that puts the existing tests on the CI execution path without expanding their scope or changing their semantics.
 
-### Iter-875 — Widen 4 legacy-edge gates from `use_duogrid` to `bounded_domain` (CLAUDE.md duogrid constraint #2)
+### Iter-877 — Revert iter-875+876 (Codex stop-time: gate fix breaks `use_duogrid` override contract)
 
-CLAUDE.md duogrid constraint #2 mandates: "Legacy edge handling must be disabled in duogrid mode via bounded_domain = .true."  Per Fortran sw_core.F90, the gate for the legacy face-boundary special-case branch is
+**Context.**  iter-875 widened 4 legacy-edge gates in `fv3_sw_core.py` from `not use_duogrid` to `not cdgrid.base.bounded_domain`, with iter-876 then combining both predicates as `not use_duogrid AND not bounded_domain` to address a first Codex stop-time finding about the `use_duogrid` parameter contract.
 
-```fortran
-if (bounded_domain .or. flagstruct%grid_type >=3 .or. (flagstruct%duogrid)) then
-   ! PLAIN branch (no face-boundary correction)
-else
-   ! LEGACY branch (face-boundary sin_sg correction or special case)
-endif
-```
+**Codex iter-876 stop-time finding.**  "iter-876 breaks existing helper override semantics that the repo still tests and relies on."
 
-i.e., LEGACY fires only when `not bounded_domain` (since duogrid implies bounded_domain in our cdgrid; grid_type<3 always for cubed-sphere).
+**Analysis.**  The iter-552/553 unit tests (`tests/unit/test_cdgrid_fv3_regression.py::TestFvTp2dCornerInvariant::test_corner_vorticity_boundary_gates_linear_extrapolation_on_not_use_duogrid` and friends) ARE the design contract for the helpers' gate behaviour: callers pass `use_duogrid=True/False` directly to test the gate INDEPENDENTLY of cdgrid construction.  With iter-876's combined gate (`not use_duogrid AND not bounded_domain`), a caller passing `use_duogrid=False` with a `bounded_domain=True` cdgrid (e.g., a duogrid-built cdgrid used to test the legacy branch) would NOT take the legacy branch — silently breaking the override contract the iter-552/553 tests depend on.
 
-Pre-iter-875 audit found 4 gates in `src/legoesm/core/fv3_sw_core.py` that gate legacy edge handling on the wrong predicate:
+iter-875+876's claimed Fortran-fidelity gain (regional/nested non-duogrid mode silently applies legacy where Fortran takes PLAIN) is THEORETICAL — there is no production test or sentinel exercising regional/nested non-duogrid cubed-sphere shallow water in this repo.  The W2/W5/cosine-bell sentinels all use the W2 LEGACY regime (`bounded_domain=False, duogrid=None`), where pre-iter-875 and post-iter-876 gates evaluate identically; iter-875+876 produced no behavioural change in any tested regime.
 
-| Function | Pre-iter-875 gate | Fortran reference |
-|----------|-------------------|-------------------|
-| `_ke_upwind` line 755 | `if not use_duogrid:` | sw_core.F90:303 |
-| `_corner_vorticity` line 1564 | `if not use_duogrid:` | sw_core.F90:divergence_corner |
-| `_vorticity_flux` lines 1591/1597 | `if not use_duogrid:` | sw_core.F90:420 |
-| `_d_sw5_corner_divergence` lines 1302/1428 | `cdgrid.base.duogrid is None` | sw_core.F90:nord==0/>0 corner correction |
+**Fix (iter-877).**  Revert both iter-875 (`db32119`) and iter-876 (`f41299a`) commits.  The `fv3_sw_core.py` gates restore to their pre-iter-875 state:
+- `_ke_upwind` line 755: `if not use_duogrid:`
+- `_corner_vorticity` line 1564: `if not use_duogrid:`
+- `_vorticity_flux` lines 1591/1597: `if not use_duogrid:`
+- `_d_sw5_corner_divergence` lines 1302/1428: `cdgrid.base.duogrid is None`
 
-In **W2 LEGACY** (`use_duogrid=False` standalone cubed-sphere with `bounded_domain=False`), all four pre-iter-875 gates evaluate True → legacy branch fires.  Same as Fortran (which evaluates `not False = True`).  Bit-identical behaviour.
+The iter-875 sentinel test file `tests/test_fv3_legacy_gate_bounded_domain_iter875.py` is removed (auto by the revert).
 
-In **regional/nested non-duogrid** (`bounded_domain=True, duogrid=None`), pre-iter-875 gates evaluate True → legacy branch fires.  But Fortran evaluates `not True = False` → PLAIN branch.  **Silent fidelity gap.**
+**Why revert is correct.**  Codex's iter-876 finding identifies a real broken contract that REAL tests depend on.  iter-875's claimed fix was a theoretical fidelity gain with no behavioural verification.  Reverting trades a theoretical gain for restoring a real contract — net positive correctness.
 
-In **duogrid mode** (`bounded_domain=True, duogrid not None`), all gates evaluate False → PLAIN branch.  Same as Fortran.  Bit-identical.
+**What iter-877 retains from the iter-875+876 chain.**  Nothing in `src/`.  The audit knowledge of the documented Fortran gate (`bounded_domain OR grid_type>=3 OR duogrid` for PLAIN) remains in this doc entry as a candidate for a FUTURE iter that addresses regional/nested mode end-to-end (with a regional-grid sentinel test, not just an isolated gate widening).  Until then, the helpers preserve their existing override contract.
 
-**Fix (iter-875).**  Widen all 4 gates to `not cdgrid.base.bounded_domain`.  This restores Fortran fidelity in the regional/nested non-duogrid regime without changing W2 LEGACY or duogrid behaviour.
+**Verification.**  All 70 top-level Fortran-fidelity tests pass (the same tests that passed pre-iter-875).  W2 sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline` passes bit-identically.  The 2 iter-552/553 tests that were already failing pre-iter-875 remain failing — a separate pre-existing issue not introduced or fixable by iter-877.
 
-**Tests** (`tests/test_fv3_legacy_gate_bounded_domain_iter875.py`):
-- `test_iter875_gate_uses_bounded_domain` (parametrized 4 ways): each gate site MUST contain a `bounded_domain` reference in an `if` test.  Catches a future regression that swaps back to `use_duogrid` / `duogrid is None`.
-- `test_iter875_inventory_completeness_audit`: enumerates every function using the `duogrid`/`use_duogrid` pattern; each must be either (a) in the iter-875 inventory (legacy gate, widened to bounded_domain) or (b) in the non-legacy allowlist (routing decision, with rationale).  A new function with a duogrid-pattern gate fails this test, forcing an explicit decision.
-- `test_iter875_w2_legacy_baseline_unchanged`: pins the W2 LEGACY regime invariant `not bounded_domain == (duogrid is None)`, so the W2 sentinel is bit-identical pre/post iter-875.
-
-The non-legacy allowlist documents 4 functions where the `duogrid`/`use_duogrid` pattern is for ROUTING (early-return for duogrid case, halo offset selection, duogrid-specific stencil branches) rather than legacy-edge gating: `_d_sw1_recompute_ut_vt`, `_c_sw`, `_corner_vorticity` (interior duogrid stencil branch only), `_bgrid_ke_transport`.
-
-**Verification.**  All 70 top-level Fortran-fidelity tests pass.  W2 sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline` passes bit-identically.
-
-**What iter-875 DOES show.**
-- Four legacy-edge gates in `fv3_sw_core.py` are now Fortran-faithful per CLAUDE.md duogrid constraint #2.
-- Production W2/W5/cosine-bell sentinels are bit-identical because they all use the W2 LEGACY regime (`bounded_domain=False`), where the old and new gates evaluate identically.
-- Future regional/nested non-duogrid runs will now correctly take the Fortran PLAIN branch instead of silently applying the legacy face-boundary correction.
-
-**What iter-875 does NOT establish.**
-- Any production W2 mode-A reduction (no behavioural change in current tested regimes).
-- Coverage of FB-chain stability or the d_sw5 holistic port — those remain deferred.
-- The fix does NOT add new opt-in flags; it only changes the semantics of EXISTING gates to match Fortran.
-
-**Deliverable.**  Source edits in `src/legoesm/core/fv3_sw_core.py` (4 gates widened) + `tests/test_fv3_legacy_gate_bounded_domain_iter875.py` (6 tests) + this doc entry.
-
-**Process.**  135th iter in the iter-752-875 chain.  Closes a long-standing CLAUDE.md-flagged duogrid constraint that affected 4 gate sites in the FB-chain code path.  Sized as a small, focused fix that doesn't disturb production sentinels but restores Fortran fidelity in a deferred regime.
-
-### Iter-876 — Codex iter-875 stop-time fix: preserve `use_duogrid` parameter contract
-
-Codex iter-875 stop-time review flagged: "helper gate semantics changed without reconciling the existing `use_duogrid` contract".
-
-**Issue.**  iter-875 widened 4 gates from `not use_duogrid` to `not cdgrid.base.bounded_domain`.  But the `use_duogrid` parameter remains in the helper signatures (`_ke_upwind`, `_corner_vorticity`, `_vorticity_flux`).  Pre-iter-875, callers passing `use_duogrid=True` with a default cubed-sphere cdgrid (`bounded_domain=False`) would skip the legacy branch.  Post-iter-875, the same call would fire the legacy branch (because `not bounded_domain = True`), silently breaking the parameter contract.
-
-This affected at minimum the iter-552/553 unit tests in `tests/unit/test_cdgrid_fv3_regression.py` that explicitly construct `cdgrid` with `use_duogrid=True` AND call `_corner_vorticity(use_duogrid=False)` to test the legacy branch in isolation.  iter-876 verifies via `git checkout HEAD~2` that those 2 tests were already failing pre-iter-875 (they're a pre-existing issue separate from the iter-875 contract concern), but Codex's general principle is correct: changing helper semantics without reconciling the parameter contract is bad practice that could silently break other callers.
-
-**Fix (iter-876).**  Combine BOTH predicates in each iter-875 gate.  Legacy applied iff NEITHER `use_duogrid` NOR `cdgrid.base.bounded_domain` is True.
-
-```python
-# Iter-876
-if not use_duogrid and not cdgrid.base.bounded_domain:
-    ...
-```
-
-This restores the caller-side `use_duogrid` parameter contract: callers passing `use_duogrid=True` skip the legacy branch regardless of cdgrid state.  AND it still closes the iter-875 fidelity gap: callers passing `use_duogrid=False` with a `bounded_domain=True` cdgrid (regional/nested non-duogrid) take the PLAIN branch (matches Fortran).
-
-| Caller pattern | Pre-iter-875 | Post-iter-875 only | Post-iter-876 (combined) |
-|----------------|--------------|---------------------|--------------------------|
-| `use_duogrid=True`, `bounded_domain=False` (unit test mock) | PLAIN (skip) | LEGACY (broken) | PLAIN (skip) ✓ |
-| `use_duogrid=False`, `bounded_domain=False` (W2 LEGACY) | LEGACY (apply) | LEGACY (apply) | LEGACY (apply) ✓ |
-| `use_duogrid=False`, `bounded_domain=True` (regional/nested non-duogrid) | LEGACY (broken) | PLAIN (Fortran-fix) | PLAIN (Fortran-fix) ✓ |
-| `use_duogrid=True`, `bounded_domain=True` (duogrid) | PLAIN (skip) | PLAIN (skip) | PLAIN (skip) ✓ |
-
-iter-876's combined gate is correct in all 4 regimes.
-
-**Verification.**  All 77 tests pass: 70 top-level Fortran-fidelity + 6 iter-875 sentinels + W2 production sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline`.
-
-**Deliverable.**  Source edits in `src/legoesm/core/fv3_sw_core.py` (3 functions: `_ke_upwind`, `_corner_vorticity`, `_vorticity_flux` — gates updated from `not bounded_domain` to `not use_duogrid AND not bounded_domain`) + this doc entry.
-
-The 2 `_d_sw5_corner_divergence` gates from iter-875 are unchanged — that helper takes `apply_legacy_corner_corrections` as an opt-in flag (not `use_duogrid`), so the parameter-contract concern doesn't apply.
-
-**Process.**  136th iter in the iter-752-876 chain.  Codex stop-time review caught a real API-contract issue with iter-875.  iter-876 reconciles the contract while preserving the iter-875 Fortran-fidelity gain.
+**Process.**  137th iter in the iter-752-877 chain.  iter-877 is a revert iter that closes the iter-875+876 chain by removing both commits.  The lesson: a Fortran-fidelity gate widening that breaks an existing test-side override contract is NOT a net improvement, even if the new gate matches Fortran more literally.  Future regional/nested fidelity work must come with an end-to-end sentinel that exercises the regime, not just a gate widening.
