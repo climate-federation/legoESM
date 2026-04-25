@@ -104,9 +104,13 @@ def _make_test_inputs():
     # 1a      | -1.0    | 0.5   | -0.5  | a0 ≤ 0 → both → 0
     # 1b      |  0.0    | 0.5   | -0.5  | a0 ≤ 0 → both → 0
     # 2       |  1.0    | 0.1   | -0.1  | a4=0, abs(0.2)<0 false → pass
-    # 3       |  0.6    | 0.5   |  1.0  | a4=-4.5, |0.5|<4.5 ✓,
-    #         |         |       |       | fmin=0.6 - 0.0139 - 0.375
-    #         |         |       |       |      ≈ 0.211 ≥ 0 → pass
+    # 3a      |  0.6    | 0.5   |  1.0  | a4=-4.5, |0.5|<4.5 ✓,
+    #         |         |       |       | fmin≈0.211 ≥ 0 → pass
+    # 3b      |  0.39   | 0.5   |  1.0  | a4=-4.5, |0.5|<4.5 ✓,
+    #         |         |       |       | fmin≈0.00111 just≥0 → pass
+    #         |         |       |       | (near-boundary: catches
+    #         |         |       |       |  fmin coefficient corruption
+    #         |         |       |       |  via sign-flip)
     # 4       |  0.5    | 2.0   |  2.0  | a4=-12, |0|<12 ✓, fmin=-0.5<0,
     #         |         |       |       | both > 0 → zero
     # 5       |  0.5    | -0.5  |  2.0  | a4=-4.5, |2.5|<4.5 ✓, fmin≈-0.22<0,
@@ -122,35 +126,41 @@ def _make_test_inputs():
     # diff.  The pre-iter-881b inputs used bl=0 / br=0 which made
     # `-2*0 == -3*0 == 0`, masking such corruptions (false-pass).
     #
-    # Iter-881c (Codex iter-881b stop-time fix): branch 3 now uses
-    # NON-ZERO da1 (bl=0.5, br=1.0, da1=0.5) so the fmin formula's
-    # `0.25/a4*da1**2` term is genuinely exercised.  Pre-iter-881c
-    # branch 3 used bl=br=0.4 with da1=0, making the fmin formula's
-    # coefficient on `da1**2` irrelevant — a corruption like
-    # `0.25 → 0.50` would have produced no observable diff (zero
-    # contribution either way).  iter-881c's da1=0.5 makes the
-    # coefficient corruption produce a measurable fmin shift that
-    # could flip pass-through to clip.
-    q  = np.array([-1.0, 0.0, 1.0, 0.6, 0.5,  0.5,  0.5])
-    bl = np.array([ 0.5, 0.5, 0.1, 0.5, 2.0, -0.5,  2.0])
-    br = np.array([-0.5, -0.5, -0.1, 1.0, 2.0, 2.0, -0.5])
+    # Iter-881c: branch 3a uses NON-ZERO da1 (bl=0.5, br=1.0,
+    # da1=0.5) so the fmin formula's `0.25/a4*da1**2` term is
+    # exercised.  But Codex iter-881b stop-time noted that branch 3
+    # outputs are pass-through, so fmin coefficient changes that
+    # keep the sign don't show in output.
+    #
+    # Iter-881d (Codex iter-881c stop-time fix): branch 3b is added
+    # specifically as a NEAR-BOUNDARY input (q=0.39 instead of 0.6).
+    # With q=0.39, fmin ≈ 0.00111 (just barely positive — pass-
+    # through).  A coefficient corruption like `0.25 → 0.50` shifts
+    # fmin to ≈ -0.01278 (negative), flipping the branch to fmin<0
+    # → both bl,br > 0 → zero both.  The output then changes from
+    # (0.5, 1.0) pass-through to (0.0, 0.0) zero-out — caught by
+    # the per-branch expected output assertion.
+    q  = np.array([-1.0, 0.0, 1.0, 0.6, 0.39, 0.5, 0.5,  0.5])
+    bl = np.array([ 0.5, 0.5, 0.1, 0.5, 0.5,  2.0, -0.5,  2.0])
+    br = np.array([-0.5, -0.5, -0.1, 1.0, 1.0, 2.0, 2.0, -0.5])
     return q, bl, br
 
 
 def _expected_outputs_per_branch():
-    """Hand-computed expected (bl_out, br_out) for the 7 inputs
+    """Hand-computed expected (bl_out, br_out) for the 8 inputs
     above, derived from the Fortran iv=0 logic.  Used to verify
     BOTH that the implementation matches Fortran AND that each
-    input actually fires the intended branch (i.e., the output
-    structurally matches the branch's expected effect)."""
+    input actually fires the intended branch."""
     # Branch 1a/b: zero both.
     # Branch 2: pass-through (bl, br unchanged).
-    # Branch 3: pass-through (iter-881c: bl=0.5 br=1.0).
+    # Branch 3a: pass-through (comfortably positive fmin).
+    # Branch 3b: pass-through (just-barely-positive fmin —
+    #            catches fmin coefficient corruption via sign-flip).
     # Branch 4: zero both.
     # Branch 5: br = -2*bl = -2*(-0.5) = 1.0 (bl unchanged).
     # Branch 6: bl = -2*br = -2*(-0.5) = 1.0 (br unchanged).
-    bl_expected = np.array([0.0, 0.0, 0.1, 0.5, 0.0, -0.5,  1.0])
-    br_expected = np.array([0.0, 0.0, -0.1, 1.0, 0.0,  1.0, -0.5])
+    bl_expected = np.array([0.0, 0.0, 0.1, 0.5, 0.5, 0.0, -0.5,  1.0])
+    br_expected = np.array([0.0, 0.0, -0.1, 1.0, 1.0, 0.0,  1.0, -0.5])
     return bl_expected, br_expected
 
 

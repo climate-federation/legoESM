@@ -1828,3 +1828,41 @@ The corruption is caught by the iter-881c sentinel.  Pre-iter-881c (with `da1=0`
 **Deliverable.**  Updated `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py` (branch-3 input + expected output) + this doc entry.
 
 **Process.**  151st iter in the iter-752-881c chain.  Three-pass branch-coverage tightening (iter-881 → 881b → 881c).  iter-881 had inputs landing in wrong branches; iter-881b fixed input gates but left zero-multiplier masking; iter-881c fixes branch-3's da1=0 fmin-coefficient masking.  Each pass closes one specific corruption-masking gap that Codex stop-time review identified.  Final form: 7 inputs covering 6 Fortran branches, with non-trivial da1/bl/br values that actually exercise the algorithm's parameters.
+
+### Iter-881d — Codex iter-881c stop-time: near-boundary branch-3b input catches fmin coefficient corruption
+
+**Codex iter-881c stop-time finding.**  "branch-3 still does not make the hand-built sentinel catch the claimed `fmin` coefficient corruption."
+
+**Issue.**  iter-881c gave branch 3 a non-zero `da1=0.5`, so the fmin formula's `0.25/a4*da1**2` term has non-zero contribution.  But branch 3's OUTPUT is pass-through (`bl_out = bl, br_out = br`) — fmin's exact value doesn't appear in the output, only its sign matters.  A coefficient corruption like `0.25 → 0.50` shifts fmin from `≈0.211` to `≈0.197` — both still ≥ 0 → still pass-through → identical output.  The hand-built test cannot catch this corruption because the sign doesn't flip.
+
+**Fix (iter-881d).**  Add a SECOND branch-3 input (3b) at a NEAR-BOUNDARY point where fmin is just-barely-positive, so a coefficient corruption flips the sign and the branch:
+- Input: `q=0.39, bl=0.5, br=1.0` (3a was `q=0.6`).
+- fmin = `0.39 - 0.0139 - 0.375 ≈ 0.00111` (just above zero).
+- With corruption `0.25 → 0.50`: fmin = `0.39 - 0.0278 - 0.375 ≈ -0.01278` (negative).
+- Branch flips from "pass-through" to "fmin<0, both>0 → zero both".
+- Output changes from `(0.5, 1.0)` to `(0.0, 0.0)` — caught by per-branch expected-output assertion.
+
+**Sentinel verification.**  Manual corruption test:
+- Corrupt fmin coefficient (`0.25 → 0.50`):
+  ```
+  ACTUAL : array([ 0. ,  0. ,  0.1,  0.5,  0. ,  0. , -0.5,  1. ])
+  DESIRED: array([ 0. ,  0. ,  0.1,  0.5,  0.5,  0. , -0.5,  1. ])
+                                       ^^^
+                                  branch 3b position
+  ```
+  ACTUAL[4]=0.0 (zero-out triggered) ≠ DESIRED[4]=0.5 (pass-through expected).  1 of 4 tests fail.
+- Restore source: 4 of 4 pass.
+
+The branch-3b near-boundary input correctly catches the fmin coefficient corruption that branch-3a (comfortable margin) cannot.
+
+**Final form.**  8 inputs covering 6 Fortran branches:
+- Branches 1a, 1b: zero-out (q ≤ 0).
+- Branch 2: no-extremum pass-through.
+- Branch 3a: comfortable-margin pass-through (verifies basic branch firing).
+- Branch 3b: near-boundary pass-through (catches fmin coefficient sign-flip corruptions).
+- Branch 4: both-positive zero-out.
+- Branches 5, 6: clip with non-zero multiplier targets.
+
+**Deliverable.**  Updated `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py` (added 3b input + extended expected outputs) + this doc entry.
+
+**Process.**  152nd iter in the iter-752-881d chain.  Four-pass branch-coverage tightening (iter-881 → 881b → 881c → 881d).  Each pass closes a specific corruption-masking gap Codex stop-time review identified.  iter-881d's near-boundary input is the diagnostic technique for catching internal-formula corruptions whose effect is only visible near a sign-flip threshold.
