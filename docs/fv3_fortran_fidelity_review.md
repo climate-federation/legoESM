@@ -1770,3 +1770,37 @@ Pre-iter-881 a regression in any single branch (e.g., wrong fmin formula, wrong 
 **Deliverable.**  `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py` (4 tests) + this doc entry.  No source code change — sentinel-only, locks the existing Fortran-faithful implementation.
 
 **Process.**  149th iter in the iter-752-881 chain.  Sentinel-only iter that closes the "no direct Fortran test for hord=9 positive-definite constraint" gap identified during the iter-878+880 PPM audit.  The sentinel pins all 6 iv=0 branches against an explicit hand-rolled Fortran reference, so any regression in any branch fires loudly.
+
+### Iter-881b — Codex iter-881 stop-time: fix branch-coverage gap in the iv=0 sentinel
+
+**Codex iter-881 stop-time finding.**  "iter-881 does not actually lock the 6 iv=0 branches it claims to cover."
+
+**Issue.**  Two real branch-coverage bugs in iter-881's hand-built inputs:
+
+1. **Branches 4-6 fall into branch 2.**  The Fortran iv=0 algorithm gates the constraint-active branches behind `abs(da1) < -a4` (where `a4 = -3*(bl+br)`).  This requires `a4 < 0`, i.e., `bl+br > 0`.  iter-881's original branch-5 and branch-6 inputs had `bl + br = 0` or `bl + br < 0`, making `a4 ≥ 0` and `-a4 ≤ 0`, which means `abs(da1) < -a4` is always FALSE.  Those inputs landed in branch 2 (no-extremum pass-through) instead of branches 5/6.
+
+2. **Branches 5/6 used bl=0 / br=0, masking corruption.**  Even after fixing the `a4` sign issue, iter-881 used `bl=0.0` for branch 5 and `br=0.0` for branch 6.  The Fortran clip is `br = -2*bl` (branch 5) or `bl = -2*br` (branch 6).  With the zero values, a corruption like `-2 → -3` produces `0` in both cases — masking the bug.
+
+iter-881 claimed "all 6 branches covered" but the test would silently pass if branches 4-6 were corrupted.
+
+**Fix (iter-881b).**  Two changes:
+
+1. **Reset hand-built inputs** so each branch's inputs satisfy the actual Fortran gate condition:
+   - Branch 4: `q=0.5, bl=2.0, br=2.0` → `a4=-12, abs(0)<12, fmin=-0.5<0, both>0` → zero both.
+   - Branch 5: `q=0.5, bl=-0.5, br=2.0` → `a4=-4.5, abs(2.5)<4.5, fmin≈-0.22<0, NOT both>0, da1>0` → `br = -2*bl = 1.0`.
+   - Branch 6: `q=0.5, bl=2.0, br=-0.5` → symmetric → `bl = -2*br = 1.0`.
+
+   Note the non-zero `bl` (branch 5) and `br` (branch 6) so the clip output is non-zero and a multiplier corruption (e.g., `-2 → -3`) produces a measurable diff.
+
+2. **Add branch-coverage assertion** that compares the actual function output against hand-computed per-branch expected outputs (in addition to the existing Fortran-reference comparison).  This pins that each test input actually exercises the claimed branch — if the production function and the Fortran reference agree but BOTH have the same bug, the per-branch assertion still fails.
+
+**Sentinel verification.**  Manual corruption tests:
+- Corrupt branch 5 (`-2*bl → -3*bl`): 2 of 4 tests fail.
+- Corrupt branch 6 (`-2*br → -3*br`): 1 of 4 tests fail.
+- Restore source: 4 of 4 pass.
+
+Both corruption classes correctly caught.
+
+**Deliverable.**  Updated `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py`: corrected hand-built inputs + new branch-coverage expected-outputs reference + this doc entry.
+
+**Process.**  150th iter in the iter-752-881b chain.  Codex stop-time review caught a real branch-coverage gap in iter-881's hand-built inputs.  iter-881b corrects the inputs to actually exercise each Fortran branch AND adds a per-branch expected-output assertion that catches corruption even when both production and reference have the same bug.

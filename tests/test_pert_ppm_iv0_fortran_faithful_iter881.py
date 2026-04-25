@@ -73,49 +73,73 @@ def _pert_ppm_iv0_fortran_reference(q, bl, br):
 
 
 def _make_test_inputs():
-    """Build inputs that exercise every Fortran iv=0 branch."""
-    # Each row covers a specific Fortran branch.
-    q = np.array([
-        -1.0,    # branch 1: a0 <= 0 → zero
-        0.0,     # branch 1: a0 == 0 → zero (Fortran <= 0)
-         1.0,    # branch 2: a0 > 0, no extremum → pass-through
-         1.0,    # branch 3: a0 > 0, extremum, fmin >= 0 → pass-through
-         0.5,    # branch 4: a0 > 0, extremum, fmin < 0, both bl/br > 0 → zero
-         1.0,    # branch 5: a0 > 0, extremum, fmin < 0, da1 > 0 → clip br
-         1.0,    # branch 6: a0 > 0, extremum, fmin < 0, da1 < 0 → clip bl
-    ])
-    # bl, br chosen to land in each branch.  Pre-compute to verify.
-    bl = np.array([
-        0.5,     # ignored (q <= 0)
-        0.5,     # ignored (q == 0)
-        0.1,     # branch 2: small perturbations, no extremum
-        -0.1,    # branch 3: extremum exists but parabola stays positive
-         0.4,    # branch 4: both bl & br > 0
-         0.5,    # branch 5: bl > 0, br > 0, da1 = br - bl
-        -0.5,    # branch 6: bl < 0
-    ])
-    br = np.array([
-        -0.5,    # ignored
-        -0.5,    # ignored
-        -0.1,    # branch 2
-         0.1,    # branch 3
-         0.4,    # branch 4
-        -0.5,    # branch 5: da1 = br - bl < 0; need da1 > 0 → swap
-         0.5,    # branch 6: da1 = br - bl > 0; need da1 < 0 → swap
-    ])
-    # Adjust branch 5 and 6 to actually hit their da1 sign branches.
-    bl[5] = -0.5  # branch 5: da1 = 0.5 - (-0.5) = 1.0 > 0 (needs br=-2*bl test)
-    br[5] = 0.5   # but bl<0,br>0 — not "both positive" → falls into da1>0 case
-    # Wait — branch 5 needs `not (br>0 and bl>0)` and da1 > 0.
-    # So bl < 0 or br <= 0, AND da1 = br - bl > 0.
-    # Set bl=-1, br=0.5 → da1=1.5>0, br>0 but bl<0 → not "both" → da1 case.
-    bl[5] = -1.0
-    br[5] = 0.5
-    # Branch 6: not "both positive" AND da1 < 0.
-    # bl=0.5, br=-1 → da1=-1.5<0, bl>0 br<0 → not both → da1 case.
-    bl[6] = 0.5
-    br[6] = -1.0
+    """Build inputs that exercise every Fortran iv=0 branch.
+
+    Iter-881b (Codex iter-881 stop-time fix): the original hand-
+    built inputs claimed to cover all 6 branches but actually
+    landed branches 4-6 in branch 2 (no-extremum) because the
+    `abs(da1) < -a4` gate requires `a4 < 0` (i.e., `bl+br > 0`),
+    which the original inputs didn't satisfy.
+
+    The Fortran iv=0 algorithm:
+      a4 = -3*(ar + al)         # parabola "a4" coefficient
+      da1 = ar - al              # slope
+      has_extremum = abs(da1) < -a4    # only true when a4 < 0
+                                       # (i.e., bl + br > 0)
+      if has_extremum:
+          fmin = q + 0.25/a4*da1**2 + a4/12
+          if fmin < 0:
+              if br>0 and bl>0:  zero
+              elif da1 > 0:       clip br = -2*bl
+              else:               clip bl = -2*br
+
+    For branches 4, 5, 6 we need `bl + br > 0` (so a4 < 0) AND
+    fmin < 0.  For branch 4 specifically we need bl > 0 AND br > 0.
+    For branches 5/6 we need bl ≤ 0 OR br ≤ 0, plus the da1 sign.
+
+    Trace verified by hand for the corrected inputs below.
+    """
+    # Branch  | q       | bl    | br    | Trace
+    # --------|---------|-------|-------|--------------------------
+    # 1a      | -1.0    | 0.5   | -0.5  | a0 ≤ 0 → both → 0
+    # 1b      |  0.0    | 0.5   | -0.5  | a0 ≤ 0 → both → 0
+    # 2       |  1.0    | 0.1   | -0.1  | a4=0, abs(0.2)<0 false → pass
+    # 3       |  0.5    | 0.4   |  0.4  | a4=-2.4, |0|<2.4 ✓, fmin=0.3≥0 → pass
+    # 4       |  0.5    | 2.0   |  2.0  | a4=-12, |0|<12 ✓, fmin=-0.5<0,
+    #         |         |       |       | both > 0 → zero
+    # 5       |  0.5    | -0.5  |  2.0  | a4=-4.5, |2.5|<4.5 ✓, fmin≈-0.22<0,
+    #         |         |       |       | NOT both > 0 (bl<0), da1=2.5>0
+    #         |         |       |       | → br = -2*bl = 1.0
+    # 6       |  0.5    | 2.0   | -0.5  | a4=-4.5, |-2.5|<4.5 ✓, fmin≈-0.22<0,
+    #         |         |       |       | NOT both > 0 (br<0), da1=-2.5<0
+    #         |         |       |       | → bl = -2*br = 1.0
+    #
+    # Iter-881b crucial detail: branches 5 and 6 use NON-ZERO bl/br
+    # so the clip output (e.g., `-2*bl`) is non-zero and a corruption
+    # of the multiplier (e.g., `-2` → `-3`) produces a measurable
+    # diff.  The pre-iter-881b inputs used bl=0 / br=0 which made
+    # `-2*0 == -3*0 == 0`, masking such corruptions (false-pass).
+    q  = np.array([-1.0, 0.0, 1.0, 0.5, 0.5,  0.5,  0.5])
+    bl = np.array([ 0.5, 0.5, 0.1, 0.4, 2.0, -0.5,  2.0])
+    br = np.array([-0.5, -0.5, -0.1, 0.4, 2.0, 2.0, -0.5])
     return q, bl, br
+
+
+def _expected_outputs_per_branch():
+    """Hand-computed expected (bl_out, br_out) for the 7 inputs
+    above, derived from the Fortran iv=0 logic.  Used to verify
+    BOTH that the implementation matches Fortran AND that each
+    input actually fires the intended branch (i.e., the output
+    structurally matches the branch's expected effect)."""
+    # Branch 1a/b: zero both.
+    # Branch 2: pass-through (bl, br unchanged).
+    # Branch 3: pass-through.
+    # Branch 4: zero both.
+    # Branch 5: br = -2*bl = -2*(-0.5) = 1.0 (bl unchanged).
+    # Branch 6: bl = -2*br = -2*(-0.5) = 1.0 (br unchanged).
+    bl_expected = np.array([0.0, 0.0, 0.1, 0.4, 0.0, -0.5,  1.0])
+    br_expected = np.array([0.0, 0.0, -0.1, 0.4, 0.0,  1.0, -0.5])
+    return bl_expected, br_expected
 
 
 def test_iter881_pert_ppm_iv0_matches_fortran_reference():
@@ -125,13 +149,22 @@ def test_iter881_pert_ppm_iv0_matches_fortran_reference():
     A regression that breaks any branch (e.g., wrong fmin formula,
     wrong da1 sign convention, wrong "both positive" check) will
     fail this test.
+
+    Iter-881b (Codex iter-881 stop-time fix): also verify against
+    hand-computed branch-specific expected outputs.  The Fortran-
+    reference comparison alone could pass if BOTH the production
+    function AND the reference contained the same bug; pinning
+    the per-branch expected outputs ensures the inputs actually
+    exercise the intended branches.
     """
     q, bl, br = _make_test_inputs()
 
     bl_actual, br_actual = _pert_ppm_iv0(
         jnp.asarray(q), jnp.asarray(bl), jnp.asarray(br))
     bl_ref, br_ref = _pert_ppm_iv0_fortran_reference(q, bl, br)
+    bl_expected, br_expected = _expected_outputs_per_branch()
 
+    # First check: production matches Fortran reference.
     np.testing.assert_allclose(
         np.asarray(bl_actual), bl_ref, rtol=1e-12, atol=1e-12,
         err_msg=(
@@ -142,6 +175,27 @@ def test_iter881_pert_ppm_iv0_matches_fortran_reference():
         np.asarray(br_actual), br_ref, rtol=1e-12, atol=1e-12,
         err_msg=(
             "`_pert_ppm_iv0` br output differs from Fortran reference."))
+
+    # Second check (iter-881b): production matches hand-computed
+    # per-branch expected outputs.  This pins that each test input
+    # actually exercises the claimed branch, not just that the two
+    # implementations agree.
+    np.testing.assert_allclose(
+        np.asarray(bl_actual), bl_expected, rtol=1e-12, atol=1e-12,
+        err_msg=(
+            "iter-881b branch-coverage failure: `_pert_ppm_iv0` bl "
+            "output differs from hand-computed per-branch expected. "
+            "This means either (a) the Python implementation is wrong "
+            "in a way that AGREES with the reference (both have same "
+            "bug) — check both against Fortran tp_core.F90:1169-1192 "
+            "directly, OR (b) one of the test inputs no longer "
+            "exercises the intended branch (e.g., a numerical "
+            "precision change shifted the gate)."))
+    np.testing.assert_allclose(
+        np.asarray(br_actual), br_expected, rtol=1e-12, atol=1e-12,
+        err_msg=(
+            "iter-881b branch-coverage failure: br output differs "
+            "from per-branch expected."))
 
 
 @pytest.mark.parametrize("seed", [3, 17, 42])
