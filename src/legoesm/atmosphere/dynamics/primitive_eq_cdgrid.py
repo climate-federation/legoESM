@@ -347,12 +347,22 @@ def fv3_hydrostatic_tendencies(
     # --- 11. Thermodynamic equation ---
     # Horizontal advection: centred advection using cell-centre velocities
     # === Stage-level packed halo exchange #2 ===
-    # Batch {T, u_cell, v_cell} into one packed exchange (MPI) or
-    # individual exchanges (local).  Pre-padded arrays reused by
+    # Batch {T, u_cell, v_cell} into one packed exchange (SPMD or MPI)
+    # or individual exchanges (local).  Pre-padded arrays reused by
     # gradient, Laplacian, and hyperdiffusion operators downstream.
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
-    if _halo_backend == "mpi" and _needs_uv_pad:
+    if _halo_backend == "spmd" and _needs_uv_pad:
+        # Mirror stage-1: SPMD packed all_gather collapses 3
+        # collectives into 1 — 3× fewer NCCL/ICI calls per timestep
+        # for the thermodynamic-equation halo set.
+        from legoesm.parallel.cubesphere_exchange import (
+            packed_pad_halo_4d, _spmd_mesh,
+        )
+        _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_4d(
+            T, u_cell, v_cell, mesh=_spmd_mesh,
+        )
+    elif _halo_backend == "mpi" and _needs_uv_pad:
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
         _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_mpi_4d(

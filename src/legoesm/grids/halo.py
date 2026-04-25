@@ -637,13 +637,32 @@ def _pad_halo_local_h2_4d(
 ) -> jax.Array:
     """Local 4D scalar halo exchange for halo=2.
 
-    Loop-based exchange (same as 2D version) — the scalar indexing
-    ``data[face, i, j]`` naturally returns shape ``(nlev,)`` for 4D.
+    Two paths:
+
+    * ``interp_offsets is None`` — the common fast path: gather all
+      ``48 × n`` halo source cells via a precomputed index table and
+      scatter them into the padded array in a single ``.at[].set``
+      call.  Mirrors the halo=1 vectorisation
+      (:func:`_pad_halo_local_4d`) and replaces the previous 48-step
+      ``.at[].set`` loop body, which produced one XLA scatter per
+      step.
+    * ``interp_offsets is not None`` — keep the loop-based path because
+      :func:`_interp_strip` consumes a per-edge offset ``(n,)`` array
+      and would require a separate per-edge gather to vectorise; this
+      branch is exercised only by Lagrange-corrected halos where the
+      runtime cost is dominated by the interpolation itself.
     """
     n = data.shape[1]
     nlev = data.shape[3]
     padded = jnp.zeros((6, n + 4, n + 4, nlev), dtype=data.dtype)
     padded = padded.at[:, 2:-2, 2:-2, :].set(data)
+
+    if interp_offsets is None:
+        src_f, src_i, src_j, dst_f, dst_i, dst_j = _get_halo_tables_h2(n)
+        values = data[src_f, src_i, src_j]   # (48*n, nlev)
+        padded = padded.at[dst_f, dst_i, dst_j].set(values)
+        padded = _fill_corners_h2(padded)
+        return padded
 
     edges = [WEST, EAST, SOUTH, NORTH]
 
@@ -659,10 +678,9 @@ def _pad_halo_local_h2_4d(
                 if is_reversed:
                     strip = strip[::-1]
 
-                if interp_offsets is not None:
-                    strip = _interp_strip(
-                        strip, interp_offsets[face, edge_idx, depth],
-                    )
+                strip = _interp_strip(
+                    strip, interp_offsets[face, edge_idx, depth],
+                )
 
                 if edge == WEST:
                     padded = padded.at[face, 1 - depth, 2:-2].set(strip)
@@ -945,6 +963,78 @@ def _get_halo_tables_h1(n: int) -> tuple:
     return _halo_table_cache_h1[n]
 
 
+_halo_table_cache_h2: dict[int, tuple] = {}
+
+
+def _build_halo_tables_h2(n: int) -> tuple:
+    """Build source/destination index arrays for vectorized halo=2 exchange.
+
+    For each of the 48*n halo cells (6 faces × 4 edges × 2 depths × n
+    cells per edge), stores the (face, i, j) source coordinates in the
+    original data array and the (face, i, j) destination coordinates
+    in the padded ``(n+4)×(n+4)`` array.  Mirrors
+    :func:`_build_halo_tables_h1` so the runtime exchange becomes a
+    single gather + scatter instead of 48 ``.at[].set`` scatters.
+    """
+    edges = [WEST, EAST, SOUTH, NORTH]
+    total = 48 * n
+
+    src_f = np.zeros(total, dtype=np.int32)
+    src_i = np.zeros(total, dtype=np.int32)
+    src_j = np.zeros(total, dtype=np.int32)
+    dst_f = np.zeros(total, dtype=np.int32)
+    dst_i = np.zeros(total, dtype=np.int32)
+    dst_j = np.zeros(total, dtype=np.int32)
+
+    idx = 0
+    for face in range(6):
+        for edge in edges:
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            for depth in range(2):
+                for j in range(n):
+                    k = (n - 1 - j) if is_reversed else j
+
+                    # Source cell at this depth on the neighbour's
+                    # edge — same convention as
+                    # :func:`_extract_edge_strip_at_depth`.
+                    if nbr_edge == WEST:
+                        sf, si, sj = nbr_face, depth, k
+                    elif nbr_edge == EAST:
+                        sf, si, sj = nbr_face, n - 1 - depth, k
+                    elif nbr_edge == SOUTH:
+                        sf, si, sj = nbr_face, k, depth
+                    else:  # NORTH
+                        sf, si, sj = nbr_face, k, n - 1 - depth
+                    src_f[idx], src_i[idx], src_j[idx] = sf, si, sj
+
+                    # Destination index in the (n+4)×(n+4) padded
+                    # array.  Mirrors the layout used by the loop
+                    # version: WEST halo at i = 1-depth (i.e. col 1 then
+                    # col 0), EAST at n+2+depth, etc.  Interior occupies
+                    # rows/cols [2, n+2).
+                    if edge == WEST:
+                        di, dj = 1 - depth, j + 2
+                    elif edge == EAST:
+                        di, dj = n + 2 + depth, j + 2
+                    elif edge == SOUTH:
+                        di, dj = j + 2, 1 - depth
+                    else:  # NORTH
+                        di, dj = j + 2, n + 2 + depth
+                    dst_f[idx], dst_i[idx], dst_j[idx] = face, di, dj
+
+                    idx += 1
+
+    return (src_f, src_i, src_j, dst_f, dst_i, dst_j)
+
+
+def _get_halo_tables_h2(n: int) -> tuple:
+    """Return cached halo index tables for halo=2 of grid size n."""
+    n = int(n)
+    if n not in _halo_table_cache_h2:
+        _halo_table_cache_h2[n] = _build_halo_tables_h2(n)
+    return _halo_table_cache_h2[n]
+
+
 def precompute_halo_tables(n: int) -> None:
     """Eagerly populate the halo index cache for grid size n.
 
@@ -952,6 +1042,7 @@ def precompute_halo_tables(n: int) -> None:
     writes during JAX tracing.
     """
     _get_halo_tables_h1(int(n))
+    _get_halo_tables_h2(int(n))
 
 
 def _fill_corners_h1(padded: jax.Array) -> jax.Array:

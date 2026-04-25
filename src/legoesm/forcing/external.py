@@ -298,16 +298,30 @@ def _interp_1d(times: np.ndarray, values: np.ndarray, day: float) -> float:
 
 
 def _interp_2d_time(times: np.ndarray, values: np.ndarray, day: float) -> np.ndarray:
-    """Linearly interpolate a 2-D time series (time, nfeat) at *day*."""
+    """Linearly interpolate a 2-D time series (time, nfeat) at *day*.
+
+    Vectorised search + broadcast — the previous per-feature
+    ``for j in range(values.shape[1]): out[j] = np.interp(...)`` loop
+    fired per simulated step with up to 112 g-points (CMIP6 spectral
+    SSI), forcing 112 Python calls into ``np.interp`` per step.
+    """
     if values.ndim != 2 or values.shape[0] != times.shape[0]:
         raise ValueError(
             "Expected values with shape (ntime, nfeat) matching times length; "
             f"got {values.shape} with times {times.shape}",
         )
-    out = np.zeros((values.shape[1],), dtype=np.float64)
-    for j in range(values.shape[1]):
-        out[j] = np.interp(day, times, values[:, j])
-    return out
+    n = times.shape[0]
+    if n == 0:
+        return np.zeros((values.shape[1],), dtype=np.float64)
+    if n == 1 or day <= times[0]:
+        return values[0].astype(np.float64, copy=True)
+    if day >= times[-1]:
+        return values[-1].astype(np.float64, copy=True)
+    # Locate the bracketing interval once, then linear-interp in NumPy.
+    i = int(np.clip(np.searchsorted(times, day, side="right") - 1, 0, n - 2))
+    dx = times[i + 1] - times[i]
+    w = 0.0 if dx <= 0.0 else float((day - times[i]) / dx)
+    return ((1.0 - w) * values[i] + w * values[i + 1]).astype(np.float64, copy=False)
 
 
 @lru_cache(maxsize=16)
