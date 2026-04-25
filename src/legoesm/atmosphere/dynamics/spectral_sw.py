@@ -519,8 +519,12 @@ def compute_spectral_diagnostics(
     abs_vor = vor + grid.f
     enstrophy = jnp.sum(abs_vor**2 / (2.0 * h) * dA)
 
+    # One device→host transfer instead of three separate ``float(...)``
+    # casts — this diagnostic is called every save_every steps in
+    # validation/test loops.
+    _h = jax.device_get(jnp.stack([mass, energy, enstrophy]))
     return {
-        'mass': float(mass),
-        'energy': float(energy),
-        'enstrophy': float(enstrophy),
+        'mass': float(_h[0]),
+        'energy': float(_h[1]),
+        'enstrophy': float(_h[2]),
     }

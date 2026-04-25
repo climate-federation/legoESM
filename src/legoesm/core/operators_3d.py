@@ -551,20 +551,16 @@ def vertical_advection_height(
     w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
     w_star = w_full / jacobian[..., None]
 
-    # Backward difference (upward)
-    df_bwd = field_full[..., :-1] - field_full[..., 1:]
-    grad_bwd = jnp.concatenate(
-        [jnp.zeros((*field_full.shape[:-1], 1)),
-         df_bwd / dz_half],
-        axis=-1,
-    )
-
-    # Forward difference (downward)
-    grad_fwd = jnp.concatenate(
-        [df_bwd / dz_half,
-         jnp.zeros((*field_full.shape[:-1], 1))],
-        axis=-1,
-    )
+    # Backward / forward differences share ``df_bwd / dz_half`` — pad
+    # along the trailing axis instead of allocating two fresh
+    # ``jnp.zeros`` buffers and concatenating.  Single Pad HLO op
+    # each, no zero-buffer allocation.
+    df = (field_full[..., :-1] - field_full[..., 1:]) / dz_half
+    pad_axes = ((0, 0),) * (df.ndim - 1)
+    # Backward difference (upward): zero at the surface boundary.
+    grad_bwd = jnp.pad(df, (*pad_axes, (1, 0)))
+    # Forward difference (downward): zero at the top boundary.
+    grad_fwd = jnp.pad(df, (*pad_axes, (0, 1)))
 
     # Upwind: w* > 0 = upward => backward; w* < 0 = downward => forward
     grad = jnp.where(w_star > 0, grad_bwd, grad_fwd)
