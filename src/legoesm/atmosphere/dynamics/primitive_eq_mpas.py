@@ -200,9 +200,12 @@ def mpas_hydrostatic_tendencies(
     # Divergence for continuity / sigma-dot
     div_3d = divergence_cell_3d(u_3d, mesh)  # (nCells, nlev)
 
-    # Temperature advection: -v·∇T ≈ centered tracer flux form
-    T_edge_centered_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
-    flux_T_3d = u_3d * T_edge_centered_3d  # (nEdges, nlev)
+    # Temperature advection: -v·∇T ≈ centered tracer flux form.
+    # Reuse ``T_edge_3d`` computed above for the pressure-gradient
+    # correction — XLA CSE may dedupe the two ``cell_to_edge_avg_3d``
+    # calls but the explicit reuse is more reliable across XLA
+    # versions and saves one Voronoi gather kernel per RHS evaluation.
+    flux_T_3d = u_3d * T_edge_3d  # (nEdges, nlev)
     div_uT_3d = divergence_cell_3d(flux_T_3d, mesh)  # (nCells, nlev)
     horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
 

@@ -114,10 +114,13 @@ def step_lake(
         Q_freeze=Q_freeze_field,
     )
 
-    _, _, lw_up_new = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_epi_new, config.albedo_lake,
-        config.emissivity_lake,
-    )
+    # Direct ``lw_up = ε σ T⁴`` — the previous call to
+    # ``surface_radiation_fluxes`` recomputed ``sw_net`` (depends only on
+    # albedo) and the LW balance just to discard them and read out
+    # ``lw_up_new``.  One multiply + one pow vs the full radiation
+    # call.
+    from legoesm import constants as _constants
+    lw_up_new = config.emissivity_lake * _constants.sigma_sb * T_epi_new ** 4
 
     # Recompute q_surface from updated epilimnion temperature for consistency
     q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
