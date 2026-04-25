@@ -1215,3 +1215,38 @@ Codex adversarial-review pass-5 on iter-872c-take4 flagged the residual silent-n
 The configuration-vs-runtime mismatch surface is now fully covered by either documentation, scope clarification, or explicit user warnings.
 
 **Process.**  Five-pass Codex adversarial-review chain.  Each pass identified a real correctness or UX gap; each fix progressively eliminated silent failure modes.  Net Fortran-fidelity gain: parameter `dddmp` is exposed configurably while preserving production W2 sentinel bit-for-bit, with explicit safety nets for every misconfiguration corner case.
+
+### Iter-873 — Fortran-fidelity opt-in flags default-OFF regression sentinel
+
+Six iters in the iter-765 → iter-871c chain added Fortran-fidelity opt-in flags to `CDGridShallowWaterConfig`:
+
+| Flag | Iter | Fortran reference |
+|------|------|-------------------|
+| `fortran_a2b_corner_avg` | iter-766 | `a2b_edge.F90:385-388` (3-pt scalar corner average) |
+| `fortran_vector_corner_fill` | iter-767 | `fv_mp_mod.F90:1433-1457` (vector swap+sign at cube vertex) |
+| `boundary_fix_skip_corners` | iter-769 | cascaded boundary-corner smoothing scope |
+| `apply_legacy_d_sw4_corner_ke_fix` | iter-869b | `sw_core.F90:1438-1466` (d_sw4 corner KE override) |
+| `apply_legacy_d_sw5_corner_corrections` | iter-871b | `_d_sw5_corner_divergence` inner helper |
+| `use_experimental_csw` | pre-iter-862 | experimental C-grid path (known unstable) |
+
+Each flag was added default-OFF for explicit iter-specific reasons (corner-corrections that consume known-bad halo data, FB-chain regimes that are structurally unstable, etc.).  Iter-873 adds a regression sentinel that pins this default-OFF state, so a future code change that silently flips a default to True would fail loudly rather than shifting production W2/W5/cosine-bell baselines undetected.
+
+**Tests** (`tests/test_fortran_fidelity_default_flags_iter873.py`):
+- `test_fortran_fidelity_flag_default_is_off` (parametrized 6 ways) — pins each opt-in flag's default to False on `CDGridShallowWaterConfig()`.
+- `test_matrix_runner_does_not_activate_fortran_fidelity_flags` — AST scan asserting `scripts/run_atmosphere_test_matrix.py` does not pass any opt-in flag as True to `CDGridShallowWaterConfig(...)`.
+- `test_w2_sentinel_does_not_activate_fortran_fidelity_flags` — AST scan asserting `test_w2_iter761_matrix_v_ll_and_mode4_baseline` does not pass any opt-in flag as True.
+- `test_iter873_inventory_is_complete` — sanity check that the iter-873 inventory covers ALL fields on `CDGridShallowWaterConfig` matching the `fortran_*` / `apply_legacy_*` / `boundary_fix_skip_*` / `use_experimental_*` prefixes.  A future iter that adds a new opt-in flag matching one of these prefixes without updating the inventory would fail this test.
+
+**What iter-873 DOES show.**
+- The current default-OFF state of all 6 documented Fortran-fidelity opt-in flags is locked by sentinel test.
+- The production W2 matrix runner and W2 sentinel test do not silently activate any of these flags.
+- The inventory is complete (no `fortran_*` / `apply_legacy_*` / `boundary_fix_skip_*` / `use_experimental_*` field on `CDGridShallowWaterConfig` is missed).
+
+**What iter-873 does NOT establish.**
+- Any production W2 mode-A reduction (this is a sentinel-only iter — no source change).
+- Whether any of the opt-in flags should be enabled by default (each flag's deferral rationale is in its per-iter doc entry).
+- Coverage of function-level kwargs (e.g., `fortran_dir_aware_corners`, `dddmp`).  The sentinel scope is `CDGridShallowWaterConfig` fields only, since those are the user-visible config surface.  Function-level kwargs change behaviour only when a caller explicitly passes them, which is harder to misuse silently.
+
+**Deliverable.**  `tests/test_fortran_fidelity_default_flags_iter873.py` (9 tests) + this doc entry.  No source-code change.
+
+**Process.**  133rd iter in the iter-752-873 chain.  Small Fortran-fidelity safety-net iter: closes the regression-sentinel gap for the 6 documented opt-in flags so a future code change can't silently invalidate the production baseline.  Sized to be addressable in a single iter without touching the production code.
