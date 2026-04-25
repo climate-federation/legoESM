@@ -1001,3 +1001,33 @@ The combination of (1)+(2)+(3) means variant B's reported magnitudes carry an un
 - iter-870d (this entry): removed even the absolute magnitudes from the doc.  The canonical doc is now purely qualitative ("they differ at cube vertices on the W2 IC"); the script still prints magnitudes for human inspection but with explicit caveats; no number is committed to the doc.
 
 The qualitative finding survives every honesty pass.  Pinning the exact magnitude needs the iter-871+ edge-stagger halo helper.
+
+### Iter-871 — Verify iter-862 / iter-869b corner-correction flags would change behaviour if enabled
+
+iter-862 (`apply_legacy_corner_corrections`) and iter-869b (`apply_legacy_d_sw4_corner_ke_fix`) are both wired into their respective callers as default-off opt-in flags.  Both ship default-OFF because the mode='edge' halo RHS produces values whose Fortran-fidelity is in question (iter-870 chain).  iter-871 closes the obvious follow-up question: with the current mode='edge' RHS, are the corner contributions NUMERICALLY non-zero on a realistic input, or zero by coincidence?
+
+**Method** (`scripts/diag_iter871_corner_correction_active.py`).  W2 LEGACY C36 alpha=0 IC.
+1. Call `_d_sw5_corner_divergence` (iter-862's helper context) with `apply_legacy_corner_corrections=False` vs `True`; compare `ke_damping` at the 4 cube-vertex cells per face (24 cells total).
+2. Call `_apply_legacy_d_sw4_corner_ke_fix` (iter-869b helper) directly with realistic `ut`/`vt` (proxied by `v_d`/`u_d` magnitude); count non-zero corner cells.
+
+**Result** (qualitative).
+- iter-862: 24/24 cube-vertex cells change with non-zero magnitude when the flag flips.  The corner correction is large enough to dominate the underlying `ke_damping` baseline at corners.
+- iter-869b: 24/24 cube-vertex cells receive a non-zero ke override on realistic ut/vt magnitudes.
+
+The script prints concrete numerical values for human inspection, but per the iter-870c/d framework the canonical doc commits only the qualitative finding ("non-zero at all cube vertices") rather than specific magnitudes.
+
+**Implication.**  Both opt-in flags WOULD change behaviour if enabled — they're not silently no-ops.  Combined with iter-870's qualitative observation that the mode='edge' RHS differs from a cross-face proxy at cube vertices, this means enabling either flag right now would inject CORNER CONTRIBUTIONS based on questionable halo data.  **Confirms** the default-OFF semantics for both flags is the right call until the iter-872+ cross-face halo helper validates the RHS values.
+
+**What iter-871 DOES show.**
+- The opt-in flags introduced by iter-862 and iter-869b are not no-ops — they would change FB-chain behaviour at cube vertices if turned on.
+- Together with iter-870, this establishes that (a) the mode='edge' halo RHS differs from a cross-face proxy and (b) the helpers' arithmetic propagates that difference to a non-zero corner contribution.
+
+**What iter-871 does NOT establish.**
+- Whether enabling the flags would IMPROVE Fortran fidelity.  The mode='edge' RHS is documented as wrong (iter-655); enabling the flags propagates that wrong RHS through Fortran-faithful arithmetic — net result is unclear without the iter-872+ helper.
+- Any production W2 mode-A measurement.  Production does not call these helpers.
+
+**Iter-872+ candidates.**  Unchanged from iter-870.  The cross-face D-grid edge halo helper (with cube-vertex handling) remains the next concrete fidelity step; iter-872 is the canonical first piece.
+
+**Deliverable.**  `scripts/diag_iter871_corner_correction_active.py` + this doc entry recording the qualitative non-zero finding.  No source change.
+
+**Process.**  131st iter in iter-752-871 chain.  Closes a natural follow-up question from the iter-870 chain — confirms the opt-in flags are impactful (not no-ops) without committing specific magnitudes to the doc.  Reinforces the default-OFF semantics is correct until the cross-face halo lands.
