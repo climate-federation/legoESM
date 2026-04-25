@@ -903,3 +903,48 @@ The helper is NOT yet wired into `_d_sw_native`.  iter-868 demonstrated FB chain
 - All 15 W2 LEGACY sentinels and iter-862/iter-864/iter-867 tests still pass.
 
 **Process.**  129th iter in iter-752-869 chain.  Bounded structural Fortran-fidelity port.  Helper available for a future Check 4 / cross-face halo iter; default-off semantics ensure no current behaviour change.
+
+### Iter-869b — Wire d_sw4 corner-KE helper into `_d_sw_native` as default-off opt-in
+
+Codex stop-time review of iter-869: "108a42a introduces code that violates an existing repo invariant" — the helper added in iter-869 was a half-finished implementation (CLAUDE.md: "No half-finished implementations either.").  iter-869's "not-wired-in" AST marker test explicitly confirmed the helper had no caller.
+
+**Fix.**
+- Added `apply_legacy_d_sw4_corner_ke_fix: bool = False` kwarg to `_d_sw_native`.
+- After step 4 (`_bgrid_ke_transport`), wire the helper:
+  ```python
+  if apply_legacy_d_sw4_corner_ke_fix:
+      ke_corner = _apply_legacy_d_sw4_corner_ke_fix(
+          ke_corner, ut, vt, u_d, v_d, dt,
+          bounded_domain=cdgrid.base.bounded_domain)
+  ```
+- The helper now has a real call site.  Default behaviour is unchanged (flag default `False`); the FB chain wrappers (`fv3_fb_sw_step`, `fv3_forward_backward_step`) don't pass the flag, so they get `False` automatically and produce bit-identical output to pre-iter-869.
+
+**Pattern parity with iter-862.**  This matches iter-862's `_d_sw5_corner_divergence` pattern: helper wired in, gated by an opt-in kwarg (default False) AND the bounded-domain semantics from `cdgrid.base.bounded_domain` (iter-865b's Fortran-faithful flag).  Both helpers exist as ready-to-fire structural ports; both are off by default until a future iter validates Fortran-faithful behaviour with proper cross-face halo data.
+
+**Tests.**  Updated `tests/test_d_sw4_corner_ke_fix_iter869.py` (7 tests total):
+- 4 kernel tests (unchanged from iter-869): bounded_domain skip, locality, SW/SE/NE/NW arithmetic on constant inputs.
+- **3 new wire-in tests**:
+  1. `test_d_sw_native_default_off_matches_pre_iter869` — default kwarg-off output equals not-passing-kwarg output bit-for-bit.
+  2. `test_d_sw_native_flag_on_legacy_changes_winds` — flag=True + legacy grid changes u_d / v_d output (helper fires); h_new unchanged (mass path is at step 2, before step 4 KE compute).
+  3. `test_d_sw_native_flag_on_duogrid_no_change` — flag=True + duogrid grid: bounded_domain gate inside the helper short-circuits; output bit-identical to flag=False.
+- The renamed `test_helper_is_wired_into_d_sw_native_as_opt_in` (was: "is NOT wired") verifies (i) exactly 1 call from `_d_sw_native` body, (ii) the kwarg exists in the signature, (iii) the kwarg's default is the literal `False`.
+
+**Production verification.**  All 24 Fortran-fidelity tests across iter-862/864/865/867/869b + the iter-866-rebaselined gold-file pass.
+
+**What iter-869b DOES show.**
+- The d_sw4 corner-KE fix helper is no longer half-finished; it has a default-off call site in the FB chain.
+- Bit-identical default behaviour preserved across the FB chain wrappers.
+- The wiring is testable: enabling the flag produces measurably different output on a legacy grid; on a duogrid grid the bounded_domain gate keeps it inert.
+
+**What iter-869b does NOT establish.**
+- Whether enabling the flag stabilises the FB chain (still expected NO per iter-868's measurement).
+- Halo-input numerical fidelity at cube vertices (iter-870+ tracks the cross-face halo helper that would close both iter-862 and iter-869b halo gaps).
+
+**Iter-870+ candidates.** Unchanged from iter-869.
+
+**Deliverable.**
+- `src/legoesm/core/fv3_sw_core.py`: new `apply_legacy_d_sw4_corner_ke_fix` kwarg on `_d_sw_native`; helper wired after step 4.
+- `tests/test_d_sw4_corner_ke_fix_iter869.py`: 3 new behavioural tests + renamed AST scan now verifying the helper IS wired (with default-False).
+- All 24 Fortran-fidelity tests pass; production W2 path (which doesn't use `_d_sw_native`) unchanged.
+
+**Process.**  129b in iter-752-869b chain.  Codex stop-time review caught the half-finished implementation; iter-869b wires the helper as default-off opt-in matching iter-862's pattern.  No behaviour change for any current run; helper now has a real call site that future iters can flip on once the cross-face halo lands.

@@ -2127,7 +2127,8 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
 def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                  div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
-                 damp_v=0.0, nord_v=0):
+                 damp_v=0.0, nord_v=0,
+                 apply_legacy_d_sw4_corner_ke_fix=False):
     """D-grid full-step (FV3 d_sw1..d_sw6).
 
     Matches the FV3 dyn_core.F90 d_sw sequence:
@@ -2234,6 +2235,20 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
 
     # === 4. B-grid KE transport (FV3 d_sw3, sw_core.F90:1201-1388) ===
     ke_corner = _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt)
+
+    # Iter-869: optional Fortran d_sw4 cube-vertex KE fix
+    # (sw_core.F90:1442-1465).  Default-off opt-in matching iter-862's
+    # d_sw5 corner-corrections pattern.  When enabled AND in the
+    # legacy non-bounded-domain global cubed sphere, overrides ke at
+    # the four cube-vertex corners with Fortran's `dt/6 * (...)`
+    # formula combining ut, vt, u_d, v_d.  Halo-input gap (mode='edge'
+    # same-face extension) carried forward; cross-face halo deferred
+    # to iter-870+.  Production (`fv3_sw_tendencies`) does NOT invoke
+    # this branch — _d_sw_native is FB-chain only.
+    if apply_legacy_d_sw4_corner_ke_fix:
+        ke_corner = _apply_legacy_d_sw4_corner_ke_fix(
+            ke_corner, ut, vt, u_d, v_d, dt,
+            bounded_domain=cdgrid.base.bounded_domain)
 
     # === 5. Corner divergence damping added to KE (FV3 d_sw5) ===
     # Fortran d_sw5 (sw_core.F90:1641-1821) computes divergence at D-grid
