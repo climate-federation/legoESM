@@ -243,8 +243,9 @@ def test_production_step_forwards_dddmp_prod():
     assert matched, (
         "FV3EdgeShallowWaterModel.step's fv3_sw_tendencies(...) call "
         "does NOT forward dddmp=<self.config.*>.  The production path "
-        "is therefore re-pinned to the iter-872 kwarg default (0.2) "
-        "regardless of CDGridShallowWaterConfig.dddmp_prod.")
+        "is therefore re-pinned to the iter-872c kwarg default (0.0, "
+        "Fortran-strict) regardless of "
+        "CDGridShallowWaterConfig.dddmp_prod.")
 
 
 # ---------------------------------------------------------------------
@@ -386,12 +387,29 @@ def test_iter872c_cdgrid_momentum_honors_dddmp():
         f"users see a silent reproducibility hazard.")
 
 
-def test_iter872c_cdgrid_shallow_water_forwards_dddmp():
-    """Iter-872c: AST scan of ``cdgrid_shallow_water_tendencies``
-    confirming it forwards ``dddmp=config.dddmp_prod`` (or any
-    config-attribute access) to ``cdgrid_momentum_tendencies``.
-    Without this forwarding, the shared `dddmp_prod` field is dead
-    on the ``CDGridShallowWaterModel`` path.
+def test_iter872c_take3_cdgrid_shallow_water_does_not_forward_dddmp():
+    """Iter-872c-take3 (Codex pass-3): ``cdgrid_shallow_water_tendencies``
+    MUST NOT forward ``dddmp_prod`` to ``cdgrid_momentum_tendencies``.
+
+    Codex pass-3 found that iter-872c's plumbing of
+    ``dddmp=config.dddmp_prod`` (default 0.2) into
+    ``cdgrid_shallow_water_tendencies`` silently turned on adaptive
+    Smagorinsky for every default-config ``CDGridShallowWaterModel``
+    user, including the standard driver path.  Pre-iter-872 the
+    `CDGridShallowWaterModel(default_config)` had hardcoded
+    `dddmp = 0.2` BUT was gated behind `if div_damp > 0:` and the
+    default `div_damp=0` skipped the entire branch — so it
+    effectively had no adaptive damping.  iter-872c's gate widening
+    + plumbing made it fire by default.
+
+    iter-872c-take3 reverts the plumbing: ``dddmp_prod`` is scoped
+    to ``FV3EdgeShallowWaterModel`` only.  This test pins the
+    scoping by asserting that NO ``cdgrid_momentum_tendencies(...)``
+    call inside ``cdgrid_shallow_water_tendencies`` passes a
+    ``dddmp=...`` kwarg.  Advanced ``CDGridShallowWaterModel``
+    callers wanting adaptive Smagorinsky should pass `dddmp`
+    directly to ``cdgrid_momentum_tendencies`` (the Fortran-strict
+    0.0 default kwarg added in iter-872c).
     """
     src = (Path(__file__).resolve().parent.parent
            / "src" / "legoesm" / "atmosphere" / "dynamics"
@@ -418,25 +436,69 @@ def test_iter872c_cdgrid_shallow_water_forwards_dddmp():
         "Could not find any cdgrid_momentum_tendencies(...) call in "
         "cdgrid_shallow_water_tendencies")
 
-    matched = False
+    forwarded = []
     for call in momentum_calls:
         for kw in call.keywords:
-            if kw.arg != "dddmp":
-                continue
-            node = kw.value
-            chain = []
-            while isinstance(node, ast.Attribute):
-                chain.append(node.attr)
-                node = node.value
-            if isinstance(node, ast.Name) and node.id == "config" and chain:
-                matched = True
+            if kw.arg == "dddmp":
+                forwarded.append(call)
                 break
-        if matched:
-            break
 
-    assert matched, (
-        "cdgrid_shallow_water_tendencies' cdgrid_momentum_tendencies "
-        "call does NOT forward `dddmp=config.*`.  The shared "
-        "`dddmp_prod` field on `CDGridShallowWaterConfig` is dead on "
-        "the `CDGridShallowWaterModel` driver/CLI path — Codex pass-2 "
-        "Finding 2 must be addressed by plumbing through this caller.")
+    assert not forwarded, (
+        f"cdgrid_shallow_water_tendencies' cdgrid_momentum_tendencies "
+        f"call forwards `dddmp=...` ({len(forwarded)} occurrence(s)).  "
+        f"This re-introduces the iter-872c silent default-config "
+        f"behaviour change for `CDGridShallowWaterModel` users that "
+        f"Codex pass-3 flagged.  `dddmp_prod` is scoped to "
+        f"`FV3EdgeShallowWaterModel` only by design.")
+
+
+def test_iter872c_take3_cdgrid_default_no_silent_adaptive_damping():
+    """Iter-872c-take3 (Codex pass-3): ``CDGridShallowWaterModel``
+    constructed with the default config MUST NOT silently inject
+    adaptive Smagorinsky damping.
+
+    With ``CDGridShallowWaterConfig()`` (default), ``div_damp=0`` and
+    the kwarg-default ``dddmp=0.0`` both result in NO entry into the
+    divergence-damping branch (gate: ``div_damp>0 or dddmp>0`` →
+    ``False or False`` → ``False``).  This pins the iter-872c-take3
+    scoping: even though ``dddmp_prod`` defaults to 0.2 on the
+    shared config, it is not forwarded to this model's tendency
+    path, so the default behaviour is unchanged from pre-iter-872.
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig, CDGridShallowWaterModel,
+        cdgrid_shallow_water_tendencies, CDGridShallowWaterState,
+    )
+
+    n = 8
+    grid = create_cubed_sphere(n, use_duogrid=True)
+    cfg = CDGridShallowWaterConfig()
+    model = CDGridShallowWaterModel(grid, cfg)
+    rng = np.random.default_rng(2026)
+    state = CDGridShallowWaterState(
+        h=jnp.asarray(rng.normal(size=(6, n, n)) * 100.0 + 8000.0),
+        u_d=jnp.asarray(rng.normal(size=(6, n + 1, n + 1))),
+        v_d=jnp.asarray(rng.normal(size=(6, n + 1, n + 1))),
+        h_s=jnp.zeros((6, n, n)),
+    )
+
+    # With cfg.div_damp=0 AND dddmp_prod NOT forwarded, the gate
+    # `if div_damp>0 or dddmp>0:` (kwarg-default 0.0) MUST be False,
+    # so the divergence-damping branch must be skipped entirely.
+    # We verify by computing tendencies twice with different
+    # `dddmp_prod` values on the config; if the field were silently
+    # forwarded, output would change.
+    cfg_pt2 = cfg._replace(dddmp_prod=0.2)
+    cfg_pt8 = cfg._replace(dddmp_prod=0.8)
+    dh_pt2, du_pt2, dv_pt2 = cdgrid_shallow_water_tendencies(
+        state, model.cdgrid, cfg_pt2)
+    dh_pt8, du_pt8, dv_pt8 = cdgrid_shallow_water_tendencies(
+        state, model.cdgrid, cfg_pt8)
+
+    # If `dddmp_prod` were forwarded, dddmp=0.2 vs 0.8 with this
+    # state would produce different tendencies.  Per iter-872c-take3,
+    # `cdgrid_shallow_water_tendencies` ignores `dddmp_prod` →
+    # outputs MUST be bit-identical.
+    np.testing.assert_array_equal(np.asarray(dh_pt2), np.asarray(dh_pt8))
+    np.testing.assert_array_equal(np.asarray(du_pt2), np.asarray(du_pt8))
+    np.testing.assert_array_equal(np.asarray(dv_pt2), np.asarray(dv_pt8))

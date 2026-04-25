@@ -169,14 +169,25 @@ class CDGridShallowWaterConfig(NamedTuple):
     apply_legacy_d_sw4_corner_ke_fix: bool = False
     apply_legacy_d_sw5_corner_corrections: bool = False
 
-    # Iter-872: production divergence-damping `dddmp` coefficient
-    # (Fortran `flagstruct%dddmp`, fv_arrays.F90:360).  Fortran's
-    # strict default is 0.0 (no adaptive Smagorinsky); 0.2 is the
-    # typical production config.  Exposing this as a config field
-    # mirrors Fortran's user-configurability semantics.  Default 0.2
-    # preserves pre-iter-872 production behaviour bit-for-bit.  Used
-    # only by `fv3_sw_tendencies` (production W2 path); the FB chain
-    # passes `dddmp` to `_d_sw5_corner_divergence` directly.
+    # Iter-872c-take3 (Codex pass-3): production divergence-damping
+    # `dddmp` coefficient (Fortran `flagstruct%dddmp`,
+    # fv_arrays.F90:360).  Default 0.2 preserves pre-iter-872
+    # production behaviour bit-for-bit on the canonical W2/W5/
+    # cosine-bell matrix configs that all rely on the historic
+    # hardcoded 0.2 value.
+    #
+    # SCOPE — this field is consumed by `FV3EdgeShallowWaterModel.
+    # step` ONLY (forwarded to `fv3_sw_tendencies`).  It is
+    # deliberately NOT forwarded by `cdgrid_shallow_water_tendencies`
+    # to avoid silently injecting adaptive Smagorinsky into
+    # `CDGridShallowWaterModel` default-config users (Codex pass-3
+    # finding).  Advanced `CDGridShallowWaterModel` callers wanting
+    # adaptive Smagorinsky should pass `dddmp` directly to
+    # `cdgrid_momentum_tendencies`, which has a Fortran-strict 0.0
+    # default kwarg added in iter-872c.
+    #
+    # The FB chain passes `dddmp` to `_d_sw5_corner_divergence`
+    # directly via the separate `dddmp` field above.
     dddmp_prod: float = 0.2
 
 
@@ -211,14 +222,20 @@ def cdgrid_shallow_water_tendencies(
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
 
     # 2. Momentum tendencies (vector-invariant form with div damping)
-    # Iter-872c: forward `dddmp_prod` so `CDGridShallowWaterModel`
-    # honors the same shared config field as `FV3EdgeShallowWaterModel`.
+    # Iter-872c-take3 (Codex pass-3): `dddmp_prod` is deliberately
+    # NOT forwarded here.  `dddmp_prod` is scoped to
+    # `FV3EdgeShallowWaterModel` only; forwarding it from the
+    # shared config to `cdgrid_momentum_tendencies` would silently
+    # change `CDGridShallowWaterModel(default_config)` behaviour
+    # (Codex pass-3 finding).  Advanced `CDGridShallowWaterModel`
+    # users wanting adaptive Smagorinsky should pass `dddmp`
+    # directly to `cdgrid_momentum_tendencies` (Fortran-strict 0.0
+    # default kwarg added in iter-872c).
     du_d_dt, dv_d_dt = cdgrid_momentum_tendencies(
         h, u_d, v_d, h_s, cdgrid,
         g=config.g, A_h=config.A_h,
         hyperdiff_coeff=config.hyperdiff_coeff,
         div_damp=config.div_damp,
-        dddmp=config.dddmp_prod,
     )
 
     # Boundary-corner fix: halo interpolation gives O(dx) gradient error

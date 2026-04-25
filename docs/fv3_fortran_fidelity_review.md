@@ -1112,3 +1112,33 @@ The iter-872 test `test_default_kwarg_reproduces_pre_iter872_hardcoded_value` wa
 **Verification.**  All 9 iter-872/872b/872c tests pass.  All 145 broader regression tests (test_cdgrid + iter-862-869 chain) pass.  All 15 W2 boundary error budget tests pass — production W2 sentinel bit-identical.
 
 **Process.**  iter-872c is the third Codex pass on iter-872.  Total pattern: iter-872 (initial), iter-872b (Codex pass-1 Finding 1 gate fix + Finding 2 doc scoping), iter-872c (Codex pass-2 Finding 1 default fix + Finding 2 second-model plumbing).  Each pass progressively closed Fortran-fidelity gaps that the previous fix exposed.  Net effect: both shallow-water model classes now honour Fortran-strict `dddmp_prod` semantics with no silent leaks and consistent shared-config behaviour.
+
+### Iter-872c-take3 — Codex pass-3 follow-up: scope `dddmp_prod` to FV3Edge only (revert CDGrid plumbing)
+
+Codex adversarial-review pass-3 on iter-872c flagged a third high-severity issue:
+
+**Pass-3 Finding (high) — silent default change for `CDGridShallowWaterModel`.**  iter-872c plumbed `dddmp=config.dddmp_prod` (default 0.2) into `cdgrid_momentum_tendencies` via `cdgrid_shallow_water_tendencies`, which is the path used by `CDGridShallowWaterModel`.  Combined with iter-872b's gate widening (`if div_damp > 0 or dddmp > 0:`), this turned on adaptive Smagorinsky for every default-config user including the standard driver path through `component_factory`.  Pre-iter-872 `CDGridShallowWaterModel(default_config)` had hardcoded `dddmp = 0.2` BUT was gated behind `if div_damp > 0:` and the default `div_damp=0` skipped the entire branch, so it effectively had no adaptive damping.  iter-872c made it fire by default — a silent numerical regression for every default `CDGridShallowWaterModel` user.
+
+**Fix (iter-872c-take3).**  Scope `dddmp_prod` to `FV3EdgeShallowWaterModel` ONLY.  Revert the iter-872c plumbing through `cdgrid_shallow_water_tendencies` (do NOT forward `dddmp_prod` to `cdgrid_momentum_tendencies`); restore `dddmp_prod` default to 0.2 (preserves W2 sentinel + matrix tests bit-for-bit); document explicitly that `dddmp_prod` is consumed by `FV3EdgeShallowWaterModel.step` only.  Advanced `CDGridShallowWaterModel` callers wanting adaptive Smagorinsky must pass `dddmp` directly to `cdgrid_momentum_tendencies` (the Fortran-strict 0.0 default kwarg added in iter-872c).
+
+This satisfies all three Codex passes:
+- Codex pass-2 Finding 1 (silent API break for direct `fv3_sw_tendencies` callers): kwarg default 0.0 retained → direct callers without explicit `dddmp` get Fortran-strict no-adaptive behaviour.
+- Codex pass-2 Finding 2 (`dddmp_prod` ignored on `CDGridShallowWaterModel` path): documented as deliberate scoping; the new `cdgrid_momentum_tendencies.dddmp` kwarg gives advanced users a direct opt-in.
+- Codex pass-3 (silent default change for `CDGridShallowWaterModel`): fixed by reverting the plumbing.
+
+**Tests.**  iter-872c-take3 replaces `test_iter872c_cdgrid_shallow_water_forwards_dddmp` with two new tests:
+- `test_iter872c_take3_cdgrid_shallow_water_does_not_forward_dddmp`: AST scan asserting `cdgrid_shallow_water_tendencies` does NOT pass any `dddmp=...` kwarg to `cdgrid_momentum_tendencies`.
+- `test_iter872c_take3_cdgrid_default_no_silent_adaptive_damping`: behavioural — varying `cfg.dddmp_prod` between 0.2 and 0.8 produces bit-identical tendencies through `cdgrid_shallow_water_tendencies`, proving the field is ignored on this path.
+
+The matrix runner (`scripts/run_atmosphere_test_matrix.py`) and the W2 sentinel test (`test_w2_iter761_matrix_v_ll_and_mode4_baseline`) are reverted to use the default `dddmp_prod=0.2` (no explicit opt-in needed since the default is restored).
+
+**Verification.**  All 11 iter-872/872b/872c tests + 15 W2 boundary error budget tests + 20 diff-atmosphere-dynamics tests pass.  Production W2 sentinel bit-identical.
+
+**Final iter-872 chain summary.**
+- Production W2 path (`FV3EdgeShallowWaterModel`): `dddmp_prod` configurable from `CDGridShallowWaterConfig`, default 0.2 → bit-identical to pre-iter-872.
+- Direct `fv3_sw_tendencies(...)` callers without explicit `dddmp`: Fortran-strict 0.0 (was hardcoded 0.2 — net effect on tests: no breakage observed).
+- Direct `cdgrid_momentum_tendencies(...)` callers without explicit `dddmp`: Fortran-strict 0.0 (was hardcoded 0.2 — net effect: no breakage observed).
+- `CDGridShallowWaterModel(default_config)`: no damping (was no damping pre-iter-872 due to `div_damp=0` gate skip — preserved).
+- `CDGridShallowWaterModel(matrix_config with div_damp>0)`: background-only damping (was `div_damp + 0.2 adaptive` pre-iter-872 — now `div_damp` only; advanced users opt in via direct `cdgrid_momentum_tendencies(dddmp=0.2)` call).
+
+Net Fortran-fidelity gain: kwarg defaults are Fortran-strict at the operator level; `dddmp_prod` is exposed as a configurable parameter on the production model class; both paths now have the formal infrastructure for Fortran-faithful adaptive Smagorinsky configuration.
