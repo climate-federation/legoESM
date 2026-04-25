@@ -2555,15 +2555,17 @@ Per iter-856b's iter-857+ Priority 1: re-run iter-856 via `model.step()` (preser
 |       1.0  | **BLEW UP step 10**              | **BLEW UP step 10**            | stable, 301 m                  |
 |       2.0  | **BLEW UP step 6**               | **BLEW UP step 6**             | stable, 639 m                  |
 
-**Decisive finding.**  iter-857 matches iter-856 EXACTLY (within numerical-noise scale) at the failing damp_scales 1.0× and 2.0×, AND at the stable damp_scales 0..0.1× the magnitudes are within 1 % of each other.  This isolates the cause of the qualitative reversal vs iter-854:
+**Decisive finding (qualitative agreement; stable-scale magnitudes differ at the few-% level).**  iter-857 matches iter-856 QUALITATIVELY: same stability outcome at every tested damp_scale, including the same blow-up step number (10 at 1.0×, 6 at 2.0×).  At the stable damp_scales 0..0.1× the magnitudes are close but NOT identical — at 0.001× the gap is 9 % (0.884 m vs 0.807 m), elsewhere typically 1-2 %.  These small magnitude shifts come from the post-RK3 corrections that iter-856 skips and iter-857 retains.  This is consistent with the qualitative result being driven by the staleness fix, while small magnitude differences come from the post-RK3 corrections.  Specifically:
 
-- The **STALENESS FIX** (substeps 2/3 seeing correct intermediate winds rather than start-of-step winds) is the dominant difference.  At canonical damping, the proper plumbing reveals real instability that the stale plumbing artificially suppressed.
-- The **POST-RK3 corrections** (`damp_v` vorticity damping + mass fixer) are NOT the dominant stabiliser here — iter-857 has them active and still blows up at canonical damping with the same step number as iter-856.
+- The **STALENESS FIX** (substeps 2/3 seeing correct intermediate winds rather than start-of-step winds) is the LIKELY DOMINANT cause of the qualitative reversal vs iter-854.  At canonical damping, the proper plumbing reveals instability that the stale plumbing did not exhibit.
+- The **POST-RK3 corrections** (`damp_v` vorticity damping + mass fixer) shift the stable-scale magnitudes at the few-% level but do NOT prevent canonical-damping blow-up — iter-857 has them active and still blows up at the same step as iter-856.
+
+This is an INFERENCE across iter-854/856/857 (a 3-way comparison varying staleness and wrapper independently), not a direct one-variable A/B test vs iter-854.  A strict A/B test would require running iter-854's exact buggy hybrid plumbing alongside iter-857's proper plumbing — that is not done here.
 
 **Validation chain.**
 - iter-853's t=0-only "would destabilise" prediction → directionally consistent with iter-856 / iter-857.
-- iter-854's "stable at canonical" → fully retracted as a STALENESS-BUG artefact.
-- iter-855's retraction of iter-854 → confirmed by direct measurement.
+- iter-854's "stable at canonical" → retracted (iter-855); iter-857's evidence STRONGLY SUGGESTS the staleness bug was the main cause but does not strictly prove "sole cause."
+- iter-855's retraction of iter-854 → confirmed by qualitative agreement of iter-856 and iter-857.
 - iter-856's "Phase 1 + canonical damping is unstable" → confirmed by iter-857 with model.step() wrapper.
 
 **Refined conclusion.**
@@ -2588,4 +2590,4 @@ Per iter-856b's iter-857+ Priority 1: re-run iter-856 via `model.step()` (preser
 
 **Deliverable.**  `scripts/diag_iter857_phase1_via_modelstep.py` (with note that source patches are reverted).  Production source changes to `fv3_sw_tendencies` AND `shallow_water_fv3_cdgrid.py` were applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
 
-**Process.**  117th iter in iter-752-857 chain.  Disentangles iter-856's two confounders (staleness AND wrapper).  iter-857 result matches iter-856 → the STALENESS FIX is what reveals the canonical-damping instability; post-RK3 corrections are NOT the dominant stabiliser.  Cleanly retroactively confirms iter-855's retraction of iter-854 and iter-856's "directional validation" of iter-853's prediction.
+**Process.**  117th iter in iter-752-857 chain.  Disentangles iter-856's two confounders (staleness AND wrapper) by 3-way inference.  iter-857 matches iter-856 qualitatively (same stability outcome at every damp_scale; same blow-up step at 1.0× and 2.0×).  Stable-scale magnitudes differ at the few-% level (up to 9 % at 0.001×) — consistent with post-RK3 corrections shifting magnitudes but not preventing canonical-damping blow-up.  STRONGLY SUGGESTS the staleness fix is the dominant cause of the iter-854→iter-856 qualitative reversal, but this is inference, not a direct A/B test vs iter-854's buggy hybrid plumbing.
