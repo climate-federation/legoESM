@@ -1314,3 +1314,64 @@ The iter-875 sentinel test file `tests/test_fv3_legacy_gate_bounded_domain_iter8
 **Verification.**  All 70 top-level Fortran-fidelity tests pass (the same tests that passed pre-iter-875).  W2 sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline` passes bit-identically.  The 2 iter-552/553 tests that were already failing pre-iter-875 remain failing — a separate pre-existing issue not introduced or fixable by iter-877.
 
 **Process.**  137th iter in the iter-752-877 chain.  iter-877 is a revert iter that closes the iter-875+876 chain by removing both commits.  The lesson: a Fortran-fidelity gate widening that breaks an existing test-side override contract is NOT a net improvement, even if the new gate matches Fortran more literally.  Future regional/nested fidelity work must come with an end-to-end sentinel that exercises the regime, not just a gate widening.
+
+### Iter-878 — Fix PPM overshoot constraint to match CW84 / Fortran `pert_ppm`
+
+**Bug.**  `_ppm_reconstruct_1d` (`src/legoesm/core/operators_cdgrid.py:86-183`) implements the Colella-Woodward (1984) Piecewise Parabolic Method.  Its monotonicity step #2 (overshoot limiting) had the conditions
+
+```python
+cond_L = q_6 > dq * dq    # PRE-iter-878 (BUG)
+cond_R = -q_6 > dq * dq
+```
+
+i.e., `q_6 > Δa²` and `-q_6 > Δa²`, where `Δa = q_R - q_L` and `q_6 = 6(q - 0.5(q_L + q_R))`.  CW84 eq. 1.10 specifies the condition as:
+
+```
+if Δa · q_6 >  (Δa)²:  q_L = 3q - 2q_R
+if Δa · q_6 < -(Δa)²:  q_R = 3q - 2q_L
+```
+
+i.e., `Δa · q_6 > Δa²`, NOT `q_6 > Δa²`.  The `Δa` factor on the LHS is missing in the pre-iter-878 form.  Fortran's `pert_ppm` (`tp_core.F90:1199-1205`) implements the CW84 form exactly:
+
+```fortran
+da1 = al(i) - ar(i)               ! corresponds to -dq in absolute form
+da2 = da1**2                       ! Δa²
+a6da = 3.*(al(i)+ar(i))*da1        ! q_6 * dq via algebraic substitution
+if (a6da < -da2) then              ! corresponds to q_6 * dq < -Δa²
+    ar(i) = -2.*al(i)
+elseif (a6da > da2) then           ! corresponds to q_6 * dq >  Δa²
+    al(i) = -2.*ar(i)
+endif
+```
+
+The pre-iter-878 Python form silently diverges from CW84 / Fortran in two regimes:
+- `|dq| > 1` (large jump): pre-iter-878 condition is HARDER to satisfy (RHS = dq² is large), so PPM under-caps.
+- `|dq| < 1` (small jump): pre-iter-878 condition is EASIER to satisfy (RHS is tiny), so PPM over-caps.
+- `dq < 0`: pre-iter-878 ignores the sign (dq² is always positive); CW84 handles correctly via the signed product.
+
+**Fix (iter-878).**  Restore the `dq` factor on the LHS:
+
+```python
+q6_dq = q_6 * dq
+dq_sq = dq * dq
+cond_L = q6_dq > dq_sq
+cond_R = q6_dq < -dq_sq
+```
+
+This matches CW84 eq. 1.10 and Fortran `pert_ppm` exactly.
+
+**Tests** (`tests/test_ppm_overshoot_constraint_iter878.py`):
+- `test_iter878_ppm_matches_cw84_reference`: pin behaviour against an explicit CW84 NumPy reference; bit-match required to 1e-12 relative tolerance.
+- `test_iter878_ppm_differs_from_pre_iter878_buggy_reference`: behavioural — on a wide-range input where pre-iter-878 and CW84 diverge, the actual function output MUST differ from the pre-iter-878 buggy formula by > 1e-6.  Proves the iter-878 fix is firing.
+- `test_iter878_source_uses_signed_product`: AST scan asserting the source contains a `q_6 * dq` product (catches a regression that reverts to `q_6 > dq * dq`).
+- `test_iter878_constant_field_unchanged`: sanity check that constant fields produce `q_L = q_R = q` (extremum flatten works in both pre- and post-iter-878 forms).
+
+**Behavioural impact on production sentinels.**
+- W2 sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline`: PASSES bit-identically.  W2 has smooth flow with `|dq|` typically too small to trigger the constraint regularly, and the constraint behaviour difference between the two formulas is negligible on a smooth field.
+- All 70 top-level Fortran-fidelity tests: PASS.
+
+**Why this matters.**  Even though the W2 sentinel is unaffected, this is a **real** Fortran-fidelity bug in the PPM transport — the bug fires on any input with sharp gradients, where the pre-iter-878 form silently produces wrong limiting behaviour relative to Fortran.  Cosine-bell transport at small grid scales, or atmospheric flows with discontinuities, would reveal the divergence.  The fix is small (single-line algebraic correction) but closes a fundamental algorithmic gap.
+
+**Deliverable.**  Source fix in `src/legoesm/core/operators_cdgrid.py` (`_ppm_reconstruct_1d`) + 4 regression tests in `tests/test_ppm_overshoot_constraint_iter878.py` + this doc entry.
+
+**Process.**  138th iter in the iter-752-878 chain.  Concrete operator-level Fortran-fidelity correction: pre-iter-878 PPM had a documented algorithm bug (CW84 eq. 1.10 violation) that pre-existed the entire iter chain; iter-878 closes it.  The W2 sentinel was unaffected because the bug only fires when the constraint is reached; on smooth flows the constraint rarely activates.

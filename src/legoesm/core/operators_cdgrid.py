@@ -153,24 +153,33 @@ def _ppm_reconstruct_1d(q, *, axis: int):
     q_L = q_face[..., :-1]  # face at i-1/2 → left face of cell i
     q_R = q_face[..., 1:]   # face at i+1/2 → right face of cell i
 
-    # --- Monotonicity constraints (Colella & Woodward 1984) ---
+    # --- Monotonicity constraints (Colella & Woodward 1984, eq. 1.10) ---
     # 1. Detect local extrema: if (q_R - q)(q - q_L) <= 0, flatten
     delta = (q_R - q) * (q - q_L)
     is_extremum = delta <= 0.0
     q_L = jnp.where(is_extremum, q, q_L)
     q_R = jnp.where(is_extremum, q, q_R)
 
-    # 2. Overshoot limiting: ensure the parabola doesn't create new extrema
-    # q_6 = 6*(q - 0.5*(q_L + q_R))
+    # 2. Overshoot limiting: ensure the parabola doesn't create new
+    # extrema.  Per CW84 eq. 1.10:
+    #   if Δa · a_6 >  (Δa)²:  a_L = 3a - 2a_R
+    #   if Δa · a_6 < -(Δa)²:  a_R = 3a - 2a_L
+    # where Δa = a_R - a_L and a_6 = 6(a - 0.5(a_L+a_R)).  Iter-878
+    # (Fortran-fidelity fix): pre-iter-878 the conditions were
+    # ``q_6 > dq*dq`` and ``-q_6 > dq*dq`` (missing the ``dq`` factor
+    # on the LHS), which differs from CW84 / Fortran ``pert_ppm``
+    # (tp_core.F90:1199-1205) where the test is ``a6da = 3*(al+ar)*
+    # da1`` (this includes ``da1`` factor) compared to ``da2 = da1²``.
+    # Restoring the ``dq`` factor on the LHS makes the gate match
+    # CW84 + Fortran exactly.
     q_6 = 6.0 * (q - 0.5 * (q_L + q_R))
-    # If q_6 * (q_R - q_L) > (q_R - q_L)^2, limit q_L
     dq = q_R - q_L
-    cond_L = q_6 > dq * dq
-    # If adjustment needed: q_L = 3*q - 2*q_R
+    q6_dq = q_6 * dq
+    dq_sq = dq * dq
+    cond_L = q6_dq > dq_sq
     q_L_adj = 3.0 * q - 2.0 * q_R
     q_L = jnp.where(cond_L & ~is_extremum, q_L_adj, q_L)
-    # If -q_6 > dq*dq, limit q_R
-    cond_R = -q_6 > dq * dq
+    cond_R = q6_dq < -dq_sq
     q_R_adj = 3.0 * q - 2.0 * q_L
     q_R = jnp.where(cond_R & ~is_extremum, q_R_adj, q_R)
 
