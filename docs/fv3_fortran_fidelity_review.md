@@ -2385,7 +2385,17 @@ A FULL Phase 1 ruling-out would require: (a) short-run stability evidence; (b) a
 
 **Process.**  113th iter in iter-752-853 chain.  t=0 measurement of the simplest Phase 1 monkey-patch shows a 180× peak amplification.  Codex iter-853b honesty pass narrows the conclusion: the SPECIFIC drop-in monkey-patch is unsafe under iter-761 canonical damping; this does NOT generally rule out Phase 1.  iter-854+ priorities are short-run stability test + damping-coefficient sweep with the patched stencil to disentangle "stencil-construction effect" from "over-damping artefact" before claiming Phase 1 is generally non-viable.
 
-### Iter-854 — Short-run stability test refines iter-853: patched config IS stable; over-damping artefact dominates the 180× peak
+### Iter-854 — Short-run stability test (QUANTITATIVE FINDINGS RETRACTED in iter-855)
+
+**RETRACTION NOTICE (iter-855).**  The iter-854 diagnostic at `scripts/diag_iter854_short_run_stability.py` has a real RK3 plumbing bug: the patched `cgrid_divergence` reads `u_d`/`v_d` from a module-level `LIVE_STATE` dict updated only BEFORE `model.step()`, but `model.step()` runs SSP-RK3 with THREE tendency calls at intermediate states (y₀, y₁, y₂).  RK3 substeps 2 and 3 therefore use STALE start-of-step winds for the divergence, while every other tendency term sees the actual intermediate state.  This is a HYBRID computation, NOT a faithful Phase 1 trial.
+
+**All quantitative findings reported below (the |h − h₀| table, the 470× ratio, the linear-with-damp_scale claim, the 0.001×-recovers-baseline claim, the "stable at 2.0×" claim, the over-damping-artefact mechanism story) are SCOPED TO this hybrid system and CANNOT be cited as evidence about a properly-plumbed Phase 1 swap.**  The original iter-854 reasoning is preserved below for transparency, but iter-855 onwards treats it as superseded.
+
+The single qualitative observation that survives the retraction: the hybrid integration completed 60 steps without NaN at all damp_scales 0–2×.  This narrowly-scoped fact does NOT establish that a correctly-plumbed Phase 1 trial would also be stable.  iter-855+ Priority 1 is a properly-plumbed Phase 1 trial via in-place `fv3_sw_tendencies` source patch.
+
+---
+
+(retained for transparency; superseded by retraction notice above)
 
 Per iter-853b's iter-854+ priority: take the iter-853 patched configuration and run short integration at multiple damping-coefficient scales to disentangle "stencil-instability signature" from "over-damping artefact under canonical damping."
 
@@ -2441,3 +2451,23 @@ The Fortran-cc divergence is 30×–2200× larger than `cgrid_divergence` at cub
 **Deliverable.**  `scripts/diag_iter854_short_run_stability.py` (with un-patched reference baseline + patched sweep).  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  114th iter in iter-752-854 chain.  RETRACTS iter-853's "destabilise" extrapolation.  Confirms via direct measurement that the iter-853 patched configuration is short-run STABLE at all damp_scales 0–2×, with the 180× t=0 amplification translating to a 470× larger 5h |h-h₀| integration error (from over-damping artefact, not stencil instability).  Identifies a "Phase 1 + reduced damping" path (damp_scale=0.001×) that recovers baseline-quality W2 short-run error but at the cost of Fortran fidelity.  Real Fortran-faithful path still requires iter-849 Checks 1+4 implementation.
+
+### Iter-855 — Retraction follow-through on iter-854 (proper deletion of unreliable claims)
+
+iter-854b acknowledged the RK3-staleness bug in a caveat appended to the iter-854 section but LEFT the unreliable quantitative conclusions in place.  Stop-hook review: "the turn leaves invalid iter-854 conclusions in place after acknowledging the RK3 staleness bug."
+
+iter-855 fixes this by:
+- Adding a prominent **RETRACTION NOTICE** at the TOP of the iter-854 section that explicitly names the affected quantitative findings (470× ratio, "stable at 2.0×", "0.001× recovers baseline", over-damping-artefact mechanism story) and states they are SCOPED TO the buggy hybrid and CANNOT be cited as Phase 1 evidence.
+- Marking the rest of the iter-854 reasoning as "retained for transparency; superseded by retraction notice."  This way the original text remains readable for context, but no future citation can mistakenly take it as established.
+- Re-stating the SINGLE surviving qualitative observation (hybrid integration completed 60 steps without NaN) and noting it does NOT generalise to a properly-plumbed Phase 1 trial.
+
+iter-855 itself does NO new measurement.  This is purely a doc-honesty pass — but a necessary one: the stop-hook explicitly required it, and leaving overclaim-laden text in the doc with only a footnote-style caveat would silently mislead future readers (or future Codex reviews) who skim the section.
+
+**Iter-856+ candidates (unchanged from iter-854b).**
+- **Priority 1**: properly-plumbed Phase 1 trial.  Patch the divergence INSIDE `fv3_sw_tendencies` (source modification, reverted after measurement) so it sees actual intermediate u_d/v_d at each RK3 substep.  This is the FIRST honest Phase 1 measurement.
+- Once Priority 1 produces a reliable answer: 1-day run of the properly-plumbed config + best damp_scale, measure v_ll_Linf vs iter-761 canonical 0.159 m/s.
+- iter-849 Check 1 (`*dt` factor) and Check 4 (`ke`→d_sw6 routing) implementations.
+
+**Deliverable.**  Doc-only retraction strengthening on the iter-854 section.  No script change (the script's docstring already carries the staleness-bug notice from iter-854b).  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  115th iter in iter-752-855 chain.  Honesty discipline: when a measurement is invalidated by a plumbing bug, the right response is RETRACTION at the top of the section, not a caveat at the bottom.  iter-854's quantitative claims are now visibly retracted; only the qualitative "hybrid was stable for 60 steps" observation remains, with explicit scope-limit.
