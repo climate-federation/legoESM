@@ -2009,3 +2009,25 @@ The strengthened sentinel correctly catches the index regression in BOTH static 
 **On restored source.**  All 3 iter-884b tests + 14 other top-level Fortran-fidelity files pass.
 
 **Process.**  156th iter in the iter-752-884b chain.  Codex stop-time review caught a real test-correctness gap: the count-only behavioural test gave false-pass on the index regression because both pre- and post-iter-884 invoke `_pert_ppm` 6 times.  iter-884b strengthens the test to read back the actual q_c indices used, so the index regression now produces a measurable diff in the runtime test.
+
+### Iter-885 — Fortran-faithful sentinel for `_edge_interpolate4`
+
+**Discovery.**  `_edge_interpolate4` (`src/legoesm/core/fv3_sw_core.py`) is a port of Fortran's `edge_interpolate4` (`sw_core.F90:3709-3720`) — the FV3 4-point non-uniform-spacing Lagrange-style interpolation used by `_d2a2c_vect` to compute transport velocities at cube-face boundaries.  Despite being a key FB-chain operator, this function had NO direct cross-Fortran reference test.
+
+**Tests** (`tests/test_edge_interpolate4_fortran_faithful_iter885.py`):
+
+1. `test_iter885_edge_interpolate4_uniform_spacing`: analytical check on uniform `dxa = [1,1,1,1]` and `ua = [10,20,30,40]`.  Result must equal `0.25 * (3*ua[1] - ua[0] + 3*ua[2] - ua[3]) = 25`.
+
+2. `test_iter885_edge_interpolate4_non_uniform_spacing`: analytical check on `dxa = [1,2,3,4]` and `ua = [10,20,30,40]`.  Result must equal `550/21 ≈ 26.19` exactly (rationals computed by hand).  Catches any change to spacing-dependent terms.
+
+3. `test_iter885_edge_interpolate4_matches_fortran_reference`: 4 hand-built batched inputs (uniform, increasing dxa, decreasing dxa, symmetric dxa) compared against an explicit element-wise Python port of Fortran lines 3709-3720 at 1e-12 rtol.
+
+4. `test_iter885_edge_interpolate4_random_inputs` (parametrized over 3 seeds): random 32×4 batched inputs at 1e-12 rtol.
+
+**Sentinel verification.**  Manual corruption test: swap `dxa4[..., 1]` for `dxa4[..., 2]` in the first-term coefficient (a subtle index swap that wouldn't produce an obvious error). 5 of 6 tests fail (high detection rate). Restored: 6 of 6 pass.
+
+**Coverage.**  Combined with iter-881d (iv=0) and iter-882 (iv=1), iter-885 closes another previously-untested FB-chain operator surface against direct Fortran reference comparison.
+
+**Deliverable.**  `tests/test_edge_interpolate4_fortran_faithful_iter885.py` (6 tests) + this doc entry.  No source-code change.
+
+**Process.**  157th iter in the iter-752-885 chain.  Sentinel-only iter that locks the existing `_edge_interpolate4` Fortran-faithful implementation against future regression.  Three approaches combined: analytical hand-derived expected values, batched Fortran reference comparison, and random-input cross-check.  Lessons from iter-881 chain applied on first attempt: non-zero values, non-uniform spacing, deterministic analytical expectations, and corruption-injection verification all included from the start.
