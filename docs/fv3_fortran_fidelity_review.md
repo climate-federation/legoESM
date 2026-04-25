@@ -1734,3 +1734,39 @@ The iter-880b sentinel correctly fires on the clip-re-injection regression, in b
 **Deliverable.**  Three test changes in `tests/test_ppm_edge_values_clip_iter880.py`: (a) add `blend_edges` parameter to reference function; (b) switch overshoot input to every-third-cell impulse; (c) add `test_iter880b_reference_isolates_clip_only_diff` for cross-mode isolation guard.
 
 **Process.**  148th iter in the iter-752-880b chain.  Codex stop-time review caught real test-correctness bugs in iter-880's regression test — the test passed for the wrong reasons.  iter-880b isolates the clip step in both reference function design and input choice, then verifies the sentinel actually catches the iter-880 regression class via deliberate clip re-injection.
+
+### Iter-881 — Fortran-faithful sentinel for `_pert_ppm_iv0` (hord=9 positive-definite constraint)
+
+**Discovery.**  Auditing the PPM constraint stack (iter-878+880 + iter-879 chain) revealed that `_pert_ppm_iv0` (`src/legoesm/core/fv_tp_2d.py:47-86`) — the positive-definite constraint used by Fortran's hord=9 (FV3 default for mass, vorticity, momentum transport) — had NO direct test against the Fortran reference (`tp_core.F90:1169-1192`).  The function was only tested implicitly via larger transport-stack tests, which mask divergence in any single branch.
+
+**Branch coverage.**  The Fortran iv=0 branch has 6 distinct paths:
+1. `a0 ≤ 0`: zero-out al and ar.
+2. `a0 > 0`, no extremum in [0,1] (`abs(da1) >= -a4`): pass-through.
+3. `a0 > 0`, extremum exists, `fmin >= 0` (parabola stays positive): pass-through.
+4. `a0 > 0`, extremum, `fmin < 0`, BOTH `bl > 0` AND `br > 0`: zero both.
+5. `a0 > 0`, extremum, `fmin < 0`, NOT both positive, `da1 > 0`: clip `br = -2*bl`.
+6. `a0 > 0`, extremum, `fmin < 0`, NOT both positive, `da1 < 0`: clip `bl = -2*br`.
+
+Pre-iter-881 a regression in any single branch (e.g., wrong fmin formula, wrong da1 sign convention, wrong "both positive" check) would not be caught by the existing tests until the regression manifested in a downstream transport-stack test on a specific input.
+
+**Fix (iter-881).**  Add `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py` with two tests:
+
+1. `test_iter881_pert_ppm_iv0_matches_fortran_reference`: hand-built input that exercises each of the 6 Fortran branches.  Compares actual function output against an explicit element-wise Python port of `tp_core.F90:1169-1192` at 1e-12 rtol.
+
+2. `test_iter881_pert_ppm_iv0_random_inputs` (parametrized over 3 seeds): random `(q, bl, br)` tuples with mixed positive/negative `q` to exercise both the zero-out branch and the constraint-active branches.  Catches edge cases not in the hand-built input.
+
+**Verification.**  All 4 iter-881 tests pass on current source.  The Python `_pert_ppm_iv0` matches the Fortran NumPy reference exactly across:
+- 6 hand-built branch-coverage tuples.
+- 3 random seeds × 64 elements = 192 random comparisons per seed.
+
+**What iter-881 DOES show.**
+- The Python `_pert_ppm_iv0` is Fortran-faithful per `tp_core.F90:1169-1192` across all 6 iv=0 branches.
+- A future regression in any single branch will fail the sentinel loudly (1e-12 rtol cross-implementation match).
+
+**What iter-881 does NOT establish.**
+- Coverage of the iv=1 branch (standard PPM constraint = CW84 = `_pert_ppm` in same file).  iter-879g's behavioral test already covers `_pert_ppm` indirectly via cross-implementation bit-match.
+- Coverage of `pert_ppm` callers (xppm, yppm) — those use the constraint but have additional logic (Courant-number flux integration, etc.) not in scope here.
+
+**Deliverable.**  `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py` (4 tests) + this doc entry.  No source code change — sentinel-only, locks the existing Fortran-faithful implementation.
+
+**Process.**  149th iter in the iter-752-881 chain.  Sentinel-only iter that closes the "no direct Fortran test for hord=9 positive-definite constraint" gap identified during the iter-878+880 PPM audit.  The sentinel pins all 6 iv=0 branches against an explicit hand-rolled Fortran reference, so any regression in any branch fires loudly.
