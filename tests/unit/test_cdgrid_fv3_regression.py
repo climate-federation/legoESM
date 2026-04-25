@@ -5516,10 +5516,18 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
           2.  ``mode-4 amp at lat=±30°`` — ZONAL FFT amplitude of the
                                     cube-face mode-4 imprint at the
                                     ±30° latitudes where face seams
-                                    cross.  Saved baseline ≈
-                                    2.297e-2 m/s.  Ceiling: 3.0e-2
-                                    m/s (~30 % head).  Equator-
-                                    symmetric to within 1 ulp.
+                                    cross.  Convention matches the
+                                    older iter-609 short-run mode-4
+                                    test (``np.fft.rfft(row) / N * 2``
+                                    — one-sided amplitude with the
+                                    factor of 2 for k>0).  Saved
+                                    baseline ≈ 4.594e-2 m/s (twice
+                                    the user-reported "2.297e-2"
+                                    which used the alternative
+                                    ``|fft|/N`` convention).
+                                    Ceiling: 6.0e-2 m/s (~30 %
+                                    head).  Equator-symmetric to
+                                    within 1 ulp.
           3.  ``face4_maxabs vs face5_maxabs mirror`` —
                                     ``|f4 - f5| / max(f4, f5)``.
                                     Saved baseline 0.115776 vs
@@ -5548,11 +5556,16 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         Acceptance criteria from user iter-862 reframe:
         - keep canonical W2 h_L2 within 25% of 2.07e-04 → already
           locked by the L2 test above.
-        - final max|v_ll| < 1.585e-01 m/s OR mode-4(|lat|=30°) <
-          2.297e-02 m/s — to BEAT this test, a future patch must
-          improve at least one metric below its baseline.  The
+        - final max|v_ll| < 1.585e-01 m/s OR mode-4(|lat|=30°)
+          improvement target — to BEAT this test, a future patch
+          must improve at least one metric below its baseline.  The
           ceilings here are the regression sentinels; the
           improvement targets are the saved baseline values.
+          (User reported mode-4 = 2.297e-2 m/s under the ``|fft|/N``
+          convention; this test reports it under the iter-609
+          ``rfft/N*2`` one-sided convention as 4.594e-2 m/s.  Same
+          underlying physics, factor-of-2 in the spectral
+          normalisation only.)
         """
         import jax.numpy as jnp
         import numpy as np
@@ -5624,17 +5637,26 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         max_v_ll = float(np.max(np.abs(v_ll)))
 
         # --- Mode-4 amplitude at lat=±30° ---
+        # FFT convention matches the existing iter-609 short-run
+        # mode-4 test (`test_w2_short_run_mode4_at_pm30deg_lat_ceiling`):
+        # `np.fft.rfft(row) / N * 2.0` — one-sided amplitude with the
+        # factor-of-2 for k>0 modes.  Codex iter-863 stop-time review
+        # flagged the prior `|fft|/N` form as inconsistent with the
+        # iter-609 sentinel; both tests now use the same convention.
         lat_axis = np.linspace(-90.0, 90.0, v_ll.shape[0])
         j_pos = int(np.argmin(np.abs(lat_axis - 30.0)))
         j_neg = int(np.argmin(np.abs(lat_axis + 30.0)))
         nlon = v_ll.shape[1]
-        mode4_pos = float(np.abs(np.fft.fft(v_ll[j_pos])[4]) / nlon)
-        mode4_neg = float(np.abs(np.fft.fft(v_ll[j_neg])[4]) / nlon)
+        mode4_pos = float(
+            np.abs(np.fft.rfft(v_ll[j_pos])[4]) / nlon * 2.0)
+        mode4_neg = float(
+            np.abs(np.fft.rfft(v_ll[j_neg])[4]) / nlon * 2.0)
 
-        # Ceilings.  Baselines (April 2026 saved):
+        # Ceilings.  Baselines (April 2026 saved, iter-609 FFT
+        # convention `rfft/N*2`):
         #   max_v_ll       = 1.585e-1 m/s
-        #   mode4_pos      = 2.297e-2 m/s
-        #   mode4_neg      = 2.297e-2 m/s
+        #   mode4_pos      = 4.594e-2 m/s   (= 2× the |fft|/N value)
+        #   mode4_neg      = 4.594e-2 m/s
         #   face_mirror    = 6.5e-4
         # Ceilings carry small headroom so any meaningful regression
         # trips the test while normal numerical noise does not.
@@ -5645,17 +5667,18 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"baseline = 1.585e-1 m/s.  A regression here means "
                  f"the user-visible W2 v-wind imprint has grown."))
         self.assertLess(
-            mode4_pos, 3.0e-2,
+            mode4_pos, 6.0e-2,
             msg=(f"W2 iter-761 matrix 1-day mode-4 amplitude at "
-                 f"+30°N = {mode4_pos:.4e} m/s exceeds 3.0e-2 ceiling. "
-                 f"Saved baseline = 2.297e-2 m/s.  Mode-4 amplification "
-                 f"would indicate the production A-L + RK3 path's cube-"
-                 f"face imprint has worsened."))
+                 f"+30°N = {mode4_pos:.4e} m/s exceeds 6.0e-2 ceiling. "
+                 f"Saved baseline = 4.594e-2 m/s (iter-609 "
+                 f"`rfft/N*2` convention).  Mode-4 amplification would "
+                 f"indicate the production A-L + RK3 path's cube-face "
+                 f"imprint has worsened."))
         self.assertLess(
-            mode4_neg, 3.0e-2,
+            mode4_neg, 6.0e-2,
             msg=(f"W2 iter-761 matrix 1-day mode-4 amplitude at "
-                 f"-30°S = {mode4_neg:.4e} m/s exceeds 3.0e-2 ceiling. "
-                 f"Saved baseline = 2.297e-2 m/s."))
+                 f"-30°S = {mode4_neg:.4e} m/s exceeds 6.0e-2 ceiling. "
+                 f"Saved baseline = 4.594e-2 m/s."))
         self.assertLess(
             face_mirror_rel, 1.0e-2,
             msg=(f"W2 iter-761 matrix 1-day face4/face5 max|v_cc_north| "

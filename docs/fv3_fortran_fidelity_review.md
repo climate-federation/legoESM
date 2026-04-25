@@ -513,7 +513,7 @@ These three are intertwined — replacing any one in isolation is what iter-749-
 
 **iter-863 deliverable.**  New regression sentinel `tests/unit/test_cdgrid_fv3_regression.py::TestW2BoundaryErrorBudget::test_w2_iter761_matrix_v_ll_and_mode4_baseline` runs W2 LEGACY C36 1 day on the iter-761 canonical matrix config and asserts:
 - `max|v_ll| < 2.0e-1` (saved baseline 1.585e-1, ~25% headroom)
-- `mode4(±30°) < 3.0e-2` (saved baseline 2.297e-2 each, ~30% headroom)
+- `mode4(±30°) < 6.0e-2` (saved baseline 4.594e-2 each, ~30% headroom).  FFT convention matches the existing `test_w2_short_run_mode4_at_pm30deg_lat_ceiling`: `np.fft.rfft(row) / N * 2.0` — one-sided amplitude.  iter-863's first draft used `|fft|/N` (matches the user-reported 2.297e-2) but Codex stop-time review flagged the inconsistency with the iter-609 sentinel; iter-863 now uses the same `rfft/N*2` convention so a single repo-wide spectral-amp definition holds.  The factor-of-2 normalisation difference does not change the underlying physics.
 - `face4 vs face5 maxabs mirror rel < 1.0e-2` (saved 6.6e-4, ~15× headroom)
 
 A future patch that worsens any of these on the canonical matrix config trips this test.  A future patch that BEATS the baseline (lowers max|v_ll| or mode-4 below the saved value) is the next concrete improvement target.  Cost: ~14 s on CPU x64; same class as the existing iter-761 L2 test.
