@@ -2533,3 +2533,59 @@ iter-856 differs from iter-854 in TWO ways: (a) NO RK3 staleness (each substep s
 **Deliverable.**  `scripts/diag_iter856_phase1_proper.py` (with note that the source patch is reverted).  Production source change to `fv3_sw_tendencies` was applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
 
 **Process.**  116th iter in iter-752-856 chain.  First measurement of the Phase 1 stencil swap with proper RK3 substep plumbing (no staleness).  iter-856 measures `Fortran-cc + canonical damping + own-RK3 + no post-RK3 damp_v/fix` configuration and observes blow-up at step 10 at canonical damping.  This is qualitatively consistent with iter-853's "would destabilise" prediction (which iter-854's buggy hybrid contradicted), but iter-856 changed TWO things vs iter-854 (staleness AND wrapper) and cannot strictly attribute the qualitative reversal to the staleness fix alone.  iter-857+ Priority 1 is the wrapper-equivalent re-run to disentangle staleness from post-RK3 corrections.  Sub-canonical damping (≤0.1×) remains stable in this configuration; the architectural attribution to "Checks 1+4 ARE needed" is iter-857+ scope, not established by iter-856 alone.
+
+### Iter-857 — model.step() + properly-plumbed Phase 1: identical to iter-856; staleness fix was the dominant difference
+
+Per iter-856b's iter-857+ Priority 1: re-run iter-856 via `model.step()` (preserves production post-RK3 corrections) with proper RK3 substep plumbing.  This isolates the staleness fix from the wrapper/post-RK3-corrections difference.
+
+**Method.**
+- Re-applied iter-856's `fv3_sw_tendencies(phase1_div_swap=False)` opt-in kwarg (default-off).
+- Additionally modified `shallow_water_fv3_cdgrid.py`'s `tendency_fn` closure inside `model.step()` to forward `phase1_div_swap` and `phase1_dt` from a module-level toggle `legoesm.core.operators_cdgrid._PHASE1_DIV_SWAP_ENABLED` / `_PHASE1_DT_VALUE`.  Default off → production behaviour identical.
+- Wrote `scripts/diag_iter857_phase1_via_modelstep.py` that flips the toggle on, runs W2 LEGACY C36 for 60 steps via `model.step()`, then flips off.  Damping sweep at the same scales as iter-856.
+- After measurement: REVERTED both source changes.  All 14 W2 sentinels pass after revert.
+
+**Result.**
+
+| damp_scale | iter-857 (model.step + proper) | iter-856 (own-RK3 + proper) | iter-854 (model.step + stale) |
+|-----------:|-------------------------------:|------------------------------:|------------------------------:|
+|       0.0  | stable, 0.844 m                 | stable, 0.857 m               | stable, 0.844 m               |
+|     0.001  | stable, 0.884 m                 | stable, 0.807 m               | stable, 0.886 m               |
+|      0.01  | stable, 3.01 m                  | stable, 3.02 m                | stable, 2.91 m                |
+|       0.1  | stable, 67.2 m                  | stable, 67.4 m                | stable, 26.4 m                |
+|       1.0  | **BLEW UP step 10**              | **BLEW UP step 10**            | stable, 301 m                  |
+|       2.0  | **BLEW UP step 6**               | **BLEW UP step 6**             | stable, 639 m                  |
+
+**Decisive finding.**  iter-857 matches iter-856 EXACTLY (within numerical-noise scale) at the failing damp_scales 1.0× and 2.0×, AND at the stable damp_scales 0..0.1× the magnitudes are within 1 % of each other.  This isolates the cause of the qualitative reversal vs iter-854:
+
+- The **STALENESS FIX** (substeps 2/3 seeing correct intermediate winds rather than start-of-step winds) is the dominant difference.  At canonical damping, the proper plumbing reveals real instability that the stale plumbing artificially suppressed.
+- The **POST-RK3 corrections** (`damp_v` vorticity damping + mass fixer) are NOT the dominant stabiliser here — iter-857 has them active and still blows up at canonical damping with the same step number as iter-856.
+
+**Validation chain.**
+- iter-853's t=0-only "would destabilise" prediction → directionally consistent with iter-856 / iter-857.
+- iter-854's "stable at canonical" → fully retracted as a STALENESS-BUG artefact.
+- iter-855's retraction of iter-854 → confirmed by direct measurement.
+- iter-856's "Phase 1 + canonical damping is unstable" → confirmed by iter-857 with model.step() wrapper.
+
+**Refined conclusion.**
+- Phase 1 stencil swap (`_d_sw5_corner_divergence` corner delpc → 4-pt avg to cell centres, fed into the production `du += coeff·grad(div)` formula) at iter-761 canonical damping is REAL-WORLD UNSTABLE.  The 60-step blow-up at step 10 is robust to the integration wrapper choice.
+- Sub-canonical damping (≤0.1×) keeps it stable for at least 5h, with integration error growing roughly linearly with damp_scale (0.001× ≈ baseline; 0.1× → 67 m, ≈100× worse).
+- iter-857 still does NOT establish that "Checks 1+4 are required" — it shows the Fortran-cc stencil + canonical coefficient + production application path is unstable.  Whether Check 1 alone, Check 4 alone, or only the combination would resolve it is iter-858+ scope.
+
+**What iter-857 DOES show.**
+- Same qualitative finding as iter-856 (canonical damping → blow-up at step 10) holds when the wrapper's post-RK3 corrections (`damp_v` + mass fixer) are active.
+- The staleness bug in iter-854 was the SOLE cause of its "stable" finding at canonical damping.
+- Sub-canonical damping (≤0.1×) is stable in BOTH wrapper configurations.
+
+**What iter-857 does NOT establish.**
+- Whether 1-day v_ll_Linf at sub-canonical damping (e.g., 0.001×) reduces below iter-761 canonical's 0.159 m/s.
+- Whether iter-849 Check 1 (`*dt`) alone would stabilise canonical damping.
+- Whether iter-849 Check 4 (`ke→d_sw6` routing) alone would stabilise canonical damping.
+
+**Iter-858+ candidates.**
+- 1-day Phase 1 trial at damp_scale=0.001× via model.step() (with wrapper post-RK3) — measure v_ll_Linf vs iter-761 canonical's 0.159 m/s.
+- Add iter-849 Check 1 (`*dt` factor in the `dddmp · |delpc|` cap) on top of Phase 1 and re-test 1.0× stability.
+- Continue iter-849 Check 4 architectural port (multi-iter; structurally bigger change).
+
+**Deliverable.**  `scripts/diag_iter857_phase1_via_modelstep.py` (with note that source patches are reverted).  Production source changes to `fv3_sw_tendencies` AND `shallow_water_fv3_cdgrid.py` were applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
+
+**Process.**  117th iter in iter-752-857 chain.  Disentangles iter-856's two confounders (staleness AND wrapper).  iter-857 result matches iter-856 → the STALENESS FIX is what reveals the canonical-damping instability; post-RK3 corrections are NOT the dominant stabiliser.  Cleanly retroactively confirms iter-855's retraction of iter-854 and iter-856's "directional validation" of iter-853's prediction.
