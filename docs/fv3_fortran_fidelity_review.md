@@ -2218,9 +2218,15 @@ LOWERING div_damp from canonical (8× base) WORSENS the 1-day v_ll_Linf (0.159 �
 |--------------------------------|-------------------:|----------------------------|------------------:|
 | Production cgrid_divergence    | 3.30e−08            | (0, 3, 0) lat=−38.4°, lon=−37.5° | 6.78°  (cube-vertex-adjacent) |
 | Fortran `_d_sw5_corner_divergence` | **1.16e−05**     | (0, 36, 18) lat=0°, lon=45°       | **35.26°** (cube-EDGE equatorial corner) |
-| **Magnitude ratio**            | **352×**            | (Fortran / production)         | —                 |
 
-The two stencils differ by a factor of 352× and peak at COMPLETELY DIFFERENT locations.  Production is small at cube-vertex-adjacent corners; Fortran is ~350× larger but at panel-edge equatorial corners.
+**Magnitude comparisons.**
+- Global peak-vs-peak ratio (different locations): Fortran / production = **352×**.
+- Same-location ratio at production peak (face 0 (3,0), GC=6.78°): production = −3.30e−08, Fortran = +1.01e−06 → ratio **−31×** (opposite sign, 31× larger magnitude).
+- Same-location ratio at Fortran peak (face 0 (36,18), GC=35.26°): production = −5.36e−09, Fortran = −1.16e−05 → ratio **+2167×**.
+
+The two stencils differ across the entire corner grid by 30× to 2200× depending on location.  They peak at COMPLETELY DIFFERENT locations: production at a cube-vertex-adjacent corner; Fortran at a panel-edge equatorial corner.
+
+**Halo caveat (Codex iter-850b).**  The `_d_sw5_corner_divergence` nord=0 branch still uses `jnp.pad(..., mode='edge')` for `ptc`/`vort` at `fv3_sw_core.py:~1044` — a known same-face halo gap analogous to iter-836's `_corner_vorticity` issue.  The peak at GC=35.26° (panel-edge equatorial) could therefore reflect that halo gap rather than a true Fortran-faithful stencil signature.  A complete same-stencil comparison would require porting that halo path first — likely making the magnitudes more comparable but in a still-non-equivalent way.
 
 **Interpretation (observational only).**
 - W2 IC has zero true divergence (solid-body rotation conserves area/volume), so any non-zero stencil output is numerical truncation error.
@@ -2229,7 +2235,7 @@ The two stencils differ by a factor of 352× and peak at COMPLETELY DIFFERENT lo
 
 **What iter-850 DOES show.**
 - Documentary cleanup: no other older diag scripts contain residual unconditional overclaims comparable to iter-848's "REFUTED" (already fixed in iter-849b).  The pattern of conditional `IF X THEN Y` is correctly used throughout the iter-700+ scripts.
-- Stencil comparison: production `cgrid_divergence` and Fortran `_d_sw5_corner_divergence` produce divergence fields that differ by 352× peak magnitude on W2 IC at t=0, with peaks in DIFFERENT locations (cube-vertex-adjacent vs panel-edge-equatorial).
+- Stencil comparison: production `cgrid_divergence` and Fortran `_d_sw5_corner_divergence` produce divergence fields that differ across the entire corner grid by 30×–2200× depending on location, with peaks at DIFFERENT locations (cube-vertex-adjacent at GC=6.78° vs panel-edge-equatorial at GC=35.26°).  The Fortran stencil's panel-edge peak may be partly a `mode='edge'` halo-padding artefact (per `fv3_sw_core.py:~1044`).
 - Phase 1 of the d_sw5 architectural port would materially change the production behaviour — not a drop-in equivalent.
 
 **What iter-850 does NOT establish.**

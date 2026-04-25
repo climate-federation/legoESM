@@ -163,8 +163,45 @@ def main():
           f"{delta_peak['j']}), GC-to-vertex={delta_peak['gc_deg']:.2f}°")
     print()
     if centre_peak['peak'] > 0:
-        ratio = delpc_peak['peak'] / centre_peak['peak']
-        print(f"Magnitude ratio Fortran/production = {ratio:.3f}")
+        global_ratio = delpc_peak['peak'] / centre_peak['peak']
+        print(f"GLOBAL peak-vs-peak ratio Fortran/production = {global_ratio:.3f}")
+        print(f"  (NOTE: peaks are at DIFFERENT locations — see GC values above)")
+
+    # Same-location ratios (Codex iter-850b request).  Compare at the
+    # production peak location and at the Fortran peak location to
+    # disentangle magnitude difference from location difference.
+    print()
+    print("Same-location ratios (Fortran/production):")
+    f_p, i_p, j_p = centre_peak["face"], centre_peak["i"], centre_peak["j"]
+    prod_at_prod_peak = float(np.asarray(div_centre_corner)[f_p, i_p, j_p])
+    fortran_at_prod_peak = float(np.asarray(delpc_corner)[f_p, i_p, j_p])
+    if abs(prod_at_prod_peak) > 0:
+        ratio_at_prod = fortran_at_prod_peak / prod_at_prod_peak
+        print(f"  AT production peak (face {f_p} ({i_p},{j_p}), GC={centre_peak['gc_deg']:.2f}°):")
+        print(f"    production = {prod_at_prod_peak:.3e},"
+              f" Fortran = {fortran_at_prod_peak:.3e},"
+              f" ratio = {ratio_at_prod:.3f}")
+    f_f, i_f, j_f = delpc_peak["face"], delpc_peak["i"], delpc_peak["j"]
+    prod_at_fortran_peak = float(np.asarray(div_centre_corner)[f_f, i_f, j_f])
+    fortran_at_fortran_peak = float(np.asarray(delpc_corner)[f_f, i_f, j_f])
+    if abs(prod_at_fortran_peak) > 0:
+        ratio_at_fortran = fortran_at_fortran_peak / prod_at_fortran_peak
+        print(f"  AT Fortran peak (face {f_f} ({i_f},{j_f}), GC={delpc_peak['gc_deg']:.2f}°):")
+        print(f"    production = {prod_at_fortran_peak:.3e},"
+              f" Fortran = {fortran_at_fortran_peak:.3e},"
+              f" ratio = {ratio_at_fortran:.3f}")
+    else:
+        print(f"  AT Fortran peak (face {f_f} ({i_f},{j_f}), GC={delpc_peak['gc_deg']:.2f}°):")
+        print(f"    production = {prod_at_fortran_peak:.3e} (zero, ratio undefined),"
+              f" Fortran = {fortran_at_fortran_peak:.3e}")
+    print()
+    print("Caveat (Codex iter-850b note):")
+    print("- The Fortran `_d_sw5_corner_divergence` nord=0 branch still uses")
+    print("  `mode='edge'` padding for vort/ptc at fv3_sw_core.py:~1044, an")
+    print("  acknowledged same-face halo gap.  The peak at GC=35.26° (panel-")
+    print("  edge equatorial corner) could therefore reflect that halo gap")
+    print("  rather than a true Fortran-faithful stencil signature.  A complete")
+    print("  comparison would require fixing that halo gap first.")
     print()
     print("Interpretation (observational only):")
     print("- If Δ peaks AT cube-vertex corners with magnitude comparable")
