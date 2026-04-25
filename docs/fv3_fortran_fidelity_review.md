@@ -1018,6 +1018,10 @@ The script prints concrete numerical values for human inspection, but per the it
 
 **Implication.**  Both opt-in flags WOULD change behaviour if enabled — they're not silently no-ops.  Combined with iter-870's qualitative observation that the mode='edge' RHS differs from a cross-face proxy at cube vertices, this means enabling either flag right now would inject CORNER CONTRIBUTIONS based on questionable halo data.  **Confirms** the default-OFF semantics for both flags is the right call until the iter-872+ cross-face halo helper validates the RHS values.
 
+**iter-871b — Codex correction: forward iter-862's flag through `_d_sw_native`.**  The original iter-871 framing claimed "both opt-in flags would change FB-chain behaviour"; Codex stop-time review correctly noted this overstates iter-862.  When iter-862 added `apply_legacy_corner_corrections` to `_d_sw5_corner_divergence`, it did NOT plumb the kwarg through the FB-chain wrapper (`_d_sw_native` line 2259 called the inner helper without the flag).  iter-869b plumbed its analogous flag; iter-862 did not.  iter-871b closes that asymmetry by adding `apply_legacy_d_sw5_corner_corrections: bool = False` to `_d_sw_native` and forwarding it.
+
+The iter-871 helper-direct measurement is still valid for the inner helper in isolation; iter-871b adds a new `test_d_sw_native_forwards_d_sw5_flag` that exercises the wrapper-level path on a legacy grid (flag=True changes u/v output) and on a duogrid grid (flag=True is bit-identical to flag=False because the helper's bounded_domain gate short-circuits).  All 15 iter-862/iter-869/iter-871b tests + gold-file tests pass after the wiring fix.
+
 **What iter-871 DOES show.**
 - The opt-in flags introduced by iter-862 and iter-869b are not no-ops — they would change FB-chain behaviour at cube vertices if turned on.
 - Together with iter-870, this establishes that (a) the mode='edge' halo RHS differs from a cross-face proxy and (b) the helpers' arithmetic propagates that difference to a non-zero corner contribution.
@@ -1030,4 +1034,4 @@ The script prints concrete numerical values for human inspection, but per the it
 
 **Deliverable.**  `scripts/diag_iter871_corner_correction_active.py` + this doc entry recording the qualitative non-zero finding.  No source change.
 
-**Process.**  131st iter in iter-752-871 chain.  Closes a natural follow-up question from the iter-870 chain — confirms the opt-in flags are impactful (not no-ops) without committing specific magnitudes to the doc.  Reinforces the default-OFF semantics is correct until the cross-face halo lands.
+**Process.**  131st iter in iter-752-871 chain (with iter-871b follow-on).  Closes a natural follow-up from the iter-870 chain — confirms the opt-in flags are impactful (not no-ops) without committing specific magnitudes to the doc.  iter-871b additionally fixes a wiring asymmetry Codex caught: iter-862 had added `apply_legacy_corner_corrections` only on the inner helper, not on the FB-chain wrapper; iter-871b plumbs the kwarg through `_d_sw_native` matching iter-869b's pattern.  Reinforces the default-OFF semantics is correct until the cross-face halo lands.

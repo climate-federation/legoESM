@@ -364,3 +364,80 @@ def test_nord1_off_vs_on_only_corners_differ_largest_change():
             f"is not a cube-vertex corner — iter-862's n-loop corner "
             f"correction must place its largest contribution exactly "
             f"on one of {sorted(corner_set)}.")
+
+
+def test_d_sw_native_forwards_d_sw5_flag():
+    """Iter-871b: `_d_sw_native` must forward
+    `apply_legacy_d_sw5_corner_corrections` kwarg through to
+    `_d_sw5_corner_divergence(apply_legacy_corner_corrections=...)`.
+
+    Codex iter-871 stop-time review: iter-862 added the flag only on
+    the inner helper; the FB-chain wrapper was not plumbed, making
+    the flag unreachable from the FB chain.  iter-871b adds the
+    forward.  This test verifies (i) flag=True changes the FB-chain
+    output on a legacy grid (the d_sw5 corner correction propagates
+    through ke into the d_sw6 wind update), (ii) flag=True is
+    bit-identical to flag=False on a duogrid grid (the duogrid gate
+    inside `_d_sw5_corner_divergence` short-circuits).
+    """
+    from legoesm.core.fv3_sw_core import _d_sw_native
+
+    n = 8
+
+    # Legacy grid: flag-on must differ from flag-off.
+    grid_leg = create_cubed_sphere(n=n, use_duogrid=False)
+    cdgrid_leg = create_cubed_sphere_cdgrid(grid_leg)
+    assert cdgrid_leg.base.bounded_domain is False
+
+    rng = np.random.default_rng(862)
+    h = jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    h_s = jnp.zeros((6, n, n))
+    uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    ua = jnp.asarray(rng.standard_normal((6, n, n)))
+    va = jnp.asarray(rng.standard_normal((6, n, n)))
+
+    # Use d2_bg=1.0 (nord=0 branch) so damp = da_min_c * 1.0 fires
+    # and the iter-862 corner-correction propagates into ke_damping.
+    # nord=0 + d4_bg=0 keeps the higher-order Laplacian path off.
+    h_off, u_off, v_off = _d_sw_native(
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_leg, 100.0, 9.80616,
+        div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
+        damp_v=0.0, nord_v=0,
+        apply_legacy_d_sw5_corner_corrections=False)
+    h_on, u_on, v_on = _d_sw_native(
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_leg, 100.0, 9.80616,
+        div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
+        damp_v=0.0, nord_v=0,
+        apply_legacy_d_sw5_corner_corrections=True)
+    diff_u = float(np.max(np.abs(np.asarray(u_on) - np.asarray(u_off))))
+    diff_v = float(np.max(np.abs(np.asarray(v_on) - np.asarray(v_off))))
+    assert diff_u > 1e-12 or diff_v > 1e-12, (
+        f"Iter-871b: _d_sw_native legacy + d_sw5 flag=True must change "
+        f"u_d/v_d output (corner correction propagates through ke "
+        f"into d_sw6).  Got max|Δu|={diff_u:.3e}, "
+        f"max|Δv|={diff_v:.3e} — kwarg may not be forwarded.")
+
+    # Duogrid grid: helper's bounded_domain gate short-circuits.
+    grid_dg = create_cubed_sphere(n=n, use_duogrid=True)
+    cdgrid_dg = create_cubed_sphere_cdgrid(grid_dg)
+    assert cdgrid_dg.base.bounded_domain is True
+
+    h_off2, u_off2, v_off2 = _d_sw_native(
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_dg, 100.0, 9.80616,
+        div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
+        damp_v=0.0, nord_v=0,
+        apply_legacy_d_sw5_corner_corrections=False)
+    h_on2, u_on2, v_on2 = _d_sw_native(
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_dg, 100.0, 9.80616,
+        div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
+        damp_v=0.0, nord_v=0,
+        apply_legacy_d_sw5_corner_corrections=True)
+    np.testing.assert_array_equal(
+        np.asarray(h_on2), np.asarray(h_off2))
+    np.testing.assert_array_equal(
+        np.asarray(u_on2), np.asarray(u_off2))
+    np.testing.assert_array_equal(
+        np.asarray(v_on2), np.asarray(v_off2))

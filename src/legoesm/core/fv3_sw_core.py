@@ -2128,7 +2128,8 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                  div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
                  damp_v=0.0, nord_v=0,
-                 apply_legacy_d_sw4_corner_ke_fix=False):
+                 apply_legacy_d_sw4_corner_ke_fix=False,
+                 apply_legacy_d_sw5_corner_corrections=False):
     """D-grid full-step (FV3 d_sw1..d_sw6).
 
     Matches the FV3 dyn_core.F90 d_sw sequence:
@@ -2256,9 +2257,19 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     # the standard FV3 path with nord=1, d4_bg=0.16 as defaults.
     use_d_sw5_damping = (d2_bg > 1e-10 or dddmp > 1e-10 or d4_bg > 1e-10)
     if use_d_sw5_damping:
+        # Iter-871b: forward iter-862's `apply_legacy_corner_corrections`
+        # opt-in flag through the FB-chain wrapper so a caller of
+        # `_d_sw_native` can opt into Check 3 corner corrections.
+        # iter-862 originally added the flag only to
+        # `_d_sw5_corner_divergence`; the wrapper-level wiring was
+        # missing, making the flag unreachable from the FB chain.
+        # Codex iter-871 stop-time review caught this asymmetry vs
+        # iter-869b's wrapper-plumbed flag.  Default-off preserved.
         ke_damping = _d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt,
-            d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord)
+            d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
+            apply_legacy_corner_corrections=(
+                apply_legacy_d_sw5_corner_corrections))
         ke_corner = ke_corner + ke_damping
 
     # === 6. KE gradient at D-grid edge positions ===
