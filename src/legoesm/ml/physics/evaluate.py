@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.ml.normalization import denormalize, normalize
 from legoesm.ml.physics.model import (
@@ -93,10 +94,19 @@ def evaluate_physics_parameterization(
         stats_bundle=stats_bundle,
         columns=dataset.columns,
     )
+    # Fuse the three RMSE reductions into one host transfer.
+    _km = predicted["Km"] - dataset.Km
+    _kh = predicted["Kh"] - dataset.Kh
+    _meq = predicted["M_eq"] - dataset.M_eq
+    _h = np.asarray(jnp.stack([
+        jnp.sqrt(jnp.mean(_km ** 2)),
+        jnp.sqrt(jnp.mean(_kh ** 2)),
+        jnp.sqrt(jnp.mean(_meq ** 2)),
+    ]))
     metrics = PhysicsEvaluationMetrics(
-        rmse_Km=float(jnp.sqrt(jnp.mean((predicted["Km"] - dataset.Km) ** 2))),
-        rmse_Kh=float(jnp.sqrt(jnp.mean((predicted["Kh"] - dataset.Kh) ** 2))),
-        rmse_M_eq=float(jnp.sqrt(jnp.mean((predicted["M_eq"] - dataset.M_eq) ** 2))),
+        rmse_Km=float(_h[0]),
+        rmse_Kh=float(_h[1]),
+        rmse_M_eq=float(_h[2]),
     )
     if dataset.microphysics_scheme == "kessler":
         metrics = metrics._replace(
