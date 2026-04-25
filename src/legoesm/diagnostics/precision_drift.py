@@ -22,6 +22,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 def _best_float():
@@ -300,11 +301,31 @@ def precision_health_report(
     v = state.v.data
     ps = state.p_s.data
 
-    # NaN/Inf check
-    has_nan = bool(jnp.any(jnp.isnan(T)) or jnp.any(jnp.isnan(u))
-                   or jnp.any(jnp.isnan(ps)))
-    has_inf = bool(jnp.any(jnp.isinf(T)) or jnp.any(jnp.isinf(u))
-                   or jnp.any(jnp.isinf(ps)))
+    # Fuse 7 reductions into one host transfer.  ``bool(jnp.any(...) or
+    # jnp.any(...))`` was triggering 6 separate device→host syncs (the
+    # Python ``or`` between traced booleans calls ``__bool__`` on each
+    # branch).  Plus 5 separate ``float(jnp.X(...))`` for T/ps/wind
+    # bounds.
+    _stats = jnp.stack([
+        (jnp.any(jnp.isnan(T)) | jnp.any(jnp.isnan(u))
+            | jnp.any(jnp.isnan(ps))).astype(T.dtype),
+        (jnp.any(jnp.isinf(T)) | jnp.any(jnp.isinf(u))
+            | jnp.any(jnp.isinf(ps))).astype(T.dtype),
+        jnp.min(T).astype(T.dtype),
+        jnp.max(T).astype(T.dtype),
+        jnp.min(ps).astype(T.dtype),
+        jnp.max(ps).astype(T.dtype),
+        jnp.max(jnp.sqrt(u ** 2 + v ** 2)).astype(T.dtype),
+    ])
+    _h = np.asarray(_stats)
+    has_nan = bool(_h[0] > 0.5)
+    has_inf = bool(_h[1] > 0.5)
+    T_min = float(_h[2])
+    T_max = float(_h[3])
+    ps_min = float(_h[4])
+    ps_max = float(_h[5])
+    wind_max = float(_h[6])
+
     metrics["has_nan"] = has_nan
     metrics["has_inf"] = has_inf
     if has_nan:
@@ -313,8 +334,6 @@ def precision_health_report(
         warnings_list.append("Inf detected in state variables")
 
     # Temperature bounds
-    T_min = float(jnp.min(T))
-    T_max = float(jnp.max(T))
     metrics["T_min"] = T_min
     metrics["T_max"] = T_max
     if T_min < T_range[0]:
@@ -323,8 +342,6 @@ def precision_health_report(
         warnings_list.append(f"T_max={T_max:.1f} K above {T_range[1]} K")
 
     # Surface pressure bounds
-    ps_min = float(jnp.min(ps))
-    ps_max = float(jnp.max(ps))
     metrics["ps_min"] = ps_min
     metrics["ps_max"] = ps_max
     if ps_min < ps_range[0]:
@@ -333,7 +350,6 @@ def precision_health_report(
         warnings_list.append(f"p_s max={ps_max:.0f} Pa above {ps_range[1]:.0f} Pa")
 
     # Wind speed
-    wind_max = float(jnp.max(jnp.sqrt(u ** 2 + v ** 2)))
     metrics["wind_max"] = wind_max
     if wind_max > max_wind:
         warnings_list.append(f"Max wind {wind_max:.1f} m/s exceeds {max_wind} m/s")

@@ -427,22 +427,44 @@ class DiagnosticCollector:
         """
         from legoesm.forcing.surface_utils import blend_surface_temperature
 
-        mean_sst = float(jnp.mean(sst))
-        mean_sic = float(jnp.mean(sic))
-        mean_T = float(jnp.mean(state.T.data))
-        mean_T_low = float(jnp.mean(state.T.data[..., -1]))
+        # Fuse 12 diagnostic reductions into one ``jnp.stack`` +
+        # ``np.asarray`` host transfer.  Each ``float(jnp.X(...))``
+        # was previously its own device→host sync, serialising the
+        # GPU pipeline at every diagnostic interval.  The model step
+        # following ``collect()`` cannot launch until all 12 have
+        # round-tripped — fusing them collapses the stall to one.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
-        mean_precip = float(jnp.mean(precip_total)) * 86400.0
+            wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
-        mean_cwv = float(jnp.mean(cwv))
-        mean_sw_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_toa = float(jnp.mean(lw_up_toa))
-        mean_ps = float(jnp.mean(state.p_s.data))
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
+        _stats = jnp.stack([
+            jnp.mean(sst),
+            jnp.mean(sic),
+            jnp.mean(state.T.data),
+            jnp.mean(state.T.data[..., -1]),
+            wind_term,
+            jnp.mean(precip_total),
+            jnp.mean(cwv),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(state.p_s.data),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ])
+        _stats_host = np.asarray(_stats)
+        mean_sst = float(_stats_host[0])
+        mean_sic = float(_stats_host[1])
+        mean_T = float(_stats_host[2])
+        mean_T_low = float(_stats_host[3])
+        max_v = float(_stats_host[4])
+        mean_precip = float(_stats_host[5]) * 86400.0
+        mean_cwv = float(_stats_host[6])
+        mean_sw_toa = float(_stats_host[7])
+        mean_lw_toa = float(_stats_host[8])
+        mean_ps = float(_stats_host[9])
+        mean_sw_sfc = float(_stats_host[10])
+        mean_lw_sfc = float(_stats_host[11])
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)

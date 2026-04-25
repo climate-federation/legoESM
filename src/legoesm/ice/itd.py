@@ -25,6 +25,8 @@ References
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -44,11 +46,17 @@ CICE_BOUNDS = {
 }
 
 
+@lru_cache(maxsize=8)
 def category_bounds(n_cat: int) -> jnp.ndarray:
     """Return lower thickness bounds for *n_cat* categories.
 
     Uses CICE-standard bounds when available (1, 3, 5, 7 categories).
     For other values, returns evenly spaced bounds from 0 to 4 m.
+
+    The result is cached per ``n_cat`` so repeated calls share the
+    same JAX device array instead of building a fresh ``jnp.array``
+    each time (which used to allocate from a Python tuple every step
+    when called from inside the ITD pipeline).
 
     Returns
     -------

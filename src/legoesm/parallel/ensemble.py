@@ -514,10 +514,12 @@ def gather_ensemble(sharded_state: Any) -> Any:
     pytree
         State gathered to device 0.
     """
-    return jax.tree.map(
-        lambda x: jax.device_put(x, jax.devices()[0]),
-        sharded_state,
-    )
+    # Hoist ``jax.devices()`` out of the tree.map closure so the
+    # device list isn't walked once per pytree leaf.  Atmospheric
+    # state has 30+ leaves; the lookup is cheap individually but adds
+    # measurable overhead at each gather call.
+    dev0 = jax.devices()[0]
+    return jax.tree.map(lambda x: jax.device_put(x, dev0), sharded_state)
 
 
 # ============================================================================
