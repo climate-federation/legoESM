@@ -43,6 +43,11 @@ BAROTROPIC_DIV_DAMP_OVERRIDE = None  # Set via --barotropic-div-damp CLI flag
                                      # (dimensionless; targets grid-scale
                                      # compressible modes — see issue #213
                                      # hi-res Eady SOM investigation recipe)
+MOMENTUM_ADVECTION_OVERRIDE = None   # Set via --momentum-advection CLI flag
+                                     # (latlon C-grid only: "vector_invariant",
+                                     # "weno5", or "weno7")
+WENO_D_TERM_OVERRIDE = None          # Set via --no-weno-d-term CLI flag
+                                     # (disables the D-term in WENO momentum)
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"

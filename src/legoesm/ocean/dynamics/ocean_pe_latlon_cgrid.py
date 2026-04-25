@@ -874,7 +874,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # WENO reconstruction of velocity divergence to faces adds implicit
     # dissipation of the divergent mode, complementing the Z-term's
     # rotational dissipation.  WENO5 always (Table 2).
-    if _mom_adv in ("weno5", "weno7"):
+    #
+    # WARNING: The D-term upwinding is NOT energy-dissipative (Silvestri
+    # Appendix C).  When div > 0, the contribution D*u adds kinetic
+    # energy, creating a positive feedback that causes exponential
+    # velocity growth and blowup — confirmed on the Eady experiment at
+    # both 20 and 50 vertical levels by day ~42.  Gated by
+    # config.weno_d_term (default True for paper reproduction; set False
+    # for production stability).
+    if _mom_adv in ("weno5", "weno7") and config.weno_d_term:
         vel_div = divergence_cgrid(u * u_mask_3d, v * v_mask_3d, grid)
         D_at_u = _weno_cell_to_uface(vel_div, vel_div, u, order=5)
         D_at_v = _weno_cell_to_vface(vel_div, vel_div, v, order=5)

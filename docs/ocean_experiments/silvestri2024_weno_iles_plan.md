@@ -125,19 +125,19 @@ reconstruction with smoothness-optimized stencils, gated by
 |-------|-------------|--------|------|
 | 1a | Core WENO module (`core/weno.py`) | **DONE** | 2026-04-23 |
 | 1b | 2D Leith closure | **DONE** | 2026-04-23 |
-| 1c | Deformation radius diagnostic | NOT DONE | — |
-| 1d | Energy/enstrophy spectra diagnostic | NOT DONE | — |
+| 1c | Deformation radius diagnostic | **DONE** | 2026-04-24 |
+| 1d | Energy/enstrophy spectra diagnostic | **DONE** | 2026-04-24 |
 | 2a | WENO tracer advection (WENO5/7 horizontal + vertical) | **DONE** | 2026-04-24 |
 | 2b | WENO momentum advection — Z (vorticity flux) + C (vertical) | **DONE** | 2026-04-24 |
 | 3a | Silvestri baroclinic jet experiment script | **DONE** | 2026-04-24 |
-| 3b | 2D decaying turbulence experiment | NOT DONE | — |
+| 3b | 2D decaying turbulence experiment | **SKIPPED** | — (requires FFT pressure solver; out of scope) |
 | 4a | Fix issue #160 (total-velocity PV flux, Sadourny EC) | **DONE** | 2026-04-25 |
 | 4b | WENO D (divergence flux) + K (KE gradient) terms | **DONE** | 2026-04-25 |
 | 4c | QG Leith closure | NOT DONE | — |
 | 4d | OM4p25 combined Smagorinsky | NOT DONE | — |
-| 4e | AB2 time integrator | NOT DONE | — |
-| 4f | UP3 flux-form momentum advection | NOT DONE | — |
-| 5a | 2D turbulence comparison matrix | NOT DONE | — |
+| 4e | AB2 time integrator | **SKIPPED** | — (only needed for UP3; out of scope) |
+| 4f | UP3 flux-form momentum advection | **SKIPPED** | — (requires horizontal flux-form momentum pathway; out of scope) |
+| 5a | 2D turbulence comparison matrix | **SKIPPED** | — (depends on 3b) |
 | 5b | 3D baroclinic jet comparison matrix | NOT DONE | — |
 
 ### WENO momentum implementation detail
@@ -619,15 +619,28 @@ The WENO-ILES implementation was completed across multiple conversations:
 
 ### What remains for full paper reproduction
 
-**Next conversation(s)** would cover alternative closures and comparison runs:
+**Infrastructure needed before production Silvestri runs:**
 
-- Phase 1c (deformation radius) — prerequisite for 4c and 4d
-- Phase 1d (energy/enstrophy spectra) — prerequisite for Phase 5 figures
+- **Zonal-mean restoring** (~40 LOC): The paper restores the zonal-mean b and u
+  to the initial profiles everywhere in the domain with a 50-day timescale
+  (Soufflet et al. 2016 approach). This is fundamentally different from our
+  boundary sponge — it maintains the mean jet while allowing eddies to develop
+  freely. Without it, the mean flow accelerates unchecked and WENO5 blows up
+  at 160x160 by day 34. Implementation: each timestep compute zonal mean of
+  T, u; apply tendency `dX/dt += (1/tau) * (X_init_zonalmean - X_zonalmean)`
+  uniformly across longitudes. Only the zonal-mean component is restored.
+- **Front profile** (Eq. 52-53): The paper uses a smooth piecewise sin/cos
+  profile spanning the full 20° domain width, not a narrow tanh. Should be
+  updated to match.
+- **WENO order**: Paper uses 9th-order for Z and D terms; we currently only
+  support up to 7th. Consider adding `weno9` config option or testing with
+  `weno7` as a close approximation.
+
+**Next conversation(s)** would cover:
+
+- Zonal-mean restoring implementation + Silvestri front profile fix
 - Phase 4c (QG Leith) + Phase 4d (OM4p25 Smagorinsky) — competing schemes
-- Phase 3b (2D turbulence) — needs FFT pressure solver
-- Phase 4e (AB2 time integrator) — paper uses AB2
-- Phase 4f (UP3 flux-form momentum) — one of 5 schemes in comparison
-- Phase 5 (full comparison matrix) — production runs + figure generation
+- Phase 5 (comparison matrix) — production runs + figure generation
 
 ### Grid priority
 
