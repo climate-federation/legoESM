@@ -616,3 +616,64 @@ Production `fv3_sw_tendencies` does NOT call `fv_tp_2d` (uses `cgrid_mass_flux_d
 - All 15 `TestW2BoundaryErrorBudget` sentinels pass.
 
 **Process.**  124th iter in iter-752-864 chain.  CLAUDE.md guidance specified flux-sync verification as a critical duogrid constraint.  Audit identified ONE Fortran-fidelity gap: the FB chain's d_sw5 vortflux call was over-syncing relative to Fortran's commented-out vortflux averaging block.  Fix is the smallest possible: gate the existing sync behind a kwarg (default-True for callers that match Fortran's ACTIVE mass-flux sync) and opt the d_sw5 caller out (matching Fortran's DISABLED vortflux sync).  Production unchanged; FB chain now Fortran-faithful at this site.  Three Codex review findings addressed across two passes: (a) flow-aware AST scan replaces walk-with-quorum so a nested-scope or transport_step regression cannot hide; (b) wind/KE gold-file fingerprints rebaselined to post-iter-864 Fortran-faithful values, NOT silently for h_new.sum (Codex first-pass directive); (c) h_new.sum kept as a HARD relative-drift ceiling subTest (1e-5 ceiling, ~10× the observed pre-iter-862 drift), NOT downgraded to non-blocking @expectedFailure (Codex second-pass directive: don't downgrade regression coverage).  iter-865+ remains tasked with rooting out the original mass-path drift cause.
+
+### Iter-865 — Production legacy-edge-handling auto-disabled in duogrid mode
+
+CLAUDE.md duogrid constraint #2: "Legacy edge handling must be disabled in duogrid mode via `bounded_domain = .true.`  Verify that legacy edge paths are actually bypassed."  Iter-865 audits the production `fv3_sw_tendencies` legacy-edge-handling sites and adds explicit `cdgrid.base.duogrid is None` gates so the legacy paths are bypassed when duogrid is active.
+
+**Audit findings** (production `fv3_sw_tendencies`, file `src/legoesm/core/operators_cdgrid.py`).
+
+| Site                                                | Pre-iter-865 gate                | Post-iter-865 gate                                     |
+|-----------------------------------------------------|----------------------------------|--------------------------------------------------------|
+| `boundary_fix` smoothing block (line ~1745)         | `boundary_fix and n > 2`         | `boundary_fix AND duogrid is None AND n > 2`            |
+| `_fortran_agrid_vector_corner_fill` at step (e)     | `fortran_vector_corner_fill`     | `fortran_vector_corner_fill AND duogrid is None`        |
+| `_fortran_agrid_vector_corner_fill` at step (k)     | `fortran_vector_corner_fill`     | `fortran_vector_corner_fill AND duogrid is None`        |
+
+Both `boundary_fix` and `fortran_vector_corner_fill` are documented non-FV3 / non-duogrid hacks: `boundary_fix` is described in source as "a NON-FV3 hack...because our A-L + RK3 production path is not FV3-faithful, so the boundary cells need explicit smoothing" (with no Fortran analogue per Codex iter-769 review); `fortran_vector_corner_fill` is the Fortran legacy `fill_corners_agrid_r8` cube-vertex formula whose direct cross-component swap+sign avoids the rotate-pad-rotate mismatch that arises only because non-duogrid same-face halos cannot supply correct cross-face values at cube vertices.  In duogrid mode the cross-face halo from `pad_halo_vector` already provides correct cube-vertex values, and these legacy hacks must NOT fire.
+
+**Audit findings — already-correct sites** (no change needed in this iter):
+- `_pad_halo_auto` / `_pad_halo_auto_h2`: correctly switch via `cdgrid.base.duogrid is not None`.
+- `pad_halo`: `interp_offsets` and `duogrid` are mutually exclusive (raises ValueError on conflict).
+- `fv_tp_2d` PPM legacy edge logic (lines 150, 162, 183, 205, 252): correctly gated on `not use_duogrid`.
+- `_ke_upwind`, `_corner_vorticity`, `_vorticity_flux` (FB chain): correctly gated on `not use_duogrid`.
+
+**Behavioural impact.**  No production caller currently combines duogrid mode with `boundary_fix=True` or `fortran_vector_corner_fill=True`:
+- The atmosphere matrix script (`scripts/run_atmosphere_test_matrix.py:1175`) creates the cubed sphere with the default `use_duogrid=False`, so production W2/W5/cosine bell run in LEGACY mode where the gates are no-ops.
+- All 14 `TestW2BoundaryErrorBudget` sentinels and the iter-863 `test_w2_iter761_matrix_v_ll_and_mode4_baseline` use LEGACY mode.
+- iter-825's combined Fortran-corner-fill regression sentinels test LEGACY mode.
+
+So iter-865 is a defensive Fortran-fidelity lock: NO behavioural change for any current run, but a future caller that enables `use_duogrid=True` with `boundary_fix=True` or `fortran_vector_corner_fill=True` will now correctly bypass the legacy hacks instead of corrupting the duogrid path.
+
+**Tests.**  New `tests/test_fv3_boundary_fix_duogrid_gate_iter865.py` (5 tests):
+1. `test_boundary_fix_fires_in_legacy_mode` — LEGACY + boundary_fix=True changes du/dv vs boundary_fix=False (smoothing fires).  Guards that iter-865 did not break LEGACY behaviour.
+2. `test_boundary_fix_bypassed_in_duogrid_mode` — DUOGRID + boundary_fix=True equals boundary_fix=False bit-for-bit (smoothing bypassed by iter-865 gate).
+3. `test_fortran_vector_corner_fill_bypassed_in_duogrid_mode` — DUOGRID + fortran_vector_corner_fill=True equals False bit-for-bit (legacy corner formula bypassed).
+4. `test_fortran_vector_corner_fill_active_in_legacy_mode` — LEGACY + fortran_vector_corner_fill=True changes output (legacy formula fires).
+5. `test_iter865_gate_visible_in_source` — flow-aware AST scan: every `du_cc/dv_cc.at[...].set(...)` smoothing assignment in `fv3_sw_tendencies` must be dominated by an `If` whose test is an AND of all three guards (`boundary_fix`, `cdgrid.base.duogrid is None`, `n > 2`).  Codex iter-865 review tightened this from "any If with boundary_fix and some duogrid mention" to a proper dominance check that also verifies the `n > 2` size guard and the full `cdgrid.base.duogrid` attribute chain.
+
+**Production verification.**
+- All 15 `TestW2BoundaryErrorBudget` sentinels pass.
+- `scripts/run_atmosphere_test_matrix.py --only sw --grid cubed_sphere --quick` reports identical W2 v_ll_Linf=0.159, L2=2.07e-04, W5 mass drift=1.83e-05, cosine bell L1=0.12.
+- 5 new iter-865 tests pass.
+
+**What iter-865 DOES show.**
+- Three legacy non-FV3 paths in `fv3_sw_tendencies` are now Fortran-faithfully bypassed when duogrid is active.
+- The audit established that the remaining production halo / edge-handling sites are already correctly gated (`_pad_halo_auto`, `pad_halo`, `fv_tp_2d`, `_ke_upwind`, `_corner_vorticity`, `_vorticity_flux`).
+- The flow-aware AST scan locks the `boundary_fix` block's three-guard AND chain explicitly, so a future refactor cannot move the smoothing block out of the gate undetected.
+
+**What iter-865 does NOT establish.**
+- Any production W2 mode-A reduction.  No current production run combines duogrid with these legacy hacks; iter-865 is a defensive lock.
+- Whether a future production duogrid run would benefit from re-enabling the boundary smoothing.  The CLAUDE.md directive says it must NOT.
+- Root cause of the pre-iter-862 mass-path drift in `h_new.sum` (still tracked as the iter-864b hard ceiling subTest).
+
+**Iter-866+ candidates.**
+- Investigate the pre-iter-862 mass-path drift causing `h_new.sum` to shift from 383992.34 to ~383993.75 (delta ~1.4 over 384e3, ~3.7e-6 relative).
+- FB-chain C36 stability re-test now that iter-864 aligned d_sw5 vortflux behaviour.
+- Multi-iter Check 4 architectural port (production ke→d_sw6 routing).
+
+**Deliverable.**
+- `src/legoesm/core/operators_cdgrid.py`: three duogrid-is-None gates added (boundary_fix smoothing block + 2 fortran_vector_corner_fill sites).
+- `tests/test_fv3_boundary_fix_duogrid_gate_iter865.py`: 5 new tests covering both legacy and duogrid behaviour for both flags + flow-aware AST scan.
+- All 15 W2 sentinels pass; production atmosphere matrix unchanged.
+
+**Process.**  125th iter in iter-752-865 chain.  Direct response to CLAUDE.md duogrid constraint #2.  Audit found three legacy non-FV3 paths in `fv3_sw_tendencies` (boundary_fix block + 2 sites of fortran_vector_corner_fill) that fired regardless of duogrid status; all three now gated on `cdgrid.base.duogrid is None`.  Defensive Fortran-fidelity lock with no behavioural change for any current run.  Two Codex review findings addressed: (a) added second flag's gate (Codex flagged `fortran_vector_corner_fill` as a public escape hatch); (b) tightened AST scan to flow-aware dominance check verifying the full three-guard AND chain `boundary_fix AND cdgrid.base.duogrid is None AND n > 2` ties to the actual smoothing assignments.
