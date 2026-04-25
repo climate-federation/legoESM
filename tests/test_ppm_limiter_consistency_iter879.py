@@ -35,23 +35,38 @@ iter-879f removes the AST sentinel entirely.  Iter-879g (Codex
 iter-879f stop-time) widens the behavioural coverage with explicit
 edge cases.
 
-**Scope (iter-879g, honest).**  The behavioural test catches
-regressions that affect the limiter output on the specific INPUT
-REGIMES exercised by:
+**Scope (iter-879g + iter-879h, honest).**  The behavioural test
+catches regressions that affect the limiter output on the specific
+INPUT REGIMES exercised by:
 - 3 random seeds at unit scale (constraint sometimes fires).
 - 3 input scales (0.001 / 1.0 / 1000.0) at one fixed seed
   (constraint rarely / mixed / often).
-- 9 deterministic edge cases (monotone ramp, step function, zero
-  field, near-zero, double/triple peaks, single outlier, sign
-  flips, alternating pairs).
+- 9 deterministic edge-case patterns (monotone ramp, step function,
+  zero field, near-zero, double/triple peaks, single outlier, sign
+  flips with period 2, alternating pairs with period 4).
 
-Total: 3 + 3 + 9 = 15 distinct input regimes.  A regression that
-manifests in any of these regimes will fail the cross-implementation
-bit-match at 1e-12 rtol.  A regression that ONLY manifests in
-input regimes outside this set (e.g., specific NaN/Inf inputs,
-exact-fp-boundary values, or 2D/3D inputs not exercised here)
-would not be caught.  iter-879g does NOT claim universal
-coverage; it provides 15 representative regime checks.
+Total: 3 + 3 + 9 = 15 named input regimes.  Note that some patterns
+share characteristics (e.g., ``step_function``, ``sign_flips``, and
+``alternating_pairs`` all probe sharp-gradient regimes with
+different periods); on a regression that manifests on sharp
+gradients they may all fail in concert.  Distinct-regime coverage
+across the 9 edge cases is therefore < 9 in the worst case but
+remains a stronger probe than random seeds alone.
+
+A regression that manifests in any of these regimes will fail the
+cross-implementation bit-match at 1e-12 rtol.  A regression that
+ONLY manifests in input regimes outside this set (e.g., specific
+NaN/Inf inputs, exact-fp-boundary values, or 2D/3D inputs not
+exercised here) would not be caught.  This sentinel does NOT claim
+universal coverage; it provides 15 representative regime checks.
+
+iter-879h fix: pre-iter-879h the `alternating_pairs` fixture used
+``np.repeat([1, -1], 16)`` which expands to 16 ones followed by 16
+minus-ones — a step function in disguise, duplicating
+`step_function`.  Codex iter-879g stop-time correctly caught this
+misdefinition.  The intended fixture is now
+``np.tile([1, 1, -1, -1], 8)`` which actually alternates in pairs
+(period 4, distinct from `sign_flips`'s period 2).
 
 For PER-FUNCTION existence verification of the iter-878 fix in
 ``_ppm_reconstruct_1d`` specifically, see
@@ -194,8 +209,17 @@ _ITER879G_EDGE_CASES = {
                                                               size=32)),
     "single_outlier": np.concatenate(
         [np.zeros(15), [1e6], np.zeros(16)]),
+    # `sign_flips`: ``[1, -1, 1, -1, ...]`` — every cell flips sign.
     "sign_flips": np.array([(-1.0) ** i for i in range(32)]) * 10.0,
-    "alternating_pairs": (np.repeat([1.0, -1.0], 16) * 100.0),
+    # `alternating_pairs`: ``[1, 1, -1, -1, 1, 1, -1, -1, ...]`` —
+    # iter-879h fix: pre-iter-879h this was
+    # ``np.repeat([1, -1], 16)`` which expands to 16 ones followed
+    # by 16 minus-ones (a step function in disguise, duplicating
+    # ``step_function`` above).  Codex iter-879g stop-time correctly
+    # caught this misdefinition.  The intended fixture is now
+    # ``np.tile([1, 1, -1, -1], 8)`` which actually alternates in
+    # pairs.
+    "alternating_pairs": (np.tile([1.0, 1.0, -1.0, -1.0], 8) * 100.0),
 }
 
 

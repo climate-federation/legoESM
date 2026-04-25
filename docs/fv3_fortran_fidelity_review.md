@@ -1647,3 +1647,21 @@ The strengthened behavioural test fires across 13 of the 15 regimes — much hig
 These gaps are documented in the test docstring.  Future iters can extend coverage if a real regression in any of these regimes is encountered.
 
 **Process.**  145th iter in the iter-752-879g chain.  Seven-pass sentinel evolution.  iter-879g adds explicit edge-case coverage to address Codex's "completeness claim is overstated" finding, and softens the doc to match.  The honest scope: 15 representative input regimes covered; obfuscated source forms and uncovered input regimes both delegated to future iters.  This is a defensible final form for the iter-879 sentinel.
+
+### Iter-879h — Codex iter-879g stop-time: fix misdefined `alternating_pairs` fixture
+
+**Codex iter-879g stop-time finding.**  "iter-879g still overstates its new coverage; the new `alternating_pairs` fixture is misdefined."
+
+**Issue.**  iter-879g's `alternating_pairs` edge-case fixture was defined as `np.repeat([1.0, -1.0], 16) * 100.0`.  `np.repeat` REPEATS each element N times (so the result is `[1, 1, 1, ..., 1, -1, -1, -1, ..., -1]` with 16 ones followed by 16 minus-ones), NOT alternating pairs.  This is functionally identical to `step_function` (a single jump), so the supposed 9 distinct edge-case regimes really collapsed to 8 effective regimes.
+
+**Fix (iter-879h).**  Replace `np.repeat([1.0, -1.0], 16)` with `np.tile([1.0, 1.0, -1.0, -1.0], 8)`, which produces the actually-alternating-pairs pattern `[1, 1, -1, -1, 1, 1, -1, -1, ...]` (period 4 — distinct from `sign_flips`'s period 2).
+
+Also update the test docstring to honestly describe distinct vs overlapping regime coverage:
+
+> Total: 3 + 3 + 9 = 15 named input regimes.  Note that some patterns share characteristics (e.g., `step_function`, `sign_flips`, and `alternating_pairs` all probe sharp-gradient regimes with different periods); on a regression that manifests on sharp gradients they may all fail in concert.  Distinct-regime coverage across the 9 edge cases is therefore < 9 in the worst case but remains a stronger probe than random seeds alone.
+
+**Verification.**  All 15 iter-879h tests pass on current source.  Re-injected the iter-878 bug: 13 of 15 tests fail (same detection rate as iter-879g — the misdefined fixture happened to fail in the same regime as `step_function`, so the count is preserved by accident, but the regime coverage is now genuinely distinct).
+
+**On restored source.**  All 15 iter-879h tests + 4 iter-878 tests pass (19 total).
+
+**Process.**  146th iter in the iter-752-879h chain.  Eighth pass in the iter-879 sentinel evolution.  iter-879h fixes the fixture misdefinition Codex caught and acknowledges in the doc that "9 edge cases" doesn't translate 1-to-1 into "9 fully distinct regimes" — overlap is real and documented.
