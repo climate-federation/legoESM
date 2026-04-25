@@ -2230,7 +2230,7 @@ The two stencils differ across the entire corner grid by 30× to 2200× dependin
 
 **Interpretation (observational only).**
 - W2 IC has zero true divergence (solid-body rotation conserves area/volume), so any non-zero stencil output is numerical truncation error.
-- The 352× magnitude difference reflects different stencil construction: Fortran's edge-by-edge `ptc/vort` formulation with `cosa_v · 0.5(va_below + va_above)` cross-velocity correction is more sensitive to cube-edge geometry than our cell-centre flux-form `cgrid_divergence`.
+- The 30×–2200× same-location magnitude differences reflect different stencil construction: Fortran's edge-by-edge `ptc/vort` formulation with `cosa_v · 0.5(va_below + va_above)` cross-velocity correction is more sensitive to cube-edge geometry than our cell-centre flux-form `cgrid_divergence`.  (At the production peak, Fortran is 31× larger and OPPOSITE SIGN; at the Fortran peak, Fortran is 2167× larger.)
 - Phase 1 of the d_sw5 port (replace `cgrid_divergence` with `_d_sw5_corner_divergence`) is NOT a cosmetic refactor.  Even with the same downstream `d2_bg`, `dddmp`, etc., the underlying divergence field would be dramatically different.
 
 **What iter-850 DOES show.**
@@ -2250,4 +2250,4 @@ The two stencils differ across the entire corner grid by 30× to 2200× dependin
 
 **Deliverable.**  `scripts/diag_iter850_div_stencil_compare.py` + run output.  Documentary cleanup pass result: only iter-848 had a residual overclaim (already fixed in iter-849b).  No production source-code change.  All 14 W2 sentinels unaffected.
 
-**Process.**  110th iter in iter-752-850 chain.  Two-part deliverable: (i) cleanup verification — older diag scripts use proper hypothesis-conditional language; iter-848's residual was the only one and is fixed.  (ii) quantitative reconnaissance for the Phase 1 d_sw5 port — Fortran corner-divergence stencil is 352× larger than production at t=0 on W2 IC, located at panel-edge equatorial corners (vs cube-vertex-adjacent for production).  Phase 1 swap would substantially change the production field and is not a cosmetic refactor.
+**Process.**  110th iter in iter-752-850 chain.  Two-part deliverable: (i) cleanup verification — older diag scripts use proper hypothesis-conditional language; iter-848's residual was the only one and is fixed.  (ii) quantitative reconnaissance for the Phase 1 d_sw5 port — at t=0 on W2 IC, the Fortran corner-divergence stencil differs from the production cell-centre stencil by 30×–2200× across the corner grid (same-location ratios), with peaks in different locations: production at cube-vertex-adjacent (GC=6.78°), Fortran at panel-edge-equatorial (GC=35.26°, possibly partly a `mode='edge'` halo artefact).  Phase 1 swap would substantially change the production field and is not a cosmetic refactor.
