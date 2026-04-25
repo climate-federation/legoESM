@@ -791,3 +791,53 @@ iter-849 catalogued the production divergence-damping coefficient gaps.  iter-86
 **Deliverable.**  `tests/test_da_min_c_fortran_fidelity_iter867.py` with empirical + AST scan tests.  Doc entry recording the audit table.  No source-code change.
 
 **Process.**  127th iter in iter-752-867 chain.  Small Fortran-fidelity verification iter: closes the `da_min_c` definition question raised by the production divergence-damping branch.  Audit + sentinel test ensures a future refactor can't silently swap the corner area for the cell area.
+
+### Iter-868 — Pre-iter-808 gold-file audit + FB chain C36 stability measurement post iter-864
+
+iter-867's iter-868+ candidates: (1) audit other gold-file tests for pre-iter-808 fingerprint staleness similar to iter-866's iter-710 finding; (2) re-test FB chain C36 stability now that iter-864 aligned d_sw5 vortflux behaviour.
+
+**Part 1 — Pre-iter-808 gold-file audit.**  Searched the test tree for gold-file regression tests committed before iter-808 (`ff135e2`, 2026-04-24).  Found 6 candidates:
+
+| Test class                                   | Iter | Status |
+|----------------------------------------------|------|--------|
+| `TestDSwNativeEndToEndGoldFileIter710`       | 710  | iter-866 rebaselined ✓ |
+| `TestDSw5CornerDivergenceGoldFileIter702`    | 702  | **PASS** (no flux sync involved; tests `_d_sw5_corner_divergence` directly) |
+| `TestInterpCenterToCornerOrderIter707`       | 707  | **PASS** (helper interpolation test; no flux sync) |
+| `TestFv3SwTendenciesProductionGoldFileIter711` | 711 | **PASS** (uses `use_duogrid=False`; iter-808 sync gated off) |
+| `TestCosineBellGoldFileIter712`              | 712  | **PASS** (uses `use_duogrid=False`) |
+| `TestW5ProductionGoldFileIter716`            | 716  | **PASS** (uses `use_duogrid=False`) |
+
+All 8 sub-tests across the 5 non-iter-710 classes PASS on HEAD.  The iter-866 finding was specific to `TestDSwNativeEndToEndGoldFileIter710` because it exercises `use_duogrid=True` AND routes through `synchronize_cgrid_fluxes`.  Production-path gold-file tests use `use_duogrid=False` (the matrix's LEGACY default), so the iter-808 sign-flip fix is gated off and their fingerprints are unaffected.  No other rebaselining required.
+
+**Part 2 — FB chain C36 stability measurement.**  Re-ran W2 LEGACY 1-day on the FB chain (`FV3FBShallowWaterModel` → `fv3_fb_sw_step` → `_d_sw_native`) post iter-864:
+
+| `damp_v` | `dt`   | Outcome                                     |
+|----------|--------|---------------------------------------------|
+| 0.00     | 300 s  | blew up at step 40 (~3.3 h)                  |
+| 0.00     | 100 s  | completed 100 steps (~2.8 h), max\|h−h₀\| ≈ 2.5e+03 m |
+| 0.00     |  30 s  | completed 100 steps (~0.8 h), max\|h−h₀\| ≈ 3.7e+02 m |
+| 0.06     | 300 s  | blew up at step 40 (~3.3 h)                  |
+| 0.06     | 100 s  | completed 100 steps (~2.8 h), max\|h−h₀\| ≈ 2.5e+03 m |
+| 0.06     |  30 s  | completed 100 steps (~0.8 h), max\|h−h₀\| ≈ 3.2e+02 m |
+
+W2 should produce \|h−h₀\| < 1 m for a Fortran-faithful integration (the W2 analytical IC is a steady solid-body rotation).  FB chain produces O(10²-10³) m error within the first hour — orders of magnitude beyond physical.  Reducing `dt` from 300 s → 30 s doesn't change the qualitative picture: instability is exponential in time and reducing `dt` only delays the blow-up.  `damp_v` has negligible effect on this instability.
+
+**Conclusion.**  iter-864's d_sw5 vortflux sync alignment was a Fortran-fidelity correction but DID NOT improve FB chain stability at C36.  The FB instability is a separate architectural issue — per the source docstring at `FV3FBShallowWaterModel`: "The forward-backward coupling is unstable for finite dt without additional dissipation at the c_sw/d_sw interface."  iter-863's diagnosis stands: FB chain stabilisation requires additional Fortran-faithful dissipation control between c_sw and d_sw, not a single-knob fix.
+
+**What iter-868 DOES show.**
+- Pre-iter-808 fingerprint staleness was a one-off issue specific to the `_d_sw_native` gold-file (iter-866); other gold-file tests in the repo are clean.
+- FB chain C36 instability post iter-864 is unchanged from pre iter-864 — iter-864's vortflux sync alignment is not a stability fix.
+- `damp_v ∈ {0.0, 0.06}` and `dt ∈ {300s, 100s, 30s}` all produce O(10²-10³) m error in the first hour on W2 LEGACY at C36.  FB chain is not a viable production candidate as-is.
+
+**What iter-868 does NOT establish.**
+- The exact source of the FB chain instability — that requires deeper diagnostic work (multi-iter).
+- Whether a Fortran-faithful additional dissipation between c_sw and d_sw would stabilise it.
+
+**Iter-869+ candidates.**
+- Diagnostic: identify which step in `fv3_fb_sw_step` (c_sw, p_grad_c, or d_sw) injects the runaway energy.  Component-by-component instability bisect.
+- Multi-iter Check 4 architectural port (production ke→d_sw6 routing).
+- FB chain c_sw/d_sw dissipation port (Fortran-faithful `del2_cubed` or similar between phases).
+
+**Deliverable.**  Doc entry recording the audit + stability measurement.  No source changes.  No regression sentinels added (FB chain is documented as unstable; locking its current behaviour would be locking-in a non-Fortran-faithful state).
+
+**Process.**  128th iter in iter-752-868 chain.  Two carry-over items from iter-866/867 closed: (1) other gold-file tests audited and clean — iter-710 was unique; (2) FB chain re-tested post iter-864 — still unstable at C36, vortflux sync was not the bottleneck.  Documents the negative results so iter-869+ can target the actual FB instability source rather than re-examining ground already covered.
