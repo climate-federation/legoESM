@@ -1088,3 +1088,27 @@ Codex adversarial-review on iter-872 flagged two findings:
 iter-872 is therefore **explicitly per-model**: direct `FV3EdgeShallowWaterModel(grid, config_with_dddmp_prod=X)` callers see the new knob; YAML/driver/CLI users see the historic 0.2 value (no behaviour change).  The W2 sentinel uses `FV3EdgeShallowWaterModel` directly via the matrix runner, so iter-872 covers the live Fortran-fidelity surface.
 
 **Deliverable.**  iter-872 + iter-872b together: gate fix + regression test + scope clarification.  No driver/CLI wiring (deferred).
+
+### Iter-872c — Codex pass-2 follow-up: Fortran-strict kwarg default + plumb `dddmp_prod` through `CDGridShallowWaterModel`
+
+Codex adversarial-review pass-2 on iter-872 + iter-872b flagged two more high-severity issues that needed correction:
+
+**Pass-2 Finding 1 (high) — silent numerical API break for direct callers.**  iter-872's kwarg default was 0.2, and iter-872b widened the gate.  Combined, this meant a direct call `fv3_sw_tendencies(..., div_damp=0)` (no `dddmp` override) silently switched from "no damping" (pre-iter-872) to "adaptive damping with 0.2" (post-iter-872b).  Codex correctly identified this as a silent API break for direct callers.
+
+**Fix (iter-872c).**  Change the kwarg default from 0.2 to 0.0 (Fortran-strict, fv_arrays.F90:360).  Production passes 0.2 explicitly via `self.config.dddmp_prod` (default 0.2), so production W2 sentinel is unaffected.  Direct callers without an explicit `dddmp` now get pure background-only damping when `div_damp>0` (Fortran-strict regime) and no damping at all when `div_damp=0`.  Pre-iter-872 behaviour (hardcoded 0.2 leak into every direct call) was itself NOT Fortran-faithful — Fortran's strict default IS 0.0.  This iter brings the kwarg default in line with Fortran while keeping production W2 sentinel bit-identical via explicit `dddmp_prod` plumbing.
+
+**Pass-2 Finding 2 (medium) — `dddmp_prod` ignored on `CDGridShallowWaterModel` path.**  iter-872 wired `dddmp_prod` into `FV3EdgeShallowWaterModel.step` only.  But `CDGridShallowWaterModel` (used by `cdgrid_shallow_water_tendencies`) reaches `cdgrid_momentum_tendencies` (operators_cdgrid.py:1138), which had its OWN hardcoded `dddmp = 0.2` literal.  So setting `config.dddmp_prod = 0.4` on the shared `CDGridShallowWaterConfig` had no effect when used with `CDGridShallowWaterModel` — a silent reproducibility hazard.
+
+**Fix (iter-872c).**  Plumb `dddmp` through `cdgrid_momentum_tendencies` (new kwarg, default 0.0) and forward `dddmp=config.dddmp_prod` from `cdgrid_shallow_water_tendencies`.  Both model classes (`FV3EdgeShallowWaterModel` AND `CDGridShallowWaterModel`) now honour the same shared config field consistently.
+
+**Tests.**  iter-872c adds:
+- `test_iter872c_default_kwarg_is_fortran_strict_zero`: pin the new Fortran-strict default 0.0.
+- `test_iter872c_kwarg_default_is_zero_fortran_strict`: inspect.signature-based double-check.
+- `test_iter872c_cdgrid_momentum_honors_dddmp`: behavioural — `dddmp=0.0` vs 0.2 produces different tendencies on the corner-stagger D-grid path.
+- `test_iter872c_cdgrid_shallow_water_forwards_dddmp`: AST scan — `cdgrid_shallow_water_tendencies` forwards `dddmp=config.*`.
+
+The iter-872 test `test_default_kwarg_reproduces_pre_iter872_hardcoded_value` was renamed to `test_iter872c_default_kwarg_is_fortran_strict_zero` and updated to compare default vs explicit 0.0 (was 0.2).
+
+**Verification.**  All 9 iter-872/872b/872c tests pass.  All 145 broader regression tests (test_cdgrid + iter-862-869 chain) pass.  All 15 W2 boundary error budget tests pass — production W2 sentinel bit-identical.
+
+**Process.**  iter-872c is the third Codex pass on iter-872.  Total pattern: iter-872 (initial), iter-872b (Codex pass-1 Finding 1 gate fix + Finding 2 doc scoping), iter-872c (Codex pass-2 Finding 1 default fix + Finding 2 second-model plumbing).  Each pass progressively closed Fortran-fidelity gaps that the previous fix exposed.  Net effect: both shallow-water model classes now honour Fortran-strict `dddmp_prod` semantics with no silent leaks and consistent shared-config behaviour.

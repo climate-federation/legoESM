@@ -211,11 +211,14 @@ def cdgrid_shallow_water_tendencies(
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
 
     # 2. Momentum tendencies (vector-invariant form with div damping)
+    # Iter-872c: forward `dddmp_prod` so `CDGridShallowWaterModel`
+    # honors the same shared config field as `FV3EdgeShallowWaterModel`.
     du_d_dt, dv_d_dt = cdgrid_momentum_tendencies(
         h, u_d, v_d, h_s, cdgrid,
         g=config.g, A_h=config.A_h,
         hyperdiff_coeff=config.hyperdiff_coeff,
         div_damp=config.div_damp,
+        dddmp=config.dddmp_prod,
     )
 
     # Boundary-corner fix: halo interpolation gives O(dx) gradient error

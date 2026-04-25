@@ -1140,6 +1140,7 @@ def cdgrid_momentum_tendencies(
     g=9.80616, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
     rho_0=None, div_v=None, f_3d=None,
     u_prime=None, v_prime=None,
+    dddmp=0.0,
 ):
     """D-grid momentum tendencies (vector-invariant form).
 
@@ -1302,11 +1303,17 @@ def cdgrid_momentum_tendencies(
     # (corner divergence + KE-add) together, deferred to a dedicated
     # iter.  Iter-757b metric fix (da_min_c = area_corner) is
     # retained.
-    if div_damp > 0:
+    # Iter-872c: parallel `dddmp` plumbing for `CDGridShallowWaterModel`
+    # via the shared `dddmp_prod` config field.  Pre-iter-872c the
+    # literal was hardcoded 0.2 here, identical to the leak in
+    # `fv3_sw_tendencies` (now closed by iter-872).  Same gate
+    # widening to honor Fortran sw_core.F90:1720 (`damp = da_min_c *
+    # max(d2_bg, min(0.20, dddmp*|delpc*dt|))` is unconditional in
+    # the `nord==0` branch).
+    if div_damp > 0 or dddmp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
         d2_bg = div_damp / da_min_c
-        dddmp = 0.2
         div_abs = jnp.abs(div_field)
         div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
         adaptive_coeff = da_min_c * jnp.maximum(
@@ -1573,7 +1580,7 @@ def fv3_sw_tendencies(
     fortran_dir_aware_corners=False,
     fortran_a2b_corner_avg=False,
     fortran_vector_corner_fill=False,
-    dddmp=0.2,
+    dddmp=0.0,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1718,13 +1725,16 @@ def fv3_sw_tendencies(
         # so `max(0, min(0.20, dddmp * |div|))` reduces to pure
         # adaptive-only damping (matches Fortran).
         d2_bg = div_damp / da_min_c
-        # Iter-872: `dddmp` is now a kwarg (default 0.2 preserves
-        # pre-iter-872 behaviour).  Fortran fv_arrays.F90:360 has
-        # `dddmp = 0.0` as the strict default with a comment naming
-        # 0.2 as the typical config.  Exposing the kwarg matches
-        # Fortran's `flagstruct%dddmp` configurability semantics
-        # while preserving our previous hardcoded value as the
-        # default for backward compatibility.
+        # Iter-872c: `dddmp` is now a kwarg with Fortran-strict
+        # default 0.0 (Fortran fv_arrays.F90:360).  Production
+        # callers pass 0.2 explicitly via
+        # `CDGridShallowWaterConfig.dddmp_prod`
+        # (`FV3EdgeShallowWaterModel.step`); direct callers that omit
+        # `dddmp` get pure background-only damping when `div_damp>0`
+        # and no damping at all when `div_damp=0`, matching Fortran's
+        # strict-default semantics.  Pre-iter-872c the literal
+        # was hardcoded 0.2 and silently leaked adaptive Smagorinsky
+        # contributions into every direct call.
         div_abs = jnp.abs(div_field)
         adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs))

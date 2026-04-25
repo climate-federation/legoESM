@@ -78,18 +78,25 @@ def _grid_and_state(n=8, seed=2026, scale_div=1.0):
 # Test A: default 0.2 reproduces pre-iter-872 hardcoded value
 # ---------------------------------------------------------------------
 
-def test_default_kwarg_reproduces_pre_iter872_hardcoded_value():
-    """``dddmp=0.2`` (the kwarg default) must produce bit-for-bit
-    identical tendencies to passing ``dddmp=0.2`` explicitly.  This is
-    a sanity check that the default is unchanged from the historic
-    hardcoded value.
+def test_iter872c_default_kwarg_is_fortran_strict_zero():
+    """Iter-872c (Codex pass-2 Finding 1): the kwarg default
+    ``dddmp=0.0`` (Fortran-strict) MUST reproduce passing
+    ``dddmp=0.0`` explicitly.  Pre-iter-872c the kwarg default was
+    0.2 and silently leaked the adaptive Smagorinsky coefficient
+    into every direct caller without explicit opt-in.
+
+    Production callers go through ``FV3EdgeShallowWaterModel.step``
+    which passes ``dddmp=self.config.dddmp_prod`` (default 0.2)
+    explicitly, so the production W2/W5/cosine-bell sentinels are
+    unaffected.  This test pins the *low-level* kwarg default at the
+    Fortran-strict value 0.0.
     """
     cdgrid, h, u_d, v_d, h_s = _grid_and_state(n=8, seed=11)
 
     dh_default, du_default, dv_default = fv3_sw_tendencies(
         h, u_d, v_d, h_s, cdgrid, div_damp=0.01)
     dh_explicit, du_explicit, dv_explicit = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, div_damp=0.01, dddmp=0.2)
+        h, u_d, v_d, h_s, cdgrid, div_damp=0.01, dddmp=0.0)
 
     np.testing.assert_array_equal(np.asarray(dh_default), np.asarray(dh_explicit))
     np.testing.assert_array_equal(np.asarray(du_default), np.asarray(du_explicit))
@@ -303,3 +310,133 @@ def test_iter872b_dddmp_active_when_div_damp_zero():
         f"`d2_bg=0, dddmp>0` is a valid Fortran configuration and "
         f"must NOT be silently no-op'd.  max |Δdu|={diff_u:.3e}, "
         f"max |Δdv|={diff_v:.3e}")
+
+
+# ---------------------------------------------------------------------
+# Iter-872c (Codex Finding 2): CDGridShallowWaterModel honours
+# `dddmp_prod` via plumbing through `cdgrid_momentum_tendencies`
+# ---------------------------------------------------------------------
+
+def test_iter872c_kwarg_default_is_zero_fortran_strict():
+    """Iter-872c (Codex pass-2 Finding 1): the low-level kwarg
+    default for ``fv3_sw_tendencies.dddmp`` MUST be ``0.0``
+    (Fortran-strict, fv_arrays.F90:360).  Pre-iter-872c the kwarg
+    default was ``0.2``, which silently leaked the adaptive
+    Smagorinsky coefficient into every direct caller that did not
+    explicitly opt out.  Production ``FV3EdgeShallowWaterModel.step``
+    explicitly passes ``dddmp=self.config.dddmp_prod`` (default 0.2),
+    so the production sentinel is unaffected; direct callers without
+    an explicit ``dddmp`` get pure background-only damping when
+    ``div_damp>0`` and no damping at all when ``div_damp=0``.
+    """
+    sig = inspect.signature(fv3_sw_tendencies)
+    dddmp_default = sig.parameters["dddmp"].default
+    assert dddmp_default == 0.0, (
+        f"`fv3_sw_tendencies.dddmp` default changed from 0.0 to "
+        f"{dddmp_default!r}; this re-introduces the silent leak that "
+        f"injects adaptive Smagorinsky into direct callers without "
+        f"explicit opt-in.  Restore the Fortran-strict default 0.0 "
+        f"and pass 0.2 only from production call sites via "
+        f"`CDGridShallowWaterConfig.dddmp_prod`.")
+
+
+def test_iter872c_cdgrid_momentum_honors_dddmp():
+    """Iter-872c (Codex pass-2 Finding 2): the
+    ``cdgrid_momentum_tendencies`` divergence-damping branch MUST
+    honour the ``dddmp`` kwarg, NOT a hardcoded 0.2 literal.  This
+    is the path used by ``CDGridShallowWaterModel`` (driver/CLI
+    surface).  Pre-iter-872c the literal was hardcoded so
+    ``dddmp_prod`` on the shared config field was silently ignored
+    on this code path.
+
+    Shape note: ``cdgrid_momentum_tendencies`` uses the
+    corner-stagger D-grid convention (u_d, v_d both shape
+    (6, n+1, n+1)) — distinct from ``fv3_sw_tendencies`` which uses
+    the edge-midpoint stagger.  Both are valid D-grid layouts.
+    """
+    from legoesm.core.operators_cdgrid import cdgrid_momentum_tendencies
+
+    n = 8
+    grid = create_cubed_sphere(n, use_duogrid=True)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(53)
+    h = jnp.asarray(rng.normal(size=(6, n, n)) * 100.0 + 8000.0)
+    h_s = jnp.zeros_like(h)
+    # Corner-stagger D-grid: u_d, v_d both at corners (6, n+1, n+1)
+    u_d = jnp.asarray(rng.normal(size=(6, n + 1, n + 1)))
+    v_d = jnp.asarray(rng.normal(size=(6, n + 1, n + 1)))
+    common = dict(g=9.80616, A_h=0.0, hyperdiff_coeff=0.0,
+                  div_damp=0.01)
+
+    du_pt2, dv_pt2 = cdgrid_momentum_tendencies(
+        h, u_d, v_d, h_s, cdgrid, dddmp=0.2, **common)
+    du_zero, dv_zero = cdgrid_momentum_tendencies(
+        h, u_d, v_d, h_s, cdgrid, dddmp=0.0, **common)
+
+    diff_u = float(jnp.max(jnp.abs(du_pt2 - du_zero)))
+    diff_v = float(jnp.max(jnp.abs(dv_pt2 - dv_zero)))
+    assert (diff_u > 1e-8) or (diff_v > 1e-8), (
+        f"`cdgrid_momentum_tendencies` ignores the `dddmp` kwarg: "
+        f"dddmp=0.2 vs 0.0 produced near-identical du/dv "
+        f"(max |Δdu|={diff_u:.3e}, max |Δdv|={diff_v:.3e}).  Either "
+        f"the kwarg is shadowed by a hardcoded 0.2 literal, or the "
+        f"kwarg is missing entirely.  Codex pass-2 Finding 2 "
+        f"requires the shared `dddmp_prod` config field to reach "
+        f"this code path; without that, `CDGridShallowWaterModel` "
+        f"users see a silent reproducibility hazard.")
+
+
+def test_iter872c_cdgrid_shallow_water_forwards_dddmp():
+    """Iter-872c: AST scan of ``cdgrid_shallow_water_tendencies``
+    confirming it forwards ``dddmp=config.dddmp_prod`` (or any
+    config-attribute access) to ``cdgrid_momentum_tendencies``.
+    Without this forwarding, the shared `dddmp_prod` field is dead
+    on the ``CDGridShallowWaterModel`` path.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "src" / "legoesm" / "atmosphere" / "dynamics"
+           / "shallow_water_fv3_cdgrid.py")
+    tree = ast.parse(src.read_text())
+
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+         and n.name == "cdgrid_shallow_water_tendencies"),
+        None,
+    )
+    assert fn is not None, (
+        "Could not find cdgrid_shallow_water_tendencies in "
+        "shallow_water_fv3_cdgrid.py")
+
+    momentum_calls = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "cdgrid_momentum_tendencies"
+    ]
+    assert momentum_calls, (
+        "Could not find any cdgrid_momentum_tendencies(...) call in "
+        "cdgrid_shallow_water_tendencies")
+
+    matched = False
+    for call in momentum_calls:
+        for kw in call.keywords:
+            if kw.arg != "dddmp":
+                continue
+            node = kw.value
+            chain = []
+            while isinstance(node, ast.Attribute):
+                chain.append(node.attr)
+                node = node.value
+            if isinstance(node, ast.Name) and node.id == "config" and chain:
+                matched = True
+                break
+        if matched:
+            break
+
+    assert matched, (
+        "cdgrid_shallow_water_tendencies' cdgrid_momentum_tendencies "
+        "call does NOT forward `dddmp=config.*`.  The shared "
+        "`dddmp_prod` field on `CDGridShallowWaterConfig` is dead on "
+        "the `CDGridShallowWaterModel` driver/CLI path — Codex pass-2 "
+        "Finding 2 must be addressed by plumbing through this caller.")
