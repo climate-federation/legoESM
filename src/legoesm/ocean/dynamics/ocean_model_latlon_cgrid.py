@@ -22,6 +22,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.precision import cast_pytree
 from legoesm.grids.latlon import LatLonGrid
@@ -724,64 +725,79 @@ class LatLonCGridOceanModel:
                 "Use replace_land_mask() or land_mask_override instead of "
                 "raw state._replace(land_mask=...).")
 
-        # Finiteness of all prognostic fields
-        finite_ok = bool(
+        # Fuse all reductions into a single ``jnp.stack`` + host pull
+        # so the runtime check costs one device→host stall instead of
+        # 7-9.  Same pattern as the loop-3 ``ocean_model.py`` rewrite.
+        water_col = state.eta.data + state.H_bathy.data
+        wet3 = wet[..., jnp.newaxis]
+        T_ocean = jnp.where(wet3, state.T.data, jnp.nan)
+        S_ocean = jnp.where(wet3, state.S.data, jnp.nan)
+
+        finite_ok = (
             jnp.all(jnp.isfinite(state.u.data))
             & jnp.all(jnp.isfinite(state.v.data))
             & jnp.all(jnp.isfinite(state.T.data))
             & jnp.all(jnp.isfinite(state.S.data))
             & jnp.all(jnp.isfinite(state.eta.data))
         )
-        if not finite_ok:
+        any_wet = jnp.any(wet)
+        _eta_dtype = state.eta.data.dtype
+        _stats = jnp.stack([
+            finite_ok.astype(_eta_dtype),
+            any_wet.astype(_eta_dtype),
+            jnp.min(jnp.where(wet, water_col, jnp.inf)).astype(_eta_dtype),
+            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0))).astype(_eta_dtype),
+            jnp.nanmin(T_ocean).astype(_eta_dtype),
+            jnp.nanmax(T_ocean).astype(_eta_dtype),
+            jnp.nanmin(S_ocean).astype(_eta_dtype),
+            jnp.nanmax(S_ocean).astype(_eta_dtype),
+        ])
+        host = np.asarray(_stats)
+        finite_ok_h = bool(host[0] > 0.5)
+        any_wet_h = bool(host[1] > 0.5)
+        min_wc = float(host[2]) if any_wet_h else float("inf")
+        eta_abs = float(host[3]) if any_wet_h else 0.0
+        T_min = float(host[4]) if any_wet_h else float("nan")
+        T_max = float(host[5]) if any_wet_h else float("nan")
+        S_min = float(host[6]) if any_wet_h else float("nan")
+        S_max = float(host[7]) if any_wet_h else float("nan")
+
+        if not finite_ok_h:
             raise FloatingPointError(
                 "C-grid ocean: non-finite state detected")
 
-        # Water column depth
-        water_col = state.eta.data + state.H_bathy.data
-        if bool(jnp.any(wet)):
-            min_wc = float(jnp.min(jnp.where(wet, water_col, jnp.inf)))
-            if min_wc < self.config.min_water_column_m:
-                raise ValueError(
-                    f"C-grid ocean: water column too small. "
-                    f"min(eta+H)={min_wc:.6g} m, "
-                    f"threshold={self.config.min_water_column_m:.6g} m",
-                )
+        if min_wc < self.config.min_water_column_m:
+            raise ValueError(
+                f"C-grid ocean: water column too small. "
+                f"min(eta+H)={min_wc:.6g} m, "
+                f"threshold={self.config.min_water_column_m:.6g} m",
+            )
 
-        # SSH bounds
-        eta_abs = float(
-            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0))))
         if eta_abs > self.config.max_abs_eta_m:
             raise ValueError(
                 f"C-grid ocean: |eta|={eta_abs:.3g} exceeds "
                 f"threshold {self.config.max_abs_eta_m:.3g}",
             )
 
-        # Temperature bounds
-        if bool(jnp.any(wet)):
-            T_ocean = jnp.where(
-                wet[..., jnp.newaxis], state.T.data, jnp.nan)
-            T_min = float(jnp.nanmin(T_ocean))
-            T_max = float(jnp.nanmax(T_ocean))
-            if (T_min < self.config.temperature_min_c
-                    or T_max > self.config.temperature_max_c):
-                raise ValueError(
-                    f"C-grid ocean: T range [{T_min:.3f}, {T_max:.3f}] "
-                    f"outside bounds [{self.config.temperature_min_c:.3f}, "
-                    f"{self.config.temperature_max_c:.3f}]",
-                )
+        if any_wet_h and (
+            T_min < self.config.temperature_min_c
+            or T_max > self.config.temperature_max_c
+        ):
+            raise ValueError(
+                f"C-grid ocean: T range [{T_min:.3f}, {T_max:.3f}] "
+                f"outside bounds [{self.config.temperature_min_c:.3f}, "
+                f"{self.config.temperature_max_c:.3f}]",
+            )
 
-            # Salinity bounds
-            S_ocean = jnp.where(
-                wet[..., jnp.newaxis], state.S.data, jnp.nan)
-            S_min = float(jnp.nanmin(S_ocean))
-            S_max = float(jnp.nanmax(S_ocean))
-            if (S_min < self.config.salinity_min_psu
-                    or S_max > self.config.salinity_max_psu):
-                raise ValueError(
-                    f"C-grid ocean: S range [{S_min:.3f}, {S_max:.3f}] "
-                    f"outside bounds [{self.config.salinity_min_psu:.3f}, "
-                    f"{self.config.salinity_max_psu:.3f}]",
-                )
+        if any_wet_h and (
+            S_min < self.config.salinity_min_psu
+            or S_max > self.config.salinity_max_psu
+        ):
+            raise ValueError(
+                f"C-grid ocean: S range [{S_min:.3f}, {S_max:.3f}] "
+                f"outside bounds [{self.config.salinity_min_psu:.3f}, "
+                f"{self.config.salinity_max_psu:.3f}]",
+            )
 
     def integrate(
         self,
