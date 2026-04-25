@@ -101,12 +101,29 @@ def _apply_structured_regrid_3d(
     w: _StructuredRegridWeights,
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 3-D field (nlat_src, nlon_src, nlev)
-    → (nlat_tgt, nlon_tgt, nlev)."""
-    nlev = field.shape[2]
-    result = np.empty((len(w.i_lo), len(w.j_lo), nlev), dtype=field.dtype)
-    for k in range(nlev):
-        result[:, :, k] = _apply_structured_regrid_2d(field[:, :, k], w)
-    return result
+    → (nlat_tgt, nlon_tgt, nlev).
+
+    Vectorised over the level axis — gather the four bilinear
+    neighbours once and apply the per-cell weights with NumPy
+    broadcasting instead of looping ``nlev`` times.  At T63L49 with
+    ~50 levels this turns 50 separate per-level NumPy calls into one.
+    """
+    i0 = w.i_lo
+    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
+    j0 = w.j_lo
+    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
+    wi = w.wi[:, None, None]   # (n_lat_tgt, 1, 1)
+    wj = w.wj[None, :, None]   # (1, n_lon_tgt, 1)
+    f00 = field[np.ix_(i0, j0)]   # (n_lat_tgt, n_lon_tgt, nlev)
+    f10 = field[np.ix_(i1, j0)]
+    f01 = field[np.ix_(i0, j1)]
+    f11 = field[np.ix_(i1, j1)]
+    return (
+        (1 - wi) * (1 - wj) * f00
+        + wi * (1 - wj) * f10
+        + (1 - wi) * wj * f01
+        + wi * wj * f11
+    )
 
 
 class DiagnosticCollector:
