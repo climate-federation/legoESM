@@ -749,3 +749,45 @@ The Codex iter-864 directive ("Do not rebaseline ... unless you also provide a c
 - Both gold-file tests now pass cleanly without subTest workarounds for h_new.sum.
 
 **Process.**  126th iter in iter-752-866 chain.  Closes the iter-864b TODO via systematic bisect.  The drift was iter-808's documented Fortran-fidelity fix propagating into a gold-file test that was never updated; rebaseline locks the post-iter-808 Fortran-faithful values as proper regression sentinels.
+
+### Iter-867 — Verify and lock `da_min_c` Fortran definition (audit + sentinel)
+
+iter-849 catalogued the production divergence-damping coefficient gaps.  iter-867 audits one specific piece — the `da_min_c` metric — against Fortran's `fv_grid_utils.F90:743` definition and locks the audit result with a sentinel test.
+
+**Audit result.**
+
+| Quantity   | Fortran                                              | Python                                                  | Status |
+|------------|------------------------------------------------------|---------------------------------------------------------|--------|
+| `da_min_c` | `global_mx_c(area_c(is:ie, js:je), ...)` after `mp_reduce_min` (`fv_grid_utils.F90:743`) — global min of corner area over interior corner range, MPI-reduced.  | `jnp.min(cdgrid.area_corner)` (`operators_cdgrid.py:~1692`) — global min of corner area over the full `(6, n+1, n+1)` array. | **MATCH ✓** |
+| `da_max_c` | `global_mx_c` upper bound, same call (returned alongside da_min_c). | not used in production divergence damping; not currently a fidelity concern. | n/a |
+| `dddmp` default | `dddmp = 0.0` per `fv_arrays.F90:360` (with comment "(0.2)" indicating typical config). | hardcoded `dddmp = 0.2` in production divergence-damping branch. | matches typical Fortran config; differs from Fortran's strict default but is the documented production value. |
+| `d2_bg` default | `d2_bg = 0.0` per `fv_arrays.F90:362`. | derived `d2_bg = div_damp / da_min_c` from the user's `div_damp` parameter. | different parameterization (intentional, well-documented in iter-849).  Production user-passes `div_damp` (with units of m⁴/s) instead of dimensionless `d2_bg`. |
+| `*dt` factor in adaptive cap | present in Fortran `dddmp*abs(delpc(i,j)*dt)` (`sw_core.F90:1720`). | absent — production uses `dddmp * jnp.abs(div_field)` (`operators_cdgrid.py:~1697`). | **GAP** (iter-849 Check 1).  iter-859 ruled out adding it alone (no-op on production at W2 magnitudes; catastrophic on Phase 1 stencil swap).  Multi-iter Check 4 is the architectural fix. |
+
+**Empirical verification of `da_min_c` definition** at C16/C24/C36:
+- Full-corner `min(area_corner)` equals interior-only `min(area_corner[:, :-1, :-1])` to FP precision at every tested resolution.  Confirms the Fortran `area_c(is:ie, js:je)` exclusion of east/north boundary corners is a partition-counting artifact (each MPI rank excludes corners owned by neighbours; the global `mp_reduce_min` is unaffected).
+- `da_max_c / da_min_c` ranges 1.29 (C16) → 1.36 (C36), matching the well-known cubed-sphere area variance.
+
+**Tests.**  New `tests/test_da_min_c_fortran_fidelity_iter867.py` (5 tests):
+- `test_da_min_c_full_vs_interior_min_equal[16/24/36]` — empirical verification at three resolutions.
+- `test_da_min_c_used_in_fv3_sw_tendencies[16/36]` — AST source-scan: production must call `jnp.min(cdgrid.area_corner)` and must NOT call `jnp.min(cdgrid.base.area)` (cell-centre area would shift damping by a max/min factor of ~1.36).
+
+**Production verification.**  iter-867 is a test-only audit iter — no production source changes.  All previously-passing W2 / W5 / cosine bell sentinels remain untouched.
+
+**What iter-867 DOES show.**
+- The production `da_min_c = jnp.min(cdgrid.area_corner)` is Fortran-faithful per `fv_grid_utils.F90:743`.
+- The remaining production divergence-damping fidelity gap (the missing `*dt` factor in the adaptive cap) is unchanged from iter-849's Check 1; iter-859 ruled out the in-isolation fix.
+- The audit closes one of the structural ambiguity items from the iter-849 catalogue.
+
+**What iter-867 does NOT establish.**
+- Any production W2 mode-A reduction (still no production change).
+- Whether the `dddmp = 0.2` hardcoding (which matches typical Fortran config but differs from Fortran's strict default 0.0) should be exposed as a config parameter.  Out-of-scope.
+
+**Iter-868+ candidates.**
+- Audit other gold-file fingerprints in the repo for pre-iter-808 staleness (carried over from iter-866 follow-up).
+- FB-chain C36 stability re-test.
+- Multi-iter Check 4 architectural port (production ke→d_sw6 routing).
+
+**Deliverable.**  `tests/test_da_min_c_fortran_fidelity_iter867.py` with empirical + AST scan tests.  Doc entry recording the audit table.  No source-code change.
+
+**Process.**  127th iter in iter-752-867 chain.  Small Fortran-fidelity verification iter: closes the `da_min_c` definition question raised by the production divergence-damping branch.  Audit + sentinel test ensures a future refactor can't silently swap the corner area for the cell area.
