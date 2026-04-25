@@ -96,11 +96,26 @@ def test_iter879_ppm_reconstruct_1d_matches_ppm_limit(seed):
             f"DIFFERENT q_R on seed={seed}."))
 
 
-def test_iter879_both_limiters_use_signed_product():
-    """AST scan: both limiter implementations MUST use the signed
-    product ``q_6 * dq`` (or equivalent ``dm * d6``) in the
-    overshoot conditions.  Catches a future regression that
-    re-introduces the missing-``dq`` form.
+def test_iter879_both_limiters_use_signed_product_in_overshoot_compare():
+    """AST scan: both limiter implementations MUST express the
+    overshoot constraint as a Compare whose LHS is a signed product
+    of the parabolic term (``q_6`` / ``d6``) and the span (``dq`` /
+    ``dm``), and whose RHS is the squared span (``dq*dq`` / ``dm**2``).
+
+    Iter-879 take-2 (Codex stop-time): the original AST scan only
+    checked for the EXISTENCE of a ``q_6 * dq`` product anywhere in
+    the function, which can false-pass if a function contains the
+    product as an intermediate but uses the WRONG form in the
+    actual constraint Compare.  This stricter scan walks every
+    Compare node in the function body, identifies the ones that
+    look like overshoot constraints (RHS or comparator involves
+    ``dq*dq`` / ``dm*dm`` / ``dm**2`` / their negation), and
+    requires the LHS to be a signed product or a Name bound to
+    such a product.
+
+    A regression to ``q_6 > dq * dq`` (LHS is bare ``q_6``, no
+    span factor) would fail this scan because the LHS Name doesn't
+    match the signed-product structural pattern.
     """
     import ast
     from pathlib import Path
@@ -111,6 +126,47 @@ def test_iter879_both_limiters_use_signed_product():
     ]
 
     repo_root = Path(__file__).resolve().parent.parent
+
+    parabolic_names = {"q_6", "d6"}
+    span_names = {"dq", "dm"}
+
+    def _is_signed_product(node, intermediates):
+        """Return True if `node` is a BinOp(Mult) of parabolic*span,
+        OR a Name bound earlier to such a BinOp.
+        """
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            l = node.left
+            r = node.right
+            l_para = (isinstance(l, ast.Name) and l.id in parabolic_names)
+            l_span = (isinstance(l, ast.Name) and l.id in span_names)
+            r_para = (isinstance(r, ast.Name) and r.id in parabolic_names)
+            r_span = (isinstance(r, ast.Name) and r.id in span_names)
+            return (l_para and r_span) or (r_para and l_span)
+        if isinstance(node, ast.Name):
+            return node.id in intermediates
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return _is_signed_product(node.operand, intermediates)
+        return False
+
+    def _is_squared_span(node, squared_span_aliases):
+        """Return True if `node` is `dq*dq`, `dm*dm`, `dq**2`,
+        `dm**2`, a USub thereof, or a Name bound to such a value.
+        """
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return _is_squared_span(node.operand, squared_span_aliases)
+        if isinstance(node, ast.Name) and node.id in squared_span_aliases:
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            l, r = node.left, node.right
+            if (isinstance(l, ast.Name) and isinstance(r, ast.Name)
+                    and l.id == r.id and l.id in span_names):
+                return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+            l, r = node.left, node.right
+            if (isinstance(l, ast.Name) and l.id in span_names
+                    and isinstance(r, ast.Constant) and r.value == 2):
+                return True
+        return False
 
     for rel_path, fn_name in paths:
         src = (repo_root / rel_path).read_text()
@@ -124,31 +180,79 @@ def test_iter879_both_limiters_use_signed_product():
         assert fn is not None, (
             f"Could not find `{fn_name}` in {rel_path}.")
 
-        # Look for a signed-product BinOp where one operand mentions
-        # the parabolic term (q_6/d6) and the other mentions the
-        # span (dq/dm).  Reject cases where left==right (self-product).
-        found = False
+        # Collect intermediate Names bound to a signed product
+        # (e.g. `q6_dq = q_6 * dq`).
+        intermediates = set()
+        # Collect intermediate Names bound to a squared span
+        # (e.g. `dq_sq = dq * dq`).
+        squared_span_aliases = set()
         for node in ast.walk(fn):
-            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
-                left = ast.dump(node.left)
-                right = ast.dump(node.right)
-                if left == right:
-                    continue
-                # Check for parabolic-term × span-term combo.
-                left_has_parabolic = (
-                    "q_6" in left or "'d6'" in left or "'q6_dq'" in left)
-                left_has_span = ("'dq'" in left or "'dm'" in left)
-                right_has_parabolic = (
-                    "q_6" in right or "'d6'" in right or "'q6_dq'" in right)
-                right_has_span = ("'dq'" in right or "'dm'" in right)
-                if ((left_has_parabolic and right_has_span)
-                        or (right_has_parabolic and left_has_span)):
-                    found = True
-                    break
-        assert found, (
-            f"Function `{fn_name}` in {rel_path} does NOT contain a "
-            f"signed `q_6*dq` (or `d6*dm`) product.  Per CW84 eq. "
-            f"1.10 the overshoot constraint is `Δa · a_6 > (Δa)²`, "
-            f"requiring this product on the LHS.  iter-878 fixed "
-            f"the missing-product bug in `_ppm_reconstruct_1d`; "
-            f"this test catches a regression in either limiter.")
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    val = node.value
+                    if (isinstance(val, ast.BinOp)
+                            and isinstance(val.op, ast.Mult)
+                            and _is_signed_product(val, set())):
+                        intermediates.add(target.id)
+                    if isinstance(val, ast.BinOp):
+                        if isinstance(val.op, ast.Mult):
+                            l, r = val.left, val.right
+                            if (isinstance(l, ast.Name)
+                                    and isinstance(r, ast.Name)
+                                    and l.id == r.id
+                                    and l.id in span_names):
+                                squared_span_aliases.add(target.id)
+                        elif isinstance(val.op, ast.Pow):
+                            l, r = val.left, val.right
+                            if (isinstance(l, ast.Name)
+                                    and l.id in span_names
+                                    and isinstance(r, ast.Constant)
+                                    and r.value == 2):
+                                squared_span_aliases.add(target.id)
+
+        # Walk every Compare node; an overshoot constraint is one
+        # where the RHS (or comparator) looks like a squared span
+        # AND the LHS is (or resolves to) a signed product.
+        constraint_compares = []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Compare):
+                continue
+            # Compare may have multiple comparators; check each
+            # against the LHS in turn.
+            lhs = node.left
+            for comparator in node.comparators:
+                if _is_squared_span(comparator, squared_span_aliases):
+                    constraint_compares.append((lhs, comparator))
+
+        assert constraint_compares, (
+            f"Function `{fn_name}` in {rel_path} has no Compare "
+            f"with a squared-span RHS (`dq*dq`, `dm*dm`, `dq**2`, "
+            f"`dm**2`, or negated).  The overshoot constraint per "
+            f"CW84 eq. 1.10 must be `signed_product > squared_span` "
+            f"and `signed_product < -squared_span`.  Either the "
+            f"limiter was rewritten without these constraints, or "
+            f"the variable names diverged from the iter-879 sentinel "
+            f"vocabulary.  Update both source and sentinel together "
+            f"if this is intentional.")
+
+        # At least one such Compare's LHS must be a signed product
+        # (or Name-bound to one).  This catches the
+        # ``q_6 > dq * dq`` regression (LHS is bare q_6 Name, NOT in
+        # `intermediates` set, NOT a BinOp).
+        signed_lhs_found = any(
+            _is_signed_product(lhs, intermediates)
+            for lhs, _ in constraint_compares)
+        assert signed_lhs_found, (
+            f"Function `{fn_name}` in {rel_path} has at least one "
+            f"Compare with a squared-span RHS, but NO Compare's LHS "
+            f"is a signed `q_6*dq` (or `d6*dm`) product.  This is "
+            f"the iter-878 missing-product regression: pre-iter-878 "
+            f"the LHS was `q_6` alone (bare Name, not a product), "
+            f"giving `q_6 > dq*dq` instead of CW84's "
+            f"`q_6*dq > dq*dq`.  Restore the signed product on the "
+            f"LHS.\n"
+            f"Found compares (LHS dumps):\n"
+            + "\n".join(f"  {ast.unparse(lhs)}"
+                       for lhs, _ in constraint_compares))

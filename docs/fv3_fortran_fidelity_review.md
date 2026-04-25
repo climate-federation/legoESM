@@ -1402,3 +1402,33 @@ This matches CW84 eq. 1.10 and Fortran `pert_ppm` exactly.
 **Deliverable.**  `tests/test_ppm_limiter_consistency_iter879.py` (4 tests) + this doc entry.  No source code change.
 
 **Process.**  139th iter in the iter-752-879 chain.  Small Fortran-fidelity safety-net iter that locks the iter-878 fix at the cross-module level.  Sized as a sentinel-only iter — no behavioural impact, but prevents the iter-878 regression class from recurring silently.
+
+### Iter-879b — Codex stop-time: tighten the AST sentinel to actually catch the regression
+
+**Codex iter-879 stop-time finding.**  "iter-879's AST sentinel can false-pass, so the 'regression sentinel' does not reliably guard the claimed bug class."
+
+**Issue.**  iter-879's original AST scan checked for the EXISTENCE of a `q_6 * dq` (or `d6 * dm`) BinOp anywhere in the function body.  This is a NECESSARY but not SUFFICIENT condition for the sentinel's claimed coverage: a future regression could use the product as an intermediate (e.g. for a different purpose) while the actual constraint Compare uses the wrong LHS form.  The original sentinel would false-pass.
+
+**Fix (iter-879b).**  Replace the existence-check with a STRUCTURAL scan that identifies the constraint Compare:
+1. Walk every `Compare` node in the function body.
+2. Identify Compares whose RHS is a "squared span" — `dq*dq`, `dm*dm`, `dq**2`, `dm**2`, a `USub` thereof, OR a `Name` bound earlier to such a value (catches the iter-878 fix's `dq_sq` intermediate).
+3. Among those, require AT LEAST ONE Compare whose LHS is a "signed product" — `q_6 * dq`, `d6 * dm` BinOp, OR a `Name` bound to such a product (catches the iter-878 fix's `q6_dq` intermediate), or a USub thereof.
+4. A Compare whose LHS is bare `q_6` or `-q_6` (the pre-iter-878 buggy form) does NOT satisfy the signed-product requirement → assertion fires.
+
+**Sentinel verification.**  iter-879b includes a manual verification that the tightened sentinel fires on the iter-878 regression:
+```bash
+# Re-injected the bug: cond_L = q_6 > dq_sq (LHS bare q_6, no product)
+# Result:
+FAILED test_iter879_both_limiters_use_signed_product_in_overshoot_compare
+  - Found compares (LHS dumps):
+      q_6
+      -q_6
+```
+
+The sentinel correctly identified that NEITHER Compare LHS was a signed product.
+
+**On restored source.**  All 4 iter-879b tests + 4 iter-878 tests pass (8 total).
+
+**Deliverable.**  Tightened AST scan in `tests/test_ppm_limiter_consistency_iter879.py` (replaces the iter-879 lax existence-check) + this doc entry recording the Codex finding and the verification that the new sentinel fires loudly on the regression.
+
+**Process.**  140th iter in the iter-752-879b chain.  Codex stop-time review caught a real soundness gap in the iter-879 sentinel — the original scan was easy to trick.  iter-879b tightens it to a structural Compare scan that actually catches the bug class it claims to guard.  Verified by deliberate bug re-injection.
