@@ -2496,21 +2496,21 @@ Per iter-855's iter-856+ Priority 1: take the iter-853 Phase 1 stencil swap and 
 
 **Comparison to iter-854 (BUGGY hybrid, RETRACTED in iter-855).**
 - iter-854 1.0×: stable, 301 m (470× worse than baseline).
-- **iter-856 1.0×: BLEW UP at step 10.**  Hybrid was MASKING actual instability.
+- **iter-856 1.0×: BLEW UP at step 10.**
 - iter-854 2.0×: stable, 639 m.
-- **iter-856 2.0×: BLEW UP at step 6.**  Same masking.
+- **iter-856 2.0×: BLEW UP at step 6.**
 - iter-854 0.001×: stable, 0.886 m (≈ baseline).
 - iter-856 0.001×: stable, 0.807 m (≈ baseline).  Sub-canonical damping behaviour MATCHES.
 
-The staleness bug was numerically CONSEQUENTIAL at canonical damping: it spuriously stabilised an otherwise-unstable configuration by feeding stale start-of-step winds to the divergence in RK3 substeps 2/3.  At sub-canonical damping (where the damping term is weak enough that it doesn't drive instability), the staleness was inconsequential.
+iter-856 differs from iter-854 in TWO ways: (a) NO RK3 staleness (each substep sees correct intermediate state) AND (b) NO post-RK3 corrections (iter-854 used `model.step()` which applies `damp_v` vorticity damping + mass fixer AFTER RK3; iter-856 uses a hand-rolled RK3 loop that calls `fv3_sw_tendencies` directly and skips those post-RK3 steps).  iter-856 cannot disentangle which of (a) or (b) caused the qualitative reversal.  Both are likely contributors: (a) gives a more honest tendency at each substep, (b) removes a post-step regulariser.  iter-857+ priority should include re-running iter-856 via `model.step()` (with the same opt-in `phase1_div_swap` kwarg threaded through `tendency_fn`) to isolate (a) from (b).
 
-**Validates iter-853's prediction.**  iter-853's t=0-only "would destabilise in tens to hundreds of timesteps" extrapolation from the 180× peak ratio is now validated by direct measurement: the properly-plumbed Phase 1 swap at canonical damping blows up at step 10 (about 50 min).  iter-854's "destabilise was wrong" conclusion was an artefact of the buggy hybrid; iter-855's retraction stands; iter-856 now provides the corrected measurement.
+**iter-853's "would destabilise" prediction was DIRECTIONAL but not strict — qualitative agreement only.**  iter-853 said the 180× t=0 peak amplitude "SUGGESTS short-run instability" / "would destabilise in tens to hundreds of timesteps."  iter-856 measured blow-up at step 10 at canonical damping — directionally consistent.  But iter-856 cannot strictly validate iter-853 against a wrapper-equivalent run; the iter-854-vs-iter-856 difference is also explained by post-RK3 corrections being skipped in iter-856.  Honest summary: iter-856 confirms "Fortran-cc + canonical damping + own RK3 + no post-RK3 damp_v/fix" is unstable; iter-854's "stable at canonical" had AT LEAST the staleness bug as a confounder; the relative weight of the two confounders requires the iter-857+ wrapper-comparison test.
 
-**Refined conclusion.**
-- The Phase 1 stencil swap with iter-761 canonical damping IS unstable in the A-L production path (blows up at step 10 with proper plumbing).
-- The Phase 1 stencil swap with damp_scale ≤ 0.1× is stable for at least 5h, with integration error growing roughly linearly with damp_scale (0.001× ≈ baseline; 0.1× → 67 m, 100× worse).
-- A "stable AND Fortran-faithful" combination requires fixing iter-849 Checks 1 (`*dt` factor) and 4 (`ke→d_sw6` routing) concurrently — a multi-iter architectural port.
-- Phase 1 alone at damp_scale ~ 0.001× IS stable + baseline-quality for 5h, but is NOT Fortran-faithful and would not necessarily reduce the W2 LEGACY mode-A signature at 1-day (the v_ll stripe peak is a 24h cumulative phenomenon, not a 5h short-run signal).
+**Refined conclusion (scoped to the iter-856 hand-rolled RK3 + no post-RK3 corrections).**
+- The Phase 1 stencil swap with iter-761 canonical damping IS unstable in this configuration (blows up at step 10).
+- The Phase 1 stencil swap with damp_scale ≤ 0.1× is stable for at least 5h in this configuration, with integration error growing roughly linearly with damp_scale (0.001× ≈ baseline; 0.1× → 67 m, 100× worse).
+- iter-856 alone does NOT establish that "iter-849 Checks 1+4 are required" — it shows that the Fortran-cc stencil + canonical damping coefficient + production application path (du += coeff·grad(div)) + own-RK3 (no post-RK3 damp_v/fix) is unstable.  Whether either Check 1 alone, Check 4 alone, or only the combination, would resolve the instability is iter-857+ scope.
+- Phase 1 alone at damp_scale ~ 0.001× IS stable + baseline-quality for 5h in this configuration, but is NOT Fortran-faithful and would not necessarily reduce the W2 LEGACY mode-A signature at 1-day (the v_ll stripe peak is a 24h cumulative phenomenon, not a 5h short-run signal).
 
 **What iter-856 DOES show.**
 - Direct measurement of the (properly-plumbed) Phase 1 swap.  No staleness bug.
@@ -2524,6 +2524,7 @@ The staleness bug was numerically CONSEQUENTIAL at canonical damping: it spuriou
 - Whether the cosine bell or W5 results would be similarly affected by Phase 1 at sub-canonical damping.
 
 **Iter-857+ candidates.**
+- **Priority 1 (disentangle staleness from post-RK3 corrections)**: re-run iter-856 via `model.step()` with the same opt-in `phase1_div_swap` kwarg threaded through `tendency_fn` so post-RK3 `damp_v` + mass fixer remain active.  If 1.0× becomes stable with the wrapper, the missing post-RK3 corrections were the dominant destabiliser, not the staleness fix.  If 1.0× still blows up, the staleness fix exposed real instability.
 - 1-day (288-step) Phase 1 trial at damp_scale=0.001× to measure v_ll_Linf — IF it improves on 0.159 m/s, the Phase 1 stencil + reduced-coefficient path is a viable mode-A reduction (at the cost of partial Fortran fidelity).
 - Implement iter-849 Check 1 (`*dt` factor in adaptive cap) on top of Phase 1 to test whether the magnitude alone is the destabiliser.  If 1.0× becomes stable with `*dt`, Check 1 dominates; if not, Check 4 is also needed.
 - Run cosine-bell + W5 evaluations on Phase 1 + damp_scale=0.001× to check for regressions before any production wire-in.
@@ -2531,4 +2532,4 @@ The staleness bug was numerically CONSEQUENTIAL at canonical damping: it spuriou
 
 **Deliverable.**  `scripts/diag_iter856_phase1_proper.py` (with note that the source patch is reverted).  Production source change to `fv3_sw_tendencies` was applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
 
-**Process.**  116th iter in iter-752-856 chain.  First HONEST Phase 1 trial.  Validates iter-853's "destabilise" prediction with direct measurement (canonical damping blows up at step 10).  iter-854's contrary "stable at all damp_scales" finding is now fully retracted as a buggy-hybrid artefact (iter-855 retraction confirmed).  Sub-canonical damping (≤0.1×) is stable but the stencil swap alone is NOT a Fortran-faithful path to mode-A reduction.
+**Process.**  116th iter in iter-752-856 chain.  First measurement of the Phase 1 stencil swap with proper RK3 substep plumbing (no staleness).  iter-856 measures `Fortran-cc + canonical damping + own-RK3 + no post-RK3 damp_v/fix` configuration and observes blow-up at step 10 at canonical damping.  This is qualitatively consistent with iter-853's "would destabilise" prediction (which iter-854's buggy hybrid contradicted), but iter-856 changed TWO things vs iter-854 (staleness AND wrapper) and cannot strictly attribute the qualitative reversal to the staleness fix alone.  iter-857+ Priority 1 is the wrapper-equivalent re-run to disentangle staleness from post-RK3 corrections.  Sub-canonical damping (≤0.1×) remains stable in this configuration; the architectural attribution to "Checks 1+4 ARE needed" is iter-857+ scope, not established by iter-856 alone.
