@@ -2424,13 +2424,16 @@ The Fortran-cc divergence is 30×–2200× larger than `cgrid_divergence` at cub
 - The 180× / 470× / etc. amplification is dominated by an OVER-DAMPING ARTEFACT (Fortran-cc magnitude × production damping coefficient mismatch), NOT a stencil-instability signature.
 
 **What iter-854 does NOT establish.**
-- Whether 1-day or longer integrations remain stable at canonical damping (only 60 steps tested).
+- Whether 1-day or longer integrations remain stable at canonical damping (only 60 steps tested; iter-794's 24h sweep had `16×base = 2× canonical` go NaN, so iter-854's 60-step "stable at 2.0×" does NOT generalise to 24h).
 - What the v_ll_Linf at 1-day looks like for the patched configuration at damp_scale=0.001× (where 5h error is baseline-comparable but Fortran fidelity is compromised).
 - Whether iter-849 Checks 1+4 (the ∗dt factor + ke-application path) would, when implemented properly, give Fortran-faithful magnitude AND stable+accurate W2.
 - Whether the un-patched baseline at 5h is representative of 1-day W2 sentinel error (probably not — 5h is much shorter than 24h).
 
+**STALENESS CAVEAT (iter-854b self-review).**  The script updates `LIVE_STATE["u_d"], LIVE_STATE["v_d"]` BEFORE each `model.step()` call.  But `model.step()` internally executes a 3-stage SSP-RK3 (`src/legoesm/timestepping/ssp_rk3.py:54-66`) that calls the tendency function 3 times at DIFFERENT intermediate states (y₀, y₁, y₂).  The patched `cgrid_divergence` reads `u_d, v_d` from `LIVE_STATE` which is the y₀ (start-of-step) state ONLY.  So in RK3 substeps 2 and 3 the patched divergence uses STALE u_d/v_d — substeps 2/3 see the start-of-step winds while everything else in the tendency function (KE, Bernoulli, vorticity, Coriolis) sees the actual intermediate state.  This means iter-854 is NOT a faithful Phase 1 trial: it's a HYBRID computation that mixes start-of-step Fortran-cc divergence with intermediate-state production tendencies.  The 470× worse 5h error and the "stable at 2.0×" findings are therefore quantitatively unreliable.  An honest fix requires patching INSIDE `fv3_sw_tendencies` (source modification) so the patched divergence sees the actual intermediate state at each RK3 substep.  iter-855+ should re-run with proper plumbing.
+
 **Iter-855+ candidates.**
-- 1-day (288-step) run of the patched config at damp_scale=0.001× to measure v_ll_Linf and see if it improves on iter-761 canonical's 0.159 m/s.  If yes, the Phase 1 stencil swap with re-tuned damping IS a viable mode-A reduction (at the cost of some Fortran fidelity).
+- **Priority 1 (fix the staleness bug)**: re-run iter-854 with the patched divergence using the CURRENT intermediate-state u_d, v_d at each RK3 substep.  Requires patching INSIDE `fv3_sw_tendencies` (source modification).  Without this fix, iter-854's 470× and "stable at 2.0×" findings are unreliable.
+- 1-day (288-step) run of the (properly-plumbed) patched config at damp_scale=0.001× to measure v_ll_Linf and see if it improves on iter-761 canonical's 0.159 m/s.  If yes, the Phase 1 stencil swap with re-tuned damping IS a viable mode-A reduction (at the cost of some Fortran fidelity).
 - Implement iter-849 Check 1 (`*dt` factor in adaptive cap) on the patched path and re-measure the 60-step error — does the magnitude come closer to baseline?
 - 1-day run at canonical damping (damp_scale=1.0×) to see if 470× short-run error continues to grow OR saturates.
 - Continue iter-849 Check 4 architectural port (multi-iter).

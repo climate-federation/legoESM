@@ -27,6 +27,20 @@ Caveats inherited from iter-853:
   iter-854 reports peak |state.h - h0| (mass error) as the proxy
   observable per step.
 
+***STALENESS BUG (iter-854b self-review):*** The mutable `LIVE_STATE`
+dict is updated BEFORE each `model.step()` call, but `model.step()`
+internally executes a 3-stage SSP-RK3 that calls `fv3_sw_tendencies`
+3 times at DIFFERENT intermediate states (y₀, y₁, y₂).  The patched
+`cgrid_divergence` reads `u_d, v_d` from `LIVE_STATE` which holds the
+y₀ (start-of-step) state ONLY.  So substeps 2 and 3 use STALE
+u_d/v_d for the Fortran-cc divergence while everything else in
+`fv3_sw_tendencies` sees the actual intermediate state.  This makes
+iter-854 a HYBRID computation, not a faithful Phase 1 trial.  The
+quantitative findings (470× larger 5h error at canonical, "stable at
+2.0×") are therefore UNRELIABLE.  An honest fix requires patching
+INSIDE `fv3_sw_tendencies` so the divergence sees the actual y₁/y₂
+state in substeps 2/3.
+
 Observational only.  No production source-code change.
 """
 import os, sys
