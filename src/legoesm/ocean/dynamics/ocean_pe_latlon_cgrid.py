@@ -262,6 +262,175 @@ def _neumann_fill_cgrid(
     return filled
 
 
+# =============================================================================
+# WENO momentum advection helpers (Phase 2b, Silvestri et al. 2024)
+# =============================================================================
+
+def _weno_zeta_at_u(
+    zeta: jnp.ndarray,
+    v_prime: jnp.ndarray,
+    v_at_u: jnp.ndarray,
+    order: int = 5,
+) -> jnp.ndarray:
+    """WENO reconstruction of vorticity from vertices to u-faces (meridional).
+
+    Uses the {ζ; v} smoothness-optimised stencil (Silvestri et al. 2024):
+    smoothness indicators computed from v (smoother velocity field),
+    reconstruction applied to ζ (noisier vorticity field).
+
+    Parameters
+    ----------
+    zeta : (n_lat+1, n_lon+1, nlev) at vertices.
+    v_prime : (n_lat+1, n_lon, nlev) at v-faces (smoothness field).
+    v_at_u : (n_lat, n_lon+1, nlev) at u-faces (upwinding velocity).
+    order : {5, 7}
+
+    Returns
+    -------
+    zeta_at_u : (n_lat, n_lon+1, nlev)
+    """
+    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+
+    hw = {5: 3, 7: 4}[order]
+    n_lat = zeta.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
+
+    # Interpolate v to vertex longitudes.
+    # v: (n_lat+1, n_lon) at cell-center lons → vertex: (n_lat+1, n_lon+1) at interface lons
+    v_w = jnp.roll(v_prime, 1, axis=1)  # v[:, (j-1) % n_lon, :]
+    v_at_vtx = 0.5 * (v_w + v_prime)    # (n_lat+1, n_lon, nlev)
+    v_at_vtx = jnp.concatenate(
+        [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
+
+    # Ghost cells (Neumann BC) along axis 0 for the meridional stencil
+    zeta_ext = jnp.concatenate(
+        [zeta[:1, :, :]] * hw + [zeta] + [zeta[-1:, :, :]] * hw, axis=0)
+    v_ext = jnp.concatenate(
+        [v_at_vtx[:1, :, :]] * hw + [v_at_vtx] + [v_at_vtx[-1:, :, :]] * hw,
+        axis=0)
+
+    # Build stencil for all n_lat u-faces simultaneously.
+    # Face i (i=0..n_lat-1) is between vertex i and vertex i+1.
+    # WENO at I+1/2 where I=i: needs vertices i-hw+1 .. i+hw.
+    # In ext: indices (i-hw+1)+hw .. (i+hw)+hw = i+1 .. i+2*hw.
+    phi_stencil = [zeta_ext[1 + j: n_lat + 1 + j, :, :]
+                   for j in range(2 * hw)]
+    psi_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
+                   for j in range(2 * hw)]
+
+    zeta_plus, zeta_minus = weno_reconstruct_split(
+        phi_stencil, psi_stencil, order=order)
+
+    # Upwind: v > 0 ⟹ flow from south → use left-biased (f_plus)
+    return weno_upwind(zeta_plus, zeta_minus, v_at_u)
+
+
+def _weno_zeta_at_v(
+    zeta: jnp.ndarray,
+    u_prime: jnp.ndarray,
+    u_at_v: jnp.ndarray,
+    order: int = 5,
+) -> jnp.ndarray:
+    """WENO reconstruction of vorticity from vertices to v-faces (zonal).
+
+    Uses the {ζ; u} smoothness-optimised stencil.
+    Periodic in longitude.
+
+    Parameters
+    ----------
+    zeta : (n_lat+1, n_lon+1, nlev) at vertices.
+    u_prime : (n_lat, n_lon+1, nlev) at u-faces (smoothness field).
+    u_at_v : (n_lat+1, n_lon, nlev) at v-faces (upwinding velocity).
+    order : {5, 7}
+
+    Returns
+    -------
+    zeta_at_v : (n_lat+1, n_lon, nlev)
+    """
+    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+
+    hw = {5: 3, 7: 4}[order]
+    n_lon = zeta.shape[1] - 1   # n_lon+1 vertices → n_lon v-face longitudes
+    nlev = zeta.shape[2]
+
+    # Interpolate u to vertex latitudes.
+    # u: (n_lat, n_lon+1) at cell-center lats → vertex: (n_lat+1, n_lon+1) at interface lats
+    n_lon_u = u_prime.shape[1]  # n_lon+1
+    zero_u = jnp.zeros((1, n_lon_u, nlev), dtype=u_prime.dtype)
+    u_ext_lat = jnp.concatenate(
+        [zero_u, u_prime, zero_u], axis=0)    # (n_lat+2, n_lon+1, nlev)
+    u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] +
+                       u_ext_lat[1:, :, :])   # (n_lat+1, n_lon+1, nlev)
+
+    # Both ζ and u_at_vtx are (n_lat+1, n_lon+1, nlev).
+    # Reconstruct along axis 1 (longitude), periodic.
+    # Use the first n_lon columns (column n_lon == column 0).
+    zeta_core = zeta[:, :n_lon, :]    # (n_lat+1, n_lon, nlev)
+    u_core = u_at_vtx[:, :n_lon, :]   # (n_lat+1, n_lon, nlev)
+
+    # Face j (j=0..n_lon-1) between vertex j and vertex j+1.
+    # WENO at I+1/2 where I=j: needs vertices j-hw+1 .. j+hw.
+    # Roll offsets hw-1, hw-2, ..., -(hw) place vertex j-hw+1 .. j+hw
+    # at position j in the rolled array.
+    phi_stencil = [jnp.roll(zeta_core, hw - 1 - j, axis=1)
+                   for j in range(2 * hw)]
+    psi_stencil = [jnp.roll(u_core, hw - 1 - j, axis=1)
+                   for j in range(2 * hw)]
+
+    zeta_plus, zeta_minus = weno_reconstruct_split(
+        phi_stencil, psi_stencil, order=order)
+
+    # Upwind: u > 0 ⟹ flow from west → use left-biased (f_plus)
+    return weno_upwind(zeta_plus, zeta_minus, u_at_v)
+
+
+def _flux_form_vertical_momentum_advection_weno(
+    u: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_u: jnp.ndarray,
+    order: int = 5,
+) -> jnp.ndarray:
+    """WENO vertical momentum advection as a per-thickness tendency.
+
+    Same interface as ``flux_form_vertical_momentum_advection`` from
+    ``vertical.py``, but uses WENO-Z reconstruction at vertical
+    interfaces instead of first-order upwind.
+
+    WARNING: WENO removes the implicit viscosity (~|w|*dz/2) that
+    first-order upwind provides.  This may require compensating
+    vertical viscosity (e.g. KPP, Richardson-dependent A_v).
+    See issue #204.
+
+    Parameters
+    ----------
+    u : (..., nlev)  velocity at momentum points.
+    w_half : (..., nlev+1)  vertical velocity on interfaces.
+    h_u : (..., nlev)  layer thickness at momentum points.
+    order : {5, 7}
+
+    Returns
+    -------
+    tendency : (..., nlev)
+        ``-(F_top - F_bot) / h_u``
+    """
+    if order == 5:
+        from legoesm.ocean.advection import (
+            flux_form_vertical_tracer_advection_weno5,
+        )
+        vert_flux_div = flux_form_vertical_tracer_advection_weno5(
+            u, w_half, h_u, dt=0.0)
+    elif order == 7:
+        from legoesm.ocean.advection import (
+            flux_form_vertical_tracer_advection_weno7,
+        )
+        vert_flux_div = flux_form_vertical_tracer_advection_weno7(
+            u, w_half, h_u, dt=0.0)
+    else:
+        raise ValueError(
+            f"Unsupported WENO order {order} for vertical momentum")
+    h_u_safe = jnp.maximum(h_u, 1.0e-10)
+    return -vert_flux_div / h_u_safe
+
+
 def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
@@ -428,14 +597,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # energy nor enstrophy on the perturbation subsystem. Replacing it
     # cleanly requires the MOM6-style slow-forcing refactor tracked
     # in #160.
+    #
+    # When momentum_advection == "weno5" or "weno7", the 2-point ζ
+    # average is replaced by a WENO-Z reconstruction with {ζ; v/u}
+    # smoothness-optimised stencil (Silvestri et al. 2024).  This is
+    # an orthogonal improvement from the #160 velocity-definition fix.
     zeta = curl_vertex_cgrid(u_prime, v_prime, grid)  # (n_lat+1, n_lon+1, nlev)
-
-    # Average ζ from vertices to velocity points
-    zeta_at_u = 0.5 * (zeta[:-1, :, :] + zeta[1:, :, :])  # (n_lat, n_lon+1, nlev)
-    zeta_at_v = 0.5 * (zeta[:, :-1, :] + zeta[:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
     # Average v' to u-points (4-point arithmetic mean, periodic in lon).
     # NOT thickness-weighted — see NOTE above for the consequences.
+    # Computed before the ζ reconstruction because WENO uses v_at_u
+    # as the upwinding velocity for zeta_at_u.
     v_west = jnp.roll(v_prime, 1, axis=1)  # v'[:, (j-1)%n_lon, :]
     v_at_u_core = 0.25 * (v_prime[:-1] + v_prime[1:]
                           + v_west[:-1] + v_west[1:])  # (n_lat, n_lon, nlev)
@@ -449,6 +621,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     u_ext = jnp.concatenate([zero_u, u_prime, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
+
+    # Reconstruct ζ from vertices to velocity points
+    _mom_adv = config.momentum_advection
+    if _mom_adv in ("weno5", "weno7"):
+        _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
+        zeta_at_u = _weno_zeta_at_u(
+            zeta, v_prime, v_at_u, order=_weno_order)
+        zeta_at_v = _weno_zeta_at_v(
+            zeta, u_prime, u_at_v, order=_weno_order)
+    else:
+        # Default: 2-point average (see NOTE above)
+        zeta_at_u = 0.5 * (zeta[:-1, :, :] + zeta[1:, :, :])  # (n_lat, n_lon+1, nlev)
+        zeta_at_v = 0.5 * (zeta[:, :-1, :] + zeta[:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
     du_dt = du_dt + zeta_at_u * v_at_u
     dv_dt = dv_dt - zeta_at_v * u_at_v
@@ -468,15 +653,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     h_v_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_v[..., jnp.newaxis]
     w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
-    # Vertical momentum advection: keep 1st-order upwind.
-    # The implicit viscosity (~|w|*dz/2) provides essential damping of
-    # baroclinic shear that the explicit A_v=1e-5 cannot.  Upgrading to
-    # TVD removes this and causes blowup.  Proper fix: Richardson-number-
-    # dependent mixing or KPP (issue #204), not higher-order advection.
-    du_dt = du_dt + _flux_form_vertical_momentum_advection(
-        u_prime, w_u, h_u_old)
-    dv_dt = dv_dt + _flux_form_vertical_momentum_advection(
-        v_prime, w_v, h_v_old)
+    if _mom_adv in ("weno5", "weno7"):
+        # WENO vertical momentum advection removes the implicit viscosity
+        # (~|w|*dz/2) that first-order upwind provides.  Requires
+        # compensating vertical viscosity (KPP / Richardson-A_v, #204).
+        du_dt = du_dt + _flux_form_vertical_momentum_advection_weno(
+            u_prime, w_u, h_u_old, order=_weno_order)
+        dv_dt = dv_dt + _flux_form_vertical_momentum_advection_weno(
+            v_prime, w_v, h_v_old, order=_weno_order)
+    else:
+        # Default: 1st-order upwind.  The implicit viscosity (~|w|*dz/2)
+        # damps baroclinic shear that explicit A_v=1e-5 cannot.
+        du_dt = du_dt + _flux_form_vertical_momentum_advection(
+            u_prime, w_u, h_u_old)
+        dv_dt = dv_dt + _flux_form_vertical_momentum_advection(
+            v_prime, w_v, h_v_old)
 
     # --- 9. Tracer tendencies (diffusion + physics only) ---
     # Horizontal AND vertical tracer advection are handled in the step()
