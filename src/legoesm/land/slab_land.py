@@ -278,8 +278,8 @@ def step_land(
     response = TileResponse(
         T_surface=T_soil_new,
         albedo=alpha_new,
-        emissivity=jnp.broadcast_to(jnp.asarray(emissivity), T_soil.shape),
-        z0=jnp.broadcast_to(jnp.asarray(z0), T_soil.shape),
+        emissivity=jnp.full(T_soil.shape, emissivity, dtype=T_soil.dtype),
+        z0=jnp.full(T_soil.shape, z0, dtype=T_soil.dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx_actual,

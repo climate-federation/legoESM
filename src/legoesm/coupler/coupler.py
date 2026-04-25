@@ -230,11 +230,17 @@ def ocean_tile_response(
         + (1.0 - config.ocean_emissivity) * forcing.lw_down
     )
 
+    # ``jnp.full`` is one ``Broadcast`` HLO op vs the
+    # ``broadcast_to(jnp.array(scalar), shape)`` form which adds a
+    # ``ConvertElementType`` for the implicit Python-float promotion
+    # — same per-coupler-step micro-optimisation as the loop-18 lake
+    # rewrite.
+    _ssh_dtype = ocean_sst.dtype
     return TileResponse(
         T_surface=ocean_sst,
         albedo=alpha_ocean,
-        emissivity=jnp.broadcast_to(jnp.array(config.ocean_emissivity), shape),
-        z0=jnp.broadcast_to(jnp.array(config.ocean_z0), shape),
+        emissivity=jnp.full(shape, config.ocean_emissivity, dtype=_ssh_dtype),
+        z0=jnp.full(shape, config.ocean_z0, dtype=_ssh_dtype),
         q_surface=q_sfc,
         shflx=shflx,
         lhflx=lhflx,
