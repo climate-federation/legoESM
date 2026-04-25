@@ -31,13 +31,27 @@ via function calls (`jax.lax.gt`), algebraic rewrites
 (`(q_6 - dq_sq) > 0`), variable renames outside the vocabulary,
 chained comparisons (`a < b < c`), Subscript LHS, etc.
 
-iter-879f accepts this and removes the AST sentinel entirely.  The
-canonical regression sentinel is the BEHAVIOURAL bit-match test
-below: a regression that changes ANY of the limiter semantics in
-EITHER source file will fail the cross-implementation bit-match at
-1e-12 rtol, regardless of how the source is written.  This is the
-strongest possible structural guarantee: equivalent semantics in
-both implementations, end of story.
+iter-879f removes the AST sentinel entirely.  Iter-879g (Codex
+iter-879f stop-time) widens the behavioural coverage with explicit
+edge cases.
+
+**Scope (iter-879g, honest).**  The behavioural test catches
+regressions that affect the limiter output on the specific INPUT
+REGIMES exercised by:
+- 3 random seeds at unit scale (constraint sometimes fires).
+- 3 input scales (0.001 / 1.0 / 1000.0) at one fixed seed
+  (constraint rarely / mixed / often).
+- 9 deterministic edge cases (monotone ramp, step function, zero
+  field, near-zero, double/triple peaks, single outlier, sign
+  flips, alternating pairs).
+
+Total: 3 + 3 + 9 = 15 distinct input regimes.  A regression that
+manifests in any of these regimes will fail the cross-implementation
+bit-match at 1e-12 rtol.  A regression that ONLY manifests in
+input regimes outside this set (e.g., specific NaN/Inf inputs,
+exact-fp-boundary values, or 2D/3D inputs not exercised here)
+would not be caught.  iter-879g does NOT claim universal
+coverage; it provides 15 representative regime checks.
 
 For PER-FUNCTION existence verification of the iter-878 fix in
 ``_ppm_reconstruct_1d`` specifically, see
@@ -157,3 +171,76 @@ def test_iter879_ppm_consistency_across_scales(scale):
             f"audit both `_ppm_reconstruct_1d` and `_ppm_limit`."))
     np.testing.assert_allclose(
         np.asarray(q_R_a), np.asarray(q_R_b), rtol=1e-12, atol=atol)
+
+
+# ----------------------------------------------------------------------
+# Iter-879g (Codex iter-879f stop-time): explicit edge-case inputs
+# Codex correctly noted the completeness claim was overstated — random
+# seeds + scales don't cover all input regimes.  iter-879g adds
+# deterministic edge-case inputs designed to exercise specific
+# regimes the random tests may miss.
+# ----------------------------------------------------------------------
+
+_ITER879G_EDGE_CASES = {
+    "monotone_ramp": np.linspace(-100.0, 100.0, 32),
+    "step_function": np.where(np.arange(32) < 16, 0.0, 100.0),
+    "zero_field": np.zeros(32),
+    "near_zero": np.full(32, 1e-15),
+    "double_peak": (np.sin(np.linspace(0, 2 * np.pi, 32))
+                    * 50.0 + 100.0),
+    "triple_peak_w_noise": (np.sin(np.linspace(0, 6 * np.pi, 32))
+                            * 50.0
+                            + np.random.default_rng(1).normal(scale=2.0,
+                                                              size=32)),
+    "single_outlier": np.concatenate(
+        [np.zeros(15), [1e6], np.zeros(16)]),
+    "sign_flips": np.array([(-1.0) ** i for i in range(32)]) * 10.0,
+    "alternating_pairs": (np.repeat([1.0, -1.0], 16) * 100.0),
+}
+
+
+@pytest.mark.parametrize("name", list(_ITER879G_EDGE_CASES.keys()))
+def test_iter879g_ppm_consistency_on_edge_cases(name):
+    """Bit-match consistency MUST hold on deterministic edge-case
+    inputs.
+
+    iter-879g (Codex iter-879f stop-time): random-seed parametrization
+    is sufficient to catch generic regressions, but specific edge
+    cases (step functions, zero fields, single outliers, alternating
+    patterns) probe the limiter at well-defined regime boundaries.
+    A regression that only manifests on one of these patterns would
+    fail this test even if all random seeds happened to miss the
+    affected regime.
+
+    Edge cases:
+    - monotone_ramp: smooth linear, constraint rarely fires.
+    - step_function: sharp discontinuity, constraint fires hard.
+    - zero_field: degenerate, all q_L=q_R=0.
+    - near_zero: floating-point underflow regime.
+    - double_peak / triple_peak: multiple local extrema.
+    - single_outlier: one large value among zeros.
+    - sign_flips / alternating_pairs: rapid sign reversal pattern.
+    """
+    q_np = _ITER879G_EDGE_CASES[name].astype(np.float64)
+    q = jnp.asarray(q_np)
+
+    q_L_a, q_R_a = _ppm_reconstruct_1d(q, axis=0)
+    q_pad = np.pad(q_np, (2, 2), mode='edge')
+    q_L_unlimited, q_R_unlimited = _compute_face_values_4thorder(q_pad)
+    q_L_b, q_R_b = _ppm_limit(
+        jnp.asarray(q_np),
+        jnp.asarray(q_L_unlimited),
+        jnp.asarray(q_R_unlimited))
+
+    scale = max(1.0, float(np.max(np.abs(q_np))))
+    atol = 1e-12 * scale
+    np.testing.assert_allclose(
+        np.asarray(q_L_a), np.asarray(q_L_b), rtol=1e-12, atol=atol,
+        err_msg=(
+            f"PPM limiter divergence on edge case `{name}` (q_L).  "
+            f"iter-879g edge-case consistency check failed; "
+            f"audit both `_ppm_reconstruct_1d` and `_ppm_limit`."))
+    np.testing.assert_allclose(
+        np.asarray(q_R_a), np.asarray(q_R_b), rtol=1e-12, atol=atol,
+        err_msg=(
+            f"PPM limiter divergence on edge case `{name}` (q_R)."))

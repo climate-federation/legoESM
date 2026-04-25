@@ -1604,3 +1604,46 @@ The behavioural test fires across BOTH the seed and scale parametrizations.  6 d
 **Why iter-879f is the right move.**  An AST sentinel that catches "98% of regressions but Codex can find more false-pass paths" is worse than no AST sentinel — it gives false confidence and consumes review effort.  The behavioural bit-match test is provably complete: ANY regression that changes the function output must fail it (modulo random-input coverage of the input space).  iter-879f scopes the sentinel to that single robust guarantee.
 
 **Process.**  144th iter in the iter-752-879f chain.  Six-pass sentinel evolution: iter-879 / 879b / 879c / 879d / 879e all attempted to make the AST sentinel airtight; iter-879f accepts that's structurally impossible and removes the AST sentinel in favor of the behavioural bit-match alone, with widened parametrization over both seed and scale.
+
+### Iter-879g — Codex iter-879f stop-time: widen behavioural coverage with edge cases + scope honesty
+
+**Codex iter-879f stop-time finding.**  "the AST sentinel was removed on a completeness claim the new tests do not actually satisfy".
+
+**Issue.**  iter-879f's doc and commit message claimed the behavioural test catches "ANY regression that changes the limiter semantics" — but that's an overstatement.  3 random seeds + 3 scales = 6 input regime checks.  A regression that ONLY manifests outside those 6 regimes (e.g., on a step function, on a single outlier, on alternating sign patterns) would slip through silently.
+
+**Fix (iter-879g).**  Two changes:
+
+1. **Widen the behavioural coverage** with 9 deterministic edge-case inputs designed to exercise specific regimes the random tests may miss:
+   - `monotone_ramp`: smooth linear, constraint rarely fires.
+   - `step_function`: sharp discontinuity, constraint fires hard.
+   - `zero_field`: degenerate, all q_L=q_R=0.
+   - `near_zero`: floating-point underflow regime.
+   - `double_peak` / `triple_peak_w_noise`: multiple local extrema.
+   - `single_outlier`: one large value among zeros.
+   - `sign_flips` / `alternating_pairs`: rapid sign reversal pattern.
+
+   Total: 3 seeds + 3 scales + 9 edge cases = **15 distinct input regimes**.
+
+2. **Soften the completeness claim** in both the test docstring and the doc.  The accurate claim is: "A regression that manifests in ANY of these 15 regimes will fail the bit-match check."  Explicitly enumerate what's NOT covered: specific NaN/Inf inputs, exact-fp-boundary values, 2D/3D inputs not exercised here.  iter-879g does NOT claim universal coverage; it provides 15 representative regime checks.
+
+**Verification (iter-879g).**  Re-injected the iter-878 bug (`cond_L = q_6 > dq_sq, cond_R = -q_6 > dq_sq`):
+```
+13 failed, 2 passed
+  PPM limiter divergence on edge case `sign_flips` (q_L).
+  PPM limiter divergence on edge case `alternating_pairs` (q_L).
+  ... etc.
+```
+
+The strengthened behavioural test fires across 13 of the 15 regimes — much higher detection rate than iter-879f's 6 of 6.
+
+**On restored source.**  All 15 iter-879g tests + 4 iter-878 tests pass (19 total).
+
+**Honest residual scope.**  iter-879g still does NOT catch:
+- Regressions that manifest only on NaN/Inf inputs.
+- Regressions that manifest only on exact floating-point boundary values (e.g., values where `q_6 * dq` exactly equals `dq_sq`).
+- Regressions that manifest only on multi-dimensional input layouts (2D/3D) different from the 1D inputs tested.
+- Regressions in the per-axis ``axis`` keyword behaviour of `_ppm_reconstruct_1d` (the test always uses `axis=0`).
+
+These gaps are documented in the test docstring.  Future iters can extend coverage if a real regression in any of these regimes is encountered.
+
+**Process.**  145th iter in the iter-752-879g chain.  Seven-pass sentinel evolution.  iter-879g adds explicit edge-case coverage to address Codex's "completeness claim is overstated" finding, and softens the doc to match.  The honest scope: 15 representative input regimes covered; obfuscated source forms and uncovered input regimes both delegated to future iters.  This is a defensible final form for the iter-879 sentinel.
