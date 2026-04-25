@@ -2680,7 +2680,7 @@ The remaining iter-849 audit items are: Check 4 (`ke→d_sw6` routing — multi-
 **What iter-859 DOES show.**
 - Check 1 alone on production: production W2 1-day numbers are unchanged (Check 1 is a NO-OP at production magnitude).
 - Phase 1 + Check 1: catastrophic instability at ALL damp_scales tested (canonical and sub-canonical), worse than Phase 1 alone.
-- The `*dt` factor's effect depends on whether the divergence is large enough to saturate the cap.  Production: never; Phase 1: always.
+- The `*dt` factor's effect depends on whether the divergence is large enough to saturate the cap.  Production: never (tested at W2 IC).  Phase 1: only at peak corners where Fortran-cc divergence exceeds the `|div| ≳ 0.0033` threshold; the rest of the domain is still d2_bg-dominated.
 
 **What iter-859 does NOT establish.**
 - Whether iter-849 Check 4 (ke-application path) added to Phase 1 + Check 1 would change anything.
