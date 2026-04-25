@@ -1342,3 +1342,38 @@ The non-legacy allowlist documents 4 functions where the `duogrid`/`use_duogrid`
 **Deliverable.**  Source edits in `src/legoesm/core/fv3_sw_core.py` (4 gates widened) + `tests/test_fv3_legacy_gate_bounded_domain_iter875.py` (6 tests) + this doc entry.
 
 **Process.**  135th iter in the iter-752-875 chain.  Closes a long-standing CLAUDE.md-flagged duogrid constraint that affected 4 gate sites in the FB-chain code path.  Sized as a small, focused fix that doesn't disturb production sentinels but restores Fortran fidelity in a deferred regime.
+
+### Iter-876 — Codex iter-875 stop-time fix: preserve `use_duogrid` parameter contract
+
+Codex iter-875 stop-time review flagged: "helper gate semantics changed without reconciling the existing `use_duogrid` contract".
+
+**Issue.**  iter-875 widened 4 gates from `not use_duogrid` to `not cdgrid.base.bounded_domain`.  But the `use_duogrid` parameter remains in the helper signatures (`_ke_upwind`, `_corner_vorticity`, `_vorticity_flux`).  Pre-iter-875, callers passing `use_duogrid=True` with a default cubed-sphere cdgrid (`bounded_domain=False`) would skip the legacy branch.  Post-iter-875, the same call would fire the legacy branch (because `not bounded_domain = True`), silently breaking the parameter contract.
+
+This affected at minimum the iter-552/553 unit tests in `tests/unit/test_cdgrid_fv3_regression.py` that explicitly construct `cdgrid` with `use_duogrid=True` AND call `_corner_vorticity(use_duogrid=False)` to test the legacy branch in isolation.  iter-876 verifies via `git checkout HEAD~2` that those 2 tests were already failing pre-iter-875 (they're a pre-existing issue separate from the iter-875 contract concern), but Codex's general principle is correct: changing helper semantics without reconciling the parameter contract is bad practice that could silently break other callers.
+
+**Fix (iter-876).**  Combine BOTH predicates in each iter-875 gate.  Legacy applied iff NEITHER `use_duogrid` NOR `cdgrid.base.bounded_domain` is True.
+
+```python
+# Iter-876
+if not use_duogrid and not cdgrid.base.bounded_domain:
+    ...
+```
+
+This restores the caller-side `use_duogrid` parameter contract: callers passing `use_duogrid=True` skip the legacy branch regardless of cdgrid state.  AND it still closes the iter-875 fidelity gap: callers passing `use_duogrid=False` with a `bounded_domain=True` cdgrid (regional/nested non-duogrid) take the PLAIN branch (matches Fortran).
+
+| Caller pattern | Pre-iter-875 | Post-iter-875 only | Post-iter-876 (combined) |
+|----------------|--------------|---------------------|--------------------------|
+| `use_duogrid=True`, `bounded_domain=False` (unit test mock) | PLAIN (skip) | LEGACY (broken) | PLAIN (skip) ✓ |
+| `use_duogrid=False`, `bounded_domain=False` (W2 LEGACY) | LEGACY (apply) | LEGACY (apply) | LEGACY (apply) ✓ |
+| `use_duogrid=False`, `bounded_domain=True` (regional/nested non-duogrid) | LEGACY (broken) | PLAIN (Fortran-fix) | PLAIN (Fortran-fix) ✓ |
+| `use_duogrid=True`, `bounded_domain=True` (duogrid) | PLAIN (skip) | PLAIN (skip) | PLAIN (skip) ✓ |
+
+iter-876's combined gate is correct in all 4 regimes.
+
+**Verification.**  All 77 tests pass: 70 top-level Fortran-fidelity + 6 iter-875 sentinels + W2 production sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline`.
+
+**Deliverable.**  Source edits in `src/legoesm/core/fv3_sw_core.py` (3 functions: `_ke_upwind`, `_corner_vorticity`, `_vorticity_flux` — gates updated from `not bounded_domain` to `not use_duogrid AND not bounded_domain`) + this doc entry.
+
+The 2 `_d_sw5_corner_divergence` gates from iter-875 are unchanged — that helper takes `apply_legacy_corner_corrections` as an opt-in flag (not `use_duogrid`), so the parameter-contract concern doesn't apply.
+
+**Process.**  136th iter in the iter-752-876 chain.  Codex stop-time review caught a real API-contract issue with iter-875.  iter-876 reconciles the contract while preserving the iter-875 Fortran-fidelity gain.
