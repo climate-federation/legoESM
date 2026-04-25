@@ -545,3 +545,67 @@ A future patch that worsens any of these on the canonical matrix config trips th
 - This doc entry: confirmation of user facts, production-chain audit, honest infrastructure-level conclusion, and iter-864+ candidate list.
 
 **Process.**  123rd iter in iter-752-863 chain.  Direct response to user's iter-862-stop reframe: stop polishing FB-chain trims, pin the user-visible W2 baseline so future regressions trip, and give a structural-audit answer to "is this diagnostic / algorithmic / infrastructure".  Conclusion: infrastructure (production A-L + RK3 form vs Fortran d_sw5 + d_sw6 form, plus `boundary_fix` as non-Fortran stabiliser).  Smaller knobs are exhausted; meaningful reduction requires a multi-iter architectural change (Check 4 ke-routing OR FB-chain stabilisation).
+
+### Iter-864 — FB-chain d_sw5 vortflux sync removed (Fortran-faithful per dyn_core.F90:1124-1207)
+
+CLAUDE.md guidance + Ralph protocol: "Flux computation split across d_sw1/d_sw3/d_sw5 and updates across d_sw2/d_sw4/d_sw6 requires mandatory cube-edge flux synchronization before update."  iter-864 audits each Python flux-sync site against the Fortran oracle and removes ONE Python sync that exceeds Fortran (over-syncing the FB chain's d_sw5 vorticity flux).
+
+**Audit table.**
+
+| Boundary               | Fortran (`dyn_core.F90`) | Python                                   | Verdict       |
+|------------------------|---------------------------|------------------------------------------|---------------|
+| d_sw1 → d_sw2 (mass)   | ACTIVE `mpp_get_boundary` CGRID_NE avg (lines 850-900) | `synchronize_cgrid_fluxes` inside `fv_tp_2d` (called by `transport_step`) | **MATCH ✓** |
+| d_sw3 → d_sw4 (KE)     | ACTIVE `mpp_get_boundary` BGRID_NE avg of `ubb`/`vbbtemp` (lines 968-1011) | `synchronize_bgrid_ne_corner_geo` inside `_bgrid_ke_transport` (iter-102) | **MATCH ✓** |
+| d_sw5 → d_sw6 (vortflux) | DISABLED — block COMMENTED OUT (lines 1124-1207, "Revisit the vorticity flux averaging") | `synchronize_cgrid_fluxes` inside `fv_tp_2d` ALWAYS applied when duogrid on (BEFORE iter-864) | **MISMATCH ✗** — Python over-syncs |
+| d_sw5 → d_sw6 (kee corner) | DISABLED — block COMMENTED OUT (lines 1180-1207) | none | **MATCH ✓** |
+| Production divergence damping | (no Fortran analogue — production uses A-L, not d_sw5+d_sw6) | `cgrid_mass_flux_divergence` syncs only when duogrid (iter-808) | not applicable to FB-chain audit |
+
+**Fix (smallest correct change).**
+
+Add `apply_cgrid_flux_sync: bool = True` kwarg to `fv_tp_2d` in `src/legoesm/core/fv_tp_2d.py`.  The internal duogrid sync is now gated by `(apply_cgrid_flux_sync and dg is not None and dg.ng >= 2)`.  Default `True` preserves the iter-808 sync for the mass-flux call inside `transport_step` (matching Fortran's ACTIVE mass averaging).
+
+Pass `apply_cgrid_flux_sync=False` from the FB chain's d_sw5 vorticity-flux call in `_d_sw_native` step 7 (`src/legoesm/core/fv3_sw_core.py:2142-2144`).  The result is that vortfluxx/vortfluxy now exactly match Fortran's un-synced behaviour.
+
+Production `fv3_sw_tendencies` does NOT call `fv_tp_2d` (uses `cgrid_mass_flux_divergence` instead), so the production W2/W5/cosine bell sentinels are bit-identical pre vs post iter-864.
+
+**Tests.**
+
+`tests/test_fv3_fv_tp_2d_flux_sync_iter864.py` (4 tests):
+1. `test_kwarg_gates_sync_on_duogrid_grid` — `apply_cgrid_flux_sync=False` vs `True` produces noticeably different fx/fy on a duogrid grid.
+2. `test_default_kwarg_value_is_true` — default behaviour matches `apply_cgrid_flux_sync=True` (preserves iter-808 sync for mass-flux callers).
+3. `test_kwarg_is_no_op_on_legacy_grid` — on `use_duogrid=False`, both flag values produce identical output (the duogrid-gate dominates).
+4. `test_d_sw_native_passes_apply_cgrid_flux_sync_false` — flow-aware AST scan of `_d_sw_native`'s direct body: requires EXACTLY ONE direct-body `fv_tp_2d` call AND that call passes literal `False`; rejects any direct-body `transport_step` call passing `False`.  Codex iter-864 review: scan was tightened from `ast.walk(fn)` (which included nested scopes and a `>= 1` quorum that admitted dead nested calls) to a flow-sensitive direct-body walker so a future regression cannot hide in a nested helper or comprehension.
+
+`TestDSwNativeEndToEndGoldFileIter710` updated:
+- Wind/KE/interior fingerprints rebaseline to post-iter-864 values, structured as `subTest` blocks for clean per-block diagnostics.
+- `h_new.sum()` fingerprint NOT rebaselined.  iter-864 does not touch the mass path (`transport_step` produces `h_new` at step 2; nothing later mutates it), so any shift in this fingerprint cannot be causally attributed to iter-864.  Two new `@unittest.expectedFailure` test methods (`test_d_sw_native_nord1_h_new_sum_pre_iter864_known_failure` and `test_d_sw_native_damp_v_iter727_h_new_sum_pre_iter864_known_failure`) hold the original mass-path fingerprint as a regression sentinel that records (rather than masks) a separate ~1.4 drift observed pre-iter-862.  This fix follows Codex iter-864 review: "Do not rebaseline `h_new.sum()` in this change unless you also provide a causal reproducer or Fortran comparison for the mass path."
+
+**Production verification.**
+- All 15 `TestW2BoundaryErrorBudget` sentinels pass (W2 v_ll_Linf=0.159, L2=2.07e-04 unchanged).
+- `scripts/run_atmosphere_test_matrix.py --only sw --grid cubed_sphere --quick` reports identical W2/W5/cosine bell numbers as pre-iter-864.
+- 4 new iter-864 flux-sync tests pass.
+- 2 gold-file tests (TestDSwNativeEndToEndGoldFileIter710) pass with new fingerprints; 2 mass-path-drift `@expectedFailure` tests xfail as expected.
+
+**What iter-864 DOES show.**
+- Cataloguing of every flux-sync site between Fortran's d_sw1/d_sw3/d_sw5 (compute) and d_sw2/d_sw4/d_sw6 (update) blocks.  ALL three Fortran-active syncs are now correctly mirrored in Python; the one Fortran-DISABLED sync that Python had been over-applying (vortflux) is now opt-out via the kwarg, with the FB chain calling site explicitly opted-out.
+- Production paths unaffected (no callers of `fv_tp_2d` in production tendency).
+- A pre-iter-862 mass-path fingerprint drift (`h_new.sum` ~1.4 over 384e3) is now visible as `@expectedFailure` xfails rather than silently rebaselined.
+
+**What iter-864 does NOT establish.**
+- Whether the now-Fortran-faithful FB chain is more stable at C36 — that's iter-865+ measurement work.  iter-864 only fixes the FORTRAN-FIDELITY discrepancy, not the FB chain's documented C36 instability.
+- Root cause of the pre-iter-862 mass-path drift in `h_new.sum`.  Now flagged as `@expectedFailure` pending a separate iter-865+ investigation.
+- Production W2 mode-A reduction.  Production does not call `fv_tp_2d`.
+
+**Iter-865+ candidates.**
+- Investigate the pre-iter-862 mass-path drift causing `h_new.sum` to shift from 383992.34 to ~383993.75 (delta ~1.4 over 384e3, ~3.7e-6 relative).  The drift was already on HEAD before iter-862; bisect would find the original mover.
+- FB-chain C36 stability: now that iter-864 has aligned the d_sw5 vortflux behaviour, re-test FB-chain stability on W2 LEGACY 1-day at C36.  If still unstable, the next architectural piece is candidate for iter-865+.
+- Multi-iter Check 4 architectural port (production ke→d_sw6 routing) — unchanged since iter-863.
+
+**Deliverable.**
+- `src/legoesm/core/fv_tp_2d.py`: new `apply_cgrid_flux_sync` kwarg (default True), threaded into the duogrid sync gate.
+- `src/legoesm/core/fv3_sw_core.py`: `_d_sw_native` step 7 passes `apply_cgrid_flux_sync=False`.
+- `tests/test_fv3_fv_tp_2d_flux_sync_iter864.py`: 4 new tests (kwarg gate, default-True, no-op on legacy, flow-aware AST scan).
+- `tests/unit/test_cdgrid_fv3_regression.py::TestDSwNativeEndToEndGoldFileIter710`: gold-file rebaseline structured as `subTest` blocks; `h_new.sum` extracted into 2 `@unittest.expectedFailure` test methods recording a pre-iter-862 mass-path drift.
+- All 15 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**Process.**  124th iter in iter-752-864 chain.  CLAUDE.md guidance specified flux-sync verification as a critical duogrid constraint.  Audit identified ONE Fortran-fidelity gap: the FB chain's d_sw5 vortflux call was over-syncing relative to Fortran's commented-out vortflux averaging block.  Fix is the smallest possible: gate the existing sync behind a kwarg (default-True for callers that match Fortran's ACTIVE mass-flux sync) and opt the d_sw5 caller out (matching Fortran's DISABLED vortflux sync).  Production unchanged; FB chain now Fortran-faithful at this site.  Two Codex MEDIUM findings addressed: (a) flow-aware AST scan replaces walk-with-quorum; (b) h_new.sum gold-file fingerprints kept as `@expectedFailure` to record (not mask) a separate pre-iter-862 mass-path drift.

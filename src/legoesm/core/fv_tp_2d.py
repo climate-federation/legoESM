@@ -457,8 +457,31 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
 
 
 def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
-             nord=None, damp_c=None, mass=None):
-    """Lin-Rood operator-split 2D transport (Putman & Lin 2007)."""
+             nord=None, damp_c=None, mass=None,
+             apply_cgrid_flux_sync=True):
+    """Lin-Rood operator-split 2D transport (Putman & Lin 2007).
+
+    Parameters
+    ----------
+    apply_cgrid_flux_sync : bool, default True
+        Iter-864: when ``True`` (default), the duogrid CGRID_NE flux
+        synchronization (`synchronize_cgrid_fluxes`) is applied at the
+        end so neighbour-face flux pairs agree post-iter-808 sign-flip.
+        Default ``True`` matches Fortran's ``mpp_get_boundary``
+        averaging block in dyn_core.F90:850-900 around the d_sw1 mass
+        flux call.
+
+        Set ``False`` to MATCH Fortran's commented-out vorticity-flux
+        averaging block in dyn_core.F90:1124-1207 (the d_sw5 → d_sw6
+        sync that Fortran has explicitly disabled).  The FB chain's
+        vorticity-flux call (`_d_sw_native` step 7) passes ``False``
+        so the post-d_sw5 vortfluxx/vortfluxy fields match Fortran's
+        un-synchronised behaviour exactly.
+
+        Production `fv3_sw_tendencies` does not call this helper, so
+        it is unaffected.  `transport_step` and direct callers default
+        to ``True``, preserving prior behaviour for the mass-flux call.
+    """
     n = cdgrid.n
     grid = cdgrid.base
     area = grid.area
@@ -530,8 +553,13 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
         fx, fy = _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=mass)
 
     # Duogrid flux synchronization (see cgrid_mass_flux_divergence for rationale).
+    # Iter-864: gated by `apply_cgrid_flux_sync` so the FB chain's d_sw5
+    # vorticity-flux call can opt out and match Fortran's commented-out
+    # `mpp_get_boundary(... gridtype=CGRID_NE)` averaging at
+    # dyn_core.F90:1124-1207.  Default True keeps the iter-808 sync
+    # active for the mass-flux callers (`transport_step`).
     dg = cdgrid.base.duogrid
-    if dg is not None and dg.ng >= 2:
+    if apply_cgrid_flux_sync and dg is not None and dg.ng >= 2:
         from legoesm.grids.halo import synchronize_cgrid_fluxes
         fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
 

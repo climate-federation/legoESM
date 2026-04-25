@@ -2125,10 +2125,23 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     ke_diff_v_scaled = ke_corner[:, :, :-1] - ke_corner[:, :, 1:]  # (6, n+1, n)
 
     # === 7. Vorticity transport to D-grid edges (FV3 d_sw5 fv_tp_2d) ===
+    # Iter-864: pass `apply_cgrid_flux_sync=False` so this call matches
+    # Fortran's commented-out vorticity-flux averaging block in
+    # dyn_core.F90:1124-1207.  Fortran computes vortfluxx/vortfluxy at
+    # sw_core.F90:1861 inside d_sw5 and then EXPLICITLY DOES NOT
+    # `mpp_get_boundary`-sync them before d_sw6 (the sync block exists
+    # in source but is commented out).  Our `fv_tp_2d` previously
+    # always applied the iter-808 CGRID_NE sync when duogrid was on,
+    # which silently over-synced the vorticity flux relative to
+    # Fortran.  Following the Fortran oracle exactly: skip the sync
+    # here.  The mass-flux call inside `transport_step` (step 2 above)
+    # still defaults to sync=True, matching Fortran's ACTIVE
+    # `mpp_get_boundary` averaging block at dyn_core.F90:850-900.
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
         ut, vt, dt, cdgrid)
     fx_vort, fy_vort = fv_tp_2d(
-        zeta_abs, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid)
+        zeta_abs, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
+        apply_cgrid_flux_sync=False)
 
     # === 8. D-grid wind update (FV3 d_sw6, sw_core.F90:1935-1944) ===
     # Incremental form equivalent to Fortran replacement formula:
