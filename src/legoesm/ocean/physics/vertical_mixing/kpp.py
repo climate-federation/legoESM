@@ -103,8 +103,12 @@ def _boundary_layer_depth(
     sharpness = 20.0
     sig = jax.nn.sigmoid(sharpness * (Ri_b - cfg.Ri_crit))  # (..., nlev)
 
-    # Crossing weight: difference of adjacent sigmoid values
-    sig_prev = jnp.concatenate([jnp.zeros_like(sig[..., :1]), sig[..., :-1]], axis=-1)
+    # Crossing weight: difference of adjacent sigmoid values.  ``jnp.pad``
+    # along the trailing axis is one HLO op; the previous
+    # ``concatenate([zeros_like(sig[..., :1]), sig[..., :-1]])`` allocated
+    # a fresh zero buffer and concatenated.
+    pad_axes = ((0, 0),) * (sig.ndim - 1)
+    sig_prev = jnp.pad(sig[..., :-1], (*pad_axes, (1, 0)))
     w_cross = sig - sig_prev  # (..., nlev), peaks at crossing level
     w_cross = jnp.maximum(w_cross, 0.0)
     w_sum = jnp.sum(w_cross, axis=-1, keepdims=True)

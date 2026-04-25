@@ -72,12 +72,13 @@ def sbm_convection(
     """
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev) layer thickness
-    tau_c = jnp.broadcast_to(jnp.asarray(config.tau_c, dtype=T.dtype), (ncol,))
-    RH_ref = jnp.broadcast_to(jnp.asarray(config.RH_ref, dtype=T.dtype), (ncol,))
-    CAPE_threshold = jnp.broadcast_to(
-        jnp.asarray(config.CAPE_threshold, dtype=T.dtype),
-        (ncol,),
-    )
+    # ``jnp.full`` lowers to a single ``Broadcast`` HLO op; the previous
+    # ``broadcast_to(jnp.asarray(scalar, dtype), shape)`` form additionally
+    # forced a ``ConvertElementType`` for the implicit promotion of the
+    # Python float, which is unnecessary work per convection step.
+    tau_c = jnp.full((ncol,), config.tau_c, dtype=T.dtype)
+    RH_ref = jnp.full((ncol,), config.RH_ref, dtype=T.dtype)
+    CAPE_threshold = jnp.full((ncol,), config.CAPE_threshold, dtype=T.dtype)
 
     # 1. Surface temperature as parcel starting point
     T_base = T[:, -1]  # (ncol,)
