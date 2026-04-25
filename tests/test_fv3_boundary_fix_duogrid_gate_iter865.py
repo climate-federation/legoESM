@@ -175,19 +175,51 @@ def test_fortran_vector_corner_fill_active_in_legacy_mode():
         f"legacy-mode corner-fill behaviour.")
 
 
+def test_bounded_domain_property_recognises_panel_and_duogrid():
+    """Iter-865b: the new `bounded_domain` property on
+    `CubedSphereGrid` must return True for both bounded-domain cases:
+    - duogrid (full 6-face cubed sphere with cross-face halo).
+    - regional / nested single-face panel (`lat.shape[0] == 1`).
+    And False for a plain non-duogrid global cubed sphere."""
+    n = 8
+    legacy_grid = create_cubed_sphere(n, use_duogrid=False)
+    duogrid_grid = create_cubed_sphere(n, use_duogrid=True)
+
+    # Regional panel from create_cubed_sphere_panel.
+    from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+    panel = create_cubed_sphere_panel(n)
+
+    assert legacy_grid.bounded_domain is False, (
+        f"non-duogrid global cubed sphere should report "
+        f"bounded_domain=False; got {legacy_grid.bounded_domain}")
+    assert duogrid_grid.bounded_domain is True, (
+        f"duogrid global cubed sphere should report "
+        f"bounded_domain=True; got {duogrid_grid.bounded_domain}")
+    assert panel.bounded_domain is True, (
+        f"single-face regional panel should report "
+        f"bounded_domain=True; got {panel.bounded_domain}")
+
+
 def test_iter865_gate_visible_in_source():
-    """Iter-865 source-scan: the production `boundary_fix` block in
-    `fv3_sw_tendencies` must be guarded by ALL THREE conditions:
-    `boundary_fix`, `cdgrid.base.duogrid is None`, AND `n > 2`.
+    """Iter-865 / iter-865b source-scan: the production
+    `boundary_fix` block in `fv3_sw_tendencies` must be guarded by
+    ALL THREE conditions: `boundary_fix`, `not cdgrid.base.bounded_domain`
+    (or equivalently `cdgrid.base.duogrid is None` in legacy
+    iter-865 form), AND `n > 2`.
+
+    Iter-865b: original iter-865 hardcoded `cdgrid.base.duogrid is
+    None`; Codex stop-time review pointed out this leaves regional/
+    nested single-face panels on the legacy path.  iter-865b uses
+    the proper Fortran-faithful `bounded_domain` flag.  This scan
+    accepts BOTH forms (`not cdgrid.base.bounded_domain` and
+    `cdgrid.base.duogrid is None`) so a future revert to the
+    duogrid-only form would not silently pass.
 
     Codex iter-865 second-pass tightening: the prior version checked
     only that some `if boundary_fix ... .duogrid is None` block existed
     anywhere under the function — it didn't (a) target the actual
     smoothing assignments, (b) verify the `cdgrid.base.duogrid`
-    attribute chain, or (c) verify the `n > 2` size guard.  A future
-    refactor could leave an unrelated guard intact while moving the
-    real smoothing block out from under it; the tightened scan ties
-    the requirement to the smoothing assignments themselves.
+    attribute chain, or (c) verify the `n > 2` size guard.
 
     The scan finds every direct-body assignment of the form
     ``du_cc.at[:, ...].set(...)`` or ``dv_cc.at[:, ...].set(...)`` in
@@ -260,7 +292,20 @@ def test_iter865_gate_visible_in_source():
                     and isinstance(op.left.value, ast.Attribute)
                     and op.left.value.attr == "base")
 
-        has_duogrid = any(is_duogrid_is_none(op) for op in operands)
+        def is_not_bounded_domain(op):
+            """Iter-865b: ``not cdgrid.base.bounded_domain`` form."""
+            if not (isinstance(op, ast.UnaryOp)
+                    and isinstance(op.op, ast.Not)):
+                return False
+            inner = op.operand
+            return (isinstance(inner, ast.Attribute)
+                    and inner.attr == "bounded_domain"
+                    and isinstance(inner.value, ast.Attribute)
+                    and inner.value.attr == "base")
+
+        has_duogrid = any(
+            is_duogrid_is_none(op) or is_not_bounded_domain(op)
+            for op in operands)
 
         def is_n_gt_2(op):
             return (isinstance(op, ast.Compare)
@@ -333,5 +378,6 @@ def test_iter865_gate_visible_in_source():
         f"Iter-865 boundary_fix gate is incomplete:\n  "
         + "\n  ".join(failures)
         + "\n\nThe top-level If guarding du_cc/dv_cc smoothing must "
-          "AND together: (a) `boundary_fix`, (b) "
-          "`cdgrid.base.duogrid is None`, (c) `n > 2`.")
+          "AND together: (a) `boundary_fix`, (b) `not "
+          "cdgrid.base.bounded_domain` (iter-865b) OR `cdgrid.base."
+          "duogrid is None` (legacy iter-865), (c) `n > 2`.")

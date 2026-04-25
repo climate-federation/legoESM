@@ -1645,17 +1645,19 @@ def fv3_sw_tendencies(
     # pad-rotate mismatch at the 3-face cube vertex where face-local
     # grid angle is discontinuous.  See iter-767 review-doc entry.
     #
-    # Iter-865: gate this NON-DUOGRID corner override on
-    # `cdgrid.base.duogrid is None` per CLAUDE.md duogrid constraint
-    # #2.  Fortran's `fill_corners_agrid_r8` is part of the
-    # non-duogrid cube-vertex handling; in duogrid mode the cross-
-    # face halo from `pad_halo_vector` already provides correct
-    # cube-vertex values and overwriting them with the legacy
-    # cross-component formula would corrupt the duogrid path.
-    # Codex iter-865 review: this flag was a public escape hatch
-    # for legacy edge handling that could be enabled on a duogrid
-    # grid without protection; the gate locks it down.
-    if fortran_vector_corner_fill and cdgrid.base.duogrid is None:
+    # Iter-865 / iter-865b: gate this NON-DUOGRID corner override on
+    # `not cdgrid.base.bounded_domain` per CLAUDE.md duogrid
+    # constraint #2.  Fortran's `fill_corners_agrid_r8` is part of
+    # the non-bounded-domain cube-vertex handling; in any
+    # bounded_domain mode (duogrid OR regional panel) the cross-face
+    # halo from `pad_halo_vector` (or Neumann wall BC) already
+    # provides correct cube-vertex values and overwriting them with
+    # the legacy cross-component formula would corrupt the
+    # bounded-domain path.  iter-865b widens the gate from
+    # `duogrid is None` to `not bounded_domain` per Codex stop-time
+    # review (regional-panel runs would have hit the legacy path).
+    if (fortran_vector_corner_fill
+            and not cdgrid.base.bounded_domain):
         u_cc_pad, v_cc_pad = _fortran_agrid_vector_corner_fill(
             u_cc_pad, v_cc_pad)
     u_corner = 0.25 * (u_cc_pad[:, :-1, :-1] + u_cc_pad[:, 1:, :-1]
@@ -1754,22 +1756,26 @@ def fv3_sw_tendencies(
     # Removing this is gated on the FB chain becoming stable at C36
     # (review-doc item #2: ng=3 halo infrastructure).
     #
-    # Iter-865: Fortran-faithful gating per CLAUDE.md duogrid
-    # constraint #2 ("Legacy edge handling must be disabled in
-    # duogrid mode via bounded_domain = .true.").  When duogrid is
-    # active (`cdgrid.base.duogrid is not None`), the cross-face
-    # halo placed by `pad_halo_vector` on `du_cc/dv_cc` already
+    # Iter-865 / iter-865b: Fortran-faithful gating per CLAUDE.md
+    # duogrid constraint #2 ("Legacy edge handling must be disabled
+    # in duogrid mode via bounded_domain = .true.").  When the
+    # bounded-domain flag is True (duogrid OR regional/nested
+    # single-face panel), the cross-face halo placed by
+    # `pad_halo_vector` (or Neumann wall BC on a panel) already
     # provides Fortran-faithful neighbour-face values at face
     # boundaries; smoothing same-face boundary cells with
     # adjacent-interior cells (this `boundary_fix` block) is the
-    # legacy non-FV3 hack that should be bypassed.  In legacy
-    # (`use_duogrid=False`) mode the smoothing remains active —
-    # iter-511 measured it as load-bearing for W2 L2.  No production
-    # caller currently combines `fv3_sw_tendencies` with duogrid +
-    # boundary_fix=True (W2/W5/cosine bell matrix uses LEGACY), so
-    # this gate is a defensive Fortran-fidelity lock rather than a
-    # behaviour change for any current run.  Audited iter-865.
-    if boundary_fix and (cdgrid.base.duogrid is None) and n > 2:
+    # legacy non-FV3 hack that should be bypassed.  In a
+    # non-bounded-domain global cubed sphere (LEGACY) the smoothing
+    # remains active — iter-511 measured it as load-bearing for W2
+    # L2.  Codex iter-865 stop-time review flagged the original
+    # iter-865 gate `cdgrid.base.duogrid is None` as hardcoding
+    # duogrid-only and missing the regional-panel case; iter-865b
+    # uses the proper `bounded_domain` flag from `cdgrid.base` per
+    # the Fortran `fv_arrays.F90:1512` definition `bounded_domain =
+    # (regional .or. nested .or. duogrid)`.  Single-face regional
+    # panels now bypass the legacy edge handling correctly.
+    if boundary_fix and (not cdgrid.base.bounded_domain) and n > 2:
         # Iter-769: optionally skip the 4 cube-corner cells [0,0],
         # [0,n-1], [n-1,0], [n-1,n-1].  The cascaded row-0/col-0 (and
         # row-n/col-n) smoothing causes corner cells to receive a
@@ -1827,10 +1833,12 @@ def fv3_sw_tendencies(
     # consistent across every pad_halo_vector call inside this
     # function (both the wind halo in step (e) and the tendency
     # projection here in step (k)).
-    # Iter-865: same duogrid-is-None gate as the (e)-site call —
-    # `fortran_vector_corner_fill` is the non-duogrid legacy corner
-    # formula and must NOT fire when duogrid is active.
-    if fortran_vector_corner_fill and cdgrid.base.duogrid is None:
+    # Iter-865 / iter-865b: same `not bounded_domain` gate as the
+    # (e)-site call — `fortran_vector_corner_fill` is the non-
+    # bounded-domain legacy corner formula and must NOT fire when
+    # the grid is bounded_domain (duogrid or regional panel).
+    if (fortran_vector_corner_fill
+            and not cdgrid.base.bounded_domain):
         du_cc_pad, dv_cc_pad = _fortran_agrid_vector_corner_fill(
             du_cc_pad, dv_cc_pad)
     du_d_dt = 0.5 * (du_cc_pad[:, 1:-1, :-1] + du_cc_pad[:, 1:-1, 1:])   # (6, n, n+1)

@@ -677,3 +677,33 @@ So iter-865 is a defensive Fortran-fidelity lock: NO behavioural change for any 
 - All 15 W2 sentinels pass; production atmosphere matrix unchanged.
 
 **Process.**  125th iter in iter-752-865 chain.  Direct response to CLAUDE.md duogrid constraint #2.  Audit found three legacy non-FV3 paths in `fv3_sw_tendencies` (boundary_fix block + 2 sites of fortran_vector_corner_fill) that fired regardless of duogrid status; all three now gated on `cdgrid.base.duogrid is None`.  Defensive Fortran-fidelity lock with no behavioural change for any current run.  Two Codex review findings addressed: (a) added second flag's gate (Codex flagged `fortran_vector_corner_fill` as a public escape hatch); (b) tightened AST scan to flow-aware dominance check verifying the full three-guard AND chain `boundary_fix AND cdgrid.base.duogrid is None AND n > 2` ties to the actual smoothing assignments.
+
+### Iter-865b — Generalise gate from `duogrid is None` to `not bounded_domain`
+
+Codex stop-time review of iter-865: "iter-865 hardcodes duogrid-only gating and leaves bounded-domain panel runs on the legacy edge path."
+
+**Issue.**  Fortran's `bounded_domain` flag (`fv_arrays.F90:1512`) is a UNION: `bounded_domain = (regional .or. nested .or. duogrid)`.  iter-865's gate `cdgrid.base.duogrid is None` correctly identifies the duogrid case but MISSES the regional / nested single-face panel case (created via `create_cubed_sphere_panel`, identified by `lat.shape[0] == 1`).  A regional panel run of `fv3_sw_tendencies` with `boundary_fix=True` or `fortran_vector_corner_fill=True` would silently fall through to the legacy edge path despite being a bounded-domain configuration.
+
+**Fix.**
+- Added `bounded_domain` property to `CubedSphereGrid` (NamedTuple) returning `(self.duogrid is not None) or (self.lat.shape[0] == 1)`, matching Fortran's `fv_arrays.F90:1512` definition.
+- Updated all three iter-865 gates from `cdgrid.base.duogrid is None` to `not cdgrid.base.bounded_domain` so regional panels also bypass the legacy hacks.
+- Updated AST source-scan to recognise both forms (`not cdgrid.base.bounded_domain` and the legacy `cdgrid.base.duogrid is None`) for backward compatibility, and added a new test that verifies the property correctly recognises legacy / duogrid / panel grids.
+
+**Tests.**
+- All 5 prior iter-865 tests still pass (the gate semantics include the duogrid case, just via the more general property).
+- New `test_bounded_domain_property_recognises_panel_and_duogrid`: verifies `bounded_domain` is False for non-duogrid global cubed sphere, True for duogrid, True for `create_cubed_sphere_panel` regional panel.
+- All 15 `TestW2BoundaryErrorBudget` sentinels pass.
+
+**What iter-865b DOES show.**
+- The generalisation closes a regional-panel hole that iter-865's hardcoded duogrid gate left open.
+- The new `bounded_domain` property is the canonical Fortran-faithful test for legacy-edge-handling bypass and should be used by any future legacy-mode gate.
+
+**What iter-865b does NOT establish.**
+- Any production W2 mode-A reduction (still no current caller combines bounded_domain with these legacy hacks).
+
+**Deliverable.**
+- `src/legoesm/grids/cubed_sphere.py`: new `bounded_domain` property on `CubedSphereGrid`.
+- `src/legoesm/core/operators_cdgrid.py`: three gates updated from `duogrid is None` to `not bounded_domain`.
+- `tests/test_fv3_boundary_fix_duogrid_gate_iter865.py`: new property-recognition test + AST scan accepts both forms.
+
+**Process.**  125b in iter-752-865b chain.  Codex stop-time review identified a regional-panel hole in iter-865's duogrid-only gate.  Fix exposes the proper `bounded_domain` Fortran abstraction (regional OR nested OR duogrid) as a property and uses it consistently.

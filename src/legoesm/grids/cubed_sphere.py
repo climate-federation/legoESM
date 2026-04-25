@@ -172,6 +172,27 @@ class CubedSphereGrid(NamedTuple):
         """
         return (jnp.pi / 2) * self.radius / (self.n * 1000.0)
 
+    @property
+    def bounded_domain(self) -> bool:
+        """Iter-865b: Fortran-faithful ``bounded_domain`` flag per
+        ``fv_arrays.F90:1512``: ``bounded_domain = (regional .or.
+        nested .or. duogrid)``.  In legoESM:
+        - duogrid: ``self.duogrid is not None``.
+        - regional / nested: a single-face panel (``self.lat.shape[0]
+          == 1``; see ``create_cubed_sphere_panel`` and the
+          ``data.shape[0] == 1`` branch of ``pad_halo`` which applies
+          Neumann wall BCs instead of inter-face halo exchange).
+
+        Operators with legacy edge-handling fallbacks should bypass
+        them when ``bounded_domain`` is True so the duogrid /
+        regional Fortran-faithful path is used uniformly across the
+        codebase.  Iter-865 originally hardcoded the gate to
+        ``self.duogrid is None``; iter-865b exposes the proper
+        bounded-domain abstraction so future regional/nested support
+        gates the same way.
+        """
+        return (self.duogrid is not None) or (self.lat.shape[0] == 1)
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------
