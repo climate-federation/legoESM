@@ -208,7 +208,7 @@ def step_multilayer_land(
             lat, snow, snow_age, config.land_albedo,
         )
     else:
-        alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_surface.shape)
+        alpha = jnp.full(T_surface.shape, albedo_land, dtype=T_surface.dtype)
 
     # --- Radiation ---
     sw_net, lw_net, lw_up = surface_radiation_fluxes(

@@ -92,7 +92,7 @@ def step_land(
             lat, snow, snow_age, config.land_albedo,
         )
     else:
-        alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_soil.shape)
+        alpha = jnp.full(T_soil.shape, albedo_land, dtype=T_soil.dtype)
 
     # Smooth wind speed floor
     wind_speed = jnp.sqrt(
