@@ -228,12 +228,16 @@ def upwind_vertical_gradient(
     inv_dz_half = 1.0 / jnp.maximum(dz_half, eps)
     df = (field[..., :-1] - field[..., 1:]) * inv_dz_half
 
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-
+    # Pad along trailing axis instead of allocating a fresh ``zeros``
+    # buffer + concatenate.  Single Pad HLO op each.  This helper
+    # fires once per scan step inside ``vertical_advection_ocean`` for
+    # u, v, T, S, and every tracer — so 4-6 zero-broadcast concats
+    # per RHS evaluation in the hot loop.
+    pad_axes = ((0, 0),) * (df.ndim - 1)
     # Upward flow (w>0): donor is deeper cell -> (f[k] - f[k+1]) / dz.
-    grad_up = jnp.concatenate([df, zeros], axis=-1)
+    grad_up = jnp.pad(df, (*pad_axes, (0, 1)))
     # Downward flow (w<0): donor is shallower cell -> (f[k-1] - f[k]) / dz.
-    grad_down = jnp.concatenate([zeros, df], axis=-1)
+    grad_down = jnp.pad(df, (*pad_axes, (1, 0)))
 
     return jnp.where(w > 0.0, grad_up, grad_down)
 

@@ -704,11 +704,21 @@ def _interp_monthly_noncyclic(mid_days: np.ndarray, data: np.ndarray,
     if data.ndim == 1:
         return np.array(np.interp(day, mid_days, data), dtype=np.float64)
     trailing = data.shape[1:]
-    flat = data.reshape(data.shape[0], -1)
-    out = np.empty(flat.shape[1], dtype=np.float64)
-    for k in range(flat.shape[1]):
-        out[k] = np.interp(day, mid_days, flat[:, k])
-    return out.reshape(trailing)
+    # Vectorised lerp instead of the previous per-trailing-column
+    # ``for k in range(...): np.interp(...)`` loop.  For CMIP6 ozone
+    # (~64 lat × 80 plev) this is ~5k Python calls per AMIP forcing
+    # update — replaced with a single ``np.searchsorted`` + broadcast.
+    n = mid_days.shape[0]
+    if n == 0:
+        return np.zeros(trailing, dtype=np.float64)
+    if n == 1 or day <= mid_days[0]:
+        return data[0].astype(np.float64, copy=True)
+    if day >= mid_days[-1]:
+        return data[-1].astype(np.float64, copy=True)
+    i = int(np.clip(np.searchsorted(mid_days, day, side="right") - 1, 0, n - 2))
+    dx = mid_days[i + 1] - mid_days[i]
+    w = 0.0 if dx <= 0.0 else float((day - mid_days[i]) / dx)
+    return ((1.0 - w) * data[i] + w * data[i + 1]).astype(np.float64, copy=False)
 
 
 def _simday_to_file_day(sim_day: float, start_year: int,
