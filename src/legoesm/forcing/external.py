@@ -785,16 +785,34 @@ def _interp_zonal_to_grid(lat_src: np.ndarray, field: np.ndarray,
     if field.ndim == 1:
         result = np.interp(lat_deg, lat_src, field)
         return jnp.array(result).reshape(lat_grid.shape)
+
+    # Vectorised lerp: locate the bracketing source latitude once, then
+    # gather both endpoints and combine.  Replaces the previous
+    # ``for k in range(n_cols): np.interp(...)`` loop, which scaled
+    # quadratically on T170+ (n_cols ~ 10⁴) at every external-forcing
+    # update.
+    nsrc = lat_src.shape[0]
+    if nsrc == 1:
+        result_flat = np.broadcast_to(
+            field.reshape(1, -1), (lat_deg.size, np.prod(field.shape[1:])),
+        ).copy()
     else:
-        # Handle 2D, 3D, ... by flattening trailing dims, interpolating
-        # each column independently, and reshaping back (issue #178).
+        idx = np.clip(np.searchsorted(lat_src, lat_deg) - 1, 0, nsrc - 2)
+        x0 = lat_src[idx]
+        x1 = lat_src[idx + 1]
+        # Avoid division by zero on duplicated source points.
+        dx = np.where(x1 > x0, x1 - x0, 1.0)
+        w = np.where(x1 > x0, (lat_deg - x0) / dx, 0.0)
+        # Clamp at the endpoints (matches np.interp's flat extrapolation).
+        w = np.clip(w, 0.0, 1.0)
+        # Reshape ``field`` to (nsrc, n_cols) and gather along leading.
         trailing_shape = field.shape[1:]
         n_cols = int(np.prod(trailing_shape))
-        field_flat = field.reshape(field.shape[0], n_cols)
-        result = np.zeros((len(lat_deg), n_cols))
-        for k in range(n_cols):
-            result[:, k] = np.interp(lat_deg, lat_src, field_flat[:, k])
-        return jnp.array(result).reshape((*lat_grid.shape, *trailing_shape))
+        field_flat = np.asarray(field).reshape(nsrc, n_cols)
+        f0 = field_flat[idx]                    # (n_lat, n_cols)
+        f1 = field_flat[idx + 1]                # (n_lat, n_cols)
+        result_flat = (1.0 - w[:, None]) * f0 + w[:, None] * f1
+    return jnp.array(result_flat).reshape((*lat_grid.shape, *field.shape[1:]))
 
 
 def _interp_vertical(field_plev: jnp.ndarray, plev_src: np.ndarray,
@@ -817,15 +835,32 @@ def _interp_vertical(field_plev: jnp.ndarray, plev_src: np.ndarray,
     log_p_src = np.log(np.maximum(plev_src, 1e-10))
     log_p_tgt = jnp.log(jnp.maximum(p_target, 1e-10))
 
-    # Use numpy interp on flattened arrays
     shape_prefix = field_plev.shape[:-1]
     nlev_tgt = p_target.shape[-1]
-    field_flat = np.asarray(field_plev).reshape(-1, len(plev_src))
+    nsrc = log_p_src.shape[0]
+    field_flat = np.asarray(field_plev).reshape(-1, nsrc)
     log_p_tgt_flat = np.asarray(log_p_tgt).reshape(-1, nlev_tgt)
 
-    result = np.zeros((field_flat.shape[0], nlev_tgt))
-    for i in range(field_flat.shape[0]):
-        result[i] = np.interp(log_p_tgt_flat[i], log_p_src, field_flat[i])
+    # Vectorised lerp in log-pressure space.  Replaces the
+    # ``for i in range(ncol): np.interp(...)`` loop that scaled
+    # ``ncol × n_lev`` Python-level for every forcing update — at
+    # T170 with 14 000 columns the loop dominated wall time.
+    if nsrc == 1:
+        result = np.broadcast_to(field_flat[:, :1], (field_flat.shape[0], nlev_tgt)).copy()
+    else:
+        # Find bracketing index per (col, target-level).  ``np.searchsorted``
+        # is vectorised so this is one C call.
+        idx = np.clip(np.searchsorted(log_p_src, log_p_tgt_flat) - 1, 0, nsrc - 2)
+        x0 = log_p_src[idx]
+        x1 = log_p_src[idx + 1]
+        dx = np.where(x1 > x0, x1 - x0, 1.0)
+        w = np.where(x1 > x0, (log_p_tgt_flat - x0) / dx, 0.0)
+        w = np.clip(w, 0.0, 1.0)
+        # Gather endpoints from ``field_flat`` along last axis.
+        col_idx = np.arange(field_flat.shape[0])[:, None]
+        f0 = field_flat[col_idx, idx]             # (ncol, nlev_tgt)
+        f1 = field_flat[col_idx, idx + 1]
+        result = (1.0 - w) * f0 + w * f1
 
     return jnp.array(result).reshape((*shape_prefix, nlev_tgt))
 

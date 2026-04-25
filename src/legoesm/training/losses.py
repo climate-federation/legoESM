@@ -141,15 +141,16 @@ def multi_day_loss(
     -------
     scalar — averaged loss across all lead times
     """
-    n_days = pred_carries.T.shape[0]
-
-    def _day_loss(i):
-        pred_i = jax.tree.map(lambda x: x[i], pred_carries)
-        target_i = jax.tree.map(lambda x: x[i], target_carries)
+    # Use ``jax.vmap`` directly over the leading day axis of the carry
+    # pytrees instead of a closure-over-arange + ``tree.map(lambda x: x[i])``.
+    # The closure pattern forced JAX to retrace every call (the closure
+    # captured ``pred_carries`` / ``target_carries`` by identity); vmap
+    # with ``in_axes=0`` lets the batching machinery slice the leading
+    # axis without any Python tree walk inside the inner loop.
+    def _day_loss(pred_i, target_i):
         return carry_mse(pred_i, target_i, sigma_full, config=config)
 
-    # Average loss across days
-    day_losses = jax.vmap(lambda i: _day_loss(i))(jnp.arange(n_days))
+    day_losses = jax.vmap(_day_loss)(pred_carries, target_carries)
     return jnp.mean(day_losses)
 
 

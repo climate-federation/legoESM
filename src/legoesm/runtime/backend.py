@@ -187,6 +187,12 @@ _NVIDIA_GPU_XLA_FLAGS = {
     # until completion, leaving the GPU idle during communication.
     "xla_gpu_enable_async_collectives": "true",
     "xla_gpu_enable_highest_priority_async_stream": "true",
+    # CUDA Graphs / command buffers — XLA can capture sequences of
+    # kernel launches and replay them as a single command buffer, which
+    # eliminates the ~5-10μs per-launch overhead that dominates
+    # small-grain step kernels.  Requires CUDA ≥ 12.3 (XLA falls back
+    # silently on older runtimes, so always-on is safe).
+    "xla_gpu_enable_command_buffer": "FUSION,CUSTOM_CALL,COLLECTIVES",
 }
 
 _AMD_GPU_XLA_FLAGS: dict[str, str] = {
@@ -350,6 +356,22 @@ def configure_backend(backend: str | None = None) -> str:
         # multi-GPU scaling, so we cannot afford that race.
         if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
             os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
+        # On multi-process MPI runs (the standard case for legoESM at
+        # scale), several ranks share the same physical GPU under
+        # ``MPS`` or co-located workers.  XLA's default
+        # ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` then OOMs because
+        # each process tries to grab 90 % of HBM.  Disable
+        # preallocation when MPI is detected; keep it on for
+        # single-process runs (preallocation reduces fragmentation
+        # over a long simulation).  User overrides win.
+        if "XLA_PYTHON_CLIENT_PREALLOCATE" not in os.environ:
+            _multi_proc = (
+                int(os.environ.get("OMPI_COMM_WORLD_SIZE", "1")) > 1
+                or int(os.environ.get("PMI_SIZE", "1")) > 1
+                or int(os.environ.get("SLURM_NTASKS_PER_NODE", "1")) > 1
+            )
+            if _multi_proc:
+                os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
         pre_init_vendor = _detect_gpu_vendor_pre_init()
         if pre_init_vendor == "nvidia":
