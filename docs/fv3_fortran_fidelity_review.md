@@ -1922,7 +1922,7 @@ The covariant branch of `pad_halo_vector` in `fv3_cc2c` blows up W2 LEGACY L2 by
 
 **Process.**  103rd iter in iter-752-843 chain.  Part 1: cleanup of iter-842c's stale diag label per Codex stop-time review.  Part 2: tested a "covariant halo in `fv3_cc2c`" Fortran-fidelity hypothesis (122× W2 L2 regression), then RETRACTED after Codex adversarial review showed the hypothesis was based on a convention misdiagnosis (D-grid u_d/v_d are grid-aligned physical per the production comment at `fv3_d2cc:1418-1420`, not covariant).  Self-correcting iter: iter-843 Part 2 produces no new rule-out but removes a non-existent "bug" from the candidate list.  The tally of genuinely-tested-and-ruled-out drop-in fixes stands at 3: iter-839 symmetric v_c, iter-841 ut/vt swap, iter-842 iter-836b pattern on `_d_sw1_recompute_ut_vt`.
 
-### Iter-844 — Post-iter-808 W2 LEGACY dv/dt decomposition at cube vertex
+### Iter-844 — Post-iter-808 W2 LEGACY dv/dt decomposition near cube vertex
 
 Per iter-843c's top-ranked iter-844+ candidate (Codex a9cf212edbd0efccf): direct t=0 dv/dt measurement at cube vertices on the A-L production path with current iter-808/836-838 code in place.  iter-792/793/796 did this measurement PRE iter-808's sign-flip flux sync; iter-844 re-measures POST to check whether any of the intervening production changes (iter-808 sync, iter-836-838 `_corner_vorticity` halo) affected the W2 LEGACY mode-A `dv/dt` signature.
 
@@ -2060,14 +2060,14 @@ Per iter-844b/845's iter-846+ candidate: measure the 4-term pure-dynamics residu
 - Damping (div_damp) and boundary_fix are LOCATION-DEPENDENT contributors: at the pure-dynamics-peak point they reduce |full dv/dt| by ~40 % via sign-cancellation; at the full-peak point they are the dominant term.  Whether they are "modifiers" vs "signal" is location-dependent.
 
 **What iter-846 does NOT establish.**
-- Which of the 4 pure-dynamics terms is the biggest culprit at the cube vertex (all 4 have O(10⁻³-10⁻⁴) magnitudes; the residual is their net).  Per-term cube-vertex deep audit remains iter-847+ scope.
+- Which of the 4 pure-dynamics terms is the biggest culprit at the pure-dynamics peak (1.16° from the nearest cube vertex; all 4 have O(10⁻³-10⁻⁴) magnitudes and the residual is their net).  Per-term deep audit remains iter-848+ scope.
 - Whether a location-dependent damping (larger at (2,34), smaller at (0,0)) would reduce BOTH peaks simultaneously.
 - Whether the mode-A in late-time visualisation (iter-820's v_ll stripes) is more like the pure-dynamics peak or the full peak structurally.
 
 **Iter-847+ candidates.**
-- Per-term cube-vertex audit at Fortran entry points (sw_core.F90:303-372 KE, :378-408 + :416-480 vort, :3419-3454 / :3560 / :3691 d2a2c_vect halo).  Start with the term showing biggest fidelity drift vs Fortran at the cube vertex.
-- Compare iter-820's v_ll stripe peak location to the pure-dynamics peak location here (face 5 (0,0), lat=−35.8°, lon=−133.8°).  If the v_ll stripe peaks near a cube vertex, the structural mode-A is a pure-dynamics residual, not damping-driven.
-- Sweep div_damp on W2 LEGACY to verify: does reducing div_damp CENTRE the full peak at the cube vertex (pure-dynamics peak location)?  If yes, the current damping is artificially moving the peak away from its structural source.
+- Per-term audit near the pure-dynamics peak at the matching Fortran entry points (sw_core.F90:303-372 KE, :378-408 + :416-480 vort, :3419-3454 / :3560 / :3691 d2a2c_vect halo).  Start with the term showing biggest fidelity drift vs Fortran in the vertex-adjacent sampling region.
+- Compare iter-820's v_ll stripe peak location to the pure-dynamics peak location here (face 5 (0,0), lat=−35.8°, lon=−133.8°, 1.16° from the −135° cube vertex).  If the v_ll stripe peaks near the cube vertices, the structural mode-A is a pure-dynamics residual, not damping-driven.
+- Sweep div_damp on W2 LEGACY to verify: does reducing div_damp SHIFT the full peak toward the pure-dynamics peak location?  If yes, the current damping is artificially moving the peak away from its structural source.
 
 **Deliverable.**  Extended `scripts/diag_iter844_dvdt_decomposition.py` (pure-dynamics reporting section added by Codex).  No production source-code change.  All 14 W2 sentinels unaffected.
 
@@ -2104,3 +2104,53 @@ Codex stop-time review of iter-846b: "The turn added an unsupported mitigation c
 **Deliverable.**  `scripts/diag_iter844_dvdt_decomposition.py` Decision-note block rewritten; `docs/fv3_fortran_fidelity_review.md` iter-846 heading + Interpretation + Process scope-tightened.  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  107th iter in iter-752-847 chain.  Self-correcting pass: retract iter-846's mitigation overreach and fix residual vertex-wording.  No new measurement.  Opens iter-848+ scope to an actual damping-sweep diagnostic to verify (or refute) the sign-structure hypothesis.
+
+### Iter-848 — div_damp sweep REFUTES iter-846's sign-structure hypothesis
+
+Per iter-847's priority iter-848+ candidate: actually run the damping-sweep to test iter-846's sign-structure hypothesis (that damping cancels at the pure-dynamics peak and dominates at the full-peak point, so monotonic damping scaling would move the two peaks in OPPOSITE directions).  Also addresses a residual vertex-wording error in iter-844 + iter-846 flagged by the stop-hook.
+
+**Method** (`scripts/diag_iter848_damp_sweep.py`).  Scale `div_damp` across {0, 0.25, 0.5, 1.0, 2.0} × iter-761 canonical (= 2.133e+08).  At each scale, compute `fv3_sw_tendencies()` on W2 IC at t=0 and report:
+- Global peak |dv/dt| and its location (face, (i,j), GC to cube vertex).
+- |dv/dt| at the iter-846 full-peak point (0, 2, 34).
+- |dv/dt| at the iter-846 pure-dynamics-peak point (5, 0, 0).
+
+**Result.**
+
+| scale | peak |dv/dt|   | peak location   | GC°  | |dv/dt| @(0,2,34) | |dv/dt| @(5,0,0) |
+|------:|----------------:|-----------------|-----:|-----------------:|-----------------:|
+|  0.00 | **4.551e−06**    | 4 (18, 2)        | 35.74 | 2.708e−06         | 9.682e−07         |
+|  0.25 | 6.955e−06        | 5 (31, 35)       | 10.61 | 6.789e−06         | 1.043e−06         |
+|  0.50 | 1.087e−05        | 0 (2, 1)         |  4.34 | 1.087e−05         | 3.054e−06         |
+|  1.00 | **1.903e−05**    | 0 (2, 34)        |  4.34 | 1.903e−05         | 7.077e−06         |
+|  2.00 | 3.535e−05        | 0 (2, 1)         |  4.34 | 3.535e−05         | 1.512e−05         |
+
+**Observation — sign-structure hypothesis REFUTED.**
+- BOTH (0,2,34) and (5,0,0) |dv/dt| INCREASE MONOTONICALLY with damping scale.  They do NOT move in opposite directions.
+- Removing damping (scale=0) drops the GLOBAL |dv/dt| peak from 1.90e−05 → 4.55e−06 (≈ 4× reduction) AND shifts the peak from (0,2,34) cube-vertex-adjacent to (4, 18, 2) mid-face (GC = 35.74°, far from any cube vertex).
+- As damping scale grows, the peak LOCATION converges to the cube-vertex-adjacent pattern at (0, 2, *).
+
+**Reinterpretation of iter-846.**  iter-846's sign-structure reasoning was based on signed per-term values at TWO SPECIFIC grid points.  At (5,0,0), iter-846 measured pure-dyn = +1.15e−05 and damp+bfix = −1.86e−05, arguing they cancel.  But the sweep shows that as `div_damp → 0`, |dv/dt| at (5,0,0) drops toward 1e−06, NOT toward +1.15e−05.  The discrepancy is that at scale=0, `boundary_fix` STILL runs and its magnitude depends on the post-damping `dv_pre` field, not on div_damp directly.  The iter-846 "damping partially cancels pure-dynamics" description was a LOCAL sign-reading that did not predict the global scaling behaviour.
+
+**Revised mechanism.**
+- Damping is NOT cancelling dynamics at cube-vertex-adjacent points; it is the DOMINANT source of the |dv/dt| signal.  At scale=0 the dv/dt everywhere drops by ≈ 4×.
+- The full peak LOCATION is set by where div_damp is largest on the W2 IC geometry — cube-vertex-adjacent points (0,2,*).  This is consistent with div_damp's adaptive Smagorinsky scaling with |divergence| at corners.
+- The mode-A v_ll stripes observed in iter-820 are therefore LARGELY driven by div_damp amplification at cube-vertex corners, NOT by a pure-dynamics cancellation residual.
+
+**What iter-848 DOES show.**
+- iter-846's sign-structure mitigation hypothesis is REFUTED: uniform damping scaling moves BOTH peaks in the SAME direction (both decrease as damping decreases).
+- div_damp is the primary driver of the |dv/dt| magnitude at cube-vertex-adjacent points on W2.  Scale=0 gives a 4× smaller peak, relocated mid-face.
+- The production W2 LEGACY mode-A at cube vertices is largely a DAMPING-DRIVEN amplification, not a structural dynamics residual.  (Per-term inspection at scale=0 still shows a small O(1e−06) pure-dynamics residual; but div_damp contributes ~75 % of the scale=1 peak at these locations.)
+
+**What iter-848 does NOT establish.**
+- Whether div_damp = 0 is a viable production configuration.  Removing div_damp likely destabilises the A-L integration (iter-761 added the 8× div_damp bump specifically for stability) — iter-849+ should sweep a STABILITY-bounded range, not just magnitude.
+- Whether a smaller div_damp (e.g., 0.25× or 0.5×) can be run stably through a full 1-day W2 integration without the iter-761 sentinel failing.
+- Whether Fortran's own div_damp construction differs from ours in a way that Fortran achieves smaller cube-vertex dv/dt at the same stability.
+
+**Iter-849+ candidates.**
+- Stability-bounded damping sweep: run W2 C36 1d at scales {0.5, 0.75, 1.0, 1.25} and measure L2 + v_ll_Linf + time-to-blowup.  If 0.5× maintains stability with reduced v_ll_Linf, iter-761's 8× bump is over-damping.
+- Compare Fortran div_damp construction (sw_core.F90:1641-1821 d_sw5 corner divergence damping) to our `cgrid_divergence` + adaptive-coefficient at `operators_cdgrid.py`.  If Fortran clamps or locates div_damp differently at cube vertices, that's a fidelity gap.
+- Audit `boundary_fix` sensitivity at scale=0 (since it still runs and contributes ≥ 1e−06 at scale=0).
+
+**Deliverable.**  `scripts/diag_iter848_damp_sweep.py` + 5-point sweep output.  No production source-code change.  All 14 W2 sentinels unaffected.  Also fixed residual vertex-wording in iter-844 heading ("at cube vertex" → "near cube vertex") and iter-846 "What DOES NOT establish" bullet ("at the cube vertex" → "at the pure-dynamics peak") flagged by stop-hook.
+
+**Process.**  108th iter in iter-752-848 chain.  Runs the actual damping sweep that iter-847 called for; REFUTES iter-846's sign-structure hypothesis.  Reveals div_damp as the primary driver of the cube-vertex-adjacent |dv/dt| signal (not a cancellation of pure-dynamics residuals).  Opens iter-849+ scope to stability-bounded damping tuning — a concrete candidate for reducing W2 LEGACY mode-A that is consistent with the new measurement.
