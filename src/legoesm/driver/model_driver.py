@@ -483,6 +483,12 @@ class ModelDriver:
             enabled=self._ozone_ext_active,
             source="climatology", path=cfg.ozone_file,
             use_reference_if_missing=True,
+            # Required for the non-cyclic branch in ``get_ozone_at_time``
+            # so that CMIP6 multi-year ozone files (>12 months, e.g. the
+            # UReading 1850–2014 vmro3 file) are sampled at the actual
+            # simulation calendar year instead of falling back to a
+            # 1850 climatology.
+            start_year=cfg.start_year,
         )
 
         # Aerosol external forcing

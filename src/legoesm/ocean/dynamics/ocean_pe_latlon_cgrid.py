@@ -41,7 +41,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -51,6 +51,10 @@ from legoesm.ocean.state import (
     LatLonCGridOceanState,
     LatLonCGridOceanTendencies,
     LatLonCGridOceanConfig,
+)
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    apply_sponge_tracer_relaxation,
+    iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     biharmonic_scaling_factor,
@@ -701,36 +705,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         min_water_column_m=config.min_water_column_m,
     )
 
-    # --- 2. Density from EOS ---
-    T_filled = _neumann_fill_cgrid(T, mask)
-    S_filled = _neumann_fill_cgrid(S, mask)
+    # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
+    # Reference Jacobian (J=1, eta=0): the barotropic solver handles
+    # the free-surface gradient g*grad(eta) and using actual J here
+    # would double-count it (would also create a spatially-varying
+    # pressure even for uniform T/S).
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
-    # Use REFERENCE Jacobian (J=1, eta=0) for the hydrostatic pressure
-    # in the EOS iteration.  The barotropic solver handles the
-    # free-surface pressure gradient g*grad(eta); using the actual J
-    # here would create a spatially-varying pressure even for uniform
-    # T/S, double-counting the barotropic forcing.
-    J_ref = jnp.ones_like(J)
-    eta_ref = jnp.zeros_like(eta_safe)
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
-    for _ in range(2):
-        p_hydro = compute_hydrostatic_pressure(
-            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g_val,
-        )
-        rho = eos_fn(T_filled, S_filled, p_hydro)
-    p_hydro = compute_hydrostatic_pressure(
-        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g_val,
+    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask,
+        lambda field: _neumann_fill_cgrid(field, mask),
+        eos_fn, z_coord.dz_ref, rho_0, g_val,
+        n_iter=2,
     )
-    rho_prime = rho - rho_0
-
-    # --- 3. Baroclinic pressure gradient (compact C-grid stencil) ---
-    # Use REFERENCE layer thickness (dz_ref, corresponding to eta=0)
-    # rather than the actual thickness (dz_ref * J) which includes the
-    # free-surface contribution.  The barotropic solver handles
-    # g*grad(eta); using J here would double-count that forcing.
-    dp_layer = rho_prime * g_val * z_coord.dz_ref
-    p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = p_prime + 0.5 * dp_layer
 
     p_prime_filled = _neumann_fill_cgrid(p_prime, mask)
 
@@ -1053,10 +1039,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Cast sponge arrays to state dtype to prevent float64 promotion when
     # the precision policy stores state in float32 (crashes barotropic scan).
     if sponge is not None:
+        dT_dt, dS_dt = apply_sponge_tracer_relaxation(
+            dT_dt, dS_dt, T, S, sponge, mask=None, expand_gamma_axis=-1,
+        )
         _dt = T.dtype
-        gamma_3d = sponge.gamma.astype(_dt)[..., jnp.newaxis]
-        dT_dt = dT_dt + gamma_3d * (sponge.T_ref.astype(_dt) - T)
-        dS_dt = dS_dt + gamma_3d * (sponge.S_ref.astype(_dt) - S)
         if sponge.u_ref is not None:
             gamma_u = interp_cell_to_uface(sponge.gamma.astype(_dt))[..., jnp.newaxis]
             du_dt = du_dt + gamma_u * (sponge.u_ref.astype(_dt) - u)

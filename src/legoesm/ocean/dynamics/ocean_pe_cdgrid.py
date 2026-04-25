@@ -40,13 +40,16 @@ from legoesm.core.operators_cdgrid import (
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    iterate_eos_and_pressure_anomaly,
+)
 
 
 # ==============================================================================
@@ -115,48 +118,25 @@ def ocean_baroclinic_tendencies_cdgrid(
         min_water_column_m=config.min_water_column_m,
     )
 
-    # --- 2. Density from EOS (2 iterations, reference J) ---
-    # Use reference Jacobian (J=1, eta=0) for the EOS pressure iteration
-    # and baroclinic pressure gradient.  The barotropic solver already
-    # handles -g*grad(eta); using the actual J here would double-count
-    # the free-surface contribution (see #109).
+    # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
+    # Reference Jacobian (J=1, eta=0): the barotropic solver handles
+    # -g*grad(eta) and using the actual J here would double-count the
+    # free-surface contribution (see #109).
+    #
+    # The cubed-sphere path runs the cumsum in float64: at depth p has
+    # ULP = 0.0625 Pa in float32, so the halo-exchange interpolation
+    # of float32 values at face boundaries leaks O(ULP/dx) ≈ 2e-7 Pa/m
+    # — a spurious PGF that drives rest-state instability.  Keeping
+    # p_prime in float64 reduces the leak by 9 orders of magnitude.
     from legoesm.ocean.dynamics.barotropic import fill_land_cells
-    T_filled = jax.vmap(
+    fill_TS = lambda field: jax.vmap(
         lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
-    )(T)
-    S_filled = jax.vmap(
-        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
-    )(S)
+    )(field)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
-    J_ref = jnp.ones_like(J)
-    eta_ref = jnp.zeros_like(eta_safe)
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
-    for _ in range(2):
-        p_hydro = compute_hydrostatic_pressure(
-            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
-        )
-        rho = eos_fn(T_filled, S_filled, p_hydro)
-    p_hydro = compute_hydrostatic_pressure(
-        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
+    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_TS, eos_fn, z_coord.dz_ref, rho_0, g,
+        n_iter=2, hi_precision_pressure=True,
     )
-    rho_prime = rho - rho_0
-
-    # --- 3. Baroclinic pressure gradient ---
-    # Use REFERENCE layer thickness (dz_ref, not dz_ref*J) to avoid
-    # double-counting the free-surface contribution.
-    # Must use float64 for cumulative sums AND the subsequent gradient
-    # computation.  With float32, the absolute pressure (~6e5 Pa at depth)
-    # has ULP = 0.0625 Pa.  The halo-exchange interpolation of float32
-    # values at face boundaries introduces O(ULP) errors, which the
-    # gradient operator amplifies to O(ULP/dx) ≈ O(2e-7) Pa/m — a
-    # spurious pressure gradient that drives rest-state instability
-    # on the cubed sphere.  Keeping p_prime in float64 (ULP ≈ 1e-10 Pa)
-    # reduces the halo interpolation error by 9 orders of magnitude.
-    rho_prime_hi = rho_prime.astype(jnp.float64)
-    dz_hi = z_coord.dz_ref.astype(jnp.float64)
-    dp_layer = rho_prime_hi * g * dz_hi
-    p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = p_prime + 0.5 * dp_layer  # stay in float64 through gradient
 
     # --- 4. Convert to D-grid ---
     u_d, v_d = center_to_dgrid_vector(u_a * mask_3d, v_a * mask_3d, cdgrid)

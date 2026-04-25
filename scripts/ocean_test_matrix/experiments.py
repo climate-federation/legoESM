@@ -1391,6 +1391,8 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
         overrides["K_h"] = config.K_H_OVERRIDE
     if config.U_SURFACE_OVERRIDE is not None:
         overrides["U_surface"] = config.U_SURFACE_OVERRIDE
+    if config.BAROTROPIC_DIV_DAMP_OVERRIDE is not None:
+        overrides["barotropic_div_damp"] = config.BAROTROPIC_DIV_DAMP_OVERRIDE
     if overrides:
         fields = {f: getattr(eu_config, f) for f in eu_config.__dataclass_fields__}
         fields.update(overrides)
