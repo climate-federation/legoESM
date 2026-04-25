@@ -156,12 +156,14 @@ def absolute_vorticity_coriolis(
     eta_at_v = 0.5 * (eta[:, :-1] + eta[:, 1:])  # (n_lat+1, n_lon[, nlev])
 
     # --- Average u to v-faces (4-point, same as coriolis_cgrid) ---
+    # Use ``jnp.pad`` on the leading axis instead of allocating
+    # ``zero_row`` twice and concatenating — one HLO Pad op vs
+    # alloc + concat.
     u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
     if is_3d:
-        zero_row = jnp.zeros((1, n_lon, u.shape[2]), dtype=u.dtype)
+        u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0), (0, 0)))
     else:
-        zero_row = jnp.zeros((1, n_lon), dtype=u.dtype)
-    u_at_v = jnp.concatenate([zero_row, u_avg_interior, zero_row], axis=0)
+        u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0)))
 
     # --- Coriolis terms ---
     cor_u = eta_at_u * v_at_u

@@ -131,15 +131,11 @@ def mass_flux_convection_from_closure(
     q_sat_base = saturation_mixing_ratio(T[:, -1:], p_full[:, -1:])
     q_u = dilution * q_sat_base + (1.0 - dilution) * q_v
 
-    dT_dz = jnp.zeros_like(T)
-    dT_dz = dT_dz.at[:, 1:-1].set(
-        (T[:, :-2] - T[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
-    )
-
-    dq_dz = jnp.zeros_like(q_v)
-    dq_dz = dq_dz.at[:, 1:-1].set(
-        (q_v[:, :-2] - q_v[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
-    )
+    # Centered vertical gradient with zero edges via ``jnp.pad`` —
+    # one Pad HLO op vs alloc-zeros + scatter.
+    dz_centered = jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
+    dT_dz = jnp.pad((T[:, :-2] - T[:, 2:]) / dz_centered, ((0, 0), (1, 1)))
+    dq_dz = jnp.pad((q_v[:, :-2] - q_v[:, 2:]) / dz_centered, ((0, 0), (1, 1)))
 
     rho_safe = jnp.clip(rho, 0.01, None)
     M_profile = M_c_new[:, None] * m_profile  # (ncol, nlev)
