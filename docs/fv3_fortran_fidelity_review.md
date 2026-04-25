@@ -1299,7 +1299,7 @@ Codex stop-time review on iter-873 flagged that the new sentinel test file (`tes
 
 iter-875+876's claimed Fortran-fidelity gain (regional/nested non-duogrid mode silently applies legacy where Fortran takes PLAIN) is THEORETICAL — there is no production test or sentinel exercising regional/nested non-duogrid cubed-sphere shallow water in this repo.  The W2/W5/cosine-bell sentinels all use the W2 LEGACY regime (`bounded_domain=False, duogrid=None`), where pre-iter-875 and post-iter-876 gates evaluate identically; iter-875+876 produced no behavioural change in any tested regime.
 
-**Fix (iter-877).**  Revert both iter-875 (`db32119`) and iter-876 (`f41299a`) commits.  The `fv3_sw_core.py` gates restore to their pre-iter-875 state:
+**Fix (iter-877).**  Revert iter-875 (`db32119`) — `git revert` automatically subsumes iter-876 (`f41299a`) since both commits modified the same gate lines.  Attempting a separate `git revert f41299a` after the iter-875 revert produces a merge conflict because iter-876's changes are already absent.  The `fv3_sw_core.py` gates restore to their pre-iter-875 state:
 - `_ke_upwind` line 755: `if not use_duogrid:`
 - `_corner_vorticity` line 1564: `if not use_duogrid:`
 - `_vorticity_flux` lines 1591/1597: `if not use_duogrid:`
