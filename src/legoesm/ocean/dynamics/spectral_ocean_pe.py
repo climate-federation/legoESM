@@ -239,8 +239,10 @@ def spectral_ocean_tendencies(
     div_h_rev = div_h[..., ::-1]
     cumsum_rev = jnp.cumsum(div_h_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
-    zeros_bottom = jnp.zeros((*div.shape[:-1], 1), dtype=div_h.dtype)
-    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+    # Pad with zero on the bottom — single Pad HLO op vs alloc-zeros
+    # + concatenate.
+    _pad_axes_w = ((0, 0),) * (w_inner.ndim - 1)
+    w_euler = jnp.pad(w_inner, (*_pad_axes_w, (0, 1)))
     # z-star correction: subtract grid velocity so ẇ[0]=0, ẇ[nlev]=0.
     sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
     deta_dt_local = w_euler[..., 0:1]

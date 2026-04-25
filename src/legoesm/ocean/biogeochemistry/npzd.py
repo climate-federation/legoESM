@@ -66,9 +66,11 @@ def par_profile(
     # Cumulative attenuation from surface (k=0 is surface)
     # For level k, PAR has been attenuated by layers 0..k-1 plus half of layer k
     cum_atten_interface = jnp.cumsum(atten, axis=-1)
-    # Shift: interface attenuation at top of layer k = cumsum through k-1
-    zeros = jnp.zeros((*atten.shape[:-1], 1), dtype=atten.dtype)
-    cum_atten_top = jnp.concatenate([zeros, cum_atten_interface[..., :-1]], axis=-1)
+    # Shift: interface attenuation at top of layer k = cumsum through k-1.
+    # ``jnp.pad`` is one Pad HLO op; the previous form allocated a fresh
+    # ``(..., 1)`` zero buffer + concatenate.
+    _pad_axes = ((0, 0),) * (cum_atten_interface.ndim - 1)
+    cum_atten_top = jnp.pad(cum_atten_interface[..., :-1], (*_pad_axes, (1, 0)))
     # Mid-level attenuation = top + half this layer
     cum_atten_mid = cum_atten_top + 0.5 * atten
 
@@ -149,8 +151,10 @@ def npzd_source_sink(
     # F[0] = 0 (no flux into top), F[nlev] = w_sink * D[nlev-1] (export)
     # Tendency: dD/dt[k] = (F[k] - F[k+1]) / dz[k]
     flux_out = w_sink_s * D  # flux leaving each layer downward
-    zeros = jnp.zeros((*D.shape[:-1], 1), dtype=D.dtype)
-    flux_in = jnp.concatenate([zeros, flux_out[..., :-1]], axis=-1)
+    # ``jnp.pad`` along trailing axis: single Pad HLO op vs
+    # alloc-zeros + concatenate.
+    _pad_axes_d = ((0, 0),) * (flux_out.ndim - 1)
+    flux_in = jnp.pad(flux_out[..., :-1], (*_pad_axes_d, (1, 0)))
     sinking_tend = (flux_in - flux_out) / jnp.clip(dz_ref, 1.0, None)
 
     # ---- Assemble tendencies ----

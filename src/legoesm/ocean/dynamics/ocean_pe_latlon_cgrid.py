@@ -491,12 +491,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 z_coord.dz_half_ref * jac_v
             )
             flux = config.K_v * dtr_dz_half
-            zeros_face = jnp.zeros(
-                (*tr.shape[:-1], 1), dtype=tr.dtype,
-            )
-            flux_full = jnp.concatenate(
-                [zeros_face, flux, zeros_face], axis=-1,
-            )
+            # Pad with zero on top + bottom — single Pad HLO op vs
+            # alloc-zeros + 3-array concatenate.
+            _pad_axes_tr = ((0, 0),) * (flux.ndim - 1)
+            flux_full = jnp.pad(flux, (*_pad_axes_tr, (1, 1)))
             dtr_dt = dtr_dt + (
                 flux_full[..., :-1] - flux_full[..., 1:]
             ) / dz_actual_loc
@@ -559,8 +557,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 z_coord.dz_half_ref * jac
             )
             flux = config.A_v * dv_dz_half
-            zeros_face = jnp.zeros((*vel.shape[:-1], 1), dtype=vel.dtype)
-            flux_full = jnp.concatenate([zeros_face, flux, zeros_face], axis=-1)
+            # Pad along trailing axis instead of allocating a fresh
+            # ``(..., 1)`` zero buffer + 3-array concatenate.
+            _pad_axes = ((0, 0),) * (flux.ndim - 1)
+            flux_full = jnp.pad(flux, (*_pad_axes, (1, 1)))
             vdiff = (flux_full[..., :-1] - flux_full[..., 1:]) / (
                 z_coord.dz_ref * jac
             )
