@@ -381,9 +381,10 @@ def flux_form_vertical_tracer_advection_dst3(
                        jnp.maximum(T_donor, T_downstream))
     F_interior = w_int * T_face
 
-    # Full flux with zero boundaries
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+    # Full flux with zero boundaries — single Pad HLO op vs alloc
+    # ``(..., 1)`` zeros + 3-array concat.  Hot per scan step.
+    pad_axes = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes, (1, 1)))
 
     # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
     return F[..., :-1] - F[..., 1:]
@@ -745,9 +746,9 @@ def flux_form_vertical_tracer_advection_ppm(
     # Flux at interfaces
     F_interior = w_int * T_face
 
-    # Zero-flux boundaries
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+    # Zero-flux boundaries — single Pad HLO op.
+    pad_axes_b = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes_b, (1, 1)))
 
     # Flux divergence
     return F[..., :-1] - F[..., 1:]
@@ -843,10 +844,12 @@ def fct_tracer_advection(
                           jnp.maximum(T_above, T_below))
     F_vert_hi_int = w_int * T_face_hi
 
-    # Vertical divergences for Zalesak bounds computation
-    zeros_v = jnp.zeros((*tracer.shape[:-1], 1), dtype=tracer.dtype)
-    F_vert_low = jnp.concatenate([zeros_v, F_vert_low_int, zeros_v], axis=-1)
-    F_vert_hi = jnp.concatenate([zeros_v, F_vert_hi_int, zeros_v], axis=-1)
+    # Vertical divergences for Zalesak bounds computation — pad
+    # (single Pad HLO each) instead of allocating a fresh ``(..., 1)``
+    # zero buffer and concatenating it on both ends.
+    pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
+    F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
+    F_vert_hi = jnp.pad(F_vert_hi_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
     vert_div_hi = F_vert_hi[..., :-1] - F_vert_hi[..., 1:]
 
@@ -891,7 +894,7 @@ def fct_tracer_advection(
     div_h_fct = divergence_cgrid(flux_u_fct, flux_v_fct, grid)
 
     F_vert_fct_int = F_vert_low_int + alpha_vert_face * ad_vert_int
-    F_vert_fct = jnp.concatenate([zeros_v, F_vert_fct_int, zeros_v], axis=-1)
+    F_vert_fct = jnp.pad(F_vert_fct_int, (*pad_axes_v, (1, 1)))
     vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
 
     return div_h_fct, vert_div_fct
@@ -996,10 +999,11 @@ def _zalesak_signsplit_face_alphas(
     # Vertical: pad with zeros at the top / bottom (rigid lid + floor) so
     # cell-c indexing is uniform.  ad_vert_int has shape (n_lat, n_lon,
     # nlev-1) for interfaces 0..nlev-2 between cell k (above) and k+1
-    # (below); F > 0 = upward.
-    zeros_v = jnp.zeros((*ad_vert_int.shape[:-1], 1), dtype=ad_vert_int.dtype)
-    F_w_pos_full = jnp.concatenate([zeros_v, F_w_pos, zeros_v], axis=-1)
-    F_w_neg_full = jnp.concatenate([zeros_v, F_w_neg, zeros_v], axis=-1)
+    # (below); F > 0 = upward.  Pad (single HLO op) instead of
+    # alloc-zeros + 3-array concatenate.
+    pad_axes_v = ((0, 0),) * (F_w_pos.ndim - 1)
+    F_w_pos_full = jnp.pad(F_w_pos, (*pad_axes_v, (1, 1)))
+    F_w_neg_full = jnp.pad(F_w_neg, (*pad_axes_v, (1, 1)))
     # For cell k:
     #   TOP    interface index k:   F>0 = upward = leaving k upward, F<0 = entering k from above.
     #   BOTTOM interface index k+1: F>0 = upward = entering k from below, F<0 = leaving k downward.
