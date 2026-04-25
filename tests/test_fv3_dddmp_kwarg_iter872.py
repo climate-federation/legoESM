@@ -37,6 +37,12 @@ because the default 0.2 preserves bit-for-bit pre-iter-872 numerics.
 """
 import os
 os.environ.setdefault("JAX_ENABLE_X64", "1")
+# Iter-883: also enable x64 at runtime in case JAX was already
+# initialized in float32 by an earlier conftest import.  The
+# os.environ.setdefault above is for command-line invocation; the
+# jax.config.update is the runtime-effective form.
+import jax
+jax.config.update("jax_enable_x64", True)
 
 import ast
 import inspect

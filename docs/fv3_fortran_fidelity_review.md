@@ -1906,3 +1906,55 @@ All three branch-class corruptions correctly caught with full detection rate (4 
 **Deliverable.**  `tests/test_pert_ppm_iv1_fortran_faithful_iter882.py` (4 tests) + this doc entry.  No source-code change — sentinel-only.
 
 **Process.**  153rd iter in the iter-752-882 chain.  Sibling sentinel to iter-881d, applying all the iter-881 chain's lessons (non-zero clip targets, near-boundary inputs, exact-boundary inputs, per-branch expected outputs, corruption-injection verification) on the FIRST attempt instead of via 4 stop-time-driven iterations.  No false-pass paths identified at iter-882 commit time.
+
+### Iter-883 — Codex iter-882 stop-time: fix JAX_ENABLE_X64 bootstrap timing (14 test files)
+
+**Codex iter-882 stop-time finding.**  "iter-882 adds a test that fails under the repo's default pytest bootstrap."
+
+**Issue.**  The iter chain's 14 top-level test files all started with:
+```python
+import os
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+```
+
+This `setdefault` runs at module IMPORT time, but pytest's `tests/conftest.py` imports `jax` BEFORE any test module imports.  By the time the test module's `setdefault` runs, JAX has already initialized in float32 mode (the default) and the env var has no effect.
+
+Result: under default `pytest tests/test_*.py` invocation (no `JAX_ENABLE_X64` env var pre-set), all 14 test files fail with rtol=1e-12 vs float32 precision (~1e-7).  CI passed because `.github/workflows/ci.yml` (iter-874) explicitly sets `JAX_ENABLE_X64: "1"` for the `top-level-fidelity-tests` job, but local `pytest` without env var fails.
+
+**Fix (iter-883).**  Add `jax.config.update("jax_enable_x64", True)` immediately after the `os.environ.setdefault` in all 14 files:
+```python
+import os
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+# Iter-883: also enable x64 at runtime in case JAX was already
+# initialized in float32 by an earlier conftest import.  The
+# os.environ.setdefault above is for command-line invocation; the
+# jax.config.update is the runtime-effective form.
+import jax
+jax.config.update("jax_enable_x64", True)
+```
+
+`jax.config.update` works at runtime regardless of whether JAX was already initialized — switches the default precision for new arrays, which is what these tests need.
+
+**Affected files** (all 14 iter-862-882 chain top-level tests):
+- `test_d_sw4_corner_ke_fix_iter869.py`
+- `test_da_min_c_fortran_fidelity_iter867.py`
+- `test_fortran_fidelity_default_flags_iter873.py`
+- `test_fv3_boundary_fix_duogrid_gate_iter865.py`
+- `test_fv3_d_sw5_corner_corrections.py`
+- `test_fv3_d_sw5_corner_divergence.py`
+- `test_fv3_dddmp_kwarg_iter872.py`
+- `test_fv3_del6_vt_flux.py`
+- `test_fv3_fv_tp_2d_flux_sync_iter864.py`
+- `test_pert_ppm_iv0_fortran_faithful_iter881.py`
+- `test_pert_ppm_iv1_fortran_faithful_iter882.py`
+- `test_ppm_edge_values_clip_iter880.py`
+- `test_ppm_limiter_consistency_iter879.py`
+- `test_ppm_overshoot_constraint_iter878.py`
+
+**Verification.**  Running `pytest tests/test_*.py` with `JAX_ENABLE_X64` UNSET (default pytest bootstrap):
+- Pre-iter-883: many tests fail with rtol=1e-12 mismatches due to float32.
+- Post-iter-883: 103 of 103 tests pass.
+
+**Deliverable.**  3-line additions to 14 test files + this doc entry.  No source-code change.
+
+**Process.**  154th iter in the iter-752-883 chain.  Codex stop-time review caught a real CI/local divergence: tests passed in CI (which sets JAX_ENABLE_X64=1) but failed under default `pytest` invocation.  iter-883 makes all 14 iter chain tests robust to JAX bootstrap timing by adding `jax.config.update` at module-load time.  Local developers can now run `pytest tests/test_*.py` directly without remembering the env var.
