@@ -1309,6 +1309,20 @@ def cdgrid_momentum_tendencies(
     # default 0.0) is kept so advanced users can override the
     # adaptive Smagorinsky coefficient when they explicitly enable
     # divergence damping via `div_damp > 0`.
+    #
+    # Iter-872c-take5 (Codex pass-5): symmetric warning for the
+    # narrow-gate silent no-op when `dddmp > 0, div_damp = 0`.
+    if dddmp > 0 and div_damp == 0:
+        import warnings
+        warnings.warn(
+            f"`cdgrid_momentum_tendencies` called with `dddmp="
+            f"{dddmp!r}` and `div_damp=0`.  The narrow gate "
+            f"(iter-872c-take4) silently no-ops `dddmp` whenever "
+            f"`div_damp == 0`; adaptive Smagorinsky damping is NOT "
+            f"active.  To enable adaptive damping, also set "
+            f"`div_damp > 0`.",
+            stacklevel=2,
+        )
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
@@ -1722,6 +1736,25 @@ def fv3_sw_tendencies(
     # for the production path's explicit `dddmp_prod` opt-in.  The
     # widened-gate Fortran-fidelity improvement is deferred until
     # the d_sw5 port is complete; see iter-872c-take4 doc entry.
+    #
+    # Iter-872c-take5 (Codex pass-5): warn loudly when `dddmp > 0`
+    # is supplied with `div_damp = 0`, because the narrow gate
+    # silently no-ops `dddmp` in that regime.  Without this warning
+    # users could set `dddmp_prod=0.4` and believe adaptive
+    # Smagorinsky is active when the entire branch is bypassed.
+    if dddmp > 0 and div_damp == 0:
+        import warnings
+        warnings.warn(
+            f"`fv3_sw_tendencies` called with `dddmp={dddmp!r}` and "
+            f"`div_damp=0`.  The narrow gate (iter-872c-take4) "
+            f"silently no-ops `dddmp` whenever `div_damp == 0`; "
+            f"adaptive Smagorinsky damping is NOT active.  To "
+            f"enable adaptive damping, also set `div_damp > 0`.  "
+            f"The Fortran-valid pure-adaptive regime "
+            f"(`div_damp=0, dddmp>0`) is a deferred Fortran-fidelity "
+            f"gap pending the holistic d_sw5 port.",
+            stacklevel=2,
+        )
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c

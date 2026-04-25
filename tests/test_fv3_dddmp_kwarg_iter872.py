@@ -443,6 +443,119 @@ def test_iter872c_take3_cdgrid_shallow_water_does_not_forward_dddmp():
         f"`FV3EdgeShallowWaterModel` only by design.")
 
 
+def test_iter872c_take5_warns_when_dddmp_silently_no_op():
+    """Iter-872c-take5 (Codex pass-5 high): ``fv3_sw_tendencies``
+    and ``cdgrid_momentum_tendencies`` MUST emit a UserWarning when
+    ``dddmp > 0`` is supplied with ``div_damp = 0``, because the
+    narrow gate silently no-ops `dddmp` in that regime.  Without
+    this warning users could set `dddmp_prod=0.4` and believe
+    adaptive Smagorinsky is active when the entire branch is
+    bypassed.
+    """
+    import warnings
+    from legoesm.core.operators_cdgrid import cdgrid_momentum_tendencies
+
+    cdgrid, h, u_d, v_d, h_s = _grid_and_state(n=8, seed=61)
+
+    # fv3_sw_tendencies: dddmp>0, div_damp=0 → must warn.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fv3_sw_tendencies(
+            h, u_d, v_d, h_s, cdgrid,
+            div_damp=0.0, dddmp=0.4)
+    matched = [w for w in caught
+               if issubclass(w.category, UserWarning)
+               and "no-op" in str(w.message)]
+    assert matched, (
+        f"`fv3_sw_tendencies(dddmp=0.4, div_damp=0)` did not emit "
+        f"the iter-872c-take5 silent-no-op warning.  Caught: "
+        f"{[str(w.message) for w in caught]}")
+
+    # No warning when div_damp > 0 (gate fires).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fv3_sw_tendencies(
+            h, u_d, v_d, h_s, cdgrid,
+            div_damp=0.01, dddmp=0.4)
+
+    # No warning when dddmp = 0 (no silent no-op concern).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fv3_sw_tendencies(
+            h, u_d, v_d, h_s, cdgrid,
+            div_damp=0.0, dddmp=0.0)
+
+    # cdgrid_momentum_tendencies: same warning policy.
+    n = 8
+    grid = create_cubed_sphere(n, use_duogrid=True)
+    cdgrid2 = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(62)
+    h2 = jnp.asarray(rng.normal(size=(6, n, n)) * 100.0 + 8000.0)
+    h_s2 = jnp.zeros_like(h2)
+    u_d2 = jnp.asarray(rng.normal(size=(6, n + 1, n + 1)))
+    v_d2 = jnp.asarray(rng.normal(size=(6, n + 1, n + 1)))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cdgrid_momentum_tendencies(
+            h2, u_d2, v_d2, h_s2, cdgrid2,
+            div_damp=0.0, dddmp=0.4)
+    matched = [w for w in caught
+               if issubclass(w.category, UserWarning)
+               and "no-op" in str(w.message)]
+    assert matched, (
+        f"`cdgrid_momentum_tendencies(dddmp=0.4, div_damp=0)` did "
+        f"not emit the iter-872c-take5 silent-no-op warning.")
+
+
+def test_iter872c_take5_cdgrid_shallow_water_warns_direct_callers():
+    """Iter-872c-take5 (Codex pass-5 medium): direct callers of
+    ``cdgrid_shallow_water_tendencies`` with non-default
+    ``dddmp_prod`` MUST also see a UserWarning, not just the
+    `CDGridShallowWaterModel.__init__` warning.  Codex pass-5
+    correctly noted that direct callers bypass the model-class
+    warning, leaving a silent-ignore hazard on the functional API.
+    """
+    import warnings
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig, CDGridShallowWaterState,
+        cdgrid_shallow_water_tendencies,
+    )
+
+    n = 8
+    grid = create_cubed_sphere(n, use_duogrid=True)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(71)
+    state = CDGridShallowWaterState(
+        h=jnp.asarray(rng.normal(size=(6, n, n)) * 100.0 + 8000.0),
+        u_d=jnp.asarray(rng.normal(size=(6, n + 1, n + 1))),
+        v_d=jnp.asarray(rng.normal(size=(6, n + 1, n + 1))),
+        h_s=jnp.zeros((6, n, n)),
+    )
+
+    # Default config: no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        cdgrid_shallow_water_tendencies(
+            state, cdgrid, CDGridShallowWaterConfig())
+
+    # Non-default dddmp_prod: must warn at the functional API level.
+    cfg = CDGridShallowWaterConfig(dddmp_prod=0.5)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cdgrid_shallow_water_tendencies(state, cdgrid, cfg)
+    matched = [w for w in caught
+               if issubclass(w.category, UserWarning)
+               and "dddmp_prod" in str(w.message)
+               and "ignored" in str(w.message)]
+    assert matched, (
+        f"Direct call to `cdgrid_shallow_water_tendencies` with "
+        f"`config.dddmp_prod=0.5` did not emit the iter-872c-take5 "
+        f"functional-API warning.  Codex pass-5 medium identified "
+        f"this as a silent-ignore hazard on the public functional "
+        f"API.  Caught: {[str(w.message) for w in caught]}")
+
+
 def test_iter872c_take4_cdgrid_warns_on_non_default_dddmp_prod():
     """Iter-872c-take4 (Codex pass-4): ``CDGridShallowWaterModel``
     MUST emit a UserWarning when constructed with a non-default

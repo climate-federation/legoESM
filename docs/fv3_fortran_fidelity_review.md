@@ -1180,3 +1180,38 @@ Behavioral comparison vs pre-iter-872:
 The remaining behavioral change (direct callers passing `div_damp>0` without explicit `dddmp` see d2_bg-only damping instead of pre-iter-872 hardcoded 0.2) is the deliberate Fortran-fidelity correction at the operator-level kwarg layer.  Pre-iter-872's hardcoded 0.2 was an unverified leak; the new Fortran-strict default 0.0 makes the API contract honest.
 
 **Process.**  iter-872 → iter-872b → iter-872c → iter-872c-take2 (rollback intermediate) → iter-872c-take3 → iter-872c-take4 chain.  Four Codex adversarial-review passes drove progressive refinement of the API surface, gate semantics, default values, and scope documentation.  Each pass closed a real correctness or UX gap that the previous fix exposed.
+
+### Iter-872c-take5 — Codex pass-5 follow-up: explicit warnings for all silent-no-op cases
+
+Codex adversarial-review pass-5 on iter-872c-take4 flagged the residual silent-no-op surface:
+
+**Pass-5 Finding 1 (high) — `dddmp_prod` is silent no-op on FV3Edge unless `div_damp>0` is also set.**  iter-872c-take4 reverted the gate to narrow (`if div_damp > 0:`), which means setting `dddmp_prod=0.4` on a `FV3EdgeShallowWaterModel(default_config)` (where `div_damp=0`) gets identical numerics to `dddmp_prod=0.0`.  Users could believe adaptive Smagorinsky is active when the entire branch is bypassed.
+
+**Fix (iter-872c-take5).**  Emit a `UserWarning` in `fv3_sw_tendencies` and `cdgrid_momentum_tendencies` whenever `dddmp > 0` is supplied with `div_damp == 0`.  The warning is loud about the silent no-op semantics and points to the resolution (also set `div_damp > 0`).
+
+**Pass-5 Finding 2 (medium) — direct callers of `cdgrid_shallow_water_tendencies` bypass the model-class warning.**  iter-872c-take4's `CDGridShallowWaterModel.__init__` warning catches the common case but not the functional API.  A direct call `cdgrid_shallow_water_tendencies(state, cdgrid, config_with_dddmp_prod=0.4)` silently ignored the field with no warning.
+
+**Fix (iter-872c-take5).**  Emit a `UserWarning` in `cdgrid_shallow_water_tendencies` when `config.dddmp_prod` differs from the field default.  Catches direct functional-API callers in addition to model-class callers.
+
+**Tests** (added in iter-872c-take5):
+- `test_iter872c_take5_warns_when_dddmp_silently_no_op`: pin the no-op warning emission for both `fv3_sw_tendencies` and `cdgrid_momentum_tendencies`.
+- `test_iter872c_take5_cdgrid_shallow_water_warns_direct_callers`: pin the functional-API warning for direct callers.
+
+**Verification.**  All 13 iter-872 chain tests pass.  All 15 W2 boundary error budget tests pass.  All 4 diff-atmosphere-dynamics shallow-water tests pass.  Production W2 sentinel bit-identical.
+
+**Iter-872 chain final state (after take-5).**
+- `fv3_sw_tendencies.dddmp` kwarg default = 0.0 (Fortran-strict).
+- `cdgrid_momentum_tendencies.dddmp` kwarg default = 0.0 (Fortran-strict).
+- Gates: narrow `if div_damp > 0:` on both functions.
+- `CDGridShallowWaterConfig.dddmp_prod` default = 0.2 (preserves matrix tests).
+- `FV3EdgeShallowWaterModel.step` forwards `dddmp_prod` → `fv3_sw_tendencies`.
+- `cdgrid_shallow_water_tendencies` does NOT forward `dddmp_prod`.
+- Three runtime warnings catch silent-no-op cases:
+  1. `fv3_sw_tendencies(dddmp>0, div_damp=0)` → narrow-gate no-op.
+  2. `cdgrid_momentum_tendencies(dddmp>0, div_damp=0)` → narrow-gate no-op.
+  3. `cdgrid_shallow_water_tendencies(config.dddmp_prod != default)` → functional-API ignored field.
+  4. `CDGridShallowWaterModel(config.dddmp_prod != default)` → model-class ignored field (iter-872c-take4).
+
+The configuration-vs-runtime mismatch surface is now fully covered by either documentation, scope clarification, or explicit user warnings.
+
+**Process.**  Five-pass Codex adversarial-review chain.  Each pass identified a real correctness or UX gap; each fix progressively eliminated silent failure modes.  Net Fortran-fidelity gain: parameter `dddmp` is exposed configurably while preserving production W2 sentinel bit-for-bit, with explicit safety nets for every misconfiguration corner case.

@@ -217,6 +217,31 @@ def cdgrid_shallow_water_tendencies(
     """
     h, u_d, v_d, h_s = state
 
+    # Iter-872c-take5 (Codex pass-5): warn for direct callers that
+    # set `dddmp_prod` non-default — `cdgrid_shallow_water_tendencies`
+    # deliberately does NOT forward `dddmp_prod` to
+    # `cdgrid_momentum_tendencies` (Codex pass-3 fix), so a non-
+    # default value is silently ignored here.  The model-class
+    # warning at `CDGridShallowWaterModel.__init__` catches the
+    # common case but not direct functional callers.
+    _default_dddmp_prod = CDGridShallowWaterConfig._field_defaults[
+        "dddmp_prod"]
+    if config.dddmp_prod != _default_dddmp_prod:
+        import warnings
+        warnings.warn(
+            f"`cdgrid_shallow_water_tendencies` called with "
+            f"`config.dddmp_prod={config.dddmp_prod!r}` (non-default).  "
+            f"This function deliberately does NOT forward "
+            f"`dddmp_prod` to `cdgrid_momentum_tendencies` (Codex "
+            f"pass-3 fix to avoid silent default-config behaviour "
+            f"changes); the setting will be ignored on this code "
+            f"path.  `dddmp_prod` is consumed by "
+            f"`FV3EdgeShallowWaterModel.step` only.  Pass `dddmp` "
+            f"directly to `cdgrid_momentum_tendencies` if adaptive "
+            f"Smagorinsky is required on this code path.",
+            stacklevel=2,
+        )
+
     # 1. Mass transport via C-grid velocities (with non-orth correction)
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
