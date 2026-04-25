@@ -180,6 +180,39 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # The face boundary edge is at position -0.5.
     # Correct edge value using actual distances to the boundary.
     # Skipped for duogrid (kinked-extended remap already aligns halo cells).
+    #
+    # Iter-887 (Fortran-fidelity gap, documented but not yet fixed).
+    # Fortran tp_core.F90:614-628 (left) and 632-647 (right) implements
+    # a richer boundary procedure when ``.not. (bounded_domain .or.
+    # duogrid) .and. grid_type<3``:
+    #   1. Sets bl(0)/br(npx) via ``s14*dm(-1) + s11*(q1(-1)-q1(0))``
+    #      using constants ``s11 = 11/14, s14 = 4/7, s15 = 3/14``
+    #      (tp_core.F90:58).
+    #   2. Computes a 4-point dxa-weighted boundary edge value
+    #      ``xt = 0.5 * (left_avg + right_avg)`` where each *_avg is a
+    #      ``((2*dxa(i)+dxa(i±1))*q1(i) - dxa(i)*q1(i±1))/(dxa(i±1)+
+    #      dxa(i))`` weighted ratio (tp_core.F90:616-617, 638-639).
+    #      For uniform grid this simplifies to
+    #      ``0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))``, which is a
+    #      4-point cubic-style stencil — different from our 2-point
+    #      ``(0.5*q_hm1 + h_L*q_i0)/(h_L+0.5)`` average below.
+    #   3. Clips xt to within ``min/max(q1(-1..2))`` (tp_core.F90:619-
+    #      620, 641-642).
+    #   4. Then sets br(0)/bl(1) and br(1)/bl(2) (left side) or
+    #      br(npx-2)/bl(npx-1) and br(npx-1)/bl(npx) (right side)
+    #      from ``xt - q1(...)``.
+    #
+    # Our Python below implements only a 2-point position-aware
+    # average for items 2-4 above and SKIPS items 1 and the explicit
+    # bl(0..2)/br(0..2) overrides.  This is a Fortran-fidelity gap on
+    # the legacy non-duogrid path only — duogrid runs are unaffected
+    # because Fortran's ``.not. (bounded_domain .or. duogrid)`` gate
+    # bypasses the entire block.  Production CDGrid uses
+    # ``_ppm_reconstruct_1d`` (operators_cdgrid.py) which has its own
+    # boundary handling, so this gap currently only affects FB-chain
+    # ``fv_tp_2d`` consumers.  Implementing the full s11/s14/s15
+    # formula requires plumbing dxa through the call site and is
+    # deferred to a future iter alongside FB-chain stabilisation.
     if not use_duogrid and off_left is not None:
         # Left face-boundary edge: al[:, 1, :] between halo(-1) and interior(0)
         q_hm1 = qe[:, 2, :]   # halo -1 at position (-1 + off0)

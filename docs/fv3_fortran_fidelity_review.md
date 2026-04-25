@@ -2058,22 +2058,22 @@ iter-885's 6 tests substantially overlap iter-617's coverage (uniform spacing, n
 
 **Motivation.**  iter-885b's failed-audit lesson: per-function coverage checks must enumerate matching test classes inside test files, not just count grep references.  iter-886 catalogs the existing direct cross-Fortran sentinels in the iter chain, so future iters can FIRST consult this inventory before claiming "missing coverage."
 
-**Direct cross-Fortran sentinels** (function ↔ Fortran reference ↔ test class):
+**Direct cross-Fortran sentinels** (function ↔ Fortran reference ↔ test location).  Note: `tests/test_*.py` files in this iter chain (iter-878-884) use top-level `def test_*` functions, NOT `unittest.TestCase` classes — the table reflects the actual style of each file.
 
-| Python function | File | Fortran reference | Test class | Iter |
-|-----------------|------|-------------------|------------|------|
-| `_ppm_reconstruct_1d` | `core/operators_cdgrid.py` | CW84 eq. 1.10 / `tp_core.F90:1199` | `test_ppm_overshoot_constraint_iter878.py` (4 tests) | iter-878 |
-| `_ppm_reconstruct_1d` ↔ `_ppm_limit` | (same + `core/operators_fv.py`) | cross-implementation consistency | `test_ppm_limiter_consistency_iter879.py` (15 tests) | iter-879g/h |
-| `_ppm_edge_values` | `core/operators_fv.py` | `tp_core.F90:353-355` | `test_ppm_edge_values_clip_iter880.py` (6 tests) | iter-880b |
-| `_ppm_1d` boundary indices | `core/fv_tp_2d.py` | `tp_core.F90:629/648` | `test_ppm_1d_boundary_indices_iter884.py` (3 tests) | iter-884b |
-| `_pert_ppm_iv0` | `core/fv_tp_2d.py` | `tp_core.F90:1169-1192` | `test_pert_ppm_iv0_fortran_faithful_iter881.py` (4 tests, 6 branches) | iter-881d |
-| `_pert_ppm` (iv=1) | `core/fv_tp_2d.py` | `tp_core.F90:1193-1212` | `test_pert_ppm_iv1_fortran_faithful_iter882.py` (4 tests, 4 branches) | iter-882 |
-| `_edge_interpolate4` | `core/fv3_sw_core.py` | `sw_core.F90:3709-3720` | `TestEdgeInterpolate4FortranFormula` in `tests/unit/test_cdgrid_fv3_regression.py:6471-6628` (4 tests) | iter-617 |
-| `_d_sw1_recompute_ut_vt` (interior formula) | `core/fv3_sw_core.py` | `sw_core.F90:618-812` | `TestDSw1RecomputeUtVtFortranFormula` in `tests/unit/test_cdgrid_fv3_regression.py` | iter-622 |
-| `_xppm` flux formula | `core/fv_tp_2d.py` | `tp_core.F90:670-677` | `TestFlux*Fortran*` (iter-639 lock) in `tests/unit/test_cdgrid_fv3_regression.py:8214+` | iter-639 |
-| `_corner_vorticity` boundary gates | `core/fv3_sw_core.py` | `sw_core.F90:divergence_corner` | iter-553 lock `test_corner_vorticity_*` in `tests/unit/test_cdgrid_fv3_regression.py:1735+` | iter-553 |
-| `_divergence_corner_duo` | `core/fv3_sw_core.py` | `sw_core.F90:2345-2447` | `test_divergence_corner_duo_*` in `tests/unit/test_cdgrid_fv3_regression.py:2058+` | iter-554/556 |
-| `_apply_legacy_d_sw4_corner_ke_fix` | `core/fv3_sw_core.py` | `sw_core.F90:1438-1466` | `tests/test_d_sw4_corner_ke_fix_iter869.py` (4 tests) | iter-869b |
+| Python function | File | Fortran reference | Test location (file ▸ class or top-level fns) | Iter |
+|-----------------|------|-------------------|---------------------------------------------|------|
+| `_ppm_reconstruct_1d` | `core/operators_cdgrid.py` | CW84 eq. 1.10 / `tp_core.F90:1199` | `tests/test_ppm_overshoot_constraint_iter878.py` ▸ 4 top-level `test_iter878_*` | iter-878 |
+| `_ppm_reconstruct_1d` ↔ `_ppm_limit` | (same + `core/operators_fv.py`) | cross-implementation consistency | `tests/test_ppm_limiter_consistency_iter879.py` ▸ 3 parameterized top-level fns (15 cases) | iter-879g/h |
+| `_ppm_edge_values` | `core/operators_fv.py` | `tp_core.F90:353-355` | `tests/test_ppm_edge_values_clip_iter880.py` ▸ 5 top-level `test_iter880*_*` (6 cases) | iter-880b |
+| `_ppm_1d` boundary indices | `core/fv_tp_2d.py` | `tp_core.F90:629/648` | `tests/test_ppm_1d_boundary_indices_iter884.py` ▸ 3 top-level `test_iter884_*` | iter-884b |
+| `_pert_ppm_iv0` | `core/fv_tp_2d.py` | `tp_core.F90:1169-1192` | `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py` ▸ 2 top-level fns (4 cases, 6 branches) | iter-881d |
+| `_pert_ppm` (iv=1) | `core/fv_tp_2d.py` | `tp_core.F90:1193-1212` | `tests/test_pert_ppm_iv1_fortran_faithful_iter882.py` ▸ 2 top-level fns (4 cases, 4 branches) | iter-882 |
+| `_edge_interpolate4` | `core/fv3_sw_core.py` | `sw_core.F90:3709-3720` | `tests/unit/test_cdgrid_fv3_regression.py:6471` ▸ class `TestEdgeInterpolate4FortranFormula` (4 tests) | iter-617 |
+| `_d_sw1_recompute_ut_vt` (interior formula) | `core/fv3_sw_core.py` | `sw_core.F90:618-812` | `tests/unit/test_cdgrid_fv3_regression.py:6914` ▸ class `TestDSw1RecomputeUtVtFortranFormula` | iter-622 |
+| `_xppm` flux formula | `core/fv_tp_2d.py` | `tp_core.F90:670-677` | `tests/unit/test_cdgrid_fv3_regression.py:8213` ▸ class `TestPpmFluxFortranFormula` | iter-639 |
+| `_corner_vorticity` boundary gates | `core/fv3_sw_core.py` | `sw_core.F90:378-408` | `tests/unit/test_cdgrid_fv3_regression.py:1735+` ▸ method `test_corner_vorticity_*` (5 tests) + class `TestCornerVorticityFortranFormula` (line 7987) | iter-553 |
+| `_divergence_corner_duo` | `core/fv3_sw_core.py` | `sw_core.F90:2345-2447` | `tests/unit/test_cdgrid_fv3_regression.py:2058+` ▸ methods `test_divergence_corner_duo_*` (3 tests) + class `TestDivergenceCornerDuoFortranFormula` (line 8815) | iter-554/556 |
+| `_apply_legacy_d_sw4_corner_ke_fix` | `core/fv3_sw_core.py` | `sw_core.F90:1438-1466` | `tests/test_d_sw4_corner_ke_fix_iter869.py` ▸ top-level fns | iter-869b |
 
 **Other regression sentinels** (not direct cross-Fortran, but pin Fortran-fidelity properties):
 
@@ -2097,3 +2097,36 @@ iter-885's 6 tests substantially overlap iter-617's coverage (uniform spacing, n
 **Deliverable.**  This doc inventory entry.  No source or test code change.
 
 **Process.**  159th iter in the iter-752-886 chain.  Doc-only iter that catalogs the existing iter chain's cross-Fortran sentinels into a master inventory.  Closes the iter-885 audit-method gap by giving future iters an explicit pre-existing-test enumeration to consult.  No new sentinel because iter-885b's audit method (read test files, not just grep counts) shows that the iter-878-885 chain has now sentineled the major FB chain operators sufficient for the regression-prevention goal.  Future fidelity work should target either (a) the deferred multi-iter cross-face halo helper, (b) the deferred d_sw5 holistic port, or (c) FB-chain stabilisation — all multi-iter architectural items per the iter-849-868 chain.
+
+### Iter-887 — `_ppm_1d` boundary `s11/s14/s15` formula gap (Codex iter-886 stop-time follow-up)
+
+**Codex stop-time review of iter-886 (BLOCK).**  e999c10 was MD-only; per Ralph's "non-idle" rule a doc-only inventory is insufficient even when serving as iter-885b audit-method follow-up.  Two inventory entries also used "Test class" terminology for files that contain only top-level `def test_*` functions.  iter-887 addresses both findings.
+
+**Inventory terminology fix.**  The iter-886 inventory header `Test class` is replaced by `Test location (file ▸ class or top-level fns)` and each entry now reflects the actual style of its test file.  A note below the header reminds readers that iter-878-884 test files use top-level functions; the older iter-617/622/639/553/554 sentinels live inside `unittest.TestCase` classes in `tests/unit/test_cdgrid_fv3_regression.py`.  Path/line numbers verified by spot-check.
+
+**Substantive code change — document `s11/s14/s15` boundary-formula gap in `_ppm_1d`.**  Fortran `tp_core.F90:614-628` (left) and `:632-647` (right) implement a richer boundary procedure than our Python `_ppm_1d` for the legacy non-duogrid path:
+
+1. **`s11/s14/s15` constants** (Fortran `tp_core.F90:58`: `s11=11/14, s14=4/7, s15=3/14`):
+   - `bl(0) = s14*dm(-1) + s11*(q1(-1)-q1(0))`  (line 614)
+   - `xt = s15*q1(1) + s11*q1(2) - s14*dm(2)` then `br(1) = xt - q1(1); bl(2) = xt - q1(2)`  (line 624-626)
+   - Mirror on the right side (lines 634-636, 647).
+2. **4-point dxa-weighted boundary edge** (`tp_core.F90:616-617`):
+   ```
+   xt = 0.5 * ( ((2*dxa(0)+dxa(-1))*q1(0)-dxa(0)*q1(-1))/(dxa(-1)+dxa(0))
+              + ((2*dxa(1)+dxa( 2))*q1(1)-dxa(1)*q1( 2))/(dxa( 1)+dxa(2)) )
+   ```
+   For uniform grid this collapses to `0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))` — a 4-point cubic-style stencil.
+3. **Clip xt to `min/max(q1(-1..2))`** (`tp_core.F90:619-620`).
+4. **Set br(0)/bl(1) from xt** (`tp_core.F90:622-623`).
+
+Our Python implements item 2 as a 2-point position-aware average `(0.5*q_hm1 + h_L*q_i0)/(h_L+0.5)` and item 3's clip, but skips items 1 and 4.  This is a real Fortran-fidelity gap on the legacy non-duogrid `_ppm_1d` path.
+
+**Scope of impact.**  The legacy non-duogrid `_ppm_1d` path is exercised by FB-chain consumers (`fv_tp_2d` → `_xppm`/`_yppm`).  Production CDGrid path uses a different reconstructor (`_ppm_reconstruct_1d` in `operators_cdgrid.py`), so the gap does NOT affect production runs.  Duogrid runs (FV3 default) bypass the entire block via Fortran's `.not. (bounded_domain .or. duogrid)` gate.
+
+**Why not fix in iter-887 directly.**  Implementing the s11/s14/s15 formula requires plumbing `dxa` (the cell-spacing in the sweep direction) through the `_ppm_1d` call site.  `dxa` lives on `cdgrid.dxa` but `_ppm_1d`'s callers (`_xppm`, `_yppm`) currently pass only the per-strip 3-tuple `(off_left, off_right, off_left_d1, off_right_d1, off_left_d1, off_right_d1)`.  A clean fix needs the corresponding `(dxa_left, dxa_right)` strips.  This is a multi-iter plumbing change deferred to align with the larger FB-chain stabilisation effort.
+
+**Deliverable.**  (a) iter-886 inventory terminology fix in the table immediately above; (b) detailed in-source comment block in `src/legoesm/core/fv_tp_2d.py:_ppm_1d` documenting the s11/s14/s15 gap with Fortran line references, scope of impact, and rationale for deferral.  No behavioural change.
+
+**Verification.**  Recent PPM sentinel suite (iter-878 + iter-880 + iter-881 + iter-882 + iter-884) re-run: all 21 tests pass.
+
+**Process.**  160th iter.  Codex stop-time review of iter-886 caught two BLOCK findings (MD-only + terminology); iter-887 corrects both with a real source-code comment that documents an actual Fortran-fidelity gap not previously catalogued.
