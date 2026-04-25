@@ -2166,3 +2166,38 @@ LOWERING div_damp from canonical (8× base) WORSENS the 1-day v_ll_Linf (0.159 �
 **Deliverable.**  `scripts/diag_iter848_damp_sweep.py` + 5-point sweep output.  No production source-code change.  All 14 W2 sentinels unaffected.  Also fixed residual vertex-wording in iter-844 heading ("at cube vertex" → "near cube vertex") and iter-846 "What DOES NOT establish" bullet ("at the cube vertex" → "at the pure-dynamics peak") flagged by stop-hook.
 
 **Process.**  108th iter in iter-752-848 chain.  Runs the actual damping sweep that iter-847 called for.  iter-846's sign-structure opposite-direction prediction is NOT SUPPORTED on the tested 0..2× range; at t=0 div_damp drives |dv/dt| magnitude and shifts the peak location toward cube-vertex-adjacent points.  BUT: iter-794 already showed that over 24 h lowering div_damp WORSENS v_ll_Linf (0.159 → 0.234 m/s at div_damp=0) — so iter-848's t=0 reading does not transfer to the 1-day stripe mechanism.  div_damp acts as a necessary stabiliser whose absence admits other mode-A mechanisms over 24 h.  iter-848c re-ranked iter-849+ priorities to time-history attribution and Fortran div_damp-construction audit (Codex abee3a690accf07e9 recommendation) instead of a redundant stability-bounded sweep.
+
+### Iter-849 — d_sw5 div_damp Fortran-vs-Python audit + script-claim cleanup
+
+**Part 1** (stop-hook cleanup).  iter-848c retracted "REFUTED" in the doc but `scripts/diag_iter848_damp_sweep.py` still printed "iter-846 hypothesis REFUTED" in its interpretation block.  Rewrote the script's interpretation to match the doc-level scoping: "NOT SUPPORTED on tested range, does not exclude narrow non-monotone sub-intervals" + explicit warning that the t=0 reading does not predict 1-day v_ll behaviour (iter-794 contradicts it directly).
+
+**Part 2** (Fortran-fidelity audit, per iter-848c iter-849+ priority).  Codex (ae3beae85db3236e3) audited Fortran d_sw5 corner divergence damping (`sw_core.F90:1641-1821`) against our Python production-path div_damp construction in `operators_cdgrid.py:1690-1707`.  Found FOUR concrete gaps:
+
+| # | check                          | gap                                                    |
+|---|--------------------------------|--------------------------------------------------------|
+| 1 | adaptive coefficient formula   | Fortran has `*dt` factor in cap argument; Python does NOT. (Acknowledged at iter-758c comment lines 1677-1689 — applying `*dt` ALONE breaks because the 0.20 cap activates at wrong magnitude in RK3 form.) |
+| 2 | corner divergence definition   | Fortran builds corner `delpc` from edge-by-edge `ptc`/`vort` with metric weights; Python uses `cgrid_divergence` cell-centre flux-form stencil + 4-point centre→corner average. Not equivalent at corners. |
+| 3 | corner correction stencil      | Fortran has explicit `delpc(1,1) -= vort(1,0)` at sw_corner (and 3 other corners); Python has NO directly comparable correction. |
+| 4 | application to velocity        | Fortran adds damping to `ke` then differentiates `ke` in `d_sw6` to update `u,v`; Python adds damping DIRECTLY to `du_cc, dv_cc` in `fv3_sw_tendencies`. Structural bypass. |
+
+**Most-load-bearing gap (Codex)**: Check 4 — Python's direct du/dv addition vs Fortran's ke-routed application.  Hypothesis: this structural bypass makes Python's instantaneous |dv/dt| more directly sensitive to div_damp amplitude (consistent with iter-848's strong scaling).
+
+**Inventory finding.**  We ALREADY have a Fortran-faithful `_d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt, ...)` at `src/legoesm/core/fv3_sw_core.py:959-1158`.  It is currently called ONLY from the FB chain (`_d_sw_native`); it is NOT wired into the A-L production path (`fv3_sw_tendencies`).  Wiring it in would require an RK3-compatible application strategy because Fortran d_sw5's `ke += damp*delpc` then `d_sw6: u += rdxc*(ke[i-1]-ke[i])` is FB-time-split, whereas A-L production is RK3.
+
+**What iter-849 DOES show.**
+- 4 concrete fidelity gaps in the production div_damp pipeline are now catalogued with file:line references for both Fortran and Python.
+- iter-758c's comment correctly anticipated that piecemeal fixes (just `*dt`) break in RK3.  The full fix requires checks 1+2+3+4 together.
+- Existing `_d_sw5_corner_divergence` helper provides a Fortran-faithful CORNER DIVERGENCE construction that could be re-used in a production wiring; the velocity-update path (Fortran `ke` differencing in d_sw6) still needs RK3-compatible adaptation.
+
+**What iter-849 does NOT establish.**
+- Whether wiring `_d_sw5_corner_divergence` into the A-L production path with RK3-compatible velocity application would resolve the cube-vertex |dv/dt| amplification.  This is a multi-iter architectural change.
+- Whether the stop-hook's "the script still ships REFUTED" was the only residual issue or whether other diagnostic scripts have similar overstatement.
+
+**Iter-850+ candidates.**
+- Architectural item (multi-iter): port full d_sw5 to A-L production.  Phase 1: replace `cgrid_divergence` cell-centre stencil with `_d_sw5_corner_divergence` corner-stencil delpc (Check 2).  Phase 2: add the explicit corner corrections (Check 3).  Phase 3: re-route the damping through a `ke`-differencing form compatible with RK3 (Check 4).  Each phase is testable against the iter-761 sentinel.
+- Continue documentary cleanup pass over older diag scripts to catch any residual overclaims.
+- Time-history attribution diagnostic (per iter-848c re-ranked priority) — measure how div_damp vs boundary_fix evolve over 0..1h on W2 LEGACY.
+
+**Deliverable.**  Updated `scripts/diag_iter848_damp_sweep.py` (REFUTED claim removed).  Doc audit of 4 d_sw5 fidelity gaps + inventory of existing `_d_sw5_corner_divergence` helper.  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  109th iter in iter-752-849 chain.  Diagnostic-honesty pass on iter-848 script + first-pass Fortran-fidelity audit of d_sw5 div_damp construction.  Catalogues 4 concrete gaps with file:line references.  Confirms iter-758c's comment that piecemeal fixes don't work and identifies the existing `_d_sw5_corner_divergence` helper as a starting point for a multi-iter architectural port.

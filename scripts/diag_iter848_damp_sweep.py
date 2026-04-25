@@ -139,10 +139,19 @@ def main():
 
     print()
     print("Interpretation (observational only):")
-    print("- If |dv/dt| @(0,2,34) DECREASES with scale and |dv/dt| @(5,0,0)")
-    print("  INCREASES with scale → iter-846 sign-structure hypothesis SUPPORTED.")
-    print("- If both move in the same direction → iter-846 hypothesis REFUTED.")
-    print("- If peak LOCATION shifts with scale → damping is setting the full peak.")
+    print("- iter-846 sign-structure prediction was that |dv/dt| @(0,2,34)")
+    print("  and |dv/dt| @(5,0,0) move in OPPOSITE directions with damping")
+    print("  scale.  If they move in opposite directions on the tested range,")
+    print("  iter-846's reasoning is consistent with the data; if they move")
+    print("  in the same direction, the prediction is NOT SUPPORTED on the")
+    print("  tested range (does not exclude narrow non-monotone sub-intervals).")
+    print("- Peak LOCATION shifts with scale → damping is influencing the")
+    print("  full-peak position.")
+    print("- IMPORTANT: this t=0 single-step measurement does NOT predict the")
+    print("  1-day v_ll stripe behaviour.  iter-794's 24h sweep at the same")
+    print("  div_damp scales found that lowering div_damp WORSENS 1-day")
+    print("  v_ll_Linf (0.159 → 0.234 m/s, +47%).  Do not extrapolate from")
+    print("  this t=0 reading to the late-time mode-A mechanism.")
 
 
 if __name__ == "__main__":
