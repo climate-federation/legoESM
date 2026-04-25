@@ -1866,3 +1866,43 @@ The branch-3b near-boundary input correctly catches the fmin coefficient corrupt
 **Deliverable.**  Updated `tests/test_pert_ppm_iv0_fortran_faithful_iter881.py` (added 3b input + extended expected outputs) + this doc entry.
 
 **Process.**  152nd iter in the iter-752-881d chain.  Four-pass branch-coverage tightening (iter-881 → 881b → 881c → 881d).  Each pass closes a specific corruption-masking gap Codex stop-time review identified.  iter-881d's near-boundary input is the diagnostic technique for catching internal-formula corruptions whose effect is only visible near a sign-flip threshold.
+
+### Iter-882 — Fortran-faithful sentinel for `_pert_ppm` (iv=1 standard PPM constraint)
+
+**Sibling sentinel to iter-881.**  iter-881d covered the iv=0 (positive-definite) branch of Fortran `pert_ppm` (`tp_core.F90:1169-1192`).  iter-882 covers the iv=1 (standard PPM constraint) branch (`tp_core.F90:1193-1212`), which our Python implementation lives in `_pert_ppm` (`src/legoesm/core/fv_tp_2d.py:26-44`).
+
+**Fortran iv=1 algorithm.**  The standard PPM constraint has 4 distinct paths:
+- Branch A (opposite signs `bl*br < 0`):
+  - A1: `a6da < -da2` → `br = -2*bl` (clip overshoot left).
+  - A2: `a6da > da2` → `bl = -2*br` (clip overshoot right).
+  - A3: `|a6da| ≤ da2` → no change (CW84 cap not active).
+- Branch B (same signs `bl*br ≥ 0`, including zero product): `bl = 0; br = 0`.
+
+**Tests** (`tests/test_pert_ppm_iv1_fortran_faithful_iter882.py`):
+
+1. `test_iter882_pert_ppm_iv1_matches_fortran_reference`: hand-built input covering all 4 branches.  Three sub-checks:
+   - Production matches the Fortran NumPy reference at 1e-12 rtol.
+   - Production matches hand-computed per-branch expected outputs (catches "both production and reference share a bug").
+   - Includes an EXACT-BOUNDARY input (A1-bd: `bl=-0.5, br=1.0` where `a6da = -da2`) to catch a strict-vs-non-strict inequality regression (`<` vs `<=`).
+
+2. `test_iter882_pert_ppm_iv1_random_inputs` (parametrized over 3 seeds): random `(bl, br)` pairs spanning multiple sign and magnitude regimes.
+
+**Iter-881 lessons applied.**  iter-882's branch design avoids the four masking patterns Codex stop-time identified during iter-881's evolution:
+- A1, A2 use NON-ZERO clip targets (post-clip values 0.2 instead of 0) so multiplier corruptions (-2 → -3) flip output measurably.
+- A3 uses a non-zero pass-through (`(-0.5, 0.5)`) so a pass-through-vs-clip flip is observable.
+- A1-bd uses an exact-boundary case (`a6da = -da2`) to catch strict-inequality regressions.
+- B includes a `bl=0` zero-product case to verify Fortran's `<` (strict) vs `≥` (non-strict) gate.
+
+**Sentinel verification.**  Manual corruption tests:
+- Corrupt A1 (`-2*bl → -3*bl`): 4 of 4 tests fail.
+- Corrupt A2 (`-2*br → -3*br`): 4 of 4 tests fail.
+- Corrupt B (`0 → 0.001` zero-out target): 4 of 4 tests fail.
+- Restore source: 4 of 4 pass.
+
+All three branch-class corruptions correctly caught with full detection rate (4 of 4).
+
+**Combined coverage (iter-881d + iter-882).**  Both Fortran `pert_ppm` branches (iv=0 positive-definite + iv=1 standard) now have direct cross-Fortran sentinels with per-branch expected outputs and corruption-injection verification.
+
+**Deliverable.**  `tests/test_pert_ppm_iv1_fortran_faithful_iter882.py` (4 tests) + this doc entry.  No source-code change — sentinel-only.
+
+**Process.**  153rd iter in the iter-752-882 chain.  Sibling sentinel to iter-881d, applying all the iter-881 chain's lessons (non-zero clip targets, near-boundary inputs, exact-boundary inputs, per-branch expected outputs, corruption-injection verification) on the FIRST attempt instead of via 4 stop-time-driven iterations.  No false-pass paths identified at iter-882 commit time.
