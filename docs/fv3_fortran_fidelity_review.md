@@ -970,7 +970,7 @@ At each of SW / SE / NE / NW corner halo cell vort_pad[corner]:
   → values differ
 ```
 
-iter-870b explicitly STOPS short of computing a quantitative ratio (e.g., `rel_diff / vort_interior`) because variant B is approximate (see LIMITATIONS).  The two values being printed side-by-side document that the same-face halo and the proxy differ on this input; iter-870b does NOT make any quantitative claim about the size of the Fortran-fidelity gap.
+iter-870c explicitly STOPS short of computing a quantitative ratio (e.g., `rel_diff / vort_interior`) because variant B is approximate (see LIMITATIONS).  iter-870 (the original iter) printed and quoted "rel diff vs vort_interior 6.85e-01" / "68 %" as the headline; iter-870b added a caveat alongside the still-quoted ratio; iter-870c removes the ratio entirely from both the script output and the doc.  The two values being printed side-by-side document that the same-face halo and the proxy differ on this input; iter-870c does NOT make any quantitative claim about the size of the Fortran-fidelity gap.
 
 **LIMITATIONS of variant B (Codex iter-870 stop-time review).**  Variant B is NOT a tight Fortran-faithful reference.  Three approximations:
 
