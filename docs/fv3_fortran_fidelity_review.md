@@ -2031,3 +2031,25 @@ The strengthened sentinel correctly catches the index regression in BOTH static 
 **Deliverable.**  `tests/test_edge_interpolate4_fortran_faithful_iter885.py` (6 tests) + this doc entry.  No source-code change.
 
 **Process.**  157th iter in the iter-752-885 chain.  Sentinel-only iter that locks the existing `_edge_interpolate4` Fortran-faithful implementation against future regression.  Three approaches combined: analytical hand-derived expected values, batched Fortran reference comparison, and random-input cross-check.  Lessons from iter-881 chain applied on first attempt: non-zero values, non-uniform spacing, deterministic analytical expectations, and corruption-injection verification all included from the start.
+
+### Iter-885b — Codex iter-885 stop-time: revert duplicate sentinel (iter-617 already covers `_edge_interpolate4`)
+
+**Codex iter-885 stop-time finding.**  "iter-885 is based on a false 'missing coverage' premise and should not ship as written".
+
+**Issue.**  iter-885 claimed `_edge_interpolate4` had "NO direct cross-Fortran reference test."  This was FALSE — iter-617 already added `TestEdgeInterpolate4FortranFormula` in `tests/unit/test_cdgrid_fv3_regression.py:6471-6628` with 4 tests covering:
+- `test_linear_input_exact`: linear input on uniform dxa.
+- `test_uniform_dxa_reduces_to_3_4_weighted_average`: closed-form reduction for uniform dxa.
+- `test_non_uniform_dxa_matches_explicit_fortran_formula`: 5 random non-uniform cases at 12 decimal places vs explicit Fortran reference.
+- `test_production_shape_6_n_4_matches_per_cell_scalar`: production-shape (6, n, 4) verification.
+
+iter-885's 6 tests substantially overlap iter-617's coverage (uniform spacing, non-uniform spacing, Fortran reference, random inputs).  Shipping iter-885 as written added redundant tests and a misleading doc entry claiming new coverage that already existed.
+
+**Fix (iter-885b).**  Delete `tests/test_edge_interpolate4_fortran_faithful_iter885.py` (the redundant test file) and add this honest correction to the doc.
+
+**On the audit search method.**  The iter-885 audit method was insufficient: I grepped `tests/` for the function name BUT only excluded files matching `iter885` and `.pyc`.  The pre-existing iter-617 tests live in `tests/unit/test_cdgrid_fv3_regression.py` — a large omnibus file that wasn't filtered out.  A proper coverage audit needs to read the matching test classes, not just count function-name references.  Future "missing coverage" claims must include explicit pre-existing-test-class enumeration before shipping a sentinel.
+
+**Verification.**  After deleting the iter-885 test file, iter-617's 4 `TestEdgeInterpolate4FortranFormula` tests still pass (verified).  The iter chain's other 14 top-level test files unaffected.
+
+**Deliverable.**  Delete `tests/test_edge_interpolate4_fortran_faithful_iter885.py` + this doc correction.
+
+**Process.**  158th iter in the iter-752-885b chain.  Codex stop-time review caught that iter-885 was based on an incorrect coverage audit.  iter-885b honestly acknowledges the false premise, reverts the duplicate test file, and documents the failed audit method so future sentinels can avoid the same mistake.  No source-code change.  The lesson: per-function coverage audits must look INSIDE the test files, not just count references — references include comments, docstrings, and unrelated code that passes a grep filter but doesn't actually exercise the function.
