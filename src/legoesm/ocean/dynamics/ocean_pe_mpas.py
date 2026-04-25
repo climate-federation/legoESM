@@ -411,10 +411,11 @@ def _vertical_diffusion(field_3d, dz_half, dz, jacobian, coeff, is_edge, mesh):
     dz_half_safe = jnp.maximum(dz_half_actual, 1e-10)
     flux_interface = coeff * (field_3d[:, :-1] - field_3d[:, 1:]) / dz_half_safe
 
-    # Tendency: (flux[k-1/2] - flux[k+1/2]) / dz[k]
-    zeros = jnp.zeros((field_3d.shape[0], 1), dtype=field_3d.dtype)
-    flux_above = jnp.concatenate([zeros, flux_interface], axis=1)  # (n, nlev)
-    flux_below = jnp.concatenate([flux_interface, zeros], axis=1)  # (n, nlev)
+    # Tendency: (flux[k-1/2] - flux[k+1/2]) / dz[k].  Use ``jnp.pad``
+    # to attach the zero-flux top/bottom boundaries — single Pad HLO
+    # op vs alloc fresh ``(n, 1)`` zeros and concatenate.
+    flux_above = jnp.pad(flux_interface, ((0, 0), (1, 0)))  # (n, nlev)
+    flux_below = jnp.pad(flux_interface, ((0, 0), (0, 1)))  # (n, nlev)
 
     dz_safe = jnp.maximum(dz_actual, 1e-10)
     return (flux_above - flux_below) / dz_safe

@@ -381,22 +381,25 @@ def precision_health_report(
         if cfl > cfl_limit:
             warnings_list.append(f"CFL={cfl:.3f} exceeds limit {cfl_limit}")
 
-    # Energy drift rate
+    # Energy drift rate — fuse the two energy sums into a single
+    # ``jnp.stack`` + host pull so the diagnostic costs one GPU stall
+    # instead of two.
     if state_prev is not None and grid is not None:
         _acc = _best_float()
         area = grid.area.astype(_acc)
         c_p = 1004.64
         g = 9.80616
-        energy_now = float(jnp.sum(
-            c_p * T.astype(_acc) * ps.astype(_acc)[..., None]
-            * area[..., None]
-        )) / g
         T_prev = state_prev.T.data
         ps_prev = state_prev.p_s.data
-        energy_prev = float(jnp.sum(
-            c_p * T_prev.astype(_acc) * ps_prev.astype(_acc)[..., None]
-            * area[..., None]
-        )) / g
+        _energy_pair = jnp.stack([
+            jnp.sum(c_p * T.astype(_acc) * ps.astype(_acc)[..., None]
+                    * area[..., None]),
+            jnp.sum(c_p * T_prev.astype(_acc) * ps_prev.astype(_acc)[..., None]
+                    * area[..., None]),
+        ])
+        _eh = np.asarray(_energy_pair)
+        energy_now = float(_eh[0]) / g
+        energy_prev = float(_eh[1]) / g
         dE = abs(energy_now - energy_prev)
         dE_rel = dE / max(abs(energy_prev), 1e-30)
         # Scale to per-day rate
@@ -435,9 +438,17 @@ def check_tracer_negativity(
     -------
     dict : tracer_name -> minimum value (only for those below threshold).
     """
+    if not tracers:
+        return {}
+    # Stack the per-tracer mins into one ``jnp.stack`` and pull host
+    # in one transfer.  The previous per-tracer ``float(jnp.min(...))``
+    # serialised one device→host stall per tracer (typically 6-9
+    # tracers under full microphysics).
+    names = list(tracers.keys())
+    mins_host = np.asarray(jnp.stack([jnp.min(tracers[n]) for n in names]))
     violations = {}
-    for name, arr in tracers.items():
-        arr_min = float(jnp.min(arr))
-        if arr_min < threshold:
-            violations[name] = arr_min
+    for name, arr_min in zip(names, mins_host):
+        v = float(arr_min)
+        if v < threshold:
+            violations[name] = v
     return violations

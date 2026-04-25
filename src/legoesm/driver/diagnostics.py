@@ -702,22 +702,43 @@ class DiagnosticCollector:
 
         Returns the same dict keys as ``collect`` for logging compatibility.
         """
-        mean_sst = float(jnp.mean(sst))
-        mean_sic = float(jnp.mean(sic))
-        mean_T = float(jnp.mean(state.T.data))
-        mean_T_low = float(jnp.mean(state.T.data[..., -1]))
+        # Fuse the 12 reductions into one ``jnp.stack`` + ``np.asarray``
+        # device→host transfer.  The "minimal" docstring promised low
+        # overhead, but the previous per-scalar ``float(...)`` chain
+        # serialised 12 GPU stalls per diagnostic step — exactly the
+        # sin the long ``collect`` path was already corrected for.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
-        mean_precip = float(jnp.mean(precip_total)) * 86400.0
+            wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
-        mean_cwv = float(jnp.mean(cwv))
-        mean_sw_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_toa = float(jnp.mean(lw_up_toa))
-        mean_ps = float(jnp.mean(state.p_s.data))
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
+        _stats = jnp.stack([
+            jnp.mean(sst),
+            jnp.mean(sic),
+            jnp.mean(state.T.data),
+            jnp.mean(state.T.data[..., -1]),
+            wind_term,
+            jnp.mean(precip_total),
+            jnp.mean(cwv),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(state.p_s.data),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ])
+        _h = np.asarray(_stats)
+        mean_sst = float(_h[0])
+        mean_sic = float(_h[1])
+        mean_T = float(_h[2])
+        mean_T_low = float(_h[3])
+        max_v = float(_h[4])
+        mean_precip = float(_h[5]) * 86400.0
+        mean_cwv = float(_h[6])
+        mean_sw_toa = float(_h[7])
+        mean_lw_toa = float(_h[8])
+        mean_ps = float(_h[9])
+        mean_sw_sfc = float(_h[10])
+        mean_lw_sfc = float(_h[11])
 
         # Append to time-series (same as collect, for continuity).
         self.times.append(elapsed_day)
