@@ -282,17 +282,55 @@ def gpu_vendor() -> str:
     return "unknown"
 
 
+def _detect_backend_pre_init() -> str | None:
+    """Detect the backend without calling ``jax.default_backend()``.
+
+    Mirrors :func:`_detect_gpu_vendor_pre_init`: we cannot afford to
+    initialise the PJRT client (via ``jax.default_backend()`` or
+    ``jax.devices()``) before the GPU-specific XLA scheduler flags are
+    set, otherwise ``XLA_FLAGS`` mutations no-op.  Returns one of
+    ``"tpu"``, ``"gpu"``, ``"metal"``, ``"cpu"``, or ``None`` when no
+    hint is available (caller must fall back to ``get_backend()``).
+    """
+    platforms = os.environ.get("JAX_PLATFORMS", "").lower()
+    if platforms:
+        if platforms.startswith("tpu"):
+            return "tpu"
+        if platforms.startswith(("cuda", "rocm", "gpu")):
+            return "gpu"
+        if platforms.startswith("metal"):
+            return "metal"
+        if platforms.startswith("cpu"):
+            return "cpu"
+    if _detect_gpu_vendor_pre_init() is not None:
+        return "gpu"
+    if os.environ.get("TPU_NAME") or os.environ.get("COLAB_TPU_ADDR"):
+        return "tpu"
+    return None
+
+
 def configure_backend(backend: str | None = None) -> str:
     """Apply backend-specific XLA flags and JAX options.
 
     This should be called **once at startup**, before any JAX computation.
-    If *backend* is ``None`` the current default backend is detected.
+    If *backend* is ``None`` the current default backend is detected
+    from environment hints (``JAX_PLATFORMS``, ``CUDA_VISIBLE_DEVICES``,
+    ``TPU_NAME``).  We deliberately avoid ``jax.default_backend()`` /
+    ``jax.devices()`` until **after** the GPU XLA scheduler flags are
+    set — otherwise PJRT initialises with the wrong flags.
 
     Returns the resolved backend name (lowercase).
     """
     import jax
 
     if backend is None:
+        backend = _detect_backend_pre_init()
+    if backend is None:
+        # No hint at all — fall through to the JAX default.  We still
+        # try to apply NVIDIA flags pre-init in case the heuristic
+        # missed something (env var weirdness).  This branch is the
+        # last resort and will warn from the GPU path below if the
+        # client is already up.
         backend = get_backend()
     backend = backend.lower()
 
