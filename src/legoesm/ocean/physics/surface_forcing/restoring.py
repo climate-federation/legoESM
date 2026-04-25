@@ -39,11 +39,19 @@ def restoring_surface_forcing(
 
     S_star = jnp.full_like(lat, cfg.S_star, dtype=dtype)
 
-    # Restoring tendency in surface layer only
-    dT_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dS_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dT_dt = dT_dt.at[..., 0].set(-(T[..., 0] - T_star) / cfg.tau_T)
-    dS_dt = dS_dt.at[..., 0].set(-(S[..., 0] - S_star) / cfg.tau_S)
+    # Restoring tendency in surface layer only — pad along trailing
+    # axis instead of allocating a fresh full ``(*, nlev)`` zero
+    # buffer + scattering the surface row.  Single Pad HLO op each.
+    nlev = shape_3d[-1]
+    pad_axes_r = ((0, 0),) * (len(shape_3d) - 1)
+    dT_dt = jnp.pad(
+        (-(T[..., 0] - T_star) / cfg.tau_T)[..., None],
+        (*pad_axes_r, (0, nlev - 1)),
+    )
+    dS_dt = jnp.pad(
+        (-(S[..., 0] - S_star) / cfg.tau_S)[..., None],
+        (*pad_axes_r, (0, nlev - 1)),
+    )
 
     du_dt = jnp.zeros(shape_3d, dtype=dtype)
     dv_dt = jnp.zeros(shape_3d, dtype=dtype)
