@@ -841,3 +841,65 @@ W2 should produce \|h−h₀\| < 1 m for a Fortran-faithful integration (the W2 
 **Deliverable.**  Doc entry recording the audit + stability measurement.  No source changes.  No regression sentinels added (FB chain is documented as unstable; locking its current behaviour would be locking-in a non-Fortran-faithful state).
 
 **Process.**  128th iter in iter-752-868 chain.  Two carry-over items from iter-866/867 closed: (1) other gold-file tests audited and clean — iter-710 was unique; (2) FB chain re-tested post iter-864 — still unstable at C36, vortflux sync was not the bottleneck.  Documents the negative results so iter-869+ can target the actual FB instability source rather than re-examining ground already covered.
+
+### Iter-869 — Port d_sw4 cube-vertex KE fix as default-off helper (FB chain only, not yet wired)
+
+iter-868 documented the FB chain as unstable for independent reasons; the iter-864 vortflux fix did not stabilise it.  iter-863 / iter-869 audit identified the **Fortran d_sw4 corner-KE fix** (`sw_core.F90:1442-1465`) as another known-missing piece in the FB chain's `_bgrid_ke_transport` / `_d_sw_native` path.
+
+**Fortran reference** (`sw_core.F90:1442-1465`).  Inside `d_sw4`, gated by `.not. bounded_domain .or. .not. flagstruct%duogrid`:
+
+```fortran
+dt6 = dt / 6.
+if (sw_corner) ke(1, 1) = dt6 * (
+    (ut(1, 1) + ut(1, 0)) * u(1, 1) +
+    (vt(1, 1) + vt(0, 1)) * v(1, 1) +
+    (ut(1, 1) + vt(1, 1)) * u(0, 1) )
+! ... and SE / NE / NW with sign tweaks ...
+```
+
+These four formulas OVERRIDE the regular B-grid corner KE (`0.5 * (ubbtemp*vbbtemp + ubb*vbb)` at line 1018-1019 of `dyn_core.F90`) at the four cube-vertex corners of the face.  The fix uses ut, vt (transport velocities), u, v (D-grid winds), and reaches into halo cells (`ut(1, 0)`, `vt(0, 1)`, `u(0, 1)`).
+
+**Scope of iter-869 port.**  STRUCTURAL ONLY — same pattern as iter-862's d_sw5 corner corrections.  Ported as a pure JAX-functional helper:
+
+```python
+def _apply_legacy_d_sw4_corner_ke_fix(
+        ke, ut, vt, u_d, v_d, dt, bounded_domain: bool):
+    if bounded_domain:
+        return ke
+    ...  # pad ut/vt/u_d/v_d with mode='edge' and apply 4 corner overrides
+```
+
+The helper is NOT yet wired into `_d_sw_native`.  iter-868 demonstrated FB chain unconditional instability (>2.5e+03 m h error at C36 within 3 hours regardless of dt or damp_v); a single corner-KE fix would not move that.  The helper exists for a future Check 4 architectural port that wires the FB-chain fidelity gaps in concert with inter-phase dissipation.
+
+**Halo-input gap** (Codex iter-869 caveat, mirrors iter-862's d_sw5 caveat).  The four corner formulas reference halo cells (e.g., `ut(1, 0)` at j=-1 south halo).  Our Python pads ut/vt/u_d/v_d with `mode='edge'` (same-face extension); Fortran would have proper cross-face halo via `mpp_update_domains`.  At cube vertices the right-hand-side data is incomplete; the structural arithmetic of the fix is Fortran-faithful but its numerical magnitudes differ from Fortran by `|cross_face_value − same_face_value|` at corners.  iter-870+ tracks a cross-face D-grid edge halo helper that would close both iter-862's and iter-869's halo gaps simultaneously.
+
+**Tests.**  New `tests/test_d_sw4_corner_ke_fix_iter869.py` (4 tests):
+1. `test_bounded_domain_returns_unchanged` — Fortran's gate maps to "skip in bounded_domain mode"; helper must return `ke` unchanged on `bounded_domain=True`.
+2. `test_legacy_only_cube_vertex_corners_change` — in legacy mode, ONLY the four cube-vertex corners change; no interior or face-edge cell.
+3. `test_sw_corner_formula_exact_on_constant_inputs` — on `ut=vt=u_d=v_d=1`, the SW formula reduces to `dt6 * (2 + 2 + 2) = dt`; NE matches; SE = NW = `2*dt/3` (because the third term has a sign-cancelling `(ut - vt)` factor).  Verifies SW/SE/NE/NW arithmetic exactly without depending on halo behaviour.
+4. `test_helper_is_not_wired_into_d_sw_native` — AST scan that `_d_sw_native` does NOT call `_apply_legacy_d_sw4_corner_ke_fix`.  This test is a "wire-in marker": when a future iter wires the helper, this test fails and forces an explicit deletion / repurposing.
+
+**Production verification.**  iter-869 adds source code (helper) but does NOT wire it into any production caller.  All 15 W2 LEGACY sentinels and the iter-862 / iter-864 / iter-867 tests still pass.
+
+**What iter-869 DOES show.**
+- The Fortran d_sw4 cube-vertex KE fix is now structurally available in our Python via `_apply_legacy_d_sw4_corner_ke_fix`.
+- Same gating semantics as Fortran (`bounded_domain=True` → skip; `False` → apply).
+- Locality verified: only cube-vertex cells change.
+- Sign / magnitude exact on synthetic constant-1 inputs.
+
+**What iter-869 does NOT establish.**
+- Any production W2 mode-A reduction.  Helper is not wired in.
+- Whether wiring the helper would stabilise the FB chain.  iter-868's measurement implies it would not, but this remains untested.
+- Halo-input numerical fidelity at cube vertices (carried forward from iter-862's pattern; iter-870+ tracks the cross-face halo port).
+
+**Iter-870+ candidates.**
+- Cross-face D-grid edge halo helper for ut/vt/u_d/v_d — closes BOTH iter-862's d_sw5 and iter-869's d_sw4 halo-input gaps simultaneously.
+- Multi-iter Check 4 architectural port (production ke→d_sw6 routing).
+- FB chain c_sw/d_sw inter-phase dissipation port (per iter-868 conclusion: the documented instability cause).
+
+**Deliverable.**
+- `src/legoesm/core/fv3_sw_core.py`: new `_apply_legacy_d_sw4_corner_ke_fix` helper.
+- `tests/test_d_sw4_corner_ke_fix_iter869.py`: 4 unit tests verifying gate, locality, sign/magnitude on constants, and not-yet-wired marker.
+- All 15 W2 LEGACY sentinels and iter-862/iter-864/iter-867 tests still pass.
+
+**Process.**  129th iter in iter-752-869 chain.  Bounded structural Fortran-fidelity port.  Helper available for a future Check 4 / cross-face halo iter; default-off semantics ensure no current behaviour change.

@@ -956,6 +956,135 @@ def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
     return divg_d
 
 
+def _apply_legacy_d_sw4_corner_ke_fix(
+        ke, ut, vt, u_d, v_d, dt,
+        bounded_domain: bool):
+    """Iter-869 corner-KE fix kernel for Fortran d_sw4 legacy path.
+
+    Applies the four cube-vertex KE overrides from Fortran
+    ``sw_core.F90:1442-1465``, gated by Fortran's
+    ``.not. bounded_domain .or. .not. flagstruct%duogrid`` (i.e.,
+    fires UNLESS BOTH bounded_domain AND duogrid are true — for
+    legoESM's global cubed sphere with duogrid we have
+    bounded_domain==duogrid so the gate matches
+    ``not bounded_domain``).
+
+    Fortran formula (1-indexed; SW corner shown):
+
+    ::
+
+        dt6 = dt / 6.
+        if (sw_corner) ke(1, 1) = dt6 * (
+            (ut(1, 1) + ut(1, 0)) * u(1, 1) +
+            (vt(1, 1) + vt(0, 1)) * v(1, 1) +
+            (ut(1, 1) + vt(1, 1)) * u(0, 1) )
+
+    Halo-input scope (Codex iter-869 caveat).  The right-hand side
+    references halo cells (``ut(1, 0)``, ``vt(0, 1)``, ``u(0, 1)``,
+    etc.).  Our Python pads ut/vt/u_d/v_d with ``mode='edge'``
+    (same-face extension) — Fortran would have proper cross-face
+    halo via ``mpp_update_domains``.  This is the same halo-quality
+    gap as iter-862's d_sw5 corner corrections; the structural
+    arithmetic of the fix is Fortran-faithful but the right-hand-side
+    data is incomplete at cube vertices until a cross-face D-grid
+    edge halo helper lands (deferred to iter-870+).
+
+    Pure JAX-functional: returns a new ke array.  Caller is
+    responsible for the duogrid / bounded_domain gate AND the
+    iter-869 opt-in flag.
+
+    Parameters
+    ----------
+    ke : jax.Array, shape (6, n+1, n+1)
+        Corner KE field to update.
+    ut : jax.Array, shape (6, n+1, n)
+        Contravariant transport u at C-grid u-edges.
+    vt : jax.Array, shape (6, n, n+1)
+        Contravariant transport v at C-grid v-edges.
+    u_d : jax.Array, shape (6, n, n+1)
+        D-grid u at v-edge midpoints.
+    v_d : jax.Array, shape (6, n+1, n)
+        D-grid v at u-edge midpoints.
+    dt : float
+        Full time step.
+    bounded_domain : bool
+        From the caller.  If True, the function returns ``ke``
+        unchanged (Fortran skips this fix in pure-duogrid mode).
+
+    Returns
+    -------
+    ke_fixed : jax.Array, shape (6, n+1, n+1)
+        Same shape as input; only the four cube-vertex corners
+        change in the legacy (non-bounded-domain) branch.
+    """
+    if bounded_domain:
+        return ke
+
+    dt6 = dt / 6.0
+
+    # Pad ut, vt with halo=1 mode='edge' so the Fortran formulas at
+    # i=0/j=0/i=n/j=n halo positions can be evaluated.  iter-870+
+    # tracks the cross-face halo upgrade.
+    ut_pad = jnp.pad(ut, [(0, 0), (0, 0), (1, 1)], mode='edge')   # (6, n+1, n+2)
+    vt_pad = jnp.pad(vt, [(0, 0), (1, 1), (0, 0)], mode='edge')   # (6, n+2, n+1)
+    u_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')   # (6, n+2, n+1)
+    v_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')   # (6, n+1, n+2)
+
+    n = ke.shape[1] - 1  # ke is (6, n+1, n+1)
+    # Index translation (Fortran 1-indexed → Python 0-indexed):
+    #   Fortran i=1 (interior west boundary) → Python i=0.
+    #   Fortran i=npx (interior east boundary) → Python i=n.
+    #   Fortran ut at (1, 0) (south halo) → Python ut_pad at (0, 0)
+    #     where ut_pad has axis-2 halo so j_pad=0 is the south halo.
+    #   Fortran u(0, 1) (west halo, j=1) → Python u_pad at (0, 0)
+    #     where u_pad has axis-1 halo so i_pad=0 is the west halo.
+
+    # SW corner: Fortran ke(1,1).  Python: ke[:, 0, 0].
+    sw_value = dt6 * (
+        # (ut(1,1) + ut(1,0)) * u(1,1): ut at i=0 (Fortran 1), j=0
+        # interior + j=-1 halo; u at i=0, j=0.
+        (ut[:, 0, 0] + ut_pad[:, 0, 0]) * u_d[:, 0, 0]
+        # (vt(1,1) + vt(0,1)) * v(1,1): vt at i=0 interior + i=-1
+        # halo, j=0; v at i=0, j=0.
+        + (vt[:, 0, 0] + vt_pad[:, 0, 0]) * v_d[:, 0, 0]
+        # (ut(1,1) + vt(1,1)) * u(0,1): u at west halo i=-1, j=0.
+        + (ut[:, 0, 0] + vt[:, 0, 0]) * u_pad[:, 0, 0]
+    )
+
+    # SE corner: Fortran ke(npx, 1).  Python: ke[:, -1, 0].
+    se_value = dt6 * (
+        # (ut(npx,1) + ut(npx,0)) * u(npx-1,1): ut at i=n, j interior
+        # + halo south.  u(npx-1) = u at i=n-1.
+        (ut[:, -1, 0] + ut_pad[:, -1, 0]) * u_d[:, -1, 0]
+        # (vt(npx,1) + vt(npx-1,1)) * v(npx,1): vt at i=n + i=n-1; v at npx (i=n).
+        + (vt_pad[:, -1, 0] + vt[:, -1, 0]) * v_d[:, -1, 0]
+        # (ut(npx,1) - vt(npx-1,1)) * u(npx,1): u at east halo i=n.
+        # Python u_pad has west-halo at i=0 and east-halo at i=-1
+        # (i.e., n+1).  u(npx, 1) is east halo of u_d → u_pad[:, -1, 0].
+        + (ut[:, -1, 0] - vt[:, -1, 0]) * u_pad[:, -1, 0]
+    )
+
+    # NE corner: Fortran ke(npx, npy).  Python: ke[:, -1, -1].
+    ne_value = dt6 * (
+        (ut[:, -1, -1] + ut[:, -1, -2]) * u_d[:, -1, -1]
+        + (vt[:, -1, -1] + vt[:, -2, -1]) * v_d[:, -1, -1]
+        + (ut[:, -1, -2] + vt[:, -2, -1]) * u_pad[:, -1, -1]
+    )
+
+    # NW corner: Fortran ke(1, npy).  Python: ke[:, 0, -1].
+    nw_value = dt6 * (
+        (ut[:, 0, -1] + ut[:, 0, -2]) * u_d[:, 0, -1]
+        + (vt[:, 0, -1] + vt_pad[:, 0, -1]) * v_d[:, 0, -1]
+        + (ut[:, 0, -2] - vt[:, 0, -1]) * u_pad[:, 0, -1]
+    )
+
+    ke_fixed = ke.at[:, 0, 0].set(sw_value)
+    ke_fixed = ke_fixed.at[:, -1, 0].set(se_value)
+    ke_fixed = ke_fixed.at[:, -1, -1].set(ne_value)
+    ke_fixed = ke_fixed.at[:, 0, -1].set(nw_value)
+    return ke_fixed
+
+
 def _apply_legacy_d_sw5_corner_corrections(field_at_corners, edge_halo_field):
     """Iter-862 corner correction kernel for Fortran d_sw5 legacy path.
 
