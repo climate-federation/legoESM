@@ -2201,3 +2201,47 @@ LOWERING div_damp from canonical (8× base) WORSENS the 1-day v_ll_Linf (0.159 �
 **Deliverable.**  Updated `scripts/diag_iter848_damp_sweep.py` (REFUTED claim removed).  Doc audit of 4 d_sw5 fidelity gaps + inventory of existing `_d_sw5_corner_divergence` helper.  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  109th iter in iter-752-849 chain.  Diagnostic-honesty pass on iter-848 script + first-pass Fortran-fidelity audit of d_sw5 div_damp construction.  Catalogues 4 concrete gaps with file:line references.  Confirms iter-758c's comment that piecemeal fixes don't work and identifies the existing `_d_sw5_corner_divergence` helper as a starting point for a multi-iter architectural port.
+
+### Iter-850 — Documentary cleanup pass + divergence-stencil quantitative comparison
+
+**Part 1** (per iter-849b Priority 1: documentary cleanup over older diag scripts).  Grepped `scripts/` for unconditional overclaim patterns (REFUTED, conclusively, definitively shows, the bug is, fundamentally LIMITED, etc.).  Most flagged hits were properly hypothesis-conditional ("If X then Y") — for example iter-732's "the bug is halo/edge in either …" is gated on a measured condition; iter-825's "cannot be addressed by these known Fortran-like corner fills" is properly scoped to the 3 specific tested fills.  No new genuine overclaims found beyond iter-849b's iter-848 fix.
+
+**Part 2** (per iter-849b Priority 2 Phase 1 reconnaissance: quantitatively compare divergence stencils).  iter-849 identified Check 2 (corner-divergence stencil) as one of 4 d_sw5 fidelity gaps but did not measure the magnitude.  iter-850 ran a direct comparison on W2 IC at t=0:
+
+**Method** (`scripts/diag_iter850_div_stencil_compare.py`).
+- Production: `cgrid_divergence(u_c, v_c, cdgrid)` (cell-centre flux-form) + 4-point centre→corner average.
+- Fortran-faithful: `_d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt, d2_bg=1, dddmp=0, nord=0)` with the constant-coefficient setting `d2_bg=1, dddmp=0` to recover raw corner `delpc` from the returned ke-damping increment as `ke_damping / da_min_c`.
+
+**Result.**
+
+| stencil                        | peak \|div\| (1/s) | peak location (face, i, j) | peak GC-to-vertex |
+|--------------------------------|-------------------:|----------------------------|------------------:|
+| Production cgrid_divergence    | 3.30e−08            | (0, 3, 0) lat=−38.4°, lon=−37.5° | 6.78°  (cube-vertex-adjacent) |
+| Fortran `_d_sw5_corner_divergence` | **1.16e−05**     | (0, 36, 18) lat=0°, lon=45°       | **35.26°** (cube-EDGE equatorial corner) |
+| **Magnitude ratio**            | **352×**            | (Fortran / production)         | —                 |
+
+The two stencils differ by a factor of 352× and peak at COMPLETELY DIFFERENT locations.  Production is small at cube-vertex-adjacent corners; Fortran is ~350× larger but at panel-edge equatorial corners.
+
+**Interpretation (observational only).**
+- W2 IC has zero true divergence (solid-body rotation conserves area/volume), so any non-zero stencil output is numerical truncation error.
+- The 352× magnitude difference reflects different stencil construction: Fortran's edge-by-edge `ptc/vort` formulation with `cosa_v · 0.5(va_below + va_above)` cross-velocity correction is more sensitive to cube-edge geometry than our cell-centre flux-form `cgrid_divergence`.
+- Phase 1 of the d_sw5 port (replace `cgrid_divergence` with `_d_sw5_corner_divergence`) is NOT a cosmetic refactor.  Even with the same downstream `d2_bg`, `dddmp`, etc., the underlying divergence field would be dramatically different.
+
+**What iter-850 DOES show.**
+- Documentary cleanup: no other older diag scripts contain residual unconditional overclaims comparable to iter-848's "REFUTED" (already fixed in iter-849b).  The pattern of conditional `IF X THEN Y` is correctly used throughout the iter-700+ scripts.
+- Stencil comparison: production `cgrid_divergence` and Fortran `_d_sw5_corner_divergence` produce divergence fields that differ by 352× peak magnitude on W2 IC at t=0, with peaks in DIFFERENT locations (cube-vertex-adjacent vs panel-edge-equatorial).
+- Phase 1 of the d_sw5 architectural port would materially change the production behaviour — not a drop-in equivalent.
+
+**What iter-850 does NOT establish.**
+- Whether the Fortran stencil's larger magnitude is the "right" magnitude (i.e., whether Fortran d_sw5 actually reduces W2 mode-A on the cubed sphere).
+- How the Fortran stencil's peak shifts under non-zero true divergence (e.g., W5 mountain).
+- Whether wiring `_d_sw5_corner_divergence` into A-L production with the rest of the d_sw5 application path (Checks 3 + 4) would yield a stable+improved W2 sentinel.
+
+**Iter-851+ candidates.**
+- Phase 1 trial wire-in: temporarily route production div_damp through `_d_sw5_corner_divergence` (with iter-761 canonical scaling) and measure the W2 1-day v_ll_Linf.  If it improves toward 0.16 → 0 m/s with stable integration, the stencil swap alone is significant.  If it destabilises, Checks 3 + 4 (corner corrections + ke-application path) are needed concurrently.
+- Time-history attribution diagnostic (iter-848c carried-over priority).
+- Compare Fortran `_d_sw5_corner_divergence` vs production stencil on W5 mountain IC (non-zero divergence) for additional context.
+
+**Deliverable.**  `scripts/diag_iter850_div_stencil_compare.py` + run output.  Documentary cleanup pass result: only iter-848 had a residual overclaim (already fixed in iter-849b).  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  110th iter in iter-752-850 chain.  Two-part deliverable: (i) cleanup verification — older diag scripts use proper hypothesis-conditional language; iter-848's residual was the only one and is fixed.  (ii) quantitative reconnaissance for the Phase 1 d_sw5 port — Fortran corner-divergence stencil is 352× larger than production at t=0 on W2 IC, located at panel-edge equatorial corners (vs cube-vertex-adjacent for production).  Phase 1 swap would substantially change the production field and is not a cosmetic refactor.
