@@ -520,15 +520,17 @@ def main():
     # capture this sign- and location-dependence, so replace the
     # hardcoded threshold-to-label mapping with an observational
     # summary.
-    print("  Decision note (location-dependent):")
+    print("  Decision note (observation only; no mitigation claim):")
     print(f"    Pure-dynamics peak magnitude   = {pure_peak['peak_abs']:.6e} m s^-2")
     print(f"    Full-term peak magnitude       = {peak['peak_abs']:.6e} m s^-2")
     print(f"    Reference threshold            = {mode_a_threshold:.6e} m s^-2")
-    print(f"    At the pure-dynamics peak, damping partially CANCELS")
-    print(f"    (sum of damp+bfix opposes pure); at the full-term peak")
-    print(f"    damping is UNCANCELLED (pure-dyn near zero, div_damp")
-    print(f"    dominates).  Mitigation is LOCATION-DEPENDENT — uniform")
-    print(f"    damping tuning cannot reduce both peaks at once.")
+    print(f"    At the pure-dynamics peak, damping (div_damp + boundary_fix)")
+    print(f"    opposes the pure-dynamics sign so the net |dv/dt| is smaller;")
+    print(f"    at the full-term peak, pure-dynamics is near zero and damping")
+    print(f"    dominates.  This is an OBSERVATION about the two specific")
+    print(f"    peak points.  Whether a uniform or location-dependent damping")
+    print(f"    change would reduce one or both peaks is NOT established by")
+    print(f"    this diagnostic — a damping-sweep is needed (iter-848+).")
     print()
     print("Balance checks:")
     print(f"  max|dv_ref - project(total_cc)| = {residual_total:.12e}")
