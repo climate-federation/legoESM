@@ -59,23 +59,38 @@ from tests.atmosphere.shallow_water.test_cases.williamson import (
     williamson_test2)
 
 
-# iter-860 reproducibility guard: fail LOUDLY if the source patch
-# this script depends on (phase1_div_swap kwarg) is not present.
-# Setting `_PHASE1_DIV_SWAP_ENABLED` on the module via setattr always
-# succeeds even when the wrapper doesn't read it, so without this
-# guard the script would SILENTLY run production code and produce
-# misleading "phase1=True" rows that are actually production results.
+# iter-860/861 reproducibility guard: fail LOUDLY if EITHER required
+# source patch is missing.  The script depends on TWO patches:
+#  (a) phase1_div_swap kwarg on fv3_sw_tendencies (operators_cdgrid.py).
+#  (b) tendency_fn closure in shallow_water_fv3_cdgrid.py that reads
+#      _PHASE1_DIV_SWAP_ENABLED toggle and forwards phase1_div_swap.
+# iter-860 only checked (a), but a partial re-application of just (a)
+# would PASS the kwarg-check while the wrapper still silently ignores
+# the toggle.  iter-861 adds the wrapper-source check so a partial
+# re-application can't slip through.
 import inspect
+from legoesm.atmosphere.dynamics import shallow_water_fv3_cdgrid as _swfc
 _sig = inspect.signature(fv3_sw_tendencies)
-if "phase1_div_swap" not in _sig.parameters:
+_step_src = inspect.getsource(_swfc.FV3EdgeShallowWaterModel.step)
+_kwarg_present = "phase1_div_swap" in _sig.parameters
+_wrapper_present = "phase1_div_swap=" in _step_src
+if not (_kwarg_present and _wrapper_present):
+    missing = []
+    if not _kwarg_present:
+        missing.append("(a) phase1_div_swap kwarg in fv3_sw_tendencies")
+    if not _wrapper_present:
+        missing.append(
+            "(b) tendency_fn forwarding 'phase1_div_swap=' in "
+            "shallow_water_fv3_cdgrid.py FV3EdgeShallowWaterModel.step")
     raise RuntimeError(
-        "scripts/diag_iter857_phase1_via_modelstep.py requires the "
-        "`phase1_div_swap` source patch in `fv3_sw_tendencies` AND a "
-        "matching toggle-forwarding patch in `shallow_water_fv3_cdgrid.py`."
-        "  Both patches were REVERTED at the end of iter-857 per "
-        "Ralph-loop discipline.  Re-apply them temporarily to re-run.  "
-        "See iter-857 doc entry in docs/fv3_fortran_fidelity_review.md "
-        "for the diff."
+        f"scripts/diag_iter857_phase1_via_modelstep.py requires BOTH "
+        f"source patches.  Missing: {missing}.  Both were REVERTED at "
+        f"the end of iter-857 per Ralph-loop discipline.  Re-apply BOTH "
+        f"temporarily to re-run.  See iter-857 doc entry in "
+        f"docs/fv3_fortran_fidelity_review.md for the diff.  Note: a "
+        f"partial re-application (only one of the two patches) is "
+        f"insufficient because the wrapper must forward the kwarg AND "
+        f"the kwarg must be accepted on fv3_sw_tendencies."
     )
 
 

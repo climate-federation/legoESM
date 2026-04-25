@@ -2728,3 +2728,35 @@ The result: iter-857/858/859 scripts run successfully on the post-revert tree bu
 **Deliverable.**  Updated `scripts/diag_iter856_phase1_proper.py`, `scripts/diag_iter857_phase1_via_modelstep.py`, `scripts/diag_iter858_phase1_1day.py`, `scripts/diag_iter859_phase1_check1.py` with upfront `inspect.signature` guard.  All raise `RuntimeError` immediately on the post-revert HEAD.  No production source-code change.
 
 **Process.**  120th iter in iter-752-860 chain.  Reproducibility-discipline pass: trial-only scripts that depend on temporary source patches MUST fail loudly when those patches are absent, not silently run production code.  iter-857/858/859 scripts updated to enforce this; pattern established for future iters.
+
+### Iter-861 — Reproducibility guard now also verifies wrapper-source patch
+
+Codex stop-time review of iter-860: "The new guards only verify `fv3_sw_tendencies`, not the required `model.step()` forwarding patch."
+
+**The gap.**  iter-860 added `inspect.signature(fv3_sw_tendencies)` checks for the kwarg presence, but iter-857/858/859 actually depend on TWO source patches:
+- (a) `phase1_div_swap` kwarg on `fv3_sw_tendencies` (in `operators_cdgrid.py`).
+- (b) `tendency_fn` closure inside `FV3EdgeShallowWaterModel.step` that reads the `_PHASE1_DIV_SWAP_ENABLED` toggle from the module global and forwards `phase1_div_swap=` into `fv3_sw_tendencies`.
+
+If a future user partially re-applies just (a), iter-860's guard PASSES (kwarg is present), but the wrapper still ignores the toggle.  Setting `ocd._PHASE1_DIV_SWAP_ENABLED = True` would have no effect because the wrapper doesn't read it; the kwarg defaults to `False` at the call site.  The script then runs successfully but produces production results — same silent-wrongness pattern that iter-860 was supposed to prevent.
+
+**Fix.**  iter-861 adds a second check via `inspect.getsource(FV3EdgeShallowWaterModel.step)` that scans for the literal string `phase1_div_swap=` (and for iter-859, also `phase1_check1_dt=`) in the wrapper source.  If either piece is missing, the guard raises `RuntimeError` with explicit `(a) ... (b) ...` enumeration of which patches are missing.
+
+(iter-856 doesn't depend on the wrapper — it has its own SSP-RK3 loop calling `fv3_sw_tendencies` directly — so its guard remains unchanged.)
+
+**Verified.**
+- iter-857/858/859 scripts now correctly identify BOTH missing patches when run on the post-revert HEAD: `RuntimeError: ... Missing: ['(a) phase1_div_swap kwarg in fv3_sw_tendencies', "(b) tendency_fn forwarding 'phase1_div_swap=' in shallow_water_fv3_cdgrid.py FV3EdgeShallowWaterModel.step"]`.
+- Partial re-application (only one of the two patches) would correctly trip the guard with a more specific error message naming just the missing piece.
+
+**What iter-861 DOES show.**
+- iter-860's guard was incomplete: it checked the kwarg signature but not the wrapper-forwarding source.
+- iter-861's strengthened guard checks BOTH and identifies which is missing.
+- Future trial-iters using this pattern should follow iter-861's two-part check.
+
+**What iter-861 does NOT establish.**
+- Any new mechanism information.  This is a doc-honesty / reproducibility-discipline iter.
+
+**Iter-862+ candidates (unchanged from iter-859).**  Halo-fixed `_d_sw5_corner_divergence` (single-iter), Check 4 architectural port (multi-iter), or pivot to other operator audit.
+
+**Deliverable.**  Updated guard in `scripts/diag_iter857_phase1_via_modelstep.py`, `scripts/diag_iter858_phase1_1day.py`, `scripts/diag_iter859_phase1_check1.py`.  iter-856's guard unchanged (doesn't depend on wrapper).  No production source-code change.
+
+**Process.**  121st iter in iter-752-861 chain.  Tightens iter-860's reproducibility guard to also verify the wrapper-source patch.  Two-part check: kwarg signature on `fv3_sw_tendencies` AND `phase1_div_swap=` literal in `FV3EdgeShallowWaterModel.step` source.  Future trial scripts should follow this pattern when they depend on multiple source patches.

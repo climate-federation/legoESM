@@ -53,16 +53,30 @@ from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 
 
-# iter-860 reproducibility guard.  See iter-857 script for context.
+# iter-860/861 reproducibility guard.  See iter-857 script for full
+# context.  Checks BOTH (a) the phase1_div_swap kwarg on
+# fv3_sw_tendencies AND (b) the wrapper toggle-forwarding in
+# shallow_water_fv3_cdgrid.py FV3EdgeShallowWaterModel.step.  Partial
+# re-application of just (a) would silently ignore the toggle.
 import inspect
+from legoesm.atmosphere.dynamics import shallow_water_fv3_cdgrid as _swfc
 _sig = inspect.signature(fv3_sw_tendencies)
-if "phase1_div_swap" not in _sig.parameters:
+_step_src = inspect.getsource(_swfc.FV3EdgeShallowWaterModel.step)
+_kwarg_present = "phase1_div_swap" in _sig.parameters
+_wrapper_present = "phase1_div_swap=" in _step_src
+if not (_kwarg_present and _wrapper_present):
+    missing = []
+    if not _kwarg_present:
+        missing.append("(a) phase1_div_swap kwarg in fv3_sw_tendencies")
+    if not _wrapper_present:
+        missing.append(
+            "(b) tendency_fn forwarding 'phase1_div_swap=' in "
+            "shallow_water_fv3_cdgrid.py FV3EdgeShallowWaterModel.step")
     raise RuntimeError(
-        "scripts/diag_iter858_phase1_1day.py requires the "
-        "`phase1_div_swap` source patch in `fv3_sw_tendencies` AND a "
-        "matching toggle-forwarding patch in `shallow_water_fv3_cdgrid.py`. "
-        "Both were REVERTED at the end of iter-858.  Re-apply to re-run.  "
-        "See iter-858 doc entry for the diff."
+        f"scripts/diag_iter858_phase1_1day.py requires BOTH source "
+        f"patches.  Missing: {missing}.  Both were REVERTED at the end "
+        f"of iter-858.  Re-apply BOTH to re-run.  See iter-858 doc entry "
+        f"for the diff."
     )
 from legoesm.grids.cubed_sphere_cdgrid import (
     cell_centre_angles_from_4edge)

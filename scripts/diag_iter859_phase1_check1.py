@@ -54,18 +54,31 @@ from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 
 
-# iter-860 reproducibility guard.  See iter-857 script for context.
+# iter-860/861 reproducibility guard.  See iter-857 script for full
+# context.  Checks BOTH (a) phase1_div_swap and phase1_check1_dt
+# kwargs on fv3_sw_tendencies AND (b) wrapper toggle-forwarding in
+# shallow_water_fv3_cdgrid.py FV3EdgeShallowWaterModel.step.
 import inspect
+from legoesm.atmosphere.dynamics import shallow_water_fv3_cdgrid as _swfc
 _sig = inspect.signature(fv3_sw_tendencies)
+_step_src = inspect.getsource(_swfc.FV3EdgeShallowWaterModel.step)
 required_kwargs = ("phase1_div_swap", "phase1_check1_dt")
-missing = [k for k in required_kwargs if k not in _sig.parameters]
-if missing:
+missing_kwargs = [k for k in required_kwargs if k not in _sig.parameters]
+required_wrapper = ("phase1_div_swap=", "phase1_check1_dt=")
+missing_wrapper = [w for w in required_wrapper if w not in _step_src]
+if missing_kwargs or missing_wrapper:
+    parts = []
+    if missing_kwargs:
+        parts.append(f"(a) missing kwargs in fv3_sw_tendencies: {missing_kwargs}")
+    if missing_wrapper:
+        parts.append(
+            f"(b) missing forwarding in shallow_water_fv3_cdgrid.py "
+            f"FV3EdgeShallowWaterModel.step: {missing_wrapper}")
     raise RuntimeError(
-        f"scripts/diag_iter859_phase1_check1.py requires source patches "
-        f"in `fv3_sw_tendencies` (missing kwargs: {missing}) AND a matching "
-        f"toggle-forwarding patch in `shallow_water_fv3_cdgrid.py`.  Both "
-        f"were REVERTED at the end of iter-859.  Re-apply to re-run.  See "
-        f"iter-859 doc entry for the diff."
+        f"scripts/diag_iter859_phase1_check1.py requires BOTH source "
+        f"patches.  Missing: {parts}.  Both were REVERTED at the end of "
+        f"iter-859.  Re-apply BOTH to re-run.  See iter-859 doc entry "
+        f"for the diff."
     )
 from legoesm.grids.cubed_sphere_cdgrid import (
     cell_centre_angles_from_4edge)
