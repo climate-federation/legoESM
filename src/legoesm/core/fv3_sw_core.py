@@ -1796,7 +1796,9 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
 # ==============================================================================
 
 def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
-                               div_damp=0.0, hyperdiff_coeff=0.0):
+                               div_damp=0.0, hyperdiff_coeff=0.0,
+                               apply_legacy_d_sw4_corner_ke_fix=False,
+                               apply_legacy_d_sw5_corner_corrections=False):
     """EXPERIMENTAL: One complete FV3 forward-backward time step for shallow water.
 
     Known unstable — produces large errors by step ~50.  Use
@@ -1847,9 +1849,16 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
 
     # Phase 3: D-grid half-step using FV3-native transport operators
     # (NOT Arakawa-Lamb — uses PPM mass transport + KE/vort transport)
+    # Iter-871c: forward iter-869b/iter-871b opt-in flags so a caller
+    # of `fv3_forward_backward_step` can opt into the d_sw4 corner-KE
+    # fix and the d_sw5 corner corrections.  Default-off preserves
+    # bit-identical behaviour for existing callers.
     h_new, u_d_new, v_d_new = _d_sw_native(
         h, u_d, v_d, h_s, uc_new, vc_new, ua, va, cdgrid, dt, g,
-        div_damp=div_damp)
+        div_damp=div_damp,
+        apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
+        apply_legacy_d_sw5_corner_corrections=(
+            apply_legacy_d_sw5_corner_corrections))
 
     return h_new, u_d_new, v_d_new
 
@@ -2328,7 +2337,9 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
 
 def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
                    div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
-                   damp_v=0.0, nord_v=0):
+                   damp_v=0.0, nord_v=0,
+                   apply_legacy_d_sw4_corner_ke_fix=False,
+                   apply_legacy_d_sw5_corner_corrections=False):
     """EXPERIMENTAL: Complete FV3 forward-backward shallow water time step.
 
     Known unstable at C16 (halo quality limitation).
@@ -2373,9 +2384,17 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     vc_new = vc_new + dp_y
 
     # Phase 3: d_sw — full-step D-grid update
+    # Iter-871c: forward iter-869b/iter-871b opt-in flags through this
+    # FB-chain entry point so callers of `fv3_fb_sw_step` (the
+    # canonical FB step function used by `FV3FBShallowWaterModel`)
+    # can opt into the legacy corner fixes.  Default-off preserves
+    # bit-identical behaviour for existing callers.
     h_new, u_d_new, v_d_new = _d_sw_native(
         h, u_d, v_d, h_s, uc_new, vc_new, ua, va, cdgrid, dt, g,
         div_damp=div_damp, d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
-        damp_v=damp_v, nord_v=nord_v)
+        damp_v=damp_v, nord_v=nord_v,
+        apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
+        apply_legacy_d_sw5_corner_corrections=(
+            apply_legacy_d_sw5_corner_corrections))
 
     return h_new, u_d_new, v_d_new

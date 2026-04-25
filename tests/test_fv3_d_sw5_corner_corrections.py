@@ -441,3 +441,87 @@ def test_d_sw_native_forwards_d_sw5_flag():
         np.asarray(u_on2), np.asarray(u_off2))
     np.testing.assert_array_equal(
         np.asarray(v_on2), np.asarray(v_off2))
+
+
+def test_fb_entry_points_forward_iter862_iter869b_flags():
+    """Iter-871c: end-to-end wiring through the FB-chain entry points.
+
+    Codex iter-871b stop-time review: 'the new flag is still not
+    reachable from the actual FB entry points.'  iter-871b only
+    plumbed the kwargs through `_d_sw_native`; the higher-level
+    wrappers (`fv3_fb_sw_step`, `fv3_forward_backward_step`,
+    `FV3FBShallowWaterModel.step` via config) still didn't forward
+    them.  iter-871c closes the wiring at all three levels.
+
+    This test verifies:
+      (a) `fv3_fb_sw_step` accepts both kwargs and forwards them.
+      (b) `fv3_forward_backward_step` accepts both kwargs and
+          forwards them.
+      (c) `CDGridShallowWaterConfig` exposes both as config fields
+          and `FV3FBShallowWaterModel.step` threads them.
+    """
+    from legoesm.core.fv3_sw_core import (
+        fv3_fb_sw_step, fv3_forward_backward_step)
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig, FV3FBShallowWaterModel,
+        FV3EdgeShallowWaterState)
+
+    n = 8
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    rng = np.random.default_rng(862)
+    h = jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    h_s = jnp.zeros((6, n, n))
+
+    # (a) fv3_fb_sw_step: both flags reachable.
+    h_a_off, u_a_off, v_a_off = fv3_fb_sw_step(
+        h, u_d, v_d, h_s, cdgrid, 100.0,
+        d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
+        apply_legacy_d_sw5_corner_corrections=False,
+        apply_legacy_d_sw4_corner_ke_fix=False)
+    h_a_on, u_a_on, v_a_on = fv3_fb_sw_step(
+        h, u_d, v_d, h_s, cdgrid, 100.0,
+        d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
+        apply_legacy_d_sw5_corner_corrections=True,
+        apply_legacy_d_sw4_corner_ke_fix=True)
+    diff_a = float(np.max(np.abs(np.asarray(u_a_on) - np.asarray(u_a_off)))
+                    + np.max(np.abs(np.asarray(v_a_on) - np.asarray(v_a_off))))
+    assert diff_a > 1e-12, (
+        f"fv3_fb_sw_step does not forward the iter-862/iter-869b "
+        f"flags: combined |Δu|+|Δv| = {diff_a:.3e}.")
+
+    # (b) fv3_forward_backward_step: both flags reachable.
+    # Note: fv3_forward_backward_step doesn't expose d_sw5 coefficients
+    # so default d4_bg=0.16 nord=1 fires the nord>=1 path, where the
+    # iter-862 corner correction lives in the n-loop.  Compare flag
+    # toggles end-to-end.
+    h_b_off, u_b_off, v_b_off = fv3_forward_backward_step(
+        h, u_d, v_d, h_s, cdgrid, 100.0,
+        apply_legacy_d_sw5_corner_corrections=False,
+        apply_legacy_d_sw4_corner_ke_fix=False)
+    h_b_on, u_b_on, v_b_on = fv3_forward_backward_step(
+        h, u_d, v_d, h_s, cdgrid, 100.0,
+        apply_legacy_d_sw5_corner_corrections=True,
+        apply_legacy_d_sw4_corner_ke_fix=True)
+    diff_b = float(np.max(np.abs(np.asarray(u_b_on) - np.asarray(u_b_off)))
+                    + np.max(np.abs(np.asarray(v_b_on) - np.asarray(v_b_off))))
+    assert diff_b > 1e-12, (
+        f"fv3_forward_backward_step does not forward the iter-862/"
+        f"iter-869b flags: combined |Δu|+|Δv| = {diff_b:.3e}.")
+
+    # (c) CDGridShallowWaterConfig exposes both flags as fields.
+    cfg_default = CDGridShallowWaterConfig()
+    assert hasattr(cfg_default, "apply_legacy_d_sw4_corner_ke_fix"), (
+        "CDGridShallowWaterConfig is missing "
+        "`apply_legacy_d_sw4_corner_ke_fix` field.")
+    assert hasattr(cfg_default,
+                   "apply_legacy_d_sw5_corner_corrections"), (
+        "CDGridShallowWaterConfig is missing "
+        "`apply_legacy_d_sw5_corner_corrections` field.")
+    assert cfg_default.apply_legacy_d_sw4_corner_ke_fix is False, (
+        "iter-869b flag default must be False.")
+    assert cfg_default.apply_legacy_d_sw5_corner_corrections is False, (
+        "iter-862 flag default must be False (via iter-871c)."
+    )

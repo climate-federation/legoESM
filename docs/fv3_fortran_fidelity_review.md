@@ -1020,7 +1020,13 @@ The script prints concrete numerical values for human inspection, but per the it
 
 **iter-871b — Codex correction: forward iter-862's flag through `_d_sw_native`.**  The original iter-871 framing claimed "both opt-in flags would change FB-chain behaviour"; Codex stop-time review correctly noted this overstates iter-862.  When iter-862 added `apply_legacy_corner_corrections` to `_d_sw5_corner_divergence`, it did NOT plumb the kwarg through the FB-chain wrapper (`_d_sw_native` line 2259 called the inner helper without the flag).  iter-869b plumbed its analogous flag; iter-862 did not.  iter-871b closes that asymmetry by adding `apply_legacy_d_sw5_corner_corrections: bool = False` to `_d_sw_native` and forwarding it.
 
-The iter-871 helper-direct measurement is still valid for the inner helper in isolation; iter-871b adds a new `test_d_sw_native_forwards_d_sw5_flag` that exercises the wrapper-level path on a legacy grid (flag=True changes u/v output) and on a duogrid grid (flag=True is bit-identical to flag=False because the helper's bounded_domain gate short-circuits).  All 15 iter-862/iter-869/iter-871b tests + gold-file tests pass after the wiring fix.
+**iter-871c — Codex correction: forward both flags through ALL FB entry points.**  Codex iter-871b stop-time review: "the new flag is still not reachable from the actual FB entry points."  iter-871b plumbed only through `_d_sw_native`; the higher-level wrappers (`fv3_fb_sw_step`, `fv3_forward_backward_step`, `FV3FBShallowWaterModel.step` via config) still didn't forward.  iter-871c closes the wiring at all three levels:
+- Added `apply_legacy_d_sw4_corner_ke_fix` and `apply_legacy_d_sw5_corner_corrections` kwargs to both `fv3_fb_sw_step` and `fv3_forward_backward_step` with default-False.
+- Added both fields to `CDGridShallowWaterConfig` (default-False).
+- `FV3FBShallowWaterModel.step` now reads the config fields and threads them into `fv3_fb_sw_step`.
+- New `test_fb_entry_points_forward_iter862_iter869b_flags` verifies (a) `fv3_fb_sw_step` reaches both flags, (b) `fv3_forward_backward_step` reaches both flags, (c) `CDGridShallowWaterConfig` exposes both fields with default-False.
+
+All 16 iter-862 / iter-869 / iter-871b/c tests + 15 W2 LEGACY sentinels pass.  Production W2 path (`fv3_sw_tendencies` via `FV3EdgeShallowWaterModel`) is unaffected — production does not invoke the FB chain wrappers.
 
 **What iter-871 DOES show.**
 - The opt-in flags introduced by iter-862 and iter-869b are not no-ops — they would change FB-chain behaviour at cube vertices if turned on.
@@ -1034,4 +1040,4 @@ The iter-871 helper-direct measurement is still valid for the inner helper in is
 
 **Deliverable.**  `scripts/diag_iter871_corner_correction_active.py` + this doc entry recording the qualitative non-zero finding.  No source change.
 
-**Process.**  131st iter in iter-752-871 chain (with iter-871b follow-on).  Closes a natural follow-up from the iter-870 chain — confirms the opt-in flags are impactful (not no-ops) without committing specific magnitudes to the doc.  iter-871b additionally fixes a wiring asymmetry Codex caught: iter-862 had added `apply_legacy_corner_corrections` only on the inner helper, not on the FB-chain wrapper; iter-871b plumbs the kwarg through `_d_sw_native` matching iter-869b's pattern.  Reinforces the default-OFF semantics is correct until the cross-face halo lands.
+**Process.**  131st iter in iter-752-871 chain (with iter-871b and iter-871c follow-ons).  Closes a natural follow-up from the iter-870 chain — confirms the opt-in flags are impactful (not no-ops) without committing specific magnitudes to the doc.  iter-871b/c progressively close the wiring chain Codex caught: iter-862 had added the flag only on the inner helper; iter-871b plumbed `_d_sw_native`; iter-871c plumbed both wrappers (`fv3_fb_sw_step`, `fv3_forward_backward_step`) and the `CDGridShallowWaterConfig` config + `FV3FBShallowWaterModel.step`.  Both opt-in flags now reach all FB entry points.  Reinforces the default-OFF semantics is correct until the cross-face halo lands.

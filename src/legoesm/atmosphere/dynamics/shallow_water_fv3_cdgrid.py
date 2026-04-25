@@ -155,6 +155,20 @@ class CDGridShallowWaterConfig(NamedTuple):
     # pending iter-769 W2 measurement.
     boundary_fix_skip_corners: bool = False
 
+    # Iter-862 / iter-869b / iter-871c: opt-in flags for the legacy
+    # FB-chain corner fixes (Fortran d_sw4 corner-KE override and
+    # d_sw5 cube-vertex corner corrections).  Both default OFF
+    # because the right-hand-side data uses mode='edge' same-face
+    # halo at cube vertices, which iter-870 confirmed differs from
+    # a cross-face proxy.  Until the iter-872+ cross-face D-grid
+    # edge halo helper validates the RHS, both flags should remain
+    # False.  When True (and a legacy non-bounded-domain grid),
+    # they fire from the FB-chain entry points (`fv3_fb_sw_step` →
+    # `_d_sw_native`).  Production `fv3_sw_tendencies` does NOT
+    # invoke either flag (does not call `_d_sw_native`).
+    apply_legacy_d_sw4_corner_ke_fix: bool = False
+    apply_legacy_d_sw5_corner_corrections: bool = False
+
 
 # ==============================================================================
 # Tendencies
@@ -420,6 +434,16 @@ class FV3FBShallowWaterModel:
             nord=self.config.nord,
             damp_v=self.config.damp_v,
             nord_v=nord_v,
+            # Iter-871c: forward iter-869b/iter-871b opt-in flags from
+            # the config so users can enable the FB-chain corner fixes
+            # via `CDGridShallowWaterConfig`.  Default OFF preserves
+            # bit-identical behaviour for existing callers; setting
+            # either flag True at config-time threads through the FB
+            # entry point to the `_d_sw_native` corner-fix sites.
+            apply_legacy_d_sw4_corner_ke_fix=(
+                self.config.apply_legacy_d_sw4_corner_ke_fix),
+            apply_legacy_d_sw5_corner_corrections=(
+                self.config.apply_legacy_d_sw5_corner_corrections),
         )
 
         state_new = FV3EdgeShallowWaterState(
