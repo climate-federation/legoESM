@@ -1250,3 +1250,41 @@ Each flag was added default-OFF for explicit iter-specific reasons (corner-corre
 **Deliverable.**  `tests/test_fortran_fidelity_default_flags_iter873.py` (9 tests) + this doc entry.  No source-code change.
 
 **Process.**  133rd iter in the iter-752-873 chain.  Small Fortran-fidelity safety-net iter: closes the regression-sentinel gap for the 6 documented opt-in flags so a future code change can't silently invalidate the production baseline.  Sized to be addressable in a single iter without touching the production code.
+
+### Iter-874 — Codex iter-873 stop-time fix: put top-level Fortran-fidelity tests on CI execution path
+
+Codex stop-time review on iter-873 flagged that the new sentinel test file (`tests/test_fortran_fidelity_default_flags_iter873.py`) lives at the top level of `tests/`, but the pre-iter-874 CI workflow `.github/workflows/ci.yml` only ran `pytest tests/unit/` and `pytest tests/atmosphere/` — top-level test files were never executed in CI.  This applied to **all** of the iter-862-873 chain's Fortran-fidelity tests:
+
+- `tests/test_da_min_c_fortran_fidelity_iter867.py`
+- `tests/test_d_sw4_corner_ke_fix_iter869.py`
+- `tests/test_fortran_fidelity_default_flags_iter873.py` (iter-873)
+- `tests/test_fv3_boundary_fix_duogrid_gate_iter865.py`
+- `tests/test_fv3_d_sw5_corner_corrections.py`
+- `tests/test_fv3_d_sw5_corner_divergence.py`
+- `tests/test_fv3_dddmp_kwarg_iter872.py`
+- `tests/test_fv3_del6_vt_flux.py`
+- `tests/test_fv3_fv_tp_2d_flux_sync_iter864.py`
+- `tests/test_mpas_conservation.py` (not iter chain but in same path)
+
+70 tests across 10 files would run locally but be invisible to CI gating.  This was a real regression-coverage gap that defeated the entire iter chain's Fortran-fidelity safety-net effort.
+
+**Fix (iter-874).**  Add a new CI job `top-level-fidelity-tests` to `.github/workflows/ci.yml` that explicitly executes `tests/test_*.py` (top-level files only) via shell glob expansion.  The job:
+- Runs after `install-smoke` and `test-collect` (matches `unit-tests` dependencies).
+- Uses `JAX_ENABLE_X64=1` (matches the iter chain's local invocation pattern).
+- Restricted to top-level via shell glob `tests/test_*.py` (`shopt -s nullglob` ensures empty matches fail-fast rather than passing literal patterns to pytest).
+- Lists the matched files in CI output before running so a future audit can see exactly what was covered.
+- 30-minute timeout matches the existing `unit-tests` job.
+
+**Verification.**  Local invocation `pytest tests/test_*.py` finds 10 files / 70 tests, all passing.  CI YAML validated by `yaml.safe_load`.
+
+**What iter-874 DOES show.**
+- The iter-862-873 chain's Fortran-fidelity tests are now on the CI execution path (not just locally runnable).
+- A future regression that flips a default-OFF opt-in flag in `CDGridShallowWaterConfig` (iter-873 sentinel) or breaks the dddmp wiring (iter-872 sentinel) WILL fail CI rather than passing silently.
+
+**What iter-874 does NOT establish.**
+- Coverage of subdirectory tests other than `tests/unit/` and `tests/atmosphere/` (`tests/distributed/`, `tests/integration/`, `tests/stress/`, etc.) — these have separate CI workflows or are deliberately excluded for cost reasons.
+- Coverage of slow tests excluded by the global `addopts = "-m 'not slow'"` filter.
+
+**Deliverable.**  `.github/workflows/ci.yml` adds the `top-level-fidelity-tests` job + this doc entry recording the discovery and fix.
+
+**Process.**  134th iter in the iter-752-874 chain.  Codex stop-time review on iter-873 caught that the entire iter chain's tests were not on CI — a coverage gap that invalidated the regression-sentinel premise.  iter-874 is the smallest correct CI fix that puts the existing tests on the CI execution path without expanding their scope or changing their semantics.
