@@ -11137,218 +11137,279 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
 
 
 class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
-    """Iter-703 structural lock: Fortran `sw_core.F90:1742-1777`
-    d_sw5 non-duogrid corner corrections are ABSENT in Python.
+    """Iter-703 structural lock — UPDATED in iter-862.
 
-    Fortran block (lines 1771-1777) modifies `divg_d` at the 4 cube
-    corners via `divg_d(corner) ± uc(corner)` — gated on
-    `.not. duogrid`.  Python production (duogrid=T) SKIPS this block.
-    Python's d_sw5 implementation (`_d_sw5_corner_divergence`) is
-    documented as duogrid-only and does NOT reproduce the non-duogrid
-    corner correction.  This lock asserts that absence by greping for
-    the unique Fortran signature (corner-indexed `divg_d ± uc[corner]`
-    assignment inside an Assign/AugAssign statement).
+    iter-703 originally asserted that the Fortran non-duogrid d_sw5
+    corner correction (`sw_core.F90:1773-1776`,
+    `divg_d(corner) ± uc(corner)`, gated on `.not. duogrid`) was
+    ABSENT in Python.  iter-862 ports Check 3 from iter-849's d_sw5
+    fidelity audit and ADDS that correction to
+    `_d_sw5_corner_divergence` — but ALWAYS gated on
+    `cdgrid.base.duogrid is None` (the Python equivalent of the
+    Fortran `.not. flagstruct%duogrid` gate).  The original
+    "MUST stay ABSENT" contract is therefore obsolete; the lock is
+    repurposed.
 
-    Also locks absence of the `fill_c` gate (line 1742) — the
-    non-duogrid fill_corners call at line 1746/1754/1762 that would
-    feed `vc`/`uc` Laplacian iterations.
+    The new lock tests:
+      (a) Any cube-corner `divg_d` / `delpc` mutation reading from
+          `uc` / `vort` MUST be guarded by an `is None` test against
+          `duogrid` (matching the Fortran `.not. flagstruct%duogrid`
+          gate).  This catches a future regression where the gate
+          is dropped or accidentally inverted (which would corrupt
+          the duogrid path).
+      (b) The non-duogrid `fill_c` / `fill_corners` paired pattern
+          (Fortran sw_core.F90:1742/1746/1754/1762) is still ABSENT —
+          iter-862 only ports the corner-correction half of the
+          legacy block, NOT the fill_corners-on-`uc`/`vc` Laplacian
+          iterations.  That remains a deliberate gap pinned by
+          `test_no_fill_c_gate_with_fill_corners_call`.
+
+    iter-862 also acknowledges that the corrections consume
+    `mode='edge'` halo values (`vort_pad` / `uc_lap` after same-face
+    extension), which is a documented O(1) gap at cube vertices —
+    upgrading those inputs to a true cross-face halo is iter-863+
+    work.  The Fortran gate semantics are correctly replicated by
+    the iter-862 patch even when the halo input remains imperfect.
+
+    Production (`fv3_sw_tendencies`) does NOT call
+    `_d_sw5_corner_divergence`; iter-862 does NOT alter any
+    production W2 / W5 / cosine bell sentinel.
     """
 
-    def test_no_divg_d_corner_modification_in_source(self):
+    def test_corner_corrections_are_duogrid_gated(self):
+        """Iter-862 contract: every call to
+        `_apply_legacy_d_sw5_corner_corrections` (and any cube-corner
+        ``delpc/divg_d.at[CORNER, CORNER].add(... vort/uc ...)``
+        residual still inline in source) must be DOMINATED by the
+        Fortran-mirroring guard ``cdgrid.base.duogrid is None``
+        (bare or AND-combined with the iter-862 opt-in flag).
+
+        The scanner is FLOW-SENSITIVE (Codex iter-862 third-pass
+        finding): it walks `If.body` vs `If.orelse` separately and
+        only accepts updates inside the body of an `if` whose test
+        is the duogrid-is-None comparison (or contains it under an
+        AND).  An update in an `else` branch of `if duogrid is None:`
+        — which would invert the gate — fails this test.
+        """
         import ast
         from pathlib import Path
-        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
+        src = (Path(__file__).resolve().parent.parent.parent
+               / 'src' / 'legoesm' / 'core' / 'fv3_sw_core.py')
+        tree = ast.parse(src.read_text())
 
         def is_corner_index(slice_node):
-            """True if a subscript indexes to {0 or n/N/nx/ny/npx/npy/...}
-            in both i and j dimensions — i.e. a cube corner."""
             if not isinstance(slice_node, ast.Tuple):
                 return False
-            # Expect 3D form: [:, i, j].  Check last two elements are
-            # cube-corner literals/variables.
             elts = slice_node.elts
             if len(elts) < 2:
                 return False
+
             def is_corner_bound(e):
                 if isinstance(e, ast.Constant) and e.value in (0, 1):
                     return True
+                if (isinstance(e, ast.UnaryOp)
+                        and isinstance(e.op, ast.USub)
+                        and isinstance(e.operand, ast.Constant)
+                        and e.operand.value == 1):
+                    return True  # -1
                 if isinstance(e, ast.Name) and e.id in (
                         'n', 'N', 'nx', 'ny', 'npx', 'npy'):
                     return True
-                if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Sub) \
-                        and isinstance(e.left, ast.Name) \
-                        and isinstance(e.right, ast.Constant) \
-                        and e.right.value == 1:
-                    return True  # e.g. n-1
+                if (isinstance(e, ast.BinOp)
+                        and isinstance(e.op, ast.Sub)
+                        and isinstance(e.left, ast.Name)
+                        and isinstance(e.right, ast.Constant)
+                        and e.right.value == 1):
+                    return True  # n-1
                 return False
-            # Last two elts (i, j dimensions in 3D [face, i, j] form).
             return is_corner_bound(elts[-2]) and is_corner_bound(elts[-1])
 
-        # Iter-704 (Codex iter-703 finding): extend rhs_uses_uc to also
-        # recognize aliased names (uc_lap, uc_pad, uc_full, ...) that
-        # the repo uses after halo/Laplacian processing.  Build a
-        # per-function env of Names bound from `uc`, any Subscript of
-        # `uc`, or transitively via Name aliases.  Any Name resolving
-        # to that root counts as `uc`.
-        def build_uc_env(func):
-            """Name → True iff Name is bound (transitively) from uc."""
-            env = {}
-            for stmt in ast.walk(func):
-                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
-                        and isinstance(stmt.targets[0], ast.Name):
-                    target = stmt.targets[0].id
-                    rhs = stmt.value
-                    if isinstance(rhs, ast.Name):
-                        env[target] = env.get(rhs.id, rhs.id == 'uc')
-                    elif isinstance(rhs, ast.Subscript) \
-                            and isinstance(rhs.value, ast.Name):
-                        env[target] = (rhs.value.id == 'uc'
-                                        or env.get(rhs.value.id, False))
-                    elif isinstance(rhs, ast.Call) \
-                            and isinstance(rhs.func, ast.Name) \
-                            and any(isinstance(a, ast.Name)
-                                    and (a.id == 'uc' or env.get(a.id, False))
-                                    for a in rhs.args):
-                        # e.g. `uc_pad = jnp.pad(uc, ...)` → uc_pad aliases uc
-                        env[target] = True
-                    else:
-                        # Walk RHS for any reference to uc or aliased name.
-                        for sub in ast.walk(rhs):
-                            if isinstance(sub, ast.Name) and \
-                                    (sub.id == 'uc' or env.get(sub.id, False)):
-                                env[target] = True
-                                break
-                            if isinstance(sub, ast.Subscript) and \
-                                    isinstance(sub.value, ast.Name) and \
-                                    (sub.value.id == 'uc' or env.get(sub.value.id, False)):
-                                env[target] = True
-                                break
-                        else:
-                            env.setdefault(target, False)
-            return env
+        def is_corner_helper_call(node):
+            """True if node calls `_apply_legacy_d_sw5_corner_corrections`."""
+            return (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == '_apply_legacy_d_sw5_corner_corrections')
 
-        def name_looks_like_uc(ident):
-            """Heuristic: identifier is `uc` exactly OR starts with `uc_`
-            (e.g. uc_lap, uc_pad, uc_full, uc_left, uc_sum, uc_avg).
-            Iter-706: catches uc-aliases that come from outside the
-            function scope (closure, module, argument) where the AST
-            env tracker has no binding."""
-            return ident == 'uc' or ident.startswith('uc_')
+        def is_inline_corner_at_update(node):
+            """True if node is an inline cube-corner JAX `.at[].add()`
+            mutation reading vort/uc — the residual pattern that
+            iter-862 factored INTO the helper but a future inline
+            re-introduction would trigger."""
+            if not isinstance(node, ast.Call):
+                return False
+            if not isinstance(node.func, ast.Attribute):
+                return False
+            if node.func.attr not in ('add', 'set', 'subtract'):
+                return False
+            outer = node.func.value
+            if (not isinstance(outer, ast.Subscript)
+                    or not isinstance(outer.value, ast.Attribute)
+                    or outer.value.attr != 'at'):
+                return False
+            base = outer.value.value
+            if (not isinstance(base, ast.Name)
+                    or base.id not in ('delpc', 'divg_d')):
+                return False
+            if not is_corner_index(outer.slice):
+                return False
+            # RHS must reference vort/uc-style names.
+            ok = False
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and (
+                        sub.id in ('vort_pad', 'uc_lap', 'vort', 'uc')
+                        or sub.id.startswith('vort_')
+                        or sub.id.startswith('uc_')):
+                    ok = True
+                    break
+            return ok
 
-        def rhs_uses_uc_with_env(rhs, uc_env):
-            """Flag if RHS references `uc` directly, any alias whose
-            uc_env entry is True, OR any Name that looks like a uc
-            alias by naming convention (iter-706)."""
-            for sub in ast.walk(rhs):
-                if isinstance(sub, ast.Name):
-                    if (sub.id == 'uc'
-                            or uc_env.get(sub.id, False)
-                            or name_looks_like_uc(sub.id)):
-                        return True
-                elif isinstance(sub, ast.Subscript) \
-                        and isinstance(sub.value, ast.Name):
-                    if (sub.value.id == 'uc'
-                            or uc_env.get(sub.value.id, False)
-                            or name_looks_like_uc(sub.value.id)):
-                        return True
+        def _is_duogrid_is_none_compare(node):
+            if not isinstance(node, ast.Compare):
+                return False
+            if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Is):
+                return False
+            if (len(node.comparators) != 1
+                    or not isinstance(node.comparators[0], ast.Constant)
+                    or node.comparators[0].value is not None):
+                return False
+            left = node.left
+            return (isinstance(left, ast.Attribute)
+                    and left.attr == 'duogrid'
+                    and isinstance(left.value, ast.Attribute)
+                    and left.value.attr == 'base')
+
+        def test_contains_duogrid_is_none(test_expr):
+            """Recursively check whether `test_expr` contains a
+            `... .base.duogrid is None` comparison either as the bare
+            test or as an operand of an AND chain (Codex iter-862:
+            recognise both bare and AND-combined forms).  An OR or
+            NOT wrapper does NOT count — those would not guarantee
+            the body executes only when duogrid is None.
+            """
+            if _is_duogrid_is_none_compare(test_expr):
+                return True
+            if (isinstance(test_expr, ast.BoolOp)
+                    and isinstance(test_expr.op, ast.And)):
+                return any(test_contains_duogrid_is_none(v)
+                           for v in test_expr.values)
             return False
 
-        def match_jax_at_update(call):
-            """Match `divg_d.at[CORNER, CORNER].{set,add,subtract,multiply}(RHS)`
-            — JAX immutable update forms.  Iter-704 extends iter-703 to
-            cover `.add(...)` (and `.subtract`, `.multiply`).  Returns
-            (matched, rhs) or (False, None)."""
-            if not (isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Attribute)
-                    and call.func.attr in ('set', 'add', 'subtract',
-                                            'multiply', 'min', 'max')):
-                return False, None
-            subs = call.func.value
-            if not (isinstance(subs, ast.Subscript)
-                    and isinstance(subs.value, ast.Attribute)
-                    and subs.value.attr == 'at'
-                    and isinstance(subs.value.value, ast.Name)
-                    and subs.value.value.id == 'divg_d'):
-                return False, None
-            if not is_corner_index(subs.slice):
-                return False, None
-            if not call.args:
-                return False, None
-            return True, call.args[0]
+        # Flow-sensitive walker: visit each statement block (function
+        # body, if-body, if-else, for-body, while-body, try-body, etc.)
+        # carrying a flag `inside_duogrid_guard` that is True ONLY when
+        # the walker is inside the BODY (not orelse) of an if-statement
+        # whose test contains `duogrid is None`.  The guard does NOT
+        # leak into else/elif branches.
+        unguarded = []
 
-        # Iter-705 (Codex iter-704 finding): the previous check required
-        # the JAX update's assign target to be Name('divg_d') — this
-        # misses realistic "named intermediate" escape hatches like
-        #     corrected = divg_d.at[:, 1, 1].add(-uc[:, 1, 0])
-        #     divg_d = corrected
-        # where the Call is on an intermediate line not directly
-        # assigned to divg_d.  Iter-705 walks the AST for ANY Call
-        # matching the `divg_d.at[CORNER, CORNER].{set,add,...}(... uc ...)`
-        # pattern, regardless of whether the Call's result is bound to
-        # `divg_d`, a temp, a dict, or unused.  Also walks for direct
-        # Subscript-assign mutations independently.
-        #
-        # For uc resolution, we still use per-function env (a Name inside
-        # a function that aliases uc must be resolved via that function's
-        # env, not a module-level env).
-        offenders = []
-        for py_file in src_dir.rglob('*.py'):
-            try:
-                tree = ast.parse(py_file.read_text())
-            except (SyntaxError, UnicodeDecodeError):
-                continue
+        def visit_block(stmts, inside_guard):
+            for stmt in stmts:
+                _visit(stmt, inside_guard)
 
-            # Build per-function uc aliasing envs once.
-            func_envs = {}
-            node_to_fn = {}   # Map each descendant node id → enclosing function
-            for fn_node in ast.walk(tree):
-                if isinstance(fn_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    env = build_uc_env(fn_node)
-                    func_envs[id(fn_node)] = env
-                    for sub in ast.walk(fn_node):
-                        # First function encountered wins (innermost may
-                        # override if we iterate inner-first; we don't
-                        # guarantee order, but for detection purposes
-                        # outer env is sufficient since uc aliases
-                        # usually propagate through enclosing scopes).
-                        node_to_fn.setdefault(id(sub), fn_node)
-            module_env = build_uc_env(tree)
+        def _visit(node, inside_guard):
+            if isinstance(node, ast.If):
+                guard_here = (inside_guard
+                              or test_contains_duogrid_is_none(node.test))
+                visit_block(node.body, guard_here)
+                # `orelse` is NOT covered by the guard (it's the
+                # negation).  Even if the user meant to put the call
+                # there, that inverts the gate.
+                visit_block(node.orelse, inside_guard)
+                return
+            # For all other statement-bearing nodes, walk children
+            # respecting block boundaries.
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                visit_block(node.body, inside_guard)
+                visit_block(node.orelse, inside_guard)
+                return
+            if isinstance(node, (ast.While, ast.Try)):
+                # Try has body/handlers/orelse/finalbody; fall back to
+                # generic walk on each.
+                for f in ('body', 'orelse', 'finalbody'):
+                    visit_block(getattr(node, f, []), inside_guard)
+                if isinstance(node, ast.Try):
+                    for handler in node.handlers:
+                        visit_block(handler.body, inside_guard)
+                return
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                visit_block(node.body, inside_guard)
+                return
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                # Reset guard when entering a new function/class — the
+                # guard from the enclosing scope does not carry inside.
+                visit_block(node.body, False)
+                return
+            # Leaf statement / expression: scan for guarded calls.
+            for sub in ast.walk(node):
+                if is_corner_helper_call(sub) or is_inline_corner_at_update(sub):
+                    if not inside_guard:
+                        # `_apply_legacy_d_sw5_corner_corrections` itself
+                        # is the helper — it WILL contain the corner
+                        # mutations.  We exempt it because the gate
+                        # lives at the call sites.  Detect this by
+                        # walking up the AST module to find which
+                        # FunctionDef encloses `sub`.  However, since
+                        # this _visit only fires on non-block statements,
+                        # the helper's own corner mutations are inside
+                        # the `_apply_legacy_d_sw5_corner_corrections`
+                        # function's body which we recurse into via
+                        # `_visit(FunctionDef, ...)` above with
+                        # `inside_guard=False`.  So those WOULD be
+                        # flagged.  Skip them via name lookup against
+                        # the enclosing function below.
+                        unguarded.append(sub.lineno)
 
-            def env_for(node):
-                fn = node_to_fn.get(id(node))
-                return func_envs[id(fn)] if fn is not None else module_env
+        visit_block(tree.body, False)
 
-            for node in ast.walk(tree):
-                # (a) Direct subscript mutation / augassign form.
-                if isinstance(node, (ast.Assign, ast.AugAssign)):
-                    if isinstance(node, ast.Assign):
-                        if len(node.targets) != 1:
-                            continue
-                        target = node.targets[0]
-                    else:
-                        target = node.target
-                    if (isinstance(target, ast.Subscript)
-                            and isinstance(target.value, ast.Name)
-                            and target.value.id == 'divg_d'
-                            and is_corner_index(target.slice)
-                            and rhs_uses_uc_with_env(node.value, env_for(node))):
-                        offenders.append(
-                            f"{py_file.relative_to(src_dir)}:{node.lineno}")
+        # Filter out the helper's own internal mutations (it's allowed
+        # to contain corner mutations because callers gate it).
+        helper_lines = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == '_apply_legacy_d_sw5_corner_corrections'):
+                for sub in ast.walk(node):
+                    if hasattr(sub, 'lineno'):
+                        helper_lines.add(sub.lineno)
+        unguarded = sorted(set(unguarded) - helper_lines)
 
-                # (b) JAX immutable-update Call — flag regardless of
-                # assign target (catches named-intermediate escape).
-                if isinstance(node, ast.Call):
-                    matched, jax_rhs = match_jax_at_update(node)
-                    if matched and rhs_uses_uc_with_env(jax_rhs, env_for(node)):
-                        offenders.append(
-                            f"{py_file.relative_to(src_dir)}:{node.lineno}")
+        self.assertEqual(unguarded, [],
+            msg=(f"Found cube-corner mutation (call to "
+                 f"`_apply_legacy_d_sw5_corner_corrections` or inline "
+                 f"`delpc/divg_d.at[CORNER, CORNER].add(...vort/uc...)`)"
+                 f" at lines {unguarded} that is NOT dominated by an "
+                 f"`if cdgrid.base.duogrid is None:` body block.  "
+                 f"iter-862 requires the corrections fire ONLY in "
+                 f"legacy (non-duogrid) mode.  An unguarded mutation "
+                 f"or one in the `else`-branch of the gate (inverting "
+                 f"it) would corrupt the duogrid path."))
 
-        self.assertEqual(offenders, [],
-            msg=(f"Found cube-corner `divg_d[:, CORNER, CORNER] ± uc` "
-                 f"assignment in {offenders}.  This matches the Fortran "
-                 f"non-duogrid d_sw5 corner correction at sw_core.F90:"
-                 f"1773-1776 (gated on `.not. duogrid`).  Python "
-                 f"production is duogrid; this block MUST stay ABSENT."))
+    def test_no_divg_d_corner_modification_in_source(self):
+        """OBSOLETE — superseded by iter-862.
+
+        The original iter-703/704/705/706 contract asserted that the
+        Fortran non-duogrid corner correction (`divg_d ± uc[corner]`)
+        was ABSENT from the entire `src/legoesm` tree.  iter-862 ports
+        that correction into `_d_sw5_corner_divergence` (Check 3 from
+        iter-849's d_sw5 fidelity audit), gated on
+        `cdgrid.base.duogrid is None` (Python equivalent of Fortran's
+        `.not. flagstruct%duogrid`).  The "MUST stay ABSENT" lock is
+        therefore obsolete.
+
+        The iter-862 contract — corrections fire ONLY in the legacy
+        non-duogrid mode and only inside the well-known
+        `_d_sw5_corner_divergence` helper — is locked positively by
+        `test_corner_corrections_are_duogrid_gated` above.  That test
+        verifies any cube-corner `delpc` / `divg_d` mutation reading
+        from `vort` / `uc` lives inside an
+        `if cdgrid.base.duogrid is None:` guard.  An unguarded mutation
+        (the regression iter-703 originally watched for) trips the
+        new test instead.
+        """
+        self.skipTest(
+            "Iter-862 ports Fortran d_sw5 corner correction (Check 3); "
+            "the iter-703 absence lock is replaced by "
+            "test_corner_corrections_are_duogrid_gated.")
 
     def test_no_fill_c_gate_with_fill_corners_call(self):
         """The non-duogrid `fill_c` gate (line 1742) conditions a

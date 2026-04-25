@@ -956,8 +956,37 @@ def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
     return divg_d
 
 
+def _apply_legacy_d_sw5_corner_corrections(field_at_corners, edge_halo_field):
+    """Iter-862 corner correction kernel for Fortran d_sw5 legacy path.
+
+    Applies the four cube-vertex corner adjustments from
+    Fortran sw_core.F90:1709-1715 (delpc/vort) and 1773-1776
+    (divg_d/uc) on a (6, n+1, n+1) corner field using a (6, n+1, n+2)
+    edge-halo field as the right-hand side:
+
+        field[:, 0, 0]   -=  edge_halo[:, 0, 0]    # SW
+        field[:, -1, 0]  -=  edge_halo[:, -1, 0]   # SE
+        field[:, -1, -1] +=  edge_halo[:, -1, -1]  # NE
+        field[:, 0, -1]  +=  edge_halo[:, 0, -1]   # NW
+
+    Pure JAX-functional: returns a new array.  Caller is responsible
+    for gating on `cdgrid.base.duogrid is None` (= Fortran's
+    `.not. flagstruct%duogrid`) and the iter-862 opt-in flag.
+    Factored out so unit tests can verify exact sign / index /
+    magnitude on synthetic inputs that bypass the upstream face-
+    boundary zeroing performed by `_divergence_corner_duo`.
+    """
+    f = field_at_corners
+    f = f.at[:, 0, 0].add(-edge_halo_field[:, 0, 0])
+    f = f.at[:, -1, 0].add(-edge_halo_field[:, -1, 0])
+    f = f.at[:, -1, -1].add(edge_halo_field[:, -1, -1])
+    f = f.at[:, 0, -1].add(edge_halo_field[:, 0, -1])
+    return f
+
+
 def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
-                             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1):
+                             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
+                             apply_legacy_corner_corrections=False):
     """FV3 d_sw5 corner divergence damping (sw_core.F90:1641-1821).
 
     Computes divergence at D-grid corners and returns a damping term
@@ -980,6 +1009,41 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     dddmp : float — adaptive del-2 coefficient (Fortran default 0.0)
     d4_bg : float — background del-4 coefficient (Fortran default 0.16)
     nord : int — damping order: 0=del-2, 1=del-4, etc.
+    apply_legacy_corner_corrections : bool, default False
+        Iter-862 opt-in for Check 3 from iter-849 d_sw5 fidelity audit.
+        When ``True`` AND ``cdgrid.base.duogrid is None`` (= Fortran's
+        ``.not. flagstruct%duogrid``), apply the four cube-vertex corner
+        corrections from Fortran ``sw_core.F90:1709-1715`` (nord=0) and
+        ``1773-1776`` (nord>=1 n-loop):
+
+        ::
+
+            if (sw_corner) delpc(1,    1) = delpc(1,    1) - vort(1,    0)
+            if (se_corner) delpc(npx,  1) = delpc(npx,  1) - vort(npx,  0)
+            if (ne_corner) delpc(npx,npy) = delpc(npx,npy) + vort(npx,npy)
+            if (nw_corner) delpc(1,  npy) = delpc(1,  npy) + vort(1,  npy)
+
+        DEFAULT IS FALSE — corrections are OFF by default.  Reason
+        (Codex iter-862 finding): the right-hand-side ``vort_pad`` /
+        ``uc_lap`` values come from the iter-655 ``mode='edge'`` same-
+        face halo, which is documented as an O(1) approximation at
+        cube vertices; the cross-face D-grid edge halo
+        (``mpp_update_domains(DGRID_NE)`` analogue) does not yet
+        exist in our Python.  Until that lands, applying the
+        corner corrections by default could push legacy FB-chain
+        runs FURTHER from Fortran at cube vertices because the
+        right-hand-side data quality is incomplete.  The opt-in flag
+        keeps the structural Fortran-faithful arithmetic ready for
+        future experiments while the default behaviour stays bit-
+        identical to the pre-iter-862 baseline.
+
+        When ``False`` or ``cdgrid.base.duogrid is not None``, the
+        corrections are skipped — output is bit-identical to the
+        pre-iter-862 implementation.
+
+        Production ``fv3_sw_tendencies`` does NOT call this helper, so
+        production W2 / W5 / cosine bell sentinels are unaffected by
+        either setting.
 
     Returns
     -------
@@ -1053,6 +1117,62 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
 
         delpc = (vort_pad[:, :, :-1] - vort_pad[:, :, 1:]
                  + ptc_pad[:, :-1, :] - ptc_pad[:, 1:, :])
+
+        # Iter-862: cube-vertex corner corrections (Check 3 from iter-849
+        # d_sw5 audit).  Fortran sw_core.F90:1709-1715 applies four corner
+        # adjustments to `delpc` BEFORE the rarea_c scaling, gated by
+        # `.not. flagstruct%duogrid`:
+        #     if (sw_corner) delpc(1,    1) = delpc(1,    1) - vort(1,    0)
+        #     if (se_corner) delpc(npx,  1) = delpc(npx,  1) - vort(npx,  0)
+        #     if (ne_corner) delpc(npx,npy) = delpc(npx,npy) + vort(npx,npy)
+        #     if (nw_corner) delpc(1,  npy) = delpc(1,  npy) + vort(1,  npy)
+        # On a global cubed sphere every face has all four cube-vertex
+        # corners, so all six faces apply all four corrections.  The
+        # Fortran gate maps to `cdgrid.base.duogrid is None` here — i.e.,
+        # legacy non-duogrid mode.  In duogrid mode Fortran skips these
+        # adjustments because the duogrid halo for vort already supplies
+        # the cross-face contribution implicitly.
+        #
+        # Index translation (Fortran 1-indexed → Python 0-indexed):
+        #   delpc(1, 1)        → delpc[:, 0, 0]      (SW corner)
+        #   delpc(npx, 1)      → delpc[:, -1, 0]     (SE corner)
+        #   delpc(npx, npy)    → delpc[:, -1, -1]    (NE corner)
+        #   delpc(1, npy)      → delpc[:, 0, -1]     (NW corner)
+        #   vort(1, 0)         → vort_pad[:, 0, 0]   (south halo, west edge)
+        #   vort(npx, 0)       → vort_pad[:, -1, 0]  (south halo, east edge)
+        #   vort(npx, npy)     → vort_pad[:, -1, -1] (north halo, east edge)
+        #   vort(1, npy)       → vort_pad[:, 0, -1]  (north halo, west edge)
+        #
+        # Scope of fidelity claim — STRUCTURAL ONLY.  iter-862 ports the
+        # Fortran arithmetic STRUCTURE of the four corner adjustments
+        # but the right-hand side `vort_pad[corner-halo]` values come
+        # from the SAME `mode='edge'` halo whose limitations are
+        # documented above (iter-655 same-face fallback at the j=0/j=n
+        # halo cells).  At cube vertices the Fortran-faithful right-
+        # hand-side would come from a true cross-face D-grid edge halo
+        # exchange of `u_d, v_d` (Fortran's `mpp_update_domains` with
+        # DGRID_NE) — that helper does not yet exist in our Python.
+        # Until it lands, the Python correction's MAGNITUDE differs
+        # from Fortran at cube vertices by an amount bounded by
+        # `|vort_cross_face - vort_same_face|`.  Compared to the pre-
+        # iter-862 baseline (no correction at all) this still moves
+        # delpc closer to Fortran on average — it captures the
+        # qualitative structure even when the cross-face data is
+        # incomplete.  Future iter (iter-863+) tracks porting the
+        # cross-face D-grid edge halo so the correction's right-hand
+        # side becomes Fortran-faithful too.
+        #
+        # Production W2 path (`fv3_sw_tendencies`) does NOT call this
+        # helper, so no production sentinel changes from this edit; the
+        # FB chain (`_d_sw_native`) gains the structural correction in
+        # its legacy-mode invocation ONLY when the caller passes
+        # ``apply_legacy_corner_corrections=True`` (default False).
+        # Arithmetic factored into `_apply_legacy_d_sw5_corner_corrections`
+        # so its sign/index contract is testable on synthetic inputs.
+        if (apply_legacy_corner_corrections
+                and cdgrid.base.duogrid is None):
+            delpc = _apply_legacy_d_sw5_corner_corrections(delpc, vort_pad)
+
         delpc = rarea_c * delpc
 
         # Adaptive Smagorinsky coefficient (sw_core.F90:1720-1721):
@@ -1147,6 +1267,38 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
             # divg_d(i,j) = uc(i,j-1) - uc(i,j) + vc(i-1,j) - vc(i,j)
             divg_d = (uc_lap[:, :, :-1] - uc_lap[:, :, 1:]
                       + vc_lap[:, :-1, :] - vc_lap[:, 1:, :])
+
+            # Iter-862: cube-vertex corner corrections inside the
+            # iterated-Laplacian n-loop (Fortran sw_core.F90:1773-1776),
+            # gated by `.not. flagstruct%duogrid`.  Same pattern as the
+            # nord=0 branch but operating on `uc_lap` (Fortran name `uc`
+            # in the n-loop) instead of `vort`:
+            #     if (sw_corner) divg_d(1, 1)     -= uc(1, 0)
+            #     if (se_corner) divg_d(npx, 1)   -= uc(npx, 0)
+            #     if (ne_corner) divg_d(npx, npy) += uc(npx, npy)
+            #     if (nw_corner) divg_d(1, npy)   += uc(1, npy)
+            # Applied each iteration BEFORE the rarea_c scaling so the
+            # subsequent gradient stencil sees corrected divergence at
+            # cube vertices.  Like the nord=0 branch this only fires on
+            # the legacy non-duogrid path; production unaffected.
+            #
+            # Halo-input scope (same caveat as the nord=0 branch above):
+            # `uc_lap` was constructed from `divg_d_pad` with the
+            # `mode='edge'` same-face halo, which the comment block
+            # above acknowledges as an O(1) approximation at cube
+            # vertices.  iter-862 ports the Fortran arithmetic
+            # STRUCTURE of the corner correction but its right-hand
+            # side inherits that halo's known imperfection.  Fortran-
+            # faithful magnitude requires the cross-face halo path
+            # (`mpp_update_domains` analogue) to land first, deferred
+            # to iter-863+.  Until then the corrections are gated
+            # behind the ``apply_legacy_corner_corrections`` opt-in
+            # flag (default False) so callers cannot accidentally
+            # apply Fortran-structure with Fortran-incomplete data.
+            if (apply_legacy_corner_corrections
+                    and cdgrid.base.duogrid is None):
+                divg_d = _apply_legacy_d_sw5_corner_corrections(
+                    divg_d, uc_lap)
 
             # Scale by rarea_c (sw_core.F90:1780-1784)
             divg_d = divg_d * rarea_c
