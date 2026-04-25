@@ -220,10 +220,14 @@ def ocean_tile_response(
     if not hasattr(alpha_ocean, 'shape') or alpha_ocean.shape != shape:
         alpha_ocean = jnp.broadcast_to(jnp.asarray(alpha_ocean), shape)
 
-    # Surface radiation (only lw_up needed for ocean tile response)
-    _, _, lw_up = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, ocean_sst, alpha_ocean,
-        config.ocean_emissivity,
+    # Surface upward longwave: ε σ T⁴ + (1-ε)·lw_down.  Same direct
+    # expression as the loop-11 ``two_layer_lake.py`` fix — avoids the
+    # full ``surface_radiation_fluxes`` call which recomputes
+    # ``sw_net`` and the LW balance only to discard them.
+    from legoesm import constants as _constants
+    lw_up = (
+        config.ocean_emissivity * _constants.sigma_sb * ocean_sst ** 4
+        + (1.0 - config.ocean_emissivity) * forcing.lw_down
     )
 
     return TileResponse(
