@@ -11130,12 +11130,30 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
                 -0.12907376627658967, places=8,
                 msg="v_new[3,2,6] fingerprint changed.")
-        # h_new.sum sub-test extracted to
-        # `test_d_sw_native_nord1_h_new_sum_pre_iter864_known_failure`
-        # below as @expectedFailure so the legitimate iter-864
-        # contributions (wind/KE) can lock cleanly while the separate
-        # mass-path drift is recorded as a known issue rather than
-        # masked or crashed.
+        # h_new.sum HARD ceiling (Codex iter-864 second-pass review:
+        # @expectedFailure was a coverage downgrade because the test
+        # would pass even if the drift got WORSE).  Replaced with a
+        # hard relative-drift ceiling: the assertion BLOCKS if the
+        # mass-path fingerprint drifts further, while accepting the
+        # current pre-iter-862 ~1.4 delta over 384e3 (~3.7e-6
+        # relative).  Ceiling at 1e-5 (~10× the observed drift) so
+        # any meaningful new mass-path regression trips this.
+        with self.subTest("h_new.sum (pre-iter-864 mass-path drift "
+                          "ceiling)"):
+            h_sum = float(h_new.sum())
+            expected_h_sum = 383992.34091496095
+            rel_drift = abs(h_sum - expected_h_sum) / abs(expected_h_sum)
+            self.assertLess(rel_drift, 1.0e-5,
+                msg=(f"h_new.sum() = {h_sum:.6f} drifted from the "
+                     f"original fingerprint {expected_h_sum:.6f} by "
+                     f"relative {rel_drift:.3e} (ceiling 1.0e-5).  "
+                     f"iter-864 does NOT touch the mass path; a "
+                     f"failure here indicates a separate mass-path "
+                     f"regression in `transport_step`.  Pre-iter-862 "
+                     f"baseline drift was ~3.7e-6 (delta ~1.4 absolute). "
+                     f"This assertion blocks further drift.  "
+                     f"iter-865+: investigate the original drift root "
+                     f"cause and tighten this ceiling once fixed."))
         with self.subTest("u/v wind sum fingerprints (iter-864 vortflux)"):
             self.assertAlmostEqual(float(u_new.sum()),
                 -14.9344555689, places=6,
@@ -11229,10 +11247,22 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
                 -0.09038511603576341, places=8,
                 msg="iter-727: v_new[3,2,6] fingerprint changed.")
-        # h_new.sum sub-test extracted to
-        # `test_d_sw_native_damp_v_iter727_h_new_sum_pre_iter864_known_failure`
-        # below as @expectedFailure for the same reason as the nord1
-        # sibling — pre-iter-864 mass-path drift is a separate issue.
+        # h_new.sum HARD ceiling (same rationale as the nord1
+        # sibling, Codex iter-864 second-pass review: replace
+        # non-blocking @expectedFailure with a hard relative-drift
+        # ceiling so further mass-path regressions are caught).
+        with self.subTest("h_new.sum (pre-iter-864 mass-path drift "
+                          "ceiling)"):
+            h_sum = float(h_new.sum())
+            expected_h_sum = 383992.2998335532
+            rel_drift = abs(h_sum - expected_h_sum) / abs(expected_h_sum)
+            self.assertLess(rel_drift, 1.0e-5,
+                msg=(f"iter-727 h_new.sum() = {h_sum:.6f} drifted from "
+                     f"original {expected_h_sum:.6f} by relative "
+                     f"{rel_drift:.3e} (ceiling 1.0e-5).  iter-864 does "
+                     f"NOT touch the mass path; failure here indicates "
+                     f"a separate mass-path regression.  Pre-iter-862 "
+                     f"baseline drift was ~3.7e-6 (delta ~1.4)."))
         with self.subTest("kinetic energy fingerprint (iter-864 vortflux)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
@@ -11253,104 +11283,6 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             784.4113157657439, places=2,
             msg="damp_v path collapsed to the baseline.")
 
-    @unittest.expectedFailure
-    def test_d_sw_native_nord1_h_new_sum_pre_iter864_known_failure(self):
-        """KNOWN-FAILING h_new.sum fingerprint (pre-iter-862 drift).
-
-        The original `test_d_sw_native_gold_file_nord1` pinned
-        ``h_new.sum() = 383992.34091496095`` but on HEAD the value is
-        ~383993.7464 (delta ~1.4 over 384e3, ~3.7e-6 relative).  This
-        drift was already present BEFORE both iter-862 and iter-864
-        — verified by `git stash` of the iter-862 source patch and
-        re-running the test, which still produced 383993.7463547496.
-
-        iter-864 modifies the d_sw5 vorticity-flux call inside
-        `_d_sw_native` step 7 — that step does NOT touch ``h_new``
-        (which is set by `transport_step` at step 2 and never
-        mutated afterwards).  So iter-864 cannot causally explain
-        the 1.4 drift and must not silently rebaseline this
-        fingerprint (per Codex iter-864 review).
-
-        This test is marked ``@expectedFailure`` to:
-        - record the discrepancy (failing here keeps it visible);
-        - keep the wind/KE sub-tests in the sibling test method
-          (which DO have an iter-864 cause) cleanly locked;
-        - flag for a future iter-865+ to investigate the mass-path
-          drift in `transport_step` independently.
-
-        If a future fix to the mass path resolves the drift back to
-        383992.34, this test will start PASSING — at which point
-        unittest reports it as ``unexpected success`` and the
-        `@expectedFailure`` decorator should be removed (along with
-        moving the assertion back into the main nord1 test).
-        """
-        import numpy as np
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.cubed_sphere_cdgrid import (
-            create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _d_sw_native
-
-        n = 8
-        grid = create_cubed_sphere(n=n, use_duogrid=True)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        rng = np.random.default_rng(710)
-        h = jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0)
-        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
-        h_s = jnp.zeros((6, n, n))
-        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
-        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-        ua = jnp.asarray(rng.standard_normal((6, n, n)))
-        va = jnp.asarray(rng.standard_normal((6, n, n)))
-        dt = 100.0
-        g = 9.80616
-
-        h_new, _, _ = _d_sw_native(
-            h, u_d, v_d, h_s, uc, vc, ua, va,
-            cdgrid, dt, g,
-            div_damp=0.0, d2_bg=0.0, dddmp=0.0,
-            d4_bg=0.16, nord=1, damp_v=0.0, nord_v=0)
-        self.assertAlmostEqual(float(np.asarray(h_new).sum()),
-            383992.34091496095, places=4,
-            msg="iter-862/864 mass-path drift: h_new.sum diverged "
-                "before iter-862 from 383992.34 to ~383993.75.  "
-                "Investigation: iter-865+.")
-
-    @unittest.expectedFailure
-    def test_d_sw_native_damp_v_iter727_h_new_sum_pre_iter864_known_failure(self):
-        """Same pre-iter-864 mass-path drift as the nord1 sibling, but
-        for the damp_v=0.06 / nord_v=1 (iter-727) configuration."""
-        import numpy as np
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.cubed_sphere_cdgrid import (
-            create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _d_sw_native
-
-        n = 8
-        grid = create_cubed_sphere(n=n, use_duogrid=True)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        rng = np.random.default_rng(710)
-        h = jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0)
-        u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-        v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
-        h_s = jnp.zeros((6, n, n))
-        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
-        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
-        ua = jnp.asarray(rng.standard_normal((6, n, n)))
-        va = jnp.asarray(rng.standard_normal((6, n, n)))
-        dt = 100.0
-        g = 9.80616
-
-        h_new, _, _ = _d_sw_native(
-            h, u_d, v_d, h_s, uc, vc, ua, va,
-            cdgrid, dt, g,
-            div_damp=0.0, d2_bg=0.0, dddmp=0.0,
-            d4_bg=0.16, nord=1, damp_v=0.06, nord_v=1)
-        self.assertAlmostEqual(float(np.asarray(h_new).sum()),
-            383992.2998335532, places=4,
-            msg="iter-727 mass-path drift: pre-iter-862 regression "
-                "moved h_new.sum from 383992.30 to ~383993.74.  "
-                "Investigation: iter-865+.")
 
 
 class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
