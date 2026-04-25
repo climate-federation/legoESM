@@ -959,18 +959,13 @@ iter-862 and iter-869b helpers both pad their D-grid edge-midpoint inputs (vort,
 
 Report max |Δ| at the four cube-vertex halo cells of `vort_pad`, normalised by `vort` interior magnitude.
 
-**Result** (W2 LEGACY C36 alpha=0; QUALITATIVE side-by-side, no ratio).
+**Result** (W2 LEGACY C36 alpha=0; QUALITATIVE only — see LIMITATIONS).
 
-```
-vort_interior max                       : 7.59e+06 m^2/s
+The script `scripts/diag_iter870_halo_gap.py` runs end-to-end and reports that, at each of the four cube-vertex halo cells of `vort_pad`, the **same-face `mode='edge'` value** and the **variant-B proxy value** are not equal.  The script prints the two values side-by-side for human inspection, but the absolute magnitudes are *not* quoted in this doc entry: variant B's three documented approximations make even its absolute output an uncertain quantity, and quoting any specific number — even just the proxy's max-absolute-value — would imply a quantitative claim the proxy cannot support.
 
-At each of SW / SE / NE / NW corner halo cell vort_pad[corner]:
-  same-face mode='edge' max|value|      : 3.66e+06
-  proxy variant-B max|value|            : 2.22e+06
-  → values differ
-```
+The doc preserves only the **qualitative** finding: `mode='edge'` halo at cube-vertex positions of D-grid edge fields produces values that differ from any cross-face proxy on the W2 IC.  No number is committed to the doc.
 
-iter-870c explicitly STOPS short of computing a quantitative ratio (e.g., `rel_diff / vort_interior`) because variant B is approximate (see LIMITATIONS).  iter-870 (the original iter) printed and quoted "rel diff vs vort_interior 6.85e-01" / "68 %" as the headline; iter-870b added a caveat alongside the still-quoted ratio; iter-870c removes the ratio entirely from both the script output and the doc.  The two values being printed side-by-side document that the same-face halo and the proxy differ on this input; iter-870c does NOT make any quantitative claim about the size of the Fortran-fidelity gap.
+History of the iter-870 attribution.  iter-870 (the original iter) computed and printed "rel diff vs vort_interior 6.85e-01" / "68 %" as the headline figure-of-merit and quoted it in the doc.  iter-870b added a "LIMITATIONS" caveat but kept the misleading ratio in both print/doc.  iter-870c stripped the ratio AND the per-corner magnitudes from the doc, retaining the script's two-value side-by-side print for human inspection but committing only the qualitative finding to the canonical doc.  iter-870d (this entry) clarifies the attribution chain so future readers see the per-iter evolution.
 
 **LIMITATIONS of variant B (Codex iter-870 stop-time review).**  Variant B is NOT a tight Fortran-faithful reference.  Three approximations:
 
@@ -982,14 +977,14 @@ The combination of (1)+(2)+(3) means variant B's reported magnitudes carry an un
 
 **Conclusion (softened).**  iter-870 confirms QUALITATIVELY that the iter-862 / iter-869b mode='edge' halo at cube-vertex positions differs from a cross-face approximation on a realistic input.  The proxy's approximation error prevents a precise quantitative claim.  Cross-face D-grid edge halo helper remains a worthwhile iter-871+ Fortran-fidelity port — the qualitative gap is real, even if the exact magnitude isn't pinned.  Both iter-862 and iter-869b opt-in flags should remain default-off until a true edge-stagger halo helper validates the corrections' RHS values.
 
-**What iter-870 DOES show (after the Codex correction).**
-- A measurement script that runs end-to-end with documented limitations (`scripts/diag_iter870_halo_gap.py`).
-- Qualitative confirmation that mode='edge' halo at cube-vertex positions of D-grid edge fields produces values that differ from a cross-face proxy on the W2 IC.  The difference exists; its precise magnitude depends on the halo helper that's still pending.
-- The script's `print` block now explicitly flags the proxy approximation in its output so future readers don't take the magnitudes at face value.
+**What iter-870 DOES show (after iter-870b/c/d corrections).**
+- A measurement script that runs end-to-end with documented LIMITATIONS (`scripts/diag_iter870_halo_gap.py`).
+- The qualitative finding: mode='edge' halo at cube-vertex positions of D-grid edge fields produces values that differ from a cross-face proxy on the W2 IC.  The difference exists.
+- The script print and the doc both REFRAIN from quoting any magnitude as a Fortran-fidelity figure — iter-870b's caveat-with-ratio and iter-870c's two-value-side-by-side both retained traces of quantitative claims the proxy cannot support; iter-870d removes the magnitudes from the doc entirely so the canonical record is purely qualitative.
 
 **What iter-870 does NOT establish.**
-- A tight Fortran-fidelity quantitative gap — variant B's three approximations make the headline magnitude an order-of-magnitude proxy, not a precise figure.
-- Whether the gap propagates linearly into the iter-862 / iter-869b corner-correction contributions.  At least the corrections add `±halo[corner]` to the corner field, so SOME proportional propagation exists, but the exact size requires the iter-871+ helper.
+- Any quantitative gap.  Variant B's three approximations preclude pinning even an order-of-magnitude figure with confidence.
+- Whether the gap propagates into the iter-862 / iter-869b corner-correction contributions.  The arithmetic structurally adds `±halo[corner]` to the corner field, so some propagation exists in principle, but its size cannot be quantified from this script.
 - Any production W2 mode-A measurement.  Production does not call these helpers.
 
 **Iter-871+ candidates.**
@@ -998,4 +993,11 @@ The combination of (1)+(2)+(3) means variant B's reported magnitudes carry an un
 
 **Deliverable.**  `scripts/diag_iter870_halo_gap.py` + this doc entry documenting the qualitative side-by-side comparison.  No quantitative gap measurement (proxy is approximate).  No source change.
 
-**Process.**  130th iter in iter-752-870 chain.  Real-data measurement script + qualitative gap confirmation.  After Codex flagged TWO rounds of overstatement: first the original "68 %" headline rested on a malformed cross-face reference (variant B's `u=0`, 2-point edge re-extraction, `mode='edge'` metric halo); iter-870b added a doc/script caveat but kept the misleading ratio in print/doc; iter-870c (this iter) STRIPS the ratio entirely, prints only same-face vs proxy values side-by-side, and explicitly states no quantitative claim is made.  The qualitative finding — that mode='edge' and the proxy differ at cube vertices — survives.  Pinning the exact magnitude needs the iter-871+ edge-stagger halo helper.
+**Process.**  130th iter in iter-752-870 chain (with 870b, 870c, 870d follow-on honesty passes).  Codex stop-time review fired three times in a row to push the framing back from quantitative claims to qualitative ones:
+
+- iter-870 (original): computed and printed "rel diff vs vort_interior 6.85e-01" / "68 %" as the headline figure of merit; quoted the ratio in the doc.
+- iter-870b: added LIMITATIONS sections describing variant B's three approximations (`u_dummy=0`, 2-point cell-centre average for edge re-extraction, `mode='edge'` on metric halo), but KEPT the misleading ratio in both the script print and the doc.
+- iter-870c: stripped the ratio from script print and doc; doc still quoted absolute "3.66e+06 / 2.22e+06" magnitudes side-by-side.
+- iter-870d (this entry): removed even the absolute magnitudes from the doc.  The canonical doc is now purely qualitative ("they differ at cube vertices on the W2 IC"); the script still prints magnitudes for human inspection but with explicit caveats; no number is committed to the doc.
+
+The qualitative finding survives every honesty pass.  Pinning the exact magnitude needs the iter-871+ edge-stagger halo helper.
