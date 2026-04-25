@@ -2199,3 +2199,39 @@ Constants: `s11 = 11/14, s14 = 4/7, s15 = 3/14` (`tp_core.F90:58`).
 - This doc entry.
 
 **Process.**  161st iter.  Codex iter-888 fidelity review identified 3 candidates; #1 was empirically falsified by iter-888's own measurement (skip_corners makes W2 worse), #2 is multi-iter (deferred), #3 is already-disproven (iter-825).  Pivoted to iter-887's deferred s11/s14/s15 gap, which Codex iter-887 ALLOW review hinted was contained-not-multi-iter.  Implementation is single-iter (~85 lines + 5 tests + doc); default-OFF preserves all existing behaviour; future iter can opt FB-chain callers in for measurement.
+
+### Iter-888b — plumb `apply_fortran_xppm_boundary` through FB-chain transport (Codex iter-888 stop-time fix)
+
+**Codex iter-888 stop-time finding.**  c2e8caf added `apply_fortran_xppm_boundary` to `_ppm_1d` only.  `_xppm`/`_yppm`/`fv_tp_2d`/`transport_step`/`_d_sw_native`/`fv3_forward_backward_step`/`fv3_fb_sw_step` did NOT forward the kwarg, so it was unreachable from any FB-chain caller — Codex correctly flagged this as dead code.  iter-888b plumbs the kwarg through every level so FB-chain consumers can opt in.
+
+**Plumbing chain (top-down).**
+
+| Caller | File | Action |
+|--------|------|--------|
+| `fv3_fb_sw_step` | `fv3_sw_core.py:2349` | Add `apply_fortran_xppm_boundary=False` kwarg, forward to `_d_sw_native`. |
+| `fv3_forward_backward_step` | `fv3_sw_core.py:1798` | Same. |
+| `_d_sw_native` | `fv3_sw_core.py:2137` | Add kwarg; forward to `transport_step` (mass) AND to `fv_tp_2d` (vorticity flux at d_sw5). |
+| `transport_step` | `fv_tp_2d.py:783` | Add kwarg, forward to `fv_tp_2d`. |
+| `fv_tp_2d` | `fv_tp_2d.py:513` | Add kwarg, forward to all 4 `_xppm`/`_yppm` calls. |
+| `_xppm`, `_yppm` | `fv_tp_2d.py:445/465` | Add kwarg, forward to `_ppm_1d`. |
+| `_ppm_1d` | `fv_tp_2d.py:89` | Already had kwarg + implementation from iter-888. |
+
+**Default-OFF preservation.**  Every level defaults to `False`.  No production caller passes the kwarg.  The W2 sentinel at C36 reproduces unchanged.  Iter-888b is a pure plumbing iter; the s11/s14/s15 implementation in `_ppm_1d` is unchanged.
+
+**New tests** (added to `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`, 6 new tests, 11 total):
+6. `test_iter888b_xppm_yppm_forward_kwarg` — invokes `_xppm`/`_yppm` with kwarg ON vs OFF on a non-trivial input; asserts the output differs (kwarg actually reaches `_ppm_1d`).
+7. `test_iter888b_fv_tp_2d_forwards_kwarg` — signature check + AST scan: every `_xppm`/`_yppm` call inside `fv_tp_2d` forwards `apply_fortran_xppm_boundary` as a kwarg.
+8. `test_iter888b_transport_step_signature` — signature check.
+9. `test_iter888b_d_sw_native_signature` — signature check.
+10. `test_iter888b_fb_chain_entry_points_signatures` — both FB entry points (`fv3_forward_backward_step`, `fv3_fb_sw_step`) accept the kwarg.
+11. `test_iter888b_fb_chain_end_to_end_kwarg_changes_output` — end-to-end behavioural test on Williamson-2 IC at C12: invoking `fv3_fb_sw_step` with kwarg=True produces materially different output from kwarg=False, proving the kwarg reaches `_ppm_1d` through every plumbing level.
+
+**Verification.**  All 118 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.  iter-888 tests: 11 pass (5 from iter-888 + 6 new from iter-888b).  W2 LEGACY at C36 unchanged: production runs `fv3_sw_tendencies` which is unaffected by the FB-chain plumbing.
+
+**Deliverable.**
+- `src/legoesm/core/fv_tp_2d.py`: `_xppm`/`_yppm`/`fv_tp_2d`/`transport_step` gain the kwarg + forward.
+- `src/legoesm/core/fv3_sw_core.py`: `_d_sw_native`/`fv3_forward_backward_step`/`fv3_fb_sw_step` gain the kwarg + forward.
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: +6 new plumbing/reachability tests (signature + AST + end-to-end behavioural).
+- This doc entry.
+
+**Process.**  162nd iter.  Codex iter-888 stop-time review correctly caught that the iter-888 kwarg was leaf-only dead code from the FB-chain perspective.  iter-888b is the smallest correct fix: plumb the kwarg through every transport-chain function, with a behavioural test that catches a future regression where the kwarg is propagated through signatures but silently dropped before reaching `_ppm_1d`.  Default-OFF preserved at every level; production unchanged.

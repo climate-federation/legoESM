@@ -443,17 +443,26 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 
 
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
-          off_left_d1=None, off_right_d1=None, use_duogrid=False):
+          off_left_d1=None, off_right_d1=None, use_duogrid=False,
+          apply_fortran_xppm_boundary=False):
     """PPM in x with hord=9 Courant-number integration.
 
     FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
     in the standard PPM flux formula.  Boundary non-uniformity is handled
     entirely through bl/br corrections in ``_ppm_1d``, NOT by scaling crx
     (the Fortran does not adjust the Courant number at face boundaries).
+
+    Iter-888b (Codex iter-888 stop-time fix): forwards the
+    ``apply_fortran_xppm_boundary`` kwarg to ``_ppm_1d``.  Pre-iter-888b
+    the kwarg was added to ``_ppm_1d`` only and was unreachable from
+    every existing caller — Codex stop-time review correctly flagged
+    this as dead code.  Default False preserves behaviour.
     """
     bl, br, q_c = _ppm_1d(q_h2, n, off_left, off_right,
                            off_left_d1, off_right_d1,
-                           use_duogrid=use_duogrid)
+                           use_duogrid=use_duogrid,
+                           apply_fortran_xppm_boundary=(
+                               apply_fortran_xppm_boundary))
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
@@ -463,13 +472,20 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
 
 
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
-          off_left_d1=None, off_right_d1=None, use_duogrid=False):
-    """PPM in y with hord=9 Courant-number integration."""
+          off_left_d1=None, off_right_d1=None, use_duogrid=False,
+          apply_fortran_xppm_boundary=False):
+    """PPM in y with hord=9 Courant-number integration.
+
+    Iter-888b: see ``_xppm`` docstring for the
+    ``apply_fortran_xppm_boundary`` plumbing rationale.
+    """
     q_t = jnp.swapaxes(q_h2, 1, 2)
     c_t = jnp.swapaxes(cry, 1, 2)
     bl, br, q_c = _ppm_1d(q_t, n, off_left, off_right,
                            off_left_d1, off_right_d1,
-                           use_duogrid=use_duogrid)
+                           use_duogrid=use_duogrid,
+                           apply_fortran_xppm_boundary=(
+                               apply_fortran_xppm_boundary))
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
     fy_pos = q_L + (1.0 - c_t) * (br_L - c_t * (bl_L + br_L))
@@ -642,7 +658,8 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
 
 def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
              nord=None, damp_c=None, mass=None,
-             apply_cgrid_flux_sync=True):
+             apply_cgrid_flux_sync=True,
+             apply_fortran_xppm_boundary=False):
     """Lin-Rood operator-split 2D transport (Putman & Lin 2007).
 
     Parameters
@@ -665,6 +682,15 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
         Production `fv3_sw_tendencies` does not call this helper, so
         it is unaffected.  `transport_step` and direct callers default
         to ``True``, preserving prior behaviour for the mass-flux call.
+    apply_fortran_xppm_boundary : bool, default False
+        Iter-888b (Codex iter-888 stop-time fix): forwards through to
+        ``_xppm`` / ``_yppm`` / ``_ppm_1d`` so the Fortran s11/s14/s15
+        boundary formula at ``tp_core.F90:614-628`` (left) and
+        ``:632-647`` (right) becomes reachable from FB-chain transport.
+        Pre-iter-888b the kwarg was added at the ``_ppm_1d`` leaf only
+        and was dead code from every transport caller.  Default False
+        preserves prior behaviour bit-for-bit.  See iter-888 doc entry
+        for scope and the uniform-grid simplification rationale.
     """
     n = cdgrid.n
     grid = cdgrid.base
@@ -700,25 +726,29 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
 
     # Pass 1: Y-sweep on q, X-sweep on cross-corrected q_i
     fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
-                use_duogrid=use_duogrid)
+                use_duogrid=use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
     # Proper halo exchange for q_i (required for mass conservation)
     q_i_pad = pad_halo(q_i, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
     fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
-                use_duogrid=use_duogrid)
+                use_duogrid=use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
 
     # Pass 2: X-sweep on q, Y-sweep on cross-corrected q_j
     fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
-                use_duogrid=use_duogrid)
+                use_duogrid=use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
     # Proper halo exchange for q_j (required for mass conservation)
     q_j_pad = pad_halo(q_j, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
-                use_duogrid=use_duogrid)
+                use_duogrid=use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
 
     if mass is not None:
         # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy
@@ -751,7 +781,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
 
 
 def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
-                   nord=None, damp_c=None, **_kwargs):
+                   nord=None, damp_c=None,
+                   apply_fortran_xppm_boundary=False, **_kwargs):
     """Single FV3-style transport step with mass conservation.
 
     Parameters
@@ -768,12 +799,21 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
         smoother the Fortran FB chain applies.  Both default ``None``
         (no damping) to preserve legacy behaviour for existing callers
         that do not pass these kwargs (iter-727).
+    apply_fortran_xppm_boundary : bool, default False
+        Iter-888b (Codex iter-888 stop-time fix): forwards through to
+        ``fv_tp_2d`` so FB-chain transport callers (e.g. ``_d_sw_native``)
+        can opt into Fortran's s11/s14/s15 boundary formulas
+        (tp_core.F90:614-628, :632-647).  Default False preserves
+        prior behaviour bit-for-bit; the kwarg is reachable from
+        ``_d_sw_native`` via this plumbing.
     """
     area = cdgrid.base.area
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
         ut, vt, dt, cdgrid)
     fx, fy = fv_tp_2d(h, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
-                      nord=nord, damp_c=damp_c)
+                      nord=nord, damp_c=damp_c,
+                      apply_fortran_xppm_boundary=(
+                          apply_fortran_xppm_boundary))
     h_new = h + (fx[:, :-1, :] - fx[:, 1:, :]
                  + fy[:, :, :-1] - fy[:, :, 1:]) / area
 

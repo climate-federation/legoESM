@@ -1798,7 +1798,8 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
 def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
                                div_damp=0.0, hyperdiff_coeff=0.0,
                                apply_legacy_d_sw4_corner_ke_fix=False,
-                               apply_legacy_d_sw5_corner_corrections=False):
+                               apply_legacy_d_sw5_corner_corrections=False,
+                               apply_fortran_xppm_boundary=False):
     """EXPERIMENTAL: One complete FV3 forward-backward time step for shallow water.
 
     Known unstable — produces large errors by step ~50.  Use
@@ -1858,7 +1859,8 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
         div_damp=div_damp,
         apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
         apply_legacy_d_sw5_corner_corrections=(
-            apply_legacy_d_sw5_corner_corrections))
+            apply_legacy_d_sw5_corner_corrections),
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
 
     return h_new, u_d_new, v_d_new
 
@@ -2138,7 +2140,8 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                  div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
                  damp_v=0.0, nord_v=0,
                  apply_legacy_d_sw4_corner_ke_fix=False,
-                 apply_legacy_d_sw5_corner_corrections=False):
+                 apply_legacy_d_sw5_corner_corrections=False,
+                 apply_fortran_xppm_boundary=False):
     """D-grid full-step (FV3 d_sw1..d_sw6).
 
     Matches the FV3 dyn_core.F90 d_sw sequence:
@@ -2227,8 +2230,15 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     # code-path names are distinct.  We forward damp_v/nord_v here
     # because the delp call at sw_core.F90:886-887 names them
     # literally.
+    # Iter-888b (Codex iter-888 stop-time fix): forward
+    # `apply_fortran_xppm_boundary` so the FB-chain mass-transport call
+    # is the entry point for the Fortran s11/s14/s15 boundary formula
+    # (tp_core.F90:614-628, :632-647).  Default False — pre-iter-888b
+    # the kwarg was a leaf-level addition unreachable from any caller.
     h_new = transport_step(h, ut, vt, dt, cdgrid,
-                           nord=nord_v, damp_c=damp_v)
+                           nord=nord_v, damp_c=damp_v,
+                           apply_fortran_xppm_boundary=(
+                               apply_fortran_xppm_boundary))
 
     # === 3. Cell-centre vorticity from D-grid circulation ===
     dx_u = cdgrid.dx_edge_y  # (6, n, n+1) — edge length for u_d
@@ -2305,7 +2315,8 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
         ut, vt, dt, cdgrid)
     fx_vort, fy_vort = fv_tp_2d(
         zeta_abs, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
-        apply_cgrid_flux_sync=False)
+        apply_cgrid_flux_sync=False,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
 
     # === 8. D-grid wind update (FV3 d_sw6, sw_core.F90:1935-1944) ===
     # Incremental form equivalent to Fortran replacement formula:
@@ -2339,7 +2350,8 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
                    div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
                    damp_v=0.0, nord_v=0,
                    apply_legacy_d_sw4_corner_ke_fix=False,
-                   apply_legacy_d_sw5_corner_corrections=False):
+                   apply_legacy_d_sw5_corner_corrections=False,
+                   apply_fortran_xppm_boundary=False):
     """EXPERIMENTAL: Complete FV3 forward-backward shallow water time step.
 
     Known unstable at C16 (halo quality limitation).
@@ -2395,6 +2407,7 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
         damp_v=damp_v, nord_v=nord_v,
         apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
         apply_legacy_d_sw5_corner_corrections=(
-            apply_legacy_d_sw5_corner_corrections))
+            apply_legacy_d_sw5_corner_corrections),
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
 
     return h_new, u_d_new, v_d_new

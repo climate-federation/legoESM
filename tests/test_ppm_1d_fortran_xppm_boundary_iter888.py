@@ -314,3 +314,190 @@ def test_iter888_constants_match_fortran():
         f"trip this sentinel — that's intentional, since changing "
         f"from rational form to decimal increases the risk of "
         f"silent precision loss vs the Fortran exact constants.")
+
+
+# ----------------------------------------------------------------------
+# Iter-888b (Codex iter-888 stop-time fix): plumbing-reachability tests.
+#
+# Codex iter-888 stop-time review correctly flagged that the new kwarg
+# was added to ``_ppm_1d`` only and was unreachable from any caller —
+# i.e., it was dead code from the FB-chain transport perspective.
+# iter-888b plumbs the kwarg through ``_xppm`` / ``_yppm`` / ``fv_tp_2d``
+# / ``transport_step`` / ``_d_sw_native`` / ``fv3_forward_backward_step``
+# / ``fv3_fb_sw_step`` so FB-chain callers can opt in.  These tests
+# assert the plumbing is intact at every level.
+# ----------------------------------------------------------------------
+
+
+def test_iter888b_xppm_yppm_forward_kwarg():
+    """``_xppm`` and ``_yppm`` accept and forward
+    ``apply_fortran_xppm_boundary`` to ``_ppm_1d``.  Verified by
+    constructing a simple input that triggers the override and
+    comparing against ``_ppm_1d`` direct invocation.
+    """
+    from legoesm.core.fv_tp_2d import _xppm, _yppm
+
+    n = 12
+    M = 1
+    rng = np.random.default_rng(8888)
+    q = jnp.asarray(rng.normal(size=(6, n + 4, M)))
+    crx = jnp.asarray(rng.normal(size=(6, n + 1, M)) * 0.3)
+
+    # _xppm with kwarg
+    fx_off = _xppm(q, crx, n, use_duogrid=False,
+                   apply_fortran_xppm_boundary=False)
+    fx_on = _xppm(q, crx, n, use_duogrid=False,
+                  apply_fortran_xppm_boundary=True)
+    diff_x = float(np.max(np.abs(np.asarray(fx_on) - np.asarray(fx_off))))
+    assert diff_x > 1e-12, (
+        f"_xppm kwarg is unreachable: fx_on equals fx_off "
+        f"(max diff = {diff_x:.3e}).  The kwarg is silently ignored "
+        f"or not forwarded to _ppm_1d.")
+
+    # _yppm with kwarg
+    cry = jnp.asarray(rng.normal(size=(6, n, n + 1)) * 0.3)
+    q_y = jnp.asarray(rng.normal(size=(6, n, n + 4)))
+    fy_off = _yppm(q_y, cry, n, use_duogrid=False,
+                   apply_fortran_xppm_boundary=False)
+    fy_on = _yppm(q_y, cry, n, use_duogrid=False,
+                  apply_fortran_xppm_boundary=True)
+    diff_y = float(np.max(np.abs(np.asarray(fy_on) - np.asarray(fy_off))))
+    assert diff_y > 1e-12, (
+        f"_yppm kwarg is unreachable: fy_on equals fy_off "
+        f"(max diff = {diff_y:.3e}).  The kwarg is silently ignored "
+        f"or not forwarded to _ppm_1d.")
+
+
+def test_iter888b_fv_tp_2d_forwards_kwarg():
+    """``fv_tp_2d`` accepts and forwards ``apply_fortran_xppm_boundary``
+    to ``_xppm`` / ``_yppm``.  We can't easily verify the bit-equality
+    of fv_tp_2d output without a grid, so this test checks the
+    function signature and AST-asserts the keyword is forwarded.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    from legoesm.core.fv_tp_2d import fv_tp_2d
+
+    sig = inspect.signature(fv_tp_2d)
+    assert "apply_fortran_xppm_boundary" in sig.parameters, (
+        f"fv_tp_2d signature missing apply_fortran_xppm_boundary kwarg.  "
+        f"Got: {list(sig.parameters.keys())}.  Iter-888b expects "
+        f"the kwarg to be plumbed through.")
+    assert sig.parameters["apply_fortran_xppm_boundary"].default is False, (
+        f"fv_tp_2d apply_fortran_xppm_boundary default is "
+        f"{sig.parameters['apply_fortran_xppm_boundary'].default!r}, "
+        f"expected False.")
+
+    # AST: every _xppm/_yppm call inside fv_tp_2d's body must include
+    # apply_fortran_xppm_boundary as a kwarg.
+    src_path = (Path(__file__).resolve().parent.parent
+                / "src" / "legoesm" / "core" / "fv_tp_2d.py")
+    tree = ast.parse(src_path.read_text())
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "fv_tp_2d"),
+        None,
+    )
+    assert fn is not None
+    bad_calls = []
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in ("_xppm", "_yppm")):
+            kw_names = {kw.arg for kw in node.keywords}
+            if "apply_fortran_xppm_boundary" not in kw_names:
+                bad_calls.append(
+                    f"line {node.lineno}: {node.func.id}() missing "
+                    f"apply_fortran_xppm_boundary kwarg; got "
+                    f"{sorted(kw_names)}")
+    assert not bad_calls, (
+        "fv_tp_2d has _xppm/_yppm calls that do NOT forward the "
+        "apply_fortran_xppm_boundary kwarg:\n  "
+        + "\n  ".join(bad_calls))
+
+
+def test_iter888b_transport_step_signature():
+    """``transport_step`` accepts ``apply_fortran_xppm_boundary``
+    and forwards it to ``fv_tp_2d``.
+    """
+    import inspect
+    from legoesm.core.fv_tp_2d import transport_step
+
+    sig = inspect.signature(transport_step)
+    assert "apply_fortran_xppm_boundary" in sig.parameters, (
+        f"transport_step signature missing apply_fortran_xppm_boundary; "
+        f"got {list(sig.parameters.keys())}")
+
+
+def test_iter888b_d_sw_native_signature():
+    """``_d_sw_native`` accepts ``apply_fortran_xppm_boundary``."""
+    import inspect
+    from legoesm.core.fv3_sw_core import _d_sw_native
+
+    sig = inspect.signature(_d_sw_native)
+    assert "apply_fortran_xppm_boundary" in sig.parameters, (
+        f"_d_sw_native signature missing apply_fortran_xppm_boundary; "
+        f"got {list(sig.parameters.keys())}")
+
+
+def test_iter888b_fb_chain_entry_points_signatures():
+    """The FB-chain top entry points ``fv3_forward_backward_step`` and
+    ``fv3_fb_sw_step`` accept ``apply_fortran_xppm_boundary``.
+    """
+    import inspect
+    from legoesm.core.fv3_sw_core import (
+        fv3_forward_backward_step, fv3_fb_sw_step)
+
+    for fn in (fv3_forward_backward_step, fv3_fb_sw_step):
+        sig = inspect.signature(fn)
+        assert "apply_fortran_xppm_boundary" in sig.parameters, (
+            f"{fn.__name__} signature missing apply_fortran_xppm_boundary; "
+            f"got {list(sig.parameters.keys())}")
+
+
+def test_iter888b_fb_chain_end_to_end_kwarg_changes_output():
+    """End-to-end behavioural check: invoking the FB chain
+    ``fv3_fb_sw_step`` with ``apply_fortran_xppm_boundary=True`` must
+    produce DIFFERENT output from the default-OFF call.  This catches
+    a regression where the kwarg is propagated through every signature
+    but silently dropped before reaching ``_ppm_1d``.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.core.fv3_sw_core import fv3_fb_sw_step
+    import sys
+    sys.path.insert(0, "tests")
+    from test_cases.williamson import williamson_test2
+
+    n = 12  # small grid for fast test
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
+    sw = williamson_test2(grid)
+    u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+    from legoesm.grids.cubed_sphere_cdgrid import (
+        create_cubed_sphere_cdgrid)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+    v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+
+    dt = 60.0  # small timestep for stability
+    h_off, ud_off, vd_off = fv3_fb_sw_step(
+        sw.h.data, u_d, v_d, sw.h_s.data, cdgrid, dt,
+        apply_fortran_xppm_boundary=False)
+    h_on, ud_on, vd_on = fv3_fb_sw_step(
+        sw.h.data, u_d, v_d, sw.h_s.data, cdgrid, dt,
+        apply_fortran_xppm_boundary=True)
+
+    diff_h = float(np.max(np.abs(np.asarray(h_on) - np.asarray(h_off))))
+    diff_u = float(np.max(np.abs(np.asarray(ud_on) - np.asarray(ud_off))))
+    diff_v = float(np.max(np.abs(np.asarray(vd_on) - np.asarray(vd_off))))
+    max_diff = max(diff_h, diff_u, diff_v)
+
+    assert max_diff > 1e-12, (
+        f"fv3_fb_sw_step end-to-end output bit-identical for "
+        f"apply_fortran_xppm_boundary in (False, True): "
+        f"max diff h={diff_h:.3e}, u_d={diff_u:.3e}, v_d={diff_v:.3e}.  "
+        f"The kwarg is plumbed through signatures but silently dropped "
+        f"somewhere — check that every transport_step / fv_tp_2d / "
+        f"_xppm / _yppm / _ppm_1d call site forwards the kwarg.")
