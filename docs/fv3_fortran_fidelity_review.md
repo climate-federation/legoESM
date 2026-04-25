@@ -1375,3 +1375,30 @@ This matches CW84 eq. 1.10 and Fortran `pert_ppm` exactly.
 **Deliverable.**  Source fix in `src/legoesm/core/operators_cdgrid.py` (`_ppm_reconstruct_1d`) + 4 regression tests in `tests/test_ppm_overshoot_constraint_iter878.py` + this doc entry.
 
 **Process.**  138th iter in the iter-752-878 chain.  Concrete operator-level Fortran-fidelity correction: pre-iter-878 PPM had a documented algorithm bug (CW84 eq. 1.10 violation) that pre-existed the entire iter chain; iter-878 closes it.  The W2 sentinel was unaffected because the bug only fires when the constraint is reached; on smooth flows the constraint rarely activates.
+
+### Iter-879 — PPM limiter cross-implementation consistency sentinel
+
+**Discovery.**  iter-878's audit found that the repo has TWO PPM monotonicity limiter implementations:
+
+1. `_ppm_reconstruct_1d` in `src/legoesm/core/operators_cdgrid.py` — used by `cgrid_mass_flux_divergence` (production W2 path) and `_cgrid_fct_fluxes_2d` (FCT tracer advection).
+2. `_ppm_limit` in `src/legoesm/core/operators_fv.py` — used by `fv_flux_divergence` (alternative FV transport).
+
+**Pre-iter-878 state.**  `_ppm_limit` (operators_fv.py:101-136) had the CW84-faithful overshoot constraint `over_L = dm * d6 > dm**2`.  `_ppm_reconstruct_1d` (operators_cdgrid.py:86-183) had the buggy `cond_L = q_6 > dq * dq` (missing `dq` factor).  The two implementations silently disagreed on inputs that triggered the constraint.
+
+**Post-iter-878 + iter-879 state.**  iter-878 brought `_ppm_reconstruct_1d` into agreement with `_ppm_limit` and CW84.  iter-879 adds a regression sentinel that catches future divergence between the two implementations:
+
+- `test_iter879_ppm_reconstruct_1d_matches_ppm_limit` (parametrized over 3 random seeds): both limiters MUST produce bit-identical output (rtol 1e-12) on the same pre-computed `(q, q_L, q_R)` inputs.
+- `test_iter879_both_limiters_use_signed_product`: AST scan asserting BOTH source files contain a signed `q_6 * dq` (or `d6 * dm`) product in the overshoot conditions.  A regression in EITHER file that reintroduces the missing-product form will fail this test.
+
+**Verification.**  All 4 iter-879 tests pass.  The cross-implementation consistency holds across smooth, sharp-gradient, and wide-range inputs.
+
+**What iter-879 DOES show.**
+- The repo's two PPM monotonicity limiter implementations now agree to 1e-12 relative tolerance.
+- A future regression in either source file that diverges from CW84 / Fortran `pert_ppm` will fail the sentinel.
+
+**What iter-879 does NOT establish.**
+- Coverage of the FB-chain `_pert_ppm` in `fv_tp_2d.py` (which is the third PPM-constraint implementation in the codebase, used by `_ppm_1d` for the FB-chain transport).  That implementation has been Fortran-faithful since its introduction; the iter-878 audit incidentally verified it's algebraically equivalent to the iter-879-aligned form, but iter-879's sentinel is scoped to the production-relevant pair.  Future iter could extend the sentinel to include `_pert_ppm` for completeness.
+
+**Deliverable.**  `tests/test_ppm_limiter_consistency_iter879.py` (4 tests) + this doc entry.  No source code change.
+
+**Process.**  139th iter in the iter-752-879 chain.  Small Fortran-fidelity safety-net iter that locks the iter-878 fix at the cross-module level.  Sized as a sentinel-only iter — no behavioural impact, but prevents the iter-878 regression class from recurring silently.
