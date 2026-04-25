@@ -158,29 +158,32 @@ def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
 
     sigma_dot_inner = fractional_sigma * D_total - cumsum_div
 
-    shape_2d = div_3d.shape[:-1]
-    zero_top = jnp.zeros((*shape_2d, 1))
-    sigma_dot = jnp.concatenate([zero_top, sigma_dot_inner], axis=-1)
+    # Pad with one zero on the top boundary; XLA lowers ``jnp.pad`` to
+    # a single ``Pad`` HLO op instead of materialising a fresh
+    # ``jnp.zeros`` buffer and concatenating.
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 0),)
+    sigma_dot = jnp.pad(sigma_dot_inner, pad_axes)
     sigma_dot = sigma_dot.at[..., -1].set(0.0)
     return sigma_dot
 
 
 def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
-    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes."""
+    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes.
+
+    Top/bottom boundaries pad with a zero gradient; using ``jnp.pad``
+    instead of ``concatenate([jnp.zeros(...), ...])`` lowers to a
+    single XLA ``Pad`` op rather than allocating a fresh zero buffer
+    every RHS evaluation (this helper runs 3-5× per outer step under
+    SSP-RK).
+    """
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
     dsigma_bwd = sigma_coord.dsigma_full
     df_bwd = jnp.diff(field, axis=-1)
+    diff = df_bwd / dsigma_bwd
 
-    grad_bwd = jnp.concatenate(
-        [jnp.zeros((*field.shape[:-1], 1)),
-         df_bwd / dsigma_bwd],
-        axis=-1,
-    )
-    grad_fwd = jnp.concatenate(
-        [df_bwd / dsigma_bwd,
-         jnp.zeros((*field.shape[:-1], 1))],
-        axis=-1,
-    )
+    pad_axes = ((0, 0),) * (diff.ndim - 1)
+    grad_bwd = jnp.pad(diff, (*pad_axes, (1, 0)))
+    grad_fwd = jnp.pad(diff, (*pad_axes, (0, 1)))
 
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
     return -sigma_dot_full * grad

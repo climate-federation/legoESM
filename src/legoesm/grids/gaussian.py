@@ -689,6 +689,12 @@ def _sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     """Inverse SH transform using derivative Legendre Hnm (instead of Pnm).
 
     Produces the theta-derivative of the field on the grid.
+
+    Mirrors the ``sh_synthesis`` rewrite that replaced a scatter-add
+    (``zeros + at[:, ms].add``) with ``jax.ops.segment_sum``.  On GPU
+    the scatter-add falls back to atomic ops and is 5–20× slower than
+    a segment sum; this path is hit every spectral PE step via
+    ``uv_from_vordiv``.
     """
     n_lat = grid.n_lat
     n_lon = grid.n_lon
@@ -696,8 +702,11 @@ def _sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     ms = grid.ms
 
     contributions = grid.Hnm * coeffs[None, :]
-    f_m = jnp.zeros((n_lat, n_max + 1), dtype=jnp.complex128)
-    f_m = f_m.at[:, ms].add(contributions)
+    f_m = jax.ops.segment_sum(
+        contributions.T,
+        ms,
+        num_segments=n_max + 1,
+    ).T  # (n_lat, n_max + 1)
 
     f_hat_full = jnp.zeros((n_lat, n_lon // 2 + 1), dtype=jnp.complex128)
     f_hat_full = f_hat_full.at[:, :n_max + 1].set(f_m)
