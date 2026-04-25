@@ -114,6 +114,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--C-leith-modified", action="store_true",
         help="Use modified Leith |∇(ζ + Q_d)| rather than plain |∇ζ| "
              "(MPAS only; default: False)")
+    p.add_argument(
+        "--barotropic-div-damp", type=float, default=None,
+        help=(
+            "Dimensionless divergence damping on barotropic velocity. "
+            "Targets grid-scale compressible modes directly without "
+            "smearing momentum.  Knob #3 in the issue #213 hi-res SOM "
+            "Eady investigation recipe."
+        ))
     return p
 
 
@@ -182,6 +190,8 @@ def main():
         config.C_LEITH_OVERRIDE = args.C_leith
     if args.C_leith_modified:
         config.C_LEITH_MODIFIED_OVERRIDE = True
+    if args.barotropic_div_damp is not None:
+        config.BAROTROPIC_DIV_DAMP_OVERRIDE = args.barotropic_div_damp
 
     tests = filter_tests(TEST_MATRIX, args)
 

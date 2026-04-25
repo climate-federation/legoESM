@@ -45,6 +45,10 @@ PV_ALPHA_OVERRIDE = None   # Set via --pv-alpha CLI flag (MPAS only; used when p
 K_ZETA_BIH_OVERRIDE = None # Set via --K-zeta-bih CLI flag (MPAS only; m⁴/s; biharmonic ζ damping)
 C_LEITH_OVERRIDE = None    # Set via --C-leith CLI flag (MPAS only; flow-dependent biharmonic viscosity)
 C_LEITH_MODIFIED_OVERRIDE = None  # Set via --C-leith-modified CLI flag (uses |∇(ζ+Q_d)| instead of |∇ζ|)
+BAROTROPIC_DIV_DAMP_OVERRIDE = None  # Set via --barotropic-div-damp CLI flag
+                                     # (dimensionless; targets grid-scale
+                                     # compressible modes — see issue #213
+                                     # hi-res Eady SOM investigation recipe)
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"

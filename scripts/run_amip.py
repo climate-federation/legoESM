@@ -88,7 +88,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["standard", "analytical", "none"])
     parser.add_argument("--ozone-forcing", type=str, default="inline",
                         choices=["inline", "external", "off"])
-    parser.add_argument("--ozone-file", type=str, default="")
+    parser.add_argument(
+        "--ozone-file", type=str, default="",
+        help=(
+            "Path to an ozone NetCDF/Zarr file (CMIP6 input4MIPs "
+            "compatible).  Auto-detects variable name among "
+            "'ozone'/'vmro3'/'o3'/'O3'/'tro3'.  Files with 12 months of "
+            "data are interpreted as a monthly climatology and looped "
+            "every year; files with >12 months (e.g. the CMIP6 "
+            "1850–2014 vmro3 file with 1980 months and "
+            "'months since 1850-01-01' CF units) are interpreted as an "
+            "interannually varying dataset and dispatched through "
+            "OzoneConfig.start_year to preserve the real time evolution."
+        ))
     parser.add_argument("--ghg-forcing", type=str, default="constant",
                         choices=["constant", "external"])
     parser.add_argument("--ghg-file", type=str, default="",
@@ -96,19 +108,51 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Solar
     parser.add_argument("--solar-source", type=str, default="constant",
-                        choices=["constant", "file", "spectral_file"])
+                        choices=["constant", "file", "spectral_file"],
+                        help=(
+                            "'constant' uses --co2/ch4/n2o/solar-S_0 "
+                            "defaults; 'file' reads a 1-D TSI time series; "
+                            "'spectral_file' additionally reads a 2-D "
+                            "(time, band|gpt) spectrum."
+                        ))
     parser.add_argument("--solar-file", type=str, default="")
-    parser.add_argument("--solar-tsi-var", type=str, default="tsi",
-                        help="Variable name for TSI in solar forcing file (e.g. 'TSI' for CMIP6 files)")
-    parser.add_argument("--solar-spectral-var", type=str,
-                        default="solar_fraction_by_gpt")
+    parser.add_argument(
+        "--solar-tsi-var", type=str, default="tsi",
+        help=(
+            "Variable name for broadband TSI [W/m^2] in the solar forcing "
+            "file.  Case-insensitive: the canonical MPI-M CMIP6 spectral-"
+            "solar file stores 'TSI', the in-tree default is 'tsi' — "
+            "either works."
+        ))
+    parser.add_argument(
+        "--solar-spectral-var", type=str,
+        default="solar_fraction_by_gpt",
+        help=(
+            "Variable name for the normalised spectrum in "
+            "--solar-source=spectral_file.  Case-insensitive lookup.  "
+            "If the loaded axis has <50 entries (e.g. CMIP6 'SSI_frac' "
+            "with 14 solar bands) it is expanded to per-g-point weights "
+            "(112 g-points on the default RRTMG-SW table) so the "
+            "radiation solver receives one weight per g-point."
+        ))
 
     # Aerosol
     parser.add_argument("--aerosol-forcing", type=str, default="off",
                         choices=["off", "external"])
     parser.add_argument("--aerosol-file", type=str, default="")
     parser.add_argument("--aerosol-reference-aod", type=float, default=0.03)
-    parser.add_argument("--volcanic-aerosol-file", type=str, default="")
+    parser.add_argument(
+        "--volcanic-aerosol-file", type=str, default="",
+        help=(
+            "Path to a volcanic stratospheric aerosol file.  Auto-"
+            "dispatched by file schema: the legacy 'aod(time, lat)' "
+            "convention is read directly, while the CMIP6 / MPI-M files "
+            "'bc_aeropt_cmip6_volc_lw_b16_sw_b14_<year>.nc' storing "
+            "per-band 'ext_sun(solar_bands, lat, altitude, month)' in "
+            "[1/km] are integrated over altitude (∫ ext·dz) and averaged "
+            "over SW bands to produce a representative single-band AOD "
+            "(matching the Kinne multi-band aerosol convention)."
+        ))
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
 
     # Subgrid physics

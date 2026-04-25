@@ -33,6 +33,12 @@ from legoesm.core.operators_voronoi import (
 )
 from legoesm.ocean.vertical import compute_layer_thickness
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
+from legoesm.ocean.dynamics.barotropic_common import (
+    bebt_blend,
+    compute_filter_weights,
+    maxvel_clip,
+)
+from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
 
 
 def barotropic_substeps_mpas(
@@ -170,14 +176,10 @@ def barotropic_substeps_mpas(
     _maxvel = config.maxvel_barotropic
     use_maxvel = _maxvel > 0.0
 
-    _i = jnp.arange(n_substeps, dtype=eta.dtype)
     use_cosine_filter = config.barotropic_time_filter == "cosine"
-    if use_cosine_filter:
-        w_filter = 1.0 + jnp.cos(
-            2.0 * jnp.pi * (_i - 0.5 * n_substeps) / n_substeps)
-    else:
-        w_filter = jnp.ones(n_substeps, dtype=eta.dtype)
-    w_total = jnp.sum(w_filter)
+    w_filter, w_total = compute_filter_weights(
+        n_substeps, eta.dtype, use_cosine=use_cosine_filter,
+    )
 
     # Accumulators for time-averaged barotropic fields (issues #145, #149, #102).
     Hu_sum = jnp.zeros_like(u_bar)
@@ -206,7 +208,7 @@ def barotropic_substeps_mpas(
 
         # Backward: update u_bar using new eta
         # BEBT: blend new/old eta for semi-implicit PGF (#205)
-        eta_pgf = (1.0 - bebt) * eta_next + bebt * eta_c
+        eta_pgf = bebt_blend(eta_next, eta_c, bebt)
         eta_filled = _fill_land_cells_mpas(eta_pgf, mask)
         grad_eta = gradient_edge(eta_filled, mesh)
 
@@ -249,12 +251,13 @@ def barotropic_substeps_mpas(
         # Bottom drag on barotropic velocity: -r * U_bar / H_total.
         # r is in [m/s] — resolution-independent bottom stress.
         if config.bottom_drag_r > 0:
-            drag = 1.0 - dt_baro * config.bottom_drag_r / jnp.maximum(H_e_c, 1e-10)
-            u_bar_next = u_bar_next * drag
+            u_bar_next = u_bar_next * implicit_bottom_drag_factor(
+                dt_baro, config.bottom_drag_r, H_e_c,
+            )
 
         # MAXVEL clipping
         if use_maxvel:
-            u_bar_next = jnp.clip(u_bar_next, -_maxvel, _maxvel)
+            u_bar_next = maxvel_clip(u_bar_next, _maxvel)
 
         # Barotropic Laplacian diffusion on eta (flux-form: conservative).
         # Uses div(nu_edge * grad(eta)) instead of nu_cell * div(grad(eta))

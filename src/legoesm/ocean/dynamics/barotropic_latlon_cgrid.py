@@ -27,6 +27,12 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
 )
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
+from legoesm.ocean.dynamics.barotropic_common import (
+    bebt_blend,
+    compute_filter_weights,
+    maxvel_clip,
+)
+from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
 
 
 def _depth_average_to_faces(
@@ -222,13 +228,9 @@ def barotropic_substeps_latlon_cgrid(
     # Transport accumulators (Hu, Hv) MUST remain box-filtered for exact
     # volume conservation with the discrete continuity equation.
     use_cosine_filter = config.barotropic_time_filter == "cosine"
-    _i = jnp.arange(n_substeps, dtype=eta.dtype)
-    if use_cosine_filter:
-        w_filter = 1.0 + jnp.cos(
-            2.0 * jnp.pi * (_i - 0.5 * n_substeps) / n_substeps)
-    else:
-        w_filter = jnp.ones(n_substeps, dtype=eta.dtype)
-    w_total = jnp.sum(w_filter)
+    w_filter, w_total = compute_filter_weights(
+        n_substeps, eta.dtype, use_cosine=use_cosine_filter,
+    )
 
     # BEBT semi-implicit parameter and MAXVEL clipping
     bebt = config.bebt
@@ -286,7 +288,7 @@ def barotropic_substeps_latlon_cgrid(
         # Blend new and old eta for the pressure gradient to damp fast
         # barotropic gravity waves.  bebt=0 → forward-backward (current),
         # bebt=0.2 → MOM6 default semi-implicit.
-        eta_pgf = (1.0 - bebt) * eta_new + bebt * eta_c
+        eta_pgf = bebt_blend(eta_new, eta_c, bebt)
         deta_dx = gradient_x_cgrid(eta_pgf, grid).astype(eta.dtype)
         deta_dy = gradient_y_cgrid(eta_pgf, grid).astype(eta.dtype)
 
@@ -336,15 +338,17 @@ def barotropic_substeps_latlon_cgrid(
 
         # Bottom drag: -r * U_bar / H_total
         if config.bottom_drag_r > 0:
-            drag_u = 1.0 - dt_s * config.bottom_drag_r / jnp.maximum(H_u, 1e-10)
-            drag_v = 1.0 - dt_s * config.bottom_drag_r / jnp.maximum(H_v, 1e-10)
-            U_bar_new = U_bar_new * drag_u
-            V_bar_new = V_bar_new * drag_v
+            U_bar_new = U_bar_new * implicit_bottom_drag_factor(
+                dt_s, config.bottom_drag_r, H_u,
+            )
+            V_bar_new = V_bar_new * implicit_bottom_drag_factor(
+                dt_s, config.bottom_drag_r, H_v,
+            )
 
         # --- MAXVEL clipping: prevent runaway velocities ---
         if use_maxvel:
-            U_bar_new = jnp.clip(U_bar_new, -_maxvel, _maxvel)
-            V_bar_new = jnp.clip(V_bar_new, -_maxvel, _maxvel)
+            U_bar_new = maxvel_clip(U_bar_new, _maxvel)
+            V_bar_new = maxvel_clip(V_bar_new, _maxvel)
 
         # Optional Laplacian damping on eta (flux-form: conservative)
         if config.barotropic_diffusion_alpha > 0.0:
