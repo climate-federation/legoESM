@@ -15,19 +15,17 @@ Boundary conditions:
 - Longitude: periodic (u wraps at j=0 and j=n_lon)
 - Latitude: solid wall at poles (v=0 at i=0 and i=n_lat)
 
-Vector-invariant status (see issue #160)
-----------------------------------------
-The momentum equation is split into baroclinic (this file) and
-barotropic (barotropic_latlon_cgrid.py) parts. The baroclinic step
-computes the vorticity flux ζ×u using the *perturbation* velocity u'
-(see section 7b below) and the barotropic solver is purely linear in
-U_bar. The cross terms ζ(u')·V_bar and ζ(U_bar)·v' are therefore
-missing from the total momentum budget. This is not equivalent to
-integrating (f+ζ_total)·u_total and has no known conservation
-property — despite the historical "Sadourny" label, the 2-point ζ /
-4-point raw-v' stencil at section 7b is not Sadourny EC, Sadourny EN,
-Arakawa-Hsu, or Arakawa-Lamb. Fixing this requires a MOM6-style
-slow-forcing coupling; tracked in issue #160.
+Vector-invariant momentum advection (issue #160, fixed)
+-------------------------------------------------------
+The nonlinear momentum advection uses TOTAL velocity throughout:
+  KE = 0.5*(u² + v²)   (total velocity, section 6)
+  q  = ζ(u_total) / h  (potential vorticity at vertices, section 7b)
+  PV flux = q̄ · F      (Sadourny EC: PV times mass flux)
+Planetary Coriolis (f × u) is handled separately in the step function
+via forward-backward (Matsuno) stepping. The depth-mean of the full
+nonlinear tendency enters the barotropic solver as F_slow; the
+perturbation (full − depth-mean) is applied to 3D velocity. This is
+the MOM6-style slow-forcing split that closes issue #160.
 
 References
 ----------
@@ -267,43 +265,43 @@ def _neumann_fill_cgrid(
 # =============================================================================
 
 def _weno_zeta_at_u(
-    zeta: jnp.ndarray,
-    v_prime: jnp.ndarray,
+    phi: jnp.ndarray,
+    v_smooth: jnp.ndarray,
     v_at_u: jnp.ndarray,
     order: int = 5,
 ) -> jnp.ndarray:
-    """WENO reconstruction of vorticity from vertices to u-faces (meridional).
+    """WENO reconstruction of a vertex field to u-faces (meridional).
 
-    Uses the {ζ; v} smoothness-optimised stencil (Silvestri et al. 2024):
+    Uses the {φ; v} smoothness-optimised stencil (Silvestri et al. 2024):
     smoothness indicators computed from v (smoother velocity field),
-    reconstruction applied to ζ (noisier vorticity field).
+    reconstruction applied to φ (e.g. potential vorticity q = ζ/h).
 
     Parameters
     ----------
-    zeta : (n_lat+1, n_lon+1, nlev) at vertices.
-    v_prime : (n_lat+1, n_lon, nlev) at v-faces (smoothness field).
+    phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
+    v_smooth : (n_lat+1, n_lon, nlev) at v-faces (smoothness field).
     v_at_u : (n_lat, n_lon+1, nlev) at u-faces (upwinding velocity).
     order : {5, 7}
 
     Returns
     -------
-    zeta_at_u : (n_lat, n_lon+1, nlev)
+    phi_at_u : (n_lat, n_lon+1, nlev)
     """
     from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 
     hw = {5: 3, 7: 4}[order]
-    n_lat = zeta.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
+    n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
 
     # Interpolate v to vertex longitudes.
     # v: (n_lat+1, n_lon) at cell-center lons → vertex: (n_lat+1, n_lon+1) at interface lons
-    v_w = jnp.roll(v_prime, 1, axis=1)  # v[:, (j-1) % n_lon, :]
-    v_at_vtx = 0.5 * (v_w + v_prime)    # (n_lat+1, n_lon, nlev)
+    v_w = jnp.roll(v_smooth, 1, axis=1)  # v[:, (j-1) % n_lon, :]
+    v_at_vtx = 0.5 * (v_w + v_smooth)    # (n_lat+1, n_lon, nlev)
     v_at_vtx = jnp.concatenate(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
     # Ghost cells (Neumann BC) along axis 0 for the meridional stencil
-    zeta_ext = jnp.concatenate(
-        [zeta[:1, :, :]] * hw + [zeta] + [zeta[-1:, :, :]] * hw, axis=0)
+    phi_ext = jnp.concatenate(
+        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
     v_ext = jnp.concatenate(
         [v_at_vtx[:1, :, :]] * hw + [v_at_vtx] + [v_at_vtx[-1:, :, :]] * hw,
         axis=0)
@@ -312,75 +310,75 @@ def _weno_zeta_at_u(
     # Face i (i=0..n_lat-1) is between vertex i and vertex i+1.
     # WENO at I+1/2 where I=i: needs vertices i-hw+1 .. i+hw.
     # In ext: indices (i-hw+1)+hw .. (i+hw)+hw = i+1 .. i+2*hw.
-    phi_stencil = [zeta_ext[1 + j: n_lat + 1 + j, :, :]
+    phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
                    for j in range(2 * hw)]
     psi_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
                    for j in range(2 * hw)]
 
-    zeta_plus, zeta_minus = weno_reconstruct_split(
+    phi_plus, phi_minus = weno_reconstruct_split(
         phi_stencil, psi_stencil, order=order)
 
     # Upwind: v > 0 ⟹ flow from south → use left-biased (f_plus)
-    return weno_upwind(zeta_plus, zeta_minus, v_at_u)
+    return weno_upwind(phi_plus, phi_minus, v_at_u)
 
 
 def _weno_zeta_at_v(
-    zeta: jnp.ndarray,
-    u_prime: jnp.ndarray,
+    phi: jnp.ndarray,
+    u_smooth: jnp.ndarray,
     u_at_v: jnp.ndarray,
     order: int = 5,
 ) -> jnp.ndarray:
-    """WENO reconstruction of vorticity from vertices to v-faces (zonal).
+    """WENO reconstruction of a vertex field to v-faces (zonal).
 
-    Uses the {ζ; u} smoothness-optimised stencil.
+    Uses the {φ; u} smoothness-optimised stencil.
     Periodic in longitude.
 
     Parameters
     ----------
-    zeta : (n_lat+1, n_lon+1, nlev) at vertices.
-    u_prime : (n_lat, n_lon+1, nlev) at u-faces (smoothness field).
+    phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
+    u_smooth : (n_lat, n_lon+1, nlev) at u-faces (smoothness field).
     u_at_v : (n_lat+1, n_lon, nlev) at v-faces (upwinding velocity).
     order : {5, 7}
 
     Returns
     -------
-    zeta_at_v : (n_lat+1, n_lon, nlev)
+    phi_at_v : (n_lat+1, n_lon, nlev)
     """
     from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 
     hw = {5: 3, 7: 4}[order]
-    n_lon = zeta.shape[1] - 1   # n_lon+1 vertices → n_lon v-face longitudes
-    nlev = zeta.shape[2]
+    n_lon = phi.shape[1] - 1   # n_lon+1 vertices → n_lon v-face longitudes
+    nlev = phi.shape[2]
 
     # Interpolate u to vertex latitudes.
     # u: (n_lat, n_lon+1) at cell-center lats → vertex: (n_lat+1, n_lon+1) at interface lats
-    n_lon_u = u_prime.shape[1]  # n_lon+1
-    zero_u = jnp.zeros((1, n_lon_u, nlev), dtype=u_prime.dtype)
+    n_lon_u = u_smooth.shape[1]  # n_lon+1
+    zero_u = jnp.zeros((1, n_lon_u, nlev), dtype=u_smooth.dtype)
     u_ext_lat = jnp.concatenate(
-        [zero_u, u_prime, zero_u], axis=0)    # (n_lat+2, n_lon+1, nlev)
+        [zero_u, u_smooth, zero_u], axis=0)    # (n_lat+2, n_lon+1, nlev)
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] +
                        u_ext_lat[1:, :, :])   # (n_lat+1, n_lon+1, nlev)
 
-    # Both ζ and u_at_vtx are (n_lat+1, n_lon+1, nlev).
+    # Both φ and u_at_vtx are (n_lat+1, n_lon+1, nlev).
     # Reconstruct along axis 1 (longitude), periodic.
     # Use the first n_lon columns (column n_lon == column 0).
-    zeta_core = zeta[:, :n_lon, :]    # (n_lat+1, n_lon, nlev)
+    phi_core = phi[:, :n_lon, :]      # (n_lat+1, n_lon, nlev)
     u_core = u_at_vtx[:, :n_lon, :]   # (n_lat+1, n_lon, nlev)
 
     # Face j (j=0..n_lon-1) between vertex j and vertex j+1.
     # WENO at I+1/2 where I=j: needs vertices j-hw+1 .. j+hw.
     # Roll offsets hw-1, hw-2, ..., -(hw) place vertex j-hw+1 .. j+hw
     # at position j in the rolled array.
-    phi_stencil = [jnp.roll(zeta_core, hw - 1 - j, axis=1)
+    phi_stencil = [jnp.roll(phi_core, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
     psi_stencil = [jnp.roll(u_core, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
 
-    zeta_plus, zeta_minus = weno_reconstruct_split(
+    phi_plus, phi_minus = weno_reconstruct_split(
         phi_stencil, psi_stencil, order=order)
 
     # Upwind: u > 0 ⟹ flow from west → use left-biased (f_plus)
-    return weno_upwind(zeta_plus, zeta_minus, u_at_v)
+    return weno_upwind(phi_plus, phi_minus, u_at_v)
 
 
 def _flux_form_vertical_momentum_advection_weno(
@@ -563,10 +561,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # by sqrt(1 + (f*dt)^2) per step and blows up within ~1 day at
     # high latitudes.
 
-    # --- 6. Kinetic energy gradient (from perturbation velocity) ---
-    up_cell = 0.5 * (u_prime[:, :-1, :] + u_prime[:, 1:, :])
-    vp_cell = 0.5 * (v_prime[:-1, :, :] + v_prime[1:, :, :])
-    KE = 0.5 * (up_cell**2 + vp_cell**2)
+    # --- 6. Kinetic energy gradient (from TOTAL velocity, #160) ---
+    # MOM6-style: KE from total u, not perturbation u'. The depth-mean
+    # contribution enters F_slow for the barotropic solver; the
+    # perturbation is applied to 3D velocity in the step function.
+    u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+    v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+    KE = 0.5 * (u_cell**2 + v_cell**2)
 
     KE_t = jnp.moveaxis(KE, -1, 0)
     dKE_dx_t = jax.vmap(lambda ke2d: gradient_x_cgrid(ke2d, grid))(KE_t)
@@ -578,65 +579,88 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     du_dt = -dKE_dx - dp_dx / rho_0
     dv_dt = -dKE_dy - dp_dy / rho_0
 
-    # --- 7b. Relative vorticity flux (issue #153, revisited in #160) ---
-    # Vector-invariant advection: (u·∇)u = ∇(KE) + ζ × u.
-    # Coriolis (f × u) is handled in the step function.
+    # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
+    # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
+    # Coriolis (f × u) handled in step function; here only ζ × u.
     #
-    # NOTE (#160): This stencil is NOT a standard Sadourny/Arakawa-Hsu/
-    # Arakawa-Lamb vorticity-flux scheme, despite the original commit
-    # message. Specifically:
-    #   (1) ζ is computed from the *perturbation* velocity u', not the
-    #       total velocity, so the cross terms ζ(u')·V_bar and
-    #       ζ(U_bar)·v' are missing.
-    #   (2) zeta_at_u below is a 2-point meridional average (Sadourny
-    #       uses a 4-point PV stencil on corner-centred q = (f+ζ)/h).
-    #   (3) v_at_u uses raw v' rather than the thickness-weighted mass
-    #       flux h·v' required for discrete energy consistency with
-    #       the continuity equation.
-    # Net effect: the term is O(Δx²)-consistent but conserves neither
-    # energy nor enstrophy on the perturbation subsystem. Replacing it
-    # cleanly requires the MOM6-style slow-forcing refactor tracked
-    # in #160.
+    # MOM6-style total-velocity Sadourny EC scheme:
+    #   ζ  = curl(u_total, v_total)    — total velocity vorticity
+    #   q  = ζ / h_vertex              — potential vorticity at vertices
+    #   Fv = h·v at v-faces            — thickness-weighted mass flux
+    #   du/dt += q̄ · Fv_at_u           — PV times mass flux at u-faces
+    #   dv/dt -= q̄ · Fu_at_v           — PV times mass flux at v-faces
+    # Energy conserving (Sadourny 1975) and uses total velocity, fixing
+    # the perturbation-only cross-term errors from issue #160.
     #
-    # When momentum_advection == "weno5" or "weno7", the 2-point ζ
-    # average is replaced by a WENO-Z reconstruction with {ζ; v/u}
-    # smoothness-optimised stencil (Silvestri et al. 2024).  This is
-    # an orthogonal improvement from the #160 velocity-definition fix.
-    zeta = curl_vertex_cgrid(u_prime, v_prime, grid)  # (n_lat+1, n_lon+1, nlev)
+    # When momentum_advection == "weno5"/"weno7", the 2-point q average
+    # is replaced by WENO-Z reconstruction (Silvestri et al. 2024).
 
-    # Average v' to u-points (4-point arithmetic mean, periodic in lon).
-    # NOT thickness-weighted — see NOTE above for the consequences.
-    # Computed before the ζ reconstruction because WENO uses v_at_u
-    # as the upwinding velocity for zeta_at_u.
-    v_west = jnp.roll(v_prime, 1, axis=1)  # v'[:, (j-1)%n_lon, :]
-    v_at_u_core = 0.25 * (v_prime[:-1] + v_prime[1:]
-                          + v_west[:-1] + v_west[1:])  # (n_lat, n_lon, nlev)
+    # Vorticity from TOTAL velocity (not perturbation u')
+    zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
+
+    # Layer thickness at vertices (4-cell average matching vertex layout)
+    h_sw = jnp.roll(h_k, 1, axis=1)  # h_k[:, (j-1)%n_lon, :]
+    h_vtx_interior = 0.25 * (h_k[:-1] + h_k[1:]
+                              + h_sw[:-1] + h_sw[1:])  # (n_lat-1, n_lon, nlev)
+    h_vtx_south = 0.5 * (h_k[0:1] + h_sw[0:1])        # (1, n_lon, nlev)
+    h_vtx_north = 0.5 * (h_k[-1:] + h_sw[-1:])         # (1, n_lon, nlev)
+    h_vtx = jnp.concatenate(
+        [h_vtx_south, h_vtx_interior, h_vtx_north], axis=0,
+    )  # (n_lat+1, n_lon, nlev)
+    h_vtx = jnp.concatenate(
+        [h_vtx, h_vtx[:, 0:1, :]], axis=1,
+    )  # (n_lat+1, n_lon+1, nlev)
+
+    # Potential vorticity q = ζ / h at vertices
+    q = zeta / jnp.maximum(h_vtx, 1e-10)
+
+    # Thickness-weighted mass fluxes at faces
+    Fv = h_v * v * v_mask_3d  # (n_lat+1, n_lon, nlev)
+    Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
+
+    # Average Fv to u-points (4-point, periodic in lon)
+    Fv_west = jnp.roll(Fv, 1, axis=1)
+    Fv_at_u_core = 0.25 * (Fv[:-1] + Fv[1:]
+                            + Fv_west[:-1] + Fv_west[1:])  # (n_lat, n_lon, nlev)
+    Fv_at_u = jnp.concatenate(
+        [Fv_at_u_core, Fv_at_u_core[:, 0:1, :]], axis=1,
+    )  # (n_lat, n_lon+1, nlev)
+
+    # Average Fu to v-points (4-point, zero-padded at poles)
+    n_lon_loc = Fu.shape[1]   # n_lon+1
+    nlev_loc = Fu.shape[2]
+    zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u.dtype)
+    Fu_ext = jnp.concatenate([zero_u, Fu, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
+    Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
+                       + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
+
+    # Total velocity at u/v faces (for WENO upwinding direction)
+    v_west_total = jnp.roll(v, 1, axis=1)
+    v_at_u_core = 0.25 * (v[:-1] + v[1:]
+                           + v_west_total[:-1] + v_west_total[1:])
     v_at_u = jnp.concatenate(
-        [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
+        [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1,
+    )  # (n_lat, n_lon+1, nlev)
 
-    # Average u' to v-points (4-point average, zero-padded at poles)
-    n_lon_loc = u_prime.shape[1]  # n_lon+1
-    nlev_loc = u_prime.shape[2]
-    zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u_prime.dtype)
-    u_ext = jnp.concatenate([zero_u, u_prime, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
+    u_ext = jnp.concatenate([zero_u, u, zero_u], axis=0)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
-    # Reconstruct ζ from vertices to velocity points
+    # Reconstruct q from vertices to velocity points
     _mom_adv = config.momentum_advection
     if _mom_adv in ("weno5", "weno7"):
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
-        zeta_at_u = _weno_zeta_at_u(
-            zeta, v_prime, v_at_u, order=_weno_order)
-        zeta_at_v = _weno_zeta_at_v(
-            zeta, u_prime, u_at_v, order=_weno_order)
+        q_at_u = _weno_zeta_at_u(
+            q, v, v_at_u, order=_weno_order)
+        q_at_v = _weno_zeta_at_v(
+            q, u, u_at_v, order=_weno_order)
     else:
-        # Default: 2-point average (see NOTE above)
-        zeta_at_u = 0.5 * (zeta[:-1, :, :] + zeta[1:, :, :])  # (n_lat, n_lon+1, nlev)
-        zeta_at_v = 0.5 * (zeta[:, :-1, :] + zeta[:, 1:, :])  # (n_lat+1, n_lon, nlev)
+        # Sadourny EC: 2-point average of q to faces
+        q_at_u = 0.5 * (q[:-1, :, :] + q[1:, :, :])   # (n_lat, n_lon+1, nlev)
+        q_at_v = 0.5 * (q[:, :-1, :] + q[:, 1:, :])    # (n_lat+1, n_lon, nlev)
 
-    du_dt = du_dt + zeta_at_u * v_at_u
-    dv_dt = dv_dt - zeta_at_v * u_at_v
+    du_dt = du_dt + q_at_u * Fv_at_u
+    dv_dt = dv_dt - q_at_v * Fu_at_v
 
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
     # Issue #171 Level-1 fix: use interface-upwind flux-form momentum

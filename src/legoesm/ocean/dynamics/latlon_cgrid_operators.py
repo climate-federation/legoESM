@@ -1632,8 +1632,11 @@ def leith_viscosity_cgrid(
     is_3d = u.ndim == 3
 
     # Apply face masks to input velocities (same convention as Smagorinsky).
-    u_eff = u if u_mask is None else u * u_mask
-    v_eff = v if v_mask is None else v * v_mask
+    # Expand 2D masks to 3D when velocity is 3D to avoid broadcast mismatch.
+    _um = u_mask[..., jnp.newaxis] if (u_mask is not None and is_3d) else u_mask
+    _vm = v_mask[..., jnp.newaxis] if (v_mask is not None and is_3d) else v_mask
+    u_eff = u if _um is None else u * _um
+    v_eff = v if _vm is None else v * _vm
 
     # 1. Relative vorticity at vertices.
     zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)
@@ -1691,8 +1694,10 @@ def leith_viscosity_q_cgrid(
     """
     is_3d = u.ndim == 3
 
-    u_eff = u if u_mask is None else u * u_mask
-    v_eff = v if v_mask is None else v * v_mask
+    _um = u_mask[..., jnp.newaxis] if (u_mask is not None and is_3d) else u_mask
+    _vm = v_mask[..., jnp.newaxis] if (v_mask is not None and is_3d) else v_mask
+    u_eff = u if _um is None else u * _um
+    v_eff = v if _vm is None else v * _vm
 
     zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)   # (n_lat+1, n_lon+1[, nlev])
 

@@ -166,26 +166,14 @@ class TestCGridTendencies:
         assert jnp.all(tend.dH_bathy_dt.data == 0)
         assert jnp.all(tend.dland_mask_dt.data == 0)
 
-    @pytest.mark.xfail(
-        reason="#160: lat-lon baroclinic tendency uses perturbation u', "
-        "so adding a constant barotropic zonal offset δU leaves u' "
-        "unchanged and the tendency is identical. A correct "
-        "full-velocity (f+ζ)·u scheme would differ by ~δU·∂u/∂x via "
-        "the KE gradient. XPASS here signals the #160 refactor landed.",
-        strict=True,
-    )
     def test_baroclinic_tendency_not_galilean_invariant(
         self, state, grid, z_coord, config,
     ):
-        """Barotropic-shift characterization test for issue #160.
+        """Barotropic-shift test for issue #160 (total-velocity KE/PV).
 
         Two states differ only by a spatially constant δU added to u.
-        In a correct vector-invariant scheme the KE gradient
-        (-∂/∂x [0.5·(u+δU)² + …] = -∂/∂x [0.5·u²] − δU·∂u/∂x) supplies
-        an extra −δU·∂u/∂x tendency, so du_dt_A ≠ du_dt_B when ∂u/∂x ≠ 0.
-        The current perturbation-only split computes KE from u' only,
-        and u' is invariant under a barotropic shift — so the two
-        tendencies are exactly equal, which is what this xfail pins.
+        The total-velocity KE gradient produces an extra −δU·∂u/∂x
+        tendency, so du_dt_A ≠ du_dt_B when ∂u/∂x ≠ 0.
         """
         n_lat = grid.n_lat
         n_lon = grid.n_lon
@@ -219,10 +207,7 @@ class TestCGridTendencies:
         diff_du = float(
             jnp.max(jnp.abs(tend_A.du_dt.data - tend_B.du_dt.data))
         )
-        # Expected O(δU · ∂u/∂x) ~ 1e-9 for this setup once the
-        # full-velocity refactor lands. Threshold is orders of
-        # magnitude above the current round-off (~1e-16) but well
-        # below the expected nonzero value.
+        # Total-velocity KE gradient produces O(δU · ∂u/∂x) difference.
         assert diff_du > 1e-12, (
             f"Baroclinic du/dt should depend on barotropic offset δU "
             f"via the KE gradient; got diff={diff_du:.3e} (invariant → bug)."
