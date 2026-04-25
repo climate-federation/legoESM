@@ -707,3 +707,45 @@ Codex stop-time review of iter-865: "iter-865 hardcodes duogrid-only gating and 
 - `tests/test_fv3_boundary_fix_duogrid_gate_iter865.py`: new property-recognition test + AST scan accepts both forms.
 
 **Process.**  125b in iter-752-865b chain.  Codex stop-time review identified a regional-panel hole in iter-865's duogrid-only gate.  Fix exposes the proper `bounded_domain` Fortran abstraction (regional OR nested OR duogrid) as a property and uses it consistently.
+
+### Iter-866 — Bisect identifies iter-807/808 as the cause of the gold-file h_new.sum drift; rebaseline complete
+
+iter-864b's hard-ceiling assertion on `h_new.sum` flagged a separate pre-iter-862 mass-path drift (~1.4 absolute, ~3.7e-6 relative) for iter-865+ investigation.  iter-866 closes it.
+
+**Method (git bisect).**  The original iter-710 fingerprint was `383992.34091496095`; HEAD measures `383993.7463547496` for the nord1 test (and `383993.7414099876` for the iter-727 damp_v test).  Bisect strategy:
+1. Confirmed the test PASSES at the iter-710 commit (`541e8014`) — value 383992.3409 was the actual iter-710 measurement.
+2. Identified that checking out HEAD's `core/*.py` against iter-710's `grids/*.py` reproduces 383992.3409 — drift cause is in `grids/`.
+3. Per-file bisect within `grids/`: only `halo.py` shifts the value.  `cubed_sphere.py` and `duogrid.py` are no-ops.
+4. Per-commit bisect within halo.py history (`git log 541e8014..HEAD -- src/legoesm/grids/halo.py`): drift introduced exactly at `ff135e2` = **iter-807/808: sign-aware flux sync FIXES DUOGRID (800x → 7x LEGACY on W2)**.
+
+**Diagnosis.**  iter-807/808 is a deliberate, documented Fortran-fidelity correction (closed priority in this doc's Live Status: "Duogrid cube-edge flux synchronization: resolved by iter-807/808 sign-flip sync").  The `_FLUX_SIGN_FLIP_EDGES` table addition shifted DUOGRID flux-sync output at sign-flip seams from `0.5*(a+b)` to `0.5*(a-b)`.  This propagated through `transport_step` → `fv_tp_2d` → `synchronize_cgrid_fluxes` and changed `h_new` at face-boundary cells.  The iter-710 gold-file fingerprint was recorded against the BUGGY pre-iter-808 sign convention; the post-iter-808 value 383993.7464 is the Fortran-faithful one.
+
+The "drift" was never a regression — it was a stale gold-file fingerprint that survived through iter-708..iter-865b without being updated.
+
+**Fix.**  Rebaseline both gold-file `h_new.sum` fingerprints to their post-iter-808 values:
+- `test_d_sw_native_gold_file_nord1`: `383992.34091496095` → `383993.7463547496`.
+- `test_d_sw_native_gold_file_damp_v_iter727`: `383992.2998335532` → `383993.7414099876`.
+- Replaced iter-864b hard relative-drift ceiling subTest with the standard `assertAlmostEqual` exact-equality check at `places=4`.  Any future drift now trips directly.
+
+The Codex iter-864 directive ("Do not rebaseline ... unless you also provide a causal reproducer or Fortran comparison for the mass path") is now satisfied: bisect identifies iter-808 as the exact cause, and iter-808 was a Fortran-fidelity fix (sign-flip table now matches Fortran's mpp_get_boundary semantics).
+
+**What iter-866 DOES show.**
+- The `h_new.sum` "drift" was iter-808's deliberate Fortran-fidelity correction propagating through the gold-file test, not a real mass-path regression.
+- The post-iter-808 fingerprints are the correct Fortran-faithful values; rebaselining locks them as proper regression sentinels.
+- Bisect on `grids/halo.py` was the diagnostic: per-file then per-commit narrowed the cause precisely.
+
+**What iter-866 does NOT establish.**
+- Any production W2 mode-A reduction (still no current production change).
+- Whether other gold-file tests in the repo have similarly stale fingerprints from pre-iter-808.  iter-867+ candidate.
+
+**Iter-867+ candidates.**
+- Audit other gold-file fingerprints in `test_cdgrid_fv3_regression.py` for staleness against iter-808's flux-sync fix (specifically tests that go through `synchronize_cgrid_fluxes`).
+- FB-chain C36 stability re-test now that iter-864 aligned d_sw5 vortflux.
+- Multi-iter Check 4 architectural port (production ke→d_sw6 routing).
+
+**Deliverable.**
+- `tests/unit/test_cdgrid_fv3_regression.py::TestDSwNativeEndToEndGoldFileIter710`: rebaselined both `h_new.sum` fingerprints to post-iter-808 values; iter-864b ceiling subTest replaced with standard exact-equality assertion.
+- All 15 W2 LEGACY sentinels pass; production atmosphere matrix unchanged.
+- Both gold-file tests now pass cleanly without subTest workarounds for h_new.sum.
+
+**Process.**  126th iter in iter-752-866 chain.  Closes the iter-864b TODO via systematic bisect.  The drift was iter-808's documented Fortran-fidelity fix propagating into a gold-file test that was never updated; rebaseline locks the post-iter-808 Fortran-faithful values as proper regression sentinels.

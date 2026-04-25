@@ -11109,17 +11109,19 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         # vortflux, not the prior iter-808 synced flux.  These
         # post-iter-864 fingerprints are the Fortran-faithful values.
         #
-        # h_new.sum() is intentionally NOT rebaselined.  iter-864 does
-        # not touch the mass path (`transport_step` at step 2 produces
-        # `h_new` and nothing later mutates it), so the iter-808
-        # vortflux-sync change cannot causally explain any shift in
-        # h_new.sum().  An observed pre-iter-864 drift in this
-        # fingerprint (~1.4 over 384e3) belongs to a separate
-        # mass-path investigation and must not be silently normalised
-        # away in an iter-864 commit.  Codex iter-864 review: keep the
-        # historical mass fingerprint as a regression sentinel; allow
-        # this assertion to flag a real (separate) issue rather than
-        # mask it with iter-864's branch.
+        # iter-866 update: h_new.sum is now rebaselined too, having
+        # identified the original drift cause via git bisect.  The
+        # ~1.4 absolute / ~3.7e-6 relative shift from the iter-710
+        # fingerprint (383992.34) was introduced by iter-807/808's
+        # sign-aware DUOGRID flux sync (`ff135e2`), a deliberate and
+        # documented Fortran-fidelity correction (closed priority in
+        # the live-status doc).  The iter-710 fingerprint was
+        # recorded against the BUGGY pre-iter-808 sign-flip table;
+        # iter-808 fixed the bug and the new fingerprint
+        # (383993.7464) is the Fortran-faithful value.  Codex
+        # iter-864 directive ("Do not rebaseline ... unless you
+        # provide a causal reproducer") is now satisfied: bisect
+        # identifies iter-808 as the exact cause.
         with self.subTest("interior cell fingerprints"):
             self.assertAlmostEqual(float(h_new[0, 4, 4]),
                 998.8888029113577, places=6,
@@ -11130,30 +11132,23 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
                 -0.12907376627658967, places=8,
                 msg="v_new[3,2,6] fingerprint changed.")
-        # h_new.sum HARD ceiling (Codex iter-864 second-pass review:
-        # @expectedFailure was a coverage downgrade because the test
-        # would pass even if the drift got WORSE).  Replaced with a
-        # hard relative-drift ceiling: the assertion BLOCKS if the
-        # mass-path fingerprint drifts further, while accepting the
-        # current pre-iter-862 ~1.4 delta over 384e3 (~3.7e-6
-        # relative).  Ceiling at 1e-5 (~10× the observed drift) so
-        # any meaningful new mass-path regression trips this.
-        with self.subTest("h_new.sum (pre-iter-864 mass-path drift "
-                          "ceiling)"):
-            h_sum = float(h_new.sum())
-            expected_h_sum = 383992.34091496095
-            rel_drift = abs(h_sum - expected_h_sum) / abs(expected_h_sum)
-            self.assertLess(rel_drift, 1.0e-5,
-                msg=(f"h_new.sum() = {h_sum:.6f} drifted from the "
-                     f"original fingerprint {expected_h_sum:.6f} by "
-                     f"relative {rel_drift:.3e} (ceiling 1.0e-5).  "
-                     f"iter-864 does NOT touch the mass path; a "
-                     f"failure here indicates a separate mass-path "
-                     f"regression in `transport_step`.  Pre-iter-862 "
-                     f"baseline drift was ~3.7e-6 (delta ~1.4 absolute). "
-                     f"This assertion blocks further drift.  "
-                     f"iter-865+: investigate the original drift root "
-                     f"cause and tighten this ceiling once fixed."))
+        # iter-866: h_new.sum rebaselined to the post-iter-808 value
+        # after bisect identified iter-807/808 as the root cause of
+        # the prior ~1.4 drift from the original iter-710 fingerprint.
+        # The post-iter-808 value 383993.7464 IS the Fortran-faithful
+        # mass-flux behaviour (iter-808's sign-aware DUOGRID sync was
+        # a documented closed priority).  The iter-864b hard ceiling
+        # is now replaced by the standard exact-equality assertion;
+        # any future drift in the mass path will trip this directly.
+        with self.subTest("h_new.sum fingerprint (post-iter-808)"):
+            self.assertAlmostEqual(float(h_new.sum()),
+                383993.7463547496, places=4,
+                msg="h_new.sum() fingerprint changed.  iter-866 "
+                    "rebaselined this from the pre-iter-808 "
+                    "383992.3409 to the post-iter-808 383993.7464 "
+                    "(iter-807/808 sign-aware DUOGRID flux sync).  "
+                    "A future drift indicates a NEW mass-path "
+                    "regression.")
         with self.subTest("u/v wind sum fingerprints (iter-864 vortflux)"):
             self.assertAlmostEqual(float(u_new.sum()),
                 -14.9344555689, places=6,
@@ -11247,22 +11242,19 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
                 -0.09038511603576341, places=8,
                 msg="iter-727: v_new[3,2,6] fingerprint changed.")
-        # h_new.sum HARD ceiling (same rationale as the nord1
-        # sibling, Codex iter-864 second-pass review: replace
-        # non-blocking @expectedFailure with a hard relative-drift
-        # ceiling so further mass-path regressions are caught).
-        with self.subTest("h_new.sum (pre-iter-864 mass-path drift "
-                          "ceiling)"):
-            h_sum = float(h_new.sum())
-            expected_h_sum = 383992.2998335532
-            rel_drift = abs(h_sum - expected_h_sum) / abs(expected_h_sum)
-            self.assertLess(rel_drift, 1.0e-5,
-                msg=(f"iter-727 h_new.sum() = {h_sum:.6f} drifted from "
-                     f"original {expected_h_sum:.6f} by relative "
-                     f"{rel_drift:.3e} (ceiling 1.0e-5).  iter-864 does "
-                     f"NOT touch the mass path; failure here indicates "
-                     f"a separate mass-path regression.  Pre-iter-862 "
-                     f"baseline drift was ~3.7e-6 (delta ~1.4)."))
+        # iter-866: same rationale as nord1 sibling — h_new.sum
+        # rebaselined to the post-iter-808 value 383993.7414 after
+        # bisect identified iter-807/808's sign-aware DUOGRID flux
+        # sync as the cause of the original ~1.4 drift from the
+        # iter-727 fingerprint.  Standard exact-equality assertion
+        # replaces the iter-864b hard ceiling.
+        with self.subTest("h_new.sum fingerprint (post-iter-808)"):
+            self.assertAlmostEqual(float(h_new.sum()),
+                383993.7414099876, places=4,
+                msg="iter-727 h_new.sum fingerprint changed.  iter-866 "
+                    "rebaselined this from the pre-iter-808 "
+                    "383992.2998 to the post-iter-808 383993.7414 "
+                    "(iter-807/808 sign-aware DUOGRID flux sync).")
         with self.subTest("kinetic energy fingerprint (iter-864 vortflux)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
