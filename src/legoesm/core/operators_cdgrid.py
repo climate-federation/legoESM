@@ -1303,14 +1303,13 @@ def cdgrid_momentum_tendencies(
     # (corner divergence + KE-add) together, deferred to a dedicated
     # iter.  Iter-757b metric fix (da_min_c = area_corner) is
     # retained.
-    # Iter-872c: parallel `dddmp` plumbing for `CDGridShallowWaterModel`
-    # via the shared `dddmp_prod` config field.  Pre-iter-872c the
-    # literal was hardcoded 0.2 here, identical to the leak in
-    # `fv3_sw_tendencies` (now closed by iter-872).  Same gate
-    # widening to honor Fortran sw_core.F90:1720 (`damp = da_min_c *
-    # max(d2_bg, min(0.20, dddmp*|delpc*dt|))` is unconditional in
-    # the `nord==0` branch).
-    if div_damp > 0 or dddmp > 0:
+    # Iter-872c-take4 (Codex pass-4): gate reverted to narrow
+    # (`if div_damp > 0:`) — see iter-872c-take4 comment in
+    # `fv3_sw_tendencies`.  The kwarg `dddmp` (Fortran-strict
+    # default 0.0) is kept so advanced users can override the
+    # adaptive Smagorinsky coefficient when they explicitly enable
+    # divergence damping via `div_damp > 0`.
+    if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
         d2_bg = div_damp / da_min_c
@@ -1708,22 +1707,24 @@ def fv3_sw_tendencies(
     # port requires pairing (*dt factor) with items 3 (corner
     # divergence delpc) and 4 (KE-add structure) — deferred to a
     # dedicated iter that ports d_sw5 holistically.
-    # Iter-872b (Codex Finding 1): the gate must fire when EITHER the
-    # background coefficient (`div_damp` → `d2_bg`) OR the adaptive
-    # Smagorinsky coefficient (`dddmp`) is non-zero.  Pre-iter-872b
-    # the gate was `if div_damp > 0:`, which silently zeroed the
-    # adaptive Smagorinsky path whenever `div_damp = 0` — Fortran
-    # sw_core.F90:1720 computes `damp = da_min_c * max(d2_bg,
-    # min(0.20, dddmp * |delpc * dt|))` unconditionally inside the
-    # `nord==0` branch, so a Fortran user can run `d2_bg=0, dddmp>0`
-    # (pure adaptive Smagorinsky) and still get damping.  Our
-    # previous Python gate refused that valid configuration.
-    if div_damp > 0 or dddmp > 0:
+    # Iter-872c-take4 (Codex pass-4): gate is narrow
+    # (``if div_damp > 0:``) — same as pre-iter-872b.  iter-872b
+    # widened the gate to ``div_damp > 0 or dddmp > 0`` to enable
+    # the Fortran-valid regime ``d2_bg = 0, dddmp > 0`` (pure
+    # adaptive Smagorinsky), but Codex pass-4 correctly noted that
+    # combined with the production `dddmp_prod = 0.2` default this
+    # turned on adaptive damping for default-config callers — a
+    # silent behavioural change for a code path that the comment
+    # below documents as "structurally incomplete" (the *dt factor
+    # and corner-divergence stencil are deferred to a dedicated
+    # d_sw5 holistic port).  Reverting the gate to narrow restores
+    # pre-iter-872b semantics while keeping the kwarg infrastructure
+    # for the production path's explicit `dddmp_prod` opt-in.  The
+    # widened-gate Fortran-fidelity improvement is deferred until
+    # the d_sw5 port is complete; see iter-872c-take4 doc entry.
+    if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
-        # When `div_damp = 0` the dimensionless `d2_bg = 0` exactly,
-        # so `max(0, min(0.20, dddmp * |div|))` reduces to pure
-        # adaptive-only damping (matches Fortran).
         d2_bg = div_damp / da_min_c
         # Iter-872c: `dddmp` is now a kwarg with Fortran-strict
         # default 0.0 (Fortran fv_arrays.F90:360).  Production

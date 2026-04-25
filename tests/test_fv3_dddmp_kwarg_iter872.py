@@ -273,44 +273,35 @@ def test_config_dddmp_prod_default_is_zero_point_two():
 # Iter-872b (Codex Finding 1): adaptive damping when div_damp=0
 # ---------------------------------------------------------------------
 
-def test_iter872b_dddmp_active_when_div_damp_zero():
-    """Iter-872b regression: with ``div_damp = 0`` and ``dddmp > 0``,
-    the adaptive Smagorinsky path MUST still produce non-trivial
-    damping.  Pre-iter-872b the production gate was ``if div_damp
-    > 0:`` which silently zeroed the adaptive path whenever the
-    background coefficient was disabled.  Fortran sw_core.F90:1720
-    ALWAYS evaluates ``damp = da_min_c * max(d2_bg, min(0.20,
-    dddmp * |delpc * dt|))`` inside the `nord==0` branch, so the
-    valid configuration ``d2_bg = 0, dddmp > 0`` (pure adaptive
-    Smagorinsky) was incorrectly refused by our Python gate.
+def test_iter872c_take4_gate_narrow_div_damp_zero_no_op():
+    """Iter-872c-take4 (Codex pass-4): with ``div_damp = 0`` the
+    divergence-damping branch in ``fv3_sw_tendencies`` MUST be
+    skipped entirely, regardless of ``dddmp``.
 
-    This test pins the iter-872b gate fix: ``div_damp = 0,
-    dddmp = 0.2`` and ``div_damp = 0, dddmp = 0.0`` produce
-    measurably different tendencies (proves the adaptive path is
-    actually firing when the background coefficient is zero).
+    iter-872b had widened the gate to ``div_damp > 0 or dddmp > 0``
+    to enable the Fortran-valid pure-adaptive regime, but Codex
+    pass-4 correctly noted that combined with the production
+    ``dddmp_prod = 0.2`` default this turned on adaptive damping
+    for default-config callers — a silent behavioural change for a
+    code path the comments themselves document as "structurally
+    incomplete".  iter-872c-take4 reverts the gate to narrow.
+
+    The widened-gate Fortran-fidelity improvement is deferred until
+    the d_sw5 holistic port is complete; until then, ``dddmp`` is
+    only effective when ``div_damp > 0``.  This test pins the
+    narrow-gate semantics so any future widening is explicit.
     """
     cdgrid, h, u_d, v_d, h_s = _grid_and_state(n=8, seed=43)
 
-    # Pure adaptive (Fortran-faithful regime that pre-iter-872b
-    # silently zeroed).
-    _, du_adap, dv_adap = fv3_sw_tendencies(
+    # With div_damp=0, dddmp value MUST NOT affect output
+    # (entire branch skipped).
+    _, du_pt2, dv_pt2 = fv3_sw_tendencies(
         h, u_d, v_d, h_s, cdgrid, div_damp=0.0, dddmp=0.2)
-    # Both coefficients zero — no damping (identity baseline).
-    _, du_none, dv_none = fv3_sw_tendencies(
+    _, du_zero, dv_zero = fv3_sw_tendencies(
         h, u_d, v_d, h_s, cdgrid, div_damp=0.0, dddmp=0.0)
 
-    diff_u = float(jnp.max(jnp.abs(du_adap - du_none)))
-    diff_v = float(jnp.max(jnp.abs(dv_adap - dv_none)))
-    assert (diff_u > 1e-8) or (diff_v > 1e-8), (
-        f"Iter-872b gate fix regression: with `div_damp=0`, the "
-        f"adaptive Smagorinsky path is silently zeroed when `dddmp` "
-        f"is non-zero.  The gate `if div_damp > 0:` is back to its "
-        f"pre-iter-872b form.  Codex Finding 1 was correct: Fortran "
-        f"sw_core.F90:1720 evaluates `max(d2_bg, min(0.20, "
-        f"dddmp*|delpc*dt|))` unconditionally inside `nord==0`, so "
-        f"`d2_bg=0, dddmp>0` is a valid Fortran configuration and "
-        f"must NOT be silently no-op'd.  max |Δdu|={diff_u:.3e}, "
-        f"max |Δdv|={diff_v:.3e}")
+    np.testing.assert_array_equal(np.asarray(du_pt2), np.asarray(du_zero))
+    np.testing.assert_array_equal(np.asarray(dv_pt2), np.asarray(dv_zero))
 
 
 # ---------------------------------------------------------------------
@@ -450,6 +441,45 @@ def test_iter872c_take3_cdgrid_shallow_water_does_not_forward_dddmp():
         f"behaviour change for `CDGridShallowWaterModel` users that "
         f"Codex pass-3 flagged.  `dddmp_prod` is scoped to "
         f"`FV3EdgeShallowWaterModel` only by design.")
+
+
+def test_iter872c_take4_cdgrid_warns_on_non_default_dddmp_prod():
+    """Iter-872c-take4 (Codex pass-4): ``CDGridShallowWaterModel``
+    MUST emit a UserWarning when constructed with a non-default
+    ``dddmp_prod`` because the field is silently ignored on this
+    model's tendency path.  Without this warning a user could set
+    ``dddmp_prod=0.4`` and get the same numerics as ``dddmp_prod=
+    0.2`` — a reproducibility hazard that Codex pass-4 flagged as
+    "high" severity.
+    """
+    import warnings
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig, CDGridShallowWaterModel,
+    )
+
+    n = 8
+    grid = create_cubed_sphere(n, use_duogrid=True)
+
+    # Default config: no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        CDGridShallowWaterModel(grid, CDGridShallowWaterConfig())
+
+    # Non-default `dddmp_prod`: must warn.
+    cfg = CDGridShallowWaterConfig(dddmp_prod=0.4)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        CDGridShallowWaterModel(grid, cfg)
+
+    matched = [w for w in caught
+               if issubclass(w.category, UserWarning)
+               and "dddmp_prod" in str(w.message)]
+    assert matched, (
+        f"CDGridShallowWaterModel did not warn when constructed "
+        f"with non-default `dddmp_prod=0.4`.  Without this warning, "
+        f"the silent no-op on the CDGrid path is a reproducibility "
+        f"hazard (Codex pass-4 high finding).  Caught warnings: "
+        f"{[str(w.message) for w in caught]}")
 
 
 def test_iter872c_take3_cdgrid_default_no_silent_adaptive_damping():

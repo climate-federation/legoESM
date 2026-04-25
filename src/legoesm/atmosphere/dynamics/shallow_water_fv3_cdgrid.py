@@ -273,6 +273,32 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self.config = config or CDGridShallowWaterConfig()
         self._target_mass = None
+        # Iter-872c-take4 (Codex pass-4): warn if `dddmp_prod` is set
+        # to a non-default value, because `CDGridShallowWaterModel`
+        # routes through `cdgrid_shallow_water_tendencies` which
+        # deliberately does NOT forward `dddmp_prod` (Codex pass-3
+        # finding).  Without this warning a user could set
+        # `dddmp_prod=0.4` and silently get the same numerics as
+        # `dddmp_prod=0.2` — a reproducibility hazard.
+        _default_dddmp_prod = CDGridShallowWaterConfig._field_defaults[
+            "dddmp_prod"]
+        if self.config.dddmp_prod != _default_dddmp_prod:
+            import warnings
+            warnings.warn(
+                f"CDGridShallowWaterConfig.dddmp_prod="
+                f"{self.config.dddmp_prod!r} is set on a "
+                f"CDGridShallowWaterModel instance, but this model's "
+                f"tendency path (`cdgrid_shallow_water_tendencies`) "
+                f"deliberately does NOT forward `dddmp_prod` to "
+                f"`cdgrid_momentum_tendencies` (Codex pass-3 fix).  "
+                f"The setting will be silently ignored.  "
+                f"`dddmp_prod` is consumed by "
+                f"`FV3EdgeShallowWaterModel.step` only.  Advanced "
+                f"`CDGridShallowWaterModel` users wanting adaptive "
+                f"Smagorinsky should pass `dddmp` directly to "
+                f"`cdgrid_momentum_tendencies` instead.",
+                stacklevel=2,
+            )
 
     def set_initial_mass(self, state: CDGridShallowWaterState):
         """Anchor conservation fixer to initial state mass."""
