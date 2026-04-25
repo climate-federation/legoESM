@@ -90,11 +90,14 @@ def _ppm_edge_values(q_1d, blend_edges=False):
     # All M-1 = n+3 edge values
     q_hat = jnp.concatenate([q_hat_lo, q_hat_inner, q_hat_hi], axis=-2)
 
-    # Monotonicity: clamp each edge between its two flanking cell values
-    q_lo = jnp.minimum(q_1d[..., :-1, :], q_1d[..., 1:, :])
-    q_hi = jnp.maximum(q_1d[..., :-1, :], q_1d[..., 1:, :])
-    q_hat = jnp.clip(q_hat, q_lo, q_hi)
-
+    # Iter-880: pre-iter-880 we clipped each edge value into the
+    # ``[min(q[i],q[i+1]), max(q[i],q[i+1])]`` range here.  Fortran's
+    # ``xppm`` (tp_core.F90:353-355) does NOT clip the 4th-order
+    # edge values; it passes them directly to the CW84 ``pert_ppm``
+    # constraint (which our caller applies via ``_ppm_limit``).  The
+    # extra clip step in our Python made the limiter MORE diffusive
+    # than Fortran by pre-flattening edge overshoots before the CW84
+    # constraint could see them.  Removed for Fortran fidelity.
     return q_hat
 
 

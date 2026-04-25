@@ -1665,3 +1665,39 @@ Also update the test docstring to honestly describe distinct vs overlapping regi
 **On restored source.**  All 15 iter-879h tests + 4 iter-878 tests pass (19 total).
 
 **Process.**  146th iter in the iter-752-879h chain.  Eighth pass in the iter-879 sentinel evolution.  iter-879h fixes the fixture misdefinition Codex caught and acknowledges in the doc that "9 edge cases" doesn't translate 1-to-1 into "9 fully distinct regimes" — overlap is real and documented.
+
+### Iter-880 — Remove non-Fortran-faithful clip in `_ppm_edge_values`
+
+**Bug.**  `_ppm_edge_values` (`src/legoesm/core/operators_fv.py:30-98`) computed 4th-order PPM edge values via the centered formula `(7/12)*(q[i]+q[i+1]) - (1/12)*(q[i-1]+q[i+2])` (matches Fortran `xppm` tp_core.F90:354).  But it then applied an extra clip step BEFORE returning:
+
+```python
+q_lo = jnp.minimum(q_1d[..., :-1, :], q_1d[..., 1:, :])
+q_hi = jnp.maximum(q_1d[..., :-1, :], q_1d[..., 1:, :])
+q_hat = jnp.clip(q_hat, q_lo, q_hi)  # NOT in Fortran
+```
+
+Fortran's `xppm` does NOT clip the 4th-order edge values; it passes them directly to the CW84 `pert_ppm` constraint (which our caller applies via `_ppm_limit`).  Our extra clip step pre-flattened edge overshoots before the CW84 constraint could process them, making the PPM scheme MORE diffusive than Fortran.
+
+**Fix (iter-880).**  Remove the clip step.  The 4th-order edge values are now passed unmodified to `_ppm_limit`, matching Fortran exactly.
+
+**Tests** (`tests/test_ppm_edge_values_clip_iter880.py`):
+- `test_iter880_constant_field_unchanged`: constant field produces constant edges (no clip activity, sanity).
+- `test_iter880_linear_field_unchanged`: linear ramp produces exact midpoints (4th-order is exact, sanity).
+- `test_iter880_high_frequency_field_differs_from_clipped`: zigzag input produces overshoots that the pre-iter-880 clip would have flattened — iter-880's unclipped output MUST differ from a clipped reference on this input, proving the fix is firing.
+- `test_iter880_source_no_jnp_clip_in_ppm_edge_values`: AST scan asserting no `jnp.clip` Call exists in the function body.
+
+**Behavioural impact.**
+- `_ppm_edge_values` is used by:
+  - `operators_fv.fv_flux_divergence` (cubed-sphere FV transport).
+  - `operators_fv_latlon_3d.fv_flux_divergence_latlon_3d` (lat-lon 3D).
+  - `operators_fv_latlon_3d.cgrid_fv_flux_divergence_latlon_3d`.
+- W2 sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline` uses `cgrid_mass_flux_divergence` (operators_cdgrid.py), which routes through `_ppm_reconstruct_1d` (a DIFFERENT PPM implementation with no clip step).  Verified: W2 sentinel passes bit-identically post iter-880.
+- `tests/unit/test_operators_fv.py` (which exercises `_ppm_edge_values` directly): all tests still pass — they used inputs (constant, linear) where the clip didn't fire.
+
+**Verification.**  All 4 iter-880 tests + 100 broader tests (top-level + test_operators_fv) pass.  W2 sentinel passes bit-identically.
+
+**Why this matters.**  Even though the fix doesn't change W2 sentinel numerics (different code path), it closes a real Fortran-fidelity bug in the FV transport stack.  Cosine-bell tests on the lat-lon 3D path (which exercise `_ppm_edge_values` with non-trivial gradients) would now produce slightly less diffusive transport, matching Fortran.
+
+**Deliverable.**  Source fix (1-line removal + 8-line iter-880 comment) + 4 regression tests + this doc entry.
+
+**Process.**  147th iter in the iter-752-880 chain.  Concrete operator-level Fortran-fidelity bug fix in the FV transport stack.  Smaller scope than iter-878's CW84 constraint fix but the same class: a documented Fortran formula is followed by an extra Python-side step that doesn't exist in Fortran.
