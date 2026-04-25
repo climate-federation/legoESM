@@ -212,44 +212,40 @@ def test_iter879_both_limiters_use_signed_product_in_overshoot_compare():
                                     and r.value == 2):
                                 squared_span_aliases.add(target.id)
 
-        # Iter-879d (Codex iter-879c stop-time): also catch reverse
-        # comparisons (`squared_span < q_6` instead of
-        # `q_6 > squared_span`).  Walk every Compare and consider
-        # BOTH directions: if EITHER the LHS is squared-span and
-        # RHS is parabolic, OR vice versa, treat it as a candidate
-        # constraint Compare.  The "parabolic-side" operand must be
-        # a signed product; the "squared-span-side" operand is
-        # already checked against the squared-span pattern.
-        def _references_parabolic_or_signed_product(node):
-            """Return True if `node` mentions q_6, d6, or a Name in
-            ``intermediates`` (i.e., a signed-product alias).  Used
-            to identify the 'parabolic side' of a Compare."""
-            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-                return _references_parabolic_or_signed_product(node.operand)
-            if isinstance(node, ast.Name):
-                return (node.id in parabolic_names
-                        or node.id in intermediates)
-            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
-                # Includes the bare `q_6 * dq` BinOp form.
-                return _is_signed_product(node, set())
-            return False
-
+        # Iter-879e (Codex iter-879d stop-time): include ALL Compares
+        # with a squared-span operand, regardless of the OTHER
+        # operand's form.  iter-879d's filter
+        # ``_references_parabolic_or_signed_product`` was meant to
+        # restrict to "compares that look like overshoot constraints"
+        # but Codex correctly noted this WEAKENS the check: a forward
+        # Compare with squared-span RHS but bare unrelated LHS
+        # (e.g. ``unrelated_var > dq_sq``, or a malformed renamed
+        # variant) would be silently dropped from
+        # ``constraint_compares`` and pass without scrutiny.
+        #
+        # iter-879e restores iter-879c's strictness on Direction A
+        # (every squared-span RHS Compare is checked, no filter on
+        # LHS), and applies the SAME no-filter strictness on
+        # Direction B (every squared-span LHS Compare is checked, no
+        # filter on RHS).  The bad-compare check below then requires
+        # the OTHER operand (paired with squared-span) to be a
+        # signed-product, regardless of whether it's vocabulary-
+        # matched or not.
         constraint_compares = []
         for node in ast.walk(fn):
             if not isinstance(node, ast.Compare):
                 continue
             lhs = node.left
             for comparator in node.comparators:
-                # Direction A: LHS=parabolic-side, RHS=squared-span.
+                # Direction A: LHS-side, RHS=squared-span.
                 if _is_squared_span(comparator, squared_span_aliases):
-                    if _references_parabolic_or_signed_product(lhs):
-                        constraint_compares.append((lhs, comparator))
-                # Direction B: LHS=squared-span, RHS=parabolic-side.
+                    constraint_compares.append((lhs, comparator))
+                # Direction B: LHS=squared-span, RHS-side.
                 elif _is_squared_span(lhs, squared_span_aliases):
-                    if _references_parabolic_or_signed_product(comparator):
-                        # Swap so the "parabolic side" is always
-                        # checked uniformly below.
-                        constraint_compares.append((comparator, lhs))
+                    # Swap so the "parabolic-side" position is
+                    # always checked uniformly below as the first
+                    # tuple element.
+                    constraint_compares.append((comparator, lhs))
 
         assert constraint_compares, (
             f"Function `{fn_name}` in {rel_path} has no Compare "

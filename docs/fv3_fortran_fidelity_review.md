@@ -1513,3 +1513,44 @@ For these obfuscated forms, the BEHAVIOURAL test (`test_iter879_ppm_reconstruct_
 **On restored source.**  All 4 iter-879d tests + 4 iter-878 tests pass (8 total).
 
 **Process.**  142nd iter in the iter-752-879d chain.  Four-pass progressive sentinel tightening (iter-879 → 879b → 879c → 879d), each addressing a real false-pass path identified by Codex stop-time review.  The final iter-879d form catches both forward and reverse Compare directions, with explicit documentation of the residual obfuscation classes that fall outside the AST sentinel's reach (delegated to the behavioural cross-implementation test).
+
+### Iter-879e — Codex iter-879d stop-time: drop the Direction-A LHS filter that weakened iter-879c
+
+**Codex iter-879d stop-time finding.**  "iter-879d weakens the sentinel and can false-pass malformed forward compares".
+
+**Issue.**  iter-879d added a `_references_parabolic_or_signed_product(lhs)` filter on Direction A (squared-span RHS) before adding the Compare to `constraint_compares`.  The filter was meant to restrict to "compares that look like overshoot constraints", but it actually WEAKENED iter-879c's check: a malformed forward Compare with squared-span RHS but bare unrelated LHS (e.g. `unrelated_var > dq_sq`, or a regression that renames `q_6` to a non-vocabulary name) would be silently dropped from `constraint_compares` → not checked → silently passes.
+
+**Fix (iter-879e).**  Drop the Direction-A LHS filter.  Restore iter-879c's "every squared-span RHS Compare is checked" strictness.  Apply the SAME no-filter strictness to Direction B (every squared-span LHS Compare is checked).  The bad-compare assertion below requires the OTHER operand (paired with squared-span) to be a signed-product, regardless of vocabulary match.
+
+```python
+# Direction A: LHS-side, RHS=squared-span. (No filter on LHS.)
+if _is_squared_span(comparator, squared_span_aliases):
+    constraint_compares.append((lhs, comparator))
+# Direction B: LHS=squared-span, RHS-side. (No filter on RHS.)
+elif _is_squared_span(lhs, squared_span_aliases):
+    constraint_compares.append((comparator, lhs))  # swapped
+```
+
+**Sentinel verification.**  iter-879e includes manual verification of BOTH false-pass classes:
+
+1. Malformed forward Compare (Codex iter-879d finding):
+   ```bash
+   # Injected: _iter879e_unrelated = q + 1 > dq_sq
+   FAILED test_iter879_both_limiters_use_signed_product_in_overshoot_compare
+     Bad compares (1 of 3):
+       parabolic-side=q + 1 (against squared-span=dq_sq)
+   ```
+
+2. Reverse-direction Compare (iter-879d original target):
+   ```bash
+   # Injected: _iter879e_reverse = dq_sq < q_6
+   FAILED test_iter879_both_limiters_use_signed_product_in_overshoot_compare
+     Bad compares (1 of 3):
+       parabolic-side=q_6 (against squared-span=dq_sq)
+   ```
+
+Both bug patterns correctly fire the sentinel.
+
+**On restored source.**  All 4 iter-879e tests + 4 iter-878 tests pass (8 total).
+
+**Process.**  143rd iter in the iter-752-879e chain.  Five-pass progressive sentinel tightening (iter-879 → 879b → 879c → 879d → 879e).  iter-879d's Direction-A filter was a regression on iter-879c's strictness; iter-879e drops it and restores symmetric no-filter strictness on both directions.  Two distinct bug patterns (malformed forward, reverse direction) verified via deliberate injection.  No more known false-pass paths within the AST sentinel's structural scope.
