@@ -233,6 +233,13 @@ def barotropic_substeps(
     )
     nu_dt = (baro_alpha * grid.area).astype(eta.dtype)
 
+    # Hoist the constant ``ocean_area`` out of the substep body — both
+    # ``grid.area`` and ``mask`` are loop-invariant.  Inside the
+    # ``fori_loop`` this previously triggered a redundant reduction
+    # per substep (~30 reductions per barotropic step on serial; under
+    # SPMD/MPI it would also be a redundant allreduce).
+    ocean_area_const = jnp.maximum(jnp.sum(grid.area * mask), 1.0)
+
     # Forward-backward substeps via fori_loop
     def substep_body(i, carry):
         eta_c, U_bar_c, V_bar_c = carry
@@ -253,8 +260,7 @@ def barotropic_substeps(
         eta_new = jnp.maximum(eta_unfloored, eta_floor) * mask
         # Redistribute mass added by floor clamping to preserve continuity.
         mass_added = jnp.sum((eta_new - eta_unfloored) * grid.area * mask)
-        ocean_area = jnp.sum(grid.area * mask)
-        eta_new = (eta_new - mass_added / jnp.maximum(ocean_area, 1.0) * mask)
+        eta_new = (eta_new - mass_added / ocean_area_const * mask)
         # Re-floor after correction to prevent negative water columns
         eta_new = jnp.maximum(eta_new, eta_floor) * mask
 

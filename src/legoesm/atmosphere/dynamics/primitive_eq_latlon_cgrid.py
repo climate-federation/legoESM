@@ -344,8 +344,11 @@ def cgrid_latlon_hydrostatic_tendencies(
         _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
         _cumsum = jnp.cumsum(div_dp, axis=-1)
         _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum
-        _zero_top = jnp.zeros((*p_s.shape, 1))
-        mass_flux = jnp.concatenate([_zero_top, _mf_inner], axis=-1)
+        # Pad top with zero (top BC) instead of allocating a fresh
+        # zero buffer + concatenate.  Bottom BC remains an explicit
+        # ``.at[-1].set(0.0)``.
+        _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 0),)
+        mass_flux = jnp.pad(_mf_inner, _pad_axes)
         mass_flux = mass_flux.at[..., -1].set(0.0)
         mf_u = interp_cell_to_uface(mass_flux)
         mf_v = interp_cell_to_vface(mass_flux)
@@ -362,8 +365,10 @@ def cgrid_latlon_hydrostatic_tendencies(
         sigma_dot_inner = (
             _frac * D_total_p[..., jnp.newaxis] - _cumsum_dp
         ) / (p_s[..., jnp.newaxis] + 1e-10)
-        _zero_top = jnp.zeros((*p_s.shape, 1))
-        sigma_dot = jnp.concatenate([_zero_top, sigma_dot_inner], axis=-1)
+        # Pad with zero on the top boundary; one HLO Pad op vs zeros
+        # buffer + concatenate.
+        _pad_axes_sd = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 0),)
+        sigma_dot = jnp.pad(sigma_dot_inner, _pad_axes_sd)
         sd_u = interp_cell_to_uface(sigma_dot)
         sd_v = interp_cell_to_vface(sigma_dot)
         du_dt = du_dt + vertical_advection(u, sd_u, sigma_coord)

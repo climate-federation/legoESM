@@ -116,18 +116,36 @@ def compare_states(
         energy_ref = jnp.sum(c_p * ref_T * area[..., None]) / g
         energy_test = jnp.sum(c_p * test_T * area[..., None]) / g
 
+    # Fuse the 10 ``float(...)`` calls into a single ``jnp.stack`` +
+    # ``np.asarray`` device→host transfer.  The old per-scalar
+    # ``device_get`` chain serialised 10 GPU stalls per snapshot;
+    # ``compare_states`` is called every diagnostic interval, so this
+    # adds up.
+    _stats = jnp.stack([
+        _rms(ref_T, test_T).astype(ref_T.dtype),
+        _rms(ref_u, test_u).astype(ref_T.dtype),
+        _rms(ref_ps, test_ps).astype(ref_T.dtype),
+        _linf(ref_T, test_T).astype(ref_T.dtype),
+        _linf(ref_u, test_u).astype(ref_T.dtype),
+        _linf(ref_ps, test_ps).astype(ref_T.dtype),
+        mass_ref.astype(ref_T.dtype),
+        mass_test.astype(ref_T.dtype),
+        energy_ref.astype(ref_T.dtype),
+        energy_test.astype(ref_T.dtype),
+    ])
+    _h = np.asarray(_stats)
     return DriftSnapshot(
         step=step,
-        rms_T=float(_rms(ref_T, test_T)),
-        rms_u=float(_rms(ref_u, test_u)),
-        rms_ps=float(_rms(ref_ps, test_ps)),
-        linf_T=float(_linf(ref_T, test_T)),
-        linf_u=float(_linf(ref_u, test_u)),
-        linf_ps=float(_linf(ref_ps, test_ps)),
-        global_mass_ref=float(mass_ref),
-        global_mass_test=float(mass_test),
-        global_energy_ref=float(energy_ref),
-        global_energy_test=float(energy_test),
+        rms_T=float(_h[0]),
+        rms_u=float(_h[1]),
+        rms_ps=float(_h[2]),
+        linf_T=float(_h[3]),
+        linf_u=float(_h[4]),
+        linf_ps=float(_h[5]),
+        global_mass_ref=float(_h[6]),
+        global_mass_test=float(_h[7]),
+        global_energy_ref=float(_h[8]),
+        global_energy_test=float(_h[9]),
     )
 
 
