@@ -103,34 +103,48 @@ def main():
     vort_pad_xface = vort_pad_edge.at[:, :, 0].set(vort_south)
     vort_pad_xface = vort_pad_xface.at[:, :, -1].set(vort_north)
 
-    print("=== Iter-870 halo-input gap ESTIMATE ===")
+    print("=== Iter-870 halo-input gap PROXY ===")
     print(f"W2 LEGACY C{n}, alpha=0 initial state.")
     print(f"vort_interior max: {vort_interior_max:.4e} m^2/s")
     print()
-    print("CAVEAT (Codex iter-870): variant B (cross-face proxy) uses")
-    print("u_dummy=0 in pad_halo_vector and mode='edge' on dxc/sina_u")
-    print("in the halo row.  Numbers below are an order-of-magnitude")
-    print("PROXY; the exact Fortran-faithful gap requires the iter-871+")
-    print("edge-stagger halo helper.")
+    print("CAVEAT (Codex iter-870b): variant B uses u_dummy=0 in")
+    print("pad_halo_vector + 2-point cell-centre average for edge")
+    print("re-extraction + mode='edge' on dxc/sina_u in the halo row.")
+    print("This is NOT a Fortran-faithful reference.  Below we print")
+    print("ONLY the same-face value and the proxy value side-by-side")
+    print("with NO ratio or quantitative gap claim.  The qualitative")
+    print("finding 'they differ at cube vertices' survives the proxy")
+    print("limitations; the precise size of the difference does not.")
+    print("Iter-871+ edge-stagger halo helper is needed for a real")
+    print("quantitative gap.")
     print()
 
+    differs = False
     for label, idx in (("SW", (slice(None), 0, 0)),
                        ("SE", (slice(None), -1, 0)),
                        ("NE", (slice(None), -1, -1)),
                        ("NW", (slice(None), 0, -1))):
         edge_val = vort_pad_edge[idx]
         xface_val = vort_pad_xface[idx]
-        diff = jnp.abs(xface_val - edge_val)
         m_edge = float(jnp.max(jnp.abs(edge_val)))
-        m_xface = float(jnp.max(jnp.abs(xface_val)))
-        m_diff = float(jnp.max(diff))
-        print(f"At {label} corner halo cell vort_pad[idx]:")
-        print(f"  mode='edge' max|value|       : {m_edge:.4e}")
-        print(f"  cross-face max|value|        : {m_xface:.4e}")
-        print(f"  max|cross-face - mode='edge'|: {m_diff:.4e}")
-        print(f"  rel diff vs vort_interior    : "
-              f"{m_diff/vort_interior_max:.3e}")
+        m_proxy = float(jnp.max(jnp.abs(xface_val)))
+        m_diff_abs = float(jnp.max(jnp.abs(xface_val - edge_val)))
+        # Only print the same-face and proxy max|value| side-by-side.
+        # Do NOT compute or print a "rel diff vs vort_interior" ratio
+        # (would be a quantitative claim the proxy doesn't justify).
+        print(f"{label} corner halo cell vort_pad[idx]:")
+        print(f"  same-face mode='edge' max|value| : {m_edge:.4e}")
+        print(f"  proxy variant-B max|value|       : {m_proxy:.4e}")
+        if m_diff_abs > 0.0:
+            print(f"  → values differ (proxy ≠ same-face)")
+            differs = True
+        else:
+            print(f"  → values match")
         print()
+    print("Qualitative finding: same-face mode='edge' and the proxy "
+          + ("DIFFER" if differs else "MATCH") + " at the four")
+    print("cube-vertex halo cells on this realistic input.  Use the")
+    print("iter-871+ edge-stagger halo helper for a quantitative gap.")
 
 
 if __name__ == "__main__":

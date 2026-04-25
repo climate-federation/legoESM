@@ -959,17 +959,18 @@ iter-862 and iter-869b helpers both pad their D-grid edge-midpoint inputs (vort,
 
 Report max |Δ| at the four cube-vertex halo cells of `vort_pad`, normalised by `vort` interior magnitude.
 
-**Result** (W2 LEGACY C36 alpha=0).
+**Result** (W2 LEGACY C36 alpha=0; QUALITATIVE side-by-side, no ratio).
 
 ```
-vort_interior max                 : 7.59e+06 m^2/s
+vort_interior max                       : 7.59e+06 m^2/s
 
-At SW / SE / NE / NW corner halo cell vort_pad[corner]:
-  mode='edge' max|value|          : 3.66e+06
-  cross-face proxy max|value|     : 2.22e+06
-  max|proxy - mode='edge'|        : 5.19e+06
-  rel diff vs vort_interior       : 6.85e-01
+At each of SW / SE / NE / NW corner halo cell vort_pad[corner]:
+  same-face mode='edge' max|value|      : 3.66e+06
+  proxy variant-B max|value|            : 2.22e+06
+  → values differ
 ```
+
+iter-870b explicitly STOPS short of computing a quantitative ratio (e.g., `rel_diff / vort_interior`) because variant B is approximate (see LIMITATIONS).  The two values being printed side-by-side document that the same-face halo and the proxy differ on this input; iter-870b does NOT make any quantitative claim about the size of the Fortran-fidelity gap.
 
 **LIMITATIONS of variant B (Codex iter-870 stop-time review).**  Variant B is NOT a tight Fortran-faithful reference.  Three approximations:
 
@@ -977,7 +978,7 @@ At SW / SE / NE / NW corner halo cell vort_pad[corner]:
 2. Edge-midpoint re-extraction `0.5 * (v_cc_pad[:, :-1, halo] + v_cc_pad[:, 1:, halo])` is a 2-point average of two halo'd cell-centre values.  The proper edge-stagger halo gives the cross-face neighbour's edge value at the halo cell, not a 2-point average of its cell-centres.
 3. `dxc` and `sina_u` in the halo row use `mode='edge'` themselves inside the proxy.  Cross-face metric variation isn't captured.
 
-The combination of (1)+(2)+(3) means variant B's reported magnitudes carry an unknown approximation error.  The 5.19e+06 / 68 % figure should be read as **an order-of-magnitude indication that mode='edge' and a cross-face halo DIFFER at cube vertices on a realistic IC**, NOT as a tight quantitative claim about the Fortran-fidelity gap.
+The combination of (1)+(2)+(3) means variant B's reported magnitudes carry an unknown approximation error.  iter-870c (this honesty pass) explicitly removes any "X % rel diff" headline from both the script output and the doc — the qualitative "they differ" finding survives, but the precise magnitude does not, and pretending to quote a quantitative gap was a misleading framing.
 
 **Conclusion (softened).**  iter-870 confirms QUALITATIVELY that the iter-862 / iter-869b mode='edge' halo at cube-vertex positions differs from a cross-face approximation on a realistic input.  The proxy's approximation error prevents a precise quantitative claim.  Cross-face D-grid edge halo helper remains a worthwhile iter-871+ Fortran-fidelity port — the qualitative gap is real, even if the exact magnitude isn't pinned.  Both iter-862 and iter-869b opt-in flags should remain default-off until a true edge-stagger halo helper validates the corrections' RHS values.
 
@@ -995,6 +996,6 @@ The combination of (1)+(2)+(3) means variant B's reported magnitudes carry an un
 - Build the cross-face D-grid edge halo helper.  Build cost: requires edge-stagger angle metrics (cos/sin at edge midpoints in the halo), and cube-vertex handling (a 3-face vertex shares no single neighbour edge — one of the existing options is `synchronize_corner_scalar` semantics adapted for vector pairs).  Multi-iter feasible if scoped to the duogrid path first.
 - Wire the helper into `_d_sw5_corner_divergence` (replacing the iter-655 `mode='edge'`) and the iter-869b d_sw4 helper's RHS construction.
 
-**Deliverable.**  `scripts/diag_iter870_halo_gap.py` + this doc entry recording the 68 % gap measurement.  No source change.
+**Deliverable.**  `scripts/diag_iter870_halo_gap.py` + this doc entry documenting the qualitative side-by-side comparison.  No quantitative gap measurement (proxy is approximate).  No source change.
 
-**Process.**  130th iter in iter-752-870 chain.  Real-data measurement script + qualitative gap confirmation.  After Codex stop-time review pointed out that the variant-B reference is malformed (u=0 in pad_halo_vector + 2-point cell-centre average for edge re-extraction + mode='edge' on metric halo), the doc and script now treat the headline magnitude as an order-of-magnitude proxy rather than a tight Fortran-fidelity figure.  The qualitative finding — that mode='edge' and any cross-face halo differ at cube vertices — survives, but pinning the exact magnitude needs the iter-871+ edge-stagger halo helper.
+**Process.**  130th iter in iter-752-870 chain.  Real-data measurement script + qualitative gap confirmation.  After Codex flagged TWO rounds of overstatement: first the original "68 %" headline rested on a malformed cross-face reference (variant B's `u=0`, 2-point edge re-extraction, `mode='edge'` metric halo); iter-870b added a doc/script caveat but kept the misleading ratio in print/doc; iter-870c (this iter) STRIPS the ratio entirely, prints only same-face vs proxy values side-by-side, and explicitly states no quantitative claim is made.  The qualitative finding — that mode='edge' and the proxy differ at cube vertices — survives.  Pinning the exact magnitude needs the iter-871+ edge-stagger halo helper.
