@@ -818,7 +818,11 @@ def fix_mass_mpas(state, target_mass, mesh):
     """
     from legoesm.core.state import MPASShallowWaterState
     current_mass = global_integral_voronoi(state.h.data, mesh)
-    total_area = jnp.sum(mesh.areaCell)
+    # ``mesh.grid_total_area`` is precomputed at mesh construction —
+    # avoid recomputing the global ``jnp.sum(areaCell)`` every step
+    # (one extra reduction in serial; one extra allreduce under
+    # multi-rank Voronoi sharding).
+    total_area = mesh.grid_total_area
     correction = (target_mass - current_mass) / total_area
     h_fixed = state.h.replace(data=state.h.data + correction)
     return state._replace(h=h_fixed)
@@ -826,6 +830,12 @@ def fix_mass_mpas(state, target_mass, mesh):
 
 def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     """Fix energy conservation on Voronoi mesh via velocity scaling.
+
+    Batches the KE / PE sums into one stacked reduction so the helper
+    issues a single ``jnp.sum`` per accumulator pair instead of two
+    separate ones — half the allreduce traffic when the Voronoi mesh
+    is sharded across ranks (matching the ``shallow_water_mpas`` /
+    ``conservation_mpas`` fixers).
 
     Parameters
     ----------
@@ -847,8 +857,11 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     area = mesh.areaCell
 
     KE_cells = kinetic_energy_cell(u, mesh)
-    KE = jnp.sum(KE_cells * h * area)
-    PE = jnp.sum(0.5 * g * (h + h_s) ** 2 * area)
+    energy_terms = jnp.stack([
+        jnp.sum(KE_cells * h * area),
+        jnp.sum(0.5 * g * (h + h_s) ** 2 * area),
+    ])
+    KE, PE = energy_terms[0], energy_terms[1]
 
     KE_target = jnp.maximum(target_energy - PE, _EPS_ENERGY)
     scale = jnp.where(KE > _tiny(KE), jnp.sqrt(KE_target / KE), 1.0)
