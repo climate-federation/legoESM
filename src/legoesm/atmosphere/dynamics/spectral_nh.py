@@ -426,15 +426,18 @@ def _acoustic_substeps_grid(
 
         # --- Backward: update rho' ---
         rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        rho_w = jnp.zeros_like(w_new)
-        rho_w = rho_w.at[..., 1:-1].set(rho_half * w_new[..., 1:-1])
+        # Use ``jnp.pad`` to attach the zero top/bottom boundaries
+        # instead of allocating ``zeros_like(w_new)`` and scattering
+        # the interior; one Pad HLO op vs alloc + scatter inside
+        # the per-substep ``fori_loop`` body.
+        pad_axes = ((0, 0),) * (w_new.ndim - 1)
+        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes, (1, 1)))
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div
 
         # --- Backward: update theta' ---
         w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
-        dtheta_dz = jnp.zeros_like(theta_total)
         nlev_local = theta_total.shape[-1]
         if nlev_local > 2:
             dz_half_val = height_coord.dz_half
@@ -442,7 +445,10 @@ def _acoustic_substeps_grid(
             inner_grad = (
                 theta_total[..., :-2] - theta_total[..., 2:]
             ) / dz_centered
-            dtheta_dz = dtheta_dz.at[..., 1:-1].set(inner_grad)
+            theta_pad_axes = ((0, 0),) * (theta_total.ndim - 1)
+            dtheta_dz = jnp.pad(inner_grad, (*theta_pad_axes, (1, 1)))
+        else:
+            dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
 
         return (w_new, theta_p_new, rho_p_new)
@@ -524,19 +530,21 @@ def _acoustic_substeps_grid_semi_implicit(
 
         # --- Backward: update rho' ---
         rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        rho_w = jnp.zeros_like(w_new)
-        rho_w = rho_w.at[..., 1:-1].set(rho_half * w_new[..., 1:-1])
+        pad_axes = ((0, 0),) * (w_new.ndim - 1)
+        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes, (1, 1)))
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div
 
         # --- Backward: update theta' ---
         w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
-        dtheta_dz = jnp.zeros_like(theta_total)
         if nlev > 2:
             dz_centered = dz_half[:-1] + dz_half[1:]
             inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-            dtheta_dz = dtheta_dz.at[..., 1:-1].set(inner_grad)
+            theta_pad_axes = ((0, 0),) * (theta_total.ndim - 1)
+            dtheta_dz = jnp.pad(inner_grad, (*theta_pad_axes, (1, 1)))
+        else:
+            dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
 
         return (w_new, theta_p_new, rho_p_new)
