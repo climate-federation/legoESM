@@ -1,4 +1,4 @@
-"""Iter-851 diagnostic (apples-to-apples replacement for iter-850).
+"""Iter-851 diagnostic (apples-to-apples-ish replacement for iter-850).
 
 iter-850 was RETRACTED because its "production divergence at corners"
 was a fabricated 4-point `mode='edge'` average to corners — not part
@@ -6,12 +6,36 @@ of the production pipeline.  Production only uses `cgrid_divergence`
 at CELL CENTRES; the corner divergence quantity does not exist in the
 A-L tendency path.
 
-iter-851 does a valid stencil-equivalence comparison by reducing the
-Fortran corner-divergence to cell centres via 4-point averaging and
-comparing to the production cell-centre `cgrid_divergence`.  Both
-operators now produce CELL-CENTRE divergence on the same stagger; the
-ratio is purely the stencil-construction difference (not a stagger-
-conversion artefact).
+iter-851 reduces the Fortran corner-divergence to cell centres via
+4-point averaging and compares to the production cell-centre
+`cgrid_divergence`.  Both operands are now at cell-centre stagger,
+which is closer to apples-to-apples than iter-850's invalid
+fabricated corner field.
+
+CAVEATS (iter-852 honesty pass, ANY conclusions from this diag must
+acknowledge these):
+1. The "Fortran-cc" field is ALSO a constructed quantity.  Fortran
+   d_sw5 adds damp·delpc to `ke` at CORNER positions, then d_sw6
+   takes corner-to-corner gradients of `ke` to update u/v.  Fortran
+   NEVER evaluates a cell-centre delpc.  4-point centre-from-corner
+   average is one possible reduction, not what Fortran does.
+2. 4-point centre averaging blurs by ~1 cell (O(dx²) stencil error).
+   The cube-vertex-adjacent peak location may reflect blurring, not
+   a pure stencil signature.
+3. The `_d_sw5_corner_divergence` nord=0 branch still uses
+   `mode='edge'` halo padding for vort/ptc at fv3_sw_core.py:~1044
+   (same-face halo gap, analogous to iter-836's _corner_vorticity
+   issue).  Fortran-faithful CGRID halo would require fixing that
+   first.
+
+The reported 73×–403× same-location ratios therefore MIX:
+  (a) genuine Fortran-vs-Python stencil-construction differences,
+  (b) the Fortran helper's internal mode='edge' artefact,
+  (c) the 4-point centre-from-corner reduction artefact.
+This diagnostic cannot disentangle (a), (b), (c).  The honest claim
+is "Fortran corner-stencil + 4-pt-avg-to-cc gives substantially
+different values from production cgrid_divergence at cube-vertex-
+adjacent cells, with mixed contributions from these three sources."
 
 Method:
   1. Production: `div_centre_prod = cgrid_divergence(u_c, v_c, cdgrid)`
@@ -136,7 +160,8 @@ def main():
     prod_peak = _peak(div_centre_prod, lat_centre, lon_centre)
     fort_peak = _peak(delpc_cc, lat_centre, lon_centre)
 
-    print(f"Iter-851 cell-centre divergence stencil comparison (apples-to-apples)")
+    print(f"Iter-851 cell-centre divergence stencil comparison "
+          f"(apples-to-apples-ish; see iter-852 caveats)")
     print(f"W2 IC, C{n}, LEGACY, t=0")
     print()
     print("Production cgrid_divergence (cell-centre flux-form):")
@@ -171,13 +196,25 @@ def main():
         print(f"    production = {prod_at_fort:.3e}, "
               f"Fortran-cc = {fort_at_fort:.3e}, ratio = {ratio2:.3f}")
     print()
-    print("Caveats (iter-851):")
-    print("- Both fields are now at cell centres (apples-to-apples).")
+    print("Caveats (iter-852 honesty pass):")
+    print("- Fortran-cc is a CONSTRUCTED quantity.  Fortran d_sw5 adds")
+    print("  damp·delpc to ke at corner positions; d_sw6 then takes corner-")
+    print("  to-corner gradients of ke.  Fortran NEVER evaluates a cell-")
+    print("  centre delpc.  4-pt centre-from-corner average is one possible")
+    print("  reduction, NOT what Fortran does.")
     print("- Fortran helper's nord=0 branch still uses mode='edge' halo")
-    print("  padding for vort/ptc (fv3_sw_core.py:~1044).  Halo-fix would")
-    print("  refine the comparison.")
+    print("  padding for vort/ptc (fv3_sw_core.py:~1044) — analogous to")
+    print("  iter-836's _corner_vorticity halo gap.  Halo-fix would refine")
+    print("  the comparison.")
     print("- 4-point centre-from-corner averaging introduces O(dx²)")
     print("  spatial blurring; comparison is approximate, not bit-exact.")
+    print("- The 73×–403× ratios MIX (a) genuine stencil-construction")
+    print("  differences, (b) the helper's mode='edge' halo artefact,")
+    print("  (c) the 4-pt centre-from-corner reduction artefact.  This")
+    print("  diagnostic CANNOT disentangle (a), (b), (c).  The honest")
+    print("  claim is that the two stencil pipelines give substantially")
+    print("  different cell-centre values at cube-vertex-adjacent cells,")
+    print("  with mixed contributions from these three sources.")
 
 
 if __name__ == "__main__":

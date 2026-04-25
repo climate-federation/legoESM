@@ -2303,6 +2303,38 @@ Same-location cell-centre ratios (Fortran/production):
 - AT production peak (face 0 (2,0), GC=5.27°): ratio = **−73×** (opposite sign).
 - AT Fortran-cc peak (face 4 (0,1), GC=3.09°): ratio = **+403×**.
 
-**Conclusion (apples-to-apples, valid).**  Both peaks are now near cube vertices (GC=3–5°), confirming that iter-850's panel-edge equatorial peak was a STAGGER ARTEFACT of the invalid comparison, not a real Fortran-stencil signature.  The Fortran corner-divergence stencil (averaged to cell centres) is 73×–403× larger than production at cube-vertex-adjacent cells.  This is the stencil-construction effect, NOT a stagger or `mode='edge'` artefact.
+**Observation (apples-to-apples, with caveats).**  At cell-centre stagger, both peaks are near cube vertices (GC=3–5°), suggesting iter-850's panel-edge-equatorial peak shifted because of the (now-removed) cell-centre→corner 4-point `mode='edge'` averaging, NOT because Fortran fundamentally peaks at a different location.  The Fortran corner-routed stencil (averaged BACK to cell centres) is 73×–403× larger than production at cube-vertex-adjacent cells.
 
-**Implication.**  Phase 1 of the d_sw5 port — replacing the cell-centre `cgrid_divergence` flux-form with a Fortran-faithful corner-routed stencil — would substantially change the production divergence field at cube-vertex-adjacent cells (where iter-844/848 located the production |dv/dt| peak).  Whether this CHANGE constitutes an IMPROVEMENT for W2 LEGACY mode-A still requires a trial wire-in (iter-852+).
+**Caveats on the apples-to-apples comparison itself (iter-852 honesty pass).**  Even iter-851's replacement is an APPROXIMATION, not an absolute Fortran-faithful measurement:
+1. **Fortran-cc is also a constructed quantity.**  Fortran d_sw5 adds `damp·delpc` to `ke` at CORNER positions, then `d_sw6` takes corner-to-corner gradients of `ke` to update `u`/`v` — Fortran NEVER evaluates a "cell-centre delpc."  iter-851's 4-point centre-from-corner average is one possible reduction; it is not what Fortran does.
+2. **4-point centre averaging blurs by ~1 cell.**  Fortran-cc peak appearing at GC=3.09° instead of further from the vertex could partly reflect this blurring, not a pure stencil signature.
+3. **Fortran helper's `mode='edge'` halo gap.**  The `_d_sw5_corner_divergence` nord=0 branch still uses `jnp.pad(..., mode='edge')` for `vort/ptc` at `fv3_sw_core.py:~1044`.  This is a same-face halo gap (analogous to iter-836's `_corner_vorticity` issue).  Some fraction of the 73×–403× ratios reflects that halo gap, not "Fortran-faithful stencil construction."
+
+The 73×–403× figure therefore mixes (a) genuine Fortran-vs-Python stencil-construction differences with (b) the Fortran helper's internal `mode='edge'` artefact and (c) the 4-point centre-from-corner reduction artefact.  iter-851 cannot fully disentangle these.  The strongest defensible claim from iter-851 alone is "Fortran corner-stencil + 4-point-avg-to-cc gives substantially different values from production cgrid_divergence at cube-vertex-adjacent cells, with mixed contributions from stencil-construction, halo, and reduction artefacts."
+
+**Implication.**  Phase 1 of the d_sw5 port — replacing the cell-centre `cgrid_divergence` with a Fortran-routed stencil — would change the production divergence field at cube-vertex-adjacent cells.  Whether the difference is dominated by genuine stencil-construction (the architectural-fix benefit), by the halo gap (a separate fixable artefact), or by reduction-method choices (the cell-centre-from-corner averaging) remains UNDETERMINED by iter-851.  iter-853+'s actual trial wire-in is the next step that can give a definitive answer for W2 LEGACY mode-A.
+
+### Iter-852 — Honesty pass on iter-851's apples-to-apples claims
+
+Codex stop-time review of iter-851: "iter-851 still overclaims what the replacement diagnostic proves."
+
+**The overclaim.**  iter-851's "Conclusion (apples-to-apples, valid)" said:
+- "Both peaks are now near cube vertices (GC=3–5°), confirming that iter-850's panel-edge equatorial peak was a STAGGER ARTEFACT…"  (Causal statement that iter-851 cannot prove from one comparison alone.)
+- "The Fortran corner-divergence stencil (averaged to cell centres) is 73×–403× larger than production at cube-vertex-adjacent cells."  (Magnitude attributable solely to the stencil, ignoring other contributors.)
+- "This is the stencil-construction effect, NOT a stagger or `mode='edge'` artefact."  (Categorical denial of remaining artefacts.)
+
+**The honest position.**  Even iter-851's apples-to-apples is APPROXIMATE because:
+
+1. **"Fortran-cc" is also a constructed quantity.**  Fortran d_sw5 adds `damp·delpc` to `ke` at CORNER positions; `d_sw6` then takes corner-to-corner gradients of `ke` to update `u`/`v`.  Fortran NEVER evaluates a cell-centre delpc.  iter-851's 4-point centre-from-corner average is one possible reduction, not what Fortran does.
+2. **4-point centre averaging blurs by ~1 cell.**  The Fortran-cc peak appearing at GC=3.09° instead of further from the cube vertex could partly reflect this blurring.
+3. **Fortran helper's `mode='edge'` halo gap.**  The `_d_sw5_corner_divergence` nord=0 branch still uses `jnp.pad(..., mode='edge')` for vort/ptc at `fv3_sw_core.py:~1044` — a same-face halo gap analogous to iter-836's `_corner_vorticity` issue.  Some fraction of the reported 73×–403× ratios reflects this halo gap.
+
+The 73×–403× figure mixes (a) genuine Fortran-vs-Python stencil-construction differences, (b) the Fortran helper's internal `mode='edge'` artefact, and (c) the 4-point centre-from-corner reduction artefact.  iter-851 cannot disentangle (a), (b), (c).
+
+**iter-852 fixes.**
+- Doc: replaced iter-851's "Conclusion (apples-to-apples, valid)" with "Observation (apples-to-apples, with caveats)" + a new "Caveats on the apples-to-apples comparison itself" block enumerating (a)/(b)/(c).  Removed "NOT a stagger or `mode='edge'` artefact" categorical denial.  Reworded "Implication" to acknowledge that iter-851 cannot determine whether the change-magnitude is dominated by stencil-construction vs halo vs reduction-method.
+- Script: added an "iter-852 honesty pass" caveat block to `diag_iter851_div_stencil_compare_v2.py`'s output explicitly listing (a)/(b)/(c).  Updated the docstring + the printed title to "apples-to-apples-ish; see iter-852 caveats".
+
+**iter-852 deliverable.**  Doc: replaced iter-851 conclusion with caveat-laden observation; added explicit Caveats block.  Script: caveat block in printed output and in module docstring.  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  112th iter in iter-752-852 chain.  Self-correction iter on the previous self-correction: iter-851 retracted iter-850's invalid comparison but its apples-to-apples REPLACEMENT also has caveats that iter-851 did not adequately surface.  iter-852 makes those caveats explicit in both doc and script.  The path forward (iter-853+ trial wire-in of `_d_sw5_corner_divergence` into A-L production) is unchanged — and remains the only definitive test for W2 LEGACY mode-A.
