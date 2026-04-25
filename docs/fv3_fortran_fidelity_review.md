@@ -1984,3 +1984,28 @@ Pre-iter-884 used `[1, 2, 3, -4, -3, -2]` — shifted INWARD by one cell on each
 **Deliverable.**  Source fix in `src/legoesm/core/fv_tp_2d.py` (1-line index list change + comment block correcting the cell-mapping documentation) + 3 regression tests + this doc entry.
 
 **Process.**  155th iter in the iter-752-884 chain.  Concrete operator-level Fortran-fidelity off-by-one fix in the FB chain PPM transport.  Same class as iter-878 (CW84 constraint coefficient) and iter-880 (extra clip step) — a documented Fortran formula was implemented with subtle indexing that diverged from the Fortran source.  iter-884 corrects the indexing.
+
+### Iter-884b — Codex iter-884 stop-time: strengthen behavioral test to actually catch the index regression
+
+**Codex iter-884 stop-time finding.**  "the new iter-884 runtime tests do not actually validate the boundary-index fix."
+
+**Issue.**  iter-884's `test_iter884_pert_ppm_applied_at_boundary_halo_cells` only checked that `_pert_ppm` was invoked exactly 6 times.  This count is identical for BOTH pre-iter-884 (`[1,2,3,-4,-3,-2]`) and post-iter-884 (`[0,1,2,-3,-2,-1]`).  The test couldn't distinguish the two — only the AST sentinel caught the regression.  The runtime test was a false-pass: it claimed to validate the fix but only validated the count.
+
+**Fix (iter-884b).**  Replace the count-only test with a MARKER-BASED test that reads back the specific q_c indices from each `_pert_ppm` invocation:
+1. Patch `_pert_ppm_iv0` to return `bl[face, k, m] = k` (a unique marker per index).
+2. Patch `_pert_ppm` to capture `bl_slice[0, 0]` from each call.
+3. Assert the captured marker values match the expected Fortran-faithful indices.
+
+For `_ppm_1d` with q shape `(6, n+4, M)`, the internal `q_c` has shape `(6, n+2, M)`.  Fortran-faithful indices `[0, 1, 2, -3, -2, -1]` resolve to absolute positions `[0, 1, 2, n-1, n, n+1]`.  Pre-iter-884 indices `[1, 2, 3, -4, -3, -2]` resolve to `[1, 2, 3, n-2, n-1, n]` — DIFFERENT marker set.
+
+Also fixed: original test passed `q` with shape `(6, n, M)` (unpadded) but `_ppm_1d` expects `(6, n+4, M)` (halo=2 padded).  iter-884b corrects to `(6, n+4, M)`.
+
+**Sentinel verification.**  Manual corruption test (re-inject pre-iter-884 indices `[1, 2, 3, -4, -3, -2]`):
+- Pre-iter-884b: 1 of 3 tests fail (only AST scan).
+- Post-iter-884b: 2 of 3 tests fail (AST scan + behavioral marker scan).
+
+The strengthened sentinel correctly catches the index regression in BOTH static and behavioural senses.
+
+**On restored source.**  All 3 iter-884b tests + 14 other top-level Fortran-fidelity files pass.
+
+**Process.**  156th iter in the iter-752-884b chain.  Codex stop-time review caught a real test-correctness gap: the count-only behavioural test gave false-pass on the index regression because both pre- and post-iter-884 invoke `_pert_ppm` 6 times.  iter-884b strengthens the test to read back the actual q_c indices used, so the index regression now produces a measurable diff in the runtime test.

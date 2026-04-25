@@ -113,61 +113,84 @@ def test_iter884_source_uses_fortran_faithful_indices():
 
 def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
     """Behavioural test: with `use_duogrid=False`, `_ppm_1d` MUST
-    apply iv=1 (= `_pert_ppm`) at q_c[0] and q_c[-1] (the boundary
-    halo cells).  Verified by mock-patching `_pert_ppm` to track
-    which q_c indices it's called on.
+    apply iv=1 (= `_pert_ppm`) at the SPECIFIC q_c indices
+    [0, 1, 2, -3, -2, -1].
 
-    Pre-iter-884 it was called on q_c[1, 2, 3, -4, -3, -2].  Post-
-    iter-884 it should be called on q_c[0, 1, 2, -3, -2, -1].
+    Iter-884b (Codex iter-884 stop-time fix): the original count-
+    only test did NOT distinguish [0,1,2,-3,-2,-1] from
+    [1,2,3,-4,-3,-2] (both have 6 indices).  Codex correctly
+    flagged that as an invalid sentinel.
 
-    The test infers "which q_c index" from the `bl` slice value
-    pattern: we set `bl[:, k, :] = k` for each k so the call's bl
-    argument identifies which index k was selected.
+    iter-884b strategy: capture the `id(bl_slice)` of each
+    `_pert_ppm` invocation, then INSPECT which q_c index those
+    slices were taken from by comparing against pre-computed
+    `bl[:, k, :]` views for every k in [-1, 0, ..., n+1].  The
+    captured ids reveal exactly which indices the for-loop
+    iterated over — no count-equality false-pass.
     """
     from unittest import mock
     from legoesm.core import fv_tp_2d as fv_tp_2d_mod
 
     n = 8
     M = 4
-    # Construct synthetic q with halo=1 padding and known bl values.
     rng = np.random.default_rng(884)
-    q = jnp.asarray(rng.normal(size=(6, n, M)))
+    # `_ppm_1d` expects q with halo=2 padding (shape (6, n+4, M))
+    # — the function itself pads with halo=1 to shape (6, n+6, M)
+    # and then `q_c = qe[:, 2:-2, :]` has shape (6, n+2, M).
+    q = jnp.asarray(rng.normal(size=(6, n + 4, M)))
 
-    captured_indices = []
+    # Make every cell mean's bl coordinate UNIQUE so we can read it
+    # back from the captured slice.  We patch _pert_ppm to record
+    # the `bl_slice[0, 0]` value (which encodes the q_c index used).
+    captured_k_values = []
 
     def tracking_pert_ppm(bl_slice, br_slice):
-        # bl_slice has shape (6, M); we set bl = jnp.tile(jnp.arange(n+2)[None, :, None], (6, 1, M))
-        # so the value at bl[face=0, *, m=0] tells us which q_c index k
-        # was being processed.  We capture the unique value across the
-        # 6×M slice (it should be constant for a given index).
-        v = float(bl_slice[0, 0])
-        captured_indices.append(round(v))
-        # Return unchanged (pass-through, sane fallback for any other test paths).
+        # bl_slice has shape (6, M); read the embedded marker.
+        v = float(np.asarray(bl_slice).flat[0])
+        captured_k_values.append(int(round(v)))
         return bl_slice, br_slice
 
+    # Helper: replace the al → bl/br computation inside _ppm_1d so
+    # bl[face, k, m] = k for all k.  Easiest path: monkey-patch
+    # `_pert_ppm_iv0` to return controlled bl/br.
+    def fake_pert_ppm_iv0(q_c, bl, br):
+        # q_c shape (6, n+2, M).  Return bl[face, k, m] = k
+        # so the subsequent `_pert_ppm` calls receive identifiable
+        # slices.
+        n_plus_2 = bl.shape[1]
+        marker = jnp.broadcast_to(
+            jnp.arange(n_plus_2, dtype=bl.dtype)[None, :, None],
+            bl.shape)
+        return marker, marker
+
     with mock.patch.object(fv_tp_2d_mod, "_pert_ppm", tracking_pert_ppm):
-        # Patch _pert_ppm_iv0 to no-op so the iv=0 call doesn't
-        # interfere with our iv=1 capture logic.
         with mock.patch.object(
-                fv_tp_2d_mod, "_pert_ppm_iv0",
-                side_effect=lambda q_c, bl, br: (bl, br)):
-            # Force bl/br to take values bl[*, k, *] = k via a controlled
-            # patch on al.  Simpler: directly invoke _ppm_1d after
-            # patching the al construction is hard.  Use a different
-            # strategy: simply count the number of pert_ppm calls and
-            # verify it equals 6 (the iter-884 count).
-            captured_indices.clear()
+                fv_tp_2d_mod, "_pert_ppm_iv0", fake_pert_ppm_iv0):
+            captured_k_values.clear()
             _ppm_1d(q, n, use_duogrid=False)
 
-    # Iter-884 calls _pert_ppm 6 times (once per boundary index).
-    # The pre-iter-884 form ALSO calls 6 times — so count alone
-    # doesn't distinguish.  But we capture the bl[0,0,0] values to
-    # see WHICH indices were selected.
-    n_calls = len(captured_indices)
-    assert n_calls == 6, (
-        f"`_ppm_1d(use_duogrid=False)` invoked `_pert_ppm` "
-        f"{n_calls} times; expected 6 (one per boundary index in "
-        f"[0, 1, 2, -3, -2, -1]).")
+    # n_plus_2 = n + 2 = 10.  Negative indices resolve to:
+    #   q_c[-1] → bl[k=n+1] = bl[k=9]
+    #   q_c[-2] → bl[k=n]   = bl[k=8]
+    #   q_c[-3] → bl[k=n-1] = bl[k=7]
+    # So Fortran-faithful indices [0, 1, 2, -3, -2, -1] map to
+    # marker values [0, 1, 2, 7, 8, 9] for n=8.
+    expected_markers = sorted([0, 1, 2, n - 1, n, n + 1])
+    actual_markers = sorted(captured_k_values)
+
+    assert actual_markers == expected_markers, (
+        f"`_ppm_1d(use_duogrid=False)` invoked `_pert_ppm` at q_c "
+        f"indices with markers {actual_markers}; expected "
+        f"{expected_markers} (Fortran-faithful indices [0, 1, 2, "
+        f"-3, -2, -1] resolved with q_c.shape[1]={n+2}).\n"
+        f"\n"
+        f"Pre-iter-884 indices [1, 2, 3, -4, -3, -2] would produce "
+        f"markers {sorted([1, 2, 3, n - 2, n - 1, n])} — different "
+        f"from the Fortran-faithful expectation.\n"
+        f"\n"
+        f"This test catches the index regression that the count-only "
+        f"check missed (both pre- and post-iter-884 invoke "
+        f"`_pert_ppm` 6 times; only the SPECIFIC indices differ).")
 
 
 def test_iter884_no_pert_ppm_in_duogrid_path():
@@ -184,7 +207,8 @@ def test_iter884_no_pert_ppm_in_duogrid_path():
     n = 8
     M = 4
     rng = np.random.default_rng(885)
-    q = jnp.asarray(rng.normal(size=(6, n, M)))
+    # `_ppm_1d` expects q with halo=2 padding (shape (6, n+4, M)).
+    q = jnp.asarray(rng.normal(size=(6, n + 4, M)))
 
     n_calls = {"n": 0}
 
