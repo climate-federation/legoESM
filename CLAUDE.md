@@ -124,6 +124,8 @@ These are recurring mistakes caught by slopbuster. Check for them before submitt
 - **Optimizer setup**: use `ml/training.create_optimizer()` for warmup + cosine decay + grad clipping — do not inline bare `optax.adam()` without schedule.
 - **SFNO model**: import from `ml/sfno.py` — do not create new neural operator architectures in training code.
 - **Channel packing**: import from `ml/channel_packing.py` (`PE3DChannelSpec`, `pack_pe_state`, `unpack_pe_output`) — do not reimplement state↔tensor conversion.
+- **Ocean baroclinic helpers** (#214): for the EOS-pressure iteration, tracer sponge, freshwater virtual-salt flux, or implicit bottom-drag factor in any new ``ocean_pe_*.py`` (or refactor of an existing one), use the helpers in ``src/legoesm/ocean/dynamics/ocean_tendency_common.py`` (``iterate_eos_and_pressure_anomaly``, ``apply_sponge_tracer_relaxation``, ``apply_freshwater_virtual_salt_top``, ``implicit_bottom_drag_factor``). Do not re-inline the 2-pass loop or the sponge cast pattern.
+- **Ocean barotropic helpers** (#214): for the cosine/box time filter, BEBT eta blend, or MAXVEL clip in any new ``barotropic_*.py``, use ``src/legoesm/ocean/dynamics/barotropic_common.py`` (``compute_filter_weights``, ``bebt_blend``, ``maxvel_clip``). The structural enforcement test ``tests/ocean/unit/test_no_scheme_duplication.py`` will fail if these are reinlined.
 
 ### JIT and compilation
 - **Never build closures inside training loops**: `build_segment_fn` creates a new function object each call. If called inside a `for epoch` loop or inside `_loss_fn`, it causes JIT recompilation every iteration. Build once outside the loop; pass changing values as explicit arguments.

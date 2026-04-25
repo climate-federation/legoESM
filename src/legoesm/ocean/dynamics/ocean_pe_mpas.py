@@ -55,7 +55,7 @@ from legoesm.core.operators_voronoi import (
     vertex_thickness_3d,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
-from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -64,9 +64,11 @@ from legoesm.ocean.vertical import (
     vertical_advection_ocean,
     flux_form_vertical_momentum_advection,
 )
-from legoesm.ocean.freshwater import (
-    FreshwaterForcing,
-    virtual_salt_flux,
+from legoesm.ocean.freshwater import FreshwaterForcing
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    apply_freshwater_virtual_salt_top,
+    apply_sponge_tracer_relaxation,
+    iterate_eos_and_pressure_anomaly,
 )
 
 
@@ -128,35 +130,15 @@ def mpas_ocean_baroclinic_tendencies(
     # ---- Density and hydrostatic pressure ----
     # Fill land-cell T/S with ocean-neighbor values before EOS so that
     # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
-    T_filled = _fill_land_cells_mpas(T_3d, mask)
-    S_filled = _fill_land_cells_mpas(S_3d, mask)
+    # Uses the reference Jacobian (J=1, eta=0): the barotropic solver
+    # handles g*grad(eta) and using actual J here would double-count it.
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
-    # Use REFERENCE Jacobian (J=1, eta=0) for the hydrostatic pressure
-    # in the EOS iteration.  The barotropic solver handles the
-    # free-surface pressure gradient g*grad(eta); using the actual J
-    # here would create a spatially-varying pressure even for uniform
-    # T/S, double-counting the barotropic forcing.
-    # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:207-213)
-    J_ref = jnp.ones_like(jacobian)
-    eta_ref = jnp.zeros_like(eta)
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T_3d))
-    for _ in range(2):
-        p_hydro = compute_hydrostatic_pressure(
-            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
-        )
-        rho = eos_fn(T_filled, S_filled, p_hydro)
-    p_hydro = compute_hydrostatic_pressure(
-        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
-    )  # (nCells, nlev)
-
-    # Baroclinic pressure anomaly: built from rho' = rho - rho_0 only,
-    # using REFERENCE layer thickness dz_ref (not actual dz = dz_ref*J).
-    # This ensures the baroclinic PGF is independent of eta, avoiding
-    # overlap with the barotropic solver's -g*grad(eta).
-    rho_prime = rho - rho_0
-    dp_layer = rho_prime * g * z_coord.dz_ref
-    p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = p_prime + 0.5 * dp_layer  # (nCells, nlev)
+    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+        T_3d, S_3d, mask,
+        lambda field: _fill_land_cells_mpas(field, mask),
+        eos_fn, z_coord.dz_ref, rho_0, g,
+        n_iter=2,
+    )
 
     # Fill land cells in p_prime before gradient_edge so the 2-cell
     # stencil sees smooth values at coastlines.
@@ -352,21 +334,21 @@ def mpas_ocean_baroclinic_tendencies(
     # from ocean_model_mpas.py:step()).  Only the virtual salt flux is
     # applied here as a tracer tendency.
     if freshwater is not None and config.freshwater_closure != "none":
-        # Virtual salt flux: dS/dt = -S_ref * F_fw / (rho_0 * dz_0)
-        dz_0 = h_k[:, 0]  # top layer thickness (nCells,)
-        dS_fw = virtual_salt_flux(freshwater, config.S_ref, dz_0, config.rho_0)
-        dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_fw * mask)
+        dS_dt_3d = apply_freshwater_virtual_salt_top(
+            dS_dt_3d, freshwater, config.S_ref, h_k[:, 0], config.rho_0, mask,
+        )
 
     # ---- Sponge layer relaxation ----
     # Cast sponge arrays to state dtype to prevent float64 promotion when
     # the precision policy stores state in float32 (crashes barotropic scan).
     if sponge is not None:
-        _dt = T_3d.dtype
-        gamma_3d = sponge.gamma.astype(_dt)[:, jnp.newaxis]  # (nCells, 1)
-        dT_dt_3d = dT_dt_3d + gamma_3d * (sponge.T_ref.astype(_dt) - T_3d) * mask[:, jnp.newaxis]
-        dS_dt_3d = dS_dt_3d + gamma_3d * (sponge.S_ref.astype(_dt) - S_3d) * mask[:, jnp.newaxis]
+        dT_dt_3d, dS_dt_3d = apply_sponge_tracer_relaxation(
+            dT_dt_3d, dS_dt_3d, T_3d, S_3d, sponge, mask=mask,
+            expand_gamma_axis=-1,
+        )
         # Edge velocity sponge (if reference velocity provided)
         if sponge.u_ref is not None:
+            _dt = T_3d.dtype
             gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
             gamma_edge_3d = gamma_edge[:, jnp.newaxis]
             du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
