@@ -2642,3 +2642,54 @@ Per iter-857b's iter-858+ Priority 1: with the Phase 1 stencil swap stable at su
 **Deliverable.**  `scripts/diag_iter858_phase1_1day.py` (with note that source patches are reverted).  Source changes applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
 
 **Process.**  118th iter in iter-752-858 chain.  Definitive 1-day measurement: Phase 1 stencil-swap-alone (with iter-849 Checks 1+3+4 unfixed) does NOT reduce W2 LEGACY mode-A at the 3 tested sub-canonical damp_scales.  In fact it WORSENS v_ll_Linf by 46-76 % at 0.001× / 0.01×, and is unstable at 0.1× by 13.4 h (despite iter-857's 60-step "stable" finding — important reminder that short-run trials do NOT certify long-run stability).  Rules out Phase 1 stencil-swap-alone for these tested damp_scales; iter-849 Check 1 (`*dt` factor) and/or Check 4 (`ke→d_sw6` routing) implementations remain the iter-859+ candidates.  Reference v_ll_Linf measurement-path difference (iter-858's direct-cell-centre 0.188 vs iter-820's lat-lon-regrid 0.159) is documented but does not affect the Phase 1 vs un-patched 1.0× internal comparison within iter-858.
+
+### Iter-859 — Check 1 alone is NO-OP on production; Phase 1 + Check 1 makes things WORSE (catastrophic)
+
+Per iter-858b's iter-859+ Priority 1: implement iter-849 Check 1 (`*dt` factor in adaptive cap) on top of Phase 1 stencil swap and re-test at canonical damping.  Per Fortran sw_core.F90:1720, the `*dt` factor goes inside `dddmp · |delpc|` BEFORE the 0.20 cap.
+
+**Method.**
+- Re-applied iter-857 source patches (phase1_div_swap kwarg + module-toggle forwarding) AND added a new opt-in kwarg `phase1_check1_dt: bool = False`.  When True, the adaptive cap argument becomes `dddmp · |div| · phase1_dt` (matching Fortran).
+- `scripts/diag_iter859_phase1_check1.py` runs W2 LEGACY C36 1 day (288 steps) via `model.step()` with multiple combinations.
+- After: REVERTED both source patches.  All 14 W2 sentinels pass.
+
+**Result (W2 LEGACY 1-day).**
+
+| Config                                | damp_scale | completed 24h? | L2          | v_ll_Linf (m/s)  |
+|---------------------------------------|-----------:|:---------------:|------------:|----------------:|
+| **A: production (no Phase1, no C1)**   | 1.0        | yes             | 2.176e−04   | **0.188**         |
+| **B: production + C1 only**            | 1.0        | yes             | **2.176e−04** | **0.188** (identical to A) |
+| D: Phase1 + C1                         | 0.001      | **NO**           | n/a          | blew up at step 60 |
+| D: Phase1 + C1                         | 0.01       | **NO**           | n/a          | blew up at step 61 |
+| D: Phase1 + C1                         | 0.1        | **NO**           | n/a          | blew up at step 55 |
+| D: Phase1 + C1                         | 1.0        | **NO**           | n/a          | blew up at step 8 |
+
+**Striking findings.**
+
+**1) Check 1 alone is a NO-OP on production** (config B identical to A to all reported digits).  Mechanism: with the production `cgrid_divergence` stencil at W2 IC, divergence values are tiny (~1e−8 1/s).  With dddmp=0.2 and dt=300s, `dddmp · |div| · dt = 0.2 · 1e−8 · 300 = 6e−7` — vastly below the 0.20 cap.  The cap is dominated by the `d2_bg` floor (= div_damp / da_min_c ≈ 1e−6 at canonical), NOT the dddmp term.  So adding `*dt` to a term that's already cap-irrelevant is invisible.  This **directly refutes** iter-758c's "applying *dt alone breaks RK3" speculation for the production magnitude regime.  iter-758c may have been from a synthetic test that hit the cap; on actual W2 IC the production stencil's divergence never gets close.
+
+**2) Phase 1 + Check 1 BLOWS UP at all damp_scales** (config D blows up at step 8 at canonical, step ~55-61 at sub-canonical 0.001-0.1×).  Mechanism: with the Fortran-cc stencil's much larger divergence values (~1e−5 to 1e−2 from iter-851 ratios), `dddmp · |div| · dt` saturates the 0.20 cap aggressively.  The damping coefficient becomes `da_min_c · 0.20` essentially everywhere where the Fortran-cc divergence is non-trivial — a uniformly large damping that destabilises within tens of steps.
+
+**3) Check 1 is INCONSISTENTLY effective.**  On the production stencil, `*dt` has no effect because divergence is small.  On the Fortran-cc stencil, `*dt` makes the damping uniformly saturate.  Neither yields useful information about Fortran-faithful d_sw5; the cap activation regime is mismatched between the production and Fortran-cc magnitudes.  iter-849's Check 1 audit identified the gap, but iter-859's measurement shows it is NOT the missing piece for mode-A reduction in either configuration tested.
+
+**Conclusion.**  iter-849 Check 1 in isolation (without Check 4 ke→d_sw6 routing) does NOT yield a Fortran-faithful + stable + mode-A-reducing W2 in either:
+- Production stencil + Check 1 (no-op): same v_ll_Linf as production.
+- Phase 1 + Check 1: catastrophic instability at all tested damp_scales.
+
+The remaining hypothesis is iter-849 Check 4 (`ke→d_sw6` routing) — but that is a multi-iter architectural port, structurally different from the stencil/coefficient swaps tested in iter-851 through iter-859.
+
+**What iter-859 DOES show.**
+- Check 1 alone on production: production W2 1-day numbers are unchanged (Check 1 is a NO-OP at production magnitude).
+- Phase 1 + Check 1: catastrophic instability at ALL damp_scales tested (canonical and sub-canonical), worse than Phase 1 alone.
+- The `*dt` factor's effect depends on whether the divergence is large enough to saturate the cap.  Production: never; Phase 1: always.
+
+**What iter-859 does NOT establish.**
+- Whether iter-849 Check 4 (ke-application path) added to Phase 1 + Check 1 would change anything.
+- Whether some intermediate divergence-magnitude regime (e.g., halo-fixed `_d_sw5_corner_divergence`) would put the cap activation in a useful regime.
+
+**Iter-860+ candidates.**
+- Multi-iter Check 4 architectural port: re-route the damping through `ke += damp · delpc → corner-rdxc-grad` (Fortran d_sw5 + d_sw6 structure) instead of the production `du += coeff · ∇·div` direct addition.  Bigger structural change.
+- Pivot away from d_sw5 port: audit `_arakawa_lamb_gradient` corner handling, port a different Fortran operator, or accept that the mode-A reduction requires a complete dynamical-core swap (e.g., FB chain port, multi-iter).
+
+**Deliverable.**  `scripts/diag_iter859_phase1_check1.py` (with note that source patches are reverted).  Source changes applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
+
+**Process.**  119th iter in iter-752-859 chain.  Tests Phase 1 + iter-849 Check 1 directly: Check 1 is a no-op on production stencil (cap-irrelevant due to small divergence), and catastrophic on Phase 1 stencil (cap-saturating due to large divergence).  Neither is the missing piece for mode-A reduction.  iter-849 Check 4 (ke→d_sw6 architectural port) is the only remaining d_sw5 hypothesis but is multi-iter.  Pivots iter-860+ scope toward Check 4 or a different operator audit.
