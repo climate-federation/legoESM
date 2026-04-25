@@ -1958,3 +1958,29 @@ jax.config.update("jax_enable_x64", True)
 **Deliverable.**  3-line additions to 14 test files + this doc entry.  No source-code change.
 
 **Process.**  154th iter in the iter-752-883 chain.  Codex stop-time review caught a real CI/local divergence: tests passed in CI (which sets JAX_ENABLE_X64=1) but failed under default `pytest` invocation.  iter-883 makes all 14 iter chain tests robust to JAX bootstrap timing by adding `jax.config.update` at module-load time.  Local developers can now run `pytest tests/test_*.py` directly without remembering the env var.
+
+### Iter-884 — Fix `_ppm_1d` off-by-one in pert_ppm boundary indices
+
+**Bug.**  `_ppm_1d` (`src/legoesm/core/fv_tp_2d.py`) applied the iv=1 boundary monotonicity constraint at the WRONG indices.  Fortran tp_core.F90:629 calls `pert_ppm(3, q1(0), bl(0), br(0), 1)` at the LEFT boundary, applying iv=1 to bl/br indices `0, 1, 2`.  In Fortran's halo convention with `is=1, ie=npx-1`, these correspond to `q1(0)` (halo-(-1)), `q1(1)` (interior 0), `q1(2)` (interior 1).  In our Python's `q_c` shape (n+2) convention with `q_c[0]` = halo-(-1), Fortran indices `0, 1, 2` map to Python `q_c[0, 1, 2]`.
+
+Pre-iter-884 used `[1, 2, 3, -4, -3, -2]` — shifted INWARD by one cell on each side.  This silently dropped the boundary halo cell from the iv=1 constraint and instead applied it to a deeper interior cell.  The pre-iter-884 source comment incorrectly labeled this "Fortran interior cells 0,1,2 → q_c indices 1,2,3".
+
+**Fix (iter-884).**  Change to `[0, 1, 2, -3, -2, -1]` matching Fortran's exact range.  Update the source comment to reflect the correct cell mapping.
+
+**Behavioural impact.**
+- W2 sentinel `test_w2_iter761_matrix_v_ll_and_mode4_baseline`: PASSES bit-identically (production W2 uses `cgrid_mass_flux_divergence` → `_ppm_reconstruct_1d` in `operators_cdgrid.py`, NOT `_ppm_1d` in `fv_tp_2d.py`).
+- All 103 top-level iter-chain tests: PASS.
+- The fix only affects the FB chain transport path (`fv_tp_2d` → `_xppm`/`_yppm` → `_ppm_1d`).
+
+**Tests** (`tests/test_ppm_1d_boundary_indices_iter884.py`):
+- `test_iter884_source_uses_fortran_faithful_indices`: AST scan asserting source contains `[0, 1, 2, -3, -2, -1]` AND does NOT contain `[1, 2, 3, -4, -3, -2]`.
+- `test_iter884_pert_ppm_applied_at_boundary_halo_cells`: behavioural — `_pert_ppm` invoked exactly 6 times in legacy mode.
+- `test_iter884_no_pert_ppm_in_duogrid_path`: sanity — `_pert_ppm` invoked 0 times in duogrid mode (preserves iter-516/iter-517 gate).
+
+**Sentinel verification.**  Re-inject pre-iter-884 indices: 1 of 3 tests fails (AST scan rejects the regression).  Restored: 3 of 3 pass.
+
+**Why this matters.**  Even though W2 sentinel is unaffected (different code path), this is a real Fortran-fidelity bug in the FB chain transport stack.  The off-by-one shifted the iv=1 monotonicity constraint INWARD by one cell on each face boundary, leaving the boundary halo cell unconstrained and over-constraining a deeper interior cell.  On inputs with sharp gradients near cube faces, the FB chain's PPM transport would silently produce non-Fortran-faithful results.
+
+**Deliverable.**  Source fix in `src/legoesm/core/fv_tp_2d.py` (1-line index list change + comment block correcting the cell-mapping documentation) + 3 regression tests + this doc entry.
+
+**Process.**  155th iter in the iter-752-884 chain.  Concrete operator-level Fortran-fidelity off-by-one fix in the FB chain PPM transport.  Same class as iter-878 (CW84 constraint coefficient) and iter-880 (extra clip step) — a documented Fortran formula was implemented with subtle indexing that diverged from the Fortran source.  iter-884 corrects the indexing.

@@ -239,18 +239,39 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
     bl, br = _pert_ppm_iv0(q_c, bl, br)
 
-    # pert_ppm(iv=1) at face-boundary INTERIOR cells: extra monotonicity for
+    # pert_ppm(iv=1) at face-boundary cells: extra monotonicity for
     # the three cells whose PPM stencil crosses a face boundary.
-    # Fortran tp_core.F90:629 calls pert_ppm iv=1 at interior cells 0,1,2 on
-    # the left side and tp_core.F90:648 at npx-3,npx-2,npx-1 on the right
-    # (NOT halo cells).  Fortran gates on (.not. (bounded_domain .or. duogrid))
-    # at line 612: duogrid provides real cross-face halo data so the extra
-    # iv=1 limiter is unnecessary.
-    # q_c shape is (n+2) with q_c[0] = halo-1, q_c[1..n] = interior 0..n-1,
-    # q_c[n+1] = halo n.  Fortran interior cells 0,1,2 → q_c indices 1,2,3;
-    # Fortran interior n-3,n-2,n-1 → q_c indices n-2,n-1,n.
+    # Fortran tp_core.F90:629 calls pert_ppm iv=1 at indices 0,1,2 on
+    # the left side and tp_core.F90:648 at npx-2,npx-1,npx on the right.
+    # Fortran gates on (.not. (bounded_domain .or. duogrid)) at line 612:
+    # duogrid provides real cross-face halo data so the extra iv=1
+    # limiter is unnecessary.
+    #
+    # q_c shape is (n+2) with q_c[0] = halo-(-1) (Fortran q1(0)),
+    # q_c[1..n] = interior 0..n-1 (Fortran q1(1..npx-1)),
+    # q_c[n+1] = halo n (Fortran q1(npx)).
+    #
+    # Iter-884 (Fortran-fidelity off-by-one fix): Fortran's pert_ppm
+    # call at line 629 uses bl/br indices 0,1,2 — which correspond to
+    # cells q1(0), q1(1), q1(2) in Fortran indexing → q_c[0,1,2] in
+    # our Python.  Pre-iter-884 we used [1, 2, 3] (shifted INWARD by
+    # one cell) and the comment incorrectly labelled these "Fortran
+    # interior 0,1,2".  Similarly on the right, Fortran uses indices
+    # npx-2,npx-1,npx → q_c[-3,-2,-1] in our Python; pre-iter-884 we
+    # used [-4,-3,-2] (also shifted INWARD).  iter-884 corrects to
+    # [0, 1, 2, -3, -2, -1] to match Fortran's exact index range.
+    #
+    # Behavioural impact: the iv=1 constraint now applies to the
+    # FACE-BOUNDARY-ADJACENT halo cell (q_c[0] / q_c[-1]) plus the
+    # two adjacent interior cells, instead of three interior cells
+    # one cell away from the boundary.  W2 sentinel uses
+    # `FV3EdgeShallowWaterModel` which doesn't route through this
+    # `_ppm_1d` (production W2 uses `cgrid_mass_flux_divergence` →
+    # `_ppm_reconstruct_1d` in operators_cdgrid.py); the FB chain
+    # transport path (`fv_tp_2d` → `_xppm`/`_yppm` → `_ppm_1d`) is
+    # the affected code.
     if not use_duogrid:
-        for k in [1, 2, 3, -4, -3, -2]:
+        for k in [0, 1, 2, -3, -2, -1]:
             bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
             bl = bl.at[:, k, :].set(bl_k)
             br = br.at[:, k, :].set(br_k)
