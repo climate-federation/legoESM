@@ -237,22 +237,29 @@ def test_iter879_both_limiters_use_signed_product_in_overshoot_compare():
             f"vocabulary.  Update both source and sentinel together "
             f"if this is intentional.")
 
-        # At least one such Compare's LHS must be a signed product
-        # (or Name-bound to one).  This catches the
-        # ``q_6 > dq * dq`` regression (LHS is bare q_6 Name, NOT in
-        # `intermediates` set, NOT a BinOp).
-        signed_lhs_found = any(
-            _is_signed_product(lhs, intermediates)
-            for lhs, _ in constraint_compares)
-        assert signed_lhs_found, (
-            f"Function `{fn_name}` in {rel_path} has at least one "
-            f"Compare with a squared-span RHS, but NO Compare's LHS "
-            f"is a signed `q_6*dq` (or `d6*dm`) product.  This is "
-            f"the iter-878 missing-product regression: pre-iter-878 "
-            f"the LHS was `q_6` alone (bare Name, not a product), "
-            f"giving `q_6 > dq*dq` instead of CW84's "
-            f"`q_6*dq > dq*dq`.  Restore the signed product on the "
-            f"LHS.\n"
-            f"Found compares (LHS dumps):\n"
-            + "\n".join(f"  {ast.unparse(lhs)}"
-                       for lhs, _ in constraint_compares))
+        # Iter-879c (Codex iter-879b stop-time): EVERY Compare with a
+        # squared-span RHS MUST have a signed-product LHS.  iter-879b
+        # required only "at least one" which false-passed if a
+        # function had both a buggy and a correct Compare.  The
+        # CW84-compliant pattern is structural: every overshoot
+        # constraint Compare must have the signed product, no
+        # exceptions.  A bare ``q_6`` LHS in any squared-span Compare
+        # is the iter-878 regression and must fail loudly.
+        bad_compares = [
+            (lhs, rhs) for lhs, rhs in constraint_compares
+            if not _is_signed_product(lhs, intermediates)
+        ]
+        assert not bad_compares, (
+            f"Function `{fn_name}` in {rel_path} has Compare(s) with "
+            f"a squared-span RHS but a non-signed-product LHS — the "
+            f"iter-878 missing-product regression.  Per CW84 eq. "
+            f"1.10 the LHS must be `q_6 * dq` (or `d6 * dm`); "
+            f"pre-iter-878 the LHS was bare `q_6` (no span factor).  "
+            f"Iter-879c requires ALL squared-span compares to have "
+            f"signed-product LHS so a co-existing 'good' Compare "
+            f"cannot mask a buggy one.\n"
+            f"Bad compares ({len(bad_compares)} of "
+            f"{len(constraint_compares)}):\n"
+            + "\n".join(f"  LHS={ast.unparse(lhs)} (against "
+                       f"RHS={ast.unparse(rhs)})"
+                       for lhs, rhs in bad_compares))

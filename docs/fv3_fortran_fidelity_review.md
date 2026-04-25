@@ -1432,3 +1432,37 @@ The sentinel correctly identified that NEITHER Compare LHS was a signed product.
 **Deliverable.**  Tightened AST scan in `tests/test_ppm_limiter_consistency_iter879.py` (replaces the iter-879 lax existence-check) + this doc entry recording the Codex finding and the verification that the new sentinel fires loudly on the regression.
 
 **Process.**  140th iter in the iter-752-879b chain.  Codex stop-time review caught a real soundness gap in the iter-879 sentinel — the original scan was easy to trick.  iter-879b tightens it to a structural Compare scan that actually catches the bug class it claims to guard.  Verified by deliberate bug re-injection.
+
+### Iter-879c — Codex iter-879b stop-time: require ALL squared-span Compares to have signed-product LHS
+
+**Codex iter-879b stop-time finding.**  "revised AST sentinel still false-passes if an unrelated 'good' compare exists".
+
+**Issue.**  iter-879b's sentinel required AT LEAST ONE Compare with squared-span RHS to have a signed-product LHS.  This is still insufficient: if a function has TWO Compares with squared-span RHS — one with the buggy bare `q_6` LHS (the iter-878 regression) and one with a correct signed product — the sentinel passes because at least one is good, missing the buggy one.
+
+**Fix (iter-879c).**  Require ALL Compares with squared-span RHS to have signed-product LHS.  A single bare-`q_6` Compare in the function fails the sentinel.
+
+```python
+bad_compares = [
+    (lhs, rhs) for lhs, rhs in constraint_compares
+    if not _is_signed_product(lhs, intermediates)
+]
+assert not bad_compares, ...
+```
+
+**Sentinel verification.**  iter-879c includes a manual verification that the tightened sentinel fires on the mixed buggy/good case Codex flagged:
+```bash
+# Injected an EXTRA buggy Compare alongside the good ones:
+#   _iter879c_bad = q_6 > dq_sq  # bare q_6 LHS — iter-878 bug pattern
+# Result:
+FAILED test_iter879_both_limiters_use_signed_product_in_overshoot_compare
+  Bad compares (1 of 3):
+    LHS=q_6 (against RHS=dq_sq)
+```
+
+The sentinel correctly identified the single buggy Compare among the 3 squared-span Compares in the function.
+
+**On restored source.**  All 4 iter-879c tests + 4 iter-878 tests pass (8 total).
+
+**Deliverable.**  Tightened AST scan in `tests/test_ppm_limiter_consistency_iter879.py` (changes "any signed-product LHS" to "no non-signed-product LHS") + this doc entry recording the verification chain: iter-879 (existence-only, false-passes) → iter-879b (structural but "any") → iter-879c (structural and "all"), each pass tightening to address the prior Codex stop-time finding.
+
+**Process.**  141st iter in the iter-752-879c chain.  Three-pass progressive sentinel tightening driven by Codex stop-time critiques.  The final iter-879c form is structurally tight: the regression class is caught by walking every Compare in the function and rejecting any with bare `q_6` (or equivalent) LHS against a squared-span RHS.  No more false-pass paths identified.
