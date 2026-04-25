@@ -53,9 +53,30 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
     FV3EdgeShallowWaterState)
 from legoesm.core import operators_cdgrid as ocd
+from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from tests.atmosphere.shallow_water.test_cases.williamson import (
     williamson_test2)
+
+
+# iter-860 reproducibility guard: fail LOUDLY if the source patch
+# this script depends on (phase1_div_swap kwarg) is not present.
+# Setting `_PHASE1_DIV_SWAP_ENABLED` on the module via setattr always
+# succeeds even when the wrapper doesn't read it, so without this
+# guard the script would SILENTLY run production code and produce
+# misleading "phase1=True" rows that are actually production results.
+import inspect
+_sig = inspect.signature(fv3_sw_tendencies)
+if "phase1_div_swap" not in _sig.parameters:
+    raise RuntimeError(
+        "scripts/diag_iter857_phase1_via_modelstep.py requires the "
+        "`phase1_div_swap` source patch in `fv3_sw_tendencies` AND a "
+        "matching toggle-forwarding patch in `shallow_water_fv3_cdgrid.py`."
+        "  Both patches were REVERTED at the end of iter-857 per "
+        "Ralph-loop discipline.  Re-apply them temporarily to re-run.  "
+        "See iter-857 doc entry in docs/fv3_fortran_fidelity_review.md "
+        "for the diff."
+    )
 
 
 def run_via_modelstep(damp_scale, n=36, dt=300.0, n_steps=60,

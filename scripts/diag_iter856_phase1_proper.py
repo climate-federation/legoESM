@@ -54,6 +54,21 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
     FV3EdgeShallowWaterState)
 from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+
+
+# iter-860 reproducibility guard: fail LOUDLY at script entry if the
+# `phase1_div_swap` source patch is not present.  Without this, the
+# script would fail later with a TypeError at the fv3_sw_tendencies
+# call site — but the upfront guard makes the requirement explicit.
+import inspect
+_sig = inspect.signature(fv3_sw_tendencies)
+if "phase1_div_swap" not in _sig.parameters:
+    raise RuntimeError(
+        "scripts/diag_iter856_phase1_proper.py requires the "
+        "`phase1_div_swap` source patch in `fv3_sw_tendencies`.  "
+        "It was REVERTED at the end of iter-856.  Re-apply to re-run.  "
+        "See iter-856 doc entry for the diff."
+    )
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from tests.atmosphere.shallow_water.test_cases.williamson import (
     williamson_test2)

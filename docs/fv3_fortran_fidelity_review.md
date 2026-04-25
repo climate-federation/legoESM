@@ -2694,3 +2694,37 @@ The remaining iter-849 audit items are: Check 4 (`ke→d_sw6` routing — multi-
 **Deliverable.**  `scripts/diag_iter859_phase1_check1.py` (with note that source patches are reverted).  Source changes applied for the run, then REVERTED.  All 14 W2 sentinels pass after revert.
 
 **Process.**  119th iter in iter-752-859 chain.  Tests Phase 1 + iter-849 Check 1 directly: Check 1 is a no-op on production stencil (cap-irrelevant at production divergence magnitude `~1e−8`, where d2_bg=4.26e−3 dominates), and destabilising on Phase 1 stencil (regional cap saturation at peak corners with divergence `~1.16e−2 ≳ 0.0033` threshold, lifting damping ~47× at saturated cells).  Neither regime is the missing piece for mode-A reduction.  iter-849 audit items still untested: Check 4 (ke→d_sw6 architectural port, multi-iter) AND halo-fixed `_d_sw5_corner_divergence` (a feasible single-iter port that might shift Phase 1's divergence magnitude into a useful regime).  Pivots iter-860+ scope toward halo-fixed Phase 1 OR Check 4 OR different operator audit.
+
+### Iter-860 — Reproducibility guard: scripts now error loudly without source patches
+
+Codex stop-time review of iter-859: "new diagnostic script is non-reproducible and silently wrong in the checked-in tree."
+
+**The bug.**  iter-857/858/859 scripts set module-level toggles `legoesm.core.operators_cdgrid._PHASE1_DIV_SWAP_ENABLED` etc. via `setattr` to communicate with the temporary source patches in `fv3_sw_tendencies` and the `tendency_fn` wrapper.  After the patches were REVERTED at the end of each iter, the toggle setattr calls STILL succeed (Python lets you set arbitrary attributes), but the un-patched `tendency_fn` wrapper does NOT read them and the un-patched `fv3_sw_tendencies` does NOT accept the `phase1_div_swap` kwarg internally.
+
+The result: iter-857/858/859 scripts run successfully on the post-revert tree but SILENTLY produce production results — they LOOK like they're testing Phase 1 but actually exercise the unmodified production pipeline.  This violates reproducibility: a future reader running the script gets misleading "phase1=True" rows that are actually production output.
+
+(Verified empirically: `scripts/diag_iter857_phase1_via_modelstep.py` ran successfully on HEAD before the iter-860 fix, producing `(reference) un-patched (phase1=False) at canonical 1.0× via model.step(): completed=True, final |h-h0| = 6.409e-01 m` — the production reference value, with no error or warning despite the source patches being gone.)
+
+**The fix.**  Added an upfront `inspect.signature(fv3_sw_tendencies)` guard at the top of each affected script (iter-856, iter-857, iter-858, iter-859) that raises `RuntimeError` immediately if the required `phase1_div_swap` (and for iter-859, `phase1_check1_dt`) kwarg is missing from the function signature.  The error message names the patches needed and points to the corresponding doc entry for the diff.
+
+**Verified.**  All four scripts now exit with a clear `RuntimeError` and explanatory message when run on the post-revert HEAD.  Re-applying the patches makes them work again (the guard checks the signature, and once the patch is back the kwarg is present).
+
+**Why this matters going forward.**  Future trial-only iters that apply temporary source patches MUST add this guard pattern.  A "the patch is reverted" docstring note is INSUFFICIENT — the script must FAIL LOUDLY when run on the post-revert tree.  iter-860 establishes this as the standard.
+
+**What iter-860 DOES show.**
+- iter-857/858/859 scripts had a real silent-wrongness reproducibility bug; running them on the post-revert tree produced production results without error.
+- The fix is a 5-line `inspect.signature` guard; the pattern is now applied consistently to all 4 trial-script files.
+- The original iter-857/858/859 documented results (which were obtained when the patches WERE applied) remain valid and unchanged.
+
+**What iter-860 does NOT establish.**
+- Any new mechanism information about Phase 1, Check 1, or W2 LEGACY mode-A.
+- This is a doc-honesty / reproducibility-discipline iter, not a measurement iter.
+
+**Iter-861+ candidates (unchanged from iter-859).**
+- Halo-fixed `_d_sw5_corner_divergence` (single-iter feasible).
+- Multi-iter Check 4 architectural port.
+- Pivot to a different operator audit (e.g., `_arakawa_lamb_gradient` corner handling).
+
+**Deliverable.**  Updated `scripts/diag_iter856_phase1_proper.py`, `scripts/diag_iter857_phase1_via_modelstep.py`, `scripts/diag_iter858_phase1_1day.py`, `scripts/diag_iter859_phase1_check1.py` with upfront `inspect.signature` guard.  All raise `RuntimeError` immediately on the post-revert HEAD.  No production source-code change.
+
+**Process.**  120th iter in iter-752-860 chain.  Reproducibility-discipline pass: trial-only scripts that depend on temporary source patches MUST fail loudly when those patches are absent, not silently run production code.  iter-857/858/859 scripts updated to enforce this; pattern established for future iters.

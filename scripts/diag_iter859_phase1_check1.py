@@ -50,7 +50,23 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig, FV3EdgeShallowWaterModel,
     FV3EdgeShallowWaterState)
 from legoesm.core import operators_cdgrid as ocd
+from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+
+# iter-860 reproducibility guard.  See iter-857 script for context.
+import inspect
+_sig = inspect.signature(fv3_sw_tendencies)
+required_kwargs = ("phase1_div_swap", "phase1_check1_dt")
+missing = [k for k in required_kwargs if k not in _sig.parameters]
+if missing:
+    raise RuntimeError(
+        f"scripts/diag_iter859_phase1_check1.py requires source patches "
+        f"in `fv3_sw_tendencies` (missing kwargs: {missing}) AND a matching "
+        f"toggle-forwarding patch in `shallow_water_fv3_cdgrid.py`.  Both "
+        f"were REVERTED at the end of iter-859.  Re-apply to re-run.  See "
+        f"iter-859 doc entry for the diff."
+    )
 from legoesm.grids.cubed_sphere_cdgrid import (
     cell_centre_angles_from_4edge)
 from tests.atmosphere.shallow_water.test_cases.williamson import (
