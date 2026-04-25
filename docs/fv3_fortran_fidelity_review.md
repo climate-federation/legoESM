@@ -2384,3 +2384,57 @@ A FULL Phase 1 ruling-out would require: (a) short-run stability evidence; (b) a
 **Deliverable.**  `scripts/diag_iter853_phase1_trial.py` + run output.  No production source-code change.  All 14 W2 sentinels unaffected.
 
 **Process.**  113th iter in iter-752-853 chain.  t=0 measurement of the simplest Phase 1 monkey-patch shows a 180× peak amplification.  Codex iter-853b honesty pass narrows the conclusion: the SPECIFIC drop-in monkey-patch is unsafe under iter-761 canonical damping; this does NOT generally rule out Phase 1.  iter-854+ priorities are short-run stability test + damping-coefficient sweep with the patched stencil to disentangle "stencil-construction effect" from "over-damping artefact" before claiming Phase 1 is generally non-viable.
+
+### Iter-854 — Short-run stability test refines iter-853: patched config IS stable; over-damping artefact dominates the 180× peak
+
+Per iter-853b's iter-854+ priority: take the iter-853 patched configuration and run short integration at multiple damping-coefficient scales to disentangle "stencil-instability signature" from "over-damping artefact under canonical damping."
+
+**Method** (`scripts/diag_iter854_short_run_stability.py`).  W2 LEGACY at C36, dt=300s, 60 steps (5h integration window).  At each step, the patched `cgrid_divergence` reads u_d, v_d, ua, va from a MUTABLE module-level dict updated BEFORE the model.step() call (live-state plumbing fix to iter-853's captured-state issue).  Sweep damp_scale ∈ {0, 0.001, 0.01, 0.1, 1.0, 2.0} × iter-761 canonical (= 2.13e+08).
+
+**Result.**
+
+| damp_scale | completed 60 steps? | final \|h − h₀\| (m) | note          |
+|-----------:|---------------------:|--------------------:|---------------|
+| (un-patched 1.0× reference) | yes | **0.641**             | baseline       |
+|       0.0  | yes                  | 0.844                | =baseline (no damping) |
+|     0.001  | yes                  | 0.886                | ≈baseline      |
+|      0.01  | yes                  | 2.91                  | 5× worse        |
+|       0.1  | yes                  | 26.4                  | 41× worse       |
+|       1.0  | yes                  | **301**                | **470× worse**   |
+|       2.0  | yes                  | 639                   | 1000× worse     |
+
+**Key finding — RETRACTS iter-853 destabilisation extrapolation.**
+- Patched configuration is STABLE for 60 steps at all damp_scales 0–2× (no NaN, no blow-up).  iter-853's "would destabilise in tens to hundreds of timesteps" extrapolation from the 180× t=0 |dv/dt| ratio was WRONG — actual short-run integration is stable.
+- The 180× t=0 |dv/dt| at canonical damping translates to a **470× larger 5h integration error** vs the un-patched baseline (301 m vs 0.641 m).  Stable, but very lossy.
+- Error scales roughly linearly with damp_scale: 0.001× → 0.89 m, 0.01× → 2.91 m, 0.1× → 26.4 m, 1.0× → 301 m, 2.0× → 639 m.
+- At damp_scale=0.001×, the patched configuration recovers baseline-quality integration error (0.89 m vs un-patched-canonical 0.64 m, ≈40 % gap).
+
+**Mechanism — over-damping artefact dominates.**
+The Fortran-cc divergence is 30×–2200× larger than `cgrid_divergence` at cube-vertex-adjacent cells (per iter-851 with iter-852 caveats).  The production damping formula `du += adaptive_coeff·∇·div_field` therefore produces a damping force ~73-403× too large at those cells when fed Fortran-cc directly.  Reducing damp_scale to 0.001× compensates for this magnitude mismatch by scaling the damping coefficient down by ~1000×.  This DOES recover baseline-quality W2 integration error in the short run but is NOT a Fortran-faithful configuration: Fortran applies nominal damping with `*dt` factor (Check 1) and `ke→d_sw6` routing (Check 4), not just a smaller coefficient.
+
+**Refined conclusion (replaces iter-853's "rules out Phase-1-alone").**
+- The Phase 1 stencil swap is NOT intrinsically unstable.  Short-run integration is stable at all tested damp_scales.
+- BUT: the swap with iter-761 canonical damping coefficient gives 470× worse W2 integration error, which would translate to severe v_ll stripe amplification at 1-day if integration continues.
+- A "stable + accurate" combination requires either (a) reducing damp_scale by ~1000× (compensates mismatch but loses Fortran fidelity), or (b) implementing iter-849 Checks 1+4 concurrently (Fortran-faithful magnitude through `*dt` factor + `ke`-routed application).
+
+**What iter-854 DOES show.**
+- Patched configuration is stable for 60 steps at all tested damp_scales 0–2×.
+- The 180× t=0 |dv/dt| ratio at canonical damping translates to 470× worse 5h |h-h₀| error.
+- Reducing damp_scale to 0.001× recovers ≈baseline 5h error.
+- The 180× / 470× / etc. amplification is dominated by an OVER-DAMPING ARTEFACT (Fortran-cc magnitude × production damping coefficient mismatch), NOT a stencil-instability signature.
+
+**What iter-854 does NOT establish.**
+- Whether 1-day or longer integrations remain stable at canonical damping (only 60 steps tested).
+- What the v_ll_Linf at 1-day looks like for the patched configuration at damp_scale=0.001× (where 5h error is baseline-comparable but Fortran fidelity is compromised).
+- Whether iter-849 Checks 1+4 (the ∗dt factor + ke-application path) would, when implemented properly, give Fortran-faithful magnitude AND stable+accurate W2.
+- Whether the un-patched baseline at 5h is representative of 1-day W2 sentinel error (probably not — 5h is much shorter than 24h).
+
+**Iter-855+ candidates.**
+- 1-day (288-step) run of the patched config at damp_scale=0.001× to measure v_ll_Linf and see if it improves on iter-761 canonical's 0.159 m/s.  If yes, the Phase 1 stencil swap with re-tuned damping IS a viable mode-A reduction (at the cost of some Fortran fidelity).
+- Implement iter-849 Check 1 (`*dt` factor in adaptive cap) on the patched path and re-measure the 60-step error — does the magnitude come closer to baseline?
+- 1-day run at canonical damping (damp_scale=1.0×) to see if 470× short-run error continues to grow OR saturates.
+- Continue iter-849 Check 4 architectural port (multi-iter).
+
+**Deliverable.**  `scripts/diag_iter854_short_run_stability.py` (with un-patched reference baseline + patched sweep).  No production source-code change.  All 14 W2 sentinels unaffected.
+
+**Process.**  114th iter in iter-752-854 chain.  RETRACTS iter-853's "destabilise" extrapolation.  Confirms via direct measurement that the iter-853 patched configuration is short-run STABLE at all damp_scales 0–2×, with the 180× t=0 amplification translating to a 470× larger 5h |h-h₀| integration error (from over-damping artefact, not stencil instability).  Identifies a "Phase 1 + reduced damping" path (damp_scale=0.001×) that recovers baseline-quality W2 short-run error but at the cost of Fortran fidelity.  Real Fortran-faithful path still requires iter-849 Checks 1+4 implementation.
