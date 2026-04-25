@@ -90,9 +90,9 @@ def sedimentation_tendency(
     q_pos = jnp.clip(q, 0.0, None)
     flux = V_t * q_pos * rho  # (ncol, nlev)
 
-    # Flux from above: zero at top, flux[k-1] enters level k
-    flux_in = jnp.concatenate(
-        [jnp.zeros((q.shape[0], 1)), flux[:, :-1]], axis=1,
-    )
+    # Flux from above: zero at top, flux[k-1] enters level k.  Use
+    # ``jnp.pad`` (single Pad HLO) instead of allocating a fresh
+    # zero buffer + concatenate.
+    flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
     dz_safe = jnp.clip(dz, 1.0, None)
     return (flux_in - flux) / (rho * dz_safe)
