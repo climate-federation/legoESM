@@ -478,3 +478,47 @@ When `cube_edge_softer_div_damp=True`, the code at `operators_cdgrid.py:2089-` a
 **Verification.**  7/7 iter-909 tests pass.  Production W2 baseline (flag OFF) unchanged at 1.319e-1 m/s.
 
 **Process.**  191st iter.  iter-909 lands a complete production-path implementation (config + plumbing + warnings + tests + W2 measurement) with a clear NEGATIVE finding.  Combined with iter-908b, both 1-D parameter-tuning paths (global and boundary-only) are now exhausted within scope.  Option (3) (`d_sw5` holistic port) and the orthogonal FB-chain stabilization track remain as iter-910+ work — both multi-iter architectural projects.
+
+### Iter-910 — W2 v_ll_Linf resolution sweep contradicts CLAUDE.md "resolution-invariant" claim (post-iter-893)
+
+**Motivation.**  iter-908b/iter-909 confirmed knob-invariance within div_damp tuning.  CLAUDE.md memory `project_w2_mode_a_structural.md` claimed (per iter-822 measurement at the pre-iter-893 baseline) the W2 LEGACY residual is also "resolution-invariant".  iter-910 tests this at the post-iter-893 baseline.
+
+**W2 sweep at C16/C24/C36/C48 with CFL-preserving dt = 300 × (36/n)** (`scripts/diag_iter910_w2_resolution_sweep.py`):
+
+| n | dt | n_steps | h_L2 | v_ll_Linf | rel C36 |
+|---|------|---------|------|-----------|---------|
+| C16 | 675s | 128 | 7.96e-04 | 0.354 | 2.68× |
+| C24 | 450s | 192 | 3.78e-04 | 0.183 | 1.39× |
+| C36 | 300s | 288 | 2.05e-04 | **0.132** | 1.00× (production) |
+| C48 | 225s | 384 | 1.51e-04 | **0.125** | 0.95× |
+
+**Estimated convergence order p ≈ 0.9 (16→48)** — close to first-order.
+
+**REFUTES CLAUDE.md memory's "resolution-invariant" claim AT THE POST-ITER-893 BASELINE.**  The pre-iter-893 measurement (iter-822: C36=0.159, C48=0.182, NON-MONOTONE) was correct at the time.  After iter-893's `apply_fortran_xppm_boundary=True` lowered the asymptote, the new baseline IS resolution-converging.
+
+**Two-component decomposition.**  Convergence is SLOWING with resolution:
+- C24→C36 ratio: 1.39 (≈ √2 ≈ 1.41, consistent with 1st order).
+- C36→C48 ratio: 1.06 (much flatter, near asymptotic floor).
+
+Interpretation: the post-iter-893 W2 v_ll_Linf has TWO components:
+1. **Discretization-driven term** (~1/n^1, visible C16-C36) that decreases with refinement.
+2. **Structural floor** near ~0.10-0.12 m/s (apparent at C36-C48) that does NOT decrease with refinement.
+
+iter-893's xppm boundary fix lowered the asymptote closer to the structural floor; iter-892 (pre-iter-893) was further from it (C36=0.159 vs structural ~0.12).
+
+**Implications for iter-911+ work.**
+
+- **Higher production resolution is a viable W2 reduction path** (not previously thought).  Going C36 → C48 reduces W2 by 5 % (0.132 → 0.125).  Going to C64 might give another 3-5 %, asymptoting near 0.10 m/s.  Cost: 4× compute per step × 1.33× more steps = ~5× total cost vs C36.
+- **The structural floor is closer to ~0.10 m/s than the iter-892 0.132 m/s baseline.**  Architectural fixes (option 3 d_sw5 port, FB chain) might lower the floor further but the gap is smaller than previously assumed.
+- **iter-910 informs the cost-benefit of iter-911+ work.**  If the structural floor is ~0.10 m/s and option (3) requires multi-iter effort to potentially reduce it to ~0.08 m/s, the marginal value is small.  Pivoting to FB-chain stabilization (which serves a different scientific goal — true FV3 fidelity for non-W2 cases) may be higher value than further W2-residual reduction.
+
+**Memory update.**  CLAUDE.md memory `project_w2_mode_a_structural.md` updated with iter-910's resolution sweep (preserving the iter-822 historical context but adding the post-iter-893 refinable behavior).
+
+**Deliverable.**
+- `scripts/diag_iter910_w2_resolution_sweep.py`: 4-point resolution sweep with convergence-order estimation.
+- `~/.claude/projects/.../memory/project_w2_mode_a_structural.md`: updated with post-iter-893 sweep data.
+- This iter-910 doc entry.
+
+**Verification.**  Sweep runs to completion (~10 min total: 4 W2 1-day trajectories at increasing cost).  Production W2 baseline (C36) unchanged at 1.319e-1 m/s.
+
+**Process.**  192nd iter.  iter-910 produces a meaningful UPDATE to the project's understanding of the W2 residual: the post-iter-893 baseline IS resolution-refinable to first-order (down to ~0.10 m/s structural floor at C∞), contradicting the memory's pre-iter-893 "resolution-invariant" claim.  This narrows the remaining residual budget: only ~0.02 m/s separates the iter-892 production at C36 from the asymptotic floor.  iter-911+ has clearer cost-benefit for option (3) vs FB-chain pivot.
