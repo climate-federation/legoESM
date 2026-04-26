@@ -494,18 +494,23 @@ def spectral_pe_tendencies(
     dT_grid_sum = T_prime_div + vert_adv_T + adiabatic
 
     # Batch the dT-grid SH analysis with the geopotential ``Phi``
-    # analysis used by ``KPhi_hat`` (Loop 145).  Both are plain
-    # ``sh_analysis_3d`` calls on (n_lat, n_lon, nlev) grid fields, so
-    # they share the same Legendre weight matrix and FFT batch — fold
-    # them along a trailing axis and run once.  2 plain SH analyses
-    # collapse to 1.
+    # analysis (Loop 145) AND the ``dlnps_dt_grid`` 2D analysis (Loop
+    # 184).  All three are plain ``sh_analysis_3d`` calls on grid
+    # fields with the same Legendre weight matrix; ``dlnps_dt_grid``
+    # is 2D (n_lat, n_lon) so it joins as a single-level slot via
+    # ``[..., None]`` + ``jnp.concatenate``.  Trailing axis =
+    # ``nlev*2 + 1``.  3 plain SH analyses → 1.
     n_lat_T, n_lon_T, nlev_T = dT_grid_sum.shape
     _Tphi_stack = jnp.stack([dT_grid_sum, Phi], axis=-1)
-    _Tphi_hat = sh_analysis_3d(
-        grid, _Tphi_stack.reshape(n_lat_T, n_lon_T, nlev_T * 2),
-    ).reshape(-1, nlev_T, 2)
+    _Tphi_flat = _Tphi_stack.reshape(n_lat_T, n_lon_T, nlev_T * 2)
+    _Tphi_lnps_input = jnp.concatenate(
+        [_Tphi_flat, dlnps_dt_grid[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, nlev*2 + 1)
+    _Tphi_lnps_hat = sh_analysis_3d(grid, _Tphi_lnps_input)
+    _Tphi_hat = _Tphi_lnps_hat[:, : nlev_T * 2].reshape(-1, nlev_T, 2)
     _dT_grid_hat = _Tphi_hat[..., 0]
     _Phi_hat = _Tphi_hat[..., 1]
+    _dlnps_hat_pre = _Tphi_lnps_hat[:, nlev_T * 2]
     dT_hat = -flux_T_div + _dT_grid_hat
     # Apply the deferred ``-∇²(Φ)`` contribution to the divergence
     # tendency now that ``Phi_hat`` is available from the batch.
@@ -542,7 +547,10 @@ def spectral_pe_tendencies(
     ddiv_hat = ddiv_hat + vert_div_tend
 
     # --- 15. Surface pressure tendency (spectral) ---
-    dlnps_hat = sh_analysis(grid, dlnps_dt_grid)
+    # ``_dlnps_hat_pre`` was already computed alongside (dT_grid_sum,
+    # Phi) via the batched ``sh_analysis_3d`` above (Loop 184); reuse
+    # it instead of issuing a standalone 2D ``sh_analysis``.
+    dlnps_hat = _dlnps_hat_pre
 
     # --- 16. Spectral hyperdiffusion ---
     hyperdiff_coeff = config.hyperdiff_coeff
