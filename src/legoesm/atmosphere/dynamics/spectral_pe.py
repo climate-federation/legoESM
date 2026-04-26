@@ -260,12 +260,18 @@ def spectral_pe_tendencies(
     # Smooth positivity protection (C∞ differentiable, scaled softplus for ~0.07K bias)
     _sp_scale = 0.1
     T = T + _sp_scale * jax.nn.softplus((config.T_min - T) / _sp_scale)
-    lnps_raw = sh_synthesis(grid, state.lnps_hat.data)
+    # Batch the two 2D syntheses (lnps, phis) into a single
+    # ``sh_synthesis_3d`` on a stacked (n_sh, 2) tensor.  The 3D
+    # variant treats the trailing axis as a passive batch even when
+    # the spatial output is 2D + a channel dim.  2 SH-syntheses → 1.
+    _lp_pair = jnp.stack([state.lnps_hat.data, state.phis_hat.data], axis=-1)
+    _lp_grid = sh_synthesis_3d(grid, _lp_pair)  # (n_lat, n_lon, 2)
+    lnps_raw = _lp_grid[..., 0]
+    phis = _lp_grid[..., 1]
     # Smooth two-sided clip with zero bias in interior:
     # softplus(lo - x) pulls up near lower bound; softplus(x - hi) pulls down near upper
     lnps = lnps_raw + jax.nn.softplus(_LNPS_MIN - lnps_raw) - jax.nn.softplus(lnps_raw - _LNPS_MAX)
     # (n_lat, n_lon)
-    phis = sh_synthesis(grid, state.phis_hat.data)
 
     # --- 2. Velocities ---
     u_cos, v_cos = uv_from_vordiv_3d(
