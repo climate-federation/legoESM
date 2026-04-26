@@ -242,8 +242,40 @@ def fv3_hydrostatic_tendencies(
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
 
-    # Vorticity interpolated to D-grid corners
-    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid, padded=_zeta_pad)
+    # Batch (zeta_abs, inv_T) corner interpolation — both share the
+    # (6, n, n, nlev) shape; when the stage-level packed halo exchange
+    # above provided pre-padded copies (``_zeta_pad`` / ``_invT_pad``),
+    # stack them along a trailing axis and run ``_interp_center_to_corner``
+    # once on the thicker tensor — same passive-trailing-axis pattern as
+    # Loops 113-117.  Saves one 4-point-average kernel launch per RHS
+    # evaluation.  Falls back to a stacked field when no pre-pad exists
+    # (``_halo_backend`` other than ``spmd`` / ``mpi``) so the operator
+    # itself does the single shared halo exchange.
+    if _zeta_pad is not None:
+        n_face_zT, n_pad_i, n_pad_j, nlev_zT = _zeta_pad.shape
+        _zT_pad_stack = jnp.stack([_zeta_pad, _invT_pad], axis=-1)
+        _zT_pad_flat = _zT_pad_stack.reshape(
+            n_face_zT, n_pad_i, n_pad_j, nlev_zT * 2,
+        )
+        # ``field`` is only used for an ``ndim`` dispatch when ``padded``
+        # is provided — pass the unpadded interior view (cheap, no compute).
+        _zT_corner_flat = _interp_center_to_corner(
+            _zT_pad_flat[:, 1:-1, 1:-1, :],
+            cdgrid, padded=_zT_pad_flat,
+        )
+        nlev_zT_out = nlev_zT
+    else:
+        n_face_zT, n_i_zT, n_j_zT, nlev_zT = zeta_abs.shape
+        _zT_stack = jnp.stack([zeta_abs, inv_T], axis=-1)
+        _zT_flat = _zT_stack.reshape(n_face_zT, n_i_zT, n_j_zT, nlev_zT * 2)
+        _zT_corner_flat = _interp_center_to_corner(_zT_flat, cdgrid)
+        nlev_zT_out = nlev_zT
+    _zT_corner = _zT_corner_flat.reshape(
+        _zT_corner_flat.shape[0], _zT_corner_flat.shape[1],
+        _zT_corner_flat.shape[2], nlev_zT_out, 2,
+    )
+    zeta_corner = _zT_corner[..., 0]
+    inv_T_corner = _zT_corner[..., 1]
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
@@ -258,7 +290,7 @@ def fv3_hydrostatic_tendencies(
     ln_ps_hi = ln_ps.astype(_pg_dt)
     dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
-    T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
+    T_corner = 1.0 / inv_T_corner
     T_corner_hi = T_corner.astype(_pg_dt)
     pg_corr_x = (R_d * T_corner_hi * dln_dx_hi[..., None]).astype(u_d.dtype)
     pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi[..., None]).astype(v_d.dtype)
