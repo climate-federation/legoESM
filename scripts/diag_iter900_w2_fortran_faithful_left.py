@@ -111,41 +111,54 @@ def run_w2(use_fortran_faithful_left: bool):
     }
 
 
-print("Iter-900 W2 measurement: Fortran-faithful LEFT-side overrides")
-print("vs iter-892 default at C36, dt=300s, 1-day integration.")
-print()
+def main():
+    """Run the W2 comparison and print the verdict.
 
-print(f"{'config':<35}  {'mass_drift':>12}  {'h_L2':>10}  "
-      f"{'h_Linf':>10}  {'v_ll_Linf':>11}")
-print("-" * 90)
-
-iter892 = run_w2(use_fortran_faithful_left=False)
-print(f"{'(A) iter-892 default':<35}  "
-      f"{iter892['mass_drift']:>12.3e}  "
-      f"{iter892['h_L2']:>10.3e}  "
-      f"{iter892['h_Linf']:>10.3e}  "
-      f"{iter892['v_ll_Linf']:>11.4e}")
-
-iter900 = run_w2(use_fortran_faithful_left=True)
-print(f"{'(B) iter-900 fortran-faithful left':<35}  "
-      f"{iter900['mass_drift']:>12.3e}  "
-      f"{iter900['h_L2']:>10.3e}  "
-      f"{iter900['h_Linf']:>10.3e}  "
-      f"{iter900['v_ll_Linf']:>11.4e}")
-print()
-print(f"v_ll_Linf delta (B - A): {iter900['v_ll_Linf'] - iter892['v_ll_Linf']:+.4e} m/s")
-print(f"v_ll_Linf relative (B/A): {iter900['v_ll_Linf'] / iter892['v_ll_Linf']:.4f}")
-
-if iter900['v_ll_Linf'] < iter892['v_ll_Linf']:
+    Iter-901d (Codex iter-901b/c stop-time follow-up): wrapped under
+    `if __name__ == "__main__"` so importing this module from a smoke
+    test does NOT trigger the heavy 30-second-per-config trajectories.
+    Same fix template as iter-901c applied to the iter-900 sibling
+    script.
+    """
+    print("Iter-900 W2 measurement: Fortran-faithful LEFT-side overrides")
+    print("vs iter-892 default at C36, dt=300s, 1-day integration.")
     print()
-    print("VERDICT: iter-900 IMPROVES W2 - Fortran-faithful LEFT-side")
-    print("         overrides reduce v_ll_Linf.  iter-901+ should default-flip.")
-elif iter900['v_ll_Linf'] > iter892['v_ll_Linf'] * 1.02:
+
+    print(f"{'config':<35}  {'mass_drift':>12}  {'h_L2':>10}  "
+          f"{'h_Linf':>10}  {'v_ll_Linf':>11}")
+    print("-" * 90)
+
+    iter892 = run_w2(use_fortran_faithful_left=False)
+    print(f"{'(A) iter-892 default':<35}  "
+          f"{iter892['mass_drift']:>12.3e}  "
+          f"{iter892['h_L2']:>10.3e}  "
+          f"{iter892['h_Linf']:>10.3e}  "
+          f"{iter892['v_ll_Linf']:>11.4e}")
+
+    iter900 = run_w2(use_fortran_faithful_left=True)
+    print(f"{'(B) iter-900 fortran-faithful left':<35}  "
+          f"{iter900['mass_drift']:>12.3e}  "
+          f"{iter900['h_L2']:>10.3e}  "
+          f"{iter900['h_Linf']:>10.3e}  "
+          f"{iter900['v_ll_Linf']:>11.4e}")
     print()
-    print("VERDICT: iter-900 WORSENS W2 (>2% increase) - keep iter-892 as default,")
-    print("         document iter-892 formulas as deliberate empirical choice")
-    print("         despite the index-map shift.")
-else:
-    print()
-    print("VERDICT: iter-900 NEUTRAL on W2 (<2% change) - either flip or not")
-    print("         at iter-901's discretion; no W2 progress in iter-900.")
+    print(f"v_ll_Linf delta (B - A): {iter900['v_ll_Linf'] - iter892['v_ll_Linf']:+.4e} m/s")
+    print(f"v_ll_Linf relative (B/A): {iter900['v_ll_Linf'] / iter892['v_ll_Linf']:.4f}")
+
+    if iter900['v_ll_Linf'] < iter892['v_ll_Linf']:
+        print()
+        print("VERDICT: iter-900 IMPROVES W2 - Fortran-faithful LEFT-side")
+        print("         overrides reduce v_ll_Linf.  iter-901+ should default-flip.")
+    elif iter900['v_ll_Linf'] > iter892['v_ll_Linf'] * 1.02:
+        print()
+        print("VERDICT: iter-900 WORSENS W2 (>2% increase) - keep iter-892 as default,")
+        print("         document iter-892 formulas as deliberate empirical choice")
+        print("         despite the index-map shift.")
+    else:
+        print()
+        print("VERDICT: iter-900 NEUTRAL on W2 (<2% change) - either flip or not")
+        print("         at iter-901's discretion; no W2 progress in iter-900.")
+
+
+if __name__ == "__main__":
+    main()
