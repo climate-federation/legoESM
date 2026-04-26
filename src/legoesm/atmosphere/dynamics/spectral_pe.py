@@ -430,13 +430,19 @@ def spectral_pe_tendencies(
     # ``KPhi_hat`` consumes the third slice of the oc2 batch above
     # (``oc2(KE_cos2)``) plus the *plain* SH analysis of geopotential
     # ``Phi`` (different SH weight matrix → cannot share the oc2 call).
-    KPhi_hat = _oc2_triple[..., 2] + sh_analysis_3d(grid, Phi)
+    # The plain ``sh_analysis_3d(Phi)`` is batched with the temperature
+    # tendency analysis below (Loop 145), so we keep ``KPhi_oc2`` here
+    # and add the Phi contribution after the batch.
+    KPhi_oc2 = _oc2_triple[..., 2]
 
     # --- 12. Horizontal tendencies ---
     dvor_hat = -flux_vor_div
+    # Build ``ddiv_hat`` with the KE contribution to ``KPhi_hat``
+    # already in place; the geopotential ``Phi`` contribution is added
+    # after the batched sh_analysis_3d below (Loop 145).
     ddiv_hat = (
         flux_vor_curl
-        - grid.lap[:, None] * KPhi_hat
+        - grid.lap[:, None] * KPhi_oc2
         - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
         - pgf_correction_hat
     )
@@ -476,7 +482,24 @@ def spectral_pe_tendencies(
     # one FFT) with one.  ``vert_adv_T``, ``adiabatic``, and
     # ``T_prime_div`` all share the (n_lat, n_lon, nlev) grid shape.
     dT_grid_sum = T_prime_div + vert_adv_T + adiabatic
-    dT_hat = -flux_T_div + sh_analysis_3d(grid, dT_grid_sum)
+
+    # Batch the dT-grid SH analysis with the geopotential ``Phi``
+    # analysis used by ``KPhi_hat`` (Loop 145).  Both are plain
+    # ``sh_analysis_3d`` calls on (n_lat, n_lon, nlev) grid fields, so
+    # they share the same Legendre weight matrix and FFT batch — fold
+    # them along a trailing axis and run once.  2 plain SH analyses
+    # collapse to 1.
+    n_lat_T, n_lon_T, nlev_T = dT_grid_sum.shape
+    _Tphi_stack = jnp.stack([dT_grid_sum, Phi], axis=-1)
+    _Tphi_hat = sh_analysis_3d(
+        grid, _Tphi_stack.reshape(n_lat_T, n_lon_T, nlev_T * 2),
+    ).reshape(-1, nlev_T, 2)
+    _dT_grid_hat = _Tphi_hat[..., 0]
+    _Phi_hat = _Tphi_hat[..., 1]
+    dT_hat = -flux_T_div + _dT_grid_hat
+    # Apply the deferred ``-∇²(Φ)`` contribution to the divergence
+    # tendency now that ``Phi_hat`` is available from the batch.
+    ddiv_hat = ddiv_hat - grid.lap[:, None] * _Phi_hat
 
     # --- 14. Vertical advection of momentum ---
     if _hybrid:
