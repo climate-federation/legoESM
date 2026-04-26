@@ -380,10 +380,13 @@ def cgrid_latlon_hydrostatic_tendencies(
         # C-grid PPM advection of T (4th-order, shared operator)
         horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(T, u, v, grid)
     else:
-        # Cell-centered gradient advection (fallback)
-        from legoesm.core.operators_fv_latlon import fv_gradient_lon, fv_gradient_lat
-        dT_dx = jax.vmap(fv_gradient_lon, in_axes=(-1, None), out_axes=-1)(T, grid)
-        dT_dy = jax.vmap(fv_gradient_lat, in_axes=(-1, None), out_axes=-1)(T, grid)
+        # Cell-centered gradient advection (fallback) — 3D-native variants
+        # share one halo pad + PPM reconstruction across all levels.
+        from legoesm.core.operators_fv_latlon import (
+            fv_gradient_lon_3d, fv_gradient_lat_3d,
+        )
+        dT_dx = fv_gradient_lon_3d(T, grid)
+        dT_dy = fv_gradient_lat_3d(T, grid)
         horiz_adv_T = -(u_c * dT_dx + v_c * dT_dy)
 
     # Adiabatic heating: κ T (ω/p + v·∇_η(ln p))
@@ -426,9 +429,11 @@ def cgrid_latlon_hydrostatic_tendencies(
                 q, dp_u * u, dp_v * v, grid)
             horiz_q = (flux_dpq + q * div_dp) / (dp + 1e-10)
         else:
-            from legoesm.core.operators_fv_latlon import fv_gradient_lon, fv_gradient_lat
-            dq_dx = jax.vmap(fv_gradient_lon, in_axes=(-1, None), out_axes=-1)(q, grid)
-            dq_dy = jax.vmap(fv_gradient_lat, in_axes=(-1, None), out_axes=-1)(q, grid)
+            from legoesm.core.operators_fv_latlon import (
+                fv_gradient_lon_3d, fv_gradient_lat_3d,
+            )
+            dq_dx = fv_gradient_lon_3d(q, grid)
+            dq_dy = fv_gradient_lat_3d(q, grid)
             horiz_q = -(u_c * dq_dx + v_c * dq_dy)
         if _hybrid:
             vert_q = vertical_advection_hybrid(q, mass_flux, p_s, sigma_coord)
