@@ -139,9 +139,7 @@ def mpas_hydrostatic_tendencies(
     else:
         Phi = compute_geopotential(T_3d, p_s, sigma_coord, phis)
 
-    # --- 3. Precompute ln(p_s) gradient at edges ---
     ln_ps = jnp.log(p_s)
-    grad_ln_ps = gradient_edge(ln_ps, mesh)  # (nEdges,)
 
     # --- Batched 3D tendencies (single gather for all levels) ---
     # Kinetic energy at all levels
@@ -150,26 +148,36 @@ def mpas_hydrostatic_tendencies(
     # Bernoulli function: KE + Phi
     bernoulli_3d = ke_3d + Phi  # (nCells, nlev)
 
-    # Bernoulli gradient at edges — when scalar diffusion is active
-    # (``K_h > 0``), batch ``grad(B)`` together with ``grad(T)`` along a
-    # trailing axis so a single ``gradient_edge_3d`` (one ``cellsOnEdge``
-    # gather + one finite difference) serves both.  Same passive
-    # trailing-axis exploit as the MPAS divergence_cell_3d batches
-    # below.
+    # Bernoulli + ln(p_s) [+ T] gradient batch.  All three quantities use
+    # the same ``cellsOnEdge`` gather + ``dcEdge`` divide; the trailing
+    # axis is purely passive.  Promote ``ln_ps`` to a single-level slot
+    # via ``[..., None]`` and concatenate along the trailing axis with
+    # the (bernoulli, T) batch.  When ``K_h > 0`` the batch has 2
+    # 3D channels + 1 2D channel = ``nlev*2 + 1`` slots; when ``K_h = 0``
+    # it has 1 + 1 = ``nlev + 1`` slots.  Saves one full
+    # ``gradient_edge`` (2D) call per RHS evaluation — same Loop 148/159
+    # exploit as the latlon PE (B, ln_ps) batch.
+    n_cells_BT = bernoulli_3d.shape[0]
+    nlev_BT = bernoulli_3d.shape[-1]
     if config.K_h > 0:
-        n_cells_BT = bernoulli_3d.shape[0]
-        nlev_BT = bernoulli_3d.shape[-1]
         _BT_stack = jnp.stack(
             [bernoulli_3d, T_3d], axis=-1,
         )  # (nCells, nlev, 2)
-        _grad_BT = gradient_edge_3d(
-            _BT_stack.reshape(n_cells_BT, nlev_BT * 2), mesh,
-        ).reshape(-1, nlev_BT, 2)
+        _BT_flat = _BT_stack.reshape(n_cells_BT, nlev_BT * 2)
+    else:
+        _BT_flat = bernoulli_3d  # (nCells, nlev)
+    _BTln_input = jnp.concatenate(
+        [_BT_flat, ln_ps[:, jnp.newaxis]], axis=-1,
+    )  # (nCells, nlev*K + 1)
+    _BTln_grad = gradient_edge_3d(_BTln_input, mesh)
+    if config.K_h > 0:
+        _grad_BT = _BTln_grad[:, : nlev_BT * 2].reshape(-1, nlev_BT, 2)
         grad_B_3d = _grad_BT[..., 0]
         grad_T_3d_pre = _grad_BT[..., 1]
     else:
-        grad_B_3d = gradient_edge_3d(bernoulli_3d, mesh)  # (nEdges, nlev)
+        grad_B_3d = _BTln_grad[:, :nlev_BT]
         grad_T_3d_pre = None
+    grad_ln_ps = _BTln_grad[:, -1]  # (nEdges,)
 
     # Pressure gradient correction: R_d * T_edge * grad_eta(ln p)
     # In sigma coords: grad_eta(ln p) = grad(ln p_s).
