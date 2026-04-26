@@ -500,17 +500,10 @@ def curl_vertex_cgrid(
     -------
     zeta : (n_lat+1, n_lon+1) or (n_lat+1, n_lon+1, nlev)
     """
+    # Native 2D and 3D — broadcast 1D metric over the trailing level
+    # axis when needed.  Eliminates the prior moveaxis + vmap +
+    # moveaxis round-trip.
     is_3d = u.ndim == 3
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
-        v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
-
-        def _curl_2d(u_k, v_k):
-            return curl_vertex_cgrid(u_k, v_k, grid)
-
-        zeta_t = jax.vmap(_curl_2d)(u_t, v_t)  # (nlev, n_lat+1, n_lon+1)
-        return jnp.moveaxis(zeta_t, 0, -1)
-
     R = grid.radius
     dlon = grid.dlon
     dlat = grid.dlat
@@ -519,67 +512,48 @@ def curl_vertex_cgrid(
 
     # Vertex area: A_v(i) = R^2 * dlon * |sin(lat_cell[i]) - sin(lat_cell[i-1])|
     # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole).
-    # Pad with the analytical pole sin values via constant_values=(-1, 1)
-    # — single Pad HLO op replaces alloc-2-singletons + concatenate-of-three.
     sin_lat = jnp.sin(lat)
     sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])  # (n_lat+1,)
-    # Interior vertex areas only (rows 1..n_lat-1); pole rows are zero
-    # by construction and excluded from the division to avoid 1e30
-    # intermediates and brittle adjoints (issue #173).
     A_vertex_interior = A_vertex_all[1:-1]  # (n_lat-1,)
-
-    # Circulation around vertex (i, j), CCW:
-    #   south edge (eastward): +u[i-1, j] * R*cos(lat[i-1])*dlon
-    #   east edge (northward): +v[i, j] * R*dlat
-    #   north edge (westward): -u[i, j] * R*cos(lat[i])*dlon
-    #   west edge (southward): -v[i, j-1] * R*dlat
-    #
-    # For vertex row i: south cell row = i-1, north cell row = i
-    # For vertex col j: east v-col = j, west v-col = (j-1) mod n_lon
 
     # Edge lengths
     dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at each cell latitude
     dy_edge = R * dlat             # scalar, meridional edge length
 
-    # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy
-    # v shape: (n_lat+1, n_lon). Wrap in longitude.
-    v_east = v                                    # (n_lat+1, n_lon)
-    v_west = jnp.roll(v, 1, axis=1)              # (n_lat+1, n_lon)
-    dv_circ = (v_east - v_west) * dy_edge         # (n_lat+1, n_lon)
+    # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy.  Works for 2D
+    # and 3D directly.
+    v_east = v
+    v_west = jnp.roll(v, 1, axis=1)
+    dv_circ = (v_east - v_west) * dy_edge
 
-    # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i]
-    # u shape: (n_lat, n_lon+1). Vertex row i uses u rows i-1 and i.
-    # Pad with zeros at poles (u at pole vertex has no cell row beyond).
-    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
-    u_ext = jnp.pad(u, ((1, 1), (0, 0)))  # (n_lat+2, n_lon+1)
-    dx_ext = jnp.pad(dx_cell, (1, 1))  # (n_lat+2,)
+    # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i].
+    # Pad with zeros at poles along the lat axis (axis 0).  Extra
+    # ``(0, 0)`` pad-tuples for any trailing dims (level axis in 3D).
+    pad_extra = ((0, 0),) * (u.ndim - 2)
+    u_ext = jnp.pad(u, ((1, 1), (0, 0), *pad_extra))
+    dx_ext = jnp.pad(dx_cell, (1, 1))
 
-    # u_south = u_ext[i] = u[i-1] for vertex row i (0-indexed)
-    # u_north = u_ext[i+1] = u[i] for vertex row i
-    u_south = u_ext[:-1, :]  # (n_lat+1, n_lon+1)
-    u_north = u_ext[1:, :]   # (n_lat+1, n_lon+1)
-    dx_south = dx_ext[:-1]    # (n_lat+1,)
-    dx_north = dx_ext[1:]     # (n_lat+1,)
+    u_south = u_ext[:-1]
+    u_north = u_ext[1:]
+    dx_south = dx_ext[:-1]
+    dx_north = dx_ext[1:]
+    # Reshape lat metrics to broadcast over (n_lat+1, n_lon+1[, nlev]).
+    bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
+    du_circ = (u_south * dx_south[bcast] - u_north * dx_north[bcast])
 
-    du_circ = (u_south * dx_south[:, jnp.newaxis]
-               - u_north * dx_north[:, jnp.newaxis])  # (n_lat+1, n_lon+1)
-
-    # Combine: need dv_circ at (n_lat+1, n_lon+1) — append periodic wrap column
-    dv_circ_full = jnp.concatenate(
-        [dv_circ, dv_circ[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+    # Append periodic wrap column to dv_circ.
+    dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
 
     circ = du_circ + dv_circ_full
 
-    # Compute vorticity only on interior rows (1..n_lat-1) where vertex
-    # area is nonzero.  Pad pole rows with zeros directly to avoid the
-    # 1/0 division that created 1e30 intermediates and brittle adjoints
-    # under jax.grad (issue #173).
-    circ_interior = circ[1:-1, :]  # (n_lat-1, n_lon+1)
-    zeta_interior = circ_interior / A_vertex_interior[:, jnp.newaxis]
-    # Pole rows are zero; single Pad HLO op replaces alloc-zeros +
-    # concatenate-of-three.
-    zeta = jnp.pad(zeta_interior, ((1, 1), (0, 0)))
+    # Compute vorticity only on interior rows (pole rows zero by
+    # construction; avoids 1/0 division — issue #173).
+    circ_interior = circ[1:-1]
+    zeta_interior = circ_interior / A_vertex_interior[bcast]
+    # Pad pole rows with zero along the lat axis (extra (0, 0) pads
+    # for trailing dims if 3D).
+    zeta = jnp.pad(zeta_interior, ((1, 1), (0, 0), *pad_extra))
 
     return zeta
 
@@ -676,67 +650,51 @@ def vector_laplacian_cgrid(
     vlap_u : same shape as u
     vlap_v : same shape as v
     """
+    # Native 2D and 3D — all underlying operators (``divergence_cgrid``,
+    # ``gradient_*_cgrid``, ``curl_vertex_cgrid``, ``_gradient_curl_to_*``)
+    # natively support 3D inputs.  Masks remain 2D and broadcast over
+    # the trailing level axis when present.
     is_3d = u.ndim == 3
 
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
-        v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
-
-        def _vlap_2d(u_k, v_k):
-            return vector_laplacian_cgrid(
-                u_k, v_k, grid,
-                mask=mask, u_mask=u_mask, v_mask=v_mask)
-
-        lu_t, lv_t = jax.vmap(_vlap_2d)(u_t, v_t)
-        return jnp.moveaxis(lu_t, 0, -1), jnp.moveaxis(lv_t, 0, -1)
-
-    # --- 2D case ---
+    def _bcast(m, like):
+        # Broadcast 2D ``m`` over trailing axes of ``like``.
+        return m[..., jnp.newaxis] if is_3d else m
 
     # Apply face masks before computing div and curl
-    u_eff = u
-    v_eff = v
-    if u_mask is not None:
-        u_eff = u * u_mask
-    if v_mask is not None:
-        v_eff = v * v_mask
+    u_eff = u if u_mask is None else u * _bcast(u_mask, u)
+    v_eff = v if v_mask is None else v * _bcast(v_mask, v)
 
     # 1. Divergence at cell centers
     div = divergence_cgrid(u_eff, v_eff, grid)
     if mask is not None:
-        div = div * mask
+        div = div * _bcast(mask, div)
 
     # 2. grad(div) at faces
-    grad_div_u = gradient_x_cgrid(div, grid)  # (n_lat, n_lon+1)
-    grad_div_v = gradient_y_cgrid(div, grid)  # (n_lat+1, n_lon)
+    grad_div_u = gradient_x_cgrid(div, grid)  # (n_lat, n_lon+1[, nlev])
+    grad_div_v = gradient_y_cgrid(div, grid)  # (n_lat+1, n_lon[, nlev])
 
     # 3. Curl at vertices
-    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1)
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1[, nlev])
 
     # Mask curl at land-adjacent vertices
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
-        zeta = zeta * vmask
+        zeta = zeta * _bcast(vmask, zeta)
 
     # 4. Tangential gradient of curl at faces
-    grad_curl_u = _gradient_curl_to_u(zeta, grid)  # (n_lat, n_lon+1)
-    grad_curl_v = _gradient_curl_to_v(zeta, grid)  # (n_lat+1, n_lon)
+    grad_curl_u = _gradient_curl_to_u(zeta, grid)
+    grad_curl_v = _gradient_curl_to_v(zeta, grid)
 
-    # 5. Vector Laplacian = grad(div) - curl(curl)
-    # curl(curl F) = k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).
-    # Signs verified via bump tests (both components must be diffusive):
-    #   u-bump: vlap_u = grad_div_u - grad_curl_u → negative ✓
-    #   v-bump: vlap_v = grad_div_v + grad_curl_v → negative ✓
-    # The sign asymmetry arises because _gradient_curl_to_u computes
-    # ∂ζ/∂y (northward) while _gradient_curl_to_v computes ∂ζ/∂x
-    # (eastward), and (k × ∇ζ)_x = -∂ζ/∂y but (k × ∇ζ)_y = +∂ζ/∂x.
+    # 5. Vector Laplacian = grad(div) - curl(curl).  curl(curl F) =
+    # k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).  Signs verified via bump tests.
     vlap_u = grad_div_u - grad_curl_u
     vlap_v = grad_div_v + grad_curl_v
 
     # Apply face masks to output
     if u_mask is not None:
-        vlap_u = vlap_u * u_mask
+        vlap_u = vlap_u * _bcast(u_mask, vlap_u)
     if v_mask is not None:
-        vlap_v = vlap_v * v_mask
+        vlap_v = vlap_v * _bcast(v_mask, vlap_v)
 
     return vlap_u, vlap_v
 
