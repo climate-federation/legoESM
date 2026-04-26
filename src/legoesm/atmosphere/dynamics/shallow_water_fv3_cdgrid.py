@@ -811,11 +811,15 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     # Iter-904b (Codex iter-904 stop-time fix):
                     # forward FV3 d_sw1 mass-transport damping
                     # (nord_v, damp_v) per `sw_core.F90:886-887`.
-                    # iter-904 omitted these and the path NaN'd —
-                    # without del-n damping, transport_step's PPM
-                    # mass flux blows up at the cube vertices.
+                    # Iter-904c (Codex iter-904b stop-time fix):
+                    # use the SAME nord_v sentinel resolution as the
+                    # FB chain (`dyn_core.F90:757,1258`):
+                    # `nord_v = min(2, nord) if nord_v<0 else nord_v`.
+                    # iter-904b incorrectly hardcoded `2` when
+                    # nord_v<0, ignoring `self.config.nord`.
                     dsw1_nord=(
-                        2 if self.config.nord_v < 0
+                        min(2, self.config.nord)
+                        if self.config.nord_v < 0
                         else self.config.nord_v),
                     dsw1_damp_c=self.config.damp_v,
                 )
