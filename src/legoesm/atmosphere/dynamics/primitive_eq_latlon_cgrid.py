@@ -421,25 +421,58 @@ def cgrid_latlon_hydrostatic_tendencies(
     # equation for discrete consistency.  The mixing-ratio tendency is:
     #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
     # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
+    #
+    # All tracers share the same u, v, dp, div_dp.  Stack along a trailing
+    # tracer axis and fold it into the level axis so the operator's
+    # halo-pad + PPM reconstruction runs once instead of n_tracers times.
+    # ``pad_halo_latlon_3d`` only touches axes 0 and 1, so the trailing
+    # ``nlev * n_tracers`` axis is passively carried through.
     tracer_tends = {}
-    for name, q in tracers.items():
+    if tracers:
+        tracer_names = list(tracers.keys())
+        n_tracers = len(tracer_names)
+        tracer_stack = jnp.stack(
+            [tracers[n] for n in tracer_names], axis=-1
+        )  # (n_lat, n_lon, nlev, n_tracers)
+        n_lat_t, n_lon_t, nlev_t, _ = tracer_stack.shape
+        tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
+
         if config.use_ppm_transport:
-            # Mass-weighted flux-form horizontal transport
-            flux_dpq = cgrid_fv_flux_divergence_latlon_3d(
-                q, dp_u * u, dp_v * v, grid)
-            horiz_q = (flux_dpq + q * div_dp) / (dp + 1e-10)
+            # Mass-weighted flux-form horizontal transport.
+            u_mass = dp_u * u  # (n_lat, n_lon+1, nlev)
+            v_mass = dp_v * v  # (n_lat+1, n_lon, nlev)
+            if n_tracers == 1:
+                u_mass_b, v_mass_b = u_mass, v_mass
+            else:
+                u_mass_b = jnp.tile(u_mass, (1, 1, n_tracers))
+                v_mass_b = jnp.tile(v_mass, (1, 1, n_tracers))
+            flux_flat = cgrid_fv_flux_divergence_latlon_3d(
+                tracer_flat, u_mass_b, v_mass_b, grid)
+            flux_stack = flux_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            horiz_q_stack = (
+                flux_stack + tracer_stack * div_dp[..., None]
+            ) / (dp[..., None] + 1e-10)
         else:
             from legoesm.core.operators_fv_latlon import (
                 fv_gradient_lon_3d, fv_gradient_lat_3d,
             )
-            dq_dx = fv_gradient_lon_3d(q, grid)
-            dq_dy = fv_gradient_lat_3d(q, grid)
-            horiz_q = -(u_c * dq_dx + v_c * dq_dy)
-        if _hybrid:
-            vert_q = vertical_advection_hybrid(q, mass_flux, p_s, sigma_coord)
-        else:
-            vert_q = vertical_advection(q, sigma_dot, sigma_coord)
-        tracer_tends[name] = horiz_q + vert_q
+            dq_dx_flat = fv_gradient_lon_3d(tracer_flat, grid)
+            dq_dy_flat = fv_gradient_lat_3d(tracer_flat, grid)
+            dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            dq_dy_stack = dq_dy_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            horiz_q_stack = -(
+                u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
+            )
+
+        # Vertical advection per-tracer — local stencil along axis -1, no halo
+        # cost so the slice-and-loop pattern is fine.
+        for i, name in enumerate(tracer_names):
+            q_i = tracer_stack[..., i]
+            if _hybrid:
+                vert_q = vertical_advection_hybrid(q_i, mass_flux, p_s, sigma_coord)
+            else:
+                vert_q = vertical_advection(q_i, sigma_dot, sigma_coord)
+            tracer_tends[name] = horiz_q_stack[..., i] + vert_q
 
     # --- 13. Diffusion (optional) ---
     if config.A_h > 0.0:
