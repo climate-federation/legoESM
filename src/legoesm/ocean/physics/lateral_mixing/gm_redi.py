@@ -238,15 +238,17 @@ def _tracer_tendency_gm_redi(
     off_diag_x = (kappa_Redi - kappa_GM_b) * S_x * dq_dz_half
     off_diag_y = (kappa_Redi - kappa_GM_b) * S_y * dq_dz_half
 
-    # Average interface values to full levels (pad boundaries with zero)
-    z_pad = jnp.zeros((*off_diag_x.shape[:-1], 1), dtype=off_diag_x.dtype)
+    # Average interface values to full levels (pad boundaries with zero).
+    # ``jnp.pad`` lowers to one Pad HLO op per pad and avoids the
+    # alloc-zeros + concatenate pair (2 HLO ops each).
+    pad_axes = ((0, 0),) * (off_diag_x.ndim - 1)
     off_diag_x_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_x], axis=-1)
-        + jnp.concatenate([off_diag_x, z_pad], axis=-1)
+        jnp.pad(off_diag_x, (*pad_axes, (1, 0)))
+        + jnp.pad(off_diag_x, (*pad_axes, (0, 1)))
     )
     off_diag_y_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_y], axis=-1)
-        + jnp.concatenate([off_diag_y, z_pad], axis=-1)
+        jnp.pad(off_diag_y, (*pad_axes, (1, 0)))
+        + jnp.pad(off_diag_y, (*pad_axes, (0, 1)))
     )
 
     # Diagonal: kappa_Redi * nabla^2(q)
@@ -263,8 +265,10 @@ def _tracer_tendency_gm_redi(
 
     # Vertical flux divergence at full levels: dF_z/dz
     # dq/dt_vert[k] = (F_z[k-1/2] - F_z[k+1/2]) / dz[k]
-    # with F_z = 0 at surface and bottom boundaries
-    F_z_ext = jnp.concatenate([z_pad, F_z, z_pad], axis=-1)
+    # with F_z = 0 at surface and bottom boundaries.  Single Pad HLO op
+    # replaces the alloc-zeros + concatenate-of-three.
+    pad_axes_v = ((0, 0),) * (F_z.ndim - 1)
+    F_z_ext = jnp.pad(F_z, (*pad_axes_v, (1, 1)))
     dq_vert = (F_z_ext[..., :-1] - F_z_ext[..., 1:]) / jnp.maximum(dz_actual, eps)
 
     return dq_h + dq_vert
