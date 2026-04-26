@@ -480,14 +480,6 @@ def fv3_hydrostatic_tendencies(
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
 
-    # --- 11b. Velocity-dependent temperature dissipation ---
-    if config.T_diss_coeff > 0:
-        wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
-        dx_local = grid.dx[..., None]
-        nu_T = config.T_diss_coeff * wind_speed * dx_local
-        lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
-        dT_dt_data = dT_dt_data + nu_T * lap_T
-
     # --- 12. Diffusion ---
     # 12a. Laplacian viscosity on D-grid winds
     #
@@ -526,6 +518,25 @@ def fv3_hydrostatic_tendencies(
         _lap_flat = _laplacian_compact_3d(
             _uvT_flat, grid, padded=_uvT_pad_flat,
         )
+
+    # --- 11b. Velocity-dependent temperature dissipation ---
+    # Lifted below the (u, v, T) Laplacian above so that, when ``A_h``
+    # or ``hyperdiff_coeff`` is also active, the T component of the
+    # batched ∇²(uvT) is reused — one fewer ``_laplacian_compact_3d``
+    # call (i.e. one extra ∇² over T standalone).  When the (u, v, T)
+    # batch did not run, fall back to a standalone ``∇²(T)``.
+    if config.T_diss_coeff > 0:
+        wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
+        dx_local = grid.dx[..., None]
+        nu_T = config.T_diss_coeff * wind_speed * dx_local
+        if _lap_flat is not None:
+            # Reuse the T slice of the batched compact Laplacian.
+            lap_T = _lap_flat.reshape(
+                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
+            )[..., 2]
+        else:
+            lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
+        dT_dt_data = dT_dt_data + nu_T * lap_T
 
     if config.A_h > 0:
         lap_uvT = _lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
