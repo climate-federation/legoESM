@@ -69,6 +69,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     curl_vertex_cgrid,
     smagorinsky_biharmonic_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
+    _compute_vertex_mask,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -261,6 +262,74 @@ def _neumann_fill_cgrid(
         filled = jnp.where(is_land_e & has_any_nbr_e, nbr_avg, filled)
         m = jnp.where(is_land & has_any_nbr, 1.0, m)
 
+    return filled
+
+
+def _neumann_fill_vertex(
+    f: jnp.ndarray,
+    vtx_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Fill land vertices with nearest ocean-neighbor (Neumann BC).
+
+    Vertex-level analog of ``_neumann_fill_cgrid`` for the
+    (n_lat+1, n_lon+1) vertex grid.  Longitude is periodic
+    (column n_lon duplicates column 0); rows 0 and n_lat are
+    pole vertices with Neumann padding in the meridional direction.
+
+    Parameters
+    ----------
+    f : (n_lat+1, n_lon+1, nlev)  or  (n_lat+1, n_lon+1)
+    vtx_mask : (n_lat+1, n_lon+1)  -- 1 = ocean vertex, 0 = land vertex.
+    """
+    m = vtx_mask
+    filled = f
+
+    for _ in range(3):
+        # N/S neighbors: Neumann padding at rows 0 and n_lat.
+        f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
+        m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
+        f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
+        m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+
+        # E/W neighbors: periodic on core columns 0..n_lon-1, then wrap.
+        # Column n_lon is a duplicate of column 0, so rolling the full
+        # array along axis 1 is correct for the core columns and the
+        # wrap column picks up the right neighbor automatically.
+        f_w = jnp.roll(filled, 1, axis=1)
+        m_w = jnp.roll(m, 1, axis=1)
+        f_e = jnp.roll(filled, -1, axis=1)
+        m_e = jnp.roll(m, -1, axis=1)
+
+        is_land = m < 0.5
+
+        if f.ndim > 2:
+            m_s_e = m_s[..., jnp.newaxis]
+            m_n_e = m_n[..., jnp.newaxis]
+            m_w_e = m_w[..., jnp.newaxis]
+            m_e_e = m_e[..., jnp.newaxis]
+            is_land_e = is_land[..., jnp.newaxis]
+        else:
+            m_s_e = m_s
+            m_n_e = m_n
+            m_w_e = m_w
+            m_e_e = m_e
+            is_land_e = is_land
+
+        nbr_sum = f_s * m_s_e + f_n * m_n_e + f_w * m_w_e + f_e * m_e_e
+        nbr_count = m_s_e + m_n_e + m_w_e + m_e_e
+        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+
+        has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
+        if f.ndim > 2:
+            has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
+        else:
+            has_any_nbr_e = has_any_nbr
+
+        filled = jnp.where(is_land_e & has_any_nbr_e, nbr_avg, filled)
+        m = jnp.where(is_land & has_any_nbr, 1.0, m)
+
+    # Re-sync periodic wrap column.
+    filled = filled.at[:, -1].set(filled[:, 0])
     return filled
 
 
@@ -649,103 +718,6 @@ def _weno_cell_to_vface(
     return jnp.concatenate([zero, phi_at_v_interior, zero], axis=0)
 
 
-def _weno_usq_to_cell(
-    u: jnp.ndarray,
-    order: int = 5,
-) -> jnp.ndarray:
-    """WENO reconstruction of u² from u-faces to cell centers (zonal, periodic).
-
-    Uses {u²; u} smoothness-optimised stencil (Silvestri et al. 2024):
-    smoothness indicators from velocity u, reconstruction of u².
-    Replaces the centered ``(0.5*(u[j]+u[j+1]))²`` with WENO upwind
-    ``avg(u²)`` for shock-capturing KE dissipation.
-
-    Parameters
-    ----------
-    u : (n_lat, n_lon+1, nlev) velocity at u-faces.
-    order : {5, 7}
-
-    Returns
-    -------
-    u_sq_cell : (n_lat, n_lon, nlev)  u² reconstructed to cell centers.
-    """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
-
-    hw = {5: 3, 7: 4}[order]
-    n_lon = u.shape[1] - 1  # n_lon+1 u-faces => n_lon cells
-
-    u_sq = u ** 2
-
-    # Cell center j is between u-face j and u-face j+1.
-    # Standard WENO at face j+1/2 uses cells j-hw+1, ..., j+hw.
-    # Use n_lon core u-face values (periodic: face n_lon == face 0).
-    u_sq_core = u_sq[:, :n_lon, :]
-    u_core = u[:, :n_lon, :]
-
-    # Roll offset hw-1-s: same pattern as _weno_zeta_at_v.
-    phi_stencil = [jnp.roll(u_sq_core, hw - 1 - s, axis=1)
-                   for s in range(2 * hw)]
-    psi_stencil = [jnp.roll(u_core, hw - 1 - s, axis=1)
-                   for s in range(2 * hw)]
-
-    phi_plus, phi_minus = weno_reconstruct_split(
-        phi_stencil, psi_stencil, order=order)
-
-    # Upwind velocity at cell centers.
-    u_at_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
-    return weno_upwind(phi_plus, phi_minus, u_at_cell)
-
-
-def _weno_vsq_to_cell(
-    v: jnp.ndarray,
-    order: int = 5,
-) -> jnp.ndarray:
-    """WENO reconstruction of v² from v-faces to cell centers (meridional, wall BC).
-
-    Uses {v²; v} smoothness-optimised stencil (Silvestri et al. 2024):
-    smoothness indicators from velocity v, reconstruction of v².
-    Replaces the centered ``(0.5*(v[i]+v[i+1]))²`` with WENO upwind
-    ``avg(v²)`` for shock-capturing KE dissipation.
-
-    Parameters
-    ----------
-    v : (n_lat+1, n_lon, nlev) velocity at v-faces.
-    order : {5, 7}
-
-    Returns
-    -------
-    v_sq_cell : (n_lat, n_lon, nlev)  v² reconstructed to cell centers.
-    """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
-
-    hw = {5: 3, 7: 4}[order]
-    n_lat = v.shape[0] - 1  # n_lat+1 v-faces => n_lat cells
-
-    v_sq = v ** 2
-
-    # Ghost cells (Neumann BC) along axis 0.
-    v_sq_ext = jnp.concatenate(
-        [v_sq[:1, :, :]] * hw + [v_sq] + [v_sq[-1:, :, :]] * hw, axis=0)
-    v_ext = jnp.concatenate(
-        [v[:1, :, :]] * hw + [v] + [v[-1:, :, :]] * hw, axis=0)
-
-    # Cell center i is between v-face i and v-face i+1.
-    # Standard WENO at face i+1/2 uses cells i-hw+1, ..., i+hw.
-    # In ext: index hw+face => positions 1+s, ..., n_lat+s.
-    # Same pattern as _weno_zeta_at_u.
-    phi_stencil = [v_sq_ext[1 + s: n_lat + 1 + s, :, :]
-                   for s in range(2 * hw)]
-    psi_stencil = [v_ext[1 + s: n_lat + 1 + s, :, :]
-                   for s in range(2 * hw)]
-
-    phi_plus, phi_minus = weno_reconstruct_split(
-        phi_stencil, psi_stencil, order=order)
-
-    # Upwind velocity at cell centers.
-    v_at_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
-    return weno_upwind(phi_plus, phi_minus, v_at_cell)
-
-
 def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
@@ -891,6 +863,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         u_sq_cell_centered = 0.5 * (u_sq_face[:, :-1, :] + u_sq_face[:, 1:, :])
         v_sq_cell_centered = 0.5 * (v_sq_face[:-1, :, :] + v_sq_face[1:, :, :])
 
+        # Fill land cells before WENO stencils so masked zeros don't
+        # create false discontinuities near walls (Neumann extrapolation).
+        delta_u_sq_cell = _neumann_fill_cgrid(delta_u_sq_cell, mask)
+        u_avg_cell = _neumann_fill_cgrid(u_avg_cell, mask)
+        delta_v_sq_cell = _neumann_fill_cgrid(delta_v_sq_cell, mask)
+        v_avg_cell = _neumann_fill_cgrid(v_avg_cell, mask)
+
         # WENO upwind of δ_i u² to u-faces (gradient times dx_u_at_face).
         delta_u_sq_at_uface = _weno_cell_to_uface(
             delta_u_sq_cell, u_avg_cell, u, order=5)        # (n_lat, n_lon+1, nlev)
@@ -1009,10 +988,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Reconstruct q from vertices to velocity points
     if _mom_adv in ("weno5", "weno7"):
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
+        # Fill PV at land-adjacent vertices so WENO stencils see smooth
+        # Neumann extrapolation instead of masked-zero discontinuities.
+        vtx_mask = _compute_vertex_mask(mask)
+        q_filled = _neumann_fill_vertex(q, vtx_mask)
         q_at_u = _weno_zeta_at_u(
-            q, v, v_at_u, order=_weno_order, u_smooth=u)
+            q_filled, v, v_at_u, order=_weno_order, u_smooth=u)
         q_at_v = _weno_zeta_at_v(
-            q, u, u_at_v, order=_weno_order, v_smooth=v)
+            q_filled, u, u_at_v, order=_weno_order, v_smooth=v)
     else:
         # Sadourny EC: 2-point average of q to faces
         q_at_u = 0.5 * (q[:-1, :, :] + q[1:, :, :])   # (n_lat, n_lon+1, nlev)
@@ -1040,11 +1023,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     if _mom_adv in ("weno5", "weno7") and config.weno_d_term:
         dU_di_cell, dV_dj_cell = _split_velocity_divergence(
             u * u_mask_3d, v * v_mask_3d, grid)
+        # Fill land cells before WENO stencils (Neumann extrapolation).
+        dU_di_filled = _neumann_fill_cgrid(dU_di_cell, mask)
+        dV_dj_filled = _neumann_fill_cgrid(dV_dj_cell, mask)
         # Matching direction (WENO upwind), cross direction (centered).
-        D_at_u = (_weno_cell_to_uface(dU_di_cell, dU_di_cell, u, order=5)
+        D_at_u = (_weno_cell_to_uface(dU_di_filled, dU_di_filled, u, order=5)
                   + _centered_cell_to_uface(dV_dj_cell))
         D_at_v = (_centered_cell_to_vface(dU_di_cell)
-                  + _weno_cell_to_vface(dV_dj_cell, dV_dj_cell, v, order=5))
+                  + _weno_cell_to_vface(dV_dj_filled, dV_dj_filled, v, order=5))
         du_dt = du_dt - D_at_u * u * u_mask_3d
         dv_dt = dv_dt - D_at_v * v * v_mask_3d
 

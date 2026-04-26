@@ -597,95 +597,6 @@ class TestWENODivAtV:
 
 
 # =====================================================================
-# WENO K-term: KE from upwind u²/v² (Phase 4b)
-# =====================================================================
-
-class TestWENOKE:
-    """Tests for _weno_usq_to_cell and _weno_vsq_to_cell."""
-
-    def test_usq_output_shape(self):
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_usq_to_cell,
-        )
-        n_lat, n_lon, nlev = 10, 20, 5
-        u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.3
-        result = _weno_usq_to_cell(u, order=5)
-        assert result.shape == (n_lat, n_lon, nlev)
-
-    def test_vsq_output_shape(self):
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_vsq_to_cell,
-        )
-        n_lat, n_lon, nlev = 10, 20, 5
-        v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.3
-        result = _weno_vsq_to_cell(v, order=5)
-        assert result.shape == (n_lat, n_lon, nlev)
-
-    def test_constant_velocity_KE(self):
-        """Uniform velocity → WENO KE = centered KE = 0.5 * u²."""
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_usq_to_cell, _weno_vsq_to_cell,
-        )
-        n_lat, n_lon, nlev = 10, 20, 3
-        u_val, v_val = 0.3, 0.2
-        u = jnp.full((n_lat, n_lon + 1, nlev), u_val)
-        v = jnp.full((n_lat + 1, n_lon, nlev), v_val)
-        u_sq_cell = _weno_usq_to_cell(u, order=5)
-        v_sq_cell = _weno_vsq_to_cell(v, order=5)
-        KE_weno = 0.5 * (u_sq_cell + v_sq_cell)
-        KE_expected = 0.5 * (u_val**2 + v_val**2)
-        assert jnp.allclose(KE_weno, KE_expected, atol=1e-13), (
-            f"Max error: {float(jnp.max(jnp.abs(KE_weno - KE_expected)))}")
-
-    def test_smooth_velocity_close_to_centered(self):
-        """On smooth velocity, WENO KE ≈ centered KE."""
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_usq_to_cell, _weno_vsq_to_cell,
-        )
-        n_lat, n_lon, nlev = 20, 30, 3
-        lat_idx = jnp.arange(n_lat + 1, dtype=jnp.float64) / n_lat
-        lon_idx = jnp.arange(n_lon + 1, dtype=jnp.float64) / n_lon
-        # Smooth sinusoidal velocity
-        u = (0.1 * jnp.sin(2 * jnp.pi * lon_idx))[jnp.newaxis, :, jnp.newaxis]
-        u = jnp.broadcast_to(u, (n_lat, n_lon + 1, nlev)).copy()
-        v = (0.1 * jnp.sin(2 * jnp.pi * lat_idx))[:, jnp.newaxis, jnp.newaxis]
-        v = jnp.broadcast_to(v, (n_lat + 1, n_lon, nlev)).copy()
-
-        # WENO KE
-        u_sq_cell = _weno_usq_to_cell(u, order=5)
-        v_sq_cell = _weno_vsq_to_cell(v, order=5)
-        KE_weno = 0.5 * (u_sq_cell + v_sq_cell)
-
-        # Centered KE
-        u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
-        v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
-        KE_centered = 0.5 * (u_cell**2 + v_cell**2)
-
-        # For smooth fields, deviation is O(Δx⁴) from higher-order WENO
-        # plus the avg(u²) vs (avg(u))² difference ≈ O(Δx²)
-        assert jnp.allclose(KE_weno, KE_centered, atol=5e-4), (
-            f"Max deviation: "
-            f"{float(jnp.max(jnp.abs(KE_weno - KE_centered)))}")
-
-    def test_usq_finite_random(self):
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_usq_to_cell,
-        )
-        key = jax.random.PRNGKey(70)
-        u = jax.random.uniform(key, (10, 21, 5), minval=-0.5, maxval=0.5)
-        result = _weno_usq_to_cell(u, order=5)
-        assert jnp.all(jnp.isfinite(result))
-
-    def test_vsq_finite_random(self):
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_vsq_to_cell,
-        )
-        key = jax.random.PRNGKey(71)
-        v = jax.random.uniform(key, (11, 20, 5), minval=-0.5, maxval=0.5)
-        result = _weno_vsq_to_cell(v, order=5)
-        assert jnp.all(jnp.isfinite(result))
-
-
 # =====================================================================
 # AD for D-term and K-term (Phase 4b)
 # =====================================================================
@@ -728,41 +639,6 @@ class TestWENOPhase4bAD:
             return jnp.sum(r ** 2)
 
         g = jax.grad(loss)(D)
-        assert jnp.all(jnp.isfinite(g)), "Gradient has non-finite values"
-        assert float(jnp.max(jnp.abs(g))) > 1e-15, "Gradient is zero"
-
-    def test_ad_usq_to_cell_finite(self):
-        """Gradient through _weno_usq_to_cell is finite and nonzero."""
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_usq_to_cell,
-        )
-        n_lat, n_lon, nlev = 8, 16, 3
-        key = jax.random.PRNGKey(82)
-        u = jax.random.uniform(key, (n_lat, n_lon + 1, nlev),
-                               minval=-0.5, maxval=0.5)
-
-        def loss(u_in):
-            r = _weno_usq_to_cell(u_in, order=5)
-            return jnp.sum(r)
-
-        g = jax.grad(loss)(u)
-        assert jnp.all(jnp.isfinite(g)), "Gradient has non-finite values"
-
-    def test_ad_vsq_to_cell_finite(self):
-        """Gradient through _weno_vsq_to_cell is finite and nonzero."""
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _weno_vsq_to_cell,
-        )
-        n_lat, n_lon, nlev = 8, 16, 3
-        key = jax.random.PRNGKey(84)
-        v = jax.random.uniform(key, (n_lat + 1, n_lon, nlev),
-                               minval=-0.5, maxval=0.5)
-
-        def loss(v_in):
-            r = _weno_vsq_to_cell(v_in, order=5)
-            return jnp.sum(r)
-
-        g = jax.grad(loss)(v)
         assert jnp.all(jnp.isfinite(g)), "Gradient has non-finite values"
         assert float(jnp.max(jnp.abs(g))) > 1e-15, "Gradient is zero"
 
