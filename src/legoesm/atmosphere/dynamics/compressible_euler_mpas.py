@@ -354,7 +354,6 @@ def _tracer_tendencies(tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2):
     field — one HLO graph for all tracers instead of n_tracers vmap'd graphs.
     """
     nCells, nlev_t, n_tracers = tracers.shape
-    div_u_3d = divergence_cell_3d(u_3d, mesh)             # (nCells, nlev)
 
     # Horizontal advection (advective form): -(div(u*q) - q*div(u)).
     # Reshape so cell→edge gather and divergence run once on all tracers.
@@ -366,7 +365,20 @@ def _tracer_tendencies(tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2):
     q_e = q_e_flat.reshape(n_edges, nlev_t, n_tracers)
     flux = u_3d[..., None] * q_e                              # (nEdges, nlev, n_tracers)
     flux_flat = flux.reshape(n_edges, nlev_t * n_tracers)
-    div_uq_flat = divergence_cell_3d(flux_flat, mesh)         # (nCells, nlev*n_tracers)
+
+    # Batch ``div(u)`` (used by the advective-form correction) with the
+    # per-tracer ``div(u*q)`` flux divergences into one
+    # ``divergence_cell_3d`` call by concatenating along the trailing
+    # axis.  ``edgesOnCell`` is gathered once and the
+    # ``sign·dvEdge`` weighting applies uniformly.  ``n_tracers + 1``
+    # divergences → 1.  Same exploit as Loop 156 for the prescribed-wind
+    # tracer transport.
+    _u_and_flux = jnp.concatenate(
+        [u_3d, flux_flat], axis=-1,
+    )  # (nEdges, nlev*(1 + n_tracers))
+    _u_flux_div = divergence_cell_3d(_u_and_flux, mesh)
+    div_u_3d = _u_flux_div[:, :nlev_t]
+    div_uq_flat = _u_flux_div[:, nlev_t:]
     div_uq = div_uq_flat.reshape(nCells, nlev_t, n_tracers)
     horiz = -(div_uq - tracers * div_u_3d[..., None])
 
