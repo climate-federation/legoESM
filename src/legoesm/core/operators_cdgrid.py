@@ -1108,8 +1108,14 @@ def _laplacian_dgrid(u_d, cdgrid):
     cell-centre Laplacian (which uses proper inter-face halo exchange),
     then interpolates back to D-grid corners.
 
-    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
-    For 3D, applies the Laplacian level-by-level.
+    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
+    The 3D path uses ``laplacian_compact_3d`` so the cell-centre halo
+    exchange is shared across all vertical levels in a single
+    ``pad_halo_4d`` collective — replaces the previous
+    ``moveaxis + jax.vmap + moveaxis`` dance that issued ``nlev``
+    separate halo calls.  ``_interp_corner_to_center`` and
+    ``_interp_center_to_corner`` are already 4D-native, so the whole
+    operator is batched with no per-level Python loop.
 
     Parameters
     ----------
@@ -1119,23 +1125,20 @@ def _laplacian_dgrid(u_d, cdgrid):
     -------
     jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    if u_d.ndim == 4:
-        u_t = jnp.moveaxis(u_d, -1, 0)
-
-        def lap_one(uk):
-            return _laplacian_dgrid(uk, cdgrid)
-
-        result = jax.vmap(lap_one)(u_t)
-        return jnp.moveaxis(result, 0, -1)
-
-    # 1. D-grid -> cell centres: (6, n+1, n+1) -> (6, n, n)
+    # 1. D-grid -> cell centres: (6, n+1, n+1[, nlev]) -> (6, n, n[, nlev])
     u_cc = _interp_corner_to_center(u_d)
 
-    # 2. Cell-centre Laplacian with proper halo exchange
-    from legoesm.core.operators import laplacian_compact
-    lap_a = laplacian_compact(u_cc, cdgrid.base)  # (6, n, n)
+    # 2. Cell-centre Laplacian with proper halo exchange.  Use the
+    # native-4D variant on 3D inputs so all levels share one
+    # ``pad_halo_4d`` MPI exchange.
+    if u_d.ndim == 4:
+        from legoesm.core.operators_3d import laplacian_compact_3d
+        lap_a = laplacian_compact_3d(u_cc, cdgrid.base)  # (6, n, n, nlev)
+    else:
+        from legoesm.core.operators import laplacian_compact
+        lap_a = laplacian_compact(u_cc, cdgrid.base)  # (6, n, n)
 
-    # 3. Cell centres -> D-grid: (6, n, n) -> (6, n+1, n+1)
+    # 3. Cell centres -> D-grid: (6, n, n[, nlev]) -> (6, n+1, n+1[, nlev])
     return _interp_center_to_corner(lap_a, cdgrid)
 
 

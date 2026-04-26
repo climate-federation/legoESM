@@ -251,10 +251,24 @@ def cdgrid_compressible_euler_slow_tendencies(
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
 
-    # Laplacian viscosity
+    # Laplacian viscosity — batch (u_d, v_d) into a single
+    # ``_laplacian_dgrid`` call by stacking along a trailing axis and
+    # folding into the level dim.  ``_laplacian_dgrid`` is now
+    # 4D-native (single ``pad_halo_4d`` for all "levels"), so the
+    # paired call shares one halo exchange and one compact ∇² across
+    # both wind components — same passive-trailing-axis pattern as the
+    # corner interps and other dycore batches.
     if config.A_h > 0:
-        du_d_dt = du_d_dt + config.A_h * _laplacian_dgrid(u_d, cdgrid)
-        dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
+        n_face_vl, n_id_vl, n_jd_vl, nlev_vl = u_d.shape
+        _uv_d_lap_stack = jnp.stack([u_d, v_d], axis=-1)
+        _uv_d_lap_flat = _uv_d_lap_stack.reshape(
+            n_face_vl, n_id_vl, n_jd_vl, nlev_vl * 2,
+        )
+        _uv_d_lap_out = _laplacian_dgrid(_uv_d_lap_flat, cdgrid).reshape(
+            n_face_vl, n_id_vl, n_jd_vl, nlev_vl, 2,
+        )
+        du_d_dt = du_d_dt + config.A_h * _uv_d_lap_out[..., 0]
+        dv_d_dt = dv_d_dt + config.A_h * _uv_d_lap_out[..., 1]
 
     # --- 8. Convert back to cell-centre ---
     # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
