@@ -5543,14 +5543,16 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                                     older iter-609 short-run mode-4
                                     test (``np.fft.rfft(row) / N * 2``
                                     — one-sided amplitude with the
-                                    factor of 2 for k>0).  Saved
-                                    baseline ≈ 4.594e-2 m/s (twice
-                                    the user-reported "2.297e-2"
-                                    which used the alternative
-                                    ``|fft|/N`` convention).
-                                    Ceiling: 6.0e-2 m/s (~30 %
-                                    head).  Equator-symmetric to
-                                    within 1 ulp.
+                                    factor of 2 for k>0).  iter-894
+                                    baseline ≈ 3.754e-2 m/s
+                                    (post-iter-893; pre-iter-893 was
+                                    4.594e-2 m/s = twice the
+                                    user-reported "2.297e-2" which
+                                    used the alternative ``|fft|/N``
+                                    convention).  Ceiling: 4.5e-2 m/s
+                                    (~20 % head over the iter-894
+                                    baseline).  Equator-symmetric
+                                    to within 1 ulp.
           3.  ``face4_maxabs vs face5_maxabs mirror`` —
                                     ``|f4 - f5| / max(f4, f5)``.
                                     Saved baseline 0.115776 vs
@@ -5576,19 +5578,20 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         ≈ 14 s on CPU x64.  Same cost class as the existing iter-761
         L2 test.
 
-        Acceptance criteria from user iter-862 reframe:
+        Acceptance criteria (iter-894 update; original iter-862
+        reframe targets superseded post-iter-893 W2 improvement):
         - keep canonical W2 h_L2 within 25% of 2.07e-04 → already
           locked by the L2 test above.
-        - final max|v_ll| < 1.585e-01 m/s OR mode-4(|lat|=30°)
+        - final max|v_ll| < 1.319e-01 m/s OR mode-4(|lat|=30°)
           improvement target — to BEAT this test, a future patch
-          must improve at least one metric below its baseline.  The
-          ceilings here are the regression sentinels; the
+          must improve at least one metric below the iter-894
+          baseline.  The ceilings here (1.6e-1 m/s on max_v_ll,
+          4.5e-2 m/s on mode-4) are the regression sentinels; the
           improvement targets are the saved baseline values.
-          (User reported mode-4 = 2.297e-2 m/s under the ``|fft|/N``
-          convention; this test reports it under the iter-609
-          ``rfft/N*2`` one-sided convention as 4.594e-2 m/s.  Same
-          underlying physics, factor-of-2 in the spectral
-          normalisation only.)
+          (Pre-iter-893 mode-4 was 4.594e-2 m/s under the iter-609
+          ``rfft/N*2`` one-sided convention; iter-893's
+          ``apply_fortran_xppm_boundary`` activation reduced it to
+          3.754e-2.  Equivalent ``|fft|/N`` value is half: 1.877e-2.)
         """
         import jax.numpy as jnp
         import numpy as np
@@ -5620,11 +5623,13 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         # Iter-893: keep this sentinel synchronized with the
         # production matrix runner config (`scripts/run_atmosphere_test_matrix.py`).
         # iter-893 enables `apply_fortran_xppm_boundary=True` on the
-        # canonical W2 LEGACY config; the W2 v_north Linf baseline
-        # shifts from ~0.189 m/s (centred 4-pt PPM) to ~0.152 m/s
-        # (Fortran iord<7 cube-edge boundary).  The CEILINGS pinned
-        # below (max_v_ll < 0.20, mode-4 < 0.06) hold for both ON
-        # and OFF; iter-893 ON is even further from the ceiling.
+        # canonical W2 LEGACY config; the W2 max|v_ll| (lat-lon
+        # regridded) baseline shifts from ~0.189 m/s OFF (centred
+        # 4-pt PPM) to ~0.132 m/s ON (Fortran iord<7 cube-edge
+        # boundary).  Iter-894 tightened the ceilings from
+        # max_v_ll<0.20 / mode-4<0.06 to max_v_ll<0.16 / mode-4<0.045
+        # to lock the iter-893 improvement.  An OFF-path regression
+        # (0.189) would now exceed the 0.16 ceiling.
         cfg = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0,
             div_damp=div_damp,
