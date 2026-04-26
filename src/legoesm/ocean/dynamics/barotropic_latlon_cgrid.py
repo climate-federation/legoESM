@@ -183,11 +183,13 @@ def barotropic_substeps_latlon_cgrid(
         # u-face coefficient: average of adjacent cell areas
         nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
         nu_face_u = jnp.concatenate([nu_face_u, nu_face_u[:, 0:1]], axis=1)
-        # v-face coefficient: average of adjacent cell areas
+        # v-face coefficient: average of adjacent cell areas.  Pole rows
+        # are zero (wall BC); single Pad HLO op replaces alloc-zeros +
+        # concatenate-of-three.  Cast first since pad inherits dtype
+        # from the input slice.
         nu_face_v_interior = baro_alpha * 0.5 * (area[:-1] + area[1:])
-        zero_row_nu = jnp.zeros((1, area.shape[1]), dtype=eta.dtype)
-        nu_face_v = jnp.concatenate(
-            [zero_row_nu, nu_face_v_interior, zero_row_nu], axis=0,
+        nu_face_v = jnp.pad(
+            nu_face_v_interior.astype(eta.dtype), ((1, 1), (0, 0)),
         )
         # Face masks for land boundaries (zero flux at coastlines)
         diff_u_mask = mask * jnp.roll(mask, 1, axis=1)
@@ -195,10 +197,7 @@ def barotropic_substeps_latlon_cgrid(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
         diff_v_mask_interior = mask[:-1] * mask[1:]
-        zero_row_m = jnp.zeros((1, mask.shape[1]), dtype=mask.dtype)
-        diff_v_mask = jnp.concatenate(
-            [zero_row_m, diff_v_mask_interior, zero_row_m], axis=0,
-        )
+        diff_v_mask = jnp.pad(diff_v_mask_interior, ((1, 1), (0, 0)))
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
@@ -214,11 +213,12 @@ def barotropic_substeps_latlon_cgrid(
         div_damp_area_u = jnp.concatenate(
             [div_damp_area_u, div_damp_area_u[:, 0:1]], axis=1,
         )
-        # v-face area: average of adjacent cells
+        # v-face area: average of adjacent cells.  Pole rows are zero
+        # (wall BC); single Pad HLO op replaces alloc-zeros +
+        # concatenate-of-three.
         div_damp_area_v_int = 0.5 * (_area[:-1] + _area[1:])
-        zero_row_dd = jnp.zeros((1, _area.shape[1]), dtype=eta.dtype)
-        div_damp_area_v = jnp.concatenate(
-            [zero_row_dd, div_damp_area_v_int, zero_row_dd], axis=0,
+        div_damp_area_v = jnp.pad(
+            div_damp_area_v_int.astype(eta.dtype), ((1, 1), (0, 0)),
         )
 
     # Cosine time filter for time-averaging (replaces box-average).

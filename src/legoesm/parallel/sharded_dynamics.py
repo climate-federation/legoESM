@@ -1707,11 +1707,16 @@ def make_voronoi_sharded_step(
                 phis_shard[:, jnp.newaxis],        # (cells_per, 1)
             ], axis=-1)
 
-            # Initialize local arrays with +1 garbage slot for safe padding
-            cell_local = jnp.zeros((max_lc + 1, nlev + 2), dtype=cell_pack.dtype)
-            cell_local = cell_local.at[:cells_per].set(cell_pack)
-            u_local = jnp.zeros((max_le + 1, nlev), dtype=u_shard.dtype)
-            u_local = u_local.at[:edges_per].set(u_shard)
+            # Initialize local arrays with +1 garbage slot for safe
+            # padding.  Single Pad HLO op replaces alloc-zeros +
+            # scatter; subsequent halo scatters write into the zeroed
+            # tail slots.
+            cell_local = jnp.pad(
+                cell_pack, ((0, max_lc + 1 - cells_per), (0, 0)),
+            )
+            u_local = jnp.pad(
+                u_shard, ((0, max_le + 1 - edges_per), (0, 0)),
+            )
 
             # Exchange halos via ppermute rounds (one per edge-color).
             # Cell and edge data are packed into a single flat buffer per
