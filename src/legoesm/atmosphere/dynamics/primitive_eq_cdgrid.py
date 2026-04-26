@@ -342,7 +342,6 @@ def fv3_hydrostatic_tendencies(
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
-        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
 
         # Vertical advection of D-grid winds: interpolate (u_d, v_d)
         # together to cell centres (single 4-point average instead of
@@ -356,18 +355,21 @@ def fv3_hydrostatic_tendencies(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
-        # Batch the two ``vertical_advection_hybrid`` calls on (u_cc,
-        # v_cc) by adding a leading axis instead of trailing.
-        # ``vertical_advection_hybrid`` operates on ``axis=-1`` for the
-        # vertical, so we need the (u, v) axis at axis=0 (any
-        # non-trailing axis) — ``F_full`` and the upwind grad are
-        # computed once and broadcast over the new (2,) axis.  Same
-        # axis-0 batching as the CD-grid CE vertical advection.
-        _uv_cc_lead = jnp.moveaxis(_uv_cc, -1, 0)  # (2, face, i, j, nlev)
-        _vert_adv_uv_cc_lead = vertical_advection_hybrid(
-            _uv_cc_lead, mass_flux, p_s, sigma_coord,
+        # Batch ``vertical_advection_hybrid`` over (u_cc, v_cc, T) by
+        # adding a leading axis: T uses the same ``mass_flux``,
+        # ``p_s``, and ``sigma_coord`` as (u, v), so ``F_full`` and
+        # ``p_full`` are computed once and broadcast over the new (3,)
+        # axis instead of being computed twice (once for the (u, v)
+        # batch and once for T standalone).  3 calls → 1.  Loop 168
+        # extends Loop 142.
+        _uvT_cc_lead = jnp.stack(
+            [_uv_cc[..., 0], _uv_cc[..., 1], T], axis=0,
+        )  # (3, face, i, j, nlev)
+        _vert_adv_uvT_lead = vertical_advection_hybrid(
+            _uvT_cc_lead, mass_flux, p_s, sigma_coord,
         )
-        _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uv_cc_lead, 0, -1)
+        _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
+        vert_adv_T = _vert_adv_uvT_lead[2]
         _vert_adv_uv_d = _interp_center_to_corner(
             _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
             cdgrid,
@@ -390,7 +392,6 @@ def fv3_hydrostatic_tendencies(
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         sigma_dot = compute_sigma_dot(div_v, sigma_coord)
-        vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
 
         # Vertical advection of D-grid winds via cell-centre interpolation.
         # Batch (u_d, v_d) → (u_cc, v_cc) and (vert_adv_u_cc,
@@ -402,16 +403,19 @@ def fv3_hydrostatic_tendencies(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
-        # Batch (u_cc, v_cc) vertical advection — ``vertical_advection``
-        # operates on ``axis=-1`` for the vertical, so move the (u, v)
-        # axis to leading where it broadcasts cleanly through the
-        # upwind gradient.  Same pattern as the hybrid branch above
-        # and the CD-grid CE batching.
-        _uv_cc_lead = jnp.moveaxis(_uv_cc, -1, 0)  # (2, face, i, j, nlev)
-        _vert_adv_uv_cc_lead = vertical_advection(
-            _uv_cc_lead, sigma_dot, sigma_coord,
+        # Batch ``vertical_advection`` over (u_cc, v_cc, T) by adding a
+        # leading axis.  T shares ``sigma_dot`` / ``sigma_coord`` with
+        # (u, v), so the velocity-independent shared work is computed
+        # once and broadcast over the (3,) leading axis.  3 calls → 1.
+        # Loop 168 extends Loop 142.
+        _uvT_cc_lead = jnp.stack(
+            [_uv_cc[..., 0], _uv_cc[..., 1], T], axis=0,
+        )  # (3, face, i, j, nlev)
+        _vert_adv_uvT_lead = vertical_advection(
+            _uvT_cc_lead, sigma_dot, sigma_coord,
         )
-        _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uv_cc_lead, 0, -1)
+        _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
+        vert_adv_T = _vert_adv_uvT_lead[2]
         _vert_adv_uv_d = _interp_center_to_corner(
             _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
             cdgrid,
