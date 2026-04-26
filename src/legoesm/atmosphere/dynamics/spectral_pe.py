@@ -260,14 +260,22 @@ def spectral_pe_tendencies(
     # Smooth positivity protection (C∞ differentiable, scaled softplus for ~0.07K bias)
     _sp_scale = 0.1
     T = T + _sp_scale * jax.nn.softplus((config.T_min - T) / _sp_scale)
-    # Batch the two 2D syntheses (lnps, phis) into a single
-    # ``sh_synthesis_3d`` on a stacked (n_sh, 2) tensor.  The 3D
-    # variant treats the trailing axis as a passive batch even when
-    # the spatial output is 2D + a channel dim.  2 SH-syntheses → 1.
-    _lp_pair = jnp.stack([state.lnps_hat.data, state.phis_hat.data], axis=-1)
-    _lp_grid = sh_synthesis_3d(grid, _lp_pair)  # (n_lat, n_lon, 2)
+    # Batch the 2D syntheses (lnps, phis) AND the ∂(lnps)/∂λ-precursor
+    # ``im·lnps_hat`` synthesis (used downstream as ``dfdlon``) into a
+    # single ``sh_synthesis_3d`` on a stacked (n_sh, 3) tensor.  The
+    # third channel is just ``1j·grid.ms·lnps_hat`` — pre-multiplying
+    # the spectral coefficients by ``im`` *before* the synthesis is
+    # algebraically the same as evaluating the zonal derivative of
+    # ``lnps`` on the grid (Loop 147 extension of Loop's existing
+    # 2-channel batch).  3 SH-syntheses → 1.
+    _ims_lnps = (1j * grid.ms) * state.lnps_hat.data  # (n_sh,)
+    _lp_pair = jnp.stack(
+        [state.lnps_hat.data, state.phis_hat.data, _ims_lnps], axis=-1,
+    )  # (n_sh, 3)
+    _lp_grid = sh_synthesis_3d(grid, _lp_pair)  # (n_lat, n_lon, 3)
     lnps_raw = _lp_grid[..., 0]
     phis = _lp_grid[..., 1]
+    _dfdlon_lnps = _lp_grid[..., 2]
     # Smooth two-sided clip with zero bias in interior:
     # softplus(lo - x) pulls up near lower bound; softplus(x - hi) pulls down near upper
     lnps = lnps_raw + jax.nn.softplus(_LNPS_MIN - lnps_raw) - jax.nn.softplus(lnps_raw - _LNPS_MAX)
@@ -368,8 +376,11 @@ def spectral_pe_tendencies(
     # adiabatic heating.
     T_ref = config.si_T_ref
 
-    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic)
-    dfdlon = sh_synthesis(grid, 1j * grid.ms * state.lnps_hat.data)
+    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic).
+    # ``dfdlon`` is reused from the batched (lnps, phis, im·lnps)
+    # synthesis above (Loop 147) — saves a separate ``sh_synthesis``
+    # call on the same input.
+    dfdlon = _dfdlon_lnps
     cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
     dlnps_dx = dfdlon / (a * cos_lat_2d)
     dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
