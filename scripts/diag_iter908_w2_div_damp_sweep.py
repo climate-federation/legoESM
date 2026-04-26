@@ -113,7 +113,13 @@ def main():
           f"{'mass_drift':>12}  {'h_L2':>10}  {'h_Linf':>10}  "
           f"{'v_ll_Linf':>11}  {'h_min':>11}  {'h_max':>11}")
     print("-" * 110)
-    multipliers = [0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+    # Iter-908b (Codex iter-908 stop-time): extend sweep to higher
+    # multipliers to test whether 10x's -1.43% is a local minimum or
+    # the descent continues.  Without this extension, the iter-908
+    # claim "8x is approximately optimal" overclaims the data — the
+    # 10x point is the right edge of the 0.5x-10x range and could be
+    # the START of further improvement.
+    multipliers = [0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 24.0]
     results = {}
     for mult in multipliers:
         r = run_w2(mult)
