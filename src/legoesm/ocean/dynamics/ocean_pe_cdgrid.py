@@ -163,13 +163,33 @@ def ocean_baroclinic_tendencies_cdgrid(
     KE = 0.5 * (u_cc_ke ** 2 + v_cc_ke ** 2)
 
     # --- 10. Bernoulli and pressure gradients at D-grid corners ---
-    dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient(KE, cdgrid)
     # Fill land cells in p_prime before gradient so the 4-point stencil
     # sees smooth values at coastlines instead of the ocean-to-zero jump.
     # ``fill_land_cells`` natively handles 4D input (single halo exchange
     # across all levels), so call it directly.
     p_prime_filled = fill_land_cells(p_prime, mask, grid)
-    dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime_filled, cdgrid)
+    # Batch the two Arakawa-Lamb gradients (KE, p_prime_filled) into a
+    # single call — both are 3D scalar fields on (face, n, n, nlev) and
+    # the operator treats the trailing axis as a passive batch.  Same
+    # exploit as Loop 119 (CD-grid CE) for K and pi_prime.  2 gradients
+    # → 1 (one halo exchange + one 4-point finite-difference + one 2x2
+    # metric-matrix multiply on the thicker tensor).
+    n_face_kp, n_i_kp, n_j_kp, nlev_kp = KE.shape
+    _kp_stack = jnp.stack([KE, p_prime_filled], axis=-1)
+    _kp_flat = _kp_stack.reshape(n_face_kp, n_i_kp, n_j_kp, nlev_kp * 2)
+    _dkp_dx_flat, _dkp_dy_perp_flat = _arakawa_lamb_gradient(_kp_flat, cdgrid)
+    _dkp_dx = _dkp_dx_flat.reshape(
+        _dkp_dx_flat.shape[0], _dkp_dx_flat.shape[1],
+        _dkp_dx_flat.shape[2], nlev_kp, 2,
+    )
+    _dkp_dy_perp = _dkp_dy_perp_flat.reshape(
+        _dkp_dy_perp_flat.shape[0], _dkp_dy_perp_flat.shape[1],
+        _dkp_dy_perp_flat.shape[2], nlev_kp, 2,
+    )
+    dKE_dx = _dkp_dx[..., 0]
+    dp_dx = _dkp_dx[..., 1]
+    dKE_dy_perp = _dkp_dy_perp[..., 0]
+    dp_dy_perp = _dkp_dy_perp[..., 1]
     # Downcast PGF results back to working precision
     dp_dx = dp_dx.astype(T.dtype)
     dp_dy_perp = dp_dy_perp.astype(T.dtype)
