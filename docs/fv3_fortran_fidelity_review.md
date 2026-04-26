@@ -2921,3 +2921,51 @@ iter-892 places the **wrong type of formula** at each cube-edge slot.  None of t
 Both fixes carry W2 regression risk: the iter-892 formulas may be empirically better than the strict-Fortran ones at the smooth W2 cube vertex.  iter-900+ should make these changes one at a time, with measurement.
 
 **Process.**  179th iter.  iter-899 does NOT close a Fortran-fidelity gap by writing code — it surfaces a previously-undocumented gap by careful investigation.  This is meaningful work in the Ralph protocol sense: it converts a hidden fidelity bug into a documented, scoped, measurable work item for iter-900+.  No production code changes; no regression risk.
+
+### Iter-900 — Fortran-faithful LEFT-side cube-edge overrides (opt-in flag, NEGATIVE result on W2)
+
+**Motivation.**  iter-899 identified a 1-cell shift bug in iter-892's LEFT-side cube-edge PPM overrides: under production strip layout (Hypothesis A: q[k]=q1(k-2)), iter-892's xt formula at q_face[2] computes a non-Fortran value at the al(0) slot, and its c3/c2/c1 mirror at q_face[3] computes a non-Fortran value at the al(1) slot.  iter-900 implements the strict Fortran-faithful overrides at the corrected q_face indices behind a feature flag, with W2 measurement.
+
+**Implementation.**  New `fortran_faithful_ppm_left: bool = False` field on `CDGridShallowWaterConfig` (forwarded through `fv3_sw_tendencies` and `cgrid_mass_flux_divergence` to `_ppm_reconstruct_1d`).  When True (and `apply_fortran_xppm_boundary=True`), the LEFT-side overrides apply Fortran's actual recipes per `tp_core.F90:359-362`:
+
+```
+q_face[2] = al(0) = c1*q1(-2) + c2*q1(-1) + c3*q1(0)
+q_face[3] = al(1) = xt clipped using q1(-1..2), where
+           xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
+q_face[4] = al(2) = c3*q1(1) + c2*q1(2) + c1*q1(3)   [NEW override]
+```
+
+(Right-side overrides unchanged in iter-900; deferred to iter-901+ for separate measurement.)
+
+**W2 measurement at C36 dt=300s 1-day** (`scripts/diag_iter900_w2_fortran_faithful_left.py`):
+
+| config                           | mass_drift | h_L2     | h_Linf   | v_ll_Linf  |
+|----------------------------------|------------|----------|----------|------------|
+| (A) iter-892 default (production) | 4.561e-07  | 2.048e-04 | 8.184e+00 | **1.319e-01** |
+| (B) iter-900 fortran-faithful left | 4.561e-07  | 2.291e-04 | 1.002e+01 | 2.027e-01 |
+
+iter-900's strict-Fortran path INCREASES W2 v_ll_Linf by 53.7 % (+0.071 m/s).  h_L2 increases 11.9 % (2.05e-4 → 2.29e-4), h_Linf increases 22.4 %.  Mass drift unchanged (correct conservation).
+
+**Interpretation.**  iter-892's 1-cell-shifted formulas are EMPIRICALLY BETTER than strict Fortran on the smooth W2 cube vertex.  Hypothesis: iter-892's xt-clipped formula at q_face[2] (placed where Fortran specifies a 3-pt c1/c2/c3) constrains the boundary value more aggressively than Fortran's own c1/c2/c3 — preventing overshoot at the smooth W2 cube edge.  Strict Fortran al(0) = c1*q1(-2) + c2*q1(-1) + c3*q1(0) is a 3-pt one-sided extrapolation with higher truncation error at smooth boundaries.
+
+**Decision.**  Keep iter-892 as the production default.  iter-900's flag stays default OFF.  This documents a tension between strict Fortran fidelity and W2 numerical quality — a case where the legoESM cubed-sphere PPM benefits from a non-Fortran formula that happens to outperform the oracle on this specific test case.
+
+**Open questions** (deferred):
+- Does the iter-900 flag improve or hurt OTHER cases (W5, cosine bell, ocean rest)?  Only W2 measured.
+- Does the same picture hold at finer resolution (C48, C96)?
+- Would the right-side counterpart (`fortran_faithful_ppm_right` adding al(npx-1)/al(npx) at q_face[n+2,n+3]) show the same pattern?
+- Could a HYBRID (strict-Fortran al(0)/al(2) but iter-892 xt at al(1)) be better than either pure path?
+
+**Deliverable.**
+- `src/legoesm/core/operators_cdgrid.py:_ppm_reconstruct_1d`: `fortran_faithful_ppm_left` kwarg (default False); preserves iter-892 default; adds 3-slot Fortran-faithful path at q_face[2,3,4] when flag=True.
+- `src/legoesm/core/operators_cdgrid.py:cgrid_mass_flux_divergence`: forwards kwarg to leaf for both x and y strips.
+- `src/legoesm/core/operators_cdgrid.py:fv3_sw_tendencies`: kwarg added; forwards to mass-flux divergence.
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:CDGridShallowWaterConfig`: `fortran_faithful_ppm_left` field added; production model.step forwards.
+- `tests/test_ppm_reconstruct_1d_fortran_faithful_left_iter900.py`: 6 sentinels covering OFF preserves iter-892, ON applies Fortran al(0/1/2) at correct slots, RIGHT side untouched, gate respects `apply_fortran_xppm_boundary`.
+- `tests/test_fortran_fidelity_default_flags_iter873.py`: `fortran_faithful_ppm_left` added to inventory.
+- `scripts/diag_iter900_w2_fortran_faithful_left.py`: W2 comparison script.
+- This iter-900 doc entry.
+
+**Verification.**  All 26 tests pass (12 iter-873 inventory + iter-896 must-activate, 6 iter-899 sentinels + iter-768 t=1d pin, 6 iter-900 sentinels).  Production W2 baseline (iter-892 default) unchanged at 1.319e-1 m/s.
+
+**Process.**  180th iter.  iter-900 closes the iter-899 handoff with a measured negative result: strict Fortran is WORSE than iter-892's accidentally-good shifted formulas on W2.  This is a legitimate FV3-fidelity finding — sometimes the oracle's literal recipes don't transfer cleanly to a different halo convention, and a thoughtful "wrong" formula outperforms.  The flag is preserved as opt-in for future hybrid experiments.  CLAUDE.md instructs "follow the Fortran implementation exactly" — but iter-900 demonstrates an empirical exception worth documenting; default flipping requires evidence iter-900 improves W2 plus W5/cosine bell/ocean rest, not just one of them.

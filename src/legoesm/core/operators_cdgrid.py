@@ -85,7 +85,8 @@ def _broadcast_metric(metric, field):
 
 def _ppm_reconstruct_1d(q, *, axis: int,
                         apply_fortran_xppm_boundary: bool = False,
-                        n_interior: int | None = None):
+                        n_interior: int | None = None,
+                        fortran_faithful_ppm_left: bool = False):
     """PPM face-value reconstruction along ``axis``.
 
     Given cell averages along ``axis``, compute left and right face
@@ -219,27 +220,67 @@ def _ppm_reconstruct_1d(q, *, axis: int,
         c3 = 5.0 / 14.0
         n_int = int(n_interior)
 
-        # LEFT cube-edge boundary overrides (al(1) and al(2) only;
-        # al(0) at q_face[1] left untouched — needs halo=3).
-        # al(1) = uniform 4-point xt clipped
-        # xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
-        #    = 0.75*(q_pad[3]+q_pad[4]) - 0.25*(q_pad[2]+q_pad[5])
-        # (q1(j) = q_pad[j+3], so q1(-1)=q_pad[2], q1(0)=q_pad[3],
-        # q1(1)=q_pad[4], q1(2)=q_pad[5].)
-        xt_L = (0.75 * (q_pad[..., 3] + q_pad[..., 4])
-                - 0.25 * (q_pad[..., 2] + q_pad[..., 5]))
-        q_lo_L = jnp.minimum(jnp.minimum(q_pad[..., 2], q_pad[..., 3]),
-                              jnp.minimum(q_pad[..., 4], q_pad[..., 5]))
-        q_hi_L = jnp.maximum(jnp.maximum(q_pad[..., 2], q_pad[..., 3]),
-                              jnp.maximum(q_pad[..., 4], q_pad[..., 5]))
-        face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
-        # al(2) = c3*q1(1) + c2*q1(2) + c1*q1(3)
-        #       = c3*q_pad[4] + c2*q_pad[5] + c1*q_pad[6]
-        face_al2 = (c3 * q_pad[..., 4] + c2 * q_pad[..., 5]
-                    + c1 * q_pad[..., 6])
+        if fortran_faithful_ppm_left:
+            # Iter-900 LEFT-side Fortran-faithful overrides at the
+            # CORRECTED q_face indices.  iter-899 investigation
+            # (`scripts/diag_iter899_ppm_strip_layout.py`) established
+            # that production strip is q[k]=q1(k-2) (Hypothesis A,
+            # full halo=2 per side), NOT q[k]=q1(k-1) as the iter-892
+            # docstring claims.  Under Hypothesis A, q_pad[k]=q1(k-4)
+            # for k=2..n+5, so:
+            #   q_pad[2]=q1(-2), q_pad[3]=q1(-1), q_pad[4]=q1(0),
+            #   q_pad[5]=q1(1),  q_pad[6]=q1(2),  q_pad[7]=q1(3),
+            # and q_face[k] corresponds to Fortran al(k-2):
+            #   q_face[2]=al(0), q_face[3]=al(1), q_face[4]=al(2).
+            #
+            # Fortran formulas (`tp_core.F90:359-362`):
+            #   al(0) = c1*q1(-2) + c2*q1(-1) + c3*q1(0)
+            #         = c1*q_pad[2] + c2*q_pad[3] + c3*q_pad[4]
+            #   al(1) = xt 4-pt clipped using q1(-1..2) = q_pad[3..6]
+            #         xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
+            #            = 0.75*(q_pad[4]+q_pad[5]) - 0.25*(q_pad[3]+q_pad[6])
+            #         clip to min/max(q1(-1..2)) = min/max(q_pad[3..6]).
+            #   al(2) = c3*q1(1) + c2*q1(2) + c1*q1(3)
+            #         = c3*q_pad[5] + c2*q_pad[6] + c1*q_pad[7]
+            face_al0 = (c1 * q_pad[..., 2] + c2 * q_pad[..., 3]
+                        + c3 * q_pad[..., 4])
+            xt_L = (0.75 * (q_pad[..., 4] + q_pad[..., 5])
+                    - 0.25 * (q_pad[..., 3] + q_pad[..., 6]))
+            q_lo_L = jnp.minimum(
+                jnp.minimum(q_pad[..., 3], q_pad[..., 4]),
+                jnp.minimum(q_pad[..., 5], q_pad[..., 6]))
+            q_hi_L = jnp.maximum(
+                jnp.maximum(q_pad[..., 3], q_pad[..., 4]),
+                jnp.maximum(q_pad[..., 5], q_pad[..., 6]))
+            face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
+            face_al2 = (c3 * q_pad[..., 5] + c2 * q_pad[..., 6]
+                        + c1 * q_pad[..., 7])
 
-        q_face = q_face.at[..., 2].set(face_al1)
-        q_face = q_face.at[..., 3].set(face_al2)
+            q_face = q_face.at[..., 2].set(face_al0)
+            q_face = q_face.at[..., 3].set(face_al1)
+            q_face = q_face.at[..., 4].set(face_al2)
+        else:
+            # Iter-892 LEFT cube-edge boundary overrides (al(1) and
+            # al(2) only; al(0) at q_face[1] left untouched — needs
+            # halo=3).  KNOWN 1-CELL SHIFT BUG documented in iter-899:
+            # the q_pad indices used here correspond to Hypothesis B
+            # (q[k]=q1(k-1)) but production gives Hypothesis A
+            # (q[k]=q1(k-2)).  Despite the bug, iter-893 measured a
+            # 17 % W2 v_ll_Linf reduction with this default — keep it
+            # as the production default until iter-900+ measurement
+            # confirms the strict-Fortran path is at least as good.
+            xt_L = (0.75 * (q_pad[..., 3] + q_pad[..., 4])
+                    - 0.25 * (q_pad[..., 2] + q_pad[..., 5]))
+            q_lo_L = jnp.minimum(jnp.minimum(q_pad[..., 2], q_pad[..., 3]),
+                                  jnp.minimum(q_pad[..., 4], q_pad[..., 5]))
+            q_hi_L = jnp.maximum(jnp.maximum(q_pad[..., 2], q_pad[..., 3]),
+                                  jnp.maximum(q_pad[..., 4], q_pad[..., 5]))
+            face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
+            face_al2 = (c3 * q_pad[..., 4] + c2 * q_pad[..., 5]
+                        + c1 * q_pad[..., 6])
+
+            q_face = q_face.at[..., 2].set(face_al1)
+            q_face = q_face.at[..., 3].set(face_al2)
 
         # RIGHT cube-edge boundary overrides (al(npx-1) and al(npx)
         # only; al(npx+1) at q_face[n+3] left untouched — needs
@@ -572,7 +613,8 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 # ==============================================================================
 
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
-                                apply_fortran_xppm_boundary=False):
+                                apply_fortran_xppm_boundary=False,
+                                fortran_faithful_ppm_left=False):
     """Conservative mass flux divergence using PPM face reconstruction.
 
     Uses the Piecewise Parabolic Method (Colella & Woodward 1984) for
@@ -604,7 +646,8 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
             return cgrid_mass_flux_divergence(
                 hk, uk, vk, cdgrid,
                 apply_fortran_xppm_boundary=(
-                    apply_fortran_xppm_boundary))
+                    apply_fortran_xppm_boundary),
+                fortran_faithful_ppm_left=fortran_faithful_ppm_left)
 
         result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
         return jnp.moveaxis(result_t, 0, -1)
@@ -646,7 +689,8 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     q_L_x, q_R_x = _ppm_reconstruct_1d(
         h_x_strips, axis=1,
         apply_fortran_xppm_boundary=effective_xppm_boundary,
-        n_interior=n)
+        n_interior=n,
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left)
 
     # Face values at x-interfaces: we need n+1 faces for interior cells
     # Face (i) is between padded cells (i+1) and (i+2), i.e. original cells i-1 and i
@@ -667,7 +711,8 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     q_L_y, q_R_y = _ppm_reconstruct_1d(
         h_y_strips, axis=2,
         apply_fortran_xppm_boundary=effective_xppm_boundary,
-        n_interior=n)
+        n_interior=n,
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left)
 
     q_R_bottom = q_R_y[:, :, 1:n+2]   # (6, n, n+1)
     q_L_top = q_L_y[:, :, 2:n+3]      # (6, n, n+1)
@@ -1746,6 +1791,7 @@ def fv3_sw_tendencies(
     fortran_vector_corner_fill=False,
     dddmp=0.0,
     apply_fortran_xppm_boundary=False,
+    fortran_faithful_ppm_left=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1779,7 +1825,8 @@ def fv3_sw_tendencies(
     # boundary overrides at tp_core.F90:357-369 when opted in.
     dh_dt = cgrid_mass_flux_divergence(
         h, u_c, v_c, cdgrid,
-        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left)
     if zero_mean_correction:
         total_area = jnp.sum(cdgrid.base.area)
         dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area

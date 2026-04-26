@@ -184,6 +184,23 @@ class CDGridShallowWaterConfig(NamedTuple):
     # `operators_cdgrid.py`) does NOT consume this field.
     apply_fortran_xppm_boundary: bool = False
 
+    # Iter-900 (default OFF): when True (and apply_fortran_xppm_boundary
+    # is also True), `_ppm_reconstruct_1d` swaps the LEFT-side cube-
+    # edge boundary overrides to Fortran-faithful formulas at the
+    # corrected q_face indices [2,3,4]:
+    #   q_face[2] = al(0) = c1*q1(-2)+c2*q1(-1)+c3*q1(0)
+    #   q_face[3] = al(1) = xt clipped using q1(-1..2)
+    #   q_face[4] = al(2) = c3*q1(1)+c2*q1(2)+c1*q1(3)
+    # iter-892 has a known 1-cell shift bug at the LEFT slots that
+    # iter-893 nonetheless landed as production (W2 v_ll_Linf 0.159
+    # -> 0.132 m/s).  iter-900 keeps iter-892 as the production
+    # default; flipping requires iter-901+ measurement that the
+    # strict-Fortran path is at least as good.  See iter-899 entry in
+    # `docs/fv3_fortran_fidelity_review.md` for the index-map analysis.
+    # RIGHT-side overrides are unchanged in iter-900 (deferred to
+    # iter-901+).
+    fortran_faithful_ppm_left: bool = False
+
     # Iter-872c-take3 (Codex pass-3): production divergence-damping
     # `dddmp` coefficient (Fortran `flagstruct%dddmp`,
     # fv_arrays.F90:360).  Default 0.2 preserves pre-iter-872
@@ -672,6 +689,13 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     # responds to the flag from iter-889 onward.
                     apply_fortran_xppm_boundary=(
                         self.config.apply_fortran_xppm_boundary),
+                    # Iter-900: forward fortran_faithful_ppm_left to the
+                    # production CDGrid PPM so the LEFT cube-edge override
+                    # uses Fortran's actual al(0)/al(1)/al(2) recipes at
+                    # the corrected q_face indices when opted in.  Default
+                    # OFF preserves iter-892/iter-893 production behavior.
+                    fortran_faithful_ppm_left=(
+                        self.config.fortran_faithful_ppm_left),
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,

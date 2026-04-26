@@ -70,6 +70,17 @@ _FORTRAN_FIDELITY_OPT_IN_FLAGS = [
      "boundary-corner cascaded smoothing"),
     ("use_experimental_csw", False, "pre-iter-862",
      "experimental C-grid path (known unstable)"),
+    # Iter-900 added `fortran_faithful_ppm_left`: switches the LEFT-
+    # side cube-edge PPM overrides to Fortran's actual al(0)/al(1)/
+    # al(2) recipes at the corrected q_face indices (per iter-899
+    # investigation of iter-892's 1-cell shift bug).  Iter-900
+    # measurement: ON path WORSENS W2 v_ll_Linf by 53.7 % (0.132 ->
+    # 0.203 m/s) — iter-892's empirically-good shifted formulas are
+    # better than strict Fortran on the smooth W2 cube vertex.
+    # Default OFF preserves iter-893 production behavior; this flag
+    # remains a Fortran-fidelity opt-in covered by iter-873 inventory.
+    ("fortran_faithful_ppm_left", False, "iter-900",
+     "tp_core.F90:359-362 (al(0)/al(1)/al(2) at Hypothesis-A q_face indices)"),
     # Iter-888c added `apply_fortran_xppm_boundary` to this inventory
     # as a default-OFF Fortran-fidelity opt-in.  Iter-892 fixed an
     # off-by-one in the iter-889 implementation and discovered the
