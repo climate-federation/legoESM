@@ -155,13 +155,26 @@ def mpas_compressible_euler_slow_tendencies(
             u_3d, mesh,
         )
 
-    # Horizontal divergence of rho*u for continuity
+    # Horizontal divergences batched.  ``divergence_cell_3d`` does a
+    # gather (``u_edge_3d[edgesOnCell]``) + weighted reduce on the
+    # leading axis only — the trailing nlev axis is purely passive.
+    # Stack the three (nEdges, nlev) flux inputs along a new trailing
+    # axis to (nEdges, nlev, 3), fold to (nEdges, nlev*3), call
+    # ``divergence_cell_3d`` once on the thicker tensor, then unfold.
+    # 3 divergence calls → 1.
     rho_e_3d = cell_to_edge_avg_3d(rho_total, mesh)        # (nEdges, nlev)
-    div_rho_v_3d = divergence_cell_3d(rho_e_3d * u_3d, mesh)
+    n_edges_d, nlev_d = u_3d.shape
+    _div_inputs = jnp.stack(
+        [rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d], axis=-1,
+    )  # (nEdges, nlev, 3)
+    _div_outputs = divergence_cell_3d(
+        _div_inputs.reshape(n_edges_d, nlev_d * 3), mesh,
+    ).reshape(-1, nlev_d, 3)
+    div_rho_v_3d = _div_outputs[..., 0]
+    div_u_theta_3d = _div_outputs[..., 1]
+    div_u_3d = _div_outputs[..., 2]
 
     # Horizontal theta advection (advective form): -(div(u·θ) - θ · div(u)).
-    div_u_theta_3d = divergence_cell_3d(u_3d * theta_e_3d, mesh)
-    div_u_3d = divergence_cell_3d(u_3d, mesh)
     dtheta_p_dt = -(div_u_theta_3d - theta_total * div_u_3d)
 
     # Horizontal continuity: drho'/dt = -div_h(rho * v)
