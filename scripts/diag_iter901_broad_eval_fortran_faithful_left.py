@@ -139,49 +139,65 @@ def run_ocean_rest(faithful: bool):
     }
 
 
-print("Iter-901 broad evaluation: fortran_faithful_ppm_left flag effect")
-print("on W5 and ocean-rest-state at C36 dt=300s 1-day.")
-print()
-print("Cosine bell SKIPPED — `run_cosine_bell` uses `transport_step`")
-print("directly without going through `fv3_sw_tendencies`, so the")
-print("iter-900 flag is structurally inert (per iter-775 note in")
-print("scripts/run_atmosphere_test_matrix.py:1568-1576).")
-print()
+def main():
+    """Run the broad evaluation and print the comparison table.
 
-# === W5 ===
-print(f"### W5 (Williamson case 5 — flow over isolated mountain) ###")
-print(f"{'config':<35}  {'mass_drift':>12}  {'|h-h_ic|_Linf':>14}  "
-      f"{'h_range (min, max)':>30}")
-print("-" * 100)
-for faithful in (False, True):
-    label = ("(A) iter-892 default (production)" if not faithful
-             else "(B) iter-900 fortran-faithful left")
-    r = run_w5(faithful)
-    print(f"{label:<35}  "
-          f"{r['mass_drift']:>12.3e}  "
-          f"{r['h_diff_linf']:>14.3e}  "
-          f"({r['h_min']:>10.4e}, {r['h_max']:>10.4e})")
-print()
+    Iter-901c (Codex iter-901b stop-time fix): wrapped in a `main()`
+    under `if __name__ == "__main__"` guard so importing this module
+    (e.g., from the smoke test in
+    `tests/test_iter901_diag_smoke.py`) does NOT trigger the heavy
+    W5 + ocean-rest trajectories.  Pre-iter-901c, the smoke test's
+    `_load_script_module()` would `exec_module` the top-level prints
+    + `run_w5(False); run_w5(True); run_ocean_rest(False);
+    run_ocean_rest(True)` — ~60 s — defeating the smoke-test purpose.
+    """
+    print("Iter-901 broad evaluation: fortran_faithful_ppm_left flag effect")
+    print("on W5 and ocean-rest-state at C36 dt=300s 1-day.")
+    print()
+    print("Cosine bell SKIPPED — `run_cosine_bell` uses `transport_step`")
+    print("directly without going through `fv3_sw_tendencies`, so the")
+    print("iter-900 flag is structurally inert (per iter-775 note in")
+    print("scripts/run_atmosphere_test_matrix.py:1568-1576).")
+    print()
 
-# === Ocean rest state ===
-print(f"### Ocean rest (h=10000, u=v=0, h_s=0; should stay at rest) ###")
-print(f"{'config':<35}  {'mass_drift':>12}  {'|h-h_ic|_Linf':>14}  "
-      f"{'max|u|':>10}  {'max|v|':>10}")
-print("-" * 100)
-for faithful in (False, True):
-    label = ("(A) iter-892 default (production)" if not faithful
-             else "(B) iter-900 fortran-faithful left")
-    r = run_ocean_rest(faithful)
-    print(f"{label:<35}  "
-          f"{r['mass_drift']:>12.3e}  "
-          f"{r['h_diff_linf']:>14.3e}  "
-          f"{r['u_max']:>10.3e}  {r['v_max']:>10.3e}")
-print()
+    # === W5 ===
+    print(f"### W5 (Williamson case 5 — flow over isolated mountain) ###")
+    print(f"{'config':<35}  {'mass_drift':>12}  {'|h-h_ic|_Linf':>14}  "
+          f"{'h_range (min, max)':>30}")
+    print("-" * 100)
+    for faithful in (False, True):
+        label = ("(A) iter-892 default (production)" if not faithful
+                 else "(B) iter-900 fortran-faithful left")
+        r = run_w5(faithful)
+        print(f"{label:<35}  "
+              f"{r['mass_drift']:>12.3e}  "
+              f"{r['h_diff_linf']:>14.3e}  "
+              f"({r['h_min']:>10.4e}, {r['h_max']:>10.4e})")
+    print()
 
-print("Conclusion: if any 'iter-900 fortran-faithful' row is BETTER")
-print("than its iter-892 counterpart, the iter-892-vs-iter-900 trade-")
-print("off is multi-dimensional and a hybrid config is warranted.")
-print("If iter-900 is worse or neutral on all 3 cases (W2 from")
-print("iter-900 + W5 + ocean rest), iter-892's empirical advantage")
-print("extends to the broader test matrix and the negative-result")
-print("conclusion is robust.")
+    # === Ocean rest state ===
+    print(f"### Ocean rest (h=10000, u=v=0, h_s=0; should stay at rest) ###")
+    print(f"{'config':<35}  {'mass_drift':>12}  {'|h-h_ic|_Linf':>14}  "
+          f"{'max|u|':>10}  {'max|v|':>10}")
+    print("-" * 100)
+    for faithful in (False, True):
+        label = ("(A) iter-892 default (production)" if not faithful
+                 else "(B) iter-900 fortran-faithful left")
+        r = run_ocean_rest(faithful)
+        print(f"{label:<35}  "
+              f"{r['mass_drift']:>12.3e}  "
+              f"{r['h_diff_linf']:>14.3e}  "
+              f"{r['u_max']:>10.3e}  {r['v_max']:>10.3e}")
+    print()
+
+    print("Conclusion: if any 'iter-900 fortran-faithful' row is BETTER")
+    print("than its iter-892 counterpart, the iter-892-vs-iter-900 trade-")
+    print("off is multi-dimensional and a hybrid config is warranted.")
+    print("If iter-900 is worse or neutral on all 3 cases (W2 from")
+    print("iter-900 + W5 + ocean rest), iter-892's empirical advantage")
+    print("extends to the broader test matrix and the negative-result")
+    print("conclusion is robust.")
+
+
+if __name__ == "__main__":
+    main()
