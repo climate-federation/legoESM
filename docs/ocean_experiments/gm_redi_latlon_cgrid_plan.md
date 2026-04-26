@@ -1,6 +1,6 @@
 # GM/Redi Implementation Plan for Lat-Lon C-Grid Ocean
 
-*Created: 2026-04-25*
+*Created: 2026-04-25.  Updated: 2026-04-25 (Eady validation & interface-level fix).*
 
 ## Context
 
@@ -28,6 +28,36 @@ MITgcm, NEMO, and POP2 implementations.
 
 ---
 
+## Current Status (2026-04-25)
+
+### Implemented (Phases 1-5 complete)
+
+- `_gm_redi_common.py` — shared Visbeck, DM95 taper, vertical flux divergence
+- `gm_redi_latlon_cgrid.py` — slopes, tracer tendency, orchestrator
+- `gm_redi.py` — CS version refactored to import from common
+- `ocean_model_latlon_cgrid.py` — import fixed, masks passed
+- `integration.py` — TypeError guard for lat-lon
+- `global_overturning.py` — `use_gm_redi` toggle + `create_gm_redi_config()`
+- 41 tests passing (16 CS + 21 lat-lon + 4 Eady physics)
+- 3 Eady GM/Redi test cases in ocean test matrix
+
+### Validated
+
+- **GM adiabatic flattening**: Confirmed in Eady uniform test — GM-only produces
+  nonzero tendency, reduces APE, conserves tracer integral.
+- **Redi isopycnal diffusion**: Single-step tendency is near-zero (8.7e-11 K/s)
+  for isopycnal-aligned tracers with linear EOS. 1400x improvement over initial
+  implementation via the interface-level flux fix.
+- **Differentiability**: `jax.grad` flows through the full tendency computation.
+
+### Remaining Issue: Spurious Redi Cross-Isopycnal Diffusion
+
+See dedicated section below — the centered-difference approach has a small but
+nonzero Redi residual that accumulates over long integrations. **Triad slope
+discretization is needed for exact isopycnal projection.**
+
+---
+
 ## Design Decisions
 
 ### 1. Formulation: Griffies (1998) skew-flux
@@ -38,13 +68,17 @@ C-grid, horizontal fluxes live naturally at u/v-faces. All major z-coordinate
 models (MITgcm, NEMO, POP2) use this as default. MOM6's thickness-diffusion
 approach doesn't map to z-star coordinates.
 
-### 2. Slope computation: Centered differences (not triads)
+### 2. Slope computation: Centered differences (not triads) — NEEDS UPGRADE
 
 Compute drho/dx at u-faces via `gradient_x_cgrid`, average to cell centers, then
 to vertical interfaces. Vertical gradient at interfaces using `dz_half_ref * J`.
-The triad approach (Griffies et al. 1998, NEMO) gives exact conservation but is
-complex; at 1-degree other error sources dominate. Upgrade path: isolate slope
-computation in its own function.
+
+**Problem identified**: The centered-difference approach does not achieve exact
+cancellation of the Redi tensor when q = f(rho). Even with the interface-level
+fix (see below), a small residual remains that accumulates over long integrations.
+The triad approach (Griffies et al. 1998, NEMO) evaluates each flux from a
+locally consistent set of density/tracer values, guaranteeing exact cancellation.
+**Upgrading to triads is the next priority.**
 
 ### 3. Tapering: DM95 with S_max = 0.005
 
@@ -108,88 +142,87 @@ vertical mixing proportional to S^2.
 
 **Tendency**: dq/dt = div_h(F_x, F_y) + dF_z/dz
 
----
-
-## Implementation Phases
-
-### Phase 1: Extract shared code (`_gm_redi_common.py`)
-
-Factor grid-agnostic helpers from `gm_redi.py`:
-- `compute_visbeck_kappa_gm()` — adaptive coefficient
-- `dm95_taper()` — identical tapering across grids
-- `vertical_flux_divergence()` — zero-pad BCs + FV divergence
-
-Update CS `gm_redi.py` to import from common. Verify existing 16 tests pass.
-
-### Phase 2: Core implementation (`gm_redi_latlon_cgrid.py`)
-
-Three public functions:
-- `compute_isopycnal_slopes_latlon_cgrid(rho, mask, z_coord, J, grid, cfg)`
-  → (S_x, S_y, taper) at interfaces
-- `gm_redi_tracer_tendency_latlon_cgrid(q, S_x, S_y, masks, z_coord, J, grid, kappa_GM, kappa_Redi)`
-  → dq/dt at cell centers
-- `gm_redi_tracer_tendency_latlon(T, S, eta, H_bathy, grid, z_coord, cfg, ...)`
-  → (dT_dt, dS_dt) — top-level orchestrator
-
-Key implementation details:
-- Use 3D-native `gradient_x_cgrid` / `gradient_y_cgrid` (no vmap)
-- Combine diagonal + off-diagonal fluxes at faces, single `divergence_cgrid` call
-- Neumann-fill BOTH density and tracer before gradient computation
-- Also provide `LateralMixingOutput`-returning wrapper for future factory use
-
-### Phase 3: Tests (13 categories + structural enforcement)
-
-Unit tests: shape, finiteness, uniform-tracer zero tendency, uniform-density zero
-slopes, tracer conservation, variance reduction, isopycnal-aligned tracer zero
-tendency, land mask correctness, zonal symmetry, sign check, Visbeck coefficient,
-JAX differentiability, vertical CFL diagnostic, LateralMixingOutput wrapper.
-
-Structural test: verify shared imports, no inline Visbeck formula duplication.
-
-### Phase 4: Wire into ocean model
-
-- Update import in `ocean_model_latlon_cgrid.py:527`
-- Pass mask, u_mask, v_mask, f_coriolis
-- Set K_h = 0 for tracers when GM/Redi active (avoid double diffusion)
-- Add clear TypeError in `integration.py` for lat-lon grid
-
-### Phase 5: Global overturning experiment
-
-- Add `use_gm_redi: bool = False` toggle to `GlobalOverturningConfig`
-- Configure: kappa_GM = kappa_Redi = 1000, S_max = 0.005, Visbeck enabled
-- Run 10-year integration, check stability, conservation, APE reduction
+**Key implementation detail**: ALL horizontal flux terms (diagonal + off-diagonal)
+are evaluated at INTERFACE levels before averaging to full levels. This ensures
+exact cancellation `dq/dx + S_x * dq/dz = 0` at the interface level when
+q = f(rho). See "Redi Cross-Isopycnal Diffusion" section below for why this
+matters and its limitations.
 
 ---
 
-## Files
+## Eady Validation Results
 
-| File | Action |
-|------|--------|
-| `src/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py` | **CREATE** |
-| `src/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py` | **CREATE** |
-| `src/legoesm/ocean/physics/lateral_mixing/gm_redi.py` | **MODIFY** |
-| `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` | **MODIFY** |
-| `src/legoesm/ocean/physics/lateral_mixing/integration.py` | **MODIFY** |
-| `src/legoesm/ocean/experiments/global_overturning.py` | **MODIFY** |
-| `tests/ocean/unit/test_gm_redi_latlon_cgrid.py` | **CREATE** |
-| `tests/ocean/unit/test_no_gm_redi_duplication.py` | **CREATE** |
+### Test design
 
----
+The Eady uniform experiment provides the ideal test: linear EOS makes isopycnals
+equal isotherms, so T is exactly constant along isopycnals. Uniform N², linear
+vertical shear, depth-uniform dT/dy. No perturbation seeded — clean background.
 
-## Expected Physical Impact
+Three cases at low resolution (20x10, ~100 km), kappa=50000 m²/s (enhanced for
+visibility), 120-day integration, no sponge layer:
 
-At 1-degree in the global overturning experiment, GM/Redi should:
-- **Sharpen the thermocline** (reduced diffusive spreading)
-- **Reduce Eulerian MOC strength** by 20-40% (GM opposes wind-driven overturning)
-- **Reduce ACC transport** by 30-50% (flattened isopycnal slopes)
-- **Reduce APE** monotonically (primary diagnostic of correctness)
-- **Reduce equator-to-pole SST gradient** (enhanced poleward heat transport)
+| Case | kappa_GM | kappa_Redi | Expected |
+|------|----------|------------|----------|
+| Baseline | 0 | 0 | Dynamics only |
+| GM-only | 50000 | 0 | Adiabatic flattening |
+| Redi-only | 0 | 50000 | No change (T ∝ rho) |
 
-**Failure modes to watch for**:
-- kappa too large → thermocline destruction, nearly uniform SST
-- Sign error → isopycnal steepening, runaway instability (APE increases)
-- Land mask error → dipoles at coastlines
-- Vertical CFL blow-up �� exponentially growing T oscillations
+### Results
+
+**Single-step Redi tendency diagnostic** (computed on evolving state):
+```
+Day   0: 0.000007 K/day   (8.7e-11 K/s)
+Day   1: 0.000005 K/day
+Day  10: 0.000001 K/day
+Day  30: 0.000000 K/day   (1.3e-12 K/s)
+```
+Redi tendency is near-zero and DECREASING — confirming the isopycnal projection.
+
+**GM-only tendency**: 1.75 K/day — 250,000x larger than Redi residual.
+
+**120-day integration (T change from initial)**:
+```
+Baseline (no GM/Redi):  0.09 K   ← dynamics only
+GM-only:                2.21 K   ← GM flattening isopycnals
+Redi-only:              1.17 K   ← NOT from Redi tendency (see below)
+```
+
+**GM effect** (GM - baseline): 2.27 K — clear adiabatic isopycnal flattening,
+visible in T(y,z) cross-sections. Cooling at depth on the warm side, warming
+in upper layers.
+
+### The Redi-only divergence puzzle
+
+The Redi-only case diverges from baseline by 1.17 K despite near-zero Redi
+tendency. Investigation revealed:
+
+**Not floating-point chaos from JIT**: Comparing `gm_redi=None` vs
+`gm_redi=GMRediConfig(kappa_GM=0, kappa_Redi=0)` (different code paths, same
+zero tendency) shows **1e-12 K divergence** at 30 days — bit-identical. The
+JIT compiler does NOT produce different results based on the code path.
+
+**Actual cause**: Comparing `kappa_Redi=0` vs `kappa_Redi=50000` (same code
+path, different tendency) shows 0.41 K divergence at 30 days. The tiny Redi
+residual (1e-11 K/s) modifies T → changes rho → changes pressure gradient →
+changes velocity → changes advection → modifies T. This pressure-velocity
+feedback amplifies the residual by ~500,000x over 30 days.
+
+**Implication**: Even a 1e-11 K/s residual matters over long integrations with
+dynamical feedback. The centered-difference approach (even with the interface-
+level fix) is NOT sufficient for century-scale climate runs. **Triads are needed.**
+
+### Verification commands
+
+```bash
+# Unit tests (41 tests, ~22s)
+JAX_ENABLE_X64=1 python -m pytest tests/ocean/unit/test_gm_redi_latlon_cgrid.py \
+    tests/ocean/unit/test_gm_redi_eady_physics.py tests/ocean/unit/test_visbeck_gm.py -v
+
+# Ocean test matrix (Eady GM/Redi visual validation)
+JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi_gm_only
+JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi_redi_only
+JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi
+```
 
 ---
 
@@ -228,13 +261,149 @@ or if conservation diagnostics flag diapycnal drift.
 
 ---
 
+## Redi Cross-Isopycnal Diffusion: Root Cause & Fix Path
+
+### The problem
+
+The Redi isopycnal diffusion tensor should produce ZERO tendency for any
+tracer that is constant along isopycnals (e.g., T with linear EOS). In the
+continuous case this is guaranteed by the cancellation:
+
+```
+dq/dx + S_x * dq/dz = 0    when q = f(rho) and S_x = -(drho/dx)/(drho/dz)
+```
+
+In the discrete case, this cancellation fails if the slope `S_x` and the
+tracer gradients `dq/dx`, `dq/dz` are evaluated at inconsistent stencil
+locations.
+
+### History of fixes
+
+**Initial implementation** (split full-level diagonal + interface off-diagonal):
+
+The diagonal term `kappa_Redi * dq/dx` was evaluated at **full levels** (where
+the C-grid gradient naturally lives), while the off-diagonal cancellation term
+`(kappa_Redi - kappa_GM) * S_x * dq/dz` was at **interfaces** (where S_x and
+dq/dz are defined), then averaged to full levels. The stencil mismatch broke
+the cancellation.
+
+- Redi residual: **1.1e-7 K/s** (0.01 K/day at kappa=50000)
+- Over 120 days with feedback: **~1.5 K spurious drift**
+
+**Interface-level fix** (current implementation):
+
+Both diagonal AND off-diagonal terms are now evaluated at **interface levels**
+before averaging to full levels. At each interface, the cancellation
+`dq/dx_half + S_x * dq/dz_half = 0` is exact (both use the same averaging
+chain: face → center → interface).
+
+- Redi residual: **8.7e-11 K/s** (0.000007 K/day at kappa=50000) — **1400x reduction**
+- But still nonzero: the averaging from interfaces to full levels and then to
+  faces introduces a residual because `avg(F_x_half)` is not exactly zero even
+  when each `F_x_half` is zero to machine precision (the zero values have
+  different floating-point representations at different interfaces).
+
+**At realistic kappa=1000**: The residual scales linearly with kappa, so
+~50x smaller: ~2e-12 K/s. For the 10-year global overturning experiment
+this produces ~0.06 K of spurious Redi drift — likely acceptable. For
+century-scale climate runs it is not.
+
+### Triad approach (needed for exact isopycnal projection)
+
+The triad discretization (Griffies et al. 1998; NEMO default) decomposes
+each flux at a u-face into contributions from 4 quarter-cell "triads". Each
+triad uses the SAME 3 density/tracer values to form both the slope and the
+tracer gradient, guaranteeing exact cancellation by construction.
+
+For a u-face (i+1/2, j, k), the 4 triads use:
+```
+Triad 1: (i,k), (i+1,k), (i,k+1)     — upper-left quarter-cell
+Triad 2: (i,k), (i+1,k), (i,k-1)     — lower-left quarter-cell
+Triad 3: (i+1,k), (i,k), (i+1,k+1)   — upper-right quarter-cell
+Triad 4: (i+1,k), (i,k), (i+1,k-1)   — lower-right quarter-cell
+```
+
+Each triad computes a local slope from its 3 density values and applies it
+to the tracer gradient from the SAME 3 values. The total flux is the average
+of the 4 triad contributions.
+
+**Properties**:
+- Exact conservation of tracer mean (antisymmetric operator)
+- Exact dissipation of tracer variance (no artificial variance creation)
+- Zero flux for locally-referenced potential density (no spurious diapycnal mixing)
+- Used by NEMO, available in MITgcm (`GM_useTriads=.TRUE.`)
+
+**Implementation plan for triads**:
+1. Add `compute_triad_slopes_latlon_cgrid()` alongside existing centered slopes
+2. Add `gm_redi_tracer_tendency_triads_latlon_cgrid()` that builds fluxes from
+   4 triads per face
+3. Config switch: `slope_scheme: str = "centered"  # or "triads"`
+4. Eady validation: Redi-only tendency must be zero to machine precision at all
+   times, with zero accumulated drift over 120 days even at kappa=50000
+5. Conservation test: verify `sum(dT * h * area) = 0` exactly
+
+---
+
+## Implementation Phases
+
+### Phase 1: Extract shared code (`_gm_redi_common.py`) — DONE
+
+Factor grid-agnostic helpers from `gm_redi.py`:
+- `compute_visbeck_kappa_gm()` — adaptive coefficient
+- `dm95_taper()` — identical tapering across grids
+- `vertical_flux_divergence()` — zero-pad BCs + FV divergence
+
+### Phase 2: Core implementation (`gm_redi_latlon_cgrid.py`) — DONE
+
+Three public functions + `LateralMixingOutput` wrapper.
+Interface-level flux evaluation for reduced Redi residual.
+
+### Phase 3: Tests — DONE
+
+41 tests passing: 16 CS + 21 lat-lon unit + 4 Eady physics.
+3 Eady GM/Redi cases in ocean test matrix.
+
+### Phase 4: Wire into ocean model — DONE
+
+Import fixed, masks passed, TypeError guard in factory.
+
+### Phase 5: Global overturning experiment config — DONE
+
+`use_gm_redi` toggle + `create_gm_redi_config()`.
+
+### Phase 6: Triad slope discretization — TODO (next priority)
+
+Required for accurate Redi isopycnal diffusion. The centered-difference
+approach has a measurable residual cross-isopycnal diffusion that accumulates
+through dynamical feedback over long integrations.
+
+---
+
+## Files
+
+| File | Status |
+|------|--------|
+| `src/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py` | DONE |
+| `src/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py` | DONE |
+| `src/legoesm/ocean/physics/lateral_mixing/gm_redi.py` | DONE (refactored) |
+| `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` | DONE |
+| `src/legoesm/ocean/physics/lateral_mixing/integration.py` | DONE |
+| `src/legoesm/ocean/experiments/global_overturning.py` | DONE |
+| `tests/ocean/unit/test_gm_redi_latlon_cgrid.py` | DONE (21 tests) |
+| `tests/ocean/unit/test_gm_redi_eady_physics.py` | DONE (4 tests) |
+| `scripts/ocean_test_matrix/experiments.py` | DONE (3 Eady cases) |
+| `scripts/ocean_test_matrix/testcase.py` | DONE |
+| `scripts/ocean_test_matrix/setup.py` | DONE (gm_redi param) |
+
+---
+
 ## Known Gaps (deferred)
 
+- **Triad slopes** — needed for exact Redi isopycnal projection (Phase 6, next priority)
 - **Surface-layer cross-isopycnal mixing** (see above) — Option A or B
 - Factory unification (lat-lon bypasses `integration.py`)
 - Config pathway unification (`LatLonCGridOceanConfig.gm_redi` vs `LateralMixingConfig`)
 - Ferrari et al. (2010) BVP boundary-layer treatment
-- Triad slope computation for exact conservation
 - MPAS GM/Redi (no lateral mixing on Voronoi grid yet)
 - Implicit vertical diffusion for the kappa * S^2 term
 
