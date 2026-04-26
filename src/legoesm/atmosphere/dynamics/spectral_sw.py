@@ -36,6 +36,10 @@ from legoesm.grids.gaussian import (
     sh_synthesis,
     sh_analysis_oc2,
     sh_analysis_dmu,
+    sh_analysis_3d,
+    sh_synthesis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
     uv_from_vordiv,
     spectral_hyperdiffusion,
 )
@@ -92,9 +96,20 @@ def spectral_sw_tendencies(
     a = grid.radius
 
     # --- 1. Transform to grid space ---
-    vor = sh_synthesis(grid, state.vor_hat.data)     # (n_lat, n_lon)
-    phi = sh_synthesis(grid, state.phi_hat.data)
-    phis = sh_synthesis(grid, state.phis_hat.data)
+    # Stack {vor, phi, phis} along a trailing axis so a single
+    # ``sh_synthesis_3d`` (one segment_sum + one IRFFT) replaces three
+    # sequential ``sh_synthesis`` calls.  The 3D variant treats the
+    # trailing axis as a passive batch — for SW (no level dim) the
+    # trailing-axis-of-3 plays the role of nlev=3.  3 SH-syntheses → 1.
+    n_sh_t = state.vor_hat.data.shape[0]
+    _vpp_stack = jnp.stack(
+        [state.vor_hat.data, state.phi_hat.data, state.phis_hat.data],
+        axis=-1,
+    )  # (n_sh, 3)
+    _vpp_grid = sh_synthesis_3d(grid, _vpp_stack)  # (n_lat, n_lon, 3)
+    vor = _vpp_grid[..., 0]
+    phi = _vpp_grid[..., 1]
+    phis = _vpp_grid[..., 2]
 
     # --- 2. Compute cos-lat-weighted velocities (pole-safe) ---
     u_cos, v_cos = uv_from_vordiv(grid, state.vor_hat.data, state.div_hat.data)
@@ -119,31 +134,41 @@ def spectral_sw_tendencies(
     A_vor = abs_vor * u_cos                     # (ζ+f)*u*cosφ
     B_vor = abs_vor * v_cos                     # (ζ+f)*v*cosφ
 
-    # Vorticity equation: dζ/dt = -div((ζ+f)*v)
-    flux_vor_div = (im_over_a * sh_analysis_oc2(grid, A_vor)
-                    - one_over_a * sh_analysis_dmu(grid, B_vor))
-
-    # Divergence equation: dδ/dt = curl((ζ+f)*v) - lap*(E+Φ+Φs)
-    flux_vor_curl = (im_over_a * sh_analysis_oc2(grid, B_vor)
-                     + one_over_a * sh_analysis_dmu(grid, A_vor))
-
     # Mass fluxes: U = Φ*u*cosφ, V = Φ*v*cosφ
     A_mass = phi * u_cos
     B_mass = phi * v_cos
 
+    # Kinetic energy on the grid (KE·cos²φ; 1/cos²φ baked into Pnm_oc2).
+    KE_cos2 = 0.5 * (u_cos * u_cos + v_cos * v_cos)  # KE·cos²φ
+
+    # Batch the SH analyses: oc2 needs {A_vor, B_vor, A_mass, KE_cos2}
+    # (4 calls), dmu needs {A_vor, B_vor, B_mass} (3 calls), plain
+    # sh_analysis needs {phi+phis} (1 call).  Each variant treats the
+    # trailing axis as passive batch, so stack along trailing axis and
+    # call once on a thicker (n_lat, n_lon, K) tensor.  8 SH-analyses
+    # collapse to 3 (one batched per variant).
+    _phi_total = phi + phis
+    _oc2_stack = jnp.stack([A_vor, B_vor, A_mass, KE_cos2], axis=-1)  # (..., 4)
+    _dmu_stack = jnp.stack([A_vor, B_vor, B_mass], axis=-1)            # (..., 3)
+    A_vor_oc2, B_vor_oc2, A_mass_oc2, KE_oc2 = jnp.moveaxis(
+        sh_analysis_oc2_3d(grid, _oc2_stack), -1, 0,
+    )
+    A_vor_dmu, B_vor_dmu, B_mass_dmu = jnp.moveaxis(
+        sh_analysis_dmu_3d(grid, _dmu_stack), -1, 0,
+    )
+    phi_total_hat = sh_analysis(grid, _phi_total)
+
+    # Vorticity equation: dζ/dt = -div((ζ+f)*v)
+    flux_vor_div = im_over_a * A_vor_oc2 - one_over_a * B_vor_dmu
+
+    # Divergence equation: dδ/dt = curl((ζ+f)*v) - lap*(E+Φ+Φs)
+    flux_vor_curl = im_over_a * B_vor_oc2 + one_over_a * A_vor_dmu
+
     # Mass equation: dΦ/dt = -div(Φ*v)
-    flux_mass_div = (im_over_a * sh_analysis_oc2(grid, A_mass)
-                     - one_over_a * sh_analysis_dmu(grid, B_mass))
+    flux_mass_div = im_over_a * A_mass_oc2 - one_over_a * B_mass_dmu
 
     # Kinetic energy + geopotential + surface geopotential -> Laplacian term
-    # KE = (u²+v²)/2 = (u_cos²+v_cos²)/(2·cos²φ).
-    # Computing KE on the grid requires dividing by cos²φ, which blows up
-    # at the poles.  Instead, compute KE·cos²φ on the grid and use
-    # sh_analysis_oc2 (which has 1/cos²φ baked into the Legendre matrix)
-    # to obtain the spectral KE directly.  This is pole-safe and
-    # mathematically equivalent: sh_analysis_oc2(f) = sh_analysis(f/cos²φ).
-    KE_cos2 = 0.5 * (u_cos * u_cos + v_cos * v_cos)  # KE·cos²φ
-    E_phi_hat = sh_analysis_oc2(grid, KE_cos2) + sh_analysis(grid, phi + phis)
+    E_phi_hat = KE_oc2 + phi_total_hat
 
     # --- 5. Assemble tendencies ---
     # d(vor_hat)/dt = -div((zeta+f)*v)
