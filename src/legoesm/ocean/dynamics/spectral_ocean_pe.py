@@ -378,44 +378,65 @@ def spectral_ocean_tendencies(
     tracers = jnp.stack([T.real, S.real], axis=0)  # (2, n_lat, n_lon, nlev)
     tracers_hat = jnp.stack([state.T_hat.data, state.S_hat.data], axis=0)
 
-    tracer_u_cos = tracers * u_cos[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
-    tracer_v_cos = tracers * v_cos[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
-    tracer_flux_div = jax.vmap(
-        lambda q_u_cos, q_v_cos: (
-            im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, q_u_cos)
-            - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos)
-        ),
-        in_axes=0,
-        out_axes=0,
-    )(tracer_u_cos, tracer_v_cos)
+    # Stack tracers along trailing axis and fold into the level dim so
+    # the three SH analyses below (oc2, dmu, plain) each run ONCE on a
+    # ``(n_lat, n_lon, nlev*n_tracers)`` tensor instead of being
+    # ``vmap``'d over the leading tracer axis (which materialises a
+    # separate FFT/sum kernel per tracer).  Same passive-trailing-axis
+    # exploit as the velocity-vdiff + free-surface block in Section 16.
+    n_tr = tracers.shape[0]
+    n_lat_t, n_lon_t, nlev_t = tracers.shape[1:]
+    # ``moveaxis`` brings the tracer axis to the end without a copy
+    # (XLA fuses the layout change with downstream ops).
+    tracers_t = jnp.moveaxis(tracers, 0, -1)  # (n_lat, n_lon, nlev, n_tr)
 
-    # Combine the three grid-space tendency contributions before the SH
+    _u_cos_flat = (
+        tracers_t * (u_cos * mask_3d)[..., jnp.newaxis]
+    ).reshape(n_lat_t, n_lon_t, nlev_t * n_tr)
+    _v_cos_flat = (
+        tracers_t * (v_cos * mask_3d)[..., jnp.newaxis]
+    ).reshape(n_lat_t, n_lon_t, nlev_t * n_tr)
+    _u_oc2_flat = sh_analysis_oc2_3d(grid, _u_cos_flat)   # (n_sh, nlev*n_tr)
+    _v_dmu_flat = sh_analysis_dmu_3d(grid, _v_cos_flat)
+    _flux_flat = (
+        im_over_a[:, jnp.newaxis] * _u_oc2_flat
+        - one_over_a * _v_dmu_flat
+    )
+    _flux = _flux_flat.reshape(_flux_flat.shape[0], nlev_t, n_tr)
+    tracer_flux_div = jnp.moveaxis(_flux, -1, 0)  # (n_tr, n_sh, nlev)
+
+    # Combine the grid-space tendency contributions before the SH
     # forward transform.  ``sh_analysis_3d`` is linear, so summing
     # tracer_div + tracer_vert_adv (+ tracer_vdiff*mask if K_v > 0) on
-    # the grid first replaces three separate vmap'd SH-analysis calls
-    # with a single one — saves 2 SH-analyses per RK substage (3 if
-    # K_v > 0).  Same exploit as Loop 94 for spectral PE.
-    tracer_div = tracers * div.real[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
+    # the grid first folds three separate vmap'd SH-analysis calls
+    # into a single trailing-axis-batched call (Loop 94 exploit) and
+    # the per-tracer dimension also folds into the same trailing axis
+    # (this commit) — saves another ``n_tr - 1 = 1`` SH analysis per
+    # RK substage on top of the prior fold.
+    tracer_div_t = (
+        tracers_t * (div.real * mask_3d)[..., jnp.newaxis]
+    )  # (n_lat, n_lon, nlev, n_tr)
     tracer_vert_adv = jax.vmap(
         lambda q: _vertical_advection_spectral(q, w, z_coord, J.real),
-        in_axes=0,
-        out_axes=0,
-    )(tracers) * mask_3d[jnp.newaxis, ...]
+        in_axes=-1,
+        out_axes=-1,
+    )(tracers_t) * mask_3d[..., jnp.newaxis]
 
-    tracer_grid_sum = tracer_div + tracer_vert_adv
+    tracer_grid_sum_t = tracer_div_t + tracer_vert_adv
     if config.K_v > 0:
         tracer_vdiff = jax.vmap(
             lambda q: vertical_diffusion(q, z_coord, J.real, config.K_v),
-            in_axes=0,
-            out_axes=0,
-        )(tracers)
-        tracer_grid_sum = tracer_grid_sum + tracer_vdiff * mask_3d[jnp.newaxis, ...]
+            in_axes=-1,
+            out_axes=-1,
+        )(tracers_t)
+        tracer_grid_sum_t = tracer_grid_sum_t + tracer_vdiff * mask_3d[..., jnp.newaxis]
 
-    dtr_hat = -tracer_flux_div + jax.vmap(
-        lambda q_sum: sh_analysis_3d(grid, q_sum),
-        in_axes=0,
-        out_axes=0,
-    )(tracer_grid_sum)
+    _dtr_grid_flat = tracer_grid_sum_t.reshape(
+        n_lat_t, n_lon_t, nlev_t * n_tr,
+    )
+    _dtr_sh_flat = sh_analysis_3d(grid, _dtr_grid_flat)
+    _dtr_sh = _dtr_sh_flat.reshape(_dtr_sh_flat.shape[0], nlev_t, n_tr)
+    dtr_hat = -tracer_flux_div + jnp.moveaxis(_dtr_sh, -1, 0)
 
     # --- 15. Explicit viscosity/diffusion ---
     if config.A_h > 0 or config.K_h > 0:
