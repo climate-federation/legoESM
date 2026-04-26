@@ -414,31 +414,46 @@ def fv3_hydrostatic_tendencies(
     # which attenuates the grid-scale mode to near zero.
     # Pre-padded {T, u_cell, v_cell} from exchange #2 eliminate
     # redundant halo exchanges in the Laplacian calls.
+    # Stack {u_cell, v_cell, T} along a trailing axis and fold into the
+    # level dim so a single Laplacian (12a) and a single hyperdiffusion
+    # (12b) run on the thicker (6, n, n, nlev*3) field.  The existing
+    # pre-padded arrays (from packed_pad_halo_4d / packed_pad_halo_mpi_4d
+    # at exchange #2) are stacked the same way so the inner laplacians
+    # still skip their halo (no extra MPI cost), while the outer ∇² of
+    # hyperdiffusion shares its outer-halo sweep across all 3 fields
+    # instead of paying it 3 times.
+    _need_uvT_stack = config.A_h > 0 or config.hyperdiff_coeff > 0
+    if _need_uvT_stack:
+        n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT = u_cell.shape
+        _uvT_stack = jnp.stack([u_cell, v_cell, T], axis=-1)
+        _uvT_flat = _uvT_stack.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 3)
+        _uvT_pad_stack = jnp.stack([_u_cc_pad, _v_cc_pad, _T_pad], axis=-1)
+        _pad_pre = _uvT_pad_stack.shape[:3]
+        _uvT_pad_flat = _uvT_pad_stack.reshape(*_pad_pre, nlev_uvT * 3)
+
     if config.A_h > 0:
-        lap_u_cc = _laplacian_compact_3d(u_cell, grid, padded=_u_cc_pad)
-        lap_v_cc = _laplacian_compact_3d(v_cell, grid, padded=_v_cc_pad)
-        du_d_dt = du_d_dt + config.A_h * _interp_center_to_corner(lap_u_cc, cdgrid)
-        dv_d_dt = dv_d_dt + config.A_h * _interp_center_to_corner(lap_v_cc, cdgrid)
-        # Temperature: reuse _T_pad (no redundant exchange)
-        lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
-        dT_dt_data = dT_dt_data + config.A_h * lap_T
+        lap_flat = _laplacian_compact_3d(_uvT_flat, grid, padded=_uvT_pad_flat)
+        lap_uvT = lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
+        du_d_dt = du_d_dt + config.A_h * _interp_center_to_corner(lap_uvT[..., 0], cdgrid)
+        dv_d_dt = dv_d_dt + config.A_h * _interp_center_to_corner(lap_uvT[..., 1], cdgrid)
+        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
 
     # 12b. Hyperdiffusion on D-grid winds (biharmonic)
     #
     # Apply the biharmonic at cell centres (where the compact Laplacian
     # works at full strength) and interpolate the tendency back to
-    # D-grid corners.  Pre-padded arrays eliminate the inner Laplacian's
-    # halo exchange (saves 3 MPI messages: one per field).
+    # D-grid corners.  Single batched call shares the outer ∇² halo
+    # across (u_cell, v_cell, T).
     if config.hyperdiff_coeff > 0:
-        hyperdiff_u_cc = _hyperdiffusion_3d(u_cell, grid, config.hyperdiff_coeff,
-                                             padded=_u_cc_pad)
-        hyperdiff_v_cc = _hyperdiffusion_3d(v_cell, grid, config.hyperdiff_coeff,
-                                             padded=_v_cc_pad)
-        du_d_dt = du_d_dt + _interp_center_to_corner(hyperdiff_u_cc, cdgrid)
-        dv_d_dt = dv_d_dt + _interp_center_to_corner(hyperdiff_v_cc, cdgrid)
-        # Temperature: reuse _T_pad for inner Laplacian
-        dT_dt_data = dT_dt_data + _hyperdiffusion_3d(T, grid, config.hyperdiff_coeff,
-                                                      padded=_T_pad)
+        hyperdiff_flat = _hyperdiffusion_3d(
+            _uvT_flat, grid, config.hyperdiff_coeff, padded=_uvT_pad_flat,
+        )
+        hyperdiff_uvT = hyperdiff_flat.reshape(
+            n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
+        )
+        du_d_dt = du_d_dt + _interp_center_to_corner(hyperdiff_uvT[..., 0], cdgrid)
+        dv_d_dt = dv_d_dt + _interp_center_to_corner(hyperdiff_uvT[..., 1], cdgrid)
+        dT_dt_data = dT_dt_data + hyperdiff_uvT[..., 2]
 
     # Surface pressure hyperdiffusion (cell-centre)
     if config.hyperdiff_ps_coeff > 0:
