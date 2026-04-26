@@ -22,6 +22,7 @@ def laplacian_viscosity_3d(
     field_3d: jnp.ndarray,
     grid: CubedSphereGrid,
     coeff: float,
+    padded: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Compute ``coeff · ∇² f`` for all levels using the native 4D path.
 
@@ -42,6 +43,11 @@ def laplacian_viscosity_3d(
         Horizontal grid.
     coeff : float
         Viscosity/diffusivity coefficient [m^2/s].
+    padded : array or None
+        Pre-padded field, shape (6, n+2, n+2, nlev).  When provided,
+        the internal halo exchange is skipped — used by callers that
+        share the same input across multiple operators (e.g. an
+        explicit Laplacian alongside a biharmonic hyperdiffusion).
 
     Returns
     -------
@@ -51,9 +57,10 @@ def laplacian_viscosity_3d(
     # ``gradient_y_3d`` skip their internal halo exchange — saves one
     # MPI message in distributed runs.  ``divergence_3d`` still issues
     # its own vector halo exchange on the gradient outputs.
-    dg = getattr(grid, 'duogrid', None)
-    offsets = None if dg is not None else grid.halo_interp_offsets
-    padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
+    if padded is None:
+        dg = getattr(grid, 'duogrid', None)
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     gx = gradient_x_3d(field_3d, grid, padded=padded)
     gy = gradient_y_3d(field_3d, grid, padded=padded)
     return coeff * divergence_3d(gx, gy, grid)

@@ -315,9 +315,24 @@ def ocean_baroclinic_tendencies_cdgrid(
         vel_masked_flat = vel_masked_stack.reshape(
             n_face_v, n_i_v, n_j_v, nlev_v * 2,
         )
+        # Pre-pad the (u, v)-stack ONCE so the explicit Laplacian
+        # (``laplacian_viscosity_3d``) and the inner Laplacian of the
+        # biharmonic hyperdiffusion (``hyperdiffusion_3d``) share the
+        # same halo on ``vel_masked_flat`` instead of issuing two
+        # independent ``pad_halo_4d`` collectives on the same input.
+        # Saves 1 MPI message per RHS evaluation when both A_h and
+        # hyperdiff_coeff are non-zero — the dominant ocean test config.
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc
+        _dg_oc = getattr(grid, 'duogrid', None)
+        _offsets_oc = None if _dg_oc is not None else grid.halo_interp_offsets
+        vel_masked_pad = _pad_halo_4d_oc(
+            vel_masked_flat, interp_offsets=_offsets_oc, duogrid=_dg_oc,
+        )
     if config.A_h > 0:
         from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-        vel_lap_flat = laplacian_viscosity_3d(vel_masked_flat, grid, config.A_h)
+        vel_lap_flat = laplacian_viscosity_3d(
+            vel_masked_flat, grid, config.A_h, padded=vel_masked_pad,
+        )
         vel_lap = vel_lap_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
         du_dt = du_dt + vel_lap[..., 0]
         dv_dt = dv_dt + vel_lap[..., 1]
@@ -335,6 +350,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         from legoesm.core.operators_3d import hyperdiffusion_3d
         vel_hyper_flat = hyperdiffusion_3d(
             vel_masked_flat, grid, config.hyperdiff_coeff,
+            padded=vel_masked_pad,
         )
         vel_hyper = vel_hyper_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
         du_dt = du_dt + vel_hyper[..., 0]
