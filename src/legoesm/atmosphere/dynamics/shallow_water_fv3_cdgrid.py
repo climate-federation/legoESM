@@ -556,24 +556,15 @@ class FV3FBShallowWaterModel:
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self.config = config or CDGridShallowWaterConfig()
         self._target_mass = None
-
-    def set_initial_mass(self, state):
-        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
-
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state, dt):
-        """Advance one time step using FV3 forward-backward."""
-        from legoesm.core.precision import cast_pytree
-        from legoesm.core.fv3_sw_core import fv3_fb_sw_step
-
-        # Iter-903b: warn if the user enabled the iter-900/iter-903
-        # `fortran_faithful_ppm_{left,right}` flags on this model.
-        # Those flags are consumed by `_ppm_reconstruct_1d` (production
-        # CDGrid PPM) only; the FB chain (`fv3_fb_sw_step` ->
-        # `_d_sw_native` -> `transport_step` -> `fv_tp_2d` -> `_ppm_1d`)
-        # never reaches `_ppm_reconstruct_1d`, so the flags would be
-        # silently ignored without this warning.  Codex iter-903 stop-
-        # time review correctly flagged this hazard.
+        # Iter-903c (Codex iter-903b stop-time fix): emit the
+        # iter-900/iter-903 ignored-flag warning at MODEL CONSTRUCTION
+        # time (not inside `step`).  Pre-iter-903c the warning lived
+        # inside `@jax.jit step`, which means it only fired at TRACE
+        # time — first call would emit, subsequent JIT-cached calls
+        # would not.  Codex correctly flagged this as a "JIT-trace-
+        # time only" guard.  Moving to `__init__` makes the warning
+        # fire deterministically once per model construction,
+        # independent of JIT timing.
         if (self.config.fortran_faithful_ppm_left
                 or self.config.fortran_faithful_ppm_right):
             import warnings
@@ -583,7 +574,7 @@ class FV3FBShallowWaterModel:
             if self.config.fortran_faithful_ppm_right:
                 ignored.append("fortran_faithful_ppm_right")
             warnings.warn(
-                f"FV3FBShallowWaterModel.step ignores config flag(s) "
+                f"FV3FBShallowWaterModel ignores config flag(s) "
                 f"{', '.join(ignored)}: the FB chain (fv3_fb_sw_step) "
                 f"does NOT consume _ppm_reconstruct_1d, so iter-900/"
                 f"iter-903 LEFT/RIGHT cube-edge Fortran-faithful "
@@ -594,6 +585,15 @@ class FV3FBShallowWaterModel:
                 f"FV3EdgeShallowWaterModel, or unset the flag(s) on "
                 f"this config to silence the warning.",
                 UserWarning, stacklevel=2)
+
+    def set_initial_mass(self, state):
+        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, state, dt):
+        """Advance one time step using FV3 forward-backward."""
+        from legoesm.core.precision import cast_pytree
+        from legoesm.core.fv3_sw_core import fv3_fb_sw_step
 
         state_c = cast_pytree(state, None, "compute")
 
