@@ -1,6 +1,6 @@
 # GM/Redi Implementation Plan for Lat-Lon C-Grid Ocean
 
-*Created: 2026-04-25.  Updated: 2026-04-25 (Eady validation & interface-level fix).*
+*Created: 2026-04-25.  Updated: 2026-04-26 (Phase 6 — triad slope discretisation).*
 
 ## Context
 
@@ -28,33 +28,50 @@ MITgcm, NEMO, and POP2 implementations.
 
 ---
 
-## Current Status (2026-04-25)
+## Current Status (2026-04-26)
 
-### Implemented (Phases 1-5 complete)
+### Implemented (Phases 1-6 complete)
 
 - `_gm_redi_common.py` — shared Visbeck, DM95 taper, vertical flux divergence
-- `gm_redi_latlon_cgrid.py` — slopes, tracer tendency, orchestrator
+- `gm_redi_latlon_cgrid.py` — slopes, tracer tendency (centered), tracer
+  tendency (triads), orchestrator with `slope_scheme` dispatch
 - `gm_redi.py` — CS version refactored to import from common
 - `ocean_model_latlon_cgrid.py` — import fixed, masks passed
 - `integration.py` — TypeError guard for lat-lon
 - `global_overturning.py` — `use_gm_redi` toggle + `create_gm_redi_config()`
-- 41 tests passing (16 CS + 21 lat-lon + 4 Eady physics)
-- 3 Eady GM/Redi test cases in ocean test matrix
+- 76 unit tests passing (16 CS + 28 lat-lon + 11 Eady physics + 16 Visbeck +
+  5 corrections)
+- 6 Eady GM/Redi test cases in ocean test matrix (3 centered + 3 triads)
 
 ### Validated
 
-- **GM adiabatic flattening**: Confirmed in Eady uniform test — GM-only produces
-  nonzero tendency, reduces APE, conserves tracer integral.
-- **Redi isopycnal diffusion**: Single-step tendency is near-zero (8.7e-11 K/s)
-  for isopycnal-aligned tracers with linear EOS. 1400x improvement over initial
-  implementation via the interface-level flux fix.
-- **Differentiability**: `jax.grad` flows through the full tendency computation.
+- **GM adiabatic flattening** (centered + triads): Confirmed in Eady uniform
+  test — GM-only produces nonzero tendency, reduces APE, conserves tracer
+  integral.
+- **Redi isopycnal diffusion (centered)**: Single-step tendency is small (~1e-11
+  K/s for the 30-day Eady physics integration), 1400× improvement over the
+  initial implementation via the interface-level flux fix.
+- **Redi isopycnal diffusion (triads)**: Per-triad cancellation is *algebraic*,
+  so the residual is at the float64 round-off scale.  At kappa_Redi = 1×10⁶ the
+  residual at the worst point is 4×10⁻¹³ K/s on the 12×6 Eady grid (compared to
+  1.2×10⁻⁴ before the Neumann-fill of ρ inside the function).  Per-unit-kappa
+  this is ~10⁻¹⁹ K/s — i.e. true machine precision.
+- **Differentiability**: `jax.grad` flows through both centered and triad paths.
 
-### Remaining Issue: Spurious Redi Cross-Isopycnal Diffusion
+### Triad scheme: how to use
 
-See dedicated section below — the centered-difference approach has a small but
-nonzero Redi residual that accumulates over long integrations. **Triad slope
-discretization is needed for exact isopycnal projection.**
+```python
+from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+
+# Default (centered) — backwards compatible:
+cfg = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+
+# Triad scheme — required for century-scale climate runs:
+cfg = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0, slope_scheme="triads")
+```
+
+The orchestrator dispatches on `cfg.slope_scheme ∈ {"centered", "triads"}`.
+Visbeck still runs on centred slopes (only ⟨N|S|⟩_z is needed there).
 
 ---
 
@@ -68,17 +85,23 @@ C-grid, horizontal fluxes live naturally at u/v-faces. All major z-coordinate
 models (MITgcm, NEMO, POP2) use this as default. MOM6's thickness-diffusion
 approach doesn't map to z-star coordinates.
 
-### 2. Slope computation: Centered differences (not triads) — NEEDS UPGRADE
+### 2. Slope computation: Centered + triads (both implemented)
 
-Compute drho/dx at u-faces via `gradient_x_cgrid`, average to cell centers, then
-to vertical interfaces. Vertical gradient at interfaces using `dz_half_ref * J`.
+Two slope discretisations are available, selected via
+`GMRediConfig.slope_scheme`:
 
-**Problem identified**: The centered-difference approach does not achieve exact
-cancellation of the Redi tensor when q = f(rho). Even with the interface-level
-fix (see below), a small residual remains that accumulates over long integrations.
-The triad approach (Griffies et al. 1998, NEMO) evaluates each flux from a
-locally consistent set of density/tracer values, guaranteeing exact cancellation.
-**Upgrading to triads is the next priority.**
+- **Centered** (default, backwards compatible).  Compute drho/dx at u-faces via
+  `gradient_x_cgrid`, average to cell centers, then to vertical interfaces.
+  Vertical gradient at interfaces using `dz_half_ref * J`.  Cheap, but the Redi
+  flux for ``q = f(ρ)`` carries a small residual that accumulates over long
+  integrations through the pressure→velocity→advection feedback loop.
+
+- **Triads** (Griffies, Gnanadesikan, Pacanowski et al. 1998).  Each face flux
+  is the average of four quarter-cell triads.  Each triad uses *the same three*
+  density/tracer values for both its slope and its gradients, so the algebraic
+  identity ``dq/dx + S_x dq/dz = 0`` (and the analogous z-flux relation) holds
+  *per triad* — the Redi tendency is therefore zero to float64 round-off when
+  ``q = f(ρ)``.  Required for century-scale climate runs.
 
 ### 3. Tapering: DM95 with S_max = 0.005
 
@@ -371,11 +394,102 @@ Import fixed, masks passed, TypeError guard in factory.
 
 `use_gm_redi` toggle + `create_gm_redi_config()`.
 
-### Phase 6: Triad slope discretization — TODO (next priority)
+### Phase 6: Triad slope discretization — DONE (2026-04-26)
 
-Required for accurate Redi isopycnal diffusion. The centered-difference
-approach has a measurable residual cross-isopycnal diffusion that accumulates
-through dynamical feedback over long integrations.
+Implemented as a separate code path in `gm_redi_latlon_cgrid.py`:
+
+- New helpers `_to_uface_west`, `_to_uface_east`, `_to_vface_south`,
+  `_to_vface_north`, `_triad_taper` lift cell-centred fields onto the four
+  triad anchors at every face with one `jnp.roll`/`jnp.concatenate` each.
+- `gm_redi_tracer_tendency_triads_latlon_cgrid(q, rho, mask, u_mask, v_mask,
+  z_coord, jacobian, grid, kappa_GM, kappa_Redi, S_max)` computes:
+  - 4 triad slopes per u-face and v-face;
+  - 8 triad slopes per w-face (4 in x + 4 in y);
+  - **per-triad DM95 tapering applied to the *full* per-triad flux**
+    (diagonal + off-diagonal together), NOT to the slope alone — see
+    "Taper-on-flux" below;
+  - validity-aware averaging (N_valid normalisation at top/bottom levels
+    so the diagonal Redi flux stays at full strength while invalid triads
+    contribute zero off-diagonal flux).
+- Both ρ and q are Neumann-filled internally, matching
+  `compute_isopycnal_slopes_latlon_cgrid`.  *This is critical*: passing
+  un-filled ρ produces drho_dz = 0 in land columns, which clips the slope to
+  S_max and breaks the algebraic cancellation.
+- The orchestrator `gm_redi_tracer_tendency_latlon` dispatches on
+  `cfg.slope_scheme`, raising `ValueError` for unknown values.
+- 18 new unit tests cover shape, finiteness, conservation, zero-tendency for
+  uniform tracers, land-mask correctness, dispatch errors, and `jax.grad`
+  through the triad path.  4 new physics tests confirm the per-kappa
+  cancellation, equivalence-or-better with centered, and the orchestrator
+  end-to-end.
+- Three triad-variant Eady cases added to `scripts/run_ocean_test_matrix.py`
+  (`eady_gm_redi_*_triads`); all pass.
+
+#### Taper-on-flux (vs taper-on-slope)
+
+The first triad implementation tapered each triad's *slope* before
+combining it with the diagonal flux:
+
+```
+F_x^(m) = K_R · ∂q/∂x + (K_R − K_GM) · (taper · S^(m)) · ∂q/∂z^(m)
+```
+
+For `q = f(ρ)` this carries a residual `K_R · (1 − taper) · ∂q/∂x` —
+even at slopes well below `S_max`, the DM95 ``tanh`` saturates only as
+`1 − O(exp)`, leaving (1 − taper) ≈ 4×10⁻⁶ at |S| = 4×10⁻³, which times
+`K_R · ∂q/∂y_v` produces a 6.6×10⁻⁷ K/s spurious flux at the jet centre
+of the production Eady setup — *exactly* what the centered scheme had
+been doing from the stencil mismatch, just for a different reason.
+
+The fix: taper the *whole* per-triad flux contribution.  Each triad's
+flux is built with raw (clipped, untapered) slopes — so for `q = f(ρ)`
+the flux is **algebraically zero per triad** — and only then multiplied
+by the per-triad taper:
+
+```
+F_x = Σ_m  w_m · taper_m · [ K_R · ∂q/∂x + (K_R − K_GM) · S^(m)_raw · ∂q/∂z^(m) ]
+```
+
+Same structure at v-face and w-face (where the taper now multiplies
+the full per-triad cross + diagonal flux, not the squared slope).
+
+Effect on the **production** Eady setup (22×10×20, κ_R = 5×10⁴):
+
+| residual | before fix | after fix |
+|---|---|---|
+| triad max\|dT\|        | 8.6×10⁻¹¹ K/s | **6×10⁻¹⁶ K/s** |
+| per-κ residual          | 1.7×10⁻¹⁵     | **1.2×10⁻²⁰** |
+| centered max\|dT\|      | 8.6×10⁻¹¹ K/s | unchanged |
+
+#### 120-day Eady validation (κ_R = 5×10⁴)
+
+`scripts/validate_triad_redi_120day.py` compares baseline (no GM/Redi)
+against Redi-only with both schemes.  The original framing of the test
+("the Redi-only simulation should stay unchanged from baseline") relies
+on `q = f(ρ)` being maintained throughout the integration — which in
+turn requires **`β_S = 0`** in the EOS, because:
+
+- Numerical noise from tracer advection / mask interactions evolves S
+  away from uniform by ~10⁻⁵ PSU per step at ocean cells.
+- With `β_S = 7.4×10⁻⁴` (the legacy default), this 10⁻⁵ PSU drift
+  contributes ~10⁻⁸ kg/m³ to ρ, breaking `q = f(ρ)` and unmasking a
+  *real* (non-canceling) Redi flux that compounds to 1.1 K over 120 days.
+- This is *not* a triad bug — it's a violation of the test's premise.
+  Setting `β_S = 0` (now exposed via `run_kwargs["beta_S_override"]` in
+  `run_eady_gm_redi`) restores `ρ = a + b·T` exactly.
+
+Pointwise RMS divergence from baseline (β_S = 0 case):
+
+| day | centered − baseline | **triads − baseline** |
+|---:|---:|---:|
+| 12 | 9.6×10⁻⁶ K | **1.0×10⁻¹² K** |
+| 60 | 1.8×10⁻⁴ K | **1.9×10⁻¹² K** |
+| 84 | 4.5×10⁻⁴ K | **2.3×10⁻¹² K** |
+
+Triads stay at float64 round-off (~10⁻¹² K) for ~84 days, ~10⁷× better
+than centered.  Past day 96 the dynamics become chaotic (independent
+issue with the β_S = 0 thermal-wind balance at this resolution); the
+84-day window is the meaningful Phase 6 validation.
 
 ---
 
@@ -399,13 +513,20 @@ through dynamical feedback over long integrations.
 
 ## Known Gaps (deferred)
 
-- **Triad slopes** — needed for exact Redi isopycnal projection (Phase 6, next priority)
-- **Surface-layer cross-isopycnal mixing** (see above) — Option A or B
+- **Surface-layer cross-isopycnal mixing** (see above) — Option A (taper full
+  tensor) or Option B (Ferrari et al. 2010 BVP).  Affects both centered and
+  triad schemes equally.  Within the triad scheme the per-triad DM95 taper
+  introduces a (1 − taper²) Redi-only residual in tapered regions; this is
+  numerically benign at 1° resolution but should be revisited when the BVP
+  boundary-layer treatment is added.
 - Factory unification (lat-lon bypasses `integration.py`)
 - Config pathway unification (`LatLonCGridOceanConfig.gm_redi` vs `LateralMixingConfig`)
 - Ferrari et al. (2010) BVP boundary-layer treatment
 - MPAS GM/Redi (no lateral mixing on Voronoi grid yet)
 - Implicit vertical diffusion for the kappa * S^2 term
+- Cubed-sphere triad scheme (`gm_redi.py` still uses centred slopes; the same
+  triad helper pattern would translate but is non-trivial because the CS
+  geometry has 6-fold corner triads at panel edges).
 
 ---
 

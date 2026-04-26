@@ -1626,12 +1626,31 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
 
     # GM/Redi mode
     gm_mode = tc.run_kwargs.get("gm_mode", "gm_redi")
+    slope_scheme = tc.run_kwargs.get("slope_scheme", "centered")
+    # Optional per-case overrides (used by the high-kappa Phase 6
+    # validation cases; default values reproduce the historical 1000).
+    k_GM = float(tc.run_kwargs.get("kappa_GM_override", 1000.0))
+    k_R = float(tc.run_kwargs.get("kappa_Redi_override", 1000.0))
     if gm_mode == "gm_only":
-        gm_cfg = GMRediConfig(kappa_GM=1000.0, kappa_Redi=0.0, S_max=0.01)
+        gm_cfg = GMRediConfig(
+            kappa_GM=k_GM, kappa_Redi=0.0, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
     elif gm_mode == "redi_only":
-        gm_cfg = GMRediConfig(kappa_GM=0.0, kappa_Redi=1000.0, S_max=0.01)
+        gm_cfg = GMRediConfig(
+            kappa_GM=0.0, kappa_Redi=k_R, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
+    elif gm_mode == "baseline":
+        gm_cfg = GMRediConfig(
+            kappa_GM=0.0, kappa_Redi=0.0, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
     else:  # "gm_redi"
-        gm_cfg = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0, S_max=0.01)
+        gm_cfg = GMRediConfig(
+            kappa_GM=k_GM, kappa_Redi=k_R, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
 
     tc.run_kwargs.setdefault("lat_south", eu_config.lat_south)
     tc.run_kwargs.setdefault("lat_north", eu_config.lat_north)
@@ -1652,6 +1671,17 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
                 rho_ref=eu_config.rho_0,
                 T_ref=eu_config.T_ref,
                 S_ref=eu_config.S_uniform,
+                # ``beta_S_override`` lets validation cases force the
+                # linear EOS to depend on T only (β_S = 0), so that
+                # the Redi-cancellation property ρ = f(T) is not
+                # contaminated by tiny numerical S evolution.  For
+                # default cases this falls back to the LinearEOSConfig
+                # default (7.4e-4).
+                **(
+                    {"beta_S": float(tc.run_kwargs["beta_S_override"])}
+                    if "beta_S_override" in tc.run_kwargs
+                    else {}
+                ),
             ),
             barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
             barotropic_div_damp=eu_config.barotropic_div_damp,
@@ -1985,6 +2015,10 @@ RUNNERS: dict[str, Callable] = {
     "eady_gm_redi_gm_only": run_eady_gm_redi,
     "eady_gm_redi_redi_only": run_eady_gm_redi,
     "eady_gm_redi": run_eady_gm_redi,
+    "eady_gm_redi_gm_only_triads": run_eady_gm_redi,
+    "eady_gm_redi_redi_only_triads": run_eady_gm_redi,
+    "eady_gm_redi_triads": run_eady_gm_redi,
+    "eady_gm_redi_baseline_triads": run_eady_gm_redi,
     "acc_channel": run_acc_channel,
     "acc_channel_rest": run_acc_channel_rest,
 }

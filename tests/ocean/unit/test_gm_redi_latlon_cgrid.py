@@ -23,6 +23,7 @@ from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckCon
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_isopycnal_slopes_latlon_cgrid,
     gm_redi_tracer_tendency_latlon_cgrid,
+    gm_redi_tracer_tendency_triads_latlon_cgrid,
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
 )
@@ -121,6 +122,10 @@ class TestShapeAndFiniteness:
     def test_orchestrator_shapes(self):
         setup = _stratified_with_meridional_tilt()
         grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        # Pin centered so this stays a centered-orchestrator regression test
+        # (the default has flipped to triads; triads-orchestrator coverage
+        # lives in TestTriadOrchestratorDispatch).
+        cfg = cfg._replace(slope_scheme="centered")
 
         dT, dS = gm_redi_tracer_tendency_latlon(
             T, S, eta, H_bathy, grid, z_coord, cfg,
@@ -400,6 +405,9 @@ class TestDifferentiability:
         """jax.grad must flow through the full orchestrator (EOS + slopes + tendency)."""
         setup = _stratified_with_meridional_tilt()
         grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        # Pin centered: triads-orchestrator grad coverage lives in
+        # TestTriadDifferentiability.test_grad_through_triad.
+        cfg = cfg._replace(slope_scheme="centered")
 
         def loss(T_in):
             dT, _ = gm_redi_tracer_tendency_latlon(
@@ -498,3 +506,131 @@ class TestNoDuplication:
         assert "dm95_taper" in text
         assert "vertical_flux_divergence" in text
         assert "compute_visbeck_kappa_gm" in text
+
+
+# =====================================================================
+# 13. Triad slope discretisation
+# =====================================================================
+
+class TestTriadShapeAndFiniteness:
+    """The triad function must produce finite, correctly-shaped output."""
+
+    def test_triad_tendency_shape(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        dT = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask,
+            z_coord, jacobian, grid,
+            kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+            S_max=cfg.S_max,
+        )
+        assert dT.shape == T.shape
+        assert jnp.all(jnp.isfinite(dT))
+
+
+class TestTriadConservation:
+
+    def test_triad_tracer_integral_conserved(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        dT = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask,
+            z_coord, jacobian, grid,
+            kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+            S_max=cfg.S_max,
+        )
+        dz = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+        area = grid.area[:, :, jnp.newaxis]
+        integral = float(jnp.sum(dT * dz * area * mask[:, :, jnp.newaxis]))
+        max_dT = float(jnp.max(jnp.abs(dT)))
+        total_vol = float(jnp.sum(dz * area * mask[:, :, jnp.newaxis]))
+        if max_dT > 0:
+            relative = abs(integral) / (max_dT * total_vol)
+            assert relative < 1e-10, f"Triad conservation: rel={relative:.2e}"
+
+
+class TestTriadZeroTendency:
+
+    def test_triad_uniform_tracer_zero_tendency(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        q_uniform = jnp.ones_like(T) * 15.0
+        dq = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            q_uniform, rho, mask, u_mask, v_mask,
+            z_coord, jacobian, grid,
+            kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+            S_max=cfg.S_max,
+        )
+        assert jnp.allclose(dq, 0.0, atol=1e-12)
+
+
+class TestTriadLandMask:
+
+    def test_triad_tendency_zero_on_land(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+
+        mask_land = mask.at[4:6, 8:12].set(0.0)
+        u_mask_land = mask_land * jnp.roll(mask_land, 1, axis=1)
+        u_mask_land = jnp.concatenate([u_mask_land, u_mask_land[:, 0:1]], axis=1)
+        v_mask_land_interior = mask_land[:-1, :] * mask_land[1:, :]
+        v_mask_land = jnp.concatenate([
+            jnp.zeros((1, n_lon)), v_mask_land_interior, jnp.zeros((1, n_lon)),
+        ], axis=0)
+
+        dT = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask_land, u_mask_land, v_mask_land,
+            z_coord, jacobian, grid,
+            kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+            S_max=cfg.S_max,
+        )
+        land_3d = (mask_land < 0.5)[:, :, jnp.newaxis]
+        assert jnp.allclose(dT * land_3d, 0.0, atol=1e-15)
+
+
+class TestTriadDifferentiability:
+
+    def test_grad_through_triad(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+
+        def loss(T_in):
+            dT = gm_redi_tracer_tendency_triads_latlon_cgrid(
+                T_in, rho, mask, u_mask, v_mask,
+                z_coord, jacobian, grid,
+                kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+                S_max=cfg.S_max,
+            )
+            return jnp.mean(dT ** 2)
+
+        grad = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad))
+
+
+class TestTriadOrchestratorDispatch:
+
+    def test_orchestrator_triads_branch(self):
+        """slope_scheme='triads' produces finite, correctly-shaped output."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_t = cfg._replace(slope_scheme="triads")
+
+        dT, dS = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg_t,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+        )
+        assert dT.shape == T.shape
+        assert dS.shape == S.shape
+        assert jnp.all(jnp.isfinite(dT))
+        assert jnp.all(jnp.isfinite(dS))
+
+    def test_orchestrator_invalid_scheme_raises(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        cfg_bad = cfg._replace(slope_scheme="bogus")
+        with pytest.raises(ValueError, match="slope_scheme"):
+            gm_redi_tracer_tendency_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg_bad,
+                eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            )

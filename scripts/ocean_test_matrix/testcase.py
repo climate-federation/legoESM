@@ -184,6 +184,18 @@ def _build_test_matrix() -> list[TestCase]:
             30.0, 5.0,
             run_kwargs={"gm_mode": mode}))
 
+    # Triad-discretisation variants of the same three cases.  These are
+    # cheap (same resolution, same length) but exercise the triad-slope
+    # branch — critical for century-scale climate runs because the
+    # centred discretisation has a small but cumulative cross-isopycnal
+    # residual that triads cancel exactly per stencil.
+    for mode in ["baseline", "gm_only", "redi_only", "gm_redi"]:
+        base = f"eady_gm_redi_{mode}" if mode != "gm_redi" else "eady_gm_redi"
+        matrix.append(TestCase(
+            f"{base}_triads", "latlon_channel", eady_gm_res["latlon_channel"],
+            30.0, 5.0,
+            run_kwargs={"gm_mode": mode, "slope_scheme": "triads"}))
+
     # --- ACC channel with Gaussian ridge (Zhang et al. 2024 inspired) ---
     # ~1 degree isotropic (20 lat x 18 lon over 20x18 deg domain at 40S).
     # ~111 km meridional, ~85 km zonal.

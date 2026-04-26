@@ -28,6 +28,9 @@ results/
 checkpoints/
 data/
 wandb/
+
+# Local research references (PDFs not committed; tracked PDFs live elsewhere in docs/)
+docs/references/
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
