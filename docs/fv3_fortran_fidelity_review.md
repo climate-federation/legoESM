@@ -367,3 +367,35 @@ The iter-893 PPM-boundary fix's effect is **localised to W2's exact-zonal flow o
 - ~3 minutes total CI cost (4 module-fixture-shared trajectories: W2 default, W2 strict-Fortran-LEFT, W5, cosine bell).
 
 The "stale-snapshot silent regression" failure mode that the iter-921 W2 audit exposed is now fully closed across the standard cube-sphere SW test triad.
+
+### Iter-925 — FV3 production rest-state sentinel: iter-893 is bit-exact no-op on constants
+
+**Trigger.**  Per Ralph loop step 4 ("ocean rest state" / atmospheric rest state).  The FV3EdgeShallowWaterModel had a rest-state test at the operator level (`_d2a2c_vect_duogrid` machine precision) but no production-path multi-step rest test pinning `model.step` behavior with the iter-893 flag.
+
+**iter-925 measurements** (FV3EdgeShallowWaterModel, C36, h=H0=1000 m, u_d=v_d=0, 1-day = 288 RK3 steps):
+
+| metric                              | iter-820 (xppm=False) | iter-893 (xppm=True) |
+|-------------------------------------|-----------------------|----------------------|
+| `max\|h - H0\|` after 1 day         | 1.010e-04 m           | 1.010e-04 m          |
+| `max\|u_d\|` after 1 day            | 4.177e-15 m/s         | 4.177e-15 m/s        |
+| `max\|v_d\|` after 1 day            | 4.171e-15 m/s         | 4.171e-15 m/s        |
+
+**Bit-exact match across the iter-893 toggle.**  PPM reconstruction of a constant field gives `q_R = q_L = H0` regardless of which boundary formula is used, so the iter-893 fix is provably a no-op on rest state.  iter-925 verifies this property holds in production.
+
+**iter-925 sentinels.**  3 tests pinning:
+1. `winds_at_machine_precision`: max|u_d|, |v_d| < 1e-12 (iter-925 baseline 4.18e-15).
+2. `h_drift_below_round_off_floor`: max|h - H0| < 1e-3 m (iter-925 baseline 1.010e-4 m).
+3. `iter893_is_bit_exact_no_op_on_rest_state`: bit-exact equality of all three field arrays between iter-820 and iter-893 trajectories.
+
+**Verification.**  3/3 pass in 40 s.
+
+**Process implication.**  Property #3 is the strongest gate.  Any future iter that makes iter-893 non-trivial on rest state would be hiding a bug — the boundary formula MUST be exact on constants.  This sentinel will fire if a future PPM-boundary tweak inadvertently introduces rest-state contamination.
+
+**Cumulative iter-921→iter-925 deliverables.**
+
+- 5 commits, no production code changes.
+- 21 sentinel tests (W2 single + Pareto + W5 multi-metric + cosine bell multi-metric + cosine bell mass + production rest state) at the iter-893 production matrix.
+- 18 regenerated PNGs + 2 Pareto plots + 2 historical-anchor PNGs.
+- ~3.5 minutes total CI cost.
+
+The Ralph loop step 4 test set (cosine bell, W2, W5, ocean/atmosphere rest state) is now fully covered with iter-893-aligned production sentinels.
