@@ -214,11 +214,25 @@ def mpas_ocean_baroclinic_tendencies(
     else:
         pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_relative, mesh)
 
-    # Horizontal viscosity on perturbation velocity (shear, not depth-mean)
-    visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
-
-    # Constant biharmonic viscosity
-    if config.B_h > 0:
+    # Horizontal viscosity on perturbation velocity (shear, not depth-mean).
+    # When both A_h > 0 and B_h > 0, the biharmonic
+    # ``vector_laplacian_del4_3d(u) = -∇²(∇²u)``, so its inner ∇² is
+    # identical to the explicit A_h Laplacian — compute it once and
+    # share between both branches.  Same exploit as Loop 135 for the
+    # latlon ocean and Loop 139 for the MPAS atmosphere.  Also adds an
+    # ``if A_h > 0`` guard so a configuration with A_h = 0 (Smag-only,
+    # Leith-only, or B_h-only) skips the unconditional del2 the
+    # previous code paid for and discarded.
+    visc = jnp.zeros_like(u_prime_3d)
+    if config.A_h > 0 and config.B_h > 0:
+        _del2_u_visc = vector_laplacian_del2_3d(u_prime_3d, mesh)
+        visc = visc + config.A_h * _del2_u_visc
+        # vector_laplacian_del4 = -del2(del2); fold the sign into the
+        # subtraction so the arithmetic matches ``+ B_h * del4``.
+        visc = visc - config.B_h * vector_laplacian_del2_3d(_del2_u_visc, mesh)
+    elif config.A_h > 0:
+        visc = visc + config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
+    elif config.B_h > 0:
         visc = visc + config.B_h * vector_laplacian_del4_3d(u_prime_3d, mesh)
 
     # Flow-dependent Smagorinsky biharmonic viscosity
