@@ -10971,12 +10971,22 @@ class TestW5ProductionGoldFileIter716(unittest.TestCase):
         area = np.asarray(grid.area)
 
         # Height field fingerprints.
-        self.assertAlmostEqual(float(h.max()), 5966.64697265625, places=2,
+        # Iter-913 rebaseline: drift from iter-866 values caused by
+        # iter-878's monotonicity-overshoot limiter LHS-factor fix
+        # (`operators_cdgrid.py:290`-comment): pre-iter-878 the
+        # condition was ``q_6 > dq*dq``; iter-878 added the missing
+        # ``dq`` factor on the LHS to match CW84 / Fortran pert_ppm
+        # exactly.  This changed the default-path `_ppm_reconstruct_1d`
+        # output for W5 (which has non-monotone field at the mountain
+        # ridge), causing h_max +0.10 m, h_min +3.02 m, h[3,18,18]
+        # -0.29 m drifts.  The iter-878 fix is Fortran-correct; iter-
+        # 913 rebaselines the gold-file rather than reverting iter-878.
+        self.assertAlmostEqual(float(h.max()), 5966.74755859375, places=2,
             msg=f"W5 h_max drifted: {float(h.max()):.3f}")
-        self.assertAlmostEqual(float(h.min()), 3886.87548828125, places=2,
+        self.assertAlmostEqual(float(h.min()), 3889.896728515625, places=2,
             msg=f"W5 h_min drifted: {float(h.min()):.3f}")
         # Pointwise h at a specific cell near the mountain.
-        self.assertAlmostEqual(float(h[3, 18, 18]), 5958.076171875,
+        self.assertAlmostEqual(float(h[3, 18, 18]), 5957.78271484375,
             places=2, msg=f"W5 h[3,18,18] drifted: {float(h[3,18,18]):.3f}")
 
         # Area-weighted mass conservation (iter-715 pattern — NOT
@@ -10991,9 +11001,10 @@ class TestW5ProductionGoldFileIter716(unittest.TestCase):
         # Wind magnitude fingerprints (tied to the Rossby wave
         # amplitude; complementary to the [4, 10] face-4 v_cc_north
         # window in TestW5PolarFaceMagnitude).
-        self.assertAlmostEqual(float(np.abs(ud).max()), 25.8116455078125,
+        # Iter-913 rebaseline values (post-iter-878 limiter fix).
+        self.assertAlmostEqual(float(np.abs(ud).max()), 25.84471893310547,
             places=2, msg=f"W5 max|u_d| drifted: {float(np.abs(ud).max()):.3f}")
-        self.assertAlmostEqual(float(np.abs(vd).max()), 18.756834030151367,
+        self.assertAlmostEqual(float(np.abs(vd).max()), 18.769433975219727,
             places=2, msg=f"W5 max|v_d| drifted: {float(np.abs(vd).max()):.3f}")
 
 
