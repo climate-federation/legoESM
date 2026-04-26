@@ -220,17 +220,36 @@ def mpas_compressible_euler_slow_tendencies(
     # 4 divergence calls → 1.  ``w_e_3d`` is now produced by the
     # batched cell-to-edge gather above (Loop 154), so we can plug it
     # directly into the divergence batch.
+    #
+    # Loop 186 — when ``K_h > 0`` the scalar-diffusion step also needs
+    # ``divergence_cell_3d(grad_th_3d)`` (theta diffusion).  Append it
+    # to the trailing axis as a 5th passive batch entry — same gather
+    # + weighted reduce, no extra halo cost — saving one full
+    # ``divergence_cell_3d`` call per RHS evaluation.  Same exploit as
+    # Loop 156 for the prescribed-wind tracer transport.
     n_edges_d, nlev_d = u_3d.shape
     _div_inputs = jnp.stack(
         [rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d, u_3d * w_e_3d], axis=-1,
     )  # (nEdges, nlev, 4)
-    _div_outputs = divergence_cell_3d(
-        _div_inputs.reshape(n_edges_d, nlev_d * 4), mesh,
-    ).reshape(-1, nlev_d, 4)
+    _div_inputs_flat = _div_inputs.reshape(n_edges_d, nlev_d * 4)
+    if config.K_h > 0:
+        _div_inputs_flat = jnp.concatenate(
+            [_div_inputs_flat, grad_th_3d], axis=-1,
+        )  # (nEdges, nlev*4 + nlev) = (nEdges, nlev*5)
+    _div_outputs_flat = divergence_cell_3d(_div_inputs_flat, mesh)
+    _div_outputs = _div_outputs_flat[:, : nlev_d * 4].reshape(
+        -1, nlev_d, 4,
+    )
     div_rho_v_3d = _div_outputs[..., 0]
     div_u_theta_3d = _div_outputs[..., 1]
     div_u_3d = _div_outputs[..., 2]
     div_uw_3d = _div_outputs[..., 3]
+    if config.K_h > 0:
+        # 5th slice: ``divergence_cell_3d(grad_th_3d)`` — consumed below
+        # in section 6 ("Scalar diffusion on theta").
+        _diff_th_3d = _div_outputs_flat[:, nlev_d * 4:]  # (nCells, nlev)
+    else:
+        _diff_th_3d = None
 
     # Horizontal theta advection (advective form): -(div(u·θ) - θ · div(u)).
     dtheta_p_dt = -(div_u_theta_3d - theta_total * div_u_3d)
@@ -286,10 +305,11 @@ def mpas_compressible_euler_slow_tendencies(
 
     # --- 6. Scalar diffusion on theta (3D-native) ---
     if config.K_h > 0:
-        # ``grad_th_3d`` was already computed via the batched gradient
-        # block above (Loop 128).  Just take the divergence here.
-        diff_3d = divergence_cell_3d(grad_th_3d, mesh)       # (nCells, nlev)
-        dtheta_p_dt = dtheta_p_dt + config.K_h * diff_3d
+        # ``_diff_th_3d`` is the 5th slice of the merged
+        # ``divergence_cell_3d`` batch above (Loop 186) — its
+        # ``divergence_cell_3d(grad_th_3d, mesh)`` call has already
+        # been folded in at zero extra ``edgesOnCell`` gather cost.
+        dtheta_p_dt = dtheta_p_dt + config.K_h * _diff_th_3d
 
     # --- 7. Add physics tendencies ---
     if physics_tendency is not None:
