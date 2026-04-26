@@ -115,23 +115,22 @@ def _spectral_gradient_3d(grid, coeffs_3d):
     dfdx, dfdy : (n_lat, n_lon, nlev)
     """
     a = grid.radius
-
-    # Zonal derivative: im * coeffs -> synthesis (per level)
-    # sh_synthesis of (im * coeffs) gives d(f)/d(lambda) on the grid
-    c_t = jnp.moveaxis(coeffs_3d, -1, 0)  # (nlev, n_sh)
     ims = grid.ms.astype(jnp.float64)
-
     cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
 
-    def zonal_deriv(c):
-        return sh_synthesis(grid, 1j * ims * c) / (a * cos_lat_2d)
+    # Zonal derivative uses ``sh_synthesis_3d`` directly on the
+    # ``(n_sh, nlev)`` complex spectrum — one batched synthesis vs the
+    # previous moveaxis + vmap(per-level synthesis) + moveaxis.  The
+    # ``ims`` broadcast over the level axis is via a trailing newaxis.
+    dfdx = sh_synthesis_3d(grid, (1j * ims)[:, None] * coeffs_3d) / (
+        a * cos_lat_2d[..., None]
+    )
 
-    dfdx_t = jax.vmap(zonal_deriv)(c_t)  # (nlev, n_lat, n_lon)
-    dfdx = jnp.moveaxis(dfdx_t, 0, -1)
+    # Meridional derivative: ``_sh_synthesis_H`` is 2D-only, so we
+    # still vmap over levels here.  Skipping the extra ``c_t`` rebind
+    # — call the moveaxis lazily inside the vmap binding.
+    c_t = jnp.moveaxis(coeffs_3d, -1, 0)
 
-    # Meridional derivative: Hnm synthesis (per level)
-    # _sh_synthesis_H gives cos(lat) * d(f)/d(colatitude)
-    # df/dy = -(1/a) * d(f)/d(colatitude) = -Hnm_synth / (a * cos(lat))
     def merid_deriv(c):
         return -_sh_synthesis_H(grid, c) / (a * cos_lat_2d)
 
