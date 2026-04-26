@@ -264,7 +264,9 @@ def cgrid_latlon_sw_tendencies(
 
     # Enforce zero tendency at poles (wall BC) so intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    dv_dt = dv_dt.at[0, :].set(0.0).at[-1, :].set(0.0)
+    # Single ``Pad`` HLO op replaces two ``ScatterUpdate`` ops on the
+    # lat axis — same per-RK-stage pattern as the lat-lon C-grid PE.
+    dv_dt = jnp.pad(dv_dt[1:-1, :], ((1, 1), (0, 0)))
 
     return dh_dt, du_dt, dv_dt
 
@@ -361,8 +363,8 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
             state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Enforce v = 0 at poles
-        v_new = state_new.v.at[0, :].set(0.0).at[-1, :].set(0.0)
+        # Enforce v = 0 at poles via a single Pad HLO op.
+        v_new = jnp.pad(state_new.v[1:-1, :], ((1, 1), (0, 0)))
         state_new = state_new._replace(v=v_new)
 
         # Conservation fixer (use float64 accumulation for precision)

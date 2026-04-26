@@ -502,7 +502,10 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # Enforce zero tendency at poles (wall BC) so that intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    dv_dt = dv_dt.at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+    # Single ``Pad`` HLO op (zero-pad the interior slice) replaces two
+    # ``ScatterUpdate`` ops on the leading lat axis — same per-RK-stage
+    # pattern as the spectral_nh ``w_new`` rewrite.
+    dv_dt = jnp.pad(dv_dt[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
 
     return du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends
 
@@ -665,8 +668,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Enforce v = 0 at poles
-        v_new = state_new.v.at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+        # Enforce v = 0 at poles via a single Pad HLO op (matches the
+        # tendency-side rewrite above).
+        v_new = jnp.pad(state_new.v[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
         state_new = state_new._replace(v=v_new)
 
         # Safety rails: T floor, p_s floor, mass fixer
