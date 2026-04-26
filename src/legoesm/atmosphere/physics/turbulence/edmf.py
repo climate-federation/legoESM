@@ -139,7 +139,7 @@ def edmf_turbulence(
 
     tke_diffused = implicit_vertical_diffusion(
         tke, Km_half, rho, dz_layer, dz_half, dt,
-        surface_flux=jnp.zeros(ncol),
+        surface_flux=jnp.zeros(ncol, dtype=tke.dtype),
     )
 
     # ===== MF part: updraft model via jax.lax.scan =====
@@ -154,10 +154,19 @@ def edmf_turbulence(
     exner = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
     theta = T / jnp.clip(exner, 1.0e-8, None)
 
-    # Initialize updraft at surface (bottom level = index nlev-1)
-    w_u_init = jnp.maximum(jnp.full(ncol, config.w_updraft_min), 2.5 * ustar)
-    theta_u_init = theta[:, -1] + 0.5  # slightly warmer
-    q_u_init = q_v[:, -1]  # same moisture
+    # Initialize updraft at surface (bottom level = index nlev-1).  Pin
+    # the carry dtype to the input field dtype so the scan body cannot
+    # promote on x64 mode: ``jnp.full`` defaults to ``float64`` when
+    # ``jax_enable_x64`` is True, which would poison ``carry[0]`` to
+    # float64 while ``theta_u_init`` (= ``theta + 0.5``) stays at the
+    # state precision and the scan rejects the carry-output mismatch.
+    _dtype = T.dtype
+    w_u_init = jnp.maximum(
+        jnp.full(ncol, config.w_updraft_min, dtype=_dtype),
+        (2.5 * ustar).astype(_dtype),
+    )
+    theta_u_init = (theta[:, -1] + 0.5).astype(_dtype)  # slightly warmer
+    q_u_init = q_v[:, -1].astype(_dtype)  # same moisture
 
     # Scan from surface upward (reverse level index)
     # Levels are top-down, so we scan from nlev-1 to 0

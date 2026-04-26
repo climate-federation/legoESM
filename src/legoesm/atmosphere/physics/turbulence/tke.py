@@ -150,10 +150,13 @@ def tke_turbulence(
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     dz_layer = jnp.clip(dz_layer, 1.0, None)
 
-    # Diffuse TKE (no surface flux for TKE)
+    # Diffuse TKE (no surface flux for TKE).  Pin the surface_flux dtype
+    # to the column dtype so ``rhs.at[:, -1].add(...)`` inside the
+    # tridiagonal solve does not see an x64-default zero clashing with
+    # the f32 state.
     tke_diffused = implicit_vertical_diffusion(
         tke, Km_half, rho, dz_layer, dz_half, dt,
-        surface_flux=jnp.zeros(ncol),
+        surface_flux=jnp.zeros(ncol, dtype=tke.dtype),
     )
 
     # Semi-implicit TKE update:

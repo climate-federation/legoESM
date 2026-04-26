@@ -167,23 +167,27 @@ def _make_hydrostatic_turbulence(
         p_half_col = p_half.reshape(ncol, nlev + 1)
 
         # Extract water vapor from tracers if available; else assume dry.
+        # Pin all defaulted allocations to the state precision so we never
+        # silently promote an x64 zero into a float32 column path (which
+        # poisons downstream scan carries with mixed-precision dtypes).
+        _state_dtype = T.dtype
         if state.tracers is not None and "q_v" in state.tracers:
             _qv_raw = state.tracers["q_v"]
             _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
             q_v_col = _qv_data.reshape(ncol, nlev)
         else:
-            q_v_col = jnp.zeros((ncol, nlev))
+            q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
 
         if turb_fn is None:
             return HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
-                dT_dt=Field(data=jnp.zeros(shape_3d), name="dT_dt_turb", dims=dims_3d, units="K/s"),
-                dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
+                dT_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dT_dt_turb", dims=dims_3d, units="K/s"),
+                dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             ), tke_out
 
         # Heights and density
@@ -200,9 +204,9 @@ def _make_hydrostatic_turbulence(
                 tke_in = phys_state.tke
                 # Reshape if needed (PhysicsState stores flat columns).
                 if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
 
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
@@ -234,8 +238,8 @@ def _make_hydrostatic_turbulence(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_turb", dims=dims_3d, units="K/s"),
-            dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+            dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
         )
         return tendencies, tke_out
@@ -305,15 +309,20 @@ def _make_nonhydrostatic_turbulence(
         dims_tr = ("face", "x", "y", "level", "tracer")
 
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+        # Mirror the hydrostatic bridge: pin defaulted allocations to the
+        # state precision so x64-default zeros do not poison the column
+        # path.
+        _state_dtype = T.dtype
+        _phis_dtype = state.phis.data.dtype
 
         if turb_fn is None:
             return NonHydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
-                dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
-                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d), name="dtheta_prime_dt_turb", dims=dims_3d, units="K/s"),
-                drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
+                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dtheta_prime_dt_turb", dims=dims_3d, units="K/s"),
+                drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
             ), tke_out
 
@@ -335,7 +344,7 @@ def _make_nonhydrostatic_turbulence(
         p_full_col = p.reshape(ncol, nlev)
         rho_col = rho_total.reshape(ncol, nlev)
 
-        q_v_col = jnp.zeros((ncol, nlev))
+        q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         if n_tracers > 0:
             q_v_col = tracers[..., 0].reshape(ncol, nlev)
 
@@ -346,9 +355,9 @@ def _make_nonhydrostatic_turbulence(
             if phys_state is not None:
                 tke_in = phys_state.tke
                 if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half, z_full, z_half,
@@ -375,10 +384,10 @@ def _make_nonhydrostatic_turbulence(
         tendencies = NonHydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
-            dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
+            dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
             dtheta_prime_dt=Field(data=dtheta_prime_dt, name="dtheta_prime_dt_turb", dims=dims_3d, units="K/s"),
-            drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+            drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
         )
         return tendencies, tke_out
@@ -448,7 +457,10 @@ def _make_spectral_pe_turbulence(
         v_col = v.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
-        q_v_col = jnp.zeros((ncol, nlev))
+        # Pin the column-physics dtype to the gridded state precision so
+        # we never silently flow x64 zeros into the column path.
+        _state_dtype = T.dtype
+        q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
@@ -473,9 +485,9 @@ def _make_spectral_pe_turbulence(
             if phys_state is not None:
                 tke_in = phys_state.tke
                 if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,

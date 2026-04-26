@@ -42,19 +42,34 @@ class MicrophysicsOutput(NamedTuple):
     precipitation: jax.Array  # surface precip [kg/m^2/s]
 
 
-def make_zero_hydrometeors(ncol: int, nlev: int) -> HydrometeorState:
-    """Create a zero-initialized HydrometeorState."""
-    z = jnp.zeros((ncol, nlev))
+def make_zero_hydrometeors(
+    ncol: int, nlev: int, dtype=None,
+) -> HydrometeorState:
+    """Create a zero-initialized HydrometeorState.
+
+    ``dtype`` defaults to the JAX default float (``float64`` under x64,
+    ``float32`` otherwise).  Callers integrating with the column physics
+    pipeline should pass the upstream state dtype explicitly so this
+    fallback never silently promotes a float32 column path to float64.
+    """
+    z = jnp.zeros((ncol, nlev), dtype=dtype)
     return HydrometeorState(
         q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
         N_c=z, N_r=z, N_i=z,
     )
 
 
-def make_zero_output(ncol: int, nlev: int) -> MicrophysicsOutput:
-    """Create a zero-initialized MicrophysicsOutput."""
-    z2 = jnp.zeros((ncol, nlev))
-    z1 = jnp.zeros((ncol,))
+def make_zero_output(
+    ncol: int, nlev: int, dtype=None,
+) -> MicrophysicsOutput:
+    """Create a zero-initialized MicrophysicsOutput.
+
+    ``dtype`` is forwarded to ``jnp.zeros`` for the same reason as
+    ``make_zero_hydrometeors``: defaulting allows x64 mode to silently
+    promote the precip path.
+    """
+    z2 = jnp.zeros((ncol, nlev), dtype=dtype)
+    z1 = jnp.zeros((ncol,), dtype=dtype)
     return MicrophysicsOutput(
         dT_dt=z2, dq_v_dt=z2, dq_c_dt=z2, dq_r_dt=z2,
         dq_i_dt=z2, dq_s_dt=z2, dq_g_dt=z2,
