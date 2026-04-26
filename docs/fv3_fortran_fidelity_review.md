@@ -2803,15 +2803,16 @@ iter-898 alignment: passing `apply_fortran_xppm_boundary=True` in each ON-path c
 - `test_boundary_fix_skip_corners_is_known_worse` (iter-769):
   - Add `apply_fortran_xppm_boundary=True` to config.
   - OFF baseline: `< 0.20` → `< 0.16` (iter-893 measures 0.132).
-  - ON ceiling: `< 5.0` → unchanged.  Re-baselined message text: cite iter-898's 0.605 instead of pre-iter-893 1.03.
+  - ON **floor** (the known-worse pin): `> 0.50` → `> 0.40` (iter-898 measures 0.605; pre-iter-893 was 1.034 — the iter-893 path lowers ON, so the floor is tightened to keep margin).
   - Ratio: `> 5` → `> 3.0` (iter-898 measures 4.59; pre-iter-893 was 6.5).
+  - There is no ON ceiling — the known-worse property is enforced by the ON floor + ratio floor.
   - Docstring updated with iter-898 cross-table.
 
 - `test_fortran_vector_corner_fill_is_known_worse` (iter-767):
   - Add `apply_fortran_xppm_boundary=True` to config.
   - OFF baseline: `< 0.20` → `< 0.16` (iter-893 measures 0.132).
-  - ON ceiling: `< 5.0` unchanged (iter-898 measures 2.41 vs pre-iter-893 2.56).
-  - Ratio: `> 5` unchanged (iter-898 measures 18.27, easily passes).
+  - ON ceiling: `< 5.0` unchanged (iter-898 measures 2.41 vs pre-iter-893 2.56; ceiling protects against NaN/blowup, not against the known-worse property itself).
+  - Ratio (the known-worse pin, **floor**): `> 5` unchanged (iter-898 measures 18.27, easily passes).
   - h_L2 ratio threshold: `> 3.0` unchanged (iter-767 second-pass pin).
   - Docstring updated with iter-898 cross-table.
 
