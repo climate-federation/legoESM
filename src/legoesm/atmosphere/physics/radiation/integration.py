@@ -252,6 +252,11 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
     """
     dims_3d = state.T.dims
     dims_2d = state.p_s.dims
+    # Pin all zero-tendency placeholders to the upstream state precision
+    # so we never silently promote a f32 column path to f64 just to
+    # carry an unused-momentum tendency placeholder on the diff result.
+    _u_dtype = state.u.data.dtype
+    _ps_dtype = state.p_s.data.dtype
 
     has_v = state.v is not None
     du_shape = state.u.data.shape  # (6,n,n,nlev) or (nEdges,nlev)
@@ -260,22 +265,22 @@ def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
     dv_dt = None
     if has_v:
         dv_dt = Field(
-            data=jnp.zeros(state.v.data.shape), name="dv_dt_rad",
+            data=jnp.zeros(state.v.data.shape, dtype=state.v.data.dtype), name="dv_dt_rad",
             dims=state.v.dims, units="m/s^2",
         )
 
     return HydrostaticTendencies(
         du_dt=Field(
-            data=jnp.zeros(du_shape), name="du_dt_rad",
+            data=jnp.zeros(du_shape, dtype=_u_dtype), name="du_dt_rad",
             dims=du_dims, units="m/s^2",
         ),
         dT_dt=Field(data=dT_dt, name="dT_dt_rad", dims=dims_3d, units="K/s"),
         dp_s_dt=Field(
-            data=jnp.zeros(shape_2d), name="dp_s_dt_rad",
+            data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dp_s_dt_rad",
             dims=dims_2d, units="Pa/s",
         ),
         dphis_dt=Field(
-            data=jnp.zeros(shape_2d), name="dphis_dt_rad",
+            data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dphis_dt_rad",
             dims=dims_2d, units="m^2/s^3",
         ),
         dv_dt=dv_dt,
@@ -658,18 +663,22 @@ def _make_nonhydrostatic_radiation(
         dims_w = ("face", "x", "y", "level_half")
         dims_2d = ("face", "x", "y")
         dims_tr = ("face", "x", "y", "level", "tracer")
+        # Pin zero-tendency placeholders to the upstream state precision
+        # so x64 default zeros do not leak into the f32 column path.
+        _state_dtype = T.dtype
+        _phis_dtype = state.phis.data.dtype
 
         return NonHydrostaticTendencies(
             du_dt=Field(
-                data=jnp.zeros(shape_3d), name="du_dt_rad",
+                data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_rad",
                 dims=dims_3d, units="m/s^2",
             ),
             dv_dt=Field(
-                data=jnp.zeros(shape_3d), name="dv_dt_rad",
+                data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_rad",
                 dims=dims_3d, units="m/s^2",
             ),
             dw_dt=Field(
-                data=jnp.zeros(shape_w), name="dw_dt_rad",
+                data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_rad",
                 dims=dims_w, units="m/s^2",
             ),
             dtheta_prime_dt=Field(
@@ -677,11 +686,11 @@ def _make_nonhydrostatic_radiation(
                 dims=dims_3d, units="K/s",
             ),
             drho_prime_dt=Field(
-                data=jnp.zeros(shape_3d), name="drho_prime_dt_rad",
+                data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_rad",
                 dims=dims_3d, units="kg/m^3/s",
             ),
             dphis_dt=Field(
-                data=jnp.zeros(shape_2d), name="dphis_dt_rad",
+                data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_rad",
                 dims=dims_2d, units="m^2/s^3",
             ),
             dtracers_dt=Field(
