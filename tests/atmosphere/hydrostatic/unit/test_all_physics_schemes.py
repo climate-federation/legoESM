@@ -31,11 +31,17 @@ def _make_hydrostatic_setup():
     sigma = create_sigma_coordinate(10)
     state = held_suarez_init(grid, sigma)
     n, nlev = grid.n, sigma.n_levels
-    # Add realistic wind so turbulence/GWD have something to work on
+    # Add realistic wind so turbulence/GWD have something to work on.
+    # Pin the wind dtype to the rest of the state's precision (set by
+    # the active precision policy) — defaulting to ``jnp.ones`` would
+    # produce float64 under JAX_ENABLE_X64=1 even when the policy is
+    # float32, which silently promotes the column physics path through
+    # surface fluxes / wind_speed / surface_flux into float64.
+    _dtype = state.T.data.dtype
     state = state._replace(
-        u=Field(data=jnp.ones((6, n, n, nlev)) * 10.0,
+        u=Field(data=jnp.ones((6, n, n, nlev), dtype=_dtype) * 10.0,
                 name="u", dims=("face", "x", "y", "level"), units="m/s"),
-        v=Field(data=jnp.ones((6, n, n, nlev)) * 3.0,
+        v=Field(data=jnp.ones((6, n, n, nlev), dtype=_dtype) * 3.0,
                 name="v", dims=("face", "x", "y", "level"), units="m/s"),
     )
     return state, grid, sigma
