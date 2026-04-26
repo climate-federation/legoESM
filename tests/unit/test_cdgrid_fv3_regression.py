@@ -5594,12 +5594,21 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         div_damp = 8.0 * div_damp_base               # iter-761
 
         grid = create_cubed_sphere(n=n, use_duogrid=False)
+        # Iter-893: keep this sentinel synchronized with the
+        # production matrix runner config (`scripts/run_atmosphere_test_matrix.py`).
+        # iter-893 enables `apply_fortran_xppm_boundary=True` on the
+        # canonical W2 LEGACY config; the W2 v_north Linf baseline
+        # shifts from ~0.189 m/s (centred 4-pt PPM) to ~0.152 m/s
+        # (Fortran iord<7 cube-edge boundary).  The CEILINGS pinned
+        # below (max_v_ll < 0.20, mode-4 < 0.06) hold for both ON
+        # and OFF; iter-893 ON is even further from the ceiling.
         cfg = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0,
             div_damp=div_damp,
             boundary_fix=True,
             damp_v=0.06,
             nord_v=2,
+            apply_fortran_xppm_boundary=True,
         )
         model = FV3EdgeShallowWaterModel(grid, config=cfg)
         cdgrid = model.cdgrid

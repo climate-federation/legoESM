@@ -1194,12 +1194,22 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # PRAGMATIC within the existing aggregated-div_damp API; a
         # Fortran-faithful port of d_sw5's structured `d2_bg, dddmp,
         # d4_bg, nord` (sw_core.F90:1720) is iter-759's ongoing work.
+        # Iter-893: enable `apply_fortran_xppm_boundary=True` on the
+        # canonical W2/W5 LEGACY production config.  iter-892's
+        # off-by-one fix in `_ppm_reconstruct_1d` revealed that
+        # Fortran's iord<7 cube-edge boundary formulas
+        # (tp_core.F90:357-369) reduce W2 v_north Linf at C36 1-day by
+        # 19.6% (0.189 → 0.152 m/s on Linf, 10.1% on L2).  iter-892
+        # locked the improvement behind a default-OFF kwarg; iter-893
+        # activates it on the production matrix.  W5 is essentially
+        # unchanged (max|h| ≈ 5966.72 in both ON/OFF).
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0,
             div_damp=8.0 * _div_damp_cube(n),
             boundary_fix=True,
             damp_v=0.06,
-            nord_v=2)
+            nord_v=2,
+            apply_fortran_xppm_boundary=True)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
 

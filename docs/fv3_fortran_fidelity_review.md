@@ -2604,3 +2604,42 @@ So iter-889's 4× degradation was NOT a Fortran-fidelity-vs-empirical-W2 tension
 - This iter-892 doc entry.
 
 **Process.**  171st iter.  Codex correctly identified the iter-889 off-by-one as a follow-up to iter-891b.  iter-892 reveals the bug was the source of the "Fortran-vs-W2 tension" iter-889 documented; the Fortran-faithful path actually IMPROVES W2 by ~20% when correctly placed.  This is the first iter in the iter-888-892 chain to land an empirical W2 improvement (locked behind default-OFF for now; iter-893+ candidate to enable by default after broader matrix audit).
+
+### Iter-893 — activate `apply_fortran_xppm_boundary=True` on production W2/W5 matrix runner + W2 sentinel
+
+**Cross-config audit (iter-893 prerequisite).**  iter-892 established that enabling `apply_fortran_xppm_boundary` on the canonical W2 LEGACY matrix config produces a 19.6% W2 v_north Linf improvement at C36 1-day.  iter-893 measures the impact across the other matrix-runner configs:
+
+| Config | OFF | ON | Δ |
+|--------|-----|----|----|
+| W2 LEGACY C36 1-day v_north Linf | 0.189 m/s | **0.152 m/s** | -19.6% (improvement) |
+| W2 LEGACY C36 1-day v_north L2 | 3.06e-2 | **2.75e-2** | -10.1% (improvement) |
+| W5 LEGACY C36 1-day max\|h\| | 5966.71 m | 5966.72 m | +0.00% (negligible) |
+| W5 LEGACY C36 1-day max\|u_d\| | 25.6293 m/s | 25.6299 m/s | +0.00% (negligible) |
+| Cosine bell C24 1-day max\|h\| | 823.33 | 825.74 | +0.29% (cosine bell uses `transport_step` → `_ppm_1d`, NOT `_ppm_reconstruct_1d`; the iter-892 path is iord<7 in `_ppm_reconstruct_1d`, so cosine bell sees the iter-888 chain `_ppm_1d` boundary instead.  Default cosine bell config does not pass the flag through `transport_step`, so this row is informational.) |
+
+The only non-negligible production impact is W2 (improvement).  W5 and cosine bell are essentially unchanged.  iter-893 therefore activates the flag on the W2/W5 production matrix config + W2 sentinel test.
+
+**Changes.**
+
+| File | Line | Change |
+|------|------|--------|
+| `scripts/run_atmosphere_test_matrix.py` | ~1200 | Add `apply_fortran_xppm_boundary=True` to the W2/W5 LEGACY `CDGridShallowWaterConfig`. |
+| `tests/unit/test_cdgrid_fv3_regression.py` | ~5597 | Add `apply_fortran_xppm_boundary=True` to the `test_w2_iter761_matrix_v_ll_and_mode4_baseline` config. |
+| `tests/test_fortran_fidelity_default_flags_iter873.py` | line ~75 | Remove `apply_fortran_xppm_boundary` from `_FORTRAN_FIDELITY_OPT_IN_FLAGS` inventory.  Add `_FORTRAN_FIDELITY_FLAGS_ACTIVE_IN_PRODUCTION` record so the iter-873 history captures iter-893's flip. |
+| `tests/test_fortran_fidelity_default_flags_iter873.py` | `expected_prefixes` | Drop `apply_fortran_` prefix.  iter-893's flag is the only `apply_fortran_*` field on the config; future flags need manual inventory review. |
+
+**Why CONFIG default stays False.**  iter-893 keeps the dataclass default at `False` (preserving new-user-OFF behaviour for any hand-rolled `CDGridShallowWaterConfig()` instantiation).  The activation happens at the matrix-runner / W2-sentinel call sites only — these are the production code paths where the iter-892 W2 improvement is wanted.
+
+**W2 sentinel ceilings hold.**  The W2 sentinel `max_v_ll < 2.0e-1`, `mode4_pos < 6.0e-2`, `mode4_neg < 6.0e-2` ceilings are all derived from the OFF baseline (~0.159 / 0.046).  The new ON measurement (~0.152 / lower mode-4) sits FURTHER below each ceiling — the sentinel is even more robust under iter-893.
+
+**iter-889 known-improved sentinel still locks the iter-892 ratio.**  `test_iter889_w2_legacy_is_known_worse_on_flag` (renamed in iter-892 but kept its function name for git history) explicitly TOGGLES the flag from False to True on its OWN config (does NOT use the matrix runner config), so iter-893's matrix-runner activation does not affect it.  The sentinel continues to assert `0.5 < ratio < 0.95`.
+
+**Verification.**  All 135 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.  (Was 136 before iter-893; the iter-873 parametrized count dropped by 1 because `apply_fortran_xppm_boundary` was removed from `_FORTRAN_FIDELITY_OPT_IN_FLAGS` — that's the expected iter-893 effect.)
+
+**Deliverable.**
+- `scripts/run_atmosphere_test_matrix.py`: enable flag in W2/W5 LEGACY config.
+- `tests/unit/test_cdgrid_fv3_regression.py`: enable flag in W2 sentinel test.
+- `tests/test_fortran_fidelity_default_flags_iter873.py`: drop flag from inventory + add iter-893 record.
+- This iter-893 doc entry.
+
+**Process.**  172nd iter.  iter-893 lands the iter-892 W2 improvement on the production matrix runner.  Net Fortran-fidelity gain: production W2 baseline shifts from 0.189 to 0.152 m/s; the W2 v_north cube imprint reduces by ~20%.  The cube-imprint blocker remains structural per CLAUDE.md memory (this is a 20% reduction, not a 100% elimination), but iter-893 is the first iter in the iter-888-893 chain to land a real, default-on W2 improvement.

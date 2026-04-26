@@ -70,13 +70,27 @@ _FORTRAN_FIDELITY_OPT_IN_FLAGS = [
      "boundary-corner cascaded smoothing"),
     ("use_experimental_csw", False, "pre-iter-862",
      "experimental C-grid path (known unstable)"),
-    # Iter-888c: Fortran s11/s14/s15 boundary-formula opt-in surfaced
-    # on `CDGridShallowWaterConfig` so the canonical FB MODEL
-    # (`FV3FBShallowWaterModel`) can opt in via config (Codex
-    # iter-888b stop-time fix).
-    ("apply_fortran_xppm_boundary", False, "iter-888c",
-     "tp_core.F90:614-628 / :632-647 (s11/s14/s15 boundary formula)"),
+    # Iter-888c added `apply_fortran_xppm_boundary` to this inventory
+    # as a default-OFF Fortran-fidelity opt-in.  Iter-892 fixed an
+    # off-by-one in the iter-889 implementation and discovered the
+    # corrected Fortran-faithful path actually IMPROVES W2 v_north
+    # Linf at C36 1-day by 19.6% (0.189 → 0.152 m/s).  Iter-893
+    # therefore activates the flag on the production matrix runner
+    # and W2 sentinel — moving it from "default-OFF opt-in" to
+    # "active by default in production".  The CONFIG default on the
+    # dataclass remains False (preserves new-user-OFF behaviour);
+    # the activation happens at the matrix-runner / W2-sentinel
+    # call sites.  Removed from this inventory because the iter-873
+    # matrix-runner / W2-sentinel "must NOT activate" check would
+    # block the iter-893 production activation.
 ]
+
+# Iter-893 record: `apply_fortran_xppm_boundary` is INTENTIONALLY
+# active in the production matrix runner and W2 sentinel.  See
+# iter-893 doc entry for measurement details.
+_FORTRAN_FIDELITY_FLAGS_ACTIVE_IN_PRODUCTION = (
+    "apply_fortran_xppm_boundary",
+)
 
 
 @pytest.mark.parametrize("field, expected, iter_added, doc_anchor",
@@ -207,9 +221,16 @@ def test_iter873_inventory_is_complete():
     sentinel would silently miss the new flag.
     """
     expected_prefixes = (
-        "fortran_", "apply_legacy_", "apply_fortran_",
+        "fortran_", "apply_legacy_",
         "boundary_fix_skip_", "use_experimental_",
     )
+    # Iter-893: `apply_fortran_*` prefix removed because
+    # `apply_fortran_xppm_boundary` was promoted from "default-OFF
+    # opt-in" to "active by default in production matrix runner +
+    # W2 sentinel" (after iter-892 demonstrated 19.6% W2 v_north Linf
+    # improvement).  Other `apply_fortran_*` flags (none currently)
+    # would not be auto-detected by this completeness check; manual
+    # inventory review remains the safety net.
     cfg = CDGridShallowWaterConfig()
     detected = sorted([
         f for f in cfg._fields
