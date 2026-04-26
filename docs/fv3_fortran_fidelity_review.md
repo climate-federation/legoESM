@@ -10,11 +10,15 @@ form below.
 
 ## Live status
 
-- **W2 v-wind artifact at C36 remains unresolved (structural).**
-  Production still runs `FV3EdgeShallowWaterModel` ->
-  `fv3_sw_tendencies` (Arakawa-Lamb + RK3 + `boundary_fix`), not
-  the FV3 FB chain. Current canonical W2 baseline after iter-761:
-  `L2=2.18e-04`, `v_ll_Linf=1.585e-01 m/s`. The artifact remains a
+- **W2 v-wind artifact at C36 remains unresolved (structural) but
+  20 % smaller after iter-893.**  Production still runs
+  `FV3EdgeShallowWaterModel` -> `fv3_sw_tendencies` (Arakawa-Lamb +
+  RK3 + `boundary_fix`), not the FV3 FB chain. Current canonical
+  W2 baseline after iter-893 (with `apply_fortran_xppm_boundary
+  =True` activating Fortran's iord<7 cube-edge boundary formulas
+  per `tp_core.F90:357-369`): `L2=2.75e-02`,
+  `v_ll_Linf=1.319e-01 m/s`. Pre-iter-893 was `L2=3.06e-02`,
+  `v_ll_Linf=1.585e-01 m/s`.  The artifact remains a
   cube-vertex-meridian stripe pattern and does not converge away
   with resolution.
 - **FB chain accuracy at C24/C36 remains unresolved.**
@@ -2643,3 +2647,43 @@ The only non-negligible production impact is W2 (improvement).  W5 and cosine be
 - This iter-893 doc entry.
 
 **Process.**  172nd iter.  iter-893 lands the iter-892 W2 improvement on the production matrix runner.  Net Fortran-fidelity gain: production W2 baseline shifts from 0.189 to 0.152 m/s; the W2 v_north cube imprint reduces by ~20%.  The cube-imprint blocker remains structural per CLAUDE.md memory (this is a 20% reduction, not a 100% elimination), but iter-893 is the first iter in the iter-888-893 chain to land a real, default-on W2 improvement.
+
+### Iter-894 — tighten W2 sentinel ceilings + update Live-status baseline (Codex iter-893 stop-time fix)
+
+**Codex iter-893 stop-time finding.**  "iter-893 changed the production W2 config but left it inconsistently represented and not fully regression-pinned."  Two specific gaps:
+
+1. **Top-level "Live status" doc still cited `v_ll_Linf=1.585e-01 m/s`** — the pre-iter-893 baseline.  After iter-893's matrix-runner activation, the canonical W2 baseline is `1.319e-01` (lat-lon regridded; `1.519e-01` per-face cell-centre).
+2. **W2 sentinel ceilings** were `max_v_ll < 2.0e-1` and `mode4 < 6.0e-2` — derived from the pre-iter-893 baseline 1.585e-1 / 4.594e-2.  After iter-893 the actual measurements dropped to 1.319e-1 / 3.754e-2, leaving the ceilings 51 % / 60 % above the new baselines — too loose.  A regression that re-introduces the off-by-one bug or silently disables `apply_fortran_xppm_boundary` would still pass the loose ceiling.
+
+**iter-894 W2 sentinel measurements** (canonical iter-893 matrix config, C36 1-day):
+
+| Metric | iter-893 measurement | iter-894 ceiling | Headroom |
+|--------|----------------------|------------------|----------|
+| `max_v_ll` (lat-lon regrid) | 1.319e-1 m/s | 1.6e-1 m/s | 21 % |
+| `mode4_pos` (lat=+30°N) | 3.754e-2 | 4.5e-2 | 20 % |
+| `mode4_neg` (lat=-30°S) | 3.753e-2 | 4.5e-2 | 20 % |
+
+**Doc updates.**
+
+- Top-level "Live status" — replaced pre-iter-893 baseline `L2=2.18e-04, v_ll_Linf=1.585e-01` with post-iter-893 `L2=2.75e-02, v_ll_Linf=1.319e-01` and noted the iter-893 activation rationale.
+- W2 sentinel docstring — replaced "iter-761 canonical matrix config" wording with "iter-893 canonical matrix config" + the iter-894 ceiling/baseline values.
+
+**Test updates.**
+
+- `tests/unit/test_cdgrid_fv3_regression.py:test_w2_iter761_matrix_v_ll_and_mode4_baseline`:
+  - `max_v_ll` ceiling: 2.0e-1 → 1.6e-1.
+  - `mode4_pos`, `mode4_neg` ceilings: 6.0e-2 → 4.5e-2.
+  - Error message text updated to reference iter-894 baseline values + iter-893 mechanism.
+
+**What iter-894 deliberately does NOT change.**
+
+- Other tests that build their own configs without `apply_fortran_xppm_boundary=True` (`test_fortran_a2b_corner_avg_is_known_worse`, `test_boundary_fix_skip_corners_is_known_worse`, etc.) still measure their OFF baselines against pre-iter-893 v_ll values (~0.159 m/s).  Those tests pin gates on the OFF path of THEIR own flag, not on the iter-893 matrix config.  Aligning them with iter-893 is iter-895+ candidate work but not strictly required for the iter-893 regression-pin claim.
+- The W2 LEGACY 1-day OFF measurement (apply_fortran_xppm_boundary=False) is still ~0.189 m/s and is still measurable via the iter-889 known-improved sentinel which toggles the flag on its own config.
+
+**Verification.**  All 149 tests pass (135 top-level + 14 W2 boundary-error-budget).  Tightened ceilings catch a hypothetical regression that disables iter-893's `apply_fortran_xppm_boundary` path: the OFF measurement 0.189 m/s would exceed the new 0.16 ceiling.
+
+**Deliverable.**
+- `docs/fv3_fortran_fidelity_review.md`: Live status update + this iter-894 entry.
+- `tests/unit/test_cdgrid_fv3_regression.py:test_w2_iter761_matrix_v_ll_and_mode4_baseline`: tightened ceilings + docstring/comment refresh.
+
+**Process.**  173rd iter.  Codex iter-893 stop-time correctly identified that iter-893 promoted a Fortran-fidelity flag to the production path but left the regression-pinning loose and the doc baseline stale.  iter-894 closes both gaps: doc reflects new baseline; ceilings tighten to lock the iter-893 improvement.  Future regressions that disable the iter-893 path would now be caught by the W2 sentinel.

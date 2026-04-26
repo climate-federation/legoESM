@@ -5525,14 +5525,17 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
 
     def test_w2_iter761_matrix_v_ll_and_mode4_baseline(self):
         """Iter-862 (per user reframe): pin the THREE user-visible W2
-        artifact metrics on the CURRENT iter-761 canonical matrix
+        artifact metrics on the CURRENT iter-893 canonical matrix
         config (hyperdiff_coeff=0, div_damp=8*..., damp_v=0.06,
-        nord_v=2, boundary_fix=True), measured at t=1 day:
+        nord_v=2, boundary_fix=True, apply_fortran_xppm_boundary=True),
+        measured at t=1 day:
 
           1.  ``max|v_ll|``       — peak of the matrix's lat-lon
                                     regridded v_north over the day.
-                                    Saved baseline = 1.585e-01 m/s.
-                                    Ceiling: 2.0e-1 m/s (~25% head).
+                                    iter-894 baseline = 1.319e-01 m/s
+                                    (post-iter-893; pre-iter-893 was
+                                    1.585e-01).  Ceiling: 1.6e-1 m/s
+                                    (~21 % headroom over baseline).
           2.  ``mode-4 amp at lat=±30°`` — ZONAL FFT amplitude of the
                                     cube-face mode-4 imprint at the
                                     ±30° latitudes where face seams
@@ -5681,33 +5684,41 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         mode4_neg = float(
             np.abs(np.fft.rfft(v_ll[j_neg])[4]) / nlon * 2.0)
 
-        # Ceilings.  Baselines (April 2026 saved, iter-609 FFT
-        # convention `rfft/N*2`):
-        #   max_v_ll       = 1.585e-1 m/s
-        #   mode4_pos      = 4.594e-2 m/s   (= 2× the |fft|/N value)
-        #   mode4_neg      = 4.594e-2 m/s
-        #   face_mirror    = 6.5e-4
-        # Ceilings carry small headroom so any meaningful regression
-        # trips the test while normal numerical noise does not.
+        # Ceilings (iter-894 update — Codex iter-893 stop-time tighten).
+        # Baselines under the iter-893 production matrix config
+        # (apply_fortran_xppm_boundary=True activates Fortran iord<7
+        # cube-edge boundary formulas, reducing W2 v-wind imprint by
+        # ~17%):
+        #   max_v_ll       = 1.319e-1 m/s   (was 1.585e-1 pre-iter-893)
+        #   mode4_pos      = 3.754e-2 m/s   (was 4.594e-2 pre-iter-893)
+        #   mode4_neg      = 3.753e-2 m/s
+        #   face_mirror    = 3.18e-4         (was 6.5e-4 pre-iter-893)
+        # Ceilings tightened from the pre-iter-893 generous values
+        # (2.0e-1, 6.0e-2) to lock the iter-893 improvement with
+        # ~20% headroom over the new baselines.  If the iter-893
+        # apply_fortran_xppm_boundary path were silently disabled or
+        # the off-by-one bug from iter-889/891b reintroduced, these
+        # ceilings would catch the regression.
         self.assertLess(
-            max_v_ll, 2.0e-1,
+            max_v_ll, 1.6e-1,
             msg=(f"W2 iter-761 matrix 1-day max|v_ll| = "
-                 f"{max_v_ll:.4e} m/s exceeds 2.0e-1 ceiling.  Saved "
-                 f"baseline = 1.585e-1 m/s.  A regression here means "
-                 f"the user-visible W2 v-wind imprint has grown."))
+                 f"{max_v_ll:.4e} m/s exceeds 1.6e-1 ceiling.  iter-894 "
+                 f"baseline = 1.319e-1 m/s (post-iter-893).  Either "
+                 f"the user-visible W2 v-wind imprint has grown OR "
+                 f"the iter-893 apply_fortran_xppm_boundary path was "
+                 f"disabled."))
         self.assertLess(
-            mode4_pos, 6.0e-2,
+            mode4_pos, 4.5e-2,
             msg=(f"W2 iter-761 matrix 1-day mode-4 amplitude at "
-                 f"+30°N = {mode4_pos:.4e} m/s exceeds 6.0e-2 ceiling. "
-                 f"Saved baseline = 4.594e-2 m/s (iter-609 "
-                 f"`rfft/N*2` convention).  Mode-4 amplification would "
-                 f"indicate the production A-L + RK3 path's cube-face "
-                 f"imprint has worsened."))
+                 f"+30°N = {mode4_pos:.4e} m/s exceeds 4.5e-2 ceiling. "
+                 f"iter-894 baseline = 3.754e-2 m/s (post-iter-893).  "
+                 f"Mode-4 amplification would indicate the production "
+                 f"A-L + RK3 path's cube-face imprint has worsened."))
         self.assertLess(
-            mode4_neg, 6.0e-2,
+            mode4_neg, 4.5e-2,
             msg=(f"W2 iter-761 matrix 1-day mode-4 amplitude at "
-                 f"-30°S = {mode4_neg:.4e} m/s exceeds 6.0e-2 ceiling. "
-                 f"Saved baseline = 4.594e-2 m/s."))
+                 f"-30°S = {mode4_neg:.4e} m/s exceeds 4.5e-2 ceiling. "
+                 f"iter-894 baseline = 3.753e-2 m/s (post-iter-893)."))
         self.assertLess(
             face_mirror_rel, 1.0e-2,
             msg=(f"W2 iter-761 matrix 1-day face4/face5 max|v_cc_north| "
