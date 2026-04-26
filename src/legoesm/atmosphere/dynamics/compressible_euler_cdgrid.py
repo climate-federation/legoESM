@@ -274,9 +274,15 @@ def cdgrid_compressible_euler_slow_tendencies(
     )
 
     # --- 15. w tendency (slow: horizontal advection) ---
+    # Pre-pad ``w_full`` once and pass to both gradient_x_3d /
+    # gradient_y_3d via ``padded=`` so they share the halo MPI exchange.
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    dw_dx = gradient_x_3d(w_full, grid)
-    dw_dy = gradient_y_3d(w_full, grid)
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+    _dg_w = getattr(grid, 'duogrid', None)
+    _offsets_w = None if _dg_w is not None else grid.halo_interp_offsets
+    _w_full_pad = _pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
+    dw_dx = gradient_x_3d(w_full, grid, padded=_w_full_pad)
+    dw_dy = gradient_y_3d(w_full, grid, padded=_w_full_pad)
     horiz_adv_w = -(u * dw_dx + v * dw_dy)
 
     # Pad zero at top/bottom interfaces (rigid BC).  Single Pad HLO op

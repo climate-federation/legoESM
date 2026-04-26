@@ -100,14 +100,26 @@ def tracer_tendencies(
     nlev = q.shape[-2]
     q_flat = q.reshape(*q.shape[:3], nlev * n_tracers)  # (6, n, n, nlev*n_tracers)
 
-    dq_dx_flat = gradient_x_3d(q_flat, grid)
-    dq_dy_flat = gradient_y_3d(q_flat, grid)
+    # Pre-pad ``q_flat`` once and feed it to both gradient_x_3d and
+    # gradient_y_3d via ``padded=``.  Halves the gradient halo cost
+    # (1 MPI exchange instead of 2 on the same input).  The pad is
+    # also reused inside ``hyperdiffusion_3d``'s inner Laplacian when
+    # hyperdiffusion is enabled.
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+    _dg_q = getattr(grid, 'duogrid', None)
+    _offsets_q = None if _dg_q is not None else grid.halo_interp_offsets
+    _q_flat_pad = _pad_halo_4d(q_flat, interp_offsets=_offsets_q, duogrid=_dg_q)
+
+    dq_dx_flat = gradient_x_3d(q_flat, grid, padded=_q_flat_pad)
+    dq_dy_flat = gradient_y_3d(q_flat, grid, padded=_q_flat_pad)
     dq_dx = dq_dx_flat.reshape(*q.shape)  # (6, n, n, nlev, n_tracers)
     dq_dy = dq_dy_flat.reshape(*q.shape)
     horiz_adv = -(u[..., None] * dq_dx + v[..., None] * dq_dy)
 
     if config.hyperdiff_coeff > 0:
-        hyper_flat = hyperdiffusion_3d(q_flat, grid, config.hyperdiff_coeff)
+        hyper_flat = hyperdiffusion_3d(
+            q_flat, grid, config.hyperdiff_coeff, padded=_q_flat_pad,
+        )
         horiz_adv = horiz_adv + hyper_flat.reshape(*q.shape)
 
     # Vertical advection — local stencil along axis -1, no halo cost.  Use
