@@ -1614,15 +1614,13 @@ def leith_viscosity_q_cgrid(
                                  u_mask=u_mask, v_mask=v_mask)
         grad_div_h = _grad_div_mag_h(div_h, grid)
         # Interpolate h→q with the same 4-point average used for D_T_q,
-        # then pad pole rows and the wrap column with zeros.
-        if is_3d:
-            gd_q_int = 0.25 * (grad_div_h[:-1, :, :] + grad_div_h[1:, :, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[:-1, :, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[1:, :, :])
-        else:
-            gd_q_int = 0.25 * (grad_div_h[:-1, :] + grad_div_h[1:, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[:-1, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[1:, :])
+        # then pad pole rows and the wrap column with zeros.  ``[:-1]``
+        # / ``[1:]`` slice along axis 0 work for both 2D and 3D.
+        gd_roll = jnp.roll(grad_div_h, 1, axis=1)
+        gd_q_int = 0.25 * (
+            grad_div_h[:-1] + grad_div_h[1:]
+            + gd_roll[:-1] + gd_roll[1:]
+        )
         # Pole rows zero; single Pad HLO op replaces alloc-zeros +
         # concatenate-of-three.
         pad_axes = ((0, 0),) * (gd_q_int.ndim - 1)
