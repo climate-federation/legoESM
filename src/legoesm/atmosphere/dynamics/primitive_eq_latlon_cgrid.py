@@ -382,11 +382,16 @@ def cgrid_latlon_hydrostatic_tendencies(
     else:
         # Cell-centered gradient advection (fallback) — 3D-native variants
         # share one halo pad + PPM reconstruction across all levels.
+        # Pre-pad T once so both gradient calls share the halo.
         from legoesm.core.operators_fv_latlon import (
             fv_gradient_lon_3d, fv_gradient_lat_3d,
         )
-        dT_dx = fv_gradient_lon_3d(T, grid)
-        dT_dy = fv_gradient_lat_3d(T, grid)
+        from legoesm.grids.halo_latlon import (
+            pad_halo_latlon_3d as _pad_T,
+        )
+        _T_pad_h2 = _pad_T(T, halo=2)
+        dT_dx = fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
+        dT_dy = fv_gradient_lat_3d(T, grid, padded=_T_pad_h2)
         horiz_adv_T = -(u_c * dT_dx + v_c * dT_dy)
 
     # Adiabatic heating: κ T (ω/p + v·∇_η(ln p))
@@ -462,8 +467,15 @@ def cgrid_latlon_hydrostatic_tendencies(
             from legoesm.core.operators_fv_latlon import (
                 fv_gradient_lon_3d, fv_gradient_lat_3d,
             )
-            dq_dx_flat = fv_gradient_lon_3d(tracer_flat, grid)
-            dq_dy_flat = fv_gradient_lat_3d(tracer_flat, grid)
+            from legoesm.grids.halo_latlon import (
+                pad_halo_latlon_3d as _pad_q,
+            )
+            # Pre-pad the stacked tracer field once so both gradients
+            # share the halo pad — saves one redundant pad_halo_latlon_3d
+            # call per timestep.
+            _q_pad_h2 = _pad_q(tracer_flat, halo=2)
+            dq_dx_flat = fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
+            dq_dy_flat = fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
             dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
             dq_dy_stack = dq_dy_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
             horiz_q_stack = -(
