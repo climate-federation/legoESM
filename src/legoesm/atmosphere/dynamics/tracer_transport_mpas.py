@@ -90,37 +90,42 @@ def tracer_tendencies_mpas(
     """
     t = state.time.data  # scalar time
     q = state.tracers.data  # (nCells, nlev, n_tracers)
+    nCells, nlev, n_tracers = q.shape
 
     # Get prescribed winds at current time
     u_edge, sigma_dot = wind_fn(t, mesh, sigma_coord)  # (nEdges, nlev), (nCells, nlev+1)
 
-    # Use the native 3D Voronoi operators so the per-level moveaxis +
-    # vmap + moveaxis round-trip can be skipped.  ``divergence_cell_3d``
-    # and ``cell_to_edge_avg_3d`` accept ``(nCells, nlev)`` /
-    # ``(nEdges, nlev)`` shaped inputs directly.
+    # ``divergence_cell_3d`` and ``cell_to_edge_avg_3d`` accept any trailing
+    # axis as passive, so fold tracers into the level axis to run the
+    # gather + divergence ONCE for all tracers instead of n_tracers
+    # vmap'd graphs.
     div_u_3d = divergence_cell_3d(u_edge, mesh)  # (nCells, nlev) — shared
 
-    def single_tracer_tendency(q_i):
-        """Compute dq_i/dt for a single tracer. q_i shape: (nCells, nlev)."""
-        # Horizontal advection (advective form): -(div(q*u) - q * div(u)).
-        q_edge = cell_to_edge_avg_3d(q_i, mesh)              # (nEdges, nlev)
-        flux = q_edge * u_edge                                # (nEdges, nlev)
-        div_qu = divergence_cell_3d(flux, mesh)              # (nCells, nlev)
-        horiz_adv = -(div_qu - q_i * div_u_3d)
+    # Horizontal advection (advective form): -(div(q*u) - q * div(u)).
+    q_flat = q.reshape(nCells, nlev * n_tracers)
+    q_edge_flat = cell_to_edge_avg_3d(q_flat, mesh)               # (nEdges, nlev*n_tracers)
+    n_edges = q_edge_flat.shape[0]
+    # Multiply by u_edge via reshape→multiply→reshape so u_edge (nEdges, nlev)
+    # broadcasts against the tracer axis without materializing a tile.
+    q_edge = q_edge_flat.reshape(n_edges, nlev, n_tracers)
+    flux = q_edge * u_edge[..., None]                              # (nEdges, nlev, n_tracers)
+    flux_flat = flux.reshape(n_edges, nlev * n_tracers)
+    div_qu_flat = divergence_cell_3d(flux_flat, mesh)              # (nCells, nlev*n_tracers)
+    div_qu = div_qu_flat.reshape(nCells, nlev, n_tracers)
+    horiz_adv = -(div_qu - q * div_u_3d[..., None])
 
-        # Vertical advection: -sigma_dot dq/dsigma
-        vert_adv = vertical_advection(q_i, sigma_dot, sigma_coord)
+    # Vertical advection — local stencil along axis -1, no halo cost.
+    # ``vertical_advection`` hard-codes axis -1 as nlev, so vmap over
+    # the trailing tracer axis (with sigma_dot/sigma_coord captured).
+    def _vert_one(q_one):
+        return vertical_advection(q_one, sigma_dot, sigma_coord)
 
-        # Hyperdiffusion placeholder — MPAS scalar hyperdiffusion is not yet
-        # available in operators_voronoi; tendency contribution is zero.
-        return horiz_adv + vert_adv
+    vert_adv = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(q)
 
-    # Move tracer axis to front for vmap: (n_tracers, nCells, nlev)
-    q_t = jnp.moveaxis(q, -1, 0)
-    dq_dt_t = jax.vmap(single_tracer_tendency)(q_t)  # (n_tracers, nCells, nlev)
-    dq_dt = jnp.moveaxis(dq_dt_t, 0, -1)  # (nCells, nlev, n_tracers)
+    dq_dt = horiz_adv + vert_adv
 
-    # Return same pytree structure as state
+    # Hyperdiffusion placeholder — MPAS scalar hyperdiffusion is not yet
+    # available in operators_voronoi; tendency contribution is zero.
     return TracerState(
         tracers=state.tracers.replace(data=dq_dt),
         time=state.time.replace(data=jnp.ones_like(t)),  # dtime/dt = 1.0
