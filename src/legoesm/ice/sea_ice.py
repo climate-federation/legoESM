@@ -292,7 +292,14 @@ def _step_dynamic(
 
     # ---- 3. Thermodynamics (per category or single) ----
     if h.ndim > 3:
-        # Multi-category: apply thermodynamics per category via vmap
+        # Multi-category: apply thermodynamics per category via vmap.
+        # ``jax.vmap`` accepts negative ``in_axes`` / ``out_axes`` and
+        # vmaps over the trailing category axis directly — skipping the
+        # six ``jnp.moveaxis`` round-trips used by the prior pattern.
+        # JAX still produces one batched kernel for ``_thermo_single``,
+        # so the savings are layout/intermediate eliminations rather
+        # than fewer kernel launches; the diff is one less buffer copy
+        # per category-vmap invocation under XLA fusion.
         n_cat = h.shape[-1]
         h_old = h
         conc_old = conc
@@ -303,13 +310,9 @@ def _step_dynamic(
                 forcing, ocean_sst, config, U_min, dt,
             )
 
-        h_t = jnp.moveaxis(h, -1, 0)
-        T_t = jnp.moveaxis(T_ice, -1, 0)
-        conc_t = jnp.moveaxis(conc, -1, 0)
-        h_t, T_t, conc_t = jax.vmap(_thermo_cat)(h_t, T_t, conc_t)
-        h = jnp.moveaxis(h_t, 0, -1)
-        T_ice = jnp.moveaxis(T_t, 0, -1)
-        conc = jnp.moveaxis(conc_t, 0, -1)
+        h, T_ice, conc = jax.vmap(
+            _thermo_cat, in_axes=-1, out_axes=-1,
+        )(h, T_ice, conc)
 
         # Open-water ice growth should only be deposited into category 0
         # (thinnest). Zero out new-ice growth in empty higher categories
