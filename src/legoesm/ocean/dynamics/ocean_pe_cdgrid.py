@@ -212,29 +212,54 @@ def ocean_baroclinic_tendencies_cdgrid(
     dv_dt = dv_dt + _vertical_advection_ocean(v_a, w, z_coord, J)
 
     # --- 16. Tracer tendencies ---
-    # Use C-grid velocities for upwind advection of tracers at cell centres
-    tracers = jnp.stack([T, S], axis=0)
+    # Use C-grid velocities for upwind advection of tracers at cell centres.
+    # Stack T, S along a trailing tracer axis and fold it into the level
+    # axis so the halo-issuing operators (cgrid_tracer_advection_fct,
+    # laplacian_viscosity_3d) run ONCE for both tracers instead of being
+    # called twice under vmap-over-(T,S) — each vmap'd call would emit
+    # its own pad_halo_4d MPI exchange.  Vertical operators stay
+    # per-tracer because they hard-code the vertical axis at -1.
+    tracer_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
+    n_face, n_i, n_j, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
+    # Tile C-grid velocities so they broadcast against the combined
+    # (level × tracer) axis.  Skipped when n_tracers == 1 to avoid
+    # materializing an unnecessary copy.
+    if n_tracers == 1:
+        u_c_b, v_c_b = u_c, v_c
+    else:
+        u_c_b = jnp.tile(u_c, (1, 1, 1, n_tracers))
+        v_c_b = jnp.tile(v_c, (1, 1, 1, n_tracers))
 
-    def tracer_tendency(tr):
-        # Horizontal: FCT-limited advection with C-grid velocities
-        # Uses Zalesak (1979) flux-corrected transport to ensure
-        # monotonicity — eliminates overshoot/undershoot that unlimited
-        # PPM produces on the cubed-sphere near panel boundaries.
-        dtr_dt = cgrid_tracer_advection_fct(tr, u_c, v_c, cdgrid)
-        # Vertical advection
-        dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
+    horiz_flat = cgrid_tracer_advection_fct(tracer_flat, u_c_b, v_c_b, cdgrid)
+    if config.K_h > 0:
+        from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
+        horiz_flat = horiz_flat + laplacian_viscosity_3d(
+            tracer_flat, grid, config.K_h,
+        )
+    horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
 
-        if config.K_h > 0:
-            from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-            dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
-        if config.K_v > 0:
-            from legoesm.ocean.physics.mixing import vertical_diffusion
-            dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
-        return dtr_dt
+    # Vertical advection per-tracer (vmap over the trailing tracer axis
+    # so JAX produces one batched kernel rather than n_tracers unrolled
+    # stencils).
+    def _vert_adv(q):
+        return _vertical_advection_ocean(q, w, z_coord, J)
 
-    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
-    dT_dt = tracer_tend[0]
-    dS_dt = tracer_tend[1]
+    vert_adv_stack = jax.vmap(_vert_adv, in_axes=-1, out_axes=-1)(tracer_stack)
+
+    if config.K_v > 0:
+        from legoesm.ocean.physics.mixing import vertical_diffusion
+
+        def _vdiff(q):
+            return vertical_diffusion(q, z_coord, J, config.K_v)
+
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        tracer_tend_stack = horiz_stack + vert_adv_stack + vdiff_stack
+    else:
+        tracer_tend_stack = horiz_stack + vert_adv_stack
+
+    dT_dt = tracer_tend_stack[..., 0]
+    dS_dt = tracer_tend_stack[..., 1]
 
     # --- 17. Mixing (always applied from config, grid-native operators) ---
     if config.A_h > 0:
