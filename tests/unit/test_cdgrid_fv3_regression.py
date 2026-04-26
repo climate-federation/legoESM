@@ -5576,12 +5576,14 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
 
         Why this test exists.  Per user iter-862 reframe message: the
         live W2 artifact is dynamically generated (t=0 ~8e-3 m/s →
-        t=1d ~1.6e-1 m/s), is NOT the old polar-axis asymmetry, NOT
-        a t=0 diagnostic bug, but a structural cube-face mode-4
-        imprint produced by the production A-L + RK3 path
-        (`fv3_sw_tendencies` + boundary_fix + RK3).  The existing
-        sentinels (``test_w2_alpha0_c36_1day_iter761_matrix_config``
-        on L2 alone, ``test_w2_v_wind_imprint_below_iter505_canonical_ceiling``
+        t=1d ~1.6e-1 m/s pre-iter-893; ~1.32e-1 m/s post-iter-893
+        with `apply_fortran_xppm_boundary=True`), is NOT the old
+        polar-axis asymmetry, NOT a t=0 diagnostic bug, but a
+        structural cube-face mode-4 imprint produced by the
+        production A-L + RK3 path (`fv3_sw_tendencies` +
+        boundary_fix + RK3).  The existing sentinels
+        (``test_w2_alpha0_c36_1day_iter761_matrix_config`` on L2
+        alone, ``test_w2_v_wind_imprint_below_iter505_canonical_ceiling``
         on a LEGACY-config max|v_ll| at 0.40 m/s) do NOT pin the
         post-iter-761 matrix config or the user-visible mode-4
         amplitude.  This test closes that gap.
@@ -5590,16 +5592,18 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         ≈ 14 s on CPU x64.  Same cost class as the existing iter-761
         L2 test.
 
-        Acceptance criteria (iter-894 update; original iter-862
-        reframe targets superseded post-iter-893 W2 improvement):
+        Acceptance criteria (iter-895 update; original iter-862
+        reframe targets superseded post-iter-893 W2 improvement +
+        iter-894/895 ceiling tightening):
         - keep canonical W2 h_L2 within 25% of 2.07e-04 → already
           locked by the L2 test above.
         - final max|v_ll| < 1.319e-01 m/s OR mode-4(|lat|=30°)
           improvement target — to BEAT this test, a future patch
-          must improve at least one metric below the iter-894
-          baseline.  The ceilings here (1.6e-1 m/s on max_v_ll,
-          4.5e-2 m/s on mode-4) are the regression sentinels; the
-          improvement targets are the saved baseline values.
+          must improve at least one metric below the iter-895
+          baseline.  The ceilings here (1.45e-1 m/s on max_v_ll
+          per iter-895, 4.5e-2 m/s on mode-4 per iter-894) are the
+          regression sentinels; the improvement targets are the
+          saved baseline values.
           (Pre-iter-893 mode-4 was 4.594e-2 m/s under the iter-609
           ``rfft/N*2`` one-sided convention; iter-893's
           ``apply_fortran_xppm_boundary`` activation reduced it to
