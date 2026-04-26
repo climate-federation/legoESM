@@ -726,20 +726,24 @@ class SpectralCompressibleEulerModel:
             )
 
         def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-            # Convert acoustic variables from spectral to grid.  theta_p
-            # and rho_p share (n_sh, nlev) so batch them into a single
-            # sh_synthesis_3d (one segment_sum + one IRFFT).  w_hat has
-            # (n_sh, nlev+1) — stays separate.  Same pattern as Loop 97.
-            theta_rho_hat = jnp.stack(
-                [s.theta_prime_hat.data, s.rho_prime_hat.data], axis=-1,
-            )  # (n_sh, nlev, 2)
+            # Convert acoustic variables from spectral to grid.  Theta_p
+            # and rho_p share (n_sh, nlev); w_hat has (n_sh, nlev+1).
+            # Concatenate all three along the trailing axis and run a
+            # single ``sh_synthesis_3d`` — the 3D transform treats the
+            # trailing axis as a passive batch, so different "level"
+            # axes in different fields combine cleanly into one
+            # ``segment_sum`` + IRFFT.  3 SH syntheses → 1.  Loop 179
+            # extends Loop 97.
             n_sh_a, nlev_a = s.theta_prime_hat.data.shape
-            theta_rho_grid = sh_synthesis_3d(
-                self.grid, theta_rho_hat.reshape(n_sh_a, nlev_a * 2),
-            ).reshape(self.grid.n_lat, self.grid.n_lon, nlev_a, 2)
-            theta_p_grid = theta_rho_grid[..., 0]
-            rho_p_grid = theta_rho_grid[..., 1]
-            w_grid = sh_synthesis_3d(self.grid, s.w_hat.data)
+            nlev_w = s.w_hat.data.shape[-1]  # nlev + 1
+            theta_rho_w_hat = jnp.concatenate(
+                [s.theta_prime_hat.data, s.rho_prime_hat.data, s.w_hat.data],
+                axis=-1,
+            )  # (n_sh, 2*nlev + (nlev+1))
+            theta_rho_w_grid = sh_synthesis_3d(self.grid, theta_rho_w_hat)
+            theta_p_grid = theta_rho_w_grid[..., :nlev_a]
+            rho_p_grid = theta_rho_w_grid[..., nlev_a:2 * nlev_a]
+            w_grid = theta_rho_w_grid[..., 2 * nlev_a:]
 
             # Run acoustic substeps in grid space
             acoustic_fn = (
@@ -753,27 +757,27 @@ class SpectralCompressibleEulerModel:
                 self.height_coord, self.terrain_metric, self.config,
             )
 
-            # Convert back to spectral.  Same batching: theta_p_new and
-            # rho_p_new share (n_lat, n_lon, nlev) so a single
-            # sh_analysis_3d on the stacked tensor replaces two.  w_new
-            # has nlev+1 trailing axis — stays separate.
-            theta_rho_new = jnp.stack(
-                [theta_p_new, rho_p_new], axis=-1,
-            )  # (n_lat, n_lon, nlev, 2)
+            # Convert back to spectral via the same concat trick — 3 SH
+            # analyses → 1.  Slot order matches the synthesis so we can
+            # slice the result back into (theta_hat, rho_hat, w_hat).
             n_lat_a = self.grid.n_lat
             n_lon_a = self.grid.n_lon
-            theta_rho_new_hat = sh_analysis_3d(
-                self.grid, theta_rho_new.reshape(n_lat_a, n_lon_a, nlev_a * 2),
-            ).reshape(-1, nlev_a, 2)
+            theta_rho_w_new = jnp.concatenate(
+                [theta_p_new, rho_p_new, w_new], axis=-1,
+            )  # (n_lat, n_lon, 2*nlev + (nlev+1))
+            theta_rho_w_new_hat = sh_analysis_3d(self.grid, theta_rho_w_new)
+            theta_p_new_hat = theta_rho_w_new_hat[..., :nlev_a]
+            rho_p_new_hat = theta_rho_w_new_hat[..., nlev_a:2 * nlev_a]
+            w_new_hat = theta_rho_w_new_hat[..., 2 * nlev_a:]
             return SpectralNHState(
                 vor_hat=s.vor_hat,
                 div_hat=s.div_hat,
-                w_hat=s.w_hat.replace(data=sh_analysis_3d(self.grid, w_new)),
+                w_hat=s.w_hat.replace(data=w_new_hat),
                 theta_prime_hat=s.theta_prime_hat.replace(
-                    data=theta_rho_new_hat[..., 0],
+                    data=theta_p_new_hat,
                 ),
                 rho_prime_hat=s.rho_prime_hat.replace(
-                    data=theta_rho_new_hat[..., 1],
+                    data=rho_p_new_hat,
                 ),
                 phis_hat=s.phis_hat,
                 tracers_hat=s.tracers_hat,
