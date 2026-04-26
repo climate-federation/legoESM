@@ -675,7 +675,15 @@ class LatLonCGridOceanModel:
             dS_fw = virtual_salt_flux(
                 freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
             )
-            S_fw = state_new.S.data.at[..., 0].add(dt * dS_fw * mask)
+            # Cast the freshwater contribution to S's dtype so the
+            # scatter add does not silently widen on x64 mode (the
+            # freshwater struct is built at JAX-default precision in
+            # init helpers, which can be f64 while S runs at the
+            # storage policy's f32).
+            _S_dtype = state_new.S.data.dtype
+            S_fw = state_new.S.data.at[..., 0].add(
+                (dt * dS_fw * mask).astype(_S_dtype),
+            )
             state_new = state_new._replace(
                 S=state_new.S.replace(data=S_fw),
             )
