@@ -280,22 +280,28 @@ def fv3_hydrostatic_tendencies(
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
     dv_d_dt = -zeta_corner * u_d - dB_dy_perp - pg_corr_y_perp
 
+    # --- 10a. C-grid divergence for continuity + (optional) damping ---
+    # ``cgrid_divergence`` is identical regardless of caller, so compute
+    # it once here and feed both the optional divergence-damping block
+    # below and the continuity / mass-flux block in section 10b.  The
+    # previous code computed ``cgrid_divergence(u_c, v_c, cdgrid)``
+    # twice when ``div_damp_coeff > 0`` — one full halo exchange + PPM
+    # pass per RHS evaluation.  Drop the duplicate.
+    div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
-        div_v_damp = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
         if config.use_async_halo and _halo_backend == "mpi":
             from legoesm.core.operators_cdgrid import _overlapped_arakawa_lamb_gradient
             ddiv_dx, ddiv_dy_perp = _overlapped_arakawa_lamb_gradient(
-                div_v_damp, cdgrid,
+                div_v, cdgrid,
             )
         else:
-            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v_damp, cdgrid)
+            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)
         du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
 
-    # --- 10. Surface pressure tendency and vertical motion ---
-    # C-grid divergence for continuity
-    div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+    # --- 10b. Surface pressure tendency and vertical motion ---
 
     if _hybrid:
         D_total_p = jnp.sum(div_v * dp, axis=-1)
