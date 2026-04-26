@@ -4269,18 +4269,24 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         v_ll_linf_off = _run_and_measure(flag=False)
         v_ll_linf_on = _run_and_measure(flag=True)
 
-        # iter-897 baseline: under iter-893 production matrix config
-        # (apply_fortran_xppm_boundary=True), OFF v_ll_Linf is
-        # ~0.132 m/s — pin below 0.16 to track the iter-893 W2
-        # sentinel ceiling.  Pre-iter-893 the measurement was ~0.159
-        # under apply_fortran_xppm_boundary=False.
+        # Iter-898c: tighten OFF threshold from 0.16 to 0.145 so
+        # the assertion actually pins the iter-893 alignment.  The
+        # original < 0.16 admitted both 0.132 (xppm=True, iter-893)
+        # AND 0.159 (xppm=False, pre-iter-893), so a silent revert
+        # of `apply_fortran_xppm_boundary=True` would not fire the
+        # sentinel.  0.145 passes 0.132 with margin ~0.013 and FAILS
+        # 0.159 (catches alignment break).  Codex iter-898 stop-time
+        # review correctly flagged this on iter-898's iter-769/767
+        # sentinels; the same blind spot applies to iter-897/766.
         self.assertLess(
-            v_ll_linf_off, 0.16,
+            v_ll_linf_off, 0.145,
             msg=(f"OFF (default 2-pt-avg, xppm_boundary=True) "
                  f"baseline v_ll_Linf={v_ll_linf_off:.3e} m/s "
-                 f"drifted above 0.16 m/s — the iter-897 baseline "
-                 f"(~0.132 m/s) no longer applies.  Regenerate the "
-                 f"ON vs OFF ratio."))
+                 f"drifted above 0.145 m/s — iter-898c threshold "
+                 f"rejects silent xppm=True->False revert (would "
+                 f"give 0.1593 > 0.145) AND rejects upward drift "
+                 f"from iter-893 baseline (0.132).  Investigate "
+                 f"BEFORE relaxing."))
 
         # iter-897: pin ON absolute upper bound.  Pre-iter-893 ON was
         # 0.300; iter-897 ON is 0.346 (slightly higher because the
@@ -4351,13 +4357,30 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         row/col smoothing to no longer cascade at corners), the
         regression is caught.
 
-        Pin thresholds (iter-898 update for iter-893 alignment):
-          OFF (baseline) v_ll_Linf < 0.16  (matches iter-893 W2
-                                              ceiling; iter-898
-                                              measures 0.132)
+        Pin thresholds (iter-898c update — actually pins iter-893
+        xppm=True alignment, not just an upper bound):
+          OFF (baseline) v_ll_Linf < 0.145  (iter-898c: tight enough
+                                              to REJECT a silent
+                                              xppm=True->False revert
+                                              which would give OFF=
+                                              0.1593 > 0.145; iter-898
+                                              measures 0.132 with
+                                              margin ~0.013)
           ON  v_ll_Linf          > 0.40   (well above baseline,
                                               well below measured 0.605)
           ratio ON/OFF           > 3.0    (measured 4.59x)
+
+        Iter-898c rationale: the original iter-898 threshold of
+        < 0.16 was too loose — both the iter-893 OFF baseline
+        (0.1319) and the pre-iter-893 OFF baseline (0.1593) satisfy
+        < 0.16, so the assertion did NOT catch a silent removal of
+        `apply_fortran_xppm_boundary=True` from the config.  The
+        Codex iter-898 stop-time review correctly flagged this:
+        "iter-898's new assertions do not actually pin the
+        apply_fortran_xppm_boundary=True alignment they were added
+        to enforce".  Tightening to < 0.145 gives an assertion that
+        FIRES on a silent revert (0.1593 > 0.145) and PASSES under
+        the iter-893 alignment (0.1319 < 0.145).
 
         If either the baseline drifts up, the ON path stops being
         substantially worse, or the ratio collapses, the sentinel
@@ -4428,11 +4451,19 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         v_ll_linf_off = _run_and_measure(flag=False)
         v_ll_linf_on = _run_and_measure(flag=True)
 
+        # Iter-898c: 0.145 is the alignment-pinning threshold —
+        # iter-893 xppm=True yields 0.132 (passes with margin ~0.013);
+        # a silent xppm=True->False revert would give 0.1593 (FAILS,
+        # 0.1593 > 0.145).  This is what makes the alignment claim
+        # actually load-bearing on the assertion, not just descriptive.
         self.assertLess(
-            v_ll_linf_off, 0.16,
+            v_ll_linf_off, 0.145,
             msg=(f"OFF (default, xppm_boundary=True) baseline "
-                 f"v_ll_Linf={v_ll_linf_off:.3e} drifted above 0.16 "
-                 f"— iter-898 baseline (~0.132) no longer applies."))
+                 f"v_ll_Linf={v_ll_linf_off:.3e} drifted above 0.145 "
+                 f"— iter-898c threshold rejects silent xppm=True->"
+                 f"False revert (would give 0.1593 > 0.145) AND "
+                 f"rejects upward numerical drift from iter-893 "
+                 f"baseline (0.132).  Investigate BEFORE relaxing."))
 
         self.assertGreater(
             v_ll_linf_on, 0.40,
@@ -4489,11 +4520,22 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         ratio was ~16×).  Cross-table at C36 1-day:
             vec=F xppm=T → 0.1319 m/s   (OFF, matrix-aligned)
             vec=T xppm=T → 2.4087 m/s   (ON,  matrix-aligned)
-        OFF baseline pin tightened from < 0.20 → < 0.16; ON ceiling
-        unchanged at < 5.0; ratio threshold unchanged at > 5.
+
+        Iter-898c update: tightened OFF baseline pin from < 0.16
+        to < 0.145.  The original < 0.16 admitted both 0.1319
+        (xppm=True) and 0.1593 (xppm=False), so the assertion did
+        NOT pin the iter-893 alignment claim — Codex iter-898
+        stop-time review correctly flagged "iter-898's new
+        assertions do not actually pin the apply_fortran_xppm_
+        boundary=True alignment they were added to enforce".
+        The < 0.145 threshold passes at 0.1319 (margin ~0.013) and
+        FIRES at 0.1593 (catches a silent xppm=True->False revert).
+        ON ceiling unchanged at < 5.0; ratio threshold unchanged
+        at > 5; h_L2 ratio unchanged at > 3.0.
 
         This sentinel runs BOTH the OFF (default) and ON paths,
-        pins OFF < 0.16 (above iter-898-aligned 0.132 with margin),
+        pins OFF < 0.145 (iter-898c — pins iter-893 alignment by
+        rejecting xppm=False's 0.1593),
         pins ON < 5.0 (above iter-898-aligned 2.409 with margin),
         and pins the ratio ON/OFF > 5 (iter-898 measured ~18.27×).
         """
@@ -4566,14 +4608,21 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         v_ll_linf_off, h_l2_off = _run_and_measure(flag=False)
         v_ll_linf_on, h_l2_on = _run_and_measure(flag=True)
 
+        # Iter-898c: 0.145 is the alignment-pinning threshold —
+        # iter-893 xppm=True yields 0.132 (passes with margin ~0.013);
+        # a silent xppm=True->False revert would give 0.1593 (FAILS,
+        # 0.1593 > 0.145).  This makes the iter-898 alignment claim
+        # load-bearing on the assertion, not just descriptive.
         self.assertLess(
-            v_ll_linf_off, 0.16,
+            v_ll_linf_off, 0.145,
             msg=(f"OFF (default rotate-pad-rotate, with iter-893 "
                  f"apply_fortran_xppm_boundary=True alignment) "
                  f"baseline v_ll_Linf={v_ll_linf_off:.3e} m/s "
-                 f"drifted above 0.16 m/s — iter-898 measurement "
-                 f"(0.132 m/s) no longer applies.  Regenerate the "
-                 f"ON/OFF ratio."))
+                 f"drifted above 0.145 m/s — iter-898c threshold "
+                 f"rejects silent xppm=True->False revert (would give "
+                 f"0.1593 > 0.145) AND rejects upward numerical drift "
+                 f"from iter-893 baseline (0.132).  Investigate "
+                 f"BEFORE relaxing."))
 
         # Iter-898 measured ON v_ll_Linf ~2.409 m/s (with iter-893
         # matrix alignment).  Pre-iter-898 measurement was 2.555 m/s.

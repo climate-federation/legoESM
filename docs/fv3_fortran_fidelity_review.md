@@ -2829,3 +2829,43 @@ iter-898 alignment: passing `apply_fortran_xppm_boundary=True` in each ON-path c
 - This iter-898 doc entry.
 
 **Process.**  177th iter.  iter-898 closes the iter-893 alignment audit for the W2 cube-vertex regression sentinels.  After iter-898 every known-worse test that runs the canonical W2 1-day matrix config measures the iter-893 OFF=0.132 baseline (rather than the pre-iter-893 OFF=0.159).  The iter-893 alignment audit on W2 W2-cell-centre / lat-lon sentinels is therefore complete.  Outstanding: deeper cross-face halo helper, FB chain stabilization, and the structural W2 cube-imprint blocker are unaffected by this regression-pin work.
+
+### Iter-898c — actually pin the iter-893 alignment by tightening OFF threshold (Codex iter-898 stop-time fix)
+
+**Motivation.**  Codex iter-898 stop-time review correctly flagged: "iter-898's new assertions do not actually pin the `apply_fortran_xppm_boundary=True` alignment they were added to enforce."  Empirically demonstrated: the iter-898 OFF threshold of `< 0.16` admits BOTH measurements:
+
+| `apply_fortran_xppm_boundary` | OFF v_ll_Linf | passes `< 0.16`? |
+|-------------------------------|---------------|-------------------|
+| True  (iter-893 production)   | 0.1319 m/s    | YES (margin +0.028) |
+| False (silent revert / pre-iter-893) | 0.1593 m/s | YES (margin +0.001) |
+
+A silent removal of `apply_fortran_xppm_boundary=True` from any of the iter-766/iter-769/iter-767 test configs would shift OFF from 0.132 to 0.159 but leave the assertion satisfied.  The "alignment" was descriptive in the docstring but not load-bearing on the assertion.
+
+**Fix.**  Tighten OFF threshold from `< 0.16` to `< 0.145` in all three sentinels:
+
+- `test_fortran_a2b_corner_avg_is_known_worse` (iter-766/iter-897)
+- `test_boundary_fix_skip_corners_is_known_worse` (iter-769/iter-898)
+- `test_fortran_vector_corner_fill_is_known_worse` (iter-767/iter-898)
+
+**Empirical proof** (`/tmp/diag_iter898c_alignment_proof.py`, output committed conceptually):
+
+| `apply_fortran_xppm_boundary` | OFF v_ll_Linf | passes `< 0.145`? |
+|-------------------------------|---------------|---------------------|
+| True  (iter-893 production)   | 0.1319 m/s    | YES (margin +0.013) |
+| False (silent revert)         | 0.1593 m/s    | **NO** (margin -0.014) |
+
+The threshold now PASSES iter-893 alignment AND FIRES on a silent xppm=True→False revert — i.e., it actually pins the alignment claim.  Same fix template applied to all three sentinels for consistency.
+
+**What iter-898c does NOT change.**
+
+- ON pins, ratio pins, and h_L2 pins are unchanged.  The Codex finding was specifically about OFF not pinning the alignment; the ON-side known-worse pins were already correctly load-bearing on the actual test value.
+- The iter-893 production baseline itself (1.319e-1 m/s) is unchanged; iter-898c is purely a tightening of the test pin to actually exclude the pre-iter-893 baseline from the assertion's pass band.
+- iter-895 runtime ceiling (`max_v_ll < 1.45e-1`) was already at 0.145 — iter-898c happens to converge with that value, but they're independent thresholds derived from the same iter-893 measurement.
+
+**Verification.**  All 3 sentinels pass with tightened threshold (OFF=0.132 < 0.145 with margin 0.013).  Diagnostic script confirms xppm=False produces 0.1593, which exceeds 0.145 (assertion would fire as required).
+
+**Deliverable.**
+- `tests/unit/test_cdgrid_fv3_regression.py`: 3 tests' OFF assertion + docstring updated; iter-769 docstring includes iter-898c rationale.
+- This iter-898c doc entry.
+
+**Process.**  178th iter.  iter-898c closes a real alignment-pin gap that iter-898 left — the original "alignment with iter-893 matrix" claim was descriptive in docstrings but not load-bearing on the assertions.  iter-898c makes the alignment pin actually pin the alignment.  Outstanding work unchanged.
