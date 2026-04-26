@@ -214,11 +214,26 @@ def cdgrid_compressible_euler_slow_tendencies(
     # θ is NOT a conserved density — it satisfies dθ/dt = 0, not ∂(ρθ)/∂t = -∇·(ρθv).
     # Advective form = flux divergence + θ·div(v):  -v·∇θ = -∇·(θv) + θ∇·v
     div_v = cgrid_divergence(u_c, v_c, cdgrid)
-    dtheta_p_dt = (cgrid_mass_flux_divergence(theta_total, u_c, v_c, cdgrid)
-                   + theta_total * div_v)
 
-    # --- 11. Continuity: C-grid upwind mass flux (divergence form) ---
-    drho_p_dt = cgrid_mass_flux_divergence(rho_total, u_c, v_c, cdgrid)
+    # --- 10/11. theta_total and rho_total flux divergence (batched) ---
+    # Stack the two scalars along a trailing axis and fold it into the
+    # level dim so ``cgrid_mass_flux_divergence`` runs ONE ``pad_halo_4d``
+    # MPI exchange across both fields instead of two.  ``u_c``, ``v_c``
+    # are shared; ``jnp.repeat`` builds the matching velocity broadcast
+    # for the interleaved (level × scalar) trailing axis.
+    n_face_tr, n_i_tr, n_j_tr, nlev_tr = theta_total.shape
+    tr_pair = jnp.stack(
+        [theta_total, rho_total], axis=-1,
+    )  # (6, n, n, nlev, 2)
+    tr_pair_flat = tr_pair.reshape(n_face_tr, n_i_tr, n_j_tr, nlev_tr * 2)
+    u_c_pair = jnp.repeat(u_c, 2, axis=-1)
+    v_c_pair = jnp.repeat(v_c, 2, axis=-1)
+    flux_pair_flat = cgrid_mass_flux_divergence(
+        tr_pair_flat, u_c_pair, v_c_pair, cdgrid,
+    )
+    flux_pair = flux_pair_flat.reshape(n_face_tr, n_i_tr, n_j_tr, nlev_tr, 2)
+    dtheta_p_dt = flux_pair[..., 0] + theta_total * div_v
+    drho_p_dt = flux_pair[..., 1]
 
     # --- 12. Tracer advection (advective form) ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
