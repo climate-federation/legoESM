@@ -275,55 +275,73 @@ def spectral_nh_slow_tendencies(
     pgf_div = im_over_a[:, None] * pgf_u_oc2 - one_over_a * pgf_v_dmu
     ddiv_hat = flux_vor_curl - grid.lap[:, None] * K_hat - pgf_div
 
-    # --- 11. Vertical advection (grid space) ---
-    # Vertical advection of momentum
+    # --- 11-13. Vertical advection + theta + rho horizontal fluxes (batched) ---
+    # All four flux contributions (vert_adv_u/v on momentum, theta on
+    # heat, rho on continuity) end up needing oc2(F_u_cos) and
+    # dmu(F_v_cos) for the spectral div/curl operators.  Compute the
+    # eight grid-space inputs first, then run a single batched oc2
+    # call and a single batched dmu call instead of 4+4 = 8 sequential
+    # SH analyses.
     vert_adv_u = vertical_advection_height(u, w, dz, dz_half, J)
     vert_adv_v = vertical_advection_height(v, w, dz, dz_half, J)
-
-    # Convert to spectral vor/div contributions
     vu_cos = vert_adv_u * grid.cos_lat[:, None, None]
     vv_cos = vert_adv_v * grid.cos_lat[:, None, None]
-
-    vert_vor = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vv_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, vu_cos)
-    )
-    vert_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vu_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, vv_cos)
-    )
-    dvor_hat = dvor_hat + vert_vor
-    ddiv_hat = ddiv_hat + vert_div
-
-    # --- 12. Theta equation ---
-    # Horizontal advection via spectral flux form: -div(theta*v) + theta*div
     theta_u_cos = theta_total * u_cos
     theta_v_cos = theta_total * v_cos
-
-    flux_theta_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, theta_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, theta_v_cos)
-    )
-    theta_div_hat = sh_analysis_3d(grid, theta_total * div)
-
-    dtheta_p_hat = -flux_theta_div + theta_div_hat
-
-    # NOTE: Vertical advection of theta by w is handled ONLY by the
-    # acoustic substeps (forward-backward scheme) to avoid double counting
-    # in the split-explicit time integration (Skamarock & Klemp 2008).
-
-    # --- 13. Continuity equation (rho') ---
-    # Horizontal only: vertical mass flux divergence handled by acoustic step.
     rho_u_cos = rho_total * u_cos * J[..., None]
     rho_v_cos = rho_total * v_cos * J[..., None]
 
-    flux_rho_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, rho_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, rho_v_cos)
+    n_lat_f, n_lon_f, nlev_f = vu_cos.shape
+    _flux_oc2_stack = jnp.stack(
+        [vu_cos, vv_cos, theta_u_cos, rho_u_cos], axis=-1,
+    )  # (..., nlev, 4)
+    _flux_dmu_stack = jnp.stack(
+        [vu_cos, vv_cos, theta_v_cos, rho_v_cos], axis=-1,
     )
-    # d(rho')/dt_horiz = -(1/J)*div_h(J*rho*v)
+    _flux_oc2 = sh_analysis_oc2_3d(
+        grid, _flux_oc2_stack.reshape(n_lat_f, n_lon_f, nlev_f * 4),
+    ).reshape(-1, nlev_f, 4)
+    _flux_dmu = sh_analysis_dmu_3d(
+        grid, _flux_dmu_stack.reshape(n_lat_f, n_lon_f, nlev_f * 4),
+    ).reshape(-1, nlev_f, 4)
+    vu_oc2, vv_oc2, theta_u_oc2, rho_u_oc2 = (
+        _flux_oc2[..., 0], _flux_oc2[..., 1], _flux_oc2[..., 2], _flux_oc2[..., 3],
+    )
+    vu_dmu, vv_dmu, theta_v_dmu, rho_v_dmu = (
+        _flux_dmu[..., 0], _flux_dmu[..., 1], _flux_dmu[..., 2], _flux_dmu[..., 3],
+    )
+
+    # Vorticity / divergence: vertical-advection contributions
+    vert_vor = im_over_a[:, None] * vv_oc2 + one_over_a * vu_dmu
+    vert_div = im_over_a[:, None] * vu_oc2 - one_over_a * vv_dmu
+    dvor_hat = dvor_hat + vert_vor
+    ddiv_hat = ddiv_hat + vert_div
+
+    # Theta equation: horizontal advection via spectral flux form.
+    # NOTE: Vertical advection of theta by w is handled ONLY by the
+    # acoustic substeps (forward-backward scheme) to avoid double counting
+    # in the split-explicit time integration (Skamarock & Klemp 2008).
+    flux_theta_div = im_over_a[:, None] * theta_u_oc2 - one_over_a * theta_v_dmu
+    # Continuity equation (rho'): horizontal only — vertical mass flux
+    # divergence handled by acoustic step.
+    flux_rho_div = im_over_a[:, None] * rho_u_oc2 - one_over_a * rho_v_dmu
+
+    # Sum theta_total*div in grid first, transform once: ``theta_div_hat``
+    # and ``rho_horiz_tend_grid`` both feed into a single sh_analysis_3d
+    # but rho_horiz needs a sh_synthesis_3d on flux_rho_div first; batch
+    # the two analyses into one stacked call.
     rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div) / J[..., None]
-    drho_p_hat = sh_analysis_3d(grid, rho_horiz_tend_grid)
+    _theta_rho_pair = jnp.stack(
+        [theta_total * div, rho_horiz_tend_grid], axis=-1,
+    )
+    n_lat_p2, n_lon_p2, nlev_p2, _ = _theta_rho_pair.shape
+    _theta_rho_hat = sh_analysis_3d(
+        grid, _theta_rho_pair.reshape(n_lat_p2, n_lon_p2, nlev_p2 * 2),
+    ).reshape(-1, nlev_p2, 2)
+    theta_div_hat = _theta_rho_hat[..., 0]
+    drho_p_hat = _theta_rho_hat[..., 1]
+
+    dtheta_p_hat = -flux_theta_div + theta_div_hat
 
     # --- 14. w tendency (slow part) ---
     # Slow w tendency is zero: vertical PGF, buoyancy, and w-divergence are
