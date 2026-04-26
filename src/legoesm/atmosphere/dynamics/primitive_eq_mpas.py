@@ -175,23 +175,28 @@ def mpas_hydrostatic_tendencies(
     # In sigma coords: grad_eta(ln p) = grad(ln p_s).
     # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
     if _hybrid:
-        # Batch the two cell-to-edge gathers (T_3d and p_full) into
-        # one call.  ``cell_to_edge_avg_3d`` is a pure ``cellsOnEdge``
-        # gather + average — same passive trailing-axis pattern as
-        # Loops 109/112 (MPAS divergence/cell-to-edge batching).
+        # Batch three cell-to-edge gathers (T_3d, p_full, dp) into one
+        # call.  ``cell_to_edge_avg_3d`` is a pure ``cellsOnEdge``
+        # gather + average — the trailing axis is purely passive.
+        # ``edge_thickness_3d(dp)`` is just ``cell_to_edge_avg_3d(dp)``,
+        # so folding ``dp`` into this batch lets the hybrid-path
+        # ``dp_edge_3d`` reuse the gather instead of issuing a
+        # standalone call later.  Same exploit as Loop 154 for MPAS CE.
         nlev_te = T_3d.shape[-1]
-        _Tp_stack = jnp.stack([T_3d, p_full], axis=-1)  # (nCells, nlev, 2)
-        _Tp_edge = cell_to_edge_avg_3d(
-            _Tp_stack.reshape(_Tp_stack.shape[0], nlev_te * 2), mesh,
-        ).reshape(-1, nlev_te, 2)
-        T_edge_3d = _Tp_edge[..., 0]
-        p_full_edge = _Tp_edge[..., 1]
+        _Tpd_stack = jnp.stack([T_3d, p_full, dp], axis=-1)  # (nCells, nlev, 3)
+        _Tpd_edge = cell_to_edge_avg_3d(
+            _Tpd_stack.reshape(_Tpd_stack.shape[0], nlev_te * 3), mesh,
+        ).reshape(-1, nlev_te, 3)
+        T_edge_3d = _Tpd_edge[..., 0]
+        p_full_edge = _Tpd_edge[..., 1]
+        dp_edge_3d = _Tpd_edge[..., 2]  # consumed in the divergence batch below
         p_s_edge_scalar = cell_to_edge_avg(p_s, mesh)    # (nEdges,)
         B_full = sigma_coord.B_full  # (nlev,)
         hybrid_factor_edge = B_full * p_s_edge_scalar[:, None] / jnp.maximum(p_full_edge, 1e-10)
         pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None] * hybrid_factor_edge
     else:
         T_edge_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
+        dp_edge_3d = None
         pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
 
     # PV flux: h_proxy = dp/g (pressure thickness)
@@ -230,44 +235,65 @@ def mpas_hydrostatic_tendencies(
     elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
 
-    # Batched divergences for continuity (div(u)), tracer transport
-    # (div(u * T_edge)), and the v·∇(ln p_s) thermodynamic correction
-    # (div(u * ln_ps_edge)).  All three are ``divergence_cell_3d`` on
-    # (nEdges, nlev) inputs and share the same MPAS edgesOnCell gather
-    # + reduce — the trailing nlev axis is purely passive.  Pull
-    # ``ln_ps_edge`` up here so the v·∇(ln p_s) divergence joins the
-    # batch instead of running as a fourth standalone call later.
+    # Batched divergences.  ``divergence_cell_3d`` shares the same
+    # MPAS edgesOnCell gather + reduce on the leading edge axis (the
+    # trailing nlev axis is purely passive), so all the divergences
+    # the dycore needs at this stage can fold into a single call:
+    #
+    #   * div(u)                 — continuity / sigma-dot closure
+    #   * div(u * T_edge)        — temperature flux divergence
+    #   * div(u * ln_ps_edge)    — v·∇(ln p_s) thermodynamic correction
+    #   * div(u * dp_edge)       — hybrid layer-mass continuity
+    #                              (only when ``_hybrid``)
+    #   * div(grad_T)            — K_h scalar Laplacian (only when ``K_h > 0``)
+    #
+    # Pull ``ln_ps_edge`` and (when hybrid) ``u*dp_edge_3d`` and (when
+    # K_h > 0) ``grad_T_3d_pre`` up into the batch so the standalone
+    # divergence calls that previously fired later in the function are
+    # eliminated.
     flux_T_3d = u_3d * T_edge_3d  # (nEdges, nlev)
     ln_ps_edge = cell_to_edge_avg(ln_ps, mesh)  # (nEdges,)
     flux_lnps_3d = u_3d * ln_ps_edge[:, None]   # (nEdges, nlev)
     n_edges_d, nlev_d = u_3d.shape
-    _div_inputs = jnp.stack(
-        [u_3d, flux_T_3d, flux_lnps_3d], axis=-1,
-    )  # (nEdges, nlev, 3)
+
+    _div_input_list = [u_3d, flux_T_3d, flux_lnps_3d]
+    _idx_u, _idx_uT, _idx_ulnps = 0, 1, 2
+    _idx_udp = -1
+    _idx_gradT = -1
+    if _hybrid:
+        _div_input_list.append(u_3d * dp_edge_3d)
+        _idx_udp = len(_div_input_list) - 1
+    if config.K_h > 0:
+        _div_input_list.append(grad_T_3d_pre)
+        _idx_gradT = len(_div_input_list) - 1
+
+    _n_div = len(_div_input_list)
+    _div_inputs = jnp.stack(_div_input_list, axis=-1)  # (nEdges, nlev, K)
     _div_outputs = divergence_cell_3d(
-        _div_inputs.reshape(n_edges_d, nlev_d * 3), mesh,
-    ).reshape(-1, nlev_d, 3)
-    div_3d = _div_outputs[..., 0]
-    div_uT_3d = _div_outputs[..., 1]
-    div_flux_lnps = _div_outputs[..., 2]
+        _div_inputs.reshape(n_edges_d, nlev_d * _n_div), mesh,
+    ).reshape(-1, nlev_d, _n_div)
+    div_3d = _div_outputs[..., _idx_u]
+    div_uT_3d = _div_outputs[..., _idx_uT]
+    div_flux_lnps = _div_outputs[..., _idx_ulnps]
+    if _hybrid:
+        div_dp_3d_pre = _div_outputs[..., _idx_udp]
+    if config.K_h > 0:
+        _div_grad_T = _div_outputs[..., _idx_gradT]
     horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
 
-    # Scalar diffusion — ``grad_T_3d`` was already computed alongside
-    # ``grad_B_3d`` in the batched gradient above; reuse it here.
+    # Scalar diffusion — ``grad_T_3d`` and its divergence were already
+    # computed in the batched blocks above; reuse the cached results.
     if config.K_h > 0:
-        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * divergence_cell_3d(
-            grad_T_3d_pre, mesh,
-        )
+        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * _div_grad_T
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     if _hybrid:
         # Hybrid closure on MPAS:
         #   B_range * dp_s/dt = -sum_k div(dp_k * v_k)
-        # Compute layer-pressure flux on edges, then cell divergence.
-        dp_edge_3d = edge_thickness_3d(dp, mesh)  # (nEdges, nlev)
-        div_dp_3d = divergence_cell_3d(
-            u_3d * dp_edge_3d, mesh,
-        )  # (nCells, nlev)
+        # ``div_dp_3d_pre`` (i.e. ``div(u * dp_edge_3d)``) was already
+        # produced by the batched divergence block above (Loop 155),
+        # so reuse it instead of issuing a standalone divergence call.
+        div_dp_3d = div_dp_3d_pre  # (nCells, nlev)
         dp_s_dt = -jnp.sum(div_dp_3d, axis=-1) / sigma_coord.B_range
 
         mass_flux = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
