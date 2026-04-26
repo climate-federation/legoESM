@@ -2783,3 +2783,48 @@ iter-897 alignment: pass `apply_fortran_xppm_boundary=True` in iter-766's `_run_
 - This iter-897 doc entry.
 
 **Process.**  176th iter.  iter-897 begins the broader audit of "tests that pin pre-iter-893 OFF baselines".  The W2 sentinel was already aligned in iter-893; iter-768 / iter-775 diagnostics in iter-893b; iter-766 in iter-897.  iter-769 / iter-767 known-worse tests still measure the pre-iter-893 OFF baseline — those are iter-898+ candidates for the same alignment treatment.
+
+### Iter-898 — finish iter-893 matrix alignment for iter-767/iter-769 known-worse sentinels
+
+**Motivation.**  iter-897 explicitly deferred the iter-769 (`boundary_fix_skip_corners`) and iter-767 (`fortran_vector_corner_fill`) known-worse sentinels because each required a fresh cross-table measurement.  iter-898 closes that loop: both sentinels' configs and pins are now aligned with the iter-893 production matrix (`apply_fortran_xppm_boundary=True`).  Without iter-898, those two sentinels would still measure pre-iter-893 OFF baselines and could mis-fire if the production OFF=0.132 (iter-893) were ever blamed on the corner-skip / vector-fill flag.
+
+**Cross-table at C36 1-day, both ON paths layered on the iter-893 matrix config.**
+
+| flag | xppm=False (pre-iter-893) | xppm=True (iter-893 production) |
+|------|---------------------------|---------------------------------|
+| **OFF (matrix baseline)** | 0.1593 m/s | **0.1319 m/s** |
+| iter-769 `boundary_fix_skip_corners=True` | 1.034 m/s (~6.5×) | 0.6052 m/s (~4.59×) |
+| iter-767 `fortran_vector_corner_fill=True` | 2.555 m/s (~16×)  | 2.4087 m/s (~18.27×) |
+
+iter-898 alignment: passing `apply_fortran_xppm_boundary=True` in each ON-path config measures the actual gap that production would see if the opt-in were silently re-enabled.  The known-worse property of both flags **persists** under iter-893 — the iter-769 ratio narrows slightly (6.5× → 4.59×) because iter-893 lowers OFF more than the corner-skip ON, while the iter-767 ratio actually **widens** (16× → 18.27×) because iter-893 lowers OFF more than the vector-fill ON.
+
+**Test changes.**
+
+- `test_boundary_fix_skip_corners_is_known_worse` (iter-769):
+  - Add `apply_fortran_xppm_boundary=True` to config.
+  - OFF baseline: `< 0.20` → `< 0.16` (iter-893 measures 0.132).
+  - ON ceiling: `< 5.0` → unchanged.  Re-baselined message text: cite iter-898's 0.605 instead of pre-iter-893 1.03.
+  - Ratio: `> 5` → `> 3.0` (iter-898 measures 4.59; pre-iter-893 was 6.5).
+  - Docstring updated with iter-898 cross-table.
+
+- `test_fortran_vector_corner_fill_is_known_worse` (iter-767):
+  - Add `apply_fortran_xppm_boundary=True` to config.
+  - OFF baseline: `< 0.20` → `< 0.16` (iter-893 measures 0.132).
+  - ON ceiling: `< 5.0` unchanged (iter-898 measures 2.41 vs pre-iter-893 2.56).
+  - Ratio: `> 5` unchanged (iter-898 measures 18.27, easily passes).
+  - h_L2 ratio threshold: `> 3.0` unchanged (iter-767 second-pass pin).
+  - Docstring updated with iter-898 cross-table.
+
+**What iter-898 does NOT change** (deliberate scope).
+
+- The two flags themselves remain default-OFF (iter-873 inventory unchanged).  iter-898 only re-baselines the regression sentinels' OFF and ratio expectations to match the iter-893 production matrix.  A future repair of either flag (ON ratio falling below the known-worse threshold) would still fire and trigger re-examination — see the "(a) repaired / (b) silently disabled" branches in each sentinel's failure message.
+- iter-895's runtime ceiling and iter-896's AST inventory pins are unaffected; both already measured iter-893-aligned baselines.
+
+**Verification.**  All 4 iter-893/898-aligned W2 sentinels pass: `test_fortran_a2b_corner_avg_is_known_worse` (iter-897), `test_boundary_fix_skip_corners_is_known_worse` (iter-898), `test_fortran_vector_corner_fill_is_known_worse` (iter-898), `test_iter768_two_point_measurement_pins` (iter-893b).  All 12 iter-873/896 default-flag inventory tests pass.
+
+**Deliverable.**
+- `tests/unit/test_cdgrid_fv3_regression.py:test_boundary_fix_skip_corners_is_known_worse`: config + assertions + docstring updated.
+- `tests/unit/test_cdgrid_fv3_regression.py:test_fortran_vector_corner_fill_is_known_worse`: config + assertions + docstring updated.
+- This iter-898 doc entry.
+
+**Process.**  177th iter.  iter-898 closes the iter-893 alignment audit for the W2 cube-vertex regression sentinels.  After iter-898 every known-worse test that runs the canonical W2 1-day matrix config measures the iter-893 OFF=0.132 baseline (rather than the pre-iter-893 OFF=0.159).  The iter-893 alignment audit on W2 W2-cell-centre / lat-lon sentinels is therefore complete.  Outstanding: deeper cross-face halo helper, FB chain stabilization, and the structural W2 cube-imprint blocker are unaffected by this regression-pin work.

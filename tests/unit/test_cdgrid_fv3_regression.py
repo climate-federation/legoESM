@@ -4321,18 +4321,29 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         `fv3_sw_tendencies` / `CDGridShallowWaterConfig` is KNOWN
         WORSE than the default (cascaded corner 4-point average).
 
-        Canonical W2 C36 1d matrix config (iter-768 pins baseline):
+        iter-769 (pre-iter-893) measurement on `apply_fortran_xppm
+        _boundary=False` config:
           OFF (default):                     v_ll_Linf = 0.159 m/s
-          ON  (skip 4 cube-corner cells):    v_ll_Linf = 1.04  m/s
+          ON  (skip 4 cube-corner cells):    v_ll_Linf = 1.04 m/s
+          Ratio ON/OFF ~= 6.5x worse.
 
-        Ratio ON/OFF ~= 6.5x worse.  h_L2 ratio ~= 5x worse.
+        iter-898 update: aligned with iter-893 production matrix
+        (apply_fortran_xppm_boundary=True):
+          OFF: v_ll_Linf = 0.132 m/s
+          ON:  v_ll_Linf = 0.605 m/s
+          Ratio ON/OFF ~= 4.59x worse.
+
+        The known-worse property holds under both alignment regimes;
+        iter-898 aligns the test config with the iter-893 production
+        path so the regression sentinel measures the same baseline
+        as production.
 
         Interpretation.  The cascaded row-0/col-0 (+ row-n/col-n)
         boundary_fix smoothing gives cube-corner cells [0,0],
         [0,n-1], [n-1,0], [n-1,n-1] a DOUBLE update — effectively
         a 4-point average of the 2x2 block at the corner.  That
         double-smoothing is critical for W2 v-wind stability.
-        Without it, mode A grows 6.5x larger.
+        Without it, mode A grows 4.59x larger (iter-898 alignment).
 
         This sentinel pins the known-worse outcome so if a future
         edit inadvertently disables the corner smoothing (by
@@ -4340,11 +4351,13 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         row/col smoothing to no longer cascade at corners), the
         regression is caught.
 
-        Pin thresholds:
-          OFF (baseline) v_ll_Linf < 0.20  (near iter-768's 0.159)
-          ON  v_ll_Linf          > 0.50  (well above baseline,
-                                            well below measured 1.04)
-          ratio ON/OFF           > 3.0   (measured 6.5x)
+        Pin thresholds (iter-898 update for iter-893 alignment):
+          OFF (baseline) v_ll_Linf < 0.16  (matches iter-893 W2
+                                              ceiling; iter-898
+                                              measures 0.132)
+          ON  v_ll_Linf          > 0.40   (well above baseline,
+                                              well below measured 0.605)
+          ratio ON/OFF           > 3.0    (measured 4.59x)
 
         If either the baseline drifts up, the ON path stops being
         substantially worse, or the ratio collapses, the sentinel
@@ -4384,6 +4397,14 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                 boundary_fix_skip_corners=flag,
                 damp_v=0.06,
                 nord_v=2,
+                # Iter-898: align with iter-893 production matrix
+                # runner config so the OFF baseline matches the
+                # current production W2 baseline (0.132) rather than
+                # the pre-iter-893 baseline (0.159).  The known-worse
+                # property of `boundary_fix_skip_corners` holds under
+                # both settings; iter-898 measurement gives ratio
+                # 4.59x (was 6.5x pre-iter-893).
+                apply_fortran_xppm_boundary=True,
             )
             model = FV3EdgeShallowWaterModel(grid, config=cfg)
             cdgrid = model.cdgrid
@@ -4408,28 +4429,28 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         v_ll_linf_on = _run_and_measure(flag=True)
 
         self.assertLess(
-            v_ll_linf_off, 0.20,
-            msg=(f"OFF (default) baseline v_ll_Linf="
-                 f"{v_ll_linf_off:.3e} drifted above 0.20 — "
-                 f"iter-768/769 baseline (0.159) no longer applies."))
+            v_ll_linf_off, 0.16,
+            msg=(f"OFF (default, xppm_boundary=True) baseline "
+                 f"v_ll_Linf={v_ll_linf_off:.3e} drifted above 0.16 "
+                 f"— iter-898 baseline (~0.132) no longer applies."))
 
         self.assertGreater(
-            v_ll_linf_on, 0.50,
-            msg=(f"ON (boundary_fix_skip_corners=True) v_ll_Linf="
-                 f"{v_ll_linf_on:.3e} is below the known-worse "
-                 f"threshold 0.50.  Iter-769 measured 1.04.  A "
-                 f"smaller value means either the corner-skip path "
-                 f"was repaired (re-examine as a mode-A candidate) "
-                 f"or the opt-in was silently disabled (restore "
-                 f"kwarg threading)."))
+            v_ll_linf_on, 0.40,
+            msg=(f"ON (boundary_fix_skip_corners=True, xppm_boundary"
+                 f"=True) v_ll_Linf={v_ll_linf_on:.3e} is below the "
+                 f"known-worse threshold 0.40.  Iter-898 measured "
+                 f"0.605.  A smaller value means either the "
+                 f"corner-skip path was repaired (re-examine as a "
+                 f"mode-A candidate) or the opt-in was silently "
+                 f"disabled (restore kwarg threading)."))
 
         ratio = v_ll_linf_on / v_ll_linf_off
         self.assertGreater(
             ratio, 3.0,
             msg=(f"boundary_fix_skip_corners=True v_ll_Linf="
                  f"{v_ll_linf_on:.3e} produced ratio {ratio:.3f}x "
-                 f"over OFF baseline {v_ll_linf_off:.3e}.  Iter-769 "
-                 f"measured ratio ~6.5x.  A smaller ratio means the "
+                 f"over OFF baseline {v_ll_linf_off:.3e}.  Iter-898 "
+                 f"measured ratio ~4.59x.  A smaller ratio means the "
                  f"cascaded corner smoothing has become less load-"
                  f"bearing than iter-769 established — re-examine."))
 
@@ -4439,7 +4460,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         `fv3_sw_tendencies` / `CDGridShallowWaterConfig` is KNOWN
         WORSE than the default rotate-pad-rotate pipeline on the
         canonical W2 matrix config — enabling it makes W2
-        v_ll_Linf ~16× worse (0.159 → 2.555 m/s) and h_L2 ~10×
+        v_ll_Linf ~18× worse (0.132 → 2.409 m/s) and h_L2 ~10×
         worse (2.07e-4 → 2.07e-3).
 
         Iter-767 implemented Fortran's `fill_corners_agrid_r8`
@@ -4459,10 +4480,22 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         rotated halo cells produces algorithmically inconsistent
         values at the cube vertex.
 
+        Iter-898 update: aligned with the canonical W2 matrix
+        config which now activates `apply_fortran_xppm_boundary=
+        True` (Fortran iord<7 cube-edge boundary formulas,
+        tp_core.F90:357-369).  The OFF baseline dropped from
+        pre-iter-893 0.159 m/s to 0.132 m/s; the ON measurement
+        landed at 2.409 m/s, giving ratio ~18.27× (pre-iter-893
+        ratio was ~16×).  Cross-table at C36 1-day:
+            vec=F xppm=T → 0.1319 m/s   (OFF, matrix-aligned)
+            vec=T xppm=T → 2.4087 m/s   (ON,  matrix-aligned)
+        OFF baseline pin tightened from < 0.20 → < 0.16; ON ceiling
+        unchanged at < 5.0; ratio threshold unchanged at > 5.
+
         This sentinel runs BOTH the OFF (default) and ON paths,
-        pins OFF < 0.20 (near iter-766 documented 0.159), pins ON
-        < 5.0 (above iter-767 documented 2.555 with margin), and
-        pins the ratio ON/OFF > 5 (iter-767 measured ~16×).
+        pins OFF < 0.16 (above iter-898-aligned 0.132 with margin),
+        pins ON < 5.0 (above iter-898-aligned 2.409 with margin),
+        and pins the ratio ON/OFF > 5 (iter-898 measured ~18.27×).
         """
         import jax.numpy as jnp
         import numpy as np
@@ -4500,6 +4533,10 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                 damp_v=0.06,
                 nord_v=2,
                 fortran_vector_corner_fill=flag,
+                # Iter-898 alignment: matrix W2 config activates
+                # apply_fortran_xppm_boundary=True (iter-893).
+                # Mismatched OFF baseline if not aligned.
+                apply_fortran_xppm_boundary=True,
             )
             model = FV3EdgeShallowWaterModel(grid, config=cfg)
             cdgrid = model.cdgrid
@@ -4530,20 +4567,23 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         v_ll_linf_on, h_l2_on = _run_and_measure(flag=True)
 
         self.assertLess(
-            v_ll_linf_off, 0.20,
-            msg=(f"OFF (default rotate-pad-rotate) baseline "
-                 f"v_ll_Linf={v_ll_linf_off:.3e} m/s drifted above "
-                 f"0.20 m/s — iter-766/767 measurement (0.159 m/s) "
-                 f"no longer applies.  Regenerate the ON/OFF ratio."))
+            v_ll_linf_off, 0.16,
+            msg=(f"OFF (default rotate-pad-rotate, with iter-893 "
+                 f"apply_fortran_xppm_boundary=True alignment) "
+                 f"baseline v_ll_Linf={v_ll_linf_off:.3e} m/s "
+                 f"drifted above 0.16 m/s — iter-898 measurement "
+                 f"(0.132 m/s) no longer applies.  Regenerate the "
+                 f"ON/OFF ratio."))
 
-        # Iter-767 measured ON v_ll_Linf ~2.555 m/s.  Pin < 5.0 so
-        # a NaN/blowup to 10+ m/s fires, and a repair below 2.0 m/s
-        # (possible mode-A reduction) also fires.
+        # Iter-898 measured ON v_ll_Linf ~2.409 m/s (with iter-893
+        # matrix alignment).  Pre-iter-898 measurement was 2.555 m/s.
+        # Pin < 5.0 so a NaN/blowup to 10+ m/s fires, and a repair
+        # below 2.0 m/s (possible mode-A reduction) also fires.
         self.assertLess(
             v_ll_linf_on, 5.0,
             msg=(f"ON (fortran_vector_corner_fill=True) v_ll_Linf="
                  f"{v_ll_linf_on:.3e} m/s exceeded 5.0 m/s — the "
-                 f"iter-767 measurement (2.555 m/s) no longer "
+                 f"iter-898 measurement (2.409 m/s) no longer "
                  f"applies.  Regenerate the pins."))
 
         ratio_v = v_ll_linf_on / v_ll_linf_off
@@ -4553,8 +4593,9 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"{v_ll_linf_on:.3e} m/s produced ratio "
                  f"{ratio_v:.3f}× over OFF baseline "
                  f"({v_ll_linf_off:.3e} m/s) — UNEXPECTEDLY SMALL "
-                 f"gap.  Iter-767 falsified this path at ~16× "
-                 f"blowup.  A new smaller ratio means either:\n"
+                 f"gap.  Iter-898-aligned measurement falsified "
+                 f"this path at ~18.27× blowup (pre-iter-893 was "
+                 f"~16×).  A new smaller ratio means either:\n"
                  f"  (a) the Fortran vector corner-fill path has "
                  f"been repaired — re-examine whether it now "
                  f"reduces mode A and can replace the default "
