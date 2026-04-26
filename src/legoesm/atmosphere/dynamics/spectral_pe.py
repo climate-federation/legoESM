@@ -406,16 +406,12 @@ def spectral_pe_tendencies(
     )
 
     T_prime_div = T_prime * div
-    T_prime_div_hat = sh_analysis_3d(grid, T_prime_div)
-
-    dT_hat = -flux_T_div + T_prime_div_hat
 
     # Vertical advection of T
     if _hybrid:
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
     else:
         vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
-    dT_hat = dT_hat + sh_analysis_3d(grid, vert_adv_T)
 
     # Adiabatic heating: kappa * T * omega / p
     if _hybrid:
@@ -432,7 +428,14 @@ def spectral_pe_tendencies(
         v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
-    dT_hat = dT_hat + sh_analysis_3d(grid, adiabatic)
+    # Combine the three grid-space contributions to dT/dt before the SH
+    # forward transform.  ``sh_analysis_3d`` is linear, so
+    # ``Σ_i sh_analysis_3d(f_i) = sh_analysis_3d(Σ_i f_i)`` — summing on
+    # grid first replaces three SH analyses (each one ``segment_sum`` +
+    # one FFT) with one.  ``vert_adv_T``, ``adiabatic``, and
+    # ``T_prime_div`` all share the (n_lat, n_lon, nlev) grid shape.
+    dT_grid_sum = T_prime_div + vert_adv_T + adiabatic
+    dT_hat = -flux_T_div + sh_analysis_3d(grid, dT_grid_sum)
 
     # --- 14. Vertical advection of momentum ---
     if _hybrid:
