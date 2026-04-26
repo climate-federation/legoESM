@@ -83,17 +83,22 @@ def _spectral_conservation_fixer(
     mask_3d = mask[..., jnp.newaxis]
     area = _spectral_cell_area(grid)
     weighted_area = mask * area
-    H_bathy = sh_synthesis(grid, state_old.H_bathy_hat.data).real
+    # Batch the three 2D syntheses (eta_old, eta_new, H_bathy) along a
+    # trailing axis — same passive-trailing-axis exploit as Loop 144/151
+    # but extended with H_bathy_hat.  3 SH-syntheses → 1.
+    _ehb_pair = jnp.stack(
+        [
+            state_old.eta_hat.data,
+            state_new.eta_hat.data,
+            state_old.H_bathy_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, 3)
+    _ehb_grid = sh_synthesis_3d(grid, _ehb_pair).real  # (n_lat, n_lon, 3)
+    eta_old = _ehb_grid[..., 0] * mask
+    eta_new = _ehb_grid[..., 1] * mask
+    H_bathy = _ehb_grid[..., 2]
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
-
-    # Batch the two ``eta`` 2D syntheses into a single
-    # ``sh_synthesis_3d`` on a stacked (n_sh, 2) tensor — the 3D variant
-    # treats the trailing axis as a passive batch even when the spatial
-    # shape is 2D.  2 SH-syntheses → 1.
-    _eta_pair = jnp.stack([state_old.eta_hat.data, state_new.eta_hat.data], axis=-1)
-    _eta_grid = sh_synthesis_3d(grid, _eta_pair).real  # (n_lat, n_lon, 2)
-    eta_old = _eta_grid[..., 0] * mask
-    eta_new = _eta_grid[..., 1] * mask
     eta_floor = jnp.asarray(config.min_water_column_m, dtype=eta_new.dtype) - H_bathy
     eta_new = jnp.maximum(eta_new, eta_floor) * mask
 
