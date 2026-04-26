@@ -668,13 +668,21 @@ def uv_from_vordiv(
     # This gives sum_nm psi_hat[nm] * Hnm[lat, nm] * exp(im*lon) / a
     # The /a comes from the sphere: gradient on sphere has 1/a factor
 
-    # d/d(theta) component: uses Hnm in synthesis
-    dpsi_dtheta = _sh_synthesis_H(grid, psi_hat) / a
-    dchi_dtheta = _sh_synthesis_H(grid, chi_hat) / a
+    # d/d(theta) and d/d(lon) components — batch (psi, chi) along a
+    # trailing axis so the SH synthesis runs once on (n_sh, 2) for
+    # each of the two synthesis variants.  Uses the 3D-native
+    # synthesis (``sh_synthesis_3d`` / ``_sh_synthesis_H_3d``), which
+    # treats any trailing axis (level *or* tracer/component) as a
+    # passive batch — for the SW 2D path the ``2`` plays the role of
+    # ``nlev=2``.  4 SH syntheses → 2.
+    pc_hat = jnp.stack([psi_hat, chi_hat], axis=-1)  # (n_sh, 2)
+    pc_dtheta = _sh_synthesis_H_3d(grid, pc_hat) / a
+    dpsi_dtheta = pc_dtheta[..., 0]
+    dchi_dtheta = pc_dtheta[..., 1]
 
-    # d/d(lon) component: multiply coeffs by im, then standard synthesis
-    dpsi_dlon = sh_synthesis(grid, 1j * grid.ms * psi_hat) / a
-    dchi_dlon = sh_synthesis(grid, 1j * grid.ms * chi_hat) / a
+    pc_dlon = sh_synthesis_3d(grid, (1j * grid.ms)[:, None] * pc_hat) / a
+    dpsi_dlon = pc_dlon[..., 0]
+    dchi_dlon = pc_dlon[..., 1]
 
     # u*cos_lat = d(psi)/d(theta) + d(chi)/d(lon)
     u_cos = dpsi_dtheta + dchi_dlon
@@ -914,10 +922,12 @@ def uv_from_vordiv_3d(
     """Reconstruct (u*cos_lat, v*cos_lat) at all levels from spectral
     vor/div — 3D-native.
 
-    Same algorithm as :func:`uv_from_vordiv` but every synthesis call
-    uses the batched 3D variants (``sh_synthesis_3d`` /
-    ``_sh_synthesis_H_3d``) so the four per-level synthesis calls
-    collapse to four batched calls — no per-level moveaxis + vmap.
+    Same algorithm as :func:`uv_from_vordiv` but each synthesis is
+    batched across both the (psi, chi) potentials *and* all vertical
+    levels, using the trailing-axis-passive-batch property of
+    ``sh_synthesis_3d`` / ``_sh_synthesis_H_3d``.  4 per-call SH
+    syntheses collapse to 2 (one ``segment_sum`` + IRFFT for both
+    ``d/dtheta`` and ``d/dlon`` — psi/chi share the kernel).
 
     Parameters
     ----------
@@ -934,12 +944,27 @@ def uv_from_vordiv_3d(
     psi_hat = grid.ilap[:, None] * vor_hat_3d
     chi_hat = grid.ilap[:, None] * div_hat_3d
 
-    dpsi_dtheta = _sh_synthesis_H_3d(grid, psi_hat) / a
-    dchi_dtheta = _sh_synthesis_H_3d(grid, chi_hat) / a
+    n_sh_pc, nlev_pc = psi_hat.shape
+    # Stack (psi, chi) along a trailing axis and fold into the level
+    # dim so each SH synthesis runs once on a thicker (n_sh, nlev*2)
+    # tensor instead of being called twice on (n_sh, nlev).
+    pc_stack = jnp.stack([psi_hat, chi_hat], axis=-1)  # (n_sh, nlev, 2)
+    pc_flat = pc_stack.reshape(n_sh_pc, nlev_pc * 2)
 
-    im = (1j * grid.ms)[:, None]
-    dpsi_dlon = sh_synthesis_3d(grid, im * psi_hat) / a
-    dchi_dlon = sh_synthesis_3d(grid, im * chi_hat) / a
+    pc_dtheta_flat = _sh_synthesis_H_3d(grid, pc_flat) / a
+    pc_dtheta = pc_dtheta_flat.reshape(
+        pc_dtheta_flat.shape[0], pc_dtheta_flat.shape[1], nlev_pc, 2,
+    )
+    dpsi_dtheta = pc_dtheta[..., 0]
+    dchi_dtheta = pc_dtheta[..., 1]
+
+    im_pc = (1j * grid.ms)[:, None] * pc_flat
+    pc_dlon_flat = sh_synthesis_3d(grid, im_pc) / a
+    pc_dlon = pc_dlon_flat.reshape(
+        pc_dlon_flat.shape[0], pc_dlon_flat.shape[1], nlev_pc, 2,
+    )
+    dpsi_dlon = pc_dlon[..., 0]
+    dchi_dlon = pc_dlon[..., 1]
 
     u_cos = dpsi_dtheta + dchi_dlon
     v_cos = dpsi_dlon - dchi_dtheta
