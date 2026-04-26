@@ -459,38 +459,53 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # per-layer divergence, ensuring 3D transport consistency.
     #
     # The tendency here includes only: diffusion and physics.
-    tracers = jnp.stack([T, S], axis=0)
+    # Stack T, S along a trailing tracer axis and fold it into the level
+    # axis so ``laplacian_cgrid`` (and ``bilaplacian_cgrid`` which is two
+    # laplacian calls) runs ONCE on the thicker
+    # ``(n_lat, n_lon, nlev*2)`` field — the prior vmap-over-(T,S)
+    # pattern issued separate halo pads + 5-point stencils per tracer.
+    # Vertical diffusion stays per-tracer because it hard-codes the
+    # vertical axis at -1.
+    tracer_stack = jnp.stack([T, S], axis=-1)  # (n_lat, n_lon, nlev, 2)
+    n_lat_t, n_lon_t, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
 
-    def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        dtr_dt = jnp.zeros_like(tr)
+    horiz_flat = jnp.zeros_like(tracer_flat)
+    if config.K_h > 0:
+        horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
+            tracer_flat, grid, mask=mask,
+        )
+    if config.K_bih > 0:
+        horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
+            tracer_flat, grid, mask=mask,
+        )
+    horiz_stack = horiz_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
 
-        if config.K_h > 0:
-            dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
-        if config.K_bih > 0:
-            dtr_dt = dtr_dt - config.K_bih * bilaplacian_cgrid(tr, grid, mask=mask)
-        # Vertical tracer diffusion: always applied regardless of physics
-        # pipeline state. The physics pipeline's vertical_mixing module is
-        # a separate concept (e.g., KPP). Baseline K_v diffusion should
-        # always be active when K_v > 0. (Fixes #150.)
-        if config.K_v > 0 and tr.shape[-1] >= 2:
-            jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
-            dz_actual_loc = z_coord.dz_ref * jac_v
+    # Vertical tracer diffusion (per-tracer; axis -1 of ``tr`` is nlev).
+    # Always applied regardless of physics pipeline state — the physics
+    # pipeline's vertical_mixing module is a separate concept (e.g.,
+    # KPP).  Baseline K_v diffusion should always be active when K_v > 0.
+    # (Fixes #150.)
+    if config.K_v > 0 and nlev_t >= 2:
+        jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)  # (n_lat, n_lon, 1)
+        dz_actual_loc = z_coord.dz_ref * jac_v           # (n_lat, n_lon, nlev)
+
+        def _vdiff(tr):
             dtr_dz_half = (tr[..., :-1] - tr[..., 1:]) / (
                 z_coord.dz_half_ref * jac_v
             )
             flux = config.K_v * dtr_dz_half
-            # Pad with zero on top + bottom — single Pad HLO op vs
-            # alloc-zeros + 3-array concatenate.
             _pad_axes_tr = ((0, 0),) * (flux.ndim - 1)
             flux_full = jnp.pad(flux, (*_pad_axes_tr, (1, 1)))
-            dtr_dt = dtr_dt + (
-                flux_full[..., :-1] - flux_full[..., 1:]
-            ) / dz_actual_loc
-        return dtr_dt
+            return (flux_full[..., :-1] - flux_full[..., 1:]) / dz_actual_loc
 
-    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
-    dT_dt = tracer_tend[0]
-    dS_dt = tracer_tend[1]
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        tracer_tend_stack = horiz_stack + vdiff_stack
+    else:
+        tracer_tend_stack = horiz_stack
+
+    dT_dt = tracer_tend_stack[..., 0]
+    dS_dt = tracer_tend_stack[..., 1]
 
     # --- 10. Mixing (viscosity on perturbation velocity) ---
     # Uses the proper vector Laplacian grad(div) - k×grad(curl) directly
