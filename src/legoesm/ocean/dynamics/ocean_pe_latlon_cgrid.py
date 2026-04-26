@@ -337,10 +337,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # C-grid gradient: compact stencil at face points.  ``gradient_*_cgrid``
     # natively handles 3D input (it broadcasts the lat-only metric over
-    # the trailing level axis), so the previous ``moveaxis + vmap +
-    # moveaxis`` round-trip was redundant — call directly on 3D.
-    dp_dx = gradient_x_cgrid(p_prime_filled, grid)  # (n_lat, n_lon+1, nlev)
-    dp_dy = gradient_y_cgrid(p_prime_filled, grid)  # (n_lat+1, n_lon, nlev)
+    # the trailing level axis).  ``dp_*`` and ``dKE_*`` use the same
+    # operator on (n_lat, n_lon, nlev) cell-center inputs, so we batch
+    # them by stacking ``p_prime_filled`` and ``KE`` along a trailing
+    # axis and folding into the level dim.  4 gradient calls collapse
+    # to 2 (one batched ``gradient_x_cgrid`` + one batched
+    # ``gradient_y_cgrid``).  ``KE`` is computed below — the gradients
+    # are also moved down so both inputs are in scope at the call site.
+    # See block "--- 6/7 Pressure + KE gradient (batched) ---" below.
 
     # --- 4. Vertical velocity from FV flux divergence ---
     # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
@@ -371,15 +375,32 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # by sqrt(1 + (f*dt)^2) per step and blows up within ~1 day at
     # high latitudes.
 
-    # --- 6. Kinetic energy gradient (from perturbation velocity) ---
+    # --- 6/7. Kinetic energy + pressure gradients (batched) ---
     up_cell = 0.5 * (u_prime[:, :-1, :] + u_prime[:, 1:, :])
     vp_cell = 0.5 * (v_prime[:-1, :, :] + v_prime[1:, :, :])
     KE = 0.5 * (up_cell**2 + vp_cell**2)
 
-    # ``gradient_*_cgrid`` natively handles 3D input — call directly
-    # on KE instead of the moveaxis + vmap round-trip.
-    dKE_dx = gradient_x_cgrid(KE, grid)
-    dKE_dy = gradient_y_cgrid(KE, grid)
+    # Batch (KE, p_prime_filled) gradients — both share the (n_lat,
+    # n_lon, nlev) cell-center shape and the operators ``gradient_*_cgrid``
+    # treat the trailing axis as a passive batch (the per-lat ``cos_lat``
+    # / ``dx_u`` metric broadcasts cleanly).  Stack along trailing axis,
+    # fold into the level dim, and run each gradient once on the thicker
+    # (n_lat, n_lon, nlev*2) tensor.  4 gradient calls → 2.
+    n_lat_g, n_lon_g, nlev_g = KE.shape
+    _Kp_stack = jnp.stack([KE, p_prime_filled], axis=-1)
+    _Kp_flat = _Kp_stack.reshape(n_lat_g, n_lon_g, nlev_g * 2)
+    _dKp_dx_flat = gradient_x_cgrid(_Kp_flat, grid)  # (n_lat, n_lon+1, nlev*2)
+    _dKp_dy_flat = gradient_y_cgrid(_Kp_flat, grid)  # (n_lat+1, n_lon, nlev*2)
+    _dKp_dx = _dKp_dx_flat.reshape(
+        _dKp_dx_flat.shape[0], _dKp_dx_flat.shape[1], nlev_g, 2,
+    )
+    _dKp_dy = _dKp_dy_flat.reshape(
+        _dKp_dy_flat.shape[0], _dKp_dy_flat.shape[1], nlev_g, 2,
+    )
+    dKE_dx = _dKp_dx[..., 0]
+    dp_dx = _dKp_dx[..., 1]
+    dKE_dy = _dKp_dy[..., 0]
+    dp_dy = _dKp_dy[..., 1]
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     du_dt = -dKE_dx - dp_dx / rho_0
