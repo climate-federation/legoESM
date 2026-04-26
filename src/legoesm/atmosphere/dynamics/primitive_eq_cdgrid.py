@@ -306,14 +306,31 @@ def fv3_hydrostatic_tendencies(
         mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
 
-        # Vertical advection of D-grid winds: interpolate to cell centres,
-        # compute vertical advection, interpolate back to D-grid corners.
-        u_cc = _interp_corner_to_center(u_d)  # (6, n, n, nlev)
-        v_cc = _interp_corner_to_center(v_d)
+        # Vertical advection of D-grid winds: interpolate (u_d, v_d)
+        # together to cell centres (single 4-point average instead of
+        # two), compute vertical advection per-component, then batch
+        # the back-interpolation to D-grid corners (single halo + 4-pt
+        # average instead of two).  Same trailing-axis-as-passive-batch
+        # pattern as Loops 113/114.
+        n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
+        _uv_d = jnp.stack([u_d, v_d], axis=-1)
+        _uv_cc_flat = _interp_corner_to_center(
+            _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
+        )
+        _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
+        u_cc = _uv_cc[..., 0]
+        v_cc = _uv_cc[..., 1]
         vert_adv_u_cc = vertical_advection_hybrid(u_cc, mass_flux, p_s, sigma_coord)
         vert_adv_v_cc = vertical_advection_hybrid(v_cc, mass_flux, p_s, sigma_coord)
-        vert_adv_u_d = _interp_center_to_corner(vert_adv_u_cc, cdgrid)
-        vert_adv_v_d = _interp_center_to_corner(vert_adv_v_cc, cdgrid)
+        _vert_adv_uv_cc = jnp.stack([vert_adv_u_cc, vert_adv_v_cc], axis=-1)
+        _vert_adv_uv_d = _interp_center_to_corner(
+            _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
+            cdgrid,
+        ).reshape(
+            n_face_uv, n_i_uv + 1, n_j_uv + 1, nlev_uv, 2,
+        )
+        vert_adv_u_d = _vert_adv_uv_d[..., 0]
+        vert_adv_v_d = _vert_adv_uv_d[..., 1]
 
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
@@ -330,13 +347,29 @@ def fv3_hydrostatic_tendencies(
         sigma_dot = compute_sigma_dot(div_v, sigma_coord)
         vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
 
-        # Vertical advection of D-grid winds via cell-centre interpolation
-        u_cc = _interp_corner_to_center(u_d)
-        v_cc = _interp_corner_to_center(v_d)
+        # Vertical advection of D-grid winds via cell-centre interpolation.
+        # Batch (u_d, v_d) → (u_cc, v_cc) and (vert_adv_u_cc,
+        # vert_adv_v_cc) → (vert_adv_u_d, vert_adv_v_d) — same pattern
+        # as the hybrid branch above.
+        n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
+        _uv_d = jnp.stack([u_d, v_d], axis=-1)
+        _uv_cc_flat = _interp_corner_to_center(
+            _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
+        )
+        _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
+        u_cc = _uv_cc[..., 0]
+        v_cc = _uv_cc[..., 1]
         vert_adv_u_cc = vertical_advection(u_cc, sigma_dot, sigma_coord)
         vert_adv_v_cc = vertical_advection(v_cc, sigma_dot, sigma_coord)
-        vert_adv_u_d = _interp_center_to_corner(vert_adv_u_cc, cdgrid)
-        vert_adv_v_d = _interp_center_to_corner(vert_adv_v_cc, cdgrid)
+        _vert_adv_uv_cc = jnp.stack([vert_adv_u_cc, vert_adv_v_cc], axis=-1)
+        _vert_adv_uv_d = _interp_center_to_corner(
+            _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
+            cdgrid,
+        ).reshape(
+            n_face_uv, n_i_uv + 1, n_j_uv + 1, nlev_uv, 2,
+        )
+        vert_adv_u_d = _vert_adv_uv_d[..., 0]
+        vert_adv_v_d = _vert_adv_uv_d[..., 1]
 
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
