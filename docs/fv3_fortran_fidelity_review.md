@@ -551,3 +551,67 @@ iter-905 also catastrophically blows up: v_ll_Linf = 292 m/s (+221416 %), h_L2 =
 **Verification.**  6/6 iter-905 tests pass; 33 total tests pass in the iter-89x/90x suite (12 iter-873/896 + 6 iter-899 + 1 iter-768 + 6 iter-900 + 6 iter-903 + 5 iter-903b/c + 7 iter-904 + 6 iter-905).  Production W2 baseline (flag OFF) unchanged at 1.319e-1 m/s.
 
 **Process.**  186th iter.  iter-905 closes path (3) of the user-directed 3-path program with another negative result.  Combined with iter-904 (NaN) and iter-904b (catastrophic blowup at +2378 % v_ll_Linf), all 3 partial-FV3/RK3-hybrid attempts fail.  The user's explicit request to implement all 3 paths is now answered: path (3) is implemented and measured negative; paths (1) and (2) are explicitly deferred with structural arguments why they're unlikely to succeed.  iter-906+ should pivot away from RK3-hybrid approaches and toward either FB-chain stabilization (path 1's prerequisite) or a different W2 angle entirely (e.g., the structural geostrophic cancellation per CLAUDE.md memory).
+
+### Iter-906 — per-component dv tendency analysis at W2 hot spots (POSITIVE diagnostic finding)
+
+**Motivation.**  iter-904/904b/905 confirmed all 3 partial-FV3/RK3 hybrids fail catastrophically.  iter-906 takes a different angle: instead of trying ANOTHER time-integration swap, decompose `dv_d/dt` at the iter-904 W2 hot spots into its constituent terms to identify WHICH component drives the geostrophic-cancellation residual.  Per `operators_cdgrid.py:2009-2010`:
+
+```
+du_cc =  zeta_abs * v_cc - dB_dx_cc
+dv_cc = -zeta_abs * u_cc - dB_dy_cc
+```
+
+For the W2 IC, the analytical solution has v_cc≡0 and exact geostrophic balance `f·u = -g·dh/dy`.  iter-906 measures `+zeta_abs*u_cc` (Coriolis-vorticity term) and `-dB_dy_cc` (pressure-gradient term) magnitudes separately and reports their cancellation quality at cube-vertex cells.
+
+**Diagnostic results at C36 t=0** (`scripts/diag_iter906_w2_dv_balance.py`):
+
+| metric                       | value           |
+|------------------------------|-----------------|
+| max \|dv_cc\| (residual)     | 2.52e-05 m/s²   |
+| mean \|dv_cc\|               | 2.04e-06 m/s²   |
+| max \|coriolis term\|        | 3.04e-03 m/s²   |
+| max \|pressure term\|        | 3.04e-03 m/s²   |
+
+The two terms each have magnitude ~3e-3 m/s², matching analytical `f·u ≈ Ω·a·u₀ ≈ 2.7e-3` for W2's u₀ ≈ 38.6 m/s — the discretization is correctly representing both the Coriolis-vorticity and the pressure-gradient force.
+
+**Top-10 cube-vertex hot spots:**
+
+| face | i | j | lat (°) | -zeta_abs*u | -dB_dy_cc | dv_cc | cancel ratio |
+|------|---|---|---------|-------------|-----------|-------|--------------|
+| 5 | 0 | 0 | -36.45 | -2.494e-03 | +2.519e-03 | +2.516e-05 | 9.99e-03 |
+| 4 | 0 | 0 | +36.45 | -2.494e-03 | +2.519e-03 | +2.516e-05 | 9.99e-03 |
+| 4 | 35 | 35 | +36.45 | +2.494e-03 | -2.519e-03 | -2.516e-05 | 9.99e-03 |
+| ... 5 more cube-vertex cells at lat ±36.45° on faces 4/5 ... |
+| 3 | 35 | 35 | +34.66 | -2.503e-03 | +2.511e-03 | +7.39e-06 | 2.95e-03 |
+| 3 | 35 | 0  | -34.66 | +2.503e-03 | -2.511e-03 | -7.39e-06 | 2.95e-03 |
+
+The first 8 hot spots are EXACTLY the 8 cube vertices on faces 4 and 5 (top/bottom polar faces' corners).  Cancellation ratio at these cube vertices is ~1e-2 (i.e., the two ~2.5e-3 terms cancel to within ~2.5e-5).
+
+**Cancellation quality summary:**
+
+| metric                                       | cancellation ratio |
+|----------------------------------------------|--------------------|
+| hot-spot top-10 mean                         | 8.58e-03           |
+| global mean (all 6n² cells)                  | 1.13e-03           |
+| global max (worst cell, ≈ hot spot)          | 9.99e-03           |
+
+**Cube-vertex cancellation is 7.6× WORSE than global average.**
+
+**Interpretation.**  The W2 v-bias is NOT a uniformly-distributed cancellation error amplified by time integration.  It is a LOCALIZED cube-vertex breakdown of the geostrophic cancellation between zeta_abs*u_cc and dB_dy_cc.  Both terms are individually accurate (~3e-3, matching analytical), but their cube-vertex difference accumulates 7.6× more error than at smooth interior cells.
+
+**Implications for iter-907+ work.**  Two concrete improvement targets:
+
+1. **`zeta_abs` at cube vertices**: `dgrid_vorticity` uses corner-interpolated `u_corner, v_corner` from rotate-pad-rotate halo cells.  Cube-vertex inaccuracy in halo metrics propagates to `zeta`.  Improving the halo treatment at the 4 cube-vertex cells of `(u_cc_pad, v_cc_pad)` should reduce this term's local error.
+2. **`dB_dy_cc` at cube vertices**: `_arakawa_lamb_gradient` + `_interp_corner_to_center` chain has its own cube-vertex errors.  Improving the corner-to-center interpolation at the 4 vertex cells should reduce this term's local error.
+
+Either fix applied at ONE cube-vertex slot (4 or 8 cells per cube edge) would ~halve the local cancellation error and reduce the W2 v_ll_Linf residual.  Iter-907+ should target ONE of these fixes per iter, with measurement.
+
+**Comparison to iter-767/769 corner-fill experiments.**  Per CLAUDE.md memory, iter-767 implemented Fortran's `fill_corners_agrid_r8` VECTOR (mySign=-1) formula at the cube vertices to address this exact mechanism — but it WORSENED W2 by 16×.  The reason (per iter-767's docstring) is that our `pad_halo_vector` ALREADY rotates winds through geographic intermediary, and applying Fortran's swap on top of already-rotated halo produces algorithmically inconsistent values.  iter-907+ work should not repeat iter-767's approach — instead, target the halo's accuracy at the rotation step, or improve the gradient-stencil rather than the halo cells themselves.
+
+**Deliverable.**
+- `scripts/diag_iter906_w2_dv_balance.py`: per-component dv decomposition at W2 hot spots; quantifies cube-vertex cancellation breakdown; emits VERDICT identifying the localized-cancellation interpretation.
+- This iter-906 doc entry surfacing the actionable diagnostic finding.
+
+**Verification.**  Diagnostic runs to completion in ~5s.  No production code change; no regression risk.
+
+**Process.**  187th iter.  iter-906 PIVOTS from the failed RK3-hybrid implementation thread to a diagnostic deep-dive that yields a concrete actionable target for iter-907+: cube-vertex cancellation breakdown between `-zeta_abs*u_cc` and `-dB_dy_cc`.  This is the highest-leverage single iter so far in the iter-904-906 thread because it gives future iters a precise mechanism to target rather than repeating failed time-integration swaps.
