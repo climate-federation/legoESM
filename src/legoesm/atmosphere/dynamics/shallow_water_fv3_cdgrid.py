@@ -808,6 +808,16 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     use_fv3_dsw1_mass_transport=(
                         self.config.use_fv3_dsw1_mass_transport),
                     dt=dt,
+                    # Iter-904b (Codex iter-904 stop-time fix):
+                    # forward FV3 d_sw1 mass-transport damping
+                    # (nord_v, damp_v) per `sw_core.F90:886-887`.
+                    # iter-904 omitted these and the path NaN'd —
+                    # without del-n damping, transport_step's PPM
+                    # mass flux blows up at the cube vertices.
+                    dsw1_nord=(
+                        2 if self.config.nord_v < 0
+                        else self.config.nord_v),
+                    dsw1_damp_c=self.config.damp_v,
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,

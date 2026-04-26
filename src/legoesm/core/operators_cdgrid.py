@@ -1852,6 +1852,8 @@ def fv3_sw_tendencies(
     fortran_faithful_ppm_right=False,
     use_fv3_dsw1_mass_transport=False,
     dt=None,
+    dsw1_nord=2,
+    dsw1_damp_c=0.06,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1890,6 +1892,16 @@ def fv3_sw_tendencies(
         # a finite-volume update returning h_new, from which we
         # extract dh_dt = (h_new - h) / dt for the SSP-RK3 caller.
         # Default-OFF preserves bit-equality with the iter-892 path.
+        #
+        # Iter-904b (Codex iter-904 stop-time fix): forward
+        # `dsw1_nord` and `dsw1_damp_c` to `transport_step`'s
+        # `nord` / `damp_c` kwargs.  Fortran `sw_core.F90:886-887`
+        # calls `fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)`
+        # inside d_sw1 so the mass transport picks up the same
+        # 4th-order del-n smoother the FB chain applies.  Pre-
+        # iter-904b omission of these kwargs gave d_sw1 transport
+        # without any damping, which is the likely root cause of
+        # the iter-904 W2 NaN at C36 1-day.
         if dt is None:
             raise ValueError(
                 "`use_fv3_dsw1_mass_transport=True` requires `dt` to "
@@ -1902,6 +1914,8 @@ def fv3_sw_tendencies(
         _, _, _, _, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
         h_new = transport_step(
             h, ut, vt, dt, cdgrid,
+            nord=dsw1_nord,
+            damp_c=dsw1_damp_c,
             apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
         dh_dt = (h_new - h) / dt
     else:

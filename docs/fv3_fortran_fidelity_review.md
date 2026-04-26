@@ -466,3 +466,38 @@ iter-904's path **NaN'd** during the 1-day integration.  Likely cause: `transpor
 **Verification.**  7/7 iter-904 tests pass; 14/14 iter-873 tests pass; production W2 baseline unchanged at 1.319e-1 m/s with flag OFF.
 
 **Process.**  184th iter.  iter-904 lands a user-directed substantive piece of work (production-path config flag + true-FV3 d_sw1 transport plumbing + tendency diagnostic + W2 measurement) and produces a clear empirical answer: the partial-swap shortcut does NOT work — the SSP-RK3 + finite-volume hybrid is unstable.  This narrows the design space for iter-905+: the W2 bias requires either (a) the full FB chain's stabilization, or (b) a different time-integration matching strategy.
+
+### Iter-904b — forward FV3 d_sw1 damping (`nord_v`, `damp_v`); confirms iter-904's instability is structural, not damping-driven (Codex iter-904 stop-time)
+
+**Motivation.**  Codex iter-904 stop-time review correctly flagged: "iter-904 omits FV3 d_sw1 mass-transport damping".  Per Fortran `sw_core.F90:886-887`, d_sw1 calls `fv_tp_2d(delp, ..., nord=nord_v, damp_c=damp_v)` so the mass transport picks up the same 4th-order del-n smoother the FB chain applies.  iter-904's `transport_step` call omitted these kwargs, leaving d_sw1 transport without any del-n damping.
+
+**Fix.**  Add `dsw1_nord` and `dsw1_damp_c` kwargs to `fv3_sw_tendencies` (defaults 2 and 0.06 — Fortran-canonical values).  Production model.step forwards from `config.nord_v` and `config.damp_v` (already-canonical config fields per the iter-872c-take3 Fortran convention).  iter-904b's `transport_step` call now passes these so the d_sw1 mass transport gets the proper Fortran-faithful smoother.
+
+**Re-measurement at C36 dt=300s 1-day.**
+
+| config                                         | h_L2     | v_ll_Linf  |
+|------------------------------------------------|----------|------------|
+| (A) iter-892 default                           | 2.048e-04 | **1.319e-01** |
+| (B) iter-904b use_fv3_dsw1_mass_transport      | 1.387e+00 | 3.137e+02 |
+
+iter-904b's path no longer NaN's (the damping prevents the immediate catastrophic instability), but produces a v_ll_Linf of **313 m/s** (vs 0.13 baseline — +2378× worse) and h_L2 of **1.39** (vs 2.05e-4 baseline — +6770× worse).
+
+**Why the result is still catastrophic.**  The fundamental incompatibility is the SSP-RK3 wrapping: each of the 3 RK3 stages calls `transport_step` with the FULL `dt` (not the sub-stage dt — the integrator API doesn't expose stage dt to the tendency function), so each stage attempts to advect h forward by an entire timestep.  RK3 then combines the stage tendencies with weights summing to 1, but the underlying transport in each stage was already a full-dt update.  Net effect: mass is advected ~3× per step, and the resulting tendency has wildly wrong magnitude.  Damping mitigates the blowup speed but cannot fix the structural mismatch.
+
+**Confirms iter-904's conclusion.**  The W2 v-bias cannot be fixed by partial-swapping ONE component (d_sw1 mass transport) of true FV3 into the SSP-RK3 wrapper.  The FB scheme requires its own time stepping (`dyn_core.F90:489` uses three sequential FORWARD-BACKWARD phases per dt, each itself a full-dt update — NOT a multi-stage RK3 with weighted intermediate states).  iter-904b strengthens this conclusion: even with proper Fortran-faithful damping, the SSP-RK3 + d_sw1 hybrid is structurally unsuitable.
+
+**Decision.**  iter-892 remains production default.  `use_fv3_dsw1_mass_transport=True` flag is preserved as a documented opt-in for diagnostic reproducibility, but the doc now explicitly states the path is structurally unstable — users should NOT enable it expecting improvement.
+
+**Path forward (iter-905+).**  The W2 bias fix requires one of:
+1. **Full FB-chain integration**: replace SSP-RK3 with the Fortran-faithful FB scheme (c_sw -> p_grad_c -> d_sw with proper sub-stepping).  Multi-iter architectural project; CLAUDE.md memory tracks this as a deferred structural blocker ("FB chain accuracy at C24/C36 remains unresolved").
+2. **Sub-dt threading in tendency_fn**: refactor the integrator API so tendency_fn receives the actual stage dt, then pass that as transport_step's dt.  This would make iter-904's hybrid consistent at each RK3 stage.  Risk: stage-level full-dt re-advection still doesn't match the FB chain's design — the partial-swap may remain a non-improvement.
+3. **Forward-Euler mass-only path**: split the integration at `model.step` level — call `transport_step` ONCE per full dt outside RK3 (forward-Euler mass), and use SSP-RK3 only for momentum.  This breaks the joint conservation properties of RK3 but might produce a stable iter-904-class hybrid.  Architectural change but smaller than (1).
+
+**Deliverable.**
+- `src/legoesm/core/operators_cdgrid.py:fv3_sw_tendencies`: new `dsw1_nord` (default 2) and `dsw1_damp_c` (default 0.06) kwargs forwarded to `transport_step` when `use_fv3_dsw1_mass_transport=True`.
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:FV3EdgeShallowWaterModel.step`: forwards `nord_v`/`damp_v` config fields as the new `dsw1_nord`/`dsw1_damp_c`.
+- This iter-904b doc entry strengthening iter-904's negative-result conclusion with proper damping in place.
+
+**Verification.**  All 26 tests pass (7 iter-904 + 5 iter-903b/c + 14 iter-873).  Production W2 baseline (flag OFF) unchanged at 1.319e-1 m/s.
+
+**Process.**  185th iter.  iter-904b closes the Codex iter-904 stop-time finding by adding the previously-omitted Fortran-faithful damping, then confirms via re-measurement that the SSP-RK3 + d_sw1 partial-swap remains structurally unsuitable even with proper damping.  This is a stronger negative result than iter-904 alone: not "we forgot the damping and it NaN'd", but "even with proper Fortran-faithful damping, the time-integration mismatch is the binding constraint".
