@@ -193,8 +193,44 @@ At 1-degree in the global overturning experiment, GM/Redi should:
 
 ---
 
+## Surface-Layer Mixing Behavior
+
+The current implementation tapers the **slopes** (S_x, S_y) via DM95 but not
+the Redi diffusivity itself. This means:
+
+- **Interior (taper ≈ 1):** Full isopycnal mixing — adiabatic by design.
+- **Surface (taper → 0):** The off-diagonal rotation terms vanish, but the
+  diagonal `kappa_Redi * nabla^2(q)` persists at full strength. This is pure
+  horizontal diffusion — **cross-isopycnal** wherever isopycnals slope.
+
+In practice the mixed layer has weak stratification, so "along isopycnal" is
+ill-defined there anyway. The residual horizontal diffusion effectively acts
+as a background K_h in the surface layer, which is needed for numerical
+stability. But `kappa_Redi = 1000 m^2/s` may be too large for that role.
+
+### Options (future)
+
+**Option A — taper the full tensor (quick fix):** Multiply the entire tendency
+(diagonal + off-diagonal + vertical) by the taper factor. In fully tapered
+regions GM/Redi produces zero tendency, and the existing K_v + convective
+adjustment handle the surface. This matches MITgcm's DM95 implementation.
+
+**Option B — Ferrari et al. (2010) BVP (correct fix):** Solve a vertical
+elliptic problem for the GM streamfunction that smoothly transitions from
+depth-independent (horizontal) transport in the mixed layer to adiabatic
+interior transport. Eliminates the need for tapering near boundaries entirely.
+
+**Current choice:** Proceed with the slope-only tapering. At 1-degree with
+20 levels the surface layer is maintained by surface restoring + convective
+adjustment, so the residual horizontal diffusion from tapered Redi is
+unlikely to dominate the solution. Revisit if SST shows excessive smoothing
+or if conservation diagnostics flag diapycnal drift.
+
+---
+
 ## Known Gaps (deferred)
 
+- **Surface-layer cross-isopycnal mixing** (see above) — Option A or B
 - Factory unification (lat-lon bypasses `integration.py`)
 - Config pathway unification (`LatLonCGridOceanConfig.gm_redi` vs `LateralMixingConfig`)
 - Ferrari et al. (2010) BVP boundary-layer treatment
