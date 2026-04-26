@@ -2869,3 +2869,55 @@ The threshold now PASSES iter-893 alignment AND FIRES on a silent xppm=True→Fa
 - This iter-898c doc entry.
 
 **Process.**  178th iter.  iter-898c closes a real alignment-pin gap that iter-898 left — the original "alignment with iter-893 matrix" claim was descriptive in docstrings but not load-bearing on the assertions.  iter-898c makes the alignment pin actually pin the alignment.  Outstanding work unchanged.
+
+### Iter-899 — investigate iter-892 PPM boundary index map; surface 1-cell shift bug
+
+**Motivation.**  Codex iter-899 fidelity review recommended adding the missing Fortran `al(0)` and `al(npx+1)` cube-edge boundary overrides in `_ppm_reconstruct_1d` (`tp_core.F90:359, 368`).  iter-899 attempted this but uncovered an **index-map ambiguity** in the existing iter-892 code that requires resolution before extending.
+
+**The finding.**  iter-892's docstring (`operators_cdgrid.py:189-197`) describes the input strip as:
+
+> q has caller halo=2: q[k] = q1(k-1) for k=0..n_int+3.
+
+This implies q[0]=q1(-1) (i.e., 1 halo cell on the left, 3 on the right — asymmetric).  iter-892's override formulas were written under this assumption.
+
+**Empirical investigation** (`scripts/diag_iter899_ppm_strip_layout.py`) reveals that production actually feeds the leaf a **symmetric** halo=2 strip:
+
+```
+strip[ 0] = q1(-2)   (halo cell, depth 2)
+strip[ 1] = q1(-1)   (halo cell, depth 1)
+strip[ 2] = q1( 0)   (cube-edge interior cell)
+strip[ 3] = q1( 1)
+...
+strip[n+1] = q1(n-1) (last interior)
+strip[n+2] = q1(n)   (halo cell, depth 1)
+strip[n+3] = q1(n+1) (halo cell, depth 2)
+```
+
+This is the natural output of `_pad_halo_auto_h2` (returning `(6, n+4, n+4)` with halo=2 per side) followed by `h_pad[:, :, 2:-2]` in `cgrid_mass_flux_divergence`.  The real strip layout is `q[k] = q1(k-2)` — ONE cell shifted from what the iter-892 docstring claims.
+
+**Implication.**  Under the actual Hypothesis A index map, q_face[k] corresponds to Fortran `al(k-2)`.  iter-892's overrides at q_face[2,3,n+1,n+2] therefore correspond to `al(0,1,n-1,n)` — but iter-892's *formulas* implement the Fortran recipes for `al(1,2,npx-1,npx)`-style values (i.e., the docstring's intended targets).  This is a **1-cell shift bug**:
+
+| q_face index | Fortran al (under Hypothesis A) | iter-892 formula |
+|--------------|---------------------------------|------------------|
+| q_face[2]    | al(0) = c1·q1(-2)+c2·q1(-1)+c3·q1(0) | xt-style 4-pt clipped |
+| q_face[3]    | al(1) = xt 4-pt clipped         | c3·q_pad[4]+c2·q_pad[5]+c1·q_pad[6] |
+| q_face[n+1]  | al(n-1) = standard 4th-order    | c1·q_pad[n+1]+c2·q_pad[n+2]+c3·q_pad[n+3] |
+| q_face[n+2]  | al(n) = standard 4th-order      | xt-style 4-pt clipped |
+
+iter-892 places the **wrong type of formula** at each cube-edge slot.  None of the four overrides produce Fortran-faithful values at their target indices.
+
+**Why iter-893 still helped.**  Despite the 1-cell shift, iter-893 reduced W2 v_ll_Linf from 0.159 to 0.132 m/s (-17%).  Hypothesis: the iter-892 formulas (xt-clipped + c3/c2/c1 mirrors) are still **closer to Fortran's correct cube-edge values than the standard 4th-order edge extrapolation** (which uses `mode='edge'` replicas of q1(-1) for q1(-2) cells), even when placed at the wrong q_face indices.  The clipping in xt formulas may also reduce overshoot at the W2 cube vertex.
+
+**iter-899 deliverable** (NO production code change — pure investigation + documentation).
+- `scripts/diag_iter899_ppm_strip_layout.py`: empirical demonstration of the production strip layout (Hypothesis A confirmed).
+- This iter-899 doc entry surfacing the discrepancy and the implication for future iters.
+
+**Why no fix in iter-899.**  Two distinct fixes are possible:
+
+1. **Index correction**: shift iter-892's q_pad indices +1 so the formulas land at the correct Fortran al targets.  Requires careful re-analysis because the iter-892 *formulas* (xt at q_face[2], c3/c2/c1 at q_face[3]) don't directly correspond to Fortran's specifications for those indices either — Fortran al(0) is 3-pt c1/c2/c3, Fortran al(1) is 4-pt xt clipped.  A pure index shift won't make the code Fortran-faithful; the formulas need to be swapped too.
+
+2. **Full Fortran-faithful overrides**: replace iter-892's overrides with Fortran's actual recipes at the correct indices: q_face[2]=al(0)=c1·q1(-2)+c2·q1(-1)+c3·q1(0); q_face[3]=al(1)=xt clipped; q_face[4]=al(2)=c3·q1(1)+c2·q1(2)+c1·q1(3); mirror on right.  Halo=2 strip provides q1(-2..n+1), enough for al(0,1,2,n-1,n) but **NOT for al(npx,npx+1) which need q1(npx+1)=q1(n+2)** (deferred to halo=3 work).
+
+Both fixes carry W2 regression risk: the iter-892 formulas may be empirically better than the strict-Fortran ones at the smooth W2 cube vertex.  iter-900+ should make these changes one at a time, with measurement.
+
+**Process.**  179th iter.  iter-899 does NOT close a Fortran-fidelity gap by writing code — it surfaces a previously-undocumented gap by careful investigation.  This is meaningful work in the Ralph protocol sense: it converts a hidden fidelity bug into a documented, scoped, measurable work item for iter-900+.  No production code changes; no regression risk.
