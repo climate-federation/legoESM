@@ -615,3 +615,54 @@ Either fix applied at ONE cube-vertex slot (4 or 8 cells per cube edge) would ~h
 **Verification.**  Diagnostic runs to completion in ~5s.  No production code change; no regression risk.
 
 **Process.**  187th iter.  iter-906 PIVOTS from the failed RK3-hybrid implementation thread to a diagnostic deep-dive that yields a concrete actionable target for iter-907+: cube-vertex cancellation breakdown between `-zeta_abs*u_cc` and `-dB_dy_cc`.  This is the highest-leverage single iter so far in the iter-904-906 thread because it gives future iters a precise mechanism to target rather than repeating failed time-integration swaps.
+
+### Iter-906b — D-grid `dv_d_dt` decomposition matching iter-904 hot-spot stagger (REFINES iter-906 interpretation)
+
+**Codex iter-906 stop-time concern.**  "The iter-906 diagnostic does not measure the D-grid hot spots it claims to explain".  iter-906 measured `dv_cc` at cell centres (shape `(6, n, n)`); iter-904's hot spots were on the D-grid v-edge stagger `dv_d_dt` (shape `(6, n+1, n)`), AFTER the cell-centre→D-grid projection at `operators_cdgrid.py:2193-2214` and AFTER div_damp + boundary_fix contributions.
+
+**iter-906b extension.**  Reproduce iter-906's cell-centre decomposition, project the bare Coriolis+pressure sum to D-grid via the same `pad_halo_vector` chain production uses, then compare to the FULL production `dv_d_dt` (which includes div_damp + boundary_fix + projection halo).
+
+**Key results at C36 t=0** (`scripts/diag_iter906b_w2_dv_balance_dgrid.py`):
+
+| metric                                          | value          |
+|-------------------------------------------------|----------------|
+| max \|dv_cc\| (iter-906 finding, cell centre)   | 2.52e-05 m/s²  |
+| max \|dv_d_dt\| (BARE Coriolis+pressure, D-grid) | 1.15e-05 m/s²  |
+| max \|dv_d_dt_prod\| (PRODUCTION fv3_sw_tendencies) | **1.90e-05 m/s²** |
+
+The bare-projection result (1.15e-5) is SMALLER than the cell-centre cube-vertex finding (2.52e-5) — i.e., the projection AVERAGES OUT half the cube-vertex error.  The PRODUCTION result (1.90e-5) is LARGER than the bare projection by ~65 % because production adds div_damp + boundary_fix.
+
+**Iter-904 D-grid hot spots vs iter-906 cell-centre hot spots — DIFFERENT.**
+
+- iter-906 cell-centre hot spots: **lat ±36.45° on faces 4 / 5** (cube vertices).
+- iter-906b D-grid production hot spots: **lat ±33.9° on faces 0 / 2** (interior of equatorial faces, ~3° away from cube vertices) — matching iter-904.
+
+These are NOT the same cells.  The cell-centre cube-vertex cancellation breakdown that iter-906 identified does NOT directly translate to the D-grid production hot spots.
+
+**Cancellation quality on D-grid stagger:**
+
+| metric                                | value          |
+|---------------------------------------|----------------|
+| hot-spot top-10 mean                  | 1.08e-03       |
+| global mean                           | 1.11e-03       |
+| global max                            | 6.06e-03       |
+
+**D-grid hot-spot cancellation ratio is ~1.0× global** — i.e., iter-906's "7.6× worse at hot spots" finding does NOT replicate on the D-grid stagger.  The D-grid hot spots are NOT driven by the cell-centre cube-vertex cancellation breakdown.
+
+**Refined interpretation.**  iter-906's cell-centre cube-vertex finding is REAL but UPSTREAM of and PARTIALLY CANCELLED BY the cell-centre→D-grid projection.  The actual production W2 v-bias driver is the contributions ADDED after the bare Coriolis+pressure terms — most likely div_damp's contribution to dv_cc (line 2089) and/or boundary_fix's smoothing (line 2188-2191), and/or `fortran_vector_corner_fill`-style halo treatments at the projection step (line 2209-2212).
+
+**Updated targets for iter-907+:**
+
+1. **div_damp's contribution to dv_d_dt at lat ±33.9° face 0/2**: this is the lat-band where div_damp's adaptive `dddmp * |delpc|` clipping interacts with the cube-edge cells (face 0/2 = equatorial faces, with i=2/3 the row near the EW cube edges).  The interaction may be the dominant mechanism.
+2. **boundary_fix's effect on dv_cc at face boundary cells**: row 2/3 from the cube edge corresponds to interior cells just inside the boundary smoothing region.  Boundary_fix smooths rows 0 and n-1; rows 1-3 may absorb its discontinuity.
+3. **Cell-centre→D-grid projection halo (`pad_halo_vector`) accuracy at cube edges**: the projection at line 2194 uses halo cells; cube-edge halo accuracy could break the iter-906 cancellation differently for the D-grid stagger than the cell-centre one.
+
+**Walking back iter-906's overclaim.**  iter-906 said cube-vertex cancellation was the W2 bias mechanism.  iter-906b shows that's correct AT CELL CENTRES but NOT AT THE D-GRID STAGGER WHERE THE BIAS LIVES.  The actual mechanism is more complex — production-only contributions (div_damp, boundary_fix) AND/OR projection-halo errors AT THE D-GRID stagger are the binding constraints.  iter-907+ should target these production-side components rather than zeta_abs / dB_dy_cc directly.
+
+**Deliverable.**
+- `scripts/diag_iter906b_w2_dv_balance_dgrid.py`: D-grid `dv_d_dt` decomposition with explicit comparison to iter-906 cell-centre finding; emits VERDICT identifying the discrepancy.
+- This iter-906b doc entry refining iter-906's interpretation.
+
+**Verification.**  Diagnostic runs to completion in ~5s.  No production code change.
+
+**Process.**  188th iter.  iter-906b corrects iter-906's overclaim by measuring at the same stagger as iter-904's hot spots.  The Codex stop-time concern was valid; the corrective measurement reveals iter-906's cube-vertex cancellation finding is real at cell centres but DOES NOT explain the production W2 v-bias.  Net iter-907+ direction shifts from "fix zeta_abs/dB_dy_cc at cube vertices" (iter-906's recommendation, now superseded) to "investigate div_damp + boundary_fix + projection-halo contributions at lat ±33.9° face 0/2 — the actual D-grid hot spots".
