@@ -222,3 +222,38 @@ Production W2 baseline unchanged at 1.319e-1 m/s throughout the iter-913→iter-
 **Process improvement durability**: the new memory `feedback_run_full_test_file_cadence.md` (iter-917) now lists the 4 test directories worth scanning at multi-iter cadence (`tests/unit/test_cdgrid_fv3_regression.py`, `test_cdgrid.py`, `tests/atmosphere/shallow_water/unit/`, `tests/test_fv3_*.py`).  Future Ralph porters inherit this discipline.
 
 **No code change.**  iter-920 closes the silent-regression sweep with a clean validation result on the broader test layers.
+
+### Iter-921 — visual verification reveals iter-893 v_ll vs h_err Pareto trade-off
+
+**Trigger.**  Per CLAUDE.md "CRITICAL — Visual verification for spatial/grid artifacts": "Error norms can improve while visual artifacts get worse (e.g., if artifacts shift location or change character)."  The committed `diagnostics/fv3_visual/w2_*.png` snapshots had not been regenerated since iter-820 (commit 853dd19) — they reflected the pre-iter-893 baseline (`apply_fortran_xppm_boundary=False`) at v_ll_Linf=0.159 m/s, while the live production sentinel runs the post-iter-893 path at 0.132 m/s.  iter-921 updates the diag script `scripts/diag_w2_visual.py` to add `apply_fortran_xppm_boundary=True`, regenerates snapshots, and quantifies the visual delta.
+
+**A/B measurement** (C36 1-day, identical config except `apply_fortran_xppm_boundary`; see `scripts/diag_iter921_w2_v_vs_h_pareto.py`):
+
+| metric         | iter-820 (xppm=False) | iter-893 (xppm=True) | Δ      |
+|----------------|-----------------------|----------------------|--------|
+| `v_ll_Linf`    | 0.1593                | 0.1319               | −17.21 % ✓ |
+| `v_north_max`  | 0.1889                | 0.1519               | −19.59 % ✓ |
+| `h_err_max`    | 4.6155                | **8.1841**           | **+77.32 %** ✗ |
+| `h_err_l2`     | 0.5176                | 0.5116               | −1.16 % (≈unchanged) |
+
+**Interpretation.**  iter-893's PPM cube-edge alignment fix reduces the v_north cube-vertex artifact (the iter-893 sentinel) but **redistributes** the h-error: the cube-vertex h hot-spot `Linf` magnitude grows ~77 %, while total RMS h-error stays flat.  The artifact pattern re-localises rather than smoothing out.  Visual inspection of `w2_herr_production.png` (regenerated at iter-893 baseline) shows softer corner checkerboard but stronger hot spots at face 0 top-right and face 2/3 corners (saturated to ±8 m).  `w2_vnorth_production.png` (iter-893) shows visibly softer cube-vertex red/blue hot spots than the iter-820 baseline preserved as `w2_vnorth_production_iter820_baseline.png`.
+
+**This is exactly the CLAUDE.md-warned scenario** — error-norm improvement masking a visual regression.  Future iters that try to push `v_ll_Linf` further down without watching `h_err_max` could keep accruing this kind of trade-off silently.
+
+**iter-921 deliverables.**
+
+1. `scripts/diag_w2_visual.py` — updated to use the iter-893 production matrix (`apply_fortran_xppm_boundary=True`).
+2. `scripts/diag_iter921_w2_v_vs_h_pareto.py` — new A/B diagnostic + Pareto plot (`diagnostics/fv3_visual/iter921_v_vs_h_pareto.png`).
+3. `diagnostics/fv3_visual/w2_*_iter820_baseline.png` — committed historical anchors of the pre-iter-893 visuals.
+4. `tests/test_iter921_w2_v_vs_h_pareto_sentinel.py` — 3 new dual-pin sentinels (run as a 22 s module-fixture-shared trajectory):
+   - `test_iter921_v_ll_linf_matches_iter893`: pin 0.1319 m/s within ±5 %.
+   - `test_iter921_h_err_max_locked_at_iter893_baseline`: pin 8.184 m within ±5 %.
+   - `test_iter921_h_err_l2_essentially_unchanged_vs_iter820`: pin 0.5116 m within ±5 %.
+
+**Verification.**  3/3 new tests pass.  Co-running with iter-89x/9xx sentinels: 20/20 pass in 167 s.
+
+**Process improvement.**  Single-metric sentinels (iter-768/iter-893's `v_ll_Linf`-only pin) miss Pareto trade-offs.  Future production-config swaps should pin BOTH the metric being improved AND the most-likely-to-regress dual metric (here `h_err_max`).  The Pareto plot makes the trade-off explicit so future editors can decide whether to accept it.
+
+**Backlog implication.**  The structural floor at the cube vertex (~0.10-0.12 m/s on `v_ll_Linf`, ~5-8 m on `h_err_max`) is the visible signature of the cell-centred Arakawa-Lamb / `div_damp` / `boundary_fix` stack on the cubed-sphere geometry.  Closing this gap requires the FB-chain port (still open) or a different operator family at the cube vertices, not parameter-tuning within the current production matrix.
+
+**Process.**  No production code change.  Diag updates + new sentinel + Pareto plot + iter-820 historical anchors.  Production W2 baseline at v_ll_Linf=0.132 m/s and h_err_max=8.18 m is now dual-pinned.

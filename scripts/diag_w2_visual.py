@@ -62,19 +62,23 @@ def _div_damp_cube(n, ref_n=48, ref_coeff=1.5e7):
 
 
 def run_sim(grid, cdgrid, state0, use_csw, n=N):
-    # Iter-797: match the iter-761 canonical matrix config
-    # (run_atmosphere_test_matrix.py:1197-1202) that the production
-    # W2 sentinel uses, so the visual plot reflects the PRODUCTION
-    # state, not the default-config state that has much worse
-    # artifacts.  iter-761: hyperdiff=0, div_damp=8*base, damp_v=0.06,
-    # nord_v=2, boundary_fix=True.
+    # Iter-921: match the CURRENT iter-893 production matrix config
+    # (run_atmosphere_test_matrix.py + test_w2_alpha0_c36_1day_iter761
+    # _matrix_config), which adds `apply_fortran_xppm_boundary=True`
+    # to the iter-761 baseline.  This reduces v_ll_Linf from 0.159
+    # (iter-820 baseline) to 0.132 m/s.  Without this flag, the visual
+    # snapshot reflects the stale iter-820 state, not the live
+    # production sentinel.  iter-797/iter-761: hyperdiff=0, div_damp=
+    # 8*base, damp_v=0.06, nord_v=2, boundary_fix=True; iter-893:
+    # apply_fortran_xppm_boundary=True (PPM cube-edge alignment fix).
     config = CDGridShallowWaterConfig(
         use_experimental_csw=use_csw,
         hyperdiff_coeff=0.0,
         div_damp=8.0 * _div_damp_cube(n),
         boundary_fix=True,
         damp_v=0.06,
-        nord_v=2)
+        nord_v=2,
+        apply_fortran_xppm_boundary=True)
     model = FV3EdgeShallowWaterModel(grid, config)
     model.set_initial_mass(state0)
     state = state0
