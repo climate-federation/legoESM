@@ -190,16 +190,19 @@ def mpas_hydrostatic_tendencies(
     if config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
 
-    # Divergence for continuity / sigma-dot
-    div_3d = divergence_cell_3d(u_3d, mesh)  # (nCells, nlev)
-
-    # Temperature advection: -v·∇T ≈ centered tracer flux form.
-    # Reuse ``T_edge_3d`` computed above for the pressure-gradient
-    # correction — XLA CSE may dedupe the two ``cell_to_edge_avg_3d``
-    # calls but the explicit reuse is more reliable across XLA
-    # versions and saves one Voronoi gather kernel per RHS evaluation.
+    # Batched divergences for continuity (div(u)) and tracer transport
+    # (div(u * T_edge)).  Both are ``divergence_cell_3d`` on
+    # (nEdges, nlev) inputs — same MPAS edgesOnCell gather + reduce
+    # with the trailing axis as a passive batch.  Same exploit as
+    # Loop 109 (compressible Euler MPAS) and 111 (MPAS edge gradients).
     flux_T_3d = u_3d * T_edge_3d  # (nEdges, nlev)
-    div_uT_3d = divergence_cell_3d(flux_T_3d, mesh)  # (nCells, nlev)
+    n_edges_d, nlev_d = u_3d.shape
+    _div_inputs = jnp.stack([u_3d, flux_T_3d], axis=-1)  # (nEdges, nlev, 2)
+    _div_outputs = divergence_cell_3d(
+        _div_inputs.reshape(n_edges_d, nlev_d * 2), mesh,
+    ).reshape(-1, nlev_d, 2)
+    div_3d = _div_outputs[..., 0]
+    div_uT_3d = _div_outputs[..., 1]
     horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
 
     # Scalar diffusion
