@@ -426,6 +426,17 @@ def spectral_ocean_tendencies(
         if config.K_h > 0:
             dtr_hat = dtr_hat + config.K_h * lap[jnp.newaxis, ...] * tracers_hat
 
+    # --- 15-16. Velocity vertical diffusion + free-surface tendency (batched) ---
+    # When A_v > 0, the velocity-vdiff path needs oc2 of {vdiff_u_cos,
+    # vdiff_v_cos} and dmu of {vdiff_u_cos, vdiff_v_cos} — 4 SH-analyses.
+    # The free-surface flux div needs oc2(hu_cos) + dmu(hv_cos) — 2 more.
+    # Stack the inputs across both sections and run a single batched
+    # oc2 (3 inputs when A_v > 0, else 1) + a single batched dmu (3
+    # inputs when A_v > 0, else 1).  6 SH-analyses → 2 (or 2 → 2 when
+    # A_v = 0; the latter doesn't change but the structure stays
+    # consistent).
+    hu_cos = h_k.real * u_cos * mask_3d
+    hv_cos = h_k.real * v_cos * mask_3d
     if config.A_v > 0:
         vel_uv = jnp.stack([u.real, v.real], axis=0)
         vdiff_uv = jax.vmap(
@@ -437,24 +448,42 @@ def spectral_ocean_tendencies(
         vdiff_u_cos = vdiff_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
         vdiff_v_cos = vdiff_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
 
+        n_lat_v, n_lon_v, nlev_v = vdiff_u_cos.shape
+        _vdh_oc2_stack = jnp.stack(
+            [vdiff_u_cos, vdiff_v_cos, hu_cos], axis=-1,
+        )  # (..., nlev, 3)
+        _vdh_dmu_stack = jnp.stack(
+            [vdiff_u_cos, vdiff_v_cos, hv_cos], axis=-1,
+        )
+        _vdh_oc2 = sh_analysis_oc2_3d(
+            grid, _vdh_oc2_stack.reshape(n_lat_v, n_lon_v, nlev_v * 3),
+        ).reshape(-1, nlev_v, 3)
+        _vdh_dmu = sh_analysis_dmu_3d(
+            grid, _vdh_dmu_stack.reshape(n_lat_v, n_lon_v, nlev_v * 3),
+        ).reshape(-1, nlev_v, 3)
+        vdiff_u_oc2, vdiff_v_oc2, hu_oc2 = (
+            _vdh_oc2[..., 0], _vdh_oc2[..., 1], _vdh_oc2[..., 2],
+        )
+        vdiff_u_dmu, vdiff_v_dmu, hv_dmu = (
+            _vdh_dmu[..., 0], _vdh_dmu[..., 1], _vdh_dmu[..., 2],
+        )
+
         dvor_hat = dvor_hat + (
-            im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vdiff_v_cos)
-            + one_over_a * sh_analysis_dmu_3d(grid, vdiff_u_cos)
+            im_over_a[:, jnp.newaxis] * vdiff_v_oc2
+            + one_over_a * vdiff_u_dmu
         )
         ddiv_hat = ddiv_hat + (
-            im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vdiff_u_cos)
-            - one_over_a * sh_analysis_dmu_3d(grid, vdiff_v_cos)
+            im_over_a[:, jnp.newaxis] * vdiff_u_oc2
+            - one_over_a * vdiff_v_dmu
         )
+    else:
+        hu_oc2 = sh_analysis_oc2_3d(grid, hu_cos)
+        hv_dmu = sh_analysis_dmu_3d(grid, hv_cos)
 
     # --- 16. Free-surface tendency ---
     # Use flux-form continuity explicitly: dη/dt = -sum_k div(h_k * v_k).
     # This avoids the div(v)*h approximation error on deforming z-star layers.
-    hu_cos = h_k.real * u_cos * mask_3d
-    hv_cos = h_k.real * v_cos * mask_3d
-    div_hv_hat = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, hu_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, hv_cos)
-    )
+    div_hv_hat = im_over_a[:, jnp.newaxis] * hu_oc2 - one_over_a * hv_dmu
     div_hv = sh_synthesis_3d(grid, div_hv_hat).real * mask_3d
     deta_dt_grid = -jnp.sum(div_hv, axis=-1) * mask
     deta_hat = sh_analysis(grid, deta_dt_grid)
