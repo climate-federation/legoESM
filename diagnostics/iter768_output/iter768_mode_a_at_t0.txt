@@ -5,16 +5,16 @@
   v_d  err Linf (vs analytic IC)        = 0.0000e+00
 
 [t=1 day (after 288 steps)]
-  v_north_Linf (per-face, cell-centre) = 1.8792e-01
-  v_ll_Linf    (post-regrid lat-lon)    = 1.5852e-01
-  u_d  err Linf (vs analytic IC)        = 2.8585e-01
-  v_d  err Linf (vs analytic IC)        = 2.7388e-01
+  v_north_Linf (per-face, cell-centre) = 1.5192e-01
+  v_ll_Linf    (post-regrid lat-lon)    = 1.3188e-01
+  u_d  err Linf (vs analytic IC)        = 2.5100e-01
+  v_d  err Linf (vs analytic IC)        = 2.0949e-01
 
 Two-point v_ll_Linf on W2 C36 1d, canonical matrix config:
   t=0      v_ll_Linf  = 8.0118e-03 m/s
     (u_d err Linf = 0, v_d err Linf = 0 at t=0)
-  t=1 day  v_ll_Linf  = 1.5852e-01 m/s
-  ratio (t=1 day / t=0) = 19.79x
+  t=1 day  v_ll_Linf  = 1.3188e-01 m/s
+  ratio (t=1 day / t=0) = 16.46x
 
 Iter-768 reports these two v_ll_Linf values and the ratio.
 It makes no attribution claim about mechanism.  Mechanism
@@ -22,13 +22,13 @@ separation is out of scope (iter-769+).
 
 Top 10 |v_ll| locations at t=1 day:
       |v_ll|      lat      lon   GC_dist_to_vertex_deg   near_cube_vertex?
-  1.5852e-01    36.0°  -139.0°                  3.33°                 YES
-  1.5810e-01   -36.0°    41.0°                  3.33°                 YES
-  1.5774e-01   -36.0°  -139.0°                  3.33°                 YES
-  1.5730e-01    36.0°    41.0°                  3.33°                 YES
-  1.5572e-01    35.0°  -138.0°                  2.47°                 YES
-  1.5520e-01   -35.0°    42.0°                  2.47°                 YES
-  1.5496e-01   -35.0°  -138.0°                  2.47°                 YES
-  1.5438e-01    35.0°    42.0°                  2.47°                 YES
-  1.5202e-01    35.0°  -137.0°                  1.66°                 YES
-  1.5147e-01   -35.0°    43.0°                  1.66°                 YES
+  1.3188e-01   -35.0°  -137.0°                  1.66°                 YES
+  1.3185e-01   -35.0°    43.0°                  1.66°                 YES
+  1.3181e-01    35.0°    43.0°                  1.66°                 YES
+  1.3180e-01    35.0°  -137.0°                  1.66°                 YES
+  1.3176e-01   -35.0°  -138.0°                  2.47°                 YES
+  1.3173e-01   -35.0°    42.0°                  2.47°                 YES
+  1.3171e-01    35.0°    42.0°                  2.47°                 YES
+  1.3170e-01    35.0°  -138.0°                  2.47°                 YES
+  1.2498e-01   -36.0°  -139.0°                  3.33°                 YES
+  1.2495e-01   -36.0°    41.0°                  3.33°                 YES

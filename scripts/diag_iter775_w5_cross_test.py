@@ -64,12 +64,16 @@ def run_w5(alpha: float):
                     c10[face, ci + di, cj + dj] *= alpha
         cdg = cdg._replace(grad_c10=jnp.asarray(c10))
 
+    # Iter-893: synchronized with `scripts/run_atmosphere_test_matrix.py`
+    # W2/W5 LEGACY config — `apply_fortran_xppm_boundary=True` activates
+    # Fortran's iord<7 cube-edge boundary formulas (tp_core.F90:357-369).
     cfg = CDGridShallowWaterConfig(
         hyperdiff_coeff=0.0,
         div_damp=8.0 * _div_damp_cube(n),
         boundary_fix=True,
         damp_v=0.06,
         nord_v=2,
+        apply_fortran_xppm_boundary=True,
     )
     model = FV3EdgeShallowWaterModel(grid, config=cfg)
     model.cdgrid = cdg

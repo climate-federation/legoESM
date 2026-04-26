@@ -68,12 +68,17 @@ exact = williamson_test2_exact(grid, days * 86400.0)
 weights = get_cubedsphere_to_latlon_weights(n, 360, 181)
 
 # Canonical matrix config.
+# Iter-893: synchronized with `scripts/run_atmosphere_test_matrix.py`
+# W2/W5 LEGACY config — `apply_fortran_xppm_boundary=True` activates
+# Fortran's iord<7 cube-edge boundary formulas (tp_core.F90:357-369),
+# reducing W2 v_north Linf at C36 1-day from 0.189 to 0.152 m/s.
 cfg = CDGridShallowWaterConfig(
     hyperdiff_coeff=0.0,
     div_damp=8.0 * _div_damp_cube(n),
     boundary_fix=True,
     damp_v=0.06,
     nord_v=2,
+    apply_fortran_xppm_boundary=True,
 )
 model = FV3EdgeShallowWaterModel(grid, config=cfg)
 cdgrid = model.cdgrid
