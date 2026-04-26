@@ -236,29 +236,43 @@ def spectral_nh_slow_tendencies(
     pgf_u_cos = pgf_x * grid.cos_lat[:, None, None]
     pgf_v_cos = pgf_y * grid.cos_lat[:, None, None]
 
-    # --- 9. Vorticity tendency ---
+    # --- 9-10. Vorticity + divergence tendencies (batched SH analyses) ---
+    # The vor/div tendencies need oc2 of {A_vor, B_vor, pgf_u_cos,
+    # pgf_v_cos, KE_cos2} (5 calls) and dmu of {A_vor, B_vor, pgf_u_cos,
+    # pgf_v_cos} (4 calls).  Stack each variant's inputs along the
+    # trailing axis and fold into the level dim — 9 sequential SH
+    # analyses collapse to 2.  Same trailing-axis-as-passive-batch
+    # property as Loops 95 and 96 for spectral PE.
+    n_lat_v, n_lon_v, nlev_v = A_vor.shape
+    _oc2_stack = jnp.stack(
+        [A_vor, B_vor, pgf_u_cos, pgf_v_cos, KE_cos2], axis=-1,
+    )  # (..., nlev, 5)
+    _dmu_stack = jnp.stack(
+        [A_vor, B_vor, pgf_u_cos, pgf_v_cos], axis=-1,
+    )  # (..., nlev, 4)
+    _oc2_flat = sh_analysis_oc2_3d(
+        grid, _oc2_stack.reshape(n_lat_v, n_lon_v, nlev_v * 5),
+    ).reshape(-1, nlev_v, 5)
+    _dmu_flat = sh_analysis_dmu_3d(
+        grid, _dmu_stack.reshape(n_lat_v, n_lon_v, nlev_v * 4),
+    ).reshape(-1, nlev_v, 4)
+    A_oc2, B_oc2, pgf_u_oc2, pgf_v_oc2, K_hat = (
+        _oc2_flat[..., 0], _oc2_flat[..., 1], _oc2_flat[..., 2],
+        _oc2_flat[..., 3], _oc2_flat[..., 4],
+    )
+    A_dmu, B_dmu, pgf_u_dmu, pgf_v_dmu = (
+        _dmu_flat[..., 0], _dmu_flat[..., 1], _dmu_flat[..., 2],
+        _dmu_flat[..., 3],
+    )
+
     # dvor/dt = -div(abs_vor * v) - curl(PGF)
-    flux_vor_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, A_vor)
-        - one_over_a * sh_analysis_dmu_3d(grid, B_vor)
-    )
-    pgf_curl = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, pgf_u_cos)
-    )
+    flux_vor_div = im_over_a[:, None] * A_oc2 - one_over_a * B_dmu
+    pgf_curl = im_over_a[:, None] * pgf_v_oc2 + one_over_a * pgf_u_dmu
     dvor_hat = -flux_vor_div - pgf_curl
 
-    # --- 10. Divergence tendency ---
     # ddiv/dt = curl(abs_vor * v) - lap(K) - div(PGF)
-    flux_vor_curl = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, B_vor)
-        + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
-    )
-    K_hat = sh_analysis_oc2_3d(grid, KE_cos2)
-    pgf_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, pgf_v_cos)
-    )
+    flux_vor_curl = im_over_a[:, None] * B_oc2 + one_over_a * A_dmu
+    pgf_div = im_over_a[:, None] * pgf_u_oc2 - one_over_a * pgf_v_dmu
     ddiv_hat = flux_vor_curl - grid.lap[:, None] * K_hat - pgf_div
 
     # --- 11. Vertical advection (grid space) ---
