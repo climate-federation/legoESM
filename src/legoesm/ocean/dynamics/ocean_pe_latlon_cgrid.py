@@ -437,6 +437,71 @@ def _flux_form_vertical_momentum_advection_weno(
 # WENO D-term (divergence flux) and K-term (KE) helpers — Phase 4b
 # =============================================================================
 
+def _split_velocity_divergence(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Split velocity divergence into zonal and meridional components at cells.
+
+    Returns the two cell-centered components of ∇·u separately:
+      ``dU_di = (u[east] - u[west]) * face_dy / area``  (1/s)
+      ``dV_dj = (v[north]*face_dx_n - v[south]*face_dx_s) / area``  (1/s)
+
+    Used by the WENO D-term, which requires the matching-direction
+    component to be WENO-upwinded and the cross-direction component to
+    stay centered (Silvestri et al. 2024 Eqs. 31-32, Appendix C).
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1, nlev) zonal velocity at u-faces.
+    v : (n_lat+1, n_lon, nlev) meridional velocity at v-faces.
+    grid : LatLonGrid
+
+    Returns
+    -------
+    dU_di_cell : (n_lat, n_lon, nlev)  zonal divergence component at cells.
+    dV_dj_cell : (n_lat, n_lon, nlev)  meridional divergence component.
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    dlat = grid.dlat
+    lat = grid.lat
+
+    # Zonal flux divergence at cells.
+    face_dy = R * dlat
+    net_zonal = (u[:, 1:, :] - u[:, :-1, :]) * face_dy
+
+    # Meridional flux divergence at cells (with cos(lat) at v-faces).
+    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
+    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])
+    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
+    cos_lat_v = jnp.cos(lat_v)
+    face_dx = R * cos_lat_v * dlon                     # (n_lat+1,)
+    fd = face_dx[:, jnp.newaxis, jnp.newaxis]
+    net_merid = v[1:, :, :] * fd[1:] - v[:-1, :, :] * fd[:-1]
+
+    area = grid.area[..., jnp.newaxis]                  # (n_lat, n_lon, 1)
+    return net_zonal / area, net_merid / area
+
+
+def _centered_cell_to_uface(phi: jnp.ndarray) -> jnp.ndarray:
+    """Centered cell→u-face interpolation, periodic in longitude."""
+    phi_west = jnp.roll(phi, 1, axis=1)
+    phi_at_uface_core = 0.5 * (phi_west + phi)
+    return jnp.concatenate([phi_at_uface_core, phi_at_uface_core[:, 0:1, :]], axis=1)
+
+
+def _centered_cell_to_vface(phi: jnp.ndarray) -> jnp.ndarray:
+    """Centered cell→v-face interpolation with wall BC (v=0 at poles)."""
+    interior = 0.5 * (phi[:-1, :, :] + phi[1:, :, :])
+    n_lon = phi.shape[1]
+    nlev = phi.shape[2]
+    zero = jnp.zeros((1, n_lon, nlev), dtype=phi.dtype)
+    return jnp.concatenate([zero, interior, zero], axis=0)
+
+
 def _weno_cell_to_uface(
     phi: jnp.ndarray,
     psi: jnp.ndarray,
@@ -921,23 +986,31 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dv_dt = dv_dt - q_at_v * Fu_at_v
 
     # --- 7c. Divergence flux (D term, Silvestri et al. 2024 Eqs. 31-32) ---
-    # WENO reconstruction of velocity divergence to faces adds implicit
-    # dissipation of the divergent mode, complementing the Z-term's
-    # rotational dissipation.  WENO5 always (Table 2).
+    # The two components of ∇·u are treated asymmetrically:
     #
-    # WARNING: The D-term upwinding is NOT energy-dissipative (Silvestri
-    # Appendix C).  When div > 0, the contribution D*u adds kinetic
-    # energy, creating a positive feedback that causes exponential
-    # velocity growth and blowup — confirmed on the Eady experiment at
-    # both 20 and 50 vertical levels by day ~42.  Gated by
-    # config.weno_d_term (default True for paper reproduction; set False
-    # for production stability).
+    #   {D}_at_u = {δ_i U; δ_i U}_i  +  ⟨δ_j V⟩_i
+    #              \________WENO____/    \__centered__/
+    #              matching direction    cross direction
+    #
+    # The cross-direction component must stay centered: WENO-upwinding
+    # the FULL divergence (which embeds δ_j V at u-faces) produces a
+    # non-energy-dissipative term `u|u|·δ_i δ_j V` that injects energy
+    # at the grid scale (Silvestri Appendix C, Eq. C7).  Symmetric for
+    # D_at_v.  Sign per Silvestri Eq. 25 evolution form: ``du/dt -= D·u``
+    # (D=∇·u, contribution from flux-form decomposition).
+    #
+    # Gated by config.weno_d_term so the effect can be isolated; default
+    # True (paper-faithful) once the split is in place.
     if _mom_adv in ("weno5", "weno7") and config.weno_d_term:
-        vel_div = divergence_cgrid(u * u_mask_3d, v * v_mask_3d, grid)
-        D_at_u = _weno_cell_to_uface(vel_div, vel_div, u, order=5)
-        D_at_v = _weno_cell_to_vface(vel_div, vel_div, v, order=5)
-        du_dt = du_dt + D_at_u * u * u_mask_3d
-        dv_dt = dv_dt + D_at_v * v * v_mask_3d
+        dU_di_cell, dV_dj_cell = _split_velocity_divergence(
+            u * u_mask_3d, v * v_mask_3d, grid)
+        # Matching direction (WENO upwind), cross direction (centered).
+        D_at_u = (_weno_cell_to_uface(dU_di_cell, dU_di_cell, u, order=5)
+                  + _centered_cell_to_uface(dV_dj_cell))
+        D_at_v = (_centered_cell_to_vface(dU_di_cell)
+                  + _weno_cell_to_vface(dV_dj_cell, dV_dj_cell, v, order=5))
+        du_dt = du_dt - D_at_u * u * u_mask_3d
+        dv_dt = dv_dt - D_at_v * v * v_mask_3d
 
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
     # Issue #171 Level-1 fix: use interface-upwind flux-form momentum

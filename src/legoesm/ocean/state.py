@@ -436,7 +436,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     C_leith: float = 0.0
     C_leith_modified: bool = False
     momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
-    weno_d_term: bool = False  # Include WENO D-term (divergence flux) in momentum advection.
-                              # The D-term upwinding is NOT energy-dissipative (Silvestri 2024
-                              # Appendix C) and can inject energy at coarse vertical resolution.
-                              # Set False to disable for stability at low nlev.
+    weno_d_term: bool = True  # Include WENO D-term (divergence flux, Silvestri Eqs. 31-32).
+                              # Implemented with proper split: matching-direction divergence
+                              # is WENO-upwinded, cross-direction stays centered (Appendix C).
+                              # Set False to disable the divergent-mode dissipation.
