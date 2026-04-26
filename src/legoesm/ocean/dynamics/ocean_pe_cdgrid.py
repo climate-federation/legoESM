@@ -174,8 +174,23 @@ def ocean_baroclinic_tendencies_cdgrid(
     dp_dx = dp_dx.astype(T.dtype)
     dp_dy_perp = dp_dy_perp.astype(T.dtype)
 
-    # --- 11. Vorticity at corners (relative only) ---
-    zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+    # --- 11. Vorticity + divergence at corners (batched) ---
+    # Batch the (zeta, div_v) center-to-corner interpolation: both are
+    # cell-centre (face, n, n, nlev) fields and the operator treats
+    # the trailing axis as a passive batch.  Stack and fold so a
+    # single halo + 4-point average serves both interps.  Same
+    # passive-trailing-axis pattern as the CD-grid PE corner interps.
+    n_face_zd, n_i_zd, n_j_zd, nlev_zd = zeta.shape
+    _zd_stack = jnp.stack([zeta, div_v], axis=-1)
+    _zd_corner_flat = _interp_center_to_corner(
+        _zd_stack.reshape(n_face_zd, n_i_zd, n_j_zd, nlev_zd * 2), cdgrid,
+    )
+    _zd_corner = _zd_corner_flat.reshape(
+        _zd_corner_flat.shape[0], _zd_corner_flat.shape[1],
+        _zd_corner_flat.shape[2], nlev_zd, 2,
+    )
+    zeta_corner = _zd_corner[..., 0]
+    div_corner = _zd_corner[..., 1]
     f_corner_3d = cdgrid.f_corner[:, :, :, None]   # (6, n+1, n+1, 1)
 
     # --- 12. Baroclinic Coriolis split ---
@@ -195,8 +210,8 @@ def ocean_baroclinic_tendencies_cdgrid(
     dv_d_dt = (-zeta_corner * u_d - f_corner_3d * u_prime_d
                - dKE_dy_perp - dp_dy_perp / rho_0)
 
-    # Skew-symmetric correction
-    div_corner = _interp_center_to_corner(div_v, cdgrid)
+    # Skew-symmetric correction (``div_corner`` was already computed
+    # alongside ``zeta_corner`` via the batched corner interpolation).
     du_d_dt = du_d_dt - 0.5 * u_d * div_corner
     dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
 
