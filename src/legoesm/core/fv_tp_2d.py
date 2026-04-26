@@ -773,7 +773,7 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
             "(regional/nested panel).  iter-890b: the FB-chain "
             "transport pipeline does not currently support regional/"
             "nested grids — `pad_halo` dispatches to the wall-BC path "
-            "for single-face inputs but the offset extraction above "
+            "for single-face inputs but the offset extraction below "
             "this guard requires non-None offsets.  iter-890 made the "
             "`_ppm_1d` GATE Fortran-faithful for bounded_domain, but "
             "regional/nested FB-chain is multi-iter work tied to a "
