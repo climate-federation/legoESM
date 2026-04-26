@@ -117,15 +117,24 @@ def mpas_compressible_euler_slow_tendencies(
     # over the trailing level axis natively, so the previous per-level
     # ``jax.lax.scan`` + 3 ``jnp.moveaxis`` round-trip is redundant.
 
-    # KE and Exner gradient at edges
+    # KE and Exner gradient at edges.  Both pi_prime and ke_3d are
+    # cell-centered (nCells, nlev) fields, and ``gradient_edge_3d``
+    # treats the trailing axis as a passive batch (the cellsOnEdge
+    # gather operates on the leading nCells axis only).  Stack the
+    # two fields along a new trailing axis, fold to (nCells, nlev*2),
+    # call ``gradient_edge_3d`` once, then unfold and slice.  2 edge
+    # gradients → 1.
     ke_3d = kinetic_energy_cell_3d(u_3d, mesh)             # (nCells, nlev)
-    grad_pi_3d = gradient_edge_3d(pi_prime, mesh)          # (nEdges, nlev)
+    n_cells_g = pi_prime.shape[0]
+    _grad_stack = jnp.stack([pi_prime, ke_3d], axis=-1)    # (nCells, nlev, 2)
+    _grad_flat = gradient_edge_3d(
+        _grad_stack.reshape(n_cells_g, nlev * 2), mesh,
+    ).reshape(-1, nlev, 2)
+    grad_pi_3d = _grad_flat[..., 0]
+    grad_ke_3d = _grad_flat[..., 1]
 
     # Theta at edges for PGF
     theta_e_3d = cell_to_edge_avg_3d(theta_total, mesh)    # (nEdges, nlev)
-
-    # KE gradient at edges
-    grad_ke_3d = gradient_edge_3d(ke_3d, mesh)             # (nEdges, nlev)
 
     # PV flux (Coriolis + vorticity).  Use rho*dz as thickness proxy
     # for mass-weighted PV.
