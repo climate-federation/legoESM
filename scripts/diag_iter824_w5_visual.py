@@ -51,9 +51,17 @@ n_steps = int(round(days * 86400 / dt))
 USE_DUOGRID = False
 
 grid = create_cubed_sphere(n=n, use_duogrid=USE_DUOGRID)
+# Iter-923: align with the iter-893 production matrix (adds
+# `apply_fortran_xppm_boundary=True` to the iter-820 baseline).
+# iter-921's audit showed W2 has a v_ll vs h_err Pareto trade-off
+# under this swap; iter-923's W5 A/B at C36 day-3 measured all 7
+# diagnostics within ±1 % — W5 is structurally insensitive to the
+# iter-893 PPM boundary toggle.  Update keeps W5 visuals aligned
+# with the live production sentinel.
 cfg = CDGridShallowWaterConfig(
     hyperdiff_coeff=0.0, div_damp=8.0 * _div_damp_cube(n),
-    boundary_fix=True, damp_v=0.06, nord_v=2)
+    boundary_fix=True, damp_v=0.06, nord_v=2,
+    apply_fortran_xppm_boundary=True)
 model = FV3EdgeShallowWaterModel(grid, config=cfg)
 cdgrid = model.cdgrid
 

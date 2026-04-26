@@ -295,3 +295,32 @@ Production W2 baseline unchanged at 1.319e-1 m/s throughout the iter-913→iter-
 **Backlog implication.**  The PPM-boundary knob family is exhausted within the current production matrix.  Reducing h_err_max below the 8.18 m floor while keeping v_ll_Linf below 0.132 m/s requires either: (a) different operator structure at the cube vertices (e.g., FB-chain corner port), (b) different halo plumbing (e.g., halo=3 to enable strict al(0)/al(npx+1) Fortran-faithful overrides), or (c) a different div_damp / boundary_fix interaction at the corners.  Pure parameter tuning within the iter-892/iter-900/iter-903 flag family cannot beat case B.
 
 **Process.**  No production code change.  Diag + sentinels + Pareto plot.  Production W2 baseline pinned by both iter-921 (single-point) and iter-922 (Pareto-frontier).  Total iter-921+iter-922 sentinel cost: ~80 s wall (two trajectories shared via module fixtures across the two test files).
+
+### Iter-923 — W5 sentinel + visual refresh: Pareto trade-off is W2-specific, not global
+
+**Trigger.**  iter-921 found a v_ll_Linf vs h_err_max Pareto trade-off on Williamson 2.  Per CLAUDE.md the same visual-verification mandate applies to Williamson 5.  iter-923 runs the iter-820/iter-893 A/B on W5 (mountain, 3-day, C36) and updates the visual script + adds a multi-metric W5 production sentinel.
+
+**A/B measurement** (W5 day-3, C36, identical config except `apply_fortran_xppm_boundary`):
+
+| metric                 | iter-820 (xppm=False) | iter-893 (xppm=True) | Δ %    |
+|------------------------|-----------------------|----------------------|--------|
+| `h_max`                | 5964.3 m              | 5965.0 m             | +0.01 % |
+| `h_min`                | 3903.7 m              | 3903.9 m             | +0.00 % |
+| `h_change_max`         | 260.7 m               | 260.4 m              | −0.10 % |
+| `h_change_l2`          | 32.94 m               | 32.83 m              | −0.32 % |
+| `v_north_max`          | 24.80 m/s             | 24.78 m/s            | −0.08 % |
+| `v_ll_Linf`            | 24.60 m/s             | 24.58 m/s            | −0.07 % |
+
+**All 6 W5 diagnostics are within ±1 % across the iter-893 swap.**  The Pareto trade-off observed on W2 (`v_ll_Linf` −17 %, `h_err_max` +77 %) does NOT manifest on W5 — W5's mountain-driven flow is structurally insensitive to the iter-892 PPM-boundary fix at cube vertices.  This is consistent with the iter-921 hypothesis that the trade-off is concentrated at cube vertices where W2's exact-zonal flow drives the worst-case stencil cancellation, while W5's mountain-driven flow has different cube-vertex sensitivity.
+
+**iter-923 deliverables.**
+
+1. `scripts/diag_iter824_w5_visual.py` — updated to use iter-893 production matrix (`apply_fortran_xppm_boundary=True`).  Comment block records the W5 A/B finding (≤1 % change across all metrics).
+2. `diagnostics/fv3_visual/w5_*_latlon.png` — regenerated at iter-893 baseline.  Visual inspection: mountain wave (v_north dipole at lon −80°, lat +30°; h_change with characteristic positive-then-negative pattern downstream of mountain) cleanly dominates faint cube-edge stripes at noise level.
+3. `tests/test_iter923_w5_production_sentinel.py` — 7 parametric pins on W5 day-3 production (h_max, h_min, h_change_max, h_change_l2, v_north_max, v_ll_Linf within ±5 %, plus h-range physical sanity gate).  All 7 pass in 22 s with one shared module-fixture trajectory.
+
+**Verification.**  7/7 pass.  W5 visual refresh shows mountain wave with no new artifacts.
+
+**Coverage extension complete.**  iter-921 (W2 single-point), iter-922 (W2 Pareto frontier), iter-923 (W5 multi-metric).  Production cube-sphere SW dynamics now has dual-pin sentinels on both W2 and W5, with the visual snapshots regenerated at the live iter-893 production matrix.
+
+**Process improvement.**  When the previous editor (iter-820/iter-824) committed visual snapshots for a baseline that subsequent iters shifted away from, the snapshots silently became stale.  iter-921→iter-923 added the discipline of regenerating ALL committed visual snapshots after a production-matrix swap (iter-893 here).  Future production-matrix changes should follow the same pattern: a visual-refresh iter immediately after a config swap.
