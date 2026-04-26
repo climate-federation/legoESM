@@ -108,13 +108,31 @@ def ocean_baroclinic_tendencies_fc(
     dp_dx = fc_gradient_x_3d(p_prime, grid, fc_config, padded=_p_pad)
     dp_dy = fc_gradient_y_3d(p_prime, grid, fc_config, padded=_p_pad)
 
-    # --- 4. Diagnose w from flux divergence ---
-    flux_div_k = fc_divergence_3d(
-        h_k * u * mask_3d, h_k * v * mask_3d, grid, fc_config,
-    )
+    # --- 4. Diagnose w from flux divergence (batched flux + bare div) ---
+    # Both ``flux_div_k`` and ``div_v`` are FC divergences on (u-component,
+    # v-component) pairs that share the (6, n, n, nlev) shape and use the
+    # same vector halo + metric weights.  Stack the two u-inputs and the
+    # two v-inputs along a new trailing axis, fold to (6, n, n, nlev*2),
+    # call ``fc_divergence_3d`` once on the thicker tensor, and unfold.
+    # The trailing axis is purely passive: the vector rotation in
+    # ``_fc_pad_halo_vector`` broadcasts ``cos_angle/sin_angle`` over the
+    # trailing axis via ``[..., None]``, the metric weights broadcast the
+    # same way, and the FC index-space derivatives operate on axis 1/2
+    # only.  2 fc_divergence calls → 1 (one shared vector halo
+    # exchange + one fused derivative + one final divide).
+    n_face_d, n_i_d, n_j_d, nlev_d = u.shape
+    u_masked = u * mask_3d
+    v_masked = v * mask_3d
+    _div_u_pair = jnp.stack([h_k * u_masked, u_masked], axis=-1)
+    _div_v_pair = jnp.stack([h_k * v_masked, v_masked], axis=-1)
+    _div_pair_flat = fc_divergence_3d(
+        _div_u_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2),
+        _div_v_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2),
+        grid, fc_config,
+    ).reshape(n_face_d, n_i_d, n_j_d, nlev_d, 2)
+    flux_div_k = _div_pair_flat[..., 0]
+    div_v = _div_pair_flat[..., 1]
     w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
-
-    div_v = fc_divergence_3d(u * mask_3d, v * mask_3d, grid, fc_config)
 
     # --- 5. Vorticity ---
     zeta = fc_curl_z_3d(u * mask_3d, v * mask_3d, grid, fc_config)
