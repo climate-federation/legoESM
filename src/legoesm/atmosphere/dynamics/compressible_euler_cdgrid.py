@@ -205,15 +205,19 @@ def cdgrid_compressible_euler_slow_tendencies(
         # axis through passively (PPM operates on (i, j) only).
         n_face, n_i, n_j, nlev_t, _ = tracers.shape
         tracers_flat = tracers.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
-        # u_c, v_c, div_v are the same for every tracer; tile across the
-        # combined level/tracer trailing axis.  ``jnp.tile`` materializes
-        # but only once per timestep (vs n_tracers separate halo MPI msgs).
+        # u_c, v_c, div_v are the same for every tracer; broadcast across
+        # the combined level/tracer trailing axis.  ``tracers_flat`` reshape
+        # interleaves levels and tracers as
+        # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]``, so we use
+        # ``jnp.repeat`` (each level value duplicated n_tracers times) rather
+        # than ``jnp.tile`` (which would concatenate the whole array and
+        # mis-align tracer ↔ level).
         if n_tracers == 1:
             u_c_b, v_c_b, div_v_b = u_c, v_c, div_v
         else:
-            u_c_b = jnp.tile(u_c, (1, 1, 1, n_tracers))
-            v_c_b = jnp.tile(v_c, (1, 1, 1, n_tracers))
-            div_v_b = jnp.tile(div_v, (1, 1, 1, n_tracers))
+            u_c_b = jnp.repeat(u_c, n_tracers, axis=-1)
+            v_c_b = jnp.repeat(v_c, n_tracers, axis=-1)
+            div_v_b = jnp.repeat(div_v, n_tracers, axis=-1)
         flux_flat = cgrid_mass_flux_divergence(
             tracers_flat, u_c_b, v_c_b, cdgrid,
         )

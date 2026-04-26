@@ -148,14 +148,18 @@ def tracer_tendencies_latlon(
     # ``pad_halo_latlon_3d`` and ``_ppm_reconstruct_*_3d`` only operate
     # on lat/lon; the trailing combined axis is passively carried
     # through.  ``u_face`` and ``v_face`` are the same for every tracer,
-    # so they are tiled across the trailing axis (no-op when n_tracers
-    # == 1).
+    # so they are broadcast across the trailing axis using ``jnp.repeat``:
+    # the ``q_flat`` reshape interleaves levels and tracers as
+    # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]``, so each level's
+    # velocity must be duplicated ``n_tracers`` times to align — using
+    # ``jnp.tile`` would concatenate the entire array and mis-align
+    # tracer ↔ level.
     q_flat = q.reshape(n_lat, n_lon, nlev * n_tracers)
     if n_tracers == 1:
         u_face_b, v_face_b = u_face, v_face
     else:
-        u_face_b = jnp.tile(u_face, (1, 1, n_tracers))
-        v_face_b = jnp.tile(v_face, (1, 1, n_tracers))
+        u_face_b = jnp.repeat(u_face, n_tracers, axis=-1)
+        v_face_b = jnp.repeat(v_face, n_tracers, axis=-1)
     horiz_adv_flat = cgrid_fv_scalar_advection_latlon_3d(
         q_flat, u_face_b, v_face_b, grid,
     )

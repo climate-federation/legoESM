@@ -222,14 +222,17 @@ def ocean_baroclinic_tendencies_cdgrid(
     tracer_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
     n_face, n_i, n_j, nlev_t, n_tracers = tracer_stack.shape
     tracer_flat = tracer_stack.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
-    # Tile C-grid velocities so they broadcast against the combined
-    # (level × tracer) axis.  Skipped when n_tracers == 1 to avoid
-    # materializing an unnecessary copy.
+    # Broadcast C-grid velocities across the combined (level × tracer)
+    # axis.  ``tracer_flat`` reshape interleaves levels and tracers as
+    # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]`` — each level's
+    # velocity must be duplicated ``n_tracers`` times to align, which
+    # ``jnp.repeat`` does directly.  ``jnp.tile`` would instead
+    # concatenate the entire array and mis-align tracer ↔ level.
     if n_tracers == 1:
         u_c_b, v_c_b = u_c, v_c
     else:
-        u_c_b = jnp.tile(u_c, (1, 1, 1, n_tracers))
-        v_c_b = jnp.tile(v_c, (1, 1, 1, n_tracers))
+        u_c_b = jnp.repeat(u_c, n_tracers, axis=-1)
+        v_c_b = jnp.repeat(v_c, n_tracers, axis=-1)
 
     horiz_flat = cgrid_tracer_advection_fct(tracer_flat, u_c_b, v_c_b, cdgrid)
     if config.K_h > 0:

@@ -444,8 +444,14 @@ def cgrid_latlon_hydrostatic_tendencies(
             if n_tracers == 1:
                 u_mass_b, v_mass_b = u_mass, v_mass
             else:
-                u_mass_b = jnp.tile(u_mass, (1, 1, n_tracers))
-                v_mass_b = jnp.tile(v_mass, (1, 1, n_tracers))
+                # ``tracer_flat`` reshape interleaves levels and tracers as
+                # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]`` — each level
+                # has all tracers consecutive.  ``jnp.repeat`` builds a
+                # matching velocity broadcast where every level value is
+                # duplicated ``n_tracers`` times.  ``jnp.tile`` would instead
+                # concatenate the whole array and mis-align tracer ↔ level.
+                u_mass_b = jnp.repeat(u_mass, n_tracers, axis=-1)
+                v_mass_b = jnp.repeat(v_mass, n_tracers, axis=-1)
             flux_flat = cgrid_fv_flux_divergence_latlon_3d(
                 tracer_flat, u_mass_b, v_mass_b, grid)
             flux_stack = flux_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
