@@ -502,9 +502,21 @@ def fv3_hydrostatic_tendencies(
         _pad_pre = _uvT_pad_stack.shape[:3]
         _uvT_pad_flat = _uvT_pad_stack.reshape(*_pad_pre, nlev_uvT * 3)
 
+    # When BOTH A_h and hyperdiff_coeff are active, compute the inner
+    # ∇²(_uvT_flat) (compact stencil) ONCE and reuse it for both the
+    # explicit Laplacian (Section 12a) and the inner stage of the
+    # biharmonic hyperdiffusion (Section 12b).  Saves one full
+    # ``_laplacian_compact_3d`` call (i.e. one extra arithmetic ∇² pass
+    # over the (u, v, T) trio) per RHS evaluation — same idea as the
+    # ocean Loop 135 K_h+K_bih sharing.
+    _lap_flat: jax.Array | None = None
+    if config.A_h > 0 or config.hyperdiff_coeff > 0:
+        _lap_flat = _laplacian_compact_3d(
+            _uvT_flat, grid, padded=_uvT_pad_flat,
+        )
+
     if config.A_h > 0:
-        lap_flat = _laplacian_compact_3d(_uvT_flat, grid, padded=_uvT_pad_flat)
-        lap_uvT = lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
+        lap_uvT = _lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
         # Batch the (lap_u, lap_v) corner interpolation: same passive-
         # trailing-axis pattern as the (u, v) corner interpolation in
         # Loop 113 — single halo + single 4-point average for both.
@@ -530,7 +542,12 @@ def fv3_hydrostatic_tendencies(
     # across (u_cell, v_cell, T).
     if config.hyperdiff_coeff > 0:
         hyperdiff_flat = _hyperdiffusion_3d(
-            _uvT_flat, grid, config.hyperdiff_coeff, padded=_uvT_pad_flat,
+            _uvT_flat, grid, config.hyperdiff_coeff,
+            padded=_uvT_pad_flat,
+            # When ``_lap_flat`` was already computed above (A_h > 0),
+            # feed it in as the inner ∇² so the biharmonic skips a
+            # redundant compact-stencil pass.
+            inner_lap=_lap_flat,
         )
         hyperdiff_uvT = hyperdiff_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,

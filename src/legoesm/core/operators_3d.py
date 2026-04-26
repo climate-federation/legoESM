@@ -154,6 +154,7 @@ def divergence_3d(
 def hyperdiffusion_3d(
     field_3d: jax.Array, grid: CubedSphereGrid, coeff: float,
     padded: jax.Array | None = None,
+    inner_lap: jax.Array | None = None,
 ) -> jax.Array:
     """Compute hyperdiffusion at all levels using native 4D halo.
 
@@ -168,13 +169,25 @@ def hyperdiffusion_3d(
     padded : jax.Array or None
         Pre-padded field, shape (6, n+2, n+2, nlev).  When provided,
         the inner Laplacian skips its own halo exchange (saves 1 msg).
+    inner_lap : jax.Array or None
+        Pre-computed inner ``∇²(field_3d)`` (compact stencil), shape
+        ``(6, n, n, nlev)``.  When provided, the inner Laplacian
+        computation is skipped entirely — useful when the caller has
+        already evaluated the same ∇² for an explicit ``A_h``
+        Laplacian on the same input and wants to reuse it for the
+        biharmonic.  ``padded`` is then ignored for the inner stage
+        (still does not affect the outer halo).
 
     Returns
     -------
     jax.Array : Hyperdiffusion tendency, shape (6, n, n, nlev).
     """
-    # Inner ∇² (compact): uses pre-padded if available.
-    lap1 = laplacian_compact_3d(field_3d, grid, padded=padded)
+    # Inner ∇² (compact): uses pre-padded if available, or skip the
+    # whole computation when the caller already has the result.
+    if inner_lap is not None:
+        lap1 = inner_lap
+    else:
+        lap1 = laplacian_compact_3d(field_3d, grid, padded=padded)
     # Outer ∇² = div(grad).  Pad lap1 once and feed it to both
     # gradient_x_3d and gradient_y_3d via their ``padded=`` kwarg —
     # otherwise each grad call would emit its own pad_halo_4d MPI
