@@ -286,8 +286,17 @@ def cdgrid_compressible_euler_slow_tendencies(
     dv_dt = _duv_dt[..., 1]
 
     # --- 9. Vertical advection of u, v ---
-    du_dt = du_dt + vertical_advection_height(u, w, dz, dz_half, J)
-    dv_dt = dv_dt + vertical_advection_height(v, w, dz, dz_half, J)
+    # Batch the two ``vertical_advection_height`` calls by stacking
+    # (u, v) along a new leading axis.  ``w_full`` / ``w_star``
+    # depend only on (w, dz, dz_half, J) so they are computed once
+    # and the trailing-axis ``[..., :-1] - [..., 1:]`` gradient
+    # broadcasts across the new axis.  Two passes through the
+    # vertical-advection kernel collapse to one — same trailing/leading
+    # axis batching as Loops 137/141.
+    _uv_va = jnp.stack([u, v], axis=0)
+    _uv_va_adv = vertical_advection_height(_uv_va, w, dz, dz_half, J)
+    du_dt = du_dt + _uv_va_adv[0]
+    dv_dt = dv_dt + _uv_va_adv[1]
 
     # --- 10. Theta equation: advective form -v·∇θ ---
     # The θ equation uses advective form (not divergence/flux form) because

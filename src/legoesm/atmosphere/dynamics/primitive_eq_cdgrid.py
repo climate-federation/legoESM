@@ -356,11 +356,18 @@ def fv3_hydrostatic_tendencies(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
-        u_cc = _uv_cc[..., 0]
-        v_cc = _uv_cc[..., 1]
-        vert_adv_u_cc = vertical_advection_hybrid(u_cc, mass_flux, p_s, sigma_coord)
-        vert_adv_v_cc = vertical_advection_hybrid(v_cc, mass_flux, p_s, sigma_coord)
-        _vert_adv_uv_cc = jnp.stack([vert_adv_u_cc, vert_adv_v_cc], axis=-1)
+        # Batch the two ``vertical_advection_hybrid`` calls on (u_cc,
+        # v_cc) by adding a leading axis instead of trailing.
+        # ``vertical_advection_hybrid`` operates on ``axis=-1`` for the
+        # vertical, so we need the (u, v) axis at axis=0 (any
+        # non-trailing axis) — ``F_full`` and the upwind grad are
+        # computed once and broadcast over the new (2,) axis.  Same
+        # axis-0 batching as the CD-grid CE vertical advection.
+        _uv_cc_lead = jnp.moveaxis(_uv_cc, -1, 0)  # (2, face, i, j, nlev)
+        _vert_adv_uv_cc_lead = vertical_advection_hybrid(
+            _uv_cc_lead, mass_flux, p_s, sigma_coord,
+        )
+        _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uv_cc_lead, 0, -1)
         _vert_adv_uv_d = _interp_center_to_corner(
             _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
             cdgrid,
@@ -395,11 +402,16 @@ def fv3_hydrostatic_tendencies(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
-        u_cc = _uv_cc[..., 0]
-        v_cc = _uv_cc[..., 1]
-        vert_adv_u_cc = vertical_advection(u_cc, sigma_dot, sigma_coord)
-        vert_adv_v_cc = vertical_advection(v_cc, sigma_dot, sigma_coord)
-        _vert_adv_uv_cc = jnp.stack([vert_adv_u_cc, vert_adv_v_cc], axis=-1)
+        # Batch (u_cc, v_cc) vertical advection — ``vertical_advection``
+        # operates on ``axis=-1`` for the vertical, so move the (u, v)
+        # axis to leading where it broadcasts cleanly through the
+        # upwind gradient.  Same pattern as the hybrid branch above
+        # and the CD-grid CE batching.
+        _uv_cc_lead = jnp.moveaxis(_uv_cc, -1, 0)  # (2, face, i, j, nlev)
+        _vert_adv_uv_cc_lead = vertical_advection(
+            _uv_cc_lead, sigma_dot, sigma_coord,
+        )
+        _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uv_cc_lead, 0, -1)
         _vert_adv_uv_d = _interp_center_to_corner(
             _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
             cdgrid,
