@@ -30,6 +30,22 @@ def _div_damp_cube(n, ref_n=48, ref_coeff=1.5e7):
     return ref_coeff * (ref_n / n) ** 2
 
 
+@pytest.fixture(scope="module")
+def _w2_v_ll_linf_c16():
+    """Module-scoped cache of the C16 W2 trajectory.  Iter-911b
+    (Codex iter-911 stop-time fix): pre-iter-911b the third sentinel
+    re-ran the C16 + C24 trajectories, doubling CI time.  Caching at
+    module scope makes each trajectory run exactly once per test
+    file invocation."""
+    return _run_w2_v_ll_linf(n=16)
+
+
+@pytest.fixture(scope="module")
+def _w2_v_ll_linf_c24():
+    """Module-scoped cache of the C24 W2 trajectory."""
+    return _run_w2_v_ll_linf(n=24)
+
+
 def _run_w2_v_ll_linf(n: int) -> float:
     """Run W2 1-day at the iter-892/iter-893 production matrix config
     with CFL-preserving dt = 300 * (36/n) and return v_ll_Linf."""
@@ -80,12 +96,12 @@ def _run_w2_v_ll_linf(n: int) -> float:
     return float(np.max(np.abs(v_ll)))
 
 
-def test_iter911_w2_c16_v_ll_linf_matches_iter910():
+def test_iter911_w2_c16_v_ll_linf_matches_iter910(_w2_v_ll_linf_c16):
     """iter-910 measured C16 W2 v_ll_Linf = 0.3537 m/s.  Pin within
     ±5 % tolerance."""
     iter910_value = 3.5367e-01
     tol_pct = 0.05  # 5 %
-    measured = _run_w2_v_ll_linf(n=16)
+    measured = _w2_v_ll_linf_c16
     assert np.isfinite(measured), (
         f"C16 W2 v_ll_Linf is NaN — production path destabilized.")
     rel_err = abs(measured - iter910_value) / iter910_value
@@ -98,12 +114,12 @@ def test_iter911_w2_c16_v_ll_linf_matches_iter910():
         f"iter-910 doc-entry table.")
 
 
-def test_iter911_w2_c24_v_ll_linf_matches_iter910():
+def test_iter911_w2_c24_v_ll_linf_matches_iter910(_w2_v_ll_linf_c24):
     """iter-910 measured C24 W2 v_ll_Linf = 0.1831 m/s.  Pin within
     ±5 % tolerance.  C24 takes ~60 s — runs slower than C16."""
     iter910_value = 1.8311e-01
     tol_pct = 0.05
-    measured = _run_w2_v_ll_linf(n=24)
+    measured = _w2_v_ll_linf_c24
     assert np.isfinite(measured), (
         f"C24 W2 v_ll_Linf is NaN — production path destabilized.")
     rel_err = abs(measured - iter910_value) / iter910_value
@@ -113,7 +129,8 @@ def test_iter911_w2_c24_v_ll_linf_matches_iter910():
         f"re-baselining guidance.")
 
 
-def test_iter911_w2_resolution_convergence_holds_c16_to_c24():
+def test_iter911_w2_resolution_convergence_holds_c16_to_c24(
+        _w2_v_ll_linf_c16, _w2_v_ll_linf_c24):
     """The post-iter-893 baseline shows resolution refinement: C16 ->
     C24 should reduce v_ll_Linf by ~50 % (iter-910: 0.3537 -> 0.1831,
     -48 %).  Pin the convergence ratio with ±10 % tolerance.
@@ -121,13 +138,19 @@ def test_iter911_w2_resolution_convergence_holds_c16_to_c24():
     A future change that turned this into a non-monotone or
     resolution-invariant pattern would fire this sentinel — reverting
     to the pre-iter-893 "resolution-invariant" regime would be a
-    serious W2 regression."""
+    serious W2 regression.
+
+    Iter-911b (Codex iter-911 stop-time fix): uses the module-scoped
+    fixtures `_w2_v_ll_linf_c16` and `_w2_v_ll_linf_c24` so the
+    trajectories run exactly ONCE for the whole test file (was: this
+    test re-ran both trajectories, doubling CI time).
+    """
     iter910_c16 = 3.5367e-01
     iter910_c24 = 1.8311e-01
     iter910_ratio = iter910_c16 / iter910_c24  # ≈ 1.93
 
-    c16 = _run_w2_v_ll_linf(n=16)
-    c24 = _run_w2_v_ll_linf(n=24)
+    c16 = _w2_v_ll_linf_c16
+    c24 = _w2_v_ll_linf_c24
     assert np.isfinite(c16) and np.isfinite(c24)
     measured_ratio = c16 / c24
     rel = abs(measured_ratio - iter910_ratio) / iter910_ratio
