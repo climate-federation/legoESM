@@ -156,14 +156,25 @@ def mpas_hydrostatic_tendencies(
     # Pressure gradient correction: R_d * T_edge * grad_eta(ln p)
     # In sigma coords: grad_eta(ln p) = grad(ln p_s).
     # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    T_edge_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
-    pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
     if _hybrid:
-        p_full_edge = cell_to_edge_avg_3d(p_full, mesh)  # (nEdges, nlev)
+        # Batch the two cell-to-edge gathers (T_3d and p_full) into
+        # one call.  ``cell_to_edge_avg_3d`` is a pure ``cellsOnEdge``
+        # gather + average — same passive trailing-axis pattern as
+        # Loops 109/112 (MPAS divergence/cell-to-edge batching).
+        nlev_te = T_3d.shape[-1]
+        _Tp_stack = jnp.stack([T_3d, p_full], axis=-1)  # (nCells, nlev, 2)
+        _Tp_edge = cell_to_edge_avg_3d(
+            _Tp_stack.reshape(_Tp_stack.shape[0], nlev_te * 2), mesh,
+        ).reshape(-1, nlev_te, 2)
+        T_edge_3d = _Tp_edge[..., 0]
+        p_full_edge = _Tp_edge[..., 1]
         p_s_edge_scalar = cell_to_edge_avg(p_s, mesh)    # (nEdges,)
         B_full = sigma_coord.B_full  # (nlev,)
         hybrid_factor_edge = B_full * p_s_edge_scalar[:, None] / jnp.maximum(p_full_edge, 1e-10)
-        pg_corr_3d = pg_corr_3d * hybrid_factor_edge
+        pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None] * hybrid_factor_edge
+    else:
+        T_edge_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
+        pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
 
     # PV flux: h_proxy = dp/g (pressure thickness)
     if _hybrid:
