@@ -86,8 +86,14 @@ def _spectral_conservation_fixer(
     H_bathy = sh_synthesis(grid, state_old.H_bathy_hat.data).real
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
 
-    eta_old = sh_synthesis(grid, state_old.eta_hat.data).real * mask
-    eta_new = sh_synthesis(grid, state_new.eta_hat.data).real * mask
+    # Batch the two ``eta`` 2D syntheses into a single
+    # ``sh_synthesis_3d`` on a stacked (n_sh, 2) tensor — the 3D variant
+    # treats the trailing axis as a passive batch even when the spatial
+    # shape is 2D.  2 SH-syntheses → 1.
+    _eta_pair = jnp.stack([state_old.eta_hat.data, state_new.eta_hat.data], axis=-1)
+    _eta_grid = sh_synthesis_3d(grid, _eta_pair).real  # (n_lat, n_lon, 2)
+    eta_old = _eta_grid[..., 0] * mask
+    eta_new = _eta_grid[..., 1] * mask
     eta_floor = jnp.asarray(config.min_water_column_m, dtype=eta_new.dtype) - H_bathy
     eta_new = jnp.maximum(eta_new, eta_floor) * mask
 
@@ -109,10 +115,22 @@ def _spectral_conservation_fixer(
         eta_fixed, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     )
 
-    T_old = sh_synthesis_3d(grid, state_old.T_hat.data).real
-    T_new = sh_synthesis_3d(grid, state_new.T_hat.data).real
-    S_old = sh_synthesis_3d(grid, state_old.S_hat.data).real
-    S_new = sh_synthesis_3d(grid, state_new.S_hat.data).real
+    # Batch the four (n_sh, nlev) tracer syntheses (T_old, T_new, S_old,
+    # S_new) into a single sh_synthesis_3d on a (n_sh, nlev*4) tensor.
+    # 4 SH-syntheses → 1.
+    n_sh_c, nlev_c = state_old.T_hat.data.shape
+    _ts_stack = jnp.stack(
+        [state_old.T_hat.data, state_new.T_hat.data,
+         state_old.S_hat.data, state_new.S_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 4)
+    _ts_grid = sh_synthesis_3d(
+        grid, _ts_stack.reshape(n_sh_c, nlev_c * 4),
+    ).real.reshape(grid.n_lat, grid.n_lon, nlev_c, 4)
+    T_old = _ts_grid[..., 0]
+    T_new = _ts_grid[..., 1]
+    S_old = _ts_grid[..., 2]
+    S_new = _ts_grid[..., 3]
 
     local_tracer_terms = jnp.stack(
         [
@@ -132,10 +150,17 @@ def _spectral_conservation_fixer(
     salt_corr = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
     S_fixed = S_new + salt_corr * mask_3d
 
+    # Batch the two tracer analyses (T_fixed, S_fixed) into a single
+    # ``sh_analysis_3d`` on a stacked (n_lat, n_lon, nlev*2) tensor.
+    # 2 SH-analyses → 1.  ``eta_fixed`` is 2D and stays separate.
+    _ts_fixed = jnp.stack([T_fixed, S_fixed], axis=-1)  # (..., nlev, 2)
+    _ts_fixed_hat = sh_analysis_3d(
+        grid, _ts_fixed.reshape(grid.n_lat, grid.n_lon, nlev_c * 2),
+    ).reshape(-1, nlev_c, 2)
     return state_new._replace(
         eta_hat=state_new.eta_hat.replace(data=sh_analysis(grid, eta_fixed)),
-        T_hat=state_new.T_hat.replace(data=sh_analysis_3d(grid, T_fixed)),
-        S_hat=state_new.S_hat.replace(data=sh_analysis_3d(grid, S_fixed)),
+        T_hat=state_new.T_hat.replace(data=_ts_fixed_hat[..., 0]),
+        S_hat=state_new.S_hat.replace(data=_ts_fixed_hat[..., 1]),
     )
 
 
