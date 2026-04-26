@@ -769,3 +769,145 @@ def test_iter889_w2_legacy_is_known_worse_on_flag():
         f"threading in _ppm_reconstruct_1d / cgrid_mass_flux_divergence "
         f"/ fv3_sw_tendencies / FV3EdgeShallowWaterModel.step per "
         f"iter-889.")
+
+
+def test_iter889b_duogrid_bypasses_boundary_override():
+    """Iter-889b (Codex iter-889 stop-time fix): on duogrid /
+    bounded-domain grids the iter-889 production-path boundary
+    override must be BYPASSED, matching Fortran's gate at
+    `tp_core.F90:333` / `:357`:
+        if ( .not. (bounded_domain .or. duogrid) .and. grid_type<3 )
+
+    Pre-iter-889b `cgrid_mass_flux_divergence` forwarded
+    `apply_fortran_xppm_boundary` unconditionally to
+    `_ppm_reconstruct_1d`.  When a user enabled the flag on a
+    duogrid grid, the legacy non-duogrid boundary formula would fire
+    incorrectly (the cross-face halo from `pad_halo_vector` already
+    delivers Fortran-faithful neighbour-face values, so the legacy
+    s11/s14/s15-style override is wrong on duogrid).
+
+    iter-889b adds an `effective_xppm_boundary = apply_fortran_xppm_boundary
+    AND not cdgrid.base.bounded_domain` gate inside
+    `cgrid_mass_flux_divergence`.
+
+    This test verifies: setting `apply_fortran_xppm_boundary=True` on
+    a DUOGRID grid produces output bit-identical to setting it False
+    (i.e., the gate bypasses the override exactly as Fortran does).
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig,
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+    )
+    import sys
+    sys.path.insert(0, "tests")
+    from test_cases.williamson import williamson_test2
+
+    n = 12
+    # Use duogrid mode so bounded_domain is True
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    assert grid.bounded_domain, (
+        "Test setup error: duogrid grid did not produce "
+        "bounded_domain=True; iter-889b gate test is invalid.")
+
+    sw = williamson_test2(grid)
+    u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+    def _step_with_flag(flag):
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            div_damp=0.0,
+            boundary_fix=False,  # boundary_fix is duogrid-disabled
+            damp_v=0.0,
+            apply_fortran_xppm_boundary=flag)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+        return model.step(state, 60.0)
+
+    state_off = _step_with_flag(False)
+    state_on = _step_with_flag(True)
+
+    # Duogrid output MUST be bit-identical: the gate bypasses the
+    # override regardless of the flag value.
+    np.testing.assert_array_equal(
+        np.asarray(state_off.h), np.asarray(state_on.h),
+        err_msg=(
+            "Duogrid + apply_fortran_xppm_boundary=True produced "
+            "different h than =False.  iter-889b gate "
+            "(`not cdgrid.base.bounded_domain`) is broken — the "
+            "Fortran-non-duogrid boundary override fires on duogrid, "
+            "which is exactly the bug Codex flagged in iter-889 "
+            "stop-time review."))
+    np.testing.assert_array_equal(
+        np.asarray(state_off.u_d), np.asarray(state_on.u_d))
+    np.testing.assert_array_equal(
+        np.asarray(state_off.v_d), np.asarray(state_on.v_d))
+
+
+def test_iter889b_legacy_non_duogrid_still_responds_to_flag():
+    """Sanity: on the legacy global cubed sphere (NOT bounded_domain),
+    the iter-889b gate does NOT bypass — the flag still produces
+    different output from the default.  Mirrors the iter-889 production
+    behavioural test but explicitly contrasts with the iter-889b
+    duogrid-bypass case above.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig,
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+    )
+    import sys
+    sys.path.insert(0, "tests")
+    from test_cases.williamson import williamson_test2
+
+    n = 12
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
+    assert not grid.bounded_domain, (
+        "Test setup error: legacy non-duogrid grid produced "
+        "bounded_domain=True; iter-889b gate test is invalid.")
+
+    sw = williamson_test2(grid)
+    u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+    def _step_with_flag(flag):
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            div_damp=8.0 * 1.5e7 * (48.0 / n) ** 2,
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2,
+            apply_fortran_xppm_boundary=flag)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+        return model.step(state, 60.0)
+
+    state_off = _step_with_flag(False)
+    state_on = _step_with_flag(True)
+
+    # Legacy (non-bounded-domain): output MUST differ
+    diff_h = float(np.max(np.abs(np.asarray(state_on.h)
+                                  - np.asarray(state_off.h))))
+    diff_u = float(np.max(np.abs(np.asarray(state_on.u_d)
+                                  - np.asarray(state_off.u_d))))
+    diff_v = float(np.max(np.abs(np.asarray(state_on.v_d)
+                                  - np.asarray(state_off.v_d))))
+    max_diff = max(diff_h, diff_u, diff_v)
+    assert max_diff > 1e-12, (
+        f"Legacy non-bounded-domain + apply_fortran_xppm_boundary=True "
+        f"produced output bit-identical to =False: "
+        f"h={diff_h:.3e}, u_d={diff_u:.3e}, v_d={diff_v:.3e}.  "
+        f"iter-889b gate is over-zealous — it should ONLY bypass on "
+        f"duogrid/bounded-domain, NOT on the legacy global cubed "
+        f"sphere where the override is the entire purpose of the flag.")

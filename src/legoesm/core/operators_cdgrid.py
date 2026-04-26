@@ -613,6 +613,21 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
     n = cdgrid.n
 
+    # Iter-889b (Codex iter-889 stop-time fix): Fortran's iord<7 cube-
+    # edge boundary overrides at tp_core.F90:357 are gated on
+    # ``.not. (bounded_domain .or. duogrid) .and. grid_type<3``.
+    # iter-889 forwarded the kwarg unconditionally; in duogrid /
+    # bounded-domain mode the cross-face halo (or Neumann panel BC)
+    # already provides Fortran-faithful neighbour-face values so the
+    # legacy non-duogrid boundary formula must NOT fire.  Same gate
+    # pattern as iter-865's `boundary_fix` and iter-865b's
+    # `fortran_vector_corner_fill` corrections.  Compute the EFFECTIVE
+    # flag here so the gate lives in one place and the leaf
+    # `_ppm_reconstruct_1d` receives a pre-gated boolean.
+    effective_xppm_boundary = (
+        apply_fortran_xppm_boundary
+        and not cdgrid.base.bounded_domain)
+
     # --- X-direction PPM ---
     # For each j, reconstruct h along i-direction and compute flux at
     # each x-interface.  h_pad[:, :, j+2] for j in [0, n-1] gives the
@@ -627,7 +642,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     h_x_strips = h_pad[:, :, 2:-2]                  # (6, n+4, n)
     q_L_x, q_R_x = _ppm_reconstruct_1d(
         h_x_strips, axis=1,
-        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        apply_fortran_xppm_boundary=effective_xppm_boundary,
         n_interior=n)
 
     # Face values at x-interfaces: we need n+1 faces for interior cells
@@ -648,7 +663,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     h_y_strips = h_pad[:, 2:-2, :]  # (6, n, n+4)
     q_L_y, q_R_y = _ppm_reconstruct_1d(
         h_y_strips, axis=2,
-        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        apply_fortran_xppm_boundary=effective_xppm_boundary,
         n_interior=n)
 
     q_R_bottom = q_R_y[:, :, 1:n+2]   # (6, n, n+1)

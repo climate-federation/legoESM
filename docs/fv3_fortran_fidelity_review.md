@@ -2339,3 +2339,38 @@ with constants `c1 = -2/14, c2 = 11/14, c3 = 5/14` (`tp_core.F90:63-65`).  iter-
 - This doc entry.
 
 **Process.**  164th iter.  Codex iter-888c follow-up review identified the production-path analogue of iter-888's gap.  iter-889 implements it (default-OFF), measures W2 impact (~4× worse), and locks the result with a known-worse sentinel.  Net Fortran-fidelity gain: the Fortran iord<7 boundary path is now reachable from the user-facing config; default-OFF preserves the empirically-better production behaviour while documenting the Fortran-faithful path's known-worse W2 LEGACY outcome.
+
+### Iter-889b — gate iter-889 boundary override on `not bounded_domain` (Codex iter-889 stop-time fix)
+
+**Codex iter-889 stop-time finding.**  The iter-889 implementation forwarded `apply_fortran_xppm_boundary` unconditionally from `cgrid_mass_flux_divergence` into `_ppm_reconstruct_1d`.  Fortran's tp_core.F90:333/357 gate is `.not. (bounded_domain .or. duogrid) .and. grid_type<3`, but iter-889's plumbing had no such gate — when a user enabled the flag on a duogrid grid, the legacy non-duogrid boundary formula would fire incorrectly.  Same bug class as iter-865's pre-fix `boundary_fix` and `fortran_vector_corner_fill` gating gap.
+
+**Fortran reference.**
+
+```fortran
+if ( .not. (bounded_domain .or. duogrid) .and. grid_type<3 ) then
+   ! lines 357-369 — iord<7 boundary overrides
+   if ( is==1 ) then
+      al(0)   = c1*q1(-2) + c2*q1(-1) + c3*q1(0)
+      ...
+   endif
+endif
+```
+
+In our cdgrid `bounded_domain = (regional .or. nested .or. duogrid)` (`fv_arrays.F90:1512`), so `.not. (bounded_domain .or. duogrid)` is equivalent to `.not. bounded_domain`.
+
+**Fix.**  Compute `effective_xppm_boundary = apply_fortran_xppm_boundary AND not cdgrid.base.bounded_domain` inside `cgrid_mass_flux_divergence` (line ~622) and pass the gated boolean to both `_ppm_reconstruct_1d` calls (X-sweep + Y-sweep).  The leaf function receives a pre-gated boolean; this matches iter-865's "gate lives at the call site that has access to the grid" pattern.
+
+**Tests** (+2 new tests, 17 total):
+16. `test_iter889b_duogrid_bypasses_boundary_override` — duogrid grid + flag=True must produce output bit-identical to flag=False.  Catches a future regression where the gate is removed.
+17. `test_iter889b_legacy_non_duogrid_still_responds_to_flag` — sanity: on legacy non-bounded-domain grid the override still fires (the flag still has effect).  Mirrors iter-865's "smoothing fires in legacy mode" gate-completeness test.
+
+**iter-888 chain latent gap (deferred).**  The FB-chain `_ppm_1d` (iter-888) gates on `not use_duogrid`, where `use_duogrid` is duogrid-only and does NOT cover regional/nested bounded-domain cases.  On a regional or nested grid (bounded_domain=True but use_duogrid=False), the iter-888 boundary overrides would fire — same gap iter-889 had before iter-889b fixed it.  Deferred because (a) FB-chain is not currently used for regional/nested in the matrix runner; (b) fixing requires plumbing `bounded_domain` through `fv_tp_2d` → `_xppm`/`_yppm` → `_ppm_1d`; (c) FB chain itself is unstable so this latent gap has no observable impact in current test scope.
+
+**Verification.**  All 125 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.  iter-888 chain test count: 17 (5 iter-888 + 6 iter-888b + 3 iter-888c + 2 iter-889 + 2 iter-889b).
+
+**Deliverable.**
+- `src/legoesm/core/operators_cdgrid.py:622-633`: `effective_xppm_boundary` gate.
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: +2 gate-correctness tests.
+- This doc entry.
+
+**Process.**  165th iter.  Codex iter-889 stop-time review caught a gating gap matching iter-865's earlier pattern.  iter-889b is the smallest correct fix: a single `effective_xppm_boundary` AND-gate at the caller site, plus 2 sentinel tests for both gate directions.  Default-OFF preserved; legacy non-bounded-domain behaviour unchanged; duogrid/bounded-domain now correctly bypasses the override.
