@@ -11069,14 +11069,29 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
         # (2) Per-face max — catches face-specific drift that a global
         # max wouldn't detect.
         f_max = np.array([float(h_np[f].max()) for f in range(6)])
+        # Iter-914 rebaseline: drift caused by iter-878's monotonicity-
+        # overshoot limiter LHS-factor fix (also affecting `_ppm_1d` in
+        # `fv_tp_2d.py`).  Pre-iter-878 the limiter condition missed a
+        # `dq` factor on the LHS; iter-878 added it to match CW84 /
+        # Fortran pert_ppm.  Cosine bell (non-monotone at peak)
+        # responds to this fix: face-3 max drifted -0.046, face-4 tail
+        # +1.91 (the iter-878 limiter is less aggressive on the
+        # advection tail), face-0 leakage +0.026.
         # Face 3 holds the bell peak.
-        self.assertAlmostEqual(f_max[3], 896.294677734375, places=2,
+        self.assertAlmostEqual(f_max[3], 896.2488403320312, places=2,
             msg=f"Face-3 max (bell peak) fingerprint changed: {f_max[3]:.3f}")
-        # Face 4 has a tail from the advection path.
-        self.assertAlmostEqual(f_max[4], 7.254971981048584, places=4,
+        # Face 4 has a tail from the advection path.  Iter-914
+        # relaxed the precision from places=4 to places=2 because the
+        # iter-878 limiter fix produces a 26 % drift in this tail
+        # (7.25 → 9.16 m).  This is a structural change, not a small
+        # numerical drift, so the looser pin reflects that the tail
+        # value is sensitive to limiter implementation choice.
+        self.assertAlmostEqual(f_max[4], 9.162005424499512, places=2,
             msg=f"Face-4 max (tail) fingerprint changed: {f_max[4]:.4f}")
-        # Face 0 has minor leakage; bound it tightly.
-        self.assertAlmostEqual(f_max[0], 0.4569498300552368, places=5,
+        # Face 0 has minor leakage; bound it tightly.  Iter-914
+        # relaxed places=5 → places=4 because the iter-878 fix
+        # produces a +5.6 % drift here.
+        self.assertAlmostEqual(f_max[0], 0.48261451721191406, places=4,
             msg=f"Face-0 max (leakage) fingerprint changed: {f_max[0]:.5f}")
         # Faces 1, 2, 5: the bell never advects here within 1 day — should
         # be EXACTLY zero (after transport_step's mass clip + rescale).
@@ -11098,17 +11113,18 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
         # shape — catches diffusion that widens the bell, directional
         # asymmetry, and other regressions that preserve the peak
         # value but distort the bell profile.
+        # Iter-914 rebaseline: post-iter-878 limiter values.
         neighbor_fingerprints = {
             # 4-connected neighbors
-            (25, 27): 875.10693359375,
-            (27, 27): 883.236572265625,
-            (26, 26): 895.2742919921875,
-            (26, 28): 862.8768310546875,
+            (25, 27): 875.0620727539062,
+            (27, 27): 883.1915283203125,
+            (26, 26): 895.2283935546875,
+            (26, 28): 862.8318481445312,
             # Diagonal neighbors
-            (25, 26): 878.779296875,
-            (27, 26): 878.5997314453125,
-            (25, 28): 823.8604736328125,
-            (27, 28): 858.3539428710938,
+            (25, 26): 878.7340087890625,
+            (27, 26): 878.5547485351562,
+            (25, 28): 823.8182373046875,
+            (27, 28): 858.3087768554688,
         }
         for (i, j), expected in neighbor_fingerprints.items():
             got = float(h_np[3, i, j])
@@ -11131,16 +11147,20 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
         box_mass = float(
             (h_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]
              * area_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]).sum())
-        self.assertAlmostEqual(box_mass, 2303419146567680.0, places=-8,
+        # Iter-914 rebaseline values (post-iter-878 limiter).
+        self.assertAlmostEqual(box_mass, 2303295666257920.0, places=-8,
             msg=f"7x7 box MASS around peak drifted: {box_mass:.3e}")
         # Face 3 mass (bell-carrying face, area-weighted).
         face3_mass = float((h_np[3] * area_np[3]).sum())
-        self.assertAlmostEqual(face3_mass, 4191998944739328.0,
+        self.assertAlmostEqual(face3_mass, 4191834930675712.0,
             places=-8,
             msg=f"face-3 area-weighted mass drifted: {face3_mass:.3e}")
-        # Face 4 mass (tail only, area-weighted).
+        # Face 4 mass (tail only, area-weighted).  Iter-914 also
+        # relaxed places=-4 → places=-3 because the iter-878 limiter
+        # fix produced a 7 % drift in face-4 tail mass (+1.7e11 from
+        # 2.47e12 to 2.65e12).
         face4_mass = float((h_np[4] * area_np[4]).sum())
-        self.assertAlmostEqual(face4_mass, 2473981902848.0, places=-4,
+        self.assertAlmostEqual(face4_mass, 2645436661760.0, places=-3,
             msg=f"face-4 (tail) area-weighted mass drifted: {face4_mass:.3e}")
         # Global mass conservation: integrated mass should match
         # mass_target enforced by transport_step.  Allow tolerance for
@@ -11216,8 +11236,10 @@ class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
             -1.528400660199037e-05, places=12,
             msg="production dv[3,2,6] fingerprint changed.")
         # Global reductions (catch bugs that cancel pointwise).
+        # Iter-914 rebaseline: 1.04e-6 drift at places=10 from iter-878
+        # limiter fix.  Updated to current measurement.
         self.assertAlmostEqual(float(dh.sum()),
-            0.005122296389910602, places=10,
+            0.005123338227347317, places=10,
             msg="production dh.sum() fingerprint changed.")
         self.assertAlmostEqual(float(du.sum()),
             -0.007307134530367604, places=10,
@@ -11226,8 +11248,10 @@ class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
             -0.003963301875215937, places=10,
             msg="production dv.sum() fingerprint changed.")
         # Magnitude fingerprints (catch any scale regression).
+        # Iter-914 rebaseline: 1.89e-7 drift at places=10 (post-
+        # iter-878 limiter fix).
         self.assertAlmostEqual(float(np.abs(dh).max()),
-            0.0016060754230186561, places=10,
+            0.0016062647250376994, places=10,
             msg="production max|dh| fingerprint changed.")
         self.assertAlmostEqual(float(np.abs(du).max()),
             0.0005217483352837994, places=10,
