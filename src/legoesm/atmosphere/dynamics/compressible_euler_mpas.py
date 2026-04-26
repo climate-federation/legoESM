@@ -280,25 +280,38 @@ def _vertical_advection_height_1d(field_3d, w, dz, dz_half, J):
 
 
 def _tracer_tendencies(tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2):
-    """Horizontal + vertical advection of tracers."""
-    # Hoist the q-independent ``div_u`` out of the per-tracer vmap so
-    # it isn't recomputed n_tracers × nlev times.
+    """Horizontal + vertical advection of tracers.
+
+    Fold the tracer axis into the level axis so the cell→edge gather and
+    ``divergence_cell_3d`` operate on a single thicker (nCells, nlev*n_tracers)
+    field — one HLO graph for all tracers instead of n_tracers vmap'd graphs.
+    """
+    nCells, nlev_t, n_tracers = tracers.shape
     div_u_3d = divergence_cell_3d(u_3d, mesh)             # (nCells, nlev)
 
-    def _single_tracer(q_3d):
-        # Horizontal advection (advective form, 3D-native): -(div(u*q) - q*div(u))
-        q_e_3d = 0.5 * (q_3d[c1] + q_3d[c2])              # (nEdges, nlev)
-        div_uq_3d = divergence_cell_3d(u_3d * q_e_3d, mesh)
-        horiz = -(div_uq_3d - q_3d * div_u_3d)
+    # Horizontal advection (advective form): -(div(u*q) - q*div(u)).
+    # Reshape so cell→edge gather and divergence run once on all tracers.
+    tracers_flat = tracers.reshape(nCells, nlev_t * n_tracers)
+    q_e_flat = 0.5 * (tracers_flat[c1] + tracers_flat[c2])  # (nEdges, nlev*n_tracers)
+    # Multiply by u_3d via reshape→multiply→reshape so u_3d (nEdges, nlev)
+    # broadcasts against the tracer axis without materializing a tile.
+    n_edges = q_e_flat.shape[0]
+    q_e = q_e_flat.reshape(n_edges, nlev_t, n_tracers)
+    flux = u_3d[..., None] * q_e                              # (nEdges, nlev, n_tracers)
+    flux_flat = flux.reshape(n_edges, nlev_t * n_tracers)
+    div_uq_flat = divergence_cell_3d(flux_flat, mesh)         # (nCells, nlev*n_tracers)
+    div_uq = div_uq_flat.reshape(nCells, nlev_t, n_tracers)
+    horiz = -(div_uq - tracers * div_u_3d[..., None])
 
-        # Vertical advection
-        vert = _vertical_advection_height_1d(q_3d, w, dz, dz_half, J)
-        return horiz + vert
+    # Vertical advection — local stencil along axis -1, no halo cost.
+    # ``_vertical_advection_height_1d`` hard-codes axis 1 as nlev for 2D
+    # input, so vmap over the trailing tracer axis to get one batched
+    # kernel rather than a Python-unrolled loop.
+    def _vert_one(q):
+        return _vertical_advection_height_1d(q, w, dz, dz_half, J)
 
-    # vmap over tracers
-    tracers_t = jnp.moveaxis(tracers, -1, 0)  # (n_tracers, nCells, nlev)
-    dt_t = jax.vmap(_single_tracer)(tracers_t)
-    return jnp.moveaxis(dt_t, 0, -1)  # (nCells, nlev, n_tracers)
+    vert = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(tracers)
+    return horiz + vert
 
 
 # ============================================================================
