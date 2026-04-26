@@ -64,16 +64,26 @@ def fc_curl_z_3d(u_3d: jax.Array, v_3d: jax.Array,
 
 
 def fc_laplacian_3d(field_3d: jax.Array, grid: CubedSphereGrid,
-                    fc_config: FCOperatorConfig) -> jax.Array:
-    """FC Laplacian at all levels. (6,n,n,nlev) -> (6,n,n,nlev)."""
-    return fc_laplacian(field_3d, grid, fc_config)
+                    fc_config: FCOperatorConfig,
+                    padded: jax.Array | None = None) -> jax.Array:
+    """FC Laplacian at all levels. (6,n,n,nlev) -> (6,n,n,nlev).
+
+    Optional ``padded=`` skips the internal halo exchange — share with
+    a co-located ``fc_hyperdiffusion_3d`` on the same input to halve
+    the halo cost.
+    """
+    return fc_laplacian(field_3d, grid, fc_config, padded=padded)
 
 
 def fc_hyperdiffusion_3d(field_3d: jax.Array, grid: CubedSphereGrid,
                          fc_config: FCOperatorConfig,
-                         coeff: float) -> jax.Array:
-    """FC hyperdiffusion at all levels. (6,n,n,nlev) -> (6,n,n,nlev)."""
-    return fc_hyperdiffusion(field_3d, grid, fc_config, coeff)
+                         coeff: float,
+                         padded: jax.Array | None = None) -> jax.Array:
+    """FC hyperdiffusion at all levels. (6,n,n,nlev) -> (6,n,n,nlev).
+
+    See :func:`fc_laplacian_3d` for ``padded=`` usage.
+    """
+    return fc_hyperdiffusion(field_3d, grid, fc_config, coeff, padded=padded)
 
 
 def fc_flux_divergence_3d(q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,

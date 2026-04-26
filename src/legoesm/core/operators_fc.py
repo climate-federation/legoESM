@@ -295,41 +295,59 @@ def fc_curl_z(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
 
 
 def fc_laplacian(q: jax.Array, grid: CubedSphereGrid,
-                 fc_config: FCOperatorConfig) -> jax.Array:
+                 fc_config: FCOperatorConfig,
+                 padded: jax.Array | None = None) -> jax.Array:
     """FC spectral Laplacian: div(grad(q)).
 
     Parameters
     ----------
-    q : jax.Array, shape (6, n, n)
+    q : jax.Array, shape (6, n, n) or (6, n, n, nlev)
     grid : CubedSphereGrid
     fc_config : FCOperatorConfig
+    padded : jax.Array, optional
+        Pre-padded scalar field with halo=1.  When provided, the
+        internal halo exchange is skipped *and* shared between the
+        ``∂q/∂x`` and ``∂q/∂y`` calls below — saves one full halo
+        exchange relative to the previous implementation that padded
+        ``q`` inside each gradient call.
 
     Returns
     -------
-    jax.Array, shape (6, n, n)
+    jax.Array, shape (6, n, n) or (6, n, n, nlev)
     """
-    gx = fc_gradient_x(q, grid, fc_config)
-    gy = fc_gradient_y(q, grid, fc_config)
+    # Pad ``q`` once and share between the two gradient operators —
+    # previously each ``fc_gradient_x/_y`` issued its own
+    # ``_fc_pad_halo(q)`` collective on the same input, doubling the
+    # halo cost.  Hot path: every fc_laplacian / fc_hyperdiffusion
+    # call (the latter is two laplacians).
+    q_pad = padded if padded is not None else _fc_pad_halo(q, grid)
+    gx = fc_gradient_x(q, grid, fc_config, padded=q_pad)
+    gy = fc_gradient_y(q, grid, fc_config, padded=q_pad)
     return fc_divergence(gx, gy, grid, fc_config)
 
 
 def fc_hyperdiffusion(q: jax.Array, grid: CubedSphereGrid,
                       fc_config: FCOperatorConfig,
-                      coeff: float) -> jax.Array:
+                      coeff: float,
+                      padded: jax.Array | None = None) -> jax.Array:
     """FC spectral hyperdiffusion: -coeff * nabla^4(q).
 
     Parameters
     ----------
-    q : jax.Array, shape (6, n, n)
+    q : jax.Array, shape (6, n, n) or (6, n, n, nlev)
     grid : CubedSphereGrid
     fc_config : FCOperatorConfig
     coeff : float
+    padded : jax.Array, optional
+        Pre-padded scalar field with halo=1 forwarded to the inner
+        Laplacian — share with a co-located explicit Laplacian on the
+        same input to halve the halo cost when both are active.
 
     Returns
     -------
-    jax.Array, shape (6, n, n)
+    jax.Array, shape (6, n, n) or (6, n, n, nlev)
     """
-    lap1 = fc_laplacian(q, grid, fc_config)
+    lap1 = fc_laplacian(q, grid, fc_config, padded=padded)
     lap2 = fc_laplacian(lap1, grid, fc_config)
     return -coeff * lap2
 
