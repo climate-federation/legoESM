@@ -186,8 +186,30 @@ def mpas_ocean_baroclinic_tendencies(
     # Bernoulli function: KE(u) + p'/rho_0
     bernoulli = ke + p_prime / rho_0  # (nCells, nlev)
 
-    # Pressure gradient + Bernoulli
-    grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
+    # Pressure gradient + Bernoulli — when scalar tracer diffusion is on
+    # (``K_h > 0``) we *also* need ``∇T`` and ``∇S`` for the harmonic
+    # diffusion downstream.  All three gradients use the same
+    # ``cellsOnEdge`` gather + finite-difference (the trailing axis
+    # passes through passively), so concatenate ``bernoulli`` with the
+    # ``(T, S)`` tracer pack along the trailing axis and run
+    # ``gradient_edge_3d`` once on the thicker tensor.  Saves one
+    # gradient call (1 ``cellsOnEdge`` gather + 1 ``dcEdge`` divide) per
+    # RHS evaluation when ``K_h > 0`` — same passive trailing-axis
+    # exploit as Loop 139 in the MPAS atmosphere PE.
+    nlev_B = bernoulli.shape[-1]
+    if config.K_h > 0:
+        _tracer_flat_pre = jnp.stack([T_3d, S_3d], axis=-1).reshape(
+            T_3d.shape[0], nlev_B * 2,
+        )
+        _btr_input = jnp.concatenate(
+            [bernoulli, _tracer_flat_pre], axis=-1,
+        )  # (nCells, nlev*(1 + n_tracers))
+        _btr_grad = gradient_edge_3d(_btr_input, mesh)
+        grad_B = _btr_grad[:, :nlev_B]
+        _tracer_grad_flat_pre = _btr_grad[:, nlev_B:]
+    else:
+        grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
+        _tracer_grad_flat_pre = None
 
     # PV flux: RELATIVE vorticity only, q = ζ(u)/h. Planetary Coriolis is
     # applied separately (a) as online f·v_t(u_bar) in the barotropic
@@ -295,8 +317,11 @@ def mpas_ocean_baroclinic_tendencies(
 
     # Horizontal tracer diffusion: K_h * lap(T,S) per layer.  edge_mask is
     # (nEdges,) and broadcasts across the trailing axis via [:, None].
+    # ``_tracer_grad_flat_pre`` was computed alongside ``grad_B`` via the
+    # batched gradient block above (Loop 148) — reuse it here so we
+    # don't issue a redundant ``gradient_edge_3d`` on the same input.
     if config.K_h > 0:
-        grad_flat = gradient_edge_3d(tracer_flat, mesh) * edge_mask[:, jnp.newaxis]
+        grad_flat = _tracer_grad_flat_pre * edge_mask[:, jnp.newaxis]
         div_flat = divergence_cell_3d(grad_flat, mesh)
         # Reshape to (nCells, nlev, 2) so h_safe and h_k broadcast via [:, :, None].
         div_stack = div_flat.reshape(nCells_t, nlev_t, n_tracers)
