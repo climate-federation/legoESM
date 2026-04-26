@@ -1177,3 +1177,252 @@ def test_iter890c_fv_tp_2d_no_crash_with_panel_offsets():
         "conditional offset handling is broken.")
     assert fx.shape == (6, n + 1, M), (
         f"Expected fx shape (6, {n+1}, {M}); got {fx.shape}")
+
+
+# ----------------------------------------------------------------------
+# Iter-891 — parallel `_ppm_edge_values` Fortran iord<7 boundary
+# overrides (tp_core.F90:357-369).  Mirrors iter-889's pattern but for
+# `operators_fv.py:_ppm_edge_values`, which is used by the lat-lon /
+# 3D / non-cubed-sphere PPM transport paths and (via
+# `_ppm_reconstruct_x` / `_y` / `fv_flux_divergence`) the cubed-sphere
+# `fv_flux_divergence` path.  Production W2 (`fv3_sw_tendencies`) and
+# FB chain (`_d_sw_native`) do NOT use this code; the Fortran-fidelity
+# gain is locked behind a default-OFF kwarg and reachable only by
+# direct callers.
+# ----------------------------------------------------------------------
+
+
+def test_iter891_default_off_preserves_prior_behaviour():
+    """Iter-891: `_ppm_edge_values` called without the new kwarg or
+    with `apply_fortran_xppm_boundary=False` must produce output
+    bit-identical to pre-iter-891.  Default-OFF preservation.
+    """
+    from legoesm.core.operators_fv import _ppm_edge_values
+
+    n = 12
+    K = 3
+    rng = np.random.default_rng(891)
+    q = jnp.asarray(rng.normal(size=(6, n + 4, K)))
+
+    q_hat_default = _ppm_edge_values(q)
+    q_hat_off = _ppm_edge_values(q, apply_fortran_xppm_boundary=False)
+
+    np.testing.assert_array_equal(
+        np.asarray(q_hat_default), np.asarray(q_hat_off))
+
+
+def test_iter891_on_path_overrides_5_boundary_indices():
+    """Iter-891: `_ppm_edge_values` with kwarg=True AND `n_interior`
+    provided MUST overwrite the 5 cube-edge `q_hat` indices [1, 2, 3,
+    n_interior+1, n_interior+2] and leave all other indices identical.
+
+    Fortran al(npx+1) is out of `q_hat` range (no override at index
+    n_interior+3), and `q_hat[0]` (between halo cells) is also outside
+    the iord<7 override scope.
+    """
+    from legoesm.core.operators_fv import _ppm_edge_values
+
+    n = 16
+    K = 1
+    rng = np.random.default_rng(8911)
+    q = jnp.asarray(rng.normal(size=(6, n + 4, K)))
+
+    q_hat_off = _ppm_edge_values(q, apply_fortran_xppm_boundary=False)
+    q_hat_on = _ppm_edge_values(q, apply_fortran_xppm_boundary=True,
+                                 n_interior=n)
+
+    # Indices that MUST differ
+    overridden_indices = [1, 2, 3, n + 1, n + 2]
+    for k in overridden_indices:
+        diff = float(np.max(np.abs(np.asarray(q_hat_on)[:, k, :]
+                                    - np.asarray(q_hat_off)[:, k, :])))
+        assert diff > 1e-12, (
+            f"q_hat[{k}] (Fortran-faithful boundary override slot) "
+            f"matches the default 4th-order value (diff={diff:.3e}); "
+            f"the iter-891 override is invisible at this index.")
+
+    # Indices that MUST be identical
+    untouched_indices = [0] + list(range(4, n + 1)) + [n + 2 + 1] if n + 3 <= n + 2 else [0] + list(range(4, n + 1))
+    # Actually q_hat shape is (6, n+3, K) with indices 0..n+2; index 0
+    # is q_hat_lo (boundary halo-only) and indices 4..n MUST be
+    # untouched.  We just check the deep interior (4..n) is identical.
+    deep_interior_off = np.asarray(q_hat_off)[:, 4:n, :]
+    deep_interior_on = np.asarray(q_hat_on)[:, 4:n, :]
+    np.testing.assert_array_equal(
+        deep_interior_on, deep_interior_off,
+        err_msg=("Deep-interior q_hat (indices 4..n-1) drifted under "
+                 "iter-891 — boundary override scope leaked into "
+                 "interior."))
+
+
+def test_iter891_on_matches_fortran_formula_predictions():
+    """Iter-891: on a smooth quadratic input, the actual ON-path output
+    bit-equals the Fortran iord<7 formula prediction at the 5 override
+    indices.
+    """
+    from legoesm.core.operators_fv import _ppm_edge_values
+
+    n = 16
+    K = 1
+    x = np.arange(-2, n + 2, dtype=np.float64)
+    q_1d = 100.0 + 1.0 * x + 0.01 * x ** 2
+    q_np = np.broadcast_to(q_1d[None, :, None], (6, n + 4, K)).copy()
+    q = jnp.asarray(q_np)
+
+    c1 = -2.0 / 14.0
+    c2 = 11.0 / 14.0
+    c3 = 5.0 / 14.0
+
+    # Predicted overrides
+    expected_face_1 = (
+        c1 * q_np[..., 0, :] + c2 * q_np[..., 1, :]
+        + c3 * q_np[..., 2, :])
+    xt_L = (
+        0.75 * (q_np[..., 2, :] + q_np[..., 3, :])
+        - 0.25 * (q_np[..., 1, :] + q_np[..., 4, :]))
+    q_lo_L = np.minimum(np.minimum(q_np[..., 1, :], q_np[..., 2, :]),
+                        np.minimum(q_np[..., 3, :], q_np[..., 4, :]))
+    q_hi_L = np.maximum(np.maximum(q_np[..., 1, :], q_np[..., 2, :]),
+                        np.maximum(q_np[..., 3, :], q_np[..., 4, :]))
+    expected_face_2 = np.clip(xt_L, q_lo_L, q_hi_L)
+    expected_face_3 = (
+        c3 * q_np[..., 3, :] + c2 * q_np[..., 4, :]
+        + c1 * q_np[..., 5, :])
+
+    expected_face_nm1 = (
+        c1 * q_np[..., n - 1, :] + c2 * q_np[..., n, :]
+        + c3 * q_np[..., n + 1, :])
+    xt_R = (
+        0.75 * (q_np[..., n + 1, :] + q_np[..., n + 2, :])
+        - 0.25 * (q_np[..., n, :] + q_np[..., n + 3, :]))
+    q_lo_R = np.minimum(np.minimum(q_np[..., n, :], q_np[..., n + 1, :]),
+                        np.minimum(q_np[..., n + 2, :], q_np[..., n + 3, :]))
+    q_hi_R = np.maximum(np.maximum(q_np[..., n, :], q_np[..., n + 1, :]),
+                        np.maximum(q_np[..., n + 2, :], q_np[..., n + 3, :]))
+    expected_face_n = np.clip(xt_R, q_lo_R, q_hi_R)
+
+    q_hat_on = _ppm_edge_values(q, apply_fortran_xppm_boundary=True,
+                                 n_interior=n)
+    q_hat_np = np.asarray(q_hat_on)
+
+    np.testing.assert_allclose(
+        q_hat_np[..., 1, :], expected_face_1,
+        rtol=1e-12, atol=1e-12,
+        err_msg="q_hat[1] != Fortran al(0) c1/c2/c3 formula")
+    np.testing.assert_allclose(
+        q_hat_np[..., 2, :], expected_face_2,
+        rtol=1e-12, atol=1e-12,
+        err_msg="q_hat[2] != Fortran al(1) 4-point xt clipped")
+    np.testing.assert_allclose(
+        q_hat_np[..., 3, :], expected_face_3,
+        rtol=1e-12, atol=1e-12,
+        err_msg="q_hat[3] != Fortran al(2) c3/c2/c1 formula")
+    np.testing.assert_allclose(
+        q_hat_np[..., n + 1, :], expected_face_nm1,
+        rtol=1e-12, atol=1e-12,
+        err_msg="q_hat[n+1] != Fortran al(npx-1) c1/c2/c3 formula")
+    np.testing.assert_allclose(
+        q_hat_np[..., n + 2, :], expected_face_n,
+        rtol=1e-12, atol=1e-12,
+        err_msg="q_hat[n+2] != Fortran al(npx) 4-point xt clipped")
+
+
+def test_iter891_constants_match_fortran():
+    """AST scan: `_ppm_edge_values` source contains BinOp(Div) literal
+    pairs (-2.0, 14.0), (11.0, 14.0), (5.0, 14.0) for c1/c2/c3.
+    """
+    import ast
+    from pathlib import Path
+
+    src_path = (Path(__file__).resolve().parent.parent
+                / "src" / "legoesm" / "core" / "operators_fv.py")
+    tree = ast.parse(src_path.read_text())
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "_ppm_edge_values"),
+        None,
+    )
+    assert fn is not None
+    found_pairs = set()
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                and isinstance(node.left, ast.UnaryOp)
+                and isinstance(node.left.op, ast.USub)
+                and isinstance(node.left.operand, ast.Constant)
+                and isinstance(node.right, ast.Constant)
+                and isinstance(node.left.operand.value, (int, float))
+                and isinstance(node.right.value, (int, float))):
+            found_pairs.add(
+                (-float(node.left.operand.value), float(node.right.value)))
+        elif (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                and isinstance(node.left, ast.Constant)
+                and isinstance(node.right, ast.Constant)
+                and isinstance(node.left.value, (int, float))
+                and isinstance(node.right.value, (int, float))):
+            found_pairs.add(
+                (float(node.left.value), float(node.right.value)))
+
+    expected = {(-2.0, 14.0): "c1", (11.0, 14.0): "c2", (5.0, 14.0): "c3"}
+    missing = [n for p, n in expected.items() if p not in found_pairs]
+    assert not missing, (
+        f"`_ppm_edge_values` is missing iter-891 constants {missing}.  "
+        f"Fortran reference: tp_core.F90:63-65 c1=-2/14, c2=11/14, "
+        f"c3=5/14.  Found pairs: {sorted(found_pairs)}")
+
+
+def test_iter891_fv_flux_divergence_responds_to_flag_on_global_cubed_sphere():
+    """`fv_flux_divergence` on a non-bounded-domain global cubed sphere
+    MUST produce different output for kwarg ON vs OFF.  Validates the
+    plumbing through `_ppm_reconstruct_x` / `_y` / `_ppm_edge_values`.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.core.operators_fv import fv_flux_divergence
+
+    n = 12
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
+    assert not grid.bounded_domain  # sanity: gate must be active
+
+    rng = np.random.default_rng(8915)
+    q = jnp.asarray(rng.normal(size=(6, n, n)))
+    u = jnp.asarray(rng.normal(size=(6, n, n)) * 5.0)
+    v = jnp.asarray(rng.normal(size=(6, n, n)) * 5.0)
+
+    div_off = fv_flux_divergence(
+        q, u, v, grid, apply_fortran_xppm_boundary=False)
+    div_on = fv_flux_divergence(
+        q, u, v, grid, apply_fortran_xppm_boundary=True)
+
+    diff = float(np.max(np.abs(np.asarray(div_on) - np.asarray(div_off))))
+    assert diff > 1e-12, (
+        f"fv_flux_divergence kwarg unreachable: ON path bit-equals OFF "
+        f"(max diff = {diff:.3e}).  Either the kwarg threading is "
+        f"broken or the iter-891b bounded_domain gate is misfiring.")
+
+
+def test_iter891b_fv_flux_divergence_duogrid_bypasses_override():
+    """`fv_flux_divergence` on a duogrid (bounded_domain=True) grid
+    MUST produce bit-identical output for kwarg ON vs OFF — Fortran's
+    iord<7 boundary block is gated on `not (bounded_domain or
+    duogrid)` (`tp_core.F90:333/357`).  iter-891 mirrors iter-889b's
+    `effective_xppm_boundary = flag and not grid.bounded_domain` gate.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.core.operators_fv import fv_flux_divergence
+
+    n = 12
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    assert grid.bounded_domain
+
+    rng = np.random.default_rng(8916)
+    q = jnp.asarray(rng.normal(size=(6, n, n)))
+    u = jnp.asarray(rng.normal(size=(6, n, n)) * 5.0)
+    v = jnp.asarray(rng.normal(size=(6, n, n)) * 5.0)
+
+    div_off = fv_flux_divergence(
+        q, u, v, grid, apply_fortran_xppm_boundary=False)
+    div_on = fv_flux_divergence(
+        q, u, v, grid, apply_fortran_xppm_boundary=True)
+
+    np.testing.assert_array_equal(
+        np.asarray(div_on), np.asarray(div_off),
+        err_msg="fv_flux_divergence on duogrid responds to flag — gate broken")

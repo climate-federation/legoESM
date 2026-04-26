@@ -222,9 +222,24 @@ def test_iter880b_reference_isolates_clip_only_diff():
 
 def test_iter880_source_no_jnp_clip_in_ppm_edge_values():
     """AST scan: ``_ppm_edge_values`` source MUST NOT contain a
-    ``jnp.clip(q_hat, ...)`` call.  The pre-iter-880 clip step
-    flattened edge overshoots before the CW84 constraint could
-    process them, making the scheme more diffusive than Fortran.
+    ``jnp.clip(q_hat, ...)`` call on the STANDARD 4th-order edge
+    path.  The pre-iter-880 clip step flattened edge overshoots
+    before the CW84 constraint could process them, making the scheme
+    more diffusive than Fortran.
+
+    Iter-891 update: Fortran's iord<7 cube-edge boundary override at
+    `tp_core.F90:619-620` DOES include a `xt = max(xt, min(q1));
+    xt = min(xt, max(q1))` clip for the 4-point boundary edge value
+    only.  iter-891 adds those clips inside an
+    ``if apply_fortran_xppm_boundary and n_interior is not None:``
+    block.  Those Fortran-faithful clips are ALLOWED — the iter-880
+    rule is specifically about the standard (non-boundary-override)
+    4th-order edge formula, not the iord<7 boundary block.
+
+    This sentinel scans for `jnp.clip` calls and rejects any that
+    are NOT inside the iter-891 boundary override block (i.e., NOT
+    nested under an ``If`` test of
+    ``apply_fortran_xppm_boundary and n_interior is not None``).
     """
     src_path = (Path(__file__).resolve().parent.parent
                 / "src" / "legoesm" / "core" / "operators_fv.py")
@@ -238,7 +253,28 @@ def test_iter880_source_no_jnp_clip_in_ppm_edge_values():
     )
     assert fn is not None, "Could not find _ppm_edge_values"
 
-    # Look for any ``jnp.clip(...)`` Call within the function body.
+    # Build a parent-pointer map so we can walk up from each `jnp.clip`
+    # call to check whether it lives under the iter-891 boundary block.
+    parents = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    def _under_iter891_boundary_block(node):
+        """Return True iff `node` is nested under an `If` whose test
+        mentions `apply_fortran_xppm_boundary` (i.e., the iter-891
+        Fortran iord<7 boundary override block).
+        """
+        cur = node
+        while id(cur) in parents:
+            cur = parents[id(cur)]
+            if isinstance(cur, ast.If):
+                test_src = ast.unparse(cur.test)
+                if "apply_fortran_xppm_boundary" in test_src:
+                    return True
+        return False
+
+    bad_clips = []
     for node in ast.walk(fn):
         if isinstance(node, ast.Call):
             f = node.func
@@ -246,11 +282,17 @@ def test_iter880_source_no_jnp_clip_in_ppm_edge_values():
                     and f.attr == "clip"
                     and isinstance(f.value, ast.Name)
                     and f.value.id == "jnp"):
-                raise AssertionError(
-                    f"`_ppm_edge_values` re-introduced a `jnp.clip` "
-                    f"call (Call source: `{ast.unparse(node)}`).  "
-                    f"Iter-880 removed this clip step for Fortran "
-                    f"fidelity (xppm tp_core.F90:353-355 has no "
-                    f"such clip).  If the clip is being re-added "
-                    f"intentionally, document the rationale and "
-                    f"update this test.")
+                if not _under_iter891_boundary_block(node):
+                    bad_clips.append(ast.unparse(node))
+
+    assert not bad_clips, (
+        f"`_ppm_edge_values` re-introduced a `jnp.clip` call OUTSIDE "
+        f"the iter-891 Fortran-iord<7 boundary override block:\n"
+        + "\n".join(f"  - {c}" for c in bad_clips)
+        + "\nIter-880 removed the standard 4th-order clip step for "
+        "Fortran fidelity (xppm tp_core.F90:353-355 has no such clip "
+        "on the standard edge path).  iter-891 only re-introduces "
+        "clip inside the iord<7 boundary override block, matching "
+        "Fortran tp_core.F90:619-620.  If the clip is being re-added "
+        "elsewhere intentionally, document the rationale and update "
+        "this sentinel.")

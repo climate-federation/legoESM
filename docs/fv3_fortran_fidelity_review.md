@@ -2475,3 +2475,56 @@ So iter-890c makes `fv_tp_2d` ROBUST to `offsets_h2=None`, but the end-to-end re
 - This iter-890c doc entry.
 
 **Process.**  168th iter.  Codex iter-890b stop-time review correctly noted that the NotImplementedError was over-defensive on a path that the iter-890 gate already short-circuits.  iter-890c is the right fix: conditional offset extraction allows `fv_tp_2d` itself to handle `offsets_h2=None` correctly while the iter-890 gate ensures the offsets are unused on bounded_domain.  The deeper regional pipeline gaps (cdgrid metric shapes, `compute_transport_quantities` broadcasting) are out of scope for this iter and remain deferred.
+
+### Iter-891 — parallel `_ppm_edge_values` Fortran iord<7 boundary overrides (parallel to iter-889)
+
+**Codex iter-891 fidelity review identified the gap.**  After the iter-888-890c chain closed the PPM cube-edge fidelity gap on `_ppm_1d` (FB chain) and `_ppm_reconstruct_1d` (production CDGrid), the parallel gap remained on `operators_fv.py:_ppm_edge_values`.  This is a SEPARATE PPM implementation used by `fv_flux_divergence` and the lat-lon paths.  Pre-iter-891 it had a `blend_edges` boundary mode (3rd-order one-sided extrapolation averaged with 4th-order interior) that does NOT match Fortran's iord<7 c1/c2/c3 + 4-point xt formula at `tp_core.F90:357-369`.
+
+**Fix.**  Add `apply_fortran_xppm_boundary` and `n_interior` kwargs to `_ppm_edge_values`, paralleling iter-889's pattern.  When the kwarg is True AND `n_interior` is provided, overwrite the 5 cube-edge `q_hat` indices `[1, 2, 3, n_interior+1, n_interior+2]` with Fortran's iord<7 formulas:
+
+| Index | Fortran ref | Formula |
+|-------|-------------|---------|
+| `q_hat[1]` | al(0) | `c1*q1(-2) + c2*q1(-1) + c3*q1(0)` |
+| `q_hat[2]` | al(1) | `xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))`, clipped |
+| `q_hat[3]` | al(2) | `c3*q1(1) + c2*q1(2) + c1*q1(3)` |
+| `q_hat[n_int+1]` | al(npx-1) | `c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)` |
+| `q_hat[n_int+2]` | al(npx) | `xt = 0.75*(q1(npx-1)+q1(npx)) - 0.25*(q1(npx-2)+q1(npx+1))`, clipped |
+
+Constants `c1=-2/14, c2=11/14, c3=5/14` from `tp_core.F90:63-65`.  Uniform-grid simplification of dxa-weighted xt; full dxa-weighted form is multi-iter (deferred).  Fortran al(npx+1) is out of `q_hat` range (q_hat shape is `n+3`, max index `n+2`), so we don't override it.
+
+**Plumbing.**
+
+| File:line | Change |
+|-----------|--------|
+| `operators_fv.py:_ppm_edge_values` (line 36) | New kwargs + override block. |
+| `operators_fv.py:_ppm_reconstruct_x` (line 142) | Forward kwarg, derive `n` from strip shape. |
+| `operators_fv.py:_ppm_reconstruct_y` (line 282) | Forward kwarg. |
+| `operators_fv.py:fv_flux_divergence` (line 323) | Forward kwarg + iter-891b bounded_domain gate (`effective_xppm_boundary = flag and not grid.bounded_domain`) matching iter-889b's pattern. |
+
+**iter-880 sentinel update.**  Iter-880 added an AST sentinel that asserts `_ppm_edge_values` source contains NO `jnp.clip` calls.  iter-891's Fortran-faithful 4-point xt boundary formula REQUIRES a clip (`tp_core.F90:619-620` `xt = max(xt, min(q1)); xt = min(xt, max(q1))`).  iter-891 updates the iter-880 sentinel to allow `jnp.clip` ONLY inside the iter-891 boundary override block (an `If` whose test mentions `apply_fortran_xppm_boundary`); the standard 4th-order edge path remains clip-free.
+
+**Default reach.**  `_ppm_edge_values` is used by:
+- `fv_flux_divergence` (cubed-sphere PPM transport, secondary code path) — reachable now.
+- `operators_fv_latlon.py` and `operators_fv_latlon_3d.py` (lat-lon paths) — reachable but the Fortran iord<7 cube-edge formula doesn't apply on lat-lon (no cube-face boundary).  Lat-lon callers SHOULD NOT pass `apply_fortran_xppm_boundary=True`.
+- Production `fv3_sw_tendencies` and FB-chain `_d_sw_native` do NOT use this path; iter-891 doesn't reach them.
+
+So iter-891 is a Fortran-fidelity gap closure for the lesser-used `fv_flux_divergence` cubed-sphere path.  Default OFF preserves all production / FB-chain numerics bit-for-bit.
+
+**Tests** (+7 new tests, 29 total in iter-888 sentinel file, 6 in iter-880 sentinel):
+- `test_iter891_default_off_preserves_prior_behaviour` — kwarg-omitted bit-equals kwarg=False.
+- `test_iter891_on_path_overrides_5_boundary_indices` — verifies the 5 specific override indices differ; deep-interior identical.
+- `test_iter891_on_matches_fortran_formula_predictions` — bit-match against hand-computed Fortran-formula predictions on a smooth quadratic input.
+- `test_iter891_constants_match_fortran` — AST scan for c1=-2/14, c2=11/14, c3=5/14 BinOp(Div) literals.
+- `test_iter891_fv_flux_divergence_responds_to_flag_on_global_cubed_sphere` — end-to-end through `fv_flux_divergence` on legacy cubed sphere; flag=True changes output.
+- `test_iter891b_fv_flux_divergence_duogrid_bypasses_override` — duogrid grid + flag=True bit-equals flag=False (iter-891b gate matches iter-889b's pattern).
+- iter-880 sentinel updated to allow `jnp.clip` only inside the iter-891 boundary override block.
+
+**Verification.**  All 136 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.
+
+**Deliverable.**
+- `src/legoesm/core/operators_fv.py`: ~80 lines added (kwargs + override + plumbing).
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: +7 iter-891 tests.
+- `tests/test_ppm_edge_values_clip_iter880.py`: iter-880 sentinel updated to allow conditional clip.
+- This doc entry.
+
+**Process.**  169th iter.  iter-891 is the parallel iter-889 fix for the `operators_fv.py` PPM implementation: same Fortran reference, same uniform-grid simplification, same default-OFF preservation pattern.  Closes the PPM cube-edge boundary fidelity gap across all three PPM implementations (`_ppm_1d` FB, `_ppm_reconstruct_1d` production, `_ppm_edge_values` operators_fv).  No production W2 / FB-chain reach (different code path); the Fortran-fidelity gain is locked behind a kwarg for callers who want it.
