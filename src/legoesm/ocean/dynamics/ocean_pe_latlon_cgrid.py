@@ -273,19 +273,25 @@ def _weno_zeta_at_u(
     v_smooth: jnp.ndarray,
     v_at_u: jnp.ndarray,
     order: int = 5,
+    u_smooth: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to u-faces (meridional).
 
-    Uses the {φ; v} smoothness-optimised stencil (Silvestri et al. 2024):
-    smoothness indicators computed from v (smoother velocity field),
-    reconstruction applied to φ (e.g. potential vorticity q = ζ/h).
+    Uses Silvestri et al. (2024) Eq. 43 smoothness-optimised stencil:
+    ``{ζ; u} = ({ζ; ⟨v⟩_i} + {ζ; ⟨u⟩_j}) / 2`` — average of two WENO
+    reconstructions, one with ⟨v⟩_i smoothness and one with ⟨u⟩_j
+    smoothness.  This makes the scheme less sensitive to noise in any
+    single velocity component.  If *u_smooth* is None, falls back to
+    the single ⟨v⟩_i reconstruction.
 
     Parameters
     ----------
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
-    v_smooth : (n_lat+1, n_lon, nlev) at v-faces (smoothness field).
+    v_smooth : (n_lat+1, n_lon, nlev) at v-faces (⟨v⟩_i smoothness).
     v_at_u : (n_lat, n_lon+1, nlev) at u-faces (upwinding velocity).
     order : {5, 7}
+    u_smooth : (n_lat, n_lon+1, nlev) or None
+        u at u-faces for the ⟨u⟩_j smoothness path.
 
     Returns
     -------
@@ -295,11 +301,11 @@ def _weno_zeta_at_u(
 
     hw = {5: 3, 7: 4}[order]
     n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
+    nlev = phi.shape[2]
 
-    # Interpolate v to vertex longitudes.
-    # v: (n_lat+1, n_lon) at cell-center lons → vertex: (n_lat+1, n_lon+1) at interface lons
-    v_w = jnp.roll(v_smooth, 1, axis=1)  # v[:, (j-1) % n_lon, :]
-    v_at_vtx = 0.5 * (v_w + v_smooth)    # (n_lat+1, n_lon, nlev)
+    # ⟨v⟩_i: v averaged in longitude to vertex positions.
+    v_w = jnp.roll(v_smooth, 1, axis=1)
+    v_at_vtx = 0.5 * (v_w + v_smooth)
     v_at_vtx = jnp.concatenate(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
@@ -310,20 +316,35 @@ def _weno_zeta_at_u(
         [v_at_vtx[:1, :, :]] * hw + [v_at_vtx] + [v_at_vtx[-1:, :, :]] * hw,
         axis=0)
 
-    # Build stencil for all n_lat u-faces simultaneously.
-    # Face i (i=0..n_lat-1) is between vertex i and vertex i+1.
-    # WENO at I+1/2 where I=i: needs vertices i-hw+1 .. i+hw.
-    # In ext: indices (i-hw+1)+hw .. (i+hw)+hw = i+1 .. i+2*hw.
     phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
                    for j in range(2 * hw)]
-    psi_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
-                   for j in range(2 * hw)]
+    psi_v_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
+                     for j in range(2 * hw)]
 
-    phi_plus, phi_minus = weno_reconstruct_split(
-        phi_stencil, psi_stencil, order=order)
+    phi_plus_v, phi_minus_v = weno_reconstruct_split(
+        phi_stencil, psi_v_stencil, order=order)
+    result_v = weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
 
-    # Upwind: v > 0 ⟹ flow from south → use left-biased (f_plus)
-    return weno_upwind(phi_plus, phi_minus, v_at_u)
+    if u_smooth is None:
+        return result_v
+
+    # ⟨u⟩_j: u averaged in latitude to vertex positions.
+    n_lon_u = u_smooth.shape[1]  # n_lon+1
+    zero_u = jnp.zeros((1, n_lon_u, nlev), dtype=u_smooth.dtype)
+    u_ext_lat = jnp.concatenate([zero_u, u_smooth, zero_u], axis=0)
+    u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
+
+    u_ext = jnp.concatenate(
+        [u_at_vtx[:1, :, :]] * hw + [u_at_vtx] + [u_at_vtx[-1:, :, :]] * hw,
+        axis=0)
+    psi_u_stencil = [u_ext[1 + j: n_lat + 1 + j, :, :]
+                     for j in range(2 * hw)]
+
+    phi_plus_u, phi_minus_u = weno_reconstruct_split(
+        phi_stencil, psi_u_stencil, order=order)
+    result_u = weno_upwind(phi_plus_u, phi_minus_u, v_at_u)
+
+    return 0.5 * (result_v + result_u)
 
 
 def _weno_zeta_at_v(
@@ -331,18 +352,25 @@ def _weno_zeta_at_v(
     u_smooth: jnp.ndarray,
     u_at_v: jnp.ndarray,
     order: int = 5,
+    v_smooth: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to v-faces (zonal).
 
-    Uses the {φ; u} smoothness-optimised stencil.
+    Uses Silvestri et al. (2024) Eq. 43 smoothness-optimised stencil:
+    ``{ζ; u} = ({ζ; ⟨u⟩_j} + {ζ; ⟨v⟩_i}) / 2`` — average of two WENO
+    reconstructions.  If *v_smooth* is None, falls back to the single
+    ⟨u⟩_j reconstruction.
+
     Periodic in longitude.
 
     Parameters
     ----------
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
-    u_smooth : (n_lat, n_lon+1, nlev) at u-faces (smoothness field).
+    u_smooth : (n_lat, n_lon+1, nlev) at u-faces (⟨u⟩_j smoothness).
     u_at_v : (n_lat+1, n_lon, nlev) at v-faces (upwinding velocity).
     order : {5, 7}
+    v_smooth : (n_lat+1, n_lon, nlev) or None
+        v at v-faces for the ⟨v⟩_i smoothness path.
 
     Returns
     -------
@@ -351,38 +379,46 @@ def _weno_zeta_at_v(
     from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 
     hw = {5: 3, 7: 4}[order]
-    n_lon = phi.shape[1] - 1   # n_lon+1 vertices → n_lon v-face longitudes
+    n_lon = phi.shape[1] - 1
     nlev = phi.shape[2]
 
-    # Interpolate u to vertex latitudes.
-    # u: (n_lat, n_lon+1) at cell-center lats → vertex: (n_lat+1, n_lon+1) at interface lats
+    # ⟨u⟩_j: u averaged in latitude to vertex positions.
     n_lon_u = u_smooth.shape[1]  # n_lon+1
     zero_u = jnp.zeros((1, n_lon_u, nlev), dtype=u_smooth.dtype)
     u_ext_lat = jnp.concatenate(
-        [zero_u, u_smooth, zero_u], axis=0)    # (n_lat+2, n_lon+1, nlev)
-    u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] +
-                       u_ext_lat[1:, :, :])   # (n_lat+1, n_lon+1, nlev)
+        [zero_u, u_smooth, zero_u], axis=0)
+    u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
-    # Both φ and u_at_vtx are (n_lat+1, n_lon+1, nlev).
-    # Reconstruct along axis 1 (longitude), periodic.
-    # Use the first n_lon columns (column n_lon == column 0).
-    phi_core = phi[:, :n_lon, :]      # (n_lat+1, n_lon, nlev)
-    u_core = u_at_vtx[:, :n_lon, :]   # (n_lat+1, n_lon, nlev)
+    phi_core = phi[:, :n_lon, :]
+    u_core = u_at_vtx[:, :n_lon, :]
 
-    # Face j (j=0..n_lon-1) between vertex j and vertex j+1.
-    # WENO at I+1/2 where I=j: needs vertices j-hw+1 .. j+hw.
-    # Roll offsets hw-1, hw-2, ..., -(hw) place vertex j-hw+1 .. j+hw
-    # at position j in the rolled array.
     phi_stencil = [jnp.roll(phi_core, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
-    psi_stencil = [jnp.roll(u_core, hw - 1 - j, axis=1)
-                   for j in range(2 * hw)]
+    psi_u_stencil = [jnp.roll(u_core, hw - 1 - j, axis=1)
+                     for j in range(2 * hw)]
 
-    phi_plus, phi_minus = weno_reconstruct_split(
-        phi_stencil, psi_stencil, order=order)
+    phi_plus_u, phi_minus_u = weno_reconstruct_split(
+        phi_stencil, psi_u_stencil, order=order)
+    result_u = weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
 
-    # Upwind: u > 0 ⟹ flow from west → use left-biased (f_plus)
-    return weno_upwind(phi_plus, phi_minus, u_at_v)
+    if v_smooth is None:
+        return result_u
+
+    # ⟨v⟩_i: v averaged in longitude to vertex positions.
+    v_w = jnp.roll(v_smooth, 1, axis=1)
+    v_at_vtx = 0.5 * (v_w + v_smooth)
+    v_at_vtx = jnp.concatenate(
+        [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)
+
+    v_core = v_at_vtx[:, :n_lon, :]
+    psi_v_stencil = [jnp.roll(v_core, hw - 1 - j, axis=1)
+                     for j in range(2 * hw)]
+
+    phi_plus_v, phi_minus_v = weno_reconstruct_split(
+        phi_stencil, psi_v_stencil, order=order)
+    result_v = weno_upwind(phi_plus_v, phi_minus_v, u_at_v)
+
+    return 0.5 * (result_u + result_v)
 
 
 def _flux_form_vertical_momentum_advection_weno(
@@ -974,9 +1010,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     if _mom_adv in ("weno5", "weno7"):
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
         q_at_u = _weno_zeta_at_u(
-            q, v, v_at_u, order=_weno_order)
+            q, v, v_at_u, order=_weno_order, u_smooth=u)
         q_at_v = _weno_zeta_at_v(
-            q, u, u_at_v, order=_weno_order)
+            q, u, u_at_v, order=_weno_order, v_smooth=v)
     else:
         # Sadourny EC: 2-point average of q to faces
         q_at_u = 0.5 * (q[:-1, :, :] + q[1:, :, :])   # (n_lat, n_lon+1, nlev)
