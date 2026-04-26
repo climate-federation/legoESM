@@ -461,7 +461,8 @@ def _run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float,
     physics = create_forcings(tc.grid_type, None, gyre_config)
 
     grid, z_coord, ocean_config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=gyre_config.A_h))
+        _create_ocean_setup(tc, physics=physics, A_h=gyre_config.A_h,
+                            bottom_drag_r=gyre_config.bottom_drag_coeff))
 
     state = create_initial_conditions(tc.grid_type, grid, z_coord, gyre_config)
 
@@ -582,8 +583,16 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
     gbw_config = GlobalBarotropicWindConfig()
     physics = gbw_forcings(tc.grid_type, None, gbw_config)
     nlev_override = tc.run_kwargs.get("nlev", None)
+    # MPAS ico3 needs higher viscosity than lat-lon at comparable
+    # resolution — the TRiSK discretization on irregular cells requires
+    # more dissipation to remain stable with correct bottom drag.
+    A_h = gbw_config.A_h
+    if tc.grid_type == "mpas":
+        A_h = max(A_h, 5e5)
     grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=gbw_config.A_h, nlev=nlev_override))
+        _create_ocean_setup(tc, physics=physics, A_h=A_h,
+                            bottom_drag_r=gbw_config.bottom_drag_coeff,
+                            nlev=nlev_override))
     state = gbw_ic(tc.grid_type, grid, z_coord, gbw_config)
 
     dt = config.DEFAULT_DT
@@ -1307,7 +1316,8 @@ def run_eady_instability(tc: TestCase, output_dir: Path, days: float
     physics = eady_forcings(tc.grid_type, None, eady_config)
 
     grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=eady_config.A_h))
+        _create_ocean_setup(tc, physics=physics, A_h=eady_config.A_h,
+                            bottom_drag_r=eady_config.bottom_drag_coeff))
 
     state = eady_ic(tc.grid_type, grid, z_coord, eady_config)
 

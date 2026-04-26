@@ -172,9 +172,6 @@ def create_forcings(grid_type: str, grid, config: RegionalGyreConfig = None):
     )
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
     return OceanPhysicsConfig(
@@ -190,10 +187,6 @@ def create_forcings(grid_type: str, grid, config: RegionalGyreConfig = None):
         ),
         vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(
-            scheme="linear",
-            linear=LinearDragConfig(r=config.bottom_drag_coeff),
-        ),
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=None,
     )

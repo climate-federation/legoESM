@@ -58,10 +58,20 @@ def make_mpas_ocean_physics(config) -> Callable:
         isinstance(sf_config, SurfaceForcingConfig)
         and sf_config.scheme != "none"
     )
-    has_bottom_drag = (
-        isinstance(bd_config, BottomDragConfig)
-        and bd_config.scheme != "none"
-    )
+
+    # Physics-level bottom drag is deprecated — use the dynamics-level
+    # ``bottom_drag_r`` field on ``MPASOceanConfig`` instead.  The
+    # dynamics path applies drag in both the baroclinic PE and the
+    # barotropic substeps, which is physically correct (MOM6 convention).
+    if (isinstance(bd_config, BottomDragConfig)
+            and bd_config.scheme != "none"):
+        raise ValueError(
+            f"Physics-level bottom drag (scheme={bd_config.scheme!r}) is "
+            "deprecated. Use MPASOceanConfig(bottom_drag_r=...) instead, "
+            "which applies drag in both the baroclinic PE and the "
+            "barotropic substeps (matching MOM6). Set "
+            "BottomDragConfig(scheme='none') in your OceanPhysicsConfig."
+        )
 
     def physics_fn(
         state: MPASOceanState,
@@ -81,12 +91,16 @@ def make_mpas_ocean_physics(config) -> Callable:
         dS_dt = jnp.zeros_like(T_3d)
         deta_dt = jnp.zeros_like(eta)
 
+        # Jacobian — needed by surface forcing (top-layer thickness) and
+        # bottom drag (bottom-layer thickness).  Compute once.
+        jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+        c1 = mesh.cellsOnEdge[0]  # (nEdges,)
+        c2 = mesh.cellsOnEdge[1]  # (nEdges,)
+
         # --- Prescribed surface forcing ---
         if has_surface_forcing and sf_config.scheme == "prescribed":
             cfg = sf_config.prescribed
 
-            # Jacobian for top-layer thickness
-            jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
             dz_0_cell = z_coord.dz_ref[0] * jacobian  # (nCells,)
 
             # Compute cell-centered wind stress from latitude
@@ -96,8 +110,6 @@ def make_mpas_ocean_physics(config) -> Callable:
             # Project cell-centered wind stress onto edge normals.
             # Average tau from the two cells sharing each edge, then dot
             # with the edge-normal direction (angleEdge).
-            c1 = mesh.cellsOnEdge[0]  # (nEdges,)
-            c2 = mesh.cellsOnEdge[1]  # (nEdges,)
             tau_x_e = 0.5 * (tau_x[c1] + tau_x[c2])
             tau_y_e = 0.5 * (tau_y[c1] + tau_y[c2])
             tau_n = (tau_x_e * jnp.cos(mesh.angleEdge)
@@ -122,11 +134,6 @@ def make_mpas_ocean_physics(config) -> Callable:
                 inv_dz = 1.0 / jnp.maximum(dz_0_cell, 1e-10)
                 dS_dt = dS_dt.at[:, 0].add(
                     state.S.data[:, 0] * cfg.E_minus_P * inv_dz * mask)
-
-        # --- Bottom drag ---
-        if has_bottom_drag and bd_config.scheme == "linear":
-            r = bd_config.linear.r
-            du_dt = du_dt.at[:, -1].add(-r * u_3d[:, -1])
 
         return MPASOceanTendencies(
             du_dt=Field(data=du_dt, name="du_dt",

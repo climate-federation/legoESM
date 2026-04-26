@@ -1012,37 +1012,27 @@ class TestSurfaceForcing:
         assert float(jnp.max(jnp.abs(tend.du_dt.data[:, 1:]))) == 0.0
 
     def test_bottom_drag_produces_tendency(self, mesh, z_coord):
-        """Linear bottom drag produces nonzero bottom-layer tendency."""
-        from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
-        from legoesm.ocean.physics.combined import OceanPhysicsConfig
-        from legoesm.ocean.physics.bottom_drag.config import (
-            BottomDragConfig, LinearDragConfig,
-        )
+        """Dynamics-level linear bottom drag produces nonzero tendency."""
+        from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
 
-        config = OceanPhysicsConfig(
-            bottom_drag=BottomDragConfig(
-                scheme="linear", linear=LinearDragConfig(r=1e-4)),
-        )
-        fn = make_mpas_ocean_physics(config)
+        config = MPASOceanConfig(bottom_drag_r=1e-4)
 
         # Create state with nonzero bottom velocity
         s = rest_state_mpas_ocean(mesh, z_coord, H_max=500.0)
         u_data = s.u.data.at[:, -1].set(1.0)
         s = s._replace(u=s.u.replace(data=u_data))
 
-        tend = fn(s, mesh, z_coord)
-        # Bottom layer should have drag: du/dt = -r * u = -1e-4
+        tend = mpas_ocean_baroclinic_tendencies(
+            s, mesh, z_coord, config)
+        # Bottom layer should have drag: du/dt = -r * u / dz_bottom
         assert float(jnp.max(jnp.abs(tend.du_dt.data[:, -1]))) > 0
 
     def test_model_step_with_physics(self, mesh, z_coord):
-        """Full model step with physics produces circulation."""
+        """Full model step with wind + dynamics bottom drag produces circulation."""
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.surface_forcing.config import (
             PrescribedForcingConfig, SurfaceForcingConfig,
-        )
-        from legoesm.ocean.physics.bottom_drag.config import (
-            BottomDragConfig, LinearDragConfig,
         )
         from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
 
@@ -1052,11 +1042,10 @@ class TestSurfaceForcing:
                 prescribed=PrescribedForcingConfig(
                     wind_profile="single_gyre", tau_max=0.1),
             ),
-            bottom_drag=BottomDragConfig(
-                scheme="linear", linear=LinearDragConfig(r=1e-4)),
         )
         config = MPASOceanConfig(
-            n_barotropic_substeps=5, physics=physics, A_h=1e3)
+            n_barotropic_substeps=5, physics=physics, A_h=1e3,
+            bottom_drag_r=1e-4)
         model = MPASOceanModel(mesh, z_coord, config)
 
         state = wind_driven_gyre_mpas(mesh, z_coord, H_max=500.0)
