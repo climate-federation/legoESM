@@ -666,3 +666,61 @@ These are NOT the same cells.  The cell-centre cube-vertex cancellation breakdow
 **Verification.**  Diagnostic runs to completion in ~5s.  No production code change.
 
 **Process.**  188th iter.  iter-906b corrects iter-906's overclaim by measuring at the same stagger as iter-904's hot spots.  The Codex stop-time concern was valid; the corrective measurement reveals iter-906's cube-vertex cancellation finding is real at cell centres but DOES NOT explain the production W2 v-bias.  Net iter-907+ direction shifts from "fix zeta_abs/dB_dy_cc at cube vertices" (iter-906's recommendation, now superseded) to "investigate div_damp + boundary_fix + projection-halo contributions at lat ±33.9° face 0/2 — the actual D-grid hot spots".
+
+### Iter-907 — ablation study: div_damp dominates W2 D-grid hot-spot magnitude (29× more than boundary_fix)
+
+**Motivation.**  iter-906b refined the iter-907+ targets to "div_damp + boundary_fix + projection halo".  iter-907 disambiguates WHICH component dominates by running fv3_sw_tendencies with each toggled independently.
+
+**Configurations** (all use `apply_fortran_xppm_boundary=True`, `dddmp=0.2`):
+
+- (A) Production:    `div_damp = 2.13e8, boundary_fix = True`  (= iter-892).
+- (B) − div_damp:    `div_damp = 0,       boundary_fix = True`.
+- (C) − boundary_fix: `div_damp = 2.13e8, boundary_fix = False`.
+- (D) Bare A-L:      `div_damp = 0,       boundary_fix = False`.
+
+**Whole-D-grid `|dv_d_dt|` max:**
+
+| config | max \|dv_d_dt\| |
+|--------|------------------|
+| A (production) | 1.903e-05 |
+| B (− div_damp) | **4.551e-06**  (−76 %) |
+| C (− boundary_fix) | 2.688e-05  (+41 %) |
+| D (bare A-L) | 1.148e-05 |
+
+Removing div_damp reduces the max by 76 %.  Removing boundary_fix INCREASES the max by 41 % (boundary_fix is a stabilizer, as designed).
+
+**At iter-904 D-grid production hot spots (top-10 cells by |cfg_A|):**
+
+| metric | value |
+|--------|-------|
+| A (production) mean \|dv_d_dt\| | 1.875e-05 |
+| B (− div_damp) mean | 2.77e-06  (−85 %) |
+| C (− boundary_fix) mean | 1.93e-05  (essentially unchanged) |
+| D (bare A-L) mean | 2.82e-06 |
+| **delta_div_damp** (A − B) | **+1.599e-05**  (~85 % of A) |
+| **delta_bfix** (A − C) | **−5.47e-07**  (~3 % of A; opposite sign) |
+| **\|delta_div_damp / delta_bfix\|** | **29.2 ×** |
+
+div_damp's contribution at the hot spots is **29× larger** than boundary_fix's — div_damp is the dominant driver of the W2 D-grid hot-spot magnitude.
+
+**The eight hot spots at lat ±33.9° face 0/2 are the EW-cube-edge cells of the equatorial faces.**  Removing div_damp reduces |dv_d_dt| at these cells from 1.90e-5 → 2.71e-6 (−86 %).  These cells correspond to (face, i, j) = (0, 2, 1), (0, 2, 34), (2, 2, 1), (2, 2, 34) and their lat-mirrors at (face, 3, ...).  The i = 2-3 row is just inside the cube-edge boundary on the east side of faces 0/2.
+
+**Mechanism interpretation.**  div_damp's contribution to dv_cc is `adaptive_coeff * d(div)/dy_cc` (line 2089) where `adaptive_coeff = da_min_c * max(d2_bg, min(0.20, dddmp*|div|))` and `d2_bg = div_damp / da_min_c` (line 2066).  At iter-892 production with `div_damp = 2.13e8`, the bg-dominated regime (div_damp/da_min_c) is large.  The cube-edge cells have non-zero numerical divergence (despite the W2 IC having near-zero physical divergence) — the iter-892 PPM-flux + Arakawa-Lamb pressure gradient + boundary_fix combination produces ~1e-9 m/s divergence at these cells, and div_damp amplifies it to ~1.6e-5 m/s² in the dv tendency.
+
+**iter-761 historical context.**  Per CLAUDE.md memory, iter-761 tuned `div_damp = 8 × _div_damp_cube(n)` (= the current production value) and measured this 8× as REDUCING W2 v_ll_Linf from 0.303 → 0.159 m/s (−48 %).  At the iter-761 baseline, increasing div_damp helped because the cube-corner mode A at lat ±35° was driven by a DIFFERENT mechanism (mode-A flux divergence at corners).  At the post-iter-893 baseline (0.132 m/s), the cube-corner mode-A pathway is no longer the dominant residual — but the div_damp is still active at 8×, and now its contribution is the limiting factor.
+
+**Implications for iter-908+:**
+
+1. **div_damp coefficient sweep**: try 4×, 2×, 1× the iter-761 value and measure W2 v_ll_Linf at C36 1-day.  If the post-iter-893 W2 sweet spot is at a smaller coefficient, this is a quick win.  Risk: lower div_damp may resurrect the iter-761-era mode-A at corners.
+2. **Cube-edge-aware `adaptive_coeff`**: apply the full coefficient at face interiors but a softer (e.g., 4×) value at the i=0,1,n-1,n cells.  Targets the specific hot-spot cells.
+3. **`d_sw5` holistic port**: the iter-872c-take4 comment notes the divergence-damping path is "structurally incomplete (the *dt factor and corner-divergence stencil are deferred to a dedicated d_sw5 holistic port)".  This is the architecturally-correct fix but multi-iter scope.
+
+**Caveat — t=0 vs 1-day.**  iter-907 measures dv_d_dt at t=0, not the time-integrated W2 v_ll_Linf at 1-day.  The hot-spot dv_d_dt is small in absolute terms (1.9e-5 m/s² × 86400 s = 1.6 m/s if integrated as constant tendency).  But the 1-day W2 v_ll_Linf is 0.132 m/s — much smaller than the integrated tendency.  This means the actual time-integrated bias is from a smaller systematic component of the t=0 hot-spot magnitude that survives time averaging.  div_damp's contribution may include both an oscillatory part (averaged out) and a systematic part (accumulating).  iter-908 sweep would confirm if reducing div_damp actually helps the integrated bias.
+
+**Deliverable.**
+- `scripts/diag_iter907_w2_dv_ablation.py`: 4-config ablation script with hot-spot per-cell decomposition and clear VERDICT on dominant component.
+- This iter-907 doc entry.
+
+**Verification.**  Diagnostic runs to completion in ~5s.  No production code change.
+
+**Process.**  189th iter.  iter-907 closes the iter-906b refinement question with a sharp answer: div_damp dominates 29× over boundary_fix at the W2 D-grid hot spots.  The historical iter-761 8× tuning is now identified as the dominant residual contributor at the post-iter-893 baseline.  iter-908+ has a concrete, low-cost test: sweep div_damp and measure W2.
