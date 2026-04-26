@@ -146,19 +146,25 @@ def mpas_compressible_euler_slow_tendencies(
         grad_ke_3d = _grad_flat[..., 1]
         grad_th_3d = None
 
-    # Cell-to-edge averaging for theta and rho, batched.  Both are
+    # Cell-to-edge averaging for theta, rho, and w_full — all three are
     # (nCells, nlev) inputs and ``cell_to_edge_avg_3d`` is a pure
     # ``cellsOnEdge`` gather + average (passive on the trailing axis).
-    # Stack and fold so a single gather computes both edge averages.
-    # 2 calls → 1.  ``rho_e_3d`` is consumed in the divergence batching
-    # below; computing it here lets us share the cell-to-edge gather.
+    # Stack and fold so a single gather computes all three edge
+    # averages.  3 calls → 1.  ``w_full`` is the half-to-full level
+    # average of ``w``; computing it here lets us share its
+    # cell-to-edge gather with theta/rho.  ``rho_e_3d`` and ``w_e_3d``
+    # are consumed in the divergence batching below.
     n_cells_e = theta_total.shape[0]
-    _te_stack = jnp.stack([theta_total, rho_total], axis=-1)  # (nCells, nlev, 2)
+    w_full = 0.5 * (w[:, :-1] + w[:, 1:])              # (nCells, nlev)
+    _te_stack = jnp.stack(
+        [theta_total, rho_total, w_full], axis=-1,
+    )  # (nCells, nlev, 3)
     _te_edge = cell_to_edge_avg_3d(
-        _te_stack.reshape(n_cells_e, nlev * 2), mesh,
-    ).reshape(-1, nlev, 2)
+        _te_stack.reshape(n_cells_e, nlev * 3), mesh,
+    ).reshape(-1, nlev, 3)
     theta_e_3d = _te_edge[..., 0]
     rho_e_3d = _te_edge[..., 1]
+    w_e_3d = _te_edge[..., 2]
 
     # PV flux (Coriolis + vorticity).  Use rho*dz as thickness proxy
     # for mass-weighted PV.
@@ -204,12 +210,9 @@ def mpas_compressible_euler_slow_tendencies(
     # Stack the four (nEdges, nlev) flux inputs along a new trailing
     # axis to (nEdges, nlev, 4), fold to (nEdges, nlev*4), call
     # ``divergence_cell_3d`` once on the thicker tensor, then unfold.
-    # 4 divergence calls → 1.  ``w_e_3d`` is computed up-front (it
-    # only depends on ``w``), so we pull its divergence into the same
-    # batch as the rho/theta/continuity divergences instead of leaving
-    # it as a fourth standalone call later in the function.
-    w_full = 0.5 * (w[:, :-1] + w[:, 1:])              # (nCells, nlev)
-    w_e_3d = 0.5 * (w_full[c1] + w_full[c2])           # (nEdges, nlev)
+    # 4 divergence calls → 1.  ``w_e_3d`` is now produced by the
+    # batched cell-to-edge gather above (Loop 154), so we can plug it
+    # directly into the divergence batch.
     n_edges_d, nlev_d = u_3d.shape
     _div_inputs = jnp.stack(
         [rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d, u_3d * w_e_3d], axis=-1,
