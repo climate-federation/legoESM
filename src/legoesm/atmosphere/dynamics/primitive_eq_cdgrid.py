@@ -467,8 +467,21 @@ def fv3_hydrostatic_tendencies(
     if config.A_h > 0:
         lap_flat = _laplacian_compact_3d(_uvT_flat, grid, padded=_uvT_pad_flat)
         lap_uvT = lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
-        du_d_dt = du_d_dt + config.A_h * _interp_center_to_corner(lap_uvT[..., 0], cdgrid)
-        dv_d_dt = dv_d_dt + config.A_h * _interp_center_to_corner(lap_uvT[..., 1], cdgrid)
+        # Batch the (lap_u, lap_v) corner interpolation: same passive-
+        # trailing-axis pattern as the (u, v) corner interpolation in
+        # Loop 113 — single halo + single 4-point average for both.
+        _lap_uv_d_flat = _interp_center_to_corner(
+            lap_uvT[..., :2].reshape(
+                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
+            ),
+            cdgrid,
+        )
+        _lap_uv_d = _lap_uv_d_flat.reshape(
+            _lap_uv_d_flat.shape[0], _lap_uv_d_flat.shape[1],
+            _lap_uv_d_flat.shape[2], nlev_uvT, 2,
+        )
+        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
+        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
         dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
 
     # 12b. Hyperdiffusion on D-grid winds (biharmonic)
@@ -484,8 +497,20 @@ def fv3_hydrostatic_tendencies(
         hyperdiff_uvT = hyperdiff_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
-        du_d_dt = du_d_dt + _interp_center_to_corner(hyperdiff_uvT[..., 0], cdgrid)
-        dv_d_dt = dv_d_dt + _interp_center_to_corner(hyperdiff_uvT[..., 1], cdgrid)
+        # Same batching as the laplacian section above — one halo +
+        # 4-point average for both u and v components.
+        _hd_uv_d_flat = _interp_center_to_corner(
+            hyperdiff_uvT[..., :2].reshape(
+                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
+            ),
+            cdgrid,
+        )
+        _hd_uv_d = _hd_uv_d_flat.reshape(
+            _hd_uv_d_flat.shape[0], _hd_uv_d_flat.shape[1],
+            _hd_uv_d_flat.shape[2], nlev_uvT, 2,
+        )
+        du_d_dt = du_d_dt + _hd_uv_d[..., 0]
+        dv_d_dt = dv_d_dt + _hd_uv_d[..., 1]
         dT_dt_data = dT_dt_data + hyperdiff_uvT[..., 2]
 
     # Surface pressure hyperdiffusion (cell-centre)
