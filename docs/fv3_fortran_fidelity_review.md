@@ -2275,3 +2275,67 @@ Constants: `s11 = 11/14, s14 = 4/7, s15 = 3/14` (`tp_core.F90:58`).
 - This doc entry.
 
 **Process.**  163rd iter.  Codex iter-888b stop-time review caught the model-class plumbing gap.  iter-888c is the final piece: the new opt-in flag is now reachable from `CDGridShallowWaterConfig` through to `_ppm_1d` via either (a) direct function-level kwarg (iter-888b) or (b) `FV3FBShallowWaterModel.step` config (iter-888c).  Default-OFF preserved at every level; production unchanged.  iter-873 sentinel updated to lock the new default and prevent silent activation in matrix runner / W2 sentinel.
+
+### Iter-889 — extend `apply_fortran_xppm_boundary` to production `_ppm_reconstruct_1d` (Codex iter-888c follow-up)
+
+**Codex iter-889 fidelity review.**  After the iter-888 chain locked Fortran's iord=9 `bl/br` boundary formulas (`tp_core.F90:614-628`/`:632-647`) for `_ppm_1d` (FB chain only), Codex identified the analogous gap on the production path: `_ppm_reconstruct_1d` (`operators_cdgrid.py:86`) used a uniform centred 4th-order PPM at every face including the cube-edge faces, while Fortran's iord<7 path (`tp_core.F90:357-369`) applies one-sided `s11/s14/s15`-style edge formulas + a 4-point `dxa`-weighted xt at the actual cube-face boundary.  This is the **first** Fortran-fidelity gap iter-889 has implemented that affects W2 LEGACY through `cgrid_mass_flux_divergence`.
+
+**Fortran reference (`tp_core.F90:357-369`, iord<7 boundary block).**
+
+```fortran
+if ( .not. (bounded_domain .or. duogrid) .and. grid_type<3 ) then
+  if ( is==1 ) then
+    al(0)   = c1*q1(-2) + c2*q1(-1) + c3*q1(0)
+    al(1)   = 0.5 * ((dxa-weighted left-of-edge avg)
+                   + (dxa-weighted right-of-edge avg))
+    al(2)   = c3*q1(1) + c2*q1(2) + c1*q1(3)
+  endif
+  if ( (ie+1)==npx ) then
+    al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
+    al(npx)   = 0.5 * (dxa-weighted) ! at the right cube-face edge
+    al(npx+1) = c3*q1(npx) + c2*q1(npx+1) + c1*q1(npx+2)
+  endif
+endif
+```
+with constants `c1 = -2/14, c2 = 11/14, c3 = 5/14` (`tp_core.F90:63-65`).  iter-889 implements this with the **uniform-grid simplification** of the 4-point `dxa`-weighted xt: when `dxa(-1)=dxa(0)=dxa(1)=dxa(2)`, the formula collapses to `0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))`.  The full `dxa`-weighted formula is deferred until `dxa` plumbing is added to `_ppm_reconstruct_1d` (multi-iter).
+
+**Implementation.**
+
+| File | Change |
+|------|--------|
+| `src/legoesm/core/operators_cdgrid.py:86` (`_ppm_reconstruct_1d`) | New kwargs `apply_fortran_xppm_boundary: bool = False` + `n_interior: int | None = None`.  When True AND `n_interior` provided, overwrite `q_face[1, 2, 3, n_interior+1, n_interior+2, n_interior+3]` with the iord<7 boundary formulas.  Cube-face edges (`q_face[2]`, `q_face[n_interior+2]`) get the clipped uniform 4-point xt; the four cube-adjacent faces get c1/c2/c3 weighted formulas. |
+| `src/legoesm/core/operators_cdgrid.py:457` (`cgrid_mass_flux_divergence`) | Add `apply_fortran_xppm_boundary=False` kwarg.  Forward to both `_ppm_reconstruct_1d` calls (X and Y sweeps). |
+| `src/legoesm/core/operators_cdgrid.py:1596` (`fv3_sw_tendencies`) | Add `apply_fortran_xppm_boundary=False` kwarg.  Forward to `cgrid_mass_flux_divergence`. |
+| `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:653` (`FV3EdgeShallowWaterModel.step`) | Forward `self.config.apply_fortran_xppm_boundary` to `fv3_sw_tendencies`. |
+
+**W2 LEGACY measurement (C36, dt=300, 1 day).**
+
+| Config | v_north Linf | v_north L2 | Notes |
+|--------|--------------|------------|-------|
+| OFF (default, iter-888c semantics) | 0.189 m/s | 3.06e-2 | Empirical baseline (centred 4-pt PPM) |
+| ON (iter-889 Fortran iord<7 boundary) | 0.756 m/s | 1.17e-1 | ~4× WORSE on Linf, ~4× WORSE on L2 |
+
+**Interpretation.**  Fortran's iord<7 cube-edge boundary formulas are STRICTLY MORE Fortran-faithful than our default centred 4-point PPM at boundary faces.  But our hybrid A-L+RK3+`boundary_fix` production stack does NOT match Fortran's full numerical environment; replacing only the PPM boundary formula amplifies a tension between operator-split and Fortran-faithful reconstruction at cube vertices.  Same pattern as iter-766's `fortran_a2b_corner_avg` (1.89× worse) and iter-769's `boundary_fix_skip_corners` (6.5× worse).
+
+**Resolution.**  Default OFF.  The Fortran-faithful path is REACHABLE for callers (e.g., FB-chain stabilisation tests, future iters that land complementary Fortran-faithful changes) but is locked as known-worse on W2 LEGACY by a sentinel.  iter-873 sentinel locks the default-OFF state.
+
+**iter-888c "production-path inert" contract is now superseded.**  iter-888c added the flag with the documented promise that production runs (`FV3EdgeShallowWaterModel`, default `use_experimental_csw=False`) would be unaffected.  iter-889 explicitly extends the flag's reach to the production path; the inert promise is replaced by "default-OFF preserves bit-identical production behaviour, ON activates Fortran-faithful boundary formulas (locked as known-worse on W2 LEGACY)".
+
+**Tests** (`tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`, +1 new test, 15 total):
+15. `test_iter889_w2_legacy_is_known_worse_on_flag` — parametrised W2 LEGACY measurement at C36 1-day with flag OFF vs ON.  Asserts ratio ON/OFF > 2.0 (iter-889 measured 4.0).  Mirrors iter-766's `test_fortran_a2b_corner_avg_is_known_worse` pattern.
+
+**Iter-888c test 14 update.**  The original `test_iter888c_production_fv3edge_model_unaffected` asserted the production path was inert.  iter-889 renames it to `test_iter889_production_fv3edge_model_responds_to_flag` and asserts the OPPOSITE: ON produces non-trivial diff from OFF.  This catches a future regression where the kwarg threading is silently dropped.
+
+**Verification.**  All 123 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.  iter-888 chain test count: 15 (5 iter-888 + 6 iter-888b + 3 iter-888c + 1 iter-889 known-worse).
+
+**Iter-889+ candidates.**
+- Plumb `dxa`/`dya` through `_ppm_reconstruct_1d` to enable the FULL Fortran 4-point `dxa`-weighted xt (currently uniform-grid simplification).
+- Investigate why our centred 4-point PPM at boundaries empirically outperforms Fortran's iord<7 formula on W2 LEGACY — possibly because our `boundary_fix` smoothing is tuned to compensate for the centred reconstruction's specific error structure.
+
+**Deliverable.**
+- `src/legoesm/core/operators_cdgrid.py`: `_ppm_reconstruct_1d` boundary overrides (~85 lines) + plumbing through `cgrid_mass_flux_divergence` and `fv3_sw_tendencies`.
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py`: forward config field from `FV3EdgeShallowWaterModel.step`.
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: +1 known-worse W2 sentinel; iter-888c test 14 renamed and inverted.
+- This doc entry.
+
+**Process.**  164th iter.  Codex iter-888c follow-up review identified the production-path analogue of iter-888's gap.  iter-889 implements it (default-OFF), measures W2 impact (~4× worse), and locks the result with a known-worse sentinel.  Net Fortran-fidelity gain: the Fortran iord<7 boundary path is now reachable from the user-facing config; default-OFF preserves the empirically-better production behaviour while documenting the Fortran-faithful path's known-worse W2 LEGACY outcome.

@@ -83,7 +83,9 @@ def _broadcast_metric(metric, field):
 # PPM (Piecewise Parabolic Method) transport
 # ==============================================================================
 
-def _ppm_reconstruct_1d(q, *, axis: int):
+def _ppm_reconstruct_1d(q, *, axis: int,
+                        apply_fortran_xppm_boundary: bool = False,
+                        n_interior: int | None = None):
     """PPM face-value reconstruction along ``axis``.
 
     Given cell averages along ``axis``, compute left and right face
@@ -108,6 +110,34 @@ def _ppm_reconstruct_1d(q, *, axis: int):
         REQUIRED keyword.  Axis along which to reconstruct face values.
         Use ``axis=1`` for x-direction strips of shape ``(6, n+4, n)``;
         use ``axis=2`` for y-direction strips of shape ``(6, n, n+4)``.
+    apply_fortran_xppm_boundary : bool, default False
+        Iter-889: when True, AND the strip has a halo=2 cubed-sphere
+        layout (`n_interior` provided), overwrite the 6 face-boundary
+        ``q_face`` values with Fortran's iord<7 cube-edge boundary
+        formulas from `tp_core.F90:357-369`:
+        - Left side: ``q_face[1] = c1*q1(-2) + c2*q1(-1) + c3*q1(0)``
+          (Fortran al(0)), ``q_face[2] = uniform 4-point xt`` (Fortran
+          al(1) — cube-face edge), ``q_face[3] = c3*q1(1) + c2*q1(2)
+          + c1*q1(3)`` (Fortran al(2)).  Mirror on the right side.
+        Constants from `tp_core.F90:63-65`:
+            c1 = -2/14, c2 = 11/14, c3 = 5/14.
+        The 4-point xt at the cube-face edge uses the UNIFORM-GRID
+        simplification of Fortran's dxa-weighted formula (lines 360-
+        361, 366-367):
+            xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
+        and is clipped to ``min/max(q1(-1..2))``.  For non-uniform
+        cubed-sphere boundary cells this is a partial Fortran-fidelity
+        fix; the full ``dxa``-weighted formula is deferred until
+        ``dxa`` plumbing is added.
+        Default False preserves prior behaviour bit-for-bit.
+    n_interior : int or None, default None
+        Number of interior cells along ``axis`` when the strip has
+        halo=2 padding (so total size along ``axis`` is
+        ``n_interior + 4``).  Required when
+        ``apply_fortran_xppm_boundary=True`` because the Fortran
+        boundary formulas need to know exactly which 6 ``q_face``
+        indices to override (depends on n).  When the kwarg is False
+        this is ignored.
 
     Returns
     -------
@@ -148,6 +178,90 @@ def _ppm_reconstruct_1d(q, *, axis: int):
     q_face = (7.0 * (q_pad[..., 1:-2] + q_pad[..., 2:-1])
               - (q_pad[..., :-3] + q_pad[..., 3:])) / 12.0
     # q_face has shape (..., N+1): face values at positions -1/2, 1/2, ..., N-1/2
+
+    # Iter-889: Fortran-faithful cube-edge boundary overrides per
+    # tp_core.F90:357-369 (iord<7 path).  Only fires when the kwarg is
+    # True AND the strip is a known halo=2 cubed-sphere layout (caller
+    # provides `n_interior`).  Constants from tp_core.F90:63-65:
+    #   c1 = -2/14, c2 = 11/14, c3 = 5/14
+    # Fortran ↔ q_face (cell at q_pad[k+1] → q_pad[k+2], so face at index
+    # k corresponds to that interface):
+    #   Fortran al(0)  → q_face[1]  (between halo depth-1 and halo depth-0)
+    #   Fortran al(1)  → q_face[2]  (between halo depth-0 and interior 0
+    #                                — the actual cube-face boundary)
+    #   Fortran al(2)  → q_face[3]  (between interior 0 and interior 1)
+    #   Fortran al(npx-1) → q_face[n+1]
+    #   Fortran al(npx)   → q_face[n+2]  (cube-face boundary, right)
+    #   Fortran al(npx+1) → q_face[n+3]
+    # The strip has shape (..., n_interior+4, ...) on `axis` (now axis=-1
+    # since we moved it).  q_pad has shape (..., n_interior+8, ...).
+    # Fortran q1(-2) = q_pad[2], q1(-1) = q_pad[3], q1(0) = q_pad[4]
+    # (interior 0 in our convention = halo depth-0 in Fortran), q1(1)
+    # = q_pad[5] (interior 1), q1(2) = q_pad[6], q1(3) = q_pad[7].
+    # Note: our halo=2 strip's "interior 0" (q[2]) corresponds to
+    # Fortran q1(1) (the FIRST interior).  Our q[1] is halo-depth-0
+    # (Fortran q1(0)).  The cube-face boundary is between q[1] and q[2]
+    # — which is q_face[2] (between q_pad[3] and q_pad[4]).
+    # Right side mirror.
+    if apply_fortran_xppm_boundary and n_interior is not None:
+        c1 = -2.0 / 14.0
+        c2 = 11.0 / 14.0
+        c3 = 5.0 / 14.0
+        n_int = int(n_interior)
+
+        # LEFT cube-edge boundary overrides
+        # al(0) = c1*q1(-2) + c2*q1(-1) + c3*q1(0)
+        #       = c1*q_pad[2] + c2*q_pad[3] + c3*q_pad[4]
+        face_1 = (c1 * q_pad[..., 2] + c2 * q_pad[..., 3]
+                  + c3 * q_pad[..., 4])
+        # al(1) = uniform 4-point xt (clipped)
+        # xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
+        #    = 0.75*(q_pad[4]+q_pad[5]) - 0.25*(q_pad[3]+q_pad[6])
+        xt_L = (0.75 * (q_pad[..., 4] + q_pad[..., 5])
+                - 0.25 * (q_pad[..., 3] + q_pad[..., 6]))
+        q_lo_L = jnp.minimum(jnp.minimum(q_pad[..., 3], q_pad[..., 4]),
+                              jnp.minimum(q_pad[..., 5], q_pad[..., 6]))
+        q_hi_L = jnp.maximum(jnp.maximum(q_pad[..., 3], q_pad[..., 4]),
+                              jnp.maximum(q_pad[..., 5], q_pad[..., 6]))
+        face_2 = jnp.clip(xt_L, q_lo_L, q_hi_L)
+        # al(2) = c3*q1(1) + c2*q1(2) + c1*q1(3)
+        #       = c3*q_pad[5] + c2*q_pad[6] + c1*q_pad[7]
+        face_3 = (c3 * q_pad[..., 5] + c2 * q_pad[..., 6]
+                  + c1 * q_pad[..., 7])
+
+        q_face = q_face.at[..., 1].set(face_1)
+        q_face = q_face.at[..., 2].set(face_2)
+        q_face = q_face.at[..., 3].set(face_3)
+
+        # RIGHT cube-edge boundary overrides
+        # al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
+        # In our q_pad: q1(npx-3) = q_pad[n_int+1], q1(npx-2) = q_pad[n_int+2],
+        # q1(npx-1) = q_pad[n_int+3].  q_face[n_int+1] is Fortran al(npx-1).
+        face_nm1 = (c1 * q_pad[..., n_int + 1]
+                    + c2 * q_pad[..., n_int + 2]
+                    + c3 * q_pad[..., n_int + 3])
+        # al(npx) = uniform 4-point xt (clipped)
+        # q1(npx-1) = q_pad[n_int+3], q1(npx) = q_pad[n_int+4],
+        # q1(npx-2) = q_pad[n_int+2], q1(npx+1) = q_pad[n_int+5]
+        xt_R = (0.75 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 4])
+                - 0.25 * (q_pad[..., n_int + 2] + q_pad[..., n_int + 5]))
+        q_lo_R = jnp.minimum(
+            jnp.minimum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
+            jnp.minimum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
+        q_hi_R = jnp.maximum(
+            jnp.maximum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
+            jnp.maximum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
+        face_n = jnp.clip(xt_R, q_lo_R, q_hi_R)
+        # al(npx+1) = c3*q1(npx) + c2*q1(npx+1) + c1*q1(npx+2)
+        # In our q_pad: q1(npx) = q_pad[n_int+4], q1(npx+1) = q_pad[n_int+5],
+        # q1(npx+2) = q_pad[n_int+6]
+        face_np1 = (c3 * q_pad[..., n_int + 4]
+                    + c2 * q_pad[..., n_int + 5]
+                    + c1 * q_pad[..., n_int + 6])
+
+        q_face = q_face.at[..., n_int + 1].set(face_nm1)
+        q_face = q_face.at[..., n_int + 2].set(face_n)
+        q_face = q_face.at[..., n_int + 3].set(face_np1)
 
     # Left and right face values for each cell
     q_L = q_face[..., :-1]  # face at i-1/2 → left face of cell i
@@ -454,7 +568,8 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 # C-grid mass flux with PPM transport
 # ==============================================================================
 
-def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
+def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
+                                apply_fortran_xppm_boundary=False):
     """Conservative mass flux divergence using PPM face reconstruction.
 
     Uses the Piecewise Parabolic Method (Colella & Woodward 1984) for
@@ -483,7 +598,10 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
 
         def flux_div_one(args):
             hk, uk, vk = args
-            return cgrid_mass_flux_divergence(hk, uk, vk, cdgrid)
+            return cgrid_mass_flux_divergence(
+                hk, uk, vk, cdgrid,
+                apply_fortran_xppm_boundary=(
+                    apply_fortran_xppm_boundary))
 
         result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
         return jnp.moveaxis(result_t, 0, -1)
@@ -507,7 +625,10 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     # `_ppm_reconstruct_1d` reconstructs in the i-direction (iter-508
     # made the axis explicit to prevent the iter-505 silent-bug class).
     h_x_strips = h_pad[:, :, 2:-2]                  # (6, n+4, n)
-    q_L_x, q_R_x = _ppm_reconstruct_1d(h_x_strips, axis=1)
+    q_L_x, q_R_x = _ppm_reconstruct_1d(
+        h_x_strips, axis=1,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        n_interior=n)
 
     # Face values at x-interfaces: we need n+1 faces for interior cells
     # Face (i) is between padded cells (i+1) and (i+2), i.e. original cells i-1 and i
@@ -525,7 +646,10 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     # Strip shape (6, n, n+4) puts the halo-padded j-axis at axis=2;
     # pass `axis=2` explicitly per the iter-509 PPM contract.
     h_y_strips = h_pad[:, 2:-2, :]  # (6, n, n+4)
-    q_L_y, q_R_y = _ppm_reconstruct_1d(h_y_strips, axis=2)
+    q_L_y, q_R_y = _ppm_reconstruct_1d(
+        h_y_strips, axis=2,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        n_interior=n)
 
     q_R_bottom = q_R_y[:, :, 1:n+2]   # (6, n, n+1)
     q_L_top = q_L_y[:, :, 2:n+3]      # (6, n, n+1)
@@ -1603,6 +1727,7 @@ def fv3_sw_tendencies(
     fortran_a2b_corner_avg=False,
     fortran_vector_corner_fill=False,
     dddmp=0.0,
+    apply_fortran_xppm_boundary=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1631,7 +1756,12 @@ def fv3_sw_tendencies(
     u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
 
     # (b) Height tendency (PPM mass flux divergence)
-    dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
+    # Iter-889: forward apply_fortran_xppm_boundary so the production
+    # CDGrid mass-flux PPM picks up Fortran's iord<7 cube-edge
+    # boundary overrides at tp_core.F90:357-369 when opted in.
+    dh_dt = cgrid_mass_flux_divergence(
+        h, u_c, v_c, cdgrid,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
     if zero_mean_correction:
         total_area = jnp.sum(cdgrid.base.area)
         dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area

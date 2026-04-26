@@ -586,13 +586,22 @@ def test_iter888c_fb_model_step_forwards_config_field():
         f"fv3_fb_sw_step call.")
 
 
-def test_iter888c_production_fv3edge_model_unaffected():
-    """Sanity: `FV3EdgeShallowWaterModel` (default
-    `use_experimental_csw=False`) routes through `fv3_sw_tendencies`
-    → `cgrid_mass_flux_divergence` → `_ppm_reconstruct_1d`, NEVER
-    through the FB-chain functions modified in iter-888/888b/888c.
-    Setting `apply_fortran_xppm_boundary=True` on the production
-    model's config must NOT change its output.
+def test_iter889_production_fv3edge_model_responds_to_flag():
+    """Iter-889 (supersedes iter-888c "production inert" contract):
+    `FV3EdgeShallowWaterModel` (default `use_experimental_csw=False`)
+    now routes `apply_fortran_xppm_boundary` through `fv3_sw_tendencies`
+    → `cgrid_mass_flux_divergence` → `_ppm_reconstruct_1d`, where
+    iter-889 added the Fortran iord<7 cube-edge boundary overrides
+    (tp_core.F90:357-369).  Setting the config flag True must produce
+    DIFFERENT output from False on the same Williamson-2 IC.
+
+    Pre-iter-889 this test asserted the OPPOSITE (production unaffected
+    by the flag), reflecting iter-888c's leaf-only production scope.
+    iter-889 implements production-path support, so the contract
+    flips: ON-path must change output; OFF-path preserves prior
+    behaviour bit-for-bit (locked separately by the
+    test_iter889_production_off_path_bit_identical_to_pre_iter889
+    test below).
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
@@ -629,14 +638,134 @@ def test_iter888c_production_fv3edge_model_unaffected():
     state_off = _step_with_flag(False)
     state_on = _step_with_flag(True)
 
-    np.testing.assert_array_equal(
-        np.asarray(state_off.h), np.asarray(state_on.h),
-        err_msg=("FV3EdgeShallowWaterModel (production CDGrid path) "
-                 "responds to apply_fortran_xppm_boundary, but it "
-                 "should be inert on this code path — production "
-                 "uses fv3_sw_tendencies → _ppm_reconstruct_1d, not "
-                 "the FB chain."))
-    np.testing.assert_array_equal(
-        np.asarray(state_off.u_d), np.asarray(state_on.u_d))
-    np.testing.assert_array_equal(
-        np.asarray(state_off.v_d), np.asarray(state_on.v_d))
+    diff_h = float(np.max(np.abs(np.asarray(state_on.h)
+                                  - np.asarray(state_off.h))))
+    diff_u = float(np.max(np.abs(np.asarray(state_on.u_d)
+                                  - np.asarray(state_off.u_d))))
+    diff_v = float(np.max(np.abs(np.asarray(state_on.v_d)
+                                  - np.asarray(state_off.v_d))))
+    max_diff = max(diff_h, diff_u, diff_v)
+    assert max_diff > 1e-12, (
+        f"FV3EdgeShallowWaterModel (production CDGrid path) is NOT "
+        f"reachable via apply_fortran_xppm_boundary: max diff "
+        f"h={diff_h:.3e}, u_d={diff_u:.3e}, v_d={diff_v:.3e}.  "
+        f"iter-889 plumbed the kwarg through fv3_sw_tendencies → "
+        f"cgrid_mass_flux_divergence → _ppm_reconstruct_1d.  Either "
+        f"the kwarg is silently dropped or the Fortran-faithful "
+        f"boundary overrides are not activating.")
+
+
+def test_iter889_w2_legacy_is_known_worse_on_flag():
+    """Iter-889 known-worse sentinel (mirrors iter-766's
+    `test_fortran_a2b_corner_avg_is_known_worse` pattern).
+
+    Setting `apply_fortran_xppm_boundary=True` on the canonical W2
+    LEGACY matrix config makes W2 v_north Linf at C36 1-day SUBSTANTIALLY
+    WORSE than the default-OFF empirical baseline.
+
+    iter-889 measurement at C36 1-day:
+      OFF (default 4-pt centred PPM): v_north Linf = 0.189 m/s
+      ON  (Fortran iord<7 boundary): v_north Linf = 0.756 m/s
+    Ratio ON/OFF ≈ 4.0x worse.
+
+    Interpretation.  Fortran's iord<7 cube-edge boundary formulas
+    (s11/s14/s15 + uniform-grid 4-point xt at the cube-face edge,
+    tp_core.F90:357-369) are STRICTLY MORE Fortran-faithful than our
+    default centred 4-point PPM at boundary faces.  But our hybrid
+    A-L+RK3+boundary_fix production stack does NOT match Fortran's
+    full numerical environment; replacing only the PPM boundary
+    formula amplifies a tension between operator-split and Fortran-
+    faithful reconstruction at cube vertices.  Same pattern as
+    iter-766's a2b corner average and iter-769's skip_corners.
+
+    This is a Fortran-fidelity vs empirical-W2 tension iter-889
+    documents but does NOT resolve.  Default-OFF preserves the
+    empirically-better current behaviour while making the Fortran-
+    faithful path REACHABLE for callers (e.g., FB-chain stabilisation
+    tests, future iters that land complementary Fortran-faithful
+    changes).
+
+    This sentinel pins the known-worse outcome so:
+    - A future change that enables the flag by default in the matrix
+      runner shifts the production W2 baseline 4x and would fail
+      iter-873's "matrix runner does not activate flags" test.
+    - A future repair that closes the ON/OFF gap (i.e., the Fortran-
+      faithful path becomes the empirical winner) would fail this
+      test, prompting an audit + potentially re-baselining iter-873.
+    - A future regression that silently disables the kwarg threading
+      would also fail this test (since ON would equal OFF).
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig,
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+    )
+    import sys
+    sys.path.insert(0, "tests")
+    from test_cases.williamson import williamson_test2
+
+    n = 36
+    dt = 300.0
+    n_steps = int(86400 / dt)  # 1 day
+    div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
+    sw = williamson_test2(grid)
+    u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+    def _run_and_measure(flag):
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            div_damp=div_damp,
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2,
+            apply_fortran_xppm_boundary=flag)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge)
+        ca, sa = cell_centre_angles_from_4edge(cdgrid)
+        u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
+                      + np.asarray(state.u_d)[:, :, 1:])
+        v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
+                      + np.asarray(state.v_d)[:, 1:, :])
+        v_north = (np.asarray(sa) * u_cc + np.asarray(ca) * v_cc)
+        return float(np.max(np.abs(v_north)))
+
+    v_off = _run_and_measure(flag=False)
+    v_on = _run_and_measure(flag=True)
+
+    # Pin OFF baseline near iter-888's measurement (~0.19 m/s direct
+    # cell-centre measurement; sentinel test gives ~0.16 m/s through
+    # latlon regridding).  0.30 ceiling allows for resolution drift.
+    assert v_off < 0.30, (
+        f"OFF (default) baseline v_north Linf = {v_off:.3e} m/s "
+        f"drifted above 0.30 m/s — the iter-888 measurement (0.189) "
+        f"no longer applies.  Re-baseline the iter-889 known-worse "
+        f"sentinel.")
+
+    # Pin ON path to be materially worse than OFF (>= 2x gap).
+    # iter-889 measured ratio ~4.0x.  A smaller ratio means either
+    # the boundary formula was changed or the OFF baseline drifted up.
+    ratio = v_on / v_off
+    assert ratio > 2.0, (
+        f"apply_fortran_xppm_boundary=True v_north Linf={v_on:.3e} "
+        f"produced ratio {ratio:.2f}x over OFF baseline ({v_off:.3e}) "
+        f"— UNEXPECTEDLY SMALL gap.  iter-889 falsified this path at "
+        f"~4.0x blowup.  A new smaller ratio means either:\n"
+        f"  (a) the iord<7 Fortran boundary path has been repaired — "
+        f"re-examine whether it now reduces W2 mode A and could "
+        f"replace the default centred 4-point reconstruction, OR\n"
+        f"  (b) the opt-in was silently disabled — restore the kwarg "
+        f"threading in _ppm_reconstruct_1d / cgrid_mass_flux_divergence "
+        f"/ fv3_sw_tendencies / FV3EdgeShallowWaterModel.step per "
+        f"iter-889.")

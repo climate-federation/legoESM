@@ -663,6 +663,15 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     fortran_vector_corner_fill=(
                         self.config.fortran_vector_corner_fill),
                     dddmp=self.config.dddmp_prod,
+                    # Iter-889: forward iter-888c's `apply_fortran_xppm_boundary`
+                    # config field to `fv3_sw_tendencies` so the production
+                    # CDGrid path picks up Fortran's iord<7 cube-edge
+                    # boundary overrides (tp_core.F90:357-369) when the
+                    # user opts in.  iter-888c's "production-path inert"
+                    # contract is now superseded — production CDGrid
+                    # responds to the flag from iter-889 onward.
+                    apply_fortran_xppm_boundary=(
+                        self.config.apply_fortran_xppm_boundary),
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,
