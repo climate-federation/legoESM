@@ -183,27 +183,40 @@ def mpas_hydrostatic_tendencies(
     # In sigma coords: grad_eta(ln p) = grad(ln p_s).
     # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
     if _hybrid:
-        # Batch three cell-to-edge gathers (T_3d, p_full, dp) into one
-        # call.  ``cell_to_edge_avg_3d`` is a pure ``cellsOnEdge``
-        # gather + average — the trailing axis is purely passive.
-        # ``edge_thickness_3d(dp)`` is just ``cell_to_edge_avg_3d(dp)``,
-        # so folding ``dp`` into this batch lets the hybrid-path
-        # ``dp_edge_3d`` reuse the gather instead of issuing a
-        # standalone call later.  Same exploit as Loop 154 for MPAS CE.
+        # Batch the cell-to-edge gathers — three 3D fields (T_3d, p_full,
+        # dp) and two 2D fields (p_s, ln_ps) — into a single
+        # ``cell_to_edge_avg_3d`` call.  The 2D fields are promoted to
+        # single-level slots via ``[..., None]`` and concatenated along
+        # the trailing axis, so total trailing axis = ``nlev*3 + 2``.
+        # ``cell_to_edge_avg_3d`` is a pure ``cellsOnEdge`` gather + average
+        # — the trailing axis is purely passive.  Saves *two* full
+        # ``cell_to_edge_avg`` (2D) calls per RHS evaluation.  Same
+        # exploit as Loop 154 / 174.
         nlev_te = T_3d.shape[-1]
         _Tpd_stack = jnp.stack([T_3d, p_full, dp], axis=-1)  # (nCells, nlev, 3)
-        _Tpd_edge = cell_to_edge_avg_3d(
-            _Tpd_stack.reshape(_Tpd_stack.shape[0], nlev_te * 3), mesh,
-        ).reshape(-1, nlev_te, 3)
+        _Tpd_flat = _Tpd_stack.reshape(_Tpd_stack.shape[0], nlev_te * 3)
+        _Tpd_pl_input = jnp.concatenate(
+            [_Tpd_flat, p_s[:, jnp.newaxis], ln_ps[:, jnp.newaxis]], axis=-1,
+        )  # (nCells, nlev*3 + 2)
+        _Tpd_pl_edge = cell_to_edge_avg_3d(_Tpd_pl_input, mesh)
+        _Tpd_edge = _Tpd_pl_edge[:, : nlev_te * 3].reshape(-1, nlev_te, 3)
         T_edge_3d = _Tpd_edge[..., 0]
         p_full_edge = _Tpd_edge[..., 1]
         dp_edge_3d = _Tpd_edge[..., 2]  # consumed in the divergence batch below
-        p_s_edge_scalar = cell_to_edge_avg(p_s, mesh)    # (nEdges,)
+        p_s_edge_scalar = _Tpd_pl_edge[:, -2]  # (nEdges,)
+        ln_ps_edge_pre = _Tpd_pl_edge[:, -1]   # (nEdges,) — reused below
         B_full = sigma_coord.B_full  # (nlev,)
         hybrid_factor_edge = B_full * p_s_edge_scalar[:, None] / jnp.maximum(p_full_edge, 1e-10)
         pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None] * hybrid_factor_edge
     else:
-        T_edge_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
+        # Batch (T_3d, ln_ps) into a single cell_to_edge_avg_3d call.
+        nlev_te = T_3d.shape[-1]
+        _T_ln_input = jnp.concatenate(
+            [T_3d, ln_ps[:, jnp.newaxis]], axis=-1,
+        )  # (nCells, nlev + 1)
+        _T_ln_edge = cell_to_edge_avg_3d(_T_ln_input, mesh)
+        T_edge_3d = _T_ln_edge[:, :nlev_te]
+        ln_ps_edge_pre = _T_ln_edge[:, -1]
         dp_edge_3d = None
         pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
 
@@ -270,7 +283,10 @@ def mpas_hydrostatic_tendencies(
     # divergence calls that previously fired later in the function are
     # eliminated.
     flux_T_3d = u_3d * T_edge_3d  # (nEdges, nlev)
-    ln_ps_edge = cell_to_edge_avg(ln_ps, mesh)  # (nEdges,)
+    # ``ln_ps_edge_pre`` was already produced by the batched
+    # ``cell_to_edge_avg_3d`` block above (Loop 175); reuse it here so
+    # the standalone 2D ``cell_to_edge_avg(ln_ps)`` call is eliminated.
+    ln_ps_edge = ln_ps_edge_pre
     flux_lnps_3d = u_3d * ln_ps_edge[:, None]   # (nEdges, nlev)
     n_edges_d, nlev_d = u_3d.shape
 
