@@ -318,39 +318,30 @@ def mpas_compressible_euler_slow_tendencies(
 def _vertical_advection_height_1d(field_3d, w, dz, dz_half, J):
     """Vertical advection for height-based coords: -(w/J) df/dz*.
 
-    ndim-aware: ``[..., axis]`` indexing lets arbitrary leading batch
-    axes pass through, so the function is natively callable on
-    ``(n_tracers, n, nlev)`` (or any leading-axis stack) without a
-    ``jax.vmap`` wrapper.
-
     Parameters
     ----------
-    field_3d : (..., nlev)
-    w : (..., nlev+1) at interfaces (or (n, nlev+1) and broadcast)
+    field_3d : (n, nlev)
+    w : (n, nlev+1) at interfaces
     dz : (nlev,)
     dz_half : (nlev-1,)
     J : (n,) or scalar
 
     Returns
     -------
-    (..., nlev) tendency
+    (n, nlev) tendency
     """
     nlev = field_3d.shape[-1]
-    # w at full levels (slice on the last axis = nlev+1)
-    w_full = 0.5 * (w[..., :-1] + w[..., 1:])
+    # w at full levels
+    w_full = 0.5 * (w[:, :-1] + w[:, 1:])
 
     # Vertical gradient at full levels (centred); zero at top/bottom
     # (no ghost cells).  Single Pad HLO op replaces alloc-zeros + scatter.
     if nlev > 2:
-        inner = (field_3d[..., :-2] - field_3d[..., 2:]) / (dz_half[:-1] + dz_half[1:])
-        pad_axes = ((0, 0),) * (inner.ndim - 1)
-        df_dz = jnp.pad(inner, (*pad_axes, (1, 1)))
+        inner = (field_3d[:, :-2] - field_3d[:, 2:]) / (dz_half[:-1] + dz_half[1:])
+        df_dz = jnp.pad(inner, ((0, 0), (1, 1)))
     else:
         df_dz = jnp.zeros_like(field_3d)
 
-    # J is per-edge (n,) — broadcast against any leading batch axes via
-    # ``[:, None]``.  XLA fills in implicit leading 1-axes for ``w_full``
-    # / ``df_dz`` so the multiply works for both 2D and higher-rank inputs.
     J_col = J[:, None] if J.ndim == 1 else J
     return -w_full / J_col * df_dz
 
@@ -392,15 +383,13 @@ def _tracer_tendencies(tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2):
     horiz = -(div_uq - tracers * div_u_3d[..., None])
 
     # Vertical advection — local stencil along axis -1, no halo cost.
-    # ``_vertical_advection_height_1d`` is now ndim-aware (axis -1 = nlev)
-    # so we can pass the leading-stacked tensor directly: move the
-    # tracer axis to leading and call once.  Drop the per-tracer
-    # ``jax.vmap`` wrapper (Loop 170).
-    tracers_lead = jnp.moveaxis(tracers, -1, 0)  # (n_tracers, nCells, nlev)
-    vert_lead = _vertical_advection_height_1d(
-        tracers_lead, w, dz, dz_half, J,
-    )
-    vert = jnp.moveaxis(vert_lead, 0, -1)
+    # ``_vertical_advection_height_1d`` hard-codes axis 1 as nlev for 2D
+    # input, so vmap over the trailing tracer axis to get one batched
+    # kernel rather than a Python-unrolled loop.
+    def _vert_one(q):
+        return _vertical_advection_height_1d(q, w, dz, dz_half, J)
+
+    vert = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(tracers)
     return horiz + vert
 
 
