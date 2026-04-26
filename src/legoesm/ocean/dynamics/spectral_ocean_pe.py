@@ -270,18 +270,52 @@ def spectral_ocean_tendencies(
     im_over_a = 1j * grid.ms.astype(jnp.float64) / a
     one_over_a = 1.0 / a
 
-    # --- 9. Vorticity fluxes ---
+    # --- 9-12. Vorticity fluxes + energy + vertical advection (batched) ---
+    # The vor/div tendencies need oc2 and dmu of {A_vor, B_vor,
+    # vert_u_cos, vert_v_cos}, plus oc2 of KE_cos2*mask and a single
+    # ``sh_analysis_3d`` of the energy-variable scalar potential.
+    # Compute all the grid inputs first, then batch:
+    #
+    # * 5 oc2 forwards (A_vor, B_vor, vert_u_cos, vert_v_cos, KE)  → 1
+    # * 4 dmu forwards (A_vor, B_vor, vert_u_cos, vert_v_cos)      → 1
+    # * 1 sh_analysis_3d for the scalar energy potential           — stays
+    #
+    # 10 SH-analyses → 3.  Same trailing-axis-as-passive-batch pattern
+    # as Loops 95/98/101.
     A_vor = abs_vor * u_cos * mask_3d
     B_vor = abs_vor * v_cos * mask_3d
 
-    flux_vor_div = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, A_vor)
-        - one_over_a * sh_analysis_dmu_3d(grid, B_vor)
-    )
-    flux_vor_curl = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, B_vor)
-        + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
-    )
+    vert_adv_u = _vertical_advection_spectral(u.real, w, z_coord, J.real)
+    vert_adv_v = _vertical_advection_spectral(v.real, w, z_coord, J.real)
+    vert_u_cos = vert_adv_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
+    vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
+
+    KE_cos2_masked = KE_cos2 * mask_3d
+    n_lat_o, n_lon_o, nlev_o = A_vor.shape
+    _ocean_oc2_stack = jnp.stack(
+        [A_vor, B_vor, vert_u_cos, vert_v_cos, KE_cos2_masked], axis=-1,
+    )  # (..., nlev, 5)
+    _ocean_dmu_stack = jnp.stack(
+        [A_vor, B_vor, vert_u_cos, vert_v_cos], axis=-1,
+    )  # (..., nlev, 4)
+    _ocean_oc2 = sh_analysis_oc2_3d(
+        grid, _ocean_oc2_stack.reshape(n_lat_o, n_lon_o, nlev_o * 5),
+    ).reshape(-1, nlev_o, 5)
+    _ocean_dmu = sh_analysis_dmu_3d(
+        grid, _ocean_dmu_stack.reshape(n_lat_o, n_lon_o, nlev_o * 4),
+    ).reshape(-1, nlev_o, 4)
+    A_vor_oc2 = _ocean_oc2[..., 0]
+    B_vor_oc2 = _ocean_oc2[..., 1]
+    vert_u_oc2 = _ocean_oc2[..., 2]
+    vert_v_oc2 = _ocean_oc2[..., 3]
+    KE_oc2 = _ocean_oc2[..., 4]
+    A_vor_dmu = _ocean_dmu[..., 0]
+    B_vor_dmu = _ocean_dmu[..., 1]
+    vert_u_dmu = _ocean_dmu[..., 2]
+    vert_v_dmu = _ocean_dmu[..., 3]
+
+    flux_vor_div = im_over_a[:, jnp.newaxis] * A_vor_oc2 - one_over_a * B_vor_dmu
+    flux_vor_curl = im_over_a[:, jnp.newaxis] * B_vor_oc2 + one_over_a * A_vor_dmu
 
     # --- 10. Energy variable: E = K + p'/rho_0 + g*eta ---
     # Subtract the area-weighted mean pressure at each level to remove
@@ -305,28 +339,15 @@ def spectral_ocean_tendencies(
     p_prime_anom = (p_prime - p_prime_mean) * mask_3d
     # Barotropic PGF: g*eta broadcast to all levels (Boussinesq)
     g_eta_3d = (g * eta_safe)[..., jnp.newaxis]  # (n_lat, n_lon, 1)
-    E_hat = (sh_analysis_oc2_3d(grid, KE_cos2 * mask_3d)
-             + sh_analysis_3d(grid, (p_prime_anom / rho_0 + g_eta_3d) * mask_3d))
-
-    # --- 11. Horizontal tendencies ---
-    dvor_hat = -flux_vor_div
-    ddiv_hat = flux_vor_curl - grid.lap[:, jnp.newaxis] * E_hat
-
-    # --- 12. Vertical advection of momentum ---
-    vert_adv_u = _vertical_advection_spectral(u.real, w, z_coord, J.real)
-    vert_adv_v = _vertical_advection_spectral(v.real, w, z_coord, J.real)
-
-    vert_u_cos = vert_adv_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
-    vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
-
-    dvor_hat = dvor_hat + (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vert_v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, vert_u_cos)
+    E_hat = KE_oc2 + sh_analysis_3d(
+        grid, (p_prime_anom / rho_0 + g_eta_3d) * mask_3d,
     )
-    ddiv_hat = ddiv_hat + (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vert_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, vert_v_cos)
-    )
+
+    # --- 11. Horizontal tendencies (combine flux + vert-advection) ---
+    vert_vor = im_over_a[:, jnp.newaxis] * vert_v_oc2 + one_over_a * vert_u_dmu
+    vert_div = im_over_a[:, jnp.newaxis] * vert_u_oc2 - one_over_a * vert_v_dmu
+    dvor_hat = -flux_vor_div + vert_vor
+    ddiv_hat = flux_vor_curl - grid.lap[:, jnp.newaxis] * E_hat + vert_div
 
     # --- 13. Tracer equations (vectorized over T, S) ---
     tracers = jnp.stack([T.real, S.real], axis=0)  # (2, n_lat, n_lon, nlev)
