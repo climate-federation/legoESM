@@ -335,15 +335,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     p_prime_filled = _neumann_fill_cgrid(p_prime, mask)
 
-    # C-grid gradient: compact stencil at face points
-    # vmap over levels for 3D gradient
-    p_t = jnp.moveaxis(p_prime_filled, -1, 0)  # (nlev, n_lat, n_lon)
-
-    dp_dx_t = jax.vmap(lambda p2d: gradient_x_cgrid(p2d, grid))(p_t)
-    dp_dy_t = jax.vmap(lambda p2d: gradient_y_cgrid(p2d, grid))(p_t)
-
-    dp_dx = jnp.moveaxis(dp_dx_t, 0, -1)  # (n_lat, n_lon+1, nlev)
-    dp_dy = jnp.moveaxis(dp_dy_t, 0, -1)  # (n_lat+1, n_lon, nlev)
+    # C-grid gradient: compact stencil at face points.  ``gradient_*_cgrid``
+    # natively handles 3D input (it broadcasts the lat-only metric over
+    # the trailing level axis), so the previous ``moveaxis + vmap +
+    # moveaxis`` round-trip was redundant — call directly on 3D.
+    dp_dx = gradient_x_cgrid(p_prime_filled, grid)  # (n_lat, n_lon+1, nlev)
+    dp_dy = gradient_y_cgrid(p_prime_filled, grid)  # (n_lat+1, n_lon, nlev)
 
     # --- 4. Vertical velocity from FV flux divergence ---
     # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
@@ -379,11 +376,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     vp_cell = 0.5 * (v_prime[:-1, :, :] + v_prime[1:, :, :])
     KE = 0.5 * (up_cell**2 + vp_cell**2)
 
-    KE_t = jnp.moveaxis(KE, -1, 0)
-    dKE_dx_t = jax.vmap(lambda ke2d: gradient_x_cgrid(ke2d, grid))(KE_t)
-    dKE_dy_t = jax.vmap(lambda ke2d: gradient_y_cgrid(ke2d, grid))(KE_t)
-    dKE_dx = jnp.moveaxis(dKE_dx_t, 0, -1)
-    dKE_dy = jnp.moveaxis(dKE_dy_t, 0, -1)
+    # ``gradient_*_cgrid`` natively handles 3D input — call directly
+    # on KE instead of the moveaxis + vmap round-trip.
+    dKE_dx = gradient_x_cgrid(KE, grid)
+    dKE_dy = gradient_y_cgrid(KE, grid)
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     du_dt = -dKE_dx - dp_dx / rho_0
