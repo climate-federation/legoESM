@@ -324,20 +324,29 @@ def spectral_pe_tendencies(
     one_over_a = 1.0 / a
 
     # --- 10. Vorticity fluxes: (zeta+f)*u*cos, (zeta+f)*v*cos ---
+    # Batch the four SH analyses (oc2 on A_vor & B_vor, dmu on A_vor &
+    # B_vor) into two: stack ``(A_vor, B_vor)`` along a trailing axis
+    # and fold into the level dim so each SH-analysis variant runs once
+    # on a thicker (n_lat, n_lon, nlev*2) tensor.  Both
+    # ``sh_analysis_oc2_3d`` and ``sh_analysis_dmu_3d`` treat the
+    # trailing axis as a passive batch (FFT on lon, weighted sum over
+    # lat — neither touches the trailing axis), so the result is
+    # identical to two separate calls.  4 SH forwards → 2.
     A_vor = abs_vor * u_cos   # (n_lat, n_lon, nlev)
     B_vor = abs_vor * v_cos
+    _AB_stack = jnp.stack([A_vor, B_vor], axis=-1)  # (..., nlev, 2)
+    n_lat_t, n_lon_t, nlev_t, _ = _AB_stack.shape
+    _AB_flat = _AB_stack.reshape(n_lat_t, n_lon_t, nlev_t * 2)
+    _oc2_AB = sh_analysis_oc2_3d(grid, _AB_flat).reshape(-1, nlev_t, 2)
+    _dmu_AB = sh_analysis_dmu_3d(grid, _AB_flat).reshape(-1, nlev_t, 2)
+    _A_oc2, _B_oc2 = _oc2_AB[..., 0], _oc2_AB[..., 1]
+    _A_dmu, _B_dmu = _dmu_AB[..., 0], _dmu_AB[..., 1]
 
     # Spectral divergence of vorticity flux -> dvor/dt
-    flux_vor_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, A_vor)
-        - one_over_a * sh_analysis_dmu_3d(grid, B_vor)
-    )  # (n_sh, nlev)
+    flux_vor_div = im_over_a[:, None] * _A_oc2 - one_over_a * _B_dmu  # (n_sh, nlev)
 
     # Spectral curl of vorticity flux -> ddiv/dt contribution
-    flux_vor_curl = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, B_vor)
-        + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
-    )
+    flux_vor_curl = im_over_a[:, None] * _B_oc2 + one_over_a * _A_dmu
 
     # --- 11. Pressure gradient force (correct form, NOT Bourke E-variable) ---
     # The PGF divergence is: -∇²(K + Φ) - ∇·(R_d·T·∇lnps)
@@ -445,20 +454,24 @@ def spectral_pe_tendencies(
         vert_adv_u = _vertical_advection_sigma_gaussian(u, sigma_dot, sigma_coord)
         vert_adv_v = _vertical_advection_sigma_gaussian(v, sigma_dot, sigma_coord)
 
-    # Convert to spectral vor/div contributions
+    # Convert to spectral vor/div contributions.  Same batching pattern
+    # as the vorticity-flux SH analyses above: stack (vert_u_cos,
+    # vert_v_cos) along a trailing axis and run each SH variant once on
+    # a thicker (..., nlev*2) tensor — 4 SH forwards collapse to 2.
     vert_u_cos = vert_adv_u * grid.cos_lat[:, None, None]
     vert_v_cos = vert_adv_v * grid.cos_lat[:, None, None]
+    _vert_uv_stack = jnp.stack([vert_u_cos, vert_v_cos], axis=-1)
+    n_lat_v, n_lon_v, nlev_v, _ = _vert_uv_stack.shape
+    _vert_uv_flat = _vert_uv_stack.reshape(n_lat_v, n_lon_v, nlev_v * 2)
+    _vert_oc2 = sh_analysis_oc2_3d(grid, _vert_uv_flat).reshape(-1, nlev_v, 2)
+    _vert_dmu = sh_analysis_dmu_3d(grid, _vert_uv_flat).reshape(-1, nlev_v, 2)
+    _vu_oc2, _vv_oc2 = _vert_oc2[..., 0], _vert_oc2[..., 1]
+    _vu_dmu, _vv_dmu = _vert_dmu[..., 0], _vert_dmu[..., 1]
 
     # curl(vert_adv) -> dvor_hat
-    vert_vor_tend = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vert_v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, vert_u_cos)
-    )
+    vert_vor_tend = im_over_a[:, None] * _vv_oc2 + one_over_a * _vu_dmu
     # div(vert_adv) -> ddiv_hat
-    vert_div_tend = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vert_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, vert_v_cos)
-    )
+    vert_div_tend = im_over_a[:, None] * _vu_oc2 - one_over_a * _vv_dmu
 
     dvor_hat = dvor_hat + vert_vor_tend
     ddiv_hat = ddiv_hat + vert_div_tend
