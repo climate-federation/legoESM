@@ -2528,3 +2528,33 @@ So iter-891 is a Fortran-fidelity gap closure for the lesser-used `fv_flux_diver
 - This doc entry.
 
 **Process.**  169th iter.  iter-891 is the parallel iter-889 fix for the `operators_fv.py` PPM implementation: same Fortran reference, same uniform-grid simplification, same default-OFF preservation pattern.  Closes the PPM cube-edge boundary fidelity gap across all three PPM implementations (`_ppm_1d` FB, `_ppm_reconstruct_1d` production, `_ppm_edge_values` operators_fv).  No production W2 / FB-chain reach (different code path); the Fortran-fidelity gain is locked behind a kwarg for callers who want it.
+
+### Iter-891b — fix off-by-one in `_ppm_edge_values` Fortran-formula placement (Codex iter-891 stop-time fix)
+
+**Codex iter-891 stop-time finding.**  "iter-891 writes the right-edge Fortran boundary formulas to the wrong `_ppm_edge_values` faces."  The bug applies to BOTH left and right edges: pre-iter-891b iter-891 placed every override one cell too far INTO the interior, applying the al(0)-style formula at q_hat[1] (which is al(1) position), the al(1) 4-pt xt at q_hat[2] (al(2) position), etc.
+
+**Root cause.**  The al(i) → q_hat[k] mapping is `al(i) → q_hat[i]` (since `q_hat[k] = face between q_1d[k] and q_1d[k+1] = face between q1(k-1) and q1(k) = al(k)`), NOT `al(i) → q_hat[i+1]` as iter-891 used.  iter-891 misderived the mapping by treating q_hat_lo (a 1-element prefix) as if it shifted al(0) into q_hat[1], when in fact al(0) corresponds to q_hat[0] (which IS q_hat_lo's slot, currently a default 2-point average).
+
+**Fix scope.**  iter-891b CORRECTLY MAPS:
+- q_hat[1] ← Fortran al(1) (4-pt xt clipped, uses q_1d[0..3] = q1(-1..2))
+- q_hat[2] ← Fortran al(2) (c3*q1(1) + c2*q1(2) + c1*q1(3), uses q_1d[2..4])
+- q_hat[n_int] ← Fortran al(npx-1) (c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1), uses q_1d[n-2..n])
+- q_hat[n_int+1] ← Fortran al(npx) (4-pt xt clipped, uses q_1d[n-1..n+2])
+
+**Halo=2 limitation.**  Fortran al(0) (at q_hat[0]) needs `q1(-2)` which is halo depth 2, unavailable with our halo=2 input.  Same for al(npx+1) at q_hat[n_int+2] needing `q1(npx+2)`.  iter-891b therefore overrides ONLY 4 cube-edge faces (down from iter-891's incorrect 5+5 = 10 attempt at 6 effective).  q_hat[0] and q_hat[n_int+2] remain at the default 2-point average; full Fortran fidelity at those slots requires a halo=3 effort (deferred).
+
+**Tests updated:**
+- `test_iter891_on_path_overrides_4_boundary_indices` (renamed from `..._5_boundary_indices`) — overridden indices `[1, 2, n, n+1]`; untouched `[0, 3..n-1, n+2]`.
+- `test_iter891_on_matches_fortran_formula_predictions` — 4 expected formula matches at the corrected indices.
+- All 4 other iter-891 tests unchanged (signature/AST scans, end-to-end behavioural diff, duogrid-bypass).
+
+**iter-889 / iter-890 carry the same off-by-one bug** (CDGrid `_ppm_reconstruct_1d`).  iter-891b only fixes the `_ppm_edge_values` instance.  iter-889 / iter-890 remain on the production path with the same off-by-one — but their default-OFF state preserves production W2 unchanged; the bug only manifests when `apply_fortran_xppm_boundary=True` is opted in, and the iter-889 known-worse W2 sentinel still measures a 4× degradation (confirming the override DOES change behaviour, just at slightly wrong indices).  A follow-up iter (iter-892) is required to apply the same off-by-one fix to `_ppm_reconstruct_1d`.
+
+**Verification.**  All 136 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.
+
+**Deliverable.**
+- `src/legoesm/core/operators_fv.py:_ppm_edge_values`: shifted overrides to indices `[1, 2, n, n+1]`; dropped al(0) and al(npx+1) overrides (halo=2 insufficient).
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: 2 iter-891 tests rewritten for corrected indices + formulas.
+- This iter-891b doc entry.
+
+**Process.**  170th iter.  Codex correctly identified the off-by-one in q_hat placement.  iter-891b is the smallest correct fix: shift the override indices and drop the halo=2-insufficient slots.  iter-892 to follow with the analogous fix in `_ppm_reconstruct_1d` (iter-889 carries the same bug).

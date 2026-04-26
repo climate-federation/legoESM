@@ -1211,14 +1211,27 @@ def test_iter891_default_off_preserves_prior_behaviour():
         np.asarray(q_hat_default), np.asarray(q_hat_off))
 
 
-def test_iter891_on_path_overrides_5_boundary_indices():
-    """Iter-891: `_ppm_edge_values` with kwarg=True AND `n_interior`
-    provided MUST overwrite the 5 cube-edge `q_hat` indices [1, 2, 3,
-    n_interior+1, n_interior+2] and leave all other indices identical.
+def test_iter891_on_path_overrides_4_boundary_indices():
+    """Iter-891b (Codex iter-891 stop-time fix): `_ppm_edge_values`
+    with kwarg=True AND `n_interior` provided MUST overwrite the
+    4 cube-edge `q_hat` indices [1, 2, n_interior, n_interior+1]
+    corresponding to Fortran al(1), al(2), al(npx-1), al(npx).
 
-    Fortran al(npx+1) is out of `q_hat` range (no override at index
-    n_interior+3), and `q_hat[0]` (between halo cells) is also outside
-    the iord<7 override scope.
+    Iter-891b correction: pre-iter-891b iter-891 used indices
+    [1, 2, 3, n+1, n+2] which is OFF-BY-ONE — the al(i) → q_hat[i]
+    mapping (via q_hat[k] = face between q_1d[k] and q_1d[k+1] =
+    face between q1(k-1) and q1(k) = al(k)).  iter-891 inflicted
+    each formula at a position one cell to the right of where
+    Fortran places it; iter-891b corrects.
+
+    Fortran al(0) (would be at q_hat[0]) and al(npx+1) (would be at
+    q_hat[n_int+2]) are NOT overridden — they require q1(-2) and
+    q1(npx+2) respectively, which are halo depth 2 cells unavailable
+    with our halo=2 input.  Those slots remain at their default
+    boundary 0.5*(q_1d[outer halo]+q_1d[inner halo]) values.
+
+    Indices outside the cube-edge override (the standard 4th-order
+    interior) MUST be identical.
     """
     from legoesm.core.operators_fv import _ppm_edge_values
 
@@ -1231,100 +1244,120 @@ def test_iter891_on_path_overrides_5_boundary_indices():
     q_hat_on = _ppm_edge_values(q, apply_fortran_xppm_boundary=True,
                                  n_interior=n)
 
-    # Indices that MUST differ
-    overridden_indices = [1, 2, 3, n + 1, n + 2]
+    # Indices that MUST differ (al(1), al(2), al(npx-1), al(npx))
+    overridden_indices = [1, 2, n, n + 1]
     for k in overridden_indices:
         diff = float(np.max(np.abs(np.asarray(q_hat_on)[:, k, :]
                                     - np.asarray(q_hat_off)[:, k, :])))
         assert diff > 1e-12, (
             f"q_hat[{k}] (Fortran-faithful boundary override slot) "
             f"matches the default 4th-order value (diff={diff:.3e}); "
-            f"the iter-891 override is invisible at this index.")
+            f"the iter-891b override is invisible at this index.")
 
-    # Indices that MUST be identical
-    untouched_indices = [0] + list(range(4, n + 1)) + [n + 2 + 1] if n + 3 <= n + 2 else [0] + list(range(4, n + 1))
-    # Actually q_hat shape is (6, n+3, K) with indices 0..n+2; index 0
-    # is q_hat_lo (boundary halo-only) and indices 4..n MUST be
-    # untouched.  We just check the deep interior (4..n) is identical.
-    deep_interior_off = np.asarray(q_hat_off)[:, 4:n, :]
-    deep_interior_on = np.asarray(q_hat_on)[:, 4:n, :]
-    np.testing.assert_array_equal(
-        deep_interior_on, deep_interior_off,
-        err_msg=("Deep-interior q_hat (indices 4..n-1) drifted under "
-                 "iter-891 — boundary override scope leaked into "
-                 "interior."))
+    # Indices that MUST be identical (deep interior + the al(0)/al(npx+1)
+    # boundary halos that we cannot Fortran-faithfully override with
+    # halo=2).
+    untouched_indices = [0] + list(range(3, n)) + [n + 2]
+    for k in untouched_indices:
+        np.testing.assert_array_equal(
+            np.asarray(q_hat_on)[:, k, :],
+            np.asarray(q_hat_off)[:, k, :],
+            err_msg=(
+                f"q_hat[{k}] drifted under iter-891b — either the "
+                f"iter-891b shift broke or the override leaked into "
+                f"a slot it shouldn't.  Untouched slots: q_hat[0] "
+                f"(al(0), needs halo=3), q_hat[3..n-1] (deep "
+                f"interior), q_hat[n+2] (al(npx+1), needs halo=3)."))
 
 
 def test_iter891_on_matches_fortran_formula_predictions():
-    """Iter-891: on a smooth quadratic input, the actual ON-path output
-    bit-equals the Fortran iord<7 formula prediction at the 5 override
-    indices.
+    """Iter-891b: on a smooth quadratic input, the actual ON-path
+    output bit-equals the Fortran iord<7 formula prediction at the
+    4 corrected override indices [1, 2, n, n+1] = al(1, 2, npx-1, npx).
+
+    Iter-891b verification: q_hat[k] = face between q_1d[k] and
+    q_1d[k+1] = face between q1(k-1) and q1(k) = Fortran al(k).
+    So al(1) → q_hat[1], al(2) → q_hat[2], al(npx-1) → q_hat[n],
+    al(npx) → q_hat[n+1].
+
+    On the LEFT, al(1) uses q_1d[0..3] = q1(-1..2):
+        xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
+        clipped to min/max(q1(-1..2)).
+    al(2) uses q_1d[2..4] = q1(1..3):
+        c3*q1(1) + c2*q1(2) + c1*q1(3).
+
+    On the RIGHT, al(npx-1) uses q_1d[n-2..n] = q1(npx-3..npx-1):
+        c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1).
+    al(npx) uses q_1d[n-1..n+2] = q1(npx-2..npx+1):
+        xt = 0.75*(q1(npx-1)+q1(npx)) - 0.25*(q1(npx-2)+q1(npx+1))
+        clipped to min/max(q1(npx-2..npx+1)).
     """
     from legoesm.core.operators_fv import _ppm_edge_values
 
     n = 16
     K = 1
     x = np.arange(-2, n + 2, dtype=np.float64)
-    q_1d = 100.0 + 1.0 * x + 0.01 * x ** 2
-    q_np = np.broadcast_to(q_1d[None, :, None], (6, n + 4, K)).copy()
+    q_1d_arr = 100.0 + 1.0 * x + 0.01 * x ** 2
+    q_np = np.broadcast_to(q_1d_arr[None, :, None], (6, n + 4, K)).copy()
     q = jnp.asarray(q_np)
 
     c1 = -2.0 / 14.0
     c2 = 11.0 / 14.0
     c3 = 5.0 / 14.0
 
-    # Predicted overrides
-    expected_face_1 = (
-        c1 * q_np[..., 0, :] + c2 * q_np[..., 1, :]
-        + c3 * q_np[..., 2, :])
+    # LEFT predictions
+    # al(1): xt clipped, uses q_1d[0..3]
     xt_L = (
-        0.75 * (q_np[..., 2, :] + q_np[..., 3, :])
-        - 0.25 * (q_np[..., 1, :] + q_np[..., 4, :]))
-    q_lo_L = np.minimum(np.minimum(q_np[..., 1, :], q_np[..., 2, :]),
-                        np.minimum(q_np[..., 3, :], q_np[..., 4, :]))
-    q_hi_L = np.maximum(np.maximum(q_np[..., 1, :], q_np[..., 2, :]),
-                        np.maximum(q_np[..., 3, :], q_np[..., 4, :]))
-    expected_face_2 = np.clip(xt_L, q_lo_L, q_hi_L)
-    expected_face_3 = (
-        c3 * q_np[..., 3, :] + c2 * q_np[..., 4, :]
-        + c1 * q_np[..., 5, :])
+        0.75 * (q_np[..., 1, :] + q_np[..., 2, :])
+        - 0.25 * (q_np[..., 0, :] + q_np[..., 3, :]))
+    q_lo_L = np.minimum(np.minimum(q_np[..., 0, :], q_np[..., 1, :]),
+                        np.minimum(q_np[..., 2, :], q_np[..., 3, :]))
+    q_hi_L = np.maximum(np.maximum(q_np[..., 0, :], q_np[..., 1, :]),
+                        np.maximum(q_np[..., 2, :], q_np[..., 3, :]))
+    expected_al1 = np.clip(xt_L, q_lo_L, q_hi_L)
+    # al(2): c3*q1(1) + c2*q1(2) + c1*q1(3) — uses q_1d[2, 3, 4]
+    expected_al2 = (
+        c3 * q_np[..., 2, :] + c2 * q_np[..., 3, :]
+        + c1 * q_np[..., 4, :])
 
-    expected_face_nm1 = (
-        c1 * q_np[..., n - 1, :] + c2 * q_np[..., n, :]
-        + c3 * q_np[..., n + 1, :])
+    # RIGHT predictions
+    # al(npx-1): c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1) — uses
+    # q_1d[n-2, n-1, n]
+    expected_alnm1 = (
+        c1 * q_np[..., n - 2, :] + c2 * q_np[..., n - 1, :]
+        + c3 * q_np[..., n, :])
+    # al(npx): xt clipped, uses q_1d[n-1, n, n+1, n+2]
     xt_R = (
-        0.75 * (q_np[..., n + 1, :] + q_np[..., n + 2, :])
-        - 0.25 * (q_np[..., n, :] + q_np[..., n + 3, :]))
-    q_lo_R = np.minimum(np.minimum(q_np[..., n, :], q_np[..., n + 1, :]),
-                        np.minimum(q_np[..., n + 2, :], q_np[..., n + 3, :]))
-    q_hi_R = np.maximum(np.maximum(q_np[..., n, :], q_np[..., n + 1, :]),
-                        np.maximum(q_np[..., n + 2, :], q_np[..., n + 3, :]))
-    expected_face_n = np.clip(xt_R, q_lo_R, q_hi_R)
+        0.75 * (q_np[..., n, :] + q_np[..., n + 1, :])
+        - 0.25 * (q_np[..., n - 1, :] + q_np[..., n + 2, :]))
+    q_lo_R = np.minimum(
+        np.minimum(q_np[..., n - 1, :], q_np[..., n, :]),
+        np.minimum(q_np[..., n + 1, :], q_np[..., n + 2, :]))
+    q_hi_R = np.maximum(
+        np.maximum(q_np[..., n - 1, :], q_np[..., n, :]),
+        np.maximum(q_np[..., n + 1, :], q_np[..., n + 2, :]))
+    expected_aln = np.clip(xt_R, q_lo_R, q_hi_R)
 
     q_hat_on = _ppm_edge_values(q, apply_fortran_xppm_boundary=True,
                                  n_interior=n)
     q_hat_np = np.asarray(q_hat_on)
 
     np.testing.assert_allclose(
-        q_hat_np[..., 1, :], expected_face_1,
+        q_hat_np[..., 1, :], expected_al1,
         rtol=1e-12, atol=1e-12,
-        err_msg="q_hat[1] != Fortran al(0) c1/c2/c3 formula")
+        err_msg="q_hat[1] != Fortran al(1) (4-point xt clipped)")
     np.testing.assert_allclose(
-        q_hat_np[..., 2, :], expected_face_2,
+        q_hat_np[..., 2, :], expected_al2,
         rtol=1e-12, atol=1e-12,
-        err_msg="q_hat[2] != Fortran al(1) 4-point xt clipped")
+        err_msg="q_hat[2] != Fortran al(2) (c3/c2/c1 formula)")
     np.testing.assert_allclose(
-        q_hat_np[..., 3, :], expected_face_3,
+        q_hat_np[..., n, :], expected_alnm1,
         rtol=1e-12, atol=1e-12,
-        err_msg="q_hat[3] != Fortran al(2) c3/c2/c1 formula")
+        err_msg="q_hat[n] != Fortran al(npx-1) (c1/c2/c3 formula)")
     np.testing.assert_allclose(
-        q_hat_np[..., n + 1, :], expected_face_nm1,
+        q_hat_np[..., n + 1, :], expected_aln,
         rtol=1e-12, atol=1e-12,
-        err_msg="q_hat[n+1] != Fortran al(npx-1) c1/c2/c3 formula")
-    np.testing.assert_allclose(
-        q_hat_np[..., n + 2, :], expected_face_n,
-        rtol=1e-12, atol=1e-12,
-        err_msg="q_hat[n+2] != Fortran al(npx) 4-point xt clipped")
+        err_msg="q_hat[n+1] != Fortran al(npx) (4-point xt clipped)")
 
 
 def test_iter891_constants_match_fortran():
