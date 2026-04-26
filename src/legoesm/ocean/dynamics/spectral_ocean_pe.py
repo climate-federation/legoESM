@@ -202,10 +202,12 @@ def spectral_ocean_tendencies(
     mask_3d = mask[..., jnp.newaxis]  # (n_lat, n_lon, 1)
 
     # --- 1. Transform to grid space ---
-    # Batch the four (n_sh, nlev) syntheses (vor, div, T, S) into a
-    # single sh_synthesis_3d call — the inverse SH transform treats
-    # the trailing axis as a passive batch.  4 syntheses → 1.  (eta
-    # and H_bathy are 2D and stay separate.)
+    # Merge the (vor, div, T, S) 3D batch with the (eta, H_bathy) 2D
+    # pair via ``jnp.concatenate``: trailing axis = ``nlev*4 + 2``.
+    # ``sh_synthesis_3d`` treats any trailing axis as a passive batch,
+    # so different "level" sizes (nlev vs 1) combine cleanly into a
+    # single ``segment_sum`` + IRFFT.  6 SH syntheses → 1.  Loop 181
+    # extends Loop 180 (acoustic update path).
     n_sh_t, nlev_t = state.vor_hat.data.shape
     _vdts_stack = jnp.stack(
         [
@@ -216,25 +218,23 @@ def spectral_ocean_tendencies(
         ],
         axis=-1,
     )  # (n_sh, nlev, 4)
-    _vdts_grid_flat = sh_synthesis_3d(
-        grid, _vdts_stack.reshape(n_sh_t, nlev_t * 4),
-    )  # (n_lat, n_lon, nlev*4)
-    _vdts_grid = _vdts_grid_flat.reshape(grid.n_lat, grid.n_lon, nlev_t, 4)
+    _vdts_flat = _vdts_stack.reshape(n_sh_t, nlev_t * 4)
+    _vdtseh_flat = jnp.concatenate(
+        [_vdts_flat, state.eta_hat.data[:, jnp.newaxis],
+         state.H_bathy_hat.data[:, jnp.newaxis]],
+        axis=-1,
+    )  # (n_sh, nlev*4 + 2)
+    _vdtseh_grid_flat = sh_synthesis_3d(grid, _vdtseh_flat)
+    _vdts_grid = _vdtseh_grid_flat[..., : nlev_t * 4].reshape(
+        grid.n_lat, grid.n_lon, nlev_t, 4,
+    )
     vor = _vdts_grid[..., 0] * mask_3d
     div = _vdts_grid[..., 1] * mask_3d
     # Keep tracer extensions smooth across coastlines; apply mask on tendencies.
     T = _vdts_grid[..., 2]
     S = _vdts_grid[..., 3]
-    # Batch the two 2D syntheses (eta, H_bathy) along a trailing axis
-    # — same passive-trailing-axis exploit as Loops 144/150.  The 3D
-    # synthesis variant treats the trailing ``2`` as ``nlev=2`` for
-    # 2D inputs.  2 SH syntheses → 1.
-    _eh_pair_diag = jnp.stack(
-        [state.eta_hat.data, state.H_bathy_hat.data], axis=-1,
-    )  # (n_sh, 2)
-    _eh_grid_diag = sh_synthesis_3d(grid, _eh_pair_diag)  # (n_lat, n_lon, 2)
-    eta = _eh_grid_diag[..., 0] * mask          # (n_lat, n_lon)
-    H_bathy = _eh_grid_diag[..., 1].real
+    eta = _vdtseh_grid_flat[..., nlev_t * 4] * mask     # (n_lat, n_lon)
+    H_bathy = _vdtseh_grid_flat[..., nlev_t * 4 + 1].real
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
     min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.real.dtype)
     eta_floor = min_water_col - H_bathy
