@@ -2558,3 +2558,49 @@ So iter-891 is a Fortran-fidelity gap closure for the lesser-used `fv_flux_diver
 - This iter-891b doc entry.
 
 **Process.**  170th iter.  Codex correctly identified the off-by-one in q_hat placement.  iter-891b is the smallest correct fix: shift the override indices and drop the halo=2-insufficient slots.  iter-892 to follow with the analogous fix in `_ppm_reconstruct_1d` (iter-889 carries the same bug).
+
+### Iter-892 — fix off-by-one in `_ppm_reconstruct_1d` (iter-889 follow-up); reveals W2 IMPROVEMENT
+
+**Codex iter-891b deferred follow-up.**  iter-891b documented that iter-889's `_ppm_reconstruct_1d` has the same LEFT-side off-by-one bug as iter-891 had: `c1*q_pad[2..4]` should be `c1*q_pad[1..3]` (or skip al(0) for halo=2).  iter-892 applies the analogous correction in `operators_cdgrid.py:_ppm_reconstruct_1d`.
+
+**Mapping correction.**  In `_ppm_reconstruct_1d`, `q_pad = pad(q, halo=2, 'edge')` extends the caller's halo=2 input.  The mapping is:
+- `q_pad[j] = q[j-2] = q1(j-3)` for j=2..n_int+5 (q1(j-3) using q[k]=q1(k-1) and q_pad[j]=q[j-2])
+- `q_face[k] = face between q_pad[k+1] and q_pad[k+2] = face between q1(k-2) and q1(k-1) = Fortran al(k-1)`
+- So `al(i) → q_face[i+1]`
+
+Pre-iter-892 iter-889 used the LEFT formulas with q_pad cells shifted +1 from Fortran (the same bug iter-891 had in operators_fv).  iter-892 fixes:
+
+| q_face index | iter-889/890 (BEFORE) | iter-892 (CORRECTED) |
+|--------------|------------------------|----------------------|
+| q_face[1] = al(0) | `c1*q_pad[2] + c2*q_pad[3] + c3*q_pad[4]` | NOT OVERRIDDEN (halo=2 lacks q1(-2)) |
+| q_face[2] = al(1) | xt_L using q_pad[3..6] | xt_L using **q_pad[2..5]** (= q1(-1..2)) |
+| q_face[3] = al(2) | `c3*q_pad[5..7]` | `c3*q_pad[4] + c2*q_pad[5] + c1*q_pad[6]` |
+| q_face[n+1] = al(npx-1) | `c1*q_pad[n+1] + c2*q_pad[n+2] + c3*q_pad[n+3]` | UNCHANGED (was correct) |
+| q_face[n+2] = al(npx) | xt_R using q_pad[n+2..n+5] | UNCHANGED (was correct) |
+| q_face[n+3] = al(npx+1) | `c3*q_pad[n+4..n+6]` | NOT OVERRIDDEN (halo=2 lacks q1(npx+2)) |
+
+Right side was already correct in iter-889; only LEFT side had the off-by-one bug.
+
+**W2 LEGACY MEASUREMENT — iter-889's "known-worse" result was an artifact of the bug.**
+
+| Config | v_north Linf | v_north L2 | Notes |
+|--------|--------------|------------|-------|
+| Pre-iter-892 OFF | 0.189 m/s | 3.06e-2 | Default centred 4-pt PPM |
+| Pre-iter-892 ON  | 0.756 m/s | 1.17e-1 | iter-889 ON (off-by-one bug shifted formulas, amplified mode-A 4×) |
+| **Iter-892 OFF** | **0.189 m/s** | **3.06e-2** | Default centred 4-pt PPM (unchanged) |
+| **Iter-892 ON**  | **0.152 m/s** | **2.75e-2** | Fortran-faithful boundary CORRECTLY placed — **19.6% IMPROVEMENT on Linf, 10.1% on L2** |
+
+So iter-889's 4× degradation was NOT a Fortran-fidelity-vs-empirical-W2 tension — it was an off-by-one bug producing non-Fortran formulas at the wrong q_face slots.  When CORRECTLY placed (iter-892), Fortran's iord<7 boundary formula reduces W2 v_north Linf by 19.6%.
+
+**iter-889 known-worse sentinel renamed → known-IMPROVED.**  Pre-iter-892 the sentinel asserted `ratio > 2.0` (4× degradation).  iter-892 changes the assertion to `0.5 < ratio < 0.95` to lock the new improvement.  ratio >= 0.95 catches a regression to the off-by-one or a silent kwarg-threading break; ratio <= 0.5 catches an unexpectedly-large improvement that warrants audit.
+
+**Default still OFF in matrix runner / W2 sentinel.**  iter-892 does NOT enable the flag by default in the production matrix config.  Enabling it shifts the production W2 baseline from 0.189 to 0.152 m/s and would break several iter-873 inputs.  iter-893+ candidate work: audit whether enabling the flag is the right Fortran-fidelity step, then re-baseline the matrix runner + W2 sentinel + iter-873 default-OFF inventory.
+
+**Verification.**  All 136 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.  iter-889 known-improved sentinel correctly catches the iter-892 ratio (~0.80x).
+
+**Deliverable.**
+- `src/legoesm/core/operators_cdgrid.py:_ppm_reconstruct_1d`: shifted LEFT-side formulas to use correct q_pad cells; dropped al(0) and al(npx+1) overrides (halo=2 insufficient).
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py:test_iter889_w2_legacy_is_known_worse_on_flag`: updated docstring + assertion (now `0.5 < ratio < 0.95`).
+- This iter-892 doc entry.
+
+**Process.**  171st iter.  Codex correctly identified the iter-889 off-by-one as a follow-up to iter-891b.  iter-892 reveals the bug was the source of the "Fortran-vs-W2 tension" iter-889 documented; the Fortran-faithful path actually IMPROVES W2 by ~20% when correctly placed.  This is the first iter in the iter-888-892 chain to land an empirical W2 improvement (locked behind default-OFF for now; iter-893+ candidate to enable by default after broader matrix audit).

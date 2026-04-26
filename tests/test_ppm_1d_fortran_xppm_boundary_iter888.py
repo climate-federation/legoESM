@@ -656,44 +656,40 @@ def test_iter889_production_fv3edge_model_responds_to_flag():
 
 
 def test_iter889_w2_legacy_is_known_worse_on_flag():
-    """Iter-889 known-worse sentinel (mirrors iter-766's
-    `test_fortran_a2b_corner_avg_is_known_worse` pattern).
+    """Iter-892 (Codex iter-891b stop-time follow-up): RENAMED from
+    "known-worse" to "known-IMPROVED".  The pre-iter-892 measurement
+    of 4× degradation (`apply_fortran_xppm_boundary=True` makes W2
+    v_north Linf 4× worse) was an artifact of an OFF-BY-ONE BUG in
+    iter-889's left-side boundary override (used q_pad cells shifted
+    +1 from Fortran).  iter-892 corrected the off-by-one; the
+    Fortran-faithful boundary formula now PRODUCES BETTER W2
+    v_north Linf than the default centred 4-point PPM.
 
-    Setting `apply_fortran_xppm_boundary=True` on the canonical W2
-    LEGACY matrix config makes W2 v_north Linf at C36 1-day SUBSTANTIALLY
-    WORSE than the default-OFF empirical baseline.
-
-    iter-889 measurement at C36 1-day:
-      OFF (default 4-pt centred PPM): v_north Linf = 0.189 m/s
-      ON  (Fortran iord<7 boundary): v_north Linf = 0.756 m/s
-    Ratio ON/OFF ≈ 4.0x worse.
+    iter-892 measurement at C36 1-day W2 LEGACY canonical config:
+      OFF (default 4-pt centred PPM):    v_north Linf = 0.189 m/s
+      ON  (Fortran iord<7 corrected):    v_north Linf = 0.152 m/s
+    Ratio ON/OFF ≈ 0.80x — ON is **better** by 19.6% on Linf and
+    10.1% on L2.
 
     Interpretation.  Fortran's iord<7 cube-edge boundary formulas
-    (s11/s14/s15 + uniform-grid 4-point xt at the cube-face edge,
-    tp_core.F90:357-369) are STRICTLY MORE Fortran-faithful than our
-    default centred 4-point PPM at boundary faces.  But our hybrid
-    A-L+RK3+boundary_fix production stack does NOT match Fortran's
-    full numerical environment; replacing only the PPM boundary
-    formula amplifies a tension between operator-split and Fortran-
-    faithful reconstruction at cube vertices.  Same pattern as
-    iter-766's a2b corner average and iter-769's skip_corners.
+    (`tp_core.F90:357-369`: c1/c2/c3 mirror + 4-point xt clipped) are
+    BOTH more Fortran-faithful AND empirically reduce W2 v_north
+    Linf when correctly placed at q_face[2, 3, n+1, n+2] = al(1, 2,
+    npx-1, npx).  The pre-iter-892 off-by-one placed each formula
+    one cell shifted, producing a non-Fortran formula that happened
+    to amplify W2 mode-A 4×.
 
-    This is a Fortran-fidelity vs empirical-W2 tension iter-889
-    documents but does NOT resolve.  Default-OFF preserves the
-    empirically-better current behaviour while making the Fortran-
-    faithful path REACHABLE for callers (e.g., FB-chain stabilisation
-    tests, future iters that land complementary Fortran-faithful
-    changes).
+    This sentinel locks the iter-892 IMPROVEMENT so:
+    - A future regression that re-introduces the off-by-one would
+      drift the ratio back toward 4×, failing the upper bound here.
+    - A future code change that silently disables the kwarg threading
+      would make ON equal OFF (ratio = 1.0), also failing.
+    - A future improvement that closes the gap further (ratio < 0.5)
+      would prompt a re-baseline.
 
-    This sentinel pins the known-worse outcome so:
-    - A future change that enables the flag by default in the matrix
-      runner shifts the production W2 baseline 4x and would fail
-      iter-873's "matrix runner does not activate flags" test.
-    - A future repair that closes the ON/OFF gap (i.e., the Fortran-
-      faithful path becomes the empirical winner) would fail this
-      test, prompting an audit + potentially re-baselining iter-873.
-    - A future regression that silently disables the kwarg threading
-      would also fail this test (since ON would equal OFF).
+    Iter-892 keeps the flag default-OFF on the production W2 matrix
+    config.  Enabling it by default is iter-893+ candidate work
+    (would shift the W2 sentinel baseline + several iter-873 inputs).
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
@@ -745,30 +741,31 @@ def test_iter889_w2_legacy_is_known_worse_on_flag():
     v_on = _run_and_measure(flag=True)
 
     # Pin OFF baseline near iter-888's measurement (~0.19 m/s direct
-    # cell-centre measurement; sentinel test gives ~0.16 m/s through
-    # latlon regridding).  0.30 ceiling allows for resolution drift.
+    # cell-centre measurement).  0.30 ceiling allows for resolution drift.
     assert v_off < 0.30, (
         f"OFF (default) baseline v_north Linf = {v_off:.3e} m/s "
         f"drifted above 0.30 m/s — the iter-888 measurement (0.189) "
-        f"no longer applies.  Re-baseline the iter-889 known-worse "
+        f"no longer applies.  Re-baseline the iter-892 known-improved "
         f"sentinel.")
 
-    # Pin ON path to be materially worse than OFF (>= 2x gap).
-    # iter-889 measured ratio ~4.0x.  A smaller ratio means either
-    # the boundary formula was changed or the OFF baseline drifted up.
+    # iter-892 known-improved: ON path is 19.6% BETTER than OFF
+    # (ratio ≈ 0.80).  Pin between 0.5 and 0.95.  Below 0.5 means
+    # an unexpectedly-large improvement (audit needed); above 0.95
+    # means the improvement collapsed (off-by-one regression or
+    # kwarg threading silently disabled).
     ratio = v_on / v_off
-    assert ratio > 2.0, (
+    assert 0.5 < ratio < 0.95, (
         f"apply_fortran_xppm_boundary=True v_north Linf={v_on:.3e} "
-        f"produced ratio {ratio:.2f}x over OFF baseline ({v_off:.3e}) "
-        f"— UNEXPECTEDLY SMALL gap.  iter-889 falsified this path at "
-        f"~4.0x blowup.  A new smaller ratio means either:\n"
-        f"  (a) the iord<7 Fortran boundary path has been repaired — "
-        f"re-examine whether it now reduces W2 mode A and could "
-        f"replace the default centred 4-point reconstruction, OR\n"
-        f"  (b) the opt-in was silently disabled — restore the kwarg "
-        f"threading in _ppm_reconstruct_1d / cgrid_mass_flux_divergence "
-        f"/ fv3_sw_tendencies / FV3EdgeShallowWaterModel.step per "
-        f"iter-889.")
+        f"produced ratio {ratio:.3f}x over OFF baseline ({v_off:.3e}) "
+        f"— OUTSIDE the iter-892 expected range [0.5, 0.95].  "
+        f"Possible causes:\n"
+        f"  (a) ratio >= 0.95: the iter-892 off-by-one fix was reverted, "
+        f"or the kwarg threading was silently disabled.  Verify the "
+        f"override block in `_ppm_reconstruct_1d` places formulas at "
+        f"q_face[2, 3, n+1, n+2] (NOT q_face[1, 2, 3, n+1, n+2, n+3]).\n"
+        f"  (b) ratio <= 0.5: an unexpectedly-large W2 improvement.  "
+        f"Audit whether other Fortran-fidelity changes co-landed with "
+        f"this measurement.")
 
 
 def test_iter889b_duogrid_bypasses_boundary_override():

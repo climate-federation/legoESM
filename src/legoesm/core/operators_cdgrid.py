@@ -179,70 +179,80 @@ def _ppm_reconstruct_1d(q, *, axis: int,
               - (q_pad[..., :-3] + q_pad[..., 3:])) / 12.0
     # q_face has shape (..., N+1): face values at positions -1/2, 1/2, ..., N-1/2
 
-    # Iter-889: Fortran-faithful cube-edge boundary overrides per
-    # tp_core.F90:357-369 (iord<7 path).  Only fires when the kwarg is
-    # True AND the strip is a known halo=2 cubed-sphere layout (caller
-    # provides `n_interior`).  Constants from tp_core.F90:63-65:
-    #   c1 = -2/14, c2 = 11/14, c3 = 5/14
-    # Fortran ↔ q_face (cell at q_pad[k+1] → q_pad[k+2], so face at index
-    # k corresponds to that interface):
-    #   Fortran al(0)  → q_face[1]  (between halo depth-1 and halo depth-0)
-    #   Fortran al(1)  → q_face[2]  (between halo depth-0 and interior 0
-    #                                — the actual cube-face boundary)
-    #   Fortran al(2)  → q_face[3]  (between interior 0 and interior 1)
-    #   Fortran al(npx-1) → q_face[n+1]
-    #   Fortran al(npx)   → q_face[n+2]  (cube-face boundary, right)
-    #   Fortran al(npx+1) → q_face[n+3]
-    # The strip has shape (..., n_interior+4, ...) on `axis` (now axis=-1
-    # since we moved it).  q_pad has shape (..., n_interior+8, ...).
-    # Fortran q1(-2) = q_pad[2], q1(-1) = q_pad[3], q1(0) = q_pad[4]
-    # (interior 0 in our convention = halo depth-0 in Fortran), q1(1)
-    # = q_pad[5] (interior 1), q1(2) = q_pad[6], q1(3) = q_pad[7].
-    # Note: our halo=2 strip's "interior 0" (q[2]) corresponds to
-    # Fortran q1(1) (the FIRST interior).  Our q[1] is halo-depth-0
-    # (Fortran q1(0)).  The cube-face boundary is between q[1] and q[2]
-    # — which is q_face[2] (between q_pad[3] and q_pad[4]).
-    # Right side mirror.
+    # Iter-892 (Codex iter-891b stop-time follow-up).  Fortran-faithful
+    # cube-edge boundary overrides per tp_core.F90:357-369 (iord<7
+    # path).  Only fires when the kwarg is True AND the strip is a
+    # known halo=2 cubed-sphere layout (caller provides `n_interior`).
+    # Constants from tp_core.F90:63-65: c1 = -2/14, c2 = 11/14, c3 = 5/14.
+    #
+    # Index map (CORRECTED in iter-892):
+    #   q has caller halo=2: q[k] = q1(k-1) for k=0..n_int+3.
+    #   q_pad = pad(q, halo=2, 'edge') has length n_int+8.  Indices:
+    #     q_pad[0,1] = replicated q[0] = q1(-1)
+    #     q_pad[k] = q[k-2] for k=2..n_int+5  =>  q1(k-3) for k=2..n_int+5
+    #     q_pad[n_int+6, n_int+7] = replicated q[n_int+3] = q1(n_int+2)
+    #   q_face[k] = (7/12)*(q_pad[k+1]+q_pad[k+2]) - (1/12)*(q_pad[k]+q_pad[k+3])
+    #     i.e. face between q_pad[k+1] and q_pad[k+2]
+    #     = face between q1(k-2) and q1(k-1)
+    #     = Fortran al(k-1).   So al(i) → q_face[i+1].
+    #
+    # Fortran al(0) needs q1(-2) and al(npx+1) needs q1(npx+2).  Both
+    # are halo depth 2 cells unavailable with our halo=2 input.
+    # q_pad[0] / q_pad[1] are mode='edge' replicas of q1(-1), NOT
+    # actual q1(-2); same on the right.  Including those degenerate
+    # values would produce non-Fortran-faithful results.  iter-892
+    # therefore overrides ONLY the 4 cube-edge faces that are
+    # computable Fortran-faithfully with halo=2:
+    #   q_face[2]      = al(1)     (left 4-pt xt clipped)
+    #   q_face[3]      = al(2)     (left c3/c2/c1 mirror)
+    #   q_face[n+1]    = al(npx-1) (right c1/c2/c3)
+    #   q_face[n+2]    = al(npx)   (right 4-pt xt clipped)
+    # q_face[1] (al(0)) and q_face[n+3] (al(npx+1)) are LEFT
+    # UNTOUCHED on the standard 4th-order edge formula.
+    #
+    # Pre-iter-892 iter-889 used left-side cells (q_pad[2..7]) shifted
+    # +1 from the correct Fortran mapping (q_pad[2..6] for the al(1)
+    # /al(2) overrides).  iter-892 corrects the cell indexing.
     if apply_fortran_xppm_boundary and n_interior is not None:
         c1 = -2.0 / 14.0
         c2 = 11.0 / 14.0
         c3 = 5.0 / 14.0
         n_int = int(n_interior)
 
-        # LEFT cube-edge boundary overrides
-        # al(0) = c1*q1(-2) + c2*q1(-1) + c3*q1(0)
-        #       = c1*q_pad[2] + c2*q_pad[3] + c3*q_pad[4]
-        face_1 = (c1 * q_pad[..., 2] + c2 * q_pad[..., 3]
-                  + c3 * q_pad[..., 4])
-        # al(1) = uniform 4-point xt (clipped)
+        # LEFT cube-edge boundary overrides (al(1) and al(2) only;
+        # al(0) at q_face[1] left untouched — needs halo=3).
+        # al(1) = uniform 4-point xt clipped
         # xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
-        #    = 0.75*(q_pad[4]+q_pad[5]) - 0.25*(q_pad[3]+q_pad[6])
-        xt_L = (0.75 * (q_pad[..., 4] + q_pad[..., 5])
-                - 0.25 * (q_pad[..., 3] + q_pad[..., 6]))
-        q_lo_L = jnp.minimum(jnp.minimum(q_pad[..., 3], q_pad[..., 4]),
-                              jnp.minimum(q_pad[..., 5], q_pad[..., 6]))
-        q_hi_L = jnp.maximum(jnp.maximum(q_pad[..., 3], q_pad[..., 4]),
-                              jnp.maximum(q_pad[..., 5], q_pad[..., 6]))
-        face_2 = jnp.clip(xt_L, q_lo_L, q_hi_L)
+        #    = 0.75*(q_pad[3]+q_pad[4]) - 0.25*(q_pad[2]+q_pad[5])
+        # (q1(j) = q_pad[j+3], so q1(-1)=q_pad[2], q1(0)=q_pad[3],
+        # q1(1)=q_pad[4], q1(2)=q_pad[5].)
+        xt_L = (0.75 * (q_pad[..., 3] + q_pad[..., 4])
+                - 0.25 * (q_pad[..., 2] + q_pad[..., 5]))
+        q_lo_L = jnp.minimum(jnp.minimum(q_pad[..., 2], q_pad[..., 3]),
+                              jnp.minimum(q_pad[..., 4], q_pad[..., 5]))
+        q_hi_L = jnp.maximum(jnp.maximum(q_pad[..., 2], q_pad[..., 3]),
+                              jnp.maximum(q_pad[..., 4], q_pad[..., 5]))
+        face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
         # al(2) = c3*q1(1) + c2*q1(2) + c1*q1(3)
-        #       = c3*q_pad[5] + c2*q_pad[6] + c1*q_pad[7]
-        face_3 = (c3 * q_pad[..., 5] + c2 * q_pad[..., 6]
-                  + c1 * q_pad[..., 7])
+        #       = c3*q_pad[4] + c2*q_pad[5] + c1*q_pad[6]
+        face_al2 = (c3 * q_pad[..., 4] + c2 * q_pad[..., 5]
+                    + c1 * q_pad[..., 6])
 
-        q_face = q_face.at[..., 1].set(face_1)
-        q_face = q_face.at[..., 2].set(face_2)
-        q_face = q_face.at[..., 3].set(face_3)
+        q_face = q_face.at[..., 2].set(face_al1)
+        q_face = q_face.at[..., 3].set(face_al2)
 
-        # RIGHT cube-edge boundary overrides
+        # RIGHT cube-edge boundary overrides (al(npx-1) and al(npx)
+        # only; al(npx+1) at q_face[n+3] left untouched — needs
+        # halo=3).
         # al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
-        # In our q_pad: q1(npx-3) = q_pad[n_int+1], q1(npx-2) = q_pad[n_int+2],
-        # q1(npx-1) = q_pad[n_int+3].  q_face[n_int+1] is Fortran al(npx-1).
-        face_nm1 = (c1 * q_pad[..., n_int + 1]
-                    + c2 * q_pad[..., n_int + 2]
-                    + c3 * q_pad[..., n_int + 3])
-        # al(npx) = uniform 4-point xt (clipped)
-        # q1(npx-1) = q_pad[n_int+3], q1(npx) = q_pad[n_int+4],
-        # q1(npx-2) = q_pad[n_int+2], q1(npx+1) = q_pad[n_int+5]
+        # With npx = n_int + 1: q1(npx-3) = q1(n-2) = q_pad[n+1],
+        # q1(npx-2) = q1(n-1) = q_pad[n+2], q1(npx-1) = q1(n) = q_pad[n+3].
+        face_alnm1 = (c1 * q_pad[..., n_int + 1]
+                      + c2 * q_pad[..., n_int + 2]
+                      + c3 * q_pad[..., n_int + 3])
+        # al(npx) = uniform 4-point xt clipped to min/max(q1(npx-2..npx+1)).
+        # q1(npx-2) = q_pad[n+2], q1(npx-1) = q_pad[n+3],
+        # q1(npx) = q_pad[n+4], q1(npx+1) = q_pad[n+5].
         xt_R = (0.75 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 4])
                 - 0.25 * (q_pad[..., n_int + 2] + q_pad[..., n_int + 5]))
         q_lo_R = jnp.minimum(
@@ -251,17 +261,10 @@ def _ppm_reconstruct_1d(q, *, axis: int,
         q_hi_R = jnp.maximum(
             jnp.maximum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
             jnp.maximum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
-        face_n = jnp.clip(xt_R, q_lo_R, q_hi_R)
-        # al(npx+1) = c3*q1(npx) + c2*q1(npx+1) + c1*q1(npx+2)
-        # In our q_pad: q1(npx) = q_pad[n_int+4], q1(npx+1) = q_pad[n_int+5],
-        # q1(npx+2) = q_pad[n_int+6]
-        face_np1 = (c3 * q_pad[..., n_int + 4]
-                    + c2 * q_pad[..., n_int + 5]
-                    + c1 * q_pad[..., n_int + 6])
+        face_aln = jnp.clip(xt_R, q_lo_R, q_hi_R)
 
-        q_face = q_face.at[..., n_int + 1].set(face_nm1)
-        q_face = q_face.at[..., n_int + 2].set(face_n)
-        q_face = q_face.at[..., n_int + 3].set(face_np1)
+        q_face = q_face.at[..., n_int + 1].set(face_alnm1)
+        q_face = q_face.at[..., n_int + 2].set(face_aln)
 
     # Left and right face values for each cell
     q_L = q_face[..., :-1]  # face at i-1/2 → left face of cell i
