@@ -164,11 +164,29 @@ def spectral_ocean_tendencies(
     mask_3d = mask[..., jnp.newaxis]  # (n_lat, n_lon, 1)
 
     # --- 1. Transform to grid space ---
-    vor = sh_synthesis_3d(grid, state.vor_hat.data) * mask_3d   # (n_lat, n_lon, nlev)
-    div = sh_synthesis_3d(grid, state.div_hat.data) * mask_3d
+    # Batch the four (n_sh, nlev) syntheses (vor, div, T, S) into a
+    # single sh_synthesis_3d call — the inverse SH transform treats
+    # the trailing axis as a passive batch.  4 syntheses → 1.  (eta
+    # and H_bathy are 2D and stay separate.)
+    n_sh_t, nlev_t = state.vor_hat.data.shape
+    _vdts_stack = jnp.stack(
+        [
+            state.vor_hat.data,
+            state.div_hat.data,
+            state.T_hat.data,
+            state.S_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, nlev, 4)
+    _vdts_grid_flat = sh_synthesis_3d(
+        grid, _vdts_stack.reshape(n_sh_t, nlev_t * 4),
+    )  # (n_lat, n_lon, nlev*4)
+    _vdts_grid = _vdts_grid_flat.reshape(grid.n_lat, grid.n_lon, nlev_t, 4)
+    vor = _vdts_grid[..., 0] * mask_3d
+    div = _vdts_grid[..., 1] * mask_3d
     # Keep tracer extensions smooth across coastlines; apply mask on tendencies.
-    T = sh_synthesis_3d(grid, state.T_hat.data)
-    S = sh_synthesis_3d(grid, state.S_hat.data)
+    T = _vdts_grid[..., 2]
+    S = _vdts_grid[..., 3]
     eta = sh_synthesis(grid, state.eta_hat.data) * mask          # (n_lat, n_lon)
     H_bathy = sh_synthesis(grid, state.H_bathy_hat.data).real
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
