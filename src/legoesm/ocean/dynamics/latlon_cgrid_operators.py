@@ -375,12 +375,9 @@ def coriolis_cgrid(
     # v[i, j-1], v[i+1, j-1], v[i, j], v[i+1, j]
     v_west = jnp.roll(v, 1, axis=1)  # v[:, (j-1) mod n_lon]
     v_avg = 0.25 * (v[:-1] + v[1:] + v_west[:-1] + v_west[1:])
-    # v_avg shape: (n_lat, n_lon, ...). Need (n_lat, n_lon+1, ...)
-    if is_3d:
-        v_avg_wrap = v_avg[:, 0:1, :]
-    else:
-        v_avg_wrap = v_avg[:, 0:1]
-    v_at_u = jnp.concatenate([v_avg, v_avg_wrap], axis=1)
+    # v_avg shape: (n_lat, n_lon, ...). Append wrap column to (n_lat, n_lon+1, ...);
+    # ``v_avg[:, 0:1]`` works for both 2D and 3D (slice along axis 1 only).
+    v_at_u = jnp.concatenate([v_avg, v_avg[:, 0:1]], axis=1)
 
     # --- Average u to v-points ---
     # v-point (i+1/2, j) has 4 neighboring u-points:
@@ -394,12 +391,12 @@ def coriolis_cgrid(
     u_at_v = jnp.pad(u_avg_interior, ((1, 1), *pad_axes))
 
     # --- Coriolis terms ---
-    if is_3d:
-        cor_u = f_u[:, :, jnp.newaxis] * v_at_u
-        cor_v = -f_v[:, :, jnp.newaxis] * u_at_v
-    else:
-        cor_u = f_u * v_at_u
-        cor_v = -f_v * u_at_v
+    # Reshape 2D ``f_u``/``f_v`` to broadcast over the trailing level
+    # axis when 3D (no-op when 2D).
+    f_u_b = f_u[..., jnp.newaxis] if is_3d else f_u
+    f_v_b = f_v[..., jnp.newaxis] if is_3d else f_v
+    cor_u = f_u_b * v_at_u
+    cor_v = -f_v_b * u_at_v
 
     # Apply masks
     if u_mask is not None:
@@ -1022,64 +1019,37 @@ def stress_divergence_cgrid(
     )
     dx_v = R * cos_lat_v * dlon  # (n_lat+1,) face_dx at v-face latitudes
 
+    # Reshape lat metric to broadcast over (n_lat, n_lon[+1][, nlev]).
     is_3d = stress_h.ndim == 3
+    lat_bcast = (slice(None),) + (jnp.newaxis,) * (stress_h.ndim - 1)
 
     # =====================================================================
     # tend_u: contribution from D_T adjoint
     # =====================================================================
     # u[i,k] in D_T_num[i,j]:  coeff +dy at j=k-1, coeff -dy at j=k
-    # Adjoint: -[+dy * sh[i,k-1] + (-dy) * sh[i,k]] = dy * (sh[i,k] - sh[i,k-1])
-    #
-    # sh[i,k] - sh[i,k-1] with periodic wrap:
-    sh_west = jnp.roll(stress_h, 1, axis=1)  # sh[:, (k-1)%n_lon]
-    dsh = stress_h - sh_west   # (n_lat, n_lon, ...)
-    # Append periodic wrap (face n_lon = face 0)
-    dsh_full = jnp.concatenate(
-        [dsh, dsh[:, 0:1] if not is_3d else dsh[:, 0:1, :]], axis=1)
+    # Adjoint: dy * (sh[i,k] - sh[i,k-1]) with periodic wrap.
+    sh_west = jnp.roll(stress_h, 1, axis=1)
+    dsh = stress_h - sh_west
+    dsh_full = jnp.concatenate([dsh, dsh[:, 0:1]], axis=1)
     tend_u_DT = dy * dsh_full  # (n_lat, n_lon+1, ...)
 
     # =====================================================================
     # tend_u: contribution from D_S adjoint
     # =====================================================================
-    # D_S_num[m,j] uses u_north[m,j] * dx_north[m] - u_south[m,j] * dx_south[m]
-    # where u_north at vertex m = u[m,j], u_south = u[m-1,j],
-    #       dx_north[m] = dx_cell[m], dx_south[m] = dx_cell[m-1].
-    #
-    # u[i,k] appears at vertex (m=i, k) as u_north: coeff +dx_cell[i]
-    # u[i,k] appears at vertex (m=i+1, k) as u_south: coeff -dx_cell[i]
-    #
-    # Adjoint: -[+dx_cell[i]*sq[i,k] + (-dx_cell[i])*sq[i+1,k]]
-    #        = dx_cell[i] * (sq[i+1,k] - sq[i,k])
-    dsq_meridional = stress_q[1:, :] - stress_q[:-1, :]  # (n_lat, n_lon+1, ...)
-    if is_3d:
-        tend_u_DS = dx_cell[:, jnp.newaxis, jnp.newaxis] * dsq_meridional
-    else:
-        tend_u_DS = dx_cell[:, jnp.newaxis] * dsq_meridional
+    # Adjoint: dx_cell[i] * (sq[i+1,k] - sq[i,k])
+    dsq_meridional = stress_q[1:] - stress_q[:-1]  # (n_lat, n_lon+1, ...)
+    tend_u_DS = dx_cell[lat_bcast] * dsq_meridional
 
     tend_u = tend_u_DT + tend_u_DS
 
     # =====================================================================
     # tend_v: contribution from D_T adjoint
     # =====================================================================
-    # v[m,j] in D_T_num[i,j]:
-    #   v[i+1,j] at D_T[i,j]: coeff -dx_v[i+1]
-    #   v[i,j] at D_T[i,j]:   coeff +dx_v[i]
-    #
-    # So v[m,j] appears in:
-    #   D_T[m-1,j] as v_north: coeff -dx_v[m]
-    #   D_T[m,j] as v_south:   coeff +dx_v[m]
-    #
-    # Adjoint: -[-dx_v[m]*sh[m-1,j] + dx_v[m]*sh[m,j]]
-    #        = dx_v[m] * (sh[m-1,j] - sh[m,j])
-    #
-    # For interior v-faces (m=1..n_lat-1):
-    dsh_merid = stress_h[:-1, :] - stress_h[1:, :]  # sh[m-1,j]-sh[m,j] for m=1..n_lat-1
-    if is_3d:
-        tend_v_DT_interior = dx_v[1:-1, jnp.newaxis, jnp.newaxis] * dsh_merid
-    else:
-        tend_v_DT_interior = dx_v[1:-1, jnp.newaxis] * dsh_merid
-    # Pole boundaries: zero (wall BC).  Single Pad HLO op replaces
-    # alloc-zeros + concatenate-of-three.
+    # Adjoint: dx_v[m] * (sh[m-1,j] - sh[m,j]).  Interior v-faces only;
+    # pole rows zero (wall BC).
+    dsh_merid = stress_h[:-1] - stress_h[1:]
+    tend_v_DT_interior = dx_v[1:-1][lat_bcast] * dsh_merid
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
     pad_axes = ((0, 0),) * (tend_v_DT_interior.ndim - 1)
     tend_v_DT = jnp.pad(tend_v_DT_interior, ((1, 1), *pad_axes))
 
@@ -1124,12 +1094,8 @@ def stress_divergence_cgrid(
     area_v_dual = jnp.maximum(area_v_dual, 1e-30)
 
     if normalize:
-        if is_3d:
-            tend_u = tend_u / area_u_dual[:, jnp.newaxis, jnp.newaxis]
-            tend_v = tend_v / area_v_dual[:, jnp.newaxis, jnp.newaxis]
-        else:
-            tend_u = tend_u / area_u_dual[:, jnp.newaxis]
-            tend_v = tend_v / area_v_dual[:, jnp.newaxis]
+        tend_u = tend_u / area_u_dual[lat_bcast]
+        tend_v = tend_v / area_v_dual[lat_bcast]
 
     if u_mask is not None:
         um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
@@ -1616,10 +1582,8 @@ def leith_viscosity_q_cgrid(
         (1, 1), constant_values=1e-10,
     )
 
-    if is_3d:
-        cos_lat_q_b = cos_lat_q[:, jnp.newaxis, jnp.newaxis]
-    else:
-        cos_lat_q_b = cos_lat_q[:, jnp.newaxis]
+    bcast = (slice(None),) + (jnp.newaxis,) * (zeta_q.ndim - 1)
+    cos_lat_q_b = cos_lat_q[bcast]
 
     dx_q = R * cos_lat_q_b * dlon
     dy_q = R * dlat
@@ -1670,11 +1634,8 @@ def leith_viscosity_q_cgrid(
     norm_q = jnp.sqrt(total_sq + 1e-30)
 
     A_vert = _vertex_area(grid)                          # (n_lat+1,)
-    Delta_q = jnp.sqrt(A_vert)
-    if is_3d:
-        Delta_q = Delta_q[:, jnp.newaxis, jnp.newaxis]
-    else:
-        Delta_q = Delta_q[:, jnp.newaxis]
+    bcast = (slice(None),) + (jnp.newaxis,) * (norm_q.ndim - 1)
+    Delta_q = jnp.sqrt(A_vert)[bcast]
 
     A_leith_q = (C_leith * Delta_q) ** 3 * norm_q
 
