@@ -129,9 +129,10 @@ def ocean_baroclinic_tendencies_cdgrid(
     # — a spurious PGF that drives rest-state instability.  Keeping
     # p_prime in float64 reduces the leak by 9 orders of magnitude.
     from legoesm.ocean.dynamics.barotropic import fill_land_cells
-    fill_TS = lambda field: jax.vmap(
-        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
-    )(field)
+    # ``fill_land_cells`` is ndim-aware: it uses ``pad_halo_4d`` for 4D
+    # input so all vertical levels share one MPI halo exchange per pass
+    # (instead of nlev separate exchanges under the prior vmap).
+    fill_TS = lambda field: fill_land_cells(field, mask, grid)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_TS, eos_fn, z_coord.dz_ref, rho_0, g,
@@ -165,9 +166,9 @@ def ocean_baroclinic_tendencies_cdgrid(
     dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient(KE, cdgrid)
     # Fill land cells in p_prime before gradient so the 4-point stencil
     # sees smooth values at coastlines instead of the ocean-to-zero jump.
-    p_prime_filled = jax.vmap(
-        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
-    )(p_prime)
+    # ``fill_land_cells`` natively handles 4D input (single halo exchange
+    # across all levels), so call it directly.
+    p_prime_filled = fill_land_cells(p_prime, mask, grid)
     dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime_filled, cdgrid)
     # Downcast PGF results back to working precision
     dp_dx = dp_dx.astype(T.dtype)
