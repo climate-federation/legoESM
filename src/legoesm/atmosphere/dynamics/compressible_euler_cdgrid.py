@@ -161,8 +161,33 @@ def cdgrid_compressible_euler_slow_tendencies(
     K = 0.5 * (u_cc ** 2 + v_cc ** 2)
 
     # --- 6. Gradients at D-grid corners ---
-    dK_dx, dK_dy_perp = _arakawa_lamb_gradient(K, cdgrid)
-    dpi_dx, dpi_dy_perp = _arakawa_lamb_gradient(pi_prime, cdgrid)
+    # Pack K and pi_prime into a single halo exchange under SPMD/MPI;
+    # under the local backend each operator does its own exchange (same
+    # as before).  ``_arakawa_lamb_gradient`` takes ``padded=`` to skip
+    # its internal halo when supplied.
+    from legoesm.grids.halo import _halo_backend as _hb_step6
+    if _hb_step6 == "spmd":
+        from legoesm.parallel.cubesphere_exchange import (
+            packed_pad_halo_4d as _packed_4d_spmd, _spmd_mesh as _spmd_mesh_step6,
+        )
+        _K_pad_step6, _pi_pad_step6 = _packed_4d_spmd(
+            K, pi_prime, mesh=_spmd_mesh_step6,
+        )
+    elif _hb_step6 == "mpi":
+        from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
+        from legoesm.parallel.halo_exchange import (
+            packed_pad_halo_mpi_4d as _packed_mpi_4d_step6,
+        )
+        _K_pad_step6, _pi_pad_step6 = _packed_mpi_4d_step6(
+            K, pi_prime, topology=_mpi_topo_step6,
+        )
+    else:
+        _K_pad_step6 = _pi_pad_step6 = None
+
+    dK_dx, dK_dy_perp = _arakawa_lamb_gradient(K, cdgrid, padded=_K_pad_step6)
+    dpi_dx, dpi_dy_perp = _arakawa_lamb_gradient(
+        pi_prime, cdgrid, padded=_pi_pad_step6,
+    )
 
     # --- 7. D-grid momentum tendencies ---
     abs_vor_corner = _interp_center_to_corner(abs_vor, cdgrid)
