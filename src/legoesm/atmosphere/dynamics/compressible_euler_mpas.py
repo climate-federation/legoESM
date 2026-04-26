@@ -199,22 +199,16 @@ def mpas_compressible_euler_slow_tendencies(
     )
 
     # --- 4. w tendency (slow part: horizontal advection + sponge) ---
-    # Interpolate w to full levels, compute horizontal advection, map back
+    # Interpolate w to full levels, compute horizontal advection, map back.
     w_full = 0.5 * (w[:, :-1] + w[:, 1:])  # (nCells, nlev)
 
-    # Horizontal advection of w: -v·∇w ≈ -(div(u*w) - w*div(u))
-    def _w_horiz_adv(k):
-        w_k = w_full[:, k]
-        w_e = 0.5 * (w_k[c1] + w_k[c2])
-        u_k = u_3d[:, k]
-        div_uw = divergence_cell(u_k * w_e, mesh)
-        div_u = divergence_cell(u_k, mesh)
-        return -(div_uw - w_k * div_u)
-
-    _, w_adv_all = jax.lax.scan(
-        lambda c, k: (c, _w_horiz_adv(k)), None, jnp.arange(nlev),
-    )
-    w_adv_full = jnp.moveaxis(w_adv_all, 0, -1)  # (nCells, nlev)
+    # Horizontal advection of w in advective form (3D-native):
+    #   -v·∇w ≈ -(div(u*w) - w·div(u))
+    # ``div_u_3d`` was already computed for the theta advection block;
+    # reuse it instead of recomputing nlev redundant copies.
+    w_e_3d = 0.5 * (w_full[c1] + w_full[c2])              # (nEdges, nlev)
+    div_uw_3d = divergence_cell_3d(u_3d * w_e_3d, mesh)   # (nCells, nlev)
+    w_adv_full = -(div_uw_3d - w_full * div_u_3d)         # (nCells, nlev)
 
     # Map back to half levels by averaging.  ``dw_dt`` zero at top/bottom
     # interfaces (rigid BC); single Pad HLO op replaces alloc-zeros +
@@ -297,22 +291,15 @@ def _vertical_advection_height_1d(field_3d, w, dz, dz_half, J):
 
 def _tracer_tendencies(tracers, u_3d, w, dz, dz_half, J, mesh, c1, c2):
     """Horizontal + vertical advection of tracers."""
-    nCells, nlev, n_tracers = tracers.shape
+    # Hoist the q-independent ``div_u`` out of the per-tracer vmap so
+    # it isn't recomputed n_tracers × nlev times.
+    div_u_3d = divergence_cell_3d(u_3d, mesh)             # (nCells, nlev)
 
     def _single_tracer(q_3d):
-        # Horizontal advection per level
-        def _horiz_adv(k):
-            q_k = q_3d[:, k]
-            u_k = u_3d[:, k]
-            q_e = 0.5 * (q_k[c1] + q_k[c2])
-            div_uq = divergence_cell(u_k * q_e, mesh)
-            div_u = divergence_cell(u_k, mesh)
-            return -(div_uq - q_k * div_u)
-
-        _, horiz_all = jax.lax.scan(
-            lambda c, k: (c, _horiz_adv(k)), None, jnp.arange(nlev),
-        )
-        horiz = jnp.moveaxis(horiz_all, 0, -1)
+        # Horizontal advection (advective form, 3D-native): -(div(u*q) - q*div(u))
+        q_e_3d = 0.5 * (q_3d[c1] + q_3d[c2])              # (nEdges, nlev)
+        div_uq_3d = divergence_cell_3d(u_3d * q_e_3d, mesh)
+        horiz = -(div_uq_3d - q_3d * div_u_3d)
 
         # Vertical advection
         vert = _vertical_advection_height_1d(q_3d, w, dz, dz_half, J)
