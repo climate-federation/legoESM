@@ -34,6 +34,7 @@ References
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -266,35 +267,47 @@ def mpas_ocean_baroclinic_tendencies(
     # Horizontal AND vertical tracer advection are handled in the step()
     # function using barotropic-averaged transport (Hallberg 1997, #102, #145).
     # This matches the latlon C-grid pattern (ocean_pe_latlon_cgrid.py).
+    #
+    # Stack T and S along a trailing axis and fold it into the level dim
+    # so the halo-issuing operators (gradient_edge_3d, divergence_cell_3d,
+    # bilaplacian_cell_3d) run ONCE on the thicker (nCells, nlev*2)
+    # field instead of being called twice per timestep — eliminates the
+    # per-tracer kernel duplication.  Vertical diffusion stays per-tracer
+    # because ``_vertical_diffusion`` hard-codes the vertical axis at -1.
     h_safe = jnp.maximum(h_k, 1e-10)  # (nCells, nlev)
+    tracer_stack = jnp.stack([T_3d, S_3d], axis=-1)  # (nCells, nlev, 2)
+    nCells_t, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(nCells_t, nlev_t * n_tracers)
 
-    # Horizontal tracer diffusion: K_h * lap(T)
+    # Horizontal tracer diffusion: K_h * lap(T,S) per layer.  edge_mask is
+    # (nEdges,) and broadcasts across the trailing axis via [:, None].
     if config.K_h > 0:
-        grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
-        dT_dt_3d = config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
-        grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
-        dS_dt_3d = config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
+        grad_flat = gradient_edge_3d(tracer_flat, mesh) * edge_mask[:, jnp.newaxis]
+        div_flat = divergence_cell_3d(grad_flat, mesh)
+        # Reshape to (nCells, nlev, 2) so h_safe and h_k broadcast via [:, :, None].
+        div_stack = div_flat.reshape(nCells_t, nlev_t, n_tracers)
+        diff_stack = config.K_h * div_stack / h_safe[..., None] * h_k[..., None]
     else:
-        dT_dt_3d = jnp.zeros_like(T_3d)
-        dS_dt_3d = jnp.zeros_like(S_3d)
+        diff_stack = jnp.zeros_like(tracer_stack)
 
-    # Biharmonic tracer diffusion: -K_bih * bilap(T).  Same sign convention
-    # as the latlon ``bilaplacian_cgrid`` wiring (ocean_pe_latlon_cgrid.py):
-    # ``bilaplacian_cell_3d`` returns ``∇²(∇²T)`` so the physical dissipation
-    # sign is applied here.  The ``mask`` kwarg zeros gradients at coastlines
-    # and the intermediate Laplacian on land on both passes.  The trailing
-    # ``/ h_safe * h_k`` factor is an ``≈1`` identity on wet cells
-    # (``h_safe == h_k``) and a dry-cell safety guard where ``h_k → 0`` —
-    # matching the K_h branch above, not a thickness-flux form.
+    # Biharmonic tracer diffusion: -K_bih * bilap(T,S).  Same sign convention
+    # as the latlon ``bilaplacian_cgrid`` wiring: ``bilaplacian_cell_3d``
+    # returns ∇²(∇²f), so the physical dissipation sign is applied at the
+    # call site.  The ``mask`` kwarg zeros gradients at coastlines and the
+    # intermediate Laplacian on land on both passes; the trailing
+    # ``/ h_safe * h_k`` factor is ≈1 on wet cells and a dry-cell safety
+    # guard where h_k → 0.
     if config.K_bih > 0:
-        bilap_T = bilaplacian_cell_3d(T_3d, mesh, mask=mask)
-        bilap_S = bilaplacian_cell_3d(S_3d, mesh, mask=mask)
-        dT_dt_3d = dT_dt_3d - config.K_bih * bilap_T / h_safe * h_k
-        dS_dt_3d = dS_dt_3d - config.K_bih * bilap_S / h_safe * h_k
+        bilap_flat = bilaplacian_cell_3d(tracer_flat, mesh, mask=mask)
+        bilap_stack = bilap_flat.reshape(nCells_t, nlev_t, n_tracers)
+        diff_stack = diff_stack - (
+            config.K_bih * bilap_stack / h_safe[..., None] * h_k[..., None]
+        )
 
-    # Mask land cells
-    dT_dt_3d = dT_dt_3d * mask[:, jnp.newaxis]
-    dS_dt_3d = dS_dt_3d * mask[:, jnp.newaxis]
+    # Mask land cells (mask broadcasts via [..., None, None] over level + tracer)
+    diff_stack = diff_stack * mask[:, jnp.newaxis, jnp.newaxis]
+    dT_dt_3d = diff_stack[..., 0]
+    dS_dt_3d = diff_stack[..., 1]
 
     # ---- Vertical mixing ----
     dz_half = z_coord.dz_half_ref  # (nlev-1,)
@@ -306,15 +319,18 @@ def mpas_ocean_baroclinic_tendencies(
         mesh=mesh,
     )
 
-    # Vertical tracer diffusion
-    dT_dt_3d = dT_dt_3d + _vertical_diffusion(
-        T_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
-        mesh=mesh,
-    ) * mask[:, jnp.newaxis]
-    dS_dt_3d = dS_dt_3d + _vertical_diffusion(
-        S_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
-        mesh=mesh,
-    ) * mask[:, jnp.newaxis]
+    # Vertical tracer diffusion (per-tracer; axis -1 of the input is nlev,
+    # so vmap over the trailing tracer axis to get one batched kernel).
+    def _vdiff(q):
+        return _vertical_diffusion(
+            q, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
+            mesh=mesh,
+        )
+
+    vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+    vdiff_stack = vdiff_stack * mask[:, jnp.newaxis, jnp.newaxis]
+    dT_dt_3d = dT_dt_3d + vdiff_stack[..., 0]
+    dS_dt_3d = dS_dt_3d + vdiff_stack[..., 1]
 
     # ---- Physics (surface forcing, bottom drag, etc.) ----
     if physics_fn is not None:
