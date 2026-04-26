@@ -281,25 +281,14 @@ def _step_dynamic(
         )
 
     # ---- 2. Transport ----
+    # ``advect_ice_tracers`` handles both 2D ``(6, n, n)`` and multi-category
+    # 3D ``(6, n, n, n_cat)`` shapes natively, with a single 4D vector halo
+    # exchange across all quantities and categories — the prior vmap-over-
+    # categories pattern issued ``n_cat × 3`` halo exchanges per timestep.
     if config.transport == "advect" and grid is not None:
-        if h.ndim > 3:
-            # Multi-category: advect each category via vmap over last axis
-            def _advect_cat(h_k, conc_k, T_k):
-                return advect_ice_tracers(
-                    h_k, conc_k, T_k, u_ice, v_ice, grid, dt,
-                )
-            # Move category axis to front for vmap, then back
-            h_t = jnp.moveaxis(h, -1, 0)
-            conc_t = jnp.moveaxis(conc, -1, 0)
-            T_t = jnp.moveaxis(T_ice, -1, 0)
-            h_t, conc_t, T_t = jax.vmap(_advect_cat)(h_t, conc_t, T_t)
-            h = jnp.moveaxis(h_t, 0, -1)
-            conc = jnp.moveaxis(conc_t, 0, -1)
-            T_ice = jnp.moveaxis(T_t, 0, -1)
-        else:
-            h, conc, T_ice = advect_ice_tracers(
-                h, conc, T_ice, u_ice, v_ice, grid, dt,
-            )
+        h, conc, T_ice = advect_ice_tracers(
+            h, conc, T_ice, u_ice, v_ice, grid, dt,
+        )
 
     # ---- 3. Thermodynamics (per category or single) ----
     if h.ndim > 3:
