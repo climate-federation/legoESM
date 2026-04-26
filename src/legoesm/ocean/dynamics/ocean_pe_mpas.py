@@ -231,10 +231,17 @@ def mpas_ocean_baroclinic_tendencies(
     if config.apvm_dt > 0.0:
         q_relative = apvm_correction_3d(q_relative, u_3d, mesh, config.apvm_dt)
 
+    # ``h_e_3d`` is already computed above (line 158); pass it via
+    # ``h_edge_3d=`` so ``pv_flux_*_conserving_3d`` skips its internal
+    # ``edge_thickness_3d`` (i.e. one redundant ``cellsOnEdge`` gather).
     if config.pv_scheme == "energy":
-        pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_relative, mesh)
+        pv_flux = pv_flux_energy_conserving_3d(
+            u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+        )
     else:
-        pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_relative, mesh)
+        pv_flux = pv_flux_enstrophy_conserving_3d(
+            u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+        )
 
     # Horizontal viscosity on perturbation velocity (shear, not depth-mean).
     # When both A_h > 0 and B_h > 0, the biharmonic

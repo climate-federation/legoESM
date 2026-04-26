@@ -167,18 +167,25 @@ def mpas_compressible_euler_slow_tendencies(
     w_e_3d = _te_edge[..., 2]
 
     # PV flux (Coriolis + vorticity).  Use rho*dz as thickness proxy
-    # for mass-weighted PV.
+    # for mass-weighted PV.  ``rho_e_3d`` is already produced by the
+    # batched cell-to-edge gather above, so the matching edge-thickness
+    # proxy is just ``rho_e_3d * dz`` — pass it via ``h_edge_3d=`` to
+    # skip the internal ``edge_thickness_3d`` (one redundant
+    # ``cellsOnEdge`` gather).
     h_proxy_3d = rho_total * dz[None, :]                   # (nCells, nlev)
+    h_proxy_edge_3d = rho_e_3d * dz[None, :]               # (nEdges, nlev)
     f_v = mesh.fVertex if config.use_coriolis else jnp.zeros_like(mesh.fVertex)
     q_v_3d = potential_vorticity_vertex_3d(u_3d, h_proxy_3d, f_v, mesh)
 
     if config.pv_scheme == "enstrophy":
         pv_flux_3d = pv_flux_enstrophy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh,
+            h_edge_3d=h_proxy_edge_3d,
         )
     else:
         pv_flux_3d = pv_flux_energy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh,
+            h_edge_3d=h_proxy_edge_3d,
         )
 
     # Momentum tendency

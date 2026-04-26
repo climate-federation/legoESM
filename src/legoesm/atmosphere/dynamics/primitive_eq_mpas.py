@@ -199,11 +199,17 @@ def mpas_hydrostatic_tendencies(
         dp_edge_3d = None
         pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
 
-    # PV flux: h_proxy = dp/g (pressure thickness)
+    # PV flux: h_proxy = dp/g (pressure thickness).  For the hybrid
+    # branch ``dp_edge_3d`` was produced by the batched cell-to-edge
+    # gather above, so ``h_proxy_edge = dp_edge_3d / g`` is free —
+    # forward it to ``pv_flux_*_conserving_3d`` via ``h_edge_3d=`` to
+    # skip one redundant ``cellsOnEdge`` gather.
     if _hybrid:
         h_proxy_3d = dp / config.g  # (nCells, nlev)
+        h_proxy_edge_3d = dp_edge_3d / config.g
     else:
         h_proxy_3d = p_s[:, None] * sigma_coord.dsigma[None, :] / config.g
+        h_proxy_edge_3d = None
 
     q_v_3d = potential_vorticity_vertex_3d(u_3d, h_proxy_3d, mesh.fVertex, mesh)
 
@@ -211,9 +217,13 @@ def mpas_hydrostatic_tendencies(
         q_v_3d = apvm_correction_3d(q_v_3d, u_3d, mesh, config.apvm_scale * dt)
 
     if config.pv_scheme == "enstrophy":
-        pv_flux_3d = pv_flux_enstrophy_conserving_3d(u_3d, h_proxy_3d, q_v_3d, mesh)
+        pv_flux_3d = pv_flux_enstrophy_conserving_3d(
+            u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
+        )
     else:
-        pv_flux_3d = pv_flux_energy_conserving_3d(u_3d, h_proxy_3d, q_v_3d, mesh)
+        pv_flux_3d = pv_flux_energy_conserving_3d(
+            u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
+        )
 
     # Momentum tendency
     du_dt_3d = -grad_B_3d - pg_corr_3d + pv_flux_3d  # (nEdges, nlev)
