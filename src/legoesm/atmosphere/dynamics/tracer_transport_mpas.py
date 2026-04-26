@@ -99,7 +99,6 @@ def tracer_tendencies_mpas(
     # axis as passive, so fold tracers into the level axis to run the
     # gather + divergence ONCE for all tracers instead of n_tracers
     # vmap'd graphs.
-    div_u_3d = divergence_cell_3d(u_edge, mesh)  # (nCells, nlev) — shared
 
     # Horizontal advection (advective form): -(div(q*u) - q * div(u)).
     q_flat = q.reshape(nCells, nlev * n_tracers)
@@ -110,7 +109,20 @@ def tracer_tendencies_mpas(
     q_edge = q_edge_flat.reshape(n_edges, nlev, n_tracers)
     flux = q_edge * u_edge[..., None]                              # (nEdges, nlev, n_tracers)
     flux_flat = flux.reshape(n_edges, nlev * n_tracers)
-    div_qu_flat = divergence_cell_3d(flux_flat, mesh)              # (nCells, nlev*n_tracers)
+
+    # Batch ``div(u)`` (shared across tracers) with the per-tracer
+    # ``div(q*u)`` flux divergences into a single ``divergence_cell_3d``
+    # call by concatenating along the trailing axis.  ``div(u)`` claims
+    # the first ``nlev`` slots; the per-tracer ``div(q*u)`` claims the
+    # rest.  ``edgesOnCell`` is gathered once and the
+    # ``sign[:, :, None] * dvEdge[:, :, None]`` weighting applies
+    # uniformly.  ``n_tracers + 1`` divergences → 1.
+    _u_and_flux = jnp.concatenate(
+        [u_edge, flux_flat], axis=-1,
+    )  # (nEdges, nlev*(1 + n_tracers))
+    _u_flux_div = divergence_cell_3d(_u_and_flux, mesh)
+    div_u_3d = _u_flux_div[:, :nlev]                # (nCells, nlev)
+    div_qu_flat = _u_flux_div[:, nlev:]             # (nCells, nlev*n_tracers)
     div_qu = div_qu_flat.reshape(nCells, nlev, n_tracers)
     horiz_adv = -(div_qu - q * div_u_3d[..., None])
 
