@@ -238,6 +238,33 @@ class CDGridShallowWaterConfig(NamedTuple):
     # a clear warning is emitted.
     fortran_faithful_ppm_right: bool = False
 
+    # Iter-904 (default OFF): when True, the production
+    # `FV3EdgeShallowWaterModel.step` swaps the height-tendency path
+    # in `fv3_sw_tendencies` from the iter-892 CDGrid PPM
+    # (fv3_d2cc -> fv3_cc2c -> cgrid_mass_flux_divergence) to the
+    # true-FV3 d_sw1 finite-volume transport
+    # (_d2a2c_vect -> compute_transport_quantities -> transport_step
+    # in `fv3_sw_core.py` / `fv_tp_2d.py`), then derives
+    # dh_dt = (h_new - h) / dt for the SSP-RK3 caller.  Momentum
+    # tendencies (du_d_dt, dv_d_dt) are UNCHANGED in iter-904 — only
+    # the mass transport path is swapped.
+    #
+    # Motivation: the iter-892 CDGrid PPM is NOT true FV3
+    # (Arakawa-Lamb pressure gradient + tuned div_damp + non-FV3
+    # boundary_fix).  True FV3 uses c_sw + d_sw1/d_sw4/d_sw5/d_sw6
+    # forward-backward chain (`dyn_core.F90:489`, `sw_core.F90:79`).
+    # iter-904 isolates whether the d_sw1 mass transport alone (kept
+    # in an SSP-RK3 wrapper) reduces the W2 v-wind bias from
+    # incomplete geostrophic cancellation.  Default-OFF preserves
+    # iter-892/iter-893 production behavior bit-for-bit.
+    #
+    # SCOPE (iter-904): consumed by `FV3EdgeShallowWaterModel.step`
+    # ONLY.  `FV3FBShallowWaterModel.step` already uses the FB chain
+    # natively and does not benefit from the SSP-RK3 d_sw1 wrap.
+    # iter-903b/c warning pattern is reused: setting this flag while
+    # using FV3FBShallowWaterModel emits a UserWarning at __init__.
+    use_fv3_dsw1_mass_transport: bool = False
+
     # Iter-872c-take3 (Codex pass-3): production divergence-damping
     # `dddmp` coefficient (Fortran `flagstruct%dddmp`,
     # fv_arrays.F90:360).  Default 0.2 preserves pre-iter-872
@@ -566,22 +593,25 @@ class FV3FBShallowWaterModel:
         # fire deterministically once per model construction,
         # independent of JIT timing.
         if (self.config.fortran_faithful_ppm_left
-                or self.config.fortran_faithful_ppm_right):
+                or self.config.fortran_faithful_ppm_right
+                or self.config.use_fv3_dsw1_mass_transport):
             import warnings
             ignored = []
             if self.config.fortran_faithful_ppm_left:
                 ignored.append("fortran_faithful_ppm_left")
             if self.config.fortran_faithful_ppm_right:
                 ignored.append("fortran_faithful_ppm_right")
+            if self.config.use_fv3_dsw1_mass_transport:
+                ignored.append("use_fv3_dsw1_mass_transport")
             warnings.warn(
                 f"FV3FBShallowWaterModel ignores config flag(s) "
                 f"{', '.join(ignored)}: the FB chain (fv3_fb_sw_step) "
-                f"does NOT consume _ppm_reconstruct_1d, so iter-900/"
-                f"iter-903 LEFT/RIGHT cube-edge Fortran-faithful "
-                f"overrides have no effect here.  These flags are "
-                f"specific to FV3EdgeShallowWaterModel "
-                f"(apply_fortran_xppm_boundary on the production "
-                f"CDGrid PPM path).  Either switch to "
+                f"already routes through the true-FV3 d_sw1/d_sw4/"
+                f"d_sw5/d_sw6 chain natively, so iter-900/iter-903/"
+                f"iter-904 production-only opt-ins have no effect "
+                f"here.  These flags are specific to "
+                f"FV3EdgeShallowWaterModel (Arakawa-Lamb + RK3 path "
+                f"with selective FV3-style swaps).  Either switch to "
                 f"FV3EdgeShallowWaterModel, or unset the flag(s) on "
                 f"this config to silence the warning.",
                 UserWarning, stacklevel=2)
@@ -766,6 +796,18 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     # Fortran-faithful flag to the production CDGrid PPM.
                     fortran_faithful_ppm_right=(
                         self.config.fortran_faithful_ppm_right),
+                    # Iter-904: forward the true-FV3 d_sw1 mass-
+                    # transport opt-in.  When True, fv3_sw_tendencies
+                    # routes height-tendency through transport_step
+                    # (Lin-Rood FV3-style) instead of
+                    # cgrid_mass_flux_divergence, and requires `dt` in
+                    # scope.  Only the production model forwards this
+                    # flag; FV3FBShallowWaterModel uses the FB chain
+                    # natively and emits a __init__ warning if the
+                    # flag is set there.
+                    use_fv3_dsw1_mass_transport=(
+                        self.config.use_fv3_dsw1_mass_transport),
+                    dt=dt,
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,

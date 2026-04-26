@@ -91,6 +91,15 @@ _FORTRAN_FIDELITY_OPT_IN_FLAGS = [
     # behavior; iter-904+ measurement determines whether to flip.
     ("fortran_faithful_ppm_right", False, "iter-903",
      "tp_core.F90:365-367 (al(npx-1)/al(npx) at Hypothesis-A q_face indices)"),
+    # Iter-904 NOTE: `use_fv3_dsw1_mass_transport` (default OFF, per
+    # iter-904) is intentionally NOT listed here — its name doesn't
+    # match the iter-873 prefix taxonomy (`fortran_*` /
+    # `apply_legacy_*` / `boundary_fix_skip_*` / `use_experimental_*`)
+    # and `use_fv3_*` is a separate naming scheme for FV3-vs-non-FV3
+    # algorithmic swaps rather than Fortran-formula opt-ins.  The
+    # iter-904 default-OFF property is pinned by the dedicated
+    # `tests/test_iter904_*.py` sentinels, not by the iter-873
+    # inventory check.
     # Iter-888c added `apply_fortran_xppm_boundary` to this inventory
     # as a default-OFF Fortran-fidelity opt-in.  Iter-892 fixed an
     # off-by-one in the iter-889 implementation and discovered the

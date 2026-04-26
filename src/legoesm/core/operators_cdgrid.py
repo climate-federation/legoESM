@@ -1850,6 +1850,8 @@ def fv3_sw_tendencies(
     apply_fortran_xppm_boundary=False,
     fortran_faithful_ppm_left=False,
     fortran_faithful_ppm_right=False,
+    use_fv3_dsw1_mass_transport=False,
+    dt=None,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1877,15 +1879,41 @@ def fv3_sw_tendencies(
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
     u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
 
-    # (b) Height tendency (PPM mass flux divergence)
-    # Iter-889: forward apply_fortran_xppm_boundary so the production
-    # CDGrid mass-flux PPM picks up Fortran's iord<7 cube-edge
-    # boundary overrides at tp_core.F90:357-369 when opted in.
-    dh_dt = cgrid_mass_flux_divergence(
-        h, u_c, v_c, cdgrid,
-        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-        fortran_faithful_ppm_right=fortran_faithful_ppm_right)
+    # (b) Height tendency
+    if use_fv3_dsw1_mass_transport:
+        # Iter-904: opt into the true-FV3 d_sw1 mass transport path
+        # per `sw_core.F90:79` -> d_sw1 -> fv_tp_2d.  Uses
+        # `_d2a2c_vect` to derive contravariant transport velocities
+        # (ut, vt) and `transport_step` (= the FV3-style Lin-Rood
+        # finite-volume update with PPM fluxes via `fv_tp_2d`).
+        # `dt` MUST be provided in this branch — the FV3 transport is
+        # a finite-volume update returning h_new, from which we
+        # extract dh_dt = (h_new - h) / dt for the SSP-RK3 caller.
+        # Default-OFF preserves bit-equality with the iter-892 path.
+        if dt is None:
+            raise ValueError(
+                "`use_fv3_dsw1_mass_transport=True` requires `dt` to "
+                "be passed through `fv3_sw_tendencies`.  The "
+                "production caller `FV3EdgeShallowWaterModel.step` "
+                "forwards `dt` automatically when the flag is set; "
+                "non-production callers must do the same.")
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv_tp_2d import transport_step
+        _, _, _, _, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        h_new = transport_step(
+            h, ut, vt, dt, cdgrid,
+            apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+        dh_dt = (h_new - h) / dt
+    else:
+        # Iter-889: forward apply_fortran_xppm_boundary so the
+        # production CDGrid mass-flux PPM picks up Fortran's iord<7
+        # cube-edge boundary overrides at tp_core.F90:357-369 when
+        # opted in.
+        dh_dt = cgrid_mass_flux_divergence(
+            h, u_c, v_c, cdgrid,
+            apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+            fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+            fortran_faithful_ppm_right=fortran_faithful_ppm_right)
     if zero_mean_correction:
         total_area = jnp.sum(cdgrid.base.area)
         dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
