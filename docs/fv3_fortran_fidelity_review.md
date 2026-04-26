@@ -324,3 +324,46 @@ Production W2 baseline unchanged at 1.319e-1 m/s throughout the iter-913→iter-
 **Coverage extension complete.**  iter-921 (W2 single-point), iter-922 (W2 Pareto frontier), iter-923 (W5 multi-metric).  Production cube-sphere SW dynamics now has dual-pin sentinels on both W2 and W5, with the visual snapshots regenerated at the live iter-893 production matrix.
 
 **Process improvement.**  When the previous editor (iter-820/iter-824) committed visual snapshots for a baseline that subsequent iters shifted away from, the snapshots silently became stale.  iter-921→iter-923 added the discipline of regenerating ALL committed visual snapshots after a production-matrix swap (iter-893 here).  Future production-matrix changes should follow the same pattern: a visual-refresh iter immediately after a config swap.
+
+### Iter-924 — cosine bell production sentinel + visual refresh: triad complete
+
+**Trigger.**  iter-921 (W2) + iter-923 (W5) added dual/multi-metric production sentinels with iter-893 baselines.  iter-924 closes the cube-sphere validation triad on the third standard test: cosine bell pure-transport day-1.
+
+**A/B measurement** (cosine bell C36 day-1; `transport_step` direct, no SW dynamics):
+
+| metric         | iter-820  | iter-893  | Δ %     |
+|----------------|-----------|-----------|---------|
+| `h_num_max`    | 895.4     | 895.7     | +0.04 % |
+| `Linf_err`     | 121.2     | 121.3     | +0.04 % |
+| `L2_err`       | 8.124     | 8.114     | −0.13 % |
+| `rel_L2`       | 0.1195    | 0.1194    | −0.13 % |
+
+**Cosine bell pure transport is structurally insensitive to iter-893** — same conclusion as W5 (≤1 % shift across all metrics).  Per-test summary across the cube-sphere triad:
+
+| test         | Δ across iter-820↔iter-893       | Pareto trade-off? |
+|--------------|----------------------------------|-------------------|
+| W2 1-day     | v_ll −17 %, h_err_max +77 %      | YES               |
+| W5 day-3     | all 6 metrics ≤ 1 %              | NO                |
+| Cosine bell  | all 4 metrics ≤ 0.13 %           | NO                |
+
+The iter-893 PPM-boundary fix's effect is **localised to W2's exact-zonal flow over cube vertices**.  W5 (mountain-driven, departs from zonal early) and cosine bell (rotating bell, never aligned exactly with cube edges) have negligible sensitivity.  This vindicates the iter-893 production choice — the only test it noticeably affects is W2, and the v_ll improvement is the desired direction (matching the iter-893 sentinel).
+
+**iter-924 deliverables.**
+
+1. `scripts/diag_iter823_cb_visual.py` — updated to use the iter-893 production matrix.
+2. `diagnostics/fv3_visual/cb_*.png` — regenerated.  h_err shows a clean dispersion dipole at the bell location with NO cube-vertex stripes or panel-edge artifacts.
+3. `tests/test_iter924_cosine_bell_production_sentinel.py` — 5 sentinels:
+   - 4 parametric pins (h_num_max=895.7, Linf_err=121.3, L2_err=8.114, rel_L2=0.1194 within ±5 %).
+   - 1 mass-conservation gate (|Δm/m| < 5e-7; iter-924 measured 1.92e-7).
+
+**Verification.**  5/5 pass in 55 s.
+
+**Cumulative iter-921→iter-924 deliverables.**
+
+- 4 commits, no production code changes.
+- 18 sentinel tests pinning W2 (single + Pareto), W5 (multi-metric), cosine bell (multi-metric + mass).
+- 3 visual diag scripts updated to live production matrix; 18 PNGs regenerated; 2 historical-anchor PNGs added.
+- 2 Pareto plots (iter921 1-axis, iter922 2-axis with 5 cases).
+- ~3 minutes total CI cost (4 module-fixture-shared trajectories: W2 default, W2 strict-Fortran-LEFT, W5, cosine bell).
+
+The "stale-snapshot silent regression" failure mode that the iter-921 W2 audit exposed is now fully closed across the standard cube-sphere SW test triad.

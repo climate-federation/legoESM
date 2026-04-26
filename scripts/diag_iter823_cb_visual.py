@@ -46,9 +46,16 @@ beta = jnp.pi / 4.0
 n_steps = int(round(days * 86400 / dt))
 
 grid = create_cubed_sphere(n)
+# Iter-924: align with iter-893 production matrix
+# (`apply_fortran_xppm_boundary=True`).  iter-921→923 audit showed
+# W2 has a v_ll vs h_err Pareto trade-off under this swap; iter-924's
+# cosine bell A/B at C36 day-1 measured all 4 diagnostics within
+# ±0.13 % — cosine bell pure-transport is structurally insensitive
+# to the iter-893 PPM boundary toggle.
 cfg = CDGridShallowWaterConfig(
     hyperdiff_coeff=0.0, div_damp=_div_damp_cube(n),
-    boundary_fix=True, damp_v=0.06, nord_v=2)
+    boundary_fix=True, damp_v=0.06, nord_v=2,
+    apply_fortran_xppm_boundary=True)
 model = FV3EdgeShallowWaterModel(grid, config=cfg)
 cdgrid = model.cdgrid
 state = cosine_bell_cubesphere(grid, cdgrid, beta)
@@ -56,7 +63,8 @@ _, _, _, _, ut, vt = _d2a2c_vect(state.u_d, state.v_d, cdgrid)
 mass_init = float(jnp.sum(state.h * grid.area))
 h = state.h
 for _ in range(n_steps):
-    h = transport_step(h, ut, vt, dt, cdgrid, mass_target=mass_init)
+    h = transport_step(h, ut, vt, dt, cdgrid, mass_target=mass_init,
+                       apply_fortran_xppm_boundary=True)
 
 t_s = days * 86400.0
 h_exact = cosine_bell_exact(grid.lon, grid.lat, grid.radius, t_s, beta)
