@@ -417,6 +417,7 @@ def fc_scalar_advection(q: jax.Array, u: jax.Array, v: jax.Array,
 def fc_divergence_damping(u: jax.Array, v: jax.Array,
                           grid: CubedSphereGrid,
                           fc_config: FCOperatorConfig,
+                          padded: tuple[jax.Array, jax.Array] | None = None,
                           ) -> tuple[jax.Array, jax.Array]:
     """FC spectral divergence damping for momentum.
 
@@ -432,6 +433,11 @@ def fc_divergence_damping(u: jax.Array, v: jax.Array,
     u, v : jax.Array, shape (6, n, n)
     grid : CubedSphereGrid
     fc_config : FCOperatorConfig
+    padded : tuple of (u_pad, v_pad), optional
+        Pre-padded vector pair from ``_fc_pad_halo_vector``.  When
+        provided, the *inner* divergence skips its halo exchange —
+        share with a co-located ``fc_divergence`` / ``fc_curl_z`` on
+        the same input.
 
     Returns
     -------
@@ -446,8 +452,8 @@ def fc_divergence_damping(u: jax.Array, v: jax.Array,
     if nu2 <= 0 and nu4 <= 0:
         return du_damp, dv_damp
 
-    # Compute divergence spectrally
-    div = fc_divergence(u, v, grid, fc_config)
+    # Compute divergence spectrally — forward the optional pre-pad.
+    div = fc_divergence(u, v, grid, fc_config, padded=padded)
 
     if nu2 > 0:
         grad_div_x = fc_gradient_x(div, grid, fc_config)

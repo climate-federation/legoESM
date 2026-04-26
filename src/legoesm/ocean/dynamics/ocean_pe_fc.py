@@ -200,9 +200,16 @@ def ocean_baroclinic_tendencies_fc(
              - 0.5 * v * div_v - dp_dy / rho_0)
 
     # --- Divergence damping (only if fc_config requests it) ---
+    # ``(u_masked, v_masked)`` halo is already produced by the
+    # combined-pad block above (Loop 173) — slot-1 of the interleaved
+    # ``[h*u, u, h*u, u, ...]`` layout.  Pass it via ``padded=`` so
+    # the inner divergence inside ``fc_divergence_damping_3d`` skips
+    # its own ``_fc_pad_halo_vector`` collective (Loop 176).
     if fc_config.div_damp_2 > 0 or fc_config.div_damp_4 > 0:
         du_damp, dv_damp = fc_divergence_damping_3d(
-            u * mask_3d, v * mask_3d, grid, fc_config)
+            u_masked, v_masked, grid, fc_config,
+            padded=(_u_masked_pad, _v_masked_pad),
+        )
         du_dt = du_dt + du_damp
         dv_dt = dv_dt + dv_damp
 

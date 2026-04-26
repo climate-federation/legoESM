@@ -112,6 +112,7 @@ def fc_scalar_advection_3d(q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
 def fc_divergence_damping_3d(u_3d: jax.Array, v_3d: jax.Array,
                              grid: CubedSphereGrid,
                              fc_config: FCOperatorConfig,
+                             padded: tuple[jax.Array, jax.Array] | None = None,
                              ) -> tuple[jax.Array, jax.Array]:
     """FC divergence damping at all levels.
 
@@ -120,9 +121,13 @@ def fc_divergence_damping_3d(u_3d: jax.Array, v_3d: jax.Array,
     u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
     fc_config : FCOperatorConfig
+    padded : tuple of (u_pad, v_pad), optional
+        Pre-padded vector pair forwarded to the inner ``fc_divergence``
+        — share with a co-located ``fc_divergence_3d`` /
+        ``fc_curl_z_3d`` on the same input to halve the halo cost.
 
     Returns
     -------
     du_damp, dv_damp : jax.Array, shape (6, n, n, nlev)
     """
-    return fc_divergence_damping(u_3d, v_3d, grid, fc_config)
+    return fc_divergence_damping(u_3d, v_3d, grid, fc_config, padded=padded)
