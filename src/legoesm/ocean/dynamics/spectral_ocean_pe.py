@@ -155,15 +155,23 @@ def _spectral_conservation_fixer(
     salt_corr = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
     S_fixed = S_new + salt_corr * mask_3d
 
-    # Batch the two tracer analyses (T_fixed, S_fixed) into a single
-    # ``sh_analysis_3d`` on a stacked (n_lat, n_lon, nlev*2) tensor.
-    # 2 SH-analyses → 1.  ``eta_fixed`` is 2D and stays separate.
+    # Batch the three SH analyses (T_fixed, S_fixed, eta_fixed) into a
+    # single ``sh_analysis_3d`` call.  T_fixed/S_fixed contribute
+    # ``nlev`` slots each along the trailing axis; eta_fixed (2D) is
+    # promoted via ``[..., None]`` to a single trailing slot and
+    # concatenated.  Total trailing axis = ``2*nlev + 1``.  3 SH-analyses
+    # → 1.  Split the result back into (T, S) and (eta) using slot
+    # indexing.
     _ts_fixed = jnp.stack([T_fixed, S_fixed], axis=-1)  # (..., nlev, 2)
-    _ts_fixed_hat = sh_analysis_3d(
-        grid, _ts_fixed.reshape(grid.n_lat, grid.n_lon, nlev_c * 2),
-    ).reshape(-1, nlev_c, 2)
+    _ts_fixed_flat = _ts_fixed.reshape(grid.n_lat, grid.n_lon, nlev_c * 2)
+    _ts_eta_input = jnp.concatenate(
+        [_ts_fixed_flat, eta_fixed[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, 2*nlev + 1)
+    _ts_eta_hat = sh_analysis_3d(grid, _ts_eta_input)  # (n_sh, 2*nlev + 1)
+    _ts_fixed_hat = _ts_eta_hat[:, :nlev_c * 2].reshape(-1, nlev_c, 2)
+    _eta_fixed_hat = _ts_eta_hat[:, nlev_c * 2]
     return state_new._replace(
-        eta_hat=state_new.eta_hat.replace(data=sh_analysis(grid, eta_fixed)),
+        eta_hat=state_new.eta_hat.replace(data=_eta_fixed_hat),
         T_hat=state_new.T_hat.replace(data=_ts_fixed_hat[..., 0]),
         S_hat=state_new.S_hat.replace(data=_ts_fixed_hat[..., 1]),
     )
