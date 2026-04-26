@@ -41,6 +41,16 @@ from legoesm.core.operators_voronoi import (
     cell_to_edge_avg,
     vector_laplacian_del2,
     vector_laplacian_del4,
+    # 3D-native operators (loop-free per-level computation):
+    divergence_cell_3d,
+    gradient_edge_3d,
+    kinetic_energy_cell_3d,
+    potential_vorticity_vertex_3d,
+    pv_flux_energy_conserving_3d,
+    pv_flux_enstrophy_conserving_3d,
+    cell_to_edge_avg_3d,
+    vector_laplacian_del2_3d,
+    vector_laplacian_del4_3d,
 )
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
@@ -112,65 +122,57 @@ def mpas_compressible_euler_slow_tendencies(
     # --- 1. Exner perturbation and horizontal pressure gradient ---
     pi_prime = compute_exner_perturbation(rho_p, theta_p, height_coord)
 
-    # --- Per-level momentum and continuity ---
-    def _level_slow_tend(carry, k):
-        u_k = u_3d[:, k]              # (nEdges,)
-        theta_k = theta_total[:, k]   # (nCells,)
-        rho_k = rho_total[:, k]       # (nCells,)
-        pi_k = pi_prime[:, k]         # (nCells,)
+    # --- All-levels momentum and continuity (3D-native) ---
+    # ``operators_voronoi`` exposes ``*_3d`` variants that broadcast
+    # over the trailing level axis natively, so the previous per-level
+    # ``jax.lax.scan`` + 3 ``jnp.moveaxis`` round-trip is redundant.
 
-        # KE at cells
-        ke = kinetic_energy_cell(u_k, mesh)
+    # KE and Exner gradient at edges
+    ke_3d = kinetic_energy_cell_3d(u_3d, mesh)             # (nCells, nlev)
+    grad_pi_3d = gradient_edge_3d(pi_prime, mesh)          # (nEdges, nlev)
 
-        # Horizontal Exner gradient at edges
-        grad_pi = gradient_edge(pi_k, mesh)  # (nEdges,)
+    # Theta at edges for PGF
+    theta_e_3d = cell_to_edge_avg_3d(theta_total, mesh)    # (nEdges, nlev)
 
-        # Theta at edges for PGF
-        theta_e = cell_to_edge_avg(theta_k, mesh)
+    # KE gradient at edges
+    grad_ke_3d = gradient_edge_3d(ke_3d, mesh)             # (nEdges, nlev)
 
-        # KE gradient at edges
-        grad_ke = gradient_edge(ke, mesh)
+    # PV flux (Coriolis + vorticity).  Use rho*dz as thickness proxy
+    # for mass-weighted PV.
+    h_proxy_3d = rho_total * dz[None, :]                   # (nCells, nlev)
+    f_v = mesh.fVertex if config.use_coriolis else jnp.zeros_like(mesh.fVertex)
+    q_v_3d = potential_vorticity_vertex_3d(u_3d, h_proxy_3d, f_v, mesh)
 
-        # PV flux (Coriolis + vorticity)
-        # Use rho*dz as thickness proxy for mass-weighted PV
-        h_proxy = rho_k * dz[k]  # (nCells,)
-        f_v = mesh.fVertex if config.use_coriolis else jnp.zeros_like(mesh.fVertex)
-        q_v = potential_vorticity_vertex(u_k, h_proxy, f_v, mesh)
+    if config.pv_scheme == "enstrophy":
+        pv_flux_3d = pv_flux_enstrophy_conserving_3d(
+            u_3d, h_proxy_3d, q_v_3d, mesh,
+        )
+    else:
+        pv_flux_3d = pv_flux_energy_conserving_3d(
+            u_3d, h_proxy_3d, q_v_3d, mesh,
+        )
 
-        if config.pv_scheme == "enstrophy":
-            pv_flux = pv_flux_enstrophy_conserving(u_k, h_proxy, q_v, mesh)
-        else:
-            pv_flux = pv_flux_energy_conserving(u_k, h_proxy, q_v, mesh)
+    # Momentum tendency
+    du_dt_3d = pv_flux_3d - grad_ke_3d - c_p * theta_e_3d * grad_pi_3d
 
-        # Momentum tendency
-        du_dt_k = pv_flux - grad_ke - c_p * theta_e * grad_pi
+    # Viscosity
+    if config.nu_del2 > 0:
+        du_dt_3d = du_dt_3d + config.nu_del2 * vector_laplacian_del2_3d(
+            u_3d, mesh,
+        )
+    if config.nu_del4 > 0:
+        du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(
+            u_3d, mesh,
+        )
 
-        # Viscosity
-        if config.nu_del2 > 0:
-            du_dt_k = du_dt_k + config.nu_del2 * vector_laplacian_del2(u_k, mesh)
-        if config.nu_del4 > 0:
-            du_dt_k = du_dt_k + config.nu_del4 * vector_laplacian_del4(u_k, mesh)
+    # Horizontal divergence of rho*u for continuity
+    rho_e_3d = cell_to_edge_avg_3d(rho_total, mesh)        # (nEdges, nlev)
+    div_rho_v_3d = divergence_cell_3d(rho_e_3d * u_3d, mesh)
 
-        # Horizontal divergence of rho*u for continuity
-        rho_e = cell_to_edge_avg(rho_k, mesh)  # (nEdges,)
-        div_rho_v = divergence_cell(rho_e * u_k, mesh)  # (nCells,)
-
-        # Horizontal theta advection: -v·∇θ
-        grad_theta = gradient_edge(theta_k, mesh)
-        # Reconstruct v·∇θ at cells via flux form
-        theta_e_adv = cell_to_edge_avg(theta_k, mesh)
-        div_u_theta = divergence_cell(u_k * theta_e_adv, mesh)
-        div_u = divergence_cell(u_k, mesh)
-        horiz_adv_theta = -(div_u_theta - theta_k * div_u)
-
-        return carry, (du_dt_k, div_rho_v, horiz_adv_theta)
-
-    _, (du_dt_all, div_rho_v_all, horiz_adv_theta_all) = jax.lax.scan(
-        _level_slow_tend, None, jnp.arange(nlev),
-    )
-    du_dt_3d = jnp.moveaxis(du_dt_all, 0, -1)          # (nEdges, nlev)
-    div_rho_v_3d = jnp.moveaxis(div_rho_v_all, 0, -1)  # (nCells, nlev)
-    dtheta_p_dt = jnp.moveaxis(horiz_adv_theta_all, 0, -1)
+    # Horizontal theta advection (advective form): -(div(u·θ) - θ · div(u)).
+    div_u_theta_3d = divergence_cell_3d(u_3d * theta_e_3d, mesh)
+    div_u_3d = divergence_cell_3d(u_3d, mesh)
+    dtheta_p_dt = -(div_u_theta_3d - theta_total * div_u_3d)
 
     # Horizontal continuity: drho'/dt = -div_h(rho * v)
     drho_p_dt = -div_rho_v_3d
@@ -232,15 +234,11 @@ def mpas_compressible_euler_slow_tendencies(
     else:
         dtracers_dt = jnp.zeros_like(tracers)
 
-    # --- 6. Scalar diffusion on theta ---
+    # --- 6. Scalar diffusion on theta (3D-native) ---
     if config.K_h > 0:
-        def _diff_theta(k):
-            grad_th = gradient_edge(theta_p[:, k], mesh)
-            return divergence_cell(grad_th, mesh)
-        _, diff_all = jax.lax.scan(
-            lambda c, k: (c, _diff_theta(k)), None, jnp.arange(nlev),
-        )
-        dtheta_p_dt = dtheta_p_dt + config.K_h * jnp.moveaxis(diff_all, 0, -1)
+        grad_th_3d = gradient_edge_3d(theta_p, mesh)         # (nEdges, nlev)
+        diff_3d = divergence_cell_3d(grad_th_3d, mesh)       # (nCells, nlev)
+        dtheta_p_dt = dtheta_p_dt + config.K_h * diff_3d
 
     # --- 7. Add physics tendencies ---
     if physics_tendency is not None:
