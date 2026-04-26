@@ -359,16 +359,10 @@ def cdgrid_compressible_euler_slow_tendencies(
             + tracers * div_v[..., None]          # advective-form correction
         )
 
-        # ``vertical_advection_height`` is ndim-aware (``[..., axis]``
-        # indexing + dynamic ``pad_axes``), so we move the tracer axis
-        # to leading and call once instead of wrapping in ``jax.vmap``.
-        # XLA produces the same batched kernel either way; this just
-        # drops the vmap closure-capture machinery.  Loop 171.
-        tracers_lead = jnp.moveaxis(tracers, -1, 0)  # (n_tracers, ..., nlev)
-        vert_lead = vertical_advection_height(
-            tracers_lead, w, dz, dz_half, J,
-        )
-        vert = jnp.moveaxis(vert_lead, 0, -1)
+        def _vert_one(q):
+            return vertical_advection_height(q, w, dz, dz_half, J)
+
+        vert = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(tracers)
         dtracers_dt = horiz + vert
     else:
         dtracers_dt = jnp.zeros_like(tracers)
