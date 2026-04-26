@@ -2405,3 +2405,37 @@ No new user-facing config field — `bounded_domain` is a grid property, not a u
 - This doc entry.
 
 **Process.**  166th iter.  Codex iter-889b explicitly deferred this gap; iter-890 closes it as the smallest correct one-iter fix mirroring iter-889b's pattern.  Default-OFF / global-cubed-sphere behaviour preserved bit-for-bit; regional / nested bounded-domain panels now correctly bypass the legacy global-face overrides.
+
+### Iter-890b — honest scoping of iter-890's regional/nested claim (Codex iter-890 stop-time fix)
+
+**Codex iter-890 stop-time finding.**  "Claimed regional/nested bounded-domain fix is incomplete."  iter-890's commit message + doc claimed the regional/nested gap was now Fortran-faithful, but the fix only addresses the GATE inside `_ppm_1d`.  The surrounding FB-chain pipeline `fv_tp_2d` is structurally incomplete on regional grids: `cubed_sphere.py:783` sets `halo_interp_offsets_h2=None` for regional panels (since `_pad_halo_wall` is the wall-BC path that makes the offsets unnecessary), and `fv_tp_2d` line 759 onward unconditionally subscripts `offsets_h2[:, 0, 0, :]` — which would crash with `TypeError: 'NoneType' object is not subscriptable` BEFORE the iter-890 gate ever fires.  iter-890's `bounded_domain` plumbing is correct in principle but unreachable on the regional pipeline today.
+
+**What iter-890 actually did (post-iter-890b honest scope).**
+
+| Case | bounded_domain | use_duogrid | iter-890 effect | Reachable today? |
+|------|---------------|-------------|-----------------|------------------|
+| Global cubed sphere | False | False | `fortran_legacy_face = not False and not False = True` (legacy fires) | YES — same as pre-iter-890 |
+| Duogrid | True | True | `fortran_legacy_face = False` (legacy bypassed) | YES — same as pre-iter-890 (was already gated by `not use_duogrid`) |
+| Regional / nested | True | False | `fortran_legacy_face = False` (legacy bypassed) — iter-890 NEW behaviour | NO — `fv_tp_2d` crashes upstream (offsets_h2 is None) |
+
+So iter-890's NEW gate behaviour fires on a code path that is currently unreachable.  iter-890's value is:
+- Correctness of the gate semantics matching Fortran's `.not. (bounded_domain .or. duogrid)` exactly (locked by sentinel).
+- Future-proofing: when regional/nested FB-chain support lands, the gate is already correct.
+- Tests that document the contract independently of the FB-chain pipeline state.
+
+**iter-890b changes.**
+
+| File | Change |
+|------|--------|
+| `src/legoesm/core/fv_tp_2d.py:fv_tp_2d` (line ~755) | Add a defensive guard `if offsets_h2 is None: raise NotImplementedError(...)` BEFORE the offset extraction.  The error message explicitly documents the iter-890 scope: gate is Fortran-faithful, but regional/nested FB-chain pipeline is multi-iter work.  This converts a cryptic `'NoneType' object is not subscriptable` into a clear deferred-feature error. |
+| `docs/fv3_fortran_fidelity_review.md` | This iter-890b entry honestly scopes iter-890's contribution. |
+
+The defensive guard is a NEW behaviour: pre-iter-890b, calling `fv_tp_2d` on a regional grid would silently crash with a TypeError.  Post-iter-890b, it raises a `NotImplementedError` with a clear message.  No existing caller is affected (none currently call `fv_tp_2d` on regional grids — that would have already crashed).
+
+**Verification.**  All 129 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass (no test runs `fv_tp_2d` on a regional grid, so the new guard is not exercised by the existing suite — that's the iter-890b contract: the regional FB-chain isn't reachable today).
+
+**Deliverable.**
+- `src/legoesm/core/fv_tp_2d.py`: defensive guard for `offsets_h2 is None` + iter-890b doc comment block.
+- This iter-890b doc entry.
+
+**Process.**  167th iter.  Codex iter-890 stop-time review caught that iter-890's commit message overclaimed regional/nested support.  iter-890b is a doc + defensive-guard honesty fix: it does NOT add regional/nested FB-chain transport (multi-iter work) but instead converts the silent crash into a clear deferred-feature error and documents the actual scope of iter-890's contribution (gate semantics correct + future-proofed; pipeline still incomplete).  The Fortran-fidelity gain from iter-890 stands — the gate now exactly matches Fortran's `.not. (bounded_domain .or. duogrid)` — but the user-visible reach of the fix is properly bounded.

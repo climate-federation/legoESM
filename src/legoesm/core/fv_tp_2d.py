@@ -753,6 +753,32 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     # to `_xppm` / `_yppm` so they can hand it through to `_ppm_1d`.
     bounded_domain = bool(grid.bounded_domain)
 
+    # Iter-890b (Codex iter-890 stop-time honesty fix).  The regional /
+    # nested FB-chain pipeline is structurally INCOMPLETE: regional
+    # panels have `halo_interp_offsets_h2=None`
+    # (`cubed_sphere.py:783`, `_pad_halo_wall` is the wall-BC path that
+    # makes them unnecessary).  The offset-extraction below would crash
+    # on regional grids before iter-890's gate ever fires.  iter-890
+    # therefore makes the GATE inside `_ppm_1d` Fortran-faithful for
+    # bounded_domain but does NOT enable regional/nested FB-chain
+    # transport — that would require additional plumbing
+    # (regional-aware offsets or skipping the offset path entirely
+    # when `pad_halo` is going to dispatch to `_pad_halo_wall`).
+    # Future-proofing: the iter-890 gate is correct in principle and
+    # locked by sentinel; when regional/nested FB-chain support lands
+    # the gate semantics are already aligned with Fortran.
+    if offsets_h2 is None:
+        raise NotImplementedError(
+            "fv_tp_2d called on a grid with halo_interp_offsets_h2=None "
+            "(regional/nested panel).  iter-890b: the FB-chain "
+            "transport pipeline does not currently support regional/"
+            "nested grids — `pad_halo` dispatches to the wall-BC path "
+            "for single-face inputs but the offset extraction above "
+            "this guard requires non-None offsets.  iter-890 made the "
+            "`_ppm_1d` GATE Fortran-faithful for bounded_domain, but "
+            "regional/nested FB-chain is multi-iter work tied to a "
+            "broader regional/nested support effort.")
+
     # Extract boundary offsets for sweep directions
     # offsets_h2: (6, 4, 2, n) — [face, edge, depth, cell_along_edge]
     # WEST=0, EAST=1, SOUTH=2, NORTH=3; depth 0 = adjacent to interior
