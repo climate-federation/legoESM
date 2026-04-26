@@ -311,15 +311,19 @@ def _make_nonhydrostatic_gwd(
         dims_tr = ("face", "x", "y", "level", "tracer")
 
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+        # Pin defaulted allocations to the state precision so x64 zeros
+        # do not silently widen the NH GWD tendency struct.
+        _state_dtype = T.dtype
+        _phis_dtype = state.phis.data.dtype
 
         if gwd_fn is None:
             tendencies = NonHydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
-                dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_gwd", dims=dims_w, units="m/s^2"),
-                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d), name="dtheta_prime_dt_gwd", dims=dims_3d, units="K/s"),
-                drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_gwd", dims=dims_3d, units="kg/m^3/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_gwd", dims=dims_w, units="m/s^2"),
+                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dtheta_prime_dt_gwd", dims=dims_3d, units="K/s"),
+                drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_gwd", dims=dims_3d, units="kg/m^3/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_gwd", dims=dims_tr, units="1/s"),
             )
             return tendencies, gwd_spectrum_out
@@ -385,10 +389,10 @@ def _make_nonhydrostatic_gwd(
         tendencies = NonHydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
-            dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_gwd", dims=dims_w, units="m/s^2"),
+            dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_gwd", dims=dims_w, units="m/s^2"),
             dtheta_prime_dt=Field(data=dtheta_prime_dt, name="dtheta_prime_dt_gwd", dims=dims_3d, units="K/s"),
-            drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_gwd", dims=dims_3d, units="kg/m^3/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
+            drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_gwd", dims=dims_3d, units="kg/m^3/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_gwd", dims=dims_tr, units="1/s"),
         )
         return tendencies, gwd_spectrum_out
