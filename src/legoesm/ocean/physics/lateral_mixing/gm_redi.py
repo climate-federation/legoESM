@@ -38,6 +38,20 @@ import jax.numpy as jnp
 
 from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+
+
+def _pad_for_gradient(field, grid):
+    """Single-call pad for gradient_x_3d/gradient_y_3d sharing.
+
+    Both gradient operators accept ``padded=`` to skip their internal
+    halo exchange.  Pre-padding here lets paired (∂/∂x, ∂/∂y) calls on
+    the same input issue ONE ``pad_halo_4d`` MPI exchange instead of
+    two.
+    """
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    return _pad_halo_4d(field, interp_offsets=offsets, duogrid=dg)
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
@@ -67,9 +81,11 @@ def _compute_tapered_slopes(
     eps = _EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
-    # Horizontal density gradients at full levels
-    drho_dx = gradient_x_3d(rho, grid)
-    drho_dy = gradient_y_3d(rho, grid)
+    # Horizontal density gradients at full levels.
+    # Pre-pad once so both gradients share the halo MPI exchange.
+    rho_pad = _pad_for_gradient(rho, grid)
+    drho_dx = gradient_x_3d(rho, grid, padded=rho_pad)
+    drho_dy = gradient_y_3d(rho, grid, padded=rho_pad)
 
     # Average to interfaces
     drho_dx_half = 0.5 * (drho_dx[..., :-1] + drho_dx[..., 1:])
@@ -213,9 +229,11 @@ def _tracer_tendency_gm_redi(
     else:
         kappa_GM_b = kappa_GM
 
-    # Horizontal tracer gradients at full levels
-    dq_dx = gradient_x_3d(q, grid)
-    dq_dy = gradient_y_3d(q, grid)
+    # Horizontal tracer gradients at full levels.
+    # Pre-pad once so both gradients share the halo MPI exchange.
+    q_pad = _pad_for_gradient(q, grid)
+    dq_dx = gradient_x_3d(q, grid, padded=q_pad)
+    dq_dy = gradient_y_3d(q, grid, padded=q_pad)
 
     # Vertical tracer gradient at interfaces
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
