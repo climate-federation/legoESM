@@ -394,16 +394,28 @@ def spectral_nh_slow_tendencies(
 
     # --- 17. Spectral hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
-        dvor_hat = dvor_hat + spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
-        ddiv_hat = ddiv_hat + spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
-        dtheta_p_hat = dtheta_p_hat + spectral_hyperdiffusion_3d(
-            grid, state.theta_prime_hat.data,
+        # Batch the three pointwise spectral hyperdiffusions (vor, div,
+        # theta_prime) into one call by stacking spectral coefficients
+        # along a trailing axis.  ``spectral_hyperdiffusion_3d`` is
+        # purely element-wise (``damping * coeffs``), so the trailing
+        # axis is a passive batch — same exploit as Loop 120 in
+        # spectral PE.  3 kernel launches → 1.
+        n_sh_h, nlev_h = state.vor_hat.data.shape
+        _vdt_hat = jnp.stack(
+            [
+                state.vor_hat.data,
+                state.div_hat.data,
+                state.theta_prime_hat.data,
+            ],
+            axis=-1,
+        )  # (n_sh, nlev, 3)
+        _hd_stack = spectral_hyperdiffusion_3d(
+            grid, _vdt_hat.reshape(n_sh_h, nlev_h * 3),
             config.hyperdiff_coeff, config.hyperdiff_order,
-        )
+        ).reshape(n_sh_h, nlev_h, 3)
+        dvor_hat = dvor_hat + _hd_stack[..., 0]
+        ddiv_hat = ddiv_hat + _hd_stack[..., 1]
+        dtheta_p_hat = dtheta_p_hat + _hd_stack[..., 2]
 
     # --- 18. Physics tendencies ---
     if physics_tendency is not None:
