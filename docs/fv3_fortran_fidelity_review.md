@@ -478,3 +478,28 @@ This is a clean experimental confirmation of user issue #2: "The pressure/Coriol
 - Replacing the ENTIRE production operator family with Fortran-faithful corner-based ops (vorticity at corners, KE at corners, Coriolis at corners) — i.e., re-derive A-L → corner formulation matching Fortran d_sw6 structure.  Single-operator swaps cannot bridge the operator-family mismatch.
 
 **Process.**  No new tests required (iter-926b's tests cover both semantics — default-off bit equality holds, flag-on changes state, FB warning fires).  Production W2/W5/cb/rest-state sentinels unchanged.
+
+### Iter-928 — meta-fidelity sentinel locking the user-identified 8 gap markers
+
+**Trigger.**  User iter-927 audit explicitly enumerated 8 Fortran-fidelity gaps with concrete file:line references.  Without a sentinel, future iters could silently rewrite or remove the documenting comment blocks (e.g., during a cleanup pass) without actually closing the gap, leaving the codebase in an undocumented-gap state.
+
+**iter-928 deliverable** (`tests/test_iter928_fortran_fidelity_gap_markers.py`).  Parametric test with 8 entries, each greps for a load-bearing sentinel substring in the file the user identified:
+
+| issue | file                        | sentinel                                                    |
+|-------|-----------------------------|-------------------------------------------------------------|
+| 1     | `shallow_water_fv3_cdgrid.py` | `fv3_fb_sw_step` (FB chain reference)                     |
+| 2     | `operators_cdgrid.py`         | `dv_cc = -zeta_abs * u_cc - dB_dy_cc` (A-L formula)        |
+| 3     | `operators_cdgrid.py`         | `use_fv3_dsw1_mass_transport`                              |
+| 4     | `operators_cdgrid.py`         | "deferred to a dedicated iter that ports d_sw5 holistically" |
+| 5     | `operators_cdgrid.py`         | "Fortran has NO post-tendency smoothing analog"            |
+| 6     | `fv3_sw_core.py`              | "Production ``fv3_sw_tendencies`` does NOT call this helper" |
+| 7     | `fv3_sw_core.py`              | "NOT PORTED in Python's non-duogrid path"                  |
+| 8     | `shallow_water_fv3_cdgrid.py` | `FV3FBShallowWaterModel` (class header)                    |
+
+Plus a count-invariant test verifying the parametric list remains at exactly 8 entries.
+
+**Verification.**  9/9 pass in 0.25 s (parametric expansion gives 8 + 1 count-invariant).
+
+**Resolution semantics**: when a future iter actually closes a gap, the editor MUST remove the corresponding parametric entry (so the test no longer requires the marker).  When an editor renames a comment block, they MUST update the marker substring to match.  Silently removing the source comment without removing the parametric entry is FORBIDDEN — the test fires.
+
+**Process.**  No production code change.  Pure test-suite addition (~150 lines).  Cumulative iter-921→iter-928: 8 commits, 33 sentinel tests, no production behavioral change at default config.  Production W2 baseline at iter-893 (v_ll_Linf=0.132 m/s, h_err_max=8.18 m) unchanged throughout.
