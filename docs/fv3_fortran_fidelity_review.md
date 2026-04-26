@@ -724,3 +724,40 @@ div_damp's contribution at the hot spots is **29× larger** than boundary_fix's 
 **Verification.**  Diagnostic runs to completion in ~5s.  No production code change.
 
 **Process.**  189th iter.  iter-907 closes the iter-906b refinement question with a sharp answer: div_damp dominates 29× over boundary_fix at the W2 D-grid hot spots.  The historical iter-761 8× tuning is now identified as the dominant residual contributor at the post-iter-893 baseline.  iter-908+ has a concrete, low-cost test: sweep div_damp and measure W2.
+
+### Iter-908 — div_damp coefficient sweep REFUTES iter-907's hypothesis (8× is approximately optimal)
+
+**Motivation.**  iter-907 identified div_damp as the dominant contributor to t=0 dv_d_dt at the W2 D-grid hot spots (29× more than boundary_fix), with the historical 8× iter-761 tuning amplifying ~85 % of the t=0 hot-spot magnitude.  iter-908 tests the iter-907 hypothesis: would reducing div_damp from 8× to a smaller value produce a smaller W2 1-day v_ll_Linf?
+
+**Sweep at C36 dt=300s 1-day** (`scripts/diag_iter908_w2_div_damp_sweep.py`) — `div_damp = mult × _div_damp_cube(n)` with `_div_damp_cube(36) = 2.667e7`:
+
+| mult | div_damp   | mass_drift | h_L2     | h_Linf  | v_ll_Linf  | rel. to 8× |
+|------|------------|------------|----------|---------|------------|------------|
+| 0.5× | 1.33e+07   | 7.98e-07   | 2.48e-04 | 5.50e+00 | 1.783e-01 | +35.21 %   |
+| 1.0× | 2.67e+07   | 3.42e-07   | 2.38e-04 | 5.20e+00 | 1.720e-01 | +30.44 %   |
+| 2.0× | 5.33e+07   | 5.70e-07   | 2.26e-04 | 5.75e+00 | 1.613e-01 | +22.33 %   |
+| 4.0× | 1.07e+08   | 0.00e+00   | 2.12e-04 | 6.77e+00 | 1.469e-01 | +11.38 %   |
+| 6.0× | 1.60e+08   | 4.56e-07   | 2.07e-04 | 7.56e+00 | 1.379e-01 | +4.54 %    |
+| **8.0×** | **2.13e+08**   | **4.56e-07**   | **2.05e-04** | **8.18e+00** | **1.319e-01** | **0.00 %** (production) |
+| 10.0× | 2.67e+08   | 4.56e-07   | 2.05e-04 | 8.78e+00 | 1.300e-01 | **−1.43 %** |
+
+**REFUTES iter-907's hypothesis.**  Reducing div_damp WORSENS W2 v_ll_Linf monotonically — going from 8× to 0.5× makes W2 35 % worse, not better.  Only INCREASING beyond 8× helps, and only marginally (10× gives -1.43 %, below the 5 % threshold for a default flip).
+
+**Refined interpretation of iter-907's t=0 finding.**  iter-907's "div_damp drives 85 % of the t=0 hot-spot magnitude" was correct, but the t=0 magnitude is **CORRECTIVE**, not erroneous.  Most of div_damp's t=0 contribution at the hot spots OPPOSES (cancels) the cube-edge mode-A residual that would otherwise build up during integration.  Lower div_damp lets that mode-A grow more, producing a LARGER 1-day v_ll_Linf even though the t=0 dv_d_dt magnitude is smaller.
+
+**Conservation and stability across the sweep.**  All configurations from 0.5× to 10× are stable (no NaN, h_min/h_max bounded near 1094-2998 m).  Mass drift is at machine precision floor for all multipliers ≥1×.  h_Linf grows monotonically with mult (5.5 → 8.8 m) — higher div_damp dampens height oscillations more aggressively, but the 8× production value is well within stable range.
+
+**Conclusion: option (1) coefficient sweep is EXHAUSTED.**  The iter-761 8× tuning is approximately optimal at the post-iter-893 baseline.  Marginal further W2 improvement (-1.4 %) is possible at 10× but below the 5 % threshold for a production default flip.  iter-909+ should pursue:
+
+- **Option (2): Cube-edge-aware adaptive_coeff** — apply softer div_damp at i=0,1,n-1,n cells (interior) and full strength at the deep interior.  Targets the specific hot-spot cells without the global trade-off.
+- **Option (3): `d_sw5` holistic port** (iter-872c-take4 deferred) — the *dt factor + corner-divergence delpc + KE-add structure currently not implemented.  Multi-iter scope.
+
+**Caveat — sweep was 1-D.**  iter-908 swept div_damp alone, holding `dddmp=0.2` fixed.  The Fortran-valid pure-adaptive regime (`div_damp=0, dddmp>0`) is gated off by iter-872c-take4's narrow gate (silent no-op).  A 2-D sweep over (`div_damp`, `dddmp`) might reveal a different optimum, but is gated on the holistic d_sw5 port.
+
+**Deliverable.**
+- `scripts/diag_iter908_w2_div_damp_sweep.py`: 7-point div_damp sweep with W2 measurements and clear VERDICT.
+- This iter-908 doc entry refuting iter-907's hypothesis with data.
+
+**Verification.**  Sweep runs to completion in ~3 min (7 W2 1-day trajectories).  Production W2 baseline (8×) unchanged at 1.319e-1 m/s.
+
+**Process.**  190th iter.  iter-908 closes iter-907's hypothesis with a clean refutation: the div_damp sweep does NOT reveal a sweet spot below 8×.  Negative result, but valuable — eliminates option (1) and narrows iter-909+ work to option (2) or (3).  The iter-907→908 sequence demonstrates a key Ralph-protocol pattern: a sharp hypothesis (iter-907) followed by a definitive measurement (iter-908) that either validates or refutes it.
