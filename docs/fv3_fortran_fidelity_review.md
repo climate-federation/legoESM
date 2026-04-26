@@ -399,3 +399,51 @@ The "stale-snapshot silent regression" failure mode that the iter-921 W2 audit e
 - ~3.5 minutes total CI cost.
 
 The Ralph loop step 4 test set (cosine bell, W2, W5, ocean/atmosphere rest state) is now fully covered with iter-893-aligned production sentinels.
+
+### Iter-926 — `use_fv3_dsw5_corner_damping` flag added (default-off, NEGATIVE acceptance result)
+
+**Trigger.**  User-directed audit: investigate the d_sw5 corner-divergence-damping fidelity gap between production (cell-centre Arakawa-Lamb `adaptive_coeff * grad(div)`) and Fortran (corner `damp * delpc` added to KE before d_sw6 wind update).
+
+**iter-926a diagnostic** (`scripts/diag_iter920_w2_dsw5_gap.py`).  At t=0 W2 C36 with iter-893 production matrix:
+
+- Top 20 production `dv_d_dt` hot spots concentrated at lat ±33-34° on faces 0/2 (i=2,3 row near polar/equatorial cube edge), with **84.3 %** of |dv| coming from `div_damp` and 6.9 % from `boundary_fix`.
+- Hot spots #8-15 at lat ±39-40° on POLAR faces 4/5 cube-vertex corners.
+- **Spatial correlation between production `div_damp` and Fortran d_sw5 (same coefficient regime, projected to D-grid v stagger): −0.52 (negative)**.
+- Hot-spot location MISMATCH: production peaks on equatorial side (face 0/2 i=2,3); Fortran d_sw5 peaks on polar side (face 4 i=35, face 5 i=0).
+- Σ|Fortran d_sw5| at top 20 hot spots = 49 % of Σ|dv_full| — comparable magnitude but opposite direction at most spots.
+
+**Interpretation**: Fortran d_sw5 corner damping would damp at DIFFERENT cells than production currently does, AND partly in the OPPOSITE direction.  Adding it on top of existing `div_damp` would create over-damping with sign mismatch.
+
+**iter-926b implementation** (production code change).
+
+- New config field: `CDGridShallowWaterConfig.use_fv3_dsw5_corner_damping: bool = False`.
+- New post-RK3 hook in `FV3EdgeShallowWaterModel.step` (after the existing `damp_v` post-step hook): computes `_d_sw5_corner_divergence(... d2_bg=config.d2_bg, dddmp=config.dddmp, d4_bg=config.d4_bg, nord=config.nord)` and applies `(ke_damp_diff_x) / dx_u`, `(ke_damp_diff_y) / dy_v` as a per-step wind correction, exactly mirroring Fortran d_sw5 → d_sw6 KE-update structure (sw_core.F90:1641-1944).  This is NOT an RK3 sampled tendency — it's a discrete per-step wind update applied OUTSIDE the integrator, per user direction.
+- FB-model warning: setting the flag on a config used to construct `FV3FBShallowWaterModel` now emits a UserWarning at `__init__` time (production-only flag, FB chain has the structure natively).
+
+**iter-926b tests** (6/6 pass in 93 s):
+- `default_off_bit_identical_to_iter893` — bit equality at default False.
+- `flag_on_c8_w2_step_finite` and `flag_on_c12_w2_step_finite` — finite output.
+- `flag_on_changes_state_vs_default` — sanity check (hook is not silently no-op).
+- `fb_model_emits_warning_for_flag` — UserWarning when flag set on FB config.
+- `fb_model_no_warning_for_default_off` — no spurious warning at default.
+
+**iter-926b acceptance test** (per user direction step 9-10).  W2 C36 1-day with `use_fv3_dsw5_corner_damping=True` and Fortran defaults (d4_bg=0.16, nord=1):
+
+| metric        | iter-893 (off) | iter-926 (on) | Δ %      |
+|---------------|----------------|---------------|----------|
+| `h_L2`        | 0.512 m        | **3.464 m**   | +577 %   |
+| `h_Linf`      | 8.18 m         | 50.5 m        | +517 %   |
+| `v_north_max` | 0.152 m/s      | 2.375 m/s     | +1463 %  |
+| `v_ll_Linf`   | 0.1319 m/s     | **2.253 m/s** | +1608 %  |
+
+**ACCEPTANCE CRITERION (user iter-926 step 10)**:
+- v_ll_Linf improvement ≥ 10 %: **−1608 % (FAIL)** — the flag is catastrophically WORSE.
+- h_L2 regression < 5 %: **+577 % (FAIL)** — h_L2 explodes by 6.8×.
+
+**REJECT — flag stays default-off.**  The post-RK3 d_sw5 corner-damping hook with Fortran-default `d4_bg=0.16/nord=1` adds a NEW del-4 background damping on top of the existing production `div_damp` (cell-centre adaptive Smagorinsky).  The combined damping over-corrects at the cube-vertex corners with sign mismatch (the iter-926a correlation = −0.52 prediction held), driving the system into a different, worse, accumulated-error regime.
+
+**Process improvement.**  iter-926 is the canonical NEGATIVE-result iter pattern recommended by the user: implement default-off → measure → reject if acceptance fails.  The flag stays in the codebase as documentation of the explored option with a known-bad measurement; future iters considering "add Fortran d_sw5" can run the diagnostic and acceptance test to confirm the gap rather than re-investigate from scratch.
+
+**Backlog implication.**  Closing the d_sw5 fidelity gap requires more than a post-RK3 hook addition.  Either (a) the hook needs to REPLACE production `div_damp` (not add to it; user explicitly forbade modifying current div_damp defaults), or (b) the FB chain needs to be stabilized so production switches to `FV3FBShallowWaterModel` (the iter-904/905 attempts failed catastrophically).  Pure additive integration of Fortran d_sw5 at corners onto the existing cell-centre A-L damping is rejected.
+
+**Process.**  iter-926a (diagnostic) + iter-926b (implementation + tests + acceptance + doc) committed.  Flag default-off is bit-exact; W2/W5/cosine-bell/rest-state production sentinels (iter-921→iter-925) all unchanged at iter-893 baselines.

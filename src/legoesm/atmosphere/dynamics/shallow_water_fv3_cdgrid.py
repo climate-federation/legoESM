@@ -336,6 +336,37 @@ class CDGridShallowWaterConfig(NamedTuple):
     # directly via the separate `dddmp` field above.
     dddmp_prod: float = 0.2
 
+    # Iter-926: optional Fortran-style d_sw5 corner-divergence damping
+    # applied as a POST-RK3 step (analogous to the existing damp_v
+    # post-step hook).  Default OFF preserves iter-893 production
+    # behaviour bit-for-bit.
+    #
+    # When True, after the RK3 main step completes,
+    # `FV3EdgeShallowWaterModel.step` calls
+    # `_d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
+    # d2_bg=config.d2_bg, dddmp=config.dddmp, d4_bg=config.d4_bg,
+    # nord=config.nord)` and applies the resulting `ke_damping`
+    # corner field as a per-step KE-gradient wind correction
+    # (sw_core.F90:1942):
+    #   u_new = u_new + (ke_damp(i,j) - ke_damp(i+1,j)) / dx
+    #   v_new = v_new + (ke_damp(i,j) - ke_damp(i,j+1)) / dy
+    # This is NOT an RK3 sampled tendency — it's a discrete per-step
+    # wind update applied OUTSIDE the integrator, exactly as the
+    # Fortran d_sw5 → d_sw6 chain does (KE update then wind update).
+    #
+    # SCOPE: consumed by `FV3EdgeShallowWaterModel.step` ONLY.  The
+    # `FV3FBShallowWaterModel` already routes through the true-FV3
+    # d_sw1/d_sw4/d_sw5/d_sw6 chain natively, so the flag is
+    # redundant there and a UserWarning fires at FB model
+    # construction time (iter-903c-style).
+    #
+    # Coefficients: uses the existing `d2_bg`/`dddmp`/`d4_bg`/`nord`
+    # config fields (Fortran defaults d2_bg=0, dddmp=0, d4_bg=0.16,
+    # nord=1 → del-4 background damping).  These are independent of
+    # production's `div_damp`/`dddmp_prod` (which feed the cell-
+    # centred A-L gradient damping inside `fv3_sw_tendencies`).
+    use_fv3_dsw5_corner_damping: bool = False
+
 
 # ==============================================================================
 # Tendencies
@@ -646,7 +677,8 @@ class FV3FBShallowWaterModel:
                 or self.config.fortran_faithful_ppm_right
                 or self.config.use_fv3_dsw1_mass_transport
                 or self.config.use_split_mass_momentum_integration
-                or self.config.cube_edge_softer_div_damp):
+                or self.config.cube_edge_softer_div_damp
+                or self.config.use_fv3_dsw5_corner_damping):
             import warnings
             ignored = []
             if self.config.fortran_faithful_ppm_left:
@@ -659,13 +691,15 @@ class FV3FBShallowWaterModel:
                 ignored.append("use_split_mass_momentum_integration")
             if self.config.cube_edge_softer_div_damp:
                 ignored.append("cube_edge_softer_div_damp")
+            if self.config.use_fv3_dsw5_corner_damping:
+                ignored.append("use_fv3_dsw5_corner_damping")
             warnings.warn(
                 f"FV3FBShallowWaterModel ignores config flag(s) "
                 f"{', '.join(ignored)}: the FB chain (fv3_fb_sw_step) "
                 f"already routes through the true-FV3 d_sw1/d_sw4/"
                 f"d_sw5/d_sw6 chain natively, so iter-900/iter-903/"
-                f"iter-904 production-only opt-ins have no effect "
-                f"here.  These flags are specific to "
+                f"iter-904/iter-926 production-only opt-ins have no "
+                f"effect here.  These flags are specific to "
                 f"FV3EdgeShallowWaterModel (Arakawa-Lamb + RK3 path "
                 f"with selective FV3-style swaps).  Either switch to "
                 f"FV3EdgeShallowWaterModel, or unset the flag(s) on "
@@ -969,6 +1003,49 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 state_new = state_new._replace(
                     u_d=state_new.u_d + du_step,
                     v_d=state_new.v_d + dv_step,
+                )
+
+            # Iter-926: optional Fortran-style d_sw5 corner-divergence
+            # damping as a POST-RK3 wind correction (sw_core.F90:1641-
+            # 1944 d_sw5 → d_sw6 KE-update structure).  Default OFF
+            # preserves iter-893 production behaviour bit-for-bit.
+            #
+            # Fortran d_sw5 computes ke_damping = damp * delpc at
+            # D-grid corners and adds it to ke_corner before the
+            # d_sw6 wind update u += (ke(i,j) - ke(i+1,j)) / dx.
+            # Per user iter-926 brief: "apply it only as a full-step
+            # post-RK3 correction in FV3EdgeShallowWaterModel.step,
+            # analogous to the existing post-step damp_v hook.  This
+            # matters because Fortran d_sw5 is per-step KE/wind-
+            # update structure, not a continuous RK3 tendency."
+            if self.config.use_fv3_dsw5_corner_damping:
+                from legoesm.core.fv3_sw_core import (
+                    _d_sw5_corner_divergence, _d2a2c_vect)
+                _EPS = 1e-30
+                ua, va, _, _, _, _ = _d2a2c_vect(
+                    state_new.u_d, state_new.v_d, self.cdgrid)
+                ke_damping = _d_sw5_corner_divergence(
+                    state_new.u_d, state_new.v_d, ua, va,
+                    self.cdgrid, dt,
+                    d2_bg=self.config.d2_bg,
+                    dddmp=self.config.dddmp,
+                    d4_bg=self.config.d4_bg,
+                    nord=self.config.nord,
+                    apply_legacy_corner_corrections=False,
+                )
+                # KE-gradient → wind correction (Fortran d_sw6
+                # sw_core.F90:1942):
+                #   u(i,j) += (ke(i,j) - ke(i+1,j)) / dx_u
+                #   v(i,j) += (ke(i,j) - ke(i,j+1)) / dy_v
+                dx_u = self.cdgrid.dx_edge_y   # (6, n, n+1) — at u_d
+                dy_v = self.cdgrid.dy_edge_x   # (6, n+1, n) — at v_d
+                ke_diff_u = (ke_damping[:, :-1, :]
+                             - ke_damping[:, 1:, :])    # (6, n, n+1)
+                ke_diff_v = (ke_damping[:, :, :-1]
+                             - ke_damping[:, :, 1:])    # (6, n+1, n)
+                state_new = state_new._replace(
+                    u_d=state_new.u_d + ke_diff_u / jnp.maximum(dx_u, _EPS),
+                    v_d=state_new.v_d + ke_diff_v / jnp.maximum(dy_v, _EPS),
                 )
 
         # Conservation fixer
