@@ -47,7 +47,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         eos_linear=None,
                         barotropic_diffusion_alpha: float | None = None,
                         barotropic_div_damp: float | None = None,
-                        tracer_advection: str | None = None):
+                        tracer_advection: str | None = None,
+                        gm_redi=None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -262,6 +263,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
+        if gm_redi is not None:
+            kw["gm_redi"] = gm_redi
         cfg = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
