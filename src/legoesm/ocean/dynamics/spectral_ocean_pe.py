@@ -389,35 +389,33 @@ def spectral_ocean_tendencies(
         out_axes=0,
     )(tracer_u_cos, tracer_v_cos)
 
+    # Combine the three grid-space tendency contributions before the SH
+    # forward transform.  ``sh_analysis_3d`` is linear, so summing
+    # tracer_div + tracer_vert_adv (+ tracer_vdiff*mask if K_v > 0) on
+    # the grid first replaces three separate vmap'd SH-analysis calls
+    # with a single one — saves 2 SH-analyses per RK substage (3 if
+    # K_v > 0).  Same exploit as Loop 94 for spectral PE.
     tracer_div = tracers * div.real[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
-    dtr_hat = -tracer_flux_div + jax.vmap(
-        lambda q_div: sh_analysis_3d(grid, q_div),
-        in_axes=0,
-        out_axes=0,
-    )(tracer_div)
-
     tracer_vert_adv = jax.vmap(
         lambda q: _vertical_advection_spectral(q, w, z_coord, J.real),
         in_axes=0,
         out_axes=0,
     )(tracers) * mask_3d[jnp.newaxis, ...]
-    dtr_hat = dtr_hat + jax.vmap(
-        lambda q_adv: sh_analysis_3d(grid, q_adv),
-        in_axes=0,
-        out_axes=0,
-    )(tracer_vert_adv)
 
+    tracer_grid_sum = tracer_div + tracer_vert_adv
     if config.K_v > 0:
         tracer_vdiff = jax.vmap(
             lambda q: vertical_diffusion(q, z_coord, J.real, config.K_v),
             in_axes=0,
             out_axes=0,
         )(tracers)
-        dtr_hat = dtr_hat + jax.vmap(
-            lambda q_vdiff: sh_analysis_3d(grid, q_vdiff * mask_3d),
-            in_axes=0,
-            out_axes=0,
-        )(tracer_vdiff)
+        tracer_grid_sum = tracer_grid_sum + tracer_vdiff * mask_3d[jnp.newaxis, ...]
+
+    dtr_hat = -tracer_flux_div + jax.vmap(
+        lambda q_sum: sh_analysis_3d(grid, q_sum),
+        in_axes=0,
+        out_axes=0,
+    )(tracer_grid_sum)
 
     # --- 15. Explicit viscosity/diffusion ---
     if config.A_h > 0 or config.K_h > 0:
