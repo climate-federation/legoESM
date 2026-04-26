@@ -241,18 +241,17 @@ def ocean_baroclinic_tendencies_fc(
             )
     horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
 
-    # Vertical advection per-tracer (vmap over the trailing axis so JAX
-    # produces one batched kernel rather than n_tracers unrolled stencils).
-    def _vert_adv(q):
-        return _vertical_advection_ocean(q, w, z_coord, J)
-
-    vert_adv_stack = jax.vmap(_vert_adv, in_axes=-1, out_axes=-1)(tracer_stack)
+    # Vertical advection per-tracer.  ``_vertical_advection_ocean`` and
+    # ``vertical_diffusion`` are ndim-aware (``[..., axis]`` indexing),
+    # so a leading-axis stack lets us call each kernel once instead of
+    # wrapping in ``jax.vmap`` (Loop 172 — same exploit as Loops 167/171).
+    tracers_lead = jnp.moveaxis(tracer_stack, -1, 0)  # (n_tr, ..., nlev)
+    vert_adv_lead = _vertical_advection_ocean(tracers_lead, w, z_coord, J)
+    vert_adv_stack = jnp.moveaxis(vert_adv_lead, 0, -1)
 
     if physics_fn is None and config.K_v > 0:
-        def _vdiff(q):
-            return vertical_diffusion(q, z_coord, J, config.K_v)
-
-        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        vdiff_lead = vertical_diffusion(tracers_lead, z_coord, J, config.K_v)
+        vdiff_stack = jnp.moveaxis(vdiff_lead, 0, -1)
         tracer_tend_stack = horiz_stack + vert_adv_stack + vdiff_stack
     else:
         tracer_tend_stack = horiz_stack + vert_adv_stack
@@ -297,13 +296,12 @@ def ocean_baroclinic_tendencies_fc(
             du_dt = du_dt + vel_lap[..., 0]
             dv_dt = dv_dt + vel_lap[..., 1]
         if config.A_v > 0:
-            def _vdiff_uv(q):
-                return vertical_diffusion(q, z_coord, J, config.A_v)
-
-            vel_uv = jnp.stack([u, v], axis=-1)
-            vel_vdiff = jax.vmap(_vdiff_uv, in_axes=-1, out_axes=-1)(vel_uv)
-            du_dt = du_dt + vel_vdiff[..., 0]
-            dv_dt = dv_dt + vel_vdiff[..., 1]
+            # ``vertical_diffusion`` is ndim-aware — leading-axis stack
+            # lets us call once instead of wrapping in ``jax.vmap``.
+            vel_uv_lead = jnp.stack([u, v], axis=0)  # (2, ..., nlev)
+            vel_vdiff = vertical_diffusion(vel_uv_lead, z_coord, J, config.A_v)
+            du_dt = du_dt + vel_vdiff[0]
+            dv_dt = dv_dt + vel_vdiff[1]
 
         if config.hyperdiff_coeff > 0:
             vel_hyper_flat = fc_hyperdiffusion_3d(
