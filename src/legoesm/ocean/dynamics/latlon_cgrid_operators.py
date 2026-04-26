@@ -278,18 +278,14 @@ def divergence_cgrid(
     # Meridional face length (zonal extent) at lat interface:
     # R * cos(lat_face) * dlon
     lat = grid.lat  # (n_lat,)
-    # v-point latitudes: at interfaces between cells
-    # South pole face at lat = -pi/2
-    # Interior faces at midpoints between cell centers
-    # North pole face at lat = +pi/2
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    # v-point latitudes: at interfaces between cells.  cos(±π/2) is
+    # exactly 0 analytically (and roundoff-level in finite precision),
+    # so build cos_lat_v directly via Pad — pole rows are exactly 0
+    # regardless of dtype, and this avoids the alloc-2-singleton +
+    # concatenate-of-three + cos tower (4 HLO ops → 2 HLO ops).
     lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    # Use actual cos(lat_v) — no clamp needed because v=0 at pole faces
-    # (solid wall BC), so face_dx * v = 0 regardless. Avoiding the clamp
-    # gives clean adjoints through jax.grad (issue #173).
-    cos_lat_v = jnp.cos(lat_v)  # (n_lat+1,); zero at poles
+    cos_lat_v_interior = jnp.cos(lat_interior)  # (n_lat-1,)
+    cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))  # (n_lat+1,)
 
     face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
 
@@ -521,13 +517,11 @@ def curl_vertex_cgrid(
     cos_lat = grid.cos_lat  # (n_lat,)
 
     # Vertex area: A_v(i) = R^2 * dlon * |sin(lat_cell[i]) - sin(lat_cell[i-1])|
-    # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole)
+    # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole).
+    # Pad with the analytical pole sin values via constant_values=(-1, 1)
+    # — single Pad HLO op replaces alloc-2-singletons + concatenate-of-three.
     sin_lat = jnp.sin(lat)
-    sin_ext = jnp.concatenate([
-        jnp.array([-1.0], dtype=lat.dtype),   # sin(-pi/2)
-        sin_lat,
-        jnp.array([1.0], dtype=lat.dtype),     # sin(+pi/2)
-    ])
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])  # (n_lat+1,)
     # Interior vertex areas only (rows 1..n_lat-1); pole rows are zero
     # by construction and excluded from the division to avoid 1e30
@@ -893,11 +887,15 @@ def strain_rate_cgrid(
     u_west = u_eff[:, :-1]
     du_dx = (u_east - u_west) * face_dy
 
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    # cos(±π/2) is roundoff-level in finite precision; build cos_lat_v
+    # directly with the 1e-10 floor at the pole rows via Pad
+    # constant_values, eliminating the alloc-2-singleton +
+    # concatenate-of-three + cos tower.
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
+    cos_lat_v = jnp.pad(
+        jnp.maximum(jnp.cos(lat_interior), 1e-10),
+        (1, 1), constant_values=1e-10,
+    )
     face_dx = R * cos_lat_v * dlon
 
     v_north = v_eff[1:]
@@ -911,12 +909,10 @@ def strain_rate_cgrid(
 
     # --- D_S at q-points: dv/dx + du/dy ---
     # Same vertex stencil as curl, but u-contribution sign is flipped.
+    # Single Pad HLO op (constant_values=(-1, 1)) replaces alloc-2-
+    # singletons + concatenate-of-three.
     sin_lat = jnp.sin(lat)
-    sin_ext = jnp.concatenate([
-        jnp.array([-1.0], dtype=lat.dtype),
-        sin_lat,
-        jnp.array([1.0], dtype=lat.dtype),
-    ])
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
     A_vertex = jnp.maximum(A_vertex, 1e-30)
 
@@ -1070,12 +1066,14 @@ def stress_divergence_cgrid(
     dy_edge = R * dlat  # same as dy (edge length for vertex circulation)
     dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at cell-center latitude
 
-    # v-face latitudes and zonal edge lengths
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    # v-face latitudes and zonal edge lengths.  cos(±π/2) is roundoff-
+    # level; build cos_lat_v directly with a 1e-10 floor at the pole
+    # rows via Pad constant_values.
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
+    cos_lat_v = jnp.pad(
+        jnp.maximum(jnp.cos(lat_interior), 1e-10),
+        (1, 1), constant_values=1e-10,
+    )
     dx_v = R * cos_lat_v * dlon  # (n_lat+1,) face_dx at v-face latitudes
 
     is_3d = stress_h.ndim == 3
@@ -1306,11 +1304,9 @@ def _vertex_area(grid: LatLonGrid) -> jnp.ndarray:
     dlon = grid.dlon
     lat = grid.lat
     sin_lat = jnp.sin(lat)
-    sin_ext = jnp.concatenate([
-        jnp.array([-1.0], dtype=lat.dtype),
-        sin_lat,
-        jnp.array([1.0], dtype=lat.dtype),
-    ])
+    # Single Pad HLO op (constant_values=(-1, 1)) replaces alloc-2-
+    # singletons + concatenate-of-three.
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_v = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
     return jnp.maximum(A_v, 1e-30)
 
@@ -1683,15 +1679,16 @@ def leith_viscosity_q_cgrid(
     dlat = grid.dlat
     dlon = grid.dlon
 
-    # Latitudes at q-points: south pole, cell-interface latitudes, north pole.
+    # Cosine of q-point latitudes: cos(±π/2) is roundoff-level, so
+    # build cos_lat_q directly via Pad of cos(interior) with 1e-10 floor
+    # at the pole rows.  Single Pad HLO op replaces alloc-2-singletons +
+    # concatenate-of-three + cos tower.
     lat = grid.lat
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_q = jnp.concatenate([
-        jnp.array([-jnp.pi / 2], dtype=lat.dtype),
-        lat_interior,
-        jnp.array([jnp.pi / 2], dtype=lat.dtype),
-    ])
-    cos_lat_q = jnp.maximum(jnp.cos(lat_q), 1e-10)
+    cos_lat_q = jnp.pad(
+        jnp.maximum(jnp.cos(lat_interior), 1e-10),
+        (1, 1), constant_values=1e-10,
+    )
 
     if is_3d:
         cos_lat_q_b = cos_lat_q[:, jnp.newaxis, jnp.newaxis]

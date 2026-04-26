@@ -44,10 +44,13 @@ def lat_v_interfaces(grid):
     lat_v : jax.Array, shape (n_lat+1,)
     """
     lat = grid.lat  # (n_lat,)
-    lat_south = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    # Single Pad HLO op (constant_values=(-π/2, π/2)) replaces alloc-2-
+    # singletons + concatenate-of-three.
     lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    return jnp.concatenate([lat_south, lat_interior, lat_north])
+    return jnp.pad(
+        lat_interior, (1, 1),
+        constant_values=(-jnp.pi / 2, jnp.pi / 2),
+    )
 
 
 # ==============================================================================

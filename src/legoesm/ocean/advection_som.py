@@ -770,12 +770,12 @@ def som_advect_tracers(
     # v-faces: n_lat+1 total, interior = 1..n_lat-1
     # Use cos(average latitude) to match the divergence operator exactly
     # (divergence_cgrid uses cos(0.5*(lat[i]+lat[i+1])), not avg(cos)).
+    # cos(±π/2) ≈ 0 analytically; build cos_lat_v directly via Pad of
+    # cos(lat_interior) (single Pad HLO op vs alloc-2-singletons +
+    # concatenate-of-three + cos tower).
     lat = grid.lat  # (n_lat,)
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
     lat_interior_v = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior_v, lat_north_pole])
-    cos_lat_v = jnp.cos(lat_v)  # (n_lat+1,)
+    cos_lat_v = jnp.pad(jnp.cos(lat_interior_v), (1, 1))  # (n_lat+1,)
     face_dx_v = grid.radius * grid.dlon * cos_lat_v  # (n_lat+1,)
     vol_flux_v_all = mass_flux_v * face_dx_v[:, jnp.newaxis, jnp.newaxis] * dt
     # Interior v-faces only (1..n_lat-1), excluding wall boundaries

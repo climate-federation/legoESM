@@ -970,12 +970,13 @@ def _zalesak_signsplit_face_alphas(
     dlat = grid.dlat
     face_dy = R_planet * dlat
     lat = grid.lat
-    lat_v = jnp.concatenate([
-        jnp.array([-jnp.pi / 2.0], dtype=lat.dtype),
-        0.5 * (lat[:-1] + lat[1:]),
-        jnp.array([jnp.pi / 2.0], dtype=lat.dtype),
-    ])
-    face_dx = R_planet * jnp.cos(lat_v) * dlon  # (n_lat+1,)
+    # cos(±π/2) ≈ 0; build cos_lat_v directly via Pad of cos(interior).
+    # Single Pad HLO op replaces alloc-2-singletons + concatenate-of-three
+    # + cos tower.
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])
+    face_dx = R_planet * dlon * jnp.pad(
+        jnp.cos(lat_interior), (1, 1),
+    )  # (n_lat+1,)
     area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)
 
     # Per-cell magnitudes of incoming / outgoing horizontal flux.

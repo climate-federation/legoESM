@@ -125,12 +125,17 @@ def absolute_vorticity_coriolis(
     zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1[, nlev])
 
     # --- Planetary vorticity at vertices ---
+    # sin(±π/2) = ±1 exactly, so build f_vert directly from the
+    # interior sin via Pad with constant_values = ±2Ω.  Single
+    # Pad HLO op replaces alloc-2-singletons + concatenate-of-three +
+    # sin tower.
     lat = grid.lat  # cell-center latitudes
-    lat_sp = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_np = jnp.array([jnp.pi / 2], dtype=lat.dtype)
     lat_int = 0.5 * (lat[:-1] + lat[1:])
-    lat_vert = jnp.concatenate([lat_sp, lat_int, lat_np])
-    f_vert = 2.0 * constants.Omega * jnp.sin(lat_vert)  # (n_lat+1,)
+    twoOmega = 2.0 * constants.Omega
+    f_vert = jnp.pad(
+        twoOmega * jnp.sin(lat_int),
+        (1, 1), constant_values=(-twoOmega, twoOmega),
+    )  # (n_lat+1,)
 
     # Absolute vorticity at vertices
     if is_3d:
