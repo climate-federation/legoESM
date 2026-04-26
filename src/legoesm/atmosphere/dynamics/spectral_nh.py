@@ -350,30 +350,71 @@ def spectral_nh_slow_tendencies(
 
     # --- 15. Tracer advection ---
     if n_tracers > 0:
-        tracers_hat_t = jnp.moveaxis(state.tracers_hat.data, -1, 0)  # (n_tracers, n_sh, nlev)
+        # Fold the tracer dimension into the trailing level axis so all
+        # SH transforms in the tracer block run ONCE on a thicker
+        # ``(..., nlev*n_tracers)`` tensor instead of being
+        # ``vmap``'d over the leading tracer axis (which materialises a
+        # separate FFT/sum kernel per tracer).  Same passive-trailing-axis
+        # exploit as Loop 137 for the spectral ocean tracer block.
+        tracers_hat_data = state.tracers_hat.data  # (n_sh, nlev, n_tracers)
+        n_sh_t = tracers_hat_data.shape[0]
+        nlev_tr = tracers_hat_data.shape[-2]
+        tracers_hat_flat = tracers_hat_data.reshape(
+            n_sh_t, nlev_tr * n_tracers,
+        )
 
-        def _single_tracer_tendency(q_hat):
-            q = sh_synthesis_3d(grid, q_hat)  # (n_lat, n_lon, nlev)
+        # 1) Single SH synthesis over (level × tracer) — one IRFFT instead
+        # of n_tracers separate ones.
+        q_grid_flat = sh_synthesis_3d(grid, tracers_hat_flat)  # (n_lat, n_lon, nlev*n_tr)
 
-            # Horizontal advection: -div(q*v) + q*div
-            q_u_cos = q * u_cos
-            q_v_cos = q * v_cos
-            flux_q_div = (
-                im_over_a[:, None] * sh_analysis_oc2_3d(grid, q_u_cos)
-                - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos)
-            )
+        # 2) Build the four flux fields (q*u_cos, q*v_cos, q*div,
+        # vertical_advection(q)) directly on the folded tensor.  The
+        # ``u_cos``/``v_cos``/``div`` factors broadcast across the
+        # combined trailing axis via ``jnp.repeat`` (same as the existing
+        # tracer-fold convention used elsewhere in the dycore).
+        if n_tracers == 1:
+            u_cos_b = u_cos
+            v_cos_b = v_cos
+            div_b = div
+        else:
+            u_cos_b = jnp.repeat(u_cos, n_tracers, axis=-1)
+            v_cos_b = jnp.repeat(v_cos, n_tracers, axis=-1)
+            div_b = jnp.repeat(div, n_tracers, axis=-1)
 
-            # Sum the two grid-space contributions to dq/dt before the
-            # SH forward transform.  ``sh_analysis_3d`` is linear, so
-            # one analysis on the sum replaces two analyses — same
-            # exploit as Loops 94 and 105 for spectral PE / ocean.
-            vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
-            dq_grid_sum = q * div + vert_adv_q
-            dq_hat = -flux_q_div + sh_analysis_3d(grid, dq_grid_sum)
-            return dq_hat
+        q_u_cos_flat = q_grid_flat * u_cos_b
+        q_v_cos_flat = q_grid_flat * v_cos_b
 
-        dtracers_hat_t = jax.vmap(_single_tracer_tendency)(tracers_hat_t)
-        dtracers_hat = jnp.moveaxis(dtracers_hat_t, 0, -1)
+        # 3) Two batched SH analyses (oc2, dmu) — 2*n_tracers calls → 2.
+        flux_q_div_flat = (
+            im_over_a[:, None] * sh_analysis_oc2_3d(grid, q_u_cos_flat)
+            - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos_flat)
+        )
+
+        # 4) Vertical advection still hard-codes axis -1 as nlev, so
+        # keep a vmap, but apply it to the folded tensor (one batched
+        # kernel — JAX traces ``vertical_advection_height`` once).
+        # We carry the (n_lat, n_lon, nlev, n_tracers) shape for the
+        # vertical pass so the level axis remains at -1 during the
+        # stencil.
+        q_grid = q_grid_flat.reshape(
+            q_grid_flat.shape[0], q_grid_flat.shape[1], nlev_tr, n_tracers,
+        )
+        vert_adv_q = jax.vmap(
+            lambda qi: vertical_advection_height(qi, w, dz, dz_half, J),
+            in_axes=-1, out_axes=-1,
+        )(q_grid)  # (n_lat, n_lon, nlev, n_tracers)
+        # Combine the grid-space contributions (q*div + vert_adv) BEFORE
+        # the SH analysis, so a single sh_analysis_3d serves all tracers
+        # and combinations.  Loops 94/137 linearity exploit.
+        dq_grid_sum_flat = (
+            q_grid_flat * div_b
+            + vert_adv_q.reshape(q_grid_flat.shape)
+        )
+        dq_hat_flat = -flux_q_div_flat + sh_analysis_3d(grid, dq_grid_sum_flat)
+
+        # Restore the (n_sh, nlev, n_tracers) layout that matches
+        # ``state.tracers_hat.data``.
+        dtracers_hat = dq_hat_flat.reshape(n_sh_t, nlev_tr, n_tracers)
     else:
         dtracers_hat = jnp.zeros_like(state.tracers_hat.data)
 
