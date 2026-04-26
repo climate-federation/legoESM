@@ -33,9 +33,11 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.core.operators_3d import (
+    divergence_3d,
     gradient_x_3d,
     gradient_y_3d,
     hyperdiffusion_3d,
+    laplacian_compact_3d,
     vertical_advection_height,
 )
 from legoesm.core.operators_cdgrid import (
@@ -366,27 +368,61 @@ def cdgrid_compressible_euler_slow_tendencies(
         dtracers_dt = jnp.zeros_like(tracers)
 
     # --- 13. Hyperdiffusion ---
-    # Stack (u, v, theta_p) along a trailing axis and fold into the level
-    # dim so a single ``hyperdiffusion_3d`` (∇⁴ = ∇²∇², two pad_halo_4d
-    # MPI exchanges) handles all three fields, replacing the prior 3
-    # sequential calls that each issued their own halo pads.  rho_p uses
-    # a different coefficient (hyperdiff_rho_coeff), so it stays separate.
-    if config.hyperdiff_coeff > 0:
+    # ``hyperdiffusion_3d(field, grid, coeff)`` is defined as
+    # ``-coeff * ∇²(∇²(field))`` where each ∇² runs the cubed-sphere
+    # 4D-native compact stencil (single ``pad_halo_4d`` per call).
+    # When *both* ``hyperdiff_coeff`` (applied to (u, v, theta_p))
+    # and ``hyperdiff_rho_coeff`` (applied to rho_p) are non-zero,
+    # the two operator chains share the same biharmonic structure
+    # but use different coefficients on the outer step.  Inline the
+    # operator and stack ALL four fields along a trailing axis: a
+    # single inner ∇² and a single outer ∇² serve all four fields,
+    # then per-field coefficients are applied at the very end.
+    # 4 ∇² evaluations → 2 (one inner, one outer) per RHS evaluation
+    # when both coefficients are active.  When only one coefficient
+    # is active, fall back to the existing path (3-field or 1-field).
+    _coeff_uvT = config.hyperdiff_coeff
+    _coeff_rho = config.hyperdiff_rho_coeff
+    if _coeff_uvT > 0 and _coeff_rho > 0:
+        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
+        _hyper_stack = jnp.stack(
+            [u, v, theta_p, rho_p], axis=-1,
+        )  # (6, n, n, nlev, 4)
+        _hyper_flat = _hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 4)
+        # Inner ∇² (compact stencil) — shared across all four fields.
+        _lap1 = laplacian_compact_3d(_hyper_flat, grid)
+        # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
+        # both gradient ops (saves 1 ``pad_halo_4d`` per call).
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_uvtr
+        _dg = getattr(grid, 'duogrid', None)
+        _offsets = None if _dg is not None else grid.halo_interp_offsets
+        _lap1_pad = _pad_halo_4d_uvtr(_lap1, interp_offsets=_offsets, duogrid=_dg)
+        _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
+        _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
+        _lap2 = divergence_3d(_gx, _gy, grid).reshape(
+            n_face_h, n_i_h, n_j_h, nlev_h, 4,
+        )
+        # Apply per-field hyperdiffusion coefficients.
+        du_dt = du_dt - _coeff_uvT * _lap2[..., 0]
+        dv_dt = dv_dt - _coeff_uvT * _lap2[..., 1]
+        dtheta_p_dt = dtheta_p_dt - _coeff_uvT * _lap2[..., 2]
+        drho_p_dt = drho_p_dt - _coeff_rho * _lap2[..., 3]
+    elif _coeff_uvT > 0:
         n_face_h, n_i_h, n_j_h, nlev_h = u.shape
         hyper_stack = jnp.stack(
             [u, v, theta_p], axis=-1,
         )  # (6, n, n, nlev, 3)
         hyper_flat = hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 3)
         hyper_out_flat = hyperdiffusion_3d(
-            hyper_flat, grid, config.hyperdiff_coeff,
+            hyper_flat, grid, _coeff_uvT,
         )
         hyper_out = hyper_out_flat.reshape(n_face_h, n_i_h, n_j_h, nlev_h, 3)
         du_dt = du_dt + hyper_out[..., 0]
         dv_dt = dv_dt + hyper_out[..., 1]
         dtheta_p_dt = dtheta_p_dt + hyper_out[..., 2]
-    if config.hyperdiff_rho_coeff > 0:
+    elif _coeff_rho > 0:
         drho_p_dt = drho_p_dt + hyperdiffusion_3d(
-            rho_p, grid, config.hyperdiff_rho_coeff,
+            rho_p, grid, _coeff_rho,
         )
 
     # --- 14. Sponge layer ---
