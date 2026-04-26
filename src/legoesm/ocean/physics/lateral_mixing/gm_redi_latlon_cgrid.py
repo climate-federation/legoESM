@@ -185,33 +185,46 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     dq_dz_half = (q_filled[:, :, :-1] - q_filled[:, :, 1:]) / jnp.maximum(dz_half, _EPS_DIV)
 
     # ================================================================
-    # Horizontal fluxes — combined at faces, single divergence call
+    # Horizontal fluxes — computed at INTERFACES for exact cancellation
     # ================================================================
     # F_x = kappa_Redi * dq/dx + (kappa_Redi - kappa_GM) * S_x * dq/dz
     # F_y = kappa_Redi * dq/dy + (kappa_Redi - kappa_GM) * S_y * dq/dz
+    #
+    # KEY: Both the diagonal (kR * dq/dx) and off-diagonal (kR-kG)*S*dq/dz
+    # terms are evaluated at INTERFACE levels before averaging to full
+    # levels.  This ensures exact cancellation (dq/dx + S_x*dq/dz = 0)
+    # when q is constant along isopycnals (e.g., linear EOS with T as
+    # tracer).  The previous approach evaluated the diagonal at full
+    # levels and the off-diagonal at interfaces, breaking the
+    # cancellation and producing spurious cross-isopycnal diffusion.
 
-    # Off-diagonal: (kR - kG) * S * dq/dz at interfaces (n_lat, n_lon, nlev-1)
-    off_diag_x = (kappa_Redi - kappa_GM_b) * S_x * dq_dz_half
-    off_diag_y = (kappa_Redi - kappa_GM_b) * S_y * dq_dz_half
+    # Average horizontal tracer gradients from full levels to interfaces.
+    # u-face gradient → cell center → interface
+    dq_dx_center = 0.5 * (dq_dx_u[:, :-1, :] + dq_dx_u[:, 1:, :])  # (n_lat, n_lon, nlev)
+    dq_dy_center = 0.5 * (dq_dy_v[:-1, :, :] + dq_dy_v[1:, :, :])
+    dq_dx_half = 0.5 * (dq_dx_center[:, :, :-1] + dq_dx_center[:, :, 1:])  # (n_lat, n_lon, nlev-1)
+    dq_dy_half = 0.5 * (dq_dy_center[:, :, :-1] + dq_dy_center[:, :, 1:])
 
-    # Average interface values to full levels (pad boundaries with zero).
-    z_pad = jnp.zeros((*off_diag_x.shape[:2], 1), dtype=off_diag_x.dtype)
-    off_diag_x_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_x], axis=-1)
-        + jnp.concatenate([off_diag_x, z_pad], axis=-1)
+    # Total horizontal Redi flux at interfaces (exact cancellation here).
+    F_x_half = (kappa_Redi * dq_dx_half
+                + (kappa_Redi - kappa_GM_b) * S_x * dq_dz_half)  # (n_lat, n_lon, nlev-1)
+    F_y_half = (kappa_Redi * dq_dy_half
+                + (kappa_Redi - kappa_GM_b) * S_y * dq_dz_half)
+
+    # Average interface fluxes to full levels (zero-pad at surface/bottom).
+    z_pad = jnp.zeros((*F_x_half.shape[:2], 1), dtype=F_x_half.dtype)
+    F_x_full = 0.5 * (
+        jnp.concatenate([z_pad, F_x_half], axis=-1)
+        + jnp.concatenate([F_x_half, z_pad], axis=-1)
     )  # (n_lat, n_lon, nlev)
-    off_diag_y_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_y], axis=-1)
-        + jnp.concatenate([off_diag_y, z_pad], axis=-1)
+    F_y_full = 0.5 * (
+        jnp.concatenate([z_pad, F_y_half], axis=-1)
+        + jnp.concatenate([F_y_half, z_pad], axis=-1)
     )
 
-    # Interpolate cell-center off-diagonal to faces.
-    off_diag_x_u = interp_cell_to_uface(off_diag_x_full)  # (n_lat, n_lon+1, nlev)
-    off_diag_y_v = interp_cell_to_vface(off_diag_y_full)   # (n_lat+1, n_lon, nlev)
-
-    # Combined face fluxes: diagonal + off-diagonal.
-    F_x_u = kappa_Redi * dq_dx_u + off_diag_x_u  # (n_lat, n_lon+1, nlev)
-    F_y_v = kappa_Redi * dq_dy_v + off_diag_y_v   # (n_lat+1, n_lon, nlev)
+    # Interpolate cell-center fluxes to faces for divergence.
+    F_x_u = interp_cell_to_uface(F_x_full)  # (n_lat, n_lon+1, nlev)
+    F_y_v = interp_cell_to_vface(F_y_full)   # (n_lat+1, n_lon, nlev)
 
     # Apply face masks (zero flux through land boundaries).
     F_x_u = F_x_u * u_mask[:, :, jnp.newaxis]
@@ -224,12 +237,7 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     # Vertical flux at interfaces
     # ================================================================
     # F_z = (kR + kG) * (S_x*dq/dx_center + S_y*dq/dy_center) + kR * S^2 * dq/dz
-
-    # Average face tracer gradients to cell centers, then to interfaces.
-    dq_dx_center = 0.5 * (dq_dx_u[:, :-1, :] + dq_dx_u[:, 1:, :])  # (n_lat, n_lon, nlev)
-    dq_dy_center = 0.5 * (dq_dy_v[:-1, :, :] + dq_dy_v[1:, :, :])
-    dq_dx_half = 0.5 * (dq_dx_center[:, :, :-1] + dq_dx_center[:, :, 1:])
-    dq_dy_half = 0.5 * (dq_dy_center[:, :, :-1] + dq_dy_center[:, :, 1:])
+    # dq_dx_half, dq_dy_half already computed above (reused here).
 
     S2_half = S_x ** 2 + S_y ** 2
     F_z = ((kappa_Redi + kappa_GM_b) * (S_x * dq_dx_half + S_y * dq_dy_half)
