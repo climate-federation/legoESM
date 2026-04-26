@@ -140,10 +140,13 @@ def init_surface_state(
                            name="ice_concentration", dims=dims_2d, units="1"),
     )
 
+    # Pin lake temperatures to the same storage precision as the rest
+    # of the coupler state (sea-ice / land use ``_sd`` above) so the
+    # lake fields don't inadvertently default to f64 under x64 mode.
     lake = LakeState(
-        T_epi=Field(data=jnp.full(shape, T_epi_init),
+        T_epi=Field(data=jnp.full(shape, T_epi_init, dtype=_sd),
                     name="T_epi", dims=dims_2d, units="K"),
-        T_hypo=Field(data=jnp.full(shape, T_hypo_init),
+        T_hypo=Field(data=jnp.full(shape, T_hypo_init, dtype=_sd),
                      name="T_hypo", dims=dims_2d, units="K"),
     )
 
@@ -249,7 +252,7 @@ def ocean_tile_response(
         lw_up=lw_up,
         u_ocean_sfc=ocean_u,
         v_ocean_sfc=ocean_v,
-        co2_flux=jnp.zeros(shape),
+        co2_flux=jnp.zeros(shape, dtype=_ssh_dtype),
     )
 
 
