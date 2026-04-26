@@ -81,6 +81,16 @@ _FORTRAN_FIDELITY_OPT_IN_FLAGS = [
     # remains a Fortran-fidelity opt-in covered by iter-873 inventory.
     ("fortran_faithful_ppm_left", False, "iter-900",
      "tp_core.F90:359-362 (al(0)/al(1)/al(2) at Hypothesis-A q_face indices)"),
+    # Iter-903 added `fortran_faithful_ppm_right`: symmetric counter-
+    # part to iter-900's LEFT-side flag.  Switches the RIGHT-side
+    # cube-edge PPM overrides to Fortran's al(npx-1)/al(npx) recipes
+    # at the corrected q_face[n+2,n+3] indices (per iter-899
+    # investigation).  al(npx) is PARTIALLY faithful in halo=2
+    # (q1(npx+1) is mode='edge' replica); al(npx+1) is not placed
+    # (needs halo=3).  Default OFF preserves iter-893 production
+    # behavior; iter-904+ measurement determines whether to flip.
+    ("fortran_faithful_ppm_right", False, "iter-903",
+     "tp_core.F90:365-367 (al(npx-1)/al(npx) at Hypothesis-A q_face indices)"),
     # Iter-888c added `apply_fortran_xppm_boundary` to this inventory
     # as a default-OFF Fortran-fidelity opt-in.  Iter-892 fixed an
     # off-by-one in the iter-889 implementation and discovered the

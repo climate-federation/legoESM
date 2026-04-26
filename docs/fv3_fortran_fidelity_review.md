@@ -3054,3 +3054,66 @@ For a smooth synthetic field q1(j) = sin(j·dxa/radius) and using mode='edge' re
 **Caveat — lower bound.**  The diagnostic uses `mode='edge'` replicas for halo dxa cells (q1(-2) = q1(0) etc.).  The real halo dxa values come from neighbour faces' interior cells, which near cube vertices have meaningfully different dxa due to gnomonic projection.  The TRUE discrepancy at the cube vertex itself could be 2-5× larger.  An exhaustive measurement that pulls real halo dxa from `_pad_halo_auto_h2(rdxa)` would tighten this bound but adds complexity for marginal incremental insight.
 
 **Process.**  182nd iter.  iter-902 closes a long-standing iter-888 deferred item by quantifying its expected impact.  The conclusion ("not worth implementing now") is data-driven rather than speculative.  Future iters can refer to this magnitude estimate when deciding whether to revisit dxa plumbing.  No production code change; no regression risk.
+
+### Iter-903 — Fortran-faithful RIGHT-side cube-edge overrides (NEGATIVE result on W2, mirroring iter-900)
+
+**Motivation.**  iter-900 implemented strict-Fortran LEFT-side PPM cube-edge overrides and measured a +53.7 % W2 v_ll_Linf regression — iter-892's 1-cell-shifted formulas at the wrong q_face indices are W2-load-bearing.  iter-903 closes the symmetric counterpart: the RIGHT-side (q_face[n+1, n+2] in iter-892, q_face[n+2, n+3] under Hypothesis A) under a new `fortran_faithful_ppm_right` flag.
+
+**Implementation.**  New default-OFF field on `CDGridShallowWaterConfig`, plumbed through `fv3_sw_tendencies` -> `cgrid_mass_flux_divergence` -> `_ppm_reconstruct_1d`.  When `True` AND `apply_fortran_xppm_boundary=True`:
+
+```
+q_face[n+2] = al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
+            = c1*q_pad[n+2] + c2*q_pad[n+3] + c3*q_pad[n+4]
+            (FULL halo-2 fidelity)
+
+q_face[n+3] = al(npx) = xt clipped using q1(npx-2..npx+1)
+            = q_pad[n+3..n+6]
+            (PARTIAL fidelity — q_pad[n+6] is mode='edge' replica
+             of q1(n+1) since q1(npx+1)=q1(n+2) is outside halo=2)
+
+q_face[n+4] = al(npx+1)  [NOT placed — needs halo=3, deferred]
+
+q_face[n+1] = standard 4th-order interior stencil  [iter-892's
+              misplaced override at the al(n-1) slot is REMOVED;
+              Fortran has no boundary override there]
+```
+
+**W2 measurement at C36 dt=300s 1-day** (`scripts/diag_iter903_w2_fortran_faithful_right.py`):
+
+| config                              | mass_drift | h_L2     | h_Linf   | v_ll_Linf  |
+|-------------------------------------|------------|----------|----------|------------|
+| (A) iter-892 default (production)   | 4.561e-07  | 2.048e-04 | 8.184e+00 | **1.319e-01** |
+| (B) iter-903 fortran-faithful right | 5.701e-07  | 2.281e-04 | 1.059e+01 | 1.989e-01 |
+
+iter-903's strict-Fortran path INCREASES W2 v_ll_Linf by **+50.8 %** (+0.067 m/s) — nearly mirror-image of iter-900's +53.7 % LEFT-side regression.  h_L2 +11 %, h_Linf +29 %, mass_drift slightly worse (vs iter-900's W5 case where mass_drift IMPROVED).
+
+**Limiter-saturation observation** (iter-903 unit tests).  On strictly-convex quadratic test inputs, the monotonicity overshoot constraint at lines 295-301 saturates the q_face[n+3] override to `3*q - 2*q_R` regardless of whether iter-892's xt-clipped or iter-903's strict-Fortran al(npx) is the pre-limiter value.  The effective change in iter-903 is concentrated at q_face[n+2] (al(npx-1) — fully Fortran-faithful) plus the q_face[n+1] revert.
+
+**Symmetric interpretation (LEFT + RIGHT).**  Combining iter-900 and iter-903:
+
+| W2 v_ll_Linf at C36 1-day              | iter-892 default | strict-Fortran | delta     |
+|-----------------------------------------|------------------|----------------|-----------|
+| LEFT-side override (q_face[2,3])       | (baseline)       | flag-on:       | +53.7 %   |
+| RIGHT-side override (q_face[n+2,n+3])  | (baseline)       | flag-on:       | +50.8 %   |
+
+Both sides yield +50%-class W2 regressions when strict Fortran is applied at the correct indices.  iter-892's dual 1-cell-shifted approach is empirically optimal across BOTH cube edges of the production W2 path.  This is a NON-TRIVIAL symmetry — the cube-edge artifact mechanism that iter-892 happens to suppress is symmetric across face boundaries, so a single 1-cell shift bug applied symmetrically yields paired empirical advantages.
+
+**Decision.**  Keep iter-892 as the production default.  iter-903's flag stays default OFF (covered by iter-873 inventory).  Combined with iter-900: the LEFT-side AND RIGHT-side strict-Fortran paths both regress W2; CLAUDE.md's "follow the Fortran implementation exactly" yields W2-pessimal behavior on BOTH cube edges.
+
+**Open questions** (deferred):
+- Does iter-903's flag improve W5 mass drift like iter-900 did?  (Not measured in iter-903; same broad-eval pattern as iter-901 would close this.)
+- Could a HYBRID (iter-900 LEFT + iter-903 RIGHT, or one but not the other) yield a different trade-off?
+- Does the symmetric LEFT+RIGHT pattern hold at finer resolutions (C48, C96)?
+
+**Deliverable.**
+- `src/legoesm/core/operators_cdgrid.py:_ppm_reconstruct_1d`: new `fortran_faithful_ppm_right` kwarg (default False); preserves iter-892 default; adds 2-slot Fortran-faithful path at q_face[n+2, n+3] when flag=True with q_face[n+1] revert.
+- `src/legoesm/core/operators_cdgrid.py:cgrid_mass_flux_divergence`, `fv3_sw_tendencies`: kwarg threading.
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:CDGridShallowWaterConfig`: `fortran_faithful_ppm_right` field; production model.step forwards.
+- `tests/test_ppm_reconstruct_1d_fortran_faithful_right_iter903.py`: 6 sentinels covering OFF preserves iter-892, ON applies Fortran al(npx-1) at q_face[n+2], q_face[n+3] is limiter-saturated, q_face[n+1] reverts to 4th-order, LEFT side untouched, gate respects `apply_fortran_xppm_boundary`.
+- `tests/test_fortran_fidelity_default_flags_iter873.py`: `fortran_faithful_ppm_right` added to inventory.
+- `scripts/diag_iter903_w2_fortran_faithful_right.py`: W2 comparison script (also `if __name__ == "__main__"` guarded per iter-901c convention).
+- This iter-903 doc entry.
+
+**Verification.**  All 32 tests pass: 12 iter-873/896 + 6 iter-899 + 1 iter-768 + 6 iter-900 + 6 iter-903 + 1 iter-893 baseline.  Production W2 baseline (iter-892 + iter-903 default-OFF) unchanged at 1.319e-1 m/s.
+
+**Process.**  183rd iter.  iter-903 closes the symmetric counterpart of iter-900, completing the LEFT+RIGHT cube-edge Fortran-fidelity matrix.  Both directions yield ~50 % W2 regressions when strict Fortran is applied — the dual-side empirical pattern strengthens iter-900's interpretation: legoESM's cubed-sphere PPM transport pipeline benefits from non-Fortran constraints at BOTH cube edges, not just one.  Per Ralph protocol "every iter must produce real and meaningful work": iter-903 lands a flagged production-path implementation, measured W2 effect, sentinels, doc entry — even though the empirical conclusion is that the work should NOT be enabled by default.

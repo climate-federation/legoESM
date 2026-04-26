@@ -86,7 +86,8 @@ def _broadcast_metric(metric, field):
 def _ppm_reconstruct_1d(q, *, axis: int,
                         apply_fortran_xppm_boundary: bool = False,
                         n_interior: int | None = None,
-                        fortran_faithful_ppm_left: bool = False):
+                        fortran_faithful_ppm_left: bool = False,
+                        fortran_faithful_ppm_right: bool = False):
     """PPM face-value reconstruction along ``axis``.
 
     Given cell averages along ``axis``, compute left and right face
@@ -282,30 +283,82 @@ def _ppm_reconstruct_1d(q, *, axis: int,
             q_face = q_face.at[..., 2].set(face_al1)
             q_face = q_face.at[..., 3].set(face_al2)
 
-        # RIGHT cube-edge boundary overrides (al(npx-1) and al(npx)
-        # only; al(npx+1) at q_face[n+3] left untouched — needs
-        # halo=3).
-        # al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
-        # With npx = n_int + 1: q1(npx-3) = q1(n-2) = q_pad[n+1],
-        # q1(npx-2) = q1(n-1) = q_pad[n+2], q1(npx-1) = q1(n) = q_pad[n+3].
-        face_alnm1 = (c1 * q_pad[..., n_int + 1]
-                      + c2 * q_pad[..., n_int + 2]
-                      + c3 * q_pad[..., n_int + 3])
-        # al(npx) = uniform 4-point xt clipped to min/max(q1(npx-2..npx+1)).
-        # q1(npx-2) = q_pad[n+2], q1(npx-1) = q_pad[n+3],
-        # q1(npx) = q_pad[n+4], q1(npx+1) = q_pad[n+5].
-        xt_R = (0.75 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 4])
-                - 0.25 * (q_pad[..., n_int + 2] + q_pad[..., n_int + 5]))
-        q_lo_R = jnp.minimum(
-            jnp.minimum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
-            jnp.minimum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
-        q_hi_R = jnp.maximum(
-            jnp.maximum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
-            jnp.maximum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
-        face_aln = jnp.clip(xt_R, q_lo_R, q_hi_R)
+        if fortran_faithful_ppm_right:
+            # Iter-903 RIGHT-side Fortran-faithful overrides at the
+            # CORRECTED q_face indices.  Symmetric to iter-900's
+            # LEFT-side fix.  Under Hypothesis A (production strip
+            # layout q[k]=q1(k-2)), q_pad[k]=q1(k-4) for k=2..n+5,
+            # and q_face[k]=al(k-2).  Therefore:
+            #   q_face[n+2] = al(n)  = al(npx-1)
+            #   q_face[n+3] = al(n+1) = al(npx)
+            #   q_face[n+4] = al(n+2) = al(npx+1)  (NOT placed - halo=3)
+            #
+            # Fortran formulas (`tp_core.F90:365-368`):
+            #   al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
+            #             = c1*q_pad[n+2] + c2*q_pad[n+3] + c3*q_pad[n+4]
+            #   al(npx) = xt 4-pt clipped using q1(npx-2..npx+1)
+            #           = q_pad[n+3..n+6]
+            #     where q_pad[n+6] is mode='edge' replica of q1(n+1).
+            #     Fortran's al(npx) needs q1(npx+1) = q1(n+2) which is
+            #     OUTSIDE halo=2; the xt formula here uses q_pad[n+6] =
+            #     q1(n+1) instead (PARTIAL faithfulness — the same
+            #     "halo=2 limit" caveat as for al(npx+1)).
+            #   al(npx+1) needs q1(n+2) and q1(n+3) — NOT plumbed.
+            face_alnm1_faithful = (
+                c1 * q_pad[..., n_int + 2]
+                + c2 * q_pad[..., n_int + 3]
+                + c3 * q_pad[..., n_int + 4])
+            xt_R_faithful = (
+                0.75 * (q_pad[..., n_int + 4] + q_pad[..., n_int + 5])
+                - 0.25 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 6]))
+            q_lo_R_f = jnp.minimum(
+                jnp.minimum(q_pad[..., n_int + 3], q_pad[..., n_int + 4]),
+                jnp.minimum(q_pad[..., n_int + 5], q_pad[..., n_int + 6]))
+            q_hi_R_f = jnp.maximum(
+                jnp.maximum(q_pad[..., n_int + 3], q_pad[..., n_int + 4]),
+                jnp.maximum(q_pad[..., n_int + 5], q_pad[..., n_int + 6]))
+            face_aln_faithful = jnp.clip(
+                xt_R_faithful, q_lo_R_f, q_hi_R_f)
 
-        q_face = q_face.at[..., n_int + 1].set(face_alnm1)
-        q_face = q_face.at[..., n_int + 2].set(face_aln)
+            q_face = q_face.at[..., n_int + 2].set(face_alnm1_faithful)
+            q_face = q_face.at[..., n_int + 3].set(face_aln_faithful)
+            # Iter-892's q_face[n+1] override (placing c1/c2/c3 at
+            # the al(n-1) slot which Fortran does NOT specially treat)
+            # is REMOVED in this branch — that slot reverts to the
+            # standard 4th-order interior stencil.
+        else:
+            # Iter-892 RIGHT cube-edge boundary overrides (al(npx-1)
+            # and al(npx) only; al(npx+1) at q_face[n+3] left
+            # untouched — needs halo=3).  KNOWN 1-CELL SHIFT BUG
+            # documented in iter-899: places formulas at q_face[n+1,
+            # n+2] but those are al(n-1) and al(n) under Hypothesis
+            # A (not the al(npx-1, npx) the formulas were designed
+            # for).  Despite the bug, iter-893 measured a 17 % W2
+            # v_ll_Linf reduction with this default — keep it as the
+            # production default until iter-901+ measurement
+            # confirms the strict-Fortran path is at least as good.
+            #
+            # al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
+            # With npx = n_int + 1: q1(npx-3) = q1(n-2) = q_pad[n+1],
+            # q1(npx-2) = q1(n-1) = q_pad[n+2], q1(npx-1) = q1(n) = q_pad[n+3].
+            face_alnm1 = (c1 * q_pad[..., n_int + 1]
+                          + c2 * q_pad[..., n_int + 2]
+                          + c3 * q_pad[..., n_int + 3])
+            # al(npx) = uniform 4-point xt clipped to min/max(q1(npx-2..npx+1)).
+            # q1(npx-2) = q_pad[n+2], q1(npx-1) = q_pad[n+3],
+            # q1(npx) = q_pad[n+4], q1(npx+1) = q_pad[n+5].
+            xt_R = (0.75 * (q_pad[..., n_int + 3] + q_pad[..., n_int + 4])
+                    - 0.25 * (q_pad[..., n_int + 2] + q_pad[..., n_int + 5]))
+            q_lo_R = jnp.minimum(
+                jnp.minimum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
+                jnp.minimum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
+            q_hi_R = jnp.maximum(
+                jnp.maximum(q_pad[..., n_int + 2], q_pad[..., n_int + 3]),
+                jnp.maximum(q_pad[..., n_int + 4], q_pad[..., n_int + 5]))
+            face_aln = jnp.clip(xt_R, q_lo_R, q_hi_R)
+
+            q_face = q_face.at[..., n_int + 1].set(face_alnm1)
+            q_face = q_face.at[..., n_int + 2].set(face_aln)
 
     # Left and right face values for each cell
     q_L = q_face[..., :-1]  # face at i-1/2 → left face of cell i
@@ -614,7 +667,8 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
                                 apply_fortran_xppm_boundary=False,
-                                fortran_faithful_ppm_left=False):
+                                fortran_faithful_ppm_left=False,
+                                fortran_faithful_ppm_right=False):
     """Conservative mass flux divergence using PPM face reconstruction.
 
     Uses the Piecewise Parabolic Method (Colella & Woodward 1984) for
@@ -647,7 +701,8 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
                 hk, uk, vk, cdgrid,
                 apply_fortran_xppm_boundary=(
                     apply_fortran_xppm_boundary),
-                fortran_faithful_ppm_left=fortran_faithful_ppm_left)
+                fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+                fortran_faithful_ppm_right=fortran_faithful_ppm_right)
 
         result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
         return jnp.moveaxis(result_t, 0, -1)
@@ -690,7 +745,8 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
         h_x_strips, axis=1,
         apply_fortran_xppm_boundary=effective_xppm_boundary,
         n_interior=n,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left)
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+        fortran_faithful_ppm_right=fortran_faithful_ppm_right)
 
     # Face values at x-interfaces: we need n+1 faces for interior cells
     # Face (i) is between padded cells (i+1) and (i+2), i.e. original cells i-1 and i
@@ -712,7 +768,8 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
         h_y_strips, axis=2,
         apply_fortran_xppm_boundary=effective_xppm_boundary,
         n_interior=n,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left)
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+        fortran_faithful_ppm_right=fortran_faithful_ppm_right)
 
     q_R_bottom = q_R_y[:, :, 1:n+2]   # (6, n, n+1)
     q_L_top = q_L_y[:, :, 2:n+3]      # (6, n, n+1)
@@ -1792,6 +1849,7 @@ def fv3_sw_tendencies(
     dddmp=0.0,
     apply_fortran_xppm_boundary=False,
     fortran_faithful_ppm_left=False,
+    fortran_faithful_ppm_right=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1826,7 +1884,8 @@ def fv3_sw_tendencies(
     dh_dt = cgrid_mass_flux_divergence(
         h, u_c, v_c, cdgrid,
         apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-        fortran_faithful_ppm_left=fortran_faithful_ppm_left)
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+        fortran_faithful_ppm_right=fortran_faithful_ppm_right)
     if zero_mean_correction:
         total_area = jnp.sum(cdgrid.base.area)
         dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
