@@ -471,11 +471,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
 
     horiz_flat = jnp.zeros_like(tracer_flat)
-    if config.K_h > 0:
+    if config.K_h > 0 and config.K_bih > 0:
+        # Both Laplacian and biharmonic active: bilaplacian's *inner*
+        # ∇² is identical to the K_h Laplacian, so compute ∇²(tracer_flat)
+        # ONCE and feed it to both branches.  Saves one full
+        # laplacian_cgrid call (2 gradients + 1 divergence + masking)
+        # per RHS evaluation.
+        _lap_tr = laplacian_cgrid(tracer_flat, grid, mask=mask)
+        horiz_flat = horiz_flat + config.K_h * _lap_tr
+        horiz_flat = horiz_flat - config.K_bih * laplacian_cgrid(
+            _lap_tr, grid, mask=mask,
+        )
+    elif config.K_h > 0:
         horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
             tracer_flat, grid, mask=mask,
         )
-    if config.K_bih > 0:
+    elif config.K_bih > 0:
         horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
             tracer_flat, grid, mask=mask,
         )
@@ -511,14 +522,31 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Uses the proper vector Laplacian grad(div) - k×grad(curl) directly
     # on face velocities, avoiding the lossy cell-center detour.
     # See issue #105 for details.
-    if config.A_h > 0:
+    if config.A_h > 0 and config.B_h > 0:
+        # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
+        # *inner* vector Laplacian is identical to the explicit A_h
+        # vector Laplacian, so compute ∇²(u', v') ONCE and feed it to
+        # both branches.  Saves one full vector_laplacian_cgrid call
+        # (1 div + 1 curl + 2 gradients + 2 gradient_curl_to_*) per
+        # RHS evaluation.
+        _vlap_u, _vlap_v = vector_laplacian_cgrid(
+            u_prime, v_prime, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt + config.A_h * _vlap_u
+        dv_dt = dv_dt + config.A_h * _vlap_v
+        bilap_u, bilap_v = vector_laplacian_cgrid(
+            _vlap_u, _vlap_v, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        scale_u, scale_v = biharmonic_scaling_factor(grid)
+        du_dt = du_dt - config.B_h * scale_u[:, None, None] * bilap_u
+        dv_dt = dv_dt - config.B_h * scale_v[:, None, None] * bilap_v
+    elif config.A_h > 0:
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         du_dt = du_dt + config.A_h * vlap_u
         dv_dt = dv_dt + config.A_h * vlap_v
-
-    if config.B_h > 0:
+    elif config.B_h > 0:
         bilap_u, bilap_v = vector_bilaplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
