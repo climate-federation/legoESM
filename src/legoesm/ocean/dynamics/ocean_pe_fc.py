@@ -101,12 +101,34 @@ def ocean_baroclinic_tendencies_fc(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
-    # Pre-pad p_prime once and share between fc_gradient_x_3d and
-    # fc_gradient_y_3d (halves the halo MPI cost of the paired call).
+    # Pre-pad (p_prime, K) once and share across both gradient pairs.
+    # Both are 3D scalar fields on (6, n, n, nlev); ``pad_halo_4d`` and
+    # the FC index-space derivatives treat the trailing axis as a
+    # passive batch.  Stack along trailing axis to (6, n, n, nlev, 2),
+    # fold to (6, n, n, nlev*2), and run a single halo + paired x/y
+    # gradient call.  Halves the halo cost vs the previous Loop 78
+    # form (which already shared halo within each gradient pair but
+    # not across the two scalar fields).
+    K = 0.5 * (u**2 + v**2)
+    n_face_pK, n_i_pK, n_j_pK, nlev_pK = p_prime.shape
+    _pK_stack = jnp.stack([p_prime, K], axis=-1)
+    _pK_flat = _pK_stack.reshape(n_face_pK, n_i_pK, n_j_pK, nlev_pK * 2)
     from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fc
-    _p_pad = _pad_halo_4d_fc(p_prime, halo=1, interp_offsets=grid.halo_interp_offsets)
-    dp_dx = fc_gradient_x_3d(p_prime, grid, fc_config, padded=_p_pad)
-    dp_dy = fc_gradient_y_3d(p_prime, grid, fc_config, padded=_p_pad)
+    _pK_pad = _pad_halo_4d_fc(_pK_flat, halo=1, interp_offsets=grid.halo_interp_offsets)
+    _dpK_dx_flat = fc_gradient_x_3d(_pK_flat, grid, fc_config, padded=_pK_pad)
+    _dpK_dy_flat = fc_gradient_y_3d(_pK_flat, grid, fc_config, padded=_pK_pad)
+    _dpK_dx = _dpK_dx_flat.reshape(
+        _dpK_dx_flat.shape[0], _dpK_dx_flat.shape[1],
+        _dpK_dx_flat.shape[2], nlev_pK, 2,
+    )
+    _dpK_dy = _dpK_dy_flat.reshape(
+        _dpK_dy_flat.shape[0], _dpK_dy_flat.shape[1],
+        _dpK_dy_flat.shape[2], nlev_pK, 2,
+    )
+    dp_dx = _dpK_dx[..., 0]
+    dK_dx = _dpK_dx[..., 1]
+    dp_dy = _dpK_dy[..., 0]
+    dK_dy = _dpK_dy[..., 1]
 
     # --- 4. Diagnose w from flux divergence (batched flux + bare div) ---
     # Both ``flux_div_k`` and ``div_v`` are FC divergences on (u-component,
@@ -137,11 +159,9 @@ def ocean_baroclinic_tendencies_fc(
     # --- 5. Vorticity ---
     zeta = fc_curl_z_3d(u * mask_3d, v * mask_3d, grid, fc_config)
 
-    # --- 6. Kinetic energy gradient (share halo across ∂K/∂x, ∂K/∂y) ---
-    K = 0.5 * (u**2 + v**2)
-    _K_pad = _pad_halo_4d_fc(K, halo=1, interp_offsets=grid.halo_interp_offsets)
-    dK_dx = fc_gradient_x_3d(K, grid, fc_config, padded=_K_pad)
-    dK_dy = fc_gradient_y_3d(K, grid, fc_config, padded=_K_pad)
+    # --- 6. Kinetic energy gradient (computed via the batched
+    # (p_prime, K) gradient block above — halo and derivative shared
+    # with p_prime, halving the cost of each timestep).
 
     # --- 7. Vector-invariant momentum (skew-symmetric) ---
     H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
