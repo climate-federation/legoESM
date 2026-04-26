@@ -2721,3 +2721,30 @@ mode-4 ceiling unchanged at `4.5e-2`: pre-iter-893 OFF mode-4 (`4.594e-2`) alrea
 - This iter-895 doc entry.
 
 **Process.**  174th iter.  Codex iter-894 correctly caught a metric-mixing error in iter-894's regression-catch claim.  iter-895 fixes the ceiling AND documents the two-metric distinction so future iters cannot repeat the conflation.  Net effect: the W2 sentinel now genuinely catches a regression that disables `apply_fortran_xppm_boundary`, and the relationship between the iter-768 / iter-889 cell-centre metric and the W2 sentinel lat-lon-regrid metric is permanently documented.
+
+### Iter-896 — fast AST-based "must activate" sentinel for iter-893 production flag
+
+**Motivation.**  iter-893 promoted `apply_fortran_xppm_boundary=True` to the production matrix runner + W2 sentinel after iter-892 demonstrated 19.6% W2 v_north Linf improvement.  iter-873 was updated to drop this flag from its "must NOT activate" inventory (the original iter-873 invariant assumed all such flags stayed default-OFF in production).  But no test was added to assert the flag IS still active.  The W2 sentinel ceiling (max_v_ll<0.145, mode-4<0.045) does catch the OFF regression at runtime — but in 20 s.  iter-896 adds a fast AST-based sentinel (<1 s) that catches the same regression class.
+
+**Three new tests** in `tests/test_fortran_fidelity_default_flags_iter873.py`:
+
+1. `test_iter896_matrix_runner_has_apply_fortran_xppm_boundary_active` — AST scan: `scripts/run_atmosphere_test_matrix.py` MUST construct its W2/W5 LEGACY config with `apply_fortran_xppm_boundary=True`.  The W2/W5 config is identified by its unique `div_damp = 8.0 * _div_damp_cube(...)` 8× multiplier (the iter-761 canonical) — distinguishes it from the cosine bell config which uses `_div_damp_cube(...)` without the multiplier.
+
+2. `test_iter896_w2_sentinel_has_apply_fortran_xppm_boundary_active` — AST scan: `tests/unit/test_cdgrid_fv3_regression.py:test_w2_iter761_matrix_v_ll_and_mode4_baseline` MUST also pass the flag.  Catches a desync between matrix runner and sentinel.
+
+3. `test_iter896_active_in_production_inventory_reachable` — asserts `_FORTRAN_FIDELITY_FLAGS_ACTIVE_IN_PRODUCTION` exists, contains `apply_fortran_xppm_boundary`, and every entry corresponds to an actual `CDGridShallowWaterConfig` field.  Catches the inventory becoming stale.
+
+**Why the AST scanner is safe to leave the cosine bell config alone.**  The matrix runner has TWO `CDGridShallowWaterConfig(...)` calls in production-flow code (W2/W5 LEGACY at line ~1207 + cosine bell at line ~1587).  Cosine bell uses `transport_step` directly without forwarding the kwarg from the config — so adding `apply_fortran_xppm_boundary=True` to its config would have no observable effect (the flag is unused on that code path).  The iter-896 AST scanner specifically targets the W2/W5 config via the unique 8× multiplier in `div_damp` and does NOT require the cosine bell config to also activate the flag.
+
+**Pair with iter-873's "must NOT activate" sentinel.**  Together iter-873 + iter-896 cover the FULL set of Fortran-fidelity flags:
+- iter-873 inventory (default-OFF flags): asserts none activate in matrix runner / W2 sentinel.
+- iter-896 active-in-production list: asserts each promoted flag IS active in matrix runner / W2 sentinel.
+A new flag added in either category needs the corresponding constant updated.
+
+**Verification.**  All 138 tests pass (135 top-level + 3 new iter-896 tests + W2 LEGACY sentinel).
+
+**Deliverable.**
+- `tests/test_fortran_fidelity_default_flags_iter873.py`: +3 iter-896 tests (~120 lines).  No source-code change.
+- This iter-896 doc entry.
+
+**Process.**  175th iter.  Closes the iter-873 / iter-893 / iter-896 inventory triangle.  iter-893 promoted a flag from default-OFF to default-ON in production; iter-873 was updated to remove the "must NOT activate" check; iter-896 adds the complementary "MUST activate" check.  A future revert of iter-893 would now fail iter-896 (in <1 s, via AST scan) AND iter-895's runtime ceiling (~20 s) — two independent gates.
