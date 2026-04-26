@@ -1854,6 +1854,9 @@ def fv3_sw_tendencies(
     dt=None,
     dsw1_nord=2,
     dsw1_damp_c=0.06,
+    cube_edge_softer_div_damp=False,
+    cube_edge_div_damp_factor=0.5,
+    cube_edge_div_damp_band=2,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -2077,6 +2080,36 @@ def fv3_sw_tendencies(
         div_abs = jnp.abs(div_field)
         adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs))
+
+        # Iter-909 (default OFF): cube-edge-aware adaptive_coeff per
+        # iter-908b's option (2).  iter-907 identified div_damp as
+        # the dominant contributor (29x more than boundary_fix) to
+        # t=0 dv_d_dt at the W2 D-grid hot spots (lat ±33.9° face
+        # 0/2, i=2-3 row near EW cube edge).  iter-908b confirmed
+        # that GLOBAL coefficient sweep cannot improve W2 below the
+        # iter-892 0.132 m/s baseline.  iter-909 tests whether
+        # SOFTENING div_damp ONLY at the cube-edge boundary cells
+        # (i=0..band-1 and i=n-band..n-1, j=0..band-1 and
+        # j=n-band..n-1) reduces hot-spot growth without the global
+        # trade-off.
+        #
+        # Default OFF preserves iter-892/iter-893 production
+        # behaviour bit-for-bit.  When True, the adaptive_coeff is
+        # multiplied by `cube_edge_div_damp_factor` (default 0.5)
+        # at boundary cells and by 1.0 at interior cells.  Boundary
+        # band depth is `cube_edge_div_damp_band` cells (default 2,
+        # covering i=0,1 and i=n-2,n-1).
+        if cube_edge_softer_div_damp:
+            band = int(cube_edge_div_damp_band)
+            factor = float(cube_edge_div_damp_factor)
+            mask = jnp.ones_like(adaptive_coeff)
+            # Soften the band cells along i and j on each face.
+            mask = mask.at[:, :band, :].set(factor)
+            mask = mask.at[:, n - band:, :].set(factor)
+            mask = mask.at[:, :, :band].set(factor)
+            mask = mask.at[:, :, n - band:].set(factor)
+            adaptive_coeff = adaptive_coeff * mask
+
         # Iter-765b: thread fortran_dir_aware_corners flag to this
         # A-L gradient call too, so the flag consistently affects ALL
         # A-L invocations inside fv3_sw_tendencies.

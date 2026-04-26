@@ -419,3 +419,62 @@ iter-909+ should pursue:
 **Verification.**  Sweep runs to completion in ~4 min (10 W2 1-day trajectories).  Production W2 baseline (8×) unchanged at 1.319e-1 m/s.
 
 **Process.**  190th iter (+ iter-908b stop-time fix).  iter-908 closes iter-907's hypothesis with a refutation that is now properly scope-bounded: WITHIN THE 1-D SWEEP with `dddmp=0.2` fixed and within the stable range (0.5× to 12×), the W2 v_ll_Linf is monotonically decreasing with div_damp and the iter-761 8× tuning is in a wide flat region of the curve (12× is the best-found at only -1.75 %).  Both endpoints (16×+) are unstable.  Negative result, but valuable — eliminates option (1) within this 1-D test scope and narrows iter-909+ work to option (2), option (3), or a 2-D (`div_damp`, `dddmp`) sweep gated on the holistic d_sw5 port.
+
+### Iter-909 — cube-edge-aware adaptive_coeff (option 2 from iter-908b; NEGATIVE result, refines mechanism)
+
+**Motivation.**  iter-908b concluded the global div_damp 1-D sweep is exhausted within scope.  iter-907 had identified the W2 hot spots at lat ±33.9° face 0/2 (i=2-3 row near the EW cube edge).  iter-909 implements iter-908b's option (2): apply a per-cell mask that softens `adaptive_coeff` ONLY at face-boundary cells (i in [0..band-1] U [n-band..n-1], same for j) while keeping full strength at deep interior.  Hypothesis: targeting the hot-spot cells specifically might yield a different trade-off than the global sweep.
+
+**Implementation.**  Three new default-OFF config fields:
+
+- `cube_edge_softer_div_damp: bool = False` — feature gate.
+- `cube_edge_div_damp_factor: float = 0.5` — multiplier at boundary band.
+- `cube_edge_div_damp_band: int = 2` — band depth (cells from each face boundary).
+
+When `cube_edge_softer_div_damp=True`, the code at `operators_cdgrid.py:2089-` applies `adaptive_coeff *= mask` where `mask = factor` at boundary band and `1.0` at deep interior.  Default OFF preserves iter-892/iter-893 bit-equivalence.  `FV3FBShallowWaterModel.__init__` warning extended to flag this.
+
+**W2 1-day measurement at C36 dt=300s** (`scripts/diag_iter909_w2_cube_edge_softer.py`, band=2):
+
+| factor | h_L2 | v_ll_Linf | %v vs production |
+|--------|------|-----------|------------------|
+| OFF (production) | 2.048e-04 | 1.319e-01 | 0% |
+| 0.00 | 2.470e-04 | 1.783e-01 | +35.22% |
+| 0.25 | 2.113e-04 | 1.661e-01 | +25.98% |
+| 0.50 | 2.073e-04 | 1.520e-01 | +15.28% |
+| 0.75 | 2.053e-04 | 1.411e-01 | +6.95% |
+| 1.00 | 2.048e-04 | 1.319e-01 | 0% (sanity check) |
+
+**NEGATIVE result, mirroring iter-908b.**  Softening div_damp ONLY at boundary cells produces monotonic W2 worsening from factor=1 to factor=0 (factor=0 is +35% vs production).  The factor=1 sanity check correctly reproduces production (within machine precision).
+
+**Striking parallel with iter-908b's global sweep.**  The relative %v changes are nearly identical to the iter-908b global sweep:
+
+| iter-909 boundary-only softening | iter-908b global sweep |
+|----------------------------------|------------------------|
+| factor=0.00 → +35.22%            | mult=0.5× → +35.21%   |
+| factor=0.25 → +25.98%            | mult=2.0× → +22.33%   |
+| factor=0.50 → +15.28%            | mult=4.0× → +11.38%   |
+| factor=0.75 → +6.95%             | mult=6.0× → +4.54%    |
+| factor=1.00 → 0.00%              | mult=8.0× → 0%        |
+
+**Mechanistic refinement** (iter-908b interpretation now sharpened): div_damp's W2 effect is DOMINATED by its boundary-cell contributions.  Reducing div_damp ONLY at boundary cells produces nearly the same W2 effect as reducing div_damp GLOBALLY by the same fractional amount.  The deep-interior div_damp contribution barely matters for W2 v_ll_Linf.
+
+**Conclusion: option (2) is also EXHAUSTED.**  Cube-edge-aware softening cannot improve W2 below the iter-892 0.132 m/s baseline at the post-iter-893 production point.  The iter-908b/iter-909 combined result is sharp: ANY reduction of div_damp at the boundary cells worsens W2.  div_damp at boundary cells is doing necessary work — whether "corrective" (iter-908b's plausible interpretation) or "mode-A-suppression" (alternative interpretation), the empirical signature is monotonic and consistent across both 1-D sweeps.
+
+**iter-910+ targets, narrowed:**
+
+- **Option (3): `d_sw5` holistic port** (iter-872c-take4 deferred; multi-iter scope).  This is now the only option remaining within the iter-907 mechanism investigation thread.
+- **Different W2 angle entirely**: per CLAUDE.md memory, the W2 residual at 0.132 m/s may be structural geostrophic-cancellation failure that no SSP-RK3 + Arakawa-Lamb tuning can fix.  iter-910+ could pivot to the FB-chain stabilization track (orthogonal multi-iter project).
+
+**Default OFF preserves production.**  iter-909's flag stays default-OFF.  Production remains at iter-892/iter-893 baseline.
+
+**Deliverable.**
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:CDGridShallowWaterConfig`: 3 new default-OFF fields.
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:FV3EdgeShallowWaterModel.step`: forwards the 3 fields.
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:FV3FBShallowWaterModel.__init__`: warning extended.
+- `src/legoesm/core/operators_cdgrid.py:fv3_sw_tendencies`: per-cell mask multiply on `adaptive_coeff` when flag=True.
+- `tests/test_iter909_cube_edge_softer_div_damp.py`: 7 sentinels (default-OFF bit-equality, ON changes step output when div_damp>0, no-op when div_damp=0, factor=1 is no-op, FB warning, default config OFF, other flags untouched).
+- `scripts/diag_iter909_w2_cube_edge_softer.py`: 5-point factor sweep at band=2.
+- This iter-909 doc entry.
+
+**Verification.**  7/7 iter-909 tests pass.  Production W2 baseline (flag OFF) unchanged at 1.319e-1 m/s.
+
+**Process.**  191st iter.  iter-909 lands a complete production-path implementation (config + plumbing + warnings + tests + W2 measurement) with a clear NEGATIVE finding.  Combined with iter-908b, both 1-D parameter-tuning paths (global and boundary-only) are now exhausted within scope.  Option (3) (`d_sw5` holistic port) and the orthogonal FB-chain stabilization track remain as iter-910+ work — both multi-iter architectural projects.

@@ -293,6 +293,28 @@ class CDGridShallowWaterConfig(NamedTuple):
     # to flag this as well.
     use_split_mass_momentum_integration: bool = False
 
+    # Iter-909 (default OFF): when True, the production
+    # `fv3_sw_tendencies` divergence-damping path multiplies the
+    # adaptive_coeff by `cube_edge_div_damp_factor` (default 0.5)
+    # at face boundary cells (i in [0..band-1] U [n-band..n-1] and
+    # j similarly), keeping full strength at the deep interior.
+    # `cube_edge_div_damp_band` (default 2) controls the band depth.
+    #
+    # Motivation per iter-907/908/908b: div_damp is the dominant
+    # contributor to W2 D-grid hot-spot magnitude (29x more than
+    # boundary_fix), but a 1-D global coefficient sweep does not
+    # improve W2 below the iter-892 baseline (8x is in a wide flat
+    # plateau; 16x+ NaN's).  iter-909 tests whether targeting the
+    # softer adaptive_coeff at hot-spot cells specifically (without
+    # changing it at deep interior) yields a different trade-off.
+    #
+    # Default OFF preserves iter-892/iter-893 production behaviour.
+    # SCOPE: consumed by `FV3EdgeShallowWaterModel.step` ONLY;
+    # `FV3FBShallowWaterModel.__init__` warns if set on FB chain.
+    cube_edge_softer_div_damp: bool = False
+    cube_edge_div_damp_factor: float = 0.5
+    cube_edge_div_damp_band: int = 2
+
     # Iter-872c-take3 (Codex pass-3): production divergence-damping
     # `dddmp` coefficient (Fortran `flagstruct%dddmp`,
     # fv_arrays.F90:360).  Default 0.2 preserves pre-iter-872
@@ -623,7 +645,8 @@ class FV3FBShallowWaterModel:
         if (self.config.fortran_faithful_ppm_left
                 or self.config.fortran_faithful_ppm_right
                 or self.config.use_fv3_dsw1_mass_transport
-                or self.config.use_split_mass_momentum_integration):
+                or self.config.use_split_mass_momentum_integration
+                or self.config.cube_edge_softer_div_damp):
             import warnings
             ignored = []
             if self.config.fortran_faithful_ppm_left:
@@ -634,6 +657,8 @@ class FV3FBShallowWaterModel:
                 ignored.append("use_fv3_dsw1_mass_transport")
             if self.config.use_split_mass_momentum_integration:
                 ignored.append("use_split_mass_momentum_integration")
+            if self.config.cube_edge_softer_div_damp:
+                ignored.append("cube_edge_softer_div_damp")
             warnings.warn(
                 f"FV3FBShallowWaterModel ignores config flag(s) "
                 f"{', '.join(ignored)}: the FB chain (fv3_fb_sw_step) "
@@ -853,6 +878,16 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                         if self.config.nord_v < 0
                         else self.config.nord_v),
                     dsw1_damp_c=self.config.damp_v,
+                    # Iter-909: forward cube-edge-aware adaptive_coeff
+                    # softening for the production divergence-damping
+                    # path.  Default-OFF preserves iter-892/iter-893
+                    # bit-for-bit.
+                    cube_edge_softer_div_damp=(
+                        self.config.cube_edge_softer_div_damp),
+                    cube_edge_div_damp_factor=(
+                        self.config.cube_edge_div_damp_factor),
+                    cube_edge_div_damp_band=(
+                        self.config.cube_edge_div_damp_band),
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,
