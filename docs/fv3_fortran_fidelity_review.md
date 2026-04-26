@@ -602,3 +602,31 @@ iter-893's xppm boundary fix lowered the asymptote closer to the structural floo
 **Verification.**  After iter-913+iter-914+iter-915 fixes: 8 gold-file tests + iter-685 d_sw4 lock all PASS.  3 unrelated test failures explicitly deferred for iter-916+ with concrete diagnoses.
 
 **Process.**  194-196th iters.  This series caught silent regressions accumulated since iter-878 (~30+ iters back).  No production code change; only test rebaselines and one targeted AST-sentinel update for the iter-869b opt-in.  Production W2/W5/cosine-bell baselines are unchanged at the iter-892/iter-893/iter-878 numerical values.
+
+### Iter-916b — restore live regression coverage for 3 iter-916-skipped tests (Codex iter-916 stop-time)
+
+**Codex iter-916 stop-time concern.**  "Skips known regression tests without live replacements."  iter-916 converted 3 silently-failing tests to `@unittest.skip` but did not provide equivalent coverage of the underlying invariants — net regression coverage was reduced.
+
+**iter-916b adds 3 live replacement tests** that pin the post-iter-836 / iter-878 production invariants:
+
+1. **`test_iter916b_corner_vorticity_duogrid_post_iter836_fingerprint`** (in `TestCornerVorticityFortranFormula`): gold-file fingerprint of duogrid `_corner_vorticity` output at fixed-seed input (sum, min, max, [0,0,0], [3,4,4], [5,8,8] at places=12-14).  Catches any future change to iter-836's cross-face-rotated halo path.
+2. **`test_iter916b_corner_vorticity_duogrid_differs_from_non_duogrid`** (in `TestFvTp2dCornerInvariant`): asserts duogrid=True ≠ duogrid=False on random input (`frac_differing > 30%` empirically 39.5%; `max_diff > 1e-6` empirically 8.34e-6).  Catches collapse of the iter-552 gate.
+3. **`test_iter916b_cw_equals_iord8_post_iter878_convergence`** (in `TestPpmCwVsFv3Iord8Divergence`): asserts the NEW post-iter-878 invariant — CW and iord==8 CONVERGE within 1e-12 in production range.  Inverts the original `assertGreater` to `assertAllClose`.  Catches re-introduction of the pre-iter-878 LHS-factor bug.
+
+3/3 new tests pass.  Original 3 tests stay `@unittest.skip` with iter-917+ TODO references for deeper numpy-reference rewrites; iter-916b restores immediate regression coverage.
+
+### Iter-917 — persist iter-913→916b lesson to project memory
+
+iter-913→iter-916b caught **7 silent regressions** in `tests/unit/test_cdgrid_fv3_regression.py` that had drifted out of sync since iter-878 — all missed by iter-912's narrower iter-89x/9xx-only scan.  The lesson: **run the full test_cdgrid_fv3_regression.py at multi-iter cadence** (~7-8 min cost) to catch silent fingerprint drift accumulated across many small commits.
+
+iter-917 persists this lesson to the user's CLAUDE.md project memory:
+
+- New: `~/.claude/.../memory/feedback_run_full_test_file_cadence.md` — full text of the rule + 7-test enumeration + "skipping without replacement is forbidden" follow-up rule from iter-916b.
+- Updated: `~/.claude/.../memory/MEMORY.md` index — added one-line entry pointing to the new feedback memory.
+
+**Process improvement summary** (iter-915 + iter-916b consolidated):
+1. Future regression scans should explicitly enumerate `Test*GoldFile*` and `Test*Production*` classes alongside iter-89x/9xx files (iter-915).
+2. Skipping a regression test without a live replacement is forbidden — always provide an equivalent test pinning the new invariant (iter-916b).
+3. Run the full `tests/unit/test_cdgrid_fv3_regression.py` (~7-8 min cost) every ~5-10 Ralph iters that touch core operators to catch limiter-style drift (iter-917).
+
+**No code change in iter-917.**  Production W2/W5/cosine-bell numerical values unchanged.
