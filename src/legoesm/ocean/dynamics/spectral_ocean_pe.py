@@ -455,9 +455,11 @@ def spectral_ocean_tendencies(
     _dtr_grid_flat = tracer_grid_sum_t.reshape(
         n_lat_t, n_lon_t, nlev_t * n_tr,
     )
-    _dtr_sh_flat = sh_analysis_3d(grid, _dtr_grid_flat)
-    _dtr_sh = _dtr_sh_flat.reshape(_dtr_sh_flat.shape[0], nlev_t, n_tr)
-    dtr_hat = -tracer_flux_div + jnp.moveaxis(_dtr_sh, -1, 0)
+    # Defer the ``_dtr_sh`` analysis so it can be batched with
+    # ``deta_dt_grid`` below (Loop 185) — initialize ``dtr_hat`` with
+    # only the (already-spectral) flux-divergence contribution; the
+    # grid-tendency SH analysis is added after the merged batch.
+    dtr_hat = -tracer_flux_div
 
     # --- 15. Explicit viscosity/diffusion ---
     if config.A_h > 0 or config.K_h > 0:
@@ -528,7 +530,21 @@ def spectral_ocean_tendencies(
     div_hv_hat = im_over_a[:, jnp.newaxis] * hu_oc2 - one_over_a * hv_dmu
     div_hv = sh_synthesis_3d(grid, div_hv_hat).real * mask_3d
     deta_dt_grid = -jnp.sum(div_hv, axis=-1) * mask
-    deta_hat = sh_analysis(grid, deta_dt_grid)
+
+    # Merge the deferred ``_dtr_grid_flat`` plain analysis with the
+    # ``deta_dt_grid`` 2D analysis via ``jnp.concatenate`` along the
+    # trailing axis: ``nlev*n_tr + 1`` slots.  ``sh_analysis_3d``
+    # treats the trailing axis as a passive batch — same Loop 184
+    # exploit as the spectral PE (dT, Phi, dlnps_dt) merge.  2 SH
+    # analyses → 1.
+    _dtr_eta_input = jnp.concatenate(
+        [_dtr_grid_flat, deta_dt_grid[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, nlev*n_tr + 1)
+    _dtr_eta_hat = sh_analysis_3d(grid, _dtr_eta_input)
+    _dtr_sh_flat = _dtr_eta_hat[:, : nlev_t * n_tr]
+    deta_hat = _dtr_eta_hat[:, nlev_t * n_tr]
+    _dtr_sh = _dtr_sh_flat.reshape(_dtr_sh_flat.shape[0], nlev_t, n_tr)
+    dtr_hat = dtr_hat + jnp.moveaxis(_dtr_sh, -1, 0)
 
     # --- 17. Spectral hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
