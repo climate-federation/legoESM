@@ -590,8 +590,8 @@ def _pad_halo_local_4d(
     tables = _get_halo_tables_h1(n)
     src_f, src_i, src_j, dst_f, dst_i, dst_j = tables
 
-    padded = jnp.zeros((6, n + 2, n + 2, nlev), dtype=data.dtype)
-    padded = padded.at[:, 1:-1, 1:-1, :].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter.
+    padded = jnp.pad(data, ((0, 0), (1, 1), (1, 1), (0, 0)))
 
     if interp_offsets is None:
         # Nearest-neighbor: gather (24*n, nlev) then scatter
@@ -654,8 +654,8 @@ def _pad_halo_local_h2_4d(
     """
     n = data.shape[1]
     nlev = data.shape[3]
-    padded = jnp.zeros((6, n + 4, n + 4, nlev), dtype=data.dtype)
-    padded = padded.at[:, 2:-2, 2:-2, :].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter.
+    padded = jnp.pad(data, ((0, 0), (2, 2), (2, 2), (0, 0)))
 
     if interp_offsets is None:
         src_f, src_i, src_j, dst_f, dst_i, dst_j = _get_halo_tables_h2(n)
@@ -771,8 +771,10 @@ def _pad_halo_local(
     tables = _get_halo_tables_h1(n)
     src_f, src_i, src_j, dst_f, dst_i, dst_j = tables
 
-    padded = jnp.zeros((6, n + 2, n + 2), dtype=data.dtype)
-    padded = padded.at[:, 1:-1, 1:-1].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter (the subsequent
+    # halo scatter only writes into halo regions, which ``jnp.pad`` has
+    # already zeroed).
+    padded = jnp.pad(data, ((0, 0), (1, 1), (1, 1)))
 
     if interp_offsets is None:
         # Nearest-neighbor copy: single gather + single scatter
@@ -840,10 +842,10 @@ def _pad_halo_local_h2(
     padded : jax.Array, shape (6, n+4, n+4)
     """
     n = data.shape[1]
-    padded = jnp.zeros((6, n + 4, n + 4), dtype=data.dtype)
-
-    # Place interior data
-    padded = padded.at[:, 2:-2, 2:-2].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter (the subsequent
+    # halo scatters only write into halo regions, which ``jnp.pad`` has
+    # already zeroed).
+    padded = jnp.pad(data, ((0, 0), (2, 2), (2, 2)))
 
     edges = [WEST, EAST, SOUTH, NORTH]
 

@@ -213,18 +213,20 @@ def _make_exchange_allgather(mesh, ndim):
         n_faces = mesh.shape["face"]
         if ndim == 3:
             all_strips = all_strips.reshape(n_faces, 4, n)
-            padded = jnp.zeros((n + 2, n + 2), dtype=my_face.dtype)
         else:
             all_strips = all_strips.reshape(n_faces, 4, n, my_face.shape[-1])
-            padded = jnp.zeros((n + 2, n + 2, my_face.shape[-1]),
-                               dtype=my_face.dtype)
 
         my_idx = jax.lax.axis_index("face")
         my_nbr_f = _NBR_FACES[my_idx]
         my_nbr_e = _NBR_EDGES[my_idx]
         my_rev = _IS_REVERSED[my_idx]
 
-        padded = padded.at[1:-1, 1:-1].set(my_face)
+        # Single Pad HLO op replaces alloc-zeros + scatter (subsequent
+        # halo fill writes only into the zeroed border).
+        if ndim == 3:
+            padded = jnp.pad(my_face, ((1, 1), (1, 1)))
+        else:
+            padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
         halo_strips = []
         for e in range(4):
             strip = all_strips[my_nbr_f[e], my_nbr_e[e]]
@@ -259,16 +261,14 @@ def _make_exchange_ppermute(mesh, ndim):
                 my_face[0, :], my_face[-1, :],
                 my_face[:, 0], my_face[:, -1],
             ])  # (4, n)
-            padded = jnp.zeros((n + 2, n + 2), dtype=my_face.dtype)
+            # Single Pad HLO op replaces alloc-zeros + scatter.
+            padded = jnp.pad(my_face, ((1, 1), (1, 1)))
         else:
             my_strips = jnp.stack([
                 my_face[0, :, :], my_face[-1, :, :],
                 my_face[:, 0, :], my_face[:, -1, :],
             ])  # (4, n, C)
-            padded = jnp.zeros((n + 2, n + 2, my_face.shape[-1]),
-                               dtype=my_face.dtype)
-
-        padded = padded.at[1:-1, 1:-1].set(my_face)
+            padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
         halo_strips = [None, None, None, None]
 
         for r in range(4):

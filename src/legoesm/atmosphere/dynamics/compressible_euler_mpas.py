@@ -214,10 +214,12 @@ def mpas_compressible_euler_slow_tendencies(
     )
     w_adv_full = jnp.moveaxis(w_adv_all, 0, -1)  # (nCells, nlev)
 
-    # Map back to half levels by averaging
-    dw_dt = jnp.zeros_like(w)
-    dw_dt = dw_dt.at[:, 1:-1].set(
-        0.5 * (w_adv_full[:, :-1] + w_adv_full[:, 1:])
+    # Map back to half levels by averaging.  ``dw_dt`` zero at top/bottom
+    # interfaces (rigid BC); single Pad HLO op replaces alloc-zeros +
+    # scatter.
+    dw_dt = jnp.pad(
+        0.5 * (w_adv_full[:, :-1] + w_adv_full[:, 1:]),
+        ((0, 0), (1, 1)),
     )
     dw_dt = dw_dt - sponge_half * w
 
@@ -283,11 +285,13 @@ def _vertical_advection_height_1d(field_3d, w, dz, dz_half, J):
     # w at full levels
     w_full = 0.5 * (w[:, :-1] + w[:, 1:])
 
-    # Vertical gradient at full levels (centered)
-    df_dz = jnp.zeros_like(field_3d)
+    # Vertical gradient at full levels (centred); zero at top/bottom
+    # (no ghost cells).  Single Pad HLO op replaces alloc-zeros + scatter.
     if nlev > 2:
         inner = (field_3d[:, :-2] - field_3d[:, 2:]) / (dz_half[:-1] + dz_half[1:])
-        df_dz = df_dz.at[:, 1:-1].set(inner)
+        df_dz = jnp.pad(inner, ((0, 0), (1, 1)))
+    else:
+        df_dz = jnp.zeros_like(field_3d)
 
     J_col = J[:, None] if J.ndim == 1 else J
     return -w_full / J_col * df_dz
@@ -385,9 +389,10 @@ def mpas_acoustic_substeps(
         )
 
         # --- Backward: update rho' ---
+        # ``rho_w`` zero at top/bottom (rigid BC); single Pad HLO op
+        # replaces alloc-zeros + scatter.
         rho_half = 0.5 * (rho_total[:, :-1] + rho_total[:, 1:])
-        rho_w = jnp.zeros_like(w_new)
-        rho_w = rho_w.at[:, 1:-1].set(rho_half * w_new[:, 1:-1])
+        rho_w = jnp.pad(rho_half * w_new[:, 1:-1], ((0, 0), (1, 1)))
 
         vert_div = (rho_w[:, :-1] - rho_w[:, 1:]) / dz
         vert_div = vert_div / J[:, None]
@@ -396,12 +401,13 @@ def mpas_acoustic_substeps(
 
         # --- Backward: update theta' ---
         w_full = 0.5 * (w_new[:, :-1] + w_new[:, 1:])
-        dtheta_dz = jnp.zeros_like(theta_total)
         if nlev > 2:
             dz_half_val = height_coord.dz_half
             dz_centered = dz_half_val[:-1] + dz_half_val[1:]
             inner_grad = (theta_total[:, :-2] - theta_total[:, 2:]) / dz_centered
-            dtheta_dz = dtheta_dz.at[:, 1:-1].set(inner_grad)
+            dtheta_dz = jnp.pad(inner_grad, ((0, 0), (1, 1)))
+        else:
+            dtheta_dz = jnp.zeros_like(theta_total)
 
         theta_p_new = theta_p_c - dt_s * w_full / J[:, None] * dtheta_dz
 
