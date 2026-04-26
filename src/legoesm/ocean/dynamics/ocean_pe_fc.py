@@ -184,8 +184,14 @@ def ocean_baroclinic_tendencies_fc(
         dv_dt = dv_dt + dv_damp
 
     # --- 8. Vertical advection of u, v ---
-    du_dt = du_dt + _vertical_advection_ocean(u, w, z_coord, J)
-    dv_dt = dv_dt + _vertical_advection_ocean(v, w, z_coord, J)
+    # Batch (u, v) via leading-axis stack so the velocity-independent
+    # shared work (``w_full`` / ``jac_safe`` / ``dz_half``) runs once
+    # and the upwind gradient broadcasts across the new axis.  Same
+    # leading-axis batching as Loop 142 / 162.
+    _uv_va = jnp.stack([u, v], axis=0)
+    _uv_va_adv = _vertical_advection_ocean(_uv_va, w, z_coord, J)
+    du_dt = du_dt + _uv_va_adv[0]
+    dv_dt = dv_dt + _uv_va_adv[1]
 
     # --- 9. Tracer tendencies ---
     # Stack T, S along a trailing tracer axis and fold it into the level
