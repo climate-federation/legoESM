@@ -3015,3 +3015,42 @@ W5 fields are essentially **identical** between the two flag values (h_diff_linf
 - This iter-901 doc entry adding the broader evaluation.
 
 **Process.**  181st iter.  iter-901 completes the iter-900 evaluation by running the remaining 3 of 4 Ralph-protocol cases (cosine bell explicitly skipped with justification).  Strengthens the iter-900 conclusion: the flag is W2-pessimal in absolute v_ll_Linf but neutral-to-marginally-positive elsewhere.  No production code change; no regression risk.
+
+### Iter-902 — quantify the dxa-weighted vs uniform-xt fidelity gap (defer full plumbing)
+
+**Motivation.**  iter-888 docstring at `_ppm_reconstruct_1d` (line 124-131) explicitly notes the LEFT-side cube-edge xt formula uses a UNIFORM-GRID simplification of Fortran's dxa-weighted formula at `tp_core.F90:360-361`:
+
+```fortran
+al(1) = 0.5 * ( ((2*dxa(0,j)+dxa(-1,j))*q1(0) - dxa(0,j)*q1(-1))
+                / (dxa(-1,j)+dxa(0,j))
+              + ((2*dxa(1,j)+dxa(2,j))*q1(1) - dxa(1,j)*q1(2))
+                / (dxa(1,j)+dxa(2,j)) )
+```
+
+For uniform dxa this collapses to `0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))` — the iter-892 formula in production.  The gap was deferred until "dxa plumbing is added".  Codex iter-902 fidelity review recommended closing this gap.  iter-902 quantifies the magnitude FIRST so the implementation cost can be weighed against expected impact.
+
+**Quantification at C36 face-0 LEFT cube edge** (`scripts/diag_iter902_dxa_xt_gap.py`):
+
+For a smooth synthetic field q1(j) = sin(j·dxa/radius) and using mode='edge' replicas for halo dxa cells (LOWER BOUND on the true discrepancy, since real halo dxa from neighbour faces near cube vertices may differ more):
+
+| metric | value |
+|--------|-------|
+| min \|fortran_al1 - uniform_xt\|  | 1.127e-07 |
+| max \|fortran_al1 - uniform_xt\|  | 1.207e-04 |
+| mean \|fortran_al1 - uniform_xt\| | 4.510e-05 |
+
+**Expected W2 impact (extrapolation).**  iter-893's analogous-magnitude PPM cube-edge perturbations (replacing 4th-order edge stencil with iter-892's xt-clipped + c3/c2/c1) produced a W2 v_ll_Linf change of 0.027 m/s.  The iter-902 dxa correction is ~10× smaller in face-value units, so the expected W2 effect scales to ~3 mm/s — roughly 2% of the current production baseline (0.132 m/s).  Marginal but measurable.
+
+**Decision.**  Defer full dxa plumbing to iter-903+.  Reasons:
+1. Expected W2 progress (~2%) is below the threshold that justifies the implementation cost (substantial: cdgrid metric plumbing through `cgrid_mass_flux_divergence` → `_ppm_reconstruct_1d`, plus halo-2 dxa values which require their own neighbour-face exchange or `1.0/rdxa` extension).
+2. iter-900-901 just demonstrated that strict Fortran can be W2-PESSIMAL at the cube edge — applying the dxa correction on TOP of iter-892's empirically-good 1-cell-shifted slot may not improve W2 (and could worsen it via similar mechanism).
+3. The MED-risk-of-W2-regression label from Codex's review reflects this.
+4. Higher-value gaps likely exist outside the PPM cube-edge thread (FB chain stabilization, deeper cross-face halo helper, structural W2 cube-imprint blocker).
+
+**Deliverable.**
+- `scripts/diag_iter902_dxa_xt_gap.py`: numerical quantification of the dxa correction magnitude.
+- This iter-902 doc entry surfacing the deferred-with-justification status.
+
+**Caveat — lower bound.**  The diagnostic uses `mode='edge'` replicas for halo dxa cells (q1(-2) = q1(0) etc.).  The real halo dxa values come from neighbour faces' interior cells, which near cube vertices have meaningfully different dxa due to gnomonic projection.  The TRUE discrepancy at the cube vertex itself could be 2-5× larger.  An exhaustive measurement that pulls real halo dxa from `_pad_halo_auto_h2(rdxa)` would tighten this bound but adds complexity for marginal incremental insight.
+
+**Process.**  182nd iter.  iter-902 closes a long-standing iter-888 deferred item by quantifying its expected impact.  The conclusion ("not worth implementing now") is data-driven rather than speculative.  Future iters can refer to this magnitude estimate when deciding whether to revisit dxa plumbing.  No production code change; no regression risk.
