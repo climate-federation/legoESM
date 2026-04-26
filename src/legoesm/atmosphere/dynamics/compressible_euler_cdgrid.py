@@ -143,8 +143,21 @@ def cdgrid_compressible_euler_slow_tendencies(
     pi_prime = compute_exner_perturbation(rho_p, theta_p, height_coord)
 
     # --- 2. Convert to D-grid ---
-    u_d = _interp_center_to_corner(u, cdgrid)
-    v_d = _interp_center_to_corner(v, cdgrid)
+    # Stack (u, v) along a trailing axis and fold into the level dim so
+    # a single ``_interp_center_to_corner`` (one halo exchange + one
+    # 4-point average) handles both components, replacing two separate
+    # calls each with their own halo.  Same passive-trailing-axis
+    # pattern as the SH and divergence batching loops.
+    n_face_uv, n_i_uv, n_j_uv, nlev_uv = u.shape
+    _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
+    _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
+    _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
+    _uv_d = _uv_d_flat.reshape(
+        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
+        nlev_uv, 2,
+    )
+    u_d = _uv_d[..., 0]
+    v_d = _uv_d[..., 1]
 
     # --- 3. C-grid velocities ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
