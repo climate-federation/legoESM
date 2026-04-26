@@ -42,6 +42,7 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     uv_from_vordiv,
     spectral_hyperdiffusion,
+    spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
@@ -186,10 +187,20 @@ def spectral_sw_tendencies(
     #   - It causes spurious energy drift
     #   - Standard practice (Hack & Jakob 1992) diffuses only vor and div
     if config.hyperdiff_coeff > 0:
-        dvor_hat = dvor_hat + spectral_hyperdiffusion(
-            grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order)
-        ddiv_hat = ddiv_hat + spectral_hyperdiffusion(
-            grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order)
+        # Batch the two pointwise hyperdiffusions (vor, div) into one
+        # call by stacking along a trailing axis.  ``spectral_hyperdiffusion_3d``
+        # treats the trailing axis as a passive batch (the operator is
+        # purely ``damping * coeffs``), so SW's 2D (n_sh,) inputs work
+        # natively as (n_sh, 2).  2 kernel launches → 1.  Same exploit
+        # as Loops 120/121 for spectral PE/NH.
+        _vd_hat = jnp.stack(
+            [state.vor_hat.data, state.div_hat.data], axis=-1,
+        )  # (n_sh, 2)
+        _hd_pair = spectral_hyperdiffusion_3d(
+            grid, _vd_hat, config.hyperdiff_coeff, config.hyperdiff_order,
+        )
+        dvor_hat = dvor_hat + _hd_pair[..., 0]
+        ddiv_hat = ddiv_hat + _hd_pair[..., 1]
 
     # Return as same pytree structure (for SSP-RK3 tree_map)
     return SpectralSWState(
