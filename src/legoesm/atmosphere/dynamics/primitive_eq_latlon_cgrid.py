@@ -482,15 +482,29 @@ def cgrid_latlon_hydrostatic_tendencies(
                 u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
             )
 
-        # Vertical advection per-tracer — local stencil along axis -1, no halo
-        # cost so the slice-and-loop pattern is fine.
+        # Vertical advection batched across all tracers — both
+        # ``vertical_advection_hybrid`` and ``vertical_advection``
+        # operate on ``axis=-1`` for the vertical, so move the tracer
+        # axis to leading where the velocity-independent shared work
+        # (``F_full`` / ``p_full`` for hybrid, ``F`` for sigma) is
+        # computed *once* and the upwind ``jnp.diff(field, axis=-1)``
+        # broadcasts across the (n_tracers,) axis.  Replaces a Python
+        # for-loop that called the operator ``n_tracers`` times.
+        # Same leading-axis batching as the (u, v) vertical advection
+        # in CD-grid CE/PE (Loop 142).
+        tracers_lead = jnp.moveaxis(
+            tracer_stack, -1, 0,
+        )  # (n_tracers, n_lat, n_lon, nlev)
+        if _hybrid:
+            vert_q_lead = vertical_advection_hybrid(
+                tracers_lead, mass_flux, p_s, sigma_coord,
+            )
+        else:
+            vert_q_lead = vertical_advection(
+                tracers_lead, sigma_dot, sigma_coord,
+            )
         for i, name in enumerate(tracer_names):
-            q_i = tracer_stack[..., i]
-            if _hybrid:
-                vert_q = vertical_advection_hybrid(q_i, mass_flux, p_s, sigma_coord)
-            else:
-                vert_q = vertical_advection(q_i, sigma_dot, sigma_coord)
-            tracer_tends[name] = horiz_q_stack[..., i] + vert_q
+            tracer_tends[name] = horiz_q_stack[..., i] + vert_q_lead[i]
 
     # --- 13. Diffusion (optional) ---
     if config.A_h > 0.0:
