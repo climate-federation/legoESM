@@ -764,7 +764,12 @@ def spectral_hyperdiffusion(
 # =============================================================================
 
 def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
-    """Forward SH transform per vertical level.
+    """Forward SH transform per vertical level (3D-native).
+
+    Same numeric algorithm as :func:`sh_analysis` but with the
+    longitude FFT, the Legendre weight, and the latitude sum all
+    batched along the trailing level axis — no per-level moveaxis +
+    vmap.
 
     Parameters
     ----------
@@ -774,9 +779,19 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
     -------
     (n_sh, nlev) complex array.
     """
-    f_t = jnp.moveaxis(field_3d, -1, 0)  # (nlev, n_lat, n_lon)
-    result = jax.vmap(lambda f: sh_analysis(grid, f))(f_t)  # (nlev, n_sh)
-    return jnp.moveaxis(result, 0, -1)  # (n_sh, nlev)
+    n_lon = grid.n_lon
+    n_max = grid.n_max
+    ms = grid.ms
+
+    # FFT along longitude (axis 1) → (n_lat, n_lon//2+1, nlev) complex.
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]                    # (n_lat, n_max+1, nlev)
+    f_m_gathered = f_m[:, ms, :]                          # (n_lat, n_sh, nlev)
+
+    # Sum over latitudes; ``wPnm`` is (n_lat, n_sh) — broadcast over levels.
+    return 2.0 * jnp.pi * jnp.sum(
+        grid.wPnm[:, :, None] * f_m_gathered, axis=0,
+    )
 
 
 def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
@@ -859,37 +874,36 @@ def _sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
 def sh_analysis_oc2_3d(
     grid: GaussianGrid, field_3d: jax.Array,
 ) -> jax.Array:
-    """Forward SH transform with 1/cos^2 weighting, per level.
+    """Forward SH transform with 1/cos² weighting, 3D-native.
 
-    Parameters
-    ----------
-    field_3d : (n_lat, n_lon, nlev).
-
-    Returns
-    -------
-    (n_sh, nlev) complex.
+    Same numeric algorithm as :func:`sh_analysis_oc2` but with the
+    longitude FFT, Legendre weighting, and latitude sum batched along
+    the trailing level axis.
     """
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(lambda f: sh_analysis_oc2(grid, f))(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    n_max = grid.n_max
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]
+    f_m_gathered = f_m[:, grid.ms, :]
+    return 2.0 * jnp.pi * jnp.sum(
+        grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0,
+    )
 
 
 def sh_analysis_dmu_3d(
     grid: GaussianGrid, field_3d: jax.Array,
 ) -> jax.Array:
-    """Forward SH transform with dPnm/dmu weighting, per level.
+    """Forward SH transform with dPnm/dμ weighting, 3D-native.
 
-    Parameters
-    ----------
-    field_3d : (n_lat, n_lon, nlev).
-
-    Returns
-    -------
-    (n_sh, nlev) complex.
+    Same numeric algorithm as :func:`sh_analysis_dmu` but batched along
+    the trailing level axis.
     """
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(lambda f: sh_analysis_dmu(grid, f))(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    n_max = grid.n_max
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]
+    f_m_gathered = f_m[:, grid.ms, :]
+    return 2.0 * jnp.pi * jnp.sum(
+        grid.wDnm[:, :, None] * f_m_gathered, axis=0,
+    )
 
 
 def uv_from_vordiv_3d(
@@ -897,7 +911,13 @@ def uv_from_vordiv_3d(
     vor_hat_3d: jax.Array,
     div_hat_3d: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """Reconstruct (u*cos_lat, v*cos_lat) at all levels from spectral vor/div.
+    """Reconstruct (u*cos_lat, v*cos_lat) at all levels from spectral
+    vor/div — 3D-native.
+
+    Same algorithm as :func:`uv_from_vordiv` but every synthesis call
+    uses the batched 3D variants (``sh_synthesis_3d`` /
+    ``_sh_synthesis_H_3d``) so the four per-level synthesis calls
+    collapse to four batched calls — no per-level moveaxis + vmap.
 
     Parameters
     ----------
@@ -907,14 +927,23 @@ def uv_from_vordiv_3d(
     -------
     u_cos, v_cos : (n_lat, n_lon, nlev) real arrays.
     """
-    vor_t = jnp.moveaxis(vor_hat_3d, -1, 0)  # (nlev, n_sh)
-    div_t = jnp.moveaxis(div_hat_3d, -1, 0)
+    a = grid.radius
 
-    def single_level(v, d):
-        return uv_from_vordiv(grid, v, d)
+    # Streamfunction and velocity potential in spectral space
+    # (ilap is shape (n_sh,) — broadcasts over the trailing level axis).
+    psi_hat = grid.ilap[:, None] * vor_hat_3d
+    chi_hat = grid.ilap[:, None] * div_hat_3d
 
-    u_cos_t, v_cos_t = jax.vmap(single_level)(vor_t, div_t)
-    return jnp.moveaxis(u_cos_t, 0, -1), jnp.moveaxis(v_cos_t, 0, -1)
+    dpsi_dtheta = _sh_synthesis_H_3d(grid, psi_hat) / a
+    dchi_dtheta = _sh_synthesis_H_3d(grid, chi_hat) / a
+
+    im = (1j * grid.ms)[:, None]
+    dpsi_dlon = sh_synthesis_3d(grid, im * psi_hat) / a
+    dchi_dlon = sh_synthesis_3d(grid, im * chi_hat) / a
+
+    u_cos = dpsi_dtheta + dchi_dlon
+    v_cos = dpsi_dlon - dchi_dtheta
+    return u_cos, v_cos
 
 
 def spectral_hyperdiffusion_3d(
