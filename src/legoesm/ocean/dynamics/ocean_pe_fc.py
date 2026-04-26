@@ -200,27 +200,46 @@ def ocean_baroclinic_tendencies_fc(
     dS_dt = tracer_tend_stack[..., 1]
 
     # --- 10. Mixing ---
+    # Stack u, v along a trailing axis and fold it into the level dim so
+    # the halo-issuing horizontal viscosity operators (fc_laplacian_3d,
+    # fc_hyperdiffusion_3d, both 4D-native via pad_halo_4d in Loop 65)
+    # run ONCE on the thicker (6, n, n, nlev*2) field instead of issuing
+    # two separate halo MPI exchanges per call.  Vertical diffusion stays
+    # per-component (axis -1 = nlev hard-coded, no halo).
     if physics_fn is None:
+        n_face_v, n_i_v, n_j_v, nlev_v = u.shape
+        if config.A_h > 0 or config.hyperdiff_coeff > 0:
+            vel_masked_stack = jnp.stack(
+                [u * mask_3d, v * mask_3d], axis=-1,
+            )  # (6, n, n, nlev, 2)
+            vel_masked_flat = vel_masked_stack.reshape(
+                n_face_v, n_i_v, n_j_v, nlev_v * 2,
+            )
         if config.A_h > 0:
-            vel_masked = jnp.stack([u * mask_3d, v * mask_3d], axis=0)
-            vel_lap = jax.vmap(
-                lambda q: fc_laplacian_3d(q, grid, fc_config) * config.A_h,
-                in_axes=0, out_axes=0,
-            )(vel_masked)
-            du_dt = du_dt + vel_lap[0]
-            dv_dt = dv_dt + vel_lap[1]
+            vel_lap_flat = (
+                fc_laplacian_3d(vel_masked_flat, grid, fc_config) * config.A_h
+            )
+            vel_lap = vel_lap_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
+            du_dt = du_dt + vel_lap[..., 0]
+            dv_dt = dv_dt + vel_lap[..., 1]
         if config.A_v > 0:
-            vel = jnp.stack([u, v], axis=0)
-            vel_vdiff = jax.vmap(
-                lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
-                in_axes=0, out_axes=0,
-            )(vel)
-            du_dt = du_dt + vel_vdiff[0]
-            dv_dt = dv_dt + vel_vdiff[1]
+            def _vdiff_uv(q):
+                return vertical_diffusion(q, z_coord, J, config.A_v)
+
+            vel_uv = jnp.stack([u, v], axis=-1)
+            vel_vdiff = jax.vmap(_vdiff_uv, in_axes=-1, out_axes=-1)(vel_uv)
+            du_dt = du_dt + vel_vdiff[..., 0]
+            dv_dt = dv_dt + vel_vdiff[..., 1]
 
         if config.hyperdiff_coeff > 0:
-            du_dt = du_dt + fc_hyperdiffusion_3d(u * mask_3d, grid, fc_config, config.hyperdiff_coeff)
-            dv_dt = dv_dt + fc_hyperdiffusion_3d(v * mask_3d, grid, fc_config, config.hyperdiff_coeff)
+            vel_hyper_flat = fc_hyperdiffusion_3d(
+                vel_masked_flat, grid, fc_config, config.hyperdiff_coeff,
+            )
+            vel_hyper = vel_hyper_flat.reshape(
+                n_face_v, n_i_v, n_j_v, nlev_v, 2,
+            )
+            du_dt = du_dt + vel_hyper[..., 0]
+            dv_dt = dv_dt + vel_hyper[..., 1]
     else:
         phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
