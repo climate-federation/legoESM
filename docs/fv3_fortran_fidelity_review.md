@@ -257,3 +257,41 @@ Production W2 baseline unchanged at 1.319e-1 m/s throughout the iter-913→iter-
 **Backlog implication.**  The structural floor at the cube vertex (~0.10-0.12 m/s on `v_ll_Linf`, ~5-8 m on `h_err_max`) is the visible signature of the cell-centred Arakawa-Lamb / `div_damp` / `boundary_fix` stack on the cubed-sphere geometry.  Closing this gap requires the FB-chain port (still open) or a different operator family at the cube vertices, not parameter-tuning within the current production matrix.
 
 **Process.**  No production code change.  Diag updates + new sentinel + Pareto plot + iter-820 historical anchors.  Production W2 baseline at v_ll_Linf=0.132 m/s and h_err_max=8.18 m is now dual-pinned.
+
+### Iter-922 — PPM-boundary 5-way Pareto map: iter-893 default is Pareto-non-dominated
+
+**Trigger.**  iter-921 raised the question: are there other knob settings on the `apply_fortran_xppm_boundary` family that improve h_err_max without losing the v_ll_Linf gain?  iter-892's default-LEFT formula is a "1-cell-shifted accidental" formula (per iter-899/iter-900 audit); strict-Fortran LEFT (`fortran_faithful_ppm_left`) and strict-Fortran RIGHT (`fortran_faithful_ppm_right`) flags exist and have been measured worse on v_ll_Linf alone (iter-900: 0.132→0.203 with LEFT; iter-903: 0.132→0.199 with RIGHT).
+
+**iter-922 measures all five combinations** on the dual (v_ll_Linf, h_err_max) Pareto plane (see `scripts/diag_iter922_ppm_boundary_pareto.py`):
+
+| label | xppm  | faithful_L | faithful_R | v_ll_Linf | h_err_max | h_err_l2 | Pareto       |
+|-------|-------|------------|------------|-----------|-----------|----------|--------------|
+| A     | False |            |            | 0.1593    | 4.62      | 0.5176   | non-dominated |
+| B     | True  | F          | F          | **0.1319**| **8.18**  | 0.5116   | non-dominated (production) |
+| C     | True  | T          | F          | 0.2027    | 10.02     | 0.5727   | DOMINATED by B |
+| D     | True  | F          | T          | 0.1989    | 10.59     | 0.5724   | DOMINATED by B |
+| E     | True  | T          | T          | 0.1713    | 8.62      | 0.5723   | DOMINATED by B |
+
+**Interpretation.**
+
+- **Two Pareto-non-dominated points**: A (xppm=False, best h_err) and B (xppm=True default, best v_ll_Linf).  iter-893 chose B; iter-921 made the trade-off explicit.
+- **All three strict-Fortran variants (C, D, E) are Pareto-dominated by B**: they each have BOTH worse v_ll_Linf AND worse h_err_max than the iter-893 default.  The iter-892 1-cell-shifted formula is genuinely better than strict Fortran on this metric pair.
+- **L2 separation**: A and B both have h_err_L2 ≈ 0.51 m; C, D, E all jump to h_err_L2 ≈ 0.57 m (+11 %).  Strict Fortran spreads error across the field, while iter-892's shifted formula localizes it at the cube vertices.
+- **The h_err hot-spot location moves between A and B**: A's hot spots are at the 4 polar-face corners (faces 4, 5; |h_err|≈4.6 m); B's are at faces 1 and 3 left edge (i=0) corners (|h_err|≈8.2 m).  The iter-893 swap *redirects* the residual from polar to specific equatorial faces.
+
+**Why the iter-892 1-cell-shifted formula is non-trivially better than strict Fortran**: the iter-892 PPM boundary mapping uses `q_pad[..., 2..6]` (Hypothesis B per iter-899); the production strip layout is actually `q[k]=q1(k-2)` (Hypothesis A); so iter-892's formula is "shifted by one cell" relative to true Fortran.  This shift accidentally aligns better with the production halo / `boundary_fix` / `div_damp` cancellation structure.  Strict-Fortran (Hypothesis-A-aware) `q_pad[..., 3..7]` mappings break that alignment and degrade BOTH metrics — the strip layout, halo, boundary_fix, and PPM boundary formula form a tightly-coupled tendency-balance system that iter-892 happens to land on a local minimum of.
+
+**iter-922 deliverables.**
+
+1. `scripts/diag_iter922_ppm_boundary_pareto.py` — measures all 5 cases + Pareto-dominance check + plot.
+2. `diagnostics/fv3_visual/iter922_ppm_boundary_pareto.png` — Pareto plot showing 2 non-dominated and 3 dominated points.
+3. `tests/test_iter922_ppm_boundary_pareto_sentinel.py` — 3 sentinel tests:
+   - `test_iter922_iter893_default_pareto_dominates_strict_fortran_left`: B strictly better than C on BOTH metrics.  Fires if a future change to iter-892's default-LEFT formula loses Pareto dominance — that would invalidate the iter-893 choice.
+   - `test_iter922_iter893_pareto_baseline_pinned`: defensive duplicate of iter-921's (0.1319, 8.18) pin (±5 %) so this file is self-contained.
+   - `test_iter922_strict_fortran_left_pinned`: pin (0.2027, 10.02) within ±10 % so any drift in the strict-Fortran path also fires.
+
+**Verification.**  3/3 pass in 26 s (two C36 1-day trajectories shared via module fixtures — Codex iter-911 stop-time pattern).
+
+**Backlog implication.**  The PPM-boundary knob family is exhausted within the current production matrix.  Reducing h_err_max below the 8.18 m floor while keeping v_ll_Linf below 0.132 m/s requires either: (a) different operator structure at the cube vertices (e.g., FB-chain corner port), (b) different halo plumbing (e.g., halo=3 to enable strict al(0)/al(npx+1) Fortran-faithful overrides), or (c) a different div_damp / boundary_fix interaction at the corners.  Pure parameter tuning within the iter-892/iter-900/iter-903 flag family cannot beat case B.
+
+**Process.**  No production code change.  Diag + sentinels + Pareto plot.  Production W2 baseline pinned by both iter-921 (single-point) and iter-922 (Pareto-frontier).  Total iter-921+iter-922 sentinel cost: ~80 s wall (two trajectories shared via module fixtures across the two test files).
