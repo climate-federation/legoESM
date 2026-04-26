@@ -31,8 +31,8 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import TracerState
 from legoesm.core.operators_voronoi import (
-    divergence_cell,
-    cell_to_edge_avg,
+    divergence_cell_3d,
+    cell_to_edge_avg_3d,
 )
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
@@ -94,51 +94,26 @@ def tracer_tendencies_mpas(
     # Get prescribed winds at current time
     u_edge, sigma_dot = wind_fn(t, mesh, sigma_coord)  # (nEdges, nlev), (nCells, nlev+1)
 
-    # Compute tendencies for each tracer via vmap over the tracer axis
+    # Use the native 3D Voronoi operators so the per-level moveaxis +
+    # vmap + moveaxis round-trip can be skipped.  ``divergence_cell_3d``
+    # and ``cell_to_edge_avg_3d`` accept ``(nCells, nlev)`` /
+    # ``(nEdges, nlev)`` shaped inputs directly.
+    div_u_3d = divergence_cell_3d(u_edge, mesh)  # (nCells, nlev) — shared
+
     def single_tracer_tendency(q_i):
         """Compute dq_i/dt for a single tracer. q_i shape: (nCells, nlev)."""
-        # Horizontal advection using advective form:
-        #   u . grad(q) = div(q*u) - q * div(u)
-        # Compute per-level via vmap over the level axis.
-
-        def _horiz_adv_level(q_k, u_k):
-            """Horizontal advection at a single level.
-
-            q_k: (nCells,), u_k: (nEdges,)
-            """
-            # Interpolate q to edges
-            q_edge = cell_to_edge_avg(q_k, mesh)  # (nEdges,)
-
-            # Flux = q_edge * u_edge
-            flux = q_edge * u_k  # (nEdges,)
-
-            # div(q*u)
-            div_qu = divergence_cell(flux, mesh)  # (nCells,)
-
-            # div(u)
-            div_u = divergence_cell(u_k, mesh)  # (nCells,)
-
-            # Advective form: -(div(q*u) - q * div(u))
-            return -(div_qu - q_k * div_u)
-
-        # vmap over vertical levels: q_i is (nCells, nlev), u_edge is (nEdges, nlev)
-        # Transpose to (nlev, nCells) and (nlev, nEdges) for vmap
-        q_levels = jnp.moveaxis(q_i, -1, 0)        # (nlev, nCells)
-        u_levels = jnp.moveaxis(u_edge, -1, 0)      # (nlev, nEdges)
-
-        horiz_adv_levels = jax.vmap(_horiz_adv_level)(q_levels, u_levels)  # (nlev, nCells)
-        horiz_adv = jnp.moveaxis(horiz_adv_levels, 0, -1)  # (nCells, nlev)
+        # Horizontal advection (advective form): -(div(q*u) - q * div(u)).
+        q_edge = cell_to_edge_avg_3d(q_i, mesh)              # (nEdges, nlev)
+        flux = q_edge * u_edge                                # (nEdges, nlev)
+        div_qu = divergence_cell_3d(flux, mesh)              # (nCells, nlev)
+        horiz_adv = -(div_qu - q_i * div_u_3d)
 
         # Vertical advection: -sigma_dot dq/dsigma
         vert_adv = vertical_advection(q_i, sigma_dot, sigma_coord)
 
-        tendency = horiz_adv + vert_adv
-
         # Hyperdiffusion placeholder — MPAS scalar hyperdiffusion is not yet
-        # available in operators_voronoi; set tendency contribution to zero.
-        # TODO: implement scalar_laplacian_cell and use it here.
-
-        return tendency
+        # available in operators_voronoi; tendency contribution is zero.
+        return horiz_adv + vert_adv
 
     # Move tracer axis to front for vmap: (n_tracers, nCells, nlev)
     q_t = jnp.moveaxis(q, -1, 0)
