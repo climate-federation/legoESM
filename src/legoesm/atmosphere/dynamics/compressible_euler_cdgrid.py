@@ -197,10 +197,39 @@ def cdgrid_compressible_euler_slow_tendencies(
     else:
         _K_pad_step6 = _pi_pad_step6 = None
 
-    dK_dx, dK_dy_perp = _arakawa_lamb_gradient(K, cdgrid, padded=_K_pad_step6)
-    dpi_dx, dpi_dy_perp = _arakawa_lamb_gradient(
-        pi_prime, cdgrid, padded=_pi_pad_step6,
+    # Batch the two Arakawa-Lamb gradients (K and pi_prime) into a
+    # single call on a stacked tensor — the operator treats the
+    # trailing axis as a passive batch (the 4-point finite difference
+    # and the metric-matrix multiplication broadcast over the trailing
+    # dim).  Stack the pre-padded inputs the same way so the local
+    # backend (no pre-pad) issues only one halo exchange instead of
+    # two.  2 gradient calls → 1.
+    n_face_kp, n_i_kp, n_j_kp, nlev_kp = K.shape
+    _kp_stack = jnp.stack([K, pi_prime], axis=-1)  # (6, n, n, nlev, 2)
+    _kp_flat = _kp_stack.reshape(n_face_kp, n_i_kp, n_j_kp, nlev_kp * 2)
+    if _K_pad_step6 is not None:
+        _kp_pad_stack = jnp.stack([_K_pad_step6, _pi_pad_step6], axis=-1)
+        _kp_pad_flat = _kp_pad_stack.reshape(
+            _kp_pad_stack.shape[0], _kp_pad_stack.shape[1],
+            _kp_pad_stack.shape[2], nlev_kp * 2,
+        )
+    else:
+        _kp_pad_flat = None
+    _dKpi_dx_flat, _dKpi_dy_perp_flat = _arakawa_lamb_gradient(
+        _kp_flat, cdgrid, padded=_kp_pad_flat,
     )
+    _dKpi_dx = _dKpi_dx_flat.reshape(
+        _dKpi_dx_flat.shape[0], _dKpi_dx_flat.shape[1],
+        _dKpi_dx_flat.shape[2], nlev_kp, 2,
+    )
+    _dKpi_dy_perp = _dKpi_dy_perp_flat.reshape(
+        _dKpi_dy_perp_flat.shape[0], _dKpi_dy_perp_flat.shape[1],
+        _dKpi_dy_perp_flat.shape[2], nlev_kp, 2,
+    )
+    dK_dx = _dKpi_dx[..., 0]
+    dpi_dx = _dKpi_dx[..., 1]
+    dK_dy_perp = _dKpi_dy_perp[..., 0]
+    dpi_dy_perp = _dKpi_dy_perp[..., 1]
 
     # --- 7. D-grid momentum tendencies ---
     # Batch (abs_vor, theta_total) center-to-corner interp — same
