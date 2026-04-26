@@ -753,43 +753,45 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     # to `_xppm` / `_yppm` so they can hand it through to `_ppm_1d`.
     bounded_domain = bool(grid.bounded_domain)
 
-    # Iter-890b (Codex iter-890 stop-time honesty fix).  The regional /
-    # nested FB-chain pipeline is structurally INCOMPLETE: regional
-    # panels have `halo_interp_offsets_h2=None`
-    # (`cubed_sphere.py:783`, `_pad_halo_wall` is the wall-BC path that
-    # makes them unnecessary).  The offset-extraction below would crash
-    # on regional grids before iter-890's gate ever fires.  iter-890
-    # therefore makes the GATE inside `_ppm_1d` Fortran-faithful for
-    # bounded_domain but does NOT enable regional/nested FB-chain
-    # transport — that would require additional plumbing
-    # (regional-aware offsets or skipping the offset path entirely
-    # when `pad_halo` is going to dispatch to `_pad_halo_wall`).
-    # Future-proofing: the iter-890 gate is correct in principle and
-    # locked by sentinel; when regional/nested FB-chain support lands
-    # the gate semantics are already aligned with Fortran.
-    if offsets_h2 is None:
-        raise NotImplementedError(
-            "fv_tp_2d called on a grid with halo_interp_offsets_h2=None "
-            "(regional/nested panel).  iter-890b: the FB-chain "
-            "transport pipeline does not currently support regional/"
-            "nested grids — `pad_halo` dispatches to the wall-BC path "
-            "for single-face inputs but the offset extraction below "
-            "this guard requires non-None offsets.  iter-890 made the "
-            "`_ppm_1d` GATE Fortran-faithful for bounded_domain, but "
-            "regional/nested FB-chain is multi-iter work tied to a "
-            "broader regional/nested support effort.")
+    # Iter-890c (Codex iter-890b stop-time fix).  Pre-iter-890b the
+    # offset extraction below would crash on regional / nested panels
+    # because `cubed_sphere.py:783` sets `halo_interp_offsets_h2=None`
+    # for single-face panels (`_pad_halo_wall` is the wall-BC path
+    # that makes the offsets unnecessary in the first place).
+    # iter-890b added a `NotImplementedError` guard, which Codex
+    # correctly noted converted a silent TypeError into an explicit
+    # crash on a path that should ACTUALLY work — the iter-890 gate
+    # already ensures the legacy boundary specials are bypassed for
+    # `bounded_domain=True`, so the offsets are unused on the regional
+    # path anyway.  iter-890c replaces the guard with conditional
+    # extraction: when `offsets_h2 is None` we set every offset to
+    # ``None`` and rely on `_ppm_1d`'s `fortran_legacy_face` gate
+    # (which is False for `bounded_domain=True`) to skip the offset-
+    # consuming code path entirely.  `pad_halo` already dispatches to
+    # `_pad_halo_wall` for single-face inputs regardless of
+    # `interp_offsets`, so the halo padding is correct on regional
+    # grids without further changes.
 
-    # Extract boundary offsets for sweep directions
+    # Extract boundary offsets for sweep directions when available.
     # offsets_h2: (6, 4, 2, n) — [face, edge, depth, cell_along_edge]
     # WEST=0, EAST=1, SOUTH=2, NORTH=3; depth 0 = adjacent to interior
-    ox_L0 = offsets_h2[:, 0, 0, :]   # WEST depth=0
-    ox_R0 = offsets_h2[:, 1, 0, :]   # EAST depth=0
-    oy_L0 = offsets_h2[:, 2, 0, :]   # SOUTH depth=0
-    oy_R0 = offsets_h2[:, 3, 0, :]   # NORTH depth=0
-    ox_L1 = offsets_h2[:, 0, 1, :]   # WEST depth=1
-    ox_R1 = offsets_h2[:, 1, 1, :]   # EAST depth=1
-    oy_L1 = offsets_h2[:, 2, 1, :]   # SOUTH depth=1
-    oy_R1 = offsets_h2[:, 3, 1, :]   # NORTH depth=1
+    if offsets_h2 is not None:
+        ox_L0 = offsets_h2[:, 0, 0, :]   # WEST depth=0
+        ox_R0 = offsets_h2[:, 1, 0, :]   # EAST depth=0
+        oy_L0 = offsets_h2[:, 2, 0, :]   # SOUTH depth=0
+        oy_R0 = offsets_h2[:, 3, 0, :]   # NORTH depth=0
+        ox_L1 = offsets_h2[:, 0, 1, :]   # WEST depth=1
+        ox_R1 = offsets_h2[:, 1, 1, :]   # EAST depth=1
+        oy_L1 = offsets_h2[:, 2, 1, :]   # SOUTH depth=1
+        oy_R1 = offsets_h2[:, 3, 1, :]   # NORTH depth=1
+    else:
+        # Regional / nested panel: offsets are unused because the
+        # iter-890 `bounded_domain=True` gate inside `_ppm_1d` short-
+        # circuits the offset-consuming code path.  Set all offsets to
+        # None so any accidental use (which would indicate a gate
+        # regression) raises a clear AttributeError.
+        ox_L0 = ox_R0 = oy_L0 = oy_R0 = None
+        ox_L1 = ox_R1 = oy_L1 = oy_R1 = None
 
     q_full = pad_halo(q, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
 

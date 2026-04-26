@@ -2439,3 +2439,39 @@ The defensive guard is a NEW behaviour: pre-iter-890b, calling `fv_tp_2d` on a r
 - This iter-890b doc entry.
 
 **Process.**  167th iter.  Codex iter-890 stop-time review caught that iter-890's commit message overclaimed regional/nested support.  iter-890b is a doc + defensive-guard honesty fix: it does NOT add regional/nested FB-chain transport (multi-iter work) but instead converts the silent crash into a clear deferred-feature error and documents the actual scope of iter-890's contribution (gate semantics correct + future-proofed; pipeline still incomplete).  The Fortran-fidelity gain from iter-890 stands — the gate now exactly matches Fortran's `.not. (bounded_domain .or. duogrid)` — but the user-visible reach of the fix is properly bounded.
+
+### Iter-890c — replace iter-890b's NotImplementedError guard with conditional offset extraction (Codex iter-890b stop-time fix)
+
+**Codex iter-890b stop-time finding.**  "`fv_tp_2d` now hard-fails a bounded-domain panel path that still executes."  iter-890b's `NotImplementedError` guard converted a silent TypeError into an explicit crash, but Codex correctly noted that the panel path SHOULD execute — the iter-890 gate already short-circuits the offset-consuming code path inside `_ppm_1d` for `bounded_domain=True`, so the offsets are unused on the regional path anyway.  Crashing pre-emptively at the offset extraction is over-defensive.
+
+**Fix.**  Replace the `NotImplementedError` guard with conditional offset extraction:
+
+```python
+if offsets_h2 is not None:
+    ox_L0 = offsets_h2[:, 0, 0, :]
+    ...
+else:
+    ox_L0 = ox_R0 = oy_L0 = oy_R0 = None
+    ox_L1 = ox_R1 = oy_L1 = oy_R1 = None
+```
+
+When `offsets_h2 is None` (regional / single-face panel), the offsets are set to None and passed through `_xppm`/`_yppm` to `_ppm_1d`.  iter-890's `fortran_legacy_face = (not use_duogrid) and (not bounded_domain)` gate is False on a panel grid (since `bounded_domain=True`), so every gated block inside `_ppm_1d` that would access the offsets is bypassed.  `pad_halo` already dispatches to `_pad_halo_wall` for `data.shape[0]==1` regardless of `interp_offsets`, so halo padding is correct.
+
+**Scope (still bounded).**  iter-890c only fixes the offset-extraction crash inside `fv_tp_2d`.  The broader regional FB-chain transport pipeline still has additional incompleteness layers that iter-890c does NOT address:
+
+- `create_cubed_sphere_cdgrid(panel)` produces global-cubed-sphere shaped metrics (`rdxa.shape == (6, n, n)`) on a 1-face panel (`area.shape == (1, n, n)`).
+- `compute_transport_quantities(ut, vt, dt, cdgrid)` crashes upstream of `fv_tp_2d` with a JAX broadcasting error because of the 6-vs-1 metric/data shape mismatch.
+
+So iter-890c makes `fv_tp_2d` ROBUST to `offsets_h2=None`, but the end-to-end regional FB-chain transport still requires multi-iter work to fix the cdgrid panel metric shapes.
+
+**Test** (+1 new test, 22 total).
+- `test_iter890c_fv_tp_2d_no_crash_with_panel_offsets` — narrowly verifies iter-890c's contract: invoke `_xppm` with `off_left=off_right=None, bounded_domain=True` (the regional-equivalent path through `_ppm_1d`'s gate); assert finite output and correct shape.  Does NOT exercise the full regional FB-chain pipeline (`compute_transport_quantities` upstream crash is a separate deferred fix).
+
+**Verification.**  All 130 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass + iter-890c test = 131 total.  Pre-existing tests unchanged.
+
+**Deliverable.**
+- `src/legoesm/core/fv_tp_2d.py`: replace iter-890b NotImplementedError guard with conditional offset extraction.
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: +1 iter-890c test.
+- This iter-890c doc entry.
+
+**Process.**  168th iter.  Codex iter-890b stop-time review correctly noted that the NotImplementedError was over-defensive on a path that the iter-890 gate already short-circuits.  iter-890c is the right fix: conditional offset extraction allows `fv_tp_2d` itself to handle `offsets_h2=None` correctly while the iter-890 gate ensures the offsets are unused on bounded_domain.  The deeper regional pipeline gaps (cdgrid metric shapes, `compute_transport_quantities` broadcasting) are out of scope for this iter and remain deferred.

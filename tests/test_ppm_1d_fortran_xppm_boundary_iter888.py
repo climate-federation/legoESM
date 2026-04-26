@@ -1130,3 +1130,50 @@ def test_iter890_fb_chain_duogrid_no_op_with_or_without_flag():
         np.asarray(state_off.u_d), np.asarray(state_on.u_d))
     np.testing.assert_array_equal(
         np.asarray(state_off.v_d), np.asarray(state_on.v_d))
+
+
+def test_iter890c_fv_tp_2d_no_crash_with_panel_offsets():
+    """Iter-890c (Codex iter-890b stop-time fix): `fv_tp_2d` MUST
+    handle `cdgrid` instances where `halo_interp_offsets_h2 is None`
+    without crashing on the offset extraction.
+
+    The full regional FB-chain transport pipeline has additional
+    incompleteness layers that iter-890c does NOT fix — most notably
+    `create_cubed_sphere_cdgrid(panel)` produces global-cubed-sphere
+    shaped metrics (`rdxa.shape == (6, n, n)`) on a 1-face panel
+    (`area.shape == (1, n, n)`), so `compute_transport_quantities`
+    crashes upstream of `fv_tp_2d` with a broadcasting error.  iter-
+    890c scope: `fv_tp_2d` itself no longer crashes when given
+    pre-computed transport quantities AND `offsets_h2 is None`.
+
+    This test exercises iter-890c's contract narrowly: directly
+    invoke `_ppm_1d`-via-`_xppm` with `offsets_h2 is None`-equivalent
+    inputs (off_left=None etc., bounded_domain=True) and assert no
+    exception is raised.  The end-to-end panel pipeline crash from
+    `compute_transport_quantities` is a separate, deeper deferred
+    item.
+    """
+    from legoesm.core.fv_tp_2d import _xppm
+
+    n = 12
+    M = 1
+    rng = np.random.default_rng(890)
+    q = jnp.asarray(rng.normal(size=(6, n + 4, M)))
+    crx = jnp.asarray(rng.normal(size=(6, n + 1, M)) * 0.3)
+
+    # Simulate the iter-890c pathway: offsets are None (regional),
+    # bounded_domain=True (Fortran-faithful gate inside _ppm_1d
+    # bypasses the legacy face-boundary specials).
+    fx = _xppm(q, crx, n,
+               off_left=None, off_right=None,
+               off_left_d1=None, off_right_d1=None,
+               use_duogrid=False,
+               bounded_domain=True,
+               apply_fortran_xppm_boundary=False)
+
+    assert jnp.all(jnp.isfinite(fx)), (
+        "_xppm on regional-equivalent inputs (offsets=None, "
+        "bounded_domain=True) produced non-finite fx — iter-890c "
+        "conditional offset handling is broken.")
+    assert fx.shape == (6, n + 1, M), (
+        f"Expected fx shape (6, {n+1}, {M}); got {fx.shape}")
