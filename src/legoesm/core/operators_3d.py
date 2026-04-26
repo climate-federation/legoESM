@@ -173,11 +173,17 @@ def hyperdiffusion_3d(
     -------
     jax.Array : Hyperdiffusion tendency, shape (6, n, n, nlev).
     """
-    # Inner ∇² (compact): uses pre-padded if available
+    # Inner ∇² (compact): uses pre-padded if available.
     lap1 = laplacian_compact_3d(field_3d, grid, padded=padded)
-    # Outer ∇² = div(grad)
-    gx = gradient_x_3d(lap1, grid)
-    gy = gradient_y_3d(lap1, grid)
+    # Outer ∇² = div(grad).  Pad lap1 once and feed it to both
+    # gradient_x_3d and gradient_y_3d via their ``padded=`` kwarg —
+    # otherwise each grad call would emit its own pad_halo_4d MPI
+    # exchange on the same lap1 (saves 1 halo MPI call per hyperdiff).
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    lap1_pad = pad_halo_4d(lap1, interp_offsets=offsets, duogrid=dg)
+    gx = gradient_x_3d(lap1, grid, padded=lap1_pad)
+    gy = gradient_y_3d(lap1, grid, padded=lap1_pad)
     lap2 = divergence_3d(gx, gy, grid)
     return -coeff * lap2
 
