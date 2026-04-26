@@ -5532,10 +5532,22 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
 
           1.  ``max|v_ll|``       — peak of the matrix's lat-lon
                                     regridded v_north over the day.
-                                    iter-894 baseline = 1.319e-01 m/s
-                                    (post-iter-893; pre-iter-893 was
-                                    1.585e-01).  Ceiling: 1.6e-1 m/s
-                                    (~21 % headroom over baseline).
+                                    iter-895 baseline = 1.319e-01 m/s
+                                    (post-iter-893; pre-iter-893
+                                    OFF was 1.585e-01).  Ceiling:
+                                    1.45e-1 m/s (~9.9 % headroom
+                                    over baseline; 8.5 % below the
+                                    pre-iter-893 OFF baseline so
+                                    a regression that disables
+                                    `apply_fortran_xppm_boundary`
+                                    would trip the ceiling).
+                                    NOTE: this metric uses
+                                    `apply_cubedsphere_to_latlon`;
+                                    the per-face cell-centre direct
+                                    max (used by iter-768 and the
+                                    iter-889 known-improved sentinel)
+                                    runs ~15 % higher (0.152 ON,
+                                    0.189 OFF).
           2.  ``mode-4 amp at lat=±30°`` — ZONAL FFT amplitude of the
                                     cube-face mode-4 imprint at the
                                     ±30° latitudes where face seams
@@ -5623,13 +5635,21 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         # Iter-893: keep this sentinel synchronized with the
         # production matrix runner config (`scripts/run_atmosphere_test_matrix.py`).
         # iter-893 enables `apply_fortran_xppm_boundary=True` on the
-        # canonical W2 LEGACY config; the W2 max|v_ll| (lat-lon
-        # regridded) baseline shifts from ~0.189 m/s OFF (centred
-        # 4-pt PPM) to ~0.132 m/s ON (Fortran iord<7 cube-edge
-        # boundary).  Iter-894 tightened the ceilings from
-        # max_v_ll<0.20 / mode-4<0.06 to max_v_ll<0.16 / mode-4<0.045
-        # to lock the iter-893 improvement.  An OFF-path regression
-        # (0.189) would now exceed the 0.16 ceiling.
+        # canonical W2 LEGACY config.  Iter-895 metrics clarification
+        # (Codex iter-894 stop-time): the W2 v-wind imprint has TWO
+        # measurement paths in this codebase, which can disagree by
+        # ~10–20 %:
+        #   (a) per-face cell-centre direct max: pre-iter-893 OFF
+        #       0.189 m/s → post-iter-893 ON 0.152 m/s (-19.6 %).
+        #       Used by the iter-768 diagnostic and the iter-889
+        #       known-improved sentinel.
+        #   (b) lat-lon-regridded max (`apply_cubedsphere_to_latlon`):
+        #       pre-iter-893 OFF 0.1585 m/s → post-iter-893 ON
+        #       0.1319 m/s (-16.8 %).  Used by THIS sentinel.
+        # Pre-iter-895 iter-894 conflated (a) and (b) when sizing
+        # ceilings; the loose 0.16 ceiling did not catch the OFF
+        # path's lat-lon value 0.1585.  iter-895 tightens to 0.145
+        # so the ceiling actually catches an OFF regression.
         cfg = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0,
             div_damp=div_damp,
@@ -5689,29 +5709,37 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         mode4_neg = float(
             np.abs(np.fft.rfft(v_ll[j_neg])[4]) / nlon * 2.0)
 
-        # Ceilings (iter-894 update — Codex iter-893 stop-time tighten).
-        # Baselines under the iter-893 production matrix config
-        # (apply_fortran_xppm_boundary=True activates Fortran iord<7
-        # cube-edge boundary formulas, reducing W2 v-wind imprint by
-        # ~17%):
-        #   max_v_ll       = 1.319e-1 m/s   (was 1.585e-1 pre-iter-893)
-        #   mode4_pos      = 3.754e-2 m/s   (was 4.594e-2 pre-iter-893)
-        #   mode4_neg      = 3.753e-2 m/s
-        #   face_mirror    = 3.18e-4         (was 6.5e-4 pre-iter-893)
-        # Ceilings tightened from the pre-iter-893 generous values
-        # (2.0e-1, 6.0e-2) to lock the iter-893 improvement with
-        # ~20% headroom over the new baselines.  If the iter-893
-        # apply_fortran_xppm_boundary path were silently disabled or
-        # the off-by-one bug from iter-889/891b reintroduced, these
-        # ceilings would catch the regression.
+        # Ceilings (iter-895 update — Codex iter-894 stop-time:
+        # iter-894's `max_v_ll<0.16` ceiling did NOT catch a regression
+        # to the pre-iter-893 OFF lat-lon regrid baseline 0.1585; both
+        # values were below 0.16.  The iter-894 doc claim that 0.189 >
+        # 0.16 catches the OFF regression mixed metrics — 0.189 is the
+        # PER-FACE CELL-CENTRE direct max, NOT the lat-lon regrid value
+        # this assertion uses.  iter-895 tightens to a ceiling that
+        # catches the actual lat-lon-regrid OFF baseline.
+        # Baselines (canonical iter-893 matrix config, lat-lon regrid):
+        #   max_v_ll       = 1.319e-1 m/s post-iter-893 ON
+        #                    (1.585e-1 m/s pre-iter-893 OFF — 17 % gap)
+        #   mode4_pos      = 3.754e-2 m/s ON   (4.594e-2 OFF)
+        #   mode4_neg      = 3.753e-2 m/s ON
+        # iter-895 ceiling on max_v_ll = 1.45e-1 → 9.9 % headroom over
+        # the iter-893 ON baseline AND tighter than the pre-iter-893
+        # OFF baseline (1.585e-1) by 9.0 %, so a regression that
+        # disables apply_fortran_xppm_boundary (returning v_ll to
+        # 0.1585 lat-lon regrid) DOES exceed the ceiling.
+        # mode-4 ceilings unchanged at 4.5e-2: the pre-iter-893 OFF
+        # mode-4 (4.594e-2) already exceeds 4.5e-2 by 2 %, so an OFF
+        # regression is caught on mode-4 even if max_v_ll passes.
         self.assertLess(
-            max_v_ll, 1.6e-1,
+            max_v_ll, 1.45e-1,
             msg=(f"W2 iter-761 matrix 1-day max|v_ll| = "
-                 f"{max_v_ll:.4e} m/s exceeds 1.6e-1 ceiling.  iter-894 "
-                 f"baseline = 1.319e-1 m/s (post-iter-893).  Either "
-                 f"the user-visible W2 v-wind imprint has grown OR "
-                 f"the iter-893 apply_fortran_xppm_boundary path was "
-                 f"disabled."))
+                 f"{max_v_ll:.4e} m/s exceeds 1.45e-1 ceiling.  "
+                 f"iter-895 baseline = 1.319e-1 m/s (post-iter-893 "
+                 f"lat-lon regrid).  Either the user-visible W2 "
+                 f"v-wind imprint has grown OR the iter-893 "
+                 f"apply_fortran_xppm_boundary path was disabled "
+                 f"(pre-iter-893 OFF baseline 1.585e-1 m/s would "
+                 f"also exceed this ceiling)."))
         self.assertLess(
             mode4_pos, 4.5e-2,
             msg=(f"W2 iter-761 matrix 1-day mode-4 amplitude at "

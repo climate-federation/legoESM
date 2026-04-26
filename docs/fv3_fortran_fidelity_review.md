@@ -2687,3 +2687,37 @@ The only non-negligible production impact is W2 (improvement).  W5 and cosine be
 - `tests/unit/test_cdgrid_fv3_regression.py:test_w2_iter761_matrix_v_ll_and_mode4_baseline`: tightened ceilings + docstring/comment refresh.
 
 **Process.**  173rd iter.  Codex iter-893 stop-time correctly identified that iter-893 promoted a Fortran-fidelity flag to the production path but left the regression-pinning loose and the doc baseline stale.  iter-894 closes both gaps: doc reflects new baseline; ceilings tighten to lock the iter-893 improvement.  Future regressions that disable the iter-893 path would now be caught by the W2 sentinel.
+
+### Iter-895 — fix iter-894's metric-mixing in `max_v_ll` ceiling claim (Codex iter-894 stop-time fix)
+
+**Codex iter-894 stop-time finding.**  "iter-894/894b mix metrics and overstate what the tightened `max_v_ll` gate actually catches."  iter-894 set the `max_v_ll` ceiling to `1.6e-1` and claimed it catches "an OFF-path regression (0.189) would now exceed the 0.16 ceiling."  The 0.189 figure is the PER-FACE CELL-CENTRE direct max measurement (used by the iter-768 diagnostic and iter-889 known-improved sentinel); the W2 sentinel under `max_v_ll` uses `apply_cubedsphere_to_latlon` (lat-lon regridded max), where the OFF baseline is 0.1585 m/s — BELOW iter-894's 0.16 ceiling.  iter-894 therefore did not actually catch the OFF regression class it claimed to catch.
+
+**The two metrics.**
+
+| Metric | Path | OFF baseline | ON baseline | Δ |
+|--------|------|-------------|------------|---|
+| Per-face cell-centre direct max | iter-768 / iter-889 sentinels | 0.189 m/s | 0.152 m/s | -19.6 % |
+| Lat-lon regridded max (`apply_cubedsphere_to_latlon`) | W2 sentinel `max_v_ll` | 0.1585 m/s | 0.1319 m/s | -16.8 % |
+
+The two measurement paths differ by ~15 % systematically because `apply_cubedsphere_to_latlon` smooths the per-face data via the regrid kernel.  Both are valid measurements; iter-894 conflated them when sizing the ceiling.
+
+**iter-895 fix.**  Tighten `max_v_ll` from `1.6e-1` to `1.45e-1`:
+
+- Headroom over the iter-893 ON baseline (0.1319): 9.9 %.
+- Tighter than the pre-iter-893 OFF baseline (0.1585) by 8.5 %, so a regression that disables `apply_fortran_xppm_boundary` (returning v_ll lat-lon to 0.1585) DOES exceed the ceiling.
+
+mode-4 ceiling unchanged at `4.5e-2`: pre-iter-893 OFF mode-4 (`4.594e-2`) already exceeds 4.5e-2, so OFF regression is caught on mode-4 even if max_v_ll passes.
+
+**Doc/comment refresh.**
+
+- W2 sentinel docstring `max|v_ll|` field: explicitly notes the metric is `apply_cubedsphere_to_latlon`-regridded; documents the ~15 % systematic gap to the per-face cell-centre measurement.
+- Inline config comment: lists BOTH (a) per-face cell-centre and (b) lat-lon regridded baselines explicitly so future iters cannot conflate them.
+- The error message text on the assertion explicitly states that the OFF regression (1.585e-1 lat-lon) would exceed the 1.45e-1 ceiling.
+
+**Verification.**  All 149 tests pass.  W2 sentinel `max_v_ll = 1.319e-1` passes the tightened 1.45e-1 ceiling with 9.9 % headroom.
+
+**Deliverable.**
+- `tests/unit/test_cdgrid_fv3_regression.py:test_w2_iter761_matrix_v_ll_and_mode4_baseline`: ceiling tightened, docstring + comments updated.
+- This iter-895 doc entry.
+
+**Process.**  174th iter.  Codex iter-894 correctly caught a metric-mixing error in iter-894's regression-catch claim.  iter-895 fixes the ceiling AND documents the two-metric distinction so future iters cannot repeat the conflation.  Net effect: the W2 sentinel now genuinely catches a regression that disables `apply_fortran_xppm_boundary`, and the relationship between the iter-768 / iter-889 cell-centre metric and the W2 sentinel lat-lon-regrid metric is permanently documented.
