@@ -911,3 +911,222 @@ def test_iter889b_legacy_non_duogrid_still_responds_to_flag():
         f"iter-889b gate is over-zealous — it should ONLY bypass on "
         f"duogrid/bounded-domain, NOT on the legacy global cubed "
         f"sphere where the override is the entire purpose of the flag.")
+
+
+# ----------------------------------------------------------------------
+# Iter-890 (Codex iter-889b stop-time follow-up): close the FB-chain
+# `_ppm_1d` `bounded_domain` gap.  Pre-iter-890 the FB-chain `_ppm_1d`
+# gated on `not use_duogrid` only — regional/nested bounded-domain
+# panels would incorrectly take the legacy global-cubed-sphere face
+# overrides and the iv=1 limiter.  iter-890 adds a `bounded_domain`
+# kwarg + a `fortran_legacy_face = (not use_duogrid) and (not
+# bounded_domain)` gate inside `_ppm_1d`, plumbed via `_xppm`/`_yppm`
+# from `fv_tp_2d` (which reads `cdgrid.base.bounded_domain`).
+# ----------------------------------------------------------------------
+
+
+def test_iter890_ppm_1d_bounded_domain_gates_legacy_overrides():
+    """Direct unit test on `_ppm_1d`: when `bounded_domain=True` (or
+    `use_duogrid=True`), the legacy global-face boundary overrides
+    AND the iv=1 face-boundary limiter MUST be bypassed.  When both
+    flags are False, the overrides fire (legacy global cubed sphere
+    is in play).
+
+    Strategy: monkey-patch `_pert_ppm` to count invocations.  The
+    legacy code path calls `_pert_ppm` 6 times at boundary indices.
+    bounded_domain=True or use_duogrid=True must skip those 6 calls.
+    """
+    from unittest import mock
+    from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+    from legoesm.core.fv_tp_2d import _ppm_1d
+
+    n = 8
+    M = 4
+    rng = np.random.default_rng(890)
+    q = jnp.asarray(rng.normal(size=(6, n + 4, M)))
+
+    n_calls = {"n": 0}
+
+    def counting_pert_ppm(bl_slice, br_slice):
+        n_calls["n"] += 1
+        return bl_slice, br_slice
+
+    with mock.patch.object(fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm):
+        # Case A: legacy global cubed sphere (both flags False) — 6 calls
+        n_calls["n"] = 0
+        _ppm_1d(q, n, use_duogrid=False, bounded_domain=False)
+        n_legacy = n_calls["n"]
+
+        # Case B: bounded_domain=True (regional/nested) — 0 calls
+        n_calls["n"] = 0
+        _ppm_1d(q, n, use_duogrid=False, bounded_domain=True)
+        n_bounded = n_calls["n"]
+
+        # Case C: use_duogrid=True — 0 calls (existing iter-884 contract)
+        n_calls["n"] = 0
+        _ppm_1d(q, n, use_duogrid=True, bounded_domain=False)
+        n_duogrid = n_calls["n"]
+
+        # Case D: both True — 0 calls (also bypassed)
+        n_calls["n"] = 0
+        _ppm_1d(q, n, use_duogrid=True, bounded_domain=True)
+        n_both = n_calls["n"]
+
+    assert n_legacy == 6, (
+        f"Legacy global cubed sphere case: expected 6 _pert_ppm calls "
+        f"at boundary indices, got {n_legacy}.")
+    assert n_bounded == 0, (
+        f"bounded_domain=True case: expected 0 _pert_ppm calls "
+        f"(Fortran tp_core.F90:612 gate `.not. (bounded_domain .or. "
+        f"duogrid)` must bypass the iv=1 limiter), got {n_bounded}.")
+    assert n_duogrid == 0, (
+        f"use_duogrid=True case: expected 0 _pert_ppm calls (legacy "
+        f"contract from iter-884), got {n_duogrid}.")
+    assert n_both == 0, (
+        f"Both flags True case: expected 0 _pert_ppm calls, got {n_both}.")
+
+
+def test_iter890_ppm_1d_bounded_domain_skips_position_aware_corrections():
+    """When `bounded_domain=True`, the position-aware boundary `dm` and
+    `al` corrections (lines 192-285 of `_ppm_1d`, gated on
+    `fortran_legacy_face`) MUST also be bypassed.  This catches a
+    regression where the iv=1 gate was widened but the dm/al gates
+    were missed.
+    """
+    from legoesm.core.fv_tp_2d import _ppm_1d
+
+    n = 8
+    M = 1
+    rng = np.random.default_rng(8902)
+    q = jnp.asarray(rng.normal(size=(6, n + 4, M)))
+    # Provide non-trivial offsets so the position-aware corrections
+    # would fire if the gate were missing.
+    off_left = jnp.full((6, M), 0.3)
+    off_right = jnp.full((6, M), 0.4)
+    off_left_d1 = jnp.full((6, M), 0.6)
+    off_right_d1 = jnp.full((6, M), 0.7)
+
+    # Legacy: position-aware corrections fire
+    bl_legacy, br_legacy, _ = _ppm_1d(
+        q, n, off_left, off_right, off_left_d1, off_right_d1,
+        use_duogrid=False, bounded_domain=False)
+    # bounded_domain=True: same call signature, but corrections
+    # must be bypassed
+    bl_bounded, br_bounded, _ = _ppm_1d(
+        q, n, off_left, off_right, off_left_d1, off_right_d1,
+        use_duogrid=False, bounded_domain=True)
+
+    # The two outputs MUST differ at boundary cells (since the
+    # legacy corrections are bypassed in case B but applied in case A).
+    diff_bl = float(np.max(np.abs(np.asarray(bl_legacy)
+                                   - np.asarray(bl_bounded))))
+    diff_br = float(np.max(np.abs(np.asarray(br_legacy)
+                                   - np.asarray(br_bounded))))
+    assert max(diff_bl, diff_br) > 1e-10, (
+        f"`_ppm_1d(bounded_domain=True)` produced output bit-identical "
+        f"to `bounded_domain=False` (max bl diff={diff_bl:.3e}, max "
+        f"br diff={diff_br:.3e}).  iter-890 expected the position-aware "
+        f"dm/al corrections to be gated by `fortran_legacy_face`, but "
+        f"they appear to fire regardless of `bounded_domain`.")
+
+    # And: bounded_domain=True output MUST equal use_duogrid=True output
+    # (both bypass all legacy face logic; offsets are unused either way).
+    bl_dg, br_dg, _ = _ppm_1d(
+        q, n, off_left, off_right, off_left_d1, off_right_d1,
+        use_duogrid=True, bounded_domain=False)
+    np.testing.assert_array_equal(
+        np.asarray(bl_bounded), np.asarray(bl_dg),
+        err_msg="bounded_domain=True != use_duogrid=True bl mismatch")
+    np.testing.assert_array_equal(
+        np.asarray(br_bounded), np.asarray(br_dg),
+        err_msg="bounded_domain=True != use_duogrid=True br mismatch")
+
+
+def test_iter890_fv_tp_2d_forwards_bounded_domain_from_grid():
+    """`fv_tp_2d` MUST read `bounded_domain = grid.bounded_domain`
+    and forward it through `_xppm` / `_yppm` to `_ppm_1d`.
+
+    AST scan: every `_xppm`/`_yppm` call inside `fv_tp_2d` must
+    forward `bounded_domain` as a kwarg.  Catches a regression where
+    the kwarg is added to the leaf but a future refactor drops it
+    from the call-site forwarding.
+    """
+    import ast
+    from pathlib import Path
+
+    src_path = (Path(__file__).resolve().parent.parent
+                / "src" / "legoesm" / "core" / "fv_tp_2d.py")
+    tree = ast.parse(src_path.read_text())
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "fv_tp_2d"),
+        None,
+    )
+    assert fn is not None
+    bad_calls = []
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in ("_xppm", "_yppm")):
+            kw_names = {kw.arg for kw in node.keywords}
+            if "bounded_domain" not in kw_names:
+                bad_calls.append(
+                    f"line {node.lineno}: {node.func.id}() missing "
+                    f"bounded_domain kwarg; got {sorted(kw_names)}")
+    assert not bad_calls, (
+        "fv_tp_2d has _xppm/_yppm calls that do NOT forward the "
+        "bounded_domain kwarg:\n  " + "\n  ".join(bad_calls))
+
+
+def test_iter890_fb_chain_duogrid_no_op_with_or_without_flag():
+    """End-to-end FB-chain regression: the iter-890 `bounded_domain`
+    plumbing must make `FV3FBShallowWaterModel` on a DUOGRID grid
+    bypass the legacy global-face boundary specials regardless of
+    whether `apply_fortran_xppm_boundary` is True or False.
+
+    Mirrors iter-889b's `test_iter889b_duogrid_bypasses_boundary_override`
+    but for the FB chain (FV3FBShallowWaterModel.step) instead of
+    production (FV3EdgeShallowWaterModel.step).
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig,
+        FV3FBShallowWaterModel,
+        FV3EdgeShallowWaterState,
+    )
+    import sys
+    sys.path.insert(0, "tests")
+    from test_cases.williamson import williamson_test2
+
+    n = 12
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    assert grid.bounded_domain
+    sw = williamson_test2(grid)
+    u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+    def _step_with_flag(flag):
+        cfg = CDGridShallowWaterConfig(
+            apply_fortran_xppm_boundary=flag)
+        model = FV3FBShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+        return model.step(state, 60.0)
+
+    state_off = _step_with_flag(False)
+    state_on = _step_with_flag(True)
+
+    np.testing.assert_array_equal(
+        np.asarray(state_off.h), np.asarray(state_on.h),
+        err_msg=("FB chain (FV3FBShallowWaterModel) duogrid + flag=True "
+                 "produced different h than flag=False.  iter-890 gate "
+                 "(`bounded_domain=True` short-circuits the legacy "
+                 "boundary overrides) is broken or unreachable through "
+                 "the FB-chain plumbing."))
+    np.testing.assert_array_equal(
+        np.asarray(state_off.u_d), np.asarray(state_on.u_d))
+    np.testing.assert_array_equal(
+        np.asarray(state_off.v_d), np.asarray(state_on.v_d))

@@ -2374,3 +2374,34 @@ In our cdgrid `bounded_domain = (regional .or. nested .or. duogrid)` (`fv_arrays
 - This doc entry.
 
 **Process.**  165th iter.  Codex iter-889 stop-time review caught a gating gap matching iter-865's earlier pattern.  iter-889b is the smallest correct fix: a single `effective_xppm_boundary` AND-gate at the caller site, plus 2 sentinel tests for both gate directions.  Default-OFF preserved; legacy non-bounded-domain behaviour unchanged; duogrid/bounded-domain now correctly bypasses the override.
+
+### Iter-890 — close the FB-chain `_ppm_1d` `bounded_domain` gate gap (Codex iter-889b deferred follow-up)
+
+**Codex iter-890 fidelity review confirmed the gap.**  The iter-888 chain plumbed `apply_fortran_xppm_boundary` through `_ppm_1d` but the legacy face-boundary specials inside `_ppm_1d` (position-aware dm/al corrections + iv=1 limiter + s11/s14/s15 overrides) gated only on `not use_duogrid`.  Fortran's gate at `tp_core.F90:333/357/612` is `.not. (bounded_domain .or. duogrid)`.  In our convention `bounded_domain = (regional .or. nested .or. duogrid)` (`fv_arrays.F90:1512`), so a regional or nested panel (where `bounded_domain=True` but `use_duogrid=False`) would incorrectly trigger the legacy global-face overrides.  iter-889b explicitly deferred this analogous FB-chain gap as a future iter; iter-890 closes it.
+
+**Fix.**
+
+| File | Change |
+|------|--------|
+| `src/legoesm/core/fv_tp_2d.py:_ppm_1d` (line 89) | Add `bounded_domain: bool = False` kwarg.  Compute `fortran_legacy_face = (not use_duogrid) and (not bounded_domain)` near the top of the body; replace all 6 `not use_duogrid` gates inside the function with `fortran_legacy_face`. |
+| `src/legoesm/core/fv_tp_2d.py:_xppm` (line 470), `_yppm` (line 507) | Add `bounded_domain` kwarg + forward to `_ppm_1d`. |
+| `src/legoesm/core/fv_tp_2d.py:fv_tp_2d` (line ~750) | Read `bounded_domain = bool(grid.bounded_domain)` once (where `grid = cdgrid.base`); forward to all 4 `_xppm`/`_yppm` calls (Pass 1 + Pass 2). |
+
+No new user-facing config field — `bounded_domain` is a grid property, not a user choice.  All callers of `fv_tp_2d` pick it up automatically through `cdgrid`.
+
+**Default behaviour preservation.**  Global cubed sphere has `bounded_domain=False`, so `fortran_legacy_face = not use_duogrid` — identical to pre-iter-890.  W2 LEGACY sentinel reproduces unchanged.  Duogrid runs were already gated by `use_duogrid=True` (`fortran_legacy_face=False`), unchanged.  Only regional / nested panels (where `bounded_domain=True` and `use_duogrid=False`) see new behaviour: the legacy overrides now correctly bypass.
+
+**Tests** (+4 new tests, 21 total in iter-888 sentinel file):
+18. `test_iter890_ppm_1d_bounded_domain_gates_legacy_overrides` — direct unit test on `_ppm_1d`: 4-case truth table (legacy/bounded/duogrid/both) using `_pert_ppm` invocation count to verify the iv=1 limiter fires only in the legacy case.
+19. `test_iter890_ppm_1d_bounded_domain_skips_position_aware_corrections` — verifies the `dm`/`al` position-aware corrections at boundary cells are also gated by `fortran_legacy_face`.  Catches a regression where the iv=1 gate was widened but the dm/al gates were missed.  Also asserts `bounded_domain=True` output bit-equals `use_duogrid=True` output.
+20. `test_iter890_fv_tp_2d_forwards_bounded_domain_from_grid` — AST scan: every `_xppm`/`_yppm` call inside `fv_tp_2d` forwards `bounded_domain` as a kwarg.
+21. `test_iter890_fb_chain_duogrid_no_op_with_or_without_flag` — end-to-end FB chain: `FV3FBShallowWaterModel` on duogrid produces bit-identical output for `apply_fortran_xppm_boundary` ∈ {False, True} (mirrors iter-889b's production-path equivalent).
+
+**Verification.**  All 125 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass (124 + 1 W2 = 125 already; added 4 iter-890 tests bringing total to 129).  The W2 sentinel reproduces unchanged because production W2 LEGACY uses `_ppm_reconstruct_1d` (not `_ppm_1d`) and the global cubed sphere has `bounded_domain=False` regardless.
+
+**Deliverable.**
+- `src/legoesm/core/fv_tp_2d.py`: +1 kwarg + computed gate variable + 6 gate-replace + 4 call-site forwards.
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: +4 iter-890 tests.
+- This doc entry.
+
+**Process.**  166th iter.  Codex iter-889b explicitly deferred this gap; iter-890 closes it as the smallest correct one-iter fix mirroring iter-889b's pattern.  Default-OFF / global-cubed-sphere behaviour preserved bit-for-bit; regional / nested bounded-domain panels now correctly bypass the legacy global-face overrides.

@@ -89,7 +89,8 @@ def _pert_ppm_iv0(q, bl, br):
 def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None,
             use_duogrid=False,
-            apply_fortran_xppm_boundary=False):
+            apply_fortran_xppm_boundary=False,
+            bounded_domain=False):
     """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
@@ -113,6 +114,19 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
             all cells and instead handles any residual non-uniformity via
             explicit ``bl/br`` rewrites (which we also skip for duogrid,
             matching the Fortran gate).
+    bounded_domain : bool, default False
+        Iter-890 (Codex iter-889b stop-time follow-up): match Fortran's
+        full gate ``.not. (bounded_domain .or. duogrid)`` at
+        `tp_core.F90:612` and `:333/357`.  Pre-iter-890 ``_ppm_1d``
+        gated only on ``use_duogrid`` (duogrid-only); regional/nested
+        bounded-domain panels (where `bounded_domain = (regional .or.
+        nested .or. duogrid)` per `fv_arrays.F90:1512`) would
+        incorrectly take the legacy global-face boundary overrides
+        and the iv=1 limiter.  iter-890 closes that gap by adding the
+        explicit `bounded_domain` kwarg; every existing
+        ``not use_duogrid`` gate inside this function becomes
+        ``not (use_duogrid or bounded_domain)``.  Default False
+        preserves prior global-cubed-sphere behaviour bit-for-bit.
     apply_fortran_xppm_boundary : bool, default False
         Iter-888: when True AND ``not use_duogrid``, overwrite the bl/br
         values at the 6 face-boundary cells (indices 0, 1, 2 and -3, -2,
@@ -136,6 +150,17 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     q_cells  : (6, n+2, M)
     """
     qe = jnp.pad(q, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+6, M)
+
+    # Iter-890: Fortran's full gate at tp_core.F90:333/357/612 is
+    # `.not. (bounded_domain .or. duogrid) .and. grid_type<3`.  In our
+    # convention `bounded_domain = (regional .or. nested .or. duogrid)`
+    # so `bounded_domain` already covers the duogrid case, but we keep
+    # `use_duogrid` as a separate parameter for backward compatibility
+    # with existing callers and to distinguish "duogrid kinked-to-
+    # extended remap is active" from "regional/nested panel BC is
+    # active".  The gates below all check that NEITHER flag is set
+    # (i.e., the legacy global-cubed-sphere face is in play).
+    fortran_legacy_face = (not use_duogrid) and (not bounded_domain)
 
     # Monotone slopes
     xt = 0.25 * (qe[:, 2:, :] - qe[:, :-2, :])
@@ -164,7 +189,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # positions, so the standard monotone dm is Fortran-faithful
     # (tp_core.F90:539-545 uses a single uniform-spacing formula for all
     # cells and relies on uniform halo spacing from MPI).
-    if not use_duogrid and off_left is not None:
+    if fortran_legacy_face and off_left is not None:
         # dm at halo cell -1 (dm index 1): spans from halo(-2) to interior(0)
         if off_left_d1 is not None:
             span_halo = 2.0 - off_left_d1 + off_left
@@ -176,7 +201,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
         dm = _correct_dm(dm, 2, q_hi, q_lo, qm,
                          2.0 / jnp.maximum(span_int0, 0.5))
 
-    if not use_duogrid and off_right is not None:
+    if fortran_legacy_face and off_right is not None:
         # dm at halo cell n (dm index n+2): spans from interior(n-1) to halo(n+1)
         if off_right_d1 is not None:
             span_halo_r = 2.0 + off_right - off_right_d1
@@ -230,7 +255,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # ``fv_tp_2d`` consumers.  Implementing the full s11/s14/s15
     # formula requires plumbing dxa through the call site and is
     # deferred to a future iter alongside FB-chain stabilisation.
-    if not use_duogrid and off_left is not None:
+    if fortran_legacy_face and off_left is not None:
         # Left face-boundary edge: al[:, 1, :] between halo(-1) and interior(0)
         q_hm1 = qe[:, 2, :]   # halo -1 at position (-1 + off0)
         q_i0 = qe[:, 3, :]    # interior 0 at position 0
@@ -252,7 +277,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
                               jnp.maximum(q_hm2, q_hm1))
             al = al.at[:, 0, :].set(al_L1)
 
-    if not use_duogrid and off_right is not None:
+    if fortran_legacy_face and off_right is not None:
         # Right face-boundary edge: al[:, n+1, :] between interior(n-1) and halo(n)
         q_inm1 = qe[:, n + 2, :]  # interior n-1
         q_hn = qe[:, n + 3, :]    # halo n at position (n + off0)
@@ -313,7 +338,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     #   Fortran dm(2)  = dm[3]
     #   Fortran dm(npx-2) = dm[n]
     #   Fortran dm(npx+1) = dm[n+3]
-    if apply_fortran_xppm_boundary and not use_duogrid:
+    if apply_fortran_xppm_boundary and fortran_legacy_face:
         s11 = 11.0 / 14.0
         s14 = 4.0 / 7.0
         s15 = 3.0 / 14.0
@@ -433,7 +458,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # `_ppm_reconstruct_1d` in operators_cdgrid.py); the FB chain
     # transport path (`fv_tp_2d` → `_xppm`/`_yppm` → `_ppm_1d`) is
     # the affected code.
-    if not use_duogrid:
+    if fortran_legacy_face:
         for k in [0, 1, 2, -3, -2, -1]:
             bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
             bl = bl.at[:, k, :].set(bl_k)
@@ -444,7 +469,8 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None, use_duogrid=False,
-          apply_fortran_xppm_boundary=False):
+          apply_fortran_xppm_boundary=False,
+          bounded_domain=False):
     """PPM in x with hord=9 Courant-number integration.
 
     FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
@@ -457,12 +483,19 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
     the kwarg was added to ``_ppm_1d`` only and was unreachable from
     every existing caller — Codex stop-time review correctly flagged
     this as dead code.  Default False preserves behaviour.
+
+    Iter-890 (Codex iter-889b stop-time follow-up): forwards
+    ``bounded_domain`` so ``_ppm_1d``'s gates match Fortran's full
+    ``.not. (bounded_domain .or. duogrid)`` semantics on regional /
+    nested panels.  Default False preserves global-cubed-sphere
+    behaviour bit-for-bit.
     """
     bl, br, q_c = _ppm_1d(q_h2, n, off_left, off_right,
                            off_left_d1, off_right_d1,
                            use_duogrid=use_duogrid,
                            apply_fortran_xppm_boundary=(
-                               apply_fortran_xppm_boundary))
+                               apply_fortran_xppm_boundary),
+                           bounded_domain=bounded_domain)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
@@ -473,11 +506,13 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
 
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None, use_duogrid=False,
-          apply_fortran_xppm_boundary=False):
+          apply_fortran_xppm_boundary=False,
+          bounded_domain=False):
     """PPM in y with hord=9 Courant-number integration.
 
     Iter-888b: see ``_xppm`` docstring for the
     ``apply_fortran_xppm_boundary`` plumbing rationale.
+    Iter-890: ``bounded_domain`` plumbing — see ``_xppm`` docstring.
     """
     q_t = jnp.swapaxes(q_h2, 1, 2)
     c_t = jnp.swapaxes(cry, 1, 2)
@@ -485,7 +520,8 @@ def _yppm(q_h2, cry, n, off_left=None, off_right=None,
                            off_left_d1, off_right_d1,
                            use_duogrid=use_duogrid,
                            apply_fortran_xppm_boundary=(
-                               apply_fortran_xppm_boundary))
+                               apply_fortran_xppm_boundary),
+                           bounded_domain=bounded_domain)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
     fy_pos = q_L + (1.0 - c_t) * (br_L - c_t * (bl_L + br_L))
@@ -710,6 +746,13 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     halo_offsets = None if use_duogrid else offsets_h2
     halo_dg = dg if use_duogrid else None
 
+    # Iter-890 (Codex iter-889b stop-time follow-up): the FB-chain
+    # `_ppm_1d` legacy face-boundary specials must also be bypassed on
+    # regional / nested bounded-domain panels (where `bounded_domain`
+    # is True but `use_duogrid` is False).  Forward `bounded_domain`
+    # to `_xppm` / `_yppm` so they can hand it through to `_ppm_1d`.
+    bounded_domain = bool(grid.bounded_domain)
+
     # Extract boundary offsets for sweep directions
     # offsets_h2: (6, 4, 2, n) — [face, edge, depth, cell_along_edge]
     # WEST=0, EAST=1, SOUTH=2, NORTH=3; depth 0 = adjacent to interior
@@ -727,7 +770,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     # Pass 1: Y-sweep on q, X-sweep on cross-corrected q_i
     fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=bounded_domain)
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
@@ -735,12 +779,14 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     q_i_pad = pad_halo(q_i, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
     fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=bounded_domain)
 
     # Pass 2: X-sweep on q, Y-sweep on cross-corrected q_j
     fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=bounded_domain)
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
@@ -748,7 +794,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     q_j_pad = pad_halo(q_j, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=bounded_domain)
 
     if mass is not None:
         # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy
