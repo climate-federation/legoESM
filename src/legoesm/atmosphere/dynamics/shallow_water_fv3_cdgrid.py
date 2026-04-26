@@ -336,35 +336,50 @@ class CDGridShallowWaterConfig(NamedTuple):
     # directly via the separate `dddmp` field above.
     dddmp_prod: float = 0.2
 
-    # Iter-926: optional Fortran-style d_sw5 corner-divergence damping
-    # applied as a POST-RK3 step (analogous to the existing damp_v
-    # post-step hook).  Default OFF preserves iter-893 production
-    # behaviour bit-for-bit.
+    # Iter-926/iter-927: optional Fortran-style d_sw5 corner-divergence
+    # damping applied as a POST-RK3 wind correction.  Default OFF
+    # preserves iter-893 production bit-for-bit.
     #
-    # When True, after the RK3 main step completes,
-    # `FV3EdgeShallowWaterModel.step` calls
-    # `_d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
-    # d2_bg=config.d2_bg, dddmp=config.dddmp, d4_bg=config.d4_bg,
-    # nord=config.nord)` and applies the resulting `ke_damping`
-    # corner field as a per-step KE-gradient wind correction
-    # (sw_core.F90:1942):
-    #   u_new = u_new + (ke_damp(i,j) - ke_damp(i+1,j)) / dx
-    #   v_new = v_new + (ke_damp(i,j) - ke_damp(i,j+1)) / dy
+    # When True (iter-927 REPLACEMENT semantics):
+    # 1. Production cell-centre `adaptive_coeff*grad(div)` damping is
+    #    SKIPPED (`div_damp` forced to 0 inside `fv3_sw_tendencies`).
+    # 2. After the RK3 main step, `_d_sw5_corner_divergence(u_d, v_d,
+    #    ua, va, cdgrid, dt, d2_bg=config.d2_bg, dddmp=config.dddmp,
+    #    d4_bg=config.d4_bg, nord=config.nord)` is computed and
+    #    applied as a per-step KE-gradient wind correction:
+    #      u_new += (ke_damp(i,j) - ke_damp(i+1,j)) / dx
+    #      v_new += (ke_damp(i,j) - ke_damp(i,j+1)) / dy
     # This is NOT an RK3 sampled tendency — it's a discrete per-step
-    # wind update applied OUTSIDE the integrator, exactly as the
-    # Fortran d_sw5 → d_sw6 chain does (KE update then wind update).
+    # update outside the integrator, exactly as Fortran d_sw5 → d_sw6
+    # does (sw_core.F90:1641-1944).  In FV3 there is no separate
+    # "div_damp" from d_sw5; d_sw5 IS the divergence damping.
+    #
+    # MEASUREMENT (iter-927).  Both ADDITIVE (iter-926b: keep
+    # production div_damp + add d_sw5) and REPLACEMENT (iter-927:
+    # skip production div_damp + d_sw5 only) variants REJECTED on
+    # acceptance criterion (≥10 % v_ll_Linf improvement, <5 % h_L2
+    # regression):
+    #   ADDITIVE  :  v_ll_Linf +1608 %, h_L2 +577 %.
+    #   REPLACEMENT:  v_ll_Linf  +637 %, h_L2 +238 %.
+    # Replacement is LESS BAD than additive (it doesn't double-damp)
+    # but still rejects.  Reason: the Python A-L+RK3 operator family
+    # has its own structural cancellation balance with cell-centre
+    # `grad(div)` damping; switching to corner d_sw5 KE-add structure
+    # disrupts that balance because the other operators (vorticity,
+    # B-function, Coriolis) are still in the A-L family.  The full
+    # FV3 fix requires the FB chain (currently unstable).
     #
     # SCOPE: consumed by `FV3EdgeShallowWaterModel.step` ONLY.  The
-    # `FV3FBShallowWaterModel` already routes through the true-FV3
-    # d_sw1/d_sw4/d_sw5/d_sw6 chain natively, so the flag is
-    # redundant there and a UserWarning fires at FB model
-    # construction time (iter-903c-style).
+    # `FV3FBShallowWaterModel` routes through the true-FV3 d_sw1/
+    # d_sw4/d_sw5/d_sw6 chain natively, so the flag is redundant
+    # there and a UserWarning fires at FB model construction time.
     #
     # Coefficients: uses the existing `d2_bg`/`dddmp`/`d4_bg`/`nord`
-    # config fields (Fortran defaults d2_bg=0, dddmp=0, d4_bg=0.16,
-    # nord=1 → del-4 background damping).  These are independent of
-    # production's `div_damp`/`dddmp_prod` (which feed the cell-
-    # centred A-L gradient damping inside `fv3_sw_tendencies`).
+    # config fields.  Default coefficients (d2_bg=0, dddmp=0,
+    # d4_bg=0.16, nord=1) give Fortran-default del-4 background
+    # damping.  Setting `d2_bg=div_damp/da_min_c, dddmp=0.2, nord=0`
+    # mimics production's adaptive Smagorinsky regime in d_sw5
+    # corner form.
     use_fv3_dsw5_corner_damping: bool = False
 
 
@@ -853,11 +868,24 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 state, tendency_fn_csw, dt, self.config.time_integrator,
             )
         else:
+            # Iter-927: when `use_fv3_dsw5_corner_damping=True`, REPLACE
+            # the production cell-centre A-L `adaptive_coeff*grad(div)`
+            # damping with Fortran's corner d_sw5 damping (applied as a
+            # post-RK3 hook below).  This is Fortran-faithful: in FV3
+            # there is no separate "div_damp" tendency — d_sw5 IS the
+            # divergence damping (sw_core.F90:1641-1944).  Adding both
+            # (iter-926b) was REJECTED catastrophically (W2 +1608 %).
+            # Replacing keeps the structure Fortran-faithful.  Default
+            # OFF preserves iter-893 production bit-for-bit.
+            _div_damp_for_tendency = (
+                0.0 if self.config.use_fv3_dsw5_corner_damping
+                else self.config.div_damp)
+
             def tendency_fn(s):
                 dh, du, dv = fv3_sw_tendencies(
                     s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
                     g=self.config.g,
-                    div_damp=self.config.div_damp,
+                    div_damp=_div_damp_for_tendency,
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
                     boundary_fix=self.config.boundary_fix,
                     boundary_fix_skip_corners=(

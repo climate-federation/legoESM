@@ -447,3 +447,34 @@ The Ralph loop step 4 test set (cosine bell, W2, W5, ocean/atmosphere rest state
 **Backlog implication.**  Closing the d_sw5 fidelity gap requires more than a post-RK3 hook addition.  Either (a) the hook needs to REPLACE production `div_damp` (not add to it; user explicitly forbade modifying current div_damp defaults), or (b) the FB chain needs to be stabilized so production switches to `FV3FBShallowWaterModel` (the iter-904/905 attempts failed catastrophically).  Pure additive integration of Fortran d_sw5 at corners onto the existing cell-centre A-L damping is rejected.
 
 **Process.**  iter-926a (diagnostic) + iter-926b (implementation + tests + acceptance + doc) committed.  Flag default-off is bit-exact; W2/W5/cosine-bell/rest-state production sentinels (iter-921→iter-925) all unchanged at iter-893 baselines.
+
+### Iter-927 — refactor `use_fv3_dsw5_corner_damping` to REPLACEMENT semantics (still REJECTED, less bad)
+
+**Trigger.**  Per user iter-927 feedback (8 issues enumerated), issue #4 says the Fortran d_sw5 IS the divergence damping — there is no separate "div_damp" alongside it in FV3.  The iter-926b ADDITIVE flag (keep production div_damp + add Fortran d_sw5) duplicated the damping and was catastrophically rejected (+1608 % v_ll_Linf).  iter-927 refactors the flag to REPLACEMENT semantics: when ON, skip production cell-centre div_damp AND apply post-RK3 d_sw5 hook, mirroring Fortran's "d_sw5 only" structure.
+
+**Refactor.**  In `FV3EdgeShallowWaterModel.step`, when `use_fv3_dsw5_corner_damping=True`, force `div_damp=0` in the inner `tendency_fn` so production's `adaptive_coeff*grad(div)` block is bypassed; the post-RK3 d_sw5 hook then becomes the SOLE divergence damping.  Default OFF preserves iter-893 bit-exact (verified by iter-926b's `default_off_bit_identical_to_iter893` test which still passes after the refactor).
+
+**Acceptance test** (W2 C36 1-day, `use_fv3_dsw5_corner_damping=True` with `d2_bg=div_damp/da_min_c, dddmp=0.2, nord=0` to mimic production's adaptive Smagorinsky regime in d_sw5 corner form):
+
+| metric        | iter-893 (off) | iter-927 (on, replacement) | Δ %       | iter-926b (additive) for comparison |
+|---------------|----------------|-----------------------------|-----------|--------------------------------------|
+| `h_L2`        | 0.512 m        | **1.732 m**                | +238 %    | +577 %                               |
+| `h_Linf`      | 8.18 m         | 24.87 m                    | +204 %    | +517 %                               |
+| `v_north_max` | 0.152 m/s      | 1.022 m/s                  | +573 %    | +1463 %                              |
+| `v_ll_Linf`   | 0.1319 m/s     | **0.971 m/s**              | +637 %    | +1608 %                              |
+
+**REJECT — flag stays default-off.**  Replacement is LESS BAD than additive (v_ll_Linf 0.97 vs 2.25 m/s; h_L2 1.7 vs 3.5 m) — replacement doesn't double-damp.  But the operator-family mismatch is fundamental: the Python A-L+RK3 stack has its own structural cancellation balance built around cell-centre `grad(div)` damping; switching to corner d_sw5 KE-add structure (Fortran's family) disrupts the cancellations because the OTHER operators (vorticity, B-function, Coriolis, KE-gradient) are still in the A-L family.
+
+This is a clean experimental confirmation of user issue #2: "The pressure/Coriolis balance is the wrong operator family."  Mixing one Fortran operator into the A-L family doesn't help — the whole family must be Fortran-faithful (FB chain), and FB chain is currently unstable for independent reasons.
+
+**iter-927 deliverables.**
+
+1. Refactored `FV3EdgeShallowWaterModel.step` so `use_fv3_dsw5_corner_damping=True` has REPLACEMENT semantics (skip production div_damp + apply post-RK3 d_sw5).  Default OFF unchanged.
+2. Updated `CDGridShallowWaterConfig.use_fv3_dsw5_corner_damping` docstring documenting both semantics tested and the rejection reasons.
+3. iter-926b tests (6/6) all still pass after the refactor.
+
+**Backlog implication.**  The iter-926/iter-927 audit closes the "naive d_sw5 port" path: neither additive nor replacement at the post-RK3 hook level helps production W2.  The next meaningful d_sw5 work requires either:
+- Stabilizing the FB chain (iter-904/905 attempts catastrophic; full FB-chain debug requires multi-iter project), OR
+- Replacing the ENTIRE production operator family with Fortran-faithful corner-based ops (vorticity at corners, KE at corners, Coriolis at corners) — i.e., re-derive A-L → corner formulation matching Fortran d_sw6 structure.  Single-operator swaps cannot bridge the operator-family mismatch.
+
+**Process.**  No new tests required (iter-926b's tests cover both semantics — default-off bit equality holds, flag-on changes state, FB warning fires).  Production W2/W5/cb/rest-state sentinels unchanged.
