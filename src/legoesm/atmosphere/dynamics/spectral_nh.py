@@ -45,7 +45,7 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
-    _sh_synthesis_H,
+    _sh_synthesis_H_3d,
 )
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
 from legoesm.atmosphere.dynamics.compressible_euler import (
@@ -126,16 +126,12 @@ def _spectral_gradient_3d(grid, coeffs_3d):
         a * cos_lat_2d[..., None]
     )
 
-    # Meridional derivative: ``_sh_synthesis_H`` is 2D-only, so we
-    # still vmap over levels here.  Skipping the extra ``c_t`` rebind
-    # — call the moveaxis lazily inside the vmap binding.
-    c_t = jnp.moveaxis(coeffs_3d, -1, 0)
-
-    def merid_deriv(c):
-        return -_sh_synthesis_H(grid, c) / (a * cos_lat_2d)
-
-    dfdy_t = jax.vmap(merid_deriv)(c_t)
-    dfdy = jnp.moveaxis(dfdy_t, 0, -1)
+    # Meridional derivative uses ``_sh_synthesis_H_3d`` — same one-shot
+    # batched segment-sum + IRFFT as ``sh_synthesis_3d`` (no per-level
+    # moveaxis + vmap).
+    dfdy = -_sh_synthesis_H_3d(grid, coeffs_3d) / (
+        a * cos_lat_2d[..., None]
+    )
 
     return dfdx, dfdy
 

@@ -780,7 +780,13 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
 
 
 def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
-    """Inverse SH transform per vertical level.
+    """Inverse SH transform per vertical level (3D-native).
+
+    Same numeric algorithm as :func:`sh_synthesis` but with the
+    ``n_sh`` -> ``m`` segment-sum done in a single batched call over
+    ``(n_sh, n_lat, nlev)`` instead of vmap'ing the 2D path per level.
+    Eliminates the per-level moveaxis + vmap dance and lets XLA fuse
+    the FFT across the level axis.
 
     Parameters
     ----------
@@ -790,9 +796,64 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     -------
     (n_lat, n_lon, nlev) real array.
     """
-    c_t = jnp.moveaxis(coeffs_3d, -1, 0)  # (nlev, n_sh)
-    result = jax.vmap(lambda c: sh_synthesis(grid, c))(c_t)  # (nlev, n_lat, n_lon)
-    return jnp.moveaxis(result, 0, -1)  # (n_lat, n_lon, nlev)
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    n_max = grid.n_max
+    ms = grid.ms  # (n_sh,)
+
+    # contributions: (n_lat, n_sh, nlev) — Pnm broadcasts over levels.
+    contributions = grid.Pnm[..., None] * coeffs_3d[None, :, :]
+
+    # segment_sum operates on the leading axis; permute (n_sh, n_lat, nlev),
+    # group, then permute back to (n_lat, n_max+1, nlev).
+    f_m = jnp.swapaxes(
+        jax.ops.segment_sum(
+            jnp.swapaxes(contributions, 0, 1),
+            ms,
+            num_segments=n_max + 1,
+        ),
+        0, 1,
+    )
+
+    # Inverse FFT in longitude over axis 1.
+    nlev = coeffs_3d.shape[-1]
+    f_hat_full = jnp.zeros(
+        (n_lat, n_lon // 2 + 1, nlev), dtype=jnp.complex128,
+    )
+    f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
+    field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
+    return field_grid.real
+
+
+def _sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
+    """3D-native counterpart of :func:`_sh_synthesis_H`.
+
+    Returns the θ-derivative of the inverse SH transform at every
+    vertical level in a single batched ``segment_sum`` + IRFFT, instead
+    of vmap'ing the 2D path per level.
+    """
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    n_max = grid.n_max
+    ms = grid.ms
+
+    contributions = grid.Hnm[..., None] * coeffs_3d[None, :, :]
+    f_m = jnp.swapaxes(
+        jax.ops.segment_sum(
+            jnp.swapaxes(contributions, 0, 1),
+            ms,
+            num_segments=n_max + 1,
+        ),
+        0, 1,
+    )
+
+    nlev = coeffs_3d.shape[-1]
+    f_hat_full = jnp.zeros(
+        (n_lat, n_lon // 2 + 1, nlev), dtype=jnp.complex128,
+    )
+    f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
+    field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
+    return field_grid.real
 
 
 def sh_analysis_oc2_3d(
