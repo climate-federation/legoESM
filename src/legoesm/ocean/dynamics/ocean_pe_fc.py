@@ -145,25 +145,59 @@ def ocean_baroclinic_tendencies_fc(
     dv_dt = dv_dt + _vertical_advection_ocean(v, w, z_coord, J)
 
     # --- 9. Tracer tendencies ---
-    tracers = jnp.stack([T, S], axis=0)
+    # Stack T, S along a trailing tracer axis and fold it into the level
+    # axis so halo-issuing FC operators (fc_scalar_advection_3d,
+    # fc_laplacian_3d, fc_hyperdiffusion_3d) — now 4D-native via
+    # pad_halo_4d (Loop 65) — run ONCE for both tracers instead of being
+    # re-entered under vmap-over-(T,S).  Vertical operators stay
+    # per-tracer because they hard-code the vertical axis at -1.
+    tracer_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
+    n_face, n_i, n_j, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
+    # Broadcast masked velocities across the combined (level × tracer)
+    # axis.  ``tracer_flat`` reshape interleaves levels and tracers as
+    # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]``, so each level's
+    # velocity must be duplicated ``n_tracers`` times to align.
+    # ``jnp.repeat`` does this directly; ``jnp.tile`` would concatenate
+    # the entire array and mis-align tracer ↔ level.
+    u_masked = u * mask_3d
+    v_masked = v * mask_3d
+    if n_tracers == 1:
+        u_b, v_b = u_masked, v_masked
+    else:
+        u_b = jnp.repeat(u_masked, n_tracers, axis=-1)
+        v_b = jnp.repeat(v_masked, n_tracers, axis=-1)
 
-    def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        dtr_dt = fc_scalar_advection_3d(tr, u * mask_3d, v * mask_3d, grid, fc_config)
-        dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
+    horiz_flat = fc_scalar_advection_3d(tracer_flat, u_b, v_b, grid, fc_config)
+    if physics_fn is None:
+        if config.K_h > 0:
+            horiz_flat = horiz_flat + fc_laplacian_3d(
+                tracer_flat, grid, fc_config,
+            ) * config.K_h
+        if config.hyperdiff_coeff > 0:
+            horiz_flat = horiz_flat + fc_hyperdiffusion_3d(
+                tracer_flat, grid, fc_config, config.hyperdiff_coeff,
+            )
+    horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
 
-        if physics_fn is None:
-            if config.K_h > 0:
-                dtr_dt = dtr_dt + fc_laplacian_3d(tr, grid, fc_config) * config.K_h
-            if config.K_v > 0:
-                dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
-            if config.hyperdiff_coeff > 0:
-                dtr_dt = dtr_dt + fc_hyperdiffusion_3d(tr, grid, fc_config, config.hyperdiff_coeff)
+    # Vertical advection per-tracer (vmap over the trailing axis so JAX
+    # produces one batched kernel rather than n_tracers unrolled stencils).
+    def _vert_adv(q):
+        return _vertical_advection_ocean(q, w, z_coord, J)
 
-        return dtr_dt
+    vert_adv_stack = jax.vmap(_vert_adv, in_axes=-1, out_axes=-1)(tracer_stack)
 
-    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
-    dT_dt = tracer_tend[0]
-    dS_dt = tracer_tend[1]
+    if physics_fn is None and config.K_v > 0:
+        def _vdiff(q):
+            return vertical_diffusion(q, z_coord, J, config.K_v)
+
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        tracer_tend_stack = horiz_stack + vert_adv_stack + vdiff_stack
+    else:
+        tracer_tend_stack = horiz_stack + vert_adv_stack
+
+    dT_dt = tracer_tend_stack[..., 0]
+    dS_dt = tracer_tend_stack[..., 1]
 
     # --- 10. Mixing ---
     if physics_fn is None:
