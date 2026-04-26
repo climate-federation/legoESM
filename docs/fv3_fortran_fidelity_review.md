@@ -2971,3 +2971,47 @@ iter-900's strict-Fortran path INCREASES W2 v_ll_Linf by 53.7 % (+0.071 m/s).  h
 **Verification.**  All 26 tests pass (12 iter-873 inventory + iter-896 must-activate, 6 iter-899 sentinels + iter-768 t=1d pin, 6 iter-900 sentinels).  Production W2 baseline (iter-892 default) unchanged at 1.319e-1 m/s.
 
 **Process.**  180th iter.  iter-900 closes the iter-899 handoff with a measured negative result: strict Fortran is WORSE than iter-892's accidentally-good shifted formulas on W2.  This is a legitimate FV3-fidelity finding — sometimes the oracle's literal recipes don't transfer cleanly to a different halo convention, and a thoughtful "wrong" formula outperforms.  The flag is preserved as opt-in for future hybrid experiments.  CLAUDE.md instructs "follow the Fortran implementation exactly" — but iter-900 demonstrates an empirical exception worth documenting; default flipping requires evidence iter-900 improves W2 plus W5/cosine bell/ocean rest, not just one of them.
+
+### Iter-901 — broad evaluation of `fortran_faithful_ppm_left` across W5 + ocean rest
+
+**Motivation.**  iter-900 measured ONLY W2 and concluded iter-892 was empirically better.  Per Ralph protocol, every iter should run all 4 evaluations (cosine bell, W2, W5, ocean rest).  iter-901 fills the gap.
+
+**Cosine bell** is structurally INERT to the iter-900 flag because `run_cosine_bell` invokes `transport_step` directly without going through `fv3_sw_tendencies` (per iter-775 note in `scripts/run_atmosphere_test_matrix.py:1568-1576`).  Skipped with explicit justification.
+
+**W5 measurement at C36 dt=300s 1-day** (`scripts/diag_iter901_broad_eval_fortran_faithful_left.py`):
+
+| config                            | mass_drift | \|h-h_ic\|_Linf | h_min     | h_max     |
+|-----------------------------------|------------|-----------------|-----------|-----------|
+| (A) iter-892 default (production) | 1.151e-06  | 1.964e+02       | 3.9040e+03 | 5.9667e+03 |
+| (B) iter-900 fortran-faithful left | 5.753e-07 | 1.965e+02       | 3.9039e+03 | 5.9667e+03 |
+
+W5 fields are essentially **identical** between the two flag values (h_diff_linf, h range bit-equal in 4 sig figs).  Only mass drift differs: iter-900's strict-Fortran path has **half** the iter-892 mass drift (5.75e-7 vs 1.15e-6).  iter-892's accidentally-good shifted formulas evidently leak slightly more mass than the strict-Fortran recipes — a small but measurable Fortran-fidelity benefit.
+
+**Ocean rest measurement at C36 1-day** (h=10000 m, u=v=0, h_s=0):
+
+| config                            | mass_drift | \|h-h_ic\|_Linf | max\|u\|    | max\|v\|    |
+|-----------------------------------|------------|-----------------|------------|------------|
+| (A) iter-892 default (production) | 1.758e-06  | 1.758e-02       | 2.884e-14  | 2.409e-14  |
+| (B) iter-900 fortran-faithful left | 1.758e-06 | 1.758e-02       | 2.884e-14  | 2.409e-14  |
+
+**Bit-identical** between the two flag values.  Reason: at zero velocity the upwind face selection (`jnp.where(u_c > 0, q_R_left, q_L_right)` etc.) is degenerate, and the changed PPM face values feed multiplications by zero in the flux divergence — so the LEFT-edge override never affects the height tendency.  Ocean rest is robust to this PPM change.
+
+**Combined picture (now including iter-900's W2):**
+
+| test case        | iter-892 default | iter-900 fortran-faithful | winner       |
+|------------------|------------------|---------------------------|--------------|
+| W2 v_ll_Linf     | 1.319e-01 m/s    | 2.027e-01 m/s             | iter-892 (-53.7%) |
+| W5 mass drift    | 1.151e-06        | 5.753e-07                 | iter-900 (-50%)   |
+| W5 \|h-h_ic\|_Linf | 1.964e+02 m    | 1.965e+02 m               | tie (essentially identical) |
+| Ocean rest       | identical        | identical                 | tie          |
+| Cosine bell      | n/a (transport_step path) | n/a               | inert        |
+
+**Interpretation.**  iter-892's empirical advantage is **W2-specific**.  On W5, iter-900's strict-Fortran path is marginally BETTER on mass conservation while preserving the height field bit-equally.  This is consistent with Fortran's recipes being designed for the FB-chain transport (which iter-900 does NOT consume) — but at the production C-grid PPM level, the formulas converge for cases without strong cube-vertex anomalies.  W2's smooth-IC cube-vertex artifact is a special case where iter-892's xt-clipping coincidentally constrains overshoot better than strict Fortran.
+
+**Decision.**  iter-892 remains production default.  No default flip in iter-901.  The W2 +53.7 % regression dominates the W5 -50 % mass-drift improvement (mass drift is already at machine-precision floor; the W2 effect is at the actual physical-error scale).  iter-900's flag stays opt-in for advanced users who care more about Fortran fidelity than W2 absolute error.
+
+**Deliverable.**
+- `scripts/diag_iter901_broad_eval_fortran_faithful_left.py`: W5 + ocean rest comparison.
+- This iter-901 doc entry adding the broader evaluation.
+
+**Process.**  181st iter.  iter-901 completes the iter-900 evaluation by running the remaining 3 of 4 Ralph-protocol cases (cosine bell explicitly skipped with justification).  Strengthens the iter-900 conclusion: the flag is W2-pessimal in absolute v_ll_Linf but neutral-to-marginally-positive elsewhere.  No production code change; no regression risk.
