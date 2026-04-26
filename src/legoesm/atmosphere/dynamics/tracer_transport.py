@@ -91,29 +91,35 @@ def tracer_tendencies(
     # Get prescribed winds at current time
     u, v, sigma_dot = wind_fn(t, grid, sigma_coord)  # (6,n,n,nlev), (6,n,n,nlev+1)
 
-    # Compute tendencies for each tracer via vmap over the tracer axis
-    def single_tracer_tendency(q_i):
-        """Compute dq_i/dt for a single tracer. q_i shape: (6, n, n, nlev)."""
-        # Centered advection: -(u dq/dx + v dq/dy)
-        dq_dx = gradient_x_3d(q_i, grid)
-        dq_dy = gradient_y_3d(q_i, grid)
-        horiz_adv = -(u * dq_dx + v * dq_dy)
+    # Fold the tracer axis into the level axis so the cubed-sphere halo+stencil
+    # operators (``gradient_x_3d``, ``gradient_y_3d``, ``hyperdiffusion_3d``)
+    # process all tracers in a single ``pad_halo_4d`` call instead of issuing
+    # one halo exchange per tracer under vmap.  Multi-GPU MPI exchange dominates
+    # the cost of these per-level operators, so collapsing n_tracers separate
+    # exchanges into one is a substantial savings under multi-GPU sharding.
+    nlev = q.shape[-2]
+    q_flat = q.reshape(*q.shape[:3], nlev * n_tracers)  # (6, n, n, nlev*n_tracers)
 
-        # Vertical advection: -sigma_dot dq/dsigma
-        vert_adv = vertical_advection(q_i, sigma_dot, sigma_coord)
+    dq_dx_flat = gradient_x_3d(q_flat, grid)
+    dq_dy_flat = gradient_y_3d(q_flat, grid)
+    dq_dx = dq_dx_flat.reshape(*q.shape)  # (6, n, n, nlev, n_tracers)
+    dq_dy = dq_dy_flat.reshape(*q.shape)
+    horiz_adv = -(u[..., None] * dq_dx + v[..., None] * dq_dy)
 
-        tendency = horiz_adv + vert_adv
+    if config.hyperdiff_coeff > 0:
+        hyper_flat = hyperdiffusion_3d(q_flat, grid, config.hyperdiff_coeff)
+        horiz_adv = horiz_adv + hyper_flat.reshape(*q.shape)
 
-        # Optional hyperdiffusion
-        if config.hyperdiff_coeff > 0:
-            tendency = tendency + hyperdiffusion_3d(q_i, grid, config.hyperdiff_coeff)
+    # Vertical advection — local stencil along axis -1, no halo cost.  Use
+    # ``jax.vmap`` over the tracer axis (with sigma_dot/sigma_coord captured
+    # in the closure) so JAX produces a single batched kernel rather than
+    # n_tracers unrolled stencils.
+    def _vert_adv_one(q_one):
+        return vertical_advection(q_one, sigma_dot, sigma_coord)
 
-        return tendency
+    vert_adv = jax.vmap(_vert_adv_one, in_axes=-1, out_axes=-1)(q)
 
-    # Move tracer axis to front for vmap: (n_tracers, 6, n, n, nlev)
-    q_t = jnp.moveaxis(q, -1, 0)
-    dq_dt_t = jax.vmap(single_tracer_tendency)(q_t)  # (n_tracers, 6, n, n, nlev)
-    dq_dt = jnp.moveaxis(dq_dt_t, 0, -1)  # (6, n, n, nlev, n_tracers)
+    dq_dt = horiz_adv + vert_adv  # (6, n, n, nlev, n_tracers)
 
     # Return same pytree structure as state
     return TracerState(
