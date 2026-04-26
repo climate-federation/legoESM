@@ -31,17 +31,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import MPASNonHydrostaticState, MPASNonHydrostaticTendencies
 from legoesm.core.operators_voronoi import (
-    divergence_cell,
-    gradient_edge,
-    kinetic_energy_cell,
-    potential_vorticity_vertex,
-    pv_flux_energy_conserving,
-    pv_flux_enstrophy_conserving,
-    edge_thickness,
-    cell_to_edge_avg,
-    vector_laplacian_del2,
-    vector_laplacian_del4,
-    # 3D-native operators (loop-free per-level computation):
+    # 3D-native operators (loop-free per-level computation).
     divergence_cell_3d,
     gradient_edge_3d,
     kinetic_energy_cell_3d,

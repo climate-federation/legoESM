@@ -33,18 +33,11 @@ from legoesm.core.precision import cast_pytree
 from legoesm.core.field import Field
 from legoesm.core.state import MPASHydrostaticState, MPASHydrostaticTendencies
 from legoesm.core.operators_voronoi import (
+    # 2D operators used for surface-pressure-only fields (ln_ps, p_s).
     divergence_cell,
     gradient_edge,
-    kinetic_energy_cell,
-    potential_vorticity_vertex,
-    pv_flux_energy_conserving,
-    pv_flux_enstrophy_conserving,
-    vector_laplacian_del2,
-    vector_laplacian_del4,
-    edge_thickness,
     cell_to_edge_avg,
-    apvm_correction,
-    # Batched 3D operators — single gather for all levels
+    # Batched 3D operators — single gather for all levels.
     divergence_cell_3d,
     gradient_edge_3d,
     kinetic_energy_cell_3d,
