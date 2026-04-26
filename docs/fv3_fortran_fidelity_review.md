@@ -508,9 +508,21 @@ iter-893's xppm boundary fix lowered the asymptote closer to the structural floo
 
 **Implications for iter-911+ work.**
 
-- **Higher production resolution is a viable W2 reduction path** (not previously thought).  Going C36 → C48 reduces W2 by 5 % (0.132 → 0.125).  Going to C64 might give another 3-5 %, asymptoting near 0.10 m/s.  Cost: 4× compute per step × 1.33× more steps = ~5× total cost vs C36.
+- **Higher production resolution is a viable W2 reduction path** (not previously thought).  Going C36 → C48 reduces W2 by 5 % (0.132 → 0.125).  Going to C64 might give another 3-5 %, asymptoting near 0.10 m/s.
+
+  **Compute cost** (iter-910b correction per Codex iter-910 stop-time): for 2D shallow water with CFL-preserving dt = 300×(36/n), per-step work scales as O(n²) (cells per face) and n_steps scales as O(n), giving total cost O(n³):
+
+  | from → to | per-step | n_steps | total cost |
+  |-----------|----------|---------|-----------|
+  | C36 → C48 | (48/36)² = 1.78× | 1.33× | **~2.37×** |
+  | C36 → C64 | (64/36)² ≈ 3.16× | 1.78× | **~5.62×** |
+  | C36 → C96 | (96/36)² ≈ 7.11× | 2.67× | ~19× |
+
+  iter-910's original cost claim "~5× cost vs C36" conflated C36→C48 (actually ~2.4×) with C36→C64 (~5.6×).  Corrected here.
+
 - **The structural floor is closer to ~0.10 m/s than the iter-892 0.132 m/s baseline.**  Architectural fixes (option 3 d_sw5 port, FB chain) might lower the floor further but the gap is smaller than previously assumed.
-- **iter-910 informs the cost-benefit of iter-911+ work.**  If the structural floor is ~0.10 m/s and option (3) requires multi-iter effort to potentially reduce it to ~0.08 m/s, the marginal value is small.  Pivoting to FB-chain stabilization (which serves a different scientific goal — true FV3 fidelity for non-W2 cases) may be higher value than further W2-residual reduction.
+
+- **iter-910 informs the cost-benefit of iter-911+ work.**  If the structural floor is ~0.10 m/s and option (3) requires multi-iter effort to potentially reduce it to ~0.08 m/s, the marginal value is small.  At ~2.4× compute, going C36 → C48 captures ~25 % of the available reduction (0.132 → 0.125 vs 0.132 → 0.10 floor).  At ~5.6× compute, C64 captures perhaps ~40-50 % (0.132 → ~0.118 estimated).  Pivoting to FB-chain stabilization (which serves a different scientific goal — true FV3 fidelity for non-W2 cases) may be higher value than chasing the remaining residual via either resolution or d_sw5 port.
 
 **Memory update.**  CLAUDE.md memory `project_w2_mode_a_structural.md` updated with iter-910's resolution sweep (preserving the iter-822 historical context but adding the post-iter-893 refinable behavior).
 
