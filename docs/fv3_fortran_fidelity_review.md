@@ -503,3 +503,48 @@ Plus a count-invariant test verifying the parametric list remains at exactly 8 e
 **Resolution semantics**: when a future iter actually closes a gap, the editor MUST remove the corresponding parametric entry (so the test no longer requires the marker).  When an editor renames a comment block, they MUST update the marker substring to match.  Silently removing the source comment without removing the parametric entry is FORBIDDEN — the test fires.
 
 **Process.**  No production code change.  Pure test-suite addition (~150 lines).  Cumulative iter-921→iter-928: 8 commits, 33 sentinel tests, no production behavioral change at default config.  Production W2 baseline at iter-893 (v_ll_Linf=0.132 m/s, h_err_max=8.18 m) unchanged throughout.
+
+### Iter-929 — bare A-L operator decomposition: hot spots are at the 8 cube VERTICES with 1 % imperfect cancellation
+
+**Trigger.**  iter-907/908b/909 found `div_damp` dominates production `dv_d_dt` magnitude at hot spots (~84 %) but did not decompose what creates the bare A-L residual that `div_damp` is responding to.  iter-921 localised the production hot spot to face 0/2 (i=2, lat ±33.9°), but the BARE A-L (without `div_damp`, without `boundary_fix`) might have its hot spots at a different location.  iter-929 measures both and decomposes the bare A-L tendency into Coriolis vs Bernoulli-grad sub-operators.
+
+**iter-929 diagnostic** (`scripts/diag_iter929_w2_bare_al_decomposition.py`).  At t=0 W2 C36, evaluate:
+
+- `dv_cc_bare = coriolis_dv + bernoulli_dv`  where `coriolis_dv = -zeta_abs * u_cc` and `bernoulli_dv = -dB_dy_cc`.
+- Pearson correlation between `coriolis_dv` and `-bernoulli_dv` (perfect cancellation = +1.000).
+- Top 10 |bare| hot-spot locations.
+- Comparison to production `dv_d_dt` hot-spot locations.
+
+**Key findings.**
+
+1. **`Pearson(coriolis_dv, -bernoulli_dv) = +1.000000`** to 6 decimals.  Globally the two A-L sub-operators cancel almost perfectly; this validates that the bare-AL discretisation is *intended* to be geostrophically balanced.
+2. **At hot spots, both `|coriolis_dv|` and `|bernoulli_dv|` ≈ 2.5e-3** (background magnitude), but their sum is only 2.5e-5.  **The cancellation is ~100×** — `dv_cc_bare`/`|coriolis_dv|` ≈ 1 %.
+3. **Bare A-L hot spots are at the EIGHT CUBE VERTICES** (lat ±36.45°, lon ±45° / ±135°): 4 corner cells of face 4 (north pole) + 4 corner cells of face 5 (south pole), plus secondary peaks at face 3 (i=35, j=0/35) and similar.  These are the 8 vertices of the cubed-sphere geometry.
+4. **|residual|/|background| at cube vertices = ~1 %**, vs ~0.1 % at interior cells.  The cube vertex is the only place where the geostrophic cancellation is observably imperfect.
+5. **Production hot spots are at face 0/2 i=2 (NOT i=0)**.  Bare A-L at face 0 (i=2, j=34) is `-2.7e-6`; production `dv_d_dt` at face 0 v_d edge (i=2, j=34) is `-1.9e-5` — a **7× amplification**.
+
+**Causal chain identified.**
+
+The production hot-spot pattern is consistent with a 3-stage amplification:
+
+1. **Bare A-L** has 1 %-level imperfect cancellation at the 8 cube vertices (i=0/35 boundary cells).  Magnitude `dv_cc_bare ≈ 2.5e-5`.
+2. **`boundary_fix`** averages row 0/n-1 with row 1/n-2 (operators_cdgrid.py:2217), spreading the cube-vertex error into row 1.
+3. **`div_damp`** stencil at row 2 picks up the contaminated row-1 gradient and produces a tendency ~7× larger than the bare residual.  Net production hot spot at row 2 i=2 dominated by div_damp (84 %).
+
+The ROOT cause is the bare A-L imperfect geostrophic cancellation at cube vertices (1 % of background).  `boundary_fix` and `div_damp` are AMPLIFIERS, not creators, of the artifact.
+
+**Implication for the d_sw5 audit (iter-926/iter-927).**
+
+The 1 % bare A-L imperfect cancellation at cube vertices is *intrinsic to the A-L operator family* on the cubed sphere — the corner discretisation simply cannot perfectly cancel the two ~2.5e-3 terms there.  Adding or replacing with Fortran d_sw5 corner damping cannot fix THIS — d_sw5 is a damping operator, it operates on the AMPLIFIED stage, not the BARE stage.  Closing the W2 gap requires either:
+
+- **Fixing the bare A-L cancellation** at cube vertices (e.g., Fortran-faithful corner halo, Fortran's `_d2a2c_vect` corner sign-flip overrides porting — issue #7), OR
+- **Replacing the entire operator family** with Fortran's corner-based d_sw5/d_sw6 chain (issues #1, #2, #6 — multi-iter project).
+
+**iter-929 deliverables.**
+
+1. `scripts/diag_iter929_w2_bare_al_decomposition.py` — bare A-L decomposition diagnostic, runnable standalone.
+2. Top hot-spot table + magnitude summary + Pearson correlation in stdout.
+
+**Verification.**  No new test added — the diagnostic is interpretive, not a regression check.  Output is reproducible from the script.
+
+**Process.**  No production code change.  Cumulative iter-921→iter-929: 9 commits, 33 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
