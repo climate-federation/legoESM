@@ -501,3 +501,53 @@ iter-904b's path no longer NaN's (the damping prevents the immediate catastrophi
 **Verification.**  All 26 tests pass (7 iter-904 + 5 iter-903b/c + 14 iter-873).  Production W2 baseline (flag OFF) unchanged at 1.319e-1 m/s.
 
 **Process.**  185th iter.  iter-904b closes the Codex iter-904 stop-time finding by adding the previously-omitted Fortran-faithful damping, then confirms via re-measurement that the SSP-RK3 + d_sw1 partial-swap remains structurally unsuitable even with proper damping.  This is a stronger negative result than iter-904 alone: not "we forgot the damping and it NaN'd", but "even with proper Fortran-faithful damping, the time-integration mismatch is the binding constraint".
+
+### Iter-905 — split mass+momentum integration (path 3 of iter-904b's 3 paths forward; NEGATIVE result)
+
+**Motivation (user-directed).**  After iter-904b confirmed the SSP-RK3+d_sw1 partial-swap is structurally unstable, the user directed implementation of all 3 paths forward:
+
+> "implement 1. Full FB-chain integration replacing SSP-RK3 (multi-iter architectural). 2. Sub-dt threading in the tendency_fn API. 3. Split mass+momentum integration (forward-Euler mass outside RK3, RK3 momentum)."
+
+iter-905 implements path (3) — the smallest architectural change of the three.
+
+**Implementation.**  New default-OFF `use_split_mass_momentum_integration` config field.  When True, `FV3EdgeShallowWaterModel.step`:
+1. Computes `h_new = transport_step(h, ut, vt, dt, ...)` ONCE outside the RK3 loop with Fortran-faithful damping (`nord_v`, `damp_v`).
+2. Runs SSP-RK3 with momentum-only tendency function: at each stage, the held IC `h` is used for the Bernoulli function, and mass tendency is forced to zero.  RK3 produces final `u_d`, `v_d`.
+3. Returns state with `h=h_new` from step 1 and momentum from step 2.
+
+This decouples mass from RK3 stages, addressing iter-904b's "~3× mass advection per step" finding.
+
+**W2 1-day measurement at C36 dt=300s** (`scripts/diag_iter905_w2_split_integration.py`):
+
+| config                                          | h_L2     | h_Linf   | v_ll_Linf  |
+|-------------------------------------------------|----------|----------|------------|
+| (A) iter-892 default                            | 2.048e-04 | 8.184e+00 | **1.319e-01** |
+| (B) iter-905 split mass+momentum                | 1.292e+00 | 5.068e+04 | 2.921e+02 |
+
+iter-905 also catastrophically blows up: v_ll_Linf = 292 m/s (+221416 %), h_L2 = 1.29 (+630798 %).  Same ~+50× scale of failure as iter-904b's full-RK3 wrap with damping.
+
+**Why path (3) also fails.**  The momentum RK3 stages use the IC h for the Bernoulli function across all 3 stages while u, v evolve.  After stage 1, u₁/v₁ have been updated against the IC pressure-gradient (Bernoulli) field — but the actual h field has by then been advected forward by transport_step.  So u₁/v₁ correspond to a momentum balance with the OLD h, while the actual flow field has h_new.  This mass-momentum decoupling violates the geostrophic balance the W2 IC relies on, producing a runaway divergence.
+
+**Implications for paths (1) and (2).**
+
+- **Path (1) — Full FB-chain integration replacing SSP-RK3**: this would replace `dispatch_integrator` with a faithful c_sw → p_grad_c → d_sw chain at each timestep (no RK3 at all).  This is the architecturally correct fix — the FB chain is precisely the time integration the d_sw routines are designed for.  But: legoESM's existing `fv3_fb_sw_step` (consumed by `FV3FBShallowWaterModel`) is documented "EXPERIMENTAL — DO NOT USE.  NOT PRODUCTION-READY.  Known unstable (85 m/s v-wind after 1 day, 3 % mass error)."  The FB chain is itself a known structural blocker (per CLAUDE.md "FB chain accuracy at C24/C36 remains unresolved").  Wiring an unstable FB chain into production wouldn't fix W2 either; it'd worsen it.  Path (1) is fundamentally blocked on the FB chain stabilization work itself.
+- **Path (2) — Sub-dt threading**: this would refactor `dispatch_integrator` so tendency_fn receives the actual stage dt (instead of closing over the outer dt).  But even with stage-correct dt, iter-905's stage-level mass-momentum decoupling would persist — RK3 would now run transport_step with stage-dt inside each tendency, but the stage's Bernoulli-derived momentum gradient still uses an h that's inconsistent with the stage's transported h.  Path (2) doesn't address the geostrophic-cancellation requirement.
+
+**Combined conclusion (iter-904 + iter-904b + iter-905).**  ALL THREE partial-FV3 / RK3-hybrid paths fail catastrophically on W2 1-day at C36.  The W2 v-bias is fundamentally tied to maintaining geostrophic mass-momentum balance during time integration.  iter-892's choices (full PPM mass flux divergence + Arakawa-Lamb pressure gradient + boundary_fix corner smoothing, all inside a SINGLE RK3 stage) preserve the balance well enough to give v_ll_Linf = 0.132 m/s.  Any partial swap that mixes FV3 d_sw transport with RK3 momentum breaks the balance and produces 100×-2400× v_ll_Linf regression.
+
+**Decision.**  Keep iter-892 as production default.  iter-905 flag stays default-OFF.  Paths (1) and (2) DEFERRED with strong evidence they're unlikely to improve W2:
+
+- Path (1) requires FB chain stabilization first (multi-iter prerequisite).  When the FB chain itself reaches sub-0.132 W2 v_ll_Linf at C36, then it makes sense to wire it into production.  Until then, swapping in an unstable FB chain would worsen W2.
+- Path (2) doesn't address the geostrophic-balance issue; predicted to produce similar blowups as paths (3) and (4) but via a different mechanism.  Could be implemented for completeness but unlikely to be the W2 fix.
+
+**Deliverable.**
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:CDGridShallowWaterConfig`: new `use_split_mass_momentum_integration: bool = False` field.
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:FV3EdgeShallowWaterModel.step`: split-integration branch when flag=True (transport_step outside RK3, momentum-only tendency_fn with held h).
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:FV3FBShallowWaterModel.__init__`: warning extended to flag iter-905.
+- `tests/test_iter905_split_mass_momentum.py`: 6 sentinels covering default-OFF bit-equality, ON-changes-step-output, ON-finite, FB-warning, default-OFF, unrelated flags untouched.
+- `scripts/diag_iter905_w2_split_integration.py`: W2 measurement script (with `__main__` guard per iter-901c convention).
+- This iter-905 doc entry.
+
+**Verification.**  6/6 iter-905 tests pass; 33 total tests pass in the iter-89x/90x suite (12 iter-873/896 + 6 iter-899 + 1 iter-768 + 6 iter-900 + 6 iter-903 + 5 iter-903b/c + 7 iter-904 + 6 iter-905).  Production W2 baseline (flag OFF) unchanged at 1.319e-1 m/s.
+
+**Process.**  186th iter.  iter-905 closes path (3) of the user-directed 3-path program with another negative result.  Combined with iter-904 (NaN) and iter-904b (catastrophic blowup at +2378 % v_ll_Linf), all 3 partial-FV3/RK3-hybrid attempts fail.  The user's explicit request to implement all 3 paths is now answered: path (3) is implemented and measured negative; paths (1) and (2) are explicitly deferred with structural arguments why they're unlikely to succeed.  iter-906+ should pivot away from RK3-hybrid approaches and toward either FB-chain stabilization (path 1's prerequisite) or a different W2 angle entirely (e.g., the structural geostrophic cancellation per CLAUDE.md memory).

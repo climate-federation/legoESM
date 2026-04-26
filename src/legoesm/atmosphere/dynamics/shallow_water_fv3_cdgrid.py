@@ -265,6 +265,34 @@ class CDGridShallowWaterConfig(NamedTuple):
     # using FV3FBShallowWaterModel emits a UserWarning at __init__.
     use_fv3_dsw1_mass_transport: bool = False
 
+    # Iter-905 (default OFF): when True, the production
+    # `FV3EdgeShallowWaterModel.step` splits the time integration:
+    #   - Mass (h): updated ONCE per full dt via the true-FV3 d_sw1
+    #     finite-volume transport (`_d2a2c_vect` -> `transport_step`),
+    #     held fixed across the RK3 stages for momentum.
+    #   - Momentum (u_d, v_d): SSP-RK3 stages on momentum tendencies
+    #     ONLY, with `h` fixed at the IC h (mass tendency forced to
+    #     zero in tendency_fn so RK3 doesn't double-update mass).
+    # This addresses the iter-904/iter-904b structural finding that
+    # `use_fv3_dsw1_mass_transport=True` inside RK3 produces ~3x mass
+    # advection per step (because each stage calls transport_step at
+    # full dt).  Splitting forces mass to be advected exactly once
+    # per dt.
+    #
+    # Limitation: holding h fixed across RK3 stages breaks the
+    # momentum-mass conservation coupling that RK3 normally provides.
+    # Stage Bernoulli function uses the IC h instead of an evolving
+    # estimate; this is approximately first-order accurate in mass-
+    # momentum interactions but second/third-order in pure momentum
+    # advection.  iter-905 is intentionally an EXPERIMENTAL middle
+    # ground between iter-904's full-RK3 wrap and a true FB chain
+    # (which would replace dispatch_integrator entirely).
+    #
+    # SCOPE: consumed by `FV3EdgeShallowWaterModel.step` ONLY.
+    # `FV3FBShallowWaterModel.__init__` extends its iter-903b warning
+    # to flag this as well.
+    use_split_mass_momentum_integration: bool = False
+
     # Iter-872c-take3 (Codex pass-3): production divergence-damping
     # `dddmp` coefficient (Fortran `flagstruct%dddmp`,
     # fv_arrays.F90:360).  Default 0.2 preserves pre-iter-872
@@ -594,7 +622,8 @@ class FV3FBShallowWaterModel:
         # independent of JIT timing.
         if (self.config.fortran_faithful_ppm_left
                 or self.config.fortran_faithful_ppm_right
-                or self.config.use_fv3_dsw1_mass_transport):
+                or self.config.use_fv3_dsw1_mass_transport
+                or self.config.use_split_mass_momentum_integration):
             import warnings
             ignored = []
             if self.config.fortran_faithful_ppm_left:
@@ -603,6 +632,8 @@ class FV3FBShallowWaterModel:
                 ignored.append("fortran_faithful_ppm_right")
             if self.config.use_fv3_dsw1_mass_transport:
                 ignored.append("use_fv3_dsw1_mass_transport")
+            if self.config.use_split_mass_momentum_integration:
+                ignored.append("use_split_mass_momentum_integration")
             warnings.warn(
                 f"FV3FBShallowWaterModel ignores config flag(s) "
                 f"{', '.join(ignored)}: the FB chain (fv3_fb_sw_step) "
@@ -828,9 +859,49 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     h_s=jnp.zeros_like(s.h_s),
                 )
 
-            state_new = dispatch_integrator(
-                state, tendency_fn, dt, self.config.time_integrator,
-            )
+            if self.config.use_split_mass_momentum_integration:
+                # Iter-905: split mass+momentum integration.  Mass via
+                # transport_step ONCE outside RK3; momentum via RK3
+                # with h held fixed at the IC throughout the 3 stages.
+                from legoesm.core.fv3_sw_core import _d2a2c_vect
+                from legoesm.core.fv_tp_2d import transport_step
+                _, _, _, _, ut0, vt0 = _d2a2c_vect(
+                    state.u_d, state.v_d, self.cdgrid)
+                eff_nord = (min(2, self.config.nord)
+                            if self.config.nord_v < 0
+                            else self.config.nord_v)
+                h_new_split = transport_step(
+                    state.h, ut0, vt0, dt, self.cdgrid,
+                    nord=eff_nord, damp_c=self.config.damp_v,
+                    apply_fortran_xppm_boundary=(
+                        self.config.apply_fortran_xppm_boundary))
+                # Wrap tendency_fn to force mass tendency to zero AND
+                # to use the IC h for the Bernoulli function regardless
+                # of which RK3 stage we're in.  This decouples mass
+                # from the RK3 stages.
+                h_held = state.h
+                def tendency_fn_momentum_only(s):
+                    s_held = FV3EdgeShallowWaterState(
+                        h=h_held, u_d=s.u_d, v_d=s.v_d, h_s=s.h_s)
+                    inner = tendency_fn(s_held)
+                    return FV3EdgeShallowWaterState(
+                        h=jnp.zeros_like(s.h),
+                        u_d=inner.u_d, v_d=inner.v_d,
+                        h_s=jnp.zeros_like(s.h_s))
+                state_after_momentum = dispatch_integrator(
+                    state, tendency_fn_momentum_only, dt,
+                    self.config.time_integrator,
+                )
+                state_new = FV3EdgeShallowWaterState(
+                    h=h_new_split,
+                    u_d=state_after_momentum.u_d,
+                    v_d=state_after_momentum.v_d,
+                    h_s=state.h_s)
+            else:
+                state_new = dispatch_integrator(
+                    state, tendency_fn, dt,
+                    self.config.time_integrator,
+                )
 
             # Fortran-faithful POST-STEP del-n vorticity damping
             # (sw_core.F90:1948-1999).  Fortran applies del6_vt_flux
