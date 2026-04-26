@@ -4186,19 +4186,25 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         `fortran_a2b_corner_avg=True` opt-in path in
         `fv3_sw_tendencies` / `CDGridShallowWaterConfig` is KNOWN
         WORSE than the default 2-pt-avg on the canonical W2 matrix
-        config — enabling it makes W2 v_ll_Linf 1.89× worse
-        (0.159 → 0.300 m/s) and h_L2 2.17× worse (2.07e-4 → 4.5e-4).
+        config.
 
-        Iter-766 implemented Fortran's `a2b_ord4` 3-pt cube-corner
-        average (a2b_edge.F90:385-388) — a DIRECTION-NEUTRAL
-        Fortran scalar corner fill — as a candidate replacement for
-        the 2-pt-avg.  It was falsified at 1.89× blowup.
+        iter-766 (pre-iter-893) measurement on `apply_fortran_xppm
+        _boundary=False` config: ON makes W2 v_ll_Linf 1.89× worse
+        (0.159 → 0.300 m/s).  iter-897 update: tracking the iter-893
+        production matrix runner (which sets
+        `apply_fortran_xppm_boundary=True` per iter-893), the
+        measurement now reads OFF=0.132 / ON=0.346 (ratio 2.62×).
+        The known-worse property holds under either xppm_boundary
+        setting; iter-897 aligns this test config with the iter-893
+        production path so the regression sentinel measures the
+        SAME baseline as production.
 
         Iter-766 Codex 2nd-pass: sentinel now runs BOTH the OFF
-        (default) and ON paths and pins the ON/OFF RATIO.  A
-        float-pin on the ON path alone could miss a regression that
-        raises the OFF baseline and preserves the absolute ON floor.
-        The ratio assertion is robust to parallel drift of both.
+        (default a2b_corner_avg=False) and ON paths and pins the
+        ON/OFF RATIO.  A float-pin on the ON path alone could miss
+        a regression that raises the OFF baseline and preserves the
+        absolute ON floor.  The ratio assertion is robust to
+        parallel drift of both.
         """
         import jax.numpy as jnp
         import numpy as np
@@ -4232,6 +4238,13 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                 boundary_fix=True,
                 damp_v=0.06,
                 nord_v=2,
+                # Iter-897: align with iter-893 production matrix
+                # runner config so the OFF baseline matches the
+                # current production W2 baseline (0.132) rather than
+                # the pre-iter-893 baseline (0.159).  The known-worse
+                # property of `fortran_a2b_corner_avg` holds under
+                # both settings.
+                apply_fortran_xppm_boundary=True,
                 fortran_a2b_corner_avg=flag,
             )
             model = FV3EdgeShallowWaterModel(grid, config=cfg)
@@ -4256,35 +4269,36 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         v_ll_linf_off = _run_and_measure(flag=False)
         v_ll_linf_on = _run_and_measure(flag=True)
 
-        # The canonical default matrix result is v_ll_Linf ~0.159 m/s.
-        # Pin OFF baseline to stay near that value so a regression
-        # that raises the OFF floor is also caught.
+        # iter-897 baseline: under iter-893 production matrix config
+        # (apply_fortran_xppm_boundary=True), OFF v_ll_Linf is
+        # ~0.132 m/s — pin below 0.16 to track the iter-893 W2
+        # sentinel ceiling.  Pre-iter-893 the measurement was ~0.159
+        # under apply_fortran_xppm_boundary=False.
         self.assertLess(
-            v_ll_linf_off, 0.20,
-            msg=(f"OFF (default 2-pt-avg) baseline v_ll_Linf="
-                 f"{v_ll_linf_off:.3e} m/s drifted above 0.20 m/s — "
-                 f"the iter-766 measurement (0.159 m/s) no longer "
-                 f"applies.  Regenerate the ON vs OFF ratio."))
+            v_ll_linf_off, 0.16,
+            msg=(f"OFF (default 2-pt-avg, xppm_boundary=True) "
+                 f"baseline v_ll_Linf={v_ll_linf_off:.3e} m/s "
+                 f"drifted above 0.16 m/s — the iter-897 baseline "
+                 f"(~0.132 m/s) no longer applies.  Regenerate the "
+                 f"ON vs OFF ratio."))
 
-        # Iter-766 Codex 3rd-pass: pin ON absolute upper bound too,
-        # so a NaN/blowup to >1 m/s also fails.  Iter-766 measured
-        # ~0.300 m/s; 1.0 m/s is a conservative ceiling.
+        # iter-897: pin ON absolute upper bound.  Pre-iter-893 ON was
+        # 0.300; iter-897 ON is 0.346 (slightly higher because the
+        # OFF baseline shifted lower under iter-893).  1.0 m/s is a
+        # conservative ceiling that catches NaN/blowup.
         self.assertLess(
             v_ll_linf_on, 1.0,
-            msg=(f"ON (fortran_a2b_corner_avg=True) v_ll_Linf="
-                 f"{v_ll_linf_on:.3e} m/s exceeded 1.0 m/s — the "
-                 f"iter-766 measurement (0.300 m/s) no longer "
-                 f"applies.  Regenerate the pins."))
+            msg=(f"ON (fortran_a2b_corner_avg=True, xppm_boundary=True) "
+                 f"v_ll_Linf={v_ll_linf_on:.3e} m/s exceeded 1.0 m/s "
+                 f"— iter-897 measurement was ~0.346 m/s.  "
+                 f"Regenerate the pins."))
 
         # Pin ON path to be materially worse than OFF (>= 1.3× gap).
-        # Iter-766 measured ratio ~1.89×; iter-893 stop-time audit
-        # shows the ratio drifted to ~1.49× over the iter-888-892
-        # chain (cumulative numerical reshuffle in the broader
-        # pipeline; iter-892 default-OFF path at the `_ppm_reconstruct_1d`
-        # q_face level is bit-preserved, so drift is from elsewhere).
-        # Relaxed threshold from 1.5 to 1.3 preserves the "materially
-        # worse" property while absorbing the historical drift.  A
-        # ratio < 1.3 would still be surprising and merit audit.
+        # iter-766 measured ratio ~1.89× (pre-iter-893; with
+        # xppm_boundary=False).  iter-897 measurement under iter-893
+        # alignment: ratio ~2.62× (because xppm_boundary=True lowers
+        # OFF more than ON).  iter-893b relaxed threshold to 1.3
+        # absorbs both regimes.
         ratio = v_ll_linf_on / v_ll_linf_off
         self.assertGreater(
             ratio, 1.3,

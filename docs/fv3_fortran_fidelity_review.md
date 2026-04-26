@@ -2748,3 +2748,38 @@ A new flag added in either category needs the corresponding constant updated.
 - This iter-896 doc entry.
 
 **Process.**  175th iter.  Closes the iter-873 / iter-893 / iter-896 inventory triangle.  iter-893 promoted a flag from default-OFF to default-ON in production; iter-873 was updated to remove the "must NOT activate" check; iter-896 adds the complementary "MUST activate" check.  A future revert of iter-893 would now fail iter-896 (in <1 s, via AST scan) AND iter-895's runtime ceiling (~20 s) — two independent gates.
+
+### Iter-897 — align iter-766 known-worse sentinel with iter-893 production matrix config
+
+**Motivation.**  iter-766's `test_fortran_a2b_corner_avg_is_known_worse` pinned baselines from a pre-iter-893 measurement (OFF=0.159, ON=0.300, ratio=1.89).  After iter-893 enabled `apply_fortran_xppm_boundary=True` on the production matrix, the iter-766 test's config remained on the OLD matrix config (xppm_boundary=False), so its baselines diverged from production.  iter-897 aligns the test config with the iter-893 production matrix.
+
+**Cross-table at C36 1-day.**
+
+| `fortran_a2b_corner_avg` | `apply_fortran_xppm_boundary` | v_ll_Linf | ratio |
+|--------------------------|-------------------------------|-----------|-------|
+| False (default) | False (pre-iter-893) | 0.1593 m/s | 1.000 |
+| True (iter-766 ON) | False | 0.2373 m/s | 1.490 |
+| False | True (iter-893 production) | **0.1319 m/s** | 1.000 |
+| True | True | 0.3459 m/s | **2.622** |
+
+iter-897 alignment: pass `apply_fortran_xppm_boundary=True` in iter-766's `_run_and_measure` config.  The known-worse property of `fortran_a2b_corner_avg` strengthens (1.49× → 2.62×) under iter-893 — the iter-893 path lowers OFF more than ON, widening the gap.
+
+**Test changes.**
+
+- Add `apply_fortran_xppm_boundary=True` to iter-766's config (matches iter-893 matrix runner).
+- OFF baseline assertion: `< 0.20` → `< 0.16` (matches iter-893 W2 sentinel ceiling 0.16; iter-897 measures 0.1319).
+- ON ceiling: unchanged at `< 1.0` (still conservatively catches NaN/blowup; iter-897 measures 0.346).
+- Ratio assertion: unchanged at `> 1.3` (iter-893b relaxed; iter-897 measures 2.62, easily passes).
+- Docstring updated to document the iter-893 alignment + the cross-table.
+
+**What iter-897 does NOT change** (deliberate scope).
+
+- `test_boundary_fix_skip_corners_is_known_worse` (iter-769 pattern) and `test_fortran_vector_corner_fill_is_known_worse` (iter-767 pattern): these tests should similarly be aligned with the iter-893 matrix.  Deferred to iter-898+ as separate alignment work — each requires a fresh cross-table measurement and pin re-baselining.
+
+**Verification.**  All 152 tests pass (138 + 14 W2 boundary-error-budget; iter-897 didn't add new tests, just realigned an existing one).
+
+**Deliverable.**
+- `tests/unit/test_cdgrid_fv3_regression.py:test_fortran_a2b_corner_avg_is_known_worse`: config + assertion + docstring updated.
+- This iter-897 doc entry.
+
+**Process.**  176th iter.  iter-897 begins the broader audit of "tests that pin pre-iter-893 OFF baselines".  The W2 sentinel was already aligned in iter-893; iter-768 / iter-775 diagnostics in iter-893b; iter-766 in iter-897.  iter-769 / iter-767 known-worse tests still measure the pre-iter-893 OFF baseline — those are iter-898+ candidates for the same alignment treatment.
