@@ -441,19 +441,13 @@ def laplacian_cgrid(
     """
     is_3d = f.ndim == 3
 
-    if is_3d:
-        # vmap over levels
-        f_t = jnp.moveaxis(f, -1, 0)
-
-        def lap_2d(fi):
-            return laplacian_cgrid(fi, grid, mask=mask)
-
-        lap_t = jax.vmap(lap_2d)(f_t)
-        return jnp.moveaxis(lap_t, 0, -1)
-
-    # 2D case: compact gradient -> divergence
-    grad_x = gradient_x_cgrid(f, grid)  # (n_lat, n_lon+1)
-    grad_y = gradient_y_cgrid(f, grid)  # (n_lat+1, n_lon)
+    # ``gradient_x_cgrid`` / ``gradient_y_cgrid`` / ``divergence_cgrid``
+    # all natively support 3D inputs (they internally branch on ndim
+    # for the dx_u / dy_v / cos_lat broadcasting).  Call them directly
+    # on 3D — the previous moveaxis + vmap + moveaxis round-trip was
+    # redundant.
+    grad_x = gradient_x_cgrid(f, grid)  # (n_lat, n_lon+1[, nlev])
+    grad_y = gradient_y_cgrid(f, grid)  # (n_lat+1, n_lon[, nlev])
 
     if mask is not None:
         # Zero gradient at land-ocean boundaries
@@ -463,13 +457,20 @@ def laplacian_cgrid(
         # replaces alloc-zeros + concatenate-of-three.
         v_mask_interior = mask[:-1] * mask[1:]
         v_mask = jnp.pad(v_mask_interior, ((1, 1), (0, 0)))
-        grad_x = grad_x * u_mask
-        grad_y = grad_y * v_mask
+        if is_3d:
+            grad_x = grad_x * u_mask[..., jnp.newaxis]
+            grad_y = grad_y * v_mask[..., jnp.newaxis]
+        else:
+            grad_x = grad_x * u_mask
+            grad_y = grad_y * v_mask
 
     lap = divergence_cgrid(grad_x, grad_y, grid)
 
     if mask is not None:
-        lap = lap * mask
+        if is_3d:
+            lap = lap * mask[..., jnp.newaxis]
+        else:
+            lap = lap * mask
 
     return lap
 
