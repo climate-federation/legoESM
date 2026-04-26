@@ -199,6 +199,16 @@ class CDGridShallowWaterConfig(NamedTuple):
     # `docs/fv3_fortran_fidelity_review.md` for the index-map analysis.
     # RIGHT-side overrides are unchanged in iter-900 (deferred to
     # iter-901+).
+    #
+    # SCOPE (iter-903b clarification): consumed by
+    # `FV3EdgeShallowWaterModel.step` ONLY — that model forwards into
+    # `fv3_sw_tendencies` -> `cgrid_mass_flux_divergence` ->
+    # `_ppm_reconstruct_1d` where the override fires.  The
+    # `FV3FBShallowWaterModel.step` path uses the FB chain
+    # (`fv3_fb_sw_step` -> `_ppm_1d` in `fv_tp_2d.py`) which does NOT
+    # consume `_ppm_reconstruct_1d`; setting this flag while using
+    # `FV3FBShallowWaterModel` is detected at runtime and a clear
+    # warning is emitted (see the FB step entry point).
     fortran_faithful_ppm_left: bool = False
 
     # Iter-903 (default OFF): symmetric counterpart to
@@ -220,6 +230,12 @@ class CDGridShallowWaterConfig(NamedTuple):
     # analysis.  iter-892's q_face[n+1] override is REMOVED in this
     # branch — that slot reverts to the standard 4th-order interior
     # stencil because Fortran has no boundary override at al(n-1).
+    #
+    # SCOPE (iter-903b clarification): same as
+    # `fortran_faithful_ppm_left` — consumed by
+    # `FV3EdgeShallowWaterModel.step` ONLY.  Setting this flag while
+    # using `FV3FBShallowWaterModel.step` is detected at runtime and
+    # a clear warning is emitted.
     fortran_faithful_ppm_right: bool = False
 
     # Iter-872c-take3 (Codex pass-3): production divergence-damping
@@ -549,6 +565,35 @@ class FV3FBShallowWaterModel:
         """Advance one time step using FV3 forward-backward."""
         from legoesm.core.precision import cast_pytree
         from legoesm.core.fv3_sw_core import fv3_fb_sw_step
+
+        # Iter-903b: warn if the user enabled the iter-900/iter-903
+        # `fortran_faithful_ppm_{left,right}` flags on this model.
+        # Those flags are consumed by `_ppm_reconstruct_1d` (production
+        # CDGrid PPM) only; the FB chain (`fv3_fb_sw_step` ->
+        # `_d_sw_native` -> `transport_step` -> `fv_tp_2d` -> `_ppm_1d`)
+        # never reaches `_ppm_reconstruct_1d`, so the flags would be
+        # silently ignored without this warning.  Codex iter-903 stop-
+        # time review correctly flagged this hazard.
+        if (self.config.fortran_faithful_ppm_left
+                or self.config.fortran_faithful_ppm_right):
+            import warnings
+            ignored = []
+            if self.config.fortran_faithful_ppm_left:
+                ignored.append("fortran_faithful_ppm_left")
+            if self.config.fortran_faithful_ppm_right:
+                ignored.append("fortran_faithful_ppm_right")
+            warnings.warn(
+                f"FV3FBShallowWaterModel.step ignores config flag(s) "
+                f"{', '.join(ignored)}: the FB chain (fv3_fb_sw_step) "
+                f"does NOT consume _ppm_reconstruct_1d, so iter-900/"
+                f"iter-903 LEFT/RIGHT cube-edge Fortran-faithful "
+                f"overrides have no effect here.  These flags are "
+                f"specific to FV3EdgeShallowWaterModel "
+                f"(apply_fortran_xppm_boundary on the production "
+                f"CDGrid PPM path).  Either switch to "
+                f"FV3EdgeShallowWaterModel, or unset the flag(s) on "
+                f"this config to silence the warning.",
+                UserWarning, stacklevel=2)
 
         state_c = cast_pytree(state, None, "compute")
 
