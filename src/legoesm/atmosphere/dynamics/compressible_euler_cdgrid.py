@@ -236,12 +236,24 @@ def cdgrid_compressible_euler_slow_tendencies(
         dtracers_dt = jnp.zeros_like(tracers)
 
     # --- 13. Hyperdiffusion ---
+    # Stack (u, v, theta_p) along a trailing axis and fold into the level
+    # dim so a single ``hyperdiffusion_3d`` (∇⁴ = ∇²∇², two pad_halo_4d
+    # MPI exchanges) handles all three fields, replacing the prior 3
+    # sequential calls that each issued their own halo pads.  rho_p uses
+    # a different coefficient (hyperdiff_rho_coeff), so it stays separate.
     if config.hyperdiff_coeff > 0:
-        du_dt = du_dt + hyperdiffusion_3d(u, grid, config.hyperdiff_coeff)
-        dv_dt = dv_dt + hyperdiffusion_3d(v, grid, config.hyperdiff_coeff)
-        dtheta_p_dt = dtheta_p_dt + hyperdiffusion_3d(
-            theta_p, grid, config.hyperdiff_coeff,
+        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
+        hyper_stack = jnp.stack(
+            [u, v, theta_p], axis=-1,
+        )  # (6, n, n, nlev, 3)
+        hyper_flat = hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 3)
+        hyper_out_flat = hyperdiffusion_3d(
+            hyper_flat, grid, config.hyperdiff_coeff,
         )
+        hyper_out = hyper_out_flat.reshape(n_face_h, n_i_h, n_j_h, nlev_h, 3)
+        du_dt = du_dt + hyper_out[..., 0]
+        dv_dt = dv_dt + hyper_out[..., 1]
+        dtheta_p_dt = dtheta_p_dt + hyper_out[..., 2]
     if config.hyperdiff_rho_coeff > 0:
         drho_p_dt = drho_p_dt + hyperdiffusion_3d(
             rho_p, grid, config.hyperdiff_rho_coeff,
