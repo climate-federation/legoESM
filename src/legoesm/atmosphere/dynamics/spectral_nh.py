@@ -165,11 +165,29 @@ def spectral_nh_slow_tendencies(
     J = terrain_metric.jacobian   # (n_lat, n_lon)
 
     # --- 1. Transform to grid ---
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
+    # Batch the four (n_sh, nlev) syntheses into one — vor, div,
+    # theta_p, rho_p all share shape and the inverse SH transform
+    # treats the trailing axis as a passive batch (segment_sum runs
+    # along n_sh, IRFFT runs along longitude).  ``w_hat`` has
+    # (n_sh, nlev+1) — stays separate.  4 SH-syntheses → 1 + 1 = 2.
+    n_sh, nlev_t = state.vor_hat.data.shape
+    _vdtr_stack = jnp.stack(
+        [
+            state.vor_hat.data,
+            state.div_hat.data,
+            state.theta_prime_hat.data,
+            state.rho_prime_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, nlev, 4)
+    _vdtr_flat = _vdtr_stack.reshape(n_sh, nlev_t * 4)
+    _vdtr_grid_flat = sh_synthesis_3d(grid, _vdtr_flat)  # (n_lat, n_lon, nlev*4)
+    _vdtr_grid = _vdtr_grid_flat.reshape(grid.n_lat, grid.n_lon, nlev_t, 4)
+    vor = _vdtr_grid[..., 0]
+    div = _vdtr_grid[..., 1]
+    theta_p = _vdtr_grid[..., 2]
+    rho_p = _vdtr_grid[..., 3]
     w = sh_synthesis_3d(grid, state.w_hat.data)        # (n_lat, n_lon, nlev+1)
-    theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
-    rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
 
     n_tracers = state.tracers_hat.data.shape[-1] if state.tracers_hat.data.ndim >= 3 else 0
 
