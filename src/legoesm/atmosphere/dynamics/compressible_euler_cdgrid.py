@@ -198,16 +198,36 @@ def cdgrid_compressible_euler_slow_tendencies(
     # --- 12. Tracer advection (advective form) ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
     if n_tracers > 0:
-        tracers_t = jnp.moveaxis(tracers, -1, 0)
+        # Fold the tracer axis into the level axis so
+        # ``cgrid_mass_flux_divergence`` runs ONE ``pad_halo_4d`` for all
+        # tracers instead of n_tracers separate halo exchanges under
+        # vmap-over-tracers.  The operator's 4D path passes the trailing
+        # axis through passively (PPM operates on (i, j) only).
+        n_face, n_i, n_j, nlev_t, _ = tracers.shape
+        tracers_flat = tracers.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
+        # u_c, v_c, div_v are the same for every tracer; tile across the
+        # combined level/tracer trailing axis.  ``jnp.tile`` materializes
+        # but only once per timestep (vs n_tracers separate halo MPI msgs).
+        if n_tracers == 1:
+            u_c_b, v_c_b, div_v_b = u_c, v_c, div_v
+        else:
+            u_c_b = jnp.tile(u_c, (1, 1, 1, n_tracers))
+            v_c_b = jnp.tile(v_c, (1, 1, 1, n_tracers))
+            div_v_b = jnp.tile(div_v, (1, 1, 1, n_tracers))
+        flux_flat = cgrid_mass_flux_divergence(
+            tracers_flat, u_c_b, v_c_b, cdgrid,
+        )
+        horiz_flat = flux_flat + tracers_flat * div_v_b
+        horiz = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
 
-        def _single_tracer(q):
-            horiz = (cgrid_mass_flux_divergence(q, u_c, v_c, cdgrid)
-                     + q * div_v)
-            vert = vertical_advection_height(q, w, dz, dz_half, J)
-            return horiz + vert
+        # Vertical advection per-tracer — local stencil along axis -1, no
+        # halo cost.  vmap over the trailing axis so JAX produces one
+        # batched kernel rather than n_tracers separate ones.
+        def _vert_one(q):
+            return vertical_advection_height(q, w, dz, dz_half, J)
 
-        dtracers_dt_t = jax.vmap(_single_tracer)(tracers_t)
-        dtracers_dt = jnp.moveaxis(dtracers_dt_t, 0, -1)
+        vert = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(tracers)
+        dtracers_dt = horiz + vert
     else:
         dtracers_dt = jnp.zeros_like(tracers)
 
