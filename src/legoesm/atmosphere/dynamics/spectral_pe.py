@@ -237,9 +237,26 @@ def spectral_pe_tendencies(
         _dealias_3d = None
 
     # --- 1. Transform to grid space ---
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
-    T = sh_synthesis_3d(grid, state.T_hat.data)
+    # Stack {vor, div, T} along a trailing axis and fold into the level
+    # axis so a single ``sh_synthesis_3d`` (one ``segment_sum`` + one
+    # IRFFT) handles all three fields, replacing three sequential calls
+    # that each launched their own segment_sum + IRFFT kernels.  The
+    # trailing axis is purely passive: ``Pnm[..., None] * coeffs[None, :, :]``
+    # broadcasts cleanly, ``segment_sum`` operates on the leading n_sh
+    # axis, and the IRFFT runs along the longitude axis — none touch
+    # the trailing batch axis.  Saves 2 segment_sums and 2 IRFFTs per
+    # RK substage.
+    n_sh, nlev = state.vor_hat.data.shape
+    _hat_stack = jnp.stack(
+        [state.vor_hat.data, state.div_hat.data, state.T_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 3)
+    _hat_flat = _hat_stack.reshape(n_sh, nlev * 3)
+    _grid_flat = sh_synthesis_3d(grid, _hat_flat)  # (n_lat, n_lon, nlev*3)
+    _grid_stack = _grid_flat.reshape(grid.n_lat, grid.n_lon, nlev, 3)
+    vor = _grid_stack[..., 0]
+    div = _grid_stack[..., 1]
+    T = _grid_stack[..., 2]
     # Smooth positivity protection (C∞ differentiable, scaled softplus for ~0.07K bias)
     _sp_scale = 0.1
     T = T + _sp_scale * jax.nn.softplus((config.T_min - T) / _sp_scale)
