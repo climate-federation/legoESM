@@ -490,19 +490,29 @@ def spectral_ocean_tendencies(
 
     # --- 17. Spectral hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
-        dvor_hat = dvor_hat + spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
+        # Batch all four pointwise hyperdiffusions (vor, div, T, S)
+        # into one call by stacking along a trailing axis.
+        # ``spectral_hyperdiffusion_3d`` is purely ``damping * coeffs``,
+        # so the trailing axis is a passive batch.  Same exploit as
+        # Loops 120/121 for spectral PE/NH; here we collapse 2 + 2
+        # vmap'd tracer calls (4 total) into 1.
+        n_sh_h, nlev_h = state.vor_hat.data.shape
+        # tracers_hat has shape (n_tracers, n_sh, nlev) — move tracer axis
+        # to trailing for stacking.
+        _T_hat = tracers_hat[0]  # (n_sh, nlev)
+        _S_hat = tracers_hat[1]
+        _vdts_stack = jnp.stack(
+            [state.vor_hat.data, state.div_hat.data, _T_hat, _S_hat], axis=-1,
+        )  # (n_sh, nlev, 4)
+        _hd_stack = spectral_hyperdiffusion_3d(
+            grid, _vdts_stack.reshape(n_sh_h, nlev_h * 4),
+            config.hyperdiff_coeff, config.hyperdiff_order,
+        ).reshape(n_sh_h, nlev_h, 4)
+        dvor_hat = dvor_hat + _hd_stack[..., 0]
+        ddiv_hat = ddiv_hat + _hd_stack[..., 1]
+        dtr_hat = dtr_hat + jnp.stack(
+            [_hd_stack[..., 2], _hd_stack[..., 3]], axis=0,
         )
-        ddiv_hat = ddiv_hat + spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
-        dtr_hat = dtr_hat + jax.vmap(
-            lambda coeffs: spectral_hyperdiffusion_3d(
-                grid, coeffs, config.hyperdiff_coeff, config.hyperdiff_order,
-            ),
-            in_axes=0,
-            out_axes=0,
-        )(tracers_hat)
 
     # --- 17b. Barotropic (eta) hyperdiffusion ---
     # The spectral solver uses unsplit SSP-RK3 for the entire system,
