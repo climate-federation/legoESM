@@ -507,15 +507,22 @@ def spectral_pe_tendencies(
         hyperdiff_coeff = hyperdiff_coeff * config.si_hyperdiff_boost
 
     if hyperdiff_coeff > 0 and not config.implicit_hyperdiff:
-        base_diff_vor = spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
-        base_diff_div = spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
-        base_diff_T = spectral_hyperdiffusion_3d(
-            grid, state.T_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
+        # Batch the three pointwise spectral hyperdiffusions (vor, div,
+        # T) into one call by stacking the spectral coefficients along
+        # a trailing axis.  ``spectral_hyperdiffusion_3d`` is just
+        # ``damping[:, None] * coeffs`` — element-wise multiplication
+        # with the trailing axis as a passive batch — so 3 separate
+        # kernel launches collapse to 1 fused multiply on the thicker
+        # tensor.  Same-axis pattern as Loops 93 / 97 for the SH
+        # transforms above.
+        n_sh_h, nlev_h = state.vor_hat.data.shape
+        _vdT_hat = jnp.stack(
+            [state.vor_hat.data, state.div_hat.data, state.T_hat.data], axis=-1,
+        )  # (n_sh, nlev, 3)
+        base_diff_stack = spectral_hyperdiffusion_3d(
+            grid, _vdT_hat.reshape(n_sh_h, nlev_h * 3),
+            hyperdiff_coeff, config.hyperdiff_order,
+        ).reshape(n_sh_h, nlev_h, 3)
 
         if config.hyperdiff_pscale > 0:
             # Level-dependent scaling: (p_ref/p_k)^exponent
@@ -526,14 +533,12 @@ def spectral_pe_tendencies(
                 sigma_full = sigma_coord.sigma_full
             p_ref_sigma = sigma_full[-1]  # near-surface reference
             scale = (p_ref_sigma / jnp.clip(sigma_full, 1e-6, None)) ** config.hyperdiff_pscale
-            scale = scale[None, :]  # (1, nlev)
-            base_diff_vor = base_diff_vor * scale
-            base_diff_div = base_diff_div * scale
-            base_diff_T = base_diff_T * scale
+            # Apply scale on the level axis once for the stacked tensor.
+            base_diff_stack = base_diff_stack * scale[None, :, None]
 
-        dvor_hat = dvor_hat + base_diff_vor
-        ddiv_hat = ddiv_hat + base_diff_div
-        dT_hat = dT_hat + base_diff_T
+        dvor_hat = dvor_hat + base_diff_stack[..., 0]
+        ddiv_hat = ddiv_hat + base_diff_stack[..., 1]
+        dT_hat = dT_hat + base_diff_stack[..., 2]
 
     # --- 17. Add physics tendencies if provided ---
     if physics_tendency is not None:
