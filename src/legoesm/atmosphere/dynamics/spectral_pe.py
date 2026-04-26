@@ -1262,15 +1262,28 @@ def spectral_pe_to_grid(
     -------
     dict with keys: 'u', 'v', 'T', 'vor', 'div', 'lnps', 'p_s', 'phis'
     """
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
-    T = sh_synthesis_3d(grid, state.T_hat.data)
-    lnps = jnp.clip(
-        sh_synthesis(grid, state.lnps_hat.data),
-        _LNPS_MIN,
-        _LNPS_MAX,
-    )
-    phis = sh_synthesis(grid, state.phis_hat.data)
+    # Batch the three (vor, div, T) syntheses along a trailing axis
+    # and the two 2D (lnps, phis) syntheses along a separate trailing
+    # axis — same exploit as the tendency block at the top of the file.
+    # 5 SH syntheses → 2 (one for the 3D fields, one for the 2D fields).
+    n_sh_d, nlev_d = state.vor_hat.data.shape
+    _vdT_stack = jnp.stack(
+        [state.vor_hat.data, state.div_hat.data, state.T_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 3)
+    _vdT_grid = sh_synthesis_3d(
+        grid, _vdT_stack.reshape(n_sh_d, nlev_d * 3),
+    ).reshape(grid.n_lat, grid.n_lon, nlev_d, 3)
+    vor = _vdT_grid[..., 0]
+    div = _vdT_grid[..., 1]
+    T = _vdT_grid[..., 2]
+
+    _lp_pair_diag = jnp.stack(
+        [state.lnps_hat.data, state.phis_hat.data], axis=-1,
+    )  # (n_sh, 2)
+    _lp_grid_diag = sh_synthesis_3d(grid, _lp_pair_diag)  # (n_lat, n_lon, 2)
+    lnps = jnp.clip(_lp_grid_diag[..., 0], _LNPS_MIN, _LNPS_MAX)
+    phis = _lp_grid_diag[..., 1]
 
     u_cos, v_cos = uv_from_vordiv_3d(
         grid, state.vor_hat.data, state.div_hat.data,
