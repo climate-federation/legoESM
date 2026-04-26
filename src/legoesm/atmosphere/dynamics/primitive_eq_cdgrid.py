@@ -564,9 +564,24 @@ def fv3_to_hydrostatic(
     """Convert FV3 D-grid state to cell-centre HydrostaticState.
 
     Uses corner-to-centre interpolation for the wind components.
+    Batches (u_d, v_d) into a single ``_interp_corner_to_center`` call
+    so the 4-point average kernel runs once on the thicker stacked
+    tensor instead of twice — same passive-trailing-axis pattern used
+    in the tendency function.
     """
-    u_cc = _interp_corner_to_center(state.u_d.data)
-    v_cc = _interp_corner_to_center(state.v_d.data)
+    u_d = state.u_d.data
+    v_d = state.v_d.data
+    n_face_a, n_corner_i, n_corner_j, nlev_a = u_d.shape
+    _uv_d = jnp.stack([u_d, v_d], axis=-1)  # (face, n+1, n+1, nlev, 2)
+    _uv_cc_flat = _interp_corner_to_center(
+        _uv_d.reshape(n_face_a, n_corner_i, n_corner_j, nlev_a * 2),
+    )
+    _uv_cc = _uv_cc_flat.reshape(
+        _uv_cc_flat.shape[0], _uv_cc_flat.shape[1], _uv_cc_flat.shape[2],
+        nlev_a, 2,
+    )
+    u_cc = _uv_cc[..., 0]
+    v_cc = _uv_cc[..., 1]
     return HydrostaticState(
         u=state.u_d.replace(data=u_cc, name="u"),
         v=state.v_d.replace(data=v_cc, name="v"),
@@ -681,9 +696,25 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 s_cc = fv3_to_hydrostatic(s, cdgrid)
                 _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
                 phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-                # Convert cell-centre physics tendencies to D-grid corners
-                pu_d = _interp_center_to_corner(phys_cc.du_dt.data, cdgrid)
-                pv_d = _interp_center_to_corner(phys_cc.dv_dt.data, cdgrid)
+                # Convert cell-centre physics (du_dt, dv_dt) tendencies
+                # to D-grid corners — batched: stack along trailing
+                # axis and run a single halo + 4-point average instead
+                # of two.  Matches the corner-interp batching pattern
+                # used in the tendency function.
+                _pu_cc = phys_cc.du_dt.data
+                _pv_cc = phys_cc.dv_dt.data
+                _np_face, _np_i, _np_j, _np_lev = _pu_cc.shape
+                _pp = jnp.stack([_pu_cc, _pv_cc], axis=-1)
+                _pp_d_flat = _interp_center_to_corner(
+                    _pp.reshape(_np_face, _np_i, _np_j, _np_lev * 2),
+                    cdgrid,
+                )
+                _pp_d = _pp_d_flat.reshape(
+                    _pp_d_flat.shape[0], _pp_d_flat.shape[1], _pp_d_flat.shape[2],
+                    _np_lev, 2,
+                )
+                pu_d = _pp_d[..., 0]
+                pv_d = _pp_d[..., 1]
                 phys_tend_dgrid = FV3HydrostaticTendencies(
                     du_d_dt=phys_cc.du_dt.replace(data=pu_d, name="du_d_dt"),
                     dv_d_dt=phys_cc.dv_dt.replace(data=pv_d, name="dv_d_dt"),
@@ -759,8 +790,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         D-grid corners at entry and back to cell centres at exit;
         internally the dycore operates entirely on D-grid winds.
         """
-        u_d = _interp_center_to_corner(state.u.data, self.cdgrid)
-        v_d = _interp_center_to_corner(state.v.data, self.cdgrid)
+        # Batch the cell-centre → D-grid interpolation for u, v: same
+        # passive-trailing-axis pattern as the tendency function and
+        # ``fv3_to_hydrostatic`` adapter.  One halo + one 4-point
+        # average shared between u and v.
+        _u_in = state.u.data
+        _v_in = state.v.data
+        _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
+        _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
+        _uv_d_flat = _interp_center_to_corner(
+            _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2),
+            self.cdgrid,
+        )
+        _uv_d = _uv_d_flat.reshape(
+            _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
+            _ni_lev, 2,
+        )
+        u_d = _uv_d[..., 0]
+        v_d = _uv_d[..., 1]
         fv3_state = FV3HydrostaticState(
             u_d=state.u.replace(data=u_d, name="u_d"),
             v_d=state.v.replace(data=v_d, name="v_d"),
@@ -803,9 +850,20 @@ def cdgrid_hydrostatic_tendencies(
     if isinstance(state, FV3HydrostaticState):
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
 
-    # HydrostaticState path: convert cell-centre -> D-grid
-    u_d = _interp_center_to_corner(state.u.data, cdgrid)
-    v_d = _interp_center_to_corner(state.v.data, cdgrid)
+    # HydrostaticState path: convert cell-centre -> D-grid (batched).
+    _u_in = state.u.data
+    _v_in = state.v.data
+    _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
+    _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
+    _uv_d_flat = _interp_center_to_corner(
+        _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2), cdgrid,
+    )
+    _uv_d = _uv_d_flat.reshape(
+        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
+        _ni_lev, 2,
+    )
+    u_d = _uv_d[..., 0]
+    v_d = _uv_d[..., 1]
     fv3_state = FV3HydrostaticState(
         u_d=state.u.replace(data=u_d, name="u_d"),
         v_d=state.v.replace(data=v_d, name="v_d"),
@@ -816,9 +874,20 @@ def cdgrid_hydrostatic_tendencies(
     )
     fv3_tend = fv3_hydrostatic_tendencies(fv3_state, grid, sigma_coord, cdgrid, config, physics_tendency)
 
-    # Convert D-grid tendencies back to cell-centre
-    du_cc = _interp_corner_to_center(fv3_tend.du_d_dt.data)
-    dv_cc = _interp_corner_to_center(fv3_tend.dv_d_dt.data)
+    # Convert D-grid tendencies back to cell-centre (batched).
+    _du_d = fv3_tend.du_d_dt.data
+    _dv_d = fv3_tend.dv_d_dt.data
+    _nd_face, _nd_i, _nd_j, _nd_lev = _du_d.shape
+    _duv_d = jnp.stack([_du_d, _dv_d], axis=-1)
+    _duv_cc_flat = _interp_corner_to_center(
+        _duv_d.reshape(_nd_face, _nd_i, _nd_j, _nd_lev * 2),
+    )
+    _duv_cc = _duv_cc_flat.reshape(
+        _duv_cc_flat.shape[0], _duv_cc_flat.shape[1], _duv_cc_flat.shape[2],
+        _nd_lev, 2,
+    )
+    du_cc = _duv_cc[..., 0]
+    dv_cc = _duv_cc[..., 1]
 
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
@@ -838,9 +907,22 @@ def hydrostatic_to_fv3(
     """Convert cell-centre HydrostaticState to FV3 D-grid state.
 
     Uses centre-to-corner interpolation for the wind components.
+    Batches (u, v) into a single ``_interp_center_to_corner`` call —
+    one halo + 4-point average shared between u and v.
     """
-    u_d = _interp_center_to_corner(state.u.data, cdgrid)
-    v_d = _interp_center_to_corner(state.v.data, cdgrid)
+    _u_in = state.u.data
+    _v_in = state.v.data
+    _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
+    _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
+    _uv_d_flat = _interp_center_to_corner(
+        _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2), cdgrid,
+    )
+    _uv_d = _uv_d_flat.reshape(
+        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
+        _ni_lev, 2,
+    )
+    u_d = _uv_d[..., 0]
+    v_d = _uv_d[..., 1]
     return FV3HydrostaticState(
         u_d=state.u.replace(data=u_d, name="u_d"),
         v_d=state.v.replace(data=v_d, name="v_d"),
