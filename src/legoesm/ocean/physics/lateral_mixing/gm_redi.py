@@ -33,19 +33,20 @@ References
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
+from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    _EPS,
+    compute_visbeck_kappa_gm,
+    dm95_taper,
+    vertical_flux_divergence,
+)
 from legoesm.ocean.vertical import OceanZStarCoordinate
-from legoesm.ocean.eos import compute_buoyancy_frequency, rho_0 as _RHO_0_DEFAULT
-from legoesm import constants
-
-_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 
 def _compute_tapered_slopes(
@@ -87,89 +88,7 @@ def _compute_tapered_slopes(
     S_y = jnp.clip(-drho_dy_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
 
     # DM95 tapering: smooth taper near S_max
-    S_mag = jnp.sqrt(S_x**2 + S_y**2 + eps)
-    taper = 0.5 * (1.0 + jnp.tanh((cfg.S_max - S_mag) / (0.1 * cfg.S_max + eps)))
-
-    S_x = S_x * taper
-    S_y = S_y * taper
-
-    return S_x, S_y, taper
-
-
-def compute_visbeck_kappa_gm(
-    rho: jnp.ndarray,
-    S_x: jnp.ndarray,
-    S_y: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
-    jacobian: jnp.ndarray,
-    f_coriolis: jnp.ndarray,
-    cfg: VisbeckConfig,
-    rho_ref: float = _RHO_0_DEFAULT,
-) -> jnp.ndarray:
-    """Visbeck (1997) adaptive GM coefficient.
-
-    ``κ_Visbeck(x, y) = α · L² · ⟨N · |S|⟩_z`` with the depth-average
-    weighted by the local interface thickness, optionally using the
-    local first-baroclinic Rossby radius as the mixing length.
-
-    Parameters
-    ----------
-    rho : (..., nlev) in-situ density.
-    S_x, S_y : (..., nlev-1) tapered isopycnal slopes at interfaces.
-    z_coord : OceanZStarCoordinate.
-    jacobian : (...,) z* Jacobian at cell centres.
-    f_coriolis : (...,) Coriolis parameter (same horizontal shape as
-        ``jacobian``, broadcastable).
-    cfg : VisbeckConfig.
-
-    Returns
-    -------
-    kappa : (...,) horizontally-varying κ_GM [m²/s], clamped to the
-        configured bounds.  Shape matches ``jacobian`` — i.e. one value
-        per column.
-    """
-    eps = _EPS
-    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
-    # Interior interface thicknesses (used as weights for the depth-avg).
-    dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
-
-    # --- Local growth rate σ_Eady ≈ N · |S| at each interior interface ---
-    # compute_buoyancy_frequency returns ``-(g/rho_ref) · drho/dz``; we
-    # must pass the Boussinesq reference density ``rho_0`` so that N²
-    # has the correct O(1e-5) magnitude for seawater.  Using rho_ref=1
-    # overstates N² by ~10³ (Boussinesq reference density) and destroys
-    # both σ and the Rossby-radius length scale.
-    N2 = compute_buoyancy_frequency(
-        rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
-    )
-    N = jnp.sqrt(jnp.maximum(N2, 0.0))
-    # Regularise the square-root gradient at zero slope with a value much
-    # smaller than any realistic ocean slope (≥ 1e-6).  The float32 eps
-    # (1.19e-7) was too large and produced an apparent |S| ≈ 3e-4 even
-    # for exactly-zero inputs, which pushed κ well above ``kappa_min``.
-    S_mag = jnp.sqrt(S_x ** 2 + S_y ** 2 + 1e-30)
-    sigma = N * S_mag                                   # (..., nlev-1)
-
-    # --- Depth-weighted average of σ_Eady ---
-    w_total = jnp.sum(dz_half, axis=-1)
-    sigma_bar = jnp.sum(sigma * dz_half, axis=-1) / jnp.maximum(w_total, eps)
-
-    # --- Mixing length L ---
-    if cfg.use_rossby_radius:
-        # Arithmetic depth-average of N itself — NOT sqrt(<N²>), which is
-        # always ≥ <N> and would over-estimate the Rossby radius for any
-        # vertically varying stratification.  Using <N> matches the
-        # standard WKB scale (1/H)·∫N dz used in textbook Rossby-radius
-        # definitions (Chelton et al. 1998, Gill 1982).
-        N_bar = jnp.sum(N * dz_half, axis=-1) / jnp.maximum(w_total, eps)
-        H_col = jnp.sum(dz_actual, axis=-1)
-        f_safe = jnp.maximum(jnp.abs(f_coriolis), cfg.f_min)
-        L = jnp.clip(N_bar * H_col / f_safe, cfg.L_min, cfg.L_max)
-    else:
-        L = jnp.full_like(sigma_bar, cfg.L_fixed)
-
-    kappa = cfg.alpha * L ** 2 * sigma_bar
-    return jnp.clip(kappa, cfg.kappa_min, cfg.kappa_max)
+    return dm95_taper(S_x, S_y, cfg.S_max, eps)
 
 
 def _tracer_tendency_gm_redi(
@@ -261,11 +180,8 @@ def _tracer_tendency_gm_redi(
     F_z = ((kappa_Redi + kappa_GM_b) * (S_x * dq_dx_half + S_y * dq_dy_half)
            + kappa_Redi * S2_half * dq_dz_half)
 
-    # Vertical flux divergence at full levels: dF_z/dz
-    # dq/dt_vert[k] = (F_z[k-1/2] - F_z[k+1/2]) / dz[k]
-    # with F_z = 0 at surface and bottom boundaries
-    F_z_ext = jnp.concatenate([z_pad, F_z, z_pad], axis=-1)
-    dq_vert = (F_z_ext[..., :-1] - F_z_ext[..., 1:]) / jnp.maximum(dz_actual, eps)
+    # Vertical flux divergence at full levels
+    dq_vert = vertical_flux_divergence(F_z, dz_actual, eps)
 
     return dq_h + dq_vert
 

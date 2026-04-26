@@ -524,13 +524,16 @@ class LatLonCGridOceanModel:
 
         # GM/Redi isopycnal mixing (if configured)
         if self.config.gm_redi is not None:
-            from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon import (
+            from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
                 gm_redi_tracer_tendency_latlon,
             )
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
                 self.grid, self.z_coord, self.config.gm_redi,
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
+                mask=state.land_mask.data,
+                u_mask=state.u_mask.data,
+                v_mask=state.v_mask.data,
             )
             T_mid = T_mid + dt * dT_gm * mask_3d
             S_mid = S_mid + dt * dS_gm * mask_3d

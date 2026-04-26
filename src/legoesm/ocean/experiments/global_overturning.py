@@ -93,6 +93,16 @@ class GlobalOverturningConfig:
     alpha_T: float = 2.0e-4        # Thermal expansion [1/K]
     T_ref: float = 10.0            # Reference temperature for EOS [degC]
 
+    # --- GM/Redi mesoscale eddy parameterization ---
+    use_gm_redi: bool = False         # Enable GM/Redi isopycnal mixing
+    kappa_GM: float = 1000.0          # GM transport coefficient [m2/s]
+    kappa_Redi: float = 1000.0        # Redi isopycnal diffusivity [m2/s]
+    S_max: float = 0.005              # Maximum slope for DM95 tapering
+    visbeck_enabled: bool = True      # Adaptive coefficient (Visbeck 1997)
+    visbeck_alpha: float = 0.015      # Visbeck dimensionless coefficient
+    visbeck_kappa_min: float = 200.0  # Visbeck kappa floor [m2/s]
+    visbeck_kappa_max: float = 2000.0 # Visbeck kappa ceiling [m2/s]
+
     # --- Continent geometry (same as global_barotropic_wind) ---
     continent_lon_west: float = 20.0
     continent_lon_east: float = 60.0
@@ -186,6 +196,10 @@ def create_forcings(grid_type: str, grid,
 
     Uses ``scheme="combined"`` to apply prescribed 3-belt wind stress
     together with SST restoring toward a cosine-latitude profile.
+
+    Returns
+    -------
+    OceanPhysicsConfig
     """
     if config is None:
         config = GlobalOverturningConfig()
@@ -236,6 +250,35 @@ def create_forcings(grid_type: str, grid,
             ),
         ),
         shortwave_penetration=None,
+    )
+
+
+def create_gm_redi_config(config: GlobalOverturningConfig = None):
+    """Return GMRediConfig if ``use_gm_redi`` is enabled, else None.
+
+    The returned config is passed to ``LatLonCGridOceanConfig.gm_redi``
+    (the lat-lon C-grid model applies it directly, bypassing the
+    physics factory).
+    """
+    if config is None:
+        config = GlobalOverturningConfig()
+
+    if not config.use_gm_redi:
+        return None
+
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig, VisbeckConfig,
+    )
+    return GMRediConfig(
+        kappa_GM=config.kappa_GM,
+        kappa_Redi=config.kappa_Redi,
+        S_max=config.S_max,
+        visbeck=VisbeckConfig(
+            enabled=config.visbeck_enabled,
+            alpha=config.visbeck_alpha,
+            kappa_min=config.visbeck_kappa_min,
+            kappa_max=config.visbeck_kappa_max,
+        ),
     )
 
 
@@ -335,6 +378,7 @@ EXPERIMENT_CONFIG = {
     "config_class": GlobalOverturningConfig,
     "create_initial_conditions": create_initial_conditions,
     "create_forcings": create_forcings,
+    "create_gm_redi_config": create_gm_redi_config,
     "create_domain": create_domain_config,
     "validate": validate_results,
     "get_field_specs": get_diagnostic_field_specs,
