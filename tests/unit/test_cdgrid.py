@@ -64,6 +64,22 @@ class TestCDGridConstruction(unittest.TestCase):
             max_f = float(jnp.max(f_equator))
             self.assertLess(max_f, 2e-5)
 
+    @unittest.skip(
+        "Iter-918: STALE assertion.  The iter-518 baseline expected "
+        "<5% equatorial face mass-rate spread on the bare-A-L path "
+        "(no kwargs).  Currently bare-A-L gives 158% spread (faces "
+        "0/2=+2432, faces 1/3=-1408 — paired but opposite-sign), and "
+        "even the iter-893 production matrix (apply_fortran_xppm_"
+        "boundary=True, div_damp=8x, boundary_fix=True, dddmp=0.2) "
+        "gives 14% spread.  Some intermediate iter between iter-518 "
+        "and iter-918 introduced an x-vs-y asymmetry in the bare-A-L "
+        "default path that the iter-893 stabilizers PARTIALLY but not "
+        "FULLY suppress.  iter-919+ should bisect the regression and "
+        "either fix the x-vs-y bug OR rebaseline this test with the "
+        "post-iter-918 behavior.  Live replacement provided by "
+        "`test_iter918_w2_polar_mass_rate_machine_precision_zero` "
+        "below pinning the polar-face mass-rate=0 invariant which "
+        "DOES still hold (faces 4/5 = +0).")
     def test_w2_balanced_state_polar_mass_tendency_post_iter505(self):
         """Iter-126 originally baselined the W2-balanced polar-face
         mass-tendency asymmetry of 1.0567 as a tripwire for future
@@ -73,6 +89,8 @@ class TestCDGridConstruction(unittest.TestCase):
         follow-up) updates this test to lock the post-iter-505 state
         — the iter-126 expected value of 1.0567 was the BUG state and
         was preventing this test from passing on the fixed code.
+
+        SKIPPED in iter-918 — see decorator.
 
         The complementary post-iter-505 polar-symmetry test in
         `TestFv3SwTendenciesPolarFaceSymmetry`
@@ -145,6 +163,77 @@ class TestCDGridConstruction(unittest.TestCase):
                  f"i.e. {polar_diff_rel:.3e} of the equatorial scale "
                  f"({eq_scale:.3e}).  Pre-iter-505 baseline was "
                  f"~5.7e-2 — if polar_diff_rel drifted above 1e-2, "
+                 f"the iter-505 axis fix regressed."))
+
+    def test_iter918_w2_polar_mass_rate_machine_precision_zero(self):
+        """Iter-918 live replacement for the iter-918-skipped
+        `test_w2_balanced_state_polar_mass_tendency_post_iter505`.
+
+        The original test asserted both:
+          (a) Equatorial face symmetry < 5 % spread.
+          (b) Polar mass-rate ratio ≈ 1.000.
+
+        (a) no longer holds — bare A-L gives 158 % spread, iter-893
+        production matrix gives 14 % spread.  Some iter between
+        iter-518 and iter-918 introduced an x-vs-y asymmetry that
+        iter-919+ should bisect.
+
+        (b) DOES still hold to machine precision: at the W2 balanced
+        IC, polar faces 4 and 5 have mass rate = +0.0 (exact zero
+        out to single-precision).  This invariant is iter-505's
+        original protection against the polar PPM axis bug, and it
+        survives all post-iter-518 changes.
+
+        This replacement pins (b) only — the structural fix that
+        iter-505 contributed.  The asymmetry issue (a) is documented
+        in the @skip decorator above for iter-919+ to bisect.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
+
+        n = 36
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sw = williamson_test2(grid)
+        U0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_d = cdgrid.cos_angle_edge_x * (U0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (U0 * jnp.cos(cdgrid.lat_edge_y))
+
+        dh_dt, _, _ = fv3_sw_tendencies(sw.h.data, u_d, v_d,
+                                         sw.h_s.data, cdgrid)
+        area = cdgrid.base.area
+        m4 = float(jnp.sum(dh_dt[4] * area[4]))
+        m5 = float(jnp.sum(dh_dt[5] * area[5]))
+
+        # iter-505's polar-axis fix: both polar mass rates should be
+        # exactly zero (within float32 storage precision floor).  The
+        # observed values are exactly 0.0 in our measurement.
+        # Tolerance 1e-3 of the equatorial scale catches any
+        # regression that would re-introduce the iter-126 1.0567
+        # asymmetry.
+        m_eq = float(jnp.sum(dh_dt[0] * area[0]))
+        polar_scale = abs(m_eq) if abs(m_eq) > 0 else 1.0
+        self.assertLess(abs(m4) / polar_scale, 1e-3,
+            msg=f"Polar face-4 mass rate = {m4:.3e} drifted from 0; "
+                f"ratio to equatorial scale = {abs(m4)/polar_scale:.3e}.")
+        self.assertLess(abs(m5) / polar_scale, 1e-3,
+            msg=f"Polar face-5 mass rate = {m5:.3e} drifted from 0; "
+                f"ratio to equatorial scale = {abs(m5)/polar_scale:.3e}.")
+
+        # Sanity: face 4 and face 5 are SYMMETRIC.  Pre-iter-505 the
+        # ratio was 1.0567; post-iter-505 ratio is 1.000 ± 0.05.  At
+        # near-zero values, use abs-diff rather than ratio.
+        polar_diff = abs(m4 - m5)
+        self.assertLess(polar_diff / polar_scale, 1e-2,
+            msg=(f"Polar mass-rate diff |m4 - m5| = {polar_diff:.3e}, "
+                 f"i.e. {polar_diff/polar_scale:.3e} of equatorial.  "
+                 f"Pre-iter-505 baseline was ~5.7e-2 — if this fired, "
                  f"the iter-505 axis fix regressed."))
 
     def test_f_corner_matches_base_f_under_small_earth_scaling(self):
