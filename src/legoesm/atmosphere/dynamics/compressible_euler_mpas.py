@@ -178,21 +178,26 @@ def mpas_compressible_euler_slow_tendencies(
     # Horizontal divergences batched.  ``divergence_cell_3d`` does a
     # gather (``u_edge_3d[edgesOnCell]``) + weighted reduce on the
     # leading axis only — the trailing nlev axis is purely passive.
-    # Stack the three (nEdges, nlev) flux inputs along a new trailing
-    # axis to (nEdges, nlev, 3), fold to (nEdges, nlev*3), call
+    # Stack the four (nEdges, nlev) flux inputs along a new trailing
+    # axis to (nEdges, nlev, 4), fold to (nEdges, nlev*4), call
     # ``divergence_cell_3d`` once on the thicker tensor, then unfold.
-    # 3 divergence calls → 1.  ``rho_e_3d`` was already computed above
-    # alongside ``theta_e_3d`` via the batched cell-to-edge gather.
+    # 4 divergence calls → 1.  ``w_e_3d`` is computed up-front (it
+    # only depends on ``w``), so we pull its divergence into the same
+    # batch as the rho/theta/continuity divergences instead of leaving
+    # it as a fourth standalone call later in the function.
+    w_full = 0.5 * (w[:, :-1] + w[:, 1:])              # (nCells, nlev)
+    w_e_3d = 0.5 * (w_full[c1] + w_full[c2])           # (nEdges, nlev)
     n_edges_d, nlev_d = u_3d.shape
     _div_inputs = jnp.stack(
-        [rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d], axis=-1,
-    )  # (nEdges, nlev, 3)
+        [rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d, u_3d * w_e_3d], axis=-1,
+    )  # (nEdges, nlev, 4)
     _div_outputs = divergence_cell_3d(
-        _div_inputs.reshape(n_edges_d, nlev_d * 3), mesh,
-    ).reshape(-1, nlev_d, 3)
+        _div_inputs.reshape(n_edges_d, nlev_d * 4), mesh,
+    ).reshape(-1, nlev_d, 4)
     div_rho_v_3d = _div_outputs[..., 0]
     div_u_theta_3d = _div_outputs[..., 1]
     div_u_3d = _div_outputs[..., 2]
+    div_uw_3d = _div_outputs[..., 3]
 
     # Horizontal theta advection (advective form): -(div(u·θ) - θ · div(u)).
     dtheta_p_dt = -(div_u_theta_3d - theta_total * div_u_3d)
@@ -222,15 +227,10 @@ def mpas_compressible_euler_slow_tendencies(
     )
 
     # --- 4. w tendency (slow part: horizontal advection + sponge) ---
-    # Interpolate w to full levels, compute horizontal advection, map back.
-    w_full = 0.5 * (w[:, :-1] + w[:, 1:])  # (nCells, nlev)
-
-    # Horizontal advection of w in advective form (3D-native):
-    #   -v·∇w ≈ -(div(u*w) - w·div(u))
-    # ``div_u_3d`` was already computed for the theta advection block;
-    # reuse it instead of recomputing nlev redundant copies.
-    w_e_3d = 0.5 * (w_full[c1] + w_full[c2])              # (nEdges, nlev)
-    div_uw_3d = divergence_cell_3d(u_3d * w_e_3d, mesh)   # (nCells, nlev)
+    # ``div_uw_3d`` was already computed via the batched divergence
+    # block above.  Use it together with ``div_u_3d`` to assemble the
+    # horizontal w-advection in advective form: -v·∇w ≈ -(div(u*w) -
+    # w·div(u)).
     w_adv_full = -(div_uw_3d - w_full * div_u_3d)         # (nCells, nlev)
 
     # Map back to half levels by averaging.  ``dw_dt`` zero at top/bottom
