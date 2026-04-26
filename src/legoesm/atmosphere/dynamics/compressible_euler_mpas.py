@@ -117,21 +117,34 @@ def mpas_compressible_euler_slow_tendencies(
     # over the trailing level axis natively, so the previous per-level
     # ``jax.lax.scan`` + 3 ``jnp.moveaxis`` round-trip is redundant.
 
-    # KE and Exner gradient at edges.  Both pi_prime and ke_3d are
-    # cell-centered (nCells, nlev) fields, and ``gradient_edge_3d``
+    # KE, Exner, and (optional) theta-prime gradients at edges.  All
+    # are cell-centered (nCells, nlev) fields, and ``gradient_edge_3d``
     # treats the trailing axis as a passive batch (the cellsOnEdge
     # gather operates on the leading nCells axis only).  Stack the
-    # two fields along a new trailing axis, fold to (nCells, nlev*2),
-    # call ``gradient_edge_3d`` once, then unfold and slice.  2 edge
-    # gradients → 1.
+    # fields along a new trailing axis, fold to (nCells, nlev*K), call
+    # ``gradient_edge_3d`` once, then unfold and slice.  When K_h > 0
+    # we add ``theta_p`` to the batch so its scalar-diffusion gradient
+    # is computed in the same pass — Loop 128 extension of Loop 111.
     ke_3d = kinetic_energy_cell_3d(u_3d, mesh)             # (nCells, nlev)
     n_cells_g = pi_prime.shape[0]
-    _grad_stack = jnp.stack([pi_prime, ke_3d], axis=-1)    # (nCells, nlev, 2)
-    _grad_flat = gradient_edge_3d(
-        _grad_stack.reshape(n_cells_g, nlev * 2), mesh,
-    ).reshape(-1, nlev, 2)
-    grad_pi_3d = _grad_flat[..., 0]
-    grad_ke_3d = _grad_flat[..., 1]
+    if config.K_h > 0:
+        _grad_stack = jnp.stack(
+            [pi_prime, ke_3d, theta_p], axis=-1,
+        )  # (nCells, nlev, 3)
+        _grad_flat = gradient_edge_3d(
+            _grad_stack.reshape(n_cells_g, nlev * 3), mesh,
+        ).reshape(-1, nlev, 3)
+        grad_pi_3d = _grad_flat[..., 0]
+        grad_ke_3d = _grad_flat[..., 1]
+        grad_th_3d = _grad_flat[..., 2]
+    else:
+        _grad_stack = jnp.stack([pi_prime, ke_3d], axis=-1)
+        _grad_flat = gradient_edge_3d(
+            _grad_stack.reshape(n_cells_g, nlev * 2), mesh,
+        ).reshape(-1, nlev, 2)
+        grad_pi_3d = _grad_flat[..., 0]
+        grad_ke_3d = _grad_flat[..., 1]
+        grad_th_3d = None
 
     # Cell-to-edge averaging for theta and rho, batched.  Both are
     # (nCells, nlev) inputs and ``cell_to_edge_avg_3d`` is a pure
@@ -253,7 +266,8 @@ def mpas_compressible_euler_slow_tendencies(
 
     # --- 6. Scalar diffusion on theta (3D-native) ---
     if config.K_h > 0:
-        grad_th_3d = gradient_edge_3d(theta_p, mesh)         # (nEdges, nlev)
+        # ``grad_th_3d`` was already computed via the batched gradient
+        # block above (Loop 128).  Just take the divergence here.
         diff_3d = divergence_cell_3d(grad_th_3d, mesh)       # (nCells, nlev)
         dtheta_p_dt = dtheta_p_dt + config.K_h * diff_3d
 
