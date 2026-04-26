@@ -1322,20 +1322,21 @@ def test_iter891_on_matches_fortran_formula_predictions():
 
     # RIGHT predictions
     # al(npx-1): c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1) — uses
-    # q_1d[n-2, n-1, n]
+    # q_1d[n-1, n, n+1] (since q1(j) = q_1d[j+1] and q1(npx-3) = q1(n-2)
+    # = q_1d[n-1], etc.)
     expected_alnm1 = (
-        c1 * q_np[..., n - 2, :] + c2 * q_np[..., n - 1, :]
-        + c3 * q_np[..., n, :])
-    # al(npx): xt clipped, uses q_1d[n-1, n, n+1, n+2]
+        c1 * q_np[..., n - 1, :] + c2 * q_np[..., n, :]
+        + c3 * q_np[..., n + 1, :])
+    # al(npx): xt clipped, uses q_1d[n, n+1, n+2, n+3] (q1(npx-2..npx+1))
     xt_R = (
-        0.75 * (q_np[..., n, :] + q_np[..., n + 1, :])
-        - 0.25 * (q_np[..., n - 1, :] + q_np[..., n + 2, :]))
+        0.75 * (q_np[..., n + 1, :] + q_np[..., n + 2, :])
+        - 0.25 * (q_np[..., n, :] + q_np[..., n + 3, :]))
     q_lo_R = np.minimum(
-        np.minimum(q_np[..., n - 1, :], q_np[..., n, :]),
-        np.minimum(q_np[..., n + 1, :], q_np[..., n + 2, :]))
+        np.minimum(q_np[..., n, :], q_np[..., n + 1, :]),
+        np.minimum(q_np[..., n + 2, :], q_np[..., n + 3, :]))
     q_hi_R = np.maximum(
-        np.maximum(q_np[..., n - 1, :], q_np[..., n, :]),
-        np.maximum(q_np[..., n + 1, :], q_np[..., n + 2, :]))
+        np.maximum(q_np[..., n, :], q_np[..., n + 1, :]),
+        np.maximum(q_np[..., n + 2, :], q_np[..., n + 3, :]))
     expected_aln = np.clip(xt_R, q_lo_R, q_hi_R)
 
     q_hat_on = _ppm_edge_values(q, apply_fortran_xppm_boundary=True,

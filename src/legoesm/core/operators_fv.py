@@ -183,24 +183,28 @@ def _ppm_edge_values(q_1d, blend_edges=False,
         # q_hat_hi, al(npx+1) position) is left untouched because
         # Fortran al(npx+1) needs q1(npx+2) which our halo=2 input
         # lacks.
-        # al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1).
-        # In our q_1d (npx = n_int + 1): q1(npx-3) = q_1d[n_int-2],
-        # q1(npx-2) = q_1d[n_int-1], q1(npx-1) = q_1d[n_int]
-        # (the last interior cell at our q_1d index n_int).
-        face_alnm1 = (c1 * q_1d[..., n_int - 2, :]
-                      + c2 * q_1d[..., n_int - 1, :]
-                      + c3 * q_1d[..., n_int, :])
+        #
+        # Index map: q_1d[k] = q1(k-1) for k=0..n_int+3, so q1(j) =
+        # q_1d[j+1].  With npx = n_int + 1 (n_int interior cells in
+        # q_1d at indices 2..n_int+1):
+        #   q1(npx-3) = q1(n_int-2) = q_1d[n_int-1]
+        #   q1(npx-2) = q1(n_int-1) = q_1d[n_int]
+        #   q1(npx-1) = q1(n_int)   = q_1d[n_int+1]   (last interior)
+        #   q1(npx)   = q1(n_int+1) = q_1d[n_int+2]   (right halo depth 0)
+        #   q1(npx+1) = q1(n_int+2) = q_1d[n_int+3]   (right halo depth 1)
+        # al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
+        face_alnm1 = (c1 * q_1d[..., n_int - 1, :]
+                      + c2 * q_1d[..., n_int, :]
+                      + c3 * q_1d[..., n_int + 1, :])
         # al(npx) = uniform 4-pt xt clipped to min/max(q1(npx-2..npx+1)).
-        # q1(npx-2)=q_1d[n_int-1], q1(npx-1)=q_1d[n_int],
-        # q1(npx)=q_1d[n_int+1], q1(npx+1)=q_1d[n_int+2].
-        xt_R = (0.75 * (q_1d[..., n_int, :] + q_1d[..., n_int + 1, :])
-                - 0.25 * (q_1d[..., n_int - 1, :] + q_1d[..., n_int + 2, :]))
+        xt_R = (0.75 * (q_1d[..., n_int + 1, :] + q_1d[..., n_int + 2, :])
+                - 0.25 * (q_1d[..., n_int, :] + q_1d[..., n_int + 3, :]))
         q_lo_R = jnp.minimum(
-            jnp.minimum(q_1d[..., n_int - 1, :], q_1d[..., n_int, :]),
-            jnp.minimum(q_1d[..., n_int + 1, :], q_1d[..., n_int + 2, :]))
+            jnp.minimum(q_1d[..., n_int, :], q_1d[..., n_int + 1, :]),
+            jnp.minimum(q_1d[..., n_int + 2, :], q_1d[..., n_int + 3, :]))
         q_hi_R = jnp.maximum(
-            jnp.maximum(q_1d[..., n_int - 1, :], q_1d[..., n_int, :]),
-            jnp.maximum(q_1d[..., n_int + 1, :], q_1d[..., n_int + 2, :]))
+            jnp.maximum(q_1d[..., n_int, :], q_1d[..., n_int + 1, :]),
+            jnp.maximum(q_1d[..., n_int + 2, :], q_1d[..., n_int + 3, :]))
         face_aln = jnp.clip(xt_R, q_lo_R, q_hi_R)
 
         q_hat = q_hat.at[..., n_int, :].set(face_alnm1)
