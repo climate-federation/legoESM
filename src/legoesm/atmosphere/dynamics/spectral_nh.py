@@ -169,7 +169,11 @@ def spectral_nh_slow_tendencies(
     # theta_p, rho_p all share shape and the inverse SH transform
     # treats the trailing axis as a passive batch (segment_sum runs
     # along n_sh, IRFFT runs along longitude).  ``w_hat`` has
-    # (n_sh, nlev+1) — stays separate.  4 SH-syntheses → 1 + 1 = 2.
+    # (n_sh, nlev+1) — concatenate it onto the trailing axis of the
+    # (vor, div, theta_p, rho_p) batch so that a *single* SH synthesis
+    # serves all five fields.  Total trailing axis = ``4*nlev + (nlev+1)``.
+    # 5 SH-syntheses → 1 (Loop 180 — same exploit as Loop 179 for the
+    # acoustic update path).
     n_sh, nlev_t = state.vor_hat.data.shape
     _vdtr_stack = jnp.stack(
         [
@@ -181,13 +185,17 @@ def spectral_nh_slow_tendencies(
         axis=-1,
     )  # (n_sh, nlev, 4)
     _vdtr_flat = _vdtr_stack.reshape(n_sh, nlev_t * 4)
-    _vdtr_grid_flat = sh_synthesis_3d(grid, _vdtr_flat)  # (n_lat, n_lon, nlev*4)
+    _vdtrw_flat = jnp.concatenate(
+        [_vdtr_flat, state.w_hat.data], axis=-1,
+    )  # (n_sh, 4*nlev + (nlev+1))
+    _vdtrw_grid_flat = sh_synthesis_3d(grid, _vdtrw_flat)
+    _vdtr_grid_flat = _vdtrw_grid_flat[..., : nlev_t * 4]
     _vdtr_grid = _vdtr_grid_flat.reshape(grid.n_lat, grid.n_lon, nlev_t, 4)
     vor = _vdtr_grid[..., 0]
     div = _vdtr_grid[..., 1]
     theta_p = _vdtr_grid[..., 2]
     rho_p = _vdtr_grid[..., 3]
-    w = sh_synthesis_3d(grid, state.w_hat.data)        # (n_lat, n_lon, nlev+1)
+    w = _vdtrw_grid_flat[..., nlev_t * 4:]              # (n_lat, n_lon, nlev+1)
 
     n_tracers = state.tracers_hat.data.shape[-1] if state.tracers_hat.data.ndim >= 3 else 0
 
