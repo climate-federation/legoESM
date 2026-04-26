@@ -169,6 +169,21 @@ class CDGridShallowWaterConfig(NamedTuple):
     apply_legacy_d_sw4_corner_ke_fix: bool = False
     apply_legacy_d_sw5_corner_corrections: bool = False
 
+    # Iter-888c (Codex iter-888b stop-time fix): expose iter-888's
+    # Fortran s11/s14/s15 boundary-formula opt-in (tp_core.F90:614-628
+    # left, :632-647 right) on the canonical FB MODEL config, so users
+    # of `FV3FBShallowWaterModel` can enable the new path WITHOUT
+    # bypassing the model class and calling `fv3_fb_sw_step` directly.
+    # Pre-iter-888c the kwarg was reachable from the function-level
+    # FB chain (iter-888b plumbing) but the model class did NOT
+    # forward it.  Default OFF preserves bit-identical behaviour for
+    # existing FB model callers.  Like the other `apply_legacy_*`
+    # flags above, this fires only on the FB chain; production
+    # `FV3EdgeShallowWaterModel` (default `use_experimental_csw=False`
+    # → `fv3_sw_tendencies` → `_ppm_reconstruct_1d` in
+    # `operators_cdgrid.py`) does NOT consume this field.
+    apply_fortran_xppm_boundary: bool = False
+
     # Iter-872c-take3 (Codex pass-3): production divergence-damping
     # `dddmp` coefficient (Fortran `flagstruct%dddmp`,
     # fv_arrays.F90:360).  Default 0.2 preserves pre-iter-872
@@ -525,6 +540,12 @@ class FV3FBShallowWaterModel:
                 self.config.apply_legacy_d_sw4_corner_ke_fix),
             apply_legacy_d_sw5_corner_corrections=(
                 self.config.apply_legacy_d_sw5_corner_corrections),
+            # Iter-888c (Codex iter-888b stop-time fix): forward the
+            # iter-888 Fortran s11/s14/s15 boundary-formula opt-in
+            # (tp_core.F90:614-628, :632-647) so FB-model users can
+            # enable it via `CDGridShallowWaterConfig`.  Default OFF.
+            apply_fortran_xppm_boundary=(
+                self.config.apply_fortran_xppm_boundary),
         )
 
         state_new = FV3EdgeShallowWaterState(

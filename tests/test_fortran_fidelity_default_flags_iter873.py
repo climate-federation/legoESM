@@ -70,6 +70,12 @@ _FORTRAN_FIDELITY_OPT_IN_FLAGS = [
      "boundary-corner cascaded smoothing"),
     ("use_experimental_csw", False, "pre-iter-862",
      "experimental C-grid path (known unstable)"),
+    # Iter-888c: Fortran s11/s14/s15 boundary-formula opt-in surfaced
+    # on `CDGridShallowWaterConfig` so the canonical FB MODEL
+    # (`FV3FBShallowWaterModel`) can opt in via config (Codex
+    # iter-888b stop-time fix).
+    ("apply_fortran_xppm_boundary", False, "iter-888c",
+     "tp_core.F90:614-628 / :632-647 (s11/s14/s15 boundary formula)"),
 ]
 
 
@@ -201,8 +207,8 @@ def test_iter873_inventory_is_complete():
     sentinel would silently miss the new flag.
     """
     expected_prefixes = (
-        "fortran_", "apply_legacy_", "boundary_fix_skip_",
-        "use_experimental_",
+        "fortran_", "apply_legacy_", "apply_fortran_",
+        "boundary_fix_skip_", "use_experimental_",
     )
     cfg = CDGridShallowWaterConfig()
     detected = sorted([

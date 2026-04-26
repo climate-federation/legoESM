@@ -501,3 +501,142 @@ def test_iter888b_fb_chain_end_to_end_kwarg_changes_output():
         f"The kwarg is plumbed through signatures but silently dropped "
         f"somewhere — check that every transport_step / fv_tp_2d / "
         f"_xppm / _yppm / _ppm_1d call site forwards the kwarg.")
+
+
+# ----------------------------------------------------------------------
+# Iter-888c (Codex iter-888b stop-time fix): canonical FB MODEL config
+# reachability.  Codex iter-888b correctly flagged that even with
+# function-level plumbing through fv3_fb_sw_step, the canonical FB
+# MODEL class (`FV3FBShallowWaterModel`) did NOT forward the kwarg
+# from its config.  iter-888c surfaces `apply_fortran_xppm_boundary`
+# as a `CDGridShallowWaterConfig` field and forwards it from
+# `FV3FBShallowWaterModel.step` to `fv3_fb_sw_step`.
+# ----------------------------------------------------------------------
+
+
+def test_iter888c_config_field_default_off():
+    """`CDGridShallowWaterConfig` exposes ``apply_fortran_xppm_boundary``
+    as a field with default False.  Locked by the iter-873 sentinel
+    via the inventory list (see test_fortran_fidelity_default_flags_iter873.py).
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig)
+
+    cfg = CDGridShallowWaterConfig()
+    assert hasattr(cfg, "apply_fortran_xppm_boundary"), (
+        "CDGridShallowWaterConfig is missing apply_fortran_xppm_boundary.")
+    assert cfg.apply_fortran_xppm_boundary is False, (
+        f"apply_fortran_xppm_boundary default is "
+        f"{cfg.apply_fortran_xppm_boundary!r}; expected False.")
+
+
+def test_iter888c_fb_model_step_forwards_config_field():
+    """`FV3FBShallowWaterModel.step` forwards the
+    ``apply_fortran_xppm_boundary`` config field to ``fv3_fb_sw_step``.
+    Verified by an end-to-end behavioural diff: a model with config
+    flag True must produce different output from a model with the
+    config flag False on the same input.  This catches a regression
+    where the field is added to config but not threaded through the
+    model class.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig,
+        FV3FBShallowWaterModel,
+        FV3EdgeShallowWaterState,
+    )
+    import sys
+    sys.path.insert(0, "tests")
+    from test_cases.williamson import williamson_test2
+
+    n = 12
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
+    sw = williamson_test2(grid)
+    u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+    def _step_with_flag(flag):
+        cfg = CDGridShallowWaterConfig(
+            apply_fortran_xppm_boundary=flag)
+        model = FV3FBShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+        return model.step(state, 60.0)
+
+    state_off = _step_with_flag(False)
+    state_on = _step_with_flag(True)
+
+    diff_h = float(np.max(np.abs(np.asarray(state_on.h)
+                                  - np.asarray(state_off.h))))
+    diff_u = float(np.max(np.abs(np.asarray(state_on.u_d)
+                                  - np.asarray(state_off.u_d))))
+    diff_v = float(np.max(np.abs(np.asarray(state_on.v_d)
+                                  - np.asarray(state_off.v_d))))
+    max_diff = max(diff_h, diff_u, diff_v)
+
+    assert max_diff > 1e-12, (
+        f"FV3FBShallowWaterModel.step does NOT forward "
+        f"config.apply_fortran_xppm_boundary to fv3_fb_sw_step.  "
+        f"Output identical with config flag False vs True: "
+        f"max diff h={diff_h:.3e}, u_d={diff_u:.3e}, v_d={diff_v:.3e}.  "
+        f"Verify the model class threads the field through the "
+        f"fv3_fb_sw_step call.")
+
+
+def test_iter888c_production_fv3edge_model_unaffected():
+    """Sanity: `FV3EdgeShallowWaterModel` (default
+    `use_experimental_csw=False`) routes through `fv3_sw_tendencies`
+    → `cgrid_mass_flux_divergence` → `_ppm_reconstruct_1d`, NEVER
+    through the FB-chain functions modified in iter-888/888b/888c.
+    Setting `apply_fortran_xppm_boundary=True` on the production
+    model's config must NOT change its output.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig,
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+    )
+    import sys
+    sys.path.insert(0, "tests")
+    from test_cases.williamson import williamson_test2
+
+    n = 12
+    grid = create_cubed_sphere(n=n, use_duogrid=False)
+    sw = williamson_test2(grid)
+    u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+
+    def _step_with_flag(flag):
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            div_damp=8.0 * 1.5e7 * (48.0 / n) ** 2,
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2,
+            apply_fortran_xppm_boundary=flag)
+        model = FV3EdgeShallowWaterModel(grid, config=cfg)
+        cdgrid = model.cdgrid
+        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
+        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
+        return model.step(state, 60.0)
+
+    state_off = _step_with_flag(False)
+    state_on = _step_with_flag(True)
+
+    np.testing.assert_array_equal(
+        np.asarray(state_off.h), np.asarray(state_on.h),
+        err_msg=("FV3EdgeShallowWaterModel (production CDGrid path) "
+                 "responds to apply_fortran_xppm_boundary, but it "
+                 "should be inert on this code path — production "
+                 "uses fv3_sw_tendencies → _ppm_reconstruct_1d, not "
+                 "the FB chain."))
+    np.testing.assert_array_equal(
+        np.asarray(state_off.u_d), np.asarray(state_on.u_d))
+    np.testing.assert_array_equal(
+        np.asarray(state_off.v_d), np.asarray(state_on.v_d))

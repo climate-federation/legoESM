@@ -2235,3 +2235,43 @@ Constants: `s11 = 11/14, s14 = 4/7, s15 = 3/14` (`tp_core.F90:58`).
 - This doc entry.
 
 **Process.**  162nd iter.  Codex iter-888 stop-time review correctly caught that the iter-888 kwarg was leaf-only dead code from the FB-chain perspective.  iter-888b is the smallest correct fix: plumb the kwarg through every transport-chain function, with a behavioural test that catches a future regression where the kwarg is propagated through signatures but silently dropped before reaching `_ppm_1d`.  Default-OFF preserved at every level; production unchanged.
+
+### Iter-888c — surface `apply_fortran_xppm_boundary` on FB MODEL config (Codex iter-888b stop-time fix)
+
+**Codex iter-888b stop-time finding.**  c6a2053 plumbed the kwarg through every FB-chain function but the canonical FB MODEL CLASS (`FV3FBShallowWaterModel`) still did not forward it from its config.  Codex stop-hook complaint: "canonical FB model path still cannot enable `apply_fortran_xppm_boundary`."  iter-888c surfaces the kwarg as a `CDGridShallowWaterConfig` field and forwards it through `FV3FBShallowWaterModel.step` to `fv3_fb_sw_step`.
+
+**Changes.**
+
+| File | Change |
+|------|--------|
+| `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:171` | Add `apply_fortran_xppm_boundary: bool = False` to `CDGridShallowWaterConfig` (with iter-888c rationale block). |
+| `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py:528` | Forward `self.config.apply_fortran_xppm_boundary` from `FV3FBShallowWaterModel.step` to `fv3_fb_sw_step`. |
+| `tests/test_fortran_fidelity_default_flags_iter873.py` | Add `apply_fortran_xppm_boundary` to `_FORTRAN_FIDELITY_OPT_IN_FLAGS` inventory + add `apply_fortran_` to `expected_prefixes` so future iters auto-detect. |
+| `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py` | +3 new tests (iter-888c block): config field default, FB-model end-to-end behavioural diff, production-path inert check. |
+
+**Default-OFF preservation.**  The new field defaults to False.  iter-873 sentinel locks the default-OFF state and AST-checks that neither the matrix runner nor the W2 sentinel sets it to True.  W2 LEGACY at C36 reproduces unchanged.
+
+**Production-path inert check** (test 14 / iter-888c-3).  This is a new sentinel guarding against a future change that wires the kwarg into the production path (`fv3_sw_tendencies` / `_ppm_reconstruct_1d`).  Setting `apply_fortran_xppm_boundary=True` on a `FV3EdgeShallowWaterModel` config must NOT change its output — production uses `_ppm_reconstruct_1d` in `operators_cdgrid.py`, not `_ppm_1d`.  If a future refactor merges the two PPM implementations, this test will FAIL loudly so the production W2 baseline can be re-validated explicitly.
+
+**Verification.**  All 122 top-level Fortran-fidelity tests + W2 LEGACY sentinel pass.  iter-888 chain test count: 14 (5 iter-888 + 6 iter-888b + 3 iter-888c).  iter-873 sentinel: 10 tests pass (was 9; +1 parameterized case for the new field).
+
+**Reachability ladder (full chain).**
+
+| Level | Function/Class | iter |
+|-------|---------------|------|
+| Implementation | `_ppm_1d` (fv_tp_2d.py:89) | iter-888 |
+| 1D PPM wrappers | `_xppm`, `_yppm` (fv_tp_2d.py:445/465) | iter-888b |
+| Transport core | `fv_tp_2d` (fv_tp_2d.py:513) | iter-888b |
+| Single-step transport | `transport_step` (fv_tp_2d.py:783) | iter-888b |
+| FB-chain step | `_d_sw_native` (fv3_sw_core.py:2137) | iter-888b |
+| FB-chain entry points | `fv3_forward_backward_step`, `fv3_fb_sw_step` (fv3_sw_core.py:1798/2349) | iter-888b |
+| **FB MODEL config** | **`CDGridShallowWaterConfig.apply_fortran_xppm_boundary`** (shallow_water_fv3_cdgrid.py:171) | **iter-888c** |
+| **FB MODEL step** | **`FV3FBShallowWaterModel.step` config-forward** (shallow_water_fv3_cdgrid.py:528) | **iter-888c** |
+
+**Deliverable.**
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py`: new config field + step() forward.
+- `tests/test_fortran_fidelity_default_flags_iter873.py`: inventory update + prefix expansion.
+- `tests/test_ppm_1d_fortran_xppm_boundary_iter888.py`: +3 iter-888c reachability tests.
+- This doc entry.
+
+**Process.**  163rd iter.  Codex iter-888b stop-time review caught the model-class plumbing gap.  iter-888c is the final piece: the new opt-in flag is now reachable from `CDGridShallowWaterConfig` through to `_ppm_1d` via either (a) direct function-level kwarg (iter-888b) or (b) `FV3FBShallowWaterModel.step` config (iter-888c).  Default-OFF preserved at every level; production unchanged.  iter-873 sentinel updated to lock the new default and prevent silent activation in matrix runner / W2 sentinel.
