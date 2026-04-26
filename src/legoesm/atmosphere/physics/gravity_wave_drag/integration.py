@@ -165,14 +165,18 @@ def _make_hydrostatic_gwd(
 
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
+        # Pin defaulted allocations to the state precision so x64 zeros
+        # do not silently flow into the column physics path.
+        _state_dtype = T.dtype
+        _ps_dtype = p_s.dtype
 
         if gwd_fn is None:
             tendencies = HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
-                dT_dt=Field(data=jnp.zeros(shape_3d), name="dT_dt_gwd", dims=dims_3d, units="K/s"),
-                dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_gwd", dims=dims_2d, units="Pa/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
+                dT_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dT_dt_gwd", dims=dims_3d, units="K/s"),
+                dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dp_s_dt_gwd", dims=dims_2d, units="Pa/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
             )
             return tendencies, gwd_spectrum_out
 
@@ -184,15 +188,24 @@ def _make_hydrostatic_gwd(
 
         if is_prognostic:
             sc = scheme_config
+            # NOTE: ``spec_in`` (and the prognostic spectrum more
+            # broadly) is intentionally allocated at the JAX default
+            # float dtype rather than ``_state_dtype``.  The internal
+            # propagation in ``prognostic_spectral_gwd`` builds
+            # ``tau_sat`` from sigma-coord-derived quantities at
+            # compute precision; pinning ``spec_in`` to storage
+            # precision would force a carry-input/output dtype
+            # mismatch in the lax.scan body.  Keep the spectrum at
+            # compute precision end-to-end.
             if phys_state is not None:
                 spec_in = phys_state.gwd_spectrum
                 if spec_in.shape[0] != ncol:
                     spec_in = jnp.full(
-                        (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
+                        (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux,
                     )
             else:
                 spec_in = jnp.full(
-                    (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
+                    (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux,
                 )
             gwd_out, spec_new = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
@@ -226,8 +239,8 @@ def _make_hydrostatic_gwd(
             du_dt=Field(data=du_dt, name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_gwd", dims=dims_3d, units="K/s"),
-            dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_gwd", dims=dims_2d, units="Pa/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
+            dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dp_s_dt_gwd", dims=dims_2d, units="Pa/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
         )
         return tendencies, gwd_spectrum_out
 
