@@ -529,16 +529,46 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     dh_dt : jax.Array, shape (6, n, n[, nlev])
     """
     if h.ndim == 4:
-        # 3D: apply per level via vmap
-        h_t = jnp.moveaxis(h, -1, 0)
-        u_c_t = jnp.moveaxis(u_c, -1, 0)
-        v_c_t = jnp.moveaxis(v_c, -1, 0)
+        # Native 4D path: ``_pad_halo_auto_h2`` dispatches to ``pad_halo_4d``
+        # for 4D input, so all vertical levels get one MPI exchange instead of
+        # nlev under per-level vmap.  Move nlev to the front so the rest of
+        # the 2D body's slicing along axes -2/-1 still operates on (i, j).
+        h_pad = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4, nlev)
+        n = cdgrid.n
+        dy = cdgrid.dy_edge_x  # (6, n+1, n)
+        dx = cdgrid.dx_edge_y  # (6, n, n+1)
 
-        def flux_div_one(args):
-            hk, uk, vk = args
-            return cgrid_mass_flux_divergence(hk, uk, vk, cdgrid)
+        h_pad_t = jnp.moveaxis(h_pad, -1, 0)  # (nlev, 6, n+4, n+4)
+        u_c_t = jnp.moveaxis(u_c, -1, 0)      # (nlev, 6, n+1, n)
+        v_c_t = jnp.moveaxis(v_c, -1, 0)      # (nlev, 6, n, n+1)
 
-        result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
+        # X-direction PPM (axis -1 = j after slicing transverse halo).
+        h_x_strips_t = h_pad_t[..., 2:-2]              # (nlev, 6, n+4, n)
+        q_L_x_t, q_R_x_t = _ppm_reconstruct_1d(h_x_strips_t)
+        q_R_left_t = q_R_x_t[..., 1:n+2, :]            # (nlev, 6, n+1, n)
+        q_L_right_t = q_L_x_t[..., 2:n+3, :]
+        h_face_x_t = jnp.where(u_c_t > 0, q_R_left_t, q_L_right_t)
+
+        # Y-direction PPM (axis -1 = j with halo).
+        h_y_strips_t = h_pad_t[..., 2:-2, :]           # (nlev, 6, n, n+4)
+        q_L_y_t, q_R_y_t = _ppm_reconstruct_1d(h_y_strips_t)
+        q_R_bottom_t = q_R_y_t[..., 1:n+2]             # (nlev, 6, n, n+1)
+        q_L_top_t = q_L_y_t[..., 2:n+3]
+        h_face_y_t = jnp.where(v_c_t > 0, q_R_bottom_t, q_L_top_t)
+
+        flux_x_t = h_face_x_t * u_c_t * dy             # (nlev, 6, n+1, n)
+        flux_y_t = h_face_y_t * v_c_t * dx             # (nlev, 6, n, n+1)
+
+        dg = cdgrid.base.duogrid
+        if dg is not None and dg.ng >= 2:
+            from legoesm.grids.halo import synchronize_cgrid_fluxes
+            flux_x_t, flux_y_t = jax.vmap(
+                lambda fx, fy: synchronize_cgrid_fluxes(fx, fy, n),
+            )(flux_x_t, flux_y_t)
+
+        net_x_t = flux_x_t[..., 1:, :] - flux_x_t[..., :-1, :]
+        net_y_t = flux_y_t[..., 1:] - flux_y_t[..., :-1]
+        result_t = -(net_x_t + net_y_t) / cdgrid.base.area
         return jnp.moveaxis(result_t, 0, -1)
 
     # 2D case: PPM face reconstruction with halo=2

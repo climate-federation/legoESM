@@ -293,22 +293,31 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
 
     Parameters
     ----------
-    strip : shape (n,)
+    strip : shape (n,) or (n, ...)
+        Edge strip.  Trailing axes (e.g. nlev or nlev*n_tracers) are
+        carried through passively.
     offsets_1d : shape (n,)
 
     Returns
     -------
-    interpolated strip : shape (n,)
+    interpolated strip : shape matching ``strip``.
     """
     n = strip.shape[0]
     idx = jnp.arange(n, dtype=offsets_1d.dtype) + offsets_1d
     idx = jnp.clip(idx, 0.0, n - 1.0)
 
+    # Reshape interpolation weights so they broadcast against ``strip``'s
+    # trailing axes.  For 1D ``strip`` this is a no-op; for 2D/3D inputs
+    # (e.g. native 4D halo on lat-lon-extended levels) it inserts the
+    # right number of singleton axes so weights broadcast.
+    bcast = (slice(None),) + (None,) * (strip.ndim - 1)
+
     if n < 3:
         # Fall back to linear for very coarse grids
         lo = jnp.clip(jnp.floor(idx).astype(jnp.int32), 0, n - 2)
         w = jnp.clip(idx - lo.astype(offsets_1d.dtype), 0.0, 1.0)
-        return ((1.0 - w) * strip[lo] + w * strip[lo + 1]).astype(strip.dtype)
+        w_b = w[bcast]
+        return ((1.0 - w_b) * strip[lo] + w_b * strip[lo + 1]).astype(strip.dtype)
 
     # 3-point Lagrange: stencil centre clamped to [1, n-2] so all
     # three indices {jc-1, jc, jc+1} are in bounds.
@@ -317,9 +326,9 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     # With float32 offsets + float64 data, the float32 weights have
     # sum(w) = 1 ± O(1e-7), causing ~0.06 Pa error for 6e5 Pa fields.
     f = (idx - jc.astype(offsets_1d.dtype)).astype(strip.dtype)
-    c_m1 = 0.5 * f * (f - 1.0)
-    c_0 = 1.0 - f * f
-    c_p1 = 0.5 * f * (f + 1.0)
+    c_m1 = (0.5 * f * (f - 1.0))[bcast]
+    c_0 = (1.0 - f * f)[bcast]
+    c_p1 = (0.5 * f * (f + 1.0))[bcast]
     interp = c_m1 * strip[jc - 1] + c_0 * strip[jc] + c_p1 * strip[jc + 1]
     return interp.astype(strip.dtype)
 
