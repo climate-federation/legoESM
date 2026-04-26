@@ -230,7 +230,7 @@ def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
     -------
     u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    from legoesm.grids.halo import pad_halo_vector
+    from legoesm.grids.halo import pad_halo_vector, pad_halo_vector_4d
 
     grid = cdgrid.base
     dg = grid.duogrid
@@ -248,16 +248,21 @@ def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
                        + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
         return u_d, v_d
 
-    # 3D: vmap over levels
-    u_t = jnp.moveaxis(u_cc, -1, 0)
-    v_t = jnp.moveaxis(v_cc, -1, 0)
-
-    def convert_one(args):
-        uk, vk = args
-        return center_to_dgrid_vector(uk, vk, cdgrid)
-
-    u_d_t, v_d_t = jax.vmap(convert_one)((u_t, v_t))
-    return jnp.moveaxis(u_d_t, 0, -1), jnp.moveaxis(v_d_t, 0, -1)
+    # 4D: native single-message vector halo via pad_halo_vector_4d.
+    # Replaces nlev separate ``pad_halo_vector`` MPI calls under the
+    # previous per-level vmap.  4-point averaging then proceeds on axes
+    # 1, 2 (i, j), with the trailing nlev axis carried through passively.
+    u_pad, v_pad = pad_halo_vector_4d(
+        u_cc, v_cc,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=offsets, duogrid=dg,
+    )
+    u_d = 0.25 * (u_pad[:, :-1, :-1, :] + u_pad[:, 1:, :-1, :]
+                   + u_pad[:, :-1, 1:, :] + u_pad[:, 1:, 1:, :])
+    v_d = 0.25 * (v_pad[:, :-1, :-1, :] + v_pad[:, 1:, :-1, :]
+                   + v_pad[:, :-1, 1:, :] + v_pad[:, 1:, 1:, :])
+    return u_d, v_d
 
 
 def dgrid_to_center_vector(u_d, v_d):
