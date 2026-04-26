@@ -304,58 +304,59 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Advective form = flux divergence + θ·div(v):  -v·∇θ = -∇·(θv) + θ∇·v
     div_v = cgrid_divergence(u_c, v_c, cdgrid)
 
-    # --- 10/11. theta_total and rho_total flux divergence (batched) ---
-    # Stack the two scalars along a trailing axis and fold it into the
-    # level dim so ``cgrid_mass_flux_divergence`` runs ONE ``pad_halo_4d``
-    # MPI exchange across both fields instead of two.  ``u_c``, ``v_c``
-    # are shared; ``jnp.repeat`` builds the matching velocity broadcast
-    # for the interleaved (level × scalar) trailing axis.
+    # --- 10/11/12. (theta, rho, tracers) flux divergence (batched) ---
+    # ``cgrid_mass_flux_divergence`` issues a ``pad_halo_4d`` on its
+    # scalar input and runs the PPM reconstruction along the trailing
+    # axis as a passive batch.  Stack ``(theta_total, rho_total)`` and
+    # any prognostic tracers along that trailing axis, fold into the
+    # level dim, and run a single PPM transport call instead of two.
+    # ``u_c``, ``v_c``, and ``div_v`` are shared; ``jnp.repeat`` builds
+    # the matching velocity broadcast for the interleaved (level ×
+    # scalar) trailing axis.
     n_face_tr, n_i_tr, n_j_tr, nlev_tr = theta_total.shape
-    tr_pair = jnp.stack(
-        [theta_total, rho_total], axis=-1,
-    )  # (6, n, n, nlev, 2)
-    tr_pair_flat = tr_pair.reshape(n_face_tr, n_i_tr, n_j_tr, nlev_tr * 2)
-    u_c_pair = jnp.repeat(u_c, 2, axis=-1)
-    v_c_pair = jnp.repeat(v_c, 2, axis=-1)
-    flux_pair_flat = cgrid_mass_flux_divergence(
-        tr_pair_flat, u_c_pair, v_c_pair, cdgrid,
-    )
-    flux_pair = flux_pair_flat.reshape(n_face_tr, n_i_tr, n_j_tr, nlev_tr, 2)
-    dtheta_p_dt = flux_pair[..., 0] + theta_total * div_v
-    drho_p_dt = flux_pair[..., 1]
-
-    # --- 12. Tracer advection (advective form) ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
-    if n_tracers > 0:
-        # Fold the tracer axis into the level axis so
-        # ``cgrid_mass_flux_divergence`` runs ONE ``pad_halo_4d`` for all
-        # tracers instead of n_tracers separate halo exchanges under
-        # vmap-over-tracers.  The operator's 4D path passes the trailing
-        # axis through passively (PPM operates on (i, j) only).
-        n_face, n_i, n_j, nlev_t, _ = tracers.shape
-        tracers_flat = tracers.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
-        # u_c, v_c, div_v are the same for every tracer; broadcast across
-        # the combined level/tracer trailing axis.  ``tracers_flat`` reshape
-        # interleaves levels and tracers as
-        # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]``, so we use
-        # ``jnp.repeat`` (each level value duplicated n_tracers times) rather
-        # than ``jnp.tile`` (which would concatenate the whole array and
-        # mis-align tracer ↔ level).
-        if n_tracers == 1:
-            u_c_b, v_c_b, div_v_b = u_c, v_c, div_v
-        else:
-            u_c_b = jnp.repeat(u_c, n_tracers, axis=-1)
-            v_c_b = jnp.repeat(v_c, n_tracers, axis=-1)
-            div_v_b = jnp.repeat(div_v, n_tracers, axis=-1)
-        flux_flat = cgrid_mass_flux_divergence(
-            tracers_flat, u_c_b, v_c_b, cdgrid,
-        )
-        horiz_flat = flux_flat + tracers_flat * div_v_b
-        horiz = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
+    n_total = 2 + n_tracers  # theta + rho + tracers
 
-        # Vertical advection per-tracer — local stencil along axis -1, no
-        # halo cost.  vmap over the trailing axis so JAX produces one
-        # batched kernel rather than n_tracers separate ones.
+    if n_tracers > 0:
+        combined_stack = jnp.concatenate(
+            [
+                jnp.stack([theta_total, rho_total], axis=-1),  # (..., nlev, 2)
+                tracers,  # (..., nlev, n_tracers)
+            ], axis=-1,
+        )  # (..., nlev, n_total)
+    else:
+        combined_stack = jnp.stack(
+            [theta_total, rho_total], axis=-1,
+        )  # (..., nlev, 2)
+
+    combined_flat = combined_stack.reshape(
+        n_face_tr, n_i_tr, n_j_tr, nlev_tr * n_total,
+    )
+    if n_total == 1:
+        u_c_b, v_c_b = u_c, v_c
+    else:
+        u_c_b = jnp.repeat(u_c, n_total, axis=-1)
+        v_c_b = jnp.repeat(v_c, n_total, axis=-1)
+    flux_combined_flat = cgrid_mass_flux_divergence(
+        combined_flat, u_c_b, v_c_b, cdgrid,
+    )
+    flux_combined = flux_combined_flat.reshape(
+        n_face_tr, n_i_tr, n_j_tr, nlev_tr, n_total,
+    )
+    # Theta uses advective form: -∇·(θv) + θ·∇·v.
+    dtheta_p_dt = flux_combined[..., 0] + theta_total * div_v
+    # Rho uses pure flux form: -∇·(ρv) + 0 (continuity).
+    drho_p_dt = flux_combined[..., 1]
+
+    # Tracer advection (advective form).  Vertical advection still runs
+    # per-tracer via ``vmap`` over the trailing axis so JAX produces one
+    # batched kernel.
+    if n_tracers > 0:
+        horiz = (
+            flux_combined[..., 2:]                # (..., nlev, n_tracers)
+            + tracers * div_v[..., None]          # advective-form correction
+        )
+
         def _vert_one(q):
             return vertical_advection_height(q, w, dz, dz_half, J)
 
