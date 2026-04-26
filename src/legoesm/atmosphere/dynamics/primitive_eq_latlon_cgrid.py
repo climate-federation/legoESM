@@ -267,14 +267,25 @@ def cgrid_latlon_hydrostatic_tendencies(
     # --- 4. Bernoulli function B = Φ + KE ---
     B = Phi + KE
 
-    # --- 5. Bernoulli gradient at faces ---
-    dB_dx = gradient_x_cgrid(B, grid)
-    dB_dy = gradient_y_cgrid(B, grid)
-
-    # --- 6. Pressure gradient correction ---
+    # --- 5/6. Bernoulli + ln(p_s) gradients (batched at faces) ---
+    # ``B`` is (n_lat, n_lon, nlev) and ``ln_ps`` is (n_lat, n_lon).
+    # ``gradient_*_cgrid`` treats any trailing axis as a passive batch
+    # (the per-lat ``cos_lat`` / ``dx_u`` metric broadcasts cleanly), so
+    # we promote ``ln_ps`` to a single-level tensor and concatenate
+    # along the level axis.  Each gradient runs once on the
+    # (n_lat, n_lon, nlev+1) tensor; ``ln_ps`` claims the trailing slot.
+    # 4 gradient calls collapse to 2 (one batched x + one batched y).
     ln_ps = jnp.log(p_s)
-    dln_dx = gradient_x_cgrid(ln_ps, grid)  # 2D
-    dln_dy = gradient_y_cgrid(ln_ps, grid)  # 2D
+    n_lat_g, n_lon_g, nlev_g = B.shape
+    _Bln_stack = jnp.concatenate(
+        [B, ln_ps[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, nlev+1)
+    _dBln_dx = gradient_x_cgrid(_Bln_stack, grid)  # (n_lat, n_lon+1, nlev+1)
+    _dBln_dy = gradient_y_cgrid(_Bln_stack, grid)  # (n_lat+1, n_lon, nlev+1)
+    dB_dx = _dBln_dx[..., :nlev_g]
+    dB_dy = _dBln_dy[..., :nlev_g]
+    dln_dx = _dBln_dx[..., nlev_g]   # squeeze trailing-1 → (n_lat, n_lon+1)
+    dln_dy = _dBln_dy[..., nlev_g]
 
     T_u = interp_cell_to_uface(T)
     T_v = interp_cell_to_vface(T)
