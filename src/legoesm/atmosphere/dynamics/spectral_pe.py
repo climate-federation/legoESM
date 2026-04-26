@@ -383,19 +383,6 @@ def spectral_pe_tendencies(
         _pgf_dlnps_dy = _pgf_dlnps_dy * _hf
     pgf_Fx_cos = R_d * T_prime_pgf * _pgf_dlnps_dx * cos_lat_3d
     pgf_Fy_cos = R_d * T_prime_pgf * _pgf_dlnps_dy * cos_lat_3d
-    pgf_correction_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_Fx_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, pgf_Fy_cos)
-    )
-
-    # --- 12. Horizontal tendencies ---
-    dvor_hat = -flux_vor_div
-    ddiv_hat = (
-        flux_vor_curl
-        - grid.lap[:, None] * KPhi_hat
-        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
-        - pgf_correction_hat
-    )
 
     # --- 13. Temperature equation ---
     # Horizontal: dT/dt = -v·∇T = -div(T*v) + T*div(v)
@@ -409,9 +396,38 @@ def spectral_pe_tendencies(
     T_prime_u_cos = T_prime * u_cos
     T_prime_v_cos = T_prime * v_cos
 
+    # Batch the four PGF + T-flux SH analyses: PGF needs oc2(Fx) +
+    # dmu(Fy), the T equation needs oc2(T'u) + dmu(T'v).  Stack the
+    # two oc2 inputs and the two dmu inputs along trailing axes and
+    # fold into level so each SH variant runs once on a thicker
+    # (n_lat, n_lon, nlev*2) tensor.  4 SH forwards collapse to 2.
+    _pgfT_oc2_stack = jnp.stack([pgf_Fx_cos, T_prime_u_cos], axis=-1)
+    _pgfT_dmu_stack = jnp.stack([pgf_Fy_cos, T_prime_v_cos], axis=-1)
+    n_lat_p, n_lon_p, nlev_p, _ = _pgfT_oc2_stack.shape
+    _oc2_pair = sh_analysis_oc2_3d(
+        grid, _pgfT_oc2_stack.reshape(n_lat_p, n_lon_p, nlev_p * 2),
+    ).reshape(-1, nlev_p, 2)
+    _dmu_pair = sh_analysis_dmu_3d(
+        grid, _pgfT_dmu_stack.reshape(n_lat_p, n_lon_p, nlev_p * 2),
+    ).reshape(-1, nlev_p, 2)
+
+    pgf_correction_hat = (
+        im_over_a[:, None] * _oc2_pair[..., 0]
+        - one_over_a * _dmu_pair[..., 0]
+    )
+
+    # --- 12. Horizontal tendencies ---
+    dvor_hat = -flux_vor_div
+    ddiv_hat = (
+        flux_vor_curl
+        - grid.lap[:, None] * KPhi_hat
+        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
+        - pgf_correction_hat
+    )
+
     flux_T_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, T_prime_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, T_prime_v_cos)
+        im_over_a[:, None] * _oc2_pair[..., 1]
+        - one_over_a * _dmu_pair[..., 1]
     )
 
     T_prime_div = T_prime * div
