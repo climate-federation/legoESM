@@ -548,3 +548,41 @@ The 1 % bare A-L imperfect cancellation at cube vertices is *intrinsic to the A-
 **Verification.**  No new test added — the diagnostic is interpretive, not a regression check.  Output is reproducible from the script.
 
 **Process.**  No production code change.  Cumulative iter-921→iter-929: 9 commits, 33 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-930 — boundary_fix vs div_damp 4-way matrix: boundary_fix is dominant integrated stabilizer
+
+**Trigger.**  iter-907 found `div_damp` is 29× more than `boundary_fix` at INSTANTANEOUS hot-spot tendency magnitude.  iter-929 identified the 3-stage chain (bare A-L cube-vertex → boundary_fix spread → div_damp amplification).  But which stabilizer dominates the INTEGRATED 1-day v_ll_Linf?  The two questions have different answers.
+
+**iter-930 measurement** (W2 C36 1-day, `apply_fortran_xppm_boundary=True`, all 4 cells of the `boundary_fix × div_damp` matrix):
+
+| `boundary_fix` | `div_damp` | v_ll_Linf | h_L2  | h_Linf |
+|----------------|------------|-----------|-------|--------|
+| True (production) | 8×       | 0.1319    | 0.512 | 8.184  |
+| False             | 8×       | 0.6380    | 1.751 | 34.29  |
+| True              | 0        | 0.1857    | 0.645 | 6.023  |
+| False             | 0        | 0.6616    | 1.826 | 20.72  |
+
+**Findings.**
+
+1. **`boundary_fix=False` worsens v_ll_Linf 4.8×** (0.132 → 0.638 m/s) regardless of `div_damp`.
+2. **`div_damp=0` (with boundary_fix on) worsens v_ll_Linf only 1.4×** (0.132 → 0.186 m/s).
+3. **`boundary_fix` is the DOMINANT integrated-error stabilizer** for W2 — penalty for removing it is 3×+ larger than the penalty for removing `div_damp`.
+4. **Production matrix (both on) is the BEST of the 4 cells** on every metric except h_Linf, where `bf=T, dd=0` wins (6.02 vs 8.18).  The h_Linf trade-off mirrors the iter-921 v vs h Pareto observation: more aggressive damping shifts where the residual concentrates.
+
+**Reconciliation with iter-907.**  iter-907's "div_damp 29× boundary_fix at hot spot" is correct but refers to the INSTANTANEOUS dv tendency magnitude.  Over 288 RK3 steps, the `boundary_fix` smoothing operates at every step and accumulates to dominate the integrated v_ll_Linf.  `div_damp` damps the instantaneous noise but doesn't fully suppress it; `boundary_fix`'s averaging is more globally effective at reducing the integrated cube-vertex-derived bias.
+
+**Implication for the d_sw5 audit and the user's issue #5.**
+
+User issue #5 noted `boundary_fix` is "Python-only stabilizer ... reduces artifacts but proves the production operator is compensating for a missing faithful FV3 mechanism."  iter-930 quantifies the SCALE of that compensation: removing boundary_fix would push v_ll_Linf from 0.132 to 0.638 m/s — 4.8× worse than the iter-893 baseline.  Until a Fortran-faithful corner mechanism (per issue #6 — d_sw5 corner KE-add structure within the FB chain) is in place, `boundary_fix` is structurally indispensable for production W2.
+
+**iter-930 deliverables.**
+
+1. `tests/test_iter930_boundary_fix_div_damp_load_bearing.py` — 5 sentinels:
+   - 4 parametric pins on the 4-way matrix (within ±5 %).
+   - 1 inequality pin: `bf=False` penalty > 3× `dd=0` penalty on v_ll_Linf.
+
+**Verification.**  5/5 pass in 60 s.
+
+**Backlog implication.**  When/if FB chain stabilization lands, the FIRST validation should be that production W2 v_ll_Linf with the FB chain (and no boundary_fix Python-only stabilizer) reaches the iter-893 0.132 m/s number or better.  iter-930's 0.638 m/s is the "no compensation" baseline that the FB chain replacement must match.
+
+**Process.**  No production code change.  Cumulative iter-921→iter-930: 10 commits, 38 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
