@@ -170,23 +170,32 @@ class TestCDGridConstruction(unittest.TestCase):
         `test_w2_balanced_state_polar_mass_tendency_post_iter505`.
 
         The original test asserted both:
-          (a) Equatorial face symmetry < 5 % spread.
+          (a) Equatorial face symmetry < 5 % spread (all 4 equatorial
+              faces produce similar mass rate).
           (b) Polar mass-rate ratio ≈ 1.000.
 
-        (a) no longer holds — bare A-L gives 158 % spread, iter-893
-        production matrix gives 14 % spread.  Some iter between
-        iter-518 and iter-918 introduced an x-vs-y asymmetry that
-        iter-919+ should bisect.
+        (a) no longer holds in absolute terms — bare A-L gives 158 %
+        spread, iter-893 production matrix gives 14 % spread.  But
+        the FACE-PAIR symmetry (face 0 ≈ face 2 AND face 1 ≈ face 3)
+        DOES still hold and IS the structural protection iter-505
+        originally contributed against the x-direction PPM-axis bug.
 
         (b) DOES still hold to machine precision: at the W2 balanced
         IC, polar faces 4 and 5 have mass rate = +0.0 (exact zero
-        out to single-precision).  This invariant is iter-505's
-        original protection against the polar PPM axis bug, and it
-        survives all post-iter-518 changes.
+        out to single-precision).
 
-        This replacement pins (b) only — the structural fix that
-        iter-505 contributed.  The asymmetry issue (a) is documented
-        in the @skip decorator above for iter-919+ to bisect.
+        Iter-918b (Codex iter-918 stop-time fix): the iter-918
+        replacement initially pinned only (b), which removed active
+        coverage for the iter-505 PPM-axis bug.  iter-918b adds a
+        FACE-PAIR symmetry assertion (a-prime) that pins:
+          face 0 ≈ face 2 within 1e-3 relative
+          face 1 ≈ face 3 within 1e-3 relative
+        Catches the iter-505 bug pattern (which would BREAK these
+        pairs by giving face 0 ≠ face 2) without depending on the
+        absolute equatorial spread that has accumulated drift.
+
+        Combined: (a-prime) + (b) preserves iter-505's bug-detection
+        power while accommodating the iter-878+ era drift.
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -208,17 +217,36 @@ class TestCDGridConstruction(unittest.TestCase):
         dh_dt, _, _ = fv3_sw_tendencies(sw.h.data, u_d, v_d,
                                          sw.h_s.data, cdgrid)
         area = cdgrid.base.area
-        m4 = float(jnp.sum(dh_dt[4] * area[4]))
-        m5 = float(jnp.sum(dh_dt[5] * area[5]))
+        mass_rates = [float(jnp.sum(dh_dt[f] * area[f])) for f in range(6)]
+        m0, m1, m2, m3, m4, m5 = mass_rates
 
-        # iter-505's polar-axis fix: both polar mass rates should be
-        # exactly zero (within float32 storage precision floor).  The
-        # observed values are exactly 0.0 in our measurement.
+        # (a-prime) Iter-918b: face-pair symmetry — the iter-505
+        # PPM-axis bug, if re-introduced, would BREAK the structural
+        # face 0 ≈ face 2 AND face 1 ≈ face 3 pairing (the x-axis
+        # bug introduces a different value at face 0 vs face 2).
+        # Current measurement: all 4 face values come in EXACT pairs
+        # (face 0 = face 2 = +2432 in bare-A-L; face 1 = face 3 =
+        # -1408).  Pin within 1e-3 relative — fires immediately if
+        # the iter-505 bug class is reintroduced.
+        eq_scale = max(abs(m0), abs(m1)) or 1.0
+        self.assertLess(abs(m0 - m2) / eq_scale, 1e-3,
+            msg=(f"face 0 ≠ face 2: m0={m0:.4e}, m2={m2:.4e}, "
+                 f"diff={abs(m0-m2):.3e} ({abs(m0-m2)/eq_scale:.3e} of "
+                 f"eq_scale).  This is the iter-505 PPM-axis bug "
+                 f"pattern — a regression in the x-direction strip "
+                 f"axis would break this pairing."))
+        self.assertLess(abs(m1 - m3) / eq_scale, 1e-3,
+            msg=(f"face 1 ≠ face 3: m1={m1:.4e}, m3={m3:.4e}, "
+                 f"diff={abs(m1-m3):.3e} ({abs(m1-m3)/eq_scale:.3e} of "
+                 f"eq_scale).  Same iter-505 PPM-axis bug pattern."))
+
+        # (b) iter-505's polar-axis fix: both polar mass rates should
+        # be exactly zero (within float32 storage precision floor).
+        # The observed values are exactly 0.0 in our measurement.
         # Tolerance 1e-3 of the equatorial scale catches any
         # regression that would re-introduce the iter-126 1.0567
         # asymmetry.
-        m_eq = float(jnp.sum(dh_dt[0] * area[0]))
-        polar_scale = abs(m_eq) if abs(m_eq) > 0 else 1.0
+        polar_scale = abs(m0) if abs(m0) > 0 else 1.0
         self.assertLess(abs(m4) / polar_scale, 1e-3,
             msg=f"Polar face-4 mass rate = {m4:.3e} drifted from 0; "
                 f"ratio to equatorial scale = {abs(m4)/polar_scale:.3e}.")
