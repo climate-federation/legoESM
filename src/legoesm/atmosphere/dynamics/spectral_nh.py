@@ -362,12 +362,14 @@ def spectral_nh_slow_tendencies(
                 im_over_a[:, None] * sh_analysis_oc2_3d(grid, q_u_cos)
                 - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos)
             )
-            q_div_hat = sh_analysis_3d(grid, q * div)
-            dq_hat = -flux_q_div + q_div_hat
 
-            # Vertical advection
+            # Sum the two grid-space contributions to dq/dt before the
+            # SH forward transform.  ``sh_analysis_3d`` is linear, so
+            # one analysis on the sum replaces two analyses — same
+            # exploit as Loops 94 and 105 for spectral PE / ocean.
             vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
-            dq_hat = dq_hat + sh_analysis_3d(grid, vert_adv_q)
+            dq_grid_sum = q * div + vert_adv_q
+            dq_hat = -flux_q_div + sh_analysis_3d(grid, dq_grid_sum)
             return dq_hat
 
         dtracers_hat_t = jax.vmap(_single_tracer_tendency)(tracers_hat_t)
