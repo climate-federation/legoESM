@@ -2067,6 +2067,61 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                  f"— either the extrapolation was never actually "
                  f"gated, or the branches were both made equivalent."))
 
+    def test_iter916b_corner_vorticity_duogrid_differs_from_non_duogrid(self):
+        """Iter-916b live replacement for the iter-916-skipped
+        `test_corner_vorticity_boundary_gates_linear_extrapolation_on_not_use_duogrid`.
+
+        That test compared duogrid=True output against a numpy
+        `mode='edge'` reference, which became stale when iter-836
+        replaced the duogrid halo with cross-face-rotated
+        `pad_halo_vector`.
+
+        This replacement asserts the WEAKER but still-load-bearing
+        invariant: duogrid=True and duogrid=False MUST produce
+        DIFFERENT outputs on the same random input — proof that the
+        iter-552 gate (which controls both the linear-extrapolation
+        branch AND the cross-face-rotation branch added in iter-836)
+        is wired correctly.
+
+        If a future change reverted to a single shared path (no gate),
+        the two outputs would match and this test would fire.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+
+        n = 8
+        cdg_nd = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=False))
+        rng = np.random.default_rng(639)
+        uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+
+        vort_dg = np.asarray(_corner_vorticity(
+            uc, vc, cdg_nd, use_duogrid=True))
+        vort_nd = np.asarray(_corner_vorticity(
+            uc, vc, cdg_nd, use_duogrid=False))
+        diff = np.abs(vort_dg - vort_nd)
+
+        # Iter-916b empirical fingerprint: at the random input
+        # 39.5 % of cells differ at >1e-10, max diff 8.34e-6.  We pin
+        # 30 %+ as a robust lower bound for the gate-fires invariant.
+        frac_differing = float((diff > 1e-10).mean())
+        self.assertGreater(frac_differing, 0.30,
+            msg=(f"duogrid and non-duogrid `_corner_vorticity` outputs "
+                 f"differ on only {frac_differing*100:.1f}% of cells "
+                 f"(threshold 30%).  The iter-552 gate must be wiring "
+                 f"the duogrid (iter-836 cross-face rotation) and "
+                 f"non-duogrid (linear extrapolation + corner adds) "
+                 f"branches to produce different output on random input."))
+        # Also assert the magnitude is meaningful (not numerical noise).
+        self.assertGreater(float(diff.max()), 1e-6,
+            msg=f"max diff between duogrid/non-duogrid is only "
+                f"{float(diff.max()):.3e}; expected > 1e-6 on random "
+                f"input.")
+
     def test_divergence_corner_duo_face_boundary_zeroing(self):
         """Iter-554: lock `_divergence_corner_duo`'s face-boundary
         zeroing and 0.25× attenuation at adjacent cells.
@@ -3687,6 +3742,88 @@ class TestPpmCwVsFv3Iord8Divergence(unittest.TestCase):
                  f"Both should use the same 4th-order "
                  f"`(7*(q[i-1]+q[i]) - (q[i-2]+q[i+1]))/12` "
                  f"interpolant at non-extremum interior cells."))
+
+    def test_iter916b_cw_equals_iord8_post_iter878_convergence(self):
+        """Iter-916b live replacement for the iter-916-skipped
+        `test_cw_vs_fv3_iord8_on_production_halo_sliced_range`.
+
+        That test asserted CW limiter and iord==8 limiter DIFFER
+        measurably (assertGreater diff > 0.05).  Post-iter-878
+        limiter LHS-factor fix (matching CW84/Fortran pert_ppm),
+        the two schemes now CONVERGE.  This replacement asserts the
+        new invariant: CW == iord==8 within tolerance, in the
+        production-used range.
+
+        If a future change diverges the two limiters again, this
+        test fires — alerting the porter that iter-878's CW84
+        alignment was undone.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.core.operators_cdgrid import _ppm_reconstruct_1d
+
+        n = 5
+        q_np = np.array(
+            [0.5, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.5, 0.75],
+            dtype=np.float64)
+        # Path A: production CW.
+        q = jnp.asarray(q_np[None, :])
+        q_L, q_R = _ppm_reconstruct_1d(q, axis=1)
+        q_L_cw = np.asarray(q_L[0], dtype=np.float64)
+        q_R_cw = np.asarray(q_R[0], dtype=np.float64)
+
+        # Path B: in-test iord==8 reproduction (copied from the
+        # original iter-568 test body).
+        N = q_np.size
+        q_pad = np.pad(q_np, (2, 2), mode='edge')
+
+        def dm_iord8plus(q_seq, i):
+            xt = 0.25 * (q_seq[i + 1] - q_seq[i - 1])
+            dqr = max(q_seq[i], q_seq[i - 1], q_seq[i + 1]) - q_seq[i]
+            dql = q_seq[i] - min(q_seq[i], q_seq[i - 1], q_seq[i + 1])
+            return float(np.sign(xt) * min(abs(xt), dqr, dql))
+
+        def al_iord8plus(q_pad_arr, k_pad):
+            dm_left = dm_iord8plus(q_pad_arr, k_pad - 1)
+            dm_right = dm_iord8plus(q_pad_arr, k_pad)
+            return (0.5 * (q_pad_arr[k_pad - 1] + q_pad_arr[k_pad])
+                    + (1.0 / 3.0) * (dm_left - dm_right))
+
+        q_L_iord8 = np.zeros(N)
+        q_R_iord8 = np.zeros(N)
+        for i in range(N):
+            k = i + 2
+            al_left = al_iord8plus(q_pad, k)
+            al_right = al_iord8plus(q_pad, k + 1)
+            dm_here = dm_iord8plus(q_pad, k)
+            xt = 2.0 * dm_here
+            bl = -np.sign(xt) * min(abs(xt), abs(al_left - q_pad[k]))
+            br = np.sign(xt) * min(abs(xt), abs(al_right - q_pad[k]))
+            q_L_iord8[i] = q_pad[k] + bl
+            q_R_iord8[i] = q_pad[k] + br
+
+        prod_q_R_range = slice(1, n + 2)
+        prod_q_L_range = slice(2, n + 3)
+
+        diff_R = np.abs(q_R_iord8[prod_q_R_range] - q_R_cw[prod_q_R_range])
+        diff_L = np.abs(q_L_iord8[prod_q_L_range] - q_L_cw[prod_q_L_range])
+
+        # Iter-916b NEW invariant: post-iter-878, CW and iord==8
+        # converge to within numerical precision in the production
+        # range.  iter-878's LHS-factor fix aligned CW with CW84/
+        # Fortran pert_ppm; iord==8 uses the same family, so they
+        # produce identical output in the slot pair production
+        # actually consumes.
+        np.testing.assert_allclose(diff_R, 0.0, atol=1e-12,
+            err_msg=(f"Post-iter-878, CW q_R must equal iord==8 q_R "
+                     f"in the production range (q_R[1:{n+2}]).  Max "
+                     f"diff = {float(diff_R.max()):.4e}.  If a future "
+                     f"change re-introduced the pre-iter-878 LHS-factor "
+                     f"bug, this would fire."))
+        np.testing.assert_allclose(diff_L, 0.0, atol=1e-12,
+            err_msg=(f"Post-iter-878, CW q_L must equal iord==8 q_L "
+                     f"in the production range (q_L[2:{n+3}]).  Max "
+                     f"diff = {float(diff_L.max()):.4e}."))
 
 
 class TestPpmLimiterAtSmoothExtremum(unittest.TestCase):
@@ -8338,6 +8475,55 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             err_msg=("_corner_vorticity duogrid output diverges from "
                      "edge-mode-pad + no-corner-correction reference "
                      "— any non-duogrid edge rewrite would fire here."))
+
+    def test_iter916b_corner_vorticity_duogrid_post_iter836_fingerprint(self):
+        """Iter-916b live replacement for the iter-916-skipped
+        `test_corner_vorticity_matches_fortran_duogrid`.
+
+        That test compared duogrid `_corner_vorticity` against a numpy
+        `mode='edge'` reference (lines 8211-8224), which became stale
+        when iter-836 replaced the duogrid halo with cross-face-rotated
+        `pad_halo_vector` (fv3_sw_core.py:1453-1488).
+
+        This replacement uses a gold-file fingerprint approach: pin the
+        CURRENT post-iter-836 production output for the same fixed-seed
+        random input.  Catches any future change to the duogrid path
+        without requiring a numpy reproduction of `pad_halo_vector`.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid)
+        from legoesm.core.fv3_sw_core import _corner_vorticity
+
+        n = 8
+        cdgrid = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n=n, use_duogrid=True))
+        uc, vc = self._build_inputs(639, n)
+
+        vort_abs = np.asarray(_corner_vorticity(
+            jnp.asarray(uc), jnp.asarray(vc), cdgrid, use_duogrid=True))
+
+        # Iter-916b gold fingerprints (post-iter-836 production).
+        self.assertEqual(vort_abs.shape, (6, 9, 9))
+        self.assertAlmostEqual(float(vort_abs.sum()),
+            -2.785074425912422e-06, places=14,
+            msg=f"duogrid vort_abs.sum() drifted: {float(vort_abs.sum()):.6e}")
+        self.assertAlmostEqual(float(vort_abs.min()),
+            -0.00014810834183147395, places=12,
+            msg=f"duogrid vort_abs.min() drifted: {float(vort_abs.min()):.6e}")
+        self.assertAlmostEqual(float(vort_abs.max()),
+            0.00014395187913355967, places=12,
+            msg=f"duogrid vort_abs.max() drifted: {float(vort_abs.max()):.6e}")
+        self.assertAlmostEqual(float(vort_abs[0, 0, 0]),
+            -8.479464389985785e-05, places=12,
+            msg=f"duogrid vort_abs[0,0,0] drifted: {float(vort_abs[0,0,0]):.6e}")
+        self.assertAlmostEqual(float(vort_abs[3, 4, 4]),
+            -2.2152548776918704e-06, places=14,
+            msg=f"duogrid vort_abs[3,4,4] drifted: {float(vort_abs[3,4,4]):.6e}")
+        self.assertAlmostEqual(float(vort_abs[5, 8, 8]),
+            -8.417284419787868e-05, places=12,
+            msg=f"duogrid vort_abs[5,8,8] drifted: {float(vort_abs[5,8,8]):.6e}")
 
     def test_corner_vorticity_duogrid_skips_corner_additions_iter638(self):
         """Explicit lock: under duogrid, the 4 cube-vertex corner
