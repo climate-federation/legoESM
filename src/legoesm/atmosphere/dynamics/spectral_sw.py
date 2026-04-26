@@ -501,10 +501,23 @@ def spectral_to_grid(
         All arrays have shape (n_lat, n_lon).
     """
     g = constants.g
-    vor = sh_synthesis(grid, state.vor_hat.data)
-    div = sh_synthesis(grid, state.div_hat.data)
-    phi = sh_synthesis(grid, state.phi_hat.data)
-    phis = sh_synthesis(grid, state.phis_hat.data)
+    # Batch the four 2D SH syntheses (vor, div, phi, phis) along a
+    # trailing axis — same trailing-axis-passive-batch exploit as the
+    # SW tendency block (Loops 95/96 / 101).  4 SH syntheses → 1.
+    _vdpp_pair_diag = jnp.stack(
+        [
+            state.vor_hat.data,
+            state.div_hat.data,
+            state.phi_hat.data,
+            state.phis_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, 4)
+    _vdpp_grid_diag = sh_synthesis_3d(grid, _vdpp_pair_diag)  # (n_lat, n_lon, 4)
+    vor = _vdpp_grid_diag[..., 0]
+    div = _vdpp_grid_diag[..., 1]
+    phi = _vdpp_grid_diag[..., 2]
+    phis = _vdpp_grid_diag[..., 3]
 
     h = phi / g
     h_s = phis / g
