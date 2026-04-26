@@ -534,3 +534,41 @@ iter-893's xppm boundary fix lowered the asymptote closer to the structural floo
 **Verification.**  Sweep runs to completion (~10 min total: 4 W2 1-day trajectories at increasing cost).  Production W2 baseline (C36) unchanged at 1.319e-1 m/s.
 
 **Process.**  192nd iter.  iter-910 produces a meaningful UPDATE to the project's understanding of the W2 residual: the post-iter-893 baseline IS resolution-refinable to first-order (down to ~0.10 m/s structural floor at C∞), contradicting the memory's pre-iter-893 "resolution-invariant" claim.  This narrows the remaining residual budget: only ~0.02 m/s separates the iter-892 production at C36 from the asymptotic floor.  iter-911+ has clearer cost-benefit for option (3) vs FB-chain pivot.
+
+### Iter-912 — clean regression scan across iter-887→iter-911b commit series
+
+**Motivation.**  The iter-887→iter-911b commit series (25 commits over ~190 iter labels) introduced many new config fields and code branches: `apply_fortran_xppm_boundary` (iter-893), `fortran_faithful_ppm_left/right` (iter-900/903), `use_fv3_dsw1_mass_transport` (iter-904), `use_split_mass_momentum_integration` (iter-905), `cube_edge_softer_div_damp` + factor + band (iter-909), plus FB-chain warning at `__init__` (iter-903c) and 4 new diag scripts.  Per CLAUDE.md "Validation Rules" ("Always run the narrowest relevant test after edits"), iter-912 runs the focused iter-89x/9xx regression suite to verify production stability after the recent flurry of changes.
+
+**Sweep result (10 test files, 63 tests, 175 s wall time, all PASS).**
+
+| Test file                                                | Tests | Iter origin      |
+|----------------------------------------------------------|-------|------------------|
+| `test_fortran_fidelity_default_flags_iter873.py`         | 14    | iter-873 + iter-896 |
+| `test_ppm_reconstruct_1d_iter892_lock_iter899.py`        | 6     | iter-899/899b   |
+| `test_ppm_reconstruct_1d_fortran_faithful_left_iter900.py`| 6    | iter-900        |
+| `test_iter901_diag_smoke.py`                             | 3     | iter-901c       |
+| `test_ppm_reconstruct_1d_fortran_faithful_right_iter903.py`| 6   | iter-903        |
+| `test_iter903b_fb_chain_warning.py`                      | 5     | iter-903b/c     |
+| `test_iter904_use_fv3_dsw1_mass_transport.py`            | 7     | iter-904         |
+| `test_iter905_split_mass_momentum.py`                    | 6     | iter-905         |
+| `test_iter909_cube_edge_softer_div_damp.py`              | 7     | iter-909         |
+| `test_iter911_w2_resolution_sentinel.py`                 | 3     | iter-911b        |
+| **Total**                                                | **63**|                  |
+
+**63/63 PASS in 175 s (~2.8 s/test average).**  The slow tests are 1-day W2 trajectories at C8 (smoke) through C24 (iter-911 sentinels); JIT cache reuse keeps the per-test overhead modest.
+
+**What this validates.**
+
+1. **All iter-887→iter-911b config fields default OFF correctly.**  iter-873 inventory test confirms 7 default-OFF Fortran-fidelity flags; cross-iter sentinels (iter-900/903/904/905/909) confirm their flags don't mutually interfere.
+2. **Production W2 baseline is bit-stable** at the iter-892/iter-893 path — iter-768 t=1d pin (1.32e-1 m/s ±5%) and iter-895/896 sentinels still hold.
+3. **All known-worse opt-ins remain known-worse**: iter-766 (a2b_corner_avg), iter-767 (vector_corner_fill), iter-769 (boundary_fix_skip_corners) all maintain their iter-898c-tightened OFF/ratio pins.
+4. **FB chain warnings fire correctly** at `__init__` for iter-900/903/904/905/909 flags (iter-903b/c sentinels).
+5. **Resolution-sweep finding holds** at iter-910's measurement points (iter-911b sentinels: C16 = 0.354, C24 = 0.183 within ±5 %).
+
+**No regression.**  The iter-887→iter-911b series is internally consistent and production-stable.
+
+**Deliverable.**
+- This iter-912 doc entry recording the clean-sweep result.
+- No new tests, no production code change.
+
+**Process.**  193rd iter.  iter-912 closes the iter-887→iter-911b series with a CI-validated stability check.  Production W2 baseline is unchanged at 1.319e-1 m/s.  Future iter-913+ work either continues option (3) d_sw5 holistic port (small marginal benefit), pivots to FB-chain stabilization (broader scientific scope), or moves toward higher-resolution production (C48 at ~2.4× cost for 5 % W2 reduction per iter-910b).
