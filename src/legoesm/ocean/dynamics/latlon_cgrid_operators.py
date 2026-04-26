@@ -812,18 +812,10 @@ def strain_rate_cgrid(
     D_T : (n_lat, n_lon, ...) at h-points — du/dx - dv/dy
     D_S : (n_lat+1, n_lon+1, ...) at q-points — dv/dx + du/dy
     """
+    # Native 2D and 3D — broadcast 1D / 2D metrics over the trailing
+    # level axis when needed.  Eliminates the prior moveaxis + vmap +
+    # moveaxis round-trip.
     is_3d = u.ndim == 3
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)
-        v_t = jnp.moveaxis(v, -1, 0)
-
-        def _sr_2d(u_k, v_k):
-            return strain_rate_cgrid(u_k, v_k, grid,
-                                     mask=mask, u_mask=u_mask, v_mask=v_mask)
-
-        dt_t, ds_t = jax.vmap(_sr_2d)(u_t, v_t)
-        return jnp.moveaxis(dt_t, 0, -1), jnp.moveaxis(ds_t, 0, -1)
-
     R = grid.radius
     dlon = grid.dlon
     dlat = grid.dlat
@@ -831,13 +823,17 @@ def strain_rate_cgrid(
     cos_lat = grid.cos_lat
     n_lon = grid.n_lon
 
-    u_eff = u if u_mask is None else u * u_mask
-    v_eff = v if v_mask is None else v * v_mask
+    def _bcast2d(m):
+        return m[..., jnp.newaxis] if is_3d else m
 
-    # Structural periodicity: build u with wrap column always referencing
-    # column 0.  This avoids the JAX .at[].set() scatter (which complicates
-    # gradients) and guarantees D_S consistency at the wrap vertex even when
-    # the caller hasn't enforced u[:,n_lon]==u[:,0].
+    # Reshape lat-only metric to broadcast along the trailing axes.
+    lat_bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
+    pad_extra = ((0, 0),) * (u.ndim - 2)
+
+    u_eff = u if u_mask is None else u * _bcast2d(u_mask)
+    v_eff = v if v_mask is None else v * _bcast2d(v_mask)
+
+    # Structural periodicity wrap column.  Works directly for 2D and 3D.
     u_eff = jnp.concatenate([u_eff[:, :n_lon], u_eff[:, 0:1]], axis=1)
 
     # --- D_T at h-points: du/dx - dv/dy ---
@@ -846,30 +842,25 @@ def strain_rate_cgrid(
     u_west = u_eff[:, :-1]
     du_dx = (u_east - u_west) * face_dy
 
-    # cos(±π/2) is roundoff-level in finite precision; build cos_lat_v
-    # directly with the 1e-10 floor at the pole rows via Pad
-    # constant_values, eliminating the alloc-2-singleton +
-    # concatenate-of-three + cos tower.
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
     cos_lat_v = jnp.pad(
         jnp.maximum(jnp.cos(lat_interior), 1e-10),
         (1, 1), constant_values=1e-10,
     )
-    face_dx = R * cos_lat_v * dlon
+    face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
 
     v_north = v_eff[1:]
     v_south = v_eff[:-1]
-    dv_dy = v_north * face_dx[1:, jnp.newaxis] - v_south * face_dx[:-1, jnp.newaxis]
+    dv_dy = (v_north * face_dx[1:][lat_bcast]
+             - v_south * face_dx[:-1][lat_bcast])
 
-    area = grid.area
-    D_T = (du_dx - dv_dy) / area
+    area = grid.area  # (n_lat, n_lon) — broadcasts naturally over (...,, nlev)
+    D_T = (du_dx - dv_dy) / area[..., jnp.newaxis] if is_3d else \
+        (du_dx - dv_dy) / area
     if mask is not None:
-        D_T = D_T * mask
+        D_T = D_T * _bcast2d(mask)
 
     # --- D_S at q-points: dv/dx + du/dy ---
-    # Same vertex stencil as curl, but u-contribution sign is flipped.
-    # Single Pad HLO op (constant_values=(-1, 1)) replaces alloc-2-
-    # singletons + concatenate-of-three.
     sin_lat = jnp.sin(lat)
     sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
@@ -884,27 +875,23 @@ def strain_rate_cgrid(
     dv_circ = (v_east - v_west) * dy_edge
     dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
 
-    # du/dy at vertex: sign FLIPPED vs curl
-    # curl uses: u_south*dx_south - u_north*dx_north
-    # shear uses: u_north*dx_north - u_south*dx_south
-    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
-    u_ext = jnp.pad(u_eff, ((1, 1), (0, 0)))
+    # du/dy at vertex: sign FLIPPED vs curl.
+    u_ext = jnp.pad(u_eff, ((1, 1), (0, 0), *pad_extra))
     dx_ext = jnp.pad(dx_cell, (1, 1))
-    u_south = u_ext[:-1, :]
-    u_north = u_ext[1:, :]
+    u_south = u_ext[:-1]
+    u_north = u_ext[1:]
     dx_south = dx_ext[:-1]
     dx_north = dx_ext[1:]
-    du_circ = (u_north * dx_north[:, jnp.newaxis]
-               - u_south * dx_south[:, jnp.newaxis])
+    du_circ = (u_north * dx_north[lat_bcast]
+               - u_south * dx_south[lat_bcast])
 
-    D_S = (dv_circ_full + du_circ) / A_vertex[:, jnp.newaxis]
-    # Pole rows zero (wall BC).  Slice + single Pad HLO op replaces two
-    # scatter ops.
-    D_S = jnp.pad(D_S[1:-1, :], ((1, 1), (0, 0)))
+    D_S = (dv_circ_full + du_circ) / A_vertex[lat_bcast]
+    # Pole rows zero (wall BC).
+    D_S = jnp.pad(D_S[1:-1], ((1, 1), (0, 0), *pad_extra))
 
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
-        D_S = D_S * vmask
+        D_S = D_S * _bcast2d(vmask)
 
     return D_T, D_S
 
@@ -1198,51 +1185,39 @@ def viscous_tendency_cgrid(
     -------
     tend_u, tend_v : dissipative when ADDED to du/dt, dv/dt
     """
+    # Native 2D and 3D — ``strain_rate_cgrid`` and
+    # ``stress_divergence_cgrid`` both natively support 3D inputs.
+    # The only care needed is broadcasting 2D ``A_h``/``A_q``
+    # coefficients over the trailing level axis when the velocity is 3D.
     is_3d = u.ndim == 3
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)
-        v_t = jnp.moveaxis(v, -1, 0)
 
-        # Handle coefficient broadcasting for vmap
-        if isinstance(A_h, jnp.ndarray) and A_h.ndim == 3:
-            A_h_t = jnp.moveaxis(A_h, -1, 0)
-        else:
-            A_h_t = A_h
-        if isinstance(A_q, jnp.ndarray) and A_q.ndim == 3:
-            A_q_t = jnp.moveaxis(A_q, -1, 0)
-        else:
-            A_q_t = A_q
-
-        if isinstance(A_h_t, jnp.ndarray) and A_h_t.ndim == 3:
-            def _vt_2d(u_k, v_k, ah_k, aq_k):
-                return viscous_tendency_cgrid(
-                    u_k, v_k, grid, ah_k, aq_k,
-                    mask=mask, u_mask=u_mask, v_mask=v_mask,
-                    normalize=normalize)
-            tu_t, tv_t = jax.vmap(_vt_2d)(u_t, v_t, A_h_t, A_q_t)
-        else:
-            def _vt_2d(u_k, v_k):
-                return viscous_tendency_cgrid(
-                    u_k, v_k, grid, A_h, A_q,
-                    mask=mask, u_mask=u_mask, v_mask=v_mask,
-                    normalize=normalize)
-            tu_t, tv_t = jax.vmap(_vt_2d)(u_t, v_t)
-        return jnp.moveaxis(tu_t, 0, -1), jnp.moveaxis(tv_t, 0, -1)
-
-    # --- 2D case ---
+    def _bcast_coef(A, like_shape_ndim):
+        # Add a trailing newaxis if A is a 2D array and the field is 3D.
+        if (
+            is_3d and isinstance(A, jnp.ndarray) and A.ndim == 2
+        ):
+            return A[..., jnp.newaxis]
+        return A
 
     # Apply face masks to input velocities
-    u_eff = u if u_mask is None else u * u_mask
-    v_eff = v if v_mask is None else v * v_mask
+    if u_mask is not None:
+        u_eff = u * (u_mask[..., jnp.newaxis] if is_3d else u_mask)
+    else:
+        u_eff = u
+    if v_mask is not None:
+        v_eff = v * (v_mask[..., jnp.newaxis] if is_3d else v_mask)
+    else:
+        v_eff = v
 
-    # 1. Strain rate
+    # 1. Strain rate (3D-native)
     D_T, D_S = strain_rate_cgrid(u_eff, v_eff, grid, mask=mask)
 
-    # 2. Form stresses
-    stress_h = A_h * D_T
-    stress_q = A_q * D_S
+    # 2. Form stresses (broadcast 2D coefficients over the level axis)
+    stress_h = _bcast_coef(A_h, D_T.ndim) * D_T
+    stress_q = _bcast_coef(A_q, D_S.ndim) * D_S
 
-    # 3. Stress divergence (normalize controls area normalization)
+    # 3. Stress divergence (already 3D-native; normalize controls area
+    # normalization)
     tend_u, tend_v = stress_divergence_cgrid(
         stress_h, stress_q, grid,
         u_mask=u_mask, v_mask=v_mask, normalize=normalize)
@@ -1303,19 +1278,13 @@ def smagorinsky_viscosity_q_cgrid(
     """
     is_3d = D_T.ndim == 3
 
-    # Interpolate D_T from h-points to q-points (4-point average)
-    if is_3d:
-        D_T_q = 0.25 * (D_T[:-1, :, :] + D_T[1:, :, :]
-                         + jnp.roll(D_T, 1, axis=1)[:-1, :, :]
-                         + jnp.roll(D_T, 1, axis=1)[1:, :, :])
-    else:
-        D_T_q = 0.25 * (D_T[:-1, :] + D_T[1:, :]
-                         + jnp.roll(D_T, 1, axis=1)[:-1, :]
-                         + jnp.roll(D_T, 1, axis=1)[1:, :])
+    # Interpolate D_T from h-points to q-points (4-point average).
+    # ``D_T[:-1]`` works for both 2D and 3D (sliced along axis 0).
+    D_T_roll = jnp.roll(D_T, 1, axis=1)
+    D_T_q = 0.25 * (D_T[:-1] + D_T[1:] + D_T_roll[:-1] + D_T_roll[1:])
 
     # D_T_q shape: (n_lat-1, n_lon, ...). Need (n_lat+1, n_lon+1, ...).
-    # Pad pole rows with zero (degenerate vertices).  Single Pad HLO op
-    # replaces alloc-zeros + concatenate-of-three.
+    # Pad pole rows with zero (degenerate vertices).
     pad_axes = ((0, 0),) * (D_T_q.ndim - 1)
     D_T_q = jnp.pad(D_T_q, ((1, 1), *pad_axes))
     # Append periodic wrap column
@@ -1325,17 +1294,15 @@ def smagorinsky_viscosity_q_cgrid(
     # Small epsilon prevents NaN gradient of sqrt at zero (masked points).
     deformation_q = jnp.sqrt(D_T_q**2 + D_S**2 + 1e-30)
 
-    # Vertex dual cell area
+    # Vertex dual cell area; reshape for broadcast over (n_lat+1, n_lon+1[, nlev]).
     A_vert = _vertex_area(grid)  # (n_lat+1,)
-    Delta_q = jnp.sqrt(A_vert)  # (n_lat+1,)
-    if is_3d:
-        Delta_q = Delta_q[:, jnp.newaxis, jnp.newaxis]
-    else:
-        Delta_q = Delta_q[:, jnp.newaxis]
+    Delta_q = jnp.sqrt(A_vert)
+    bcast = (slice(None),) + (jnp.newaxis,) * (D_T.ndim - 1)
+    Delta_q = Delta_q[bcast]
 
     A_smag_q = (C_smag * Delta_q)**2 * deformation_q
 
-    # Zero at pole vertices and land-adjacent vertices
+    # Zero at pole vertices.
     A_smag_q = A_smag_q.at[0].set(0.0)
     A_smag_q = A_smag_q.at[-1].set(0.0)
 
