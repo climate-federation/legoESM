@@ -101,8 +101,12 @@ def ocean_baroclinic_tendencies_fc(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
-    dp_dx = fc_gradient_x_3d(p_prime, grid, fc_config)
-    dp_dy = fc_gradient_y_3d(p_prime, grid, fc_config)
+    # Pre-pad p_prime once and share between fc_gradient_x_3d and
+    # fc_gradient_y_3d (halves the halo MPI cost of the paired call).
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fc
+    _p_pad = _pad_halo_4d_fc(p_prime, halo=1, interp_offsets=grid.halo_interp_offsets)
+    dp_dx = fc_gradient_x_3d(p_prime, grid, fc_config, padded=_p_pad)
+    dp_dy = fc_gradient_y_3d(p_prime, grid, fc_config, padded=_p_pad)
 
     # --- 4. Diagnose w from flux divergence ---
     flux_div_k = fc_divergence_3d(
@@ -115,10 +119,11 @@ def ocean_baroclinic_tendencies_fc(
     # --- 5. Vorticity ---
     zeta = fc_curl_z_3d(u * mask_3d, v * mask_3d, grid, fc_config)
 
-    # --- 6. Kinetic energy gradient ---
+    # --- 6. Kinetic energy gradient (share halo across ∂K/∂x, ∂K/∂y) ---
     K = 0.5 * (u**2 + v**2)
-    dK_dx = fc_gradient_x_3d(K, grid, fc_config)
-    dK_dy = fc_gradient_y_3d(K, grid, fc_config)
+    _K_pad = _pad_halo_4d_fc(K, halo=1, interp_offsets=grid.halo_interp_offsets)
+    dK_dx = fc_gradient_x_3d(K, grid, fc_config, padded=_K_pad)
+    dK_dy = fc_gradient_y_3d(K, grid, fc_config, padded=_K_pad)
 
     # --- 7. Vector-invariant momentum (skew-symmetric) ---
     H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)

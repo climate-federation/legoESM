@@ -28,15 +28,25 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 
 
 def fc_gradient_x_3d(field_3d: jax.Array, grid: CubedSphereGrid,
-                     fc_config: FCOperatorConfig) -> jax.Array:
-    """FC x-gradient at all levels. (6,n,n,nlev) -> (6,n,n,nlev)."""
-    return fc_gradient_x(field_3d, grid, fc_config)
+                     fc_config: FCOperatorConfig,
+                     padded: jax.Array | None = None) -> jax.Array:
+    """FC x-gradient at all levels. (6,n,n,nlev) -> (6,n,n,nlev).
+
+    Optional ``padded=`` skips the internal halo exchange — pre-pad
+    ``field_3d`` once and pass it to both ``fc_gradient_x_3d`` and
+    ``fc_gradient_y_3d`` to halve the halo cost of paired calls.
+    """
+    return fc_gradient_x(field_3d, grid, fc_config, padded=padded)
 
 
 def fc_gradient_y_3d(field_3d: jax.Array, grid: CubedSphereGrid,
-                     fc_config: FCOperatorConfig) -> jax.Array:
-    """FC y-gradient at all levels. (6,n,n,nlev) -> (6,n,n,nlev)."""
-    return fc_gradient_y(field_3d, grid, fc_config)
+                     fc_config: FCOperatorConfig,
+                     padded: jax.Array | None = None) -> jax.Array:
+    """FC y-gradient at all levels. (6,n,n,nlev) -> (6,n,n,nlev).
+
+    See :func:`fc_gradient_x_3d` for ``padded=`` usage.
+    """
+    return fc_gradient_y(field_3d, grid, fc_config, padded=padded)
 
 
 def fc_divergence_3d(u_3d: jax.Array, v_3d: jax.Array,

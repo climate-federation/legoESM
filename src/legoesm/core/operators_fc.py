@@ -205,24 +205,35 @@ def _fc_derivative_y(q_padded: jax.Array, grid: CubedSphereGrid,
 # ==============================================================================
 
 def fc_gradient_x(q: jax.Array, grid: CubedSphereGrid,
-                  fc_config: FCOperatorConfig) -> jax.Array:
+                  fc_config: FCOperatorConfig,
+                  padded: jax.Array | None = None) -> jax.Array:
     """FC spectral x-gradient of scalar field.
 
     Accepts ``q`` shape ``(6, n, n)`` or ``(6, n, n, nlev)``.  The 4D
     path uses ``pad_halo_4d`` so all vertical levels share a single MPI
     halo exchange.
+
+    Parameters
+    ----------
+    padded : jax.Array, optional
+        Pre-padded field with halo=1.  When provided, the internal
+        halo exchange is skipped — useful for paired (∂/∂x, ∂/∂y) calls
+        on the same input where the halo can be shared.
     """
-    q_padded = _fc_pad_halo(q, grid)
+    q_padded = padded if padded is not None else _fc_pad_halo(q, grid)
     return _fc_derivative_x(q_padded, grid, fc_config)
 
 
 def fc_gradient_y(q: jax.Array, grid: CubedSphereGrid,
-                  fc_config: FCOperatorConfig) -> jax.Array:
+                  fc_config: FCOperatorConfig,
+                  padded: jax.Array | None = None) -> jax.Array:
     """FC spectral y-gradient of scalar field.
 
-    Accepts 3D or 4D input as for :func:`fc_gradient_x`.
+    Accepts 3D or 4D input as for :func:`fc_gradient_x`.  Optional
+    ``padded=`` skips the internal halo exchange — see
+    :func:`fc_gradient_x` for usage.
     """
-    q_padded = _fc_pad_halo(q, grid)
+    q_padded = padded if padded is not None else _fc_pad_halo(q, grid)
     return _fc_derivative_y(q_padded, grid, fc_config)
 
 
