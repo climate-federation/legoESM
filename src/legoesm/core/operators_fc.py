@@ -391,22 +391,35 @@ def fc_flux_divergence(q: jax.Array, u: jax.Array, v: jax.Array,
 
 def fc_scalar_advection(q: jax.Array, u: jax.Array, v: jax.Array,
                         grid: CubedSphereGrid,
-                        fc_config: FCOperatorConfig) -> jax.Array:
+                        fc_config: FCOperatorConfig,
+                        padded: jax.Array | None = None) -> jax.Array:
     """Advective transport: -v . grad(q).
 
     Parameters
     ----------
-    q : jax.Array, shape (6, n, n)
-    u, v : jax.Array, shape (6, n, n)
+    q : jax.Array, shape (6, n, n) or (6, n, n, nlev)
+    u, v : jax.Array, shape matching ``q``
     grid : CubedSphereGrid
     fc_config : FCOperatorConfig
+    padded : jax.Array, optional
+        Pre-padded scalar field (halo=1).  When provided, the
+        internal halo exchange is skipped *and* shared between the
+        ∂q/∂x and ∂q/∂y calls below — same Loop 134 fix as
+        ``fc_laplacian``.  Saves one ``_fc_pad_halo(q)`` collective
+        per advection call (the prior code padded q twice, once
+        inside each gradient op).
 
     Returns
     -------
-    jax.Array, shape (6, n, n)
+    jax.Array, shape matching ``q``
     """
-    dq_dx = fc_gradient_x(q, grid, fc_config)
-    dq_dy = fc_gradient_y(q, grid, fc_config)
+    # Pad q once and share between the two gradient ops — previously
+    # ``fc_gradient_x`` / ``fc_gradient_y`` each issued their own
+    # ``_fc_pad_halo(q)`` collective on the same input, doubling the
+    # halo cost per advection call.
+    q_pad = padded if padded is not None else _fc_pad_halo(q, grid)
+    dq_dx = fc_gradient_x(q, grid, fc_config, padded=q_pad)
+    dq_dy = fc_gradient_y(q, grid, fc_config, padded=q_pad)
     return -(u * dq_dx + v * dq_dy)
 
 

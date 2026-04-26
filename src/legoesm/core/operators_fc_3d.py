@@ -104,9 +104,15 @@ def fc_flux_divergence_3d(q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
 
 def fc_scalar_advection_3d(q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
                            grid: CubedSphereGrid,
-                           fc_config: FCOperatorConfig) -> jax.Array:
-    """FC scalar advection at all levels. (6,n,n,nlev) -> (6,n,n,nlev)."""
-    return fc_scalar_advection(q_3d, u_3d, v_3d, grid, fc_config)
+                           fc_config: FCOperatorConfig,
+                           padded: jax.Array | None = None) -> jax.Array:
+    """FC scalar advection at all levels. (6,n,n,nlev) -> (6,n,n,nlev).
+
+    Optional ``padded=`` shares the scalar halo across paired ∂q/∂x
+    and ∂q/∂y calls (Loop 177 — same pattern as
+    :func:`fc_laplacian_3d`).
+    """
+    return fc_scalar_advection(q_3d, u_3d, v_3d, grid, fc_config, padded=padded)
 
 
 def fc_divergence_damping_3d(u_3d: jax.Array, v_3d: jax.Array,
