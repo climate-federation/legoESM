@@ -203,8 +203,21 @@ def cdgrid_compressible_euler_slow_tendencies(
     )
 
     # --- 7. D-grid momentum tendencies ---
-    abs_vor_corner = _interp_center_to_corner(abs_vor, cdgrid)
-    theta_corner = _interp_center_to_corner(theta_total, cdgrid)
+    # Batch (abs_vor, theta_total) center-to-corner interp — same
+    # passive-trailing-axis batching as the (u, v) interp earlier.
+    # 2 corner-interpolations → 1 (one halo exchange + one 4-point
+    # average shared between abs_vor and theta_total).
+    n_face_at, n_i_at, n_j_at, nlev_at = abs_vor.shape
+    _at_stack = jnp.stack([abs_vor, theta_total], axis=-1)
+    _at_d_flat = _interp_center_to_corner(
+        _at_stack.reshape(n_face_at, n_i_at, n_j_at, nlev_at * 2), cdgrid,
+    )
+    _at_d = _at_d_flat.reshape(
+        _at_d_flat.shape[0], _at_d_flat.shape[1], _at_d_flat.shape[2],
+        nlev_at, 2,
+    )
+    abs_vor_corner = _at_d[..., 0]
+    theta_corner = _at_d[..., 1]
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
@@ -215,8 +228,19 @@ def cdgrid_compressible_euler_slow_tendencies(
         dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
 
     # --- 8. Convert back to cell-centre ---
-    du_dt = _interp_corner_to_center(du_d_dt)
-    dv_dt = _interp_corner_to_center(dv_d_dt)
+    # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
+    # passive-trailing-axis pattern; ``_interp_corner_to_center`` is a
+    # 4-point average with no halo, so this saves one kernel launch.
+    _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., 2)
+    _duv_d_dt_flat = _duv_d_dt.reshape(
+        _duv_d_dt.shape[0], _duv_d_dt.shape[1], _duv_d_dt.shape[2],
+        nlev_at * 2,
+    )
+    _duv_dt = _interp_corner_to_center(_duv_d_dt_flat).reshape(
+        n_face_at, n_i_at, n_j_at, nlev_at, 2,
+    )
+    du_dt = _duv_dt[..., 0]
+    dv_dt = _duv_dt[..., 1]
 
     # --- 9. Vertical advection of u, v ---
     du_dt = du_dt + vertical_advection_height(u, w, dz, dz_half, J)
