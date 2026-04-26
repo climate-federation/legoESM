@@ -10494,6 +10494,33 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                     return True
             return False
 
+        # Iter-869b introduced `_apply_legacy_d_sw4_corner_ke_fix` as
+        # a Fortran-fidelity OPT-IN helper (gated behind the default-
+        # OFF `apply_legacy_d_sw4_corner_ke_fix` config flag, covered
+        # by iter-873 inventory).  This helper INTENTIONALLY contains
+        # the `ut + vt` cross-term per Fortran sw_core.F90:1446.  iter-
+        # 915 strips that function from the AST tree before scanning
+        # so the iter-685 lock continues to catch ACCIDENTAL
+        # reintroductions in any OTHER function but allows iter-869b's
+        # opt-in helper to retain the cross-term.
+        EXEMPT_FUNCTIONS = {"_apply_legacy_d_sw4_corner_ke_fix"}
+
+        def _strip_exempt_functions(tree):
+            """Walk `tree` and remove any FunctionDef whose name is in
+            EXEMPT_FUNCTIONS.  Returns a new tree with those functions
+            replaced by harmless empty function bodies."""
+            class _Stripper(ast.NodeTransformer):
+                def visit_FunctionDef(self, node):
+                    if node.name in EXEMPT_FUNCTIONS:
+                        # Replace body with `pass` to neutralize the AST
+                        # while preserving the function shell so the
+                        # scanner doesn't crash on missing references.
+                        node.body = [ast.Pass()]
+                        return node
+                    self.generic_visit(node)
+                    return node
+            return _Stripper().visit(tree)
+
         offenders = []
         for py_file in src_dir.rglob('*.py'):
             try:
@@ -10501,18 +10528,22 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
                 tree = ast.parse(text)
             except (SyntaxError, UnicodeDecodeError):
                 continue
+            tree = _strip_exempt_functions(tree)
             if _dsw4_has_ut_plus_vt_crossterm(tree):
                 offenders.append(str(py_file.relative_to(src_dir)))
 
         self.assertEqual(offenders, [],
             msg=(f"Found `ut[...] + vt[...]` (or `vt + ut`) cross-term "
-                 f"in {offenders}.  This AST signature is UNIQUE to the "
-                 f"Fortran d_sw4 corner KE fix (sw_core.F90:1446): "
+                 f"in {offenders} (excluding iter-869b's "
+                 f"`_apply_legacy_d_sw4_corner_ke_fix` opt-in helper).  "
+                 f"This AST signature is UNIQUE to the Fortran d_sw4 "
+                 f"corner KE fix (sw_core.F90:1446): "
                  f"`(ut(i,j) + vt(i,j)) * u(...)`.  That block is gated "
                  f"on `.not. bounded_domain .or. .not. duogrid` and must "
                  f"stay ABSENT in the Python duogrid-production path.  "
-                 f"If this is an intentional addition, update the "
-                 f"iter-692 invariant."))
+                 f"If this is an intentional addition, either gate it "
+                 f"behind a config flag in iter-873 inventory OR update "
+                 f"this iter-692 invariant + the EXEMPT_FUNCTIONS list."))
 
     def test_bgrid_ke_transport_gold_file_non_constant(self):
         """Gold-file regression test: run `_bgrid_ke_transport` on a
