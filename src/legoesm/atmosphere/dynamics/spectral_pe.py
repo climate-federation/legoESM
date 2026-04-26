@@ -237,45 +237,44 @@ def spectral_pe_tendencies(
         _dealias_3d = None
 
     # --- 1. Transform to grid space ---
-    # Stack {vor, div, T} along a trailing axis and fold into the level
-    # axis so a single ``sh_synthesis_3d`` (one ``segment_sum`` + one
-    # IRFFT) handles all three fields, replacing three sequential calls
-    # that each launched their own segment_sum + IRFFT kernels.  The
-    # trailing axis is purely passive: ``Pnm[..., None] * coeffs[None, :, :]``
-    # broadcasts cleanly, ``segment_sum`` operates on the leading n_sh
-    # axis, and the IRFFT runs along the longitude axis — none touch
-    # the trailing batch axis.  Saves 2 segment_sums and 2 IRFFTs per
-    # RK substage.
+    # Merge the (vor, div, T) 3D batch with the (lnps, phis, im·lnps)
+    # 2D triplet via ``jnp.concatenate``: trailing axis = ``nlev*3 + 3``.
+    # ``sh_synthesis_3d`` treats any trailing axis as a passive batch,
+    # so different "level" sizes (nlev vs 1) combine cleanly into a
+    # single ``segment_sum`` + IRFFT.  6 SH syntheses → 1.  Loop 182
+    # extends Loop 181 (spectral ocean merge).
     n_sh, nlev = state.vor_hat.data.shape
     _hat_stack = jnp.stack(
         [state.vor_hat.data, state.div_hat.data, state.T_hat.data],
         axis=-1,
     )  # (n_sh, nlev, 3)
     _hat_flat = _hat_stack.reshape(n_sh, nlev * 3)
-    _grid_flat = sh_synthesis_3d(grid, _hat_flat)  # (n_lat, n_lon, nlev*3)
-    _grid_stack = _grid_flat.reshape(grid.n_lat, grid.n_lon, nlev, 3)
+    # Append the three 2D fields as single-level slots.  ``im·lnps_hat``
+    # is the spectral pre-multiply that yields ``∂(lnps)/∂λ`` on the
+    # grid post-synthesis (Loop 147 trick).
+    _ims_lnps = (1j * grid.ms) * state.lnps_hat.data  # (n_sh,)
+    _all_hat_flat = jnp.concatenate(
+        [
+            _hat_flat,
+            state.lnps_hat.data[:, jnp.newaxis],
+            state.phis_hat.data[:, jnp.newaxis],
+            _ims_lnps[:, jnp.newaxis],
+        ],
+        axis=-1,
+    )  # (n_sh, nlev*3 + 3)
+    _all_grid_flat = sh_synthesis_3d(grid, _all_hat_flat)
+    _grid_stack = _all_grid_flat[..., : nlev * 3].reshape(
+        grid.n_lat, grid.n_lon, nlev, 3,
+    )
     vor = _grid_stack[..., 0]
     div = _grid_stack[..., 1]
     T = _grid_stack[..., 2]
     # Smooth positivity protection (C∞ differentiable, scaled softplus for ~0.07K bias)
     _sp_scale = 0.1
     T = T + _sp_scale * jax.nn.softplus((config.T_min - T) / _sp_scale)
-    # Batch the 2D syntheses (lnps, phis) AND the ∂(lnps)/∂λ-precursor
-    # ``im·lnps_hat`` synthesis (used downstream as ``dfdlon``) into a
-    # single ``sh_synthesis_3d`` on a stacked (n_sh, 3) tensor.  The
-    # third channel is just ``1j·grid.ms·lnps_hat`` — pre-multiplying
-    # the spectral coefficients by ``im`` *before* the synthesis is
-    # algebraically the same as evaluating the zonal derivative of
-    # ``lnps`` on the grid (Loop 147 extension of Loop's existing
-    # 2-channel batch).  3 SH-syntheses → 1.
-    _ims_lnps = (1j * grid.ms) * state.lnps_hat.data  # (n_sh,)
-    _lp_pair = jnp.stack(
-        [state.lnps_hat.data, state.phis_hat.data, _ims_lnps], axis=-1,
-    )  # (n_sh, 3)
-    _lp_grid = sh_synthesis_3d(grid, _lp_pair)  # (n_lat, n_lon, 3)
-    lnps_raw = _lp_grid[..., 0]
-    phis = _lp_grid[..., 1]
-    _dfdlon_lnps = _lp_grid[..., 2]
+    lnps_raw = _all_grid_flat[..., nlev * 3]
+    phis = _all_grid_flat[..., nlev * 3 + 1]
+    _dfdlon_lnps = _all_grid_flat[..., nlev * 3 + 2]
     # Smooth two-sided clip with zero bias in interior:
     # softplus(lo - x) pulls up near lower bound; softplus(x - hi) pulls down near upper
     lnps = lnps_raw + jax.nn.softplus(_LNPS_MIN - lnps_raw) - jax.nn.softplus(lnps_raw - _LNPS_MAX)
