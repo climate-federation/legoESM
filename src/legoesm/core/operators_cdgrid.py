@@ -657,7 +657,7 @@ def cgrid_scalar_advection(q, u_c, v_c, cdgrid):
 # ==============================================================================
 
 def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
-    """Compute FCT-limited tracer fluxes on the C-D grid (2D only).
+    """Compute FCT-limited tracer fluxes on the C-D grid.
 
     Uses a two-stage approach for monotone transport:
 
@@ -675,20 +675,24 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
        aspect — even if each 1D face value is bounded, the combined
        x + y update can still overshoot.
 
+    Accepts both 2D ``(6, n, n)`` and 3D ``(6, n, n, nlev)`` tracers.
+    The 4D path moves ``nlev`` to the leading position so the spatial
+    slicing operates on axes ``-2, -1`` regardless of rank, and the
+    halo pad runs once for all levels via ``pad_halo_4d`` /
+    ``pad_halo_4d_h2`` (single MPI exchange).  Replaces the prior
+    per-level ``vmap`` dispatcher in :func:`cgrid_tracer_advection_fct`
+    that issued ``nlev`` separate halo exchanges.
+
     Parameters
     ----------
-    q : jax.Array, shape (6, n, n)
-        Tracer at cell centres.
-    u_c : jax.Array, shape (6, n+1, n)
-        C-grid x-velocity at x-faces.
-    v_c : jax.Array, shape (6, n, n+1)
-        C-grid y-velocity at y-faces.
+    q : jax.Array, shape (6, n, n) or (6, n, n, nlev)
+    u_c : jax.Array, shape (6, n+1, n[, nlev])
+    v_c : jax.Array, shape (6, n, n+1[, nlev])
     cdgrid : CubedSphereCDGrid
 
     Returns
     -------
-    dq_dt : jax.Array, shape (6, n, n)
-        Monotone advective tendency.
+    dq_dt : jax.Array, shape matching ``q``.
 
     References
     ----------
@@ -701,61 +705,81 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     dy = cdgrid.dy_edge_x     # (6, n+1, n)
     dx = cdgrid.dx_edge_y     # (6, n, n+1)
 
-    # Halo-padded field for neighbour lookups (halo=1)
-    q_pad = _pad_halo_auto(q, cdgrid)  # (6, n+2, n+2)
+    # Halo-padded fields (halo=1 for upwind / min-max stencil, halo=2 for PPM).
+    # ``_pad_halo_auto*`` already dispatch on ``q.ndim`` so 4D inputs use
+    # ``pad_halo_4d`` (one MPI message for all levels).
+    q_pad_full = _pad_halo_auto(q, cdgrid)        # (6, n+2, n+2[, nlev])
+    q_pad_h2_full = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4[, nlev])
+
+    # For 4D inputs we move ``nlev`` to the leading position so that the
+    # rest of the body's spatial slicing — written with ``[..., ...]``
+    # prefixes — operates on the same trailing ``(i, j)`` axes regardless
+    # of rank.  This also keeps ``_ppm_reconstruct_1d`` (axis -1) acting on
+    # the correct PPM axis (j with halo, n with halo stripped).
+    is_4d = q.ndim == 4
+    if is_4d:
+        q_t = jnp.moveaxis(q, -1, 0)
+        q_pad = jnp.moveaxis(q_pad_full, -1, 0)
+        q_pad_h2 = jnp.moveaxis(q_pad_h2_full, -1, 0)
+        u_c_t = jnp.moveaxis(u_c, -1, 0)
+        v_c_t = jnp.moveaxis(v_c, -1, 0)
+    else:
+        q_t = q
+        q_pad = q_pad_full
+        q_pad_h2 = q_pad_h2_full
+        u_c_t = u_c
+        v_c_t = v_c
 
     # ----------------------------------------------------------------
     # Step 1: First-order upwind fluxes (inherently monotone for CFL<1)
     # ----------------------------------------------------------------
-    q_left_x = q_pad[:, :-1, 1:-1]    # (6, n+1, n)
-    q_right_x = q_pad[:, 1:, 1:-1]    # (6, n+1, n)
-    q_face_low_x = jnp.where(u_c > 0, q_left_x, q_right_x)
+    q_left_x = q_pad[..., :-1, 1:-1]
+    q_right_x = q_pad[..., 1:, 1:-1]
+    q_face_low_x = jnp.where(u_c_t > 0, q_left_x, q_right_x)
 
-    q_below_y = q_pad[:, 1:-1, :-1]   # (6, n, n+1)
-    q_above_y = q_pad[:, 1:-1, 1:]    # (6, n, n+1)
-    q_face_low_y = jnp.where(v_c > 0, q_below_y, q_above_y)
+    q_below_y = q_pad[..., 1:-1, :-1]
+    q_above_y = q_pad[..., 1:-1, 1:]
+    q_face_low_y = jnp.where(v_c_t > 0, q_below_y, q_above_y)
 
-    flux_low_x = q_face_low_x * u_c * dy
-    flux_low_y = q_face_low_y * v_c * dx
+    flux_low_x = q_face_low_x * u_c_t * dy
+    flux_low_y = q_face_low_y * v_c_t * dx
 
-    net_low_x = flux_low_x[:, 1:] - flux_low_x[:, :-1]
-    net_low_y = flux_low_y[:, :, 1:] - flux_low_y[:, :, :-1]
+    net_low_x = flux_low_x[..., 1:, :] - flux_low_x[..., :-1, :]
+    net_low_y = flux_low_y[..., 1:] - flux_low_y[..., :-1]
     dq_low = -(net_low_x + net_low_y) / area
 
     # ----------------------------------------------------------------
     # Step 2: PPM face values with face-value clipping
     # ----------------------------------------------------------------
-    q_pad_h2 = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4)
-
-    # X-direction PPM
-    q_x_strips = q_pad_h2[:, :, 2:-2]
+    # X-direction PPM (axis -1 = j after slicing transverse halo).
+    q_x_strips = q_pad_h2[..., 2:-2]
     q_L_x, q_R_x = _ppm_reconstruct_1d(q_x_strips)
-    q_R_left = q_R_x[:, 1:n+2, :]
-    q_L_right = q_L_x[:, 2:n+3, :]
-    q_face_hi_x = jnp.where(u_c > 0, q_R_left, q_L_right)
+    q_R_left = q_R_x[..., 1:n+2, :]
+    q_L_right = q_L_x[..., 2:n+3, :]
+    q_face_hi_x = jnp.where(u_c_t > 0, q_R_left, q_L_right)
 
     # Clip to local bounds of adjacent cells
     q_face_min_x = jnp.minimum(q_left_x, q_right_x)
     q_face_max_x = jnp.maximum(q_left_x, q_right_x)
     q_face_hi_x = jnp.clip(q_face_hi_x, q_face_min_x, q_face_max_x)
 
-    # Y-direction PPM
-    q_y_strips = q_pad_h2[:, 2:-2, :]
+    # Y-direction PPM (axis -1 = j with halo).
+    q_y_strips = q_pad_h2[..., 2:-2, :]
     q_L_y, q_R_y = _ppm_reconstruct_1d(q_y_strips)
-    q_R_bottom = q_R_y[:, :, 1:n+2]
-    q_L_top = q_L_y[:, :, 2:n+3]
-    q_face_hi_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)
+    q_R_bottom = q_R_y[..., 1:n+2]
+    q_L_top = q_L_y[..., 2:n+3]
+    q_face_hi_y = jnp.where(v_c_t > 0, q_R_bottom, q_L_top)
 
     # Clip to local bounds of adjacent cells
     q_face_min_y = jnp.minimum(q_below_y, q_above_y)
     q_face_max_y = jnp.maximum(q_below_y, q_above_y)
     q_face_hi_y = jnp.clip(q_face_hi_y, q_face_min_y, q_face_max_y)
 
-    flux_hi_x = q_face_hi_x * u_c * dy
-    flux_hi_y = q_face_hi_y * v_c * dx
+    flux_hi_x = q_face_hi_x * u_c_t * dy
+    flux_hi_y = q_face_hi_y * v_c_t * dx
 
-    net_hi_x = flux_hi_x[:, 1:] - flux_hi_x[:, :-1]
-    net_hi_y = flux_hi_y[:, :, 1:] - flux_hi_y[:, :, :-1]
+    net_hi_x = flux_hi_x[..., 1:, :] - flux_hi_x[..., :-1, :]
+    net_hi_y = flux_hi_y[..., 1:] - flux_hi_y[..., :-1]
     dq_hi = -(net_hi_x + net_hi_y) / area
 
     # ----------------------------------------------------------------
@@ -772,22 +796,22 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     ad = dq_hi - dq_low  # anti-diffusive tendency
 
     # Local min/max including all face-adjacent neighbours
-    q_min = q
-    q_max = q
-    q_min = jnp.minimum(q_min, q_pad[:, :-2, 1:-1])   # west
-    q_min = jnp.minimum(q_min, q_pad[:, 2:, 1:-1])    # east
-    q_min = jnp.minimum(q_min, q_pad[:, 1:-1, :-2])   # south
-    q_min = jnp.minimum(q_min, q_pad[:, 1:-1, 2:])    # north
-    q_max = jnp.maximum(q_max, q_pad[:, :-2, 1:-1])
-    q_max = jnp.maximum(q_max, q_pad[:, 2:, 1:-1])
-    q_max = jnp.maximum(q_max, q_pad[:, 1:-1, :-2])
-    q_max = jnp.maximum(q_max, q_pad[:, 1:-1, 2:])
+    q_min = q_t
+    q_max = q_t
+    q_min = jnp.minimum(q_min, q_pad[..., :-2, 1:-1])   # west
+    q_min = jnp.minimum(q_min, q_pad[..., 2:, 1:-1])    # east
+    q_min = jnp.minimum(q_min, q_pad[..., 1:-1, :-2])   # south
+    q_min = jnp.minimum(q_min, q_pad[..., 1:-1, 2:])    # north
+    q_max = jnp.maximum(q_max, q_pad[..., :-2, 1:-1])
+    q_max = jnp.maximum(q_max, q_pad[..., 2:, 1:-1])
+    q_max = jnp.maximum(q_max, q_pad[..., 1:-1, :-2])
+    q_max = jnp.maximum(q_max, q_pad[..., 1:-1, 2:])
 
     # How much room does the low-order update leave?
     # After applying dq_low, q would be at q + dq_low (for unit "dt").
     # We allow the anti-diffusive part to bring it to at most q_max
     # and at least q_min.
-    q_td = q + dq_low   # provisional (unit-step low-order update)
+    q_td = q_t + dq_low   # provisional (unit-step low-order update)
 
     room_up = q_max - q_td     # how much we can still increase
     room_dn = q_td - q_min     # how much we can still decrease
@@ -816,7 +840,10 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     )
     alpha = jnp.clip(alpha, 0.0, 1.0)
 
-    return dq_low + alpha * ad
+    result = dq_low + alpha * ad
+    if is_4d:
+        return jnp.moveaxis(result, 0, -1)
+    return result
 
 
 def _make_fct_2d_differentiable(cdgrid):
@@ -869,7 +896,13 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
     - Differentiable (custom JVP linearizes through unlimited PPM)
     - JAX-compatible (pure array operations, no Python control flow)
 
-    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
+    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.  The 4D
+    path runs ``_cgrid_fct_fluxes_2d`` natively on the 4D field — a
+    single ``pad_halo_4d`` MPI exchange across all levels — replacing
+    the prior per-level ``vmap`` that issued ``nlev`` separate halo
+    exchanges.  ``cgrid_mass_flux_divergence`` (used in the JVP path of
+    ``_make_fct_2d_differentiable``) is already 4D-native, so the
+    differentiable ``custom_jvp`` wrapper composes cleanly.
 
     Parameters
     ----------
@@ -887,20 +920,6 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
         Monotone tracer advection tendency.
     """
     fct_fn = _make_fct_2d_differentiable(cdgrid)
-
-    if q.ndim == 4:
-        # 3D: vmap over levels
-        q_t = jnp.moveaxis(q, -1, 0)
-        u_c_t = jnp.moveaxis(u_c, -1, 0)
-        v_c_t = jnp.moveaxis(v_c, -1, 0)
-
-        def fct_one(args):
-            qk, uk, vk = args
-            return fct_fn(qk, uk, vk)
-
-        result_t = jax.vmap(fct_one)((q_t, u_c_t, v_c_t))
-        return jnp.moveaxis(result_t, 0, -1)
-
     return fct_fn(q, u_c, v_c)
 
 
