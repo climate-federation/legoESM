@@ -247,28 +247,28 @@ def ocean_baroclinic_tendencies_fc(
         u_b = jnp.repeat(u_masked, n_tracers, axis=-1)
         v_b = jnp.repeat(v_masked, n_tracers, axis=-1)
 
-    horiz_flat = fc_scalar_advection_3d(tracer_flat, u_b, v_b, grid, fc_config)
-    if physics_fn is None and (
-        config.K_h > 0 or config.hyperdiff_coeff > 0
-    ):
-        # Pre-pad tracer_flat ONCE so the explicit Laplacian and the
-        # inner Laplacian of the biharmonic hyperdiffusion share the
-        # halo on ``tracer_flat`` instead of issuing two independent
-        # ``pad_halo_4d`` collectives on the same input.  Same pattern
-        # as the velocity-mixing block below.
-        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc_fc_tr
-        tracer_flat_pad = _pad_halo_4d_oc_fc_tr(
-            tracer_flat, halo=1, interp_offsets=grid.halo_interp_offsets,
+    # Pre-pad ``tracer_flat`` ONCE up-front and share the halo across
+    # ``fc_scalar_advection_3d`` (Loop 177 — internal x/y gradients
+    # share q's halo) AND the Laplacian/hyperdiff branches below.
+    # Three halo-issuing calls on the same input collapse to a single
+    # ``pad_halo_4d`` collective per RHS evaluation when
+    # diffusion is on (Loop 178 extension of Loops 134/177).
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc_fc_tr
+    tracer_flat_pad = _pad_halo_4d_oc_fc_tr(
+        tracer_flat, halo=1, interp_offsets=grid.halo_interp_offsets,
+    )
+    horiz_flat = fc_scalar_advection_3d(
+        tracer_flat, u_b, v_b, grid, fc_config, padded=tracer_flat_pad,
+    )
+    if physics_fn is None and config.K_h > 0:
+        horiz_flat = horiz_flat + fc_laplacian_3d(
+            tracer_flat, grid, fc_config, padded=tracer_flat_pad,
+        ) * config.K_h
+    if physics_fn is None and config.hyperdiff_coeff > 0:
+        horiz_flat = horiz_flat + fc_hyperdiffusion_3d(
+            tracer_flat, grid, fc_config, config.hyperdiff_coeff,
+            padded=tracer_flat_pad,
         )
-        if config.K_h > 0:
-            horiz_flat = horiz_flat + fc_laplacian_3d(
-                tracer_flat, grid, fc_config, padded=tracer_flat_pad,
-            ) * config.K_h
-        if config.hyperdiff_coeff > 0:
-            horiz_flat = horiz_flat + fc_hyperdiffusion_3d(
-                tracer_flat, grid, fc_config, config.hyperdiff_coeff,
-                padded=tracer_flat_pad,
-            )
     horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
 
     # Vertical advection per-tracer (vmap over the trailing axis so JAX
