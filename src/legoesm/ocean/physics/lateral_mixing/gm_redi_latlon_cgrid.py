@@ -387,9 +387,15 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
 
     if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
-        kappa_GM_b = kappa_GM[:, :, jnp.newaxis]
+        kappa_GM_c = kappa_GM[:, :, jnp.newaxis]                   # (n_lat, n_lon, 1)
+        kappa_GM_u = interp_cell_to_uface(kappa_GM_c)              # (n_lat, n_lon+1, 1)
+        kappa_GM_v = interp_cell_to_vface(kappa_GM_c)              # (n_lat+1, n_lon, 1)
     else:
-        kappa_GM_b = kappa_GM
+        kappa_GM_c = kappa_GM
+        kappa_GM_u = kappa_GM
+        kappa_GM_v = kappa_GM
+    # w-face triads sit at cell-centers horizontally → cell-centered kappa.
+    kappa_GM_w = kappa_GM_c
 
     # Neumann-fill BOTH rho and q so the gradients across coastlines do
     # not pick up jumps between ocean and land sentinel values.  This
@@ -494,10 +500,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     w_T4 = valid_T4 / N_valid_u_safe
 
     # Per-triad full flux (cancels exactly when q = f(ρ)).
-    flux_T1 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_b) * S_T1 * dq_dz_T1
-    flux_T2 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_b) * S_T2 * dq_dz_T2
-    flux_T3 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_b) * S_T3 * dq_dz_T3
-    flux_T4 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_b) * S_T4 * dq_dz_T4
+    flux_T1 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T1 * dq_dz_T1
+    flux_T2 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T2 * dq_dz_T2
+    flux_T3 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T3 * dq_dz_T3
+    flux_T4 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T4 * dq_dz_T4
 
     F_x_u = (w_T1 * taper_T1 * flux_T1
            + w_T2 * taper_T2 * flux_T2
@@ -542,10 +548,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     w_V3 = valid_V3 / N_valid_v_safe
     w_V4 = valid_V4 / N_valid_v_safe
 
-    flux_V1 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_b) * S_V1 * dq_dz_V1
-    flux_V2 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_b) * S_V2 * dq_dz_V2
-    flux_V3 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_b) * S_V3 * dq_dz_V3
-    flux_V4 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_b) * S_V4 * dq_dz_V4
+    flux_V1 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V1 * dq_dz_V1
+    flux_V2 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V2 * dq_dz_V2
+    flux_V3 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V3 * dq_dz_V3
+    flux_V4 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V4 * dq_dz_V4
 
     F_y_v = (w_V1 * taper_V1 * flux_V1
            + w_V2 * taper_V2 * flux_V2
@@ -629,22 +635,22 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     # Multiplying each by its taper and averaging keeps that exact
     # zero while still damping the genuine GM transport in tapered
     # boundary regions.
-    flux_Wx1 = ((kappa_Redi + kappa_GM_b) * S_Wx1 * dq_dx_west_A
+    flux_Wx1 = ((kappa_Redi + kappa_GM_w) * S_Wx1 * dq_dx_west_A
                 + kappa_Redi * S_Wx1 ** 2 * dq_dz_w)
-    flux_Wx2 = ((kappa_Redi + kappa_GM_b) * S_Wx2 * dq_dx_east_A
+    flux_Wx2 = ((kappa_Redi + kappa_GM_w) * S_Wx2 * dq_dx_east_A
                 + kappa_Redi * S_Wx2 ** 2 * dq_dz_w)
-    flux_Wx3 = ((kappa_Redi + kappa_GM_b) * S_Wx3 * dq_dx_west_B
+    flux_Wx3 = ((kappa_Redi + kappa_GM_w) * S_Wx3 * dq_dx_west_B
                 + kappa_Redi * S_Wx3 ** 2 * dq_dz_w)
-    flux_Wx4 = ((kappa_Redi + kappa_GM_b) * S_Wx4 * dq_dx_east_B
+    flux_Wx4 = ((kappa_Redi + kappa_GM_w) * S_Wx4 * dq_dx_east_B
                 + kappa_Redi * S_Wx4 ** 2 * dq_dz_w)
 
-    flux_Wy1 = ((kappa_Redi + kappa_GM_b) * S_Wy1 * dq_dy_south_A
+    flux_Wy1 = ((kappa_Redi + kappa_GM_w) * S_Wy1 * dq_dy_south_A
                 + kappa_Redi * S_Wy1 ** 2 * dq_dz_w)
-    flux_Wy2 = ((kappa_Redi + kappa_GM_b) * S_Wy2 * dq_dy_north_A
+    flux_Wy2 = ((kappa_Redi + kappa_GM_w) * S_Wy2 * dq_dy_north_A
                 + kappa_Redi * S_Wy2 ** 2 * dq_dz_w)
-    flux_Wy3 = ((kappa_Redi + kappa_GM_b) * S_Wy3 * dq_dy_south_B
+    flux_Wy3 = ((kappa_Redi + kappa_GM_w) * S_Wy3 * dq_dy_south_B
                 + kappa_Redi * S_Wy3 ** 2 * dq_dz_w)
-    flux_Wy4 = ((kappa_Redi + kappa_GM_b) * S_Wy4 * dq_dy_north_B
+    flux_Wy4 = ((kappa_Redi + kappa_GM_w) * S_Wy4 * dq_dy_north_B
                 + kappa_Redi * S_Wy4 ** 2 * dq_dz_w)
 
     F_z = 0.25 * (taper_Wx1 * flux_Wx1 + taper_Wx2 * flux_Wx2

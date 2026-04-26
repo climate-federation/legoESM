@@ -608,6 +608,56 @@ class TestTriadDifferentiability:
         assert jnp.all(jnp.isfinite(grad))
 
 
+class TestTriadVisbeck:
+    """Triad scheme must broadcast correctly against a per-cell kappa_GM
+    (e.g., the (n_lat, n_lon) field returned by Visbeck).  Regression
+    test for the shape mismatch fixed alongside the global-overturning
+    GM/Redi rollout — the original triad code multiplied a cell-centred
+    kappa against u-face / v-face fluxes without face interpolation."""
+
+    def test_triad_with_2d_kappa_GM_runs_and_finite(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, _ = T.shape
+
+        kappa_GM_2d = jnp.full(
+            (n_lat, n_lon), float(cfg.kappa_GM), dtype=T.dtype,
+        )
+        dT = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask,
+            z_coord, jacobian, grid,
+            kappa_GM=kappa_GM_2d, kappa_Redi=cfg.kappa_Redi,
+            S_max=cfg.S_max,
+        )
+        assert dT.shape == T.shape
+        assert jnp.all(jnp.isfinite(dT))
+
+    def test_triad_uniform_2d_kappa_GM_matches_scalar(self):
+        """A uniform (n_lat, n_lon) kappa_GM must give the same tendency
+        as the equivalent scalar kappa_GM (interpolation is identity for
+        uniform fields)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, _ = T.shape
+
+        kappa_scalar = float(cfg.kappa_GM)
+        kappa_2d = jnp.full((n_lat, n_lon), kappa_scalar, dtype=T.dtype)
+
+        dT_scalar = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask,
+            z_coord, jacobian, grid,
+            kappa_GM=kappa_scalar, kappa_Redi=cfg.kappa_Redi,
+            S_max=cfg.S_max,
+        )
+        dT_2d = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask,
+            z_coord, jacobian, grid,
+            kappa_GM=kappa_2d, kappa_Redi=cfg.kappa_Redi,
+            S_max=cfg.S_max,
+        )
+        assert jnp.allclose(dT_scalar, dT_2d, atol=1e-14, rtol=1e-12)
+
+
 class TestTriadOrchestratorDispatch:
 
     def test_orchestrator_triads_branch(self):
