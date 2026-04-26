@@ -238,7 +238,8 @@ def fc_gradient_y(q: jax.Array, grid: CubedSphereGrid,
 
 
 def fc_divergence(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
-                  fc_config: FCOperatorConfig) -> jax.Array:
+                  fc_config: FCOperatorConfig,
+                  padded: tuple[jax.Array, jax.Array] | None = None) -> jax.Array:
     """FC spectral divergence of vector field (u, v).
 
     Uses the discrete Gauss theorem form on orthogonal curvilinear coords:
@@ -251,8 +252,19 @@ def fc_divergence(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
     Accepts ``u, v`` shape ``(6, n, n)`` or ``(6, n, n, nlev)``.  The
     4D path uses ``pad_halo_vector_4d`` so all levels share one MPI
     vector halo exchange.
+
+    Parameters
+    ----------
+    padded : tuple of (u_pad, v_pad), optional
+        Pre-padded vector pair from ``_fc_pad_halo_vector``.  When
+        provided, the internal vector halo exchange is skipped — share
+        with a co-located ``fc_curl_z`` on the same input to halve
+        the halo cost.
     """
-    u_pad, v_pad = _fc_pad_halo_vector(u, v, grid)
+    if padded is not None:
+        u_pad, v_pad = padded
+    else:
+        u_pad, v_pad = _fc_pad_halo_vector(u, v, grid)
 
     # Metric-weighted fluxes on padded grid.  ``hy_ext`` is (6, n+2, n+2);
     # broadcast to match a possible trailing nlev axis.
@@ -270,7 +282,8 @@ def fc_divergence(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
 
 
 def fc_curl_z(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
-              fc_config: FCOperatorConfig) -> jax.Array:
+              fc_config: FCOperatorConfig,
+              padded: tuple[jax.Array, jax.Array] | None = None) -> jax.Array:
     """FC spectral vorticity (vertical component of curl).
 
     Uses the discrete Stokes theorem form:
@@ -278,9 +291,14 @@ def fc_curl_z(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
 
     where d/di, d/dj are index-space FC spectral derivatives.
 
-    Accepts 3D or 4D input as for :func:`fc_divergence`.
+    Accepts 3D or 4D input as for :func:`fc_divergence`.  See
+    :func:`fc_divergence` for ``padded=`` usage — share the vector
+    halo with a co-located divergence on the same (u, v).
     """
-    u_pad, v_pad = _fc_pad_halo_vector(u, v, grid)
+    if padded is not None:
+        u_pad, v_pad = padded
+    else:
+        u_pad, v_pad = _fc_pad_halo_vector(u, v, grid)
 
     hy_ext = _broadcast_metric_to_field(grid.hy_ext, v_pad)
     hx_ext = _broadcast_metric_to_field(grid.hx_ext, u_pad)

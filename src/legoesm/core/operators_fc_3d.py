@@ -51,16 +51,25 @@ def fc_gradient_y_3d(field_3d: jax.Array, grid: CubedSphereGrid,
 
 def fc_divergence_3d(u_3d: jax.Array, v_3d: jax.Array,
                      grid: CubedSphereGrid,
-                     fc_config: FCOperatorConfig) -> jax.Array:
-    """FC divergence at all levels. (6,n,n,nlev) -> (6,n,n,nlev)."""
-    return fc_divergence(u_3d, v_3d, grid, fc_config)
+                     fc_config: FCOperatorConfig,
+                     padded: tuple[jax.Array, jax.Array] | None = None) -> jax.Array:
+    """FC divergence at all levels. (6,n,n,nlev) -> (6,n,n,nlev).
+
+    Optional ``padded=(u_pad, v_pad)`` shares the vector halo with a
+    co-located ``fc_curl_z_3d`` on the same input.
+    """
+    return fc_divergence(u_3d, v_3d, grid, fc_config, padded=padded)
 
 
 def fc_curl_z_3d(u_3d: jax.Array, v_3d: jax.Array,
                  grid: CubedSphereGrid,
-                 fc_config: FCOperatorConfig) -> jax.Array:
-    """FC vorticity at all levels. (6,n,n,nlev) -> (6,n,n,nlev)."""
-    return fc_curl_z(u_3d, v_3d, grid, fc_config)
+                 fc_config: FCOperatorConfig,
+                 padded: tuple[jax.Array, jax.Array] | None = None) -> jax.Array:
+    """FC vorticity at all levels. (6,n,n,nlev) -> (6,n,n,nlev).
+
+    See :func:`fc_divergence_3d` for ``padded=`` usage.
+    """
+    return fc_curl_z(u_3d, v_3d, grid, fc_config, padded=padded)
 
 
 def fc_laplacian_3d(field_3d: jax.Array, grid: CubedSphereGrid,

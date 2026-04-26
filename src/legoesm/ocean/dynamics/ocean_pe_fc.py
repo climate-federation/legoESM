@@ -147,17 +147,40 @@ def ocean_baroclinic_tendencies_fc(
     v_masked = v * mask_3d
     _div_u_pair = jnp.stack([h_k * u_masked, u_masked], axis=-1)
     _div_v_pair = jnp.stack([h_k * v_masked, v_masked], axis=-1)
+    _div_u_pair_flat = _div_u_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2)
+    _div_v_pair_flat = _div_v_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2)
+    # Pre-pad (combined_u, combined_v) ONCE so the divergence and the
+    # curl below share the FC vector halo exchange.  ``stack(..., axis=-1)
+    # + reshape`` interleaves [h*u, u, h*u, u, ...], so the
+    # ``[..., 1::2]`` slot of the padded array is the padded ``u_masked``
+    # — exactly what ``fc_curl_z_3d`` needs.  Saves one full
+    # ``_fc_pad_halo_vector`` collective per RHS evaluation (a vector
+    # halo with cross-face cos/sin rotation, costlier than a scalar
+    # halo) — same Loop 134 exploit as the FC laplacian/hyperdiff
+    # share.
+    from legoesm.core.operators_fc import _fc_pad_halo_vector as _fc_pad_halo_vector_oc
+    _combined_u_pad, _combined_v_pad = _fc_pad_halo_vector_oc(
+        _div_u_pair_flat, _div_v_pair_flat, grid,
+    )
     _div_pair_flat = fc_divergence_3d(
-        _div_u_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2),
-        _div_v_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2),
+        _div_u_pair_flat, _div_v_pair_flat,
         grid, fc_config,
+        padded=(_combined_u_pad, _combined_v_pad),
     ).reshape(n_face_d, n_i_d, n_j_d, nlev_d, 2)
     flux_div_k = _div_pair_flat[..., 0]
     div_v = _div_pair_flat[..., 1]
     w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
     # --- 5. Vorticity ---
-    zeta = fc_curl_z_3d(u * mask_3d, v * mask_3d, grid, fc_config)
+    # Reuse the ``u_masked`` / ``v_masked`` padded slices from the
+    # combined halo above — slot index 1 of the interleaved
+    # ``[h*u, u, h*u, u, ...]`` layout.
+    _u_masked_pad = _combined_u_pad[..., 1::2]
+    _v_masked_pad = _combined_v_pad[..., 1::2]
+    zeta = fc_curl_z_3d(
+        u_masked, v_masked, grid, fc_config,
+        padded=(_u_masked_pad, _v_masked_pad),
+    )
 
     # --- 6. Kinetic energy gradient (computed via the batched
     # (p_prime, K) gradient block above — halo and derivative shared
