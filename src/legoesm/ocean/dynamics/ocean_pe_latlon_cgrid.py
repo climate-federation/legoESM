@@ -763,26 +763,76 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # MOM6-style: KE from total u, not perturbation u'. The depth-mean
     # contribution enters F_slow for the barotropic solver; the
     # perturbation is applied to 3D velocity in the step function.
+    #
+    # WENO K-term (Silvestri et al. 2024 Eq. 33): the substitution
+    # ``<δ_i u²>_i ↦ {δ_i u²; <u>_i}_i`` applies ONLY to the matching-
+    # direction component of the KE gradient.  For ∂K/∂x at u-faces:
+    #   - u² part: WENO upwind reconstruction of cell-centered δ_i u²
+    #     (small magnitude, smooth) back to u-faces with <u>_i smoothness
+    #   - v² part: stays centered (the cross-direction term).
+    # Symmetrically for ∂K/∂y at v-faces.  Reconstructing cell-centered
+    # *differences* (small) is fundamentally less dissipative than
+    # reconstructing u² (large): keeps WENO weights closer to optimal
+    # in smooth regions, matching paper's design intent.
     _mom_adv = config.momentum_advection
     if _mom_adv in ("weno5", "weno7"):
-        # WENO5 {u²;u} and {v²;v} reconstruction (Silvestri et al. 2024,
-        # Phase 4b K-term, Table 2: always WENO5 for K regardless of
-        # config order).  Replaces centered interpolation with upwind
-        # bias: computes avg(u²) not (avg(u))², adding O((ΔU)²) implicit
-        # KE dissipation at velocity fronts.
-        u_sq_cell = _weno_usq_to_cell(u, order=5)
-        v_sq_cell = _weno_vsq_to_cell(v, order=5)
-        KE = 0.5 * (u_sq_cell + v_sq_cell)
+        # u² at faces and cell-centered fields needed by Eq. 33.
+        u_sq_face = u ** 2                                  # (n_lat, n_lon+1, nlev)
+        v_sq_face = v ** 2                                  # (n_lat+1, n_lon, nlev)
+        # δ_i u² at cell j = u²[face j+1] - u²[face j]      (small in smooth regions)
+        delta_u_sq_cell = u_sq_face[:, 1:, :] - u_sq_face[:, :-1, :]   # (n_lat, n_lon, nlev)
+        # δ_j v² at cell i = v²[face i+1] - v²[face i]
+        delta_v_sq_cell = v_sq_face[1:, :, :] - v_sq_face[:-1, :, :]   # (n_lat, n_lon, nlev)
+        # <u>_i, <v>_j at cells (smoothness fields per Eq. 41-42).
+        u_avg_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])               # (n_lat, n_lon, nlev)
+        v_avg_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])               # (n_lat, n_lon, nlev)
+        # <u²>_i, <v²>_j at cells (centered, used for cross terms in K).
+        u_sq_cell_centered = 0.5 * (u_sq_face[:, :-1, :] + u_sq_face[:, 1:, :])
+        v_sq_cell_centered = 0.5 * (v_sq_face[:-1, :, :] + v_sq_face[1:, :, :])
+
+        # WENO upwind of δ_i u² to u-faces (gradient times dx_u_at_face).
+        delta_u_sq_at_uface = _weno_cell_to_uface(
+            delta_u_sq_cell, u_avg_cell, u, order=5)        # (n_lat, n_lon+1, nlev)
+        # WENO upwind of δ_j v² to v-faces.
+        delta_v_sq_at_vface = _weno_cell_to_vface(
+            delta_v_sq_cell, v_avg_cell, v, order=5)        # (n_lat+1, n_lon, nlev)
+
+        # Convert "δ across one cell" → "gradient at face" by dividing
+        # by dx_u (cell width at u-face latitude) and dy_v (constant).
+        R = grid.radius
+        dx_u_at_face = (R * grid.dlon * grid.cos_lat)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
+        dy_v = R * grid.dlat
+        # Gradient of <u²>_i at u-face (WENO upwind version).
+        dKE_u2_dx_at_uface = 0.5 * delta_u_sq_at_uface / dx_u_at_face
+        # Gradient of <v²>_j at v-face (WENO upwind version).
+        dKE_v2_dy_at_vface = 0.5 * delta_v_sq_at_vface / dy_v
+
+        # Centered cross terms: gradient of <v²>_j at u-faces, gradient of <u²>_i at v-faces.
+        v_sq_cell_t = jnp.moveaxis(v_sq_cell_centered, -1, 0)
+        u_sq_cell_t = jnp.moveaxis(u_sq_cell_centered, -1, 0)
+        dvsq_dx_t = jax.vmap(lambda f: gradient_x_cgrid(f, grid))(v_sq_cell_t)
+        dusq_dy_t = jax.vmap(lambda f: gradient_y_cgrid(f, grid))(u_sq_cell_t)
+        dvsq_dx = jnp.moveaxis(dvsq_dx_t, 0, -1)            # (n_lat, n_lon+1, nlev)
+        dusq_dy = jnp.moveaxis(dusq_dy_t, 0, -1)            # (n_lat+1, n_lon, nlev)
+
+        # Assemble: K_u = 0.5 * (WENO_upwind ∂_x <u²>_i + centered ∂_x <v²>_j)
+        dKE_dx = dKE_u2_dx_at_uface + 0.5 * dvsq_dx
+        # K_v = 0.5 * (centered ∂_y <u²>_i + WENO_upwind ∂_y <v²>_j)
+        dKE_dy = 0.5 * dusq_dy + dKE_v2_dy_at_vface
     else:
+        # Centered baseline: KE = 0.5 * ((<u>_i)² + (<v>_j)²).  Note this
+        # differs slightly from Silvestri Eq. 19 which uses <u²>_i (avg of
+        # squares) — the two converge in the smooth limit but differ at
+        # O(Δ²·grad²).  We retain the ``(avg)²`` form for compatibility
+        # with existing experiments.
         u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
         v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
         KE = 0.5 * (u_cell**2 + v_cell**2)
-
-    KE_t = jnp.moveaxis(KE, -1, 0)
-    dKE_dx_t = jax.vmap(lambda ke2d: gradient_x_cgrid(ke2d, grid))(KE_t)
-    dKE_dy_t = jax.vmap(lambda ke2d: gradient_y_cgrid(ke2d, grid))(KE_t)
-    dKE_dx = jnp.moveaxis(dKE_dx_t, 0, -1)
-    dKE_dy = jnp.moveaxis(dKE_dy_t, 0, -1)
+        KE_t = jnp.moveaxis(KE, -1, 0)
+        dKE_dx_t = jax.vmap(lambda ke2d: gradient_x_cgrid(ke2d, grid))(KE_t)
+        dKE_dy_t = jax.vmap(lambda ke2d: gradient_y_cgrid(ke2d, grid))(KE_t)
+        dKE_dx = jnp.moveaxis(dKE_dx_t, 0, -1)
+        dKE_dy = jnp.moveaxis(dKE_dy_t, 0, -1)
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     du_dt = -dKE_dx - dp_dx / rho_0

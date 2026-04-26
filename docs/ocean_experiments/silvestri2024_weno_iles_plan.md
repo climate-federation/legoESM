@@ -617,10 +617,66 @@ The WENO-ILES implementation was completed across multiple conversations:
 | 4 | WENO momentum Z+C terms (Phase 2b) + baroclinic jet script (Phase 3a) | ✅ Done |
 | 5 | Fix issue #160 (Phase 4a) + WENO D+K terms (Phase 4b) | ✅ Done |
 
+### Implementation bugs found (2026-04-25 audit)
+
+A deep audit by both the dycore and ocean-model expert agents found that
+the legoESM WENO momentum implementation does not faithfully match the
+Silvestri paper. These bugs are the most likely cause of the surprising
+result that legoESM-WENO5 (no explicit viscosity) appears MORE dissipative
+than centered + B_h=2.3e11 on the Eady experiment — opposite of the paper's
+claim that WENO produces ~28x more EKE than Smagorinsky.
+
+**Critical bugs:**
+
+1. **D-term: wrong split (Silvestri Eqs. 31-32)** —
+   `_weno_cell_to_uface/vface` in `ocean_pe_latlon_cgrid.py:885-890`.
+   Paper prescribes `{D}_i = {δ_i U}_i + ⟨δ_j V⟩_i`: only the
+   matching-direction divergence is WENO-upwinded; the cross-direction
+   component must be **centered**. Our code WENO-reconstructs the full
+   divergence, which is exactly the non-energy-dissipative operation
+   Appendix C explicitly warns against. Plus a likely sign error
+   (paper has `du/dt -= D·u` per Eq. 25 evolution form; code has `+=`).
+   Disabled via `weno_d_term=False` default; needs proper fix.
+
+2. **K-term: reconstruction order wrong (Silvestri Eq. 33)** —
+   `_weno_usq_to_cell`, `_weno_vsq_to_cell` in `ocean_pe_latlon_cgrid.py:
+   551-645` and assembly at lines 766-789. Paper: compute `δ_i u²` at
+   cell centers FIRST (small magnitudes), then WENO upwind these
+   differenced fields back to faces. Our code: WENO `u²` to cell
+   centers (full magnitudes), then centered gradient. Reconstructing
+   `u²` directly causes WENO weights to be more upwind-biased
+   everywhere there's shear, **adding dissipation** instead of
+   reducing it as the paper intends. Plus the smoothness field uses
+   raw face values where paper uses `⟨u⟩_i` (cell-centered averages).
+   This is the most likely explanation for the over-dissipation
+   observed in Eady.
+
+3. **Z-term smoothness stencil possibly incomplete (Eq. 43)** —
+   `_weno_zeta_at_u/v` in `ocean_pe_latlon_cgrid.py:271-385`. Paper
+   may prescribe `{ζ; u} = ({ζ; ⟨u⟩_j} + {ζ; ⟨v⟩_i}) / 2` — average
+   of two WENO reconstructions with different smoothness fields. Our
+   code does only one. Verify against Oceananigans v0.84 reference.
+
+4. **Land mask not applied inside WENO stencils** — all helpers.
+   Currently harmless for Silvestri jet (no internal coasts) but a
+   problem for Eady, ACC channel, AMIP. Easy fix: `_neumann_fill_cgrid`
+   inputs before stencil construction.
+
+**Suggested test additions** (current 42 tests don't catch these):
+- K-term consistency with Eq. 33 (`{δ_i u²}_i` form)
+- D-term Eq. 30 anti-diffusion test (divergence-free input)
+- Energy-budget regression: WENO should be LESS dissipative than
+  centered+B_h on a smooth Taylor-Green vortex
+- 2-step parity: energy decay rate vs. analytical
+
 ### What remains for full paper reproduction
 
 **Infrastructure needed before production Silvestri runs:**
 
+- **Fix WENO momentum bugs above** (highest priority — invalidates
+  prior comparison runs). Order: K-term first (most likely explains
+  over-dissipation), then D-term split + sign, then Z-term Eq. 43
+  averaging, then add regression tests.
 - **Zonal-mean restoring** (~40 LOC): The paper restores the zonal-mean b and u
   to the initial profiles everywhere in the domain with a 50-day timescale
   (Soufflet et al. 2016 approach). This is fundamentally different from our
