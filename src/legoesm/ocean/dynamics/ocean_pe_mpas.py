@@ -197,7 +197,12 @@ def mpas_ocean_baroclinic_tendencies(
     # RHS evaluation when ``K_h > 0`` — same passive trailing-axis
     # exploit as Loop 139 in the MPAS atmosphere PE.
     nlev_B = bernoulli.shape[-1]
-    if config.K_h > 0:
+    # ``_tracer_grad_flat_pre`` is needed both for the K_h Laplacian
+    # *and* for the inner gradient of the K_bih biharmonic, so the
+    # batched gradient must include the (T, S) channels when *either*
+    # coefficient is non-zero.
+    _need_tracer_grad = config.K_h > 0 or config.K_bih > 0
+    if _need_tracer_grad:
         _tracer_flat_pre = jnp.stack([T_3d, S_3d], axis=-1).reshape(
             T_3d.shape[0], nlev_B * 2,
         )
@@ -327,11 +332,24 @@ def mpas_ocean_baroclinic_tendencies(
     # ``_tracer_grad_flat_pre`` was computed alongside ``grad_B`` via the
     # batched gradient block above (Loop 148) — reuse it here so we
     # don't issue a redundant ``gradient_edge_3d`` on the same input.
-    if config.K_h > 0:
+    #
+    # When BOTH K_h and K_bih are active, the K_h Laplacian
+    # ``div(grad*edge_mask)`` is identical to the *inner* (raw)
+    # Laplacian of the biharmonic ``bilaplacian_cell_3d`` (which is
+    # defined as ``laplacian_cell_3d(laplacian_cell_3d(f, mask=mask),
+    # mask=mask)`` — its inner step computes ``div(grad(f)*edge_mask)
+    # * cell_mask``).  Inline the bilaplacian and share the inner
+    # ``div(grad*edge_mask)`` with K_h's Laplacian — saves one
+    # ``divergence_cell_3d`` call (1 ``edgesOnCell`` gather + reduce)
+    # per RHS evaluation when both coefficients are active.  Same
+    # Loop 135 exploit as the latlon ocean K_h+K_bih sharing.
+    _inner_lap_div: jnp.ndarray | None = None
+    if config.K_h > 0 or config.K_bih > 0:
         grad_flat = _tracer_grad_flat_pre * edge_mask[:, jnp.newaxis]
-        div_flat = divergence_cell_3d(grad_flat, mesh)
+        _inner_lap_div = divergence_cell_3d(grad_flat, mesh)
+    if config.K_h > 0:
         # Reshape to (nCells, nlev, 2) so h_safe and h_k broadcast via [:, :, None].
-        div_stack = div_flat.reshape(nCells_t, nlev_t, n_tracers)
+        div_stack = _inner_lap_div.reshape(nCells_t, nlev_t, n_tracers)
         diff_stack = config.K_h * div_stack / h_safe[..., None] * h_k[..., None]
     else:
         diff_stack = jnp.zeros_like(tracer_stack)
@@ -344,7 +362,14 @@ def mpas_ocean_baroclinic_tendencies(
     # ``/ h_safe * h_k`` factor is ≈1 on wet cells and a dry-cell safety
     # guard where h_k → 0.
     if config.K_bih > 0:
-        bilap_flat = bilaplacian_cell_3d(tracer_flat, mesh, mask=mask)
+        # Inline the bilaplacian: inner = ``div(grad*edge_mask) *
+        # cell_mask`` (already partially computed above as
+        # ``_inner_lap_div``); outer = ``laplacian_cell_3d(inner,
+        # mask=mask)``.
+        inner_lap_masked = _inner_lap_div * mask[:, jnp.newaxis]
+        outer_grad = gradient_edge_3d(inner_lap_masked, mesh) * edge_mask[:, jnp.newaxis]
+        outer_div = divergence_cell_3d(outer_grad, mesh)
+        bilap_flat = outer_div * mask[:, jnp.newaxis]
         bilap_stack = bilap_flat.reshape(nCells_t, nlev_t, n_tracers)
         diff_stack = diff_stack - (
             config.K_bih * bilap_stack / h_safe[..., None] * h_k[..., None]
