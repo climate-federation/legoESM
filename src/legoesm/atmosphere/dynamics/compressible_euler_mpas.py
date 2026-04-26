@@ -133,8 +133,19 @@ def mpas_compressible_euler_slow_tendencies(
     grad_pi_3d = _grad_flat[..., 0]
     grad_ke_3d = _grad_flat[..., 1]
 
-    # Theta at edges for PGF
-    theta_e_3d = cell_to_edge_avg_3d(theta_total, mesh)    # (nEdges, nlev)
+    # Cell-to-edge averaging for theta and rho, batched.  Both are
+    # (nCells, nlev) inputs and ``cell_to_edge_avg_3d`` is a pure
+    # ``cellsOnEdge`` gather + average (passive on the trailing axis).
+    # Stack and fold so a single gather computes both edge averages.
+    # 2 calls → 1.  ``rho_e_3d`` is consumed in the divergence batching
+    # below; computing it here lets us share the cell-to-edge gather.
+    n_cells_e = theta_total.shape[0]
+    _te_stack = jnp.stack([theta_total, rho_total], axis=-1)  # (nCells, nlev, 2)
+    _te_edge = cell_to_edge_avg_3d(
+        _te_stack.reshape(n_cells_e, nlev * 2), mesh,
+    ).reshape(-1, nlev, 2)
+    theta_e_3d = _te_edge[..., 0]
+    rho_e_3d = _te_edge[..., 1]
 
     # PV flux (Coriolis + vorticity).  Use rho*dz as thickness proxy
     # for mass-weighted PV.
@@ -170,8 +181,8 @@ def mpas_compressible_euler_slow_tendencies(
     # Stack the three (nEdges, nlev) flux inputs along a new trailing
     # axis to (nEdges, nlev, 3), fold to (nEdges, nlev*3), call
     # ``divergence_cell_3d`` once on the thicker tensor, then unfold.
-    # 3 divergence calls → 1.
-    rho_e_3d = cell_to_edge_avg_3d(rho_total, mesh)        # (nEdges, nlev)
+    # 3 divergence calls → 1.  ``rho_e_3d`` was already computed above
+    # alongside ``theta_e_3d`` via the batched cell-to-edge gather.
     n_edges_d, nlev_d = u_3d.shape
     _div_inputs = jnp.stack(
         [rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d], axis=-1,
