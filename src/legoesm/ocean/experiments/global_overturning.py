@@ -84,7 +84,7 @@ class GlobalOverturningConfig:
     tau_max: float = 0.1           # Maximum wind stress [Pa]
 
     # --- Viscosity / diffusion (scaled for ~1 deg) ---
-    A_h: float = 1e5               # Laplacian viscosity [m2/s]
+    A_h: float = 2e5               # Laplacian viscosity [m2/s]
     A_v: float = 1e-3              # Vertical viscosity [m2/s]
     K_v: float = 1e-5              # Background vertical diffusivity [m2/s]
     bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag [m/s]
@@ -208,7 +208,7 @@ def create_forcings(grid_type: str, grid,
         surface_forcing=SurfaceForcingConfig(
             scheme="combined",
             prescribed=PrescribedForcingConfig(
-                wind_profile="global_wind",
+                wind_profile="two_belt",
                 tau_max=config.tau_max,
             ),
             restoring=RestoringConfig(
