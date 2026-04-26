@@ -64,18 +64,18 @@ def richardson_vertical_mixing(
     K_v = cfg.K_0 / (1.0 + cfg.alpha * Ri) ** cfg.n + cfg.K_bg
     A_v = K_v * cfg.Pr_t + cfg.A_bg
 
-    # Apply variable-K vertical diffusion
+    # Apply variable-K vertical diffusion.  ``vertical_diffusion_variable_K``
+    # natively handles arbitrary leading batch axes (its arithmetic uses
+    # ``[..., :-1]`` and ``[..., 1:]`` indexing), so a single direct call
+    # on the leading-stacked tensor is equivalent to a per-component
+    # ``jax.vmap`` — but without the vmap wrapper.  ``A_v`` /
+    # ``K_v`` (shape ``(..., nlev-1)``) broadcast cleanly across the
+    # extra leading axis.
     vel = jnp.stack([u, v], axis=0)
-    vel_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
-        in_axes=0, out_axes=0,
-    )(vel)
+    vel_tend = vertical_diffusion_variable_K(vel, z_coord, jacobian, A_v)
 
     tracers = jnp.stack([T, S], axis=0)
-    tr_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
-        in_axes=0, out_axes=0,
-    )(tracers)
+    tr_tend = vertical_diffusion_variable_K(tracers, z_coord, jacobian, K_v)
 
     return VerticalMixingOutput(
         du_dt=vel_tend[0],
