@@ -150,8 +150,26 @@ def mpas_hydrostatic_tendencies(
     # Bernoulli function: KE + Phi
     bernoulli_3d = ke_3d + Phi  # (nCells, nlev)
 
-    # Bernoulli gradient at edges
-    grad_B_3d = gradient_edge_3d(bernoulli_3d, mesh)  # (nEdges, nlev)
+    # Bernoulli gradient at edges — when scalar diffusion is active
+    # (``K_h > 0``), batch ``grad(B)`` together with ``grad(T)`` along a
+    # trailing axis so a single ``gradient_edge_3d`` (one ``cellsOnEdge``
+    # gather + one finite difference) serves both.  Same passive
+    # trailing-axis exploit as the MPAS divergence_cell_3d batches
+    # below.
+    if config.K_h > 0:
+        n_cells_BT = bernoulli_3d.shape[0]
+        nlev_BT = bernoulli_3d.shape[-1]
+        _BT_stack = jnp.stack(
+            [bernoulli_3d, T_3d], axis=-1,
+        )  # (nCells, nlev, 2)
+        _grad_BT = gradient_edge_3d(
+            _BT_stack.reshape(n_cells_BT, nlev_BT * 2), mesh,
+        ).reshape(-1, nlev_BT, 2)
+        grad_B_3d = _grad_BT[..., 0]
+        grad_T_3d_pre = _grad_BT[..., 1]
+    else:
+        grad_B_3d = gradient_edge_3d(bernoulli_3d, mesh)  # (nEdges, nlev)
+        grad_T_3d_pre = None
 
     # Pressure gradient correction: R_d * T_edge * grad_eta(ln p)
     # In sigma coords: grad_eta(ln p) = grad(ln p_s).
@@ -195,10 +213,21 @@ def mpas_hydrostatic_tendencies(
     # Momentum tendency
     du_dt_3d = -grad_B_3d - pg_corr_3d + pv_flux_3d  # (nEdges, nlev)
 
-    # Viscosity
-    if config.nu_del2 > 0:
+    # Viscosity — when both del2 and del4 are active, the biharmonic
+    # ``vector_laplacian_del4_3d`` is defined as
+    # ``-vector_laplacian_del2_3d(vector_laplacian_del2_3d(u))``, so
+    # the *inner* del2 is identical to the explicit del2 viscosity.
+    # Compute it once and reuse — saves one full
+    # ``vector_laplacian_del2_3d`` call (1 div + 1 curl + 1 grad +
+    # 1 tangential-curl difference) per RHS evaluation.  Same exploit
+    # as Loop 135 for the latlon ocean K_h+K_bih sharing.
+    if config.nu_del2 > 0 and config.nu_del4 > 0:
+        _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + config.nu_del2 * _del2_u
+        du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(_del2_u, mesh)
+    elif config.nu_del2 > 0:
         du_dt_3d = du_dt_3d + config.nu_del2 * vector_laplacian_del2_3d(u_3d, mesh)
-    if config.nu_del4 > 0:
+    elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
 
     # Batched divergences for continuity (div(u)), tracer transport
@@ -223,10 +252,12 @@ def mpas_hydrostatic_tendencies(
     div_flux_lnps = _div_outputs[..., 2]
     horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
 
-    # Scalar diffusion
+    # Scalar diffusion — ``grad_T_3d`` was already computed alongside
+    # ``grad_B_3d`` in the batched gradient above; reuse it here.
     if config.K_h > 0:
-        grad_T_3d = gradient_edge_3d(T_3d, mesh)  # (nEdges, nlev)
-        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * divergence_cell_3d(grad_T_3d, mesh)
+        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * divergence_cell_3d(
+            grad_T_3d_pre, mesh,
+        )
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     if _hybrid:

@@ -178,12 +178,22 @@ def mpas_compressible_euler_slow_tendencies(
     # Momentum tendency
     du_dt_3d = pv_flux_3d - grad_ke_3d - c_p * theta_e_3d * grad_pi_3d
 
-    # Viscosity
-    if config.nu_del2 > 0:
+    # Viscosity — share the inner del2 between the explicit del2 and
+    # the biharmonic del4 when both are active.  Same Loop 135 exploit
+    # as the latlon ocean K_h+K_bih sharing — saves one full
+    # ``vector_laplacian_del2_3d`` (1 div + 1 curl + 1 grad +
+    # 1 tangential-curl difference) per RHS evaluation.
+    if config.nu_del2 > 0 and config.nu_del4 > 0:
+        _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + config.nu_del2 * _del2_u
+        du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(
+            _del2_u, mesh,
+        )
+    elif config.nu_del2 > 0:
         du_dt_3d = du_dt_3d + config.nu_del2 * vector_laplacian_del2_3d(
             u_3d, mesh,
         )
-    if config.nu_del4 > 0:
+    elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(
             u_3d, mesh,
         )
