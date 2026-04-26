@@ -671,10 +671,20 @@ class SpectralCompressibleEulerModel:
             )
 
         def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-            # Convert acoustic variables from spectral to grid
+            # Convert acoustic variables from spectral to grid.  theta_p
+            # and rho_p share (n_sh, nlev) so batch them into a single
+            # sh_synthesis_3d (one segment_sum + one IRFFT).  w_hat has
+            # (n_sh, nlev+1) — stays separate.  Same pattern as Loop 97.
+            theta_rho_hat = jnp.stack(
+                [s.theta_prime_hat.data, s.rho_prime_hat.data], axis=-1,
+            )  # (n_sh, nlev, 2)
+            n_sh_a, nlev_a = s.theta_prime_hat.data.shape
+            theta_rho_grid = sh_synthesis_3d(
+                self.grid, theta_rho_hat.reshape(n_sh_a, nlev_a * 2),
+            ).reshape(self.grid.n_lat, self.grid.n_lon, nlev_a, 2)
+            theta_p_grid = theta_rho_grid[..., 0]
+            rho_p_grid = theta_rho_grid[..., 1]
             w_grid = sh_synthesis_3d(self.grid, s.w_hat.data)
-            theta_p_grid = sh_synthesis_3d(self.grid, s.theta_prime_hat.data)
-            rho_p_grid = sh_synthesis_3d(self.grid, s.rho_prime_hat.data)
 
             # Run acoustic substeps in grid space
             acoustic_fn = (
@@ -688,16 +698,27 @@ class SpectralCompressibleEulerModel:
                 self.height_coord, self.terrain_metric, self.config,
             )
 
-            # Convert back to spectral
+            # Convert back to spectral.  Same batching: theta_p_new and
+            # rho_p_new share (n_lat, n_lon, nlev) so a single
+            # sh_analysis_3d on the stacked tensor replaces two.  w_new
+            # has nlev+1 trailing axis — stays separate.
+            theta_rho_new = jnp.stack(
+                [theta_p_new, rho_p_new], axis=-1,
+            )  # (n_lat, n_lon, nlev, 2)
+            n_lat_a = self.grid.n_lat
+            n_lon_a = self.grid.n_lon
+            theta_rho_new_hat = sh_analysis_3d(
+                self.grid, theta_rho_new.reshape(n_lat_a, n_lon_a, nlev_a * 2),
+            ).reshape(-1, nlev_a, 2)
             return SpectralNHState(
                 vor_hat=s.vor_hat,
                 div_hat=s.div_hat,
                 w_hat=s.w_hat.replace(data=sh_analysis_3d(self.grid, w_new)),
                 theta_prime_hat=s.theta_prime_hat.replace(
-                    data=sh_analysis_3d(self.grid, theta_p_new),
+                    data=theta_rho_new_hat[..., 0],
                 ),
                 rho_prime_hat=s.rho_prime_hat.replace(
-                    data=sh_analysis_3d(self.grid, rho_p_new),
+                    data=theta_rho_new_hat[..., 1],
                 ),
                 phis_hat=s.phis_hat,
                 tracers_hat=s.tracers_hat,
