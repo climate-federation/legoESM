@@ -415,9 +415,9 @@ iter-938+ should instrument inside `_d_sw_native` after each substep to identify
    - 1 default-off bit-equality.
    - 1 "currently no-op" pin documenting the incomplete-port state.
 
-**Verification.**
+**Verification (iter-938 baseline; superseded by iter-938b counts below).**
 
-- 13/13 pass (10 iter-938 + 3 iter-921 production).  Production W2 unchanged.
+- 12/12 pass at iter-938: 9 iter-938 helper-mapping/purity + 3 iter-921 production.  Production W2 unchanged.
 
 **KNOWN INCOMPLETE PORT — currently no-op on `uc`/`vc` outputs.**
 
@@ -437,14 +437,9 @@ Cannot be evaluated yet because:
 
 iter-938 closes the iter-108 documented gap STRUCTURALLY (the Fortran sign-flip arithmetic is now in the codebase and unit-tested) but explicitly defers the propagation refactor to iter-939+.
 
-**Process.**  Real production code addition (helper function + kwarg, default-OFF).  Cumulative iter-921→iter-938: 19 commits, 62 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag, iter-934 `_deln_flux`, iter-937/937b `_del6_vt_flux` × 2).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+**Process (iter-938 entry; superseded by iter-938b cleanup below).**  Real production code addition (helper function + kwarg).  iter-938b later removed the kwarg as Codex flagged it output-dead.  See iter-938b entry for the corrected commit count and sentinel count.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
-**Backlog for iter-939+.**
-
-1. Port Fortran `sw_core.F90:3567-3582` ua x-dir corner overrides.
-2. Port Fortran `sw_core.F90:3640+` va y-dir corner overrides.
-3. Re-run iter-938's "currently no-op" sentinel — it should fail with the new propagation, prompting test rebaseline.
-4. Measure: with the full `_d2a2c_vect` corner-override propagation, what's the FB chain step survival at C36?  If FB chain reaches 1 day, run W2 acceptance test.  If not, iter-935's structural growth bug is the next gate.
+**Backlog for iter-939+** (rewritten in iter-938b — see below).
 
 ### Iter-938b — remove dead-flag wiring (Codex iter-938 stop-time fix)
 
@@ -460,17 +455,24 @@ iter-938 closes the iter-108 documented gap STRUCTURALLY (the Fortran sign-flip 
 
 **Verification.**
 
-- 9 helper-mapping tests + 1 pure-function test pass.  Total iter-938 tests: 10.
-- Combined with iter-921 W2 + iter-934 FB low-res sentinels: **18/18 pass in 227 s**.
+- iter-938 test file collected: **9 tests** total (8 sign-flip mapping pins — 4 corners × 2 axes — plus 1 helper-is-pure-function pin).
+- Combined with iter-921 W2 (3 tests) + iter-934 FB low-res (6 tests): **18/18 pass in 227 s**.
 
 **Net iter-938 + iter-938b deliverable.**
 
 1. `src/legoesm/core/fv3_sw_core.py:_apply_fortran_d2a2c_corner_overrides` — standalone helper porting Fortran sw_core.F90:3527-3545 + 3620-3639 utmp/vtmp halo cube-corner overrides (16 sign-flip writes total).
-2. `tests/test_iter938_d2a2c_corner_overrides.py` — 10 sentinels: 8 sign-flip mapping pins (4 corners × 2 axes) + 1 SW vtmp y-dir mapping pin + 1 pure-function pin.
+2. `tests/test_iter938_d2a2c_corner_overrides.py` — 9 sentinels: 8 sign-flip mapping pins (4 corners × 2 axes — utmp x-dir + vtmp y-dir) + 1 helper-is-pure-function pin.
 3. Documentation in `_d2a2c_vect` body explaining the j-slicing prerequisite for wiring this helper.
 
 The helper is structurally Fortran-faithful (mapping verified by 8 unit tests).  Wiring requires iter-939+ to extend `_d2a2c_vect`'s edge_interpolate4 j-slice to read padded j ∈ [1, n+2] (boundary halo cells), so the corner-override values reach the uc/vc output.
 
+**Backlog for iter-939+** (corrected in iter-938b after Codex flagged the stale step-3 reference):
+
+1. Port Fortran `sw_core.F90:3567-3582` ua x-dir corner overrides AND extend `_d2a2c_vect` to apply them after step 3 (ua_pad/va_pad computation).  Currently the helper writes utmp_pad/vtmp_pad halo cells, but the ua/va halo overrides are a separate Fortran arithmetic block.
+2. Port Fortran `sw_core.F90:3640+` va y-dir corner overrides (same pattern).
+3. Refactor `_d2a2c_vect`'s edge_interpolate4 j-slicing to read padded j ∈ [1, n+2] so the corner-override values propagate to the uc/vc output.  Without this, items 1-2 remain output-dead just like the iter-938 helper.
+4. Once the propagation is live: measure FB chain step survival at C36.  If FB chain reaches 1 day, run W2 acceptance test (target v_ll_Linf ≤ 0.119 m/s per user iter-938 brief).  If not, iter-935's structural growth bug is the next gate.
+
 **Cumulative iter-921→iter-938b.**
 
-20 commits, 62 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag REJECTED, iter-934 `_deln_flux` damp-factoring, iter-937/937b `_del6_vt_flux` damp-factoring × 2 implementations).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+21 commits, 64 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag REJECTED, iter-934 `_deln_flux` damp-factoring, iter-937/937b `_del6_vt_flux` damp-factoring × 2 implementations).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
