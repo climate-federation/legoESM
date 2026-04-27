@@ -271,3 +271,50 @@ The user's iter-927 prohibition on `use_fv3_dsw1_mass_transport` / `split_mass_m
 3. `tests/test_iter934_fb_chain_low_res_stability.py` — 6 sentinels.
 
 **Process.**  Real production code change (`_deln_flux` semantics in float32; mathematically identical in float64).  Cumulative iter-921→iter-934: 14 commits, 52 sentinel tests, 2 production code changes (iter-926/927 `use_fv3_dsw5_corner_damping` flag, REJECTED but default-OFF; iter-934 `_deln_flux` damp-factoring fix, ENABLED at all resolutions).  Production W2 baseline at iter-893 unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-935 — FB chain has DEEPER long-term instability beyond iter-934's float32 fix
+
+**Trigger.**  iter-934 fixed `_deln_flux`'s float32 overflow → FB chain produces finite output at step 1 for all resolutions.  Question: does the FB chain stay finite over a full W2 1-day integration?
+
+**Result: NO.**  FB chain blows up after 40-90 steps at every resolution:
+
+| `N` | `dt`  | target steps (1 day) | survived steps | h_max at end |
+|-----|-------|----------------------|----------------|---------------|
+| 8   | 1350  | 64                   | 49             | 1.46e+10      |
+| 12  | 900   | 96                   | 67             | 1.52e+20      |
+| 16  | 675   | 128                  | 84             | 1.12e+08      |
+| 24  | 450   | 192                  | 42             | 1.69e+13      |
+| 36  | 300   | 288                  | 41             | 5.13e+19      |
+
+This is **explosive growth** (h_max from ~3000 m → 1e10–1e20 m), NOT a slow underdamped mode.
+
+**Damping coefficient sweep at C36 (50 steps target)** confirms it isn't a damping-insufficiency:
+
+| damping config                          | survived |
+|-----------------------------------------|----------|
+| default (d4=0.16, nord=1, damp_v=0.06)  | 41 / 50  |
+| stronger del-4 (d4=0.5)                 |  9 / 50  |
+| add d2_bg=0.05                          | 41 / 50  |
+| aggressive Smag (dddmp=0.4)             | 41 / 50  |
+| higher damp_v=0.2                       | 18 / 50  |
+
+**Higher damping makes it WORSE** (d4=0.5 → 9 steps; damp_v=0.2 → 18 steps).  This refutes the "underdamped slow mode" hypothesis and points to a STRUCTURAL bug in one of the d_sw1/d_sw4/d_sw5/d_sw6 sub-operators that amplifies between steps 30 and 50.
+
+**Implication.**
+
+iter-934 is necessary but not sufficient for FB chain production-readiness.  The FB chain has at least TWO independent failure modes:
+
+1. **iter-934 / `_deln_flux` float32 overflow** (FIXED).  Caused step-1 NaN at C8/C12/C16.
+2. **iter-935 / structural growth mode** (OPEN).  Causes h explosion after 30-90 steps at all resolutions, not a damping-insufficiency.
+
+Closing #2 requires per-step instrumentation to identify which operator step (`_d2a2c_vect`, `_c_sw`, `_p_grad_c`, transport, `_d_sw5_corner_divergence`, KE-add, vorticity transport, `_del6_vt_flux`) contributes to the explosive growth.  This is a multi-iter debugging project.
+
+**iter-935 deliverables.**
+
+1. `scripts/diag_iter935_fb_chain_long_term_instability.py` — runnable resolution scan + damping sweep diagnostic.
+
+**Verification.**  No new test added — the result is a known-bad measurement waiting on the structural-bug fix; pinning it would lock in current bad behavior.  The diagnostic script provides reproducible measurement.
+
+**Backlog implication.**  The user's iter-927 prohibition on `use_fv3_dsw1_mass_transport` and `split_mass_momentum` (both based on iter-904/905 catastrophic blowups at C36) is consistent with iter-935's finding: those flags route through the same operator chain that has the structural growth mode.  iter-934's fix may have improved their step-1 numerical stability, but iter-927's prohibition on default-flipping remains valid until iter-935's structural bug is found.
+
+**Process.**  No production code change.  Cumulative iter-921→iter-935: 15 commits, 52 sentinel tests, 2 production code changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
