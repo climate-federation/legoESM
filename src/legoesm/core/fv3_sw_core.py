@@ -819,7 +819,19 @@ def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
     dg = grid.duogrid if use_duogrid else None
     _offs = None if use_duogrid else grid.halo_interp_offsets
 
-    d2 = damp * q
+    # Iter-937b (Codex iter-937 stop-time fix): factor `damp` out of
+    # the iteration and apply at the final flux-output stage.  iter-937
+    # only fixed the sibling implementation in `fv3_del6_vt_flux.py`
+    # (called from `fv3_del6_vorticity_damping`, which the production
+    # `FV3EdgeShallowWaterModel.step` post-step damp_v hook uses); the
+    # ACTIVE FB-chain path is via `_d_sw_native` (line 2341), which
+    # calls THIS implementation.  Same float32-overflow class as
+    # iter-934 (`_deln_flux`): `d2 = damp * q` blows past float32 max
+    # at low resolution where `damp = (damp_v * da_min_c)^(nord+1)` is
+    # huge.  All operations between Step 1 and the return are LINEAR
+    # in d2, so the result is mathematically identical with the damp
+    # factor applied at the end instead.
+    d2 = q
 
     # Laplacian diffusive fluxes (USE_SG path, sw_core.F90:2064-2082)
     d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
@@ -844,6 +856,11 @@ def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
         d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
         fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
         fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
+
+    # Iter-937b: apply the deferred damp factor at the final output
+    # stage.  See top-of-function comment for float32-overflow rationale.
+    fx2 = damp * fx2
+    fy2 = damp * fy2
 
     return fx2, fy2
 
