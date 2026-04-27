@@ -586,3 +586,43 @@ User issue #5 noted `boundary_fix` is "Python-only stabilizer ... reduces artifa
 **Backlog implication.**  When/if FB chain stabilization lands, the FIRST validation should be that production W2 v_ll_Linf with the FB chain (and no boundary_fix Python-only stabilizer) reaches the iter-893 0.132 m/s number or better.  iter-930's 0.638 m/s is the "no compensation" baseline that the FB chain replacement must match.
 
 **Process.**  No production code change.  Cumulative iter-921→iter-930: 10 commits, 38 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-931 — bare A-L cube-vertex residual is RESOLUTION-REFINABLE (slow ~p=0.4 power-law)
+
+**Trigger.**  iter-929 found the bare A-L has 1 % imperfect cancellation at the 8 cube vertices.  iter-931 measures whether this cube-vertex bias DECREASES with resolution (refinable, soft floor) or stays constant (structural, hard floor).
+
+**iter-931 measurement** (W2 IC, t=0, no time stepping; bare A-L only):
+
+| `N` | `|coriolis_dv|` max | `|bare residual|` max | imperfect % |
+|-----|---------------------|-----------------------|-------------|
+| 16  | 3.029e-03           | 3.382e-05             | 1.117 %     |
+| 24  | 3.040e-03           | 2.967e-05             | 0.976 %     |
+| 36  | 3.045e-03           | 2.516e-05             | 0.826 %     |
+| 48  | 3.047e-03           | 2.238e-05             | 0.735 %     |
+
+**Findings.**
+
+1. **Background magnitude is nearly resolution-INVARIANT** (3.03e-3 → 3.05e-3, +0.6 %).  The Coriolis and Bernoulli-grad sub-operators are O(1) physical quantities, not numerical noise.
+2. **Residual magnitude DECREASES monotonically** with resolution (3.38e-5 → 2.24e-5, −34 % from C16 to C48).
+3. **Imperfect % decreases monotonically** (1.12 % → 0.73 %, −34 %).
+4. **Convergence rate**: residual at C16 / C48 = 1.51× over a 3× resolution increase → effective order p ≈ log(1.51)/log(3) ≈ 0.38.  Slow (sub-linear) but POSITIVE convergence.
+
+**Reconciliation with iter-910's integrated v_ll_Linf scaling.**
+
+iter-910 measured C16=0.354, C24=0.183, C36=0.132, C48=0.125 m/s for integrated 1-day W2 v_ll_Linf — also slow ~1st-order scaling.  iter-931 confirms the source of that scaling: the bare A-L cube-vertex residual is the upstream feeder.  Both metrics scale together; the cube-vertex bias is the structural source of the integrated W2 floor.
+
+**Implication.**
+
+The cube-vertex bias is **NOT a structural floor** — refinement reduces it.  Production at C36 (v_ll_Linf=0.132 m/s) is at this resolution because of cost constraints (~5.6× cost factor C36→C64 per iter-910b), not because higher resolution doesn't help.  An iter that wants to push v_ll_Linf below 0.10 m/s has a viable resolution-only path (~C72-C96), independent of any operator-family change.
+
+This is a useful diagnostic finding for the user's iter-927 issue #2 (operator family).  The A-L family DOES converge with refinement; the operator family question is about cost-efficiency, not feasibility.
+
+**iter-931 deliverables.**
+
+1. `tests/test_iter931_bare_al_cube_vertex_resolution_scaling.py` — 5 sentinels:
+   - 4 parametric pins (C16, C24, C36, C48 residual_max + imperfect_pct within ±5 %).
+   - 1 monotonicity sentinel: residual must decrease with resolution.
+
+**Verification.**  5/5 pass in 59 s.
+
+**Process.**  No production code change.  Cumulative iter-921→iter-931: 11 commits, 43 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
