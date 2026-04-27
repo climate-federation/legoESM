@@ -406,14 +406,11 @@ iter-938+ should instrument inside `_d_sw_native` after each substep to identify
 
 **Trigger.**  User-directed iter-938 brief: port Fortran `sw_core.F90:3527-3545` (utmp x-direction) and `3620-3639` (vtmp y-direction) cube-corner sign-flip overrides for `_d2a2c_vect`'s non-duogrid path.  Issue #7 from the user's iter-927 audit explicitly identified this as a "NOT PORTED" gap.
 
-**iter-938 deliverables.**
+**iter-938 deliverables (initial; ALL items reflect the iter-938 commit; iter-938b removed the kwarg + the two no-longer-relevant tests — see iter-938b entry below for the live state).**
 
-1. `src/legoesm/core/fv3_sw_core.py:_apply_fortran_d2a2c_corner_overrides` — new helper that applies the 16 utmp/vtmp halo-cell overrides at the 4 cube corners.  With our halo=2 reach, the helper ports the 2 deepest cells per corner per axis (Fortran writes 3; the third is at depth-3 outside our halo).
-2. `src/legoesm/core/fv3_sw_core.py:_d2a2c_vect` — new kwarg `apply_fortran_corner_overrides: bool = False`.  Default-OFF preserves bit-identical behaviour for existing callers.
-3. `tests/test_iter938_d2a2c_corner_overrides.py` — 10 sentinels:
-   - 8 sign-flip mapping pins (2 cells × 4 corners × 2 axes — utmp x-dir and vtmp y-dir).
-   - 1 default-off bit-equality.
-   - 1 "currently no-op" pin documenting the incomplete-port state.
+1. `src/legoesm/core/fv3_sw_core.py:_apply_fortran_d2a2c_corner_overrides` — new helper that applies the 16 utmp/vtmp halo-cell overrides at the 4 cube corners.  With our halo=2 reach, the helper ports the 2 deepest cells per corner per axis (Fortran writes 3; the third is at depth-3 outside our halo).  KEPT in iter-938b.
+2. `src/legoesm/core/fv3_sw_core.py:_d2a2c_vect` — new kwarg `apply_fortran_corner_overrides: bool = False`.  REMOVED in iter-938b after Codex flagged the kwarg as output-dead.
+3. `tests/test_iter938_d2a2c_corner_overrides.py` — 10 sentinels at iter-938 commit (8 sign-flip mapping pins + 1 default-off bit-equality + 1 "currently no-op" pin).  REVISED to 9 sentinels in iter-938b: 8 mapping pins + 1 helper-is-pure-function pin (the bit-equality and no-op pins were removed alongside the kwarg).
 
 **Verification (iter-938 baseline; superseded by iter-938b counts below).**
 
