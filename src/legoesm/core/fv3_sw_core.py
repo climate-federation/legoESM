@@ -479,7 +479,7 @@ def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
     return utmp_pad, vtmp_pad
 
 
-def _d2a2c_vect(u_d, v_d, cdgrid, *, apply_fortran_corner_overrides=False):
+def _d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid vector conversion.
 
     Adapted from GFDL sw_core.F90 d2a2c_vect.  Returns C-grid
@@ -490,14 +490,6 @@ def _d2a2c_vect(u_d, v_d, cdgrid, *, apply_fortran_corner_overrides=False):
     FV3-faithful Duo-Grid path (``_d2a2c_vect_duogrid``) which uses
     4th-order interpolation everywhere and skips all edge/corner specials.
     This matches the ``dg%is_initialized`` branch in FV3 sw_core.F90.
-
-    Iter-938: ``apply_fortran_corner_overrides`` (default False) when
-    True (and not duogrid), applies the Fortran sw_core.F90:3527-
-    3545 + 3620-3639 cube-corner sign-flip overrides to utmp_pad/
-    vtmp_pad before computing ua/va/uc/vc/ut/vt.  This is a partial
-    port (2 deepest halo cells per corner; Fortran writes 3 — the
-    third is out of our halo=2 reach).  Default OFF preserves prior
-    behaviour bit-for-bit.
 
     Parameters
     ----------
@@ -582,13 +574,17 @@ def _d2a2c_vect(u_d, v_d, cdgrid, *, apply_fortran_corner_overrides=False):
         halo=h,
     )  # each (6, n+4, n+4)
 
-    # Iter-938: optional Fortran-faithful cube-corner sign-flip
-    # overrides on utmp_pad/vtmp_pad (sw_core.F90:3527-3545+3620-3639).
-    # Default-OFF preserves prior behaviour; flag-on closes the iter-108
-    # documented "NOT PORTED" gap for the non-duogrid path.
-    if apply_fortran_corner_overrides:
-        utmp_pad, vtmp_pad = _apply_fortran_d2a2c_corner_overrides(
-            utmp_pad, vtmp_pad, n)
+    # Iter-938 / iter-938b: the Fortran sw_core.F90:3527-3545 + 3620-
+    # 3639 cube-corner sign-flip overrides on utmp_pad/vtmp_pad are
+    # available as `_apply_fortran_d2a2c_corner_overrides(utmp_pad,
+    # vtmp_pad, n)` but are NOT wired into the main path because the
+    # downstream edge_interpolate4 j-slicing reads only interior j ∈
+    # [h, n+h-1] = padded [2, n+1], while the Fortran overrides write
+    # to padded j=1 and j=n+2 (south/north halo).  Wiring without the
+    # edge_interpolate4 j-slice extension would be output-dead (Codex
+    # iter-938 stop-time finding).  The helper + its mapping unit
+    # tests are kept as documentation of the Fortran arithmetic for
+    # iter-939+ to wire in once the edge_interpolate4 refactor lands.
 
     # ---- Step 3: Contravariant at cell centres (including halo) ----
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]

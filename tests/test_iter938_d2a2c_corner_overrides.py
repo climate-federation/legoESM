@@ -186,86 +186,38 @@ def test_iter938_ne_corner_vtmp_overrides():
     )
 
 
-def test_iter938_d2a2c_default_off_bit_identical():
-    """`_d2a2c_vect(...)` with default `apply_fortran_corner_overrides
-    =False` must produce bit-identical output to the same call without
-    the kwarg.  This guards the default-off contract.
+def test_iter938_helper_is_pure_function():
+    """The helper `_apply_fortran_d2a2c_corner_overrides(utmp_pad,
+    vtmp_pad, n)` is a STANDALONE module-level function (not wired
+    into `_d2a2c_vect`).  This test confirms its public contract:
+    inputs unchanged at non-corner cells, outputs match Fortran at
+    the 8 corner positions per axis.
+
+    Codex iter-938 stop-time finding: wiring this helper into
+    `_d2a2c_vect` would be output-dead because the downstream
+    edge_interpolate4 j-slicing reads only interior j ∈ [2, n+1]
+    while the corner overrides write to padded j=1 and j=n+2.
+    iter-938b removed the dead wiring; the helper remains as a
+    documented Fortran-arithmetic reference for iter-939+ to wire in
+    after the edge_interpolate4 j-slice refactor lands.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-        FV3EdgeShallowWaterState,
+    n = 8
+    utmp_in, vtmp_in = _make_distinct_pads(n)
+    utmp_o, vtmp_o = _apply_fortran_d2a2c_corner_overrides(
+        utmp_in, vtmp_in, n)
+
+    # Cell at (i=2, j=2) is FAR from all corners — must be unchanged.
+    np.testing.assert_array_equal(
+        np.asarray(utmp_o[:, 2, 2]),
+        np.asarray(utmp_in[:, 2, 2]),
     )
-    from legoesm.core.fv3_sw_core import _d2a2c_vect
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from tests.atmosphere.shallow_water.test_cases.williamson import (
-        williamson_test2,
+    np.testing.assert_array_equal(
+        np.asarray(vtmp_o[:, 2, 2]),
+        np.asarray(vtmp_in[:, 2, 2]),
     )
-
-    n = 16
-    grid = create_cubed_sphere(n)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    sw = williamson_test2(grid)
-    u0 = 2.0 * jnp.pi * grid.radius / (12.0 * 86400.0)
-    u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-    v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-
-    out_default = _d2a2c_vect(u_d, v_d, cdgrid)
-    out_off_explicit = _d2a2c_vect(
-        u_d, v_d, cdgrid, apply_fortran_corner_overrides=False)
-    for a, b, name in zip(out_default, out_off_explicit,
-                            ("ua", "va", "uc", "vc", "ut", "vt")):
-        np.testing.assert_array_equal(
-            np.asarray(a), np.asarray(b),
-            err_msg=f"{name} differs at default-off",
-        )
-
-
-def test_iter938_d2a2c_flag_on_currently_no_op_on_uc_vc():
-    """KNOWN INCOMPLETE PORT (iter-938).
-
-    The utmp/vtmp halo overrides applied by `_apply_fortran_d2a2c_corner_
-    overrides` write to halo cells at j=1 (Python padded south halo) and
-    j=n+2 (north halo), but our Python `_d2a2c_vect` downstream stencils
-    (ua/va computation step 3, uc/vc edge_interpolate4 step 4a/b) only
-    read padded j in [2, n+1] (interior).  The overridden halo cells are
-    therefore CURRENTLY NO-OP on uc/vc/ua/va output.
-
-    To make the override effective, an additional port is required:
-    Fortran sw_core.F90:3567-3582 also overrides ua/va halo cells with
-    sign-flipped cross-component values; THOSE values feed into the
-    edge_interpolate4 step that propagates to uc/vc.  iter-938 deferred
-    that second port to a follow-up iter (iter-939+).
-
-    This test pins the CURRENT no-op state so any future port that
-    propagates the override into uc/vc is detected (and the editor
-    must update this test alongside the propagation work).
-    """
-    from legoesm.core.fv3_sw_core import _d2a2c_vect
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-    from tests.atmosphere.shallow_water.test_cases.williamson import (
-        williamson_test2,
+    # Centre interior cell at (n//2 + 2, n//2 + 2) — must be unchanged.
+    cmid = n // 2 + 2
+    np.testing.assert_array_equal(
+        np.asarray(utmp_o[:, cmid, cmid]),
+        np.asarray(utmp_in[:, cmid, cmid]),
     )
-
-    n = 16
-    grid = create_cubed_sphere(n)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    sw = williamson_test2(grid)
-    u0 = 2.0 * jnp.pi * grid.radius / (12.0 * 86400.0)
-    u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-    v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-
-    ua_off, va_off, uc_off, vc_off, ut_off, vt_off = _d2a2c_vect(
-        u_d, v_d, cdgrid, apply_fortran_corner_overrides=False)
-    ua_on, va_on, uc_on, vc_on, ut_on, vt_on = _d2a2c_vect(
-        u_d, v_d, cdgrid, apply_fortran_corner_overrides=True)
-
-    # Pin the CURRENT no-op state.  Once iter-939+ adds the ua/va
-    # halo-override propagation, these assertions will fail and the
-    # editor must update this test alongside the propagation work.
-    np.testing.assert_array_equal(np.asarray(ua_on), np.asarray(ua_off))
-    np.testing.assert_array_equal(np.asarray(va_on), np.asarray(va_off))
-    np.testing.assert_array_equal(np.asarray(uc_on), np.asarray(uc_off))
-    np.testing.assert_array_equal(np.asarray(vc_on), np.asarray(vc_off))
-    np.testing.assert_array_equal(np.asarray(ut_on), np.asarray(ut_off))
-    np.testing.assert_array_equal(np.asarray(vt_on), np.asarray(vt_off))

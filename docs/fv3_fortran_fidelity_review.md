@@ -445,3 +445,32 @@ iter-938 closes the iter-108 documented gap STRUCTURALLY (the Fortran sign-flip 
 2. Port Fortran `sw_core.F90:3640+` va y-dir corner overrides.
 3. Re-run iter-938's "currently no-op" sentinel — it should fail with the new propagation, prompting test rebaseline.
 4. Measure: with the full `_d2a2c_vect` corner-override propagation, what's the FB chain step survival at C36?  If FB chain reaches 1 day, run W2 acceptance test.  If not, iter-935's structural growth bug is the next gate.
+
+### Iter-938b — remove dead-flag wiring (Codex iter-938 stop-time fix)
+
+**Trigger.**  Codex iter-938 stop-time review: "iter-938 adds a flag/helper that is still output-dead."  iter-938's `apply_fortran_corner_overrides=False` kwarg on `_d2a2c_vect` would invoke `_apply_fortran_d2a2c_corner_overrides`, but the downstream edge_interpolate4 j-slicing reads only interior j ∈ [2, n+1] while the corner overrides write to padded j=1 and j=n+2 (south/north halo).  Wiring without the edge_interpolate4 j-slice extension is genuinely no-op on the function output.
+
+**iter-938b fix.**
+
+1. Removed the `apply_fortran_corner_overrides` kwarg from `_d2a2c_vect`.  No more dead flag.
+2. Removed the conditional helper invocation inside `_d2a2c_vect` (was unconditionally no-op via the sliced-stencil contract).
+3. Inserted a comment block explaining why the helper is NOT wired in — points future iters at the edge_interpolate4 j-slice extension as the prerequisite.
+4. Kept `_apply_fortran_d2a2c_corner_overrides` as a module-level standalone helper (Fortran arithmetic reference).
+5. Updated tests: removed the (now-impossible) "default-off bit-equality" and "currently no-op" tests; added `test_iter938_helper_is_pure_function` that confirms the helper is a pure standalone function with the expected non-corner cells unchanged.
+
+**Verification.**
+
+- 9 helper-mapping tests + 1 pure-function test pass.  Total iter-938 tests: 10.
+- Combined with iter-921 W2 + iter-934 FB low-res sentinels: **18/18 pass in 227 s**.
+
+**Net iter-938 + iter-938b deliverable.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_apply_fortran_d2a2c_corner_overrides` — standalone helper porting Fortran sw_core.F90:3527-3545 + 3620-3639 utmp/vtmp halo cube-corner overrides (16 sign-flip writes total).
+2. `tests/test_iter938_d2a2c_corner_overrides.py` — 10 sentinels: 8 sign-flip mapping pins (4 corners × 2 axes) + 1 SW vtmp y-dir mapping pin + 1 pure-function pin.
+3. Documentation in `_d2a2c_vect` body explaining the j-slicing prerequisite for wiring this helper.
+
+The helper is structurally Fortran-faithful (mapping verified by 8 unit tests).  Wiring requires iter-939+ to extend `_d2a2c_vect`'s edge_interpolate4 j-slice to read padded j ∈ [1, n+2] (boundary halo cells), so the corner-override values reach the uc/vc output.
+
+**Cumulative iter-921→iter-938b.**
+
+20 commits, 62 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag REJECTED, iter-934 `_deln_flux` damp-factoring, iter-937/937b `_del6_vt_flux` damp-factoring × 2 implementations).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
