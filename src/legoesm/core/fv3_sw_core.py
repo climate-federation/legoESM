@@ -2410,6 +2410,10 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                 apply_legacy_d_sw5_corner_corrections))
         ke_corner = ke_corner + ke_damping
 
+    # iter-942: sync ke_corner AFTER d_sw5 KE-add and BEFORE KE-grad
+    from legoesm.grids.halo import synchronize_corner_scalar
+    ke_corner = synchronize_corner_scalar(ke_corner, cdgrid.n)
+
     # === 6. KE gradient at D-grid edge positions ===
     # FV3 d_sw6 (sw_core.F90:1935-1944):
     #   u(i,j) = vt(i,j) + ke(i,j) - ke(i+1,j) + fy(i,j)

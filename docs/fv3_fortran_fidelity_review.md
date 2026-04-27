@@ -581,3 +581,33 @@ The remaining FB chain growth at step 63 is in the d_sw6 KE-gradient stencil OR 
 3. The `_bgrid_ke_transport` operator-split sweep order (y-then-x for transported_y; x-then-y for transported_x) may differ from Fortran's order.
 
 **Process.**  Real production code change in the FB chain (helper function gate removed).  No production behavior change at default `FV3EdgeShallowWaterModel`.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-942 — `ke_corner` scalar sync after d_sw5 KE-add (FB chain 63 → 209 steps)
+
+**Trigger.**  iter-941 improved FB chain step survival from 41 → 63 steps by syncing the BGRID_NE Courant numbers.  But the d_sw6 KE-gradient (`(ke_corner[i] - ke_corner[i+1]) / dx_u`) reads `ke_corner` directly, and `ke_corner` itself is computed as `0.5 × (ubbtemp×vbbtemp + ubb×vbb)` — even with synced ubb/vbbtemp, the product carries cube-vertex inconsistency from the unsynced `ubbtemp` and `vbb` PPM transport outputs.
+
+**iter-942 fix.**  Added `ke_corner = synchronize_corner_scalar(ke_corner, n)` AFTER the d_sw5 corner-divergence KE-add and BEFORE the d_sw6 KE-gradient (`fv3_sw_core.py:_d_sw_native` step 5 → step 6).  This makes the 4 faces meeting at each cube vertex agree on the final ke_corner value used by the gradient stencil.
+
+**Cumulative FB chain step survival on W2 C36 dt=300 s** (target 1-day = 288 steps):
+
+| iter      | survived  | improvement vs baseline |
+|-----------|-----------|-------------------------|
+| baseline  | 41 steps  | —                       |
+| iter-941  | 63 steps  | +54 %                   |
+| **iter-942** | **209 steps** | **+410 %**              |
+
+Still does NOT reach 1-day stability (288 steps target) — there is at least one more contributor to FB chain growth post-iter-942.  Possible candidates for iter-943+:
+1. `_bgrid_ke_transport`'s separate scalar transports `ubbtemp` (transported_y) and `vbb` (transported_x) — these are PPM scalar outputs at corners but not vector-pair, so the BGRID_NE vector sync doesn't apply.  An attempted "treat them as vector and rotate to geo" probe at iter-942 made the FB chain WORSE (step 103 vs step 209) — confirming they need a different sync strategy.
+2. The KE-gradient stencil at face boundaries may need a Fortran-faithful one-sided formula similar to the production iter-893 PPM-boundary fix.
+3. Vorticity flux `fy_vort, fx_vort` may need their own corner sync.
+
+**Production impact.**  ZERO — same scope as iter-941 (`_d_sw_native` is FB-chain-only).  12 cross-iter sentinels (iter-921 W2 + iter-925 rest state + iter-934 FB low-res) pass post-iter-942.
+
+**iter-942 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_d_sw_native` — added `synchronize_corner_scalar(ke_corner, n)` call between step 5 (d_sw5 KE-add) and step 6 (KE-gradient).  ~3-line edit + comment block.
+2. `tests/test_iter942_ke_corner_scalar_sync.py` — 1 sentinel pinning FB chain C36 dt=300 s step survival ≥ 180 (baseline 209; tolerance ±29 steps).
+
+**Verification.**  1/1 iter-942 + 12 cross-iter sentinels pass.
+
+**Process.**  Real production code change in the FB chain (one helper call added).  No production behavior change at default `FV3EdgeShallowWaterModel`.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
