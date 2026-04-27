@@ -60,7 +60,6 @@ from legoesm.core.operators_3d import (
     hyperdiffusion_3d as _hyperdiffusion_3d,
     laplacian_compact_3d as _laplacian_compact_3d,
 )
-from legoesm.core.operators import gradient_x, gradient_y
 from legoesm.core.conservation import zero_mean_tendency
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
@@ -434,29 +433,59 @@ def fv3_hydrostatic_tendencies(
     # --- 11. Thermodynamic equation ---
     # Horizontal advection: centred advection using cell-centre velocities
     # === Stage-level packed halo exchange #2 ===
-    # Batch {T, u_cell, v_cell} into one packed exchange (SPMD or MPI)
-    # or individual exchanges (local).  Pre-padded arrays reused by
-    # gradient, Laplacian, and hyperdiffusion operators downstream.
+    # Batch {T, u_cell, v_cell, ln_ps} into one packed exchange (SPMD
+    # or MPI) or individual exchanges (local).  Pre-padded arrays
+    # reused by gradient, Laplacian, and hyperdiffusion operators
+    # downstream.
+    #
+    # Loop 189 — promote ``ln_ps`` to ``(6, n, n, 1)`` and pack it
+    # into the same packed halo exchange as ``T`` (and, when
+    # ``_needs_uv_pad``, ``u_cell`` / ``v_cell``).  This eliminates
+    # the two standalone halo exchanges that previously fired inside
+    # ``gradient_x(ln_ps)`` and ``gradient_y(ln_ps)`` (each issued
+    # its own ``pad_halo``) — they are now replaced by sliced gradients
+    # of the shared 4D padded field.  Saves 2 halo exchanges (or, on
+    # SPMD/MPI, packs ln_ps into an existing collective at the cost
+    # of ``9*4`` extra bytes per face boundary).
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
-    if _halo_backend == "spmd" and _needs_uv_pad:
-        # Mirror stage-1: SPMD packed all_gather collapses 3
-        # collectives into 1 — 3× fewer NCCL/ICI calls per timestep
-        # for the thermodynamic-equation halo set.
+    ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
+    if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import (
             packed_pad_halo_4d, _spmd_mesh,
         )
-        _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_4d(
-            T, u_cell, v_cell, mesh=_spmd_mesh,
-        )
-    elif _halo_backend == "mpi" and _needs_uv_pad:
+        if _needs_uv_pad:
+            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_4d(
+                T, u_cell, v_cell, ln_ps_3d, mesh=_spmd_mesh,
+            )
+        else:
+            _T_pad, _lnps_pad = packed_pad_halo_4d(
+                T, ln_ps_3d, mesh=_spmd_mesh,
+            )
+            _u_cc_pad = _v_cc_pad = None
+    elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_mpi_4d(
-            T, u_cell, v_cell, topology=_mpi_topology,
-        )
+        if _needs_uv_pad:
+            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+                T, u_cell, v_cell, ln_ps_3d, topology=_mpi_topology,
+            )
+        else:
+            _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+                T, ln_ps_3d, topology=_mpi_topology,
+            )
+            _u_cc_pad = _v_cc_pad = None
     else:
-        _T_pad = _pad_halo_4d(T, interp_offsets=grid.halo_interp_offsets)
+        # Local backend: stack T and ln_ps_3d into a single
+        # ``pad_halo_4d`` call so the halo arithmetic runs once on
+        # the (6, n, n, nlev+1) tensor.
+        _nlev_T = T.shape[-1]
+        _T_lnps = jnp.concatenate([T, ln_ps_3d], axis=-1)
+        _T_lnps_pad = _pad_halo_4d(
+            _T_lnps, interp_offsets=grid.halo_interp_offsets,
+        )
+        _T_pad = _T_lnps_pad[..., :_nlev_T]
+        _lnps_pad = _T_lnps_pad[..., _nlev_T:]
         if _needs_uv_pad:
             _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=grid.halo_interp_offsets)
             _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=grid.halo_interp_offsets)
@@ -468,11 +497,12 @@ def fv3_hydrostatic_tendencies(
     horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
 
     # Adiabatic heating: kappa * T * omega / p
-    # ln_ps gradient at cell centres for the v.grad(ln ps) correction
-    ln_ps_field = Field(data=ln_ps, name="ln_ps", dims=("face", "x", "y"),
-                        units="", staggering="cell")
-    dln_ps_dx = gradient_x(ln_ps_field, grid).data  # (6, n, n)
-    dln_ps_dy = gradient_y(ln_ps_field, grid).data
+    # ln_ps gradient at cell centres for the v.grad(ln ps) correction.
+    # Use the 3D variants with the shared ``_lnps_pad`` from exchange
+    # #2 — saves the two halo exchanges that the 2D ``gradient_x`` /
+    # ``gradient_y`` would otherwise fire (Loop 189).
+    dln_ps_dx = _gradient_x_3d(ln_ps_3d, grid, padded=_lnps_pad)[..., 0]  # (6, n, n)
+    dln_ps_dy = _gradient_y_3d(ln_ps_3d, grid, padded=_lnps_pad)[..., 0]
     adiabatic = kappa * T * omega / p_adiab
     v_dot_grad_lnps = u_cell * dln_ps_dx[..., None] + v_cell * dln_ps_dy[..., None]
     # In sigma coords: grad_eta(ln p) = grad(ln p_s).
