@@ -318,3 +318,57 @@ Closing #2 requires per-step instrumentation to identify which operator step (`_
 **Backlog implication.**  The user's iter-927 prohibition on `use_fv3_dsw1_mass_transport` and `split_mass_momentum` (both based on iter-904/905 catastrophic blowups at C36) is consistent with iter-935's finding: those flags route through the same operator chain that has the structural growth mode.  iter-934's fix may have improved their step-1 numerical stability, but iter-927's prohibition on default-flipping remains valid until iter-935's structural bug is found.
 
 **Process.**  No production code change.  Cumulative iter-921→iter-935: 15 commits, 52 sentinel tests, 2 production code changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-936 — VELOCITIES grow first: structural bug is in the velocity update, not mass transport
+
+**Trigger.**  iter-935 found FB chain has a structural growth mode that takes ~40 steps to manifest at C36.  iter-936 instruments per-step `h_max`, `|u_d|_max`, `|v_d|_max` to identify which field grows FIRST — pointing at which operator step has the bug.
+
+**Per-step measurement at C36, dt=300 s, default damping (d4=0.16, nord=1, damp_v=0.06):**
+
+| step | h_max  | \|u_d\|_max | \|v_d\|_max | h_excess (vs 3000 m) |
+|------|--------|-------------|-------------|----------------------|
+| 1    | 3003   | 38.6        | 27.3        | 2.8                  |
+| 10   | 3056   | 38.7        | 32.0        | 56                   |
+| 21   | 3146   | 40.2        | 60.1        | 147                  |
+| 26   | 3201   | 41.9        | 86.8        | 201                  |
+| 31   | 3263   | **92.6**    | **154.1**   | 263                  |
+| 36   | 4383   | 564         | 569         | 1383                 |
+| 39   | 10960  | 4038        | 5342        | 7956                 |
+| 40   | 2.7e6  | 3.8e5       | 3.7e5       | 2.7e6                |
+| 41   | 5.1e19 | 2.1e16      | 2.0e15      | catastrophic         |
+| 42   | NaN    |             |             |                      |
+
+**Key observation: velocities double at step 31 (|u_d| 41→93, |v_d| 87→154) BEFORE h goes out of range.**
+
+For comparison, W2 alpha=0 has analytical |u_max| = 40 m/s and |v_north| ≈ 0 m/s.  Through step 30, the FB chain's `|v_d|` already drifts to 87 m/s (in grid frame, including projection components — though some is physically expected).  At step 31 the velocities double, then explode geometrically until step 41-42.
+
+**Localisation: structural bug is in the velocity update path.**
+
+The FB chain's velocity update (`_d_sw_native`):
+
+1. `_d2a2c_vect` → ua, va, ut, vt  (D-to-A-to-C grid)
+2. `transport_step` → h (mass transport — iter-934 fixed step-1 NaN here)
+3. `_c_sw` → C-grid winds half-step
+4. `_p_grad_c` → C-grid pressure gradient
+5. `_d_sw5_corner_divergence` → KE-add at corners
+6. d_sw6 KE-gradient → D-grid wind update
+7. `vorticity_flux` (`fv_tp_2d` no-sync) → vorticity transport at edges
+8. `_del6_vt_flux` → post-step vorticity damping
+
+iter-936's finding rules out steps 1-2 (mass transport) as the load-bearing failure for the long-term instability.  The velocity-side path (steps 5-8) is where the bug lives.  Each of these steps is a candidate for iter-937+ debugging:
+
+- d_sw5 corner damping: may have float32 issues at higher d4_bg (sweep at iter-935 shows d4=0.5 fails at step 9, suggesting damping path is itself unstable)
+- d_sw6 KE-gradient: incorrect sign or scaling of `(ke[i,j] - ke[i+1,j])/dx` could create an unstable feedback loop
+- vorticity transport: iter-864 disabled the CGRID_NE flux sync to match Fortran's commented-out averaging; this might be incorrect for stability
+- del6_vt_flux post-step: same float32 overflow class as `_deln_flux` — iter-934 didn't touch this
+
+**iter-936 deliverables.**
+
+1. Per-step instrumentation in stdout (`scripts/diag_iter936_fb_velocity_growth.py` to be added if needed; the inline diagnostic in this iter is reproducible from the doc).
+2. This doc-entry localising the bug to velocity-side operators.
+
+**Verification.**  No new test added — pinning a "velocity grows first" pattern would lock in current bad behavior.  The interpretive finding is what guides the next iter's debugging target.
+
+**Backlog.**  iter-937+ should instrument inside `_d_sw_native` to track u/v after each substep (after `_p_grad_c`, after `_d_sw5_corner_divergence`, after KE-grad update, after vorticity transport, after `_del6_vt_flux`) on a few early steps and find the substep where |u|_max or |v|_max first jumps non-linearly.
+
+**Process.**  No production code change.  Cumulative iter-921→iter-936: 16 commits, 52 sentinel tests, 2 production code changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
