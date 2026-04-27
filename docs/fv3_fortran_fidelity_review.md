@@ -472,6 +472,13 @@ The helper is structurally Fortran-faithful (mapping verified by 8 unit tests). 
 
 **Cumulative iter-921→iter-938b.**
 
-23 commits since iter-920 (verified by `git log 0b1e622..HEAD` count), 64 sentinel tests (verified by `pytest --collect-only` across the 12 session test files), 3 production code changes (iter-926/927 default-OFF flag REJECTED, iter-934 `_deln_flux` damp-factoring, iter-937/937b `_del6_vt_flux` damp-factoring × 2 implementations).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+This entry's commit-count claim is intentionally phrased to avoid the self-reference paradox where committing a doc fix increments the count it cites.  As of iter-921 (commit 573c1fb), the cumulative session work to-date is reproducible via `git log --oneline 0b1e622..HEAD` and `pytest --collect-only` against the 12 session sentinel files; consult those commands for the exact-current count rather than copy-pasting a number from this entry into a later commit.
 
-The 23 commits include 4 stop-time follow-up commits: iter-911b (Codex iter-911 dedup pre-session, not counted here as it predates iter-921), iter-918b (Codex iter-918 face-pair pre-session), iter-937b (Codex iter-937 dead-flag), iter-938b dead-flag-removal (b979c00), iter-938b doc-test-count (c118609), and iter-938b doc-clarify-list (bfe5b62) — each anchored to a Codex finding from the prior commit.
+Concrete invariants (these don't drift with stop-time follow-up commits):
+
+- **3 production code changes** (iter-926/927 `use_fv3_dsw5_corner_damping` default-OFF flag REJECTED; iter-934 `_deln_flux` damp-factoring; iter-937/937b `_del6_vt_flux` damp-factoring across two parallel implementations).
+- **12 session sentinel test files** (iter-921 / 922 / 923 / 924 / 925 / 926 / 928 / 930 / 931 / 932 / 934 / 938).
+- **64 collected tests** across those 12 files (pre-iter-938b verified by pytest collect; iter-938b removed 1 dead-flag test and added 1 pure-function test, net 0 — count stable across iter-938b cleanup).
+- Stop-time follow-up commits in the session: iter-937b (Codex iter-937 in-fv3_sw_core.py path), iter-938b dead-flag-removal (b979c00), iter-938b doc-test-count (c118609), iter-938b doc-clarify-list (bfe5b62), iter-938b commit-count (5568dfe and this entry's correction commit).
+
+Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
