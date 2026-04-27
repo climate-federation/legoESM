@@ -646,11 +646,22 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
     _offs = None if _use_dg else grid.halo_interp_offsets
     _dg_arg = dg if _use_dg else None
 
-    # Step 1: initialize d2 (tp_core.F90:1253-1265)
-    if mass is None:
-        d2 = damp * q
-    else:
-        d2 = q
+    # Step 1: initialize d2 (tp_core.F90:1253-1265).
+    #
+    # Iter-934 (FB-chain low-res NaN fix): factor `damp` out of the
+    # iteration loop and apply it at Step 4 instead of Step 1.  All
+    # operations between Step 1 and Step 4 are LINEAR in `d2`, so the
+    # overall result is mathematically identical, but the intermediate
+    # `d2`/`fx2`/`fy2` arrays no longer carry the huge `damp` factor
+    # (which scales as `area^(nord+1)`).  At low resolution this is
+    # critical: at C8, `damp = (damp_c*area)^(nord+1) ≈ 4e32`; the
+    # product `damp * q * dy ≈ 1.5e42` overflows float32 (max 3.4e38)
+    # even though the final per-step damped flux is small.  Factoring
+    # damp out keeps every intermediate within float32 range.
+    #
+    # Pre-iter-934 the FB chain produced NaN in `h` at C8/C12/C16
+    # (iter-933 stability scan).  iter-934 fix: defer damp to Step 4.
+    d2 = q
 
     # Step 2: Laplacian diffusive fluxes (tp_core.F90:1270-1290, USE_SG path)
     # fx2 = 0.5*(sin_sg(i-1,j,E)+sin_sg(i,j,W)) * dy * (d2[i-1]-d2[i]) * rdxc
@@ -678,7 +689,8 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
         fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
         fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
 
-    # Step 4: Add diffusive fluxes to transport fluxes (tp_core.F90:1339-1363)
+    # Step 4: Add diffusive fluxes to transport fluxes (tp_core.F90:1339-1363).
+    # Apply `damp` here rather than at Step 1 (iter-934 float32-overflow fix).
     if mass is not None:
         mass_pad = pad_halo(mass, interp_offsets=_offs, duogrid=_dg_arg)
         mass_u = 0.5 * (mass_pad[:, :-1, 1:-1] + mass_pad[:, 1:, 1:-1])  # (6, n+1, n)
@@ -686,8 +698,8 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
         fx = fx + 0.5 * damp * mass_u * fx2
         fy = fy + 0.5 * damp * mass_v * fy2
     else:
-        fx = fx + fx2
-        fy = fy + fy2
+        fx = fx + damp * fx2
+        fy = fy + damp * fy2
 
     return fx, fy
 

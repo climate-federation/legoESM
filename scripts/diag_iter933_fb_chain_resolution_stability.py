@@ -5,7 +5,7 @@ The user's issue #8 marks `FV3FBShallowWaterModel` as experimental
 and unstable.  iter-933 quantifies WHERE the instability shows up
 by running one FB step at C8/C12/C16/C24/C36 with the same dt=300s.
 
-Result (W2 t=0, dt=300 s, FB chain Fortran defaults d4_bg=0.16, nord=1):
+Result PRE-iter-934 (W2 t=0, dt=300 s, FB defaults d4_bg=0.16, nord=1):
 
 | N   | h finite? | u finite? | v finite? |
 |-----|-----------|-----------|-----------|
@@ -15,7 +15,17 @@ Result (W2 t=0, dt=300 s, FB chain Fortran defaults d4_bg=0.16, nord=1):
 | 24  | yes       | yes       | yes       |
 | 36  | yes       | yes       | yes       |
 
-Surprising findings:
+Result POST-iter-934 (after `_deln_flux` damp-factoring fix):
+
+| N   | h finite? | u finite? | v finite? |
+|-----|-----------|-----------|-----------|
+| 8   | yes       | yes       | yes       |
+| 12  | yes       | yes       | yes       |
+| 16  | yes       | yes       | yes       |
+| 24  | yes       | yes       | yes       |
+| 36  | yes       | yes       | yes       |
+
+Surprising findings (pre-iter-934 historical context):
 
 1. FB chain is stable at C24+ but NaN at C8/C12/C16.  This is the
    OPPOSITE of typical CFL-driven instability (which fails at
@@ -122,11 +132,11 @@ def main() -> None:
         )
 
     print()
-    print("Findings:")
-    print("- FB chain stable at C24+ but NaN in `h` at C8/C12/C16.")
-    print("- Velocity tendencies (u, v) finite at all resolutions.")
-    print("- NaN is grid-size-dependent (not CFL): same dt=300s used.")
-    print("- Mass transport (PPM/transport_step) is the failing path.")
+    print("Findings (post-iter-934):")
+    print("- FB chain stable at ALL resolutions C8..C36 with iter-934 fix.")
+    print("- Pre-iter-934 NaN at C8/C12/C16 from float32 overflow in")
+    print("  `_deln_flux`'s damp*q intermediate; iter-934 factors damp")
+    print("  to the final Step 4 instead of Step 1 initialisation.")
 
 
 if __name__ == "__main__":
