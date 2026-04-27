@@ -326,8 +326,16 @@ def spectral_ocean_tendencies(
     # * 4 dmu forwards (A_vor, B_vor, vert_u_cos, vert_v_cos)      → 1
     # * 1 sh_analysis_3d for the scalar energy potential           — stays
     #
-    # 10 SH-analyses → 3.  Same trailing-axis-as-passive-batch pattern
-    # as Loops 95/98/101.
+    # Loop 188 — fold the free-surface mass-flux pair (hu_cos for oc2,
+    # hv_cos for dmu) into the same earlier batch.  Both are
+    # ``h_k * u_cos|v_cos * mask_3d`` and h_k is already computed at
+    # this point, so the inputs are cheap to construct here.  When
+    # ``A_v == 0`` this saves the two standalone ``sh_analysis_oc2_3d``
+    # / ``sh_analysis_dmu_3d`` calls in section 16; when ``A_v > 0``
+    # it shrinks the velocity-vdiff batch to (vdiff_u_cos, vdiff_v_cos)
+    # only — same total SH count there but avoids a redundant per-batch
+    # gather of the same fields.  10 SH-analyses → 3 (with hu/hv
+    # always batched in).
     A_vor = abs_vor * u_cos * mask_3d
     B_vor = abs_vor * v_cos * mask_3d
 
@@ -337,28 +345,34 @@ def spectral_ocean_tendencies(
     vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
 
     KE_cos2_masked = KE_cos2 * mask_3d
+    # Free-surface mass-flux inputs (Loop 188 — folded into the
+    # earlier batch from section 16).
+    hu_cos = h_k.real * u_cos * mask_3d
+    hv_cos = h_k.real * v_cos * mask_3d
     n_lat_o, n_lon_o, nlev_o = A_vor.shape
     _ocean_oc2_stack = jnp.stack(
-        [A_vor, B_vor, vert_u_cos, vert_v_cos, KE_cos2_masked], axis=-1,
-    )  # (..., nlev, 5)
+        [A_vor, B_vor, vert_u_cos, vert_v_cos, KE_cos2_masked, hu_cos], axis=-1,
+    )  # (..., nlev, 6)
     _ocean_dmu_stack = jnp.stack(
-        [A_vor, B_vor, vert_u_cos, vert_v_cos], axis=-1,
-    )  # (..., nlev, 4)
+        [A_vor, B_vor, vert_u_cos, vert_v_cos, hv_cos], axis=-1,
+    )  # (..., nlev, 5)
     _ocean_oc2 = sh_analysis_oc2_3d(
-        grid, _ocean_oc2_stack.reshape(n_lat_o, n_lon_o, nlev_o * 5),
-    ).reshape(-1, nlev_o, 5)
+        grid, _ocean_oc2_stack.reshape(n_lat_o, n_lon_o, nlev_o * 6),
+    ).reshape(-1, nlev_o, 6)
     _ocean_dmu = sh_analysis_dmu_3d(
-        grid, _ocean_dmu_stack.reshape(n_lat_o, n_lon_o, nlev_o * 4),
-    ).reshape(-1, nlev_o, 4)
+        grid, _ocean_dmu_stack.reshape(n_lat_o, n_lon_o, nlev_o * 5),
+    ).reshape(-1, nlev_o, 5)
     A_vor_oc2 = _ocean_oc2[..., 0]
     B_vor_oc2 = _ocean_oc2[..., 1]
     vert_u_oc2 = _ocean_oc2[..., 2]
     vert_v_oc2 = _ocean_oc2[..., 3]
     KE_oc2 = _ocean_oc2[..., 4]
+    hu_oc2 = _ocean_oc2[..., 5]
     A_vor_dmu = _ocean_dmu[..., 0]
     B_vor_dmu = _ocean_dmu[..., 1]
     vert_u_dmu = _ocean_dmu[..., 2]
     vert_v_dmu = _ocean_dmu[..., 3]
+    hv_dmu = _ocean_dmu[..., 4]
 
     flux_vor_div = im_over_a[:, jnp.newaxis] * A_vor_oc2 - one_over_a * B_vor_dmu
     flux_vor_curl = im_over_a[:, jnp.newaxis] * B_vor_oc2 + one_over_a * A_vor_dmu
@@ -470,17 +484,13 @@ def spectral_ocean_tendencies(
         if config.K_h > 0:
             dtr_hat = dtr_hat + config.K_h * lap[jnp.newaxis, ...] * tracers_hat
 
-    # --- 15-16. Velocity vertical diffusion + free-surface tendency (batched) ---
-    # When A_v > 0, the velocity-vdiff path needs oc2 of {vdiff_u_cos,
-    # vdiff_v_cos} and dmu of {vdiff_u_cos, vdiff_v_cos} — 4 SH-analyses.
-    # The free-surface flux div needs oc2(hu_cos) + dmu(hv_cos) — 2 more.
-    # Stack the inputs across both sections and run a single batched
-    # oc2 (3 inputs when A_v > 0, else 1) + a single batched dmu (3
-    # inputs when A_v > 0, else 1).  6 SH-analyses → 2 (or 2 → 2 when
-    # A_v = 0; the latter doesn't change but the structure stays
-    # consistent).
-    hu_cos = h_k.real * u_cos * mask_3d
-    hv_cos = h_k.real * v_cos * mask_3d
+    # --- 15-16. Velocity vertical diffusion + free-surface tendency ---
+    # ``hu_oc2`` and ``hv_dmu`` are now produced by the earlier batched
+    # oc2/dmu (Loop 188) — the standalone analyses that used to live
+    # in this block are gone.  When ``A_v > 0`` the velocity-vdiff
+    # vector still needs its own oc2/dmu pair (different inputs, no
+    # cheap fold into the earlier batch since vdiff requires the
+    # vertical_diffusion stencil to run first).
     if config.A_v > 0:
         vel_uv = jnp.stack([u.real, v.real], axis=0)
         vdiff_uv = jax.vmap(
@@ -493,24 +503,14 @@ def spectral_ocean_tendencies(
         vdiff_v_cos = vdiff_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
 
         n_lat_v, n_lon_v, nlev_v = vdiff_u_cos.shape
-        _vdh_oc2_stack = jnp.stack(
-            [vdiff_u_cos, vdiff_v_cos, hu_cos], axis=-1,
-        )  # (..., nlev, 3)
-        _vdh_dmu_stack = jnp.stack(
-            [vdiff_u_cos, vdiff_v_cos, hv_cos], axis=-1,
-        )
-        _vdh_oc2 = sh_analysis_oc2_3d(
-            grid, _vdh_oc2_stack.reshape(n_lat_v, n_lon_v, nlev_v * 3),
-        ).reshape(-1, nlev_v, 3)
-        _vdh_dmu = sh_analysis_dmu_3d(
-            grid, _vdh_dmu_stack.reshape(n_lat_v, n_lon_v, nlev_v * 3),
-        ).reshape(-1, nlev_v, 3)
-        vdiff_u_oc2, vdiff_v_oc2, hu_oc2 = (
-            _vdh_oc2[..., 0], _vdh_oc2[..., 1], _vdh_oc2[..., 2],
-        )
-        vdiff_u_dmu, vdiff_v_dmu, hv_dmu = (
-            _vdh_dmu[..., 0], _vdh_dmu[..., 1], _vdh_dmu[..., 2],
-        )
+        _vdh_uv_stack = jnp.stack(
+            [vdiff_u_cos, vdiff_v_cos], axis=-1,
+        )  # (..., nlev, 2)
+        _vdh_uv_flat = _vdh_uv_stack.reshape(n_lat_v, n_lon_v, nlev_v * 2)
+        _vdh_oc2 = sh_analysis_oc2_3d(grid, _vdh_uv_flat).reshape(-1, nlev_v, 2)
+        _vdh_dmu = sh_analysis_dmu_3d(grid, _vdh_uv_flat).reshape(-1, nlev_v, 2)
+        vdiff_u_oc2, vdiff_v_oc2 = _vdh_oc2[..., 0], _vdh_oc2[..., 1]
+        vdiff_u_dmu, vdiff_v_dmu = _vdh_dmu[..., 0], _vdh_dmu[..., 1]
 
         dvor_hat = dvor_hat + (
             im_over_a[:, jnp.newaxis] * vdiff_v_oc2
@@ -520,9 +520,6 @@ def spectral_ocean_tendencies(
             im_over_a[:, jnp.newaxis] * vdiff_u_oc2
             - one_over_a * vdiff_v_dmu
         )
-    else:
-        hu_oc2 = sh_analysis_oc2_3d(grid, hu_cos)
-        hv_dmu = sh_analysis_dmu_3d(grid, hv_cos)
 
     # --- 16. Free-surface tendency ---
     # Use flux-form continuity explicitly: dη/dt = -sum_k div(h_k * v_k).
