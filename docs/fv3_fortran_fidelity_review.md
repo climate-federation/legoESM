@@ -401,3 +401,47 @@ iter-938+ should instrument inside `_d_sw_native` after each substep to identify
 **Verification.**  No new test added; the iter-934 sentinel and existing production W2/rest-state sentinels cover both `_deln_flux` and `_del6_vt_flux` damp paths.
 
 **Process.**  Real production code change (`_del6_vt_flux` semantics in float32; mathematically identical in float64).  Cumulative iter-921→iter-937: 17 commits, 52 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag REJECTED, iter-934 `_deln_flux` damp-factoring, iter-937 `_del6_vt_flux` damp-factoring).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-938 — Fortran d2a2c_vect cube-corner sign-flip helper (structurally correct, currently no-op)
+
+**Trigger.**  User-directed iter-938 brief: port Fortran `sw_core.F90:3527-3545` (utmp x-direction) and `3620-3639` (vtmp y-direction) cube-corner sign-flip overrides for `_d2a2c_vect`'s non-duogrid path.  Issue #7 from the user's iter-927 audit explicitly identified this as a "NOT PORTED" gap.
+
+**iter-938 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_apply_fortran_d2a2c_corner_overrides` — new helper that applies the 16 utmp/vtmp halo-cell overrides at the 4 cube corners.  With our halo=2 reach, the helper ports the 2 deepest cells per corner per axis (Fortran writes 3; the third is at depth-3 outside our halo).
+2. `src/legoesm/core/fv3_sw_core.py:_d2a2c_vect` — new kwarg `apply_fortran_corner_overrides: bool = False`.  Default-OFF preserves bit-identical behaviour for existing callers.
+3. `tests/test_iter938_d2a2c_corner_overrides.py` — 10 sentinels:
+   - 8 sign-flip mapping pins (2 cells × 4 corners × 2 axes — utmp x-dir and vtmp y-dir).
+   - 1 default-off bit-equality.
+   - 1 "currently no-op" pin documenting the incomplete-port state.
+
+**Verification.**
+
+- 13/13 pass (10 iter-938 + 3 iter-921 production).  Production W2 unchanged.
+
+**KNOWN INCOMPLETE PORT — currently no-op on `uc`/`vc` outputs.**
+
+The utmp/vtmp halo overrides write to padded `j=1` (south halo) and `j=n+2` (north halo) cells.  Our Python `_d2a2c_vect` downstream stencils (ua/va computation step 3, uc/vc edge_interpolate4 step 4a/b) read padded `j ∈ [2, n+1]` (interior only) and DO NOT read the overridden halo cells.  Therefore the helper is currently a no-op on the `(ua, va, uc, vc, ut, vt)` tuple returned to `_c_sw` / FB chain.
+
+**To make the override propagate**, a follow-up iter must ALSO port:
+- Fortran `sw_core.F90:3567-3582` ua x-dir corner overrides (writes ua at halo cells)
+- Fortran `sw_core.F90:3640+` va y-dir corner overrides (writes va at halo cells)
+
+These overrides write ua/va AT halo cells using the (corner-overridden) utmp/vtmp values, AND those halo ua/va values feed the edge_interpolate4 step that produces the boundary uc/vc.  Without the ua/va halo overrides, the corner-corrected utmp/vtmp values are dropped on the floor.
+
+**Implication for the user's iter-938 acceptance criterion** (FB chain W2 C36 1-day v_ll_Linf ≤ 0.119 m/s):
+
+Cannot be evaluated yet because:
+1. iter-938's port is intentionally limited to utmp/vtmp halo (matches the literal text of issue #7's "NOT PORTED" comment) and is currently no-op on uc/vc.
+2. iter-935 found the FB chain has a deeper structural growth mode (h explosion at step 41 on C36 1-day target of 288 steps); even with the iter-939+ ua/va propagation, the FB chain wouldn't reach 1 day.
+
+iter-938 closes the iter-108 documented gap STRUCTURALLY (the Fortran sign-flip arithmetic is now in the codebase and unit-tested) but explicitly defers the propagation refactor to iter-939+.
+
+**Process.**  Real production code addition (helper function + kwarg, default-OFF).  Cumulative iter-921→iter-938: 19 commits, 62 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag, iter-934 `_deln_flux`, iter-937/937b `_del6_vt_flux` × 2).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+**Backlog for iter-939+.**
+
+1. Port Fortran `sw_core.F90:3567-3582` ua x-dir corner overrides.
+2. Port Fortran `sw_core.F90:3640+` va y-dir corner overrides.
+3. Re-run iter-938's "currently no-op" sentinel — it should fail with the new propagation, prompting test rebaseline.
+4. Measure: with the full `_d2a2c_vect` corner-override propagation, what's the FB chain step survival at C36?  If FB chain reaches 1 day, run W2 acceptance test.  If not, iter-935's structural growth bug is the next gate.

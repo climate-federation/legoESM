@@ -409,7 +409,77 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     return ua, va, uc, vc, ut, vt
 
 
-def _d2a2c_vect(u_d, v_d, cdgrid):
+def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
+    """Iter-938 port of Fortran sw_core.F90:3527-3545 + 3620-3639
+    cube-corner sign-flip overrides on utmp_pad / vtmp_pad.
+
+    Fortran applies four corner overrides per axis (SW/SE/NE/NW),
+    each writing 3 halo cells (i=-2..0 or i=0..2) at the boundary
+    halo row/col.  Our Python pad_halo_vector(halo=2) only provides
+    2 halo cells per side, so we port the 2 deepest cells (depth
+    -1 and -0 in Fortran indexing → padded-index depth-2 and
+    depth-1).  The third Fortran cell (depth-3) is OUT of our
+    halo=2 reach and is skipped — a documented partial port.
+
+    Index map (with halo=2, padded shape (n+4, n+4)):
+      Fortran i=-1 → padded 0   (depth-2 west halo)
+      Fortran i=0  → padded 1   (depth-1 west halo)
+      Fortran i=1  → padded 2   (first interior, west boundary)
+      Fortran i=npx → padded n+2 (depth-1 east halo)
+      Fortran i=npx+1 → padded n+3 (depth-2 east halo)
+
+    The Fortran utmp/vtmp interior values are NOT modified — only
+    halo cells.  This matches our intent of correcting `pad_halo_vector`'s
+    `_fill_corners_h2` 2-point AVERAGE with Fortran's sign-flipped
+    cross-component copy at the cube vertex.
+
+    The vtmp overrides read from utmp_pad INTERIOR cells (which the
+    utmp overrides do NOT modify), so the two override blocks are
+    independent in input/output and may be applied in either order.
+
+    Parameters
+    ----------
+    utmp_pad : (6, n+4, n+4) — pad_halo_vector output
+    vtmp_pad : (6, n+4, n+4) — pad_halo_vector output
+    n : int — interior grid size
+
+    Returns
+    -------
+    utmp_pad, vtmp_pad : same shapes, with cube-vertex halo cells
+        overwritten using Fortran's sign-flip cross-component values.
+    """
+    # ---- utmp x-direction overrides (Fortran 3527-3545) ----
+    # SW corner: utmp(i=-1..0, j=0) = -vtmp(0, 1-i)
+    utmp_pad = utmp_pad.at[:, 0, 1].set(-vtmp_pad[:, 1, 3])  # i=-1
+    utmp_pad = utmp_pad.at[:, 1, 1].set(-vtmp_pad[:, 1, 2])  # i=0
+    # SE corner: utmp(npx+i, 0) = +vtmp(npx, i+1)  for i in {0, 1}
+    utmp_pad = utmp_pad.at[:, n+2, 1].set(+vtmp_pad[:, n+2, 2])
+    utmp_pad = utmp_pad.at[:, n+3, 1].set(+vtmp_pad[:, n+2, 3])
+    # NE corner: utmp(npx+i, npy) = -vtmp(npx, npy-1-i) for i in {0, 1}
+    utmp_pad = utmp_pad.at[:, n+2, n+2].set(-vtmp_pad[:, n+2, n+1])
+    utmp_pad = utmp_pad.at[:, n+3, n+2].set(-vtmp_pad[:, n+2, n])
+    # NW corner: utmp(i=-1..0, npy) = +vtmp(0, npy-1+i+1)
+    utmp_pad = utmp_pad.at[:, 0, n+2].set(+vtmp_pad[:, 1, n])     # i=-1
+    utmp_pad = utmp_pad.at[:, 1, n+2].set(+vtmp_pad[:, 1, n+1])   # i=0
+
+    # ---- vtmp y-direction overrides (Fortran 3620-3639) ----
+    # SW corner: vtmp(0, j=-1..0) = -utmp(1-j, 0)
+    vtmp_pad = vtmp_pad.at[:, 1, 0].set(-utmp_pad[:, 3, 1])  # j=-1, reads utmp(2, 0)
+    vtmp_pad = vtmp_pad.at[:, 1, 1].set(-utmp_pad[:, 2, 1])  # j=0,  reads utmp(1, 0)
+    # NW corner: vtmp(0, npy+j) = +utmp(j+1, npy)  for j in {0, 1}
+    vtmp_pad = vtmp_pad.at[:, 1, n+2].set(+utmp_pad[:, 2, n+2])
+    vtmp_pad = vtmp_pad.at[:, 1, n+3].set(+utmp_pad[:, 3, n+2])
+    # SE corner: vtmp(npx, j=-1..0) = +utmp(ie+j, 0)
+    vtmp_pad = vtmp_pad.at[:, n+2, 0].set(+utmp_pad[:, n,   1])   # j=-1 → utmp(npx-2, 0)
+    vtmp_pad = vtmp_pad.at[:, n+2, 1].set(+utmp_pad[:, n+1, 1])   # j=0  → utmp(npx-1, 0)
+    # NE corner: vtmp(npx, npy+j) = -utmp(ie-j, npy) for j in {0, 1}
+    vtmp_pad = vtmp_pad.at[:, n+2, n+2].set(-utmp_pad[:, n+1, n+2])
+    vtmp_pad = vtmp_pad.at[:, n+2, n+3].set(-utmp_pad[:, n,   n+2])
+
+    return utmp_pad, vtmp_pad
+
+
+def _d2a2c_vect(u_d, v_d, cdgrid, *, apply_fortran_corner_overrides=False):
     """FV3 D-grid → A-grid → C-grid vector conversion.
 
     Adapted from GFDL sw_core.F90 d2a2c_vect.  Returns C-grid
@@ -420,6 +490,14 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     FV3-faithful Duo-Grid path (``_d2a2c_vect_duogrid``) which uses
     4th-order interpolation everywhere and skips all edge/corner specials.
     This matches the ``dg%is_initialized`` branch in FV3 sw_core.F90.
+
+    Iter-938: ``apply_fortran_corner_overrides`` (default False) when
+    True (and not duogrid), applies the Fortran sw_core.F90:3527-
+    3545 + 3620-3639 cube-corner sign-flip overrides to utmp_pad/
+    vtmp_pad before computing ua/va/uc/vc/ut/vt.  This is a partial
+    port (2 deepest halo cells per corner; Fortran writes 3 — the
+    third is out of our halo=2 reach).  Default OFF preserves prior
+    behaviour bit-for-bit.
 
     Parameters
     ----------
@@ -503,6 +581,14 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
         interp_offsets=grid.halo_interp_offsets_h2,
         halo=h,
     )  # each (6, n+4, n+4)
+
+    # Iter-938: optional Fortran-faithful cube-corner sign-flip
+    # overrides on utmp_pad/vtmp_pad (sw_core.F90:3527-3545+3620-3639).
+    # Default-OFF preserves prior behaviour; flag-on closes the iter-108
+    # documented "NOT PORTED" gap for the non-duogrid path.
+    if apply_fortran_corner_overrides:
+        utmp_pad, vtmp_pad = _apply_fortran_d2a2c_corner_overrides(
+            utmp_pad, vtmp_pad, n)
 
     # ---- Step 3: Contravariant at cell centres (including halo) ----
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
