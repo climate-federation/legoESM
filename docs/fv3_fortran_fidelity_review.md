@@ -626,3 +626,46 @@ This is a useful diagnostic finding for the user's iter-927 issue #2 (operator f
 **Verification.**  5/5 pass in 59 s.
 
 **Process.**  No production code change.  Cumulative iter-921→iter-931: 11 commits, 43 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-932 — pin the SCOPE of iter-893's PPM boundary fix
+
+**Trigger.**  iter-925 verified iter-893 is bit-exact no-op on rest state (constants).  iter-929 found bare A-L cube-vertex 1 % imperfect cancellation.  Question: does iter-893's PPM fix leak into the velocity tendency path on a non-uniform state, or is it strictly scoped to the mass transport (`dh_dt`)?
+
+**iter-932 measurement** (W2 t=0 C36, `div_damp=0`, `boundary_fix=False` so no other production stabilizers fire):
+
+| metric                       | iter-820 (xppm=False) | iter-893 (xppm=True) | Δ                |
+|------------------------------|-----------------------|----------------------|------------------|
+| max\|du_dt\|                 | reference             | reference            | **0.0 (bit-exact)** |
+| max\|dv_dt\|                 | reference             | reference            | **0.0 (bit-exact)** |
+| max\|dh_dt\|                 | 8.53e-05              | 1.71e-04             | 8.57e-05         |
+
+**iter-893 is FULLY scoped to `dh_dt`.**  Velocity tendencies are bit-exact identical under the toggle, confirming PPM is consumed only by `cgrid_mass_flux_divergence` and not by the bare A-L Coriolis/Bernoulli-grad path.
+
+**iter-932 deliverables.**
+
+1. `tests/test_iter932_iter893_velocity_tendency_invariant.py` — 3 sentinels:
+   - `velocity_tendencies_bit_exact_under_iter893_toggle`: `du_dt`, `dv_dt` strictly bit-exact between iter-820 and iter-893 baselines.  Fires if PPM ever leaks into the velocity path.
+   - `height_tendency_does_change_under_iter893_toggle`: positive sentinel — if iter-893 silently no-ops on `dh_dt`, the flag is dead.
+   - `height_tendency_drift_within_iter932_band`: pin the iter-893 magnitude effect on `dh_dt` (8.57e-5) within ±20 %.
+
+**Verification.**  3/3 pass in 19 s.
+
+**Cumulative iter-921→iter-932 deliverables.**
+
+- 12 commits, 1 production code change (`use_fv3_dsw5_corner_damping` flag, default-OFF, REJECTED).
+- 46 sentinel tests across W2 single + Pareto + W5 multi + cosine bell + rest state + bare-AL resolution scaling + iter-893 scope.
+- 8 user-identified Fortran-fidelity gaps locked in test suite.
+- ~5 minutes total CI cost.
+
+The iter-921→iter-932 audit established the FOLLOWING about the production W2 problem:
+
+1. **Root cause** (iter-929): bare A-L 1 % imperfect cancellation at 8 cube vertices.
+2. **Resolution scaling** (iter-931): cube-vertex bias is REFINABLE (slow ~p=0.4 power-law).  Production at higher resolution would help.
+3. **Amplification chain** (iter-929): bare residual → boundary_fix spread → div_damp 7× amp.
+4. **Stabilizer dominance** (iter-930): boundary_fix is the dominant integrated stabilizer (4.8× v_ll inflation if removed).
+5. **iter-893 scope** (iter-925, iter-932): strictly mass-transport-only — bit-exact no-op on velocity path and on constant states.
+6. **Pareto trade-off** (iter-921, iter-922): iter-893 reduces v_ll Linf by 17 % at cost of h_err Linf +77 %; default is Pareto-non-dominated vs strict-Fortran variants.
+7. **d_sw5 corner damping**: REJECTED both as additive (iter-926b) and replacement (iter-927) — operator family mismatch is fundamental, can't be patched per-operator.
+8. **W5/cosine bell are unaffected** (iter-923, iter-924): the Pareto trade-off is W2-specific.
+
+Production W2 baseline at iter-893 (v_ll_Linf=0.132 m/s, h_err_max=8.18 m) unchanged throughout.
