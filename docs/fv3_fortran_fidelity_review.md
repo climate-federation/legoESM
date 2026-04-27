@@ -669,3 +669,39 @@ The iter-921→iter-932 audit established the FOLLOWING about the production W2 
 8. **W5/cosine bell are unaffected** (iter-923, iter-924): the Pareto trade-off is W2-specific.
 
 Production W2 baseline at iter-893 (v_ll_Linf=0.132 m/s, h_err_max=8.18 m) unchanged throughout.
+
+### Iter-933 — FB chain stability scan: NaN at C8/C12/C16, stable at C24+
+
+**Trigger.**  User issue #8 marks `FV3FBShallowWaterModel` as experimental and unstable.  iter-933 quantifies WHERE the instability shows up by running one FB step at C8/C12/C16/C24/C36 with the same `dt=300 s`.
+
+**iter-933 measurement** (W2 t=0, dt=300 s, FB Fortran defaults d4_bg=0.16, nord=1):
+
+| `N` | `h` finite | `u_d` finite | `v_d` finite |
+|-----|------------|--------------|--------------|
+| 8   | **NO (NaN)** | yes        | yes          |
+| 12  | **NO (NaN)** | yes        | yes          |
+| 16  | **NO (NaN)** | yes        | yes          |
+| 24  | yes          | yes        | yes          |
+| 36  | yes          | yes        | yes          |
+
+**Surprising findings.**
+
+1. **FB chain is stable at C24+ but produces NaN at C8/C12/C16.**  This is the OPPOSITE of typical CFL-driven instability (which fails at high resolution under fixed dt).
+2. **The NaN is in `h` only** (mass transport), NOT in `u_d` or `v_d` (velocity tendencies).  Velocity computation handles low resolution fine — `u_max` and `v_max` are O(40) m/s at all resolutions.
+3. **Grid-size-dependent, not time-step-dependent.**  Same `dt=300 s` across all resolutions; only the grid spacing changes.
+
+**Localisation.**  The blow-up is in the mass-transport path: `_d_sw_native` → `transport_step` → `fv_tp_2d` → `_ppm_1d`.  The `_ppm_1d` boundary-cell handling becomes inadequate when `n_interior` falls below some threshold between 16 and 24.
+
+**Implication for stabilisation.**
+
+The user's iter-927 prohibition ("Do not use `use_fv3_dsw1_mass_transport` or `split_mass_momentum` as the fix; those paths already failed catastrophically") aligns with iter-933's localisation: those rejected flags use the same `transport_step` path that NaN's in the FB chain at low resolution.  The mass-transport stage is the load-bearing FB-chain failure mode.
+
+Stabilising the FB chain at low resolution → fixing `_ppm_1d` boundary handling at small `n_interior`.  This is a focused multi-iter project independent of the velocity-side operator-family work (issues #1, #2, #6).
+
+**iter-933 deliverables.**
+
+1. `scripts/diag_iter933_fb_chain_resolution_stability.py` — runnable one-step FB scan across resolutions.
+
+**Verification.**  No new test added — adding a sentinel that REQUIRES NaN at C8 would be perverse (we want the bug FIXED, not pinned).  The diagnostic provides reproducible measurement for stabilisation work.
+
+**Process.**  No production code change.  Cumulative iter-921→iter-933: 13 commits, 46 sentinel tests, 1 production code change (`use_fv3_dsw5_corner_damping` flag, default-OFF, REJECTED), 0 default-config behavior changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
