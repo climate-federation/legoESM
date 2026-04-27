@@ -372,3 +372,32 @@ iter-936's finding rules out steps 1-2 (mass transport) as the load-bearing fail
 **Backlog.**  iter-937+ should instrument inside `_d_sw_native` to track u/v after each substep (after `_p_grad_c`, after `_d_sw5_corner_divergence`, after KE-grad update, after vorticity transport, after `_del6_vt_flux`) on a few early steps and find the substep where |u|_max or |v|_max first jumps non-linearly.
 
 **Process.**  No production code change.  Cumulative iter-921→iter-936: 16 commits, 52 sentinel tests, 2 production code changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-937 — `_del6_vt_flux` defensive sibling fix; confirms post-step damp is NOT the FB bug source
+
+**Trigger.**  iter-936 localised the FB structural growth to the velocity update path (`_d_sw_native` steps 5-9).  iter-937 inspects `_del6_vt_flux` (step 9, post-step damp_v hook) — it has the IDENTICAL `d2 = damp * q` pattern that iter-934 fixed in `_deln_flux`.
+
+**Fix (iter-937).**  Apply the iter-934 pattern to `_del6_vt_flux`: factor `damp` out of the iteration, apply at the final flux output stage (`fx2 = damp * fx2`, `fy2 = damp * fy2` after the iteration loop).  Mathematically identical because all intermediate operations are linear in d2; defensively closes the sibling float32-overflow class.
+
+**Verification.**
+
+- Production W2 sentinel (iter-921) and rest-state sentinel (iter-925): **6/6 pass in 35 s**.  Bit-identical at C36 — float64 arithmetic unchanged, float32 doesn't overflow at C36 for the typical vorticity magnitude.
+- FB chain survival (iter-935 scan) re-run post-iter-937: same survival counts (49/67/84/42/41 at C8/C12/C16/C24/C36).  iter-937 does NOT improve long-term FB stability.
+
+**Implication.**
+
+`_del6_vt_flux` is NOT the load-bearing source of the structural growth mode.  The bug is in the d_sw5 / d_sw6 inner cycle (steps 5-6 of `_d_sw_native`):
+
+- Step 5: `_d_sw5_corner_divergence` (KE-add at corners with `dd8 = (da_min_c * d4_bg)^(nord+1)`).
+- Step 6: d_sw6 KE-gradient + vorticity transport via `fv_tp_2d` no-sync + D-grid wind update.
+
+iter-938+ should instrument inside `_d_sw_native` after each substep to identify which one creates the unstable mode.
+
+**iter-937 deliverables.**
+
+1. `src/legoesm/core/fv3_del6_vt_flux.py` — `_del6_vt_flux` damp-factoring fix (~6 lines).
+2. Documentation noting iter-937 ruled out post-step damp_v as the FB bug source.
+
+**Verification.**  No new test added; the iter-934 sentinel and existing production W2/rest-state sentinels cover both `_deln_flux` and `_del6_vt_flux` damp paths.
+
+**Process.**  Real production code change (`_del6_vt_flux` semantics in float32; mathematically identical in float64).  Cumulative iter-921→iter-937: 17 commits, 52 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag REJECTED, iter-934 `_deln_flux` damp-factoring, iter-937 `_del6_vt_flux` damp-factoring).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.

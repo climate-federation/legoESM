@@ -130,7 +130,19 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
         return pad_halo(field, interp_offsets=offsets, duogrid=dg)
 
     # Step 1: initial damping.
-    d2 = damp * q                                    # (6, n, n)
+    #
+    # Iter-937 (sibling fix to iter-934's `_deln_flux` change): factor
+    # `damp` out of the iteration and apply at the final flux-output
+    # stage instead of multiplying it into `d2` here.  All operations
+    # between this point and the final return are LINEAR in d2, so
+    # the result is mathematically identical, but the intermediate
+    # `d2`/`fx2`/`fy2` arrays no longer carry the huge `damp` factor
+    # which scales as `(damp_v * area)^(nord+1)`.  At low resolution
+    # the un-factored intermediates overflow float32 (same class as
+    # iter-934).  Production at C36 is bit-identical because float64
+    # arithmetic is unchanged and float32 doesn't overflow at C36
+    # for the typical vorticity scale.
+    d2 = q                                           # (6, n, n)
 
     # First flux computation (n=0 pre-loop in Fortran).  Note sign:
     # Fortran: fx2 = del6_v * (d2(i-1,j) - d2(i,j)) initially,
@@ -182,6 +194,11 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
         d2_south = d2_pad[:, 1:-1, :-1]
         d2_north = d2_pad[:, 1:-1, 1:]
         fy2 = del6_u * (d2_north - d2_south)         # sign flipped
+
+    # Iter-937: apply the deferred `damp` factor at the final output
+    # stage.  See Step 1 comment for the float32-overflow rationale.
+    fx2 = damp * fx2
+    fy2 = damp * fy2
 
     return fx2, fy2
 
