@@ -14,12 +14,22 @@ Use git history for retired prose.
   `FV3EdgeShallowWaterModel` -> `fv3_sw_tendencies` with
   Arakawa-Lamb/RK3/`div_damp`/`boundary_fix`, not the Fortran
   FB `c_sw` -> `d_sw1/d_sw4/d_sw5/d_sw6` chain.
-- W2 C36 remains a cube-vertex/meridian `v_ll` artifact.
+- W2 C36 production remains a cube-vertex/meridian `v_ll` artifact.
   `apply_fortran_xppm_boundary=True` improved the canonical baseline
-  from `v_ll_Linf=1.585e-01` to `1.319e-01 m/s`, but did not remove
-  the structural bias.
-- FB/duogrid scaffolding exists (`halo=3`, flux sync, `d_sw*`
-  helpers), but C24/C36 accuracy and stability remain unresolved.
+  from `v_ll_Linf=1.585e-01` to `1.319e-01 m/s` (iter-893), but did
+  not remove the structural bias.  iter-921→942 added 64 sentinel
+  tests, 4 production code changes, and traced the root cause to
+  bare A-L 1 % imperfect cancellation at the 8 cube vertices
+  (iter-929; resolution-refinable per iter-931).
+- FB chain partial stabilisation (iter-940→942): step survival on
+  W2 C36 dt=300 s improved from **41 → 209 steps** (5×) via three
+  fixes: iter-934 `_deln_flux` float32-overflow factoring, iter-941
+  unconditional `BGRID_NE` corner sync, iter-942 `ke_corner` scalar
+  sync after d_sw5 KE-add.  Still NOT 1-day stable (288 step target);
+  remaining ~80 steps gap requires deeper structural debug.
+- FB/duogrid scaffolding (`halo=3`, flux sync, `d_sw*` helpers)
+  refined; C24/C36 1-day stability remains the open blocker for
+  using FB chain as the production path.
 
 ## Compact Archive
 
