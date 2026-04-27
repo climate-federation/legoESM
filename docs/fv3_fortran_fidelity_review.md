@@ -482,3 +482,25 @@ Concrete invariants (these don't drift with stop-time follow-up commits):
 - Stop-time follow-up commits in the session: iter-937b (Codex iter-937 in-fv3_sw_core.py path), iter-938b dead-flag-removal (b979c00), iter-938b doc-test-count (c118609), iter-938b doc-clarify-list (bfe5b62), iter-938b commit-count (5568dfe and this entry's correction commit).
 
 Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-939 — closure scan: float32 `damp` overflow class fully closed
+
+**Trigger.**  iter-934 (`_deln_flux`), iter-937 + iter-937b (`_del6_vt_flux` in two parallel implementations) closed three sites with the float32-overflow pattern `damp = (coeff × da_min)^(nord+1)` × `q` where the intermediate exceeds float32 max at low resolution.  iter-939 scans the codebase for any remaining sites of this class.
+
+**iter-939 scan** (`grep "** (nord+1)" src/legoesm/core/`):
+
+| site                                                          | status                                                      |
+|---------------------------------------------------------------|-------------------------------------------------------------|
+| `fv_tp_2d.py:853` (computes `damp` in `fv_tp_2d`)             | ✓ Fixed: damp passed to `_deln_flux`; iter-934 deferred multiplication. |
+| `fv3_sw_core.py:1421` (`dd8 = (da_min_c × d4_bg)^(nord+1)`)   | ✓ OK: ALREADY uses "factor at end" pattern (`dd8 × divg_d` at line 1535 after the iteration loop). |
+| `fv3_sw_core.py:2437` (`damp4 = (damp_v × da_min_c)^(nord_v+1)`) | ✓ Fixed: passed to `_del6_vt_flux` (`fv3_sw_core.py:778`); iter-937b deferred multiplication. |
+
+**Conclusion.**  All `(coeff × da_min)^(nord+1) × field` overflow sites in `src/legoesm/core/` are closed — either by iter-934/937/937b's explicit factoring fix OR by pre-existing "factor at end" structure (`_d_sw5_corner_divergence` nord>0 path).
+
+**Cross-iter sentinel verification.**  Ran 41 tests across iter-921/923/924/925/930/932/934/938 in 528 s.  41/41 pass.  Confirms iter-934/937/937b changes do not regress production W2/W5/cosine-bell/rest-state/4-way-matrix/PPM-scope/FB-low-res sentinels.
+
+**iter-939 deliverables.**  Pure verification iter.  No production code change.  No new test (existing sentinels cover all the modified paths).
+
+**Process implication.**  Closure record for the float32 `damp` overflow class.  Future iters that introduce new del-n damping operators must follow the iter-934 pattern (factor `damp` out of any iteration loop, apply at the final flux output stage) to keep the class closed at low resolution.
+
+Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
