@@ -338,18 +338,19 @@ def spectral_nh_slow_tendencies(
     # and ``rho_horiz_tend_grid`` both feed into a single sh_analysis_3d
     # but rho_horiz needs a sh_synthesis_3d on flux_rho_div first; batch
     # the two analyses into one stacked call.
+    #
+    # Loop 187 — when ``n_tracers > 0`` the tracer block (section 15)
+    # also runs an ``sh_analysis_3d(dq_grid_sum_flat)`` whose trailing
+    # axis is ``nlev*n_tracers``.  Defer the (theta_div, rho_horiz)
+    # analysis past the tracer block and ``jnp.concatenate`` all three
+    # grid inputs along the trailing axis, then run a single
+    # ``sh_analysis_3d`` — different trailing-axis sizes
+    # (``nlev*2 + nlev*n_tracers``) all flow through the same
+    # ``segment_sum + projection`` machinery.  2 SH analyses → 1 when
+    # tracers are active.  Same exploit as Loops 184/185.
     rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div) / J[..., None]
-    _theta_rho_pair = jnp.stack(
-        [theta_total * div, rho_horiz_tend_grid], axis=-1,
-    )
-    n_lat_p2, n_lon_p2, nlev_p2, _ = _theta_rho_pair.shape
-    _theta_rho_hat = sh_analysis_3d(
-        grid, _theta_rho_pair.reshape(n_lat_p2, n_lon_p2, nlev_p2 * 2),
-    ).reshape(-1, nlev_p2, 2)
-    theta_div_hat = _theta_rho_hat[..., 0]
-    drho_p_hat = _theta_rho_hat[..., 1]
-
-    dtheta_p_hat = -flux_theta_div + theta_div_hat
+    _theta_div_grid = theta_total * div
+    n_lat_p2, n_lon_p2, nlev_p2 = _theta_div_grid.shape
 
     # --- 14. w tendency (slow part) ---
     # Slow w tendency is zero: vertical PGF, buoyancy, and w-divergence are
@@ -418,13 +419,35 @@ def spectral_nh_slow_tendencies(
             q_grid_flat * div_b
             + vert_adv_q.reshape(q_grid_flat.shape)
         )
-        dq_hat_flat = -flux_q_div_flat + sh_analysis_3d(grid, dq_grid_sum_flat)
+        # Loop 187 — merge the (theta_div, rho_horiz) analysis batch
+        # (section 13) into the tracer analysis: concatenate the three
+        # grid inputs along the trailing axis and run a single
+        # ``sh_analysis_3d``.  Trailing axis = ``nlev*2 + nlev*n_tracers``.
+        _all_an_input = jnp.concatenate(
+            [_theta_div_grid, rho_horiz_tend_grid, dq_grid_sum_flat],
+            axis=-1,
+        )  # (n_lat, n_lon, nlev*(2 + n_tracers))
+        _all_an_hat = sh_analysis_3d(grid, _all_an_input)
+        theta_div_hat = _all_an_hat[:, :nlev_p2]
+        drho_p_hat = _all_an_hat[:, nlev_p2:nlev_p2 * 2]
+        dq_hat_flat = -flux_q_div_flat + _all_an_hat[:, nlev_p2 * 2:]
 
         # Restore the (n_sh, nlev, n_tracers) layout that matches
         # ``state.tracers_hat.data``.
         dtracers_hat = dq_hat_flat.reshape(n_sh_t, nlev_tr, n_tracers)
     else:
+        # No tracers — keep the (theta_div, rho_horiz) 2-batch analysis.
+        _theta_rho_pair = jnp.stack(
+            [_theta_div_grid, rho_horiz_tend_grid], axis=-1,
+        )
+        _theta_rho_hat = sh_analysis_3d(
+            grid, _theta_rho_pair.reshape(n_lat_p2, n_lon_p2, nlev_p2 * 2),
+        ).reshape(-1, nlev_p2, 2)
+        theta_div_hat = _theta_rho_hat[..., 0]
+        drho_p_hat = _theta_rho_hat[..., 1]
         dtracers_hat = jnp.zeros_like(state.tracers_hat.data)
+
+    dtheta_p_hat = -flux_theta_div + theta_div_hat
 
     # --- 16. Sponge layer damping ---
     if config.sponge_coeff > 0:
