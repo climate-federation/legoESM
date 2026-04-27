@@ -52,6 +52,7 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
     LatLonCGridOceanTendencies,
+    MomentumTendencyDiagnostics,
     LatLonCGridOceanConfig,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
@@ -275,7 +276,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     surface_forcing=None,
     sponge=None,
     dt: float = 300.0,
-) -> LatLonCGridOceanTendencies:
+    diagnose_momentum: bool = False,
+):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
     Parameters
@@ -288,10 +290,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     surface_forcing : optional
     sponge : SpongeForcing, optional
         Sponge layer relaxation fields (gamma, T_ref, S_ref, u_ref, v_ref).
+    diagnose_momentum : bool
+        If ``True``, capture each momentum-tendency component at its
+        point of computation and return a
+        ``(tendencies, MomentumTendencyDiagnostics)`` tuple instead of
+        just ``tendencies``.  Used by the budget-closure infrastructure;
+        adds memory but no recompilation.  Default ``False`` (existing
+        behavior).
 
     Returns
     -------
     LatLonCGridOceanTendencies
+        When ``diagnose_momentum`` is ``False``.
+    (LatLonCGridOceanTendencies, MomentumTendencyDiagnostics)
+        When ``diagnose_momentum`` is ``True``.  The diagnostics satisfy
+        ``Σ components == du_dt`` (and v) to machine precision.
     """
     u = state.u.data       # (n_lat, n_lon+1, nlev)
     v = state.v.data       # (n_lat+1, n_lon, nlev)
@@ -392,8 +405,36 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dKE_dy = jnp.moveaxis(dKE_dy_t, 0, -1)
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
-    du_dt = -dKE_dx - dp_dx / rho_0
-    dv_dt = -dKE_dy - dp_dy / rho_0
+    # Capture each term as a named local so the same expression feeds
+    # both the integration and the optional diagnostics path.
+    KE_PGF_u = -dKE_dx - dp_dx / rho_0
+    KE_PGF_v = -dKE_dy - dp_dy / rho_0
+    du_dt = KE_PGF_u
+    dv_dt = KE_PGF_v
+    # Diagnostics scaffolding: zero arrays for terms that may be
+    # inactive in this config; overwritten below where active.
+    _diag_zero_u = jnp.zeros_like(du_dt)
+    _diag_zero_v = jnp.zeros_like(dv_dt)
+    diag_vortcor_u = _diag_zero_u
+    diag_vortcor_v = _diag_zero_v
+    diag_vertadv_u = _diag_zero_u
+    diag_vertadv_v = _diag_zero_v
+    diag_Ah_lap_u = _diag_zero_u
+    diag_Ah_lap_v = _diag_zero_v
+    diag_Bh_bilap_u = _diag_zero_u
+    diag_Bh_bilap_v = _diag_zero_v
+    diag_Cs_smag_u = _diag_zero_u
+    diag_Cs_smag_v = _diag_zero_v
+    diag_Cl_leith_u = _diag_zero_u
+    diag_Cl_leith_v = _diag_zero_v
+    diag_botdrag_u = _diag_zero_u
+    diag_botdrag_v = _diag_zero_v
+    diag_Av_vert_u = _diag_zero_u
+    diag_Av_vert_v = _diag_zero_v
+    diag_phys_u = _diag_zero_u
+    diag_phys_v = _diag_zero_v
+    diag_sponge_u = _diag_zero_u
+    diag_sponge_v = _diag_zero_v
 
     # --- 7b. Relative vorticity flux (issue #153, revisited in #160) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + ζ × u.
@@ -436,8 +477,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
-    du_dt = du_dt + zeta_at_u * v_at_u
-    dv_dt = dv_dt - zeta_at_v * u_at_v
+    diag_vortcor_u = zeta_at_u * v_at_u
+    diag_vortcor_v = -(zeta_at_v * u_at_v)
+    du_dt = du_dt + diag_vortcor_u
+    dv_dt = dv_dt + diag_vortcor_v
 
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
     # Issue #171 Level-1 fix: use interface-upwind flux-form momentum
@@ -459,10 +502,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # baroclinic shear that the explicit A_v=1e-5 cannot.  Upgrading to
     # TVD removes this and causes blowup.  Proper fix: Richardson-number-
     # dependent mixing or KPP (issue #204), not higher-order advection.
-    du_dt = du_dt + _flux_form_vertical_momentum_advection(
+    diag_vertadv_u = _flux_form_vertical_momentum_advection(
         u_prime, w_u, h_u_old)
-    dv_dt = dv_dt + _flux_form_vertical_momentum_advection(
+    diag_vertadv_v = _flux_form_vertical_momentum_advection(
         v_prime, w_v, h_v_old)
+    du_dt = du_dt + diag_vertadv_u
+    dv_dt = dv_dt + diag_vertadv_v
 
     # --- 9. Tracer tendencies (diffusion + physics only) ---
     # Horizontal AND vertical tracer advection are handled in the step()
@@ -514,8 +559,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        du_dt = du_dt + config.A_h * vlap_u
-        dv_dt = dv_dt + config.A_h * vlap_v
+        diag_Ah_lap_u = config.A_h * vlap_u
+        diag_Ah_lap_v = config.A_h * vlap_v
+        du_dt = du_dt + diag_Ah_lap_u
+        dv_dt = dv_dt + diag_Ah_lap_v
 
     if config.B_h > 0:
         bilap_u, bilap_v = vector_bilaplacian_cgrid(
@@ -524,23 +571,29 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
         # CFL violation near poles where dx shrinks (MOM6 convention).
         scale_u, scale_v = biharmonic_scaling_factor(grid)
-        du_dt = du_dt - config.B_h * scale_u[:, None, None] * bilap_u
-        dv_dt = dv_dt - config.B_h * scale_v[:, None, None] * bilap_v
+        diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
+        diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+        du_dt = du_dt + diag_Bh_bilap_u
+        dv_dt = dv_dt + diag_Bh_bilap_v
 
     if config.C_smag > 0:
         smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
             u_prime, v_prime, grid, config.C_smag,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        du_dt = du_dt - smag_u
-        dv_dt = dv_dt - smag_v
+        diag_Cs_smag_u = -smag_u
+        diag_Cs_smag_v = -smag_v
+        du_dt = du_dt + diag_Cs_smag_u
+        dv_dt = dv_dt + diag_Cs_smag_v
 
     if getattr(config, "C_leith", 0.0) > 0:
         leith_u, leith_v = leith_biharmonic_tendency_cgrid(
             u_prime, v_prime, grid, config.C_leith,
             modified=getattr(config, "C_leith_modified", False),
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        du_dt = du_dt - leith_u
-        dv_dt = dv_dt - leith_v
+        diag_Cl_leith_u = -leith_u
+        diag_Cl_leith_v = -leith_v
+        du_dt = du_dt + diag_Cl_leith_u
+        dv_dt = dv_dt + diag_Cl_leith_v
 
     if config.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
@@ -548,8 +601,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
         dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
         dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
-        du_dt = du_dt.at[..., -1].add(-config.bottom_drag_r * u[..., -1] / dz_bot_u)
-        dv_dt = dv_dt.at[..., -1].add(-config.bottom_drag_r * v[..., -1] / dz_bot_v)
+        # Capture only at the bottom level; zeros elsewhere.
+        diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
+            -config.bottom_drag_r * u[..., -1] / dz_bot_u)
+        diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
+            -config.bottom_drag_r * v[..., -1] / dz_bot_v)
+        du_dt = du_dt + diag_botdrag_u
+        dv_dt = dv_dt + diag_botdrag_v
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
@@ -565,8 +623,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 z_coord.dz_ref * jac
             )
             if is_u:
+                diag_Av_vert_u = vdiff
                 du_dt = du_dt + vdiff
             else:
+                diag_Av_vert_v = vdiff
                 dv_dt = dv_dt + vdiff
 
     # --- 10b. Physics tendencies (surface forcing, bottom drag, etc.) ---
@@ -582,8 +642,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             v=state.v.replace(data=v_cell),
         )
         phys = physics_fn(cc_state, grid, z_coord, surface_forcing)
-        du_dt = du_dt + interp_cell_to_uface(phys.du_dt.data)
-        dv_dt = dv_dt + _interp_to_v_points(phys.dv_dt.data)
+        diag_phys_u = interp_cell_to_uface(phys.du_dt.data)
+        diag_phys_v = _interp_to_v_points(phys.dv_dt.data)
+        du_dt = du_dt + diag_phys_u
+        dv_dt = dv_dt + diag_phys_v
         dT_dt = dT_dt + phys.dT_dt.data
         dS_dt = dS_dt + phys.dS_dt.data
 
@@ -597,10 +659,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _dt = T.dtype
         if sponge.u_ref is not None:
             gamma_u = interp_cell_to_uface(sponge.gamma.astype(_dt))[..., jnp.newaxis]
-            du_dt = du_dt + gamma_u * (sponge.u_ref.astype(_dt) - u)
+            diag_sponge_u = gamma_u * (sponge.u_ref.astype(_dt) - u)
+            du_dt = du_dt + diag_sponge_u
         if sponge.v_ref is not None:
             gamma_v = _interp_to_v_points(sponge.gamma.astype(_dt))[..., jnp.newaxis]
-            dv_dt = dv_dt + gamma_v * (sponge.v_ref.astype(_dt) - v)
+            diag_sponge_v = gamma_v * (sponge.v_ref.astype(_dt) - v)
+            dv_dt = dv_dt + diag_sponge_v
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
@@ -616,7 +680,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
 
-    return LatLonCGridOceanTendencies(
+    tendencies = LatLonCGridOceanTendencies(
         du_dt=Field(data=du_dt, name="du_dt", dims=dims_u, units="m/s^2"),
         dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_v, units="m/s^2"),
         dT_dt=Field(data=dT_dt, name="dT_dt", dims=dims_3d, units="degC/s"),
@@ -631,5 +695,36 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             dims=dims_2d, units="1/s",
         ),
     )
+
+    if not diagnose_momentum:
+        return tendencies
+
+    # Apply the same land mask to every diagnostic component.  Because
+    # the final masking is `du_dt = du_dt * u_mask_3d` and × distributes
+    # over +, applying the mask uniformly to all components preserves
+    # ``Σ components == total`` exactly.
+    def _mu(x):
+        return Field(data=x * u_mask_3d, name="diag_u", dims=dims_u, units="m/s^2")
+    def _mv(x):
+        return Field(data=x * v_mask_3d, name="diag_v", dims=dims_v, units="m/s^2")
+
+    diagnostics = MomentumTendencyDiagnostics(
+        KE_PGF_u=_mu(KE_PGF_u),         KE_PGF_v=_mv(KE_PGF_v),
+        vortcor_u=_mu(diag_vortcor_u),  vortcor_v=_mv(diag_vortcor_v),
+        vertadv_u=_mu(diag_vertadv_u),  vertadv_v=_mv(diag_vertadv_v),
+        Ah_lap_u=_mu(diag_Ah_lap_u),    Ah_lap_v=_mv(diag_Ah_lap_v),
+        Bh_bilap_u=_mu(diag_Bh_bilap_u),Bh_bilap_v=_mv(diag_Bh_bilap_v),
+        Cs_smag_u=_mu(diag_Cs_smag_u),  Cs_smag_v=_mv(diag_Cs_smag_v),
+        Cl_leith_u=_mu(diag_Cl_leith_u),Cl_leith_v=_mv(diag_Cl_leith_v),
+        botdrag_u=_mu(diag_botdrag_u),  botdrag_v=_mv(diag_botdrag_v),
+        Av_vert_u=_mu(diag_Av_vert_u),  Av_vert_v=_mv(diag_Av_vert_v),
+        phys_u=_mu(diag_phys_u),        phys_v=_mv(diag_phys_v),
+        sponge_u=_mu(diag_sponge_u),    sponge_v=_mv(diag_sponge_v),
+        # total_u/v are the actually-applied masked tendencies — must
+        # equal Σ of the components above to machine precision.
+        total_u=Field(data=du_dt, name="total_u", dims=dims_u, units="m/s^2"),
+        total_v=Field(data=dv_dt, name="total_v", dims=dims_v, units="m/s^2"),
+    )
+    return tendencies, diagnostics
 
 

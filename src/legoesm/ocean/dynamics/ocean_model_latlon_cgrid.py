@@ -39,6 +39,9 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
 )
+from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+    barotropic_implicit_latlon_cgrid,
+)
 from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 
 
@@ -252,6 +255,24 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"salinity_min_psu ({config.salinity_min_psu}) must be "
                 f"< salinity_max_psu ({config.salinity_max_psu})")
+        _valid_solvers = {"explicit_substep", "implicit_cn"}
+        if config.barotropic_solver not in _valid_solvers:
+            raise ValueError(
+                f"barotropic_solver must be one of {_valid_solvers}, "
+                f"got {config.barotropic_solver!r}")
+        for fld in ("barotropic_implicit_theta_eta",
+                    "barotropic_implicit_theta_pgf"):
+            v = getattr(config, fld)
+            if not (0.0 <= v <= 1.0):
+                raise ValueError(f"{fld} must be in [0, 1], got {v!r}")
+        if config.barotropic_implicit_pcg_tol <= 0.0:
+            raise ValueError(
+                f"barotropic_implicit_pcg_tol must be > 0, "
+                f"got {config.barotropic_implicit_pcg_tol!r}")
+        if config.barotropic_implicit_pcg_maxiter < 1:
+            raise ValueError(
+                f"barotropic_implicit_pcg_maxiter must be >= 1, "
+                f"got {config.barotropic_implicit_pcg_maxiter!r}")
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
@@ -300,6 +321,34 @@ class LatLonCGridOceanModel:
             surface_forcing=surface_forcing,
             sponge=sponge,
             dt=dt,
+        )
+
+    def tendencies_with_diagnostics(
+        self, state: LatLonCGridOceanState, surface_forcing=None,
+        sponge=None, dt=300.0,
+    ):
+        """Compute baroclinic tendencies + per-term momentum-tendency
+        breakdown.
+
+        Returns
+        -------
+        (LatLonCGridOceanTendencies, MomentumTendencyDiagnostics)
+            The diagnostics satisfy
+            ``Σ components == du_dt`` to machine precision (verified by
+            ``tests/ocean/unit/test_momentum_diagnostics_closure.py``).
+
+        Use the returned tendencies as the start-of-step approximation
+        of what the model integrates internally; for the
+        time-mean budget this converges to the actually-applied
+        tendency at O(dt) accuracy.
+        """
+        return latlon_cgrid_ocean_baroclinic_tendencies(
+            state, self.grid, self.z_coord, self.config,
+            physics_fn=self._physics_fn,
+            surface_forcing=surface_forcing,
+            sponge=sponge,
+            dt=dt,
+            diagnose_momentum=True,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -410,8 +459,12 @@ class LatLonCGridOceanModel:
             min_water_column_m=self.config.min_water_column_m,
         )
 
-        # 6. Barotropic substeps with slow-forcing coupling
-        dt_s = dt / self.config.n_barotropic_substeps
+        # 6. Barotropic step.  Two paths:
+        #    - explicit_substep: split-explicit forward-backward substepping
+        #      with cosine/box time filter.
+        #    - implicit_cn: single-step Crank-Nicolson free surface (PCG).
+        #      Eliminates the chequerboard mode by construction; no
+        #      substepping or time filter needed.
 
         # Freshwater mass flux for barotropic continuity equation
         F_slow_eta = None
@@ -420,13 +473,23 @@ class LatLonCGridOceanModel:
                 freshwater, self.config.rho_0,
             ) * state.land_mask.data
 
-        state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
-            state_mid, dt_s, self.config.n_barotropic_substeps,
-            self.grid, self.z_coord, self.config,
-            F_slow_eta=F_slow_eta,
-            F_slow_u=F_slow_u,
-            F_slow_v=F_slow_v,
-        )
+        if self.config.barotropic_solver == "implicit_cn":
+            state_new, (Hu_avg, Hv_avg) = barotropic_implicit_latlon_cgrid(
+                state_mid, dt,
+                self.grid, self.z_coord, self.config,
+                F_slow_eta=F_slow_eta,
+                F_slow_u=F_slow_u,
+                F_slow_v=F_slow_v,
+            )
+        else:
+            dt_s = dt / self.config.n_barotropic_substeps
+            state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
+                state_mid, dt_s, self.config.n_barotropic_substeps,
+                self.grid, self.z_coord, self.config,
+                F_slow_eta=F_slow_eta,
+                F_slow_u=F_slow_u,
+                F_slow_v=F_slow_v,
+            )
 
         # 7. Flux-form tracer update using full 3D velocity
         #
