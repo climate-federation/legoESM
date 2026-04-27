@@ -504,3 +504,46 @@ Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 **Process implication.**  Closure record for the float32 `damp` overflow class.  Future iters that introduce new del-n damping operators must follow the iter-934 pattern (factor `damp` out of any iteration loop, apply at the final flux output stage) to keep the class closed at low resolution.
 
 Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-940 — localise FB chain structural growth to d_sw6 KE-gradient
+
+**Trigger.**  iter-935 found FB chain blows up at step 41 on C36 1-day target.  iter-936 found velocities grow first.  iter-940 narrows further by temporarily ZEROING individual contributions inside `_d_sw_native` and measuring step survival.
+
+**iter-940 substep probes** (W2 C36 dt=300 s):
+
+| modification                                 | survived |
+|----------------------------------------------|----------|
+| BASELINE (full FB chain)                     | 41 steps |
+| vorticity flux sync ON (was OFF per iter-864)| 41 steps |
+| `d4_bg=0` (no d_sw5 corner damping)          | 41 steps |
+| `damp_v=0` (no del6_vt post-step)            | 41 steps |
+| both off (no damping at all)                 | 41 steps |
+| `damp_v=2.0` (huge — destabilises)           |  3 steps |
+| `fy_vort=fx_vort=0` (zero vorticity flux)    | 43 steps |
+| `u_d_new = u_d` (skip d_sw6 wind update)     | **120+** |
+| `ke_diff_u/v_scaled=0` (skip KE-grad ONLY)   | **120+** |
+
+**Key finding**: zeroing the d_sw6 KE-gradient contribution (`ke_corner[i] - ke_corner[i+1]` in `fv3_sw_core.py:2397-2398`) makes the FB chain stable for 120+ steps.
+
+**Localisation conclusion**:
+- d_sw5 corner damping: ruled OUT (zeroing d4_bg doesn't help).
+- del6_vt_flux post-step: ruled OUT (zeroing damp_v doesn't help; iter-937b also fixed its overflow).
+- vorticity-flux sync: ruled OUT (toggling sync gives same 41).
+- vorticity transport: minor contributor (43 vs 41).
+- **d_sw6 KE-gradient: load-bearing structural growth source.**
+
+The bug is in either `_bgrid_ke_transport` (computes `ke_corner` at step 4) or the gradient stencil at lines 2397-2398 + 2426-2427.  Both paths converge on the cubed-sphere stagger and halo treatment.
+
+**iter-940 deliverables.**
+
+1. `scripts/diag_iter940_fb_substep_probes.py` — runnable damping sweep + documented findings of the manual probe set.
+
+**Verification.**  Code reverted to bit-identical baseline.  iter-934 sentinel (6/6) passes — no regressions.
+
+**Backlog for iter-941+.**
+
+1. Compare `_bgrid_ke_transport` against Fortran `sw_core.F90:1201-1388` (d_sw3 B-grid KE transport).  Check ke_corner staggering, halo path at cube vertices, and time integration of the KE field.
+2. Verify the gradient formula `(ke_corner[:, :-1, :] - ke_corner[:, 1:, :]) / dx_u` matches Fortran's `(ke(i,j) - ke(i+1,j))` interpretation including sign and metric scaling on a non-uniform cubed-sphere grid.
+3. Check whether ke_corner has cube-vertex halo errors that propagate through the gradient into the wind update.
+
+**Process.**  No production code change.  Pure diagnostic + localisation iter.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
