@@ -611,3 +611,34 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 **Verification.**  1/1 iter-942 + 12 cross-iter sentinels pass.
 
 **Process.**  Real production code change in the FB chain (one helper call added).  No production behavior change at default `FV3EdgeShallowWaterModel`.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-943 — negative probe iter: ubbtemp/vbb scalar sync HURTS, redundant placement is no-op
+
+**Trigger.**  iter-942 reached 209 FB chain steps but still doesn't reach 1-day (288).  iter-943 probes the remaining gap with two targeted sync attempts.
+
+**iter-943 probes** (all at C36 dt=300 s W2 1-day target):
+
+| probe                                                             | survived  |
+|-------------------------------------------------------------------|-----------|
+| iter-942 baseline (BGRID_NE + ke_corner sync after d_sw5)         | 209 steps |
+| ALSO sync `ubbtemp, vbb` AS A VECTOR (geo-frame rotation)         | 103 steps (worse) |
+| ALSO sync `ubbtemp` and `vbb` separately as scalars (no rotation) | 100 steps (worse) |
+| ALSO sync ke_corner BEFORE d_sw5 (redundant placement)            | 209 steps (no change) |
+
+**Findings.**
+
+1. `ubbtemp` (transported_y) and `vbb` (transported_x) are **separate scalar transport outputs**, not a vector pair.  Treating them as a vector and rotating to the geographic frame loses physical meaning — fails sooner.
+2. Treating each separately as a corner scalar (no rotation) ALSO fails sooner — the values from different faces have different physical meanings (face-A's transported v_d ≠ face-B's transported v_d in any common frame), so averaging them is incorrect.
+3. The pre-d_sw5 ke_corner sync is mathematically redundant because: (a) iter-942 already syncs ke_corner after d_sw5; (b) the d_sw5 ke_damping addition (`ke_corner += ke_damping`) is itself per-face inconsistent at cube vertices, so syncing `ke_corner` BEFORE d_sw5 only to have it become inconsistent again from the d_sw5 add is futile.
+
+**Implication.**  The remaining FB chain growth post-iter-942 is NOT in the corner-stagger sync; it's in another part of the d_sw chain.  Possible candidates for future iters:
+1. KE-gradient stencil at face-boundary u-edges (needs Fortran-faithful one-sided formula like iter-893 PPM-boundary).
+2. Vorticity flux corner sync.
+3. The operator-split sweep order in `_bgrid_ke_transport`.
+4. Cube-vertex halo for `ke_damping` from `_d_sw5_corner_divergence`.
+
+**iter-943 deliverables.**  None.  Pure negative-result documentation iter; revert all probes.
+
+**Verification.**  iter-942 sentinel (1/1) and production sentinels still pass post-revert.
+
+**Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
