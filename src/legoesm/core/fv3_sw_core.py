@@ -2207,8 +2207,6 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # 8 reversed seams, 4 cross-axis non-reversed seams, and the 8 cube
     # vertices.  On duogrid-enabled grids this replaces the previous
     # scalar-KE sync (Fortran commented-out alternative, dyn_core.F90:1029-1055).
-    dg = cdgrid.base.duogrid
-    use_duogrid = dg is not None and dg.ng >= 2
     # Name the intermediates to match Fortran convention:
     #   ubbtemp = ytp_v output = transported_y
     #   vbbtemp = y-Courant scalar = vb
@@ -2218,14 +2216,36 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     vbbtemp = vb
     ubb = ub
     vbb = transported_x
-    if use_duogrid:
-        from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
-        cac = cdgrid.cos_angle_corner
-        sac = cdgrid.sin_angle_corner
-        # Fortran BGRID_NE call syncs (tempfx1=ubb, tempfy1=vbbtemp) as a
-        # single vector exchange.  Route through the geographic frame.
-        ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
-            ubb, vbbtemp, cac, sac, n)
+    # Iter-941: apply the BGRID_NE corner sync UNCONDITIONALLY.
+    #
+    # Pre-iter-941 the sync was gated on `use_duogrid` (i.e., only on
+    # duogrid-active runs).  But Fortran's `mpp_get_boundary(...,
+    # gridtype=BGRID_NE)` at dyn_core.F90:968-1019 fires regardless
+    # of duogrid — it's a single-process MPI-equivalent that ensures
+    # the four faces meeting at each cube vertex agree on the (ubb,
+    # vbbtemp) values BEFORE computing KE_corner.
+    #
+    # Skipping it on non-duogrid leaves cube-vertex KE values mutually
+    # inconsistent across faces, which feeds back through the
+    # d_sw6 KE-gradient stencil into the wind update and produces an
+    # explosive growth mode (iter-940 localised this to KE-gradient).
+    # Enabling the sync improves FB chain step survival from 41 → 63
+    # steps at C36 (W2 1-day target = 288 steps; still not enough for
+    # 1-day stability but a clear partial fix).
+    #
+    # The sync helper `synchronize_bgrid_ne_corner_geo` works on
+    # (6, n+1, n+1) corner-stagger vectors and uses `cos_angle_corner`/
+    # `sin_angle_corner` which exist on both duogrid and non-duogrid
+    # grids — no duogrid-specific dependencies.
+    #
+    # Production `fv3_sw_tendencies` (FV3EdgeShallowWaterModel default)
+    # does NOT call `_d_sw_native`, so production sentinels are
+    # unchanged.
+    from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
+    cac = cdgrid.cos_angle_corner
+    sac = cdgrid.sin_angle_corner
+    ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
+        ubb, vbbtemp, cac, sac, n)
 
     # --- Step 6: KE at corners (Lin-Rood average of two sweeps) ---
     # FV3 dyn_core.F90:1013-1020:

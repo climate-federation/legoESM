@@ -547,3 +547,37 @@ The bug is in either `_bgrid_ke_transport` (computes `ke_corner` at step 4) or t
 3. Check whether ke_corner has cube-vertex halo errors that propagate through the gradient into the wind update.
 
 **Process.**  No production code change.  Pure diagnostic + localisation iter.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-941 — apply BGRID_NE corner sync UNCONDITIONALLY (FB chain 41 → 63 steps)
+
+**Trigger.**  iter-940 localised the FB chain structural growth to the d_sw6 KE-gradient.  Investigating `_bgrid_ke_transport` revealed that the `synchronize_bgrid_ne_corner_geo` corner sync (which makes the four faces meeting at each cube vertex agree on `(ubb, vbbtemp)` BEFORE computing `ke_corner`) was gated on `use_duogrid` — it ran ONLY for duogrid runs and was skipped on non-duogrid.
+
+**Fortran spec.**  `dyn_core.F90:968-1019` calls `mpp_get_boundary(... gridtype=BGRID_NE)` UNCONDITIONALLY (no duogrid gate).  This is a single-process MPI-equivalent that ensures cube-vertex agreement.
+
+**iter-941 fix.**  Removed the `if use_duogrid:` gate around the BGRID_NE sync inside `_bgrid_ke_transport` (`fv3_sw_core.py:2210+`).  The sync now fires on every FB step.
+
+**FB chain step-survival improvement** (W2 C36 dt=300 s, default damping):
+- Pre-iter-941:  **41 steps**
+- Post-iter-941: **63 steps** (+54 % improvement)
+
+The FB chain still does not reach 1-day stability (288 steps target), so iter-935's structural growth bug is NOT fully closed — there is at least one more contributor in the d_sw6 KE-gradient path (likely the cube-vertex halo of `ke_corner` itself, or the gradient stencil at face boundaries).  But iter-941 is a clear partial fix that closes one specific Fortran-fidelity gap.
+
+**Production impact.**  ZERO.  `_d_sw_native` is FB-chain-only; production `fv3_sw_tendencies` (FV3EdgeShallowWaterModel default) does NOT call this code path.  Production W2 sentinel (iter-921) and rest-state sentinel (iter-925) bit-identical post-iter-941.
+
+**iter-941 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_bgrid_ke_transport` — removed `if use_duogrid:` gate around `synchronize_bgrid_ne_corner_geo` call (~10-line edit; comment block records the Fortran spec citation and the FB step-survival measurement).
+2. `tests/test_iter941_bgrid_ne_sync_unconditional.py` — 2 sentinels:
+   - `test_iter941_fb_chain_c36_survives_at_least_60_steps`: pin the post-iter-941 step-survival at ≥ 60 (with 3-step tolerance around 63).
+   - `test_iter941_fb_chain_low_res_step1_finite`: smoke test that the BGRID_NE sync addition doesn't introduce step-1 NaN at C8/C12/C16/C24/C36 (covered by iter-934, re-checked here).
+
+**Verification.**  2/2 iter-941 + 21 cross-iter sentinels (iter-921/925/934/938) pass.  No production regression.
+
+**Backlog for iter-942+.**
+
+The remaining FB chain growth at step 63 is in the d_sw6 KE-gradient stencil OR `ke_corner` cube-vertex halo.  Per-substep instrumentation between steps 30 and 60 would identify which corner cell starts diverging first.  Possible candidates:
+1. `ke_corner` cube-vertex halo: even with BGRID_NE sync, the halo cells (j=0/n in Fortran indexing) may carry stale data feeding the gradient stencil at the boundary.
+2. The KE-gradient formula `(ke_corner[:, :-1, :] - ke_corner[:, 1:, :]) / dx_u` may have a sign or scaling bug at face-boundary u-edges.
+3. The `_bgrid_ke_transport` operator-split sweep order (y-then-x for transported_y; x-then-y for transported_x) may differ from Fortran's order.
+
+**Process.**  Real production code change in the FB chain (helper function gate removed).  No production behavior change at default `FV3EdgeShallowWaterModel`.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
