@@ -39,10 +39,10 @@ def make_mpas_ocean_physics(config) -> Callable:
     bd_config = config.bottom_drag
 
     # Warn about unsupported physics schemes that would be silently ignored.
+    # ``convection`` is handled explicitly below (supports "enhanced_diffusion").
     import warnings
     _unsupported = []
-    for attr in ("vertical_mixing", "lateral_mixing", "convection",
-                 "shortwave_penetration"):
+    for attr in ("vertical_mixing", "lateral_mixing", "shortwave_penetration"):
         sub = getattr(config, attr, None)
         if sub is not None and getattr(sub, "scheme", "none") != "none":
             _unsupported.append(f"{attr}={getattr(sub, 'scheme', '?')!r}")
@@ -67,6 +67,17 @@ def make_mpas_ocean_physics(config) -> Callable:
         )
     apply_wind_block = sf_scheme in ("prescribed", "combined")
     apply_restoring = sf_scheme in ("restoring", "combined")
+
+    conv_config = getattr(config, "convection", None)
+    conv_scheme = (conv_config.scheme
+                   if conv_config is not None else "none")
+    _supported_conv = ("none", "enhanced_diffusion")
+    if conv_scheme not in _supported_conv:
+        raise NotImplementedError(
+            f"MPAS ocean physics does not support convection scheme "
+            f"{conv_scheme!r}. Supported: {_supported_conv}."
+        )
+    apply_convection = conv_scheme == "enhanced_diffusion"
 
     # Physics-level bottom drag is deprecated — use the dynamics-level
     # ``bottom_drag_r`` field on ``MPASOceanConfig`` instead.  The
@@ -157,6 +168,25 @@ def make_mpas_ocean_physics(config) -> Callable:
             # land-cell tracer values are not driven by the restoring term.
             dT_dt = dT_dt + r_out.dT_dt * mask[:, None]
             dS_dt = dS_dt + r_out.dS_dt * mask[:, None]
+
+        # --- Convective adjustment (enhanced diffusion where N²<0) ---
+        if apply_convection:
+            from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                enhanced_diffusion_convection,
+            )
+            from legoesm.ocean.eos import compute_ocean_rho
+            cfg_c = conv_config.enhanced_diffusion
+            # Match the lat-lon convection integration: use the default
+            # (Wright) EOS for the ρ used in the static-stability check,
+            # even when the dycore is configured with linear EOS.  This
+            # is a known approximation — the EOS choice only affects the
+            # static-stability ranking, not the dycore tendencies.
+            rho = compute_ocean_rho(state, z_coord, jacobian)
+            c_out = enhanced_diffusion_convection(
+                state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+            )
+            dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
+            dS_dt = dS_dt + c_out.dS_dt * mask[:, None]
 
         return MPASOceanTendencies(
             du_dt=Field(data=du_dt, name="du_dt",

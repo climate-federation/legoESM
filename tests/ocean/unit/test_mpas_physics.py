@@ -20,11 +20,16 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm.core.field import Field
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.init_mpas import rest_state_mpas_ocean
 from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
+from legoesm.ocean.physics.convection.config import (
+    EnhancedDiffusionConfig,
+    OceanConvectionConfig,
+)
 from legoesm.ocean.physics.surface_forcing.config import (
     PrescribedForcingConfig,
     RestoringConfig,
@@ -136,3 +141,89 @@ class TestRestoringMaskApplied:
         if land_idx.size > 0:
             land_dT = tend.dT_dt.data[land_idx, 0]
             assert float(jnp.max(jnp.abs(land_dT))) == 0.0
+
+
+def _convection_physics_config(scheme: str) -> OceanPhysicsConfig:
+    return OceanPhysicsConfig(
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        convection=OceanConvectionConfig(
+            scheme=scheme,
+            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0, K_bg=1e-5),
+        ),
+    )
+
+
+def _flip_state_to_unstable(state):
+    """Invert the surface-layer T to make the column statically unstable.
+
+    Default rest_state has T_surface > T_deep (stable).  Setting the top
+    layer cooler than the second layer creates an N² < 0 condition that
+    the enhanced_diffusion branch must detect.
+    """
+    T = state.T.data.copy() if hasattr(state.T.data, "copy") else jnp.array(state.T.data)
+    T = jnp.array(state.T.data).at[:, 0].set(0.0)  # 0 °C surface
+    return state._replace(T=Field(data=T, name="T", dims=state.T.dims, units=state.T.units))
+
+
+class TestConvectionDispatch:
+    """Convective adjustment routing for ``scheme='enhanced_diffusion'``."""
+
+    def test_none_yields_zero_T_tendency(self, mesh, z_coord, state):
+        unstable = _flip_state_to_unstable(state)
+        fn = make_mpas_ocean_physics(_convection_physics_config("none"))
+        tend = fn(unstable, mesh, z_coord)
+        assert float(jnp.max(jnp.abs(tend.dT_dt.data))) == 0.0
+
+    def test_enhanced_diffusion_fires_on_unstable_column(
+        self, mesh, z_coord, state,
+    ):
+        """Surface=0°C, k=1=2°C → unstable; K_conv must mix surface+k=1."""
+        unstable = _flip_state_to_unstable(state)
+        fn = make_mpas_ocean_physics(
+            _convection_physics_config("enhanced_diffusion"))
+        tend = fn(unstable, mesh, z_coord)
+        # Some ocean cell in the surface layer must have non-zero dT/dt.
+        ocean = state.land_mask.data > 0.5
+        dT_top = tend.dT_dt.data[:, 0]
+        max_ocean_dT = float(jnp.max(jnp.abs(jnp.where(ocean, dT_top, 0.0))))
+        assert max_ocean_dT > 0.0, (
+            "enhanced_diffusion convection must produce non-zero dT/dt "
+            "on an unstable column"
+        )
+
+    def test_stable_column_no_convection(self, mesh, z_coord, state):
+        """Default rest_state is stable (T_surface=20 > T_deep=2).  With
+        K_bg=0 the only source of vertical mixing is the convection
+        branch when N²<0 — so dT/dt must be zero (or below numerical
+        noise) for a strictly stable column."""
+        cfg = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=1.0, K_bg=0.0,
+                ),
+            ),
+        )
+        fn = make_mpas_ocean_physics(cfg)
+        tend = fn(state, mesh, z_coord)
+        assert float(jnp.max(jnp.abs(tend.dT_dt.data))) < 1e-12
+
+    def test_unsupported_convection_scheme_raises(self):
+        cfg = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(scheme="none"),
+            convection=OceanConvectionConfig(scheme="plume"),
+        )
+        with pytest.raises(NotImplementedError, match="plume"):
+            make_mpas_ocean_physics(cfg)
+
+    def test_convection_respects_land_mask(self, mesh, z_coord, state):
+        unstable = _flip_state_to_unstable(state)
+        fn = make_mpas_ocean_physics(
+            _convection_physics_config("enhanced_diffusion"))
+        tend = fn(unstable, mesh, z_coord)
+        mask = state.land_mask.data
+        land_idx = jnp.where(mask < 0.5, size=mask.shape[0], fill_value=-1)[0]
+        land_idx = land_idx[land_idx >= 0]
+        if land_idx.size > 0:
+            assert float(jnp.max(jnp.abs(tend.dT_dt.data[land_idx]))) == 0.0
