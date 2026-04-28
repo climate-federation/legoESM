@@ -117,6 +117,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Short 10-day runs for smoke testing")
     p.add_argument("--recompute", action="store_true",
                    help="Recompute diagnostics from saved snapshots (no simulation)")
+    p.add_argument("--B-h", type=float, default=None,
+                   help="Override biharmonic viscosity [m^4/s]")
+    p.add_argument("--C-smag", type=float, default=None,
+                   help="Override Smagorinsky coefficient")
+    p.add_argument("--no-sponge", action="store_true",
+                   help="Disable sponge relaxation")
+    p.add_argument("--no-kpp", action="store_true",
+                   help="Disable KPP vertical mixing")
     return p
 
 
@@ -293,6 +301,8 @@ def _run_single(
     output_dir: Path,
     checkpoint_days: float,
     restart_from: str | None = None,
+    no_sponge: bool = False,
+    no_kpp: bool = False,
 ):
     """Run one Eady experiment and save all diagnostics.
 
@@ -342,7 +352,7 @@ def _run_single(
 
     # Physics
     physics = eu_forcings(grid_type, None, eu_config)
-    if grid_type == "latlon_channel":
+    if grid_type == "latlon_channel" and not no_kpp:
         from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
         physics = physics._replace(
             vertical_mixing=VerticalMixingConfig(scheme="kpp"),
@@ -420,8 +430,12 @@ def _run_single(
     extract_fn = _make_extract_fn(grid_type, grid, lon_deg, lat_deg,
                                   include_velocity_3d=True)
 
+    use_sponge = not no_sponge
+
     def step_fn(s, dt_):
         s_new = model.step(s, dt_)
+        if not use_sponge:
+            return s_new
         T_new = s_new.T.data * decay_T + T_init_jnp * (1.0 - decay_T)
         u_new = s_new.u.data * decay_u
         sponge_kw = dict(
@@ -705,9 +719,14 @@ def main():
     tracer_schemes = [s.strip() for s in args.tracer_schemes.split(",")]
     momentum_schemes = [s.strip() for s in args.momentum_schemes.split(",")]
 
-    # Build EadyUniformConfig for this regime
+    # Build EadyUniformConfig for this regime, applying CLI overrides
     from legoesm.ocean.experiments.eady_uniform import EadyUniformConfig
-    eu_config = EadyUniformConfig(U_surface=regime["U_surface"])
+    eu_kwargs = dict(U_surface=regime["U_surface"])
+    if args.B_h is not None:
+        eu_kwargs["B_h"] = args.B_h
+    if args.C_smag is not None:
+        eu_kwargs["C_smag"] = args.C_smag
+    eu_config = EadyUniformConfig(**eu_kwargs)
 
     # Print header
     print("=" * 78)
@@ -717,6 +736,10 @@ def main():
     print(f"  Duration:     {days} days")
     print(f"  Grid:         {args.grid} ({args.resolution})")
     print(f"  BT solver:    {args.barotropic_solver}")
+    print(f"  B_h:          {eu_config.B_h:.2e}")
+    print(f"  C_smag:       {eu_config.C_smag}")
+    print(f"  Sponge:       {'OFF' if args.no_sponge else 'ON'}")
+    print(f"  KPP:          {'OFF' if args.no_kpp else 'ON'}")
     print(f"  Tracer:       {', '.join(tracer_schemes)}")
     print(f"  Momentum:     {', '.join(momentum_schemes)}")
     print(f"  Ld:           {eu_config.Ld_km:.0f} km")
@@ -762,6 +785,8 @@ def main():
                     output_dir=run_dir,
                     checkpoint_days=args.checkpoint_days,
                     restart_from=args.restart_from,
+                    no_sponge=args.no_sponge,
+                    no_kpp=args.no_kpp,
                 )
             except Exception as e:
                 import traceback
