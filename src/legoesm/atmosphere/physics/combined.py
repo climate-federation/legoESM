@@ -68,6 +68,7 @@ from legoesm.atmosphere.physics.microphysics.integration import (
 from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
     make_gwd_physics,
 )
+from legoesm.atmosphere.physics.physics_state import update_physics_state
 
 
 class PhysicsConfig(NamedTuple):
@@ -137,32 +138,6 @@ def make_physics(
             f"Unknown model_type: {model_type!r}. "
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
-
-
-def _build_updated_phys_state(phys_state, updates):
-    """Build updated PhysicsState from explicitly returned field updates.
-
-    Parameters
-    ----------
-    phys_state : PhysicsState or None
-        Input physics state.  When ``None``, returns ``None``.
-    updates : dict
-        Mapping from field name ('tke', 'conv_prog', 'gwd_spectrum')
-        to the updated JAX array returned by the sub-physics function.
-
-    Returns
-    -------
-    PhysicsState or None
-    """
-    if phys_state is None:
-        return None
-    from legoesm.atmosphere.physics.physics_state import PhysicsState
-
-    return PhysicsState(
-        tke=updates.get('tke', phys_state.tke),
-        conv_prog=updates.get('conv_prog', phys_state.conv_prog),
-        gwd_spectrum=updates.get('gwd_spectrum', phys_state.gwd_spectrum),
-    )
 
 
 # ======================================================================
@@ -278,7 +253,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             dv_dt=combined_dv_dt,
             tracer_tendencies=tracer_tends_out,
         )
-        phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
+        phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
     def reset_state():
@@ -378,7 +353,7 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dphis_dt=first.dphis_dt.replace(data=dphis_dt),
             dtracers_dt=first.dtracers_dt.replace(data=dtracers_dt),
         )
-        phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
+        phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
     def reset_state():
@@ -470,7 +445,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             lnps_hat=first.lnps_hat.replace(data=lnps_hat),
             phis_hat=first.phis_hat.replace(data=phis_hat),
         )
-        phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
+        phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
     def reset_state():

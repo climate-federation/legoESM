@@ -132,3 +132,32 @@ def init_physics_state(
         conv_prog=conv_prog,
         gwd_spectrum=gwd_spectrum,
     )
+
+
+def update_physics_state(phys_state, updates):
+    """Rebuild a ``PhysicsState`` from per-field updates returned by sub-physics.
+
+    Co-located with ``PhysicsState`` and ``init_physics_state`` so that adding
+    a new prognostic field only requires editing this one module.
+
+    Parameters
+    ----------
+    phys_state : PhysicsState or None
+        Input physics state.  When ``None``, returns ``None`` (the orchestrator
+        is running without a prognostic carry).
+    updates : dict
+        Mapping from field name (``'tke'``, ``'conv_prog'``, ``'gwd_spectrum'``)
+        to the updated ``jax.Array`` returned by the sub-physics function.
+        Fields absent from the dict are carried over unchanged.
+
+    Returns
+    -------
+    PhysicsState or None
+    """
+    if phys_state is None:
+        return None
+    return PhysicsState(
+        tke=updates.get("tke", phys_state.tke),
+        conv_prog=updates.get("conv_prog", phys_state.conv_prog),
+        gwd_spectrum=updates.get("gwd_spectrum", phys_state.gwd_spectrum),
+    )
