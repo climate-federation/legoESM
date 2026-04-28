@@ -17,7 +17,7 @@ class TestRCESetup:
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.driver.component_factory import create_atmosphere_dycore
         from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
         from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
         from legoesm.atmosphere.physics.convection.config import SBMConfig
         from legoesm.atmosphere.physics.radiation.gray import gray_radiation
@@ -77,7 +77,11 @@ class TestRCESetup:
             dt=DT, config=sbm_config,
         )
         assert jnp.all(jnp.isfinite(conv.dT_dt))
-        assert conv.precipitation.shape == (ncol,)
+        # Post-Option-C: convection emits a 3D ``dq_c_conv_dt``
+        # cloud-water source instead of a scalar surface precip;
+        # microphysics owns the resulting surface-flux diagnostic.
+        assert conv.dq_c_conv_dt.shape == (ncol, NLEV)
+        assert jnp.all(conv.dq_c_conv_dt >= 0)
 
     def test_constants_used_for_freezing_point(self):
         """Verify RCE uses constants.T_freeze for land mode (not hardcoded)."""

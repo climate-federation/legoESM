@@ -227,10 +227,12 @@ def acoustic_substeps(
         )
 
         # --- Backward: update rho' using continuity ---
-        # Vertical mass flux divergence with updated w
+        # Vertical mass flux divergence with updated w; ``rho_w`` has
+        # zero at top/bottom (rigid BC).  Single Pad HLO op replaces
+        # alloc-zeros + scatter.
         rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        rho_w = jnp.zeros_like(w_new)
-        rho_w = rho_w.at[..., 1:-1].set(rho_half * w_new[..., 1:-1])
+        pad_axes_w = ((0, 0),) * (w_new.ndim - 1)
+        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
 
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
@@ -243,16 +245,20 @@ def acoustic_substeps(
         rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
         # --- Backward: update theta' using vertical w advection ---
-        # d(theta')/dt from acoustic vertical advection only
+        # d(theta')/dt from acoustic vertical advection only.
+        # ``dtheta_dz`` is zero at top/bottom (no ghost), centred in
+        # the interior; single Pad HLO op replaces alloc-zeros +
+        # scatter.
         w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
-        # Centered vertical gradient of theta_total at interior full levels
-        dtheta_dz = jnp.zeros_like(theta_total)
         nlev = theta_total.shape[-1]
         if nlev > 2:
             dz_half_val = height_coord.dz_half  # (nlev-1,)
             dz_centered = dz_half_val[:-1] + dz_half_val[1:]  # (nlev-2,)
             inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-            dtheta_dz = dtheta_dz.at[..., 1:-1].set(inner_grad)
+            pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
+            dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+        else:
+            dtheta_dz = jnp.zeros_like(theta_total)
 
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
 
@@ -392,21 +398,23 @@ def acoustic_substeps_semi_implicit(
         # alpha_k = dt_s^2 * cs2_half[k] / (dz_inner[k] * J)^2
         alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2  # (6,n,n,nlev-1)
 
-        # Sub-diagonal: -alpha (for k > 0 in interior)
-        a_tri = jnp.zeros_like(alpha)
-        a_tri = a_tri.at[..., 1:].set(-alpha[..., 1:])
+        # Sub-diagonal: 0 at k=0, -alpha for k > 0.  Single Pad HLO op
+        # replaces alloc-zeros + scatter.
+        pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
+        a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
 
-        # Main diagonal: 1 + 2*alpha (interior), adjusted at boundaries
-        # At k=0 (top interior): w[k-1] = w[0] = 0 (BC), so only +alpha from below
-        # At k=n_inner-1 (bottom interior): w[k+1] = w[nlev] = 0 (BC), so only +alpha from above
-        b_tri = 1.0 + 2.0 * alpha
-        # Boundary corrections: first row has no upper neighbor in implicit part, last row no lower
-        b_tri = b_tri.at[..., 0].set(1.0 + alpha[..., 0])
-        b_tri = b_tri.at[..., -1].set(1.0 + alpha[..., -1])
+        # Main diagonal: 1 + alpha + alpha_interior, where alpha_interior
+        # is alpha with the boundary entries zeroed.  This collapses
+        # ``b_tri = 1 + 2*alpha`` + 2 boundary scatters into 1 Pad HLO op
+        # (the slice + Pad share intermediates).
+        # At boundaries (k=0, k=-1) the implicit BC sets w_outside=0 so
+        # the diagonal is 1 + alpha; in the interior it is 1 + 2*alpha.
+        alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
+        b_tri = 1.0 + alpha + alpha_interior
 
-        # Super-diagonal: -alpha (for k < n_inner-1)
-        c_tri = jnp.zeros_like(alpha)
-        c_tri = c_tri.at[..., :-1].set(-alpha[..., :-1])
+        # Super-diagonal: -alpha for k < n_inner-1, 0 at k=-1.  Single
+        # Pad HLO op replaces alloc-zeros + scatter.
+        c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
 
         # Solve tridiagonal system
         w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
@@ -415,9 +423,11 @@ def acoustic_substeps_semi_implicit(
         w_new = w_c.at[..., 1:-1].set(w_inner_new)
 
         # --- Backward: update rho' using updated w ---
+        # ``rho_w`` has zero at top/bottom interfaces (rigid lid / rigid
+        # bottom).  Single Pad HLO op replaces alloc-zeros + scatter.
         rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        rho_w = jnp.zeros_like(w_new)
-        rho_w = rho_w.at[..., 1:-1].set(rho_half * w_new[..., 1:-1])
+        pad_axes_w = ((0, 0),) * (w_new.ndim - 1)
+        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div
@@ -426,12 +436,17 @@ def acoustic_substeps_semi_implicit(
         rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
         # --- Backward: update theta' using vertical w advection ---
+        # ``dtheta_dz`` is zero at top/bottom (one-sided would require
+        # ghost cells); centred difference fills the interior.  Single
+        # Pad HLO op replaces alloc-zeros + scatter.
         w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
-        dtheta_dz = jnp.zeros_like(theta_total)
         if nlev > 2:
             dz_centered = dz_half[:-1] + dz_half[1:]
             inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-            dtheta_dz = dtheta_dz.at[..., 1:-1].set(inner_grad)
+            pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
+            dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+        else:
+            dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
 
         return (w_new, theta_p_new, rho_p_new)

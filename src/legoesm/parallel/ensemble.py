@@ -514,10 +514,12 @@ def gather_ensemble(sharded_state: Any) -> Any:
     pytree
         State gathered to device 0.
     """
-    return jax.tree.map(
-        lambda x: jax.device_put(x, jax.devices()[0]),
-        sharded_state,
-    )
+    # Hoist ``jax.devices()`` out of the tree.map closure so the
+    # device list isn't walked once per pytree leaf.  Atmospheric
+    # state has 30+ leaves; the lookup is cheap individually but adds
+    # measurable overhead at each gather call.
+    dev0 = jax.devices()[0]
+    return jax.tree.map(lambda x: jax.device_put(x, dev0), sharded_state)
 
 
 # ============================================================================
@@ -590,16 +592,27 @@ def ensemble_spread(batched_state: Any) -> dict[str, float]:
         Field name -> RMS spread (root-mean-square of std dev).
     """
     std_state = ensemble_std(batched_state)
-    result = {}
-    if hasattr(batched_state, '_fields'):
-        for fname in batched_state._fields:
-            val = getattr(std_state, fname)
-            if val is None:
-                continue
-            if hasattr(val, 'data'):
-                val = val.data
-            result[fname] = float(jnp.sqrt(jnp.mean(val ** 2)))
-    return result
+    if not hasattr(batched_state, '_fields'):
+        return {}
+    # Stack the per-field RMS into one ``jnp.stack`` and pull host
+    # in a single transfer — replaces per-field
+    # ``float(jnp.sqrt(jnp.mean(val ** 2)))`` chain (one device→host
+    # sync per field).  Each ensemble component (T, u, v, p_s, q_v,
+    # q_c, q_r, …) was previously its own GPU stall.
+    names: list[str] = []
+    rms_terms: list[jax.Array] = []
+    for fname in batched_state._fields:
+        val = getattr(std_state, fname)
+        if val is None:
+            continue
+        if hasattr(val, 'data'):
+            val = val.data
+        names.append(fname)
+        rms_terms.append(jnp.sqrt(jnp.mean(val ** 2)))
+    if not names:
+        return {}
+    host = np.asarray(jnp.stack(rms_terms))
+    return {fname: float(host[i]) for i, fname in enumerate(names)}
 
 
 def ensemble_crps(

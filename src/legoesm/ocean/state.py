@@ -439,6 +439,9 @@ class MomentumTendencyDiagnostics(NamedTuple):
     KE_PGF_v: Field
     vortcor_u: Field
     vortcor_v: Field
+    Dterm_u: Field        # WENO momentum-advection D-term (Silvestri 2024
+    Dterm_v: Field        # Eqs. 31-32); zero unless `momentum_advection`
+                          # in {"weno5","weno7"} and `weno_d_term=True`.
     vertadv_u: Field
     vertadv_v: Field
     Ah_lap_u: Field
@@ -500,7 +503,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
-    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som"
+    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"
@@ -513,6 +516,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # keep working.
     C_leith: float = 0.0
     C_leith_modified: bool = False
+    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
+    weno_d_term: bool = True  # Include WENO D-term (divergence flux, Silvestri Eqs. 31-32).
+                              # Implemented with proper split: matching-direction divergence
+                              # is WENO-upwinded, cross-direction stays centered (Appendix C).
+                              # Set False to disable the divergent-mode dissipation.
     # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.

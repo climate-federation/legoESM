@@ -72,12 +72,13 @@ def sbm_convection(
     """
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev) layer thickness
-    tau_c = jnp.broadcast_to(jnp.asarray(config.tau_c, dtype=T.dtype), (ncol,))
-    RH_ref = jnp.broadcast_to(jnp.asarray(config.RH_ref, dtype=T.dtype), (ncol,))
-    CAPE_threshold = jnp.broadcast_to(
-        jnp.asarray(config.CAPE_threshold, dtype=T.dtype),
-        (ncol,),
-    )
+    # ``jnp.full`` lowers to a single ``Broadcast`` HLO op; the previous
+    # ``broadcast_to(jnp.asarray(scalar, dtype), shape)`` form additionally
+    # forced a ``ConvertElementType`` for the implicit promotion of the
+    # Python float, which is unnecessary work per convection step.
+    tau_c = jnp.full((ncol,), config.tau_c, dtype=T.dtype)
+    RH_ref = jnp.full((ncol,), config.RH_ref, dtype=T.dtype)
+    CAPE_threshold = jnp.full((ncol,), config.CAPE_threshold, dtype=T.dtype)
 
     # 1. Surface temperature as parcel starting point
     T_base = T[:, -1]  # (ncol,)
@@ -128,18 +129,36 @@ def sbm_convection(
     dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c[:, None]
     dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c[:, None]
 
-    # 7. Precipitation: column-integrated moisture sink
-    # precip = -sum(dq_v_dt * dp) / g, clipped >= 0
-    precipitation = jnp.clip(
-        -jnp.sum(dq_v_dt * dp, axis=1) / constants.g,
-        0.0,
-        None,
-    )  # (ncol,)
+    # 7. Convective source for cloud water: vapor that condenses at each
+    # level becomes cloud water rather than precipitating instantly.
+    # Microphysics processes this through autoconversion, sedimentation,
+    # and evaporation, and produces the surface precipitation diagnostic.
+    #
+    # Naive ``max(-dq_v_dt, 0)`` per level would *create* water
+    # column-wide whenever the relaxation has both drying and
+    # moistening layers (column-integrated dq_v + column-integrated
+    # max(-dq_v, 0) = moistening_part > 0). To preserve column water
+    # conservation we rescale the per-level condensation candidate so
+    # its column integral equals the column-net drying — this matches
+    # the legacy ``precipitation`` formula exactly. Per-level the
+    # field is still non-negative (no negative q_c production); when
+    # the column is net moistening (col_dq_v > 0) the scale is 0 and
+    # dq_c_conv_dt = 0 everywhere, mirroring the legacy
+    # ``clip(-col_dq_v, 0)`` behavior.
+    local_cond = jnp.maximum(-dq_v_dt, 0.0)
+    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
+    col_net_drying = jnp.clip(
+        -jnp.sum(dq_v_dt * dp / constants.g, axis=-1, keepdims=True),
+        0.0, None,
+    )
+    dq_c_conv_dt = local_cond * (
+        col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
+    )  # (ncol, nlev) [kg/kg/s]
 
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        precipitation=precipitation,
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=trigger,
     )

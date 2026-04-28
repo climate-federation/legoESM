@@ -80,8 +80,9 @@ def vertical_flux_divergence(
     -------
     tendency : array (..., nlev)
     """
-    z_pad = jnp.zeros((*F_z.shape[:-1], 1), dtype=F_z.dtype)
-    F_z_ext = jnp.concatenate([z_pad, F_z, z_pad], axis=-1)
+    # Single Pad HLO op (replaces alloc-zeros + concatenate of three).
+    pad_axes = ((0, 0),) * (F_z.ndim - 1)
+    F_z_ext = jnp.pad(F_z, (*pad_axes, (1, 1)))
     return (F_z_ext[..., :-1] - F_z_ext[..., 1:]) / jnp.maximum(dz_actual, eps)
 
 

@@ -193,11 +193,16 @@ class RRTMGP:
     # because halos are discarded later on, but there are places where the halos
     # of the temperature are used to determine interior values.
     def fill_halo(f: Array) -> Array:
+      # Linear extrapolation into the bottom/top halo cells.  Single
+      # concatenate-of-three replaces two scatter ops (and preserves
+      # the interior ``f[:, :, 1:-1]`` values verbatim).
       bottom_halo_val = 2 * f[:, :, 1] - f[:, :, 2]
       top_halo_val = 2 * f[:, :, -2] - f[:, :, -3]
-      f = f.at[:, :, 0].set(bottom_halo_val)
-      f = f.at[:, :, -1].set(top_halo_val)
-      return f
+      return jnp.concatenate(
+          [bottom_halo_val[..., None], f[:, :, 1:-1],
+           top_halo_val[..., None]],
+          axis=-1,
+      )
 
     temperature = fill_halo(temperature)
 

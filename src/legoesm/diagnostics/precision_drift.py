@@ -22,6 +22,9 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from legoesm import constants
 
 
 def _best_float():
@@ -97,12 +100,12 @@ def compare_states(
     total_area = jnp.sum(area)
 
     # Global mass = ∫ p_s dA / g
-    g = 9.80616
+    g = constants.g
     mass_ref = jnp.sum(ref_ps * area) / g
     mass_test = jnp.sum(test_ps * area) / g
 
     # Global energy (approximate: internal only)
-    c_p = 1004.64
+    c_p = constants.c_pd
     if sigma_coord is not None:
         dsigma = jnp.asarray(sigma_coord.dsigma, dtype=_acc)
         energy_ref = jnp.sum(
@@ -115,18 +118,36 @@ def compare_states(
         energy_ref = jnp.sum(c_p * ref_T * area[..., None]) / g
         energy_test = jnp.sum(c_p * test_T * area[..., None]) / g
 
+    # Fuse the 10 ``float(...)`` calls into a single ``jnp.stack`` +
+    # ``np.asarray`` device→host transfer.  The old per-scalar
+    # ``device_get`` chain serialised 10 GPU stalls per snapshot;
+    # ``compare_states`` is called every diagnostic interval, so this
+    # adds up.
+    _stats = jnp.stack([
+        _rms(ref_T, test_T).astype(ref_T.dtype),
+        _rms(ref_u, test_u).astype(ref_T.dtype),
+        _rms(ref_ps, test_ps).astype(ref_T.dtype),
+        _linf(ref_T, test_T).astype(ref_T.dtype),
+        _linf(ref_u, test_u).astype(ref_T.dtype),
+        _linf(ref_ps, test_ps).astype(ref_T.dtype),
+        mass_ref.astype(ref_T.dtype),
+        mass_test.astype(ref_T.dtype),
+        energy_ref.astype(ref_T.dtype),
+        energy_test.astype(ref_T.dtype),
+    ])
+    _h = np.asarray(_stats)
     return DriftSnapshot(
         step=step,
-        rms_T=float(_rms(ref_T, test_T)),
-        rms_u=float(_rms(ref_u, test_u)),
-        rms_ps=float(_rms(ref_ps, test_ps)),
-        linf_T=float(_linf(ref_T, test_T)),
-        linf_u=float(_linf(ref_u, test_u)),
-        linf_ps=float(_linf(ref_ps, test_ps)),
-        global_mass_ref=float(mass_ref),
-        global_mass_test=float(mass_test),
-        global_energy_ref=float(energy_ref),
-        global_energy_test=float(energy_test),
+        rms_T=float(_h[0]),
+        rms_u=float(_h[1]),
+        rms_ps=float(_h[2]),
+        linf_T=float(_h[3]),
+        linf_u=float(_h[4]),
+        linf_ps=float(_h[5]),
+        global_mass_ref=float(_h[6]),
+        global_mass_test=float(_h[7]),
+        global_energy_ref=float(_h[8]),
+        global_energy_test=float(_h[9]),
     )
 
 
@@ -300,11 +321,31 @@ def precision_health_report(
     v = state.v.data
     ps = state.p_s.data
 
-    # NaN/Inf check
-    has_nan = bool(jnp.any(jnp.isnan(T)) or jnp.any(jnp.isnan(u))
-                   or jnp.any(jnp.isnan(ps)))
-    has_inf = bool(jnp.any(jnp.isinf(T)) or jnp.any(jnp.isinf(u))
-                   or jnp.any(jnp.isinf(ps)))
+    # Fuse 7 reductions into one host transfer.  ``bool(jnp.any(...) or
+    # jnp.any(...))`` was triggering 6 separate device→host syncs (the
+    # Python ``or`` between traced booleans calls ``__bool__`` on each
+    # branch).  Plus 5 separate ``float(jnp.X(...))`` for T/ps/wind
+    # bounds.
+    _stats = jnp.stack([
+        (jnp.any(jnp.isnan(T)) | jnp.any(jnp.isnan(u))
+            | jnp.any(jnp.isnan(ps))).astype(T.dtype),
+        (jnp.any(jnp.isinf(T)) | jnp.any(jnp.isinf(u))
+            | jnp.any(jnp.isinf(ps))).astype(T.dtype),
+        jnp.min(T).astype(T.dtype),
+        jnp.max(T).astype(T.dtype),
+        jnp.min(ps).astype(T.dtype),
+        jnp.max(ps).astype(T.dtype),
+        jnp.max(jnp.sqrt(u ** 2 + v ** 2)).astype(T.dtype),
+    ])
+    _h = np.asarray(_stats)
+    has_nan = bool(_h[0] > 0.5)
+    has_inf = bool(_h[1] > 0.5)
+    T_min = float(_h[2])
+    T_max = float(_h[3])
+    ps_min = float(_h[4])
+    ps_max = float(_h[5])
+    wind_max = float(_h[6])
+
     metrics["has_nan"] = has_nan
     metrics["has_inf"] = has_inf
     if has_nan:
@@ -313,8 +354,6 @@ def precision_health_report(
         warnings_list.append("Inf detected in state variables")
 
     # Temperature bounds
-    T_min = float(jnp.min(T))
-    T_max = float(jnp.max(T))
     metrics["T_min"] = T_min
     metrics["T_max"] = T_max
     if T_min < T_range[0]:
@@ -323,8 +362,6 @@ def precision_health_report(
         warnings_list.append(f"T_max={T_max:.1f} K above {T_range[1]} K")
 
     # Surface pressure bounds
-    ps_min = float(jnp.min(ps))
-    ps_max = float(jnp.max(ps))
     metrics["ps_min"] = ps_min
     metrics["ps_max"] = ps_max
     if ps_min < ps_range[0]:
@@ -333,7 +370,6 @@ def precision_health_report(
         warnings_list.append(f"p_s max={ps_max:.0f} Pa above {ps_range[1]:.0f} Pa")
 
     # Wind speed
-    wind_max = float(jnp.max(jnp.sqrt(u ** 2 + v ** 2)))
     metrics["wind_max"] = wind_max
     if wind_max > max_wind:
         warnings_list.append(f"Max wind {wind_max:.1f} m/s exceeds {max_wind} m/s")
@@ -347,22 +383,25 @@ def precision_health_report(
         if cfl > cfl_limit:
             warnings_list.append(f"CFL={cfl:.3f} exceeds limit {cfl_limit}")
 
-    # Energy drift rate
+    # Energy drift rate — fuse the two energy sums into a single
+    # ``jnp.stack`` + host pull so the diagnostic costs one GPU stall
+    # instead of two.
     if state_prev is not None and grid is not None:
         _acc = _best_float()
         area = grid.area.astype(_acc)
-        c_p = 1004.64
-        g = 9.80616
-        energy_now = float(jnp.sum(
-            c_p * T.astype(_acc) * ps.astype(_acc)[..., None]
-            * area[..., None]
-        )) / g
+        c_p = constants.c_pd
+        g = constants.g
         T_prev = state_prev.T.data
         ps_prev = state_prev.p_s.data
-        energy_prev = float(jnp.sum(
-            c_p * T_prev.astype(_acc) * ps_prev.astype(_acc)[..., None]
-            * area[..., None]
-        )) / g
+        _energy_pair = jnp.stack([
+            jnp.sum(c_p * T.astype(_acc) * ps.astype(_acc)[..., None]
+                    * area[..., None]),
+            jnp.sum(c_p * T_prev.astype(_acc) * ps_prev.astype(_acc)[..., None]
+                    * area[..., None]),
+        ])
+        _eh = np.asarray(_energy_pair)
+        energy_now = float(_eh[0]) / g
+        energy_prev = float(_eh[1]) / g
         dE = abs(energy_now - energy_prev)
         dE_rel = dE / max(abs(energy_prev), 1e-30)
         # Scale to per-day rate
@@ -401,9 +440,17 @@ def check_tracer_negativity(
     -------
     dict : tracer_name -> minimum value (only for those below threshold).
     """
+    if not tracers:
+        return {}
+    # Stack the per-tracer mins into one ``jnp.stack`` and pull host
+    # in one transfer.  The previous per-tracer ``float(jnp.min(...))``
+    # serialised one device→host stall per tracer (typically 6-9
+    # tracers under full microphysics).
+    names = list(tracers.keys())
+    mins_host = np.asarray(jnp.stack([jnp.min(tracers[n]) for n in names]))
     violations = {}
-    for name, arr in tracers.items():
-        arr_min = float(jnp.min(arr))
-        if arr_min < threshold:
-            violations[name] = arr_min
+    for name, arr_min in zip(names, mins_host):
+        v = float(arr_min)
+        if v < threshold:
+            violations[name] = v
     return violations

@@ -155,16 +155,17 @@ def holtslag_boville_turbulence(
     Km_half = (1.0 - blend_pbl) * Km_profile + blend_pbl * Km_local
     Kh_half = Km_half / config.Pr_t
 
-    # Interpolate to full levels for diagnostics
-    Km_full = jnp.zeros((ncol, nlev))
-    Km_full = Km_full.at[:, 1:-1].set(0.5 * (Km_half[:, :-1] + Km_half[:, 1:]))
-    Km_full = Km_full.at[:, 0].set(Km_half[:, 0])
-    Km_full = Km_full.at[:, -1].set(Km_half[:, -1])
-
-    Kh_full = jnp.zeros((ncol, nlev))
-    Kh_full = Kh_full.at[:, 1:-1].set(0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:]))
-    Kh_full = Kh_full.at[:, 0].set(Kh_half[:, 0])
-    Kh_full = Kh_full.at[:, -1].set(Kh_half[:, -1])
+    # Interpolate to full levels for diagnostics — single concat per
+    # field instead of the previous ``zeros + 3 .at[].set`` triple
+    # scatter (XLA lowers the concat to one HLO op).
+    Km_interior = 0.5 * (Km_half[:, :-1] + Km_half[:, 1:])
+    Km_full = jnp.concatenate(
+        [Km_half[:, :1], Km_interior, Km_half[:, -1:]], axis=1,
+    )
+    Kh_interior = 0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:])
+    Kh_full = jnp.concatenate(
+        [Kh_half[:, :1], Kh_interior, Kh_half[:, -1:]], axis=1,
+    )
 
     # Layer thicknesses for diffusion
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])  # (ncol, nlev)

@@ -428,10 +428,12 @@ def validate_results(final_state, diagnostics: Dict[str, list],
     if hasattr(final_state, 'eta') and not jnp.all(jnp.isfinite(final_state.eta.data)):
         return False, "NaN/Inf detected in final eta field"
     
-    # Check for temperature blowup
+    # Check for temperature blowup — fuse min/max into one host pull.
     if hasattr(final_state, 'T'):
-        max_T = float(jnp.max(final_state.T.data))
-        min_T = float(jnp.min(final_state.T.data))
+        _t = final_state.T.data
+        _h = np.asarray(jnp.stack([jnp.max(_t), jnp.min(_t)]))
+        max_T = float(_h[0])
+        min_T = float(_h[1])
         if max_T > config.max_blowup_threshold or min_T < -config.max_blowup_threshold:
             return False, f"Temperature blowup: T_range=[{min_T:.1f}, {max_T:.1f}]°C"
     

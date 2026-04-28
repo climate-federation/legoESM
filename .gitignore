@@ -19,6 +19,9 @@ Icon?
 *.toc
 *.synctex.gz
 
+# Local reference PDFs
+docs/references/
+
 # Data and results artifacts
 *.zarr
 *.zarr/

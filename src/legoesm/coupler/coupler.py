@@ -140,10 +140,13 @@ def init_surface_state(
                            name="ice_concentration", dims=dims_2d, units="1"),
     )
 
+    # Pin lake temperatures to the same storage precision as the rest
+    # of the coupler state (sea-ice / land use ``_sd`` above) so the
+    # lake fields don't inadvertently default to f64 under x64 mode.
     lake = LakeState(
-        T_epi=Field(data=jnp.full(shape, T_epi_init),
+        T_epi=Field(data=jnp.full(shape, T_epi_init, dtype=_sd),
                     name="T_epi", dims=dims_2d, units="K"),
-        T_hypo=Field(data=jnp.full(shape, T_hypo_init),
+        T_hypo=Field(data=jnp.full(shape, T_hypo_init, dtype=_sd),
                      name="T_hypo", dims=dims_2d, units="K"),
     )
 
@@ -220,17 +223,27 @@ def ocean_tile_response(
     if not hasattr(alpha_ocean, 'shape') or alpha_ocean.shape != shape:
         alpha_ocean = jnp.broadcast_to(jnp.asarray(alpha_ocean), shape)
 
-    # Surface radiation (only lw_up needed for ocean tile response)
-    _, _, lw_up = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, ocean_sst, alpha_ocean,
-        config.ocean_emissivity,
+    # Surface upward longwave: ε σ T⁴ + (1-ε)·lw_down.  Same direct
+    # expression as the loop-11 ``two_layer_lake.py`` fix — avoids the
+    # full ``surface_radiation_fluxes`` call which recomputes
+    # ``sw_net`` and the LW balance only to discard them.
+    from legoesm import constants as _constants
+    lw_up = (
+        config.ocean_emissivity * _constants.sigma_sb * ocean_sst ** 4
+        + (1.0 - config.ocean_emissivity) * forcing.lw_down
     )
 
+    # ``jnp.full`` is one ``Broadcast`` HLO op vs the
+    # ``broadcast_to(jnp.array(scalar), shape)`` form which adds a
+    # ``ConvertElementType`` for the implicit Python-float promotion
+    # — same per-coupler-step micro-optimisation as the loop-18 lake
+    # rewrite.
+    _ssh_dtype = ocean_sst.dtype
     return TileResponse(
         T_surface=ocean_sst,
         albedo=alpha_ocean,
-        emissivity=jnp.broadcast_to(jnp.array(config.ocean_emissivity), shape),
-        z0=jnp.broadcast_to(jnp.array(config.ocean_z0), shape),
+        emissivity=jnp.full(shape, config.ocean_emissivity, dtype=_ssh_dtype),
+        z0=jnp.full(shape, config.ocean_z0, dtype=_ssh_dtype),
         q_surface=q_sfc,
         shflx=shflx,
         lhflx=lhflx,
@@ -239,7 +252,7 @@ def ocean_tile_response(
         lw_up=lw_up,
         u_ocean_sfc=ocean_u,
         v_ocean_sfc=ocean_v,
-        co2_flux=jnp.zeros(shape),
+        co2_flux=jnp.zeros(shape, dtype=_ssh_dtype),
     )
 
 

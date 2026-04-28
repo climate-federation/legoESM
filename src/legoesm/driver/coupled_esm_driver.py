@@ -470,22 +470,37 @@ class CoupledESMDriver:
         self._log_coupled_diag(day)
 
     def _log_coupled_diag(self, day):
-        """Record coupled diagnostics for this segment."""
+        """Record coupled diagnostics for this segment.
+
+        Stacks all reductions into one ``jnp.stack`` and pulls them in
+        a single ``np.asarray`` transfer.  Each ``float(jnp.X(...))``
+        was previously its own device→host sync, serialising 3-5
+        GPU stalls per coupling segment.
+        """
         sst = self._ocean_state.T_sfc.data
-        area = self._atm.grid.area if hasattr(self._atm.grid, 'area') else None
+        has_co2 = self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field')
+        has_T_sfc = self._last_sfc_response is not None
+
+        terms = [jnp.mean(sst), jnp.min(sst), jnp.max(sst)]
+        if has_co2:
+            terms.append(jnp.mean(self._co2_field))
+        if has_T_sfc:
+            terms.append(jnp.mean(self._last_sfc_response.T_surface))
+        host = np.asarray(jnp.stack(terms))
 
         diag = {
             "day": float(day),
-            "sst_mean": float(jnp.mean(sst)),
-            "sst_min": float(jnp.min(sst)),
-            "sst_max": float(jnp.max(sst)),
+            "sst_mean": float(host[0]),
+            "sst_min": float(host[1]),
+            "sst_max": float(host[2]),
         }
-        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
+        idx = 3
+        if has_co2:
             M_CO2, M_air = 44.01, 28.97
-            co2_mean = float(jnp.mean(self._co2_field)) / (M_CO2 / M_air) * 1e6
-            diag["co2_ppmv_mean"] = co2_mean
-        if self._last_sfc_response is not None:
-            diag["T_sfc_mean"] = float(jnp.mean(self._last_sfc_response.T_surface))
+            diag["co2_ppmv_mean"] = float(host[idx]) / (M_CO2 / M_air) * 1e6
+            idx += 1
+        if has_T_sfc:
+            diag["T_sfc_mean"] = float(host[idx])
 
         self._coupled_diag.append(diag)
 

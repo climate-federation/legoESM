@@ -677,7 +677,10 @@ def pv_edge_3d(q_vertex_3d, mesh):
     return 0.5 * (q_vertex_3d[v0] + q_vertex_3d[v1])
 
 
-def pv_flux_energy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
+def pv_flux_energy_conserving_3d(
+    u_edge_3d, h_cell_3d, q_vertex_3d, mesh,
+    h_edge_3d=None,
+):
     """Energy-conserving PV flux for all levels.
 
     Parameters
@@ -686,12 +689,17 @@ def pv_flux_energy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
     h_cell_3d : jax.Array, shape (nCells, nlev)
     q_vertex_3d : jax.Array, shape (nVertices, nlev)
     mesh : VoronoiMesh
+    h_edge_3d : jax.Array, shape (nEdges, nlev), optional
+        Pre-computed edge thickness ``cell_to_edge_avg_3d(h_cell_3d)``.
+        When provided the internal ``edge_thickness_3d`` call is
+        skipped — share the gather across pv_flux and any other op
+        that already needed ``h`` at edges.
 
     Returns
     -------
     jax.Array, shape (nEdges, nlev)
     """
-    h_e = edge_thickness_3d(h_cell_3d, mesh)
+    h_e = h_edge_3d if h_edge_3d is not None else edge_thickness_3d(h_cell_3d, mesh)
     q_e = pv_edge_3d(q_vertex_3d, mesh)
 
     eoe = mesh.edgesOnEdge
@@ -706,7 +714,10 @@ def pv_flux_energy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
     return jnp.sum(woe[:, :, None] * q_g * h_g * u_g * mask[:, :, None], axis=0)
 
 
-def pv_flux_enstrophy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
+def pv_flux_enstrophy_conserving_3d(
+    u_edge_3d, h_cell_3d, q_vertex_3d, mesh,
+    h_edge_3d=None,
+):
     """Enstrophy-conserving PV flux for all levels.
 
     Parameters
@@ -715,12 +726,15 @@ def pv_flux_enstrophy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
     h_cell_3d : jax.Array, shape (nCells, nlev)
     q_vertex_3d : jax.Array, shape (nVertices, nlev)
     mesh : VoronoiMesh
+    h_edge_3d : jax.Array, shape (nEdges, nlev), optional
+        Pre-computed edge thickness — see :func:`pv_flux_energy_conserving_3d`
+        for usage.
 
     Returns
     -------
     jax.Array, shape (nEdges, nlev)
     """
-    h_e = edge_thickness_3d(h_cell_3d, mesh)
+    h_e = h_edge_3d if h_edge_3d is not None else edge_thickness_3d(h_cell_3d, mesh)
     q_e = pv_edge_3d(q_vertex_3d, mesh)
 
     F_normal = h_e * u_edge_3d
@@ -1011,3 +1025,128 @@ def apvm_correction_3d(q_vertex_3d, u_edge_3d, mesh, dt):
     u_dot_grad_q = advection / count[:, None]
 
     return q_vertex_3d - 0.5 * dt * u_dot_grad_q
+
+
+# ============================================================================
+# Biharmonic dissipation on relative vorticity (∇⁴ζ on the dual grid)
+# ============================================================================
+
+def vertex_laplacian_3d(phi_vertex_3d, mesh):
+    """Laplacian of a vertex-centered scalar on the triangular dual grid.
+
+    Finite-volume discretisation on the dual (vertex-centred) control
+    volume::
+
+        (∇²φ)_v = (1/A_v) · Σ_{e∈E(v)} (φ_{v_other(e)} − φ_v) / dvEdge_e · dcEdge_e
+
+    where E(v) is the set of edges incident on vertex v, v_other(e) is the
+    other endpoint of edge e, A_v is the triangle area, dvEdge is the
+    vertex-to-vertex length along the edge, and dcEdge is the primal
+    (cell-to-cell) length perpendicular to it.  This is the dual of the
+    standard cell Laplacian ``divergence_cell(gradient_edge(·))`` and is
+    exact on hexagonal MPAS meshes to second order.
+
+    Parameters
+    ----------
+    phi_vertex_3d : jax.Array, shape (nVertices, nlev)
+        Vertex-centred scalar.
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nVertices, nlev)
+        ``∇²φ`` at vertices.
+    """
+    eov = mesh.edgesOnVertex            # (vertexDegree, nVertices)
+    voe = mesh.verticesOnEdge           # (2, nEdges)
+    dvEdge = mesh.dvEdge                # (nEdges,)
+    dcEdge = mesh.dcEdge                # (nEdges,)
+    area_tri = mesh.areaTriangle        # (nVertices,)
+
+    mask = (eov >= 0).astype(phi_vertex_3d.dtype)[:, :, None]  # (vD, nV, 1)
+    eov_safe = jnp.maximum(eov, 0)
+
+    v0_of_edge = voe[0][eov_safe]       # (vD, nV)
+    v1_of_edge = voe[1][eov_safe]       # (vD, nV)
+
+    # For each (v, local edge i), gather the other vertex.
+    v_index = jnp.arange(mesh.nVertices)[None, :]   # (1, nV)
+    is_v_at_v0 = (v0_of_edge == v_index)            # (vD, nV)
+
+    phi_v0_gathered = phi_vertex_3d[v0_of_edge]     # (vD, nV, nlev)
+    phi_v1_gathered = phi_vertex_3d[v1_of_edge]
+    phi_other = jnp.where(is_v_at_v0[..., None],
+                          phi_v1_gathered, phi_v0_gathered)
+    phi_self = jnp.where(is_v_at_v0[..., None],
+                          phi_v0_gathered, phi_v1_gathered)
+
+    dv_gathered = dvEdge[eov_safe][:, :, None]      # (vD, nV, 1)
+    dc_gathered = dcEdge[eov_safe][:, :, None]
+    # Guard against zero-length halo edges.
+    dv_safe = jnp.maximum(dv_gathered, 1e-30)
+
+    contrib = (phi_other - phi_self) / dv_safe * dc_gathered * mask
+    lap = jnp.sum(contrib, axis=0) / area_tri[:, None]
+    return lap
+
+
+def biharmonic_vorticity_del4_3d(u_edge_3d, mesh):
+    """Edge-normal force from biharmonic damping on relative vorticity ζ.
+
+    Returns the edge-normal force that, when added to ``du/dt`` in the
+    momentum equation, produces ``−∇⁴ζ`` in the corresponding vorticity
+    equation::
+
+        F_e = −∂_τ̂ (∇²ζ_v) = −(∇²ζ_{v1} − ∇²ζ_{v0}) / dvEdge_e
+
+    Taking the curl of this force (i.e. reading back the vorticity
+    tendency) yields::
+
+        (curl F)_v = −∇²(∇²ζ_v) = −∇⁴ζ_v
+
+    which is a biharmonic damping of ζ on the dual grid.  Unlike
+    ``vector_laplacian_del4_3d`` (which applies biharmonic to the velocity
+    u and would also damp ζ through the vector identity *in the continuum*),
+    this operator acts on the ζ field *directly* at vertices.  It therefore
+    captures the ζ-checkerboard null mode of the energy-conserving PV flux,
+    which lives in the kernel of the discrete velocity-to-vorticity map and
+    is invisible to the velocity-based biharmonic.
+
+    Note on sign/scaling: the returned array is normalised so that the
+    physical tendency is ``du/dt += K_ζ · biharmonic_vorticity_del4_3d(u)``.
+    The caller supplies ``K_ζ`` with units ``[m⁴/s]`` (same as ``B_h``).
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+        Edge-normal velocity.
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+        Edge force per unit ``K_ζ``.
+    """
+    zeta_v = curl_vertex_3d(u_edge_3d, mesh)        # (nVertices, nlev)
+    lap_zeta_v = vertex_laplacian_3d(zeta_v, mesh)  # (nVertices, nlev)
+
+    v0 = mesh.verticesOnEdge[0]
+    v1 = mesh.verticesOnEdge[1]
+    dv_safe = jnp.maximum(mesh.dvEdge, 1e-30)[:, None]
+    # Tangential gradient of ∇²ζ along the edge (from v0 to v1).
+    grad_tangent = (lap_zeta_v[v1] - lap_zeta_v[v0]) / dv_safe  # (nEdges, nlev)
+
+    # Sign: the discrete operator satisfies
+    # ``curl_vertex(grad_tangent(φ)) = −∇²φ`` on this mesh (verified in
+    # ``tests/ocean/unit/test_biharmonic_vorticity.py``; correlation +1
+    # between ``curl(F)`` and ``−∇⁴ζ`` when F = +grad_tangent(∇²ζ)).
+    # Hence returning ``+grad_tangent(∇²ζ)`` gives ``curl(K_ζ·F) = −K_ζ·∇⁴ζ``
+    # in the vorticity equation — damping for K_ζ > 0.
+    #
+    # Note: the caller is responsible for applying ``edge_mask`` to the
+    # returned force (same convention as ``vector_laplacian_del4_3d``,
+    # ``smagorinsky_biharmonic_3d`` etc.). See ocean-expert audit
+    # 2026-04-24 for a discussion of land-contaminated ζ bleeding across
+    # partial-land triangles — this is a codebase-wide concern for all
+    # curl-based operators, not specific to this one.
+    return grad_tangent

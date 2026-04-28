@@ -134,7 +134,7 @@ def solve_lw(
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -243,7 +243,7 @@ def solve_sw(
     aerosol_single_scattering_albedo: float = 0.93,
     aerosol_asymmetry_factor: float = 0.70,
     solar_fraction_by_gpt: Array | None = None,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
 

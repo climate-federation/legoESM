@@ -210,15 +210,27 @@ def recurrent_op_with_halos(
     init: Array,
     inputs: dict[str, Array],
     forward: bool = True,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> tuple[Array, Array]:
-  """Compute sequence of recurrent operations, accounting for halos in z."""
+  """Compute sequence of recurrent operations, accounting for halos in z.
+
+  ``use_scan`` defaults to ``None``: pick ``True`` on GPU/TPU
+  (``lax.scan`` lowers to a single fused kernel and avoids the
+  ``nlev`` separate ``dynamic_update_slice`` ops the unrolled path
+  emits, which on modern XLA is materially faster), and ``False`` on
+  CPU/Metal where the unrolled path historically benchmarked better.
+  Pass an explicit bool to override.
+  """
   halo_width = 1  # Assumed and hardcoded.
 
   # Step 1. Remove halos in z dimension.
   inputs = {k: v[:, :, halo_width:-halo_width] for k, v in inputs.items()}
 
   # Step 2. Run recurrent operation.
+  if use_scan is None:
+    import jax as _jax
+    _platform = _jax.devices()[0].platform if _jax.devices() else "cpu"
+    use_scan = _platform in ("gpu", "tpu")
   if use_scan:
     carry, output = recurrent_op_scan(f, init, inputs, forward)
   else:

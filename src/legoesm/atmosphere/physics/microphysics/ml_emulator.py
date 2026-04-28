@@ -79,7 +79,7 @@ def ml_microphysics(
         jnp.log(jnp.clip(p_full, 1.0) / constants.p_ref),
         rho / 1.2,
         dz / 1000.0,
-        jnp.full((ncol, nlev), dt / 3600.0),
+        jnp.full((ncol, nlev), dt / 3600.0, dtype=T.dtype),
     ], axis=-1)  # (ncol, nlev, n_input)
 
     # Apply MLP per level via double vmap
@@ -107,7 +107,9 @@ def ml_microphysics(
     # Surface precipitation from lowest level output
     precipitation = jax.nn.softplus(precip_raw[:, -1]) * 1e-3
 
-    z = jnp.zeros((ncol, nlev))
+    # Pin dtype to the input precision so we never silently promote
+    # the unused-species placeholders to f64 under x64 mode.
+    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

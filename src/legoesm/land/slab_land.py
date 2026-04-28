@@ -92,7 +92,7 @@ def step_land(
             lat, snow, snow_age, config.land_albedo,
         )
     else:
-        alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_soil.shape)
+        alpha = jnp.full(T_soil.shape, albedo_land, dtype=T_soil.dtype)
 
     # Smooth wind speed floor
     wind_speed = jnp.sqrt(
@@ -278,8 +278,8 @@ def step_land(
     response = TileResponse(
         T_surface=T_soil_new,
         albedo=alpha_new,
-        emissivity=jnp.broadcast_to(jnp.asarray(emissivity), T_soil.shape),
-        z0=jnp.broadcast_to(jnp.asarray(z0), T_soil.shape),
+        emissivity=jnp.full(T_soil.shape, emissivity, dtype=T_soil.dtype),
+        z0=jnp.full(T_soil.shape, z0, dtype=T_soil.dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx_actual,

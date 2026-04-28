@@ -148,11 +148,14 @@ def solve_richards(
         # RHS: -(theta_m - theta_n)/dt - sink + gravity flux divergence
         rhs = -(theta_m - theta_n) / dt - sink
 
-        # Gravitational flux: K_{k+1/2} enters from above, exits below
-        grav_flux_in = jnp.zeros((ncol, nlayers))
-        grav_flux_out = jnp.zeros((ncol, nlayers))
-        grav_flux_in = grav_flux_in.at[:, 1:].set(K_half / dz[1:])
-        grav_flux_out = grav_flux_out.at[:, :-1].set(K_half / dz[:-1])
+        # Gravitational flux: K_{k+1/2} enters from above, exits below.
+        # Use ``jnp.pad`` instead of ``zeros + .at[].set`` — one Pad
+        # HLO op vs alloc-then-scatter.  This block fires every Picard
+        # iteration (up to 10) inside the land step.
+        K_half_in = K_half / dz[1:]
+        K_half_out = K_half / dz[:-1]
+        grav_flux_in = jnp.pad(K_half_in, ((0, 0), (1, 0)))
+        grav_flux_out = jnp.pad(K_half_out, ((0, 0), (0, 1)))
         rhs = rhs + (grav_flux_in - grav_flux_out)
 
         # Top BC: flux = flux_infiltrated (Neumann)
@@ -166,11 +169,10 @@ def solve_richards(
         # zero_flux: no additional term (natural BC)
 
         # Solve tridiagonal system: a*dpsi[k-1] + b*dpsi[k] + c*dpsi[k+1] = rhs
-        # Assemble full arrays for Thomas algorithm
-        a_full = jnp.zeros((ncol, nlayers))
-        a_full = a_full.at[:, 1:].set(sub)
-        c_full = jnp.zeros((ncol, nlayers))
-        c_full = c_full.at[:, :-1].set(sup)
+        # Assemble full arrays for Thomas algorithm via ``jnp.pad``
+        # (one HLO op each vs ``zeros + .at[].set``).
+        a_full = jnp.pad(sub, ((0, 0), (1, 0)))
+        c_full = jnp.pad(sup, ((0, 0), (0, 1)))
 
         dpsi = thomas_solve_batch(a_full, diag, c_full, rhs)
 

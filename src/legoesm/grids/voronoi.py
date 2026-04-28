@@ -532,13 +532,44 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
             vertex_cells[v_idx].append(int(c))
             cell_vertices[int(c)].append(v_idx)
 
-    # For each vertex, find its edges (edges of the Delaunay triangle)
+    # For each vertex, find its edges (edges of the Delaunay triangle).
+    # A triangle's edge may have been dropped from edge_dict as a periodic
+    # half-edge; skip it here (the final edgesOnVertex is rebuilt later
+    # with the same `if key in edge_dict` guard at line ~645).
     for v_idx, tri in enumerate(triangles):
         for i in range(3):
             c1, c2 = int(tri[i]), int(tri[(i + 1) % 3])
             key = (min(c1, c2), max(c1, c2))
-            e_idx = edge_dict[key]
-            vertex_edges_list[v_idx].append(e_idx)
+            e_idx = edge_dict.get(key, -1)
+            if e_idx >= 0:
+                vertex_edges_list[v_idx].append(e_idx)
+
+    # --- Rebuild cell_edges and cell_vertices from cellsOnEdge / triangles ---
+    # cellsOnEdge is the source of truth for edge→cell adjacency; derive
+    # per-cell edge/vertex sets from it.  The original upstream graph
+    # construction could add the same edge twice to a cell (periodic
+    # unroll-and-ghost) or miss edges whose vertex pair did not align
+    # with triangle membership.  The LSQ weight code hid both bugs via
+    # `stencil_set = set(...)`, but TRiSK walks the ordered edge list
+    # around the cell and must have a clean, unique, CCW ordering.
+    cell_edges = [[] for _ in range(nCells)]
+    for e in range(nEdges):
+        c1 = int(cellsOnEdge[0, e])
+        c2 = int(cellsOnEdge[1, e])
+        if c1 >= 0:
+            cell_edges[c1].append(e)
+        if c2 >= 0 and c2 != c1:
+            cell_edges[c2].append(e)
+    # Rebuild cell_vertices from the edge list (each edge contributes
+    # up to two vertices to the cell).
+    cell_vertices = [set() for _ in range(nCells)]
+    for c in range(nCells):
+        for e in cell_edges[c]:
+            for a in range(2):
+                v = int(verticesOnEdge[a, e])
+                if v >= 0:
+                    cell_vertices[c].add(v)
+    cell_vertices = [sorted(cv) for cv in cell_vertices]
 
     # --- Determine maxEdges and build padded arrays ---
     nEdgesOnCell_arr = np.array([len(cell_edges[c]) for c in range(nCells)],
@@ -552,50 +583,42 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     cellsOnCell = np.full((maxEdges, nCells), -1, dtype=np.int32)
 
     for c in range(nCells):
-        n = nEdgesOnCell_arr[c]
+        n = int(nEdgesOnCell_arr[c])
         if n == 0:
             continue
-        # Get vertex positions and order CCW (seam-shift vertices near cell c)
-        v_indices = list(set(cell_vertices[c]))
+
+        # Order edges of cell c CCW by the angle of their midpoint
+        # about the cell center (seam-shifted).
+        edges_c = cell_edges[c]
         if _L is None:
-            v_xyz = vertex_xyz[v_indices]
+            e_xyz = edge_xyz[edges_c]
+        else:
+            e_xyz = np.array([_shift_near(cell_xyz[c], edge_xyz[e], _L)
+                               for e in edges_c])
+        e_order = _order_indices_ccw(cell_xyz[c], e_xyz)
+        ordered_edges = [edges_c[i] for i in e_order]
+
+        # Order vertices CCW as well.
+        verts_c = cell_vertices[c]
+        if _L is None:
+            v_xyz = vertex_xyz[verts_c]
         else:
             v_xyz = np.array([_shift_near(cell_xyz[c], vertex_xyz[v], _L)
-                               for v in v_indices])
-        order = _order_indices_ccw(cell_xyz[c], v_xyz)
-        ordered_verts = [v_indices[i] for i in order]
+                               for v in verts_c])
+        v_order = _order_indices_ccw(cell_xyz[c], v_xyz)
+        ordered_verts = [verts_c[i] for i in v_order]
 
-        # Build ordered edges: edge between consecutive vertices
-        ordered_edges = []
+        # Neighbors: the "other" cell across each ordered edge.
         ordered_neighbors = []
-        for i in range(len(ordered_verts)):
-            v_curr = ordered_verts[i]
-            v_next = ordered_verts[(i + 1) % len(ordered_verts)]
-            # Find edge connecting cells that share both v_curr and v_next
-            found = False
-            for e_idx in cell_edges[c]:
-                ev0, ev1 = verticesOnEdge[0, e_idx], verticesOnEdge[1, e_idx]
-                if set([ev0, ev1]) == set([v_curr, v_next]):
-                    ordered_edges.append(e_idx)
-                    # Neighbor is the other cell on this edge
-                    oc1, oc2 = cellsOnEdge[0, e_idx], cellsOnEdge[1, e_idx]
-                    nbr = oc2 if oc1 == c else oc1
-                    ordered_neighbors.append(nbr)
-                    found = True
-                    break
-            if not found:
-                # Fallback: use any unassigned edge
-                for e_idx in cell_edges[c]:
-                    if e_idx not in ordered_edges:
-                        ordered_edges.append(e_idx)
-                        oc1, oc2 = cellsOnEdge[0, e_idx], cellsOnEdge[1, e_idx]
-                        nbr = oc2 if oc1 == c else oc1
-                        ordered_neighbors.append(nbr)
-                        break
+        for e_idx in ordered_edges:
+            oc1 = int(cellsOnEdge[0, e_idx])
+            oc2 = int(cellsOnEdge[1, e_idx])
+            ordered_neighbors.append(oc2 if oc1 == c else oc1)
 
+        ne = len(ordered_edges)
         for i in range(min(len(ordered_verts), maxEdges)):
             verticesOnCell[i, c] = ordered_verts[i]
-        for i in range(min(len(ordered_edges), maxEdges)):
+        for i in range(min(ne, maxEdges)):
             edgesOnCell[i, c] = ordered_edges[i]
             cellsOnCell[i, c] = ordered_neighbors[i]
 
@@ -691,10 +714,9 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     # --- edgesOnEdge and weightsOnEdge ---
     maxEdges2 = 2 * maxEdges - 2
     edgesOnEdge, weightsOnEdge, nEdgesOnEdge_arr = _compute_weights_on_edge(
-        nEdges, nCells, maxEdges, maxEdges2, nEdgesOnCell_arr,
-        cellsOnEdge, verticesOnEdge, edgesOnCell, verticesOnCell,
-        edgeSignOnCell, kiteAreasOnVertex, cellsOnVertex, areaCell,
-        vertex_xyz, cell_xyz, edge_xyz, angleEdge, dvEdge, dcEdge, radius)
+        nEdges, maxEdges2, vertexDegree, nEdgesOnCell_arr,
+        cellsOnEdge, verticesOnEdge, edgesOnCell,
+        kiteAreasOnVertex, cellsOnVertex, areaCell, dvEdge, dcEdge)
 
     # --- Coriolis parameters ---
     latEdge, lonEdge = _xyz_to_latlon(edge_xyz[:, 0], edge_xyz[:, 1],
@@ -863,73 +885,147 @@ def _compute_edge_sign_on_vertex(nVertices, vertexDegree, edgesOnVertex,
     return edgeSignOnVertex
 
 
-def _compute_weights_on_edge(nEdges, nCells, maxEdges, maxEdges2,
+def _compute_weights_on_edge(nEdges, maxEdges2, vertexDegree,
                               nEdgesOnCell, cellsOnEdge, verticesOnEdge,
-                              edgesOnCell, verticesOnCell, edgeSignOnCell,
-                              kiteAreasOnVertex, cellsOnVertex,
-                              areaCell, vertex_xyz, cell_xyz, edge_xyz,
-                              angleEdge, dvEdge, dcEdge, radius):
-    """Compute weights for tangential velocity reconstruction.
+                              edgesOnCell, kiteAreasOnVertex, cellsOnVertex,
+                              areaCell, dvEdge, dcEdge):
+    """Compute weights for tangential velocity reconstruction (TRiSK).
 
-    Uses a Perot-style least-squares approach: for each edge e, the
-    weights are chosen so that a uniform vector field is reconstructed
-    exactly. This is the minimum-norm solution of:
-        Σ w_k cos(α_k) = -sin(α_e)
-        Σ w_k sin(α_k) =  cos(α_e)
-    where α_k = angleEdge[e_k].
+    Implements the Thuburn-Ringler kite-area formula
+    (Ringler et al. 2010, J. Comput. Phys. 229, Eq. 24;
+     Thuburn et al. 2009, J. Comput. Phys. 228, Eq. 33).
+
+    The stored weight satisfies
+
+        v_t(e) = Σ_k weightsOnEdge[k, e] · u(edgesOnEdge[k, e])
+
+    with
+
+        weightsOnEdge[e, e']  =  w_T(e, e') · dvEdge[e'] / dcEdge[e]
+
+    where the dimensionless `w_T` is antisymmetric
+    (w_T(e,e') + w_T(e',e) = 0) — this guarantees discrete energy
+    conservation of the tangential reconstruction.  Unlike the Perot
+    minimum-norm LSQ, this formula additionally preserves Thuburn's
+    stationary geostrophic mode, which is required to avoid spurious
+    baroclinic-instability growth on non-uniform Voronoi meshes.
+
+    The algorithm mirrors the canonical MPAS-Tools
+    `buildEdgesOnEdgeArrays` (mpas_mesh_converter.cpp):  for each
+    iEdge, walk CCW around each adjacent cell starting from iEdge,
+    accumulating kite-area fractions at each shared vertex, and
+    push one stencil entry per edge encountered.
     """
     edgesOnEdge = np.full((maxEdges2, nEdges), -1, dtype=np.int32)
     weightsOnEdge = np.zeros((maxEdges2, nEdges), dtype=np.float64)
     nEdgesOnEdge_arr = np.zeros(nEdges, dtype=np.int32)
 
     for iEdge in range(nEdges):
-        c1 = cellsOnEdge[0, iEdge]
-        c2 = cellsOnEdge[1, iEdge]
-
-        # Build stencil: all edges of c1 and c2, excluding iEdge
-        stencil_set = set()
-        for k in range(nEdgesOnCell[c1]):
-            e = edgesOnCell[k, c1]
-            if e >= 0 and e != iEdge:
-                stencil_set.add(int(e))
-        for k in range(nEdgesOnCell[c2]):
-            e = edgesOnCell[k, c2]
-            if e >= 0 and e != iEdge:
-                stencil_set.add(int(e))
-        stencil_edges = sorted(stencil_set)
-        m = len(stencil_edges)
-        if m == 0:
+        c1 = int(cellsOnEdge[0, iEdge])
+        c2 = int(cellsOnEdge[1, iEdge])
+        dc_iE = dcEdge[iEdge]
+        if dc_iE <= 0.0:
             continue
+        k_slot = 0
 
-        # Build least-squares system:
-        # A w = b where A is 2×m, b is 2×1
-        # A[0,k] = cos(angle_k), A[1,k] = sin(angle_k)
-        # b = [-sin(angle_e), cos(angle_e)]
-        A = np.zeros((2, m), dtype=np.float64)
-        for k, ek in enumerate(stencil_edges):
-            A[0, k] = np.cos(angleEdge[ek])
-            A[1, k] = np.sin(angleEdge[ek])
+        # Cell c1 pass: global sign +1 (n_{iEdge} points out of c1).
+        if c1 >= 0:
+            k_slot = _trisk_walk(
+                iEdge, c1, +1.0, k_slot,
+                nEdgesOnCell, edgesOnCell, verticesOnEdge, cellsOnEdge,
+                cellsOnVertex, kiteAreasOnVertex, areaCell,
+                dvEdge, dc_iE, vertexDegree, maxEdges2,
+                edgesOnEdge, weightsOnEdge,
+            )
 
-        b = np.array([-np.sin(angleEdge[iEdge]),
-                       np.cos(angleEdge[iEdge])], dtype=np.float64)
+        # Cell c2 pass: global sign -1 (n_{iEdge} points into c2).
+        if c2 >= 0:
+            k_slot = _trisk_walk(
+                iEdge, c2, -1.0, k_slot,
+                nEdgesOnCell, edgesOnCell, verticesOnEdge, cellsOnEdge,
+                cellsOnVertex, kiteAreasOnVertex, areaCell,
+                dvEdge, dc_iE, vertexDegree, maxEdges2,
+                edgesOnEdge, weightsOnEdge,
+            )
 
-        # Minimum-norm solution: w = A^T (A A^T)^{-1} b
-        AAT = A @ A.T  # 2x2
-        det = AAT[0, 0] * AAT[1, 1] - AAT[0, 1] * AAT[1, 0]
-        if abs(det) < 1e-30:
-            continue
-        AAT_inv = np.array([[AAT[1, 1], -AAT[0, 1]],
-                            [-AAT[1, 0], AAT[0, 0]]]) / det
-        w = A.T @ (AAT_inv @ b)
-
-        # Store
-        nEdgesOnEdge_arr[iEdge] = m
-        for k, ek in enumerate(stencil_edges):
-            if k < maxEdges2:
-                edgesOnEdge[k, iEdge] = ek
-                weightsOnEdge[k, iEdge] = w[k]
+        nEdgesOnEdge_arr[iEdge] = k_slot
 
     return edgesOnEdge, weightsOnEdge, nEdgesOnEdge_arr
+
+
+def _trisk_walk(iEdge, c, global_sign, k_slot,
+                nEdgesOnCell, edgesOnCell, verticesOnEdge, cellsOnEdge,
+                cellsOnVertex, kiteAreasOnVertex, areaCell,
+                dvEdge, dc_iE, vertexDegree, maxEdges2,
+                edgesOnEdge, weightsOnEdge):
+    """Walk CCW around cell c starting from iEdge, emitting TRiSK weights.
+
+    For each subsequent edge `cur_edge` of c in CCW order:
+      - find the vertex shared with `last_edge` (the previous edge on
+        the walk; initially iEdge)
+      - accumulate kite_area(shared_vertex, c) / areaCell[c] into area_sum
+      - push  global_sign · n(cur_edge, c) · (0.5 - area_sum) · dv[cur] / dc[iEdge]
+        into weightsOnEdge, where n(cur_edge, c) = +1 if
+        cellsOnEdge[0, cur_edge] == c (normal points out of c), else -1.
+
+    Returns the updated `k_slot` cursor.
+    """
+    ne = int(nEdgesOnCell[c])
+    if ne <= 0:
+        return k_slot
+
+    # Find position of iEdge in edgesOnCell[:, c].
+    pos = -1
+    for i in range(ne):
+        if int(edgesOnCell[i, c]) == iEdge:
+            pos = i
+            break
+    if pos < 0:
+        return k_slot  # malformed mesh: iEdge not in its own cell's list
+
+    area_c = areaCell[c]
+    if area_c <= 0.0:
+        return k_slot
+
+    last_edge = iEdge
+    area_sum = 0.0
+    for step in range(1, ne):
+        i = (pos + step) % ne
+        cur_edge = int(edgesOnCell[i, c])
+        if cur_edge < 0 or cur_edge == iEdge:
+            break
+
+        # Shared vertex between last_edge and cur_edge.
+        va0 = int(verticesOnEdge[0, last_edge])
+        va1 = int(verticesOnEdge[1, last_edge])
+        vb0 = int(verticesOnEdge[0, cur_edge])
+        vb1 = int(verticesOnEdge[1, cur_edge])
+        shared = -1
+        if va0 >= 0 and (va0 == vb0 or va0 == vb1):
+            shared = va0
+        elif va1 >= 0 and (va1 == vb0 or va1 == vb1):
+            shared = va1
+        if shared < 0:
+            break
+
+        # Accumulate kite-area fraction of cell c at the shared vertex.
+        for j in range(vertexDegree):
+            if int(cellsOnVertex[j, shared]) == c:
+                area_sum += kiteAreasOnVertex[j, shared] / area_c
+                break
+
+        # Edge-orientation sign: +1 if cur_edge normal points out of c.
+        edge_sign = 1.0 if int(cellsOnEdge[0, cur_edge]) == c else -1.0
+        w_dimless = global_sign * edge_sign * (0.5 - area_sum)
+        w_store = w_dimless * dvEdge[cur_edge] / dc_iE
+
+        if k_slot < maxEdges2:
+            edgesOnEdge[k_slot, iEdge] = cur_edge
+            weightsOnEdge[k_slot, iEdge] = w_store
+            k_slot += 1
+        last_edge = cur_edge
+
+    return k_slot
 
 
 # ============================================================================
@@ -1179,7 +1275,24 @@ def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False,
         Filtered triangle vertex indices.
     """
     d_rad = resolution_km * 1000.0 / radius
-    max_edge = 3.0 * d_rad
+    # Oversize-edge cutoff for Delaunay triangle acceptance.  The correct
+    # value is path-dependent:
+    #   - sub-360° periodic (unroll+ghost):  1.5·d_rad.  The unroll+ghost
+    #     Delaunay in (u·cos(lat_c), lat) coordinates produces pathological
+    #     seam triangles with a meridional third leg of exactly 2·d_rad
+    #     (two rows at identical lon).  These pass a looser 3·d_rad
+    #     threshold and poison TRiSK with phantom edges (issue #211).
+    #     1.5·d_rad is a comfortable margin above legitimate edges
+    #     (~1.0–1.15·d_rad) and well below the 2·d_rad pathology.
+    #   - bounded / full-360°:  3·d_rad.  The stereographic-projection
+    #     path produces legitimate convex-hull boundary triangles with
+    #     edge lengths up to ~2·d_rad; tightening to 1.5·d_rad here
+    #     filter-orphans them and breaks antisymmetry.
+    _sub360_periodic = (
+        periodic_x and lon_range is not None
+        and abs(np.radians(lon_range[1] - lon_range[0]) - 2.0 * np.pi) > 1e-6
+    )
+    max_edge = (1.5 if _sub360_periodic else 3.0) * d_rad
 
     if periodic_x:
         # Decide between full-360° stereographic-annulus and sub-360°
@@ -1213,7 +1326,8 @@ def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False,
         tri = Delaunay(xy)
         triangles = tri.simplices.copy()
 
-    # Filter degenerate triangles: any edge > 3x angular resolution.
+    # Filter degenerate triangles: any edge > max_edge (1.5x for sub-360°
+    # periodic, 3x otherwise — see max_edge definition above).
     # For sub-360° periodic, use seam-aware distances so valid seam
     # triangles are retained.
     L_for_shift = None
@@ -1453,9 +1567,9 @@ def create_regional_voronoi_mesh(
                                        triangles=triangles,
                                        periodic_L_rad=periodic_L_rad)
 
-    # Step 4: Apply safety floors on dvEdge and areaTriangle
+    # Step 4: Apply safety floors on dvEdge and areaTriangle.
     # Boundary edges may have only one adjacent triangle, giving
-    # dvEdge = 0. Set a floor to prevent NaN in TRiSK operators.
+    # dvEdge = 0.  Set a floor to prevent NaN in TRiSK operators.
     d_rad = resolution_km * 1000.0 / radius
     dvEdge_floor = 0.1 * d_rad * radius  # 10% of resolution
     areaTriangle_floor = 0.01 * (d_rad * radius) ** 2  # 1% of cell area
@@ -1463,7 +1577,36 @@ def create_regional_voronoi_mesh(
     dvEdge_safe = jnp.maximum(mesh.dvEdge, dvEdge_floor)
     areaTriangle_safe = jnp.maximum(mesh.areaTriangle, areaTriangle_floor)
 
-    mesh = mesh._replace(dvEdge=dvEdge_safe, areaTriangle=areaTriangle_safe)
+    # The TRiSK weights scale with dvEdge/dcEdge, so recompute them
+    # using the floored dvEdge so the stored weightsOnEdge is
+    # consistent with the final mesh geometry.  (The old LSQ weights
+    # used only angleEdge and were blind to this inconsistency, which
+    # masked baroclinic-instability amplification driven by stale
+    # near-zero dvEdge values — see issue #211.)
+    maxEdges2 = mesh.edgesOnEdge.shape[0]
+    edgesOnEdge_new, weightsOnEdge_new, nEdgesOnEdge_new = (
+        _compute_weights_on_edge(
+            mesh.nEdges, maxEdges2, mesh.vertexDegree,
+            np.asarray(mesh.nEdgesOnCell),
+            np.asarray(mesh.cellsOnEdge),
+            np.asarray(mesh.verticesOnEdge),
+            np.asarray(mesh.edgesOnCell),
+            np.asarray(mesh.kiteAreasOnVertex, dtype=np.float64),
+            np.asarray(mesh.cellsOnVertex),
+            np.asarray(mesh.areaCell, dtype=np.float64),
+            np.asarray(dvEdge_safe, dtype=np.float64),
+            np.asarray(mesh.dcEdge, dtype=np.float64),
+        )
+    )
+    _w_dtype = mesh.weightsOnEdge.dtype
+    _i_dtype = mesh.edgesOnEdge.dtype
+    mesh = mesh._replace(
+        dvEdge=dvEdge_safe,
+        areaTriangle=areaTriangle_safe,
+        edgesOnEdge=jnp.asarray(edgesOnEdge_new, dtype=_i_dtype),
+        weightsOnEdge=jnp.asarray(weightsOnEdge_new, dtype=_w_dtype),
+        nEdgesOnEdge=jnp.asarray(nEdgesOnEdge_new, dtype=_i_dtype),
+    )
 
     return mesh
 

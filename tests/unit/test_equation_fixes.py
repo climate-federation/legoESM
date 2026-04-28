@@ -266,8 +266,15 @@ class TestIssue3_MicrophysicsRateSemantics:
 
 class TestIssue4_MassFluxPrecipitation:
 
-    def test_precipitation_dimensional_consistency(self):
-        """Precipitation from mass-flux scheme should be in kg/m^2/s."""
+    def test_dq_c_conv_dimensional_consistency(self):
+        """Convective cloud-water source from mass-flux should be kg/kg/s.
+
+        Post-Option-C: mass_flux now emits a 3D ``dq_c_conv_dt``
+        (kg/kg/s) instead of a scalar surface ``precipitation``
+        (kg/m²/s); microphysics owns the surface-flux diagnostic. A
+        sane parameterization keeps per-level condensation rates well
+        under 1e-3 kg/kg/s — this bound catches gross unit errors.
+        """
         from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
         from legoesm.atmosphere.physics.convection.config import MassFluxConfig
 
@@ -278,11 +285,12 @@ class TestIssue4_MassFluxPrecipitation:
         config = MassFluxConfig(M_scale=0.01, cape_threshold=0.0)
         out, _ = mass_flux_convection(T, q_v, p_full, p_half, M_c, dt=300.0, config=config)
 
-        # Precipitation should be O(1e-5) to O(1e-2) kg/m^2/s, not O(1) or O(1e3)
-        max_precip = jnp.max(out.precipitation)
-        assert max_precip >= 0, "Precipitation must be non-negative"
-        assert max_precip < 1.0, \
-            f"Mass-flux precip {max_precip:.4f} kg/m²/s unreasonably large (dimensional error?)"
+        max_rate = jnp.max(out.dq_c_conv_dt)
+        assert max_rate >= 0, "dq_c_conv_dt must be non-negative"
+        assert max_rate < 1e-3, (
+            f"Mass-flux dq_c_conv_dt {max_rate:.4e} kg/kg/s unreasonably "
+            "large (dimensional error?)"
+        )
 
     def test_analytic_column_precipitation(self):
         """Analytic test: uniform M, delta_0, condensate, dz → known result."""
@@ -316,9 +324,17 @@ class TestIssue4_MassFluxPrecipitation:
 
 class TestIssue5_EDMFPrecipitation:
 
-    def test_precipitation_dimensional_consistency(self):
-        """Precipitation from EDMF scheme should be in kg/m^2/s."""
-        from legoesm.atmosphere.physics.convection.edmf import edmf_convection
+    def test_dq_c_conv_dimensional_consistency(self):
+        """Convective cloud-water source from EDMF should be in kg/kg/s.
+
+        Replaces the legacy ``out.precipitation`` (kg/m²/s) check after
+        the Option-C refactor: EDMF now emits a 3D
+        ``dq_c_conv_dt`` field; surface precipitation is owned by
+        microphysics. A sane parameterization should produce per-level
+        condensation rates well under 1e-3 kg/kg/s — far below this
+        bound for any physically reasonable column.
+        """
+        from legoesm.atmosphere.physics.convection.mass_flux import edmf_convection
         from legoesm.atmosphere.physics.convection.config import EDMFConfig
 
         T, q_v, p_full, p_half = _make_unstable_columns()
@@ -328,10 +344,12 @@ class TestIssue5_EDMFPrecipitation:
         config = EDMFConfig(cape_threshold=0.0)
         out, _ = edmf_convection(T, q_v, p_full, p_half, a_u, dt=300.0, config=config)
 
-        max_precip = jnp.max(out.precipitation)
-        assert max_precip >= 0, "Precipitation must be non-negative"
-        assert max_precip < 1.0, \
-            f"EDMF precip {max_precip:.4f} kg/m²/s unreasonably large (dimensional error?)"
+        max_rate = jnp.max(out.dq_c_conv_dt)
+        assert max_rate >= 0, "dq_c_conv_dt must be non-negative"
+        assert max_rate < 1e-3, (
+            f"EDMF dq_c_conv_dt {max_rate:.4e} kg/kg/s unreasonably large "
+            "(dimensional error?)"
+        )
 
 
 # ======================================================================
@@ -349,11 +367,25 @@ class TestIssue6_KuoTriggerUnits:
             "KuoConfig should not have mc_threshold (renamed to me_threshold)"
 
     def test_kuo_trigger_responds_to_moisture_excess(self):
-        """Kuo scheme should activate when column moisture excess exceeds threshold."""
+        """Kuo activates only when column moisture excess exceeds threshold.
+
+        The default ``_make_unstable_columns`` profile is
+        conditionally unstable but undersaturated (``MC = 0``); under
+        the post-Option-C MC-gating Kuo correctly stays off there
+        (no spurious heating, no destroyed vapor, no created cloud
+        water in undersaturated columns). To test that the trigger
+        *does* fire when moisture excess is present, supersaturate
+        the lower half of the column here.
+        """
         from legoesm.atmosphere.physics.convection.kuo import kuo_convection
         from legoesm.atmosphere.physics.convection.config import KuoConfig
+        from legoesm.thermo import saturation_mixing_ratio
 
         T, q_v, p_full, p_half = _make_unstable_columns()
+        q_sat = saturation_mixing_ratio(T, p_full)
+        nlev = q_v.shape[-1]
+        moist_mask = (jnp.arange(nlev) >= nlev // 2)
+        q_v = jnp.where(moist_mask[None, :], 1.05 * q_sat, q_v)
         config = KuoConfig(me_threshold=1e-5)
         out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
 

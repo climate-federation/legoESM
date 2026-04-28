@@ -101,24 +101,90 @@ def ocean_baroclinic_tendencies_fc(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
-    dp_dx = fc_gradient_x_3d(p_prime, grid, fc_config)
-    dp_dy = fc_gradient_y_3d(p_prime, grid, fc_config)
-
-    # --- 4. Diagnose w from flux divergence ---
-    flux_div_k = fc_divergence_3d(
-        h_k * u * mask_3d, h_k * v * mask_3d, grid, fc_config,
+    # Pre-pad (p_prime, K) once and share across both gradient pairs.
+    # Both are 3D scalar fields on (6, n, n, nlev); ``pad_halo_4d`` and
+    # the FC index-space derivatives treat the trailing axis as a
+    # passive batch.  Stack along trailing axis to (6, n, n, nlev, 2),
+    # fold to (6, n, n, nlev*2), and run a single halo + paired x/y
+    # gradient call.  Halves the halo cost vs the previous Loop 78
+    # form (which already shared halo within each gradient pair but
+    # not across the two scalar fields).
+    K = 0.5 * (u**2 + v**2)
+    n_face_pK, n_i_pK, n_j_pK, nlev_pK = p_prime.shape
+    _pK_stack = jnp.stack([p_prime, K], axis=-1)
+    _pK_flat = _pK_stack.reshape(n_face_pK, n_i_pK, n_j_pK, nlev_pK * 2)
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fc
+    _pK_pad = _pad_halo_4d_fc(_pK_flat, halo=1, interp_offsets=grid.halo_interp_offsets)
+    _dpK_dx_flat = fc_gradient_x_3d(_pK_flat, grid, fc_config, padded=_pK_pad)
+    _dpK_dy_flat = fc_gradient_y_3d(_pK_flat, grid, fc_config, padded=_pK_pad)
+    _dpK_dx = _dpK_dx_flat.reshape(
+        _dpK_dx_flat.shape[0], _dpK_dx_flat.shape[1],
+        _dpK_dx_flat.shape[2], nlev_pK, 2,
     )
+    _dpK_dy = _dpK_dy_flat.reshape(
+        _dpK_dy_flat.shape[0], _dpK_dy_flat.shape[1],
+        _dpK_dy_flat.shape[2], nlev_pK, 2,
+    )
+    dp_dx = _dpK_dx[..., 0]
+    dK_dx = _dpK_dx[..., 1]
+    dp_dy = _dpK_dy[..., 0]
+    dK_dy = _dpK_dy[..., 1]
+
+    # --- 4. Diagnose w from flux divergence (batched flux + bare div) ---
+    # Both ``flux_div_k`` and ``div_v`` are FC divergences on (u-component,
+    # v-component) pairs that share the (6, n, n, nlev) shape and use the
+    # same vector halo + metric weights.  Stack the two u-inputs and the
+    # two v-inputs along a new trailing axis, fold to (6, n, n, nlev*2),
+    # call ``fc_divergence_3d`` once on the thicker tensor, and unfold.
+    # The trailing axis is purely passive: the vector rotation in
+    # ``_fc_pad_halo_vector`` broadcasts ``cos_angle/sin_angle`` over the
+    # trailing axis via ``[..., None]``, the metric weights broadcast the
+    # same way, and the FC index-space derivatives operate on axis 1/2
+    # only.  2 fc_divergence calls → 1 (one shared vector halo
+    # exchange + one fused derivative + one final divide).
+    n_face_d, n_i_d, n_j_d, nlev_d = u.shape
+    u_masked = u * mask_3d
+    v_masked = v * mask_3d
+    _div_u_pair = jnp.stack([h_k * u_masked, u_masked], axis=-1)
+    _div_v_pair = jnp.stack([h_k * v_masked, v_masked], axis=-1)
+    _div_u_pair_flat = _div_u_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2)
+    _div_v_pair_flat = _div_v_pair.reshape(n_face_d, n_i_d, n_j_d, nlev_d * 2)
+    # Pre-pad (combined_u, combined_v) ONCE so the divergence and the
+    # curl below share the FC vector halo exchange.  ``stack(..., axis=-1)
+    # + reshape`` interleaves [h*u, u, h*u, u, ...], so the
+    # ``[..., 1::2]`` slot of the padded array is the padded ``u_masked``
+    # — exactly what ``fc_curl_z_3d`` needs.  Saves one full
+    # ``_fc_pad_halo_vector`` collective per RHS evaluation (a vector
+    # halo with cross-face cos/sin rotation, costlier than a scalar
+    # halo) — same Loop 134 exploit as the FC laplacian/hyperdiff
+    # share.
+    from legoesm.core.operators_fc import _fc_pad_halo_vector as _fc_pad_halo_vector_oc
+    _combined_u_pad, _combined_v_pad = _fc_pad_halo_vector_oc(
+        _div_u_pair_flat, _div_v_pair_flat, grid,
+    )
+    _div_pair_flat = fc_divergence_3d(
+        _div_u_pair_flat, _div_v_pair_flat,
+        grid, fc_config,
+        padded=(_combined_u_pad, _combined_v_pad),
+    ).reshape(n_face_d, n_i_d, n_j_d, nlev_d, 2)
+    flux_div_k = _div_pair_flat[..., 0]
+    div_v = _div_pair_flat[..., 1]
     w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
-    div_v = fc_divergence_3d(u * mask_3d, v * mask_3d, grid, fc_config)
-
     # --- 5. Vorticity ---
-    zeta = fc_curl_z_3d(u * mask_3d, v * mask_3d, grid, fc_config)
+    # Reuse the ``u_masked`` / ``v_masked`` padded slices from the
+    # combined halo above — slot index 1 of the interleaved
+    # ``[h*u, u, h*u, u, ...]`` layout.
+    _u_masked_pad = _combined_u_pad[..., 1::2]
+    _v_masked_pad = _combined_v_pad[..., 1::2]
+    zeta = fc_curl_z_3d(
+        u_masked, v_masked, grid, fc_config,
+        padded=(_u_masked_pad, _v_masked_pad),
+    )
 
-    # --- 6. Kinetic energy gradient ---
-    K = 0.5 * (u**2 + v**2)
-    dK_dx = fc_gradient_x_3d(K, grid, fc_config)
-    dK_dy = fc_gradient_y_3d(K, grid, fc_config)
+    # --- 6. Kinetic energy gradient (computed via the batched
+    # (p_prime, K) gradient block above — halo and derivative shared
+    # with p_prime, halving the cost of each timestep).
 
     # --- 7. Vector-invariant momentum (skew-symmetric) ---
     H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
@@ -134,59 +200,151 @@ def ocean_baroclinic_tendencies_fc(
              - 0.5 * v * div_v - dp_dy / rho_0)
 
     # --- Divergence damping (only if fc_config requests it) ---
+    # ``(u_masked, v_masked)`` halo is already produced by the
+    # combined-pad block above (Loop 173) — slot-1 of the interleaved
+    # ``[h*u, u, h*u, u, ...]`` layout.  Pass it via ``padded=`` so
+    # the inner divergence inside ``fc_divergence_damping_3d`` skips
+    # its own ``_fc_pad_halo_vector`` collective (Loop 176).
     if fc_config.div_damp_2 > 0 or fc_config.div_damp_4 > 0:
         du_damp, dv_damp = fc_divergence_damping_3d(
-            u * mask_3d, v * mask_3d, grid, fc_config)
+            u_masked, v_masked, grid, fc_config,
+            padded=(_u_masked_pad, _v_masked_pad),
+        )
         du_dt = du_dt + du_damp
         dv_dt = dv_dt + dv_damp
 
     # --- 8. Vertical advection of u, v ---
-    du_dt = du_dt + _vertical_advection_ocean(u, w, z_coord, J)
-    dv_dt = dv_dt + _vertical_advection_ocean(v, w, z_coord, J)
+    # Batch (u, v) via leading-axis stack so the velocity-independent
+    # shared work (``w_full`` / ``jac_safe`` / ``dz_half``) runs once
+    # and the upwind gradient broadcasts across the new axis.  Same
+    # leading-axis batching as Loop 142 / 162.
+    _uv_va = jnp.stack([u, v], axis=0)
+    _uv_va_adv = _vertical_advection_ocean(_uv_va, w, z_coord, J)
+    du_dt = du_dt + _uv_va_adv[0]
+    dv_dt = dv_dt + _uv_va_adv[1]
 
     # --- 9. Tracer tendencies ---
-    tracers = jnp.stack([T, S], axis=0)
+    # Stack T, S along a trailing tracer axis and fold it into the level
+    # axis so halo-issuing FC operators (fc_scalar_advection_3d,
+    # fc_laplacian_3d, fc_hyperdiffusion_3d) — now 4D-native via
+    # pad_halo_4d (Loop 65) — run ONCE for both tracers instead of being
+    # re-entered under vmap-over-(T,S).  Vertical operators stay
+    # per-tracer because they hard-code the vertical axis at -1.
+    tracer_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
+    n_face, n_i, n_j, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
+    # Broadcast masked velocities across the combined (level × tracer)
+    # axis.  ``tracer_flat`` reshape interleaves levels and tracers as
+    # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]``, so each level's
+    # velocity must be duplicated ``n_tracers`` times to align.
+    # ``jnp.repeat`` does this directly; ``jnp.tile`` would concatenate
+    # the entire array and mis-align tracer ↔ level.
+    u_masked = u * mask_3d
+    v_masked = v * mask_3d
+    if n_tracers == 1:
+        u_b, v_b = u_masked, v_masked
+    else:
+        u_b = jnp.repeat(u_masked, n_tracers, axis=-1)
+        v_b = jnp.repeat(v_masked, n_tracers, axis=-1)
 
-    def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        dtr_dt = fc_scalar_advection_3d(tr, u * mask_3d, v * mask_3d, grid, fc_config)
-        dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
+    # Pre-pad ``tracer_flat`` ONCE up-front and share the halo across
+    # ``fc_scalar_advection_3d`` (Loop 177 — internal x/y gradients
+    # share q's halo) AND the Laplacian/hyperdiff branches below.
+    # Three halo-issuing calls on the same input collapse to a single
+    # ``pad_halo_4d`` collective per RHS evaluation when
+    # diffusion is on (Loop 178 extension of Loops 134/177).
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc_fc_tr
+    tracer_flat_pad = _pad_halo_4d_oc_fc_tr(
+        tracer_flat, halo=1, interp_offsets=grid.halo_interp_offsets,
+    )
+    horiz_flat = fc_scalar_advection_3d(
+        tracer_flat, u_b, v_b, grid, fc_config, padded=tracer_flat_pad,
+    )
+    if physics_fn is None and config.K_h > 0:
+        horiz_flat = horiz_flat + fc_laplacian_3d(
+            tracer_flat, grid, fc_config, padded=tracer_flat_pad,
+        ) * config.K_h
+    if physics_fn is None and config.hyperdiff_coeff > 0:
+        horiz_flat = horiz_flat + fc_hyperdiffusion_3d(
+            tracer_flat, grid, fc_config, config.hyperdiff_coeff,
+            padded=tracer_flat_pad,
+        )
+    horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
 
-        if physics_fn is None:
-            if config.K_h > 0:
-                dtr_dt = dtr_dt + fc_laplacian_3d(tr, grid, fc_config) * config.K_h
-            if config.K_v > 0:
-                dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
-            if config.hyperdiff_coeff > 0:
-                dtr_dt = dtr_dt + fc_hyperdiffusion_3d(tr, grid, fc_config, config.hyperdiff_coeff)
+    # Vertical advection per-tracer (vmap over the trailing axis so JAX
+    # produces one batched kernel rather than n_tracers unrolled stencils).
+    def _vert_adv(q):
+        return _vertical_advection_ocean(q, w, z_coord, J)
 
-        return dtr_dt
+    vert_adv_stack = jax.vmap(_vert_adv, in_axes=-1, out_axes=-1)(tracer_stack)
 
-    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
-    dT_dt = tracer_tend[0]
-    dS_dt = tracer_tend[1]
+    if physics_fn is None and config.K_v > 0:
+        def _vdiff(q):
+            return vertical_diffusion(q, z_coord, J, config.K_v)
+
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        tracer_tend_stack = horiz_stack + vert_adv_stack + vdiff_stack
+    else:
+        tracer_tend_stack = horiz_stack + vert_adv_stack
+
+    dT_dt = tracer_tend_stack[..., 0]
+    dS_dt = tracer_tend_stack[..., 1]
 
     # --- 10. Mixing ---
+    # Stack u, v along a trailing axis and fold it into the level dim so
+    # the halo-issuing horizontal viscosity operators (fc_laplacian_3d,
+    # fc_hyperdiffusion_3d, both 4D-native via pad_halo_4d in Loop 65)
+    # run ONCE on the thicker (6, n, n, nlev*2) field instead of issuing
+    # two separate halo MPI exchanges per call.  Vertical diffusion stays
+    # per-component (axis -1 = nlev hard-coded, no halo).
     if physics_fn is None:
+        n_face_v, n_i_v, n_j_v, nlev_v = u.shape
+        if config.A_h > 0 or config.hyperdiff_coeff > 0:
+            vel_masked_stack = jnp.stack(
+                [u * mask_3d, v * mask_3d], axis=-1,
+            )  # (6, n, n, nlev, 2)
+            vel_masked_flat = vel_masked_stack.reshape(
+                n_face_v, n_i_v, n_j_v, nlev_v * 2,
+            )
+            # Pre-pad ONCE so the explicit Laplacian and the inner
+            # Laplacian of the biharmonic hyperdiffusion share the halo
+            # on ``vel_masked_flat`` instead of issuing two independent
+            # ``pad_halo_4d`` collectives on the same input.  Same
+            # halo-sharing pattern as the CD-grid ocean (Loop 133).
+            from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc_fc
+            vel_masked_pad = _pad_halo_4d_oc_fc(
+                vel_masked_flat, halo=1,
+                interp_offsets=grid.halo_interp_offsets,
+            )
         if config.A_h > 0:
-            vel_masked = jnp.stack([u * mask_3d, v * mask_3d], axis=0)
-            vel_lap = jax.vmap(
-                lambda q: fc_laplacian_3d(q, grid, fc_config) * config.A_h,
-                in_axes=0, out_axes=0,
-            )(vel_masked)
-            du_dt = du_dt + vel_lap[0]
-            dv_dt = dv_dt + vel_lap[1]
+            vel_lap_flat = (
+                fc_laplacian_3d(
+                    vel_masked_flat, grid, fc_config,
+                    padded=vel_masked_pad,
+                ) * config.A_h
+            )
+            vel_lap = vel_lap_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
+            du_dt = du_dt + vel_lap[..., 0]
+            dv_dt = dv_dt + vel_lap[..., 1]
         if config.A_v > 0:
-            vel = jnp.stack([u, v], axis=0)
-            vel_vdiff = jax.vmap(
-                lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
-                in_axes=0, out_axes=0,
-            )(vel)
-            du_dt = du_dt + vel_vdiff[0]
-            dv_dt = dv_dt + vel_vdiff[1]
+            def _vdiff_uv(q):
+                return vertical_diffusion(q, z_coord, J, config.A_v)
+
+            vel_uv = jnp.stack([u, v], axis=-1)
+            vel_vdiff = jax.vmap(_vdiff_uv, in_axes=-1, out_axes=-1)(vel_uv)
+            du_dt = du_dt + vel_vdiff[..., 0]
+            dv_dt = dv_dt + vel_vdiff[..., 1]
 
         if config.hyperdiff_coeff > 0:
-            du_dt = du_dt + fc_hyperdiffusion_3d(u * mask_3d, grid, fc_config, config.hyperdiff_coeff)
-            dv_dt = dv_dt + fc_hyperdiffusion_3d(v * mask_3d, grid, fc_config, config.hyperdiff_coeff)
+            vel_hyper_flat = fc_hyperdiffusion_3d(
+                vel_masked_flat, grid, fc_config, config.hyperdiff_coeff,
+                padded=vel_masked_pad,
+            )
+            vel_hyper = vel_hyper_flat.reshape(
+                n_face_v, n_i_v, n_j_v, nlev_v, 2,
+            )
+            du_dt = du_dt + vel_hyper[..., 0]
+            dv_dt = dv_dt + vel_hyper[..., 1]
     else:
         phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
