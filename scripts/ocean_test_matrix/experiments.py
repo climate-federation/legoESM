@@ -461,7 +461,8 @@ def _run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float,
     physics = create_forcings(tc.grid_type, None, gyre_config)
 
     grid, z_coord, ocean_config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=gyre_config.A_h))
+        _create_ocean_setup(tc, physics=physics, A_h=gyre_config.A_h,
+                            bottom_drag_r=gyre_config.bottom_drag_coeff))
 
     state = create_initial_conditions(tc.grid_type, grid, z_coord, gyre_config)
 
@@ -582,8 +583,16 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
     gbw_config = GlobalBarotropicWindConfig()
     physics = gbw_forcings(tc.grid_type, None, gbw_config)
     nlev_override = tc.run_kwargs.get("nlev", None)
+    # MPAS ico3 needs higher viscosity than lat-lon at comparable
+    # resolution — the TRiSK discretization on irregular cells requires
+    # more dissipation to remain stable with correct bottom drag.
+    A_h = gbw_config.A_h
+    if tc.grid_type == "mpas":
+        A_h = max(A_h, 5e5)
     grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=gbw_config.A_h, nlev=nlev_override))
+        _create_ocean_setup(tc, physics=physics, A_h=A_h,
+                            bottom_drag_r=gbw_config.bottom_drag_coeff,
+                            nlev=nlev_override))
     state = gbw_ic(tc.grid_type, grid, z_coord, gbw_config)
 
     dt = config.DEFAULT_DT
@@ -1307,7 +1316,8 @@ def run_eady_instability(tc: TestCase, output_dir: Path, days: float
     physics = eady_forcings(tc.grid_type, None, eady_config)
 
     grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=eady_config.A_h))
+        _create_ocean_setup(tc, physics=physics, A_h=eady_config.A_h,
+                            bottom_drag_r=eady_config.bottom_drag_coeff))
 
     state = eady_ic(tc.grid_type, grid, z_coord, eady_config)
 
@@ -1579,6 +1589,196 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
 
 
 # ===========================================================================
+# Runner: Eady GM/Redi (parameterized isopycnal flattening, no instability)
+# ===========================================================================
+
+def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
+                     ) -> tuple[str, float, str]:
+    """Eady setup with GM/Redi parameterization instead of resolved eddies.
+
+    Uses the Eady uniform initial conditions (thermal-wind balanced,
+    linear EOS, uniform N²) but at LOW resolution where eddies cannot
+    form.  GM/Redi flattens the isopycnals adiabatically.
+
+    Two sub-cases via run_kwargs["gm_mode"]:
+      "gm_only"   — kappa_GM=1000, kappa_Redi=0 (adiabatic flattening)
+      "redi_only"  — kappa_GM=0, kappa_Redi=1000 (should be ~zero tendency)
+      "gm_redi"   — kappa_GM=1000, kappa_Redi=1000 (default, combined)
+
+    Visual validation:
+      - gm_only: T(y,z) cross-section should show isopycnals relaxing
+        toward horizontal over time; APE decreases monotonically.
+      - redi_only: T(y,z) should remain nearly unchanged (T is constant
+        along isopycnals with linear EOS).
+    """
+    if tc.grid_type != "latlon_channel":
+        raise NotImplementedError(
+            f"eady_gm_redi only for latlon_channel, not {tc.grid_type}")
+
+    from legoesm.ocean.experiments.eady_uniform import (
+        EadyUniformConfig, create_initial_conditions as eu_ic,
+        create_forcings as eu_forcings, compute_sponge_mask)
+    from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.core.field import Field
+
+    eu_config = EadyUniformConfig(
+        T_perturbation_K=0.0,   # No perturbation — clean background
+        U_surface=0.5,
+        N=1.2e-3,
+        A_h=0.0,                # No explicit viscosity
+        B_h=0.0,
+        C_smag=0.0,
+        K_h=0.0,                # No explicit tracer diffusion (GM handles it)
+        K_bih=0.0,
+        sponge_width_deg=2.0,
+    )
+    physics = eu_forcings(tc.grid_type, None, eu_config)
+
+    # GM/Redi mode
+    gm_mode = tc.run_kwargs.get("gm_mode", "gm_redi")
+    slope_scheme = tc.run_kwargs.get("slope_scheme", "centered")
+    # Optional per-case overrides (used by the high-kappa Phase 6
+    # validation cases; default values reproduce the historical 1000).
+    k_GM = float(tc.run_kwargs.get("kappa_GM_override", 1000.0))
+    k_R = float(tc.run_kwargs.get("kappa_Redi_override", 1000.0))
+    if gm_mode == "gm_only":
+        gm_cfg = GMRediConfig(
+            kappa_GM=k_GM, kappa_Redi=0.0, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
+    elif gm_mode == "redi_only":
+        gm_cfg = GMRediConfig(
+            kappa_GM=0.0, kappa_Redi=k_R, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
+    elif gm_mode == "baseline":
+        gm_cfg = GMRediConfig(
+            kappa_GM=0.0, kappa_Redi=0.0, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
+    else:  # "gm_redi"
+        gm_cfg = GMRediConfig(
+            kappa_GM=k_GM, kappa_Redi=k_R, S_max=0.01,
+            slope_scheme=slope_scheme,
+        )
+
+    tc.run_kwargs.setdefault("lat_south", eu_config.lat_south)
+    tc.run_kwargs.setdefault("lat_north", eu_config.lat_north)
+    tc.run_kwargs.setdefault("lon_west", eu_config.lon_west)
+    tc.run_kwargs.setdefault("lon_east", eu_config.lon_east)
+
+    grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(
+            tc, nlev=20, physics=physics,
+            A_h=eu_config.A_h, B_h=eu_config.B_h,
+            C_smag=eu_config.C_smag,
+            K_h=eu_config.K_h, K_bih=eu_config.K_bih,
+            A_v=eu_config.A_v, K_v=eu_config.K_v,
+            bottom_drag_r=eu_config.bottom_drag_coeff,
+            eos="linear",
+            eos_linear=LinearEOSConfig(
+                alpha_T=eu_config.alpha_T,
+                rho_ref=eu_config.rho_0,
+                T_ref=eu_config.T_ref,
+                S_ref=eu_config.S_uniform,
+                # ``beta_S_override`` lets validation cases force the
+                # linear EOS to depend on T only (β_S = 0), so that
+                # the Redi-cancellation property ρ = f(T) is not
+                # contaminated by tiny numerical S evolution.  For
+                # default cases this falls back to the LinearEOSConfig
+                # default (7.4e-4).
+                **(
+                    {"beta_S": float(tc.run_kwargs["beta_S_override"])}
+                    if "beta_S_override" in tc.run_kwargs
+                    else {}
+                ),
+            ),
+            barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=eu_config.barotropic_div_damp,
+            tracer_advection=eu_config.tracer_advection,
+            gm_redi=gm_cfg,
+        ))
+
+    state = eu_ic(tc.grid_type, grid, z_coord, eu_config)
+
+    dt = config.DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    # Sponge layer
+    gamma = compute_sponge_mask(grid, eu_config)
+    T_init_jnp = jnp.array(np.array(state.T.data))
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        interp_cell_to_uface, interp_cell_to_vface)
+    decay_T = jnp.array(np.exp(-dt * gamma)[..., np.newaxis])
+    decay_u = jnp.array(np.exp(-dt * np.array(
+        interp_cell_to_uface(jnp.array(gamma))))[..., np.newaxis])
+    decay_v = jnp.array(np.exp(-dt * np.array(
+        interp_cell_to_vface(jnp.array(gamma))))[..., np.newaxis])
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
+                                  include_velocity_3d=True)
+
+    def step_fn(s, dt_):
+        s_new = model.step(s, dt_)
+        # Sponge: relax T toward initial, damp u/v near walls
+        T_new = s_new.T.data * decay_T + T_init_jnp * (1.0 - decay_T)
+        u_new = s_new.u.data * decay_u
+        v_new = s_new.v.data * decay_v
+        s_new = s_new._replace(
+            u=Field(u_new, name="u", dims=s_new.u.dims, units=s_new.u.units),
+            v=Field(v_new, name="v", dims=s_new.v.dims, units=s_new.v.units),
+            T=Field(T_new, name="T", dims=s_new.T.dims, units=s_new.T.units))
+        return s_new
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Eady GM/Redi [{gm_mode}] ({tc.grid_type})", total_days=days)
+
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    T_vals = diag.get("mean_T", [])
+    T_drift = abs(T_vals[-1] - T_vals[0]) if len(T_vals) >= 2 else 0
+    notes = (f"gm_mode={gm_mode}, max_speed={max_speed:.4f}m/s, "
+             f"T_drift={T_drift:.2e}")
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+    case_label = f"Eady GM/Redi [{gm_mode}] {tc.grid_type} {tc.resolution}"
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "gm_mode": gm_mode, "days": days, "dt": dt, "n_steps": n_steps,
+        "max_speed": max_speed, "T_drift": T_drift,
+        "kappa_GM": gm_cfg.kappa_GM, "kappa_Redi": gm_cfg.kappa_Redi,
+    })
+
+    _save_case_diagnostics(
+        output_dir, case_label,
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("speed_sfc", "Surface Speed (m/s)", "plasma"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"})
+
+    for fkey in ("u_3d", "speed_3d"):
+        _save_cross_sections(
+            output_dir, case_label, snapshots, dt, fkey,
+            coord_kind, lon_deg, lat_deg, depth, "Depth (m)")
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
 # Runner: ACC Channel with Gaussian Ridge
 # ===========================================================================
 
@@ -1823,6 +2023,13 @@ RUNNERS: dict[str, Callable] = {
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
     "eady_instability": run_eady_instability,
     "eady_uniform": run_eady_uniform,
+    "eady_gm_redi_gm_only": run_eady_gm_redi,
+    "eady_gm_redi_redi_only": run_eady_gm_redi,
+    "eady_gm_redi": run_eady_gm_redi,
+    "eady_gm_redi_gm_only_triads": run_eady_gm_redi,
+    "eady_gm_redi_redi_only_triads": run_eady_gm_redi,
+    "eady_gm_redi_triads": run_eady_gm_redi,
+    "eady_gm_redi_baseline_triads": run_eady_gm_redi,
     "acc_channel": run_acc_channel,
     "acc_channel_rest": run_acc_channel_rest,
 }

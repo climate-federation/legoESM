@@ -220,9 +220,6 @@ def create_forcings(grid_type: str, grid, config: BaroclinicGyreConfig = None):
     )
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
     # Surface forcing: sin^2 westerly jet profile.
@@ -255,22 +252,18 @@ def create_forcings(grid_type: str, grid, config: BaroclinicGyreConfig = None):
         scheme="none",  # A_h handled by ocean dynamics, not physics
     )
 
-    # Bottom drag: linear Rayleigh damping
-    bottom_drag = BottomDragConfig(
-        scheme="linear",
-        linear=LinearDragConfig(r=config.bottom_drag_coeff),
-    )
-
-    # Convection: none for now 
+    # Convection: none for now
     convection = OceanConvectionConfig(
         scheme="none",
     )
 
+    # Bottom drag is applied via the dynamics-level ``bottom_drag_r``
+    # field (baroclinic PE + barotropic substeps), not through the
+    # physics pipeline.
     return OceanPhysicsConfig(
         surface_forcing=surface_forcing,
         vertical_mixing=vertical_mixing,
         lateral_mixing=lateral_mixing,
-        bottom_drag=bottom_drag,
         convection=convection,
     )
 

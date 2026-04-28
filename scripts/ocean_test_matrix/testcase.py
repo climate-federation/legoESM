@@ -170,6 +170,32 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "eady_uniform", g, eady_u_res[g], 120.0, 10.0))
 
+    # --- Eady GM/Redi: parameterized isopycnal flattening (low-res, no eddies) ---
+    # Coarse resolution (20x10 ≈ 100 km) so eddies cannot form; GM/Redi
+    # is the only mechanism flattening isopycnals.  Three sub-cases:
+    #   gm_only:   adiabatic flattening (APE decreases, T evolves)
+    #   redi_only: should be ~no-op (T is constant along isopycnals)
+    #   gm_redi:   combined (default, for visual comparison)
+    eady_gm_res = {"latlon_channel": "20x10"}
+    for mode in ["gm_only", "redi_only", "gm_redi"]:
+        case_name = f"eady_gm_redi_{mode}" if mode != "gm_redi" else "eady_gm_redi"
+        matrix.append(TestCase(
+            case_name, "latlon_channel", eady_gm_res["latlon_channel"],
+            30.0, 5.0,
+            run_kwargs={"gm_mode": mode}))
+
+    # Triad-discretisation variants of the same three cases.  These are
+    # cheap (same resolution, same length) but exercise the triad-slope
+    # branch — critical for century-scale climate runs because the
+    # centred discretisation has a small but cumulative cross-isopycnal
+    # residual that triads cancel exactly per stencil.
+    for mode in ["baseline", "gm_only", "redi_only", "gm_redi"]:
+        base = f"eady_gm_redi_{mode}" if mode != "gm_redi" else "eady_gm_redi"
+        matrix.append(TestCase(
+            f"{base}_triads", "latlon_channel", eady_gm_res["latlon_channel"],
+            30.0, 5.0,
+            run_kwargs={"gm_mode": mode, "slope_scheme": "triads"}))
+
     # --- ACC channel with Gaussian ridge (Zhang et al. 2024 inspired) ---
     # ~1 degree isotropic (20 lat x 18 lon over 20x18 deg domain at 40S).
     # ~111 km meridional, ~85 km zonal.

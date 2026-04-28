@@ -63,11 +63,29 @@ class GMRediConfig(NamedTuple):
     by a flow-dependent field computed from the local slope and
     stratification (Visbeck et al. 1997).  ``kappa_Redi`` still
     controls the isopycnal diffusivity.
+
+    ``slope_scheme`` selects the discretisation used to build the
+    isopycnal-tensor fluxes (lat-lon C-grid only — the cubed-sphere
+    implementation always uses centered):
+
+    - ``"triads"`` (default) — Griffies, Gnanadesikan, Pacanowski et
+      al. (1998) triad decomposition.  Each flux is built from four
+      quarter-cell triads that use the SAME three density / tracer
+      values for both slope and gradient, guaranteeing that the Redi
+      flux vanishes exactly for tracers constant along isopycnals
+      (e.g. T with a linear EOS).  Required for century-scale climate
+      runs and the recommended default for all production work.
+    - ``"centered"`` — face-then-interface averaging of centered
+      slopes (cheap, but the Redi tendency for ``q = f(ρ)`` retains a
+      small residual that accumulates through dynamical feedback).
+      Kept as a regression-coverage option and as a fallback for
+      cheap short integrations.
     """
     kappa_GM: float = 1e3       # GM bolus transport coefficient [m^2/s]
     kappa_Redi: float = 1e3     # Redi isopycnal diffusivity [m^2/s]
     S_max: float = 0.01         # Maximum isopycnal slope for tapering
     visbeck: VisbeckConfig = VisbeckConfig()
+    slope_scheme: str = "triads"     # "triads" (default) or "centered"
 
 
 class LateralMixingConfig(NamedTuple):
