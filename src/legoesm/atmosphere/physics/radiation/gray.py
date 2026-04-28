@@ -144,8 +144,10 @@ def _lw_two_stream(
     B = constants.sigma_sb * T ** 4  # (ncol, nlev)
 
     # --- Downward sweep (top to bottom) using scan ---
-    # BC: F_down(TOA) = 0
-    F_down_toa = jnp.zeros(ncol)
+    # BC: F_down(TOA) = 0.  Pin to the result-type that the scan body
+    # actually computes (transmittance * F_above + emissivity*B), so
+    # the carry dtype matches under any storage/compute precision combo.
+    F_down_toa = jnp.zeros(ncol, dtype=jnp.result_type(transmittance, B))
     t_T = jnp.moveaxis(transmittance, 1, 0)    # (nlev, ncol)
     eB_T = jnp.moveaxis(emissivity * B, 1, 0)  # (nlev, ncol)
 

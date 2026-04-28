@@ -22,6 +22,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 
@@ -343,21 +344,28 @@ class EnergyBudgetTracker:
         EnergyBudget
             Snapshot of global-mean energy budget diagnostics.
         """
-        # Column energy (global mean)
+        # Column energy + TOA + surface fluxes — fuse all six means
+        # into one ``jnp.stack`` + ``np.asarray`` host transfer.  The
+        # previous chain serialised six GPU stalls per energy-budget
+        # check.
         E = column_moist_static_energy(
             T, q_v, u, v, phis, p_s, dsigma, sigma_full,
         )
-        mean_E = float(jnp.mean(E))
-
-        # TOA fluxes (global mean)
-        mean_sw_down_toa = float(jnp.mean(sw_down_toa))
-        mean_sw_up_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_up_toa = float(jnp.mean(lw_up_toa))
+        _h = np.asarray(jnp.stack([
+            jnp.mean(E),
+            jnp.mean(sw_down_toa),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ]))
+        mean_E = float(_h[0])
+        mean_sw_down_toa = float(_h[1])
+        mean_sw_up_toa = float(_h[2])
+        mean_lw_up_toa = float(_h[3])
+        mean_sw_sfc = float(_h[4])
+        mean_lw_sfc = float(_h[5])
         mean_toa_net = mean_sw_down_toa - mean_sw_up_toa - mean_lw_up_toa
-
-        # Surface fluxes (global mean)
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
         mean_sfc_net = mean_sw_sfc + mean_lw_sfc
 
         # Energy tendency and residual
@@ -525,10 +533,11 @@ class MoistureBudgetTracker:
         from legoesm.diagnostics.column_integrals import column_water_vapor
 
         W = column_water_vapor(q_v, p_s, dsigma)
-        mean_W = float(jnp.mean(W))
-
-        # Precipitation in mm/day
-        mean_P = float(jnp.mean(precip)) * 86400.0  # kg/m²/s → mm/day
+        # Fuse the column-water-vapor + precipitation means into one
+        # host transfer.
+        _h = np.asarray(jnp.stack([jnp.mean(W), jnp.mean(precip)]))
+        mean_W = float(_h[0])
+        mean_P = float(_h[1]) * 86400.0  # kg/m²/s → mm/day
 
         # Tendency
         if self._prev_water is not None and self._prev_time is not None:

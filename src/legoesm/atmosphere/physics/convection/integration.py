@@ -35,8 +35,10 @@ from legoesm.atmosphere.physics.convection.config import ConvectionConfig
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
-from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
-from legoesm.atmosphere.physics.convection.edmf import edmf_convection
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    edmf_convection,
+    mass_flux_convection,
+)
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
     reconstruct_half_level_pressure_hydrostatic,
@@ -157,25 +159,29 @@ def _make_hydrostatic_convection(
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
 
+        # Pin defaulted allocations to the state precision so x64-default
+        # zeros do not silently flow into the column physics path.
+        _state_dtype = T.dtype
+        _ps_dtype = state.p_s.data.dtype
         # Extract water vapor from tracers if available; else assume dry.
         if state.tracers is not None and "q_v" in state.tracers:
             _qv_raw = state.tracers["q_v"]
             _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
             q_v_col = _qv_data.reshape(ncol, nlev)
         else:
-            q_v_col = jnp.zeros((ncol, nlev))
+            q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         conv_prog_out = None
         if conv_fn is None:
             # "none" scheme: return zero tendencies
-            dT_dt = jnp.zeros(shape_3d)
+            dT_dt = jnp.zeros(shape_3d, dtype=_state_dtype)
         elif is_prognostic:
             if phys_state is not None:
                 prog_in = phys_state.conv_prog
                 if prog_in.shape != (ncol,):
-                    prog_in = jnp.full(ncol, prog_init)
+                    prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
             else:
-                prog_in = jnp.full(ncol, prog_init)
+                prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
 
             conv_out, prog_new = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -196,24 +202,34 @@ def _make_hydrostatic_convection(
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
 
-        # Propagate tracer tendencies from convection backend
+        # Propagate tracer tendencies from convection backend.
+        # Convective detrained condensate (``dq_c_conv_dt``) feeds the
+        # cloud-water tracer; the dynamical core's tracer registry
+        # picks it up by name (``q_c``) and applies it alongside the
+        # microphysics tendency on the next step. Models without a
+        # ``q_c`` tracer simply ignore the entry.
         tracer_tends = None
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
+            dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
             tracer_tends = {
                 "q_v": Field(
                     data=dq_v_dt, name="dq_v_dt_conv",
+                    dims=dims_3d, units="kg/kg/s",
+                ),
+                "q_c": Field(
+                    data=dq_c_conv_dt, name="dq_c_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
                 ),
             }
 
         tendencies = HydrostaticTendencies(
             du_dt=Field(
-                data=jnp.zeros(shape_3d), name="du_dt_conv",
+                data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_conv",
                 dims=dims_3d, units="m/s^2",
             ),
             dv_dt=Field(
-                data=jnp.zeros(shape_3d), name="dv_dt_conv",
+                data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_conv",
                 dims=dims_3d, units="m/s^2",
             ),
             dT_dt=Field(
@@ -221,11 +237,11 @@ def _make_hydrostatic_convection(
                 dims=dims_3d, units="K/s",
             ),
             dp_s_dt=Field(
-                data=jnp.zeros(shape_2d), name="dp_s_dt_conv",
+                data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dp_s_dt_conv",
                 dims=dims_2d, units="Pa/s",
             ),
             dphis_dt=Field(
-                data=jnp.zeros(shape_2d), name="dphis_dt_conv",
+                data=jnp.zeros(shape_2d, dtype=_ps_dtype), name="dphis_dt_conv",
                 dims=dims_2d, units="m^2/s^3",
             ),
             tracer_tendencies=tracer_tends,
@@ -311,11 +327,15 @@ def _make_nonhydrostatic_convection(
         p_full_col = p.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
 
+        # Pin defaulted allocations to the state precision so x64 zeros
+        # do not silently flow into the column physics path.
+        _state_dtype = T.dtype
+        _phis_dtype = state.phis.data.dtype
         # Extract q_v from tracers if available
         if n_tracers > 0:
             q_v_col = tracers[..., 0].reshape(ncol, nlev)
         else:
-            q_v_col = jnp.zeros((ncol, nlev))
+            q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         dims_3d = ("face", "x", "y", "level")
         dims_w = ("face", "x", "y", "level_half")
@@ -324,12 +344,12 @@ def _make_nonhydrostatic_convection(
 
         if conv_fn is None:
             return NonHydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_conv", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_conv", dims=dims_3d, units="m/s^2"),
-                dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_conv", dims=dims_w, units="m/s^2"),
-                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d), name="dtheta_prime_dt_conv", dims=dims_3d, units="K/s"),
-                drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_conv", dims=dims_3d, units="kg/m^3/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_conv", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_conv", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_conv", dims=dims_3d, units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_conv", dims=dims_w, units="m/s^2"),
+                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dtheta_prime_dt_conv", dims=dims_3d, units="K/s"),
+                drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_conv", dims=dims_3d, units="kg/m^3/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_conv", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_conv", dims=dims_tr, units="1/s"),
             )
 
@@ -338,9 +358,9 @@ def _make_nonhydrostatic_convection(
             if phys_state is not None:
                 prog_in = phys_state.conv_prog
                 if prog_in.shape != (ncol,):
-                    prog_in = jnp.full(ncol, prog_init)
+                    prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
             else:
-                prog_in = jnp.full(ncol, prog_init)
+                prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
 
             conv_out, prog_new = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -360,19 +380,34 @@ def _make_nonhydrostatic_convection(
         dT_dt = conv_out.dT_dt.reshape(shape_3d)
         dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
 
-        # Tracer tendencies
+        # Tracer tendencies. The non-hydrostatic state's tracer ordering
+        # is documented on ``NonHydrostaticState`` in
+        # ``src/legoesm/core/state.py``:
+        #   moist runs → tracers[..., 0] = q_vapor,
+        #                tracers[..., 1] = q_cloud,
+        #                tracers[..., 2] = q_rain.
+        # Slot 0 (``q_v``) carries the convection vapor tendency; slot
+        # 1 (``q_c``) carries the convective detrained-condensate
+        # source so that microphysics processes it through
+        # autoconversion / sedimentation / evaporation rather than the
+        # previous instant-fall assumption (Option C). Models with
+        # ``n_tracers < 2`` (dry or vapor-only runs) silently omit the
+        # ``q_c`` write — there is no slot to receive it.
         dtracers = jnp.zeros_like(tracers)
         if n_tracers > 0:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dtracers = dtracers.at[..., 0].set(dq_v_dt)
+        if n_tracers > 1:
+            dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            dtracers = dtracers.at[..., 1].set(dq_c_conv_dt)
 
         tendencies = NonHydrostaticTendencies(
-            du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_conv", dims=dims_3d, units="m/s^2"),
-            dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_conv", dims=dims_3d, units="m/s^2"),
-            dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_conv", dims=dims_w, units="m/s^2"),
+            du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_conv", dims=dims_3d, units="m/s^2"),
+            dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_conv", dims=dims_3d, units="m/s^2"),
+            dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_conv", dims=dims_w, units="m/s^2"),
             dtheta_prime_dt=Field(data=dtheta_prime_dt, name="dtheta_prime_dt_conv", dims=dims_3d, units="K/s"),
-            drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_conv", dims=dims_3d, units="kg/m^3/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_conv", dims=dims_2d, units="m^2/s^3"),
+            drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_conv", dims=dims_3d, units="kg/m^3/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_conv", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_conv", dims=dims_tr, units="1/s"),
         )
         return tendencies, conv_prog_out
@@ -439,13 +474,16 @@ def _make_spectral_pe_convection(
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
+        # Pin the column-physics dtype to the gridded state precision so
+        # we never silently flow x64 zeros into the column path.
+        _state_dtype = T.dtype
         # Extract water vapor if spectral state carries tracers.
         if hasattr(state, "tracers") and state.tracers is not None and "q_v" in state.tracers:
             _qv_raw = state.tracers["q_v"]
             _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
             q_v_col = _qv_data.reshape(ncol, nlev)
         else:
-            q_v_col = jnp.zeros((ncol, nlev))
+            q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         conv_prog_out = None
         if conv_fn is None:
@@ -454,9 +492,9 @@ def _make_spectral_pe_convection(
             if phys_state is not None:
                 prog_in = phys_state.conv_prog
                 if prog_in.shape != (ncol,):
-                    prog_in = jnp.full(ncol, prog_init)
+                    prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
             else:
-                prog_in = jnp.full(ncol, prog_init)
+                prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
 
             conv_out, prog_new = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -474,7 +512,16 @@ def _make_spectral_pe_convection(
             )
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
-        # Transform T tendency to spectral space
+        # Transform T tendency to spectral space.
+        # NOTE: this dispatcher already drops ``conv_out.dq_v_dt`` and
+        # (post-Option-C) also drops ``conv_out.dq_c_conv_dt`` — the
+        # spectral PE state surfaced here doesn't carry tracer
+        # tendencies. This is a pre-existing limitation: spectral PE
+        # runs effectively dry through the convection coupling.
+        # TODO(option-c): when spectral PE gains tracer-tendency
+        # plumbing, route ``conv_out.dq_v_dt`` and
+        # ``conv_out.dq_c_conv_dt`` here so the convective vapor sink
+        # and cloud-water source are no longer silently discarded.
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
         # No wind or surface pressure tendencies from convection

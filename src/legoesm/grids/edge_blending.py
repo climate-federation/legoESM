@@ -122,15 +122,24 @@ def blend_scalar_cube_edges(arr: jax.Array, strength: float, width: int = 1) -> 
     if arr.ndim == 3:
         return blend_scalar_cube_edges_2d(arr, strength, width=width)
     if arr.ndim == 4:
-        arr_t = jnp.moveaxis(arr, -1, 0)  # (nlev, 6, n, n)
-        out_t = jax.vmap(lambda a: blend_scalar_cube_edges_2d(a, strength, width=width))(arr_t)
-        return jnp.moveaxis(out_t, 0, -1)
+        # ``jax.vmap`` accepts negative axes — vmap over the trailing
+        # level dimension directly so we skip two ``jnp.moveaxis``
+        # round-trips.  XLA fuses the layout consequences with the
+        # scatter-add inside ``blend_scalar_cube_edges_2d``.
+        return jax.vmap(
+            lambda a: blend_scalar_cube_edges_2d(a, strength, width=width),
+            in_axes=-1, out_axes=-1,
+        )(arr)
     if arr.ndim == 5:
+        # Fold (nlev, ntr) into a single trailing axis and vmap over it
+        # via negative axis — same trick as the rank-4 path.  Only one
+        # reshape pair is needed; the moveaxis dance is gone.
         lead = arr.shape[3] * arr.shape[4]
         arr_f = arr.reshape(arr.shape[0], arr.shape[1], arr.shape[2], lead)
-        arr_t = jnp.moveaxis(arr_f, -1, 0)  # (lead, 6, n, n)
-        out_t = jax.vmap(lambda a: blend_scalar_cube_edges_2d(a, strength, width=width))(arr_t)
-        out_f = jnp.moveaxis(out_t, 0, -1)
+        out_f = jax.vmap(
+            lambda a: blend_scalar_cube_edges_2d(a, strength, width=width),
+            in_axes=-1, out_axes=-1,
+        )(arr_f)
         return out_f.reshape(arr.shape)
     raise ValueError(
         "blend_scalar_cube_edges expects rank-3/4/5 cubed-sphere array, "

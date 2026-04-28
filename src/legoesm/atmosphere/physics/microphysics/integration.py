@@ -151,13 +151,16 @@ def _make_hydrostatic_microphysics(
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
 
+        # Pin defaulted allocations to the state precision so we never
+        # silently flow x64 zeros into the column physics path.
+        _state_dtype = T.dtype
         if micro_fn is None:
             return HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
-                dT_dt=Field(data=jnp.zeros(shape_3d), name="dT_dt_micro", dims=dims_3d, units="K/s"),
-                dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+                dT_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dT_dt_micro", dims=dims_3d, units="K/s"),
+                dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
             )
 
         # Pressure at full and half levels
@@ -176,7 +179,7 @@ def _make_hydrostatic_microphysics(
                 raw = state.tracers[name]
                 data = raw.data if hasattr(raw, "data") else raw
                 return jnp.maximum(data.reshape(ncol, nlev), 0.0)
-            return jnp.zeros((ncol, nlev))
+            return jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         # Extract water vapor from tracers if available; else assume dry.
         q_v_col = _get_tracer("q_v")
@@ -234,11 +237,11 @@ def _make_hydrostatic_microphysics(
         }
 
         return HydrostaticTendencies(
-            du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
-            dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+            du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
+            dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_micro", dims=dims_3d, units="K/s"),
-            dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
+            dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
         )
 
@@ -298,14 +301,18 @@ def _make_nonhydrostatic_microphysics(
         dims_2d = ("face", "x", "y")
         dims_tr = ("face", "x", "y", "level", "tracer")
 
+        # Pin defaulted allocations to the state precision so x64 zeros
+        # do not silently flow into the column physics path.
+        _state_dtype = T.dtype
+        _phis_dtype = state.phis.data.dtype
         if micro_fn is None:
             return NonHydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
-                dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_micro", dims=dims_w, units="m/s^2"),
-                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d), name="dtheta_prime_dt_micro", dims=dims_3d, units="K/s"),
-                drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_micro", dims=dims_3d, units="kg/m^3/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_micro", dims=dims_w, units="m/s^2"),
+                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dtheta_prime_dt_micro", dims=dims_3d, units="K/s"),
+                drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_micro", dims=dims_3d, units="kg/m^3/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_micro", dims=dims_tr, units="1/s"),
             )
 
@@ -330,7 +337,7 @@ def _make_nonhydrostatic_microphysics(
         def _get_tracer(idx):
             if n_tracers > idx:
                 return tracers[..., idx].reshape(ncol, nlev)
-            return jnp.zeros((ncol, nlev))
+            return jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         q_v_col = _get_tracer(0)
         hydrometeors = HydrometeorState(
@@ -379,12 +386,12 @@ def _make_nonhydrostatic_microphysics(
                 dtracers = dtracers.at[..., idx].set(field.reshape(shape_3d))
 
         return NonHydrostaticTendencies(
-            du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
-            dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
-            dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_micro", dims=dims_w, units="m/s^2"),
+            du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
+            dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+            dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_micro", dims=dims_w, units="m/s^2"),
             dtheta_prime_dt=Field(data=dtheta_prime_dt, name="dtheta_prime_dt_micro", dims=dims_3d, units="K/s"),
-            drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_micro", dims=dims_3d, units="kg/m^3/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
+            drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_micro", dims=dims_3d, units="kg/m^3/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_micro", dims=dims_tr, units="1/s"),
         )
 
@@ -451,12 +458,14 @@ def _make_spectral_pe_microphysics(
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
-        q_v_col = jnp.zeros((ncol, nlev))
+        # Pin the column-physics dtype to the gridded state precision so
+        # we do not silently flow x64 zeros into the column path.
+        q_v_col = jnp.zeros((ncol, nlev), dtype=T.dtype)
 
         rho = _compute_rho(T_col, p_full_col)
         dz = _compute_heights_from_sigma(T_col, p_half_col)
 
-        hydrometeors = make_zero_hydrometeors(ncol, nlev)
+        hydrometeors = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)
 
         if is_ml:
             if _ml_model_cache[0] is None:

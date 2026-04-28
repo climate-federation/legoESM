@@ -101,7 +101,9 @@ def hines_gwd(
 
         return sigma_new, drag
 
-    sigma_gw_init = jnp.full((ncol,), config.total_rms_wind)
+    # Pin the carry dtype so the scan body stays at the input precision
+    # (defaulting allows x64 to silently promote the launch wind to f64).
+    sigma_gw_init = jnp.full((ncol,), config.total_rms_wind, dtype=u.dtype)
     _, drag_stack = jax.lax.scan(scan_fn, sigma_gw_init, jnp.arange(nlev))
     drag_all = drag_stack.T[:, ::-1]  # (ncol, nlev), top-first
 

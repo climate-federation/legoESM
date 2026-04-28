@@ -158,29 +158,34 @@ def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
 
     sigma_dot_inner = fractional_sigma * D_total - cumsum_div
 
-    shape_2d = div_3d.shape[:-1]
-    zero_top = jnp.zeros((*shape_2d, 1))
-    sigma_dot = jnp.concatenate([zero_top, sigma_dot_inner], axis=-1)
-    sigma_dot = sigma_dot.at[..., -1].set(0.0)
+    # Top BC: σ̇=0; bottom BC: zero by construction
+    # (frac_sigma[-1]=1, cumsum_div[-1]=D_total → sigma_dot_inner[-1]=0).
+    # Drop the (∼0) trailing element + pad with zeros on both ends in
+    # one ``jnp.pad`` — replaces ``jnp.pad`` + scatter (2 HLO ops) with
+    # slice + Pad (2 HLO ops) but eliminates the float roundoff in
+    # sigma_dot[-1].
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
+    sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
     return sigma_dot
 
 
 def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
-    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes."""
+    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes.
+
+    Top/bottom boundaries pad with a zero gradient; using ``jnp.pad``
+    instead of ``concatenate([jnp.zeros(...), ...])`` lowers to a
+    single XLA ``Pad`` op rather than allocating a fresh zero buffer
+    every RHS evaluation (this helper runs 3-5× per outer step under
+    SSP-RK).
+    """
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
     dsigma_bwd = sigma_coord.dsigma_full
     df_bwd = jnp.diff(field, axis=-1)
+    diff = df_bwd / dsigma_bwd
 
-    grad_bwd = jnp.concatenate(
-        [jnp.zeros((*field.shape[:-1], 1)),
-         df_bwd / dsigma_bwd],
-        axis=-1,
-    )
-    grad_fwd = jnp.concatenate(
-        [df_bwd / dsigma_bwd,
-         jnp.zeros((*field.shape[:-1], 1))],
-        axis=-1,
-    )
+    pad_axes = ((0, 0),) * (diff.ndim - 1)
+    grad_bwd = jnp.pad(diff, (*pad_axes, (1, 0)))
+    grad_fwd = jnp.pad(diff, (*pad_axes, (0, 1)))
 
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
     return -sigma_dot_full * grad
@@ -232,18 +237,48 @@ def spectral_pe_tendencies(
         _dealias_3d = None
 
     # --- 1. Transform to grid space ---
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
-    T = sh_synthesis_3d(grid, state.T_hat.data)
+    # Merge the (vor, div, T) 3D batch with the (lnps, phis, im·lnps)
+    # 2D triplet via ``jnp.concatenate``: trailing axis = ``nlev*3 + 3``.
+    # ``sh_synthesis_3d`` treats any trailing axis as a passive batch,
+    # so different "level" sizes (nlev vs 1) combine cleanly into a
+    # single ``segment_sum`` + IRFFT.  6 SH syntheses → 1.  Loop 182
+    # extends Loop 181 (spectral ocean merge).
+    n_sh, nlev = state.vor_hat.data.shape
+    _hat_stack = jnp.stack(
+        [state.vor_hat.data, state.div_hat.data, state.T_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 3)
+    _hat_flat = _hat_stack.reshape(n_sh, nlev * 3)
+    # Append the three 2D fields as single-level slots.  ``im·lnps_hat``
+    # is the spectral pre-multiply that yields ``∂(lnps)/∂λ`` on the
+    # grid post-synthesis (Loop 147 trick).
+    _ims_lnps = (1j * grid.ms) * state.lnps_hat.data  # (n_sh,)
+    _all_hat_flat = jnp.concatenate(
+        [
+            _hat_flat,
+            state.lnps_hat.data[:, jnp.newaxis],
+            state.phis_hat.data[:, jnp.newaxis],
+            _ims_lnps[:, jnp.newaxis],
+        ],
+        axis=-1,
+    )  # (n_sh, nlev*3 + 3)
+    _all_grid_flat = sh_synthesis_3d(grid, _all_hat_flat)
+    _grid_stack = _all_grid_flat[..., : nlev * 3].reshape(
+        grid.n_lat, grid.n_lon, nlev, 3,
+    )
+    vor = _grid_stack[..., 0]
+    div = _grid_stack[..., 1]
+    T = _grid_stack[..., 2]
     # Smooth positivity protection (C∞ differentiable, scaled softplus for ~0.07K bias)
     _sp_scale = 0.1
     T = T + _sp_scale * jax.nn.softplus((config.T_min - T) / _sp_scale)
-    lnps_raw = sh_synthesis(grid, state.lnps_hat.data)
+    lnps_raw = _all_grid_flat[..., nlev * 3]
+    phis = _all_grid_flat[..., nlev * 3 + 1]
+    _dfdlon_lnps = _all_grid_flat[..., nlev * 3 + 2]
     # Smooth two-sided clip with zero bias in interior:
     # softplus(lo - x) pulls up near lower bound; softplus(x - hi) pulls down near upper
     lnps = lnps_raw + jax.nn.softplus(_LNPS_MIN - lnps_raw) - jax.nn.softplus(lnps_raw - _LNPS_MAX)
     # (n_lat, n_lon)
-    phis = sh_synthesis(grid, state.phis_hat.data)
 
     # --- 2. Velocities ---
     u_cos, v_cos = uv_from_vordiv_3d(
@@ -302,20 +337,29 @@ def spectral_pe_tendencies(
     one_over_a = 1.0 / a
 
     # --- 10. Vorticity fluxes: (zeta+f)*u*cos, (zeta+f)*v*cos ---
+    # Batch the four SH analyses (oc2 on A_vor & B_vor, dmu on A_vor &
+    # B_vor) into two: stack ``(A_vor, B_vor)`` along a trailing axis
+    # and fold into the level dim so each SH-analysis variant runs once
+    # on a thicker (n_lat, n_lon, nlev*2) tensor.  Both
+    # ``sh_analysis_oc2_3d`` and ``sh_analysis_dmu_3d`` treat the
+    # trailing axis as a passive batch (FFT on lon, weighted sum over
+    # lat — neither touches the trailing axis), so the result is
+    # identical to two separate calls.  4 SH forwards → 2.
     A_vor = abs_vor * u_cos   # (n_lat, n_lon, nlev)
     B_vor = abs_vor * v_cos
+    _AB_stack = jnp.stack([A_vor, B_vor], axis=-1)  # (..., nlev, 2)
+    n_lat_t, n_lon_t, nlev_t, _ = _AB_stack.shape
+    _AB_flat = _AB_stack.reshape(n_lat_t, n_lon_t, nlev_t * 2)
+    _oc2_AB = sh_analysis_oc2_3d(grid, _AB_flat).reshape(-1, nlev_t, 2)
+    _dmu_AB = sh_analysis_dmu_3d(grid, _AB_flat).reshape(-1, nlev_t, 2)
+    _A_oc2, _B_oc2 = _oc2_AB[..., 0], _oc2_AB[..., 1]
+    _A_dmu, _B_dmu = _dmu_AB[..., 0], _dmu_AB[..., 1]
 
     # Spectral divergence of vorticity flux -> dvor/dt
-    flux_vor_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, A_vor)
-        - one_over_a * sh_analysis_dmu_3d(grid, B_vor)
-    )  # (n_sh, nlev)
+    flux_vor_div = im_over_a[:, None] * _A_oc2 - one_over_a * _B_dmu  # (n_sh, nlev)
 
     # Spectral curl of vorticity flux -> ddiv/dt contribution
-    flux_vor_curl = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, B_vor)
-        + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
-    )
+    flux_vor_curl = im_over_a[:, None] * _B_oc2 + one_over_a * _A_dmu
 
     # --- 11. Pressure gradient force (correct form, NOT Bourke E-variable) ---
     # The PGF divergence is: -∇²(K + Φ) - ∇·(R_d·T·∇lnps)
@@ -330,10 +374,12 @@ def spectral_pe_tendencies(
     # (-R_d·lnps_0·∇²T') that is unstable when combined with
     # adiabatic heating.
     T_ref = config.si_T_ref
-    KPhi_hat = sh_analysis_oc2_3d(grid, KE_cos2) + sh_analysis_3d(grid, Phi)
 
-    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic)
-    dfdlon = sh_synthesis(grid, 1j * grid.ms * state.lnps_hat.data)
+    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic).
+    # ``dfdlon`` is reused from the batched (lnps, phis, im·lnps)
+    # synthesis above (Loop 147) — saves a separate ``sh_synthesis``
+    # call on the same input.
+    dfdlon = _dfdlon_lnps
     cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
     dlnps_dx = dfdlon / (a * cos_lat_2d)
     dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
@@ -352,19 +398,6 @@ def spectral_pe_tendencies(
         _pgf_dlnps_dy = _pgf_dlnps_dy * _hf
     pgf_Fx_cos = R_d * T_prime_pgf * _pgf_dlnps_dx * cos_lat_3d
     pgf_Fy_cos = R_d * T_prime_pgf * _pgf_dlnps_dy * cos_lat_3d
-    pgf_correction_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_Fx_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, pgf_Fy_cos)
-    )
-
-    # --- 12. Horizontal tendencies ---
-    dvor_hat = -flux_vor_div
-    ddiv_hat = (
-        flux_vor_curl
-        - grid.lap[:, None] * KPhi_hat
-        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
-        - pgf_correction_hat
-    )
 
     # --- 13. Temperature equation ---
     # Horizontal: dT/dt = -v·∇T = -div(T*v) + T*div(v)
@@ -378,22 +411,64 @@ def spectral_pe_tendencies(
     T_prime_u_cos = T_prime * u_cos
     T_prime_v_cos = T_prime * v_cos
 
+    # Batch SH oc2: PGF needs oc2(Fx), the T equation needs oc2(T'u),
+    # and ``KPhi_hat`` (used by the divergence Laplacian below) needs
+    # oc2(KE_cos2).  All three are oc2 forward analyses on
+    # ``(n_lat, n_lon, nlev)`` grid fields; stack along a trailing axis
+    # and fold into level so the oc2 SH runs once on a thicker
+    # ``(n_lat, n_lon, nlev*3)`` tensor — 3 separate oc2 forwards
+    # collapse to 1.  ``Phi`` still needs the *plain* sh_analysis_3d
+    # weights, so it stays in its own (single) call.  The dmu branch
+    # remains a 2-input batch (PGF Fy + T'v).
+    _pgfTK_oc2_stack = jnp.stack(
+        [pgf_Fx_cos, T_prime_u_cos, KE_cos2], axis=-1,
+    )  # (..., nlev, 3)
+    _pgfT_dmu_stack = jnp.stack([pgf_Fy_cos, T_prime_v_cos], axis=-1)
+    n_lat_p, n_lon_p, nlev_p, _ = _pgfTK_oc2_stack.shape
+    _oc2_triple = sh_analysis_oc2_3d(
+        grid, _pgfTK_oc2_stack.reshape(n_lat_p, n_lon_p, nlev_p * 3),
+    ).reshape(-1, nlev_p, 3)
+    _dmu_pair = sh_analysis_dmu_3d(
+        grid, _pgfT_dmu_stack.reshape(n_lat_p, n_lon_p, nlev_p * 2),
+    ).reshape(-1, nlev_p, 2)
+
+    pgf_correction_hat = (
+        im_over_a[:, None] * _oc2_triple[..., 0]
+        - one_over_a * _dmu_pair[..., 0]
+    )
+
+    # ``KPhi_hat`` consumes the third slice of the oc2 batch above
+    # (``oc2(KE_cos2)``) plus the *plain* SH analysis of geopotential
+    # ``Phi`` (different SH weight matrix → cannot share the oc2 call).
+    # The plain ``sh_analysis_3d(Phi)`` is batched with the temperature
+    # tendency analysis below (Loop 145), so we keep ``KPhi_oc2`` here
+    # and add the Phi contribution after the batch.
+    KPhi_oc2 = _oc2_triple[..., 2]
+
+    # --- 12. Horizontal tendencies ---
+    dvor_hat = -flux_vor_div
+    # Build ``ddiv_hat`` with the KE contribution to ``KPhi_hat``
+    # already in place; the geopotential ``Phi`` contribution is added
+    # after the batched sh_analysis_3d below (Loop 145).
+    ddiv_hat = (
+        flux_vor_curl
+        - grid.lap[:, None] * KPhi_oc2
+        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
+        - pgf_correction_hat
+    )
+
     flux_T_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, T_prime_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, T_prime_v_cos)
+        im_over_a[:, None] * _oc2_triple[..., 1]
+        - one_over_a * _dmu_pair[..., 1]
     )
 
     T_prime_div = T_prime * div
-    T_prime_div_hat = sh_analysis_3d(grid, T_prime_div)
-
-    dT_hat = -flux_T_div + T_prime_div_hat
 
     # Vertical advection of T
     if _hybrid:
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
     else:
         vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
-    dT_hat = dT_hat + sh_analysis_3d(grid, vert_adv_T)
 
     # Adiabatic heating: kappa * T * omega / p
     if _hybrid:
@@ -410,7 +485,36 @@ def spectral_pe_tendencies(
         v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
-    dT_hat = dT_hat + sh_analysis_3d(grid, adiabatic)
+    # Combine the three grid-space contributions to dT/dt before the SH
+    # forward transform.  ``sh_analysis_3d`` is linear, so
+    # ``Σ_i sh_analysis_3d(f_i) = sh_analysis_3d(Σ_i f_i)`` — summing on
+    # grid first replaces three SH analyses (each one ``segment_sum`` +
+    # one FFT) with one.  ``vert_adv_T``, ``adiabatic``, and
+    # ``T_prime_div`` all share the (n_lat, n_lon, nlev) grid shape.
+    dT_grid_sum = T_prime_div + vert_adv_T + adiabatic
+
+    # Batch the dT-grid SH analysis with the geopotential ``Phi``
+    # analysis (Loop 145) AND the ``dlnps_dt_grid`` 2D analysis (Loop
+    # 184).  All three are plain ``sh_analysis_3d`` calls on grid
+    # fields with the same Legendre weight matrix; ``dlnps_dt_grid``
+    # is 2D (n_lat, n_lon) so it joins as a single-level slot via
+    # ``[..., None]`` + ``jnp.concatenate``.  Trailing axis =
+    # ``nlev*2 + 1``.  3 plain SH analyses → 1.
+    n_lat_T, n_lon_T, nlev_T = dT_grid_sum.shape
+    _Tphi_stack = jnp.stack([dT_grid_sum, Phi], axis=-1)
+    _Tphi_flat = _Tphi_stack.reshape(n_lat_T, n_lon_T, nlev_T * 2)
+    _Tphi_lnps_input = jnp.concatenate(
+        [_Tphi_flat, dlnps_dt_grid[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, nlev*2 + 1)
+    _Tphi_lnps_hat = sh_analysis_3d(grid, _Tphi_lnps_input)
+    _Tphi_hat = _Tphi_lnps_hat[:, : nlev_T * 2].reshape(-1, nlev_T, 2)
+    _dT_grid_hat = _Tphi_hat[..., 0]
+    _Phi_hat = _Tphi_hat[..., 1]
+    _dlnps_hat_pre = _Tphi_lnps_hat[:, nlev_T * 2]
+    dT_hat = -flux_T_div + _dT_grid_hat
+    # Apply the deferred ``-∇²(Φ)`` contribution to the divergence
+    # tendency now that ``Phi_hat`` is available from the batch.
+    ddiv_hat = ddiv_hat - grid.lap[:, None] * _Phi_hat
 
     # --- 14. Vertical advection of momentum ---
     if _hybrid:
@@ -420,26 +524,33 @@ def spectral_pe_tendencies(
         vert_adv_u = _vertical_advection_sigma_gaussian(u, sigma_dot, sigma_coord)
         vert_adv_v = _vertical_advection_sigma_gaussian(v, sigma_dot, sigma_coord)
 
-    # Convert to spectral vor/div contributions
+    # Convert to spectral vor/div contributions.  Same batching pattern
+    # as the vorticity-flux SH analyses above: stack (vert_u_cos,
+    # vert_v_cos) along a trailing axis and run each SH variant once on
+    # a thicker (..., nlev*2) tensor — 4 SH forwards collapse to 2.
     vert_u_cos = vert_adv_u * grid.cos_lat[:, None, None]
     vert_v_cos = vert_adv_v * grid.cos_lat[:, None, None]
+    _vert_uv_stack = jnp.stack([vert_u_cos, vert_v_cos], axis=-1)
+    n_lat_v, n_lon_v, nlev_v, _ = _vert_uv_stack.shape
+    _vert_uv_flat = _vert_uv_stack.reshape(n_lat_v, n_lon_v, nlev_v * 2)
+    _vert_oc2 = sh_analysis_oc2_3d(grid, _vert_uv_flat).reshape(-1, nlev_v, 2)
+    _vert_dmu = sh_analysis_dmu_3d(grid, _vert_uv_flat).reshape(-1, nlev_v, 2)
+    _vu_oc2, _vv_oc2 = _vert_oc2[..., 0], _vert_oc2[..., 1]
+    _vu_dmu, _vv_dmu = _vert_dmu[..., 0], _vert_dmu[..., 1]
 
     # curl(vert_adv) -> dvor_hat
-    vert_vor_tend = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vert_v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, vert_u_cos)
-    )
+    vert_vor_tend = im_over_a[:, None] * _vv_oc2 + one_over_a * _vu_dmu
     # div(vert_adv) -> ddiv_hat
-    vert_div_tend = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vert_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, vert_v_cos)
-    )
+    vert_div_tend = im_over_a[:, None] * _vu_oc2 - one_over_a * _vv_dmu
 
     dvor_hat = dvor_hat + vert_vor_tend
     ddiv_hat = ddiv_hat + vert_div_tend
 
     # --- 15. Surface pressure tendency (spectral) ---
-    dlnps_hat = sh_analysis(grid, dlnps_dt_grid)
+    # ``_dlnps_hat_pre`` was already computed alongside (dT_grid_sum,
+    # Phi) via the batched ``sh_analysis_3d`` above (Loop 184); reuse
+    # it instead of issuing a standalone 2D ``sh_analysis``.
+    dlnps_hat = _dlnps_hat_pre
 
     # --- 16. Spectral hyperdiffusion ---
     hyperdiff_coeff = config.hyperdiff_coeff
@@ -447,15 +558,22 @@ def spectral_pe_tendencies(
         hyperdiff_coeff = hyperdiff_coeff * config.si_hyperdiff_boost
 
     if hyperdiff_coeff > 0 and not config.implicit_hyperdiff:
-        base_diff_vor = spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
-        base_diff_div = spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
-        base_diff_T = spectral_hyperdiffusion_3d(
-            grid, state.T_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
+        # Batch the three pointwise spectral hyperdiffusions (vor, div,
+        # T) into one call by stacking the spectral coefficients along
+        # a trailing axis.  ``spectral_hyperdiffusion_3d`` is just
+        # ``damping[:, None] * coeffs`` — element-wise multiplication
+        # with the trailing axis as a passive batch — so 3 separate
+        # kernel launches collapse to 1 fused multiply on the thicker
+        # tensor.  Same-axis pattern as Loops 93 / 97 for the SH
+        # transforms above.
+        n_sh_h, nlev_h = state.vor_hat.data.shape
+        _vdT_hat = jnp.stack(
+            [state.vor_hat.data, state.div_hat.data, state.T_hat.data], axis=-1,
+        )  # (n_sh, nlev, 3)
+        base_diff_stack = spectral_hyperdiffusion_3d(
+            grid, _vdT_hat.reshape(n_sh_h, nlev_h * 3),
+            hyperdiff_coeff, config.hyperdiff_order,
+        ).reshape(n_sh_h, nlev_h, 3)
 
         if config.hyperdiff_pscale > 0:
             # Level-dependent scaling: (p_ref/p_k)^exponent
@@ -466,14 +584,12 @@ def spectral_pe_tendencies(
                 sigma_full = sigma_coord.sigma_full
             p_ref_sigma = sigma_full[-1]  # near-surface reference
             scale = (p_ref_sigma / jnp.clip(sigma_full, 1e-6, None)) ** config.hyperdiff_pscale
-            scale = scale[None, :]  # (1, nlev)
-            base_diff_vor = base_diff_vor * scale
-            base_diff_div = base_diff_div * scale
-            base_diff_T = base_diff_T * scale
+            # Apply scale on the level axis once for the stacked tensor.
+            base_diff_stack = base_diff_stack * scale[None, :, None]
 
-        dvor_hat = dvor_hat + base_diff_vor
-        ddiv_hat = ddiv_hat + base_diff_div
-        dT_hat = dT_hat + base_diff_T
+        dvor_hat = dvor_hat + base_diff_stack[..., 0]
+        ddiv_hat = ddiv_hat + base_diff_stack[..., 1]
+        dT_hat = dT_hat + base_diff_stack[..., 2]
 
     # --- 17. Add physics tendencies if provided ---
     if physics_tendency is not None:
@@ -1153,15 +1269,32 @@ def spectral_pe_to_grid(
     -------
     dict with keys: 'u', 'v', 'T', 'vor', 'div', 'lnps', 'p_s', 'phis'
     """
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
-    T = sh_synthesis_3d(grid, state.T_hat.data)
-    lnps = jnp.clip(
-        sh_synthesis(grid, state.lnps_hat.data),
-        _LNPS_MIN,
-        _LNPS_MAX,
+    # Merge the (vor, div, T) 3D batch with the (lnps, phis) 2D pair
+    # via ``jnp.concatenate`` — same exploit as Loop 182 in the tendency
+    # block.  Trailing axis = ``nlev*3 + 2``.  5 SH syntheses → 1.
+    n_sh_d, nlev_d = state.vor_hat.data.shape
+    _vdT_stack = jnp.stack(
+        [state.vor_hat.data, state.div_hat.data, state.T_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 3)
+    _vdT_flat = _vdT_stack.reshape(n_sh_d, nlev_d * 3)
+    _all_diag_flat = jnp.concatenate(
+        [
+            _vdT_flat,
+            state.lnps_hat.data[:, jnp.newaxis],
+            state.phis_hat.data[:, jnp.newaxis],
+        ],
+        axis=-1,
+    )  # (n_sh, nlev*3 + 2)
+    _all_grid_diag = sh_synthesis_3d(grid, _all_diag_flat)
+    _vdT_grid = _all_grid_diag[..., : nlev_d * 3].reshape(
+        grid.n_lat, grid.n_lon, nlev_d, 3,
     )
-    phis = sh_synthesis(grid, state.phis_hat.data)
+    vor = _vdT_grid[..., 0]
+    div = _vdT_grid[..., 1]
+    T = _vdT_grid[..., 2]
+    lnps = jnp.clip(_all_grid_diag[..., nlev_d * 3], _LNPS_MIN, _LNPS_MAX)
+    phis = _all_grid_diag[..., nlev_d * 3 + 1]
 
     u_cos, v_cos = uv_from_vordiv_3d(
         grid, state.vor_hat.data, state.div_hat.data,

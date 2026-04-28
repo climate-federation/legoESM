@@ -17,7 +17,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     isothermal_rest_state_spectral,
     spectral_pe_to_grid,
 )
-from tests.test_cases.held_suarez import held_suarez_forcing_spectral
+from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
 
 
 @pytest.mark.slow

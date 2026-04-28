@@ -11,6 +11,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
@@ -462,37 +463,59 @@ class MPASOceanModel:
         return state_new
 
     def _assert_runtime_invariants(self, state: MPASOceanState) -> None:
-        """Host-side runtime checks (matching cubed-sphere ocean model)."""
+        """Host-side runtime checks (matching cubed-sphere ocean model).
+
+        Fuses the finite-check, T-min/max, and S-min/max reductions
+        into a single ``jnp.stack`` + ``np.asarray`` host transfer so
+        the runtime checks cost one GPU stall per step instead of
+        five.  Uses ``jnp.where``-masked ``nanmin``/``nanmax`` to
+        avoid the boolean indexing path (``state.T.data[wet]`` allocates
+        a dynamically-shaped array that cannot be JIT'd; the masked
+        reductions are equivalent and stay on device).
+        """
         mask = state.land_mask.data
         wet = mask > 0.5
+        wet3 = wet[..., jnp.newaxis] if state.T.data.ndim > 1 else wet
+        T_wet = jnp.where(wet3, state.T.data, jnp.nan)
+        S_wet = jnp.where(wet3, state.S.data, jnp.nan)
+        any_wet = jnp.any(wet)
 
-        finite_ok = bool(
+        finite_ok = (
             jnp.all(jnp.isfinite(state.u.data))
             & jnp.all(jnp.isfinite(state.T.data))
             & jnp.all(jnp.isfinite(state.S.data))
             & jnp.all(jnp.isfinite(state.eta.data))
         )
-        if not finite_ok:
+
+        _stats = jnp.stack([
+            finite_ok.astype(state.eta.data.dtype),
+            any_wet.astype(state.eta.data.dtype),
+            jnp.nanmin(T_wet).astype(state.eta.data.dtype),
+            jnp.nanmax(T_wet).astype(state.eta.data.dtype),
+            jnp.nanmin(S_wet).astype(state.eta.data.dtype),
+            jnp.nanmax(S_wet).astype(state.eta.data.dtype),
+        ])
+        host = np.asarray(_stats)
+        finite_ok_h = bool(host[0] > 0.5)
+        any_wet_h = bool(host[1] > 0.5)
+
+        if not finite_ok_h:
             raise FloatingPointError(
                 "MPAS ocean runtime check failed: non-finite state detected"
             )
 
         config = self.config
-        T_wet = state.T.data[wet]
-        S_wet = state.S.data[wet]
-
-        if T_wet.size > 0:
-            T_min_val = float(jnp.min(T_wet))
-            T_max_val = float(jnp.max(T_wet))
+        if any_wet_h:
+            T_min_val = float(host[2])
+            T_max_val = float(host[3])
+            S_min_val = float(host[4])
+            S_max_val = float(host[5])
             if T_min_val < config.temperature_min_c or T_max_val > config.temperature_max_c:
                 raise ValueError(
                     f"MPAS ocean runtime check failed: T out of bounds "
                     f"[{T_min_val:.2f}, {T_max_val:.2f}] vs "
                     f"[{config.temperature_min_c}, {config.temperature_max_c}]"
                 )
-        if S_wet.size > 0:
-            S_min_val = float(jnp.min(S_wet))
-            S_max_val = float(jnp.max(S_wet))
             if S_min_val < config.salinity_min_psu or S_max_val > config.salinity_max_psu:
                 raise ValueError(
                     f"MPAS ocean runtime check failed: S out of bounds "

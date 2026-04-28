@@ -170,22 +170,31 @@ def _step_slab(
     )
 
     # ---------- Build response ----------
+    # ``jnp.full`` is one ``Broadcast`` HLO op vs the
+    # ``broadcast_to(jnp.array(scalar), ...)`` form.  Same micro-fix
+    # as the loop-18/20 lake / coupler / land tile responses.
+    _h_dtype = h.dtype
     if config.temp_dependent_albedo:
         alpha_ice = compute_ice_albedo(T_ice_new, config.ice_albedo)
     else:
-        alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
+        alpha_ice = jnp.full(h.shape, config.albedo_ice, dtype=_h_dtype)
 
-    _, _, lw_up_new = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_ice_new, alpha_ice,
-        config.emissivity_ice,
+    # Direct ``ε σ T⁴ + (1-ε)·lw_down`` instead of the full
+    # ``surface_radiation_fluxes`` call (which discards ``sw_net``
+    # / ``lw_net``) — same direct-expression rewrite as the
+    # ``ocean_tile_response`` and ``two_layer_lake`` fixes.
+    from legoesm import constants as _constants
+    lw_up_new = (
+        config.emissivity_ice * _constants.sigma_sb * T_ice_new ** 4
+        + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
     q_sfc_new = saturation_mixing_ratio_ice(T_ice_new, forcing.p_surface)
 
     response = TileResponse(
         T_surface=T_ice_new,
         albedo=alpha_ice,
-        emissivity=jnp.broadcast_to(jnp.array(config.emissivity_ice), h.shape),
-        z0=jnp.broadcast_to(jnp.array(config.z0_ice), h.shape),
+        emissivity=jnp.full(h.shape, config.emissivity_ice, dtype=_h_dtype),
+        z0=jnp.full(h.shape, config.z0_ice, dtype=_h_dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx,
@@ -272,29 +281,25 @@ def _step_dynamic(
         )
 
     # ---- 2. Transport ----
+    # ``advect_ice_tracers`` handles both 2D ``(6, n, n)`` and multi-category
+    # 3D ``(6, n, n, n_cat)`` shapes natively, with a single 4D vector halo
+    # exchange across all quantities and categories — the prior vmap-over-
+    # categories pattern issued ``n_cat × 3`` halo exchanges per timestep.
     if config.transport == "advect" and grid is not None:
-        if h.ndim > 3:
-            # Multi-category: advect each category via vmap over last axis
-            def _advect_cat(h_k, conc_k, T_k):
-                return advect_ice_tracers(
-                    h_k, conc_k, T_k, u_ice, v_ice, grid, dt,
-                )
-            # Move category axis to front for vmap, then back
-            h_t = jnp.moveaxis(h, -1, 0)
-            conc_t = jnp.moveaxis(conc, -1, 0)
-            T_t = jnp.moveaxis(T_ice, -1, 0)
-            h_t, conc_t, T_t = jax.vmap(_advect_cat)(h_t, conc_t, T_t)
-            h = jnp.moveaxis(h_t, 0, -1)
-            conc = jnp.moveaxis(conc_t, 0, -1)
-            T_ice = jnp.moveaxis(T_t, 0, -1)
-        else:
-            h, conc, T_ice = advect_ice_tracers(
-                h, conc, T_ice, u_ice, v_ice, grid, dt,
-            )
+        h, conc, T_ice = advect_ice_tracers(
+            h, conc, T_ice, u_ice, v_ice, grid, dt,
+        )
 
     # ---- 3. Thermodynamics (per category or single) ----
     if h.ndim > 3:
-        # Multi-category: apply thermodynamics per category via vmap
+        # Multi-category: apply thermodynamics per category via vmap.
+        # ``jax.vmap`` accepts negative ``in_axes`` / ``out_axes`` and
+        # vmaps over the trailing category axis directly — skipping the
+        # six ``jnp.moveaxis`` round-trips used by the prior pattern.
+        # JAX still produces one batched kernel for ``_thermo_single``,
+        # so the savings are layout/intermediate eliminations rather
+        # than fewer kernel launches; the diff is one less buffer copy
+        # per category-vmap invocation under XLA fusion.
         n_cat = h.shape[-1]
         h_old = h
         conc_old = conc
@@ -305,13 +310,9 @@ def _step_dynamic(
                 forcing, ocean_sst, config, U_min, dt,
             )
 
-        h_t = jnp.moveaxis(h, -1, 0)
-        T_t = jnp.moveaxis(T_ice, -1, 0)
-        conc_t = jnp.moveaxis(conc, -1, 0)
-        h_t, T_t, conc_t = jax.vmap(_thermo_cat)(h_t, T_t, conc_t)
-        h = jnp.moveaxis(h_t, 0, -1)
-        T_ice = jnp.moveaxis(T_t, 0, -1)
-        conc = jnp.moveaxis(conc_t, 0, -1)
+        h, T_ice, conc = jax.vmap(
+            _thermo_cat, in_axes=-1, out_axes=-1,
+        )(h, T_ice, conc)
 
         # Open-water ice growth should only be deposited into category 0
         # (thinnest). Zero out new-ice growth in empty higher categories
@@ -403,7 +404,7 @@ def _thermo_single(
     if config.temp_dependent_albedo:
         alpha_ice = compute_ice_albedo(T_ice, config.ice_albedo)
     else:
-        alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
+        alpha_ice = jnp.full(h.shape, config.albedo_ice, dtype=h.dtype)
     alpha = jnp.where(ice_mask, alpha_ice, config.albedo_ocean)
 
     # Radiation
@@ -428,7 +429,7 @@ def _thermo_single(
     T_new = jnp.where(
         ice_mask,
         jnp.clip(T_trial, config.T_ice_min, config.T_freeze_ocean),
-        jnp.broadcast_to(jnp.array(config.T_freeze_ocean), T_ice.shape),
+        jnp.full(T_ice.shape, config.T_freeze_ocean, dtype=T_ice.dtype),
     )
 
     # Surface melt: if T_trial exceeds freezing, the excess enthalpy melts
@@ -480,11 +481,16 @@ def _build_response(
     if config.temp_dependent_albedo:
         alpha_ice = compute_ice_albedo(T_ice, config.ice_albedo)
     else:
-        alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
+        alpha_ice = jnp.full(h.shape, config.albedo_ice, dtype=h.dtype)
 
-    _, _, lw_up = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_ice, alpha_ice,
-        config.emissivity_ice,
+    # Direct ``ε σ T⁴ + (1-ε)·lw_down`` instead of the full
+    # ``surface_radiation_fluxes`` call (which discards ``sw_net``
+    # / ``lw_net``).  Same direct-expression rewrite used for
+    # ``ocean_tile_response`` and ``two_layer_lake``.
+    from legoesm import constants as _constants
+    lw_up = (
+        config.emissivity_ice * _constants.sigma_sb * T_ice ** 4
+        + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
 
     # Recompute surface fluxes from aggregated state, honoring bulk_scheme
@@ -517,8 +523,8 @@ def _build_response(
     return TileResponse(
         T_surface=T_ice,
         albedo=alpha_ice,
-        emissivity=jnp.broadcast_to(jnp.array(config.emissivity_ice), h.shape),
-        z0=jnp.broadcast_to(jnp.array(config.z0_ice), h.shape),
+        emissivity=jnp.full(h.shape, config.emissivity_ice, dtype=h.dtype),
+        z0=jnp.full(h.shape, config.z0_ice, dtype=h.dtype),
         q_surface=q_sfc,
         shflx=shflx,
         lhflx=lhflx,

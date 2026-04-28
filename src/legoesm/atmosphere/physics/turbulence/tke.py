@@ -123,16 +123,18 @@ def tke_turbulence(
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
     N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
-    # Interpolate S2 and N2 to full levels
-    S2 = jnp.zeros((ncol, nlev))
-    S2 = S2.at[:, 1:-1].set(0.5 * (S2_half[:, :-1] + S2_half[:, 1:]))
-    S2 = S2.at[:, 0].set(S2_half[:, 0])
-    S2 = S2.at[:, -1].set(S2_half[:, -1])
-
-    N2 = jnp.zeros((ncol, nlev))
-    N2 = N2.at[:, 1:-1].set(0.5 * (N2_half[:, :-1] + N2_half[:, 1:]))
-    N2 = N2.at[:, 0].set(N2_half[:, 0])
-    N2 = N2.at[:, -1].set(N2_half[:, -1])
+    # Interpolate S2 and N2 to full levels.  Single ``concatenate`` of
+    # the centered interior with the two endpoint half-values lowers
+    # to one HLO op vs the previous ``zeros + 3 .at[].set`` triple
+    # scatter (3 wasted scatter ops per field, fired every TKE step).
+    S2_interior = 0.5 * (S2_half[:, :-1] + S2_half[:, 1:])
+    S2 = jnp.concatenate(
+        [S2_half[:, :1], S2_interior, S2_half[:, -1:]], axis=1,
+    )
+    N2_interior = 0.5 * (N2_half[:, :-1] + N2_half[:, 1:])
+    N2 = jnp.concatenate(
+        [N2_half[:, :1], N2_interior, N2_half[:, -1:]], axis=1,
+    )
 
     # Production and buoyancy at full levels
     shear_prod = Km_full * S2        # P = Km * S^2
@@ -148,10 +150,13 @@ def tke_turbulence(
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     dz_layer = jnp.clip(dz_layer, 1.0, None)
 
-    # Diffuse TKE (no surface flux for TKE)
+    # Diffuse TKE (no surface flux for TKE).  Pin the surface_flux dtype
+    # to the column dtype so ``rhs.at[:, -1].add(...)`` inside the
+    # tridiagonal solve does not see an x64-default zero clashing with
+    # the f32 state.
     tke_diffused = implicit_vertical_diffusion(
         tke, Km_half, rho, dz_layer, dz_half, dt,
-        surface_flux=jnp.zeros(ncol),
+        surface_flux=jnp.zeros(ncol, dtype=tke.dtype),
     )
 
     # Semi-implicit TKE update:

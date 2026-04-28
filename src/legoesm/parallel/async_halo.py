@@ -175,9 +175,9 @@ def _ppermute_halo_exchange(data, grid, mesh):
     if n_devices <= 1:
         return pad_halo(data)
 
-    n = data.shape[1]
-    padded = jnp.zeros((6, n + 2, n + 2), dtype=data.dtype)
-    padded = padded.at[:, 1:-1, 1:-1].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter (the subsequent
+    # halo scatter only writes into the zeroed border).
+    padded = jnp.pad(data, ((0, 0), (1, 1), (1, 1)))
 
     edges = (WEST, EAST, SOUTH, NORTH)
     faces_per_device = 6 // n_devices

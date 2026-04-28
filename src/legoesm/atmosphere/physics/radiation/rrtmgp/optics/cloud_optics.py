@@ -123,17 +123,15 @@ def compute_optical_properties(
       cloud_path_ice * _KG_TO_G_FACTOR,
   )
 
-  cld_mask_liq = jnp.where(
-      cloud_path_liq * _KG_TO_G_FACTOR >= _EPSILON,
-      jnp.ones_like(cloud_path_liq),
-      jnp.zeros_like(cloud_path_liq),
-  )
-
-  cld_mask_ice = jnp.where(
-      cloud_path_ice * _KG_TO_G_FACTOR >= _EPSILON,
-      jnp.ones_like(cloud_path_ice),
-      jnp.zeros_like(cloud_path_ice),
-  )
+  # Boolean threshold cast directly to the field dtype — avoids
+  # materialising two ``ones_like`` / ``zeros_like`` buffers per band
+  # per radiation step (`nbnd × 2 × ncol × nlev` extra writes).
+  cld_mask_liq = (
+      cloud_path_liq * _KG_TO_G_FACTOR >= _EPSILON
+  ).astype(cloud_path_liq.dtype)
+  cld_mask_ice = (
+      cloud_path_ice * _KG_TO_G_FACTOR >= _EPSILON
+  ).astype(cloud_path_ice.dtype)
   cld_mask = (cld_mask_liq, cld_mask_ice)
 
   optical_props = []

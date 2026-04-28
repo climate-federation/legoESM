@@ -415,10 +415,17 @@ class ModelDriver:
             self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
-            mean_qv = float(jnp.mean(self.tracers["q_v"])) * 1000.0
-            cwv = float(jnp.mean(
-                column_water_vapor(self.tracers["q_v"], self.state.p_s.data, self.sigma.dsigma)
-            ))
+            # Fuse the two diagnostic means into one host transfer.
+            _stats = jnp.stack([
+                jnp.mean(self.tracers["q_v"]),
+                jnp.mean(column_water_vapor(
+                    self.tracers["q_v"], self.state.p_s.data,
+                    self.sigma.dsigma,
+                )),
+            ])
+            _h = np.asarray(_stats)
+            mean_qv = float(_h[0]) * 1000.0
+            cwv = float(_h[1])
             logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
@@ -1215,11 +1222,24 @@ class ModelDriver:
                 p_s_data = self.state.p_s.data
                 u_data = self.state.u.data
 
-                mean_T = float(jnp.mean(T_data))
-                mean_ps = float(jnp.mean(p_s_data))
-                max_u = float(jnp.max(jnp.abs(u_data)))
-                T_min = float(jnp.min(T_data))
-                T_max = float(jnp.max(T_data))
+                # Fuse the diagnostic reductions to a single device→host
+                # transfer instead of five separate ones — each ``float()``
+                # call is a GPU stall under default JAX scheduling.
+                _stats = jnp.stack([
+                    jnp.mean(T_data),
+                    jnp.mean(p_s_data),
+                    jnp.max(jnp.abs(u_data)),
+                    jnp.min(T_data),
+                    jnp.max(T_data),
+                    jnp.all(jnp.isfinite(T_data)).astype(T_data.dtype),
+                ])
+                _stats_host = np.asarray(_stats)
+                mean_T = float(_stats_host[0])
+                mean_ps = float(_stats_host[1])
+                max_u = float(_stats_host[2])
+                T_min = float(_stats_host[3])
+                T_max = float(_stats_host[4])
+                T_finite = bool(_stats_host[5] > 0.5)
 
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
@@ -1230,7 +1250,7 @@ class ModelDriver:
                 )
 
                 # Blowup detection
-                if not jnp.all(jnp.isfinite(T_data)):
+                if not T_finite:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break
@@ -1376,11 +1396,25 @@ class ModelDriver:
                 p_s_g = fields['p_s']
                 u_g, v_g = fields['u'], fields['v']
 
-                mean_T = float(jnp.mean(T_g))
-                T_min = float(jnp.min(T_g))
-                T_max = float(jnp.max(T_g))
-                mean_ps = float(jnp.mean(p_s_g))
-                max_wind = float(jnp.max(jnp.sqrt(u_g**2 + v_g**2)))
+                # Fuse the diagnostic reductions into one stack so we
+                # device→host-transfer once instead of five times.  At
+                # diagnostic cadence this saves O(DIAG_INTERVAL) GPU
+                # stalls per simulated period.
+                _stats = jnp.stack([
+                    jnp.mean(T_g),
+                    jnp.min(T_g),
+                    jnp.max(T_g),
+                    jnp.mean(p_s_g),
+                    jnp.max(jnp.sqrt(u_g ** 2 + v_g ** 2)),
+                    jnp.all(jnp.isfinite(T_g)).astype(T_g.dtype),
+                ])
+                _stats_host = np.asarray(_stats)
+                mean_T = float(_stats_host[0])
+                T_min = float(_stats_host[1])
+                T_max = float(_stats_host[2])
+                mean_ps = float(_stats_host[3])
+                max_wind = float(_stats_host[4])
+                T_finite = bool(_stats_host[5] > 0.5)
 
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
@@ -1390,7 +1424,7 @@ class ModelDriver:
                     f"|v|_max={max_wind:.1f}m/s  ({rate:.1f} sim-days/s)"
                 )
 
-                if not jnp.all(jnp.isfinite(T_g)):
+                if not T_finite:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break

@@ -189,9 +189,19 @@ def compute_cloud_properties(
     lwp = q_c * dp / constants.g
     iwp = q_i * dp / constants.g
 
-    # Effective radii (constant for now)
-    r_eff_liq = jnp.full_like(T, config.r_eff_liq)
-    r_eff_ice = jnp.full_like(T, config.r_eff_ice)
+    # Effective radii (constant for now): ``broadcast_to`` produces a
+    # zero-copy logical view, whereas ``jnp.full_like(T, scalar)``
+    # materialises a fresh ``(ncol, nlev)`` constant buffer every
+    # physics step.  XLA folds the broadcast at trace time but the
+    # broadcast form keeps the HLO graph small and avoids two
+    # allocator round-trips per cloud_optics call.
+    _scalar_dtype = T.dtype
+    r_eff_liq = jnp.broadcast_to(
+        jnp.asarray(config.r_eff_liq, dtype=_scalar_dtype), T.shape,
+    )
+    r_eff_ice = jnp.broadcast_to(
+        jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype), T.shape,
+    )
 
     return CloudProperties(
         cloud_fraction=cf,

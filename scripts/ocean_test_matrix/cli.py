@@ -122,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
             "smearing momentum.  Knob #3 in the issue #213 hi-res SOM "
             "Eady investigation recipe."
         ))
+    p.add_argument(
+        "--momentum-advection", type=str, default=None,
+        choices=["vector_invariant", "weno5", "weno7"],
+        help="Override momentum advection scheme (latlon C-grid only)")
+    p.add_argument(
+        "--no-weno-d-term", action="store_true",
+        help="Disable the WENO D-term (divergence flux) in momentum advection")
     return p
 
 
@@ -192,6 +199,10 @@ def main():
         config.C_LEITH_MODIFIED_OVERRIDE = True
     if args.barotropic_div_damp is not None:
         config.BAROTROPIC_DIV_DAMP_OVERRIDE = args.barotropic_div_damp
+    if args.momentum_advection is not None:
+        config.MOMENTUM_ADVECTION_OVERRIDE = args.momentum_advection
+    if args.no_weno_d_term:
+        config.WENO_D_TERM_OVERRIDE = False
 
     tests = filter_tests(TEST_MATRIX, args)
 

@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import jax
 import numpy as np
 
 from legoesm.core.field import Field
@@ -77,17 +78,23 @@ def _extract_arrays(state) -> dict[str, np.ndarray]:
     For ``Field`` attributes, uses ``.data``.
     For raw ``jax.Array`` / ``numpy.ndarray``, uses the value directly.
     ``None`` fields are skipped.
+
+    Pulls all device arrays in a single batched ``jax.device_get`` so
+    transfers can overlap on the GPU runtime instead of serialising
+    one-per-leaf at every checkpoint write.
     """
-    arrays: dict[str, np.ndarray] = {}
+    names: list[str] = []
+    values = []
     for name in state._fields:
         val = getattr(state, name)
         if val is None:
             continue
-        if isinstance(val, Field):
-            arrays[name] = np.asarray(val.data)
-        else:
-            arrays[name] = np.asarray(val)
-    return arrays
+        names.append(name)
+        values.append(val.data if isinstance(val, Field) else val)
+    if not values:
+        return {}
+    host = jax.device_get(values)
+    return {n: np.asarray(v) for n, v in zip(names, host)}
 
 
 def _extract_field_metadata(state) -> dict[str, dict[str, Any]]:

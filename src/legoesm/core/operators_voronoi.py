@@ -677,7 +677,10 @@ def pv_edge_3d(q_vertex_3d, mesh):
     return 0.5 * (q_vertex_3d[v0] + q_vertex_3d[v1])
 
 
-def pv_flux_energy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
+def pv_flux_energy_conserving_3d(
+    u_edge_3d, h_cell_3d, q_vertex_3d, mesh,
+    h_edge_3d=None,
+):
     """Energy-conserving PV flux for all levels.
 
     Parameters
@@ -686,12 +689,17 @@ def pv_flux_energy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
     h_cell_3d : jax.Array, shape (nCells, nlev)
     q_vertex_3d : jax.Array, shape (nVertices, nlev)
     mesh : VoronoiMesh
+    h_edge_3d : jax.Array, shape (nEdges, nlev), optional
+        Pre-computed edge thickness ``cell_to_edge_avg_3d(h_cell_3d)``.
+        When provided the internal ``edge_thickness_3d`` call is
+        skipped — share the gather across pv_flux and any other op
+        that already needed ``h`` at edges.
 
     Returns
     -------
     jax.Array, shape (nEdges, nlev)
     """
-    h_e = edge_thickness_3d(h_cell_3d, mesh)
+    h_e = h_edge_3d if h_edge_3d is not None else edge_thickness_3d(h_cell_3d, mesh)
     q_e = pv_edge_3d(q_vertex_3d, mesh)
 
     eoe = mesh.edgesOnEdge
@@ -706,7 +714,10 @@ def pv_flux_energy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
     return jnp.sum(woe[:, :, None] * q_g * h_g * u_g * mask[:, :, None], axis=0)
 
 
-def pv_flux_enstrophy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
+def pv_flux_enstrophy_conserving_3d(
+    u_edge_3d, h_cell_3d, q_vertex_3d, mesh,
+    h_edge_3d=None,
+):
     """Enstrophy-conserving PV flux for all levels.
 
     Parameters
@@ -715,12 +726,15 @@ def pv_flux_enstrophy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
     h_cell_3d : jax.Array, shape (nCells, nlev)
     q_vertex_3d : jax.Array, shape (nVertices, nlev)
     mesh : VoronoiMesh
+    h_edge_3d : jax.Array, shape (nEdges, nlev), optional
+        Pre-computed edge thickness — see :func:`pv_flux_energy_conserving_3d`
+        for usage.
 
     Returns
     -------
     jax.Array, shape (nEdges, nlev)
     """
-    h_e = edge_thickness_3d(h_cell_3d, mesh)
+    h_e = h_edge_3d if h_edge_3d is not None else edge_thickness_3d(h_cell_3d, mesh)
     q_e = pv_edge_3d(q_vertex_3d, mesh)
 
     F_normal = h_e * u_edge_3d

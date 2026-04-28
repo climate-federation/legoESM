@@ -46,9 +46,13 @@ def quadratic_bottom_drag(
     drag_u = -cfg.C_d * speed * u_bot * inv_dz
     drag_v = -cfg.C_d * speed * v_bot * inv_dz
 
-    du_dt = jnp.zeros_like(u)
-    dv_dt = jnp.zeros_like(v)
-    du_dt = du_dt.at[..., -1].set(drag_u)
-    dv_dt = dv_dt.at[..., -1].set(drag_v)
+    # Pad with zero on top instead of allocating ``zeros_like`` and
+    # scattering only the bottom row.  Single Pad HLO op vs alloc +
+    # dynamic_update_slice.  The bottom row is ``drag_u``/``drag_v``;
+    # the top ``nlev-1`` rows are zero by construction.
+    nlev = u.shape[-1]
+    pad_axes = ((0, 0),) * (drag_u.ndim)
+    du_dt = jnp.pad(drag_u[..., None], (*pad_axes, (nlev - 1, 0)))
+    dv_dt = jnp.pad(drag_v[..., None], (*pad_axes, (nlev - 1, 0)))
 
     return BottomDragOutput(du_dt=du_dt, dv_dt=dv_dt)
