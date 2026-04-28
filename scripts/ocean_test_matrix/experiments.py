@@ -1450,6 +1450,8 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
             barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
             barotropic_div_damp=eu_config.barotropic_div_damp,
             tracer_advection=eu_config.tracer_advection,
+            momentum_advection=config.MOMENTUM_ADVECTION_OVERRIDE,
+            weno_d_term=config.WENO_D_TERM_OVERRIDE,
         ))
 
     state = eu_ic(tc.grid_type, grid, z_coord, eu_config)

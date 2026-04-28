@@ -900,6 +900,262 @@ def fct_tracer_advection(
     return div_h_fct, vert_div_fct
 
 
+# =============================================================================
+# WENO-Z tracer advection (Phase 2a of Silvestri et al. 2024 WENO-ILES plan)
+# =============================================================================
+#
+# High-order essentially non-oscillatory reconstruction at cell faces using
+# the WENO-Z kernels from ``legoesm.core.weno``.  Unlike DST-3 and PPM, WENO
+# uses nonlinear weights (not explicit limiters) to suppress oscillations near
+# discontinuities, so no CFL, limiter, or monotonicity clamp is needed.
+#
+# WENO5: 5th-order, 6-point stencil (3 cells each side of face).
+# WENO7: 7th-order, 8-point stencil (4 cells each side of face).
+
+def _weno_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+    order: int,
+) -> jnp.ndarray:
+    """WENO-Z interpolation to u-faces (zonal).
+
+    Periodic in longitude. No CFL dependence — reconstruction is
+    purely spatial.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_u : array, shape (n_lat, n_lon+1, nlev)
+        Thickness-weighted velocity at u-faces (sign determines upwind).
+    order : {5, 7}
+        WENO order.
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, nlev)
+        WENO face values at u-points.
+    """
+    from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
+
+    weno_fn = {5: weno5_z, 7: weno7_z}[order]
+    hw = {5: 3, 7: 4}[order]
+    n_lon = f.shape[1]
+
+    # Build stencil for all faces simultaneously (periodic longitude).
+    # Face j between cell j-1 and cell j: WENO face at I+1/2 where I=j-1.
+    # Need cells j-hw to j+(hw-1), obtained via roll offsets hw..-(hw-1).
+    stencil = [jnp.roll(f, hw - j, axis=1) for j in range(2 * hw)]
+
+    f_plus, f_minus = weno_fn(stencil)
+
+    mf = mass_flux_u[:, :n_lon, :]
+    f_face = weno_upwind(f_plus, f_minus, mf)
+
+    # Periodic wrap: face n_lon = face 0
+    return jnp.concatenate([f_face, f_face[:, 0:1, :]], axis=1)
+
+
+def _weno_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    order: int,
+) -> jnp.ndarray:
+    """WENO-Z interpolation to v-faces (meridional).
+
+    Solid wall at poles. Ghost cells use Neumann BC (copy boundary value),
+    which degrades the reconstruction to lower order near boundaries.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_v : array, shape (n_lat+1, n_lon, nlev)
+        Thickness-weighted velocity at v-faces.
+    order : {5, 7}
+        WENO order.
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, nlev)
+        WENO face values at v-points. Zero at pole boundaries.
+    """
+    from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
+
+    weno_fn = {5: weno5_z, 7: weno7_z}[order]
+    hw = {5: 3, 7: 4}[order]
+    n_lat = f.shape[0]
+
+    # Ghost cells (Neumann BC: copy boundary value)
+    f_ext = jnp.concatenate(
+        [f[:1, :, :]] * hw + [f] + [f[-1:, :, :]] * hw, axis=0
+    )
+
+    # Stencil for interior faces i=1..n_lat-1.
+    # Cell k in original = f_ext[k + hw].
+    # Face i: WENO at I+1/2 where I = i-1. Need cells i-hw..i+(hw-1).
+    # In f_ext: indices i..i+(2*hw-1).
+    stencil = [f_ext[1 + j: n_lat + j, :, :] for j in range(2 * hw)]
+
+    f_plus, f_minus = weno_fn(stencil)
+
+    mf_int = mass_flux_v[1:-1, :, :]
+    f_face = weno_upwind(f_plus, f_minus, mf_int)
+
+    # Solid wall at poles: zero flux
+    zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
+    return jnp.concatenate([zero, f_face, zero], axis=0)
+
+
+def _flux_form_vertical_tracer_advection_weno(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+    order: int,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with WENO-Z reconstruction.
+
+    Same interface as ``flux_form_vertical_tracer_advection_dst3``.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Tracer at full levels.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels [m/s].
+        Positive = upward. Zero at surface and bottom.
+    h_k : array, shape (..., nlev)
+        Layer thickness [m] (unused — WENO is purely spatial).
+    dt : float
+        Time step [s] (unused — WENO doesn't need CFL).
+    order : {5, 7}
+        WENO order.
+
+    Returns
+    -------
+    vert_flux_div : array, shape (..., nlev)
+        Vertical flux divergence F_top[k] - F_bot[k] for each level.
+    """
+    from legoesm.core.weno import weno5_z, weno7_z
+
+    weno_fn = {5: weno5_z, 7: weno7_z}[order]
+    hw = {5: 3, 7: 4}[order]
+    nlev = field.shape[-1]
+
+    # Ghost cells (Neumann BC: copy boundary value)
+    f_ext = jnp.concatenate(
+        [field[..., :1]] * hw + [field] + [field[..., -1:]] * hw, axis=-1
+    )
+
+    # Stencil for interior interfaces k=1..nlev-1.
+    # field[k] = f_ext[..., k + hw].
+    # Interface k between level k-1 (above) and level k (below):
+    #   WENO at I+1/2 where I = k-1. Need cells k-hw..k+(hw-1).
+    #   In f_ext: indices k..k+(2*hw-1).
+    stencil = [f_ext[..., 1 + j: nlev + j] for j in range(2 * hw)]
+
+    w_int = w_half[..., 1:nlev]
+    f_plus, f_minus = weno_fn(stencil)
+
+    # Stencil is ordered top-to-bottom (increasing level index).
+    # f_plus = left-biased (from above), f_minus = right-biased (from below).
+    # Upward flow (w > 0): donor is below → use f_minus.
+    # Downward flow (w < 0): donor is above → use f_plus.
+    T_face = jnp.where(w_int >= 0, f_minus, f_plus)
+
+    F_interior = w_int * T_face
+
+    # Zero-flux boundaries
+    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
+    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+
+    # Flux divergence: F_top[k] - F_bot[k]
+    return F[..., :-1] - F[..., 1:]
+
+
+# --- Public API: WENO5 ---
+
+def weno5_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO5-Z interpolation to u-faces (zonal).
+
+    5th-order essentially non-oscillatory reconstruction. Periodic in
+    longitude. See ``_weno_to_u_points`` for details.
+    """
+    return _weno_to_u_points(f, mass_flux_u, order=5)
+
+
+def weno5_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO5-Z interpolation to v-faces (meridional).
+
+    5th-order with solid wall BCs at poles.
+    See ``_weno_to_v_points`` for details.
+    """
+    return _weno_to_v_points(f, mass_flux_v, order=5)
+
+
+def flux_form_vertical_tracer_advection_weno5(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with WENO5-Z.
+
+    Same interface as ``flux_form_vertical_tracer_advection_dst3``.
+    *h_k* and *dt* are unused (WENO is purely spatial) but kept for
+    interface compatibility.
+    """
+    return _flux_form_vertical_tracer_advection_weno(field, w_half, h_k, dt, order=5)
+
+
+# --- Public API: WENO7 ---
+
+def weno7_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO7-Z interpolation to u-faces (zonal).
+
+    7th-order essentially non-oscillatory reconstruction. Periodic in
+    longitude. See ``_weno_to_u_points`` for details.
+    """
+    return _weno_to_u_points(f, mass_flux_u, order=7)
+
+
+def weno7_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO7-Z interpolation to v-faces (meridional).
+
+    7th-order with solid wall BCs at poles.
+    See ``_weno_to_v_points`` for details.
+    """
+    return _weno_to_v_points(f, mass_flux_v, order=7)
+
+
+def flux_form_vertical_tracer_advection_weno7(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with WENO7-Z.
+
+    Same interface as ``flux_form_vertical_tracer_advection_dst3``.
+    *h_k* and *dt* are unused (WENO is purely spatial) but kept for
+    interface compatibility.
+    """
+    return _flux_form_vertical_tracer_advection_weno(field, w_half, h_k, dt, order=7)
+
+
 def _zalesak_signsplit_face_alphas(
     ad_flux_u: jnp.ndarray,
     ad_flux_v: jnp.ndarray,
