@@ -1,18 +1,26 @@
 #!/usr/bin/env python
-"""Continuation of GO+GM/Redi from the implicit-solver 10-yr spinup
-endpoint to sim-year 50 (40 more years).
+"""Follow-up A: 10-year fresh spinup of GO+GM/Redi with the implicit
+Crank-Nicolson barotropic solver.
 
-Loads ``restart_day003650.npz`` from the spinup, integrates 40 more
-sim-yr with ``barotropic_solver = 'implicit_cn'``, saving restarts
-every 5 sim-yr to match the original 50yr-run cadence (days 5475,
-7300, 9125, 10950, 12775, 14600, 16425, 18250).
+Starts from rest (no flow, the experiment's default stratified IC) and
+integrates for 10 sim-years using ``barotropic_solver = 'implicit_cn'``
+from step 1 — so the resulting state has no chequerboard inherited
+from the old explicit-substep solver.  This restart is then the clean
+IC for the 1-yr verification run that decides whether Crit 1.2/1.3 of
+``docs/issues/barotropic_mode_noise.md`` pass.
 
-Output: ``results/ocean/global_overturning_50yr_implicit/``
+Inner stepping uses the same lax.scan + JIT pattern as
+``_drake_momentum_budget_runner.py`` (Follow-up D), without the
+per-term momentum diagnostic — gives ~10x speedup over a pure Python
+loop for a model.step-only run.
 
-Companion to the original (broken-solver) run at
-``results/ocean/global_overturning_50yr_gmredi/`` for direct comparison
-of the Drake-band momentum budget, MOC, and zonal-mean fields after
-the chequerboard noise is removed.
+Outputs (results/ocean/global_overturning_implicit_spinup/):
+  - restart_day{000000,000730,001460,...,003650}.npz
+    every 2 sim-years; days are integer count from day 0
+  - run.log
+
+Usage:
+    JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_implicit_spinup.py
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from legoesm.ocean.vertical import create_ocean_z_star
@@ -40,23 +48,7 @@ from legoesm.ocean.experiments.global_overturning import (
 )
 
 
-SPINUP_RESTART = Path(
-    "results/ocean/global_overturning_implicit_spinup/restart_day003650.npz"
-)
-OUTPUT_DIR = Path("results/ocean/global_overturning_50yr_implicit")
-
-
-def _restore_state(template, restart_path):
-    npz = np.load(restart_path, allow_pickle=False)
-    new = {}
-    for f in template._fields:
-        obj = getattr(template, f)
-        if obj is None or not hasattr(obj, "data"):
-            continue
-        if f not in npz.files:
-            raise KeyError(f"Restart {restart_path} missing {f!r}")
-        new[f] = obj.replace(data=jnp.asarray(npz[f], dtype=obj.data.dtype))
-    return template._replace(**new), float(npz["time_days"])
+OUTPUT_DIR = Path("results/ocean/global_overturning_implicit_spinup")
 
 
 def _save_restart(state, day, output_dir):
@@ -73,6 +65,7 @@ def _save_restart(state, day, output_dir):
 
 
 def _make_step_block(model, dt):
+    """JIT-compiled n-step scan of model.step (no diagnostic capture)."""
     def scan_body(state, _):
         return model.step(state, dt), None
 
@@ -87,11 +80,12 @@ def _make_step_block(model, dt):
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    extension_years = 40.0
+    # ---- Configuration ----
+    total_years = 10.0
     dt = 600.0
-    n_steps = int(extension_years * 365.0 * 86400 / dt)
+    n_steps = int(total_years * 365.0 * 86400 / dt)
     block_size = 1000
-    restart_every_years = 5.0
+    restart_every_years = 2.0
     n_steps_per_restart = int(restart_every_years * 365.0 * 86400 / dt)
 
     config = GlobalOverturningConfig(use_gm_redi=True)
@@ -104,7 +98,7 @@ def main():
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
     ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,
+        n_barotropic_substeps=30,                 # unused by implicit solver
         physics=physics,
         A_h=config.A_h, A_v=config.A_v, K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
@@ -113,46 +107,49 @@ def main():
         barotropic_solver="implicit_cn",
     )
 
-    print(f"=== 40-yr continuation: spinup yr 10 → sim-yr 50 ===")
-    print(f"  Restart from: {SPINUP_RESTART}")
+    print(f"=== Follow-up A: 10-year fresh spinup with implicit solver ===")
     print(f"  Output: {OUTPUT_DIR}")
     print(f"  barotropic_solver = {ocean_config.barotropic_solver}")
-    print(f"  dt = {dt} s, n_steps = {n_steps:,} ({extension_years} more sim-yr)")
-    print(f"  Block size: {block_size}  (~{n_steps // block_size} blocks)")
+    print(f"  Grid: 36×72 (5°), 20 levels, H_max={config.H_max} m")
+    print(f"  dt = {dt} s, n_steps = {n_steps:,} ({total_years} sim-yr)")
+    print(f"  Block size: {block_size} steps  ({n_steps // block_size} blocks)")
     print(f"  Restart cadence: every {restart_every_years} yr "
-          f"({n_steps // n_steps_per_restart} mid-run + 1 final)")
-
-    if not SPINUP_RESTART.exists():
-        raise FileNotFoundError(f"Spinup restart not found: {SPINUP_RESTART}")
+          f"({n_steps // n_steps_per_restart} mid-run + 1 final restart)")
+    print()
 
     model = LatLonCGridOceanModel(grid, z_coord, ocean_config)
-    template = create_initial_conditions("latlon", grid, z_coord, config)
-    state, day_offset = _restore_state(template, SPINUP_RESTART)
-    print(f"\nLoaded spinup state at day {day_offset:.1f} (year {day_offset/365:.2f})")
-    print(f"  |η|max = {float(jnp.max(jnp.abs(state.eta.data))):.4e} m")
+    state = create_initial_conditions("latlon", grid, z_coord, config)
+    print("Initial state: rest with stratified T (T_surface=20°C, T_deep=2°C)")
     print(f"  T range: [{float(jnp.min(state.T.data)):.2f}, "
           f"{float(jnp.max(state.T.data)):.2f}] °C")
-    print(f"  |u|max = {float(jnp.max(jnp.abs(state.u.data))):.4e} m/s")
+    print(f"  S uniform: {float(jnp.mean(state.S.data)):.2f} PSU")
+    print(f"  η: {float(jnp.max(jnp.abs(state.eta.data))):.3e} m  (rest)")
     print()
 
     block_fn = _make_step_block(model, dt)
 
-    print(f"Starting integration ({n_steps:,} steps)")
-    t0 = time.time()
-    last_print = t0
-    steps_done = 0
-    last_restart_step = 0
+    # Save day-0 restart for reference
+    _save_restart(state, 0.0, OUTPUT_DIR)
+
     n_blocks = n_steps // block_size
     n_remainder = n_steps - n_blocks * block_size
-    progress_every = max(1, n_blocks // 50)
+    print(f"Starting integration ({n_blocks} blocks × {block_size} steps "
+          f"+ {n_remainder} remainder)")
+    t0 = time.time()
+    last_print = t0
+
+    steps_done = 0
+    last_restart_step = 0
+    progress_every = max(1, n_blocks // 30)
 
     for b in range(n_blocks):
         state = block_fn(state, block_size)
         steps_done += block_size
 
+        # Periodic restarts at multiples of ~n_steps_per_restart
         if (steps_done - last_restart_step) >= n_steps_per_restart:
             jax.block_until_ready(state.eta.data)
-            day = day_offset + steps_done * dt / 86400.0
+            day = steps_done * dt / 86400.0
             _save_restart(state, day, OUTPUT_DIR)
             last_restart_step = steps_done
 
@@ -160,23 +157,22 @@ def main():
             now = time.time()
             if now - last_print > 30 or (b + 1) == n_blocks:
                 jax.block_until_ready(state.eta.data)
-                yr = day_offset / 365.0 + steps_done * dt / 86400.0 / 365.0
+                yr = steps_done * dt / 86400.0 / 365.0
                 eta_max = float(jnp.max(jnp.abs(state.eta.data)))
                 T_max = float(jnp.max(state.T.data))
                 T_min = float(jnp.min(state.T.data))
                 u_max = float(jnp.max(jnp.abs(state.u.data)))
                 elapsed = now - t0
-                yr_done = steps_done * dt / 86400.0 / 365.0
-                eta_s = (
-                    elapsed / yr_done * extension_years - elapsed
-                    if yr_done > 0 else 0
-                )
-                eta_str = (f"{eta_s/60:.1f} min" if eta_s < 3600
-                           else f"{eta_s/3600:.2f} h")
-                print(f"  Yr {yr:5.1f}/50 (extension {yr_done:5.2f}/{extension_years}) | "
+                eta_s = elapsed / yr * total_years - elapsed if yr > 0 else 0
+                if eta_s < 3600:
+                    eta_str = f"{eta_s/60:.1f} min"
+                else:
+                    eta_str = f"{eta_s/3600:.2f} h"
+                print(f"  Yr {yr:5.2f}/{total_years:.1f} | "
                       f"|η|max={eta_max:.2e} | "
                       f"T∈[{T_min:.1f},{T_max:.1f}] | "
-                      f"|u|max={u_max:.3f} | ETA {eta_str}", flush=True)
+                      f"|u|max={u_max:.3f} | "
+                      f"ETA {eta_str}", flush=True)
                 last_print = now
 
     if n_remainder > 0:
@@ -185,16 +181,19 @@ def main():
 
     jax.block_until_ready(state.eta.data)
     wall = time.time() - t0
-    final_day = day_offset + steps_done * dt / 86400.0
-    print(f"\nContinuation done in {wall:.0f}s ({wall/60:.1f} min, "
-          f"{wall/3600:.2f} h)")
-    print(f"  Final state: sim day {final_day:.0f} (year {final_day/365:.2f})")
+    final_day = steps_done * dt / 86400.0
+    print(f"\nSpinup complete in {wall:.0f}s ({wall/60:.1f} min)")
+    print(f"  Final state at sim day {final_day:.0f}")
     print(f"  |η|max = {float(jnp.max(jnp.abs(state.eta.data))):.4e} m")
     print(f"  T range: [{float(jnp.min(state.T.data)):.2f}, "
           f"{float(jnp.max(state.T.data)):.2f}] °C")
     print(f"  |u|max = {float(jnp.max(jnp.abs(state.u.data))):.4e} m/s")
 
+    # Final restart
     _save_restart(state, final_day, OUTPUT_DIR)
+    print(f"\nReady for verification: re-run "
+          f"scripts/run_drake_momentum_budget_implicit.py with "
+          f"RESTART_PATH = {OUTPUT_DIR}/restart_day{int(round(final_day)):06d}.npz")
 
 
 if __name__ == "__main__":

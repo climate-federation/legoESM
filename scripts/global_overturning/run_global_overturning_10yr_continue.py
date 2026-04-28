@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
@@ -92,7 +92,7 @@ def main():
     if not RESTART_PATH.exists():
         raise FileNotFoundError(
             f"Restart file not found: {RESTART_PATH}\n"
-            "Run scripts/run_global_overturning_50yr_gmredi.py first."
+            "Run scripts/global_overturning/run_global_overturning_50yr_gmredi.py first."
         )
 
     config = GlobalOverturningConfig(use_gm_redi=True)

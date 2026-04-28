@@ -1,26 +1,13 @@
 #!/usr/bin/env python
-"""50-year global overturning circulation experiment WITH GM/Redi.
+"""200-year global overturning circulation experiment.
 
-Same setup as run_global_overturning_200yr.py (lat-lon 36x72 = 5-deg,
-20 levels, dt=600s, two-belt wind, A_h=2e5, surface T restoring,
-convective adjustment), but:
-
-  - 50 years instead of 200
-  - GM/Redi mesoscale eddy parameterization ENABLED (triads default,
-    Visbeck adaptive coefficient on)
-
-The triad GM/Redi default landed in commit 520d005 ("Phase 6").  This
-run exercises it on a long, real climate-style integration.
+Runs the global baroclinic overturning experiment on a lat-lon 36x72
+(5-deg) grid for 200 years with periodic restart saves and diagnostics.
 
 Usage:
-    JAX_ENABLE_X64=1 python scripts/run_global_overturning_50yr_gmredi.py
+    JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_200yr.py
 
-Restart files saved every 5 years; snapshots every 2 years.
-
-This script intentionally mirrors run_global_overturning_200yr.py
-rather than refactoring it — keeps the 200yr setup reproducible while
-adding a clearly-labelled GM/Redi-enabled 50yr variant for direct
-comparison.
+Restart files are saved every 10 years to allow continuation.
 """
 
 from __future__ import annotations
@@ -32,7 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Ensure the scripts directory is on the path for ocean_test_matrix imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
@@ -45,54 +33,37 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions, create_forcings,
-    create_eos_config, create_gm_redi_config,
+    create_eos_config,
 )
 
 
 def main():
     # ---- Configuration ----
-    total_years = 50
-    restart_every_years = 5       # 10 restart saves over 50 yr
+    total_years = 200
+    restart_every_years = 10      # save restart every N years
     diag_every_days = 36.5        # ~10 diagnostics per year
-    snapshot_every_years = 2      # 25 snapshots over 50 yr
-    dt = 600.0                    # 10-min timestep
+    snapshot_every_years = 5      # save full 2D snapshots every N years
+    dt = 600.0                    # 10-min timestep (convective CFL safe)
     n_lat, n_lon = 36, 72         # 5-degree resolution
     n_barotropic_substeps = 30
 
-    output_dir = Path("results/ocean/global_overturning_50yr_gmredi")
+    output_dir = Path("results/ocean/global_overturning_200yr")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # GlobalOverturningConfig with GM/Redi turned on; everything else
-    # matches the 200yr setup (defaults from the dataclass).  Visbeck
-    # adaptive coefficient is on by default.
-    config = GlobalOverturningConfig(use_gm_redi=True)
-    gm_redi_cfg = create_gm_redi_config(config)
-    assert gm_redi_cfg is not None
-
+    config = GlobalOverturningConfig()
     total_days = total_years * 365.0
     n_steps = int(total_days * 86400 / dt)
     diag_every = max(1, int(diag_every_days * 86400 / dt))
     restart_every = int(restart_every_years * 365 * 86400 / dt)
     snapshot_every = int(snapshot_every_years * 365 * 86400 / dt)
 
-    print(f"Global Overturning 50-year run (GM/Redi triads ON)")
+    print(f"Global Overturning 200-year run")
     print(f"  Grid: lat-lon {n_lat}x{n_lon} (5-deg)")
     print(f"  Vertical: {config.n_levels} levels, H_max={config.H_max}m")
     print(f"  dt={dt}s, n_steps={n_steps:,}")
     print(f"  A_h={config.A_h:.0e}, K_v={config.K_v:.0e}, A_v={config.A_v:.0e}")
     print(f"  bottom_drag_r={config.bottom_drag_coeff}")
-    print(f"  GM/Redi: scheme={gm_redi_cfg.slope_scheme}  "
-          f"kappa_GM={gm_redi_cfg.kappa_GM:.0f}  "
-          f"kappa_Redi={gm_redi_cfg.kappa_Redi:.0f}  "
-          f"S_max={gm_redi_cfg.S_max}")
-    print(f"  Visbeck: enabled={gm_redi_cfg.visbeck.enabled}  "
-          f"alpha={gm_redi_cfg.visbeck.alpha}  "
-          f"kappa range=[{gm_redi_cfg.visbeck.kappa_min:.0f}, "
-          f"{gm_redi_cfg.visbeck.kappa_max:.0f}]")
-    print(f"  Restart save every {restart_every_years} years "
-          f"({n_steps // restart_every} saves)")
-    print(f"  Snapshot every {snapshot_every_years} years "
-          f"({n_steps // snapshot_every} snaps)")
+    print(f"  Restart save every {restart_every_years} years")
     print(f"  Diagnostics every {diag_every_days} days")
     print(f"  Output: {output_dir}")
     print()
@@ -117,7 +88,6 @@ def main():
         bottom_drag_r=config.bottom_drag_coeff,
         eos="linear",
         eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
     )
     model = LatLonCGridOceanModel(grid, z_coord, ocean_config)
     state = create_initial_conditions("latlon", grid, z_coord, config)
@@ -136,14 +106,16 @@ def main():
     snapshots = {}
 
     def record_diagnostics(state, day):
+        """Extract and store scalar diagnostics."""
         eta = np.asarray(state.eta.data)
         T = np.asarray(state.T.data)
-        u = np.asarray(state.u.data)
-        v = np.asarray(state.v.data)
+        u = np.asarray(state.u.data)    # (nlat, nlon+1, nlev)
+        v = np.asarray(state.v.data)    # (nlat+1, nlon, nlev)
         mask = np.asarray(state.land_mask.data)
 
-        u_c = 0.5 * (u[:, :-1, 0] + u[:, 1:, 0])
-        v_c = 0.5 * (v[:-1, :, 0] + v[1:, :, 0])
+        # Interpolate staggered velocities to cell centers for speed
+        u_c = 0.5 * (u[:, :-1, 0] + u[:, 1:, 0])   # (nlat, nlon)
+        v_c = 0.5 * (v[:-1, :, 0] + v[1:, :, 0])   # (nlat, nlon)
         speed = np.sqrt(u_c**2 + v_c**2)
         max_spd = float(np.max(speed))
 
@@ -163,6 +135,7 @@ def main():
         diag_mean_eta.append(mean_eta)
 
     def save_snapshot(state, step, day):
+        """Save 2D fields for later plotting."""
         eta = np.asarray(state.eta.data)
         T = np.asarray(state.T.data)
         u = np.asarray(state.u.data)
@@ -174,10 +147,11 @@ def main():
             "eta": eta.copy(),
             "SST": T[:, :, 0].copy(),
             "speed_sfc": speed_sfc.copy(),
-            "T_zonal_mean": np.mean(T, axis=1).copy(),
+            "T_zonal_mean": np.mean(T, axis=1).copy(),  # lat x depth
         }
 
     def save_restart_file(state, step, day):
+        """Save restart NPZ."""
         restart = {
             "step": step,
             "time_days": day,
@@ -205,6 +179,7 @@ def main():
         step = i + 1
         day = step * dt / 86400.0
 
+        # Blowup check every 100 steps
         if step % 100 == 0:
             eta_max = float(jnp.max(jnp.abs(state.eta.data)))
             if not np.isfinite(eta_max) or eta_max > 100.0:
@@ -213,24 +188,28 @@ def main():
                 save_restart_file(state, step, day)
                 break
 
+        # Diagnostics
         if step % diag_every == 0:
             record_diagnostics(state, day)
             now = time.time()
             if now - last_print > 30:
                 yr = day / 365.0
                 elapsed = now - t0
+                rate = day / elapsed * 365  # years per wall-second * 365
                 eta_s = elapsed / yr * total_years - elapsed if yr > 0 else 0
-                print(f"  Year {yr:6.2f}/{total_years} | "
+                print(f"  Year {yr:6.1f}/{total_years} | "
                       f"spd={diag_max_speed[-1]:.3f} | "
                       f"SST={diag_mean_sst[-1]:.2f} | "
                       f"T_deep={diag_T_deep[-1]:.2f} | "
                       f"eta={diag_mean_eta[-1]:.2e} | "
-                      f"ETA {eta_s/3600:.1f}h", flush=True)
+                      f"ETA {eta_s/3600:.1f}h")
                 last_print = now
 
+        # Snapshots
         if step % snapshot_every == 0:
             save_snapshot(state, step, day)
 
+        # Restart saves
         if step % restart_every == 0:
             save_restart_file(state, step, day)
 
@@ -238,9 +217,11 @@ def main():
     wall = time.time() - t0
     print(f"\nCompleted in {wall:.0f}s ({wall/3600:.1f}h)")
 
+    # ---- Save final restart ----
     final_day = n_steps * dt / 86400.0
     save_restart_file(state, n_steps, final_day)
 
+    # ---- Save diagnostics ----
     np.savez_compressed(
         output_dir / "diagnostics.npz",
         times=np.array(diag_times),
@@ -252,6 +233,7 @@ def main():
     )
     print(f"  Diagnostics saved: {output_dir / 'diagnostics.npz'}")
 
+    # ---- Save snapshots ----
     snap_data = {}
     for day_key, fields in snapshots.items():
         for fname, arr in fields.items():
@@ -260,26 +242,27 @@ def main():
     np.savez_compressed(output_dir / "snapshots.npz", **snap_data)
     print(f"  Snapshots saved: {output_dir / 'snapshots.npz'}")
 
+    # ---- Plot diagnostics ----
     _plot_diagnostics(output_dir, diag_times, diag_max_speed,
                       diag_mean_sst, diag_mean_T, diag_T_deep,
-                      diag_mean_eta, snapshots, lat_deg, total_years)
+                      diag_mean_eta, snapshots, lat_deg)
     print(f"\nAll output in: {output_dir}")
 
 
 def _plot_diagnostics(output_dir, times, max_speed, mean_sst,
-                      mean_T, T_deep, mean_eta, snapshots, lat_deg,
-                      total_years):
+                      mean_T, T_deep, mean_eta, snapshots, lat_deg):
+    """Generate summary plots."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     years = np.array(times) / 365.0
 
+    # ---- Timeseries ----
     fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
     axes[0].plot(years, max_speed)
     axes[0].set_ylabel("Max speed (m/s)")
-    axes[0].set_title(f"Global Overturning + GM/Redi triads — "
-                      f"{total_years}-year timeseries")
+    axes[0].set_title("Global Overturning — 200-year timeseries")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(years, mean_sst, label="SST")
@@ -298,9 +281,10 @@ def _plot_diagnostics(output_dir, times, max_speed, mean_sst,
     axes[3].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_dir / f"timeseries_{total_years}yr.png", dpi=150)
+    plt.savefig(output_dir / "timeseries_200yr.png", dpi=150)
     plt.close()
 
+    # ---- Snapshot evolution (SSH, SST, speed) ----
     snap_days = sorted(snapshots.keys())
     n_snaps = len(snap_days)
     if n_snaps > 0:
@@ -321,19 +305,19 @@ def _plot_diagnostics(output_dir, times, max_speed, mean_sst,
                 if i == 0:
                     axes[i, j].set_title(label)
                 axes[i, j].set_ylabel(f"Year {yr:.0f}")
-        plt.suptitle("Global Overturning + GM/Redi — snapshot evolution",
-                     y=1.01)
+        plt.suptitle("Global Overturning — snapshot evolution", y=1.01)
         plt.tight_layout()
-        plt.savefig(output_dir / f"snapshots_{total_years}yr.png", dpi=120)
+        plt.savefig(output_dir / "snapshots_200yr.png", dpi=120)
         plt.close()
 
+    # ---- Zonal-mean T sections ----
     if n_snaps > 0:
         fig, axes = plt.subplots(1, n_snaps, figsize=(4 * n_snaps, 5))
         if n_snaps == 1:
             axes = [axes]
         for i, day in enumerate(snap_days):
             yr = day / 365.0
-            T_zm = snapshots[day]["T_zonal_mean"]
+            T_zm = snapshots[day]["T_zonal_mean"]  # (nlat, nlev)
             im = axes[i].imshow(
                 T_zm.T, aspect="auto", origin="upper",
                 cmap="RdYlBu_r", extent=[lat_deg[0], lat_deg[-1],
@@ -345,7 +329,7 @@ def _plot_diagnostics(output_dir, times, max_speed, mean_sst,
                 axes[i].set_ylabel("Level index")
         plt.suptitle("Zonal-mean temperature sections", y=1.02)
         plt.tight_layout()
-        plt.savefig(output_dir / f"T_zonal_mean_{total_years}yr.png", dpi=150)
+        plt.savefig(output_dir / "T_zonal_mean_200yr.png", dpi=150)
         plt.close()
 
     print(f"  Plots saved to {output_dir}")

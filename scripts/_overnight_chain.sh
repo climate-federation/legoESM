@@ -124,7 +124,7 @@ echo "[$(ts)] === Crit 1.2 / Crit 2 numbers from clean-IC verification logged ab
 # --- Step 3: 40-yr continuation ---
 echo "[$(ts)] Step 3: 40-yr continuation to sim-yr 50" | tee -a "$LOG"
 mkdir -p results/ocean/global_overturning_50yr_implicit
-JAX_ENABLE_X64=1 "$PY" scripts/run_global_overturning_50yr_implicit_continuation.py \
+JAX_ENABLE_X64=1 "$PY" scripts/global_overturning/run_global_overturning_50yr_implicit_continuation.py \
     > results/ocean/global_overturning_50yr_implicit/run.log 2>&1
 echo "[$(ts)] Step 3 done" | tee -a "$LOG"
 tail -10 results/ocean/global_overturning_50yr_implicit/run.log | tee -a "$LOG"
