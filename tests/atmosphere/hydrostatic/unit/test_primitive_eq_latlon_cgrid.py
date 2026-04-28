@@ -14,7 +14,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
     hydrostatic_to_cgrid,
     cgrid_to_hydrostatic,
 )
-from tests.test_cases.held_suarez import (
+from legoesm.atmosphere.held_suarez import (
     held_suarez_init_latlon,
     held_suarez_forcing_latlon,
 )

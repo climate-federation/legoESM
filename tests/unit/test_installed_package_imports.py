@@ -1,31 +1,72 @@
-"""Regression tests for issue #188.
+"""Regression coverage for issue #188 and the generalised
+production-imports-from-tests anti-pattern.
 
-The ``scripts/run_amip.py`` entry point (and every other top-level
-script under ``scripts/``) must be importable/runnable *without*
-the repository ``tests/`` directory on ``sys.path``. In issue #188,
-``src/legoesm/driver/model_driver.py`` and several scripts were
-importing Held-Suarez initialization/forcing from
-``tests.test_cases.held_suarez``; running ``python scripts/run_amip.py``
-from the repo root then crashed with
-``ModuleNotFoundError: No module named 'tests'`` because Python puts
-the *script directory* (``scripts/``) on ``sys.path``, not the CWD,
-so ``tests/`` is not discoverable.
+Background
+----------
+Issue #188: ``scripts/run_amip.py`` (and other top-level scripts under
+``scripts/``) crashed at startup with
+``ModuleNotFoundError: No module named 'tests'`` because
+``src/legoesm/driver/model_driver.py`` was importing Held-Suarez from
+``tests.test_cases.held_suarez``. Running a script puts the *script
+directory* on ``sys.path``, not the repo root, so ``tests/`` is not
+discoverable in that context.
 
-These tests enforce two contracts:
+The original fix moved the Held-Suarez implementation into the
+installed package (``legoesm.atmosphere.held_suarez``) and left a
+back-compat shim at ``tests/test_cases/held_suarez.py``. The shim was
+later removed; existing test callers were migrated to import the
+canonical location directly.
 
-1. Held-Suarez lives in the installed package at
-   ``legoesm.atmosphere.held_suarez``.
-2. No file under ``src/legoesm/`` or ``scripts/`` imports it from
-   ``tests.test_cases.held_suarez``. The shim in
-   ``tests/test_cases/held_suarez.py`` exists only so existing
-   *test* code that uses the old path keeps working.
+Why this file still exists
+--------------------------
+Removing the shim makes ``from tests.test_cases.held_suarez import ...``
+fail at parse time, so the original held_suarez-specific narrow guard
+is now structurally enforced. But the underlying anti-pattern —
+production code importing from the ``tests/`` tree at all — is broader
+than held_suarez and is not enforced anywhere else. ``src/legoesm/cli.
+py``, ``src/legoesm/atmosphere/dynamics/spectral_nh.py``, and a number
+of scripts currently exhibit the same pattern for ``williamson``,
+``baroclinic_wave``, ``dcmip2025``, ``cosine_bell``, ``dcmip_transport``,
+and ``test_williamson2_cdgrid``. Each of those is a latent #188-style
+bug waiting to surface in any context where ``tests/`` is not on
+``sys.path``.
+
+This file enforces three layers of protection:
+
+1. **Narrow held_suarez guard** (``test_no_held_suarez_imports_from_tests_in_production``):
+   reproduces the exact #188 condition. Even though Python now raises
+   ``ModuleNotFoundError`` at parse time, this AST scan runs at pytest
+   collection with a clearer failure message naming the file, line
+   number, and the canonical replacement.
+
+2. **Per-file module-set allowlist** (``test_no_new_tests_imports_in_production``
+   plus ``test_grandfather_list_is_minimal``): scans every ``.py``
+   under ``src/legoesm/`` and ``scripts/`` for any ``from tests.*`` or
+   ``import tests.*``. The allowlist
+   ``GRANDFATHERED_TESTS_IMPORTS_BY_FILE`` is a dict mapping each
+   currently-offending file to the **exact set of ``tests.X`` modules
+   it is permitted to import**. A new module — even one added to a
+   file already on the allowlist — fails the test. Importantly this
+   means an allowlisted file does *not* receive a blank check; it can
+   only continue to import the modules it was importing when the
+   allowlist was created. The minimality check then refuses to let
+   stale entries linger: when a file stops importing one of its
+   allowlisted modules (or stops existing), the entry must be removed.
+
+3. **End-to-end subprocess verification**
+   (``test_run_amip_help_starts_without_tests_on_path`` and
+   ``test_held_suarez_resolves_without_tests_on_path``): launches a
+   fresh interpreter with the repo root scrubbed from ``PYTHONPATH``
+   and confirms ``run_amip.py --help`` and the canonical Held-Suarez
+   import both succeed without ``tests/`` on the path. This is the
+   exact #188 user-visible failure.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import pathlib
-import re
 import subprocess
 import sys
 
@@ -33,15 +74,116 @@ import pytest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+PRODUCTION_ROOTS = ("src/legoesm", "scripts")
 
-# Only forbid the import in production code paths. The shim itself
-# (tests/test_cases/held_suarez.py) and other existing test modules
-# legitimately reference the old location.
-FORBIDDEN_ROOTS = ("src/legoesm", "scripts")
-FORBIDDEN_PATTERN = re.compile(
-    r"^\s*from\s+tests\.test_cases\.held_suarez\s+import",
-    re.MULTILINE,
-)
+
+# Map of grandfathered production file → set of ``tests.X`` modules
+# the file is permitted to import. **This is a per-file module-set
+# allowlist, not a per-file blank check**: the test fails for any
+# ``tests.X`` import in this file unless ``X`` is in the recorded set.
+#
+# When you remove an import:
+#   - If a module no longer appears in a file, remove it from this
+#     file's frozenset (``test_grandfather_list_is_minimal`` enforces
+#     this).
+#   - If the file ends up with an empty frozenset, remove the file
+#     entry entirely.
+#
+# When you would otherwise add a new ``tests.X`` import in production:
+#   - **Don't.** Move the imported module into the installed package
+#     (e.g., the way ``held_suarez`` was moved to
+#     ``legoesm.atmosphere.held_suarez`` for issue #188), or
+#     bootstrap ``<repo>/src`` onto ``sys.path`` from the script
+#     itself if the script genuinely needs ``tests/`` for fixtures.
+#   - As a last resort only, add an entry here. Each new entry is a
+#     known #188-style latent bug; track it for future cleanup.
+#
+# As of 2026-04-28, every entry below mirrors the same #188 anti-
+# pattern. They are out of scope for the held_suarez cleanup but
+# remain known tech debt; flagged for a follow-up audit.
+GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
+    "scripts/diagnostic/diag_williamson2.py": frozenset({
+        "tests.unit.test_williamson2_cdgrid",
+    }),
+    "scripts/diagnostic/validate_cubed_sphere_fv3_atmos.py": frozenset({
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1",
+        "tests.test_cases.williamson",
+    }),
+    "scripts/run_atmosphere_test_matrix.py": frozenset({
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas",
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2_mpas",
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3_mpas",
+        "tests.atmosphere.shallow_water.test_cases.williamson_mpas",
+        "tests.test_cases.baroclinic_wave",
+        "tests.test_cases.cosine_bell",
+        "tests.test_cases.dcmip2025",
+        "tests.test_cases.dcmip_transport",
+        "tests.test_cases.williamson",
+    }),
+    "scripts/run_baroclinic_wave_benchmark.py": frozenset({
+        "tests.test_cases.baroclinic_wave",
+    }),
+    "scripts/run_cpu_mpi_scaling.py": frozenset({
+        "tests.test_cases.baroclinic_wave",
+    }),
+    "scripts/run_levante_gpu_scaling.py": frozenset({
+        "tests.test_cases.baroclinic_wave",
+    }),
+    "scripts/run_w2_mpas_convergence.py": frozenset({
+        "tests.atmosphere.shallow_water.test_cases.williamson_mpas",
+    }),
+    "src/legoesm/atmosphere/dynamics/spectral_nh.py": frozenset({
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.common",
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2",
+        "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3",
+        "tests.test_cases.dcmip2025.common",
+        "tests.test_cases.dcmip2025.test_case_1",
+    }),
+    "src/legoesm/cli.py": frozenset({
+        "tests.test_cases.williamson",
+    }),
+}
+
+
+def _walk_py_files(root: pathlib.Path):
+    yield from root.rglob("*.py")
+
+
+def _ast_find_tests_imports(source: str) -> list[tuple[int, str, str]]:
+    """Return ``[(lineno, module, statement), ...]`` for every
+    ``from tests.*`` or ``import tests.*`` in ``source``, including
+    imports nested inside function bodies, class bodies, or
+    conditional branches.
+
+    ``module`` is the dotted module path (e.g.
+    ``tests.test_cases.williamson``) — used for allowlist matching.
+    ``statement`` is the human-readable form (e.g. ``from tests.X
+    import a, b``) — used in failure messages.
+
+    A plain regex on the source text would miss some cases (dynamically
+    constructed import nodes, exec'd code), but more importantly
+    AST-level scanning explicitly walks into function bodies so it
+    catches lazy-imports that only fire when a method is called —
+    which is the original #188 bug pattern.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    hits: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "tests" or mod.startswith("tests."):
+                names = ", ".join(a.name for a in node.names)
+                hits.append((node.lineno, mod, f"from {mod} import {names}"))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "tests" or alias.name.startswith("tests."):
+                    hits.append((
+                        node.lineno, alias.name, f"import {alias.name}"
+                    ))
+    return hits
 
 
 def test_held_suarez_is_installed_package():
@@ -65,95 +207,115 @@ def test_held_suarez_is_installed_package():
         assert hasattr(hs, name), f"missing public symbol {name!r}"
 
 
-def test_tests_shim_reexports_same_objects():
-    """Back-compat shim must expose the same objects, not copies."""
-    import legoesm.atmosphere.held_suarez as canonical
-    import tests.test_cases.held_suarez as shim
+def test_no_held_suarez_imports_from_tests_in_production():
+    """Issue #188 narrow guard — production code must import
+    Held-Suarez from ``legoesm.atmosphere.held_suarez``, never from
+    ``tests.test_cases.held_suarez``.
 
-    for name in (
-        "held_suarez_init",
-        "held_suarez_forcing_mpas",
-        "held_suarez_equilibrium_temperature",
-        "SIGMA_B",
-    ):
-        assert getattr(shim, name) is getattr(canonical, name), (
-            f"{name} in shim differs from canonical location"
-        )
-
-
-def _walk_py_files(root: pathlib.Path):
-    for p in root.rglob("*.py"):
-        yield p
-
-
-@pytest.mark.parametrize("subdir", FORBIDDEN_ROOTS)
-def test_no_tests_held_suarez_import_in_production(subdir: str):
-    """Production code must import from ``legoesm.atmosphere.held_suarez``.
-
-    Running any script under ``scripts/`` from the repo root puts the
-    script's own directory on ``sys.path`` — *not* the repo root — so
-    ``tests/`` is not importable. Any ``from tests.test_cases.held_suarez``
-    line in those files reintroduces issue #188.
+    The shim has been removed, so any such import would also raise
+    ``ModuleNotFoundError`` at parse time. This static scan runs at
+    pytest collection (no JAX/dycore startup cost) and produces a
+    clear, file-and-line failure message that names the canonical
+    replacement.
     """
     offenders: list[str] = []
-    for path in _walk_py_files(REPO_ROOT / subdir):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if FORBIDDEN_PATTERN.search(text):
-            offenders.append(str(path.relative_to(REPO_ROOT)))
+    for subdir in PRODUCTION_ROOTS:
+        for path in _walk_py_files(REPO_ROOT / subdir):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for lineno, _module, stmt in _ast_find_tests_imports(text):
+                if "tests.test_cases.held_suarez" in stmt:
+                    rel = path.relative_to(REPO_ROOT)
+                    offenders.append(f"  - {rel}:{lineno}: {stmt}")
     assert not offenders, (
-        "The following production files import Held-Suarez from the "
-        "tests tree, which breaks installed/script execution (see #188):\n"
-        + "\n".join(f"  - {p}" for p in offenders)
+        "Production code must import Held-Suarez from "
+        "legoesm.atmosphere.held_suarez (issue #188):\n"
+        + "\n".join(offenders)
     )
 
 
-def _ast_find_tests_imports(source: str) -> list[tuple[int, str]]:
-    """Return every ``from tests.test_cases.held_suarez import ...`` in
-    ``source``, including those nested inside functions, classes, or
-    conditional branches.
+@pytest.mark.parametrize("subdir", PRODUCTION_ROOTS)
+def test_no_new_tests_imports_in_production(subdir: str):
+    """Generalised #188 guard — production code under
+    ``src/legoesm/`` and ``scripts/`` must not import from the
+    ``tests/`` tree, except for files explicitly listed in
+    ``GRANDFATHERED_TESTS_IMPORTS_BY_FILE`` AND only for the modules
+    each file is recorded as importing today.
 
-    A plain regex on the source text would miss some cases (e.g. where
-    an ``import`` node is constructed dynamically), and more importantly
-    AST-level scanning explicitly walks into function bodies so it
-    catches lazy-imports that only fire when a method is called — which
-    is exactly the original #188 bug pattern.
+    This catches the same anti-pattern that triggered #188 for any
+    other test-case module (``williamson``, ``baroclinic_wave``,
+    ``dcmip2025``, ...). Two failure modes:
+
+    1. A file not in the allowlist that imports any ``tests.X``.
+    2. A file in the allowlist that imports a ``tests.X`` not in
+       its recorded set (i.e. someone added a new violation to an
+       already-grandfathered file — the allowlist is per-module,
+       not a blank check).
     """
-    import ast
-
-    tree = ast.parse(source)
-    hits: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            if mod == "tests.test_cases.held_suarez" or mod.startswith(
-                "tests.test_cases.held_suarez."
-            ):
-                names = ", ".join(a.name for a in node.names)
-                hits.append((node.lineno, f"from {mod} import {names}"))
-    return hits
-
-
-@pytest.mark.parametrize("subdir", FORBIDDEN_ROOTS)
-def test_no_nested_tests_held_suarez_import_via_ast(subdir: str):
-    """AST-level scan: catch lazy imports inside functions.
-
-    The file-level regex test above scans every line, but a future
-    refactor could hide the same import inside an `exec(...)` block or
-    build the module name dynamically. AST walking is the canonical way
-    to enumerate every static ``import`` node, including those nested
-    inside function bodies (the original #188 bug was exactly a
-    function-local import), so this test guards against silent
-    reintroduction regardless of indentation style.
-    """
-    offenders: list[str] = []
+    new_offenders: dict[str, list[tuple[int, str]]] = {}
     for path in _walk_py_files(REPO_ROOT / subdir):
+        rel = path.relative_to(REPO_ROOT).as_posix()
         text = path.read_text(encoding="utf-8", errors="ignore")
-        for lineno, stmt in _ast_find_tests_imports(text):
-            rel = path.relative_to(REPO_ROOT)
-            offenders.append(f"  - {rel}:{lineno}: {stmt}")
-    assert not offenders, (
-        "AST scan found imports of Held-Suarez from the tests tree in "
-        "production code (see #188):\n" + "\n".join(offenders)
+        hits = _ast_find_tests_imports(text)
+        if not hits:
+            continue
+        allowed = GRANDFATHERED_TESTS_IMPORTS_BY_FILE.get(rel, frozenset())
+        for lineno, module, stmt in hits:
+            if module not in allowed:
+                new_offenders.setdefault(rel, []).append((lineno, stmt))
+    assert not new_offenders, (
+        "New production-code import from tests/ detected — this is the "
+        "issue #188 anti-pattern. Either move the imported module into "
+        "the installed legoesm package (preferred), or — only as a last "
+        "resort — add the module to the file's frozenset in "
+        "GRANDFATHERED_TESTS_IMPORTS_BY_FILE in this test file:\n"
+        + "\n".join(
+            f"  - {p}:\n"
+            + "\n".join(f"      {ln}: {s}" for ln, s in hits)
+            for p, hits in sorted(new_offenders.items())
+        )
+    )
+
+
+def test_grandfather_list_is_minimal():
+    """The allowlist must ratchet DOWN: if an allowlisted file no
+    longer imports one (or any) of its allowlisted ``tests.*``
+    modules, that entry is stale. Stale entries fail this test,
+    forcing the tech debt to monotonically shrink rather than
+    accumulate.
+
+    Specifically detected:
+      - File no longer exists (entry must be removed).
+      - File exists but no longer imports any ``tests.*`` (entry
+        must be removed).
+      - File imports a strict subset of its allowed modules (the
+        unused module names must be removed from the frozenset).
+    """
+    stale: list[str] = []
+    for rel, allowed in sorted(GRANDFATHERED_TESTS_IMPORTS_BY_FILE.items()):
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            stale.append(f"  - {rel}: file no longer exists; remove entry")
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        actual = {module for _, module, _ in _ast_find_tests_imports(text)}
+        if not actual:
+            stale.append(
+                f"  - {rel}: no remaining tests.* imports; "
+                "remove the file entry from "
+                "GRANDFATHERED_TESTS_IMPORTS_BY_FILE"
+            )
+            continue
+        unused = allowed - actual
+        if unused:
+            stale.append(
+                f"  - {rel}: allowlisted but no longer imported: "
+                + ", ".join(sorted(unused))
+                + " — remove from this file's frozenset"
+            )
+    assert not stale, (
+        "GRANDFATHERED_TESTS_IMPORTS_BY_FILE contains stale entries "
+        "(files cleaned up but allowlist not updated):\n"
+        + "\n".join(stale)
     )
 
 
@@ -198,7 +360,7 @@ def test_run_amip_help_starts_without_tests_on_path():
     result = _run_subprocess_without_repo_root(
         "import runpy, sys\n"
         f"sys.argv = [{str(script)!r}, '--help']\n"
-        f"try:\n"
+        "try:\n"
         f"    runpy.run_path({str(script)!r}, run_name='__main__')\n"
         "except SystemExit as exc:\n"
         "    # argparse --help exits 0; anything else is a real failure.\n"
@@ -215,7 +377,16 @@ def test_run_amip_help_starts_without_tests_on_path():
 
 
 def test_held_suarez_resolves_without_tests_on_path():
-    """Canonical Held-Suarez module must resolve in an installed env."""
+    """Canonical Held-Suarez module must resolve in an installed env.
+
+    Companion to ``test_run_amip_help_starts_without_tests_on_path``:
+    that test verifies the script's full import closure is clean; this
+    one verifies the specific submodule the closure depends on
+    (``legoesm.atmosphere.held_suarez``) loads without any ``tests/``
+    reference. If a future refactor moved Held-Suarez back into the
+    tests tree (reversing the #188 fix), this test would fail with
+    ``ModuleNotFoundError`` even before the script-level test ran.
+    """
     # NOTE: do not assert ``find_spec('tests') is None`` here — an
     # unrelated site-packages ``tests`` package (which some CI images
     # ship) would make that precondition flaky. The real contract is
@@ -230,313 +401,5 @@ def test_held_suarez_resolves_without_tests_on_path():
     )
     assert result.returncode == 0, (
         f"Canonical Held-Suarez import failed:\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-
-
-def test_tests_shim_works_from_raw_repo_checkout():
-    """``from tests.test_cases.held_suarez import ...`` must resolve when
-    the package has not been pip-installed in editable mode — i.e. only
-    the repo root is on ``sys.path`` and ``legoesm`` is not yet
-    importable. The shim is expected to bootstrap itself by locating
-    ``<repo>/src`` on disk and prepending it to ``sys.path`` before
-    delegating to the canonical module.
-
-    Reproducing this exactly requires a venv in which ``legoesm`` is
-    *not* installed; since our CI venv uses ``pip install -e .``, we
-    simulate the raw-checkout layout in a subprocess by:
-
-    1. Setting ``PYTHONPATH`` to the repo root only.
-    2. Removing every editable-install hook (``.pth``-injected entries
-       pointing at ``src/``) from ``sys.path`` and deleting any cached
-       ``legoesm`` entries from ``sys.modules`` *before* the shim
-       imports. At that point, ``import legoesm`` raises
-       ``ModuleNotFoundError`` and the shim's fallback path fires.
-    """
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            # Strip src/ from sys.path so legoesm is not importable via
-            # the editable install, forcing the shim to self-bootstrap.
-            "import sys, os\n"
-            "repo_src = os.path.join(os.environ['PYTHONPATH'], 'src')\n"
-            "sys.path = [p for p in sys.path if os.path.abspath(p) != os.path.abspath(repo_src)]\n"
-            "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
-            "    del sys.modules[mod]\n"
-            "# Sanity check: legoesm must be unresolvable *before* the shim runs.\n"
-            "import importlib.util\n"
-            "assert importlib.util.find_spec('legoesm') is None, "
-            "    'precondition failed: legoesm is already on path'\n"
-            "# Now import the shim; it must self-bootstrap src/ onto sys.path.\n"
-            "import tests.test_cases.held_suarez as shim\n"
-            "assert callable(shim.held_suarez_init)\n"
-            "assert shim.SIGMA_B == 0.7\n",
-        ],
-        cwd=str(REPO_ROOT.parent),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, (
-        "tests/ shim failed from raw repo checkout (no editable "
-        "install):\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-
-
-def test_tests_shim_recovers_from_stale_legoesm_install():
-    """Shim must self-bootstrap even when a stale ``legoesm`` package is
-    already importable but *lacks* the ``atmosphere.held_suarez``
-    submodule — e.g. an older wheel/editable install from before the
-    #188 move.
-
-    Reproduction: inject a dummy ``legoesm`` namespace package into a
-    throwaway staging directory (with no ``atmosphere`` submodule),
-    prepend that directory to ``sys.path`` so ``import legoesm``
-    succeeds but ``import legoesm.atmosphere.held_suarez`` would fail,
-    and then import the shim. The shim is expected to notice the
-    missing submodule via ``importlib.util.find_spec`` and prepend
-    ``<repo>/src`` so the delegating import resolves to the checkout
-    copy rather than the stale stand-in.
-    """
-    import tempfile
-    import textwrap
-
-    with tempfile.TemporaryDirectory() as stale_root:
-        stale_pkg = pathlib.Path(stale_root) / "legoesm"
-        stale_pkg.mkdir()
-        (stale_pkg / "__init__.py").write_text(
-            textwrap.dedent(
-                """
-                # Deliberately stale: no ``atmosphere`` submodule.
-                STALE_SENTINEL = True
-                """
-            ).lstrip()
-        )
-
-        env = dict(os.environ)
-        # Put the stale package directory *ahead* of the repo root so
-        # ``import legoesm`` resolves to the stale stand-in first.
-        env["PYTHONPATH"] = os.pathsep.join([str(stale_root), str(REPO_ROOT)])
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                # Scrub editable-install src/ so the stale stand-in wins.
-                "import sys, os\n"
-                "repo_src = os.path.join(os.environ['PYTHONPATH'].split(os.pathsep)[-1], 'src')\n"
-                "sys.path = [p for p in sys.path if os.path.abspath(p) != os.path.abspath(repo_src)]\n"
-                "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
-                "    del sys.modules[mod]\n"
-                # Prime the stale install: top-level import must succeed,\n"
-                # but the submodule must not be reachable yet.\n"
-                "import legoesm\n"
-                "assert getattr(legoesm, 'STALE_SENTINEL', False), 'stale stand-in not active'\n"
-                "import importlib.util\n"
-                "assert importlib.util.find_spec('legoesm.atmosphere') is None, "
-                "    'stale stand-in unexpectedly exposes atmosphere/'\n"
-                # Now import the shim; it must detect the missing\n"
-                # submodule, prepend <repo>/src, evict the stale\n"
-                # top-level module, and resolve against the checkout.\n"
-                "import tests.test_cases.held_suarez as shim\n"
-                "assert callable(shim.held_suarez_init)\n"
-                "assert shim.SIGMA_B == 0.7\n"
-                "# After the shim runs, the canonical module must come\n"
-                "# from the checkout, not the stale stand-in.\n"
-                "import legoesm.atmosphere.held_suarez as canonical\n"
-                "assert shim.held_suarez_init is canonical.held_suarez_init\n",
-            ],
-            cwd=str(REPO_ROOT.parent),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    assert result.returncode == 0, (
-        "tests/ shim failed to recover from a stale legoesm install:\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-
-
-def test_tests_shim_recovers_when_src_is_on_path_but_shadowed():
-    """Mixed case: checkout ``<repo>/src`` is already on ``sys.path``,
-    but a stale ``legoesm`` package appears *earlier* on the path and
-    wins the initial ``import legoesm``. The shim must still recover
-    and resolve the delegating import against the checkout.
-
-    This is the realistic editable-install scenario that round-4
-    Codex review flagged: pip install -e already put ``src/`` on the
-    path, yet the developer's environment also has a different
-    ``legoesm`` earlier (e.g. a site-packages wheel or a leftover
-    staging directory). If the shim only inserts ``src/`` when
-    missing, it leaves the stale package in control and crashes on
-    the star-import of ``legoesm.atmosphere.held_suarez``.
-    """
-    import tempfile
-    import textwrap
-
-    with tempfile.TemporaryDirectory() as stale_root:
-        stale_pkg = pathlib.Path(stale_root) / "legoesm"
-        stale_pkg.mkdir()
-        (stale_pkg / "__init__.py").write_text(
-            textwrap.dedent(
-                """
-                # Deliberately stale: no ``atmosphere`` submodule.
-                STALE_SENTINEL = True
-                """
-            ).lstrip()
-        )
-
-        env = dict(os.environ)
-        # Put the stale stand-in *earlier* than any ``src/`` hint; we
-        # rely on the in-process ``sys.path`` manipulation to emulate
-        # the editable install having ``src/`` already discoverable.
-        env["PYTHONPATH"] = os.pathsep.join([str(stale_root), str(REPO_ROOT)])
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                # Emulate a mixed editable-install state: keep
-                # ``<repo>/src`` on sys.path, but *after* the stale
-                # stand-in so ``import legoesm`` resolves there first.
-                "import sys, os\n"
-                "repo_root = os.environ['PYTHONPATH'].split(os.pathsep)[-1]\n"
-                "repo_src = os.path.join(repo_root, 'src')\n"
-                "if repo_src not in sys.path:\n"
-                "    sys.path.append(repo_src)\n"
-                # Clear any cached legoesm modules and prime the stale\n"
-                # stand-in so its incomplete top-level __init__ wins.\n"
-                "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
-                "    del sys.modules[mod]\n"
-                "import legoesm\n"
-                "assert getattr(legoesm, 'STALE_SENTINEL', False), "
-                "    'stale stand-in is not active'\n"
-                "import importlib.util\n"
-                "try:\n"
-                "    sub = importlib.util.find_spec('legoesm.atmosphere.held_suarez')\n"
-                "except ModuleNotFoundError:\n"
-                "    sub = None\n"
-                "assert sub is None, 'precondition failed: submodule already reachable'\n"
-                # Now import the shim. The fix must: move <repo>/src to\n"
-                # the front, evict stale legoesm from sys.modules, and\n"
-                # re-resolve the delegating import against the checkout.\n"
-                "import tests.test_cases.held_suarez as shim\n"
-                "assert callable(shim.held_suarez_init)\n"
-                "import legoesm.atmosphere.held_suarez as canonical\n"
-                "assert shim.held_suarez_init is canonical.held_suarez_init\n"
-                "import legoesm as reloaded\n"
-                "assert not getattr(reloaded, 'STALE_SENTINEL', False), "
-                "    'shim did not evict the stale top-level package'\n",
-            ],
-            cwd=str(REPO_ROOT.parent),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    assert result.returncode == 0, (
-        "tests/ shim failed to recover from a stale install shadowing "
-        "an already-on-path src/:\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-
-
-def test_tests_shim_rejects_stale_install_that_includes_submodule():
-    """Stop-gate regression: a stale install that *does* ship
-    ``legoesm.atmosphere.held_suarez`` must still not silently bind
-    the shim to it.
-
-    Previous shim logic bootstrapped ``<repo>/src`` only when the
-    target submodule was unreachable. If a user had an older
-    ``legoesm`` earlier on ``sys.path`` that *included* the submodule
-    (e.g. a wheel published between two versions of this fix), the
-    shim would detect a valid spec, skip the bootstrap, and re-export
-    the stale copy — silently running tests against the wrong code.
-
-    The hardened shim must compare the resolved submodule origin
-    against ``<repo>/src`` and force the checkout to win whenever the
-    two disagree.
-    """
-    import tempfile
-    import textwrap
-
-    with tempfile.TemporaryDirectory() as stale_root:
-        stale_pkg = pathlib.Path(stale_root) / "legoesm"
-        atmosphere_pkg = stale_pkg / "atmosphere"
-        atmosphere_pkg.mkdir(parents=True)
-        (stale_pkg / "__init__.py").write_text("STALE_SENTINEL = True\n")
-        (atmosphere_pkg / "__init__.py").write_text("")
-        # Stale submodule exposes a marker attribute and a sentinel
-        # function object. If the shim binds to this copy, the test
-        # will see the sentinels instead of the checkout symbols.
-        (atmosphere_pkg / "held_suarez.py").write_text(
-            textwrap.dedent(
-                """
-                STALE_HELD_SUAREZ = True
-
-                def held_suarez_init(*args, **kwargs):
-                    return 'stale-init'
-
-                SIGMA_B = -1.0
-                K_A = -1.0
-                K_S = -1.0
-                K_F = -1.0
-                """
-            ).lstrip()
-        )
-
-        env = dict(os.environ)
-        # Put the stale install *earlier* than the repo root so that
-        # ``import legoesm`` and ``import legoesm.atmosphere.held_suarez``
-        # both resolve to it before the shim runs.
-        env["PYTHONPATH"] = os.pathsep.join([str(stale_root), str(REPO_ROOT)])
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import sys, os\n"
-                "repo_root = os.environ['PYTHONPATH'].split(os.pathsep)[-1]\n"
-                "repo_src = os.path.join(repo_root, 'src')\n"
-                "if repo_src not in sys.path:\n"
-                "    sys.path.append(repo_src)\n"
-                "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
-                "    del sys.modules[mod]\n"
-                # Precondition: the stale submodule is fully reachable\n"
-                # before the shim runs — the critical difference from\n"
-                # the earlier stale-install test.\n"
-                "import legoesm.atmosphere.held_suarez as pre\n"
-                "assert getattr(pre, 'STALE_HELD_SUAREZ', False), "
-                "    'precondition failed: stale submodule not active'\n"
-                "assert pre.held_suarez_init() == 'stale-init'\n"
-                # Now import the shim. It must detect that the found\n"
-                # submodule lives outside <repo>/src, prepend the\n"
-                # checkout, evict cached modules, and re-resolve.\n"
-                "import tests.test_cases.held_suarez as shim\n"
-                "assert not getattr(shim, 'STALE_HELD_SUAREZ', False), "
-                "    'shim silently bound to the stale installed module'\n"
-                "assert shim.SIGMA_B == 0.7, "
-                "    f'SIGMA_B came from stale module: {shim.SIGMA_B!r}'\n"
-                # After the shim runs, a fresh import of the canonical\n"
-                # name must also resolve to the checkout, not the stale\n"
-                # copy — confirming sys.path + sys.modules were both\n"
-                # repaired, not just the shim's own references.\n"
-                "import legoesm.atmosphere.held_suarez as canonical\n"
-                "assert not getattr(canonical, 'STALE_HELD_SUAREZ', False), "
-                "    'canonical re-import still returned the stale module'\n"
-                "assert shim.held_suarez_init is canonical.held_suarez_init\n",
-            ],
-            cwd=str(REPO_ROOT.parent),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    assert result.returncode == 0, (
-        "tests/ shim silently bound to a stale installed Held-Suarez "
-        "module that happened to ship the submodule (#188 stop-gate):\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
