@@ -48,6 +48,12 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         barotropic_diffusion_alpha: float | None = None,
                         barotropic_div_damp: float | None = None,
                         tracer_advection: str | None = None,
+                        pv_scheme: str | None = None,
+                        apvm_dt: float | None = None,
+                        pv_alpha: float | None = None,
+                        K_zeta_bih: float | None = None,
+                        C_leith: float | None = None,
+                        C_leith_modified: bool | None = None,
                         momentum_advection: str | None = None,
                         weno_d_term: bool | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
@@ -144,6 +150,18 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
+        if pv_scheme is not None:
+            kw["pv_scheme"] = pv_scheme
+        if apvm_dt is not None:
+            kw["apvm_dt"] = apvm_dt
+        if pv_alpha is not None:
+            kw["pv_alpha"] = pv_alpha
+        if K_zeta_bih is not None:
+            kw["K_zeta_bih"] = K_zeta_bih
+        if C_leith is not None:
+            kw["C_leith"] = C_leith
+        if C_leith_modified is not None:
+            kw["C_leith_modified"] = C_leith_modified
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"
@@ -191,6 +209,18 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
+        if pv_scheme is not None:
+            kw["pv_scheme"] = pv_scheme
+        if apvm_dt is not None:
+            kw["apvm_dt"] = apvm_dt
+        if pv_alpha is not None:
+            kw["pv_alpha"] = pv_alpha
+        if K_zeta_bih is not None:
+            kw["K_zeta_bih"] = K_zeta_bih
+        if C_leith is not None:
+            kw["C_leith"] = C_leith
+        if C_leith_modified is not None:
+            kw["C_leith_modified"] = C_leith_modified
         # pv_scheme defaults to "enstrophy" in MPASOceanConfig.
         # apvm_dt left at 0 (disabled); see mpas_channel branch notes.
         cfg = MPASOceanConfig(**kw)
@@ -318,6 +348,18 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
+        if pv_scheme is not None:
+            kw["pv_scheme"] = pv_scheme
+        if apvm_dt is not None:
+            kw["apvm_dt"] = apvm_dt
+        if pv_alpha is not None:
+            kw["pv_alpha"] = pv_alpha
+        if K_zeta_bih is not None:
+            kw["K_zeta_bih"] = K_zeta_bih
+        if C_leith is not None:
+            kw["C_leith"] = C_leith
+        if C_leith_modified is not None:
+            kw["C_leith_modified"] = C_leith_modified
         # pv_scheme defaults to "enstrophy" in MPASOceanConfig — suppresses
         # the ζ-checkerboard null mode of the energy-conserving scheme.
         # APVM is left disabled (``apvm_dt=0``); enabling it on top of

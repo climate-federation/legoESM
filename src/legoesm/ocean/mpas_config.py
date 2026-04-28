@@ -94,6 +94,19 @@ class MPASOceanConfig(NamedTuple):
                           # bias (damps ζ-checkerboard null mode of the
                           # energy-conserving PV flux). 0 = disabled.
                           # Set automatically by the test matrix to dt.
+    pv_alpha: float = 1.0  # Weight on energy-conserving flux when
+                           # ``pv_scheme == "mixed"``: α·energy + (1−α)·enstrophy.
+                           # α=1.0 recovers pure energy; α=0.0 pure enstrophy.
+                           # Ignored for pv_scheme in {"energy", "enstrophy"}.
+    K_zeta_bih: float = 0.0  # Biharmonic dissipation on relative vorticity ζ
+                             # [m⁴/s]. Adds −K_ζ·∇⁴ζ to the vorticity
+                             # equation (scale-selective damping of grid-scale
+                             # ζ patterns), applied as a tangential-gradient
+                             # force on the momentum equation. Targets the
+                             # ζ-checkerboard null mode of the energy-
+                             # conserving PV flux — invisible to B_h·∇⁴u
+                             # because the null mode lives in the kernel of
+                             # the discrete curl. 0 = disabled.
     use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
