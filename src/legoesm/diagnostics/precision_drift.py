@@ -24,6 +24,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 
 def _best_float():
     """Return float64 if x64 is enabled, else float32."""
@@ -98,12 +100,12 @@ def compare_states(
     total_area = jnp.sum(area)
 
     # Global mass = ∫ p_s dA / g
-    g = 9.80616
+    g = constants.g
     mass_ref = jnp.sum(ref_ps * area) / g
     mass_test = jnp.sum(test_ps * area) / g
 
     # Global energy (approximate: internal only)
-    c_p = 1004.64
+    c_p = constants.c_pd
     if sigma_coord is not None:
         dsigma = jnp.asarray(sigma_coord.dsigma, dtype=_acc)
         energy_ref = jnp.sum(
@@ -387,8 +389,8 @@ def precision_health_report(
     if state_prev is not None and grid is not None:
         _acc = _best_float()
         area = grid.area.astype(_acc)
-        c_p = 1004.64
-        g = 9.80616
+        c_p = constants.c_pd
+        g = constants.g
         T_prev = state_prev.T.data
         ps_prev = state_prev.p_s.data
         _energy_pair = jnp.stack([

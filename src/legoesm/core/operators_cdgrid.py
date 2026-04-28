@@ -26,6 +26,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo, pad_halo_4d
 
@@ -1194,7 +1195,7 @@ def _extrapolate_boundary_corners(du, dv, n):
 
 def cdgrid_momentum_tendencies(
     h_or_p, u_d, v_d, h_s_or_p_prime, cdgrid,
-    g=9.80616, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
+    g=constants.g, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
     rho_0=None, div_v=None, f_3d=None,
     u_prime=None, v_prime=None,
 ):
@@ -1543,7 +1544,7 @@ def fv3_d2cc2c(u_d, v_d, cdgrid):
 
 def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
-    g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
+    g=constants.g, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
     zero_mean_correction=False,
 ):

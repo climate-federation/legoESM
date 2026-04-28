@@ -9,6 +9,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.forcing.time_utils import day_to_calendar
 
 
@@ -40,7 +41,7 @@ def analytical_sst_sic(
     lat_eff = np.asarray(lat_deg) - lat_shift
 
     # Qobs-like SST profile: warm equator, cold poles
-    sst = 27.0 * (1.0 - np.sin(np.radians(lat_eff)) ** 2) + 273.15
+    sst = 27.0 * (1.0 - np.sin(np.radians(lat_eff)) ** 2) + constants.T_freeze
     seasonal_amp = 3.0 * np.cos(np.radians(lat_eff)) * np.cos(
         2.0 * np.pi * day_of_year / 365.0
     )
