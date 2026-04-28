@@ -27,6 +27,12 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
 )
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
+from legoesm.ocean.dynamics.barotropic_common import (
+    bebt_blend,
+    compute_filter_weights,
+    maxvel_clip,
+)
+from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
 
 
 def _depth_average_to_faces(
@@ -65,14 +71,13 @@ def _depth_average_to_faces(
     H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
     U_bar = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
 
-    # h at v-faces: average of adjacent cell h
+    # h at v-faces: average of adjacent cell h.
+    # Pole rows are zero (wall BC); single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
     h_south = h_k[:-1]
     h_north = h_k[1:]
     h_v_interior = 0.5 * (h_south + h_north)  # (n_lat-1, n_lon, nlev)
-    n_lon = h_k.shape[1]
-    nlev = h_k.shape[2]
-    zero_row = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
-    h_v = jnp.concatenate([zero_row, h_v_interior, zero_row], axis=0)
+    h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     H_v = jnp.maximum(jnp.sum(h_v, axis=-1), min_water_col)
     V_bar = jnp.sum(v_3d * h_v, axis=-1) / H_v * v_mask
@@ -178,11 +183,13 @@ def barotropic_substeps_latlon_cgrid(
         # u-face coefficient: average of adjacent cell areas
         nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
         nu_face_u = jnp.concatenate([nu_face_u, nu_face_u[:, 0:1]], axis=1)
-        # v-face coefficient: average of adjacent cell areas
+        # v-face coefficient: average of adjacent cell areas.  Pole rows
+        # are zero (wall BC); single Pad HLO op replaces alloc-zeros +
+        # concatenate-of-three.  Cast first since pad inherits dtype
+        # from the input slice.
         nu_face_v_interior = baro_alpha * 0.5 * (area[:-1] + area[1:])
-        zero_row_nu = jnp.zeros((1, area.shape[1]), dtype=eta.dtype)
-        nu_face_v = jnp.concatenate(
-            [zero_row_nu, nu_face_v_interior, zero_row_nu], axis=0,
+        nu_face_v = jnp.pad(
+            nu_face_v_interior.astype(eta.dtype), ((1, 1), (0, 0)),
         )
         # Face masks for land boundaries (zero flux at coastlines)
         diff_u_mask = mask * jnp.roll(mask, 1, axis=1)
@@ -190,10 +197,7 @@ def barotropic_substeps_latlon_cgrid(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
         diff_v_mask_interior = mask[:-1] * mask[1:]
-        zero_row_m = jnp.zeros((1, mask.shape[1]), dtype=mask.dtype)
-        diff_v_mask = jnp.concatenate(
-            [zero_row_m, diff_v_mask_interior, zero_row_m], axis=0,
-        )
+        diff_v_mask = jnp.pad(diff_v_mask_interior, ((1, 1), (0, 0)))
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
@@ -209,11 +213,12 @@ def barotropic_substeps_latlon_cgrid(
         div_damp_area_u = jnp.concatenate(
             [div_damp_area_u, div_damp_area_u[:, 0:1]], axis=1,
         )
-        # v-face area: average of adjacent cells
+        # v-face area: average of adjacent cells.  Pole rows are zero
+        # (wall BC); single Pad HLO op replaces alloc-zeros +
+        # concatenate-of-three.
         div_damp_area_v_int = 0.5 * (_area[:-1] + _area[1:])
-        zero_row_dd = jnp.zeros((1, _area.shape[1]), dtype=eta.dtype)
-        div_damp_area_v = jnp.concatenate(
-            [zero_row_dd, div_damp_area_v_int, zero_row_dd], axis=0,
+        div_damp_area_v = jnp.pad(
+            div_damp_area_v_int.astype(eta.dtype), ((1, 1), (0, 0)),
         )
 
     # Cosine time filter for time-averaging (replaces box-average).
@@ -222,13 +227,9 @@ def barotropic_substeps_latlon_cgrid(
     # Transport accumulators (Hu, Hv) MUST remain box-filtered for exact
     # volume conservation with the discrete continuity equation.
     use_cosine_filter = config.barotropic_time_filter == "cosine"
-    _i = jnp.arange(n_substeps, dtype=eta.dtype)
-    if use_cosine_filter:
-        w_filter = 1.0 + jnp.cos(
-            2.0 * jnp.pi * (_i - 0.5 * n_substeps) / n_substeps)
-    else:
-        w_filter = jnp.ones(n_substeps, dtype=eta.dtype)
-    w_total = jnp.sum(w_filter)
+    w_filter, w_total = compute_filter_weights(
+        n_substeps, eta.dtype, use_cosine=use_cosine_filter,
+    )
 
     # BEBT semi-implicit parameter and MAXVEL clipping
     bebt = config.bebt
@@ -264,10 +265,10 @@ def barotropic_substeps_latlon_cgrid(
         # Forward: update eta from continuity (C-grid divergence)
         H_u = 0.5 * (jnp.roll(H_total_c, 1, axis=1) + H_total_c)
         H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
+        # Pole rows are zero (wall BC); single Pad HLO op replaces
+        # alloc-zeros + concatenate-of-three (called every substep).
         H_v_interior = 0.5 * (H_total_c[:-1] + H_total_c[1:])
-        n_lon_loc = H_total_c.shape[1]
-        zero_row = jnp.zeros((1, n_lon_loc), dtype=eta.dtype)
-        H_v = jnp.concatenate([zero_row, H_v_interior, zero_row], axis=0)
+        H_v = jnp.pad(H_v_interior, ((1, 1), (0, 0)))
 
         flux_u = H_u * U_bar_c * u_mask
         flux_v = H_v * V_bar_c * v_mask
@@ -286,7 +287,7 @@ def barotropic_substeps_latlon_cgrid(
         # Blend new and old eta for the pressure gradient to damp fast
         # barotropic gravity waves.  bebt=0 → forward-backward (current),
         # bebt=0.2 → MOM6 default semi-implicit.
-        eta_pgf = (1.0 - bebt) * eta_new + bebt * eta_c
+        eta_pgf = bebt_blend(eta_new, eta_c, bebt)
         deta_dx = gradient_x_cgrid(eta_pgf, grid).astype(eta.dtype)
         deta_dy = gradient_y_cgrid(eta_pgf, grid).astype(eta.dtype)
 
@@ -295,13 +296,14 @@ def barotropic_substeps_latlon_cgrid(
         V_at_u = 0.25 * (V_bar_c[:-1] + V_bar_c[1:] + V_west[:-1] + V_west[1:])
         V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
-        # Average U to v-points for Coriolis
+        # Average U to v-points for Coriolis.  Pole rows are zero
+        # (wall BC); single Pad HLO op replaces alloc-zeros +
+        # concatenate-of-three (called every substep).
         U_at_v_interior = 0.25 * (
             U_bar_c[:-1, :-1] + U_bar_c[:-1, 1:]
             + U_bar_c[1:, :-1] + U_bar_c[1:, 1:]
         )
-        zero_row_u = jnp.zeros((1, n_lon_loc), dtype=eta.dtype)
-        U_at_v = jnp.concatenate([zero_row_u, U_at_v_interior, zero_row_u], axis=0)
+        U_at_v = jnp.pad(U_at_v_interior, ((1, 1), (0, 0)))
 
         # Forward-backward Coriolis (Matsuno) + PGF + slow forcing
         U_bar_new = (U_bar_c + dt_s * (
@@ -312,9 +314,8 @@ def barotropic_substeps_latlon_cgrid(
             U_bar_new[:-1, :-1] + U_bar_new[:-1, 1:]
             + U_bar_new[1:, :-1] + U_bar_new[1:, 1:]
         )
-        U_new_at_v = jnp.concatenate(
-            [zero_row_u, U_new_at_v_interior, zero_row_u], axis=0,
-        )
+        # Pole rows are zero; single Pad HLO op (substep hot path).
+        U_new_at_v = jnp.pad(U_new_at_v_interior, ((1, 1), (0, 0)))
         V_bar_new = (V_bar_c + dt_s * (
             -f_v * U_new_at_v - g * deta_dy + F_slow_v
         )) * v_mask
@@ -336,15 +337,17 @@ def barotropic_substeps_latlon_cgrid(
 
         # Bottom drag: -r * U_bar / H_total
         if config.bottom_drag_r > 0:
-            drag_u = 1.0 - dt_s * config.bottom_drag_r / jnp.maximum(H_u, 1e-10)
-            drag_v = 1.0 - dt_s * config.bottom_drag_r / jnp.maximum(H_v, 1e-10)
-            U_bar_new = U_bar_new * drag_u
-            V_bar_new = V_bar_new * drag_v
+            U_bar_new = U_bar_new * implicit_bottom_drag_factor(
+                dt_s, config.bottom_drag_r, H_u,
+            )
+            V_bar_new = V_bar_new * implicit_bottom_drag_factor(
+                dt_s, config.bottom_drag_r, H_v,
+            )
 
         # --- MAXVEL clipping: prevent runaway velocities ---
         if use_maxvel:
-            U_bar_new = jnp.clip(U_bar_new, -_maxvel, _maxvel)
-            V_bar_new = jnp.clip(V_bar_new, -_maxvel, _maxvel)
+            U_bar_new = maxvel_clip(U_bar_new, _maxvel)
+            V_bar_new = maxvel_clip(V_bar_new, _maxvel)
 
         # Optional Laplacian damping on eta (flux-form: conservative)
         if config.barotropic_diffusion_alpha > 0.0:

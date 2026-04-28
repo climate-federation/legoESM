@@ -259,9 +259,9 @@ def dst3_to_v_points(
     # Select based on flow direction
     f_face = jnp.where(mf_int > 0, f_face_pos, f_face_neg)
 
-    # Solid wall at poles: zero flux
-    zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_face, zero], axis=0)
+    # Solid wall at poles: zero flux.  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three (DST-3 hot path).
+    return jnp.pad(f_face, ((1, 1), (0, 0), (0, 0)))
 
 
 # =============================================================================
@@ -381,9 +381,10 @@ def flux_form_vertical_tracer_advection_dst3(
                        jnp.maximum(T_donor, T_downstream))
     F_interior = w_int * T_face
 
-    # Full flux with zero boundaries
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+    # Full flux with zero boundaries — single Pad HLO op vs alloc
+    # ``(..., 1)`` zeros + 3-array concat.  Hot per scan step.
+    pad_axes = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes, (1, 1)))
 
     # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
     return F[..., :-1] - F[..., 1:]
@@ -661,9 +662,9 @@ def ppm_to_v_points(
     f_face = jnp.clip(f_face, jnp.minimum(f_south, f_north),
                        jnp.maximum(f_south, f_north))
 
-    # Solid wall: zero at poles
-    zero = jnp.zeros((1, n_lon, nlev), dtype=f.dtype)
-    return jnp.concatenate([zero, f_face, zero], axis=0)
+    # Solid wall at poles: zero flux.  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three (PPM hot path).
+    return jnp.pad(f_face, ((1, 1), (0, 0), (0, 0)))
 
 
 def flux_form_vertical_tracer_advection_ppm(
@@ -745,9 +746,9 @@ def flux_form_vertical_tracer_advection_ppm(
     # Flux at interfaces
     F_interior = w_int * T_face
 
-    # Zero-flux boundaries
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+    # Zero-flux boundaries — single Pad HLO op.
+    pad_axes_b = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes_b, (1, 1)))
 
     # Flux divergence
     return F[..., :-1] - F[..., 1:]
@@ -843,10 +844,12 @@ def fct_tracer_advection(
                           jnp.maximum(T_above, T_below))
     F_vert_hi_int = w_int * T_face_hi
 
-    # Vertical divergences for Zalesak bounds computation
-    zeros_v = jnp.zeros((*tracer.shape[:-1], 1), dtype=tracer.dtype)
-    F_vert_low = jnp.concatenate([zeros_v, F_vert_low_int, zeros_v], axis=-1)
-    F_vert_hi = jnp.concatenate([zeros_v, F_vert_hi_int, zeros_v], axis=-1)
+    # Vertical divergences for Zalesak bounds computation — pad
+    # (single Pad HLO each) instead of allocating a fresh ``(..., 1)``
+    # zero buffer and concatenating it on both ends.
+    pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
+    F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
+    F_vert_hi = jnp.pad(F_vert_hi_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
     vert_div_hi = F_vert_hi[..., :-1] - F_vert_hi[..., 1:]
 
@@ -855,95 +858,219 @@ def fct_tracer_advection(
     dq_hi_h = divergence_cgrid(flux_u_hi, flux_v_hi, grid)
     dq_hi = -(dq_hi_h + vert_div_hi) / jnp.maximum(h_k, eps)
 
-    # --- Step 3: Zalesak limiter ---
-    # Anti-diffusive tendency
-    ad = dq_hi - dq_low
+    # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
+    # Anti-diffusive face fluxes:
+    ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
+    ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
+    ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
 
-    # Local min/max from horizontal neighbors + self
+    # Local min / max over the (cell + 6 neighbours) stencil.  For non-
+    # cyclic latitude the boundary cell is its own south/north neighbour
+    # (copy BC); periodic in lon; vertical clamps to top/bottom layer.
     tr_west = jnp.roll(tracer, 1, axis=1)
     tr_east = jnp.roll(tracer, -1, axis=1)
-    # North/south with wall BCs (copy boundary)
     tr_south = jnp.concatenate([tracer[:1, :, :], tracer[:-1, :, :]], axis=0)
     tr_north = jnp.concatenate([tracer[1:, :, :], tracer[-1:, :, :]], axis=0)
-
-    q_min = jnp.minimum(tracer, jnp.minimum(
-        jnp.minimum(tr_west, tr_east), jnp.minimum(tr_south, tr_north)))
-    q_max = jnp.maximum(tracer, jnp.maximum(
-        jnp.maximum(tr_west, tr_east), jnp.maximum(tr_south, tr_north)))
-
-    # Also include vertical neighbors
     tr_above = jnp.concatenate([tracer[..., :1], tracer[..., :-1]], axis=-1)
     tr_below = jnp.concatenate([tracer[..., 1:], tracer[..., -1:]], axis=-1)
-    q_min = jnp.minimum(q_min, jnp.minimum(tr_above, tr_below))
-    q_max = jnp.maximum(q_max, jnp.maximum(tr_above, tr_below))
-
-    # Provisional low-order update (what q would be after upwind step)
-    q_td = tracer + dq_low * dt
-
-    # Room for anti-diffusive correction
-    room_up = q_max - q_td
-    room_dn = q_td - q_min
-
-    # Per-cell blending factor alpha ∈ [0, 1]
-    ad_dt = ad * dt  # anti-diffusive increment
-    safe_pos = jnp.maximum(ad_dt, eps)
-    safe_neg = jnp.minimum(ad_dt, -eps)
-    alpha = jnp.where(
-        ad_dt > eps,
-        jnp.minimum(1.0, room_up / safe_pos),
-        jnp.where(
-            ad_dt < -eps,
-            jnp.minimum(1.0, room_dn / (-safe_neg)),
-            1.0,
-        ),
+    q_min = jnp.minimum(
+        jnp.minimum(jnp.minimum(tracer, tr_west), jnp.minimum(tr_east, tr_south)),
+        jnp.minimum(jnp.minimum(tr_north, tr_above), tr_below),
     )
-    alpha = jnp.clip(alpha, 0.0, 1.0)
+    q_max = jnp.maximum(
+        jnp.maximum(jnp.maximum(tracer, tr_west), jnp.maximum(tr_east, tr_south)),
+        jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
+    )
+    q_td = tracer + dq_low * dt  # provisional low-order update
 
-    # --- Step 4: Face-based flux limiting (Zalesak 1979) ---
-    # Apply the cell-based alpha to each FACE as the minimum of the two
-    # adjacent cells.  This ensures conservation: each face has ONE
-    # limited flux shared by both cells.
-    #
-    # Anti-diffusive face fluxes:
-    ad_flux_u = flux_u_hi - flux_u_low  # (n_lat, n_lon+1, nlev)
-    ad_flux_v = flux_v_hi - flux_v_low  # (n_lat+1, n_lon, nlev)
+    alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
+        ad_flux_u, ad_flux_v, ad_vert_int,
+        q_td, q_min, q_max, h_k, dt, grid, eps,
+    )
 
-    # Alpha at u-faces: min of left and right cell alpha
-    # u-face j sits between cell (j-1)%n_lon and cell j
-    alpha_left_u = jnp.roll(alpha, 1, axis=1)  # alpha of cell j-1
-    alpha_right_u = alpha                        # alpha of cell j
-    alpha_u = jnp.minimum(alpha_left_u, alpha_right_u)
-    # Wrap for periodic: face n_lon = face 0
-    alpha_u_full = jnp.concatenate([alpha_u, alpha_u[:, :1, :]], axis=1)
-
-    # Alpha at v-faces: min of south and north cell alpha
-    # v-face j sits between cell j-1 (south) and cell j (north)
-    # Interior faces 1..n_lat-1:
-    alpha_v_int = jnp.minimum(alpha[:-1, :, :], alpha[1:, :, :])  # (n_lat-1, ...)
-    # Wall faces: use adjacent cell alpha (wall flux is zero anyway)
-    alpha_v = jnp.concatenate([
-        alpha[:1, :, :],       # south wall face
-        alpha_v_int,           # interior faces
-        alpha[-1:, :, :],      # north wall face
-    ], axis=0)  # (n_lat+1, n_lon, nlev)
-
-    # Limited face fluxes
+    # --- Step 4: limited face fluxes (conservative by construction) ---
     flux_u_fct = flux_u_low + alpha_u_full * ad_flux_u
     flux_v_fct = flux_v_low + alpha_v * ad_flux_v
-
-    # Horizontal divergence from limited fluxes (conservative by construction)
     div_h_fct = divergence_cgrid(flux_u_fct, flux_v_fct, grid)
 
-    # Vertical: face-based limiting at each interface
-    # Anti-diffusive interface flux
-    ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
-    # Alpha at interface k: min of cell above (k-1) and cell below (k)
-    alpha_cell_above = alpha[..., :-1]  # cells 0..nlev-2
-    alpha_cell_below = alpha[..., 1:]   # cells 1..nlev-1
-    alpha_vert_face = jnp.minimum(alpha_cell_above, alpha_cell_below)
-    # Limited interface flux
     F_vert_fct_int = F_vert_low_int + alpha_vert_face * ad_vert_int
-    F_vert_fct = jnp.concatenate([zeros_v, F_vert_fct_int, zeros_v], axis=-1)
+    F_vert_fct = jnp.pad(F_vert_fct_int, (*pad_axes_v, (1, 1)))
     vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
 
     return div_h_fct, vert_div_fct
+
+
+def _zalesak_signsplit_face_alphas(
+    ad_flux_u: jnp.ndarray,
+    ad_flux_v: jnp.ndarray,
+    ad_vert_int: jnp.ndarray,
+    q_td: jnp.ndarray,
+    q_min: jnp.ndarray,
+    q_max: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+    grid: "LatLonGrid",
+    eps: float = 1e-30,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Zalesak (1979) sign-split FCT face-flux limiter.
+
+    Replaces the conservation-preserving ``alpha_face = min(alpha_left,
+    alpha_right)`` heuristic with the proper monotone limiter.  For each
+    cell ``c`` we compute the incoming and outgoing anti-diffusive
+    increments separately (``P+_c``, ``P-_c``), pair them with the
+    incoming/outgoing budgets ``Q+_c = q_max_c - q_td_c`` and
+    ``Q-_c = q_td_c - q_min_c``, and form the per-cell ratios
+
+        R+_c = min(1, Q+_c / max(P+_c, eps))
+        R-_c = min(1, Q-_c / max(P-_c, eps)).
+
+    Each anti-diffusive face flux is then limited by the smaller of the
+    *receiving* cell's R+ and the *sending* cell's R-, with sender /
+    receiver determined by the sign of the face flux.  This is the
+    monotone version of Zalesak's algorithm and removes the symmetric
+    ``min`` looseness of the old face-min heuristic that allowed grid-
+    scale T noise to leak through under strong-frontal forcing
+    (issue #212; reference Zalesak 1979 J. Comp. Phys. 31, 335; Kuzmin,
+    *Flux-corrected transport*, 2012).
+
+    Parameters
+    ----------
+    ad_flux_u : array (n_lat, n_lon+1, nlev) — anti-diffusive u-face flux
+    ad_flux_v : array (n_lat+1, n_lon, nlev) — anti-diffusive v-face flux
+    ad_vert_int : array (n_lat, n_lon, nlev-1) — anti-diffusive interior
+        vertical interface flux (positive = upward).
+    q_td : array (n_lat, n_lon, nlev) — provisional low-order update.
+    q_min, q_max : array (n_lat, n_lon, nlev) — local stencil bounds.
+    h_k : array (n_lat, n_lon, nlev) — layer thickness.
+    dt : float — baroclinic time step.
+    grid : LatLonGrid.
+    eps : float — divide-by-zero guard for empty P+/P-.
+
+    Returns
+    -------
+    alpha_u_full : (n_lat, n_lon+1, nlev) — alpha for each u-face, with
+        ``face[n_lon] == face[0]`` for periodic-x.
+    alpha_v : (n_lat+1, n_lon, nlev) — alpha for each v-face; the two
+        wall faces carry placeholder 1.0 (their face flux is zero by
+        the wall mask, so any alpha is harmless).
+    alpha_vert_face : (n_lat, n_lon, nlev-1) — alpha for each interior
+        vertical interface.
+    """
+    # Local positive / negative parts of the anti-diffusive face fluxes.
+    F_u_pos = jnp.maximum(ad_flux_u, 0.0)
+    F_u_neg = jnp.maximum(-ad_flux_u, 0.0)
+    F_v_pos = jnp.maximum(ad_flux_v, 0.0)
+    F_v_neg = jnp.maximum(-ad_flux_v, 0.0)
+    F_w_pos = jnp.maximum(ad_vert_int, 0.0)
+    F_w_neg = jnp.maximum(-ad_vert_int, 0.0)
+
+    # Spherical face metrics (mirroring divergence_cgrid).
+    R_planet = grid.radius
+    dlon = grid.dlon
+    dlat = grid.dlat
+    face_dy = R_planet * dlat
+    lat = grid.lat
+    # cos(±π/2) ≈ 0; build cos_lat_v directly via Pad of cos(interior).
+    # Single Pad HLO op replaces alloc-2-singletons + concatenate-of-three
+    # + cos tower.
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])
+    face_dx = R_planet * dlon * jnp.pad(
+        jnp.cos(lat_interior), (1, 1),
+    )  # (n_lat+1,)
+    area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)
+
+    # Per-cell magnitudes of incoming / outgoing horizontal flux.
+    # u-face j is the WEST face of cell j and EAST face of cell j-1.
+    # Per cell c (index j):
+    #   incoming  = F_u_pos at WEST face (eastward in)  + F_u_neg at EAST face (westward in)
+    #   outgoing  = F_u_neg at WEST face (westward out) + F_u_pos at EAST face (eastward out)
+    in_u  = F_u_pos[:, :-1, :] + F_u_neg[:, 1:, :]
+    out_u = F_u_neg[:, :-1, :] + F_u_pos[:, 1:, :]
+
+    # v-face j is the SOUTH face of cell j and NORTH face of cell j-1; weighted by face_dx[j].
+    in_v_w = (F_v_pos[:-1, :, :] * face_dx[:-1, jnp.newaxis, jnp.newaxis]
+              + F_v_neg[1:, :, :] * face_dx[1:, jnp.newaxis, jnp.newaxis])
+    out_v_w = (F_v_neg[:-1, :, :] * face_dx[:-1, jnp.newaxis, jnp.newaxis]
+               + F_v_pos[1:, :, :] * face_dx[1:, jnp.newaxis, jnp.newaxis])
+
+    # Horizontal-incoming / outgoing tracer increment per cell (same units as ad·dt).
+    P_in_h = (in_u * face_dy + in_v_w) / area
+    P_out_h = (out_u * face_dy + out_v_w) / area
+
+    # Vertical: pad with zeros at the top / bottom (rigid lid + floor) so
+    # cell-c indexing is uniform.  ad_vert_int has shape (n_lat, n_lon,
+    # nlev-1) for interfaces 0..nlev-2 between cell k (above) and k+1
+    # (below); F > 0 = upward.  Pad (single HLO op) instead of
+    # alloc-zeros + 3-array concatenate.
+    pad_axes_v = ((0, 0),) * (F_w_pos.ndim - 1)
+    F_w_pos_full = jnp.pad(F_w_pos, (*pad_axes_v, (1, 1)))
+    F_w_neg_full = jnp.pad(F_w_neg, (*pad_axes_v, (1, 1)))
+    # For cell k:
+    #   TOP    interface index k:   F>0 = upward = leaving k upward, F<0 = entering k from above.
+    #   BOTTOM interface index k+1: F>0 = upward = entering k from below, F<0 = leaving k downward.
+    P_in_w  = F_w_neg_full[..., :-1] + F_w_pos_full[..., 1:]
+    P_out_w = F_w_pos_full[..., :-1] + F_w_neg_full[..., 1:]
+
+    h_safe = jnp.maximum(h_k, eps)
+    inc_in = (P_in_h + P_in_w) * dt / h_safe
+    inc_out = (P_out_h + P_out_w) * dt / h_safe
+
+    # Per-cell budgets and ratios.
+    Q_up = jnp.maximum(q_max - q_td, 0.0)
+    Q_dn = jnp.maximum(q_td - q_min, 0.0)
+    R_in = jnp.minimum(1.0, Q_up / jnp.maximum(inc_in, eps))
+    R_out = jnp.minimum(1.0, Q_dn / jnp.maximum(inc_out, eps))
+
+    # ---- Per-face alpha selection ----
+    # u-face j: cell L = (j-1)%n_lon (west), cell R = j (east).
+    # F > 0  → flow east, into R, out of L  → α = min(R+_R, R-_L).
+    # F < 0  → flow west, into L, out of R  → α = min(R+_L, R-_R).
+    n_lon = ad_flux_u.shape[1] - 1
+    R_in_R_u = R_in                                 # (n_lat, n_lon, nlev)
+    R_in_L_u = jnp.roll(R_in, 1, axis=1)
+    R_out_R_u = R_out
+    R_out_L_u = jnp.roll(R_out, 1, axis=1)
+    ad_face_u_int = ad_flux_u[:, :n_lon, :]
+    alpha_u_pos = jnp.minimum(R_in_R_u, R_out_L_u)
+    alpha_u_neg = jnp.minimum(R_in_L_u, R_out_R_u)
+    alpha_u_int = jnp.where(
+        ad_face_u_int > 0.0, alpha_u_pos,
+        jnp.where(ad_face_u_int < 0.0, alpha_u_neg, 1.0),
+    )
+    # Periodic wrap: face n_lon == face 0.
+    alpha_u_full = jnp.concatenate(
+        [alpha_u_int, alpha_u_int[:, :1, :]], axis=1,
+    )
+
+    # v-face j (interior, 1 ≤ j ≤ n_lat-1): cell S = j-1, cell N = j.
+    R_in_N_v  = R_in[1:, :, :]
+    R_in_S_v  = R_in[:-1, :, :]
+    R_out_N_v = R_out[1:, :, :]
+    R_out_S_v = R_out[:-1, :, :]
+    ad_v_int = ad_flux_v[1:-1, :, :]  # interior faces
+    alpha_v_pos = jnp.minimum(R_in_N_v, R_out_S_v)
+    alpha_v_neg = jnp.minimum(R_in_S_v, R_out_N_v)
+    alpha_v_int_face = jnp.where(
+        ad_v_int > 0.0, alpha_v_pos,
+        jnp.where(ad_v_int < 0.0, alpha_v_neg, 1.0),
+    )
+    # Wall faces (south & north): the wall mass flux is zero, so any
+    # alpha is harmless; use 1 as a neutral placeholder.
+    walls_shape = (1, ad_flux_v.shape[1], ad_flux_v.shape[2])
+    walls = jnp.ones(walls_shape, dtype=ad_flux_v.dtype)
+    alpha_v = jnp.concatenate([walls, alpha_v_int_face, walls], axis=0)
+
+    # Vertical interface k between cell k (above) and cell k+1 (below).
+    # F > 0 = upward → out of (k+1) below, into k above → α = min(R+_above, R-_below).
+    # F < 0 = downward → out of k above, into k+1 below → α = min(R+_below, R-_above).
+    R_in_above_w  = R_in[..., :-1]   # cell k above interface k
+    R_in_below_w  = R_in[..., 1:]    # cell k+1 below interface k
+    R_out_above_w = R_out[..., :-1]
+    R_out_below_w = R_out[..., 1:]
+    alpha_w_pos = jnp.minimum(R_in_above_w, R_out_below_w)
+    alpha_w_neg = jnp.minimum(R_in_below_w, R_out_above_w)
+    alpha_vert_face = jnp.where(
+        ad_vert_int > 0.0, alpha_w_pos,
+        jnp.where(ad_vert_int < 0.0, alpha_w_neg, 1.0),
+    )
+    return alpha_u_full, alpha_v, alpha_vert_face

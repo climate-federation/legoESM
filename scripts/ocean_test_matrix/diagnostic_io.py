@@ -472,6 +472,10 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         s for s in snapshots if field_3d_key in snapshots[s])
     if not valid_steps:
         return
+    # Cross-sections require ≥ 2 vertical levels; barotropic (1-level) cases
+    # have nothing to show vertically.
+    if np.asarray(levels).size < 2:
+        return
     if len(valid_steps) > 6:
         idx = np.linspace(0, len(valid_steps) - 1, 6).astype(int)
         valid_steps = [valid_steps[i] for i in idx]
@@ -540,12 +544,20 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         init_section = all_sections[0]
         init_bin = all_bin_centers[0]
 
-        # Choose ~8 contour levels spanning the initial field
+        # Choose ~8 contour levels spanning the initial field.
+        # If the field is (near-)uniform (rest_state_uniform cases),
+        # np.linspace collapses to duplicate values that matplotlib rejects;
+        # skip the contour overlay in that case.
         init_finite = init_section[np.isfinite(init_section)]
         if len(init_finite) > 0:
-            ctr_levels = np.linspace(
-                float(np.nanpercentile(init_finite, 5)),
-                float(np.nanpercentile(init_finite, 95)), 8)
+            lo = float(np.nanpercentile(init_finite, 5))
+            hi = float(np.nanpercentile(init_finite, 95))
+            span = hi - lo
+            ref = max(abs(lo), abs(hi), 1.0)
+            if span > 1e-12 * ref:
+                ctr_levels = np.linspace(lo, hi, 8)
+            else:
+                ctr_levels = None
         else:
             ctr_levels = None
 

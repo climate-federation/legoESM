@@ -200,11 +200,18 @@ def _fix_mass_mpas(state_new, state_old, mesh):
 
     Upcasts to float64 for the global reduction to avoid catastrophic
     cancellation in the mass difference (float32 sums lose ~7 digits).
+    Three sums batched into one allreduce for multi-rank scaling.
     """
     area = mesh.areaCell.astype(jnp.float64)
-    mass_old = jnp.sum(state_old.h.data.astype(jnp.float64) * area)
-    mass_new = jnp.sum(state_new.h.data.astype(jnp.float64) * area)
-    total_area = jnp.sum(area)
+    local = jnp.stack([
+        jnp.sum(state_old.h.data.astype(jnp.float64) * area),
+        jnp.sum(state_new.h.data.astype(jnp.float64) * area),
+        jnp.sum(area),
+    ])
+    if jax.process_count() > 1:
+        from legoesm.parallel.reductions import global_sum_mpi
+        local = global_sum_mpi(local)
+    mass_old, mass_new, total_area = local[0], local[1], local[2]
     correction = (mass_old - mass_new) / total_area
     h_fixed = state_new.h.replace(
         data=state_new.h.data + correction.astype(state_new.h.data.dtype),
@@ -213,30 +220,35 @@ def _fix_mass_mpas(state_new, state_old, mesh):
 
 
 def _fix_energy_mpas(state_new, state_old, mesh, g):
-    """Fix energy conservation: velocity scaling."""
-    area = mesh.areaCell
-    dc = mesh.dcEdge
-    dv = mesh.dvEdge
+    """Fix energy conservation: velocity scaling.
 
-    def total_energy(state):
+    The four contributing sums (E_old, KE_new, PE_new, plus KE_old +
+    PE_old that go into E_old) are computed locally and reduced
+    together — one MPI allreduce instead of four when the mesh is
+    sharded across ranks.
+    """
+    area = mesh.areaCell
+
+    def _ke_pe_terms(state):
         h = state.h.data
         u = state.u.data
         h_s = state.h_s.data
-        # KE at cells
-        ke = kinetic_energy_cell(u, mesh) * h
-        pe = 0.5 * g * (h + h_s) ** 2
-        return jnp.sum((ke + pe) * area)
+        ke = jnp.sum(kinetic_energy_cell(u, mesh) * h * area)
+        pe = jnp.sum(0.5 * g * (h + h_s) ** 2 * area)
+        return ke, pe
 
-    E_old = total_energy(state_old)
+    KE_old, PE_old = _ke_pe_terms(state_old)
+    KE_new, PE_new = _ke_pe_terms(state_new)
 
-    h_new = state_new.h.data
-    u_new = state_new.u.data
-    KE_cells = kinetic_energy_cell(u_new, mesh)
-    KE_new = jnp.sum(KE_cells * h_new * area)
-    PE_new = jnp.sum(0.5 * g * (h_new + state_new.h_s.data) ** 2 * area)
+    local = jnp.stack([KE_old, PE_old, KE_new, PE_new])
+    if jax.process_count() > 1:
+        from legoesm.parallel.reductions import global_sum_mpi
+        local = global_sum_mpi(local)
+    KE_old, PE_old, KE_new, PE_new = local[0], local[1], local[2], local[3]
+    E_old = KE_old + PE_old
 
     KE_target = jnp.maximum(E_old - PE_new, 0.0)
     scale = jnp.where(KE_new > _TINY, jnp.sqrt(KE_target / KE_new), 1.0)
 
-    u_fixed = state_new.u.replace(data=u_new * scale)
+    u_fixed = state_new.u.replace(data=state_new.u.data * scale)
     return state_new._replace(u=u_fixed)

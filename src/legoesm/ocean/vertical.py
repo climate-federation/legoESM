@@ -228,12 +228,16 @@ def upwind_vertical_gradient(
     inv_dz_half = 1.0 / jnp.maximum(dz_half, eps)
     df = (field[..., :-1] - field[..., 1:]) * inv_dz_half
 
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-
+    # Pad along trailing axis instead of allocating a fresh ``zeros``
+    # buffer + concatenate.  Single Pad HLO op each.  This helper
+    # fires once per scan step inside ``vertical_advection_ocean`` for
+    # u, v, T, S, and every tracer — so 4-6 zero-broadcast concats
+    # per RHS evaluation in the hot loop.
+    pad_axes = ((0, 0),) * (df.ndim - 1)
     # Upward flow (w>0): donor is deeper cell -> (f[k] - f[k+1]) / dz.
-    grad_up = jnp.concatenate([df, zeros], axis=-1)
+    grad_up = jnp.pad(df, (*pad_axes, (0, 1)))
     # Downward flow (w<0): donor is shallower cell -> (f[k-1] - f[k]) / dz.
-    grad_down = jnp.concatenate([zeros, df], axis=-1)
+    grad_down = jnp.pad(df, (*pad_axes, (1, 0)))
 
     return jnp.where(w > 0.0, grad_up, grad_down)
 
@@ -285,8 +289,10 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
     fd_rev = fd_integrated[..., ::-1]
     cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
-    zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
-    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+    # Pad along the trailing axis instead of allocating a fresh
+    # ``(..., 1)`` zero buffer and concatenating.
+    pad_axes_w = ((0, 0),) * (w_inner.ndim - 1)
+    w_euler = jnp.pad(w_inner, (*pad_axes_w, (0, 1)))
 
     if z_coord is None:
         return w_euler
@@ -472,9 +478,10 @@ def flux_form_vertical_tracer_advection(
     T_face_interior = jnp.where(w_interior > 0.0, T_below, T_above)
     F_interior = w_interior * T_face_interior  # (..., nlev-1)
 
-    # Full flux array with zero boundaries
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)  # (..., nlev+1)
+    # Full flux array with zero boundaries — single Pad HLO op vs
+    # alloc fresh ``(..., 1)`` zero buffer and 3-array concatenate.
+    pad_axes_f = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes_f, (1, 1)))  # (..., nlev+1)
 
     # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
     vert_flux_div = F[..., :-1] - F[..., 1:]  # (..., nlev)
@@ -566,9 +573,9 @@ def flux_form_vertical_tracer_advection_tvd(
     phi = _van_leer_limiter_vert(r)
     F_interior = F_upwind + 0.5 * jnp.abs(w_interior) * (1.0 - CFL) * phi * delta
 
-    # Full flux array with zero boundaries
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+    # Full flux array with zero boundaries — single Pad HLO op.
+    pad_axes_t = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes_t, (1, 1)))
 
     # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
     vert_flux_div = F[..., :-1] - F[..., 1:]

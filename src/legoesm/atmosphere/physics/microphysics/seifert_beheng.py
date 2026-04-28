@@ -104,7 +104,9 @@ def seifert_beheng_microphysics(
     q_r_bot = jnp.clip(q_r[:, -1], 0.0)
     precipitation = q_r_bot * rho[:, -1] * jnp.clip(V_t_r[:, -1], 0.0)
 
-    z = jnp.zeros((ncol, nlev))
+    # Pin dtype to the input precision so we never silently promote
+    # the unused-species placeholders to f64 under x64 mode.
+    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

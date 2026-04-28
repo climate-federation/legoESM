@@ -34,10 +34,10 @@ from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
 from legoesm.atmosphere.physics.convection.mass_flux import (
     diagnose_mass_flux_closure,
+    edmf_convection,
     mass_flux_convection,
     mass_flux_convection_from_closure,
 )
-from legoesm.atmosphere.physics.convection.edmf import edmf_convection
 from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
 )
@@ -211,7 +211,7 @@ class TestSBM:
 
         assert out.dT_dt.shape == (ncol, nlev)
         assert out.dq_v_dt.shape == (ncol, nlev)
-        assert out.precipitation.shape == (ncol,)
+        assert out.dq_c_conv_dt.shape == (ncol, nlev)
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
 
@@ -242,11 +242,11 @@ class TestSBM:
         assert float(jnp.max(relative_error)) < 0.1  # within 10%
 
     def test_precipitation_non_negative(self):
-        """Precipitation should always be >= 0."""
+        """Convective cloud-water source should always be >= 0."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         config = SBMConfig()
         out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
-        assert jnp.all(out.precipitation >= 0)
+        assert jnp.all(out.dq_c_conv_dt >= 0)
 
     def test_stable_gives_small_tendency(self):
         """Stable columns should produce small tendencies relative to unstable."""
@@ -317,7 +317,7 @@ class TestDCA:
 
         assert out.dT_dt.shape == (ncol, nlev)
         assert out.dq_v_dt.shape == (ncol, nlev)
-        assert out.precipitation.shape == (ncol,)
+        assert out.dq_c_conv_dt.shape == (ncol, nlev)
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
 
@@ -389,7 +389,7 @@ class TestIntegration:
         """Hydrostatic convection tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -409,7 +409,7 @@ class TestIntegration:
         """Hydrostatic convection should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -426,7 +426,7 @@ class TestIntegration:
         """Convection should not produce wind or pressure tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -524,7 +524,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic convection physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -551,7 +551,7 @@ class TestIntegration:
 
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -570,7 +570,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -586,7 +586,7 @@ class TestIntegration:
         """scheme='kuo' should give different results from 'sbm'."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -607,7 +607,7 @@ class TestIntegration:
         """scheme='mass_flux' should produce nonzero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -624,7 +624,7 @@ class TestIntegration:
         """scheme='edmf' should produce nonzero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -641,7 +641,7 @@ class TestIntegration:
         """jax.grad should work through mass_flux integration."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -662,7 +662,7 @@ class TestIntegration:
         """jax.grad should work through edmf integration."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -696,20 +696,33 @@ class TestKuo:
 
         assert out.dT_dt.shape == (ncol, nlev)
         assert out.dq_v_dt.shape == (ncol, nlev)
-        assert out.precipitation.shape == (ncol,)
+        assert out.dq_c_conv_dt.shape == (ncol, nlev)
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
 
     def test_precipitation_non_negative(self):
-        """Precipitation should always be >= 0."""
+        """Convective cloud-water source should always be >= 0."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         config = KuoConfig()
         out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
-        assert jnp.all(out.precipitation >= 0)
+        assert jnp.all(out.dq_c_conv_dt >= 0)
 
     def test_nonzero_tendencies(self):
-        """Unstable columns should produce nonzero tendencies."""
+        """Supersaturated unstable columns should produce nonzero tendencies.
+
+        Kuo only fires when there is column moisture excess
+        (``MC > 0``). The default ``_make_unstable_columns`` builds
+        an undersaturated profile (RH ≤ 0.9), so we locally
+        supersaturate the lower troposphere here to give Kuo
+        something to convect — otherwise the scheme correctly stays
+        off (which would be a different test).
+        """
         T, q_v, p_full, p_half = _make_unstable_columns()
+        q_sat = saturation_mixing_ratio(T, p_full)
+        # 5% supersaturation in the lower half of the column → MC > 0.
+        nlev = q_v.shape[-1]
+        moist_mask = (jnp.arange(nlev) >= nlev // 2)
+        q_v = jnp.where(moist_mask[None, :], 1.05 * q_sat, q_v)
         config = KuoConfig()
         out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
@@ -748,7 +761,7 @@ class TestMassFlux:
 
         assert out.dT_dt.shape == (ncol, nlev)
         assert out.dq_v_dt.shape == (ncol, nlev)
-        assert out.precipitation.shape == (ncol,)
+        assert out.dq_c_conv_dt.shape == (ncol, nlev)
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
         assert M_c_new.shape == (ncol,)
@@ -792,7 +805,7 @@ class TestMassFlux:
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-10
 
     def test_precipitation_is_nonzero_for_moist_unstable_columns(self):
-        """Moist unstable columns should produce at least some precipitation."""
+        """Moist unstable columns should produce some convective condensate."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         q_v = saturation_mixing_ratio(T, p_full)
         ncol = T.shape[0]
@@ -801,7 +814,7 @@ class TestMassFlux:
         out, _ = mass_flux_convection(
             T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
         )
-        assert float(jnp.max(out.precipitation)) > 0.0
+        assert float(jnp.max(out.dq_c_conv_dt)) > 0.0
 
     def test_closure_split_matches_full_kernel(self):
         """The split closure+tendency path should match the full kernel."""
@@ -822,7 +835,7 @@ class TestMassFlux:
         assert jnp.allclose(closure.M_c_new, M_c_new_full)
         assert jnp.allclose(out_split.dT_dt, out_full.dT_dt)
         assert jnp.allclose(out_split.dq_v_dt, out_full.dq_v_dt)
-        assert jnp.allclose(out_split.precipitation, out_full.precipitation)
+        assert jnp.allclose(out_split.dq_c_conv_dt, out_full.dq_c_conv_dt)
 
     def test_differentiable(self):
         """jax.grad should work through Mass-Flux convection."""
@@ -861,7 +874,7 @@ class TestEDMF:
 
         assert out.dT_dt.shape == (ncol, nlev)
         assert out.dq_v_dt.shape == (ncol, nlev)
-        assert out.precipitation.shape == (ncol,)
+        assert out.dq_c_conv_dt.shape == (ncol, nlev)
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
         assert a_u_new.shape == (ncol,)
@@ -1001,7 +1014,7 @@ class TestMassFluxPhysics:
         out, _ = mass_flux_convection(
             T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
         )
-        assert jnp.all(out.precipitation >= 0)
+        assert jnp.all(out.dq_c_conv_dt >= 0)
 
 
 class TestEDMFPhysics:
@@ -1085,7 +1098,7 @@ class TestEDMFPhysics:
         )
 
     def test_precipitation_non_negative(self):
-        """Precipitation should always be >= 0."""
+        """Convective cloud-water source should always be >= 0."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         ncol = T.shape[0]
         config = EDMFConfig()
@@ -1093,4 +1106,4 @@ class TestEDMFPhysics:
         out, _ = edmf_convection(
             T, q_v, p_full, p_half, a_u, dt=300.0, config=config,
         )
-        assert jnp.all(out.precipitation >= 0)
+        assert jnp.all(out.dq_c_conv_dt >= 0)

@@ -375,7 +375,7 @@ def sw_cell_source(
     toa_flux: Array,
     sfc_albedo_direct: Array,
     zenith: float | Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Compute the monochromatic shortwave direct-beam flux and diffuse source.
 
@@ -453,7 +453,7 @@ def _solve_rte_2stream(
     toa_flux_down: Array,
     sfc_emission: Array,
     sfc_reflectance: Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Solves the monochromatic two-stream radiative transfer equation.
 
@@ -592,7 +592,7 @@ def lw_transport(
     toa_flux_down: Array,
     sfc_src: Array,
     sfc_emissivity: Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Compute the monochromatic longwave diffusive flux of the atmosphere.
 
@@ -645,7 +645,7 @@ def sw_transport(
     sfc_src: Array,
     sfc_albedo: Array,
     flux_down_dir: Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Compute the monochromatic shortwave fluxes in a layered atmosphere.
 

@@ -101,12 +101,29 @@ def _apply_structured_regrid_3d(
     w: _StructuredRegridWeights,
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 3-D field (nlat_src, nlon_src, nlev)
-    → (nlat_tgt, nlon_tgt, nlev)."""
-    nlev = field.shape[2]
-    result = np.empty((len(w.i_lo), len(w.j_lo), nlev), dtype=field.dtype)
-    for k in range(nlev):
-        result[:, :, k] = _apply_structured_regrid_2d(field[:, :, k], w)
-    return result
+    → (nlat_tgt, nlon_tgt, nlev).
+
+    Vectorised over the level axis — gather the four bilinear
+    neighbours once and apply the per-cell weights with NumPy
+    broadcasting instead of looping ``nlev`` times.  At T63L49 with
+    ~50 levels this turns 50 separate per-level NumPy calls into one.
+    """
+    i0 = w.i_lo
+    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
+    j0 = w.j_lo
+    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
+    wi = w.wi[:, None, None]   # (n_lat_tgt, 1, 1)
+    wj = w.wj[None, :, None]   # (1, n_lon_tgt, 1)
+    f00 = field[np.ix_(i0, j0)]   # (n_lat_tgt, n_lon_tgt, nlev)
+    f10 = field[np.ix_(i1, j0)]
+    f01 = field[np.ix_(i0, j1)]
+    f11 = field[np.ix_(i1, j1)]
+    return (
+        (1 - wi) * (1 - wj) * f00
+        + wi * (1 - wj) * f10
+        + (1 - wi) * wj * f01
+        + wi * wj * f11
+    )
 
 
 class DiagnosticCollector:
@@ -471,22 +488,44 @@ class DiagnosticCollector:
         """
         from legoesm.forcing.surface_utils import blend_surface_temperature
 
-        mean_sst = float(jnp.mean(sst))
-        mean_sic = float(jnp.mean(sic))
-        mean_T = float(jnp.mean(state.T.data))
-        mean_T_low = float(jnp.mean(state.T.data[..., -1]))
+        # Fuse 12 diagnostic reductions into one ``jnp.stack`` +
+        # ``np.asarray`` host transfer.  Each ``float(jnp.X(...))``
+        # was previously its own device→host sync, serialising the
+        # GPU pipeline at every diagnostic interval.  The model step
+        # following ``collect()`` cannot launch until all 12 have
+        # round-tripped — fusing them collapses the stall to one.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
-        mean_precip = float(jnp.mean(precip_total)) * 86400.0
+            wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
-        mean_cwv = float(jnp.mean(cwv))
-        mean_sw_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_toa = float(jnp.mean(lw_up_toa))
-        mean_ps = float(jnp.mean(state.p_s.data))
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
+        _stats = jnp.stack([
+            jnp.mean(sst),
+            jnp.mean(sic),
+            jnp.mean(state.T.data),
+            jnp.mean(state.T.data[..., -1]),
+            wind_term,
+            jnp.mean(precip_total),
+            jnp.mean(cwv),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(state.p_s.data),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ])
+        _stats_host = np.asarray(_stats)
+        mean_sst = float(_stats_host[0])
+        mean_sic = float(_stats_host[1])
+        mean_T = float(_stats_host[2])
+        mean_T_low = float(_stats_host[3])
+        max_v = float(_stats_host[4])
+        mean_precip = float(_stats_host[5]) * 86400.0
+        mean_cwv = float(_stats_host[6])
+        mean_sw_toa = float(_stats_host[7])
+        mean_lw_toa = float(_stats_host[8])
+        mean_ps = float(_stats_host[9])
+        mean_sw_sfc = float(_stats_host[10])
+        mean_lw_sfc = float(_stats_host[11])
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -505,13 +544,15 @@ class DiagnosticCollector:
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
         # Lat-lon:      (nlat,nlon,nlev) → mean over (0,1) → (nlev,)
+        # Stacked into one ``np.asarray`` host transfer (same dtype as
+        # T) so the two profile means share a single device→host sync.
         spatial_axes = tuple(range(state.T.data.ndim - 1))
-        self.profiles_T.append(
-            np.asarray(jnp.mean(state.T.data, axis=spatial_axes))
-        )
-        self.profiles_qv.append(
-            np.asarray(jnp.mean(q_v, axis=spatial_axes)) * 1000.0
-        )
+        _profiles_host = np.asarray(jnp.stack([
+            jnp.mean(state.T.data, axis=spatial_axes),
+            jnp.mean(q_v, axis=spatial_axes).astype(state.T.data.dtype),
+        ]))
+        self.profiles_T.append(_profiles_host[0])
+        self.profiles_qv.append(_profiles_host[1] * 1000.0)
 
         # Snapshots
         iday = int(round(elapsed_day))
@@ -742,22 +783,43 @@ class DiagnosticCollector:
 
         Returns the same dict keys as ``collect`` for logging compatibility.
         """
-        mean_sst = float(jnp.mean(sst))
-        mean_sic = float(jnp.mean(sic))
-        mean_T = float(jnp.mean(state.T.data))
-        mean_T_low = float(jnp.mean(state.T.data[..., -1]))
+        # Fuse the 12 reductions into one ``jnp.stack`` + ``np.asarray``
+        # device→host transfer.  The "minimal" docstring promised low
+        # overhead, but the previous per-scalar ``float(...)`` chain
+        # serialised 12 GPU stalls per diagnostic step — exactly the
+        # sin the long ``collect`` path was already corrected for.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
-        mean_precip = float(jnp.mean(precip_total)) * 86400.0
+            wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
-        mean_cwv = float(jnp.mean(cwv))
-        mean_sw_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_toa = float(jnp.mean(lw_up_toa))
-        mean_ps = float(jnp.mean(state.p_s.data))
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
+        _stats = jnp.stack([
+            jnp.mean(sst),
+            jnp.mean(sic),
+            jnp.mean(state.T.data),
+            jnp.mean(state.T.data[..., -1]),
+            wind_term,
+            jnp.mean(precip_total),
+            jnp.mean(cwv),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(state.p_s.data),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ])
+        _h = np.asarray(_stats)
+        mean_sst = float(_h[0])
+        mean_sic = float(_h[1])
+        mean_T = float(_h[2])
+        mean_T_low = float(_h[3])
+        max_v = float(_h[4])
+        mean_precip = float(_h[5]) * 86400.0
+        mean_cwv = float(_h[6])
+        mean_sw_toa = float(_h[7])
+        mean_lw_toa = float(_h[8])
+        mean_ps = float(_h[9])
+        mean_sw_sfc = float(_h[10])
+        mean_lw_sfc = float(_h[11])
 
         # Append to time-series (same as collect, for continuity).
         self.times.append(elapsed_day)
@@ -1124,20 +1186,41 @@ class DiagnosticCollector:
         str or None
             Error message if blow-up detected, None if stable.
         """
-        if not jnp.all(jnp.isfinite(state.u.data)):
-            return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
+        # Fuse all device→host syncs into one ``jnp.stack`` so the
+        # blowup probe (called every diagnostic interval inside the
+        # integration loop) costs one GPU stall per call instead of
+        # 6-7.  The boolean ``isfinite`` checks on u and T are folded
+        # into the same stack as 0/1 floats.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
+            wind_term = jnp.max(jnp.abs(state.u.data))
+        has_p_s = hasattr(state, 'p_s')
+        terms = [
+            jnp.all(jnp.isfinite(state.u.data)).astype(state.T.data.dtype),
+            jnp.all(jnp.isfinite(state.T.data)).astype(state.T.data.dtype),
+            wind_term.astype(state.T.data.dtype),
+            jnp.min(state.T.data).astype(state.T.data.dtype),
+            jnp.max(state.T.data).astype(state.T.data.dtype),
+        ]
+        if has_p_s:
+            terms.append(jnp.min(state.p_s.data).astype(state.T.data.dtype))
+            terms.append(jnp.max(state.p_s.data).astype(state.T.data.dtype))
+        host = np.asarray(jnp.stack(terms))
+        u_finite = bool(host[0] > 0.5)
+        T_finite = bool(host[1] > 0.5)
+        max_v = float(host[2])
+        T_min_val = float(host[3])
+        T_max_val = float(host[4])
+
+        if not u_finite:
+            return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
         if max_v > 500:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
-        if not jnp.all(jnp.isfinite(state.T.data)):
+        if not T_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
 
         # Temperature bounds (physical range for Earth atmosphere)
-        T_min_val = float(jnp.min(state.T.data))
-        T_max_val = float(jnp.max(state.T.data))
         if T_min_val < 100.0 or T_max_val > 400.0:
             return (
                 f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical bounds "
@@ -1146,9 +1229,9 @@ class DiagnosticCollector:
             )
 
         # Surface pressure bounds
-        if hasattr(state, 'p_s'):
-            ps_min = float(jnp.min(state.p_s.data))
-            ps_max = float(jnp.max(state.p_s.data))
+        if has_p_s:
+            ps_min = float(host[5])
+            ps_max = float(host[6])
             if ps_min < 40000.0 or ps_max > 115000.0:
                 return (
                     f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of bounds "

@@ -115,16 +115,17 @@ def edmf_turbulence(
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
     N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
-    # Interpolate to full levels
-    S2 = jnp.zeros((ncol, nlev))
-    S2 = S2.at[:, 1:-1].set(0.5 * (S2_half[:, :-1] + S2_half[:, 1:]))
-    S2 = S2.at[:, 0].set(S2_half[:, 0])
-    S2 = S2.at[:, -1].set(S2_half[:, -1])
-
-    N2 = jnp.zeros((ncol, nlev))
-    N2 = N2.at[:, 1:-1].set(0.5 * (N2_half[:, :-1] + N2_half[:, 1:]))
-    N2 = N2.at[:, 0].set(N2_half[:, 0])
-    N2 = N2.at[:, -1].set(N2_half[:, -1])
+    # Interpolate to full levels: top/bottom take the nearest half-level
+    # value, interior is the average of flanking half-levels.  Single
+    # concatenate replaces alloc-zeros + 3 scatter ops.
+    S2_interior = 0.5 * (S2_half[:, :-1] + S2_half[:, 1:])
+    S2 = jnp.concatenate(
+        [S2_half[:, :1], S2_interior, S2_half[:, -1:]], axis=1,
+    )
+    N2_interior = 0.5 * (N2_half[:, :-1] + N2_half[:, 1:])
+    N2 = jnp.concatenate(
+        [N2_half[:, :1], N2_interior, N2_half[:, -1:]], axis=1,
+    )
 
     shear_prod = Km_full * S2
     buoyancy = -Kh_full * N2
@@ -138,7 +139,7 @@ def edmf_turbulence(
 
     tke_diffused = implicit_vertical_diffusion(
         tke, Km_half, rho, dz_layer, dz_half, dt,
-        surface_flux=jnp.zeros(ncol),
+        surface_flux=jnp.zeros(ncol, dtype=tke.dtype),
     )
 
     # ===== MF part: updraft model via jax.lax.scan =====
@@ -153,10 +154,19 @@ def edmf_turbulence(
     exner = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
     theta = T / jnp.clip(exner, 1.0e-8, None)
 
-    # Initialize updraft at surface (bottom level = index nlev-1)
-    w_u_init = jnp.maximum(jnp.full(ncol, config.w_updraft_min), 2.5 * ustar)
-    theta_u_init = theta[:, -1] + 0.5  # slightly warmer
-    q_u_init = q_v[:, -1]  # same moisture
+    # Initialize updraft at surface (bottom level = index nlev-1).  Pin
+    # the carry dtype to the input field dtype so the scan body cannot
+    # promote on x64 mode: ``jnp.full`` defaults to ``float64`` when
+    # ``jax_enable_x64`` is True, which would poison ``carry[0]`` to
+    # float64 while ``theta_u_init`` (= ``theta + 0.5``) stays at the
+    # state precision and the scan rejects the carry-output mismatch.
+    _dtype = T.dtype
+    w_u_init = jnp.maximum(
+        jnp.full(ncol, config.w_updraft_min, dtype=_dtype),
+        (2.5 * ustar).astype(_dtype),
+    )
+    theta_u_init = (theta[:, -1] + 0.5).astype(_dtype)  # slightly warmer
+    q_u_init = q_v[:, -1].astype(_dtype)  # same moisture
 
     # Scan from surface upward (reverse level index)
     # Levels are top-down, so we scan from nlev-1 to 0
@@ -229,17 +239,12 @@ def edmf_turbulence(
     # Compute vertical derivative of mass flux transport
     def _mf_tendency(phi, phi_u):
         flux = M * (phi_u - phi)  # (ncol, nlev)
-        # Centered finite difference for d(flux)/dz
-        dflux_dz = jnp.zeros_like(flux)
-        dflux_dz = dflux_dz.at[:, 1:-1].set(
-            (flux[:, :-2] - flux[:, 2:]) / (2.0 * dz_layer[:, 1:-1])
-        )
-        dflux_dz = dflux_dz.at[:, 0].set(
-            (flux[:, 0] - flux[:, 1]) / dz_layer[:, 0]
-        )
-        dflux_dz = dflux_dz.at[:, -1].set(
-            (flux[:, -2] - flux[:, -1]) / dz_layer[:, -1]
-        )
+        # Centered FD interior + one-sided FD at top/bottom; single
+        # concatenate replaces alloc-zeros + 3 scatter ops.
+        dflux_top = (flux[:, :1] - flux[:, 1:2]) / dz_layer[:, :1]
+        dflux_int = (flux[:, :-2] - flux[:, 2:]) / (2.0 * dz_layer[:, 1:-1])
+        dflux_bot = (flux[:, -2:-1] - flux[:, -1:]) / dz_layer[:, -1:]
+        dflux_dz = jnp.concatenate([dflux_top, dflux_int, dflux_bot], axis=1)
         return -dflux_dz / jnp.clip(rho, 0.01, None)
 
     dtheta_dt_mf = _mf_tendency(theta, theta_u)

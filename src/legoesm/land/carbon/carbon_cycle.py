@@ -74,8 +74,14 @@ def compute_gpp(
     T_C = T - 273.15
     f_T = jnp.exp(-0.5 * ((T_C - config.T_opt) / config.T_width) ** 2)
 
-    # CO2 fertilization — Michaelis-Menten
-    co2 = jnp.broadcast_to(jnp.asarray(co2_ppmv, dtype=T.dtype), T.shape)
+    # CO2 fertilization — Michaelis-Menten.  Use ``jnp.full`` (single
+    # ``Broadcast`` HLO op) instead of
+    # ``broadcast_to(jnp.asarray(scalar, dtype), shape)`` which
+    # additionally forces a ``ConvertElementType``.
+    if hasattr(co2_ppmv, "shape"):
+        co2 = jnp.broadcast_to(co2_ppmv.astype(T.dtype), T.shape)
+    else:
+        co2 = jnp.full(T.shape, co2_ppmv, dtype=T.dtype)
     f_CO2 = co2 / (co2 + config.K_CO2)
 
     # GPP = epsilon * APAR * f_T * f_CO2 * beta  [gC/m2/s]
@@ -134,8 +140,14 @@ def compute_phenology(
     wf = config.leaf_fall_period * sqrt2_half
     osf = _phenology_offset(config.leaf_lifespan, wf)
 
-    # Hemisphere-aware effective doy (shift by half year for SH)
-    doy_arr = jnp.broadcast_to(jnp.asarray(doy, dtype=lat.dtype), lat.shape)
+    # Hemisphere-aware effective doy (shift by half year for SH).
+    # ``jnp.full`` is one ``Broadcast`` HLO op vs the
+    # ``broadcast_to(jnp.asarray(...))`` form's
+    # ``ConvertElementType + Broadcast`` pair.
+    if hasattr(doy, "shape"):
+        doy_arr = jnp.broadcast_to(doy.astype(lat.dtype), lat.shape)
+    else:
+        doy_arr = jnp.full(lat.shape, doy, dtype=lat.dtype)
     if config.hemisphere_aware:
         doy_eff = jnp.where(
             lat < 0,

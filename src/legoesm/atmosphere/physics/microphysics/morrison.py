@@ -170,7 +170,9 @@ def morrison_microphysics(
     precip_s = jnp.clip(q_s[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_s[:, -1], 0.0)
     precipitation = precip_r + precip_i + precip_s
 
-    z = jnp.zeros((ncol, nlev))
+    # Pin dtype to the input precision so we never silently promote
+    # the unused-species placeholders to f64 under x64 mode.
+    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

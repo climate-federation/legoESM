@@ -36,8 +36,13 @@ from legoesm.grids.gaussian import (
     sh_synthesis,
     sh_analysis_oc2,
     sh_analysis_dmu,
+    sh_analysis_3d,
+    sh_synthesis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
     uv_from_vordiv,
     spectral_hyperdiffusion,
+    spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
@@ -92,9 +97,20 @@ def spectral_sw_tendencies(
     a = grid.radius
 
     # --- 1. Transform to grid space ---
-    vor = sh_synthesis(grid, state.vor_hat.data)     # (n_lat, n_lon)
-    phi = sh_synthesis(grid, state.phi_hat.data)
-    phis = sh_synthesis(grid, state.phis_hat.data)
+    # Stack {vor, phi, phis} along a trailing axis so a single
+    # ``sh_synthesis_3d`` (one segment_sum + one IRFFT) replaces three
+    # sequential ``sh_synthesis`` calls.  The 3D variant treats the
+    # trailing axis as a passive batch — for SW (no level dim) the
+    # trailing-axis-of-3 plays the role of nlev=3.  3 SH-syntheses → 1.
+    n_sh_t = state.vor_hat.data.shape[0]
+    _vpp_stack = jnp.stack(
+        [state.vor_hat.data, state.phi_hat.data, state.phis_hat.data],
+        axis=-1,
+    )  # (n_sh, 3)
+    _vpp_grid = sh_synthesis_3d(grid, _vpp_stack)  # (n_lat, n_lon, 3)
+    vor = _vpp_grid[..., 0]
+    phi = _vpp_grid[..., 1]
+    phis = _vpp_grid[..., 2]
 
     # --- 2. Compute cos-lat-weighted velocities (pole-safe) ---
     u_cos, v_cos = uv_from_vordiv(grid, state.vor_hat.data, state.div_hat.data)
@@ -119,31 +135,41 @@ def spectral_sw_tendencies(
     A_vor = abs_vor * u_cos                     # (ζ+f)*u*cosφ
     B_vor = abs_vor * v_cos                     # (ζ+f)*v*cosφ
 
-    # Vorticity equation: dζ/dt = -div((ζ+f)*v)
-    flux_vor_div = (im_over_a * sh_analysis_oc2(grid, A_vor)
-                    - one_over_a * sh_analysis_dmu(grid, B_vor))
-
-    # Divergence equation: dδ/dt = curl((ζ+f)*v) - lap*(E+Φ+Φs)
-    flux_vor_curl = (im_over_a * sh_analysis_oc2(grid, B_vor)
-                     + one_over_a * sh_analysis_dmu(grid, A_vor))
-
     # Mass fluxes: U = Φ*u*cosφ, V = Φ*v*cosφ
     A_mass = phi * u_cos
     B_mass = phi * v_cos
 
+    # Kinetic energy on the grid (KE·cos²φ; 1/cos²φ baked into Pnm_oc2).
+    KE_cos2 = 0.5 * (u_cos * u_cos + v_cos * v_cos)  # KE·cos²φ
+
+    # Batch the SH analyses: oc2 needs {A_vor, B_vor, A_mass, KE_cos2}
+    # (4 calls), dmu needs {A_vor, B_vor, B_mass} (3 calls), plain
+    # sh_analysis needs {phi+phis} (1 call).  Each variant treats the
+    # trailing axis as passive batch, so stack along trailing axis and
+    # call once on a thicker (n_lat, n_lon, K) tensor.  8 SH-analyses
+    # collapse to 3 (one batched per variant).
+    _phi_total = phi + phis
+    _oc2_stack = jnp.stack([A_vor, B_vor, A_mass, KE_cos2], axis=-1)  # (..., 4)
+    _dmu_stack = jnp.stack([A_vor, B_vor, B_mass], axis=-1)            # (..., 3)
+    A_vor_oc2, B_vor_oc2, A_mass_oc2, KE_oc2 = jnp.moveaxis(
+        sh_analysis_oc2_3d(grid, _oc2_stack), -1, 0,
+    )
+    A_vor_dmu, B_vor_dmu, B_mass_dmu = jnp.moveaxis(
+        sh_analysis_dmu_3d(grid, _dmu_stack), -1, 0,
+    )
+    phi_total_hat = sh_analysis(grid, _phi_total)
+
+    # Vorticity equation: dζ/dt = -div((ζ+f)*v)
+    flux_vor_div = im_over_a * A_vor_oc2 - one_over_a * B_vor_dmu
+
+    # Divergence equation: dδ/dt = curl((ζ+f)*v) - lap*(E+Φ+Φs)
+    flux_vor_curl = im_over_a * B_vor_oc2 + one_over_a * A_vor_dmu
+
     # Mass equation: dΦ/dt = -div(Φ*v)
-    flux_mass_div = (im_over_a * sh_analysis_oc2(grid, A_mass)
-                     - one_over_a * sh_analysis_dmu(grid, B_mass))
+    flux_mass_div = im_over_a * A_mass_oc2 - one_over_a * B_mass_dmu
 
     # Kinetic energy + geopotential + surface geopotential -> Laplacian term
-    # KE = (u²+v²)/2 = (u_cos²+v_cos²)/(2·cos²φ).
-    # Computing KE on the grid requires dividing by cos²φ, which blows up
-    # at the poles.  Instead, compute KE·cos²φ on the grid and use
-    # sh_analysis_oc2 (which has 1/cos²φ baked into the Legendre matrix)
-    # to obtain the spectral KE directly.  This is pole-safe and
-    # mathematically equivalent: sh_analysis_oc2(f) = sh_analysis(f/cos²φ).
-    KE_cos2 = 0.5 * (u_cos * u_cos + v_cos * v_cos)  # KE·cos²φ
-    E_phi_hat = sh_analysis_oc2(grid, KE_cos2) + sh_analysis(grid, phi + phis)
+    E_phi_hat = KE_oc2 + phi_total_hat
 
     # --- 5. Assemble tendencies ---
     # d(vor_hat)/dt = -div((zeta+f)*v)
@@ -161,10 +187,20 @@ def spectral_sw_tendencies(
     #   - It causes spurious energy drift
     #   - Standard practice (Hack & Jakob 1992) diffuses only vor and div
     if config.hyperdiff_coeff > 0:
-        dvor_hat = dvor_hat + spectral_hyperdiffusion(
-            grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order)
-        ddiv_hat = ddiv_hat + spectral_hyperdiffusion(
-            grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order)
+        # Batch the two pointwise hyperdiffusions (vor, div) into one
+        # call by stacking along a trailing axis.  ``spectral_hyperdiffusion_3d``
+        # treats the trailing axis as a passive batch (the operator is
+        # purely ``damping * coeffs``), so SW's 2D (n_sh,) inputs work
+        # natively as (n_sh, 2).  2 kernel launches → 1.  Same exploit
+        # as Loops 120/121 for spectral PE/NH.
+        _vd_hat = jnp.stack(
+            [state.vor_hat.data, state.div_hat.data], axis=-1,
+        )  # (n_sh, 2)
+        _hd_pair = spectral_hyperdiffusion_3d(
+            grid, _vd_hat, config.hyperdiff_coeff, config.hyperdiff_order,
+        )
+        dvor_hat = dvor_hat + _hd_pair[..., 0]
+        ddiv_hat = ddiv_hat + _hd_pair[..., 1]
 
     # Return as same pytree structure (for SSP-RK3 tree_map)
     return SpectralSWState(
@@ -465,10 +501,23 @@ def spectral_to_grid(
         All arrays have shape (n_lat, n_lon).
     """
     g = constants.g
-    vor = sh_synthesis(grid, state.vor_hat.data)
-    div = sh_synthesis(grid, state.div_hat.data)
-    phi = sh_synthesis(grid, state.phi_hat.data)
-    phis = sh_synthesis(grid, state.phis_hat.data)
+    # Batch the four 2D SH syntheses (vor, div, phi, phis) along a
+    # trailing axis — same trailing-axis-passive-batch exploit as the
+    # SW tendency block (Loops 95/96 / 101).  4 SH syntheses → 1.
+    _vdpp_pair_diag = jnp.stack(
+        [
+            state.vor_hat.data,
+            state.div_hat.data,
+            state.phi_hat.data,
+            state.phis_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, 4)
+    _vdpp_grid_diag = sh_synthesis_3d(grid, _vdpp_pair_diag)  # (n_lat, n_lon, 4)
+    vor = _vdpp_grid_diag[..., 0]
+    div = _vdpp_grid_diag[..., 1]
+    phi = _vdpp_grid_diag[..., 2]
+    phis = _vdpp_grid_diag[..., 3]
 
     h = phi / g
     h_s = phis / g
@@ -519,8 +568,12 @@ def compute_spectral_diagnostics(
     abs_vor = vor + grid.f
     enstrophy = jnp.sum(abs_vor**2 / (2.0 * h) * dA)
 
+    # One device→host transfer instead of three separate ``float(...)``
+    # casts — this diagnostic is called every save_every steps in
+    # validation/test loops.
+    _h = jax.device_get(jnp.stack([mass, energy, enstrophy]))
     return {
-        'mass': float(mass),
-        'energy': float(energy),
-        'enstrophy': float(enstrophy),
+        'mass': float(_h[0]),
+        'energy': float(_h[1]),
+        'enstrophy': float(_h[2]),
     }

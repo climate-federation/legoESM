@@ -25,6 +25,8 @@ References
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -44,11 +46,17 @@ CICE_BOUNDS = {
 }
 
 
+@lru_cache(maxsize=8)
 def category_bounds(n_cat: int) -> jnp.ndarray:
     """Return lower thickness bounds for *n_cat* categories.
 
     Uses CICE-standard bounds when available (1, 3, 5, 7 categories).
     For other values, returns evenly spaced bounds from 0 to 4 m.
+
+    The result is cached per ``n_cat`` so repeated calls share the
+    same JAX device array instead of building a fresh ``jnp.array``
+    each time (which used to allocate from a Python tuple every step
+    when called from inside the ITD pipeline).
 
     Returns
     -------
@@ -252,10 +260,13 @@ def linear_remap(
     a_remap = a_new - a_excess - a_deficit
 
     # Add excess to next category (shift left); last category retains
-    # its own excess to avoid non-conservative volume loss.
-    z_pad = jnp.zeros_like(vol_excess[..., :1])
-    vol_receive = jnp.concatenate([z_pad, vol_excess[..., :-1]], axis=-1)
-    a_receive = jnp.concatenate([z_pad, a_excess[..., :-1]], axis=-1)
+    # its own excess to avoid non-conservative volume loss.  Use
+    # ``jnp.pad`` along the trailing axis instead of constructing a
+    # zero strip and concatenating — single ``Pad`` HLO op vs
+    # alloc + concat.
+    pad_axes = ((0, 0),) * (vol_excess.ndim - 1)
+    vol_receive = jnp.pad(vol_excess[..., :-1], (*pad_axes, (1, 0)))
+    a_receive = jnp.pad(a_excess[..., :-1], (*pad_axes, (1, 0)))
     # Last category: re-add its own excess (nowhere to promote)
     vol_receive = vol_receive.at[..., -1].add(vol_excess[..., -1])
     a_receive = a_receive.at[..., -1].add(a_excess[..., -1])
@@ -263,8 +274,8 @@ def linear_remap(
     a_remap = a_remap + a_receive
 
     # Add deficit to previous category (shift right, pad first with zero)
-    vol_remap = vol_remap + jnp.concatenate([vol_deficit[..., 1:], z_pad], axis=-1)
-    a_remap = a_remap + jnp.concatenate([a_deficit[..., 1:], z_pad], axis=-1)
+    vol_remap = vol_remap + jnp.pad(vol_deficit[..., 1:], (*pad_axes, (0, 1)))
+    a_remap = a_remap + jnp.pad(a_deficit[..., 1:], (*pad_axes, (0, 1)))
 
     # Recover thickness from volume
     a_remap = jnp.clip(a_remap, 0.0, 1.0)
@@ -295,13 +306,13 @@ def linear_remap(
     E_remap = E_new - E_excess - E_deficit
 
     # Add excess enthalpy to next category (same pattern as volume)
-    z_E = jnp.zeros_like(E_excess[..., :1])
-    E_recv = jnp.concatenate([z_E, E_excess[..., :-1]], axis=-1)
+    e_pad_axes = ((0, 0),) * (E_excess.ndim - 1)
+    E_recv = jnp.pad(E_excess[..., :-1], (*e_pad_axes, (1, 0)))
     E_recv = E_recv.at[..., -1].add(E_excess[..., -1])
     E_remap = E_remap + E_recv
 
     # Add deficit enthalpy to previous category
-    E_remap = E_remap + jnp.concatenate([E_deficit[..., 1:], z_E], axis=-1)
+    E_remap = E_remap + jnp.pad(E_deficit[..., 1:], (*e_pad_axes, (0, 1)))
 
     # Recover temperature from enthalpy
     vol_safe = jnp.maximum(vol_remap, 1e-30)

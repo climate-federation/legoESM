@@ -504,11 +504,15 @@ def build_segment_fn(
                 )
 
             # --- Physics with radiation sub-cycling ---
-            need_rad = jnp.where(
-                rad_update_steps <= 1,
-                jnp.bool_(True),
-                ((step_idx + 1) % rad_update_steps) == 0,
-            )
+            # ``rad_update_steps`` is a Python ``int`` captured in this
+            # closure — gate with a Python ``if`` so the dead branch is
+            # never traced.  The previous ``jnp.where`` on a static int
+            # forced both branches into the trace and added an unused
+            # modulo on every scan step (CLAUDE.md JAX rules).
+            if rad_update_steps <= 1:
+                need_rad = jnp.bool_(True)
+            else:
+                need_rad = ((step_idx + 1) % rad_update_steps) == 0
 
             if owned_face_ids is not None:
                 # MPI replicated dynamics: physics on owned faces only.

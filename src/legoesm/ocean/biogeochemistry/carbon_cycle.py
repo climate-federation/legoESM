@@ -66,12 +66,15 @@ def compute_biogeo_tendencies(
     """
     shape = state.DIC.shape
     mask_3d = ocean_mask[..., jnp.newaxis] if ocean_mask.ndim < state.DIC.ndim else ocean_mask
+    # Pin default forcing dtype to match the BGC state precision so a
+    # missing forcing input does not silently widen the column path.
+    _state_dtype = state.DIC.dtype
 
     # Default forcing if not provided
     if U10 is None:
-        U10 = jnp.full(ocean_mask.shape, cfg.wind_speed)
+        U10 = jnp.full(ocean_mask.shape, cfg.wind_speed, dtype=_state_dtype)
     if PAR_surf is None:
-        PAR_surf = jnp.full(ocean_mask.shape, 200.0)
+        PAR_surf = jnp.full(ocean_mask.shape, 200.0, dtype=_state_dtype)
 
     # ---- 1. Air-sea CO2 flux (surface layer only) ----
     DIC_surf = state.DIC[..., 0]
@@ -88,9 +91,10 @@ def compute_biogeo_tendencies(
     dz_surface = dz_ref[0]
     dDIC_gas = co2_diag.flux_co2 / jnp.clip(dz_surface, 1.0, None)
 
-    # Initialize tendencies
-    dDIC_dt = jnp.zeros(shape)
-    dALK_dt = jnp.zeros(shape)
+    # Initialize tendencies — pin to state precision so the BGC tendency
+    # struct does not silently widen to f64 under x64 mode.
+    dDIC_dt = jnp.zeros(shape, dtype=_state_dtype)
+    dALK_dt = jnp.zeros(shape, dtype=_state_dtype)
 
     # Add gas exchange to surface layer
     dDIC_dt = dDIC_dt.at[..., 0].add(dDIC_gas * ocean_mask)

@@ -235,7 +235,26 @@ def main():
         )
         dT_conv = conv.dT_dt.reshape(T.shape)
         dq_conv = conv.dq_v_dt.reshape(T.shape)
-        precip = conv.precipitation.reshape(p_s.shape)
+        # Surface precipitation diagnostic — preserves the exact
+        # water-budget definition that ``ConvectionOutput.precipitation``
+        # used before the Option-C refactor: the net column moisture
+        # sink, clipped at zero. Computing it from ``dq_v_dt`` (sum
+        # then clip) is *not* equivalent to integrating
+        # ``dq_c_conv_dt`` (clip-per-level then sum): the latter
+        # over-counts in columns that mix drying lower levels with
+        # moistening upper levels because per-level clipping drops the
+        # cancelling moistening contribution.
+        # Under the new architecture microphysics would own this
+        # diagnostic, but the RCE script intentionally runs without a
+        # microphysics chain — so we recover the legacy definition
+        # locally to keep the column water budget reproducible.
+        dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+        precip_col = jnp.clip(
+            -jnp.sum(conv.dq_v_dt * dp_col / constants.g, axis=1),
+            0.0,
+            None,
+        )
+        precip = precip_col.reshape(p_s.shape)
 
         # (c) Bulk aerodynamic BL coupling
         rho_low = (p_s * sigma.sigma_full[-1]) / (constants.R_d * T[..., -1])

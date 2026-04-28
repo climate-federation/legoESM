@@ -118,8 +118,28 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
         cfg = MPASOceanConfig(**kw)
@@ -155,7 +175,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["K_v"] = K_v
         if K_h is not None:
             kw["K_h"] = K_h
-        # K_bih not supported by MPASOceanConfig — skip silently
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
         if eos is not None:
@@ -277,7 +298,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["K_v"] = K_v
         if K_h is not None:
             kw["K_h"] = K_h
-        # K_bih not supported by MPASOceanConfig — skip silently
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
         if eos is not None:

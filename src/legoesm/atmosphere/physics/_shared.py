@@ -41,11 +41,15 @@ def compute_heights_from_sigma(T, p_half):
         constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
 
-    # Integrate from surface upward
+    # Integrate from surface upward.  Use ``jnp.pad`` to append the
+    # surface (z=0) boundary instead of allocating a fresh
+    # ``jnp.zeros((ncol, 1))`` and concatenating — single Pad HLO op
+    # vs alloc + concat (this helper is invoked by GWD / microphysics
+    # / turbulence integrations every physics step).
     dz_rev = dz[:, ::-1]
     z_half_cumsum = jnp.cumsum(dz_rev, axis=1)
     z_half_inner = z_half_cumsum[:, ::-1]
-    z_half = jnp.concatenate([z_half_inner, jnp.zeros((ncol, 1))], axis=1)
+    z_half = jnp.pad(z_half_inner, ((0, 0), (0, 1)))
     z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
     return z_full, z_half
 

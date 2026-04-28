@@ -39,6 +39,10 @@ B_H_OVERRIDE = None  # Set via --B-h CLI flag
 C_SMAG_OVERRIDE = None  # Set via --C-smag CLI flag
 K_H_OVERRIDE = None  # Set via --K-h CLI flag
 U_SURFACE_OVERRIDE = None  # Set via --U-surface CLI flag (Eady)
+BAROTROPIC_DIV_DAMP_OVERRIDE = None  # Set via --barotropic-div-damp CLI flag
+                                     # (dimensionless; targets grid-scale
+                                     # compressible modes — see issue #213
+                                     # hi-res Eady SOM investigation recipe)
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"

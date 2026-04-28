@@ -43,7 +43,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -53,6 +53,10 @@ from legoesm.ocean.state import (
     LatLonCGridOceanState,
     LatLonCGridOceanTendencies,
     LatLonCGridOceanConfig,
+)
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    apply_sponge_tracer_relaxation,
+    iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     biharmonic_scaling_factor,
@@ -66,6 +70,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     interp_cell_to_uface,
     curl_vertex_cgrid,
     smagorinsky_biharmonic_tendency_cgrid,
+    leith_biharmonic_tendency_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -90,11 +95,9 @@ def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
     f_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, n_lon, ...)
-    if f.ndim >= 3:
-        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    else:
-        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_interior, zero], axis=0)
+    # Pole rows zero (wall BC); single Pad HLO op.
+    pad_axes = ((0, 0),) * (f_interior.ndim - 1)
+    return jnp.pad(f_interior, ((1, 1), *pad_axes))
 
 
 def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
@@ -136,11 +139,9 @@ def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray) -> jnp.ndarray:
     f_pos = f_south + 0.5 * _van_leer_limiter(r_pos) * delta_pos
     f_neg = f_north + 0.5 * _van_leer_limiter(r_neg) * delta_neg
     f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
-    if f.ndim >= 3:
-        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    else:
-        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_tvd, zero], axis=0)
+    # Pole rows zero (wall BC); single Pad HLO op.
+    pad_axes = ((0, 0),) * (f_tvd.ndim - 1)
+    return jnp.pad(f_tvd, ((1, 1), *pad_axes))
 
 
 def _upwind_to_u_points(
@@ -203,11 +204,9 @@ def _upwind_to_v_points(
     mf_interior = mass_flux_v[1:-1]
     f_upwind = jnp.where(mf_interior > 0, f_south, f_north)
 
-    if f.ndim >= 3:
-        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-    else:
-        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    return jnp.concatenate([zero, f_upwind, zero], axis=0)
+    # Pole rows zero (wall BC); single Pad HLO op.
+    pad_axes = ((0, 0),) * (f_upwind.ndim - 1)
+    return jnp.pad(f_upwind, ((1, 1), *pad_axes))
 
 
 def _neumann_fill_cgrid(
@@ -321,48 +320,31 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         min_water_column_m=config.min_water_column_m,
     )
 
-    # --- 2. Density from EOS ---
-    T_filled = _neumann_fill_cgrid(T, mask)
-    S_filled = _neumann_fill_cgrid(S, mask)
+    # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
+    # Reference Jacobian (J=1, eta=0): the barotropic solver handles
+    # the free-surface gradient g*grad(eta) and using actual J here
+    # would double-count it (would also create a spatially-varying
+    # pressure even for uniform T/S).
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
-    # Use REFERENCE Jacobian (J=1, eta=0) for the hydrostatic pressure
-    # in the EOS iteration.  The barotropic solver handles the
-    # free-surface pressure gradient g*grad(eta); using the actual J
-    # here would create a spatially-varying pressure even for uniform
-    # T/S, double-counting the barotropic forcing.
-    J_ref = jnp.ones_like(J)
-    eta_ref = jnp.zeros_like(eta_safe)
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
-    for _ in range(2):
-        p_hydro = compute_hydrostatic_pressure(
-            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g_val,
-        )
-        rho = eos_fn(T_filled, S_filled, p_hydro)
-    p_hydro = compute_hydrostatic_pressure(
-        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g_val,
+    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask,
+        lambda field: _neumann_fill_cgrid(field, mask),
+        eos_fn, z_coord.dz_ref, rho_0, g_val,
+        n_iter=2,
     )
-    rho_prime = rho - rho_0
-
-    # --- 3. Baroclinic pressure gradient (compact C-grid stencil) ---
-    # Use REFERENCE layer thickness (dz_ref, corresponding to eta=0)
-    # rather than the actual thickness (dz_ref * J) which includes the
-    # free-surface contribution.  The barotropic solver handles
-    # g*grad(eta); using J here would double-count that forcing.
-    dp_layer = rho_prime * g_val * z_coord.dz_ref
-    p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = p_prime + 0.5 * dp_layer
 
     p_prime_filled = _neumann_fill_cgrid(p_prime, mask)
 
-    # C-grid gradient: compact stencil at face points
-    # vmap over levels for 3D gradient
-    p_t = jnp.moveaxis(p_prime_filled, -1, 0)  # (nlev, n_lat, n_lon)
-
-    dp_dx_t = jax.vmap(lambda p2d: gradient_x_cgrid(p2d, grid))(p_t)
-    dp_dy_t = jax.vmap(lambda p2d: gradient_y_cgrid(p2d, grid))(p_t)
-
-    dp_dx = jnp.moveaxis(dp_dx_t, 0, -1)  # (n_lat, n_lon+1, nlev)
-    dp_dy = jnp.moveaxis(dp_dy_t, 0, -1)  # (n_lat+1, n_lon, nlev)
+    # C-grid gradient: compact stencil at face points.  ``gradient_*_cgrid``
+    # natively handles 3D input (it broadcasts the lat-only metric over
+    # the trailing level axis).  ``dp_*`` and ``dKE_*`` use the same
+    # operator on (n_lat, n_lon, nlev) cell-center inputs, so we batch
+    # them by stacking ``p_prime_filled`` and ``KE`` along a trailing
+    # axis and folding into the level dim.  4 gradient calls collapse
+    # to 2 (one batched ``gradient_x_cgrid`` + one batched
+    # ``gradient_y_cgrid``).  ``KE`` is computed below — the gradients
+    # are also moved down so both inputs are in scope at the call site.
+    # See block "--- 6/7 Pressure + KE gradient (batched) ---" below.
 
     # --- 4. Vertical velocity from FV flux divergence ---
     # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
@@ -393,16 +375,32 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # by sqrt(1 + (f*dt)^2) per step and blows up within ~1 day at
     # high latitudes.
 
-    # --- 6. Kinetic energy gradient (from perturbation velocity) ---
+    # --- 6/7. Kinetic energy + pressure gradients (batched) ---
     up_cell = 0.5 * (u_prime[:, :-1, :] + u_prime[:, 1:, :])
     vp_cell = 0.5 * (v_prime[:-1, :, :] + v_prime[1:, :, :])
     KE = 0.5 * (up_cell**2 + vp_cell**2)
 
-    KE_t = jnp.moveaxis(KE, -1, 0)
-    dKE_dx_t = jax.vmap(lambda ke2d: gradient_x_cgrid(ke2d, grid))(KE_t)
-    dKE_dy_t = jax.vmap(lambda ke2d: gradient_y_cgrid(ke2d, grid))(KE_t)
-    dKE_dx = jnp.moveaxis(dKE_dx_t, 0, -1)
-    dKE_dy = jnp.moveaxis(dKE_dy_t, 0, -1)
+    # Batch (KE, p_prime_filled) gradients — both share the (n_lat,
+    # n_lon, nlev) cell-center shape and the operators ``gradient_*_cgrid``
+    # treat the trailing axis as a passive batch (the per-lat ``cos_lat``
+    # / ``dx_u`` metric broadcasts cleanly).  Stack along trailing axis,
+    # fold into the level dim, and run each gradient once on the thicker
+    # (n_lat, n_lon, nlev*2) tensor.  4 gradient calls → 2.
+    n_lat_g, n_lon_g, nlev_g = KE.shape
+    _Kp_stack = jnp.stack([KE, p_prime_filled], axis=-1)
+    _Kp_flat = _Kp_stack.reshape(n_lat_g, n_lon_g, nlev_g * 2)
+    _dKp_dx_flat = gradient_x_cgrid(_Kp_flat, grid)  # (n_lat, n_lon+1, nlev*2)
+    _dKp_dy_flat = gradient_y_cgrid(_Kp_flat, grid)  # (n_lat+1, n_lon, nlev*2)
+    _dKp_dx = _dKp_dx_flat.reshape(
+        _dKp_dx_flat.shape[0], _dKp_dx_flat.shape[1], nlev_g, 2,
+    )
+    _dKp_dy = _dKp_dy_flat.reshape(
+        _dKp_dy_flat.shape[0], _dKp_dy_flat.shape[1], nlev_g, 2,
+    )
+    dKE_dx = _dKp_dx[..., 0]
+    dp_dx = _dKp_dx[..., 1]
+    dKE_dy = _dKp_dy[..., 0]
+    dp_dy = _dKp_dy[..., 1]
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     du_dt = -dKE_dx - dp_dx / rho_0
@@ -441,11 +439,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     v_at_u = jnp.concatenate(
         [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
 
-    # Average u' to v-points (4-point average, zero-padded at poles)
-    n_lon_loc = u_prime.shape[1]  # n_lon+1
-    nlev_loc = u_prime.shape[2]
-    zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u_prime.dtype)
-    u_ext = jnp.concatenate([zero_u, u_prime, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
+    # Average u' to v-points (4-point average, zero-padded at poles).
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    u_ext = jnp.pad(u_prime, ((1, 1), (0, 0), (0, 0)))  # (n_lat+2, n_lon+1, nlev)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
@@ -484,53 +480,94 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # per-layer divergence, ensuring 3D transport consistency.
     #
     # The tendency here includes only: diffusion and physics.
-    tracers = jnp.stack([T, S], axis=0)
+    # Stack T, S along a trailing tracer axis and fold it into the level
+    # axis so ``laplacian_cgrid`` (and ``bilaplacian_cgrid`` which is two
+    # laplacian calls) runs ONCE on the thicker
+    # ``(n_lat, n_lon, nlev*2)`` field — the prior vmap-over-(T,S)
+    # pattern issued separate halo pads + 5-point stencils per tracer.
+    # Vertical diffusion stays per-tracer because it hard-codes the
+    # vertical axis at -1.
+    tracer_stack = jnp.stack([T, S], axis=-1)  # (n_lat, n_lon, nlev, 2)
+    n_lat_t, n_lon_t, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
 
-    def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        dtr_dt = jnp.zeros_like(tr)
+    horiz_flat = jnp.zeros_like(tracer_flat)
+    if config.K_h > 0 and config.K_bih > 0:
+        # Both Laplacian and biharmonic active: bilaplacian's *inner*
+        # ∇² is identical to the K_h Laplacian, so compute ∇²(tracer_flat)
+        # ONCE and feed it to both branches.  Saves one full
+        # laplacian_cgrid call (2 gradients + 1 divergence + masking)
+        # per RHS evaluation.
+        _lap_tr = laplacian_cgrid(tracer_flat, grid, mask=mask)
+        horiz_flat = horiz_flat + config.K_h * _lap_tr
+        horiz_flat = horiz_flat - config.K_bih * laplacian_cgrid(
+            _lap_tr, grid, mask=mask,
+        )
+    elif config.K_h > 0:
+        horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
+            tracer_flat, grid, mask=mask,
+        )
+    elif config.K_bih > 0:
+        horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
+            tracer_flat, grid, mask=mask,
+        )
+    horiz_stack = horiz_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
 
-        if config.K_h > 0:
-            dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
-        if config.K_bih > 0:
-            dtr_dt = dtr_dt - config.K_bih * bilaplacian_cgrid(tr, grid, mask=mask)
-        # Vertical tracer diffusion: always applied regardless of physics
-        # pipeline state. The physics pipeline's vertical_mixing module is
-        # a separate concept (e.g., KPP). Baseline K_v diffusion should
-        # always be active when K_v > 0. (Fixes #150.)
-        if config.K_v > 0 and tr.shape[-1] >= 2:
-            jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
-            dz_actual_loc = z_coord.dz_ref * jac_v
+    # Vertical tracer diffusion (per-tracer; axis -1 of ``tr`` is nlev).
+    # Always applied regardless of physics pipeline state — the physics
+    # pipeline's vertical_mixing module is a separate concept (e.g.,
+    # KPP).  Baseline K_v diffusion should always be active when K_v > 0.
+    # (Fixes #150.)
+    if config.K_v > 0 and nlev_t >= 2:
+        jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)  # (n_lat, n_lon, 1)
+        dz_actual_loc = z_coord.dz_ref * jac_v           # (n_lat, n_lon, nlev)
+
+        def _vdiff(tr):
             dtr_dz_half = (tr[..., :-1] - tr[..., 1:]) / (
                 z_coord.dz_half_ref * jac_v
             )
             flux = config.K_v * dtr_dz_half
-            zeros_face = jnp.zeros(
-                (*tr.shape[:-1], 1), dtype=tr.dtype,
-            )
-            flux_full = jnp.concatenate(
-                [zeros_face, flux, zeros_face], axis=-1,
-            )
-            dtr_dt = dtr_dt + (
-                flux_full[..., :-1] - flux_full[..., 1:]
-            ) / dz_actual_loc
-        return dtr_dt
+            _pad_axes_tr = ((0, 0),) * (flux.ndim - 1)
+            flux_full = jnp.pad(flux, (*_pad_axes_tr, (1, 1)))
+            return (flux_full[..., :-1] - flux_full[..., 1:]) / dz_actual_loc
 
-    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
-    dT_dt = tracer_tend[0]
-    dS_dt = tracer_tend[1]
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        tracer_tend_stack = horiz_stack + vdiff_stack
+    else:
+        tracer_tend_stack = horiz_stack
+
+    dT_dt = tracer_tend_stack[..., 0]
+    dS_dt = tracer_tend_stack[..., 1]
 
     # --- 10. Mixing (viscosity on perturbation velocity) ---
     # Uses the proper vector Laplacian grad(div) - k×grad(curl) directly
     # on face velocities, avoiding the lossy cell-center detour.
     # See issue #105 for details.
-    if config.A_h > 0:
+    if config.A_h > 0 and config.B_h > 0:
+        # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
+        # *inner* vector Laplacian is identical to the explicit A_h
+        # vector Laplacian, so compute ∇²(u', v') ONCE and feed it to
+        # both branches.  Saves one full vector_laplacian_cgrid call
+        # (1 div + 1 curl + 2 gradients + 2 gradient_curl_to_*) per
+        # RHS evaluation.
+        _vlap_u, _vlap_v = vector_laplacian_cgrid(
+            u_prime, v_prime, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt + config.A_h * _vlap_u
+        dv_dt = dv_dt + config.A_h * _vlap_v
+        bilap_u, bilap_v = vector_laplacian_cgrid(
+            _vlap_u, _vlap_v, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        scale_u, scale_v = biharmonic_scaling_factor(grid)
+        du_dt = du_dt - config.B_h * scale_u[:, None, None] * bilap_u
+        dv_dt = dv_dt - config.B_h * scale_v[:, None, None] * bilap_v
+    elif config.A_h > 0:
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         du_dt = du_dt + config.A_h * vlap_u
         dv_dt = dv_dt + config.A_h * vlap_v
-
-    if config.B_h > 0:
+    elif config.B_h > 0:
         bilap_u, bilap_v = vector_bilaplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
@@ -546,6 +583,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         du_dt = du_dt - smag_u
         dv_dt = dv_dt - smag_v
+
+    if getattr(config, "C_leith", 0.0) > 0:
+        leith_u, leith_v = leith_biharmonic_tendency_cgrid(
+            u_prime, v_prime, grid, config.C_leith,
+            modified=getattr(config, "C_leith_modified", False),
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt - leith_u
+        dv_dt = dv_dt - leith_v
 
     if config.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
@@ -564,8 +609,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 z_coord.dz_half_ref * jac
             )
             flux = config.A_v * dv_dz_half
-            zeros_face = jnp.zeros((*vel.shape[:-1], 1), dtype=vel.dtype)
-            flux_full = jnp.concatenate([zeros_face, flux, zeros_face], axis=-1)
+            # Pad along trailing axis instead of allocating a fresh
+            # ``(..., 1)`` zero buffer + 3-array concatenate.
+            _pad_axes = ((0, 0),) * (flux.ndim - 1)
+            flux_full = jnp.pad(flux, (*_pad_axes, (1, 1)))
             vdiff = (flux_full[..., :-1] - flux_full[..., 1:]) / (
                 z_coord.dz_ref * jac
             )
@@ -596,10 +643,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Cast sponge arrays to state dtype to prevent float64 promotion when
     # the precision policy stores state in float32 (crashes barotropic scan).
     if sponge is not None:
+        dT_dt, dS_dt = apply_sponge_tracer_relaxation(
+            dT_dt, dS_dt, T, S, sponge, mask=None, expand_gamma_axis=-1,
+        )
         _dt = T.dtype
-        gamma_3d = sponge.gamma.astype(_dt)[..., jnp.newaxis]
-        dT_dt = dT_dt + gamma_3d * (sponge.T_ref.astype(_dt) - T)
-        dS_dt = dS_dt + gamma_3d * (sponge.S_ref.astype(_dt) - S)
         if sponge.u_ref is not None:
             gamma_u = interp_cell_to_uface(sponge.gamma.astype(_dt))[..., jnp.newaxis]
             du_dt = du_dt + gamma_u * (sponge.u_ref.astype(_dt) - u)
