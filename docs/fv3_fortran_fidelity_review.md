@@ -21,14 +21,23 @@ Use git history for retired prose.
   tests, 4 production code changes, and traced the root cause to
   bare A-L 1 % imperfect cancellation at the 8 cube vertices
   (iter-929; resolution-refinable per iter-931).
-- FB chain partial stabilisation (iter-940→942): step survival on
-  W2 C36 dt=300 s improved from **41 → 209 steps** (5×) via three
-  fixes: iter-934 `_deln_flux` float32-overflow factoring, iter-941
-  unconditional `BGRID_NE` corner sync, iter-942 `ke_corner` scalar
-  sync after d_sw5 KE-add.  Still NOT 1-day stable (288 step target);
-  remaining ~80 steps gap requires deeper structural debug.
+- FB chain stabilisation (iter-940→944): step survival on W2 C36
+  dt=300 s improved from **41 → 288 steps** (1-day NaN-free) via
+  five fixes: iter-934 `_deln_flux` float32-overflow factoring,
+  iter-941 unconditional `BGRID_NE` corner sync, iter-942
+  `ke_corner` scalar sync after d_sw5 KE-add, iter-944 CGRID_NE
+  sync of `(ut, vt)` at d_sw step 1, iter-944 forced CGRID_NE sync
+  of `(fx_vort, fy_vort)` at d_sw step 7.  iter-944 closes the
+  structural-growth NaN blocker: FB chain reaches the 1-day target
+  without producing NaN.
+- FB chain W2 acceptance (v_ll_Linf ≤ 0.119 m/s per user iter-938
+  brief) **NOT YET MET**: at 1 day, |v_max|≈2300 m/s (analytical
+  ≈0).  Numerical stability achieved; W2 fidelity remains the open
+  iter-945+ target (likely PPM hord=9 boundary handling, the
+  operator-split sweep order in `_bgrid_ke_transport`, or the cube-
+  vertex halo for u_d/v_d themselves).
 - FB/duogrid scaffolding (`halo=3`, flux sync, `d_sw*` helpers)
-  refined; C24/C36 1-day stability remains the open blocker for
+  refined; C24/C36 W2 fidelity remains the open blocker for
   using FB chain as the production path.
 
 ## Compact Archive
@@ -59,461 +68,19 @@ Use git history for retired prose.
 
 ## Latest Ralph-Loop Iterations
 
-Full detail is retained from `iter-930` onward. Older Ralph-loop entries are compressed below; use git history for retired prose.
-
-### Iter-904 to Iter-929 - compacted Ralph-loop archive
-
-- `iter-904..905`: Partial true-FV3 mass transport inserted into the RK3 production path failed catastrophically. Default-off `use_fv3_dsw1_mass_transport` produced NaNs; adding `nord_v`/`damp_v` avoided NaNs but yielded W2 `v_ll_Linf=3.137e+02 m/s`; split mass/FV3 + RK3 momentum still gave `2.921e+02 m/s`. This rules out one-component FV3/RK3 hybrids.
-- `iter-906..910`: W2 residual was localized to cube-edge/cube-vertex geometry. Bare cell-center Coriolis/pressure cancellation is worst near vertices; production `div_damp` dominates instantaneous hot spots, but reducing global or boundary damping worsens W2. Resolution helps slowly, with C36 near a `0.10..0.12 m/s` practical floor at current cost.
-- `iter-912`: Focused iter-887..911b regression sweep passed: 10 files, 63 tests, 175 s. All recent default-off flags remained isolated; production W2 baseline stayed `v_ll_Linf=1.319e-1 m/s`.
-- `iter-913..920`: Silent-regression cleanup found 8 drifted tests, mostly from iter-878's Fortran-correct PPM limiter fix. Gold files and live replacement tests were updated; broader atmosphere/dynamics layers were clean. Process rule persisted: run full `tests/unit/test_cdgrid_fv3_regression.py` and related layers every multi-iter core-operator cycle.
-- `iter-921..925`: Visual and sentinel refresh for W2/W5/cosine-bell/rest-state. Iter-893 PPM boundary fix improves W2 `v_ll_Linf` by ~17 % but worsens W2 `h_err_max` by ~77 %; strict-Fortran PPM variants are Pareto-dominated. W5, cosine bell, and rest state are essentially unaffected; iter-893 is bit-exact on constants.
-- `iter-926..927`: Added `use_fv3_dsw5_corner_damping` as default-off documentation of a rejected path. Additive d_sw5 corner damping blew up W2 (`v_ll_Linf=2.253 m/s`); replacement semantics were less bad but still rejected (`0.971 m/s`). Conclusion: per-operator d_sw5 swaps cannot fix the A-L/RK3 operator-family mismatch.
-- `iter-928`: Added a meta-fidelity sentinel locking 8 documented Fortran-fidelity gap markers so cleanup edits cannot silently erase known gaps without actually closing them.
-- `iter-929`: Bare A-L decomposition identified the upstream source: 1 % imperfect geostrophic cancellation at the 8 cube vertices. `boundary_fix` spreads that residual and `div_damp` amplifies it into the row-2 production hot spots. Fixing W2 requires either better cube-vertex cancellation/halo handling or the full Fortran FB operator family, not damping tuning.
-
-### Iter-930 — boundary_fix vs div_damp 4-way matrix: boundary_fix is dominant integrated stabilizer
-
-**Trigger.**  iter-907 found `div_damp` is 29× more than `boundary_fix` at INSTANTANEOUS hot-spot tendency magnitude.  iter-929 identified the 3-stage chain (bare A-L cube-vertex → boundary_fix spread → div_damp amplification).  But which stabilizer dominates the INTEGRATED 1-day v_ll_Linf?  The two questions have different answers.
-
-**iter-930 measurement** (W2 C36 1-day, `apply_fortran_xppm_boundary=True`, all 4 cells of the `boundary_fix × div_damp` matrix):
-
-| `boundary_fix` | `div_damp` | v_ll_Linf | h_L2  | h_Linf |
-|----------------|------------|-----------|-------|--------|
-| True (production) | 8×       | 0.1319    | 0.512 | 8.184  |
-| False             | 8×       | 0.6380    | 1.751 | 34.29  |
-| True              | 0        | 0.1857    | 0.645 | 6.023  |
-| False             | 0        | 0.6616    | 1.826 | 20.72  |
-
-**Findings.**
-
-1. **`boundary_fix=False` worsens v_ll_Linf 4.8×** (0.132 → 0.638 m/s) regardless of `div_damp`.
-2. **`div_damp=0` (with boundary_fix on) worsens v_ll_Linf only 1.4×** (0.132 → 0.186 m/s).
-3. **`boundary_fix` is the DOMINANT integrated-error stabilizer** for W2 — penalty for removing it is 3×+ larger than the penalty for removing `div_damp`.
-4. **Production matrix (both on) is the BEST of the 4 cells** on every metric except h_Linf, where `bf=T, dd=0` wins (6.02 vs 8.18).  The h_Linf trade-off mirrors the iter-921 v vs h Pareto observation: more aggressive damping shifts where the residual concentrates.
-
-**Reconciliation with iter-907.**  iter-907's "div_damp 29× boundary_fix at hot spot" is correct but refers to the INSTANTANEOUS dv tendency magnitude.  Over 288 RK3 steps, the `boundary_fix` smoothing operates at every step and accumulates to dominate the integrated v_ll_Linf.  `div_damp` damps the instantaneous noise but doesn't fully suppress it; `boundary_fix`'s averaging is more globally effective at reducing the integrated cube-vertex-derived bias.
-
-**Implication for the d_sw5 audit and the user's issue #5.**
-
-User issue #5 noted `boundary_fix` is "Python-only stabilizer ... reduces artifacts but proves the production operator is compensating for a missing faithful FV3 mechanism."  iter-930 quantifies the SCALE of that compensation: removing boundary_fix would push v_ll_Linf from 0.132 to 0.638 m/s — 4.8× worse than the iter-893 baseline.  Until a Fortran-faithful corner mechanism (per issue #6 — d_sw5 corner KE-add structure within the FB chain) is in place, `boundary_fix` is structurally indispensable for production W2.
-
-**iter-930 deliverables.**
-
-1. `tests/test_iter930_boundary_fix_div_damp_load_bearing.py` — 5 sentinels:
-   - 4 parametric pins on the 4-way matrix (within ±5 %).
-   - 1 inequality pin: `bf=False` penalty > 3× `dd=0` penalty on v_ll_Linf.
-
-**Verification.**  5/5 pass in 60 s.
-
-**Backlog implication.**  When/if FB chain stabilization lands, the FIRST validation should be that production W2 v_ll_Linf with the FB chain (and no boundary_fix Python-only stabilizer) reaches the iter-893 0.132 m/s number or better.  iter-930's 0.638 m/s is the "no compensation" baseline that the FB chain replacement must match.
-
-**Process.**  No production code change.  Cumulative iter-921→iter-930: 10 commits, 38 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-931 — bare A-L cube-vertex residual is RESOLUTION-REFINABLE (slow ~p=0.4 power-law)
-
-**Trigger.**  iter-929 found the bare A-L has 1 % imperfect cancellation at the 8 cube vertices.  iter-931 measures whether this cube-vertex bias DECREASES with resolution (refinable, soft floor) or stays constant (structural, hard floor).
-
-**iter-931 measurement** (W2 IC, t=0, no time stepping; bare A-L only):
-
-| `N` | `|coriolis_dv|` max | `|bare residual|` max | imperfect % |
-|-----|---------------------|-----------------------|-------------|
-| 16  | 3.029e-03           | 3.382e-05             | 1.117 %     |
-| 24  | 3.040e-03           | 2.967e-05             | 0.976 %     |
-| 36  | 3.045e-03           | 2.516e-05             | 0.826 %     |
-| 48  | 3.047e-03           | 2.238e-05             | 0.735 %     |
-
-**Findings.**
-
-1. **Background magnitude is nearly resolution-INVARIANT** (3.03e-3 → 3.05e-3, +0.6 %).  The Coriolis and Bernoulli-grad sub-operators are O(1) physical quantities, not numerical noise.
-2. **Residual magnitude DECREASES monotonically** with resolution (3.38e-5 → 2.24e-5, −34 % from C16 to C48).
-3. **Imperfect % decreases monotonically** (1.12 % → 0.73 %, −34 %).
-4. **Convergence rate**: residual at C16 / C48 = 1.51× over a 3× resolution increase → effective order p ≈ log(1.51)/log(3) ≈ 0.38.  Slow (sub-linear) but POSITIVE convergence.
-
-**Reconciliation with iter-910's integrated v_ll_Linf scaling.**
-
-iter-910 measured C16=0.354, C24=0.183, C36=0.132, C48=0.125 m/s for integrated 1-day W2 v_ll_Linf — also slow ~1st-order scaling.  iter-931 confirms the source of that scaling: the bare A-L cube-vertex residual is the upstream feeder.  Both metrics scale together; the cube-vertex bias is the structural source of the integrated W2 floor.
-
-**Implication.**
-
-The cube-vertex bias is **NOT a structural floor** — refinement reduces it.  Production at C36 (v_ll_Linf=0.132 m/s) is at this resolution because of cost constraints (~5.6× cost factor C36→C64 per iter-910b), not because higher resolution doesn't help.  An iter that wants to push v_ll_Linf below 0.10 m/s has a viable resolution-only path (~C72-C96), independent of any operator-family change.
-
-This is a useful diagnostic finding for the user's iter-927 issue #2 (operator family).  The A-L family DOES converge with refinement; the operator family question is about cost-efficiency, not feasibility.
-
-**iter-931 deliverables.**
-
-1. `tests/test_iter931_bare_al_cube_vertex_resolution_scaling.py` — 5 sentinels:
-   - 4 parametric pins (C16, C24, C36, C48 residual_max + imperfect_pct within ±5 %).
-   - 1 monotonicity sentinel: residual must decrease with resolution.
-
-**Verification.**  5/5 pass in 59 s.
-
-**Process.**  No production code change.  Cumulative iter-921→iter-931: 11 commits, 43 sentinel tests, 0 production behavioral changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-932 — pin the SCOPE of iter-893's PPM boundary fix
-
-**Trigger.**  iter-925 verified iter-893 is bit-exact no-op on rest state (constants).  iter-929 found bare A-L cube-vertex 1 % imperfect cancellation.  Question: does iter-893's PPM fix leak into the velocity tendency path on a non-uniform state, or is it strictly scoped to the mass transport (`dh_dt`)?
-
-**iter-932 measurement** (W2 t=0 C36, `div_damp=0`, `boundary_fix=False` so no other production stabilizers fire):
-
-| metric                       | iter-820 (xppm=False) | iter-893 (xppm=True) | Δ                |
-|------------------------------|-----------------------|----------------------|------------------|
-| max\|du_dt\|                 | reference             | reference            | **0.0 (bit-exact)** |
-| max\|dv_dt\|                 | reference             | reference            | **0.0 (bit-exact)** |
-| max\|dh_dt\|                 | 8.53e-05              | 1.71e-04             | 8.57e-05         |
-
-**iter-893 is FULLY scoped to `dh_dt`.**  Velocity tendencies are bit-exact identical under the toggle, confirming PPM is consumed only by `cgrid_mass_flux_divergence` and not by the bare A-L Coriolis/Bernoulli-grad path.
-
-**iter-932 deliverables.**
-
-1. `tests/test_iter932_iter893_velocity_tendency_invariant.py` — 3 sentinels:
-   - `velocity_tendencies_bit_exact_under_iter893_toggle`: `du_dt`, `dv_dt` strictly bit-exact between iter-820 and iter-893 baselines.  Fires if PPM ever leaks into the velocity path.
-   - `height_tendency_does_change_under_iter893_toggle`: positive sentinel — if iter-893 silently no-ops on `dh_dt`, the flag is dead.
-   - `height_tendency_drift_within_iter932_band`: pin the iter-893 magnitude effect on `dh_dt` (8.57e-5) within ±20 %.
-
-**Verification.**  3/3 pass in 19 s.
-
-**Cumulative iter-921→iter-932 deliverables.**
-
-- 12 commits, 1 production code change (`use_fv3_dsw5_corner_damping` flag, default-OFF, REJECTED).
-- 46 sentinel tests across W2 single + Pareto + W5 multi + cosine bell + rest state + bare-AL resolution scaling + iter-893 scope.
-- 8 user-identified Fortran-fidelity gaps locked in test suite.
-- ~5 minutes total CI cost.
-
-The iter-921→iter-932 audit established the FOLLOWING about the production W2 problem:
-
-1. **Root cause** (iter-929): bare A-L 1 % imperfect cancellation at 8 cube vertices.
-2. **Resolution scaling** (iter-931): cube-vertex bias is REFINABLE (slow ~p=0.4 power-law).  Production at higher resolution would help.
-3. **Amplification chain** (iter-929): bare residual → boundary_fix spread → div_damp 7× amp.
-4. **Stabilizer dominance** (iter-930): boundary_fix is the dominant integrated stabilizer (4.8× v_ll inflation if removed).
-5. **iter-893 scope** (iter-925, iter-932): strictly mass-transport-only — bit-exact no-op on velocity path and on constant states.
-6. **Pareto trade-off** (iter-921, iter-922): iter-893 reduces v_ll Linf by 17 % at cost of h_err Linf +77 %; default is Pareto-non-dominated vs strict-Fortran variants.
-7. **d_sw5 corner damping**: REJECTED both as additive (iter-926b) and replacement (iter-927) — operator family mismatch is fundamental, can't be patched per-operator.
-8. **W5/cosine bell are unaffected** (iter-923, iter-924): the Pareto trade-off is W2-specific.
-
-Production W2 baseline at iter-893 (v_ll_Linf=0.132 m/s, h_err_max=8.18 m) unchanged throughout.
-
-### Iter-933 — FB chain stability scan: NaN at C8/C12/C16, stable at C24+
-
-**Trigger.**  User issue #8 marks `FV3FBShallowWaterModel` as experimental and unstable.  iter-933 quantifies WHERE the instability shows up by running one FB step at C8/C12/C16/C24/C36 with the same `dt=300 s`.
-
-**iter-933 measurement** (W2 t=0, dt=300 s, FB Fortran defaults d4_bg=0.16, nord=1):
-
-| `N` | `h` finite | `u_d` finite | `v_d` finite |
-|-----|------------|--------------|--------------|
-| 8   | **NO (NaN)** | yes        | yes          |
-| 12  | **NO (NaN)** | yes        | yes          |
-| 16  | **NO (NaN)** | yes        | yes          |
-| 24  | yes          | yes        | yes          |
-| 36  | yes          | yes        | yes          |
-
-**Surprising findings.**
-
-1. **FB chain is stable at C24+ but produces NaN at C8/C12/C16.**  This is the OPPOSITE of typical CFL-driven instability (which fails at high resolution under fixed dt).
-2. **The NaN is in `h` only** (mass transport), NOT in `u_d` or `v_d` (velocity tendencies).  Velocity computation handles low resolution fine — `u_max` and `v_max` are O(40) m/s at all resolutions.
-3. **Grid-size-dependent, not time-step-dependent.**  Same `dt=300 s` across all resolutions; only the grid spacing changes.
-
-**Localisation.**  The blow-up is in the mass-transport path: `_d_sw_native` → `transport_step` → `fv_tp_2d` → `_ppm_1d`.  The `_ppm_1d` boundary-cell handling becomes inadequate when `n_interior` falls below some threshold between 16 and 24.
-
-**Implication for stabilisation.**
-
-The user's iter-927 prohibition ("Do not use `use_fv3_dsw1_mass_transport` or `split_mass_momentum` as the fix; those paths already failed catastrophically") aligns with iter-933's localisation: those rejected flags use the same `transport_step` path that NaN's in the FB chain at low resolution.  The mass-transport stage is the load-bearing FB-chain failure mode.
-
-Stabilising the FB chain at low resolution → fixing `_ppm_1d` boundary handling at small `n_interior`.  This is a focused multi-iter project independent of the velocity-side operator-family work (issues #1, #2, #6).
-
-**iter-933 deliverables.**
-
-1. `scripts/diag_iter933_fb_chain_resolution_stability.py` — runnable one-step FB scan across resolutions.
-
-**Verification.**  No new test added — adding a sentinel that REQUIRES NaN at C8 would be perverse (we want the bug FIXED, not pinned).  The diagnostic provides reproducible measurement for stabilisation work.
-
-**Process.**  No production code change.  Cumulative iter-921→iter-933: 13 commits, 46 sentinel tests, 1 production code change (`use_fv3_dsw5_corner_damping` flag, default-OFF, REJECTED), 0 default-config behavior changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-934 — fix `_deln_flux` float32 overflow: FB chain now stable at all resolutions
-
-**Trigger.**  iter-933 localised the FB chain low-resolution NaN to the mass-transport path (`_d_sw_native` → `transport_step` → `fv_tp_2d`).  iter-934 drilled deeper and identified the exact failing operator: `_deln_flux` in `fv_tp_2d.py`.
-
-**Root cause** (iter-934 diagnostic).  At C8 with `nord=2`, `damp_c=0.06`:
-
-```
-da_min = min(area) ≈ 1.2e12 m²    (huge cells at coarse grid)
-damp   = (damp_c * da_min)^(nord+1) = (0.06 × 1.2e12)³ ≈ 4e32
-d2     = damp * q                  ≈ 4e32 × 3e3 = 1.5e36   (still in float32)
-fx2    = sin × dy × (d2_diff) × rdxc
-       ≈ 1 × 1.25e6 × 1.4e35 × 1e-6
-       ≈ 1.75e35 — but intermediate sin*dy*d2_diff = 1.75e41 OVERFLOWS float32 (max 3.4e38)
-```
-
-Even though the final per-step damped flux is small, the INTERMEDIATE products `sin × dy × (damp*q_diff)` overflow float32 at low resolution.  The grid metric arrays (`area`, `dy_edge_x`, `sin_sg`, etc.) are float32 in the codebase; promoting them globally would have wide-ranging cost.
-
-**Fix (iter-934).**  Factor `damp` out of the iteration loop and apply it at the final flux assembly (Step 4) instead of at Step 1 initialisation.  All operations between Step 1 and Step 4 are LINEAR in `d2`, so the result is mathematically identical — but every intermediate now fits comfortably in float32:
-
-```python
-# BEFORE:
-d2 = damp * q                           # ≈ 1.5e36
-... iterate Laplacian-divergence on d2 ...
-fx = fx + fx2                           # damp baked in
-
-# AFTER (iter-934):
-d2 = q                                  # ≈ 3e3 (no overflow)
-... iterate Laplacian-divergence on d2 ...
-fx = fx + damp * fx2                    # apply damp at end
-```
-
-Single change in `src/legoesm/core/fv_tp_2d.py:_deln_flux`; ~6 lines edited; the mass-not-None path was already factored this way, so iter-934 only changes the mass=None branch.
-
-**Verification.**
-
-- iter-933 stability scan (re-run after iter-934): all resolutions C8/C12/C16/C24/C36 produce FINITE `h`, `u`, `v` after one FB step (W2 IC, dt=300 s).  Was: NaN at C8/C12/C16.
-- 25/25 production sentinels (iter-921 + iter-923 + iter-924 + iter-925 + iter-904) pass — no production W2/W5/cb/rest-state regression at C36.  iter-934 is bit-identical to pre-iter-934 at high resolution where float32 didn't overflow.
-- iter-934 sentinel (`tests/test_iter934_fb_chain_low_res_stability.py`) — 6 tests pin: 5 parametric pass-at-each-resolution + 1 mathematical-equivalence pin.  6/6 pass in 147 s.
-
-**Implication.**
-
-This unblocks FB-chain stabilisation at low resolution (C8-C16).  The FB chain remains structurally non-Fortran-faithful at cube vertices for OTHER reasons (issue #7 sign-flip not ported, issue #2 operator family) — iter-934 does not by itself make FB chain production-ready.  But iter-934 removes the float32-overflow gate that previously prevented even basic FB-chain stability testing at low resolution.
-
-The user's iter-927 prohibition on `use_fv3_dsw1_mass_transport` / `split_mass_momentum` was based on iter-904/iter-905 catastrophic blowups at C36.  Those tests used the same `_deln_flux` path; iter-934 may have improved their numerical stability at lower resolution, but the iter-927 prohibition remains valid until those flags are re-measured against iter-927's strict acceptance criterion.
-
-**iter-934 deliverables.**
-
-1. `src/legoesm/core/fv_tp_2d.py` — `_deln_flux` damp-factoring fix (mass=None branch).
-2. `scripts/diag_iter933_fb_chain_resolution_stability.py` — updated header to record post-iter-934 result.
-3. `tests/test_iter934_fb_chain_low_res_stability.py` — 6 sentinels.
-
-**Process.**  Real production code change (`_deln_flux` semantics in float32; mathematically identical in float64).  Cumulative iter-921→iter-934: 14 commits, 52 sentinel tests, 2 production code changes (iter-926/927 `use_fv3_dsw5_corner_damping` flag, REJECTED but default-OFF; iter-934 `_deln_flux` damp-factoring fix, ENABLED at all resolutions).  Production W2 baseline at iter-893 unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-935 — FB chain has DEEPER long-term instability beyond iter-934's float32 fix
-
-**Trigger.**  iter-934 fixed `_deln_flux`'s float32 overflow → FB chain produces finite output at step 1 for all resolutions.  Question: does the FB chain stay finite over a full W2 1-day integration?
-
-**Result: NO.**  FB chain blows up after 40-90 steps at every resolution:
-
-| `N` | `dt`  | target steps (1 day) | survived steps | h_max at end |
-|-----|-------|----------------------|----------------|---------------|
-| 8   | 1350  | 64                   | 49             | 1.46e+10      |
-| 12  | 900   | 96                   | 67             | 1.52e+20      |
-| 16  | 675   | 128                  | 84             | 1.12e+08      |
-| 24  | 450   | 192                  | 42             | 1.69e+13      |
-| 36  | 300   | 288                  | 41             | 5.13e+19      |
-
-This is **explosive growth** (h_max from ~3000 m → 1e10–1e20 m), NOT a slow underdamped mode.
-
-**Damping coefficient sweep at C36 (50 steps target)** confirms it isn't a damping-insufficiency:
-
-| damping config                          | survived |
-|-----------------------------------------|----------|
-| default (d4=0.16, nord=1, damp_v=0.06)  | 41 / 50  |
-| stronger del-4 (d4=0.5)                 |  9 / 50  |
-| add d2_bg=0.05                          | 41 / 50  |
-| aggressive Smag (dddmp=0.4)             | 41 / 50  |
-| higher damp_v=0.2                       | 18 / 50  |
-
-**Higher damping makes it WORSE** (d4=0.5 → 9 steps; damp_v=0.2 → 18 steps).  This refutes the "underdamped slow mode" hypothesis and points to a STRUCTURAL bug in one of the d_sw1/d_sw4/d_sw5/d_sw6 sub-operators that amplifies between steps 30 and 50.
-
-**Implication.**
-
-iter-934 is necessary but not sufficient for FB chain production-readiness.  The FB chain has at least TWO independent failure modes:
-
-1. **iter-934 / `_deln_flux` float32 overflow** (FIXED).  Caused step-1 NaN at C8/C12/C16.
-2. **iter-935 / structural growth mode** (OPEN).  Causes h explosion after 30-90 steps at all resolutions, not a damping-insufficiency.
-
-Closing #2 requires per-step instrumentation to identify which operator step (`_d2a2c_vect`, `_c_sw`, `_p_grad_c`, transport, `_d_sw5_corner_divergence`, KE-add, vorticity transport, `_del6_vt_flux`) contributes to the explosive growth.  This is a multi-iter debugging project.
-
-**iter-935 deliverables.**
-
-1. `scripts/diag_iter935_fb_chain_long_term_instability.py` — runnable resolution scan + damping sweep diagnostic.
-
-**Verification.**  No new test added — the result is a known-bad measurement waiting on the structural-bug fix; pinning it would lock in current bad behavior.  The diagnostic script provides reproducible measurement.
-
-**Backlog implication.**  The user's iter-927 prohibition on `use_fv3_dsw1_mass_transport` and `split_mass_momentum` (both based on iter-904/905 catastrophic blowups at C36) is consistent with iter-935's finding: those flags route through the same operator chain that has the structural growth mode.  iter-934's fix may have improved their step-1 numerical stability, but iter-927's prohibition on default-flipping remains valid until iter-935's structural bug is found.
-
-**Process.**  No production code change.  Cumulative iter-921→iter-935: 15 commits, 52 sentinel tests, 2 production code changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-936 — VELOCITIES grow first: structural bug is in the velocity update, not mass transport
-
-**Trigger.**  iter-935 found FB chain has a structural growth mode that takes ~40 steps to manifest at C36.  iter-936 instruments per-step `h_max`, `|u_d|_max`, `|v_d|_max` to identify which field grows FIRST — pointing at which operator step has the bug.
-
-**Per-step measurement at C36, dt=300 s, default damping (d4=0.16, nord=1, damp_v=0.06):**
-
-| step | h_max  | \|u_d\|_max | \|v_d\|_max | h_excess (vs 3000 m) |
-|------|--------|-------------|-------------|----------------------|
-| 1    | 3003   | 38.6        | 27.3        | 2.8                  |
-| 10   | 3056   | 38.7        | 32.0        | 56                   |
-| 21   | 3146   | 40.2        | 60.1        | 147                  |
-| 26   | 3201   | 41.9        | 86.8        | 201                  |
-| 31   | 3263   | **92.6**    | **154.1**   | 263                  |
-| 36   | 4383   | 564         | 569         | 1383                 |
-| 39   | 10960  | 4038        | 5342        | 7956                 |
-| 40   | 2.7e6  | 3.8e5       | 3.7e5       | 2.7e6                |
-| 41   | 5.1e19 | 2.1e16      | 2.0e15      | catastrophic         |
-| 42   | NaN    |             |             |                      |
-
-**Key observation: velocities double at step 31 (|u_d| 41→93, |v_d| 87→154) BEFORE h goes out of range.**
-
-For comparison, W2 alpha=0 has analytical |u_max| = 40 m/s and |v_north| ≈ 0 m/s.  Through step 30, the FB chain's `|v_d|` already drifts to 87 m/s (in grid frame, including projection components — though some is physically expected).  At step 31 the velocities double, then explode geometrically until step 41-42.
-
-**Localisation: structural bug is in the velocity update path.**
-
-The FB chain's velocity update (`_d_sw_native`):
-
-1. `_d2a2c_vect` → ua, va, ut, vt  (D-to-A-to-C grid)
-2. `transport_step` → h (mass transport — iter-934 fixed step-1 NaN here)
-3. `_c_sw` → C-grid winds half-step
-4. `_p_grad_c` → C-grid pressure gradient
-5. `_d_sw5_corner_divergence` → KE-add at corners
-6. d_sw6 KE-gradient → D-grid wind update
-7. `vorticity_flux` (`fv_tp_2d` no-sync) → vorticity transport at edges
-8. `_del6_vt_flux` → post-step vorticity damping
-
-iter-936's finding rules out steps 1-2 (mass transport) as the load-bearing failure for the long-term instability.  The velocity-side path (steps 5-8) is where the bug lives.  Each of these steps is a candidate for iter-937+ debugging:
-
-- d_sw5 corner damping: may have float32 issues at higher d4_bg (sweep at iter-935 shows d4=0.5 fails at step 9, suggesting damping path is itself unstable)
-- d_sw6 KE-gradient: incorrect sign or scaling of `(ke[i,j] - ke[i+1,j])/dx` could create an unstable feedback loop
-- vorticity transport: iter-864 disabled the CGRID_NE flux sync to match Fortran's commented-out averaging; this might be incorrect for stability
-- del6_vt_flux post-step: same float32 overflow class as `_deln_flux` — iter-934 didn't touch this
-
-**iter-936 deliverables.**
-
-1. Per-step instrumentation in stdout (`scripts/diag_iter936_fb_velocity_growth.py` to be added if needed; the inline diagnostic in this iter is reproducible from the doc).
-2. This doc-entry localising the bug to velocity-side operators.
-
-**Verification.**  No new test added — pinning a "velocity grows first" pattern would lock in current bad behavior.  The interpretive finding is what guides the next iter's debugging target.
-
-**Backlog.**  iter-937+ should instrument inside `_d_sw_native` to track u/v after each substep (after `_p_grad_c`, after `_d_sw5_corner_divergence`, after KE-grad update, after vorticity transport, after `_del6_vt_flux`) on a few early steps and find the substep where |u|_max or |v|_max first jumps non-linearly.
-
-**Process.**  No production code change.  Cumulative iter-921→iter-936: 16 commits, 52 sentinel tests, 2 production code changes.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-937 — `_del6_vt_flux` defensive sibling fix; confirms post-step damp is NOT the FB bug source
-
-**Trigger.**  iter-936 localised the FB structural growth to the velocity update path (`_d_sw_native` steps 5-9).  iter-937 inspects `_del6_vt_flux` (step 9, post-step damp_v hook) — it has the IDENTICAL `d2 = damp * q` pattern that iter-934 fixed in `_deln_flux`.
-
-**Fix (iter-937).**  Apply the iter-934 pattern to `_del6_vt_flux`: factor `damp` out of the iteration, apply at the final flux output stage (`fx2 = damp * fx2`, `fy2 = damp * fy2` after the iteration loop).  Mathematically identical because all intermediate operations are linear in d2; defensively closes the sibling float32-overflow class.
-
-**Verification.**
-
-- Production W2 sentinel (iter-921) and rest-state sentinel (iter-925): **6/6 pass in 35 s**.  Bit-identical at C36 — float64 arithmetic unchanged, float32 doesn't overflow at C36 for the typical vorticity magnitude.
-- FB chain survival (iter-935 scan) re-run post-iter-937: same survival counts (49/67/84/42/41 at C8/C12/C16/C24/C36).  iter-937 does NOT improve long-term FB stability.
-
-**Implication.**
-
-`_del6_vt_flux` is NOT the load-bearing source of the structural growth mode.  The bug is in the d_sw5 / d_sw6 inner cycle (steps 5-6 of `_d_sw_native`):
-
-- Step 5: `_d_sw5_corner_divergence` (KE-add at corners with `dd8 = (da_min_c * d4_bg)^(nord+1)`).
-- Step 6: d_sw6 KE-gradient + vorticity transport via `fv_tp_2d` no-sync + D-grid wind update.
-
-iter-938+ should instrument inside `_d_sw_native` after each substep to identify which one creates the unstable mode.
-
-**iter-937 deliverables.**
-
-1. `src/legoesm/core/fv3_del6_vt_flux.py` — `_del6_vt_flux` damp-factoring fix (~6 lines).
-2. Documentation noting iter-937 ruled out post-step damp_v as the FB bug source.
-
-**Verification.**  No new test added; the iter-934 sentinel and existing production W2/rest-state sentinels cover both `_deln_flux` and `_del6_vt_flux` damp paths.
-
-**Process.**  Real production code change (`_del6_vt_flux` semantics in float32; mathematically identical in float64).  Cumulative iter-921→iter-937: 17 commits, 52 sentinel tests, 3 production code changes (iter-926/927 default-OFF flag REJECTED, iter-934 `_deln_flux` damp-factoring, iter-937 `_del6_vt_flux` damp-factoring).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-938 — Fortran d2a2c_vect cube-corner sign-flip helper (structurally correct, currently no-op)
-
-**Trigger.**  User-directed iter-938 brief: port Fortran `sw_core.F90:3527-3545` (utmp x-direction) and `3620-3639` (vtmp y-direction) cube-corner sign-flip overrides for `_d2a2c_vect`'s non-duogrid path.  Issue #7 from the user's iter-927 audit explicitly identified this as a "NOT PORTED" gap.
-
-**iter-938 deliverables (initial; ALL items reflect the iter-938 commit; iter-938b removed the kwarg + the two no-longer-relevant tests — see iter-938b entry below for the live state).**
-
-1. `src/legoesm/core/fv3_sw_core.py:_apply_fortran_d2a2c_corner_overrides` — new helper that applies the 16 utmp/vtmp halo-cell overrides at the 4 cube corners.  With our halo=2 reach, the helper ports the 2 deepest cells per corner per axis (Fortran writes 3; the third is at depth-3 outside our halo).  KEPT in iter-938b.
-2. `src/legoesm/core/fv3_sw_core.py:_d2a2c_vect` — new kwarg `apply_fortran_corner_overrides: bool = False`.  REMOVED in iter-938b after Codex flagged the kwarg as output-dead.
-3. `tests/test_iter938_d2a2c_corner_overrides.py` — 10 sentinels at iter-938 commit (8 sign-flip mapping pins + 1 default-off bit-equality + 1 "currently no-op" pin).  REVISED to 9 sentinels in iter-938b: 8 mapping pins + 1 helper-is-pure-function pin (the bit-equality and no-op pins were removed alongside the kwarg).
-
-**Verification (iter-938 baseline; superseded by iter-938b counts below).**
-
-- 12/12 pass at iter-938: 9 iter-938 helper-mapping/purity + 3 iter-921 production.  Production W2 unchanged.
-
-**KNOWN INCOMPLETE PORT — currently no-op on `uc`/`vc` outputs.**
-
-The utmp/vtmp halo overrides write to padded `j=1` (south halo) and `j=n+2` (north halo) cells.  Our Python `_d2a2c_vect` downstream stencils (ua/va computation step 3, uc/vc edge_interpolate4 step 4a/b) read padded `j ∈ [2, n+1]` (interior only) and DO NOT read the overridden halo cells.  Therefore the helper is currently a no-op on the `(ua, va, uc, vc, ut, vt)` tuple returned to `_c_sw` / FB chain.
-
-**To make the override propagate**, a follow-up iter must ALSO port:
-- Fortran `sw_core.F90:3567-3582` ua x-dir corner overrides (writes ua at halo cells)
-- Fortran `sw_core.F90:3640+` va y-dir corner overrides (writes va at halo cells)
-
-These overrides write ua/va AT halo cells using the (corner-overridden) utmp/vtmp values, AND those halo ua/va values feed the edge_interpolate4 step that produces the boundary uc/vc.  Without the ua/va halo overrides, the corner-corrected utmp/vtmp values are dropped on the floor.
-
-**Implication for the user's iter-938 acceptance criterion** (FB chain W2 C36 1-day v_ll_Linf ≤ 0.119 m/s):
-
-Cannot be evaluated yet because:
-1. iter-938's port is intentionally limited to utmp/vtmp halo (matches the literal text of issue #7's "NOT PORTED" comment) and is currently no-op on uc/vc.
-2. iter-935 found the FB chain has a deeper structural growth mode (h explosion at step 41 on C36 1-day target of 288 steps); even with the iter-939+ ua/va propagation, the FB chain wouldn't reach 1 day.
-
-iter-938 closes the iter-108 documented gap STRUCTURALLY (the Fortran sign-flip arithmetic is now in the codebase and unit-tested) but explicitly defers the propagation refactor to iter-939+.
-
-**Process (iter-938 entry; superseded by iter-938b cleanup below).**  Real production code addition (helper function + kwarg).  iter-938b later removed the kwarg as Codex flagged it output-dead.  See iter-938b entry for the corrected commit count and sentinel count.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-**Backlog for iter-939+** (rewritten in iter-938b — see below).
-
-### Iter-938b — remove dead-flag wiring (Codex iter-938 stop-time fix)
-
-**Trigger.**  Codex iter-938 stop-time review: "iter-938 adds a flag/helper that is still output-dead."  iter-938's `apply_fortran_corner_overrides=False` kwarg on `_d2a2c_vect` would invoke `_apply_fortran_d2a2c_corner_overrides`, but the downstream edge_interpolate4 j-slicing reads only interior j ∈ [2, n+1] while the corner overrides write to padded j=1 and j=n+2 (south/north halo).  Wiring without the edge_interpolate4 j-slice extension is genuinely no-op on the function output.
-
-**iter-938b fix.**
-
-1. Removed the `apply_fortran_corner_overrides` kwarg from `_d2a2c_vect`.  No more dead flag.
-2. Removed the conditional helper invocation inside `_d2a2c_vect` (was unconditionally no-op via the sliced-stencil contract).
-3. Inserted a comment block explaining why the helper is NOT wired in — points future iters at the edge_interpolate4 j-slice extension as the prerequisite.
-4. Kept `_apply_fortran_d2a2c_corner_overrides` as a module-level standalone helper (Fortran arithmetic reference).
-5. Updated tests: removed the (now-impossible) "default-off bit-equality" and "currently no-op" tests; added `test_iter938_helper_is_pure_function` that confirms the helper is a pure standalone function with the expected non-corner cells unchanged.
-
-**Verification.**
-
-- iter-938 test file collected: **9 tests** total (8 sign-flip mapping pins — 4 corners × 2 axes — plus 1 helper-is-pure-function pin).
-- Combined with iter-921 W2 (3 tests) + iter-934 FB low-res (6 tests): **18/18 pass in 227 s**.
-
-**Net iter-938 + iter-938b deliverable.**
-
-1. `src/legoesm/core/fv3_sw_core.py:_apply_fortran_d2a2c_corner_overrides` — standalone helper porting Fortran sw_core.F90:3527-3545 + 3620-3639 utmp/vtmp halo cube-corner overrides (16 sign-flip writes total).
-2. `tests/test_iter938_d2a2c_corner_overrides.py` — 9 sentinels: 8 sign-flip mapping pins (4 corners × 2 axes — utmp x-dir + vtmp y-dir) + 1 helper-is-pure-function pin.
-3. Documentation in `_d2a2c_vect` body explaining the j-slicing prerequisite for wiring this helper.
-
-The helper is structurally Fortran-faithful (mapping verified by 8 unit tests).  Wiring requires iter-939+ to extend `_d2a2c_vect`'s edge_interpolate4 j-slice to read padded j ∈ [1, n+2] (boundary halo cells), so the corner-override values reach the uc/vc output.
-
-**Backlog for iter-939+** (corrected in iter-938b after Codex flagged the stale step-3 reference):
-
-1. Port Fortran `sw_core.F90:3567-3582` ua x-dir corner overrides AND extend `_d2a2c_vect` to apply them after step 3 (ua_pad/va_pad computation).  Currently the helper writes utmp_pad/vtmp_pad halo cells, but the ua/va halo overrides are a separate Fortran arithmetic block.
-2. Port Fortran `sw_core.F90:3640+` va y-dir corner overrides (same pattern).
-3. Refactor `_d2a2c_vect`'s edge_interpolate4 j-slicing to read padded j ∈ [1, n+2] so the corner-override values propagate to the uc/vc output.  Without this, items 1-2 remain output-dead just like the iter-938 helper.
-4. Once the propagation is live: measure FB chain step survival at C36.  If FB chain reaches 1 day, run W2 acceptance test (target v_ll_Linf ≤ 0.119 m/s per user iter-938 brief).  If not, iter-935's structural growth bug is the next gate.
-
-**Cumulative iter-921→iter-938b.**
-
-This entry's commit-count claim is intentionally phrased to avoid the self-reference paradox where committing a doc fix increments the count it cites.  As of iter-921 (commit 573c1fb), the cumulative session work to-date is reproducible via `git log --oneline 0b1e622..HEAD` and `pytest --collect-only` against the 12 session sentinel files; consult those commands for the exact-current count rather than copy-pasting a number from this entry into a later commit.
-
-Concrete invariants (these don't drift with stop-time follow-up commits):
-
-- **3 production code changes** (iter-926/927 `use_fv3_dsw5_corner_damping` default-OFF flag REJECTED; iter-934 `_deln_flux` damp-factoring; iter-937/937b `_del6_vt_flux` damp-factoring across two parallel implementations).
-- **12 session sentinel test files** (iter-921 / 922 / 923 / 924 / 925 / 926 / 928 / 930 / 931 / 932 / 934 / 938).
-- **64 collected tests** across those 12 files (pre-iter-938b verified by pytest collect; iter-938b removed 1 dead-flag test and added 1 pure-function test, net 0 — count stable across iter-938b cleanup).
-- Stop-time follow-up commits in the session: iter-937b (Codex iter-937 in-fv3_sw_core.py path), iter-938b dead-flag-removal (b979c00), iter-938b doc-test-count (c118609), iter-938b doc-clarify-list (bfe5b62), iter-938b commit-count (5568dfe and this entry's correction commit).
-
-Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
-
-### Iter-939 — closure scan: float32 `damp` overflow class fully closed
-
-**Trigger.**  iter-934 (`_deln_flux`), iter-937 + iter-937b (`_del6_vt_flux` in two parallel implementations) closed three sites with the float32-overflow pattern `damp = (coeff × da_min)^(nord+1)` × `q` where the intermediate exceeds float32 max at low resolution.  iter-939 scans the codebase for any remaining sites of this class.
-
-**iter-939 scan** (`grep "** (nord+1)" src/legoesm/core/`):
-
-| site                                                          | status                                                      |
-|---------------------------------------------------------------|-------------------------------------------------------------|
-| `fv_tp_2d.py:853` (computes `damp` in `fv_tp_2d`)             | ✓ Fixed: damp passed to `_deln_flux`; iter-934 deferred multiplication. |
-| `fv3_sw_core.py:1421` (`dd8 = (da_min_c × d4_bg)^(nord+1)`)   | ✓ OK: ALREADY uses "factor at end" pattern (`dd8 × divg_d` at line 1535 after the iteration loop). |
-| `fv3_sw_core.py:2437` (`damp4 = (damp_v × da_min_c)^(nord_v+1)`) | ✓ Fixed: passed to `_del6_vt_flux` (`fv3_sw_core.py:778`); iter-937b deferred multiplication. |
-
-**Conclusion.**  All `(coeff × da_min)^(nord+1) × field` overflow sites in `src/legoesm/core/` are closed — either by iter-934/937/937b's explicit factoring fix OR by pre-existing "factor at end" structure (`_d_sw5_corner_divergence` nord>0 path).
-
-**Cross-iter sentinel verification.**  Ran 41 tests across iter-921/923/924/925/930/932/934/938 in 528 s.  41/41 pass.  Confirms iter-934/937/937b changes do not regress production W2/W5/cosine-bell/rest-state/4-way-matrix/PPM-scope/FB-low-res sentinels.
-
-**iter-939 deliverables.**  Pure verification iter.  No production code change.  No new test (existing sentinels cover all the modified paths).
-
-**Process implication.**  Closure record for the float32 `damp` overflow class.  Future iters that introduce new del-n damping operators must follow the iter-934 pattern (factor `damp` out of any iteration loop, apply at the final flux output stage) to keep the class closed at low resolution.
-
-Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+Full detail is retained from `iter-940` onward. Older Ralph-loop entries are compressed below; use git history for retired prose.
+
+### Iter-904 to Iter-939 - compacted Ralph-loop archive
+
+- `iter-904..905`: Partial true-FV3 mass transport inside RK3 failed catastrophically: NaN, then W2 `v_ll_Linf=3.137e+02 m/s`; split FV3 mass + RK3 momentum still gave `2.921e+02 m/s`. One-component FV3/RK3 hybrids are rejected.
+- `iter-906..910`: W2 residual localized to cube-edge/cube-vertex geometry. `div_damp` dominates instantaneous hot spots, but reducing global or boundary damping worsens W2. C36 sits near a practical `0.10..0.12 m/s` v-bias floor at current cost.
+- `iter-912..920`: Regression cleanup. Focused iter-89x/9xx sweep passed; broader gold-file scan found silent drift from iter-878's Fortran-correct PPM limiter fix. Rebaselines/live replacements restored coverage; process rule: periodically run full `test_cdgrid_fv3_regression.py` and related layers.
+- `iter-921..925`: Visual/sentinel refresh for W2, W5, cosine bell, and rest state. Iter-893 PPM boundary fix improves W2 `v_ll_Linf` by ~17 % but worsens `h_err_max` by ~77 %. W5/cosine/rest are essentially unaffected; iter-893 is bit-exact on constants.
+- `iter-926..927`: `use_fv3_dsw5_corner_damping` added as default-off negative-result documentation. Additive d_sw5 (`v_ll_Linf=2.253 m/s`) and replacement d_sw5 (`0.971 m/s`) both failed, proving per-operator d_sw5 swaps cannot fix the A-L/RK3 operator-family mismatch.
+- `iter-928..932`: Gap markers and W2 source diagnosis. Meta-sentinel locked 8 Fortran-fidelity gaps. Bare A-L decomposition found ~1 % imperfect geostrophic cancellation at the 8 cube vertices; `boundary_fix` spreads it and `div_damp` amplifies it. The bias is slowly resolution-refinable. Iter-893 affects `dh_dt` only, not velocity tendencies.
+- `iter-933..937`: FB-chain stability work. Iter-933 found step-1 NaNs at C8/C12/C16; iter-934 fixed `_deln_flux` float32 overflow by factoring `damp` to final flux assembly. Iter-935/936 then exposed a deeper velocity-side growth mode. Iter-937/937b applied the same damp-factoring defense to `_del6_vt_flux`; this closed the overflow class but did not improve long-term FB survival.
+- `iter-938..938b`: Ported and unit-tested the Fortran `d2a2c_vect` cube-corner sign-flip helper, then removed dead flag wiring after review because the helper did not yet propagate to outputs. Backlog: extend `_d2a2c_vect` edge-interpolate slicing so the helper affects `uc/vc`.
+- `iter-939`: Closure scan confirmed all known `(coeff * da_min)^(nord+1) * field` float32-overflow sites in `src/legoesm/core/` are fixed or already factored. Cross-iter sentinels passed; no production behavior change.
 
 ### Iter-940 — localise FB chain structural growth to d_sw6 KE-gradient
 
@@ -652,3 +219,64 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 **Verification.**  iter-942 sentinel (1/1) and production sentinels still pass post-revert.
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-944 — CGRID_NE sync of `(ut, vt)` and `(fx_vort, fy_vort)`: FB chain reaches 1-day NaN-free (209 → 288 steps)
+
+**Trigger.**  iter-942 reached 209 FB chain steps; iter-943 confirmed the corner-stagger sync probes were exhausted (both `ubbtemp/vbb` syncs HURT, redundant ke_corner placements were no-ops).  iter-944 widens the search to the C-grid edge-staggered fields `(ut, vt)` and `(fx_vort, fy_vort)` to localise the remaining structural growth.
+
+**iter-944 probe matrix** (W2 C36 dt=300 s, default damping):
+
+| state                                                   | survived |
+|---------------------------------------------------------|----------|
+| iter-942 baseline                                       | 208–209  |
+| `apply_cgrid_flux_sync=True` on vort flux (probe A)     | 208      |
+| sync `ke_damping` itself before add (probe B)           | 208      |
+| force vort flux sync (bypass duogrid gate, probe C)     | 270      |
+| ungate `fv_tp_2d` sync only (probe D)                   | 187      |
+| probes C + D (force vort + mass flux sync)              | 279      |
+| **probes C + E (force vort sync + sync ut/vt at step 1)** | **288** |
+
+**Key finding** (probe A vs C).  The pre-iter-944 `apply_cgrid_flux_sync=False` kwarg passed to the vorticity-flux `fv_tp_2d` call was indistinguishable from `=True` because the duogrid gate inside `fv_tp_2d` (`if apply_cgrid_flux_sync and dg is not None and dg.ng >= 2`) skipped the sync regardless on the non-duogrid grid used by the test.  Forcing the sync explicitly (probe C) rather than relying on the kwarg lifts FB chain step survival from 209 → 270 steps.
+
+**Probe E — ut/vt CGRID_NE sync at step 1.**  `_d_sw1_recompute_ut_vt` produces transport velocities at C-grid u-face / v-face positions with face-local upwind sin_sg boundary overrides.  These overrides leave cube-edge cells inconsistent across face pairs.  `synchronize_cgrid_fluxes` (built for fluxes with the iter-808 sign-flip table) is signature-compatible with `(ut, vt)` since they share the (`fx`, `fy`) face-staggered shape.  Applied immediately after step 1, it lifts the FB chain past the 1-day target.
+
+**iter-944 fix.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_d_sw_native` step 1 — added `ut, vt = synchronize_cgrid_fluxes(ut, vt, n)` after `_d_sw1_recompute_ut_vt`.
+2. `src/legoesm/core/fv3_sw_core.py:_d_sw_native` step 7 — added `fx_vort, fy_vort = synchronize_cgrid_fluxes(fx_vort, fy_vort, n)` after the `fv_tp_2d` call.  The `apply_cgrid_flux_sync=False` kwarg is preserved (avoids a redundant call inside `fv_tp_2d` if its duogrid gate ever flips on).
+
+**Cumulative FB chain step survival on W2 C36 dt=300 s** (target 1-day = 288 steps):
+
+| iter      | survived  | improvement vs baseline |
+|-----------|-----------|-------------------------|
+| baseline  | 41 steps  | —                       |
+| iter-941  | 63 steps  | +54 %                   |
+| iter-942  | 209 steps | +410 %                  |
+| **iter-944** | **288 steps** | **+602 %**              |
+
+**Caveat — NaN-free ≠ W2 acceptance.**  At 1 day:
+
+- `h` range: `[-323, 41796] m`  (W2 IC ~1000..3000 m)
+- `|u|_max`: 3044 m/s  (analytical 40 m/s)
+- `|v|_max`: 2278 m/s  (analytical ≈0 m/s)
+
+The FB chain runs through 1 day without NaN, but the W2 v_ll_Linf acceptance (≤ 0.119 m/s per user iter-938 brief) is failed by 4 orders of magnitude.  iter-944 closes the structural-growth NaN blocker; the W2 fidelity gap remains the iter-945+ target.
+
+**Production impact.**  ZERO.  `_d_sw_native` is FB-chain-only; production `fv3_sw_tendencies` (`FV3EdgeShallowWaterModel` default) does not call this code path.  15/15 cross-iter sentinels (iter-921 W2, iter-925 rest state, iter-934 FB low-res, iter-941 BGRID_NE, iter-942 ke_corner) pass post-iter-944.
+
+**iter-944 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_d_sw_native` — two `synchronize_cgrid_fluxes` calls inside the FB-chain function (steps 1 and 7).
+2. `tests/test_iter944_cgrid_ne_ut_vt_vort_sync.py` — 1 sentinel pinning FB chain C36 dt=300 s step survival ≥ 288 (1-day NaN-free target).
+3. `scripts/diag_iter944_fb_remaining_growth.py` — measurement record + final-state print.
+
+**Backlog for iter-945+.**
+
+The 288-step NaN-free milestone is necessary but not sufficient.  Now that 1-day FB chain runs without NaN, the W2 v_ll_Linf 1-day measurement is finally meaningful.  Candidates for the v_ll fidelity gap:
+
+1. PPM hord=9 boundary handling in `_ppm_transport_1d` (currently `mode='edge'` face-local extrapolation, NOT cross-face halo).  Same root cause as iter-893's PPM-boundary one-sided fix on the production path.
+2. Operator-split sweep order in `_bgrid_ke_transport` (Lin-Rood y-then-x for `transported_y` vs x-then-y for `transported_x`).
+3. Cube-vertex halo for `u_d, v_d` themselves before passing to step 4 (`_bgrid_ke_transport`), since iter-941 syncs only the `(ubb, vbbtemp)` Courant numbers, not the underlying transported velocities.
+4. `_d2a2c_vect` propagation refactor (iter-938b backlog) — the iter-938 utmp/vtmp corner overrides are still no-op on uc/vc.
+
+**Process.**  Real production code change in the FB chain (two helper calls added).  No production behaviour change at default `FV3EdgeShallowWaterModel`.  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.

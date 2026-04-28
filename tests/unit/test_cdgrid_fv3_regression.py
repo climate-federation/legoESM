@@ -11620,21 +11620,27 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
                     "(iter-807/808 sign-aware DUOGRID flux sync).  "
                     "A future drift indicates a NEW mass-path "
                     "regression.")
-        with self.subTest("u/v wind sum fingerprints (iter-864 vortflux)"):
+        # iter-944 update: re-baselined u/v sum and KE fingerprints
+        # after iter-944 added an explicit `synchronize_cgrid_fluxes`
+        # for `(fx_vort, fy_vort)` after step 7 and for `(ut, vt)`
+        # after step 1.  Both sums and KE shift by ~5e-2 / ~4e-1
+        # respectively.  Interior point fingerprints are unchanged
+        # (sync only touches cube-edge cells).
+        with self.subTest("u/v wind sum fingerprints (iter-944 vortflux)"):
             self.assertAlmostEqual(float(u_new.sum()),
-                -14.9344555689, places=6,
-                msg="u_new.sum() fingerprint changed (iter-864 "
-                    "vortflux sync removal).")
+                -14.983889882636358, places=6,
+                msg="u_new.sum() fingerprint changed (iter-944 "
+                    "vortflux + ut/vt CGRID_NE sync).")
             self.assertAlmostEqual(float(v_new.sum()),
-                18.2027138769, places=6,
-                msg="v_new.sum() fingerprint changed (iter-864 "
-                    "vortflux sync removal).")
-        with self.subTest("kinetic energy fingerprint (iter-864 vortflux)"):
+                18.214567744465896, places=6,
+                msg="v_new.sum() fingerprint changed (iter-944 "
+                    "vortflux + ut/vt CGRID_NE sync).")
+        with self.subTest("kinetic energy fingerprint (iter-944 vortflux)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
-                784.2994823745, places=4,
-                msg="u/v kinetic energy fingerprint changed (iter-864 "
-                    "vortflux sync removal).")
+                784.7249674282261, places=4,
+                msg="u/v kinetic energy fingerprint changed (iter-944 "
+                    "vortflux + ut/vt CGRID_NE sync).")
 
     def test_d_sw_native_gold_file_damp_v_iter727(self):
         """Iter-727 lock: ``_d_sw_native`` with ``damp_v=0.06,
@@ -11726,12 +11732,17 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
                     "rebaselined this from the pre-iter-808 "
                     "383992.2998 to the post-iter-808 383993.7414 "
                     "(iter-807/808 sign-aware DUOGRID flux sync).")
-        with self.subTest("kinetic energy fingerprint (iter-864 vortflux)"):
+        # iter-944 update: KE re-baselined after iter-944 added
+        # explicit `synchronize_cgrid_fluxes` for `(fx_vort, fy_vort)`
+        # at step 7 and `(ut, vt)` at step 1.  Interior point
+        # fingerprints at [0,4,4] and [3,2,6] unchanged (sync only
+        # touches cube-edge cells).
+        with self.subTest("kinetic energy fingerprint (iter-944 vortflux)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
-                736.5256627231, places=4,
+                736.9561874486412, places=4,
                 msg="iter-727: u/v kinetic energy fingerprint changed "
-                    "(iter-864 vortflux sync removal).")
+                    "(iter-944 vortflux + ut/vt CGRID_NE sync).")
 
         # Delta check: assert this result DIFFERS from the damp_v=0
         # baseline at `test_d_sw_native_gold_file_nord1` above.  A

@@ -1,30 +1,30 @@
-"""Iter-942 sentinel: pin the FB chain step-survival improvement
-from adding `ke_corner` scalar sync after the d_sw5 KE-add.
+"""Iter-942 sentinel (REWRITTEN at iter-944b): pin the Fortran-faithful
+absence of a `synchronize_corner_scalar(ke_corner)` call inside
+`_d_sw_native`.
 
-Cumulative FB chain step survival on W2 C36 dt=300 s, default
-damping (target 1-day = 288 steps):
+iter-942 (original): added an UNCONDITIONAL ke_corner scalar sync
+between d_sw5 (KE-add) and d_sw6 (KE-gradient), claiming it lifted FB
+chain step survival from 63 → 209 steps on non-duogrid C36 W2.
 
-| iter      | survived | improvement |
-|-----------|----------|-------------|
-| baseline  | 41       | —           |
-| iter-941  | 63       | +54 %       |
-| iter-942  | 209      | +410 %      |
+iter-944b (Fortran-fidelity audit): the reference source
+`atmos_cubed_sphere-symmetryclean/model/dyn_core.F90:1029-1055` AND
+`:1180-1207` show TWO COMMENTED-OUT corner ke sync blocks that map to
+iter-942's smoother:
 
-iter-942 added a scalar `synchronize_corner_scalar(ke_corner, n)`
-call AFTER the d_sw5 corner-divergence KE-add and BEFORE the d_sw6
-KE-gradient (`fv3_sw_core.py:_d_sw_native` step 5 → step 6).  This
-makes the four faces meeting at each cube vertex agree on the
-final `ke_corner` value (combined initial KE + d_sw5 ke_damping)
-that feeds the gradient stencil.
+    !if(duogrid) then
+    !  ...
+    !  call mpp_get_boundary(kee(:,:,:), domain, ...,
+    !                        position=CORNER, complete=.true.)
+    !  ...
+    !endif
 
-Without the sync, each face computes its own ke_corner at the
-cube vertex.  The d_sw6 KE-gradient `(ke_corner[i] - ke_corner[i+1])
-/ dx_u` reads adjacent corners, so cube-vertex inconsistency
-propagates into the wind update via `u_d_new = u_d + ke_diff / dx_u`.
+Adjacent commentary reads "seems to reduce noise a lot for few timesteps
+only" and "is this ok?" — Fortran has explicitly DISABLED these syncs.
+iter-942 was Python-only smoothing that improved measured step survival
+only by violating the Fortran-fidelity contract.
 
-Still doesn't reach 1-day stability — there's at least one more
-contributor to the FB chain growth in the d_sw6 path or downstream.
-But iter-942 is a major partial fix (5× the iter-940 baseline).
+iter-944b reverted iter-942's sync.  This sentinel pins the absence of
+the smoother as a Fortran-fidelity contract.
 """
 from __future__ import annotations
 
@@ -32,60 +32,50 @@ import os
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import warnings
-
-import jax.numpy as jnp
-import numpy as np
-
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-    CDGridShallowWaterConfig,
-    FV3EdgeShallowWaterState,
-    FV3FBShallowWaterModel,
-)
-from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-from tests.atmosphere.shallow_water.test_cases.williamson import (
-    williamson_test2,
-)
+import inspect
 
 
-def _fb_chain_survival(N: int, dt: float, max_steps: int) -> int:
-    grid = create_cubed_sphere(N)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
-    sw = williamson_test2(grid)
-    u0 = 2.0 * jnp.pi * grid.radius / (12.0 * 86400.0)
-    u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-    v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-    state = FV3EdgeShallowWaterState(
-        h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data,
-    )
-    cfg = CDGridShallowWaterConfig(
-        hyperdiff_coeff=0.0,
-        d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
-        damp_v=0.06, nord_v=2,
-    )
-    model = FV3FBShallowWaterModel(grid, cfg)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        for k in range(max_steps):
-            state = model.step(state, dt)
-            if not bool(np.all(np.isfinite(np.asarray(state.h)))):
-                return k
-    return max_steps
-
-
-def test_iter942_fb_chain_c36_survives_at_least_180_steps():
-    """Post-iter-942 FB chain at C36 dt=300 s must survive >= 180 steps
-    (iter-942 baseline measurement: 209).  Tolerance ±29 steps to
-    allow numerical drift; firing this gate signals the iter-942
-    `ke_corner` scalar sync has been disturbed or another structural
-    bug has emerged.
-
-    Pre-iter-942 baseline: 63 steps (iter-941 alone) and 41 steps
-    (iter-940 baseline).
+def test_iter942_ke_corner_sync_is_NOT_applied_in_d_sw_native():
+    """`_d_sw_native` must NOT contain a
+    `synchronize_corner_scalar(ke_corner` call.  Fortran's reference
+    has the corresponding ke corner sync explicitly commented out
+    (dyn_core.F90:1029-1055, 1180-1207); enabling it in our Python
+    port would be Python-only smoothing not present in the reference.
     """
-    n = _fb_chain_survival(36, 300.0, max_steps=220)
-    assert n >= 180, (
-        f"FB chain at C36 dt=300 s survived only {n} steps; iter-942 "
-        f"baseline expected >= 180 steps (post-iter-942 measurement: 209)."
+    from legoesm.core import fv3_sw_core
+
+    src = inspect.getsource(fv3_sw_core._d_sw_native)
+    bad_patterns = [
+        "synchronize_corner_scalar(ke_corner",
+        "synchronize_corner_scalar( ke_corner",
+    ]
+    for pattern in bad_patterns:
+        assert pattern not in src, (
+            f"`_d_sw_native` contains a forbidden ke_corner sync "
+            f"(`{pattern}`).  iter-944b removed iter-942's Python-"
+            f"only smoothing because Fortran has the equivalent "
+            f"sync commented out at dyn_core.F90:1029-1055 and "
+            f":1180-1207.  Re-introducing it violates the Fortran-"
+            f"fidelity contract."
+        )
+
+
+def test_iter942_d_sw_native_carries_iter944b_audit_note():
+    """`_d_sw_native` must document the iter-944b removal of iter-942's
+    sync, including the dyn_core.F90 line numbers from the reference
+    source.  Removing the audit comment would lose the "why this is NOT
+    here" context and risk a future re-introduction.
+    """
+    from legoesm.core import fv3_sw_core
+
+    src = inspect.getsource(fv3_sw_core._d_sw_native)
+    assert "iter-944b" in src and "iter-942" in src, (
+        "`_d_sw_native` must reference iter-944b's revert of iter-942 "
+        "(both tags) so future reviewers understand WHY there is no "
+        "ke_corner sync."
+    )
+    assert "1029-1055" in src or "1180-1207" in src, (
+        "`_d_sw_native` must cite at least one of the dyn_core.F90 "
+        "line ranges where Fortran's ke corner sync is commented "
+        "out.  This anchors the Fortran-fidelity claim."
     )

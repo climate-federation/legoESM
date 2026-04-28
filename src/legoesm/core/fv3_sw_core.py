@@ -2216,36 +2216,36 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     vbbtemp = vb
     ubb = ub
     vbb = transported_x
-    # Iter-941: apply the BGRID_NE corner sync UNCONDITIONALLY.
+    # iter-944b: GATE BGRID_NE corner sync on duogrid (Fortran-faithful).
     #
-    # Pre-iter-941 the sync was gated on `use_duogrid` (i.e., only on
-    # duogrid-active runs).  But Fortran's `mpp_get_boundary(...,
-    # gridtype=BGRID_NE)` at dyn_core.F90:968-1019 fires regardless
-    # of duogrid — it's a single-process MPI-equivalent that ensures
-    # the four faces meeting at each cube vertex agree on the (ubb,
-    # vbbtemp) values BEFORE computing KE_corner.
+    # iter-941 mistakenly removed the `if use_duogrid:` gate based on the
+    # erroneous belief that Fortran's `mpp_get_boundary(... gridtype=
+    # BGRID_NE)` "fires regardless of duogrid".  iter-944b's review of
+    # the reference source `dyn_core.F90:968-1011` shows the call is
+    # explicitly inside an `if (duogrid)` block — non-duogrid Fortran
+    # runs do NOT sync (ubb, vbbtemp) here, relying instead on the
+    # standard halo from `mpp_update_domains(uc, vc, gridtype=CGRID_NE)`
+    # at dyn_core.F90:633/689/702/1291 to keep the C-grid winds consistent
+    # across face boundaries (which feeds through the (ubb, vbbtemp)
+    # construction at d_sw3 to keep cube-vertex KE consistent).
     #
-    # Skipping it on non-duogrid leaves cube-vertex KE values mutually
-    # inconsistent across faces, which feeds back through the
-    # d_sw6 KE-gradient stencil into the wind update and produces an
-    # explosive growth mode (iter-940 localised this to KE-gradient).
-    # Enabling the sync improves FB chain step survival from 41 → 63
-    # steps at C36 (W2 1-day target = 288 steps; still not enough for
-    # 1-day stability but a clear partial fix).
-    #
-    # The sync helper `synchronize_bgrid_ne_corner_geo` works on
-    # (6, n+1, n+1) corner-stagger vectors and uses `cos_angle_corner`/
-    # `sin_angle_corner` which exist on both duogrid and non-duogrid
-    # grids — no duogrid-specific dependencies.
+    # The gate restores Fortran-faithful behaviour:
+    #   - duogrid runs: BGRID_NE sync fires (matches Fortran).
+    #   - non-duogrid runs: NO sync (matches Fortran).  FB chain step
+    #     survival on C36 W2 reverts to ~41 steps for non-duogrid;
+    #     duogrid is the supported FV3 W2 path.
     #
     # Production `fv3_sw_tendencies` (FV3EdgeShallowWaterModel default)
     # does NOT call `_d_sw_native`, so production sentinels are
-    # unchanged.
-    from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
-    cac = cdgrid.cos_angle_corner
-    sac = cdgrid.sin_angle_corner
-    ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
-        ubb, vbbtemp, cac, sac, n)
+    # unchanged either way.
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    if use_duogrid:
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
+        cac = cdgrid.cos_angle_corner
+        sac = cdgrid.sin_angle_corner
+        ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
+            ubb, vbbtemp, cac, sac, n)
 
     # --- Step 6: KE at corners (Lin-Rood average of two sweeps) ---
     # FV3 dyn_core.F90:1013-1020:
@@ -2318,6 +2318,17 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     # Use FV3 d_sw1 boundary handling (adjacent strips + corner 2×2 solve)
     # for cross-face consistent transport at panel boundaries.
     ut, vt = _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt)
+    # iter-944b: REVERTED iter-944's CGRID_NE sync of (ut, vt) here.
+    # Fortran reference dyn_core.F90:855-900 syncs only the MASS flux
+    # (`fxx_delp/fyy_delp`) via `mpp_get_boundary(... gridtype=CGRID_NE)`,
+    # gated on `if (duogrid)`, AFTER the d_sw2 transport call.  The
+    # transport velocities ut, vt themselves are NOT separately synced —
+    # they are inputs to d_sw2/d_sw3 and Fortran relies on the standard
+    # halo from `mpp_update_domains(uc, vc, gridtype=CGRID_NE)` at
+    # dyn_core.F90:633/689/702/1291 to keep them consistent across face
+    # boundaries.  iter-944's standalone sync of (ut, vt) was Python-
+    # only smoothing not present in Fortran; removed per iter-944b's
+    # Fortran-fidelity audit.
 
     # === 2. PPM mass transport using ORIGINAL h ===
     # Fortran d_sw1 (sw_core.F90:886-887) UNCONDITIONALLY passes
@@ -2410,9 +2421,15 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                 apply_legacy_d_sw5_corner_corrections))
         ke_corner = ke_corner + ke_damping
 
-    # iter-942: sync ke_corner AFTER d_sw5 KE-add and BEFORE KE-grad
-    from legoesm.grids.halo import synchronize_corner_scalar
-    ke_corner = synchronize_corner_scalar(ke_corner, cdgrid.n)
+    # iter-944b: REVERTED iter-942's `synchronize_corner_scalar(ke_corner, n)`.
+    # Fortran reference dyn_core.F90:1029-1055 AND :1180-1207 contain
+    # the corresponding ke_corner corner sync but it is COMMENTED OUT
+    # (between `! if(duogrid)` and `!endif`), with adjacent commentary
+    # noting it "seems to reduce noise a lot for few timesteps only".
+    # Even within the duogrid branch the sync is disabled in the
+    # reference source.  iter-942's unconditional sync was Python-only
+    # smoothing not present in Fortran; removed per iter-944b's
+    # Fortran-fidelity audit.
 
     # === 6. KE gradient at D-grid edge positions ===
     # FV3 d_sw6 (sw_core.F90:1935-1944):
@@ -2440,6 +2457,15 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
         zeta_abs, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
         apply_cgrid_flux_sync=False,
         apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+    # iter-944b: REVERTED iter-944's explicit CGRID_NE sync of
+    # (fx_vort, fy_vort).  Fortran reference dyn_core.F90:1124-1207
+    # has the corresponding vorticity-flux sync entirely COMMENTED OUT
+    # (between `! ... ! endif`), and the surrounding comment block reads
+    # "Revisit the vorticity flux averaging / should be applied to have
+    # a consistent logic".  Even within the `if (duogrid)` branch the
+    # sync is disabled in the reference source.  iter-944's force-sync
+    # was Python-only smoothing not present in Fortran; removed per
+    # iter-944b's Fortran-fidelity audit.
 
     # === 8. D-grid wind update (FV3 d_sw6, sw_core.F90:1935-1944) ===
     # Incremental form equivalent to Fortran replacement formula:
