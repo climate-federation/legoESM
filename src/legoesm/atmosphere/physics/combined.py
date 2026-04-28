@@ -2,8 +2,15 @@
 
 Provides `PhysicsConfig` and `make_physics()`, which create a single
 physics function that combines radiation, convection, turbulence,
-and microphysics tendencies.  Each sub-module can be independently
-enabled/disabled via its ``scheme`` field (set to ``"none"`` to disable).
+microphysics, and **gravity wave drag** tendencies. Each sub-module
+can be independently enabled/disabled via its ``scheme`` field (set to
+``"none"`` to disable).
+
+Gravity wave drag is included as a first-class component on equal
+footing with the other parameterizations; the supported schemes are
+``"rayleigh"``, ``"lindzen"``, ``"mcfarlane"``, ``"hines"``,
+``"prognostic_spectral"``, ``"ml_emulator"``, and ``"none"`` (see
+``GravityWaveDragConfig``).
 
 The combined function accepts an optional ``phys_state`` (``PhysicsState``)
 argument.  When provided, prognostic physics variables (TKE, convective
@@ -15,13 +22,14 @@ Example
 >>> from legoesm.atmosphere.physics import (
 ...     PhysicsConfig, make_physics,
 ...     RadiationConfig, ConvectionConfig, TurbulenceConfig,
-...     MicrophysicsConfig,
+...     MicrophysicsConfig, GravityWaveDragConfig,
 ... )
 >>> config = PhysicsConfig(
 ...     radiation=RadiationConfig(scheme="gray"),
 ...     convection=ConvectionConfig(scheme="sbm"),
 ...     turbulence=TurbulenceConfig(scheme="louis"),
 ...     microphysics=MicrophysicsConfig(scheme="kessler"),
+...     gravity_wave_drag=GravityWaveDragConfig(scheme="lindzen"),
 ... )
 >>> physics_fn = make_physics(config, model_type="hydrostatic", dt=300.0)
 >>> state = model.step_with_physics(state, dt, physics_fn)
