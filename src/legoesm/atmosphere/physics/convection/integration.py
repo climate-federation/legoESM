@@ -35,8 +35,10 @@ from legoesm.atmosphere.physics.convection.config import ConvectionConfig
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
-from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
-from legoesm.atmosphere.physics.convection.edmf import edmf_convection
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    edmf_convection,
+    mass_flux_convection,
+)
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
     reconstruct_half_level_pressure_hydrostatic,
@@ -200,13 +202,23 @@ def _make_hydrostatic_convection(
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
 
-        # Propagate tracer tendencies from convection backend
+        # Propagate tracer tendencies from convection backend.
+        # Convective detrained condensate (``dq_c_conv_dt``) feeds the
+        # cloud-water tracer; the dynamical core's tracer registry
+        # picks it up by name (``q_c``) and applies it alongside the
+        # microphysics tendency on the next step. Models without a
+        # ``q_c`` tracer simply ignore the entry.
         tracer_tends = None
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
+            dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
             tracer_tends = {
                 "q_v": Field(
                     data=dq_v_dt, name="dq_v_dt_conv",
+                    dims=dims_3d, units="kg/kg/s",
+                ),
+                "q_c": Field(
+                    data=dq_c_conv_dt, name="dq_c_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
                 ),
             }
@@ -368,11 +380,26 @@ def _make_nonhydrostatic_convection(
         dT_dt = conv_out.dT_dt.reshape(shape_3d)
         dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
 
-        # Tracer tendencies
+        # Tracer tendencies. The non-hydrostatic state's tracer ordering
+        # is documented on ``NonHydrostaticState`` in
+        # ``src/legoesm/core/state.py``:
+        #   moist runs → tracers[..., 0] = q_vapor,
+        #                tracers[..., 1] = q_cloud,
+        #                tracers[..., 2] = q_rain.
+        # Slot 0 (``q_v``) carries the convection vapor tendency; slot
+        # 1 (``q_c``) carries the convective detrained-condensate
+        # source so that microphysics processes it through
+        # autoconversion / sedimentation / evaporation rather than the
+        # previous instant-fall assumption (Option C). Models with
+        # ``n_tracers < 2`` (dry or vapor-only runs) silently omit the
+        # ``q_c`` write — there is no slot to receive it.
         dtracers = jnp.zeros_like(tracers)
         if n_tracers > 0:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dtracers = dtracers.at[..., 0].set(dq_v_dt)
+        if n_tracers > 1:
+            dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            dtracers = dtracers.at[..., 1].set(dq_c_conv_dt)
 
         tendencies = NonHydrostaticTendencies(
             du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_conv", dims=dims_3d, units="m/s^2"),
@@ -485,7 +512,16 @@ def _make_spectral_pe_convection(
             )
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
-        # Transform T tendency to spectral space
+        # Transform T tendency to spectral space.
+        # NOTE: this dispatcher already drops ``conv_out.dq_v_dt`` and
+        # (post-Option-C) also drops ``conv_out.dq_c_conv_dt`` — the
+        # spectral PE state surfaced here doesn't carry tracer
+        # tendencies. This is a pre-existing limitation: spectral PE
+        # runs effectively dry through the convection coupling.
+        # TODO(option-c): when spectral PE gains tracer-tendency
+        # plumbing, route ``conv_out.dq_v_dt`` and
+        # ``conv_out.dq_c_conv_dt`` here so the convective vapor sink
+        # and cloud-water source are no longer silently discarded.
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
         # No wind or surface pressure tendencies from convection

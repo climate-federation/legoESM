@@ -244,7 +244,25 @@ def dca_convection(
     # Convert to tendencies, gated by CAPE
     dT_dt = cape_gate[:, None] * (T_adj - T) / dt
     dq_v_dt = cape_gate[:, None] * (q_adj - q_v) / dt
-    precipitation = jnp.clip(cape_gate * precip_total / dt, 0.0, None)
+    # Convective source for cloud water — column-conservative
+    # rescaling so that ∫ dq_c_conv_dt dp/g equals the column-net
+    # drying (matches the legacy ``precipitation`` formula). Naive
+    # per-level ``max(-dq_v_dt, 0)`` would create water column-wide
+    # whenever the adjustment has mixed-sign vapor tendencies; this
+    # rescaling removes that bug while keeping the field non-negative
+    # at every level. ``precip_total`` (the scan-accumulated column
+    # total) is no longer surfaced — microphysics owns the surface
+    # precipitation diagnostic.
+    del precip_total
+    local_cond = jnp.maximum(-dq_v_dt, 0.0)
+    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
+    col_net_drying = jnp.clip(
+        -jnp.sum(dq_v_dt * dp / constants.g, axis=-1, keepdims=True),
+        0.0, None,
+    )
+    dq_c_conv_dt = local_cond * (
+        col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
+    )  # (ncol, nlev) [kg/kg/s]
 
     # Convective mask: CAPE-gated
     convective_mask = cape_gate
@@ -252,7 +270,7 @@ def dca_convection(
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        precipitation=precipitation,
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=convective_mask,
     )

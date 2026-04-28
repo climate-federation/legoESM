@@ -77,7 +77,11 @@ class TestRCESetup:
             dt=DT, config=sbm_config,
         )
         assert jnp.all(jnp.isfinite(conv.dT_dt))
-        assert conv.precipitation.shape == (ncol,)
+        # Post-Option-C: convection emits a 3D ``dq_c_conv_dt``
+        # cloud-water source instead of a scalar surface precip;
+        # microphysics owns the resulting surface-flux diagnostic.
+        assert conv.dq_c_conv_dt.shape == (ncol, NLEV)
+        assert jnp.all(conv.dq_c_conv_dt >= 0)
 
     def test_constants_used_for_freezing_point(self):
         """Verify RCE uses constants.T_freeze for land mode (not hardcoded)."""

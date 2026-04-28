@@ -182,7 +182,12 @@ class TestPhysicsZeros:
 
         out = _noop_convection(T, q_v, p_full, p_half, dt=600.0, config=None)
         assert out.dT_dt.dtype == policy.storage
-        assert out.precipitation.dtype == policy.storage
+        # Post-Option-C: ``ConvectionOutput.precipitation`` was replaced
+        # by the 3D ``dq_c_conv_dt`` field (cloud-water source rate);
+        # microphysics owns the surface precipitation diagnostic. The
+        # dtype contract still applies — the no-op stub must produce
+        # the policy storage dtype.
+        assert out.dq_c_conv_dt.dtype == policy.storage
 
     @pytest.mark.parametrize("mode_name,policy", MODES)
     def test_gwd_zero_output_dtype(self, mode_name, policy):
