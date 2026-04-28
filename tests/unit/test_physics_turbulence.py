@@ -32,7 +32,7 @@ def _make_state(n=8, nlev=10, T_sfc_offset=0.0, wind_speed=10.0):
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from tests.test_cases.held_suarez import held_suarez_init
+    from legoesm.atmosphere.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(n)
     sigma = create_sigma_coordinate(nlev)

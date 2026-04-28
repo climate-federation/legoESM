@@ -15,8 +15,10 @@ from legoesm import constants
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
-from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
-from legoesm.atmosphere.physics.convection.edmf import edmf_convection
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    edmf_convection,
+    mass_flux_convection,
+)
 from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, KuoConfig, MassFluxConfig, EDMFConfig,
 )
@@ -90,27 +92,60 @@ def _call_scheme(name, T, q_v, p_full, p_half, dt=300.0):
 
 @pytest.mark.parametrize("scheme", ["sbm", "dca"])
 def test_moisture_conservation(scheme):
-    """Column-integrated moisture tendency approximately equals -precipitation.
+    """Column water budget under the post-Option-C semantics.
 
-    Note: mass_flux and edmf compute precipitation from updraft condensate
-    detrainment, so their column dq_v budget includes additional terms
-    not captured by sum(dq_v_dt * dp/g) + precip = 0.
+    Convection emits a 3D ``dq_c_conv_dt`` (rate of cloud-water creation
+    at each level) instead of a scalar surface ``precipitation``;
+    microphysics owns the surface-flux diagnostic. The intended
+    column-integrated balance for the SBM and DCA relaxation schemes
+    is:
+
+        ∫ dq_v_dt dp/g  +  ∫ dq_c_conv_dt dp/g  ≈  0
+
+    Both schemes rescale their per-level condensation candidate so
+    the column integral exactly equals the column-net drying
+    (= the legacy ``precipitation`` formula). This guarantees
+    machine-precision column water conservation regardless of the
+    sign pattern of ``dq_v_dt`` — without per-level negative cloud
+    water source. (A naive per-level ``max(-dq_v_dt, 0)`` would
+    create water column-wide whenever drying and moistening layers
+    coexist; the rescaling removes that bug.)
+
+    ``kuo`` is intentionally excluded: by design Kuo's column water
+    is non-conservative (it imports a ``(1 - alpha_heat) * MC /
+    tau_relax`` moistening source from outside the column —
+    surface evaporation / large-scale moisture convergence). Under
+    Option C, Kuo exposes the full design-intent condensation rate
+    to microphysics rather than the underreporting legacy
+    formula; see ``kuo.py`` module docstring for the water budget.
+
+    ``mass_flux`` and ``edmf`` are also excluded: their kernels
+    include vertical subsidence/detrainment transport so the column
+    ``dq_v_dt`` is not the negative of the column condensation by
+    design — water conservation is not the right invariant to test
+    at the column level for those schemes either.
     """
     T, q_v, p_full, p_half = _make_unstable_column()
     out = _call_scheme(scheme, T, q_v, p_full, p_half)
 
     dp = p_half[:, 1:] - p_half[:, :-1]
     col_dqv = jnp.sum(out.dq_v_dt * dp / constants.g, axis=1)
+    col_dqc = jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1)
 
+    # With column-scaling, conservation is exact in floating point.
+    # 1e-6 leaves margin for x64-vs-x32 mode switches without admitting
+    # any of the bug patterns this test is meant to catch.
+    bound = 1e-6
     for i in range(col_dqv.shape[0]):
-        precip = float(out.precipitation[i])
-        integral = float(col_dqv[i])
-        residual = abs(integral + precip)
-        scale = max(abs(precip), abs(integral), 1e-12)
+        condensation = float(col_dqc[i])
+        vapor_loss = float(col_dqv[i])
+        residual = abs(vapor_loss + condensation)
+        scale = max(abs(condensation), abs(vapor_loss), 1e-12)
         if scale > 1e-10:
             rel_err = residual / scale
-            assert rel_err < 0.10, (
-                f"{scheme} col {i}: moisture conservation rel_err = {rel_err:.4f}"
+            assert rel_err < bound, (
+                f"{scheme} col {i}: moisture conservation rel_err = "
+                f"{rel_err:.6e} (bound {bound:.0e})"
             )
 
 
@@ -149,10 +184,15 @@ def test_stable_profile_small_convection(scheme):
     out = _call_scheme(scheme, T, q_v, p_full, p_half)
 
     max_dT = float(jnp.max(jnp.abs(out.dT_dt)))
-    max_precip = float(jnp.max(out.precipitation))
+    # Convective cloud-water source is per-level [kg/kg/s]; in a stable
+    # column it should round-off to zero. 1e-9 kg/kg/s × 1000 s = 1e-6
+    # kg/kg of cloud water — physically negligible.
+    max_dq_c = float(jnp.max(out.dq_c_conv_dt))
 
     assert max_dT < 1e-2, f"{scheme}: dT_dt = {max_dT:.2e} in stable column"
-    assert max_precip < 1e-6, f"{scheme}: precip = {max_precip:.2e} in stable column"
+    assert max_dq_c < 1e-9, (
+        f"{scheme}: dq_c_conv_dt = {max_dq_c:.2e} kg/kg/s in stable column"
+    )
 
 
 # ============================================================================
@@ -161,12 +201,12 @@ def test_stable_profile_small_convection(scheme):
 
 @pytest.mark.parametrize("scheme", ["sbm", "dca", "kuo", "mass_flux", "edmf"])
 def test_precipitation_non_negative(scheme):
-    """Precipitation must be >= 0."""
+    """Convective cloud-water source must be >= 0 at every level."""
     T, q_v, p_full, p_half = _make_unstable_column()
     out = _call_scheme(scheme, T, q_v, p_full, p_half)
-    min_precip = float(jnp.min(out.precipitation))
-    assert min_precip >= -1e-15, (
-        f"{scheme}: negative precipitation = {min_precip:.2e}"
+    min_dq_c = float(jnp.min(out.dq_c_conv_dt))
+    assert min_dq_c >= -1e-15, (
+        f"{scheme}: negative dq_c_conv_dt = {min_dq_c:.2e}"
     )
 
 
@@ -260,5 +300,7 @@ def test_all_outputs_finite(scheme):
     out = _call_scheme(scheme, T, q_v, p_full, p_half)
     assert jnp.all(jnp.isfinite(out.dT_dt)), f"{scheme}: dT_dt has NaN/Inf"
     assert jnp.all(jnp.isfinite(out.dq_v_dt)), f"{scheme}: dq_v_dt has NaN/Inf"
-    assert jnp.all(jnp.isfinite(out.precipitation)), f"{scheme}: precip has NaN/Inf"
+    assert jnp.all(jnp.isfinite(out.dq_c_conv_dt)), (
+        f"{scheme}: dq_c_conv_dt has NaN/Inf"
+    )
     assert jnp.all(jnp.isfinite(out.cape)), f"{scheme}: cape has NaN/Inf"

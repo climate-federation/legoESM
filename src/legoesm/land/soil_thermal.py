@@ -159,11 +159,10 @@ def solve_soil_thermal(
     # Bottom BC: geothermal heat flux (Neumann, positive into soil)
     rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
 
-    # Assemble full arrays
-    a = jnp.zeros((ncol, nlayers))
-    a = a.at[:, 1:].set(sub)
-    c = jnp.zeros((ncol, nlayers))
-    c = c.at[:, :-1].set(sup)
+    # Assemble full arrays via ``jnp.pad`` — one Pad HLO op per
+    # diagonal vs ``zeros + .at[].set`` (alloc + scatter).
+    a = jnp.pad(sub, ((0, 0), (1, 0)))
+    c = jnp.pad(sup, ((0, 0), (0, 1)))
 
     T_new = thomas_solve_batch(a, diag, c, rhs)
     return T_new

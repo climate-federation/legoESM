@@ -92,12 +92,11 @@ def cell_to_cgrid_winds(
     u_face = interp_cell_to_uface(u_cell)
     # v at poles is zero (wall BC), not the average of adjacent cells.
     v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
-    if v_cell.ndim >= 3:
-        zero = jnp.zeros((1, v_cell.shape[1], v_cell.shape[2]),
-                         dtype=v_cell.dtype)
-    else:
-        zero = jnp.zeros((1, v_cell.shape[1]), dtype=v_cell.dtype)
-    v_face = jnp.concatenate([zero, v_interior, zero], axis=0)
+    # ``jnp.pad`` with zero fill is one Pad HLO op; the previous form
+    # alloc-zeros + concatenate-of-three is two HLO ops.  Wall-BC at
+    # poles is preserved (pole rows are zero).
+    pad_axes = ((0, 0),) * (v_interior.ndim - 1)
+    v_face = jnp.pad(v_interior, ((1, 1), *pad_axes))
     return u_face, v_face
 
 
@@ -179,13 +178,10 @@ def gradient_y_cgrid(
     # Interior v-faces: i=1..n_lat-1
     df_interior = (f[1:] - f[:-1]) / dy_v  # (n_lat-1, n_lon, ...)
 
-    # Boundary faces at poles: zero gradient (wall BC)
-    if f.ndim == 2:
-        zero_row = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
-    else:
-        zero_row = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
-
-    df_dy = jnp.concatenate([zero_row, df_interior, zero_row], axis=0)
+    # Boundary faces at poles: zero gradient (wall BC).
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    pad_axes = ((0, 0),) * (df_interior.ndim - 1)
+    df_dy = jnp.pad(df_interior, ((1, 1), *pad_axes))
     return df_dy
 
 
@@ -282,18 +278,14 @@ def divergence_cgrid(
     # Meridional face length (zonal extent) at lat interface:
     # R * cos(lat_face) * dlon
     lat = grid.lat  # (n_lat,)
-    # v-point latitudes: at interfaces between cells
-    # South pole face at lat = -pi/2
-    # Interior faces at midpoints between cell centers
-    # North pole face at lat = +pi/2
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    # v-point latitudes: at interfaces between cells.  cos(±π/2) is
+    # exactly 0 analytically (and roundoff-level in finite precision),
+    # so build cos_lat_v directly via Pad — pole rows are exactly 0
+    # regardless of dtype, and this avoids the alloc-2-singleton +
+    # concatenate-of-three + cos tower (4 HLO ops → 2 HLO ops).
     lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    # Use actual cos(lat_v) — no clamp needed because v=0 at pole faces
-    # (solid wall BC), so face_dx * v = 0 regardless. Avoiding the clamp
-    # gives clean adjoints through jax.grad (issue #173).
-    cos_lat_v = jnp.cos(lat_v)  # (n_lat+1,); zero at poles
+    cos_lat_v_interior = jnp.cos(lat_interior)  # (n_lat-1,)
+    cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))  # (n_lat+1,)
 
     face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
 
@@ -361,8 +353,6 @@ def coriolis_cgrid(
     f_cell = grid.f  # (n_lat, n_lon)
 
     is_3d = u.ndim == 3
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
 
     # --- f at u-points ---
     # u-point at face j is between cell (j-1) mod n_lon and cell j.
@@ -385,12 +375,9 @@ def coriolis_cgrid(
     # v[i, j-1], v[i+1, j-1], v[i, j], v[i+1, j]
     v_west = jnp.roll(v, 1, axis=1)  # v[:, (j-1) mod n_lon]
     v_avg = 0.25 * (v[:-1] + v[1:] + v_west[:-1] + v_west[1:])
-    # v_avg shape: (n_lat, n_lon, ...). Need (n_lat, n_lon+1, ...)
-    if is_3d:
-        v_avg_wrap = v_avg[:, 0:1, :]
-    else:
-        v_avg_wrap = v_avg[:, 0:1]
-    v_at_u = jnp.concatenate([v_avg, v_avg_wrap], axis=1)
+    # v_avg shape: (n_lat, n_lon, ...). Append wrap column to (n_lat, n_lon+1, ...);
+    # ``v_avg[:, 0:1]`` works for both 2D and 3D (slice along axis 1 only).
+    v_at_u = jnp.concatenate([v_avg, v_avg[:, 0:1]], axis=1)
 
     # --- Average u to v-points ---
     # v-point (i+1/2, j) has 4 neighboring u-points:
@@ -398,20 +385,18 @@ def coriolis_cgrid(
     # Average: u_at_v = 0.25 * (u[i,j] + u[i,j+1] + u[i+1,j] + u[i+1,j+1])
     u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
     # u_avg_interior shape: (n_lat-1, n_lon, ...)
-    # Boundary: at poles (j=0 and j=n_lat), u_at_v = 0 (v=0 at poles anyway)
-    if is_3d:
-        zero_row = jnp.zeros((1, n_lon, u.shape[2]), dtype=u.dtype)
-    else:
-        zero_row = jnp.zeros((1, n_lon), dtype=u.dtype)
-    u_at_v = jnp.concatenate([zero_row, u_avg_interior, zero_row], axis=0)
+    # Boundary: at poles, u_at_v = 0 (v=0 at poles anyway).
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    pad_axes = ((0, 0),) * (u_avg_interior.ndim - 1)
+    u_at_v = jnp.pad(u_avg_interior, ((1, 1), *pad_axes))
 
     # --- Coriolis terms ---
-    if is_3d:
-        cor_u = f_u[:, :, jnp.newaxis] * v_at_u
-        cor_v = -f_v[:, :, jnp.newaxis] * u_at_v
-    else:
-        cor_u = f_u * v_at_u
-        cor_v = -f_v * u_at_v
+    # Reshape 2D ``f_u``/``f_v`` to broadcast over the trailing level
+    # axis when 3D (no-op when 2D).
+    f_u_b = f_u[..., jnp.newaxis] if is_3d else f_u
+    f_v_b = f_v[..., jnp.newaxis] if is_3d else f_v
+    cor_u = f_u_b * v_at_u
+    cor_v = -f_v_b * u_at_v
 
     # Apply masks
     if u_mask is not None:
@@ -453,34 +438,36 @@ def laplacian_cgrid(
     """
     is_3d = f.ndim == 3
 
-    if is_3d:
-        # vmap over levels
-        f_t = jnp.moveaxis(f, -1, 0)
-
-        def lap_2d(fi):
-            return laplacian_cgrid(fi, grid, mask=mask)
-
-        lap_t = jax.vmap(lap_2d)(f_t)
-        return jnp.moveaxis(lap_t, 0, -1)
-
-    # 2D case: compact gradient -> divergence
-    grad_x = gradient_x_cgrid(f, grid)  # (n_lat, n_lon+1)
-    grad_y = gradient_y_cgrid(f, grid)  # (n_lat+1, n_lon)
+    # ``gradient_x_cgrid`` / ``gradient_y_cgrid`` / ``divergence_cgrid``
+    # all natively support 3D inputs (they internally branch on ndim
+    # for the dx_u / dy_v / cos_lat broadcasting).  Call them directly
+    # on 3D — the previous moveaxis + vmap + moveaxis round-trip was
+    # redundant.
+    grad_x = gradient_x_cgrid(f, grid)  # (n_lat, n_lon+1[, nlev])
+    grad_y = gradient_y_cgrid(f, grid)  # (n_lat+1, n_lon[, nlev])
 
     if mask is not None:
         # Zero gradient at land-ocean boundaries
         u_mask = mask * jnp.roll(mask, 1, axis=1)
         u_mask = jnp.concatenate([u_mask, u_mask[:, 0:1]], axis=1)
+        # Pole rows of v_mask are zero (wall BC); single Pad HLO op
+        # replaces alloc-zeros + concatenate-of-three.
         v_mask_interior = mask[:-1] * mask[1:]
-        zero_row = jnp.zeros((1, mask.shape[1]), dtype=mask.dtype)
-        v_mask = jnp.concatenate([zero_row, v_mask_interior, zero_row], axis=0)
-        grad_x = grad_x * u_mask
-        grad_y = grad_y * v_mask
+        v_mask = jnp.pad(v_mask_interior, ((1, 1), (0, 0)))
+        if is_3d:
+            grad_x = grad_x * u_mask[..., jnp.newaxis]
+            grad_y = grad_y * v_mask[..., jnp.newaxis]
+        else:
+            grad_x = grad_x * u_mask
+            grad_y = grad_y * v_mask
 
     lap = divergence_cgrid(grad_x, grad_y, grid)
 
     if mask is not None:
-        lap = lap * mask
+        if is_3d:
+            lap = lap * mask[..., jnp.newaxis]
+        else:
+            lap = lap * mask
 
     return lap
 
@@ -510,93 +497,60 @@ def curl_vertex_cgrid(
     -------
     zeta : (n_lat+1, n_lon+1) or (n_lat+1, n_lon+1, nlev)
     """
+    # Native 2D and 3D — broadcast 1D metric over the trailing level
+    # axis when needed.  Eliminates the prior moveaxis + vmap +
+    # moveaxis round-trip.
     is_3d = u.ndim == 3
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
-        v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
-
-        def _curl_2d(u_k, v_k):
-            return curl_vertex_cgrid(u_k, v_k, grid)
-
-        zeta_t = jax.vmap(_curl_2d)(u_t, v_t)  # (nlev, n_lat+1, n_lon+1)
-        return jnp.moveaxis(zeta_t, 0, -1)
-
     R = grid.radius
     dlon = grid.dlon
     dlat = grid.dlat
     lat = grid.lat  # cell-center latitudes (n_lat,)
     cos_lat = grid.cos_lat  # (n_lat,)
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
 
     # Vertex area: A_v(i) = R^2 * dlon * |sin(lat_cell[i]) - sin(lat_cell[i-1])|
-    # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole)
+    # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole).
     sin_lat = jnp.sin(lat)
-    sin_ext = jnp.concatenate([
-        jnp.array([-1.0], dtype=lat.dtype),   # sin(-pi/2)
-        sin_lat,
-        jnp.array([1.0], dtype=lat.dtype),     # sin(+pi/2)
-    ])
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])  # (n_lat+1,)
-    # Interior vertex areas only (rows 1..n_lat-1); pole rows are zero
-    # by construction and excluded from the division to avoid 1e30
-    # intermediates and brittle adjoints (issue #173).
     A_vertex_interior = A_vertex_all[1:-1]  # (n_lat-1,)
-
-    # Circulation around vertex (i, j), CCW:
-    #   south edge (eastward): +u[i-1, j] * R*cos(lat[i-1])*dlon
-    #   east edge (northward): +v[i, j] * R*dlat
-    #   north edge (westward): -u[i, j] * R*cos(lat[i])*dlon
-    #   west edge (southward): -v[i, j-1] * R*dlat
-    #
-    # For vertex row i: south cell row = i-1, north cell row = i
-    # For vertex col j: east v-col = j, west v-col = (j-1) mod n_lon
 
     # Edge lengths
     dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at each cell latitude
     dy_edge = R * dlat             # scalar, meridional edge length
 
-    # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy
-    # v shape: (n_lat+1, n_lon). Wrap in longitude.
-    v_east = v                                    # (n_lat+1, n_lon)
-    v_west = jnp.roll(v, 1, axis=1)              # (n_lat+1, n_lon)
-    dv_circ = (v_east - v_west) * dy_edge         # (n_lat+1, n_lon)
+    # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy.  Works for 2D
+    # and 3D directly.
+    v_east = v
+    v_west = jnp.roll(v, 1, axis=1)
+    dv_circ = (v_east - v_west) * dy_edge
 
-    # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i]
-    # u shape: (n_lat, n_lon+1). Vertex row i uses u rows i-1 and i.
-    # Pad with zeros at poles (u at pole vertex has no cell row beyond)
-    zero_u = jnp.zeros((1, n_lon + 1), dtype=u.dtype)
-    u_ext = jnp.concatenate([zero_u, u, zero_u], axis=0)  # (n_lat+2, n_lon+1)
-    dx_ext = jnp.concatenate([
-        jnp.zeros(1, dtype=lat.dtype),
-        dx_cell,
-        jnp.zeros(1, dtype=lat.dtype),
-    ])  # (n_lat+2,)
+    # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i].
+    # Pad with zeros at poles along the lat axis (axis 0).  Extra
+    # ``(0, 0)`` pad-tuples for any trailing dims (level axis in 3D).
+    pad_extra = ((0, 0),) * (u.ndim - 2)
+    u_ext = jnp.pad(u, ((1, 1), (0, 0), *pad_extra))
+    dx_ext = jnp.pad(dx_cell, (1, 1))
 
-    # u_south = u_ext[i] = u[i-1] for vertex row i (0-indexed)
-    # u_north = u_ext[i+1] = u[i] for vertex row i
-    u_south = u_ext[:-1, :]  # (n_lat+1, n_lon+1)
-    u_north = u_ext[1:, :]   # (n_lat+1, n_lon+1)
-    dx_south = dx_ext[:-1]    # (n_lat+1,)
-    dx_north = dx_ext[1:]     # (n_lat+1,)
+    u_south = u_ext[:-1]
+    u_north = u_ext[1:]
+    dx_south = dx_ext[:-1]
+    dx_north = dx_ext[1:]
+    # Reshape lat metrics to broadcast over (n_lat+1, n_lon+1[, nlev]).
+    bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
+    du_circ = (u_south * dx_south[bcast] - u_north * dx_north[bcast])
 
-    du_circ = (u_south * dx_south[:, jnp.newaxis]
-               - u_north * dx_north[:, jnp.newaxis])  # (n_lat+1, n_lon+1)
-
-    # Combine: need dv_circ at (n_lat+1, n_lon+1) — append periodic wrap column
-    dv_circ_full = jnp.concatenate(
-        [dv_circ, dv_circ[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+    # Append periodic wrap column to dv_circ.
+    dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
 
     circ = du_circ + dv_circ_full
 
-    # Compute vorticity only on interior rows (1..n_lat-1) where vertex
-    # area is nonzero.  Pad pole rows with zeros directly to avoid the
-    # 1/0 division that created 1e30 intermediates and brittle adjoints
-    # under jax.grad (issue #173).
-    circ_interior = circ[1:-1, :]  # (n_lat-1, n_lon+1)
-    zeta_interior = circ_interior / A_vertex_interior[:, jnp.newaxis]
-    zero_row = jnp.zeros((1, circ.shape[1]), dtype=circ.dtype)
-    zeta = jnp.concatenate([zero_row, zeta_interior, zero_row], axis=0)
+    # Compute vorticity only on interior rows (pole rows zero by
+    # construction; avoids 1/0 division — issue #173).
+    circ_interior = circ[1:-1]
+    zeta_interior = circ_interior / A_vertex_interior[bcast]
+    # Pad pole rows with zero along the lat axis (extra (0, 0) pads
+    # for trailing dims if 3D).
+    zeta = jnp.pad(zeta_interior, ((1, 1), (0, 0), *pad_extra))
 
     return zeta
 
@@ -653,15 +607,16 @@ def _gradient_curl_to_v(
     # zeta[:, j+1] - zeta[:, j] for j=0..n_lon-1
     dzeta = zeta[:, 1:] - zeta[:, :-1]  # (n_lat+1, n_lon [, nlev])
 
-    # Compute gradient only on interior rows (1..n_lat-1), pad poles with 0
+    # Compute gradient only on interior rows (1..n_lat-1), pad poles
+    # with zero.  Single Pad HLO op replaces alloc-zeros + concatenate-
+    # of-three.
     dzeta_int = dzeta[1:-1]  # (n_lat-1, n_lon [, nlev])
     if zeta.ndim == 2:
         grad_int = dzeta_int / dx_v_int[:, jnp.newaxis]
-        zero_row = jnp.zeros((1, dzeta.shape[1]), dtype=zeta.dtype)
     else:
         grad_int = dzeta_int / dx_v_int[:, jnp.newaxis, jnp.newaxis]
-        zero_row = jnp.zeros((1, dzeta.shape[1], dzeta.shape[2]), dtype=zeta.dtype)
-    return jnp.concatenate([zero_row, grad_int, zero_row], axis=0)
+    pad_axes = ((0, 0),) * (grad_int.ndim - 1)
+    return jnp.pad(grad_int, ((1, 1), *pad_axes))
 
 
 def vector_laplacian_cgrid(
@@ -692,67 +647,51 @@ def vector_laplacian_cgrid(
     vlap_u : same shape as u
     vlap_v : same shape as v
     """
+    # Native 2D and 3D — all underlying operators (``divergence_cgrid``,
+    # ``gradient_*_cgrid``, ``curl_vertex_cgrid``, ``_gradient_curl_to_*``)
+    # natively support 3D inputs.  Masks remain 2D and broadcast over
+    # the trailing level axis when present.
     is_3d = u.ndim == 3
 
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
-        v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
-
-        def _vlap_2d(u_k, v_k):
-            return vector_laplacian_cgrid(
-                u_k, v_k, grid,
-                mask=mask, u_mask=u_mask, v_mask=v_mask)
-
-        lu_t, lv_t = jax.vmap(_vlap_2d)(u_t, v_t)
-        return jnp.moveaxis(lu_t, 0, -1), jnp.moveaxis(lv_t, 0, -1)
-
-    # --- 2D case ---
+    def _bcast(m, like):
+        # Broadcast 2D ``m`` over trailing axes of ``like``.
+        return m[..., jnp.newaxis] if is_3d else m
 
     # Apply face masks before computing div and curl
-    u_eff = u
-    v_eff = v
-    if u_mask is not None:
-        u_eff = u * u_mask
-    if v_mask is not None:
-        v_eff = v * v_mask
+    u_eff = u if u_mask is None else u * _bcast(u_mask, u)
+    v_eff = v if v_mask is None else v * _bcast(v_mask, v)
 
     # 1. Divergence at cell centers
     div = divergence_cgrid(u_eff, v_eff, grid)
     if mask is not None:
-        div = div * mask
+        div = div * _bcast(mask, div)
 
     # 2. grad(div) at faces
-    grad_div_u = gradient_x_cgrid(div, grid)  # (n_lat, n_lon+1)
-    grad_div_v = gradient_y_cgrid(div, grid)  # (n_lat+1, n_lon)
+    grad_div_u = gradient_x_cgrid(div, grid)  # (n_lat, n_lon+1[, nlev])
+    grad_div_v = gradient_y_cgrid(div, grid)  # (n_lat+1, n_lon[, nlev])
 
     # 3. Curl at vertices
-    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1)
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1[, nlev])
 
     # Mask curl at land-adjacent vertices
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
-        zeta = zeta * vmask
+        zeta = zeta * _bcast(vmask, zeta)
 
     # 4. Tangential gradient of curl at faces
-    grad_curl_u = _gradient_curl_to_u(zeta, grid)  # (n_lat, n_lon+1)
-    grad_curl_v = _gradient_curl_to_v(zeta, grid)  # (n_lat+1, n_lon)
+    grad_curl_u = _gradient_curl_to_u(zeta, grid)
+    grad_curl_v = _gradient_curl_to_v(zeta, grid)
 
-    # 5. Vector Laplacian = grad(div) - curl(curl)
-    # curl(curl F) = k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).
-    # Signs verified via bump tests (both components must be diffusive):
-    #   u-bump: vlap_u = grad_div_u - grad_curl_u → negative ✓
-    #   v-bump: vlap_v = grad_div_v + grad_curl_v → negative ✓
-    # The sign asymmetry arises because _gradient_curl_to_u computes
-    # ∂ζ/∂y (northward) while _gradient_curl_to_v computes ∂ζ/∂x
-    # (eastward), and (k × ∇ζ)_x = -∂ζ/∂y but (k × ∇ζ)_y = +∂ζ/∂x.
+    # 5. Vector Laplacian = grad(div) - curl(curl).  curl(curl F) =
+    # k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).  Signs verified via bump tests.
     vlap_u = grad_div_u - grad_curl_u
     vlap_v = grad_div_v + grad_curl_v
 
     # Apply face masks to output
     if u_mask is not None:
-        vlap_u = vlap_u * u_mask
+        vlap_u = vlap_u * _bcast(u_mask, vlap_u)
     if v_mask is not None:
-        vlap_v = vlap_v * v_mask
+        vlap_v = vlap_v * _bcast(v_mask, vlap_v)
 
     return vlap_u, vlap_v
 
@@ -870,33 +809,28 @@ def strain_rate_cgrid(
     D_T : (n_lat, n_lon, ...) at h-points — du/dx - dv/dy
     D_S : (n_lat+1, n_lon+1, ...) at q-points — dv/dx + du/dy
     """
+    # Native 2D and 3D — broadcast 1D / 2D metrics over the trailing
+    # level axis when needed.  Eliminates the prior moveaxis + vmap +
+    # moveaxis round-trip.
     is_3d = u.ndim == 3
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)
-        v_t = jnp.moveaxis(v, -1, 0)
-
-        def _sr_2d(u_k, v_k):
-            return strain_rate_cgrid(u_k, v_k, grid,
-                                     mask=mask, u_mask=u_mask, v_mask=v_mask)
-
-        dt_t, ds_t = jax.vmap(_sr_2d)(u_t, v_t)
-        return jnp.moveaxis(dt_t, 0, -1), jnp.moveaxis(ds_t, 0, -1)
-
     R = grid.radius
     dlon = grid.dlon
     dlat = grid.dlat
     lat = grid.lat
     cos_lat = grid.cos_lat
-    n_lat = grid.n_lat
     n_lon = grid.n_lon
 
-    u_eff = u if u_mask is None else u * u_mask
-    v_eff = v if v_mask is None else v * v_mask
+    def _bcast2d(m):
+        return m[..., jnp.newaxis] if is_3d else m
 
-    # Structural periodicity: build u with wrap column always referencing
-    # column 0.  This avoids the JAX .at[].set() scatter (which complicates
-    # gradients) and guarantees D_S consistency at the wrap vertex even when
-    # the caller hasn't enforced u[:,n_lon]==u[:,0].
+    # Reshape lat-only metric to broadcast along the trailing axes.
+    lat_bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
+    pad_extra = ((0, 0),) * (u.ndim - 2)
+
+    u_eff = u if u_mask is None else u * _bcast2d(u_mask)
+    v_eff = v if v_mask is None else v * _bcast2d(v_mask)
+
+    # Structural periodicity wrap column.  Works directly for 2D and 3D.
     u_eff = jnp.concatenate([u_eff[:, :n_lon], u_eff[:, 0:1]], axis=1)
 
     # --- D_T at h-points: du/dx - dv/dy ---
@@ -905,30 +839,27 @@ def strain_rate_cgrid(
     u_west = u_eff[:, :-1]
     du_dx = (u_east - u_west) * face_dy
 
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
-    face_dx = R * cos_lat_v * dlon
+    cos_lat_v = jnp.pad(
+        jnp.maximum(jnp.cos(lat_interior), 1e-10),
+        (1, 1), constant_values=1e-10,
+    )
+    face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
 
     v_north = v_eff[1:]
     v_south = v_eff[:-1]
-    dv_dy = v_north * face_dx[1:, jnp.newaxis] - v_south * face_dx[:-1, jnp.newaxis]
+    dv_dy = (v_north * face_dx[1:][lat_bcast]
+             - v_south * face_dx[:-1][lat_bcast])
 
-    area = grid.area
-    D_T = (du_dx - dv_dy) / area
+    area = grid.area  # (n_lat, n_lon) — broadcasts naturally over (...,, nlev)
+    D_T = (du_dx - dv_dy) / area[..., jnp.newaxis] if is_3d else \
+        (du_dx - dv_dy) / area
     if mask is not None:
-        D_T = D_T * mask
+        D_T = D_T * _bcast2d(mask)
 
     # --- D_S at q-points: dv/dx + du/dy ---
-    # Same vertex stencil as curl, but u-contribution sign is flipped.
     sin_lat = jnp.sin(lat)
-    sin_ext = jnp.concatenate([
-        jnp.array([-1.0], dtype=lat.dtype),
-        sin_lat,
-        jnp.array([1.0], dtype=lat.dtype),
-    ])
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
     A_vertex = jnp.maximum(A_vertex, 1e-30)
 
@@ -941,28 +872,23 @@ def strain_rate_cgrid(
     dv_circ = (v_east - v_west) * dy_edge
     dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
 
-    # du/dy at vertex: sign FLIPPED vs curl
-    # curl uses: u_south*dx_south - u_north*dx_north
-    # shear uses: u_north*dx_north - u_south*dx_south
-    zero_u = jnp.zeros((1, n_lon + 1), dtype=u.dtype)
-    u_ext = jnp.concatenate([zero_u, u_eff, zero_u], axis=0)
-    dx_ext = jnp.concatenate([
-        jnp.zeros(1, dtype=lat.dtype), dx_cell, jnp.zeros(1, dtype=lat.dtype),
-    ])
-    u_south = u_ext[:-1, :]
-    u_north = u_ext[1:, :]
+    # du/dy at vertex: sign FLIPPED vs curl.
+    u_ext = jnp.pad(u_eff, ((1, 1), (0, 0), *pad_extra))
+    dx_ext = jnp.pad(dx_cell, (1, 1))
+    u_south = u_ext[:-1]
+    u_north = u_ext[1:]
     dx_south = dx_ext[:-1]
     dx_north = dx_ext[1:]
-    du_circ = (u_north * dx_north[:, jnp.newaxis]
-               - u_south * dx_south[:, jnp.newaxis])
+    du_circ = (u_north * dx_north[lat_bcast]
+               - u_south * dx_south[lat_bcast])
 
-    D_S = (dv_circ_full + du_circ) / A_vertex[:, jnp.newaxis]
-    D_S = D_S.at[0, :].set(0.0)
-    D_S = D_S.at[-1, :].set(0.0)
+    D_S = (dv_circ_full + du_circ) / A_vertex[lat_bcast]
+    # Pole rows zero (wall BC).
+    D_S = jnp.pad(D_S[1:-1], ((1, 1), (0, 0), *pad_extra))
 
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
-        D_S = D_S * vmask
+        D_S = D_S * _bcast2d(vmask)
 
     return D_T, D_S
 
@@ -1078,82 +1004,54 @@ def stress_divergence_cgrid(
     dlat = grid.dlat
     lat = grid.lat
     cos_lat = grid.cos_lat
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
 
     dy = R * dlat       # face_dy: meridional edge length
     dy_edge = R * dlat  # same as dy (edge length for vertex circulation)
     dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at cell-center latitude
 
-    # v-face latitudes and zonal edge lengths
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    # v-face latitudes and zonal edge lengths.  cos(±π/2) is roundoff-
+    # level; build cos_lat_v directly with a 1e-10 floor at the pole
+    # rows via Pad constant_values.
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
+    cos_lat_v = jnp.pad(
+        jnp.maximum(jnp.cos(lat_interior), 1e-10),
+        (1, 1), constant_values=1e-10,
+    )
     dx_v = R * cos_lat_v * dlon  # (n_lat+1,) face_dx at v-face latitudes
 
+    # Reshape lat metric to broadcast over (n_lat, n_lon[+1][, nlev]).
     is_3d = stress_h.ndim == 3
+    lat_bcast = (slice(None),) + (jnp.newaxis,) * (stress_h.ndim - 1)
 
     # =====================================================================
     # tend_u: contribution from D_T adjoint
     # =====================================================================
     # u[i,k] in D_T_num[i,j]:  coeff +dy at j=k-1, coeff -dy at j=k
-    # Adjoint: -[+dy * sh[i,k-1] + (-dy) * sh[i,k]] = dy * (sh[i,k] - sh[i,k-1])
-    #
-    # sh[i,k] - sh[i,k-1] with periodic wrap:
-    sh_west = jnp.roll(stress_h, 1, axis=1)  # sh[:, (k-1)%n_lon]
-    dsh = stress_h - sh_west   # (n_lat, n_lon, ...)
-    # Append periodic wrap (face n_lon = face 0)
-    dsh_full = jnp.concatenate(
-        [dsh, dsh[:, 0:1] if not is_3d else dsh[:, 0:1, :]], axis=1)
+    # Adjoint: dy * (sh[i,k] - sh[i,k-1]) with periodic wrap.
+    sh_west = jnp.roll(stress_h, 1, axis=1)
+    dsh = stress_h - sh_west
+    dsh_full = jnp.concatenate([dsh, dsh[:, 0:1]], axis=1)
     tend_u_DT = dy * dsh_full  # (n_lat, n_lon+1, ...)
 
     # =====================================================================
     # tend_u: contribution from D_S adjoint
     # =====================================================================
-    # D_S_num[m,j] uses u_north[m,j] * dx_north[m] - u_south[m,j] * dx_south[m]
-    # where u_north at vertex m = u[m,j], u_south = u[m-1,j],
-    #       dx_north[m] = dx_cell[m], dx_south[m] = dx_cell[m-1].
-    #
-    # u[i,k] appears at vertex (m=i, k) as u_north: coeff +dx_cell[i]
-    # u[i,k] appears at vertex (m=i+1, k) as u_south: coeff -dx_cell[i]
-    #
-    # Adjoint: -[+dx_cell[i]*sq[i,k] + (-dx_cell[i])*sq[i+1,k]]
-    #        = dx_cell[i] * (sq[i+1,k] - sq[i,k])
-    dsq_meridional = stress_q[1:, :] - stress_q[:-1, :]  # (n_lat, n_lon+1, ...)
-    if is_3d:
-        tend_u_DS = dx_cell[:, jnp.newaxis, jnp.newaxis] * dsq_meridional
-    else:
-        tend_u_DS = dx_cell[:, jnp.newaxis] * dsq_meridional
+    # Adjoint: dx_cell[i] * (sq[i+1,k] - sq[i,k])
+    dsq_meridional = stress_q[1:] - stress_q[:-1]  # (n_lat, n_lon+1, ...)
+    tend_u_DS = dx_cell[lat_bcast] * dsq_meridional
 
     tend_u = tend_u_DT + tend_u_DS
 
     # =====================================================================
     # tend_v: contribution from D_T adjoint
     # =====================================================================
-    # v[m,j] in D_T_num[i,j]:
-    #   v[i+1,j] at D_T[i,j]: coeff -dx_v[i+1]
-    #   v[i,j] at D_T[i,j]:   coeff +dx_v[i]
-    #
-    # So v[m,j] appears in:
-    #   D_T[m-1,j] as v_north: coeff -dx_v[m]
-    #   D_T[m,j] as v_south:   coeff +dx_v[m]
-    #
-    # Adjoint: -[-dx_v[m]*sh[m-1,j] + dx_v[m]*sh[m,j]]
-    #        = dx_v[m] * (sh[m-1,j] - sh[m,j])
-    #
-    # For interior v-faces (m=1..n_lat-1):
-    dsh_merid = stress_h[:-1, :] - stress_h[1:, :]  # sh[m-1,j]-sh[m,j] for m=1..n_lat-1
-    if is_3d:
-        zero_row = jnp.zeros((1, stress_h.shape[1], stress_h.shape[2]),
-                             dtype=stress_h.dtype)
-        tend_v_DT_interior = dx_v[1:-1, jnp.newaxis, jnp.newaxis] * dsh_merid
-    else:
-        zero_row = jnp.zeros((1, stress_h.shape[1]), dtype=stress_h.dtype)
-        tend_v_DT_interior = dx_v[1:-1, jnp.newaxis] * dsh_merid
-    # Pole boundaries: zero (wall BC)
-    tend_v_DT = jnp.concatenate([zero_row, tend_v_DT_interior, zero_row], axis=0)
+    # Adjoint: dx_v[m] * (sh[m-1,j] - sh[m,j]).  Interior v-faces only;
+    # pole rows zero (wall BC).
+    dsh_merid = stress_h[:-1] - stress_h[1:]
+    tend_v_DT_interior = dx_v[1:-1][lat_bcast] * dsh_merid
+    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
+    pad_axes = ((0, 0),) * (tend_v_DT_interior.ndim - 1)
+    tend_v_DT = jnp.pad(tend_v_DT_interior, ((1, 1), *pad_axes))
 
     # =====================================================================
     # tend_v: contribution from D_S adjoint
@@ -1196,12 +1094,8 @@ def stress_divergence_cgrid(
     area_v_dual = jnp.maximum(area_v_dual, 1e-30)
 
     if normalize:
-        if is_3d:
-            tend_u = tend_u / area_u_dual[:, jnp.newaxis, jnp.newaxis]
-            tend_v = tend_v / area_v_dual[:, jnp.newaxis, jnp.newaxis]
-        else:
-            tend_u = tend_u / area_u_dual[:, jnp.newaxis]
-            tend_v = tend_v / area_v_dual[:, jnp.newaxis]
+        tend_u = tend_u / area_u_dual[lat_bcast]
+        tend_v = tend_v / area_v_dual[lat_bcast]
 
     if u_mask is not None:
         um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
@@ -1257,51 +1151,39 @@ def viscous_tendency_cgrid(
     -------
     tend_u, tend_v : dissipative when ADDED to du/dt, dv/dt
     """
+    # Native 2D and 3D — ``strain_rate_cgrid`` and
+    # ``stress_divergence_cgrid`` both natively support 3D inputs.
+    # The only care needed is broadcasting 2D ``A_h``/``A_q``
+    # coefficients over the trailing level axis when the velocity is 3D.
     is_3d = u.ndim == 3
-    if is_3d:
-        u_t = jnp.moveaxis(u, -1, 0)
-        v_t = jnp.moveaxis(v, -1, 0)
 
-        # Handle coefficient broadcasting for vmap
-        if isinstance(A_h, jnp.ndarray) and A_h.ndim == 3:
-            A_h_t = jnp.moveaxis(A_h, -1, 0)
-        else:
-            A_h_t = A_h
-        if isinstance(A_q, jnp.ndarray) and A_q.ndim == 3:
-            A_q_t = jnp.moveaxis(A_q, -1, 0)
-        else:
-            A_q_t = A_q
-
-        if isinstance(A_h_t, jnp.ndarray) and A_h_t.ndim == 3:
-            def _vt_2d(u_k, v_k, ah_k, aq_k):
-                return viscous_tendency_cgrid(
-                    u_k, v_k, grid, ah_k, aq_k,
-                    mask=mask, u_mask=u_mask, v_mask=v_mask,
-                    normalize=normalize)
-            tu_t, tv_t = jax.vmap(_vt_2d)(u_t, v_t, A_h_t, A_q_t)
-        else:
-            def _vt_2d(u_k, v_k):
-                return viscous_tendency_cgrid(
-                    u_k, v_k, grid, A_h, A_q,
-                    mask=mask, u_mask=u_mask, v_mask=v_mask,
-                    normalize=normalize)
-            tu_t, tv_t = jax.vmap(_vt_2d)(u_t, v_t)
-        return jnp.moveaxis(tu_t, 0, -1), jnp.moveaxis(tv_t, 0, -1)
-
-    # --- 2D case ---
+    def _bcast_coef(A, like_shape_ndim):
+        # Add a trailing newaxis if A is a 2D array and the field is 3D.
+        if (
+            is_3d and isinstance(A, jnp.ndarray) and A.ndim == 2
+        ):
+            return A[..., jnp.newaxis]
+        return A
 
     # Apply face masks to input velocities
-    u_eff = u if u_mask is None else u * u_mask
-    v_eff = v if v_mask is None else v * v_mask
+    if u_mask is not None:
+        u_eff = u * (u_mask[..., jnp.newaxis] if is_3d else u_mask)
+    else:
+        u_eff = u
+    if v_mask is not None:
+        v_eff = v * (v_mask[..., jnp.newaxis] if is_3d else v_mask)
+    else:
+        v_eff = v
 
-    # 1. Strain rate
+    # 1. Strain rate (3D-native)
     D_T, D_S = strain_rate_cgrid(u_eff, v_eff, grid, mask=mask)
 
-    # 2. Form stresses
-    stress_h = A_h * D_T
-    stress_q = A_q * D_S
+    # 2. Form stresses (broadcast 2D coefficients over the level axis)
+    stress_h = _bcast_coef(A_h, D_T.ndim) * D_T
+    stress_q = _bcast_coef(A_q, D_S.ndim) * D_S
 
-    # 3. Stress divergence (normalize controls area normalization)
+    # 3. Stress divergence (already 3D-native; normalize controls area
+    # normalization)
     tend_u, tend_v = stress_divergence_cgrid(
         stress_h, stress_q, grid,
         u_mask=u_mask, v_mask=v_mask, normalize=normalize)
@@ -1322,11 +1204,9 @@ def _vertex_area(grid: LatLonGrid) -> jnp.ndarray:
     dlon = grid.dlon
     lat = grid.lat
     sin_lat = jnp.sin(lat)
-    sin_ext = jnp.concatenate([
-        jnp.array([-1.0], dtype=lat.dtype),
-        sin_lat,
-        jnp.array([1.0], dtype=lat.dtype),
-    ])
+    # Single Pad HLO op (constant_values=(-1, 1)) replaces alloc-2-
+    # singletons + concatenate-of-three.
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
     A_v = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
     return jnp.maximum(A_v, 1e-30)
 
@@ -1364,23 +1244,15 @@ def smagorinsky_viscosity_q_cgrid(
     """
     is_3d = D_T.ndim == 3
 
-    # Interpolate D_T from h-points to q-points (4-point average)
-    if is_3d:
-        D_T_q = 0.25 * (D_T[:-1, :, :] + D_T[1:, :, :]
-                         + jnp.roll(D_T, 1, axis=1)[:-1, :, :]
-                         + jnp.roll(D_T, 1, axis=1)[1:, :, :])
-    else:
-        D_T_q = 0.25 * (D_T[:-1, :] + D_T[1:, :]
-                         + jnp.roll(D_T, 1, axis=1)[:-1, :]
-                         + jnp.roll(D_T, 1, axis=1)[1:, :])
+    # Interpolate D_T from h-points to q-points (4-point average).
+    # ``D_T[:-1]`` works for both 2D and 3D (sliced along axis 0).
+    D_T_roll = jnp.roll(D_T, 1, axis=1)
+    D_T_q = 0.25 * (D_T[:-1] + D_T[1:] + D_T_roll[:-1] + D_T_roll[1:])
 
     # D_T_q shape: (n_lat-1, n_lon, ...). Need (n_lat+1, n_lon+1, ...).
-    # Pad pole rows with zero (degenerate vertices)
-    if is_3d:
-        zero_row = jnp.zeros((1, D_T.shape[1], D_T.shape[2]), dtype=D_T.dtype)
-    else:
-        zero_row = jnp.zeros((1, D_T.shape[1]), dtype=D_T.dtype)
-    D_T_q = jnp.concatenate([zero_row, D_T_q, zero_row], axis=0)
+    # Pad pole rows with zero (degenerate vertices).
+    pad_axes = ((0, 0),) * (D_T_q.ndim - 1)
+    D_T_q = jnp.pad(D_T_q, ((1, 1), *pad_axes))
     # Append periodic wrap column
     D_T_q = jnp.concatenate(
         [D_T_q, D_T_q[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1, ...)
@@ -1388,17 +1260,15 @@ def smagorinsky_viscosity_q_cgrid(
     # Small epsilon prevents NaN gradient of sqrt at zero (masked points).
     deformation_q = jnp.sqrt(D_T_q**2 + D_S**2 + 1e-30)
 
-    # Vertex dual cell area
+    # Vertex dual cell area; reshape for broadcast over (n_lat+1, n_lon+1[, nlev]).
     A_vert = _vertex_area(grid)  # (n_lat+1,)
-    Delta_q = jnp.sqrt(A_vert)  # (n_lat+1,)
-    if is_3d:
-        Delta_q = Delta_q[:, jnp.newaxis, jnp.newaxis]
-    else:
-        Delta_q = Delta_q[:, jnp.newaxis]
+    Delta_q = jnp.sqrt(A_vert)
+    bcast = (slice(None),) + (jnp.newaxis,) * (D_T.ndim - 1)
+    Delta_q = Delta_q[bcast]
 
     A_smag_q = (C_smag * Delta_q)**2 * deformation_q
 
-    # Zero at pole vertices and land-adjacent vertices
+    # Zero at pole vertices.
     A_smag_q = A_smag_q.at[0].set(0.0)
     A_smag_q = A_smag_q.at[-1].set(0.0)
 
@@ -1706,20 +1576,19 @@ def leith_viscosity_q_cgrid(
     dlat = grid.dlat
     dlon = grid.dlon
 
-    # Latitudes at q-points: south pole, cell-interface latitudes, north pole.
+    # Cosine of q-point latitudes: cos(±π/2) is roundoff-level, so
+    # build cos_lat_q directly via Pad of cos(interior) with 1e-10 floor
+    # at the pole rows.  Single Pad HLO op replaces alloc-2-singletons +
+    # concatenate-of-three + cos tower.
     lat = grid.lat
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_q = jnp.concatenate([
-        jnp.array([-jnp.pi / 2], dtype=lat.dtype),
-        lat_interior,
-        jnp.array([jnp.pi / 2], dtype=lat.dtype),
-    ])
-    cos_lat_q = jnp.maximum(jnp.cos(lat_q), 1e-10)
+    cos_lat_q = jnp.pad(
+        jnp.maximum(jnp.cos(lat_interior), 1e-10),
+        (1, 1), constant_values=1e-10,
+    )
 
-    if is_3d:
-        cos_lat_q_b = cos_lat_q[:, jnp.newaxis, jnp.newaxis]
-    else:
-        cos_lat_q_b = cos_lat_q[:, jnp.newaxis]
+    bcast = (slice(None),) + (jnp.newaxis,) * (zeta_q.ndim - 1)
+    cos_lat_q_b = cos_lat_q[bcast]
 
     dx_q = R * cos_lat_q_b * dlon
     dy_q = R * dlat
@@ -1750,20 +1619,17 @@ def leith_viscosity_q_cgrid(
                                  u_mask=u_mask, v_mask=v_mask)
         grad_div_h = _grad_div_mag_h(div_h, grid)
         # Interpolate h→q with the same 4-point average used for D_T_q,
-        # then pad pole rows and the wrap column with zeros.
-        if is_3d:
-            gd_q_int = 0.25 * (grad_div_h[:-1, :, :] + grad_div_h[1:, :, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[:-1, :, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[1:, :, :])
-            zero_row = jnp.zeros((1, grad_div_h.shape[1], grad_div_h.shape[2]),
-                                 dtype=grad_div_h.dtype)
-        else:
-            gd_q_int = 0.25 * (grad_div_h[:-1, :] + grad_div_h[1:, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[:-1, :]
-                               + jnp.roll(grad_div_h, 1, axis=1)[1:, :])
-            zero_row = jnp.zeros((1, grad_div_h.shape[1]),
-                                 dtype=grad_div_h.dtype)
-        grad_div_q = jnp.concatenate([zero_row, gd_q_int, zero_row], axis=0)
+        # then pad pole rows and the wrap column with zeros.  ``[:-1]``
+        # / ``[1:]`` slice along axis 0 work for both 2D and 3D.
+        gd_roll = jnp.roll(grad_div_h, 1, axis=1)
+        gd_q_int = 0.25 * (
+            grad_div_h[:-1] + grad_div_h[1:]
+            + gd_roll[:-1] + gd_roll[1:]
+        )
+        # Pole rows zero; single Pad HLO op replaces alloc-zeros +
+        # concatenate-of-three.
+        pad_axes = ((0, 0),) * (gd_q_int.ndim - 1)
+        grad_div_q = jnp.pad(gd_q_int, ((1, 1), *pad_axes))
         grad_div_q = jnp.concatenate(
             [grad_div_q, grad_div_q[:, 0:1]], axis=1)
         total_sq = total_sq + grad_div_q ** 2
@@ -1771,20 +1637,16 @@ def leith_viscosity_q_cgrid(
     norm_q = jnp.sqrt(total_sq + 1e-30)
 
     A_vert = _vertex_area(grid)                          # (n_lat+1,)
-    Delta_q = jnp.sqrt(A_vert)
-    if is_3d:
-        Delta_q = Delta_q[:, jnp.newaxis, jnp.newaxis]
-    else:
-        Delta_q = Delta_q[:, jnp.newaxis]
+    bcast = (slice(None),) + (jnp.newaxis,) * (norm_q.ndim - 1)
+    Delta_q = jnp.sqrt(A_vert)[bcast]
 
     A_leith_q = (C_leith * Delta_q) ** 3 * norm_q
 
-    # Zero at pole vertices and land-adjacent vertices, matching
-    # smagorinsky_viscosity_q_cgrid.
-    zero_first = jnp.zeros_like(A_leith_q[0:1])
-    zero_last = jnp.zeros_like(A_leith_q[-1:])
-    A_leith_q = jnp.concatenate(
-        [zero_first, A_leith_q[1:-1], zero_last], axis=0)
+    # Zero at pole vertices, matching smagorinsky_viscosity_q_cgrid.
+    # Slice + single Pad HLO op replaces zeros_like-of-slice ×2 +
+    # concatenate-of-three.
+    pad_axes = ((0, 0),) * (A_leith_q.ndim - 1)
+    A_leith_q = jnp.pad(A_leith_q[1:-1], ((1, 1), *pad_axes))
 
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
@@ -1867,10 +1729,9 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     interior_full = jnp.concatenate(
         [interior, interior[:, 0:1]], axis=1)  # (n_lat-1, n_lon+1)
 
-    # Pole rows: zero (degenerate vertices)
-    zero_row = jnp.zeros((1, n_lon + 1), dtype=m.dtype)
-
-    return jnp.concatenate([zero_row, interior_full, zero_row], axis=0)
+    # Pole rows zero (degenerate vertices); single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
+    return jnp.pad(interior_full, ((1, 1), (0, 0)))
 
 
 # =============================================================================
@@ -1903,10 +1764,10 @@ def compute_face_masks(
         [u_mask_interior, u_mask_interior[:, 0:1]], axis=1,
     )
 
-    # v-face i is between cell i and cell i+1
+    # v-face i is between cell i and cell i+1.
+    # Pole boundaries: v=0 (always masked).  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
-    # Pole boundaries: v=0 (always masked)
-    zero_row = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
-    v_mask = jnp.concatenate([zero_row, v_mask_interior, zero_row], axis=0)
+    v_mask = jnp.pad(v_mask_interior, ((1, 1), (0, 0)))
 
     return u_mask, v_mask

@@ -239,7 +239,12 @@ def apply_freshwater_virtual_salt_top(
         ``dS_dt`` with the virtual-salt flux added to the top layer.
     """
     dS_top = virtual_salt_flux(freshwater, S_ref, h_top, rho_0)
-    return dS_dt.at[..., 0].add(dS_top * mask)
+    # Cast the freshwater contribution to dS_dt's dtype so the scatter
+    # add does not silently widen on x64 mode (the freshwater struct
+    # is built at JAX-default precision in init helpers, which can be
+    # f64 while the salinity tendency runs at the storage policy's
+    # f32).
+    return dS_dt.at[..., 0].add((dS_top * mask).astype(dS_dt.dtype))
 
 
 def implicit_bottom_drag_factor(

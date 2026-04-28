@@ -158,7 +158,13 @@ def _adjust_one_iteration(
 
         return (T_work, q_work, precip_new), None
 
-    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol))
+    # Pin the precip carry dtype to whatever ``q * dp`` actually
+    # produces inside the scan body — under standard promotion the
+    # compute precision wins when ``q_v`` is at storage precision but
+    # ``dp_rev`` comes from sigma-coord arrays at compute precision.
+    # ``jnp.result_type`` resolves this without materializing a scalar.
+    _precip_dtype = jnp.result_type(q_v_rev, dp_rev)
+    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol, dtype=_precip_dtype))
     level_indices = jnp.arange(1, nlev)
     (T_adj_rev, q_adj_rev, precip_col), _ = jax.lax.scan(
         scan_step, init_carry, level_indices,
@@ -204,10 +210,14 @@ def dca_convection(
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
 
-    # Apply adjustment iterations
+    # Apply adjustment iterations.  ``prec_iter`` returned by the inner
+    # scan inherits ``q * dp`` precision (compute precision wins when
+    # state is f32 but sigma-coord-derived dp is f64), so pin
+    # ``precip_total`` to the same result-type so the outer scan carry
+    # input matches its output.
     T_adj = T
     q_adj = q_v
-    precip_total = jnp.zeros(ncol)
+    precip_total = jnp.zeros(ncol, dtype=jnp.result_type(q_v, dp))
 
     def body_fn(carry, _):
         T_c, q_c, prec = carry
@@ -234,7 +244,25 @@ def dca_convection(
     # Convert to tendencies, gated by CAPE
     dT_dt = cape_gate[:, None] * (T_adj - T) / dt
     dq_v_dt = cape_gate[:, None] * (q_adj - q_v) / dt
-    precipitation = jnp.clip(cape_gate * precip_total / dt, 0.0, None)
+    # Convective source for cloud water — column-conservative
+    # rescaling so that ∫ dq_c_conv_dt dp/g equals the column-net
+    # drying (matches the legacy ``precipitation`` formula). Naive
+    # per-level ``max(-dq_v_dt, 0)`` would create water column-wide
+    # whenever the adjustment has mixed-sign vapor tendencies; this
+    # rescaling removes that bug while keeping the field non-negative
+    # at every level. ``precip_total`` (the scan-accumulated column
+    # total) is no longer surfaced — microphysics owns the surface
+    # precipitation diagnostic.
+    del precip_total
+    local_cond = jnp.maximum(-dq_v_dt, 0.0)
+    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
+    col_net_drying = jnp.clip(
+        -jnp.sum(dq_v_dt * dp / constants.g, axis=-1, keepdims=True),
+        0.0, None,
+    )
+    dq_c_conv_dt = local_cond * (
+        col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
+    )  # (ncol, nlev) [kg/kg/s]
 
     # Convective mask: CAPE-gated
     convective_mask = cape_gate
@@ -242,7 +270,7 @@ def dca_convection(
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        precipitation=precipitation,
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=convective_mask,
     )

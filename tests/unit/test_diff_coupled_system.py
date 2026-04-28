@@ -39,7 +39,7 @@ class TestAtmDynPlusPhysics:
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
         )
-        from tests.test_cases.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.held_suarez import held_suarez_forcing
         from legoesm.core.state import FV3HydrostaticState
 
         n, nlev = 4, 5
@@ -238,7 +238,7 @@ class TestFullAMIPChain:
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
         )
-        from tests.test_cases.held_suarez import held_suarez_forcing
+        from legoesm.atmosphere.held_suarez import held_suarez_forcing
         from legoesm.core.state import FV3HydrostaticState, HydrostaticState
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig

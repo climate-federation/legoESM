@@ -79,13 +79,19 @@ def smagorinsky_turbulence(
     Km_val = config.Km
     Kh_val = Km_val / config.Pr_t
 
-    # Km, Kh at full levels for diagnostics
-    Km_full = jnp.full((ncol, nlev), Km_val)
-    Kh_full = jnp.full((ncol, nlev), Kh_val)
+    # Km, Kh at full levels for diagnostics.  Pin the broadcast dtype to
+    # the input field dtype: ``jnp.full(shape, scalar)`` defaults to
+    # ``float64`` under ``jax_enable_x64=True`` even when the model state
+    # is float32, which silently promotes the whole vertical-diffusion
+    # solve to f64 (twice the GPU memory bandwidth and a forced cast at
+    # the ``rhs.at[].add`` line in implicit_vertical_diffusion).
+    _dtype = T.dtype
+    Km_full = jnp.full((ncol, nlev), Km_val, dtype=_dtype)
+    Kh_full = jnp.full((ncol, nlev), Kh_val, dtype=_dtype)
 
     # K at half-levels (interfaces): average of adjacent full levels
-    K_half_m = jnp.full((ncol, nlev - 1), Km_val)
-    K_half_h = jnp.full((ncol, nlev - 1), Kh_val)
+    K_half_m = jnp.full((ncol, nlev - 1), Km_val, dtype=_dtype)
+    K_half_h = jnp.full((ncol, nlev - 1), Kh_val, dtype=_dtype)
 
     # Layer thicknesses
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])  # (ncol, nlev)

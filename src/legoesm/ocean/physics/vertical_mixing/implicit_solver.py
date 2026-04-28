@@ -136,11 +136,11 @@ def implicit_vertical_diffusion_ocean(
     # K / dz_half at interfaces (nlev-1)
     flux_coeff = K_safe / dzh_safe                   # (..., nlev-1)
 
-    # Pad top and bottom with zero (no-flux):
-    zero_face = jnp.zeros(flux_coeff.shape[:-1] + (1,),
-                          dtype=flux_coeff.dtype)
-    flux_top = jnp.concatenate([zero_face, flux_coeff], axis=-1)  # (..., nlev)
-    flux_bot = jnp.concatenate([flux_coeff, zero_face], axis=-1)  # (..., nlev)
+    # Pad top and bottom with zero (no-flux).  Two Pad HLO ops replace
+    # alloc-zeros + two concatenate-of-two.
+    pad_axes = ((0, 0),) * (flux_coeff.ndim - 1)
+    flux_top = jnp.pad(flux_coeff, (*pad_axes, (1, 0)))  # (..., nlev)
+    flux_bot = jnp.pad(flux_coeff, (*pad_axes, (0, 1)))  # (..., nlev)
 
     inv_dz = 1.0 / jnp.maximum(dz_arr, _EPS)          # (..., nlev)
     alpha = dt * flux_top * inv_dz                    # (..., nlev)

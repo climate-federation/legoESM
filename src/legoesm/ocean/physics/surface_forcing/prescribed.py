@@ -47,23 +47,37 @@ def prescribed_surface_forcing(
     # Wind stress from shared grid-agnostic computation
     tau_x, tau_y = compute_wind_stress(grid.grid_lat, cfg)
 
-    du_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dv_dt = jnp.zeros(shape_3d, dtype=dtype)
-    du_dt = du_dt.at[..., 0].set(tau_x * inv_rho_dz)
-    dv_dt = dv_dt.at[..., 0].set(tau_y * inv_rho_dz)
+    # Build top-layer-only tendencies via ``jnp.pad`` along the
+    # trailing axis instead of allocating a fresh full ``(*, nlev)``
+    # zero buffer per field and scattering the surface row.  Single
+    # Pad HLO op each — this physics fires every ocean step in
+    # configurations that use the prescribed surface forcing.
+    nlev = shape_3d[-1]
+    pad_axes = ((0, 0),) * (len(shape_3d) - 1)
+    du_dt = jnp.pad(
+        (tau_x * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
+    dv_dt = jnp.pad(
+        (tau_y * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
 
     # Heat flux: dT/dt = Q_net / (rho_0 * c_sw * dz_0)
     Q_net = jnp.full_like(dz_0, cfg.Q_net, dtype=dtype)
     inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
-    dT_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dT_dt = dT_dt.at[..., 0].set(Q_net * inv_rho_csw_dz)
+    dT_dt = jnp.pad(
+        (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
 
     # Freshwater (virtual salt flux): dS/dt = +S * E_minus_P / dz_0
     # Positive E-P means net evaporation → water leaves → salt concentrates → dS/dt > 0
-    dS_dt = jnp.zeros(shape_3d, dtype=dtype)
     if cfg.E_minus_P != 0.0:
         inv_dz = 1.0 / jnp.maximum(dz_0, 1e-10)
-        dS_dt = dS_dt.at[..., 0].set(S[..., 0] * cfg.E_minus_P * inv_dz)
+        dS_dt = jnp.pad(
+            (S[..., 0] * cfg.E_minus_P * inv_dz)[..., None],
+            (*pad_axes, (0, nlev - 1)),
+        )
+    else:
+        dS_dt = jnp.zeros(shape_3d, dtype=dtype)
 
     return SurfaceForcingOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dS_dt=dS_dt,

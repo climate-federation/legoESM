@@ -50,8 +50,13 @@ def linear_bottom_drag(
     dz_bottom = z_coord.dz_ref[-1] * jacobian  # (...)
     inv_dz = 1.0 / jnp.maximum(dz_bottom, _EPS)
 
-    du_dt = jnp.zeros_like(u)
-    dv_dt = jnp.zeros_like(v)
-    du_dt = du_dt.at[..., -1].set(-cfg.r * u[..., -1] * inv_dz)
-    dv_dt = dv_dt.at[..., -1].set(-cfg.r * v[..., -1] * inv_dz)
+    # Pad with zero on top instead of allocating ``zeros_like`` and
+    # scattering only the bottom row.  Single Pad HLO op vs alloc +
+    # dynamic_update_slice.
+    nlev = u.shape[-1]
+    drag_u = -cfg.r * u[..., -1] * inv_dz
+    drag_v = -cfg.r * v[..., -1] * inv_dz
+    pad_axes = ((0, 0),) * (drag_u.ndim)
+    du_dt = jnp.pad(drag_u[..., None], (*pad_axes, (nlev - 1, 0)))
+    dv_dt = jnp.pad(drag_v[..., None], (*pad_axes, (nlev - 1, 0)))
     return BottomDragOutput(du_dt=du_dt, dv_dt=dv_dt)

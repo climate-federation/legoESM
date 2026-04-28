@@ -208,7 +208,7 @@ def step_multilayer_land(
             lat, snow, snow_age, config.land_albedo,
         )
     else:
-        alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_surface.shape)
+        alpha = jnp.full(T_surface.shape, albedo_land, dtype=T_surface.dtype)
 
     # --- Radiation ---
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
@@ -395,8 +395,8 @@ def step_multilayer_land(
     response = TileResponse(
         T_surface=T_surface_new,
         albedo=alpha_new,
-        emissivity=jnp.broadcast_to(jnp.asarray(emissivity), T_surface.shape),
-        z0=jnp.broadcast_to(jnp.asarray(z0), T_surface.shape),
+        emissivity=jnp.full(T_surface.shape, emissivity, dtype=T_surface.dtype),
+        z0=jnp.full(T_surface.shape, z0, dtype=T_surface.dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx_actual,

@@ -28,6 +28,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -175,76 +176,115 @@ class OceanModel:
             )
 
     def _assert_runtime_invariants(self, state: OceanState) -> None:
-        """Host-side runtime checks for debugging/regression hardening."""
+        """Host-side runtime checks for debugging/regression hardening.
+
+        All reductions are fused into a single ``jnp.stack`` and pulled
+        to host with one ``np.asarray`` call so enabling
+        ``enable_runtime_checks`` costs one GPU→host sync per step
+        instead of 11.
+        """
+        u = state.u.data
+        v = state.v.data
+        T = state.T.data
+        S = state.S.data
+        eta = state.eta.data
+        H_bathy = state.H_bathy.data
         mask = state.land_mask.data
+
         wet = mask > 0.5
         land = ~wet
+        wet3 = wet[..., jnp.newaxis]
+        land3 = jnp.broadcast_to(land[..., jnp.newaxis], u.shape)
+        any_wet = jnp.any(wet)
+        any_land = jnp.any(land)
+        water_col = eta + H_bathy
 
-        finite_ok = bool(
-            jnp.all(jnp.isfinite(state.u.data))
-            & jnp.all(jnp.isfinite(state.v.data))
-            & jnp.all(jnp.isfinite(state.T.data))
-            & jnp.all(jnp.isfinite(state.S.data))
-            & jnp.all(jnp.isfinite(state.eta.data))
-            & jnp.all(jnp.isfinite(state.H_bathy.data))
+        finite_ok = (
+            jnp.all(jnp.isfinite(u))
+            & jnp.all(jnp.isfinite(v))
+            & jnp.all(jnp.isfinite(T))
+            & jnp.all(jnp.isfinite(S))
+            & jnp.all(jnp.isfinite(eta))
+            & jnp.all(jnp.isfinite(H_bathy))
         )
-        if not finite_ok:
-            raise FloatingPointError("Ocean runtime check failed: non-finite state detected")
 
-        water_col = state.eta.data + state.H_bathy.data
-        min_water_col = float(
-            jnp.min(jnp.where(wet, water_col, jnp.inf))
-        ) if bool(jnp.any(wet)) else float("inf")
+        # Mask reductions so the safe scalars can be shipped together.
+        T_wet = jnp.where(wet3, T, jnp.nan)
+        S_wet = jnp.where(wet3, S, jnp.nan)
+        eta_wet = jnp.where(wet, eta, 0.0)
+        wc_wet = jnp.where(wet, water_col, jnp.inf)
+
+        u_land = jnp.where(land3, u, 0.0)
+        v_land = jnp.where(land3, v, 0.0)
+        eta_land = jnp.where(land, eta, 0.0)
+
+        _stats = jnp.stack([
+            finite_ok.astype(eta.dtype),
+            any_wet.astype(eta.dtype),
+            any_land.astype(eta.dtype),
+            jnp.min(wc_wet).astype(eta.dtype),
+            jnp.max(jnp.abs(eta_wet)).astype(eta.dtype),
+            jnp.nanmin(T_wet).astype(eta.dtype),
+            jnp.nanmax(T_wet).astype(eta.dtype),
+            jnp.nanmin(S_wet).astype(eta.dtype),
+            jnp.nanmax(S_wet).astype(eta.dtype),
+            jnp.max(jnp.abs(u_land)).astype(eta.dtype),
+            jnp.max(jnp.abs(v_land)).astype(eta.dtype),
+            jnp.max(jnp.abs(eta_land)).astype(eta.dtype),
+        ])
+        host = np.asarray(_stats)
+        finite_ok_h = bool(host[0] > 0.5)
+        any_wet_h = bool(host[1] > 0.5)
+        any_land_h = bool(host[2] > 0.5)
+        min_water_col = float(host[3]) if any_wet_h else float("inf")
+        eta_abs = float(host[4]) if any_wet_h else 0.0
+        T_min = float(host[5]) if any_wet_h else float("nan")
+        T_max = float(host[6]) if any_wet_h else float("nan")
+        S_min = float(host[7]) if any_wet_h else float("nan")
+        S_max = float(host[8]) if any_wet_h else float("nan")
+        max_land_u = float(host[9])
+        max_land_v = float(host[10])
+        max_land_eta = float(host[11])
+
+        if not finite_ok_h:
+            raise FloatingPointError("Ocean runtime check failed: non-finite state detected")
         if min_water_col < self.config.min_water_column_m:
             raise ValueError(
                 "Ocean runtime check failed: water column too small. "
                 f"min(eta+H_bathy)={min_water_col:.6g} m, "
                 f"threshold={self.config.min_water_column_m:.6g} m",
             )
-
-        eta_abs = float(
-            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0)))
-        ) if bool(jnp.any(wet)) else 0.0
         if eta_abs > self.config.max_abs_eta_m:
             raise ValueError(
                 "Ocean runtime check failed: |eta| exceeded threshold. "
                 f"max|eta|={eta_abs:.6g} m, threshold={self.config.max_abs_eta_m:.6g} m",
             )
-
-        if bool(jnp.any(wet)):
-            T_ocean = jnp.where(wet[..., jnp.newaxis], state.T.data, jnp.nan)
-            T_min = float(jnp.nanmin(T_ocean))
-            T_max = float(jnp.nanmax(T_ocean))
-            if T_min < self.config.temperature_min_c or T_max > self.config.temperature_max_c:
-                raise ValueError(
-                    "Ocean runtime check failed: temperature out of bounds. "
-                    f"range=[{T_min:.3f}, {T_max:.3f}] C, "
-                    f"bounds=[{self.config.temperature_min_c:.3f}, "
-                    f"{self.config.temperature_max_c:.3f}] C",
-                )
-
-            S_ocean = jnp.where(wet[..., jnp.newaxis], state.S.data, jnp.nan)
-            S_min = float(jnp.nanmin(S_ocean))
-            S_max = float(jnp.nanmax(S_ocean))
-            if S_min < self.config.salinity_min_psu or S_max > self.config.salinity_max_psu:
-                raise ValueError(
-                    "Ocean runtime check failed: salinity out of bounds. "
-                    f"range=[{S_min:.3f}, {S_max:.3f}] PSU, "
-                    f"bounds=[{self.config.salinity_min_psu:.3f}, "
-                    f"{self.config.salinity_max_psu:.3f}] PSU",
-                )
-
-        if bool(jnp.any(land)):
-            land_3d = jnp.broadcast_to(land[..., jnp.newaxis], state.u.data.shape)
-            max_land_u = float(jnp.max(jnp.abs(jnp.where(land_3d, state.u.data, 0.0))))
-            max_land_v = float(jnp.max(jnp.abs(jnp.where(land_3d, state.v.data, 0.0))))
-            max_land_eta = float(jnp.max(jnp.abs(jnp.where(land, state.eta.data, 0.0))))
-            if max(max_land_u, max_land_v, max_land_eta) > 1.0e-8:
-                raise ValueError(
-                    "Ocean runtime check failed: land cells are not zero. "
-                    f"max(|u_land|,|v_land|,|eta_land|)="
-                    f"{max(max_land_u, max_land_v, max_land_eta):.3e}",
-                )
+        if any_wet_h and (
+            T_min < self.config.temperature_min_c
+            or T_max > self.config.temperature_max_c
+        ):
+            raise ValueError(
+                "Ocean runtime check failed: temperature out of bounds. "
+                f"range=[{T_min:.3f}, {T_max:.3f}] C, "
+                f"bounds=[{self.config.temperature_min_c:.3f}, "
+                f"{self.config.temperature_max_c:.3f}] C",
+            )
+        if any_wet_h and (
+            S_min < self.config.salinity_min_psu
+            or S_max > self.config.salinity_max_psu
+        ):
+            raise ValueError(
+                "Ocean runtime check failed: salinity out of bounds. "
+                f"range=[{S_min:.3f}, {S_max:.3f}] PSU, "
+                f"bounds=[{self.config.salinity_min_psu:.3f}, "
+                f"{self.config.salinity_max_psu:.3f}] PSU",
+            )
+        if any_land_h and max(max_land_u, max_land_v, max_land_eta) > 1.0e-8:
+            raise ValueError(
+                "Ocean runtime check failed: land cells are not zero. "
+                f"max(|u_land|,|v_land|,|eta_land|)="
+                f"{max(max_land_u, max_land_v, max_land_eta):.3e}",
+            )
 
     def tendencies(self, state: OceanState, surface_forcing=None):
         """Compute baroclinic tendencies (pure function wrapper)."""

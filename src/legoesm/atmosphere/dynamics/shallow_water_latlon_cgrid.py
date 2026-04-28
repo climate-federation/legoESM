@@ -125,12 +125,17 @@ def absolute_vorticity_coriolis(
     zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1[, nlev])
 
     # --- Planetary vorticity at vertices ---
+    # sin(±π/2) = ±1 exactly, so build f_vert directly from the
+    # interior sin via Pad with constant_values = ±2Ω.  Single
+    # Pad HLO op replaces alloc-2-singletons + concatenate-of-three +
+    # sin tower.
     lat = grid.lat  # cell-center latitudes
-    lat_sp = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_np = jnp.array([jnp.pi / 2], dtype=lat.dtype)
     lat_int = 0.5 * (lat[:-1] + lat[1:])
-    lat_vert = jnp.concatenate([lat_sp, lat_int, lat_np])
-    f_vert = 2.0 * constants.Omega * jnp.sin(lat_vert)  # (n_lat+1,)
+    twoOmega = 2.0 * constants.Omega
+    f_vert = jnp.pad(
+        twoOmega * jnp.sin(lat_int),
+        (1, 1), constant_values=(-twoOmega, twoOmega),
+    )  # (n_lat+1,)
 
     # Absolute vorticity at vertices
     if is_3d:
@@ -156,12 +161,14 @@ def absolute_vorticity_coriolis(
     eta_at_v = 0.5 * (eta[:, :-1] + eta[:, 1:])  # (n_lat+1, n_lon[, nlev])
 
     # --- Average u to v-faces (4-point, same as coriolis_cgrid) ---
+    # Use ``jnp.pad`` on the leading axis instead of allocating
+    # ``zero_row`` twice and concatenating — one HLO Pad op vs
+    # alloc + concat.
     u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
     if is_3d:
-        zero_row = jnp.zeros((1, n_lon, u.shape[2]), dtype=u.dtype)
+        u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0), (0, 0)))
     else:
-        zero_row = jnp.zeros((1, n_lon), dtype=u.dtype)
-    u_at_v = jnp.concatenate([zero_row, u_avg_interior, zero_row], axis=0)
+        u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0)))
 
     # --- Coriolis terms ---
     cor_u = eta_at_u * v_at_u
@@ -257,7 +264,9 @@ def cgrid_latlon_sw_tendencies(
 
     # Enforce zero tendency at poles (wall BC) so intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    dv_dt = dv_dt.at[0, :].set(0.0).at[-1, :].set(0.0)
+    # Single ``Pad`` HLO op replaces two ``ScatterUpdate`` ops on the
+    # lat axis — same per-RK-stage pattern as the lat-lon C-grid PE.
+    dv_dt = jnp.pad(dv_dt[1:-1, :], ((1, 1), (0, 0)))
 
     return dh_dt, du_dt, dv_dt
 
@@ -354,8 +363,8 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
             state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Enforce v = 0 at poles
-        v_new = state_new.v.at[0, :].set(0.0).at[-1, :].set(0.0)
+        # Enforce v = 0 at poles via a single Pad HLO op.
+        v_new = jnp.pad(state_new.v[1:-1, :], ((1, 1), (0, 0)))
         state_new = state_new._replace(v=v_new)
 
         # Conservation fixer (use float64 accumulation for precision)

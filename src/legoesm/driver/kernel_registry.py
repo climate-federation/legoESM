@@ -71,7 +71,7 @@ CONVECTION_REGISTRY: dict[str, _Entry] = {
         "mass_flux_convection",
     ),
     "edmf": (
-        "legoesm.atmosphere.physics.convection.edmf",
+        "legoesm.atmosphere.physics.convection.mass_flux",
         "edmf_convection",
     ),
 }

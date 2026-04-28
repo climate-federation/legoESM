@@ -326,13 +326,12 @@ def compute_sigma_dot(
         fractional_sigma * D_total - cumsum_div
     )  # (...,nlev)
 
-    # Prepend top (σ̇=0)
-    shape_horiz = div_3d.shape[:-1]  # spatial dims
-    zero_top = jnp.zeros((*shape_horiz, 1))
-    sigma_dot = jnp.concatenate([zero_top, sigma_dot_inner], axis=-1)  # (...,nlev+1)
-
-    # Force bottom boundary (should be zero by construction, enforce for safety)
-    sigma_dot = sigma_dot.at[..., -1].set(0.0)
+    # Prepend top (σ̇=0) and force bottom boundary (zero by construction).
+    # Drop the (∼0) last element + pad with zeros on both ends in one
+    # ``jnp.pad`` — replaces alloc-zeros + concatenate + scatter (3 HLO
+    # ops) with slice + Pad (2 HLO ops).
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1)
+    sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], (*pad_axes, (1, 1)))
 
     return sigma_dot
 
@@ -372,25 +371,18 @@ def vertical_advection(
     # Interpolate σ̇ from half-levels to full levels
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])  # (6,n,n,nlev)
 
-    # Backward difference: ∂f/∂σ ≈ (f_k - f_{k-1}) / (σ_k - σ_{k-1})
-    # Pad top with zero-gradient BC: f_{-1} = f_0
+    # Backward / forward differences both consume ``df_bwd / dsigma_bwd``
+    # — compute the inner gradient once and pad along the trailing
+    # axis instead of building two padded arrays via fresh
+    # ``jnp.zeros`` + concatenate.  Single Pad HLO op each.
     dsigma_bwd = sigma_coord.dsigma_full  # (nlev-1,) precomputed diff(sigma_full)
     df_bwd = jnp.diff(field, axis=-1)  # (...,nlev-1) f_{k+1} - f_k
+    df_over = df_bwd / dsigma_bwd
+    pad_axes = ((0, 0),) * (df_over.ndim - 1)
     # At k=0 (top level): backward gradient = 0 (zero-gradient BC)
-    shape_horiz = field.shape[:-1]  # spatial dims
-    grad_bwd = jnp.concatenate(
-        [jnp.zeros((*shape_horiz, 1)),
-         df_bwd / dsigma_bwd],
-        axis=-1,
-    )  # (...,nlev)
-
-    # Forward difference: ∂f/∂σ ≈ (f_{k+1} - f_k) / (σ_{k+1} - σ_k)
+    grad_bwd = jnp.pad(df_over, (*pad_axes, (1, 0)))
     # At k=nlev-1 (bottom level): forward gradient = 0 (zero-gradient BC)
-    grad_fwd = jnp.concatenate(
-        [df_bwd / dsigma_bwd,
-         jnp.zeros((*shape_horiz, 1))],
-        axis=-1,
-    )  # (...,nlev)
+    grad_fwd = jnp.pad(df_over, (*pad_axes, (0, 1)))
 
     # Upwind selection: σ̇ > 0 (downward) → backward, σ̇ < 0 (upward) → forward
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
@@ -981,13 +973,12 @@ def compute_mass_flux_hybrid(
     frac_B = (coord.B_half[1:] - B_top) / coord.B_range  # (nlev,)
     mass_flux_inner = frac_B * D_total_p - cumsum_div  # (..., nlev)
 
-    # Prepend top (F=0)
-    shape_horiz = div_3d.shape[:-1]
-    zero_top = jnp.zeros((*shape_horiz, 1))
-    mass_flux = jnp.concatenate([zero_top, mass_flux_inner], axis=-1)
-
-    # Force bottom boundary
-    mass_flux = mass_flux.at[..., -1].set(0.0)
+    # Prepend top (F=0) and force bottom boundary (zero by construction).
+    # Drop the (∼0) last element + pad with zeros on both ends in one
+    # ``jnp.pad`` — replaces alloc-zeros + concatenate + scatter (3 HLO
+    # ops) with slice + Pad (2 HLO ops).
+    pad_axes = ((0, 0),) * (mass_flux_inner.ndim - 1)
+    mass_flux = jnp.pad(mass_flux_inner[..., :-1], (*pad_axes, (1, 1)))
 
     return mass_flux
 
@@ -1029,16 +1020,14 @@ def vertical_advection_hybrid(
     dp_full = jnp.diff(p_full, axis=-1)  # (..., nlev-1)
     dp_full_safe = jnp.clip(jnp.abs(dp_full), 1e-10, None)
 
-    # Vertical gradient df/dp with upwind differencing
+    # Vertical gradient df/dp with upwind differencing.  Pad along the
+    # trailing axis instead of allocating fresh ``zeros`` and
+    # concatenating — single Pad HLO op each.
     df = jnp.diff(field, axis=-1)  # (..., nlev-1)
-
-    shape_horiz = field.shape[:-1]
-    grad_bwd = jnp.concatenate(
-        [jnp.zeros((*shape_horiz, 1)), df / dp_full_safe], axis=-1
-    )
-    grad_fwd = jnp.concatenate(
-        [df / dp_full_safe, jnp.zeros((*shape_horiz, 1))], axis=-1
-    )
+    df_over = df / dp_full_safe
+    pad_axes = ((0, 0),) * (df_over.ndim - 1)
+    grad_bwd = jnp.pad(df_over, (*pad_axes, (1, 0)))
+    grad_fwd = jnp.pad(df_over, (*pad_axes, (0, 1)))
 
     # Upwind: F > 0 (downward mass flux) → backward difference
     grad = jnp.where(F_full > 0, grad_bwd, grad_fwd)

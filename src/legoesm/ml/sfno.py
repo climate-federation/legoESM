@@ -46,6 +46,12 @@ class SFNOConfig(NamedTuple):
         Expansion factor for pointwise MLPs within blocks.
     residual_prediction : bool
         If True, predict residuals: output = input[:out_channels] + decoder(...).
+    gradient_checkpoint : bool
+        If True, wrap each processor block in ``jax.checkpoint`` so the
+        backward pass rematerialises block activations from the input
+        instead of storing them.  Trades ~30 % extra forward compute for
+        roughly ``n_blocks`` × less peak training memory.  Default off:
+        leave inference unaffected and let training drivers opt in.
     """
     in_channels: int = 4
     out_channels: int = 4
@@ -53,6 +59,7 @@ class SFNOConfig(NamedTuple):
     n_blocks: int = 8
     mlp_expansion: int = 4
     residual_prediction: bool = True
+    gradient_checkpoint: bool = False
 
 
 class SFNO(eqx.Module):
@@ -129,9 +136,20 @@ class SFNO(eqx.Module):
         # Encoder: (n_lat, n_lon, in_channels) → (n_lat, n_lon, embed_dim)
         x = jax.vmap(jax.vmap(self.encoder))(x)
 
-        # Processor: N SFNO blocks
+        # Processor: N SFNO blocks.  When ``gradient_checkpoint`` is
+        # set, wrap each block call in ``jax.checkpoint`` so the
+        # backward pass rematerialises block activations from the
+        # block input instead of storing them — typically ``n_blocks×``
+        # peak-memory reduction at training time, ~30 % extra forward
+        # FLOPs.  Inference (no AD) is unaffected because checkpoint
+        # is a no-op outside of grad transforms.
         for block in self.blocks:
-            x = block(x, grid)
+            if self.config.gradient_checkpoint:
+                x = jax.checkpoint(
+                    lambda x_, b=block: b(x_, grid), prevent_cse=False,
+                )(x)
+            else:
+                x = block(x, grid)
 
         # Decoder: (n_lat, n_lon, embed_dim) → (n_lat, n_lon, out_channels)
         x = jax.vmap(jax.vmap(self.decoder))(x)

@@ -280,7 +280,13 @@ class PhysicsPipeline:
             )
         dT_dt_conv = ad.unflatten_3d(conv_out.dT_dt)
         dq_v_dt_conv = ad.unflatten_3d(conv_out.dq_v_dt)
-        precip = ad.unflatten_2d(conv_out.precipitation)
+        # Convection no longer surfaces its own precip diagnostic. Its
+        # detrained condensate joins the cloud-water bucket and is
+        # routed through microphysics for proper sedimentation /
+        # melting / evaporation; surface precipitation is owned by
+        # ``micro_out.precipitation`` (read into ``precip_micro`` below).
+        dq_c_dt_conv = ad.unflatten_3d(conv_out.dq_c_conv_dt)
+        precip = jnp.zeros(shape_2d, dtype=T.dtype)
 
         # Microphysics (resolved kernel — no dispatch here)
         _sd = T.dtype  # inherit storage dtype from state arrays
@@ -364,6 +370,14 @@ class PhysicsPipeline:
             dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
+
+        # Convection→microphysics coupling: detrained convective
+        # condensate is added to the cloud-water tendency. Microphysics
+        # processes the augmented bucket on the next step (operator
+        # splitting), giving proper autoconversion / sedimentation /
+        # evaporation for convective rain instead of the previous
+        # instant-fall assumption.
+        dq_c_dt = dq_c_dt + dq_c_dt_conv
 
         # Boundary layer exchange (grid-agnostic: uses [..., -1] indexing)
         rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T[..., -1])
@@ -856,7 +870,7 @@ def _noop_convection(T, q_v, p_full, p_half, dt, config):
     z2 = jnp.zeros_like(T)
     z1 = jnp.zeros((ncol,), dtype=T.dtype)
     return ConvectionOutput(
-        dT_dt=z2, dq_v_dt=z2, precipitation=z1, cape=z1, convective_mask=z1,
+        dT_dt=z2, dq_v_dt=z2, dq_c_conv_dt=z2, cape=z1, convective_mask=z1,
     )
 
 

@@ -61,6 +61,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import jax
 import numpy as np
 
 
@@ -1060,9 +1061,21 @@ class CFWriter:
             ),
         )
 
+        # ---- Pre-fetch all device arrays in a single ``jax.device_get`` ----
+        # so the JAX runtime can pipeline the per-variable transfers in
+        # parallel.  The previous per-key ``_to_numpy(arr_raw)`` chain
+        # forced ~50 sequential device→host blocking syncs at every
+        # CMIP6 monthly write.
+        _device_values = [monthly_data[k] for k in sorted_keys]
+        try:
+            _host_values = jax.device_get(_device_values)
+        except Exception:
+            _host_values = _device_values
+        _host_lookup = {k: v for k, v in zip(sorted_keys, _host_values)}
+
         # ---- Process each key in the monthly_data dict ----
         for key in sorted_keys:
-            arr_raw = monthly_data[key]
+            arr_raw = _host_lookup[key]
             arr = _to_numpy(arr_raw)
 
             # Determine CMOR variable name from key prefix

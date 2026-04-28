@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
-from legoesm.core.operators import divergence
+from legoesm.core.operators_3d import divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
 
@@ -42,32 +41,28 @@ def advect_ice_tracers(
     transport.  This is **not** an upwind/monotone scheme — physical
     bounds are enforced by post-transport clamping.
 
+    Accepts both single-category 2D inputs ``(6, n, n)`` and multi-category
+    3D inputs ``(6, n, n, n_cat)``.  For multi-category, the divergence is
+    computed in a single batched call (one ``pad_halo_vector_4d`` MPI
+    exchange across all categories and all three quantities), avoiding the
+    O(n_cat × 3) halo cost of the previous vmap-over-categories pattern.
+
     Parameters
     ----------
-    h_ice : array (6, n, n)
-        Ice thickness [m].
-    concentration : array (6, n, n)
-        Areal fraction [0-1].
-    T_ice : array (6, n, n)
-        Ice surface temperature [K].
+    h_ice, concentration, T_ice : arrays (6, n, n) or (6, n, n, n_cat)
+        Ice tracer fields.
     u_ice, v_ice : arrays (6, n, n)
-        Ice velocity [m/s].
+        Ice velocity [m/s] — same wind across all categories.
     grid : CubedSphereGrid
     dt : float
         Timestep [s].
-    T_ice_min : float
-        Lower temperature bound [K] (default 180).
-    T_freeze_ocean : float
-        Upper temperature bound [K] (default 271.35).
+    T_ice_min, T_freeze_ocean : float
+        Physical temperature bounds [K].
 
     Returns
     -------
-    h_new : array (6, n, n)
-        Updated thickness (clamped >= 0).
-    conc_new : array (6, n, n)
-        Updated concentration (clamped to [0, 1]).
-    T_new : array (6, n, n)
-        Updated temperature (clamped to [T_ice_min, T_freeze_ocean]).
+    h_new, conc_new, T_new : arrays
+        Updated tracer fields with the same shape as the inputs.
     """
     eps = 1e-20
 
@@ -76,19 +71,39 @@ def advect_ice_tracers(
     # Enthalpy = T * h * a (conserved for temperature advection)
     enthalpy = T_ice * vol
 
-    # Flux-form transport: dq/dt = -div(q * u)
-    # Using the existing cubed-sphere divergence operator
-    u_f = Field(data=u_ice * vol, name="flux_u", dims=("face", "x", "y"), units="m^2/s")
-    v_f = Field(data=v_ice * vol, name="flux_v", dims=("face", "x", "y"), units="m^2/s")
-    div_vol = divergence(u_f, v_f, grid).data
+    # Stack [vol, conc, enth] along a trailing axis so a single
+    # ``divergence_3d`` (one ``pad_halo_vector_4d`` MPI exchange) handles
+    # all three quantities at once.  For multi-category 3D inputs the
+    # category axis is folded in too, giving one halo exchange instead of
+    # ``n_cat × 3`` under the prior vmap-over-categories + per-quantity
+    # divergence pattern.
+    is_multicat = h_ice.ndim == 4
+    if is_multicat:
+        # (6, n, n, n_cat) → stack to (6, n, n, n_cat, 3) → flatten the
+        # last two axes so the operator sees a single trailing axis.
+        n_cat = h_ice.shape[-1]
+        stacked = jnp.stack([vol, concentration, enthalpy], axis=-1)
+        # (6, n, n, n_cat, 3)
+        stacked_flat = stacked.reshape(*stacked.shape[:3], n_cat * 3)
+    else:
+        # 2D inputs: stack to (6, n, n, 3).
+        stacked_flat = jnp.stack([vol, concentration, enthalpy], axis=-1)
 
-    u_a = Field(data=u_ice * concentration, name="flux_u", dims=("face", "x", "y"), units="1/s")
-    v_a = Field(data=v_ice * concentration, name="flux_v", dims=("face", "x", "y"), units="1/s")
-    div_conc = divergence(u_a, v_a, grid).data
+    # Flux components: u_ice and v_ice are (6, n, n) and broadcast across
+    # the trailing axis via ``[..., None]``.
+    u_flux = u_ice[..., None] * stacked_flat
+    v_flux = v_ice[..., None] * stacked_flat
+    div_flat = divergence_3d(u_flux, v_flux, grid)
 
-    u_e = Field(data=u_ice * enthalpy, name="flux_u", dims=("face", "x", "y"), units="K*m^2/s")
-    v_e = Field(data=v_ice * enthalpy, name="flux_v", dims=("face", "x", "y"), units="K*m^2/s")
-    div_enth = divergence(u_e, v_e, grid).data
+    if is_multicat:
+        div_stack = div_flat.reshape(*stacked.shape)  # (6, n, n, n_cat, 3)
+        div_vol = div_stack[..., 0]
+        div_conc = div_stack[..., 1]
+        div_enth = div_stack[..., 2]
+    else:
+        div_vol = div_flat[..., 0]
+        div_conc = div_flat[..., 1]
+        div_enth = div_flat[..., 2]
 
     # Forward Euler update
     vol_new = jnp.maximum(vol - dt * div_vol, 0.0)

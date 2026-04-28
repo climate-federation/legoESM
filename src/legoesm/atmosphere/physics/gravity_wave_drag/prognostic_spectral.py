@@ -166,8 +166,14 @@ def prognostic_spectral_gwd(
     # Column dissipation (positive-definite: KE lost by the mean flow)
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
-    # Prognostic spectrum update: relax toward launch source
-    launch_source = jnp.full((ncol, n_az, n_wn), config.launch_flux)
+    # Prognostic spectrum update: relax toward launch source.  Pin the
+    # broadcast dtype to the input spectrum dtype so the relaxation
+    # stays at the input precision (defaulting to ``jnp.full`` allows
+    # x64 mode to silently promote the spectrum to f64 even when the
+    # state is f32).
+    launch_source = jnp.full(
+        (ncol, n_az, n_wn), config.launch_flux, dtype=spectrum_in.dtype,
+    )
     spectrum_new = spectrum_in + dt * (launch_source - spectrum_in) / config.tau_decay
 
     return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd), spectrum_new

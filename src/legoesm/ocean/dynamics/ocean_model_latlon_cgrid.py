@@ -22,6 +22,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.precision import cast_pytree
 from legoesm.grids.latlon import LatLonGrid
@@ -106,10 +107,10 @@ def _forward_backward_coriolis_3d(
     h_u = 0.5 * (h_west + h_k)
     h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)
 
-    # h at v-faces
+    # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
+    # replaces alloc-zeros + concatenate-of-three.
     h_v_interior = 0.5 * (h_k[:-1] + h_k[1:])
-    zero_h = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
-    h_v = jnp.concatenate([zero_h, h_v_interior, zero_h], axis=0)
+    h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     # --- Depth-averaged velocity (barotropic component) ---
     H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
@@ -145,13 +146,14 @@ def _forward_backward_coriolis_3d(
     u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis] * v_at_u) * u_mask_3d
 
     # --- Backward step: update v' using NEW u' ---
-    # Average u'_new to v-points (Sadourny 4-point average)
+    # Average u'_new to v-points (Sadourny 4-point average).
+    # Pole rows are zero (wall BC); single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three.
     u_at_v_interior = 0.25 * (
         u_prime_new[:-1, :-1] + u_prime_new[:-1, 1:]
         + u_prime_new[1:, :-1] + u_prime_new[1:, 1:]
     )
-    zero_row = jnp.zeros((1, n_lon, nlev), dtype=u.dtype)
-    u_at_v = jnp.concatenate([zero_row, u_at_v_interior, zero_row], axis=0)
+    u_at_v = jnp.pad(u_at_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 
@@ -361,12 +363,10 @@ class LatLonCGridOceanModel:
         h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
         h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
         H_u_pre = jnp.maximum(jnp.sum(h_u_pre, axis=-1), 1e-10)
-        # h at v-faces
+        # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
+        # replaces alloc-zeros + concatenate-of-three.
         h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
-        _n_lon = h_k_pre.shape[1]
-        _nlev = h_k_pre.shape[2]
-        _z_row = jnp.zeros((1, _n_lon, _nlev), dtype=h_k_pre.dtype)
-        h_v_pre = jnp.concatenate([_z_row, h_v_pre_int, _z_row], axis=0)
+        h_v_pre = jnp.pad(h_v_pre_int, ((1, 1), (0, 0), (0, 0)))
         H_v_pre = jnp.maximum(jnp.sum(h_v_pre, axis=-1), 1e-10)
 
         # Depth-averaged tendency → slow forcing for barotropic solver
@@ -697,7 +697,15 @@ class LatLonCGridOceanModel:
             dS_fw = virtual_salt_flux(
                 freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
             )
-            S_fw = state_new.S.data.at[..., 0].add(dt * dS_fw * mask)
+            # Cast the freshwater contribution to S's dtype so the
+            # scatter add does not silently widen on x64 mode (the
+            # freshwater struct is built at JAX-default precision in
+            # init helpers, which can be f64 while S runs at the
+            # storage policy's f32).
+            _S_dtype = state_new.S.data.dtype
+            S_fw = state_new.S.data.at[..., 0].add(
+                (dt * dS_fw * mask).astype(_S_dtype),
+            )
             state_new = state_new._replace(
                 S=state_new.S.replace(data=S_fw),
             )
@@ -746,64 +754,79 @@ class LatLonCGridOceanModel:
                 "Use replace_land_mask() or land_mask_override instead of "
                 "raw state._replace(land_mask=...).")
 
-        # Finiteness of all prognostic fields
-        finite_ok = bool(
+        # Fuse all reductions into a single ``jnp.stack`` + host pull
+        # so the runtime check costs one device→host stall instead of
+        # 7-9.  Same pattern as the loop-3 ``ocean_model.py`` rewrite.
+        water_col = state.eta.data + state.H_bathy.data
+        wet3 = wet[..., jnp.newaxis]
+        T_ocean = jnp.where(wet3, state.T.data, jnp.nan)
+        S_ocean = jnp.where(wet3, state.S.data, jnp.nan)
+
+        finite_ok = (
             jnp.all(jnp.isfinite(state.u.data))
             & jnp.all(jnp.isfinite(state.v.data))
             & jnp.all(jnp.isfinite(state.T.data))
             & jnp.all(jnp.isfinite(state.S.data))
             & jnp.all(jnp.isfinite(state.eta.data))
         )
-        if not finite_ok:
+        any_wet = jnp.any(wet)
+        _eta_dtype = state.eta.data.dtype
+        _stats = jnp.stack([
+            finite_ok.astype(_eta_dtype),
+            any_wet.astype(_eta_dtype),
+            jnp.min(jnp.where(wet, water_col, jnp.inf)).astype(_eta_dtype),
+            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0))).astype(_eta_dtype),
+            jnp.nanmin(T_ocean).astype(_eta_dtype),
+            jnp.nanmax(T_ocean).astype(_eta_dtype),
+            jnp.nanmin(S_ocean).astype(_eta_dtype),
+            jnp.nanmax(S_ocean).astype(_eta_dtype),
+        ])
+        host = np.asarray(_stats)
+        finite_ok_h = bool(host[0] > 0.5)
+        any_wet_h = bool(host[1] > 0.5)
+        min_wc = float(host[2]) if any_wet_h else float("inf")
+        eta_abs = float(host[3]) if any_wet_h else 0.0
+        T_min = float(host[4]) if any_wet_h else float("nan")
+        T_max = float(host[5]) if any_wet_h else float("nan")
+        S_min = float(host[6]) if any_wet_h else float("nan")
+        S_max = float(host[7]) if any_wet_h else float("nan")
+
+        if not finite_ok_h:
             raise FloatingPointError(
                 "C-grid ocean: non-finite state detected")
 
-        # Water column depth
-        water_col = state.eta.data + state.H_bathy.data
-        if bool(jnp.any(wet)):
-            min_wc = float(jnp.min(jnp.where(wet, water_col, jnp.inf)))
-            if min_wc < self.config.min_water_column_m:
-                raise ValueError(
-                    f"C-grid ocean: water column too small. "
-                    f"min(eta+H)={min_wc:.6g} m, "
-                    f"threshold={self.config.min_water_column_m:.6g} m",
-                )
+        if min_wc < self.config.min_water_column_m:
+            raise ValueError(
+                f"C-grid ocean: water column too small. "
+                f"min(eta+H)={min_wc:.6g} m, "
+                f"threshold={self.config.min_water_column_m:.6g} m",
+            )
 
-        # SSH bounds
-        eta_abs = float(
-            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0))))
         if eta_abs > self.config.max_abs_eta_m:
             raise ValueError(
                 f"C-grid ocean: |eta|={eta_abs:.3g} exceeds "
                 f"threshold {self.config.max_abs_eta_m:.3g}",
             )
 
-        # Temperature bounds
-        if bool(jnp.any(wet)):
-            T_ocean = jnp.where(
-                wet[..., jnp.newaxis], state.T.data, jnp.nan)
-            T_min = float(jnp.nanmin(T_ocean))
-            T_max = float(jnp.nanmax(T_ocean))
-            if (T_min < self.config.temperature_min_c
-                    or T_max > self.config.temperature_max_c):
-                raise ValueError(
-                    f"C-grid ocean: T range [{T_min:.3f}, {T_max:.3f}] "
-                    f"outside bounds [{self.config.temperature_min_c:.3f}, "
-                    f"{self.config.temperature_max_c:.3f}]",
-                )
+        if any_wet_h and (
+            T_min < self.config.temperature_min_c
+            or T_max > self.config.temperature_max_c
+        ):
+            raise ValueError(
+                f"C-grid ocean: T range [{T_min:.3f}, {T_max:.3f}] "
+                f"outside bounds [{self.config.temperature_min_c:.3f}, "
+                f"{self.config.temperature_max_c:.3f}]",
+            )
 
-            # Salinity bounds
-            S_ocean = jnp.where(
-                wet[..., jnp.newaxis], state.S.data, jnp.nan)
-            S_min = float(jnp.nanmin(S_ocean))
-            S_max = float(jnp.nanmax(S_ocean))
-            if (S_min < self.config.salinity_min_psu
-                    or S_max > self.config.salinity_max_psu):
-                raise ValueError(
-                    f"C-grid ocean: S range [{S_min:.3f}, {S_max:.3f}] "
-                    f"outside bounds [{self.config.salinity_min_psu:.3f}, "
-                    f"{self.config.salinity_max_psu:.3f}]",
-                )
+        if any_wet_h and (
+            S_min < self.config.salinity_min_psu
+            or S_max > self.config.salinity_max_psu
+        ):
+            raise ValueError(
+                f"C-grid ocean: S range [{S_min:.3f}, {S_max:.3f}] "
+                f"outside bounds [{self.config.salinity_min_psu:.3f}, "
+                f"{self.config.salinity_max_psu:.3f}]",
+            )
 
     def integrate(
         self,
