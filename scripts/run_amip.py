@@ -76,6 +76,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-days", type=int, default=0)
     parser.add_argument("--restart-from", type=str, default=None)
 
+    # Initial atmospheric state
+    parser.add_argument("--t-init", type=float, default=None,
+                        help="Initial isothermal temperature [K] (default 300)")
+    parser.add_argument("--rh-init", type=float, default=None,
+                        help="Initial relative humidity (default 0.7); lower for drier IC")
+
     # Radiation
     parser.add_argument("--radiation", type=str, default="gray",
                         choices=["gray", "rrtmg", "rrtmgp"])
@@ -271,6 +277,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         ensemble_size=args.ensemble_size,
+        **({"T_init": args.t_init} if args.t_init is not None else {}),
+        **({"RH_init": args.rh_init} if args.rh_init is not None else {}),
     )
 
 
