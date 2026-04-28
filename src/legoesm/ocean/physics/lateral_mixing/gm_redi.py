@@ -38,6 +38,20 @@ import jax.numpy as jnp
 
 from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+
+
+def _pad_for_gradient(field, grid):
+    """Single-call pad for gradient_x_3d/gradient_y_3d sharing.
+
+    Both gradient operators accept ``padded=`` to skip their internal
+    halo exchange.  Pre-padding here lets paired (∂/∂x, ∂/∂y) calls on
+    the same input issue ONE ``pad_halo_4d`` MPI exchange instead of
+    two.
+    """
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    return _pad_halo_4d(field, interp_offsets=offsets, duogrid=dg)
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
@@ -67,9 +81,11 @@ def _compute_tapered_slopes(
     eps = _EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
-    # Horizontal density gradients at full levels
-    drho_dx = gradient_x_3d(rho, grid)
-    drho_dy = gradient_y_3d(rho, grid)
+    # Horizontal density gradients at full levels.
+    # Pre-pad once so both gradients share the halo MPI exchange.
+    rho_pad = _pad_for_gradient(rho, grid)
+    drho_dx = gradient_x_3d(rho, grid, padded=rho_pad)
+    drho_dy = gradient_y_3d(rho, grid, padded=rho_pad)
 
     # Average to interfaces
     drho_dx_half = 0.5 * (drho_dx[..., :-1] + drho_dx[..., 1:])
@@ -213,9 +229,11 @@ def _tracer_tendency_gm_redi(
     else:
         kappa_GM_b = kappa_GM
 
-    # Horizontal tracer gradients at full levels
-    dq_dx = gradient_x_3d(q, grid)
-    dq_dy = gradient_y_3d(q, grid)
+    # Horizontal tracer gradients at full levels.
+    # Pre-pad once so both gradients share the halo MPI exchange.
+    q_pad = _pad_for_gradient(q, grid)
+    dq_dx = gradient_x_3d(q, grid, padded=q_pad)
+    dq_dy = gradient_y_3d(q, grid, padded=q_pad)
 
     # Vertical tracer gradient at interfaces
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
@@ -238,15 +256,17 @@ def _tracer_tendency_gm_redi(
     off_diag_x = (kappa_Redi - kappa_GM_b) * S_x * dq_dz_half
     off_diag_y = (kappa_Redi - kappa_GM_b) * S_y * dq_dz_half
 
-    # Average interface values to full levels (pad boundaries with zero)
-    z_pad = jnp.zeros((*off_diag_x.shape[:-1], 1), dtype=off_diag_x.dtype)
+    # Average interface values to full levels (pad boundaries with zero).
+    # ``jnp.pad`` lowers to one Pad HLO op per pad and avoids the
+    # alloc-zeros + concatenate pair (2 HLO ops each).
+    pad_axes = ((0, 0),) * (off_diag_x.ndim - 1)
     off_diag_x_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_x], axis=-1)
-        + jnp.concatenate([off_diag_x, z_pad], axis=-1)
+        jnp.pad(off_diag_x, (*pad_axes, (1, 0)))
+        + jnp.pad(off_diag_x, (*pad_axes, (0, 1)))
     )
     off_diag_y_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_y], axis=-1)
-        + jnp.concatenate([off_diag_y, z_pad], axis=-1)
+        jnp.pad(off_diag_y, (*pad_axes, (1, 0)))
+        + jnp.pad(off_diag_y, (*pad_axes, (0, 1)))
     )
 
     # Diagonal: kappa_Redi * nabla^2(q)
@@ -263,8 +283,10 @@ def _tracer_tendency_gm_redi(
 
     # Vertical flux divergence at full levels: dF_z/dz
     # dq/dt_vert[k] = (F_z[k-1/2] - F_z[k+1/2]) / dz[k]
-    # with F_z = 0 at surface and bottom boundaries
-    F_z_ext = jnp.concatenate([z_pad, F_z, z_pad], axis=-1)
+    # with F_z = 0 at surface and bottom boundaries.  Single Pad HLO op
+    # replaces the alloc-zeros + concatenate-of-three.
+    pad_axes_v = ((0, 0),) * (F_z.ndim - 1)
+    F_z_ext = jnp.pad(F_z, (*pad_axes_v, (1, 1)))
     dq_vert = (F_z_ext[..., :-1] - F_z_ext[..., 1:]) / jnp.maximum(dz_actual, eps)
 
     return dq_h + dq_vert

@@ -62,12 +62,15 @@ def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape (n_lat+2*halo, n_lon+2*halo).
     """
-    # Longitude: periodic wrap
-    data_lon = jnp.concatenate(
-        [data[:, -halo:], data, data[:, :halo]], axis=1,
-    )
+    # Longitude: periodic wrap.  ``jnp.pad(..., mode='wrap')`` lowers
+    # to a single XLA Pad op; the previous ``concatenate([data[:, -halo:],
+    # data, data[:, :halo]])`` materialised three buffers + a concat
+    # HLO per call.
+    pad_axes = ((0, 0),) * (data.ndim - 1)
+    data_lon = jnp.pad(data, (*pad_axes, (halo, halo)), mode="wrap")
 
-    # Latitude: pole-folding (scalar — no sign change)
+    # Latitude: pole-folding (scalar — no sign change).  Pole rows are
+    # NOT periodic so we still concat the folded rows.
     south, north = _fold_pole_rows(data_lon, halo, negate=False)
     padded = jnp.concatenate([south, data_lon, north], axis=0)
     return padded
@@ -90,10 +93,9 @@ def pad_halo_latlon_vector(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape (n_lat+2*halo, n_lon+2*halo).
     """
-    # Longitude: periodic wrap
-    data_lon = jnp.concatenate(
-        [data[:, -halo:], data, data[:, :halo]], axis=1,
-    )
+    # Longitude: periodic wrap (single Pad HLO via mode="wrap").
+    pad_axes = ((0, 0),) * (data.ndim - 1)
+    data_lon = jnp.pad(data, (*pad_axes, (halo, halo)), mode="wrap")
 
     # Latitude: pole-folding (vector — negate)
     south, north = _fold_pole_rows(data_lon, halo, negate=True)
@@ -158,10 +160,8 @@ def pad_halo_latlon_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape (n_lat+2*halo, n_lon+2*halo, nlev).
     """
-    # Longitude: periodic wrap (axis 1)
-    data_lon = jnp.concatenate(
-        [data[:, -halo:], data, data[:, :halo]], axis=1,
-    )
+    # Longitude: periodic wrap via single Pad HLO (axis 1).
+    data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
     # Latitude: pole-folding (scalar — no sign change)
     south, north = _fold_pole_rows_3d(data_lon, halo, negate=False)
     return jnp.concatenate([south, data_lon, north], axis=0)
@@ -181,9 +181,7 @@ def pad_halo_latlon_vector_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape (n_lat+2*halo, n_lon+2*halo, nlev).
     """
-    data_lon = jnp.concatenate(
-        [data[:, -halo:], data, data[:, :halo]], axis=1,
-    )
+    data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
     south, north = _fold_pole_rows_3d(data_lon, halo, negate=True)
     return jnp.concatenate([south, data_lon, north], axis=0)
 

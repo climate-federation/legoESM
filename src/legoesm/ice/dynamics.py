@@ -343,12 +343,16 @@ def evp_solver(
         u_new = (rhs_u + alpha * rhs_v) / coriolis_denom
         v_new = (rhs_v - alpha * rhs_u) / coriolis_denom
 
-        # Zero velocity where no ice
-        u_new = jnp.where(ice_mask, u_new, 0.0)
-        v_new = jnp.where(ice_mask, v_new, 0.0)
-        s11_new = jnp.where(ice_mask, s11_new, 0.0)
-        s22_new = jnp.where(ice_mask, s22_new, 0.0)
-        s12_new = jnp.where(ice_mask, s12_new, 0.0)
+        # Zero velocity / stress where no ice.  Cast the boolean mask
+        # to float once and multiply — fuses naturally with the
+        # following stage and gives gradients a smooth zero (vs. the
+        # branchless ``select`` that ``jnp.where`` lowers to).
+        ice_mask_f = ice_mask.astype(u_new.dtype)
+        u_new = u_new * ice_mask_f
+        v_new = v_new * ice_mask_f
+        s11_new = s11_new * ice_mask_f
+        s22_new = s22_new * ice_mask_f
+        s12_new = s12_new * ice_mask_f
 
         return (u_new, v_new, s11_new, s22_new, s12_new)
 

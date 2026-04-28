@@ -226,10 +226,9 @@ def _pad_halo_mpi_face_only(
     unique neighbor (at most 4 for face-only decomposition), rather
     than an O(world_size) allgather.
     """
-    n = data.shape[1]
-    h2 = 2 * halo
-    padded = jnp.zeros((6, n + h2, n + h2), dtype=data.dtype)
-    padded = padded.at[:, halo:-halo, halo:-halo].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter (subsequent
+    # halo scatters only fill the zeroed halo regions).
+    padded = jnp.pad(data, ((0, 0), (halo, halo), (halo, halo)))
 
     # --- Classify edges as local vs remote ---
     local_edges = []
@@ -367,9 +366,8 @@ def _pad_halo_mpi_tiled(
     """
     face = topology.local_face_ids[0]
     n = data.shape[1]  # tile dimension
-    h2 = 2 * halo
-    padded = jnp.zeros((6, n + h2, n + h2), dtype=data.dtype)
-    padded = padded.at[:, halo:-halo, halo:-halo].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter.
+    padded = jnp.pad(data, ((0, 0), (halo, halo), (halo, halo)))
 
     strip_size = halo * n
     comm = MPI.COMM_WORLD
@@ -639,11 +637,11 @@ def _pad_halo_mpi_face_only_4d(
     MPI,
 ) -> jax.Array:
     """Face-only 4D halo exchange: one sendrecv per neighbor for all levels."""
-    n = data.shape[1]
-    nlev = data.shape[3]
-    h2 = 2 * halo
-    padded = jnp.zeros((6, n + h2, n + h2, nlev), dtype=data.dtype)
-    padded = padded.at[:, halo:-halo, halo:-halo, :].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter (4D face-only
+    # path).
+    padded = jnp.pad(
+        data, ((0, 0), (halo, halo), (halo, halo), (0, 0)),
+    )
 
     local_edges = []
     remote_edges = []
@@ -759,9 +757,10 @@ def _pad_halo_mpi_tiled_4d(
     face = topology.local_face_ids[0]
     n = data.shape[1]
     nlev = data.shape[3]
-    h2 = 2 * halo
-    padded = jnp.zeros((6, n + h2, n + h2, nlev), dtype=data.dtype)
-    padded = padded.at[:, halo:-halo, halo:-halo, :].set(data)
+    # Single Pad HLO op replaces alloc-zeros + scatter (4D tiled path).
+    padded = jnp.pad(
+        data, ((0, 0), (halo, halo), (halo, halo), (0, 0)),
+    )
 
     comm = MPI.COMM_WORLD
     rank = topology.rank

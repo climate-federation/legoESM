@@ -142,7 +142,9 @@ def sundqvist_microphysics(
     dq_c_dt = rates.condensation - rates.autoconversion
     dq_r_dt = rates.autoconversion - rates.evaporation
 
-    z = jnp.zeros((ncol, nlev))
+    # Pin dtype to the input precision so we never silently promote
+    # the unused-tendency placeholders to f64 under x64 mode.
+    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

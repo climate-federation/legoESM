@@ -617,12 +617,18 @@ def generate_nmc(config: NMCConfig) -> None:
         error = _hydrostatic_diff(f48_phys, f24_phys)
         nmc_errors.append(error)
 
+        # Fuse three RMS reductions into one host transfer.
+        _h = np.asarray(jnp.stack([
+            jnp.sqrt(jnp.mean(error.T.data ** 2)),
+            jnp.sqrt(jnp.mean(error.u.data ** 2)),
+            jnp.sqrt(jnp.mean(error.p_s.data ** 2)),
+        ]))
         logger.info(
             "  Error sample %d: rms(T)=%.3f K, rms(u)=%.3f m/s, rms(p_s)=%.1f Pa",
             len(nmc_errors),
-            float(jnp.sqrt(jnp.mean(error.T.data ** 2))),
-            float(jnp.sqrt(jnp.mean(error.u.data ** 2))),
-            float(jnp.sqrt(jnp.mean(error.p_s.data ** 2))),
+            float(_h[0]),
+            float(_h[1]),
+            float(_h[2]),
         )
 
     if not nmc_errors:

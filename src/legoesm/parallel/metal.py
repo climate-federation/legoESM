@@ -186,6 +186,11 @@ def ensure_spectral_on_cpu(fn):
     device (e.g., within a ``lax.scan`` body that already runs on CPU).
 
     On non-Metal backends this is a no-op wrapper.
+
+    The Metal-vs-non-Metal check is repeated at *call* time as well as
+    at decoration time: if Metal silently falls back to CPU (which
+    flips ``is_metal_backend()`` to False), the wrapper short-circuits
+    so we don't pay the device→device tree-map roundtrip on every call.
     """
     if not is_metal_backend():
         return fn
@@ -193,6 +198,10 @@ def ensure_spectral_on_cpu(fn):
     _cpu = jax.devices("cpu")[0]
 
     def wrapper(*args, **kwargs):
+        # Re-check at call time — Metal may have fallen back to CPU
+        # since decoration; in that case there is nothing to route.
+        if not is_metal_backend():
+            return fn(*args, **kwargs)
         args_cpu = jax.tree.map(lambda x: _put_if_needed(x, _cpu), args)
         kwargs_cpu = jax.tree.map(lambda x: _put_if_needed(x, _cpu), kwargs)
         result = fn(*args_cpu, **kwargs_cpu)

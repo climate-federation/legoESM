@@ -204,10 +204,11 @@ def clubb_lite_turbulence(
     # Dissipation coefficient: C1/tau (semi-implicit)
     diss_wp2 = config.C_eps * sqrt_wp2 / l_mix_safe
 
-    # Diffuse wp2
+    # Diffuse wp2.  Pin the surface_flux dtype to the input dtype so the
+    # tridiagonal solve does not silently promote the column path to f64.
     wp2_diffused = implicit_vertical_diffusion(
         wp2, Km_half, rho, dz_layer, dz_half, dt,
-        surface_flux=jnp.zeros(ncol),
+        surface_flux=jnp.zeros(ncol, dtype=wp2.dtype),
     )
 
     # Semi-implicit update

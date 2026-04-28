@@ -141,15 +141,14 @@ def edmf_convection(
     #                                (M/rho)*dq/dz for moisture
     #   (b) Detrainment mixing:      +delta * M_u * (T_u - T_env) / rho
 
-    # Environmental vertical gradients (centered, zero at boundaries)
-    dT_dz = jnp.zeros_like(T)
-    dT_dz = dT_dz.at[:, 1:-1].set(
-        (T[:, :-2] - T[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
-    )
-    dq_dz = jnp.zeros_like(q_v)
-    dq_dz = dq_dz.at[:, 1:-1].set(
-        (q_v[:, :-2] - q_v[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
-    )
+    # Environmental vertical gradients (centered, zero at boundaries).
+    # Use ``jnp.pad`` instead of ``zeros + .at[].set`` — one HLO op
+    # vs allocate-full-buffer-then-scatter.
+    dz_centered = jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
+    dT_centered = (T[:, :-2] - T[:, 2:]) / dz_centered
+    dq_centered = (q_v[:, :-2] - q_v[:, 2:]) / dz_centered
+    dT_dz = jnp.pad(dT_centered, ((0, 0), (1, 1)))
+    dq_dz = jnp.pad(dq_centered, ((0, 0), (1, 1)))
 
     rho_safe = jnp.clip(rho, 0.01, None)
 

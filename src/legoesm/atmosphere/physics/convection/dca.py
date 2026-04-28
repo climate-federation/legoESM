@@ -158,7 +158,13 @@ def _adjust_one_iteration(
 
         return (T_work, q_work, precip_new), None
 
-    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol))
+    # Pin the precip carry dtype to whatever ``q * dp`` actually
+    # produces inside the scan body — under standard promotion the
+    # compute precision wins when ``q_v`` is at storage precision but
+    # ``dp_rev`` comes from sigma-coord arrays at compute precision.
+    # ``jnp.result_type`` resolves this without materializing a scalar.
+    _precip_dtype = jnp.result_type(q_v_rev, dp_rev)
+    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol, dtype=_precip_dtype))
     level_indices = jnp.arange(1, nlev)
     (T_adj_rev, q_adj_rev, precip_col), _ = jax.lax.scan(
         scan_step, init_carry, level_indices,
@@ -204,10 +210,14 @@ def dca_convection(
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
 
-    # Apply adjustment iterations
+    # Apply adjustment iterations.  ``prec_iter`` returned by the inner
+    # scan inherits ``q * dp`` precision (compute precision wins when
+    # state is f32 but sigma-coord-derived dp is f64), so pin
+    # ``precip_total`` to the same result-type so the outer scan carry
+    # input matches its output.
     T_adj = T
     q_adj = q_v
-    precip_total = jnp.zeros(ncol)
+    precip_total = jnp.zeros(ncol, dtype=jnp.result_type(q_v, dp))
 
     def body_fn(carry, _):
         T_c, q_c, prec = carry

@@ -251,21 +251,45 @@ def _configure_gpu(config: HardwareConfig) -> None:
     Detects NVIDIA vs AMD GPUs and applies vendor-appropriate flags.
     NVIDIA: cuDNN GEMM fusion + TensorFloat32 matmul precision.
     AMD (ROCm): no cuDNN flags, default float32 matmul precision.
+
+    Uses the pre-init detector first so XLA scheduler flags land
+    *before* the PJRT client is initialised — once ``jax.devices()``
+    runs, mutating ``XLA_FLAGS`` is silently ineffective on most JAX
+    versions, which would defeat the latency-hiding flags critical
+    for multi-GPU scaling.
     """
-    from legoesm.runtime.backend import gpu_vendor
+    from legoesm.runtime.backend import _detect_gpu_vendor_pre_init, gpu_vendor
 
-    vendor = gpu_vendor()
-
-    if config.device_count > 1:
-        if vendor == "nvidia":
-            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
-        elif vendor == "amd":
-            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+    # Pre-init detection (env-var only, no jax.devices()) to land
+    # XLA_FLAGS on time.
+    pre_vendor = _detect_gpu_vendor_pre_init()
+    if pre_vendor == "nvidia":
+        _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+    elif pre_vendor == "amd":
+        _set_xla_flags(_AMD_GPU_XLA_FLAGS)
 
     # Pre-allocate 90% of GPU memory to avoid fragmentation.
     # Only set if not already configured by the user.
     if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
+
+    # Now safe to query JAX about the GPU.
+    vendor = gpu_vendor()
+
+    # If pre-init detection missed the vendor, apply best-effort flags
+    # post-init (may not take effect, but won't make things worse) and
+    # warn so the user can fix the env for next run.
+    if pre_vendor is None and vendor != "unknown":
+        if vendor == "nvidia":
+            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        elif vendor == "amd":
+            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+        logger.warning(
+            "GPU vendor detected post-init from device_config; XLA "
+            "scheduler flags may not take effect this run.  Set "
+            "CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES or "
+            "JAX_PLATFORMS before import to enable latency-hiding flags.",
+        )
 
     # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa) —
     # faster than FP32 with negligible accuracy loss for weather/climate.

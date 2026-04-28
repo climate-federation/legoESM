@@ -33,9 +33,11 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.core.operators_3d import (
+    divergence_3d,
     gradient_x_3d,
     gradient_y_3d,
     hyperdiffusion_3d,
+    laplacian_compact_3d,
     vertical_advection_height,
 )
 from legoesm.core.operators_cdgrid import (
@@ -143,8 +145,21 @@ def cdgrid_compressible_euler_slow_tendencies(
     pi_prime = compute_exner_perturbation(rho_p, theta_p, height_coord)
 
     # --- 2. Convert to D-grid ---
-    u_d = _interp_center_to_corner(u, cdgrid)
-    v_d = _interp_center_to_corner(v, cdgrid)
+    # Stack (u, v) along a trailing axis and fold into the level dim so
+    # a single ``_interp_center_to_corner`` (one halo exchange + one
+    # 4-point average) handles both components, replacing two separate
+    # calls each with their own halo.  Same passive-trailing-axis
+    # pattern as the SH and divergence batching loops.
+    n_face_uv, n_i_uv, n_j_uv, nlev_uv = u.shape
+    _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
+    _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
+    _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
+    _uv_d = _uv_d_flat.reshape(
+        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
+        nlev_uv, 2,
+    )
+    u_d = _uv_d[..., 0]
+    v_d = _uv_d[..., 1]
 
     # --- 3. C-grid velocities ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
@@ -161,66 +176,253 @@ def cdgrid_compressible_euler_slow_tendencies(
     K = 0.5 * (u_cc ** 2 + v_cc ** 2)
 
     # --- 6. Gradients at D-grid corners ---
-    dK_dx, dK_dy_perp = _arakawa_lamb_gradient(K, cdgrid)
-    dpi_dx, dpi_dy_perp = _arakawa_lamb_gradient(pi_prime, cdgrid)
+    # Pack K and pi_prime into a single halo exchange under SPMD/MPI;
+    # under the local backend each operator does its own exchange (same
+    # as before).  ``_arakawa_lamb_gradient`` takes ``padded=`` to skip
+    # its internal halo when supplied.
+    from legoesm.grids.halo import _halo_backend as _hb_step6
+    if _hb_step6 == "spmd":
+        from legoesm.parallel.cubesphere_exchange import (
+            packed_pad_halo_4d as _packed_4d_spmd, _spmd_mesh as _spmd_mesh_step6,
+        )
+        _K_pad_step6, _pi_pad_step6 = _packed_4d_spmd(
+            K, pi_prime, mesh=_spmd_mesh_step6,
+        )
+    elif _hb_step6 == "mpi":
+        from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
+        from legoesm.parallel.halo_exchange import (
+            packed_pad_halo_mpi_4d as _packed_mpi_4d_step6,
+        )
+        _K_pad_step6, _pi_pad_step6 = _packed_mpi_4d_step6(
+            K, pi_prime, topology=_mpi_topo_step6,
+        )
+    else:
+        _K_pad_step6 = _pi_pad_step6 = None
+
+    # Batch the two Arakawa-Lamb gradients (K and pi_prime) into a
+    # single call on a stacked tensor — the operator treats the
+    # trailing axis as a passive batch (the 4-point finite difference
+    # and the metric-matrix multiplication broadcast over the trailing
+    # dim).  Stack the pre-padded inputs the same way so the local
+    # backend (no pre-pad) issues only one halo exchange instead of
+    # two.  2 gradient calls → 1.
+    n_face_kp, n_i_kp, n_j_kp, nlev_kp = K.shape
+    _kp_stack = jnp.stack([K, pi_prime], axis=-1)  # (6, n, n, nlev, 2)
+    _kp_flat = _kp_stack.reshape(n_face_kp, n_i_kp, n_j_kp, nlev_kp * 2)
+    if _K_pad_step6 is not None:
+        _kp_pad_stack = jnp.stack([_K_pad_step6, _pi_pad_step6], axis=-1)
+        _kp_pad_flat = _kp_pad_stack.reshape(
+            _kp_pad_stack.shape[0], _kp_pad_stack.shape[1],
+            _kp_pad_stack.shape[2], nlev_kp * 2,
+        )
+    else:
+        _kp_pad_flat = None
+    _dKpi_dx_flat, _dKpi_dy_perp_flat = _arakawa_lamb_gradient(
+        _kp_flat, cdgrid, padded=_kp_pad_flat,
+    )
+    _dKpi_dx = _dKpi_dx_flat.reshape(
+        _dKpi_dx_flat.shape[0], _dKpi_dx_flat.shape[1],
+        _dKpi_dx_flat.shape[2], nlev_kp, 2,
+    )
+    _dKpi_dy_perp = _dKpi_dy_perp_flat.reshape(
+        _dKpi_dy_perp_flat.shape[0], _dKpi_dy_perp_flat.shape[1],
+        _dKpi_dy_perp_flat.shape[2], nlev_kp, 2,
+    )
+    dK_dx = _dKpi_dx[..., 0]
+    dpi_dx = _dKpi_dx[..., 1]
+    dK_dy_perp = _dKpi_dy_perp[..., 0]
+    dpi_dy_perp = _dKpi_dy_perp[..., 1]
 
     # --- 7. D-grid momentum tendencies ---
-    abs_vor_corner = _interp_center_to_corner(abs_vor, cdgrid)
-    theta_corner = _interp_center_to_corner(theta_total, cdgrid)
+    # Batch (abs_vor, theta_total) center-to-corner interp — same
+    # passive-trailing-axis batching as the (u, v) interp earlier.
+    # 2 corner-interpolations → 1 (one halo exchange + one 4-point
+    # average shared between abs_vor and theta_total).
+    n_face_at, n_i_at, n_j_at, nlev_at = abs_vor.shape
+    _at_stack = jnp.stack([abs_vor, theta_total], axis=-1)
+    _at_d_flat = _interp_center_to_corner(
+        _at_stack.reshape(n_face_at, n_i_at, n_j_at, nlev_at * 2), cdgrid,
+    )
+    _at_d = _at_d_flat.reshape(
+        _at_d_flat.shape[0], _at_d_flat.shape[1], _at_d_flat.shape[2],
+        nlev_at, 2,
+    )
+    abs_vor_corner = _at_d[..., 0]
+    theta_corner = _at_d[..., 1]
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
 
-    # Laplacian viscosity
+    # Laplacian viscosity — batch (u_d, v_d) into a single
+    # ``_laplacian_dgrid`` call by stacking along a trailing axis and
+    # folding into the level dim.  ``_laplacian_dgrid`` is now
+    # 4D-native (single ``pad_halo_4d`` for all "levels"), so the
+    # paired call shares one halo exchange and one compact ∇² across
+    # both wind components — same passive-trailing-axis pattern as the
+    # corner interps and other dycore batches.
     if config.A_h > 0:
-        du_d_dt = du_d_dt + config.A_h * _laplacian_dgrid(u_d, cdgrid)
-        dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
+        n_face_vl, n_id_vl, n_jd_vl, nlev_vl = u_d.shape
+        _uv_d_lap_stack = jnp.stack([u_d, v_d], axis=-1)
+        _uv_d_lap_flat = _uv_d_lap_stack.reshape(
+            n_face_vl, n_id_vl, n_jd_vl, nlev_vl * 2,
+        )
+        _uv_d_lap_out = _laplacian_dgrid(_uv_d_lap_flat, cdgrid).reshape(
+            n_face_vl, n_id_vl, n_jd_vl, nlev_vl, 2,
+        )
+        du_d_dt = du_d_dt + config.A_h * _uv_d_lap_out[..., 0]
+        dv_d_dt = dv_d_dt + config.A_h * _uv_d_lap_out[..., 1]
 
     # --- 8. Convert back to cell-centre ---
-    du_dt = _interp_corner_to_center(du_d_dt)
-    dv_dt = _interp_corner_to_center(dv_d_dt)
+    # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
+    # passive-trailing-axis pattern; ``_interp_corner_to_center`` is a
+    # 4-point average with no halo, so this saves one kernel launch.
+    _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., 2)
+    _duv_d_dt_flat = _duv_d_dt.reshape(
+        _duv_d_dt.shape[0], _duv_d_dt.shape[1], _duv_d_dt.shape[2],
+        nlev_at * 2,
+    )
+    _duv_dt = _interp_corner_to_center(_duv_d_dt_flat).reshape(
+        n_face_at, n_i_at, n_j_at, nlev_at, 2,
+    )
+    du_dt = _duv_dt[..., 0]
+    dv_dt = _duv_dt[..., 1]
 
     # --- 9. Vertical advection of u, v ---
-    du_dt = du_dt + vertical_advection_height(u, w, dz, dz_half, J)
-    dv_dt = dv_dt + vertical_advection_height(v, w, dz, dz_half, J)
+    # Batch the two ``vertical_advection_height`` calls by stacking
+    # (u, v) along a new leading axis.  ``w_full`` / ``w_star``
+    # depend only on (w, dz, dz_half, J) so they are computed once
+    # and the trailing-axis ``[..., :-1] - [..., 1:]`` gradient
+    # broadcasts across the new axis.  Two passes through the
+    # vertical-advection kernel collapse to one — same trailing/leading
+    # axis batching as Loops 137/141.
+    _uv_va = jnp.stack([u, v], axis=0)
+    _uv_va_adv = vertical_advection_height(_uv_va, w, dz, dz_half, J)
+    du_dt = du_dt + _uv_va_adv[0]
+    dv_dt = dv_dt + _uv_va_adv[1]
 
     # --- 10. Theta equation: advective form -v·∇θ ---
     # The θ equation uses advective form (not divergence/flux form) because
     # θ is NOT a conserved density — it satisfies dθ/dt = 0, not ∂(ρθ)/∂t = -∇·(ρθv).
     # Advective form = flux divergence + θ·div(v):  -v·∇θ = -∇·(θv) + θ∇·v
     div_v = cgrid_divergence(u_c, v_c, cdgrid)
-    dtheta_p_dt = (cgrid_mass_flux_divergence(theta_total, u_c, v_c, cdgrid)
-                   + theta_total * div_v)
 
-    # --- 11. Continuity: C-grid upwind mass flux (divergence form) ---
-    drho_p_dt = cgrid_mass_flux_divergence(rho_total, u_c, v_c, cdgrid)
-
-    # --- 12. Tracer advection (advective form) ---
+    # --- 10/11/12. (theta, rho, tracers) flux divergence (batched) ---
+    # ``cgrid_mass_flux_divergence`` issues a ``pad_halo_4d`` on its
+    # scalar input and runs the PPM reconstruction along the trailing
+    # axis as a passive batch.  Stack ``(theta_total, rho_total)`` and
+    # any prognostic tracers along that trailing axis, fold into the
+    # level dim, and run a single PPM transport call instead of two.
+    # ``u_c``, ``v_c``, and ``div_v`` are shared; ``jnp.repeat`` builds
+    # the matching velocity broadcast for the interleaved (level ×
+    # scalar) trailing axis.
+    n_face_tr, n_i_tr, n_j_tr, nlev_tr = theta_total.shape
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
+    n_total = 2 + n_tracers  # theta + rho + tracers
+
     if n_tracers > 0:
-        tracers_t = jnp.moveaxis(tracers, -1, 0)
+        combined_stack = jnp.concatenate(
+            [
+                jnp.stack([theta_total, rho_total], axis=-1),  # (..., nlev, 2)
+                tracers,  # (..., nlev, n_tracers)
+            ], axis=-1,
+        )  # (..., nlev, n_total)
+    else:
+        combined_stack = jnp.stack(
+            [theta_total, rho_total], axis=-1,
+        )  # (..., nlev, 2)
 
-        def _single_tracer(q):
-            horiz = (cgrid_mass_flux_divergence(q, u_c, v_c, cdgrid)
-                     + q * div_v)
-            vert = vertical_advection_height(q, w, dz, dz_half, J)
-            return horiz + vert
+    combined_flat = combined_stack.reshape(
+        n_face_tr, n_i_tr, n_j_tr, nlev_tr * n_total,
+    )
+    if n_total == 1:
+        u_c_b, v_c_b = u_c, v_c
+    else:
+        u_c_b = jnp.repeat(u_c, n_total, axis=-1)
+        v_c_b = jnp.repeat(v_c, n_total, axis=-1)
+    flux_combined_flat = cgrid_mass_flux_divergence(
+        combined_flat, u_c_b, v_c_b, cdgrid,
+    )
+    flux_combined = flux_combined_flat.reshape(
+        n_face_tr, n_i_tr, n_j_tr, nlev_tr, n_total,
+    )
+    # Theta uses advective form: -∇·(θv) + θ·∇·v.
+    dtheta_p_dt = flux_combined[..., 0] + theta_total * div_v
+    # Rho uses pure flux form: -∇·(ρv) + 0 (continuity).
+    drho_p_dt = flux_combined[..., 1]
 
-        dtracers_dt_t = jax.vmap(_single_tracer)(tracers_t)
-        dtracers_dt = jnp.moveaxis(dtracers_dt_t, 0, -1)
+    # Tracer advection (advective form).  Vertical advection still runs
+    # per-tracer via ``vmap`` over the trailing axis so JAX produces one
+    # batched kernel.
+    if n_tracers > 0:
+        horiz = (
+            flux_combined[..., 2:]                # (..., nlev, n_tracers)
+            + tracers * div_v[..., None]          # advective-form correction
+        )
+
+        def _vert_one(q):
+            return vertical_advection_height(q, w, dz, dz_half, J)
+
+        vert = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(tracers)
+        dtracers_dt = horiz + vert
     else:
         dtracers_dt = jnp.zeros_like(tracers)
 
     # --- 13. Hyperdiffusion ---
-    if config.hyperdiff_coeff > 0:
-        du_dt = du_dt + hyperdiffusion_3d(u, grid, config.hyperdiff_coeff)
-        dv_dt = dv_dt + hyperdiffusion_3d(v, grid, config.hyperdiff_coeff)
-        dtheta_p_dt = dtheta_p_dt + hyperdiffusion_3d(
-            theta_p, grid, config.hyperdiff_coeff,
+    # ``hyperdiffusion_3d(field, grid, coeff)`` is defined as
+    # ``-coeff * ∇²(∇²(field))`` where each ∇² runs the cubed-sphere
+    # 4D-native compact stencil (single ``pad_halo_4d`` per call).
+    # When *both* ``hyperdiff_coeff`` (applied to (u, v, theta_p))
+    # and ``hyperdiff_rho_coeff`` (applied to rho_p) are non-zero,
+    # the two operator chains share the same biharmonic structure
+    # but use different coefficients on the outer step.  Inline the
+    # operator and stack ALL four fields along a trailing axis: a
+    # single inner ∇² and a single outer ∇² serve all four fields,
+    # then per-field coefficients are applied at the very end.
+    # 4 ∇² evaluations → 2 (one inner, one outer) per RHS evaluation
+    # when both coefficients are active.  When only one coefficient
+    # is active, fall back to the existing path (3-field or 1-field).
+    _coeff_uvT = config.hyperdiff_coeff
+    _coeff_rho = config.hyperdiff_rho_coeff
+    if _coeff_uvT > 0 and _coeff_rho > 0:
+        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
+        _hyper_stack = jnp.stack(
+            [u, v, theta_p, rho_p], axis=-1,
+        )  # (6, n, n, nlev, 4)
+        _hyper_flat = _hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 4)
+        # Inner ∇² (compact stencil) — shared across all four fields.
+        _lap1 = laplacian_compact_3d(_hyper_flat, grid)
+        # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
+        # both gradient ops (saves 1 ``pad_halo_4d`` per call).
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_uvtr
+        _dg = getattr(grid, 'duogrid', None)
+        _offsets = None if _dg is not None else grid.halo_interp_offsets
+        _lap1_pad = _pad_halo_4d_uvtr(_lap1, interp_offsets=_offsets, duogrid=_dg)
+        _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
+        _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
+        _lap2 = divergence_3d(_gx, _gy, grid).reshape(
+            n_face_h, n_i_h, n_j_h, nlev_h, 4,
         )
-    if config.hyperdiff_rho_coeff > 0:
+        # Apply per-field hyperdiffusion coefficients.
+        du_dt = du_dt - _coeff_uvT * _lap2[..., 0]
+        dv_dt = dv_dt - _coeff_uvT * _lap2[..., 1]
+        dtheta_p_dt = dtheta_p_dt - _coeff_uvT * _lap2[..., 2]
+        drho_p_dt = drho_p_dt - _coeff_rho * _lap2[..., 3]
+    elif _coeff_uvT > 0:
+        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
+        hyper_stack = jnp.stack(
+            [u, v, theta_p], axis=-1,
+        )  # (6, n, n, nlev, 3)
+        hyper_flat = hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 3)
+        hyper_out_flat = hyperdiffusion_3d(
+            hyper_flat, grid, _coeff_uvT,
+        )
+        hyper_out = hyper_out_flat.reshape(n_face_h, n_i_h, n_j_h, nlev_h, 3)
+        du_dt = du_dt + hyper_out[..., 0]
+        dv_dt = dv_dt + hyper_out[..., 1]
+        dtheta_p_dt = dtheta_p_dt + hyper_out[..., 2]
+    elif _coeff_rho > 0:
         drho_p_dt = drho_p_dt + hyperdiffusion_3d(
-            rho_p, grid, config.hyperdiff_rho_coeff,
+            rho_p, grid, _coeff_rho,
         )
 
     # --- 14. Sponge layer ---
@@ -238,14 +440,23 @@ def cdgrid_compressible_euler_slow_tendencies(
     )
 
     # --- 15. w tendency (slow: horizontal advection) ---
+    # Pre-pad ``w_full`` once and pass to both gradient_x_3d /
+    # gradient_y_3d via ``padded=`` so they share the halo MPI exchange.
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    dw_dx = gradient_x_3d(w_full, grid)
-    dw_dy = gradient_y_3d(w_full, grid)
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+    _dg_w = getattr(grid, 'duogrid', None)
+    _offsets_w = None if _dg_w is not None else grid.halo_interp_offsets
+    _w_full_pad = _pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
+    dw_dx = gradient_x_3d(w_full, grid, padded=_w_full_pad)
+    dw_dy = gradient_y_3d(w_full, grid, padded=_w_full_pad)
     horiz_adv_w = -(u * dw_dx + v * dw_dy)
 
-    horiz_adv_w_half = jnp.zeros_like(w)
-    horiz_adv_w_half = horiz_adv_w_half.at[..., 1:-1].set(
-        0.5 * (horiz_adv_w[..., :-1] + horiz_adv_w[..., 1:])
+    # Pad zero at top/bottom interfaces (rigid BC).  Single Pad HLO op
+    # replaces alloc-zeros + scatter.
+    pad_axes_w = ((0, 0),) * (w.ndim - 1)
+    horiz_adv_w_half = jnp.pad(
+        0.5 * (horiz_adv_w[..., :-1] + horiz_adv_w[..., 1:]),
+        (*pad_axes_w, (1, 1)),
     )
 
     dw_dt = horiz_adv_w_half - sponge_half * w

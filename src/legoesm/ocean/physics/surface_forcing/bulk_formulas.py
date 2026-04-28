@@ -90,14 +90,20 @@ def bulk_formula_surface_forcing(
     inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
     inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
 
-    du_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dv_dt = jnp.zeros(shape_3d, dtype=dtype)
-    du_dt = du_dt.at[..., 0].set(tau_x * inv_rho_dz)
-    dv_dt = dv_dt.at[..., 0].set(tau_y * inv_rho_dz)
-
-    dT_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dT_dt = dT_dt.at[..., 0].set(Q_net * inv_rho_csw_dz)
-
+    # Pad with zero on trailing axis instead of alloc-zeros +
+    # scatter — single Pad HLO op per field.  Same pattern as the
+    # ``prescribed.py`` and ``restoring.py`` rewrites.
+    nlev = shape_3d[-1]
+    pad_axes = ((0, 0),) * (len(shape_3d) - 1)
+    du_dt = jnp.pad(
+        (tau_x * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
+    dv_dt = jnp.pad(
+        (tau_y * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
+    dT_dt = jnp.pad(
+        (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
     # No freshwater forcing in basic bulk formulation
     dS_dt = jnp.zeros(shape_3d, dtype=dtype)
 

@@ -115,8 +115,11 @@ def kessler_microphysics(
     V_t_bot = V_t[:, -1]
     precipitation = q_r_bot * rho[:, -1] * V_t_bot
 
-    z = jnp.zeros((ncol, nlev))
-    z1 = jnp.zeros((ncol,))
+    # Pin dtype to the input precision so we never silently promote
+    # the unused-tendency placeholders to f64 under x64 mode.
+    _dtype = T.dtype
+    z = jnp.zeros((ncol, nlev), dtype=_dtype)
+    z1 = jnp.zeros((ncol,), dtype=_dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

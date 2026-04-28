@@ -42,19 +42,34 @@ class MicrophysicsOutput(NamedTuple):
     precipitation: jax.Array  # surface precip [kg/m^2/s]
 
 
-def make_zero_hydrometeors(ncol: int, nlev: int) -> HydrometeorState:
-    """Create a zero-initialized HydrometeorState."""
-    z = jnp.zeros((ncol, nlev))
+def make_zero_hydrometeors(
+    ncol: int, nlev: int, dtype=None,
+) -> HydrometeorState:
+    """Create a zero-initialized HydrometeorState.
+
+    ``dtype`` defaults to the JAX default float (``float64`` under x64,
+    ``float32`` otherwise).  Callers integrating with the column physics
+    pipeline should pass the upstream state dtype explicitly so this
+    fallback never silently promotes a float32 column path to float64.
+    """
+    z = jnp.zeros((ncol, nlev), dtype=dtype)
     return HydrometeorState(
         q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
         N_c=z, N_r=z, N_i=z,
     )
 
 
-def make_zero_output(ncol: int, nlev: int) -> MicrophysicsOutput:
-    """Create a zero-initialized MicrophysicsOutput."""
-    z2 = jnp.zeros((ncol, nlev))
-    z1 = jnp.zeros((ncol,))
+def make_zero_output(
+    ncol: int, nlev: int, dtype=None,
+) -> MicrophysicsOutput:
+    """Create a zero-initialized MicrophysicsOutput.
+
+    ``dtype`` is forwarded to ``jnp.zeros`` for the same reason as
+    ``make_zero_hydrometeors``: defaulting allows x64 mode to silently
+    promote the precip path.
+    """
+    z2 = jnp.zeros((ncol, nlev), dtype=dtype)
+    z1 = jnp.zeros((ncol,), dtype=dtype)
     return MicrophysicsOutput(
         dT_dt=z2, dq_v_dt=z2, dq_c_dt=z2, dq_r_dt=z2,
         dq_i_dt=z2, dq_s_dt=z2, dq_g_dt=z2,
@@ -90,9 +105,9 @@ def sedimentation_tendency(
     q_pos = jnp.clip(q, 0.0, None)
     flux = V_t * q_pos * rho  # (ncol, nlev)
 
-    # Flux from above: zero at top, flux[k-1] enters level k
-    flux_in = jnp.concatenate(
-        [jnp.zeros((q.shape[0], 1)), flux[:, :-1]], axis=1,
-    )
+    # Flux from above: zero at top, flux[k-1] enters level k.  Use
+    # ``jnp.pad`` (single Pad HLO) instead of allocating a fresh
+    # zero buffer + concatenate.
+    flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
     dz_safe = jnp.clip(dz, 1.0, None)
     return (flux_in - flux) / (rho * dz_safe)
