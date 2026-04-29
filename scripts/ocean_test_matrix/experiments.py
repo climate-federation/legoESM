@@ -1779,6 +1779,8 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
         "kappa_GM": gm_cfg.kappa_GM, "kappa_Redi": gm_cfg.kappa_Redi,
     })
 
+    eady_extent = (eu_config.lon_west, eu_config.lon_east,
+                   eu_config.lat_south, eu_config.lat_north)
     _save_case_diagnostics(
         output_dir, case_label,
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -1791,7 +1793,9 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
         level_label="Depth (m)",
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
-                      "mean_T": "degC", "mean_S": "PSU"})
+                      "mean_T": "degC", "mean_S": "PSU"},
+        domain_extent=eady_extent,
+        mesh=grid if coord_kind == "mpas" else None)
 
     for fkey in ("u_3d", "speed_3d"):
         _save_cross_sections(
