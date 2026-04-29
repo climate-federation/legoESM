@@ -54,6 +54,37 @@ from pressure/barotropic/physics.
 
 Created branch `dhruv/advection-convergence-tests`. Starting with Level 1.
 
+#### Level 1 results (1D zonal advection, CFL~0.5, one revolution)
+
+| Scheme | 32 pts L2 | 64 pts L2 | 128 pts L2 | 256 pts L2 | Rate | Expected | Status |
+|---|---|---|---|---|---|---|---|
+| upwind | 4.54e-01 | 3.44e-01 | 2.75e-01 | 2.47e-01 | 0.3 | 1 | SLOW |
+| tvd | 4.03e-01 | 4.55e-01 | 3.10e-01 | 2.55e-01 | 0.2 | 2 | SLOW |
+| dst3 | 2.55e-01 | 2.46e-01 | 2.46e-01 | 2.47e-01 | 0.0 | 3 | NO CONVERGENCE |
+| weno5 | 9.51e+00 | 6.28e+00 | 5.28e+04 | 2.54e+14 | -14.9 | 5 | UNSTABLE |
+| weno7 | 8.92e+01 | 4.86e+03 | 1.04e+12 | 5.97e+30 | -31.9 | 7 | UNSTABLE |
+
+Conservation: upwind, tvd, dst3 conserve to machine precision. WENO5/7
+lose conservation as they blow up (mass_drift=0.003 at 256 pts for weno5).
+
+**Key findings:**
+
+1. **WENO5 and WENO7 are unstable in a pure 1D advection test.** Errors grow
+   exponentially with resolution. This is a bug — WENO is purely spatial
+   reconstruction, should be stable at CFL ≤ 0.5 with flux-form update.
+   The instability may explain some Eady blowups.
+
+2. **DST-3 shows zero convergence.** Error is flat at ~0.25 regardless of
+   resolution. The Sweby limiter may be clamping the 3rd-order correction.
+
+3. **Upwind and TVD converge but at sub-theoretical rates** (0.3 and 0.2
+   instead of 1 and 2). Likely a test setup issue — Gaussian spans only
+   ~10 grid points at n_lon=64. Need wider feature or finer resolutions.
+
+**Next**: Investigate WENO instability. Check if the bug is in the
+reconstruction (`weno5_to_u_points`) or in how it's called in the
+flux-form update.
+
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics
 from the explicit solver at the same physics settings:
