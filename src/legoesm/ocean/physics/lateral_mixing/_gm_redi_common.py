@@ -54,6 +54,27 @@ def dm95_taper(
     return S_x * taper, S_y * taper, taper
 
 
+def dm95_taper_scalar(
+    S: jnp.ndarray,
+    S_max: float,
+    eps: float = _EPS,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Single-component variant of :func:`dm95_taper`.
+
+    Used by grids that carry a scalar slope along each face's own normal
+    (e.g. MPAS/Voronoi edges).  Identical functional form, with ``|S|``
+    replaced by ``|S_n|``.
+
+    Returns
+    -------
+    S_tapered, taper : same shape as ``S``.
+    """
+    taper = 0.5 * (1.0 + jnp.tanh(
+        (S_max - jnp.abs(S)) / (0.1 * S_max + eps)
+    ))
+    return S * taper, taper
+
+
 # ---------------------------------------------------------------------------
 # Vertical flux divergence with zero-flux BCs
 # ---------------------------------------------------------------------------
