@@ -32,10 +32,12 @@ import jax.numpy as jnp
 
 from legoesm.core.operators_voronoi import (
     cell_to_edge_avg_3d,
+    divergence_cell_3d,
     gradient_edge_3d,
 )
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     dm95_taper_scalar,
+    vertical_flux_divergence,
 )
 
 if TYPE_CHECKING:
@@ -204,6 +206,54 @@ def compute_isopycnal_slopes_mpas(
     return dm95_taper_scalar(S_n_clipped, cfg.S_max)
 
 
+def _perot_inner_product_cell(
+    a_edge: jnp.ndarray,
+    b_edge: jnp.ndarray,
+    mesh: "VoronoiMesh",
+) -> jnp.ndarray:
+    """Cell-centre Perot reconstruction of an inner product of two
+    edge-normal vector fields.
+
+    For two vector fields whose normal components live at edges, the
+    Perot reconstruction of their cell-centred inner product is::
+
+        (a · b)_cell = (1 / A_c) · Σ_e (dc_e · dv_e / 2) · a_e · b_e
+
+    summed over the edges of cell ``c`` (with implicit `sign² = 1`).
+    The same dual-area weight ``dc·dv/2`` underlies
+    ``kinetic_energy_cell`` (Ringler 2010, Eq. 63).  Used here for the
+    cell-averaged ``S · ∇q`` and ``|S|²`` that enter the vertical Redi
+    flux on Voronoi.
+
+    Parameters
+    ----------
+    a_edge, b_edge : array (nEdges, ...) or (nEdges,)
+        Edge-normal components.  Trailing axes are broadcast.
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    array (nCells, ...) — leading axis replaces nEdges.
+    """
+    eoc = mesh.edgesOnCell                        # (maxEdges, nCells)
+    valid = (eoc >= 0).astype(a_edge.dtype)       # (maxEdges, nCells)
+    eoc_safe = jnp.maximum(eoc, 0)
+
+    # Gather (a, b) and edge dual area onto (maxEdges, nCells, ...).
+    a_g = a_edge[eoc_safe]                        # (maxEdges, nCells, ...)
+    b_g = b_edge[eoc_safe]
+    dc = mesh.dcEdge[eoc_safe]                    # (maxEdges, nCells)
+    dv = mesh.dvEdge[eoc_safe]
+    area_e = 0.5 * dc * dv                        # (maxEdges, nCells)
+
+    if a_edge.ndim == 1:
+        contrib = a_g * b_g * area_e * valid
+        return jnp.sum(contrib, axis=0) / mesh.areaCell
+    # Trailing-axis broadcast for (nEdges, nlev[-1]).
+    contrib = a_g * b_g * (area_e * valid)[:, :, None]
+    return jnp.sum(contrib, axis=0) / mesh.areaCell[:, None]
+
+
 def gm_redi_tracer_tendency_centered_mpas(
     q: jnp.ndarray,
     S_n: jnp.ndarray,
@@ -217,13 +267,140 @@ def gm_redi_tracer_tendency_centered_mpas(
 ) -> jnp.ndarray:
     """Centred GM+Redi tracer tendency on Voronoi (Phase 2).
 
-    Mirrors ``gm_redi_tracer_tendency_latlon_cgrid``: horizontal flux
-    in the edge-normal direction, vertical flux at cell-centred
-    interfaces.  Uses the small-slope tensor.
+    Mirrors ``gm_redi_tracer_tendency_latlon_cgrid`` with edge-normal
+    primitives.  All slope×gradient combinations are evaluated at
+    INTERFACE level so that the algebraic identity
+    ``∂_n q + S_n · ∂_z q = 0`` (which holds when ``q = f(ρ)``) holds
+    at every edge × interface, giving exact cancellation of the
+    off-diagonal Redi flux to within centred-averaging error.
 
-    See Phase 2 in ``docs/ocean_experiments/gm_redi_mpas_plan.md``.
+    Algorithm
+    ---------
+    Horizontal:
+        F_n[edge, k_int] = κ_R · ∂_n q + (κ_R − κ_GM) · S_n · ∂_z q
+        F_n[edge, k_full] = ½ · (F_n[..., k_int-1] + F_n[..., k_int])
+                            (zero pad at surface/bottom)
+        F_n[edge, *]      *= edge_mask
+        dq_h               = divergence_cell_3d(F_n, mesh)
+
+    Vertical (cell-centred via Perot reconstruction):
+        (S · ∇q)_c[k_int]  = Perot Σ over cell edges of (S_n · ∂_n q)
+        (|S|²)_c[k_int]    = Perot Σ over cell edges of (S_n²)
+        F_z[c, k_int]      = (κ_R + κ_GM) · (S · ∇q)_c
+                             + κ_R · |S|²_c · ∂_z q[c]
+        dq_vert            = vertical_flux_divergence(F_z, dz_actual)
+
+    Parameters
+    ----------
+    q : (nCells, nlev)
+        Tracer field at cell centres.
+    S_n : (nEdges, nlev-1)
+        Tapered edge-normal isopycnal slope at interior interfaces.
+    mask : (nCells,)
+    edge_mask : (nEdges,)
+        ``mask[c1] · mask[c2]`` — zero on coastline edges so no flux
+        is fed through land boundaries.
+    z_coord, jacobian, mesh
+    kappa_GM : float or (nCells,)
+        GM transport coefficient.  Per-cell values are broadcast to
+        edges for the horizontal flux and used directly at cell centres
+        for the vertical flux.
+    kappa_Redi : float
+
+    Returns
+    -------
+    tendency : (nCells, nlev)
     """
-    _not_implemented("gm_redi_tracer_tendency_centered_mpas")
+    dz_actual = z_coord.dz_ref * jacobian[:, jnp.newaxis]    # (nCells, nlev)
+    dz_half = z_coord.dz_half_ref * jacobian[:, jnp.newaxis]  # (nCells, nlev-1)
+
+    # --- Per-cell vs scalar kappa_GM ---
+    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 1:
+        kappa_GM_cell = kappa_GM                              # (nCells,)
+        kappa_GM_edge = cell_to_edge_avg_3d(
+            kappa_GM[:, None], mesh
+        )[:, 0]                                                # (nEdges,)
+    else:
+        kappa_GM_cell = kappa_GM
+        kappa_GM_edge = kappa_GM
+
+    # --- Neumann-fill q before differencing across coastlines ---
+    q_filled = _voronoi_neumann_fill(q, mask, mesh)
+
+    # --- Edge-normal tracer gradient at full levels ---
+    dq_dn = gradient_edge_3d(q_filled, mesh)                  # (nEdges, nlev)
+
+    # --- Vertical tracer gradient at cell-centred interfaces ---
+    dq_dz_cell = (q_filled[:, :-1] - q_filled[:, 1:]) / jnp.maximum(
+        dz_half, _EPS_DIV
+    )                                                          # (nCells, nlev-1)
+
+    # Move dq/dz onto edges for the horizontal flux.
+    dq_dz_edge = cell_to_edge_avg_3d(dq_dz_cell, mesh)         # (nEdges, nlev-1)
+
+    # Average dq/dn from full levels to interfaces.
+    dq_dn_half = 0.5 * (dq_dn[:, :-1] + dq_dn[:, 1:])         # (nEdges, nlev-1)
+
+    # ------------------------------------------------------------------
+    # Horizontal flux at edge-interface, then averaged to edge-full
+    # ------------------------------------------------------------------
+    # κ_GM may be (nEdges,) or scalar; promote shape for broadcast.
+    if isinstance(kappa_GM_edge, jnp.ndarray) and kappa_GM_edge.ndim == 1:
+        kappa_GM_edge_b = kappa_GM_edge[:, None]              # (nEdges, 1)
+    else:
+        kappa_GM_edge_b = kappa_GM_edge
+
+    F_n_half = (
+        kappa_Redi * dq_dn_half
+        + (kappa_Redi - kappa_GM_edge_b) * S_n * dq_dz_edge
+    )                                                          # (nEdges, nlev-1)
+
+    # Average interface fluxes to full levels (zero at surface/bottom).
+    z_pad = jnp.zeros((mesh.nEdges, 1), dtype=F_n_half.dtype)
+    F_n_full = 0.5 * (
+        jnp.concatenate([z_pad, F_n_half], axis=-1)
+        + jnp.concatenate([F_n_half, z_pad], axis=-1)
+    )                                                          # (nEdges, nlev)
+
+    # Land-boundary flux is zero.
+    F_n_full = F_n_full * edge_mask[:, None]
+
+    # Horizontal flux divergence: standard TRiSK divergence_cell.
+    dq_h = divergence_cell_3d(F_n_full, mesh)                  # (nCells, nlev)
+
+    # ------------------------------------------------------------------
+    # Vertical flux at cell-centred interfaces (Perot reconstruction)
+    # ------------------------------------------------------------------
+    # (S · ∇q)_cell at interfaces.
+    # NOTE: zero out S_n on land-adjacent edges so Perot doesn't carry
+    # spurious slope·gradient products into the cell-mean from edges
+    # where the flux must be zero.
+    S_n_oc = S_n * edge_mask[:, None]                          # (nEdges, nlev-1)
+    dq_dn_half_oc = dq_dn_half * edge_mask[:, None]
+    S_dot_grad_cell = _perot_inner_product_cell(
+        S_n_oc, dq_dn_half_oc, mesh,
+    )                                                          # (nCells, nlev-1)
+    S_sq_cell = _perot_inner_product_cell(
+        S_n_oc, S_n_oc, mesh,
+    )                                                          # (nCells, nlev-1)
+
+    # κ_GM may be (nCells,) — broadcast to interface axis.
+    if isinstance(kappa_GM_cell, jnp.ndarray) and kappa_GM_cell.ndim == 1:
+        kappa_GM_cell_b = kappa_GM_cell[:, None]               # (nCells, 1)
+    else:
+        kappa_GM_cell_b = kappa_GM_cell
+
+    F_z = (
+        (kappa_Redi + kappa_GM_cell_b) * S_dot_grad_cell
+        + kappa_Redi * S_sq_cell * dq_dz_cell
+    )                                                          # (nCells, nlev-1)
+
+    dq_vert = vertical_flux_divergence(F_z, dz_actual)         # (nCells, nlev)
+
+    # ------------------------------------------------------------------
+    # Total, masked
+    # ------------------------------------------------------------------
+    return (dq_h + dq_vert) * mask[:, None]
 
 
 def gm_redi_tracer_tendency_triads_mpas(

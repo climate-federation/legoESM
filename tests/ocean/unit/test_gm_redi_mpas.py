@@ -208,14 +208,201 @@ def test_neumann_fill_propagates_ocean_into_isolated_land(mesh):
 # Dispatch guards for phases not yet implemented
 # ============================================================================
 
+# ============================================================================
+# Phase 2 — centered tracer tendency
+# ============================================================================
+
+def _edge_mask(mesh, mask) -> jnp.ndarray:
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    return mask[c1] * mask[c2]
+
+
+def test_centered_constant_q_zero_tendency(mesh, z_coord, cfg):
+    """q uniform everywhere ⇒ horizontal and vertical fluxes both
+    vanish identically ⇒ tendency = 0 to machine precision."""
+    nlev = z_coord.dz_ref.shape[0]
+    mask = _all_ocean_mask(mesh)
+    jac = _unit_jacobian(mesh)
+    em = _edge_mask(mesh, mask)
+
+    rho = jnp.full((mesh.nCells, nlev), 1027.5, dtype=jnp.float64)
+    S_n, _ = compute_isopycnal_slopes_mpas(rho, mask, z_coord, jac, mesh, cfg)
+
+    q = jnp.full((mesh.nCells, nlev), 17.0, dtype=jnp.float64)
+    dqdt = gm_redi_tracer_tendency_centered_mpas(
+        q, S_n, mask, em, z_coord, jac, mesh,
+        kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+    )
+
+    np.testing.assert_allclose(np.asarray(dqdt), 0.0, atol=1e-14)
+
+
+def test_centered_q_eq_rho_redi_residual_small(mesh, z_coord, cfg):
+    """When q = f(ρ) (linear in ρ), the off-diagonal Redi flux must
+    cancel the diagonal Redi flux to within centred-averaging error.
+
+    Setup: pure isopycnal flow, ``q ≡ rho``, ``κ_GM = 0`` so only the
+    Redi tensor is active.  The exact small-slope identity
+    ``∂_n q + S_n · ∂_z q = 0`` holds at every (edge, interface)
+    because we built S_n from the *same* ρ field; the residual we see
+    is the centred-averaging error from moving ``∂_z`` from cell to
+    edge and from interface to full level.
+
+    The tolerance is set generously because this is the *centered*
+    scheme — the triad scheme (Phase 5) will tighten it to round-off.
+    """
+    z = _z_centers(z_coord)
+    nlev = z.shape[0]
+    beta = 0.5
+    alpha = 1e-3
+    rho = (1027.5
+           + (beta * jnp.sin(mesh.latCell))[:, None]
+           + (alpha * (-z))[None, :])
+
+    mask = _all_ocean_mask(mesh)
+    jac = _unit_jacobian(mesh)
+    em = _edge_mask(mesh, mask)
+
+    S_n, _ = compute_isopycnal_slopes_mpas(rho, mask, z_coord, jac, mesh, cfg)
+    q = rho
+
+    cfg_redi_only = cfg._replace(kappa_GM=0.0, kappa_Redi=1.0e3)
+    dqdt = gm_redi_tracer_tendency_centered_mpas(
+        q, S_n, mask, em, z_coord, jac, mesh,
+        kappa_GM=cfg_redi_only.kappa_GM,
+        kappa_Redi=cfg_redi_only.kappa_Redi,
+    )
+
+    # Exclude the top and bottom rows (zero-flux BCs and surface/
+    # bottom averaging are exact at boundaries; the interior is where
+    # the centered residual lives).
+    interior = np.asarray(dqdt[:, 1:-1])
+    rms = float(np.sqrt(np.mean(interior ** 2)))
+    # rho varies by ~β across hemispheres, α·H across depth: ~0.5
+    # kg/m³ horizontally, ~5e-1 kg/m³ vertically.  A residual rms below
+    # 1e-7 kg/m³/s with κ_R = 1e3 m²/s and S_max = 1e-2 means the
+    # off-diagonal cancels to 8 orders of magnitude below the
+    # diagonal flux scale (κ_R · ∂_n ρ ~ 1e3 · 1e-7 ~ 1e-4).
+    assert rms < 5e-9, f"centered q=f(ρ) residual rms = {rms:.3g}"
+
+
+def test_centered_pure_horizontal_q_diffuses(mesh, z_coord, cfg):
+    """Diagonal Redi flux is alive: a horizontal q-gradient with no
+    isopycnal slope (constant ρ) produces a non-zero tendency that
+    has the sign of horizontal Laplacian diffusion."""
+    nlev = z_coord.dz_ref.shape[0]
+    mask = _all_ocean_mask(mesh)
+    jac = _unit_jacobian(mesh)
+    em = _edge_mask(mesh, mask)
+
+    # Constant ρ ⇒ slopes are zero.
+    rho = jnp.full((mesh.nCells, nlev), 1027.5, dtype=jnp.float64)
+    S_n, _ = compute_isopycnal_slopes_mpas(rho, mask, z_coord, jac, mesh, cfg)
+    np.testing.assert_allclose(np.asarray(S_n), 0.0, atol=1e-14)
+
+    # Tracer with sin(lat) gradient.
+    q_lat = jnp.sin(mesh.latCell)
+    q = jnp.broadcast_to(q_lat[:, None], (mesh.nCells, nlev))
+
+    dqdt = gm_redi_tracer_tendency_centered_mpas(
+        q, S_n, mask, em, z_coord, jac, mesh,
+        kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+    )
+
+    # The diffusive tendency on a sin(lat) field has the opposite sign
+    # of the field itself in mid-latitudes (∇²sin(lat) on the sphere
+    # ∝ -sin(lat)/R² · 2).  Check sign correlation.
+    interior = np.asarray(dqdt[:, 0])      # any level (all identical here)
+    field = np.asarray(q_lat)
+    # Mask out near-equator points where sin(lat) ≈ 0.
+    far = np.abs(field) > 0.3
+    correlation = np.mean(np.sign(interior[far]) * np.sign(field[far]))
+    assert correlation < -0.5, (
+        f"diffusive tendency should oppose the field, got corr={correlation:.3g}"
+    )
+    # And it should be non-trivially non-zero.
+    rms = float(np.sqrt(np.mean(interior ** 2)))
+    assert rms > 1e-12, "diagonal Redi flux did not produce a tendency"
+
+
+def test_centered_conserves_mass_globally(mesh, z_coord, cfg):
+    """∫ tendency · areaCell · dz over all ocean cells/levels = 0
+    to machine precision (FV closure of TRiSK divergence + zero-flux
+    vertical BCs)."""
+    z = _z_centers(z_coord)
+    nlev = z.shape[0]
+    beta = 0.5
+    alpha = 1e-3
+    rho = (1027.5
+           + (beta * jnp.sin(mesh.latCell))[:, None]
+           + (alpha * (-z))[None, :])
+    mask = _all_ocean_mask(mesh)
+    jac = _unit_jacobian(mesh)
+    em = _edge_mask(mesh, mask)
+
+    S_n, _ = compute_isopycnal_slopes_mpas(rho, mask, z_coord, jac, mesh, cfg)
+    # Use a non-trivial tracer so dq_h and dq_vert are both non-zero.
+    q = jnp.cos(mesh.lonCell)[:, None] + 0.0 * z[None, :]
+    q = jnp.broadcast_to(q, (mesh.nCells, nlev))
+
+    dqdt = gm_redi_tracer_tendency_centered_mpas(
+        q, S_n, mask, em, z_coord, jac, mesh,
+        kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+    )
+
+    dz_actual = z_coord.dz_ref * jac[:, None]                  # (nCells, nlev)
+    integrand = np.asarray(dqdt) * np.asarray(mesh.areaCell)[:, None] \
+        * np.asarray(dz_actual)
+    total = float(np.sum(integrand))
+    # Scale by maximum cell-volume × tendency magnitude.
+    scale = float(
+        np.max(np.asarray(mesh.areaCell)) * np.max(np.asarray(dz_actual))
+        * max(np.max(np.abs(integrand)), 1e-30)
+    )
+    rel = abs(total) / scale
+    assert rel < 1e-10, (
+        f"global tracer integral drift = {total:.3e}, rel = {rel:.3e}"
+    )
+
+
+def test_centered_respects_land_mask(mesh, z_coord, cfg):
+    """Tendency on land cells must be exactly zero, regardless of the
+    tracer values used as land sentinels."""
+    nlev = z_coord.dz_ref.shape[0]
+    mask = jnp.ones((mesh.nCells,), dtype=jnp.float64).at[0].set(0.0)
+    jac = _unit_jacobian(mesh)
+    em = _edge_mask(mesh, mask)
+
+    rho = jnp.full((mesh.nCells, nlev), 1027.5, dtype=jnp.float64)
+    rho = rho.at[0, :].set(0.0)
+    S_n, _ = compute_isopycnal_slopes_mpas(rho, mask, z_coord, jac, mesh, cfg)
+
+    # Tracer with a wild value in the land cell.
+    q = jnp.broadcast_to(jnp.sin(mesh.latCell)[:, None], (mesh.nCells, nlev))
+    q = q.at[0, :].set(99999.0)
+
+    dqdt = gm_redi_tracer_tendency_centered_mpas(
+        q, S_n, mask, em, z_coord, jac, mesh,
+        kappa_GM=cfg.kappa_GM, kappa_Redi=cfg.kappa_Redi,
+    )
+
+    # Land cell tendency = 0.
+    np.testing.assert_allclose(np.asarray(dqdt[0, :]), 0.0, atol=1e-14)
+
+
+# ============================================================================
+# Dispatch guards for phases not yet implemented
+# ============================================================================
+
 @pytest.mark.parametrize("fn,name", [
-    (gm_redi_tracer_tendency_centered_mpas, "gm_redi_tracer_tendency_centered_mpas"),
     (gm_redi_tracer_tendency_triads_mpas,   "gm_redi_tracer_tendency_triads_mpas"),
     (gm_redi_tracer_tendency_mpas,          "gm_redi_tracer_tendency_mpas"),
 ])
 def test_unimplemented_phases_raise_with_plan_pointer(fn, name):
-    """Phases 2/4/5 are not implemented yet — they must raise a clear
-    NotImplementedError that names the function and points at the plan."""
+    """Phases 4 (top-level) and 5 (triads) are not implemented yet —
+    they must raise a clear NotImplementedError that names the function
+    and points at the plan."""
     import inspect
     sig = inspect.signature(fn)
     n_pos = sum(
