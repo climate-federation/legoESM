@@ -199,7 +199,41 @@ reconstruction error is O(dx^3) with point values.
 
 Option 1 is simpler and doesn't require changing the core WENO kernel.
 
-**Next:** Investigate DST-3 1st-order behavior, then implement WENO fix.
+### 2026-04-29: DST-3 diagnosis — space-time vs spatial-only
+
+DST-3 showing 1st-order face reconstruction is **not a bug**. DST-3 is a
+**direct space-time** scheme: its coefficients d0(CFL), d1(CFL) encode
+the CFL number into the reconstruction so that the combined space+time
+accuracy is 3rd order over a full advection step. Testing the face
+reconstruction alone (spatial only) does not capture this.
+
+Key detail: at CFL=0.5, `d1 = (1-c)(1-2c)/6 = 0` — the curvature
+correction vanishes entirely, reducing to 1st-order upwind + a fraction
+of the downwind value. Additionally, the stability cap `d0 = min(d0_dst3,
+d0_lw)` activates at CFL < 0.5, further reducing the high-order correction.
+
+**Conclusion:** DST-3 cannot be tested with a pure spatial reconstruction
+test. Its 3rd-order accuracy must be verified with a full advection step
+at fixed CFL. The earlier 20-step fixed-CFL test showed DST-3 having
+smaller errors than upwind/tvd at coarse resolution (0.040 vs 0.079/0.108
+at 32 pts), consistent with its space-time accuracy.
+
+**Summary of findings:**
+
+| Scheme | Face recon order | Full-step order | Issue |
+|---|---|---|---|
+| upwind | 1st | 1st | Correct |
+| tvd | 2nd | 2nd (limited by FE time) | Correct |
+| dst3 | 1st (spatial only) | 3rd (space-time) | Not a bug — test artifact |
+| weno5 | 3rd (should be 5th) | 3rd (limited) | **BUG: point values, not cell averages** |
+| weno7 | 3rd (should be 7th) | 3rd (limited) | **BUG: point values, not cell averages** |
+
+**Action items:**
+1. Fix WENO point-value → cell-average conversion in `_weno_to_u_points`
+   and `_weno_to_v_points`
+2. Verify DST-3 3rd-order convergence with a proper space-time test
+   (fixed CFL, refine dx and dt together, many revolutions to accumulate
+   error above the noise floor)
 
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics
