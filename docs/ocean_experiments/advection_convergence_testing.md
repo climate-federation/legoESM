@@ -133,13 +133,41 @@ implicit diffusion** (Var(T) preservation), not formal convergence rate.
 This is consistent with Hill et al. (2012) who measured effective
 diapycnal diffusivity, not convergence.
 
-**Next steps:**
-- Proceed to Level 2 (2D prescribed flow) to test grid metric
-  interactions and dimensional splitting
-- Investigate DST-3 behavior more carefully (it showed slightly more
-  spatial error than TVD at coarse resolution, unexpected for 3rd order)
-- The Eady advection comparison can resume — schemes are verified correct,
-  the issue is parameter tuning with the implicit solver
+### 2026-04-29: Face reconstruction convergence — spatial order bugs found
+
+Testing face reconstruction accuracy in isolation (no time stepping at
+all). Call `scheme_to_u_points(T, mass_flux)` on T = sin(2*lon), compare
+reconstructed face values to exact sin(2*lon_face). Linf error:
+
+| Scheme | 32 | 64 | 128 | 256 | 512 | Rate | Expected | Status |
+|---|---|---|---|---|---|---|---|---|
+| upwind | 1.95e-01 | 9.80e-02 | 4.91e-02 | 2.45e-02 | 1.23e-02 | **1.00** | 1 | CORRECT |
+| tvd | 3.61e-02 | 9.48e-03 | 2.40e-03 | 6.02e-04 | 1.51e-04 | **1.98** | 2 | CORRECT |
+| dst3 | 6.75e-02 | 3.30e-02 | 1.64e-02 | 8.19e-03 | 4.09e-03 | **1.01** | 3 | **BUG: 1st order** |
+| weno5 | 6.33e-03 | 1.60e-03 | 4.01e-04 | 1.00e-04 | 2.51e-05 | **1.99** | 5 | **BUG: 2nd order** |
+| weno7 | 6.33e-03 | 1.60e-03 | 4.01e-04 | 1.00e-04 | 2.51e-05 | **1.99** | 7 | **BUG: 2nd order** |
+
+**Critical findings:**
+
+1. **DST-3 is 1st order instead of 3rd.** The Sweby limiter is destroying
+   the 3rd-order correction on a smooth sinusoidal field, reducing it to
+   upwind-level spatial accuracy. The limiter should NOT activate on a
+   smooth periodic function.
+
+2. **WENO5 and WENO7 are 2nd order instead of 5th/7th.** Both give
+   IDENTICAL errors (to 4+ digits), which means WENO7 is falling back to
+   the same stencil as WENO5, and both are doing ~2nd-order linear
+   interpolation instead of their high-order WENO reconstruction.
+
+3. **Upwind (1st order) and TVD (2nd order) are correct.**
+
+**Implications:** The higher-order schemes are not delivering their
+advertised accuracy. This may explain why WENO5/7 didn't differentiate
+from TVD in the Eady Var(T) comparison — they're effectively 2nd-order
+schemes, same as TVD.
+
+**Next:** Investigate root cause in `weno5_to_u_points` and
+`dst3_to_u_points` implementations.
 
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics
