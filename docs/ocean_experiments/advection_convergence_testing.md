@@ -439,6 +439,64 @@ deliver their actual accuracy. With Euler, all schemes look similar
 because the temporal floor dominates. AB2 helps WENO but breaks TVD/DST3
 monotonicity.
 
+### 2026-04-29: Sine sanity-check + dycore audit reveals O(dx²) FV ceiling
+
+Added `--initial-condition sine` mode (sin(2*lon), infinitely smooth,
+periodic) to expose true convergence rates. Expected: WENO5+RK3 should
+give rate 3 (min of 5th spatial, 3rd temporal at fixed CFL). Observed:
+**rate exactly 2.00** for both WENO5+RK3 and WENO7+RK3.
+
+Dycore-expert audit traced the cause:
+
+The discrete FV divergence `(F_E - F_W)/dx`, even with **exact** face
+values, is only **2nd-order accurate** as an approximation of `dF/dx`
+at the cell center. For sin(2x) with exact face values:
+```
+(F_E - F_W)/dx = 2*cos(2x_c) * sinc(dx)
+                = 2*cos(2x_c) * (1 - dx²/6 + ...)
+```
+The `sinc(dx)` factor introduces a per-unit-time phase error of
+`u*(1-sinc(dx)) ≈ u*dx²/6`, giving global error O(dx²).
+
+This is NOT the WENO reconstruction's fault. WENO5 face values ARE
+5th-order accurate (verified). The ceiling is **inherent to the discrete
+FV divergence operator** when the prognostic variable is interpreted
+as a point value (as in the model's WENO wrapper which converts
+point→cellavg before reconstruction).
+
+**The model has a built-in O(dx²) accuracy ceiling for tracer advection.**
+Higher-order spatial schemes buy lower prefactors at coarse resolution
+but identical asymptotic rate. To break this ceiling would require
+either:
+- Treating T as a true cell-average throughout (skip WENO's internal
+  point→cellavg conversion, which would require model-level changes)
+- Or using a high-order divergence operator (e.g., 4th-order
+  staggered-grid finite differences instead of `(F_E - F_W)/dx`)
+
+This was validated numerically: at n=32 with sin(2*lon), `dx²/6 ≈ 6.4e-3`,
+matches observed WENO5+RK3 L2 = 6.7e-3. At n=256, `dx²/6 ≈ 1.0e-4`,
+matches observed L2 = 1.05e-4.
+
+**Practical implication**: WENO+RK3's biggest win in our ocean model
+isn't formal accuracy — it's **stability** (the Level 2 deformational
+flow blowups we saw with WENO+Euler should disappear with RK3) and
+**lower error magnitudes at production resolutions**. The asymptotic
+2nd-order rate from the divergence operator is something the model
+just lives with.
+
+**DST3+RK3 puzzle (rate 0.99)**: DST-3's CFL-dependent coefficients
+encode the time-truncation correction (Lax-Wendroff style). RK3
+re-evaluates F at each substage, double-counting this correction with
+the wrong CFL. Result: DST3+RK3 degrades to ~1st-order, behaving like
+upwind. **Don't pair DST-3 with RK3.**
+
+**AB2+ε is 1st-order in time (not 2nd)**: The eps=0.1 stabilization
+adds an `eps*dt*g_t` term to the LTE, breaking standard AB2's 2nd-order
+accuracy. This is by design (for stability) but means AB2 is closer to
+"forward Euler with one previous tendency for damping" than a true
+2nd-order scheme. Verified: WENO+AB2 mixes the rate-2 FV ceiling with
+rate-1 temporal error, giving the apparent rate ≈ 0.6 we observed.
+
 **Recommended pairings (for the model):**
 - Production tracer advection: **TVD+Euler** (cheap, robust) or
   **DST3+Euler** (best Euler accuracy, space-time tuned)

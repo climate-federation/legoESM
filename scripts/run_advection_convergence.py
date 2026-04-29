@@ -88,19 +88,37 @@ def _create_grid(n_lat, n_lon):
 
 SIGMA_LON = 60.0  # Gaussian half-width in degrees (wide enough for good convergence)
 CENTER_LON = 180.0  # Initial center
+SINE_WAVENUMBER = 2  # k for sin(k*lon) test mode
+
+# Module-level switch — set by main() based on --initial-condition
+_IC_KIND = "gaussian"
 
 
-def _gaussian_tracer(grid, center_lon=CENTER_LON, nlev=1):
-    """Create a Gaussian tracer blob centered at given longitude.
+def _smooth_tracer(grid, shift_deg=0.0, nlev=1):
+    """Create the test tracer field on the grid.
 
-    Returns array of shape (n_lat_grid, n_lon, nlev).
-    Grid lon/lat are 1D: lon (n_lon,), lat (n_lat_grid,).
+    Two modes (selected by global _IC_KIND):
+      "gaussian" — Gaussian centered at CENTER_LON + shift_deg (sigma=60°).
+                   Smooth but with localized shoulders that may stress
+                   high-order schemes' smoothness indicators.
+      "sine"    — sin(k*(lon - shift_deg_rad)) for k=SINE_WAVENUMBER.
+                   Periodic, infinitely smooth, no localized features.
+                   Should expose true convergence rates.
+
+    Returns shape (n_lat_grid, n_lon, nlev). Field is uniform in latitude.
     """
     lon_deg = np.asarray(grid.lon) * 180.0 / np.pi  # (n_lon,)
-    lon_centered = lon_deg - center_lon
-    lon_centered = np.where(lon_centered > 180, lon_centered - 360, lon_centered)
-    lon_centered = np.where(lon_centered < -180, lon_centered + 360, lon_centered)
-    tracer_1d = np.exp(-0.5 * (lon_centered / SIGMA_LON) ** 2)  # (n_lon,)
+
+    if _IC_KIND == "sine":
+        k = SINE_WAVENUMBER
+        # sin(k * (lon_deg - shift_deg) * pi/180)
+        tracer_1d = np.sin(np.radians(k * (lon_deg - shift_deg)))
+    else:  # gaussian
+        center_lon = CENTER_LON + shift_deg
+        lon_centered = lon_deg - center_lon
+        lon_centered = np.where(lon_centered > 180, lon_centered - 360, lon_centered)
+        lon_centered = np.where(lon_centered < -180, lon_centered + 360, lon_centered)
+        tracer_1d = np.exp(-0.5 * (lon_centered / SIGMA_LON) ** 2)
 
     n_lat_grid = grid.area.shape[0]
     n_lon = grid.area.shape[1]
@@ -252,8 +270,8 @@ def _run_level1_single(scheme, n_lat, n_lon, output_dir, dt_override=None,
     grid = _create_grid(n_lat, n_lon)
     n_lat_grid, n_lon_actual = grid.area.shape
 
-    # Tracer: Gaussian blob centered at 180 deg
-    tracer_init = _gaussian_tracer(grid, nlev=nlev)
+    # Tracer: smooth field (Gaussian or sine, set by --initial-condition)
+    tracer_init = _smooth_tracer(grid, shift_deg=0.0, nlev=nlev)
 
     # Velocity: u = u0 * cos(lat) so angular rotation is uniform
     # (all latitudes shift by the same number of degrees per unit time).
@@ -278,8 +296,22 @@ def _run_level1_single(scheme, n_lat, n_lon, output_dir, dt_override=None,
     print(f"    {scheme}+{time_integrator} @ {n_lat}x{n_lon}: n_steps={n_steps}, "
           f"dt={dt:.1f}s, CFL={actual_cfl:.3f}, shift={shift_deg:.1f}deg")
 
-    # Exact solution: Gaussian shifted eastward by shift_deg
-    tracer_exact = _gaussian_tracer(grid, center_lon=CENTER_LON + shift_deg, nlev=nlev)
+    # Exact solution: smooth field shifted eastward by shift_deg.
+    #
+    # IMPORTANT: The FV evolution `T_new = T - dt*(F_E-F_W)/dx` updates
+    # T as a cell average (the discrete divergence is the exact cell-
+    # average of dF/dx). But the model's WENO assumes input T is point
+    # values and converts internally. So evolved T has a mixed
+    # interpretation — but for linear advection with smooth fields,
+    # comparing the evolved T against the **cell-average** of the exact
+    # solution is what reveals the true scheme order.
+    #
+    # See dycore expert audit (2026-04-29): without this, all WENO+RK3
+    # tests cap at rate 2.00 from the point-value/cell-avg comparison
+    # mismatch (for sin(2x), this floor = dx^2/6).
+    from legoesm.core.weno import point_to_cellavg_periodic
+    tracer_exact_pt = _smooth_tracer(grid, shift_deg=shift_deg, nlev=nlev)
+    tracer_exact = point_to_cellavg_periodic(tracer_exact_pt, axis=1, order=6)
 
     # Create fields
     h_cell, h_u, h_v = _uniform_layer_thickness(grid, nlev, h_uniform)
@@ -509,6 +541,10 @@ def build_parser():
                    help="Comma-separated schemes to test")
     p.add_argument("--time-integrators", type=str, default="euler,ab2,rk3",
                    help="Comma-separated time integrators (euler, ab2, rk3)")
+    p.add_argument("--initial-condition", type=str, default="gaussian",
+                   choices=["gaussian", "sine"],
+                   help="Initial tracer field. 'sine' is infinitely smooth "
+                        "and exposes true convergence orders.")
     p.add_argument("--output", type=str, default="results/advection_convergence",
                    help="Output directory")
     p.add_argument("--quick", action="store_true",
@@ -532,6 +568,10 @@ def main():
     output_base = Path(args.output)
     level1_dir = output_base / "level1_1d"
 
+    # Set the global initial-condition kind (read by _smooth_tracer)
+    global _IC_KIND
+    _IC_KIND = args.initial_condition
+
     # Compute fixed dt from finest grid if requested
     dt_fixed = None
     if args.fixed_dt:
@@ -546,6 +586,7 @@ def main():
     print("=" * 70)
     print("  Ocean Advection Convergence Testing")
     print("=" * 70)
+    print(f"  Initial:     {_IC_KIND}")
     print(f"  Schemes:     {', '.join(schemes)}")
     print(f"  Integrators: {', '.join(time_integrators)}")
     print(f"  Resolutions: {[f'{r[0]}x{r[1]}' for r in resolutions]}")
