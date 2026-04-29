@@ -39,6 +39,21 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
     edmf_convection,
     mass_flux_convection,
 )
+from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+    zhang_mcfarlane_convection,
+)
+from legoesm.atmosphere.physics.convection.kain_fritsch import (
+    kain_fritsch_convection,
+)
+from legoesm.atmosphere.physics.convection.emanuel import (
+    emanuel_convection,
+)
+from legoesm.atmosphere.physics.convection.tiedtke import (
+    tiedtke_convection,
+)
+from legoesm.atmosphere.physics.convection.bechtold import (
+    bechtold_convection,
+)
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
     reconstruct_half_level_pressure_hydrostatic,
@@ -68,6 +83,16 @@ def _get_convection_fn(config: ConvectionConfig):
         return "mass_flux", mass_flux_convection, config.mass_flux
     elif config.scheme == "edmf":
         return "edmf", edmf_convection, config.edmf
+    elif config.scheme == "zhang_mcfarlane":
+        return "zhang_mcfarlane", zhang_mcfarlane_convection, config.zhang_mcfarlane
+    elif config.scheme == "kain_fritsch":
+        return "kain_fritsch", kain_fritsch_convection, config.kain_fritsch
+    elif config.scheme == "emanuel":
+        return "emanuel", emanuel_convection, config.emanuel
+    elif config.scheme == "tiedtke":
+        return "tiedtke", tiedtke_convection, config.tiedtke
+    elif config.scheme == "bechtold":
+        return "bechtold", bechtold_convection, config.bechtold
     elif config.scheme == "none":
         return "none", None, None
     else:
@@ -120,17 +145,35 @@ def _make_hydrostatic_convection(
     """Create convection physics_fn for PrimitiveEquationModel.
 
     Signature: (state, grid, sigma_coord, phys_state=None)
-               -> (HydrostaticTendencies, conv_prog_new | None)
+               -> (HydrostaticTendencies, conv_prog_profile_new | None)
 
-    When *phys_state* is passed, the convective prognostic variable is
-    read from ``phys_state.conv_prog`` and the updated value is returned
-    as the second element of the result tuple.
+    When *phys_state* is passed, the convective prognostic profile is
+    read from ``phys_state.conv_prog_profile`` (shape ``(ncol, nlev)``)
+    and the updated profile is returned as the second element of the
+    result tuple.  Scalar-carrying schemes (``mass_flux``, ``edmf``)
+    pack their scalar at ``[:, -1]`` (cloud-base proxy) with zeros
+    aloft; profile-carrying schemes (Tiedtke, Bechtold, added in later
+    PRs) use the full profile.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
-    is_prognostic = scheme_name in ("mass_flux", "edmf")
+    # Scalar-carrying schemes that pack their state at [:, -1].
+    is_scalar_prognostic = scheme_name in ("mass_flux", "edmf")
+    # Profile-carrying schemes (full conv_prog_profile is meaningful).
+    # ZM is technically diagnostic but uses [:, -1] as a M_b carry for
+    # implicit relaxation; we route it through the profile-aware path
+    # because the leaf signature accepts u, v for CMT.  KF is also
+    # diagnostic but routed through the profile path so the bridge can
+    # plumb the ``w_grid`` argument for its trigger.
+    is_profile_prognostic = scheme_name in (
+        "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+    )
+    is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
+    is_w_grid_consumer = scheme_name in ("kain_fritsch",)
+    is_stochastic = scheme_name in ("bechtold",)
+
     prog_key = None
     prog_init = None
-    if is_prognostic:
+    if is_scalar_prognostic:
         if scheme_name == "mass_flux":
             prog_key, prog_init = "M_c", scheme_config.M_c_init
         else:  # edmf
@@ -171,15 +214,41 @@ def _make_hydrostatic_convection(
         else:
             q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
+        # Wind columns for CMT-capable schemes.
+        if is_cmt_capable:
+            u_col = state.u.data.reshape(ncol, nlev)
+            v_col = (
+                state.v.data.reshape(ncol, nlev)
+                if state.v is not None
+                else jnp.zeros_like(u_col)
+            )
+        else:
+            u_col = None
+            v_col = None
+
+        # Grid-scale w proxy for w-consuming schemes (Kain-Fritsch).
+        # The hydrostatic dycore does not expose ``omega`` (or
+        # equivalently ``sigma_dot``) at this layer; we pass zeros and
+        # let the trigger be driven by ``parcel_perturb_T`` alone.  See
+        # TODO(kf-w-grid) for the eventual omega→w wiring.
+        if is_w_grid_consumer:
+            w_grid_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        else:
+            w_grid_col = None
+
         conv_prog_out = None
         if conv_fn is None:
             # "none" scheme: return zero tendencies
             dT_dt = jnp.zeros(shape_3d, dtype=_state_dtype)
-        elif is_prognostic:
-            if phys_state is not None:
-                prog_in = phys_state.conv_prog
-                if prog_in.shape != (ncol,):
-                    prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
+            conv_out = None
+        elif is_scalar_prognostic:
+            # Scalar-carrying schemes pack at [:, -1]; slice to recover
+            # the per-column scalar.  Falls back to scheme default when
+            # the carry is the wrong shape (warm start, scheme switch).
+            if phys_state is not None and (
+                phys_state.conv_prog_profile.shape == (ncol, nlev)
+            ):
+                prog_in = phys_state.conv_prog_profile[:, -1]
             else:
                 prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
 
@@ -189,7 +258,77 @@ def _make_hydrostatic_convection(
                 **{prog_key: prog_in},
                 dt=dt, config=scheme_config,
             )
-            conv_prog_out = prog_new
+            # Pack the updated scalar back into the (ncol, nlev) profile.
+            conv_prog_out = jnp.zeros(
+                (ncol, nlev), dtype=_state_dtype
+            ).at[:, -1].set(prog_new)
+            dT_dt = conv_out.dT_dt.reshape(shape_3d)
+        elif is_profile_prognostic:
+            # Profile-carrying schemes (ZM, KF, Emanuel, Tiedtke,
+            # Bechtold) take and return the full
+            # ``conv_prog_profile`` directly.  Per-scheme kwarg
+            # plumbing handles CMT (u, v), the KF trigger (w_grid),
+            # and Bechtold's stochastic state (conv_stoch_state +
+            # prng_key).
+            if phys_state is not None and (
+                phys_state.conv_prog_profile.shape == (ncol, nlev)
+            ):
+                prog_in = phys_state.conv_prog_profile
+            else:
+                prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+
+            if is_stochastic:
+                # Bechtold: also threads conv_stoch_state and prng_key.
+                if phys_state is not None and (
+                    phys_state.conv_stoch_state.shape == (ncol,)
+                ):
+                    stoch_in = phys_state.conv_stoch_state
+                else:
+                    stoch_in = jnp.zeros((ncol,), dtype=_state_dtype)
+                # TODO(bechtold-prng): route a per-step PRNG key from
+                # the orchestrator.  For now we pass ``None`` which
+                # falls back to deterministic behavior in the leaf.
+                conv_out, prog_new_profile, stoch_new = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_col, v=v_col,
+                    conv_prog_profile=prog_in,
+                    conv_stoch_state=stoch_in,
+                    prng_key=None,
+                    dt=dt, config=scheme_config,
+                )
+                # Multi-field carry update — return as dict so the
+                # orchestrator can ``update`` both PhysicsState slots.
+                conv_prog_out = {
+                    "conv_prog_profile": prog_new_profile,
+                    "conv_stoch_state": stoch_new,
+                }
+            elif is_cmt_capable:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_col, v=v_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
+            elif is_w_grid_consumer:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    w_grid=w_grid_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
+            else:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
             dT_dt = conv_out.dT_dt.reshape(shape_3d)
         else:
             conv_out = conv_fn(
@@ -223,13 +362,27 @@ def _make_hydrostatic_convection(
                 ),
             }
 
+        # Convective momentum transport (CMT): use the scheme's optional
+        # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
+        # Tiedtke, Bechtold).  Schemes that do not produce CMT (the
+        # existing five plus Kain-Fritsch and Emanuel) leave these as
+        # ``None`` and the bridge zero-fills.
+        if conv_fn is not None and conv_out.du_dt_conv is not None:
+            du_dt = conv_out.du_dt_conv.reshape(shape_3d)
+        else:
+            du_dt = jnp.zeros(shape_3d, dtype=_state_dtype)
+        if conv_fn is not None and conv_out.dv_dt_conv is not None:
+            dv_dt = conv_out.dv_dt_conv.reshape(shape_3d)
+        else:
+            dv_dt = jnp.zeros(shape_3d, dtype=_state_dtype)
+
         tendencies = HydrostaticTendencies(
             du_dt=Field(
-                data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_conv",
+                data=du_dt, name="du_dt_conv",
                 dims=dims_3d, units="m/s^2",
             ),
             dv_dt=Field(
-                data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_conv",
+                data=dv_dt, name="dv_dt_conv",
                 dims=dims_3d, units="m/s^2",
             ),
             dT_dt=Field(
@@ -266,17 +419,25 @@ def _make_nonhydrostatic_convection(
     """Create convection physics_fn for CompressibleEulerModel.
 
     Signature: (state, grid, height_coord, terrain_metric, phys_state=None)
-               -> (NonHydrostaticTendencies, conv_prog_new | None)
+               -> (NonHydrostaticTendencies, conv_prog_profile_new | None)
 
-    When *phys_state* is passed, the convective prognostic variable is
-    read from ``phys_state.conv_prog`` and the updated value is returned
-    as the second element of the result tuple.
+    When *phys_state* is passed, the convective prognostic profile is
+    read from ``phys_state.conv_prog_profile`` (shape ``(ncol, nlev)``)
+    and the updated profile is returned as the second element of the
+    result tuple.  See the hydrostatic bridge for the slice/pack
+    convention for scalar-carrying schemes.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
-    is_prognostic = scheme_name in ("mass_flux", "edmf")
+    is_scalar_prognostic = scheme_name in ("mass_flux", "edmf")
+    is_profile_prognostic = scheme_name in (
+        "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+    )
+    is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
+    is_w_grid_consumer = scheme_name in ("kain_fritsch",)
+    is_stochastic = scheme_name in ("bechtold",)
     prog_key = None
     prog_init = None
-    if is_prognostic:
+    if is_scalar_prognostic:
         if scheme_name == "mass_flux":
             prog_key, prog_init = "M_c", scheme_config.M_c_init
         else:  # edmf
@@ -353,12 +514,28 @@ def _make_nonhydrostatic_convection(
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_conv", dims=dims_tr, units="1/s"),
             )
 
+        # Wind columns for CMT-capable schemes.
+        if is_cmt_capable:
+            u_col = state.u.data.reshape(ncol, nlev)
+            v_col = state.v.data.reshape(ncol, nlev)
+        else:
+            u_col = None
+            v_col = None
+
+        # Grid-scale w for w-consuming schemes (KF).  ``state.w`` lives
+        # at half levels — interpolate to full-level centers.
+        if is_w_grid_consumer:
+            w_data = state.w.data.reshape(ncol, nlev + 1)
+            w_grid_col = 0.5 * (w_data[:, :-1] + w_data[:, 1:])
+        else:
+            w_grid_col = None
+
         conv_prog_out = None
-        if is_prognostic:
-            if phys_state is not None:
-                prog_in = phys_state.conv_prog
-                if prog_in.shape != (ncol,):
-                    prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
+        if is_scalar_prognostic:
+            if phys_state is not None and (
+                phys_state.conv_prog_profile.shape == (ncol, nlev)
+            ):
+                prog_in = phys_state.conv_prog_profile[:, -1]
             else:
                 prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
 
@@ -368,7 +545,63 @@ def _make_nonhydrostatic_convection(
                 **{prog_key: prog_in},
                 dt=dt, config=scheme_config,
             )
-            conv_prog_out = prog_new
+            conv_prog_out = jnp.zeros(
+                (ncol, nlev), dtype=_state_dtype
+            ).at[:, -1].set(prog_new)
+        elif is_profile_prognostic:
+            if phys_state is not None and (
+                phys_state.conv_prog_profile.shape == (ncol, nlev)
+            ):
+                prog_in = phys_state.conv_prog_profile
+            else:
+                prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+
+            if is_stochastic:
+                if phys_state is not None and (
+                    phys_state.conv_stoch_state.shape == (ncol,)
+                ):
+                    stoch_in = phys_state.conv_stoch_state
+                else:
+                    stoch_in = jnp.zeros((ncol,), dtype=_state_dtype)
+                conv_out, prog_new_profile, stoch_new = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_col, v=v_col,
+                    conv_prog_profile=prog_in,
+                    conv_stoch_state=stoch_in,
+                    prng_key=None,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = {
+                    "conv_prog_profile": prog_new_profile,
+                    "conv_stoch_state": stoch_new,
+                }
+            elif is_cmt_capable:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_col, v=v_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
+            elif is_w_grid_consumer:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    w_grid=w_grid_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
+            else:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
         else:
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -401,9 +634,19 @@ def _make_nonhydrostatic_convection(
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
             dtracers = dtracers.at[..., 1].set(dq_c_conv_dt)
 
+        # CMT plumbing — see hydrostatic bridge for rationale.
+        if conv_out.du_dt_conv is not None:
+            du_dt_data = conv_out.du_dt_conv.reshape(shape_3d)
+        else:
+            du_dt_data = jnp.zeros(shape_3d, dtype=_state_dtype)
+        if conv_out.dv_dt_conv is not None:
+            dv_dt_data = conv_out.dv_dt_conv.reshape(shape_3d)
+        else:
+            dv_dt_data = jnp.zeros(shape_3d, dtype=_state_dtype)
+
         tendencies = NonHydrostaticTendencies(
-            du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_conv", dims=dims_3d, units="m/s^2"),
-            dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_conv", dims=dims_3d, units="m/s^2"),
+            du_dt=Field(data=du_dt_data, name="du_dt_conv", dims=dims_3d, units="m/s^2"),
+            dv_dt=Field(data=dv_dt_data, name="dv_dt_conv", dims=dims_3d, units="m/s^2"),
             dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_conv", dims=dims_w, units="m/s^2"),
             dtheta_prime_dt=Field(data=dtheta_prime_dt, name="dtheta_prime_dt_conv", dims=dims_3d, units="K/s"),
             drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_conv", dims=dims_3d, units="kg/m^3/s"),
@@ -430,17 +673,25 @@ def _make_spectral_pe_convection(
     """Create convection physics_fn for SpectralPEModel.
 
     Signature: (state, grid, sigma_coord, grid_fields=None, phys_state=None)
-               -> (SpectralHydrostaticState, conv_prog_new | None)
+               -> (SpectralHydrostaticState, conv_prog_profile_new | None)
 
-    When *phys_state* is passed, the convective prognostic variable is
-    read from ``phys_state.conv_prog`` and the updated value is returned
-    as the second element of the result tuple.
+    When *phys_state* is passed, the convective prognostic profile is
+    read from ``phys_state.conv_prog_profile`` (shape ``(ncol, nlev)``)
+    and the updated profile is returned as the second element of the
+    result tuple.  See the hydrostatic bridge for the slice/pack
+    convention.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
-    is_prognostic = scheme_name in ("mass_flux", "edmf")
+    is_scalar_prognostic = scheme_name in ("mass_flux", "edmf")
+    is_profile_prognostic = scheme_name in (
+        "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+    )
+    is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
+    is_w_grid_consumer = scheme_name in ("kain_fritsch",)
+    is_stochastic = scheme_name in ("bechtold",)
     prog_key = None
     prog_init = None
-    if is_prognostic:
+    if is_scalar_prognostic:
         if scheme_name == "mass_flux":
             prog_key, prog_init = "M_c", scheme_config.M_c_init
         else:  # edmf
@@ -485,14 +736,36 @@ def _make_spectral_pe_convection(
         else:
             q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
+        # Spectral PE columns for CMT-capable schemes.  We pass zeros
+        # for u, v because CMT can't currently round-trip through the
+        # spectral state (see TODO(spectral-pe-cmt) below).  Passing
+        # zeros makes the leaf's CMT contribution identically zero,
+        # which is consistent with the spectral PE bridge's existing
+        # zero-fill for ``vor_hat`` and ``div_hat`` tendencies.
+        if is_cmt_capable:
+            u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+            v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        else:
+            u_col = None
+            v_col = None
+
+        # Spectral PE has no native ``w`` field — pass zeros to KF and
+        # let its trigger run on ``parcel_perturb_T`` alone.  See
+        # TODO(kf-w-grid) — eventual hookup to the dycore's vertical
+        # mass-flux diagnostic.
+        if is_w_grid_consumer:
+            w_grid_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        else:
+            w_grid_col = None
+
         conv_prog_out = None
         if conv_fn is None:
             dT_dt = jnp.zeros_like(T)
-        elif is_prognostic:
-            if phys_state is not None:
-                prog_in = phys_state.conv_prog
-                if prog_in.shape != (ncol,):
-                    prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
+        elif is_scalar_prognostic:
+            if phys_state is not None and (
+                phys_state.conv_prog_profile.shape == (ncol, nlev)
+            ):
+                prog_in = phys_state.conv_prog_profile[:, -1]
             else:
                 prog_in = jnp.full(ncol, prog_init, dtype=_state_dtype)
 
@@ -502,7 +775,55 @@ def _make_spectral_pe_convection(
                 **{prog_key: prog_in},
                 dt=dt, config=scheme_config,
             )
-            conv_prog_out = prog_new
+            conv_prog_out = jnp.zeros(
+                (ncol, nlev), dtype=_state_dtype
+            ).at[:, -1].set(prog_new)
+            dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
+        elif is_profile_prognostic:
+            if phys_state is not None and (
+                phys_state.conv_prog_profile.shape == (ncol, nlev)
+            ):
+                prog_in = phys_state.conv_prog_profile
+            else:
+                prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+            if is_stochastic:
+                if phys_state is not None and (
+                    phys_state.conv_stoch_state.shape == (ncol,)
+                ):
+                    stoch_in = phys_state.conv_stoch_state
+                else:
+                    stoch_in = jnp.zeros((ncol,), dtype=_state_dtype)
+                conv_out, prog_new_profile, stoch_new = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_col, v=v_col,
+                    conv_prog_profile=prog_in,
+                    conv_stoch_state=stoch_in,
+                    prng_key=None,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = {
+                    "conv_prog_profile": prog_new_profile,
+                    "conv_stoch_state": stoch_new,
+                }
+            elif is_w_grid_consumer:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    w_grid=w_grid_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
+            else:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_col, v=v_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
         else:
             conv_out = conv_fn(
@@ -522,6 +843,13 @@ def _make_spectral_pe_convection(
         # plumbing, route ``conv_out.dq_v_dt`` and
         # ``conv_out.dq_c_conv_dt`` here so the convective vapor sink
         # and cloud-water source are no longer silently discarded.
+        # TODO(spectral-pe-cmt): convective momentum transport from
+        # ``conv_out.du_dt_conv`` / ``dv_dt_conv`` is also dropped here.
+        # CMT-capable schemes (Zhang-McFarlane, Tiedtke, Bechtold) emit
+        # them in grid space; routing through to spectral vor/div
+        # tendencies requires the same SH-analysis pipeline used for
+        # ``dT_dt``.  Deferred — consistent with the existing tracer
+        # drop above.
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
         # No wind or surface pressure tendencies from convection

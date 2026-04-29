@@ -1,0 +1,294 @@
+"""Bechtold / IFS convection (Bechtold et al. 2008, 2014).
+
+Builds on the Tiedtke 1989 skeleton (see :mod:`.tiedtke`) and adds:
+
+1. **PBL-CAPE / departure-CAPE closure** (Bechtold 2008).  ``M_b`` is
+   diagnosed from a mass-weighted parcel within the boundary layer
+   rather than the surface parcel.  This sharpens the diurnal cycle
+   of deep convection over land.
+2. **AR1 stochastic perturbation** (Bechtold 2014).  ``M_b *= (1 +
+   amplitude * ε)`` where ``ε`` is an AR1 process with prescribed
+   decorrelation timescale.  The AR1 noise state is carried in
+   :attr:`legoesm.atmosphere.physics.physics_state.PhysicsState.conv_stoch_state`.
+   Stochasticity is OFF by default; when enabled, the leaf takes a
+   ``prng_key`` argument.
+
+The smooth-everywhere / differentiability properties are inherited
+from Tiedtke; the AR1 stochastic factor is treated as a fixed
+multiplier per call so ``jax.grad`` flows through the deterministic
+``M_b``.
+
+References
+----------
+* Bechtold, P., Köhler, M., Jung, T., Doblas-Reyes, F., Leutbecher,
+  M., Rodwell, M. J., Vitart, F., & Balsamo, G. (2008). Advances in
+  simulating atmospheric variability with the ECMWF model.  *Quart.
+  J. Roy. Meteor. Soc.*, 134, 1337–1351.
+* Bechtold, P., Semane, N., Lopez, P., Chaboureau, J.-P., Beljaars,
+  A., & Bormann, N. (2014). Representing equilibrium and
+  nonequilibrium convection in large-scale models.  *J. Atmos. Sci.*,
+  71, 734–753.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+
+from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics.thermodynamics import (
+    compute_cape,
+    compute_moist_adiabat,
+)
+from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    _apply_mass_flux_kernel,
+    _compute_column_geometry,
+)
+from legoesm.atmosphere.physics.convection._triggers import (
+    cape_trigger,
+    smooth_level_indicator,
+    smooth_positive_part,
+    smooth_step,
+)
+from legoesm.atmosphere.physics.convection._plume import (
+    cmt_gregory_1997,
+    compute_lcl,
+    compute_lfc_lnb,
+    entraining_detraining_plume,
+)
+
+
+__all__ = ("bechtold_convection",)
+
+
+def bechtold_convection(
+    T: jax.Array,
+    q_v: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    u: jax.Array,
+    v: jax.Array,
+    conv_prog_profile: jax.Array,
+    conv_stoch_state: jax.Array,
+    prng_key: jax.Array | None,
+    dt: float,
+    config: BechtoldConfig = BechtoldConfig(),
+) -> tuple[ConvectionOutput, jax.Array, jax.Array]:
+    """Bechtold/IFS convection (smooth, differentiable).
+
+    Parameters
+    ----------
+    T, q_v : jax.Array, shape (ncol, nlev)
+        Environmental temperature and water-vapor specific humidity.
+    p_full, p_half : jax.Array
+        Full / half-level pressures.
+    u, v : jax.Array, shape (ncol, nlev)
+        Environmental winds (for CMT).
+    conv_prog_profile : jax.Array, shape (ncol, nlev)
+        Updraft mass-flux profile from the previous step.
+    conv_stoch_state : jax.Array, shape (ncol,)
+        AR1 noise state from the previous step.
+    prng_key : jax.Array or None
+        PRNG key for the stochastic perturbation.  When
+        ``config.enable_stochastic`` is ``False`` this argument is
+        ignored.  When stochastic is on but ``prng_key`` is ``None``
+        we fall back to a deterministic (zero-noise) realization with
+        a TODO note.
+    dt : float
+        Time step [s].
+    config : BechtoldConfig
+
+    Returns
+    -------
+    out : ConvectionOutput
+    conv_prog_profile_new : jax.Array, shape (ncol, nlev)
+        Updated M_u profile (implicit-Euler relaxed).
+    conv_stoch_state_new : jax.Array, shape (ncol,)
+        Updated AR1 noise state.
+    """
+    ncol, nlev = T.shape
+
+    # -- Column geometry, moist adiabat, CAPE ------------------------------
+    dz, rho, z = _compute_column_geometry(T, p_full, p_half)
+    T_base = T[:, -1]
+    q_base = q_v[:, -1]
+    p_base = p_full[:, -1]
+
+    # -- PBL parcel: mass-weighted average over the boundary-layer
+    # depth.  Smooth weighting via ``smooth_level_indicator`` so the
+    # PBL-depth threshold is differentiable.
+    pbl_weight = smooth_level_indicator(
+        z, threshold=config.cape_pbl_depth, sharpness=2.0e-3,
+        direction="below",
+    )                                                       # (ncol, nlev)
+    pbl_norm = jnp.sum(pbl_weight, axis=-1, keepdims=True).clip(1e-6, None)
+    T_pbl = jnp.sum(pbl_weight * T, axis=-1) / pbl_norm.squeeze(-1)
+    q_pbl = jnp.sum(pbl_weight * q_v, axis=-1) / pbl_norm.squeeze(-1)
+    if config.use_pbl_cape:
+        T_parcel_source = T_pbl
+        q_parcel_source = q_pbl
+    else:
+        T_parcel_source = T_base
+        q_parcel_source = q_base
+
+    T_parcel = T_parcel_source + config.parcel_dT
+    q_parcel = q_parcel_source + config.parcel_dq
+
+    T_moist = compute_moist_adiabat(T_parcel, p_full)
+    cape_pbl = compute_cape(T, T_moist, p_full, p_half)
+
+    cape_weight = cape_trigger(
+        cape_pbl, config.cape_threshold, config.cape_sharpness,
+    )
+
+    # -- LCL, LFC/LNB ------------------------------------------------------
+    lcl = compute_lcl(T_parcel, q_parcel, p_base, p_full)
+    k_lcl_smooth = lcl.k_lcl_smooth
+    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
+
+    # Cloud depth.
+    levels_arr = jnp.arange(nlev, dtype=T.dtype)
+    weight_lcl = jax.nn.softmax(
+        -2.0 * (levels_arr[None, :] - k_lcl_smooth[:, None]) ** 2, axis=-1,
+    )
+    weight_lnb = jax.nn.softmax(
+        -2.0 * (levels_arr[None, :] - k_lnb_smooth[:, None]) ** 2, axis=-1,
+    )
+    z_lcl = jnp.sum(weight_lcl * z, axis=-1)
+    z_lnb = jnp.sum(weight_lnb * z, axis=-1)
+    cloud_depth = jnp.maximum(z_lnb - z_lcl, 0.0)
+
+    # -- Three-class blend -------------------------------------------------
+    deep_weight = smooth_step(
+        cloud_depth - config.cloud_depth_deep, config.depth_split_sharpness,
+    )
+    shallow_weight = smooth_step(
+        config.cloud_depth_shallow_max - cloud_depth,
+        config.depth_split_sharpness,
+    )
+    midlevel_weight = jnp.clip(
+        1.0 - deep_weight - shallow_weight, 0.0, 1.0
+    )
+
+    # -- PBL-CAPE closure for cloud-base mass flux -------------------------
+    M_b_deterministic = (
+        cape_weight
+        * smooth_positive_part(cape_pbl - config.cape_threshold, config.cape_sharpness)
+        / config.tau_bl
+    )
+
+    # -- AR1 stochastic perturbation ---------------------------------------
+    if config.enable_stochastic and prng_key is not None:
+        alpha_AR1 = jnp.exp(-dt / config.stochastic_decorrelation)
+        innovation = jax.random.normal(prng_key, shape=(ncol,), dtype=T.dtype)
+        conv_stoch_state_new = (
+            alpha_AR1 * conv_stoch_state
+            + jnp.sqrt(jnp.maximum(1.0 - alpha_AR1 ** 2, 0.0)) * innovation
+        )
+        stoch_factor = 1.0 + config.stochastic_amplitude * conv_stoch_state_new
+    else:
+        # Either stochastic disabled or no PRNG provided — preserve
+        # input AR1 state and use deterministic factor 1.
+        conv_stoch_state_new = conv_stoch_state
+        stoch_factor = jnp.ones_like(M_b_deterministic)
+
+    M_b = M_b_deterministic * jnp.maximum(stoch_factor, 0.0)
+    M_b = jnp.maximum(M_b, 0.0)
+
+    # -- Per-class entrainment / detrainment profiles ----------------------
+    eps_per_class = (
+        deep_weight[:, None] * config.epsilon_deep
+        + shallow_weight[:, None] * config.epsilon_shallow
+        + midlevel_weight[:, None] * config.epsilon_midlevel
+    )
+    dlt_per_class = (
+        deep_weight[:, None] * config.delta_deep
+        + shallow_weight[:, None] * config.delta_shallow
+        + midlevel_weight[:, None] * config.delta_midlevel
+    )
+    eps_profile = jnp.broadcast_to(eps_per_class, T.shape)
+    dlt_profile = jnp.broadcast_to(dlt_per_class, T.shape)
+
+    plume = entraining_detraining_plume(
+        T, q_v, p_full, p_half, z,
+        T_parcel, q_parcel, k_lcl_smooth,
+        eps_profile, dlt_profile, M_b,
+    )
+
+    # -- Implicit-Euler relaxation of the M_u profile carry ---------------
+    dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, dt)
+    M_u_new = (conv_prog_profile + dt_over_tau * plume.M_u) / (1.0 + dt_over_tau)
+    M_u_new = jnp.maximum(M_u_new, 0.0)
+
+    # -- Environmental tendencies (using relaxed M_u) ---------------------
+    delta_0_eff = (
+        deep_weight * config.delta_deep
+        + shallow_weight * config.delta_shallow
+        + midlevel_weight * config.delta_midlevel
+    )
+    dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
+        T, q_v, p_full,
+        plume.T_u, plume.q_u, M_u_new,
+        z, rho, float(config.delta_deep),
+    )
+    rho_safe = jnp.clip(rho, 0.01, None)
+    dq_c_conv_dt_raw = (
+        delta_0_eff[:, None] * M_u_new * plume.q_c_u / rho_safe
+    )
+    rescale = delta_0_eff[:, None] / config.delta_deep
+    dT_dt = dT_dt_raw * rescale
+    dq_v_dt = dq_v_dt_raw * rescale
+    dq_c_conv_dt = dq_c_conv_dt_raw
+
+    # -- Optional downdraft (RH-dependent) ---------------------------------
+    if config.enable_downdraft:
+        below_lcl = jax.nn.sigmoid(
+            2.0 * (levels_arr[None, :] - k_lcl_smooth[:, None])
+        )
+        q_sat_env = saturation_mixing_ratio(T, p_full)
+        rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        below_mass = jnp.sum(below_lcl * dp, axis=-1) + 1e-6
+        rh_below = (
+            jnp.sum(below_lcl * rh_layer * dp, axis=-1) / below_mass
+        )
+        downdraft_trigger = jax.nn.sigmoid(
+            10.0 * (config.downdraft_RH_min - rh_below)
+        )
+        M_d_base = -config.downdraft_alpha * M_b * downdraft_trigger
+        below_lcl_norm = below_lcl / jnp.sum(below_lcl, axis=-1, keepdims=True).clip(1e-6, None)
+        dT_dt_dd = -(constants.L_v / constants.c_pd) * (
+            jnp.abs(M_d_base[:, None]) * below_lcl_norm * 0.05
+        ) / rho_safe
+        dT_dt = dT_dt + dT_dt_dd
+
+    # -- CMT --------------------------------------------------------------
+    if config.enable_cmt:
+        if config.enable_downdraft:
+            M_d = -config.downdraft_alpha * M_u_new * 0.3
+        else:
+            M_d = None
+        du_dt_conv, dv_dt_conv = cmt_gregory_1997(
+            u, v, M_u_new, M_d,
+            p_full, p_half, rho,
+            c_u=config.cmt_c_u, c_d=config.cmt_c_d,
+        )
+    else:
+        du_dt_conv = None
+        dv_dt_conv = None
+
+    convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)
+
+    out = ConvectionOutput(
+        dT_dt=dT_dt,
+        dq_v_dt=dq_v_dt,
+        dq_c_conv_dt=jnp.maximum(dq_c_conv_dt, 0.0),
+        cape=cape_pbl,
+        convective_mask=convective_mask,
+        du_dt_conv=du_dt_conv,
+        dv_dt_conv=dv_dt_conv,
+    )
+    return out, M_u_new, conv_stoch_state_new

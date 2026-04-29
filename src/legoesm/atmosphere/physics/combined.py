@@ -156,7 +156,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.radiation.scheme != "none":
         tagged_fns.append((make_radiation_physics(config.radiation, model_type), False, None))
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog"))
+        tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
         tagged_fns.append((make_turbulence_physics(config.turbulence, model_type, dt), True, "tke"))
     if config.microphysics.scheme != "none":
@@ -196,7 +196,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         if accepts_ps:
             first, field_val = fn0(state, grid, sigma_coord, phys_state=phys_state)
             if field_val is not None and field_name is not None:
-                phys_updates[field_name] = field_val
+                # Multi-field updates (e.g., Bechtold's conv_prog_profile
+                # and conv_stoch_state) are returned as a dict, which
+                # we merge into ``phys_updates``.
+                if isinstance(field_val, dict):
+                    phys_updates.update(field_val)
+                else:
+                    phys_updates[field_name] = field_val
         else:
             first = fn0(state, grid, sigma_coord)
         du_dt = first.du_dt.data
@@ -283,7 +289,7 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.radiation.scheme != "none":
         tagged_fns.append((make_radiation_physics(config.radiation, "nonhydrostatic"), False, None))
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog"))
+        tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
         tagged_fns.append((make_turbulence_physics(config.turbulence, "nonhydrostatic", dt), True, "tke"))
     if config.microphysics.scheme != "none":
@@ -318,7 +324,13 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         if accepts_ps:
             first, field_val = fn0(state, grid, height_coord, terrain_metric, phys_state=phys_state)
             if field_val is not None and field_name is not None:
-                phys_updates[field_name] = field_val
+                # Multi-field updates (e.g., Bechtold's conv_prog_profile
+                # and conv_stoch_state) are returned as a dict, which
+                # we merge into ``phys_updates``.
+                if isinstance(field_val, dict):
+                    phys_updates.update(field_val)
+                else:
+                    phys_updates[field_name] = field_val
         else:
             first = fn0(state, grid, height_coord, terrain_metric)
         du_dt = first.du_dt.data
@@ -382,7 +394,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.radiation.scheme != "none":
         tagged_fns.append((make_radiation_physics(config.radiation, "spectral_pe"), False, None))
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog"))
+        tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
         tagged_fns.append((make_turbulence_physics(config.turbulence, "spectral_pe", dt), True, "tke"))
     if config.microphysics.scheme != "none":
@@ -416,7 +428,13 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         if accepts_ps:
             first, field_val = fn0(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
             if field_val is not None and field_name is not None:
-                phys_updates[field_name] = field_val
+                # Multi-field updates (e.g., Bechtold's conv_prog_profile
+                # and conv_stoch_state) are returned as a dict, which
+                # we merge into ``phys_updates``.
+                if isinstance(field_val, dict):
+                    phys_updates.update(field_val)
+                else:
+                    phys_updates[field_name] = field_val
         else:
             first = fn0(state, grid, sigma_coord, grid_fields=shared_fields)
         vor_hat = first.vor_hat.data
