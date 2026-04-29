@@ -942,10 +942,20 @@ def _weno_to_u_points(
     hw = {5: 3, 7: 4}[order]
     n_lon = f.shape[1]
 
+    # Convert point values to cell averages (4th-order accurate):
+    #   f_avg ≈ f_point + (1/24) * (f_{i+1} - 2*f_i + f_{i-1})
+    # The cell average of a smooth function exceeds the midpoint value
+    # by +(dx²/24)*f'' due to the curvature correction.
+    # WENO is a finite-volume reconstruction expecting cell averages;
+    # passing point values caps the order at O(dx^3) regardless of
+    # WENO order.
+    f_avg = f + (1.0 / 24.0) * (
+        jnp.roll(f, -1, axis=1) - 2.0 * f + jnp.roll(f, 1, axis=1))
+
     # Build stencil for all faces simultaneously (periodic longitude).
     # Face j between cell j-1 and cell j: WENO face at I+1/2 where I=j-1.
     # Need cells j-hw to j+(hw-1), obtained via roll offsets hw..-(hw-1).
-    stencil = [jnp.roll(f, hw - j, axis=1) for j in range(2 * hw)]
+    stencil = [jnp.roll(f_avg, hw - j, axis=1) for j in range(2 * hw)]
 
     f_plus, f_minus = weno_fn(stencil)
 
@@ -986,9 +996,15 @@ def _weno_to_v_points(
     hw = {5: 3, 7: 4}[order]
     n_lat = f.shape[0]
 
+    # Convert point values to cell averages (meridional direction).
+    # Use Neumann-padded stencil for the conversion near boundaries.
+    f_south = jnp.concatenate([f[:1, :, :], f[:-1, :, :]], axis=0)
+    f_north = jnp.concatenate([f[1:, :, :], f[-1:, :, :]], axis=0)
+    f_avg = f + (1.0 / 24.0) * (f_north - 2.0 * f + f_south)
+
     # Ghost cells (Neumann BC: copy boundary value)
     f_ext = jnp.concatenate(
-        [f[:1, :, :]] * hw + [f] + [f[-1:, :, :]] * hw, axis=0
+        [f_avg[:1, :, :]] * hw + [f_avg] + [f_avg[-1:, :, :]] * hw, axis=0
     )
 
     # Stencil for interior faces i=1..n_lat-1.
