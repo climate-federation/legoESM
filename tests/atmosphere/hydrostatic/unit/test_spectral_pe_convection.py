@@ -32,6 +32,10 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
 from legoesm.atmosphere.physics.convection.config import (
     ConvectionConfig,
     ZhangMcFarlaneConfig,
+    KainFritschConfig,
+    EmanuelConfig,
+    TiedtkeConfig,
+    BechtoldConfig,
 )
 from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
@@ -602,3 +606,135 @@ class TestSpectralPECMT:
 
         g = jax.grad(loss)(jnp.array(1.0))
         assert bool(jnp.isfinite(g))
+
+
+# ---------------------------------------------------------------------------
+# All 5 profile-prognostic schemes must run on spectral PE.  Pre-fix the
+# spectral-PE branch of ``_make_spectral_pe_convection`` had a flat elif
+# chain that fell through to a catch-all ``else`` passing ``u`` and ``v``
+# to any non-stochastic / non-w-grid / non-MC scheme — Emanuel's leaf
+# does not accept ``u``/``v``, so the kernel raised ``TypeError`` at
+# call time.  This regression pins all five schemes through the bridge.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        ("zhang_mcfarlane", "zhang_mcfarlane", ZhangMcFarlaneConfig),
+        ("kain_fritsch", "kain_fritsch", KainFritschConfig),
+        ("emanuel", "emanuel", EmanuelConfig),
+        ("tiedtke", "tiedtke", TiedtkeConfig),
+        ("bechtold", "bechtold", BechtoldConfig),
+    ],
+    ids=["zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold"],
+)
+def profile_scheme_config(request):
+    """Yield a (name, ConvectionConfig) pair for each new scheme."""
+    name, scheme_field, scheme_cls = request.param
+    kwargs = {scheme_field: scheme_cls()}
+    return name, ConvectionConfig(scheme=name, **kwargs)
+
+
+class TestSpectralPEAllProfileSchemes:
+    """Each new profile-prognostic scheme must run end-to-end on a
+    Gaussian spectral-PE state without raising and produce finite
+    tendencies.  This catches the spectral-PE Emanuel dispatch bug
+    (TypeError: emanuel_convection() got an unexpected keyword
+    argument 'u') and prevents a similar regression for the other
+    schemes."""
+
+    def _state_with_cape_and_qv(self, grid, sigma_coord, rest_state):
+        """Build a CAPE-positive state with near-saturated q_v so the
+        new schemes have a non-trivial trigger surface to act on."""
+        from legoesm.thermo import saturation_mixing_ratio
+
+        nlev = sigma_coord.n_levels
+        sigma_full = sigma_coord.sigma_full
+        T_col = 300.0 * jnp.power(jnp.clip(sigma_full, 0.05, None), 0.19)
+        T_col = jnp.maximum(T_col, 200.0)
+        T_grid = jnp.broadcast_to(
+            T_col[None, None, :], (grid.n_lat, grid.n_lon, nlev),
+        )
+        T_hat = sh_analysis_3d(grid, T_grid)
+        p_full_3d = jnp.broadcast_to(
+            (sigma_full * 1e5)[None, None, :],
+            (grid.n_lat, grid.n_lon, nlev),
+        )
+        q_sat = saturation_mixing_ratio(T_grid, p_full_3d)
+        rh_profile = jnp.where(sigma_full > 0.7, 0.95, 0.5)
+        q_v_grid = rh_profile[None, None, :] * q_sat
+        q_v_field = Field(
+            data=q_v_grid, name="q_v",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
+        return rest_state._replace(
+            T_hat=rest_state.T_hat.replace(data=T_hat),
+            tracers={"q_v": q_v_field},
+        )
+
+    def test_bridge_call_succeeds(
+        self, profile_scheme_config, grid, sigma_coord, rest_state,
+    ):
+        """Bridge runs end-to-end without raising for each scheme."""
+        scheme_name, cfg = profile_scheme_config
+        state = self._state_with_cape_and_qv(grid, sigma_coord, rest_state)
+        physics_fn = make_convection_physics(
+            cfg, model_type="spectral_pe", dt=300.0,
+        )
+        # The bug surfaced as TypeError at call time — exercise the
+        # full bridge path including the elif dispatch.
+        tend, prog = physics_fn(state, grid, sigma_coord)
+        assert tend is not None
+        assert tend.T_hat.data.shape == state.T_hat.data.shape
+
+    def test_finite_output(
+        self, profile_scheme_config, grid, sigma_coord, rest_state,
+    ):
+        """Tendencies are finite for each scheme on spectral PE."""
+        scheme_name, cfg = profile_scheme_config
+        state = self._state_with_cape_and_qv(grid, sigma_coord, rest_state)
+        physics_fn = make_convection_physics(
+            cfg, model_type="spectral_pe", dt=300.0,
+        )
+        tend, prog = physics_fn(state, grid, sigma_coord)
+        assert bool(jnp.all(jnp.isfinite(tend.T_hat.data))), (
+            f"{scheme_name}: T_hat tendency has NaN/Inf"
+        )
+        assert bool(jnp.all(jnp.isfinite(tend.vor_hat.data)))
+        assert bool(jnp.all(jnp.isfinite(tend.div_hat.data)))
+        assert bool(jnp.all(jnp.isfinite(tend.lnps_hat.data)))
+        if prog is not None:
+            # Profile-prognostic carry can be a dict (Bechtold) or a
+            # raw array (the rest).  In both cases the array(s) inside
+            # must be finite — the dict carries
+            # ``conv_prog_profile``/``conv_stoch_state``/``prng_key``.
+            if isinstance(prog, dict):
+                for k, v in prog.items():
+                    if v is not None:
+                        assert bool(jnp.all(jnp.isfinite(v))), (
+                            f"{scheme_name}: prog[{k}] has NaN/Inf"
+                        )
+            else:
+                assert bool(jnp.all(jnp.isfinite(prog)))
+
+    def test_emanuel_spectral_pe_does_not_receive_winds(
+        self, grid, sigma_coord, rest_state,
+    ):
+        """Direct regression for the original Codex finding.
+
+        Pre-fix:
+            TypeError: emanuel_convection() got an unexpected
+            keyword argument 'u'
+        because the spectral-PE bridge's catch-all ``else`` branch
+        passed ``u``/``v`` to non-CMT, non-MC, non-w-grid profile
+        schemes — Emanuel's leaf has no wind kwargs.
+        """
+        state = self._state_with_cape_and_qv(grid, sigma_coord, rest_state)
+        physics_fn = make_convection_physics(
+            ConvectionConfig(scheme="emanuel", emanuel=EmanuelConfig()),
+            model_type="spectral_pe", dt=300.0,
+        )
+        # The original bug raised inside the JIT-traced kernel call.
+        tend, _ = physics_fn(state, grid, sigma_coord)
+        # And the resulting T tendency must be finite (no NaN).
+        assert bool(jnp.all(jnp.isfinite(tend.T_hat.data)))

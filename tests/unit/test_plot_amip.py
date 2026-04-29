@@ -9,8 +9,7 @@ matplotlib.use("Agg")  # non-interactive backend for CI
 import numpy as np
 import pytest
 
-# Add scripts/ to path so we can import plot_amip
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "diagnostic"))
 from plot_amip import load_timeseries, plot_amip
 
 

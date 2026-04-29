@@ -266,8 +266,7 @@ def jarvis_gs(
     PAR = _PAR_FRAC * sw_down
     f_PAR = PAR / (PAR + config.K_PAR + 1e-10)
 
-    # Temperature response (parabolic around T_opt)
-    T_C = T - 273.15
+    T_C = T - constants.T_freeze
     dT = (T_C - config.T_opt_jarvis) / config.T_range_jarvis
     f_T = jnp.maximum(1.0 - dT ** 2, 0.0)
 

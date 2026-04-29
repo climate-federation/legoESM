@@ -30,6 +30,7 @@ import jax.numpy as jnp
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 _EPS = float(jnp.finfo(jnp.float32).eps)    # Float32 machine epsilon (~1.19e-7)
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import (
     CubedSphereGrid,
     _face_to_cartesian,
@@ -420,7 +421,7 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
 
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
-    omega: float = 7.292e-5,
+    omega: float = constants.Omega,
     metric_dtype=None,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.

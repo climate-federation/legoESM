@@ -531,7 +531,7 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         import logging as _logging
         _ce_logger = _logging.getLogger("legoesm.compressible_euler")
         dx_min = estimate_min_dx_cubed_sphere(
-            grid.n, getattr(grid, 'radius', 6.371229e6),
+            grid.n, getattr(grid, 'radius', constants.R_earth),
         )
         c_sound = float(jnp.sqrt(
             constants.c_pd / constants.c_vd * constants.R_d * 300.0

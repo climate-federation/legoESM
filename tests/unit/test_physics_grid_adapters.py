@@ -197,13 +197,41 @@ class TestKernelRegistries:
         assert fn.__name__ == "gray_radiation"
 
     def test_convection_registry_has_all(self):
-        expected = {"sbm", "dca", "kuo", "mass_flux", "edmf"}
+        # Five legacy schemes plus the five profile-prognostic schemes
+        # added by the convection-schemes branch (zhang_mcfarlane,
+        # kain_fritsch, emanuel, tiedtke, bechtold).  The latter five
+        # are registered for kernel resolution via the bridge factory
+        # but are intentionally rejected by ``_resolve_convection``
+        # until the unified pipeline carry can carry their richer
+        # ``(ncol, nlev)`` prognostic state — see the
+        # ``TestResolveConvectionRejectsProfileSchemes`` class below.
+        expected = {
+            "sbm", "dca", "kuo", "mass_flux", "edmf",
+            "zhang_mcfarlane", "kain_fritsch", "emanuel",
+            "tiedtke", "bechtold",
+        }
         assert expected == set(CONVECTION_REGISTRY.keys())
 
     def test_resolve_sbm(self):
         fn = resolve_kernel(CONVECTION_REGISTRY, "sbm")
         assert callable(fn)
         assert fn.__name__ == "sbm_convection"
+
+    @pytest.mark.parametrize(
+        "scheme,fn_name",
+        [
+            ("zhang_mcfarlane", "zhang_mcfarlane_convection"),
+            ("kain_fritsch", "kain_fritsch_convection"),
+            ("emanuel", "emanuel_convection"),
+            ("tiedtke", "tiedtke_convection"),
+            ("bechtold", "bechtold_convection"),
+        ],
+    )
+    def test_resolve_profile_prognostic_schemes(self, scheme, fn_name):
+        """Each new scheme resolves to its leaf via the registry."""
+        fn = resolve_kernel(CONVECTION_REGISTRY, scheme)
+        assert callable(fn)
+        assert fn.__name__ == fn_name
 
     def test_microphysics_registry_has_all(self):
         expected = {"kessler", "sundqvist", "seifert_beheng", "morrison", "thompson"}
@@ -221,6 +249,43 @@ class TestKernelRegistries:
     def test_available_schemes(self):
         schemes = available_schemes(CONVECTION_REGISTRY)
         assert schemes == sorted(CONVECTION_REGISTRY.keys())
+
+
+class TestResolveConvectionRejectsProfileSchemes:
+    """The five new profile-prognostic schemes are registered for kernel
+    lookup but the unified driver pipeline can't yet thread their
+    ``(ncol, nlev)`` carry / wind / w_grid / MC / stochastic plumbing.
+    ``_resolve_convection`` raises ``NotImplementedError`` so configs
+    using these schemes fail at build time with a clear message rather
+    than producing silently-wrong tendencies inside the hot loop.
+
+    Removing one of these tests is a signal that the pipeline now
+    supports the corresponding scheme — at that point the rejection in
+    ``_resolve_convection`` should also be loosened.
+    """
+
+    @pytest.mark.parametrize(
+        "scheme",
+        ["zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold"],
+    )
+    def test_resolve_raises_not_implemented(self, scheme, cs_grid):
+        from legoesm.driver.physics_pipeline import _resolve_convection
+        config = _make_config(convection=scheme)
+        with pytest.raises(NotImplementedError) as excinfo:
+            _resolve_convection(config)
+        msg = str(excinfo.value)
+        # The error must name the offending scheme and point at the
+        # supported alternative path so users know what to do.
+        assert scheme in msg
+        assert "make_convection_physics" in msg
+
+    def test_existing_schemes_still_resolve(self, cs_grid):
+        """Sanity-check: legacy schemes continue to resolve cleanly."""
+        from legoesm.driver.physics_pipeline import _resolve_convection
+        for legacy in ("sbm", "dca", "kuo", "mass_flux", "edmf", "none"):
+            config = _make_config(convection=legacy)
+            conv_fn, conv_config = _resolve_convection(config)
+            assert callable(conv_fn)
 
 
 # ===================================================================

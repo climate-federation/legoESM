@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
 
 # ---------------------------------------------------------------------------
@@ -70,8 +71,7 @@ def compute_gpp(
     fAPAR = 1.0 - jnp.exp(-config.k_ext * LAI)
     APAR = fAPAR * PAR_MJ
 
-    # Temperature response — Gaussian around T_opt
-    T_C = T - 273.15
+    T_C = T - constants.T_freeze
     f_T = jnp.exp(-0.5 * ((T_C - config.T_opt) / config.T_width) ** 2)
 
     # CO2 fertilization — Michaelis-Menten.  Use ``jnp.full`` (single

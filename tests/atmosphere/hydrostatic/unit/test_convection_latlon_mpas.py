@@ -251,6 +251,116 @@ class TestConvectionMPAS:
         assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dp_s_dt.data)))
 
+    def test_tiedtke_mpas_passes_none_not_zeros_for_missing_mc(
+        self, mpas_mesh, mpas_state, sigma_coord,
+    ):
+        """MPAS state has ``state.v is None`` and no ``q_v`` tracer,
+        so the bridge cannot synthesize a moisture convergence
+        diagnostic.  Pre-fix the bridge passed ``mc_col = zeros`` to
+        the leaf, which silently bypassed Tiedtke's saturation-deficit
+        proxy (the leaf gates the proxy on
+        ``moisture_convergence is None``).  After the fix the bridge
+        passes ``None`` and the proxy fires.
+
+        ``smooth_positive_part`` is strictly positive everywhere
+        (it is a softplus), so a "carry > 0" assertion would pass
+        even with ``mc_col = zeros``.  Instead we exercise the leaf
+        directly twice — once with ``moisture_convergence=None``
+        (proxy path) and once with ``moisture_convergence=zeros``
+        (no-proxy path) — and assert the bridge's dT/dt matches the
+        proxy call and *differs* from the zeros call.  This pins the
+        actual semantic difference the fix is meant to deliver.
+        """
+        from legoesm.atmosphere.physics.convection.tiedtke import (
+            tiedtke_convection,
+        )
+
+        cfg = ConvectionConfig(scheme="tiedtke", tiedtke=TiedtkeConfig())
+
+        # Bridge call.
+        physics_fn = make_convection_physics(
+            cfg, model_type="mpas", dt=300.0,
+        )
+        tend_bridge, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+
+        # Replicate the column inputs the bridge constructs for the
+        # MPAS Tiedtke path.  ``state.tracers is None`` → q_v_col is
+        # zeros; ``state.v is None`` and edge-vs-cell mismatch → u/v
+        # are zeros (this is the bridge's MPAS CMT graceful-degrade
+        # branch).  ``phys_state is None`` → conv_prog_profile is
+        # zeros at first call.
+        nlev = sigma_coord.n_levels
+        ncol = mpas_state.T.data.shape[0]
+        T_col = mpas_state.T.data.reshape(ncol, nlev)
+        _state_dtype = T_col.dtype
+        p_s = mpas_state.p_s.data
+        from legoesm.grids.vertical import pressure_from_sigma
+        p_full_col = pressure_from_sigma(
+            sigma_coord.sigma_full, p_s,
+        ).reshape(ncol, nlev)
+        p_half_col = pressure_from_sigma(
+            sigma_coord.sigma_half, p_s,
+        ).reshape(ncol, nlev + 1)
+        q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+
+        # Proxy path: moisture_convergence=None → leaf engages the
+        # saturation-deficit proxy.
+        out_proxy, _ = tiedtke_convection(
+            T=T_col, q_v=q_v_col,
+            p_full=p_full_col, p_half=p_half_col,
+            u=u_col, v=v_col,
+            conv_prog_profile=prog_in,
+            dt=300.0, config=cfg.tiedtke,
+            moisture_convergence=None,
+        )
+        # No-proxy path: moisture_convergence=zeros((ncol, nlev)) →
+        # leaf computes column_MC = 0 and bypasses the proxy.
+        mc_zeros = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        out_zeros, _ = tiedtke_convection(
+            T=T_col, q_v=q_v_col,
+            p_full=p_full_col, p_half=p_half_col,
+            u=u_col, v=v_col,
+            conv_prog_profile=prog_in,
+            dt=300.0, config=cfg.tiedtke,
+            moisture_convergence=mc_zeros,
+        )
+        proxy_dT = out_proxy.dT_dt.reshape(ncol, nlev)
+        zeros_dT = out_zeros.dT_dt.reshape(ncol, nlev)
+        bridge_dT = tend_bridge.dT_dt.data.reshape(ncol, nlev)
+
+        # The bridge must have called the leaf with
+        # ``moisture_convergence=None`` — i.e. its dT/dt matches the
+        # proxy call to round-off (we use a relative tolerance so
+        # this is robust to dtype promotion in the bridge).
+        npt_max_abs = float(jnp.max(jnp.abs(bridge_dT - proxy_dT)))
+        proxy_scale = float(jnp.max(jnp.abs(proxy_dT))) + 1e-30
+        assert npt_max_abs / proxy_scale < 1e-6, (
+            "Tiedtke MPAS bridge dT/dt should match the proxy-path "
+            "leaf call (moisture_convergence=None).  "
+            f"max |bridge - proxy| / max |proxy| = "
+            f"{npt_max_abs / proxy_scale:.3e}.  Bridge may be "
+            "passing zeros for moisture_convergence instead of None."
+        )
+        # And the proxy and zero-MC paths must differ meaningfully.
+        # ``smooth_positive_part(0 - threshold)`` is small but
+        # non-zero, so this lower bound (1% of proxy magnitude) is
+        # comfortably above numerical noise but well within the
+        # pre/post-fix gap.
+        zeros_diff = float(jnp.max(jnp.abs(proxy_dT - zeros_dT)))
+        assert zeros_diff / proxy_scale > 1e-2, (
+            "Proxy path and zeros-MC path produce indistinguishable "
+            "Tiedtke tendencies — the differential test cannot "
+            "discriminate the bridge fix.  "
+            f"max |proxy - zeros| / max |proxy| = "
+            f"{zeros_diff / proxy_scale:.3e}.  Tighten the test "
+            "fixture (e.g. raise T_init or add a CAPE-positive "
+            "profile) so the proxy contribution becomes more "
+            "distinct from the zero-MC bypass."
+        )
+
     def test_mpas_cmt_is_zero_documented_limitation(
         self, scheme_config, mpas_mesh, mpas_state, sigma_coord,
     ):

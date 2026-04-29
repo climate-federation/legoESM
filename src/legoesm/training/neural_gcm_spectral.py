@@ -623,7 +623,7 @@ def load_training_data(
     import numpy as np
     from legoesm.training.era5_to_state import (
         _open_era5_zarr, _resolve_var, ERA5Slice,
-        _regrid_latlon_to_gaussian, _regrid_2d_to_gaussian,
+        regrid_latlon_to_gaussian, regrid_2d_to_gaussian,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
     n_days = config.n_train_days
@@ -652,7 +652,7 @@ def load_training_data(
         phis_era5 = ds[phis_var].values.astype(np.float32)
     else:
         phis_era5 = np.zeros((len(lat), len(lon)), dtype=np.float32)
-    phis_gauss = _regrid_2d_to_gaussian(phis_era5, lat, lon, grid)
+    phis_gauss = regrid_2d_to_gaussian(phis_era5, lat, lon, grid)
 
     sigma_full = np.asarray(sigma.sigma_full)
 

@@ -317,8 +317,10 @@ def _make_hydrostatic_convection(
         # Moisture convergence for MC-consuming schemes (Tiedtke,
         # Bechtold).  Reuses the dycore's FV-flux-divergence operator
         # via :func:`._shared.compute_moisture_convergence`.  When the
-        # state has no q_v tracer or wind data we fall back to zeros
-        # and the leaf will use its built-in saturation-deficit proxy.
+        # state has no q_v tracer or wind data we pass ``None`` so the
+        # leaf engages its built-in saturation-deficit proxy — Tiedtke
+        # gates the proxy on ``moisture_convergence is None`` and zero-
+        # filling silently bypasses it.
         if (
             is_mc_consumer
             and state.tracers is not None
@@ -338,8 +340,6 @@ def _make_hydrostatic_convection(
             mc_col = _compute_mc(
                 _qv_grid_full, state.u.data, state.v.data, grid,
             )
-        elif is_mc_consumer:
-            mc_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         else:
             mc_col = None
 
@@ -705,8 +705,9 @@ def _make_nonhydrostatic_convection(
         # state stores tracers as a (face, n, n, nlev, n_tracers) array
         # with q_v at slot 0; reuse the cubed-sphere FV-flux-divergence
         # operator on slot 0.  When the scheme runs but tracers don't
-        # carry q_v we fall back to zeros and the leaf uses its
-        # saturation-deficit proxy.
+        # carry q_v we pass ``None`` so the leaf engages its built-in
+        # saturation-deficit proxy (Tiedtke gates the proxy on
+        # ``moisture_convergence is None`` — zero-filling bypassed it).
         if is_mc_consumer and n_tracers > 0:
             from legoesm.atmosphere.physics._shared import (
                 compute_moisture_convergence as _compute_mc,
@@ -715,8 +716,6 @@ def _make_nonhydrostatic_convection(
             mc_col = _compute_mc(
                 _qv_grid_full, state.u.data, state.v.data, grid,
             )
-        elif is_mc_consumer:
-            mc_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         else:
             mc_col = None
 
@@ -1014,8 +1013,10 @@ def _make_spectral_pe_convection(
         # the grid, take the spectral divergence via
         # :func:`legoesm.grids.gaussian.vordiv_from_uv_3d`, synthesize
         # back, and negate.  When the spectral state has no ``q_v``
-        # tracer in ``state.tracers`` we fall back to zeros and the
-        # leaf will use its built-in saturation-deficit proxy.
+        # tracer in ``state.tracers`` we pass ``None`` so the leaf
+        # engages its built-in saturation-deficit proxy (Tiedtke gates
+        # the proxy on ``moisture_convergence is None`` — zero-filling
+        # silently bypassed it).
         if (
             is_mc_consumer
             and state.tracers is not None
@@ -1033,8 +1034,6 @@ def _make_spectral_pe_convection(
             mc_col = _compute_mc(
                 _qv_grid, u_grid_for_mc, v_grid_for_mc, grid,
             ).astype(_state_dtype)
-        elif is_mc_consumer:
-            mc_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         else:
             mc_col = None
 
@@ -1105,6 +1104,33 @@ def _make_spectral_pe_convection(
                 }
                 if master_key_new is not None:
                     conv_prog_out["prng_key"] = master_key_new
+            elif is_cmt_capable:
+                # CMT-capable, non-stochastic profile schemes — ZM and
+                # Tiedtke (Bechtold is stochastic and caught above).
+                # Tiedtke also consumes ``moisture_convergence``; ZM
+                # does not (its signature lacks the kwarg).  Mirrors the
+                # hydrostatic / nonhydrostatic factory ordering — the
+                # earlier flat dispatch dropped through to the catch-all
+                # ``else`` and silently passed ``u``/``v`` to leaves
+                # whose signature does not accept winds (Emanuel).
+                if is_mc_consumer:
+                    conv_out, prog_new_profile = conv_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_col, v=v_col,
+                        conv_prog_profile=prog_in,
+                        dt=dt, config=scheme_config,
+                        moisture_convergence=mc_col,
+                    )
+                else:
+                    conv_out, prog_new_profile = conv_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_col, v=v_col,
+                        conv_prog_profile=prog_in,
+                        dt=dt, config=scheme_config,
+                    )
+                conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
                 conv_out, prog_new_profile = conv_fn(
                     T=T_col, q_v=q_v_col,
@@ -1114,21 +1140,14 @@ def _make_spectral_pe_convection(
                     dt=dt, config=scheme_config,
                 )
                 conv_prog_out = prog_new_profile
-            elif is_mc_consumer:
-                conv_out, prog_new_profile = conv_fn(
-                    T=T_col, q_v=q_v_col,
-                    p_full=p_full_col, p_half=p_half_col,
-                    u=u_col, v=v_col,
-                    conv_prog_profile=prog_in,
-                    dt=dt, config=scheme_config,
-                    moisture_convergence=mc_col,
-                )
-                conv_prog_out = prog_new_profile
             else:
+                # Profile-prognostic schemes that take neither winds
+                # nor MC (Emanuel).  Pre-fix this branch passed ``u``
+                # and ``v`` unconditionally, which raised TypeError on
+                # Emanuel's wind-free leaf signature.
                 conv_out, prog_new_profile = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
-                    u=u_col, v=v_col,
                     conv_prog_profile=prog_in,
                     dt=dt, config=scheme_config,
                 )

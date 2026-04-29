@@ -136,14 +136,13 @@ def _era5_to_spectral(era5, grid, sigma, include_tracers: bool = True):
         sh_analysis_dmu_3d,
     )
     from legoesm.training.era5_to_state import (
-        _regrid_latlon_to_gaussian,
-        _regrid_2d_to_gaussian,
+        regrid_latlon_to_gaussian,
+        regrid_2d_to_gaussian,
     )
     from legoesm.training.vertical_interp import interp_pressure_to_sigma
 
-    # 1. Regrid lat-lon → Gaussian
-    T_ll, u_ll, v_ll, q_ll, p_s_ll = _regrid_latlon_to_gaussian(era5, grid)
-    phis_ll = _regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    T_ll, u_ll, v_ll, q_ll, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
+    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
 
     # 2. Vertical interpolation
     sigma_f = jnp.array(sigma.sigma_full, dtype=jnp.float64)

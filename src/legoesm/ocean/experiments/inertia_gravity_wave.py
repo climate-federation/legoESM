@@ -52,13 +52,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from legoesm.constants import g
+from legoesm.constants import g, R_earth
 from legoesm.core.field import Field
 
 
-# Physical constants
-_A_EARTH = 6.371e6  # Earth radius [m]
-_G_EARTH = 9.80616  # Gravitational acceleration [m/s^2]
+_A_EARTH = R_earth
+_G_EARTH = g
 
 
 @dataclass

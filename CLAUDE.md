@@ -100,7 +100,7 @@
 ## Code Hygiene Rules
 - Every new `.py` source file must have at least one test that imports and exercises it. Do not add files to `__init__.py` lazy imports or `supported_matrix.py` without a corresponding test.
 - New config dispatch branches (new Literal values in config NamedTuples + factory cases in `integration.py`) must have a test exercising that branch.
-- Every dispatch branch must have at least one test that selects it via the public config (not just a unit test of the leaf module). Currently uncovered: `cloud_scheme={"sundqvist","xu_randall"}` — fix before adding any new cloud-scheme literal.
+- Every dispatch branch must have at least one test that selects it via the public config (not just a unit test of the leaf module).
 - When removing a source module, also remove: its `__init__.py` re-export, its `supported_matrix.py` entry, its dispatch entry, its test file, and any stale `__pycache__` files.
 - Do not add deprecated backward-compatibility wrappers. If an API changes, update call sites directly.
 - Do not add thin dispatch-only wrappers (e.g., `X_utils.py` that just re-exports a function from `X.py`). Inline the call at each site or factor the helper into the canonical module. (Modules with real branching/dispatch logic across multiple callers — like `land/stomata_utils.py` — are legitimate and not "thin wrappers".)

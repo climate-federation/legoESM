@@ -22,6 +22,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.halo import (
     pad_halo,
     compute_padded_angle,
@@ -199,8 +200,8 @@ class CubedSphereGrid(NamedTuple):
 
 def create_cubed_sphere(
     n: int,
-    radius: float = 6.371229e6,
-    omega: float = 7.292e-5,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
     dtype=None,
     use_duogrid: bool = False,
     k2e_nord: int = 2,
@@ -571,7 +572,7 @@ def lonlat_to_cartesian(
 def great_circle_distance(
     lon1: jax.Array, lat1: jax.Array,
     lon2: jax.Array, lat2: jax.Array,
-    radius: float = 6.371229e6,
+    radius: float = constants.R_earth,
 ) -> jax.Array:
     """Compute great-circle distance using the Haversine formula."""
     dlat = lat2 - lat1
@@ -640,8 +641,8 @@ def rotate_winds_grid_to_geo(
 def create_cubed_sphere_panel(
     n: int,
     face_id: int = 0,
-    radius: float = 6.371229e6,
-    omega: float = 7.292e-5,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
     dtype=None,
     return_cdgrid: bool = False,
 ) -> "CubedSphereGrid | tuple[CubedSphereGrid, ...]":

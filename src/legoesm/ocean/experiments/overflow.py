@@ -61,8 +61,7 @@ from legoesm.constants import g
 from legoesm.core.field import Field
 
 
-# Physical constants
-_G_EARTH = 9.80616  # Gravitational acceleration [m/s^2]
+_G_EARTH = g
 
 
 @dataclass

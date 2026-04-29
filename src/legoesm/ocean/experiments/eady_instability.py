@@ -46,6 +46,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
+from legoesm import constants
 from legoesm.constants import g, Omega
 from legoesm.core.field import Field
 
@@ -371,8 +372,7 @@ def _add_thermal_wind_mpas(state, mesh, z_coord,
     f0 = 2.0 * Omega * np.sin(lat_mid)
     coeff = -g * config.alpha_T / f0
 
-    # Compute dT/dy ≈ dT/dlat * 1/(R) at each cell from the analytical front
-    R = 6.371e6  # Earth radius [m]
+    R = constants.R_earth
     lat_deg = np.degrees(lat_cell)
     # Analytical dT/dy from the tanh front:
     # T_front = ΔT/2 * tanh((lat - lat_c) / w) * depth_decay
