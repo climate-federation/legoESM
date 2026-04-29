@@ -337,6 +337,83 @@ class TestSpectralPEState:
         assert bool(jnp.allclose(new_state.tracers["q_v"], qv_array))
         assert bool(jnp.allclose(new_state.tracers["q_c"].data, qc_field.data))
 
+    def test_step_with_full_orchestrator_and_tracers(
+        self, rest_state, grid, sigma_coord,
+    ):
+        """End-to-end: spectral PE stepping with the multi-physics
+        orchestrator (radiation + convection both active) AND a
+        tracer-aware state.  Exercises the full pytree-stepping +
+        orchestrator combine + dycore RHS + tracer-propagation chain
+        on a single step.  Pre-fix the orchestrator's combined
+        tendency had ``tracers=None`` which broke any downstream
+        tree.map that expected matching pytree structure.
+        """
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPEConfig,
+            SpectralPrimitiveEquationModel,
+        )
+        from legoesm.atmosphere.physics.combined import (
+            PhysicsConfig, make_physics,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+        from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+        from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig,
+        )
+        from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+            GravityWaveDragConfig,
+        )
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        from legoesm.core.field import Field
+
+        nlev = sigma_coord.n_levels
+        qv_grid = jnp.full(
+            (grid.n_lat, grid.n_lon, nlev), 0.01, dtype=jnp.float64,
+        )
+        qv_field = Field(
+            data=qv_grid, name="q_v",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
+        state_w_tracers = rest_state._replace(tracers={"q_v": qv_field})
+
+        cfg = PhysicsConfig(
+            radiation=RadiationConfig(scheme="gray"),
+            convection=ConvectionConfig(scheme="sbm"),
+            turbulence=TurbulenceConfig(scheme="none"),
+            microphysics=MicrophysicsConfig(scheme="none"),
+            gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+        )
+        ncol = grid.n_lat * grid.n_lon
+        ps = init_physics_state(ncol, nlev, cfg)
+        physics_fn = make_physics(cfg, model_type="spectral_pe", dt=300.0)
+
+        # The orchestrator returns (combined, phys_state) — the dycore
+        # ``step_with_physics`` indexes [0] to grab the tendency.
+        # We exercise it directly here as well to lock in the fix:
+        # the combined tendency must carry a tracers field that
+        # mirrors the input state.
+        combined, _ = physics_fn(state_w_tracers, grid, sigma_coord, phys_state=ps)
+        assert combined.tracers is not None
+        assert "q_v" in combined.tracers
+        assert hasattr(combined.tracers["q_v"], "data")
+        assert float(jnp.max(jnp.abs(combined.tracers["q_v"].data))) == 0.0
+
+        # Now wire it through the actual model.step() path.
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=_proper_hyperdiff(grid),
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, pe_config)
+        new_state = model.step(
+            state_w_tracers, dt=300.0, physics_fn=physics_fn,
+        )
+
+        # Tracer survives the step (zero-tendency path).
+        assert new_state.tracers is not None
+        assert "q_v" in new_state.tracers
+        assert bool(jnp.allclose(new_state.tracers["q_v"].data, qv_grid))
+
 
 # =============================================================================
 # Geopotential Tests
