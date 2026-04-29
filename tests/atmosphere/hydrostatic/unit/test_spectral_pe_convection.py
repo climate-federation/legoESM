@@ -551,12 +551,23 @@ class TestSpectralPECMT:
             state_with_T_and_q, dt=300.0, physics_fn=physics_fn,
         )
 
-        # Tracer survives the step (zero-tendency from the dycore;
-        # convection's q_v sink is dropped at the spectral interface
-        # per ``TODO(option-c)``).
+        # With the new tracer-aware dycore, Tiedtke's q_v sink is
+        # actually applied across the SSP-RK stages.  We expect the
+        # boundary-layer q_v to *drop* slightly (convection consumes
+        # vapor) — but stay finite and bounded by the initial q_v.
         assert new_state.tracers is not None
         assert "q_v" in new_state.tracers
-        assert bool(jnp.allclose(new_state.tracers["q_v"].data, q_v_grid))
+        new_qv = new_state.tracers["q_v"].data
+        assert bool(jnp.all(jnp.isfinite(new_qv)))
+        # Tracer remains positive (q_v >= 0) — physical realism check.
+        assert float(jnp.min(new_qv)) > -1e-12
+        # The change is bounded by an aggressive upper limit on
+        # convective drying over 1 step at dt=300s with q_sat ~ 1.4e-2:
+        # ~0.5% of the initial field magnitude.
+        max_change = float(jnp.max(jnp.abs(new_qv - q_v_grid)))
+        assert max_change < 5e-3, (
+            f"q_v evolution exceeded tolerance: max change {max_change}"
+        )
         # All spectral fields are finite (no NaN from tracer plumbing).
         assert bool(jnp.all(jnp.isfinite(new_state.vor_hat.data)))
         assert bool(jnp.all(jnp.isfinite(new_state.div_hat.data)))

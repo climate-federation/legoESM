@@ -209,6 +209,85 @@ def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
     return omega
 
 
+def _tracer_advection_gaussian(
+    q_grid: jnp.ndarray,
+    u_cos: jnp.ndarray,
+    v_cos: jnp.ndarray,
+    div: jnp.ndarray,
+    sigma_dot: jnp.ndarray,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    grid: GaussianGrid,
+) -> jnp.ndarray:
+    """Compute advective tendency ``∂q/∂t = -v · ∇q - σ̇ · ∂q/∂σ`` on grid.
+
+    Uses the conservative + correction form (matching the T equation
+    in :func:`spectral_pe_tendencies`):
+
+        ∂q/∂t = -∇·(q v_h) + q · D - σ̇ · ∂q/∂σ
+
+    Spectral horizontal divergence via the pole-safe ``oc2`` / ``dmu``
+    operators; vertical advection via the existing upwind helper.
+
+    Parameters
+    ----------
+    q_grid : jax.Array, shape (n_lat, n_lon, nlev)
+        Tracer mixing ratio at full levels.
+    u_cos, v_cos : jax.Array, shape (n_lat, n_lon, nlev)
+        ``u·cos φ``, ``v·cos φ`` (pole-safe; matches the convention
+        used elsewhere in the spectral PE RHS).
+    div : jax.Array, shape (n_lat, n_lon, nlev)
+        Horizontal divergence ``∇·v_h`` on grid.
+    sigma_dot : jax.Array, shape (n_lat, n_lon, nlev+1)
+        Sigma-dot at half levels (only used for the σ-coord branch).
+        For hybrid coords this argument is ignored — the helper falls
+        back to the same pseudospectral horizontal pathway and the
+        caller drives vertical advection via
+        ``vertical_advection_hybrid``.
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+    grid : GaussianGrid
+
+    Returns
+    -------
+    jax.Array, shape (n_lat, n_lon, nlev)
+        Tracer tendency ``∂q/∂t`` on grid (no physics added).
+    """
+    a = grid.radius
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    # Horizontal flux ``q·v_h`` with cos-φ weighting absorbed; pair the
+    # two analyses into a single oc2 / dmu batch (4 SH forwards → 2).
+    flux_x = q_grid * u_cos      # = q · u · cos φ
+    flux_y = q_grid * v_cos      # = q · v · cos φ
+    n_lat_q, n_lon_q, nlev_q = q_grid.shape
+    _flux_stack = jnp.stack([flux_x, flux_y], axis=-1)
+    _flux_flat = _flux_stack.reshape(n_lat_q, n_lon_q, nlev_q * 2)
+    _oc2_pair = sh_analysis_oc2_3d(grid, _flux_flat).reshape(-1, nlev_q, 2)
+    _dmu_pair = sh_analysis_dmu_3d(grid, _flux_flat).reshape(-1, nlev_q, 2)
+    flux_x_oc2 = _oc2_pair[..., 0]
+    flux_y_dmu = _dmu_pair[..., 1]
+
+    # Spectral horizontal divergence of ``(q·u, q·v)``.
+    flux_q_div_hat = im_over_a[:, None] * flux_x_oc2 - one_over_a * flux_y_dmu
+    flux_q_div_grid = sh_synthesis_3d(grid, flux_q_div_hat)
+
+    # Conservative advection + divergence-of-velocity correction:
+    #   -∇·(q v) + q · ∇·v  ≡  -v · ∇q       (advective form)
+    horiz_adv = -flux_q_div_grid + q_grid * div
+
+    # Vertical advection.  Hybrid coords use the mass-flux helper from
+    # the dycore; sigma coords use the existing upwind-stable helper.
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        # ``sigma_dot`` is ignored in this branch; the hybrid path is
+        # handled by the caller post-return (it has access to mass_flux
+        # and p_s).  Returning horizontal-only here keeps the helper
+        # non-conditional on ``sigma_dot``.
+        return horiz_adv
+
+    vert_adv = _vertical_advection_sigma_gaussian(q_grid, sigma_dot, sigma_coord)
+    return horiz_adv + vert_adv
+
+
 # =============================================================================
 # Tendency computation
 # =============================================================================
@@ -326,6 +405,7 @@ def spectral_pe_tendencies(
     # --- 7. Vertical velocity ---
     if _hybrid:
         mass_flux = compute_mass_flux_hybrid(div, p_s, sigma_coord)
+        sigma_dot = None   # hybrid path uses ``mass_flux`` instead
     else:
         sigma_dot = _compute_sigma_dot_gaussian(div, sigma_coord)
 
@@ -615,23 +695,48 @@ def spectral_pe_tendencies(
         dT_hat = dT_hat * _dealias_3d
         dlnps_hat = dlnps_hat * _dealias
 
-    # Return as same pytree structure (for SSP-RK3).  When the input
-    # state carries an optional ``tracers`` dict, the tendency must
-    # carry one of the *same shape* (zero-filled) so that
-    # ``jax.tree.map(state, tendency)`` in the RK step does not see
-    # a structure mismatch (dict on one side, None on the other).
-    # The dycore time-integration loop does not yet apply tracer
-    # tendencies, but it must at least pass a structurally compatible
-    # zero tendency through the RK stages.  Tracer advection itself
-    # is tracked under the dedicated "spectral PE tracers" follow-up
-    # (see TODO(option-c) in convection/integration.py).
+    # --- 18. Tracer tendencies ---
+    # When the input state carries a ``tracers`` dict the tendency
+    # must mirror the same pytree structure for SSP-RK ``tree.map``.
+    # Each tracer gets:
+    #   ∂q/∂t = -∇·(q v_h) + q · D - σ̇ · ∂q/∂σ + (physics tendency)
+    # where the spectral PE bridge / orchestrator may inject a grid
+    # tendency via ``physics_tendency.tracers[name]``.
     #
-    # Tracer values are duck-typed (``Field`` or raw JAX array) — the
-    # zero-tendency must mirror the input container so pytree leaves
-    # match.  Use the shared ``zero_like_tracers`` helper to keep this
-    # rule in one place.
-    from legoesm.atmosphere.physics._shared import zero_like_tracers
-    tracers_tend = zero_like_tracers(state.tracers)
+    # Tracer values are duck-typed: callers may store ``Field`` objects
+    # (with ``.data`` / ``.replace``) or raw JAX arrays.  We extract a
+    # raw array for the math, then wrap the result back into the same
+    # container so pytree leaves match.
+    if state.tracers is None:
+        tracers_tend = None
+    else:
+        tracers_tend = {}
+        for name, value in state.tracers.items():
+            q_grid = value.data if hasattr(value, "data") else value
+            # Compute advective tendency (sigma-coord branch handles
+            # vertical advection internally; hybrid drops vertical for
+            # now, follow-up work).
+            dq_dt_grid = _tracer_advection_gaussian(
+                q_grid, u_cos, v_cos, div, sigma_dot,
+                sigma_coord, grid,
+            )
+            # Add physics tendency for this tracer when the bridge
+            # provided one.
+            if (
+                physics_tendency is not None
+                and physics_tendency.tracers is not None
+                and name in physics_tendency.tracers
+            ):
+                phys_v = physics_tendency.tracers[name]
+                phys_grid = phys_v.data if hasattr(phys_v, "data") else phys_v
+                dq_dt_grid = dq_dt_grid + phys_grid
+            # Wrap back into the original container type so pytree
+            # leaves match.
+            if hasattr(value, "data") and hasattr(value, "replace"):
+                tracers_tend[name] = value.replace(data=dq_dt_grid)
+            else:
+                tracers_tend[name] = dq_dt_grid
+
     return SpectralHydrostaticState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),
         div_hat=state.div_hat.replace(data=ddiv_hat),
@@ -1198,6 +1303,7 @@ def isothermal_rest_state_spectral(
     phis: jnp.ndarray | None = None,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
+    tracers: dict | None = None,
 ) -> SpectralHydrostaticState:
     """Create an isothermal rest-state initial condition in spectral space.
 
@@ -1225,6 +1331,12 @@ def isothermal_rest_state_spectral(
         Set to 0.0 to disable.
     seed : int
         Random seed for temperature perturbation.
+    tracers : dict or None
+        Optional initial tracer dict ``{name: Field | jax.Array}`` of
+        grid-space mixing ratios with shape ``(n_lat, n_lon, nlev)``.
+        Default ``None`` matches the dry pre-tracer pipeline.  Tracer
+        values may be ``Field``-wrapped or raw JAX arrays — the dycore
+        RHS duck-types both.
     """
     import jax
     from legoesm import constants
@@ -1278,6 +1390,7 @@ def isothermal_rest_state_spectral(
         T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
         lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
         phis_hat=Field(data=phis_hat_data, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        tracers=tracers,
     )
 
 

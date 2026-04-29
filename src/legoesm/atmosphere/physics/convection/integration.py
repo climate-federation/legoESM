@@ -1089,43 +1089,48 @@ def _make_spectral_pe_convection(
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
         # Transform T tendency to spectral space.
-        # NOTE: this dispatcher already drops ``conv_out.dq_v_dt`` and
-        # ``conv_out.dq_c_conv_dt`` — the spectral PE state surfaced
-        # here (``SpectralHydrostaticState``) doesn't carry tracers,
-        # so there is nowhere for these tendencies to land.  The
-        # spectral PE pipeline therefore runs effectively dry through
-        # the convection coupling: q_v stays whatever the duck-typed
-        # ``state.tracers`` mapping carries (used for *reading* the
-        # current q_v profile to feed the column physics), and the
-        # convective sink/source on q_v / q_c is silently discarded.
-        #
-        # TODO(option-c): make the spectral PE state tracer-aware.
-        # Concretely:
-        #   1. Add ``tracers: dict[str, Field] | None = None`` to
-        #      ``SpectralHydrostaticState`` (NamedTuple field, default
-        #      None preserves backward-compat for all existing
-        #      constructors).  Tracer fields hold spectral
-        #      coefficients (``(n_sh, nlev)`` complex128) — define a
-        #      ``tracers_hat`` convention or follow the lat-lon path
-        #      and store grid-space tracers on the state.
-        #   2. Update ``isothermal_rest_state_spectral`` and the other
-        #      ``SpectralHydrostaticState(...)`` constructors in
-        #      ``da/generate_nmc.py``, ``driver/model_driver.py``, and
-        #      ``training/neural_gcm_spectral.py``.
-        #   3. Update the spectral PE tendency function to compute
-        #      tracer advection (``-v · ∇q``) and return tendencies on
-        #      the same spectral basis.
-        #   4. Update the SSP-RK time-integration loop to apply tracer
-        #      tendencies alongside vor / div / T / lnps.
-        #   5. Then route ``conv_out.dq_v_dt`` and ``dq_c_conv_dt``
-        #      through here (sh_analysis_3d → tracers_hat tendencies)
-        #      and merge them at the orchestrator level (see
-        #      ``_make_spectral_pe_combined``, which currently has no
-        #      tracer-accumulation branch).
-        # This is a structural change touching ~5 files and the dycore
-        # time-integration loop; it belongs in a dedicated "spectral
-        # PE tracers" PR rather than a convection follow-up.
         dT_hat = sh_analysis_3d(grid, dT_dt)
+
+        # Tracer tendencies (q_v sink, q_c source from convection).
+        # ``SpectralHydrostaticState.tracers`` is grid-space, so we
+        # reshape the column-physics output ``(ncol, nlev)`` back to
+        # ``(n_lat, n_lon, nlev)`` and stash it under the tracer name
+        # the dycore RHS expects.  The dycore RHS adds these to its
+        # own advective tracer tendencies during the SSP-RK stages.
+        # When the input state has no tracer (state.tracers is None or
+        # missing the relevant key) we drop the tendency — there is
+        # no carry to write into.
+        tracers_tend = None
+        if conv_fn is not None and state.tracers is not None:
+            _state_tracers = state.tracers
+            tt = {}
+            if "q_v" in _state_tracers:
+                dq_v_dt_grid = conv_out.dq_v_dt.reshape(n_lat, n_lon, nlev)
+                _qv_template = _state_tracers["q_v"]
+                if hasattr(_qv_template, "data") and hasattr(_qv_template, "replace"):
+                    tt["q_v"] = _qv_template.replace(
+                        data=dq_v_dt_grid.astype(_qv_template.data.dtype)
+                    )
+                else:
+                    tt["q_v"] = dq_v_dt_grid.astype(_qv_template.dtype)
+            if "q_c" in _state_tracers:
+                dq_c_dt_grid = conv_out.dq_c_conv_dt.reshape(n_lat, n_lon, nlev)
+                _qc_template = _state_tracers["q_c"]
+                if hasattr(_qc_template, "data") and hasattr(_qc_template, "replace"):
+                    tt["q_c"] = _qc_template.replace(
+                        data=dq_c_dt_grid.astype(_qc_template.data.dtype)
+                    )
+                else:
+                    tt["q_c"] = dq_c_dt_grid.astype(_qc_template.dtype)
+            # Mirror untouched tracers as zeros so the dycore RHS sees a
+            # complete tracer pytree (the orchestrator's accumulation
+            # also requires matching keys across modules).
+            from legoesm.atmosphere.physics._shared import zero_like_tracers
+            zeros = zero_like_tracers(_state_tracers)
+            if zeros is not None:
+                for k, zv in zeros.items():
+                    tt.setdefault(k, zv)
+            tracers_tend = tt
 
         # Convective momentum transport: round-trip the grid CMT
         # tendencies through ``vordiv_from_uv_3d`` to obtain spectral
@@ -1162,6 +1167,7 @@ def _make_spectral_pe_convection(
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            tracers=tracers_tend,
         )
         return tendencies, conv_prog_out
 

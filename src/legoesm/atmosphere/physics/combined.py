@@ -465,6 +465,20 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         lnps_hat = first.lnps_hat.data
         phis_hat = first.phis_hat.data
 
+        # Tracer accumulation: start from the first module's
+        # contribution if it has any, otherwise None.  Subsequent
+        # modules are summed in the loop below.  Each value is kept
+        # as a raw grid-space jax array (dropping the Field container)
+        # so the per-key sum is a plain ``+``.  We re-wrap with the
+        # state's container at the end for pytree-leaf consistency.
+        def _grid_data(value):
+            return value.data if hasattr(value, "data") else value
+        accumulated_tracers = None
+        if first.tracers is not None:
+            accumulated_tracers = {
+                k: _grid_data(v) for k, v in first.tracers.items()
+            }
+
         for fn, accepts_ps, field_name in tagged_fns[1:]:
             if accepts_ps:
                 t, field_val = fn(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
@@ -485,22 +499,54 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             T_hat = T_hat + t.T_hat.data
             lnps_hat = lnps_hat + t.lnps_hat.data
             phis_hat = phis_hat + t.phis_hat.data
+            # Per-tracer accumulation across modules.
+            if t.tracers is not None:
+                if accumulated_tracers is None:
+                    accumulated_tracers = {
+                        k: _grid_data(v) for k, v in t.tracers.items()
+                    }
+                else:
+                    for k, v in t.tracers.items():
+                        v_data = _grid_data(v)
+                        if k in accumulated_tracers:
+                            accumulated_tracers[k] = (
+                                accumulated_tracers[k] + v_data
+                            )
+                        else:
+                            accumulated_tracers[k] = v_data
 
-        # Mirror the input state's tracer pytree structure as a zero
-        # combined-tendency.  Individual physics modules return
-        # tendencies with tracers=None today (no physics module yet
-        # writes to spectral tracers); we still emit the zero
-        # structure so downstream callers can ``tree.map(state, tend)``
-        # safely when state has tracers.
+        # Build the final tracers dict for the combined tendency,
+        # mirroring the input state's container types so pytree leaves
+        # match downstream tree.map(state, tendency) calls.  When no
+        # physics module touched tracers we emit ``zero_like_tracers``
+        # of the input state's tracers (the original safe default).
         from legoesm.atmosphere.physics._shared import zero_like_tracers
-        zero_tracers_combined = zero_like_tracers(state.tracers)
+        if state.tracers is None:
+            tracers_combined = None
+        elif accumulated_tracers is None:
+            tracers_combined = zero_like_tracers(state.tracers)
+        else:
+            tracers_combined = {}
+            for k, template in state.tracers.items():
+                if k in accumulated_tracers:
+                    arr = accumulated_tracers[k]
+                else:
+                    arr = (
+                        jnp.zeros_like(template.data)
+                        if hasattr(template, "data")
+                        else jnp.zeros_like(template)
+                    )
+                if hasattr(template, "data") and hasattr(template, "replace"):
+                    tracers_combined[k] = template.replace(data=arr)
+                else:
+                    tracers_combined[k] = arr
         combined = SpectralHydrostaticState(
             vor_hat=first.vor_hat.replace(data=vor_hat),
             div_hat=first.div_hat.replace(data=div_hat),
             T_hat=first.T_hat.replace(data=T_hat),
             lnps_hat=first.lnps_hat.replace(data=lnps_hat),
             phis_hat=first.phis_hat.replace(data=phis_hat),
-            tracers=zero_tracers_combined,
+            tracers=tracers_combined,
         )
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
