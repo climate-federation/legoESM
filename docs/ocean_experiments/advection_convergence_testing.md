@@ -117,21 +117,52 @@ points. To measure formal spatial convergence rates (2, 3, 5, 7),
 would need either a sharper initial condition or a higher-order time
 integrator (RK4). But for practical validation, **no bugs detected**.
 
-#### Time stepper survey (2026-04-29)
+#### Time stepper survey (2026-04-29) — CORRECTED
 
-Production ocean models also use low-order time integration for tracers:
-- **MOM6**: Forward Euler for baroclinic tracers (same as us)
-- **MITgcm**: Supports AB2 (Adams-Bashforth 2nd order)
-- **NEMO**: Robert-Asselin time filter
+**Previous claim that "MOM6 uses forward Euler" was wrong.** Deep study
+of Hill et al. (2012) and the Silvestri plan reveals:
 
-The Silvestri WENO plan documented AB2 as Phase 4e but **skipped** it.
-Existing RK3/RK4 implementations in `src/legoesm/timestepping/` serve
-only the spectral ocean model.
+- **MITgcm**: Uses **Adams-Bashforth** (AB2/AB3) time stepping — explicitly
+  stated in Hill et al. (2012): "An Adams–Bashforth time stepping scheme
+  is used with a stabilization factor of 0.1"
+- **Oceananigans (Silvestri)**: Uses **AB2** for 3D baroclinic jet, **RK3**
+  for 2D turbulence — documented in silvestri2024_weno_iles_plan.md
+- **legoESM**: Uses **forward Euler** — the only production-relevant ocean
+  model using 1st-order time integration for tracers
 
-The value of higher-order spatial schemes (WENO5/7, SOM) is in **lower
-implicit diffusion** (Var(T) preservation), not formal convergence rate.
-This is consistent with Hill et al. (2012) who measured effective
-diapycnal diffusivity, not convergence.
+This explains why WENO is stable in MITgcm/Oceananigans but unstable
+in our Level 2 tests: AB2/RK3 don't have the leading-order anti-diffusive
+truncation error that forward Euler produces, which WENO's non-monotone
+reconstruction amplifies.
+
+**Action item**: Implement AB2 time stepping for the ocean tracer
+advection. This is ~80 LOC (Silvestri plan Phase 4e estimate) and
+requires storing one previous tendency in the scan carry.
+
+#### Hill et al. (2012) key findings
+
+Hill et al. tested 8 advection schemes in MITgcm on an ACC-like
+eddying channel (5 km resolution, AB time stepping, KPP, biharmonic
+viscosity). Effective diapycnal diffusivity from virtual tracer release:
+
+| Scheme | κ_eff (300 lvl) | κ_eff (30 lvl) | Our equivalent |
+|---|---|---|---|
+| SOM no limiter | **0.005** | 0.93 ± 0.2 | `som` |
+| SOM with limiter | 0.52 | 3.8 ± 2 | not implemented |
+| 2nd order Superbee | 0.017 | 11 ± 5 | ~ `tvd` |
+| DST-3 (no limiter) | 18 | 32 ± 4 | `dst3` |
+| DST-3 + Sweby | 4.9 | 24 ± 4 | `dst3` (uses Van Leer) |
+| 7th order monotone | 2.6 | 12 ± 3 | ~ `weno7` |
+| Centered 2nd + diffusion | 16.9 | 19 ± 5 | not tested |
+
+(All values ×10⁻⁵ m²/s. Observed ocean interior: ~1 ×10⁻⁵.)
+
+**Key takeaways:**
+1. SOM is 3-4 orders of magnitude less diffusive than DST-3
+2. DST-3 performed **worse** than centered 2nd order + explicit diffusion
+3. The 7th-order monotone scheme (closest to our WENO7) is ~500× more
+   diffusive than SOM but still reasonable (2.6 at 300 levels)
+4. All tests used AB time stepping — not forward Euler
 
 ### 2026-04-29: Face reconstruction convergence — spatial order bugs found
 
