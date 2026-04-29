@@ -320,6 +320,32 @@ manufactured solution approach. Left as future work — not blocking
 because DST-3 shows lower errors than upwind/TVD at coarse resolution
 (0.040 vs 0.079/0.108 at 32 pts), consistent with its expected behavior.
 
+### 2026-04-29: SOM included in Level 1 — behaves correctly
+
+SOM added to the coupled convergence test. Like all schemes, limited to
+~1st order by forward Euler. Key observations:
+
+- SOM and DST-3 tied for lowest errors at coarse resolution (3.9e-02 at 32 pts)
+- SOM conserves mass to machine precision (0.00e+00 drift)
+- SOM is ~5x slower than other schemes (5.3s vs ~1s at 256 pts) due to
+  9-moment directional sweeps
+- At fine resolution (256 pts), all schemes converge to the same temporal
+  floor (~5e-3 L2 error)
+
+**Level 1 summary (all schemes, after WENO fix):**
+
+| Scheme | L2 @ 32 | L2 @ 256 | Conservation | Face recon order |
+|---|---|---|---|---|
+| upwind | 7.89e-02 | 5.03e-03 | machine-eps | 1st (correct) |
+| tvd | 1.08e-01 | 5.06e-03 | machine-eps | 2nd (correct) |
+| dst3 | 4.05e-02 | 4.89e-03 | machine-eps | space-time (untested) |
+| weno5 | 9.61e-02 | 5.07e-03 | machine-eps | **5th (fixed)** |
+| weno7 | 9.81e-02 | 5.13e-03 | machine-eps | **6.5th (fixed)** |
+| som | 3.91e-02 | 4.89e-03 | machine-eps | N/A (moment method) |
+
+All schemes verified stable and conservative. WENO5/7 spatial order
+fixed from 2nd to 5th/6.5th. Ready for Level 2 (2D prescribed flow).
+
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics
 from the explicit solver at the same physics settings:
