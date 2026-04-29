@@ -265,7 +265,40 @@ All converge at ~1st order due to forward Euler time integration,
 but DST-3 consistently has the lowest prefactor at coarse resolution
 (0.040 vs 0.079-0.107) — consistent with its space-time accuracy.
 
-All 30 WENO tracer tests + 37 WENO momentum tests pass with the fix.
+### 2026-04-29: Full-order WENO fix — correct conversion coefficients
+
+Initial fix used wrong coefficients (7/5760 for δ⁴ term — this is from the
+*inverse* operator, not the direct conversion). Rederived correct stencil
+weights from scratch by matching Taylor-series moments.
+
+**Correct 5-point stencil (6th-order):**
+```
+f_avg = (863/960)*f_0 + (77/1440)*(f_{-1} + f_{+1}) - (17/5760)*(f_{-2} + f_{+2})
+```
+
+Verified: p=0, p=2, p=4 moments all match exactly. Conversion accuracy:
+- 3-point (order=4): rate = 3.99
+- 5-point (order=6): rate = **5.85**
+
+**Face reconstruction after full fix:**
+
+| Scheme | Rate (before any fix) | Rate (4th-order conv) | Rate (6th-order conv) |
+|---|---|---|---|
+| weno5 | 1.99 | 4.34 | **5.03** |
+| weno7 | 1.99 | 3.99 | **6.45** |
+
+WENO5 now achieves its designed 5th order. WENO7 achieves 6.45 (slightly
+limited by the 6th-order conversion; 8th-order conversion would need a
+7-point stencil). For practical purposes with forward Euler time
+integration this is academic, but the spatial reconstruction is now correct.
+
+Also applied the cell-average conversion to **momentum WENO**:
+- `_weno_cell_to_uface` (D-term, zonal periodic)
+- `_weno_cell_to_vface` (D-term, meridional bounded)
+- `_weno_zeta_at_u` (Z-term vorticity, meridional)
+- `_weno_zeta_at_v` (Z-term vorticity, zonal periodic)
+
+All 112 WENO tests pass (30 tracer + 37 momentum + 45 core).
 
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics

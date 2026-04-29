@@ -942,15 +942,13 @@ def _weno_to_u_points(
     hw = {5: 3, 7: 4}[order]
     n_lon = f.shape[1]
 
-    # Convert point values to cell averages (4th-order accurate):
-    #   f_avg ≈ f_point + (1/24) * (f_{i+1} - 2*f_i + f_{i-1})
-    # The cell average of a smooth function exceeds the midpoint value
-    # by +(dx²/24)*f'' due to the curvature correction.
-    # WENO is a finite-volume reconstruction expecting cell averages;
-    # passing point values caps the order at O(dx^3) regardless of
-    # WENO order.
-    f_avg = f + (1.0 / 24.0) * (
-        jnp.roll(f, -1, axis=1) - 2.0 * f + jnp.roll(f, 1, axis=1))
+    # Convert point values to cell averages. WENO reconstruction is
+    # a finite-volume method expecting cell-average inputs; passing
+    # point values caps the order at O(dx^3). Conversion order must
+    # match or exceed the WENO order for full accuracy.
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+    f_avg = point_to_cellavg_periodic(f, axis=1, order=conv_order)
 
     # Build stencil for all faces simultaneously (periodic longitude).
     # Face j between cell j-1 and cell j: WENO face at I+1/2 where I=j-1.
@@ -996,11 +994,10 @@ def _weno_to_v_points(
     hw = {5: 3, 7: 4}[order]
     n_lat = f.shape[0]
 
-    # Convert point values to cell averages (meridional direction).
-    # Use Neumann-padded stencil for the conversion near boundaries.
-    f_south = jnp.concatenate([f[:1, :, :], f[:-1, :, :]], axis=0)
-    f_north = jnp.concatenate([f[1:, :, :], f[-1:, :, :]], axis=0)
-    f_avg = f + (1.0 / 24.0) * (f_north - 2.0 * f + f_south)
+    # Convert point values to cell averages (meridional, bounded).
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    f_avg = point_to_cellavg_bounded(f, axis=0, order=conv_order)
 
     # Ghost cells (Neumann BC: copy boundary value)
     f_ext = jnp.concatenate(
