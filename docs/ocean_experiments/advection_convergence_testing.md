@@ -166,8 +166,40 @@ advertised accuracy. This may explain why WENO5/7 didn't differentiate
 from TVD in the Eady Var(T) comparison — they're effectively 2nd-order
 schemes, same as TVD.
 
-**Next:** Investigate root cause in `weno5_to_u_points` and
-`dst3_to_u_points` implementations.
+### 2026-04-29: WENO root cause — point values vs cell averages
+
+**Root cause identified.** The core WENO kernel (`src/legoesm/core/weno.py`)
+is correct — it converges at 5th/7th/9th order when given **cell-average**
+inputs (verified by `tests/core/test_weno.py::TestConvergenceOrder`).
+
+The ocean wrapper (`_weno_to_u_points` in `advection.py:915`) passes
+**point values** (tracer at cell centers) instead of cell averages. WENO
+reconstruction is a finite-volume method that assumes cell-average inputs.
+Point values differ from cell averages by O(dx^2):
+
+    f_avg = f(x) + (dx^2/24) * f''(x) + O(dx^4)
+
+This O(dx^2) input error limits the reconstruction to O(dx^3) regardless
+of the WENO order, confirmed by direct test:
+
+| Input type | WENO5 rate | WENO7 rate |
+|---|---|---|
+| Cell averages (correct) | **5.02** | **6.97** |
+| Point values (current) | 2.97 | 2.99 |
+
+The earlier face-reconstruction test showing 2nd order was because the
+flux-form update adds additional O(dx) error from forward Euler. The pure
+reconstruction error is O(dx^3) with point values.
+
+**Fix options:**
+1. Convert point values to cell averages before WENO reconstruction:
+   `f_avg_i = f_i - (dx^2/24) * (f_{i+1} - 2*f_i + f_{i-1}) / dx^2`
+   simplifies to `f_avg_i = f_i - (1/24) * (f_{i+1} - 2*f_i + f_{i-1})`
+2. Use a WENO variant designed for point-value inputs (different coefficients)
+
+Option 1 is simpler and doesn't require changing the core WENO kernel.
+
+**Next:** Investigate DST-3 1st-order behavior, then implement WENO fix.
 
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics
