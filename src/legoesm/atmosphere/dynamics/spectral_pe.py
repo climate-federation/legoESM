@@ -844,6 +844,53 @@ def _apply_spectral_filter_to_state(state, spectral_filter):
     )
 
 
+def _apply_filter_to_tracers(tracers, multiplicative_filter, grid):
+    """Apply a per-SH-mode multiplicative filter to grid-space tracers.
+
+    Tracers are stored on the model grid (shape ``(n_lat, n_lon, nlev)``)
+    in :class:`SpectralHydrostaticState`, so a single SH round-trip per
+    tracer per step is required: ``q_grid → q_hat → q_hat * filter →
+    q_grid_filtered``.  The same diagonal filter is reused for the
+    spectral exponential (de-aliasing) post-step damping AND the
+    implicit hyperdiffusion damping — both are pure pointwise
+    multiplications in spectral space, so they collapse into one filter
+    applied via one transform pair.
+
+    Parameters
+    ----------
+    tracers : dict[str, Field | jax.Array] or None
+        Tracer dict with grid-space values (shape ``(n_lat, n_lon, nlev)``).
+        ``Field`` and raw-array values are duck-typed.  ``None`` is a
+        no-op (returns ``None``).
+    multiplicative_filter : jax.Array, shape (n_sh,)
+        Diagonal filter per spherical-harmonic coefficient.  Typically a
+        product of ``spectral_filter`` and ``exp(-nu · eig · dt_eff)``.
+    grid : GaussianGrid
+
+    Returns
+    -------
+    dict or None
+        Filtered tracers, container-type-preserving (Field stays Field,
+        raw stays raw).
+    """
+    if tracers is None or multiplicative_filter is None:
+        return tracers
+    sf_3d = multiplicative_filter[:, None]  # (n_sh, 1) — broadcasts over level
+    out = {}
+    for name, value in tracers.items():
+        q_grid = value.data if hasattr(value, "data") else value
+        q_hat = sh_analysis_3d(grid, q_grid)
+        q_hat_filtered = q_hat * sf_3d
+        q_grid_filtered = sh_synthesis_3d(grid, q_hat_filtered)
+        if hasattr(value, "data") and hasattr(value, "replace"):
+            out[name] = value.replace(
+                data=q_grid_filtered.astype(value.data.dtype),
+            )
+        else:
+            out[name] = q_grid_filtered.astype(value.dtype)
+    return out
+
+
 # =============================================================================
 # Model class
 # =============================================================================
@@ -925,6 +972,12 @@ class SpectralPrimitiveEquationModel:
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
         self._hyperdiff_filter_dt = None
+        # Tracer filter (combined spectral + implicit hyperdiff) is
+        # precomputed lazily because it depends on dt.  ``None`` means
+        # neither knob is active and we skip the SH round-trip on
+        # tracers entirely.
+        self._tracer_filter = None
+        self._tracer_filter_dt = None
 
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
@@ -1035,6 +1088,64 @@ class SpectralPrimitiveEquationModel:
             # lnps and phis are NOT diffused (mass conservation)
         )
 
+    def _ensure_tracer_filter(self, dt: float):
+        """Lazily precompute the combined post-step filter applied to
+        tracers in grid space.
+
+        The filter is the product of:
+
+        * the spectral exponential filter (de-aliasing) — same factor
+          used by ``_apply_spectral_filter_to_state`` for vor/div/T;
+        * the implicit hyperdiffusion factor ``exp(-nu · eig · dt_eff)``
+          — same eigenvalue used by ``_ensure_hyperdiff_filter``.
+
+        Both are diagonal in spectral space, so we collapse them into a
+        single ``(n_sh,)`` multiplier applied per SH mode via one SH
+        round-trip per tracer per step (see
+        :func:`_apply_filter_to_tracers`).
+
+        Effective time step matches the integrator: ``dt_eff = 2·dt``
+        for leapfrog (which spans 2 model dt per step), ``dt_eff = dt``
+        for SSP-RK and semi-implicit RK.
+
+        Stored as ``self._tracer_filter`` (or ``None`` when neither knob
+        is active — the apply pathway then short-circuits).
+        """
+        if self._tracer_filter is not None and self._tracer_filter_dt == dt:
+            return
+        components = []
+        if self._spectral_filter is not None:
+            components.append(self._spectral_filter)
+        if self.config.hyperdiff_coeff > 0:
+            nu = self.config.hyperdiff_coeff
+            order = self.config.hyperdiff_order
+            eig = (
+                self.grid.ls * (self.grid.ls + 1) / self.grid.radius ** 2
+            ) ** order
+            integrator = self.config.time_integrator.lower()
+            dt_eff = 2.0 * dt if 'leapfrog' in integrator else dt
+            components.append(jnp.exp(-nu * eig * dt_eff))
+        if not components:
+            self._tracer_filter = None
+            self._tracer_filter_dt = dt
+            return
+        combined = components[0]
+        for c in components[1:]:
+            combined = combined * c
+        self._tracer_filter = combined
+        self._tracer_filter_dt = dt
+
+    def _apply_tracer_filter(self, state):
+        """Apply the precomputed tracer filter to ``state.tracers`` (no-op
+        when filter or tracers are absent)."""
+        if self._tracer_filter is None or state.tracers is None:
+            return state
+        return state._replace(
+            tracers=_apply_filter_to_tracers(
+                state.tracers, self._tracer_filter, self.grid,
+            )
+        )
+
     def _ensure_si_data_leapfrog(self, dt: float):
         """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""
         from legoesm.timestepping.semi_implicit import precompute_si_matrices
@@ -1083,6 +1194,11 @@ class SpectralPrimitiveEquationModel:
         if self._spectral_filter is not None:
             result = _apply_spectral_filter_to_state(result, self._spectral_filter)
 
+        # Apply combined spectral-filter + implicit-hyperdiff to tracers
+        # via one SH round-trip per tracer (no-op when neither knob is
+        # active or ``state.tracers is None``).
+        result = self._apply_tracer_filter(result)
+
         return result
 
     def step(self, state: SpectralHydrostaticState, dt: float, physics_fn=None) -> SpectralHydrostaticState:
@@ -1096,6 +1212,7 @@ class SpectralPrimitiveEquationModel:
 
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
+        self._ensure_tracer_filter(dt)
         return self._step_jit(state, dt, physics_fn)
 
     def _leapfrog_step(self, state, dt, physics_fn=None):
@@ -1106,6 +1223,7 @@ class SpectralPrimitiveEquationModel:
         """
         self._ensure_sponge_factor(dt)
         self._ensure_hyperdiff_filter(dt)
+        self._ensure_tracer_filter(dt)
 
         if self._state_prev is None:
             # --- First step: forward Euler + SI ---
@@ -1120,6 +1238,8 @@ class SpectralPrimitiveEquationModel:
                 result = _apply_spectral_filter_to_state(result, self._spectral_filter)
             # Implicit hyperdiffusion (unconditionally stable)
             result = self._apply_implicit_hyperdiff(result)
+            # Same combined filter applied to grid-space tracers
+            result = self._apply_tracer_filter(result)
             self._state_prev = state
             return result
         else:
@@ -1139,6 +1259,8 @@ class SpectralPrimitiveEquationModel:
                 )
             # Implicit hyperdiffusion (unconditionally stable with leapfrog)
             state_np1 = self._apply_implicit_hyperdiff(state_np1)
+            # Same combined filter applied to grid-space tracers
+            state_np1 = self._apply_tracer_filter(state_np1)
             # Robert-Asselin filter on time-n state
             gamma = self.config.robert_asselin_coeff
             if gamma > 0:
@@ -1262,6 +1384,7 @@ class SpectralPrimitiveEquationModel:
         n_steps = int(duration / dt)
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
+        self._ensure_tracer_filter(dt)
 
         if self._use_cpu_for_spectral:
             return self._integrate_on_cpu(state, n_steps, dt, save_every, physics_fn)

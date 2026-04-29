@@ -61,6 +61,25 @@ def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0):
     )
 
 
+def _assert_state_finite(pytree, label="state"):
+    """Iterate over a SpectralHydrostaticState (NamedTuple) and assert all
+    leaves are finite.  Handles both ``Field`` slots and the
+    ``tracers`` slot (a ``dict[str, Field | jax.Array] | None``)."""
+    for field in pytree:
+        if field is None:
+            continue
+        if isinstance(field, dict):
+            for v in field.values():
+                data = v.data if hasattr(v, "data") else v
+                assert bool(jnp.all(jnp.isfinite(data))), (
+                    f"NaN in {label} tracer {getattr(v, 'name', '?')}"
+                )
+        else:
+            assert bool(jnp.all(jnp.isfinite(field.data))), (
+                f"NaN in {label} {field.name}"
+            )
+
+
 def _make_small_sfno():
     """Create a small SFNO for testing."""
     spec = PE3DChannelSpec(nlev=NLEV)
@@ -101,14 +120,7 @@ class TestCarryToSpectralState:
         from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
-        # SpectralHydrostaticState now carries an optional ``tracers``
-        # field (default None) so we filter None entries before the
-        # ``.data`` access — same pattern used elsewhere for
-        # ``HydrostaticState.dv_dt``.
-        for field in state:
-            if field is None:
-                continue
-            assert bool(jnp.all(jnp.isfinite(field.data))), f"NaN in {field.name}"
+        _assert_state_finite(state, label="carry-to-spectral state")
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +158,7 @@ class TestSFNOSpectralPhysics:
         physics_fn = make_sfno_spectral_physics(sfno, _GRID)
         tendencies = physics_fn(state, _GRID, _SIGMA)
 
-        for field in tendencies:
-            if field is None:
-                continue
-            assert bool(jnp.all(jnp.isfinite(field.data))), f"NaN in tendency {field.name}"
+        _assert_state_finite(tendencies, label="tendency")
 
 
 # ---------------------------------------------------------------------------
@@ -181,10 +190,7 @@ class TestSpectralRollout:
             dt=1800.0, n_steps=2,
         )
 
-        for field in result:
-            if field is None:
-                continue
-            assert bool(jnp.all(jnp.isfinite(field.data))), f"NaN in rollout result {field.name}"
+        _assert_state_finite(result, label="rollout result")
 
     def test_output_same_shape(self):
         from legoesm.training.neural_gcm_spectral import (
@@ -369,10 +375,7 @@ class TestColumnMLPSpectralPhysics:
         physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
         tend = physics_fn(state, _GRID, _SIGMA)
 
-        for field in tend:
-            if field is None:
-                continue
-            assert bool(jnp.all(jnp.isfinite(field.data)))
+        _assert_state_finite(tend, label="column-MLP tendency")
 
     def test_rollout_with_column_mlp(self):
         from legoesm.training.neural_gcm_spectral import (
@@ -394,10 +397,7 @@ class TestColumnMLPSpectralPhysics:
             state, physics_fn, _GRID, _SIGMA, pe_config,
             dt=1800.0, n_steps=2,
         )
-        for field in result:
-            if field is None:
-                continue
-            assert bool(jnp.all(jnp.isfinite(field.data)))
+        _assert_state_finite(result, label="column-MLP rollout")
 
     def test_grad_through_column_mlp(self):
         """Gradients flow from loss through dycore to column MLP weights."""
@@ -457,10 +457,7 @@ class TestPhysicsParamsSpectral:
         tend = physics_fn(state, _GRID, _SIGMA)
 
         assert tend.T_hat.data.shape == state.T_hat.data.shape
-        for field in tend:
-            if field is None:
-                continue
-            assert bool(jnp.all(jnp.isfinite(field.data)))
+        _assert_state_finite(tend, label="physics-params tendency")
 
     def test_grad_through_physics_params(self):
         """Gradients flow through physics + dycore to trainable params."""

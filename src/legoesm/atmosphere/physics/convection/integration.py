@@ -122,7 +122,15 @@ def make_convection_physics(
     Callable
         Physics function with the correct signature for the model.
     """
-    if model_type == "hydrostatic":
+    # ``model_type="mpas"`` reuses the hydrostatic factory: the column
+    # physics bridge in ``_make_hydrostatic_convection`` reshapes
+    # ``(*shape_2d, nlev)`` to ``(ncol, nlev)`` and never touches grid
+    # latitude/longitude — so it is grid-agnostic across cubed-sphere
+    # ``(face, n, n)``, lat-lon ``(n_lat, n_lon)``, and MPAS Voronoi
+    # ``(nCells,)``.  Without this branch ``_make_mpas_combined`` (which
+    # passes ``model_type="mpas"`` through to all sub-physics factories)
+    # crashes the moment convection is enabled on an MPAS run.
+    if model_type in ("hydrostatic", "mpas"):
         return _make_hydrostatic_convection(convection_config, dt)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_convection(convection_config, dt)
@@ -131,7 +139,7 @@ def make_convection_physics(
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
 
 
@@ -190,12 +198,12 @@ def _make_hydrostatic_convection(
 
     def physics_fn(
         state: HydrostaticState,
-        grid: CubedSphereGrid,
+        grid,
         sigma_coord: SigmaCoordinate,
         phys_state=None,
     ):
-        T = state.T.data          # (6, n, n, nlev)
-        p_s = state.p_s.data      # (6, n, n)
+        T = state.T.data          # cubed: (6,n,n,nlev) | latlon: (n_lat,n_lon,nlev) | mpas: (nCells,nlev)
+        p_s = state.p_s.data      # cubed: (6,n,n)      | latlon: (n_lat,n_lon)      | mpas: (nCells,)
 
         nlev = sigma_coord.n_levels
         shape_3d = T.shape
@@ -205,8 +213,13 @@ def _make_hydrostatic_convection(
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
         p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
 
-        # Reshape to columns: (6,n,n,...) -> (ncol, ...)
-        ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+        # Reshape to columns generically for any grid topology.
+        # Cubed-sphere ``shape_2d=(6,n,n)`` → ncol = 6·n·n.
+        # Lat-lon     ``shape_2d=(n_lat,n_lon)`` → ncol = n_lat·n_lon.
+        # MPAS        ``shape_2d=(nCells,)`` → ncol = nCells.
+        ncol = 1
+        for s in shape_2d:
+            ncol *= int(s)
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
@@ -223,14 +236,29 @@ def _make_hydrostatic_convection(
         else:
             q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
-        # Wind columns for CMT-capable schemes.
+        # Wind columns for CMT-capable schemes.  On cubed-sphere and
+        # lat-lon the prognostic winds live at cell centres so the
+        # ``(...,nlev) → (ncol, nlev)`` reshape works directly.  On
+        # MPAS the prognostic ``u`` is the normal velocity on edges
+        # (``shape (nEdges, nlev)``) so the reshape would mismatch
+        # ``ncol = nCells``.  In that case we degrade gracefully to
+        # zero u/v columns — the CMT-capable scheme still runs (it
+        # produces zero CMT) and the rest of the column physics
+        # (Tiedtke / ZM / Bechtold mass-flux closures) is unaffected.
+        # Proper edge→cell interpolation for MPAS CMT is a follow-up.
         if is_cmt_capable:
-            u_col = state.u.data.reshape(ncol, nlev)
-            v_col = (
-                state.v.data.reshape(ncol, nlev)
-                if state.v is not None
-                else jnp.zeros_like(u_col)
-            )
+            _u_data = state.u.data
+            if _u_data.shape[0] == ncol or _u_data.shape[:-1] == shape_2d:
+                u_col = _u_data.reshape(ncol, nlev)
+                v_col = (
+                    state.v.data.reshape(ncol, nlev)
+                    if state.v is not None
+                    else jnp.zeros_like(u_col)
+                )
+            else:
+                # MPAS / unsupported wind staggering: zero CMT inputs.
+                u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+                v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         else:
             u_col = None
             v_col = None
@@ -451,8 +479,13 @@ def _make_hydrostatic_convection(
             )
             dT_dt = conv_out.dT_dt.reshape(shape_3d)
 
-        dims_3d = ("face", "x", "y", "level")
-        dims_2d = ("face", "x", "y")
+        # Derive dim metadata from the input state so the returned
+        # Field metadata matches the underlying grid (cubed-sphere
+        # ("face","x","y",...), lat-lon ("lat","lon",...), or MPAS
+        # ("nCells",...)).  Hardcoding "face","x","y" produced wrong
+        # dim labels on lat-lon and MPAS runs.
+        dims_3d = state.T.dims
+        dims_2d = state.p_s.dims
 
         # Propagate tracer tendencies from convection backend.
         # Convective detrained condensate (``dq_c_conv_dt``) feeds the
@@ -479,25 +512,46 @@ def _make_hydrostatic_convection(
         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
         # Tiedtke, Bechtold).  Schemes that do not produce CMT (the
         # existing five plus Kain-Fritsch and Emanuel) leave these as
-        # ``None`` and the bridge zero-fills.
+        # ``None`` and the bridge zero-fills.  On MPAS where the
+        # prognostic ``u`` lives on edges and ``state.v is None`` we
+        # do not return a ``dv_dt`` Field — the orchestrator's
+        # ``has_v = state.v is not None`` gate handles it.  ``du_dt``
+        # is shaped to match the wind grid (edges on MPAS, cells
+        # elsewhere), zeroed since CMT was disabled by the column-
+        # extraction step above.
+        u_target_shape = state.u.data.shape
         if conv_fn is not None and conv_out.du_dt_conv is not None:
-            du_dt = conv_out.du_dt_conv.reshape(shape_3d)
+            # Reshape only when the column-physics output matches the
+            # u-grid layout.  When MPAS shifted CMT to zero (edge winds
+            # not interpolated to cells) we keep the zero on the
+            # u-grid layout instead of broadcasting cells back to edges.
+            try:
+                du_dt = conv_out.du_dt_conv.reshape(u_target_shape)
+            except (TypeError, ValueError):
+                du_dt = jnp.zeros(u_target_shape, dtype=_state_dtype)
         else:
-            du_dt = jnp.zeros(shape_3d, dtype=_state_dtype)
-        if conv_fn is not None and conv_out.dv_dt_conv is not None:
-            dv_dt = conv_out.dv_dt_conv.reshape(shape_3d)
-        else:
-            dv_dt = jnp.zeros(shape_3d, dtype=_state_dtype)
+            du_dt = jnp.zeros(u_target_shape, dtype=_state_dtype)
+        dv_dt_field = None
+        if state.v is not None:
+            v_target_shape = state.v.data.shape
+            if conv_fn is not None and conv_out.dv_dt_conv is not None:
+                try:
+                    dv_dt = conv_out.dv_dt_conv.reshape(v_target_shape)
+                except (TypeError, ValueError):
+                    dv_dt = jnp.zeros(v_target_shape, dtype=_state_dtype)
+            else:
+                dv_dt = jnp.zeros(v_target_shape, dtype=_state_dtype)
+            dv_dt_field = Field(
+                data=dv_dt, name="dv_dt_conv",
+                dims=state.v.dims, units="m/s^2",
+            )
 
         tendencies = HydrostaticTendencies(
             du_dt=Field(
                 data=du_dt, name="du_dt_conv",
-                dims=dims_3d, units="m/s^2",
+                dims=state.u.dims, units="m/s^2",
             ),
-            dv_dt=Field(
-                data=dv_dt, name="dv_dt_conv",
-                dims=dims_3d, units="m/s^2",
-            ),
+            dv_dt=dv_dt_field,
             dT_dt=Field(
                 data=dT_dt, name="dT_dt_conv",
                 dims=dims_3d, units="K/s",
