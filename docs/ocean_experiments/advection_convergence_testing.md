@@ -384,9 +384,43 @@ All schemes conserve mass to machine precision.
    whereas in 1D it was lower. The multi-directional flow may be
    less favorable for DST-3's operator-split space-time design.
 
-**Action**: Investigate WENO7 2D instability. May need to limit the
-cell-average conversion order for the bounded axis, or use a more
-conservative ghost-cell treatment for the wider stencil.
+### 2026-04-29: Audit found divergent flow bug + retest
+
+Dycore expert audit found **critical bug**: the swirl velocity field was
+divergent (cos²(lat) instead of cos(lat) in v, plus sign inconsistency).
+Divergent flow creates spurious T*div(u) source/sink bias ~ O(0.07).
+
+**Fixed** to non-divergent flow from stream function ψ = A*sin²(λ)*cos²(φ):
+  u = +A*sin²(lon)*sin(2*lat)*cos(πt/T)
+  v = +A*sin(2*lon)*cos(lat)*cos(πt/T)
+
+**Retest results (corrected non-divergent flow):**
+
+| Scheme | 32x64 L2 | 64x128 L2 | 128x256 L2 | Rate | Status |
+|---|---|---|---|---|---|
+| upwind | 1.48e-01 | 8.68e-02 | 4.83e-02 | 0.81 | OK |
+| tvd | 8.91e-02 | 4.68e-02 | 2.45e-02 | 0.93 | OK |
+| dst3 | 1.10e-01 | 6.07e-02 | 3.28e-02 | 0.87 | OK |
+| weno5 | 3.82e-02 | 1.96e-02 | **5.51e-02** | -0.26 | **UNSTABLE at 128x256** |
+| weno7 | 3.81e-02 | 2.58e-02 | **6.18e+00** | -3.67 | **BLOWUP at 128x256** |
+
+**WENO instability is worse with corrected flow.** Now WENO5 also shows
+instability at 128x256 (previously only WENO7). The divergent flow was
+acting as accidental stabilization.
+
+**Root cause (confirmed by audit):** WENO is essentially non-oscillatory
+but NOT monotone. Small oscillations near sharp gradients grow over many
+forward-Euler steps. At higher resolution, more steps are needed (fixed
+CFL → dt ∝ dx → n_steps ∝ 1/dx), giving oscillations more time to
+accumulate. Monotone schemes (upwind, TVD, DST-3) don't have this issue.
+
+**Implications for production:**
+1. WENO5/7 tracer advection with forward Euler is marginally stable in
+   2D at fine resolution. In the full ocean model, other damping
+   mechanisms (viscosity, diffusion, barotropic coupling) may prevent
+   the instability, but this is a fragile situation.
+2. A monotone WENO limiter (e.g., Zalesak FCT post-processing) or a
+   higher-order time integrator (RK3) would fix this properly.
 
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics

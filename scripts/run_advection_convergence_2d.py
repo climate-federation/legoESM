@@ -66,14 +66,16 @@ def _swirl_velocity(lon_u, lat_u, lon_v, lat_v, t, T=T_PERIOD):
     v_north : array at v-faces [m/s]
     """
     R = 6371.0e3  # Earth radius
-    # A chosen so max velocity ~ 20 m/s (CFL ~ 0.25 at ~100 km resolution)
-    # Reduced from 40 to keep filaments away from meridional walls.
+    # Stream function ψ = A*sin²(λ)*cos²(φ) gives non-divergent flow:
+    #   u = -(1/R)∂ψ/∂φ = +(A/R)*sin²(λ)*sin(2φ)
+    #   v = +(1/(R*cosφ))∂ψ/∂λ = +(A/R)*sin(2λ)*cos(φ)
+    # Verified: div = (1/(Rcosφ))[∂u/∂λ + ∂(v*cosφ)/∂φ] = 0 analytically.
     A = 20.0  # m/s
 
     cos_phase = jnp.cos(jnp.pi * t / T)
 
-    u = -A * jnp.sin(lon_u) ** 2 * jnp.sin(2.0 * lat_u) * cos_phase
-    v = A * jnp.sin(2.0 * lon_v) * jnp.cos(lat_v) ** 2 * cos_phase
+    u = A * jnp.sin(lon_u) ** 2 * jnp.sin(2.0 * lat_u) * cos_phase
+    v = A * jnp.sin(2.0 * lon_v) * jnp.cos(lat_v) * cos_phase
 
     return u, v
 
