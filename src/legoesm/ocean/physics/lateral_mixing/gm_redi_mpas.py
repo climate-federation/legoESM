@@ -30,15 +30,22 @@ from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.operators_voronoi import (
     cell_to_edge_avg_3d,
     divergence_cell_3d,
     gradient_edge_3d,
 )
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    iterate_eos_and_pressure_anomaly,
+)
+from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    compute_visbeck_kappa_gm,
     dm95_taper_scalar,
     vertical_flux_divergence,
 )
+from legoesm.ocean.vertical import compute_ocean_jacobian
 
 if TYPE_CHECKING:
     from legoesm.grids.voronoi import VoronoiMesh
@@ -423,6 +430,46 @@ def gm_redi_tracer_tendency_triads_mpas(
     _not_implemented("gm_redi_tracer_tendency_triads_mpas")
 
 
+def _visbeck_kappa_gm_mpas(
+    rho: jnp.ndarray,
+    S_n: jnp.ndarray,
+    mesh: "VoronoiMesh",
+    z_coord: "OceanZStarCoordinate",
+    jacobian: jnp.ndarray,
+    f_coriolis: jnp.ndarray,
+    cfg_visbeck,
+) -> jnp.ndarray:
+    """Visbeck (1997) adaptive GM coefficient on Voronoi.
+
+    Reuses the grid-agnostic ``compute_visbeck_kappa_gm`` from
+    ``_gm_redi_common.py``.  That function only consumes the slope
+    *magnitude* ``|S| = sqrt(S_x² + S_y²)``; on MPAS we reconstruct
+    ``|S|²`` at cell centres via the Perot inner-product helper and
+    pass the proxy ``(S_x, S_y) = (|S|, 0)``.
+
+    Parameters
+    ----------
+    rho : (nCells, nlev) — in-situ density.
+    S_n : (nEdges, nlev-1) — tapered edge-normal slope.
+    mesh : VoronoiMesh
+    z_coord, jacobian
+    f_coriolis : (nCells,)
+    cfg_visbeck : VisbeckConfig
+
+    Returns
+    -------
+    kappa : (nCells,) clamped GM coefficient [m²/s].
+    """
+    S_sq_cell = _perot_inner_product_cell(S_n, S_n, mesh)         # (nCells, nlev-1)
+    S_mag_cell = jnp.sqrt(jnp.maximum(S_sq_cell, 0.0))            # (nCells, nlev-1)
+    S_x_proxy = S_mag_cell
+    S_y_proxy = jnp.zeros_like(S_mag_cell)
+    return compute_visbeck_kappa_gm(
+        rho, S_x_proxy, S_y_proxy,
+        z_coord, jacobian, f_coriolis, cfg_visbeck,
+    )
+
+
 def gm_redi_tracer_tendency_mpas(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -440,13 +487,87 @@ def gm_redi_tracer_tendency_mpas(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level MPAS GM/Redi entry point.
 
-    Composes density → slopes → optional Visbeck → tracer tendency.
-    Signature mirrors ``gm_redi_tracer_tendency_latlon`` so the
-    dycore hook in ``ocean_model_mpas.py`` is mechanical once the
-    body is filled in.
+    Composes density → slopes → optional Visbeck → centred tracer
+    tendency for ``T`` and ``S``.  Signature mirrors
+    ``gm_redi_tracer_tendency_latlon`` so the dycore hook in
+    ``ocean_model_mpas.py`` is mechanical.
+
+    The triad scheme (``cfg.slope_scheme = "triads"``) is not yet
+    implemented on MPAS — see Phase 5 in the plan doc.  Passing it
+    here raises ``NotImplementedError``; callers must use ``"centered"``
+    until the triad port lands.
+
+    Parameters
+    ----------
+    T, S : (nCells, nlev)
+    eta : (nCells,) — sea surface height.
+    H_bathy : (nCells,) — bottom depth (positive).
+    mesh : VoronoiMesh
+    z_coord, cfg
+    eos : str — "wright" or "linear".
+    eos_linear : LinearEOSConfig or None.
+    mask : (nCells,) — ocean mask (default all ocean).
+    edge_mask : (nEdges,) — face mask, default = mask[c1] · mask[c2].
+    f_coriolis : (nCells,) — default 2·Ω·sin(latCell).
 
     Returns
     -------
     dT_dt, dS_dt : (nCells, nlev)
     """
-    _not_implemented("gm_redi_tracer_tendency_mpas")
+    if mask is None:
+        mask = jnp.ones((mesh.nCells,), dtype=T.dtype)
+    if edge_mask is None:
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = mask[c1] * mask[c2]
+
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+
+    # In-situ density via the grid-agnostic 2-pass EOS iteration.
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: _voronoi_neumann_fill(field, mask, mesh)
+    rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn,
+        z_coord.dz_ref, _RHO_0, constants.g,
+        n_iter=2,
+    )
+
+    # Edge-normal slopes (always — needed for Visbeck and for the
+    # centred tracer tendency).
+    S_n, _taper = compute_isopycnal_slopes_mpas(
+        rho, mask, z_coord, jacobian, mesh, cfg,
+    )
+
+    # GM coefficient.
+    if cfg.visbeck.enabled:
+        if f_coriolis is None:
+            f_coriolis = 2.0 * constants.Omega * jnp.sin(mesh.latCell)
+        kappa_GM = _visbeck_kappa_gm_mpas(
+            rho, S_n, mesh, z_coord, jacobian, f_coriolis, cfg.visbeck,
+        )
+    else:
+        kappa_GM = cfg.kappa_GM
+
+    scheme = getattr(cfg, "slope_scheme", "centered")
+    if scheme == "centered":
+        dT_dt = gm_redi_tracer_tendency_centered_mpas(
+            T, S_n, mask, edge_mask, z_coord, jacobian, mesh,
+            kappa_GM, cfg.kappa_Redi,
+        )
+        dS_dt = gm_redi_tracer_tendency_centered_mpas(
+            S, S_n, mask, edge_mask, z_coord, jacobian, mesh,
+            kappa_GM, cfg.kappa_Redi,
+        )
+    elif scheme == "triads":
+        raise NotImplementedError(
+            "GM/Redi triad scheme is not yet implemented on MPAS. "
+            f"See Phase 5 in {_PLAN}.  Use slope_scheme='centered' "
+            "for now."
+        )
+    else:
+        raise ValueError(
+            f"Unknown GMRediConfig.slope_scheme={scheme!r}; "
+            f"expected 'centered' or 'triads'."
+        )
+
+    return dT_dt, dS_dt

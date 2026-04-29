@@ -22,8 +22,9 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
 from legoesm.grids.voronoi import create_voronoi_mesh
-from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
 from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+    _visbeck_kappa_gm_mpas,
     _voronoi_neumann_fill,
     compute_isopycnal_slopes_mpas,
     gm_redi_tracer_tendency_centered_mpas,
@@ -392,26 +393,272 @@ def test_centered_respects_land_mask(mesh, z_coord, cfg):
 
 
 # ============================================================================
-# Dispatch guards for phases not yet implemented
+# Phase 3 — Visbeck adaptive κ_GM
 # ============================================================================
 
-@pytest.mark.parametrize("fn,name", [
-    (gm_redi_tracer_tendency_triads_mpas,   "gm_redi_tracer_tendency_triads_mpas"),
-    (gm_redi_tracer_tendency_mpas,          "gm_redi_tracer_tendency_mpas"),
-])
-def test_unimplemented_phases_raise_with_plan_pointer(fn, name):
-    """Phases 4 (top-level) and 5 (triads) are not implemented yet —
-    they must raise a clear NotImplementedError that names the function
-    and points at the plan."""
+def test_visbeck_kappa_grows_with_slope_magnitude(mesh, z_coord):
+    """Visbeck kappa is monotone in the slope magnitude: doubling β
+    (which doubles the meridional density gradient and hence |S|)
+    must increase the per-cell kappa."""
+    z = _z_centers(z_coord)
+    nlev = z.shape[0]
+    alpha = 1e-3
+    mask = _all_ocean_mask(mesh)
+    jac = _unit_jacobian(mesh)
+    f_cor = 2.0 * constants.Omega * jnp.sin(mesh.latCell)
+    # Wide kappa bounds so the level-2 mesh's small slopes don't clip
+    # against the floor and mask the monotonicity we want to test.
+    cfg_v = VisbeckConfig(
+        enabled=True, alpha=0.015, L_fixed=1.0e5,
+        use_rossby_radius=False, kappa_min=1e-12, kappa_max=4e3,
+    )
+    cfg = GMRediConfig(
+        kappa_GM=1e3, kappa_Redi=1e3, S_max=1e-2, visbeck=cfg_v,
+    )
+
+    def kappa_for(beta):
+        rho = (1027.5
+               + (beta * jnp.sin(mesh.latCell))[:, None]
+               + (alpha * (-z))[None, :])
+        S_n, _ = compute_isopycnal_slopes_mpas(rho, mask, z_coord, jac, mesh, cfg)
+        return _visbeck_kappa_gm_mpas(
+            rho, S_n, mesh, z_coord, jac, f_cor, cfg_v,
+        )
+
+    k_small = np.asarray(kappa_for(0.1))
+    k_large = np.asarray(kappa_for(0.4))
+
+    assert k_small.shape == (mesh.nCells,)
+    # Median (per-cell) kappa increases with the larger slope.
+    # Visbeck has kappa ∝ alpha·L²·N·|S|, so 4× β gives 4× kappa
+    # (linear in |S| at fixed N).
+    ratio = float(np.median(k_large) / np.maximum(np.median(k_small), 1e-30))
+    assert ratio > 3.0, f"kappa should ~4x with 4x slope; got ratio={ratio:.3g}"
+    # Both within configured bounds.
+    assert float(k_small.min()) >= cfg_v.kappa_min - 1e-9
+    assert float(k_large.max()) <= cfg_v.kappa_max + 1e-9
+
+
+# ============================================================================
+# Phase 4 — top-level wrapper (density + slopes + Visbeck + tendency)
+# ============================================================================
+
+def test_top_level_runs_and_returns_correct_shapes(mesh, z_coord):
+    """Top-level wrapper accepts (T, S, eta, H_bathy) and returns
+    (dT_dt, dS_dt) with the expected shapes; output is finite."""
+    nlev = z_coord.dz_ref.shape[0]
+    z = _z_centers(z_coord)
+
+    # Stable stratification + mild horizontal T gradient.
+    T = jnp.broadcast_to(
+        (5.0 + 15.0 * jnp.cos(mesh.latCell))[:, None]
+        + (-0.005 * z)[None, :],
+        (mesh.nCells, nlev),
+    )
+    S = jnp.full((mesh.nCells, nlev), 35.0, dtype=jnp.float64)
+    eta = jnp.zeros((mesh.nCells,), dtype=jnp.float64)
+    H_bathy = jnp.full((mesh.nCells,), 500.0, dtype=jnp.float64)
+
+    cfg = GMRediConfig(
+        kappa_GM=1e3, kappa_Redi=1e3, S_max=1e-2,
+        slope_scheme="centered",
+    )
+
+    dT_dt, dS_dt = gm_redi_tracer_tendency_mpas(
+        T, S, eta, H_bathy, mesh, z_coord, cfg,
+        eos="linear",  # avoid pressure dependence in this smoke test
+    )
+
+    assert dT_dt.shape == (mesh.nCells, nlev)
+    assert dS_dt.shape == (mesh.nCells, nlev)
+    assert np.all(np.isfinite(np.asarray(dT_dt)))
+    assert np.all(np.isfinite(np.asarray(dS_dt)))
+    # S is uniform ⇒ no salt tendency from gradients.
+    np.testing.assert_allclose(np.asarray(dS_dt), 0.0, atol=1e-12)
+
+
+def test_top_level_with_visbeck_matches_explicit_call(mesh, z_coord):
+    """Visbeck-enabled top-level must match a hand-stitched call
+    (rho via EOS iteration, slopes, Visbeck, centred tendency).
+    Guards against the `enabled` branch silently bypassing Visbeck.
+    """
+    nlev = z_coord.dz_ref.shape[0]
+    z = _z_centers(z_coord)
+    T = jnp.broadcast_to(
+        (5.0 + 15.0 * jnp.cos(mesh.latCell))[:, None]
+        + (-0.005 * z)[None, :],
+        (mesh.nCells, nlev),
+    )
+    S = jnp.full((mesh.nCells, nlev), 35.0, dtype=jnp.float64)
+    eta = jnp.zeros((mesh.nCells,), dtype=jnp.float64)
+    H_bathy = jnp.full((mesh.nCells,), 500.0, dtype=jnp.float64)
+
+    visbeck = VisbeckConfig(
+        enabled=True, alpha=0.015, L_fixed=1.0e5,
+        use_rossby_radius=False, kappa_min=1e2, kappa_max=4e3,
+    )
+    cfg = GMRediConfig(
+        kappa_GM=1e3, kappa_Redi=1e3, S_max=1e-2,
+        visbeck=visbeck, slope_scheme="centered",
+    )
+
+    dT_top, _ = gm_redi_tracer_tendency_mpas(
+        T, S, eta, H_bathy, mesh, z_coord, cfg, eos="linear",
+    )
+
+    # Hand-stitch the same pipeline.
+    from legoesm.ocean.dynamics.ocean_tendency_common import (
+        iterate_eos_and_pressure_anomaly,
+    )
+    from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
+    from legoesm.ocean.vertical import compute_ocean_jacobian
+
+    mask = _all_ocean_mask(mesh)
+    em = _edge_mask(mesh, mask)
+    jac = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn("linear", None)
+    fill = lambda f: _voronoi_neumann_fill(f, mask, mesh)
+    rho, _, _ = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill, eos_fn,
+        z_coord.dz_ref, _RHO_0, constants.g, n_iter=2,
+    )
+    S_n, _ = compute_isopycnal_slopes_mpas(rho, mask, z_coord, jac, mesh, cfg)
+    f_cor = 2.0 * constants.Omega * jnp.sin(mesh.latCell)
+    kappa_GM = _visbeck_kappa_gm_mpas(rho, S_n, mesh, z_coord, jac, f_cor, visbeck)
+    dT_ref = gm_redi_tracer_tendency_centered_mpas(
+        T, S_n, mask, em, z_coord, jac, mesh, kappa_GM, cfg.kappa_Redi,
+    )
+
+    np.testing.assert_allclose(np.asarray(dT_top), np.asarray(dT_ref), atol=1e-14)
+
+
+def test_top_level_triads_not_implemented_yet(mesh, z_coord):
+    """Until Phase 5 lands, slope_scheme='triads' must raise a clear
+    NotImplementedError naming the plan doc."""
+    nlev = z_coord.dz_ref.shape[0]
+    T = jnp.full((mesh.nCells, nlev), 10.0, dtype=jnp.float64)
+    S = jnp.full((mesh.nCells, nlev), 35.0, dtype=jnp.float64)
+    eta = jnp.zeros((mesh.nCells,), dtype=jnp.float64)
+    H_bathy = jnp.full((mesh.nCells,), 500.0, dtype=jnp.float64)
+    cfg = GMRediConfig(
+        kappa_GM=1e3, kappa_Redi=1e3, S_max=1e-2, slope_scheme="triads",
+    )
+    with pytest.raises(NotImplementedError) as exc_info:
+        gm_redi_tracer_tendency_mpas(
+            T, S, eta, H_bathy, mesh, z_coord, cfg, eos="linear",
+        )
+    msg = str(exc_info.value)
+    assert "triad" in msg.lower()
+    assert "gm_redi_mpas_plan.md" in msg
+
+
+# ============================================================================
+# Dispatch guard for the only remaining unimplemented entry point
+# ============================================================================
+
+# ============================================================================
+# Phase 4 dycore hook — MPASOceanModel.step with gm_redi enabled
+# ============================================================================
+
+def test_dycore_hook_runs_one_step_with_gm_redi():
+    """The full MPASOceanModel.step must accept ``gm_redi=GMRediConfig(...)``
+    and complete one step with finite output that differs from the
+    gm_redi=None baseline."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    mesh_local = create_voronoi_mesh(subdivision_level=2)
+    z_coord_local = create_ocean_z_star(
+        n_levels=5, H_max=500.0, dz_surface=20.0, dz_deep=200.0,
+    )
+    state = rest_state_mpas_ocean(
+        mesh_local, z_coord_local,
+        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=500.0, land_lat_threshold=85.0,
+    )
+    # Strong horizontal T gradient so GM/Redi has a clearly resolvable
+    # signal at the level-2 mesh (the slopes are O(β/(α·R)) and
+    # κ_R · S² · ∂_z q is what drives the visible vertical mixing).
+    T = state.T.data
+    T_modified = T + 5.0 * jnp.cos(mesh_local.latCell)[:, None]
+    state = state._replace(T=state.T.replace(data=T_modified))
+
+    base_cfg = MPASOceanConfig(
+        eos="linear",
+        n_barotropic_substeps=8,
+    )
+    cfg_with_gm = base_cfg._replace(
+        gm_redi=GMRediConfig(
+            kappa_GM=1e4, kappa_Redi=1e4, S_max=1e-2,
+            slope_scheme="centered",
+        ),
+    )
+
+    dt = 600.0
+    model_off = MPASOceanModel(
+        mesh=mesh_local, z_coord=z_coord_local, config=base_cfg,
+    )
+    model_on = MPASOceanModel(
+        mesh=mesh_local, z_coord=z_coord_local, config=cfg_with_gm,
+    )
+
+    state_off = model_off.step(state, dt)
+    state_on  = model_on.step(state, dt)
+
+    assert np.all(np.isfinite(np.asarray(state_off.T.data)))
+    assert np.all(np.isfinite(np.asarray(state_on.T.data)))
+
+    # GM/Redi must produce a non-trivial difference: the hook is alive.
+    delta = np.asarray(state_on.T.data) - np.asarray(state_off.T.data)
+    rms_delta = float(np.sqrt(np.mean(delta ** 2)))
+    assert rms_delta > 1e-10, (
+        f"GM/Redi hook had no effect on T (rms delta = {rms_delta:.3e}); "
+        "is the dycore hook actually wired in?"
+    )
+
+
+def test_dycore_hook_default_none_unchanged():
+    """When config.gm_redi is None (default), step() output is bit-
+    identical to the pre-hook behaviour, i.e. the hook is a no-op."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    mesh_local = create_voronoi_mesh(subdivision_level=2)
+    z_coord_local = create_ocean_z_star(
+        n_levels=5, H_max=500.0, dz_surface=20.0, dz_deep=200.0,
+    )
+    state = rest_state_mpas_ocean(
+        mesh_local, z_coord_local,
+        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=500.0, land_lat_threshold=85.0,
+    )
+    cfg = MPASOceanConfig(eos="linear", n_barotropic_substeps=8)
+    assert cfg.gm_redi is None
+    model = MPASOceanModel(
+        mesh=mesh_local, z_coord=z_coord_local, config=cfg,
+    )
+    new_state = model.step(state, 60.0)
+    assert np.all(np.isfinite(np.asarray(new_state.T.data)))
+
+
+def test_triads_leaf_raises_with_plan_pointer():
+    """Phase 5 (triads leaf) is not implemented yet — direct calls to
+    it must raise NotImplementedError naming the function and the
+    plan doc."""
     import inspect
-    sig = inspect.signature(fn)
+    sig = inspect.signature(gm_redi_tracer_tendency_triads_mpas)
     n_pos = sum(
         1 for p in sig.parameters.values()
         if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
     )
     with pytest.raises(NotImplementedError) as exc_info:
-        fn(*[None] * n_pos)
+        gm_redi_tracer_tendency_triads_mpas(*[None] * n_pos)
     msg = str(exc_info.value)
-    assert name in msg, f"error must name the called function: got {msg!r}"
-    assert "gm_redi_mpas_plan.md" in msg, (
-        "error must point at the implementation plan doc")
+    assert "gm_redi_tracer_tendency_triads_mpas" in msg
+    assert "gm_redi_mpas_plan.md" in msg

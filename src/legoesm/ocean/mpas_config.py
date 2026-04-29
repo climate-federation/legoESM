@@ -149,6 +149,10 @@ class MPASOceanConfig(NamedTuple):
     physics: object = None  # OceanPhysicsConfig or None
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    gm_redi: object = None  # GMRediConfig — None disables GM/Redi.  Only the
+                            # 'centered' slope_scheme is implemented on MPAS;
+                            # 'triads' raises NotImplementedError (Phase 5
+                            # of docs/ocean_experiments/gm_redi_mpas_plan.md).
     tracer_advection: str = "upwind"
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False

@@ -256,6 +256,26 @@ class MPASOceanModel:
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
 
+        # 2b. GM/Redi isopycnal mixing (forward Euler tendency on top of
+        # the physics-stepped tracer, before advection).  Mirrors the
+        # lat-lon pattern in ocean_model_latlon_cgrid.py.  Only the
+        # centred scheme is implemented on MPAS (Phase 1-4 of the plan
+        # at docs/ocean_experiments/gm_redi_mpas_plan.md); the triad
+        # branch raises NotImplementedError.
+        if config.gm_redi is not None:
+            from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+                gm_redi_tracer_tendency_mpas,
+            )
+            dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(
+                T_new, S_new, state.eta.data, state.H_bathy.data,
+                mesh, z_coord, config.gm_redi,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask,
+            )
+            mask_3d = mask[:, jnp.newaxis]
+            T_new = T_new + dt * dT_gm * mask_3d
+            S_new = S_new + dt * dS_gm * mask_3d
+
         # 3. Update 3D velocity with baroclinic perturbation tendency.
         # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
         # planetary Coriolis) — Coriolis on the 3D perturbation is
