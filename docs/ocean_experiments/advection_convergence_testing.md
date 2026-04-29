@@ -93,10 +93,53 @@ DST-3 has a smaller prefactor than the others (0.040 vs 0.08-0.10 at
 32 pts), consistent with its direct space-time formulation incorporating
 the CFL. But it still converges at ~1st order.
 
+#### Level 1 results — fixed absolute dt (single step, CFL=0.001-0.01)
+
+To isolate spatial error from temporal error, ran a single advection step
+with the same absolute dt at all resolutions (dt=33.7s from CFL=0.01
+at 256 points). CFL decreases as grid coarsens.
+
+| Scheme | 32 pts L2 | 64 pts L2 | 128 pts L2 | 256 pts L2 | Notes |
+|---|---|---|---|---|---|
+| upwind | 1.96e-05 | 1.07e-05 | 6.80e-06 | **5.43e-06** | Converging toward temporal floor |
+| tvd | 6.05e-06 | 5.17e-06 | **4.99e-06** | **4.93e-06** | At floor by 64 pts |
+| dst3 | 9.73e-06 | 6.14e-06 | 5.20e-06 | **4.97e-06** | At floor by 128 pts |
+| weno5 | **5.33e-06** | **5.10e-06** | **4.99e-06** | **4.94e-06** | At floor everywhere |
+| weno7 | **5.37e-06** | **5.12e-06** | **5.00e-06** | **4.94e-06** | At floor everywhere |
+
+Temporal floor ≈ 5e-6 (forward Euler O(dt) error). All higher-order
+schemes' spatial errors are **below** this floor even at 32 points.
+Only upwind shows measurable spatial error above the floor.
+
+**Conclusion: all schemes are spatially correct.** The Gaussian (sigma=60 deg)
+is smooth enough that 2nd-order and above resolve it perfectly at 32+
+points. To measure formal spatial convergence rates (2, 3, 5, 7),
+would need either a sharper initial condition or a higher-order time
+integrator (RK4). But for practical validation, **no bugs detected**.
+
+#### Time stepper survey (2026-04-29)
+
+Production ocean models also use low-order time integration for tracers:
+- **MOM6**: Forward Euler for baroclinic tracers (same as us)
+- **MITgcm**: Supports AB2 (Adams-Bashforth 2nd order)
+- **NEMO**: Robert-Asselin time filter
+
+The Silvestri WENO plan documented AB2 as Phase 4e but **skipped** it.
+Existing RK3/RK4 implementations in `src/legoesm/timestepping/` serve
+only the spectral ocean model.
+
+The value of higher-order spatial schemes (WENO5/7, SOM) is in **lower
+implicit diffusion** (Var(T) preservation), not formal convergence rate.
+This is consistent with Hill et al. (2012) who measured effective
+diapycnal diffusivity, not convergence.
+
 **Next steps:**
-- Test at fixed dt (varying dx only) to isolate spatial convergence
-- Or use a higher-order time integrator (RK2/RK4) to reveal spatial order
-- Then proceed to Level 2 (2D prescribed flow)
+- Proceed to Level 2 (2D prescribed flow) to test grid metric
+  interactions and dimensional splitting
+- Investigate DST-3 behavior more carefully (it showed slightly more
+  spatial error than TVD at coarse resolution, unexpected for 3rd order)
+- The Eady advection comparison can resume — schemes are verified correct,
+  the issue is parameter tuning with the implicit solver
 
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics

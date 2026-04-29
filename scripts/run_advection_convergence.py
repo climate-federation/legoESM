@@ -179,8 +179,14 @@ def _advect_som_one_step(tracer, som_moments, mass_flux_u, mass_flux_v,
     return T_new, T_som_new
 
 
-def _run_level1_single(scheme, n_lat, n_lon, output_dir):
+def _run_level1_single(scheme, n_lat, n_lon, output_dir, dt_override=None):
     """Run Level 1 test for a single scheme at a single resolution.
+
+    Parameters
+    ----------
+    dt_override : float or None
+        If given, use this dt instead of CFL-based dt. This fixes the
+        temporal error so spatial convergence can be isolated.
 
     Returns dict with error norms and metadata.
     """
@@ -194,12 +200,15 @@ def _run_level1_single(scheme, n_lat, n_lon, output_dir):
     # Tracer: Gaussian blob centered at 180 deg
     tracer_init = _gaussian_tracer(grid, nlev=nlev)
 
-    # Velocity: uniform eastward flow at CFL ~ 0.5
+    # Velocity: uniform eastward flow
     R = float(grid.radius)
     cos_lat_center = np.cos(np.radians(25.0))
     dx = R * float(grid.dlon) * cos_lat_center
-    velocity = 42.0  # m/s — arbitrary, CFL set by dt
-    dt = 0.5 * dx / velocity  # CFL = 0.5
+    velocity = 42.0  # m/s
+    if dt_override is not None:
+        dt = dt_override
+    else:
+        dt = 0.5 * dx / velocity  # CFL = 0.5
     n_steps = n_test_steps
 
     actual_cfl = velocity * dt / dx
@@ -436,6 +445,9 @@ def build_parser():
                    help="Output directory")
     p.add_argument("--quick", action="store_true",
                    help="Quick mode: fewer resolutions")
+    p.add_argument("--fixed-dt", action="store_true",
+                   help="Fix dt across resolutions to isolate spatial order "
+                        "(uses dt from finest grid, so CFL decreases with coarsening)")
     return p
 
 
@@ -451,23 +463,36 @@ def main():
     output_base = Path(args.output)
     level1_dir = output_base / "level1_1d"
 
+    # Compute fixed dt from finest grid if requested
+    dt_fixed = None
+    if args.fixed_dt:
+        finest_nlon = max(r[1] for r in resolutions)
+        finest_grid = _create_grid(resolutions[0][0], finest_nlon)
+        R = float(finest_grid.radius)
+        cos25 = np.cos(np.radians(25.0))
+        dx_finest = R * float(finest_grid.dlon) * cos25
+        dt_fixed = 0.5 * dx_finest / 42.0  # CFL=0.5 at finest grid
+
+    mode = "fixed-dt" if args.fixed_dt else "fixed-CFL"
     print("=" * 70)
     print("  Ocean Advection Convergence Testing")
     print("=" * 70)
     print(f"  Schemes:     {', '.join(schemes)}")
     print(f"  Resolutions: {[f'{r[0]}x{r[1]}' for r in resolutions]}")
+    print(f"  Mode:        {mode}" + (f" (dt={dt_fixed:.1f}s)" if dt_fixed else ""))
     print(f"  Output:      {output_base}")
     print("=" * 70)
 
     # --- Level 1: 1D zonal advection ---
-    print("\n--- Level 1: Pure 1D zonal advection ---\n")
+    print(f"\n--- Level 1: Pure 1D zonal advection ({mode}) ---\n")
 
     all_results = []
     t0 = time.time()
 
     for scheme in schemes:
         for n_lat, n_lon in resolutions:
-            result = _run_level1_single(scheme, n_lat, n_lon, level1_dir)
+            result = _run_level1_single(scheme, n_lat, n_lon, level1_dir,
+                                       dt_override=dt_fixed)
             all_results.append(result)
             print(f"      L1={result['l1']:.2e}  L2={result['l2']:.2e}  "
                   f"Linf={result['linf']:.2e}  mass_drift={result['mass_drift']:.2e}  "
