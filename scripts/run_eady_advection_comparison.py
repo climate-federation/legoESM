@@ -460,7 +460,9 @@ def _run_single(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, lambda s: _key_array_fn(s, grid_type),
         label=f"Eady {tracer_scheme}/{momentum_scheme}",
-        total_days=total_days)
+        total_days=total_days,
+        blowup_threshold=float("inf"),
+        max_speed_threshold=float("inf"))
 
     # Shift times if restarting
     if start_day > 0:
