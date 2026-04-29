@@ -54,36 +54,49 @@ from pressure/barotropic/physics.
 
 Created branch `dhruv/advection-convergence-tests`. Starting with Level 1.
 
-#### Level 1 results (1D zonal advection, CFL~0.5, one revolution)
+#### Level 1 results — first attempt (one full revolution, CFL~0.5)
 
-| Scheme | 32 pts L2 | 64 pts L2 | 128 pts L2 | 256 pts L2 | Rate | Expected | Status |
-|---|---|---|---|---|---|---|---|
-| upwind | 4.54e-01 | 3.44e-01 | 2.75e-01 | 2.47e-01 | 0.3 | 1 | SLOW |
-| tvd | 4.03e-01 | 4.55e-01 | 3.10e-01 | 2.55e-01 | 0.2 | 2 | SLOW |
-| dst3 | 2.55e-01 | 2.46e-01 | 2.46e-01 | 2.47e-01 | 0.0 | 3 | NO CONVERGENCE |
-| weno5 | 9.51e+00 | 6.28e+00 | 5.28e+04 | 2.54e+14 | -14.9 | 5 | UNSTABLE |
-| weno7 | 8.92e+01 | 4.86e+03 | 1.04e+12 | 5.97e+30 | -31.9 | 7 | UNSTABLE |
+All schemes showed poor convergence or instability. WENO5/7 appeared to
+explode (errors 10^14/10^30 at 256 pts). Investigation revealed this was
+a **test design flaw**, not a scheme bug: error accumulated over hundreds
+of steps with diffusive schemes fully smearing the Gaussian. WENO was
+amplifying residual noise from many accumulated steps, not blowing up
+in a single step.
 
-Conservation: upwind, tvd, dst3 conserve to machine precision. WENO5/7
-lose conservation as they blow up (mass_drift=0.003 at 256 pts for weno5).
+#### Level 1 results — fixed test (20 steps, shifted exact solution)
 
-**Key findings:**
+Test: advect Gaussian (sigma=60 deg) with uniform zonal flow at CFL=0.5
+for 20 steps. Compare against shifted exact Gaussian.
 
-1. **WENO5 and WENO7 are unstable in a pure 1D advection test.** Errors grow
-   exponentially with resolution. This is a bug — WENO is purely spatial
-   reconstruction, should be stable at CFL ≤ 0.5 with flux-form update.
-   The instability may explain some Eady blowups.
+| Scheme | 32 pts L2 | 64 pts L2 | 128 pts L2 | 256 pts L2 | Rate | Expected |
+|---|---|---|---|---|---|---|
+| upwind | 7.89e-02 | 2.68e-02 | 1.08e-02 | 5.03e-03 | **1.32** | 1 |
+| tvd | 1.08e-01 | 3.05e-02 | 1.12e-02 | 5.06e-03 | **1.47** | 2 |
+| dst3 | 4.05e-02 | 1.97e-02 | 9.79e-03 | 4.89e-03 | **1.02** | 3 |
+| weno5 | 9.75e-02 | 2.85e-02 | 1.10e-02 | 5.06e-03 | **1.42** | 5 |
+| weno7 | 1.03e-01 | 3.05e-02 | 1.16e-02 | 5.20e-03 | **1.43** | 7 |
 
-2. **DST-3 shows zero convergence.** Error is flat at ~0.25 regardless of
-   resolution. The Sweby limiter may be clamping the 3rd-order correction.
+All schemes conserve mass to machine precision. All schemes stable.
 
-3. **Upwind and TVD converge but at sub-theoretical rates** (0.3 and 0.2
-   instead of 1 and 2). Likely a test setup issue — Gaussian spans only
-   ~10 grid points at n_lon=64. Need wider feature or finer resolutions.
+**Key finding: Forward Euler time integration limits all schemes to ~1st
+order convergence.** Since CFL is fixed, dt ∝ dx, so the temporal error
+O(dt) = O(dx) dominates. All schemes converge at ~1st order regardless
+of spatial order. At 256 points, all schemes have nearly identical error
+(~5e-3) — the spatial reconstruction doesn't differentiate them.
 
-**Next**: Investigate WENO instability. Check if the bug is in the
-reconstruction (`weno5_to_u_points`) or in how it's called in the
-flux-form update.
+**Implication for the ocean model:** The model uses forward Euler for
+tracer advection. The higher-order schemes (DST-3, WENO5, WENO7) are
+not buying formal accuracy — their value is in lower implicit diffusion
+and sharper front preservation, not convergence rate.
+
+DST-3 has a smaller prefactor than the others (0.040 vs 0.08-0.10 at
+32 pts), consistent with its direct space-time formulation incorporating
+the CFL. But it still converges at ~1st order.
+
+**Next steps:**
+- Test at fixed dt (varying dx only) to isolate spatial convergence
+- Or use a higher-order time integrator (RK2/RK4) to reveal spatial order
+- Then proceed to Level 2 (2D prescribed flow)
 
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics

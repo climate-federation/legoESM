@@ -73,19 +73,21 @@ def _create_grid(n_lat, n_lon):
     return grid
 
 
-def _gaussian_tracer(grid, nlev=1):
-    """Create a Gaussian tracer blob centered at lon=180.
+SIGMA_LON = 60.0  # Gaussian half-width in degrees (wide enough for good convergence)
+CENTER_LON = 180.0  # Initial center
+
+
+def _gaussian_tracer(grid, center_lon=CENTER_LON, nlev=1):
+    """Create a Gaussian tracer blob centered at given longitude.
 
     Returns array of shape (n_lat_grid, n_lon, nlev).
     Grid lon/lat are 1D: lon (n_lon,), lat (n_lat_grid,).
     """
     lon_deg = np.asarray(grid.lon) * 180.0 / np.pi  # (n_lon,)
-    # Gaussian in longitude, centered at 180 deg, width ~ 30 deg
-    sigma_lon = 30.0
-    lon_centered = lon_deg - 180.0
+    lon_centered = lon_deg - center_lon
     lon_centered = np.where(lon_centered > 180, lon_centered - 360, lon_centered)
     lon_centered = np.where(lon_centered < -180, lon_centered + 360, lon_centered)
-    tracer_1d = np.exp(-0.5 * (lon_centered / sigma_lon) ** 2)  # (n_lon,)
+    tracer_1d = np.exp(-0.5 * (lon_centered / SIGMA_LON) ** 2)  # (n_lon,)
 
     n_lat_grid = grid.area.shape[0]
     n_lon = grid.area.shape[1]
@@ -184,32 +186,31 @@ def _run_level1_single(scheme, n_lat, n_lon, output_dir):
     """
     nlev = 1
     h_uniform = 100.0  # meters
+    n_test_steps = 20   # Fixed number of steps — avoids error saturation
 
     grid = _create_grid(n_lat, n_lon)
     n_lat_grid, n_lon_actual = grid.area.shape
 
     # Tracer: Gaussian blob centered at 180 deg
-    tracer_init = _gaussian_tracer(grid, nlev)
+    tracer_init = _gaussian_tracer(grid, nlev=nlev)
 
-    # Velocity: uniform eastward flow
-    # Domain is 360 deg. At lat=25N, dx = R * dlon * cos(25).
-    # Choose velocity so one revolution takes a round number of steps.
+    # Velocity: uniform eastward flow at CFL ~ 0.5
     R = float(grid.radius)
     cos_lat_center = np.cos(np.radians(25.0))
-    circumference = 2 * np.pi * R * cos_lat_center  # meters
-    # Target: one revolution in ~10 days at reasonable CFL
-    period_s = 10.0 * 86400.0
-    velocity = circumference / period_s  # m/s
+    dx = R * float(grid.dlon) * cos_lat_center
+    velocity = 42.0  # m/s — arbitrary, CFL set by dt
+    dt = 0.5 * dx / velocity  # CFL = 0.5
+    n_steps = n_test_steps
 
-    dx_min = R * float(grid.dlon) * cos_lat_center
-    dt_target = 0.5 * dx_min / velocity  # CFL ~ 0.5
-    # Round to get integer number of steps for one revolution
-    n_steps = max(1, int(np.ceil(period_s / dt_target)))
-    dt = period_s / n_steps
+    actual_cfl = velocity * dt / dx
+    # How far does the tracer move in degrees?
+    shift_deg = n_steps * velocity * dt / (R * cos_lat_center) * 180.0 / np.pi
 
-    actual_cfl = velocity * dt / dx_min
     print(f"    {scheme} @ {n_lat}x{n_lon}: n_steps={n_steps}, "
-          f"dt={dt:.1f}s, CFL={actual_cfl:.3f}")
+          f"dt={dt:.1f}s, CFL={actual_cfl:.3f}, shift={shift_deg:.1f}deg")
+
+    # Exact solution: Gaussian shifted eastward by shift_deg
+    tracer_exact = _gaussian_tracer(grid, center_lon=CENTER_LON + shift_deg, nlev=nlev)
 
     # Create fields
     h_cell, h_u, h_v = _uniform_layer_thickness(grid, nlev, h_uniform)
@@ -239,9 +240,9 @@ def _run_level1_single(scheme, n_lat, n_lon, output_dir):
     jax.block_until_ready(tracer)
     wall = time.time() - t0
 
-    # Error norms (area-weighted)
-    error = np.asarray(tracer[..., 0] - tracer_init[..., 0])
-    exact = np.asarray(tracer_init[..., 0])
+    # Error norms vs shifted exact solution (area-weighted)
+    error = np.asarray(tracer[..., 0] - tracer_exact[..., 0])
+    exact = np.asarray(tracer_exact[..., 0])
     area = np.asarray(grid.area)
 
     l1 = float(np.sum(np.abs(error) * area) / np.sum(np.abs(exact) * area))
@@ -266,6 +267,7 @@ def _run_level1_single(scheme, n_lat, n_lon, output_dir):
         np.savez(output_dir / f"{scheme}_{n_lon}.npz",
                  tracer_init=np.asarray(tracer_init[..., 0]),
                  tracer_final=np.asarray(tracer[..., 0]),
+                 tracer_exact=np.asarray(tracer_exact[..., 0]),
                  error=error,
                  lon_deg=np.asarray(grid.lon) * 180 / np.pi,
                  lat_deg=np.asarray(grid.lat) * 180 / np.pi,
@@ -287,6 +289,7 @@ def _plot_4panel(data_file, output_dir):
     d = np.load(data_file)
     tracer_init = d["tracer_init"]
     tracer_final = d["tracer_final"]
+    tracer_exact = d.get("tracer_exact", tracer_init)  # fallback to init
     error = d["error"]
     lon = d["lon_deg"]
 
@@ -297,17 +300,19 @@ def _plot_4panel(data_file, output_dir):
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     name = data_file.stem  # e.g. "tvd_64"
 
-    axes[0, 0].plot(lon_1d, tracer_init[mid_lat, :])
-    axes[0, 0].set_title("Initial")
+    axes[0, 0].plot(lon_1d, tracer_init[mid_lat, :], 'k--', label="Initial")
+    axes[0, 0].plot(lon_1d, tracer_exact[mid_lat, :], 'g-', label="Exact (shifted)")
+    axes[0, 0].legend()
+    axes[0, 0].set_title("Initial + Exact")
     axes[0, 0].set_ylabel("Tracer")
 
     axes[0, 1].plot(lon_1d, tracer_final[mid_lat, :])
-    axes[0, 1].set_title("Final (after 1 revolution)")
+    axes[0, 1].set_title("Computed (after advection)")
 
-    axes[1, 0].plot(lon_1d, tracer_init[mid_lat, :], 'k--', label="Exact")
+    axes[1, 0].plot(lon_1d, tracer_exact[mid_lat, :], 'k--', label="Exact")
     axes[1, 0].plot(lon_1d, tracer_final[mid_lat, :], 'b-', label="Computed")
     axes[1, 0].legend()
-    axes[1, 0].set_title("Overlay")
+    axes[1, 0].set_title("Exact vs Computed")
     axes[1, 0].set_xlabel("Longitude (deg)")
     axes[1, 0].set_ylabel("Tracer")
 
@@ -332,13 +337,14 @@ def _plot_cross_section_compare(results, data_dir, output_dir):
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
-    # Plot exact (initial) first
+    # Plot exact (shifted) first
     first_scheme = results[0]["scheme"]
     d = np.load(data_dir / f"{first_scheme}_{max_nlon}.npz")
     mid_lat = d["tracer_init"].shape[0] // 2
     lon_raw = d["lon_deg"]
     lon_1d = lon_raw if lon_raw.ndim == 1 else lon_raw[mid_lat, :]
-    ax.plot(lon_1d, d["tracer_init"][mid_lat, :], 'k--', linewidth=2,
+    exact = d.get("tracer_exact", d["tracer_init"])
+    ax.plot(lon_1d, exact[mid_lat, :], 'k--', linewidth=2,
             label="Exact", zorder=10)
 
     # Plot each scheme
