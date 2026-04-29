@@ -116,10 +116,34 @@ class MPASOceanConfig(NamedTuple):
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
+    barotropic_u_viscosity: float = 0.0  # Lateral viscosity on u_bar [m²/s].
+                                         # Damps the TRiSK rotational null branch
+                                         # (Thuburn 2008; Ringler et al. 2010) on
+                                         # hexagonal C-grids — invisible to eta
+                                         # diffusion and divergence damping.
+                                         # 0 = disabled; typical 1e3-1e4 m²/s
+                                         # for global ico4 (~460 km) meshes.
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled.
     barotropic_time_filter: str = "cosine"  # "box" or "cosine"
     semi_implicit_coriolis: bool = True
+    # Barotropic solver selection.  ``"explicit_substep"`` (default) uses
+    # the existing forward-backward substep loop with cosine filter.
+    # ``"implicit_cn"`` uses a single-step Crank-Nicolson free surface
+    # with PCG Helmholtz solve, mirroring the lat-lon implementation
+    # (docs/issues/barotropic_mode_noise.md).  Eliminates the TRiSK
+    # rotational null branch (Thuburn 2008; Ringler+ 2010 §6) by
+    # construction; no substepping or time filter needed.
+    barotropic_solver: str = "explicit_substep"
+    # Implicit-CN knobs (only used when ``barotropic_solver = 'implicit_cn'``).
+    # 0.5 = pure Crank-Nicolson (2nd-order, no implicit damping); 1.0 =
+    # fully backward (1st-order, max damping).  0.55 is the standard
+    # MITgcm/MPAS-O choice — slightly past CN to suppress chequerboard
+    # while staying close to 2nd-order in time.
+    barotropic_implicit_theta_eta: float = 0.55
+    barotropic_implicit_theta_pgf: float = 0.55
+    barotropic_implicit_pcg_tol: float = 1.0e-10
+    barotropic_implicit_pcg_maxiter: int = 200
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0
     physics: object = None  # OceanPhysicsConfig or None

@@ -119,6 +119,24 @@ def main():
                         help="Total simulation years (default: 5)")
     parser.add_argument("--restart-every-years", type=float, default=1.0,
                         help="Restart save cadence (default: 1 yr)")
+    parser.add_argument("--baro-u-viscosity", type=float, default=0.0,
+                        help="Barotropic-mode lateral viscosity on u_bar "
+                             "[m^2/s].  Damps the TRiSK rotational null "
+                             "branch (Thuburn 2008; Ringler et al. 2010).  "
+                             "Default 0 (disabled, baseline behavior).  "
+                             "Try 1e3-1e4 on ico4 (~460 km cells) to test "
+                             "whether the null-branch noise is responsible "
+                             "for the diagnosed ⟨v_t(u_bar)⟩ residual.")
+    parser.add_argument("--barotropic-solver", default="explicit_substep",
+                        choices=("explicit_substep", "implicit_cn"),
+                        help="Barotropic solver. ``explicit_substep`` "
+                             "(default) uses forward-backward subcycling "
+                             "with cosine filter — the baseline that "
+                             "exhibits the TRiSK null-branch noise.  "
+                             "``implicit_cn`` uses single-step Crank-"
+                             "Nicolson with PCG Helmholtz solve, "
+                             "eliminating the chequerboard mode by "
+                             "construction (issue: barotropic_mode_noise).")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -153,6 +171,8 @@ def main():
         A_v=config.A_v,
         K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
+        barotropic_u_viscosity=args.baro_u_viscosity,
+        barotropic_solver=args.barotropic_solver,
         eos="linear",
         eos_linear=eos_config,
     )
@@ -169,8 +189,16 @@ def main():
     print(f"  A_v = {config.A_v:.1e}, K_v = {config.K_v:.1e}, "
           f"bottom_drag_r = {config.bottom_drag_coeff:.4f}")
     print(f"  GM/Redi: DISABLED (no MPAS port yet)")
-    print(f"  Barotropic solver: explicit subcycle "
-          f"(n_barotropic_substeps={ocean_config.n_barotropic_substeps})")
+    if ocean_config.barotropic_solver == "implicit_cn":
+        print(f"  Barotropic solver: implicit Crank-Nicolson "
+              f"(θ_eta=θ_pgf={ocean_config.barotropic_implicit_theta_eta}, "
+              f"PCG tol={ocean_config.barotropic_implicit_pcg_tol:.0e})")
+    else:
+        print(f"  Barotropic solver: explicit subcycle "
+              f"(n_barotropic_substeps={ocean_config.n_barotropic_substeps})")
+    print(f"  Barotropic u_bar viscosity: "
+          f"{ocean_config.barotropic_u_viscosity:.1e} m²/s "
+          f"({'enabled' if ocean_config.barotropic_u_viscosity > 0 else 'disabled'})")
     print(f"  Restart cadence: every {restart_every_years:g} yr "
           f"({n_steps // n_steps_per_restart} mid-run + 1 final)")
     print()
