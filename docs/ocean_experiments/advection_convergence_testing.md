@@ -300,6 +300,26 @@ Also applied the cell-average conversion to **momentum WENO**:
 
 All 112 WENO tests pass (30 tracer + 37 momentum + 45 core).
 
+### Open: DST-3 convergence order unverified
+
+DST-3 is a space-time scheme — its reconstruction coefficients d0(CFL),
+d1(CFL) encode the Courant number so the combined reconstruction + Euler
+update is 3rd-order accurate. The face reconstruction alone is NOT
+3rd order (at CFL=0.5, d1=0 and it reduces to 1st order by design).
+
+Cannot verify 3rd-order space-time accuracy with our current test
+infrastructure because:
+1. Face-only test: invalid (spatial reconstruction is not separable)
+2. Fixed-CFL multi-step test: forward Euler O(dt)=O(dx) dominates,
+   masking the space-time coupling
+3. Full-revolution test: error saturates from accumulated diffusion
+
+A proper test would need to compare the **prefactor** of the O(dx) error
+(not the rate) against a known analytical result for DST-3, or use a
+manufactured solution approach. Left as future work — not blocking
+because DST-3 shows lower errors than upwind/TVD at coarse resolution
+(0.040 vs 0.079/0.108 at 32 pts), consistent with its expected behavior.
+
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics
 from the explicit solver at the same physics settings:
