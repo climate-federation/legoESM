@@ -377,6 +377,75 @@ SOM added to the coupled convergence test. Like all schemes, limited to
 All schemes verified stable and conservative. WENO5/7 spatial order
 fixed from 2nd to 5th/6.5th. Ready for Level 2 (2D prescribed flow).
 
+### 2026-04-29 (later): Level 1 redone with AB2 and RK3, after audit fixes
+
+Branch `time_stepper` added AB2 and RK3 tracer integrators to the model.
+Re-ran Level 1 across all 5 schemes × 3 integrators. Audit (dycore expert)
+found two test-design bugs that were also fixed:
+
+1. **Fixed n_steps was wrong**: with CFL=0.5 fixed and n_steps=20 fixed,
+   total advection distance shrank linearly with dx (112° at n=32, only
+   14° at n=256). This created a fixed-distance ceiling that mimicked
+   "first-order convergence" for all schemes regardless of their actual
+   spatial order. Fix: hold **total advection distance fixed at 30°**;
+   n_steps grows with refinement.
+
+2. **Constant velocity in m/s was wrong**: the field was uniform in
+   latitude, but constant linear velocity gives lat-varying angular
+   speed (`dlon/dt = u/(R*cos(lat))`). This created a phase error baked
+   into the comparison. Fix: use `u = u0 * cos(lat)` so all latitudes
+   rotate at the same angular speed and the analytical-shifted Gaussian
+   is exact at every latitude.
+
+**Results (L2 error at n=256, fixed total time, smooth Gaussian):**
+
+| Scheme | Euler | AB2 | RK3 |
+|---|---|---|---|
+| upwind | 2.6e-3 | 5.6e-3 | 5.1e-3 |
+| tvd | 2.8e-3 | **4.1e-2** ✗ | 2.4e-4 |
+| dst3 | **1.6e-4** ★ | **1.6e-2** ✗ | 2.6e-3 |
+| weno5 | 4.2e-3 | 4.5e-4 | **8.0e-5** ★★ |
+| weno7 | 1.7e-2 | 4.9e-4 | **8.0e-5** ★★ |
+
+**Findings:**
+
+- **WENO5+RK3 and WENO7+RK3 are the most accurate** combinations
+  (8e-5 at n=256, ~50× better than WENO+Euler).
+- **TVD+RK3** is excellent for monotone schemes (2.4e-4), 12× better
+  than TVD+Euler.
+- **AB2 + nonlinear limiters (TVD, DST3) loses monotonicity** — Linf
+  blows up to 0.84 at fine resolution for TVD+AB2. The model docstring
+  in `ocean_model_latlon_cgrid.py` (lines 84-88) documents this: the
+  AB2 linear combination of two limited fluxes is not itself TVD.
+  This is a known limitation, not a bug.
+- **DST3+Euler is surprisingly competitive** at fine resolution
+  (1.6e-4) — its space-time coefficients are tuned for Euler, exactly
+  as designed.
+- **WENO+Euler shows Linf >> L2 at fine resolution** (weno7 Euler L2=
+  1.7e-2 with rate ≈ 0), foreshadowing the 2D instability we found in
+  Level 2 — Euler can't damp WENO's small overshoots over many steps.
+- All schemes conserve mass to machine precision (drift < 3e-15).
+
+**Implementation caveats** (from audit):
+- Test's RK3 uses **Shu-Osher SSP form**; model uses **Butcher form**.
+  Equivalent for linear schemes + constant h, but model's TVD+RK3 may
+  show slightly different overshoot behavior than the test reports.
+- Test's AB2 first step matches the model's eager `step()` path. The
+  `integrate_scan` (training) path pre-initializes prev flux to zero,
+  giving a different first-step behavior (1.6× Euler).
+
+**Implication**: Higher-order time integration (RK3) lets WENO and TVD
+deliver their actual accuracy. With Euler, all schemes look similar
+because the temporal floor dominates. AB2 helps WENO but breaks TVD/DST3
+monotonicity.
+
+**Recommended pairings (for the model):**
+- Production tracer advection: **TVD+Euler** (cheap, robust) or
+  **DST3+Euler** (best Euler accuracy, space-time tuned)
+- Accuracy-critical (e.g., adiabatic interior tracking): **WENO5+RK3**
+  (3× cost, 50× lower error)
+- AVOID: TVD+AB2, DST3+AB2 (monotonicity loss)
+
 ### 2026-04-29: Level 2 — 2D deformational flow (swirling reversal)
 
 Test: Nair & Lauritzen (2010) swirling deformation on lat-lon channel.
