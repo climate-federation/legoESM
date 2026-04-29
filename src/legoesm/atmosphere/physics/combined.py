@@ -427,12 +427,18 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)
+            # Preserve the input state's tracer pytree structure as a
+            # zero tendency so downstream tree.map(state, tendency)
+            # works.  ``zero_like_tracers`` duck-types Field vs raw-array.
+            from legoesm.atmosphere.physics._shared import zero_like_tracers
+            zero_tracers = zero_like_tracers(state.tracers)
             zero_tend = SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
                 div_hat=state.div_hat.replace(data=zero_3d),
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
                 lnps_hat=state.lnps_hat.replace(data=zero_2d),
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+                tracers=zero_tracers,
             )
             return zero_tend, None
 
@@ -480,12 +486,21 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             lnps_hat = lnps_hat + t.lnps_hat.data
             phis_hat = phis_hat + t.phis_hat.data
 
+        # Mirror the input state's tracer pytree structure as a zero
+        # combined-tendency.  Individual physics modules return
+        # tendencies with tracers=None today (no physics module yet
+        # writes to spectral tracers); we still emit the zero
+        # structure so downstream callers can ``tree.map(state, tend)``
+        # safely when state has tracers.
+        from legoesm.atmosphere.physics._shared import zero_like_tracers
+        zero_tracers_combined = zero_like_tracers(state.tracers)
         combined = SpectralHydrostaticState(
             vor_hat=first.vor_hat.replace(data=vor_hat),
             div_hat=first.div_hat.replace(data=div_hat),
             T_hat=first.T_hat.replace(data=T_hat),
             lnps_hat=first.lnps_hat.replace(data=lnps_hat),
             phis_hat=first.phis_hat.replace(data=phis_hat),
+            tracers=zero_tracers_combined,
         )
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out

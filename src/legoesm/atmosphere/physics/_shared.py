@@ -329,6 +329,41 @@ def make_zero_nonhydrostatic_tendencies(shape_3d, shape_2d, shape_w, tracers, pr
 
 
 # ---------------------------------------------------------------------------
+# Tracer-pytree helpers (used to keep state ↔ tendency pytrees aligned
+# for the spectral PE dycore RHS and orchestrator)
+# ---------------------------------------------------------------------------
+
+def zero_like_tracers(tracers):
+    """Build a tracer dict whose values are zeros with the same shape
+    and container type as the input.
+
+    Tracer dict values may be ``Field`` objects (with ``.data`` and
+    ``.replace``) or raw JAX arrays.  This helper duck-types both:
+
+    * ``Field`` value → ``v.replace(data=jnp.zeros_like(v.data))``
+    * raw array      → ``jnp.zeros_like(v)``
+
+    When ``tracers`` is ``None`` we return ``None`` — preserving the
+    "no tracers" pytree shape.
+
+    The dycore RHS for spectral PE (``spectral_pe_tendencies``) and
+    the spectral PE orchestrator both use this to keep their tendency
+    pytrees structurally identical to the input state, otherwise
+    ``jax.tree.map(state, tendency)`` in the SSP-RK steps trips on a
+    dict-vs-None mismatch.
+    """
+    if tracers is None:
+        return None
+    out = {}
+    for k, v in tracers.items():
+        if hasattr(v, "data") and hasattr(v, "replace"):
+            out[k] = v.replace(data=jnp.zeros_like(v.data))
+        else:
+            out[k] = jnp.zeros_like(v)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Moisture-convergence diagnostic for Tiedtke / Bechtold closures
 # ---------------------------------------------------------------------------
 

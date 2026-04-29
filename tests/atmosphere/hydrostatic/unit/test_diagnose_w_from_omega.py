@@ -118,3 +118,54 @@ def test_grad_through_temperature():
 
     g = jax.grad(loss)(jnp.array(1.0))
     assert bool(jnp.isfinite(g))
+
+
+# ---------------------------------------------------------------------------
+# zero_like_tracers helper
+# ---------------------------------------------------------------------------
+
+class TestZeroLikeTracers:
+    """Pin the shape-of-tracers helper used by spectral_pe_tendencies and
+    the spectral PE orchestrator to keep state ↔ tendency pytree
+    structures aligned."""
+
+    def test_none_returns_none(self):
+        from legoesm.atmosphere.physics._shared import zero_like_tracers
+        assert zero_like_tracers(None) is None
+
+    def test_empty_dict_returns_empty_dict(self):
+        from legoesm.atmosphere.physics._shared import zero_like_tracers
+        assert zero_like_tracers({}) == {}
+
+    def test_raw_array_value_yields_zero_array_same_shape(self):
+        from legoesm.atmosphere.physics._shared import zero_like_tracers
+        x = jnp.full((3, 4), 0.7)
+        out = zero_like_tracers({"q_v": x})
+        assert "q_v" in out
+        # Raw array stays a raw array (no Field promotion).
+        assert not hasattr(out["q_v"], "data")
+        assert out["q_v"].shape == x.shape
+        assert float(jnp.max(jnp.abs(out["q_v"]))) == 0.0
+
+    def test_field_value_yields_zero_field(self):
+        from legoesm.atmosphere.physics._shared import zero_like_tracers
+        from legoesm.core.field import Field
+        f = Field(
+            data=jnp.full((3, 4), 0.5), name="q_c",
+            dims=("x", "y"), units="kg/kg",
+        )
+        out = zero_like_tracers({"q_c": f})
+        assert hasattr(out["q_c"], "data")
+        assert out["q_c"].name == "q_c"        # metadata preserved
+        assert out["q_c"].units == "kg/kg"
+        assert float(jnp.max(jnp.abs(out["q_c"].data))) == 0.0
+
+    def test_mixed_field_and_raw(self):
+        from legoesm.atmosphere.physics._shared import zero_like_tracers
+        from legoesm.core.field import Field
+        x = jnp.full((2, 2), 1.0)
+        f = Field(data=jnp.full((2, 2), 1.0), name="q_c", dims=("x", "y"), units="")
+        out = zero_like_tracers({"q_v": x, "q_c": f})
+        # Each value preserves its container.
+        assert not hasattr(out["q_v"], "data")
+        assert hasattr(out["q_c"], "data")

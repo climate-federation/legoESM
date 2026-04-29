@@ -626,22 +626,12 @@ def spectral_pe_tendencies(
     # is tracked under the dedicated "spectral PE tracers" follow-up
     # (see TODO(option-c) in convection/integration.py).
     #
-    # Tracer values are duck-typed: callers may store either ``Field``
-    # objects (with ``.data`` / ``.replace``) or raw JAX arrays.  The
-    # zero-tendency must mirror whichever container shape the input
-    # used, since pytree leaves are taken from the value, not the
-    # container.
-    if state.tracers is None:
-        tracers_tend = None
-    else:
-        tracers_tend = {
-            k: (
-                v.replace(data=jnp.zeros_like(v.data))
-                if hasattr(v, "data") and hasattr(v, "replace")
-                else jnp.zeros_like(v)
-            )
-            for k, v in state.tracers.items()
-        }
+    # Tracer values are duck-typed (``Field`` or raw JAX array) — the
+    # zero-tendency must mirror the input container so pytree leaves
+    # match.  Use the shared ``zero_like_tracers`` helper to keep this
+    # rule in one place.
+    from legoesm.atmosphere.physics._shared import zero_like_tracers
+    tracers_tend = zero_like_tracers(state.tracers)
     return SpectralHydrostaticState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),
         div_hat=state.div_hat.replace(data=ddiv_hat),
