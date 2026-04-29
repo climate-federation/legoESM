@@ -176,13 +176,21 @@ def _build_test_matrix() -> list[TestCase]:
     #   gm_only:   adiabatic flattening (APE decreases, T evolves)
     #   redi_only: should be ~no-op (T is constant along isopycnals)
     #   gm_redi:   combined (default, for visual comparison)
-    eady_gm_res = {"latlon_channel": "20x10"}
+    eady_gm_res = {"latlon_channel": "20x10", "mpas_channel": "100km"}
     for mode in ["gm_only", "redi_only", "gm_redi"]:
         case_name = f"eady_gm_redi_{mode}" if mode != "gm_redi" else "eady_gm_redi"
         matrix.append(TestCase(
             case_name, "latlon_channel", eady_gm_res["latlon_channel"],
             30.0, 5.0,
             run_kwargs={"gm_mode": mode}))
+    # MPAS analog (centred only — triad scheme is Phase 5 of the plan).
+    for mode in ["gm_only", "redi_only", "gm_redi"]:
+        case_name = (f"eady_gm_redi_{mode}_mpas" if mode != "gm_redi"
+                     else "eady_gm_redi_mpas")
+        matrix.append(TestCase(
+            case_name, "mpas_channel", eady_gm_res["mpas_channel"],
+            30.0, 5.0,
+            run_kwargs={"gm_mode": mode, "slope_scheme": "centered"}))
 
     # Triad-discretisation variants of the same three cases.  These are
     # cheap (same resolution, same length) but exercise the triad-slope
