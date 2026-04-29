@@ -497,6 +497,56 @@ accuracy. This is by design (for stability) but means AB2 is closer to
 2nd-order scheme. Verified: WENO+AB2 mixes the rate-2 FV ceiling with
 rate-1 temporal error, giving the apparent rate ≈ 0.6 we observed.
 
+### 2026-04-29: Level 2 redone with AB2 and RK3 — main hypothesis confirmed
+
+Test: Nair & Lauritzen (2010) swirling deformation flow on lat-lon
+channel. Cosine bell at (180°E, 45°N) deforms into a filament during
+0 ≤ t ≤ T/2, then flow reverses, bell should return at t = T.
+Previously: WENO5 unstable at 128×256, WENO7 catastrophic blowup
+(L2 = 6.18, max = 35).
+
+**Results at finest grid (128×256):**
+
+| Scheme | Euler L2 | AB2 L2 | RK3 L2 |
+|---|---|---|---|
+| upwind | 4.83e-2 | 5.25e-2 | 5.18e-2 |
+| tvd | 2.45e-2 | 2.90e-2 | 2.82e-2 |
+| dst3 | 3.28e-2 | 3.73e-2 | 3.65e-2 |
+| weno5 | **5.51e-2** (Linf=0.30) | 1.78e-3 | **7.80e-4** |
+| weno7 | **6.18e+0** (Linf=35) | 1.72e-3 | **4.24e-4** |
+
+**Headline:** WENO7+Euler→RK3 gives **15,000× lower L2** at 128×256.
+WENO5 and WENO7 are now **stable at all tested resolutions** with
+either AB2 or RK3.
+
+**Convergence rates (L2, n=32→256):**
+
+| Scheme + Integrator | Rate | L2(coarse) | L2(fine) |
+|---|---|---|---|
+| weno5 + euler | -0.26 | 3.82e-2 | **5.51e-2** (worsens — instability) |
+| weno7 + euler | -3.67 | 3.81e-2 | **6.18e+0** (catastrophic blowup) |
+| weno5 + ab2 | 1.22 | 9.67e-3 | 1.78e-3 (clean) |
+| weno7 + ab2 | 1.09 | 7.77e-3 | 1.72e-3 (clean) |
+| **weno5 + rk3** | **1.69** | 8.12e-3 | 7.80e-4 (best) |
+| **weno7 + rk3** | **1.84** | 5.45e-3 | 4.24e-4 (best) |
+
+Rates of 1.7-1.8 are consistent with the O(dx²) FV-divergence ceiling
+identified in Level 1 (Lvl 1 cosine-bell with sharp filaments hits the
+asymptotic limit faster).
+
+**Visual confirmation:** WENO7+Euler at t/T=1 shows visible streaks of
+overshoots east of the bell; WENO7+RK3 shows the bell identical to the
+initial condition. No grid-scale artifacts.
+
+**For the ocean model:** WENO5/7 + RK3 is the recommended pairing for
+stability under sharp-gradient flows. AB2 is a cheaper alternative
+(~3× faster than RK3) at modest accuracy cost (~2× higher error). All
+non-WENO schemes (upwind, tvd, dst3) are essentially insensitive to the
+time integrator at this resolution — choose based on cost.
+
+**Mass conservation:** All combinations conserve to machine precision
+across the integration (drift ≤ 1.6e-14 in float64).
+
 **Recommended pairings (for the model):**
 - Production tracer advection: **TVD+Euler** (cheap, robust) or
   **DST3+Euler** (best Euler accuracy, space-time tuned)
