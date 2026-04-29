@@ -387,6 +387,27 @@ def compute_moisture_convergence(
         face, n, _, nlev = q_v_grid.shape
         return -flux_div.reshape(face * n * n, nlev)
 
+    # Gaussian grid (spectral PE).  Compute the divergence of
+    # (q_v u, q_v v) via the transform method: synthesize the grid
+    # product, take the spectral divergence using the existing
+    # ``vordiv_from_uv_3d`` helper (which uses the pole-safe oc2/dmu
+    # operators), then synthesize the divergence back to grid.  This is
+    # the standard transform pathway for spectral models and stays
+    # smooth / differentiable.
+    if hasattr(grid, "n_max") and hasattr(grid, "Pnm"):
+        from legoesm.grids.gaussian import (
+            sh_synthesis_3d, vordiv_from_uv_3d,
+        )
+        flux_x = q_v_grid * u_grid    # (n_lat, n_lon, nlev)
+        flux_y = q_v_grid * v_grid
+        # ``vordiv_from_uv_3d`` returns spectral (vor, div).  We only
+        # need the divergence; the helper batches the SH analyses so
+        # discarding the curl does not waste a forward transform.
+        _, div_hat = vordiv_from_uv_3d(grid, flux_x, flux_y)
+        div_grid = sh_synthesis_3d(grid, div_hat)
+        n_lat, n_lon, nlev = q_v_grid.shape
+        return -div_grid.reshape(n_lat * n_lon, nlev)
+
     # Try lat-lon — duck-typed by attribute presence so we don't
     # introduce an import dependency for users who never touch lat-lon.
     if hasattr(grid, "dlat") and hasattr(grid, "dlon"):
@@ -401,5 +422,73 @@ def compute_moisture_convergence(
 
     raise TypeError(
         f"compute_moisture_convergence: unsupported grid type "
-        f"{type(grid).__name__!r}.  Supported: CubedSphereGrid, LatLonGrid."
+        f"{type(grid).__name__!r}.  Supported: CubedSphereGrid, "
+        f"GaussianGrid, LatLonGrid."
     )
+
+
+# ---------------------------------------------------------------------------
+# omega → w conversion (for KF's ``w_grid`` trigger from a hydrostatic dycore)
+# ---------------------------------------------------------------------------
+
+def diagnose_grid_w_from_omega(
+    omega: jnp.ndarray,
+    T: jnp.ndarray,
+    p_full: jnp.ndarray,
+    q_v: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Convert pressure-velocity ``ω = dp/dt`` to grid-scale ``w = dz/dt``.
+
+    Uses the hydrostatic identity ``w = -ω / (ρ g)`` with ``ρ = p / (R_d T_v)``.
+    Virtual temperature ``T_v = T (1 + (R_v/R_d - 1) q_v) ≈ T (1 + 0.608 q_v)``
+    is used when ``q_v`` is provided; otherwise dry-air ``ρ`` is used.
+
+    The Kain-Fritsch scheme is the only convection backend that
+    consumes ``w_grid`` (for its boundary-layer trigger; see
+    :func:`legoesm.atmosphere.physics.convection.kain_fritsch.kain_fritsch_convection`).
+    For the non-hydrostatic dycore the bridge already passes the native
+    half-level-averaged ``state.w``.  The hydrostatic bridge derives
+    ``ω`` on the fly from ``∇·v_h`` via
+    :func:`legoesm.grids.vertical.compute_sigma_dot` /
+    :func:`legoesm.grids.vertical.compute_pressure_velocity` (cubed
+    sphere and lat-lon C-grid only) and feeds the result here.  The
+    spectral-PE bridge feeds the divergence carried in ``fields["div"]``
+    through the same continuity → ω pathway.
+
+    Parameters
+    ----------
+    omega : jax.Array, shape (ncol, nlev)
+        Pressure velocity ``dp/dt`` [Pa/s].  Positive ω = downward
+        motion (sinking) in the standard sign convention.
+    T : jax.Array, shape (ncol, nlev)
+        Air temperature [K].
+    p_full : jax.Array, shape (ncol, nlev)
+        Full-level pressure [Pa].
+    q_v : jax.Array or None, shape (ncol, nlev)
+        Water-vapor specific humidity [kg/kg].  When provided we use
+        virtual temperature ``T_v = T (1 + 0.608 q_v)`` for ``ρ``;
+        otherwise dry-air density is used.
+
+    Returns
+    -------
+    jax.Array, shape (ncol, nlev)
+        Grid-scale vertical velocity ``w = dz/dt`` [m/s].  Positive
+        upward.
+
+    Notes
+    -----
+    The ``T_v`` correction is small at typical tropospheric humidities
+    (≈ 1 % at 16 g/kg) but matters for tropical convection columns
+    where the column-mean ``q_v`` is non-negligible.  Floor ``T`` at 1 K
+    inside ``ρ`` to keep AD finite at numerical singularities.
+    """
+    R_d = constants.R_d
+    g = constants.g
+    if q_v is None:
+        T_v = T
+    else:
+        # ε = R_d / R_v ≈ 0.622, so 1/ε - 1 ≈ 0.608.
+        eps = R_d / constants.R_v
+        T_v = T * (1.0 + (1.0 / eps - 1.0) * q_v)
+    rho = p_full / (R_d * jnp.clip(T_v, 1.0, None))
+    return -omega / jnp.clip(rho * g, 1e-3, None)

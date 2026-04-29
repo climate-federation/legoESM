@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -123,3 +122,68 @@ def test_unsupported_grid_raises_typeerror():
     qv = jnp.zeros((1, 1, 1))
     with pytest.raises(TypeError, match="Supported"):
         compute_moisture_convergence(qv, qv, qv, _DummyGrid())
+
+
+# ---------------------------------------------------------------------------
+# Gaussian grid (spectral PE) branch
+# ---------------------------------------------------------------------------
+
+class TestGaussianGrid:
+    """Tests for the GaussianGrid branch of compute_moisture_convergence.
+
+    The spectral PE bridge feeds q_v · u and q_v · v through the
+    transform pathway: synthesize the product, take spectral div via
+    ``vordiv_from_uv_3d``, synthesize back, negate.  The pole-safe
+    ``sh_analysis_oc2`` / ``sh_analysis_dmu`` machinery does the heavy
+    lifting.  These tests pin shape, sign, and differentiability.
+    """
+
+    def _grid_field(self, n_max: int = 21, nlev: int = 4, fill: float = 1.0):
+        from legoesm.grids.gaussian import create_gaussian_grid
+        grid = create_gaussian_grid(n_max=n_max)
+        shape = (grid.n_lat, grid.n_lon, nlev)
+        return grid, jnp.full(shape, fill, dtype=jnp.float64)
+
+    def test_gaussian_shape_and_finite(self):
+        grid, q_v = self._grid_field()
+        u = 5.0 * jnp.ones_like(q_v)
+        v = 0.0 * jnp.ones_like(q_v)
+        mc = compute_moisture_convergence(q_v, u, v, grid)
+        nlev = q_v.shape[-1]
+        assert mc.shape == (grid.n_lat * grid.n_lon, nlev)
+        assert jnp.all(jnp.isfinite(mc))
+
+    def test_gaussian_zero_winds_yield_zero_mc(self):
+        grid, q_v = self._grid_field(fill=1.5e-2)
+        u = jnp.zeros_like(q_v)
+        v = jnp.zeros_like(q_v)
+        mc = compute_moisture_convergence(q_v, u, v, grid)
+        # Synthesizing zero on the grid through the SH cycle is zero
+        # to machine precision in float64.
+        assert float(jnp.max(jnp.abs(mc))) < 1e-12
+
+    def test_gaussian_constant_q_v_factors_linearly(self):
+        """For constant q_v, MC ∝ q_v."""
+        grid, q1 = self._grid_field(fill=1.0)
+        _, q2 = self._grid_field(fill=2.5)
+        # Wave-1 zonal flow gives non-trivial divergence.
+        a = grid.radius
+        u0 = 5.0
+        lon = grid.lon[None, :, None]
+        u = u0 * jnp.cos(lon) * jnp.ones_like(q1)
+        v = jnp.zeros_like(q1)
+        mc1 = compute_moisture_convergence(q1, u, v, grid)
+        mc2 = compute_moisture_convergence(q2, u, v, grid)
+        assert bool(jnp.allclose(mc2, 2.5 * mc1, atol=1e-10))
+
+    def test_gaussian_grad_through_q_v_finite(self):
+        grid, q_v = self._grid_field(fill=1.5e-2)
+        u = 3.0 * jnp.ones_like(q_v)
+        v = jnp.zeros_like(q_v)
+
+        def f(qv):
+            return jnp.sum(compute_moisture_convergence(qv, u, v, grid))
+
+        g = jax.grad(f)(q_v)
+        assert g.shape == q_v.shape
+        assert jnp.all(jnp.isfinite(g))

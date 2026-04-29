@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -171,6 +172,13 @@ def _make_hydrostatic_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    # Static at closure-build time: avoid splitting / advancing the
+    # master PRNG key when stochasticity is disabled, so the no-noise
+    # path is exactly bit-identical to a no-Bechtold run apart from
+    # the deterministic mass-flux contribution.
+    needs_prng = is_stochastic and getattr(
+        scheme_config, "enable_stochastic", False
+    )
 
     prog_key = None
     prog_init = None
@@ -227,13 +235,54 @@ def _make_hydrostatic_convection(
             u_col = None
             v_col = None
 
-        # Grid-scale w proxy for w-consuming schemes (Kain-Fritsch).
-        # The hydrostatic dycore does not expose ``omega`` (or
-        # equivalently ``sigma_dot``) at this layer; we pass zeros and
-        # let the trigger be driven by ``parcel_perturb_T`` alone.  See
-        # TODO(kf-w-grid) for the eventual omega→w wiring.
+        # Grid-scale w for w-consuming schemes (Kain-Fritsch).  The
+        # hydrostatic dycore doesn't expose ``omega`` at the physics
+        # boundary, so we re-derive it from the standard sigma-coord
+        # continuity:
+        #
+        #   D     = ∇·v_h            (per full level)
+        #   D_t   = Σ D · Δσ          (column total)
+        #   dp_s/dt = -p_s · D_t / (1 - σ_top)
+        #   σ̇    = compute_sigma_dot(D)
+        #   ω    = σ · dp_s/dt + p_s · σ̇
+        #
+        # then convert to w via :func:`._shared.diagnose_grid_w_from_omega`.
+        # Only the cubed-sphere and lat-lon grids ship with a divergence
+        # operator we can call here; other grids fall back to zeros.
         if is_w_grid_consumer:
-            w_grid_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+            from legoesm.grids.vertical import (
+                compute_sigma_dot, compute_pressure_velocity,
+            )
+            from legoesm.atmosphere.physics._shared import (
+                diagnose_grid_w_from_omega,
+            )
+            div_grid = None
+            if isinstance(grid, CubedSphereGrid):
+                from legoesm.core.operators_3d import divergence_3d as _div3
+                if state.v is not None:
+                    div_grid = _div3(state.u.data, state.v.data, grid)
+            elif hasattr(grid, "dlat") and hasattr(grid, "dlon"):
+                from legoesm.core.operators_latlon_3d import (
+                    divergence_3d as _div3_latlon,
+                )
+                if state.v is not None:
+                    div_grid = _div3_latlon(state.u.data, state.v.data, grid)
+
+            if div_grid is not None:
+                dsigma = sigma_coord.dsigma
+                sigma_top = sigma_coord.sigma_half[0]
+                D_total = jnp.sum(div_grid * dsigma, axis=-1)
+                dp_s_dt_grid = -state.p_s.data * D_total / (1.0 - sigma_top)
+                sigma_dot_grid = compute_sigma_dot(div_grid, sigma_coord)
+                omega_grid = compute_pressure_velocity(
+                    sigma_dot_grid, state.p_s.data, dp_s_dt_grid, sigma_coord,
+                )                                          # shape_3d
+                w_grid_col = diagnose_grid_w_from_omega(
+                    omega_grid.reshape(ncol, nlev),
+                    T_col, p_full_col, q_v_col,
+                ).astype(_state_dtype)
+            else:
+                w_grid_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         else:
             w_grid_col = None
 
@@ -310,16 +359,34 @@ def _make_hydrostatic_convection(
                     stoch_in = phys_state.conv_stoch_state
                 else:
                     stoch_in = jnp.zeros((ncol,), dtype=_state_dtype)
-                # TODO(bechtold-prng): route a per-step PRNG key from
-                # the orchestrator.  For now we pass ``None`` which
-                # falls back to deterministic behavior in the leaf.
+                # Derive a per-step sub-key from the master phys_state
+                # PRNG key by folding in a module-id (``"bechtold"`` →
+                # int 0xBEC4).  ``jax.random.split`` advances the master
+                # key so the next call sees a different stream.  When
+                # ``needs_prng`` is False (stochasticity disabled at
+                # config build time) we keep the master key untouched
+                # and pass ``None`` to the leaf — that path is
+                # bit-identical to a no-Bechtold run apart from the
+                # deterministic mass-flux contribution.
+                if needs_prng and phys_state is not None and hasattr(
+                    phys_state, "prng_key"
+                ):
+                    bechtold_key, master_key_new = jax.random.split(
+                        phys_state.prng_key, 2,
+                    )
+                    bechtold_key = jax.random.fold_in(
+                        bechtold_key, 0xBEC4,
+                    )
+                else:
+                    bechtold_key = None
+                    master_key_new = None
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     u=u_col, v=v_col,
                     conv_prog_profile=prog_in,
                     conv_stoch_state=stoch_in,
-                    prng_key=None,
+                    prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
                 )
@@ -329,6 +396,8 @@ def _make_hydrostatic_convection(
                     "conv_prog_profile": prog_new_profile,
                     "conv_stoch_state": stoch_new,
                 }
+                if master_key_new is not None:
+                    conv_prog_out["prng_key"] = master_key_new
             elif is_cmt_capable:
                 # Tiedtke also consumes moisture_convergence; ZM does
                 # not (its signature lacks the kwarg).
@@ -474,6 +543,9 @@ def _make_nonhydrostatic_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    needs_prng = is_stochastic and getattr(
+        scheme_config, "enable_stochastic", False
+    )
     prog_key = None
     prog_init = None
     if is_scalar_prognostic:
@@ -621,13 +693,28 @@ def _make_nonhydrostatic_convection(
                     stoch_in = phys_state.conv_stoch_state
                 else:
                     stoch_in = jnp.zeros((ncol,), dtype=_state_dtype)
+                # Mirror the hydrostatic bridge: derive a Bechtold
+                # sub-key from the master phys_state PRNG key, and only
+                # advance the master when stochasticity is enabled.
+                if needs_prng and phys_state is not None and hasattr(
+                    phys_state, "prng_key"
+                ):
+                    bechtold_key, master_key_new = jax.random.split(
+                        phys_state.prng_key, 2,
+                    )
+                    bechtold_key = jax.random.fold_in(
+                        bechtold_key, 0xBEC4,
+                    )
+                else:
+                    bechtold_key = None
+                    master_key_new = None
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     u=u_col, v=v_col,
                     conv_prog_profile=prog_in,
                     conv_stoch_state=stoch_in,
-                    prng_key=None,
+                    prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
                 )
@@ -635,6 +722,8 @@ def _make_nonhydrostatic_convection(
                     "conv_prog_profile": prog_new_profile,
                     "conv_stoch_state": stoch_new,
                 }
+                if master_key_new is not None:
+                    conv_prog_out["prng_key"] = master_key_new
             elif is_cmt_capable:
                 if is_mc_consumer:
                     conv_out, prog_new_profile = conv_fn(
@@ -759,6 +848,9 @@ def _make_spectral_pe_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    needs_prng = is_stochastic and getattr(
+        scheme_config, "enable_stochastic", False
+    )
     prog_key = None
     prog_init = None
     if is_scalar_prognostic:
@@ -772,7 +864,7 @@ def _make_spectral_pe_convection(
             SpectralHydrostaticState,
             spectral_pe_to_grid,
         )
-        from legoesm.grids.gaussian import sh_analysis_3d
+        from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
 
         # 1. Transform spectral state to grid space
         fields = grid_fields
@@ -806,36 +898,81 @@ def _make_spectral_pe_convection(
         else:
             q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
-        # Spectral PE columns for CMT-capable schemes.  We pass zeros
-        # for u, v because CMT can't currently round-trip through the
-        # spectral state (see TODO(spectral-pe-cmt) below).  Passing
-        # zeros makes the leaf's CMT contribution identically zero,
-        # which is consistent with the spectral PE bridge's existing
-        # zero-fill for ``vor_hat`` and ``div_hat`` tendencies.
+        # Spectral PE columns for CMT-capable schemes — feed the actual
+        # grid-space wind reconstructed by ``spectral_pe_to_grid`` so
+        # the leaf produces meaningful CMT.  The grid→spectral round-trip
+        # for the resulting (du_dt_conv, dv_dt_conv) is handled below
+        # via :func:`vordiv_from_uv_3d`.
         if is_cmt_capable:
-            u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-            v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+            u_grid = fields['u'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
+            v_grid = fields['v'].astype(_state_dtype)
+            u_col = u_grid.reshape(ncol, nlev)
+            v_col = v_grid.reshape(ncol, nlev)
         else:
             u_col = None
             v_col = None
 
-        # Spectral PE has no native ``w`` field — pass zeros to KF and
-        # let its trigger run on ``parcel_perturb_T`` alone.  See
-        # TODO(kf-w-grid) — eventual hookup to the dycore's vertical
-        # mass-flux diagnostic.
+        # Spectral PE has no native ``w`` field, but ``spectral_pe_to_grid``
+        # already produces the horizontal divergence ``D = ∇·v_h`` per
+        # full level — feed that through the standard sigma-coord
+        # continuity (``compute_sigma_dot`` + ``compute_pressure_velocity``)
+        # to build ``ω`` on the grid, then convert to ``w = -ω/(ρg)``
+        # via :func:`._shared.diagnose_grid_w_from_omega`.  This makes
+        # the KF trigger respond to dynamically-resolved low-level
+        # convergence/divergence (the wedge of model behavior the
+        # ``parcel_perturb_T``-only fallback is blind to).
         if is_w_grid_consumer:
-            w_grid_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+            from legoesm.grids.vertical import (
+                compute_sigma_dot, compute_pressure_velocity,
+            )
+            from legoesm.atmosphere.physics._shared import (
+                diagnose_grid_w_from_omega,
+            )
+            div_grid = fields['div'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
+            dsigma = sigma_coord.dsigma
+            sigma_top = sigma_coord.sigma_half[0]
+            D_total = jnp.sum(div_grid * dsigma, axis=-1)
+            dp_s_dt_grid = -p_s * D_total / (1.0 - sigma_top)
+            sigma_dot_grid = compute_sigma_dot(div_grid, sigma_coord)
+            omega_grid = compute_pressure_velocity(
+                sigma_dot_grid, p_s, dp_s_dt_grid, sigma_coord,
+            )                                               # (n_lat, n_lon, nlev)
+            w_grid_3d = diagnose_grid_w_from_omega(
+                omega_grid.reshape(ncol, nlev),
+                T_col, p_full_col, q_v_col,
+            )                                               # (ncol, nlev)
+            w_grid_col = w_grid_3d.astype(_state_dtype)
         else:
             w_grid_col = None
 
-        # Moisture convergence on spectral PE.  The natural pathway is
-        # to compute ``div(q_v u)`` in spectral space (sh_analysis_oc2
-        # +  ``im/a`` etc.) and synthesize back to grid; that requires
-        # plumbing the spectral state's vor/div_hat back through the
-        # convection bridge, which is out of scope for the initial MC
-        # diagnostic.  Pass zeros so Tiedtke / Bechtold use the
-        # saturation-deficit proxy here.  TODO(spectral-pe-mc).
-        if is_mc_consumer:
+        # Moisture convergence on spectral PE.  Uses the transform
+        # pathway in :func:`._shared.compute_moisture_convergence`
+        # (GaussianGrid branch): synthesize ``q_v u`` and ``q_v v`` on
+        # the grid, take the spectral divergence via
+        # :func:`legoesm.grids.gaussian.vordiv_from_uv_3d`, synthesize
+        # back, and negate.  When the spectral state has no ``q_v``
+        # tracer surfaced through the duck-typed ``state.tracers`` we
+        # fall back to zeros and the leaf will use its built-in
+        # saturation-deficit proxy.
+        if (
+            is_mc_consumer
+            and hasattr(state, "tracers")
+            and state.tracers is not None
+            and "q_v" in state.tracers
+        ):
+            from legoesm.atmosphere.physics._shared import (
+                compute_moisture_convergence as _compute_mc,
+            )
+            _qv_raw = state.tracers["q_v"]
+            _qv_grid = (
+                _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            ).astype(_state_dtype)
+            u_grid_for_mc = fields['u'].astype(_state_dtype)
+            v_grid_for_mc = fields['v'].astype(_state_dtype)
+            mc_col = _compute_mc(
+                _qv_grid, u_grid_for_mc, v_grid_for_mc, grid,
+            ).astype(_state_dtype)
+        elif is_mc_consumer:
             mc_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         else:
             mc_col = None
@@ -875,13 +1012,29 @@ def _make_spectral_pe_convection(
                     stoch_in = phys_state.conv_stoch_state
                 else:
                     stoch_in = jnp.zeros((ncol,), dtype=_state_dtype)
+                # Mirror the hydrostatic / non-hydrostatic bridges:
+                # derive a Bechtold sub-key from the master phys_state
+                # PRNG key, and only advance the master when
+                # stochasticity is enabled.
+                if needs_prng and phys_state is not None and hasattr(
+                    phys_state, "prng_key"
+                ):
+                    bechtold_key, master_key_new = jax.random.split(
+                        phys_state.prng_key, 2,
+                    )
+                    bechtold_key = jax.random.fold_in(
+                        bechtold_key, 0xBEC4,
+                    )
+                else:
+                    bechtold_key = None
+                    master_key_new = None
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     u=u_col, v=v_col,
                     conv_prog_profile=prog_in,
                     conv_stoch_state=stoch_in,
-                    prng_key=None,
+                    prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
                 )
@@ -889,6 +1042,8 @@ def _make_spectral_pe_convection(
                     "conv_prog_profile": prog_new_profile,
                     "conv_stoch_state": stoch_new,
                 }
+                if master_key_new is not None:
+                    conv_prog_out["prng_key"] = master_key_new
             elif is_w_grid_consumer:
                 conv_out, prog_new_profile = conv_fn(
                     T=T_col, q_v=q_v_col,
@@ -936,22 +1091,40 @@ def _make_spectral_pe_convection(
         # plumbing, route ``conv_out.dq_v_dt`` and
         # ``conv_out.dq_c_conv_dt`` here so the convective vapor sink
         # and cloud-water source are no longer silently discarded.
-        # TODO(spectral-pe-cmt): convective momentum transport from
-        # ``conv_out.du_dt_conv`` / ``dv_dt_conv`` is also dropped here.
-        # CMT-capable schemes (Zhang-McFarlane, Tiedtke, Bechtold) emit
-        # them in grid space; routing through to spectral vor/div
-        # tendencies requires the same SH-analysis pipeline used for
-        # ``dT_dt``.  Deferred — consistent with the existing tracer
-        # drop above.
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
-        # No wind or surface pressure tendencies from convection
-        zero_3d = jnp.zeros_like(state.vor_hat.data)
+        # Convective momentum transport: round-trip the grid CMT
+        # tendencies through ``vordiv_from_uv_3d`` to obtain spectral
+        # vor/div tendencies.  CMT-capable schemes (Zhang-McFarlane,
+        # Tiedtke, Bechtold) emit ``du_dt_conv``/``dv_dt_conv`` in grid
+        # space; non-CMT schemes leave both as ``None`` and we fall back
+        # to zeros.  The forward transform is exact up to the n=0 mode,
+        # which has no vor/div content on the sphere.
+        zero_3d_spec = jnp.zeros_like(state.vor_hat.data)
+        if (
+            conv_fn is not None
+            and conv_out.du_dt_conv is not None
+            and conv_out.dv_dt_conv is not None
+        ):
+            du_dt_grid = conv_out.du_dt_conv.reshape(n_lat, n_lon, nlev)
+            dv_dt_grid = conv_out.dv_dt_conv.reshape(n_lat, n_lon, nlev)
+            dvor_dt_hat, ddiv_dt_hat = vordiv_from_uv_3d(
+                grid, du_dt_grid, dv_dt_grid,
+            )
+            # Cast back to the spectral-state dtype so we don't silently
+            # promote the assembled tendency.
+            dvor_dt_hat = dvor_dt_hat.astype(state.vor_hat.data.dtype)
+            ddiv_dt_hat = ddiv_dt_hat.astype(state.div_hat.data.dtype)
+        else:
+            dvor_dt_hat = zero_3d_spec
+            ddiv_dt_hat = zero_3d_spec
+
+        # No surface pressure tendency from convection
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
 
         tendencies = SpectralHydrostaticState(
-            vor_hat=state.vor_hat.replace(data=zero_3d),
-            div_hat=state.div_hat.replace(data=zero_3d),
+            vor_hat=state.vor_hat.replace(data=dvor_dt_hat),
+            div_hat=state.div_hat.replace(data=ddiv_dt_hat),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),

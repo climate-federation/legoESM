@@ -408,8 +408,10 @@ class BechtoldConfig(NamedTuple):
 
     Stochasticity defaults to OFF for reproducibility.  When enabled,
     the leaf consumes a ``prng_key`` argument; the convection bridge
-    derives a per-step key from the model time (TODO: route a proper
-    PRNG through ``physics_fn``).
+    splits ``PhysicsState.prng_key`` into a Bechtold sub-key (folded
+    with module id ``0xBEC4``) and an advanced master key, returning
+    the latter as part of the multi-field carry update so subsequent
+    steps see independent random streams.
 
     Inherits sensible defaults from Tiedtke 1989 with the entrainment
     revision from Bechtold et al. 2008.

@@ -66,11 +66,18 @@ class PhysicsState(NamedTuple):
         Gravity wave drag wave action spectrum for the prognostic
         spectral scheme.  Shape is ``(ncol, 1, 1)`` when inactive
         (minimal allocation).
+    prng_key : jax.Array, shape (2,) uint32
+        Master JAX PRNG key advanced once per outer step.  Stochastic
+        sub-physics modules (currently only Bechtold/IFS when
+        ``enable_stochastic=True``) fold this key with a module-id and
+        consume the derived sub-key for their AR1 innovation.  When all
+        stochastic modules are disabled the key is carried unchanged.
     """
     tke: jnp.ndarray
     conv_prog_profile: jnp.ndarray
     conv_stoch_state: jnp.ndarray
     gwd_spectrum: jnp.ndarray
+    prng_key: jnp.ndarray
 
 
 def init_physics_state(
@@ -79,6 +86,7 @@ def init_physics_state(
     physics_config,
     *,
     dtype=None,
+    prng_seed: int = 0,
 ) -> PhysicsState:
     """Create initial physics state with correct shapes and defaults.
 
@@ -151,11 +159,18 @@ def init_physics_state(
         # Minimal allocation — zero-element trailing dims avoid wasted memory.
         gwd_spectrum = jnp.zeros((ncol, 1, 1), dtype=dtype)
 
+    # --- Master JAX PRNG key (advanced once per outer step) ---
+    # Imported lazily so the module load path does not pull in the
+    # ``jax.random`` symbol when only ``init_physics_state`` is unused.
+    import jax
+    prng_key = jax.random.PRNGKey(int(prng_seed))
+
     return PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
         conv_stoch_state=conv_stoch_state,
         gwd_spectrum=gwd_spectrum,
+        prng_key=prng_key,
     )
 
 
@@ -191,4 +206,5 @@ def update_physics_state(phys_state, updates):
             "conv_stoch_state", phys_state.conv_stoch_state
         ),
         gwd_spectrum=updates.get("gwd_spectrum", phys_state.gwd_spectrum),
+        prng_key=updates.get("prng_key", phys_state.prng_key),
     )

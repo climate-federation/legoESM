@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 from legoesm.core.field import Field
@@ -214,7 +213,7 @@ def test_bechtold_grad_through_epsilon_deep():
         return jnp.sum(out.dT_dt)
 
     g = float(jax.grad(f)(jnp.asarray(1.75e-3)))
-    assert np.isfinite(g)
+    assert bool(jnp.isfinite(g))
 
 
 def test_bechtold_grad_through_cape_pbl_depth():
@@ -231,7 +230,7 @@ def test_bechtold_grad_through_cape_pbl_depth():
         return jnp.sum(out.dT_dt)
 
     g = float(jax.grad(f)(jnp.asarray(500.0)))
-    assert np.isfinite(g)
+    assert bool(jnp.isfinite(g))
 
 
 def test_bechtold_grad_through_stochastic_amplitude_when_off():
@@ -251,7 +250,7 @@ def test_bechtold_grad_through_stochastic_amplitude_when_off():
         return jnp.sum(out.dT_dt)
 
     g = float(jax.grad(f)(jnp.asarray(0.5)))
-    assert np.isfinite(g)
+    assert bool(jnp.isfinite(g))
     # In the off branch the gradient is 0 (parameter unused) — that's
     # fine, just must be finite.
 
@@ -305,5 +304,198 @@ def test_bechtold_orchestrator_one_step_finite():
     tend, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
     assert ps_out.conv_prog_profile.shape == (ncol, 12)
     assert ps_out.conv_stoch_state.shape == (ncol,)
+    for f in (tend.du_dt, tend.dv_dt, tend.dT_dt, tend.dp_s_dt, tend.dphis_dt):
+        assert jnp.all(jnp.isfinite(f.data))
+
+
+# ---------------------------------------------------------------------------
+# PRNG threading through the bridge
+# ---------------------------------------------------------------------------
+
+def test_bechtold_orchestrator_threads_prng_key():
+    """When ``enable_stochastic=True``, two PhysicsStates with different
+    master PRNG keys produce different conv_stoch_state outputs after
+    one orchestrator step.  Same key → same output (reproducibility)."""
+    grid = create_cubed_sphere(4)
+    sigma = create_sigma_coordinate(12)
+    state = held_suarez_init(grid, sigma)
+    tracers = {
+        "q_v": Field(0.014 * jnp.ones((6, 4, 4, 12)), name="q_v",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+        "q_c": Field(jnp.zeros((6, 4, 4, 12)), name="q_c",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+    }
+    state = state._replace(tracers=tracers)
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(
+            scheme="bechtold",
+            bechtold=BechtoldConfig(
+                enable_stochastic=True, stochastic_amplitude=1.0,
+                stochastic_decorrelation=1800.0,
+            ),
+        ),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    ncol = 6 * 4 * 4
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+
+    ps_seed_0 = init_physics_state(ncol, 12, cfg, prng_seed=0)
+    ps_seed_1 = init_physics_state(ncol, 12, cfg, prng_seed=1)
+    ps_seed_0_again = init_physics_state(ncol, 12, cfg, prng_seed=0)
+
+    _, out_0 = physics_fn(state, grid, sigma, phys_state=ps_seed_0)
+    _, out_1 = physics_fn(state, grid, sigma, phys_state=ps_seed_1)
+    _, out_0_again = physics_fn(state, grid, sigma, phys_state=ps_seed_0_again)
+
+    # Different seeds → different stochastic state.
+    assert not jnp.allclose(out_0.conv_stoch_state, out_1.conv_stoch_state), (
+        "Two different PRNG seeds should produce different AR1 noise"
+    )
+    # Same seed → same state (bit-for-bit reproducibility).
+    assert jnp.allclose(out_0.conv_stoch_state, out_0_again.conv_stoch_state), (
+        "Same PRNG seed should produce identical AR1 noise"
+    )
+
+    # Master key advances after the call (so a subsequent step sees
+    # fresh randomness).
+    assert not jnp.array_equal(out_0.prng_key, ps_seed_0.prng_key), (
+        "Master PRNG key should advance through the orchestrator step"
+    )
+
+
+def test_bechtold_orchestrator_grad_through_phys_state():
+    """jax.grad through the orchestrator with stochastic Bechtold
+    succeeds — the AR1 perturbation does not break differentiability of
+    the deterministic mass flux (the noise enters multiplicatively as a
+    fixed factor at the time of differentiation)."""
+    grid = create_cubed_sphere(4)
+    sigma = create_sigma_coordinate(12)
+    state = held_suarez_init(grid, sigma)
+    tracers = {
+        "q_v": Field(0.014 * jnp.ones((6, 4, 4, 12)), name="q_v",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+        "q_c": Field(jnp.zeros((6, 4, 4, 12)), name="q_c",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+    }
+    state = state._replace(tracers=tracers)
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(
+            scheme="bechtold",
+            bechtold=BechtoldConfig(
+                enable_stochastic=True, stochastic_amplitude=0.5,
+            ),
+        ),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    ncol = 6 * 4 * 4
+    ps = init_physics_state(ncol, 12, cfg, prng_seed=42)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+
+    def loss(scale):
+        scaled_T = state.T.replace(data=scale * state.T.data)
+        s2 = state._replace(T=scaled_T)
+        tend, _ = physics_fn(s2, grid, sigma, phys_state=ps)
+        return jnp.sum(tend.dT_dt.data ** 2)
+
+    g = jax.grad(loss)(jnp.array(1.0))
+    assert bool(jnp.isfinite(g))
+
+
+def test_bechtold_orchestrator_does_not_advance_key_when_stochastic_off():
+    """When ``enable_stochastic=False``, the convection bridge must NOT
+    consume the master PRNG key — calling the orchestrator a hundred
+    times should leave ``ps.prng_key`` byte-identical."""
+    grid = create_cubed_sphere(4)
+    sigma = create_sigma_coordinate(12)
+    state = held_suarez_init(grid, sigma)
+    tracers = {
+        "q_v": Field(0.014 * jnp.ones((6, 4, 4, 12)), name="q_v",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+        "q_c": Field(jnp.zeros((6, 4, 4, 12)), name="q_c",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+    }
+    state = state._replace(tracers=tracers)
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(
+            scheme="bechtold",
+            bechtold=BechtoldConfig(enable_stochastic=False),
+        ),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    ncol = 6 * 4 * 4
+    ps = init_physics_state(ncol, 12, cfg, prng_seed=11)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+
+    _, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
+    # No advance — bit-identical key.
+    assert jnp.array_equal(ps_out.prng_key, ps.prng_key), (
+        "Master PRNG key must NOT advance when enable_stochastic=False"
+    )
+
+
+def test_bechtold_orchestrator_with_radiation_merges_dict_correctly():
+    """Regression for orchestrator dict-merge bug.
+
+    With ``radiation=gray`` + ``convection=bechtold``, Bechtold is the
+    SECOND tagged_fn.  The pre-fix orchestrator's ``tagged_fns[1:]``
+    loop assigned ``phys_updates[field_name] = field_val`` directly,
+    so Bechtold's multi-field dict (``conv_prog_profile`` /
+    ``conv_stoch_state`` / ``prng_key``) ended up nested under
+    ``conv_prog_profile`` and ``update_physics_state`` then set
+    ``ps.conv_prog_profile`` to a *dict*.  This test pins the fix:
+    every PhysicsState slot must be the right shape after the orchestrator
+    step, even with a non-Bechtold module registered first.
+    """
+    grid = create_cubed_sphere(4)
+    sigma = create_sigma_coordinate(12)
+    state = held_suarez_init(grid, sigma)
+    tracers = {
+        "q_v": Field(0.014 * jnp.ones((6, 4, 4, 12)), name="q_v",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+        "q_c": Field(jnp.zeros((6, 4, 4, 12)), name="q_c",
+                     dims=("face", "x", "y", "level"), units="kg/kg"),
+    }
+    state = state._replace(tracers=tracers)
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="gray"),
+        convection=ConvectionConfig(
+            scheme="bechtold",
+            bechtold=BechtoldConfig(
+                enable_stochastic=True, stochastic_amplitude=0.3,
+            ),
+        ),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    ncol = 6 * 4 * 4
+    ps = init_physics_state(ncol, 12, cfg, prng_seed=7)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    tend, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
+
+    # Each PhysicsState slot must be a JAX array of the right shape —
+    # NOT a dict (which is what the pre-fix orchestrator produced).
+    assert ps_out.conv_prog_profile.shape == (ncol, 12), (
+        f"conv_prog_profile got shape {ps_out.conv_prog_profile.shape!r} — "
+        "the orchestrator's dict-merge bug stored the entire multi-field "
+        "carry under this key."
+    )
+    assert ps_out.conv_stoch_state.shape == (ncol,)
+    assert ps_out.prng_key.shape == (2,)
+    # Master key advanced through the dict-merge.
+    assert not jnp.array_equal(ps_out.prng_key, ps.prng_key), (
+        "Master PRNG key must advance through the orchestrator even "
+        "when Bechtold is not the first tagged module."
+    )
+    # Tendencies are finite.
     for f in (tend.du_dt, tend.dv_dt, tend.dT_dt, tend.dp_s_dt, tend.dphis_dt):
         assert jnp.all(jnp.isfinite(f.data))

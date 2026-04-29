@@ -221,7 +221,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             if accepts_ps:
                 t, field_val = fn(state, grid, sigma_coord, phys_state=phys_state)
                 if field_val is not None and field_name is not None:
-                    phys_updates[field_name] = field_val
+                    # Match the first-iteration branch: dict updates
+                    # (e.g., Bechtold's conv_prog_profile +
+                    # conv_stoch_state + prng_key) must MERGE into
+                    # phys_updates, not be assigned as a single
+                    # blob under field_name.
+                    if isinstance(field_val, dict):
+                        phys_updates.update(field_val)
+                    else:
+                        phys_updates[field_name] = field_val
             else:
                 t = fn(state, grid, sigma_coord)
             du_dt = du_dt + t.du_dt.data
@@ -345,7 +353,15 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             if accepts_ps:
                 t, field_val = fn(state, grid, height_coord, terrain_metric, phys_state=phys_state)
                 if field_val is not None and field_name is not None:
-                    phys_updates[field_name] = field_val
+                    # Match the first-iteration branch: dict updates
+                    # (e.g., Bechtold's conv_prog_profile +
+                    # conv_stoch_state + prng_key) must MERGE into
+                    # phys_updates, not be assigned as a single
+                    # blob under field_name.
+                    if isinstance(field_val, dict):
+                        phys_updates.update(field_val)
+                    else:
+                        phys_updates[field_name] = field_val
             else:
                 t = fn(state, grid, height_coord, terrain_metric)
             du_dt = du_dt + t.du_dt.data
@@ -447,7 +463,15 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             if accepts_ps:
                 t, field_val = fn(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
                 if field_val is not None and field_name is not None:
-                    phys_updates[field_name] = field_val
+                    # Match the first-iteration branch: dict updates
+                    # (e.g., Bechtold's conv_prog_profile +
+                    # conv_stoch_state + prng_key) must MERGE into
+                    # phys_updates, not be assigned as a single
+                    # blob under field_name.
+                    if isinstance(field_val, dict):
+                        phys_updates.update(field_val)
+                    else:
+                        phys_updates[field_name] = field_val
             else:
                 t = fn(state, grid, sigma_coord, grid_fields=shared_fields)
             vor_hat = vor_hat + t.vor_hat.data
