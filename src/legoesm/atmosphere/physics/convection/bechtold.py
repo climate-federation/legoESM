@@ -76,6 +76,7 @@ def bechtold_convection(
     prng_key: jax.Array | None,
     dt: float,
     config: BechtoldConfig = BechtoldConfig(),
+    moisture_convergence: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array, jax.Array]:
     """Bechtold/IFS convection (smooth, differentiable).
 
@@ -174,11 +175,30 @@ def bechtold_convection(
     )
 
     # -- PBL-CAPE closure for cloud-base mass flux -------------------------
-    M_b_deterministic = (
+    # Bechtold 2008 / 2014 use a hybrid closure: PBL-CAPE drives the
+    # baseline mass flux, optionally enhanced where the column is
+    # moisture-convergent.  We add the (column-integrated) MC term as
+    # a multiplicative enhancement (1 + MC_normalized) so the closure
+    # gracefully reduces to pure PBL-CAPE when MC is unavailable
+    # (zero-filled by the bridge for spectral PE and other dycores
+    # without an MC diagnostic).
+    M_b_pbl_cape = (
         cape_weight
         * smooth_positive_part(cape_pbl - config.cape_threshold, config.cape_sharpness)
         / config.tau_bl
     )
+    if moisture_convergence is not None:
+        dp_full = p_half[:, 1:] - p_half[:, :-1]
+        column_MC = jnp.sum(
+            jnp.maximum(moisture_convergence, 0.0) * dp_full, axis=-1,
+        ) / constants.g
+        # Normalize the MC term so it acts as an O(1) multiplier.
+        # 0.05 kg/m^2/s is a typical strong-convergence value over
+        # tropical convective regions (Bechtold 2008 Fig. 2).
+        mc_enhancement = column_MC / 0.05
+        M_b_deterministic = M_b_pbl_cape * (1.0 + mc_enhancement)
+    else:
+        M_b_deterministic = M_b_pbl_cape
 
     # -- AR1 stochastic perturbation ---------------------------------------
     if config.enable_stochastic and prng_key is not None:

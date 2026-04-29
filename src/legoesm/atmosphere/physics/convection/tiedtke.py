@@ -71,6 +71,7 @@ def tiedtke_convection(
     conv_prog_profile: jax.Array,
     dt: float,
     config: TiedtkeConfig = TiedtkeConfig(),
+    moisture_convergence: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
     """Tiedtke (1989) convection (smooth, differentiable).
 
@@ -163,17 +164,28 @@ def tiedtke_convection(
     eps_profile = jnp.broadcast_to(eps_per_class, T.shape)
     dlt_profile = jnp.broadcast_to(dlt_per_class, T.shape)
 
-    # -- Closure: deep uses a moisture-convergence proxy; shallow and
-    # midlevel use a CAPE-relaxation closure.  Combined per-column
-    # closure is a class-weighted blend.
+    # -- Closure: deep uses moisture convergence; shallow and midlevel
+    # use a CAPE-relaxation closure.  Combined per-column closure is a
+    # class-weighted blend.  When the bridge supplies a real
+    # ``moisture_convergence`` array (from
+    # ``_shared.compute_moisture_convergence``, available for cubed-
+    # sphere and lat-lon dycores), use it directly; otherwise fall
+    # back to a saturation-deficit proxy that is qualitatively similar
+    # (positive in moist columns, vanishing in dry ones).
     q_sat_env = saturation_mixing_ratio(T, p_full)
-    sat_deficit = jnp.maximum(q_sat_env - q_v, 0.0)
-    # Column-mean MC proxy.
     dp = p_half[:, 1:] - p_half[:, :-1]
-    column_MC_proxy = (
-        jnp.sum(sat_deficit * dp, axis=-1)
-        / (constants.g * config.tau_MC_proxy)
-    )
+    if moisture_convergence is not None:
+        # Real MC — column-integrate per (kg/m^2/s).
+        column_MC = (
+            jnp.sum(moisture_convergence * dp, axis=-1) / constants.g
+        )
+        column_MC_proxy = jnp.maximum(column_MC, 0.0)
+    else:
+        sat_deficit = jnp.maximum(q_sat_env - q_v, 0.0)
+        column_MC_proxy = (
+            jnp.sum(sat_deficit * dp, axis=-1)
+            / (constants.g * config.tau_MC_proxy)
+        )
     # Smooth gate on MC threshold for deep.
     mc_gate = smooth_positive_part(
         column_MC_proxy - config.moisture_convergence_threshold,

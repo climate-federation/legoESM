@@ -326,3 +326,80 @@ def make_zero_nonhydrostatic_tendencies(shape_3d, shape_2d, shape_w, tracers, pr
         dphis_dt=Field(data=jnp.zeros(shape_2d), name=f"dphis_dt{sfx}", dims=dims_2d, units="m^2/s^3"),
         dtracers_dt=Field(data=jnp.zeros_like(tracers), name=f"dtracers_dt{sfx}", dims=dims_tr, units="1/s"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Moisture-convergence diagnostic for Tiedtke / Bechtold closures
+# ---------------------------------------------------------------------------
+
+def compute_moisture_convergence(
+    q_v_grid: jnp.ndarray,
+    u_grid: jnp.ndarray,
+    v_grid: jnp.ndarray,
+    grid,
+) -> jnp.ndarray:
+    """Per-level horizontal moisture convergence ``MC = -∇·(q_v * u)``.
+
+    Used by the Tiedtke / Bechtold convection schemes as the deep
+    closure's mass-flux driver.  Implementation reuses the dycore's
+    finite-volume tracer-flux divergence operator
+    (:func:`legoesm.core.operators_3d.fv_flux_divergence_3d` for cubed
+    sphere; :func:`legoesm.core.operators_fv_latlon_3d.fv_flux_divergence_latlon_3d`
+    for lat-lon) and negates the result.
+
+    Parameters
+    ----------
+    q_v_grid : jax.Array
+        Water-vapor specific humidity in grid-shape:
+
+        * cubed sphere — ``(face, n, n, nlev)``
+        * lat-lon C-grid — ``(n_lat, n_lon, nlev)``
+    u_grid, v_grid : jax.Array
+        Horizontal wind components, same grid-shape as ``q_v_grid``.
+    grid : CubedSphereGrid or LatLonGrid
+        Discretized grid metadata used by the underlying divergence
+        operator.
+
+    Returns
+    -------
+    jax.Array, shape (ncol, nlev)
+        Column-flattened moisture convergence [kg/kg/s].  Positive
+        values indicate net moisture inflow to the column.
+
+    Notes
+    -----
+    Uses the FV-flux-divergence operator with the slope limiter
+    *disabled* — we want a smooth, fully-differentiable diagnostic, and
+    the limiter introduces non-smooth ``where``-style branching that
+    would break ``jax.grad`` through the convection trigger.  Tracer
+    advection in the dycore proper still uses the limiter; this is a
+    closure diagnostic, not an advected quantity.
+    """
+    from legoesm.grids.cubed_sphere import CubedSphereGrid
+
+    if isinstance(grid, CubedSphereGrid):
+        from legoesm.core.operators_3d import fv_flux_divergence_3d
+        # q_v_grid shape (6, n, n, nlev)
+        flux_div = fv_flux_divergence_3d(
+            q_v_grid, u_grid, v_grid, grid, limiter=False,
+        )
+        # Reshape to (ncol, nlev)
+        face, n, _, nlev = q_v_grid.shape
+        return -flux_div.reshape(face * n * n, nlev)
+
+    # Try lat-lon — duck-typed by attribute presence so we don't
+    # introduce an import dependency for users who never touch lat-lon.
+    if hasattr(grid, "dlat") and hasattr(grid, "dlon"):
+        from legoesm.core.operators_fv_latlon_3d import (
+            fv_flux_divergence_latlon_3d,
+        )
+        flux_div = fv_flux_divergence_latlon_3d(
+            q_v_grid, u_grid, v_grid, grid, limiter=False,
+        )
+        n_lat, n_lon, nlev = q_v_grid.shape
+        return -flux_div.reshape(n_lat * n_lon, nlev)
+
+    raise TypeError(
+        f"compute_moisture_convergence: unsupported grid type "
+        f"{type(grid).__name__!r}.  Supported: CubedSphereGrid, LatLonGrid."
+    )

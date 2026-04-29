@@ -170,6 +170,7 @@ def _make_hydrostatic_convection(
     is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
+    is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
 
     prog_key = None
     prog_init = None
@@ -236,6 +237,29 @@ def _make_hydrostatic_convection(
         else:
             w_grid_col = None
 
+        # Moisture convergence for MC-consuming schemes (Tiedtke,
+        # Bechtold).  Reuses the dycore's FV-flux-divergence operator
+        # via :func:`._shared.compute_moisture_convergence`.  When the
+        # state has no q_v tracer or wind data we fall back to zeros
+        # and the leaf will use its built-in saturation-deficit proxy.
+        if (
+            is_mc_consumer
+            and state.tracers is not None
+            and "q_v" in state.tracers
+            and state.v is not None
+        ):
+            from legoesm.atmosphere.physics._shared import (
+                compute_moisture_convergence as _compute_mc,
+            )
+            _qv_grid_full = state.tracers["q_v"].data
+            mc_col = _compute_mc(
+                _qv_grid_full, state.u.data, state.v.data, grid,
+            )
+        elif is_mc_consumer:
+            mc_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        else:
+            mc_col = None
+
         conv_prog_out = None
         if conv_fn is None:
             # "none" scheme: return zero tendencies
@@ -278,7 +302,8 @@ def _make_hydrostatic_convection(
                 prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
             if is_stochastic:
-                # Bechtold: also threads conv_stoch_state and prng_key.
+                # Bechtold: also threads conv_stoch_state, prng_key,
+                # and moisture_convergence.
                 if phys_state is not None and (
                     phys_state.conv_stoch_state.shape == (ncol,)
                 ):
@@ -296,6 +321,7 @@ def _make_hydrostatic_convection(
                     conv_stoch_state=stoch_in,
                     prng_key=None,
                     dt=dt, config=scheme_config,
+                    moisture_convergence=mc_col,
                 )
                 # Multi-field carry update — return as dict so the
                 # orchestrator can ``update`` both PhysicsState slots.
@@ -304,13 +330,25 @@ def _make_hydrostatic_convection(
                     "conv_stoch_state": stoch_new,
                 }
             elif is_cmt_capable:
-                conv_out, prog_new_profile = conv_fn(
-                    T=T_col, q_v=q_v_col,
-                    p_full=p_full_col, p_half=p_half_col,
-                    u=u_col, v=v_col,
-                    conv_prog_profile=prog_in,
-                    dt=dt, config=scheme_config,
-                )
+                # Tiedtke also consumes moisture_convergence; ZM does
+                # not (its signature lacks the kwarg).
+                if is_mc_consumer:
+                    conv_out, prog_new_profile = conv_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_col, v=v_col,
+                        conv_prog_profile=prog_in,
+                        dt=dt, config=scheme_config,
+                        moisture_convergence=mc_col,
+                    )
+                else:
+                    conv_out, prog_new_profile = conv_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_col, v=v_col,
+                        conv_prog_profile=prog_in,
+                        dt=dt, config=scheme_config,
+                    )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
                 conv_out, prog_new_profile = conv_fn(
@@ -435,6 +473,7 @@ def _make_nonhydrostatic_convection(
     is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
+    is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
     prog_key = None
     prog_init = None
     if is_scalar_prognostic:
@@ -530,6 +569,25 @@ def _make_nonhydrostatic_convection(
         else:
             w_grid_col = None
 
+        # Moisture convergence for Tiedtke / Bechtold.  Non-hydrostatic
+        # state stores tracers as a (face, n, n, nlev, n_tracers) array
+        # with q_v at slot 0; reuse the cubed-sphere FV-flux-divergence
+        # operator on slot 0.  When the scheme runs but tracers don't
+        # carry q_v we fall back to zeros and the leaf uses its
+        # saturation-deficit proxy.
+        if is_mc_consumer and n_tracers > 0:
+            from legoesm.atmosphere.physics._shared import (
+                compute_moisture_convergence as _compute_mc,
+            )
+            _qv_grid_full = tracers[..., 0]   # (face, n, n, nlev)
+            mc_col = _compute_mc(
+                _qv_grid_full, state.u.data, state.v.data, grid,
+            )
+        elif is_mc_consumer:
+            mc_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        else:
+            mc_col = None
+
         conv_prog_out = None
         if is_scalar_prognostic:
             if phys_state is not None and (
@@ -571,19 +629,30 @@ def _make_nonhydrostatic_convection(
                     conv_stoch_state=stoch_in,
                     prng_key=None,
                     dt=dt, config=scheme_config,
+                    moisture_convergence=mc_col,
                 )
                 conv_prog_out = {
                     "conv_prog_profile": prog_new_profile,
                     "conv_stoch_state": stoch_new,
                 }
             elif is_cmt_capable:
-                conv_out, prog_new_profile = conv_fn(
-                    T=T_col, q_v=q_v_col,
-                    p_full=p_full_col, p_half=p_half_col,
-                    u=u_col, v=v_col,
-                    conv_prog_profile=prog_in,
-                    dt=dt, config=scheme_config,
-                )
+                if is_mc_consumer:
+                    conv_out, prog_new_profile = conv_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_col, v=v_col,
+                        conv_prog_profile=prog_in,
+                        dt=dt, config=scheme_config,
+                        moisture_convergence=mc_col,
+                    )
+                else:
+                    conv_out, prog_new_profile = conv_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_col, v=v_col,
+                        conv_prog_profile=prog_in,
+                        dt=dt, config=scheme_config,
+                    )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
                 conv_out, prog_new_profile = conv_fn(
@@ -689,6 +758,7 @@ def _make_spectral_pe_convection(
     is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
+    is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
     prog_key = None
     prog_init = None
     if is_scalar_prognostic:
@@ -758,6 +828,18 @@ def _make_spectral_pe_convection(
         else:
             w_grid_col = None
 
+        # Moisture convergence on spectral PE.  The natural pathway is
+        # to compute ``div(q_v u)`` in spectral space (sh_analysis_oc2
+        # +  ``im/a`` etc.) and synthesize back to grid; that requires
+        # plumbing the spectral state's vor/div_hat back through the
+        # convection bridge, which is out of scope for the initial MC
+        # diagnostic.  Pass zeros so Tiedtke / Bechtold use the
+        # saturation-deficit proxy here.  TODO(spectral-pe-mc).
+        if is_mc_consumer:
+            mc_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        else:
+            mc_col = None
+
         conv_prog_out = None
         if conv_fn is None:
             dT_dt = jnp.zeros_like(T)
@@ -801,6 +883,7 @@ def _make_spectral_pe_convection(
                     conv_stoch_state=stoch_in,
                     prng_key=None,
                     dt=dt, config=scheme_config,
+                    moisture_convergence=mc_col,
                 )
                 conv_prog_out = {
                     "conv_prog_profile": prog_new_profile,
@@ -813,6 +896,16 @@ def _make_spectral_pe_convection(
                     w_grid=w_grid_col,
                     conv_prog_profile=prog_in,
                     dt=dt, config=scheme_config,
+                )
+                conv_prog_out = prog_new_profile
+            elif is_mc_consumer:
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_col, v=v_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                    moisture_convergence=mc_col,
                 )
                 conv_prog_out = prog_new_profile
             else:
