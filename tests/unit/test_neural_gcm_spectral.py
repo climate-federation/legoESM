@@ -101,8 +101,14 @@ class TestCarryToSpectralState:
         from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
+        # SpectralHydrostaticState now carries an optional ``tracers``
+        # field (default None) so we filter None entries before the
+        # ``.data`` access — same pattern used elsewhere for
+        # ``HydrostaticState.dv_dt``.
         for field in state:
-            assert jnp.all(jnp.isfinite(field.data)), f"NaN in {field.name}"
+            if field is None:
+                continue
+            assert bool(jnp.all(jnp.isfinite(field.data))), f"NaN in {field.name}"
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +147,9 @@ class TestSFNOSpectralPhysics:
         tendencies = physics_fn(state, _GRID, _SIGMA)
 
         for field in tendencies:
-            assert jnp.all(jnp.isfinite(field.data)), f"NaN in tendency {field.name}"
+            if field is None:
+                continue
+            assert bool(jnp.all(jnp.isfinite(field.data))), f"NaN in tendency {field.name}"
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +182,9 @@ class TestSpectralRollout:
         )
 
         for field in result:
-            assert jnp.all(jnp.isfinite(field.data)), f"NaN in rollout result {field.name}"
+            if field is None:
+                continue
+            assert bool(jnp.all(jnp.isfinite(field.data))), f"NaN in rollout result {field.name}"
 
     def test_output_same_shape(self):
         from legoesm.training.neural_gcm_spectral import (
@@ -360,7 +370,9 @@ class TestColumnMLPSpectralPhysics:
         tend = physics_fn(state, _GRID, _SIGMA)
 
         for field in tend:
-            assert jnp.all(jnp.isfinite(field.data))
+            if field is None:
+                continue
+            assert bool(jnp.all(jnp.isfinite(field.data)))
 
     def test_rollout_with_column_mlp(self):
         from legoesm.training.neural_gcm_spectral import (
@@ -383,7 +395,9 @@ class TestColumnMLPSpectralPhysics:
             dt=1800.0, n_steps=2,
         )
         for field in result:
-            assert jnp.all(jnp.isfinite(field.data))
+            if field is None:
+                continue
+            assert bool(jnp.all(jnp.isfinite(field.data)))
 
     def test_grad_through_column_mlp(self):
         """Gradients flow from loss through dycore to column MLP weights."""
@@ -444,7 +458,9 @@ class TestPhysicsParamsSpectral:
 
         assert tend.T_hat.data.shape == state.T_hat.data.shape
         for field in tend:
-            assert jnp.all(jnp.isfinite(field.data))
+            if field is None:
+                continue
+            assert bool(jnp.all(jnp.isfinite(field.data)))
 
     def test_grad_through_physics_params(self):
         """Gradients flow through physics + dycore to trainable params."""

@@ -217,6 +217,126 @@ class TestSpectralPEState:
             err_msg="Rest state surface pressure should be 1e5 Pa",
         )
 
+    def test_state_tracers_default_none(self, rest_state):
+        """``isothermal_rest_state_spectral`` produces a state with
+        ``tracers=None`` by default — preserves backward-compat for
+        existing constructors that don't pass tracers."""
+        assert rest_state.tracers is None
+
+    @pytest.mark.parametrize("integrator", ["ssp_rk3", "ssp_rk34", "ssp_rk54"])
+    def test_step_with_tracers_does_not_break_pytree(
+        self, rest_state, grid, sigma_coord, integrator,
+    ):
+        """Regression: when state has a non-None tracers dict, the dycore
+        RHS must propagate the tracer pytree structure as zeros into
+        the tendency state.  Otherwise ``jax.tree.map(state, tendency)``
+        in the RK step fails with "Expected dict, got None"."""
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPEConfig,
+            SpectralPrimitiveEquationModel,
+        )
+        from legoesm.core.field import Field
+
+        # Attach a synthetic q_v tracer.
+        nlev = sigma_coord.n_levels
+        qv_grid = jnp.full(
+            (grid.n_lat, grid.n_lon, nlev), 0.01, dtype=jnp.float64,
+        )
+        qv_field = Field(
+            data=qv_grid, name="q_v",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
+        state_w_tracers = rest_state._replace(tracers={"q_v": qv_field})
+
+        config = SpectralPEConfig(
+            hyperdiff_coeff=_proper_hyperdiff(grid),
+            time_integrator=integrator,
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+        new_state = model.step(state_w_tracers, dt=300.0)
+
+        # Tracer is preserved across the step (the dycore time-loop does
+        # not yet apply tracer tendencies — they're zero-filled).
+        assert new_state.tracers is not None
+        assert "q_v" in new_state.tracers
+        assert bool(jnp.allclose(new_state.tracers["q_v"].data, qv_grid))
+
+    @pytest.mark.parametrize("integrator", ["ssp_rk3", "ssp_rk34", "ssp_rk54"])
+    def test_step_with_raw_array_tracers(
+        self, rest_state, grid, sigma_coord, integrator,
+    ):
+        """Regression: tracer dict values may be raw JAX arrays (not
+        ``Field``-wrapped).  The dycore tendency path must build a
+        zero-tendency container that mirrors whichever shape the input
+        used — calling ``.replace(data=...)`` on a raw array crashes
+        with ``AttributeError: DynamicJaxprTracer has no attribute
+        replace``.
+        """
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPEConfig,
+            SpectralPrimitiveEquationModel,
+        )
+
+        nlev = sigma_coord.n_levels
+        qv_array = jnp.full(
+            (grid.n_lat, grid.n_lon, nlev), 0.01, dtype=jnp.float64,
+        )
+        # Raw-array tracer (no Field wrapper).
+        state_raw = rest_state._replace(tracers={"q_v": qv_array})
+
+        config = SpectralPEConfig(
+            hyperdiff_coeff=_proper_hyperdiff(grid),
+            time_integrator=integrator,
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+        new_state = model.step(state_raw, dt=300.0)
+
+        assert new_state.tracers is not None
+        assert "q_v" in new_state.tracers
+        # Raw array preserved through the step.
+        out = new_state.tracers["q_v"]
+        assert not hasattr(out, "data"), (
+            "Raw-array tracer should remain a raw array, not get "
+            "promoted to a Field"
+        )
+        assert bool(jnp.allclose(out, qv_array))
+
+    def test_step_with_mixed_field_and_raw_tracers(
+        self, rest_state, grid, sigma_coord,
+    ):
+        """A ``tracers`` dict mixing ``Field`` and raw-array values
+        should round-trip through the dycore step without crashing.
+        Each value preserves its original container."""
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPEConfig,
+            SpectralPrimitiveEquationModel,
+        )
+        from legoesm.core.field import Field
+
+        nlev = sigma_coord.n_levels
+        qv_array = jnp.full(
+            (grid.n_lat, grid.n_lon, nlev), 0.012, dtype=jnp.float64,
+        )
+        qc_field = Field(
+            data=jnp.full((grid.n_lat, grid.n_lon, nlev), 1e-5, dtype=jnp.float64),
+            name="q_c", dims=("lat", "lon", "level"), units="kg/kg",
+        )
+        state_mixed = rest_state._replace(
+            tracers={"q_v": qv_array, "q_c": qc_field},
+        )
+
+        config = SpectralPEConfig(
+            hyperdiff_coeff=_proper_hyperdiff(grid),
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+        new_state = model.step(state_mixed, dt=300.0)
+
+        assert not hasattr(new_state.tracers["q_v"], "data")
+        assert hasattr(new_state.tracers["q_c"], "data")
+        assert bool(jnp.allclose(new_state.tracers["q_v"], qv_array))
+        assert bool(jnp.allclose(new_state.tracers["q_c"].data, qc_field.data))
+
 
 # =============================================================================
 # Geopotential Tests

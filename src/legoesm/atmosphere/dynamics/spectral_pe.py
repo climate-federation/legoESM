@@ -74,12 +74,22 @@ class SpectralHydrostaticState(NamedTuple):
 
     3D spectral fields: shape (n_sh, nlev) complex128
     2D spectral fields: shape (n_sh,) complex128
+
+    Tracers (optional): a ``dict[str, Field]`` mapping tracer name
+    (``"q_v"``, ``"q_c"``, ``"q_r"``, ...) to a grid-space ``Field``
+    of shape ``(n_lat, n_lon, nlev)``.  The spectral PE time-integration
+    loop does NOT yet apply tracer tendencies — the field exists so
+    physics bridges (radiation, convection, microphysics) can read
+    ``q_v`` directly from the state without a duck-typed wrapper.
+    Adding tracer advection / time-stepping is the dedicated "spectral
+    PE tracers" follow-up.  Mirrors :class:`HydrostaticState.tracers`.
     """
     vor_hat: Field    # Spectral relative vorticity [1/s]
     div_hat: Field    # Spectral divergence [1/s]
     T_hat: Field      # Spectral temperature [K]
     lnps_hat: Field   # Spectral log(surface pressure) [-]
     phis_hat: Field   # Spectral surface geopotential [m^2/s^2] (static)
+    tracers: dict | None = None  # name → grid-space Field (n_lat, n_lon, nlev)
 
 
 class SpectralPEConfig(NamedTuple):
@@ -605,13 +615,40 @@ def spectral_pe_tendencies(
         dT_hat = dT_hat * _dealias_3d
         dlnps_hat = dlnps_hat * _dealias
 
-    # Return as same pytree structure (for SSP-RK3)
+    # Return as same pytree structure (for SSP-RK3).  When the input
+    # state carries an optional ``tracers`` dict, the tendency must
+    # carry one of the *same shape* (zero-filled) so that
+    # ``jax.tree.map(state, tendency)`` in the RK step does not see
+    # a structure mismatch (dict on one side, None on the other).
+    # The dycore time-integration loop does not yet apply tracer
+    # tendencies, but it must at least pass a structurally compatible
+    # zero tendency through the RK stages.  Tracer advection itself
+    # is tracked under the dedicated "spectral PE tracers" follow-up
+    # (see TODO(option-c) in convection/integration.py).
+    #
+    # Tracer values are duck-typed: callers may store either ``Field``
+    # objects (with ``.data`` / ``.replace``) or raw JAX arrays.  The
+    # zero-tendency must mirror whichever container shape the input
+    # used, since pytree leaves are taken from the value, not the
+    # container.
+    if state.tracers is None:
+        tracers_tend = None
+    else:
+        tracers_tend = {
+            k: (
+                v.replace(data=jnp.zeros_like(v.data))
+                if hasattr(v, "data") and hasattr(v, "replace")
+                else jnp.zeros_like(v)
+            )
+            for k, v in state.tracers.items()
+        }
     return SpectralHydrostaticState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),
         div_hat=state.div_hat.replace(data=ddiv_hat),
         T_hat=state.T_hat.replace(data=dT_hat),
         lnps_hat=state.lnps_hat.replace(data=dlnps_hat),
         phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+        tracers=tracers_tend,
     )
 
 

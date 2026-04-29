@@ -67,28 +67,13 @@ def rest_state(grid, sigma_coord):
 
 
 def _state_with_tracers(state, tracers):
-    """Wrap a SpectralHydrostaticState in a duck-typed object exposing
-    a ``tracers`` attribute as well as all the named fields.
+    """Attach a ``tracers`` dict to a ``SpectralHydrostaticState``.
 
-    The convection bridge's only requirement on the spectral state is
-    ``state.vor_hat`` / ``div_hat`` / ``T_hat`` / ``lnps_hat`` / ``phis_hat``
-    plus an optional ``state.tracers`` dict.
+    ``SpectralHydrostaticState`` now natively carries an optional
+    ``tracers`` field (default ``None``) so this just wraps the
+    standard ``_replace`` to keep call sites short.
     """
-
-    class _StateWithTracers:
-        __slots__ = (
-            "vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat", "tracers",
-        )
-
-        def __init__(self, s, t):
-            self.vor_hat = s.vor_hat
-            self.div_hat = s.div_hat
-            self.T_hat = s.T_hat
-            self.lnps_hat = s.lnps_hat
-            self.phis_hat = s.phis_hat
-            self.tracers = t
-
-    return _StateWithTracers(state, tracers)
+    return state._replace(tracers=tracers)
 
 
 def _state_with_sheared_winds(rest_state, grid, sigma_coord, u_top=20.0, u_sfc=2.0):
@@ -503,6 +488,80 @@ class TestSpectralPECMT:
         assert max_diff > 0.0, (
             "KF carry should respond to divergence-derived w_grid"
         )
+
+    def test_full_dycore_step_with_tracers_and_convection(
+        self, grid, sigma_coord, rest_state,
+    ):
+        """End-to-end integration: spectral PE dycore stepping with a
+        tracer-aware state AND a convection physics_fn, all wired
+        through ``step_with_physics``.  This exercises:
+
+        * ``state.tracers`` survives the RK stepping (pytree match).
+        * The convection bridge reads ``state.tracers["q_v"]`` natively.
+        * The orchestrator/dycore RHS combine cleanly with the
+          tracer-aware tendency from ``spectral_pe_tendencies``.
+
+        Pre-fix this would have raised "Expected dict, got None" inside
+        the SSP-RK3 ``jax.tree.map`` because the tendency state's
+        ``tracers`` field was None while the input state's was a dict.
+        """
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPEConfig, SpectralPrimitiveEquationModel,
+        )
+        nlev = sigma_coord.n_levels
+
+        # CAPE-positive temperature profile + near-saturated q_v.
+        sigma_full = sigma_coord.sigma_full
+        T_col = 300.0 * jnp.power(jnp.clip(sigma_full, 0.05, None), 0.19)
+        T_col = jnp.maximum(T_col, 200.0)
+        T_grid = jnp.broadcast_to(
+            T_col[None, None, :], (grid.n_lat, grid.n_lon, nlev),
+        )
+        T_hat = sh_analysis_3d(grid, T_grid)
+
+        from legoesm.thermo import saturation_mixing_ratio
+        p_full_3d = jnp.broadcast_to(
+            (sigma_full * 1e5)[None, None, :],
+            (grid.n_lat, grid.n_lon, nlev),
+        )
+        q_sat = saturation_mixing_ratio(T_grid, p_full_3d)
+        q_v_grid = 0.7 * q_sat
+        q_v_field = Field(
+            data=q_v_grid, name="q_v",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
+        state_with_T_and_q = rest_state._replace(
+            T_hat=rest_state.T_hat.replace(data=T_hat),
+            tracers={"q_v": q_v_field},
+        )
+
+        physics_fn = make_convection_physics(
+            ConvectionConfig(scheme="tiedtke"),
+            model_type="spectral_pe", dt=300.0,
+        )
+
+        config = SpectralPEConfig(
+            hyperdiff_coeff=1.0 / (4.0 * 3600.0 * (
+                grid.n_max * (grid.n_max + 1) / grid.radius ** 2
+            ) ** 2),
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+        new_state = model.step(
+            state_with_T_and_q, dt=300.0, physics_fn=physics_fn,
+        )
+
+        # Tracer survives the step (zero-tendency from the dycore;
+        # convection's q_v sink is dropped at the spectral interface
+        # per ``TODO(option-c)``).
+        assert new_state.tracers is not None
+        assert "q_v" in new_state.tracers
+        assert bool(jnp.allclose(new_state.tracers["q_v"].data, q_v_grid))
+        # All spectral fields are finite (no NaN from tracer plumbing).
+        assert bool(jnp.all(jnp.isfinite(new_state.vor_hat.data)))
+        assert bool(jnp.all(jnp.isfinite(new_state.div_hat.data)))
+        assert bool(jnp.all(jnp.isfinite(new_state.T_hat.data)))
+        assert bool(jnp.all(jnp.isfinite(new_state.lnps_hat.data)))
 
     def test_grad_through_bridge(self, grid, sigma_coord, rest_state):
         """jax.grad through the spectral PE convection bridge succeeds.

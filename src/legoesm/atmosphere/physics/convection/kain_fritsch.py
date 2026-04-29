@@ -101,12 +101,15 @@ def kain_fritsch_convection(
     p_full, p_half : jax.Array
         Full / half-level pressures [Pa].
     w_grid : jax.Array, shape (ncol, nlev)
-        Grid-scale vertical-velocity proxy [m/s].  The bridge
-        provides ``state.w`` for the non-hydrostatic dycore and a
-        zero-filled array for hydrostatic dycores (where the trigger
-        is then driven entirely by ``parcel_perturb_T``).  See the
-        ``TODO`` in the bridge for hydrostatic ``omega → w``
-        conversion.
+        Grid-scale vertical-velocity proxy [m/s].  The non-hydrostatic
+        bridge passes ``state.w`` (interpolated to full levels).  The
+        hydrostatic and spectral-PE bridges derive ``w`` from
+        ``∇·v_h`` via the standard sigma-coord continuity (``σ̇`` →
+        ``ω``) and then ``w = -ω/(ρ g)`` (see
+        :func:`legoesm.atmosphere.physics._shared.diagnose_grid_w_from_omega`).
+        On grids that do not expose a divergence operator the bridge
+        falls back to zeros and the trigger is driven by
+        ``parcel_perturb_T`` alone.
     conv_prog_profile : jax.Array, shape (ncol, nlev)
         Convection prognostic carry.  KF is fully diagnostic at the
         physics-state level — we pack the diagnosed cloud-base mass

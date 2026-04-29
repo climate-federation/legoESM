@@ -96,8 +96,10 @@ def bechtold_convection(
         PRNG key for the stochastic perturbation.  When
         ``config.enable_stochastic`` is ``False`` this argument is
         ignored.  When stochastic is on but ``prng_key`` is ``None``
-        we fall back to a deterministic (zero-noise) realization with
-        a TODO note.
+        the leaf falls back to a deterministic (zero-noise)
+        realization.  The convection bridge derives a per-step
+        sub-key from ``PhysicsState.prng_key`` (split + ``fold_in``
+        with module id ``0xBEC4``) when stochasticity is enabled.
     dt : float
         Time step [s].
     config : BechtoldConfig
