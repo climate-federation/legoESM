@@ -346,6 +346,48 @@ SOM added to the coupled convergence test. Like all schemes, limited to
 All schemes verified stable and conservative. WENO5/7 spatial order
 fixed from 2nd to 5th/6.5th. Ready for Level 2 (2D prescribed flow).
 
+### 2026-04-29: Level 2 — 2D deformational flow (swirling reversal)
+
+Test: Nair & Lauritzen (2010) swirling deformation on lat-lon channel.
+Cosine bell at (180°E, 45°N), non-divergent flow deforms and reverses
+over 5 days. Error at t=T measures combined spatial, temporal, and
+dimensional-splitting accuracy.
+
+Script: `scripts/run_advection_convergence_2d.py`
+
+| Scheme | 32x64 L2 | 64x128 L2 | 128x256 L2 | Rate | Status |
+|---|---|---|---|---|---|
+| upwind | 1.34e-01 | 7.76e-02 | 4.31e-02 | 0.82 | OK |
+| tvd | 7.97e-02 | 4.20e-02 | 2.21e-02 | 0.93 | OK |
+| dst3 | 9.89e-02 | 5.46e-02 | 2.95e-02 | 0.87 | OK |
+| weno5 | 3.55e-02 | 2.07e-02 | **1.26e-02** | 0.75 | **Best L2** |
+| weno7 | 3.74e-02 | 2.33e-02 | **8.90e-02** | -0.62 | **UNSTABLE at 128x256** |
+
+All schemes conserve mass to machine precision.
+
+**Key findings:**
+
+1. **Error ordering at 64x128**: weno5 (0.021) < weno7 (0.023) < tvd (0.042)
+   < dst3 (0.055) < upwind (0.078). WENO5 is the best scheme in 2D.
+
+2. **WENO7 is unstable at 128x256**: L2 jumps from 0.023 to 0.089, Linf
+   reaches 0.487. Visible oscillatory noise around the cosine bell.
+   Likely related to the wider stencil (4 cells each side) interacting
+   with the bounded meridional direction — the 8th-order cell-average
+   conversion along the wall-bounded axis may introduce artifacts within
+   the Neumann ghost-cell region.
+
+3. **Convergence rates are ~0.8-0.9** for all stable schemes, consistent
+   with forward Euler limiting as in Level 1.
+
+4. **DST-3 shows higher error than TVD in 2D** (0.055 vs 0.042 at 64x128),
+   whereas in 1D it was lower. The multi-directional flow may be
+   less favorable for DST-3's operator-split space-time design.
+
+**Action**: Investigate WENO7 2D instability. May need to limit the
+cell-average conversion order for the bounded axis, or use a more
+conservative ghost-cell treatment for the wider stencil.
+
 **Background**: The Eady comparison on `dhruv/eady-advection-comparison` found
 that the implicit barotropic solver produces dramatically different dynamics
 from the explicit solver at the same physics settings:
