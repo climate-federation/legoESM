@@ -272,15 +272,27 @@ def create_partial_cell_coordinate(
 def compute_layer_thickness(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
+    z_coord,
     min_water_column_m: float | None = None,
 ) -> jnp.ndarray:
     """Compute actual layer thickness incorporating eta and bathymetry.
 
-    h_k = dz_ref[k] * (eta + H_bathy) / H_max
+    Dispatches on the coordinate type:
 
-    The dynamic Jacobian J = (eta + H_bathy) / H_max modifies
-    reference thicknesses to account for the actual water column.
+    - ``OceanZStarCoordinate``: pure z\\*.
+      ``h_k = dz_ref[k] * (eta + H_bathy) / H_max``.
+      All layers compressed uniformly by the column Jacobian.
+    - ``OceanPartialCellCoordinate``: z\\* + partial bottom cell.
+      ``h_k = h_partial[..., k] * (eta + H_bathy) / H_bathy``.
+      Same uniform Jacobian, but applied to the per-cell partial-cell
+      thicknesses.  Cells below the seafloor stay zero (h_partial = 0).
+
+    For the flat-bottom case (``H_bathy = H_max`` everywhere),
+    both formulas yield identical layer thicknesses — the partial-cell
+    coord has ``h_partial = dz_ref`` for every column, and the
+    Jacobian becomes ``(eta + H_max) / H_max`` either way.  This
+    backwards-compat property is guaranteed by the snap-to-dz_ref logic
+    in ``create_partial_cell_coordinate``.
 
     Parameters
     ----------
@@ -288,7 +300,7 @@ def compute_layer_thickness(
         Sea surface height [m], shape (...).
     H_bathy : array
         Local bathymetry depth [m], shape (...). Positive.
-    z_coord : OceanZStarCoordinate
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
         Vertical coordinate.
     min_water_column_m : float or None
         Optional lower bound for local water-column thickness
@@ -299,6 +311,15 @@ def compute_layer_thickness(
     -------
     array : Layer thickness [m], shape (..., nlev). Positive.
     """
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        wc = eta + H_bathy
+        if min_water_column_m is not None:
+            wc = jnp.maximum(wc, min_water_column_m)
+        # Avoid division-by-zero in dry columns; h_partial is already
+        # zero there, so the result is zero regardless of the divisor.
+        H_safe = jnp.maximum(H_bathy, 1.0e-10)
+        return z_coord.h_partial * (wc / H_safe)[..., jnp.newaxis]
+    # Pure z\\* path (legacy, unchanged).
     J = compute_ocean_jacobian(
         eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
     )
@@ -308,14 +329,22 @@ def compute_layer_thickness(
 def compute_ocean_jacobian(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
+    z_coord,
     min_water_column_m: float | None = None,
 ) -> jnp.ndarray:
-    """Compute the dynamic z-star Jacobian.
+    """Compute the dynamic vertical-coordinate Jacobian.
 
-    J = (eta + H_bathy) / H_max
+    Dispatches on coord type:
 
-    This is recomputed at every timestep as eta evolves.
+    - ``OceanZStarCoordinate``: ``J = (eta + H_bathy) / H_max``.  Used
+      with ``dz_ref`` to get per-cell thickness.
+    - ``OceanPartialCellCoordinate``: ``J = (eta + H_bathy) / H_bathy``.
+      Used with ``h_partial`` to get per-cell thickness (the partial
+      cell, full cells, and below-seafloor zero cells all scale with
+      the same Jacobian).
+
+    For backwards-compat on flat-bottom (H_bathy = H_max everywhere),
+    both formulas give the same Jacobian.
 
     Parameters
     ----------
@@ -323,8 +352,8 @@ def compute_ocean_jacobian(
         Sea surface height [m], shape (...).
     H_bathy : array
         Local bathymetry depth [m], shape (...). Positive.
-    z_coord : OceanZStarCoordinate
-        Vertical coordinate (provides H_max).
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
+        Vertical coordinate.
     min_water_column_m : float or None
         Optional lower bound for local water-column thickness
         ``eta + H_bathy`` [m].
@@ -337,6 +366,9 @@ def compute_ocean_jacobian(
     if min_water_column_m is not None:
         min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
         water_col = jnp.maximum(water_col, min_col)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        H_safe = jnp.maximum(H_bathy, 1.0e-10)
+        return water_col / H_safe
     return water_col / z_coord.H_max
 
 
