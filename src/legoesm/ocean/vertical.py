@@ -613,6 +613,7 @@ def flux_form_vertical_momentum_advection(
     u: jnp.ndarray,
     w_half: jnp.ndarray,
     h_u: jnp.ndarray,
+    face_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Flux-form vertical momentum advection as a per-thickness tendency.
 
@@ -661,6 +662,12 @@ def flux_form_vertical_momentum_advection(
     h_u : array, shape (..., nlev)
         Layer thickness at the momentum points.  Used only as the
         advective-form denominator.
+    face_active : array | None, shape (..., nlev)
+        Optional per-level face-activity mask (1 = wet face, 0 = closed
+        face below the partial seafloor).  When provided, the vertical
+        flux at any interface bordering an inactive face level is
+        gated to exactly zero — same purpose as the ``cell_active``
+        argument of the tracer helper, applied here to momentum.
 
     Returns
     -------
@@ -668,7 +675,9 @@ def flux_form_vertical_momentum_advection(
         ``-(F_top - F_bot) / h_u`` — a per-thickness momentum tendency
         ready to add to ``du/dt``.
     """
-    vert_flux_div = flux_form_vertical_tracer_advection(u, w_half)
+    vert_flux_div = flux_form_vertical_tracer_advection(
+        u, w_half, cell_active=face_active,
+    )
     h_u_safe = jnp.maximum(h_u, 1.0e-10)
     return -vert_flux_div / h_u_safe
 
@@ -676,6 +685,7 @@ def flux_form_vertical_momentum_advection(
 def flux_form_vertical_tracer_advection(
     field: jnp.ndarray,
     w_half: jnp.ndarray,
+    cell_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Flux-form vertical tracer advection with first-order upwind.
 
@@ -703,6 +713,19 @@ def flux_form_vertical_tracer_advection(
         Tracer at full levels (e.g. temperature [degC]).
     w_half : array, shape (..., nlev+1)
         Vertical velocity on half (interface) levels [m/s].
+    cell_active : array | None, shape (..., nlev)
+        Optional per-cell activity mask (1 = wet, 0 = below seafloor).
+        When provided, the flux at any interface bordering an inactive
+        cell is gated to exactly zero — needed on partial-cell grids
+        where ``w_half`` may carry float-precision noise (~1e-10 m/s)
+        at inactive interfaces.  Without the gate, that noise produces
+        a tiny spurious ``vert_flux_div`` at inactive cells; combined
+        with the ``max(h_k_new, 1e-10)`` floor at the caller, this can
+        amplify into ~1e3 spurious tracer values inside the rock, then
+        propagate into the EOS as huge density and break the model.
+        Also makes adjoint sensitivities through inactive cells exactly
+        zero (under ``jax.grad``), instead of poorly-conditioned values
+        depending on the float noise.
 
     Returns
     -------
@@ -730,6 +753,17 @@ def flux_form_vertical_tracer_advection(
 
     T_face_interior = jnp.where(w_interior > 0.0, T_below, T_above)
     F_interior = w_interior * T_face_interior  # (..., nlev-1)
+
+    # Mask the flux at interfaces that border any inactive cell.  An
+    # interior interface k (k=1..nlev-1) is between cells k-1 and k —
+    # both must be active for the flux there to be physical.  The
+    # surface (k=0) and bottom (k=nlev) interfaces are already zero by
+    # the pad below.
+    if cell_active is not None:
+        active_above = cell_active[..., :-1]   # cells k-1 for k=1..nlev-1
+        active_below = cell_active[..., 1:]    # cells k   for k=1..nlev-1
+        face_active_interior = active_above * active_below
+        F_interior = F_interior * face_active_interior
 
     # Full flux array with zero boundaries — single Pad HLO op vs
     # alloc fresh ``(..., 1)`` zero buffer and 3-array concatenate.

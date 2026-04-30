@@ -763,7 +763,9 @@ class LatLonCGridOceanModel:
                     vert_flux_div = flux_form_vertical_tracer_advection_tvd(
                         tr, w_baro, h_k_old, dt)
                 else:
-                    vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
+                    vert_flux_div = flux_form_vertical_tracer_advection(
+                        tr, w_baro, cell_active=active_3d,
+                    )
 
             # Full flux-form tracer update:
             # h_new * T_new = h_old * T_old - dt * vert_flux_div - dt * div_h(mf*T_face)

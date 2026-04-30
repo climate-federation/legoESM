@@ -1197,10 +1197,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         # Default: 1st-order upwind.  The implicit viscosity (~|w|*dz/2)
         # damps baroclinic shear that explicit A_v=1e-5 cannot.
+        # Pass u/v face-activity masks so vertical momentum flux is
+        # exactly zero at faces below the seafloor — otherwise float-
+        # precision noise in w_u/w_v drives spurious tendencies inside
+        # the rock (and poorly-conditions adjoints).  ``u_mask_3d`` may
+        # be shape ``(..., 1)`` for pure z* (2D-broadcast) or
+        # ``(..., nlev)`` for partial; broadcast to the velocity shape
+        # so the helper's per-level slicing along the last axis works.
+        u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
+        v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
         diag_vertadv_u = _flux_form_vertical_momentum_advection(
-            u_prime, w_u, h_u_old)
+            u_prime, w_u, h_u_old, face_active=u_face_active)
         diag_vertadv_v = _flux_form_vertical_momentum_advection(
-            v_prime, w_v, h_v_old)
+            v_prime, w_v, h_v_old, face_active=v_face_active)
     du_dt = du_dt + diag_vertadv_u
     dv_dt = dv_dt + diag_vertadv_v
 
