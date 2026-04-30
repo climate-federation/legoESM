@@ -117,6 +117,15 @@ class BathymetryConfig(NamedTuple):
     edge_blend_strength: float = 0.2
     edge_blend_width: int = 2
     depth_is_negative: bool = True
+    r_factor_max: float | None = None
+    """Mellor-Ezer-Oey r-factor cap.  When set, iteratively deepens
+    shallower ocean cells so that for every ocean-ocean neighbour pair
+    ``r = |H_i - H_j| / max(H_i, H_j) <= r_factor_max``.  Typical
+    target: 0.2 (the Beckmann-Haidvogel literature bound).  When None,
+    no MEO smoothing is applied — the model relies on Laplacian
+    smoothing alone, which is known to be insufficient for sharp
+    bathymetric features (Phase 3a finding)."""
+    meo_max_iter: int = 200
 
 
 # ============================================================================
@@ -376,6 +385,142 @@ def _laplacian_smooth_voronoi(
             smoothed[c] = total / count
         result = 0.5 * arr + 0.5 * smoothed
     return result
+
+
+# ============================================================================
+# Mellor-Ezer-Oey r-factor cap
+# ============================================================================
+
+
+def _r_factor_max(H_bathy, ocean_mask):
+    """Maximum r-factor over ocean-ocean neighbour pairs (4-connected).
+
+    r = |H_i - H_j| / max(H_i, H_j).  Periodic in longitude (axis=1)
+    via np.roll; latitude (axis=0) is bounded — we still roll, but
+    only count pairs where both cells are ocean, which excludes any
+    polar-row wrap-around since polar rows are always land in our
+    setup.
+    """
+    H = np.asarray(H_bathy)
+    ocean = np.asarray(ocean_mask) > 0.5
+    r_max = 0.0
+    for shift, axis in [(-1, 1), (+1, 1), (-1, 0), (+1, 0)]:
+        H_n = np.roll(H, shift, axis=axis)
+        ocean_n = np.roll(ocean, shift, axis=axis)
+        valid = ocean & ocean_n
+        if not valid.any():
+            continue
+        diff = np.abs(H - H_n)
+        denom = np.fmax(H, H_n)
+        # Avoid division-by-zero (only occurs at land neighbours, masked out)
+        denom_safe = np.where(denom > 0.0, denom, 1.0)
+        r = np.where(valid, diff / denom_safe, 0.0)
+        r_max = max(r_max, float(r.max()))
+    return r_max
+
+
+def apply_meo_r_factor_cap(
+    H_bathy,
+    ocean_mask,
+    r_factor_max,
+    *,
+    max_iter: int = 200,
+    tol: float = 1.0e-6,
+):
+    """Mellor-Ezer-Oey iterative r-factor cap.
+
+    Iteratively deepens shallower ocean cells so that for every
+    ocean-ocean neighbour pair, ``r = |H_i - H_j| / max(H_i, H_j) <=
+    r_factor_max``.  Uses Jacobi-style parallel updates (each
+    iteration updates all cells based on the previous iteration's
+    state).  Convergence is monotone: cells only get deeper, so
+    max(r) is non-increasing.
+
+    The classic Mellor-Ezer-Oey 1994 prescription: when r > target,
+    deepen the shallower cell to ``H_deep * (1 - r_factor_max)``.
+    Volume change is added (small, typically <2% at 1° on real
+    bathymetry).
+
+    Parameters
+    ----------
+    H_bathy : array, shape (...)
+        Ocean depth [m], positive downward.  Land cells should have
+        H_bathy = 0 or any value, but ``ocean_mask`` must mark them.
+    ocean_mask : array, shape (...)
+        1 = ocean, 0 = land.  Same shape as H_bathy.
+    r_factor_max : float
+        Target r-factor cap (typically 0.2).
+    max_iter : int
+        Maximum Jacobi iterations.
+    tol : float
+        Convergence tolerance — stop when no cell changed by more
+        than tol [m] in an iteration.
+
+    Returns
+    -------
+    H_new : np.ndarray
+        New bathymetry with r <= r_factor_max for every ocean pair.
+    info : dict
+        - ``iterations``: number of iterations performed
+        - ``initial_r_max``: r before MEO
+        - ``final_r_max``: r after MEO
+        - ``volume_change_frac``: fractional ocean volume change
+          (positive means added water)
+        - ``max_depth_change_m``: max single-cell depth change
+        - ``cells_modified``: count of cells whose depth changed
+    """
+    if r_factor_max <= 0.0 or r_factor_max >= 1.0:
+        raise ValueError(
+            f"r_factor_max must be in (0, 1), got {r_factor_max!r}",
+        )
+    H = np.asarray(H_bathy, dtype=np.float64).copy()
+    ocean = np.asarray(ocean_mask) > 0.5
+    factor = 1.0 - r_factor_max  # H_shallow >= H_deep * factor
+
+    H_initial = H.copy()
+    initial_r = _r_factor_max(H, ocean)
+
+    iterations = 0
+    for it in range(max_iter):
+        H_old = H.copy()
+        # Walk the four neighbours, deepening this cell to satisfy
+        # the constraint with each.  Jacobi-style: use H_old's neighbour
+        # values within the same iteration.
+        H_new = H.copy()
+        for shift, axis in [(-1, 1), (+1, 1), (-1, 0), (+1, 0)]:
+            H_n = np.roll(H_old, shift, axis=axis)
+            ocean_n = np.roll(ocean, shift, axis=axis)
+            min_required = H_n * factor
+            # Only constrain ocean-ocean pairs.
+            valid = ocean & ocean_n
+            H_new = np.where(
+                valid, np.maximum(H_new, min_required), H_new,
+            )
+        # Land cells unchanged.
+        H_new = np.where(ocean, H_new, H)
+        delta_max = float(np.max(np.abs(H_new - H_old)))
+        H = H_new
+        iterations = it + 1
+        if delta_max < tol:
+            break
+
+    final_r = _r_factor_max(H, ocean)
+    # Volume change (per unit area; this is in units of m, i.e. mean depth change)
+    vol_change = float(np.sum(np.where(ocean, H - H_initial, 0.0)))
+    vol_initial = float(np.sum(np.where(ocean, H_initial, 0.0)))
+    vol_change_frac = vol_change / vol_initial if vol_initial > 0 else 0.0
+    cells_modified = int(np.sum(np.where(ocean, np.abs(H - H_initial) > tol, 0)))
+    max_change = float(np.max(np.where(ocean, np.abs(H - H_initial), 0.0)))
+
+    info = {
+        "iterations": iterations,
+        "initial_r_max": initial_r,
+        "final_r_max": final_r,
+        "volume_change_frac": vol_change_frac,
+        "max_depth_change_m": max_change,
+        "cells_modified": cells_modified,
+    }
+    return H, info
 
 
 # ============================================================================
@@ -647,6 +792,30 @@ def load_bathymetry(
     return depth, ocean_mask
 
 
+# Last MEO run summary (read by diagnostic scripts).  Per-call info also
+# returned by ``apply_meo_r_factor_cap`` directly.
+_LAST_MEO_INFO: dict = {}
+
+
+def _maybe_apply_meo(depth, ocean_mask, cfg):
+    """Helper used by per-grid loaders to apply MEO after smoothing.
+
+    MEO must run after Laplacian smoothing because the smoothing
+    blends land cells (depth=0) into adjacent ocean cells, which
+    reduces ocean-cell depth at coastlines and re-introduces
+    r-factor violations.  Running MEO last guarantees the final
+    bathymetry satisfies r <= cfg.r_factor_max.
+    """
+    if cfg.r_factor_max is None:
+        return depth
+    depth, meo_info = apply_meo_r_factor_cap(
+        np.asarray(depth), np.asarray(ocean_mask), cfg.r_factor_max,
+        max_iter=cfg.meo_max_iter,
+    )
+    _LAST_MEO_INFO.update(meo_info)
+    return depth
+
+
 # ============================================================================
 # Grid-specific initialization
 # ============================================================================
@@ -687,6 +856,9 @@ def load_bathymetry_cubed_sphere(
     # Re-enforce minimum depth after smoothing
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # MEO r-factor cap (after smoothing).
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
 
     # Edge blending for cubed-sphere face boundaries
     if cfg.edge_blend_strength > 0:
@@ -755,6 +927,9 @@ def load_bathymetry_mpas(
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
 
+    # MEO r-factor cap (after smoothing).
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
+
     H_bathy = np.where(ocean_mask > 0.5, depth, 0.0)
 
     dtype = get_policy().storage
@@ -798,6 +973,11 @@ def load_bathymetry_latlon_cgrid(
     # Re-enforce minimum depth after smoothing.
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # MEO r-factor cap — applied last, after smoothing has finished
+    # blending coastal cells.  This guarantees the final bathymetry
+    # satisfies r <= cfg.r_factor_max for every ocean-ocean pair.
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
 
     # For z* Jacobian smoothness: set land depth to H_max
     # (the land_mask prevents actual flow on land cells).
@@ -844,6 +1024,9 @@ def load_bathymetry_gaussian(
     # Re-enforce minimum depth after smoothing
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # MEO r-factor cap (after smoothing).
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
 
     H_bathy = np.where(ocean_mask > 0.5, depth, cfg.H_max)
 

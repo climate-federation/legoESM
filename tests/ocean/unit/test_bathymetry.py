@@ -549,6 +549,156 @@ class TestFileLoadingErrors:
 
 
 # ============================================================================
+# Mellor-Ezer-Oey r-factor cap
+# ============================================================================
+
+
+class TestMEORFactorCap:
+    """``apply_meo_r_factor_cap`` correctly caps the r-factor while
+    preserving ocean topology and adding minimal volume."""
+
+    def test_already_satisfied_is_noop(self):
+        """If the bathymetry already satisfies r < target, MEO should
+        not change anything."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        # Uniform bathymetry → r = 0 everywhere.
+        H = np.full((5, 10), 4000.0)
+        ocean = np.ones_like(H)
+        H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2)
+        assert info["initial_r_max"] == 0.0
+        assert info["final_r_max"] == 0.0
+        assert info["cells_modified"] == 0
+        np.testing.assert_array_equal(H_out, H)
+
+    def test_caps_a_step_bathymetry(self):
+        """Sharp step from 200m → 4000m must be smoothed by MEO."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((5, 10), 4000.0)
+        H[:, :5] = 200.0
+        ocean = np.ones_like(H)
+        # Initial r at the step: |200 - 4000| / 4000 = 0.95
+        H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2, max_iter=200)
+        assert info["initial_r_max"] > 0.9
+        assert info["final_r_max"] <= 0.2 + 1e-10, (
+            f"Final r_max = {info['final_r_max']}"
+        )
+        # All cells should be deeper (or unchanged), never shallower.
+        assert np.all(H_out >= H - 1e-9)
+        # Some cells were modified
+        assert info["cells_modified"] > 0
+        # Volume change is positive (added water by deepening shallow cells)
+        assert info["volume_change_frac"] > 0
+
+    def test_volume_change_bounded(self):
+        """On a moderately-rough field, volume change should be modest
+        (<20% — typical real-world is 1-5%, but a synthetic adversarial
+        case can be larger)."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        rng = np.random.default_rng(seed=42)
+        # Large H baseline + spotty shallow cells
+        H = np.full((20, 40), 4000.0)
+        # 10 random shallow spots at 200m
+        idx_lat = rng.integers(0, 20, size=10)
+        idx_lon = rng.integers(0, 40, size=10)
+        for i, j in zip(idx_lat, idx_lon):
+            H[i, j] = 200.0
+        ocean = np.ones_like(H)
+        _H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2)
+        # On this adversarial pattern (isolated 200m spots in 4000m sea),
+        # MEO should still finish and cap r below target.
+        assert info["final_r_max"] <= 0.2 + 1e-10
+        assert info["volume_change_frac"] < 0.2
+
+    def test_land_cells_untouched(self):
+        """Land cells (ocean_mask=0) must be unchanged after MEO."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((5, 10), 4000.0)
+        H[:, :5] = 200.0
+        # Right half is land
+        ocean = np.ones_like(H)
+        ocean[:, 7:] = 0.0
+        H_initial = H.copy()
+        H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2)
+        # Land cells must equal their initial value.
+        land = ocean < 0.5
+        np.testing.assert_array_equal(H_out[land], H_initial[land])
+
+    def test_idempotent(self):
+        """Running MEO twice produces the same result as running once."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((5, 10), 4000.0)
+        H[:, :5] = 200.0
+        ocean = np.ones_like(H)
+        H_once, _ = apply_meo_r_factor_cap(H, ocean, 0.2)
+        H_twice, info = apply_meo_r_factor_cap(H_once, ocean, 0.2)
+        np.testing.assert_allclose(H_once, H_twice, atol=1e-9)
+        # Second run should converge in 1 iteration with no changes.
+        assert info["cells_modified"] == 0
+
+    def test_invalid_r_factor_raises(self):
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((3, 5), 4000.0)
+        ocean = np.ones_like(H)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap(H, ocean, 0.0)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap(H, ocean, 1.0)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap(H, ocean, -0.1)
+
+    def test_meo_via_load_bathymetry_pipeline(self, latlon_grid, tmp_path):
+        """End-to-end: setting ``r_factor_max`` in BathymetryConfig
+        triggers MEO during ``load_bathymetry`` and lowers the final
+        r-factor."""
+        import xarray as xr
+        # Build a synthetic ETOPO with sharp continental-slope-style cuts
+        n_lat, n_lon = 91, 180
+        lat = np.linspace(-90.0, 90.0, n_lat)
+        lon = np.linspace(0.0, 360.0, n_lon, endpoint=False)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        # 4000 m ocean, sharp shelf at lon < 30°: depth = 200 m
+        elev = np.where(np.abs(LAT) > 80.0, 100.0,
+                          np.where(LON < 30.0, -200.0, -4000.0))
+        ds = xr.Dataset(
+            {"z": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "shelf_synth.nc"
+        ds.to_netcdf(path)
+
+        # Without MEO
+        cfg_no_meo = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+            r_factor_max=None,
+        )
+        H_no, mask_no = init_ocean_bathymetry(latlon_grid, cfg_no_meo)
+        # With MEO
+        cfg_meo = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+            r_factor_max=0.2, meo_max_iter=200,
+        )
+        H_meo, mask_meo = init_ocean_bathymetry(latlon_grid, cfg_meo)
+
+        from legoesm.ocean.bathymetry import _r_factor_max
+        r_no = _r_factor_max(np.asarray(H_no), np.asarray(mask_no))
+        r_meo = _r_factor_max(np.asarray(H_meo), np.asarray(mask_meo))
+        assert r_no > 0.5, f"baseline r should be high; got {r_no}"
+        # Allow a small float32 tolerance from get_policy().storage casts
+        # in load_bathymetry_latlon_cgrid.
+        assert r_meo <= 0.2 + 1e-6, (
+            f"MEO failed to cap r-factor; final r = {r_meo}"
+        )
+        # Mask topology preserved (straits not enforced; flat land unchanged)
+        np.testing.assert_array_equal(
+            np.asarray(mask_no), np.asarray(mask_meo),
+        )
+
+
+# ============================================================================
 # Lat-lon C-grid integration (Phase 0 of realistic-geometry plan)
 # ============================================================================
 
