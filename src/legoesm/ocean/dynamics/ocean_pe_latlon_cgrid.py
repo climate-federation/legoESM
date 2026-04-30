@@ -987,25 +987,49 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # within a column so the correction is identically zero — bit-exact
     # backwards-compat preserved.
     if isinstance(z_coord, OceanPartialCellCoordinate):
-        from legoesm.ocean.vertical import compute_centroid_depth
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            partial_cell_pgf_correction_x,
-            partial_cell_pgf_correction_y,
-        )
-        # Use eta=0 reference for centroid: rho_prime / p_prime above
-        # are computed at the J=1, eta=0 reference (line 802 comment).
-        # Using live eta here would make the Adcroft correction time-
-        # dependent through eta — small effect at rest (eta=0) but
-        # breaks the "rest-state machine-zero" claim once eta evolves.
-        centroid_depth = compute_centroid_depth(
-            jnp.zeros_like(eta_safe), H_bathy, z_coord,
-        )
-        dp_dx = dp_dx + partial_cell_pgf_correction_x(
-            centroid_depth, rho_prime, grid, g_val,
-        )
-        dp_dy = dp_dy + partial_cell_pgf_correction_y(
-            centroid_depth, rho_prime, grid, g_val,
-        )
+        pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
+        if pgf_scheme == "smc03":
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                density_jacobian_pgf_smc03_x,
+                density_jacobian_pgf_smc03_y,
+            )
+            # Replace (centered-diff p_prime gradient) + (Adcroft face
+            # correction) with the density-Jacobian PGF evaluated at a
+            # smooth-in-k face-reference depth.  Same ``rho_prime`` and
+            # eta=0 reference as the Adcroft path, so AD pytree shape
+            # is unchanged.
+            dp_dx_smc = density_jacobian_pgf_smc03_x(
+                rho_prime, z_coord.h_partial, z_coord.is_active,
+                z_coord.z_full_ref, grid, g_val,
+            )
+            dp_dy_smc = density_jacobian_pgf_smc03_y(
+                rho_prime, z_coord.h_partial, z_coord.is_active,
+                z_coord.z_full_ref, grid, g_val,
+            )
+            # Match dtype to the existing dp_dx/dp_dy (which inherit
+            # from p_prime — float32 in the standard config).
+            dp_dx = dp_dx_smc.astype(dp_dx.dtype)
+            dp_dy = dp_dy_smc.astype(dp_dy.dtype)
+        else:
+            from legoesm.ocean.vertical import compute_centroid_depth
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                partial_cell_pgf_correction_x,
+                partial_cell_pgf_correction_y,
+            )
+            # Use eta=0 reference for centroid: rho_prime / p_prime above
+            # are computed at the J=1, eta=0 reference (line 802 comment).
+            # Using live eta here would make the Adcroft correction time-
+            # dependent through eta — small effect at rest (eta=0) but
+            # breaks the "rest-state machine-zero" claim once eta evolves.
+            centroid_depth = compute_centroid_depth(
+                jnp.zeros_like(eta_safe), H_bathy, z_coord,
+            )
+            dp_dx = dp_dx + partial_cell_pgf_correction_x(
+                centroid_depth, rho_prime, grid, g_val,
+            )
+            dp_dy = dp_dy + partial_cell_pgf_correction_y(
+                centroid_depth, rho_prime, grid, g_val,
+            )
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     # Capture each term as a named local so the same expression feeds

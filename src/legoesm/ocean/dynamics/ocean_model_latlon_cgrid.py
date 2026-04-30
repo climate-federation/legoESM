@@ -275,6 +275,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_implicit_pcg_maxiter must be >= 1, "
                 f"got {config.barotropic_implicit_pcg_maxiter!r}")
+        _valid_pgf = {"adcroft", "smc03"}
+        pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
+        if pgf_scheme not in _valid_pgf:
+            raise ValueError(
+                f"pgf_scheme must be one of {_valid_pgf}, got {pgf_scheme!r}")
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.

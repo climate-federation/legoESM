@@ -538,3 +538,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
+    # Pressure-gradient force scheme on partial cells.  ``"adcroft"``
+    # (default): existing centered-diff p_prime + Adcroft & Campin 2004
+    # face-PGF correction.  ``"smc03"``: full Shchepetkin & McWilliams
+    # 2003 density-Jacobian PGF with harmonic-mean monotonized slope
+    # reconstruction — closes the BH partial-cell gap by avoiding the
+    # single-level z-spike that the Adcroft correction produces and that
+    # drives the 2Δz computational mode.  See
+    # docs/ocean_experiments/density_jacobian_pgf_plan.md.  Pure-z*
+    # runs ignore this field (the existing path is identical).
+    pgf_scheme: str = "adcroft"
