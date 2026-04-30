@@ -208,13 +208,18 @@ def edmf_turbulence(
 
         return (w_u_new, theta_u_new, q_u_new), (w_u_new, theta_u_new, q_u_new)
 
+    # Pin scan inputs to the carry dtype (``_dtype = T.dtype``) so a
+    # mixed-precision state — e.g. ``T`` from the storage policy
+    # (typically f32) but ``q_v``/``q_c`` materialized via ``jnp.ones``
+    # under ``JAX_ENABLE_X64=1`` (f64) — does not promote the scan
+    # body output to f64 and trip ``scan``'s carry-dtype invariant.
     init_carry = (w_u_init, theta_u_init, q_u_init)
     # Scan over nlev-1 intervals (from surface upward, skipping surface itself)
     scan_inputs = (
-        dz_upward.T,       # (nlev-1, ncol)
-        theta_rev[:, 1:].T,
-        theta_v_rev[:, 1:].T,
-        q_v_rev[:, 1:].T,
+        dz_upward.T.astype(_dtype),       # (nlev-1, ncol)
+        theta_rev[:, 1:].T.astype(_dtype),
+        theta_v_rev[:, 1:].T.astype(_dtype),
+        q_v_rev[:, 1:].T.astype(_dtype),
     )
 
     _, (w_u_scan, theta_u_scan, q_u_scan) = jax.lax.scan(

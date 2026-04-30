@@ -83,7 +83,7 @@ def _boundary_layer_depth(
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
     V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 0.0))
-            / jnp.sqrt(jnp.maximum(cfg.c_s * 0.1, eps))
+            / jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))
             * jnp.maximum(cfg.Ri_crit * h_safe - z_depth, 0.0)
             * z_depth / h_safe)
 
@@ -100,7 +100,7 @@ def _boundary_layer_depth(
     # Weight at level k = sigmoid(sharpness * (Ri_b[k] - Ri_crit))
     #                    - sigmoid(sharpness * (Ri_b[k-1] - Ri_crit))
     # This is ~1 at the crossing level and ~0 elsewhere.
-    sharpness = 20.0
+    sharpness = cfg.crossing_sharpness
     sig = jax.nn.sigmoid(sharpness * (Ri_b - cfg.Ri_crit))  # (..., nlev)
 
     # Crossing weight: difference of adjacent sigmoid values.  ``jnp.pad``
@@ -127,7 +127,7 @@ def _boundary_layer_depth(
 
     # Blend: use crossing depth when crossing signal is strong, fallback otherwise
     crossing_strength = w_sum[..., 0]
-    blend = jax.nn.sigmoid(20.0 * (crossing_strength - 0.1))
+    blend = jax.nn.sigmoid(cfg.crossing_sharpness * (crossing_strength - cfg.crossing_threshold))
     h = blend * h_crossing + (1.0 - blend) * h_fallback
 
     # At least one layer thick
@@ -241,7 +241,7 @@ def kpp_vertical_mixing(
     # Unstable, strongly convective (epsilon*d > |L|):
     #   w_s = (kappa * (u_star^3 + c_b * kappa * (-B_f) * d))^{1/3}
     is_unstable = B_f[..., jnp.newaxis] > 0.0
-    epsilon_lmd = 0.1  # LMD94 surface layer fraction
+    epsilon_lmd = cfg.epsilon_lmd
 
     # Weakly unstable: phi_m^{-1} formulation
     w_s_weak = (cfg.kappa_vk * u_star[..., jnp.newaxis]

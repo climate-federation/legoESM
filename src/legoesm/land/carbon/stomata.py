@@ -114,6 +114,10 @@ class StomataConfig(NamedTuple):
     k_ext: float = 0.5           # Beer-law extinction coefficient [-]
     gs_ref: float = 0.3          # Reference max gs for beta [mol/m2/s]
 
+    # --- Soil moisture / VPD stress floors (CLM-style; tunable) ---
+    beta_soil_min: float = 0.01  # Lower bound on soil water stress factor
+    f_VPD_min: float = 0.01      # Lower bound on VPD stress factor
+
 
 # =====================================================================
 # Temperature response functions
@@ -180,7 +184,7 @@ def farquhar_photosynthesis(
 
     # Soil moisture stress on Vc_max (CLM / Bonan et al. 2011)
     if beta_soil is not None:
-        Vc_max = Vc_max * jnp.clip(beta_soil, 0.01, 1.0)
+        Vc_max = Vc_max * jnp.clip(beta_soil, config.beta_soil_min, 1.0)
 
     # Rubisco-limited rate
     Ci_safe = jnp.maximum(Ci, Gamma_star + 1.0)
@@ -274,7 +278,7 @@ def jarvis_gs(
     e_sat = saturation_vapor_pressure(T)
     e_air = q_air * p_surface / (constants.epsilon + q_air)
     VPD_hPa = jnp.maximum(e_sat - e_air, 0.0) / 100.0
-    f_VPD = jnp.clip(1.0 - config.a_vpd * VPD_hPa, 0.01, 1.0)
+    f_VPD = jnp.clip(1.0 - config.a_vpd * VPD_hPa, config.f_VPD_min, 1.0)
 
     # Soil moisture
     f_soil = jnp.clip(beta_soil, 0.0, 1.0)

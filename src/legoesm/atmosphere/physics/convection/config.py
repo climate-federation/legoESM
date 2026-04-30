@@ -389,6 +389,8 @@ class TiedtkeConfig(NamedTuple):
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
     tau_MC_proxy: float = 3600.0   # for saturation-deficit MC proxy
+    tau_shallow_M_b: float = 3600.0  # Shallow-cloud-base mass-flux timescale [s]
+    midlevel_M_b_fraction: float = 0.5  # M_b_midlevel = M_b_shallow * this
 
 
 class BechtoldConfig(NamedTuple):

@@ -181,7 +181,7 @@ def _temperate_modifier(
     temp_factor = jnp.exp(config.Q10_exp * (T - config.T_ref))
     precip_ratio = precip / jnp.maximum(config.precip_ref, 1e-10)
     moist = (precip_ratio - 1.0) * config.moisture_factor + 1.0
-    moist = jnp.clip(moist, 0.1, 3.0)
+    moist = jnp.clip(moist, config.moist_modifier_min, config.moist_modifier_max)
     return temp_factor * moist
 
 

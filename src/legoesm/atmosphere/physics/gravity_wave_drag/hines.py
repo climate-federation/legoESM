@@ -110,9 +110,8 @@ def hines_gwd(
     # Convert to acceleration
     accel = -drag_all / jnp.clip(rho * dz, 1e-10, None)
 
-    # Project isotropically along wind direction
-    cos_a = u / jnp.clip(U_mag, 0.1, None)
-    sin_a = v / jnp.clip(U_mag, 0.1, None)
+    cos_a = u / jnp.clip(U_mag, config.U_mag_floor, None)
+    sin_a = v / jnp.clip(U_mag, config.U_mag_floor, None)
     du_dt = accel * cos_a
     dv_dt = accel * sin_a
 

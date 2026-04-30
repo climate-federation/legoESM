@@ -129,6 +129,7 @@ class HinesConfig(NamedTuple):
     cutoff_wn: float = 2.0 * math.pi / 500.0
     Fmax: float = 0.1
     doppler_sharpness: float = 50.0
+    U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
 
 
 class PrognosticSpectralConfig(NamedTuple):
@@ -187,6 +188,9 @@ class MLEmulatorConfig(NamedTuple):
     n_output: int = 3
     seed: int = 0
     use_residual: bool = True
+    norm_u: float = 30.0     # Wind scale [m/s] for u, v normalization
+    norm_T: float = 300.0    # Temperature scale [K]
+    norm_z: float = 30000.0  # Height scale [m]
 
 
 class GravityWaveDragConfig(NamedTuple):

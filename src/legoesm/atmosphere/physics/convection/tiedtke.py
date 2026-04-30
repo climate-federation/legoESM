@@ -197,9 +197,9 @@ def tiedtke_convection(
     M_b_shallow = (
         cape_weight
         * smooth_positive_part(cape - config.cape_threshold, config.cape_sharpness)
-        / 3600.0
+        / config.tau_shallow_M_b
     )
-    M_b_midlevel = M_b_shallow * 0.5
+    M_b_midlevel = M_b_shallow * config.midlevel_M_b_fraction
     M_b = (
         deep_weight * M_b_deep
         + shallow_weight * M_b_shallow
