@@ -363,6 +363,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["C_leith"] = C_leith
         if C_leith_modified is not None:
             kw["C_leith_modified"] = C_leith_modified
+        if gm_redi is not None:
+            kw["gm_redi"] = gm_redi
         # pv_scheme defaults to "enstrophy" in MPASOceanConfig — suppresses
         # the ζ-checkerboard null mode of the energy-conserving scheme.
         # APVM is left disabled (``apvm_dt=0``); enabling it on top of

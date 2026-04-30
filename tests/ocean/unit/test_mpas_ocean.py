@@ -528,6 +528,74 @@ class TestBarotropicSubsteps:
         )
         assert u_3d_new.shape == state.u.data.shape
 
+    def test_barotropic_u_viscosity_damps_grid_noise(
+        self, state, mesh, z_coord, config,
+    ):
+        """``barotropic_u_viscosity`` damps grid-scale noise on u_bar.
+
+        Targets the TRiSK rotational null branch on hexagonal C-grids
+        (Thuburn 2008; Ringler et al. 2010, JCP §6) — a noise mode
+        that has both ∇·u_bar ≈ 0 and is not damped by eta diffusion
+        or divergence damping.
+
+        Strategy: seed the 3D velocity with random edge noise (which
+        projects onto all wavenumbers including the null branch),
+        run a single barotropic substep with and without viscosity,
+        and assert that the viscous run has significantly lower
+        u_bar variance.
+        """
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        u_noise = jnp.asarray(
+            0.01 * rng.standard_normal(state.u.data.shape),
+            dtype=state.u.data.dtype,
+        )
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = state.land_mask.data[c1] * state.land_mask.data[c2]
+        u_noise = u_noise * edge_mask[:, None]
+
+        state_noisy = state._replace(u=state.u.replace(data=u_noise))
+
+        dt_baro = 30.0
+        n_sub = 30
+
+        # Run without viscosity (baseline)
+        cfg_off = config._replace(
+            barotropic_u_viscosity=0.0,
+            barotropic_diffusion_alpha=0.0,
+            barotropic_div_damp=0.0,
+        )
+        _, u_bar_off, _ = barotropic_substeps_mpas(
+            state_noisy, mesh, z_coord, cfg_off, dt_baro, n_sub,
+        )
+
+        # Run with viscosity ON. On the level-2 mesh (~2400 km),
+        # forward-Euler stability requires A * dt / dx² < 0.5; with
+        # dt=30 s and dx²≈7e12 this gives A < 1.2e11. Pick A=1e10:
+        # diffusion timescale dx²/A ≈ 700 s, so ~30 substeps × 30 s
+        # = 900 s gives an O(1) reduction at the highest wavenumbers.
+        cfg_on = config._replace(
+            barotropic_u_viscosity=1.0e10,
+            barotropic_diffusion_alpha=0.0,
+            barotropic_div_damp=0.0,
+        )
+        _, u_bar_on, _ = barotropic_substeps_mpas(
+            state_noisy, mesh, z_coord, cfg_on, dt_baro, n_sub,
+        )
+
+        var_off = float(jnp.var(u_bar_off))
+        var_on = float(jnp.var(u_bar_on))
+        assert var_on < 0.5 * var_off, (
+            f"u_bar viscosity should reduce variance by ≥2×; "
+            f"got var_off={var_off:.3e}, var_on={var_on:.3e}"
+        )
+
+    def test_barotropic_u_viscosity_default_off(self, config):
+        """Default config keeps u_bar viscosity disabled for bit-stability."""
+        assert config.barotropic_u_viscosity == 0.0
+
 
 # ============================================================================
 # Test: Full Model

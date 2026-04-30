@@ -1611,9 +1611,18 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
       - redi_only: T(y,z) should remain nearly unchanged (T is constant
         along isopycnals with linear EOS).
     """
-    if tc.grid_type != "latlon_channel":
+    if tc.grid_type not in ("latlon_channel", "mpas_channel"):
         raise NotImplementedError(
-            f"eady_gm_redi only for latlon_channel, not {tc.grid_type}")
+            f"eady_gm_redi only for channel grids, not {tc.grid_type}")
+    # MPAS only implements the centred slope scheme (Phase 5 triads
+    # are still NotImplementedError — see
+    # docs/ocean_experiments/gm_redi_mpas_plan.md).
+    slope_scheme_cli = tc.run_kwargs.get("slope_scheme", "centered")
+    if tc.grid_type == "mpas_channel" and slope_scheme_cli == "triads":
+        raise NotImplementedError(
+            "GM/Redi triad scheme not yet implemented on MPAS — see "
+            "docs/ocean_experiments/gm_redi_mpas_plan.md Phase 5"
+        )
 
     from legoesm.ocean.experiments.eady_uniform import (
         EadyUniformConfig, create_initial_conditions as eu_ic,
@@ -1706,16 +1715,25 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 40)
 
-    # Sponge layer
+    # Sponge layer (grid-aware: latlon uses u/v faces; MPAS uses edge-normal).
     gamma = compute_sponge_mask(grid, eu_config)
     T_init_jnp = jnp.array(np.array(state.T.data))
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        interp_cell_to_uface, interp_cell_to_vface)
-    decay_T = jnp.array(np.exp(-dt * gamma)[..., np.newaxis])
-    decay_u = jnp.array(np.exp(-dt * np.array(
-        interp_cell_to_uface(jnp.array(gamma))))[..., np.newaxis])
-    decay_v = jnp.array(np.exp(-dt * np.array(
-        interp_cell_to_vface(jnp.array(gamma))))[..., np.newaxis])
+    if tc.grid_type == "latlon_channel":
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_cell_to_uface, interp_cell_to_vface)
+        decay_T = jnp.array(np.exp(-dt * gamma)[..., np.newaxis])
+        decay_u = jnp.array(np.exp(-dt * np.array(
+            interp_cell_to_uface(jnp.array(gamma))))[..., np.newaxis])
+        decay_v = jnp.array(np.exp(-dt * np.array(
+            interp_cell_to_vface(jnp.array(gamma))))[..., np.newaxis])
+    else:
+        # MPAS: gamma is (nCells,); T is (nCells, nlev); u_edge is (nEdges, nlev).
+        decay_T = jnp.array(np.exp(-dt * gamma)[:, np.newaxis])
+        c1 = np.asarray(grid.cellsOnEdge[0])
+        c2 = np.asarray(grid.cellsOnEdge[1])
+        gamma_edge = 0.5 * (gamma[c1] + gamma[c2])
+        decay_u = jnp.array(np.exp(-dt * gamma_edge)[:, np.newaxis])
+        decay_v = None  # MPAS has no separate v field.
 
     check_fn = _make_check_fn(tc.grid_type)
     scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
@@ -1724,14 +1742,19 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
 
     def step_fn(s, dt_):
         s_new = model.step(s, dt_)
-        # Sponge: relax T toward initial, damp u/v near walls
+        # Sponge: relax T toward initial, damp u (and v on lat-lon).
         T_new = s_new.T.data * decay_T + T_init_jnp * (1.0 - decay_T)
         u_new = s_new.u.data * decay_u
-        v_new = s_new.v.data * decay_v
-        s_new = s_new._replace(
+        sponge_kw = dict(
             u=Field(u_new, name="u", dims=s_new.u.dims, units=s_new.u.units),
-            v=Field(v_new, name="v", dims=s_new.v.dims, units=s_new.v.units),
-            T=Field(T_new, name="T", dims=s_new.T.dims, units=s_new.T.units))
+            T=Field(T_new, name="T", dims=s_new.T.dims, units=s_new.T.units),
+        )
+        if hasattr(s_new, 'v') and decay_v is not None:
+            v_new = s_new.v.data * decay_v
+            sponge_kw["v"] = Field(
+                v_new, name="v", dims=s_new.v.dims, units=s_new.v.units,
+            )
+        s_new = s_new._replace(**sponge_kw)
         return s_new
 
     state, snapshots, diag, wall, ok = _run_timeloop(
@@ -1756,6 +1779,8 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
         "kappa_GM": gm_cfg.kappa_GM, "kappa_Redi": gm_cfg.kappa_Redi,
     })
 
+    eady_extent = (eu_config.lon_west, eu_config.lon_east,
+                   eu_config.lat_south, eu_config.lat_north)
     _save_case_diagnostics(
         output_dir, case_label,
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -1768,7 +1793,9 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
         level_label="Depth (m)",
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
-                      "mean_T": "degC", "mean_S": "PSU"})
+                      "mean_T": "degC", "mean_S": "PSU"},
+        domain_extent=eady_extent,
+        mesh=grid if coord_kind == "mpas" else None)
 
     for fkey in ("u_3d", "speed_3d"):
         _save_cross_sections(
@@ -2030,6 +2057,9 @@ RUNNERS: dict[str, Callable] = {
     "eady_gm_redi_redi_only_triads": run_eady_gm_redi,
     "eady_gm_redi_triads": run_eady_gm_redi,
     "eady_gm_redi_baseline_triads": run_eady_gm_redi,
+    "eady_gm_redi_gm_only_mpas": run_eady_gm_redi,
+    "eady_gm_redi_redi_only_mpas": run_eady_gm_redi,
+    "eady_gm_redi_mpas": run_eady_gm_redi,
     "acc_channel": run_acc_channel,
     "acc_channel_rest": run_acc_channel_rest,
 }

@@ -359,9 +359,9 @@ Follow-up C in `docs/ocean_experiments/global_overturning_plan.md`.
   diagnostic runner (380 LOC, 8.4× speedup verified).
 - `scripts/run_drake_momentum_budget*.py` — three thinned runners
   (~80 LOC each).
-- `scripts/run_global_overturning_implicit_spinup.py` — Follow-up A
+- `scripts/global_overturning/run_global_overturning_implicit_spinup.py` — Follow-up A
   spinup driver.
-- `scripts/run_global_overturning_50yr_implicit_continuation.py` —
+- `scripts/global_overturning/run_global_overturning_50yr_implicit_continuation.py` —
   40-yr continuation to redo the original 50yr experiment.
 - `scripts/_overnight_chain.sh` — orchestrator for the spinup → verify
   → continue chain.
