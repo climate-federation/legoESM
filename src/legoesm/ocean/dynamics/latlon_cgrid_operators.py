@@ -2041,6 +2041,108 @@ def reconstruct_harmonic_slopes(
     return jnp.where(active_f > 0.5, sigma, 0.0)
 
 
+def compute_pressure_at_target_smc03(
+    rho_per_cell: jnp.ndarray,
+    h_partial: jnp.ndarray,
+    z_centroid: jnp.ndarray,
+    sigma: jnp.ndarray,
+    z_target: jnp.ndarray,
+    g: float,
+) -> jnp.ndarray:
+    """Per-column pressure at arbitrary target depths, evaluated from
+    the harmonic-slope piecewise-linear ρ(z) reconstruction.
+
+    Sign convention: all depths are **positive downward** [m].
+
+    Algorithm:
+
+    1. Cell-top interface depths and pressures by cumulative sum:
+
+       ``z_top_0   = 0,                  P_top_0   = 0``
+       ``z_top_k   = z_top_{k-1} + h_{k-1}``
+       ``P_top_k   = P_top_{k-1} + g · h_{k-1} · ρ_{k-1}``
+
+       (Cell-mean integral of the linear deviation ``σ_k · (z' − z_c)``
+       across a full cell vanishes because ``z_c`` is the geometric
+       centroid — so ``P_top_{k+1} − P_top_k = g · h_k · ρ_k`` exactly.)
+
+    2. For each target ``z_t`` find its enclosing cell ``k_t`` such
+       that ``z_top_{k_t} ≤ z_t ≤ z_top_{k_t}+h_{k_t}``.  Within that
+       cell the analytic linear-deviation integral gives
+
+       ``P(z_t) = P_top_{k_t}
+                  + g · (z_t − z_top_{k_t})
+                      · [ρ_{k_t}
+                         + 0.5 · σ_{k_t}
+                              · (z_t + z_top_{k_t} − 2 · z_c_{k_t})]``
+
+    Parameters
+    ----------
+    rho_per_cell : array, shape (..., nlev)
+        Cell-mean density [kg/m³].
+    h_partial : array, shape (..., nlev)
+        Per-cell layer thickness [m].  Inactive cells (below the
+        partial seafloor) have ``h = 0`` and contribute nothing to the
+        integral.
+    z_centroid : array, shape (..., nlev)
+        Per-cell centroid depth [m, positive downward].  Inactive
+        cells inherit the seafloor depth from above (``h = 0`` cells
+        have ``z_centroid`` at the seafloor; inert).
+    sigma : array, shape (..., nlev)
+        Per-cell density slope [kg/m⁴] from
+        ``reconstruct_harmonic_slopes``.  Inactive cells: 0.
+    z_target : array, shape (..., n_targets)
+        Target depths [m, positive downward].  Targets outside the
+        column ``[0, sum h_partial]`` are clamped — the resulting
+        pressure equals zero (above surface) or the seafloor pressure
+        (below).  Phase 3 face-mask logic should keep that branch
+        from materially affecting answers, but the clamp ensures
+        finite output and stable AD.
+    g : float
+        Gravitational acceleration [m/s²].
+
+    Returns
+    -------
+    P : array, shape (..., n_targets)
+        Hydrostatic pressure [Pa] at each target depth.
+    """
+    # 1. Cell-top depths and pressures (cumulative).
+    z_bot_per_cell = jnp.cumsum(h_partial, axis=-1)
+    z_top_per_cell = z_bot_per_cell - h_partial
+
+    cell_dP = g * h_partial * rho_per_cell
+    P_bot_per_cell = jnp.cumsum(cell_dP, axis=-1)
+    P_top_per_cell = P_bot_per_cell - cell_dP
+
+    # 2. Clamp z_target to the column's valid range.  Targets above the
+    # surface saturate to z=0 (P=0); targets below the column-bottom
+    # saturate to the seafloor depth (P = column-integrated weight).
+    z_seafloor = z_bot_per_cell[..., -1:]                  # (..., 1)
+    z_t_clamped = jnp.clip(z_target, min=0.0, max=z_seafloor)
+
+    # 3. Find enclosing cell per target via broadcasting + argmax.
+    # in_cell[..., k, t] == True iff z_top_k <= z_t <= z_bot_k.
+    z_top_e = z_top_per_cell[..., :, None]                 # (..., nlev, 1)
+    z_bot_e = z_bot_per_cell[..., :, None]
+    z_t_e = z_t_clamped[..., None, :]                       # (..., 1, n_t)
+    in_cell = (z_t_e >= z_top_e) & (z_t_e <= z_bot_e)
+    # First-True (argmax of int) handles interface ties deterministically:
+    # a target sitting exactly at z_top_k matches both cell k-1 (its bottom)
+    # and cell k (its top) — argmax picks k-1, which is a valid cell.
+    k_t = jnp.argmax(in_cell.astype(jnp.int32), axis=-2)   # (..., n_t)
+
+    # 4. Gather per-cell quantities at k_t and evaluate the in-cell integral.
+    rho_kt = jnp.take_along_axis(rho_per_cell, k_t, axis=-1)
+    sigma_kt = jnp.take_along_axis(sigma, k_t, axis=-1)
+    z_top_kt = jnp.take_along_axis(z_top_per_cell, k_t, axis=-1)
+    z_c_kt = jnp.take_along_axis(z_centroid, k_t, axis=-1)
+    P_top_kt = jnp.take_along_axis(P_top_per_cell, k_t, axis=-1)
+
+    dz = z_t_clamped - z_top_kt
+    rho_eff = rho_kt + 0.5 * sigma_kt * (z_t_clamped + z_top_kt - 2.0 * z_c_kt)
+    return P_top_kt + g * dz * rho_eff
+
+
 def compute_face_masks(
     land_mask: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
