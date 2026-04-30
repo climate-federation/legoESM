@@ -151,12 +151,21 @@ def main():
     if vmax_u == 0 or not np.isfinite(vmax_u):
         vmax_u = 0.1
     levels_u = np.linspace(-vmax_u, vmax_u, 21)
+    u_step = max(0.02, np.round(vmax_u / 8, 2))
+    u_levels = np.arange(-vmax_u, vmax_u + u_step / 2, u_step)
+    u_levels = u_levels[u_levels != 0]
     for k, (yr, zmu) in enumerate(zip(years, zm_u_list)):
         i, j = k // cols, k % cols
         ax = axes[i, j]
         cf = ax.pcolormesh(drake_lats, z_full, zmu.T,
                            vmin=-vmax_u, vmax=vmax_u, cmap="RdBu_r",
                            shading="auto")
+        cs = ax.contour(drake_lats, z_full, zmu.T,
+                         levels=u_levels, colors="k", linewidths=0.4,
+                         alpha=0.5)
+        ax.contour(drake_lats, z_full, zmu.T,
+                    levels=[0], colors="k", linewidths=1.0)
+        ax.clabel(cs, inline=True, fontsize=6, fmt="%g")
         ax.set_title(f"Yr {yr:.0f}  (T={drake_T_Sv[k]:+.0f} Sv)",
                       fontsize=10)
         ax.set_xlabel("Lat (°)")
@@ -183,12 +192,17 @@ def main():
     axes = np.atleast_2d(axes)
     vmax_T = float(np.nanmax(np.array(zm_T_list)))
     vmin_T = float(np.nanmin(np.array(zm_T_list)))
+    T_levels_drake = np.arange(np.floor(vmin_T), np.ceil(vmax_T) + 1, 1.0)
     for k, (yr, zmT) in enumerate(zip(years, zm_T_list)):
         i, j = k // cols, k % cols
         ax = axes[i, j]
         cf = ax.pcolormesh(drake_lats, z_full, zmT.T,
                            vmin=vmin_T, vmax=vmax_T, cmap="RdYlBu_r",
                            shading="auto")
+        cs = ax.contour(drake_lats, z_full, zmT.T,
+                         levels=T_levels_drake, colors="k",
+                         linewidths=0.4, alpha=0.6)
+        ax.clabel(cs, inline=True, fontsize=6, fmt="%g")
         ax.set_title(f"Yr {yr:.0f}", fontsize=10)
         ax.set_xlabel("Lat (°)")
         if j == 0:
