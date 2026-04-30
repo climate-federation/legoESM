@@ -790,12 +790,26 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # the free-surface gradient g*grad(eta) and using actual J here
     # would double-count it (would also create a spatially-varying
     # pressure even for uniform T/S).
+    #
+    # Partial-cell extension: when z_coord is an
+    # OceanPartialCellCoordinate, pass z_coord.h_partial as h_actual so
+    # the cumsum integrates to each cell's actual centroid depth,
+    # accounting for the partial bottom cell.  Cells below the
+    # seafloor have h_partial=0 and contribute zero pressure increment.
+    # For pure z* coord (legacy), h_actual=None falls back to dz_ref.
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    _h_actual_pprime = (
+        z_coord.h_partial
+        if isinstance(z_coord, OceanPartialCellCoordinate)
+        else None
+    )
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
         lambda field: _neumann_fill_cgrid(field, mask),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
         n_iter=2,
+        h_actual=_h_actual_pprime,
     )
 
     p_prime_filled = _neumann_fill_cgrid(p_prime, mask)
