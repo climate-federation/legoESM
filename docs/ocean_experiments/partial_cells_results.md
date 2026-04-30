@@ -156,26 +156,77 @@ this competition is a **2Δz vertical oscillation** in u(z): the
 spike level itself is largely damped, but adjacent levels hold the
 out-of-phase response.
 
+### Failed fix attempts (empirical exclusion)
+
+Beyond the experiments above, attempted in a single session:
+
+1. **Vertical viscosity sweep**: A_v from 1e-3 to 1e-1 (100× increase)
+   only drops |u|max from 99 → 81 mm/s (~18%).  The 2Δz mode is
+   actively forced faster than ``A_v`` Laplacian-form damping can
+   absorb.
+
+2. **Vertical biharmonic viscosity** (∂⁴u/∂z⁴, new ``B_v`` config
+   knob with ``Lap²`` operator).  At a 2Δz mode the biharmonic
+   stencil response is 16× stronger than the Laplacian (vs 4× at
+   4Δz), so this should preferentially damp 2Δz.  Result on the
+   seamount:
+   - B_v ≤ 10 m⁴/s: tiny effect (rate ~ 6e-9/s, decay > 5 years).
+   - B_v = 50 m⁴/s and above: model NaNs.  CFL is violated at the
+     partial seafloor where ``dz_half_ref · J`` shrinks toward
+     ``h_partial[bot] · J → 0`` and the implicit thickness
+     amplifies the per-step amplification factor.  An implicit
+     vertical biharmonic solver could fix the CFL; left as future
+     work.
+   - Reverted (does not help in the explicit forward-Euler path).
+
+3. **Piecewise-constant + piecewise-linear density-Jacobian PGF**
+   (added ``density_jacobian_pgf_x/y`` operators behind ``pgf_scheme``
+   config knob).  Implementation evaluates ``p(z)`` per column at a
+   smooth-in-k face-reference depth (``z_full_ref[k]``) via
+   analytical integration of the column ρ profile, then takes the
+   horizontal Jacobian.  Result on the seamount:
+   - Rest-state PGF residual is **88× WORSE** than Adcroft (5.9e−5
+     vs 6.8e−7 m/s²).
+   - Reason: piecewise-linear ρ(z) within each cell needs ``dρ/dz``
+     estimates to be **CONSISTENT across adjacent columns** (so that
+     ρ-at-the-same-physical-depth matches between W and E).  My
+     centered-FD estimate of ``dρ/dz_kc`` uses each column's local
+     neighbours, which differ in z because partial cells shift
+     centroids.  So adjacent columns disagree on ρ at intermediate
+     depths → spurious PGF.
+   - For the residual to genuinely cancel, ``dρ/dz`` needs a
+     **higher-order reconstruction** (cubic spline through a column's
+     ρ values with curvature constraints, as S&M 2003 actually
+     prescribes).  This is what makes S&M 2003 hard.
+   - Reverted.  The framework remains a good starting point for a
+     proper follow-up implementation.
+
+4. **Strong bottom drag**: r=5e−3 → 33 mm/s; r=1e−2 → 27 mm/s
+   (plateau); r ≥ 5e−2 → NaN (CFL violation).  The plateau at ~27 mm/s
+   with strong drag confirms the 2Δz mode at adjacent levels (where
+   drag doesn't act) holds the residual.  Workaround for testing,
+   not a real fix.
+
 ### Implication for next steps
 
-Density-Jacobian PGF (Shchepetkin & McWilliams 2003, originally task
-#12) is still the right next lever — but the reason is more specific
-than the audits stated.  It is not just "smaller per-face residual".
-It is "**continuous-in-z PGF**": the per-column ρ(z) is reconstructed
-as a polynomial spline, integrated analytically to give p(z) at any
-depth, and horizontal Jacobian taken between columns at a common
-depth.  The result is a **smoothly-distributed** PGF correction in z
-(not a single-level spike), which does not force a 2Δz mode at the
-partial bottom.
+Density-Jacobian PGF with **cubic spline ρ(z) reconstruction** is the
+genuinely-required fix for the BH gap on partial cells.  The
+simpler approaches above (piecewise-constant, piecewise-linear, or
+just-evaluate-at-different-z_target with the existing p_prime)
+*don't work*: their dρ/dz estimates are inconsistent across columns
+with different centroid placements.
 
-This rebrands #12 as the targeted fix, deferred to a follow-up PR:
-the implementation is multi-day work (cubic spline ρ(z)
-reconstruction per column, analytical integration, horizontal
-Jacobian).  The current branch delivers significant standalone value
-at this point: long-integration NaN fixed, conservation invariants
-tested, distributed BBL drag infrastructure landed, and the BH gap
-is now precisely characterised as a forced 2Δz mode rather than a
-mystery residual — concrete enough to specify the next PR.
+S&M 2003's full machinery — column-wise cubic spline of ρ vs z with
+specified boundary conditions, harmonic-mean averaging of ρ at faces
+for the Jacobian — is what produces a column-consistent reconstruction
+that gives a genuinely continuous-in-z PGF.  This is multi-day
+implementation work appropriate for a fresh follow-up PR.
+
+The current branch delivers significant standalone value: long-
+integration NaN fixed, conservation invariants tested, distributed
+BBL drag infrastructure landed, the BH gap precisely characterised
+as a forced 2Δz mode, and ALL simpler fix attempts empirically ruled
+out — so the next PR can target full S&M 2003 with confidence.
 
 ## Outstanding work
 
