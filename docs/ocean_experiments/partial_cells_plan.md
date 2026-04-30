@@ -70,6 +70,63 @@ legoESM, not just lat-lon C-grid.  Once partial cells lands:
 In other words, partial cells is a **prerequisite for production-class
 realistic-geometry runs** at every grid type.
 
+## Differentiability contract
+
+End-to-end `jax.grad` compatibility is a project-wide design goal
+(per CLAUDE.md).  Partial cells **preserves AD for all current and
+foreseeable workflows**:
+
+| Workflow | AD status |
+|---|---|
+| Training NN parameterizations on partial-cells ocean | ✅ Preserved |
+| Sensitivity of solutions to initial T/S, u, eta | ✅ Preserved |
+| Sensitivity to forcing parameters (wind, restoring, drag, mixing) | ✅ Preserved |
+| Sensitivity to physical-scheme tuning constants | ✅ Preserved |
+| MPI-distributed AD (via `_sendrecv_vjp`) | ✅ Preserved |
+| **Gradient w.r.t. bathymetry shape** (`H_bathy`) | ⚠️ **Fundamentally limited** |
+
+**Why most workflows are preserved**:
+
+- ``h_partial(i, j, k)`` is **static** once the coordinate is built.
+  It's a constant input to all traced operations during stepping —
+  identical role to ``dz_ref`` today.  No retracing, no `jit` issues.
+- All partial-cell-aware operators use ``jnp.where``, ``jnp.sum``,
+  ``jnp.maximum`` — all JAX-traceable.  No Python control flow on
+  traced values.
+- The PGF special-case at partial-cell boundaries is implemented as
+  ``jnp.where(is_partial_boundary, corrected_pgf, standard_pgf)`` with
+  a static boundary mask: both branches trace, no AD discontinuity.
+- Cells below ``bottom_level`` masked via ``jnp.where(is_active, value,
+  0.0)`` — the same pattern already used for land masking.
+
+**The one limitation: gradient w.r.t. bathymetry**
+
+``bottom_level(i, j) = first k where z_half_ref[k+1] < -H_bathy(i, j)``
+is a **discrete index** with step transitions as ``H_bathy`` varies
+continuously.  When ``H_bathy`` crosses a reference-level interface,
+``bottom_level`` jumps by 1 and the column gains/loses an active cell.
+
+Practical implication: gradient of a loss w.r.t. ``H_bathy`` has a
+*non-smooth* component at every reference-level interface.  JAX will
+silently compute some gradient (zero through the integer cast), but
+it won't be physically meaningful for bathymetry inference.
+
+**This is not legoESM-specific** — every partial-cell ocean model has
+the same limitation.  MOM6, MITgcm, POP/CESM all treat ``H_bathy`` as
+fixed input data; they don't infer it via gradient descent.  Smooth
+differentiable approximations exist (sigmoid-blended thicknesses, as
+in some adjoint ECCO setups) but are out of scope for this plan.
+
+**Explicit non-goals** of the partial-cells port:
+
+- Differentiable bathymetry inference from observations
+- Sensitivity studies w.r.t. continental-margin shape
+- Bayesian inversion of seafloor topography
+
+If any of these become research priorities later, they would be a
+separate workstream on top of partial cells (sigmoid-blended thickness
+or differentiable-bathy reformulation).
+
 ## Scientific contract
 
 After partial cells ships, the model must demonstrate:
@@ -308,8 +365,18 @@ state on step bathymetry.
   - New tests under ``use_partial_cells=True`` verify the partial-cell
     paths of every operator.
 
-**Decision gate**: legacy flat-bottom regression remains bit-exact;
-new partial-cell path is exercised by every operator at least once.
+- **AD bit-exact regression** (per the differentiability contract):
+  ``eqx.filter_value_and_grad`` of a representative loss function
+  (e.g. mean SST after a 24-h integration) on a flat-bottom run
+  produces *identical* gradient values before vs after the
+  partial-cells port, when ``use_partial_cells=False``.  Catches any
+  subtle pytree / JIT / VJP regression introduced during the
+  refactor.  ~30-line test in
+  ``tests/ocean/unit/test_partial_cells_ad_regression.py``.
+
+**Decision gate**: legacy flat-bottom regression remains bit-exact
+(forward AND adjoint); new partial-cell path is exercised by every
+operator at least once.
 
 ### Phase 7 — Validation suite + documentation  (≈ 1.5 weeks)
 
