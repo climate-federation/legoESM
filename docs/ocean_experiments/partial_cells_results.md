@@ -1,6 +1,6 @@
 # Partial cells: results summary
 
-Status as of 2026-04-30 on branch `ocean-partial-cells`.
+Status as of 2026-04-30 on branches `ocean-partial-cells` and `ocean-pgf-smc03`.
 
 ## What works
 
@@ -221,6 +221,125 @@ specified boundary conditions, harmonic-mean averaging of ρ at faces
 for the Jacobian — is what produces a column-consistent reconstruction
 that gives a genuinely continuous-in-z PGF.  This is multi-day
 implementation work appropriate for a fresh follow-up PR.
+
+## SMC03 piecewise-linear follow-up (branch `ocean-pgf-smc03`)
+
+The follow-up branch lands the harmonic-mean monotonized
+piecewise-linear S&M03 PGF as ``pgf_scheme="smc03"`` (default
+remains ``"adcroft"``).  Six commits cover the harmonic σ
+reconstruction, in-cell pressure profile, density-Jacobian PGF
+operator, PE-pipeline dispatch, and the BH script flag.  31 unit
+tests pass; the existing 69-test partial-cell regression suite is
+preserved bit-exact under the default.
+
+Validation of the building blocks:
+
+| test                                                          | result   |
+|:--------------------------------------------------------------|:---------|
+| Phase 1 harmonic σ on linear ρ                                | exact    |
+| Phase 2 in-cell P on linear ρ                                 | exact    |
+| Phase 3 stepped-bathymetry **linear** ρ rest-state PGF        | < 1e−12 m/s² (machine zero) |
+| Phase 3 cross-column σ agreement (different bot_levels)       | exact    |
+| Phase 4 H&A 2009 column-sum identity under SMC03              | < 1e−12  |
+
+These confirm that for **linear ρ(z)** the SMC03 scheme delivers
+machine-zero rest-state PGF on partial cells — the load-bearing
+property the harmonic-mean σ formulation buys.
+
+### BH headline result with SMC03
+
+Configuration: smoothing=5, r_max=0.54, ``bottom_drag_r=1e-3``,
+implicit-CN barotropic, **exponential** thermocline (the
+``rest_state_latlon_cgrid_ocean`` default ``T(z) = T_deep +
+(T_surface − T_deep)·exp(−z/scale_depth)``), centroid-aware T init,
+30-day integration:
+
+| pgf_scheme | |u|max @ day 30 | flow signature                |
+|:-----------|:---------------:|:------------------------------|
+| adcroft    | 99 mm/s         | 2Δz computational mode        |
+| smc03      | 525 mm/s        | smooth bottom-trapped current |
+| target     | < 5 mm/s        | —                             |
+
+SMC03 **does** kill the 2Δz mode forced by Adcroft's single-level
+PGF spike (verified in Phase 3 ``test_smc03_no_single_level_spike``)
+— the failure mode is now a smooth bottom-trapped current rather
+than a sawtooth oscillation.  But the **magnitude** of the steady
+state is larger than Adcroft's because the harmonic-σ
+piecewise-linear reconstruction leaves an ``O(h² · ρ'')`` residual
+in the in-cell integral, and at the deepest BH levels (h ≈ 500 m,
+ρ'' large in the exponential thermocline) this exceeds Adcroft's
+``O(h · ρ' · centroid_offset)`` residual.  Per-level rest-state
+``|dv/dt|`` (BH partial coord, smoothing=5):
+
+```
+  k=10..14:  SMC03 ~1e−9..1e−8 m/s²,  Adcroft ~3e−7 m/s²  (SMC03 wins)
+  k=15..19:  SMC03 ~1e−5..3e−5 m/s²,  Adcroft ~5e−7 m/s²  (Adcroft wins)
+```
+
+The deep-level Adcroft residual is small here because at smoothing=5
+the centroid offsets are gentle.  Adcroft's residual is also a
+single-level z-spike at each face's partial-bottom level — that's
+what forces the 2Δz mode that ultimately drives the 99 mm/s
+steady state.  SMC03's residual is spread smoothly in z but larger
+in absolute magnitude at the deepest cells, and that magnitude
+sets the steady state through nonlinear advection feedback into a
+smooth bottom-trapped current.
+
+### Pursued fallbacks (per plan §3 Phase 5)
+
+The plan's Phase 5 fallback ladder was followed:
+
+1. **Option B for ``z_face`` (per-face mean of cell centroids)**: the
+   initial Option A attempt with ``z_target = |z_full_ref[k]|`` blew
+   up to 2200 mm/s because at the partial-bottom level the
+   column-independent reference centroid can sit *below* one
+   column's actual partial seafloor, triggering the seafloor clamp
+   on one side and an in-cell evaluation on the other.  Option B
+   uses the per-face midpoint of the two adjacent column centroids,
+   which is by construction inside both columns.  Brought |u|max
+   from 2200 → 525 mm/s.  Shipped as the default in the SMC03 path.
+2. **Curvature term κ in the in-cell integral (S&M03 §4.2)**:
+   tried piecewise-parabolic ρ with κ from a centred FD of σ.
+   Negligible effect on BH (525 → 525 mm/s) — the dominant residual
+   at deep levels is the σ stencil mismatch across columns at the
+   partial-bottom, not the cell-mean curvature.  Reverted; not in
+   shipped code.
+3. **Cell-above σ extension at the partial-bottom**: copy
+   ``σ_{k-1}`` to ``σ_k`` at each column's partial-bottom level so
+   adjacent columns agree on σ there.  Negligible effect on BH —
+   the first-order σ values already approximate the local slope
+   reasonably; the residual must come from higher-order curvature
+   terms not the σ asymmetry per se.  Reverted; not in shipped code.
+
+### Genuinely-required next step
+
+Cubic-spline ρ(z) reconstruction (S&M03 §4 modified Jacobian, full
+form, not the harmonic-linear simplified form this branch
+implements).  This pushes the in-cell integral residual from
+``O(h²·ρ'')`` to ``O(h³·ρ''')`` and is what closes the BH gap for
+realistic exponential stratification.  Multi-day work, separate PR.
+
+The infrastructure landed on this branch (Phase 1 harmonic σ,
+Phase 2 piecewise-linear in-cell integral, Phase 3 face-adaptive
+PGF operator, Phase 4 PE dispatch) is exactly the right scaffolding
+for that follow-up: only ``compute_pressure_at_target_smc03`` and
+the σ reconstruction need to be upgraded; the dispatch and tests
+are reusable.
+
+### What this branch delivers regardless of the BH residual
+
+- Validated SMC03 piecewise-linear PGF that achieves machine-zero
+  rest-state PGF for **linear** ρ(z) on partial cells (Phase 3
+  test).
+- Eliminates the 2Δz computational mode that Adcroft's single-level
+  z-spike forces (Phase 3 smoothness test).
+- ``pgf_scheme`` config knob with backward-compat default (Phase 4).
+- All 69 pre-existing partial-cell regression tests preserved
+  bit-exact under the default.
+- Fully differentiable end-to-end (``jax.grad`` AD tests in each
+  phase).
+- BH script flag (``--pgf-scheme``) and a documented baseline run
+  for any future cubic-spline upgrade to compare against.
 
 The current branch delivers significant standalone value: long-
 integration NaN fixed, conservation invariants tested, distributed
