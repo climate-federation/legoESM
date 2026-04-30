@@ -1,6 +1,32 @@
 # Realistic coastlines + bathymetry on the lat-lon C-grid ocean — implementation plan
 
-**Status (2026-04-29):** Scoping only.  No implementation in tree.
+**Status (2026-04-30):** Phases 0–3a complete; **paused at Phase 3.5/4
+pending partial-cells implementation**.  See
+`partial_cells_plan.md` and
+`realistic_geometry_phase3a_results.md` for the rationale.
+
+**Why paused**: Phase 3a's empirical regime boundary (model passes
+seamount stress at r_max < 0.24) plus Phase 3a's MEO sweep on real
+ETOPO showed that getting r_max below the model's stability bound at
+2.5° resolution requires r_target ≤ 0.03 — corresponding to a +32%
+ocean volume change that effectively eliminates continental shelves
+and slopes.  The plan's "realistic geometry" promise is undermined
+if we land Phase 4 with a near-flat-bottom bathymetry.
+
+The chosen mitigation path (per the d-J PGF decision gate the plan
+explicitly flagged) is **z\* + partial cells** — the modern MOM6 /
+MITgcm production approach.  Partial cells eliminate the PGF
+cancellation problem in the bulk of the water column by keeping
+full-cell `z_k` constant horizontally; only the partial bottom cell
+needs special-case PGF treatment.  This is the production-grade
+solution that ~half of all CMIP-class ocean models use.
+
+The realistic-geometry plan resumes at Phase 3.5 once
+`partial_cells_plan.md` ships and lat-lon C-grid runs the seamount
+stress test cleanly on real ETOPO.  Phases 0–3a artefacts (MEO
+machinery, idealised-coastline tests, ETOPO ingest, regime-boundary
+characterisation) all remain valuable infrastructure regardless of
+the coordinate change.
 
 ## Motivation
 
