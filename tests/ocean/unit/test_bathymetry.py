@@ -546,3 +546,211 @@ class TestFileLoadingErrors:
         cfg = BathymetryConfig(source="unknown")
         with pytest.raises(ValueError, match="Unknown bathymetry source"):
             init_ocean_bathymetry(small_grid, cfg)
+
+
+# ============================================================================
+# Lat-lon C-grid integration (Phase 0 of realistic-geometry plan)
+# ============================================================================
+
+
+@pytest.fixture
+def latlon_grid():
+    """Small 36×72 (5°) lat-lon grid — same shape as global overturning."""
+    from legoesm.grids.latlon import create_latlon_grid
+    return create_latlon_grid(36, 72)
+
+
+class TestLatLonCGridDispatch:
+    """LatLonGrid must dispatch to its own bathymetry path, not collide
+    with cubed-sphere or Gaussian dispatch (since LatLonGrid has both
+    ``n`` (=n_lat) and ``n_lat`` attributes)."""
+
+    def test_idealized_dispatch_returns_correct_shape(self, latlon_grid):
+        cfg = BathymetryConfig(source="idealized", H_max=4000.0,
+                                land_lat_threshold=80.0)
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        assert H_bathy.shape == (36, 72)
+        assert ocean_mask.shape == (36, 72)
+
+    def test_idealized_dispatch_respects_land_threshold(self, latlon_grid):
+        cfg = BathymetryConfig(source="idealized", H_max=4000.0,
+                                land_lat_threshold=80.0)
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        # At |lat|>80°, cells should be land (mask=0).  On a 5° grid
+        # with cell centres at -87.5, ..., +87.5, this is rows 0, 1, 34, 35.
+        lat_deg = np.abs(np.asarray(latlon_grid.lat2d)) * 180.0 / np.pi
+        polar = lat_deg > 80.0
+        assert np.all(np.asarray(ocean_mask)[polar] < 0.5)
+
+    def test_does_not_collide_with_cubed_sphere(self, latlon_grid):
+        """LatLonGrid has an ``n`` property (=n_lat), but the dispatch
+        must route to the lat-lon path, not the cubed-sphere path.
+        The cubed-sphere idealized_bathymetry would produce shape
+        (6, n, n) — the wrong shape for a LatLonGrid."""
+        cfg = BathymetryConfig(source="idealized")
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        # Lat-lon shape, not cubed-sphere shape.
+        assert H_bathy.ndim == 2
+        assert H_bathy.shape[0] == latlon_grid.n_lat
+
+
+class TestLatLonCGridFileLoading:
+    """Round-trip a synthetic NetCDF bathymetry through the lat-lon
+    C-grid loader."""
+
+    def _make_synthetic_etopo_nc(self, tmp_path, n_lat_src=181, n_lon_src=360):
+        """Create a synthetic ETOPO-style NetCDF (elevation negative under
+        ocean, positive on land) for testing.  Pattern: hemisphere-symmetric
+        bowl 4000 m deep with land above |lat|=80°."""
+        import xarray as xr
+        lat = np.linspace(-90.0, 90.0, n_lat_src)
+        lon = np.linspace(0.0, 360.0, n_lon_src, endpoint=False)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        # Ocean: -4000 m everywhere; land where |lat| > 80°.
+        elev = np.where(np.abs(LAT) > 80.0, 100.0, -4000.0)
+        ds = xr.Dataset(
+            {"z": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "synthetic_etopo.nc"
+        ds.to_netcdf(path)
+        return str(path)
+
+    def test_roundtrip_synthetic_etopo(self, latlon_grid, tmp_path):
+        path = self._make_synthetic_etopo_nc(tmp_path)
+        cfg = BathymetryConfig(
+            source="file", path=path,
+            H_max=5500.0, H_min=10.0,
+            smoothing_passes=0,
+            enforce_straits=False,    # synthetic data has no real straits
+            fill_isolated_basins=False,
+            depth_is_negative=True,
+        )
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        assert H_bathy.shape == (36, 72)
+        assert ocean_mask.shape == (36, 72)
+        # Open ocean bathy should be approximately 4000 m where ocean.
+        H_arr = np.asarray(H_bathy)
+        mask_arr = np.asarray(ocean_mask)
+        ocean_depths = H_arr[mask_arr > 0.5]
+        assert ocean_depths.size > 0
+        assert np.all(np.abs(ocean_depths - 4000.0) < 100.0), (
+            f"ocean depths span [{ocean_depths.min()}, {ocean_depths.max()}], "
+            f"expected ~4000"
+        )
+        # Polar rows should be land.
+        lat_deg = np.abs(np.asarray(latlon_grid.lat2d)) * 180.0 / np.pi
+        polar_rows = lat_deg.max(axis=1) > 85.0
+        assert np.all(mask_arr[polar_rows] < 0.5)
+
+    def test_smoothing_reduces_bathymetry_variance(self, latlon_grid, tmp_path):
+        """With smoothing_passes>0, bathy should have lower variance than
+        raw (after the binary mask thresholding)."""
+        # Build a noisier synthetic file: random depth perturbation in ocean.
+        import xarray as xr
+        n_lat_src, n_lon_src = 91, 180
+        lat = np.linspace(-90.0, 90.0, n_lat_src)
+        lon = np.linspace(0.0, 360.0, n_lon_src, endpoint=False)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        rng = np.random.default_rng(seed=42)
+        noise = rng.normal(0.0, 500.0, LAT.shape)
+        elev = np.where(np.abs(LAT) > 80.0, 100.0, -4000.0 + noise)
+        ds = xr.Dataset(
+            {"z": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "noisy.nc"
+        ds.to_netcdf(path)
+
+        cfg_no_smooth = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+        )
+        H_no, mask_no = init_ocean_bathymetry(latlon_grid, cfg_no_smooth)
+
+        cfg_smooth = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=5, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+        )
+        H_smooth, mask_smooth = init_ocean_bathymetry(latlon_grid, cfg_smooth)
+
+        # Smoothing should reduce H variance over ocean cells.
+        ocean_no = np.asarray(mask_no) > 0.5
+        ocean_smooth = np.asarray(mask_smooth) > 0.5
+        var_no = float(np.var(np.asarray(H_no)[ocean_no]))
+        var_smooth = float(np.var(np.asarray(H_smooth)[ocean_smooth]))
+        assert var_smooth < var_no, (
+            f"Smoothed variance {var_smooth} should be < unsmoothed {var_no}"
+        )
+
+
+class TestLatLonCGridRestState:
+    """End-to-end rest_state_ocean_realistic on lat-lon C-grid."""
+
+    def test_idealized_yields_LatLonCGridOceanState(self, latlon_grid, z_coord):
+        from legoesm.ocean.state import LatLonCGridOceanState
+        cfg = BathymetryConfig(source="idealized", H_max=4000.0)
+        state = rest_state_ocean_realistic(latlon_grid, z_coord, cfg)
+        assert isinstance(state, LatLonCGridOceanState)
+        # Shapes
+        assert state.T.data.shape == (36, 72, 10)
+        assert state.u.data.shape == (36, 73, 10)   # u-faces
+        assert state.v.data.shape == (37, 72, 10)   # v-faces
+        assert state.eta.data.shape == (36, 72)
+        assert state.H_bathy.data.shape == (36, 72)
+        assert state.land_mask.data.shape == (36, 72)
+        # Face masks present and consistent with land mask
+        assert state.u_mask.data.shape == (36, 73)
+        assert state.v_mask.data.shape == (37, 72)
+        # Rest state: u, v, eta = 0
+        assert float(jnp.max(jnp.abs(state.u.data))) == 0.0
+        assert float(jnp.max(jnp.abs(state.v.data))) == 0.0
+        assert float(jnp.max(jnp.abs(state.eta.data))) == 0.0
+
+    def test_H_bathy_override_preserves_input(self, latlon_grid, z_coord):
+        """Calling rest_state_latlon_cgrid_ocean with H_bathy_override
+        should preserve the supplied bathymetry verbatim (after mask).
+        """
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        # Sloping bathymetry: shallow at the south, deep at the north.
+        n_lat, n_lon = 36, 72
+        H = np.linspace(500.0, 4000.0, n_lat)
+        H_bathy_in = jnp.broadcast_to(
+            jnp.asarray(H)[:, None], (n_lat, n_lon),
+        )
+        # Add a couple of land columns to test mask consistency.
+        land_mask = jnp.ones((n_lat, n_lon))
+        land_mask = land_mask.at[:, 10].set(0.0)
+        land_mask = land_mask.at[:, 30].set(0.0)
+        state = rest_state_latlon_cgrid_ocean(
+            latlon_grid, z_coord,
+            land_mask_override=land_mask,
+            H_bathy_override=H_bathy_in,
+        )
+        H_out = np.asarray(state.H_bathy.data)
+        H_in_np = np.asarray(H_bathy_in)
+        np.testing.assert_allclose(H_out, H_in_np, rtol=1e-5)
+
+    def test_H_bathy_override_derives_mask_when_not_given(
+        self, latlon_grid, z_coord
+    ):
+        """If only H_bathy_override is given, ocean_mask = (H_bathy > 0)."""
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        n_lat, n_lon = 36, 72
+        H = np.full((n_lat, n_lon), 4000.0)
+        H[0, :] = 0.0   # south pole row = land
+        H[-1, :] = 0.0  # north pole row = land
+        state = rest_state_latlon_cgrid_ocean(
+            latlon_grid, z_coord,
+            H_bathy_override=jnp.asarray(H),
+        )
+        mask = np.asarray(state.land_mask.data)
+        assert mask[0, 0] == 0.0
+        assert mask[-1, 0] == 0.0
+        assert mask[18, 36] == 1.0   # interior should be ocean

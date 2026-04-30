@@ -752,6 +752,52 @@ def load_bathymetry_mpas(
     return jnp.array(H_bathy, dtype=dtype), jnp.array(ocean_mask, dtype=dtype)
 
 
+def load_bathymetry_latlon_cgrid(
+    grid,
+    cfg: BathymetryConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Load realistic bathymetry for the lat-lon C-grid.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Target grid with lat2d/lon2d in radians, shape (n_lat, n_lon).
+    cfg : BathymetryConfig
+        Configuration.
+
+    Returns
+    -------
+    H_bathy : jnp.ndarray
+        Bathymetry depth [m], shape (n_lat, n_lon). Positive downward.
+        Set to H_max on land for smooth z* Jacobian (the land_mask
+        prevents actual flow on land cells).
+    ocean_mask : jnp.ndarray
+        1=ocean, 0=land, shape (n_lat, n_lon).
+    """
+    target_lat = np.asarray(grid.lat2d) * 180.0 / np.pi
+    target_lon = np.asarray(grid.lon2d) * 180.0 / np.pi
+    target_lon = target_lon % 360.0
+    grid_spacing = 180.0 / grid.n_lat
+
+    depth, ocean_mask = load_bathymetry(
+        target_lat, target_lon, cfg, grid_spacing_deg=grid_spacing,
+    )
+
+    # Smoothing on regular lat-lon (periodic in longitude, walls at poles).
+    depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
+
+    # Re-enforce minimum depth after smoothing.
+    ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
+    depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # For z* Jacobian smoothness: set land depth to H_max
+    # (the land_mask prevents actual flow on land cells).
+    H_bathy = np.where(ocean_mask > 0.5, depth, cfg.H_max)
+
+    dtype = get_policy().storage
+    return jnp.array(H_bathy, dtype=dtype), jnp.array(ocean_mask, dtype=dtype)
+
+
 def load_bathymetry_gaussian(
     grid,
     cfg: BathymetryConfig,
@@ -838,8 +884,30 @@ def init_ocean_bathymetry(
         )
 
 
+def _is_latlon_cgrid(grid) -> bool:
+    """LatLonGrid has dlon/dlat (regular spacing) — distinguishes from
+    CubedSphereGrid (which has the same ``n`` property), Voronoi (nCells),
+    and Gaussian (irregular Gauss latitudes, no dlat)."""
+    return (
+        hasattr(grid, 'dlon')
+        and hasattr(grid, 'dlat')
+        and hasattr(grid, 'lat2d')
+        and not hasattr(grid, 'nCells')
+        and not hasattr(grid, 'Pnm')
+    )
+
+
 def _idealized_dispatch(grid, cfg: BathymetryConfig):
     """Dispatch idealized bathymetry to appropriate grid handler."""
+    # LatLonGrid: check FIRST since it also exposes ``n`` (= n_lat) via property
+    if _is_latlon_cgrid(grid):
+        from legoesm.ocean.init_latlon_cgrid import (
+            idealized_bathymetry_latlon_cgrid,
+        )
+        return idealized_bathymetry_latlon_cgrid(
+            grid, cfg.H_max, cfg.land_lat_threshold,
+        )
+
     # CubedSphereGrid: has attribute 'n'
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         from legoesm.ocean.init import idealized_bathymetry
@@ -862,6 +930,10 @@ def _idealized_dispatch(grid, cfg: BathymetryConfig):
 
 def _file_dispatch(grid, cfg: BathymetryConfig):
     """Dispatch file-based bathymetry to appropriate grid handler."""
+    # LatLonGrid: check first
+    if _is_latlon_cgrid(grid):
+        return load_bathymetry_latlon_cgrid(grid, cfg)
+
     # CubedSphereGrid
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         return load_bathymetry_cubed_sphere(grid, cfg)
@@ -913,6 +985,11 @@ def rest_state_ocean_realistic(
     """
     H_bathy, ocean_mask = init_ocean_bathymetry(grid, cfg)
 
+    # LatLonGrid: check first
+    if _is_latlon_cgrid(grid):
+        return _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
+                                          T_surface, T_deep, S_uniform)
+
     # CubedSphereGrid
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         return _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,
@@ -929,6 +1006,26 @@ def rest_state_ocean_realistic(
                                     T_surface, T_deep, S_uniform)
 
     raise TypeError(f"Unsupported grid type: {type(grid)}")
+
+
+def _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
+                              T_surface, T_deep, S_uniform):
+    """Create lat-lon C-grid ocean rest state with given bathymetry.
+
+    Delegates to ``rest_state_latlon_cgrid_ocean`` (which handles the
+    full LatLonCGridOceanState construction including face masks and
+    z* metadata) by passing the loaded bathymetry + mask via the
+    *_override* parameters.
+    """
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    return rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        T_surface=T_surface,
+        T_deep=T_deep,
+        S_uniform=S_uniform,
+        land_mask_override=ocean_mask,
+        H_bathy_override=H_bathy,
+    )
 
 
 def _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,

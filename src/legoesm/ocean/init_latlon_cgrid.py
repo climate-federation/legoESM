@@ -59,6 +59,7 @@ def rest_state_latlon_cgrid_ocean(
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
     land_mask_override: jnp.ndarray | None = None,
+    H_bathy_override: jnp.ndarray | None = None,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -84,6 +85,13 @@ def rest_state_latlon_cgrid_ocean(
         If provided, use this as the land mask (1=ocean, 0=land) instead
         of deriving one from *land_lat_threshold*.  Face masks (u_mask,
         v_mask) are computed from it automatically.
+    H_bathy_override : array (n_lat, n_lon), optional
+        If provided, use this as the per-cell bathymetry depth [m].
+        When supplied together with *land_mask_override*, both are used
+        as-is (caller is responsible for consistency between them).
+        When supplied without *land_mask_override*, the land mask is
+        derived from ``H_bathy_override > 0``.  When neither is given,
+        a flat-bottom idealized bathymetry is constructed.
 
     Returns
     -------
@@ -93,7 +101,13 @@ def rest_state_latlon_cgrid_ocean(
     n_lon = grid.n_lon
     nlev = z_coord.n_levels
 
-    if land_mask_override is not None:
+    if H_bathy_override is not None:
+        H_bathy = jnp.asarray(H_bathy_override)
+        if land_mask_override is not None:
+            land_mask = jnp.asarray(land_mask_override)
+        else:
+            land_mask = (H_bathy > 0.0).astype(get_policy().storage)
+    elif land_mask_override is not None:
         land_mask = jnp.asarray(land_mask_override)
         H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=jnp.float64)
     else:
