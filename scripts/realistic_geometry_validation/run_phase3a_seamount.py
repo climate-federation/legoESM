@@ -146,6 +146,9 @@ def main():
                         help="Linear bottom drag coefficient [1/s]. "
                         "Beckmann-Haidvogel 1993 used 1e-3 m/s linear "
                         "drag; for our linear-r convention, ~3e-7 1/s.")
+    parser.add_argument("--bbl-thickness", type=float, default=0.0,
+                        help="Bottom boundary layer thickness [m] for "
+                        "distributed BBL drag (0 = legacy single-level).")
     args = parser.parse_args()
 
     drag_tag = "_drag{:.0e}".format(args.bottom_drag_r) if args.bottom_drag_r > 0 else ""
@@ -210,6 +213,7 @@ def main():
         barotropic_solver="implicit_cn",
         physics=None,
         bottom_drag_r=args.bottom_drag_r,
+        bottom_drag_bbl_thickness=args.bbl_thickness,
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     block_fn = _make_step_block(model, DT_SECONDS)

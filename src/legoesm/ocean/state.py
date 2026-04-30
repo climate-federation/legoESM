@@ -477,6 +477,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     B_h: float = 0.0
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3

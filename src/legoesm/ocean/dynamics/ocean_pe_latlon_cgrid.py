@@ -1348,7 +1348,53 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
-        if isinstance(z_coord, OceanPartialCellCoordinate):
+        H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        if H_BBL > 0:
+            # Distributed BBL drag (Killworth & Edwards 1999, MOM6 BBL_thick_min):
+            # spread drag over a fixed Ekman thickness ``H_BBL`` near the
+            # seafloor instead of applying ``r*u/h_partial_bot`` to a single
+            # (possibly very thin) partial cell.  Drag tendency at level k:
+            #   ∂u/∂t |_drag = -r * u(k) * (overlap_k / h_u_k) / H_BBL
+            # where overlap_k is the cell's geometric overlap with the
+            # band [z_seafloor, z_seafloor + H_BBL].
+            #
+            # Limits:
+            #   - If h_u_bot >= H_BBL: BBL fits in the bottom cell.
+            #     Bottom-cell overlap = H_BBL → drag = -r*u/h_u_bot
+            #     (recovers legacy single-cell drag).  No effect on cells
+            #     above (overlap = 0).
+            #   - If h_u_bot < H_BBL: BBL spans multiple cells.  Bottom
+            #     cell drag = -r*u/H_BBL (much weaker than legacy
+            #     -r*u/h_u_bot, fixing the audit-flagged "drag in 5m
+            #     partial cell is 100x stronger than deep ocean" issue).
+            #     Cells above bottom_level get partial-overlap drag.
+            #
+            # Build z interfaces at u/v faces from the cumulative thickness
+            # along the level axis.  For the seafloor, ``z_seafloor =
+            # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
+            # face thickness, partial-aware via min h).
+            def _bbl_drag_for_face(u_field, h_face):
+                pad_axes = ((0, 0),) * (h_face.ndim - 1)
+                z_half = jnp.concatenate([
+                    jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
+                    -jnp.cumsum(h_face, axis=-1),
+                ], axis=-1)
+                z_top = z_half[..., :-1]
+                z_bot = z_half[..., 1:]
+                z_seafloor = z_half[..., -1:]
+                bbl_top = z_seafloor + H_BBL
+                overlap = jnp.maximum(
+                    0.0,
+                    jnp.minimum(z_top, bbl_top)
+                    - jnp.maximum(z_bot, z_seafloor),
+                )
+                h_safe = jnp.maximum(h_face, 1e-10)
+                return -config.bottom_drag_r * u_field * overlap / (
+                    h_safe * H_BBL
+                )
+            diag_botdrag_u = _bbl_drag_for_face(u, h_u)
+            diag_botdrag_v = _bbl_drag_for_face(v, h_v)
+        elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Partial cells: apply drag at each column's actual seafloor
             # (the lowest active level, ``bottom_level[i,j]``), using the
             # partial-cell thickness h_partial there.  Without this, drag
