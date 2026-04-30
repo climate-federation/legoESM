@@ -427,9 +427,19 @@ found two test-design bugs that were also fixed:
 - All schemes conserve mass to machine precision (drift < 3e-15).
 
 **Implementation caveats** (from audit):
-- Test's RK3 uses **Shu-Osher SSP form**; model uses **Butcher form**.
-  Equivalent for linear schemes + constant h, but model's TVD+RK3 may
-  show slightly different overshoot behavior than the test reports.
+- Test's RK3 uses **Shu-Osher convex-combination form**; model uses
+  **Butcher weighted-flux form**. **For constant h these are
+  algebraically identical** (verified by hand expansion: both produce
+  `T_new = T - dt/h · (F0/6 + F1/6 + 2·F2/3)`, regardless of how
+  nonlinear F is). So our convergence-test results transfer to the
+  model exactly for the constant-h case.
+
+  For variable h (production with z*), the two forms differ: Butcher
+  conserves `h·T` mass exactly, Shu-Osher does not. The model
+  docstring's claim that they "differ for nonlinear limiters" is
+  **only correct for variable h**. The convergence tests do not
+  exercise this case.
+
 - Test's AB2 first step matches the model's eager `step()` path. The
   `integrate_scan` (training) path pre-initializes prev flux to zero,
   giving a different first-step behavior (1.6× Euler).
@@ -448,41 +458,68 @@ give rate 3 (min of 5th spatial, 3rd temporal at fixed CFL). Observed:
 
 Dycore-expert audit traced the cause:
 
-The discrete FV divergence `(F_E - F_W)/dx`, even with **exact** face
-values, is only **2nd-order accurate** as an approximation of `dF/dx`
-at the cell center. For sin(2x) with exact face values:
-```
-(F_E - F_W)/dx = 2*cos(2x_c) * sinc(dx)
-                = 2*cos(2x_c) * (1 - dx²/6 + ...)
-```
-The `sinc(dx)` factor introduces a per-unit-time phase error of
-`u*(1-sinc(dx)) ≈ u*dx²/6`, giving global error O(dx²).
+**Initial diagnosis: O(dx²) FV-divergence ceiling**
 
-This is NOT the WENO reconstruction's fault. WENO5 face values ARE
-5th-order accurate (verified). The ceiling is **inherent to the discrete
-FV divergence operator** when the prognostic variable is interpreted
-as a point value (as in the model's WENO wrapper which converts
-point→cellavg before reconstruction).
+We initially attributed this rate-2 limit to the discrete FV divergence
+operator: `(F_E - F_W)/dx ≈ 2·cos(2x_c)·sinc(dx)` differs from `∂F/∂x`
+at the cell center by `dx²/6` for sin(2x). At n=32 with sin(2·lon),
+`dx²/6 ≈ 6.4e-3` matches the observed WENO5+RK3 L2 = 6.7e-3. The
+analysis was numerically convincing.
 
-**The model has a built-in O(dx²) accuracy ceiling for tracer advection.**
-Higher-order spatial schemes buy lower prefactors at coarse resolution
-but identical asymptotic rate. To break this ceiling would require
-either:
-- Treating T as a true cell-average throughout (skip WENO's internal
-  point→cellavg conversion, which would require model-level changes)
-- Or using a high-order divergence operator (e.g., 4th-order
-  staggered-grid finite differences instead of `(F_E - F_W)/dx`)
+**Corrected diagnosis (2026-04-30 dycore audit): inconsistent cell-avg
+semantics, not FV divergence**
 
-This was validated numerically: at n=32 with sin(2*lon), `dx²/6 ≈ 6.4e-3`,
-matches observed WENO5+RK3 L2 = 6.7e-3. At n=256, `dx²/6 ≈ 1.0e-4`,
-matches observed L2 = 1.05e-4.
+A subsequent dycore-expert audit found the actual cause is a
+**design inconsistency in the WENO wrapper**:
 
-**Practical implication**: WENO+RK3's biggest win in our ocean model
-isn't formal accuracy — it's **stability** (the Level 2 deformational
-flow blowups we saw with WENO+Euler should disappear with RK3) and
-**lower error magnitudes at production resolutions**. The asymptotic
-2nd-order rate from the divergence operator is something the model
-just lives with.
+- The wrapper `_weno_to_u_points` calls `point_to_cellavg_periodic` on
+  every step, treating its input T as point values.
+- The semi-discrete FV update `T_new = T - (dt/h)·div` is exact for
+  **cell-average** evolution.
+- After step 1, the prognostic T is effectively a cell-average. Step 2
+  then applies the conversion to data that's already cell-averaged,
+  producing a per-step O(dx²) double-conversion bias.
+
+**Numerical verification** (sin(2·lon), CFL=0.5, fixed total advection):
+
+| Test variant | rate (32→256) | L2 at n=256 |
+|---|---|---|
+| Current model (point IC, internal conv, point exact) | **2.00** | 1.05e-4 |
+| Consistent FV-WENO (cellavg IC, no internal conv, cellavg exact) | **3.11** | 6.35e-7 |
+
+With consistent semantics, WENO5+RK3 hits rate 3 (the RK3 temporal limit
+at fixed CFL, since `dt ∝ dx` implies `O(dt³) = O(dx³)`). The "rate-2
+FV-divergence ceiling" was an artifact of the inconsistency, not a
+fundamental property of finite-volume methods.
+
+**Implementation inconsistency in the model:**
+
+- `_weno_to_u_points`, `_weno_to_v_points` (horizontal): apply point→cellavg
+  before WENO reconstruction
+- `flux_form_vertical_tracer_advection_weno5`, `_weno7` (vertical):
+  build the stencil directly from the field, **no conversion**
+
+These two routines have different semantics for "what is T at cell
+center." Neither is fully self-consistent with the FV update. Standard
+FV-WENO (Shu 2009) treats T as cell-averages throughout, with no
+conversion in the WENO call. The vertical implementation is closer to
+this standard; the horizontal needs to either drop the conversion or
+the entire pipeline (initial conditions, comparisons, vertical scheme)
+needs to be made consistent with point-value semantics.
+
+**Practical implications:**
+
+1. The reported rate ~2 in our convergence tests **measures the model's
+   actual behavior** with current code. A user running WENO5+RK3 on a
+   smooth field will see rate-2 convergence in practice.
+2. The ceiling is **not a fundamental FV limitation** — it's fixable
+   by aligning the WENO wrapper with the rest of the FV pipeline.
+3. WENO5+RK3 still wins by large margins on absolute error and on
+   stability under sharp-gradient flows. The big practical advantages
+   are unchanged.
+4. Fixing the WENO consistency is a **model-level change** that should
+   be done carefully (touches advection.py, the test ICs, and the
+   vertical scheme). Not in scope for this branch.
 
 **DST3+RK3 puzzle (rate 0.99)**: DST-3's CFL-dependent coefficients
 encode the time-truncation correction (Lax-Wendroff style). RK3
@@ -496,6 +533,25 @@ accuracy. This is by design (for stability) but means AB2 is closer to
 "forward Euler with one previous tendency for damping" than a true
 2nd-order scheme. Verified: WENO+AB2 mixes the rate-2 FV ceiling with
 rate-1 temporal error, giving the apparent rate ≈ 0.6 we observed.
+
+**AB2 stability margin (corrected 2026-04-30 dycore audit)**: An
+earlier note implied ε reduces the stability margin. **The opposite
+is true.** Standard AB2 (ε=0) has imaginary-axis stability boundary
+at |dt·λ| ≈ 0.004 — essentially **unstable** for pure advection.
+The ε term shifts the spurious AB2 root inside the unit disk:
+
+| ε | Imag-axis stability margin |
+|---|---|
+| 0.00 | 0.004 (essentially unstable) |
+| 0.05 | 0.397 |
+| 0.10 | 0.502 |
+| 0.20 | 0.583 |
+
+ε=0.1 is what **makes AB2 viable** for advection — without it, AB2 is
+unconditionally unstable for hyperbolic operators. This is the standard
+MITgcm convention and matches Adcroft et al.'s manual. The CFL warning
+in `ocean_model_latlon_cgrid.py` (~0.72 with ε=0.1) is consistent with
+this margin estimate.
 
 ### 2026-04-29: Level 2 redone with AB2 and RK3 — main hypothesis confirmed
 
@@ -653,11 +709,31 @@ Domain: 4 × n_lon × n_lev with uniform 100m layers, total depth 5500m.
 
 **Findings:**
 
-1. **No blowups for any combination.** WENO+Euler is stable here — the
-   vertical advection's smaller CFL (w_max << u_max) doesn't amplify
-   the WENO oscillations the way solid body rotation did. So Euler
-   instability is **flow-regime-dependent**, not a universal property
-   of WENO+Euler.
+1. **No blowups for any combination.** WENO+Euler is stable here.
+
+   **Initial diagnosis (incorrect):** "smaller vertical CFL keeps the
+   instability from growing." This is wrong — the dycore audit verified
+   that at the test configuration n_lon=128, n_lev=64, vertical and
+   horizontal CFL are comparable: CFL_w ≈ 0.27, CFL_u ≈ 0.30.
+
+   **Corrected diagnosis (2026-04-30):** Two real reasons:
+   (a) The Level 3 IC is a wide Gaussian (σ_lon = π/4, σ_z = H/6) under
+   a gentle overturning ψ ∝ sin(2πx/L)·sin(πz/H). It stays smooth and
+   never produces grid-scale filaments — unlike Level 2 deformational,
+   where filaments narrow below dx and trigger the Euler+WENO
+   instability mode.
+   (b) The vertical WENO routines do NOT do the point→cellavg conversion
+   (advection.py:1023-1087), so they're effectively 3rd-order asymptotic
+   and more diffusive than the horizontal WENO (which is 5th-order with
+   the conversion bug). The extra vertical diffusion adds enough
+   numerical viscosity to push WENO eigenvalues into the Euler stability
+   region, where horizontal WENO sits on the imaginary axis.
+
+   So the "WENO+Euler is stable in 3D" finding is fragile and depends
+   on (a) the chosen IC being smooth enough that no filaments form,
+   and (b) an inconsistency in the vertical WENO that adds extra
+   diffusion. A sharper IC, or fixing the WENO consistency, would
+   likely expose Euler+WENO instability in 3D too.
 
 2. **WENO+RK3 dominates by 50×** at fine resolution (0.00027 vs 0.013
    for TVD+RK3, the second-best). This is the largest scheme-pairing
@@ -702,11 +778,104 @@ Domain: 4 × n_lon × n_lev with uniform 100m layers, total depth 5500m.
   combinations** — flux-form FV update preserves mass to machine
   precision regardless of scheme order or integrator stage count.
 
-**Status of testing plan: COMPLETE**
+**Status of testing plan**
+
+Idealized test matrix complete:
 - Level 1 (1D zonal): 5 schemes × 3 integrators × {sine, gaussian} ✓
 - Level 2(A) (solid body rotation): 5 schemes × 3 integrators ✓
 - Level 2(B) (deformational): 5 schemes × 3 integrators ✓
 - Level 3 (3D overturning): 5 schemes × 3 integrators ✓
+
+### 2026-04-30: Three-reviewer audit — known gaps and corrections
+
+After the testing matrix completed, ocean-modeling, dycore, and dycore-tester
+reviewers audited the work. Their consolidated feedback identified several
+real issues already corrected above (rate-2 misattribution, AB2-ε direction,
+L3 stability cause, Shu-Osher/Butcher equivalence under constant h). The
+following gaps remain and should be flagged before any production decision:
+
+**Real implementation issues found:**
+
+1. **WENO horizontal/vertical inconsistency**: Horizontal `_weno_to_u/v_points`
+   apply `point_to_cellavg_periodic` before the stencil; vertical
+   `flux_form_vertical_tracer_advection_weno{5,7}` do not. Two different
+   semantics for "what is T at a cell center." Standard FV-WENO (Shu 2009)
+   uses cell-averages throughout. **Fixing this is a model-level change**,
+   not in scope for this branch. Without the fix, horizontal WENO is rate-2
+   limited from the double-conversion bias; vertical WENO is effectively
+   3rd-order from missing the conversion (which incidentally adds enough
+   numerical diffusion that WENO+Euler doesn't blow up in vertical flow).
+
+2. **AB2 + nonlinear-limiter monotonicity loss is a hard fail for BGC**:
+   Linf=0.84 in TVD+AB2 means the scheme produces values ~80% larger than
+   the IC max — for biogeochemistry tracers with positivity requirements
+   (O₂, nutrients), this gives negative concentrations. The `LatLonCGridOceanConfig`
+   docstring should warn that AB2 must NOT be paired with TVD/PPM-FCT/WENO
+   for BGC tracers.
+
+**Methodology gaps the tests did NOT exercise:**
+
+3. **No varying-h (z* coordinate) testing**. All tests use uniform layer
+   thickness. The Butcher-vs-Shu-Osher equivalence breaks down for
+   varying h, and the model's actual production path (with eta-driven h
+   changes from the barotropic step) was never tested. Mass conservation
+   to machine precision is a constant-h result; production behavior is
+   unknown.
+
+4. **No FP32 testing**. All tests use `JAX_ENABLE_X64=1`. Production GPU
+   runs may use mixed precision. AB2 differences-of-near-equal numbers
+   are particularly susceptible; not tested.
+
+5. **No JIT'd benchmarks**. All wall times are eager-mode dispatch. The
+   AB2 vs RK3 cost ratio (claimed ~3×) reflects op-count in eager mode,
+   not fully-fused kernel cost. Don't cite the wall times.
+
+6. **Endpoint-only convergence rates can mislead**. We added pairwise
+   reporting (commit on this branch) — interpret carefully. For example,
+   TVD+RK3 SBR endpoint rate=1.30 hides pairwise rates of 1.32, 0.60, 0.14
+   (clearly not asymptotic at the finest grid). Several "rate ~2" claims
+   for WENO+RK3 are similarly endpoint-only across 3 grids.
+
+7. **Mass conservation degeneracy for sine IC**. For sin(2·lon),
+   `mass_init ≈ 0` (period-integrated sine), so `mass_drift = O(eps)/O(eps)`
+   is dominated by round-off. The "machine-precision conservation" claim
+   is meaningful only for the Gaussian/cosine-bell ICs, not the sine
+   sanity-check.
+
+8. **Scheme coverage incomplete**: ppm, ppm_fct, dst3_multidim, and SOM
+   (beyond L1+Euler) are not in the L2/L3 matrix. The model exposes them.
+   PPM-FCT in particular is the canonical "monotone + high-order" choice
+   and its absence is a real coverage hole.
+
+9. **Production conditions absent**: no land mask, no stratification,
+   no Coriolis, no realistic baroclinic eddies, no coastlines, no wetting.
+   Conclusions are valid for "advecting smooth bumps in prescribed flow"
+   — they do not directly justify a production default change.
+
+**Highest-value next steps (ocean-expert priorities):**
+
+1. Wire one Level-2-style test through the model's actual `step()` path
+   (so the integrator and tracer pipeline are the real ones, not the
+   simplified test re-implementation).
+2. **Ledwell-style κ_eff diagnostic** — 1-year tracer release, second-
+   moment growth — gives a number directly comparable to Hill et al. (2012)
+   Table 1.
+3. **Slotted cylinder IC** — sharp-front advection to expose
+   non-monotonicity quantitatively.
+4. Z* coordinate test with varying h.
+5. Lock-exchange (stratified gravity current).
+6. DCMIP-2012 Test 1 (sphere, with published numbers to compare against).
+
+**Recommendation: do not change the production tracer-advection default
+to WENO5+RK3 from these tests alone.** The current default (TVD+Euler)
+is robust, monotone, cheap, and well-understood. WENO5+RK3 has clear
+advantages on idealized problems but production-path validation is
+missing.
+
+The work IS valuable as: (a) it found and fixed two real source-code
+bugs (WENO point→cellavg conversion, divergent test flow); (b) it
+demonstrates that AB2 and RK3 are now functional in the model;
+(c) it produces a clear test infrastructure that future work can build on.
 
 **Recommended pairings (for the model):**
 - Production tracer advection: **TVD+Euler** (cheap, robust) or

@@ -628,19 +628,28 @@ def main():
               f"{r['l1']:>10.2e} {r['l2']:>10.2e} {r['linf']:>10.2e} "
               f"{r['mass_drift']:>12.2e} {r['cfl']:>6.3f}")
 
-    # Convergence rates per (scheme, integrator)
+    # Convergence rates per (scheme, integrator) — pairwise + endpoint
     print(f"\n  Convergence rates (L2):")
+    print(f"    {'Scheme+TI':<20}  {'pairwise rates':<30}  {'endpoint':>10}")
     for ti in time_integrators:
         for scheme in schemes:
             sr = sorted([r for r in all_results
                          if r["scheme"] == scheme and r["time_integrator"] == ti],
                         key=lambda r: r["n_lon"])
-            if len(sr) >= 2 and sr[-1]["l2"] > 0 and sr[0]["l2"] > 0:
-                rate = (np.log(sr[0]["l2"] / sr[-1]["l2"])
+            if len(sr) < 2 or sr[-1]["l2"] <= 0 or sr[0]["l2"] <= 0:
+                continue
+            # Pairwise rates
+            pw = []
+            for i in range(1, len(sr)):
+                if sr[i]["l2"] > 0 and sr[i-1]["l2"] > 0:
+                    r_pw = (np.log(sr[i-1]["l2"] / sr[i]["l2"])
+                            / np.log(sr[i]["n_lon"] / sr[i-1]["n_lon"]))
+                    pw.append(r_pw)
+            endpoint = (np.log(sr[0]["l2"] / sr[-1]["l2"])
                         / np.log(sr[-1]["n_lon"] / sr[0]["n_lon"]))
-                expected = EXPECTED_ORDERS.get(scheme, "?")
-                print(f"    {scheme:<10} + {ti:<6}: rate={rate:>5.2f}  "
-                      f"L2(coarse)={sr[0]['l2']:.2e}  L2(fine)={sr[-1]['l2']:.2e}")
+            pw_str = ", ".join(f"{r:.2f}" for r in pw)
+            label = f"{scheme}+{ti}"
+            print(f"    {label:<20}  {pw_str:<30}  {endpoint:>10.2f}")
     print(f"\n  Total wall time: {total_wall:.1f}s")
 
     # Save summary
