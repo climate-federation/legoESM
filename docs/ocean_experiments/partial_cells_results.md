@@ -45,18 +45,78 @@ at each column's `bottom_level`):
 | 5         | 0.54  | 32        | 114            |
 | 20        | 0.54  | 32        | 114            |
 
-Neither coord meets the 5 mm/s threshold. Two observations:
+Neither coord meets the 5 mm/s threshold.
 
-1. Rest-state PGF residual on partial is much lower, but the
-   equilibrated spurious flow is **higher**. Diagnostic shows the
-   flow is bottom-trapped at `lev 17-19` (depth 3000-3800 m) over
-   the seamount slopes. The PGF residual is small but persistent;
-   without a Coriolis-balancing partner at the seafloor, even tiny
-   PGF accelerates flow until friction balances it.
+### Update after P0 face-thickness consistency fix
 
-2. Smoothing beyond ~5 passes converges to the same r_max = 0.54
-   (the seamount itself has structure that smoothing cannot reduce
-   below this) and the residual saturates accordingly.
+Re-running BH at smoothing=5 with all P0 + P1 fixes (face-thickness
+unified to ``min``, conservation tests, distributed BBL drag option,
+sigma fix in ``diagnose_w_from_flux_div``):
+
+| smoothing | r_max | z* (mm/s) | partial (mm/s) |
+|:---------:|:-----:|:---------:|:--------------:|
+| 0         | 0.72  | 97        | 101            |
+| 5         | 0.54  | 35        | 99             |
+
+Face-thickness fix delivered the predicted 3.7x improvement at
+smoothing=0 (375 → 101 mm/s) but only modest improvement at smoothing=5
+(114 → 99 mm/s).  Distributed BBL drag (BBL=50, 100, 200 m) is a wash
+at this test (the residual concentrates at thick deep cells where
+BBL fits inside the bottom cell).
+
+### Root-cause diagnostic (Phase 7 follow-up)
+
+Direct probing of the partial-cells |u|max profile at smoothing=5,
+day 30, at the column where |u|max occurs (lat=−2.5°, lon=205°,
+H_bathy=3805 m, bottom_level=19, surface):
+
+```
+  lev  0..10 (0..1100 m):  smooth profile, |u| = 2-22 mm/s
+  lev 11..14 (1300..2100 m): mid amplitude, |u| ~ 2-62 mm/s
+  lev 15: u =   2 mm/s
+  lev 16: u = -14 mm/s
+  lev 17: u =   2 mm/s
+  lev 18: u = -99 mm/s   ← |u|max
+  lev 19: u =   0 mm/s   (drag sink, partial bottom cell)
+```
+
+This is **NOT** a smooth bottom-trapped boundary current.  It is a
+**vertical 2Δz computational mode** with alternating sign at adjacent
+levels, growing in amplitude toward the partial seafloor.  Z* on the
+same setup shows a smooth surface-trapped profile (|u|max=35 mm/s at
+lev 0), no oscillation.
+
+**Consequences for the BH gap fix path**:
+
+- Increasing vertical viscosity ``A_v`` 100× (from 1e-3 to 1e-1) only
+  drops |u|max from 99 to 81 mm/s.  The mode is being actively forced
+  faster than ``A_v`` can damp it.
+- Disabling the Adcroft correction makes |u|max blow up to 3500 mm/s
+  with a smooth profile.  So Adcroft IS doing essential magnitude
+  work — but introduces the 2Δz mode as a side effect.
+
+The 2Δz mode is consistent with the Adcroft per-face pressure shift
+having a discontinuous z-structure: the correction at each face level
+depends on the centroid mismatch at THAT level, which jumps when the
+adjacent columns have different ``bottom_level``.  The vertical
+profile of the correction therefore has step-function behaviour that
+the discrete vertical viscosity cannot smooth.
+
+### Implication for next steps
+
+Density-Jacobian PGF (Shchepetkin & McWilliams 2003, originally task
+#12) is still the right next lever — but the reason is **not**
+"smaller per-face residual".  It is **vertical smoothness of the
+correction**: a polynomial-spline density reconstruction in z
+produces a continuously-differentiable PGF that does not excite 2Δz
+modes.
+
+This rebrands #12 as the targeted fix, deferred to a follow-up PR:
+the implementation is multi-day work (cubic spline ρ(z)
+reconstruction per column, analytical integration, horizontal
+Jacobian), and the leap-stc/legoESM partial-cells branch already
+delivers significant standalone value at this point (long-integration
+NaN fixed, conservation invariants tested, BBL infrastructure landed).
 
 ## Outstanding work
 
