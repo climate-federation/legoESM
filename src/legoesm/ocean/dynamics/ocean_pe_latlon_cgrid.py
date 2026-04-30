@@ -1325,13 +1325,54 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
-        dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
-        dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
-        # Capture only at the bottom level; zeros elsewhere.
-        diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
-            -config.bottom_drag_r * u[..., -1] / dz_bot_u)
-        diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
-            -config.bottom_drag_r * v[..., -1] / dz_bot_v)
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            # Partial cells: apply drag at each column's actual seafloor
+            # (the lowest active level, ``bottom_level[i,j]``), using the
+            # partial-cell thickness h_partial there.  Without this, drag
+            # would only act at the deepest reference level (``nlev-1``)
+            # in deep columns and not damp the bottom-trapped spurious
+            # flow on shallower seamount slopes.
+            n_lev = u.shape[-1]
+            level_idx = jnp.arange(n_lev)
+            # is_bottom_3d at u-faces / v-faces: 1.0 at the partial
+            # bottom for that face's COLUMN.  We use the cell-center
+            # bottom_level interpolated to faces (face's bottom level
+            # is the SHALLOWER of the two adjacent columns — already
+            # the only active level there since the deeper column's
+            # cell at that level may be active too).
+            bot_lev_cell = z_coord.bottom_level
+            # u-face bottom_level: min of west/east cell (shallower wins).
+            bot_lev_u_inner = jnp.minimum(
+                jnp.roll(bot_lev_cell, 1, axis=1), bot_lev_cell,
+            )
+            bot_lev_u = jnp.concatenate(
+                [bot_lev_u_inner, bot_lev_u_inner[:, 0:1]], axis=1,
+            )
+            # v-face bottom_level: min of south/north cell.
+            bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
+            bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)),
+                                 constant_values=0)
+            is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
+                            == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
+            is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
+                            == bot_lev_v[..., jnp.newaxis]).astype(v.dtype)
+            # Partial-cell h at faces (already partial-aware via h_k dispatch).
+            h_u_drag = jnp.maximum(h_u, 1e-10)
+            h_v_drag = jnp.maximum(h_v, 1e-10)
+            diag_botdrag_u = (
+                -config.bottom_drag_r * u / h_u_drag * is_bot_u_3d
+            )
+            diag_botdrag_v = (
+                -config.bottom_drag_r * v / h_v_drag * is_bot_v_3d
+            )
+        else:
+            dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
+            dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
+            # Capture only at the bottom level; zeros elsewhere.
+            diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
+                -config.bottom_drag_r * u[..., -1] / dz_bot_u)
+            diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
+                -config.bottom_drag_r * v[..., -1] / dz_bot_v)
         du_dt = du_dt + diag_botdrag_u
         dv_dt = dv_dt + diag_botdrag_v
 
