@@ -1933,6 +1933,114 @@ def partial_cell_pgf_correction_y(
     return correction / dy_v
 
 
+# =============================================================================
+# Density-Jacobian PGF (Shchepetkin & McWilliams 2003) — building blocks
+# =============================================================================
+
+
+def reconstruct_harmonic_slopes(
+    rho_per_cell: jnp.ndarray,
+    z_centroid: jnp.ndarray,
+    is_active: jnp.ndarray,
+    eps: float = 1e-30,
+) -> jnp.ndarray:
+    """Per-cell harmonic-mean monotonized density slopes ``σ_k``.
+
+    For Shchepetkin & McWilliams 2003 density-Jacobian PGF.  Within
+    each cell ``k`` of a column we represent ``ρ(z) = ρ_k + σ_k · (z −
+    z_centroid_k)``.  The slope ``σ_k`` is the harmonic mean of the
+    one-sided slopes computed from the cell-centroid finite differences
+
+        Δρ_top_k = (ρ_{k-1} − ρ_k) / (z_{k-1} − z_k)
+        Δρ_bot_k = (ρ_k − ρ_{k+1}) / (z_k − z_{k+1})
+        σ_k      = 2 · Δρ_top · Δρ_bot / (Δρ_top + Δρ_bot)
+
+    monotonized to zero at extrema (signs differ).  Two key properties:
+
+    1. For linear ρ(z), ``Δρ_top = Δρ_bot = a`` and ``σ_k = a`` exactly
+       in every column, regardless of where the centroids sit.  This
+       makes adjacent columns reconstruct ρ at intermediate depths
+       identically — the property that lets the rest-state PGF vanish
+       on partial cells with shifted centroids.
+    2. At local extrema the limiter sets ``σ_k = 0`` (flat-top), so the
+       reconstruction is monotone (no overshoots).
+
+    Boundary handling:
+    - Top cell (no neighbour above): ``σ_0 = Δρ_bot_0`` (one-sided).
+    - Bottom-active cell (no active neighbour below — the partial
+      seafloor): ``σ_{bot} = Δρ_top_{bot}`` (one-sided).
+    - Inactive cells (below seafloor): ``σ = 0``.
+
+    Parameters
+    ----------
+    rho_per_cell : array, shape (..., nlev)
+        Cell-mean density [kg/m³] (often the baroclinic anomaly
+        ``ρ'`` from ``iterate_eos_and_pressure_anomaly``).
+    z_centroid : array, shape (..., nlev)
+        Per-cell centroid depth [m], positive downward.
+    is_active : array, shape (..., nlev)
+        1.0 for wet cells, 0.0 below the partial seafloor.
+    eps : float
+        Safety floor for the harmonic-mean denominator.
+
+    Returns
+    -------
+    sigma : array, shape (..., nlev)
+        Per-cell density slope [kg/m⁴] (dρ/dz, positive z downward).
+
+    References
+    ----------
+    Shchepetkin & McWilliams (2003), JGR Oceans 108(C9), §4.
+    """
+    rho = rho_per_cell
+    z = z_centroid
+    active_f = is_active.astype(rho.dtype)
+
+    # Roll along the cell axis to get neighbour values.  Boundary slots
+    # (k=0 above, k=nlev-1 below) are filled with the cell's own values
+    # so that "Δρ" at the boundary safely evaluates to zero — the
+    # boundary mask below selects the correct one-sided fall-back.
+    rho_above = jnp.concatenate([rho[..., :1], rho[..., :-1]], axis=-1)
+    rho_below = jnp.concatenate([rho[..., 1:], rho[..., -1:]], axis=-1)
+    z_above = jnp.concatenate([z[..., :1], z[..., :-1]], axis=-1)
+    z_below = jnp.concatenate([z[..., 1:], z[..., -1:]], axis=-1)
+
+    # Has-active-neighbour masks.  The slot at k=0 has no upper
+    # neighbour by construction; same for k=nlev-1 below.
+    is_active_above = jnp.concatenate(
+        [jnp.zeros_like(active_f[..., :1]), active_f[..., :-1]], axis=-1,
+    )
+    is_active_below = jnp.concatenate(
+        [active_f[..., 1:], jnp.zeros_like(active_f[..., -1:])], axis=-1,
+    )
+    has_top = (active_f * is_active_above) > 0.5
+    has_bot = (active_f * is_active_below) > 0.5
+
+    # Safe-divide one-sided slopes.  When there is no active neighbour
+    # the denominator can be zero; we substitute 1 to keep gradients
+    # finite and zero out the result via ``jnp.where``.
+    dz_top = z_above - z
+    dz_bot = z - z_below
+    safe_dz_top = jnp.where(has_top, dz_top, 1.0)
+    safe_dz_bot = jnp.where(has_bot, dz_bot, 1.0)
+    delta_top = jnp.where(has_top, (rho_above - rho) / safe_dz_top, 0.0)
+    delta_bot = jnp.where(has_bot, (rho - rho_below) / safe_dz_bot, 0.0)
+
+    # Harmonic mean of one-sided slopes (when both signs agree).
+    sum_slopes = delta_top + delta_bot
+    safe_sum = jnp.where(jnp.abs(sum_slopes) > eps, sum_slopes, eps)
+    sigma_harm = 2.0 * delta_top * delta_bot / safe_sum
+    same_sign = (delta_top * delta_bot) > 0.0
+    sigma_interior = jnp.where(same_sign, sigma_harm, 0.0)
+
+    sigma = jnp.where(
+        has_top & has_bot, sigma_interior,
+        jnp.where(has_top, delta_top,
+                  jnp.where(has_bot, delta_bot, 0.0)),
+    )
+    return jnp.where(active_f > 0.5, sigma, 0.0)
+
+
 def compute_face_masks(
     land_mask: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
