@@ -2143,6 +2143,113 @@ def compute_pressure_at_target_smc03(
     return P_top_kt + g * dz * rho_eff
 
 
+def density_jacobian_pgf_smc03_x(
+    rho_per_cell: jnp.ndarray,
+    h_partial: jnp.ndarray,
+    is_active: jnp.ndarray,
+    z_full_ref: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Density-Jacobian PGF at u-faces (S&M03 §4) — zonal direction.
+
+    Replaces the cumsum ``p'`` + Adcroft-Campin face-correction stack
+    with a per-column ``P(z)`` reconstruction from harmonic-mean
+    monotonized slopes, evaluated at a face-reference depth and
+    differenced horizontally.
+
+    Algorithm (per face level ``k_f``):
+
+    1. Per-column ``z_centroid`` = ``cumsum(h_partial) − 0.5 h``.
+       (η=0 reference, consistent with the rest of the baroclinic
+       path.)
+    2. Per-column ``σ`` from ``reconstruct_harmonic_slopes``.
+    3. ``z_target = |z_full_ref[k_f]|`` (positive downward) — same
+       depth across all columns at level ``k_f`` (Option A from
+       plan §2.3).
+    4. ``P_at_target`` per column from
+       ``compute_pressure_at_target_smc03``.
+    5. Horizontal Jacobian: ``∂P/∂x = (P_E − P_W) / dx_u``, periodic
+       in longitude.
+
+    Output shape matches ``gradient_x_cgrid``: ``(n_lat, n_lon+1,
+    nlev)``, with face j=n_lon wrapping to face j=0.
+
+    For columns where ``z_target`` lies below the partial seafloor
+    (deep faces above shallow columns), ``compute_pressure_at_target_smc03``
+    clamps to the column's seafloor — finite output, but the face
+    mask in ``ocean_pe_latlon_cgrid`` should already zero the dp/dx
+    contribution at those inactive faces.
+    """
+    # Sign convention: depths positive downward.  z_full_ref is
+    # negative (height); take abs.
+    z_target_1d = jnp.abs(z_full_ref).astype(rho_per_cell.dtype)
+    # Broadcast to one target per column at each level.
+    z_target = jnp.broadcast_to(
+        z_target_1d, rho_per_cell.shape,
+    )
+
+    # Per-column geometry.
+    z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
+    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+
+    # Per-column pressure at the per-level reference depth.
+    P = compute_pressure_at_target_smc03(
+        rho_per_cell, h_partial, z_centroid, sigma, z_target, g,
+    )                                                  # (n_lat, n_lon, nlev)
+
+    # Horizontal Jacobian at u-faces.  u-face j is between cell W=(j-1)
+    # mod n_lon (west) and cell E=j (east).
+    P_E = P
+    P_W = jnp.roll(P, 1, axis=1)
+    diff_interior = P_E - P_W                           # (n_lat, n_lon, nlev)
+    diff = jnp.concatenate([diff_interior, diff_interior[:, 0:1, :]], axis=1)
+
+    R = grid.radius
+    dlon = grid.dlon
+    cos_lat = grid.cos_lat
+    dx_u = R * dlon * cos_lat                           # (n_lat,)
+    return diff / dx_u[:, jnp.newaxis, jnp.newaxis]
+
+
+def density_jacobian_pgf_smc03_y(
+    rho_per_cell: jnp.ndarray,
+    h_partial: jnp.ndarray,
+    is_active: jnp.ndarray,
+    z_full_ref: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Density-Jacobian PGF at v-faces (S&M03 §4) — meridional direction.
+
+    Same machinery as ``density_jacobian_pgf_smc03_x``; v-face i is
+    between cell S=(i−1) and cell N=i; pole faces (i=0, i=n_lat) are
+    walls and pad with zero (consistent with v=0 at the wall).
+
+    Output shape: ``(n_lat+1, n_lon, nlev)``.
+    """
+    z_target_1d = jnp.abs(z_full_ref).astype(rho_per_cell.dtype)
+    z_target = jnp.broadcast_to(z_target_1d, rho_per_cell.shape)
+
+    z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
+    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+
+    P = compute_pressure_at_target_smc03(
+        rho_per_cell, h_partial, z_centroid, sigma, z_target, g,
+    )                                                  # (n_lat, n_lon, nlev)
+
+    P_N = P[1:]                                         # (n_lat-1, n_lon, nlev)
+    P_S = P[:-1]
+    diff_interior = P_N - P_S
+    pad_axes = ((0, 0),) * (diff_interior.ndim - 1)
+    diff = jnp.pad(diff_interior, ((1, 1), *pad_axes))
+
+    R = grid.radius
+    dlat = grid.dlat
+    dy_v = R * dlat
+    return diff / dy_v
+
+
 def compute_face_masks(
     land_mask: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
