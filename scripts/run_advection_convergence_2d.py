@@ -39,6 +39,106 @@ RESOLUTIONS_QUICK = [(32, 64), (64, 128)]
 # Deformation period: 5 days (arbitrary, just needs enough steps)
 T_PERIOD = 5.0 * 86400.0
 
+# Solid body rotation period: 12 days for one full revolution
+# (Williamson et al. 1992, Test 1; DCMIP test 1-3)
+T_PERIOD_SBR = 12.0 * 86400.0
+# Rotation axis tilt: with bell at (180°, 25°N) and α=10°, bell center
+# trajectory has lat range [25°, 45°]. Bell radius 30° → bell extends
+# [−5°, 75°], safely inside the channel [−10°, 80°].
+ALPHA_SBR_DEG = 10.0
+# Bell starting position (radians)
+SBR_BELL_LON0 = float(np.pi)        # 180°E
+SBR_BELL_LAT0 = float(np.radians(25.0))  # 25°N (lowered from 45°N)
+
+
+# ---------------------------------------------------------------------------
+# Prescribed flow: solid body rotation (Williamson 1992 Test 1)
+# ---------------------------------------------------------------------------
+
+def _solid_body_velocity(lon_u, lat_u, lon_v, lat_v, t, T=T_PERIOD_SBR,
+                         alpha_deg=ALPHA_SBR_DEG):
+    """Solid-body rotation velocity field on the sphere.
+
+    The flow advects the tracer along a great circle whose pole is offset
+    from the geographic pole by angle alpha. Period T means the tracer
+    returns to its initial position at t = T.
+
+    From Williamson et al. (1992) Test Case 1:
+      u = u0 * (cos(α) cos(φ) + sin(α) sin(φ) cos(λ))
+      v = -u0 * sin(α) sin(λ)
+
+    where u0 = 2πR/T is the constant linear speed and α is the angle
+    between the rotation axis and the geographic pole.
+
+    The flow is steady and time-independent (does not vary with t).
+
+    Returns
+    -------
+    u_east : (n_lat_grid, n_lon+1, 1) at u-faces [m/s]
+    v_north : (n_lat_grid+1, n_lon, 1) at v-faces [m/s]
+    """
+    R = 6371.0e3
+    u0 = 2.0 * jnp.pi * R / T
+    alpha = jnp.radians(alpha_deg)
+    cos_a = jnp.cos(alpha)
+    sin_a = jnp.sin(alpha)
+
+    u = u0 * (cos_a * jnp.cos(lat_u)
+              + sin_a * jnp.sin(lat_u) * jnp.cos(lon_u))
+    v = -u0 * sin_a * jnp.sin(lon_v)
+    return u, v
+
+
+def _solid_body_rotated_position(lon0, lat0, t, T=T_PERIOD_SBR,
+                                 alpha_deg=ALPHA_SBR_DEG):
+    """Compute the rotated position of a point at time t under solid body rotation.
+
+    Used to compute the analytical "exact" tracer at any time.
+
+    The rotation is by angle theta = 2*pi*t/T about the axis tilted by
+    alpha from the geographic z-axis (toward the prime meridian).
+
+    Parameters
+    ----------
+    lon0, lat0 : initial position (radians, scalars)
+
+    Returns
+    -------
+    lon, lat : rotated position (radians)
+    """
+    theta = 2.0 * jnp.pi * t / T
+    alpha = jnp.radians(alpha_deg)
+
+    # Initial position in Cartesian
+    x0 = jnp.cos(lat0) * jnp.cos(lon0)
+    y0 = jnp.cos(lat0) * jnp.sin(lon0)
+    z0 = jnp.sin(lat0)
+
+    # Rotation axis (unit vector): tilted by alpha toward x-axis
+    # axis = (sin(α), 0, cos(α))
+    ax = jnp.sin(alpha)
+    ay = 0.0
+    az = jnp.cos(alpha)
+
+    # Rodrigues' rotation formula: v_rot = v*cosθ + (k×v)*sinθ + k*(k·v)*(1-cosθ)
+    cos_t = jnp.cos(theta)
+    sin_t = jnp.sin(theta)
+    kdotv = ax * x0 + ay * y0 + az * z0  # = ax*x0 + az*z0
+
+    # k × v
+    cross_x = ay * z0 - az * y0
+    cross_y = az * x0 - ax * z0
+    cross_z = ax * y0 - ay * x0
+
+    one_m_cos = 1.0 - cos_t
+    x = x0 * cos_t + cross_x * sin_t + ax * kdotv * one_m_cos
+    y = y0 * cos_t + cross_y * sin_t + ay * kdotv * one_m_cos
+    z = z0 * cos_t + cross_z * sin_t + az * kdotv * one_m_cos
+
+    lat = jnp.arcsin(jnp.clip(z, -1.0, 1.0))
+    lon = jnp.arctan2(y, x)
+    return lon, lat
+
 
 # ---------------------------------------------------------------------------
 # Prescribed flow: swirling deformation (Nair & Lauritzen 2010)
@@ -149,17 +249,49 @@ def _get_face_coordinates(grid):
 # Single-run driver
 # ---------------------------------------------------------------------------
 
-def _run_single_2d(scheme, n_lat, n_lon, output_dir):
-    """Run Level 2 deformational flow test for one scheme+resolution."""
+def _flux_divergence_2d(scheme, tracer, mass_flux_u, mass_flux_v,
+                        h_u, h_v, grid, dt):
+    """Compute div(h*u*T_face) for the given scheme."""
     from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _upwind_to_u_points, _upwind_to_v_points,
-        _tvd_to_u_points, _tvd_to_v_points)
-    from legoesm.ocean.advection import (
-        dst3_to_u_points, dst3_to_v_points,
-        weno5_to_u_points, weno5_to_v_points,
-        weno7_to_u_points, weno7_to_v_points)
 
+    if scheme == "upwind":
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _upwind_to_u_points, _upwind_to_v_points)
+        tr_u = _upwind_to_u_points(tracer, mass_flux_u)
+        tr_v = _upwind_to_v_points(tracer, mass_flux_v)
+    elif scheme == "tvd":
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _tvd_to_u_points, _tvd_to_v_points)
+        tr_u = _tvd_to_u_points(tracer, mass_flux_u)
+        tr_v = _tvd_to_v_points(tracer, mass_flux_v)
+    elif scheme == "dst3":
+        from legoesm.ocean.advection import dst3_to_u_points, dst3_to_v_points
+        tr_u = dst3_to_u_points(tracer, mass_flux_u, h_u, grid, dt)
+        tr_v = dst3_to_v_points(tracer, mass_flux_v, h_v, grid, dt)
+    elif scheme == "weno5":
+        from legoesm.ocean.advection import weno5_to_u_points, weno5_to_v_points
+        tr_u = weno5_to_u_points(tracer, mass_flux_u)
+        tr_v = weno5_to_v_points(tracer, mass_flux_v)
+    elif scheme == "weno7":
+        from legoesm.ocean.advection import weno7_to_u_points, weno7_to_v_points
+        tr_u = weno7_to_u_points(tracer, mass_flux_u)
+        tr_v = weno7_to_v_points(tracer, mass_flux_v)
+    else:
+        raise ValueError(f"Unknown scheme: {scheme}")
+
+    return divergence_cgrid(mass_flux_u * tr_u, mass_flux_v * tr_v, grid)
+
+
+def _run_single_2d(scheme, n_lat, n_lon, output_dir, time_integrator="euler",
+                   ab2_eps=0.1, flow="deformational"):
+    """Run Level 2 test for one scheme+integrator+resolution.
+
+    flow : {"deformational", "solid_body"}
+      "deformational" — Nair & Lauritzen (2010) swirling reversal.
+                        Bell deforms then returns to IC at t=T.
+      "solid_body"    — Williamson Test 1: bell rotates around a tilted axis.
+                        Returns to IC at t=T after one full revolution.
+    """
     nlev = 1
     h_uniform = 100.0
 
@@ -168,75 +300,126 @@ def _run_single_2d(scheme, n_lat, n_lon, output_dir):
     lon_u, lat_u, lon_v, lat_v = _get_face_coordinates(grid)
 
     # Initial condition: cosine bell at (lon0=π, lat0=π/4) = (180°E, 45°N)
-    lon_cell = jnp.array(grid.lon)  # (n_lon,) radians
-    lat_cell = jnp.array(grid.lat)  # (n_lat_grid,) radians
+    lon_cell = jnp.array(grid.lon)
+    lat_cell = jnp.array(grid.lat)
     lon_2d = jnp.broadcast_to(lon_cell[jnp.newaxis, :], (n_lat_grid, n_lon_actual))
     lat_2d = jnp.broadcast_to(lat_cell[:, jnp.newaxis], (n_lat_grid, n_lon_actual))
 
     R_bell = jnp.pi / 6.0  # 30 degrees radius
-    T_init = _cosine_bell(lon_2d, lat_2d, jnp.pi, jnp.pi / 4.0, R_bell)
-    tracer = T_init[..., jnp.newaxis]  # (n_lat_grid, n_lon, 1)
+    if flow == "solid_body":
+        bell_lon0 = SBR_BELL_LON0  # 180°E
+        bell_lat0 = SBR_BELL_LAT0  # 25°N (avoids wall under α=10° rotation)
+    else:
+        bell_lon0 = jnp.pi          # 180°E
+        bell_lat0 = jnp.pi / 4.0    # 45°N (deformational test)
+    T_init = _cosine_bell(lon_2d, lat_2d, bell_lon0, bell_lat0, R_bell)
+    tracer = T_init[..., jnp.newaxis]
 
-    # Time stepping: full period T (deform + reverse)
+    # Set period and velocity scale based on flow type
+    if flow == "deformational":
+        T_total = T_PERIOD
+        max_velocity = 20.0  # m/s, peak of swirl flow
+    elif flow == "solid_body":
+        T_total = T_PERIOD_SBR
+        # u0 = 2*pi*R/T → ~38 m/s for R=6371km, T=12d
+        max_velocity = 2.0 * float(np.pi) * 6371.0e3 / T_total
+    else:
+        raise ValueError(f"Unknown flow: {flow}")
+
     R = float(grid.radius)
-    cos_mid = float(jnp.cos(jnp.radians(45.0)))
-    dx_min = R * float(grid.dlon) * cos_mid
-    # dt chosen for CFL ~ 0.3 with max velocity ~ 20 m/s
-    dt = 0.3 * dx_min / 20.0
-    n_steps = int(np.ceil(T_PERIOD / dt))
-    dt = T_PERIOD / n_steps  # exact period coverage
+    # Use the SMALLEST dx the tracer encounters (bell extent over full integration).
+    # solid_body: bell at lat=25°, α=10° → max bell-top latitude ≈ 75°
+    # deformational: bell stays near 45°N, max ~50°
+    if flow == "solid_body":
+        cos_min = float(jnp.cos(jnp.radians(75.0)))
+    else:
+        cos_min = float(jnp.cos(jnp.radians(50.0)))
+    dx_min = R * float(grid.dlon) * cos_min
+    dt = 0.3 * dx_min / max_velocity  # CFL ~ 0.3 at the bell's smallest dx
+    n_steps = int(np.ceil(T_total / dt))
+    dt = T_total / n_steps
 
-    print(f"    {scheme} @ {n_lat}x{n_lon}: n_steps={n_steps}, "
-          f"dt={dt:.1f}s, dx_min={dx_min/1e3:.0f}km")
+    print(f"    {scheme}+{time_integrator}+{flow} @ {n_lat}x{n_lon}: "
+          f"n_steps={n_steps}, dt={dt:.1f}s, dx_min={dx_min/1e3:.0f}km")
 
     h_cell = jnp.full((n_lat_grid, n_lon_actual, nlev), h_uniform)
     h_u = jnp.full((n_lat_grid, n_lon_actual + 1, nlev), h_uniform)
     h_v = jnp.full((n_lat_grid + 1, n_lon_actual, nlev), h_uniform)
 
+    if flow == "deformational":
+        def _mass_flux_at(t_eval):
+            u_vel, v_vel = _swirl_velocity(
+                lon_u[..., jnp.newaxis], lat_u[..., jnp.newaxis],
+                lon_v[..., jnp.newaxis], lat_v[..., jnp.newaxis],
+                t_eval, T=T_total)
+            return h_uniform * u_vel, h_uniform * v_vel
+    else:  # solid_body — flow is steady, but we keep the t signature
+        def _mass_flux_at(t_eval):
+            u_vel, v_vel = _solid_body_velocity(
+                lon_u[..., jnp.newaxis], lat_u[..., jnp.newaxis],
+                lon_v[..., jnp.newaxis], lat_v[..., jnp.newaxis],
+                t_eval, T=T_total)
+            return h_uniform * u_vel, h_uniform * v_vel
+
     # Save snapshots at t=0, T/4, T/2, 3T/4, T
     snap_steps = {0, n_steps // 4, n_steps // 2, 3 * n_steps // 4, n_steps}
     snapshots = {0: np.asarray(tracer[..., 0])}
+
+    blew_up = False
+    div_prev = None  # for AB2
 
     t0 = time.time()
     for step in range(n_steps):
         t_current = step * dt
 
-        # Prescribed velocity at current time
-        u_vel, v_vel = _swirl_velocity(
-            lon_u[..., jnp.newaxis], lat_u[..., jnp.newaxis],
-            lon_v[..., jnp.newaxis], lat_v[..., jnp.newaxis],
-            t_current)
+        if time_integrator == "euler":
+            mfu, mfv = _mass_flux_at(t_current)
+            div_now = _flux_divergence_2d(
+                scheme, tracer, mfu, mfv, h_u, h_v, grid, dt)
+            tracer = (h_cell * tracer - dt * div_now) / h_cell
 
-        mass_flux_u = h_uniform * u_vel  # (n_lat_grid, n_lon+1, 1)
-        mass_flux_v = h_uniform * v_vel  # (n_lat_grid+1, n_lon, 1)
+        elif time_integrator == "ab2":
+            # Use velocity at start of step (consistent with model's AB2 path)
+            mfu, mfv = _mass_flux_at(t_current)
+            div_now = _flux_divergence_2d(
+                scheme, tracer, mfu, mfv, h_u, h_v, grid, dt)
+            if div_prev is None:
+                # First step → Euler fallback (matches model's eager step())
+                tracer = (h_cell * tracer - dt * div_now) / h_cell
+            else:
+                effective = (1.5 + ab2_eps) * div_now - (0.5 + ab2_eps) * div_prev
+                tracer = (h_cell * tracer - dt * effective) / h_cell
+            div_prev = div_now
 
-        # Face reconstruction
-        if scheme == "upwind":
-            tr_u = _upwind_to_u_points(tracer, mass_flux_u)
-            tr_v = _upwind_to_v_points(tracer, mass_flux_v)
-        elif scheme == "tvd":
-            tr_u = _tvd_to_u_points(tracer, mass_flux_u)
-            tr_v = _tvd_to_v_points(tracer, mass_flux_v)
-        elif scheme == "dst3":
-            tr_u = dst3_to_u_points(tracer, mass_flux_u, h_u, grid, dt)
-            tr_v = dst3_to_v_points(tracer, mass_flux_v, h_v, grid, dt)
-        elif scheme == "weno5":
-            tr_u = weno5_to_u_points(tracer, mass_flux_u)
-            tr_v = weno5_to_v_points(tracer, mass_flux_v)
-        elif scheme == "weno7":
-            tr_u = weno7_to_u_points(tracer, mass_flux_u)
-            tr_v = weno7_to_v_points(tracer, mass_flux_v)
+        elif time_integrator == "rk3":
+            # SSP-RK3 (Shu-Osher form); time-dependent flow → use t at each stage
+            mfu0, mfv0 = _mass_flux_at(t_current)
+            div0 = _flux_divergence_2d(
+                scheme, tracer, mfu0, mfv0, h_u, h_v, grid, dt)
+            k1 = (h_cell * tracer - dt * div0) / h_cell
+            # Stage 2 advances internally to t+dt
+            mfu1, mfv1 = _mass_flux_at(t_current + dt)
+            div1 = _flux_divergence_2d(
+                scheme, k1, mfu1, mfv1, h_u, h_v, grid, dt)
+            k2 = 0.75 * tracer + 0.25 * ((h_cell * k1 - dt * div1) / h_cell)
+            # Stage 3 advances internally to t+dt/2 (k2 at intermediate state)
+            mfu2, mfv2 = _mass_flux_at(t_current + 0.5 * dt)
+            div2 = _flux_divergence_2d(
+                scheme, k2, mfu2, mfv2, h_u, h_v, grid, dt)
+            tracer = (1.0 / 3.0) * tracer + (2.0 / 3.0) * (
+                (h_cell * k2 - dt * div2) / h_cell)
         else:
-            raise ValueError(f"Unknown scheme: {scheme}")
-
-        # Flux divergence and update
-        flux_u = mass_flux_u * tr_u
-        flux_v = mass_flux_v * tr_v
-        div_hut = divergence_cgrid(flux_u, flux_v, grid)
-        tracer = (h_cell * tracer - dt * div_hut) / h_cell
+            raise ValueError(f"Unknown time_integrator: {time_integrator}")
 
         if (step + 1) in snap_steps:
             snapshots[step + 1] = np.asarray(tracer[..., 0])
+
+        # Detect NaN blowup
+        if (step + 1) % max(1, n_steps // 10) == 0:
+            if not bool(jnp.all(jnp.isfinite(tracer))):
+                print(f"      BLOWUP at step {step+1}/{n_steps}")
+                blew_up = True
+                break
 
     jax.block_until_ready(tracer)
     wall = time.time() - t0
@@ -258,6 +441,8 @@ def _run_single_2d(scheme, n_lat, n_lon, output_dir):
 
     result = {
         "scheme": scheme, "n_lat": n_lat, "n_lon": n_lon,
+        "time_integrator": time_integrator, "flow": flow,
+        "blew_up": blew_up,
         "l1": l1, "l2": l2, "linf": linf,
         "mass_drift": mass_drift, "wall": wall,
         "dt": dt, "n_steps": n_steps,
@@ -266,7 +451,7 @@ def _run_single_2d(scheme, n_lat, n_lon, output_dir):
     # Save for plotting
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(output_dir / f"{scheme}_{n_lat}x{n_lon}.npz",
+        np.savez(output_dir / f"{scheme}_{time_integrator}_{flow}_{n_lat}x{n_lon}.npz",
                  tracer_init=tracer_init,
                  tracer_final=tracer_final,
                  error=error,
@@ -419,6 +604,10 @@ def build_parser():
         epilog=__doc__)
     p.add_argument("--schemes", type=str, default=",".join(ALL_SCHEMES),
                    help="Comma-separated schemes")
+    p.add_argument("--time-integrators", type=str, default="euler,ab2,rk3",
+                   help="Comma-separated time integrators")
+    p.add_argument("--flows", type=str, default="deformational",
+                   help="Comma-separated flow types: deformational, solid_body")
     p.add_argument("--output", type=str,
                    default="results/advection_convergence/level2_2d",
                    help="Output directory")
@@ -435,51 +624,76 @@ def main():
     set_policy(PrecisionPolicy.fp64())
 
     schemes = [s.strip() for s in args.schemes.split(",")]
+    time_integrators = [t.strip() for t in args.time_integrators.split(",")]
+    flows = [f.strip() for f in args.flows.split(",")]
     resolutions = RESOLUTIONS_QUICK if args.quick else RESOLUTIONS
     output_dir = Path(args.output)
 
     print("=" * 70)
-    print("  Level 2: 2D Deformational Flow Advection Test")
+    print("  Level 2: 2D Advection Test")
     print("=" * 70)
     print(f"  Schemes:     {', '.join(schemes)}")
+    print(f"  Integrators: {', '.join(time_integrators)}")
+    print(f"  Flows:       {', '.join(flows)}")
     print(f"  Resolutions: {[f'{r[0]}x{r[1]}' for r in resolutions]}")
-    print(f"  Period:      {T_PERIOD/86400:.0f} days (deform + reverse)")
     print(f"  Output:      {output_dir}")
     print("=" * 70)
 
     all_results = []
     t0 = time.time()
 
-    for scheme in schemes:
-        for n_lat, n_lon in resolutions:
-            result = _run_single_2d(scheme, n_lat, n_lon, output_dir)
-            all_results.append(result)
-            print(f"      L2={result['l2']:.2e}  Linf={result['linf']:.2e}  "
-                  f"mass_drift={result['mass_drift']:.2e}  wall={result['wall']:.1f}s")
+    for flow in flows:
+        for ti in time_integrators:
+            for scheme in schemes:
+                for n_lat, n_lon in resolutions:
+                    result = _run_single_2d(
+                        scheme, n_lat, n_lon, output_dir,
+                        time_integrator=ti, flow=flow)
+                    all_results.append(result)
+                    status = "BLEW UP" if result["blew_up"] else "ok"
+                    print(f"      L2={result['l2']:.2e}  Linf={result['linf']:.2e}  "
+                          f"mass_drift={result['mass_drift']:.2e}  "
+                          f"wall={result['wall']:.1f}s  [{status}]")
 
     total_wall = time.time() - t0
 
-    # Summary
-    print(f"\n{'='*80}")
-    print(f"  LEVEL 2 SUMMARY")
-    print(f"{'='*80}")
-    print(f"  {'Scheme':<10} {'Resolution':>12} {'L1':>10} {'L2':>10} "
-          f"{'Linf':>10} {'mass_drift':>12}")
-    print("-" * 80)
-    for r in all_results:
-        print(f"  {r['scheme']:<10} {r['n_lat']}x{r['n_lon']:>4} "
-              f"{r['l1']:>10.2e} {r['l2']:>10.2e} "
-              f"{r['linf']:>10.2e} {r['mass_drift']:>12.2e}")
+    # Summary, broken out by flow
+    for flow in flows:
+        print(f"\n{'='*110}")
+        print(f"  LEVEL 2 SUMMARY — flow = {flow}")
+        print(f"{'='*110}")
+        print(f"  {'Scheme':<10} {'Integrator':<10} {'Resolution':>12} {'L1':>10} {'L2':>10} "
+              f"{'Linf':>10} {'mass_drift':>12} {'status':>10}")
+        print("-" * 110)
+        for r in [r for r in all_results if r["flow"] == flow]:
+            status = "BLEW UP" if r["blew_up"] else "ok"
+            print(f"  {r['scheme']:<10} {r['time_integrator']:<10} "
+                  f"{r['n_lat']}x{r['n_lon']:>4} "
+                  f"{r['l1']:>10.2e} {r['l2']:>10.2e} "
+                  f"{r['linf']:>10.2e} {r['mass_drift']:>12.2e} {status:>10}")
 
-    # Convergence rates
-    print(f"\n  Convergence rates (L2):")
-    for scheme in schemes:
-        sr = sorted([r for r in all_results if r["scheme"] == scheme],
+        print(f"\n  Convergence rates (L2) — {flow}:")
+        print(f"    {'Scheme+TI':<20}  {'pairwise rates':<30}  {'endpoint':>10}")
+        for ti in time_integrators:
+            for scheme in schemes:
+                sr = sorted(
+                    [r for r in all_results
+                     if r["scheme"] == scheme and r["time_integrator"] == ti
+                     and r["flow"] == flow and not r["blew_up"]],
                     key=lambda r: r["n_lon"])
-        if len(sr) >= 2:
-            rate = np.log(sr[0]["l2"] / sr[-1]["l2"]) / np.log(
-                sr[-1]["n_lon"] / sr[0]["n_lon"])
-            print(f"    {scheme:<10}: {rate:.2f}")
+                if len(sr) < 2 or sr[-1]["l2"] <= 0 or sr[0]["l2"] <= 0:
+                    continue
+                pw = []
+                for i in range(1, len(sr)):
+                    if sr[i]["l2"] > 0 and sr[i-1]["l2"] > 0:
+                        r_pw = (np.log(sr[i-1]["l2"] / sr[i]["l2"])
+                                / np.log(sr[i]["n_lon"] / sr[i-1]["n_lon"]))
+                        pw.append(r_pw)
+                endpoint = (np.log(sr[0]["l2"] / sr[-1]["l2"])
+                            / np.log(sr[-1]["n_lon"] / sr[0]["n_lon"]))
+                pw_str = ", ".join(f"{r:.2f}" for r in pw)
+                label = f"{scheme}+{ti}"
+                print(f"    {label:<20}  {pw_str:<30}  {endpoint:>10.2f}")
     print(f"\n  Total wall time: {total_wall:.1f}s")
 
     # Save
@@ -489,17 +703,17 @@ def main():
         writer.writeheader()
         writer.writerows(all_results)
 
-    # Plots
+    # Plots — 4-panel snapshots per scheme/integrator/flow
     try:
         for r in all_results:
-            npz = output_dir / f"{r['scheme']}_{r['n_lat']}x{r['n_lon']}.npz"
+            npz = output_dir / (
+                f"{r['scheme']}_{r['time_integrator']}_{r['flow']}_"
+                f"{r['n_lat']}x{r['n_lon']}.npz")
             if npz.exists():
                 _plot_snapshots(npz, output_dir)
-        _plot_final_compare(all_results, output_dir, output_dir)
-        _plot_convergence(all_results, output_dir)
         print(f"\n  Plots saved to: {output_dir}")
-    except ImportError:
-        print("  (matplotlib not available)")
+    except (ImportError, TypeError, KeyError):
+        print("  (some plots skipped)")
 
 
 if __name__ == "__main__":
