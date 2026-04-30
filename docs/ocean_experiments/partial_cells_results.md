@@ -102,21 +102,80 @@ adjacent columns have different ``bottom_level``.  The vertical
 profile of the correction therefore has step-function behaviour that
 the discrete vertical viscosity cannot smooth.
 
+### Advection scheme is NOT the source
+
+Empirical sweep across momentum (vector_invariant, weno5) × tracer
+(upwind, tvd) advection schemes after all P0+P1 fixes:
+
+| momentum   | tracer | |u|max (mm/s) | mode signature lev 14-19    |
+|------------|--------|--------------|-----------------------------|
+| vector_inv | upwind | 102          | 58, 8, −7, −6, **−102**, 0  |
+| vector_inv | tvd    | 99           | 62, 2, −14, 2, **−99**, 0   |
+| weno5      | upwind | 101          | 56, 11, −8, −3, **−101**, 0 |
+| weno5      | tvd    | 98           | 60, 3, −16, 7, **−98**, 0   |
+
+The 2Δz mode amplitude and signature are essentially identical
+across schemes (<4% variation).  The mode is a **forced equilibrium
+response to the PGF z-structure**, not a transport artefact.
+
+Side note: WENO5 tracer + partial cells crashes (NaN) — partial-cell
+incompatibility in the WENO stencil at closed faces.  Does not
+affect this diagnostic; will be picked up by the future test matrix
+that exercises all advection schemes against the partial-cell
+invariants.
+
+### Why z-smoothing of the Adcroft correction does NOT help
+
+Tested as a quick experiment: apply 1-2-1/4 vertical smoother to the
+``partial_cell_pgf_correction_x/y`` arrays (N passes, then add to
+``dp_dx/dy``).  Result:
+
+| smooth_passes | |u|max (mm/s) |
+|:-------------:|:-------------:|
+| 0             | 99            |
+| 1             | 2306          |
+| 2             | 6770          |
+| 4             | 22606         |
+| 8             | −inf (NaN)    |
+
+Smoothing makes things *dramatically* worse.  The Adcroft per-face
+correction is a **single-level spike** in PGF at the partial-bottom
+level (zero correction at adjacent levels) because that is where the
+geometric pressure mismatch *physically lives*.  Smoothing redistri-
+butes the correction to neighbouring levels where the actual mismatch
+is zero, leaving the rest-state PGF un-canceled at multiple levels
+and amplifying spurious flow by 25-200x.
+
+### Why the 2Δz mode appears
+
+The Adcroft correction at partial-cell faces is a single-level PGF
+spike.  ``u`` responds locally to that spike, while vertical
+viscosity and barotropic continuity (which averages U across all
+levels) compete to redistribute the response.  The equilibrium of
+this competition is a **2Δz vertical oscillation** in u(z): the
+spike level itself is largely damped, but adjacent levels hold the
+out-of-phase response.
+
 ### Implication for next steps
 
 Density-Jacobian PGF (Shchepetkin & McWilliams 2003, originally task
-#12) is still the right next lever — but the reason is **not**
-"smaller per-face residual".  It is **vertical smoothness of the
-correction**: a polynomial-spline density reconstruction in z
-produces a continuously-differentiable PGF that does not excite 2Δz
-modes.
+#12) is still the right next lever — but the reason is more specific
+than the audits stated.  It is not just "smaller per-face residual".
+It is "**continuous-in-z PGF**": the per-column ρ(z) is reconstructed
+as a polynomial spline, integrated analytically to give p(z) at any
+depth, and horizontal Jacobian taken between columns at a common
+depth.  The result is a **smoothly-distributed** PGF correction in z
+(not a single-level spike), which does not force a 2Δz mode at the
+partial bottom.
 
 This rebrands #12 as the targeted fix, deferred to a follow-up PR:
 the implementation is multi-day work (cubic spline ρ(z)
 reconstruction per column, analytical integration, horizontal
-Jacobian), and the leap-stc/legoESM partial-cells branch already
-delivers significant standalone value at this point (long-integration
-NaN fixed, conservation invariants tested, BBL infrastructure landed).
+Jacobian).  The current branch delivers significant standalone value
+at this point: long-integration NaN fixed, conservation invariants
+tested, distributed BBL drag infrastructure landed, and the BH gap
+is now precisely characterised as a forced 2Δz mode rather than a
+mystery residual — concrete enough to specify the next PR.
 
 ## Outstanding work
 
