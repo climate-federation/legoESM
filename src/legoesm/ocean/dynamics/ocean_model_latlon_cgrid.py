@@ -514,8 +514,9 @@ class LatLonCGridOceanModel:
             _tvd_to_v_points,
         )
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            divergence_cgrid, interp_cell_to_uface,
+            divergence_cgrid, interp_cell_to_uface, compute_face_masks_3d,
         )
+        from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
         mask = state.land_mask.data
 
@@ -524,6 +525,30 @@ class LatLonCGridOceanModel:
         h_v_old = _interp_to_v_points(h_k_old)  # (n_lat+1, n_lon, nlev)
         H_u_old = jnp.sum(h_u_old, axis=-1)     # (n_lat, n_lon+1)
         H_v_old = jnp.sum(h_v_old, axis=-1)     # (n_lat+1, n_lon)
+
+        # 3D face masks for the tracer mass flux.  For partial cells the
+        # 2D u_mask/v_mask are non-zero at the topographic-step face
+        # (both surface columns are wet) but the face must be closed
+        # below the shallower seafloor.  Using compute_face_masks_3d on
+        # the partial coord's is_active gives the correct per-level
+        # closed-wall faces.  For pure z\\* the 3D mask collapses to the
+        # 2D mask broadcast across all levels — bit-exact backwards-compat.
+        # Likewise, ``active_3d`` gates inactive cells (below the
+        # partial seafloor) where h_k_old = h_k_new = 0; without this
+        # gate, the floor in ``tr_new = hT_new / max(h_k_new, 1e-10)``
+        # amplifies tiny float-precision residuals into huge spurious
+        # tracer values inside the ground.
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            u_mask_3d_tracer, v_mask_3d_tracer = compute_face_masks_3d(
+                self.z_coord.is_active,
+            )
+            u_mask_3d_tracer = u_mask_3d_tracer.astype(h_u_old.dtype)
+            v_mask_3d_tracer = v_mask_3d_tracer.astype(h_v_old.dtype)
+            active_3d = self.z_coord.is_active.astype(h_u_old.dtype)
+        else:
+            u_mask_3d_tracer = state.u_mask.data[..., jnp.newaxis]
+            v_mask_3d_tracer = state.v_mask.data[..., jnp.newaxis]
+            active_3d = mask_3d
 
         # Full 3D velocity (barotropic + baroclinic) from state after
         # barotropic correction.  The barotropic solver preserves the
@@ -548,8 +573,8 @@ class LatLonCGridOceanModel:
         # uniform velocity at all depths and identically zero w),
         # this preserves baroclinic shear and produces non-zero vertical
         # velocity from Ekman pumping/suction.
-        mass_flux_u = h_u_old * u_corrected * state.u_mask.data[..., jnp.newaxis]
-        mass_flux_v = h_v_old * v_corrected * state.v_mask.data[..., jnp.newaxis]
+        mass_flux_u = h_u_old * u_corrected * u_mask_3d_tracer
+        mass_flux_v = h_v_old * v_corrected * v_mask_3d_tracer
 
         # Flux-form tracer update (horizontal + vertical)
         #
@@ -735,7 +760,11 @@ class LatLonCGridOceanModel:
             # h_new * T_new = h_old * T_old - dt * vert_flux_div - dt * div_h(mf*T_face)
             hT_new = h_k_old * tr - dt * vert_flux_div - dt * div_hut
             tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
-            tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+            # Gate by 3D activity: at inactive cells (below the partial
+            # seafloor) h_k_new = 0 and the 1e-10 floor would amplify
+            # any tiny residual into a huge spurious value.  For pure
+            # z\\* active_3d collapses to the 2D mask_3d broadcast.
+            tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
             if tr_name == 'T':
                 T_corrected = tr_new
             else:

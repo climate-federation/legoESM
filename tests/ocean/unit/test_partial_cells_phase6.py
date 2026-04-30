@@ -103,16 +103,6 @@ class TestEndToEndIntegration:
         assert jnp.all(jnp.isfinite(s_new.u.data))
         assert jnp.all(jnp.isfinite(s_new.v.data))
 
-    @pytest.mark.xfail(
-        reason="Long-integration on partial cells with non-flat bathymetry "
-        "blows up around step 3-4 (~1800-2400s).  The baroclinic PE "
-        "(Phases 1-5) is partial-cell-aware, but the barotropic solver "
-        "in barotropic_implicit_latlon_cgrid.py likely still uses 2D "
-        "face masks and uniform-Jacobian assumptions for the depth-"
-        "integrated transport.  Phase 7 validation will diagnose and "
-        "fix; the key Phase 6 gates (forward bit-exact + AD bit-exact "
-        "on flat bottom) pass."
-    )
     def test_24_hour_integration_stays_bounded(self, grid, z_coord):
         """24-hour rest-state integration on partial cells: |eta|,
         |u|, T all stay tightly bounded.  Implicit-CN barotropic

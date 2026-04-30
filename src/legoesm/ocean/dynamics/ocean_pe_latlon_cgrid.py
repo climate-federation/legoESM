@@ -1163,10 +1163,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # k=0 / k=nlev-1 and matching the tracer-path interface upwind.
     # Full flux-form momentum update (Level 2) still requires step-
     # function restructuring; tracked on #171.
-    J_u = interp_cell_to_uface(J)
-    J_v = _interp_to_v_points(J)
-    h_u_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_u[..., jnp.newaxis]
-    h_v_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_v[..., jnp.newaxis]
+    # Use the partial-cell-aware face thicknesses already computed for
+    # the mass-flux divergence (lines 832-833).  For pure z* these
+    # equal dz_ref * J_u / J_v; for partial cells, h_k is zero below
+    # the seafloor so divisions inside the flux-form vertical advection
+    # do not pull thickness from inactive levels.
+    h_u_old = h_u
+    h_v_old = h_v
     w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
     if _mom_adv in ("weno5", "weno7"):

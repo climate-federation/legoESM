@@ -269,6 +269,53 @@ def create_partial_cell_coordinate(
     )
 
 
+def compute_centroid_depth(
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    z_coord,
+    min_water_column_m: float | None = None,
+) -> jnp.ndarray:
+    """Compute the geometric centroid depth (positive downward) of each
+    cell, accounting for eta and partial cells.
+
+    For each (column, level k):
+      centroid_depth[..., k] = sum_{j<k} h_actual[..., j] + 0.5 * h_actual[..., k]
+
+    For pure z\\* coord (full cells everywhere): centroid is at
+    ``|z_full_ref[k]| * (eta + H_bathy) / H_max`` — uniform across columns.
+    For partial-cell coord: centroid varies per column at the partial
+    bottom.  Cells below the seafloor have h_actual=0 and inherit the
+    seafloor depth from above (no further increment).
+
+    Used by the Adcroft-Campin face PGF correction (Phase 3b): the
+    horizontal pressure gradient between two cells with different
+    centroid depths is corrected by shifting each cell's pressure to a
+    common face-reference depth.
+
+    Parameters
+    ----------
+    eta : array
+        Sea surface height [m], shape (...).
+    H_bathy : array
+        Local bathymetry depth [m], shape (...).  Positive.
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
+        Vertical coordinate.
+    min_water_column_m : float or None
+        Optional water-column floor (passed to ``compute_layer_thickness``).
+
+    Returns
+    -------
+    array : Centroid depth [m], shape (..., nlev).  Positive downward.
+    """
+    h = compute_layer_thickness(
+        eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
+    )
+    # cumsum gives interface depths at the *bottom* of each layer.
+    # Centroid is half a layer above the bottom interface.
+    cum = jnp.cumsum(h, axis=-1)
+    return cum - 0.5 * h
+
+
 def compute_layer_thickness(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
