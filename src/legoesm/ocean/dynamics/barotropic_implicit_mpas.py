@@ -311,14 +311,11 @@ def barotropic_implicit_mpas(
 
     u_bar_new = (u_pred - theta_pgf * dt_t * g * delta_grad) * edge_mask
 
-    # Optional bottom drag on the depth-mean (mirrors explicit path).
-    if config.bottom_drag_r > 0.0:
-        from legoesm.ocean.dynamics.ocean_tendency_common import (
-            implicit_bottom_drag_factor,
-        )
-        u_bar_new = u_bar_new * implicit_bottom_drag_factor(
-            dt_t, config.bottom_drag_r, H_e_old,
-        )
+    # Bottom drag enters via F_slow_u (depth-mean of the 3D bottom-cell
+    # drag set in ocean_pe_mpas.py); applying it again here would
+    # double-count. The lat-lon implicit solver omits it for the same
+    # reason. The explicit-substep solver still double-counts — tracked
+    # as an open issue.
 
     # ----- Step 6: time-averaged transport for tracer flux --------------
     H_total_new = jnp.maximum(eta_new + H_bathy, min_water_col)
