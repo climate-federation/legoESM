@@ -1738,6 +1738,106 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
 # Utility: compute face masks from cell mask
 # =============================================================================
 
+def partial_cell_pgf_correction_x(
+    centroid_depth: jnp.ndarray,
+    rho_prime: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Adcroft & Campin (2004) face correction at u-faces (zonal direction).
+
+    Returns an additive correction to ``∂p'/∂x`` that shifts each
+    adjacent cell's baroclinic pressure to the face-reference depth
+    (the shallower of the two cell centroids).  At u-face j between
+    cell west=(j-1) mod n_lon and cell east=j::
+
+        face_ref[k] = min(centroid_east[k], centroid_west[k])
+        excess_east[k] = centroid_east[k] - face_ref[k]   ≥ 0
+        excess_west[k] = centroid_west[k] - face_ref[k]   ≥ 0
+        correction[k] = -g * (rho_prime_east * excess_east
+                                - rho_prime_west * excess_west) / dx_u
+
+    Adding this to the standard ``(p_east - p_west) / dx`` is
+    mathematically equivalent to comparing ``p_eff = p - rho_prime * g
+    * excess`` at the face-reference depth — eliminating the partial-
+    cell-vs-full PGF cancellation error that drives spurious flow on
+    realistic bathymetry.
+
+    For full-cell columns where centroids align across cells, both
+    excess values are zero and the correction is identically zero —
+    so the legacy z\\* path is bit-exact unaffected.
+
+    Output shape matches ``gradient_x_cgrid``: ``(n_lat, n_lon+1, nlev)``,
+    with face j=n_lon wrapping around to face j=0.
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    cos_lat = grid.cos_lat
+
+    centroid_east = centroid_depth                     # (n_lat, n_lon, nlev)
+    centroid_west = jnp.roll(centroid_depth, 1, axis=1)
+    rho_prime_east = rho_prime
+    rho_prime_west = jnp.roll(rho_prime, 1, axis=1)
+
+    face_ref = jnp.minimum(centroid_east, centroid_west)
+    excess_east = centroid_east - face_ref
+    excess_west = centroid_west - face_ref
+
+    # Per-face correction at faces 0..n_lon-1
+    correction = -g * (
+        rho_prime_east * excess_east
+        - rho_prime_west * excess_west
+    )
+
+    # Wrap face j=n_lon to face j=0 (matches gradient_x_cgrid convention)
+    correction_full = jnp.concatenate(
+        [correction, correction[:, 0:1, :]], axis=1,
+    )
+
+    dx_u = R * dlon * cos_lat
+    return correction_full / dx_u[:, jnp.newaxis, jnp.newaxis]
+
+
+def partial_cell_pgf_correction_y(
+    centroid_depth: jnp.ndarray,
+    rho_prime: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Adcroft & Campin (2004) face correction at v-faces (meridional).
+
+    Same structure as ``partial_cell_pgf_correction_x`` but for the
+    v-faces.  Wall BCs at poles → boundary v-faces have zero
+    correction (consistent with v=0 there).
+
+    Output shape: ``(n_lat+1, n_lon, nlev)``.
+    """
+    R = grid.radius
+    dlat = grid.dlat
+    dy_v = R * dlat
+
+    # Interior v-faces: between cell i and cell i+1 in latitude
+    centroid_north = centroid_depth[1:]                 # (n_lat-1, n_lon, nlev)
+    centroid_south = centroid_depth[:-1]                # (n_lat-1, n_lon, nlev)
+    rho_prime_north = rho_prime[1:]
+    rho_prime_south = rho_prime[:-1]
+
+    face_ref = jnp.minimum(centroid_north, centroid_south)
+    excess_north = centroid_north - face_ref
+    excess_south = centroid_south - face_ref
+
+    correction_interior = -g * (
+        rho_prime_north * excess_north
+        - rho_prime_south * excess_south
+    )
+
+    # Pad pole faces with zero (wall BC: no v-flux through poles)
+    pad_axes = ((0, 0),) * (correction_interior.ndim - 1)
+    correction = jnp.pad(correction_interior, ((1, 1), *pad_axes))
+
+    return correction / dy_v
+
+
 def compute_face_masks(
     land_mask: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:

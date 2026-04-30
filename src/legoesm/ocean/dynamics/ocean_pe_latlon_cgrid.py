@@ -951,6 +951,36 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dKE_dy = _dKp_dy[..., 0]
         dp_dy = _dKp_dy[..., 1]
 
+    # --- 6b. Adcroft-Campin partial-cell PGF face correction ---
+    # When using OceanPartialCellCoordinate, the partial bottom cells
+    # at one column are at a shallower geometric depth than the same
+    # level k at a deeper-bathymetry neighbour.  The standard
+    # gradient_*_cgrid compares pressures at different depths,
+    # producing a residual PGF error that drives spurious flow.
+    #
+    # Adcroft & Campin (2004) shift each cell's pressure to a common
+    # face-reference depth (the shallower of the two centroids) before
+    # differencing.  Implemented here as an additive correction to
+    # dp_dx, dp_dy.  For pure z\\* coord (legacy), all centroids align
+    # within a column so the correction is identically zero — bit-exact
+    # backwards-compat preserved.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        from legoesm.ocean.vertical import compute_centroid_depth
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            partial_cell_pgf_correction_x,
+            partial_cell_pgf_correction_y,
+        )
+        centroid_depth = compute_centroid_depth(eta_safe, H_bathy, z_coord)
+        # rho_prime is computed with J=1, eta=0 reference (same convention
+        # used in p_prime), so the in-situ density used for the depth
+        # shift matches the pressure formulation.
+        dp_dx = dp_dx + partial_cell_pgf_correction_x(
+            centroid_depth, rho_prime, grid, g_val,
+        )
+        dp_dy = dp_dy + partial_cell_pgf_correction_y(
+            centroid_depth, rho_prime, grid, g_val,
+        )
+
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     # Capture each term as a named local so the same expression feeds
     # both the integration and the optional diagnostics path.
