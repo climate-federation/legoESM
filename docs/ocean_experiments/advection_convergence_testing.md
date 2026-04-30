@@ -547,6 +547,78 @@ time integrator at this resolution — choose based on cost.
 **Mass conservation:** All combinations conserve to machine precision
 across the integration (drift ≤ 1.6e-14 in float64).
 
+### 2026-04-29: Level 2(A) — solid body rotation (Williamson Test 1)
+
+Added the second Level 2 test: classical Williamson (1992) Test 1 — pure
+solid-body rotation around an axis tilted by α from the geographic pole.
+Bell traces a great circle and returns to IC after one full revolution
+(12 days). Unlike the deformational flow, errors **accumulate
+monotonically** (no reversal cancellation) over a much longer integration.
+
+**Setup adjustments after wall-impact bug found:**
+- Bell at (180°, 25°N) with α=10° (originally α=30° at 45°N → bell hit
+  northern wall and gave nonsense results)
+- Bell trajectory: latitude oscillates between 25°N and 45°N. With bell
+  radius 30°, total bell extent stays within [-5°, 75°N], comfortably
+  inside the [-10°, 80°N] channel.
+
+**Results at finest grid (128×256, 12-day full revolution):**
+
+| Scheme | Euler L2 | AB2 L2 | RK3 L2 |
+|---|---|---|---|
+| upwind | 0.48 | 0.48 | 0.48 |
+| tvd | 0.11 | 0.066 | 0.060 |
+| dst3 | 0.23 | 0.28 | 0.27 |
+| weno5 | 0.28 | 0.022 | 0.016 |
+| weno7 | **4.28 BLOWUP** | 0.023 | 0.018 |
+
+**Convergence rates (L2, n=32→256):**
+
+| Scheme | Euler | AB2 | RK3 |
+|---|---|---|---|
+| upwind | 0.34 | 0.32 | 0.32 |
+| tvd | 0.65 | 1.26 | 1.30 |
+| dst3 | 0.65 | 0.56 | 0.58 |
+| weno5 | 0.45 | 1.44 | **1.65** |
+| weno7 | −1.33 (blowup) | 1.48 | **1.75** |
+
+**Findings consistent with deformational test:**
+
+1. **WENO7+Euler blows up at 128×256** (L2 = 4.28). Same root cause as
+   deformational test: forward Euler's anti-diffusive truncation amplifies
+   WENO's non-monotone overshoots over thousands of time steps.
+
+2. **WENO5/7 + AB2 or RK3 are clean and converge** at rate 1.65-1.75 —
+   consistent with the O(dx²) FV-divergence ceiling. AB2 gives errors
+   within ~30% of RK3 at 3× lower cost (one tendency eval per step
+   vs three).
+
+3. **All non-WENO schemes are stable** with all integrators. TVD shows
+   the best convergence among monotone schemes (rate 1.3 with RK3).
+   Upwind doesn't converge well (rate 0.3) — its strong diffusion
+   dominates, making the bell heavily smeared after a full revolution.
+
+4. **Mass conservation excellent**: Euler/AB2 drift ≤ 1.9e-16, RK3
+   drift ≤ 2e-13 (still effectively zero in float64; RK3 has more
+   floating-point operations per step).
+
+**Correction to earlier claim:** An initial run with α=30° starting at
+45°N showed AB2 catastrophically blowing up for ALL schemes (errors
+10^15–10^85). That was caused by the bell smashing into the northern
+wall and AB2's two-step memory amplifying the wall-impact artifacts.
+**With the corrected, properly-contained trajectory, AB2 is fully
+stable on solid body rotation** — the earlier "AB2 instability" was a
+test-setup bug, not a real scheme issue.
+
+**Practical takeaways:**
+- WENO5+AB2 is the recommended pairing for accuracy + cost: errors
+  within ~30% of RK3 at 3× lower compute.
+- WENO5/7+Euler should be avoided at production resolutions.
+- Upwind+anything is too diffusive for long-distance transport.
+- DST-3 with any integrator gives mediocre convergence (rate 0.6) —
+  the design tuning for forward Euler doesn't combine well with multi-
+  stage methods, and even with Euler it's worse than expected here.
+
 **Recommended pairings (for the model):**
 - Production tracer advection: **TVD+Euler** (cheap, robust) or
   **DST3+Euler** (best Euler accuracy, space-time tuned)
