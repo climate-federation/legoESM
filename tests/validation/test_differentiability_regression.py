@@ -154,7 +154,7 @@ class TestPhysicsStateThreading:
         # PhysicsState should be returned with updated TKE
         assert ps_out is not None
         assert ps_out.tke.shape == ps.tke.shape
-        assert ps_out.conv_prog.shape == ps.conv_prog.shape
+        assert ps_out.conv_prog_profile.shape == ps.conv_prog_profile.shape
 
 
 # ===========================================================================

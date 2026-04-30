@@ -46,6 +46,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     _compute_sponge_factor,
     _apply_sponge_filter,
     _apply_spectral_filter_to_state,
+    _apply_filter_to_tracers,
 )
 from legoesm.core.field import Field
 from legoesm.grids.gaussian import (
@@ -120,6 +121,7 @@ class NeuralGCMSpectralConfig(NamedTuple):
 def carry_to_spectral_state(
     carry,
     grid: GaussianGrid,
+    include_tracers: bool = True,
 ) -> SpectralHydrostaticState:
     """Convert a SegmentCarry (grid-space) to SpectralHydrostaticState.
 
@@ -127,12 +129,23 @@ def carry_to_spectral_state(
     phis) into spectral coefficients (vor_hat, div_hat, T_hat, lnps_hat,
     phis_hat).
 
+    When ``include_tracers=True`` (the default), the SegmentCarry's
+    moisture fields (``q_v``, ``q_c``, ``q_r``) are packaged as
+    grid-space ``Field`` entries on ``state.tracers``.  This matches
+    the spectral PE dycore's tracer-pytree convention: tracers stay on
+    the grid even though the prognostic dynamics fields live in
+    spectral space.  Set ``include_tracers=False`` to fall back to the
+    pre-tracer dry pipeline (``state.tracers=None``).
+
     Parameters
     ----------
     carry : SegmentCarry
         Grid-space state from ERA5 ingestion.
     grid : GaussianGrid
         Gaussian grid with SH transform matrices.
+    include_tracers : bool
+        Whether to attach ``carry.q_v`` / ``q_c`` / ``q_r`` as grid-
+        space ``Field`` entries on ``state.tracers``.
 
     Returns
     -------
@@ -180,6 +193,26 @@ def carry_to_spectral_state(
 
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
+    grid_dims_3d = ("lat", "lon", "level")
+
+    tracers = None
+    if include_tracers:
+        # Build a tracer dict from the SegmentCarry's q_v / q_c / q_r.
+        # Cast to float64 to match the spectral PE precision contract.
+        tracers = {
+            "q_v": Field(
+                carry.q_v.astype(jnp.float64),
+                name="q_v", dims=grid_dims_3d, units="kg/kg",
+            ),
+            "q_c": Field(
+                carry.q_c.astype(jnp.float64),
+                name="q_c", dims=grid_dims_3d, units="kg/kg",
+            ),
+            "q_r": Field(
+                carry.q_r.astype(jnp.float64),
+                name="q_r", dims=grid_dims_3d, units="kg/kg",
+            ),
+        }
 
     return SpectralHydrostaticState(
         vor_hat=Field(vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
@@ -187,6 +220,7 @@ def carry_to_spectral_state(
         T_hat=Field(T_hat, name="T_hat", dims=dims_3d, units="K"),
         lnps_hat=Field(lnps_hat, name="lnps_hat", dims=dims_2d, units="-"),
         phis_hat=Field(phis_hat, name="phis_hat", dims=dims_2d, units="m2/s2"),
+        tracers=tracers,
     )
 
 
@@ -354,6 +388,39 @@ def make_physics_params_spectral_physics(params, grid, dt):
 # Differentiable spectral rollout
 # =============================================================================
 
+def _compute_tracer_filter(
+    grid: GaussianGrid,
+    pe_config: SpectralPEConfig,
+    spectral_filter: jnp.ndarray | None,
+    dt: float,
+) -> jnp.ndarray | None:
+    """Build the per-SH-mode multiplicative filter applied to grid-space
+    tracers in :func:`spectral_rollout`.
+
+    Mirrors :meth:`SpectralPrimitiveEquationModel._ensure_tracer_filter`:
+    combines the spectral exponential filter (de-aliasing) with the
+    implicit hyperdiffusion factor ``exp(-nu · eig · dt_eff)``.  Returns
+    ``None`` when neither knob is active (caller should then skip the
+    SH round-trip on tracers entirely).
+    """
+    components = []
+    if spectral_filter is not None:
+        components.append(spectral_filter)
+    if pe_config.hyperdiff_coeff > 0:
+        nu = pe_config.hyperdiff_coeff
+        order = pe_config.hyperdiff_order
+        eig = (grid.ls * (grid.ls + 1) / grid.radius ** 2) ** order
+        integrator = pe_config.time_integrator.lower()
+        dt_eff = 2.0 * dt if 'leapfrog' in integrator else dt
+        components.append(jnp.exp(-nu * eig * dt_eff))
+    if not components:
+        return None
+    combined = components[0]
+    for c in components[1:]:
+        combined = combined * c
+    return combined
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -372,6 +439,9 @@ def spectral_rollout(
     2. Integrate with SSP-RK3 (or configured integrator)
     3. Apply sponge layer damping (if enabled)
     4. Apply spectral filter (if enabled)
+    5. Apply tracer filter (combined spectral + hyperdiff via SH round-
+       trip) when ``initial_state.tracers`` is non-empty AND either
+       ``spectral_filter`` or ``pe_config.hyperdiff_coeff > 0`` is on.
 
     Gradient checkpointing is applied per step so memory scales as
     O(1) per step rather than O(n_steps).
@@ -403,6 +473,13 @@ def spectral_rollout(
     integrator_name = pe_config.time_integrator
     ms = grid.ms  # for sponge filter
 
+    # Precompute the tracer filter (mirrors the precomputation done by
+    # the model class for ordinary stepping).  ``None`` when neither
+    # the spectral filter nor hyperdiffusion is enabled.
+    tracer_filter = _compute_tracer_filter(
+        grid, pe_config, spectral_filter, dt,
+    )
+
     def tendency_fn(s):
         phys = physics_fn(s, grid, sigma_coord)
         return spectral_pe_tendencies(s, grid, sigma_coord, pe_config, phys)
@@ -418,6 +495,16 @@ def spectral_rollout(
         if spectral_filter is not None:
             new_state = _apply_spectral_filter_to_state(
                 new_state, spectral_filter,
+            )
+
+        # Combined spectral + implicit hyperdiff applied to grid-space
+        # tracers via one SH round-trip per tracer per step (no-op when
+        # tracer_filter is None or state.tracers is None).
+        if tracer_filter is not None and new_state.tracers is not None:
+            new_state = new_state._replace(
+                tracers=_apply_filter_to_tracers(
+                    new_state.tracers, tracer_filter, grid,
+                )
             )
 
         return new_state, None
@@ -484,6 +571,22 @@ def spectral_state_vs_carry_loss(
     dp = fields['p_s'].astype(jnp.float32) - target_carry.p_s
     loss = loss + config.w_ps * jnp.mean(dp ** 2)
 
+    # Specific humidity (q_v): contribute to the loss only when the
+    # predicted state actually carries a ``q_v`` tracer (i.e., the
+    # rollout was set up via ``carry_to_spectral_state(..., include_
+    # tracers=True)``).  Skipping silently when missing keeps the
+    # function backward-compatible with dry training pipelines.
+    if (
+        pred_state.tracers is not None
+        and "q_v" in pred_state.tracers
+    ):
+        _qv_raw = pred_state.tracers["q_v"]
+        qv_grid = (
+            _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+        ).astype(jnp.float32)
+        dq = qv_grid - target_carry.q_v
+        loss = loss + config.w_q * jnp.mean(dq ** 2 * lev_w)
+
     return loss
 
 
@@ -520,7 +623,7 @@ def load_training_data(
     import numpy as np
     from legoesm.training.era5_to_state import (
         _open_era5_zarr, _resolve_var, ERA5Slice,
-        _regrid_latlon_to_gaussian, _regrid_2d_to_gaussian,
+        regrid_latlon_to_gaussian, regrid_2d_to_gaussian,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
     n_days = config.n_train_days
@@ -549,7 +652,7 @@ def load_training_data(
         phis_era5 = ds[phis_var].values.astype(np.float32)
     else:
         phis_era5 = np.zeros((len(lat), len(lon)), dtype=np.float32)
-    phis_gauss = _regrid_2d_to_gaussian(phis_era5, lat, lon, grid)
+    phis_gauss = regrid_2d_to_gaussian(phis_era5, lat, lon, grid)
 
     sigma_full = np.asarray(sigma.sigma_full)
 

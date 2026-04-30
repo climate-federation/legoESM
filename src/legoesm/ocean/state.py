@@ -166,7 +166,7 @@ class SpectralOceanState(NamedTuple):
 
 class SpectralOceanConfig(NamedTuple):
     """Configuration for the spectral ocean model."""
-    g: float = 9.80616
+    g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4
     K_h: float = 0.0
@@ -239,7 +239,7 @@ class LatLonOceanTendencies(NamedTuple):
 
 class LatLonOceanConfig(NamedTuple):
     """Configuration for the lat-lon FV ocean model."""
-    g: float = 9.80616
+    g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
     K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
@@ -471,7 +471,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     since operator semantics differ (compact stencils vs centered).
     """
 
-    g: float = 9.80616
+    g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4
     B_h: float = 0.0

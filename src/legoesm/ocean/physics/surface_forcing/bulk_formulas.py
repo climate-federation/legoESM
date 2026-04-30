@@ -45,13 +45,10 @@ def bulk_formula_surface_forcing(
     shape_3d = T.shape
     dtype = T.dtype
 
-    # SST in Kelvin
-    T_s = T[..., 0] + 273.15  # (6, n, n)
+    T_s = T[..., 0] + constants.T_freeze  # (6, n, n)
     q_sat = _saturation_specific_humidity(T_s)
 
-    # Upward longwave: Q_lw_up = epsilon * sigma * T_s^4
-    emissivity = 0.97
-    Q_lw_up = emissivity * constants.sigma_sb * T_s ** 4
+    Q_lw_up = cfg.emissivity * constants.sigma_sb * T_s ** 4
 
     if cfg.bulk_scheme in ("coare3", "large_yeager"):
         from legoesm.coupler.bulk_flux import compute_most_fluxes

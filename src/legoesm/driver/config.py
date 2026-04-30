@@ -29,7 +29,7 @@ class GridConfig(NamedTuple):
 
 class DycoreConfig(NamedTuple):
     """Dynamical core configuration."""
-    model_type: str = "hydrostatic"       # hydrostatic, nonhydrostatic, spectral_pe
+    model_type: str = "hydrostatic"       # shallow_water, hydrostatic, nonhydrostatic
     discretization: str = "cdgrid"        # cdgrid, spectral, sfno, mpas
     dt: float = 600.0
     hyperdiff_scale: float = 1.0

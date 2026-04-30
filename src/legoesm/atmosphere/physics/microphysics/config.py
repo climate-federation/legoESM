@@ -145,6 +145,11 @@ class MLEmulatorConfig(NamedTuple):
     n_output: int = 7
     seed: int = 0
     use_residual: bool = True
+    norm_T: float = 300.0       # Temperature scale [K] for input normalization
+    norm_q_factor: float = 1e3  # q_v / q_c / q_r / q_i scale
+    norm_rho: float = 1.2       # Air density scale [kg/m^3]
+    norm_dz: float = 1000.0     # Layer thickness scale [m]
+    norm_dt: float = 3600.0     # Time-step scale [s]
 
 
 class MicrophysicsConfig(NamedTuple):

@@ -24,6 +24,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
 # Maximum interpolation order (fixed array dimension for JAX pytree compat)
@@ -525,7 +526,7 @@ def _compute_corner_lagrange_coeff(n: int, ng: int, ext_lon, ext_lat):
 
 def create_duogrid_data(
     n: int,
-    radius: float = 6.371e6,
+    radius: float = constants.R_earth,
     ng: int = 3,
     k2e_nord: int = 2,
 ) -> DuoGridData:

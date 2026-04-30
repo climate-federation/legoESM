@@ -80,14 +80,23 @@ def diagnose_sundqvist_process_rates(
         P_out = jnp.clip(P_total - evap * rho_k * dz_k, 0.0)
         return P_out, evap
 
-    # Transpose for scan: (nlev, ncol)
+    # Pick a working dtype that ``scan`` can carry without promotion.
+    # Under ``JAX_ENABLE_X64=1`` ``jnp.zeros``/``jnp.ones`` default to
+    # f64, so a state assembled from a mix of (f32) ``T`` and (f64)
+    # tracers ends up with f64 ``q_v``/``q_c``.  ``P_flux_layer``
+    # then inherits the f64 promotion from ``q_c + condensation * dt``,
+    # while a carry pinned to ``T.dtype`` (f32) would mismatch the
+    # f64 scan output.  Promoting to the wider of carry/input dtype
+    # keeps ``scan`` happy without silently downcasting precipitation
+    # mass.
+    _scan_dtype = jnp.promote_types(T.dtype, P_flux_layer.dtype)
     inputs = (
-        jnp.moveaxis(P_flux_layer, 1, 0),
-        jnp.moveaxis(evap_mask, 1, 0),
-        jnp.moveaxis(rho, 1, 0),
-        jnp.moveaxis(dz, 1, 0),
+        jnp.moveaxis(P_flux_layer.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(evap_mask.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(rho.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(dz.astype(_scan_dtype), 1, 0),
     )
-    P_init = jnp.zeros(T.shape[0], dtype=T.dtype)
+    P_init = jnp.zeros(T.shape[0], dtype=_scan_dtype)
     P_final, evap_col = jax.lax.scan(scan_fn, P_init, inputs)
     evaporation = jnp.moveaxis(evap_col, 0, 1)
     return SundqvistProcessRates(

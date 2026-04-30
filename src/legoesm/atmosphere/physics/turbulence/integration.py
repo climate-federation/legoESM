@@ -108,10 +108,24 @@ def make_turbulence_physics(
         return _make_nonhydrostatic_turbulence(turbulence_config, dt)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_turbulence(turbulence_config, dt)
+    elif model_type == "mpas":
+        # MPAS dispatch is intentionally NOT supported: the turbulence
+        # bridges read both ``state.u`` and ``state.v`` directly, but
+        # MPAS stores only the normal velocity ``state.u`` on edges
+        # and has ``state.v is None``.  Until an edge→cell wind
+        # interpolator is added, fail fast with a clear message rather
+        # than a confusing ``AttributeError`` deep inside the bridge.
+        raise NotImplementedError(
+            "Turbulence on MPAS Voronoi mesh is not yet supported.  "
+            "The bridge expects cell-centered u and v winds but MPAS "
+            "stores only the normal velocity on edges.  Edge→cell "
+            "interpolation is a follow-up; until then, run MPAS with "
+            "turbulence='none'."
+        )
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
 
 

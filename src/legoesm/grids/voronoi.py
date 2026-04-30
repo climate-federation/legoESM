@@ -115,7 +115,7 @@ class VoronoiMesh(NamedTuple):
 
     @property
     def grid_coriolis(self) -> jnp.ndarray:
-        return 2.0 * 7.292e-5 * jnp.sin(self.latCell)
+        return 2.0 * constants.Omega * jnp.sin(self.latCell)
 
     @property
     def grid_radius(self) -> float:

@@ -971,6 +971,66 @@ def uv_from_vordiv_3d(
     return u_cos, v_cos
 
 
+def vordiv_from_uv_3d(
+    grid: GaussianGrid,
+    u_grid: jax.Array,
+    v_grid: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Forward transform a grid-space vector field to spectral (vor, div).
+
+    Inverse of :func:`uv_from_vordiv_3d` (up to the n=0 mode, which is
+    annihilated by both directions because vor and div have no constant
+    mode on the sphere).
+
+    Implements the Hack & Jakob (1992) / Bourke (1972) spectral
+    divergence and curl operators in pole-safe form.  For a vector field
+    ``F = (F_x, F_y)`` with ``A = F_x · cos φ`` and ``B = F_y · cos φ``::
+
+        div_hat  = (im/a) · sh_oc2(A) - (1/a) · sh_dmu(B)
+        vor_hat  = (im/a) · sh_oc2(B) + (1/a) · sh_dmu(A)
+
+    where ``sh_oc2`` carries an embedded ``1/cos²φ`` weighting (pole-safe)
+    and ``sh_dmu`` carries the dPnm/dμ kernel.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+    u_grid, v_grid : (n_lat, n_lon, nlev) real arrays
+        Grid-space vector components in **physical** units (NOT pre-multiplied
+        by ``cos φ``).
+
+    Returns
+    -------
+    vor_hat, div_hat : (n_sh, nlev) complex arrays.
+    """
+    a = grid.radius
+    cos_lat_3d = grid.cos_lat[:, None, None]
+    A = u_grid * cos_lat_3d   # F_x · cos φ
+    B = v_grid * cos_lat_3d   # F_y · cos φ
+
+    # Stack (A, B) along a trailing axis and fold into the level dim so
+    # each SH-analysis variant runs once on a thicker
+    # (n_lat, n_lon, nlev*2) tensor — matches the
+    # ``uv_from_vordiv_3d`` / spectral PE batching pattern.  4 SH
+    # forwards collapse to 2.
+    n_lat_t, n_lon_t, nlev_t = A.shape
+    AB_stack = jnp.stack([A, B], axis=-1)
+    AB_flat = AB_stack.reshape(n_lat_t, n_lon_t, nlev_t * 2)
+    AB_oc2_flat = sh_analysis_oc2_3d(grid, AB_flat)
+    AB_dmu_flat = sh_analysis_dmu_3d(grid, AB_flat)
+    AB_oc2 = AB_oc2_flat.reshape(AB_oc2_flat.shape[0], nlev_t, 2)
+    AB_dmu = AB_dmu_flat.reshape(AB_dmu_flat.shape[0], nlev_t, 2)
+    A_oc2, B_oc2 = AB_oc2[..., 0], AB_oc2[..., 1]
+    A_dmu, B_dmu = AB_dmu[..., 0], AB_dmu[..., 1]
+
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    div_hat = im_over_a[:, None] * A_oc2 - one_over_a * B_dmu
+    vor_hat = im_over_a[:, None] * B_oc2 + one_over_a * A_dmu
+    return vor_hat, div_hat
+
+
 def spectral_hyperdiffusion_3d(
     grid: GaussianGrid,
     coeffs_3d: jax.Array,

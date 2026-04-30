@@ -29,7 +29,7 @@ def update_snow(
     *,
     Q_net: jnp.ndarray | None = None,
     snow_melt_rate: float = 5.0e-6,
-    T_snow_melt: float = 273.15,
+    T_snow_melt: float = constants.T_freeze,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Update snow depth and age, returning the melt amount.
 
