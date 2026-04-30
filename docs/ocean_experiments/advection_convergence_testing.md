@@ -619,6 +619,95 @@ test-setup bug, not a real scheme issue.
   the design tuning for forward Euler doesn't combine well with multi-
   stage methods, and even with Euler it's worse than expected here.
 
+### 2026-04-30: Level 3 — vertical advection (overturning cell)
+
+Designed a 2D zonal-vertical (x-z) test using a stream function:
+  ψ(x, z, t) = ψ₀ sin(2πx/Lx) sin(πz/H) cos(πt/T)
+with ψ₀ = 3.5e4 giving u_max ≈ 20 m/s, w_max ≈ 5.5e-3 m/s (= 475 m/day).
+Bell starts at (lon=0, z=H/2) where w is at maximum magnitude.
+Time-reversing flow returns the bell to IC at t = T = 5 days.
+
+Test exercises both **horizontal** (`*_to_u_points`) and **vertical**
+(`flux_form_vertical_tracer_advection_*`) advection routines together.
+Domain: 4 × n_lon × n_lev with uniform 100m layers, total depth 5500m.
+
+**Results at finest grid (128×64):**
+
+| Scheme | Euler L2 | AB2 L2 | RK3 L2 |
+|---|---|---|---|
+| upwind | 0.043 | 0.060 | 0.057 |
+| tvd | 0.018 | 0.017 | 0.013 |
+| dst3 | 0.017 | 0.027 | 0.024 |
+| weno5 | 0.027 | 0.0050 | **0.00027** |
+| weno7 | 0.027 | 0.0050 | **0.00027** |
+
+**Convergence rates (L2, n_lon=32→128):**
+
+| Scheme | Euler | AB2 | RK3 |
+|---|---|---|---|
+| upwind | 0.87 | 0.81 | 0.82 |
+| tvd | 0.92 | 1.11 | 1.19 |
+| dst3 | 1.05 | 0.99 | 1.03 |
+| weno5 | 0.99 | 0.91 | **2.02** |
+| weno7 | 1.01 | 0.87 | **1.91** |
+
+**Findings:**
+
+1. **No blowups for any combination.** WENO+Euler is stable here — the
+   vertical advection's smaller CFL (w_max << u_max) doesn't amplify
+   the WENO oscillations the way solid body rotation did. So Euler
+   instability is **flow-regime-dependent**, not a universal property
+   of WENO+Euler.
+
+2. **WENO+RK3 dominates by 50×** at fine resolution (0.00027 vs 0.013
+   for TVD+RK3, the second-best). This is the largest scheme-pairing
+   advantage we've seen across all three Level tests.
+
+3. **WENO+RK3 hits rate ~2.0** — same FV-divergence ceiling documented
+   in Level 1 sine test. WENO5 and WENO7 give identical errors,
+   consistent with both being limited by the 6th-order cell-average
+   conversion (our docs note WENO7 effectively converges as 6th order
+   given that conversion).
+
+4. **AB2 doesn't help WENO here** — only rate 0.91 vs RK3's 2.02. The
+   AB2 ε-stabilization adds an O(dx) error that dominates in this 3D
+   regime where vertical and horizontal temporal errors compound.
+
+5. **Mass conservation**: Euler/AB2 to machine precision (~1.9e-16),
+   RK3 to ~6e-15 (still effectively zero in fp64; RK3 has more
+   floating-point operations per step accumulated over many steps).
+
+6. **WENO5 and WENO7 are indistinguishable** at this resolution —
+   spatial accuracy is fully shadowed by the FV-divergence ceiling
+   and (for AB2) by temporal error.
+
+**Combined practical takeaways (across all three levels):**
+
+- **Best pairing: WENO5 + RK3** — confirmed across 1D, 2D deformational,
+  2D solid body rotation, and now 3D overturning cell. Always stable,
+  always lowest error, mass conserves to machine precision.
+- **AB2 is a 3× cheaper alternative** when raw accuracy isn't critical:
+  errors within ~30% of RK3 in Levels 2(A)/2(B), but degrades to ~20×
+  worse in Level 3 vertical.
+- **WENO+Euler is unstable in horizontal sharp-gradient flows**
+  (deformational, solid body) but stable in pure vertical (Level 3).
+  The instability mode is anti-diffusive Euler truncation amplifying
+  WENO's non-monotone overshoots — only happens when sharp gradients
+  are sustained over many steps with negligible damping.
+- **TVD + any integrator** is the best monotone scheme. Decent accuracy,
+  always stable, never produces overshoots. Cheap.
+- **DST-3** consistently underperforms — its CFL-encoded coefficients
+  don't survive multi-stage time integration.
+- **Mass conservation is excellent across all scheme/integrator
+  combinations** — flux-form FV update preserves mass to machine
+  precision regardless of scheme order or integrator stage count.
+
+**Status of testing plan: COMPLETE**
+- Level 1 (1D zonal): 5 schemes × 3 integrators × {sine, gaussian} ✓
+- Level 2(A) (solid body rotation): 5 schemes × 3 integrators ✓
+- Level 2(B) (deformational): 5 schemes × 3 integrators ✓
+- Level 3 (3D overturning): 5 schemes × 3 integrators ✓
+
 **Recommended pairings (for the model):**
 - Production tracer advection: **TVD+Euler** (cheap, robust) or
   **DST3+Euler** (best Euler accuracy, space-time tuned)
