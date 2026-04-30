@@ -403,19 +403,25 @@ class LatLonCGridOceanModel:
         du_dt = tend.du_dt.data
         dv_dt = tend.dv_dt.data
 
-        # Compute layer thickness at u/v faces for depth-averaging
+        # Compute layer thickness at u/v faces for depth-averaging.
+        # Min-rule: the face's effective wet thickness is the shallower
+        # side's thickness (MOM6/MITgcm hFacW convention).  The same
+        # convention is used in the barotropic Helmholtz solver and the
+        # tracer mass flux below — consistency is required for the
+        # Hallberg-Adcroft 2009 column-sum invariant
+        # ``sum_k(h_u * u_corrected) == Hu_avg`` to hold to machine
+        # precision.  For full cells this reduces to the cell value
+        # (bit-exact backwards-compat).
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            min_cell_to_uface, min_cell_to_vface,
+        )
         h_k_pre = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
         )
-        # h at u-faces
-        h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
-        h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
+        h_u_pre = min_cell_to_uface(h_k_pre)
         H_u_pre = jnp.maximum(jnp.sum(h_u_pre, axis=-1), 1e-10)
-        # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
-        # replaces alloc-zeros + concatenate-of-three.
-        h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
-        h_v_pre = jnp.pad(h_v_pre_int, ((1, 1), (0, 0), (0, 0)))
+        h_v_pre = min_cell_to_vface(h_k_pre)
         H_v_pre = jnp.maximum(jnp.sum(h_v_pre, axis=-1), 1e-10)
 
         # Depth-averaged tendency → slow forcing for barotropic solver
@@ -514,15 +520,18 @@ class LatLonCGridOceanModel:
             _tvd_to_v_points,
         )
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            divergence_cgrid, interp_cell_to_uface, compute_face_masks_3d,
+            divergence_cgrid, compute_face_masks_3d,
+            min_cell_to_uface as _min_uface_op,
+            min_cell_to_vface as _min_vface_op,
         )
         from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
         mask = state.land_mask.data
 
-        # Layer thickness at face points
-        h_u_old = interp_cell_to_uface(h_k_old)  # (n_lat, n_lon+1, nlev)
-        h_v_old = _interp_to_v_points(h_k_old)  # (n_lat+1, n_lon, nlev)
+        # Layer thickness at face points (min-rule, partial-cell aware
+        # and consistent with the barotropic solver and slow forcing).
+        h_u_old = _min_uface_op(h_k_old)        # (n_lat, n_lon+1, nlev)
+        h_v_old = _min_vface_op(h_k_old)        # (n_lat+1, n_lon, nlev)
         H_u_old = jnp.sum(h_u_old, axis=-1)     # (n_lat, n_lon+1)
         H_v_old = jnp.sum(h_v_old, axis=-1)     # (n_lat+1, n_lon)
 

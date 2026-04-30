@@ -71,6 +71,60 @@ def interp_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
 
 
+def min_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
+    """Min-rule interpolation of a cell-center thickness to u-faces.
+
+    Use this (NOT ``interp_cell_to_uface``) for layer thickness ``h_k``
+    when the model has partial bottom cells.  At a face between cell
+    W (partial cell at level k, h_W) and cell E (full cell, h_E),
+    the face's effective wet thickness equals the shallower side's
+    thickness — the deeper side has rock below the shallower seafloor
+    at that level, so the face is closed there and the wet area is
+    bounded by ``min(h_W, h_E)``.
+
+    Equivalent to MOM6/MITgcm's ``hFacW = min(hFacC_L, hFacC_R)``
+    convention (Adcroft, Hill & Marshall 1997 eq. 11-13).
+
+    For full-cell columns (pure z\\* with same bathymetry on both
+    sides), ``min(h_W, h_E) == h_W == h_E`` so this is bit-exact
+    backwards-compat.  Differs from arithmetic mean when adjacent
+    cells have different layer thicknesses (partial-cell faces, or
+    z\\* with horizontally varying eta).
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, ...) at cell centers.
+
+    Returns
+    -------
+    f_u : (n_lat, n_lon+1, ...) at u-faces.
+    """
+    f_u = jnp.minimum(jnp.roll(f, 1, axis=1), f)
+    return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+
+
+def min_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
+    """Min-rule interpolation of a cell-center thickness to v-faces.
+
+    Same convention as ``min_cell_to_uface`` for the meridional
+    direction.  Pole rows (south=0, north=n_lat) are zero-padded:
+    the pole is a wall, no fluid passes through, so the face wet
+    thickness there is exactly zero.  This matches the ocean-PE
+    convention used everywhere else for thickness at v-faces.
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, ...) at cell centers.
+
+    Returns
+    -------
+    f_v : (n_lat+1, n_lon, ...) at v-faces.
+    """
+    f_v_interior = jnp.minimum(f[:-1], f[1:])
+    pad_axes = ((0, 0),) * (f_v_interior.ndim - 1)
+    return jnp.pad(f_v_interior, ((1, 1), *pad_axes))
+
+
 def cell_to_cgrid_winds(
     u_cell: jnp.ndarray,
     v_cell: jnp.ndarray,

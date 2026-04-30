@@ -68,6 +68,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
+    min_cell_to_uface,
+    min_cell_to_vface,
     curl_vertex_cgrid,
     smagorinsky_biharmonic_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
@@ -829,8 +831,16 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- 4. Vertical velocity from FV flux divergence ---
     # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
     # Uses FULL velocity (barotropic + baroclinic) for mass transport.
-    h_u = interp_cell_to_uface(h_k)
-    h_v = _interp_to_v_points(h_k)
+    # Min-rule (MOM6/MITgcm hFacW = min(hFacC_L, hFacC_R) convention,
+    # Adcroft-Hill-Marshall 1997 eq. 11-13): the face's effective wet
+    # thickness equals the shallower side's thickness.  For full cells
+    # with same h, this reduces to the cell value (bit-exact unchanged
+    # backwards-compat).  Consistency: same convention is used in the
+    # barotropic Helmholtz solver, the slow-forcing depth-average, and
+    # the tracer mass flux — required for the H&A 2009 column-sum
+    # invariant to hold.
+    h_u = min_cell_to_uface(h_k)
+    h_v = min_cell_to_vface(h_k)
     flux_div_k = divergence_cgrid(
         h_u * u * u_mask_3d, h_v * v * v_mask_3d, grid,
     )
@@ -982,10 +992,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             partial_cell_pgf_correction_x,
             partial_cell_pgf_correction_y,
         )
-        centroid_depth = compute_centroid_depth(eta_safe, H_bathy, z_coord)
-        # rho_prime is computed with J=1, eta=0 reference (same convention
-        # used in p_prime), so the in-situ density used for the depth
-        # shift matches the pressure formulation.
+        # Use eta=0 reference for centroid: rho_prime / p_prime above
+        # are computed at the J=1, eta=0 reference (line 802 comment).
+        # Using live eta here would make the Adcroft correction time-
+        # dependent through eta — small effect at rest (eta=0) but
+        # breaks the "rest-state machine-zero" claim once eta evolves.
+        centroid_depth = compute_centroid_depth(
+            jnp.zeros_like(eta_safe), H_bathy, z_coord,
+        )
         dp_dx = dp_dx + partial_cell_pgf_correction_x(
             centroid_depth, rho_prime, grid, g_val,
         )

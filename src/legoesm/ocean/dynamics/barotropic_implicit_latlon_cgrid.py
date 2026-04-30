@@ -113,12 +113,11 @@ def _depth_average_to_faces(
 
 
 def _h_total_at_faces(
-    eta: jnp.ndarray,
-    H_bathy: jnp.ndarray,
+    h_k: jnp.ndarray,
     min_water_col: jnp.ndarray,
     mask: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Total water-column thickness H = max(η + H_bathy, min_col), at u/v faces.
+    """Total water-column thickness ``H = sum_k(h_k)`` at u/v faces.
 
     Uses ``min(H_left, H_right)`` rather than the arithmetic mean —
     the gravity-wave at the face propagates through the shared wet
@@ -127,9 +126,18 @@ def _h_total_at_faces(
     have the same H_bathy (flat bottom), min == average → bit-exact
     backwards-compat preserved.
 
+    The cell-center total is computed as ``sum_k(h_k)``, NOT as
+    ``eta + H_bathy``.  This is mathematically equivalent but bit-
+    consistent with the per-level mass flux pipeline that uses
+    ``min_cell_to_uface(h_k)`` and ``H_u_old = sum_k(h_u_old)``.
+    Using ``eta + H_bathy`` here would drift by O(1e-4 m) from
+    ``sum_k(h_k)`` due to the float-precision residue in
+    ``create_ocean_z_star``'s ``dz_ref`` construction, breaking the
+    Hallberg-Adcroft 2009 column-sum identity.
+
     Multiplied by the *cell* mask so that dry-face transport is zero.
     """
-    H_total = jnp.maximum(eta + H_bathy, min_water_col) * mask
+    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col) * mask
 
     H_u_inner = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
     H_u = jnp.concatenate([H_u_inner, H_u_inner[:, 0:1]], axis=1)
@@ -310,8 +318,12 @@ def barotropic_implicit_latlon_cgrid(
     )
 
     # ----- Step 2: face total depth from eta_old -------------------------
+    # Use sum(h_k_old) for cell-center total, not eta+H_bathy: ensures
+    # bit-consistency with the per-level mass flux pipeline that builds
+    # H_u_old as sum_k(min_cell_to_uface(h_k_old)).  This is required
+    # for the Hallberg-Adcroft 2009 column-sum identity.
     H_u_old, H_v_old = _h_total_at_faces(
-        eta_old, H_bathy, min_water_col, mask,
+        h_k_old, min_water_col, mask,
     )
 
     # ----- Step 3: Coriolis face values ---------------------------------
@@ -410,8 +422,14 @@ def barotropic_implicit_latlon_cgrid(
     V_new = (V_pred - theta_pgf * dt_t * g * delta_grad_y) * v_mask
 
     # ----- Step 7: time-averaged transport for tracer step --------------
+    # H_u_new uses sum(h_k_new) — bit-consistent with the per-level
+    # mass flux pipeline.  See comment in Step 2.
+    h_k_new = compute_layer_thickness(
+        eta_new, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )
     H_u_new, H_v_new = _h_total_at_faces(
-        eta_new, H_bathy, min_water_col, mask,
+        h_k_new, min_water_col, mask,
     )
     Hu_avg = (
         (1.0 - theta_eta) * H_u_old * U_old + theta_eta * H_u_new * U_new

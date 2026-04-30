@@ -100,17 +100,27 @@ def create_ocean_z_star(
     scale = H_max / jnp.sum(dz_raw)
     dz_ref = dz_raw * scale
 
+    # Snap the last layer so ``sum(dz_ref) == H_max`` to bit-precision.
+    # Without this, the cumsum round-trip below leaves a float-drift
+    # residue of order ``H_max * eps_dtype`` (~2e-4 m for H_max=4000m
+    # in fp32) that breaks the Hallberg-Adcroft 2009 column-sum
+    # identity in partial-cell models — ``sum_k(h_partial)`` would
+    # differ from the user-supplied ``H_bathy`` by that residue.
+    dz_ref = dz_ref.at[-1].set(H_max - jnp.sum(dz_ref[:-1]))
+
     # Interface depths from cumulative sum (surface=0, bottom=-H_max)
     z_half_ref = jnp.concatenate([
         jnp.array([0.0], dtype=dz_ref.dtype),
         -jnp.cumsum(dz_ref),
     ])
+    # Snap the bottom interface to exactly -H_max (kills cumsum drift).
+    z_half_ref = z_half_ref.at[-1].set(-H_max)
 
     # Full level depths (cell centers)
     z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
 
-    # Layer thicknesses (positive)
-    dz_ref = z_half_ref[:-1] - z_half_ref[1:]  # positive since z[k] > z[k+1]
+    # Layer thicknesses (positive). Recover from the snapped interfaces.
+    dz_ref = z_half_ref[:-1] - z_half_ref[1:]
 
     # Distance between full levels
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]  # positive
@@ -520,8 +530,28 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
     if z_coord is None:
         return w_euler
 
-    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
     deta_dt = w_euler[..., 0:1]
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        # Partial cells: sigma must use each column's actual seafloor
+        # depth, not the reference H_max.  Otherwise w at the partial
+        # seafloor (k = bottom_level + 1, not k = nlev) is non-zero by
+        # ``sigma_zstar - sigma_partial`` * deta_dt — a spurious vertical
+        # mass flux at the seafloor that breaks tracer mass conservation.
+        # z_half_actual[k] = -cumsum(h_partial[0..k-1]) from surface;
+        # H_bathy_per_column = sum(h_partial).  sigma_per_cell[k] =
+        # (z_half_actual + H_bathy)/H_bathy is 1 at surface, 0 at the
+        # column's own seafloor (where h_partial = 0 below).
+        h_p = z_coord.h_partial                                  # (..., nlev)
+        z_half_actual_inner = -jnp.cumsum(h_p, axis=-1)          # (..., nlev)
+        pad_axes = ((0, 0),) * (z_half_actual_inner.ndim - 1)
+        z_half_actual = jnp.pad(
+            z_half_actual_inner, (*pad_axes, (1, 0)),
+        )                                                          # (..., nlev+1)
+        H_col = jnp.sum(h_p, axis=-1, keepdims=True)             # (..., 1)
+        H_col_safe = jnp.maximum(H_col, 1e-10)
+        sigma = (z_half_actual + H_col) / H_col_safe
+    else:
+        sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
     return w_euler - sigma * deta_dt
 
 
