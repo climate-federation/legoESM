@@ -125,6 +125,150 @@ def create_ocean_z_star(
     )
 
 
+class OceanPartialCellCoordinate(NamedTuple):
+    """z* + partial bottom cells (Adcroft, Hill, Marshall 1997;
+    Adcroft & Campin 2004).
+
+    Same z*-style reference levels as ``OceanZStarCoordinate``, but
+    augmented with per-cell layer thicknesses ``h_partial(..., k)``
+    that account for the seafloor cutting through the deepest active
+    level.
+
+    For each column with bathymetry depth ``H_bathy(i,j)``:
+      - Levels k < bottom_level(i,j): full cells, h_partial[k] = dz_ref[k]
+      - Level k = bottom_level(i,j): partial cell,
+                                       h_partial[k] = H_bathy - |z_half_ref[k]|
+      - Levels k > bottom_level(i,j): below seafloor, h_partial[k] = 0
+
+    The reference fields (``z_full_ref``, ``z_half_ref``, ``dz_ref``,
+    ``dz_half_ref``) match ``OceanZStarCoordinate`` exactly so callers
+    that need only the reference grid can treat both coords
+    uniformly.
+
+    Fields specific to partial cells
+    --------------------------------
+    h_partial : array, shape (..., nlev)
+        Per-cell at-rest layer thickness [m], with H_bathy folded in.
+        Sum over k of h_partial[..., k] equals H_bathy(i, j) per column.
+    bottom_level : array of int32, shape (...)
+        Index of the deepest active level for each column.  ``-1`` for
+        dry columns (H_bathy <= 0).
+    is_active : array of bool, shape (..., nlev)
+        True for cells at or above bottom_level.  Cells below the
+        seafloor are False.
+    """
+    n_levels: int
+    H_max: float
+    z_full_ref: jnp.ndarray
+    z_half_ref: jnp.ndarray
+    dz_ref: jnp.ndarray
+    dz_half_ref: jnp.ndarray
+    h_partial: jnp.ndarray
+    bottom_level: jnp.ndarray
+    is_active: jnp.ndarray
+
+
+def create_partial_cell_coordinate(
+    z_coord: OceanZStarCoordinate,
+    H_bathy: jnp.ndarray,
+) -> OceanPartialCellCoordinate:
+    """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry.
+
+    Parameters
+    ----------
+    z_coord : OceanZStarCoordinate
+        Reference vertical grid (sets H_max, dz_ref, etc.).  Used to
+        derive partial-cell thicknesses.
+    H_bathy : array
+        Per-column bathymetry depth [m], positive downward.  Land
+        cells should have H_bathy <= 0; they're flagged as
+        ``bottom_level = -1`` and ``is_active = False`` everywhere.
+
+    Returns
+    -------
+    OceanPartialCellCoordinate
+
+    Notes
+    -----
+    The factory is differentiable w.r.t. continuous ``H_bathy`` only
+    while ``bottom_level`` does not change — i.e., piecewise smooth
+    with discontinuities at every reference-level interface.  This is
+    the documented limitation of partial-cell schemes (see
+    ``docs/ocean_experiments/partial_cells_plan.md`` Differentiability
+    Contract); not specific to this implementation.
+    """
+    H = jnp.asarray(H_bathy)
+    nlev = z_coord.n_levels
+    abs_z_half = jnp.abs(z_coord.z_half_ref)        # (nlev+1,) positive depths
+
+    # Number of half-interfaces strictly shallower than H_bathy.
+    # E.g. abs_z_half = [0, 10, 300, 1500, 4000], H=2350 → count=4 → bottom_level=3.
+    n_lead = H.ndim
+    H_exp = H[..., jnp.newaxis]                     # (..., 1)
+    interfaces_above = jnp.sum(
+        abs_z_half[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
+        axis=-1,
+    )                                                # (...) integer
+    bottom_level = interfaces_above.astype(jnp.int32) - 1
+    # Dry columns (H <= 0): mark bottom_level = -1 (no active cells).
+    bottom_level = jnp.where(H > 0.0, bottom_level, -1)
+    # Cap at the deepest possible level (when H exceeds H_max).
+    bottom_level = jnp.minimum(bottom_level, nlev - 1)
+
+    # Per-cell active mask.
+    k_idx = jnp.arange(nlev, dtype=jnp.int32)
+    k_view = k_idx.reshape((1,) * n_lead + (nlev,))
+    bottom_view = bottom_level[..., jnp.newaxis]    # (..., 1)
+    is_active = (k_view <= bottom_view) & (bottom_view >= 0)
+
+    # Per-cell layer thickness.
+    # Start with dz_ref broadcast to (..., nlev).
+    dz_ref_view = z_coord.dz_ref.reshape((1,) * n_lead + (nlev,))
+    h_full = jnp.broadcast_to(dz_ref_view, H.shape + (nlev,))
+
+    # Partial thickness at bottom level: H - |z_half_ref[bottom_level]|,
+    # capped above by the full-cell reference thickness ``dz_ref[bottom]``,
+    # AND snapped to ``dz_ref[bottom]`` when within float32 precision.
+    #
+    # The cap matters when ``H_bathy >= H_max`` (caller passes a column
+    # at or beyond reference depth — full cells, no extra thickness).
+    #
+    # The snap matters because ``abs_z_half`` (cumsum-built in float32)
+    # has ~1e-7 relative error → for a column at exactly the reference
+    # depth, ``H - abs_z_half[bottom]`` differs from ``dz_ref[bottom]``
+    # by sub-millimetre.  Without the snap, ``use_partial_cells=False``
+    # backwards-compat regression in Phase 6 breaks — the partial path
+    # gives a slightly different thickness than the legacy path.
+    # We snap when the values agree to ~1e-5 relative, well below any
+    # physically meaningful column-thickness variation.
+    #
+    # For dry columns, bottom_level = -1 and we use 0 (the value gets
+    # masked out by is_active anyway).
+    safe_bottom = jnp.maximum(bottom_level, 0)
+    abs_z_at_bottom = abs_z_half[safe_bottom]       # (...)
+    dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
+    raw_partial = H - abs_z_at_bottom
+    capped = jnp.minimum(raw_partial, dz_at_bottom)
+    near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
+    partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
+
+    is_bottom = (k_view == bottom_view) & (bottom_view >= 0)
+    h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
+    h_partial = jnp.where(is_active, h_partial, 0.0)
+
+    return OceanPartialCellCoordinate(
+        n_levels=nlev,
+        H_max=z_coord.H_max,
+        z_full_ref=z_coord.z_full_ref,
+        z_half_ref=z_coord.z_half_ref,
+        dz_ref=z_coord.dz_ref,
+        dz_half_ref=z_coord.dz_half_ref,
+        h_partial=h_partial,
+        bottom_level=bottom_level,
+        is_active=is_active,
+    )
+
+
 def compute_layer_thickness(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
