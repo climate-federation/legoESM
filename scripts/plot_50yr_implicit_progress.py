@@ -197,11 +197,16 @@ def main():
     fig, axes = plt.subplots(1, n, figsize=(3.5 * n, 5), sharey=True)
     if n == 1:
         axes = [axes]
+    T_levels = np.arange(0, 23, 2)
     for i, s in enumerate(snapshots):
         T_zm = s["T_zonal_mean"]
         im = axes[i].pcolormesh(lat, z_full, T_zm.T,
                                  cmap="RdYlBu_r", shading="auto",
                                  vmin=0, vmax=22)
+        cs = axes[i].contour(lat, z_full, T_zm.T,
+                              levels=T_levels, colors="k",
+                              linewidths=0.5, alpha=0.6)
+        axes[i].clabel(cs, inline=True, fontsize=6, fmt="%g")
         plt.colorbar(im, ax=axes[i], fraction=0.046,
                      label="T (°C)" if i == n - 1 else None)
         axes[i].set_title(f"Yr {s['year']:.0f}")
