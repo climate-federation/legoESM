@@ -401,11 +401,56 @@ interpret the realistic-geometry Phase 4 run.
   realistic-bathymetry slopes), that decision goes through a
   separate review — do NOT silently bake it into the plan.
 
+### Phase 3.5 — Realistic-geometry smoke test  (≈ 3–4 days)
+
+The Phase 3 ladder catches each failure mode in isolation, but does
+not test whether they appear simultaneously when full ETOPO bathymetry
++ real coastlines are combined.  This phase bridges the gap before
+the multi-hour Phase 4 commitment.
+
+**Tasks:**
+
+- 30-day rest-state run on the real ETOPO bathymetry + real coastlines
+  product from Phase 0 (with the Shapiro smoothing chosen in Phase 3a).
+  Stratified T initial condition, zero forcing.
+  - Diagnostic: peak `|u|` over time, regional max-velocity maps focused
+    on the Mid-Atlantic Ridge, East Pacific Rise, Drake Passage shelf
+    break, continental shelves around Antarctica.
+- 90-day forced run with the Wolfe-Cessi-style two-belt wind + cosine
+  SST restoring on the same realistic geometry.
+  - Diagnostic: `|η|`, `|u|`, T-range bounded; mass + heat conservation
+    to round-off; targeted regional checks at known PGF-hard regions
+    (each gets a documented bound).
+- A short driver script analogous to the Phase 4 driver but capped at
+  90 days, output to
+  `results/ocean/realistic_geometry_smoke_test/`.
+
+**Decision gate:**
+
+- 30-day rest-state run produces `|u|max ≤ 5 mm/s` (same threshold as
+  Phase 3a Beckmann-Haidvogel).  Regional bounds met everywhere
+  identified in Phase 0's slope-histogram diagnostic.
+- 90-day forced run completes cleanly with documented diagnostics, OR
+  identifies a specific regional issue that gets fixed before Phase 4
+  starts.
+- If the forced run shows local instability or persistent unphysical
+  flow at a known PGF-hard region, the fix is to revisit Phase 0's
+  smoothing parameters or apply a regional `H_bathy` floor (documented),
+  not to silently increase global smoothing.
+
+This phase exists specifically to **avoid wasting a multi-hour Phase 4
+run** on a regression that the Phase 3 idealized ladder happened not
+to expose.  Cost: ~3–4 days for ~6 h of additional model runtime
+(30+90 days at dt=600s + diagnostics).
+
 ### Phase 4 — 50-yr global overturning on realistic geometry  (≈ 1 week + wall time)
 
-**Gated on Phase 3**: do not start Phase 4 until 3a–3e all pass.
-This is a multi-hour wall-clock investment; we want every distinct
-boundary-handling failure mode characterised and resolved beforehand.
+**Gated on Phases 3 and 3.5**: do not start Phase 4 until 3a–3e all
+pass and 3.5's smoke tests complete cleanly.  This is a multi-hour
+wall-clock investment; we want every distinct boundary-handling failure
+mode characterised and resolved beforehand, *and* the realistic
+combined geometry verified to integrate stably for at least a
+full season.
 
 Mirror the lat-lon flat-bottom 50-yr workflow but with realistic
 geometry.
@@ -481,6 +526,8 @@ In ascending order of difficulty:
 | 3c Munk gyre, diagonal eastern boundary | Corner cells under sustained flow | 3 |
 | 3d Circular island in closed basin | Closed-loop topology / island handling | 3 |
 | 3e Two-basin with strait | Sill exchange + connected-basin dynamics | 3 |
+| 3.5 — 30d real-geometry rest state | Combined-geometry steady stability | 3.5 |
+| 3.5 — 90d real-geometry forced run | Combined-geometry forced stability | 3.5 |
 | 50-yr realistic geometry run | End-to-end production readiness | 4 |
 | Drake transport vs published estimates | Big-picture circulation correctness | 5 |
 | AMOC pathway topology | Realistic basin connectivity | 5 |
@@ -550,10 +597,11 @@ operator refactoring.
 |   ↳ 3c Munk gyre, diagonal coastline | 2 d | |
 |   ↳ 3d Circular island | 1 d | |
 |   ↳ 3e Two-basin with strait (full diagnostic) | 4 d | |
-| 4 — 50-yr realistic-geometry run (gated on 3a–3e) | 1 week + ~6 h wall | 30 d |
-| 5 — Diagnostics + comparison | 1 week | 35 d |
+| 3.5 — Realistic-geometry smoke test | 3–4 days | 29 d |
+| 4 — 50-yr realistic-geometry run (gated on 3 + 3.5) | 1 week + ~6 h wall | 34 d |
+| 5 — Diagnostics + comparison | 1 week | 39 d |
 
-**Total: ~5 weeks** of focused work plus the 50-yr wall-clock time
+**Total: ~5.5 weeks** of focused work plus the 50-yr wall-clock time
 (now ~6 h on the implicit-CN path at dt=600 s, may need adjusting
 for variable bathymetry CFL).
 
