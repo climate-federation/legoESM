@@ -76,8 +76,7 @@ class TestShapeAndBoundary:
         rho_prime = jnp.full((8, 16, nlev), -1.0)
 
         out = density_jacobian_pgf_smc03_x(
-            rho_prime, partial.h_partial, partial.is_active,
-            partial.z_full_ref, grid, G,
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
         )
         assert out.shape == (8, 17, nlev)
         # Periodic wrap: face at j=n_lon should equal face at j=0.
@@ -97,8 +96,7 @@ class TestShapeAndBoundary:
         )
 
         out = density_jacobian_pgf_smc03_y(
-            rho_prime, partial.h_partial, partial.is_active,
-            partial.z_full_ref, grid, G,
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
         )
         assert out.shape == (9, 16, nlev)
         # Pole rows i=0 and i=n_lat must be exactly zero (wall BC)
@@ -173,12 +171,10 @@ class TestLinearRhoSteppedBathymetryMachineZero:
 
         # SMC03 PGF: should be machine zero in the active region.
         dpx_smc = density_jacobian_pgf_smc03_x(
-            rho_prime, partial.h_partial, partial.is_active,
-            partial.z_full_ref, grid, G,
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
         )
         dpy_smc = density_jacobian_pgf_smc03_y(
-            rho_prime, partial.h_partial, partial.is_active,
-            partial.z_full_ref, grid, G,
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
         )
 
         # Active levels: the shallow column has its partial bottom at
@@ -232,8 +228,7 @@ class TestLinearRhoSteppedBathymetryMachineZero:
         dpy_adcroft = dpy_grad + dpy_corr
 
         dpy_smc = density_jacobian_pgf_smc03_y(
-            rho_prime, partial.h_partial, partial.is_active,
-            partial.z_full_ref, grid, G,
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
         )
 
         bot_shallow = int(jnp.min(partial.bottom_level))
@@ -279,8 +274,7 @@ class TestSmoothnessInK:
         rho_prime = -1.0 * jnp.exp(-centroid / 700.0) - 0.5
 
         dpx_smc = density_jacobian_pgf_smc03_x(
-            rho_prime, partial.h_partial, partial.is_active,
-            partial.z_full_ref, grid, G,
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
         )
         dpx_adc = (
             gradient_x_cgrid(
@@ -297,8 +291,7 @@ class TestSmoothnessInK:
         # u-face — but here the step is in latitude so x-face won't
         # actually probe the transition.  Use y-face instead.
         dpy_smc = density_jacobian_pgf_smc03_y(
-            rho_prime, partial.h_partial, partial.is_active,
-            partial.z_full_ref, grid, G,
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
         )
         dpy_adc = (
             gradient_y_cgrid(
@@ -357,12 +350,10 @@ class TestADSmoothness:
 
         def loss(rho):
             dpx = density_jacobian_pgf_smc03_x(
-                rho, partial.h_partial, partial.is_active,
-                partial.z_full_ref, grid, G,
+                rho, partial.h_partial, partial.is_active, grid, G,
             )
             dpy = density_jacobian_pgf_smc03_y(
-                rho, partial.h_partial, partial.is_active,
-                partial.z_full_ref, grid, G,
+                rho, partial.h_partial, partial.is_active, grid, G,
             )
             return jnp.sum(dpx ** 2) + jnp.sum(dpy ** 2)
 

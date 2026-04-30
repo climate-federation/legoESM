@@ -2147,7 +2147,6 @@ def density_jacobian_pgf_smc03_x(
     rho_per_cell: jnp.ndarray,
     h_partial: jnp.ndarray,
     is_active: jnp.ndarray,
-    z_full_ref: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
 ) -> jnp.ndarray:
@@ -2158,51 +2157,59 @@ def density_jacobian_pgf_smc03_x(
     monotonized slopes, evaluated at a face-reference depth and
     differenced horizontally.
 
-    Algorithm (per face level ``k_f``):
+    Algorithm (per u-face j between cell W=(j-1) mod n_lon and cell
+    E=j; per level k):
 
     1. Per-column ``z_centroid`` = ``cumsum(h_partial) − 0.5 h``.
        (η=0 reference, consistent with the rest of the baroclinic
        path.)
     2. Per-column ``σ`` from ``reconstruct_harmonic_slopes``.
-    3. ``z_target = |z_full_ref[k_f]|`` (positive downward) — same
-       depth across all columns at level ``k_f`` (Option A from
-       plan §2.3).
+    3. **Face-adaptive z_target** = ``0.5 · (z_centroid_W + z_centroid_E)``
+       (Option B from plan §2.3).  At full-cell faces this reduces to
+       the standard reference-cell centroid (both centroids equal
+       ``|z_full_ref[k]|``).  At partial-cell faces — where the
+       column-independent ``|z_full_ref[k]|`` of Option A can fall
+       below one column's seafloor when the partial cell sits in the
+       upper half of the reference cell — the per-face midpoint of
+       centroids is by construction inside both columns' partial
+       cells.  This avoids the clamp pathology that drove the BH
+       seamount blowup with Option A.
     4. ``P_at_target`` per column from
-       ``compute_pressure_at_target_smc03``.
+       ``compute_pressure_at_target_smc03`` (each column evaluated at
+       the face-pair midpoint of *its* face).
     5. Horizontal Jacobian: ``∂P/∂x = (P_E − P_W) / dx_u``, periodic
        in longitude.
 
     Output shape matches ``gradient_x_cgrid``: ``(n_lat, n_lon+1,
     nlev)``, with face j=n_lon wrapping to face j=0.
 
-    For columns where ``z_target`` lies below the partial seafloor
-    (deep faces above shallow columns), ``compute_pressure_at_target_smc03``
-    clamps to the column's seafloor — finite output, but the face
-    mask in ``ocean_pe_latlon_cgrid`` should already zero the dp/dx
-    contribution at those inactive faces.
+    For face-levels at which one column is inactive (``h = 0`` past
+    its seafloor), the face mask in the integrating PE step gates
+    the result downstream.
     """
-    # Sign convention: depths positive downward.  z_full_ref is
-    # negative (height); take abs.
-    z_target_1d = jnp.abs(z_full_ref).astype(rho_per_cell.dtype)
-    # Broadcast to one target per column at each level.
-    z_target = jnp.broadcast_to(
-        z_target_1d, rho_per_cell.shape,
-    )
-
-    # Per-column geometry.
+    # Per-column geometry and slopes.
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
     sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
 
-    # Per-column pressure at the per-level reference depth.
-    P = compute_pressure_at_target_smc03(
-        rho_per_cell, h_partial, z_centroid, sigma, z_target, g,
-    )                                                  # (n_lat, n_lon, nlev)
+    # West-neighbour rolls (column j-1 at u-face j).
+    rho_W = jnp.roll(rho_per_cell, 1, axis=1)
+    h_W = jnp.roll(h_partial, 1, axis=1)
+    z_c_W = jnp.roll(z_centroid, 1, axis=1)
+    sigma_W = jnp.roll(sigma, 1, axis=1)
 
-    # Horizontal Jacobian at u-faces.  u-face j is between cell W=(j-1)
-    # mod n_lon (west) and cell E=j (east).
-    P_E = P
-    P_W = jnp.roll(P, 1, axis=1)
-    diff_interior = P_E - P_W                           # (n_lat, n_lon, nlev)
+    # Face-adaptive target depth: midpoint of W and E centroids.
+    # Shape (n_lat, n_lon, nlev) — value at index j is the target for
+    # u-face j.
+    z_target_face = 0.5 * (z_c_W + z_centroid)
+
+    # Per-face-pair pressures evaluated at the SAME z_target.
+    P_E = compute_pressure_at_target_smc03(
+        rho_per_cell, h_partial, z_centroid, sigma, z_target_face, g,
+    )
+    P_W = compute_pressure_at_target_smc03(
+        rho_W, h_W, z_c_W, sigma_W, z_target_face, g,
+    )
+    diff_interior = P_E - P_W
     diff = jnp.concatenate([diff_interior, diff_interior[:, 0:1, :]], axis=1)
 
     R = grid.radius
@@ -2216,7 +2223,6 @@ def density_jacobian_pgf_smc03_y(
     rho_per_cell: jnp.ndarray,
     h_partial: jnp.ndarray,
     is_active: jnp.ndarray,
-    z_full_ref: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
 ) -> jnp.ndarray:
@@ -2225,22 +2231,33 @@ def density_jacobian_pgf_smc03_y(
     Same machinery as ``density_jacobian_pgf_smc03_x``; v-face i is
     between cell S=(i−1) and cell N=i; pole faces (i=0, i=n_lat) are
     walls and pad with zero (consistent with v=0 at the wall).
+    Uses the same face-adaptive midpoint-of-centroids target depth
+    (Option B from plan §2.3).
 
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
-    z_target_1d = jnp.abs(z_full_ref).astype(rho_per_cell.dtype)
-    z_target = jnp.broadcast_to(z_target_1d, rho_per_cell.shape)
-
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
     sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
 
-    P = compute_pressure_at_target_smc03(
-        rho_per_cell, h_partial, z_centroid, sigma, z_target, g,
-    )                                                  # (n_lat, n_lon, nlev)
+    # North-direction interior pairs (i and i-1).
+    rho_N = rho_per_cell[1:]
+    rho_S = rho_per_cell[:-1]
+    h_N = h_partial[1:]
+    h_S = h_partial[:-1]
+    z_c_N = z_centroid[1:]
+    z_c_S = z_centroid[:-1]
+    sigma_N = sigma[1:]
+    sigma_S = sigma[:-1]
 
-    P_N = P[1:]                                         # (n_lat-1, n_lon, nlev)
-    P_S = P[:-1]
+    z_target_face_int = 0.5 * (z_c_S + z_c_N)
+    P_N = compute_pressure_at_target_smc03(
+        rho_N, h_N, z_c_N, sigma_N, z_target_face_int, g,
+    )
+    P_S = compute_pressure_at_target_smc03(
+        rho_S, h_S, z_c_S, sigma_S, z_target_face_int, g,
+    )
     diff_interior = P_N - P_S
+
     pad_axes = ((0, 0),) * (diff_interior.ndim - 1)
     diff = jnp.pad(diff_interior, ((1, 1), *pad_axes))
 

@@ -1000,11 +1000,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # is unchanged.
             dp_dx_smc = density_jacobian_pgf_smc03_x(
                 rho_prime, z_coord.h_partial, z_coord.is_active,
-                z_coord.z_full_ref, grid, g_val,
+                grid, g_val,
             )
             dp_dy_smc = density_jacobian_pgf_smc03_y(
                 rho_prime, z_coord.h_partial, z_coord.is_active,
-                z_coord.z_full_ref, grid, g_val,
+                grid, g_val,
             )
             # Match dtype to the existing dp_dx/dp_dy (which inherit
             # from p_prime — float32 in the standard config).

@@ -149,13 +149,20 @@ def main():
     parser.add_argument("--bbl-thickness", type=float, default=0.0,
                         help="Bottom boundary layer thickness [m] for "
                         "distributed BBL drag (0 = legacy single-level).")
+    parser.add_argument("--pgf-scheme", type=str, default="adcroft",
+                        choices=["adcroft", "smc03"],
+                        help="Pressure-gradient force scheme on partial "
+                        "cells.  ``adcroft``: existing Adcroft & Campin "
+                        "2004 face correction.  ``smc03``: Shchepetkin & "
+                        "McWilliams 2003 density-Jacobian PGF.")
     args = parser.parse_args()
 
     drag_tag = "_drag{:.0e}".format(args.bottom_drag_r) if args.bottom_drag_r > 0 else ""
+    pgf_tag = "" if args.pgf_scheme == "adcroft" else f"_pgf-{args.pgf_scheme}"
     tag = (
         f"{args.coord}_smooth{args.smoothing_passes}"
         f"_h{int(args.seamount_height)}_s{int(args.seamount_sigma)}"
-        f"{drag_tag}"
+        f"{drag_tag}{pgf_tag}"
     )
     output_dir = Path(
         f"results/realistic_geometry_validation/phase3a_seamount_{tag}"
@@ -181,6 +188,7 @@ def main():
 
     print(f"=== Phase 3a Beckmann-Haidvogel seamount ===")
     print(f"  Coord:           {args.coord}")
+    print(f"  PGF scheme:      {args.pgf_scheme}")
     print(f"  Grid: {N_LAT}x{N_LON} (5deg), {N_LEVELS} levels, H_max={H_MAX} m")
     print(f"  Seamount: height {args.seamount_height} m, sigma={args.seamount_sigma}")
     print(f"  Smoothing passes: {args.smoothing_passes}")
@@ -214,6 +222,7 @@ def main():
         physics=None,
         bottom_drag_r=args.bottom_drag_r,
         bottom_drag_bbl_thickness=args.bbl_thickness,
+        pgf_scheme=args.pgf_scheme,
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     block_fn = _make_step_block(model, DT_SECONDS)
@@ -343,6 +352,7 @@ def main():
     with open(log_path, "w") as f:
         f.write(f"Phase 3a Beckmann-Haidvogel seamount\n")
         f.write(f"coord = {args.coord}\n")
+        f.write(f"pgf_scheme = {args.pgf_scheme}\n")
         f.write(f"smoothing_passes = {args.smoothing_passes}\n")
         f.write(f"r_max = {r_max:.6f}\n")
         f.write(f"days = {args.days}\n")
