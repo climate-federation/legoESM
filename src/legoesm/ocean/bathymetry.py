@@ -128,9 +128,10 @@ def _detect_depth_variable(ds) -> tuple[str, str, str]:
     """Auto-detect depth, latitude, and longitude variable names."""
     all_vars = set(ds.data_vars.keys()) | set(ds.coords.keys())
 
-    # Depth/elevation candidates (ETOPO, GEBCO, generic)
+    # Depth/elevation candidates (ETOPO, GEBCO, NOAA ERDDAP, generic).
+    # "altitude" is the NOAA ERDDAP convention for etopo180.
     depth_candidates = [
-        "z", "elevation", "depth", "topo", "Band1",
+        "z", "elevation", "altitude", "depth", "topo", "Band1",
         "bedrock_topography", "surface_elevation",
     ]
     depth_var = None
@@ -572,11 +573,19 @@ def load_bathymetry(
 
     ds.close()
 
-    # Ensure longitude in [0, 360)
+    # Ensure longitude in [0, 360).  ETOPO/GEBCO often store longitude in
+    # [-180, +180] inclusive, which after modulo produces duplicate values
+    # (both -180 and +180 → 180).  RegularGridInterpolator below rejects
+    # non-strictly-monotonic axes, so we deduplicate after sorting.
     lon_src = lon_src % 360.0
     lon_order = np.argsort(lon_src)
     lon_src = lon_src[lon_order]
     elev_data = elev_data[:, lon_order]
+    if lon_src.size > 1:
+        keep_lon = np.concatenate([[True], np.diff(lon_src) > 0.0])
+        if not keep_lon.all():
+            lon_src = lon_src[keep_lon]
+            elev_data = elev_data[:, keep_lon]
 
     # Ensure latitude sorted ascending
     if lat_src[0] > lat_src[-1]:

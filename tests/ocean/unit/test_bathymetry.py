@@ -643,6 +643,33 @@ class TestLatLonCGridFileLoading:
         polar_rows = lat_deg.max(axis=1) > 85.0
         assert np.all(mask_arr[polar_rows] < 0.5)
 
+    def test_handles_duplicate_endpoint_longitudes(self, latlon_grid, tmp_path):
+        """ETOPO/GEBCO files often store lon in [-180, +180] inclusive.
+        After ``% 360`` this produces duplicate values (both -180 and +180
+        → 180), which RegularGridInterpolator rejects.  Verify the loader
+        deduplicates correctly."""
+        import xarray as xr
+        # Inclusive endpoints — 181 lat points, 361 lon points.
+        lat = np.linspace(-90.0, 90.0, 181)
+        lon = np.linspace(-180.0, 180.0, 361)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        elev = np.where(np.abs(LAT) > 80.0, 100.0, -3500.0)
+        ds = xr.Dataset(
+            {"altitude": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "etopo_endpoint_duplicates.nc"
+        ds.to_netcdf(path)
+        cfg = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+            depth_is_negative=True,
+        )
+        # Should not raise.
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        assert H_bathy.shape == (36, 72)
+
     def test_smoothing_reduces_bathymetry_variance(self, latlon_grid, tmp_path):
         """With smoothing_passes>0, bathy should have lower variance than
         raw (after the binary mask thresholding)."""
