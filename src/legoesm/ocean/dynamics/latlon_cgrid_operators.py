@@ -1738,6 +1738,47 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
 # Utility: compute face masks from cell mask
 # =============================================================================
 
+def compute_face_masks_3d(
+    is_active_3d: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-level u-face and v-face masks from a 3D cell-activity mask.
+
+    A face is wet at level k only if BOTH adjacent cells are wet at
+    that level — partial-cell-aware analogue of ``compute_face_masks``.
+    For columns with the same ``bottom_level``, this is identical to
+    broadcasting the 2D ``compute_face_masks`` result.  For columns
+    with different ``bottom_level`` (the realistic-bathymetry case),
+    this correctly zeroes the face below the shallower column's
+    seafloor.
+
+    Parameters
+    ----------
+    is_active_3d : array, shape (n_lat, n_lon, nlev)
+        Per-cell activity mask: True/1.0 where the cell has water,
+        False/0.0 below the seafloor.  Typically
+        ``partial_coord.is_active.astype(...)``.
+
+    Returns
+    -------
+    u_mask_3d : array, shape (n_lat, n_lon+1, nlev)
+        Wet u-face mask at each level (periodic in longitude).
+    v_mask_3d : array, shape (n_lat+1, n_lon, nlev)
+        Wet v-face mask at each level (pole rows always zero).
+    """
+    a = is_active_3d.astype(jnp.float32)
+    # u-face j is between cell (j-1) mod n_lon (west) and cell j (east).
+    u_mask_interior = a * jnp.roll(a, 1, axis=1)
+    u_mask = jnp.concatenate(
+        [u_mask_interior, u_mask_interior[:, 0:1, :]], axis=1,
+    )
+    # v-face i is between cell i-1 (south) and cell i (north).  Pole
+    # boundaries (i=0 and i=n_lat) are always wall.
+    v_mask_interior = a[:-1] * a[1:]
+    pad_axes = ((0, 0),) * (v_mask_interior.ndim - 1)
+    v_mask = jnp.pad(v_mask_interior, ((1, 1), *pad_axes))
+    return u_mask, v_mask
+
+
 def partial_cell_pgf_correction_x(
     centroid_depth: jnp.ndarray,
     rho_prime: jnp.ndarray,

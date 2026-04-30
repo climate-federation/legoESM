@@ -44,6 +44,7 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
+    OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
 )
@@ -762,8 +763,20 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     u_mask = state.u_mask.data
     v_mask = state.v_mask.data
     mask_3d = mask[..., jnp.newaxis]
-    u_mask_3d = u_mask[..., jnp.newaxis]
-    v_mask_3d = v_mask[..., jnp.newaxis]
+    # 3D face masks: when partial coord is active, faces are wet only
+    # where BOTH adjacent cells are wet AT THAT LEVEL — handles columns
+    # with different ``bottom_level`` correctly (the active-vs-inactive
+    # face case from Phase 3b).  For pure z\\* coord (legacy) and for
+    # partial cells with all columns having the same bottom_level,
+    # this produces identical results to broadcasting the 2D mask.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            compute_face_masks_3d,
+        )
+        u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active)
+    else:
+        u_mask_3d = u_mask[..., jnp.newaxis]
+        v_mask_3d = v_mask[..., jnp.newaxis]
 
     g_val = config.g
     rho_0 = config.rho_0
@@ -797,7 +810,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # accounting for the partial bottom cell.  Cells below the
     # seafloor have h_partial=0 and contribute zero pressure increment.
     # For pure z* coord (legacy), h_actual=None falls back to dz_ref.
-    from legoesm.ocean.vertical import OceanPartialCellCoordinate
     _h_actual_pprime = (
         z_coord.h_partial
         if isinstance(z_coord, OceanPartialCellCoordinate)
