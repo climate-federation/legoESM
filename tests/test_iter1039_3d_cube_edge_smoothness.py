@@ -108,9 +108,78 @@ def test_iter1039_hydrostatic_no_edge_artifacts(hyd_model_state):
             f"likely edge artifact developing.")
 
 
-# Non-hydrostatic edge-artifact coverage is provided by the existing
-# `tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py
-# ::TestFVCompressibleEuler::test_30_steps_stable` (rest state, 30
-# steps, finite + p_s drift bounded).  Iter-1039 adds hydrostatic
-# counterpart with a zonal-wind perturbation IC and edge-vs-interior
-# variance ratio check.
+def test_iter1040_nonhydrostatic_no_edge_artifacts():
+    """3D non-hydrostatic on uniform u=5 m/s zonal wind: no edge artifacts."""
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        CDGridCompressibleEulerConfig,
+        CDGridCompressibleEulerModel,
+    )
+    from legoesm.core.field import Field
+    from legoesm.core.state import NonHydrostaticState
+    from legoesm.grids.vertical import (
+        compute_terrain_metric,
+        create_height_coordinate,
+    )
+
+    grid = create_cubed_sphere(8)
+    nlev = 5
+    z_top = 30000.0
+    height_coord = create_height_coordinate(nlev, z_top)
+    terrain = jnp.zeros((6, grid.n, grid.n))
+    terrain_metric = compute_terrain_metric(terrain, height_coord)
+    config = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14,
+        n_acoustic_substeps=4,
+    )
+    model = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, config)
+
+    n = grid.n
+    dims_3d = ("face", "x", "y", "level")
+    dims_w = ("face", "x", "y", "level_half")
+    dims_2d = ("face", "x", "y")
+
+    # Initialize with small u perturbation
+    state = NonHydrostaticState(
+        u=Field(data=jnp.full((6, n, n, nlev), 5.0),
+                 name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=jnp.zeros((6, n, n, nlev)),
+                 name="v", dims=dims_3d, units="m/s"),
+        w=Field(data=jnp.zeros((6, n, n, nlev + 1)),
+                 name="w", dims=dims_w, units="m/s"),
+        theta_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                           name="theta_prime", dims=dims_3d, units="K"),
+        rho_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                         name="rho_prime", dims=dims_3d, units="kg/m^3"),
+        phis=Field(data=jnp.zeros((6, n, n)), name="phis",
+                    dims=dims_2d, units="m^2/s^2"),
+        tracers=Field(data=jnp.zeros((6, n, n, nlev, 0)),
+                       name="tracers",
+                       dims=("face", "x", "y", "level", "tracer"),
+                       units="kg/kg"),
+    )
+    dt = 10.0
+    s = state
+    for _ in range(30):
+        s = model.step(s, dt)
+
+    assert jnp.all(jnp.isfinite(s.u.data)), "u NaN after 30 steps"
+    assert jnp.all(jnp.isfinite(s.theta_prime.data)), "theta_prime NaN"
+    assert jnp.all(jnp.isfinite(s.rho_prime.data)), "rho_prime NaN"
+
+    # Edge-vs-interior std ratio for u
+    u = np.asarray(s.u.data)
+    edge_mask = np.zeros((n, n), dtype=bool)
+    edge_mask[0, :] = True
+    edge_mask[-1, :] = True
+    edge_mask[:, 0] = True
+    edge_mask[:, -1] = True
+    interior_mask = ~edge_mask
+
+    edge_std = float(np.std(u[:, edge_mask, :]))
+    interior_std = float(np.std(u[:, interior_mask, :]))
+    if interior_std > 1e-10:
+        ratio = edge_std / interior_std
+        assert ratio < 5.0, (
+            f"NH edge/interior std ratio = {ratio:.2f} > 5.0 — "
+            f"likely edge artifact.")

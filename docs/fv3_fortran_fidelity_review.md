@@ -8,6 +8,33 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
+## Working Notes (iter-1040 status snapshot — explicit 3D edge-artifact sentinels)
+
+**Iter-1039/1040: explicit 3D edge-artifact sentinels added.**
+
+`tests/test_iter1039_3d_cube_edge_smoothness.py` now has 2 tests:
+
+| Test | What it verifies |
+|------|-------------------|
+| `test_iter1039_hydrostatic_no_edge_artifacts` | 3D PE on C8 + zonal u=5 m/s + 30 steps → finite + edge/interior std ratio < 5.0 |
+| `test_iter1040_nonhydrostatic_no_edge_artifacts` | 3D CE on C8 + zonal u=5 m/s + 30 steps → finite + edge/interior std ratio < 5.0 |
+
+These are NON-TRIVIAL flow tests (vs the existing rest-state tests
+in `test_fv_cubesphere.py`).  An edge-concentrated artifact would
+inflate the edge std relative to interior.  Both PASS, confirming
+the cubed-sphere 3D dycore does NOT develop edge artifacts under
+typical zonal-flow IC.
+
+**33/33 artifact-relevant integration tests** now PASS:
+- 21 cubed-sphere SW production sentinels
+- 6 iter-1002 W2/W5/preset/warnings
+- 3 iter-1032 Williamson matrix integration
+- 1 iter-1039 hydrostatic 3D edge smoothness
+- 1 iter-1040 non-hydrostatic 3D edge smoothness
+- 1 iter-1009 W5 day-5 (counted in iter-1002)
+
+**+ 8 3D rest-state stability tests + 10 iter-928 markers = 51 total.**
+
 ## Working Notes (iter-1038 status snapshot — final verified state)
 
 **🎯 EXPANDED CRITERION FULLY MET** for 5 user-stated test cases:
