@@ -1,39 +1,32 @@
-"""Iter-944 sentinel: pin the FB chain 1-day NaN-free milestone from
-adding CGRID_NE syncs of (ut, vt) at step 1 and (fx_vort, fy_vort) at
-step 7 inside `_d_sw_native`.
+"""Iter-944 sentinel (REWRITTEN at iter-945): pin the FB chain 1-day
+NaN-free milestone, now correctly gated on the duogrid path.
+
+iter-944b (Fortran-fidelity audit) reverted the Python-only
+`synchronize_cgrid_fluxes` syncs of (ut, vt) and (fx_vort, fy_vort)
+that iter-944 had added — Fortran's `mpp_get_boundary` blocks for
+those quantities are explicitly commented out (dyn_core.F90:1124-1207
+and the standalone (ut, vt) sync is not present in Fortran at all).
+Post-iter-944b the **non-duogrid** FB chain reverts to the unsynced
+~41-step baseline.  The 1-day NaN-free milestone is preserved on the
+**duogrid** path because the BGRID_NE corner sync (gated on duogrid)
+plus the iter-945 D-grid PPM cross-face halo (`_pad_halo_dgrid_for_ppm`)
+keep the structural growth mode at bay.
 
 Cumulative FB chain step survival on W2 C36 dt=300 s (target 1-day =
 288 steps), default damping (d4_bg=0.16, nord=1, damp_v=0.06, nord_v=2):
 
-| iter      | survived | improvement |
-|-----------|----------|-------------|
-| baseline  | 41       | —           |
-| iter-941  | 63       | +54 %       |
-| iter-942  | 209      | +410 %      |
-| iter-944  | 288      | +602 %      |
-
-iter-944 added two CGRID_NE syncs (`synchronize_cgrid_fluxes`) inside
-`_d_sw_native`:
-
-1. ut, vt sync after `_d_sw1_recompute_ut_vt` (step 1).  ut, vt are
-   contravariant transport velocities at C-grid u-face / v-face
-   positions; the face-local upwind sin_sg boundary overrides leave
-   cube-edge cells inconsistent across face pairs.
-
-2. fx_vort, fy_vort sync after the vorticity-flux fv_tp_2d call
-   (step 7).  iter-864 set `apply_cgrid_flux_sync=False` to match
-   Fortran's commented-out averaging block (dyn_core.F90:1124-1207),
-   but the duogrid gate inside `fv_tp_2d` would have skipped the sync
-   for non-duogrid grids regardless.  Forcing the sync explicitly
-   (bypassing the duogrid gate) closes the cube-edge inconsistency
-   that the d_sw6 wind update propagates into a structural growth
-   mode.
+| iter           | non-duogrid | duogrid |
+|----------------|-------------|---------|
+| baseline       |     41      |   —     |
+| iter-941..944  |    288      |   —     |
+| iter-944b      |     41      |  288    |
+| iter-945       |     41      |  288    | (cross-face PPM halo) |
 
 Caveat: 288-step "1-day NaN-free" is NUMERICAL stability, not W2
-acceptance.  Velocities at 1 day reach |v|≈2300 m/s (analytical ≈0),
-heights drift to ~41 km (analytical ~3 km).  iter-944 closes the
-NaN blocker; W2 acceptance (v_ll_Linf ≤ 0.119 m/s per user iter-938
-brief) is the iter-945+ territory.
+acceptance.  Iter-944b duogrid baseline: |u_max|=106 m/s, |v_max|=151
+m/s.  Iter-945 duogrid: |u_max|≈78 m/s, |v_max|≈81 m/s — closer to
+the analytical (40 m/s, 0 m/s) but W2 v_ll_Linf acceptance still
+unmet.  Further fidelity work continues in iter-946+.
 
 Production impact: ZERO.  `_d_sw_native` is FB-chain-only; production
 `fv3_sw_tendencies` (`FV3EdgeShallowWaterModel` default) does not
@@ -63,8 +56,9 @@ from tests.atmosphere.shallow_water.test_cases.williamson import (
 )
 
 
-def _fb_chain_survival(N: int, dt: float, max_steps: int) -> int:
-    grid = create_cubed_sphere(N)
+def _fb_chain_survival(N: int, dt: float, max_steps: int,
+                       *, use_duogrid: bool = True) -> int:
+    grid = create_cubed_sphere(N, use_duogrid=use_duogrid)
     cdgrid = create_cubed_sphere_cdgrid(grid)
     sw = williamson_test2(grid)
     u0 = 2.0 * jnp.pi * grid.radius / (12.0 * 86400.0)
@@ -88,18 +82,35 @@ def _fb_chain_survival(N: int, dt: float, max_steps: int) -> int:
     return max_steps
 
 
-def test_iter944_fb_chain_c36_reaches_1_day_nan_free():
-    """Post-iter-944 FB chain at C36 dt=300 s must reach the 1-day target
-    (288 steps) NaN-free.  Pre-iter-944 baseline: 209 steps (iter-942).
+def test_iter944_fb_chain_c36_reaches_1_day_nan_free_duogrid():
+    """Post-iter-944b duogrid FB chain at C36 dt=300 s must reach the
+    1-day target (288 steps) NaN-free.  iter-944b reverted iter-944's
+    Python-only `synchronize_cgrid_fluxes` syncs and gated the BGRID_NE
+    sync on duogrid; the 1-day NaN-free milestone is preserved on
+    duogrid.  iter-945's D-grid PPM cross-face halo
+    (`_pad_halo_dgrid_for_ppm`) keeps the milestone while improving
+    W2 fidelity.
 
-    This is the structural-growth-NaN-blocker close.  W2 acceptance
-    (v_ll_Linf ≤ 0.119 m/s) is NOT achieved at 1 day — velocities
-    still drift to ~3000 m/s.  Firing this gate signals a regression
-    to the iter-944 CGRID_NE syncs of ut/vt or fx_vort/fy_vort.
+    A regression below 288 on duogrid signals either a removal of
+    the BGRID_NE corner sync, a regression in the iter-945 PPM halo,
+    or another structural-growth NaN class.
     """
-    n = _fb_chain_survival(36, 300.0, max_steps=288)
+    n = _fb_chain_survival(36, 300.0, max_steps=288, use_duogrid=True)
     assert n >= 288, (
-        f"FB chain at C36 dt=300 s survived only {n} steps; iter-944 "
-        f"baseline expected >= 288 (1-day NaN-free target).  iter-942 "
-        f"baseline was 209."
+        f"Duogrid FB chain at C36 dt=300 s survived only {n} steps; "
+        f"iter-944b/iter-945 expected >= 288 (1-day NaN-free target)."
+    )
+
+
+def test_iter944_fb_chain_c36_non_duogrid_baseline_41():
+    """Post-iter-944b non-duogrid FB chain reverts to the unsynced
+    ~41-step baseline (Fortran-faithful with no `mpp_get_boundary`
+    syncs firing).  A value above ~50 likely means a Python-only
+    sync hack has been re-introduced; below ~30 likely means a new
+    structural regression.
+    """
+    n = _fb_chain_survival(36, 300.0, max_steps=80, use_duogrid=False)
+    assert 30 <= n <= 50, (
+        f"Non-duogrid FB chain at C36 dt=300 s survived {n} steps; "
+        f"iter-944b expected ~41 (no syncs fire)."
     )

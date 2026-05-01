@@ -36,6 +36,86 @@ from legoesm.core.operators_cdgrid import (
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 
+def _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo: int = 2):
+    """Iter-945: cross-face halo for D-grid winds for PPM transport.
+
+    Equivalent to a single-rank ``mpp_update_domains(u_d, v_d, gridtype=
+    DGRID_NE)`` with the duogrid `cube_rmp` interpolation: fills cube-
+    face halo cells of (u_d, v_d) with rotated cross-face data using
+    the existing ``ext_vector_dgrid`` pipeline.  The interior is
+    overwritten EXACTLY with the input u_d/v_d so the function is the
+    identity on the interior region.
+
+    Output shapes are sliced to match what `_bgrid_ke_transport` PPM
+    transport needs:
+      * u_d_ihalo: (6, n + 2*halo, n+1)  — i-cells extended (cell axis 1)
+        with j-stagger preserved.  Used for ``_ppm_transport_1d(u_d_ihalo,
+        ub, rdx, axis=1, external_halo=halo)`` in the d_sw3 x-sweep.
+      * v_d_jhalo: (6, n+1, n + 2*halo) — j-cells extended (cell axis 2)
+        with i-stagger preserved.  Used for ``_ppm_transport_1d(v_d_jhalo,
+        vb, rdy, axis=2, external_halo=halo)`` in the d_sw3 y-sweep.
+
+    Parameters
+    ----------
+    u_d : (6, n, n+1) — D-grid x-velocity (i-cells, j-stagger)
+    v_d : (6, n+1, n) — D-grid y-velocity (i-stagger, j-cells)
+    cdgrid : CubedSphereCDGrid (must have an active duogrid with ng>=halo)
+    halo : int — halo width.  Must be ≤ the duogrid's available ng.
+
+    Returns
+    -------
+    u_d_ihalo : (6, n + 2*halo, n+1)
+    v_d_jhalo : (6, n+1, n + 2*halo)
+    """
+    from legoesm.grids.duogrid import ext_vector_dgrid
+    n = cdgrid.n
+    h = halo
+    grid = cdgrid.base
+    dg = grid.duogrid
+    if dg is None or dg.ng < h:
+        raise ValueError(
+            f"_pad_halo_dgrid_for_ppm: requires duogrid with ng>={h}, "
+            f"got ng={None if dg is None else dg.ng}."
+        )
+
+    # Same A-grid input prep as _d2a2c_vect_duogrid step 1: 2nd-order
+    # length-weighted D→A average to A-grid covariant utmp/vtmp.
+    dx_u = cdgrid.dx_edge_y  # (6, n, n+1) — x-length at u_d positions
+    dy_v = cdgrid.dy_edge_x  # (6, n+1, n) — y-length at v_d positions
+    wu = u_d * dx_u
+    wv = v_d * dy_v
+    utmp_2nd = (wu[:, :, :-1] + wu[:, :, 1:]) / (
+        dx_u[:, :, :-1] + dx_u[:, :, 1:])  # (6, n, n)
+    vtmp_2nd = (wv[:, :-1, :] + wv[:, 1:, :]) / (
+        dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+
+    u_d_full, v_d_full = ext_vector_dgrid(
+        utmp_2nd, vtmp_2nd, dg,
+        grid.cos_angle, grid.sin_angle,
+        cos_sg5, rsin2,
+        halo=h,
+    )  # u_d_full: (6, n+2h, n+2h-1); v_d_full: (6, n+2h-1, n+2h)
+
+    # Overwrite interior with EXACT input u_d/v_d — mirrors
+    # `_d2a2c_vect_duogrid` and matches Fortran's mpp_update_domains
+    # which only fills halo cells.
+    u_d_full = u_d_full.at[:, h:h + n, h - 1:h + n].set(u_d)
+    v_d_full = v_d_full.at[:, h - 1:h + n, h:h + n].set(v_d)
+
+    # u_d_ihalo: (6, n+2h, n+1) — slice j-stagger to interior n+1.
+    # u_d_full's j-stagger axis has n+2h-1 elements with index map
+    # j_padded = j_cdgrid + (h - 1).  Interior j ∈ [0, n] maps to
+    # padded indices [h-1, h+n-1] — slice [h-1 : h+n].
+    u_d_ihalo = u_d_full[:, :, h - 1:h + n]
+
+    # v_d_jhalo: (6, n+1, n+2h) — slice i-stagger to interior n+1.
+    v_d_jhalo = v_d_full[:, h - 1:h + n, :]
+
+    return u_d_ihalo, v_d_jhalo
+
+
 def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
     """FV3 d_sw1 transport velocity recomputation with boundary handling.
 
@@ -1996,7 +2076,7 @@ def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
     return dp_x, dp_y
 
 
-def _ppm_transport_1d(field, courant, rdelta, axis):
+def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0):
     """PPM hord=9 transport of a staggered field along one axis.
 
     Implements the Fortran ytp_v / xtp_u (sw_core.F90:2897-3353,
@@ -2013,12 +2093,22 @@ def _ppm_transport_1d(field, courant, rdelta, axis):
 
     Parameters
     ----------
-    field : (6, ..., N, ...) — field to transport.
-    courant : (6, ..., N+1, ...) — Courant number at interfaces (units of distance).
-    rdelta : (6, ..., N, ...) — 1/cell_width at field positions (1/dy or 1/dx).
+    field : (6, ..., N + 2*external_halo, ...) — field to transport, optionally
+        with cross-face halo cells already filled along the sweep axis.
+    courant : (6, ..., N+1, ...) — Courant number at INTERIOR interfaces
+        (units of distance).
+    rdelta : (6, ..., N, ...) — 1/cell_width at INTERIOR field positions
+        (1/dy or 1/dx).
         Used to convert the distance-based courant to dimensionless CFL fraction:
         ``cfl = |courant| * rdelta`` (FV3 sw_core.F90:3342).
     axis : int (1 or 2) — sweep axis.
+    external_halo : int (default 0) — iter-945: when > 0, ``field`` is
+        considered to already have ``external_halo`` cells of cross-face
+        halo along the sweep axis on each side.  The PPM stencil
+        internally pads to ``h3=4`` total halo, so ``mode='edge'`` is
+        applied only to the gap (``h3 - external_halo``).  When 0,
+        behaviour is bit-identical to the pre-iter-945 path
+        (mode='edge' for the full h3=4 halo).
 
     Returns
     -------
@@ -2026,20 +2116,30 @@ def _ppm_transport_1d(field, courant, rdelta, axis):
     """
     # Transpose so sweep axis is axis 1 for uniform indexing
     if axis == 1:
-        v = field    # (6, N, M)
+        v = field    # (6, N + 2*ext, M)
         c = courant  # (6, N+1, M)
         rd = rdelta  # (6, N, M)
     else:
-        v = jnp.swapaxes(field, 1, 2)     # (6, N, M)
+        v = jnp.swapaxes(field, 1, 2)     # (6, N + 2*ext, M)
         c = jnp.swapaxes(courant, 1, 2)   # (6, N+1, M)
         rd = jnp.swapaxes(rdelta, 1, 2)   # (6, N, M)
 
-    nn = v.shape[1]  # N cells in sweep direction
+    nn = v.shape[1] - 2 * external_halo  # interior cells along sweep axis
 
-    # Pad field with halo=4 for PPM hord=9 stencil (dm needs j±1, al needs dm±1,
-    # bl/br need dq at j-2..j+1, flux needs bl/br at j-1 and j)
+    # Bring field to total halo h3=4 along the sweep axis.  External
+    # cross-face halo (depth ``external_halo``) is preserved; the remaining
+    # ``h3 - external_halo`` cells are filled by ``mode='edge'`` (or, if
+    # external_halo > h3, we trim to the inner h3 cells).
     h3 = 4
-    vp = jnp.pad(v, [(0, 0), (h3, h3), (0, 0)], mode='edge')  # (6, N+8, M)
+    if external_halo == h3:
+        vp = v
+    elif external_halo < h3:
+        gap = h3 - external_halo
+        vp = jnp.pad(v, [(0, 0), (gap, gap), (0, 0)], mode='edge')
+    else:
+        trim = external_halo - h3
+        vp = v[:, trim:v.shape[1] - trim, :]
+    # vp shape: (6, N + 2*h3, M) — same as pre-iter-945 internal layout
 
     # --- Monotone slopes (FV3 sw_core.F90:3165-3171) ---
     # dm[j] at each padded cell. We compute for padded cells 1..N+4 (need j±1).
@@ -2177,13 +2277,34 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
     vb = dt5 * (vc_sum - uc_sum * cosa) * rsina  # (6, n+1, n+1)
 
+    # Iter-945 (Fortran-fidelity fix): on the duogrid path, populate
+    # cross-face halo cells of (u_d, v_d) along the PPM sweep axis via
+    # `_pad_halo_dgrid_for_ppm` (`ext_vector_dgrid` pipeline — same
+    # mechanism as `_d2a2c_vect_duogrid`'s halo).  PPM hord=9 then
+    # reads cross-face data at the four cube-face boundaries instead of
+    # `mode='edge'` same-face replicas.  Fortran sources this halo from
+    # `mpp_update_domains(u_d, v_d, gridtype=DGRID_NE)` upstream of
+    # d_sw3.  Non-duogrid path is unchanged: PPM falls back to
+    # `mode='edge'` internally (external_halo=0).
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    if use_duogrid:
+        h_dg = 2
+        u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(
+            u_d, v_d, cdgrid, halo=h_dg)
+    else:
+        h_dg = 0
+        u_d_ihalo = u_d
+        v_d_jhalo = v_d
+
     # --- Step 2: transport v_d in y-direction using vb (PPM hord=9) ---
     # FV3 sw_core.F90:1315 calls ytp_v with hord_mt=9 (default).
     # v_d: (6, n+1, n) transported along axis 2 by Courant vb: (6, n+1, n+1).
     # rdy: 1/dy at v_d positions. Fortran uses gridstruct%rdy at (isd:ied+1, jsd:jed).
     # Our dy_edge_x is at u-face positions (6, n+1, n) = same shape as v_d.
     rdy = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n)
-    transported_y = _ppm_transport_1d(v_d, vb, rdy, axis=2)
+    transported_y = _ppm_transport_1d(
+        v_d_jhalo, vb, rdy, axis=2, external_halo=h_dg)
 
     # --- Step 3: B-grid contravariant u-velocity (Courant number) ---
     ub = dt5 * (uc_sum - vc_sum * cosa) * rsina  # (6, n+1, n+1)
@@ -2194,7 +2315,8 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # rdx: 1/dx at u_d positions. Fortran uses gridstruct%rdx at (isd:ied, jsd:jed+1).
     # Our dx_edge_y is at v-face positions (6, n, n+1) = same shape as u_d.
     rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
-    transported_x = _ppm_transport_1d(u_d, ub, rdx, axis=1)
+    transported_x = _ppm_transport_1d(
+        u_d_ihalo, ub, rdx, axis=1, external_halo=h_dg)
 
     # --- Step 5: Fortran-faithful BGRID_NE component sync (dyn_core.F90:968-1019) ---
     # Fortran syncs ubb (x-component) and vbbtemp (y-component) via
@@ -2237,9 +2359,8 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     #
     # Production `fv3_sw_tendencies` (FV3EdgeShallowWaterModel default)
     # does NOT call `_d_sw_native`, so production sentinels are
-    # unchanged either way.
-    dg = cdgrid.base.duogrid
-    use_duogrid = dg is not None and dg.ng >= 2
+    # unchanged either way.  (`dg` and `use_duogrid` are already in
+    # scope from the iter-945 PPM-halo gate above.)
     if use_duogrid:
         from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
         cac = cdgrid.cos_angle_corner
@@ -2421,15 +2542,15 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                 apply_legacy_d_sw5_corner_corrections))
         ke_corner = ke_corner + ke_damping
 
-    # iter-944b: REVERTED iter-942's `synchronize_corner_scalar(ke_corner, n)`.
-    # Fortran reference dyn_core.F90:1029-1055 AND :1180-1207 contain
-    # the corresponding ke_corner corner sync but it is COMMENTED OUT
-    # (between `! if(duogrid)` and `!endif`), with adjacent commentary
-    # noting it "seems to reduce noise a lot for few timesteps only".
-    # Even within the duogrid branch the sync is disabled in the
-    # reference source.  iter-942's unconditional sync was Python-only
-    # smoothing not present in Fortran; removed per iter-944b's
-    # Fortran-fidelity audit.
+    # iter-944b: REVERTED iter-942's `synchronize_corner_scalar` on
+    # `ke_corner`.  Fortran reference dyn_core.F90:1029-1055 AND
+    # :1180-1207 contain the corresponding ke_corner corner sync but
+    # it is COMMENTED OUT (between `! if(duogrid)` and `!endif`), with
+    # adjacent commentary noting it "seems to reduce noise a lot for
+    # few timesteps only".  Even within the duogrid branch the sync is
+    # disabled in the reference source.  iter-942's unconditional sync
+    # was Python-only smoothing not present in Fortran; removed per
+    # iter-944b's Fortran-fidelity audit.
 
     # === 6. KE gradient at D-grid edge positions ===
     # FV3 d_sw6 (sw_core.F90:1935-1944):

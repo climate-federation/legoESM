@@ -31,11 +31,18 @@ Use git history for retired prose.
   structural-growth NaN blocker: FB chain reaches the 1-day target
   without producing NaN.
 - FB chain W2 acceptance (v_ll_Linf ≤ 0.119 m/s per user iter-938
-  brief) **NOT YET MET**: at 1 day, |v_max|≈2300 m/s (analytical
-  ≈0).  Numerical stability achieved; W2 fidelity remains the open
-  iter-945+ target (likely PPM hord=9 boundary handling, the
-  operator-split sweep order in `_bgrid_ke_transport`, or the cube-
-  vertex halo for u_d/v_d themselves).
+  brief) **NOT YET MET** but **iter-945 closes a major gap**: the
+  PPM hord=9 transport inside `_bgrid_ke_transport` was reading
+  `mode='edge'` same-face halo cells at the four cube-face
+  boundaries instead of cross-face data.  iter-945 wires the
+  existing duogrid `ext_vector_dgrid` halo (used by
+  `_d2a2c_vect_duogrid`) into a new `_pad_halo_dgrid_for_ppm`
+  helper and threads pre-padded `(u_d, v_d)` into PPM via a new
+  `external_halo` kwarg on `_ppm_transport_1d`.  Duogrid W2 1-day
+  on FB chain improved from `|u_max|=106 → 78 m/s, |v_max|=151 →
+  81 m/s`; step survival preserved at 288/288.  Remaining gap
+  is on the still-`mode='edge'` `(uc, vc)` C-grid halo (iter-946+
+  target — a cell-centre roundtrip attempt was Fortran-unfaithful).
 - FB/duogrid scaffolding (`halo=3`, flux sync, `d_sw*` helpers)
   refined; C24/C36 W2 fidelity remains the open blocker for
   using FB chain as the production path.
@@ -219,6 +226,142 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 **Verification.**  iter-942 sentinel (1/1) and production sentinels still pass post-revert.
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-945 — D-grid PPM cross-face halo via `ext_vector_dgrid` (duogrid W2 1-day |u| 106→78 m/s, |v| 151→81 m/s)
+
+**Trigger.**  iter-944b (Fortran-fidelity audit) reverted Python-only
+`mpp_get_boundary` syncs that did not appear in the Fortran reference
+source.  The duogrid FB chain at C36 dt=300 s W2 still reached 1-day
+NaN-free (288 steps), but with `|u_max|=106 m/s, |v_max|=151 m/s` —
+far from the analytical W2 (`|u|=40 m/s, |v|≈0`).  The remaining gap
+was not in any individual `mpp_get_boundary` call but in the basic
+`mpp_update_domains` halo: the PPM hord=9 transport inside
+`_bgrid_ke_transport` was reading `mode='edge'` same-face halo cells
+at the four cube-face boundaries instead of the cross-face data
+Fortran provides via `mpp_update_domains(u_d, v_d, gridtype=DGRID_NE)`
+upstream of `d_sw3` (with `cube_rmp` interpolation when `duogrid` is
+active).
+
+**iter-945 fix.**
+
+1. New helper `_pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo=2)` in
+   `src/legoesm/core/fv3_sw_core.py` reuses the existing
+   `ext_vector_dgrid` pipeline (same machinery as
+   `_d2a2c_vect_duogrid` step 1) and slices to:
+   - `u_d_ihalo`: `(6, n+2h, n+1)` — i-cells extended (cell axis 1)
+     with j-stagger preserved
+   - `v_d_jhalo`: `(6, n+1, n+2h)` — j-cells extended (cell axis 2)
+     with i-stagger preserved
+   The interior is overwritten EXACTLY with the input u_d/v_d so the
+   helper is identity on the interior region (matches Fortran's
+   `mpp_update_domains` which only fills halo cells).  Raises
+   `ValueError` on a non-duogrid grid (the standard
+   `mpp_update_domains` Python equivalent for non-duogrid is not
+   implemented).
+
+2. `_ppm_transport_1d` gains an `external_halo` kwarg (default 0,
+   bit-identical when 0).  When > 0, the input `field` is treated as
+   already having `external_halo` cells of cross-face halo on the
+   sweep axis; the function pads only the gap `(h3 - external_halo)`
+   with `mode='edge'`, leaving the cross-face halo cells intact.
+   When `external_halo > h3`, it trims to the inner h3 cells.  The
+   rest of the function indexes the same `(N + 2*h3)`-cell padded
+   layout it always has.
+
+3. `_bgrid_ke_transport` step 1.5 (new) gates on duogrid and pre-pads
+   `(u_d, v_d)` via `_pad_halo_dgrid_for_ppm`; the d_sw3 x-sweep
+   (xtp_u) and y-sweep (ytp_v) call `_ppm_transport_1d` with
+   `external_halo=h_dg=2` on duogrid, `0` otherwise.
+
+**Cumulative duogrid FB chain on W2 C36 dt=300 s** (target 1-day = 288 steps):
+
+| iter        | step survival | |u_max| (m/s) | |v_max| (m/s) | h range (m)         |
+|-------------|--------------:|--------------:|--------------:|---------------------|
+| iter-944b   |    288 / 288  |        106    |        151    | [-232, 21019]       |
+| **iter-945**|    288 / 288  |     **78**    |     **81**    | [-257, 21804]       |
+| analytical  |        ∞      |         40    |          0    | [~1000, ~3000]      |
+
+So |u_max| dropped 26 % toward analytical and |v_max| dropped 46 %.
+W2 v_ll_Linf acceptance (≤ 0.119 m/s per user iter-938 brief) is
+still NOT met — further fidelity work continues in iter-946+ (the
+remaining gap is likely the still-`mode='edge'` `(uc, vc)` halo
+inside `_d_sw1_recompute_ut_vt` Part 1 and inside
+`_bgrid_ke_transport`'s corner-Courant computation).  iter-945
+attempted a covariant cell-centre roundtrip helper for `(uc, vc)`
+(modeled on iter-836b/iter-837 in `_corner_vorticity`) and found it
+WORSENED the W2 fidelity (|u_max| → 747 m/s) because the
+two-point cell-centre averaging then re-stagger introduces a
+1-2-1 smoothing that is not Fortran-faithful for the d_sw 4-cell
+averages.  That helper was removed; the asymmetry (D-grid winds
+halo'd, C-grid winds still mode='edge') is documented as the
+iter-946+ target.
+
+**Production impact.**  ZERO.  `_d_sw_native` is FB-chain-only;
+production `fv3_sw_tendencies` (`FV3EdgeShallowWaterModel` default)
+does not call this code path.  Production W2 (iter-921, iter-922,
+iter-932), W5 (iter-923), cosine-bell (iter-924), rest-state
+(iter-925), and Fortran-fidelity gap markers (iter-928, iter-930,
+iter-931, iter-938) sentinels remain bit-identical post-iter-945.
+
+**iter-945 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py` — `_pad_halo_dgrid_for_ppm`
+   helper (~70 lines), `external_halo` kwarg on `_ppm_transport_1d`,
+   gate + pre-pad inside `_bgrid_ke_transport`.  No changes to
+   `_d_sw1_recompute_ut_vt` or anywhere else in the FB chain.
+2. `tests/test_iter945_dgrid_ppm_cross_face_halo.py` — 4 sentinels:
+   - shapes & interior-identity invariant for `_pad_halo_dgrid_for_ppm`
+     on duogrid C24
+   - `ValueError` raised on non-duogrid input
+   - duogrid FB chain at C36 dt=300 s 1-day reaches 288 steps with
+     `|u_max| ≤ 95 m/s` AND `|v_max| ≤ 100 m/s` (margin around 78/81)
+   - non-duogrid path remains at the iter-944b ~41-step baseline
+     (gate skips `_pad_halo_dgrid_for_ppm`)
+3. `tests/test_iter944_cgrid_ne_ut_vt_vort_sync.py` — REWRITTEN to
+   reflect iter-944b reality (the original test was failing
+   pre-iter-945 because iter-944b reverted the syncs but did not
+   update this test).  New tests pin the duogrid 288-step milestone
+   AND the non-duogrid ~41-step Fortran-faithful baseline.
+4. `scripts/diag_iter945_dgrid_ppm_halo.py` — runnable diagnostic.
+5. Comment fix in `_d_sw_native` (replaced
+   `\`synchronize_corner_scalar(ke_corner, n)\`` in the iter-944b
+   audit comment block with `\`synchronize_corner_scalar\` on
+   \`ke_corner\`` so the iter-942 sentinel's substring guard does
+   not false-positive on the audit comment).
+
+**Verification.**
+
+- 4/4 iter-945 + 17 cross-iter sentinels (iter-921 W2, iter-922 PPM
+  boundary, iter-923 W5, iter-924 cosine bell, iter-925 rest state,
+  iter-926 d_sw5 corner damping, iter-928 fidelity gap markers,
+  iter-930 boundary fix, iter-931 bare-AL cube vertex resolution
+  scaling, iter-932 iter-893 invariant, iter-934 FB low-res, iter-938
+  d2a2c corner overrides, iter-941 BGRID_NE sync gating, iter-942
+  ke_corner sync absence, iter-944 FB 1-day milestone) pass.
+
+**Backlog for iter-946+.**
+
+1. Cross-face halo for `(uc, vc)` on the duogrid path — currently
+   still `mode='edge'` inside `_d_sw1_recompute_ut_vt` Part 1 and
+   `_bgrid_ke_transport`'s corner-Courant computation.  iter-945's
+   cell-centre roundtrip attempt (`_pad_halo_uc_vc_via_a2c`, removed)
+   was not Fortran-faithful for the 4-cell averages.  Need a
+   non-lossy approach — possibly threading uc/vc with halo through
+   from `_d2a2c_vect_duogrid` (modify `_c_sw` and `_p_grad_c` to
+   propagate halo), or implementing a true `cubed_a2c_halo` analog
+   for staggered C-grid fields.
+2. Operator-split sweep order audit in `_bgrid_ke_transport`
+   (Lin-Rood y-then-x for `transported_y` vs x-then-y for
+   `transported_x`).
+3. PPM hord=9 boundary handling for the inside of the four cube-face
+   edges (separate from the iter-945 halo fix — Fortran's ytp_v /
+   xtp_u may have additional cube-edge boundary overrides analogous
+   to `apply_fortran_xppm_boundary` on tp_core.F90's xppm/yppm).
+
+**Process.**  Real production code change in the FB chain (one new
+helper, one kwarg, one gate).  No production behaviour change at
+default `FV3EdgeShallowWaterModel`.  Production W2 baseline unchanged
+at v_ll_Linf=0.132 m/s.
 
 ### Iter-944 — CGRID_NE sync of `(ut, vt)` and `(fx_vort, fy_vort)`: FB chain reaches 1-day NaN-free (209 → 288 steps)
 
