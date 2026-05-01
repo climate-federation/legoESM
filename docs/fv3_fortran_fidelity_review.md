@@ -390,6 +390,76 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-990 — Smagorinsky Pareto sweep: best stable v_ll=43.77 m/s, beyond which is NaN
+
+**Trigger.**  Iter-989 confirmed unresolved grid-scale instability;
+quantifying calibration headroom through Smagorinsky's d2_bg /
+dddmp / damp_v / nord_v space delineates how far we can push
+without restructuring.
+
+**Iter-990 sweep on FB chain C36 W2 1-day:**
+
+| d2_bg | dddmp | damp_v | nord_v | v_ll_Linf | h_err_max |
+|-------|-------|--------|--------|-----------|-----------|
+| 0.000 | 0.000 |  0.060 |   2    |   55.61   |   18591   |
+| 0.010 | 0.050 |  0.060 |   2    |   53.17   |   17423   |
+| 0.090 | 0.450 |  0.060 |   2    |  **43.77**|  **12855**|
+| 0.150 | 0.600 |  0.060 |   2    |    NaN    |    -      |
+| 0.200 | 0.750 |  0.060 |   2    |    NaN    |    -      |
+| 0.050 | 0.300 |  0.100 |   1    |   46.07   |   14015   |
+| 0.100 | 0.500 |  0.100 |   1    |    NaN    |    -      |
+
+**Pareto-optimal stable point:** d2_bg=0.09, dddmp=0.45, damp_v=0.06,
+nord_v=2 → v_ll_Linf=43.77 m/s, a 21% reduction from baseline.
+
+**NaN floor.** d2_bg ≥ 0.15 with dddmp ≥ 0.6 produces NaN at C36
+W2 1-day.  The d_sw5 Smagorinsky branch becomes numerically
+unstable past this threshold.
+
+**Iter-990 implication.**
+
+Combined with iter-989's resolution scaling finding, the FB chain
+calibration can take v_ll_Linf from 55.6 → ~43.8 m/s (21% headroom).
+The remaining 369× gap to the 0.119 m/s target is structural.
+
+The Ralph-loop session iter-985..990 has converged on this
+quantitative bound: with current operators (PPM hord=9, d_sw5
+nord=1 del-4 + del-2, del-6 vorticity), no calibration sweep can
+close the gap.  Further fidelity work requires:
+
+1. **Implementing FV3's exact dyn_core dissipation sequencing**
+   (multi-week project; needs deep dyn_core.F90 line-by-line
+   replication of the c_sw → p_grad_c → d_sw boundary syncs and
+   intermediate del-n smoothers).
+2. **Separating mass and momentum integration** with their own
+   dt and damping (currently they share the FB step).
+3. **Migrating FB chain to use the production halo plumbing**
+   (`cgrid_mass_flux_divergence`, `cdgrid_momentum_tendencies`)
+   that DO converge — at cost of breaking the c_sw + p_grad_c +
+   d_sw structural Fortran-fidelity.
+
+**Iter-990 deliverables.**
+
+1. `scripts/diag_iter990_smagorinsky_pareto.py` — Pareto sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry,
+   establishing the v_ll_Linf=43.77 m/s practical floor.
+
+No production code change.
+
+**Backlog for iter-991+.**
+
+Forward iter-988/989/990 structural backlog:
+
+1. Begin halo-extended cdgrid metric tensors.
+2. Pilot FB-chain → production halo plumbing migration.
+3. Consider d_sw1/d_sw5 split-step decomposition (apply each as
+   tiny RK-substeps with their own boundary syncs in between).
+
+**Status.**  Without structural intervention, the FB chain cannot
+reach W2 v_ll_Linf=0.119 m/s.  This Ralph-loop session value-add:
+established the practical 43.77 m/s floor and the architectural
+diagnosis.
+
 ### Iter-989 — Resolution scaling: error GROWS with N → unresolved grid-scale instability confirmed
 
 **Trigger.**  Iter-988 hypothesised the FB chain v_ll_Linf=55.6 m/s
