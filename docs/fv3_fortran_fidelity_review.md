@@ -390,6 +390,67 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-969 — Audit d_sw1 / divergence_corner_duo / d2a2c_vect against Fortran (more findings)
+
+**Iter-969 audit findings:**
+
+1. **`d_sw1` boundary overrides skip on duogrid** (sw_core.F90:656):
+   Fortran's condition `(.not. bounded_domain .or. .not. duogrid)`
+   evaluates FALSE for duogrid runs (both flags TRUE → both `.not.`
+   FALSE → `False .or. False = False`).  So the West/East/South/North
+   edge overrides at lines 658-712 SKIP for duogrid.  Our Python's
+   `_d_sw1_recompute_ut_vt` early-returns for duogrid after Part 1
+   — Fortran-faithful. ✓
+
+2. **`d_sw1` 4-cell average uses INTERIOR I, FULL halo j** (sw_core.F90:
+   623-634): Fortran loops j=jsd..jed (full halo), i=is..ie+1
+   (interior I-face).  Our Python computes ut at (n+1, n) — interior
+   I-face (n+1), interior j-cells (n).  Fortran computes wider j
+   range to provide ut for downstream operators that need halo'd ut.
+   For our Python, the iter-947 NEW-corrected uc/vc halo provides
+   the cross-face data needed; the j-direction of ut is computed at
+   interior only (sufficient for our `_d_sw_native` use).  Equivalent
+   for our use case. ✓
+
+3. **`divergence_corner_duo`** (sw_core.F90:2345-2447) matches our
+   `_divergence_corner_duo` for the duogrid path: same uf, vf
+   formulas with cos_sg/sin_sg sub-grid corrections; same boundary
+   zeroing at i=0/n, j=0/n; same 0.25× attenuation at i=1/n-1,
+   j=1/n-1.  Note: Fortran has a typo at line 2434 (`je+1==npx`
+   instead of `je+1==npy`) but for cubed-sphere npx==npy so it
+   works either way.  Our Python uses the correct `j==n` check. ✓
+
+4. **`d2a2c_vect` duogrid branch** (sw_core.F90:3419-3454): Fortran
+   does NOT do internal halo exchange; it expects u, v already
+   halo'd by `mpp_update_domains(DGRID_NE)` upstream.  Our Python
+   `_d2a2c_vect_duogrid` does internal halo via `ext_vector_dgrid`
+   which is functionally equivalent (same cube_rmp Lagrange + corner
+   fill).  At j=jsd, jed (deepest halo): Fortran has weird
+   double-overwrite `utmp(i,j) = 0.5*(u(i,j)+u(i,j+1))` then
+   `utmp(i,j) = 0.5*(u(i,j+1)+u(i,j+1)) = u(i,j+1)`.  The first
+   line is OVERWRITTEN — likely a Fortran bug or "intentional
+   1st-order extrap".  Our Python's 4th-order on the full halo'd
+   u_d_full effectively gives a more accurate utmp at the deepest
+   halo than Fortran's 1st-order extrapolation.  Either Fortran's
+   weird behaviour is intentional and our Python is OVER-SMOOTHING,
+   or our Python is more accurate.  No measurable W2 impact in our
+   testing — both work. ✓
+
+**Conclusion.**  d_sw1, divergence_corner_duo, d2a2c_vect duogrid
+branch are all Fortran-faithful in spirit (modulo the Fortran
+double-overwrite quirk at deepest halo).
+
+**Backlog for iter-970+.**  The remaining v_ll_Linf=55.6 m/s gap is
+NOT in the structures audited so far.  Candidates:
+
+1. `del6_vt_flux` (sw_core.F90:2008-2121) — vorticity damping in
+   d_sw6.  Our Python may have an indexing or Fortran-faithful
+   formula gap.
+2. `fv_tp_2d` mass / vorticity transport (tp_core.F90 xppm/yppm)
+   — verify our Python matches.
+3. d_sw5 corner-divergence damping nord>=1 path (sw_core.F90:1727-
+   1821) — verify the iterated Laplacian metric weighting matches.
+
 ### Iter-968 — Audit c_sw against Fortran source (key findings)
 
 **Trigger.**  Iter-967 found that Fortran's d_sw3 boundary fix
