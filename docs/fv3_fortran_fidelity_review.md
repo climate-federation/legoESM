@@ -390,6 +390,50 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-970 — Audit d_sw5 nord>=1 iterated Laplacian + a2b_ord4 vs `_interp_center_to_corner`
+
+**Iter-970 audit findings:**
+
+1. **d_sw5 nord>=1 iterated Laplacian** (sw_core.F90:1727-1787):
+   Fortran iterates `vc/uc = (divg_d gradient) * divg_u/v` with
+   metric weighting `divg_u, divg_v`, then `divg_d = corner_div(uc,
+   vc)`, scale by rarea_c.  Our Python matches structurally.  Both
+   skip cube-vertex corrections for duogrid. ✓
+
+2. **a2b_ord4 vs `_interp_center_to_corner`** (a2b_edge.F90:50,
+   sw_core.F90:1795): Fortran's d_sw5 Smagorinsky branch uses
+   `a2b_ord4(wk, vort)` — a **4th-order compact cubic**
+   interpolation from cell centres to corners with constants
+   `c1=2/3, c2=-1/6`, plus 1D edges done via similar 4th-order
+   along each axis.
+
+   Our Python uses `_interp_center_to_corner` which is a
+   **2nd-order 4-point average**:
+   ```python
+   0.25 * (f_pad[:-1, :-1] + f_pad[1:, :-1]
+            + f_pad[:-1, 1:] + f_pad[1:, 1:])
+   ```
+
+   This is a real fidelity gap.  However, the d_sw5 Smagorinsky
+   branch is gated on `dddmp > 1e-5`, which is OFF by default
+   (`dddmp=0`).  Only callers who opt into Smagorinsky tuning
+   (like iter-959/963) hit this code path.  For our default
+   `(d2_bg=0, dddmp=0)`, this gap doesn't matter.
+
+   For iter-963 high-Smagorinsky (dddmp=0.45), the difference
+   between 2nd and 4th-order interpolation on wk (vorticity at
+   cell centres) is small for W2 solid-body (smooth field).
+   Could close ~1% of the iter-963 v_ll_Linf=43.8 gap.
+
+   **Iter-970 deliverable.**  Documented; no code change.  Future
+   iter could port `a2b_ord4`'s 4th-order kernel to Python for
+   the Smagorinsky path.
+
+3. **d_sw5 nord=0 path** (sw_core.F90:1641-1724): direct del-2
+   with adaptive Smagorinsky.  Boundary handling at face edges
+   uses sin_sg upwind formulas.  Default `nord=1` doesn't take
+   this path; Smagorinsky tuning callers may.  Audit deferred.
+
 ### Iter-969 — Audit d_sw1 / divergence_corner_duo / d2a2c_vect against Fortran (more findings)
 
 **Iter-969 audit findings:**
