@@ -390,6 +390,81 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-987 — Audit pad_halo cube_rmp at seam: Fortran-faithful but secondary
+
+**Trigger.**  Iter-986 found west/east cube-edge asymmetry (face=1 i=0
+at -56.5 vs face=0 i=35 at -23.4 m/s same physical seam).
+PPM duogrid bypass of boundary corrections was the leading
+hypothesis.  Iter-987 audits Fortran's xppm/yppm duogrid path and
+the `pad_halo` cube_rmp halo values.
+
+**Iter-987a — Fortran xppm/yppm audit.**
+
+`tp_core.F90:333,357,612` — Fortran's xppm has the SAME `.not.
+(bounded_domain .or. duogrid)` gate skipping the boundary specials
+(s11/s14/s15 + dxa-weighted formulas + iv=1 limiter).  Our Python
+matches.  No fidelity gap on the PPM kernel itself.
+
+**Iter-987b — pad_halo halo values at face=1 west j=21.**
+
+| i_pad | nearest copy | after cube_rmp | "expected" face0 east | true ext-position |
+|-------|--------------|----------------|-----------------------|-------------------|
+| 0     | 1.834e-05    | 1.611e-05      | 1.834e-05             | 1.611e-05         |
+| 1     | 1.753e-05    | 1.679e-05      | 1.753e-05             | 1.679e-05         |
+| 2     | 1.753e-05    | 1.753e-05      | 1.753e-05             | 1.753e-05         |
+| 3     | 1.834e-05    | 1.834e-05      | 1.834e-05             | 1.834e-05         |
+
+The "kinked" nearest copy gives a V-shape (decrease toward seam,
+increase past).  cube_rmp Lagrange-extends to a monotonic profile
+(smooth continuation).  Fortran `cube_rmp` (`fv_duogrid.F90:977`)
+does the SAME thing — both apply k2e_coef weighted Lagrange remap
+to extended-grid positions.
+
+**Iter-987c — Skip cube_rmp experiment.**
+
+Monkey-patched pad_halo to skip cube_rmp (use nearest copy only).
+FB chain C36 W2 1-day:
+
+| state                          | v_ll_Linf | seam[1,0,21] |
+|--------------------------------|-----------|--------------|
+| baseline (with cube_rmp)       | 55.61     | 56.50        |
+| no cube_rmp (nearest-copy only)| 55.52     | 52.83        |
+
+**Δ = -0.09 m/s (-0.2%) on v_ll_Linf**.  The cube_rmp accounts for
+~6.5% of the seam-probe magnitude but only ~0.2% of the lat-lon
+Linf metric.  Not the dominant lever.
+
+**Implication.**
+
+The duogrid `pad_halo` cube_rmp matches Fortran's behavior.  The
+seam asymmetry must come from another source.
+
+Candidates for iter-988+:
+1. The 4 corner cells of cube_rmp's extended halo (cube vertices
+   in the halo) may have a fill error not present in Fortran.
+2. The fv_tp_2d `pad_halo` for `q_i, q_j` between Y- and X-sweeps
+   may have inconsistent halo patterns (the Lin-Rood operator-split
+   uses cross-flux corrections — if either sweep's halo is off,
+   the cross-corrections amplify).
+3. The d_sw5 corner divergence damping has a different halo path
+   than fv_tp_2d transport — may add seam noise that other paths
+   absorb.
+
+**Iter-987 deliverables.**
+
+1. `scripts/diag_iter987_pad_halo_seam_values.py` — runnable halo
+   value probe at face=1 west.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+**Backlog for iter-988+.**
+
+1. Probe Lin-Rood inter-sweep `pad_halo(q_i)` values at face=1
+   west j=21 — does it preserve the seam structure?
+2. Audit `_d_sw5_corner_divergence` halo path independently of
+   fv_tp_2d.
+
 ### Iter-986 — Seam mode characterisation: damping sweep + asymmetry between west/east cube edges
 
 **Trigger.**  Iter-985 localised the day-1 v_ll peak to face=0..3 i=0
