@@ -298,7 +298,13 @@ def _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cdgrid):
 
     # OLD interior uc, vc (the d2a2c output on OLD u_d, v_d).  Used
     # ONLY at the boundary cells to compute the cross-face geometric
-    # delta; the NEW interior is preserved everywhere else.
+    # delta; the NEW interior is preserved everywhere else.  Iter-948
+    # tested a 2-point linear extrapolation of the c_sw + p_grad_c
+    # increment to halo cells (in place of the constant iter-947
+    # extrapolation) and found it WORSENED W2 |v_max| at C36 from
+    # 75 → 87 m/s — the increment varies non-linearly along the
+    # face's j-direction near cube vertices, so a linear stencil
+    # overshoots.  Constant (iter-947) extrap retained.
     _, _, uc_old_int, vc_old_int, _, _ = _d2a2c_vect(u_d, v_d, cdgrid)
     # uc_old_int: (6, n+1, n) — interior j ∈ [0, n-1]
     # vc_old_int: (6, n, n+1) — interior i ∈ [0, n-1]

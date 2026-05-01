@@ -239,6 +239,58 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-948 — NEGATIVE-RESULT: linear extrapolation of c_sw+p_grad_c increment to halo
+
+**Trigger.**  iter-947 used a CONSTANT extrapolation of the c_sw +
+p_grad_c increment from interior boundary cell to halo cell:
+``delta_at_halo ≈ delta_at_boundary``.  The increment varies smoothly
+across the face, so a 2-point LINEAR EXTRAPOLATION ought to be
+strictly more accurate:
+
+    delta(j=-1) ≈ 2*delta(j=0) - delta(j=1)            (south halo)
+    delta(j=n)  ≈ 2*delta(j=n-1) - delta(j=n-2)        (north halo)
+
+**Iter-948 attempt.**  Replaced the constant extrapolation in
+`_pad_halo_uc_vc_new_via_old_delta` with the linear stencil above
+(with constant fallback for n<2 tiles).
+
+**Negative result.**  Linear extrapolation WORSENED the W2 1-day
+|v_max| at C36 from 75 → 87 m/s.  |u_max| was approximately
+unchanged (77 → 78 m/s).  The c_sw + p_grad_c increment varies
+non-linearly along the face's j-direction near cube vertices, so a
+linear stencil overshoots — the constant (iter-947) extrap is more
+conservative and stays closer to the truth.
+
+| iter           | step survival | |u_max| (m/s) | |v_max| (m/s) |
+|----------------|--------------:|--------------:|--------------:|
+| iter-947 (constant)  |  288 / 288  |     77    |     75    |
+| iter-948 (linear)    |  288 / 288  |     78    |     87    | ← reverted |
+
+Reverted to iter-947's constant extrapolation.  Documentation note
+preserved in the `_pad_halo_uc_vc_new_via_old_delta` docstring so a
+future iter does not re-introduce the linear stencil.
+
+**Iter-948 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_pad_halo_uc_vc_new_via_old_delta`
+   — comment block records the iter-948 negative-result finding.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No new sentinel — the iter-947 sentinel already pins the constant
+extrap behaviour, and the docstring commentary prevents re-introduction.
+
+**Backlog for iter-949+.**  Same as iter-947 backlog:
+
+1. Compute c_sw + p_grad_c increment AT halo positions (extend
+   `_pad_halo_auto`, `cdgrid.rdxc`/`rdyc` to halo) — would replace
+   the iter-947 boundary-extrapolation approximation with the exact
+   value.
+2. Operator-split sweep order audit in `_bgrid_ke_transport`.
+3. PPM hord=9 cube-edge boundary overrides for ytp_v / xtp_u
+   (analog of iter-888's `apply_fortran_xppm_boundary` on tp_core).
+4. Vorticity flux halo and the d_sw5 corner-divergence damping
+   halo audits.
+
 ### Iter-947 — NEW-corrected uc, vc halo via OLD-cross-face delta (duogrid W2 1-day |v| 81→75 m/s)
 
 **Trigger.**  iter-946 (negative-result) showed that sourcing uc, vc
