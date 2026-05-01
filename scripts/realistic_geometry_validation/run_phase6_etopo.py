@@ -76,9 +76,27 @@ def _ensure_etopo():
     )
 
 
-def _make_step_block(model, dt):
+def _make_step_block(model, dt, frozen_T=None, frozen_S=None):
+    """Build a scan-based block of N model steps.
+
+    Parameters
+    ----------
+    frozen_T, frozen_S : array or None
+        If provided, after each ``model.step`` call the T and S fields
+        are restored to these values.  Lets the dynamics see the
+        density gradient but prevents tracer evolution — used to
+        distinguish kinematic from thermodynamic instability modes.
+    """
+    do_freeze = frozen_T is not None and frozen_S is not None
+
     def scan_body(state, _):
-        return model.step(state, dt), None
+        new_state = model.step(state, dt)
+        if do_freeze:
+            new_state = new_state._replace(
+                T=new_state.T.replace(data=frozen_T),
+                S=new_state.S.replace(data=frozen_S),
+            )
+        return new_state, None
 
     @partial(jax.jit, static_argnames=("n_inner",))
     def block_fn(state, n_inner: int):
@@ -117,15 +135,78 @@ def main():
                         choices=["adcroft", "smc03"])
     parser.add_argument("--coord", type=str, default="partial",
                         choices=["zstar", "partial"])
+    # Diagnostic experiments E1/E2 for the ETOPO 30-day instability.
+    # E1: --homogeneous-ts removes stratification (uniform T, S);
+    # tests whether the bug needs stratification × coastline coupling.
+    # E2: --flat-bottom replaces ETOPO with a global flat-bottom basin
+    # at H=H_max; tests whether the bug needs irregular bathymetry /
+    # coastlines at all.  Combine the two to bisect.
+    parser.add_argument("--homogeneous-ts", action="store_true",
+                        help="E1: override the exponential thermocline "
+                        "with uniform T=10°C, S=35 PSU.  Removes "
+                        "stratification — tests if the instability "
+                        "needs stratification × coastline coupling.")
+    parser.add_argument("--flat-bottom", action="store_true",
+                        help="E2: skip ETOPO and use a global flat-bottom "
+                        "basin at H=H_max with no land mask.  Removes "
+                        "coastlines and topography — tests if the "
+                        "instability needs irregular geometry at all.")
+    parser.add_argument("--meridional-T-gradient", action="store_true",
+                        help="E3 (use with --flat-bottom): override the "
+                        "uniform-by-depth T(z) with a sin²(lat)-modulated "
+                        "T(y, z) so the rest state has a thermal-wind "
+                        "shear (warm equator, cold poles).  Distinguishes "
+                        "'any horizontal gradient → instability' (E3 fails) "
+                        "from 'gradient × topography' (E3 stable, prior "
+                        "ETOPO run still fails).")
+    parser.add_argument("--T-eq-surface", type=float, default=25.0,
+                        help="E3: equatorial surface temperature [°C].")
+    parser.add_argument("--T-pol-surface", type=float, default=2.0,
+                        help="E3: polar surface temperature [°C].")
+    parser.add_argument("--zonly-T-init", action="store_true",
+                        help="E4: replace centroid-aware T with "
+                        "T(k) = exp(-|z_full_ref[k]|/scale_depth), so "
+                        "every column's cell-mean T at level k is "
+                        "identical (no horizontal density gradient at "
+                        "partial-bottom faces).  Tests whether the "
+                        "centroid-aware T-init is what seeds the runaway.")
+    parser.add_argument("--linear-T-z", action="store_true",
+                        help="Diagnostic: replace exponential T(z) with "
+                        "a linear T(z) = T_surf - (T_surf-T_deep)*z/H_max. "
+                        "Strips d²ρ/dz² (curvature) from the in-cell "
+                        "integral.  Tests the dycore-expert's hypothesis "
+                        "that the bottom-cell σ residual scales with "
+                        "stratification curvature × partial-thickness "
+                        "mismatch.  Used with --frozen-ts.")
+    parser.add_argument("--frozen-ts", action="store_true",
+                        help="Diagnostic: restore T,S to their initial "
+                        "values after every step.  PGF still sees the "
+                        "horizontal density gradient but baroclinic "
+                        "instability cannot release APE.  Distinguishes "
+                        "kinematic (PGF-driven) from thermodynamic "
+                        "(advection-of-T-driven) failure modes.")
     args = parser.parse_args()
 
     _ensure_etopo()
 
     pgf_tag = "" if args.pgf_scheme == "adcroft" else f"_pgf-{args.pgf_scheme}"
+    diag_tag = ""
+    if args.flat_bottom:
+        diag_tag += "_E2flatbottom"
+    if args.homogeneous_ts:
+        diag_tag += "_E1homog"
+    if args.meridional_T_gradient:
+        diag_tag += "_E3meridT"
+    if args.zonly_T_init:
+        diag_tag += "_E4zonlyT"
+    if args.linear_T_z:
+        diag_tag += "_linearTz"
+    if args.frozen_ts:
+        diag_tag += "_frozenTS"
     output_dir = Path(
         f"results/realistic_geometry_validation/"
         f"phase6_etopo_{args.coord}_{args.n_lat}x{args.n_lon}_{args.n_levels}lev"
-        f"_smooth{args.smoothing_passes}_drag{args.bottom_drag_r:.0e}{pgf_tag}"
+        f"_smooth{args.smoothing_passes}_drag{args.bottom_drag_r:.0e}{pgf_tag}{diag_tag}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,22 +216,33 @@ def main():
         dz_surface=args.dz_surface, dz_deep=args.dz_deep,
     )
 
-    bathy_cfg = BathymetryConfig(
-        source="file",
-        path=str(ETOPO_FILE),
-        H_max=args.H_max,
-        H_min=args.H_min,
-        smoothing_passes=args.smoothing_passes,
-        enforce_straits=True,
-        strait_width_factor=1.0,
-        fill_isolated_basins=True,
-        depth_is_negative=True,
-    )
-    H_bathy, ocean_mask = init_ocean_bathymetry(grid, bathy_cfg)
-    # Match the rest_state working dtype (float32 by default) to avoid
-    # dtype-mismatch carry errors inside the scan-based step block.
-    H_bathy = H_bathy.astype(jnp.float32)
-    ocean_mask = ocean_mask.astype(jnp.float32)
+    if args.flat_bottom:
+        # E2: global flat-bottom basin at H_max — no land, no
+        # topography.  Tests whether the ETOPO instability needs
+        # irregular geometry to manifest.
+        H_bathy = jnp.full(
+            (args.n_lat, args.n_lon), args.H_max, dtype=jnp.float32,
+        )
+        ocean_mask = jnp.ones(
+            (args.n_lat, args.n_lon), dtype=jnp.float32,
+        )
+    else:
+        bathy_cfg = BathymetryConfig(
+            source="file",
+            path=str(ETOPO_FILE),
+            H_max=args.H_max,
+            H_min=args.H_min,
+            smoothing_passes=args.smoothing_passes,
+            enforce_straits=True,
+            strait_width_factor=1.0,
+            fill_isolated_basins=True,
+            depth_is_negative=True,
+        )
+        H_bathy, ocean_mask = init_ocean_bathymetry(grid, bathy_cfg)
+        # Match the rest_state working dtype (float32 by default) to avoid
+        # dtype-mismatch carry errors inside the scan-based step block.
+        H_bathy = H_bathy.astype(jnp.float32)
+        ocean_mask = ocean_mask.astype(jnp.float32)
 
     if args.coord == "partial":
         z_coord = create_partial_cell_coordinate(z_coord_base, H_bathy)
@@ -173,6 +265,17 @@ def main():
           f"({100.0*n_ocean/n_total:.1f}%)")
     print(f"  H_bathy range:   [{float(H_bathy[ocean_mask>0].min()):.0f}, "
           f"{float(H_bathy.max()):.0f}] m")
+    if args.flat_bottom:
+        print(f"  E2: flat-bottom mode (no ETOPO, no land mask)")
+    if args.homogeneous_ts:
+        print(f"  E1: homogeneous T=10°C, S=35 PSU (no stratification)")
+    if args.meridional_T_gradient:
+        print(f"  E3: meridional T gradient T_eq={args.T_eq_surface}°C, "
+              f"T_pol={args.T_pol_surface}°C")
+    if args.zonly_T_init:
+        print(f"  E4: z-only T-init (T(k) from z_full_ref, no centroid offset)")
+    if args.frozen_ts:
+        print(f"  Diag: frozen T,S (restored to initial after each step)")
     print(f"  dt = {args.dt} s, total = {args.days} sim-days")
     print(f"  Output: {output_dir}")
     print()
@@ -184,7 +287,99 @@ def main():
         land_mask_override=ocean_mask,
     )
 
-    if args.coord == "partial":
+    if args.meridional_T_gradient:
+        # E3: T(y, z) = T_deep + (T_surf(lat) - T_deep) * exp(-z/scale)
+        # with T_surf(lat) = T_eq + (T_pol - T_eq) * sin²(lat).
+        # Provides an APE-bearing thermal-wind shear without any
+        # topography — distinguishes "horizontal gradient" causes
+        # from "topography × gradient" causes.
+        if args.coord == "partial":
+            centroid = compute_centroid_depth(
+                jnp.zeros_like(H_bathy), H_bathy, z_coord,
+            )
+            is_active = z_coord.is_active
+        else:
+            # Pure z*: centroid_depth = |z_full_ref| · J = |z_full_ref|
+            # at η=0 with H=H_max, so the abs(z_full_ref) field
+            # broadcast to (n_lat, n_lon, nlev) suffices.
+            centroid = jnp.broadcast_to(
+                jnp.abs(z_coord.z_full_ref),
+                (args.n_lat, args.n_lon, args.n_levels),
+            )
+            is_active = jnp.ones_like(centroid, dtype=jnp.bool_)
+        # sin²(lat).  ``grid.lat`` is radians, shape (n_lat,).
+        sin2_lat = jnp.sin(grid.lat) ** 2                 # (n_lat,)
+        T_deep = 2.0
+        T_surf = (
+            args.T_eq_surface
+            + (args.T_pol_surface - args.T_eq_surface) * sin2_lat
+        )                                                  # (n_lat,)
+        T_surf_3d = T_surf[:, jnp.newaxis, jnp.newaxis]    # (n_lat, 1, 1)
+        T_per_cell = T_deep + (T_surf_3d - T_deep) * jnp.exp(
+            -centroid / _SCALE_DEPTH,
+        )
+        T_per_cell = jnp.where(is_active, T_per_cell, T_deep)
+        T_per_cell = T_per_cell * state.land_mask.data[..., jnp.newaxis]
+        state = state._replace(
+            T=state.T.replace(data=T_per_cell.astype(state.T.data.dtype)),
+        )
+    elif args.homogeneous_ts:
+        # E1: override the exponential thermocline with a uniform
+        # T = 10°C, S = 35 PSU.  The ``rest_state`` ctor already set
+        # S = 35 uniformly; we only need to flatten T.
+        T_uniform = jnp.full_like(state.T.data, 10.0)
+        T_uniform = T_uniform * state.land_mask.data[..., jnp.newaxis]
+        state = state._replace(T=state.T.replace(data=T_uniform))
+    elif args.linear_T_z:
+        # Diagnostic: T(z) linear in depth.
+        # T(z) = T_surf + (T_deep - T_surf) * z / H_max with z positive
+        # downward, so T_surf at z=0, T_deep at z=H_max.  Centroid-
+        # aware (still uses each cell's actual centroid).
+        T_deep = 2.0
+        T_surf = 20.0
+        if args.coord == "partial":
+            centroid = compute_centroid_depth(
+                jnp.zeros_like(H_bathy), H_bathy, z_coord,
+            )
+            is_active = z_coord.is_active
+        else:
+            centroid = jnp.broadcast_to(
+                jnp.abs(z_coord.z_full_ref),
+                (args.n_lat, args.n_lon, args.n_levels),
+            )
+            is_active = jnp.ones_like(centroid, dtype=jnp.bool_)
+        T_per_cell = T_surf + (T_deep - T_surf) * centroid / args.H_max
+        T_per_cell = jnp.where(is_active, T_per_cell, T_deep)
+        T_per_cell = T_per_cell * state.land_mask.data[..., jnp.newaxis]
+        state = state._replace(
+            T=state.T.replace(data=T_per_cell.astype(state.T.data.dtype)),
+        )
+    elif args.zonly_T_init:
+        # E4: depth-only T(k) using z_full_ref (NOT centroid-aware).
+        # Every column's cell-mean T at level k is identical, so the
+        # horizontal density gradient at partial-bottom faces vanishes
+        # (under linear EOS at least; with a pressure-dependent EOS a
+        # tiny residual remains from compressibility × Δh_partial,
+        # negligible for diagnostic purposes).  Trade-off: at partial-
+        # bottom cells the cell-mean T no longer matches T(actual
+        # centroid), so the rest-state PGF residual is slightly
+        # larger than centroid-aware — a small spurious initial flow
+        # seeds, but the seed is *not* a real horizontal gradient.
+        T_deep = 2.0
+        T_surf = 20.0
+        z_abs = jnp.abs(z_coord_base.z_full_ref).astype(state.T.data.dtype)
+        T_1d = T_deep + (T_surf - T_deep) * jnp.exp(-z_abs / _SCALE_DEPTH)
+        T_per_cell = jnp.broadcast_to(
+            T_1d[jnp.newaxis, jnp.newaxis, :],
+            (args.n_lat, args.n_lon, args.n_levels),
+        )
+        if args.coord == "partial":
+            T_per_cell = jnp.where(z_coord.is_active, T_per_cell, T_deep)
+        T_per_cell = T_per_cell * state.land_mask.data[..., jnp.newaxis]
+        state = state._replace(
+            T=state.T.replace(data=T_per_cell.astype(state.T.data.dtype)),
+        )
+    elif args.coord == "partial":
         # Centroid-aware T initialization to keep the rest-state PGF clean.
         centroid = compute_centroid_depth(
             jnp.zeros_like(H_bathy), H_bathy, z_coord,
@@ -205,7 +400,13 @@ def main():
         pgf_scheme=args.pgf_scheme,
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
-    block_fn = _make_step_block(model, args.dt)
+    if args.frozen_ts:
+        block_fn = _make_step_block(
+            model, args.dt,
+            frozen_T=state.T.data, frozen_S=state.S.data,
+        )
+    else:
+        block_fn = _make_step_block(model, args.dt)
 
     n_total_steps = int(args.days * 86400.0 / args.dt)
     steps_per_record = int(args.record_every_days * 86400.0 / args.dt)

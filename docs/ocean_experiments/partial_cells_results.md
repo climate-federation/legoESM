@@ -1,6 +1,8 @@
 # Partial cells: results summary
 
-Status as of 2026-04-30 on branches `ocean-partial-cells` and `ocean-pgf-smc03`.
+Status as of 2026-05-01 on branch `realistic-geometry-full` (PR #224).
+Originally on `ocean-partial-cells` and `ocean-pgf-smc03` (now
+consolidated into `realistic-geometry-full`).
 
 ## What works
 
@@ -394,6 +396,77 @@ Closing the remaining 30-day gap on global ETOPO requires
 separate stabilisation work (extra horizontal viscosity tuning,
 biharmonic + Smagorinsky, coastal sponge, MEO-style bathymetry
 smoothing) outside the scope of this PR.
+
+### ETOPO 30-day instability — bisection ladder (2026-05-01)
+
+Six diagnostic experiments, each on the same 60×120 / 20-level / 30-day
+configuration with SMC03 + partial cells + drag=1e−3, varying only the
+specified ingredient.  Two on-branch subagent reviews
+(``etopo_instability_dycore_review.md`` and
+``etopo_instability_ocean_review.md``) framed the bisection.
+
+| run | bathymetry | T-init | T,S evolution | day-1 | day-30 | NaN |
+|---|---|---|---|---|---|---|
+| **original** | ETOPO | centroid-aware exp(z) | live | 2.5 mm/s | NaN day 19 | ✓ |
+| Adcroft baseline | ETOPO | centroid-aware exp(z) | live | 327 | NaN day 12 | ✓ |
+| **E1** | ETOPO | uniform T,S=10°C, 35 PSU | live | 2.3 | 4.2 mm/s | ✗ |
+| **E2** | flat 5000m, no land | exp(z), depth-only | live | 0.000 | 0.000 mm/s | ✗ |
+| **E3** | flat 5000m, no land | sin²(lat) thermocline | live | 151 | 96 mm/s, bounded | ✗ |
+| **E4** | ETOPO | z-only T(z_full_ref) | live | 28 | NaN day 16 | ✓ |
+| **frozen-T** | ETOPO | centroid-aware exp(z) | **frozen** | 4.3 | **51 mm/s, bounded** | ✗ |
+| **frozen-T linear T(z)** | ETOPO | centroid-aware linear z | **frozen** | 1.1 | **8 mm/s, bounded** | ✗ |
+| frozen-T z-only T-init | ETOPO | z-only T(z_full_ref) | frozen | — | 545 mm/s, bounded | ✗ |
+
+Spatial analysis of frozen-T linear T(z) day-30 (``diag3_spatial_analysis.py``):
+
+| region | u step/interior RMS ratio | v step/interior RMS ratio |
+|---|---|---|
+| full domain | 1.47 | 3.06 |
+| **\|lat\| ≤ 80°** | **1.52** | **1.48** |
+
+Outside the pole zone, u and v have nearly identical mild step
+concentration (~1.5×).  The 3.06× v-direction signal in the full
+domain is dominated by lat > 80° — a near-pole grid-convergence
+artefact, not a domain-wide stencil bug.
+
+### Decomposed root cause
+
+| mechanism | magnitude (frozen-T contribution) | spatial signature | upstream of NaN? |
+|---|---|---|---|
+| C-grid topographic computational mode (Mesinger 1973; Adcroft & Hallberg 2006) | **dominant** | mild (1.3-1.5×) step concentration, distributed across abyss | yes — slow seed |
+| Bottom-cell σ × ρ-curvature in S&M03 piecewise-linear stencil | **6× factor** (8 vs 51 mm/s on linear vs exp T) | distributed at partial-bottom cells | yes — amplifies seed |
+| Pole-region v-direction signal (\|lat\| > 80°) | localised 2-3× | high latitude only | minor — narrow band |
+| Live-T positive feedback (seed flow advects T,S → new gradients → bigger PGF → faster flow) | converts 8 mm/s seed → NaN day 19 | universal | yes — sets the e-fold from ~20 days to ~2 days |
+
+### What the bisection rules out
+
+1. **`h_u` consistency** at adjacent-`bot_level` faces — Σ_k h_u
+   matches `min(H_W, H_E)` to fp32 round-off (4e−10 ratio) on all
+   4388 wet-wet u-faces of ETOPO.  The H&A 2009 column-sum
+   invariant is intact.
+2. **Smoking-gun stencil bug at every lateral step face** — the
+   step/interior concentration is 1.5× outside the pole zone, far
+   below what a real stencil bug produces (would be 5-10×+).
+3. **SMC03 itself** — same scheme passes BH-seamount at 1.5 mm/s
+   with rest-state \|dv/dt\| = 1.1e−8 m/s².  The remaining ETOPO
+   issue is downstream of the column-interior PGF.
+
+### What the bisection identifies as legitimate physical/closure work
+
+The dominant slow-growth mechanism is the C-grid topographic
+computational mode in stratified flow over rough bathymetry —
+documented since Mesinger (1973) and characterised by
+Adcroft & Hallberg (2006).  Production codes universally damp
+this with **GM/Redi thickness + isopycnal mixing** plus
+**biharmonic momentum**.  The fast positive-feedback loop that
+turns a slow seed into NaN is the well-known z\*/ALE cold-start
+mode (Holmes et al 2019; Ilıcak et al 2012; Megann 2018) that GM
+was specifically invented to suppress.
+
+The right path forward is therefore to add GM/Redi + biharmonic
+as **physical sub-grid closures** (with literature-standard
+coefficients), not as stability tuning.  Documented in
+``etopo_instability_ocean_review.md`` §closure recipe.
 
 ### What this branch delivers
 
