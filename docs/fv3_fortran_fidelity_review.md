@@ -390,6 +390,63 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-982 — Component probes: cube-vertex bug NOT in BGRID_NE sync, iter-947 helper, or damping
+
+**Trigger.**  Iter-981 isolated the per-step ~0.98 m/s |du_d|
+error to polar-face cube vertices.  Iter-982 probes individual
+components by disabling them and measuring residual error.
+
+**Iter-982 probes on duogrid C36 W2 1-step:**
+
+| config                                | \|du\|_max | \|dv\|_max | \|dh\|_max |
+|---------------------------------------|-----------:|-----------:|-----------:|
+| baseline (default)                    |     0.9801 |     1.4492 |     56.47  |
+| no BGRID_NE sync                      |     0.8787 |     1.4467 |     56.47  |
+| no iter-947 (mode='edge' uc/vc)       |     1.0673 |     1.5862 |     60.77  |
+| damp_v=0 (no vort damping)            |     0.9808 |     1.4492 |     56.47  |
+| d4_bg=0 (no d_sw5)                    |     0.9755 |     1.4425 |     56.47  |
+| both damping OFF                      |     0.9762 |     1.4424 |     56.47  |
+
+**Findings.**
+
+1. **BGRID_NE sync** introduces ~0.10 m/s of error (baseline 0.98
+   vs without-sync 0.88).  Small contributor.
+2. **iter-947 helper** REDUCES error by ~0.09 m/s (mode='edge'
+   gives 1.07 vs iter-947 0.98).  Small but positive.
+3. **Damping** (damp_v, d4_bg) is essentially neutral on the
+   per-step error (within 0.005 m/s).  Damping is not the bug.
+
+**Crucial:** With BOTH damping disabled AND BGRID_NE sync disabled
+AND iter-947 disabled, the error would still be ~0.85-0.90 m/s
+(estimated from independent contributions).
+
+The dominant ~0.85 m/s |du_d| per-step error is in the
+NON-DAMPING, NON-SYNC, NON-HALO part of the FB chain.  Candidates:
+
+1. `c_sw` + `_p_grad_c` for uc, vc construction — runs BEFORE
+   d_sw_native, contributes to the NEW uc, vc passed in.
+2. `_d_sw1_recompute_ut_vt` Part 1 (4-cell average) — uses uc,
+   vc to compute ut, vt.  At cube vertex, the average reads halo
+   uc, vc values.
+3. `_bgrid_ke_transport` PPM transport — uses iter-945 D-grid
+   halo.  At cube vertices, the cube_rmp Lagrange interpolation
+   in `ext_vector_dgrid` may not exactly match Fortran's expected
+   value.
+4. `_corner_vorticity` for zeta_abs — at cube vertices.
+
+**Iter-982 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this entry with probe
+   results.
+
+No code change.
+
+**Backlog for iter-983+.**
+
+Add probes that swap c_sw + p_grad_c for a NULL operator
+(uc, vc unchanged from d2a2c) and measure residual error.  This
+isolates whether the cube-vertex bug originates upstream of d_sw.
+
 ### Iter-981 — 1-step W2 tendency diagnostic isolates bug to polar-face cube vertices
 
 **Trigger.**  Iter-980 suggested running a 1-step diagnostic to
