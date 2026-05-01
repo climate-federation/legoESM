@@ -445,6 +445,49 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1020 — Sentinel hardening: `dddmp_prod > 0 with div_damp=0` silent-no-op warning
+
+**Trigger.**  Iter-1019 added a sentinel for the new
+`hyperdiff_coeff` warning.  Iter-1020 audits the existing
+iter-872c-take5 warning for `dddmp > 0 with div_damp == 0` and
+adds a sentinel to lock it in.
+
+**Iter-1020 fix.**  New sentinel
+`test_iter1020_dddmp_silent_noop_warning` verifies that the
+existing iter-872c-take5 warning fires when:
+
+```python
+CDGridShallowWaterConfig(div_damp=0.0, dddmp_prod=0.2)
+```
+
+This catches users who set `dddmp_prod > 0` thinking adaptive
+Smagorinsky is active but the narrow gate inside
+`cdgrid_momentum_tendencies` silently no-ops `dddmp` when
+`div_damp = 0`.  PASSES.
+
+**Total cubed-sphere SW production sentinels: 21/21 PASS:**
+
+| Suite                                          | tests |
+|------------------------------------------------|-------|
+| iter-921 W2 baseline                           |   3   |
+| iter-923 W5 production                         |   7   |
+| iter-924 cosine bell                           |   5   |
+| iter-1002 W2 target met                        |   1   |
+| iter-1009 W5 day-5 artifact-free               |   1   |
+| iter-1013 preset matches explicit              |   1   |
+| iter-1017 preset warns on non-C36              |   1   |
+| iter-1019 hyperdiff silent-noop warning        |   1   |
+| iter-1020 dddmp silent-noop warning            |   1   |
+| **Total**                                       | **21** |
+
+**Iter-1020 deliverables.**
+
+1. `tests/test_iter1002_w2_target_met.py`: new
+   `test_iter1020_dddmp_silent_noop_warning` sentinel.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change; just sentinel coverage.
+
 ### Iter-1019 — Codex fidelity audit: `hyperdiff_coeff` is silent no-op in `fv3_sw_tendencies`
 
 **Trigger.**  Iter-1004 noted that `hyperdiff_coeff=0.001..0.01`

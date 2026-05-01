@@ -65,6 +65,55 @@ def _make_iter1009_config(N):
     )
 
 
+def test_iter1020_dddmp_silent_noop_warning():
+    """`fv3_sw_tendencies(dddmp>0, div_damp=0)` should warn loudly.
+
+    Iter-872c-take5 added a UserWarning for the case where dddmp is
+    set non-zero but div_damp is zero — the narrow gate inside
+    `cdgrid_momentum_tendencies` silently no-ops dddmp in that
+    regime.  Iter-1020 hardens that warning by pinning a sentinel.
+    """
+    import warnings as _warnings
+
+    import jax.numpy as jnp_local
+
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig as _Cfg,
+        FV3EdgeShallowWaterModel as _Model,
+        FV3EdgeShallowWaterState as _State,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere as _csp
+    from legoesm.grids.cubed_sphere_cdgrid import (
+        create_cubed_sphere_cdgrid as _cdgrid,
+    )
+    from tests.atmosphere.shallow_water.test_cases.williamson import (
+        williamson_test2 as _w2,
+    )
+
+    grid = _csp(36)
+    cdgrid = _cdgrid(grid)
+    sw = _w2(grid)
+    u_d = cdgrid.cos_angle_edge_x * jnp_local.cos(cdgrid.lat_edge_x)
+    v_d = -cdgrid.sin_angle_edge_y * jnp_local.cos(cdgrid.lat_edge_y)
+    state = _State(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+
+    # dddmp_prod > 0 with div_damp = 0 → warn
+    cfg = _Cfg(div_damp=0.0, dddmp_prod=0.2,
+                apply_fortran_xppm_boundary=True)
+    model = _Model(grid, cfg)
+    with _warnings.catch_warnings(record=True) as w:
+        _warnings.simplefilter("always")
+        _ = model.step(state, 100.0)
+        silent_warns = [
+            x for x in w
+            if issubclass(x.category, UserWarning)
+            and "silently no-ops" in str(x.message)
+        ]
+        assert len(silent_warns) >= 1, (
+            f"Expected at least 1 silently-no-ops warning when "
+            f"dddmp > 0 and div_damp = 0; got {len(silent_warns)}")
+
+
 def test_iter1019_hyperdiff_silent_noop_warning():
     """`fv3_sw_tendencies(hyperdiff_coeff>0)` should warn loudly.
 
