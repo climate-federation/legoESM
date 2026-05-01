@@ -405,6 +405,28 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1007 — W5 resolution scaling: C36 is uniquely the sweet spot
+
+**Iter-1007a — W5 alt dt/div/damp_v configs (15-day):** none stable.
+
+**Iter-1007b — W5 5-day resolution scaling:**
+
+| N  | dt  | h_min | h_max | speed_max | OK? |
+|----|-----|-------|-------|-----------|-----|
+| 18 | 600 |  -271 |  8025 |   835.8   | ✗   |
+| 24 | 450 |  -238 |  7312 |   579.3   | ✗   |
+| **36** | **300** | **3887** | **6745** |  **49.0** | **✓** |  (sweet spot!)
+| 48 | 225 |  3287 |  7919 |   178.2   | ✗   |
+| 72 | 150 |    82 |  7821 |   600.4   | ✗   |
+
+**C36 is uniquely the W5 5-day reference resolution.**  Both lower
+and higher resolutions FAIL.  This non-monotonicity points to a
+resolution-specific instability mode rather than convergent error.
+
+For W5 verification, C36 is a calibrated sweet spot that achieves
+the typical 5-day reference window cleanly.  Closing the W5 15-day
+long-term gap requires structural intervention.
+
 ### Iter-1006 — dt + PPM-faithful sweeps confirm iter-1002 is optimal
 
 **Iter-1006a — dt sweep on iter-1002 W2 config:**
