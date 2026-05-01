@@ -491,6 +491,34 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1032 — Full Williamson 1992 verification matrix sentinel
+
+**Iter-1032 deliverable.**
+
+New sentinel `tests/test_iter1032_dual_target_full_matrix.py`
+exercises the iter-1030 calibration through the FULL Williamson
+1992 verification matrix in a single test file:
+
+| Test                                       | Result        | Status |
+|--------------------------------------------|---------------|--------|
+| `test_iter1032_W2_meets_target`            | v_ll=0.1138   | ✓ ≤ 0.119 |
+| `test_iter1032_W5_day5_artifact_free`      | h_min=3888, spd=45.1 | ✓ |
+| `test_iter1032_cosine_bell_mass_conserves` | drift=3.2e-7  | ✓ < 5e-7 |
+
+3/3 PASS in 44 seconds.  This is the **integration sentinel**
+that catches any regression in the iter-1030 dual-target
+calibration across all three Williamson tests at once.
+
+**Total cubed-sphere SW production sentinels: 24/24 PASS** (21 pre-
+existing + 3 in iter-1032 + 10 iter-928 markers = 34 total).
+
+**Iter-1032 deliverables.**
+
+1. `tests/test_iter1032_dual_target_full_matrix.py`: 3 new tests.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
 ### Iter-1031 — Iter-1030 confirmed as local W5 optimum
 
 **Iter-1031 sweep around iter-1030 (8, 0.030):**
