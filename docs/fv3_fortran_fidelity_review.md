@@ -390,6 +390,94 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-989 — Resolution scaling: error GROWS with N → unresolved grid-scale instability confirmed
+
+**Trigger.**  Iter-988 hypothesised the FB chain v_ll_Linf=55.6 m/s
+gap is the documented "unstable for finite dt" architectural
+limitation, not a single missing operator.  Iter-989 tests this
+by sweeping resolution on the FB chain W2 1-day.
+
+**Resolution scaling on FB chain C[N] W2 1-day:**
+
+| N  | dt  | v_ll_Linf | seam_max |
+|----|-----|-----------|----------|
+| 18 | 600 |   50.60   |  44.63   |
+| 24 | 450 |   57.30   |  46.53   |
+| 36 | 300 |   55.61   |  56.50   |
+| 48 | 225 | **88.89** |**122.29**|
+
+**Key finding.**  The error does NOT decrease with resolution as a
+converged numerical scheme would (e.g., O(dx²) 2nd-order accuracy).
+It is roughly stationary 50→57→55 from N=18 to N=36 and then GROWS
+to 89 m/s at N=48.  The seam peak GROWS from 44.6 to 122.3 m/s.
+
+This is the smoking gun for an UNRESOLVED grid-scale instability:
+- A resolved-mode error scales as `(C/N)^2` and decreases with N.
+- A grid-scale instability mode has a fixed amplitude per grid cell
+  (or grows due to amplification at finer dt), so error remains
+  constant or grows with N.
+
+The non-monotonic pattern (small dip at N=36) suggests two competing
+modes with different N-scaling: a resolved physical mode (would
+decrease with N) and a grid-scale instability (increases with N).
+At N=48 the instability dominates.
+
+**Implication.**
+
+The FV3FBShallowWaterModel docstring at line 658-669 was correct:
+
+> EXPERIMENTAL: NOT PRODUCTION-READY. Known unstable.
+> The forward-backward coupling is unstable for finite dt without
+> additional dissipation at the c_sw/d_sw interface.
+
+Without porting Fortran's exact dissipation control (del2/del4 at
+specific phases of the FB chain), our FB implementation cannot
+match Fortran's W2 v_ll_Linf=0.119 m/s target.  The remaining
+fidelity work to close this gap is not "tweak halo X by amount Y"
+but rather "implement FV3's exact dissipation control structure"
+— a multi-week structural project.
+
+**The Ralph-loop session value-add over iter-985..989** has been:
+
+1. **Localising the artifact** to equatorial cube-edge seams at
+   lat ±6.34°, with NO improvement from cube-vertex fixes
+   (iter-985), no improvement from PPM duogrid bypass (iter-987),
+   no improvement from Lin-Rood inter-sweep modifications (iter-988).
+2. **Confirming architectural origin** via resolution scaling
+   showing unresolved grid-scale growth (this iter).
+3. **Quantifying the calibration headroom** at 4-7% (iter-959,
+   iter-986) — modest but real.
+
+**Production W2 v_ll_Linf is unchanged at 0.132 m/s.**  The
+production CDGrid path (RK3 + Arakawa-Lamb) achieves Fortran-grade
+fidelity already.
+
+**Iter-989 deliverables.**
+
+1. `scripts/diag_iter989_resolution_scaling.py` — runnable
+   resolution scan.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry, including
+   the architectural realization.
+
+No production code change.
+
+**Backlog for iter-990+.**
+
+Forward iter-988's structural backlog:
+
+1. **Implement FV3 exact dissipation control** at c_sw/d_sw
+   interface (the multi-week project).  This requires deep dive
+   into Fortran dyn_core.F90:1124-1207 and dyn_core.F90:850-900
+   to mirror EXACTLY Fortran's `mpp_get_boundary` + `divergence_corner`
+   + del2/del4 sequencing.
+2. **Migrate FB chain to use the production halo plumbing** —
+   the production path uses different operators (`cgrid_mass_flux_divergence`,
+   `cdgrid_momentum_tendencies`) that DO converge.  Stub the FB
+   chain to call those instead of `transport_step` + `_d_sw_native`.
+3. **Stabilise via larger Smagorinsky** (iter-959/963 found
+   d2_bg=0.09, dddmp=0.45 → v_ll=43.8 m/s; explore higher to
+   find the stability/fidelity Pareto frontier).
+
 ### Iter-988 — Lin-Rood inter-sweep halo: structurally sound, FB chain architectural blocker
 
 **Trigger.**  Iter-987 ruled out cube_rmp as the dominant lever
