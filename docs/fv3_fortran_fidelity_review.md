@@ -342,6 +342,26 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-965 — Iter-947 halo helper also slightly improves W5
+
+**Trigger.**  Iter-947's NEW-corrected uc/vc cross-face halo
+improved W2 v_ll_Linf 56 → 55.6.  Iter-965 verifies the helper
+also improves W5 (mountain forcing) and isn't W2-specific.
+
+**Sweep on FB chain duogrid C36 W5 1-day at dt=300 s:**
+
+| config              | |u_max| (m/s) | h range (m) |
+|---------------------|--------------:|-------------|
+| mode='edge'         |        31.42  | [2069, 18065] |
+| **iter-947 NEW**    |     **31.30** | [2069, 18007] |
+
+Small improvement (~0.4% on |u_max|).  Iter-947 helper is
+generically useful, not W2-specific.  Confirms the iter-945 +
+iter-947 halo work is a real FortranR-fidelity gain across multiple
+test cases.
+
+**Iter-965 deliverable.**  No code change.  Documentation only.
+
 ### Iter-964 — Smagorinsky tuning is W2-specific; W5 needs default damping
 
 **Trigger.**  Iter-963 found `(d2_bg=0.09, dddmp=0.45)` improves W2
