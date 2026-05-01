@@ -401,23 +401,26 @@ class CDGridShallowWaterConfig(NamedTuple):
 
 def iter1009_dual_target_config(
     n: int,
-    div_damp_factor: float = 9.0,
-    damp_v: float = 0.035,
+    div_damp_factor: float = 8.0,
+    damp_v: float = 0.030,
 ) -> CDGridShallowWaterConfig:
-    """Iter-1009/1021 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
+    """Iter-1009/1021/1030 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
 
     On `FV3EdgeShallowWaterModel` at N=36 dt=300 s this preset achieves:
-        W2 1-day v_ll_Linf = 0.1137 m/s (≤ 0.119 acceptance) ✓
-        W5 day-5 (h_min=3886 m, speed_max=53.3 m/s) ✓ (artifact-free)
+        W2 1-day v_ll_Linf = 0.1138 m/s (≤ 0.119 acceptance) ✓
+        W5 day-5 (h_min=3888 m, speed_max=45.1 m/s) ✓ (artifact-free)
         Cosine bell day-1: 5/5 production metrics within ±5% ✓
 
-    Iter-1021 fine-sweep refined the iter-1009 baseline (div=10,
-    damp_v=0.04, gave v_ll=0.1147, W5 spd=68.6) to (div=9,
-    damp_v=0.035): STRICTLY BETTER on both W2 (0.1147 → 0.1137)
-    and W5 day-5 speed_max (68.6 → 53.3, 22% lower).
+    Calibration evolution:
+    - iter-1009: (div=10, damp_v=0.04) → v_ll=0.1147, W5 spd=68.6
+    - iter-1021: (div=9, damp_v=0.035)  → v_ll=0.1137, W5 spd=53.3
+    - iter-1030: (div=8, damp_v=0.030)  → v_ll=0.1138, W5 spd=45.1
+
+    Iter-1030 is the best W5 day-5 stability margin (45.1 m/s vs the
+    80 m/s threshold = 44% headroom) at essentially equal W2.
 
     See `tests/test_iter1002_w2_target_met.py` for the pinned sentinels
-    and `docs/fv3_fortran_fidelity_review.md` (iter-985..1021) for the
+    and `docs/fv3_fortran_fidelity_review.md` (iter-985..1030) for the
     full calibration narrative.
 
     Resolution caveat: C36 is uniquely the dual-target sweet spot.
@@ -429,13 +432,14 @@ def iter1009_dual_target_config(
     n : int
         Cubed-sphere face cells per side.  C36 is the validated
         dual-target reference.
-    div_damp_factor : float, default 9.0
-        Multiplier on `_div_damp_cube(n)`.  Iter-1021 measured 9.0*
-        as a STRICTLY BETTER factor than iter-1009's 10* (lower W2
-        v_ll AND lower W5 speed at day-5).
-    damp_v : float, default 0.035
-        Vorticity damping coefficient.  Iter-1021 measured 0.035 as
-        a strict improvement over iter-1009's 0.04.
+    div_damp_factor : float, default 8.0
+        Multiplier on `_div_damp_cube(n)`.  Iter-1030 measured 8.0*
+        as the W5-best factor — slightly looser div damping allows
+        the Rossby wave train to develop with less spurious damping.
+    damp_v : float, default 0.030
+        Vorticity damping coefficient.  Iter-1030 measured 0.030 as
+        the W5-best damp_v (lower than iter-1009's 0.06 and
+        iter-1021's 0.035).
 
     Returns
     -------

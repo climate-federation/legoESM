@@ -55,17 +55,18 @@ from tests.test_iter921_w2_v_vs_h_pareto_sentinel import (
 
 
 def _make_iter1009_config(N):
-    """Iter-1009/1021 calibration that meets BOTH W2 ≤ 0.119 AND W5 day-5.
+    """Iter-1009/1021/1030 calibration that meets BOTH W2 ≤ 0.119 AND W5 day-5.
 
-    Iter-1021 refined to (div=9, damp_v=0.035) — STRICTLY BETTER
-    than iter-1009's (10, 0.04): W2 0.1137 (vs 0.1147) AND W5
-    day-5 speed_max=53.3 (vs 68.6).
+    Calibration evolution:
+    - iter-1009: (10, 0.04) → v_ll=0.1147, W5 spd=68.6
+    - iter-1021: (9, 0.035) → v_ll=0.1137, W5 spd=53.3
+    - iter-1030: (8, 0.030) → v_ll=0.1138, W5 spd=45.1 (best W5)
     """
     return CDGridShallowWaterConfig(
         hyperdiff_coeff=0.0,
-        div_damp=9.0 * _div_damp_cube(N),
+        div_damp=8.0 * _div_damp_cube(N),
         boundary_fix=True,
-        damp_v=0.035, nord_v=2,
+        damp_v=0.030, nord_v=2,
         apply_fortran_xppm_boundary=True,
     )
 

@@ -18,14 +18,14 @@ from legoesm.atmosphere.dynamics import iter1009_dual_target_config
 cfg = iter1009_dual_target_config(36)  # div=9, damp_v=0.035
 ```
 
-**Verified at C36 dt=300 (iter-1021):**
+**Verified at C36 dt=300 (iter-1030):**
 
 | Metric | Result | Threshold |
 |--------|--------|-----------|
-| W2 1-day v_ll_Linf | **0.1137** m/s | ≤ 0.119 ✓ |
-| W2 1-day h_err_max | 8.75 m | < 20 ✓ |
-| W5 day-5 h_min | 3886 m | > 0 ✓ |
-| W5 day-5 speed_max | **53.3** m/s | < 80 ✓ |
+| W2 1-day v_ll_Linf | **0.1138** m/s | ≤ 0.119 ✓ |
+| W2 1-day h_err_max | ~9 m | < 20 ✓ |
+| W5 day-5 h_min | 3888 m | > 0 ✓ |
+| W5 day-5 speed_max | **45.1** m/s | < 80 ✓ (44% margin) |
 | Cosine bell h_num_max | 895.7 (within ±5%) | ✓ |
 | Cosine bell Linf_err | 121.3 (within ±5%) | ✓ |
 | Cosine bell L2_err | 8.114 (within ±5%) | ✓ |
@@ -490,6 +490,47 @@ trade W2 fidelity for W5 fidelity.
 correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
+
+### Iter-1030 — Even-better calibration: (div=8, damp_v=0.030) → W5 spd=45.1
+
+**Trigger.**  Iter-1021 found (div=9, damp_v=0.035) strictly better
+than iter-1009.  Iter-1030 fine-sweeps lower damp_v values.
+
+**Iter-1030 sweep:**
+
+| div  | damp_v | W2 v_ll | W5 day-5 (h_min, spd) | Both? |
+|------|--------|---------|------------------------|-------|
+| 9.0  | 0.035  | 0.1137  | (3886, 53.3)           | ✓ ✓ (iter-1021) |
+| 9.0  | 0.030  | 0.1141  | (3887, 53.0)           | ✓ ✓   |
+| 9.5  | 0.030  | 0.1144  | (3886, 59.0)           | ✓ ✓   |
+| 10.0 | 0.030  | 0.1146  | (3886, 65.6)           | ✓ ✓   |
+| **8.0**  | **0.030** | **0.1138**  | **(3888, 45.1)**       | **✓ ✓** |
+| 8.5  | 0.030  | 0.1139  | (3887, 47.6)           | ✓ ✓   |
+| 8.5  | 0.035  | 0.1138  | (3886, 47.6)           | ✓ ✓   |
+
+**Best W5 stability margin: (div=8, damp_v=0.030)** — W5 day-5
+speed=45.1 m/s (44% margin below 80-threshold), W2 v_ll=0.1138
+(essentially equal to iter-1021's 0.1137).
+
+**Calibration evolution:**
+
+| iter      | div   | damp_v | W2 v_ll | W5 spd | W5 margin |
+|-----------|-------|--------|---------|--------|-----------|
+| iter-1009 | 10.0  | 0.040  | 0.1147  | 68.6   | 14%       |
+| iter-1021 | 9.0   | 0.035  | 0.1137  | 53.3   | 33%       |
+| **iter-1030** | **8.0** | **0.030** | **0.1138** | **45.1** | **44%**   |
+
+**Iter-1030 deliverables.**
+
+1. `iter1009_dual_target_config` defaults updated to (8, 0.030).
+2. `_make_iter1009_config` helper updated to match.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+All 6 tests in `test_iter1002_w2_target_met.py` PASS with the
+new calibration.
+
+Production impact: ZERO (preset is opt-in; production default
+preserved).
 
 ### Iter-1027 — Add issue9 to iter-928 fidelity-gap markers (hyperdiff silent no-op)
 
