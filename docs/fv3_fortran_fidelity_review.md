@@ -445,6 +445,35 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1024 — dt scaling with iter-1021 calibration: dt ∈ [200, 450] satisfies both targets
+
+**Iter-1024 dt sweep at iter-1021 (div=9, dv=0.035):**
+
+| dt   | W2 v_ll | W5 day-5 | Both? |
+|------|---------|-----------|-------|
+| 600  |   NaN   | NaN       | ✗     |
+| 450  | 0.1141  | (3887, 53.0) | ✓ ✓ |
+| **300** | **0.1137** | **(3886, 53.3)** | ✓ ✓ (iter-1021 default) |
+| 240  | 0.1145  | (3886, 53.3) | ✓ ✓ |
+| 200  | 0.1160  | (3886, 53.2) | ✓ ✓ |
+| 150  | 0.1189  | (3886, 55.1) | ✓ ✓ |
+| 100  | 0.1236  | (3886, 57.1) | ✗ W2 |
+
+**Acceptable dt range: [150, 450].**  dt=300 is the optimal point;
+dt=450 is 33% fewer steps with similar quality (v_ll=0.1141 vs
+0.1137).  dt < 150 misses W2 acceptance threshold (temporal
+aliasing).
+
+This gives users some flexibility in dt selection while staying
+within the documented dual-target acceptance.
+
+**Iter-1024 deliverables.**
+
+1. `scripts/diag_iter1024_dt_sweep.py` — dt sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
 ### Iter-1023 — W2 multi-day stability profile (iter-1021 calibration)
 
 **Iter-1023 — W2 day-by-day with iter-1021 calibration:**
