@@ -390,6 +390,72 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-984 — Term-by-term decomposition: vortex flux DOMINATES cube-vertex imbalance
+
+**Trigger.**  Iter-983 found ~1.3 m/s |duc| imbalance at cube
+vertices.  Iter-984 decomposes the c_sw uc update into its three
+terms.
+
+**c_sw uc update formula:**
+```
+uc_new = uc + fy1 * vort_x + dke_x       (vortex flux + KE grad)
+       + dp_x                             (p_grad_c)
+```
+
+For W2 solid-body steady, all three should sum to zero.
+
+**Iter-984 measurement on duogrid C36 W2 IC:**
+
+```
+                          |max|  | top cube vertex (face=0, i=0, j=35):
+  vort_contrib_uc:        1.3174 |     -1.317  ← DOMINANT
+  dke_x (KE grad):         0.3718 |     -0.027  ← small
+  dp_x (p_grad_c):         0.4396 |     +0.202  ← partial cancel
+  ───────────────────────────────|──────────────
+  SUM (target ≈ 0):        1.1422 |     -1.142  ← imbalance!
+```
+
+**Critical finding.**  At cube vertex face=0 (i=0, j=35):
+
+- vort_contrib_uc = -1.317 m/s (vortex flux + Coriolis term)
+- dp_x = +0.202 m/s (pressure gradient)
+
+Geostrophic balance demands `fy1*vort_x = -dp_x`.  Expected
+fy1*vort_x = -0.202.  Actual: -1.317.  **OFF BY 6.5×.**
+
+**Diagnosis.**  At cube vertex, `fy1 = dt2 * (v_d - uc*cosa) /
+sina_u`.  The 1/sina_u factor amplifies near cube vertices where
+sin(angle between i and j basis) is reduced.
+
+But that doesn't explain the 6.5× excess — it should be a smaller
+factor.  Likely the issue is that vort_x (upwind-selected
+relative+absolute vorticity at corner) is wrong.  Specifically,
+`_corner_vorticity` uses a 4-circulation formula on
+`fx_circ = uc * dxc`, `fy_circ = vc * dyc`.  At cube vertices, the
+halo cells of fx/fy come from cell-centre roundtrip via
+`pad_halo_vector` (iter-836b/iter-837 path).  The
+ROUNDTRIP-INDUCED ERROR on the halo cells of fx, fy may give
+incorrect vort_x at cube vertices.
+
+**Backlog confirmed**: the halo'ing of `fx_circ`, `fy_circ` in
+`_corner_vorticity` for the duogrid path is the prime suspect.
+
+**Iter-984 deliverables.**
+
+1. `scripts/diag_iter984_csw_term_decomposition.py` — runnable
+   term decomposition.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.
+
+**Backlog for iter-985+.**
+
+1. Audit `_corner_vorticity` halo path (iter-836b/iter-837 cell-
+   centre roundtrip) at cube vertices.  Compare against Fortran's
+   c_sw vorticity computation at sw_core.F90:374-408.
+2. Test alternative halo strategies for fx_circ, fy_circ (e.g.,
+   direct cube_rmp on the face-local circulation).
+
 ### Iter-983 — c_sw + p_grad_c imperfect geostrophic balance at cube vertices
 
 **Trigger.**  Iter-982 narrowed the cube-vertex bug to upstream of
