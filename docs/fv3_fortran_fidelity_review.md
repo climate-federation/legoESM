@@ -8,6 +8,36 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
+## Working Notes (iter-961 status snapshot)
+
+Ralph-loop session iter-945..960 progressed from v_ll_Linf=85 to
+55.6 m/s (35% reduction).  Acceptance is 0.119 m/s — 467× more
+reduction needed.
+
+**Per-iter improvement is asymptotically near zero without GFDL
+Fortran source access**.  Iter-958 found that the existing
+apply_legacy_d_sw5_corner_corrections gate could be removed but is
+bit-identical for W2 (corrections applied to zeroed boundaries).
+Iter-959 found a 4% calibration tweak (Smagorinsky d2_bg=0.01,
+dddmp=0.05) but this is parameter tuning, not Fortran-fidelity.
+
+**Strategic bottleneck**.  The remaining v_ll_Linf=55.6 m/s
+concentrates at cube-face I-boundaries (per iter-952's diagnostic).
+Closing this requires:
+
+1. PPM hord=9 cube-edge boundary overrides for ytp_v / xtp_u
+   (analog of iter-888's `apply_fortran_xppm_boundary` on tp_core
+   but for the d_sw3 wind transport).  Without sw_core.F90 source
+   the exact override formula is unclear.
+2. Exact c_sw + p_grad_c increment computation at halo positions
+   (extend metric tensors and pad_halo to halo I-faces / J-faces).
+   Requires extending the cdgrid metric infrastructure.
+3. Audit operator-split sweep order in `_bgrid_ke_transport`
+   against Fortran's Lin-Rood 2-sweep KE form.
+
+The Ralph loop will keep iterating against these but the prior is
+that each iter yields ≤5% improvement until a structural shift.
+
 ## Working Notes (iter-960 session summary)
 
 This Ralph-loop session (iter-945 through iter-960) made these
