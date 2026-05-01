@@ -239,6 +239,73 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-952 — Diagnostic: v_north max localized at cube-face I-boundaries (i=0, i=n-1)
+
+**Trigger.**  iter-951 added direct v_ll_Linf tracking for the FB
+chain.  Iter-952 investigates WHERE the v_north error is largest
+to narrow down the remaining fidelity gaps.
+
+**Diagnostic.**  At duogrid C36 W2 1-day, the top-10 |v_north|
+locations are concentrated at the cube-face I-boundary columns:
+
+```
+face=1 i= 0 j=21 |v|=56.50   ← i=0 west cube-face boundary
+face=3 i= 0 j=21 |v|=56.50   ← i=0
+face=0 i= 0 j=21 |v|=56.44
+face=2 i= 0 j=21 |v|=56.44
+face=2 i=34 j=30 |v|=56.11   ← i=n-2 (interior, but adjacent to east boundary)
+face=0 i=34 j=30 |v|=56.10
+face=1 i=35 j= 4 |v|=56.02   ← i=n-1 east cube-face boundary
+face=3 i=35 j= 4 |v|=55.98
+face=3 i=34 j=30 |v|=55.92
+face=1 i=34 j=30 |v|=55.90
+```
+
+The error is concentrated on the equatorial belt (faces 0, 1, 2, 3
+— the "ring" around the equator) at the i-boundary cells (west /
+east cube-face seams).  The poles (faces 4, 5) and j-boundaries are
+NOT in the top-10.
+
+**Implication.**  The remaining fidelity gap is dominated by the
+**i-direction cube-face boundary handling**, not j-direction or cube
+vertices.  Specifically:
+
+1. The PPM mass transport at I=0 / I=n boundaries (FB chain step 2).
+2. The d_sw3 B-grid Courant numbers at corner i=0, n (FB chain
+   step 3, where iter-947 already provides cross-face halo).
+3. The d_sw1 ut recomputation at I=0, n (FB chain step 1).
+4. The d_sw6 KE-gradient at I=0, n (this reads ke_corner at
+   interior j-stagger but the i-direction is sensitive to ke_corner
+   at the boundary I-faces).
+
+iter-952 records this diagnostic but does not implement a fix —
+the next iter-953+ should target one of these four locations
+specifically.
+
+**Iter-952 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this entry recording the
+   v_north location concentration finding.
+
+No new sentinel — the iter-951 v_ll_Linf gate is sufficient.
+
+**Backlog for iter-953+.**
+
+The i-direction cube-face boundary is the localized problem area.
+Candidate fixes:
+
+1. Fortran-faithful ytp_v / xtp_u boundary overrides at the cube-
+   edge I-faces (analogous to `apply_fortran_xppm_boundary` for
+   tp_core's xppm/yppm — requires sw_core.F90 reference).
+2. Re-examine the d_sw1 boundary handling Parts 2/3/4 (currently
+   skipped for duogrid because the iter-947 halo "fixes" the
+   4-cell average — but maybe Parts 2/3/4 should still run for
+   the sin_sg-upwind override formula even on duogrid).
+3. Audit the iter-945 `_pad_halo_dgrid_for_ppm` index map for
+   off-by-one at the I-boundary (the d_sw3 PPM x-sweep reads
+   u_d_ihalo at index 0 = i-cell -h and at index n+2h-1 = i-cell
+   n+h-1; verify these map correctly to the cube-face neighbour).
+
 ### Iter-951 — Add v_ll_Linf sentinel for FB chain (the actual W2 acceptance metric)
 
 **Trigger.**  Iter-944b through iter-950 tracked |u_max| / |v_max|
