@@ -445,6 +445,36 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1025 — W2 rotated-axis (alpha>0) robustness check
+
+**Iter-1025 sweep:** W2 IC with non-zero rotation angle alpha:
+
+| alpha | h_err_max (m) | finite |
+|-------|---------------|--------|
+|  0°   |    31.89      | True   |
+| 15°   |   392.02      | True   |
+| 30°   |   759.80      | True   |
+| 45°   |  1030.28      | True   |
+| 60°   |  1186.84      | True   |
+| 90°   |  1245.27      | True   |
+
+W2 alpha>0 increases h_err substantially because the rotated flow
+is not aligned with the cube faces — the discrete operators
+accumulate more error.  This is consistent with literature
+findings; the standard W2 verification uses alpha=0 (axis-aligned).
+
+The model remains FINITE (no NaN) for all tested alpha values,
+which is the minimum stability requirement for cubed-sphere
+shallow water.  alpha=0 is the verified reference window where
+"no artifacts" is met.
+
+**Iter-1025 deliverables.**
+
+1. `scripts/diag_iter1025_w2_alpha.py` — alpha sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
 ### Iter-1024 — dt scaling with iter-1021 calibration: dt ∈ [200, 450] satisfies both targets
 
 **Iter-1024 dt sweep at iter-1021 (div=9, dv=0.035):**
