@@ -405,6 +405,49 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1005 — W5 nord_v sweep: nord_v=2 best, no calibration unlocks long-term stability
+
+**Trigger.**  Iter-1004 found hyperdiff no-op.  Iter-1005 sweeps
+nord_v (vorticity damping order) for W5.
+
+**Iter-1005 sweep at C36 W5:**
+
+| nord_v | damp_v | days | h_min | h_max | speed | OK? |
+|--------|--------|------|-------|-------|-------|-----|
+|   0    | 0.06   |  7   | -684  | 12850 | 2170  | ✗   |  (del-2)
+|   1    | 0.06   |  7   | -238  |  9963 |  604  | ✗   |  (del-4)
+| **2**  | **0.06**| **7** | **1563** | **7392** | **275** | ✗   |  (del-6, default)
+|   0    | 0.10   |  7   |  NaN  |   -   |   -   |     |
+|   1    | 0.10   |  7   | -2620 | 10047 |  939  | ✗   |
+|   1    | 0.15   |  7   | -781  | 10681 | 1198  | ✗   |
+
+nord_v=2 (del-6, default) gives best W5 long-term stability among
+tested configs — but no config achieves speed_max < 80 m/s at day 7.
+
+The W5 long-term instability is robust across all available
+calibration knobs.
+
+**Combined sentinel verification (iter-1005).**
+
+| sentinel                                          | status |
+|---------------------------------------------------|--------|
+| `test_iter921_v_ll_linf_matches_iter893`          | PASS   |
+| `test_iter921_h_err_max_locked_at_iter893`        | PASS   |
+| `test_iter921_h_err_l2_essentially_unchanged`     | PASS   |
+| `test_iter924_cb_production_metric_pinned` (5)    | PASS   |
+| `test_iter924_cb_mass_conservation_within_band`   | PASS   |
+| **`test_iter1002_w2_v_ll_linf_meets_target`**     | **PASS** |
+
+**9/9 production sentinels pass.**  W2, cosine bell, and W5 short-
+term (≤4 days) are all artifact-free.
+
+**Iter-1005 deliverables.**
+
+1. `scripts/diag_iter1005_w5_nord_sweep.py` — nord_v sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
 ### Iter-1003/1004 — W5 long-term stability: cube-edge polar instability at day 5+
 
 **Trigger.**  Iter-1002 W2 target met (0.1154 m/s).  W5 stable through
