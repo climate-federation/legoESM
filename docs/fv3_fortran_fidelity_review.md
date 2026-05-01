@@ -405,6 +405,81 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-991/992 — External del-2 wind smoothing: cosmetic v_ll fix, corrupts h field (NEGATIVE)
+
+**Trigger.**  Iter-990 found Smagorinsky Pareto floor at v_ll_Linf=
+43.77 m/s.  Iter-991/992 explore whether an EXTERNAL del-2 / del-4
+wind smoother applied post-FB-step can break that floor.
+
+**Iter-991 — External del-2 wind smoothing post FB step.**
+
+Add a 1-2-1 i+j Laplacian smoothing on `u_d, v_d` after every FB
+chain step (with d2_bg=0.09, dddmp=0.45 inside the FB):
+
+| damp_post | v_ll_Linf |
+|-----------|-----------|
+| 0.000     | 43.77     |
+| 0.005     | 42.96     |
+| 0.020     | 40.52     |
+| 0.050     | 35.86     |
+| 0.10      | 21.17     |
+| 0.20      | 13.78     |
+| 0.25      | 11.36     |
+| 0.265     | **10.72** |
+| 0.27      | NaN       |
+
+**Iter-992 — Del-4 instead of del-2.**
+
+Del-4 less effective: best at damp4=0.005 with v_ll=42.4 m/s (vs
+del-2's 10.7 m/s).  Del-4 selectively damps grid-scale; the seam
+mode has broader spectral content that del-2 catches.
+
+**Iter-992c — Verify state quality at damp_post=0.265.**
+
+```
+v_ll_Linf:    10.72 m/s   ← good (4× better than iter-990 floor)
+h range:      [698, 6836] (IC range [1094, 2997])
+h_err max:    3839 m      ← BAD (mass field heavily distorted)
+h_err RMS:    914 m
+|u_d|_max:    51.5 m/s    (analytical 38.6 m/s)
+|v_d|_max:    33.9 m/s    (analytical ≈0)
+```
+
+**Critical finding.**  External del-2 wind smoothing ROBS the model
+of geostrophic balance.  v_ll_Linf metric improves cosmetically,
+but the h field evolves without balanced winds, leading to massive
+drift (3839 m max error).  This is NOT a real fix — it corrupts
+the W2 solution.
+
+**Conclusion.**  Iter-991/992 are NEGATIVE.  External smoothing is
+not Fortran-faithful and destroys solution structure.  The iter-
+990 v_ll_Linf=43.77 m/s floor stands as the best calibration
+result that preserves W2 solution structure.
+
+**Iter-992 deliverables.**
+
+1. `scripts/diag_iter991_external_wind_smoothing.py` — sweep
+   showing apparent v_ll improvement.
+2. `scripts/diag_iter992_state_quality.py` — h-field corruption
+   check.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.  Documented negative result.
+
+**Backlog for iter-993+.**
+
+The remaining structural intervention candidates:
+
+1. Implement true c_sw + p_grad_c at halo-extended grid points
+   (multi-week structural project).
+2. Migrate FB chain transport to use production halo plumbing
+   (cgrid_mass_flux_divergence) — cost: breaks Fortran structural
+   fidelity but converges.
+3. Apply del-n smoother that PRESERVES geostrophic balance — e.g.,
+   smooth ZONAL velocity component in lat-lon basis only, leaving
+   the meridional component (which is the noise) unsmoothed.
+   Requires lat-lon ↔ cube transformation per step (expensive).
+
 ### Iter-990 — Smagorinsky Pareto sweep: best stable v_ll=43.77 m/s, beyond which is NaN
 
 **Trigger.**  Iter-989 confirmed unresolved grid-scale instability;
