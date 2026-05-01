@@ -108,6 +108,19 @@ def test_iter1039_hydrostatic_no_edge_artifacts(hyd_model_state):
             f"likely edge artifact developing.")
 
 
+def test_iter1041_hydrostatic_long_integration_finite(hyd_model_state):
+    """3D hydrostatic 100-step integration: no NaN with zonal IC."""
+    model, state, dt = hyd_model_state
+    s = state
+    for _ in range(100):
+        s = model.step(s, dt)
+    # Just verify finite — 100 steps × 300s = ~8 hr simulation
+    assert jnp.all(jnp.isfinite(s.T.data)), "T NaN at 100 steps"
+    assert jnp.all(jnp.isfinite(s.u.data)), "u NaN at 100 steps"
+    assert jnp.all(jnp.isfinite(s.v.data)), "v NaN at 100 steps"
+    assert jnp.all(jnp.isfinite(s.p_s.data)), "p_s NaN at 100 steps"
+
+
 def test_iter1040_nonhydrostatic_no_edge_artifacts():
     """3D non-hydrostatic on uniform u=5 m/s zonal wind: no edge artifacts."""
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
