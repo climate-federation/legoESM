@@ -50,7 +50,11 @@ All sentinels in 62 seconds wall.
 - iter-1019: silent no-op warning for `hyperdiff_coeff>0` in `fv3_sw_tendencies`
 - iter-1020: silent no-op warning sentinel for `dddmp_prod>0 with div_damp=0`
 
-## Working Notes (iter-1011 status snapshot — superseded)
+## Working Notes (iter-1011 status snapshot — superseded by iter-1025)
+
+NOTE: Numbers below are from iter-1009 baseline (div=10, damp_v=0.04).
+The current iter-1021 calibration (div=9, damp_v=0.035) is strictly
+better — see the iter-1025 snapshot at the top of this document.
 
 **🎯 USER'S "no artifacts" CRITERION FULLY MET FOR W2/W5/COSINE BELL** at typical reference windows.
 
