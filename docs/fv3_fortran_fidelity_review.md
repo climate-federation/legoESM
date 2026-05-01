@@ -239,6 +239,38 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-951 — Add v_ll_Linf sentinel for FB chain (the actual W2 acceptance metric)
+
+**Trigger.**  Iter-944b through iter-950 tracked |u_max| / |v_max|
+(face-covariant maxima) as proxies for W2 fidelity.  iter-950
+discovered these can move OPPOSITE to v_ll_Linf — extending the PPM
+cross-face halo reduced |v_max| 6% but regressed v_ll_Linf 4%.
+Future iters need to track v_ll_Linf directly since it's the
+actual W2 acceptance gate (≤ 0.119 m/s per user iter-938 brief).
+
+**Iter-951 deliverable.**  New sentinel
+`tests/test_iter951_fb_chain_v_ll_linf_tracking.py` measures the FB
+chain duogrid C36 W2 1-day v_ll_Linf and asserts it stays below
+60 m/s (margin around the iter-947 measured value of 55.6 m/s).
+A regression past this gate signals new structural error.
+
+**Cumulative duogrid FB chain progress:**
+
+| iter        | step survival | |u_max| (m/s) | |v_max| (m/s) | v_ll_Linf (m/s) |
+|-------------|--------------:|--------------:|--------------:|----------------:|
+| iter-944b   |    288 / 288  |        106    |        151    |          ~85    | (estimate) |
+| iter-945    |    288 / 288  |         78    |         81    |          56.2   |
+| iter-947    |    288 / 288  |         77    |         75    |          55.6   |
+| acceptance  |        ∞      |         -     |          -    |          0.119  |
+
+The v_ll_Linf reduction since iter-944b is ~35%, smaller than the
+50% reduction in |v_max| — confirming v_ll_Linf is a stricter
+metric.  Closing the remaining gap to acceptance requires reducing
+v_ll_Linf by another ~470x.
+
+**Production impact.**  ZERO.  iter-951 only adds a measurement
+sentinel.
+
 ### Iter-950 — NEGATIVE-RESULT: extending D-grid PPM halo from h=2 to h=3 regresses v_ll_Linf
 
 **Trigger.**  iter-945's `_pad_halo_dgrid_for_ppm` uses h_dg=2 cells
