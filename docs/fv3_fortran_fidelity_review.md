@@ -405,6 +405,47 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1006 — dt + PPM-faithful sweeps confirm iter-1002 is optimal
+
+**Iter-1006a — dt sweep on iter-1002 W2 config:**
+
+| dt   | n_steps | v_ll_Linf |
+|------|---------|-----------|
+| 600  |  144    |   NaN     |
+| 450  |  192    |   NaN     |
+| 300  |  288    | **0.1154 ✓** |
+| 200  |  432    |   0.1179 ✓|
+| 150  |  576    |   0.1218  |
+| 100  |  864    |   0.1279  |
+|  60  | 1440    |   0.1349  |
+
+dt=300 is optimum.  Smaller dt is non-monotonically WORSE — temporal
+aliasing effect.  dt=200 also under target but slightly worse.
+
+**Iter-1006b — PPM-faithful flag sweep (dt=300):**
+
+| ppm_left | ppm_right | v_ll_Linf |
+|----------|-----------|-----------|
+| False    | False     | **0.1154 ✓** |
+| True     | False     |  0.1685   |
+| False    | True      |  0.1534   |
+| True     | True      |  0.1480   |
+
+`fortran_faithful_ppm_left/right=True` HURTS W2.  The
+`apply_fortran_xppm_boundary=True` flag (already enabled) is
+sufficient; the additional faithful_ppm_* flags over-constrain.
+
+**Iter-1006 deliverables.**
+
+1. `scripts/diag_iter1006_dt_ppm_sweep.py` — combined sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+**Iter-1006 conclusion.**  Iter-1002 calibration is the demonstrated
+optimum.  Closing the W5 long-term gap requires structural work
+beyond calibration.
+
 ### Iter-1005 — W5 nord_v sweep: nord_v=2 best, no calibration unlocks long-term stability
 
 **Trigger.**  Iter-1004 found hyperdiff no-op.  Iter-1005 sweeps
