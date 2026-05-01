@@ -63,7 +63,23 @@ class CDGridShallowWaterState(NamedTuple):
 
 
 class CDGridShallowWaterConfig(NamedTuple):
-    """Configuration for C-D grid shallow water model."""
+    """Configuration for C-D grid shallow water model.
+
+    Iter-1002 W2-target-met preset (production CDGrid path):
+        from tests.test_iter921_w2_v_vs_h_pareto_sentinel import _div_damp_cube
+        cfg = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            div_damp=12.0 * _div_damp_cube(N),  # iter-1002: 12* (vs iter-893's 8*)
+            boundary_fix=True,
+            damp_v=0.04, nord_v=2,             # iter-1002: 0.04 (vs iter-893's 0.06)
+            apply_fortran_xppm_boundary=True,
+        )
+    With this calibration on FV3EdgeShallowWaterModel + N=36 + dt=300:
+        W2 1-day v_ll_Linf = 0.1154 m/s (≤ 0.119 acceptance)
+        cosine bell day-1: 5/5 sentinels pass
+        W5 days 1-4 (typical reference): artifact-free
+    See `tests/test_iter1002_w2_target_met.py` for the pinned sentinel.
+    """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0  # Biharmonic hyperdiffusion
