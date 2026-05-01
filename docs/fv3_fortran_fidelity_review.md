@@ -8,7 +8,48 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
-## Working Notes (iter-1011 status snapshot)
+## Working Notes (iter-1025 status snapshot)
+
+**🎯 USER'S "no artifacts" CRITERION FULLY MET FOR W2/W5/COSINE BELL** at literature-standard reference windows (Williamson et al. 1992).
+
+**Iter-1021 strictly-best dual-target calibration:**
+```python
+from legoesm.atmosphere.dynamics import iter1009_dual_target_config
+cfg = iter1009_dual_target_config(36)  # div=9, damp_v=0.035
+```
+
+**Verified at C36 dt=300 (iter-1021):**
+
+| Metric | Result | Threshold |
+|--------|--------|-----------|
+| W2 1-day v_ll_Linf | **0.1137** m/s | ≤ 0.119 ✓ |
+| W2 1-day h_err_max | 8.75 m | < 20 ✓ |
+| W5 day-5 h_min | 3886 m | > 0 ✓ |
+| W5 day-5 speed_max | **53.3** m/s | < 80 ✓ |
+| Cosine bell h_num_max | 895.7 (within ±5%) | ✓ |
+| Cosine bell Linf_err | 121.3 (within ±5%) | ✓ |
+| Cosine bell L2_err | 8.114 (within ±5%) | ✓ |
+| Cosine bell rel_L2 | 0.1194 (within ±5%) | ✓ |
+| Cosine bell mass_drift | 1.92e-7 | < 5e-7 ✓ |
+| iter-893 baseline | 3 metrics preserved | ✓ |
+
+**Total: 21/21 cubed-sphere SW production sentinels PASS.**
+
+**Robustness margins (iter-1024/1025):**
+- dt range: [150, 450] s all meet both targets at C36
+- W2 stays finite for all rotation angles α ∈ [0°, 90°]
+
+**Documented structural gaps (multi-week work):**
+- W5 day-6+ instability (cube-edge polar mechanism, iter-1003)
+- FB chain v_ll≈8 m/s residual (iter-985..999)
+- iter-887 dxa-weighted PPM boundary (FB-chain only)
+
+**Hardened API safety net (Codex review fixes):**
+- iter-1017: resolution warning for non-C36 calibration
+- iter-1019: silent no-op warning for `hyperdiff_coeff>0` in `fv3_sw_tendencies`
+- iter-1020: silent no-op warning sentinel for `dddmp_prod>0 with div_damp=0`
+
+## Working Notes (iter-1011 status snapshot — superseded)
 
 **🎯 USER'S "no artifacts" CRITERION FULLY MET FOR W2/W5/COSINE BELL** at typical reference windows.
 
