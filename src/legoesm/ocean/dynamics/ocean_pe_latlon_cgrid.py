@@ -44,6 +44,7 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
+    OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
 )
@@ -67,6 +68,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
+    min_cell_to_uface,
+    min_cell_to_vface,
     curl_vertex_cgrid,
     smagorinsky_biharmonic_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
@@ -762,8 +765,20 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     u_mask = state.u_mask.data
     v_mask = state.v_mask.data
     mask_3d = mask[..., jnp.newaxis]
-    u_mask_3d = u_mask[..., jnp.newaxis]
-    v_mask_3d = v_mask[..., jnp.newaxis]
+    # 3D face masks: when partial coord is active, faces are wet only
+    # where BOTH adjacent cells are wet AT THAT LEVEL — handles columns
+    # with different ``bottom_level`` correctly (the active-vs-inactive
+    # face case from Phase 3b).  For pure z\\* coord (legacy) and for
+    # partial cells with all columns having the same bottom_level,
+    # this produces identical results to broadcasting the 2D mask.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            compute_face_masks_3d,
+        )
+        u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active)
+    else:
+        u_mask_3d = u_mask[..., jnp.newaxis]
+        v_mask_3d = v_mask[..., jnp.newaxis]
 
     g_val = config.g
     rho_0 = config.rho_0
@@ -790,12 +805,25 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # the free-surface gradient g*grad(eta) and using actual J here
     # would double-count it (would also create a spatially-varying
     # pressure even for uniform T/S).
+    #
+    # Partial-cell extension: when z_coord is an
+    # OceanPartialCellCoordinate, pass z_coord.h_partial as h_actual so
+    # the cumsum integrates to each cell's actual centroid depth,
+    # accounting for the partial bottom cell.  Cells below the
+    # seafloor have h_partial=0 and contribute zero pressure increment.
+    # For pure z* coord (legacy), h_actual=None falls back to dz_ref.
+    _h_actual_pprime = (
+        z_coord.h_partial
+        if isinstance(z_coord, OceanPartialCellCoordinate)
+        else None
+    )
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
         lambda field: _neumann_fill_cgrid(field, mask),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
         n_iter=2,
+        h_actual=_h_actual_pprime,
     )
 
     p_prime_filled = _neumann_fill_cgrid(p_prime, mask)
@@ -803,8 +831,16 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- 4. Vertical velocity from FV flux divergence ---
     # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
     # Uses FULL velocity (barotropic + baroclinic) for mass transport.
-    h_u = interp_cell_to_uface(h_k)
-    h_v = _interp_to_v_points(h_k)
+    # Min-rule (MOM6/MITgcm hFacW = min(hFacC_L, hFacC_R) convention,
+    # Adcroft-Hill-Marshall 1997 eq. 11-13): the face's effective wet
+    # thickness equals the shallower side's thickness.  For full cells
+    # with same h, this reduces to the cell value (bit-exact unchanged
+    # backwards-compat).  Consistency: same convention is used in the
+    # barotropic Helmholtz solver, the slow-forcing depth-average, and
+    # the tracer mass flux — required for the H&A 2009 column-sum
+    # invariant to hold.
+    h_u = min_cell_to_uface(h_k)
+    h_v = min_cell_to_vface(h_k)
     flux_div_k = divergence_cgrid(
         h_u * u * u_mask_3d, h_v * v * v_mask_3d, grid,
     )
@@ -936,6 +972,64 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dp_dx = _dKp_dx[..., 1]
         dKE_dy = _dKp_dy[..., 0]
         dp_dy = _dKp_dy[..., 1]
+
+    # --- 6b. Adcroft-Campin partial-cell PGF face correction ---
+    # When using OceanPartialCellCoordinate, the partial bottom cells
+    # at one column are at a shallower geometric depth than the same
+    # level k at a deeper-bathymetry neighbour.  The standard
+    # gradient_*_cgrid compares pressures at different depths,
+    # producing a residual PGF error that drives spurious flow.
+    #
+    # Adcroft & Campin (2004) shift each cell's pressure to a common
+    # face-reference depth (the shallower of the two centroids) before
+    # differencing.  Implemented here as an additive correction to
+    # dp_dx, dp_dy.  For pure z\\* coord (legacy), all centroids align
+    # within a column so the correction is identically zero — bit-exact
+    # backwards-compat preserved.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
+        if pgf_scheme == "smc03":
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                density_jacobian_pgf_smc03_x,
+                density_jacobian_pgf_smc03_y,
+            )
+            # Replace (centered-diff p_prime gradient) + (Adcroft face
+            # correction) with the density-Jacobian PGF evaluated at a
+            # smooth-in-k face-reference depth.  Same ``rho_prime`` and
+            # eta=0 reference as the Adcroft path, so AD pytree shape
+            # is unchanged.
+            dp_dx_smc = density_jacobian_pgf_smc03_x(
+                rho_prime, z_coord.h_partial, z_coord.is_active,
+                grid, g_val,
+            )
+            dp_dy_smc = density_jacobian_pgf_smc03_y(
+                rho_prime, z_coord.h_partial, z_coord.is_active,
+                grid, g_val,
+            )
+            # Match dtype to the existing dp_dx/dp_dy (which inherit
+            # from p_prime — float32 in the standard config).
+            dp_dx = dp_dx_smc.astype(dp_dx.dtype)
+            dp_dy = dp_dy_smc.astype(dp_dy.dtype)
+        else:
+            from legoesm.ocean.vertical import compute_centroid_depth
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                partial_cell_pgf_correction_x,
+                partial_cell_pgf_correction_y,
+            )
+            # Use eta=0 reference for centroid: rho_prime / p_prime above
+            # are computed at the J=1, eta=0 reference (line 802 comment).
+            # Using live eta here would make the Adcroft correction time-
+            # dependent through eta — small effect at rest (eta=0) but
+            # breaks the "rest-state machine-zero" claim once eta evolves.
+            centroid_depth = compute_centroid_depth(
+                jnp.zeros_like(eta_safe), H_bathy, z_coord,
+            )
+            dp_dx = dp_dx + partial_cell_pgf_correction_x(
+                centroid_depth, rho_prime, grid, g_val,
+            )
+            dp_dy = dp_dy + partial_cell_pgf_correction_y(
+                centroid_depth, rho_prime, grid, g_val,
+            )
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     # Capture each term as a named local so the same expression feeds
@@ -1107,10 +1201,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # k=0 / k=nlev-1 and matching the tracer-path interface upwind.
     # Full flux-form momentum update (Level 2) still requires step-
     # function restructuring; tracked on #171.
-    J_u = interp_cell_to_uface(J)
-    J_v = _interp_to_v_points(J)
-    h_u_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_u[..., jnp.newaxis]
-    h_v_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_v[..., jnp.newaxis]
+    # Use the partial-cell-aware face thicknesses already computed for
+    # the mass-flux divergence (lines 832-833).  For pure z* these
+    # equal dz_ref * J_u / J_v; for partial cells, h_k is zero below
+    # the seafloor so divisions inside the flux-form vertical advection
+    # do not pull thickness from inactive levels.
+    h_u_old = h_u
+    h_v_old = h_v
     w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
     if _mom_adv in ("weno5", "weno7"):
@@ -1124,10 +1221,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         # Default: 1st-order upwind.  The implicit viscosity (~|w|*dz/2)
         # damps baroclinic shear that explicit A_v=1e-5 cannot.
+        # Pass u/v face-activity masks so vertical momentum flux is
+        # exactly zero at faces below the seafloor — otherwise float-
+        # precision noise in w_u/w_v drives spurious tendencies inside
+        # the rock (and poorly-conditions adjoints).  ``u_mask_3d`` may
+        # be shape ``(..., 1)`` for pure z* (2D-broadcast) or
+        # ``(..., nlev)`` for partial; broadcast to the velocity shape
+        # so the helper's per-level slicing along the last axis works.
+        u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
+        v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
         diag_vertadv_u = _flux_form_vertical_momentum_advection(
-            u_prime, w_u, h_u_old)
+            u_prime, w_u, h_u_old, face_active=u_face_active)
         diag_vertadv_v = _flux_form_vertical_momentum_advection(
-            v_prime, w_v, h_v_old)
+            v_prime, w_v, h_v_old, face_active=v_face_active)
     du_dt = du_dt + diag_vertadv_u
     dv_dt = dv_dt + diag_vertadv_v
 
@@ -1266,13 +1372,100 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
-        dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
-        dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
-        # Capture only at the bottom level; zeros elsewhere.
-        diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
-            -config.bottom_drag_r * u[..., -1] / dz_bot_u)
-        diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
-            -config.bottom_drag_r * v[..., -1] / dz_bot_v)
+        H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        if H_BBL > 0:
+            # Distributed BBL drag (Killworth & Edwards 1999, MOM6 BBL_thick_min):
+            # spread drag over a fixed Ekman thickness ``H_BBL`` near the
+            # seafloor instead of applying ``r*u/h_partial_bot`` to a single
+            # (possibly very thin) partial cell.  Drag tendency at level k:
+            #   ∂u/∂t |_drag = -r * u(k) * (overlap_k / h_u_k) / H_BBL
+            # where overlap_k is the cell's geometric overlap with the
+            # band [z_seafloor, z_seafloor + H_BBL].
+            #
+            # Limits:
+            #   - If h_u_bot >= H_BBL: BBL fits in the bottom cell.
+            #     Bottom-cell overlap = H_BBL → drag = -r*u/h_u_bot
+            #     (recovers legacy single-cell drag).  No effect on cells
+            #     above (overlap = 0).
+            #   - If h_u_bot < H_BBL: BBL spans multiple cells.  Bottom
+            #     cell drag = -r*u/H_BBL (much weaker than legacy
+            #     -r*u/h_u_bot, fixing the audit-flagged "drag in 5m
+            #     partial cell is 100x stronger than deep ocean" issue).
+            #     Cells above bottom_level get partial-overlap drag.
+            #
+            # Build z interfaces at u/v faces from the cumulative thickness
+            # along the level axis.  For the seafloor, ``z_seafloor =
+            # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
+            # face thickness, partial-aware via min h).
+            def _bbl_drag_for_face(u_field, h_face):
+                pad_axes = ((0, 0),) * (h_face.ndim - 1)
+                z_half = jnp.concatenate([
+                    jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
+                    -jnp.cumsum(h_face, axis=-1),
+                ], axis=-1)
+                z_top = z_half[..., :-1]
+                z_bot = z_half[..., 1:]
+                z_seafloor = z_half[..., -1:]
+                bbl_top = z_seafloor + H_BBL
+                overlap = jnp.maximum(
+                    0.0,
+                    jnp.minimum(z_top, bbl_top)
+                    - jnp.maximum(z_bot, z_seafloor),
+                )
+                h_safe = jnp.maximum(h_face, 1e-10)
+                return -config.bottom_drag_r * u_field * overlap / (
+                    h_safe * H_BBL
+                )
+            diag_botdrag_u = _bbl_drag_for_face(u, h_u)
+            diag_botdrag_v = _bbl_drag_for_face(v, h_v)
+        elif isinstance(z_coord, OceanPartialCellCoordinate):
+            # Partial cells: apply drag at each column's actual seafloor
+            # (the lowest active level, ``bottom_level[i,j]``), using the
+            # partial-cell thickness h_partial there.  Without this, drag
+            # would only act at the deepest reference level (``nlev-1``)
+            # in deep columns and not damp the bottom-trapped spurious
+            # flow on shallower seamount slopes.
+            n_lev = u.shape[-1]
+            level_idx = jnp.arange(n_lev)
+            # is_bottom_3d at u-faces / v-faces: 1.0 at the partial
+            # bottom for that face's COLUMN.  We use the cell-center
+            # bottom_level interpolated to faces (face's bottom level
+            # is the SHALLOWER of the two adjacent columns — already
+            # the only active level there since the deeper column's
+            # cell at that level may be active too).
+            bot_lev_cell = z_coord.bottom_level
+            # u-face bottom_level: min of west/east cell (shallower wins).
+            bot_lev_u_inner = jnp.minimum(
+                jnp.roll(bot_lev_cell, 1, axis=1), bot_lev_cell,
+            )
+            bot_lev_u = jnp.concatenate(
+                [bot_lev_u_inner, bot_lev_u_inner[:, 0:1]], axis=1,
+            )
+            # v-face bottom_level: min of south/north cell.
+            bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
+            bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)),
+                                 constant_values=0)
+            is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
+                            == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
+            is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
+                            == bot_lev_v[..., jnp.newaxis]).astype(v.dtype)
+            # Partial-cell h at faces (already partial-aware via h_k dispatch).
+            h_u_drag = jnp.maximum(h_u, 1e-10)
+            h_v_drag = jnp.maximum(h_v, 1e-10)
+            diag_botdrag_u = (
+                -config.bottom_drag_r * u / h_u_drag * is_bot_u_3d
+            )
+            diag_botdrag_v = (
+                -config.bottom_drag_r * v / h_v_drag * is_bot_v_3d
+            )
+        else:
+            dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
+            dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
+            # Capture only at the bottom level; zeros elsewhere.
+            diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
+                -config.bottom_drag_r * u[..., -1] / dz_bot_u)
+            diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
+                -config.bottom_drag_r * v[..., -1] / dz_bot_v)
         du_dt = du_dt + diag_botdrag_u
         dv_dt = dv_dt + diag_botdrag_v
 

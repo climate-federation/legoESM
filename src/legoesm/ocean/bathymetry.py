@@ -215,7 +215,20 @@ def _regrid_bathymetry(
     """
     from scipy.interpolate import RegularGridInterpolator
 
-    # Wrap longitude for periodic interpolation
+    # Drop a duplicated periodic endpoint if the source covers the full
+    # span twice (e.g. ETOPO with lon ∈ [−180, 180] — both endpoints
+    # represent the same physical line).  Without this the periodic
+    # padding below produces a back-to-back duplicate that scipy's
+    # RegularGridInterpolator rejects with "points must be strictly
+    # ascending or descending".
+    if (
+        lon_src.size >= 2
+        and np.isclose(lon_src[-1] - lon_src[0], 360.0, atol=1e-6)
+    ):
+        lon_src = lon_src[:-1]
+        depth_data = depth_data[:, :-1]
+
+    # Wrap longitude for periodic interpolation.
     lon_wrapped = np.concatenate([
         lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
     ])
