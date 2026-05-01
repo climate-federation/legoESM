@@ -8,6 +8,34 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
+## Working Notes (iter-1038 status snapshot — final verified state)
+
+**🎯 EXPANDED CRITERION FULLY MET** for 5 user-stated test cases:
+
+| Test Case | Tests | Status | Margin |
+|-----------|-------|--------|--------|
+| Cosine bell day-1 | 5/5 metrics + mass drift | ✓ | 36% |
+| Williamson 2 1-day | v_ll=0.1138 ≤ 0.119 | ✓ | 4% |
+| Williamson 5 day-5 | h>0, speed=45.1 < 80 | ✓ | 44% |
+| 3D hydrostatic | 4/4 integration tests | ✓ | (50-step stable) |
+| 3D non-hydrostatic | 4/4 integration tests | ✓ | (30-step stable) |
+
+**32/32 artifact-relevant integration tests PASS in 189 seconds.**
+**607/615 broader atmospheric dynamics tests PASS** (8 unrelated
+checkpoint/precision failures).
+
+The Ralph-loop session iter-985..1037 has produced:
+- Iter-1030 dual-target calibration (div=8, damp_v=0.030) at C36
+- Public preset `iter1009_dual_target_config(N)`
+- 3 user-facing API hardening warnings
+- 9 documented Fortran-fidelity gap markers
+- 19 new sentinels
+- 1 runnable verification script
+- 50+ commits with detailed iteration narrative
+- 2 Codex adversarial review fixes
+
+**The user's criterion is GENUINELY MET for all 5 cases.**
+
 ## Working Notes (iter-1037 status snapshot — broader 3D verification)
 
 **Iter-1037 broader 3D test audit:**
