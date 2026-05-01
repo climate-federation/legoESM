@@ -342,6 +342,52 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-963 — Push Smagorinsky to stability boundary: 21% v_ll_Linf reduction
+
+**Trigger.**  Iter-959 found that enabling Smagorinsky
+(`d2_bg=0.01, dddmp=0.05`) gives a 4% v_ll_Linf improvement on the
+FB chain duogrid C36 W2 1-day.  Iter-963 swept higher Smagorinsky
+values to find the stability boundary.
+
+**Sweep results on duogrid C36 W2 1-day:**
+
+| (d2_bg, dddmp)        | v_ll_Linf (m/s) | |v_max| | h_err_max |
+|-----------------------|----------------:|--------:|----------:|
+| (0.00, 0.00) default  |          55.61  |   75.4  |    18591  |
+| (0.01, 0.05) iter-959 |          53.17  |   60.5  |     —     |
+| (0.02, 0.10)          |          51.67  |    —    |     —     |
+| (0.03, 0.15)          |          50.28  |    —    |     —     |
+| (0.04, 0.20)          |          48.97  |    —    |     —     |
+| (0.05, 0.25)          |          47.80  |   59.2  |    14403  |
+| (0.06, 0.30)          |          46.73  |    —    |     —     |
+| (0.07, 0.35)          |          45.73  |    —    |     —     |
+| (0.08, 0.40)          |          44.76  |    —    |     —     |
+| **(0.09, 0.45)**      |       **43.77** |   55.3  |    12855  |
+| (0.10, 0.40)          | NaN at step 156 |    —    |     —     |
+
+The improvement is monotone in the Smagorinsky coefficient up to
+the stability boundary near (0.09, 0.45) → (0.10, 0.40).  Cumulative
+gain at the practical maximum:
+- v_ll_Linf: 55.61 → 43.77 (21% reduction)
+- |v_max|:    75.4 → 55.3 (27% reduction)
+- h_err_max: 18591 → 12855 (31% reduction)
+
+**Iter-963 deliverable.**  Sentinel
+`tests/test_iter962_smagorinsky_tweak.py::test_iter963_high_smagorinsky_drives_w2_to_44_m_s`
+pins v_ll_Linf ≤ 47 m/s when caller passes `d2_bg=0.09, dddmp=0.45`.
+
+The default `d2_bg=0, dddmp=0` is preserved.  Callers who want
+better W2 fidelity on the FB chain can opt into the higher
+Smagorinsky.  This is calibration tuning — Fortran's actual
+defaults are likely `dddmp ~ 0.05-0.2` per typical FV3 namelists,
+so `dddmp=0.45` may be above the Fortran-faithful range.
+
+**Backlog for iter-964+.**
+
+- Verify the stability boundary on other Williamson cases (W5, W6).
+- Determine the Fortran-faithful d2_bg/dddmp values from a GFDL
+  config file (e.g., `atmos_data/dyn_core_nml`).
+
 ### Iter-959 — Damping-coefficient sensitivity sweep (small Smagorinsky improvement available)
 
 **Trigger.**  Iters 945-958 explored Fortran-fidelity gaps in halo /

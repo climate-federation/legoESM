@@ -96,3 +96,23 @@ def test_iter962_smagorinsky_tuned_improves_w2_v_ll_linf():
         f"baseline is 53.17 m/s.  A value above 55.0 likely signals "
         f"a regression in the d_sw5 Smagorinsky branch."
     )
+
+
+def test_iter963_high_smagorinsky_drives_w2_to_44_m_s():
+    """Iter-963 finding: pushing Smagorinsky to (d2_bg=0.09, dddmp=0.45)
+    drives v_ll_Linf from 55.6 to ~43.8 m/s on FB chain duogrid C36
+    W2 1-day (21% reduction; |v_max| 75 → 55 m/s; h_err_max 18591
+    → 12855).  The d_sw5 Smagorinsky branch has substantial unused
+    headroom under the iter-934 default (0.0, 0.0).
+
+    This pins the higher Smagorinsky measurement so a future change
+    to the adaptive Smagorinsky branch that regresses this output
+    is caught.
+    """
+    v_high = _fb_chain_w2_1day(36, 300.0, d2_bg=0.09, dddmp=0.45)
+    # Iter-963 measured 43.77 m/s — pin <= 47 with margin.
+    assert v_high <= 47.0, (
+        f"High-Smagorinsky v_ll_Linf = {v_high:.4f} m/s; iter-963 "
+        f"baseline is 43.77 m/s.  A value above 47.0 likely signals "
+        f"a regression in the d_sw5 Smagorinsky branch."
+    )
