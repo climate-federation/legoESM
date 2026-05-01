@@ -72,6 +72,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # --- C-D grid cubed-sphere cores (FV3-style) ---
     "CDGridShallowWaterModel": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "CDGridShallowWaterModel"),
     "CDGridShallowWaterConfig": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "CDGridShallowWaterConfig"),
+    "iter1009_dual_target_config": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "iter1009_dual_target_config"),
     "CDGridShallowWaterState": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "CDGridShallowWaterState"),
     "cdgrid_shallow_water_tendencies": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "cdgrid_shallow_water_tendencies"),
     "CDGridPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_cdgrid", "CDGridPrimitiveEquationModel"),
