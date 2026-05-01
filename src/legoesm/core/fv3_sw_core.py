@@ -1308,10 +1308,10 @@ def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
     # j=0 and j=n cells (measured ~1e6 absolute diff on random input
     # at C36), but those cells' contribution to `divg_d` is ZEROED
     # by the face-boundary zeroing step below (`.at[:, 0, :].set(0)`
-    # etc.).  Measured `|divg_d_pad_halo - divg_d_edge|` at C36 is
-    # 0.0 bit-for-bit.  `mode='edge'` is retained because it is
-    # cheaper and equivalent for THIS helper; the apparent fidelity
-    # claim in iter-656 did not survive an A/B numerical test.
+    # etc.).  Iter-949 re-tested with `pad_halo_vector` instead of
+    # `mode='edge'` and confirmed bit-identical FB chain output on
+    # duogrid C36 W2 1-day (|u|=76.91, |v|=75.38 either way).
+    # mode='edge' retained as the cheaper equivalent.
     ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n)
     va_pad = jnp.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n, n+2)
 

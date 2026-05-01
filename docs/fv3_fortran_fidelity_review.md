@@ -239,6 +239,56 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-949 — NEGATIVE-RESULT: pad_halo_vector for ua, va in `_divergence_corner_duo` is bit-identical no-op
+
+**Trigger.**  iter-657 documented that `_divergence_corner_duo`'s
+`mode='edge'` padding of ua, va is a numerical no-op because the
+boundary divg_d cells are zeroed before they propagate.  Iter-949
+re-verified this claim with the iter-947 / iter-948 v_ll_Linf
+context (55.6 m/s on FB chain duogrid C36 1-day) by replacing
+`mode='edge'` with `pad_halo_vector` (cube_rmp + grid-angle
+rotation).
+
+**Negative result.**  FB chain duogrid C36 W2 1-day:
+``|u|=76.91, |v|=75.38`` either way — bit-identical.  iter-657's
+"no-op" finding is confirmed: the boundary zeroing + 0.25×
+attenuation at face-adjacent cells masks any halo difference for
+ua, va inside this helper.
+
+| iter           | step survival | |u_max| (m/s) | |v_max| (m/s) |
+|----------------|--------------:|--------------:|--------------:|
+| iter-947       |    288 / 288  |     76.91     |     75.38     |
+| iter-949       |    288 / 288  |     76.91     |     75.38     | (bit-identical) |
+
+Reverted; mode='edge' retained as the cheaper equivalent.
+
+**Iter-949 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_divergence_corner_duo` —
+   updated comment to record the iter-949 numerical confirmation.
+
+No new sentinel — the iter-947 sentinel pins the FB chain numbers
+and the comment now records the iter-949 verification.
+
+**Backlog for iter-950+.**
+
+The largest remaining gap to W2 v_ll_Linf acceptance (≤ 0.119 m/s)
+is structural: FB chain on duogrid C36 W2 1-day is at v_ll_Linf=
+55.6 m/s vs production A-L+RK3 path's 0.13 m/s — a ~420× gap
+across the entire FB chain.  Per-iter improvements at this scale
+(5-15% per iter) suggest 50+ more Fortran-fidelity iterations
+needed.  Candidates remain:
+
+1. Compute c_sw + p_grad_c increment AT halo positions exactly
+   (iter-947's constant-extrap approximation accounts for ~7%
+   improvement; an exact halo computation might give similar gains).
+2. Fortran-faithful PPM hord=9 cube-edge boundary overrides for
+   ytp_v / xtp_u (analog of iter-888's `apply_fortran_xppm_boundary`
+   on tp_core's xppm/yppm).
+3. d_sw operator-split sweep order audit.
+4. d_sw5 corner-divergence damping audit beyond ua/va halo.
+5. Vorticity flux (zeta_abs) corner-edge handling at cube vertices.
+
 ### Iter-948 — NEGATIVE-RESULT: linear extrapolation of c_sw+p_grad_c increment to halo
 
 **Trigger.**  iter-947 used a CONSTANT extrapolation of the c_sw +
