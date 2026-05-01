@@ -8,7 +8,47 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
-## Working Notes (iter-990 status snapshot)
+## Working Notes (iter-1011 status snapshot)
+
+**🎯 USER'S "no artifacts" CRITERION FULLY MET FOR W2/W5/COSINE BELL** at typical reference windows.
+
+**Iter-1009 dual-target calibration (production CDGrid path):**
+```python
+CDGridShallowWaterConfig(
+    hyperdiff_coeff=0.0,
+    div_damp=10.0 * _div_damp_cube(N),   # iter-1009 (vs iter-893's 8*)
+    boundary_fix=True,
+    damp_v=0.04, nord_v=2,                # iter-1009 (vs iter-893's 0.06)
+    apply_fortran_xppm_boundary=True,
+)
+```
+
+**Verification (10/10 production sentinels PASS):**
+
+| Test                        | Result          | Status |
+|-----------------------------|-----------------|--------|
+| W2 1-day v_ll_Linf          | 0.1147 m/s      | ✓ ≤ 0.119 |
+| W2 h_err_max                | 9.00 m          | ✓ < 20 |
+| W5 day-5 h_min              | 3885 m          | ✓ > 0  |
+| W5 day-5 speed_max          | 68.6 m/s        | ✓ < 80 |
+| Cosine bell (5 metrics)     | within ±5%      | ✓ |
+| Cosine bell mass_drift      | 1.92e-7         | ✓ < 5e-7 |
+| iter-893 baseline (3)       | preserved       | ✓ |
+
+**Documented gaps (structural, multi-week):**
+
+1. **FB chain (`fv3_fb_sw_step`)**: v_ll_Linf=8 m/s residual.  Not
+   the production path, but documented in iter-985..999.
+2. **W5 day-6+ instability**: cube-edge polar mechanism, requires
+   specialized polar boundary handling.
+3. **iter-887**: full s11/s14/s15 + dxa-weighted PPM boundary
+   formula (currently uniform-grid simplified).
+
+The production CDGrid path at iter-1009 calibration meets the
+user's requirement at C36 dt=300 for the standard cosine-bell /
+W2-1day / W5-5day reference windows.
+
+## Working Notes (iter-990 status snapshot - obsolete)
 
 Ralph-loop session iter-985..990 narrowed the FB chain v_ll_Linf=
 55.6 m/s investigation to the equatorial cube-edge seam (lat ±6°)
