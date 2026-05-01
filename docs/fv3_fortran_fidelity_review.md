@@ -390,6 +390,119 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-985 — CRITICAL PIVOT: 55.6 m/s peak is at equatorial cube EDGES, not vertices
+
+**Trigger.**  Iter-984 confirmed cube-vertex imbalance is 1.3 m/s in
+`c_sw + p_grad_c` 1-step tendency, identifying `_corner_vorticity`
+halo path as suspect.  Iter-985 first verified the diagnosis by
+running a patched `_corner_vorticity` (cube-vertex halo cells
+replaced with edge-mode interior copy instead of cross-face
+rotation), then localised where the FB chain 1-day v_ll_Linf=55.6 m/s
+peak actually concentrates.
+
+**Iter-985a — Cube-vertex halo fix (no improvement).**
+
+Replaced the 4 cube-vertex halo cells in `fx_halo_*`, `fy_halo_*`
+with `mode='edge'` (interior copy).  This reduced cube-vertex
+`vort_abs` from 2.18e-04 → 1.07e-04 (a 51% reduction) — confirming
+the cross-face rotation IS over-amplifying at cube vertices.
+
+But on FB chain C36 W2 1-day:
+
+| state         | v_ll_Linf  |
+|---------------|------------|
+| ORIGINAL      | 55.6130    |
+| PATCHED       | 55.6034    |
+
+Delta = -0.01 m/s (-0.02%).  **The cube-vertex halo error has
+NEGLIGIBLE impact on the 1-day W2 v_ll_Linf.**
+
+**Iter-985b — Localising the actual peak.**
+
+Probed |v_north| on the cubed-sphere directly (before lat-lon
+regridding) after FB chain 1-day:
+
+```
+|v_north| max on cubed sphere = 56.50 m/s
+  Top 4 hotspots:
+  #1: face=1, i=0, j=21 → -56.50 m/s | lat= 6.34°
+  #2: face=3, i=0, j=21 → -56.50 m/s | lat= 6.34°
+  #3: face=0, i=0, j=21 → -56.44 m/s | lat= 6.34°
+  #4: face=2, i=0, j=21 → -56.44 m/s | lat= 6.34°
+```
+
+ALL four equatorial faces hit the SAME (i=0, j=21) cell, on the
+WEST cube-edge seam at 6.34° N latitude.  This is **NOT a cube
+vertex** (i, j not at extremes; 0 in N-cell space is one extreme of
+i but j=21 is mid-range).
+
+**Pattern along face=1, i=0 (west cube-edge seam):**
+
+```
+j=14: v_north=  52.28 m/s | i=1: 29.76 | i=2: 25.15 | lat= -6.34°
+j=15: v_north=  50.23 m/s | i=1: 36.53 | i=2: 29.45 | lat= -4.52°
+...
+j=18: v_north= -41.71 m/s | i=1: -21.04 | i=2: -14.15 | lat=  0.90°
+j=21: v_north= -56.50 m/s | i=1: -28.75 | i=2: -25.05 | lat=  6.34°
+j=22: v_north= -20.30 m/s | i=1: -11.90 | i=2: -11.39 | lat=  8.18°
+```
+
+Two key features:
+
+1. **Sign flip across equator** between j=17 and j=18 (v_north goes
+   from +23 to -41 m/s in one cell row).
+2. **Edge amplification**: i=0 values are ~2× larger than i=1
+   (e.g., -56.5 vs -28.75 at j=21; +52 vs +30 at j=14).
+
+This is a classic edge artifact: the seam cells experience some
+combination of grid-scale gradient that does not propagate into
+the interior.  The 2× amplification ratio strongly suggests halo
+exchange IS adding energy at the seam rather than balancing it.
+
+**Iter-985 implication.**
+
+Iter-981/982/983/984's cube-vertex thread is a SECONDARY effect.
+The **primary** W2 v_ll_Linf=55.6 m/s gap is at **equatorial cube
+EDGES** at lat ≈ ±6° (the boundary cells closest to the equator
+on the seam).  Different from the corner imprint chased in earlier
+iters.
+
+This calls for re-investigation:
+
+1. The FB chain (in `_d_sw_native`) edge halo for `u_d, v_d` after
+   step-N or step-1 may not be cross-face complete on the seams.
+2. The d_sw5 Smagorinsky branch may be mis-calibrated near the
+   equatorial seam (lat 0 has different metric behaviour from lat
+   45).
+3. The PPM transport in `_bgrid_ke_transport` may be aliasing at
+   the seam, since the W2 wind has zero cross-edge component but
+   the PPM stencil reaches into halo at the seam.
+
+**Iter-985 deliverables.**
+
+1. `scripts/diag_iter985_cube_edge_localise.py` — runnable
+   localisation of the W2 1-day peak.
+2. Patched `_corner_vorticity` measurement (no production change;
+   cube-vertex fix yields +0.02% on v_ll_Linf — not the dominant
+   bug).
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change in iter-985.  Iter-986 will pivot to
+investigate the **equatorial cube-edge seam** as the new prime
+suspect.
+
+**Backlog for iter-986+.**
+
+1. Audit halo path for `u_d` (D-grid west-edge-of-face-1 → meets
+   east-edge-of-face-0).  Compare cross-face halo of u_d at j=21
+   to the analytical W2 wind (u = u0*cos(lat)*cos(angle)).
+2. Probe d_sw5 vs Smagorinsky behaviour at seam by zeroing each
+   d_sw step and remeasuring 1-day v_ll_Linf — narrow the term that
+   amplifies the seam.
+3. Run iter-985 fix + iter-986 candidate fix in combination once
+   iter-986 candidate is identified — the cube-vertex tweak is
+   small but free.
+
 ### Iter-984 — Term-by-term decomposition: vortex flux DOMINATES cube-vertex imbalance
 
 **Trigger.**  Iter-983 found ~1.3 m/s |duc| imbalance at cube
