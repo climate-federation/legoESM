@@ -405,6 +405,33 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-999 — dt scaling with iter-995 fix: dt=300 is optimum, smaller dt unstable
+
+**Iter-999.**  Test if smaller dt with the iter-994/995 smoother
+reduces the 8 m/s residual.
+
+| dt   | n_steps | v_ll | h_err |
+|------|---------|------|-------|
+| 600  |   144   | 9.05 | 1870  |
+| 300  |   288   | 8.33 | 1589  |  (iter-995)
+| 150  |   576   | NaN  | -     |
+| 100  |   864   | NaN  | -     |
+
+dt ≤ 150 produces NaN — smaller dt requires the smoother damp
+coefficient to scale, but our fixed coefficients become too
+aggressive per unit time and trigger instability.
+
+**dt=300 is the optimum.**  Larger dt loses temporal resolution
+(9.05 vs 8.33); smaller dt destabilizes.
+
+The smoother coefficient (damp=0.30, n_pass=3) was tuned for
+dt=300.  A fully scaled smoother would need damp=k*dt/dt_ref,
+but that defeats the timestep-independence goal.
+
+**Iter-999 conclusion.**  External-smoother + Smag-tuned FB chain
+v_ll_Linf=8.33 m/s at dt=300 is the practical floor.  Further
+reduction requires structural intervention.
+
 ### Iter-998 — Smooth uc/vc between p_grad_c and d_sw: no gain (residual is in d_sw itself)
 
 **Trigger.**  Iter-994's 8.08 m/s residual is intrinsic to the FB
