@@ -155,6 +155,76 @@ def test_iter1043_hydrostatic_cube_vertex_finite(hyd_model_state):
             f"indicating possible artifact concentration.")
 
 
+def test_iter1045_nonhydrostatic_cube_vertex_finite():
+    """3D non-hydrostatic 30-step run: cube-vertex cells finite-bounded."""
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        CDGridCompressibleEulerConfig,
+        CDGridCompressibleEulerModel,
+    )
+    from legoesm.core.field import Field
+    from legoesm.core.state import NonHydrostaticState
+    from legoesm.grids.vertical import (
+        compute_terrain_metric,
+        create_height_coordinate,
+    )
+
+    grid = create_cubed_sphere(8)
+    nlev = 5
+    z_top = 30000.0
+    height_coord = create_height_coordinate(nlev, z_top)
+    terrain = jnp.zeros((6, grid.n, grid.n))
+    terrain_metric = compute_terrain_metric(terrain, height_coord)
+    config = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14, n_acoustic_substeps=4,
+    )
+    model = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, config)
+
+    n = grid.n
+    dims_3d = ("face", "x", "y", "level")
+    dims_w = ("face", "x", "y", "level_half")
+    dims_2d = ("face", "x", "y")
+
+    state = NonHydrostaticState(
+        u=Field(data=jnp.full((6, n, n, nlev), 5.0),
+                 name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=jnp.zeros((6, n, n, nlev)),
+                 name="v", dims=dims_3d, units="m/s"),
+        w=Field(data=jnp.zeros((6, n, n, nlev + 1)),
+                 name="w", dims=dims_w, units="m/s"),
+        theta_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                           name="theta_prime", dims=dims_3d, units="K"),
+        rho_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                         name="rho_prime", dims=dims_3d, units="kg/m^3"),
+        phis=Field(data=jnp.zeros((6, n, n)),
+                    name="phis", dims=dims_2d, units="m^2/s^2"),
+        tracers=Field(data=jnp.zeros((6, n, n, nlev, 0)),
+                       name="tracers",
+                       dims=("face", "x", "y", "level", "tracer"),
+                       units="kg/kg"),
+    )
+    dt = 10.0
+    s = state
+    for _ in range(30):
+        s = model.step(s, dt)
+
+    u = np.asarray(s.u.data)
+    vertex_idx = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
+    vertex_u = []
+    for f in range(6):
+        for i, j in vertex_idx:
+            vertex_u.append(u[f, i, j, :])
+    vertex_u = np.array(vertex_u)
+
+    assert np.isfinite(vertex_u).all(), "NaN at NH cube vertex"
+    cell_mean = float(np.mean(u))
+    cell_std = float(np.std(u))
+    if cell_std > 1e-10:
+        max_z = float(np.max(np.abs(vertex_u - cell_mean)) / cell_std)
+        assert max_z < 10.0, (
+            f"NH cube vertex extreme z-score = {max_z:.2f} > 10.")
+
+
 def test_iter1042_nonhydrostatic_long_integration_finite():
     """3D non-hydrostatic 100-step integration: no NaN with zonal IC."""
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
