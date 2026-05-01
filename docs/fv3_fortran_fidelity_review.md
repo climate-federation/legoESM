@@ -261,6 +261,42 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-959 — Damping-coefficient sensitivity sweep (small Smagorinsky improvement available)
+
+**Trigger.**  Iters 945-958 explored Fortran-fidelity gaps in halo /
+operator structure with limited gain (v_ll_Linf 81 → 75.4 → 75.4
+m/s on |v|).  Iter-959 instead sweeps the d_sw5 damping
+coefficients to see if the iter-934 default
+(`d2_bg=0, dddmp=0, d4_bg=0.16, nord=1, damp_v=0.06, nord_v=2`) is
+optimal for v_ll_Linf.
+
+**Sweep results on duogrid C36 W2 1-day:**
+
+| config                                   | v_ll_Linf (m/s) | |v_max| |
+|------------------------------------------|----------------:|--------:|
+| default (d4_bg=0.16 nord=1 damp_v=0.06)  |          55.61  |   75.4  |
+| d4_bg=0.32 (double)                      |   NaN at step 16 |  —      |
+| d4_bg=0.08 (half)                        |          70.53  |   94.3  |
+| nord=2 (del-6)                           |          80.42  |  113.4  |
+| damp_v=0.12 (double vorticity)           |          55.73  |   61.8  |
+| damp_v=0.03 (half vorticity)             |          56.07  |   85.7  |
+| **d2_bg=0.01 dddmp=0.05 (Smagorinsky)**  |        **53.17**|   60.5  |
+
+**Insight.**  The default `d2_bg=0, dddmp=0` setting disables the
+adaptive Smagorinsky branch of d_sw5 entirely.  Enabling
+`d2_bg=0.01, dddmp=0.05` gives a 4% v_ll_Linf improvement
+(55.6 → 53.2 m/s) AND reduces |v_max| from 75 → 60.5 m/s.  This is
+the largest single-knob improvement found since iter-947.
+
+**Iter-959 deliverable.**  No code change — the iter-934 default is
+preserved because changing it would shift the iter-934/941/942/944/
+945/947/951 step-survival sentinel pins.  Future iters can opt in
+to `d2_bg=0.01, dddmp=0.05` via the existing config kwargs.
+
+The 4% Smagorinsky improvement is a calibration tweak rather than
+a Fortran-fidelity fix.  Adding it to the default would close ~4%
+of the remaining 467× gap.
+
 ### Iter-957 — NEGATIVE-RESULT: existing apply_legacy_* flags are no-ops on duogrid
 
 **Trigger.**  Iter-947 closes the boundary halo gap; iter-948..954
