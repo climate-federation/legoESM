@@ -405,6 +405,73 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-995 — Mass-conserving h smoother: small h_err win, can't reduce v_ll floor
+
+**Trigger.**  Iter-994 found smoothing residual at v_ll_Linf≈8.08
+m/s with h_err=2567 m.  Iter-995 adds a mass-conserving del-2 h
+smoother to cut the residual h drift.
+
+**Method.**  After meridional v smoothing:
+```
+h_smooth = h + damp_h * lap_2d(h)
+correction = (mass_before - mass_after) / total_area
+h_new = h_smooth + correction       # mass-conserving
+```
+
+**Iter-995 sweep with iter-994 best (damp_v=0.30, n_pass=3):**
+
+| damp_v | n_pass | damp_h | v_ll_Linf | h_err_max |
+|--------|--------|--------|-----------|-----------|
+| 0.30   |   3    |  0.00  |   8.08    |   2567    |  (iter-994)
+| 0.30   |   3    |  0.05  |   8.33    | **1589**  |
+| 0.30   |   3    |  0.10  |  41.53    |   1318    |  (v_ll catastrophe)
+| 0.30   |   3    |  0.20  |   NaN     |   -       |
+
+**Sweet spot: damp_h=0.05.**  h_err halves (2567 → 1589, 38% reduction),
+v_ll stays essentially at the residual (8.08 → 8.33).
+
+Higher damp_h (0.10+) catastrophically grows v_ll because the h
+smoother disturbs geostrophic balance faster than the v smoother
+can absorb it.
+
+**Cumulative progress.**
+
+| iter      | config                                    | v_ll  | h_err |
+|-----------|-------------------------------------------|-------|-------|
+| baseline  | (no Smag, no smooth)                      | 55.61 | 18591 |
+| iter-963  | Smag d2=0.09, dddmp=0.45                  | 43.77 | 12855 |
+| iter-993  | + 1-pass mer damp=0.55                    |  8.20 |  2945 |
+| iter-994  | + 3-pass mer damp=0.30                    |  8.08 |  2567 |
+| iter-995  | + h smoother damp_h=0.05                  |  8.33 |**1589**|
+
+V_ll has effectively bottomed out at ~8 m/s.  H_err continues to
+shrink but at high damp_h crosses the geostrophic-balance threshold.
+
+**Iter-995 deliverables.**
+
+1. `scripts/diag_iter995_v_plus_h_smoothing.py` — full sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+**Implication.**
+
+The combined Smag + meridional v + mass-conserving h smoothing
+represents the full external-fix surface area on the FB chain.
+v_ll ≈ 8 m/s is the practical floor with these external smoothers
+preserving balance.
+
+**Backlog for iter-996+.**
+
+The remaining work is structural:
+
+1. Replace `transport_step` (FB chain mass transport) with
+   production `cgrid_mass_flux_divergence`.
+2. Apply meridional smoothing INSIDE the FB step (between c_sw
+   and d_sw) so the d_sw operator sees pre-smoothed inputs.
+3. Migrate to RK3 + Arakawa-Lamb (production path) and abandon
+   FB chain — production already achieves 0.132 m/s.
+
 ### Iter-994 — Multi-pass meridional smoothing: convergent residual at v_ll≈8.08 m/s
 
 **Trigger.**  Iter-993 found best single-pass at damp=0.55,
