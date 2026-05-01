@@ -121,6 +121,40 @@ def test_iter1041_hydrostatic_long_integration_finite(hyd_model_state):
     assert jnp.all(jnp.isfinite(s.p_s.data)), "p_s NaN at 100 steps"
 
 
+def test_iter1043_hydrostatic_cube_vertex_finite(hyd_model_state):
+    """3D hydrostatic 30-step run: cube-vertex cells have finite finite-bounded values.
+
+    Cube vertices (8 total: 4 corners × 2 of {NE,NW,SE,SW}) are
+    where 3 faces meet — historically the trouble spot for edge
+    artifacts.  This test specifically inspects those cells.
+    """
+    model, state, dt = hyd_model_state
+    s = state
+    for _ in range(30):
+        s = model.step(s, dt)
+
+    u = np.asarray(s.u.data)
+    n = u.shape[1]
+    # Cube-vertex cells per face: (0,0), (0,n-1), (n-1,0), (n-1,n-1)
+    vertex_idx = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
+    vertex_u = []
+    for f in range(6):
+        for i, j in vertex_idx:
+            vertex_u.append(u[f, i, j, :])
+    vertex_u = np.array(vertex_u)  # shape (24, nlev)
+
+    assert np.isfinite(vertex_u).all(), "NaN at cube vertex"
+    # Vertex values shouldn't be wildly different from cell-mean
+    cell_mean = float(np.mean(u))
+    cell_std = float(np.std(u))
+    if cell_std > 1e-10:
+        max_z = float(np.max(np.abs(vertex_u - cell_mean)) / cell_std)
+        # Z-score < 10 indicates no extreme outliers at vertices
+        assert max_z < 10.0, (
+            f"Cube vertex extreme z-score = {max_z:.2f} > 10 — "
+            f"indicating possible artifact concentration.")
+
+
 def test_iter1042_nonhydrostatic_long_integration_finite():
     """3D non-hydrostatic 100-step integration: no NaN with zonal IC."""
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
