@@ -390,6 +390,51 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-978 — FB chain dt sensitivity: truncation contributes ~6% over 4x dt reduction
+
+**Trigger.**  Iter-977 hypothesized truncation as one possible
+contributor to the 55.6 m/s gap.  Iter-978 measures the dt
+sensitivity to quantify.
+
+**Iter-978 measurement on duogrid C36 W2 1-day:**
+
+| dt (s)  | n_steps | v_ll_Linf (m/s) |
+|---------|--------:|----------------:|
+|   600   |  NaN    |    NaN @ step 111 (CFL exceeded) |
+|   300   |    288  |          55.61   |
+|   150   |    576  |          55.24   |
+|    75   |   1152  |          52.40   |
+
+**Findings.**
+- dt=600s: blows up due to CFL (the FB chain at C36 with default
+  damping is unstable above ~dt=400s).
+- dt=300 → 75: 4× smaller dt gives 5.8% reduction in v_ll_Linf.
+- The improvement is modest; truncation accounts for ~6% of the
+  remaining gap.
+- Extrapolating to dt→0: maybe 10-15% reduction.  Still 30+ m/s
+  from acceptance.
+
+**Conclusion.**  Truncation is a SMALL contributor.  The dominant
+55 m/s gap is STRUCTURAL — in components we have not yet pinpointed.
+
+**Iter-978 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.
+
+**Backlog for iter-979+.**
+
+The structural gap is most likely in:
+1. The d_sw chain's specific halo-stitching at cube vertices
+   (where 3 faces meet) — our iter-945/947 helpers may differ
+   from Fortran's mpp_update_domains in vertex handling.
+2. Subtle indexing / sign / cross-component conventions in the
+   covariant rotation logic.
+3. The orchestration of c_sw + p_grad_c + d_sw1..d_sw6 (we group
+   all into `_d_sw_native`; Fortran has separate per-step
+   communications between).
+
 ### Iter-977 — Comprehensive audit conclusion: structural code is Fortran-faithful
 
 **Iter-967 through iter-976 audited 9 routines** against the GFDL
