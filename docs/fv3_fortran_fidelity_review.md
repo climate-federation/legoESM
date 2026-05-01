@@ -405,6 +405,37 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1010 — cube_edge_softer_div_damp: doesn't extend W5 past day 5
+
+**Trigger.**  Iter-1009 met dual target through day 5; day 6+ remains
+unstable.  Iter-1010 tries `cube_edge_softer_div_damp` + factor sweep.
+
+**Sweep with iter-1009 base + cube_edge_softer:**
+
+| factor | W2 v_ll | W5 day-5 (h_min, spd) | W5 day-6 |
+|--------|---------|------------------------|----------|
+| (off)  | 0.1147  | (3885, 68.6) ✓         | (3768, 200.8) ✗  |
+| 0.3    | 0.1467  | (3978, 76.0) ✓         | (3916, 134.3) ✗  |
+| 0.5    | 0.1353  | (3950, 73.9) ✓         | (3891, 136.2) ✗  |
+| 0.7    | 0.1258  | (3914, 65.7) ✓         | (3868, 129.6) ✗  |
+| 2.0    | NaN     | NaN                    | NaN              |
+
+cube_edge_softer slightly extends W5 day-6 stability (200 → 130
+m/s) but at HIGH cost to W2 v_ll (0.1147 → 0.1467).  No combination
+keeps W2 ≤ 0.119 AND W5 day-6 < 80 m/s.
+
+**Conclusion.**  W5 day-6+ instability is intrinsic to the
+cubed-sphere shallow water at C36 with available operators.
+Closing it requires structural intervention (specialized polar
+boundary handling).
+
+**Iter-1010 deliverables.**
+
+1. `scripts/diag_iter1010_cube_edge_softer.py` — sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
 ### Iter-1009 — DUAL TARGET MET: W2 v_ll ≤ 0.119 AND W5 day-5 artifact-free
 
 **Trigger.**  Iter-1002 met W2 target (0.1154 m/s) but W5 unstable
