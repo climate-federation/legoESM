@@ -8,6 +8,57 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
+## Working Notes (iter-960 session summary)
+
+This Ralph-loop session (iter-945 through iter-960) made these
+production-impacting changes:
+
+1. **iter-945** — D-grid PPM cross-face halo via `ext_vector_dgrid`
+   wired into `_bgrid_ke_transport`.  v_ll_Linf: ~85 → 56 m/s
+   (~34% reduction).  4 sentinels.
+2. **iter-947** — NEW-corrected uc/vc cross-face halo
+   (`_pad_halo_uc_vc_new_via_old_delta`) wired into
+   `_d_sw1_recompute_ut_vt` and `_bgrid_ke_transport`.
+   v_ll_Linf: 56 → 55.6 m/s (~1% additional).  3 sentinels.
+3. **iter-951** — v_ll_Linf-tracking sentinel for FB chain.
+   1 sentinel.
+
+Negative-result iters (no production code change after revert):
+iter-946 (OLD-direct halo), iter-948 (linear extrap), iter-949
+(ua/va halo no-op), iter-950 (h_dg=3 PPM regresses v_ll), iter-953
+(d_sw1 Parts 2/3/4 on duogrid catastrophic), iter-954 (Part 2 only
+also regresses), iter-957/958 (apply_legacy_* flags no-op on
+duogrid).
+
+Calibration tweak available (not enabled by default):
+- iter-959: `d2_bg=0.01, dddmp=0.05` Smagorinsky on FB chain gives
+  4% v_ll_Linf improvement (55.6 → 53.2 m/s) at no stability cost.
+
+Diagnostics + working notes:
+- iter-952: v_north max localized to equatorial cube-face
+  i-boundaries (i=0, n-1).
+- iter-955: cumulative progress diagnostic script
+  `scripts/diag_iter955_fb_chain_progress.py`.
+- iter-956: top-of-doc working-notes summary.
+
+Cumulative state at end of session:
+
+| metric                     | iter-944b | iter-960 (this session) | acceptance |
+|----------------------------|----------:|------------------------:|-----------:|
+| FB chain step survival     |  288/288  |              288/288    |     —      |
+| W2 |u_max| (m/s)           |    106    |              76.91      |     —      |
+| W2 |v_max| (m/s)           |    151    |              75.38      |     —      |
+| W2 v_ll_Linf (m/s)         |     ~85   |              55.61      |    0.119   |
+| h_err_max (m)              |   ~21000  |              18591      |     —      |
+
+Remaining gap: v_ll_Linf still 467× above acceptance.  Without GFDL
+Fortran source access, further fidelity gains beyond iter-959's 4%
+Smagorinsky tweak require structural code changes (PPM cube-edge
+boundary overrides for ytp_v / xtp_u; exact c_sw + p_grad_c
+increment computation at halo positions; operator-split sweep
+order audit).  The current Python implementation is consistent
+within itself and bit-identical on production sentinels.
+
 ## Working Notes (iter-955 status)
 
 - **Last successful production-impacting change**: iter-947
