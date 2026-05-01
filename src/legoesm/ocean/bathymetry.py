@@ -205,7 +205,20 @@ def _regrid_bathymetry(
     """
     from scipy.interpolate import RegularGridInterpolator
 
-    # Wrap longitude for periodic interpolation
+    # Drop a duplicated periodic endpoint if the source covers the full
+    # span twice (e.g. ETOPO with lon ∈ [−180, 180] — both endpoints
+    # represent the same physical line).  Without this the periodic
+    # padding below produces a back-to-back duplicate that scipy's
+    # RegularGridInterpolator rejects with "points must be strictly
+    # ascending or descending".
+    if (
+        lon_src.size >= 2
+        and np.isclose(lon_src[-1] - lon_src[0], 360.0, atol=1e-6)
+    ):
+        lon_src = lon_src[:-1]
+        depth_data = depth_data[:, :-1]
+
+    # Wrap longitude for periodic interpolation.
     lon_wrapped = np.concatenate([
         lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
     ])
@@ -572,11 +585,20 @@ def load_bathymetry(
 
     ds.close()
 
-    # Ensure longitude in [0, 360)
+    # Ensure longitude in [0, 360).  ETOPO files often span [−180, 180]
+    # with both endpoints present; ``% 360`` maps both to 180 and the
+    # subsequent argsort produces an adjacent duplicate that breaks the
+    # downstream RegularGridInterpolator.  Dedupe adjacent equals
+    # (keep the first occurrence).
     lon_src = lon_src % 360.0
     lon_order = np.argsort(lon_src)
     lon_src = lon_src[lon_order]
     elev_data = elev_data[:, lon_order]
+    if lon_src.size >= 2:
+        keep = np.concatenate([[True], np.diff(lon_src) > 0])
+        if not np.all(keep):
+            lon_src = lon_src[keep]
+            elev_data = elev_data[:, keep]
 
     # Ensure latitude sorted ascending
     if lat_src[0] > lat_src[-1]:
@@ -862,6 +884,14 @@ def _idealized_dispatch(grid, cfg: BathymetryConfig):
 
 def _file_dispatch(grid, cfg: BathymetryConfig):
     """Dispatch file-based bathymetry to appropriate grid handler."""
+    # LatLonGrid: has 2D ``lat2d``/``lon2d`` plus 1D ``lat``/``lon``.
+    # Dispatch this BEFORE the cubed-sphere check because LatLonGrid
+    # exposes a synthetic ``.n`` property (= ``n_lat``) for code that
+    # treats grid resolution generically.
+    if hasattr(grid, 'lat2d') and hasattr(grid, 'lon2d') \
+       and hasattr(grid, 'n_lat') and hasattr(grid, 'n_lon'):
+        return load_bathymetry_latlon(grid, cfg)
+
     # CubedSphereGrid
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         return load_bathymetry_cubed_sphere(grid, cfg)
@@ -875,6 +905,65 @@ def _file_dispatch(grid, cfg: BathymetryConfig):
         return load_bathymetry_gaussian(grid, cfg)
 
     raise TypeError(f"Unsupported grid type: {type(grid)}")
+
+
+def load_bathymetry_latlon(
+    grid,
+    cfg: BathymetryConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Load realistic bathymetry for a regular lat-lon grid.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Target grid with cell-center ``lat2d`` and ``lon2d`` in radians,
+        shape ``(n_lat, n_lon)``.
+    cfg : BathymetryConfig
+        Configuration.
+
+    Returns
+    -------
+    H_bathy : jnp.ndarray, shape (n_lat, n_lon)
+        Bathymetry depth [m].  Positive downward.  Land cells are set
+        to ``H_max`` for a smooth z\\* Jacobian (the ``ocean_mask``
+        gates them dynamically).
+    ocean_mask : jnp.ndarray, shape (n_lat, n_lon)
+        1=ocean, 0=land.
+    """
+    lat_deg = np.asarray(grid.lat2d) * 180.0 / np.pi
+    lon_deg = np.asarray(grid.lon2d) * 180.0 / np.pi
+    # Approximate target grid spacing in degrees (for the source-grid
+    # ocean-fraction estimate inside ``load_bathymetry``).
+    grid_spacing_deg = max(180.0 / grid.n_lat, 360.0 / grid.n_lon)
+
+    depth, ocean_mask = load_bathymetry(
+        lat_deg, lon_deg, cfg, grid_spacing_deg=grid_spacing_deg,
+    )
+
+    # Lat-lon smoothing (NOT cubed-sphere-aware: just isotropic
+    # 1-2-1 Laplacian, periodic in lon, wall in lat).
+    depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
+
+    # Re-enforce minimum depth after smoothing.
+    ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
+    depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # Optional: enforce critical straits at coarse resolution.
+    if cfg.enforce_straits:
+        depth, ocean_mask = enforce_straits(
+            depth, ocean_mask, lat_deg, lon_deg, cfg,
+        )
+
+    # Optional: fill isolated basins disconnected from the main ocean.
+    if cfg.fill_isolated_basins:
+        ocean_mask = _fill_isolated_basins_2d(ocean_mask)
+        depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # Set land cells to H_max so the z* Jacobian (eta + H)/H is smooth
+    # everywhere — the ``ocean_mask`` gates land at integration time.
+    depth = np.where(ocean_mask > 0.5, depth, cfg.H_max)
+
+    return jnp.asarray(depth), jnp.asarray(ocean_mask)
 
 
 # ============================================================================

@@ -341,6 +341,60 @@ PLM-in-(T, S) + Gauss-quadrature EOS upgrade documented in §7 of
 the research report is the recommended path — same scaffolding,
 swap what gets reconstructed.
 
+### Phase 6 ETOPO 30-day stress test
+
+Real ETOPO bathymetry, 1°-source regridded to a coarse target,
+``H_min=50`` m (so partial cells are at least ``2.5 × dz_surface``,
+avoiding degenerate sub-surface partials), ``smoothing_passes=5``,
+``bottom_drag_r=1e-3``, ``bbl_thickness=100`` m,
+``barotropic_solver=implicit_cn``, centroid-aware exponential T(z).
+
+**5°/15-level/1-day smoke test** — passes cleanly with SMC03,
+``|u|max=7.6`` mm/s.  Confirms the pipeline (ETOPO load + regrid +
+land-mask + partial coord + SMC03 PGF) integrates correctly under
+realistic global geometry.
+
+**3°/20-level/30-day side-by-side** — Adcroft vs SMC03 at
+``dt=600`` s:
+
+| day | adcroft \|u\|max | smc03 \|u\|max | smc03 advantage |
+|:---:|:----------------:|:--------------:|:---------------:|
+| 1   | 390 mm/s         | **2.5 mm/s**   | 156×            |
+| 5   | 433 mm/s         | **3.5 mm/s**   | 124×            |
+| 10  | 1163 mm/s        | **20 mm/s**    | 58×             |
+| 12  | NaN (blew up)    | 49 mm/s        | —               |
+| 18  | —                | 1647 mm/s      | —               |
+| 19  | —                | NaN (blew up)  | —               |
+
+SMC03 stays below the plan's 50 mm/s Phase 6 pass criterion through
+**day 12**; Adcroft never reaches it (already 390 mm/s on day 1).
+Both eventually crash to a **non-PGF global-domain instability**
+that is far worse with Adcroft (12 days to NaN at ~15 m/s) than
+with SMC03 (19 days to NaN, with growth visibly exponential from
+day 8 onward).  Diagnosis: the instability is *not* a rest-state
+PGF residual problem — SMC03's first-week rest-state magnitude
+(2-5 mm/s) is comparable to its BH result (1.5 mm/s) — but a
+separate ETOPO-specific dynamics issue, plausibly a coastal
+computational mode at irregular coastlines or a thin-cell
+implicit-CN solver pathology.  The legacy BH stress test has no
+coastlines, so it does not expose this.
+
+**2°/20-level** with the same config crashes both schemes: SMC03
+day 7, Adcroft day 4.  ``dt=300`` s smooths but doesn't cure it.
+The CFL-related instability scales with resolution and is
+independent of the PGF scheme — it lives downstream of the SMC03
+work.
+
+The Phase 6 acceptance criterion as stated ("model integrates 30
+days without NaN; ``|u|max < 50`` mm/s; no spatial concentration")
+is therefore **partially met**: SMC03 satisfies the magnitude
+criterion through day 12 and fails the 30-day NaN-free criterion
+due to a non-PGF instability that Adcroft fails far worse on.
+Closing the remaining 30-day gap on global ETOPO requires
+separate stabilisation work (extra horizontal viscosity tuning,
+biharmonic + Smagorinsky, coastal sponge, MEO-style bathymetry
+smoothing) outside the scope of this PR.
+
 ### What this branch delivers
 
 - ``pgf_scheme="smc03"`` (new) and ``"adcroft"`` (default,
@@ -360,8 +414,22 @@ swap what gets reconstructed.
   phase).
 - ``--pgf-scheme`` flag on the BH script; output dir tagged so
   results don't collide with the Adcroft baseline.
+- New Phase 6 ETOPO script
+  (``scripts/realistic_geometry_validation/run_phase6_etopo.py``)
+  with side-by-side Adcroft/SMC03 benchmarking on real bathymetry,
+  showing 100-150× SMC03 advantage in the rest-state magnitude
+  before the global-domain instability sets in.
 - Two on-branch research artefacts documenting the production
   landscape and the code review that found C1.
+- Lat-lon dispatch for ``init_ocean_bathymetry`` (the existing
+  ``_file_dispatch`` only handled cubed-sphere/MPAS/Gaussian; the
+  new ``load_bathymetry_latlon`` correctly routes to a 2D-coord
+  path with periodic-lon wrap, lat-lon Laplacian smoothing, and
+  ``enforce_straits``/``fill_isolated_basins`` support).
+- ETOPO endpoint-deduplication fix in ``_regrid_bathymetry`` —
+  ETOPO files spanning ``[−180, 180]`` previously broke the
+  scipy ``RegularGridInterpolator`` because ``%360`` collapsed
+  the two endpoints onto a duplicate longitude.
 
 The current branch delivers significant standalone value: long-
 integration NaN fixed, conservation invariants tested, distributed
