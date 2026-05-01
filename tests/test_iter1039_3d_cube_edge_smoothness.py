@@ -121,6 +121,67 @@ def test_iter1041_hydrostatic_long_integration_finite(hyd_model_state):
     assert jnp.all(jnp.isfinite(s.p_s.data)), "p_s NaN at 100 steps"
 
 
+def test_iter1042_nonhydrostatic_long_integration_finite():
+    """3D non-hydrostatic 100-step integration: no NaN with zonal IC."""
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        CDGridCompressibleEulerConfig,
+        CDGridCompressibleEulerModel,
+    )
+    from legoesm.core.field import Field
+    from legoesm.core.state import NonHydrostaticState
+    from legoesm.grids.vertical import (
+        compute_terrain_metric,
+        create_height_coordinate,
+    )
+
+    grid = create_cubed_sphere(8)
+    nlev = 5
+    z_top = 30000.0
+    height_coord = create_height_coordinate(nlev, z_top)
+    terrain = jnp.zeros((6, grid.n, grid.n))
+    terrain_metric = compute_terrain_metric(terrain, height_coord)
+    config = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14, n_acoustic_substeps=4,
+    )
+    model = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, config)
+
+    n = grid.n
+    dims_3d = ("face", "x", "y", "level")
+    dims_w = ("face", "x", "y", "level_half")
+    dims_2d = ("face", "x", "y")
+
+    state = NonHydrostaticState(
+        u=Field(data=jnp.full((6, n, n, nlev), 5.0),
+                 name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=jnp.zeros((6, n, n, nlev)),
+                 name="v", dims=dims_3d, units="m/s"),
+        w=Field(data=jnp.zeros((6, n, n, nlev + 1)),
+                 name="w", dims=dims_w, units="m/s"),
+        theta_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                           name="theta_prime", dims=dims_3d, units="K"),
+        rho_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                         name="rho_prime", dims=dims_3d, units="kg/m^3"),
+        phis=Field(data=jnp.zeros((6, n, n)),
+                    name="phis", dims=dims_2d, units="m^2/s^2"),
+        tracers=Field(data=jnp.zeros((6, n, n, nlev, 0)),
+                       name="tracers",
+                       dims=("face", "x", "y", "level", "tracer"),
+                       units="kg/kg"),
+    )
+    dt = 10.0  # NH needs smaller dt due to acoustic
+    s = state
+    for _ in range(100):
+        s = model.step(s, dt)
+    # 100 × 10 = 1000 s = ~17 minutes simulated.  Useful for
+    # NaN detection over an integration much longer than the
+    # 30-step tests above.
+    assert jnp.all(jnp.isfinite(s.u.data)), "NH u NaN at 100 steps"
+    assert jnp.all(jnp.isfinite(s.theta_prime.data)), "theta_prime NaN"
+    assert jnp.all(jnp.isfinite(s.rho_prime.data)), "rho_prime NaN"
+    assert jnp.all(jnp.isfinite(s.w.data)), "w NaN at 100 steps"
+
+
 def test_iter1040_nonhydrostatic_no_edge_artifacts():
     """3D non-hydrostatic on uniform u=5 m/s zonal wind: no edge artifacts."""
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
