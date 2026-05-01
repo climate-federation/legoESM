@@ -1084,12 +1084,42 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Vorticity from TOTAL velocity (not perturbation u')
     zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
 
-    # Layer thickness at vertices (4-cell average matching vertex layout)
-    h_sw = jnp.roll(h_k, 1, axis=1)  # h_k[:, (j-1)%n_lon, :]
-    h_vtx_interior = 0.25 * (h_k[:-1] + h_k[1:]
-                              + h_sw[:-1] + h_sw[1:])  # (n_lat-1, n_lon, nlev)
-    h_vtx_south = 0.5 * (h_k[0:1] + h_sw[0:1])        # (1, n_lon, nlev)
-    h_vtx_north = 0.5 * (h_k[-1:] + h_sw[-1:])         # (1, n_lon, nlev)
+    # Layer thickness at vertices.  Use the min-rule (Adcroft-Hill-
+    # Marshall 1997 / Pacanowski-Gnanadesikan 1998 / MITgcm convention)
+    # rather than a 4-cell arithmetic mean, so the PV thickness is
+    # consistent with the face-flux thickness ``h_u = min(h_W, h_E)``
+    # used in the same momentum equation.  At a step vertex where the
+    # 4 surrounding cells have different ``bot_level``, the
+    # circulation integral that defines ζ at that vertex has an
+    # effective wet thickness bounded by ``min(h_4)`` (you can only
+    # circulate through wet faces).  Dividing ζ by a 4-cell *mean*
+    # overstates the wet thickness by 2-17× at step vertices on real
+    # ETOPO bathymetry, undervaluing the potential vorticity
+    # ``q = ζ / h_vtx`` and the Coriolis advection of momentum it
+    # drives — a known root cause of slow rest-state drift on
+    # stratified seamounts (Pacanowski & Gnanadesikan 1998).
+    # ``min`` must be taken over ACTIVE cells only — inactive cells
+    # (below the partial seafloor) have ``h = 0`` and including them
+    # in the raw min sends ``h_vtx → 0`` at every step vertex with
+    # any inactive neighbour, then ``q = ζ / h_vtx`` blows up.  We
+    # mask inactive cells with ``+∞`` (large but not so large as to
+    # overflow when later combined with eps protection); then min
+    # picks the smallest *active* thickness.  If all 4 surrounding
+    # cells are inactive (deep vertex below all seafloors), the
+    # final result is ``+∞`` and the downstream ``maximum(h_vtx,
+    # 1e-10)`` floor doesn't matter because the surrounding face
+    # masks already zero ``ζ`` there.  Mirrors MITgcm's
+    # ``hFacZ = min over active hFacC`` convention.
+    BIG_H = 1.0e30
+    h_sw = jnp.roll(h_k, 1, axis=1)
+    h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
+    h_sw_active = jnp.where(h_sw > 0.0, h_sw, BIG_H)
+    h_vtx_interior = jnp.minimum(
+        jnp.minimum(h_k_active[:-1], h_k_active[1:]),
+        jnp.minimum(h_sw_active[:-1], h_sw_active[1:]),
+    )                                                  # (n_lat-1, n_lon, nlev)
+    h_vtx_south = jnp.minimum(h_k_active[0:1], h_sw_active[0:1])
+    h_vtx_north = jnp.minimum(h_k_active[-1:], h_sw_active[-1:])
     h_vtx = jnp.concatenate(
         [h_vtx_south, h_vtx_interior, h_vtx_north], axis=0,
     )  # (n_lat+1, n_lon, nlev)

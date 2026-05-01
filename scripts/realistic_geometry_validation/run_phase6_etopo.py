@@ -128,6 +128,28 @@ def main():
                         "Default 1e4 (LatLonCGridOceanConfig default); "
                         "ETOPO at 2° benefits from 5e4 to suppress "
                         "coastal computational modes.")
+    parser.add_argument("--B-h", type=float, default=0.0,
+                        help="Biharmonic momentum viscosity [m⁴/s].  "
+                        "Production-typical at 3°: 5e9.  Targets the "
+                        "topographic computational mode in stratified "
+                        "flow (frozen-T diagnostic confirmed).")
+    parser.add_argument("--gm-redi", action="store_true",
+                        help="Enable GM/Redi isopycnal mixing "
+                        "(Gent-McWilliams 1990 + Redi 1982).  "
+                        "Parameterizes mesoscale eddy effects on the "
+                        "tracer field at coarse resolution.  Reduces "
+                        "horizontal density gradients via isopycnal "
+                        "slumping — physical, not stability tuning.")
+    parser.add_argument("--K-GM", type=float, default=800.0,
+                        help="GM bolus diffusivity [m²/s] (when "
+                        "--gm-redi).  Production-typical: 800.")
+    parser.add_argument("--K-Redi", type=float, default=800.0,
+                        help="Redi isopycnal diffusivity [m²/s] (when "
+                        "--gm-redi).  Production-typical: 800; matching "
+                        "K_GM cancels horizontal off-diagonal terms.")
+    parser.add_argument("--S-max", type=float, default=0.01,
+                        help="GM/Redi slope-clipping threshold "
+                        "(Danabasoglu-McWilliams).  Standard: 0.01.")
     parser.add_argument("--days", type=float, default=30.0)
     parser.add_argument("--dt", type=float, default=600.0)
     parser.add_argument("--record-every-days", type=float, default=1.0)
@@ -203,6 +225,10 @@ def main():
         diag_tag += "_linearTz"
     if args.frozen_ts:
         diag_tag += "_frozenTS"
+    if args.B_h > 0:
+        diag_tag += f"_Bh{args.B_h:.0e}"
+    if args.gm_redi:
+        diag_tag += f"_GM{int(args.K_GM)}Redi{int(args.K_Redi)}"
     output_dir = Path(
         f"results/realistic_geometry_validation/"
         f"phase6_etopo_{args.coord}_{args.n_lat}x{args.n_lon}_{args.n_levels}lev"
@@ -261,6 +287,13 @@ def main():
     print(f"  Smoothing:       {args.smoothing_passes} Laplacian passes")
     print(f"  Bottom drag:     r={args.bottom_drag_r:.1e} 1/s, "
           f"BBL={args.bbl_thickness} m")
+    print(f"  Momentum visc:   A_h={args.A_h:.1e} m²/s, "
+          f"B_h={args.B_h:.1e} m⁴/s")
+    if args.gm_redi:
+        print(f"  GM/Redi:         K_GM={args.K_GM:.0f}, "
+              f"K_Redi={args.K_Redi:.0f}, S_max={args.S_max:.3f}")
+    else:
+        print(f"  GM/Redi:         off")
     print(f"  Wet cells:       {n_ocean}/{n_total} "
           f"({100.0*n_ocean/n_total:.1f}%)")
     print(f"  H_bathy range:   [{float(H_bathy[ocean_mask>0].min()):.0f}, "
@@ -391,13 +424,23 @@ def main():
             T=state.T.replace(data=T_per_cell.astype(state.T.data.dtype)),
         )
 
+    gm_redi_cfg = None
+    if args.gm_redi:
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        gm_redi_cfg = GMRediConfig(
+            kappa_GM=args.K_GM,
+            kappa_Redi=args.K_Redi,
+            S_max=args.S_max,
+        )
     cfg = LatLonCGridOceanConfig(
         barotropic_solver="implicit_cn",
         physics=None,
         A_h=args.A_h,
+        B_h=args.B_h,
         bottom_drag_r=args.bottom_drag_r,
         bottom_drag_bbl_thickness=args.bbl_thickness,
         pgf_scheme=args.pgf_scheme,
+        gm_redi=gm_redi_cfg,
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     if args.frozen_ts:
