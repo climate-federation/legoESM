@@ -390,6 +390,69 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-974 — Test Fortran-style d_sw3 (mode='edge' + iter-967 boundary fix) vs iter-945 halo
+
+**Trigger.**  iter-967 found the d_sw3 boundary fix conflicts with
+iter-945 halo.  Iter-974 tests the OPPOSITE configuration: Fortran's
+actual approach (mode='edge'-style halo for u_d, v_d + d_sw3
+cube-edge boundary fix from sw_core.F90:2819-2863).
+
+**Iter-974 measurement on duogrid C36 W2 1-day:**
+
+| config                                  | v_ll_Linf (m/s) | step survival |
+|-----------------------------------------|----------------:|--------------:|
+| **iter-945 halo (current)**             |        55.61    |     288/288   |
+| Fortran-style (mode='edge' + bdy fix)   |   NaN @ step 215|         215   |
+
+**Conclusion.**  Our iter-945 cross-face halo for D-grid winds is
+strictly MORE STABLE on duogrid C36 W2 than Fortran's actual
+approach (mode='edge' halo + boundary fix).
+
+**Implication.**  Either:
+1. Fortran benefits from the FULL upstream halo'd u, v (via
+   `mpp_update_domains(DGRID_NE)` providing cross-face data
+   at depth ng=3 BEFORE d_sw3 runs).  Inside d_sw3, mode='edge'
+   then extends from this cross-face halo, so Fortran's
+   "mode='edge'" is functionally close to our iter-945 halo.
+   The boundary fix is then a consistent extrapolation.
+2. OR Fortran's specific implementation does something extra
+   (e.g., a sign-correction or rotation) that our Python misses.
+
+The iter-967 boundary fix wired into our Python with iter-945's
+already-cross-face halo over-corrected (worsened).  With
+mode='edge' and iter-967 (closer to Fortran's actual code path
+modulo our missing upstream halo), it goes NaN.
+
+This means our iter-945 halo is functionally REPLACING Fortran's
+"upstream mpp_update_domains halo + mode='edge' inside d_sw3" with
+"cross-face halo + no boundary fix".  Mathematically equivalent at
+the interior but DIFFERENT at the deepest boundary cells (where
+Fortran's boundary fix override applies).
+
+**Iter-974 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.  iter-967 boundary-fix code preserved on
+`_ppm_transport_1d` (gated `apply_d_sw3_boundary_fix=False`) for
+future experiments.
+
+**Backlog for iter-975+.**
+
+The iter-967 boundary fix's actual purpose is to correct ytp_v /
+xtp_u at the deepest cube-face boundary CELL (j=0/1/2 in Fortran
+1-indexed).  At these cells, Fortran's mode='edge'-on-halo'd-data
+gives one specific value, and the boundary fix overrides with
+another using s11/s14/s15.  Our iter-945 halo gives a THIRD value
+(true cross-face from cube_rmp).
+
+The three values may all be valid Fortran-faithful approximations
+of the same physical quantity.  The exact equivalence between
+Fortran's combo and our combo is not provable without testing.
+
+For now, our iter-945 alone is the most stable + accurate
+configuration we have.
+
 ### Iter-973 — Audit `del6_vt_flux` and `d_sw6` wind update vs Fortran
 
 **Iter-973 audit findings:**
