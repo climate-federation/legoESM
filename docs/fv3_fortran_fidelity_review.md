@@ -390,6 +390,64 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-975 — Audit `fv_tp_2d` xppm/yppm against Fortran tp_core.F90
+
+**Iter-975 audit findings:**
+
+1. **`fv_tp_2d`** (tp_core.F90:80-225) Lin-Rood operator-split
+   matches our Python `fv_tp_2d` in `fv_tp_2d.py:707-742`:
+   - Pass 1: yppm on q → fy2; cross-correct via fyy = yfx*fy2 →
+     q_i; xppm on q_i → fx (final).
+   - Pass 2: xppm on q → fx2; cross-correct via fx1 = xfx*fx2 →
+     q_j; yppm on q_j → fy (final).
+   - Cross-corrected formula: `q_i = (q*area + fyy[j] - fyy[j+1])
+     / ra_y` — matches our Python exactly. ✓
+   - Final flux averaging: `fx = 0.5*(fx + fx2) * xfx`, `fy =
+     0.5*(fy + fy2) * yfx` — matches. ✓
+
+2. **`xppm` boundary fix** (tp_core.F90:2752-2863, iord>=8 path):
+   - Fortran's iord=9 (default `hord_vt = 9` per fv_arrays.F90:339)
+     boundary fix at line 2819 has condition `is==1 .and. (.not.
+     bounded_domain .or. .not. duogrid_initialized)`.
+   - For duogrid: `(.not. true) .or. (.not. true) = false`, so
+     boundary fix SKIPS.
+   - Our Python's `_ppm_1d` `apply_fortran_xppm_boundary` is gated
+     on `not use_duogrid` — matches.  ✓
+
+3. **`copy_corners`** (tp_core.F90:139-141, 160-162) — gated on
+   non-duogrid; our Python's `pad_halo(duogrid=...)` does the
+   equivalent for duogrid via cube_rmp.  ✓
+
+4. **iord=9 pmp/lac limiter** (tp_core.F90:2778-2786):
+   ```fortran
+   pmp_1 = -2.*dq(i)
+   lac_1 = pmp_1 + 1.5*dq(i+1)
+   bl(i) = min(max(0., pmp_1, lac_1),
+               max(al(i)-u(i,j), min(0., pmp_1, lac_1)))
+   ```
+   Our Python `_ppm_1d` uses the same pmp/lac formula (verified at
+   tp_core.F90:2778-2786 / `fv_tp_2d.py` iord=9 path).  ✓
+
+**Conclusion.**  `fv_tp_2d` xppm/yppm chain is Fortran-faithful for
+the duogrid path with hord_vt=9.  Boundary handling, cross-
+correction, and limiter all match Fortran.
+
+**Iter-975 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.
+
+**Backlog for iter-976+.**
+
+The remaining v_ll_Linf=55.6 m/s gap is now NARROWED to:
+1. **`compute_transport_quantities`** for ut, vt → crx, cry, xfx,
+   yfx conversion — verify our Python matches Fortran's d_sw1.
+2. **`mpp_get_boundary` BGRID_NE averaging** — Fortran averages
+   ubb in face-local frame; our `synchronize_bgrid_ne_corner_geo`
+   averages in geo frame.  Subtle difference at cube vertices.
+3. **Float precision floor** (Fortran R4 vs our float64).
+
 ### Iter-974 — Test Fortran-style d_sw3 (mode='edge' + iter-967 boundary fix) vs iter-945 halo
 
 **Trigger.**  iter-967 found the d_sw3 boundary fix conflicts with
