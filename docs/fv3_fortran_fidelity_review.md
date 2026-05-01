@@ -342,6 +342,34 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-964 — Smagorinsky tuning is W2-specific; W5 needs default damping
+
+**Trigger.**  Iter-963 found `(d2_bg=0.09, dddmp=0.45)` improves W2
+v_ll_Linf 21%.  Iter-964 verifies whether the high Smagorinsky also
+helps Williamson 5 (zonal flow over an isolated mountain).
+
+**Sweep on FB chain duogrid C36 W5 1-day at dt=300 s:**
+
+| config            | step survival | |u_max| (m/s) | h range (m) |
+|-------------------|--------------:|--------------:|-------------|
+| default (no Smag) |    288/288    |        31.30  | [2069, 18007] |
+| Smag iter-963     |    288/288    |        41.03  | [2726, 16660] |
+
+W5 analytical |u| = 20 m/s.  Default damping gives |u|=31.3 m/s
+(closer to analytical); Smagorinsky tuning gives |u|=41 m/s
+(further from analytical).
+
+**Implication.**  The iter-963 Smagorinsky tweak is W2-SPECIFIC.
+W5's mountain forcing creates physical gradients that the
+Smagorinsky over-damps.  Cannot be made the default — would
+trade W2 fidelity for W5 fidelity.
+
+**Iter-964 deliverable.**  No code change.  The
+`use_smagorinsky_tuned` opt-in path documented in iter-962/963 is
+correct: callers using W2-like initial conditions can opt in;
+callers using W5/W6/Galewsky-like topography or jets should keep
+the default.
+
 ### Iter-963 — Push Smagorinsky to stability boundary: 21% v_ll_Linf reduction
 
 **Trigger.**  Iter-959 found that enabling Smagorinsky
