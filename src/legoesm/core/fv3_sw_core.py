@@ -248,7 +248,86 @@ def _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid):
     return uc_jhalo, vc_ihalo
 
 
-def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
+def _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cdgrid):
+    """Iter-947: NEW-uc, NEW-vc halo via OLD-halo cross-face delta.
+
+    Combines the iter-946 d2a2c-derived OLD halo with the NEW interior
+    uc, vc passed to ``_d_sw_native`` to produce a halo that:
+
+    1. Carries the cross-face geometric delta (rotation between cube
+       faces) from the 4th-order d2a2c machinery.
+    2. Includes the c_sw + p_grad_c increment by anchoring on the NEW
+       interior boundary cell.
+
+    The formula at each halo cell ``H`` adjacent to interior cell ``B``::
+
+        uc_NEW_halo[H] = uc[B]_NEW + (uc_OLD_halo[H] - uc_OLD[B])
+                       = NEW_boundary + cross_face_delta_from_OLD
+
+    For W2 solid-body the OLD-derived cross-face delta and the c_sw +
+    p_grad_c increment are nearly orthogonal contributions (the delta
+    is smooth across faces; the increment is smooth on a face), so
+    summing them gives a good approximation of the NEW cross-face halo.
+
+    Iter-946 (NEGATIVE-RESULT) showed that using the OLD halo directly
+    introduces an OLD/NEW mismatch in the d_sw 4-cell averages that
+    worsens W2 |v_max|.  This iter-947 helper anchors on NEW interior
+    so the halo is consistent with the rest of the d_sw call.
+
+    Requires duogrid with ng>=3 (same as `_pad_halo_uc_vc_via_d2a2c`).
+
+    Parameters
+    ----------
+    uc : (6, n+1, n) — NEW covariant C-grid u (post-c_sw + p_grad_c)
+    vc : (6, n, n+1) — NEW covariant C-grid v
+    u_d : (6, n, n+1) — D-grid x-velocity at d_sw entry (OLD u_d)
+    v_d : (6, n+1, n) — D-grid y-velocity at d_sw entry (OLD v_d)
+    cdgrid : CubedSphereCDGrid (must have an active duogrid with ng>=3)
+
+    Returns
+    -------
+    uc_pad : (6, n+1, n+2) — uc with NEW-consistent j-halo (j=-1, j=n)
+    vc_pad : (6, n+2, n+1) — vc with NEW-consistent i-halo (i=-1, i=n)
+    """
+    n = cdgrid.n
+
+    # OLD halo via the iter-946 d2a2c machinery.
+    uc_old_jhalo, vc_old_ihalo = _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid)
+    # uc_old_jhalo: (6, n+1, n+2) — index 0 → j=-1, index n+1 → j=n.
+    # vc_old_ihalo: (6, n+2, n+1) — index 0 → i=-1, index n+1 → i=n.
+
+    # OLD interior uc, vc (the d2a2c output on OLD u_d, v_d).  Used
+    # ONLY at the boundary cells to compute the cross-face geometric
+    # delta; the NEW interior is preserved everywhere else.
+    _, _, uc_old_int, vc_old_int, _, _ = _d2a2c_vect(u_d, v_d, cdgrid)
+    # uc_old_int: (6, n+1, n) — interior j ∈ [0, n-1]
+    # vc_old_int: (6, n, n+1) — interior i ∈ [0, n-1]
+
+    # uc south halo (j=-1): cross-face delta = uc_OLD_jhalo[j=-1] - uc_OLD[j=0]
+    delta_uc_south = uc_old_jhalo[:, :, 0:1] - uc_old_int[:, :, 0:1]
+    # uc north halo (j=n):   cross-face delta = uc_OLD_jhalo[j=n] - uc_OLD[j=n-1]
+    delta_uc_north = uc_old_jhalo[:, :, n + 1:n + 2] - uc_old_int[:, :, n - 1:n]
+
+    uc_new_south = uc[:, :, 0:1] + delta_uc_south    # NEW boundary + cross-face delta
+    uc_new_north = uc[:, :, n - 1:n] + delta_uc_north
+    uc_pad = jnp.concatenate([uc_new_south, uc, uc_new_north], axis=2)
+    # uc_pad: (6, n+1, n+2)
+
+    # vc west halo (i=-1):
+    delta_vc_west = vc_old_ihalo[:, 0:1, :] - vc_old_int[:, 0:1, :]
+    # vc east halo (i=n):
+    delta_vc_east = vc_old_ihalo[:, n + 1:n + 2, :] - vc_old_int[:, n - 1:n, :]
+
+    vc_new_west = vc[:, 0:1, :] + delta_vc_west
+    vc_new_east = vc[:, n - 1:n, :] + delta_vc_east
+    vc_pad = jnp.concatenate([vc_new_west, vc, vc_new_east], axis=1)
+    # vc_pad: (6, n+2, n+1)
+
+    return uc_pad, vc_pad
+
+
+def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt,
+                            u_d_old=None, v_d_old=None):
     """FV3 d_sw1 transport velocity recomputation with boundary handling.
 
     Recomputes contravariant transport velocities (ut, vt) from covariant
@@ -265,6 +344,11 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
     vc : (6, n, n+1) covariant C-grid v
     cdgrid : CubedSphereCDGrid
     dt : float — time step (for upwind sign test)
+    u_d_old, v_d_old : optional D-grid winds at d_sw entry (OLD u_d,
+        OLD v_d).  Iter-947: when both are provided AND duogrid ng>=3,
+        the vc/uc halo cells used in the 4-cell averages are sourced
+        from `_pad_halo_uc_vc_new_via_old_delta` (NEW-corrected
+        cross-face halo) instead of `mode='edge'`.
 
     Returns
     -------
@@ -296,17 +380,22 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
     # increment that was added to interior uc, vc — small for W2
     # geostrophic balance, but iter-947+ may close that O(dt2 * grad)
     # gap by extending c_sw / p_grad_c to halo positions.
-    # iter-946 (NEGATIVE-RESULT): tried `_pad_halo_uc_vc_via_d2a2c`
-    # to source vc/uc halo from OLD u_d, v_d via d2a2c machinery.  The
-    # OLD-derived halo lacks the c_sw + p_grad_c increment that was
-    # added to interior vc, uc, producing an OLD/NEW discontinuity at
-    # cube-face boundaries that worsened W2 |v_max| from 81 → 156 m/s
-    # at C36 1-day.  Reverted; mode='edge' is the better mismatch
-    # (consistent boundary cells) until iter-947+ propagates the
-    # c_sw + p_grad_c increments to halo.  See
-    # `_pad_halo_uc_vc_via_d2a2c` docstring for full measurement table.
-    vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    # iter-947 (Fortran-fidelity fix): use NEW-corrected halo via
+    # `_pad_halo_uc_vc_new_via_old_delta`.  See helper docstring
+    # for the formula NEW_halo = NEW_boundary + (OLD_halo - OLD_boundary)
+    # which carries the OLD cross-face geometric delta while
+    # preserving the c_sw + p_grad_c increment.  Requires u_d, v_d
+    # (the OLD inputs to d_sw — already available as parameters of
+    # `_d_sw1_recompute_ut_vt`'s caller `_d_sw_native`).  Iter-947's
+    # caller in `_d_sw_native` forwards them via `u_d_old`/`v_d_old`
+    # kwargs introduced for this purpose.
+    if (use_duogrid and dg.ng >= 3
+            and u_d_old is not None and v_d_old is not None):
+        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
+            uc, vc, u_d_old, v_d_old, cdgrid)
+    else:
+        vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
     # vc_pad[:, I, :] = vc at padded row I → original row I-1
     # 4-cell average at each u-face (I, j): vc(I-1,j)+vc(I,j)+vc(I-1,j+1)+vc(I,j+1)
     vc_avg = (vc_pad[:, :-1, :-1] + vc_pad[:, 1:, :-1]
@@ -2434,14 +2523,21 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # interior corners are bit-identical to pre-iter-946.  Caveat
     # (same as in `_d_sw1_recompute_ut_vt`): derived halo lacks the
     # c_sw + p_grad_c increment.
-    # iter-946 (NEGATIVE-RESULT): see `_pad_halo_uc_vc_via_d2a2c`
-    # docstring.  d2a2c halo for d_sw3 corner Courant was tested at
-    # C36 W2 and made |v_max| WORSE (81 → 150 m/s) due to OLD u_d /
-    # NEW interior uc, vc discontinuity at boundaries.  Reverted to
-    # mode='edge'; the iter-945 D-grid PPM cross-face halo
-    # (downstream of vb/ub) is preserved.
-    vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    # iter-947 (Fortran-fidelity fix, post-iter-946 negative result):
+    # use `_pad_halo_uc_vc_new_via_old_delta` to source NEW-corrected
+    # cross-face halo for vc/uc.  The helper combines the iter-946
+    # d2a2c-derived OLD halo with the NEW interior boundary cell to
+    # estimate NEW halo = NEW_boundary + (OLD_halo - OLD_boundary).
+    # This fixes the iter-946 OLD/NEW discontinuity by anchoring the
+    # halo on the NEW boundary value while still carrying the OLD
+    # cross-face geometric delta.  Falls back to `mode='edge'` for
+    # non-duogrid or duogrid with ng<3 (same gate as iter-946).
+    if use_duogrid and dg.ng >= 3:
+        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
+            uc, vc, u_d, v_d, cdgrid)
+    else:
+        vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
     vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]  # (6, n+1, n+1)
     uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]  # (6, n+1, n+1)
 
@@ -2606,7 +2702,11 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     # === 1. Contravariant transport velocity from updated C-grid ===
     # Use FV3 d_sw1 boundary handling (adjacent strips + corner 2×2 solve)
     # for cross-face consistent transport at panel boundaries.
-    ut, vt = _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt)
+    # Iter-947: forward OLD u_d, v_d so the duogrid path can compute
+    # NEW-corrected cross-face vc/uc halo via
+    # `_pad_halo_uc_vc_new_via_old_delta`.
+    ut, vt = _d_sw1_recompute_ut_vt(
+        uc, vc, cdgrid, dt, u_d_old=u_d, v_d_old=v_d)
     # iter-944b: REVERTED iter-944's CGRID_NE sync of (ut, vt) here.
     # Fortran reference dyn_core.F90:855-900 syncs only the MASS flux
     # (`fxx_delp/fyy_delp`) via `mpp_get_boundary(... gridtype=CGRID_NE)`,

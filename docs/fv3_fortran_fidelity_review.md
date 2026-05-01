@@ -46,9 +46,15 @@ Use git history for retired prose.
   OLD-u_d derivation lacks the c_sw + p_grad_c increment (~15 m/s
   on vc for W2) that was added to interior, producing an OLD/NEW
   discontinuity at boundaries that worsened |v_max| (81 → 156 m/s).
-  Reverted; helper retained as dead-code reference.  iter-947+
-  must propagate c_sw + p_grad_c increments to halo before
-  re-enabling.
+  Reverted; helper retained as dead-code reference.
+- Iter-947: NEW-corrected uc, vc halo via
+  `_pad_halo_uc_vc_new_via_old_delta`, using
+  `NEW_halo = NEW_boundary + (OLD_halo - OLD_boundary)`.  Anchors
+  on the NEW interior boundary (preserves c_sw + p_grad_c increment)
+  while carrying the OLD cross-face geometric delta as an additive
+  correction.  Wired into d_sw1 + d_sw3 for duogrid ng>=3.  Result:
+  |u_max| 78 → 77, |v_max| 81 → 75.  Cumulative since iter-944b:
+  |v_max| 151 → 75 (50% reduction).  W2 acceptance still NOT met.
 - FB/duogrid scaffolding (`halo=3`, flux sync, `d_sw*` helpers)
   refined; C24/C36 W2 fidelity remains the open blocker for
   using FB chain as the production path.
@@ -232,6 +238,96 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 **Verification.**  iter-942 sentinel (1/1) and production sentinels still pass post-revert.
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-947 — NEW-corrected uc, vc halo via OLD-cross-face delta (duogrid W2 1-day |v| 81→75 m/s)
+
+**Trigger.**  iter-946 (negative-result) showed that sourcing uc, vc
+halo from OLD u_d, v_d via the d2a2c machinery introduces an
+OLD/NEW discontinuity at cube-face boundaries (worsened W2 |v_max|
+81 → 156 m/s).  The iter-946 helper carries the correct cross-face
+geometric delta but lacks the c_sw + p_grad_c increment that
+modifies the NEW interior uc, vc.
+
+**Iter-947 fix.**  New helper `_pad_halo_uc_vc_new_via_old_delta`
+combines the iter-946 OLD halo with the NEW interior boundary cell
+to estimate the NEW cross-face halo via:
+
+    NEW_halo = NEW_boundary + (OLD_halo - OLD_boundary)
+             = NEW_boundary + cross_face_delta_from_OLD
+
+This anchors the halo on the NEW interior boundary cell (preserving
+the c_sw + p_grad_c increment) while carrying the OLD cross-face
+geometric delta (the rotation between cube faces) as an additive
+correction.  The two contributions are nearly orthogonal for W2
+(c_sw + p_grad_c is smooth on a face; cross-face delta is smooth
+across faces), so summing them gives a good first approximation of
+the true NEW halo.
+
+Wired into BOTH `_d_sw1_recompute_ut_vt` Part 1 and
+`_bgrid_ke_transport` Step 1 for the duogrid ng>=3 path,
+replacing `mode='edge'`.  The non-duogrid path falls back to
+`mode='edge'` (no `_pad_halo_uc_vc_via_d2a2c`-equivalent for
+non-duogrid).
+
+**Cumulative duogrid FB chain on W2 C36 dt=300 s 1-day:**
+
+| iter           | step survival | |u_max| (m/s) | |v_max| (m/s) |
+|----------------|--------------:|--------------:|--------------:|
+| iter-944b      |    288 / 288  |        106    |        151    |
+| iter-945       |    288 / 288  |         78    |         81    |
+| iter-946       |    288 / 288  |         73    |        156    | ← reverted |
+| **iter-947**   |    288 / 288  |     **77**    |     **75**    |
+| analytical     |        ∞      |         40    |          0    |
+
+|v_max| improved 81 → 75 m/s (~7%); |u_max| approximately unchanged
+(78 → 77).  Cumulative since iter-944b baseline: |u_max| 106 → 77
+(27 % reduction toward analytical 40), |v_max| 151 → 75 (50 %
+reduction toward analytical 0).  W2 v_ll_Linf acceptance still NOT
+met — the 75 m/s |v_max| is still ~600x the 0.119 m/s acceptance
+threshold.
+
+**Iter-947 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_pad_halo_uc_vc_new_via_old_delta`
+   — new helper (~70 lines) wrapping iter-946's
+   `_pad_halo_uc_vc_via_d2a2c` plus a NEW-boundary anchor.
+2. `_d_sw1_recompute_ut_vt` gains optional `u_d_old`/`v_d_old`
+   kwargs that, when supplied (and duogrid ng>=3), trigger the
+   iter-947 halo path.
+3. `_bgrid_ke_transport` calls the iter-947 helper directly (uses
+   its existing `u_d`, `v_d` parameters).
+4. `_d_sw_native` forwards `u_d_old=u_d, v_d_old=v_d` to
+   `_d_sw1_recompute_ut_vt` so the iter-947 halo path fires.
+5. `tests/test_iter947_uc_vc_new_via_old_delta.py` — 3 sentinels
+   (helper shapes & interior preservation, duogrid W2 |u|/|v|
+   improvement vs iter-945, non-duogrid baseline preserved).
+6. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**Verification.**  20 cross-iter sentinels (iter-921, 922, 923, 924,
+925, 926, 928, 930, 931, 932, 934, 938, 941, 942, 944, 945, 946) +
+3 iter-947 sentinels pass.  Production W2 / W5 / cosine-bell /
+rest-state sentinels remain bit-identical.
+
+**Backlog for iter-948+.**
+
+1. Improve the c_sw + p_grad_c increment estimation: iter-947's
+   approximation is `delta_at_halo ≈ delta_at_boundary` (extrapolation
+   by NEW boundary anchoring).  A more accurate approach would
+   compute the actual c_sw + p_grad_c increment AT halo positions
+   by extending the metric tensors and pad_halo machinery.
+2. Operator-split sweep order audit in `_bgrid_ke_transport`
+   (Lin-Rood y-then-x for `transported_y` vs x-then-y for
+   `transported_x`) — possibly missing a 2D average.
+3. PPM hord=9 cube-edge boundary overrides for ytp_v / xtp_u
+   (analogous to `apply_fortran_xppm_boundary` on tp_core.F90's
+   xppm/yppm — separate from the iter-945 halo fix).
+4. Vorticity flux halo (currently `mode='edge'` inside `fv_tp_2d`
+   for the FB chain vorticity transport).
+
+**Process.**  Real production code change in the FB chain (one new
+helper, two call-site updates).  No production behaviour change at
+default `FV3EdgeShallowWaterModel`.  Production W2 baseline
+unchanged at v_ll_Linf=0.132 m/s.
 
 ### Iter-946 — NEGATIVE-RESULT: d2a2c-derived uc, vc halo conflicts with c_sw+p_grad_c interior
 
