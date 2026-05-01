@@ -405,6 +405,64 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-998 — Smooth uc/vc between p_grad_c and d_sw: no gain (residual is in d_sw itself)
+
+**Trigger.**  Iter-994's 8.08 m/s residual is intrinsic to the FB
+chain.  Iter-998 tests whether smoothing C-grid winds INSIDE the
+FB step (between c_sw + p_grad_c and d_sw) suppresses the seam
+mode at its source.
+
+**Method.**  After `p_grad_c` updates uc, vc, apply meridional
+v_north smoother on uc, vc (cell-centre roundtrip + edge averaging
+back to C-grid positions).  Then proceed to `_d_sw_native` as
+normal.
+
+**Iter-998 sweep** (with iter-994 post-step smoother active,
+damp_v=0.30, n_pass=3):
+
+| damp_uvc | v_ll | h_err |
+|----------|------|-------|
+|   0.0    | 8.08 | 2567  |  (iter-994)
+|   0.05   | 8.14 | 2568  |
+|   0.10   | 8.19 | 2569  |
+|   0.20   | 8.31 | 2570  |
+|   0.40   | 8.55 | 2571  |
+
+V_ll INCREASES with damp_uvc.  Pre-smoothing C-grid winds does
+NOT suppress the seam mode at source — d_sw amplifies whatever it
+gets.
+
+**Conclusion.**  The 8.08 m/s residual is NOT inherited from c_sw
+or p_grad_c — it arises within d_sw itself (likely the
+`fv_tp_2d` vorticity transport with PPM at the seam).
+
+**Iter-998 deliverables.**
+
+1. `scripts/diag_iter998_uc_vc_smoothing.py` — pre-d_sw
+   smoothing test.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+**Final iter-985..998 conclusion.**
+
+The FB chain v_ll_Linf=8.08 m/s residual is structural and resides
+in d_sw's vorticity transport.  Reaching 0.119 m/s requires:
+
+1. Replace `fv_tp_2d` (in d_sw step 7) with a Fortran-faithful
+   PPM that handles cube-edge boundaries differently for the
+   duogrid path — maybe Fortran has a duogrid-specific xppm
+   variant we missed.
+2. OR migrate FB chain transport to production
+   `cgrid_mass_flux_divergence` which converges.
+3. OR migrate to RK3 + Arakawa-Lamb (production, already at
+   0.132 m/s).
+
+These are multi-week structural projects.  For this Ralph-loop
+session, **the practical floor of v_ll_Linf=8.08 m/s with
+external smoothing is the demonstrable progress**, a 6.9× cumulative
+reduction from the 55.61 m/s starting baseline.
+
 ### Iter-996/997 — Push d_sw5 + direction-selective smoothing: no further gain
 
 **Iter-996.**  With iter-994/995 fix active, push d_sw5 d2_bg /
