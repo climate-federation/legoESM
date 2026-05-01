@@ -491,6 +491,27 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1031 — Iter-1030 confirmed as local W5 optimum
+
+**Iter-1031 sweep around iter-1030 (8, 0.030):**
+
+| div | damp_v | W2 v_ll | W5 day-5 (h_min, spd) |
+|-----|--------|---------|------------------------|
+| **8** | **0.030** | **0.1138** | **(3888, 45.1)** ← iter-1030 |
+| 7   | 0.030  | 0.1150  | (3888, 45.9)           |
+| 7   | 0.025  | 0.1139  | (3890, 58.8)           |
+| 7   | 0.020  | 0.1143  | (3893, 68.6)           |
+| 6   | 0.030  | 0.1180  | (3888, 46.7)           |
+| 5   | 0.025  | 0.1208 ✗ | (3890, 61.1)         |
+| 8   | 0.025  | 0.1142  | (3890, 57.6)           |
+
+Going lower div (5, 6, 7) generally hurts W2 and produces similar
+W5.  Going lower damp_v (0.025, 0.020) hurts W5.  iter-1030's
+(8, 0.030) remains the local optimum for the dual-target.
+
+The user's "no artifacts" criterion is met with strong margin
+(44% headroom on W5 day-5 speed threshold).
+
 ### Iter-1030 — Even-better calibration: (div=8, damp_v=0.030) → W5 spd=45.1
 
 **Trigger.**  Iter-1021 found (div=9, damp_v=0.035) strictly better
