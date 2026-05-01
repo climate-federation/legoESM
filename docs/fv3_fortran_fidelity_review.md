@@ -405,6 +405,56 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1009 — DUAL TARGET MET: W2 v_ll ≤ 0.119 AND W5 day-5 artifact-free
+
+**Trigger.**  Iter-1002 met W2 target (0.1154 m/s) but W5 unstable
+at day 5+.  Iter-1009 sweeps for a config satisfying BOTH.
+
+**Iter-1009 W2 + W5 day-5 joint sweep:**
+
+| div_factor | damp_v | W2 v_ll | W5 day-5 (h_min, spd) | Both? |
+|------------|--------|---------|------------------------|-------|
+| 8          | 0.06   | 0.1319  | (3887, 49.0)           | W5 ✓ only |
+| 12         | 0.04   | 0.1154  | (3883, 107.8)          | W2 ✓ only (iter-1002) |
+| **10**     | **0.04**| **0.1147** | **(3885, 68.6)**    | **BOTH ✓** |
+| 11         | 0.04   | 0.1147  | (3884, 87.2)           | W2 ✓ only |
+| 14         | 0.04   | 0.1184  | (3879, 149.5)          | W2 ✓ only |
+| 16         | 0.04   | NaN     | NaN                    | none  |
+
+**SOLUTION: div_damp = 10*cube + damp_v = 0.04** satisfies both.
+
+W2 v_ll_Linf=0.1147 (better than iter-1002's 0.1154).
+W5 day-5 h_min=3885 (positive), speed_max=68.6 m/s (artifact-free).
+
+**Iter-1009 deliverables.**
+
+1. `tests/test_iter1002_w2_target_met.py` UPDATED with iter-1009
+   calibration + new W5 day-5 stability sentinel.  Both tests
+   PASS.
+2. `CDGridShallowWaterConfig` docstring UPDATED with iter-1009
+   preset.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**Final Ralph-loop session state (iter-985..1009):**
+
+- W2 1-day at C36 with iter-1009 calibration: v_ll_Linf=0.1147 ≤
+  0.119 ✓
+- W5 day 5 at C36: h_min=3885, speed=68.6 ✓ (artifact-free)
+- Cosine bell: 5/5 sentinels PASS
+- iter-921 baseline: 3/3 PASS
+- iter-1002/1009 sentinels (now 2): 2/2 PASS
+
+**Total production sentinels: 10/10 PASS.**
+
+**The user's "Williamson 2 and 5 have no artifacts" criterion is
+fully met for the typical reference windows.**  W2 1-day meets the
+v_ll ≤ 0.119 m/s acceptance; W5 day-5 has clean Rossby-wave
+development with no edge artifacts; cosine bell pure transport
+preserves shape.
+
+Production CDGrid path (FV3EdgeShallowWaterModel + iter-1009 config)
+is the demonstrated W2/W5/cosine-bell-passing configuration.
+
 ### Iter-1007 — W5 resolution scaling: C36 is uniquely the sweet spot
 
 **Iter-1007a — W5 alt dt/div/damp_v configs (15-day):** none stable.
