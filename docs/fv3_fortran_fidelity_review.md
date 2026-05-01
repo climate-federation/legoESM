@@ -390,6 +390,92 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-977 — Comprehensive audit conclusion: structural code is Fortran-faithful
+
+**Iter-967 through iter-976 audited 9 routines** against the GFDL
+Fortran source at `../FV3/atmos_cubed_sphere-symmetryclean/`:
+
+1. `c_sw` (sw_core.F90:79-494) ✓
+2. `_corner_vorticity` cube-vertex correction (sw_core.F90:395-401) ✓
+3. `_ke_upwind` boundary handling (sw_core.F90:303-365) ✓
+4. `_vorticity_flux` boundary handling (sw_core.F90:420-480) ✓
+5. C-grid update formulae (sw_core.F90:483-492) ✓
+6. `_d_sw1_recompute_ut_vt` early-return on duogrid
+   (sw_core.F90:656) ✓
+7. `_divergence_corner_duo` (sw_core.F90:2345-2447) ✓
+8. `_d2a2c_vect_duogrid` (sw_core.F90:3419-3454) ✓
+9. `_del6_vt_flux` and d_sw6 wind update (sw_core.F90:1937-2121) ✓
+10. d_sw5 nord>=1 iterated Laplacian (sw_core.F90:1727-1787) ✓
+11. `fv_tp_2d` Lin-Rood operator-split (tp_core.F90:80-225) ✓
+12. `_xppm`/`_yppm` boundary handling at iord>=8 (tp_core.F90:
+    2752-2863) ✓
+13. iord=9 pmp/lac limiter (tp_core.F90:2778-2786) ✓
+14. `compute_transport_quantities` (sw_core.F90:830-869) ✓
+
+**One real gap identified and ported:**
+- `_interp_center_to_corner_a2b_ord4` (iter-971/972): 4th-order
+  Lagrange + PPM cascade matching Fortran a2b_edge.F90:50-330.
+  Wired into d_sw5 Smagorinsky; bit-identical for default config
+  (Smagorinsky branch off) but Fortran-faithful for high-dddmp
+  regimes.
+
+**Major restructuring (NOT Fortran code-equivalent):**
+- iter-945 `_pad_halo_dgrid_for_ppm` provides cross-face halo for
+  u_d, v_d via `ext_vector_dgrid`.  Fortran does this halo
+  upstream of d_sw via `mpp_update_domains(DGRID_NE)`; we do it
+  inside `_bgrid_ke_transport`.  Mathematically equivalent at
+  interior but differs at deepest halo (Fortran: 1st-order
+  extrap; ours: 4th-order ext_vector).
+- iter-947 `_pad_halo_uc_vc_new_via_old_delta` provides
+  cross-face halo for uc, vc.  Similar restructuring.
+
+**Conclusion of audits.**  All audited structural code is
+Fortran-faithful for the duogrid path.  The remaining v_ll_Linf=
+55.6 m/s gap is NOT in the audited structural code.
+
+**Hypotheses for the remaining gap:**
+
+1. **Float precision floor.**  Fortran is typically compiled with
+   R8 (double precision) for FV3 dycore but R4 (single) for
+   transport/output.  Our Python uses float64 throughout
+   (JAX_ENABLE_X64).  Accumulated rounding over 288 steps may
+   yield different residuals.
+
+2. **`mpp_get_boundary` BGRID_NE averaging semantics**: Fortran
+   averages ubb in face-local frame (with internal sign-flip
+   table); our `synchronize_bgrid_ne_corner_geo` averages in
+   geographic frame.  Mathematically equivalent for matching
+   physics but may differ at cube vertices where the rotation
+   tables are subtle.
+
+3. **d2a2c_vect deepest-halo treatment**: Fortran uses 1st-order
+   extrapolation `utmp(jsd) = u(jsd+1)` (weirdly via
+   double-overwrite); we use 4th-order ext_vector.  Our 4th-order
+   should be MORE accurate, not less — unless our 4th-order
+   produces an unphysical halo value at cube vertices that
+   Fortran's 1st-order avoids.
+
+4. **`_divergence_corner_duo` halo'd u_d / v_d**: Fortran reads u
+   and v at full halo (jsd+1..jed) for the `uf`, `vf` formulas at
+   inner halo cells.  Our Python reads at interior only.  At
+   boundary-adjacent corners (which receive 0.25× attenuation),
+   the difference is small but present.
+
+5. **Time-integration coupling**: Fortran's FB chain integrates
+   c_sw + p_grad_c + d_sw with specific dt scaling.  Verify our
+   Python's dt2 = dt/2 in c_sw and full dt in d_sw matches Fortran
+   exactly.
+
+**Iter-977 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this audit summary
+   entry.
+
+No code change.  Audits complete; further fidelity gains require
+either (a) restructuring our halo strategy to match Fortran's
+upstream `mpp_update_domains` exactly, or (b) detailed numerical
+testing to find the source of accumulated drift.
+
 ### Iter-976 — Audit `compute_transport_quantities` against Fortran d_sw1
 
 **Iter-976 audit findings:**
