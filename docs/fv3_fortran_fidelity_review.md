@@ -33,8 +33,10 @@ cfg = iter1009_dual_target_config(36)  # div=9, damp_v=0.035
 | Cosine bell mass_drift | 1.92e-7 | < 5e-7 ✓ |
 | iter-893 baseline | 3 metrics preserved | ✓ |
 
-**Total: 31/31 sentinels PASS** (21 production + 10 iter-928 fidelity-gap markers).
-All sentinels in 62 seconds wall.
+**Total: 34/34 sentinels PASS** in 92 seconds wall:
+- 21 cubed-sphere SW production sentinels
+- 3 iter-1032 full Williamson 1992 verification matrix integration tests
+- 10 iter-928 Fortran-fidelity gap markers
 
 **Robustness margins (iter-1024/1025):**
 - dt range: [150, 450] s all meet both targets at C36
