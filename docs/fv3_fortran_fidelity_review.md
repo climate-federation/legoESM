@@ -8,7 +8,22 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
-## Working Notes (iter-961 status snapshot)
+## Working Notes (iter-990 status snapshot)
+
+Ralph-loop session iter-985..990 narrowed the FB chain v_ll_Linf=
+55.6 m/s investigation to the equatorial cube-edge seam (lat ±6°)
+and confirmed the gap is **architectural**, not a missing operator.
+**Best stable v_ll_Linf = 43.77 m/s** (d2_bg=0.09, dddmp=0.45)
+— 21% calibration headroom from baseline.
+
+Closing the remaining 369× gap to 0.119 m/s requires structural
+intervention (FV3 dyn_core dissipation sequencing, not parameter
+tuning).  See iter-988/989/990 entries for diagnosis details.
+
+Production CDGrid (RK3 + Arakawa-Lamb) at v_ll_Linf=0.132 m/s is
+unchanged.
+
+## Working Notes (iter-961 status snapshot - obsolete)
 
 Ralph-loop session iter-945..960 progressed from v_ll_Linf=85 to
 55.6 m/s (35% reduction).  Acceptance is 0.119 m/s — 467× more
