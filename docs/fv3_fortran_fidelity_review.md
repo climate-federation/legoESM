@@ -261,6 +261,36 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-957 — NEGATIVE-RESULT: existing apply_legacy_* flags are no-ops on duogrid
+
+**Trigger.**  Iter-947 closes the boundary halo gap; iter-948..954
+were all negative results.  Iter-957 verifies whether the existing
+opt-in flags `apply_legacy_d_sw4_corner_ke_fix` (iter-869) and
+`apply_legacy_d_sw5_corner_corrections` (iter-862) — which encode
+Fortran cube-vertex corrections — could be re-enabled with iter-947's
+better halo data quality.
+
+**Negative result.**  All four configurations on duogrid C36 W2 1-day
+give bit-identical v_ll_Linf=55.6130 m/s:
+
+| flags                                              | v_ll_Linf |
+|----------------------------------------------------|----------:|
+| default (no legacy)                                |   55.6130 |
+| apply_legacy_d_sw5_corner_corrections=True         |   55.6130 |
+| apply_legacy_d_sw4_corner_ke_fix=True              |   55.6130 |
+| BOTH                                               |   55.6130 |
+
+Reason: both flags are gated on `cdgrid.base.duogrid is None`
+(per their docstrings — they only fire on the non-duogrid path
+where the right-hand-side `vort_pad` / `uc_lap` data quality is
+known incomplete).  On duogrid they're silently no-op.
+
+iter-957 records the verification but no code change.  The cube-
+vertex corrections can be ported into the duogrid path (iter-958+
+candidate) but require care — the iter-862/iter-869 docstrings
+note the right-hand-side data needs cross-face halo to be
+Fortran-faithful.
+
 ### Iter-954 — NEGATIVE-RESULT: just the Part 2 sin_sg-upwind override at I=0/n on duogrid also regresses
 
 **Trigger.**  Iter-953 found running ALL of Parts 2/3/4 on duogrid
