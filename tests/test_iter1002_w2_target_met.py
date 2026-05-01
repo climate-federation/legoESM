@@ -65,6 +65,26 @@ def _make_iter1009_config(N):
     )
 
 
+def test_iter1013_preset_helper_matches_explicit_config():
+    """`iter1009_dual_target_config(N)` matches the explicit config."""
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        iter1009_dual_target_config,
+    )
+    N = 36
+    explicit = _make_iter1009_config(N)
+    preset = iter1009_dual_target_config(N)
+    # Compare key fields
+    assert abs(preset.div_damp - explicit.div_damp) < 1e-6, (
+        f"div_damp mismatch: preset={preset.div_damp}, "
+        f"explicit={explicit.div_damp}")
+    assert preset.damp_v == explicit.damp_v
+    assert preset.nord_v == explicit.nord_v
+    assert (preset.apply_fortran_xppm_boundary
+             == explicit.apply_fortran_xppm_boundary)
+    assert preset.boundary_fix == explicit.boundary_fix
+    assert preset.hyperdiff_coeff == explicit.hyperdiff_coeff
+
+
 def test_iter1002_w2_v_ll_linf_meets_target():
     """W2 C36 1-day v_ll_Linf ≤ 0.119 m/s with iter-1009 calibration."""
     N = 36

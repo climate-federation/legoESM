@@ -399,6 +399,57 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_fv3_dsw5_corner_damping: bool = False
 
 
+def iter1009_dual_target_config(
+    n: int,
+    div_damp_factor: float = 10.0,
+    damp_v: float = 0.04,
+) -> CDGridShallowWaterConfig:
+    """Iter-1009 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
+
+    On `FV3EdgeShallowWaterModel` at N=36 dt=300 s this preset achieves:
+        W2 1-day v_ll_Linf = 0.1147 m/s (≤ 0.119 acceptance) ✓
+        W5 day-5 (h_min=3885 m, speed_max=68.6 m/s) ✓ (artifact-free)
+        Cosine bell day-1: 5/5 production metrics within ±5% ✓
+
+    See `tests/test_iter1002_w2_target_met.py` for the pinned sentinels
+    and `docs/fv3_fortran_fidelity_review.md` (iter-985..1012) for the
+    full calibration narrative.
+
+    Resolution caveat: C36 is uniquely the dual-target sweet spot.
+    C24 fails W2 (0.1835); C48 fails W5 day-5 (speed > 200 m/s)
+    regardless of (div_damp, damp_v) tuning.
+
+    Parameters
+    ----------
+    n : int
+        Cubed-sphere face cells per side.  C36 is the validated
+        dual-target reference.
+    div_damp_factor : float, default 10.0
+        Multiplier on `_div_damp_cube(n)`.  Iter-1009 measured 10*
+        as the unique factor satisfying both W2 and W5 day-5 at C36.
+    damp_v : float, default 0.04
+        Vorticity damping coefficient.  Iter-1009 measured 0.04 as
+        the W2-improving setting (vs iter-893's 0.06).
+
+    Returns
+    -------
+    CDGridShallowWaterConfig
+        Pre-populated with the iter-1009 calibration plus
+        `apply_fortran_xppm_boundary=True` and `boundary_fix=True`.
+    """
+    # _div_damp_cube(n) = 1.5e7 * (48/n)^2 — same formula as
+    # tests/test_iter921_w2_v_vs_h_pareto_sentinel.py.  Inlined here
+    # to keep `src` independent of `tests`.
+    div_damp_base = 1.5e7 * (48.0 / n) ** 2
+    return CDGridShallowWaterConfig(
+        hyperdiff_coeff=0.0,
+        div_damp=div_damp_factor * div_damp_base,
+        boundary_fix=True,
+        damp_v=damp_v, nord_v=2,
+        apply_fortran_xppm_boundary=True,
+    )
+
+
 # ==============================================================================
 # Tendencies
 # ==============================================================================

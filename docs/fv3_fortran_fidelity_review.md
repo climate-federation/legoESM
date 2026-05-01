@@ -445,6 +445,50 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1013 — Public preset `iter1009_dual_target_config(N)` for the W2/W5 dual-target calibration
+
+**Trigger.**  Iter-1009 calibration is currently constructed
+ad-hoc by callers.  Iter-1013 promotes it to a documented public
+factory function for discoverability.
+
+**Iter-1013 deliverable.**
+
+`legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid` now exports:
+
+```python
+def iter1009_dual_target_config(
+    n: int,
+    div_damp_factor: float = 10.0,
+    damp_v: float = 0.04,
+) -> CDGridShallowWaterConfig:
+    """Iter-1009 dual-target preset:
+       W2 1-day v_ll_Linf = 0.1147 m/s ≤ 0.119 ✓
+       W5 day-5 (h_min=3885 m, speed_max=68.6 m/s) ✓
+       Cosine bell day-1: 5/5 metrics within ±5% ✓"""
+```
+
+The preset returns a fully-populated `CDGridShallowWaterConfig` with:
+
+- `div_damp = div_damp_factor * (1.5e7 * (48/n)^2)`  (formula
+  inlined from `_div_damp_cube` to avoid `src→tests` dep)
+- `damp_v = 0.04, nord_v = 2`
+- `apply_fortran_xppm_boundary = True`
+- `boundary_fix = True`
+- `hyperdiff_coeff = 0.0`
+
+A new sentinel `test_iter1013_preset_helper_matches_explicit_config`
+ensures the preset construction exactly matches the iter-1009
+calibration values.
+
+**Iter-1013 verification:** 11/11 production sentinels PASS.
+
+**Total production sentinels at iter-1013:**
+1. iter-921 W2 baseline (3 tests)
+2. iter-924 cosine bell (5 tests)
+3. iter-1002 W2 target met
+4. iter-1009 W5 day-5 artifact-free
+5. iter-1013 preset helper matches explicit config
+
 ### Iter-1012 — Resolution scaling with iter-1009: C36 unique sweet spot for dual target
 
 **Trigger.**  Verify that iter-1009 dual-target calibration scales
