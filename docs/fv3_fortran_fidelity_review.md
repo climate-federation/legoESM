@@ -445,6 +445,50 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1018 — C48 dual-target search: NEGATIVE (W5 day-5 < 80 m/s unreachable)
+
+**Trigger.**  Iter-1017 added warning that iter-1009 calibration is
+C36-only.  Iter-1018 attempts to recalibrate at C48 to extend the
+validated resolution range.
+
+**C48 sweep:** 14 (div_damp_factor, damp_v) configs:
+
+| div | damp_v | W2 v_ll | W5 day-5 (h_min, spd) |
+|-----|--------|---------|------------------------|
+| 10  | 0.04   | 0.1089 ✓ | (2397, 239.2) ✗     |
+| 12  | 0.04   | 0.1091 ✓ | (2833, 215.5) ✗     |
+| 16  | 0.04   | 0.1106 ✓ | (3235, 205.4) ✗     |
+| 10  | 0.10   | 0.1185 ✓ | (3074, 104.7) ✗     |  (closest)
+| 12  | 0.10   | 0.1137 ✓ | (3465, 114.5) ✗     |
+| 16  | 0.02   | 0.1130 ✓ | (1159, 351.6) ✗     |
+| 8   | 0.08   | 0.1257 ✗ | (3848, 115.0) ✗     |
+
+**No C48 config achieves W5 day-5 speed_max < 80 m/s.**  Closest is
+(div=10, damp_v=0.10) → speed=104.7 m/s.  W2 still passes at most
+configs.
+
+**Conclusion.**  C48 W5 day-5 instability is structural — cannot
+be calibrated away with available production-path knobs.  Same
+family of cube-edge cube-sphere shallow water aliasing observed in
+iter-989 (FB chain N=48 worse).
+
+The iter-1017 warning correctly flags non-C36 calibrations as
+unsupported.
+
+**Iter-1018 deliverables.**
+
+1. `scripts/diag_iter1018_c48_search.py` — C48 sweep.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+**Backlog for iter-1019+:**
+
+1. Implement Fortran's polar boundary handling (fv_grid_utils.F90)
+   if there's a specific polar damping or PPM treatment we missed.
+2. Test alternative time integrators (Strang split between mass
+   and momentum).
+
 ### Iter-1017 — Codex adversarial review: add resolution warning to iter-1009 preset
 
 **Codex review of iter-985..1016 work flagged Q5:** the preset
