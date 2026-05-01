@@ -445,6 +445,41 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1022 — Iter-1021 calibration day-by-day W5 + C18 verification
+
+**Iter-1022a — W5 day-by-day with iter-1021 calibration:**
+
+| day | h_min | h_max | speed_max | OK? |
+|-----|-------|-------|-----------|-----|
+|  1  | 3907  | 5967  |   26.1    | ✓   |
+|  2  | 3912  | 5966  |   35.1    | ✓   |
+|  3  | 3907  | 5966  |   39.2    | ✓   |
+|  4  | 3901  | 5981  |   39.5    | ✓   |
+|  5  | 3886  | 6369  | **53.3**  | ✓   |
+|  6  | 3779  | 6626  |  184.2    | ✗   |
+|  7  | 2822  | 7202  |  187.8    | ✗   |
+| 10  |  330  | 8581  |  765.0    | ✗   |
+
+W5 day-6 instability persists with iter-1021 (same as iter-1009).
+The structural day-6+ gap is independent of (div_factor, damp_v)
+calibration.
+
+**Iter-1022b — C18 verification (preset must warn):**
+
+C18 at iter-1021 calibration: W2 v_ll explodes to 681 m/s,
+W5 day-3 hits NaN.  Calibration is C36-only as iter-1017 warning
+correctly states.
+
+**Iter-1022 deliverables.**
+
+1. `scripts/diag_iter1022_w5_dayly.py` — W5 day-by-day probe.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.  Iter-1017's resolution warning
+prevents misuse on non-C36; iter-1021's calibration is the
+strict-best at C36 with the documented day-1..5 W5 reference
+window.
+
 ### Iter-1021 — STRICTLY BETTER calibration: (div=9, damp_v=0.035)
 
 **Trigger.**  Iter-1009 at (div=10, damp_v=0.04) was the
