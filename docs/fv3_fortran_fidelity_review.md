@@ -390,6 +390,51 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-976 — Audit `compute_transport_quantities` against Fortran d_sw1
+
+**Iter-976 audit findings:**
+
+1. **Fortran d_sw1 transport-quantity formulas** (sw_core.F90:830-869):
+   ```fortran
+   xfx_adv(i,j) = dt*ut(i,j)                          ! line 832
+   if ( xfx_adv(i,j) > 0. ) then
+      crx_adv(i,j) = xfx_adv(i,j) * rdxa(i-1,j)        ! upwind cell i-1
+      xfx_adv(i,j) = dy(i,j)*xfx_adv(i,j)*sin_sg(i-1,j,3)
+   else
+      crx_adv(i,j) = xfx_adv(i,j) * rdxa(i,j)          ! upwind cell i
+      xfx_adv(i,j) = dy(i,j)*xfx_adv(i,j)*sin_sg(i,j,1)
+   end if
+   ```
+
+2. **Our Python `compute_transport_quantities`** (fv_tp_2d.py:536):
+   - `xfx_raw = dt * ut`
+   - Upwinding on `ut > 0` (equivalent to `dt*ut > 0` since dt > 0). ✓
+   - `crx = xfx_raw * rdxa(upwind cell)`. ✓
+   - `xfx = xfx_raw * dy * sin_sg(upwind edge)`. ✓
+   - sin_sg edge index: 3=E (Fortran 1-indexed) ↔ 2=E (Python
+     0-indexed) for `i-1` upwind; 1=W ↔ 0=W for `i` upwind. ✓
+   - Same logic for cry/yfx in the y-direction. ✓
+   - `ra_x = area + xfx[i] - xfx[i+1]` matches Fortran. ✓
+   - `pad_halo` with duogrid for rdxa, rdya, sin_sg — matches
+     Fortran's bounded_domain path that skips copy_corners.  ✓
+
+**Conclusion.**  `compute_transport_quantities` is Fortran-faithful
+for the duogrid path.
+
+**Iter-976 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.
+
+**Backlog for iter-977+.**
+
+1. **`mpp_get_boundary` BGRID_NE averaging semantics** —
+   compare Fortran's face-local averaging (with internal rotation
+   table) vs our `synchronize_bgrid_ne_corner_geo` (geo-frame
+   averaging).
+2. Float precision floor.
+
 ### Iter-975 — Audit `fv_tp_2d` xppm/yppm against Fortran tp_core.F90
 
 **Iter-975 audit findings:**
