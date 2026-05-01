@@ -405,6 +405,105 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-996/997 — Push d_sw5 + direction-selective smoothing: no further gain
+
+**Iter-996.**  With iter-994/995 fix active, push d_sw5 d2_bg /
+dddmp past iter-963's stable point:
+
+| d2_bg | dddmp | v_ll  | h_err |
+|-------|-------|-------|-------|
+| 0.09  | 0.45  |  8.33 | 1589  |  (iter-995)
+| 0.15  | 0.6   |  NaN  | -     |
+| 0.20+ | ...   |  NaN  | -     |
+
+The post-step smoother does NOT unlock higher d_sw5 — the
+instability still hits at d2_bg ≥ 0.15.
+
+**Iter-997.**  Direction-selective meridional smoothing:
+
+| damp | direction | v_ll  | h_err |
+|------|-----------|-------|-------|
+| 0.55 |   ij      |  8.20 | 2945  |  (iter-993, baseline)
+| 0.55 |   i only  | 31.64 | 8276  |
+| 0.55 |   j only  | 12.36 | 3213  |
+| ≥1.0 |   either  |  NaN  | -     |
+
+The seam mode has both i AND j structure; smoothing both
+directions (ij combined) is the only effective option.
+
+**Iter-996/997 deliverables.**
+
+1. `scripts/diag_iter996_pushed_dsw5.py` — d_sw5 push with
+   smoother active.
+2. `scripts/diag_iter997_directional_smoothing.py` —
+   direction-selective sweep.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+## Final Ralph-loop session summary (iter-985..997)
+
+This Ralph-loop session targeted reducing FB chain v_ll_Linf from
+55.61 m/s toward the 0.119 m/s acceptance.
+
+**Cumulative progression:**
+
+| iter      | mechanism                                  | v_ll  | h_err  |
+|-----------|--------------------------------------------|-------|--------|
+| baseline  | (default FB chain, no Smag, no smoother)   | 55.61 | 18591  |
+| iter-959  | Smag tweak d2=0.01, dddmp=0.05             | 53.17 | 17423  |
+| iter-963  | Smag d2=0.09, dddmp=0.45                   | 43.77 | 12855  |
+| iter-993  | + 1-pass meridional damp=0.55              |  8.20 |  2945  |
+| iter-994  | + 3-pass meridional damp=0.30              |**8.08**|  2567  |
+| iter-995  | + mass-conserving h smoother damp_h=0.05   |  8.33 |**1589**|
+
+**Total improvement: 55.61 → 8.08 m/s (6.9× reduction).**
+
+**Remaining gap to acceptance: 8.08 / 0.119 = 68×.**
+
+**Key findings (iter-985..989).**
+
+1. The FB chain v_ll_Linf=55.6 m/s peak concentrates at equatorial
+   cube-edge seams (lat ±6.34°), NOT cube vertices (iter-985).
+2. PPM duogrid bypass is Fortran-faithful (iter-987); cube_rmp
+   accounts for only 0.2% of v_ll.
+3. Lin-Rood inter-sweep halo is structurally sound (iter-988).
+4. Resolution scaling shows error GROWS with N=48 → unresolved
+   grid-scale instability (iter-989).
+5. The FV3FBShallowWaterModel docstring explicitly says "known
+   unstable for finite dt without additional dissipation".
+
+**Calibration headroom (iter-990..995).**
+
+- Smagorinsky d_sw5: max stable at d2=0.09, dddmp=0.45 (iter-990).
+- Direct wind smoothing destroys geostrophic balance (iter-991/992).
+- Meridional v_north-only smoothing PRESERVES balance (iter-993).
+- Multi-pass converges to v_ll≈8.08 residual (iter-994).
+- Mass-conserving h smoother halves h_err (iter-995).
+
+**The 8.08 m/s residual is the FB chain's intrinsic accuracy
+floor** even with optimal external smoothing, established by
+iter-994.
+
+**The 68× remaining gap requires structural intervention:**
+
+1. Replace `transport_step` (FB chain mass transport with
+   `fv_tp_2d`) with production `cgrid_mass_flux_divergence`.
+2. Implement FV3 dyn_core's exact dissipation sequencing
+   (dyn_core.F90:850-1207 boundary syncs and del-n smoothers
+   between c_sw → p_grad_c → d_sw phases).
+3. Use Strang splitting between mass and momentum.
+4. Migrate to RK3 + Arakawa-Lamb (production path; already
+   achieves v_ll_Linf=0.132 m/s).
+
+**Status.**  This Ralph-loop session has converged on the
+quantitative bound (8.08 m/s practical floor, 68× from target)
+and the architectural diagnosis.  The remaining work is multi-
+week structural and outside the Ralph-loop's iterative scope.
+
+**Production CDGrid (RK3 + Arakawa-Lamb) is unchanged at
+v_ll_Linf=0.132 m/s** — Fortran-grade fidelity already.
+
 ### Iter-995 — Mass-conserving h smoother: small h_err win, can't reduce v_ll floor
 
 **Trigger.**  Iter-994 found smoothing residual at v_ll_Linf≈8.08
