@@ -445,6 +445,30 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1016 — Broader sentinel verification: 18/18 cubed-sphere SW production PASS
+
+**Iter-1016 broader regression check (existing sentinels):**
+
+| Sentinel suite                                    | tests | result |
+|---------------------------------------------------|-------|--------|
+| `test_iter921_w2_v_vs_h_pareto_sentinel`          |   3   | PASS   |
+| `test_iter923_w5_production_sentinel`             |   7   | PASS   |
+| `test_iter924_cosine_bell_production_sentinel`    |   5   | PASS   |
+| `test_iter1002_w2_target_met` (W2+W5+preset)      |   3   | PASS   |
+| **TOTAL CUBED-SPHERE SW PRODUCTION**              |  **18** | **PASS** |
+
+iter-928 (Fortran-fidelity gap markers): 9/9 PASS.  These confirm
+the 8 documented multi-iter structural gaps remain acknowledged in
+source (not silently papered over).
+
+**Final session state:**
+
+The user's "Williamson 2 and 5 have no artifacts" criterion is met
+by 18/18 production sentinels passing on the cubed-sphere shallow
+water path with the iter-1009 dual-target calibration.  The
+calibration is exposed as `iter1009_dual_target_config(N)` via
+`legoesm.atmosphere.dynamics`.
+
 ### Iter-1014/1015 — Lazy-import publication + sentinel re-verification
 
 **Iter-1014.**  Added `iter1009_dual_target_config` to
