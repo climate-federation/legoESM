@@ -141,7 +141,11 @@ def zhang_mcfarlane_convection(
     M_b_old = conv_prog_profile[:, -1]
     dt_over_tau = dt / jnp.maximum(config.tau_cape, dt)
     M_b = (M_b_old + dt_over_tau * M_b_eq) / (1.0 + dt_over_tau)
-    M_b = jnp.maximum(M_b, 0.0)
+    # Bound M_b to a literature peak tropical value (config.M_b_max,
+    # default 0.1 kg/m²/s).  Without this cap a column with very large
+    # CAPE drives M_b unboundedly and emits column heating that breaks
+    # the next dynamics step on the lat-lon FV pole-cell CFL.
+    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Plume launch / cloud-base index ------------------------------------
     # Surface parcel perturbed slightly per Zhang & McFarlane 1995 §3a;
@@ -165,18 +169,22 @@ def zhang_mcfarlane_convection(
         eps_profile, dlt_profile, M_b,
     )
 
+    # Cap plume.M_u once at the source so every downstream use (kernel
+    # tendencies, CMT, q_c sources) sees the same bounded value.  The
+    # kernel's internal cap is now redundant but kept for safety.
+    plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
+    plume = plume._replace(M_u=plume_M_u_capped)
+
     # -- Environmental tendencies via the shared mass-flux kernel ----------
-    dT_dt, dq_v_dt, _ = _apply_mass_flux_kernel(
+    # Plume splits vapor (``plume.q_u`` — saturation-clipped per level)
+    # and cloud water (``plume.q_c_u`` — accumulated condensation)
+    # explicitly, so the kernel's ``q_c_conv_dt`` is now the correct
+    # detrainment of plume cloud water and we use it directly.
+    dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, plume.M_u,
-        z, rho, config.delta_0,
+        plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
+        z, rho, config.delta_0, M_u_max=config.M_b_max,
     )
-    # Override the kernel's ``q_c`` source: the kernel assumes ``q_u``
-    # carries any super-saturation (Arakawa-Wu convention), but our
-    # plume saturates ``q_u`` internally and tracks cloud water in
-    # ``plume.q_c_u``.  Use the plume's explicit cloud-water profile.
-    rho_safe = jnp.clip(rho, 0.01, None)
-    dq_c_conv_dt = config.delta_0 * plume.M_u * plume.q_c_u / rho_safe
 
     # -- Convective momentum transport --------------------------------------
     if config.enable_cmt:

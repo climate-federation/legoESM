@@ -17,6 +17,8 @@ Tests pin:
 
 from __future__ import annotations
 
+from legoesm import constants
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -243,3 +245,41 @@ def test_tiedtke_orchestrator_one_step_finite():
     assert ps_out.conv_prog_profile.shape == (ncol, 12)
     for f in (tend.du_dt, tend.dv_dt, tend.dT_dt, tend.dp_s_dt, tend.dphis_dt):
         assert jnp.all(jnp.isfinite(f.data))
+
+
+# ---------------------------------------------------------------------------
+# MSE conservation guard
+# ---------------------------------------------------------------------------
+
+@pytest.mark.xfail(
+    reason=(
+        "Standard Tiedtke kernel (subsidence g/c_p + detrainment of "
+        "moist-adiabat T_u) does not conserve column MSE on a closed "
+        "(no-surface-flux) probe.  Currently ~96% non-conservation "
+        "residual on this CAPE-positive fixture; flagged xfail so any "
+        "future kernel improvement that closes this is detected."
+    ),
+    strict=True,
+)
+def test_tiedtke_mse_conservation_within_tolerance():
+    """Column-integrated ``c_p ∫dT + L_v ∫(dq_v + dq_c_conv) dp/g`` should
+    be small relative to the heating magnitude on a CAPE-positive sounding.
+    """
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out, _ = tiedtke_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, dt=1800.0,
+        config=TiedtkeConfig(enable_cmt=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    dp = ph[:, 1:] - ph[:, :-1]
+    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
+    assert rel < 0.30, (
+        f"Tiedtke MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total) "
+        f"exceeds 30% — kernel formulation has regressed"
+    )

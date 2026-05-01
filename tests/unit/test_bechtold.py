@@ -20,6 +20,8 @@ Tests pin:
 
 from __future__ import annotations
 
+from legoesm import constants
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -157,12 +159,22 @@ def test_bechtold_deterministic_when_stochastic_off():
 
 def test_bechtold_stochastic_changes_with_key():
     """With ``enable_stochastic=True``, two different PRNG keys produce
-    different AR1 noise states and different diagnosed mass fluxes."""
+    different AR1 noise states and different diagnosed mass fluxes.
+
+    The fixture uses a high-CAPE sounding that drives diagnosed M_b
+    above the production ``M_b_max=0.05`` cap on both keys; we set
+    ``M_b_max=10.0`` here so the cap does not bind and mask the
+    stochastic variation.  In production the cap is intentional — it
+    bounds single-step shocks from outlier columns — and a no-cap
+    setup like this should never appear in a real run.
+    """
     T, q, pf, ph, u, v = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     stoch = jnp.zeros((ncol,))
-    config = BechtoldConfig(enable_stochastic=True, stochastic_amplitude=0.5)
+    config = BechtoldConfig(
+        enable_stochastic=True, stochastic_amplitude=0.5, M_b_max=10.0,
+    )
     key1 = jax.random.PRNGKey(0)
     key2 = jax.random.PRNGKey(7)
     _, M1, s1 = bechtold_convection(T, q, pf, ph, u, v, cpp, stoch, key1, dt=300.0, config=config)
@@ -499,3 +511,39 @@ def test_bechtold_orchestrator_with_radiation_merges_dict_correctly():
     # Tendencies are finite.
     for f in (tend.du_dt, tend.dv_dt, tend.dT_dt, tend.dp_s_dt, tend.dphis_dt):
         assert jnp.all(jnp.isfinite(f.data))
+
+
+# ---------------------------------------------------------------------------
+# MSE conservation regression guard (currently expected to fail)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.xfail(
+    reason=(
+        "Bechtold inherits the standard Tiedtke kernel for env tendencies, "
+        "but its PBL-CAPE closure pushes M_b larger than Tiedtke's, so "
+        "subsidence ``g/c_p`` heating overwhelms the kernel's vapor sink. "
+        "Currently ~92% non-conservation residual; flagged as xfail so "
+        "any future kernel improvement that closes this is detected."
+    ),
+    strict=True,
+)
+def test_bechtold_mse_conservation_within_tolerance():
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=1800.0,
+        config=BechtoldConfig(enable_stochastic=False, enable_cmt=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    dp = ph[:, 1:] - ph[:, :-1]
+    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
+    assert rel < 0.30, (
+        f"Bechtold MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total)"
+    )

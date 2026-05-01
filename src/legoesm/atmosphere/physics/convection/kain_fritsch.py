@@ -171,7 +171,9 @@ def kain_fritsch_convection(
         * cape
         / jnp.maximum(config.cape_consumption_time, dt)
     )
-    M_b = jnp.maximum(M_b, 0.0)
+    # Bound M_b to a literature peak tropical value
+    # (config.M_b_max, default 0.1 kg/m²/s) — see ZhangMcFarlaneConfig.
+    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Plume integration -------------------------------------------------
     # Same entraining-detraining plume as ZM, with KF default
@@ -199,15 +201,20 @@ def kain_fritsch_convection(
         shallow_weight = jnp.zeros_like(deep_weight)
     branch_weight = deep_weight + shallow_weight  # = 1 with shallow on; = deep_weight only
 
+    # Cap plume.M_u once at the source so every downstream use sees
+    # the bounded value (see ZM).
+    plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
+    plume = plume._replace(M_u=plume_M_u_capped)
+
     # -- Environmental tendencies via the shared mass-flux kernel ----------
-    dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
+    # Plume splits vapor (``plume.q_u``) and cloud water
+    # (``plume.q_c_u``) explicitly so we use the kernel's correct
+    # cloud-water source directly (see ZM).
+    dT_dt_raw, dq_v_dt_raw, dq_c_conv_dt_raw = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, plume.M_u,
-        z, rho, config.delta_0,
+        plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
+        z, rho, config.delta_0, M_u_max=config.M_b_max,
     )
-    # Override the kernel's ``q_c`` source — see ZM for rationale.
-    rho_safe = jnp.clip(rho, 0.01, None)
-    dq_c_conv_dt_raw = config.delta_0 * plume.M_u * plume.q_c_u / rho_safe
 
     # Apply the deep+shallow weight as a per-column scalar.
     dT_dt = dT_dt_raw * branch_weight[:, None]

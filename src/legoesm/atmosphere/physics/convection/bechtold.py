@@ -218,7 +218,8 @@ def bechtold_convection(
         stoch_factor = jnp.ones_like(M_b_deterministic)
 
     M_b = M_b_deterministic * jnp.maximum(stoch_factor, 0.0)
-    M_b = jnp.maximum(M_b, 0.0)
+    # See ZhangMcFarlaneConfig.M_b_max.
+    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Per-class entrainment / detrainment profiles ----------------------
     eps_per_class = (
@@ -243,7 +244,10 @@ def bechtold_convection(
     # -- Implicit-Euler relaxation of the M_u profile carry ---------------
     dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, dt)
     M_u_new = (conv_prog_profile + dt_over_tau * plume.M_u) / (1.0 + dt_over_tau)
-    M_u_new = jnp.maximum(M_u_new, 0.0)
+    # Cap M_u_new at config.M_b_max so every downstream use (kernel
+    # tendencies, dq_c_conv_raw, downdraft trigger, CMT, carry update)
+    # sees the same bounded value.
+    M_u_new = jnp.clip(M_u_new, 0.0, config.M_b_max)
 
     # -- Environmental tendencies (using relaxed M_u) ---------------------
     delta_0_eff = (
@@ -253,8 +257,8 @@ def bechtold_convection(
     )
     dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, M_u_new,
-        z, rho, float(config.delta_deep),
+        plume.T_u, plume.q_u, plume.q_c_u, M_u_new,
+        z, rho, float(config.delta_deep), M_u_max=config.M_b_max,
     )
     rho_safe = jnp.clip(rho, 0.01, None)
     dq_c_conv_dt_raw = (

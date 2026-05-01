@@ -205,7 +205,8 @@ def tiedtke_convection(
         + shallow_weight * M_b_shallow
         + midlevel_weight * M_b_midlevel
     )
-    M_b = jnp.maximum(M_b, 0.0)
+    # See ZhangMcFarlaneConfig.M_b_max.
+    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Plume integration -------------------------------------------------
     plume = entraining_detraining_plume(
@@ -217,7 +218,10 @@ def tiedtke_convection(
     # -- Implicit-Euler relaxation of the M_u profile carry ---------------
     dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, dt)
     M_u_new = (conv_prog_profile + dt_over_tau * plume.M_u) / (1.0 + dt_over_tau)
-    M_u_new = jnp.maximum(M_u_new, 0.0)
+    # Cap M_u_new at config.M_b_max so every downstream use (kernel
+    # tendencies, dq_c_conv_raw, downdraft trigger, CMT, carry update)
+    # sees the same bounded value.
+    M_u_new = jnp.clip(M_u_new, 0.0, config.M_b_max)
 
     # Use the relaxed M_u for the actual environmental tendencies — this
     # smooths the time evolution of the convective forcing.
@@ -231,10 +235,14 @@ def tiedtke_convection(
         + shallow_weight * config.delta_shallow
         + midlevel_weight * config.delta_midlevel
     )
+    # Kernel signature now takes (q_v_u, q_c_u) explicitly.  We still
+    # call with a single nominal ``delta_deep`` and rescale below by
+    # the per-column class blend to keep the existing branch-blending
+    # behaviour bit-identical.
     dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, M_u_for_kernel,
-        z, rho, float(config.delta_deep),  # nominal delta — overridden below
+        plume.T_u, plume.q_u, plume.q_c_u, M_u_for_kernel,
+        z, rho, float(config.delta_deep), M_u_max=config.M_b_max,
     )
     rho_safe = jnp.clip(rho, 0.01, None)
     dq_c_conv_dt_raw = (

@@ -127,7 +127,8 @@ def emanuel_convection(
         * smooth_positive_part(cape - config.cape_threshold, config.cape_sharpness)
         / config.sub_cloud_relaxation
     )
-    M_b = jnp.maximum(M_b_eq, 0.0)
+    # See ZhangMcFarlaneConfig.M_b_max.
+    M_b = jnp.clip(M_b_eq, 0.0, config.M_b_max)
 
     # -- Standard entraining plume from cloud base ------------------------
     eps_profile = jnp.full_like(T, config.epsilon_0)
@@ -168,19 +169,19 @@ def emanuel_convection(
     # Buoyancy-sort detrainment multiplier in [1, 1 + cu].
     sort_multiplier = 1.0 + 4.0 * config.cu_coefficient * ascending_var
 
+    # Cap plume.M_u once at the source so every downstream use sees
+    # the bounded value (see ZM).
+    plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
+    plume = plume._replace(M_u=plume_M_u_capped)
+
     # -- Environment tendencies via the shared mass-flux kernel ------------
-    dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
+    # Plume splits vapor (``plume.q_u``) and cloud water (``plume.q_c_u``)
+    # explicitly so we use the kernel's correct cloud-water source.
+    dT_dt_raw, dq_v_dt_raw, dq_c_conv_dt_raw = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, plume.M_u,
-        z, rho, config.delta_0,
+        plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
+        z, rho, config.delta_0, M_u_max=config.M_b_max,
     )
-    # The kernel's ``q_c_u`` source assumes ``q_u`` carries any
-    # super-saturation (Arakawa-Wu convention); our plume already
-    # saturates ``q_u`` internally and tracks cloud water in
-    # ``plume.q_c_u``, so override that term using the plume's
-    # explicit cloud-water profile.
-    rho_safe = jnp.clip(rho, 0.01, None)
-    dq_c_conv_dt_raw = config.delta_0 * plume.M_u * plume.q_c_u / rho_safe
 
     # Emanuel's per-level detrainment enhancement:
     dT_dt = dT_dt_raw * sort_multiplier
@@ -212,13 +213,35 @@ def emanuel_convection(
             * below_lcl
             / jnp.maximum(below_mass[:, None], 1e-6)
         )
-        # Evaporation cools T and moistens q.  Latent heat L_v / c_pd.
+        # Evaporation cools T and moistens q (BL).  Conserve column
+        # water by removing the same column-integrated mass from the
+        # cloud-water source — distributed proportional to where
+        # cloud water is *produced* (i.e. dq_c_conv_dt_raw), not where
+        # it evaporates (BL).  The earlier formulation subtracted
+        # ``evap_rate`` from ``dq_c_conv_dt`` *at the BL*, then clipped
+        # to zero — which lost the bookkeeping (the BL has little
+        # ``dq_c_conv_dt_raw``) and effectively created vapor from
+        # nothing, flipping the sign of column ``Q_v`` on CAPE-positive
+        # soundings.
         dT_evap = -(constants.L_v / constants.c_pd) * evap_rate
         dq_v_evap = evap_rate
         dT_dt = dT_dt + dT_evap
         dq_v_dt = dq_v_dt + dq_v_evap
-        # Net column condensate after evaporation.
-        dq_c_conv_dt = dq_c_conv_dt - evap_rate
+        # Per-column total evap [kg/m²/s] = downdraft_efficiency *
+        # column_condensate by construction.  Subtract from the source
+        # at the levels where condensate is produced to keep
+        # ``dq_c_conv_dt ≥ 0`` and column water conserved.
+        col_dq_c = jnp.sum(dq_c_conv_dt_raw * dp, axis=-1) / constants.g
+        weight = dq_c_conv_dt_raw / jnp.maximum(col_dq_c[:, None], 1e-12)
+        weight = jnp.where(
+            (col_dq_c > 1e-12)[:, None], weight, 0.0,
+        )
+        # ``∫ weight * dp/g = 1`` when ``col_dq_c > 0``, so
+        # ``∫ subtract * dp/g = downdraft_efficiency * col_dq_c``.
+        subtract = (
+            config.downdraft_efficiency * col_dq_c[:, None] * weight
+        )
+        dq_c_conv_dt = dq_c_conv_dt - subtract
 
     out = ConvectionOutput(
         dT_dt=dT_dt,
