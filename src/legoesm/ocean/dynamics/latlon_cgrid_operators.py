@@ -1760,6 +1760,94 @@ def leith_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+def neumann_fill_vertex(
+    f: jnp.ndarray,
+    vtx_mask: jnp.ndarray,
+    n_passes: int = 3,
+) -> jnp.ndarray:
+    """Fill land vertices with nearest ocean-neighbour (Neumann BC).
+
+    Vertex-level analog of ``_neumann_fill_cgrid`` for the
+    ``(n_lat+1, n_lon+1)`` vertex grid.  Longitude is periodic
+    (column ``n_lon`` duplicates column 0); rows 0 and ``n_lat`` are
+    pole vertices with Neumann padding in the meridional direction.
+
+    Public helper because it is reused by:
+      - the WENO branch of ``ocean_pe_latlon_cgrid`` (smooth q before
+        the smoothness-detector reconstruction)
+      - the AL81 ``pv_flux_al81_partial_cell`` helper (smooth q before
+        the 12-point triad stencil)
+
+    Parameters
+    ----------
+    f : (n_lat+1, n_lon+1, nlev) or (n_lat+1, n_lon+1)
+        Vertex field to fill.
+    vtx_mask : (n_lat+1, n_lon+1)
+        1 = ocean vertex, 0 = land vertex.
+    n_passes : int
+        Number of fill passes.  3 is sufficient to cover the typical
+        coastal triad stencil.
+
+    Returns
+    -------
+    filled : same shape as ``f``
+        ``f`` at ocean vertices; nearest-neighbour-averaged value
+        at land vertices that have at least one wet neighbour after
+        ``n_passes`` iterations; original value (typically zero) at
+        fully-isolated land vertices.
+    """
+    m = vtx_mask
+    filled = f
+
+    for _ in range(n_passes):
+        # N/S neighbours: Neumann padding at rows 0 and n_lat.
+        f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
+        m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
+        f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
+        m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+
+        # E/W neighbours: periodic on core columns 0..n_lon-1, then wrap.
+        # Column n_lon duplicates column 0, so rolling the full array
+        # along axis 1 is correct for the core columns and the wrap
+        # column picks up the right neighbour automatically.
+        f_w = jnp.roll(filled, 1, axis=1)
+        m_w = jnp.roll(m, 1, axis=1)
+        f_e = jnp.roll(filled, -1, axis=1)
+        m_e = jnp.roll(m, -1, axis=1)
+
+        is_land = m < 0.5
+
+        if f.ndim > 2:
+            m_s_e = m_s[..., jnp.newaxis]
+            m_n_e = m_n[..., jnp.newaxis]
+            m_w_e = m_w[..., jnp.newaxis]
+            m_e_e = m_e[..., jnp.newaxis]
+            is_land_e = is_land[..., jnp.newaxis]
+        else:
+            m_s_e = m_s
+            m_n_e = m_n
+            m_w_e = m_w
+            m_e_e = m_e
+            is_land_e = is_land
+
+        nbr_sum = f_s * m_s_e + f_n * m_n_e + f_w * m_w_e + f_e * m_e_e
+        nbr_count = m_s_e + m_n_e + m_w_e + m_e_e
+        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+
+        has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
+        if f.ndim > 2:
+            has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
+        else:
+            has_any_nbr_e = has_any_nbr
+
+        filled = jnp.where(is_land_e & has_any_nbr_e, nbr_avg, filled)
+        m = jnp.where(is_land & has_any_nbr, 1.0, m)
+
+    # Re-sync periodic wrap column.
+    filled = filled.at[:, -1].set(filled[:, 0])
+    return filled
+
+
 def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     """Compute vertex mask: wet only if all four surrounding cells are wet.
 
@@ -2281,6 +2369,349 @@ def density_jacobian_pgf_smc03_y(
     dlat = grid.dlat
     dy_v = R * dlat
     return diff / dy_v
+
+
+def pv_flux_al81_partial_cell(
+    zeta: jnp.ndarray,
+    h_vtx: jnp.ndarray,
+    h_v: jnp.ndarray,
+    v: jnp.ndarray,
+    h_u: jnp.ndarray,
+    u: jnp.ndarray,
+    u_mask_3d: jnp.ndarray,
+    v_mask_3d: jnp.ndarray,
+    vtx_mask: jnp.ndarray,
+    eps_h: float = 1.0e-10,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
+
+    Production-grade vector-invariant Coriolis advection on the
+    Arakawa C-grid for z-coordinate models with partial cells (NEMO
+    ``ln_zps`` regime).  Implements the 12-point triad (4-corner ⊗
+    3-vertex) stencil of Arakawa & Lamb (1981) — equivalent to NEMO
+    ``dyn_vor_een`` (Le Sommer et al. 2009) and to the Hamiltonian
+    discretisation of Salmon (2004) / Stewart & Dellar (2016) when
+    the AL81 coefficient set
+    {α, β, γ ∈ Appendix A, Stewart-Dellar 2016} is used.
+
+    The simple 2-point Sadourny enstrophy form
+    ``q_at_u = ½(q_S + q_N)`` is unstable on real partial-cell
+    bathymetry (live-T ETOPO 30-day NaN by day 19).  The AL81 form
+    suppresses the grid-scale q-noise mode at step vertices because
+    the 12-point triad averages q over **9 neighbouring vertices**
+    (not 2) at every face, with weights chosen so that **discrete
+    energy AND discrete potential enstrophy are conserved
+    simultaneously** in the inviscid, flat-bottom limit.
+
+    On partial cells, ``h_vtx`` (the F-point thickness, MITgcm
+    ``hFacZ`` / NEMO ``e3f``) absorbs the geometric dependence: at a
+    step vertex with one tall and three short surrounding cells,
+    ``h_vtx = min`` is small, so ``q = ζ/h_vtx`` is large there.
+    The triad's 1/12 weighting on each q value, combined with mass
+    fluxes ``h·v`` and ``h·u`` that vanish at closed faces, gives a
+    PV flux that is bounded and consistent with the same
+    ``min(h_W, h_E)`` face-thickness convention used in continuity
+    (Adcroft, Hill & Marshall 1997 eq. 11; Pacanowski & Gnanadesikan
+    1998 §3).
+
+    Index conventions (same as the rest of latlon_cgrid_operators)
+    --------------------------------------------------------------
+    - cell-centre  ``(j, i)``,           shape ``(n_lat, n_lon, nlev)``
+    - u-face       ``u[j, i]``  =  west face of cell ``(j, i)``,
+                                  shape ``(n_lat, n_lon+1, nlev)``,
+                                  periodic wrap ``u[:, n_lon] = u[:, 0]``.
+    - v-face       ``v[j, i]``  =  south face of cell ``(j, i)``,
+                                  shape ``(n_lat+1, n_lon, nlev)``,
+                                  with pole walls at ``j=0, n_lat``.
+    - vertex       ``q[j, i]``  =  SW corner of cell ``(j, i)``,
+                                  shape ``(n_lat+1, n_lon+1, nlev)``,
+                                  periodic wrap.
+
+    AL81 stencil
+    ------------
+    For each cell ``(j, i)`` define **four corner triads**, each the
+    1/12-weighted sum of the three vertices nearest the named corner
+    of that cell (the L-shape of corners excluding the diagonal):
+
+        SW corner triad : (q_SW, q_SE, q_NW)  / 12
+        SE corner triad : (q_SE, q_SW, q_NE)  / 12
+        NW corner triad : (q_NW, q_SW, q_NE)  / 12
+        NE corner triad : (q_NE, q_SE, q_NW)  / 12
+
+    where (using the array convention above) the four corners of
+    cell ``(j, i)`` are::
+
+        q_SW = q[j  , i  ]    q_SE = q[j  , i+1]
+        q_NW = q[j+1, i  ]    q_NE = q[j+1, i+1]
+
+    For u-face ``u[j, i]`` (between west cell ``(j, i-1)`` and east
+    cell ``(j, i)``), the AL81 PV-flux contribution is::
+
+        +F_u[j,i] = + SE_triad(west_cell) * V[j+1, i-1]
+                    + SW_triad(east_cell) * V[j+1, i  ]
+                    + NE_triad(west_cell) * V[j  , i-1]
+                    + NW_triad(east_cell) * V[j  , i  ]
+
+    where ``V = h_v · v`` is the meridional mass flux at v-faces.
+
+    For v-face ``v[j, i]`` (between south cell ``(j-1, i)`` and
+    north cell ``(j, i)``)::
+
+        -F_v[j,i] = + NW_triad(south_cell) * U[j-1, i+1]
+                    + NE_triad(south_cell) * U[j-1, i  ]
+                    + SW_triad(north_cell) * U[j  , i+1]
+                    + SE_triad(north_cell) * U[j  , i  ]
+
+    where ``U = h_u · u`` is the zonal mass flux at u-faces.
+
+    On a uniform-h, fully-wet grid this stencil reduces to a 9-point
+    average of q (the symmetric AL81 "energy-enstrophy compromise"),
+    not the 2-point Sadourny form.  In the smooth limit the truncation
+    error is the same O(d²) as Sadourny but the leading-order
+    grid-scale dispersion is much smaller — that is the property that
+    suppresses the partial-cell q-noise mode.
+
+    Land treatment
+    --------------
+    PV ``q = ζ/h_vtx`` is evaluated AFTER ``h_vtx`` has the active-cell
+    masking applied (``BIG_H`` on dry sides; min over wet cells gives
+    the true F-point wet thickness — MITgcm ``hFacZ``).  Where the
+    vertex itself is fully dry (all 4 surrounding cells inactive),
+    ``h_vtx → BIG_H`` makes ``q → 0`` — and the surrounding mass
+    fluxes ``V = h_v·v·v_mask`` and ``U = h_u·u·u_mask`` also vanish
+    at the closed faces, so triad contributions through dry vertices
+    are exactly zero (no spurious flow at the coast).
+
+    A Neumann fill of ``q`` at land-adjacent vertices (where
+    ``vtx_mask == 0`` but at least one neighbour is wet) replaces the
+    masked-zero value with the average of wet neighbours.  This
+    avoids a discontinuity in q at the coast that would otherwise
+    drive a spurious PV gradient even when the mass flux is zero
+    (the discontinuity does not affect the dynamics through ``q·F``,
+    but it pollutes the coupling to neighbouring faces through the
+    triad's 9-vertex stencil).  Same Neumann fill helper as is used
+    by the WENO branch.
+
+    Parameters
+    ----------
+    zeta : (n_lat+1, n_lon+1, nlev)
+        Relative vorticity at vertices.
+    h_vtx : (n_lat+1, n_lon+1, nlev)
+        F-point layer thickness (MITgcm hFacZ-like, min over active
+        cells with a ``BIG_H`` sentinel for fully-dry vertices).
+    h_v, v : (n_lat+1, n_lon, nlev)
+        Layer thickness and meridional velocity at v-faces.
+    h_u, u : (n_lat, n_lon+1, nlev)
+        Layer thickness and zonal velocity at u-faces.
+    u_mask_3d : (n_lat, n_lon+1, nlev) or broadcastable
+        u-face active mask (1 at wet faces, 0 at closed/dry faces).
+    v_mask_3d : (n_lat+1, n_lon, nlev) or broadcastable
+        v-face active mask.
+    vtx_mask : (n_lat+1, n_lon+1)
+        Vertex mask (1 if all 4 surrounding cells are wet, 0 otherwise);
+        used to drive the Neumann fill of q.
+    eps_h : float
+        Floor on ``h_vtx`` to avoid divide-by-zero at fully-dry verts.
+        Already partially handled by ``BIG_H`` sentinel; this is a
+        belt-and-braces guard.
+
+    Returns
+    -------
+    diag_vortcor_u : (n_lat, n_lon+1, nlev)
+        ``+ q · F_v`` contribution to ``du/dt`` at u-faces.
+    diag_vortcor_v : (n_lat+1, n_lon, nlev)
+        ``- q · F_u`` contribution to ``dv/dt`` at v-faces.
+
+    References
+    ----------
+    - Arakawa, A. and Lamb, V.R. (1981): A potential-enstrophy and
+      energy-conserving scheme for the shallow-water equations.
+      Mon. Wea. Rev. 109, 18-36.
+    - Salmon, R. (2004): Poisson-bracket approach to the construction
+      of energy- and potential-enstrophy-conserving algorithms for
+      the shallow-water equations.  J. Atmos. Sci. 61, 2016-2036.
+    - Stewart, A.L. and Dellar, P.J. (2016): An energy- and
+      potential-enstrophy-conserving numerical scheme for the
+      multilayer shallow-water equations with the complete Coriolis
+      force.  J. Comput. Phys. 313, 99-120.  (Appendix A: AL81
+      coefficient set.)
+    - Le Sommer, J., Penduff, T., Theetten, S., Madec, G., Barnier, B.
+      (2009): How momentum advection schemes influence
+      current-topography interactions at eddy-permitting resolution.
+      Ocean Modelling 29, 1-14.  (NEMO ``dyn_vor_een``;
+      recommendation for ``ln_zps``.)
+    - Adcroft, A. and Hallberg, R. (2006): On methods for solving the
+      oceanic equations of motion in generalized vertical
+      coordinates.  Ocean Modelling 11, 224-233.  (PV consistency on
+      partial cells.)
+    - Pacanowski, R.C. and Gnanadesikan, A. (1998): Transient response
+      in a z-level ocean model that resolves topography with
+      partial cells.  Mon. Wea. Rev. 126, 3248-3270.  (min-rule for
+      vertex thickness.)
+    """
+    # --- 1. PV at vertices, ``q = ζ / h_vtx`` ----------------------
+    # ``h_vtx`` already carries the BIG_H sentinel at fully-dry
+    # vertices (set by the caller) so q ≈ 0 there; eps_h is a guard
+    # against floating-point edge cases.
+    q = zeta / jnp.maximum(h_vtx, eps_h)
+
+    # Neumann-fill q at land-adjacent vertices so the triad sees a
+    # smooth field across coastlines.  The fill is idempotent at
+    # interior wet vertices (vtx_mask == 1).  Keeps q in the same
+    # 4D shape ``(n_lat+1, n_lon+1, nlev)`` as zeta.
+    q = neumann_fill_vertex(q, vtx_mask)
+
+    # --- 2. Mass fluxes at u/v faces -------------------------------
+    # ``F_u = h·u`` at u-faces, ``F_v = h·v`` at v-faces.  Multiply
+    # by the per-level face mask so closed/dry faces contribute
+    # exactly zero — required for q·F to vanish at the coast.
+    F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
+    F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+
+    # --- 3. Corner triads at every cell ----------------------------
+    # Each triad lives at a corner of a cell.  We index triads by the
+    # cell ``(j, i)`` they belong to, with shape ``(n_lat, n_lon,
+    # nlev)`` and the named corner indicating which 3 of the cell's
+    # 4 corner-q values are summed.
+    #
+    # Cell (j, i) has corners (using array indexing on q[j', i']):
+    #   q_SW = q[j  , i  ]    q_SE = q[j  , i+1]
+    #   q_NW = q[j+1, i  ]    q_NE = q[j+1, i+1]
+    #
+    # We need q_SW, q_SE, q_NW, q_NE as ``(n_lat, n_lon, nlev)``
+    # arrays.  Because ``q`` has shape ``(n_lat+1, n_lon+1, nlev)``
+    # with periodic wrap on the longitude axis (column n_lon == col
+    # 0), simple slicing extracts each corner.
+    q_SW = q[:-1, :-1, :]                # (n_lat, n_lon, nlev)
+    q_SE = q[:-1, 1:, :]
+    q_NW = q[1:, :-1, :]
+    q_NE = q[1:, 1:, :]
+
+    inv12 = 1.0 / 12.0
+    # 4 triads per cell (1/12-weighted sum of 3 corner-q values, the
+    # 3 q's nearest the named corner).
+    t_SW = inv12 * (q_SW + q_SE + q_NW)
+    t_SE = inv12 * (q_SE + q_SW + q_NE)
+    t_NW = inv12 * (q_NW + q_SW + q_NE)
+    t_NE = inv12 * (q_NE + q_SE + q_NW)
+
+    # --- 4. AL81 PV flux at u-faces --------------------------------
+    # u-face u[j, i] is between west cell (j, i-1) and east cell
+    # (j, i).  AL81 form (NEMO dyn_vor_een, translated to our index
+    # convention):
+    #   +F_pv_u[j, i] = + t_SE(west_cell)  * F_v[j+1, i-1]
+    #                   + t_SW(east_cell)  * F_v[j+1, i  ]
+    #                   + t_NE(west_cell)  * F_v[j  , i-1]
+    #                   + t_NW(east_cell)  * F_v[j  , i  ]
+    #
+    # We need the west-cell triads (cell at (j, i-1)) at u-face index
+    # i; this is ``t_*`` rolled +1 in axis 1.  East-cell triads at
+    # u-face index i are ``t_*`` itself, but we need to extend along
+    # axis 1 from n_lon → n_lon+1 to match u-face shape (the periodic
+    # wrap face).  We use ``jnp.concatenate`` with the col-0 wrap.
+    #
+    # F_v is (n_lat+1, n_lon, nlev); we need F_v at v-face indices
+    # (j, i-1), (j, i), (j+1, i-1), (j+1, i).  For u-face (j, i)
+    # with i ∈ [0, n_lon], periodic in i.
+
+    # Roll periodic in axis 1 to get west-cell triads aligned with
+    # u-face index.  After rolling +1, position i holds cell index
+    # (i-1) mod n_lon, which is the west cell of u-face i.
+    t_SE_W = jnp.roll(t_SE, 1, axis=1)   # west-cell SE at u-face i
+    t_NE_W = jnp.roll(t_NE, 1, axis=1)
+    # East-cell triads are at u-face i = cell i.  Also wrap the
+    # n_lon-th u-face to col 0 (periodic).
+    # t_SW, t_NW have shape (n_lat, n_lon, nlev); pad axis 1 by 1 on
+    # the right with the col-0 value to match u-face shape.
+    t_SW_E = jnp.concatenate([t_SW, t_SW[:, 0:1, :]], axis=1)
+    t_NW_E = jnp.concatenate([t_NW, t_NW[:, 0:1, :]], axis=1)
+    # West-cell triads also need the periodic wrap column
+    t_SE_W = jnp.concatenate([t_SE_W, t_SE_W[:, 0:1, :]], axis=1)
+    t_NE_W = jnp.concatenate([t_NE_W, t_NE_W[:, 0:1, :]], axis=1)
+
+    # F_v at the four offsets, mapped to u-face index.  At u-face
+    # (j, i), we need:
+    #   F_v_S_W = F_v[j  , i-1, :]   (south-west of u-face)
+    #   F_v_S_E = F_v[j  , i  , :]
+    #   F_v_N_W = F_v[j+1, i-1, :]
+    #   F_v_N_E = F_v[j+1, i  , :]
+    # F_v has shape (n_lat+1, n_lon, nlev); the south face of the
+    # u-face row j is F_v[j, :, :], the north face is F_v[j+1, :, :].
+    F_v_south = F_v[:-1, :, :]           # (n_lat, n_lon, nlev) — south of each u-row
+    F_v_north = F_v[1:, :, :]            # (n_lat, n_lon, nlev)
+    # West/east neighbour in i, periodic, plus wrap to (n_lat, n_lon+1, nlev).
+    F_v_S_E = jnp.concatenate([F_v_south, F_v_south[:, 0:1, :]], axis=1)
+    F_v_N_E = jnp.concatenate([F_v_north, F_v_north[:, 0:1, :]], axis=1)
+    F_v_S_W = jnp.roll(F_v_S_E, 1, axis=1)
+    F_v_N_W = jnp.roll(F_v_N_E, 1, axis=1)
+
+    # AL81 contribution at u-faces.
+    diag_vortcor_u = (
+        t_SE_W * F_v_N_W       # west-cell SE × NW V
+        + t_SW_E * F_v_N_E     # east-cell SW × NE V
+        + t_NE_W * F_v_S_W     # west-cell NE × SW V
+        + t_NW_E * F_v_S_E     # east-cell NW × SE V
+    )
+
+    # --- 5. AL81 PV flux at v-faces --------------------------------
+    # v-face v[j, i] is between south cell (j-1, i) and north cell
+    # (j, i).  AL81 form:
+    #   -F_pv_v[j, i] = + t_NW(south_cell) * F_u[j-1, i+1]
+    #                   + t_NE(south_cell) * F_u[j-1, i  ]
+    #                   + t_SW(north_cell) * F_u[j  , i+1]
+    #                   + t_SE(north_cell) * F_u[j  , i  ]
+    # The v-tendency is the negative of this (since q × u with the
+    # cross-product sign convention is q × F_u for v).
+    #
+    # South-cell triads at v-face j are ``t_*`` shifted +1 in axis 0
+    # (i.e., t_*[j-1, i] = south-cell of v-face j).  North-cell
+    # triads at v-face j are ``t_*`` itself.  v-face has shape
+    # (n_lat+1, n_lon, nlev); pole faces (j=0, n_lat) are walls
+    # → set the contribution to zero by zero-padding in axis 0.
+    #
+    # Pad t_* in axis 0 by 1 on south (south-cell of v-face 0 doesn't
+    # exist) and 1 on north (north-cell of v-face n_lat doesn't
+    # exist).  This produces (n_lat+2, n_lon, nlev) arrays from which
+    # the south-cell view is t_pad[:-1, ...] (rows 0..n_lat) and the
+    # north-cell view is t_pad[1:, ...] (rows 1..n_lat+1).  At the
+    # pole rows the corresponding triad value is 0, so the v-tendency
+    # at pole faces vanishes naturally.
+    pad0 = ((1, 1), (0, 0), (0, 0))
+    t_NW_S = jnp.pad(t_NW, pad0)[:-1, :, :]   # south-cell NW at v-face j
+    t_NE_S = jnp.pad(t_NE, pad0)[:-1, :, :]
+    t_SW_N = jnp.pad(t_SW, pad0)[1:, :, :]    # north-cell SW at v-face j
+    t_SE_N = jnp.pad(t_SE, pad0)[1:, :, :]
+
+    # F_u at the four offsets, mapped to v-face index.  At v-face
+    # (j, i), we need:
+    #   F_u_S_W = F_u[j-1, i  , :]   (south-west of v-face)
+    #   F_u_S_E = F_u[j-1, i+1, :]
+    #   F_u_N_W = F_u[j  , i  , :]
+    #   F_u_N_E = F_u[j  , i+1, :]
+    # F_u has shape (n_lat, n_lon+1, nlev); pad in axis 0 with zeros
+    # to align with v-face row index (rows 0..n_lat for v).
+    F_u_pad = jnp.pad(F_u, pad0)              # (n_lat+2, n_lon+1, nlev)
+    F_u_south = F_u_pad[:-1, :, :]            # (n_lat+1, n_lon+1, nlev)
+    F_u_north = F_u_pad[1:, :, :]
+    # Convert (n_lon+1) periodic to per-cell-index (n_lon).  At v-face
+    # i (cell column i):
+    #   F_u_*_W = F_u[*, i, :]      (west u-face of cell i)
+    #   F_u_*_E = F_u[*, i+1, :]    (east u-face of cell i)
+    F_u_S_W = F_u_south[:, :-1, :]            # (n_lat+1, n_lon, nlev)
+    F_u_S_E = F_u_south[:, 1:, :]
+    F_u_N_W = F_u_north[:, :-1, :]
+    F_u_N_E = F_u_north[:, 1:, :]
+
+    # v-tendency from PV (negative sign per the cross-product
+    # convention used by the simple Sadourny call site).
+    diag_vortcor_v = -(
+        t_NW_S * F_u_S_E       # south-cell NW × SE U
+        + t_NE_S * F_u_S_W     # south-cell NE × SW U
+        + t_SW_N * F_u_N_E     # north-cell SW × NE U
+        + t_SE_N * F_u_N_W     # north-cell SE × NW U
+    )
+
+    return diag_vortcor_u, diag_vortcor_v
 
 
 def compute_face_masks(

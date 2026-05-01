@@ -123,6 +123,16 @@ def main():
                         "barotropic on steep continental shelves.")
     parser.add_argument("--bottom-drag-r", type=float, default=1.0e-3)
     parser.add_argument("--bbl-thickness", type=float, default=100.0)
+    parser.add_argument("--momentum-advection", type=str,
+                        default="vector_invariant",
+                        choices=["vector_invariant", "weno5", "weno7"],
+                        help="Momentum advection scheme.  Vector-invariant "
+                        "(default) uses q·flux with h_vtx — the form that "
+                        "exercises any PV-thickness inconsistency at "
+                        "step vertices.  WENO5/7 uses flux-form WENO "
+                        "upwind reconstruction — bypasses the q "
+                        "stencil and isolates whether vector-invariant "
+                        "at lateral steps is the bug.")
     parser.add_argument("--A-h", type=float, default=1.0e4,
                         help="Horizontal Laplacian viscosity [m²/s].  "
                         "Default 1e4 (LatLonCGridOceanConfig default); "
@@ -229,6 +239,8 @@ def main():
         diag_tag += f"_Bh{args.B_h:.0e}"
     if args.gm_redi:
         diag_tag += f"_GM{int(args.K_GM)}Redi{int(args.K_Redi)}"
+    if args.momentum_advection != "vector_invariant":
+        diag_tag += f"_mom-{args.momentum_advection}"
     output_dir = Path(
         f"results/realistic_geometry_validation/"
         f"phase6_etopo_{args.coord}_{args.n_lat}x{args.n_lon}_{args.n_levels}lev"
@@ -441,6 +453,7 @@ def main():
         bottom_drag_bbl_thickness=args.bbl_thickness,
         pgf_scheme=args.pgf_scheme,
         gm_redi=gm_redi_cfg,
+        momentum_advection=args.momentum_advection,
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     if args.frozen_ts:

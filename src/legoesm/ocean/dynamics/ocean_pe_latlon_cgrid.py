@@ -263,72 +263,13 @@ def _neumann_fill_cgrid(
     return filled
 
 
-def _neumann_fill_vertex(
-    f: jnp.ndarray,
-    vtx_mask: jnp.ndarray,
-) -> jnp.ndarray:
-    """Fill land vertices with nearest ocean-neighbor (Neumann BC).
-
-    Vertex-level analog of ``_neumann_fill_cgrid`` for the
-    (n_lat+1, n_lon+1) vertex grid.  Longitude is periodic
-    (column n_lon duplicates column 0); rows 0 and n_lat are
-    pole vertices with Neumann padding in the meridional direction.
-
-    Parameters
-    ----------
-    f : (n_lat+1, n_lon+1, nlev)  or  (n_lat+1, n_lon+1)
-    vtx_mask : (n_lat+1, n_lon+1)  -- 1 = ocean vertex, 0 = land vertex.
-    """
-    m = vtx_mask
-    filled = f
-
-    for _ in range(3):
-        # N/S neighbors: Neumann padding at rows 0 and n_lat.
-        f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
-        m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
-        f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
-        m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
-
-        # E/W neighbors: periodic on core columns 0..n_lon-1, then wrap.
-        # Column n_lon is a duplicate of column 0, so rolling the full
-        # array along axis 1 is correct for the core columns and the
-        # wrap column picks up the right neighbor automatically.
-        f_w = jnp.roll(filled, 1, axis=1)
-        m_w = jnp.roll(m, 1, axis=1)
-        f_e = jnp.roll(filled, -1, axis=1)
-        m_e = jnp.roll(m, -1, axis=1)
-
-        is_land = m < 0.5
-
-        if f.ndim > 2:
-            m_s_e = m_s[..., jnp.newaxis]
-            m_n_e = m_n[..., jnp.newaxis]
-            m_w_e = m_w[..., jnp.newaxis]
-            m_e_e = m_e[..., jnp.newaxis]
-            is_land_e = is_land[..., jnp.newaxis]
-        else:
-            m_s_e = m_s
-            m_n_e = m_n
-            m_w_e = m_w
-            m_e_e = m_e
-            is_land_e = is_land
-
-        nbr_sum = f_s * m_s_e + f_n * m_n_e + f_w * m_w_e + f_e * m_e_e
-        nbr_count = m_s_e + m_n_e + m_w_e + m_e_e
-        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
-
-        has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
-        if f.ndim > 2:
-            has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
-        else:
-            has_any_nbr_e = has_any_nbr
-
-        filled = jnp.where(is_land_e & has_any_nbr_e, nbr_avg, filled)
-        m = jnp.where(is_land & has_any_nbr, 1.0, m)
-
-    # Re-sync periodic wrap column.
-    filled = filled.at[:, -1].set(filled[:, 0])
-    return filled
+# Note: ``_neumann_fill_vertex`` was promoted to a public
+# ``neumann_fill_vertex`` helper in ``latlon_cgrid_operators`` so it
+# can be shared with the AL81 PV-flux scheme there.  Keep an alias
+# for backward compatibility within this module.
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    neumann_fill_vertex as _neumann_fill_vertex,
+)
 
 
 # =============================================================================
@@ -1166,7 +1107,23 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
-    # Reconstruct q from vertices to velocity points
+    # Reconstruct q-flux at velocity points.
+    #
+    # WENO5/7: WENO-Z reconstruction of q at u/v-faces, multiplied by
+    # the centred mass flux average.  Used when the caller explicitly
+    # opts into ``momentum_advection="weno5"|"weno7"``.
+    #
+    # Default ("vector_invariant"): production-grade Arakawa-Lamb 1981
+    # 12-point triad PV flux (``pv_flux_al81_partial_cell``).  Uses a
+    # 9-vertex stencil around each face with weights chosen so that
+    # discrete energy AND discrete potential enstrophy are both
+    # conserved on partial-cell topography (Le Sommer et al. 2009;
+    # Stewart & Dellar 2016).  Replaces the simple 2-point Sadourny
+    # enstrophy form ``q_at_u = ½(q_S + q_N)`` which generates a grid-
+    # scale q-noise mode at step vertices that drives a day-19 NaN on
+    # real ETOPO under live-T integration.  Same Neumann fill of q at
+    # land-adjacent vertices as WENO5 (for the centred-q part of the
+    # triad).
     if _mom_adv in ("weno5", "weno7"):
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
         # Fill PV at land-adjacent vertices so WENO stencils see smooth
@@ -1177,16 +1134,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             q_filled, v, v_at_u, order=_weno_order, u_smooth=u)
         q_at_v = _weno_zeta_at_v(
             q_filled, u, u_at_v, order=_weno_order, v_smooth=v)
+        diag_vortcor_u = q_at_u * Fv_at_u
+        diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
-        # Sadourny EC: 2-point average of q to faces
-        q_at_u = 0.5 * (q[:-1, :, :] + q[1:, :, :])   # (n_lat, n_lon+1, nlev)
-        q_at_v = 0.5 * (q[:, :-1, :] + q[:, 1:, :])    # (n_lat+1, n_lon, nlev)
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            pv_flux_al81_partial_cell,
+        )
+        vtx_mask_va = _compute_vertex_mask(mask)
+        diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
+            zeta, h_vtx, h_v, v, h_u, u,
+            u_mask_3d, v_mask_3d, vtx_mask_va,
+        )
 
     # Capture PV-flux advection contribution as the `vortcor` diagnostic
     # (per-step closure: Σ components == total to machine precision; see
     # `tests/ocean/unit/test_momentum_diagnostics_closure.py`).
-    diag_vortcor_u = q_at_u * Fv_at_u
-    diag_vortcor_v = -(q_at_v * Fu_at_v)
     du_dt = du_dt + diag_vortcor_u
     dv_dt = dv_dt + diag_vortcor_v
 
