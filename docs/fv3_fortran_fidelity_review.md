@@ -239,6 +239,42 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-954 — NEGATIVE-RESULT: just the Part 2 sin_sg-upwind override at I=0/n on duogrid also regresses
+
+**Trigger.**  Iter-953 found running ALL of Parts 2/3/4 on duogrid
+worsened v_ll_Linf 55.6 → 127.2 m/s.  Iter-954 narrowed to JUST
+Part 2's sin_sg-upwind override at the four cube-face boundaries
+(I=0, n, J=0, n) using duogrid-aware sin_sg padding — skipping
+Parts 3/4 strip + corner-solve.
+
+**Negative result.**  v_ll_Linf 55.6 → 133 m/s (140 % worse).
+Part 2's override formula is ``ut = uc / sin_sg(upwind)`` — this
+REPLACES Part 1's 4-cell average but DROPS the cross-velocity
+``-0.25*cosa_u*vc_avg`` correction.  With iter-947's halo'd
+4-cell average producing correct ut at I=0/n, the Part 2 override
+is a regression: it loses the cross-velocity term in exchange for
+"slightly different boundary handling".
+
+The Part 2 override was useful PRE-iter-947 because Part 1's
+mode='edge' was wrong at boundaries; with iter-947's correct
+halo, Part 1's full formula is the preferred path.
+
+**Iter-954 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_d_sw1_recompute_ut_vt` —
+   updated comment block records the iter-954 narrow-test
+   negative-result.
+
+No new sentinel — the iter-951 v_ll_Linf gate already locks the
+Fortran-faithful FB chain numbers.
+
+**Insight.**  Iter-953/954 reveal a general principle: with iter-947
+giving Part 1 the correct halo, the Fortran Part 2/3/4 boundary
+overrides are NOT NEEDED on duogrid (they're a workaround for
+mode='edge' Part 1, which the duogrid path now bypasses).  Future
+duogrid fidelity gains must come from elsewhere (PPM transport,
+operator-split sweep order, ke_corner halo, vorticity-flux halo).
+
 ### Iter-953 — NEGATIVE-RESULT: enabling d_sw1 Parts 2/3/4 boundary overrides on duogrid regresses v_ll_Linf
 
 **Trigger.**  iter-952 localised the remaining FB-chain v_ll_Linf
