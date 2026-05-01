@@ -445,6 +445,40 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1012 — Resolution scaling with iter-1009: C36 unique sweet spot for dual target
+
+**Trigger.**  Verify that iter-1009 dual-target calibration scales
+with N.
+
+**Iter-1012 sweep with iter-1009 calibration:**
+
+| N  | dt  | W2 v_ll | W5 day-3 (h_min, spd) | W5 day-5 |
+|----|-----|---------|------------------------|----------|
+| 24 | 450 |  0.1835 ✗ | (-129, 740.7) ✗     | (197, 488.3) ✗ |
+| **36** | **300** | **0.1147 ✓** | **(3910, 39.1) ✓** | **(3885, 68.6) ✓** |
+| 48 | 225 |  0.1089 ✓ | (3860, 39.3) ✓        | (2397, 239.2) ✗ |
+
+**Iter-1012b — C48 W2+W5 sweep (varying div_damp, damp_v):**
+14 configs tested — none keep BOTH W2 ≤ 0.119 AND W5 day-5 stable
+at C48.
+
+**Conclusion.**  C36 is uniquely the dual-target sweet spot:
+- C24: W2 fails (0.1835 > 0.119)
+- **C36: BOTH PASS (W2=0.1147, W5 day-5 stable)**
+- C48: W5 day-5 fails (speed > 100 m/s) regardless of calibration
+
+This is consistent with iter-989's FB chain N=48 worse-than-N=36
+finding — same family of resolution-specific instability mode in
+the cubed-sphere shallow water.
+
+**Iter-1012 deliverables.**
+
+1. `scripts/diag_iter1012_n_scaling.py` — N sweep with iter-1009.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.  C36 remains the documented dual-
+target reference resolution.
+
 ### Iter-1010 — cube_edge_softer_div_damp: doesn't extend W5 past day 5
 
 **Trigger.**  Iter-1009 met dual target through day 5; day 6+ remains
