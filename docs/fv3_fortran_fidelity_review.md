@@ -445,6 +445,53 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1019 — Codex fidelity audit: `hyperdiff_coeff` is silent no-op in `fv3_sw_tendencies`
+
+**Trigger.**  Iter-1004 noted that `hyperdiff_coeff=0.001..0.01`
+produced IDENTICAL W5 results.  Iter-1019 traces this and finds:
+**`fv3_sw_tendencies(hyperdiff_coeff=...)` is silently dead** — the
+parameter appears in the signature for API symmetry with
+`cdgrid_momentum_tendencies` (which DOES implement it), but is
+NEVER referenced in the function body.
+
+This is a clear Codex-flagged silent no-op.
+
+**Iter-1019 fix.**  Added `UserWarning` in `fv3_sw_tendencies` when
+`hyperdiff_coeff > 0` is passed:
+
+```python
+if hyperdiff_coeff > 0:
+    warnings.warn(
+        "`fv3_sw_tendencies(hyperdiff_coeff=...)` is silently "
+        "ignored on this code path... use CDGridShallowWaterModel "
+        "for biharmonic hyperdiff",
+        UserWarning, stacklevel=2,
+    )
+```
+
+Users now see the warning instead of silently getting zero
+biharmonic damping.
+
+**New sentinel `test_iter1019_hyperdiff_silent_noop_warning`:**
+verifies the warning fires when `hyperdiff_coeff > 0` is passed
+through `FV3EdgeShallowWaterModel.step`.  PASSES.
+
+**Total cubed-sphere SW production sentinels: 20/20 PASS.**
+
+**Iter-1019 deliverables.**
+
+1. `src/legoesm/core/operators_cdgrid.py`: warning at top of
+   `fv3_sw_tendencies` body.
+2. `tests/test_iter1002_w2_target_met.py`: new
+   `test_iter1019_hyperdiff_silent_noop_warning` sentinel.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+Production impact: ZERO behavioural change for callers with
+`hyperdiff_coeff=0.0` (the production default and the
+documented iter-1009 calibration).  Callers with
+`hyperdiff_coeff > 0` (none in our sentinel matrix) get a one-time
+warning per step explaining the silent no-op.
+
 ### Iter-1018 — C48 dual-target search: NEGATIVE (W5 day-5 < 80 m/s unreachable)
 
 **Trigger.**  Iter-1017 added warning that iter-1009 calibration is

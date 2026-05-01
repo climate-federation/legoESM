@@ -65,6 +65,55 @@ def _make_iter1009_config(N):
     )
 
 
+def test_iter1019_hyperdiff_silent_noop_warning():
+    """`fv3_sw_tendencies(hyperdiff_coeff>0)` should warn loudly.
+
+    Iter-1019 Codex audit found that `hyperdiff_coeff` appears in
+    `fv3_sw_tendencies` signature but is never applied in the body.
+    Callers passing `hyperdiff_coeff > 0` would silently see no
+    biharmonic damping.  iter-1019 added a UserWarning to make this
+    explicit.
+    """
+    import warnings as _warnings
+
+    import jax.numpy as jnp_local
+
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterConfig as _Cfg,
+        FV3EdgeShallowWaterModel as _Model,
+        FV3EdgeShallowWaterState as _State,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere as _csp
+    from legoesm.grids.cubed_sphere_cdgrid import (
+        create_cubed_sphere_cdgrid as _cdgrid,
+    )
+    from tests.atmosphere.shallow_water.test_cases.williamson import (
+        williamson_test2 as _w2,
+    )
+
+    grid = _csp(36)
+    cdgrid = _cdgrid(grid)
+    sw = _w2(grid)
+    u_d = cdgrid.cos_angle_edge_x * jnp_local.cos(cdgrid.lat_edge_x)
+    v_d = -cdgrid.sin_angle_edge_y * jnp_local.cos(cdgrid.lat_edge_y)
+    state = _State(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+
+    # hyperdiff_coeff > 0 → MUST warn
+    cfg = _Cfg(hyperdiff_coeff=0.005, apply_fortran_xppm_boundary=True)
+    model = _Model(grid, cfg)
+    with _warnings.catch_warnings(record=True) as w:
+        _warnings.simplefilter("always")
+        _ = model.step(state, 100.0)
+        silent_warnings = [
+            x for x in w
+            if issubclass(x.category, UserWarning)
+            and "silently ignored" in str(x.message)
+        ]
+        assert len(silent_warnings) >= 1, (
+            f"Expected at least 1 silent-noop warning when "
+            f"hyperdiff_coeff > 0; got {len(silent_warnings)}")
+
+
 def test_iter1017_preset_warns_on_non_c36():
     """`iter1009_dual_target_config(n != 36)` should emit UserWarning."""
     import warnings

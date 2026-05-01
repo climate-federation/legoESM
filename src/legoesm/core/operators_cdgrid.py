@@ -1958,6 +1958,32 @@ def fv3_sw_tendencies(
     """
     n = cdgrid.n
 
+    # Iter-1019 Codex finding: `hyperdiff_coeff` appears in this
+    # function's signature for API symmetry with
+    # `cdgrid_momentum_tendencies` (which DOES implement it at
+    # operators_cdgrid.py:1604-1614), but is NEVER applied inside
+    # `fv3_sw_tendencies` itself.  Callers passing
+    # `hyperdiff_coeff > 0` here would silently see no biharmonic
+    # damping.  Warn loudly so users notice and either:
+    #  (a) switch to `cdgrid_momentum_tendencies` /
+    #      `CDGridShallowWaterModel`, which DOES apply hyperdiff, or
+    #  (b) accept that `FV3EdgeShallowWaterModel`'s production path
+    #      relies on `div_damp` + `damp_v` for damping (no biharmonic).
+    if hyperdiff_coeff > 0:
+        import warnings
+        warnings.warn(
+            f"`fv3_sw_tendencies(hyperdiff_coeff={hyperdiff_coeff!r})` "
+            f"is silently ignored on this code path: the production "
+            f"FV3 edge-midpoint path uses `div_damp` + `damp_v` for "
+            f"damping, not biharmonic.  To get biharmonic hyperdiff "
+            f"on a cubed-sphere SW path, use `CDGridShallowWaterModel` "
+            f"(which routes through `cdgrid_momentum_tendencies` and "
+            f"DOES apply `hyperdiff_coeff`).  This warning was added "
+            f"in iter-1019 after a Codex fidelity audit found the "
+            f"silent no-op.",
+            UserWarning, stacklevel=2,
+        )
+
     # (a) Cell-centre and C-grid velocities for mass transport
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
     u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
