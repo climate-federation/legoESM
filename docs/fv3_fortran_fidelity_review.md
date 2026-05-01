@@ -390,6 +390,76 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-973 — Audit `del6_vt_flux` and `d_sw6` wind update vs Fortran
+
+**Iter-973 audit findings:**
+
+1. **`del6_vt_flux`** (sw_core.F90:2008-2121) matches our Python
+   `_del6_vt_flux` in `fv3_sw_core.py:1202-1289`:
+   - Initial `d2 = damp * q` (we factor damp to end via iter-937b
+     for float32 safety; mathematically equivalent).
+   - Initial flux: `fx2 = del6_v * (d2(i-1) - d2(i))`, sign matches
+     Fortran's USE_SG branch (line 2065).
+   - Iteration loop: sign FLIP from initial — Fortran has `(d2(i) -
+     d2(i-1))` after iteration; our Python matches.
+   - copy_corners gated on non-duogrid; our Python uses
+     duogrid-aware `pad_halo` which is the equivalent.  ✓
+
+2. **d_sw6 wind update** (sw_core.F90:1937-1944):
+   ```fortran
+   u(i,j) = vt(i,j) + ke(i,j) - ke(i+1,j) + fy(i,j)
+   v(i,j) = ut(i,j) + ke(i,j) - ke(i,j+1) - fx(i,j)
+   ```
+   Fortran's `u` here is in CIRCULATION form (u*dx) at the end of
+   d_sw5 (vt = u*dx).  The assignment writes new u in circulation;
+   conversion back to velocity happens at a later step in the
+   chain.
+
+   Our Python:
+   ```python
+   u_d_new = u_d + (ke_diff_u_scaled + fy_vort) * rdx_u
+   v_d_new = v_d + (ke_diff_v_scaled - fx_vort) * rdy_v
+   ```
+   Equivalent to Fortran via `u_d_new * dx_u = u_d * dx_u + ke_diff
+   + fy_vort` = Fortran's circulation-form u_new.  Both formulations
+   give the same physical update.  ✓
+
+3. **d_sw6 damp_v post-step** (sw_core.F90:1989-2000):
+   ```fortran
+   u(i,j) = u(i,j) + vt(i,j)   ! vt = fy2 from del6_vt_flux
+   v(i,j) = v(i,j) - ut(i,j)   ! ut = fx2
+   ```
+   Our Python: `u_d_new = u_d_new + fy2 * rdx_u`,
+   `v_d_new = v_d_new - fx2 * rdy_v`.  Same equivalence as #2. ✓
+
+**Conclusion.**  d_sw6 (wind update + vorticity damping) and
+`del6_vt_flux` are Fortran-faithful for the duogrid path.
+
+**Iter-973 deliverables.**
+
+1. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.  All previously committed code matches Fortran in
+the audited path.
+
+**Backlog for iter-974+.**
+
+The remaining v_ll_Linf=55.6 m/s gap is NOT in any audited
+structural code.  Candidates:
+
+1. **fv_tp_2d** (tp_core.F90 xppm/yppm) — finer audit of the
+   mass / vorticity transport.
+2. **fill_corners** for non-duogrid (skipped on our duogrid path
+   anyway).
+3. **mpp_get_boundary** semantics for the BGRID_NE flux sync at
+   the d_sw3 corners (already implemented per iter-941; verify
+   the exact averaging formula matches Fortran).
+4. The numerical-precision floor: our Python uses float64 with
+   JAX_ENABLE_X64; Fortran uses single precision by default
+   (R4) but FV3 is often compiled with double (R8).  At C36
+   solid-body, accumulated truncation over 288 steps may itself
+   contribute a few m/s.
+
 ### Iter-972 — Wire `_interp_center_to_corner_a2b_ord4` into d_sw5 Smagorinsky branch
 
 **Trigger.**  iter-971 added the Fortran-faithful 4th-order
