@@ -405,6 +405,67 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1003/1004 — W5 long-term stability: cube-edge polar instability at day 5+
+
+**Trigger.**  Iter-1002 W2 target met (0.1154 m/s).  W5 stable through
+day 4 but speeds blow up at day 5+.  Iter-1003/1004 investigate.
+
+**Iter-1003 — Localise W5 instability:**
+
+| day | speed_max (m/s) | location                            |
+|-----|-----------------|-------------------------------------|
+|  1  |    25.9         | face=3, i=25, j=25 (interior)      |
+|  2  |    34.9         | face=3, i=27, j=26 (interior)      |
+|  3  |    39.0         | face=3, i=30, j=28 (interior)      |
+|  4  |    39.6         | face=3, i=32, j=29 (interior)      |
+|  5  |   107.8         | **face=4, i=0, j=34 (EDGE)**       |
+|  6  |   174.8         | face=5, i=31, j=34 (interior)      |
+|  7  |   240.3         | face=2, i=34, j=33 (interior)      |
+
+W5 is artifact-free for days 1-4 (typical reference window for
+W5 verification — speeds physically reasonable).
+
+Day 5 instability emerges at face=4 (north pole) cube-edge at
+i=0 j=34 — the polar-cap face boundary.  This is the same
+cube-edge mechanism as the W2 seam mode (iter-985) but on the
+polar face.
+
+**Iter-1004 — hyperdiff sweep on production:**
+
+Hyperdiff coefficients (0.001 → 0.01) produce IDENTICAL W5
+results at day 7 — the hyperdiff branch in `fv3_sw_tendencies`
+appears NO-OP in this code path.  Per-component damping
+(damp_v=0.06 vs 0.08 vs 0.04) modifies day-7 state but no
+config tested keeps speed below 80 m/s at day 7+.
+
+The W5 long-term instability (day 5+) is a SEPARATE issue from
+the W2 target.  W5 reference verification typically covers days
+1-15; we currently meet the artifact-free criterion only for
+days 1-4.
+
+**Iter-1003/1004 implication.**
+
+The W5 day-5 instability is structural — same cube-edge family
+as the W2 FB-chain seam.  Closing this requires either:
+- Implementing FV3's PPM cube-edge boundary handling for the
+  POLAR faces specifically (different topology than equatorial
+  seams).
+- More aggressive wave-based damping that doesn't break W2's
+  geostrophic balance.
+- Spectral filtering on the polar faces.
+
+This is a separate multi-week project from the iter-985..1002
+W2 fidelity work.
+
+**Iter-1003/1004 deliverables.**
+
+1. `scripts/diag_iter1003_w5_localise.py` — W5 instability
+   localiser.
+2. `scripts/diag_iter1004_w5_hyperdiff.py` — hyperdiff sweep.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
 ### Iter-1000-1002 — TARGET MET on PRODUCTION CDGrid path: W2 v_ll_Linf = 0.1154 m/s ≤ 0.119
 
 **Trigger.**  Iter-985..999 explored the FB chain (`fv3_fb_sw_step`)
