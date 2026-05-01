@@ -42,6 +42,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Use the model's own saturation formula — never hard-code 273.15 etc.
+# (per CLAUDE.md "constant and parameter discipline").
+from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio as _model_q_sat
+
 
 SCHEME_ORDER = (
     "sbm", "tiedtke", "zhang_mcfarlane", "emanuel",
@@ -77,19 +82,37 @@ def _scalar(v):
 
 
 def _saturation_mixing_ratio(T_K, p_Pa):
-    """Tetens-form q_sat for plotting RH only — does NOT need to match
-    the model's exact formula bit-for-bit."""
-    es = 611.2 * np.exp(17.67 * (T_K - 273.15) / (T_K - 29.65))
-    eps = 0.622
-    return eps * es / np.clip(p_Pa - (1 - eps) * es, 1.0, None)
+    """Saturation mixing ratio — wraps ``legoesm.thermo`` so the
+    physics-consistency RH check uses the *same* q_sat formula as the
+    model's saturation adjustment.  Using a different formula here
+    would flag spurious supersaturation from formula disagreement
+    (the standard atmospheric Tetens form gives ~15 % smaller q_sat
+    than the model's mixing-ratio form at high q_sat values).
+
+    Returns numpy arrays so the rest of the plotter's numpy code is
+    unchanged.
+    """
+    return np.asarray(_model_q_sat(np.asarray(T_K), np.asarray(p_Pa)))
 
 
-def _check_physics(scheme: str, day: float, snap: dict) -> list[str]:
-    """Return a list of physics-consistency violations for a snapshot."""
+def _check_physics(scheme: str, day: float, snap: dict,
+                   sigma_full: np.ndarray) -> list[str]:
+    """Return a list of physics-consistency violations for a snapshot.
+
+    ``sigma_full`` is the per-level σ value (surface-last shape
+    (nlev,)).  Per-level pressure is reconstructed from the snapshot's
+    actual surface-pressure field ``p_s`` (varies in space and time
+    with the dycore mass distribution) so the RH ≤ 1 check uses the
+    *same* (T, p) the model's sat-adj saw.  Using a constant 1e5 Pa
+    here gives spurious super-saturation reports in cells where p_s
+    is below 1e5.
+    """
     issues = []
-    T = snap["T"]
+    T = snap["T"]                           # (n_lat, n_lon, nlev)
     qv = snap["q_v"]
     precip = snap["precip"]
+    p_s = snap["p_s"]                       # (n_lat, n_lon)
+    p_full = p_s[..., None] * sigma_full    # (n_lat, n_lon, nlev)
     if not np.all(np.isfinite(T)):
         issues.append(f"{scheme} d{day}: T has {np.sum(~np.isfinite(T))} NaN/inf")
     if not np.all(np.isfinite(qv)):
@@ -102,11 +125,25 @@ def _check_physics(scheme: str, day: float, snap: dict) -> list[str]:
             f"{scheme} d{day}: T out of [{_T_MIN},{_T_MAX}] K "
             f"(min={Tmin:.1f}, max={Tmax:.1f})"
         )
-    qvmin, qvmax = float(qv.min()), float(qv.max())
-    if qvmin < _QV_MIN or qvmax > _QV_MAX:
+    if float(qv.min()) < _QV_MIN:
         issues.append(
-            f"{scheme} d{day}: q_v out of [{_QV_MIN},{_QV_MAX}] kg/kg "
-            f"(min={qvmin:.2e}, max={qvmax:.2e})"
+            f"{scheme} d{day}: q_v negative (min={qv.min():.2e} kg/kg)"
+        )
+    # Real physics check: q_v cannot exceed saturation.  RH > 1 + tol
+    # means convection moistened above the sat-adj's ability to clip,
+    # which is a model-level bug (or a microphysics step missing).
+    qsat = _saturation_mixing_ratio(T, p_full)
+    rh = qv / np.clip(qsat, 1e-12, None)
+    rh_max = float(np.nanmax(rh))
+    if rh_max > 1.0 + _RH_TOL:
+        # Locate worst point for diagnostic.
+        i = np.unravel_index(np.nanargmax(rh), rh.shape)
+        issues.append(
+            f"{scheme} d{day}: RH > 1 + {_RH_TOL} (max RH = {rh_max:.3f}) "
+            f"at lat_idx={i[0]}, lon_idx={i[1]}, lev_idx={i[2]} "
+            f"(p={float(p_full[i])/100:.0f} hPa, "
+            f"T={float(T[i]):.1f} K, q_v={float(qv[i])*1e3:.1f} g/kg, "
+            f"q_sat={float(qsat[i])*1e3:.1f} g/kg)"
         )
     pmin = float(precip.min())
     if pmin < _PRECIP_MIN:
@@ -213,44 +250,55 @@ def _plot_latlon(snap: dict, scheme: str, time_idx: int, out_dir: Path):
 
 
 def _plot_vertlat(snap: dict, scheme: str, time_idx: int, out_dir: Path):
-    """4-panel zonal-mean vertical cross-section (lat × σ)."""
+    """4-panel zonal-mean vertical cross-section (lat × pressure)."""
     day = float(snap["snap_day"][time_idx])
     lat_deg = np.rad2deg(snap["lat"][:, 0])
     sigma = snap["sigma_full"]
-    p_full = sigma * 1e5
+    p_full_hPa = sigma * 1e3                # σ × p_s/100 [hPa]
+    p_full_Pa = sigma * 1e5
     T = np.nanmean(snap["T"][time_idx], axis=1)        # (n_lat, nlev)
     qv = np.nanmean(snap["q_v"][time_idx], axis=1)
     u = np.nanmean(snap["u"][time_idx], axis=1)
-    qsat = _saturation_mixing_ratio(T, p_full[None, :])
+    qsat = _saturation_mixing_ratio(T, p_full_Pa[None, :])
     rh = qv / np.clip(qsat, 1e-12, None)
+    # Cap q_v colormap at 25 g/kg — saturation at SST 300 K is ~22 g/kg,
+    # so values above this are TOA cold-air mixing-ratio artefacts (q_sat
+    # naturally exceeds 100 g/kg at 50 hPa) and dominate the autoscale,
+    # crushing the tropospheric signal.
     panels = [
-        (T, "T (K)", "inferno", False),
-        (qv * 1e3, "q_v (g/kg)", "viridis", False),
-        (rh, "RH (-)", "BrBG", False),
-        (u, "Zonal wind u (m/s)", "RdBu_r", True),    # symmetric → wind
+        (T, "T (K)", "inferno", False, None, None),
+        (qv * 1e3, "q_v (g/kg)", "viridis", False, 0.0, 25.0),
+        (rh, "RH (-)", "BrBG", False, 0.0, 1.05),
+        (u, "Zonal wind u (m/s)", "RdBu_r", True, None, None),
     ]
     fig, axes = plt.subplots(1, 4, figsize=(16, 4.5), sharey=True)
-    for ax, (arr, label, cmap, symmetric) in zip(axes, panels):
+    for ax, (arr, label, cmap, symmetric, vmin_cap, vmax_cap) in zip(
+        axes, panels
+    ):
         if not np.all(np.isfinite(arr)):
             ax.text(0.5, 0.5, "NaN field", transform=ax.transAxes,
                     ha="center", va="center", color="red")
             ax.set_title(label)
             continue
-        vmin = float(np.nanmin(arr))
-        vmax = float(np.nanmax(arr))
+        vmin = float(np.nanmin(arr)) if vmin_cap is None else vmin_cap
+        vmax = float(np.nanmax(arr)) if vmax_cap is None else vmax_cap
         if symmetric:
             m = max(abs(vmin), abs(vmax), 1e-12)
             vmin, vmax = -m, m
         if vmax <= vmin:
             vmax = vmin + 1e-12
-        im = ax.pcolormesh(lat_deg, sigma, arr.T, cmap=cmap,
+        im = ax.pcolormesh(lat_deg, p_full_hPa, arr.T, cmap=cmap,
                            vmin=vmin, vmax=vmax, shading="auto")
         ax.set_title(label)
         ax.set_xlabel("lat (°N)")
-        ax.invert_yaxis()
+        # Standard atmospheric convention: high pressure (surface) at
+        # the BOTTOM, low pressure (TOA) at the top.  Set ylim
+        # explicitly with high-p at the bottom of the axis range
+        # (matplotlib treats the *first* y-limit value as the bottom).
+        ax.set_ylim(float(p_full_hPa.max()), float(p_full_hPa.min()))
         plt.colorbar(im, ax=ax, fraction=0.05, pad=0.02)
-    axes[0].set_ylabel("σ")
-    fig.suptitle(f"{scheme} — zonal-mean (lat × σ), day {day:.0f}")
+    axes[0].set_ylabel("p (hPa)")
+    fig.suptitle(f"{scheme} — zonal-mean (lat × p), day {day:.0f}")
     fig.tight_layout()
     out_path = out_dir / f"vertlat_{scheme}_d{int(day):03d}.png"
     fig.savefig(out_path, dpi=110, bbox_inches="tight")
@@ -259,44 +307,49 @@ def _plot_vertlat(snap: dict, scheme: str, time_idx: int, out_dir: Path):
 
 
 def _plot_vertlon(snap: dict, scheme: str, time_idx: int, out_dir: Path):
-    """4-panel meridional-mean vertical cross-section (lon × σ)."""
+    """4-panel meridional-mean vertical cross-section (lon × pressure)."""
     day = float(snap["snap_day"][time_idx])
     lon_deg = np.rad2deg(snap["lon"][0, :])
     sigma = snap["sigma_full"]
-    p_full = sigma * 1e5
+    p_full_hPa = sigma * 1e3
+    p_full_Pa = sigma * 1e5
     T = np.nanmean(snap["T"][time_idx], axis=0)        # (n_lon, nlev)
     qv = np.nanmean(snap["q_v"][time_idx], axis=0)
     v = np.nanmean(snap["v"][time_idx], axis=0)
-    qsat = _saturation_mixing_ratio(T, p_full[None, :])
+    qsat = _saturation_mixing_ratio(T, p_full_Pa[None, :])
     rh = qv / np.clip(qsat, 1e-12, None)
     panels = [
-        (T, "T (K)", "inferno", False),
-        (qv * 1e3, "q_v (g/kg)", "viridis", False),
-        (rh, "RH (-)", "BrBG", False),
-        (v, "Meridional wind v (m/s)", "RdBu_r", True),
+        (T, "T (K)", "inferno", False, None, None),
+        (qv * 1e3, "q_v (g/kg)", "viridis", False, 0.0, 25.0),
+        (rh, "RH (-)", "BrBG", False, 0.0, 1.05),
+        (v, "Meridional wind v (m/s)", "RdBu_r", True, None, None),
     ]
     fig, axes = plt.subplots(1, 4, figsize=(16, 4.5), sharey=True)
-    for ax, (arr, label, cmap, symmetric) in zip(axes, panels):
+    for ax, (arr, label, cmap, symmetric, vmin_cap, vmax_cap) in zip(
+        axes, panels
+    ):
         if not np.all(np.isfinite(arr)):
             ax.text(0.5, 0.5, "NaN field", transform=ax.transAxes,
                     ha="center", va="center", color="red")
             ax.set_title(label)
             continue
-        vmin = float(np.nanmin(arr))
-        vmax = float(np.nanmax(arr))
+        vmin = float(np.nanmin(arr)) if vmin_cap is None else vmin_cap
+        vmax = float(np.nanmax(arr)) if vmax_cap is None else vmax_cap
         if symmetric:
             m = max(abs(vmin), abs(vmax), 1e-12)
             vmin, vmax = -m, m
         if vmax <= vmin:
             vmax = vmin + 1e-12
-        im = ax.pcolormesh(lon_deg, sigma, arr.T, cmap=cmap,
+        im = ax.pcolormesh(lon_deg, p_full_hPa, arr.T, cmap=cmap,
                            vmin=vmin, vmax=vmax, shading="auto")
         ax.set_title(label)
         ax.set_xlabel("lon (°E)")
-        ax.invert_yaxis()
+        # Surface (high p) at bottom — explicit ylim is more robust
+        # than ``invert_yaxis()`` against later autoscale by colorbar.
+        ax.set_ylim(float(p_full_hPa.max()), float(p_full_hPa.min()))
         plt.colorbar(im, ax=ax, fraction=0.05, pad=0.02)
-    axes[0].set_ylabel("σ")
-    fig.suptitle(f"{scheme} — meridional-mean (lon × σ), day {day:.0f}")
+    axes[0].set_ylabel("p (hPa)")
+    fig.suptitle(f"{scheme} — meridional-mean (lon × p), day {day:.0f}")
     fig.tight_layout()
     out_path = out_dir / f"vertlon_{scheme}_d{int(day):03d}.png"
     fig.savefig(out_path, dpi=110, bbox_inches="tight")
@@ -323,12 +376,14 @@ def main():
         out_dir = root / scheme
         out_dir.mkdir(exist_ok=True)
         print(f"  -- {scheme}: {n_times} time(s) -> {out_dir}/")
+        sigma_full = snap["sigma_full"]
         for t in range(n_times):
             day = float(snap["snap_day"][t])
             issues = _check_physics(scheme, day, {
                 "T": snap["T"][t], "q_v": snap["q_v"][t],
                 "precip": snap["precip"][t],
-            })
+                "p_s": snap["p_s"][t],   # actual surface pressure
+            }, sigma_full)
             physics_issues.extend(issues)
             for fn in (_plot_latlon, _plot_vertlat, _plot_vertlon):
                 try:

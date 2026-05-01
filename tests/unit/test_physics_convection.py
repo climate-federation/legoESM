@@ -18,6 +18,7 @@ from legoesm.atmosphere.physics.convection.kuo import kuo_convection
 from legoesm.atmosphere.physics.convection.mass_flux import (
     edmf_convection,
     mass_flux_convection,
+    stratosphere_mass_flux_gate,
 )
 from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, KuoConfig, MassFluxConfig, EDMFConfig,
@@ -296,6 +297,124 @@ def test_edmf_updraft_area_bounds():
 # ============================================================================
 # All outputs finite
 # ============================================================================
+
+def test_stratosphere_mass_flux_gate_actually_closes():
+    """The gate must vanish (not merely attenuate) in the deep stratosphere.
+
+    Codex caught a regression where the default sharpness equalled the
+    cutoff, leaving the gate at sigmoid(-1) ≈ 0.27 at the model top —
+    only halving M_u rather than zeroing it.  This test pins the
+    behaviour at canonical pressure levels so a future tuning that
+    relaxes the cutoff cannot silently weaken the protection.
+    """
+    p_full = jnp.array([3_470.0, 5_000.0, 8_430.0, 10_000.0,
+                        13_370.0, 20_000.0, 50_000.0, 100_000.0])
+    gate = stratosphere_mass_flux_gate(p_full)
+    # Deep stratosphere: gate must be < 5% (not just < 50%)
+    assert float(gate[0]) < 0.05, (
+        f"gate at model top (p=3470 Pa) = {float(gate[0]):.3f}; "
+        "must be < 0.05 to actually close the convection path"
+    )
+    assert float(gate[1]) < 0.10, (
+        f"gate at 50 hPa = {float(gate[1]):.3f}; must be < 0.10"
+    )
+    # Tropopause: half-open
+    assert 0.4 < float(gate[3]) < 0.6, (
+        f"gate at 100 hPa (tropopause) = {float(gate[3]):.3f}; "
+        "must be ~0.5 (transition midpoint)"
+    )
+    # Upper troposphere: nearly fully open
+    assert float(gate[4]) > 0.80, (
+        f"gate at 130 hPa = {float(gate[4]):.3f}; must be > 0.80 "
+        "to leave deep tropical convection unaffected"
+    )
+    # Lower troposphere: fully open (sigmoid saturates to 1.0 in
+    # float32 well before 500 hPa, so use >= 0.999 not strict >)
+    assert float(gate[6]) >= 0.999, (
+        f"gate at 500 hPa = {float(gate[6]):.6f}; must be ≈ 1.0"
+    )
+    # Monotonic in pressure (non-decreasing — sigmoid saturates
+    # exactly to 1.0 in float32 above ~30 kPa so strict > would
+    # fail at the saturated tail).
+    assert jnp.all(jnp.diff(gate) >= 0), "gate must be monotonic in pressure"
+    # Strict monotonic in the transition region (below saturation).
+    transition = gate[:5]
+    assert jnp.all(jnp.diff(transition) > 0), (
+        "gate must be strictly monotonic across the transition region "
+        f"(35–134 hPa); got {[float(v) for v in transition]}"
+    )
+
+
+def test_cmt_gregory_1997_applies_stratospheric_gate():
+    """``cmt_gregory_1997`` must apply the same stratospheric gate the
+    kernel uses, so the default-enabled CMT path in ZM/Tiedtke/Bechtold
+    cannot dump convective momentum into the model top.
+
+    Codex caught that the kernel gate covered T/q_v but the CMT call
+    used the ungated ``plume.M_u``, leaving wind-driven dycore
+    instabilities (e.g. KF blowup at day 10) on the table.
+
+    Contract: with uniform ``M_u`` the function's output must equal
+    the same formula evaluated at ``M_u * gate(p_full)`` — that is the
+    operational definition of "the gate is applied inside the function".
+    """
+    from legoesm.atmosphere.physics.convection._plume import cmt_gregory_1997
+
+    ncol, nlev = 1, 8
+    p_full = jnp.array([[3_470.0, 5_000.0, 8_430.0, 10_000.0,
+                         13_370.0, 20_000.0, 50_000.0, 100_000.0]])
+    p_half = jnp.concatenate([
+        jnp.array([[0.0]]),
+        0.5 * (p_full[:, :-1] + p_full[:, 1:]),
+        jnp.array([[101_300.0]]),
+    ], axis=-1)
+    # Non-uniform shear so the ungated calculation has a non-zero
+    # divergence at every level (uniform du_layer + uniform M_u ⇒
+    # uniform flux ⇒ zero divergence in the interior).
+    u_env = jnp.array([[60.0, 50.0, 40.0, 25.0, 12.0, 5.0, 2.0, 0.0]])
+    v_env = jnp.zeros((ncol, nlev))
+    M_u = jnp.full((ncol, nlev), 0.05)
+    rho = p_full / (287.0 * 250.0)
+    c_u = 0.55
+
+    du_dt_func, _ = cmt_gregory_1997(
+        u_env, v_env, M_u, None, p_full, p_half, rho, c_u=c_u, c_d=c_u,
+    )
+
+    # Reference: replicate the formula exactly with the gate applied
+    # to M_u once.  If the function gates internally, this matches.
+    gate = stratosphere_mass_flux_gate(p_full)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    du_layer = jnp.diff(u_env, axis=-1, prepend=u_env[:, :1])
+    flux_ref = -c_u * (M_u * gate) * du_layer
+    dflux_ref = jnp.diff(flux_ref, axis=-1, append=flux_ref[:, -1:])
+    g = 9.80616
+    du_dt_ref = -g * dflux_ref / dp
+
+    # The function output must equal the gated reference exactly.
+    rel_err = float(jnp.max(jnp.abs(du_dt_func - du_dt_ref)
+                            / (jnp.abs(du_dt_ref) + 1e-30)))
+    assert rel_err < 1e-5, (
+        f"cmt_gregory_1997 output disagrees with gated reference "
+        f"by {rel_err:.3e}; the function must apply "
+        "stratosphere_mass_flux_gate to M_u (and M_d when present)"
+    )
+
+    # Sanity contrast with the *ungated* calculation — at the model
+    # top the function output must be much smaller than the ungated
+    # value (gate ≈ 0.013 at 35 hPa).
+    flux_ungated = -c_u * M_u * du_layer
+    dflux_ungated = jnp.diff(
+        flux_ungated, axis=-1, append=flux_ungated[:, -1:],
+    )
+    du_dt_ungated = -g * dflux_ungated / dp
+    ratio_top = float(jnp.abs(du_dt_func[0, 0])
+                      / (jnp.abs(du_dt_ungated[0, 0]) + 1e-30))
+    assert ratio_top < 0.10, (
+        f"At p=3470 Pa, gated CMT |du/dt| / ungated |du/dt| = "
+        f"{ratio_top:.4f}; expected < 0.10 (gate factor at TOA ≈ 0.013)"
+    )
+
 
 @pytest.mark.parametrize("scheme", ["sbm", "dca", "kuo", "mass_flux", "edmf"])
 def test_all_outputs_finite(scheme):

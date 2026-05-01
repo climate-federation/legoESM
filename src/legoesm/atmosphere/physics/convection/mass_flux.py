@@ -129,6 +129,36 @@ def _compute_centered_gradients(
     return dT_dz, dq_dz
 
 
+def stratosphere_mass_flux_gate(
+    p_full: jax.Array,
+    p_min_convection: float = 10_000.0,
+    p_gate_sharpness: float = 1_500.0,
+) -> jax.Array:
+    """Smooth sigmoid factor in [0, 1] that vanishes above the
+    tropopause (low ``p``) and equals one in the troposphere.
+
+    Multiplying any mass-flux profile by the returned factor prevents
+    convective tendencies from accumulating in the model top layer,
+    where the small mass per unit area (Δp/g) would amplify modest
+    heating into unphysical spikes (>400 K observed in 1-year RCE).
+
+    Defaults: cutoff at 100 hPa (canonical tropical tropopause) with
+    a 15-hPa transition width.  This gives factor ≈ 0.013 at the
+    model top (35 hPa), 0.034 at 50 hPa, 0.5 at 100 hPa, 0.91 at
+    130 hPa, and ≈ 1.0 below 200 hPa — i.e. the gate is *actually
+    closed* (not merely attenuated) in the deep stratosphere while
+    leaving the upper troposphere unaffected.  ``p_gate_sharpness``
+    must be << ``p_min_convection`` for the sigmoid to saturate
+    within the integration range; sharpness ≥ p_min only attenuates.
+
+    Differentiable everywhere; ``p_gate_sharpness`` sets the width of
+    the transition (Pa).
+    """
+    return jax.nn.sigmoid(
+        (p_full - p_min_convection) / jnp.maximum(p_gate_sharpness, 1.0)
+    )
+
+
 def _apply_mass_flux_kernel(
     T: jax.Array,
     q_v: jax.Array,
@@ -141,6 +171,8 @@ def _apply_mass_flux_kernel(
     rho: jax.Array,
     delta_0: float,
     M_u_max: float = 0.05,
+    p_min_convection: float = 10_000.0,
+    p_gate_sharpness: float = 1_500.0,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     """Mass-flux core kernel: compensating subsidence + detrainment.
 
@@ -154,6 +186,11 @@ def _apply_mass_flux_kernel(
           and ``(M/rho) * dq/dz`` for moisture (q is conserved so no
           adiabatic correction).
       (b) Detrainment mixing: ``+delta_0 * M * (X_u - X) / rho``.
+
+    The mass flux ``M_profile`` is gated by a smooth sigmoid in
+    pressure so that levels above ``p_min_convection`` (default 100
+    hPa, the canonical tropical tropopause) receive no convective
+    tendency.  See ``stratosphere_mass_flux_gate`` for details.
 
     The convective source for cloud water is the per-level detrainment
     of the plume's cloud water:
@@ -186,6 +223,11 @@ def _apply_mass_flux_kernel(
     # or the q_v / q_c split.
     M_profile = jnp.clip(M_profile, 0.0, M_u_max)
 
+    # Stratospheric pressure gate — see ``stratosphere_mass_flux_gate``.
+    M_profile = M_profile * stratosphere_mass_flux_gate(
+        p_full, p_min_convection, p_gate_sharpness,
+    )
+
     dT_subsidence = (M_profile / rho_safe) * (dT_dz + constants.g / constants.c_pd)
     dq_subsidence = (M_profile / rho_safe) * dq_dz
 
@@ -196,9 +238,6 @@ def _apply_mass_flux_kernel(
     dq_v_dt = dq_subsidence + dq_detrain
 
     dq_c_conv_dt = delta_0 * M_profile * jnp.clip(q_c_u, 0.0, None) / rho_safe
-    # ``p_full`` retained for interface symmetry with earlier callers
-    # that used it in a (broken) saturation calc.
-    del p_full
     return dT_dt, dq_v_dt, dq_c_conv_dt
 
 

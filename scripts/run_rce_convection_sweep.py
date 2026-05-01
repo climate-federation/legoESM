@@ -573,8 +573,14 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
         # of the soft-sigmoid bug noted above.
 
         # Saturation adjustment (one-sided): condense any q_v above
-        # q_sat and release latent heat.  No spontaneous evaporation
-        # from undersaturated air with no q_c.
+        # q_sat and release latent heat.  One pass is sufficient here:
+        # after clipping q_v to q_sat(T_pre), the latent release raises
+        # T and so raises q_sat further, so the resulting state is
+        # *under*-saturated relative to the new q_sat — no second pass
+        # would condense more vapor.  No spontaneous evaporation from
+        # undersaturated air with no q_c.  A *final* sat-adj after
+        # hyperdiffusion (below) catches any residual super-saturation
+        # that hyperdiff imports into a saturated cell from neighbours.
         q_sat_col = saturation_mixing_ratio(new_T_col, p_full_col)
         excess = jnp.maximum(new_qv_col - q_sat_col, 0.0)
         new_qv_col = new_qv_col - excess
@@ -604,6 +610,25 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
         # Hyperdiffusion on q_v (lat-lon dycore handles wind/T diffusion).
         new_qv = new_qv + DT * hyperdiffusion_3d_ll(new_qv, grid, HYPERDIFF)
         new_qv = jnp.maximum(new_qv, 0.0)
+
+        # Final saturation adjustment AFTER hyperdiffusion: hyperdiff is
+        # ∇⁴ q_v which is sign-indeterminate — in convergence cells it
+        # *imports* q_v from neighbours and can push a saturated cell
+        # above q_sat (the residual ZM-zonal-mean RH ≈ 1.04 at the
+        # surface that we observed is exactly this pathway).  Do one
+        # more sat-adj on the diffused field; the latent release goes
+        # back into T (consistent with the energy / water budget).
+        new_qv_col_final = new_qv.reshape(ncol, nlev)
+        T_col_final = new_T.reshape(ncol, nlev)
+        q_sat_col_final = saturation_mixing_ratio(T_col_final, p_full_col)
+        excess_final = jnp.maximum(new_qv_col_final - q_sat_col_final, 0.0)
+        new_qv_col_final = new_qv_col_final - excess_final
+        T_col_final = (
+            T_col_final + constants.L_v * excess_final / constants.c_pd
+        )
+        new_qc = new_qc + excess_final
+        new_qv = new_qv_col_final.reshape(q_v.shape)
+        new_T = T_col_final.reshape(T.shape)
 
         du_cmt = du_conv_col.reshape(u.shape)
         dv_cmt = dv_conv_col.reshape(v.shape)
@@ -643,7 +668,7 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
     # of ``main()``.
     snap3d = {
         "day": [], "T": [], "q_v": [], "q_c": [],
-        "precip": [], "u": [], "v": [],
+        "precip": [], "u": [], "v": [], "p_s": [],
     }
     snap3d_interval = max(1, int(args.snap3d_days * 86400 / DT))
     next_snap3d_step = snap3d_interval - 1   # capture at end of interval
@@ -705,6 +730,11 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
             snap3d["precip"].append(np.asarray(precip))
             snap3d["u"].append(np.asarray(state.u.data))
             snap3d["v"].append(np.asarray(state.v.data))
+            # Surface pressure varies with the dycore mass field — the
+            # plotter MUST use this (not a constant 1e5) when computing
+            # q_sat for the RH consistency check, otherwise it sees
+            # spurious supersaturation from the formula mismatch.
+            snap3d["p_s"].append(np.asarray(state.p_s.data))
             next_snap3d_step += snap3d_interval
 
         # 4) diagnostics
@@ -834,6 +864,7 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
             "precip": np.stack(snap3d["precip"]),   # (n_snaps, n_lat, n_lon)
             "u": np.stack(snap3d["u"]),
             "v": np.stack(snap3d["v"]),
+            "p_s": np.stack(snap3d["p_s"]),         # (n_snaps, n_lat, n_lon) [Pa]
         }
         np.savez(snap3d_path, **snap3d_payload)
         print(f"  -- {scheme}: 3D snapshot ({len(snap3d['day'])} times) "

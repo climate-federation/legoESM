@@ -29,6 +29,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Use legoesm helpers — never re-derive constants or saturation curves
+# (per CLAUDE.md "always use existing shared utilities by default").
+from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio as _model_q_sat
+
 
 SCHEME_ORDER = (
     "sbm",
@@ -149,27 +154,23 @@ def _load_snapshots(root: Path, *, strict: bool = True) -> dict[str, dict]:
 
 
 def _moist_adiabat(T_sfc: float, p_full: np.ndarray) -> np.ndarray:
-    """Reversible saturated moist adiabat from a surface parcel.
-
-    Uses a simple integration of dT/dp = R_d T / (c_p p) corrected
-    by the latent-heat / Clausius-Clapeyron term.  Approximation only —
-    intended as a visual reference, not a precise sounding.
+    """Reversible saturated moist adiabat using ``legoesm.constants``
+    + ``legoesm.thermo`` for q_sat (so the reference matches the
+    model's saturation formula bit-for-bit, per CLAUDE.md).
     """
-    R_d, c_pd, L_v, R_v = 287.0, 1004.0, 2.5e6, 461.5
-    eps = R_d / R_v
+    R_d = float(constants.R_d)
+    c_pd = float(constants.c_pd)
+    L_v = float(constants.L_v)
+    eps = float(constants.epsilon)
     T = np.empty_like(p_full)
-    T[-1] = T_sfc                       # surface (high-p end)
+    T[-1] = T_sfc
     for k in range(len(p_full) - 2, -1, -1):
         Tk = T[k + 1]
-        # Clausius-Clapeyron: e_sat ≈ 611.2 exp(17.67 (T-273)/(T-29.65))
-        e_sat = 611.2 * np.exp(17.67 * (Tk - 273.15) / (Tk - 29.65))
-        q_sat = eps * e_sat / (p_full[k + 1] - (1 - eps) * e_sat)
-        # Pseudo-adiabatic dT/dp formula (Iribarne–Godson).
+        q_sat = float(_model_q_sat(np.asarray(Tk), np.asarray(p_full[k + 1])))
         num = R_d * Tk + L_v * q_sat
         den = c_pd + L_v ** 2 * q_sat * eps / (R_d * Tk * Tk)
         dTdp = num / (p_full[k + 1] * den)
-        dp = p_full[k] - p_full[k + 1]   # negative going up
-        T[k] = Tk + dTdp * dp
+        T[k] = Tk + dTdp * (p_full[k] - p_full[k + 1])
     return T
 
 
@@ -215,6 +216,7 @@ def plot_profiles(snaps: dict, out_path: Path):
         sigma = next(iter(snaps.values()))["sigma_full"]
     p_s = 1e5
     p_full = sigma * p_s
+    p_full_hPa = p_full / 100.0
     T_sfc_ref = float(snaps[next(iter(snaps))]["sst"])
     T_madiabat = _moist_adiabat(T_sfc_ref, p_full)
 
@@ -235,17 +237,17 @@ def plot_profiles(snaps: dict, out_path: Path):
             y = d[key]
             if key == "dT_conv_profile":
                 y = y * 86400.0    # K/s → K/day
-            ax.plot(y, sigma, color=SCHEME_COLOURS[name], label=name,
+            ax.plot(y, p_full_hPa, color=SCHEME_COLOURS[name], label=name,
                     lw=2 if name == "sbm" else 1.2)
         if key == "T_profile":
-            ax.plot(T_madiabat, sigma, "k:", lw=1.0, alpha=0.7,
+            ax.plot(T_madiabat, p_full_hPa, "k:", lw=1.0, alpha=0.7,
                     label="moist adiabat (SST)")
         if key == "rh_profile":
             ax.axvline(1.0, color="gray", ls=":", lw=0.8, alpha=0.5)
         ax.set_xlabel(label)
         ax.grid(True, alpha=0.3)
-    axes[0].invert_yaxis()
-    axes[0].set_ylabel("σ (=p/p_s)")
+    axes[0].set_ylim(float(p_full_hPa.max()), float(p_full_hPa.min()))
+    axes[0].set_ylabel("p (hPa)")
     axes[0].legend(loc="best", fontsize=7, ncols=1)
     fig.suptitle(f"RCE convection-scheme sweep — final-day vertical "
                  f"profiles (SST={T_sfc_ref:.1f} K)")
@@ -263,9 +265,12 @@ def plot_conv_tendencies(snaps: dict, out_path: Path):
     fig, axes = plt.subplots(1, n, figsize=(2.2 * n, 5), sharey=True)
     if n == 1:
         axes = [axes]
+    # Reference pressure axis (all schemes share the same vertical grid).
+    p_full_hPa = next(iter(snaps.values()))["sigma_full"] * 1e3
     for ax, name in zip(axes, [k for k in SCHEME_ORDER if k in snaps]):
         d = snaps[name]
         sigma = d["sigma_full"]
+        p_hPa = sigma * 1e3
         if bool(d.get("blowup", False)):
             ax.text(0.5, 0.5, "BLOWUP", transform=ax.transAxes,
                     ha="center", va="center", color="red",
@@ -273,18 +278,18 @@ def plot_conv_tendencies(snaps: dict, out_path: Path):
         else:
             dT = d["dT_conv_profile"] * 86400.0   # K/day
             dq = d["dqv_conv_profile"] * 86400.0e3  # g/kg/day
-            ax.plot(dT, sigma, color=SCHEME_COLOURS[name], lw=1.5,
+            ax.plot(dT, p_hPa, color=SCHEME_COLOURS[name], lw=1.5,
                     label="dT/dt (K/day)")
             ax2 = ax.twiny()
-            ax2.plot(dq, sigma, color=SCHEME_COLOURS[name], lw=1.0,
+            ax2.plot(dq, p_hPa, color=SCHEME_COLOURS[name], lw=1.0,
                      ls="--", label="dq_v/dt (g/kg/day)")
             ax2.tick_params(axis="x", labelsize=7,
                             colors=SCHEME_COLOURS[name])
         ax.set_title(name, fontsize=10)
         ax.axvline(0, color="gray", lw=0.6, alpha=0.5)
         ax.grid(True, alpha=0.3)
-    axes[0].invert_yaxis()
-    axes[0].set_ylabel("σ")
+    axes[0].set_ylim(float(p_full_hPa.max()), float(p_full_hPa.min()))
+    axes[0].set_ylabel("p (hPa)")
     fig.suptitle("Convection tendency profiles (last refresh, "
                  "domain-mean) — solid: dT/dt K/day,  dashed: "
                  "dq_v/dt g/kg/day")

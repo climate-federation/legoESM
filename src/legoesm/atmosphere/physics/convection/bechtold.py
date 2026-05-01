@@ -45,6 +45,7 @@ from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
     _apply_mass_flux_kernel,
+    stratosphere_mass_flux_gate,
     _compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
@@ -261,8 +262,9 @@ def bechtold_convection(
         z, rho, float(config.delta_deep), M_u_max=config.M_b_max,
     )
     rho_safe = jnp.clip(rho, 0.01, None)
+    p_gate_qc = stratosphere_mass_flux_gate(p_full)
     dq_c_conv_dt_raw = (
-        delta_0_eff[:, None] * M_u_new * plume.q_c_u / rho_safe
+        delta_0_eff[:, None] * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
     )
     rescale = delta_0_eff[:, None] / config.delta_deep
     dT_dt = dT_dt_raw * rescale

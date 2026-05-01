@@ -620,6 +620,20 @@ def cmt_gregory_1997(
     # Layer pressure thickness; with surface-last convention dp > 0.
     dp = p_half[:, 1:] - p_half[:, :-1]
 
+    # Stratospheric mass-flux gate — same factor the kernel applies to
+    # T/q_v tendencies.  Without this, the CMT path detrains
+    # convective momentum into the model top (where the plume should
+    # already be dead), producing wind-driven dycore blowups (e.g.
+    # KF at day 10 in 1-year lat-lon FV RCE).  Imported lazily to
+    # avoid a circular import (`mass_flux` imports from `_plume`).
+    from legoesm.atmosphere.physics.convection.mass_flux import (
+        stratosphere_mass_flux_gate,
+    )
+    p_gate = stratosphere_mass_flux_gate(p_full)
+    M_u = M_u * p_gate
+    if M_d is not None:
+        M_d = M_d * p_gate
+
     # Environmental shear (forward difference per layer).  Edge layers
     # use one-sided differences via padded edges to keep shape
     # ``(ncol, nlev)``.

@@ -43,6 +43,7 @@ from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
     _apply_mass_flux_kernel,
+    stratosphere_mass_flux_gate,
     _compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
@@ -245,8 +246,11 @@ def tiedtke_convection(
         z, rho, float(config.delta_deep), M_u_max=config.M_b_max,
     )
     rho_safe = jnp.clip(rho, 0.01, None)
+    # Reuse the same stratospheric gate the kernel applies so this
+    # custom q_c path does not detrain condensate above the tropopause.
+    p_gate_qc = stratosphere_mass_flux_gate(p_full)
     dq_c_conv_dt_raw = (
-        delta_0_eff[:, None] * M_u_for_kernel * plume.q_c_u / rho_safe
+        delta_0_eff[:, None] * M_u_for_kernel * p_gate_qc * plume.q_c_u / rho_safe
     )
     # The kernel's dT/dq computations used ``config.delta_deep`` as the
     # detrainment scale; rescale by the per-column class blend.

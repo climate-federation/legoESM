@@ -26,6 +26,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Use the model's own constants + saturation formula — never re-derive.
+from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio as _model_q_sat
+
 
 SCHEME_ORDER = (
     "sbm", "tiedtke", "zhang_mcfarlane", "emanuel",
@@ -49,14 +53,17 @@ def _scalar(v):
 
 
 def _moist_adiabat(T_sfc: float, p_full: np.ndarray) -> np.ndarray:
-    R_d, c_pd, L_v, R_v = 287.0, 1004.0, 2.5e6, 461.5
-    eps = R_d / R_v
+    """Reversible saturated moist adiabat using ``legoesm.constants``
+    + ``legoesm.thermo`` for saturation (matches the model's q_sat)."""
+    R_d = float(constants.R_d)
+    c_pd = float(constants.c_pd)
+    L_v = float(constants.L_v)
+    eps = float(constants.epsilon)
     T = np.empty_like(p_full)
     T[-1] = T_sfc
     for k in range(len(p_full) - 2, -1, -1):
         Tk = T[k + 1]
-        es = 611.2 * np.exp(17.67 * (Tk - 273.15) / (Tk - 29.65))
-        q_sat = eps * es / (p_full[k + 1] - (1 - eps) * es)
+        q_sat = float(_model_q_sat(np.asarray(Tk), np.asarray(p_full[k + 1])))
         num = R_d * Tk + L_v * q_sat
         den = c_pd + L_v ** 2 * q_sat * eps / (R_d * Tk * Tk)
         dTdp = num / (p_full[k + 1] * den)
@@ -78,9 +85,8 @@ def _last_good_snapshot(snap: dict) -> tuple[int, str]:
 
 
 def _saturation_mixing_ratio(T_K, p_Pa):
-    es = 611.2 * np.exp(17.67 * (T_K - 273.15) / (T_K - 29.65))
-    eps = 0.622
-    return eps * es / np.clip(p_Pa - (1 - eps) * es, 1.0, None)
+    """Wrap ``legoesm.thermo.saturation_mixing_ratio`` (returns numpy)."""
+    return np.asarray(_model_q_sat(np.asarray(T_K), np.asarray(p_Pa)))
 
 
 def main():
@@ -121,11 +127,14 @@ def main():
         sys.exit(1)
 
     # --- Plot ---
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
-    p_full = next(iter(snaps.values()))["sigma_full"] * 1e5
+    fig, axes = plt.subplots(2, 2, figsize=(13, 10))
+    sigma_full = next(iter(snaps.values()))["sigma_full"]
+    # Reference p_full for the moist-adiabat overlay only — uses 1e5 Pa
+    # surface pressure as a representative tropical value.
+    p_full_ref = sigma_full * 1e5
+    p_full_hPa = p_full_ref / 100.0
     T_sfc_ref = float(_scalar(next(iter(snaps.values()))["sst"]))
-    T_madiabat = _moist_adiabat(T_sfc_ref, p_full)
-    sigma = next(iter(snaps.values()))["sigma_full"]
+    T_madiabat = _moist_adiabat(T_sfc_ref, p_full_ref)
 
     physics_violations = []
     for name in SCHEME_ORDER:
@@ -133,24 +142,36 @@ def main():
             continue
         snap = snaps[name]
         idx, tag = _last_good_snapshot(snap)
-        Tz = np.nanmean(snap["T"][idx], axis=(0, 1))      # (nlev,)
-        qvz = np.nanmean(snap["q_v"][idx], axis=(0, 1))
-        qsat = _saturation_mixing_ratio(Tz, p_full)
-        rh = qvz / np.clip(qsat, 1e-12, None)
+        T3 = snap["T"][idx]                           # (n_lat,n_lon,nlev)
+        qv3 = snap["q_v"][idx]
+        ps3 = snap["p_s"][idx] if snap["p_s"].ndim == 3 else snap["p_s"]
+        # 3D p_full from the snapshot's actual p_s (not 1e5).  Compute
+        # q_sat per column, then take the zonal/domain mean of RH —
+        # NOT RH of the mean, which is biased by Jensen's inequality
+        # because q_sat is highly nonlinear in T.
+        p_full3 = ps3[..., None] * sigma_full
+        qsat3 = _saturation_mixing_ratio(T3, p_full3)
+        rh3 = qv3 / np.clip(qsat3, 1e-12, None)
+        Tz = np.nanmean(T3, axis=(0, 1))              # (nlev,)
+        qvz = np.nanmean(qv3, axis=(0, 1))
+        rh = np.nanmean(rh3, axis=(0, 1))             # mean of RH, not RH of mean
         precip_lat = np.nanmean(snap["precip"][idx], axis=1) * 86400.0
         lat_deg = np.rad2deg(snap["lat"][:, 0])
 
-        # Physics consistency
+        # Physics consistency: 3D RH is the load-bearing check (q_v
+        # cannot exceed q_sat at any grid point).  Allow a small
+        # tolerance for residual hyperdiff overshoots.
         if Tz.min() < 180 or Tz.max() > 340:
             physics_violations.append(
                 f"{name} {tag}: T zonal-mean profile out of [180,340] K"
             )
-        if qvz.min() < -1e-12 or qvz.max() > 0.05:
+        if qvz.min() < -1e-12:
+            physics_violations.append(f"{name} {tag}: q_v negative")
+        rh3_max = float(np.nanmax(rh3))
+        if rh3_max - 1.0 > 0.05:
             physics_violations.append(
-                f"{name} {tag}: q_v zonal-mean out of [0,0.05] kg/kg"
+                f"{name} {tag}: 3D RH > 1.05 (max={rh3_max:.3f})"
             )
-        if rh.min() < -1e-6:
-            physics_violations.append(f"{name} {tag}: RH negative")
         if np.any(precip_lat < -1e-12):
             physics_violations.append(f"{name} {tag}: precip negative")
 
@@ -158,31 +179,33 @@ def main():
         lw = 2.0 if name == "sbm" else 1.2
         ls = ":" if "BLOWUP" in tag else "-"
         label = f"{name} ({tag})"
-        axes[0, 0].plot(Tz, sigma, color=col, lw=lw, ls=ls, label=label)
-        axes[0, 1].plot(qvz * 1e3, sigma, color=col, lw=lw, ls=ls)
-        axes[1, 0].plot(rh, sigma, color=col, lw=lw, ls=ls)
+        axes[0, 0].plot(Tz, p_full_hPa, color=col, lw=lw, ls=ls, label=label)
+        axes[0, 1].plot(qvz * 1e3, p_full_hPa, color=col, lw=lw, ls=ls)
+        axes[1, 0].plot(rh, p_full_hPa, color=col, lw=lw, ls=ls)
         axes[1, 1].plot(lat_deg, precip_lat, color=col, lw=lw, ls=ls)
 
     # Overlay moist adiabat
-    axes[0, 0].plot(T_madiabat, sigma, "k:", alpha=0.4, lw=1.0,
+    axes[0, 0].plot(T_madiabat, p_full_hPa, "k:", alpha=0.4, lw=1.0,
                     label=f"moist adiabat ({T_sfc_ref:.0f} K)")
+    p_max, p_min = float(p_full_hPa.max()), float(p_full_hPa.min())
     axes[0, 0].set_xlabel("T (K)")
-    axes[0, 0].set_ylabel("σ")
-    axes[0, 0].invert_yaxis()
+    axes[0, 0].set_ylabel("p (hPa)")
+    axes[0, 0].set_ylim(p_max, p_min)
     axes[0, 0].legend(loc="best", fontsize=7, ncols=1)
     axes[0, 0].grid(True, alpha=0.3)
     axes[0, 0].set_title("Domain-mean T profile")
 
     axes[0, 1].set_xlabel("q_v (g/kg)")
-    axes[0, 1].set_ylabel("σ")
-    axes[0, 1].invert_yaxis()
+    axes[0, 1].set_ylabel("p (hPa)")
+    axes[0, 1].set_ylim(p_max, p_min)
+    axes[0, 1].set_xlim(0, 30)        # cap at 30 g/kg — see vertlat plot
     axes[0, 1].grid(True, alpha=0.3)
     axes[0, 1].set_title("Domain-mean q_v profile")
 
     axes[1, 0].axvline(1.0, color="gray", ls=":", lw=0.8, alpha=0.5)
     axes[1, 0].set_xlabel("RH")
-    axes[1, 0].set_ylabel("σ")
-    axes[1, 0].invert_yaxis()
+    axes[1, 0].set_ylabel("p (hPa)")
+    axes[1, 0].set_ylim(p_max, p_min)
     axes[1, 0].grid(True, alpha=0.3)
     axes[1, 0].set_title("Domain-mean RH profile")
 
