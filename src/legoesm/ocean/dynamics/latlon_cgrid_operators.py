@@ -2197,10 +2197,24 @@ def density_jacobian_pgf_smc03_x(
     z_c_W = jnp.roll(z_centroid, 1, axis=1)
     sigma_W = jnp.roll(sigma, 1, axis=1)
 
-    # Face-adaptive target depth: midpoint of W and E centroids.
-    # Shape (n_lat, n_lon, nlev) — value at index j is the target for
-    # u-face j.
-    z_target_face = 0.5 * (z_c_W + z_centroid)
+    # Face-adaptive target depth: the *shallower* of the two centroids
+    # (Adcroft & Campin 2004 face_ref convention; see
+    # ``partial_cell_pgf_correction_x`` for the matching choice in
+    # the legacy path).  Using ``min`` rather than ``mean`` is
+    # essential: at a face between a full-cell column and a partial-
+    # bottom column with ``h_partial / dz_ref < 1/3``, the midpoint
+    # ``0.5·(z_c_W + z_c_E)`` falls *below* the partial column's
+    # seafloor, ``compute_pressure_at_target_smc03`` clamps that
+    # column to its seafloor pressure while the deeper column
+    # evaluates in-cell, and the asymmetric clamp leaves a residual
+    # ``ρ·g·(dz_ref − 3·h_partial)/4`` per face that does not vanish
+    # for any ρ — drove the 525 mm/s BH steady state in an earlier
+    # iteration.  The shallower centroid is by construction inside
+    # both columns (the partial column's centroid sits inside its
+    # own partial cell, and a deeper column's full or partial cell
+    # at the same level extends at least to that depth).  Reduces
+    # to the standard centroid on full-cell faces.
+    z_target_face = jnp.minimum(z_c_W, z_centroid)
 
     # Per-face-pair pressures evaluated at the SAME z_target.
     P_E = compute_pressure_at_target_smc03(
@@ -2249,7 +2263,9 @@ def density_jacobian_pgf_smc03_y(
     sigma_N = sigma[1:]
     sigma_S = sigma[:-1]
 
-    z_target_face_int = 0.5 * (z_c_S + z_c_N)
+    # Shallower-of-centroids (Adcroft & Campin convention; see x-direction
+    # operator for the rationale and the C1 bug it resolves).
+    z_target_face_int = jnp.minimum(z_c_S, z_c_N)
     P_N = compute_pressure_at_target_smc03(
         rho_N, h_N, z_c_N, sigma_N, z_target_face_int, g,
     )

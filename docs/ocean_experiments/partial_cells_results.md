@@ -257,89 +257,111 @@ implicit-CN barotropic, **exponential** thermocline (the
 | pgf_scheme | |u|max @ day 30 | flow signature                |
 |:-----------|:---------------:|:------------------------------|
 | adcroft    | 99 mm/s         | 2Δz computational mode        |
-| smc03      | 525 mm/s        | smooth bottom-trapped current |
+| smc03      | **1.5 mm/s**    | smooth, no spurious flow      |
 | target     | < 5 mm/s        | —                             |
 
-SMC03 **does** kill the 2Δz mode forced by Adcroft's single-level
-PGF spike (verified in Phase 3 ``test_smc03_no_single_level_spike``)
-— the failure mode is now a smooth bottom-trapped current rather
-than a sawtooth oscillation.  But the **magnitude** of the steady
-state is larger than Adcroft's because the harmonic-σ
-piecewise-linear reconstruction leaves an ``O(h² · ρ'')`` residual
-in the in-cell integral, and at the deepest BH levels (h ≈ 500 m,
-ρ'' large in the exponential thermocline) this exceeds Adcroft's
-``O(h · ρ' · centroid_offset)`` residual.  Per-level rest-state
-``|dv/dt|`` (BH partial coord, smoothing=5):
+**Phase 5 PASS.**  SMC03 with the harmonic-mean monotonized σ
+piecewise-linear reconstruction, evaluated at the
+**shallower-of-centroids** face-reference depth (Adcroft & Campin
+``face_ref`` convention), kills both the 2Δz computational mode
+that the Adcroft single-level PGF spike forces *and* keeps the
+rest-state PGF residual below ``1.1e−8`` m/s² (60× smaller than
+Adcroft's ``6.7e−7`` m/s² — and small enough that linear drag
+``r=1e−3`` damps everything to ~1.5 mm/s in 30 days).
 
-```
-  k=10..14:  SMC03 ~1e−9..1e−8 m/s²,  Adcroft ~3e−7 m/s²  (SMC03 wins)
-  k=15..19:  SMC03 ~1e−5..3e−5 m/s²,  Adcroft ~5e−7 m/s²  (Adcroft wins)
-```
+### Iteration log (chronological)
 
-The deep-level Adcroft residual is small here because at smoothing=5
-the centroid offsets are gentle.  Adcroft's residual is also a
-single-level z-spike at each face's partial-bottom level — that's
-what forces the 2Δz mode that ultimately drives the 99 mm/s
-steady state.  SMC03's residual is spread smoothly in z but larger
-in absolute magnitude at the deepest cells, and that magnitude
-sets the steady state through nonlinear advection feedback into a
-smooth bottom-trapped current.
+The branch went through three z_target choices before landing on
+the right one:
 
-### Pursued fallbacks (per plan §3 Phase 5)
+1. **Option A: ``z_target = |z_full_ref[k]|``** (column-independent
+   reference centroid, plan §2.3 Option A).  Blew up to
+   ~2200 mm/s on BH because at the partial-bottom level the
+   reference centroid can sit *below* one column's actual partial
+   seafloor → ``compute_pressure_at_target_smc03`` clamps that
+   column to the seafloor pressure while the deeper column
+   evaluates in-cell → asymmetric clamp → spurious gradient at
+   every steep-bathymetry face.  Switched to Option B.
 
-The plan's Phase 5 fallback ladder was followed:
+2. **Option B: ``z_target = 0.5 · (z_c_W + z_c_E)``** (face-mean of
+   centroids, plan §2.3 Option B).  Brought BH down to ~525 mm/s.
+   Initially attributed (incorrectly) to a fundamental ``O(h²·ρ'')``
+   limitation of piecewise-linear reconstruction.  Tried
+   piecewise-parabolic curvature corrections (κ term in the
+   in-cell integral) and σ_{k-1} extension at the partial-bottom
+   — neither helped, deepening the suspicion that cubic-spline ρ
+   was needed.
 
-1. **Option B for ``z_face`` (per-face mean of cell centroids)**: the
-   initial Option A attempt with ``z_target = |z_full_ref[k]|`` blew
-   up to 2200 mm/s because at the partial-bottom level the
-   column-independent reference centroid can sit *below* one
-   column's actual partial seafloor, triggering the seafloor clamp
-   on one side and an in-cell evaluation on the other.  Option B
-   uses the per-face midpoint of the two adjacent column centroids,
-   which is by construction inside both columns.  Brought |u|max
-   from 2200 → 525 mm/s.  Shipped as the default in the SMC03 path.
-2. **Curvature term κ in the in-cell integral (S&M03 §4.2)**:
-   tried piecewise-parabolic ρ with κ from a centred FD of σ.
-   Negligible effect on BH (525 → 525 mm/s) — the dominant residual
-   at deep levels is the σ stencil mismatch across columns at the
-   partial-bottom, not the cell-mean curvature.  Reverted; not in
-   shipped code.
-3. **Cell-above σ extension at the partial-bottom**: copy
-   ``σ_{k-1}`` to ``σ_k`` at each column's partial-bottom level so
-   adjacent columns agree on σ there.  Negligible effect on BH —
-   the first-order σ values already approximate the local slope
-   reasonably; the residual must come from higher-order curvature
-   terms not the σ asymmetry per se.  Reverted; not in shipped code.
+3. **Diagnosed by code review (the ocean-model-expert subagent,
+   ``docs/ocean_experiments/pgf_smc03_code_review.md`` issue C1)**:
+   the midpoint of centroids *also* falls below the partial
+   column's seafloor whenever ``h_partial / dz_ref < 1/3``,
+   triggering the same asymmetric clamp.  The Phase 3 unit tests
+   missed it because they hand-tuned ``h/dz`` to 0.5 and 0.75,
+   both above the 1/3 threshold; BH at smoothing=5 generates many
+   faces below it.  The asymmetric clamp leaves a residual
+   ``ρ · g · (dz_ref − 3·h_partial)/4`` per face that does not
+   vanish for any ρ — exactly the size needed to produce the
+   525 mm/s observation.
 
-### Genuinely-required next step
+4. **Fix: ``z_target = min(z_c_W, z_c_E)``** (the *shallower* of the
+   two centroids — the same ``face_ref`` choice the leading-order
+   Adcroft & Campin path uses, ``partial_cell_pgf_correction_x`` at
+   ``latlon_cgrid_operators.py:1877``).  By construction
+   ``z_target ≤ min(z_c_W, z_c_E) < min(z_seafloor_W,
+   z_seafloor_E)`` (each column's centroid is above its own
+   seafloor), so the clamp never triggers asymmetrically.  Also
+   reduces to the standard centroid on full-cell faces.  Brought
+   BH from 525 → 1.5 mm/s and rest-state PGF from 2.7e−5 → 1.1e−8
+   m/s².
 
-Cubic-spline ρ(z) reconstruction (S&M03 §4 modified Jacobian, full
-form, not the harmonic-linear simplified form this branch
-implements).  This pushes the in-cell integral residual from
-``O(h²·ρ'')`` to ``O(h³·ρ''')`` and is what closes the BH gap for
-realistic exponential stratification.  Multi-day work, separate PR.
+A new Phase 3 unit test
+``test_smc03_pgf_machine_zero_thin_partial_cell`` locks the C1
+regime closed: ``H_shallow=1640`` gives ``h_partial=40``,
+``h/dz=0.2`` (well below 1/3) — must give machine-zero PGF on
+linear ρ.  Closes the gap that allowed the bug to ship in the
+first place.
 
-The infrastructure landed on this branch (Phase 1 harmonic σ,
-Phase 2 piecewise-linear in-cell integral, Phase 3 face-adaptive
-PGF operator, Phase 4 PE dispatch) is exactly the right scaffolding
-for that follow-up: only ``compute_pressure_at_target_smc03`` and
-the σ reconstruction need to be upgraded; the dispatch and tests
-are reusable.
+### Production-model context (research subagent report)
 
-### What this branch delivers regardless of the BH residual
+A parallel deep-research pass by the dycore-expert subagent
+(``docs/ocean_experiments/pgf_production_models_research.md``)
+documents how production codes handle this: MOM6's default AFV
+scheme reconstructs (T, S) in piecewise-linear / piecewise-parabolic
+form and then *analytically* integrates ``ρ(T(z), S(z),
+p_LRPD(z))`` using the closed-form Wright EOS — strictly better
+than reconstructing ρ directly because EOS pressure dependence
+introduces curvature in ρ that PLM-in-ρ leaves as an
+``O(h²·ρ'')`` residual.  Our 1.5 mm/s with PLM-in-ρ is at the
+high-quality end of the envelope production codes operate in
+(ROMS DJ_GRADPS reaches ~10 mm/s on r=0.5 BH per Sikiric et al.
+2009).  Should the (separate, currently-undeveloped) bigger-scale
+ETOPO/eddy-resolving experiments demand sub-mm/s residuals, the
+PLM-in-(T, S) + Gauss-quadrature EOS upgrade documented in §7 of
+the research report is the recommended path — same scaffolding,
+swap what gets reconstructed.
 
-- Validated SMC03 piecewise-linear PGF that achieves machine-zero
-  rest-state PGF for **linear** ρ(z) on partial cells (Phase 3
-  test).
-- Eliminates the 2Δz computational mode that Adcroft's single-level
-  z-spike forces (Phase 3 smoothness test).
-- ``pgf_scheme`` config knob with backward-compat default (Phase 4).
-- All 69 pre-existing partial-cell regression tests preserved
-  bit-exact under the default.
+### What this branch delivers
+
+- ``pgf_scheme="smc03"`` (new) and ``"adcroft"`` (default,
+  bit-exact preserved) config knob.
+- Phase 5 BH headline gate **passing**: 1.5 mm/s vs the < 5 mm/s
+  target, on a 30-day exponential-thermocline integration with
+  smoothing=5, r_max=0.54, drag=1e−3.
+- Rest-state PGF on the BH partial coord: **60× smaller** than
+  Adcroft (1.1e−8 vs 6.7e−7 m/s²).
+- Eliminates the 2Δz computational mode that Adcroft's
+  single-level z-spike forces.
+- Phase 3 ``test_smc03_pgf_machine_zero_thin_partial_cell`` C1
+  regression test for the ``h/dz < 1/3`` regime.
+- 101 unit tests passing, including all 69 pre-existing
+  partial-cells phases bit-exact under the default.
 - Fully differentiable end-to-end (``jax.grad`` AD tests in each
   phase).
-- BH script flag (``--pgf-scheme``) and a documented baseline run
-  for any future cubic-spline upgrade to compare against.
+- ``--pgf-scheme`` flag on the BH script; output dir tagged so
+  results don't collide with the Adcroft baseline.
+- Two on-branch research artefacts documenting the production
+  landscape and the code review that found C1.
 
 The current branch delivers significant standalone value: long-
 integration NaN fixed, conservation invariants tested, distributed

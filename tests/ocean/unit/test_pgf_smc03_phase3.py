@@ -199,6 +199,48 @@ class TestLinearRhoSteppedBathymetryMachineZero:
             f"SMC03 PGF |y| = {smc_y_max} on linear ρ — expected machine zero."
         )
 
+    def test_smc03_pgf_machine_zero_thin_partial_cell(self):
+        """C1 regression: a partial cell with ``h_partial / dz_ref <
+        1/3`` previously triggered an asymmetric clamp inside
+        ``compute_pressure_at_target_smc03`` when the per-face target
+        depth was the midpoint of the two cell centroids
+        (``0.5·(z_c_W + z_c_E)``) — the midpoint fell *below* the
+        partial column's seafloor while the deeper column saw an
+        unclamped target, leaving an O(``ρ·g·(dz_ref − 3·h_partial)``)
+        per-face residual that does not vanish for any ρ profile.
+
+        With the shallower-of-centroids target depth (Adcroft &
+        Campin face_ref convention) this regime must give machine-
+        zero PGF on a linear ρ profile.  Locks the bug closed."""
+        grid = create_latlon_grid(n_lat=6, n_lon=12)
+        nlev = 10
+        z_coord = _uniform_dz_coord(n_levels=nlev, H_max=2000.0)
+        # H_shallow = 1640 → bot_level = 8, h_partial[8] = 40 m,
+        # h/dz = 40/200 = 0.2 (well below the 1/3 threshold).
+        H = _make_step_bathymetry(grid, H_deep=2000.0, H_shallow=1640.0)
+        partial = create_partial_cell_coordinate(z_coord, H)
+
+        centroid = compute_centroid_depth(jnp.zeros_like(H), H, partial)
+        rho_prime = _linear_rho_per_cell(centroid, slope=2.5e-3, rho_offset=-1.0)
+
+        dpx_smc = density_jacobian_pgf_smc03_x(
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
+        )
+        dpy_smc = density_jacobian_pgf_smc03_y(
+            rho_prime, partial.h_partial, partial.is_active, grid, G,
+        )
+        bot_shallow = int(jnp.min(partial.bottom_level))
+        smc_x_max = float(jnp.max(jnp.abs(dpx_smc[..., : bot_shallow + 1])))
+        smc_y_max = float(jnp.max(jnp.abs(dpy_smc[..., : bot_shallow + 1])))
+        assert smc_x_max < 1.0e-12, (
+            f"C1 regression: SMC03 PGF |x| = {smc_x_max} on linear ρ "
+            f"with h_partial/dz_ref=0.2 — expected machine zero."
+        )
+        assert smc_y_max < 1.0e-12, (
+            f"C1 regression: SMC03 PGF |y| = {smc_y_max} on linear ρ "
+            f"with h_partial/dz_ref=0.2 — expected machine zero."
+        )
+
     def test_smc03_dramatically_better_than_adcroft(self):
         """Same setup as above; compare SMC03 vs (gradient + Adcroft).
 
