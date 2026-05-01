@@ -390,6 +390,94 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-986 — Seam mode characterisation: damping sweep + asymmetry between west/east cube edges
+
+**Trigger.**  Iter-985 localised the day-1 v_ll peak to face=0..3 i=0
+j=21 on equatorial cube-edge seams (lat ±6.34°).  Iter-986 probes
+which operator drives the seam.
+
+**Damping sweep on FB chain C36 W2 1-day (baseline 55.6 m/s):**
+
+| config                          | v_ll_Linf | seam[1,0,21] | interior[1,1,21] |
+|---------------------------------|-----------|--------------|------------------|
+| baseline (damp_v=0.06,d4_bg=0.16) |  55.61   |    56.50     |    28.75         |
+| damp_v=0.12 (2x)                  |  55.73   |    44.62     |    26.91         |
+| damp_v=0                          |  56.34   |    63.37     |    30.61         |
+| damp_v=0.20 / 0.30                |    NaN   |     NaN      |     NaN          |
+| **d4_bg=0 (no d_sw5)**            |  82.98   |  **17.92**   |  **0.16**        |
+| nord_v=1 (del-4 vort)             |  55.68   |    44.26     |    26.42         |
+| nord=2 (del-6 d_sw5)              |  80.42   |    34.59     |    20.83         |
+
+**Key findings.**
+
+1. **The seam mode IS damp_v-sensitive.**  damp_v=0.12 cuts seam
+   peak 56.5→44.6.  damp_v=0 grows it to 63.4.  But damp_v cannot
+   exceed ~0.12 without numerical instability.
+
+2. **d_sw5 generates BOTH the interior mode AND amplifies the seam.**
+   Removing d_sw5 (d4_bg=0): seam drops 56.5→17.9 (3× reduction)
+   and interior drops 28.75→0.16 (180× reduction!) — but a NEW
+   interior mode at lat=1° (face=*, i=5, j=18) grows to 86 m/s.
+
+3. **Two competing modes:**
+   - INTERIOR mode at lat=1° (suppressed by d_sw5 when on)
+   - SEAM mode at cube edges at lat=±6.3° (suppressed by damp_v)
+
+   d_sw5 trades down the interior mode but ADDS noise to the seam,
+   which damp_v=0.06 partially absorbs.
+
+**Iter-986b — Asymmetry across cube edges (west vs east).**
+
+For W2 eastward zonal flow:
+
+| face=0 i=35 (east, downwind) j=21 |    -23.39 m/s |
+| face=1 i=0  (west, upwind)   j=21 |    -56.50 m/s |
+
+These are different physical seams (face=0 east is lon~+45°, face=1
+west is at a different cube edge).  But both are i=0 vs i=N-1 of
+their respective faces.  Per-step Δv at j=21 is roughly UNIFORM
+across i (≈-0.23 m/s/step everywhere, regardless of i=0 or i=5).
+So the i=0 vs i=N-1 asymmetry in DAY-1 magnitude must come from
+how DAMPING applies asymmetrically at the boundary.
+
+**Iter-986c — PPM duogrid bypass hypothesis.**
+
+`_ppm_1d` for duogrid skips:
+- `_pert_ppm(iv=1)` face-boundary monotonicity at indices 0,1,2,
+  -3,-2,-1.
+- Position-aware `al_L0/al_L1/al_R0/al_R1` corrections.
+- The `apply_fortran_xppm_boundary` Fortran s11/s14/s15 overrides
+  (gated on `fortran_legacy_face`).
+
+For duogrid, the assumption is that the kinked-extended remap puts
+halo cells at correct physical positions, so the standard uniform-
+spacing PPM is Fortran-faithful.  But empirically the seam shows
+2× amplification at the upwind-direction edge — suggesting either:
+(a) the duogrid halo VALUES still have sub-cell precision errors
+that the standard PPM amplifies on the upwind side, or (b) the
+Fortran duogrid path has additional boundary handling that we are
+not replicating.
+
+**Iter-986 deliverables.**
+
+1. `scripts/diag_iter986_seam_damping_sweep.py` — runnable damping
+   sweep + west/east asymmetry probe.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+**Backlog for iter-987+.**
+
+1. Audit duogrid PPM upwind boundary by comparing Fortran's
+   `xppm` / `yppm` source for the duogrid branch — are there
+   special boundary overrides we are missing?
+2. Probe `pad_halo` halo VALUES at face=1 i=-1 j=21 vs face=0
+   i=35 j=21 — measure the physical-quantity discrepancy in
+   zeta_abs, zeta, ut, vt, h that PPM amplifies on the upwind
+   side.
+3. Test FB chain with `apply_fortran_xppm_boundary=True` — even
+   though gated to non-duogrid, may serve as a baseline reference.
+
 ### Iter-985 — CRITICAL PIVOT: 55.6 m/s peak is at equatorial cube EDGES, not vertices
 
 **Trigger.**  Iter-984 confirmed cube-vertex imbalance is 1.3 m/s in
