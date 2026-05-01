@@ -239,6 +239,47 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-950 — NEGATIVE-RESULT: extending D-grid PPM halo from h=2 to h=3 regresses v_ll_Linf
+
+**Trigger.**  iter-945's `_pad_halo_dgrid_for_ppm` uses h_dg=2 cells
+of cross-face halo for the PPM transport.  PPM hord=9 has internal
+halo h3=4, so the outer 2 cells fall back to `mode='edge'`.  Iter-950
+tested h_dg=3 (when duogrid ng>=3) to reduce the mode='edge' gap to
+1 outer cell.
+
+**Negative result.**  Mixed metrics on duogrid C36 W2 1-day:
+
+| iter           | step survival | |u_max| | |v_max| | v_ll_Linf |
+|----------------|--------------:|-------:|-------:|----------:|
+| iter-947 (h_dg=2)|  288/288  |  76.91 |  75.38 |    55.61  |
+| iter-950 (h_dg=3)|  288/288  |  77.76 |  70.64 |    58.00  | ← v_ll regressed |
+
+|v_max| improved 6% but v_ll_Linf — the W2 acceptance metric —
+regressed by 4%.  The deeper halo spreads cube-vertex artifacts
+further into the panel rather than damping them.  Reverted; h_dg=2
+retained.  Lesson: |u_max|/|v_max| are imperfect proxies for
+v_ll_Linf, which weights the entire interpolated lat-lon field
+(not just the maximum face-covariant point).
+
+**Iter-950 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_bgrid_ke_transport` — comment
+   block records the iter-950 negative-result finding.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**Backlog for iter-951+.**
+
+The `|u|/|v| max ≠ v_ll_Linf` divergence motivates a sharper
+diagnostic: future iters should measure v_ll_Linf directly.
+Strategic candidates remain:
+
+1. Compute c_sw + p_grad_c increment at halo positions exactly
+   (extend metric tensors to halo, allow halo'd uc/vc that includes
+   the c_sw/p_grad_c gradient-term increments).
+2. Audit operator-split sweep order in `_bgrid_ke_transport` against
+   Fortran's Lin-Rood 2-sweep KE form.
+3. PPM hord=9 cube-edge boundary overrides for ytp_v / xtp_u.
+
 ### Iter-949 — NEGATIVE-RESULT: pad_halo_vector for ua, va in `_divergence_corner_duo` is bit-identical no-op
 
 **Trigger.**  iter-657 documented that `_divergence_corner_duo`'s

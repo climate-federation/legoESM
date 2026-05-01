@@ -2558,6 +2558,16 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # `mpp_update_domains(u_d, v_d, gridtype=DGRID_NE)` upstream of
     # d_sw3.  Non-duogrid path is unchanged: PPM falls back to
     # `mode='edge'` internally (external_halo=0).
+    # Iter-950 (NEGATIVE-RESULT): extending the iter-945 D-grid PPM
+    # halo from h_dg=2 to h_dg=3 (when duogrid ng>=3) reduced the
+    # mode='edge' outer-halo gap from 2 cells to 1 cell.  Result on
+    # duogrid C36 W2 1-day:
+    #     iter-947 baseline (h_dg=2):  |u|=76.91, |v|=75.38, v_ll=55.6
+    #     iter-950 (h_dg=3):           |u|=77.76, |v|=70.64, v_ll=58.0
+    # |v_max| improved 6% but v_ll_Linf REGRESSED — the deeper halo
+    # spreads cube-vertex artifacts further into the panel.  Reverted
+    # to h_dg=2; the v_ll_Linf metric (the actual W2 acceptance gate)
+    # is the right north star.
     if use_duogrid:
         h_dg = 2
         u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(
