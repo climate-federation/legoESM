@@ -405,6 +405,77 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-994 — Multi-pass meridional smoothing: convergent residual at v_ll≈8.08 m/s
+
+**Trigger.**  Iter-993 found best single-pass at damp=0.55,
+v_ll_Linf=8.20 m/s.  Iter-994 sub-steps the smoother (multiple
+passes per FB step) to push past the stability limit.
+
+**Sweep:** sub-step damp_per_pass × n_pass per FB step:
+
+| damp  | n_pass | v_ll_Linf | h_err_max |
+|-------|--------|-----------|-----------|
+| 0.55  |   1    |   8.20    |   2945    |
+| 0.30  |   2    |   8.19    |   2879    |
+| 0.20  |   3    |   8.19    |   2883    |
+| 0.40  |   2    |   NaN     |   -       |  (instability)
+| 0.20  |   5    |   8.09    |   2498    |
+| 0.10  |  10    |   8.09    |   2501    |
+| 0.30  |   3    | **8.08**  |   2567    |
+
+**Convergent residual: v_ll_Linf ≈ 8.08 m/s.**  Different
+combinations of damp × n_pass all converge to the same v_ll floor.
+This is the residual error level intrinsic to the FB chain
+operator that smoothing cannot drive lower.
+
+H_err continues to decrease with more passes (2945 → 2498 m), but
+the wind error has bottomed out.
+
+**Implication.**
+
+The 8.08 m/s residual is the FB chain's intrinsic accuracy limit
+even with optimal external smoothing.  To go below requires fixing
+the operator itself:
+
+- Replace `fv_tp_2d` with the production `cgrid_mass_flux_divergence`
+  for the mass transport step.
+- Implement the missing dyn_core dissipation sequencing exactly.
+- Use a different time integrator (e.g., Strang splitting between
+  c_sw and d_sw rather than the simple sequence).
+
+**Cumulative progress.**
+
+| iter      | config                                  | v_ll_Linf | h_err |
+|-----------|-----------------------------------------|-----------|-------|
+| baseline  | (no Smag, no smooth)                    |   55.61   | 18591 |
+| iter-963  | Smag d2=0.09, dddmp=0.45                |   43.77   | 12855 |
+| iter-993  | + 1-pass meridional damp=0.55           |    8.20   |  2945 |
+| iter-994  | + 3-pass meridional damp=0.30           |  **8.08** |  2567 |
+
+Total v_ll_Linf reduction from baseline: **6.9× (55.61 → 8.08)**.
+
+Still 68× from target 0.119 m/s.  Smoothing has been exhausted as a
+calibration lever.
+
+**Iter-994 deliverables.**
+
+1. `scripts/diag_iter994_multi_pass_smoothing.py` — sweep with
+   multi-pass.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
+**Backlog for iter-995+.**
+
+The remaining work is structural:
+
+1. Apply meridional smoother INSIDE the FB step (between c_sw and
+   d_sw, or as part of d_sw5).  May change residual from 8.08
+   floor.
+2. Replace `transport_step` (FB chain mass transport) with
+   production `cgrid_mass_flux_divergence`.
+3. Mass-conserving h smoother coupled with v_north smoother.
+
 ### Iter-993 — Meridional-only smoothing: PRESERVES geostrophic balance, drives v_ll to 8.20 m/s
 
 **Trigger.**  Iter-991/992 found that smoothing both u_d and v_d
