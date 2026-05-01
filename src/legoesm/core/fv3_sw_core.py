@@ -1739,6 +1739,14 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # ``apply_legacy_corner_corrections=True`` (default False).
         # Arithmetic factored into `_apply_legacy_d_sw5_corner_corrections`
         # so its sign/index contract is testable on synthetic inputs.
+        # iter-958 (NEGATIVE-RESULT): tested removing the iter-862
+        # `cdgrid.base.duogrid is None` gate (so corrections fire on
+        # duogrid too).  Result on duogrid C36 W2 1-day: bit-identical
+        # to iter-947 baseline (v_ll_Linf=55.6130) — the corrections
+        # are essentially no-ops because divg_d at cube vertices is
+        # boundary-zeroed by `_divergence_corner_duo` and uc_lap at
+        # the corresponding halo positions is also ~0 for W2 smooth
+        # flow.  Original iter-862 gate restored.
         if (apply_legacy_corner_corrections
                 and cdgrid.base.duogrid is None):
             delpc = _apply_legacy_d_sw5_corner_corrections(delpc, vort_pad)
@@ -1867,6 +1875,10 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
             # apply Fortran-structure with Fortran-incomplete data.
             if (apply_legacy_corner_corrections
                     and cdgrid.base.duogrid is None):
+                # iter-958 verified that removing the duogrid gate
+                # here makes the corrections bit-identical no-ops on
+                # duogrid (uc_lap ~0 at cube-vertex halo for W2).
+                # Gate retained.
                 divg_d = _apply_legacy_d_sw5_corner_corrections(
                     divg_d, uc_lap)
 
