@@ -113,6 +113,15 @@ def _file_contains(path: Path, needle: str) -> bool:
             SW_FV3_CDGRID,
             "FV3FBShallowWaterModel",
         ),
+        # 9. fv3_sw_tendencies hyperdiff_coeff is silent no-op
+        # (signature-only; cdgrid_momentum_tendencies implements it
+        # but fv3_sw_tendencies does not).  Iter-1019 added a
+        # UserWarning to make this explicit instead of silent.
+        (
+            "issue9_fv3_sw_tendencies_hyperdiff_silent_noop",
+            OPERATORS_CDGRID,
+            "is silently ignored on this code path",
+        ),
     ],
 )
 def test_iter928_fortran_fidelity_gap_marker_present(issue, path, needle):
@@ -140,12 +149,20 @@ def test_iter928_fortran_fidelity_gap_marker_present(issue, path, needle):
 
 
 def test_iter928_marker_count_invariant():
-    """The 8-issue audit must remain at exactly 8 entries.  Adding new
+    """The 9-issue audit must remain at exactly 9 entries.  Adding new
     gaps requires conscious choice of marker; removing entries
     requires explicit gap closure.  Locking the count guards against
     accidental drift in either direction.
+
+    Iter-1019 added issue9 (fv3_sw_tendencies hyperdiff silent no-op)
+    after Codex audit.  The hyperdiff branch in fv3_sw_tendencies
+    is signature-only (the implementation exists in
+    cdgrid_momentum_tendencies but is NOT applied in
+    fv3_sw_tendencies).  Iter-1019 added a UserWarning so callers
+    don't silently get zero damping; the underlying structural gap
+    remains.
     """
-    expected_count = 8
+    expected_count = 9
     # Inspect the parametrize decorator on the parametric test
     # function rather than grepping the source file; that avoids
     # false positives on `issueN_...` references in the module

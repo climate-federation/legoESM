@@ -486,6 +486,41 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1027 — Add issue9 to iter-928 fidelity-gap markers (hyperdiff silent no-op)
+
+**Trigger.**  Iter-1019 added a UserWarning for the silent no-op
+in `fv3_sw_tendencies(hyperdiff_coeff=...)`.  The underlying
+structural gap (signature-only param) remains.  Iter-1027 adds it
+to `test_iter928_fortran_fidelity_gap_markers.py` so future audits
+preserve the warning.
+
+**Iter-1027 fix.**  Added 9th marker:
+
+```python
+# 9. fv3_sw_tendencies hyperdiff_coeff is silent no-op
+# (signature-only; cdgrid_momentum_tendencies implements it
+# but fv3_sw_tendencies does not).  Iter-1019 added a
+# UserWarning to make this explicit instead of silent.
+(
+    "issue9_fv3_sw_tendencies_hyperdiff_silent_noop",
+    OPERATORS_CDGRID,
+    "is silently ignored on this code path",
+),
+```
+
+Updated `expected_count = 8 → 9`.  PASSES.
+
+**Iter-928 marker count: 8 → 9.**  Test file structure preserved
+(parametric list + invariant in lockstep).
+
+**Iter-1027 deliverables.**
+
+1. `tests/test_iter928_fortran_fidelity_gap_markers.py`:
+   + 9th marker (issue9_fv3_sw_tendencies_hyperdiff_silent_noop).
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No production code change.
+
 ### Iter-1025 — W2 rotated-axis (alpha>0) robustness check
 
 **Iter-1025 sweep:** W2 IC with non-zero rotation angle alpha:
