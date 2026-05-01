@@ -390,6 +390,73 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-981 — 1-step W2 tendency diagnostic isolates bug to polar-face cube vertices
+
+**Trigger.**  Iter-980 suggested running a 1-step diagnostic to
+isolate the per-step bug source.  W2 is a solid-body steady
+solution; analytic time derivative is zero everywhere.
+
+**Iter-981 measurement on duogrid C36 W2 dt=300 s, 1 step:**
+
+```
+|du_d|_max = 0.980 m/s
+|dv_d|_max = 1.449 m/s
+|dh|_max   = 56.5 m
+
+Top 5 |du_d| locations (face, i, j, value):
+  face=4 i= 0 j= 1   du = 0.9801   ← N-pole face SW vertex
+  face=4 i=35 j=35   du = 0.9799   ← N-pole face NE vertex
+  face=5 i= 0 j=35   du = 0.9795   ← S-pole face NW vertex
+  face=5 i=35 j= 1   du = 0.9793   ← S-pole face SE vertex
+  face=4 i=35 j=18   du = 0.8788   ← N-pole face mid-east boundary
+```
+
+**Critical pattern:** Top 4 du_d errors are ALL at CUBE VERTICES
+on the POLAR FACES (face 4 = north pole, face 5 = south pole).
+All four polar-vertex errors have nearly identical magnitude
+(~0.98 m/s), suggesting the SAME structural error fires at each.
+
+The 5th-largest error (face=4, i=35, j=18) is at a MID cube-edge
+on the polar face, ~10% smaller than the vertex errors.
+
+The error is NOT at equatorial-belt face boundaries (faces 0, 1,
+2, 3) — those are only ~0.5 m/s per step.
+
+**Implication.**  The bug is in CUBE-VERTEX HANDLING, specifically
+at the 8 cube vertices where 3 faces meet (4 vertices visible from
+each polar face).  Likely candidates:
+
+1. **`synchronize_bgrid_ne_corner_geo` 3-face vertex averaging**
+   (halo.py:2027-2126).  At each cube vertex, 3 faces share the
+   point; the geo-frame-then-back rotation may not correctly
+   handle the 3-way mean.
+2. **`pad_halo` cube-vertex corner-fill** (halo.py + duogrid
+   `cube_rmp` corner_fill_region).  At halo cells adjacent to
+   cube vertices, the fill logic may diverge from Fortran's
+   `mpp_update_domains` corner handling.
+3. **`_d2a2c_vect_duogrid` cube-vertex 4th-order interp** —
+   uses `ext_vector_dgrid` which goes through cube_rmp.  At
+   vertices, the Lagrange interpolation may be ill-conditioned.
+
+The 1-day v_ll_Linf=55 m/s gap is consistent with 0.98 m/s per
+step × 288 steps × something growing slower than linearly =
+~55 m/s when integrated.  The cube-vertex error compounds over
+time.
+
+**Iter-981 deliverables.**
+
+1. `scripts/diag_iter981_w2_1step_tendency.py` — runnable 1-step
+   diagnostic that reports |du_d|, |dv_d|, |dh| max + top-5
+   locations.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.
+
+**Backlog for iter-982+.**  Investigate the 3 candidate cube-
+vertex helpers individually; identify which one introduces the
+0.98 m/s per-step error.  Likely fixes will be ports of Fortran's
+specific cube-vertex code.
+
 ### Iter-980 — Verify mass transport CGRID_NE flux sync + KE Lin-Rood formula
 
 **Iter-980 audit findings:**
