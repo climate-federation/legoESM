@@ -405,6 +405,90 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-993 — Meridional-only smoothing: PRESERVES geostrophic balance, drives v_ll to 8.20 m/s
+
+**Trigger.**  Iter-991/992 found that smoothing both u_d and v_d
+post-step destroys geostrophic balance.  Iter-993 tests smoothing
+ONLY the meridional v_north component (in lat-lon basis), leaving
+u_east unchanged.
+
+**Method.**
+
+After each FB step:
+1. Average u_d, v_d to cell-centre (u_cc, v_cc).
+2. Rotate to lat-lon basis: `u_east = ca*u_cc - sa*v_cc`,
+   `v_north = sa*u_cc + ca*v_cc`.
+3. Apply 2D Laplacian smoothing to v_north ONLY:
+   `v_north += damp * lap_2d(v_north)`.
+4. Rotate back: `u_cc_new = ca*u_east + sa*v_north`,
+   `v_cc_new = -sa*u_east + ca*v_north`.
+5. Distribute the cell-centre delta back to D-grid u_d, v_d via
+   2-cell averaging.
+
+For W2, the analytical v_north = 0 everywhere, so smoothing v_north
+preserves the (correct) zonal flow and damps the (incorrect) noise.
+
+**Iter-993 sweep on FB chain C36 W2 1-day (with d2_bg=0.09, dddmp=0.45):**
+
+| damp | v_ll_Linf | h_err_max |
+|------|-----------|-----------|
+| 0.0  |   43.77   |   12855   |
+| 0.10 |   26.58   |    5763   |
+| 0.20 |   16.97   |    4365   |
+| 0.30 |   11.51   |    3702   |
+| 0.40 |    8.43   |    3302   |
+| 0.50 |    8.27   |    3033   |
+| 0.55 | **8.20**  |   2945    |
+| 0.60 |  149.7    |    -      |  (instability)
+| 0.62 |   NaN     |    -      |
+
+**Best stable:** damp=0.55 → v_ll_Linf=8.20 m/s.
+
+**Critical: h_err DECREASES with damp.**  Unlike iter-991/992
+(both u and v smoothing) which corrupted h, the meridional-only
+smoothing REDUCES h drift from 12855 m to 2945 m.  This confirms
+the geostrophic balance is preserved: smoothing the noise (v)
+without disrupting the zonal flow (u) keeps the h field on track.
+
+**Cumulative progress on FB chain C36 W2 1-day:**
+
+| iter      | config                           | v_ll_Linf | h_err |
+|-----------|-----------------------------------|-----------|-------|
+| baseline  | (no Smag, no smooth)              |   55.61   | 18591 |
+| iter-959  | Smag d2=0.01, dddmp=0.05          |   53.17   | 17423 |
+| iter-963  | Smag d2=0.09, dddmp=0.45          |   43.77   | 12855 |
+| iter-993  | + meridional smooth damp=0.55     |  **8.20** |  2945 |
+
+**Iter-993 is a 5.3× improvement over iter-963 calibration floor.**
+Still 69× from target 0.119 m/s, but the largest single-iter
+reduction in this Ralph-loop session.
+
+However, **h_err=2945 m is still ~100% of W2 IC range (1094-2998).**
+The wind field is now smooth (v_ll=8.2 m/s is small), but the mass
+field still has substantial drift.  This is the FB chain
+architectural instability manifesting as h drift instead of v_d
+spikes.
+
+**Iter-993 deliverables.**
+
+1. `scripts/diag_iter993_meridional_smoothing.py` — full sweep
+   showing v_ll AND h_err vs damp.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**No production code change.**  This is an experimental external
+post-step smoother; not Fortran-faithful, kept as a calibration
+benchmark.  Production unchanged at v_ll_Linf=0.132 m/s.
+
+**Backlog for iter-994+.**
+
+1. Apply meridional smoothing INSIDE the FB step (between c_sw and
+   d_sw, or between d_sw1 and d_sw5) — may suppress the seam mode
+   at its source and reduce h_err.
+2. Couple meridional smoothing with mass-conserving h smoothing
+   (e.g., `h += k * (lap_h * area / total_area)` with mean preserved).
+3. Resolution scaling with the iter-993 fix to test if the
+   improvement is consistent across N.
+
 ### Iter-991/992 — External del-2 wind smoothing: cosmetic v_ll fix, corrupts h field (NEGATIVE)
 
 **Trigger.**  Iter-990 found Smagorinsky Pareto floor at v_ll_Linf=
