@@ -390,6 +390,86 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-967 — NEGATIVE-RESULT: Fortran d_sw3 cube-edge boundary fix conflicts with iter-945 halo
+
+**Trigger.**  Now have GFDL Fortran source access at
+`../FV3/atmos_cubed_sphere-symmetryclean/`.  Read `sw_core.F90`
+d_sw3 (B-grid KE transport) lines 1201-1388 and `xtp_u` /
+`ytp_v` cube-edge boundary fix at lines 2819-2863 / 3239-3316.
+
+**Critical Fortran detail.**  d_sw3 calls ytp_v / xtp_u with
+``bounded_domain=.false.`` HARDCODED at lines 1316 and 1374
+(regardless of the global bounded_domain flag).  Inside ytp_v /
+xtp_u, the cube-edge boundary fix at iord=9 fires when
+``(.not. bounded_domain .or. .not. dg%is_initialized)`` — with the
+hardcoded `.false.`, the condition is always true.  So Fortran
+ALWAYS applies a specific cube-edge boundary correction in d_sw3
+using `s11=11/14, s14=4/7, s15=3/14` constants.
+
+**Iter-967 attempt.**  Added the boundary fix to
+`_ppm_transport_1d` via a new `apply_d_sw3_boundary_fix` kwarg.
+The fix overrides bl/br at the 6 boundary cells (3 each at south +
+north, mirrored for west/east on the other axis) using:
+
+```
+xt = s15*v(1) + s11*v(2) - s14*dm(2)
+br(1) = xt - v(1);  bl(2) = xt - v(2)
+br(2) = al(3) - v(2)
+bl(0) = s14*dm(-1) - s11*dq(-1)
+xt = (length-weighted xt of v(0)/v(-1) and v(1)/v(2) extrap)
+bl(1) = xt - v(1);  br(0) = xt - v(0)
+pert_ppm(iv=1) on bl(2), br(2)
+```
+
+(plus mirrored north boundary).  Wired into `_bgrid_ke_transport`
+for the duogrid path with `cdgrid.dy_edge_x` / `dx_edge_y` as the
+length-weighted dx field.
+
+**Negative result.**  W2 v_ll_Linf 55.6 → 119.8 m/s on duogrid C36
+1-day (115% regression).  Reverted.
+
+**Diagnosis.**  Fortran's d_sw3 boundary fix is designed to
+COMPENSATE FOR the absence of cross-face halo data on the
+mode='edge'-style halo Fortran uses inside the d_sw3 ytp_v / xtp_u
+sub-step.  It applies a specific extrapolation that yields
+sensible values at cube edges given that mode='edge' halo.
+
+But iter-945 (`_pad_halo_dgrid_for_ppm`) already provides
+**correct cross-face halo** for u_d, v_d at depth h_dg=2 via
+`ext_vector_dgrid`.  Applying Fortran's mode='edge' compensation
+ON TOP of the cross-face halo OVER-CORRECTS — the formula assumes
+the halo is wrong and tries to fix it, but the halo is right.
+
+**Conclusion.**  iter-945 and the Fortran boundary fix are
+ALTERNATIVE strategies for the same problem.  Iter-945 (cross-face
+halo) is the more accurate Fortran-spirit strategy.  The boundary
+fix kwarg is preserved on `_ppm_transport_1d` for potential use on
+non-duogrid paths or other contexts where cross-face halo is
+unavailable.
+
+**Iter-967 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_ppm_transport_1d` — new
+   `apply_d_sw3_boundary_fix` kwarg + `boundary_fix_dx_field`
+   kwarg (default False).  Implements the Fortran s11/s14/s15
+   boundary formula with length-weighted xt for the southern and
+   northern cube-edge cells; calls `_pert_ppm` (iv=1) at the
+   adjacent cells.
+2. `_bgrid_ke_transport` — kwarg DEFAULT False (preserves
+   iter-945's cross-face halo behaviour).  Code commentary records
+   the iter-967 negative-result.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**Backlog for iter-968+.**
+
+The Fortran source unblocks several other angles:
+1. `c_sw` (sw_core.F90:79-488) — verify our `_c_sw` matches.
+2. `d2a2c_vect` (sw_core.F90:3006-3345) — verify duogrid /
+   non-duogrid branches.
+3. Pressure gradient (`p_grad_c` analogue in dyn_core.F90) — check
+   our `_p_grad_c` halo handling.
+4. Vorticity damping (`del6_vt_flux`) — check our implementation.
+
 ### Iter-963 — Push Smagorinsky to stability boundary: 21% v_ll_Linf reduction
 
 **Trigger.**  Iter-959 found that enabling Smagorinsky

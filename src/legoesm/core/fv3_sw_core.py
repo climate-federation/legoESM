@@ -2350,7 +2350,9 @@ def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
     return dp_x, dp_y
 
 
-def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0):
+def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
+                       apply_d_sw3_boundary_fix: bool = False,
+                       boundary_fix_dx_field=None):
     """PPM hord=9 transport of a staggered field along one axis.
 
     Implements the Fortran ytp_v / xtp_u (sw_core.F90:2897-3353,
@@ -2480,6 +2482,171 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0):
                      jnp.minimum(jnp.minimum(z, pmp_2), lac_2)))
     # bl, br: (6, nc, M) for cells -1..N (index 0..nc-1)
 
+    # Iter-967: d_sw3 cube-edge boundary fix (sw_core.F90:3239-3316
+    # ytp_v branch; sw_core.F90:2819-2863 xtp_u branch — same formula
+    # mirrored across the sweep axis).
+    #
+    # CRITICAL Fortran detail: d_sw3 calls ytp_v / xtp_u with
+    # ``bounded_domain=.false.`` HARDCODED at lines 1315-1316 and
+    # 1373-1374, regardless of the global bounded_domain flag.  The
+    # boundary fix in xtp_u at line 2819 fires when
+    # ``(.not. bounded_domain .or. .not. dg%is_initialized)`` — with
+    # the HARDCODED .false., the condition becomes
+    # ``(.not. .false. .or. ...) = .true.``, so the fix ALWAYS FIRES
+    # for d_sw3 wind transport on cube-face boundaries (regardless
+    # of duogrid status).
+    #
+    # Constants from sw_core.F90:38: s11=11/14, s14=4/7, s15=3/14.
+    # Index map: Fortran cell j ↔ Python k = j (when bl/br is indexed
+    # 0..nc-1 over Python cells -1..N, where Python cell j = Fortran
+    # cell j+1 → bl/br index k_python = Fortran j_fortran).
+    #
+    # Boundary overrides at js=1 (south boundary):
+    #   br(2) = al(3) - v(2)
+    #   xt = s15*v(1) + s11*v(2) - s14*dm(2)
+    #   br(1) = xt - v(1);  bl(2) = xt - v(2)
+    #   bl(0) = s14*dm(-1) - s11*dq(-1)
+    #   xt = (length-weighted xt of v(0)/v(-1) and v(1)/v(2) extrap)
+    #   bl(1) = xt - v(1);  br(0) = xt - v(0)
+    #   pert_ppm(v(2), bl(2), br(2), iv=-1) → standard PPM constraint
+    if apply_d_sw3_boundary_fix:
+        from legoesm.core.fv_tp_2d import _pert_ppm as _pert_ppm_iv1
+        s11_c = 11.0 / 14.0
+        s14_c = 4.0 / 7.0
+        s15_c = 3.0 / 14.0
+        # Index map (Fortran j_F, 1-indexed) → (Python k):
+        #   - vp index for Fortran v(j_F)        : h3 + j_F - 1
+        #   - dm index for Fortran dm(j_F)       : h3 + j_F - 2
+        #   - dq index for Fortran dq(j_F)       : h3 + j_F - 2
+        #   - al index for Fortran al(j_F)       : h3 + j_F - 3
+        #   - bl/br index for Fortran bl(j_F)    : j_F (with my k=0 → halo cell -1)
+        # Substitutions:
+        #   Fortran j_F=npy-X with npy=N+1 → j_F = N+1-X.
+        # E.g., v(npy-2) → vp[h3 + (N+1-2) - 1] = vp[h3 + N - 2].
+
+        # SOUTH halo + interior cells (Fortran j_F ∈ {-1, 0, 1, 2, 3}):
+        v_jm1 = vp[:, h3 - 2, :]   # Fortran v(-1)
+        v_j0 = vp[:, h3 - 1, :]    # v(0)
+        v_j1 = vp[:, h3, :]        # v(1)
+        v_j2 = vp[:, h3 + 1, :]    # v(2)
+        # dm at Fortran cell j_F : dm index = h3 + j_F - 2
+        dm_jm1 = dm[:, h3 - 3, :]  # dm(-1)
+        dm_j2 = dm[:, h3, :]       # dm(2)
+        # dq at Fortran cell j_F : dq index = h3 + j_F - 2
+        dq_jm1 = dq[:, h3 - 3, :]  # dq(-1)
+        # al(3) — Fortran al(j_F=3) → al index = h3 + 3 - 3 = h3
+        al_j3 = al[:, h3, :]
+
+        # NORTH halo + interior cells (Fortran j_F ∈ {npy-2, npy-1, npy, npy+1}
+        #                              = {N-1, N, N+1, N+2}):
+        v_npy_m2 = vp[:, h3 + nn - 2, :]  # v(npy-2) = v(N-1)
+        v_npy_m1 = vp[:, h3 + nn - 1, :]  # v(npy-1) = v(N)
+        v_npy = vp[:, h3 + nn, :]         # v(npy) = v(N+1)
+        v_npy_p1 = vp[:, h3 + nn + 1, :]  # v(npy+1) = v(N+2)
+        # dm(npy-2) = dm(N-1) → index = h3 + (N-1) - 2 = h3+N-3
+        dm_npy_m2 = dm[:, h3 + nn - 3, :]
+        dm_npy_p1 = dm[:, h3 + nn, :]   # dm(npy+1) = dm(N+2) → index h3+N
+        # dq(npy) = dq(N+1) → index = h3 + (N+1) - 2 = h3+N-1
+        dq_npy = dq[:, h3 + nn - 1, :]
+        # al(npy-2) → al index = h3 + (N-1) - 3 = h3+N-4
+        al_npy_m2 = al[:, h3 + nn - 4, :]
+
+        # Optional length-weighted xt via dx (boundary_fix_dx_field).
+        # The caller provides INTERIOR shape (no halo); we pad to match
+        # vp's h3=4 internal halo via mode='edge' so the boundary
+        # formula's halo references work.
+        if boundary_fix_dx_field is not None:
+            if axis == 2:
+                dxf_int = jnp.swapaxes(boundary_fix_dx_field, 1, 2)
+            else:
+                dxf_int = boundary_fix_dx_field
+            # Pad sweep axis to total halo h3 to match vp.
+            dxf = jnp.pad(dxf_int, [(0, 0), (h3, h3), (0, 0)],
+                           mode='edge')
+            dx_m2 = dxf[:, h3 - 2, :]
+            dx_m1 = dxf[:, h3 - 1, :]
+            dx_1 = dxf[:, h3, :]
+            dx_2 = dxf[:, h3 + 1, :]
+            dx_npy_m2 = dxf[:, h3 + nn - 2, :]
+            dx_npy_m1 = dxf[:, h3 + nn - 1, :]
+            dx_npy = dxf[:, h3 + nn, :]
+            dx_npy_p1 = dxf[:, h3 + nn + 1, :]
+        else:
+            dx_m2 = dx_m1 = dx_1 = dx_2 = None
+            dx_npy_m2 = dx_npy_m1 = dx_npy = dx_npy_p1 = None
+
+        # SOUTH boundary fix (js==1) — overrides bl/br at Python k = 0, 1, 2
+        # (Fortran j = 0, 1, 2).
+        # br(2) = al(3) - v(2)
+        br = br.at[:, 2, :].set(al_j3 - v_j2)
+        # xt = s15*v(1) + s11*v(2) - s14*dm(2)
+        xt_s = s15_c * v_j1 + s11_c * v_j2 - s14_c * dm_j2
+        br = br.at[:, 1, :].set(xt_s - v_j1)
+        bl = bl.at[:, 2, :].set(xt_s - v_j2)
+        # bl(0) = s14*dm(-1) - s11*dq(-1)
+        bl = bl.at[:, 0, :].set(s14_c * dm_jm1 - s11_c * dq_jm1)
+        # ELSE branch (length-weighted xt for bl(1), br(0)):
+        if dx_m1 is not None:
+            x0L = 0.5 * (
+                ((2.0 * dx_m1 + dx_m2) * v_j0 - dx_m1 * v_jm1)
+                / jnp.maximum(dx_m1 + dx_m2, _EPS)
+            )
+            x0R = 0.5 * (
+                ((2.0 * dx_1 + dx_2) * v_j1 - dx_1 * v_j2)
+                / jnp.maximum(dx_1 + dx_2, _EPS)
+            )
+            xt_s2 = x0L + x0R
+        else:
+            xt_s2 = 0.5 * ((1.5 * v_j0 - 0.5 * v_jm1)
+                            + (1.5 * v_j1 - 0.5 * v_j2))
+        bl = bl.at[:, 1, :].set(xt_s2 - v_j1)
+        br = br.at[:, 0, :].set(xt_s2 - v_j0)
+
+        # NORTH boundary fix (je+1==npy) — overrides bl/br at Python k =
+        # npy-2, npy-1, npy = N-1, N, N+1 (Fortran j=npy-2, npy-1, npy).
+        k_nm2 = nn - 1
+        k_nm1 = nn
+        k_n = nn + 1
+
+        # bl(npy-2) = al(npy-2) - v(npy-2)
+        bl = bl.at[:, k_nm2, :].set(al_npy_m2 - v_npy_m2)
+        # xt = s15*v(npy-1) + s11*v(npy-2) + s14*dm(npy-2)
+        xt_n = s15_c * v_npy_m1 + s11_c * v_npy_m2 + s14_c * dm_npy_m2
+        br = br.at[:, k_nm2, :].set(xt_n - v_npy_m2)
+        bl = bl.at[:, k_nm1, :].set(xt_n - v_npy_m1)
+        # br(npy) = s11*dq(npy) - s14*dm(npy+1)
+        br = br.at[:, k_n, :].set(s11_c * dq_npy - s14_c * dm_npy_p1)
+        # ELSE branch (length-weighted xt for br(npy-1), bl(npy)):
+        if dx_npy_m1 is not None:
+            x0L_n = 0.5 * (
+                ((2.0 * dx_npy_m1 + dx_npy_m2) * v_npy_m1
+                  - dx_npy_m1 * v_npy_m2)
+                / jnp.maximum(dx_npy_m1 + dx_npy_m2, _EPS)
+            )
+            x0R_n = 0.5 * (
+                ((2.0 * dx_npy + dx_npy_p1) * v_npy
+                  - dx_npy * v_npy_p1)
+                / jnp.maximum(dx_npy + dx_npy_p1, _EPS)
+            )
+            xt_n2 = x0L_n + x0R_n
+        else:
+            xt_n2 = 0.5 * ((1.5 * v_npy_m1 - 0.5 * v_npy_m2)
+                            + (1.5 * v_npy - 0.5 * v_npy_p1))
+        br = br.at[:, k_nm1, :].set(xt_n2 - v_npy_m1)
+        bl = bl.at[:, k_n, :].set(xt_n2 - v_npy)
+
+        # pert_ppm(iv=1) at j=2 and j=npy-2 (standard PPM constraint).
+        bl_2 = bl[:, 2, :]
+        br_2 = br[:, 2, :]
+        bl_2_new, br_2_new = _pert_ppm_iv1(bl_2, br_2)
+        bl = bl.at[:, 2, :].set(bl_2_new)
+        br = br.at[:, 2, :].set(br_2_new)
+        bl_nm2 = bl[:, k_nm2, :]
+        br_nm2 = br[:, k_nm2, :]
+        bl_nm2_new, br_nm2_new = _pert_ppm_iv1(bl_nm2, br_nm2)
+        bl = bl.at[:, k_nm2, :].set(bl_nm2_new)
+        br = br.at[:, k_nm2, :].set(br_nm2_new)
+
     # --- Flux evaluation (FV3 sw_core.F90:3339-3349) ---
     # cfl = c * rdy[j-1] (positive) or c * rdy[j] (negative)
     # Pad rdelta to get rdy at interface-adjacent cells
@@ -2605,9 +2772,30 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
     # --- Step 2: transport v_d in y-direction using vb (PPM hord=9) ---
     # FV3 sw_core.F90:1315 calls ytp_v with hord_mt=9 (default).
-    # v_d: (6, n+1, n) transported along axis 2 by Courant vb: (6, n+1, n+1).
-    # rdy: 1/dy at v_d positions. Fortran uses gridstruct%rdy at (isd:ied+1, jsd:jed).
-    # Our dy_edge_x is at u-face positions (6, n+1, n) = same shape as v_d.
+    # Iter-967: enable d_sw3 cube-edge boundary fix.  Fortran's
+    # call passes ``bounded_domain=.false.`` HARDCODED at line 1316,
+    # so the boundary fix at sw_core.F90:3239-3316 fires regardless
+    # of duogrid status.
+    # Iter-967 (NEGATIVE-RESULT): tested enabling Fortran's d_sw3
+    # cube-edge boundary fix (sw_core.F90:3239-3316 ytp_v, similar
+    # for xtp_u).  Fortran's d_sw3 hardcodes ``bounded_domain=.false.``
+    # in the calls (sw_core.F90:1316/1374), so the boundary fix
+    # always fires.  Adding it to our Python `_ppm_transport_1d`
+    # via the new `apply_d_sw3_boundary_fix` kwarg WORSENED W2
+    # v_ll_Linf 55.6 → 119.8 m/s.
+    #
+    # Likely reason: with iter-945's `_pad_halo_dgrid_for_ppm` we
+    # already provide proper cross-face halo for u_d, v_d at depth
+    # h_dg=2.  Fortran's boundary fix assumes mode='edge'-style halo
+    # (no cross-face data) and applies a corrective extrapolation
+    # using s11/s14/s15 coefficients.  Applying that correction ON
+    # TOP of correct cross-face halo over-corrects.  The boundary
+    # fix is NOT compatible with iter-945's halo strategy — they're
+    # alternative paths.
+    #
+    # Reverted; the kwarg is preserved on `_ppm_transport_1d` for
+    # potential future use (e.g., a non-duogrid path that doesn't
+    # have iter-945's halo).
     rdy = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n)
     transported_y = _ppm_transport_1d(
         v_d_jhalo, vb, rdy, axis=2, external_halo=h_dg)
@@ -2616,10 +2804,6 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     ub = dt5 * (uc_sum - vc_sum * cosa) * rsina  # (6, n+1, n+1)
 
     # --- Step 4: transport u_d in x-direction using ub (PPM hord=9) ---
-    # FV3 sw_core.F90:1373 calls xtp_u with hord_mt=9.
-    # u_d: (6, n, n+1) transported along axis 1 by Courant ub: (6, n+1, n+1).
-    # rdx: 1/dx at u_d positions. Fortran uses gridstruct%rdx at (isd:ied, jsd:jed+1).
-    # Our dx_edge_y is at v-face positions (6, n, n+1) = same shape as u_d.
     rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
     transported_x = _ppm_transport_1d(
         u_d_ihalo, ub, rdx, axis=1, external_halo=h_dg)
