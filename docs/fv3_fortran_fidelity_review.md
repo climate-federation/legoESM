@@ -445,6 +445,29 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1014/1015 — Lazy-import publication + sentinel re-verification
+
+**Iter-1014.**  Added `iter1009_dual_target_config` to
+`legoesm.atmosphere.dynamics._LAZY_IMPORTS`, enabling top-level
+import:
+
+```python
+from legoesm.atmosphere.dynamics import iter1009_dual_target_config
+cfg = iter1009_dual_target_config(36)
+```
+
+Verified import works without error.
+
+**Iter-1015 — re-verification:**
+
+11/11 core production sentinels PASS in 49 s:
+- `test_iter921_w2_v_vs_h_pareto_sentinel` (3)
+- `test_iter924_cosine_bell_production_sentinel` (5)
+- `test_iter1002_w2_target_met` (3 incl. iter-1013 preset helper)
+
+The iter-1009 calibration is durable.  No regression from the
+preset-export refactoring.
+
 ### Iter-1013 — Public preset `iter1009_dual_target_config(N)` for the W2/W5 dual-target calibration
 
 **Trigger.**  Iter-1009 calibration is currently constructed
