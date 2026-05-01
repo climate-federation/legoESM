@@ -390,6 +390,75 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-983 — c_sw + p_grad_c imperfect geostrophic balance at cube vertices
+
+**Trigger.**  Iter-982 narrowed the cube-vertex bug to upstream of
+d_sw_native.  Iter-983 directly measures c_sw + p_grad_c output
+on W2 IC.
+
+**Iter-983 measurement.**  Run c_sw + p_grad_c on W2 solid-body
+IC (analytical steady → c_sw+p_grad_c should give Δuc=Δvc=0).
+Measure increments duc, dvc:
+
+```
+c_sw alone:                  |duc|_max=1.3441, |dvc|_max=0.8424
+c_sw + p_grad_c:             |duc|_max=1.2937, |dvc|_max=0.5332
+                             (both at CUBE VERTICES)
+
+Top 5 |duc| locations (c_sw + p_grad_c):
+  face=2 i= 0 j=35  |duc|=1.2937   ← NW cube vertex face 2
+  face=2 i= 0 j= 0  |duc|=1.2937   ← SW cube vertex face 2
+  face=0 i= 0 j= 0  |duc|=1.2915   ← SW cube vertex face 0
+  face=0 i= 0 j=35  |duc|=1.2915   ← NW cube vertex face 0
+  face=3 i= 0 j= 0  |duc|=1.2880   ← SW cube vertex face 3
+
+Top 5 |dvc| locations (c_sw + p_grad_c):
+  face=4 i=35 j=35  |dvc|=0.5332   ← N-pole NE cube vertex
+  face=5 i=35 j= 1  |dvc|=0.5332   ← S-pole SE cube vertex
+  face=4 i= 0 j= 1  |dvc|=0.5324   ← N-pole SW cube vertex
+  face=5 i= 0 j=35  |dvc|=0.5324   ← S-pole NW cube vertex
+```
+
+**Critical finding.**  c_sw + p_grad_c produces ~1.3 m/s
+geostrophic imbalance at cube vertices for the W2 analytical
+steady IC.  This propagates into d_sw_native as wrong NEW uc, vc.
+
+The dvc cube vertices (top 4) match EXACTLY the locations of
+iter-981's |du_d| top errors at the polar faces.  The c_sw +
+p_grad_c imbalance is the dominant source of the FB chain
+cube-vertex error.
+
+**Cause.**  Geostrophic balance for W2 requires `fy1 * vort_x +
+dke_x + dp_x = 0` (continuous).  In discrete form, the three
+terms cancel within truncation error.  At cube vertices, the
+stencils for vort, ke, p_grad use halo data from 3 different
+faces with different orientations.  The cancellation is
+imperfect at cube vertices.
+
+**Implication.**  Closing the v_ll_Linf gap requires Fortran-
+faithful cube-vertex handling in c_sw and/or p_grad_c.  The 14+
+audited routines all match Fortran functionally, but the
+COMPOSITION at cube vertices doesn't achieve the cancellation
+that Fortran does.
+
+**Iter-983 deliverables.**
+
+1. `scripts/diag_iter983_csw_pgradc_balance.py` — runnable
+   diagnostic that measures duc, dvc on W2 IC.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+No code change.
+
+**Backlog for iter-984+.**
+
+1. Compare term-by-term: which component of c_sw (KE-grad,
+   vort-flux, p_grad_c) contributes most at cube vertices?
+   This requires running each operator separately on W2 IC.
+2. Investigate whether `_pad_halo_auto` corner-fill at cube
+   vertices matches Fortran's expected stencil coverage.
+3. Check whether Fortran's W2 IC is loaded with cube-vertex
+   precomputed data that we may be missing.
+
 ### Iter-982 — Component probes: cube-vertex bug NOT in BGRID_NE sync, iter-947 helper, or damping
 
 **Trigger.**  Iter-981 isolated the per-step ~0.98 m/s |du_d|
