@@ -390,6 +390,73 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-980 — Verify mass transport CGRID_NE flux sync + KE Lin-Rood formula
+
+**Iter-980 audit findings:**
+
+1. **Mass-transport flux sync** (dyn_core.F90:850-900): Fortran's
+   d_sw1 computes mass fluxes (fx, fy from `fv_tp_2d` of delp),
+   then `mpp_get_boundary(fxx_delp, fyy_delp, ..., CGRID_NE)`
+   averages the boundary fluxes for duogrid.  Our Python's
+   `fv_tp_2d` calls `synchronize_cgrid_fluxes(fx, fy, n)` at line
+   864-865 (gated on `apply_cgrid_flux_sync=True` default for
+   mass).  ✓ Matches Fortran.
+
+2. **KE Lin-Rood formula** (dyn_core.F90:1015-1020):
+   ```fortran
+   kee(i,j) = (ubbtemp(i,j) * vbbtemp(i,j))
+   kee(i,j) = 0.5*(kee(i,j) + ubb(i,j)*vbb(i,j))
+   ```
+   Our Python:
+   ```python
+   ke_corner = 0.5 * (ubbtemp * vbbtemp + ubb * vbb)
+   ```
+   Variable mapping:
+   - `ubbtemp` ← transported_y (ytp_v output)
+   - `vbbtemp` ← vb (y-Courant)
+   - `ubb` ← ub (x-Courant)
+   - `vbb` ← transported_x (xtp_u output)
+   ✓ Identical formula.
+
+3. **BGRID_NE corner sync** (dyn_core.F90:984-1011 + our
+   `synchronize_bgrid_ne_corner_geo`): Fortran averages ubb,
+   vbbtemp face-local at boundary edges using mpp_get_boundary
+   with internal sign-flip table.  Our Python converts to geo
+   frame (invariant under face rotation), averages as scalars,
+   converts back.  Mathematically equivalent for a continuous
+   physical vector field — both methods give the same answer.
+
+**Comprehensive audit conclusion (iter-967 through iter-980).**
+
+The iter-967..iter-980 audit covered EVERY structural component
+of Fortran's d_sw chain that affects the duogrid path.  All 16+
+audited routines + halo orchestration + flux sync + KE formula
+match Fortran functionally.
+
+The remaining v_ll_Linf=55.6 m/s gap (vs Fortran's claimed < 1
+m/s for W2 at C36) is structurally unexplained.  Most likely
+sources:
+
+1. **Floating-point rounding accumulation** (~6% per iter-978).
+2. **Fortran's stale-halo data race** (uc, vc deeper halo cells
+   contain previous-step values that may differ from our
+   iter-947 NEW-corrected halo).
+3. **Bug in some auxiliary helper** I have not yet examined
+   (e.g., `_pad_halo_auto`, `pad_halo` corner-fill logic at cube
+   vertices, or duogrid `cube_rmp` interpolation table).
+
+**Suggested next steps for iter-981+.**
+
+1. Build a small "1-step" diagnostic that runs ONE FB chain step
+   on W2 IC and compares u_d_new, v_d_new at every cube-vertex
+   cell vs analytical W2 zero-tendency (since W2 is steady).
+2. Identify which specific cells deviate first.
+3. Trace back through the d_sw chain to find which operator
+   introduced the deviation.
+
+This would isolate the bug source instead of cascading through
+288 steps of compounded effects.
+
 ### Iter-979 — Audit Fortran's uc/vc halo orchestration between c_sw and d_sw
 
 **Trigger.**  Iter-977 hypothesized that Fortran's per-step
