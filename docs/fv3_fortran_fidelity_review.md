@@ -8,6 +8,28 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
+## Working Notes (iter-955 status)
+
+- **Last successful production-impacting change**: iter-947
+  (NEW-corrected uc, vc halo via OLD-cross-face delta).  Cumulative
+  reduction in v_ll_Linf since iter-944b: ~85 → 55.6 m/s (~35%).
+- **Remaining gap to W2 acceptance**: 55.6 m/s vs 0.119 m/s = 467×.
+- **Iters 948-954 were all NEGATIVE-RESULT**: linear extrapolation
+  (worsened |v|), pad_halo_vector for ua/va in `_divergence_corner_duo`
+  (no-op confirmed), h_dg=3 PPM halo (regressed v_ll), enabling
+  Parts 2/3/4 of d_sw1 on duogrid (catastrophic), and selective
+  Part 2 sin_sg-upwind override (also catastrophic).  Iter-955
+  added a runnable cumulative-progress diagnostic.
+- **General pattern**: with iter-947's halo fix, Fortran's "Part
+  2/3/4 boundary overrides" are NOT NEEDED on duogrid (they're a
+  workaround for mode='edge' Part 1).  Future fidelity gains must
+  come from PPM transport, operator-split sweep order, or
+  ke_corner halo (the latter two are non-trivial without GFDL
+  Fortran source access).
+- **Risk**: continuing to iterate without source visibility may
+  yield mostly negative-result iters.  Each one still constrains
+  the design space but the production code drift is minimal.
+
 ## Current Status
 
 - Production W2 is still not true FV3. It runs
