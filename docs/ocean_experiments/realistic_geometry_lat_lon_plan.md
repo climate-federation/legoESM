@@ -1,9 +1,51 @@
 # Realistic coastlines + bathymetry on the lat-lon C-grid ocean — implementation plan
 
-**Status (2026-04-30):** Phases 0–3a complete; **paused at Phase 3.5/4
-pending partial-cells implementation**.  See
-`partial_cells_plan.md` and
-`realistic_geometry_phase3a_results.md` for the rationale.
+**Status (2026-05-01):** Phases 0–3.5 **complete**; Phase 4-5
+remaining, blocked on a non-PGF ETOPO-domain instability.
+
+### Resumed (was: paused at Phase 3.5/4 pending partial cells)
+
+The pause documented below was lifted on 2026-05-01 by the merge of
+the partial-cells branch (``ocean-partial-cells``) and the
+density-Jacobian PGF branch (``ocean-pgf-smc03``, S&M 2003) into this
+PR.  Phase 3.5 (the headline "lat-lon C-grid runs the seamount
+stress test cleanly on real ETOPO" gate that motivated the pause):
+
+- **Beckmann-Haidvogel seamount, 30-day rest-state**:
+  smoothing=5, r_max=0.54, drag=1e−3 →
+  ``|u|max = 1.5 mm/s`` (target < 5 mm/s).  **PASS.**  Down from
+  the legacy Adcroft-only path's 99 mm/s 2Δz computational mode.
+  Rest-state PGF residual 60× smaller than Adcroft (1.1e−8 vs
+  6.7e−7 m/s²).
+- **Real ETOPO 30-day rest-state, 3°/20-level**:
+  Adcroft baseline never reaches the < 50 mm/s criterion (390 mm/s
+  on day 1) and crashes day 12.  SMC03 satisfies the < 50 mm/s
+  criterion through day 12 (peak 49 mm/s); a non-PGF global-domain
+  instability (likely coastal computational mode at irregular
+  coastlines / thin-cell implicit-CN solver pathology) drives both
+  schemes to NaN later (Adcroft day 12, SMC03 day 19).  The
+  remaining 30-day gap is downstream of the PGF and out-of-scope
+  for the SMC03 work.
+
+See ``partial_cells_results.md`` for the full result table, the
+iteration log (initial Option A → Option B → C1 ``min(z_c)`` fix),
+and the on-branch research artefacts
+(``pgf_production_models_research.md`` documenting MOM6/ROMS/NEMO
+production PGF approaches, ``pgf_smc03_code_review.md`` documenting
+the C1 bug and its fix).
+
+**Phase 4-5 remaining work**: Wolfe-Cessi-style spinup on real
+ETOPO and eddy-permitting experiments.  Both gated on closing the
+30-day NaN-free instability noted above — likely horizontal
+viscosity / biharmonic / Smagorinsky tuning, coastal sponge, or
+MEO-style additional smoothing.  A diagnostic spike to localise
+the instability (homogeneous T,S 1-day ETOPO run to separate
+"stratification × coastline" from "pure dynamics × coastline") is
+the recommended next step.
+
+---
+
+### Original pause note (2026-04-30, kept for history)
 
 **Why paused**: Phase 3a's empirical regime boundary (model passes
 seamount stress at r_max < 0.24) plus Phase 3a's MEO sweep on real
