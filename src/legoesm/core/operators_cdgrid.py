@@ -1274,6 +1274,84 @@ def _interp_center_to_corner(field, cdgrid, padded=None):
                     + f_pad[:, :-1, 1:, :] + f_pad[:, 1:, 1:, :])
 
 
+def _interp_center_to_corner_a2b_ord4(field, cdgrid):
+    """Iter-971: 4th-order A→B (cell-centre → corner) interpolation.
+
+    Port of Fortran ``a2b_ord4`` (a2b_edge.F90:50-330) for the
+    duogrid path (lines 98-104, 185-192, 241-258).  The full FV3
+    reference uses two cascaded 4-point stencils:
+
+        qx(i, j)  = b2 * (qin(i-2, j) + qin(i+1, j))
+                   + b1 * (qin(i-1, j) + qin(i, j))
+        qy(i, j)  = b2 * (qin(i, j-2) + qin(i, j+1))
+                   + b1 * (qin(i, j-1) + qin(i, j))
+        qxx(i, j) = a2 * (qx(i, j-2) + qx(i, j+1))
+                   + a1 * (qx(i, j-1) + qx(i, j))
+        qyy(i, j) = a2 * (qy(i-2, j) + qy(i+1, j))
+                   + a1 * (qy(i-1, j) + qy(i, j))
+        qout(i, j) = 0.5 * (qxx(i, j) + qyy(i, j))
+
+    Constants: a1=9/16, a2=-1/16 (Lagrange 4-pt); b1=7/12, b2=-1/12
+    (PPM volume mean).
+
+    The qx step is a 4-pt x-direction average from cells to i-faces.
+    The qxx step is a 4-pt y-direction average from i-faces to
+    corners.  qyy is the symmetric path through y first.  Final
+    qout averages the two paths.
+
+    For Smagorinsky-tuned d_sw5 callers (iter-959/963) this is
+    more Fortran-faithful than `_interp_center_to_corner` (which
+    is a 2nd-order 4-point average).
+
+    Parameters
+    ----------
+    field : (6, n, n) cell-centre A-grid scalar (e.g., wk vorticity)
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    qout : (6, n+1, n+1) corner-staggered B-grid scalar
+    """
+    n = field.shape[1]
+    # Pad input with cross-face halo of depth 2 (need cells [-2, n+1]
+    # for the 4-pt stencil applied on both i and j axes).
+    f_pad = _pad_halo_auto_h2(field, cdgrid)  # (6, n+4, n+4)
+    a1 = 9.0 / 16.0
+    a2 = -1.0 / 16.0
+    b1 = 7.0 / 12.0
+    b2 = -1.0 / 12.0
+
+    # qx(i, j) at i-face i ∈ [0, n] uses cells (i-2, i-1, i, i+1).
+    # In padded indexing (cell c at f_pad[c+2]): for I-face k ∈ [0, n],
+    # cells (k-2, k-1, k, k+1) → padded (k, k+1, k+2, k+3).
+    # qx shape: (n+1) i-faces × full halo'd j-cells (n+4) with j-halo
+    # available for the qxx 4-pt y-stencil.
+    qx = (b2 * (f_pad[:, 0:n + 1, :] + f_pad[:, 3:n + 4, :])
+          + b1 * (f_pad[:, 1:n + 2, :] + f_pad[:, 2:n + 3, :]))
+    # qx shape: (6, n+1, n+4)
+
+    # qy(i, j) at j-face j ∈ [0, n] using cells (j-2..j+1) on the
+    # j-axis.  Symmetric to qx.
+    qy = (b2 * (f_pad[:, :, 0:n + 1] + f_pad[:, :, 3:n + 4])
+          + b1 * (f_pad[:, :, 1:n + 2] + f_pad[:, :, 2:n + 3]))
+    # qy shape: (6, n+4, n+1)
+
+    # qxx: 4-pt y-stencil on qx.  qx j-axis has (n+4) cells indexed
+    # 0..n+3.  For corner j ∈ [0, n] (n+1 corners), the 4-pt stencil
+    # reads j-cells (j-2, j-1, j, j+1) → padded indices (j, j+1, j+2,
+    # j+3).
+    qxx = (a2 * (qx[:, :, 0:n + 1] + qx[:, :, 3:n + 4])
+           + a1 * (qx[:, :, 1:n + 2] + qx[:, :, 2:n + 3]))
+    # qxx shape: (6, n+1, n+1)
+
+    # qyy: 4-pt x-stencil on qy.
+    qyy = (a2 * (qy[:, 0:n + 1, :] + qy[:, 3:n + 4, :])
+           + a1 * (qy[:, 1:n + 2, :] + qy[:, 2:n + 3, :]))
+    # qyy shape: (6, n+1, n+1)
+
+    return 0.5 * (qxx + qyy)
+
+
 def _interp_corner_to_center(field_d):
     """Interpolate D-grid corners to cell centres (4-point average).
 

@@ -390,6 +390,63 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-971 — Implement Fortran-faithful `_interp_center_to_corner_a2b_ord4` (4th-order)
+
+**Trigger.**  iter-970 identified that Fortran's d_sw5 Smagorinsky
+path uses 4th-order `a2b_ord4` for cell-centre → corner
+interpolation; our Python's `_interp_center_to_corner` is 2nd-order.
+
+**Iter-971 fix.**  Ported Fortran's a2b_ord4 (a2b_edge.F90:50-330)
+duogrid path (lines 100-104, 188-192, 241-258) to Python as
+`_interp_center_to_corner_a2b_ord4` in `operators_cdgrid.py`.
+
+The 4th-order cascade:
+
+```
+qx(i, j)  = b2*(qin(i-2, j) + qin(i+1, j))
+          + b1*(qin(i-1, j) + qin(i, j))
+qy(i, j)  = b2*(qin(i, j-2) + qin(i, j+1))
+          + b1*(qin(i, j-1) + qin(i, j))
+qxx(i, j) = a2*(qx(i, j-2) + qx(i, j+1))
+          + a1*(qx(i, j-1) + qx(i, j))
+qyy(i, j) = a2*(qy(i-2, j) + qy(i+1, j))
+          + a1*(qy(i-1, j) + qy(i, j))
+qout(i, j) = 0.5 * (qxx(i, j) + qyy(i, j))
+```
+
+Constants matching Fortran:
+- a1 = 9/16, a2 = -1/16  (Lagrange 4-pt)
+- b1 = 7/12, b2 = -1/12  (PPM volume mean)
+
+**Iter-971 deliverables.**
+
+1. `src/legoesm/core/operators_cdgrid.py` —
+   `_interp_center_to_corner_a2b_ord4` (~70 lines) using
+   `_pad_halo_auto_h2` for cross-face halo of depth 2 (matches
+   Fortran's halo'd input expectation for the 4-pt stencil).
+2. `tests/test_iter971_a2b_ord4.py` — 2 sentinels:
+   - shape (6, n+1, n+1) + exact-on-constants invariant
+   - smooth-field 4th-order vs 2nd-order agreement within 10%
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**Production impact.**  ZERO.  The new helper is added but NOT
+yet wired into `_d_sw5_corner_divergence`'s Smagorinsky branch —
+that wiring is iter-972's task to keep the iter-971 commit small
+and focused.
+
+The default config (d2_bg=0, dddmp=0) doesn't hit the Smagorinsky
+branch at all, so wiring won't change default behaviour either.
+For Smagorinsky-tuned callers (iter-959/963), wiring _will_ change
+W2 numbers — TBD whether the change is improvement or regression.
+
+**Backlog for iter-972+.**
+
+1. Wire `_interp_center_to_corner_a2b_ord4` into
+   `_d_sw5_corner_divergence` Smagorinsky branch under an opt-in
+   flag.  Measure W2 v_ll_Linf with iter-963 high-Smagorinsky
+   config to verify Fortran-faithful 4th-order kernel improves
+   over 2nd-order.
+
 ### Iter-970 — Audit d_sw5 nord>=1 iterated Laplacian + a2b_ord4 vs `_interp_center_to_corner`
 
 **Iter-970 audit findings:**
