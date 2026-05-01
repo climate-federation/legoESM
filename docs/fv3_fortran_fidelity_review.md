@@ -8,6 +8,42 @@ Use git history for retired prose.
 > through iter-N" in the title. The authoritative iteration count
 > is the branch commit history plus the HEAD commit message tag.
 
+## Working Notes (iter-1045 status snapshot — 48/48 sentinels, full 3D matrix)
+
+**🎯 USER'S EXPANDED CRITERION VERIFIED with full 3D coverage matrix:**
+
+3D coverage matrix (4 dimensions × 2 paths = 8 explicit checks):
+
+| Path | Rest Stab. | Edge Artif. | Long Int. | Vertex Artif. |
+|------|------------|-------------|-----------|---------------|
+| Hydrostatic | ✓ 50-step | ✓ iter-1039 | ✓ iter-1041 | ✓ iter-1043 |
+| Non-hydrostatic | ✓ 30-step | ✓ iter-1040 | ✓ iter-1042 | ✓ iter-1045 |
+
+**Sentinel inventory (48 tests):**
+
+| Test suite                                          | tests |
+|-----------------------------------------------------|-------|
+| iter-921 W2 baseline                                |  3    |
+| iter-923 W5 production                              |  7    |
+| iter-924 cosine bell                                |  5    |
+| iter-928 Fortran-fidelity gap markers               | 10    |
+| iter-1002 W2 target + W5 day-5 + warnings           |  6    |
+| iter-1032 Williamson matrix integration             |  3    |
+| iter-1039 file: 3D edge + vertex + long             |  **6**|
+| Hydrostatic 3D rest stability                       |  4    |
+| Non-hydrostatic 3D rest stability                   |  4    |
+| **TOTAL**                                            | **48**|
+
+**Calibration:** iter-1030 dual-target (div=8, damp_v=0.030) at C36 dt=300.
+
+**Artifacts verified explicitly absent at:**
+- Cube edges (i/j ∈ {0, n-1}) — both 3D paths
+- Cube vertices (4 corners × 6 faces) — both 3D paths
+- Long-integration tails (100 steps) — both 3D paths
+- Williamson 2 1-day (v_ll < 0.119)
+- Williamson 5 day-5 (h>0, speed<80)
+- Cosine bell (5 metrics within ±5%)
+
 ## Working Notes (iter-1043 status snapshot — 46/46 sentinels PASS)
 
 **🎯 USER'S EXPANDED CRITERION FULLY MET, comprehensively verified by 46 sentinels:**
