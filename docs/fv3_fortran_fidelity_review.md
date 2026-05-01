@@ -390,6 +390,85 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-988 — Lin-Rood inter-sweep halo: structurally sound, FB chain architectural blocker
+
+**Trigger.**  Iter-987 ruled out cube_rmp as the dominant lever
+(0.2% improvement when bypassed).  Iter-988 audits the Lin-Rood
+inter-sweep halo (`pad_halo(q_i)`) and confirms the FB chain is
+architecturally limited.
+
+**Iter-988a — Lin-Rood inter-sweep probe at face=1 west j=21.**
+
+`fv_tp_2d` is operator-split: Y-sweep first to compute `q_i`, then
+pad and X-sweep on `q_i`.  Probed `q_i` at face=1, i=0..2, j=21:
+
+```
+zeta_abs[1, 0, 21] = 1.7534e-05  (input)
+q_i[1, 0, 21]       = 1.7599e-05  (after Y-sweep correction)
+delta = q_i - zeta_abs = 6.46e-08  (~0.4% modification)
+
+q_i_pad halo at face=1 west j_pad=23:
+  i_pad=0 → 1.6058e-05  (extended-grid)
+  i_pad=1 → 1.6732e-05
+  i_pad=2 → 1.7599e-05  (interior i=0)
+  i_pad=3 → 1.8398e-05  (interior i=1)
+```
+
+The Y-sweep correction adds 0.4% to zeta_abs but the cube-edge halo
+structure is preserved.  No anomaly.
+
+**Iter-988b — Architectural realization.**
+
+`FV3FBShallowWaterModel` (which we have been measuring) IS the FB
+chain (calls `fv3_fb_sw_step` → `_c_sw` + `_p_grad_c` +
+`_d_sw_native`).  The docstring at line 656 reads:
+
+> EXPERIMENTAL: NOT PRODUCTION-READY. Known unstable (85 m/s
+> v-wind after 1 day, 3% mass error).
+
+Production `FV3EdgeShallowWaterModel` uses Arakawa-Lamb + RK3 and
+achieves W2 v_ll_Linf=0.132 m/s.  The FB chain itself is an
+experimental Fortran-fidelity port marked "known unstable for
+finite dt without additional dissipation at the c_sw/d_sw
+interface".
+
+The 467× gap between FB (55.6 m/s) and production (0.132 m/s) is
+NOT a single missing operator — it is the well-documented FB-chain
+architectural instability that requires "FV3's exact dissipation
+control (del2/del4 at specific phases)" per the FB model docstring
+and that has been the iter-740..988 pursuit's overall theme.
+
+**Iter-986 calibration tweaks** (Smagorinsky `d2_bg=0.01,
+dddmp=0.05` from iter-959; del-4 vorticity damping `nord_v=1` from
+iter-986) shave 4-7% off v_ll_Linf — useful but not the 467× lever.
+Closing the remaining gap requires a structural intervention
+(e.g., true c_sw + p_grad_c at halo-extended grid points so the
+FB scheme has clean boundary inputs, or migrating the FB chain to
+the production halo plumbing).
+
+**Iter-988 deliverables.**
+
+1. `scripts/diag_iter988_lin_rood_inter_sweep.py` — Lin-Rood
+   inter-sweep halo probe.
+2. `docs/fv3_fortran_fidelity_review.md` — this entry, including
+   the FB-chain architectural realization.
+
+No production code change.
+
+**Backlog for iter-989+.**
+
+1. Resolution scaling: run FB chain at N=18, 36, 72 to determine
+   whether the 55.6 m/s seam mode is grid-resolved or unresolved
+   (would point to either a stencil missing higher-order term or
+   an inherent O(1) instability).
+2. Substitute analytical zeta_abs for discrete zeta in the
+   vorticity transport — does the seam disappear?  This isolates
+   whether the discrete zeta (built from u_d, v_d circulation) is
+   the seam source vs the PPM transport of zeta.
+3. Test the experimental `c_sw + p_grad_c` at halo-extended
+   positions — extend cdgrid metric tensors and pad_halo to
+   support halo I-faces / J-faces.
+
 ### Iter-987 — Audit pad_halo cube_rmp at seam: Fortran-faithful but secondary
 
 **Trigger.**  Iter-986 found west/east cube-edge asymmetry (face=1 i=0
