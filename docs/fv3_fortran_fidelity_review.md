@@ -239,6 +239,40 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
 
+### Iter-953 — NEGATIVE-RESULT: enabling d_sw1 Parts 2/3/4 boundary overrides on duogrid regresses v_ll_Linf
+
+**Trigger.**  iter-952 localised the remaining FB-chain v_ll_Linf
+to cube-face I-boundaries.  iter-953 tested whether running
+`_d_sw1_recompute_ut_vt` Parts 2/3/4 (sin_sg-upwind override +
+adjacent strip + corner 2x2) for the duogrid path too — currently
+they only run for non-duogrid — would help.
+
+**Negative result.**  Removing the `if use_duogrid: return ut, vt`
+early-return regressed v_ll_Linf catastrophically:
+
+| iter           | v_ll_Linf (m/s) |
+|----------------|----------------:|
+| iter-947 baseline (early-return)  |   55.6  |
+| iter-953 (Parts 2/3/4 enabled)    |  127.2  | ← +130% regression |
+
+Root cause: Parts 2/3/4 use `grid.halo_interp_offsets` (the
+non-duogrid `_pad_halo_local` interp mode) for sin_sg padding.
+Combining this non-duogrid sin_sg halo with the iter-947 duogrid
+cube_rmp halo of uc, vc creates inconsistent boundary metrics.
+
+Reverted; duogrid path early-returns after Part 1.  A future
+iter-954+ could selectively enable just the sin_sg-upwind override
+formula at I=0/n on duogrid (using a duogrid-aware sin_sg pad)
+without the strip + corner-solve overrides — separate experiment.
+
+**Iter-953 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_d_sw1_recompute_ut_vt` —
+   updated comment block records the iter-953 negative-result.
+
+No new sentinel — iter-947's sentinel + iter-951's v_ll_Linf gate
+already lock the Fortran-faithful FB chain numbers.
+
 ### Iter-952 — Diagnostic: v_north max localized at cube-face I-boundaries (i=0, i=n-1)
 
 **Trigger.**  iter-951 added direct v_ll_Linf tracking for the FB

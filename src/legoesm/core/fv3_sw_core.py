@@ -413,6 +413,17 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt,
               + uc_pad[:, :-1, 1:] + uc_pad[:, 1:, 1:])  # (6, n, n+1)
     vt = (vc - 0.25 * cosa_v * uc_avg) * rsin_v
 
+    # Iter-953 (NEGATIVE-RESULT): tested running Parts 2/3/4 for
+    # duogrid too (early return removed).  Result on duogrid C36 W2
+    # 1-day: v_ll_Linf 55.6 → 127.2 m/s (regression of 130 %).
+    # Parts 2/3/4 use `grid.halo_interp_offsets` (non-duogrid mode)
+    # for sin_sg padding, which conflicts with the duogrid cube_rmp
+    # halo of uc, vc.  Reverted; duogrid path early-returns after
+    # Part 1 (with iter-947 NEW-corrected halo).  A future iter-954+
+    # could selectively enable just the sin_sg-upwind override at
+    # I=0/n on duogrid (which IS Fortran-faithful per
+    # `compute_transport_quantities`) without the strip + corner
+    # solve, but that's a separate concrete experiment.
     if use_duogrid:
         return ut, vt
 
