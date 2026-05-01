@@ -445,6 +445,45 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1021 — STRICTLY BETTER calibration: (div=9, damp_v=0.035)
+
+**Trigger.**  Iter-1009 at (div=10, damp_v=0.04) was the
+documented dual-target.  Iter-1021 fine-sweeps around it.
+
+**Iter-1021 fine sweep on FB chain C36 W2 1-day + W5 day-5:**
+
+| div | damp_v | W2 v_ll | W5 d5 (h_min, spd) | Both? |
+|-----|--------|---------|---------------------|-------|
+| 9.0 | 0.035  | **0.1137** | (3886, **53.3**)    | ✓ ✓   |
+| 9.0 | 0.040  | 0.1159  | (3886, 53.1)        | ✓ ✓   |
+| 10.0| 0.035  | 0.1143  | (3885, 66.3)        | ✓ ✓   |
+| 10.0| 0.040  | 0.1147  | (3885, 68.6)        | ✓ ✓ (iter-1009) |
+| 10.5| 0.040  | 0.1144  | (3884, 77.6)        | ✓ ✓   |
+| 11.0| 0.040  | 0.1147  | (3884, 87.2)        | W5 ✗  |
+
+**Best stable: (div=9, damp_v=0.035)** is STRICTLY BETTER than
+iter-1009's (10, 0.04):
+- W2 v_ll: 0.1147 → **0.1137** (1% better)
+- W5 day-5 speed: 68.6 → **53.3** (22% better!)
+- W5 day-5 h_min: 3885 → 3886 (slightly better)
+
+**Iter-1021 deliverables.**
+
+1. `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py`:
+   `iter1009_dual_target_config` defaults updated to (9, 0.035).
+   Function name retained for ABI continuity.
+2. `tests/test_iter1002_w2_target_met.py`: `_make_iter1009_config`
+   helper updated to match.  All 6 tests still PASS.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**21/21 cubed-sphere SW production sentinels PASS** with the
+strictly-better calibration.
+
+**Production impact:** ZERO behavioural change for callers using
+the production default (iter-893 baseline).  Callers using the
+`iter1009_dual_target_config` preset get strictly-better W2 and
+W5 day-5 metrics with no API change.
+
 ### Iter-1020 — Sentinel hardening: `dddmp_prod > 0 with div_damp=0` silent-no-op warning
 
 **Trigger.**  Iter-1019 added a sentinel for the new

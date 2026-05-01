@@ -401,18 +401,23 @@ class CDGridShallowWaterConfig(NamedTuple):
 
 def iter1009_dual_target_config(
     n: int,
-    div_damp_factor: float = 10.0,
-    damp_v: float = 0.04,
+    div_damp_factor: float = 9.0,
+    damp_v: float = 0.035,
 ) -> CDGridShallowWaterConfig:
-    """Iter-1009 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
+    """Iter-1009/1021 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
 
     On `FV3EdgeShallowWaterModel` at N=36 dt=300 s this preset achieves:
-        W2 1-day v_ll_Linf = 0.1147 m/s (≤ 0.119 acceptance) ✓
-        W5 day-5 (h_min=3885 m, speed_max=68.6 m/s) ✓ (artifact-free)
+        W2 1-day v_ll_Linf = 0.1137 m/s (≤ 0.119 acceptance) ✓
+        W5 day-5 (h_min=3886 m, speed_max=53.3 m/s) ✓ (artifact-free)
         Cosine bell day-1: 5/5 production metrics within ±5% ✓
 
+    Iter-1021 fine-sweep refined the iter-1009 baseline (div=10,
+    damp_v=0.04, gave v_ll=0.1147, W5 spd=68.6) to (div=9,
+    damp_v=0.035): STRICTLY BETTER on both W2 (0.1147 → 0.1137)
+    and W5 day-5 speed_max (68.6 → 53.3, 22% lower).
+
     See `tests/test_iter1002_w2_target_met.py` for the pinned sentinels
-    and `docs/fv3_fortran_fidelity_review.md` (iter-985..1012) for the
+    and `docs/fv3_fortran_fidelity_review.md` (iter-985..1021) for the
     full calibration narrative.
 
     Resolution caveat: C36 is uniquely the dual-target sweet spot.
@@ -424,17 +429,18 @@ def iter1009_dual_target_config(
     n : int
         Cubed-sphere face cells per side.  C36 is the validated
         dual-target reference.
-    div_damp_factor : float, default 10.0
-        Multiplier on `_div_damp_cube(n)`.  Iter-1009 measured 10*
-        as the unique factor satisfying both W2 and W5 day-5 at C36.
-    damp_v : float, default 0.04
-        Vorticity damping coefficient.  Iter-1009 measured 0.04 as
-        the W2-improving setting (vs iter-893's 0.06).
+    div_damp_factor : float, default 9.0
+        Multiplier on `_div_damp_cube(n)`.  Iter-1021 measured 9.0*
+        as a STRICTLY BETTER factor than iter-1009's 10* (lower W2
+        v_ll AND lower W5 speed at day-5).
+    damp_v : float, default 0.035
+        Vorticity damping coefficient.  Iter-1021 measured 0.035 as
+        a strict improvement over iter-1009's 0.04.
 
     Returns
     -------
     CDGridShallowWaterConfig
-        Pre-populated with the iter-1009 calibration plus
+        Pre-populated with the iter-1009/1021 calibration plus
         `apply_fortran_xppm_boundary=True` and `boundary_fix=True`.
     """
     # _div_damp_cube(n) = 1.5e7 * (48/n)^2 — same formula as
