@@ -390,6 +390,60 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-972 — Wire `_interp_center_to_corner_a2b_ord4` into d_sw5 Smagorinsky branch
+
+**Trigger.**  iter-971 added the Fortran-faithful 4th-order
+interpolation helper.  Iter-972 wires it into
+`_d_sw5_corner_divergence`'s Smagorinsky branch (sw_core.F90:1795
+`call a2b_ord4(wk, vort)`).
+
+**Iter-972 fix.**  Replaced the 2nd-order
+`_interp_center_to_corner(wk, cdgrid)` call inside the `dddmp >
+1e-5` branch with `_interp_center_to_corner_a2b_ord4(wk, cdgrid)`.
+
+**Measurement.**  W2 1-day duogrid C36 v_ll_Linf:
+
+| config                   | iter-971 (2nd-order) | iter-972 (4th-order) |
+|--------------------------|---------------------:|---------------------:|
+| default (dddmp=0)        |               55.61  |               55.61  |
+| iter-959 (dddmp=0.05)    |               53.17  |               53.17  |
+| iter-963 (dddmp=0.45)    |               43.77  |               43.77  |
+
+**Result: bit-identical.**  Reason: in the Smagorinsky formula
+`damp2 = max(d2_bg, min(0.20, dddmp*smag_vort))`, when
+`d2_bg ≥ dddmp*smag_vort`, d2_bg dominates and wk_corner is
+irrelevant.  For W2 solid-body the relative vorticity is small
+(order 10⁻⁵ s⁻¹), so `dddmp*smag_vort ~ 1e-3 ≪ d2_bg ∈ {0.01,
+0.09}` for both Smagorinsky-tuned configs we test.  The
+4th-order wk_corner is computed but doesn't affect the final
+damp2 in this regime.
+
+**Iter-972 deliverables.**
+
+1. `src/legoesm/core/fv3_sw_core.py:_d_sw5_corner_divergence` —
+   replaced `_interp_center_to_corner` with
+   `_interp_center_to_corner_a2b_ord4` in the Smagorinsky branch
+   (1-line change with import).
+2. Documentation only — no new sentinel needed because iter-971
+   sentinel already pins the helper, and iter-962/963 sentinels
+   pin the v_ll_Linf measurements which are bit-identical.
+
+**Production impact.**  ZERO.  Default config doesn't hit the
+Smagorinsky branch at all.  For Smagorinsky-tuned callers
+(iter-959/963) the result is bit-identical because d2_bg
+dominates damp2.
+
+**Backlog for iter-973+.**
+
+1. The wk_corner computation matters when `dddmp*smag_vort >
+   d2_bg`.  This regime requires either high dddmp + low d2_bg
+   (weak background damping with strong adaptive damping) or
+   high local vorticity (e.g., W6/Galewsky jets, Held-Suarez
+   forcing).  For those cases iter-972 IS Fortran-faithful and
+   may matter.
+2. Continue auditing remaining FV3 helpers (`del6_vt_flux`,
+   `fv_tp_2d`, `fill_corners`).
+
 ### Iter-971 — Implement Fortran-faithful `_interp_center_to_corner_a2b_ord4` (4th-order)
 
 **Trigger.**  iter-970 identified that Fortran's d_sw5 Smagorinsky

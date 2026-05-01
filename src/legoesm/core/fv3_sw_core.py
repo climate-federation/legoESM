@@ -1780,7 +1780,13 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                           - u_d[:, :, 1:] * dx_u[:, :, 1:]
                           - v_d[:, :-1, :] * dy_v[:, :-1, :]
                           + v_d[:, 1:, :] * dy_v[:, 1:, :])
-            wk_corner = _interp_center_to_corner(wk, cdgrid)
+            # Iter-972: use Fortran-faithful 4th-order a2b_ord4
+            # interpolation (matching sw_core.F90:1795 `a2b_ord4` call)
+            # instead of the 2nd-order `_interp_center_to_corner`.
+            from legoesm.core.operators_cdgrid import (
+                _interp_center_to_corner_a2b_ord4,
+            )
+            wk_corner = _interp_center_to_corner_a2b_ord4(wk, cdgrid)
             smag_vort = jnp.abs(dt) * jnp.sqrt(
                 delpc ** 2 + wk_corner ** 2)
             damp2 = da_min_c * jnp.maximum(
