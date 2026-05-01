@@ -116,6 +116,138 @@ def _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo: int = 2):
     return u_d_ihalo, v_d_jhalo
 
 
+def _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid):
+    """Iter-946 (NEGATIVE-RESULT helper): cross-face halo for covariant
+    uc, vc derived from OLD u_d, v_d via the 4th-order d2a2c machinery.
+
+    Reuses ``_d2a2c_vect_duogrid``'s 4th-order machinery to derive uc
+    with j-halo (1 cell on each side) and vc with i-halo (1 cell on
+    each side) WITHOUT going through a lossy cell-centre roundtrip
+    (cf. iter-836b/iter-837 inside `_corner_vorticity` which DOES use
+    a cell-centre 2-point average — that pattern was tried for d_sw
+    in iter-945's pre-commit prototype and rejected because it
+    introduced a 1-2-1 smoothing that worsened W2 fidelity).
+
+    Iter-946 found this helper PROBLEMATIC for d_sw: the derived halo
+    is from OLD u_d, v_d (passed to `_d_sw_native`) and does NOT
+    include the ``c_sw + p_grad_c`` increment that was added to the
+    INTERIOR uc, vc.  For W2 solid-body the missing increment is
+    O(dt2 * gradient) ~ 15 m/s on vc, comparable to the velocity
+    magnitude itself.  Mixing OLD-derived halo cells with
+    NEW-modified interior cells in the d_sw1/d_sw3 4-cell averages
+    produces a discontinuity at boundaries that gives WORSE results
+    than ``mode='edge'`` (which keeps boundary cells consistent at
+    the cost of a wrong cross-face geometry).
+
+    Iter-946 measurement on duogrid C36 W2 1-day FB chain:
+      - mode='edge' baseline (iter-945):        |u|=78,  |v|=81 m/s
+      - iter-946 d2a2c halo in d_sw1+d_sw3:     |u|=73,  |v|=156 m/s ← WORSE
+      - iter-946 d2a2c halo in d_sw3 only:      |u|=70,  |v|=150 m/s ← WORSE
+
+    Reverted; the helper is retained for future work that ALSO
+    propagates the c_sw + p_grad_c increments to halo (iter-947+
+    candidate).  Without that companion fix, this helper introduces
+    a Fortran-unfaithful OLD/NEW mismatch.
+
+    Requires duogrid with ng≥3 (for the j-halo extension on the
+    4-point j-stencil applied to ``u_d_full``).  Raises ``ValueError``
+    on insufficient halo or non-duogrid grids.
+
+    Parameters
+    ----------
+    u_d : (6, n, n+1) — D-grid x-velocity (i-cells, j-stagger)
+    v_d : (6, n+1, n) — D-grid y-velocity (i-stagger, j-cells)
+    cdgrid : CubedSphereCDGrid (must have an active duogrid with ng≥3)
+
+    Returns
+    -------
+    uc_jhalo : (6, n+1, n+2) — covariant uc with j-halo of width 1
+        (j=-1 prepended, j=n appended) along axis 2.
+    vc_ihalo : (6, n+2, n+1) — covariant vc with i-halo of width 1
+        (i=-1 prepended, i=n appended) along axis 1.
+    """
+    from legoesm.grids.duogrid import ext_vector_dgrid
+    n = cdgrid.n
+    grid = cdgrid.base
+    dg = grid.duogrid
+    if dg is None or dg.ng < 3:
+        raise ValueError(
+            f"_pad_halo_uc_vc_via_d2a2c: requires duogrid with ng>=3 "
+            f"(j-halo extension on the 4-point j-stencil); "
+            f"got ng={None if dg is None else dg.ng}."
+        )
+    h = 3
+
+    # Step 1: same A-grid prep as `_d2a2c_vect_duogrid` (length-weighted
+    # 2nd-order D→A average to A-grid covariant utmp_2nd, vtmp_2nd).
+    dx_u = cdgrid.dx_edge_y
+    dy_v = cdgrid.dy_edge_x
+    wu = u_d * dx_u
+    wv = v_d * dy_v
+    utmp_2nd = (wu[:, :, :-1] + wu[:, :, 1:]) / (
+        dx_u[:, :, :-1] + dx_u[:, :, 1:])  # (6, n, n)
+    vtmp_2nd = (wv[:, :-1, :] + wv[:, 1:, :]) / (
+        dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+
+    u_d_full, v_d_full = ext_vector_dgrid(
+        utmp_2nd, vtmp_2nd, dg,
+        grid.cos_angle, grid.sin_angle,
+        cos_sg5, rsin2,
+        halo=h,
+    )  # u_d_full: (6, n+2h, n+2h-1); v_d_full: (6, n+2h-1, n+2h)
+
+    # Overwrite interior with EXACT input u_d/v_d (matches Fortran's
+    # mpp_update_domains which only fills halo cells).
+    u_d_full = u_d_full.at[:, h:h + n, h - 1:h + n].set(u_d)
+    v_d_full = v_d_full.at[:, h - 1:h + n, h:h + n].set(v_d)
+
+    # Step 2: utmp at i-halo full AND j-halo=1 (cells j ∈ [-1, n]).
+    # 4-point j-stencil on u_d_full's j-stagger axis with indices
+    # extended by 1 on each side compared to `_d2a2c_vect_duogrid`'s
+    # interior-j slicing.  Padded j-stagger range needed: [h-3, h+n+1]
+    # (max index h+n+1 = n+4 for h=3); u_d_full j-axis has n+2h-1 =
+    # n+5 elements (indices 0..n+4) — exactly fits.  Requires h≥3
+    # (h=2 would underflow at [h-3] = -1).
+    utmp_T = (
+        _A2 * (u_d_full[:, :, h - 3:h - 3 + n + 2]
+               + u_d_full[:, :, h:h + n + 2])
+        + _A1 * (u_d_full[:, :, h - 2:h - 2 + n + 2]
+                 + u_d_full[:, :, h - 1:h - 1 + n + 2])
+    )  # (6, n+2h, n+2)
+
+    # Step 3: 4th-order A→C i-stencil on utmp_T → uc with j-halo=1.
+    # Same I-face stencil as `_d2a2c_vect_duogrid` Step 4, shape
+    # preserved.  The j-axis already carries the halo from utmp_T.
+    uc_jhalo = (
+        _A2 * (utmp_T[:, h - 2:h - 2 + n + 1, :]
+               + utmp_T[:, h + 1:h + 1 + n + 1, :])
+        + _A1 * (utmp_T[:, h - 1:h - 1 + n + 1, :]
+                 + utmp_T[:, h:h + n + 1, :])
+    )  # (6, n+1, n+2)
+
+    # Step 4: vtmp at j-halo full AND i-halo=1 (cells i ∈ [-1, n]).
+    # Symmetric to utmp_T construction, swapping the i-axis stencil
+    # for the j-axis.
+    vtmp_T = (
+        _A2 * (v_d_full[:, h - 3:h - 3 + n + 2, :]
+               + v_d_full[:, h:h + n + 2, :])
+        + _A1 * (v_d_full[:, h - 2:h - 2 + n + 2, :]
+                 + v_d_full[:, h - 1:h - 1 + n + 2, :])
+    )  # (6, n+2, n+2h)
+
+    # Step 5: 4th-order A→C j-stencil on vtmp_T → vc with i-halo=1.
+    vc_ihalo = (
+        _A2 * (vtmp_T[:, :, h - 2:h - 2 + n + 1]
+               + vtmp_T[:, :, h + 1:h + 1 + n + 1])
+        + _A1 * (vtmp_T[:, :, h - 1:h - 1 + n + 1]
+                 + vtmp_T[:, :, h:h + n + 1])
+    )  # (6, n+2, n+1)
+
+    return uc_jhalo, vc_ihalo
+
+
 def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
     """FV3 d_sw1 transport velocity recomputation with boundary handling.
 
@@ -151,8 +283,30 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
 
     # === Part 1: Interior ut/vt from 4-cell vc/uc average ===
     # ut(I,j) = (uc(I,j) - 0.25*cosa_u*(vc(I-1,j)+vc(I,j)+vc(I-1,j+1)+vc(I,j+1)))*rsin_u
-    # Need vc padded in axis 1 (rows) for the I-1 stencil
-    vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n+1)
+    # Need vc padded in axis 1 (rows) for the I-1 stencil; uc padded in
+    # axis 2 (cols) for the J-1 stencil.
+    #
+    # Iter-946 (Fortran-fidelity fix): on the duogrid path with ng>=3,
+    # source the vc/uc halo cells from the OLD u_d, v_d via
+    # `_pad_halo_uc_vc_via_d2a2c` (4th-order d2a2c machinery) instead
+    # of `mode='edge'` same-face replication.  HALO ROWS only are
+    # replaced; the interior is preserved exactly so the 4-cell
+    # averages at interior I-faces / J-faces are bit-identical to
+    # pre-iter-946.  Caveat: derived halo lacks the c_sw + p_grad_c
+    # increment that was added to interior uc, vc — small for W2
+    # geostrophic balance, but iter-947+ may close that O(dt2 * grad)
+    # gap by extending c_sw / p_grad_c to halo positions.
+    # iter-946 (NEGATIVE-RESULT): tried `_pad_halo_uc_vc_via_d2a2c`
+    # to source vc/uc halo from OLD u_d, v_d via d2a2c machinery.  The
+    # OLD-derived halo lacks the c_sw + p_grad_c increment that was
+    # added to interior vc, uc, producing an OLD/NEW discontinuity at
+    # cube-face boundaries that worsened W2 |v_max| from 81 → 156 m/s
+    # at C36 1-day.  Reverted; mode='edge' is the better mismatch
+    # (consistent boundary cells) until iter-947+ propagates the
+    # c_sw + p_grad_c increments to halo.  See
+    # `_pad_halo_uc_vc_via_d2a2c` docstring for full measurement table.
+    vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
     # vc_pad[:, I, :] = vc at padded row I → original row I-1
     # 4-cell average at each u-face (I, j): vc(I-1,j)+vc(I,j)+vc(I-1,j+1)+vc(I,j+1)
     vc_avg = (vc_pad[:, :-1, :-1] + vc_pad[:, 1:, :-1]
@@ -160,7 +314,6 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
     ut = (uc - 0.25 * cosa_u * vc_avg) * rsin_u
 
     # vt(i,J) = (vc(i,J) - 0.25*cosa_v*(uc(i,J-1)+uc(i+1,J-1)+uc(i,J)+uc(i+1,J)))*rsin_v
-    uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n+1, n+2)
     uc_avg = (uc_pad[:, :-1, :-1] + uc_pad[:, 1:, :-1]
               + uc_pad[:, :-1, 1:] + uc_pad[:, 1:, 1:])  # (6, n, n+1)
     vt = (vc - 0.25 * cosa_v * uc_avg) * rsin_v
@@ -2263,16 +2416,33 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     cosa = cdgrid.cosa_corner    # (6, n+1, n+1)
     rsina = cdgrid.rsin2_corner  # (6, n+1, n+1) = 1/sin²
 
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+
     # --- Step 1: B-grid contravariant v-velocity (Courant number) ---
     # vb(i,j) = dt/2 * (vc(i-1,j) + vc(i,j) - (uc(i,j-1) + uc(i,j)) * cosa) * rsina
     # vc: (6, n, n+1) → need vc(i-1,j) and vc(i,j) at corner (i,j)
     # Corner i ranges 0..n; vc row ranges 0..n-1.  Need vc at i=-1 (halo).
-    vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n+1)
-    vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]  # (6, n+1, n+1)
-
     # uc: (6, n+1, n) → need uc(i,j-1) and uc(i,j) at corner (i,j)
     # Corner j ranges 0..n; uc col ranges 0..n-1.  Need uc at j=-1 (halo).
-    uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n+1, n+2)
+    #
+    # Iter-946 (Fortran-fidelity fix): on the duogrid path with ng>=3,
+    # source the vc/uc halo cells from the OLD u_d, v_d via
+    # `_pad_halo_uc_vc_via_d2a2c` (4th-order d2a2c machinery) instead
+    # of `mode='edge'`.  HALO ROWS only are replaced; the interior of
+    # vc, uc is preserved exactly so the corner Courant numbers at
+    # interior corners are bit-identical to pre-iter-946.  Caveat
+    # (same as in `_d_sw1_recompute_ut_vt`): derived halo lacks the
+    # c_sw + p_grad_c increment.
+    # iter-946 (NEGATIVE-RESULT): see `_pad_halo_uc_vc_via_d2a2c`
+    # docstring.  d2a2c halo for d_sw3 corner Courant was tested at
+    # C36 W2 and made |v_max| WORSE (81 → 150 m/s) due to OLD u_d /
+    # NEW interior uc, vc discontinuity at boundaries.  Reverted to
+    # mode='edge'; the iter-945 D-grid PPM cross-face halo
+    # (downstream of vb/ub) is preserved.
+    vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]  # (6, n+1, n+1)
     uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]  # (6, n+1, n+1)
 
     vb = dt5 * (vc_sum - uc_sum * cosa) * rsina  # (6, n+1, n+1)
@@ -2286,8 +2456,6 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # `mpp_update_domains(u_d, v_d, gridtype=DGRID_NE)` upstream of
     # d_sw3.  Non-duogrid path is unchanged: PPM falls back to
     # `mode='edge'` internally (external_halo=0).
-    dg = cdgrid.base.duogrid
-    use_duogrid = dg is not None and dg.ng >= 2
     if use_duogrid:
         h_dg = 2
         u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(

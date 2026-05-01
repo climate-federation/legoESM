@@ -40,9 +40,15 @@ Use git history for retired prose.
   helper and threads pre-padded `(u_d, v_d)` into PPM via a new
   `external_halo` kwarg on `_ppm_transport_1d`.  Duogrid W2 1-day
   on FB chain improved from `|u_max|=106 → 78 m/s, |v_max|=151 →
-  81 m/s`; step survival preserved at 288/288.  Remaining gap
-  is on the still-`mode='edge'` `(uc, vc)` C-grid halo (iter-946+
-  target — a cell-centre roundtrip attempt was Fortran-unfaithful).
+  81 m/s`; step survival preserved at 288/288.
+- Iter-946 (NEGATIVE-RESULT): tried analogous d2a2c-derived halo
+  for `(uc, vc)` via new `_pad_halo_uc_vc_via_d2a2c` helper; the
+  OLD-u_d derivation lacks the c_sw + p_grad_c increment (~15 m/s
+  on vc for W2) that was added to interior, producing an OLD/NEW
+  discontinuity at boundaries that worsened |v_max| (81 → 156 m/s).
+  Reverted; helper retained as dead-code reference.  iter-947+
+  must propagate c_sw + p_grad_c increments to halo before
+  re-enabling.
 - FB/duogrid scaffolding (`halo=3`, flux sync, `d_sw*` helpers)
   refined; C24/C36 W2 fidelity remains the open blocker for
   using FB chain as the production path.
@@ -226,6 +232,88 @@ Still does NOT reach 1-day stability (288 steps target) — there is at least on
 **Verification.**  iter-942 sentinel (1/1) and production sentinels still pass post-revert.
 
 **Process.**  No production code change (probes reverted).  Production W2 baseline unchanged at v_ll_Linf=0.132 m/s.
+
+### Iter-946 — NEGATIVE-RESULT: d2a2c-derived uc, vc halo conflicts with c_sw+p_grad_c interior
+
+**Trigger.**  iter-945 closed the cube-face D-grid PPM halo gap (|u|
+106→78, |v| 151→81 m/s).  The remaining `(uc, vc)` C-grid halo was
+identified as the next likely fidelity gap: `_d_sw1_recompute_ut_vt`
+Part 1 and `_bgrid_ke_transport` Step 1 still read uc, vc with
+`mode='edge'` at the four cube-face boundaries instead of cross-face
+data.
+
+**Iter-946 attempt.**  New helper `_pad_halo_uc_vc_via_d2a2c` reuses
+`_d2a2c_vect_duogrid`'s 4th-order machinery (extending the slicing of
+`u_d_full`, `v_d_full` to derive utmp / vtmp at i-halo + j-halo and
+then running the 4-point A→C interpolation) to produce:
+
+  * uc_jhalo: (6, n+1, n+2) — covariant uc with j-halo of width 1
+  * vc_ihalo: (6, n+2, n+1) — covariant vc with i-halo of width 1
+
+This bypasses the lossy cell-centre roundtrip approach that was
+prototyped pre-iter-945 (and rejected because it introduced a 1-2-1
+smoothing).  Wired into `_d_sw1_recompute_ut_vt` and
+`_bgrid_ke_transport` to replace the corresponding `mode='edge'`
+calls.
+
+**Negative result.**  The helper is called at `_d_sw_native` entry
+with the OLD u_d, v_d (the inputs to d_sw, before c_sw + p_grad_c).
+The interior uc, vc passed to the d_sw operators is NEW
+(post-c_sw + p_grad_c).  For W2 solid-body rotation, the c_sw +
+p_grad_c increment to vc is dominated by `dt2 * g * dh/dy` ~ O(15
+m/s), which is comparable to vc itself.  Mixing OLD-derived halo
+with NEW interior in the 4-cell averages produces a ~15 m/s
+discontinuity at cube-face boundaries that gives WORSE results
+than `mode='edge'`:
+
+| location of iter-946 halo                | |u_max| (m/s) | |v_max| (m/s) |
+|------------------------------------------|--------------:|--------------:|
+| iter-945 baseline (mode='edge')          |        78     |       81      |
+| iter-946 d_sw1 + d_sw3 (both)            |        73     |      156      |
+| iter-946 d_sw3 only                      |        71     |      150      |
+
+The minor |u_max| improvement does not compensate for the ~75 m/s
+|v_max| regression.  Reverted; `mode='edge'` is the better mismatch
+(consistent boundary cells) until iter-947+ propagates the c_sw +
+p_grad_c increments to halo.
+
+**Iter-946 deliverables (retained as documentation).**
+
+1. `src/legoesm/core/fv3_sw_core.py:_pad_halo_uc_vc_via_d2a2c` —
+   4th-order halo helper, RETAINED as a documented dead-code
+   reference for iter-947+ (docstring records the negative result).
+2. `tests/test_iter946_uc_vc_via_d2a2c_negative_result.py` — 3
+   sentinels:
+   - helper shapes & finiteness on duogrid C24
+   - ValueError on non-duogrid input
+   - `_d_sw_native` does NOT currently call the helper (re-enable
+     guard)
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**Verification.**  9 cross-iter sentinels (iter-941, iter-942, iter-945)
++ 3 iter-946 sentinels pass.  Production W2 / W5 / cosine-bell /
+rest-state sentinels remain bit-identical (no production code change).
+
+**Backlog for iter-947+.**
+
+1. Compute c_sw + p_grad_c increment at HALO positions (extend
+   `_pad_halo_auto` to halo I-faces / J-faces, extend `cdgrid.rdxc`
+   / `rdyc` metrics to halo) so a NEW-uc, NEW-vc halo is available.
+   Then re-enable the `_pad_halo_uc_vc_via_d2a2c`-style halo with
+   the increment added.
+2. As an interim simpler experiment: try using NEW interior values
+   to ESTIMATE the c_sw + p_grad_c contribution at halo (e.g.
+   uc_NEW_halo = uc_OLD_halo + (NEW_interior_boundary -
+   OLD_interior_boundary) extrapolated).  Hacky but cheaper than
+   full halo extension of c_sw / p_grad_c.
+3. Independently: audit operator-split sweep order in
+   `_bgrid_ke_transport` and PPM hord=9 boundary overrides for
+   ytp_v / xtp_u (separate from the halo issue).
+
+**Process.**  No production code change.  No FB-chain behaviour
+change post-revert (mode='edge' restored on both d_sw1 and d_sw3).
+W2 acceptance still NOT met.  The helper docstring + sentinel
+prevent re-introduction without iter-947+ companion fix.
 
 ### Iter-945 — D-grid PPM cross-face halo via `ext_vector_dgrid` (duogrid W2 1-day |u| 106→78 m/s, |v| 151→81 m/s)
 
