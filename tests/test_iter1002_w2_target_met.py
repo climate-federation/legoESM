@@ -65,6 +65,35 @@ def _make_iter1009_config(N):
     )
 
 
+def test_iter1017_preset_warns_on_non_c36():
+    """`iter1009_dual_target_config(n != 36)` should emit UserWarning."""
+    import warnings
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        iter1009_dual_target_config,
+    )
+    # C36 must not warn
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _ = iter1009_dual_target_config(36)
+        c36_warnings = [
+            x for x in w if issubclass(x.category, UserWarning)
+        ]
+        assert len(c36_warnings) == 0, (
+            f"C36 should not emit a warning; got {len(c36_warnings)}")
+
+    # C48 must warn (calibration not validated)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _ = iter1009_dual_target_config(48)
+        c48_warnings = [
+            x for x in w if issubclass(x.category, UserWarning)
+        ]
+        assert len(c48_warnings) == 1, (
+            f"C48 should emit exactly 1 UserWarning; "
+            f"got {len(c48_warnings)}")
+        assert "validated only at N=36" in str(c48_warnings[0].message)
+
+
 def test_iter1013_preset_helper_matches_explicit_config():
     """`iter1009_dual_target_config(N)` matches the explicit config."""
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (

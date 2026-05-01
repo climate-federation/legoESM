@@ -441,6 +441,23 @@ def iter1009_dual_target_config(
     # tests/test_iter921_w2_v_vs_h_pareto_sentinel.py.  Inlined here
     # to keep `src` independent of `tests`.
     div_damp_base = 1.5e7 * (48.0 / n) ** 2
+
+    # Iter-1017 Codex review: warn on non-C36.  Calibration is
+    # validated at N=36 (iter-985..1012); other resolutions may
+    # fail one or both targets.  See iter-1012 entry.
+    if n != 36:
+        import warnings
+        warnings.warn(
+            f"`iter1009_dual_target_config(n={n})` calibration was "
+            f"validated only at N=36 dt=300 s.  At other resolutions "
+            f"the dual W2/W5 target is NOT guaranteed: iter-1012 "
+            f"measured C24 fails W2 (v_ll=0.1835), C48 fails W5 "
+            f"day-5 (speed > 100 m/s).  Use this preset on C36 for "
+            f"the documented dual-target acceptance, or recalibrate "
+            f"`div_damp_factor`/`damp_v` for your target N.",
+            UserWarning, stacklevel=2,
+        )
+
     return CDGridShallowWaterConfig(
         hyperdiff_coeff=0.0,
         div_damp=div_damp_factor * div_damp_base,

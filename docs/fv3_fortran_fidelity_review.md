@@ -445,6 +445,49 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-1017 — Codex adversarial review: add resolution warning to iter-1009 preset
+
+**Codex review of iter-985..1016 work flagged Q5:** the preset
+`iter1009_dual_target_config(N)` is calibrated and validated at
+N=36 only.  At C24, W2 fails (v_ll=0.1835); at C48, W5 day-5 fails
+(speed > 100 m/s, iter-1012 measurement).  Exposing it with a
+generic API risks silent calibration mismatch on non-C36.
+
+**Iter-1017 fix.**  Added `UserWarning` when `n != 36` is passed:
+
+```python
+if n != 36:
+    warnings.warn(
+        f"`iter1009_dual_target_config(n={n})` calibration was "
+        f"validated only at N=36 dt=300 s.  At other resolutions "
+        f"the dual W2/W5 target is NOT guaranteed...",
+        UserWarning, stacklevel=2,
+    )
+```
+
+C36 callers (the documented use case) see no warning.  Other-N
+callers get a loud warning explaining the calibration scope.
+
+**New sentinel `test_iter1017_preset_warns_on_non_c36`:**
+- C36 path: 0 warnings
+- C48 path: exactly 1 UserWarning with message containing
+  "validated only at N=36"
+
+PASSES.  Total cubed-sphere SW production sentinels: 19/19.
+
+**Iter-1017 deliverables.**
+
+1. `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py`:
+   resolution warning in `iter1009_dual_target_config`.
+2. `tests/test_iter1002_w2_target_met.py`: new
+   `test_iter1017_preset_warns_on_non_c36` sentinel.
+3. `docs/fv3_fortran_fidelity_review.md` — this entry.
+
+**Production impact: ZERO.**  C36 callers (the documented W2/W5
+dual-target use case) see no behavioural change.  Non-C36 callers
+get a one-time warning that lets them recalibrate or accept the
+documented caveat.
+
 ### Iter-1016 — Broader sentinel verification: 18/18 cubed-sphere SW production PASS
 
 **Iter-1016 broader regression check (existing sentinels):**
