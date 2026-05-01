@@ -390,6 +390,72 @@ correct: callers using W2-like initial conditions can opt in;
 callers using W5/W6/Galewsky-like topography or jets should keep
 the default.
 
+### Iter-968 — Audit c_sw against Fortran source (key findings)
+
+**Trigger.**  Iter-967 found that Fortran's d_sw3 boundary fix
+conflicts with iter-945's halo (alternative strategies).  Iter-968
+audits `_c_sw` and supporting helpers against the Fortran source
+at `sw_core.F90:79-494` to verify our Python implementation matches
+or to identify gaps.
+
+**Findings.**
+
+1. **`d2a2c_vect` call from c_sw** (sw_core.F90:150-151):
+   Fortran HARDCODES `bounded_domain=.false.` in the call.  Our
+   Python `_d2a2c_vect_duogrid` always uses the duogrid path; the
+   hardcoded `.false.` doesn't gate on duogrid because the
+   `gridstruct%dg%is_initialized` check inside `d2a2c_vect`
+   dominates.  Behaviour is equivalent. ✓
+
+2. **Cube-vertex vorticity correction** (sw_core.F90:395-401):
+   Fortran applies +/-fy(corner) corrections at the 4 cube vertices
+   ONLY when NOT duogrid.  Our Python `_corner_vorticity` matches
+   exactly:
+   ```python
+   if not use_duogrid:
+       vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
+       vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+       vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
+       vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
+   ```
+   ✓ Matches Fortran.
+
+3. **KE-upwind boundary handling** (sw_core.F90:303-365):
+   Fortran has 2 variants — bounded_domain/duogrid (simple upwind
+   selection) vs ELSE (sin_sg/cos_sg corrections at cube edges).
+   Our Python `_ke_upwind` matches both branches via
+   `if not use_duogrid: ...` block. ✓
+
+4. **Vorticity-flux boundary handling** (sw_core.F90:420-480):
+   Fortran has 2 variants — duogrid (`fy1 = dt2*(v-uc*cosa_u)/sina_u`)
+   vs ELSE (boundary specials at i==1/npx/j==1/npy).  Our Python
+   `_vorticity_flux` matches. ✓
+
+5. **C-grid update formulae** (sw_core.F90:483-492):
+   `uc(i,j) = uc(i,j) + fy1(i,j)*fy(i,j) + rdxc(i,j)*(ke(i-1,j)-ke(i,j))`.
+   Our Python:
+   ```python
+   uc_new = uc + fy1 * vort_x + dke_x
+   ```
+   where `dke_x = rdxc * (ke_pad[:-1] - ke_pad[1:])`.  Matches. ✓
+
+**Conclusion.**  c_sw is bit-faithful to Fortran for the duogrid
+path.  The remaining v_ll_Linf gap is NOT in c_sw structure.
+
+**Iter-968 deliverables.**  Documentation only — confirms 5
+sub-routines as Fortran-faithful.
+
+**Backlog for iter-969+.**
+
+1. Audit `d2a2c_vect` duogrid branch (sw_core.F90:3419-3454)
+   against `_d2a2c_vect_duogrid` for indexing edge cases.
+2. Audit `divergence_corner_duo` (sw_core.F90:2345+) against
+   `_divergence_corner_duo`.
+3. Audit `del6_vt_flux` (sw_core.F90:2008-2121) against the
+   Python `_del6_vt_flux`.
+4. Audit `p_grad_c` for SW variant (dyn_core.F90:2073-2132) —
+   verify our `_p_grad_c` simple gradient is the SW limit.
+
 ### Iter-967 — NEGATIVE-RESULT: Fortran d_sw3 cube-edge boundary fix conflicts with iter-945 halo
 
 **Trigger.**  Now have GFDL Fortran source access at
