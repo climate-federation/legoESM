@@ -81,11 +81,13 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 from legoesm.core.conservation import (
     zero_mean_tendency,
     _accumulation_dtype,
     _batch_global_area_sums,
 )
+from legoesm.core.precision import cast_pytree
 from legoesm.core.operators_fv_latlon import (
     fv_gradient_lon_3d as _fv_gradient_lon_3d,
     fv_gradient_lat_3d as _fv_gradient_lat_3d,
@@ -575,7 +577,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.config = config or CGridLatLonPrimitiveEquationConfig()
 
         # Pole-cell CFL limit: dx_pole is the smallest cell on the grid.
-        from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
         dx_pole = pole_cell_dx(grid)
         self._max_dt = cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1)
 
@@ -649,8 +650,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         Physics is evaluated inside each RK stage (matching the CDGrid
         PE contract), not as a post-step Euler update.
         """
-        from legoesm.core.precision import cast_pytree
-
         state_c = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
