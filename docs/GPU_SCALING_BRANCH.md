@@ -47,6 +47,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | MPAS σ-coord σ̇ + dp_s_dt cross-cell-shard reductions |       2 |           1 |
 | latlon C-grid PE σ̇/mass-flux + dp_s_dt cross-shard reductions (per branch) | 2 | 1 |
 | Convection w-grid σ̇ + dp_s_dt cross-shard reductions (CS / lat-lon / spectral PE) | 2 | 1 |
+| latlon C-grid PE fix_mass mass_target+mass_new collectives (pre_state branch) | 2 | 1 |
 | Cubed-sphere PPM halo=2 calls (SPMD or MPI)        |          3 |           2 |
 | MPAS dycore mass-fix payload                       |          3 |           2 |
 | Voronoi MPI sendrecvs                              |         12 |           6 |
@@ -143,6 +144,9 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+6531c8a4 latlon C-grid PE: batch mass_target + mass_new reduction
+bdca4a58 tests: 20-step spectral level-shard regression for iter-50/51 cumsum reuse
+05f2d03a docs: record iter-55 convection physics cumsum reuse
 6b2b2809 convection physics: reuse cumsum across w-grid σ̇ + dp_s_dt diagnosis
 ef578946 docs: record iter-54 latlon C-grid PE cumsum reuse
 90c5cd27 latlon C-grid PE: reuse cumsum across dp_s_dt + sigma_dot/mass_flux
