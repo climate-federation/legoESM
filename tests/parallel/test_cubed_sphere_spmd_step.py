@@ -265,6 +265,70 @@ class TestCubedSphereSPMDStep:
                         f"drift exceeds float-pt envelope",
             )
 
+    def test_no_diffusion_6device_matches_1device(self):
+        """6-device SPMD with no Laplacian / no biharmonic matches single-device.
+
+        Iter-64 batches the vert_adv + lap_uv + hyperdiff_uv corner
+        interpolations into a single halo.  Existing tests use
+        ``hyperdiff_coeff=nu4`` (always positive), so the case
+        ``A_h=0`` AND ``hyperdiff_coeff=0`` — where iter-64's batch
+        contains ONLY the vert_adv block — is not exercised.
+
+        This test pins down that minimal-batch path.
+        """
+        _need_devices(6)
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
+            hydrostatic_to_fv3, fv3_to_hydrostatic,
+        )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+        from legoesm.parallel.mesh import (
+            create_device_mesh, shard_pytree,
+        )
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend,
+        )
+        n_grid, n_lev, dt = 24, 8, 450.0
+        grid = create_cubed_sphere(n_grid)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sigma = create_sigma_coordinate(n_lev)
+        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+        cfg = CDGridPrimitiveEquationConfig(
+            hyperdiff_coeff=0.0, hyperdiff_ps_coeff=0.0,  # no biharmonic
+            A_h=0.0,                                       # no Laplacian
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True, zero_mean_ps_tendency=False,
+            time_integrator='ssp_rk3',
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+        s0 = hydrostatic_to_fv3(state_cc, cdgrid)
+        s_ref = model.step(s0, dt)
+        ref = fv3_to_hydrostatic(s_ref, cdgrid)
+        dev_config = create_device_mesh(n_devices=6)
+        activate_spmd_halo_backend(dev_config.mesh, n=n_grid, nlev=n_lev)
+        try:
+            s_spmd = shard_pytree(s0, dev_config)
+            s_spmd = model.step(s_spmd, dt)
+            out = fv3_to_hydrostatic(s_spmd, cdgrid)
+        finally:
+            deactivate_spmd_halo_backend()
+        for name, atol, rtol in (
+            ("u", 1e-12, 1e-13),
+            ("v", 1e-12, 1e-13),
+            ("T", 1e-11, 1e-13),
+            ("p_s", 1.0, 1e-5),
+        ):
+            r = np.asarray(getattr(ref, name).data)
+            o = np.asarray(getattr(out, name).data)
+            np.testing.assert_allclose(
+                o, r, atol=atol, rtol=rtol,
+                err_msg=f"{name}: 6-dev cubed-sphere no-diffusion SPMD drift "
+                        f"exceeds float-pt envelope",
+            )
+
     @pytest.mark.parametrize("devices", [2, 3, 6])
     def test_div_damp_matches_1device(self, devices):
         """N-device SPMD with divergence damping enabled matches single-device.
