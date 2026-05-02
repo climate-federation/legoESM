@@ -60,7 +60,16 @@ from legoesm.core.operators_3d import (
     hyperdiffusion_3d as _hyperdiffusion_3d,
     laplacian_compact_3d as _laplacian_compact_3d,
 )
-from legoesm.core.conservation import zero_mean_tendency
+from legoesm.core.conservation import (
+    zero_mean_tendency,
+    fix_mass_hydrostatic,
+    fix_mass_hydrostatic_target,
+)
+from legoesm.core.operators import (
+    global_integral,
+    hyperdiffusion,
+    laplacian_compact,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -706,7 +715,6 @@ def fv3_hydrostatic_tendencies(
 
     # Surface pressure hyperdiffusion (cell-centre)
     if config.hyperdiff_ps_coeff > 0:
-        from legoesm.core.operators import hyperdiffusion
         ps_field = Field(data=p_s, name="p_s", dims=("face", "x", "y"),
                          units="Pa", staggering="cell")
         diff_ps = hyperdiffusion(ps_field, grid, config.hyperdiff_ps_coeff)
@@ -869,7 +877,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         if (self.config.use_conservation_fixer and self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
-            from legoesm.core.operators import global_integral
             self._target_mass = global_integral(state.p_s, self.grid)
 
         if isinstance(state, FV3HydrostaticState):
@@ -929,7 +936,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:
-            from legoesm.core.operators import laplacian_compact
             alpha = self.config.implicit_grav_wave_damping
             lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
             p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
@@ -948,13 +954,11 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # cubed-sphere path.
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
-                from legoesm.core.conservation import fix_mass_hydrostatic_target
                 # _target_mass is precomputed in step() outside the JIT boundary.
                 state_new = fix_mass_hydrostatic_target(
                     state_new, self._target_mass, self.grid,
                 )
             else:
-                from legoesm.core.conservation import fix_mass_hydrostatic
                 state_new = fix_mass_hydrostatic(
                     state_new, state, self.grid,
                 )
