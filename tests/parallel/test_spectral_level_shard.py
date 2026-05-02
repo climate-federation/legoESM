@@ -41,7 +41,7 @@ class TestSpectralLevelShardEquivalence:
     coefficients.
     """
 
-    def _run(self, *, devices: int):
+    def _run(self, *, devices: int, n_max: int = 21):
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.atmosphere.dynamics.spectral_pe import (
@@ -50,7 +50,9 @@ class TestSpectralLevelShardEquivalence:
         from legoesm.parallel.mesh import create_level_mesh, shard_pytree
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
-        n_max, n_lev, dt, n_steps = 21, 8, 870.0, 5
+        # dt scales inversely with resolution to stay CFL-stable
+        dt = 870.0 if n_max <= 21 else 450.0
+        n_lev, n_steps = 8, 5
         grid = create_gaussian_grid(n_max)
         sigma = create_sigma_coordinate(n_lev)
         state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
@@ -69,20 +71,33 @@ class TestSpectralLevelShardEquivalence:
 
     @pytest.mark.parametrize("devices", [2, 4])
     def test_Ndevice_matches_1device(self, devices):
-        """Single-device vs N-device level-sharded spectral PE.
+        """Single-device vs N-device level-sharded spectral PE at T21.
 
         With nlev=8 the level axis can be split evenly across 2 or 4
         devices.  Iter-29 extends iter-20's 2-device test to also
         cover 4 devices.
         """
         _need_multi_device(devices)
-        ref = self._run(devices=1)
-        out = self._run(devices=devices)
+        self._assert_equivalent(devices=devices, n_max=21)
+
+    def test_T42_2device_matches(self):
+        """Verify the level-shard equivalence at higher horizontal
+        resolution (T42).  Same bit-equivalence envelope as T21:
+        spectral transforms are linear in the SH coefficients so the
+        accumulation order is independent of horizontal resolution.
+        """
+        _need_multi_device(2)
+        self._assert_equivalent(devices=2, n_max=42)
+
+    def _assert_equivalent(self, *, devices: int, n_max: int):
+        ref = self._run(devices=1, n_max=n_max)
+        out = self._run(devices=devices, n_max=n_max)
         for name in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
             r = getattr(ref, name).data
             o = getattr(out, name).data
             np.testing.assert_allclose(
                 np.asarray(o), np.asarray(r),
                 rtol=1e-12, atol=1e-12,
-                err_msg=f"{name} drifts under {devices}-device level sharding",
+                err_msg=f"{name} drifts under {devices}-device level "
+                        f"sharding at T{n_max}",
             )
