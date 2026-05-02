@@ -989,13 +989,22 @@ def run_benchmark(
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         hd = _hyperdiff_coeff(n_grid, grid_type)
+        # When mass anchoring (``fix_mass_hydrostatic_target``) is active
+        # we already get exact mass conservation via a single post-step
+        # allreduce.  The per-stage ``zero_mean_ps_tendency`` correction
+        # adds 3 allreduces per RK3 step (one per ``tendency_fn`` call)
+        # for what is, with ``anchor_mass_to_initial=True``, a redundant
+        # safety net at the cost of three extra latency-gated round-trips
+        # per step.  Disable it in the scaling benchmark — the comment
+        # in ``CDGridPrimitiveEquationConfig`` explicitly recommends this
+        # for "pure performance benchmarks".
         config = CDGridPrimitiveEquationConfig(
             hyperdiff_coeff=hd,
             hyperdiff_ps_coeff=hd,
             use_conservation_fixer=not no_conservation,
             fix_mass=not no_conservation,
             anchor_mass_to_initial=not no_conservation,
-            zero_mean_ps_tendency=not no_conservation,
+            zero_mean_ps_tendency=False,
         )
         model = CDGridPrimitiveEquationModel(grid, sigma, config)
         state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
