@@ -439,14 +439,10 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
-        _vert_adv_uv_d = _interp_center_to_corner(
-            _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
-            cdgrid,
-        ).reshape(
-            n_face_uv, n_i_uv + 1, n_j_uv + 1, nlev_uv, 2,
-        )
-        vert_adv_u_d = _vert_adv_uv_d[..., 0]
-        vert_adv_v_d = _vert_adv_uv_d[..., 1]
+        # Iter-64: defer the cell-center → D-grid corner interpolation
+        # of ``_vert_adv_uv_cc`` until the diffusion section so it can
+        # be batched with the (lap_uv, hyperdiff_uv) corner interps
+        # into a single halo collective.
 
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
@@ -491,20 +487,16 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
-        _vert_adv_uv_d = _interp_center_to_corner(
-            _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
-            cdgrid,
-        ).reshape(
-            n_face_uv, n_i_uv + 1, n_j_uv + 1, nlev_uv, 2,
-        )
-        vert_adv_u_d = _vert_adv_uv_d[..., 0]
-        vert_adv_v_d = _vert_adv_uv_d[..., 1]
+        # Iter-64: defer the cell-center → D-grid corner interpolation
+        # of ``_vert_adv_uv_cc`` (mirrors the hybrid branch above).
 
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
 
-    du_d_dt = du_d_dt + vert_adv_u_d
-    dv_d_dt = dv_d_dt + vert_adv_v_d
+    # Iter-64: ``vert_adv_uv_d`` will be added to ``du_d_dt``/``dv_d_dt``
+    # in section 12c below alongside the lap_uv and hyperdiff_uv
+    # contributions, so the three corner interpolations share a single
+    # halo collective.
 
     # --- 11. Thermodynamic equation ---
     # Horizontal advection: centred advection using cell-centre velocities.
@@ -609,15 +601,16 @@ def fv3_hydrostatic_tendencies(
             lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
         dT_dt_data = dT_dt_data + nu_T * lap_T
 
-    # Iter-63: when BOTH ``A_h > 0`` and ``hyperdiff_coeff > 0`` are
-    # active, batch the (lap_u, lap_v) and (hyperdiff_u, hyperdiff_v)
-    # corner interpolations into a single ``_interp_center_to_corner``
-    # call.  Each one would otherwise do its own halo collective; the
-    # batched version stacks both pairs along the trailing axis,
-    # exchanges in one halo, and splits.  Saves 1 collective per RK3
-    # stage on the (A_h + hyperdiff) configuration.
-    _lap_uv_d = None
-    _hd_uv_d = None
+    # Iter-63/64: collect ALL (u, v) cell-center → D-grid corner
+    # interpolations of the stage and batch them into ONE halo +
+    # 4-pt corner average.  ``_vert_adv_uv_cc`` (always present) plus
+    # optionally ``lap_uvT[..., :2]`` (when A_h > 0) and
+    # ``hyperdiff_uvT[..., :2]`` (when hyperdiff_coeff > 0).  Each
+    # ``_interp_center_to_corner`` would otherwise do its own halo
+    # exchange; the batched version stacks the pairs along the trailing
+    # axis and exchanges in one halo.  Saves 1 collective per stage
+    # in the typical hyperdiff-only config; 2 per stage when both
+    # A_h and hyperdiff are active.
     lap_uvT = None
     hyperdiff_uvT = None
     if config.A_h > 0:
@@ -634,48 +627,47 @@ def fv3_hydrostatic_tendencies(
         hyperdiff_uvT = hyperdiff_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
-    if lap_uvT is not None and hyperdiff_uvT is not None:
-        # Both active — batch the corner interpolation into ONE halo.
-        _combined_uv_cc = jnp.concatenate(
-            [
-                lap_uvT[..., :2].reshape(
-                    n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
-                ),
-                hyperdiff_uvT[..., :2].reshape(
-                    n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
-                ),
-            ],
-            axis=-1,
-        )  # (n_face, n, n, nlev*4)
-        _combined_uv_d_flat = _interp_center_to_corner(_combined_uv_cc, cdgrid)
-        _combined_uv_d = _combined_uv_d_flat.reshape(
-            _combined_uv_d_flat.shape[0], _combined_uv_d_flat.shape[1],
-            _combined_uv_d_flat.shape[2], 2, nlev_uvT, 2,
-        )  # (n_face_d, n_i_d, n_j_d, 2-blocks, nlev, 2-uv)
-        _lap_uv_d = _combined_uv_d[:, :, :, 0]
-        _hd_uv_d = _combined_uv_d[:, :, :, 1]
-    elif lap_uvT is not None:
-        _lap_uv_d_flat = _interp_center_to_corner(
-            lap_uvT[..., :2].reshape(
-                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
-            ),
-            cdgrid,
+
+    # Build the cell-center batch: vert_adv (always) + lap (if A_h>0)
+    # + hyperdiff (if hyperdiff_coeff>0), each shape (n_face, n, n,
+    # nlev*2) along the trailing axis.
+    _uv_corner_blocks = [
+        _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
+    ]
+    if lap_uvT is not None:
+        _uv_corner_blocks.append(
+            lap_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
         )
-        _lap_uv_d = _lap_uv_d_flat.reshape(
-            _lap_uv_d_flat.shape[0], _lap_uv_d_flat.shape[1],
-            _lap_uv_d_flat.shape[2], nlev_uvT, 2,
+    if hyperdiff_uvT is not None:
+        _uv_corner_blocks.append(
+            hyperdiff_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
         )
-    elif hyperdiff_uvT is not None:
-        _hd_uv_d_flat = _interp_center_to_corner(
-            hyperdiff_uvT[..., :2].reshape(
-                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
-            ),
-            cdgrid,
-        )
-        _hd_uv_d = _hd_uv_d_flat.reshape(
-            _hd_uv_d_flat.shape[0], _hd_uv_d_flat.shape[1],
-            _hd_uv_d_flat.shape[2], nlev_uvT, 2,
-        )
+    _n_blocks = len(_uv_corner_blocks)
+    if _n_blocks == 1:
+        _combined_uv_cc = _uv_corner_blocks[0]
+    else:
+        _combined_uv_cc = jnp.concatenate(_uv_corner_blocks, axis=-1)
+    _combined_uv_d_flat = _interp_center_to_corner(_combined_uv_cc, cdgrid)
+    _combined_uv_d = _combined_uv_d_flat.reshape(
+        _combined_uv_d_flat.shape[0], _combined_uv_d_flat.shape[1],
+        _combined_uv_d_flat.shape[2], _n_blocks, nlev_uv, 2,
+    )  # (n_face_d, n_i_d, n_j_d, n_blocks, nlev, 2-uv)
+    _block_idx = 0
+    _vert_adv_uv_d = _combined_uv_d[:, :, :, _block_idx]
+    _block_idx += 1
+    _lap_uv_d = None
+    if lap_uvT is not None:
+        _lap_uv_d = _combined_uv_d[:, :, :, _block_idx]
+        _block_idx += 1
+    _hd_uv_d = None
+    if hyperdiff_uvT is not None:
+        _hd_uv_d = _combined_uv_d[:, :, :, _block_idx]
+        _block_idx += 1
+
+    # Add the vert_adv contribution to du_d_dt/dv_d_dt now that the
+    # corner interpolation is done.
+    du_d_dt = du_d_dt + _vert_adv_uv_d[..., 0]
+    dv_d_dt = dv_d_dt + _vert_adv_uv_d[..., 1]
 
     if config.A_h > 0:
         du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
