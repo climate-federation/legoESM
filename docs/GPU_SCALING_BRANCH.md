@@ -41,6 +41,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere SPMD halo=1 with offsets at high-res  |  all_gather|    ppermute (~50× less interconnect) |
 | Cubed-sphere SPMD halo at 2/3 devices              | replicated-fallback | multi-face all_gather (31–44% lower per-step time) |
 | Cubed-sphere FV3 PE cell-field halo collectives per stage | 2 | 1 |
+| Cubed-sphere FV3 PE hi-prec PGF ln_ps halo collectives per stage (float64 path) | 1 | 0 |
 | Spectral PE σ-coord cross-level collectives        |          3 |           1 |
 | Hybrid mass-flux + dp_s_dt cross-level collectives (CS, spectral) | 4 (2 in fn + 2 in callers) | 2 |
 | compute_sigma_dot internal cross-level collectives  |          2 |           1 |
@@ -145,6 +146,8 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+926ab186 cubed-sphere FV3 PE: reuse merged ln_ps halo for hi-prec PGF gradient
+239b828a docs: record iter-58 cubed-sphere FV3 PE halo merge
 44c60301 cubed-sphere FV3 PE: merge cell-field halo exchanges #1 and #2
 a193c4da docs: record iter-57 latlon C-grid PE fix_mass batching
 6531c8a4 latlon C-grid PE: batch mass_target + mass_new reduction
