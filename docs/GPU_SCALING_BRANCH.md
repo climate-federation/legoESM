@@ -151,6 +151,8 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+021d0989 cubed-sphere FV3 PE: hoist compute_sigma_dot_and_total to module imports
+b7f4933a docs: record iter-67 5-step with-physics regression test
 27a4037f tests: cubed-sphere SPMD with-physics 5-step regression for iter-65
 de76ed8d scripts: add iter-65 to plot_scaling_laws iter-progression chart
 cb7980cb docs: record iter-66 multi-face with-physics SPMD test extensions
