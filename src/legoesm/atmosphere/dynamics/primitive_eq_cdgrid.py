@@ -220,22 +220,23 @@ def fv3_hydrostatic_tendencies(
     # --- 6. D-grid vorticity at cell centres via circulation ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)  # (6, n, n, nlev)
 
-    # === Stage-level packed halo exchange (merged iter-58) ===
+    # === Stage-level packed halo exchange (merged iter-58/60) ===
     # Pack ALL cell-field halos for the stage into ONE collective:
-    # {ζ, B, 1/T, T, ln_ps_3d}, plus {u_cell, v_cell} when the
-    # downstream Laplacian / hyperdiffusion needs them.
+    # always {ζ, B, 1/T, T, ln_ps_3d}; conditionally {u_cell, v_cell}
+    # for hyperdiff and {hybrid_factor} for the hybrid PGF correction.
     #
-    # Iter-58 merge: previously exchange #1 packed {ζ, B, 1/T} and
-    # exchange #2 packed {T, u_cell, v_cell, ln_ps_3d} as two
-    # separate stage-level packed collectives.  Both packs share the
-    # same mesh / duogrid / interp_offsets and same (6, n, n) spatial
-    # prefix, so they collapse into one call along the trailing axis
-    # — saves one SPMD all_gather / MPI sendrecv per RK3 stage.
-    # Matches the iter-74 ζ-vs-ζ+f convention: pack ζ (relative
-    # vorticity) and add f at corners after interpolation.
+    # Iter-58 merge: previously two separate packed exchanges fired
+    # at different points in the function.  Iter-59 added ln_ps_hi
+    # reuse for the high-precision PGF.  Iter-60 adds the hybrid
+    # factor ``B_full * p_s / p_full`` to the pack so the PGF
+    # correction's corner interpolation skips its standalone halo too.
     ln_ps = jnp.log(p_s)
     inv_T = 1.0 / T
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1) — rides the pack
+    if _hybrid:
+        _hybrid_factor = sigma_coord.B_full * p_s[..., None] / p_full  # (6, n, n, nlev)
+    else:
+        _hybrid_factor = None
     from legoesm.grids.halo import _halo_backend
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     # Packed MPI/SPMD halos now apply the duogrid kinked-to-extended
@@ -248,40 +249,46 @@ def fv3_hydrostatic_tendencies(
     # local-pad path uses; otherwise, the duogrid path produces the
     # remap and offsets must be None.
     _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
-    if _halo_backend == "spmd":
-        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
-        if _needs_uv_pad:
-            _zeta_pad, _B_pad, _invT_pad, _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = (
-                packed_pad_halo_4d(
-                    zeta, B, inv_T, T, u_cell, v_cell, ln_ps_3d,
-                    mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
-                )
+    # Build the field list dynamically: {zeta, B, inv_T, T} are always
+    # packed; {u_cell, v_cell} ride the pack when the Laplacian /
+    # hyperdiffusion need them; {_hybrid_factor} rides when the PGF
+    # correction needs it (hybrid coord); ln_ps_3d always rides last.
+    _pack_fields = [zeta, B, inv_T, T]
+    if _needs_uv_pad:
+        _pack_fields += [u_cell, v_cell]
+    if _hybrid_factor is not None:
+        _pack_fields.append(_hybrid_factor)
+    _pack_fields.append(ln_ps_3d)
+    _zeta_pad = _B_pad = _invT_pad = _T_pad = None
+    _u_cc_pad = _v_cc_pad = _lnps_pad = _hf_pad = None
+    if _halo_backend in ("spmd", "mpi"):
+        if _halo_backend == "spmd":
+            from legoesm.parallel.cubesphere_exchange import (
+                packed_pad_halo_4d, _spmd_mesh,
             )
-        else:
-            _zeta_pad, _B_pad, _invT_pad, _T_pad, _lnps_pad = packed_pad_halo_4d(
-                zeta, B, inv_T, T, ln_ps_3d,
+            _padded_list = packed_pad_halo_4d(
+                *_pack_fields,
                 mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
             )
-            _u_cc_pad = _v_cc_pad = None
-    elif _halo_backend == "mpi":
-        from legoesm.grids.halo import _mpi_topology
-        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        if _needs_uv_pad:
-            _zeta_pad, _B_pad, _invT_pad, _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = (
-                packed_pad_halo_mpi_4d(
-                    zeta, B, inv_T, T, u_cell, v_cell, ln_ps_3d,
-                    topology=_mpi_topology, duogrid=_pe_dg,
-                )
-            )
         else:
-            _zeta_pad, _B_pad, _invT_pad, _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                zeta, B, inv_T, T, ln_ps_3d,
+            from legoesm.grids.halo import _mpi_topology
+            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+            _padded_list = packed_pad_halo_mpi_4d(
+                *_pack_fields,
                 topology=_mpi_topology, duogrid=_pe_dg,
             )
-            _u_cc_pad = _v_cc_pad = None
-    else:
-        _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
-        _T_pad = _lnps_pad = _u_cc_pad = _v_cc_pad = None  # exchange #2 fields
+        # Unpack in the same order they were packed.
+        _idx = 0
+        _zeta_pad = _padded_list[_idx]; _idx += 1
+        _B_pad = _padded_list[_idx]; _idx += 1
+        _invT_pad = _padded_list[_idx]; _idx += 1
+        _T_pad = _padded_list[_idx]; _idx += 1
+        if _needs_uv_pad:
+            _u_cc_pad = _padded_list[_idx]; _idx += 1
+            _v_cc_pad = _padded_list[_idx]; _idx += 1
+        if _hybrid_factor is not None:
+            _hf_pad = _padded_list[_idx]; _idx += 1
+        _lnps_pad = _padded_list[_idx]; _idx += 1
 
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
     zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
@@ -323,10 +330,12 @@ def fv3_hydrostatic_tendencies(
     # from surface pressure should vanish.  Without this factor the model
     # develops spurious upper-level heating and eventually blows up.
     if _hybrid:
-        B_full = sigma_coord.B_full  # (nlev,)
-        _hybrid_factor = B_full * p_s[..., None] / p_full  # (6, n, n, nlev)
-        # Interpolate to D-grid corners for the PGF correction
-        _hf_corner = _interp_center_to_corner(_hybrid_factor, cdgrid)
+        # ``_hybrid_factor`` and ``_hf_pad`` are produced by the merged
+        # halo exchange above (iter-60).  Reuse the pre-padded halo so
+        # the corner interpolation skips its own standalone collective.
+        _hf_corner = _interp_center_to_corner(
+            _hybrid_factor, cdgrid, padded=_hf_pad,
+        )
         pg_corr_x = pg_corr_x * _hf_corner
         pg_corr_y_perp = pg_corr_y_perp * _hf_corner
 
