@@ -180,6 +180,8 @@ def plot_iter_progression(plt, output_dir: Path) -> None:
             Path("results/scaling_iter49/cs"),
         "iter-58 (merged cell-field halo)":
             Path("results/scaling_iter58/cs"),
+        "iter-65 (merged cell-field + corner-interp + physics batches)":
+            Path("results/scaling_iter65/cs"),
     }
 
     fig, ax = plt.subplots(1, 1, figsize=(9, 5.5))
@@ -187,6 +189,7 @@ def plot_iter_progression(plt, output_dir: Path) -> None:
         "iter-46 (single-face SPMD halo + cumsum reuse)": "#999999",
         "iter-49 (multi-face SPMD halo at 2/3 dev)": "#FF9800",
         "iter-58 (merged cell-field halo)": "#2196F3",
+        "iter-65 (merged cell-field + corner-interp + physics batches)": "#4CAF50",
     }
 
     found_any = False
@@ -208,8 +211,12 @@ def plot_iter_progression(plt, output_dir: Path) -> None:
         ax.plot(ng, ms, "o-", color=c, label=label, linewidth=2, markersize=8)
         found_any = True
 
-    # Ideal reference using the iter-58 1-device baseline if available.
-    for label in ("iter-58 (merged cell-field halo)", "iter-49 (multi-face SPMD halo at 2/3 dev)"):
+    # Ideal reference using the latest 1-device baseline if available.
+    for label in (
+        "iter-65 (merged cell-field + corner-interp + physics batches)",
+        "iter-58 (merged cell-field halo)",
+        "iter-49 (multi-face SPMD halo at 2/3 dev)",
+    ):
         base = paths.get(label)
         if base is None or not base.exists():
             continue
