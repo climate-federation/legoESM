@@ -311,11 +311,13 @@ def compute_sigma_dot(
     # Weighted divergence: D_k * Δσ_k
     div_dsigma = div_3d * dsigma  # (...,nlev)
 
-    # Column-integrated divergence: D_total = Σ D_k * Δσ_k
-    D_total = jnp.sum(div_dsigma, axis=-1, keepdims=True)  # (...,1)
-
     # Cumulative sum from top: Σ_{k'=0}^{k} D_k' * Δσ_k'
+    # ``cumsum_div[..., -1]`` is exactly ``Σ D_k * Δσ_k`` — extract it
+    # rather than calling ``jnp.sum`` independently.  Under any sharding
+    # of the level (axis -1) this drops the per-call cross-level
+    # collective from 2 to 1.  Mirrors iter-50/51 in the spectral PE.
     cumsum_div = jnp.cumsum(div_dsigma, axis=-1)  # (...,nlev)
+    D_total = cumsum_div[..., -1:]  # (...,1)
 
     # σ̇ at interfaces 1..nlev:
     # σ̇_{k+1/2} = (σ_{k+1/2} - σ_top) / (1 - σ_top) · D_total - cumsum_div[k]
