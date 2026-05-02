@@ -213,6 +213,21 @@ def compute_moist_adiabat(
     -------
     jax.Array
         Moist adiabatic temperature profile [K], shape (ncol, nlev).
+
+    Notes
+    -----
+    **Saturated-everywhere assumption.**  ``moist_adiabat_lapse_rate`` calls
+    ``saturation_mixing_ratio(T, p)`` at every level, i.e. the parcel is
+    treated as saturated all the way down to the surface.  For an
+    unsaturated launch parcel (LCL above the base) the *true* parcel curve
+    follows a dry adiabat from the base to the LCL and only switches to the
+    moist adiabat above LCL.  The current implementation uses the moist
+    rate the entire way down, which UNDERESTIMATES the parcel-environment
+    contrast in subsaturated boundary layers and therefore systematically
+    biases CAPE diagnosed from this profile *low* for unsaturated parcels.
+    See ``compute_lcl`` for explicit LCL diagnosis.  Fixing this requires
+    threading ``q_v_base`` through the 8 convection schemes that consume
+    this function and is intentionally deferred (audit B4 / 2026-05-01).
     """
     ncol, nlev = p_levels.shape
 

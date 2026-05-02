@@ -14,6 +14,8 @@ Tests pin:
 
 from __future__ import annotations
 
+from legoesm import constants
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -282,3 +284,37 @@ def test_kf_orchestrator_one_step_finite():
     # tendency through this physics_fn, so the tendency is exactly 0.
     assert float(jnp.max(jnp.abs(tend.du_dt.data))) == 0.0
     assert float(jnp.max(jnp.abs(tend.dv_dt.data))) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# MSE conservation regression guard (currently expected to fail)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.xfail(
+    reason=(
+        "Standard mass-flux kernel does not conserve column MSE on a "
+        "closed (no-surface-flux) probe.  Currently ~95% non-conservation "
+        "residual; flagged xfail so any future kernel improvement that "
+        "closes this is detected."
+    ),
+    strict=True,
+)
+def test_kf_mse_conservation_within_tolerance():
+    """Column-integrated ``c_p ∫dT + L_v ∫(dq_v + dq_c_conv) dp/g`` should
+    be small relative to the heating magnitude on a CAPE-positive sounding.
+    """
+    T, q, p_full, p_half, w_grid = _destabilized_column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out, _ = kain_fritsch_convection(
+        T=T, q_v=q, p_full=p_full, p_half=p_half,
+        w_grid=w_grid, conv_prog_profile=cpp, dt=1800.0,
+    )
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
+    assert rel < 0.30, (
+        f"KF MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total)"
+    )

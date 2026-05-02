@@ -1,0 +1,37 @@
+Iter-782 `_d2a2c_vect` fidelity at C36, β=π/4 solid-body rotation
+ut shape=(6, 37, 36), vt shape=(6, 36, 37)
+
+Peak |ut - ut_exact| and |vt - vt_exact|:
+  ut  peak=5.740e+00  face=0  (i,j)=(36,35)  lat=+34.10°  lon=+45.00°  GC-to-vertex=1.16°  cell-to-edge=0
+  vt  peak=6.174e+00  face=1  (i,j)=(0,36)  lat=+35.84°  lon=+46.24°  GC-to-vertex=1.16°  cell-to-edge=0
+
+Within  5.0° of any cube vertex (hot := |err| > 0.5 * peak):
+  ut:   28 /    60 hot points (46.7%)
+  vt:   16 /    30 hot points (53.3%)
+Within 10.0° of any cube vertex (hot := |err| > 0.5 * peak):
+  ut:   60 /    60 hot points (100.0%)
+  vt:   30 /    30 hot points (100.0%)
+Within 20.0° of any cube vertex (hot := |err| > 0.5 * peak):
+  ut:   60 /    60 hot points (100.0%)
+  vt:   30 /    30 hot points (100.0%)
+
+Absolute scale (for perspective):
+  max |ut_exact| = 4.909e+01 m/s
+  max |vt_exact| = 5.417e+01 m/s
+  max |ut - ut_exact| = 5.740e+00 m/s (11.69% relative)
+  max |vt - vt_exact| = 6.174e+00 m/s (11.40% relative)
+
+What iter-782 DOES measure (observational only):
+- Absolute |err| in ut/vt after one `_d2a2c_vect` call on
+  the analytical solid-body rotation IC at t=0.
+- Peak-error location and its GC-distance to nearest cube
+  vertex.
+- Hot-point (|err| > 0.5*peak) clustering near cube vertices.
+What it does NOT establish:
+- Whether the measured `_d2a2c_vect` error is large enough to
+  explain the cosine bell Linf ~ 121 at t=1 day (needs
+  advection of h-field through an error-biased wind field).
+- Whether the measured error comes from `fill_corner_region`
+  (corner Lagrange) or from the 4th-order A→C stencil.
+- Whether other operators (`transport_step`, `fv_tp_2d`)
+  contribute additional error on top of this.

@@ -1,0 +1,17 @@
+Iter-818 FB DUOGRID knob-at-a-time damping test W2 C24 24.0h
+
+                               variant                          status     h_max      u_cc      v_cc
+------------------------------------------------------------------------------------------
+                   baseline (iter-816)                        ok (24h)     24040     87.57     60.11
+                         + damp_v=0.06                        ok (24h)     47002   1037.61   1602.50
+                            + nord_v=2                        ok (24h)     24040     87.57     60.11
+                              + nord=2                        ok (24h)     21548    102.16     54.93
+                        - d4_bg (=0.0)                        ok (24h)     20216    120.55    119.42
+              + damp_v=0.06 + nord_v=2            CRASH step 94 (7.8h)         —         —         —
+     + nord=2 + damp_v=0.06 + nord_v=2            CRASH step 95 (7.9h)         —         —         —
+
+Interpretation cues (observational only):
+- The single-knob variant that crashes first identifies the
+  trigger.
+- If ALL single-knob variants run to 24h but iter-817's full
+  combo crashes, the interaction of multiple knobs is the cause.

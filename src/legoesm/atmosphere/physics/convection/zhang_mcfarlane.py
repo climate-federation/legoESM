@@ -128,20 +128,42 @@ def zhang_mcfarlane_convection(
     cape_weight = cape_trigger(
         cape, config.cape_threshold, config.cape_sharpness,
     )
+    # Dimensionally-correct CAPE-relaxation closure (Kain 2004 §3):
+    #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
+    # The earlier formula ``(CAPE - threshold)+ / tau`` had units
+    # ``m^2/s^3`` — wrong by a factor of ``rho_BL/g``.  At sea level
+    # this made M_b ~8x larger than the dimensionally-correct value;
+    # the runaway was masked operationally only by the ``M_b_max`` cap,
+    # but the gradient w.r.t. CAPE was off by the same factor and ``M_b``
+    # did not scale with the surface air density at all.
+    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
     M_b_eq = (
         cape_weight
+        * rho_BL
         * smooth_positive_part(
             cape - config.cape_threshold, config.cape_sharpness,
         )
-        / config.tau_cape
+        / (constants.g * config.tau_cape)
     )
     # Implicit-Euler relaxation toward equilibrium — stable for any
     # ``dt / tau_cape`` ratio:
     #     M_b_new = (M_b_old + (dt/tau) * M_b_eq) / (1 + dt/tau).
+    # For ``dt >> tau`` this approaches ``M_b_eq`` (full
+    # equilibration); for ``dt << tau`` it approaches a small
+    # fractional adjustment ``(dt/tau) * (M_b_eq - M_b_old)``.  An
+    # earlier form ``dt / max(tau, dt)`` clamped the ratio to ≤ 1 —
+    # under-stepping by up to ``r/(r+1) - 1/2 ≈ 41%`` at ``r=10`` —
+    # which is *not* what the comment claims (audit Codex finding:
+    # "the documented implicit-Euler factor is not what is
+    # implemented").  Protect against ``tau == 0`` only.
     M_b_old = conv_prog_profile[:, -1]
-    dt_over_tau = dt / jnp.maximum(config.tau_cape, dt)
+    dt_over_tau = dt / jnp.maximum(config.tau_cape, 1e-30)
     M_b = (M_b_old + dt_over_tau * M_b_eq) / (1.0 + dt_over_tau)
-    M_b = jnp.maximum(M_b, 0.0)
+    # Bound M_b to a literature peak tropical value (config.M_b_max,
+    # default 0.1 kg/m²/s).  Without this cap a column with very large
+    # CAPE drives M_b unboundedly and emits column heating that breaks
+    # the next dynamics step on the lat-lon FV pole-cell CFL.
+    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Plume launch / cloud-base index ------------------------------------
     # Surface parcel perturbed slightly per Zhang & McFarlane 1995 §3a;
@@ -163,20 +185,25 @@ def zhang_mcfarlane_convection(
         T, q_v, p_full, p_half, z,
         T_parcel, q_parcel, k_base_smooth,
         eps_profile, dlt_profile, M_b,
+        buoyancy_death_memory=config.buoyancy_death_memory,
     )
 
+    # Cap plume.M_u once at the source so every downstream use (kernel
+    # tendencies, CMT, q_c sources) sees the same bounded value.  The
+    # kernel's internal cap is now redundant but kept for safety.
+    plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
+    plume = plume._replace(M_u=plume_M_u_capped)
+
     # -- Environmental tendencies via the shared mass-flux kernel ----------
-    dT_dt, dq_v_dt, _ = _apply_mass_flux_kernel(
+    # Plume splits vapor (``plume.q_u`` — saturation-clipped per level)
+    # and cloud water (``plume.q_c_u`` — accumulated condensation)
+    # explicitly, so the kernel's ``q_c_conv_dt`` is now the correct
+    # detrainment of plume cloud water and we use it directly.
+    dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, plume.M_u,
-        z, rho, config.delta_0,
+        plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
+        z, rho, config.delta_0, M_u_max=config.M_b_max,
     )
-    # Override the kernel's ``q_c`` source: the kernel assumes ``q_u``
-    # carries any super-saturation (Arakawa-Wu convention), but our
-    # plume saturates ``q_u`` internally and tracks cloud water in
-    # ``plume.q_c_u``.  Use the plume's explicit cloud-water profile.
-    rho_safe = jnp.clip(rho, 0.01, None)
-    dq_c_conv_dt = config.delta_0 * plume.M_u * plume.q_c_u / rho_safe
 
     # -- Convective momentum transport --------------------------------------
     if config.enable_cmt:

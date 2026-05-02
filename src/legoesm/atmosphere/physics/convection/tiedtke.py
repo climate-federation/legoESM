@@ -43,6 +43,7 @@ from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
     _apply_mass_flux_kernel,
+    stratosphere_mass_flux_gate,
     _compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
@@ -181,9 +182,21 @@ def tiedtke_convection(
         )
         column_MC_proxy = jnp.maximum(column_MC, 0.0)
     else:
-        sat_deficit = jnp.maximum(q_sat_env - q_v, 0.0)
+        # Saturation-EXCESS proxy: vapor in excess of RH_crit * q_sat,
+        # column-integrated and divided by a relaxation timescale.
+        # Positive in moist columns (q_v > RH_crit * q_sat), vanishing
+        # in dry ones — this is the qualitative signature of moisture
+        # convergence over a long timescale.
+        #
+        # The earlier formulation used the saturation DEFICIT
+        # ``max(q_sat - q_v, 0)`` which has the opposite sign: large
+        # in dry columns, vanishing in moist columns — convection
+        # would be suppressed exactly where it should fire.
+        sat_excess = jnp.maximum(
+            q_v - config.mc_proxy_RH_crit * q_sat_env, 0.0,
+        )
         column_MC_proxy = (
-            jnp.sum(sat_deficit * dp, axis=-1)
+            jnp.sum(sat_excess * dp, axis=-1)
             / (constants.g * config.tau_MC_proxy)
         )
     # Smooth gate on MC threshold for deep.
@@ -193,11 +206,20 @@ def tiedtke_convection(
     )
 
     # Cloud-base mass flux (per class, then blended).
+    # ``M_b_deep`` is driven by column moisture convergence (kg/m^2/s units
+    # — already dimensionally correct) and stays as-is.
+    # ``M_b_shallow`` and ``M_b_midlevel`` use the dimensionally-correct
+    # CAPE-relaxation closure (Kain 2004 §3 form):
+    #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
+    # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
+    # masked operationally only by ``M_b_max``.
+    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
     M_b_deep = mc_gate * cape_weight
     M_b_shallow = (
         cape_weight
+        * rho_BL
         * smooth_positive_part(cape - config.cape_threshold, config.cape_sharpness)
-        / config.tau_shallow_M_b
+        / (constants.g * config.tau_shallow_M_b)
     )
     M_b_midlevel = M_b_shallow * config.midlevel_M_b_fraction
     M_b = (
@@ -205,19 +227,26 @@ def tiedtke_convection(
         + shallow_weight * M_b_shallow
         + midlevel_weight * M_b_midlevel
     )
-    M_b = jnp.maximum(M_b, 0.0)
+    # See ZhangMcFarlaneConfig.M_b_max.
+    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Plume integration -------------------------------------------------
     plume = entraining_detraining_plume(
         T, q_v, p_full, p_half, z,
         T_parcel, q_parcel, k_lcl_smooth,
         eps_profile, dlt_profile, M_b,
+        buoyancy_death_memory=config.buoyancy_death_memory,
     )
 
     # -- Implicit-Euler relaxation of the M_u profile carry ---------------
-    dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, dt)
+    # ``dt / tau`` (with ``tau`` floored against zero), NOT
+    # ``dt / max(tau, dt)`` — see ZM for the audit context.
+    dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, 1e-30)
     M_u_new = (conv_prog_profile + dt_over_tau * plume.M_u) / (1.0 + dt_over_tau)
-    M_u_new = jnp.maximum(M_u_new, 0.0)
+    # Cap M_u_new at config.M_b_max so every downstream use (kernel
+    # tendencies, dq_c_conv_raw, downdraft trigger, CMT, carry update)
+    # sees the same bounded value.
+    M_u_new = jnp.clip(M_u_new, 0.0, config.M_b_max)
 
     # Use the relaxed M_u for the actual environmental tendencies — this
     # smooths the time evolution of the convective forcing.
@@ -231,21 +260,29 @@ def tiedtke_convection(
         + shallow_weight * config.delta_shallow
         + midlevel_weight * config.delta_midlevel
     )
-    dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
+    # Pass the per-column blended delta_0 directly to the kernel.
+    # ``_apply_mass_flux_kernel`` uses ``delta_0`` ONLY in the
+    # detrainment terms (``delta_0 * M * (T_u - T) / rho``,
+    # ``delta_0 * M * (q_v_u - q_v) / rho``); the compensating-subsidence
+    # contributions are independent of ``delta_0``.  The earlier
+    # implementation called the kernel with ``config.delta_deep`` and
+    # then multiplied the FULL kernel output by ``delta_0_eff /
+    # delta_deep``, which incorrectly rescaled subsidence too — in a
+    # shallow-only column with ``delta_shallow > delta_deep`` this
+    # over-amplifies the subsidence drying / warming by the same factor
+    # the detrainment is enhanced.
+    dT_dt, dq_v_dt, _ = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, M_u_for_kernel,
-        z, rho, float(config.delta_deep),  # nominal delta — overridden below
+        plume.T_u, plume.q_u, plume.q_c_u, M_u_for_kernel,
+        z, rho, delta_0_eff[:, None], M_u_max=config.M_b_max,
     )
     rho_safe = jnp.clip(rho, 0.01, None)
-    dq_c_conv_dt_raw = (
-        delta_0_eff[:, None] * M_u_for_kernel * plume.q_c_u / rho_safe
+    # Reuse the same stratospheric gate the kernel applies so this
+    # custom q_c path does not detrain condensate above the tropopause.
+    p_gate_qc = stratosphere_mass_flux_gate(p_full)
+    dq_c_conv_dt = (
+        delta_0_eff[:, None] * M_u_for_kernel * p_gate_qc * plume.q_c_u / rho_safe
     )
-    # The kernel's dT/dq computations used ``config.delta_deep`` as the
-    # detrainment scale; rescale by the per-column class blend.
-    rescale = delta_0_eff[:, None] / config.delta_deep
-    dT_dt = dT_dt_raw * rescale
-    dq_v_dt = dq_v_dt_raw * rescale
-    dq_c_conv_dt = dq_c_conv_dt_raw
 
     # -- Optional downdraft (RH-dependent trigger) -------------------------
     if config.enable_downdraft:
@@ -262,17 +299,62 @@ def tiedtke_convection(
         downdraft_trigger = jax.nn.sigmoid(
             10.0 * (config.downdraft_RH_min - rh_below)
         )
-        # Downdraft mass flux = -alpha * M_b at cloud base.
+        # Downdraft mass flux = -alpha * M_b at cloud base [kg/(m²·s)].
         M_d_base = -config.downdraft_alpha * M_b * downdraft_trigger
-        # Distribute uniformly below cloud base.
-        below_lcl_norm = below_lcl / jnp.sum(below_lcl, axis=-1, keepdims=True).clip(1e-6, None)
-        # Downdraft cools by entraining colder layers above and
-        # bringing them down — net cooling tendency on environment.
-        dT_dt_dd = -(constants.L_v / constants.c_pd) * (
-            jnp.abs(M_d_base[:, None]) * below_lcl_norm
-            * jnp.maximum(0.05, 0.0)  # rough evap rate proxy [kg/kg]
-        ) / rho_safe
+        # Subcloud rain-evaporation cooling — dimensionally consistent,
+        # locally AND column-water conserving.
+        #
+        # Physical model: a fraction ``downdraft_evap_efficiency`` of the
+        # downdraft mass flux re-evaporates as rain falls through the
+        # subcloud layer.  Mass conservation requires that re-evaporated
+        # water be drawn from the same convective rain source that would
+        # otherwise reach the surface — implemented by reducing
+        # ``dq_c_conv_dt`` (the cloud-water source that microphysics
+        # converts to surface precip) by the same column-integrated rate
+        # that appears as a vapor source.  Capping ``evap_total`` at the
+        # available rain rate guarantees we never extract more rain than
+        # was generated this step.
+        #
+        # Earlier formulations were broken in two ways: (1) a literal
+        # ``0.05`` divided by ``rho_safe`` only — units came out as
+        # K·m/s not K/s; (2) cooling was added to dT_dt with no matching
+        # dq_v source, then in the next iteration the dq_v source was
+        # added but with no matching dq_c_conv sink — the column water
+        # budget gained mass every step (audit GWD/convection: "downdraft
+        # `0.05` cooling — dimensionally wrong AND non-water-conserving";
+        # Codex stop-time review: "downdraft fix still creates column
+        # water").
+        below_lcl_mass = jnp.sum(below_lcl * dp, axis=-1, keepdims=True).clip(1e-6, None)
+        # Column-integrated convective rain source available this step
+        # [kg/(m²·s)] (positive part — cloud water is generated where
+        # M_u detrains, never destroyed by this term).
+        rain_source_total = jnp.sum(
+            jnp.maximum(dq_c_conv_dt, 0.0) * dp, axis=-1,
+        ) / constants.g
+        # Total downdraft evap mass flux [kg/(m²·s)], capped at available
+        # convective rain so dq_c_conv_dt stays non-negative after the
+        # correction below.
+        evap_total = jnp.minimum(
+            jnp.abs(M_d_base) * config.downdraft_evap_efficiency,
+            rain_source_total,
+        )
+        # Per-layer evap rate [kg/(kg·s)], mass-weighted over below-LCL.
+        evap_rate = (
+            evap_total[:, None] * below_lcl * constants.g / below_lcl_mass
+        )
+        dT_dt_dd = -(constants.L_v / constants.c_pd) * evap_rate
         dT_dt = dT_dt + dT_dt_dd
+        # Local water source: rain → vapor in subcloud layer.
+        dq_v_dt = dq_v_dt + evap_rate
+        # Column conservation: subtract the same column-integrated rate
+        # from the convective cloud-water source (proportional scaling
+        # over levels where it is positive).  Net column ∫(dq_v + dq_c)
+        # contribution from this term is then zero.
+        rain_source_safe = jnp.clip(rain_source_total[:, None], 1e-30, None)
+        rain_scale = 1.0 - evap_total[:, None] / rain_source_safe
+        dq_c_conv_dt = jnp.where(
+            dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
+        )
 
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:

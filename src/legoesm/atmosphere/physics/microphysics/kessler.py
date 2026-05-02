@@ -20,6 +20,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics.microphysics._warm_rain import safe_pow
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -73,27 +74,66 @@ def kessler_microphysics(
     # Saturation mixing ratio
     q_sat = saturation_mixing_ratio(T, p_full)
 
-    # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s]
+    # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s].
+    # The evaporation branch (negative ``condensation``) is donor-clamped
+    # against the available ``q_c`` so a subsaturated clear-air column
+    # (q_v < q_sat, q_c = 0) cannot drive ``q_c`` below zero (Codex audit
+    # cycle 2: "subsaturated clear air can create negative cloud water").
+    # Same pattern as ``_warm_rain.saturation_adjustment``.
     excess = q_v - q_sat
     cond_frac = jax.nn.sigmoid(sharpness * excess)
     condensation = cond_frac * excess / dt  # [kg/kg/s]
+    q_c_avail = jnp.clip(q_c, 0.0, None)
+    condensation = jnp.maximum(
+        condensation, -q_c_avail / jnp.maximum(dt, 1e-10),
+    )
 
     dq_v_sat = -condensation
     dq_c_sat = condensation
 
-    # 2. Autoconversion: cloud -> rain (threshold excess)
-    # dq_c_sat is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
-    q_c_updated = q_c + dq_c_sat * dt
+    # 2. Autoconversion: cloud -> rain (threshold excess).  Uses raw
+    # ``q_c`` so the joint donor clamp below scales it consistently
+    # with the other ``q_c`` sinks (an earlier form used
+    # ``q_c_updated = q_c + cond·dt`` here, which double-counted the
+    # condensation budget when joint sinks were active and made the
+    # joint clamp inconsistent).
     autoconv = config.autoconversion_rate * jnp.maximum(
-        q_c_updated - config.autoconversion_threshold, 0.0
+        q_c - config.autoconversion_threshold, 0.0
     )
 
-    # 3. Accretion: cloud collected by rain
-    accretion = config.accretion_coeff * q_c * jnp.clip(q_r, 0.0) ** 0.875
+    # 3. Accretion: cloud collected by rain.  Fractional powers of q_r
+    # have unbounded derivative at q_r=0 — safe_pow handles the AD guard.
+    accretion = config.accretion_coeff * q_c * safe_pow(q_r, 0.875)
 
-    # 4. Evaporation of rain
+    # 4. Evaporation of rain (q_r^0.525).
     subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
-    evaporation = config.evaporation_coeff * subsaturation * jnp.clip(q_r, 0.0) ** 0.525
+    evaporation = config.evaporation_coeff * subsaturation * safe_pow(q_r, 0.525)
+
+    # === Joint donor clamp on q_c sinks ===
+    # Saturation-evaporation, autoconversion, and accretion can each
+    # individually be donor-clamped, but the *combined* sink rate can
+    # still exceed ``q_c / dt`` and drive ``q_c`` negative on an
+    # explicit Euler step.  E.g. with ``q_c = 1e-4``, ``q_r = 5e-3``,
+    # 80 % RH at 290 K, accretion + saturation-evap together over a
+    # 1200-s step demanded ~26× the available q_c (Codex audit cycle
+    # 2 / cycle 3 follow-up).  Mirror the Morrison/Thompson joint
+    # donor clamp so total water is conserved when sinks compete.
+    cond_evap_sink = jnp.maximum(-condensation, 0.0)
+    qc_sink_total = cond_evap_sink + autoconv + accretion
+    qc_avail = jnp.clip(q_c, 0.0)
+    qc_scale = jnp.minimum(
+        1.0,
+        qc_avail / jnp.maximum(qc_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
+    )
+    autoconv = autoconv * qc_scale
+    accretion = accretion * qc_scale
+    # Scale the evaporation branch only; positive condensation
+    # (saturation adjustment from supersaturation) is unaffected.
+    condensation = jnp.where(
+        condensation < 0.0, condensation * qc_scale, condensation,
+    )
+    dq_v_sat = -condensation
+    dq_c_sat = condensation
 
     # 5. Rain sedimentation
     rho_sfc = rho[:, -1:]
@@ -105,7 +145,10 @@ def kessler_microphysics(
     # 6. Latent heating
     dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
 
-    # Combine tracer tendencies
+    # Combine tracer tendencies — sources match the scaled sinks so
+    # total water (q_v + q_c + q_r) is conserved per layer (modulo
+    # rain evaporation, which exchanges with q_v, and sedimentation,
+    # which redistributes q_r vertically).
     dq_v_dt = dq_v_sat + evaporation
     dq_c_dt = dq_c_sat - autoconv - accretion
     dq_r_dt = autoconv + accretion - evaporation + sed_tend

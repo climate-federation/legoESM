@@ -1,0 +1,34 @@
+Iter-789 W2 alpha=0 C36 24.0h (LEGACY path)
+Monkey-patched `_d2a2c_vect` to inject ANALYTICAL ut, vt
+
+                  case           L2    v_ll_Linf    v_cc_Linf
+------------------------------------------------------------
+              BASELINE    2.176e-04    1.585e-01    1.879e-01
+  (debug) _patched trace hits: 0
+      ANALYTICAL ut/vt    2.176e-04    1.585e-01    1.879e-01
+
+         Δ vs baseline     L2 +0.0%    vll +0.0%    vcc +0.0%
+
+Interpretation cues (observational only):
+- If ANALYTICAL ut/vt drops v_ll_Linf to ≪ 0.159 m/s:
+  `_d2a2c_vect` IS the direct cause of the W2 mode-A artifact.
+  A Fortran-faithful fix to `_d2a2c_vect` corner handling would
+  eliminate the artifact.
+- If ANALYTICAL ut/vt leaves v_ll_Linf unchanged:
+  `_d2a2c_vect` is NOT the direct cause; the mode-A artifact
+  originates in another operator downstream.  Candidates:
+  momentum tendencies, vorticity flux, pressure gradient.
+- If ANALYTICAL ut/vt is larger than BASELINE:
+  the LEGACY `_d2a2c_vect` error is actually compensating for
+  other biases — hard to interpret but possible.
+
+What iter-789 DOES measure (observational only):
+- W2 L2 and v_ll_Linf under LEGACY with and without an
+  analytical-ut/vt monkey-patch replacing `_d2a2c_vect` output.
+What it does NOT establish:
+- Whether a Fortran-faithful `_d2a2c_vect` fix that
+  INCREMENTALLY reduces (not eliminates) cube-vertex error
+  would produce proportional v_ll_Linf improvement.
+- Whether the override is physically consistent with other
+  operators (the analytical ut/vt may not be self-consistent
+  with the updated u_d, v_d fields that drift over time).

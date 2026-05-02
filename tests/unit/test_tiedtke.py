@@ -17,6 +17,8 @@ Tests pin:
 
 from __future__ import annotations
 
+from legoesm import constants
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -150,6 +152,60 @@ def test_tiedtke_cmt_disabled():
 # Downdraft
 # ---------------------------------------------------------------------------
 
+def test_tiedtke_mc_proxy_is_larger_in_moist_columns():
+    """The saturation-excess MC proxy is larger in MOIST columns than
+    in DRY ones.
+
+    Tiedtke's deep-branch closure ``M_b_deep = mc_gate * cape_weight``
+    relies on a column moisture-convergence proxy (the
+    ``moisture_convergence`` argument is None for dycores without a
+    diagnostic).  The proxy is constructed inline in tiedtke.py as the
+    column integral of ``max(q_v - RH_crit * q_sat, 0)``: positive in
+    moist columns (q_v above RH_crit * q_sat at any level), vanishing
+    in dry columns.
+
+    Pre-fix the formula used ``max(q_sat - q_v, 0)`` (saturation
+    DEFICIT), which is large in dry columns and small in moist ones —
+    inverted relative to the comment in the code and to the physical
+    quantity the proxy was supposed to approximate.
+
+    Reproduce the proxy formula here directly so the test pins the
+    formula's sign behaviour without relying on the rest of the
+    scheme's complex deep / shallow / midlevel blending.
+    """
+    from legoesm.thermo import saturation_mixing_ratio
+
+    T, _, p_full, p_half, _, _ = _column(T_sfc=302.0)
+    q_sat = saturation_mixing_ratio(T, p_full)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    cfg = TiedtkeConfig()
+    # Generate moist (RH ~ 80%) and dry (RH ~ 5%) profiles via a column
+    # multiplier on q_sat.
+    q_moist = 0.85 * q_sat
+    q_dry = 0.05 * q_sat
+
+    def mc_proxy(q_v):
+        sat_excess = jnp.maximum(q_v - cfg.mc_proxy_RH_crit * q_sat, 0.0)
+        return jnp.sum(sat_excess * dp, axis=-1) / (constants.g * cfg.tau_MC_proxy)
+
+    p_moist = float(mc_proxy(q_moist)[0])
+    p_dry = float(mc_proxy(q_dry)[0])
+    # Pre-fix (saturation-deficit) inversely: dry > moist by orders of
+    # magnitude.  Post-fix moist >> dry.
+    assert p_moist > 100.0 * max(p_dry, 1e-30), (
+        f"Tiedtke MC proxy: moist column proxy = {p_moist:.3e}, "
+        f"dry = {p_dry:.3e}.  Expected moist >> dry by orders of "
+        "magnitude — the saturation-deficit formula has the wrong sign."
+    )
+    # Also ensure the proxy fires above the gate threshold in the moist
+    # case (gate gets activated downstream).
+    assert p_moist > cfg.moisture_convergence_threshold, (
+        f"MC proxy in moist column ({p_moist:.3e}) does not exceed the "
+        f"threshold ({cfg.moisture_convergence_threshold}); the deep "
+        "branch would be gated off."
+    )
+
+
 def test_tiedtke_downdraft_toggle_changes_subcloud_T():
     """Enabling the downdraft branch changes the sub-cloud T
     tendency."""
@@ -166,6 +222,75 @@ def test_tiedtke_downdraft_toggle_changes_subcloud_T():
     )
     diff = jnp.abs(out_on.dT_dt[:, -4:] - out_off.dT_dt[:, -4:])
     assert float(jnp.max(diff)) > 1e-8
+
+
+def test_tiedtke_downdraft_evap_conserves_water_locally():
+    """Audit GWD/convection + Codex stop-time reviews.
+
+    The downdraft "0.05 cooling" was buggy in two stages:
+      (a) original form: dT_dt cooling injected with NO water source
+          ⇒ vapor energy created from nothing (audit: 'non-water-
+          conserving');
+      (b) fixed-locally-only form: dq_v_dt source added without a
+          matching reduction in the convective rain source
+          (``dq_c_conv_dt``) ⇒ column-integrated water increased
+          every step (Codex: 'downdraft fix still creates column
+          water').
+
+    The current fix must satisfy three invariants:
+      1. Local energy-water balance: ``Δ(dT_dt) · c_pd + Δ(dq_v_dt) · L_v
+         == 0`` per level (cooling exactly accounts for vapor created
+         by rain re-evaporation).
+      2. Column water conservation: column-integrated
+         ``Δ(dq_v_dt) + Δ(dq_c_conv_dt) == 0``.  Vapor created in
+         the subcloud layer must equal cloud-water source removed
+         from the convective rain budget.
+      3. Cooling is actually exercised (some level has dT_diff < 0).
+    """
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out_off, _ = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0,
+        config=TiedtkeConfig(enable_downdraft=False),
+    )
+    out_on, _ = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0,
+        config=TiedtkeConfig(enable_downdraft=True),
+    )
+    dT_diff = out_on.dT_dt - out_off.dT_dt
+    dqv_diff = out_on.dq_v_dt - out_off.dq_v_dt
+    dqc_diff = out_on.dq_c_conv_dt - out_off.dq_c_conv_dt
+
+    # (3) Exercise check: cooling actually fires
+    assert float(jnp.min(dT_diff)) < 0.0, (
+        "Downdraft did not produce any cooling — formulation regressed."
+    )
+
+    # (1) Local energy-water balance — per level
+    H = dT_diff * constants.c_pd
+    Q = dqv_diff * constants.L_v
+    res_local = float(jnp.max(jnp.abs(H + Q)))
+    scale_local = float(jnp.max(jnp.abs(H)))
+    assert res_local < 1e-8 * max(scale_local, 1.0), (
+        f"Tiedtke downdraft local energy-water unclosed: max|H+Q|="
+        f"{res_local:.3e}, max|H|={scale_local:.3e}"
+    )
+
+    # (2) Column water conservation — net column water source is zero
+    dp = pf  # placeholder, overwritten next line
+    dp = (ph[:, 1:] - ph[:, :-1])
+    col_dqv = jnp.sum(dqv_diff * dp, axis=-1) / constants.g  # [kg/m^2/s]
+    col_dqc = jnp.sum(dqc_diff * dp, axis=-1) / constants.g
+    col_residual = float(jnp.max(jnp.abs(col_dqv + col_dqc)))
+    col_scale = float(jnp.max(jnp.abs(col_dqv)) + 1e-15)
+    assert col_residual < 1e-10 * max(col_scale, 1.0), (
+        f"Tiedtke downdraft column water unclosed: max|∫dq_v + ∫dq_c|="
+        f"{col_residual:.3e} kg/m²/s, vapor source={col_scale:.3e} — "
+        "Codex stop-time finding 'downdraft fix still creates column "
+        "water' has regressed.  The dq_c_conv_dt rain-source reduction "
+        "must match the dq_v vapor source column-integral."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,3 +368,41 @@ def test_tiedtke_orchestrator_one_step_finite():
     assert ps_out.conv_prog_profile.shape == (ncol, 12)
     for f in (tend.du_dt, tend.dv_dt, tend.dT_dt, tend.dp_s_dt, tend.dphis_dt):
         assert jnp.all(jnp.isfinite(f.data))
+
+
+# ---------------------------------------------------------------------------
+# MSE conservation guard
+# ---------------------------------------------------------------------------
+
+@pytest.mark.xfail(
+    reason=(
+        "Standard Tiedtke kernel (subsidence g/c_p + detrainment of "
+        "moist-adiabat T_u) does not conserve column MSE on a closed "
+        "(no-surface-flux) probe.  Currently ~96% non-conservation "
+        "residual on this CAPE-positive fixture; flagged xfail so any "
+        "future kernel improvement that closes this is detected."
+    ),
+    strict=True,
+)
+def test_tiedtke_mse_conservation_within_tolerance():
+    """Column-integrated ``c_p ∫dT + L_v ∫(dq_v + dq_c_conv) dp/g`` should
+    be small relative to the heating magnitude on a CAPE-positive sounding.
+    """
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out, _ = tiedtke_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, dt=1800.0,
+        config=TiedtkeConfig(enable_cmt=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    dp = ph[:, 1:] - ph[:, :-1]
+    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
+    assert rel < 0.30, (
+        f"Tiedtke MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total) "
+        f"exceeds 30% — kernel formulation has regressed"
+    )

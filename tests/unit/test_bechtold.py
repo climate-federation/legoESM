@@ -20,6 +20,8 @@ Tests pin:
 
 from __future__ import annotations
 
+from legoesm import constants
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -137,6 +139,67 @@ def test_bechtold_cmt_disabled():
     assert out.dv_dt_conv is None
 
 
+def test_bechtold_downdraft_evap_conserves_water_locally():
+    """Bechtold inherits the same downdraft fix as Tiedtke.
+
+    Three invariants (see ``tests/unit/test_tiedtke.py::
+    test_tiedtke_downdraft_evap_conserves_water_locally`` for the
+    detailed audit / Codex rationale):
+      1. Local energy-water balance per level: ``Δ(dT_dt)·c_pd +
+         Δ(dq_v_dt)·L_v == 0``.
+      2. Column water conservation: column-integrated
+         ``Δ(dq_v_dt) + Δ(dq_c_conv_dt) == 0`` (vapor source matched
+         by reduction in convective rain source).
+      3. Cooling is actually exercised.
+    """
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out_off, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=300.0,
+        config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    out_on, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    dT_diff = out_on.dT_dt - out_off.dT_dt
+    dqv_diff = out_on.dq_v_dt - out_off.dq_v_dt
+    dqc_diff = out_on.dq_c_conv_dt - out_off.dq_c_conv_dt
+
+    assert float(jnp.min(dT_diff)) < 0.0, (
+        "Bechtold downdraft did not produce cooling — formulation regressed."
+    )
+
+    # (1) Local energy-water balance
+    H = dT_diff * constants.c_pd
+    Q = dqv_diff * constants.L_v
+    res_local = float(jnp.max(jnp.abs(H + Q)))
+    scale_local = float(jnp.max(jnp.abs(H)))
+    assert res_local < 1e-8 * max(scale_local, 1.0), (
+        f"Bechtold downdraft local energy-water budget unclosed: max|H+Q|="
+        f"{res_local:.3e}, max|H|={scale_local:.3e}"
+    )
+
+    # (2) Column water conservation
+    dp = ph[:, 1:] - ph[:, :-1]
+    col_dqv = jnp.sum(dqv_diff * dp, axis=-1) / constants.g
+    col_dqc = jnp.sum(dqc_diff * dp, axis=-1) / constants.g
+    col_residual = float(jnp.max(jnp.abs(col_dqv + col_dqc)))
+    col_scale = float(jnp.max(jnp.abs(col_dqv)) + 1e-15)
+    assert col_residual < 1e-10 * max(col_scale, 1.0), (
+        f"Bechtold downdraft column water unclosed: max|∫dq_v + ∫dq_c|="
+        f"{col_residual:.3e} kg/m²/s, vapor source={col_scale:.3e}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stochastic perturbation
 # ---------------------------------------------------------------------------
@@ -157,12 +220,22 @@ def test_bechtold_deterministic_when_stochastic_off():
 
 def test_bechtold_stochastic_changes_with_key():
     """With ``enable_stochastic=True``, two different PRNG keys produce
-    different AR1 noise states and different diagnosed mass fluxes."""
+    different AR1 noise states and different diagnosed mass fluxes.
+
+    The fixture uses a high-CAPE sounding that drives diagnosed M_b
+    above the production ``M_b_max=0.05`` cap on both keys; we set
+    ``M_b_max=10.0`` here so the cap does not bind and mask the
+    stochastic variation.  In production the cap is intentional — it
+    bounds single-step shocks from outlier columns — and a no-cap
+    setup like this should never appear in a real run.
+    """
     T, q, pf, ph, u, v = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     stoch = jnp.zeros((ncol,))
-    config = BechtoldConfig(enable_stochastic=True, stochastic_amplitude=0.5)
+    config = BechtoldConfig(
+        enable_stochastic=True, stochastic_amplitude=0.5, M_b_max=10.0,
+    )
     key1 = jax.random.PRNGKey(0)
     key2 = jax.random.PRNGKey(7)
     _, M1, s1 = bechtold_convection(T, q, pf, ph, u, v, cpp, stoch, key1, dt=300.0, config=config)
@@ -499,3 +572,39 @@ def test_bechtold_orchestrator_with_radiation_merges_dict_correctly():
     # Tendencies are finite.
     for f in (tend.du_dt, tend.dv_dt, tend.dT_dt, tend.dp_s_dt, tend.dphis_dt):
         assert jnp.all(jnp.isfinite(f.data))
+
+
+# ---------------------------------------------------------------------------
+# MSE conservation regression guard (currently expected to fail)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.xfail(
+    reason=(
+        "Bechtold inherits the standard Tiedtke kernel for env tendencies, "
+        "but its PBL-CAPE closure pushes M_b larger than Tiedtke's, so "
+        "subsidence ``g/c_p`` heating overwhelms the kernel's vapor sink. "
+        "Currently ~92% non-conservation residual; flagged as xfail so "
+        "any future kernel improvement that closes this is detected."
+    ),
+    strict=True,
+)
+def test_bechtold_mse_conservation_within_tolerance():
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=1800.0,
+        config=BechtoldConfig(enable_stochastic=False, enable_cmt=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    dp = ph[:, 1:] - ph[:, :-1]
+    H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
+    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
+    assert rel < 0.30, (
+        f"Bechtold MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total)"
+    )

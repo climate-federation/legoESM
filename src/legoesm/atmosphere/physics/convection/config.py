@@ -46,7 +46,11 @@ class SBMConfig(NamedTuple):
     RH_ref: float = 0.7
     CAPE_threshold: float = 70.0
     T_min_convect: float = 200.0
-    smooth_trigger_sharpness: float = 0.01
+    # Default 0.1 (was 0.01).  At CAPE=0 the looser 0.01 gives
+    # ``sigmoid(0.01·-70) ≈ 0.33`` (33 % activation when CAPE is zero
+    # — gating leaks).  0.1 gives ``sigmoid(-7) ≈ 9e-4`` (effectively 0)
+    # while preserving smoothness near the threshold.
+    smooth_trigger_sharpness: float = 0.1
 
 
 class DCAConfig(NamedTuple):
@@ -82,12 +86,18 @@ class KuoConfig(NamedTuple):
     smooth_trigger_sharpness : float
         Sigmoid sharpness on column moisture excess trigger [1/(kg/m^2)].
     tau_relax : float
-        Relaxation timescale [s].
+        Relaxation timescale [s].  Default 7200 (2 h).  The earlier
+        default 3600 (1 h) ate the entire column moisture excess every
+        hour, which combined with the surface-evap supply rate gave
+        ~10× too much precipitation in tropical RCE.  CCM2/CCM3 used
+        21600 (6 h); 7200 is a compromise that keeps the scheme
+        responsive to real precipitating columns without
+        over-precipitating.
     """
     alpha_heat: float = 0.75
     me_threshold: float = 1e-5
     smooth_trigger_sharpness: float = 1e4
-    tau_relax: float = 3600.0
+    tau_relax: float = 7200.0
 
 
 class MassFluxConfig(NamedTuple):
@@ -114,9 +124,17 @@ class MassFluxConfig(NamedTuple):
     epsilon_0: float = 1e-3
     delta_0: float = 1e-3
     M_scale: float = 0.01
-    cape_activation_scale: float = 100.0
-    cape_threshold: float = 0.0
+    # Trigger: ``convective_mask = sigmoid((cape − cape_threshold)
+    # / cape_activation_scale)``.  Defaults below give ``sigmoid(-7)
+    # ≈ 9e-4`` at CAPE=0 (effectively no firing) and full activation
+    # 100 J/kg above the 70 J/kg threshold.  The earlier defaults
+    # (``cape_threshold=0``, ``cape_activation_scale=100``) gave 50 %
+    # activation at CAPE=0 — the gating-leak that the validation
+    # script flags.
+    cape_activation_scale: float = 10.0
+    cape_threshold: float = 70.0
     M_c_init: float = 0.0
+    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
 
 
 class ZhangMcFarlaneConfig(NamedTuple):
@@ -150,10 +168,17 @@ class ZhangMcFarlaneConfig(NamedTuple):
     cmt_c_u, cmt_c_d : float
         Pressure-gradient correction coefficients in the Gregory et
         al. 1997 closure (default 0.55 each — the canonical value).
+    M_b_max : float
+        Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
+        (default 0.005 — about 1/20 of the literature peak tropical value 0.1; tighter than peak because the unbounded CAPE/tau closure can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer heating ~M·(T_u−T)·δ scales linearly).  The
+        CAPE/τ_cape closure is unbounded above; without this cap a
+        column with CAPE >> 5 kJ/kg yields M_b that drives
+        column-integrated heating > 10⁴ W/m² and blows up the
+        integration on the next dynamics step.
     """
     tau_cape: float = 3600.0
     cape_threshold: float = 70.0
-    cape_sharpness: float = 0.02
+    cape_sharpness: float = 0.1
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
     epsilon_0: float = 1.0e-3
@@ -161,6 +186,22 @@ class ZhangMcFarlaneConfig(NamedTuple):
     enable_cmt: bool = True
     cmt_c_u: float = 0.55
     cmt_c_d: float = 0.55
+    M_b_max: float = 0.05
+    # Buoyancy-death memory is OFF by default.  The audit's cycle-2 P2
+    # concern (a plume terminated by negative buoyancy can revive
+    # above an inversion) is real, but several attempted detector
+    # designs each introduced their own edge cases (sub-LCL warm-
+    # bubble leak, miss of weak positive CAPE, miss of cloud-base
+    # launch, growth of the launched gate during revival).  The
+    # ``_plume.entraining_detraining_plume`` ``buoyancy_death_memory``
+    # kwarg is wired through and the option is fully tested in
+    # isolation, but enabling it by default would require a more
+    # robust state-machine design plus a dedicated validation
+    # campaign.  Schemes that *want* the single-plume monotone
+    # termination can opt in by setting this to True; the default
+    # preserves the legacy local-only filter behaviour that all
+    # existing scheme test fixtures were calibrated against.
+    buoyancy_death_memory: bool = False
 
 
 class KainFritschConfig(NamedTuple):
@@ -214,6 +255,9 @@ class KainFritschConfig(NamedTuple):
         not on CAPE.
     cape_sharpness : float
         Sigmoid sharpness on the CAPE gate [1/(J/kg)] (default 0.02).
+    M_b_max : float
+        Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
+        (default 0.005 — about 1/20 of the literature peak tropical value 0.1; tighter than peak because the unbounded CAPE/tau closure can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer heating ~M·(T_u−T)·δ scales linearly).
     """
     w_thresh_offset: float = 2.0
     w_thresh_scale: float = 1.0
@@ -226,8 +270,11 @@ class KainFritschConfig(NamedTuple):
     cloud_depth_min: float = 4000.0
     cloud_depth_sharpness: float = 1.0e-3
     enable_shallow: bool = True
+    # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
+    buoyancy_death_memory: bool = False
     cape_threshold: float = 0.0
-    cape_sharpness: float = 0.02
+    cape_sharpness: float = 0.1
+    M_b_max: float = 0.05
 
 
 class EmanuelConfig(NamedTuple):
@@ -284,6 +331,9 @@ class EmanuelConfig(NamedTuple):
         Bulk-plume entrainment rate [1/m] (default 1.5e-3).
     delta_0 : float
         Bulk-plume detrainment rate [1/m] (default 1.5e-3).
+    M_b_max : float
+        Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
+        (default 0.005 — about 1/20 of the literature peak tropical value 0.1; tighter than peak because the unbounded CAPE/tau closure can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer heating ~M·(T_u−T)·δ scales linearly).
     """
     n_mixing_fractions: int = 8
     cu_coefficient: float = 0.7
@@ -291,15 +341,28 @@ class EmanuelConfig(NamedTuple):
     precip_efficiency_lcl: float = 0.0
     precip_threshold_qc: float = 1.0e-3
     cape_threshold: float = 70.0
-    cape_sharpness: float = 0.02
+    cape_sharpness: float = 0.1
     parcel_perturb_T: float = 0.5
     parcel_perturb_q: float = 1.0e-3
-    sub_cloud_relaxation: float = 100.0
-    enable_unsaturated_downdraft: bool = True
+    # Emanuel 1991 §3 uses a sub-cloud-layer mixing timescale of
+    # several thousand seconds.  The earlier default of 100 s gave
+    # M_b ~72× larger than published values and produced 28 MW/m²
+    # of column heating from a CAPE-positive sounding.
+    sub_cloud_relaxation: float = 7200.0
+    # Default-OFF.  Emanuel 1991's downdraft re-evaporates a fraction
+    # of *precipitation* (rain) back to vapor in the BL.  In a model
+    # without an explicit q_r tracer the implementation can only draw
+    # from ``dq_c_conv_dt`` (the cloud-water source), so enabling it
+    # produces a column-net moistening on CAPE-positive soundings —
+    # the wrong sign of ``Q_v`` that the validation script flags.
+    # Production runs with a full microphysics chain that owns q_r
+    # should override this to ``True``.
+    enable_unsaturated_downdraft: bool = False
     downdraft_efficiency: float = 0.2
     smooth_trigger_sharpness: float = 0.5
     epsilon_0: float = 1.5e-3
     delta_0: float = 1.5e-3
+    M_b_max: float = 0.05
 
 
 class TiedtkeConfig(NamedTuple):
@@ -373,10 +436,17 @@ class TiedtkeConfig(NamedTuple):
     enable_downdraft: bool = True
     downdraft_alpha: float = 0.3
     downdraft_RH_min: float = 0.2
+    # Fraction of the downdraft mass flux that re-evaporates as rain
+    # falling through the subcloud layer (default 0.05 — matches a
+    # historical hardcoded literal that was previously dimensionally
+    # wrong; the current implementation distributes the resulting
+    # evaporation rate over below-LCL layers by mass weight, with a
+    # matching dq_v source so the column water budget closes).
+    downdraft_evap_efficiency: float = 0.05
     moisture_convergence_threshold: float = 1.0e-8
     moisture_convergence_sharpness: float = 1.0e8
     cape_threshold: float = 70.0
-    cape_sharpness: float = 0.02
+    cape_sharpness: float = 0.1
     cloud_depth_deep: float = 3000.0
     cloud_depth_shallow_max: float = 1500.0
     depth_split_sharpness: float = 1.0e-3
@@ -388,9 +458,17 @@ class TiedtkeConfig(NamedTuple):
     tau_M_u_relax: float = 1800.0
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
-    tau_MC_proxy: float = 3600.0   # for saturation-deficit MC proxy
+    tau_MC_proxy: float = 3600.0   # for saturation-excess MC proxy
+    # Critical column-mean RH above which the MC proxy starts firing.
+    # The proxy approximates moisture convergence as the column-integrated
+    # vapor in excess of ``RH_crit * q_sat``: positive in moist columns,
+    # vanishing in dry ones.
+    mc_proxy_RH_crit: float = 0.6
     tau_shallow_M_b: float = 3600.0  # Shallow-cloud-base mass-flux timescale [s]
+    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
     midlevel_M_b_fraction: float = 0.5  # M_b_midlevel = M_b_shallow * this
+    # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
+    buoyancy_death_memory: bool = False
 
 
 class BechtoldConfig(NamedTuple):
@@ -447,9 +525,15 @@ class BechtoldConfig(NamedTuple):
     cloud_depth_deep, cloud_depth_shallow_max, depth_split_sharpness :
         as Tiedtke.
     """
-    # Tiedtke-inherited / revised
+    # Tiedtke-inherited / revised.
+    # Bechtold 2008 §2 calibrates ``delta_deep ≈ epsilon_deep`` for a
+    # near-neutral plume; the earlier default ``delta_deep = 5e-4`` (with
+    # ``epsilon_deep = 1.75e-3``) gives ``dM/dz ≈ +1.25e-3 M`` so the
+    # mass flux *grows* exponentially with height and peaks at the
+    # model top, not the cloud base — physically wrong.  Setting
+    # ``delta_deep = epsilon_deep`` matches the published calibration.
     epsilon_deep: float = 1.75e-3
-    delta_deep: float = 5.0e-4
+    delta_deep: float = 1.75e-3
     epsilon_shallow: float = 3.0e-3
     delta_shallow: float = 3.0e-3
     epsilon_midlevel: float = 1.0e-4
@@ -457,11 +541,17 @@ class BechtoldConfig(NamedTuple):
     enable_downdraft: bool = True
     downdraft_alpha: float = 0.3
     downdraft_RH_min: float = 0.2
+    # See TiedtkeConfig.downdraft_evap_efficiency for definition.
+    downdraft_evap_efficiency: float = 0.05
     enable_cmt: bool = True
     cmt_c_u: float = 0.7
     cmt_c_d: float = 0.7
-    cape_threshold: float = 0.0
-    cape_sharpness: float = 0.005
+    # The earlier ``cape_threshold = 0.0`` with ``cape_sharpness = 0.005``
+    # left the closure essentially always-on (``softplus(0)/0.005 ≈ 138
+    # J/kg`` of phantom CAPE even when CAPE = 0).  Match ZM/Tiedtke at
+    # 70 J/kg, 0.02 1/(J/kg) so the trigger is meaningful.
+    cape_threshold: float = 70.0
+    cape_sharpness: float = 0.1
     smooth_trigger_sharpness: float = 0.02
     precip_efficiency: float = 0.55
     parcel_dT: float = 0.5
@@ -477,6 +567,13 @@ class BechtoldConfig(NamedTuple):
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
+    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # Strong-convergence normaliser used to make the moisture-convergence
+    # enhancement an O(1) multiplier of M_b (Bechtold 2008 Fig. 2 — typical
+    # tropical strong-convergence is ≈ 0.05 kg/m²/s).
+    mc_normalize_scale: float = 0.05
+    # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
+    buoyancy_death_memory: bool = False
 
 
 class EDMFConfig(NamedTuple):
@@ -504,8 +601,12 @@ class EDMFConfig(NamedTuple):
     a_u_init: float = 0.1
     tau_a: float = 1800.0
     w_u_min: float = 0.1
-    cape_activation_scale: float = 100.0
-    cape_threshold: float = 0.0
+    # Trigger gating — see MassFluxConfig for rationale (sharper
+    # ``cape_activation_scale`` and a 70 J/kg threshold close the
+    # CAPE=0 leak from the earlier 50 % activation).
+    cape_activation_scale: float = 10.0
+    cape_threshold: float = 70.0
+    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
 
 
 class ConvectionConfig(NamedTuple):

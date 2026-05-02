@@ -241,14 +241,34 @@ def compute_lfc_lnb(
     # primitive to ``-buoyancy`` AFTER the LFC is reached; the soft
     # gating-by-LFC weight ensures we don't pick up sub-cloud layers
     # where the parcel was negatively buoyant.
+    #
+    # Convention: ``profile`` and ``k_lfc`` are both surface-last indices
+    # (surface at index ``nlev-1``, top at index 0).  "Above LFC altitude"
+    # means *smaller* surface-last index than ``k_lfc``.  ``direction="below"``
+    # in ``smooth_level_indicator`` gives ``sigmoid(threshold - profile)``
+    # which is ~1 where ``profile < threshold`` — so the threshold IS
+    # ``k_lfc`` itself.  The earlier formula ``(nlev - 1) - k_lfc`` flipped
+    # ``k_lfc`` into surface-first space and then compared against the
+    # surface-last ``profile``, marking the wrong levels as "above LFC"
+    # and collapsing the LNB onto the LFC for many columns.
     above_lfc_weight = smooth_level_indicator(
         jnp.broadcast_to(jnp.arange(nlev, dtype=buoyancy.dtype), buoyancy.shape),
-        threshold=(nlev - 1.0) - k_lfc[:, None],  # surface-first index of LFC
+        threshold=k_lfc[:, None],
         sharpness=sharpness,
-        direction="below",  # surface-last: indices below LFC index are above LFC altitude
+        direction="below",
     )
-    masked_buoyancy = buoyancy * above_lfc_weight
-    k_lnb = smooth_lowest_crossing_index(-masked_buoyancy, 0.0, sharpness)
+    # Drive ``-buoyancy`` strongly negative below the LFC so that the
+    # smooth-crossing primitive does not register near-zero spurious
+    # crossings produced by multiplicative masking ``buoyancy * weight``
+    # (where ``-masked_buoyancy ≈ 0`` for an entire stretch of levels
+    # near the surface).  ``LARGE = 1e6 K`` is far below any physical
+    # buoyancy magnitude (which is bounded by the moist-adiabat /
+    # environmental temperature difference, ~tens of K), so a smooth
+    # blend is safe.  Above LFC altitude the offset vanishes and the
+    # crossing detector sees the genuine ``-buoyancy`` profile.
+    LARGE = jnp.asarray(1.0e6, dtype=buoyancy.dtype)
+    guarded_neg_buoyancy = -buoyancy - LARGE * (1.0 - above_lfc_weight)
+    k_lnb = smooth_lowest_crossing_index(guarded_neg_buoyancy, 0.0, sharpness)
     return k_lfc, k_lnb
 
 
@@ -304,17 +324,23 @@ def compute_cin(
     levels = jnp.arange(nlev, dtype=T_env.dtype)
     levels = jnp.broadcast_to(levels, T_env.shape)
 
-    # The integration window in surface-last index space is
-    # ``LFC_idx <= k <= LCL_idx`` because LFC is *above* LCL and
-    # surface-last indices DECREASE with altitude.  The smooth window
-    # is the product of two sigmoids.
-    window_above_lfc = jax.nn.sigmoid(
-        indicator_sharpness * (k_lfc_smooth[:, None] + 0.5 - levels)
-    )  # 1 at indices above LFC altitude (smaller index), 0 below.
-    window_below_lcl = jax.nn.sigmoid(
-        indicator_sharpness * (levels - (k_lcl_smooth[:, None] - 0.5))
-    )  # 1 at indices at LCL or below (larger index, lower altitude), 0 above.
-    window = window_above_lfc * window_below_lcl
+    # The integration window covers altitudes BETWEEN the LCL and the
+    # LFC.  In surface-last index space (surface at the LARGEST index)
+    # the LCL has a larger index than the LFC, so the CIN layer is at
+    # indices ``k_lfc < k < k_lcl``.  The smooth window is the product
+    # of two sigmoids: ``below LFC altitude`` (index larger than
+    # ``k_lfc``) AND ``above LCL altitude`` (index smaller than
+    # ``k_lcl``).  Earlier this product was the WRONG intersection
+    # (``above_LFC AND below_LCL``) which is empty for the natural
+    # ordering ``k_lnb < k_lfc < k_lcl`` — CIN was suppressed by ~93%
+    # in straightforward test columns.
+    window_below_lfc = jax.nn.sigmoid(
+        indicator_sharpness * (levels - (k_lfc_smooth[:, None] + 0.5))
+    )  # 1 at indices below LFC altitude (larger index), 0 above.
+    window_above_lcl = jax.nn.sigmoid(
+        indicator_sharpness * (k_lcl_smooth[:, None] - 0.5 - levels)
+    )  # 1 at indices above LCL altitude (smaller index), 0 below.
+    window = window_below_lfc * window_above_lcl
 
     dp = p_half[:, 1:] - p_half[:, :-1]
     inhibiting_buoyancy = jnp.maximum(0.0, T_env - T_parcel_ma)
@@ -367,6 +393,7 @@ def entraining_detraining_plume(
     M_b: jax.Array,
     *,
     buoyancy_sharpness: float = 0.5,
+    buoyancy_death_memory: bool = False,
 ) -> Plume:
     """Bulk entraining-detraining updraft from cloud base to LNB.
 
@@ -419,6 +446,37 @@ def entraining_detraining_plume(
         [1/K].  Default ``0.5`` per Kelvin of buoyancy means the
         plume is at half mass flux when ``T_u - T_env`` reaches the
         modest negative value of about ``-1.4 K``.
+    buoyancy_death_memory : bool
+        Whether the buoyancy-tapering filter has carry-state memory.
+        Default ``False`` (legacy local filter): each level applies
+        its own ``sigmoid(B_u)`` independently — a plume that is
+        killed by negative buoyancy at one level can resume reporting
+        nonzero ``M_u`` above an inversion, which can be physically
+        inappropriate for single-plume schemes (audit Codex cycle 2
+        P2: "plume terminated by negative buoyancy can revive above
+        an inversion").
+
+        When ``True``, the carry tracks two slots — ``launched``
+        (cumulative max of a buoyancy-ramp gated by ``abv²``) and
+        ``alive_min`` (cumulative min of ``launched·plume_alive +
+        (1-launched)``) — so once the plume reaches its CAPE region
+        and is then killed by an inversion, ``alive_min`` ratchets
+        down and stays low even if buoyancy recovers above the
+        inversion.
+
+        **The True branch is opt-in and not enabled in any production
+        scheme by default.**  Iterative review during cycle-3
+        identified six independent edge-case failure modes (sub-LCL
+        warm bubble, weak-CAPE miss, sub-LCL leak, missed cloud-base
+        launch, revival-after-inversion still leaks).  The current
+        ``buoyancy_ramp · abv²`` design satisfies all six in static
+        traces, but the strongest cycle-3 finding ("cloud-base launch
+        gate still does not block revival") suggests the cumulative-
+        max + cumulative-min algorithm needs a more discrete state-
+        machine treatment to fully suppress weak-CAPE revival.  The
+        opt-in interface is preserved so a future PR can land a
+        validated implementation; current callers stay on the
+        legacy behaviour.
 
     Returns
     -------
@@ -458,12 +516,22 @@ def entraining_detraining_plume(
     # actual surface).  We launch with the parcel values; the
     # ``above_base_weight`` mask will suppress mass flux below cloud
     # base.  All carry components are pinned to ``_dtype``.
+    #
+    # ``alive_min`` tracks the cumulative MIN of ``plume_alive_local``
+    # once the plume has reached its CAPE region (gated by
+    # ``launched``).  ``launched`` is the cumulative MAX of a sharp
+    # detector ``sigmoid(launched_sharpness · (plume_alive_local -
+    # launched_threshold))`` — it ramps from 0 to 1 the first time
+    # plume_alive_local clearly exceeds the threshold, then stays at 1.
+    # Both start at 0/1 respectively (plume not launched, fully alive).
     init_carry = (
         T_parcel_base.astype(_dtype),                       # T_u_prev
         q_parcel_base.astype(_dtype),                       # q_u_prev
         jnp.zeros_like(T_parcel_base, dtype=_dtype),        # q_c_u_prev
         M_b.astype(_dtype),                                 # M_u_prev
         z_full_rev[:, 0],                                   # z_prev (already cast)
+        jnp.ones_like(T_parcel_base, dtype=_dtype),         # alive_min
+        jnp.zeros_like(T_parcel_base, dtype=_dtype),        # launched
     )
 
     # Per-level inputs to the scan.  Transpose to (nlev, ncol).
@@ -482,22 +550,45 @@ def entraining_detraining_plume(
     L_v = constants.L_v
 
     def step(carry, layer_inputs):
-        T_u_prev, q_u_prev, q_c_u_prev, M_u_raw_prev, z_prev = carry
+        (T_u_prev, q_u_prev, q_c_u_prev, M_u_raw_prev,
+         z_prev, alive_min_prev, launched_prev) = carry
         T_e, q_e, p_e, z_e, eps, dlt, abv = layer_inputs
 
         dz = jnp.maximum(z_e - z_prev, 1.0)  # ascending; floor to avoid div-by-zero
 
-        # Raw plume mass flux: dM/dz = (epsilon - delta) * M.  We
-        # intentionally do NOT bake the buoyancy / sub-cloud masks
+        # Raw plume mass flux: dM/dz = (epsilon - delta) * M.  Use the
+        # exact integration ``M(z+dz) = M(z) * exp((eps - dlt) * dz)``
+        # for this linear ODE — always positive, AD-safe everywhere,
+        # and exact when ``(eps - dlt)`` is constant over the layer.
+        # An earlier explicit-Euler form ``M * (1 + (eps - dlt) * dz)``
+        # could go negative for strong detrainment + thick layers
+        # (e.g. ``dlt = 5e-3 /m``, ``dz = 2000 m`` ⇒ multiplier =
+        # ``-7``); the subsequent ``jnp.maximum(..., 0)`` clipped the
+        # mass flux to 0 AND *zeroed the gradient* w.r.t. ``dlt`` /
+        # ``eps``, breaking AD-based sensitivity studies through the
+        # plume integrator (audit Codex finding: "plume mass flux uses
+        # explicit Euler plus a hard nonnegative clip ... after
+        # which jnp.maximum kills both mass flux and gradients").
+        # We intentionally do NOT bake the buoyancy / sub-cloud masks
         # into the carry — those are reporting filters, not dynamics.
         # Folding them into the carry would compound across levels and
         # destroy the cloud-base-to-LNB profile that consumers expect.
-        M_u_raw = M_u_raw_prev * (1.0 + (eps - dlt) * dz)
-        M_u_raw = jnp.maximum(M_u_raw, 0.0)
+        M_u_raw = M_u_raw_prev * jnp.exp((eps - dlt) * dz)
 
-        # Entrainment of environmental T, q.
-        T_u_ent = T_u_prev + eps * dz * (T_e - T_u_prev)
-        q_u_ent = q_u_prev + eps * dz * (q_e - q_u_prev)
+        # Entrainment of environmental T, q via the analytic relaxation
+        # ``X(z+dz) = X_e + (X_prev - X_e) * exp(-eps · dz)`` — exact for
+        # the linear ODE ``dX/dz = -eps · (X - X_e)`` and always bounded
+        # between ``X_prev`` and ``X_e``.  An earlier explicit-Euler form
+        # ``X_prev + eps · dz · (X_e - X_prev)`` overshoots past ``X_e``
+        # for ``eps · dz > 1`` (e.g. Bechtold ``epsilon_shallow=3e-3``
+        # with a 500–1000 m layer gives ``eps·dz ∈ [1.5, 3]``) — making
+        # ``q_u_ent`` go negative and zeroing the gradient w.r.t. ``eps``.
+        # The exponential form is dimensionally identical and AD-safe
+        # everywhere (Codex stop-time review cycle 2: "plume entrainment
+        # still uses unstable explicit Euler").
+        decay_eps = jnp.exp(-eps * dz)
+        T_u_ent = T_e + (T_u_prev - T_e) * decay_eps
+        q_u_ent = q_e + (q_u_prev - q_e) * decay_eps
 
         # Use the analytic moist-adiabatic lapse rate from
         # ``moist_adiabat_lapse_rate`` (Iribarne–Godson) at the
@@ -524,7 +615,28 @@ def entraining_detraining_plume(
         q_sat_new = saturation_mixing_ratio(T_u, p_e).astype(_dtype)
         condensate = jnp.maximum(q_u_ent - q_sat_new, 0.0).astype(_dtype)
         q_u = (q_u_ent - condensate).astype(_dtype)
-        q_c_u = (q_c_u_prev + condensate).astype(_dtype)
+        # Dilute plume cloud water by entrainment.  The continuity
+        # equation for an intensive quantity in an entraining-
+        # detraining plume is ``dq_c/dz = -eps · q_c + cond/M`` —
+        # environmental air carries q_c=0 so entrainment uniformly
+        # decreases ``q_c_u`` while detrainment is intensively
+        # neutral (it removes mass but not the per-kg amount).  An
+        # earlier formulation ``q_c_u = q_c_u_prev + condensate``
+        # carried ``q_c_u_prev`` forward unchanged and the plume's
+        # total water grew unphysically aloft (audit Codex finding:
+        # "plume cloud water is accumulated but not diluted by
+        # entrainment").
+        # Exponential dilution: ``q_c_u_ent = q_c_u_prev * exp(-eps·dz)``
+        # — exact analytic solution to ``dq_c/dz = -eps · q_c`` for an
+        # entraining plume with environment q_c=0.  Always non-negative,
+        # AD-safe everywhere.  An earlier explicit-Euler form
+        # ``max(q_c_u_prev * (1 - eps·dz), 0)`` zeroed the gradient
+        # whenever ``eps·dz > 1`` (corner case at Bechtold's
+        # ``epsilon_shallow=3e-3`` × dz=500 m and thicker — the clip
+        # branch dominated and made the test case ineffective for AD-
+        # tuning of ``eps`` in shallow convection).
+        q_c_u_ent = q_c_u_prev * decay_eps
+        q_c_u = (q_c_u_ent + condensate).astype(_dtype)
 
         T_u = T_u.astype(_dtype)
 
@@ -533,11 +645,100 @@ def entraining_detraining_plume(
 
         # Reporting filters: smoothly suppress the mass flux below
         # cloud base (``abv``) and where the plume has lost buoyancy
-        # (``plume_alive``).  These do NOT enter the carry.
-        plume_alive = jax.nn.sigmoid(buoyancy_sharpness * B_u)
-        M_u_reported = M_u_raw * plume_alive * abv
+        # (``plume_alive``).
+        #
+        # When ``buoyancy_death_memory`` is False (default), the
+        # filter is purely local: each level applies its own
+        # sigmoid(B_u), so a plume killed by an inversion can revive
+        # above it.  The carry does NOT track the filter.
+        #
+        # When True, the death-memory carry has TWO slots:
+        #
+        # 1. ``launched``: cumulative max of a smooth ramp on
+        #    ``plume_alive_local`` that engages PROPORTIONALLY to
+        #    positive buoyancy AND only above cloud base:
+        #
+        #        launched_local = abv · clamp(2·max(pl - 0.5, 0), 0, 1)
+        #
+        #    The two factors gate independently:
+        #    - ``2 · max(pl - 0.5, 0)`` is the buoyancy ramp: 0 for
+        #      ``B_u ≤ 0``, scaling linearly with positive B_u up to
+        #      saturation at ``B_u → ∞``.  Captures ALL positive-CAPE
+        #      regions, including weak CAPE (an earlier sharp
+        #      threshold required ``B_u > 1.7 K`` to engage at all,
+        #      missing weak-CAPE columns — Codex cycle-3 follow-up
+        #      "launched gate misses weak positive CAPE").
+        #    - ``abv`` is the above-cloud-base weight: 0 below LCL,
+        #      1 above.  Without this factor, a sub-LCL warm bubble
+        #      (e.g. a cooler-air-aloft-over-warm-BL profile) could
+        #      drive ``B_u > 0`` briefly at the surface and trigger
+        #      ``launched`` prematurely, causing the LCL-to-LFC CIN
+        #      passage to ratchet alive_min before the plume reaches
+        #      its actual CAPE region (Codex cycle-3 follow-up:
+        #      "launch gate is not masked to cloud base/LFC").
+        #
+        #    Cumulative max ⇒ once the plume reaches its CAPE region,
+        #    ``launched_new`` stays at the highest value seen.
+        #
+        # 2. ``alive_min``: cumulative min of ``plume_alive_local``,
+        #    GATED by ``launched`` so it only tracks deaths AFTER the
+        #    plume has reached its CAPE region.  Pre-LFC the gate is
+        #    0 ⇒ ratchet target = 1 ⇒ alive_min preserved.  Above
+        #    LFC the gate is launched_new ∈ (0, 1] ⇒ ratchet target
+        #    interpolates between ``plume_alive`` (full ratchet) and
+        #    1 (no ratchet) by buoyancy strength.  Once an above-LFC
+        #    inversion kills the plume (alive_min drops), it stays
+        #    dead even if buoyancy recovers above the inversion
+        #    (audit Codex cycle 2 P2: "plume terminated by negative
+        #    buoyancy can revive above an inversion").
+        plume_alive_local = jax.nn.sigmoid(buoyancy_sharpness * B_u)
+        if buoyancy_death_memory:
+            # Buoyancy ramp: 0 for B_u ≤ 0, scales linearly above.
+            # ``relu`` is a smooth-enough subgradient for AD.
+            buoyancy_ramp = jnp.minimum(
+                2.0 * jax.nn.relu(plume_alive_local - 0.5), 1.0,
+            )
+            # Above-cloud-base weighting for the launched gate.  The
+            # plain ``abv`` factor leaks ~2 % of the buoyancy ramp at
+            # the sub-LCL transition zone (Codex cycle-3 "sub-LCL
+            # launch gate is still leaky"), but the harder
+            # ``max(2·abv - 1, 0)`` zeros the gate exactly AT cloud
+            # base and misses genuine cloud-base launches (Codex
+            # cycle-3 "the new launch mask can miss a real cloud-
+            # base launch").  ``abv²`` is the right trade-off:
+            #
+            #   abv = 0.1  → abv² = 0.01   (very small sub-LCL leak)
+            #   abv = 0.3  → abv² = 0.09   (still small)
+            #   abv = 0.5  → abv² = 0.25   (cloud-base launch engages
+            #                                at 25 % — partial but
+            #                                non-zero, captures the
+            #                                launch event)
+            #   abv = 0.7  → abv² = 0.49   (half engagement)
+            #   abv = 1.0  → abv² = 1.0    (full above cloud base)
+            #
+            # This gives a quadratic suppression of sub-LCL leaks
+            # while preserving non-zero engagement at cloud base
+            # itself.  Cumulative max ⇒ once a level engages the
+            # launched gate, subsequent levels can only hold or
+            # increase it.
+            launched_abv_mask = abv * abv
+            launched_local = buoyancy_ramp * launched_abv_mask
+            launched_new = jnp.maximum(launched_prev, launched_local)
+            # Ratchet target: blend plume_alive_local (when launched)
+            # with 1 (when not launched).
+            ratchet_target = (
+                launched_new * plume_alive_local + (1.0 - launched_new)
+            )
+            alive_min_new = jnp.minimum(alive_min_prev, ratchet_target)
+        else:
+            alive_min_new = jnp.ones_like(alive_min_prev)
+            launched_new = jnp.zeros_like(launched_prev)
+        plume_alive_filter = (
+            alive_min_new if buoyancy_death_memory else plume_alive_local
+        )
+        M_u_reported = M_u_raw * plume_alive_filter * abv
 
-        new_carry = (T_u, q_u, q_c_u, M_u_raw, z_e)
+        new_carry = (T_u, q_u, q_c_u, M_u_raw, z_e, alive_min_new, launched_new)
         outputs = (T_u, q_u, q_c_u, M_u_reported, B_u)
         return new_carry, outputs
 
@@ -619,6 +820,20 @@ def cmt_gregory_1997(
 
     # Layer pressure thickness; with surface-last convention dp > 0.
     dp = p_half[:, 1:] - p_half[:, :-1]
+
+    # Stratospheric mass-flux gate — same factor the kernel applies to
+    # T/q_v tendencies.  Without this, the CMT path detrains
+    # convective momentum into the model top (where the plume should
+    # already be dead), producing wind-driven dycore blowups (e.g.
+    # KF at day 10 in 1-year lat-lon FV RCE).  Imported lazily to
+    # avoid a circular import (`mass_flux` imports from `_plume`).
+    from legoesm.atmosphere.physics.convection.mass_flux import (
+        stratosphere_mass_flux_gate,
+    )
+    p_gate = stratosphere_mass_flux_gate(p_full)
+    M_u = M_u * p_gate
+    if M_d is not None:
+        M_d = M_d * p_gate
 
     # Environmental shear (forward difference per layer).  Edge layers
     # use one-sided differences via padded edges to keep shape

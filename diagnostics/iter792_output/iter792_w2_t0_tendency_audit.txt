@@ -1,0 +1,33 @@
+Iter-792 W2 t=0 tendency cube-vertex audit at C36 (LEGACY)
+For solid-body rotation W2, analytical tendencies are all ZERO.
+Any non-zero numerical tendency is error.
+
+   field        peak       face,(i,j)       lat       lon   GC-to-vertex      |mean|    hot   near_vertex   near_pole
+----------------------------------------------------------------------------------------------------------------------------------
+  dh/dt  peak=1.329e-04  face=4  (i,j)=(18,0)  lat=+46.24°  lon=+1.31°  GC-to-vertex=34.38°  |mean|=1.120e-05  hot=216  near_vertex=40  near_pole=0
+  du/dt  peak=1.404e-05  face=4  (i,j)=(0,25)  lat=+44.77°  lon=-108.23°  GC-to-vertex=22.46°  |mean|=1.668e-06  hot=100  near_vertex=8  near_pole=0
+  dv/dt  peak=1.903e-05  face=0  (i,j)=(2,34)  lat=+33.90°  lon=-40.00°  GC-to-vertex=4.34°  |mean|=2.522e-06  hot=328  near_vertex=136  near_pole=0
+
+hot := |tendency| > 0.5 * peak
+near_vertex := hot cells within 10° GC of any cube vertex
+near_pole := hot cells with |lat| > 80°
+
+Interpretation cues (observational only):
+- If dv/dt peaks at cube vertices (GC < 5°) with most hot
+  points near vertices: `_arakawa_lamb_gradient` on B has a
+  cube-vertex bug that causes the W2 mode-A.
+- If dv/dt peaks near the pole (|lat| > 80°) or mid-face
+  (GC > 30°): a different mechanism is at work.
+- dh/dt for W2 should be near machine precision (mass
+  conservation is exact for steady state).  Non-trivial dh/dt
+  would indicate transport-chain error.
+
+What iter-792 DOES measure (observational only):
+- Peak t=0 tendency magnitudes and locations for W2 IC.
+- Hot-cell (|tend| > 0.5*peak) cube-vertex and pole proximity.
+What it does NOT establish:
+- Which SPECIFIC operator in fv3_sw_tendencies produces the
+  cube-vertex peak — that requires finer decomposition (toggle
+  each operator separately).
+- Whether the t=0 peak-tendency cells become the dominant
+  v_ll_Linf contributors after 288 steps of accumulation.

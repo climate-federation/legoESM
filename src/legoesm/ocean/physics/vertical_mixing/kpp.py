@@ -293,9 +293,13 @@ def kpp_vertical_mixing(
     sigma_half = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
     in_bl = sigma_half < 1.0
 
-    # Combine BL and interior
-    K_v = jnp.where(in_bl, K_bl_half, K_interior) + cfg.K_bg
-    A_v = jnp.where(in_bl, K_bl_half * 1.0, K_interior) + cfg.A_bg
+    # Combine BL and interior.
+    # K_interior already includes ``+ cfg.K_bg`` at line ~282; the BL
+    # branch needs the floor added explicitly so the merged field is
+    # consistent.  Adding ``+ cfg.K_bg`` *after* the where would
+    # double-count the floor on the interior branch.
+    K_v = jnp.where(in_bl, K_bl_half + cfg.K_bg, K_interior)
+    A_v = jnp.where(in_bl, K_bl_half + cfg.A_bg, K_interior)
     K_v = jnp.minimum(K_v, cfg.K_max)
     A_v = jnp.minimum(A_v, cfg.K_max)
 

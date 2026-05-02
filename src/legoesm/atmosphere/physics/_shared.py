@@ -97,6 +97,34 @@ def compute_rho(T, p_full):
     return p_full / (constants.R_d * jnp.clip(T, 1.0, None))
 
 
+def virtual_temperature(T, q_v):
+    """Compute virtual temperature ``T_v = T · (1 + (R_v/R_d - 1) · q_v)``.
+
+    With ``constants.epsilon = R_d / R_v ≈ 0.622``, the virtual-T
+    coefficient is ``1/ε - 1 ≈ 0.6078`` — the codebase historically
+    used a rounded ``0.61`` literal in turbulence/PBL helpers, drifting
+    by ~0.16 % from the canonical value.  This helper produces a
+    consistent, derivation-correct ``T_v`` (audit cycle 1: turbulence
+    static analysis B1).
+
+    Parameters
+    ----------
+    T : array
+        Air temperature [K].
+    q_v : array
+        Water-vapor mixing ratio [kg/kg].  The codebase uses ``q_v``
+        and the saturation mixing ratio interchangeably (~1 % drift
+        for typical tropospheric humidities; see ``thermo.py``).
+
+    Returns
+    -------
+    array
+        Virtual temperature [K], same shape as ``T``.
+    """
+    coeff = 1.0 / constants.epsilon - 1.0           # ≈ 0.6078
+    return T * (1.0 + coeff * q_v)
+
+
 # ---------------------------------------------------------------------------
 # Hydrostatic column extraction helpers (shared across physics integration bridges)
 # ---------------------------------------------------------------------------

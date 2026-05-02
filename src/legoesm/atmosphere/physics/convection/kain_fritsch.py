@@ -33,6 +33,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -165,13 +166,22 @@ def kain_fritsch_convection(
 
     # -- Cloud-base mass flux closure: CAPE / cape_consumption_time --------
     # Following Kain (2004) §3 — the cloud-base mass flux is
-    # ``M_b = CAPE / (g * tau_consume)`` modulated by the trigger.
+    # ``M_b = rho_BL * CAPE / (g * tau_consume)`` (kg/m^2/s) modulated
+    # by the trigger.  The earlier formula omitted both ``rho_BL`` and
+    # ``g``, leaving units of m^2/s^3 — the bug was masked operationally
+    # by the ``M_b_max`` cap but produced an order-of-magnitude error in
+    # the gradient w.r.t. CAPE and made ``M_b`` independent of surface
+    # density.
+    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
     M_b = (
         overall_weight
+        * rho_BL
         * cape
-        / jnp.maximum(config.cape_consumption_time, dt)
+        / (constants.g * jnp.maximum(config.cape_consumption_time, dt))
     )
-    M_b = jnp.maximum(M_b, 0.0)
+    # Bound M_b to a literature peak tropical value
+    # (config.M_b_max, default 0.1 kg/m²/s) — see ZhangMcFarlaneConfig.
+    M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
     # -- Plume integration -------------------------------------------------
     # Same entraining-detraining plume as ZM, with KF default
@@ -182,6 +192,7 @@ def kain_fritsch_convection(
         T, q_v, p_full, p_half, z,
         T_parcel, q_parcel, k_lcl_smooth,
         eps_profile, dlt_profile, M_b,
+        buoyancy_death_memory=config.buoyancy_death_memory,
     )
 
     # -- Cloud depth — z(LCL) → z(LNB) -------------------------------------
@@ -199,15 +210,20 @@ def kain_fritsch_convection(
         shallow_weight = jnp.zeros_like(deep_weight)
     branch_weight = deep_weight + shallow_weight  # = 1 with shallow on; = deep_weight only
 
+    # Cap plume.M_u once at the source so every downstream use sees
+    # the bounded value (see ZM).
+    plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
+    plume = plume._replace(M_u=plume_M_u_capped)
+
     # -- Environmental tendencies via the shared mass-flux kernel ----------
-    dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
+    # Plume splits vapor (``plume.q_u``) and cloud water
+    # (``plume.q_c_u``) explicitly so we use the kernel's correct
+    # cloud-water source directly (see ZM).
+    dT_dt_raw, dq_v_dt_raw, dq_c_conv_dt_raw = _apply_mass_flux_kernel(
         T, q_v, p_full,
-        plume.T_u, plume.q_u, plume.M_u,
-        z, rho, config.delta_0,
+        plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
+        z, rho, config.delta_0, M_u_max=config.M_b_max,
     )
-    # Override the kernel's ``q_c`` source — see ZM for rationale.
-    rho_safe = jnp.clip(rho, 0.01, None)
-    dq_c_conv_dt_raw = config.delta_0 * plume.M_u * plume.q_c_u / rho_safe
 
     # Apply the deep+shallow weight as a per-column scalar.
     dT_dt = dT_dt_raw * branch_weight[:, None]

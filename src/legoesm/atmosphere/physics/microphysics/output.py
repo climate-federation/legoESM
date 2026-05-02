@@ -16,19 +16,50 @@ import jax.numpy as jnp
 
 
 class HydrometeorState(NamedTuple):
-    """Hydrometeor state for backends. All fields shape (ncol, nlev)."""
+    """Hydrometeor state for backends. All fields shape (ncol, nlev).
+
+    **Number-concentration conventions** are NOT uniform across species
+    — different schemes inherit different SB / Morrison / Thompson
+    historical conventions:
+
+    * ``N_c`` (cloud droplets) — **per-volume** ``[1/m³]``.  The
+      Seifert-Beheng autoconversion ``x_c = q_c · ρ / N_c`` depends
+      on this so the result is in ``[kg]`` (mean droplet mass)
+      comparable to ``x_star = 2.6e-10 kg``.  Default
+      ``Nc_0 = 1e8 /m³`` is the maritime SB value.
+    * ``N_r`` (rain drops) — **per-volume** ``[1/m³]``.  The
+      self-collection ``-k_sc · N_r · q_r · ρ`` and breakup-diameter
+      ``D = (q_r · ρ / N_r / (π/6 · ρ_w))^(1/3)`` both rely on the
+      per-volume form (D in ``[m]``).
+    * ``N_i`` (ice crystals) — **per-mass** ``[1/kg]``.  Cooper (1986)
+      nucleation ``N_target = N_i0 · exp(…) / ρ`` divides the
+      per-volume Cooper expression by ρ to obtain a per-mass
+      concentration (``N_i0 = 5e3 /m³`` from the Cooper fit, but the
+      stored ``N_i`` is per-mass).
+
+    Mixing the two conventions in the same NamedTuple is a known
+    historical artifact (audit Codex cycle 2) — each formula was
+    written for the convention native to its scheme of origin.
+    Converting either at the boundary would change the numerics; the
+    docstring drift was the actionable fix.
+    """
     q_c: jax.Array    # cloud water [kg/kg]
     q_r: jax.Array    # rain water [kg/kg]
     q_i: jax.Array    # cloud ice [kg/kg]
     q_s: jax.Array    # snow [kg/kg]
     q_g: jax.Array    # graupel [kg/kg]
-    N_c: jax.Array    # cloud droplet number [1/kg]
-    N_r: jax.Array    # rain drop number [1/kg]
-    N_i: jax.Array    # ice crystal number [1/kg]
+    N_c: jax.Array    # cloud droplet number [1/m³] (Seifert-Beheng per-volume)
+    N_r: jax.Array    # rain drop number     [1/m³] (Seifert-Beheng per-volume)
+    N_i: jax.Array    # ice crystal number   [1/kg] (Morrison/Thompson per-mass)
 
 
 class MicrophysicsOutput(NamedTuple):
-    """Backend-agnostic output. All (ncol, nlev) except precipitation (ncol,)."""
+    """Backend-agnostic output. All (ncol, nlev) except precipitation (ncol,).
+
+    Number tendencies match the per-species convention of
+    ``HydrometeorState`` — see that class's docstring for the
+    cloud-vs-rain (per-volume) vs ice (per-mass) split.
+    """
     dT_dt: jax.Array          # latent heating [K/s]
     dq_v_dt: jax.Array        # vapor tendency [kg/kg/s]
     dq_c_dt: jax.Array        # cloud water tendency
@@ -36,9 +67,9 @@ class MicrophysicsOutput(NamedTuple):
     dq_i_dt: jax.Array        # ice tendency
     dq_s_dt: jax.Array        # snow tendency
     dq_g_dt: jax.Array        # graupel tendency
-    dN_c_dt: jax.Array        # cloud number tendency [1/kg/s]
-    dN_r_dt: jax.Array        # rain number tendency
-    dN_i_dt: jax.Array        # ice number tendency
+    dN_c_dt: jax.Array        # cloud number tendency [1/(m³·s)] per-volume
+    dN_r_dt: jax.Array        # rain number tendency  [1/(m³·s)] per-volume
+    dN_i_dt: jax.Array        # ice number tendency   [1/(kg·s)] per-mass
     precipitation: jax.Array  # surface precip [kg/m^2/s]
 
 

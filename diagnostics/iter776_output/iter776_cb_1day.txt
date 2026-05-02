@@ -1,0 +1,15 @@
+Iter-776 cosine bell C36 1-day transport diagnostic
+
+Error norms (PL07, vs exact analytic solution at t=1 day):
+  L1   = 1.1983e-01
+  L2   = 1.1682e-01
+  Linf = 1.2274e-01
+
+Peak amplitude:
+  analytic exact:        990.4340 m
+  simulated at t=1 day:  896.2947 m
+  undershoot:            9.5049% of exact peak
+
+Peak cell position:
+  analytic exact:        face=3, (i, j) = (26, 26), lat=19.92, lon=-68.75
+  simulated at t=1 day:  face=3, (i, j) = (26, 27), lat=22.30, lon=-68.75

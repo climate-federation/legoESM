@@ -30,7 +30,7 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.utils import file_io
 
 Array: TypeAlias = jax.Array
 
-# Configuration via environment variable  
+# Configuration via environment variable
 # Set USE_RCEMIP_OZONE_PROFILE=true to use the analytic RCEMIP ozone profile
 _USE_RCEMIP_OZONE_PROFILE = os.getenv('USE_RCEMIP_OZONE_PROFILE', 'false').lower() == 'true'
 

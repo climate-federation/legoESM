@@ -1568,8 +1568,8 @@ def make_voronoi_sharded_step(
 
     import numpy as np
     try:
-        from jax.shard_map import shard_map
-    except ImportError:  # JAX < 0.8
+        from jax import shard_map  # JAX >= 0.8 exposes it at top level
+    except ImportError:  # JAX < 0.8 fallback
         from jax.experimental.shard_map import shard_map
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
         mpas_hydrostatic_tendencies,

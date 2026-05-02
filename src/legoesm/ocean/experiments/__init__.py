@@ -11,12 +11,12 @@ test case. Each experiment module provides:
 
 Example Usage:
     from legoesm.ocean.experiments import rest_state
-    
+
     # Create initial conditions
     config = rest_state.RestStateConfig(T_surface=18.0)
     initial_state = rest_state.create_initial_conditions(
         "cubed_sphere", grid, z_coord, config)
-    
+
     # Validate results
     success, notes = rest_state.validate_results(final_state, diagnostics)
 

@@ -101,15 +101,19 @@ def rest_state_latlon_cgrid_ocean(
     n_lon = grid.n_lon
     nlev = z_coord.n_levels
 
+    # Cast bathymetry/mask inputs to the active precision policy so that a
+    # caller running under x32 does not silently get x64 fields (codex
+    # adversarial review iter-1, bug #6).
+    dtype = get_policy().storage
     if H_bathy_override is not None:
-        H_bathy = jnp.asarray(H_bathy_override)
+        H_bathy = jnp.asarray(H_bathy_override).astype(dtype)
         if land_mask_override is not None:
-            land_mask = jnp.asarray(land_mask_override)
+            land_mask = jnp.asarray(land_mask_override).astype(dtype)
         else:
-            land_mask = (H_bathy > 0.0).astype(get_policy().storage)
+            land_mask = (H_bathy > 0.0).astype(dtype)
     elif land_mask_override is not None:
-        land_mask = jnp.asarray(land_mask_override)
-        H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=jnp.float64)
+        land_mask = jnp.asarray(land_mask_override).astype(dtype)
+        H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=dtype)
     else:
         H_bathy, land_mask = idealized_bathymetry_latlon_cgrid(
             grid, H_max, land_lat_threshold,

@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import EDMFConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -108,9 +109,8 @@ def edmf_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2
 
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
     N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
@@ -165,7 +165,7 @@ def edmf_turbulence(
         jnp.full(ncol, config.w_updraft_min, dtype=_dtype),
         (2.5 * ustar).astype(_dtype),
     )
-    theta_u_init = (theta[:, -1] + 0.5).astype(_dtype)  # slightly warmer
+    theta_u_init = (theta[:, -1] + config.parcel_dT).astype(_dtype)
     q_u_init = q_v[:, -1].astype(_dtype)  # same moisture
 
     # Scan from surface upward (reverse level index)
@@ -184,7 +184,7 @@ def edmf_turbulence(
         dz_k, theta_env, theta_v_env, q_env = inputs
 
         # Updraft virtual potential temperature
-        theta_v_u = theta_u * (1.0 + 0.61 * q_u)
+        theta_v_u = virtual_temperature(theta_u, q_u)
 
         # Buoyancy
         buoy = constants.g * (theta_v_u - theta_v_env) / jnp.clip(theta_v_env, 1.0, None)
@@ -275,7 +275,7 @@ def edmf_turbulence(
 
     # TKE update: add MF production term
     # MF production ~ M * buoyancy / rho
-    theta_v_u = theta_u * (1.0 + 0.61 * q_u)
+    theta_v_u = virtual_temperature(theta_u, q_u)
     mf_buoyancy = (
         config.a_updraft * w_u * constants.g
         * (theta_v_u - theta_v) / jnp.clip(theta_v, 1.0, None)
