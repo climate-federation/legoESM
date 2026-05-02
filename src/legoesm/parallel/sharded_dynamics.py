@@ -76,6 +76,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.mesh import DeviceConfig, _N_FACES
@@ -1124,6 +1125,70 @@ def _pad_local_mesh_to(mesh, target_nCells, target_nEdges, target_nVertices):
     )
 
 
+def _close_halo_under_cellsOnEdge(
+    owned_cells_arr,
+    halo_cells_set,
+    cellsOnEdge_np,
+    n_passes,
+):
+    """Iteratively extend ``halo_cells_set`` so the halo is "closed
+    under cellsOnEdge".
+
+    A halo set is *closed* when every edge whose one ``cellsOnEdge``
+    entry is in ``owned ∪ halo`` also has its OTHER entry in the halo.
+    Closure ensures that downstream ``cellsOnEdge``-based operators
+    (e.g., ``gradient_edge``, ``divergence_cell``) at every owned cell
+    AND at every halo cell whose value is read by an owned-cell
+    operator can be evaluated locally without ``-1`` indices.
+
+    Iter-23 surfaced the *unclosed* failure mode: a single
+    ``cellsOnEdge`` entry of ``-1`` (the global→local sentinel)
+    caused ``gradient_edge`` to silently dereference Python's
+    last-element index → 1e76 garbage after one SSP-RK3 step.
+
+    Iter-25/27/37 settled on 2 passes as the minimum sufficient depth
+    for the MPAS dycore's longest operator chain (∇⁴ in
+    hyperdiffusion: owned → halo-1 → halo-2).
+
+    Modifies ``halo_cells_set`` in place.
+
+    Parameters
+    ----------
+    owned_cells_arr : np.ndarray, shape (n_owned,), int64
+        Owned cell global indices for this rank.
+    halo_cells_set : set[int]
+        Initial halo (cellsOnCell ring + iter-23 owned-edge other-cells).
+    cellsOnEdge_np : np.ndarray, shape (2, nEdges), int
+        Global cellsOnEdge connectivity.
+    n_passes : int
+        Number of augmentation iterations.  2 is the minimum that
+        closes the dycore's depth-2 operator chain; use a higher
+        value only if a future operator extends the chain depth.
+    """
+    for _ in range(n_passes):
+        cur_local_arr = np.concatenate([
+            owned_cells_arr,
+            np.fromiter(
+                halo_cells_set,
+                dtype=np.int64,
+                count=len(halo_cells_set),
+            ),
+        ])
+        # Edges where AT LEAST one ``cellsOnEdge`` is currently local.
+        edge_one_in = (
+            np.isin(cellsOnEdge_np[0], cur_local_arr)
+            | np.isin(cellsOnEdge_np[1], cur_local_arr)
+        )
+        cand_edges = np.flatnonzero(edge_one_in)
+        cand_cells = cellsOnEdge_np[:, cand_edges].reshape(-1)
+        cand_cells = np.unique(cand_cells[cand_cells >= 0])
+        # Set difference: cells not yet in local set.
+        new_cells = cand_cells[~np.isin(cand_cells, cur_local_arr)]
+        if new_cells.size == 0:
+            return
+        halo_cells_set.update(new_cells.tolist())
+
+
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
@@ -1234,52 +1299,19 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
             ic = int(c)
             if ic not in owned_cells_set:
                 halo_cells_set.add(ic)
-        # Iter-25: also augment with OTHER cells of HALO edges.  Without
-        # this, halo cells have a few of their adjacent edges silently
-        # excluded (the AND filter below cuts edges whose far cell is
-        # outside ``local_cells``).  Operator quantities at halo cells
-        # then differ slightly from single-device, and owned-cell
-        # tendencies that read those halo quantities inherit ~1% drift
-        # per step.  Iterate the augmentation until stable so halo
-        # cells always have all their adjacent edges valid in the local
-        # mesh.  On SCVT meshes this converges in 1–2 iterations.
-        #
-        # Iter-27: vectorise the augmentation loop with ``np.isin`` and
-        # boolean masks instead of a Python ``for c in cand_cells`` —
-        # the per-element ``set.add`` was O(N_edges) Python overhead at
-        # MPAS resolutions.
-        #
-        # Iter-37: the iter-25 4-iteration cap was over-conservative;
-        # the augmentation only needs to extend the halo enough that
-        # the deepest operator chain (mpas_hydrostatic_tendencies'
-        # ``compute_geopotential_hybrid`` reads cells, then ``ke_cell``
-        # at those cells reads u at edges, then those edges' cells need
-        # full local connectivity for kinetic-energy correctness, then
-        # the resulting B is used by ``gradient_edge`` consumed by the
-        # outer divergence — empirically that's 2 passes of
-        # ``add OTHER cell of every edge whose ONE cell is in halo``).
-        # Reduced from 4 → 2 to halve per-rank halo bloat while keeping
-        # the iter-28 bit-equivalence tests green.  Verified on
-        # subdivision_level=4 at 2/3/4 devices (max-abs drift unchanged
-        # at 1e-8 / 1e-9 / 1e-3 on u/T/p_s).
+        # Iter-25/27/37: extend the halo so every halo cell's adjacent
+        # edges have BOTH cells in local_cells.  Without this, halo
+        # cells have some of their adjacent edges silently excluded by
+        # the AND filter below; operator quantities at halo cells then
+        # differ slightly from single-device, and owned-cell tendencies
+        # that read those halo quantities inherit ~1% drift per step.
+        # Two passes are sufficient for the dycore's longest operator
+        # chain (depth 2: cell → edge → cell, twice for ∇⁴ in
+        # hyperdiffusion) — see iter-37 docstring.
         owned_cells_arr = np.asarray(owned_cells, dtype=np.int64)
-        for _ in range(2):
-            cur_local_arr = np.concatenate([
-                owned_cells_arr,
-                np.fromiter(halo_cells_set, dtype=np.int64,
-                            count=len(halo_cells_set)),
-            ])
-            edge_one_in = (
-                np.isin(cellsOnEdge_np[0], cur_local_arr)
-                | np.isin(cellsOnEdge_np[1], cur_local_arr)
-            )
-            cand_edges = np.flatnonzero(edge_one_in)
-            cand_cells = cellsOnEdge_np[:, cand_edges].reshape(-1)
-            cand_cells = np.unique(cand_cells[cand_cells >= 0])
-            new_cells = cand_cells[~np.isin(cand_cells, cur_local_arr)]
-            if new_cells.size == 0:
-                break
-            halo_cells_set.update(new_cells.tolist())
+        _close_halo_under_cellsOnEdge(
+            owned_cells_arr, halo_cells_set, cellsOnEdge_np, n_passes=2,
+        )
         halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
         local_cells = np.concatenate([owned_cells, halo_cells])
         local_cells_set = set(local_cells.tolist())
