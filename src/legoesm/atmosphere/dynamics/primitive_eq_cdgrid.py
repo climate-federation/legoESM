@@ -368,16 +368,22 @@ def fv3_hydrostatic_tendencies(
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
     else:
-        dsigma = sigma_coord.dsigma
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
 
-        D_total = jnp.sum(div_v * dsigma, axis=-1)
-        dp_s_dt_data = -p_s * D_total / sigma_range
+        # Iter-52: ``compute_sigma_dot_and_total`` runs the cumsum
+        # exactly once and returns both σ̇ and ``D_total = Σ div · Δσ``,
+        # rather than recomputing ``jnp.sum(div_v * dsigma, ...)``
+        # separately and then ``compute_sigma_dot`` doing its own
+        # cumsum.  Saves one cross-level collective per RK3 stage on
+        # the non-hybrid σ-coordinate path.
+        from legoesm.grids.vertical import compute_sigma_dot_and_total
+        sigma_dot, _D_total_full = compute_sigma_dot_and_total(
+            div_v, sigma_coord,
+        )
+        dp_s_dt_data = -p_s * _D_total_full[..., 0] / sigma_range
         if config.zero_mean_ps_tendency:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
-
-        sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 
         # Vertical advection of D-grid winds via cell-centre interpolation.
         # Batch (u_d, v_d) → (u_cc, v_cc) and (vert_adv_u_cc,

@@ -338,6 +338,41 @@ def compute_sigma_dot(
     return sigma_dot
 
 
+def compute_sigma_dot_and_total(
+    div_3d: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> tuple[jax.Array, jax.Array]:
+    """Diagnose sigma-dot AND return the column-integrated divergence.
+
+    Identical to :func:`compute_sigma_dot` for the σ̇ output, but also
+    returns the column-integrated divergence ``D_total = Σ div_k · Δσ_k``
+    (shape ``(..., 1)``).  Callers that need both σ̇ and ``D_total``
+    (e.g. the cubed-sphere FV3 PE non-hybrid path, which uses the
+    column sum for ``dp_s/dt = -p_s · D_total / (1 - σ_top)``) can use
+    this single call instead of running both ``jnp.sum`` and
+    ``compute_sigma_dot`` — saving one cross-level collective per call.
+
+    See :func:`compute_sigma_dot` for full documentation.
+
+    Returns
+    -------
+    sigma_dot : jax.Array, shape (..., nlev+1)
+    D_total : jax.Array, shape (..., 1)
+    """
+    dsigma = sigma_coord.dsigma  # (nlev,)
+    div_dsigma = div_3d * dsigma  # (..., nlev)
+    cumsum_div = jnp.cumsum(div_dsigma, axis=-1)  # (..., nlev)
+    D_total = cumsum_div[..., -1:]  # (..., 1)
+
+    fractional_sigma = sigma_coord.fractional_sigma  # (nlev,)
+    sigma_dot_inner = fractional_sigma * D_total - cumsum_div
+
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1)
+    sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], (*pad_axes, (1, 1)))
+
+    return sigma_dot, D_total
+
+
 def vertical_advection(
     field: jax.Array,
     sigma_dot: jax.Array,
