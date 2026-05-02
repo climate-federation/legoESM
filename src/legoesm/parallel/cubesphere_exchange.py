@@ -434,15 +434,34 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
 # Backend B: ppermute  (bandwidth-optimal for high resolution)
 # ===================================================================
 
-def _make_exchange_ppermute(mesh, ndim):
-    """Build a shard_map exchange using 4 rounds of ppermute."""
+def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
+    """Build a shard_map exchange using 4 rounds of ppermute.
+
+    When ``with_offsets`` is True the kernel applies the per-edge
+    3-point Lagrange correction to each gathered strip — same numerics
+    as the all_gather ``with_offsets`` variant, restoring bit-exact
+    equivalence with ``_pad_halo_local(data, interp_offsets)``.  The
+    offsets are indexed by the *receiving* face / edge (``my_idx``,
+    ``e``), matching the local-pad convention.
+    """
     P = jax.sharding.PartitionSpec
-    in_sp = P("face", *((None,) * (ndim - 1)))
+    in_sp_data = P("face", *((None,) * (ndim - 1)))
     out_sp = P("face", *((None,) * (ndim - 1)))
+
+    if with_offsets:
+        in_sp = (in_sp_data, P())
+    else:
+        in_sp = in_sp_data
 
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
              check_vma=False)
-    def _exchange(local_shard):
+    def _exchange(*args):
+        if with_offsets:
+            local_shard, offsets = args
+        else:
+            (local_shard,) = args
+            offsets = None
+
         n = local_shard.shape[1]
         my_face = local_shard[0]
         my_idx = jax.lax.axis_index("face")
@@ -461,6 +480,8 @@ def _make_exchange_ppermute(mesh, ndim):
             ])  # (4, n, C)
             padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
         halo_strips = [None, None, None, None]
+        if with_offsets:
+            from legoesm.grids.halo import _interp_strip
 
         for r in range(4):
             send_edge = _PPERMUTE_SEND[r, my_idx]   # traced int
@@ -471,6 +492,17 @@ def _make_exchange_ppermute(mesh, ndim):
             recv_edge = _PPERMUTE_RECV[r, my_idx]
             rev = _PPERMUTE_REV[r, my_idx]
             received = jnp.where(rev, received[::-1], received)
+            if with_offsets:
+                # offsets[my_idx, recv_edge] selects the right per-edge
+                # offset for whichever halo slot this round fills.  The
+                # offset table is indexed by *receiving* face/edge —
+                # same convention the local-pad ``_pad_halo_local``
+                # uses (halo.py:1078, ``interp_offsets[face, edge_idx]``).
+                # ``recv_edge`` is traced, so we ``lax.dynamic_slice``
+                # by indexing into the (4, n)-shaped face slice.
+                offs_for_face = offsets[my_idx]  # (4, n)
+                offs_for_edge = offs_for_face[recv_edge]  # (n,)
+                received = _interp_strip(received, offs_for_edge)
             # Place in the correct halo slot.  recv_edge is traced,
             # so we use conditional sets.
             for e in range(4):
@@ -522,7 +554,15 @@ def _get_exchange(mesh, ndim, use_ppermute, halo=1, with_offsets=False):
     if key not in _cache:
         if with_offsets:
             if halo == 2:
+                # halo=2 ppermute kernel does not exist — only the
+                # 2-strip allgather supports halo=2.  ``use_ppermute``
+                # is silently downgraded to False on this path; the
+                # caller already passes ``False`` when halo=2.
                 _cache[key] = _make_exchange_allgather_h2(
+                    mesh, ndim, with_offsets=True,
+                )
+            elif use_ppermute:
+                _cache[key] = _make_exchange_ppermute(
                     mesh, ndim, with_offsets=True,
                 )
             else:
@@ -600,15 +640,14 @@ def explicit_pad_halo(data, mesh, halo=1, interp_offsets=None):
     """Explicit 3D scalar exchange.  (6,n,n) → (6,n+2h,n+2h).
 
     Halo=1 uses ppermute or all_gather (auto-selected via the module
-    flag).  Halo=2 uses the 2-strip all_gather kernel.  Other halo
-    depths fall back to the local-pad path which triggers XLA
-    auto-gather under face-sharded execution.
+    flag), with ``interp_offsets`` Lagrange correction applied in
+    either kernel when provided.  Halo=2 uses the 2-strip all_gather
+    kernel (ppermute is currently halo=1 only).  Other halo depths
+    fall back to the local-pad path.
 
     When ``interp_offsets`` is provided the SPMD kernel applies the
     per-edge 3-point Lagrange correction so the SPMD result matches
-    ``_pad_halo_local(data, interp_offsets)`` bit-for-bit.  ppermute is
-    forced off in the with-offsets path because only the all_gather
-    kernel currently knows how to apply ``_interp_strip``.
+    ``_pad_halo_local(data, interp_offsets)`` bit-for-bit.
     """
     if halo == 2:
         if interp_offsets is None:
@@ -622,7 +661,7 @@ def explicit_pad_halo(data, mesh, halo=1, interp_offsets=None):
     if interp_offsets is None:
         return _get_exchange(mesh, 3, _use_ppermute, halo=1)(data)
     return _get_exchange(
-        mesh, 3, False, halo=1, with_offsets=True,
+        mesh, 3, _use_ppermute, halo=1, with_offsets=True,
     )(data, interp_offsets)
 
 
@@ -644,7 +683,7 @@ def explicit_pad_halo_4d(data, mesh, halo=1, interp_offsets=None):
     if interp_offsets is None:
         return _get_exchange(mesh, 4, _use_ppermute, halo=1)(data)
     return _get_exchange(
-        mesh, 4, False, halo=1, with_offsets=True,
+        mesh, 4, _use_ppermute, halo=1, with_offsets=True,
     )(data, interp_offsets)
 
 

@@ -388,6 +388,32 @@ class TestSPMDWithOffsets:
         np.testing.assert_array_equal(np.array(out1), ref1)
         np.testing.assert_array_equal(np.array(out2), ref2)
 
+    def test_halo1_3d_with_offsets_ppermute(self, mesh_6):
+        """ppermute backend with offsets matches local pad_halo
+        bit-for-bit.  Iter-17 plumbed ``interp_offsets`` through the
+        ppermute kernel so the bandwidth-optimal high-resolution path
+        is also numerically equivalent to single-device.
+        """
+        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.parallel.cubesphere_exchange import (
+            explicit_pad_halo, set_ppermute_default,
+        )
+        n = 8
+        data = jax.random.normal(jax.random.PRNGKey(40), (6, n, n))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(41), (6, 4, n),
+        ) * 0.3
+        ref = np.array(_pad_halo_local(data, offsets))
+        set_ppermute_default(True)
+        try:
+            result = np.array(explicit_pad_halo(
+                _shard_on_face(data, mesh_6), mesh_6,
+                halo=1, interp_offsets=offsets,
+            ))
+        finally:
+            set_ppermute_default(False)
+        np.testing.assert_array_equal(result, ref)
+
     def test_pad_halo_pair_h2_spmd(self, mesh_6):
         """``pad_halo_pair_h2`` under the SPMD backend produces a
         bit-exact match against the local pad_halo reference.  Guards
