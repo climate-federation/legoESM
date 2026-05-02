@@ -76,6 +76,8 @@ from legoesm.parallel.cubesphere_exchange import (
 from legoesm.parallel.halo_exchange import (
     packed_pad_halo_mpi_4d as _packed_pad_halo_4d_mpi,
 )
+from legoesm.core.precision import _resolve_dtype, cast_pytree
+from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -347,7 +349,6 @@ def fv3_hydrostatic_tendencies(
     # Promote to higher precision for the PGF computation to avoid
     # catastrophic cancellation (large p terms, small gradient).
     # Use result_type to only upcast (never downcast from current dtype).
-    from legoesm.core.precision import _resolve_dtype
     _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
     ln_ps_hi = ln_ps.astype(_pg_dt)
     # Iter-59: when the merged stage halo (iter-58) already exchanged
@@ -534,7 +535,6 @@ def fv3_hydrostatic_tendencies(
     # ``None`` and we fall back to per-field unpacked pads here so each
     # gradient/Laplacian operator still has a pre-padded array (avoids
     # the operator-internal halo on its own input).
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
     if _T_pad is None:
         # Single-device fallback: per-field unpacked exchanges with
         # offsets / duogrid forwarded.  Same numerics as the SPMD packed
@@ -895,7 +895,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> FV3HydrostaticState:
         """Advance one time step with D-grid prognostic winds."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
 
@@ -1037,8 +1036,6 @@ def cdgrid_hydrostatic_tendencies(
 
     If given a FV3HydrostaticState, delegates directly to fv3_hydrostatic_tendencies.
     """
-    from legoesm.core.state import HydrostaticTendencies
-
     if isinstance(state, FV3HydrostaticState):
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
 
