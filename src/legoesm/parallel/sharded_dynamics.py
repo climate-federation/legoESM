@@ -1243,28 +1243,30 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         # per step.  Iterate the augmentation until stable so halo
         # cells always have all their adjacent edges valid in the local
         # mesh.  On SCVT meshes this converges in 1–2 iterations.
+        #
+        # Iter-27: vectorise the augmentation loop with ``np.isin`` and
+        # boolean masks instead of a Python ``for c in cand_cells`` —
+        # the per-element ``set.add`` was O(N_edges) Python overhead at
+        # MPAS resolutions.
+        owned_cells_arr = np.asarray(owned_cells, dtype=np.int64)
         for _ in range(4):
-            local_cells_for_check = (
-                owned_cells_set | halo_cells_set
-            )
-            cur_local_arr = np.fromiter(
-                local_cells_for_check, dtype=np.int64,
-                count=len(local_cells_for_check),
-            )
-            edge_one_in = np.isin(cellsOnEdge_np[0], cur_local_arr) | np.isin(
-                cellsOnEdge_np[1], cur_local_arr,
+            cur_local_arr = np.concatenate([
+                owned_cells_arr,
+                np.fromiter(halo_cells_set, dtype=np.int64,
+                            count=len(halo_cells_set)),
+            ])
+            edge_one_in = (
+                np.isin(cellsOnEdge_np[0], cur_local_arr)
+                | np.isin(cellsOnEdge_np[1], cur_local_arr)
             )
             cand_edges = np.flatnonzero(edge_one_in)
             cand_cells = cellsOnEdge_np[:, cand_edges].reshape(-1)
-            cand_cells = cand_cells[cand_cells >= 0]
-            new = 0
-            for c in cand_cells:
-                ic = int(c)
-                if ic not in owned_cells_set and ic not in halo_cells_set:
-                    halo_cells_set.add(ic)
-                    new += 1
-            if new == 0:
+            cand_cells = np.unique(cand_cells[cand_cells >= 0])
+            # Vectorised set difference: keep cells not yet in local set.
+            new_cells = cand_cells[~np.isin(cand_cells, cur_local_arr)]
+            if new_cells.size == 0:
                 break
+            halo_cells_set.update(new_cells.tolist())
         halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
         local_cells = np.concatenate([owned_cells, halo_cells])
         local_cells_set = set(local_cells.tolist())
