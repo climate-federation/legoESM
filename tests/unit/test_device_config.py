@@ -270,6 +270,119 @@ class TestXLAFlags:
         config = detect_devices()
         configure_jax_for_device(config)
 
+    def test_cpu_backend_does_not_set_invalid_intra_op_flag(self):
+        """Iter-154 regression: the legacy
+        `intra_op_parallelism_threads=N` XLA_FLAGS entry is not
+        recognized by current XLA and crashes JAX at first use with:
+
+            F parse_flags_from_env.cc:234]
+              Unknown flag in XLA_FLAGS:
+              --intra_op_parallelism_threads=N
+
+        `runtime.backend.configure_backend('cpu')` previously wrote
+        this flag unconditionally (when XLA_FLAGS was unset), making
+        the canonical CPU bootstrap crash at first `jnp.zeros(...)`.
+
+        This test line-scans `runtime/backend.py` and the sibling
+        `parallel/device_config.py` for executable (non-comment)
+        emission of the `intra_op_parallelism_threads` XLA flag so
+        a future refactor can't silently re-introduce the crash.
+        """
+        import pathlib
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        for rel_path in (
+            "src/legoesm/runtime/backend.py",
+            "src/legoesm/parallel/device_config.py",
+        ):
+            src = (repo_root / rel_path).read_text()
+            for lineno, line in enumerate(src.splitlines(), 1):
+                code_part = line.split("#", 1)[0]
+                if "intra_op_parallelism_threads" in code_part:
+                    raise AssertionError(
+                        f"{rel_path}:{lineno} reintroduced the XLA "
+                        f"flag `intra_op_parallelism_threads`, which "
+                        f"current XLA rejects with an `Unknown flag` "
+                        f"fatal error at first JAX use.  Remove it; "
+                        f"XLA auto-scales CPU thread-pool size from "
+                        f"`os.cpu_count()`."
+                    )
+
+    def test_configure_tpu_multihost_does_not_crash_on_jax_0_9(self):
+        """Iter-149/150 regression: the canonical TPU bootstrap must NOT
+        call `jax.config.update("jax_spmd_mode", "allow_all")`.
+
+        Context: the legacy `jax_spmd_mode='allow_all'` toggle was
+        removed in JAX 0.9 with the unified-sharding migration.
+        Calling `jax.config.update("jax_spmd_mode", ...)` now raises
+        `AttributeError: Unrecognized config option: jax_spmd_mode`.
+
+        Historical state had two separate call sites that made this
+        update in multi-host mode:
+          1. `parallel.device_config._configure_tpu` (iter-149)
+          2. `runtime.backend.configure_backend('tpu')` (iter-150)
+
+        Both bootstrap paths must work without the update.  This test
+        exercises both by mocking `jax.process_count() → 2` (simulating
+        a 2-host TPU pod) and asserting neither entry point raises
+        AttributeError on the removed config option.
+        """
+        from legoesm.parallel.device_config import (
+            HardwareConfig, configure_jax_for_device,
+        )
+        from legoesm.runtime.backend import configure_backend
+
+        # Path 1: configure_backend('tpu') — canonical runtime entry
+        # point.  It queries `jax.process_count()` internally to decide
+        # whether to apply the multi-host branch; mock to force the
+        # >1 branch.
+        with patch.object(jax, "process_count", return_value=2):
+            # Must NOT raise AttributeError("jax_spmd_mode") on JAX 0.9+
+            resolved = configure_backend("tpu")
+            assert resolved == "tpu"
+
+        # Path 2: configure_jax_for_device with multi-host HardwareConfig.
+        # It reads num_hosts from the config directly (no jax.process_count
+        # mock needed), but mock anyway to keep the two cases symmetric.
+        cfg = HardwareConfig(
+            backend="tpu",
+            device_count=16,
+            devices_per_host=8,
+            num_hosts=2,
+            supports_float64=False,
+            supports_complex128=False,
+            memory_per_device_gb=16.0,
+            recommended_batch_size=6,
+        )
+        with patch.object(jax, "process_count", return_value=2):
+            # Must NOT raise AttributeError on JAX 0.9+
+            configure_jax_for_device(cfg)
+
+        # Additional invariant: NEITHER source file may reference
+        # `jax_spmd_mode` in an EXECUTABLE `jax.config.update(...)`
+        # call (i.e. not inside a `#` comment).  This catches
+        # re-introduction via copy-paste while letting the explanatory
+        # NOTE comments the fix left behind remain.
+        import pathlib
+        for rel_path in (
+            "src/legoesm/parallel/device_config.py",
+            "src/legoesm/runtime/backend.py",
+        ):
+            repo_root = pathlib.Path(__file__).resolve().parents[2]
+            src = (repo_root / rel_path).read_text()
+            for lineno, line in enumerate(src.splitlines(), 1):
+                # Strip Python line comment before inspecting for the
+                # forbidden pattern — NOTE comments mention the API by
+                # name, and that is fine.
+                code_part = line.split("#", 1)[0]
+                if ("jax.config.update" in code_part
+                        and "jax_spmd_mode" in code_part):
+                    raise AssertionError(
+                        f"{rel_path}:{lineno} reintroduced "
+                        f"`jax.config.update(..., 'jax_spmd_mode', ...)`.  "
+                        f"That call raises AttributeError on JAX 0.9+ and "
+                        f"crashes the canonical multi-host TPU bootstrap."
+                    )
+
 
 # ============================================================================
 # Optimal dtype selection

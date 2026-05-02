@@ -1,0 +1,28 @@
+Iter-795 test: component-consistent B halo vs scalar halo
+C36 W2 IC, β=0
+
+max |dB_dy_cc_cons - dB_dy_cc_def| = 3.828e-07 m/s²
+mean |diff| = 7.886e-10 m/s²
+peak diff at (1, 35, 35) lat=+34.66° lon=+133.75°
+
+dv_cc residual (WITHOUT div_damp):
+  default halo:    max |dv| = 2.516e-05
+  consistent halo: max |dv| = 2.516e-05
+  ratio (cons/def): 1.000
+       default: peak=2.516e-05 (5,0,0) lat=-36.45° lon=-135.00°
+    consistent: peak=2.516e-05 (4,35,35) lat=+36.45° lon=+135.00°
+
+Interpretation cues (observational only):
+- If consistent B halo gives a SMALLER dv_cc residual:
+  halo inconsistency IS a mechanism for W2 mode-A.  Implement
+  `pad_halo_components` for B in fv3_sw_tendencies.
+- If consistent B halo gives LARGER or EQUAL dv_cc residual:
+  halo inconsistency is not the dominant mechanism.
+
+What iter-795 DOES measure (observational only):
+- dv_cc residual at t=0 under default vs component-consistent
+  B halo.
+What it does NOT establish:
+- 1-day v_ll_Linf impact (would need intrusive source-code
+  change to fv3_sw_tendencies; deferred to future iter).
+- Whether the same change helps W5 or ocean rest state.

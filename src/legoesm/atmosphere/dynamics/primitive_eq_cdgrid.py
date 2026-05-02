@@ -52,7 +52,6 @@ from legoesm.core.operators_cdgrid import (
     _arakawa_lamb_gradient,
     _interp_center_to_corner,
     _interp_corner_to_center,
-    _laplacian_dgrid,
 )
 from legoesm.core.operators_3d import (
     gradient_x_3d as _gradient_x_3d,
@@ -220,61 +219,37 @@ def fv3_hydrostatic_tendencies(
 
     # --- 6. D-grid vorticity at cell centres via circulation ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)  # (6, n, n, nlev)
-    zeta_abs = zeta + grid.f[..., None]
 
     # === Stage-level packed halo exchange #1 ===
-    # Pack {zeta_abs, B, 1/T} into one collective instead of 3 separate.
+    # Pack {ζ, B, 1/T} into one collective instead of 3 separate.
+    # Note: we pack ζ (relative vorticity) rather than ζ+f, since f is stored
+    # directly at corners as `cdgrid.f_corner` and adding it after the corner
+    # interpolation avoids the sin(lat) nonlinear-interpolation error.
+    # Matches iter-74 fix pattern in cdgrid_momentum_tendencies.
     ln_ps = jnp.log(p_s)
     inv_T = 1.0 / T
     from legoesm.grids.halo import _halo_backend
+    # Packed MPI/SPMD halos now apply the duogrid kinked-to-extended
+    # remap when `duogrid=dg` is passed (iter-84).  Fall through to
+    # None pre-pads only when neither backend is active.
+    _pe_dg = grid.duogrid
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
-            zeta_abs, B, inv_T, mesh=_spmd_mesh,
+            zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta_abs, B, inv_T, topology=_mpi_topology,
+            zeta, B, inv_T, topology=_mpi_topology, duogrid=_pe_dg,
         )
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
 
-    # Batch (zeta_abs, inv_T) corner interpolation — both share the
-    # (6, n, n, nlev) shape; when the stage-level packed halo exchange
-    # above provided pre-padded copies (``_zeta_pad`` / ``_invT_pad``),
-    # stack them along a trailing axis and run ``_interp_center_to_corner``
-    # once on the thicker tensor — same passive-trailing-axis pattern as
-    # Loops 113-117.  Saves one 4-point-average kernel launch per RHS
-    # evaluation.  Falls back to a stacked field when no pre-pad exists
-    # (``_halo_backend`` other than ``spmd`` / ``mpi``) so the operator
-    # itself does the single shared halo exchange.
-    if _zeta_pad is not None:
-        n_face_zT, n_pad_i, n_pad_j, nlev_zT = _zeta_pad.shape
-        _zT_pad_stack = jnp.stack([_zeta_pad, _invT_pad], axis=-1)
-        _zT_pad_flat = _zT_pad_stack.reshape(
-            n_face_zT, n_pad_i, n_pad_j, nlev_zT * 2,
-        )
-        # ``field`` is only used for an ``ndim`` dispatch when ``padded``
-        # is provided — pass the unpadded interior view (cheap, no compute).
-        _zT_corner_flat = _interp_center_to_corner(
-            _zT_pad_flat[:, 1:-1, 1:-1, :],
-            cdgrid, padded=_zT_pad_flat,
-        )
-        nlev_zT_out = nlev_zT
-    else:
-        n_face_zT, n_i_zT, n_j_zT, nlev_zT = zeta_abs.shape
-        _zT_stack = jnp.stack([zeta_abs, inv_T], axis=-1)
-        _zT_flat = _zT_stack.reshape(n_face_zT, n_i_zT, n_j_zT, nlev_zT * 2)
-        _zT_corner_flat = _interp_center_to_corner(_zT_flat, cdgrid)
-        nlev_zT_out = nlev_zT
-    _zT_corner = _zT_corner_flat.reshape(
-        _zT_corner_flat.shape[0], _zT_corner_flat.shape[1],
-        _zT_corner_flat.shape[2], nlev_zT_out, 2,
-    )
-    zeta_corner = _zT_corner[..., 0]
-    inv_T_corner = _zT_corner[..., 1]
+    # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
+    zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
+                   + cdgrid.f_corner[..., None])
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
@@ -449,46 +424,25 @@ def fv3_hydrostatic_tendencies(
     # of ``9*4`` extra bytes per face boundary).
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
-    ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
-    if _halo_backend == "spmd":
-        from legoesm.parallel.cubesphere_exchange import (
-            packed_pad_halo_4d, _spmd_mesh,
-        )
-        if _needs_uv_pad:
-            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_4d(
-                T, u_cell, v_cell, ln_ps_3d, mesh=_spmd_mesh,
-            )
-        else:
-            _T_pad, _lnps_pad = packed_pad_halo_4d(
-                T, ln_ps_3d, mesh=_spmd_mesh,
-            )
-            _u_cc_pad = _v_cc_pad = None
-    elif _halo_backend == "mpi":
+    # Packed MPI halo now applies duogrid remap (iter-84) so we use it
+    # even when duogrid is active.  Non-MPI fallback does per-field pads
+    # with duogrid routing preserved.
+    _pe_dg = grid.duogrid
+    if _halo_backend == "mpi" and _needs_uv_pad:
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        if _needs_uv_pad:
-            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, u_cell, v_cell, ln_ps_3d, topology=_mpi_topology,
-            )
-        else:
-            _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, ln_ps_3d, topology=_mpi_topology,
-            )
-            _u_cc_pad = _v_cc_pad = None
-    else:
-        # Local backend: stack T and ln_ps_3d into a single
-        # ``pad_halo_4d`` call so the halo arithmetic runs once on
-        # the (6, n, n, nlev+1) tensor.
-        _nlev_T = T.shape[-1]
-        _T_lnps = jnp.concatenate([T, ln_ps_3d], axis=-1)
-        _T_lnps_pad = _pad_halo_4d(
-            _T_lnps, interp_offsets=grid.halo_interp_offsets,
+        _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_mpi_4d(
+            T, u_cell, v_cell, topology=_mpi_topology, duogrid=_pe_dg,
         )
-        _T_pad = _T_lnps_pad[..., :_nlev_T]
-        _lnps_pad = _T_lnps_pad[..., _nlev_T:]
+    else:
+        # Route through duogrid remap when duogrid is active on the grid,
+        # matching the pattern used by _arakawa_lamb_gradient via
+        # `_pad_halo_auto`.
+        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         if _needs_uv_pad:
-            _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=grid.halo_interp_offsets)
-            _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=grid.halo_interp_offsets)
+            _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
+            _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
         else:
             _u_cc_pad = _v_cc_pad = None
 

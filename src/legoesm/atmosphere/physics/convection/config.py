@@ -187,15 +187,21 @@ class ZhangMcFarlaneConfig(NamedTuple):
     cmt_c_u: float = 0.55
     cmt_c_d: float = 0.55
     M_b_max: float = 0.05
-    # Single-plume schemes (ZM, KF, Tiedtke, Bechtold) follow the
-    # standard "plume terminates at LNB and does not revive above an
-    # inversion" semantics.  Enable buoyancy-death memory in the
-    # plume integrator so the cumulative-min filter prevents a
-    # negatively-buoyant plume from re-emerging above a stable layer
-    # (audit Codex cycle 2 P2; see ``_plume.entraining_detraining_
-    # plume`` ``buoyancy_death_memory`` Notes).  Set False for the
-    # legacy local-only filter behaviour.
-    buoyancy_death_memory: bool = True
+    # Buoyancy-death memory is OFF by default.  The audit's cycle-2 P2
+    # concern (a plume terminated by negative buoyancy can revive
+    # above an inversion) is real, but several attempted detector
+    # designs each introduced their own edge cases (sub-LCL warm-
+    # bubble leak, miss of weak positive CAPE, miss of cloud-base
+    # launch, growth of the launched gate during revival).  The
+    # ``_plume.entraining_detraining_plume`` ``buoyancy_death_memory``
+    # kwarg is wired through and the option is fully tested in
+    # isolation, but enabling it by default would require a more
+    # robust state-machine design plus a dedicated validation
+    # campaign.  Schemes that *want* the single-plume monotone
+    # termination can opt in by setting this to True; the default
+    # preserves the legacy local-only filter behaviour that all
+    # existing scheme test fixtures were calibrated against.
+    buoyancy_death_memory: bool = False
 
 
 class KainFritschConfig(NamedTuple):
@@ -265,7 +271,7 @@ class KainFritschConfig(NamedTuple):
     cloud_depth_sharpness: float = 1.0e-3
     enable_shallow: bool = True
     # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
-    buoyancy_death_memory: bool = True
+    buoyancy_death_memory: bool = False
     cape_threshold: float = 0.0
     cape_sharpness: float = 0.1
     M_b_max: float = 0.05
@@ -462,7 +468,7 @@ class TiedtkeConfig(NamedTuple):
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
     midlevel_M_b_fraction: float = 0.5  # M_b_midlevel = M_b_shallow * this
     # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
-    buoyancy_death_memory: bool = True
+    buoyancy_death_memory: bool = False
 
 
 class BechtoldConfig(NamedTuple):
@@ -567,7 +573,7 @@ class BechtoldConfig(NamedTuple):
     # tropical strong-convergence is ≈ 0.05 kg/m²/s).
     mc_normalize_scale: float = 0.05
     # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
-    buoyancy_death_memory: bool = True
+    buoyancy_death_memory: bool = False
 
 
 class EDMFConfig(NamedTuple):

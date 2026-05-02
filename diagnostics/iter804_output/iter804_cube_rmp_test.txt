@@ -1,0 +1,23 @@
+Iter-804 DUOGRID halo operator decomposition test
+C36 W2 IC, iter-761 config
+
+                                      variant   dh/dt peak   du/dt peak   dv/dt peak
+-------------------------------------------------------------------------------------
+                                       LEGACY    1.329e-04    1.404e-05    1.903e-05
+                      DUOGRID (full baseline)    1.557e-01    4.700e-05    8.446e-05
+                DUOGRID (no Lagrange; rmp ON)    1.557e-01    1.412e-05    1.985e-05
+               DUOGRID (Lagrange ON; rmp OFF)    1.598e-01    3.199e-04    1.198e-04
+                DUOGRID (no Lagrange; no rmp)    1.598e-01    3.199e-04    1.198e-04
+
+Ratios vs LEGACY:
+                        DUOGRID (full baseline): dh 1171.57x, du 3.35x, dv 4.44x
+                  DUOGRID (no Lagrange; rmp ON): dh 1171.57x, du 1.01x, dv 1.04x
+                 DUOGRID (Lagrange ON; rmp OFF): dh 1202.48x, du 22.78x, dv 6.30x
+                  DUOGRID (no Lagrange; no rmp): dh 1202.48x, du 22.78x, dv 6.30x
+
+Interpretation cues (observational only):
+- If 'no rmp' drops dh/dt to LEGACY level: cube_rmp_vectorized
+  is the dh/dt culprit (kinked→extended remap breaks h halo).
+- If 'no rmp' and 'no Lagrange' both fail to fix dh/dt:
+  the issue is outside fill_corner_region and cube_rmp, maybe
+  in the initial `_pad_halo_local_h2` copy or in PPM itself.

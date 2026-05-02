@@ -944,10 +944,10 @@ def _save_snapshot_data(
     lat_deg: np.ndarray,
 ):
     """Save snapshot field arrays as NPZ files with proper time series format.
-    
+
     NEW FORMAT: Each field is saved as a time series array with shape (n_times, ...).
     This replaces the old format where each timestep was a separate variable.
-    
+
     Produces:
         snapshots_native.npz   – raw arrays keyed as ``{field}`` with time series
         snapshots_latlon.npz   – regridded to (181, 360) regular lat-lon,
@@ -984,12 +984,12 @@ def _save_snapshot_data(
         # Collect this field across all timesteps
         field_timesteps = []
         latlon_timesteps = []
-        
+
         for step in sorted_steps:
             if field_key in snapshots[step]:
                 arr = np.asarray(snapshots[step][field_key], dtype=np.float64)
                 field_timesteps.append(arr)
-                
+
                 # Regrid to lat-lon
                 if field_key.endswith("_3d"):
                     regridded = _regrid_3d_level(arr, lon_deg, lat_deg, coord_kind)
@@ -999,7 +999,7 @@ def _save_snapshot_data(
             else:
                 # Field not available at this timestep - skip incomplete time series
                 break
-        
+
         # Only save fields that are available at all timesteps
         if len(field_timesteps) == len(sorted_steps):
             # Stack into time series: shape (n_times, ...)
@@ -1175,10 +1175,41 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
+        # Iter-760: switch to Fortran-faithful del-n vorticity damping
+        # (sw_core.F90:1948-1999) instead of the scalar bilaplacian on
+        # geographic wind components.  del6_vt_flux damps relative
+        # vorticity (a true scalar, no 1/cos(lat) polar singularity)
+        # via the post-step `damp_v > 0` hook in FV3EdgeShallowWaterModel.
+        # Per iter-755b ablation, damp_v=0.06, nord_v=2 reduces W2
+        # v_ll_Linf from 0.303 (legacy hyperdiff) to 0.214 m/s
+        # (-29.4%) — the Fortran-prescribed structural fix.  Legacy
+        # `hyperdiff_coeff`-on-geographic-winds path retained in
+        # fv3_sw_tendencies but disabled by default here.
+        #
+        # Iter-761: tune `div_damp` coefficient 8× higher (8*_div_damp_cube)
+        # to further reduce cube-corner mode A at lat ±35°.  Per iter-761
+        # sweep, at 8× the W2 v_ll_Linf drops to 0.159 m/s (-48% from
+        # 0.303 legacy) and h_L2 drops to 2.07e-4 (from 2.42e-4 legacy).
+        # Stable at C16-C48.  Blowup limit at ~16×.  This tuning is
+        # PRAGMATIC within the existing aggregated-div_damp API; a
+        # Fortran-faithful port of d_sw5's structured `d2_bg, dddmp,
+        # d4_bg, nord` (sw_core.F90:1720) is iter-759's ongoing work.
+        # Iter-893: enable `apply_fortran_xppm_boundary=True` on the
+        # canonical W2/W5 LEGACY production config.  iter-892's
+        # off-by-one fix in `_ppm_reconstruct_1d` revealed that
+        # Fortran's iord<7 cube-edge boundary formulas
+        # (tp_core.F90:357-369) reduce W2 v_north Linf at C36 1-day by
+        # 19.6% (0.189 → 0.152 m/s on Linf, 10.1% on L2).  iter-892
+        # locked the improvement behind a default-OFF kwarg; iter-893
+        # activates it on the production matrix.  W5 is essentially
+        # unchanged (max|h| ≈ 5966.72 in both ON/OFF).
         config = CDGridShallowWaterConfig(
-            hyperdiff_coeff=_hyperdiff_cube(n),
-            div_damp=_div_damp_cube(n),
-            boundary_fix=True)
+            hyperdiff_coeff=0.0,
+            div_damp=8.0 * _div_damp_cube(n),
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2,
+            apply_fortran_xppm_boundary=True)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
 
@@ -1210,32 +1241,42 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # Regrid wind from cell-centre averages of edge-midpoint winds.
         _cs_w = _get_cs_weights(n)
 
+        # iter-528/529: pre-compute the 4-edge averaged cos/sin
+        # angles via the canonical helper.  This replaces the inline
+        # 4-edge averaging that lived here.
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            cell_centre_angles_from_4edge,
+        )
+        _ca_4edge, _sa_4edge = cell_centre_angles_from_4edge(cdgrid)
+        _ca_4edge_np = np.asarray(_ca_4edge, dtype=np.float64)
+        _sa_4edge_np = np.asarray(_sa_4edge, dtype=np.float64)
+
         def extract_fn(s):
             # Average edge-midpoint winds to cell centres, then regrid.
-            # Use the mean of the 4 surrounding edge angles (2 x-edges +
-            # 2 y-edges) for the rotation, not the cell-centre angle.
-            # Cell-centre angles differ from edge-averaged angles by O(dx),
-            # creating a 0.39 m/s v_north residual for Williamson 2.
-            # The 4-edge mean reduces this to 0.008 m/s (47x improvement).
+            # The cell-centre angles for the rotation come from the
+            # 4-surrounding-edge mean (helper
+            # `cell_centre_angles_from_4edge`).  Cell-centre angles
+            # differ from edge-averaged angles by O(dx), creating a
+            # 0.39 m/s v_north residual for Williamson 2; the 4-edge
+            # mean reduces this to 0.008 m/s at t=0 (47x improvement;
+            # see iter-25/26 of docs/fv3_fortran_fidelity_review.md).
             u_cc = 0.5 * (np.asarray(s.u_d, dtype=np.float64)[:, :, :-1]
                           + np.asarray(s.u_d, dtype=np.float64)[:, :, 1:])
             v_cc = 0.5 * (np.asarray(s.v_d, dtype=np.float64)[:, :-1, :]
                           + np.asarray(s.v_d, dtype=np.float64)[:, 1:, :])
-            cax = np.asarray(cdgrid.cos_angle_edge_x, dtype=np.float64)
-            sax = np.asarray(cdgrid.sin_angle_edge_x, dtype=np.float64)
-            cay = np.asarray(cdgrid.cos_angle_edge_y, dtype=np.float64)
-            say = np.asarray(cdgrid.sin_angle_edge_y, dtype=np.float64)
-            ca = 0.25 * (cax[:,:,:-1] + cax[:,:,1:] + cay[:,:-1,:] + cay[:,1:,:])
-            sa = 0.25 * (sax[:,:,:-1] + sax[:,:,1:] + say[:,:-1,:] + say[:,1:,:])
-            norm = np.sqrt(ca**2 + sa**2)
-            ca /= norm; sa /= norm
-            u_east = ca * u_cc - sa * v_cc
-            v_north = sa * u_cc + ca * v_cc
+            u_east = _ca_4edge_np * u_cc - _sa_4edge_np * v_cc
+            v_north = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
             u_ll = _regrid_2d(u_east, lon_deg, lat_deg, coord_kind)
             v_ll = _regrid_2d(v_north, lon_deg, lat_deg, coord_kind)
+            # Expose face-native cell-centre geographic winds for
+            # face-resolved diagnostics (iter-119).  These bypass the
+            # lat-lon regridding so per-face symmetry / seam jumps
+            # can be inspected directly.  Shape: (6, n, n).
             return {"u": u_ll, "v": v_ll,
                     "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
-                    "height": np.asarray(s.h, dtype=np.float64)}
+                    "height": np.asarray(s.h, dtype=np.float64),
+                    "u_cc_east": np.asarray(u_east, dtype=np.float64),
+                    "v_cc_north": np.asarray(v_north, dtype=np.float64)}
 
         key_array_fn = lambda s: s.h
         coord_kind = "cube"
@@ -1442,7 +1483,32 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         l2 = float(jnp.sqrt(jnp.sum(err**2 * area) / jnp.sum(h_exact**2 * area)))
         linf = float(jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(h_exact)))
         norms = {"l2": l2, "linf": linf}
-        notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+        # Iter-742 (corrects iter-741 per Codex stop-time review):
+        # iter-740 measured v_d-error, iter-741 corrected to pre-
+        # regrid v_north, but the actual plotted field in
+        # snapshots_v.png is the POST-REGRID v_ll =
+        # _regrid_2d(v_north, lon_deg, lat_deg, coord_kind=cube).
+        # The regrid step interpolates cube-face-native to lat-lon
+        # and can shift/smooth the peak; the PNG colourbar reflects
+        # v_ll magnitude, not v_north magnitude.  Iter-742 measures
+        # the same quantity the snapshot plots — matching the
+        # visual artifact exactly.
+        #
+        # The exact W2 geographic v_north is ZERO everywhere at all
+        # times.  Regridding a zero field yields zero, so max|v_ll|
+        # is itself the error (no subtraction).
+        u_cc = 0.5 * (np.asarray(state.u_d, dtype=np.float64)[:, :, :-1]
+                      + np.asarray(state.u_d, dtype=np.float64)[:, :, 1:])
+        v_cc = 0.5 * (np.asarray(state.v_d, dtype=np.float64)[:, :-1, :]
+                      + np.asarray(state.v_d, dtype=np.float64)[:, 1:, :])
+        v_north_face = _sa_4edge_np * u_cc + _ca_4edge_np * v_cc
+        v_ll = _regrid_2d(v_north_face, lon_deg, lat_deg, coord_kind)
+        v_linf = float(np.max(np.abs(v_ll)))
+        v_north_linf_face = float(np.max(np.abs(v_north_face)))
+        norms["v_linf"] = v_linf
+        notes = (f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}, "
+                 f"v_ll_Linf={v_linf:.2e} "
+                 f"(pre-regrid {v_north_linf_face:.2e})")
     elif test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_cgrid(grid, days * 86400.0)
         norms = compute_error_norms_cgrid(state, exact, grid)
@@ -1509,10 +1575,21 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 1800.0
+        # NOTE (iter-760b): config is DECLARATION-ONLY for this test.
+        # Cosine bell is PURE HORIZONTAL ADVECTION — `model.step()` is
+        # NEVER called.  Instead, the `step_fn` below uses
+        # `transport_step` directly with pre-computed frozen winds
+        # (_d2a2c_vect output).  The CDGridShallowWaterConfig fields
+        # (div_damp, damp_v, nord_v, hyperdiff_coeff) are NOT READ by
+        # the cosine-bell stepping code.  Kept in sync with the W2/W5
+        # config for declaration consistency but the numerical
+        # behaviour is independent of these fields.
         config = CDGridShallowWaterConfig(
-            hyperdiff_coeff=_hyperdiff_cube(n),
+            hyperdiff_coeff=0.0,
             div_damp=_div_damp_cube(n),
-            boundary_fix=True)
+            boundary_fix=True,
+            damp_v=0.06,
+            nord_v=2)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
         state = cosine_bell_cubesphere(grid, cdgrid, beta)

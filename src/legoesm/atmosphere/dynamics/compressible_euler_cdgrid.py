@@ -164,12 +164,8 @@ def cdgrid_compressible_euler_slow_tendencies(
     # --- 3. C-grid velocities ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
 
-    # --- 4. Vorticity and Coriolis ---
+    # --- 4. Vorticity (cell centres) ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)
-    if config.use_coriolis:
-        abs_vor = zeta + cdgrid.base.f[..., None]
-    else:
-        abs_vor = zeta
 
     # --- 5. KE at cell centres from D-grid (orthogonal basis) ---
     u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
@@ -234,21 +230,17 @@ def cdgrid_compressible_euler_slow_tendencies(
     dpi_dy_perp = _dKpi_dy_perp[..., 1]
 
     # --- 7. D-grid momentum tendencies ---
-    # Batch (abs_vor, theta_total) center-to-corner interp — same
-    # passive-trailing-axis batching as the (u, v) interp earlier.
-    # 2 corner-interpolations → 1 (one halo exchange + one 4-point
-    # average shared between abs_vor and theta_total).
-    n_face_at, n_i_at, n_j_at, nlev_at = abs_vor.shape
-    _at_stack = jnp.stack([abs_vor, theta_total], axis=-1)
-    _at_d_flat = _interp_center_to_corner(
-        _at_stack.reshape(n_face_at, n_i_at, n_j_at, nlev_at * 2), cdgrid,
-    )
-    _at_d = _at_d_flat.reshape(
-        _at_d_flat.shape[0], _at_d_flat.shape[1], _at_d_flat.shape[2],
-        nlev_at, 2,
-    )
-    abs_vor_corner = _at_d[..., 0]
-    theta_corner = _at_d[..., 1]
+    # Interpolate ζ only; add f_corner directly (FV3 stores f at corners).
+    # Previously abs_vor = ζ + f was interpolated as a single field; because
+    # the 4-point interpolator is linear but sin(lat) is not,
+    # interp(f_cc) ≠ f_corner introduced an O(dx²) Coriolis error at corners.
+    # Matches iter-74 fix in cdgrid_momentum_tendencies.
+    zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+    if config.use_coriolis:
+        abs_vor_corner = zeta_corner + cdgrid.f_corner[..., None]
+    else:
+        abs_vor_corner = zeta_corner
+    theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp

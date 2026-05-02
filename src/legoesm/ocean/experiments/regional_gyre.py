@@ -194,7 +194,7 @@ def create_forcings(grid_type: str, grid, config: RegionalGyreConfig = None):
 
 def create_domain_config(config: RegionalGyreConfig = None) -> Dict[str, Any]:
     """Create domain configuration parameters.
-    
+
     Returns
     -------
     Dict[str, Any]
@@ -217,63 +217,63 @@ def create_domain_config(config: RegionalGyreConfig = None) -> Dict[str, Any]:
 def compute_circulation_metrics(diagnostics: Dict[str, list], 
                               config: RegionalGyreConfig) -> Dict[str, float]:
     """Compute circulation metrics specific to wind-driven gyre validation.
-    
+
     Parameters
-    ---------- 
+    ----------
     diagnostics : Dict[str, list]
         Time series diagnostics from simulation
     config : RegionalGyreConfig
         Configuration parameters
-        
+
     Returns
     -------
     Dict[str, float]
         Circulation metrics for validation
     """
     metrics = {}
-    
+
     # Maximum surface speed - should reach realistic gyre speeds
     max_speed_list = diagnostics.get("max_speed", [])
-    
+
     if len(max_speed_list) >= 2:
         max_speed_final = max_speed_list[-1]
         metrics["max_speed_final"] = max_speed_final
-        
+
         # Speed development rate
         max_speed_initial = max_speed_list[0]
         if max_speed_initial > 0:
             speed_ratio = max_speed_final / max_speed_initial
             metrics["speed_development"] = speed_ratio
-    
+
     # Mean SSH drift - should be minimal for conservation
     mean_eta_list = diagnostics.get("mean_eta", [])
     if len(mean_eta_list) >= 2:
         # Use absolute drift normalized by ocean depth
         eta_drift = abs(mean_eta_list[-1] - mean_eta_list[0]) / config.H_max
         metrics["eta_drift_normalized"] = eta_drift
-        
+
     return metrics
 
 
 def validate_results(final_state, diagnostics: Dict[str, list], 
                    config: RegionalGyreConfig = None) -> Tuple[bool, str]:
     """Validate wind-driven gyre experiment results.
-    
+
     Success criteria:
     - Maximum surface speed in realistic range (0.05 - 0.5 m/s)
     - Mean SSH drift normalized by depth < 1e-5 (good conservation)
     - No NaN or infinite values
     - Speed development shows circulation spin-up
-    
+
     Parameters
     ----------
     final_state : OceanState
         Final model state
-    diagnostics : Dict[str, list] 
+    diagnostics : Dict[str, list]
         Time series diagnostics
     config : RegionalGyreConfig, optional
         Configuration parameters
-        
+
     Returns
     -------
     bool
@@ -286,7 +286,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
     
     # Compute circulation metrics
     metrics = compute_circulation_metrics(diagnostics, config)
-    
+
     # Check for NaN/infinite values in final state
     if hasattr(final_state, 'eta') and not jnp.all(jnp.isfinite(final_state.eta.data)):
         return False, "NaN/Inf detected in final eta field"
@@ -294,17 +294,17 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         return False, "NaN/Inf detected in final temperature field"
     if hasattr(final_state, 'u') and not jnp.all(jnp.isfinite(final_state.u.data)):
         return False, "NaN/Inf detected in final u velocity field"
-    
+
     # Validation thresholds
     min_speed = 0.05       # m/s - minimum realistic gyre speed
-    max_speed = 0.5        # m/s - maximum realistic surface speed  
+    max_speed = 0.5        # m/s - maximum realistic surface speed
     max_eta_drift = 1e-5   # normalized by depth - conservation threshold
     min_speed_ratio = 1.5  # minimum speed development for spin-up
-    
+
     # Check validation criteria
     success = True
     notes_parts = []
-    
+
     if "max_speed_final" in metrics:
         speed = metrics["max_speed_final"]
         notes_parts.append(f"max_speed={speed:.4f}m/s")
@@ -314,29 +314,29 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         elif speed > max_speed:
             success = False
             notes_parts.append("FAIL: excessive speed")
-            
+
     if "eta_drift_normalized" in metrics:
         eta_drift = metrics["eta_drift_normalized"]
         notes_parts.append(f"eta_drift={eta_drift:.2e}")
         if eta_drift > max_eta_drift:
             success = False
             notes_parts.append("FAIL: poor conservation")
-            
+
     if "speed_development" in metrics:
         speed_dev = metrics["speed_development"]
         notes_parts.append(f"speed_dev={speed_dev:.2f}")
         if speed_dev < min_speed_ratio:
             success = False
             notes_parts.append("FAIL: insufficient spin-up")
-    
+
     notes = ", ".join(notes_parts)
-    
+
     return success, notes
 
 
 def get_diagnostic_field_specs() -> list:
     """Get field specifications for diagnostic output.
-    
+
     Returns
     -------
     list
@@ -351,7 +351,7 @@ def get_diagnostic_field_specs() -> list:
 
 def get_scalar_units() -> Dict[str, str]:
     """Get units for scalar diagnostic quantities.
-    
+
     Returns
     -------
     Dict[str, str]
@@ -362,7 +362,7 @@ def get_scalar_units() -> Dict[str, str]:
         "max_abs_eta": "m",
         "max_speed": "m/s",
         "max_abs_u": "m/s",  # MPAS alternative
-        "mean_T": "degC", 
+        "mean_T": "degC",
         "mean_S": "PSU"
     }
 

@@ -211,6 +211,25 @@ class TestHaloInterpOffsets:
         offsets = compute_halo_interp_offsets_h2(N)
         assert offsets.shape == (6, 4, 2, N)
 
+    def test_offset_shape_h3(self):
+        """Iter-496: halo=3 interp-offset scaffolding for FB-chain
+        stability work.  The h3 offsets are a strict extension of h2:
+        depths 0-1 match h2 bitwise; depth 2 is new.
+        """
+        from legoesm.grids.halo import compute_halo_interp_offsets_h3
+        offsets_h1 = compute_halo_interp_offsets(N)
+        offsets_h2 = compute_halo_interp_offsets_h2(N)
+        offsets_h3 = compute_halo_interp_offsets_h3(N)
+        assert offsets_h3.shape == (6, 4, 3, N)
+        # h1 ≡ h2[depth=0] ≡ h3[depth=0]
+        np.testing.assert_array_equal(
+            np.asarray(offsets_h2[:, :, 0, :]), np.asarray(offsets_h1))
+        # h2 ≡ h3[depth=:2]
+        np.testing.assert_array_equal(
+            np.asarray(offsets_h3[:, :, :2, :]), np.asarray(offsets_h2))
+        # Depth 2 offsets are bounded (O(1) near cube vertices, typically <3)
+        assert float(jnp.max(jnp.abs(offsets_h3[:, :, 2, :]))) < 3.0
+
     def test_interpolated_constant_field(self):
         """With interpolation offsets, constant field should still be exact."""
         offsets = compute_halo_interp_offsets(N)
@@ -221,6 +240,2015 @@ class TestHaloInterpOffsets:
             np.testing.assert_allclose(padded[face, -1, 1:-1], 2.5, atol=1e-6)
             np.testing.assert_allclose(padded[face, 1:-1, 0], 2.5, atol=1e-6)
             np.testing.assert_allclose(padded[face, 1:-1, -1], 2.5, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# h3 corner fill (iter-497)
+# ---------------------------------------------------------------------------
+
+class TestFillCornersH3:
+    """Tests for the halo=3 corner fill helper added in iter-497.
+
+    This is plumbing for the ng=3 halo extension (review-doc item #2,
+    FB-path stability on W2 C36).  The fill rule is the inside-out
+    2-point averaging used by `_fill_corners_h2`, generalized to a
+    3x3 corner block.
+    """
+
+    def _build_constant_padded(self, n: int, halo: int, value: float):
+        """Construct an (6, n+2h, n+2h) padded array with interior and
+        edge-strip halos both set to ``value`` and corner blocks left
+        at zero.  Matches what ``_pad_halo_local_h3`` would produce on
+        a constant field before the corner fill step."""
+        padded = jnp.zeros((6, n + 2 * halo, n + 2 * halo), dtype=jnp.float64)
+        # Interior
+        padded = padded.at[:, halo:-halo, halo:-halo].set(value)
+        # Edge halos (skip the 4 corner blocks which are left at 0)
+        for d in range(halo):
+            # WEST, EAST: i = d or n+2h-1-d, j in [halo:-halo]
+            padded = padded.at[:, d, halo:-halo].set(value)
+            padded = padded.at[:, n + 2 * halo - 1 - d, halo:-halo].set(value)
+            # SOUTH, NORTH: j = d or n+2h-1-d, i in [halo:-halo]
+            padded = padded.at[:, halo:-halo, d].set(value)
+            padded = padded.at[:, halo:-halo, n + 2 * halo - 1 - d].set(value)
+        return padded
+
+    def test_constant_field_preserved(self):
+        """Corner fill on a constant edge+interior padded array should
+        leave every cell at the same constant value."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=4.25)
+        filled = _fill_corners_h3(padded)
+        np.testing.assert_allclose(
+            np.asarray(filled), 4.25, atol=1e-12,
+            err_msg="Corner fill should preserve constant fields")
+
+    def test_shape_preserved(self):
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=1.0)
+        filled = _fill_corners_h3(padded)
+        assert filled.shape == (6, n + 6, n + 6)
+
+    def test_zero_corner_cells_get_filled(self):
+        """Before the fill, corner 3x3 blocks are zero; after, they
+        are non-zero (pulled from non-zero edge halos)."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=7.0)
+        # Sanity: corner blocks were left zero by the builder
+        assert float(padded[0, 0, 0]) == 0.0
+        assert float(padded[0, 0, 2]) == 0.0
+        assert float(padded[0, 2, 2]) == 0.0
+        filled = _fill_corners_h3(padded)
+        # All 9 SW corner cells of face 0 should be non-zero
+        for i in range(3):
+            for j in range(3):
+                assert float(filled[0, i, j]) != 0.0
+
+    def test_no_mutation_of_interior(self):
+        """The fill must leave the interior block untouched."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        padded = self._build_constant_padded(n, halo=3, value=0.0)
+        # Write a distinct pattern in the interior
+        interior_vals = jnp.arange(
+            6 * n * n, dtype=jnp.float64).reshape(6, n, n)
+        padded = padded.at[:, 3:-3, 3:-3].set(interior_vals)
+        filled = _fill_corners_h3(padded)
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, 3:-3, 3:-3]),
+            np.asarray(interior_vals),
+        )
+
+    def test_no_mutation_of_edge_halos(self):
+        """The fill must leave the edge-strip halos (non-corner) untouched."""
+        from legoesm.grids.halo import _fill_corners_h3
+        n = N
+        h = 3
+        padded = jnp.zeros((6, n + 2 * h, n + 2 * h), dtype=jnp.float64)
+        # Fill edge halos with unique sentinel patterns
+        rng = np.random.default_rng(42)
+        w = jnp.asarray(rng.standard_normal((6, h, n)))
+        e = jnp.asarray(rng.standard_normal((6, h, n)))
+        s = jnp.asarray(rng.standard_normal((6, n, h)))
+        no = jnp.asarray(rng.standard_normal((6, n, h)))
+        padded = padded.at[:, :h, h:-h].set(w)
+        padded = padded.at[:, -h:, h:-h].set(e)
+        padded = padded.at[:, h:-h, :h].set(s)
+        padded = padded.at[:, h:-h, -h:].set(no)
+        from legoesm.grids.halo import _fill_corners_h3
+        filled = _fill_corners_h3(padded)
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, :h, h:-h]), np.asarray(w))
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, -h:, h:-h]), np.asarray(e))
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, h:-h, :h]), np.asarray(s))
+        np.testing.assert_array_equal(
+            np.asarray(filled[:, h:-h, -h:]), np.asarray(no))
+
+
+# ---------------------------------------------------------------------------
+# h3 local scalar exchange (iter-498)
+# ---------------------------------------------------------------------------
+
+class TestPadHaloLocalH3:
+    """Tests for the halo=3 local scalar exchange added in iter-498.
+
+    The implementation generalizes `_pad_halo_local_h2` to 3 halo
+    depths, using `_fill_corners_h3` for the 3x3 L-shaped corner
+    blocks.
+    """
+
+    def test_constant_field(self):
+        """Constant field at interior should propagate to all halo cells."""
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.ones((6, N, N), dtype=jnp.float64) * 9.0
+        padded = _pad_halo_local_h3(data)
+        assert padded.shape == (6, N + 6, N + 6)
+        np.testing.assert_allclose(
+            np.asarray(padded), 9.0, atol=1e-12,
+            err_msg="h3 local exchange must preserve constant fields")
+
+    def test_interior_preservation(self):
+        """Interior data must be bit-identical after halo exchange."""
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.arange(
+            6 * N * N, dtype=jnp.float64).reshape(6, N, N)
+        padded = _pad_halo_local_h3(data)
+        np.testing.assert_array_equal(
+            np.asarray(padded[:, 3:-3, 3:-3]), np.asarray(data))
+
+    def test_shape(self):
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.zeros((6, N, N), dtype=jnp.float64)
+        padded = _pad_halo_local_h3(data)
+        assert padded.shape == (6, N + 6, N + 6)
+
+    def test_face_unique_depth0_edges_match_h2_depth0(self):
+        """Depth-0 (interior-adjacent) edge strip values must match the
+        existing `_pad_halo_local_h2` depth-0 strip — both reference
+        the same physical neighbour-strip row, so they cannot differ."""
+        from legoesm.grids.halo import (
+            _pad_halo_local_h2, _pad_halo_local_h3,
+        )
+        data = jnp.zeros((6, N, N), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+        p_h2 = _pad_halo_local_h2(data)
+        p_h3 = _pad_halo_local_h3(data)
+        # West depth=0 strip: p_h2[face, 1, 2:-2] vs p_h3[face, 2, 3:-3]
+        for f in range(6):
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 2, 3:-3]),
+                np.asarray(p_h2[f, 1, 2:-2]),
+                err_msg=f"face {f} WEST depth=0 differs between h2 and h3")
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, N + 3, 3:-3]),
+                np.asarray(p_h2[f, N + 2, 2:-2]),
+                err_msg=f"face {f} EAST depth=0 differs between h2 and h3")
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, 2]),
+                np.asarray(p_h2[f, 2:-2, 1]),
+                err_msg=f"face {f} SOUTH depth=0 differs between h2 and h3")
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, N + 3]),
+                np.asarray(p_h2[f, 2:-2, N + 2]),
+                err_msg=f"face {f} NORTH depth=0 differs between h2 and h3")
+
+    def test_face_unique_depth1_matches_h2_depth1(self):
+        """Depth-1 edge strip values must match h2 depth-1 (also both
+        reference the second row from the neighbour interior)."""
+        from legoesm.grids.halo import (
+            _pad_halo_local_h2, _pad_halo_local_h3,
+        )
+        data = jnp.zeros((6, N, N), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+        p_h2 = _pad_halo_local_h2(data)
+        p_h3 = _pad_halo_local_h3(data)
+        for f in range(6):
+            # h2 WEST depth=1 at i=0; h3 WEST depth=1 at i=1
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 1, 3:-3]),
+                np.asarray(p_h2[f, 0, 2:-2]))
+            # EAST depth=1: h2 i=n+3, h3 i=n+4
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, N + 4, 3:-3]),
+                np.asarray(p_h2[f, N + 3, 2:-2]))
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, 1]),
+                np.asarray(p_h2[f, 2:-2, 0]))
+            np.testing.assert_array_equal(
+                np.asarray(p_h3[f, 3:-3, N + 4]),
+                np.asarray(p_h2[f, 2:-2, N + 3]))
+
+    def test_depth2_edge_strip_pulls_from_neighbour(self):
+        """Depth-2 halo strip must pull from the 3rd row into the
+        neighbour's interior (i.e., row index 2 or -3 on that face)."""
+        from legoesm.grids.halo import (
+            _pad_halo_local_h3,
+            CONNECTIVITY,
+            _extract_edge_strip_at_depth,
+        )
+        data = jnp.arange(
+            6 * N * N, dtype=jnp.float64).reshape(6, N, N)
+        padded = _pad_halo_local_h3(data)
+        edges = [WEST, EAST, SOUTH, NORTH]
+        for face in range(6):
+            for edge_idx, edge in enumerate(edges):
+                nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+                expected = _extract_edge_strip_at_depth(
+                    data, nbr_face, nbr_edge, 2)
+                if is_reversed:
+                    expected = expected[::-1]
+                # Extract halo slice at depth=2
+                if edge == WEST:
+                    actual = padded[face, 0, 3:-3]
+                elif edge == EAST:
+                    actual = padded[face, N + 5, 3:-3]
+                elif edge == SOUTH:
+                    actual = padded[face, 3:-3, 0]
+                else:
+                    actual = padded[face, 3:-3, N + 5]
+                np.testing.assert_array_equal(
+                    np.asarray(actual), np.asarray(expected),
+                    err_msg=(
+                        f"face={face} edge={edge} depth=2 mismatch"),
+                )
+
+    def test_jittable_and_differentiable(self):
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        # JIT path
+        p_jit = jax.jit(_pad_halo_local_h3)(data)
+        p_eager = _pad_halo_local_h3(data)
+        np.testing.assert_allclose(
+            np.asarray(p_jit), np.asarray(p_eager), atol=1e-14)
+        # Gradient path
+        def loss(x):
+            return jnp.sum(_pad_halo_local_h3(x) ** 2)
+        grad = jax.grad(loss)(data)
+        assert grad.shape == data.shape
+        assert jnp.all(jnp.isfinite(grad))
+
+
+# ---------------------------------------------------------------------------
+# Padded angle / metrics consistency between halo=2 and halo=3 (iter-530)
+# ---------------------------------------------------------------------------
+
+class TestPaddedAngleHaloConsistency:
+    """The `compute_padded_angle` and `compute_padded_half_metrics`
+    helpers accept any halo depth.  iter-530: lock the invariant that
+    the halo=3 output matches the halo=2 output at the overlapping
+    interior region (positions [1:-1, 1:-1] of halo=2 = positions
+    [2:-2, 2:-2] of halo=3).  This is a critical correctness guard:
+    halo=3 must agree with halo=2 wherever they overlap, otherwise
+    the iter-496..501 ng=3 scaffolding is broken.
+    """
+
+    # iter-531 (Codex follow-up): use rtol-based tolerances so the
+    # tests pass under both x64 and the default float32 backend.
+    # iter-530 used atol=1e-12 (angle) and atol=1e-6 (metrics) which
+    # are tighter than float32's ~1e-7 relative precision; the tests
+    # only passed because the matrix run sets `JAX_ENABLE_X64=1`.
+    # `compute_padded_angle` returns radians (range ~π/2 ≈ 1.6) →
+    # rtol=1e-5 with atol=1e-6 covers float32 precision.
+    # `compute_padded_half_metrics` returns metres on Earth (~1.5e6) →
+    # absolute float32 precision is ~0.15 m; rtol=1e-5 covers it.
+
+    def test_compute_padded_angle_h2_h3_consistent(self):
+        from legoesm.grids.halo import compute_padded_angle
+        n = 8
+        a_h2 = compute_padded_angle(n, halo=2)
+        a_h3 = compute_padded_angle(n, halo=3)
+        assert a_h2.shape == (6, n + 4, n + 4)
+        assert a_h3.shape == (6, n + 6, n + 6)
+        # The halo=2 array's interior + 2-cell halo corresponds to
+        # the halo=3 array's interior + 1..3-deep halo at offset (1, 1).
+        # I.e., a_h3[1:-1, 1:-1] should equal a_h2 at every cell.
+        np.testing.assert_allclose(
+            np.asarray(a_h3[:, 1:-1, 1:-1]),
+            np.asarray(a_h2),
+            rtol=1e-5, atol=1e-6,
+            err_msg="compute_padded_angle(h=3) interior does not "
+                    "match compute_padded_angle(h=2) — h3 scaffolding "
+                    "would propagate inconsistency to the FB chain.")
+
+    def test_grid_halo_interp_offsets_h3_wired_and_consistent(self):
+        """Iter-532: `CubedSphereGrid.halo_interp_offsets_h3` must be
+        present on every cubed-sphere grid built by
+        `create_cubed_sphere`, and its values must match the
+        free-function `compute_halo_interp_offsets_h3(n)` (so a
+        future caller can use either path interchangeably)."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import compute_halo_interp_offsets_h3
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+        assert grid.halo_interp_offsets_h3 is not None
+        assert grid.halo_interp_offsets_h3.shape == (6, 4, 3, n)
+        # Bit-equality with the free function (both compute the same
+        # offsets, so they must agree to dtype precision).
+        ref = compute_halo_interp_offsets_h3(n)
+        np.testing.assert_allclose(
+            np.asarray(grid.halo_interp_offsets_h3),
+            np.asarray(ref),
+            rtol=1e-5,  # float32 precision under default backend
+        )
+
+    def test_grid_panel_halo_interp_offsets_h3_is_none(self):
+        """Single-face regional panel uses wall BCs; `_h3` should be
+        None like `_h1` and `_h2`."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+        n = 8
+        panel = create_cubed_sphere_panel(n=n, face_id=0)
+        assert panel.halo_interp_offsets_h3 is None
+
+    def test_compute_padded_half_metrics_h2_h3_consistent(self):
+        from legoesm.grids.halo import compute_padded_half_metrics
+        n = 8
+        radius = 6.371229e6
+        hx2, hy2 = compute_padded_half_metrics(n, radius, halo=2)
+        hx3, hy3 = compute_padded_half_metrics(n, radius, halo=3)
+        assert hx2.shape == (6, n + 4, n + 4)
+        assert hx3.shape == (6, n + 6, n + 6)
+        np.testing.assert_allclose(
+            np.asarray(hx3[:, 1:-1, 1:-1]), np.asarray(hx2), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(hy3[:, 1:-1, 1:-1]), np.asarray(hy2), rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Public pad_halo(halo=3) dispatch (iter-499)
+# ---------------------------------------------------------------------------
+
+class TestPadHaloH3Dispatch:
+    """Tests that the public `pad_halo(halo=3)` dispatch wires through
+    to `_pad_halo_local_h3` on the single-node path.
+    """
+
+    def test_dispatch_delegates_to_local_h3(self):
+        """Calling pad_halo(..., halo=3) must equal a direct
+        `_pad_halo_local_h3` call when no interp_offsets/duogrid and
+        no distributed backend is active."""
+        from legoesm.grids.halo import _pad_halo_local_h3
+        data = jnp.arange(
+            6 * N * N, dtype=jnp.float64).reshape(6, N, N)
+        p_dispatch = pad_halo(data, halo=3)
+        p_direct = _pad_halo_local_h3(data)
+        np.testing.assert_array_equal(
+            np.asarray(p_dispatch), np.asarray(p_direct))
+
+    def test_shape(self):
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        padded = pad_halo(data, halo=3)
+        assert padded.shape == (6, N + 6, N + 6)
+
+    def test_constant_field_preserved(self):
+        data = jnp.ones((6, N, N), dtype=jnp.float64) * 3.5
+        padded = pad_halo(data, halo=3)
+        np.testing.assert_allclose(
+            np.asarray(padded), 3.5, atol=1e-12)
+
+    def test_halo4_raises_notimplemented(self):
+        """halo=4 should still raise NotImplementedError — iter-499 only
+        extended dispatch to halo=3."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError):
+            pad_halo(data, halo=4)
+
+    def test_interp_offsets_h3_forwarded(self):
+        """When interp_offsets with h3 shape (6,4,3,n) is passed, the
+        dispatch must feed it through to `_pad_halo_local_h3` — on a
+        constant field the result should still be exact."""
+        from legoesm.grids.halo import compute_halo_interp_offsets_h3
+        offsets = compute_halo_interp_offsets_h3(N)
+        data = jnp.ones((6, N, N), dtype=jnp.float64) * 1.75
+        padded = pad_halo(data, halo=3, interp_offsets=offsets)
+        np.testing.assert_allclose(
+            np.asarray(padded), 1.75, atol=1e-6)
+
+    def test_single_face_panel_uses_wall_bc(self):
+        """For a (1, n, n) regional panel, halo=3 must use wall BCs
+        (Neumann) and produce shape (1, n+6, n+6)."""
+        data = jnp.arange(
+            1 * N * N, dtype=jnp.float64).reshape(1, N, N)
+        padded = pad_halo(data, halo=3)
+        assert padded.shape == (1, N + 6, N + 6)
+        # Interior preserved bit-exactly
+        np.testing.assert_array_equal(
+            np.asarray(padded[:, 3:-3, 3:-3]), np.asarray(data))
+        # Boundary rows are edge-replicated (Neumann / zero-gradient)
+        np.testing.assert_array_equal(
+            np.asarray(padded[0, 0, 3:-3]), np.asarray(data[0, 0, :]))
+        np.testing.assert_array_equal(
+            np.asarray(padded[0, -1, 3:-3]), np.asarray(data[0, -1, :]))
+
+    def test_duogrid_at_halo3_constant_field_preserved(self):
+        """Iter-533 / iter-534: halo=3 is allowed for the duogrid path
+        because `cube_rmp_vectorized` and `fill_corner_region` already
+        loop over halo depth.  Constant-field preservation guard."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+        assert grid.duogrid is not None
+        data = jnp.ones((6, n, n), dtype=jnp.float64) * 5.0
+        padded = pad_halo(data, halo=3, duogrid=grid.duogrid)
+        assert padded.shape == (6, n + 6, n + 6)
+        np.testing.assert_allclose(
+            np.asarray(padded), 5.0, atol=1e-12,
+            err_msg="duogrid+halo=3 broke constant-field preservation")
+
+    def test_duogrid_at_halo3_third_ring_corner_cells_in_face_value_range(self):
+        """Iter-536 (Codex follow-up to iter-535): the iter-535 test
+        only checks the EDGE STRIPS of the depth=2 ring (positions
+        `[0, 3:-3]` etc.), missing the depth=2 CORNER cells (the
+        outermost cells of each 3×3 corner block: 12 cells per
+        cube vertex × 4 corners × 6 faces = 288 cells per grid).
+
+        On a face-unique constant field (face f → value f+1.0):
+          - Edge strips contain a single neighbour face's value
+            (covered by iter-535 test).
+          - Corner cells are filled by `_fill_corners_h3` averaging
+            of adjacent edge halos.  Each corner cell's value is
+            therefore some average of the host face's value (from
+            interior-side neighbours) and 1-2 neighbour faces'
+            values (from the cross-face edge halos).
+
+        A correctly-populated corner cell MUST be:
+          (a) finite (catches "stays at NaN/Inf");
+          (b) within [1.0, 6.0] = [min face value, max face value]
+              (catches "stays at zero" — initialization value);
+          (c) NOT identically zero on any cell of the third ring.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+        data = jnp.zeros((6, n, n), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+
+        p_h3 = pad_halo(data, halo=3, duogrid=grid.duogrid)
+        p_h3_np = np.asarray(p_h3)
+
+        # The "third ring" is the outermost layer: i ∈ {0, n+5} OR
+        # j ∈ {0, n+5}.  Build a mask for those cells.
+        np_p3 = n + 6
+        ring_mask = np.zeros((np_p3, np_p3), dtype=bool)
+        ring_mask[0, :] = True
+        ring_mask[-1, :] = True
+        ring_mask[:, 0] = True
+        ring_mask[:, -1] = True
+
+        ring_vals = p_h3_np[:, ring_mask]   # (6, ring_count)
+        # (a) finite
+        assert np.all(np.isfinite(ring_vals)), (
+            "halo=3 third ring contains NaN/Inf — duogrid h3 path "
+            "blew up at the outermost ring.")
+        # (b) within face-value range [1.0, 6.0]
+        ring_min = float(np.min(ring_vals))
+        ring_max = float(np.max(ring_vals))
+        # Tiny float-drift tolerance because the duogrid Lagrange
+        # remap weights only sum to 1 in exact arithmetic.
+        assert ring_min >= 1.0 - 1e-5, (
+            f"halo=3 third ring min = {ring_min} < 1.0 — value "
+            f"escaped the face-value range, likely zeroed by an "
+            f"unpopulated cell.")
+        assert ring_max <= 6.0 + 1e-5, (
+            f"halo=3 third ring max = {ring_max} > 6.0 — value "
+            f"overshot the face-value range.")
+        # (c) NOT identically zero on ANY cell.  This catches the
+        # specific failure mode where a per-corner block is silently
+        # left at the `_pad_halo_local_h3` zero initialization.
+        zero_count = int(np.sum(np.abs(ring_vals) < 1e-10))
+        assert zero_count == 0, (
+            f"halo=3 third ring contains {zero_count} zero cells "
+            f"(out of {ring_vals.size} total).  This indicates "
+            f"the duogrid h3 corner-fill or edge-strip path left "
+            f"some cells at the zero initialization value.")
+
+    def test_duogrid_at_halo3_corner_cells_blend_neighbour_faces(self):
+        """Iter-537 (Codex follow-up to iter-536): the iter-536 test
+        only does smoke-checks (finite / in range / non-zero) on
+        the outer ring corner cells.  A corner cell could pass all
+        three while still being identically equal to the host face's
+        value (i.e., the corner fill silently propagated host data
+        instead of cross-face neighbour data) — a meaningful
+        correctness violation that smoke-tests don't catch.
+
+        This test verifies POSITIVE correctness on the corner blocks:
+        for each face × each cube vertex, the 3×3 corner block cells
+        must have values within the convex hull of the TWO adjacent
+        neighbour faces' values, AND at least one cell of each
+        corner block must NOT be identically equal to the host face's
+        value (proving the corner fill DID blend cross-face data).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+        n = 8
+        h = 3  # halo width
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+        data = jnp.zeros((6, n, n), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+
+        p_h3 = pad_halo(data, halo=h, duogrid=grid.duogrid)
+        p_np = np.asarray(p_h3)
+
+        # The 3x3 corner blocks of the halo=3 padded array sit at
+        # the four corners.  Map each cube vertex to its two
+        # adjacent edges and the corresponding (i, j) slice.
+        corner_specs = [
+            ("SW", WEST,  SOUTH, slice(0, h),    slice(0, h)),
+            ("SE", EAST,  SOUTH, slice(-h, None), slice(0, h)),
+            ("NE", EAST,  NORTH, slice(-h, None), slice(-h, None)),
+            ("NW", WEST,  NORTH, slice(0, h),    slice(-h, None)),
+        ]
+
+        for face in range(6):
+            host_value = float(face) + 1.0
+            for label, edge_a, edge_b, i_slice, j_slice in corner_specs:
+                nbr_a, _, _ = CONNECTIVITY[face][edge_a]
+                nbr_b, _, _ = CONNECTIVITY[face][edge_b]
+                v_a = float(nbr_a) + 1.0
+                v_b = float(nbr_b) + 1.0
+                lo = min(v_a, v_b)
+                hi = max(v_a, v_b)
+                block = p_np[face, i_slice, j_slice]  # (h, h)
+                # (1) Convex-hull check: every cell in the corner
+                # block must be in [lo, hi] ± 1e-5 float drift.
+                cell_min = float(block.min())
+                cell_max = float(block.max())
+                assert cell_min >= lo - 1e-5, (
+                    f"face {face} {label}: min cell value "
+                    f"{cell_min} < neighbour min {lo} = min(face "
+                    f"{nbr_a}+1, face {nbr_b}+1).  Corner fill "
+                    f"produced an out-of-hull value.")
+                assert cell_max <= hi + 1e-5, (
+                    f"face {face} {label}: max cell value "
+                    f"{cell_max} > neighbour max {hi}.  Corner "
+                    f"fill produced an out-of-hull value.")
+                # (2) Cross-face blend check: at least one cell in
+                # the block must differ from the host value.  (If
+                # ALL cells equal the host value, the corner fill
+                # silently propagated host data instead of cross-
+                # face neighbour data — a real correctness bug.)
+                differs = bool(np.any(np.abs(block - host_value) > 1e-5))
+                assert differs, (
+                    f"face {face} {label} corner block: all 9 cells "
+                    f"equal the host value {host_value}.  Corner "
+                    f"fill did not blend in neighbour faces "
+                    f"{nbr_a} (={v_a}) and {nbr_b} (={v_b})."
+                )
+                # (3) Iter-538/539 (Codex follow-up): TWO-face SPATIAL
+                # blend.  The cross-face check above passes if all
+                # cells equal a SINGLE neighbour's value v_a.  But a
+                # degenerate "all cells = midpoint(v_a, v_b)" fill
+                # also passes "strict-between" — it's blended in
+                # COMPOSITION but not in SPATIAL STRUCTURE.
+                #
+                # To prove BOTH neighbours genuinely contribute
+                # POSITION-DEPENDENTLY (cells closer to W are closer
+                # to v_W, cells closer to S are closer to v_S), the
+                # block must contain at least one cell BELOW the
+                # midpoint AND at least one cell ABOVE the midpoint.
+                # That rules out:
+                #   - single-neighbour propagation (all = v_a or v_b)
+                #   - degenerate constant-blend (all = midpoint)
+                gap = hi - lo
+                # Only meaningful when v_a != v_b (which is always
+                # true for face-unique values; CONNECTIVITY never
+                # has both neighbours equal).
+                assert gap > 1e-6, (
+                    f"Test setup error: face {face} {label} adjacent "
+                    f"neighbours have equal value (v_a={v_a}, "
+                    f"v_b={v_b}); face-unique field cannot exercise "
+                    f"two-face blend.")
+                midpoint = 0.5 * (lo + hi)
+                margin = 0.02 * gap   # 2% margin to absorb float drift
+                some_below = bool(np.any(block < midpoint - margin))
+                some_above = bool(np.any(block > midpoint + margin))
+                assert some_below and some_above, (
+                    f"face {face} {label} corner block: lacks SPATIAL "
+                    f"two-face blend.  midpoint = {midpoint:.3f} "
+                    f"(between v_a={v_a}, v_b={v_b}); "
+                    f"some_below_midpoint = {some_below}, "
+                    f"some_above_midpoint = {some_above}.  Cells: "
+                    f"{sorted(set(block.flatten().tolist()))}.  "
+                    f"A genuine two-face blend produces cells "
+                    f"closer to v_a near the v_a edge AND cells "
+                    f"closer to v_b near the v_b edge."
+                )
+
+    def test_duogrid_at_halo3_third_ring_carries_neighbour_data(self):
+        """Iter-535 (Codex follow-up to iter-534): the iter-534
+        edge-match test only checks `p_h3[1:-1, 1:-1]` — the overlap
+        with halo=2.  The OUTERMOST ring of halo=3 (depth=2 edge
+        strip + depth-2 corners) is never verified.
+
+        This test uses a face-unique constant field (each face set
+        to its face index) so that the depth-2 edge strip MUST
+        contain the neighbour-face's value (because depth=2 pulls
+        from the 3rd row of the neighbour's interior, which under a
+        face-unique field equals that neighbour's face index for
+        every cell).
+
+        The duogrid Lagrange remap on a face-unique field also
+        preserves neighbour-face values exactly (the Lagrange weights
+        sum to 1, and a constant input gives the same constant
+        output).  So the depth-2 edge strip of p_h3 MUST match the
+        neighbour face's value, not stay at zero (which would
+        indicate the duogrid-h3 path silently skipped depth 2).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True, duogrid_ng=4)
+
+        # Face-unique constant field: each face = (face + 1.0).
+        data = jnp.zeros((6, n, n), dtype=jnp.float64)
+        for f in range(6):
+            data = data.at[f].set(float(f) + 1.0)
+
+        p_h3 = pad_halo(data, halo=3, duogrid=grid.duogrid)
+        p_h3_np = np.asarray(p_h3)
+        assert p_h3_np.shape == (6, n + 6, n + 6)
+
+        # Depth=2 strip positions in halo=3 padded array (interior at
+        # [3:-3, 3:-3]):
+        #   WEST  depth=2 → i=0
+        #   EAST  depth=2 → i=n+5
+        #   SOUTH depth=2 → j=0
+        #   NORTH depth=2 → j=n+5
+        # Strip range along the orthogonal axis: [3:-3] (interior j or i).
+        # Each cell of these strips should equal the neighbour face's
+        # constant value (= nbr_face + 1.0).
+        for face in range(6):
+            for edge in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, nbr_edge, _rev = CONNECTIVITY[face][edge]
+                expected = float(nbr_face) + 1.0
+                if edge == WEST:
+                    strip = p_h3_np[face, 0, 3:-3]
+                elif edge == EAST:
+                    strip = p_h3_np[face, n + 5, 3:-3]
+                elif edge == SOUTH:
+                    strip = p_h3_np[face, 3:-3, 0]
+                else:
+                    strip = p_h3_np[face, 3:-3, n + 5]
+                # Allow small float drift from the Lagrange remap
+                # (weights sum to 1 in exact arithmetic; float32
+                # gives ~1e-6 drift).
+                np.testing.assert_allclose(
+                    strip, expected, rtol=1e-5, atol=1e-6,
+                    err_msg=(f"face {face} edge {edge} depth=2 "
+                             f"strip = {strip} but expected "
+                             f"neighbour face {nbr_face} value "
+                             f"= {expected}.  iter-533 halo=3 path "
+                             f"is silently broken at depth=2 — "
+                             f"`cube_rmp_vectorized`'s loop or the "
+                             f"underlying `_pad_halo_local_h3` did "
+                             f"not populate the third ring."))
+
+    def test_duogrid_at_halo3_h2_h3_edge_match(self):
+        """Iter-534 (Codex follow-up to iter-533): the constant-field
+        test alone is too weak — it would pass even if the duogrid
+        halo=3 path silently did nothing on the outer halo cells.
+
+        Stronger guard: on a smooth non-constant field, the halo=3
+        output's EDGE-STRIP region (the cells filled by face-to-face
+        edge exchange + Lagrange remap, EXCLUDING cube-vertex
+        corner cells) must match the halo=2 output at the
+        corresponding interior-overlap positions.
+
+        Cube-vertex corner cells of `p_h3[1:-1, 1:-1]` and
+        `p_h2[:, :]` differ legitimately because corner-fill rules
+        depend on halo depth (the corner-fill recursion fills the
+        interior-most diagonal first, then propagates outward;
+        h=3's depth-1 cell uses different neighbours from h=2's
+        outermost-cell corner-fill).
+
+        This test masks out the cube-vertex corner cells and asserts
+        the remaining edge cells match.  Verified for both ng=4
+        (full Lagrange at all 3 halo depths) and ng=2 (Lagrange +
+        averaging fallback at outer halo).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        n = 8
+        for ng in (4, 2):
+            grid = create_cubed_sphere(
+                n=n, use_duogrid=True, duogrid_ng=ng)
+            data = jnp.cos(grid.lat) ** 2 + 0.1 * grid.lon
+            p_h2 = pad_halo(data, halo=2, duogrid=grid.duogrid)
+            p_h3 = pad_halo(data, halo=3, duogrid=grid.duogrid)
+            assert p_h2.shape == (6, n + 4, n + 4)
+            assert p_h3.shape == (6, n + 6, n + 6)
+            inner_h3 = np.asarray(p_h3[:, 1:-1, 1:-1])  # (6, n+4, n+4)
+            ref_h2 = np.asarray(p_h2)                    # (6, n+4, n+4)
+            # Mask: cell (i, j) is a corner-fill cell (depends on halo
+            # depth) iff BOTH i and j are inside one of the 2-cell
+            # halo strips at the array boundary (i.e., the four 2×2
+            # corner blocks at [0..1, 0..1], [0..1, n+2..n+3], etc.).
+            # The remaining cells are either interior or pure
+            # edge-strip cells, which DO match between halo=2 and the
+            # iter-533 halo=3 inner overlap.
+            np_p2 = n + 4
+            halo_w = 2
+            in_i_halo = lambda i: i < halo_w or i >= np_p2 - halo_w
+            mask = np.ones((np_p2, np_p2), dtype=bool)
+            for i in range(np_p2):
+                for j in range(np_p2):
+                    if in_i_halo(i) and in_i_halo(j):
+                        mask[i, j] = False
+            np.testing.assert_allclose(
+                inner_h3[:, mask], ref_h2[:, mask],
+                rtol=1e-6, atol=1e-6,
+                err_msg=(f"duogrid_ng={ng}: halo=3 edge-strip / "
+                         f"interior cells do not match halo=2.  "
+                         f"iter-533 path is silently broken at edge "
+                         f"halos.  (Corner 2×2 blocks excluded — "
+                         f"those legitimately differ by halo depth.)"))
+
+
+# ---------------------------------------------------------------------------
+# Public-API guardrails for halo=3 (iter-500, Codex stop-time fix;
+# updated iter-726 after iter-723/724 extended halo=3 to the 4D path)
+# ---------------------------------------------------------------------------
+
+class TestPadHaloH3Guardrails:
+    """Codex flagged iter-499 for exposing halo=3 publicly without
+    enough guardrails.  These tests pin down the guardrails:
+
+    1. `pad_halo(halo=3)` validates `interp_offsets` shape — wrong
+       shape raises `ValueError` clearly instead of IndexError.
+    2. `pad_halo_4d(halo=3)` — **changed iter-723/724**: was
+       `NotImplementedError`, now a working path returning
+       `(6, n+6, n+6, nlev)`.  The new contract is pinned here AND
+       at greater length in `tests/unit/test_halo.py::
+       TestPadHalo4DHalo3Iter725`.
+    3. `pad_halo_vector(halo=3)` raises `NotImplementedError` — the
+       vector rotation round-trip depends on h=3 padded grid angles
+       and half-metrics, none of which exist yet.
+    """
+
+    def test_pad_halo_halo3_rejects_h1_shape_offsets(self):
+        """Passing h1-shape offsets (6, 4, n) with halo=3 must raise
+        ValueError — the halo=3 path strictly requires h3 shape
+        (6, 4, 3, n)."""
+        from legoesm.grids.halo import compute_halo_interp_offsets
+        offsets_h1 = compute_halo_interp_offsets(N)  # (6, 4, N)
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=offsets_h1)
+
+    def test_pad_halo_halo3_rejects_h2_shape_offsets(self):
+        from legoesm.grids.halo import compute_halo_interp_offsets_h2
+        offsets_h2 = compute_halo_interp_offsets_h2(N)  # (6, 4, 2, N)
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=offsets_h2)
+
+    def test_pad_halo_halo3_rejects_non4d_offsets(self):
+        """Wrong ndim for halo=3 must be caught."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((6, 4, N), dtype=jnp.float64)  # ndim=3
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_halo3_rejects_wrong_face_axis(self):
+        """Iter-501 (Codex): non-6 face axis must be caught, not silently
+        accepted because ndim and depth happen to match."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((10, 4, 3, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_halo3_rejects_wrong_edge_axis(self):
+        """Non-4 edge axis must be rejected."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((6, 7, 3, N), dtype=jnp.float64)
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_halo3_rejects_n_mismatch(self):
+        """Final axis (n) must match data.shape[1] — otherwise _interp_strip
+        silently produces wrong-sized output."""
+        data = jnp.ones((6, N, N), dtype=jnp.float64)
+        bad = jnp.zeros((6, 4, 3, N + 2), dtype=jnp.float64)  # n axis wrong
+        with pytest.raises(ValueError, match=r"halo=3 expects"):
+            pad_halo(data, halo=3, interp_offsets=bad)
+
+    def test_pad_halo_4d_halo3_works_iter723(self):
+        """Iter-723/724 extended halo=3 to the 4D path.  This test
+        (was `test_pad_halo_4d_halo3_raises_notimplemented` before
+        iter-726) pins the inverted contract: the call now returns
+        a padded array of shape `(6, N+6, N+6, 3)` rather than
+        raising.  Full behavioral coverage is in
+        `tests/unit/test_halo.py::TestPadHalo4DHalo3Iter725`; this
+        test keeps a spot-check here so readers of the H3 guardrails
+        class see the current contract without cross-file hopping."""
+        from legoesm.grids.halo import pad_halo_4d
+        data = jnp.ones((6, N, N, 3), dtype=jnp.float64)
+        padded = pad_halo_4d(data, halo=3)
+        assert padded.shape == (6, N + 6, N + 6, 3)
+
+    def test_packed_pad_halo_mpi_4d_halo4_raises_notimplemented(self):
+        """Iter-629 (was iter-612): halo=3 MPI path now live.  The
+        delegation lock still holds — `packed_pad_halo_mpi_4d`
+        propagates `pad_halo_mpi_4d`'s NotImplementedError, now at
+        halo=4 instead of halo=3."""
+        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+
+        class _Stub:
+            tiling = (1, 1)
+        a = jnp.ones((6, N, N, 2), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError,
+                            match="pad_halo_mpi_4d"):
+            packed_pad_halo_mpi_4d(a, topology=_Stub(), halo=4)
+        b = jnp.ones((6, N, N, 3), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError,
+                            match="pad_halo_mpi_4d"):
+            packed_pad_halo_mpi_4d(a, b, topology=_Stub(), halo=4)
+
+    def test_pad_halo_mpi_face_only_4d_halo3_single_rank(self):
+        """Iter-628: `_pad_halo_mpi_face_only_4d` now supports halo=3
+        for the single-rank (all-local-edge) case.
+
+        Single-rank topology has `len(local_face_ids) == 6` and NO
+        remote edges.  In this case the sendrecv path is never
+        triggered (`if not remote_edges: return padded`), so
+        mpi4jax isn't required.  The local-edge loop now uses
+        `_place_strip_h3_4d` for halo=3 (iter-627 helper).
+
+        Test: build single-rank topology, call the helper with
+        random (6, n, n, nlev) input, verify the output matches
+        the local scalar `_pad_halo_local_h3` applied level-by-
+        level — the two paths should produce identical halo
+        exchange for a single-rank all-local configuration.
+        """
+        from legoesm.parallel.halo_exchange import (
+            _pad_halo_mpi_face_only_4d)
+        from legoesm.parallel.comm import build_comm_topology
+        from legoesm.grids.halo import _pad_halo_local_h3
+
+        topology = build_comm_topology(rank=0, n_processes=1)
+        assert len(topology.local_face_ids) == 6, (
+            "Single-rank topology should have all 6 faces local")
+
+        n = N
+        nlev = 2
+        rng = np.random.default_rng(628)
+        data = jnp.asarray(
+            rng.standard_normal((6, n, n, nlev)))
+
+        # Call the 4D helper (no mpi4jax / MPI needed when no
+        # remote edges).
+        padded_4d = _pad_halo_mpi_face_only_4d(
+            data, topology, halo=3, mpi4jax=None, MPI=None)
+        assert padded_4d.shape == (6, n + 6, n + 6, nlev)
+
+        # Reference: apply scalar `_pad_halo_local_h3` level-by-level
+        # and stack.
+        refs = [np.asarray(_pad_halo_local_h3(data[..., lev]))
+                for lev in range(nlev)]
+        padded_ref = np.stack(refs, axis=-1)
+
+        diff = float(np.max(np.abs(
+            np.asarray(padded_4d) - padded_ref)))
+        assert diff < 1e-12, (
+            f"4D halo=3 helper deviates from scalar h3 ref by "
+            f"{diff:.3e}.  Check: local-edge branch uses "
+            f"_place_strip_h3_4d, corner fill uses _fill_corners_h3, "
+            f"strip extraction uses _extract_edge_strip_at_depth_4d "
+            f"for depths 0, 1, AND 2.")
+
+    def test_place_strip_h3_4d_index_conventions(self):
+        """Iter-627: lock the depth-to-index mapping for the new
+        `_place_strip_h3_4d` helper (step #7 of the iter-613 port
+        spec for `pad_halo_mpi_4d(halo=3)`).
+
+        Depth conventions:
+          depth 0 = adjacent to interior
+          depth 1 = middle halo ring
+          depth 2 = outermost halo ring
+
+        For halo=3 shape (6, n+6, n+6, nlev), interior at [3:-3, 3:-3],
+        halo indices per side:
+          WEST:  i=2 (d0) / i=1 (d1) / i=0 (d2)
+          EAST:  i=n+3 (d0) / i=n+4 (d1) / i=n+5 (d2)
+          SOUTH: j=2 (d0) / j=1 (d1) / j=0 (d2)
+          NORTH: j=n+3 (d0) / j=n+4 (d1) / j=n+5 (d2)
+
+        Test strategy: build 3 distinctively-valued strips (all 1s,
+        2s, 3s), place them, then verify each cell holds the right
+        depth value.
+        """
+        from legoesm.parallel.halo_exchange import _place_strip_h3_4d
+
+        n = 4
+        nlev = 2
+        padded = jnp.zeros((6, n + 6, n + 6, nlev), dtype=jnp.float64)
+        strip_d0 = jnp.full((n, nlev), 1.0)  # adjacent-to-interior
+        strip_d1 = jnp.full((n, nlev), 2.0)  # middle
+        strip_d2 = jnp.full((n, nlev), 3.0)  # outermost
+
+        # WEST:
+        padded_w = _place_strip_h3_4d(
+            padded, 0, WEST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_w[0, 2, 3:-3, :] == 1.0), (
+            "WEST depth-0 (i=2) should hold strip_d0 (1.0)")
+        assert jnp.all(padded_w[0, 1, 3:-3, :] == 2.0), (
+            "WEST depth-1 (i=1) should hold strip_d1 (2.0)")
+        assert jnp.all(padded_w[0, 0, 3:-3, :] == 3.0), (
+            "WEST depth-2 (i=0, outermost) should hold strip_d2 (3.0)")
+
+        # EAST:
+        padded_e = _place_strip_h3_4d(
+            padded, 1, EAST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_e[1, n + 3, 3:-3, :] == 1.0), (
+            "EAST depth-0 (i=n+3) should hold strip_d0")
+        assert jnp.all(padded_e[1, n + 4, 3:-3, :] == 2.0), (
+            "EAST depth-1 (i=n+4) should hold strip_d1")
+        assert jnp.all(padded_e[1, n + 5, 3:-3, :] == 3.0), (
+            "EAST depth-2 (i=n+5, outermost) should hold strip_d2")
+
+        # SOUTH:
+        padded_s = _place_strip_h3_4d(
+            padded, 2, SOUTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_s[2, 3:-3, 2, :] == 1.0)
+        assert jnp.all(padded_s[2, 3:-3, 1, :] == 2.0)
+        assert jnp.all(padded_s[2, 3:-3, 0, :] == 3.0)
+
+        # NORTH:
+        padded_n = _place_strip_h3_4d(
+            padded, 3, NORTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_n[3, 3:-3, n + 3, :] == 1.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 4, :] == 2.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 5, :] == 3.0)
+
+        # Interior and cross-axis halo cells should be UNCHANGED
+        # (placement is 1D, preserves other strips).
+        assert jnp.all(padded_w[0, 3:-3, 3:-3, :] == 0.0), (
+            "WEST placement must not touch interior")
+        assert jnp.all(padded_w[0, 3:, :3, :] == 0.0), (
+            "WEST placement must not touch SE corner (different side)")
+
+    def test_pad_halo_mpi_face_only_halo3_single_rank_iter630(self):
+        """Iter-630 (Codex follow-up): `_pad_halo_mpi_face_only` (2D
+        scalar) was still hard-failing on halo=3 in its `else:` branch
+        even after iter-627/628 lifted halo=3 on the 4D helpers.  With
+        the 2D path now taught to use `_place_strip_h3` for local edges
+        and the 3*n-chunk recv layout for remote edges, the single-
+        rank (all-local) scalar path must match `_pad_halo_local_h3`
+        bit-for-bit.
+        """
+        from legoesm.parallel.halo_exchange import (
+            _pad_halo_mpi_face_only)
+        from legoesm.parallel.comm import build_comm_topology
+        from legoesm.grids.halo import _pad_halo_local_h3
+
+        topology = build_comm_topology(rank=0, n_processes=1)
+        assert len(topology.local_face_ids) == 6, (
+            "Single-rank topology should have all 6 faces local")
+
+        n = N
+        rng = np.random.default_rng(630)
+        data = jnp.asarray(rng.standard_normal((6, n, n)))
+
+        padded_mpi = _pad_halo_mpi_face_only(
+            data, topology, halo=3, mpi4jax=None, MPI=None)
+        padded_ref = np.asarray(_pad_halo_local_h3(data))
+
+        assert padded_mpi.shape == padded_ref.shape == (6, n + 6, n + 6)
+        diff = float(np.max(np.abs(
+            np.asarray(padded_mpi) - padded_ref)))
+        assert diff < 1e-12, (
+            f"2D MPI face-only halo=3 deviates from scalar h3 ref by "
+            f"{diff:.3e}.  Check: local-edge branch uses "
+            f"_place_strip_h3, corner fill uses _fill_corners_h3, "
+            f"strip extraction uses _extract_edge_strip_at_depth for "
+            f"depths 0, 1, AND 2.")
+
+    def test_place_strip_h3_index_conventions_iter630(self):
+        """Iter-630: lock the 2D depth-to-index mapping for the new
+        `_place_strip_h3` helper (scalar analogue of iter-627's
+        `_place_strip_h3_4d`).
+
+        Depth conventions (same as 4D version, minus the nlev axis):
+          depth 0 = adjacent to interior
+          depth 1 = middle halo ring
+          depth 2 = outermost halo ring
+        """
+        from legoesm.parallel.halo_exchange import _place_strip_h3
+
+        n = 4
+        padded = jnp.zeros((6, n + 6, n + 6), dtype=jnp.float64)
+        strip_d0 = jnp.full((n,), 1.0)  # adjacent-to-interior
+        strip_d1 = jnp.full((n,), 2.0)  # middle
+        strip_d2 = jnp.full((n,), 3.0)  # outermost
+
+        # WEST
+        padded_w = _place_strip_h3(
+            padded, 0, WEST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_w[0, 2, 3:-3] == 1.0)
+        assert jnp.all(padded_w[0, 1, 3:-3] == 2.0)
+        assert jnp.all(padded_w[0, 0, 3:-3] == 3.0)
+
+        # EAST
+        padded_e = _place_strip_h3(
+            padded, 1, EAST, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_e[1, n + 3, 3:-3] == 1.0)
+        assert jnp.all(padded_e[1, n + 4, 3:-3] == 2.0)
+        assert jnp.all(padded_e[1, n + 5, 3:-3] == 3.0)
+
+        # SOUTH
+        padded_s = _place_strip_h3(
+            padded, 2, SOUTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_s[2, 3:-3, 2] == 1.0)
+        assert jnp.all(padded_s[2, 3:-3, 1] == 2.0)
+        assert jnp.all(padded_s[2, 3:-3, 0] == 3.0)
+
+        # NORTH
+        padded_n = _place_strip_h3(
+            padded, 3, NORTH, strip_d0, strip_d1, strip_d2)
+        assert jnp.all(padded_n[3, 3:-3, n + 3] == 1.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 4] == 2.0)
+        assert jnp.all(padded_n[3, 3:-3, n + 5] == 3.0)
+
+        # Interior unaffected by any single-side placement.
+        assert jnp.all(padded_w[0, 3:-3, 3:-3] == 0.0)
+
+    def test_iter613_mpi_halo3_port_anchors_present(self):
+        """Iter-614 (Codex follow-up to iter-613): the iter-613 port
+        spec referenced line numbers (e.g., "line ~670") that ROT on
+        any edit above the anchor.  Iter-614 replaced line refs with
+        stable `[ANCHOR iter-613: <name>]` comment tags placed in
+        the helper bodies; the spec now references the tags by name.
+
+        This test verifies each named anchor is actually present in
+        `src/legoesm/parallel/halo_exchange.py` — so if someone
+        removes or renames an anchor in a refactor, the port spec
+        no longer dangles, and the test fires with a clear message.
+
+        Required anchors (all inside the MPI 4D helpers):
+          - `local-edge-depth-extraction` (face-only)
+          - `remote-recv-depth-extraction` (face-only)
+          - `corner-fill-face-only` (face-only)
+          - `corner-fill-face-only-post-recv` (face-only)
+          - `tiled-remote-depth-extraction` (tiled docstring)
+          - `corner-fill-tiled-early` (tiled docstring)
+          - `corner-fill-tiled-late` (tiled docstring)
+        """
+        import pathlib
+        import tokenize
+        src = pathlib.Path(
+            __file__).resolve().parent.parent.parent / (
+            "src/legoesm/parallel/halo_exchange.py")
+        text = src.read_text()
+        required_anchors = (
+            "local-edge-depth-extraction",
+            "remote-recv-depth-extraction",
+            "corner-fill-face-only",
+            "corner-fill-face-only-post-recv",
+            "tiled-remote-depth-extraction",
+            "corner-fill-tiled-early",
+            "corner-fill-tiled-late",
+        )
+        # Iter-616 (Codex follow-up): require each anchor to appear
+        # in a Python COMMENT token, not in a string literal or
+        # docstring.  Iter-615's plain-text search had a false-
+        # positive hole: a contributor could add the anchor string
+        # inside a docstring or unrelated string literal while
+        # deleting the real code comment, and the test would still
+        # pass.  Using `tokenize.tokenize` filters to COMMENT
+        # tokens, which are guaranteed to be real source-level `#`
+        # comments — the only place a legitimate anchor can live.
+        comment_texts: list[str] = []
+        with src.open("rb") as fh:
+            for tok in tokenize.tokenize(fh.readline):
+                if tok.type == tokenize.COMMENT:
+                    comment_texts.append(tok.string)
+        comments_joined = "\n".join(comment_texts)
+        missing = [a for a in required_anchors
+                    if f"ANCHOR iter-613: {a}" not in comments_joined]
+        assert not missing, (
+            f"iter-613 port-spec anchors missing in "
+            f"`src/legoesm/parallel/halo_exchange.py`: {missing}. "
+            f"Iter-614 tagged the 7 insertion sites with stable "
+            f"[ANCHOR iter-613: <name>] comments so the halo=3 "
+            f"port spec (inside `pad_halo_mpi_4d`) can reference "
+            f"them by name.  If an anchor disappears the port "
+            f"spec dangles — restore the anchor or update the "
+            f"spec if the refactor moved the insertion site "
+            f"entirely.")
+
+    def test_pad_halo_mpi_4d_halo4_raises_notimplemented(self):
+        """Iter-629 (was iter-611): halo=3 MPI path is now live.
+        The "unsupported halo raises" contract is still enforced —
+        now at halo=4 (and beyond).  The iter-611 guard that
+        rejected halo=3 was removed in iter-629 after steps 1-7 of
+        the iter-613 port spec were all implemented.
+        """
+        import numpy as np
+        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+
+        class _Stub:
+            tiling = (1, 1)
+        data = jnp.ones((6, N, N, 2), dtype=jnp.float64)
+        with pytest.raises(NotImplementedError,
+                            match="pad_halo_mpi_4d"):
+            pad_halo_mpi_4d(data, _Stub(), halo=4)
+
+    def test_pad_halo_vector_halo3_works_on_local_backend(self):
+        """Iter-595: pad_halo_vector(halo=3) is SUPPORTED on the
+        single-device (non-MPI) backend.  Callers must supply
+        `cos_angle_padded_h3` / `sin_angle_padded_h3` (shape
+        (6, n+6, n+6)) — the scalar `pad_halo(halo=3)` internal
+        call has been validated since iter-499.
+
+        **Iter-596 Codex follow-up**: the iter-595 version of this
+        test only checked interior preservation — the halo cells the
+        relaxed guard exposed were not validated at all.  This
+        version adds THREE halo-cell validations:
+
+        1. **Inner two halo=3 rings match halo=2 exchange** at the
+           overlapping physical cells.  The halo=2 vector path is
+           validated by the rest of `TestPadHaloH3Dispatch` and is
+           what existing callers use.  h=3 must reproduce h=2 at
+           the overlap to be a safe drop-in for future callers.
+
+        2. **Interior preserved** (iter-595 invariant): rotation
+           round-trip to ~1e-10 float64 noise.
+
+        3. **Outermost h=3 ring carries neighbour-face data**: for a
+           face-unique input (each face has a distinctive constant
+           value), the outermost halo ring of face 0 must match one
+           of the neighbouring faces' values — NOT be garbage or
+           left as zeros / NaN.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo_vector
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        # Use RANDOM (non-constant) inputs — constant inputs would
+        # leak halo artefacts through rotation.  Random x64 inputs
+        # exercise the full rotation+pad+inverse-rotation chain.
+        rng = np.random.default_rng(596)
+        u = jnp.asarray(rng.standard_normal((6, n, n)))
+        v = jnp.asarray(rng.standard_normal((6, n, n)))
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+
+        # --- halo=3 exchange (the NEW path) ---
+        up3, vp3 = pad_halo_vector(
+            u, v,
+            ca, sa,
+            grid.cos_angle_padded_h3.astype(jnp.float64),
+            grid.sin_angle_padded_h3.astype(jnp.float64),
+            interp_offsets=grid.halo_interp_offsets_h3,
+            halo=3,
+        )
+        assert up3.shape == (6, n + 6, n + 6)
+        assert vp3.shape == (6, n + 6, n + 6)
+
+        # --- halo=2 exchange (the VALIDATED REFERENCE) ---
+        up2, vp2 = pad_halo_vector(
+            u, v,
+            ca, sa,
+            grid.cos_angle_padded_h2.astype(jnp.float64),
+            grid.sin_angle_padded_h2.astype(jnp.float64),
+            interp_offsets=grid.halo_interp_offsets_h2,
+            halo=2,
+        )
+
+        # --- Check 1 (iter-595): interior preserved in h=3 ---
+        np.testing.assert_allclose(
+            np.asarray(up3[:, 3:-3, 3:-3]), np.asarray(u),
+            atol=1e-10, err_msg="h=3 interior u deviates from input")
+        np.testing.assert_allclose(
+            np.asarray(vp3[:, 3:-3, 3:-3]), np.asarray(v),
+            atol=1e-10, err_msg="h=3 interior v deviates from input")
+
+        # --- Check 2 (iter-596): h=3 inner two halo rings match
+        # h=2 output at the same physical cells.  The shapes are:
+        #   h=2: (6, n+4, n+4), halo rings at [:2] and [-2:]
+        #   h=3: (6, n+6, n+6), halo rings at [:3] and [-3:]
+        # The INNER two rings of h=3 (indices [1, 2] and [-2, -3])
+        # correspond to the two rings of h=2 (indices [0, 1] and
+        # [-1, -2]).
+        # West halo: h=2 row [f, i, :] for i in {0, 1}
+        #            h=3 row [f, i+1, :] for i in {0, 1} at the same
+        #            transverse range [2:-2] in h=2 vs [3:-3] in h=3.
+        def _inner_h3(arr, side):
+            """Return the inner two halo rings of a h=3 padded array."""
+            if side == "W":
+                return arr[:, 1:3, 3:-3]
+            if side == "E":
+                return arr[:, -3:-1, 3:-3]
+            if side == "S":
+                return arr[:, 3:-3, 1:3]
+            if side == "N":
+                return arr[:, 3:-3, -3:-1]
+            raise ValueError(side)
+
+        def _all_h2(arr, side):
+            """Return the h=2 halo rings (both)."""
+            if side == "W":
+                return arr[:, 0:2, 2:-2]
+            if side == "E":
+                return arr[:, -2:, 2:-2]
+            if side == "S":
+                return arr[:, 2:-2, 0:2]
+            if side == "N":
+                return arr[:, 2:-2, -2:]
+            raise ValueError(side)
+
+        for side in ("W", "E", "S", "N"):
+            for comp_label, arr3, arr2 in (
+                    ("u", up3, up2), ("v", vp3, vp2)):
+                h3_rings = np.asarray(_inner_h3(arr3, side))
+                h2_rings = np.asarray(_all_h2(arr2, side))
+                diff = float(np.max(np.abs(h3_rings - h2_rings)))
+                assert diff < 1e-10, (
+                    f"h=3 inner halo rings on {side} {comp_label} "
+                    f"diverge from validated h=2 output by "
+                    f"{diff:.3e}.  The h=3 halo path must "
+                    f"reproduce h=2 at overlapping physical "
+                    f"cells — this anchors the new path to "
+                    f"the validated reference.")
+
+        # --- Check 3: outermost h=3 ring carries non-trivial data.
+        # For random inputs, the outermost halo ring on each face
+        # should have values in the same distribution as the inputs.
+        # A bug that returned zeros or NaN would fire |outer| ~ 0 or
+        # non-finite.
+        for side, slicer in (
+                ("W", (slice(None), 0, slice(3, -3))),
+                ("E", (slice(None), -1, slice(3, -3))),
+                ("S", (slice(None), slice(3, -3), 0)),
+                ("N", (slice(None), slice(3, -3), -1))):
+            outer_u = np.asarray(up3[slicer])
+            outer_v = np.asarray(vp3[slicer])
+            assert np.isfinite(outer_u).all(), (
+                f"h=3 outermost {side} u has non-finite values")
+            assert np.isfinite(outer_v).all(), (
+                f"h=3 outermost {side} v has non-finite values")
+            # Magnitude check: should be in the same range as input
+            # (random normal, so |max| ~ O(1)).  A bug that zeroed
+            # the outer ring would produce max ~ 0.
+            max_outer = float(np.max(np.abs(outer_u))
+                              + np.max(np.abs(outer_v)))
+            assert max_outer > 0.1, (
+                f"h=3 outermost {side} ring has near-zero "
+                f"magnitude ({max_outer:.3e}); expected O(1) "
+                f"for random unit-variance inputs.  The halo "
+                f"exchange may have silently failed for the "
+                f"outermost ring.")
+
+    def test_pad_halo_vector_halo3_outer_ring_exact_constant_geographic_wind(self):
+        """Iter-597 (Codex stop-time review on iter-596): the iter-596
+        outer-ring check only verified non-triviality (finite, |max| >
+        0.1), not CORRECTNESS.  A bug that produced `0.5 * expected`
+        everywhere in the outer ring would pass iter-596's check but
+        silently halve the halo amplitude.
+
+        This test nails the outer ring to an EXACT reference via a
+        constant-geographic-wind round-trip:
+
+          Input: u_grid = cos_angle, v_grid = -sin_angle.
+          This corresponds to u_east = 1, v_north = 0 everywhere
+          on the sphere (pure zonal flow at constant speed 1).
+
+          After `pad_halo_vector(halo=3)`:
+            - u_east_padded should be 1 everywhere (halo fills from
+              neighbour face's u_east = 1).
+            - v_north_padded should be 0 everywhere.
+            - After inverse rotation via cos_angle_padded_h3 /
+              sin_angle_padded_h3, the grid-aligned outputs are:
+                u_padded[f, i, j] = cos_angle_padded_h3[f, i, j]
+                v_padded[f, i, j] = -sin_angle_padded_h3[f, i, j]
+              at EVERY cell including the outermost halo ring.
+
+        Tolerance 1e-6: `halo_interp_offsets_h3` is stored as float32
+        in the grid (default storage dtype), so the offset arithmetic
+        inside `pad_halo(halo=3)` introduces O(float32 eps) ≈ 1.2e-7
+        error even when the input data is float64.  1e-6 is ~8x above
+        this floor — catches O(1) bugs (wrong rotation, wrong halo
+        cells, missing neighbour data) while tolerating the storage-
+        precision noise.
+
+        This makes the outermost halo ring a PREDICTED value at
+        every cell, closing the iter-596 correctness gap.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo_vector
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = grid.cos_angle_padded_h3.astype(jnp.float64)
+        sap3 = grid.sin_angle_padded_h3.astype(jnp.float64)
+
+        # Constant geographic wind u_east=1, v_north=0:
+        # grid-aligned = inverse rotation of (1, 0)
+        # u_grid = cos(angle) * u_east + sin(angle) * v_north = cos
+        # v_grid = -sin(angle) * u_east + cos(angle) * v_north = -sin
+        u_grid = ca
+        v_grid = -sa
+
+        up, vp = pad_halo_vector(
+            u_grid, v_grid,
+            ca, sa, cap3, sap3,
+            interp_offsets=grid.halo_interp_offsets_h3,
+            halo=3,
+        )
+
+        # Predicted output at every padded cell:
+        #   u_padded = cos_angle_padded_h3  (since u_east=1)
+        #   v_padded = -sin_angle_padded_h3 (since v_north=0)
+        u_expected = cap3
+        v_expected = -sap3
+
+        # Check #1: full padded output matches prediction.
+        u_diff = float(np.max(np.abs(
+            np.asarray(up) - np.asarray(u_expected))))
+        v_diff = float(np.max(np.abs(
+            np.asarray(vp) - np.asarray(v_expected))))
+        assert u_diff < 1e-6, (
+            f"halo=3 vector pad for constant u_east=1, v_north=0 "
+            f"failed: max|u_out - cos_angle_padded_h3| = {u_diff:.3e}. "
+            f"Expected exact rotation round-trip at every padded "
+            f"cell including the outermost halo ring.  If this "
+            f"fires, the halo=3 vector path either has a rotation "
+            f"sign error, the wrong padded angle, or the scalar "
+            f"pad_halo(halo=3) does not propagate constants at the "
+            f"outer ring.")
+        assert v_diff < 1e-6, (
+            f"halo=3 vector pad for constant u_east=1, v_north=0 "
+            f"failed: max|v_out - (-sin_angle_padded_h3)| = "
+            f"{v_diff:.3e}.")
+
+        # Check #2: lock the diff specifically on the OUTERMOST halo
+        # ring (which iter-596 was missing correctness for).  Isolate
+        # the 4 outer strips.
+        for label, slicer in (
+                ("W (i=0)",  (slice(None), 0, slice(None))),
+                ("E (i=-1)", (slice(None), -1, slice(None))),
+                ("S (j=0)",  (slice(None), slice(None), 0)),
+                ("N (j=-1)", (slice(None), slice(None), -1))):
+            u_outer_diff = float(np.max(np.abs(
+                np.asarray(up[slicer])
+                - np.asarray(u_expected[slicer]))))
+            v_outer_diff = float(np.max(np.abs(
+                np.asarray(vp[slicer])
+                - np.asarray(v_expected[slicer]))))
+            assert u_outer_diff < 1e-6, (
+                f"halo=3 outermost {label} u deviates from "
+                f"cos_angle_padded_h3 by {u_outer_diff:.3e} — "
+                f"outermost-ring correctness regression.")
+            assert v_outer_diff < 1e-6, (
+                f"halo=3 outermost {label} v deviates from "
+                f"-sin_angle_padded_h3 by {v_outer_diff:.3e} — "
+                f"outermost-ring correctness regression.")
+
+    def test_pad_halo_vector_halo3_outer_ring_face_unique_connectivity(self):
+        """Iter-598 (Codex stop-time review on iter-597): the iter-597
+        constant-u_east test doesn't exercise interpolation because
+        `interp(constant) = constant` regardless of offset weights.
+        A bug in the interp_offsets dispatch for the outermost ring
+        (e.g., reading wrong depth or wrong neighbour face) would
+        pass iter-597 silently.
+
+        This test uses FACE-UNIQUE inputs (each face has a distinct
+        u_east value) to validate two additional correctness
+        properties at the outermost halo ring:
+
+        1. **CONNECTIVITY**: the halo cell on face A's WEST ring
+           must pull from the neighbour face specified by
+           `CONNECTIVITY[A][WEST][0]` — NOT another face.  A bug
+           that swapped neighbour faces would give a different
+           u_east constant and fire the check.
+        2. **Rotation anchor**: the grid-aligned output must equal
+           `cos_angle_padded_h3[A, halo_cell] * nbr_face_u_east` —
+           this checks the INVERSE rotation uses the correct
+           padded-angle value at each halo cell (not, e.g., a
+           transverse position or a wrong-face angle).
+
+        Input setup: u_east[f] = f+1 (constant per face, different
+        between faces).  v_north = 0.  The grid-aligned input is
+        u_grid = (f+1)*cos_angle, v_grid = -(f+1)*sin_angle.
+
+        Expected output at face A's WEST outermost halo (i=0):
+          u_grid_out[A, 0, j] = cos_angle_padded_h3[A, 0, j] * (nbr+1)
+          v_grid_out[A, 0, j] = -sin_angle_padded_h3[A, 0, j] * (nbr+1)
+        where nbr = CONNECTIVITY[A][WEST][0].
+
+        Because `u_east` is constant per face (but varies between
+        faces), the interp_offsets interpolation AT the halo cells
+        still returns the neighbour-face constant (it interpolates
+        between identical source values).  So this test validates
+        CONNECTIVITY and rotation but NOT non-constant interpolation
+        weights — that separate test would need a spatially varying
+        geographic wind and is out of scope here.  Combined with
+        iter-596 inner-ring h2 anchor + iter-597 exact-rotation
+        lock, this iter-598 test closes the correctness gap for
+        the NEW outermost-ring cells.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import (
+            pad_halo_vector, CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
+        )
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = np.asarray(grid.cos_angle_padded_h3, dtype=np.float64)
+        sap3 = np.asarray(grid.sin_angle_padded_h3, dtype=np.float64)
+
+        # u_east[f] = f+1, v_north = 0  (face-unique geographic wind)
+        face_vals = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                               dtype=jnp.float64)
+        u_east = face_vals[:, None, None] * jnp.ones((6, n, n),
+                                                       dtype=jnp.float64)
+        v_north = jnp.zeros((6, n, n), dtype=jnp.float64)
+        # Convert to grid-aligned inputs (inverse rotation):
+        u_grid = ca * u_east + sa * v_north
+        v_grid = -sa * u_east + ca * v_north
+
+        up, vp = pad_halo_vector(
+            u_grid, v_grid, ca, sa,
+            jnp.asarray(cap3), jnp.asarray(sap3),
+            interp_offsets=grid.halo_interp_offsets_h3,
+            halo=3,
+        )
+        up_np = np.asarray(up)
+        vp_np = np.asarray(vp)
+        face_vals_np = np.asarray(face_vals)
+
+        # For each face and each side, verify the outermost halo
+        # ring uses the correct NEIGHBOUR face's u_east constant.
+        # Per-side slicing for h=3:
+        #   WEST outer: [f, 0, 3:-3]
+        #   EAST outer: [f, -1, 3:-3] = [f, n+5, 3:-3]
+        #   SOUTH outer: [f, 3:-3, 0]
+        #   NORTH outer: [f, 3:-3, -1]
+        side_slicers = {
+            WEST:  lambda f: (f, 0, slice(3, -3)),
+            EAST:  lambda f: (f, -1, slice(3, -3)),
+            SOUTH: lambda f: (f, slice(3, -3), 0),
+            NORTH: lambda f: (f, slice(3, -3), -1),
+        }
+        side_names = {WEST: "W", EAST: "E", SOUTH: "S", NORTH: "N"}
+
+        for face in range(6):
+            for side in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, _, _ = CONNECTIVITY[face][side]
+                expected_u_east = face_vals_np[nbr_face]
+                # Expected grid-aligned output at outermost ring
+                sl = side_slicers[side](face)
+                cap_slice = cap3[sl]
+                sap_slice = sap3[sl]
+                expected_u = cap_slice * expected_u_east
+                expected_v = -sap_slice * expected_u_east
+
+                u_diff = float(np.max(np.abs(up_np[sl] - expected_u)))
+                v_diff = float(np.max(np.abs(vp_np[sl] - expected_v)))
+                assert u_diff < 1e-6, (
+                    f"face={face} side={side_names[side]} outermost "
+                    f"halo u does NOT equal "
+                    f"cos_angle_padded_h3 * u_east[nbr={nbr_face}] "
+                    f"(={expected_u_east}).  max diff = {u_diff:.3e}. "
+                    f"Either CONNECTIVITY selected the wrong "
+                    f"neighbour face, the rotation used the wrong "
+                    f"padded-angle cell, or axis-reversal was "
+                    f"applied incorrectly.")
+                assert v_diff < 1e-6, (
+                    f"face={face} side={side_names[side]} outermost "
+                    f"halo v does NOT equal "
+                    f"-sin_angle_padded_h3 * u_east[nbr={nbr_face}] "
+                    f"(={expected_u_east}).  max diff = {v_diff:.3e}.")
+
+    def test_pad_halo_vector_halo3_outer_ring_axis_reversal(self):
+        """Iter-599 (Codex stop-time review on iter-598): the iter-598
+        face-unique-constant test does not actually exercise
+        axis-reversal — reversing a constant-along-strip field gives
+        the same constant, so a bug that FORGOT to apply `is_reversed`
+        from CONNECTIVITY at the outermost halo ring would pass.
+
+        This test uses a field that varies ALONG THE STRIP direction
+        with face-unique offsets, so (a) reversed vs non-reversed
+        strips give different output values and (b) reading the wrong
+        neighbour face gives a different offset.
+
+        Field: `u_east[f, i, j] = 100*f + 0.5*i + 0.1*j` (no
+        duplicate values; varies along both axes; different offset
+        per face).  v_north = 0 so the grid-aligned input reduces to
+        u_grid = cos_angle * u_east, v_grid = -sin_angle * u_east.
+
+        `interp_offsets=None` — skip the offset interpolation so the
+        halo values are nearest-cell copies of the neighbour strip
+        (possibly reversed), which we can predict exactly with
+        `_extract_edge_strip_at_depth` + `[::-1]` if `is_reversed`.
+
+        For each face × side × depth-2 (outermost h=3 halo), we
+        compute the expected u_east strip directly from CONNECTIVITY
+        and check the grid-aligned output matches
+        `cos_angle_padded_h3 * expected_u_east`.
+
+        Sanity-regression this catches that iter-598 misses:
+        a refactor of `_pad_halo_local_h3` that drops the
+        `strip = strip[::-1] if is_reversed else strip` line would
+        leave all connections unreversed; a field varying along the
+        strip would produce different expected vs actual values
+        on every `is_reversed=True` side (e.g., face 1 SOUTH,
+        face 2 SOUTH/NORTH, face 3 NORTH, face 4 NORTH/EAST,
+        face 5 EAST/SOUTH per CONNECTIVITY).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import (
+            pad_halo_vector,
+            CONNECTIVITY,
+            WEST, EAST, SOUTH, NORTH,
+            _extract_edge_strip_at_depth,
+        )
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = np.asarray(grid.cos_angle_padded_h3, dtype=np.float64)
+        sap3 = np.asarray(grid.sin_angle_padded_h3, dtype=np.float64)
+
+        # Build face-unique, varying-along-strip u_east:
+        # u_east[f, i, j] = 100*f + 0.5*i + 0.1*j
+        f_idx = jnp.arange(6, dtype=jnp.float64)[:, None, None]
+        i_idx = jnp.arange(n, dtype=jnp.float64)[None, :, None]
+        j_idx = jnp.arange(n, dtype=jnp.float64)[None, None, :]
+        u_east = 100.0 * f_idx + 0.5 * i_idx + 0.1 * j_idx
+        v_north = jnp.zeros((6, n, n), dtype=jnp.float64)
+
+        # Inverse rotation to grid-aligned
+        u_grid = ca * u_east + sa * v_north
+        v_grid = -sa * u_east + ca * v_north
+
+        # Vector halo=3 WITH interp_offsets=None to bypass
+        # interpolation — we want to validate the plain strip
+        # reversal + neighbour-face selection, not the weights.
+        up, vp = pad_halo_vector(
+            u_grid, v_grid, ca, sa,
+            jnp.asarray(cap3), jnp.asarray(sap3),
+            interp_offsets=None,
+            halo=3,
+        )
+        up_np = np.asarray(up)
+        vp_np = np.asarray(vp)
+        u_east_data = np.asarray(u_east)
+
+        # Outermost halo=3 ring at depth=2 for each side.
+        # Transverse slice [3:-3] corresponds to `n` interior cells
+        # per face — same number as the strip.
+        side_info = {
+            WEST:  {"name": "W", "slicer": lambda f: (f, 0, slice(3, -3))},
+            EAST:  {"name": "E", "slicer": lambda f: (f, -1, slice(3, -3))},
+            SOUTH: {"name": "S", "slicer": lambda f: (f, slice(3, -3), 0)},
+            NORTH: {"name": "N", "slicer": lambda f: (f, slice(3, -3), -1)},
+        }
+
+        for face in range(6):
+            for side, info in side_info.items():
+                nbr_face, nbr_edge, is_reversed = (
+                    CONNECTIVITY[face][side])
+                # Extract neighbour strip at depth=2 (the outermost
+                # h=3 halo at depth 2 from the boundary).
+                strip = np.asarray(
+                    _extract_edge_strip_at_depth(
+                        jnp.asarray(u_east_data),
+                        nbr_face, nbr_edge, depth=2))
+                if is_reversed:
+                    strip = strip[::-1]
+
+                sl = info["slicer"](face)
+                cap_slice = cap3[sl]
+                sap_slice = sap3[sl]
+                expected_u_grid = cap_slice * strip
+                expected_v_grid = -sap_slice * strip
+
+                u_diff = float(np.max(np.abs(
+                    up_np[sl] - expected_u_grid)))
+                v_diff = float(np.max(np.abs(
+                    vp_np[sl] - expected_v_grid)))
+                # Tolerance 1e-4 accounts for u_east ~O(600) max and
+                # float32 storage of grid angles (eps_f32 * 600 ≈ 1e-4).
+                # Still ~4 orders of magnitude below expected sanity-
+                # check diffs (O(1) - O(100) for reversal/face bugs).
+                assert u_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost halo "
+                    f"u does NOT match `cos_angle_padded_h3 * "
+                    f"(neighbour strip with reversal={is_reversed} "
+                    f"applied)`.  max diff = {u_diff:.3e}.  This "
+                    f"catches bugs where `is_reversed` is ignored at "
+                    f"the outermost h=3 ring (iter-598 test "
+                    f"wouldn't fire because it used a constant-"
+                    f"along-strip field).")
+                assert v_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost halo "
+                    f"v does NOT match `-sin_angle_padded_h3 * "
+                    f"(neighbour strip with reversal={is_reversed} "
+                    f"applied)`.  max diff = {v_diff:.3e}.")
+
+    def test_pad_halo_vector_halo3_outer_ring_axis_reversal_interpolated(self):
+        """Iter-600 (Codex stop-time review on iter-599): the iter-599
+        axis-reversal test only exercises `interp_offsets=None` —
+        the nearest-cell-copy branch.  Production callers pass
+        `grid.halo_interp_offsets_h3`, which activates the
+        `_interp_strip` Lagrange interpolation after the reversal.
+
+        A bug that applies interp_offsets BEFORE reversal (wrong
+        order) or that skips interp on the reversed branch would
+        pass iter-599 silently.
+
+        This test uses the SAME field as iter-599 (linear along
+        both axes with face-unique offsets) but passes the
+        production `halo_interp_offsets_h3`.  Because the field is
+        LINEAR in the strip direction, 3-point Lagrange
+        interpolation is EXACT (quadratic stencil fits linear with
+        zero residual), so we can predict the interpolated halo
+        analytically via `_interp_strip(strip_after_reversal,
+        offsets_1d)`.
+
+        Expected chain at face A's outermost halo ring (depth=2):
+          1. strip = _extract_edge_strip_at_depth(u_east, nbr, nbr_edge, 2)
+          2. if is_reversed: strip = strip[::-1]
+          3. strip_interp = _interp_strip(strip, offsets[A, side, 2])
+          4. u_halo = cos_angle_padded_h3[A, halo] * strip_interp
+          5. v_halo = -sin_angle_padded_h3[A, halo] * strip_interp
+
+        This validates: (a) interp is applied AFTER reversal, not
+        before; (b) interp reads from the right (face, side, depth)
+        offsets table slice; (c) the reversal flag on the
+        reversed-connection faces propagates through the interp
+        stage.
+
+        Sanity regression this catches (not covered by iter-599):
+        swapping reversal and interp order in `_pad_halo_local_h3`
+        would give `interp(strip[::-1])` vs `interp(strip)[::-1]`,
+        which differ for non-symmetric offsets tables.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import (
+            pad_halo_vector,
+            CONNECTIVITY,
+            WEST, EAST, SOUTH, NORTH,
+            _extract_edge_strip_at_depth,
+            _interp_strip,
+        )
+        n = N
+        grid = create_cubed_sphere(n=n, use_duogrid=False)
+
+        ca = grid.cos_angle.astype(jnp.float64)
+        sa = grid.sin_angle.astype(jnp.float64)
+        cap3 = np.asarray(grid.cos_angle_padded_h3, dtype=np.float64)
+        sap3 = np.asarray(grid.sin_angle_padded_h3, dtype=np.float64)
+        offsets_h3 = grid.halo_interp_offsets_h3  # (6, 4, 3, n)
+
+        # Same field as iter-599: linear in both axes, face-unique.
+        f_idx = jnp.arange(6, dtype=jnp.float64)[:, None, None]
+        i_idx = jnp.arange(n, dtype=jnp.float64)[None, :, None]
+        j_idx = jnp.arange(n, dtype=jnp.float64)[None, None, :]
+        u_east = 100.0 * f_idx + 0.5 * i_idx + 0.1 * j_idx
+        v_north = jnp.zeros((6, n, n), dtype=jnp.float64)
+
+        u_grid = ca * u_east + sa * v_north
+        v_grid = -sa * u_east + ca * v_north
+
+        # Production call: interp_offsets_h3 active.
+        up, vp = pad_halo_vector(
+            u_grid, v_grid, ca, sa,
+            jnp.asarray(cap3), jnp.asarray(sap3),
+            interp_offsets=offsets_h3,
+            halo=3,
+        )
+        up_np = np.asarray(up)
+        vp_np = np.asarray(vp)
+
+        # Map side → edge_idx used by _pad_halo_local_h3 offset index.
+        # From halo.py edges = [WEST, EAST, SOUTH, NORTH] → [0, 1, 2, 3].
+        side_edge_idx = {WEST: 0, EAST: 1, SOUTH: 2, NORTH: 3}
+        side_info = {
+            WEST:  {"name": "W", "slicer": lambda f: (f, 0, slice(3, -3))},
+            EAST:  {"name": "E", "slicer": lambda f: (f, -1, slice(3, -3))},
+            SOUTH: {"name": "S", "slicer": lambda f: (f, slice(3, -3), 0)},
+            NORTH: {"name": "N", "slicer": lambda f: (f, slice(3, -3), -1)},
+        }
+
+        for face in range(6):
+            for side, info in side_info.items():
+                nbr_face, nbr_edge, is_reversed = (
+                    CONNECTIVITY[face][side])
+                # Step 1: extract neighbour strip at outermost depth.
+                strip = np.asarray(
+                    _extract_edge_strip_at_depth(
+                        u_east, nbr_face, nbr_edge, depth=2))
+                # Step 2: apply reversal BEFORE interpolation.
+                if is_reversed:
+                    strip = strip[::-1]
+                # Step 3: interpolate using this face × side × depth=2 offsets.
+                edge_idx = side_edge_idx[side]
+                offsets_1d = np.asarray(
+                    offsets_h3[face, edge_idx, 2, :])
+                strip_interp = np.asarray(
+                    _interp_strip(jnp.asarray(strip),
+                                   jnp.asarray(offsets_1d)))
+
+                sl = info["slicer"](face)
+                cap_slice = cap3[sl]
+                sap_slice = sap3[sl]
+                expected_u_grid = cap_slice * strip_interp
+                expected_v_grid = -sap_slice * strip_interp
+
+                u_diff = float(np.max(np.abs(
+                    up_np[sl] - expected_u_grid)))
+                v_diff = float(np.max(np.abs(
+                    vp_np[sl] - expected_v_grid)))
+                assert u_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost h=3 "
+                    f"halo u does NOT match "
+                    f"`cos_angle_padded_h3 * _interp_strip("
+                    f"reversed_strip, offsets[f, edge_idx, 2])`. "
+                    f"max diff = {u_diff:.3e}.  This covers the "
+                    f"interpolated branch that iter-599 skipped — "
+                    f"a refactor that swapped reversal and interp "
+                    f"order (interp before reverse) or that read "
+                    f"the wrong `offsets[f, edge_idx, depth]` slice "
+                    f"would fire here.")
+                assert v_diff < 1e-4, (
+                    f"face={face} side={info['name']} outermost h=3 "
+                    f"halo v does NOT match expected.  "
+                    f"max diff = {v_diff:.3e}.")
+
+    def test_pad_halo_interp_offsets_mpi_backend_refused_iter631(self):
+        """Iter-631 (Codex stop-time finding on iter-630): removing the
+        MPI halo=3 `NotImplementedError` guard in `pad_halo` newly
+        exposed a silent-drop hazard — `pad_halo_mpi` does NOT accept
+        or honor `interp_offsets`, so a caller passing offsets under
+        the MPI backend was getting nearest-index placement without
+        any error.  Iter-631 restores an explicit guard: if both the
+        MPI backend is active AND `interp_offsets` is provided, raise
+        `NotImplementedError` with a clear message explaining the
+        missing capability and the supported alternatives.
+
+        This test verifies: (1) the guard fires for halo=3 (the newly
+        exposed case), (2) the guard fires for halo=1 / halo=2 too
+        (the hazard was latent for those widths as well, but unreached
+        because no active caller paired offsets + MPI before iter-630),
+        and (3) the error message mentions `interp_offsets` so users
+        can find the guard by searching.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        for halo in (1, 2, 3):
+            n = N
+            data = jnp.ones((6, n, n), dtype=jnp.float64)
+            offsets = jnp.zeros((6, 4, halo, n), dtype=jnp.float64)
+            # Iter-500 shape lock for halo=3; halo=1/2 accept
+            # (6, 4, n) so we construct the right shape here.
+            if halo != 3:
+                offsets = jnp.zeros((6, 4, n), dtype=jnp.float64)
+
+            with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+                with pytest.raises(NotImplementedError,
+                                   match="interp_offsets"):
+                    halo_mod.pad_halo(
+                        data, halo=halo, interp_offsets=offsets)
+
+    def test_pad_halo_4d_interp_offsets_mpi_refused_iter632(self):
+        """Iter-632 (Codex stop-time finding on iter-631): the iter-631
+        guard only covered scalar `pad_halo` — `pad_halo_4d`,
+        `pad_halo_vector_4d`, and `pad_halo_vector` all still silently
+        dropped `interp_offsets` under MPI because `pad_halo_mpi_4d`
+        does not carry or honor offsets.  Iter-632 adds matching
+        guards at all three call sites.
+
+        This test covers `pad_halo_4d`: offsets under MPI at halo=1/2
+        must raise NotImplementedError with "interp_offsets" in the
+        message (halo=3 is already rejected by the pad_halo_4d
+        halo=3 guard so we do not exercise it here).
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        nlev = 2
+        for halo in (1, 2):
+            data = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
+            offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
+            with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+                with pytest.raises(NotImplementedError,
+                                   match="interp_offsets"):
+                    halo_mod.pad_halo_4d(
+                        data, halo=halo, interp_offsets=offsets)
+
+    def test_pad_halo_vector_4d_interp_offsets_mpi_refused_iter632(self):
+        """Iter-632: `pad_halo_vector_4d` MPI branch must raise when
+        `interp_offsets` is provided, for the same reason as iter-631
+        (scalar `pad_halo`) — `pad_halo_mpi_4d` drops the offsets
+        silently otherwise.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        nlev = 2
+        u = jnp.ones((6, N, N, nlev), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N, nlev), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
+        offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with pytest.raises(NotImplementedError,
+                               match="interp_offsets"):
+                halo_mod.pad_halo_vector_4d(
+                    u, v, ca, sa, cap, sap,
+                    interp_offsets=offsets, halo=1)
+
+    def test_pad_halo_vector_interp_offsets_mpi_refused_iter632(self):
+        """Iter-632: `pad_halo_vector` MPI branch must raise when
+        `interp_offsets` is provided (and no `duogrid` suppression
+        wipes them to None first) — closes the last silent-drop
+        call site identified in Codex's iter-631 follow-up review.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+
+        u = jnp.ones((6, N, N), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 2, N + 2), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 2, N + 2), dtype=jnp.float64)
+        offsets = jnp.zeros((6, 4, N), dtype=jnp.float64)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"):
+            with pytest.raises(NotImplementedError,
+                               match="interp_offsets"):
+                halo_mod.pad_halo_vector(
+                    u, v, ca, sa, cap, sap,
+                    interp_offsets=offsets, halo=1)
+
+    def test_pad_halo_vector_duogrid_mpi_fallback_iter634(self):
+        """Iter-634 (Codex stop-time finding on iter-633): iter-633
+        refused `pad_halo_vector(duogrid=<grid>)` under MPI, but scalar
+        `pad_halo` already applies `cube_rmp_vectorized` +
+        `fill_corner_region` post-dispatch regardless of backend.  So
+        a per-component scalar fallback is drop-in correct — the
+        refusal was overcautious.  Iter-634 wires the fallback:
+        `pad_halo(u_east, duogrid=<grid>)` + `pad_halo(v_north, ...)`.
+
+        This test verifies the MPI vector + duogrid path now runs and
+        produces the same result as the non-MPI path on a real
+        cubed-sphere grid (no actual MPI needed — we stub
+        `pad_halo_mpi` to fall through to the local helpers).
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+        from legoesm.grids.halo import (
+            _pad_halo_local, _pad_halo_local_h2)
+
+        # Stub `pad_halo_mpi` to call the local h1/h2 helpers (because
+        # the fallback pad_halo under MPI would otherwise need a live
+        # topology).  For halo=1/2 the local path is the SAME as what
+        # a single-rank MPI run would produce before duogrid
+        # post-processing.
+        def _stub_pad_halo_mpi(data, topology, halo):
+            if halo == 1:
+                return _pad_halo_local(data, None)
+            return _pad_halo_local_h2(data, None)
+
+        # Build a real cubed-sphere grid with duogrid for ground truth.
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        n = 8
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        u = jnp.ones((6, n, n), dtype=jnp.float64)
+        v = jnp.zeros((6, n, n), dtype=jnp.float64)
+
+        # Non-MPI reference.
+        u_ref, v_ref = halo_mod.pad_halo_vector(
+            u, v, grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        # MPI path with stub.
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch(
+                    "legoesm.parallel.halo_exchange.pad_halo_mpi",
+                    side_effect=_stub_pad_halo_mpi):
+            u_mpi, v_mpi = halo_mod.pad_halo_vector(
+                u, v, grid.cos_angle, grid.sin_angle,
+                grid.cos_angle_padded, grid.sin_angle_padded,
+                interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        # The fallback must produce a bit-for-bit match for this
+        # configuration (same inputs, same scalar pad_halo + duogrid
+        # post-processing run on both branches).
+        np.testing.assert_allclose(
+            np.asarray(u_mpi), np.asarray(u_ref), atol=1e-14,
+            err_msg="MPI+duogrid fallback diverges from non-MPI path")
+        np.testing.assert_allclose(
+            np.asarray(v_mpi), np.asarray(v_ref), atol=1e-14,
+            err_msg="MPI+duogrid fallback diverges from non-MPI path")
+
+    def test_pad_halo_vector_4d_duogrid_mpi_fallback_iter634(self):
+        """Iter-634: `pad_halo_vector_4d(duogrid=<grid>)` under MPI
+        falls back to per-component `pad_halo_4d`, which applies the
+        duogrid kinked→extended remap correctly.  Verify the fallback
+        does not raise and produces shaped output.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        # Stub `pad_halo_mpi_4d` to call the local h=1 4D helper.
+        def _stub_pad_halo_mpi_4d(data, topology, halo):
+            assert halo == 1
+            return _pad_halo_local_4d(data, None)
+
+        n = 8
+        nlev = 2
+        grid = create_cubed_sphere(n=n, use_duogrid=True)
+        u = jnp.ones((6, n, n, nlev), dtype=jnp.float64)
+        v = jnp.zeros((6, n, n, nlev), dtype=jnp.float64)
+
+        u_ref, v_ref = halo_mod.pad_halo_vector_4d(
+            u, v, grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch(
+                    "legoesm.parallel.halo_exchange.pad_halo_mpi_4d",
+                    side_effect=_stub_pad_halo_mpi_4d):
+            u_mpi, v_mpi = halo_mod.pad_halo_vector_4d(
+                u, v, grid.cos_angle, grid.sin_angle,
+                grid.cos_angle_padded, grid.sin_angle_padded,
+                interp_offsets=None, halo=1, duogrid=grid.duogrid)
+
+        np.testing.assert_allclose(
+            np.asarray(u_mpi), np.asarray(u_ref), atol=1e-14,
+            err_msg="MPI+duogrid 4D fallback diverges from non-MPI path")
+        np.testing.assert_allclose(
+            np.asarray(v_mpi), np.asarray(v_ref), atol=1e-14,
+            err_msg="MPI+duogrid 4D fallback diverges from non-MPI path")
+
+    def test_pad_halo_vector_halo3_mpi_guard_lifted_iter630(self):
+        """Iter-630: the `halo=3 and _halo_backend == "mpi"` guard in
+        `pad_halo_vector` was removed after `pad_halo_mpi_4d(halo=3)`
+        (iter-627/628) and the 2D MPI scalar paths (iter-630) gained
+        halo=3 support.  Verify that calling `pad_halo_vector(halo=3)`
+        under the MPI backend no longer raises the historical "MPI
+        backend" NotImplementedError -- the call is routed through
+        `pad_halo_mpi_4d` instead.
+        """
+        from unittest import mock
+        import legoesm.grids.halo as halo_mod
+        u = jnp.ones((6, N, N), dtype=jnp.float64)
+        v = jnp.zeros((6, N, N), dtype=jnp.float64)
+        ca = jnp.ones((6, N, N), dtype=jnp.float64)
+        sa = jnp.zeros((6, N, N), dtype=jnp.float64)
+        cap = jnp.ones((6, N + 6, N + 6), dtype=jnp.float64)
+        sap = jnp.zeros((6, N + 6, N + 6), dtype=jnp.float64)
+
+        # Stub `pad_halo_mpi_4d` so we do not require a live MPI
+        # runtime; we only want to confirm the removed guard no longer
+        # intercepts the call.
+        def _stub_pad_halo_mpi_4d(data, topology, halo):
+            n = data.shape[1]
+            h2 = 2 * halo
+            shape = (data.shape[0], n + h2, n + h2) + data.shape[3:]
+            return jnp.zeros(shape, dtype=data.dtype)
+
+        with mock.patch.object(halo_mod, "_halo_backend", "mpi"), \
+                mock.patch(
+                    "legoesm.parallel.halo_exchange.pad_halo_mpi_4d",
+                    side_effect=_stub_pad_halo_mpi_4d):
+            # Must NOT raise NotImplementedError now that iter-630
+            # lifted the guard.
+            u_p, v_p = halo_mod.pad_halo_vector(
+                u, v, ca, sa, cap, sap,
+                interp_offsets=None, halo=3)
+            assert u_p.shape == (6, N + 6, N + 6)
+            assert v_p.shape == (6, N + 6, N + 6)
 
 
 # ---------------------------------------------------------------------------

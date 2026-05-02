@@ -1,0 +1,10 @@
+Iter-777 cosine bell C36 1-day: nord/damp_c sweep
+Matrix config baseline (iter-776): nord=None, damp_c=None
+Fortran sw_core.F90:886-887 passes nord=nord_v, damp_c=damp_v
+(Config defaults: nord_v=2, damp_v=0.06 per iter-755b).
+
+  nord    damp_c          L1          L2        Linf   undershoot
+--------------------------------------------------------------------
+  None      None  1.1983e-01  1.1682e-01  1.2274e-01     9.5049%
+     2      0.06  1.1981e-01  1.1681e-01  1.2258e-01     9.4686%
+     1      0.16  1.5630e-01  1.3731e-01  1.3313e-01    11.3209%

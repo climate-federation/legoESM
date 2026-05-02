@@ -1,0 +1,32 @@
+Iter-785 cosine bell C36 with mass_target fix variants
+dt=1440.0s, β=π/4, 1.0 day
+
+          case      L_inf         L2        peak cell    peak err     h_min     h_max   mass drift
+----------------------------------------------------------------------------------------------------
+      BASELINE  1.213e+02  1.165e-01   face 3 (30,32)  +1.213e+02      0.00    895.40   +0.000e+00
+   NO_MASS_FIX  1.214e+02  1.164e-01   face 3 (30,32)  +1.214e+02     -0.01    895.70   +3.387e-04
+     CLIP_ONLY  1.214e+02  1.164e-01   face 3 (30,32)  +1.214e+02      0.00    895.70   +3.392e-04
+
+  no_mass_fix vs baseline: Linf +0.1%
+  clip_only vs baseline: Linf +0.1%
+
+Interpretation cues (observational only):
+- NO_MASS_FIX reveals the RAW PPM output.  h_min may be
+  negative, mass_drift should be near zero (PPM is inherently
+  conservative) but not exactly zero due to truncation.
+- CLIP_ONLY keeps positivity but skips the rescale.  If it's
+  close to BASELINE, the rescale is cosmetic; if it differs
+  much from BASELINE but matches NO_MASS_FIX, the rescale is
+  the main post-fix component.
+
+What iter-785 DOES measure:
+- Linf, L2, mass drift, h_min / h_max under three variants
+  of the `transport_step` post-step correction.
+What it does NOT establish:
+- Whether the non-Fortran-faithful mass_target fix should be
+  removed from production.  FV3 does not apply this post-step
+  rescale in `fv_tp_2d`; removal is a fidelity question that
+  iter-785 does not itself resolve.
+- Whether OTHER parts of the transport step (cross-term, flux-
+  form coupling, face-boundary PPM handling) contribute to
+  the remaining error.

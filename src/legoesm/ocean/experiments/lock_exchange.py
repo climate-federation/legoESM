@@ -15,7 +15,7 @@ Scientific Purpose:
 
 Domain Configuration:
 - Shallow basin: 500m depth (vs 5500m in other experiments)
-- High vertical resolution: 20 levels (vs 10 in other experiments) 
+- High vertical resolution: 20 levels (vs 10 in other experiments)
 - Global domain with temperature front at prime meridian
 - Land at high latitudes for circulation containment
 
@@ -41,10 +41,10 @@ Validation Criteria:
 - No numerical instabilities or excessive dissipation
 
 References:
-- Petersen et al. (2015), "Evaluation of the arbitrary Lagrangian–Eulerian 
+- Petersen et al. (2015), "Evaluation of the arbitrary Lagrangian–Eulerian
   vertical coordinate method in the MPAS-Ocean model", Ocean Modelling 86, 93-113.
   DOI: 10.1016/j.ocemod.2014.12.004
-- Ilicak et al. (2012), "Spurious dianeutral mixing and the role of momentum 
+- Ilicak et al. (2012), "Spurious dianeutral mixing and the role of momentum
   closure", Ocean Modelling 45-46, 37-49.
 - NEMO test cases: https://sites.nemo-ocean.io/user-guide/tests.html
 """
@@ -67,7 +67,7 @@ _G_EARTH = g
 @dataclass
 class LockExchangeConfig:
     """Configuration parameters for lock exchange experiment.
-    
+
     Parameters based on Petersen et al. (2015) and NEMO test suite.
     """
     # Domain configuration (high resolution for mixing study)
@@ -75,32 +75,32 @@ class LockExchangeConfig:
     H_max: float = 500.0           # Shallow depth [m] for clear gravity current
     land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
     spectral_land_lat_threshold: float = 90.0  # No land for spectral grid
-    
+
     # Temperature/density front parameters
     T_cold: float = 5.0            # Cold (dense) side temperature [°C]
     T_warm: float = 30.0           # Warm (light) side temperature [°C]
     S_uniform: float = 35.0        # Uniform salinity [PSU]
-    
+
     # Front location (longitude threshold)
     front_longitude: float = 0.0   # Prime meridian [degrees]
-    
+
     # Physical parameters for RPE calculation
     rho_reference: float = 1025.0   # Reference density [kg/m³]
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
     T_reference: float = 15.0       # Reference temperature [°C]
-    
+
     # Validation thresholds
     max_pe_drift: float = 1e-2      # Maximum PE drift (relative)
     max_blowup_threshold: float = 200.0  # Temperature blowup threshold [°C]
 
 
-def create_initial_conditions(grid_type: str, grid, z_coord, 
+def create_initial_conditions(grid_type: str, grid, z_coord,
                             config: LockExchangeConfig = None):
     """Create lock exchange initial conditions for any grid type.
-    
+
     Sets up a vertical density front with cold dense water on one side
     and warm light water on the other, initially at rest.
-    
+
     Parameters
     ----------
     grid_type : str
@@ -111,12 +111,12 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         Vertical coordinate system (should have nlev=20)
     config : LockExchangeConfig, optional
         Configuration parameters. Uses defaults if None.
-        
+
     Returns
     -------
     OceanState
         Initial state with vertical density front
-        
+
     Notes
     -----
     - High vertical resolution (20 levels) for gravity current resolution
@@ -126,19 +126,19 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     """
     if config is None:
         config = LockExchangeConfig()
-    
+
     # First create rest state background with special config
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
-            grid, z_coord, 
+            grid, z_coord,
             T_surface=config.T_reference,  # Use reference T as background
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
@@ -149,7 +149,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
@@ -160,7 +160,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
         )
-        
+
     elif grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
@@ -171,10 +171,10 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             H_max=config.H_max,
             land_lat_threshold=config.spectral_land_lat_threshold
         )
-        
+
     else:
         raise ValueError(f"Unknown grid type: {grid_type}")
-    
+
     # Add temperature front
     return _add_temperature_front(state, grid_type, grid, z_coord, config)
 
@@ -182,7 +182,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
 def _add_temperature_front(state, grid_type: str, grid, z_coord,
                          config: LockExchangeConfig):
     """Add vertical density front to create lock exchange setup."""
-    
+
     # Get coordinates
     if grid_type == "mpas":
         lat = np.asarray(grid.latCell, dtype=np.float64)
@@ -217,11 +217,11 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         nlev = T_grid.shape[-1]
         for k in range(nlev):
             T_grid[..., k] = T_field * mask
-            
+
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
-        return state._replace(T_hat=Field(new_T_hat, name="T_hat", 
+        return state._replace(T_hat=Field(new_T_hat, name="T_hat",
                                         dims=state.T_hat.dims, units="K"))
-    
+
     else:
         # Physical space grids
         T_data = np.array(state.T.data, dtype=np.float64, copy=True)
@@ -230,22 +230,22 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         else:
             mask = 1.0  # No land mask
         nlev = T_data.shape[-1]
-        
+
         # Apply temperature front to all levels
         T_front = np.where(west_of_front, T_cold, T_warm)
         for k in range(nlev):
             T_data[..., k] = T_front * mask
-        
+
         return state._replace(T=Field(jnp.array(T_data), name="T",
                                     dims=state.T.dims, units="K"))
 
 
 def create_forcings(grid_type: str, grid, config: LockExchangeConfig = None):
     """Create forcing functions for lock exchange experiment.
-    
+
     The lock exchange experiment has no external forcings - the dynamics
     are driven purely by the initial density imbalance.
-    
+
     Returns
     -------
     None
@@ -256,7 +256,7 @@ def create_forcings(grid_type: str, grid, config: LockExchangeConfig = None):
 
 def create_domain_config(config: LockExchangeConfig = None) -> Dict[str, Any]:
     """Create domain configuration parameters.
-    
+
     Returns
     -------
     Dict[str, Any]
@@ -264,7 +264,7 @@ def create_domain_config(config: LockExchangeConfig = None) -> Dict[str, Any]:
     """
     if config is None:
         config = LockExchangeConfig()
-        
+
     return {
         "nlev": config.nlev,
         "H_max": config.H_max,
@@ -278,11 +278,11 @@ def create_domain_config(config: LockExchangeConfig = None) -> Dict[str, Any]:
 def compute_reference_potential_energy(state, grid_type: str, grid, z_coord,
                                      config: LockExchangeConfig) -> float:
     """Compute Reference Potential Energy (RPE) for mixing quantification.
-    
+
     RPE measures the potential energy that would remain if all water parcels
     were adiabatically rearranged to minimize potential energy. Changes in RPE
     indicate irreversible mixing processes.
-    
+
     Parameters
     ----------
     state : OceanState
@@ -295,19 +295,19 @@ def compute_reference_potential_energy(state, grid_type: str, grid, z_coord,
         Vertical coordinate
     config : LockExchangeConfig
         Configuration parameters
-        
+
     Returns
     -------
     float
         Reference potential energy [J]
-        
+
     Notes
     -----
     This is a simplified approximation that computes potential energy
     using linearized equation of state. For full RPE calculation,
     density sorting would be required.
     """
-    
+
     # Get temperature and area fields
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_synthesis_3d
@@ -338,30 +338,30 @@ def compute_reference_potential_energy(state, grid_type: str, grid, z_coord,
     pe = 0.0
     for k in range(len(z_full)):
         pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
-    
+
     return _G_EARTH * pe
 
 
 def compute_mixing_metrics(diagnostics: Dict[str, list], pe_initial: float,
                          config: LockExchangeConfig) -> Dict[str, float]:
     """Compute mixing and energy metrics for validation.
-    
+
     Parameters
-    ---------- 
+    ----------
     diagnostics : Dict[str, list]
         Time series diagnostics from simulation
     pe_initial : float
         Initial potential energy for reference
     config : LockExchangeConfig
         Configuration parameters
-        
+
     Returns
     -------
     Dict[str, float]
         Mixing metrics for validation
     """
     metrics = {}
-    
+
     # Potential energy drift
     pe_list = diagnostics.get("PE", [])
     if len(pe_list) >= 2 and abs(pe_initial) > 1e-30:
@@ -370,13 +370,13 @@ def compute_mixing_metrics(diagnostics: Dict[str, list], pe_initial: float,
         metrics["pe_drift_relative"] = pe_drift
         metrics["pe_final"] = pe_final
         metrics["pe_initial"] = pe_initial
-    
+
     # Relative PE change
     pe_rel_list = diagnostics.get("PE_rel", [])
     if len(pe_rel_list) >= 1:
         pe_rel_final = pe_rel_list[-1]
         metrics["pe_rel_final"] = pe_rel_final
-    
+
     # Temperature evolution (check for numerical stability)
     mean_T_list = diagnostics.get("mean_T", [])
     if len(mean_T_list) >= 2:
@@ -385,32 +385,32 @@ def compute_mixing_metrics(diagnostics: Dict[str, list], pe_initial: float,
         T_change = abs(T_final - T_initial)
         metrics["mean_T_change"] = T_change
         metrics["mean_T_final"] = T_final
-        
+
     return metrics
 
 
-def validate_results(final_state, diagnostics: Dict[str, list], 
+def validate_results(final_state, diagnostics: Dict[str, list],
                    config: LockExchangeConfig = None,
                    **validation_kwargs) -> Tuple[bool, str]:
     """Validate lock exchange experiment results.
-    
+
     Success criteria:
     - Potential energy drift within acceptable bounds
     - No excessive temperature values (numerical stability)
     - Realistic mixing behavior (energy decrease but not excessive)
     - No NaN or infinite values
-    
+
     Parameters
     ----------
     final_state : OceanState
         Final model state
-    diagnostics : Dict[str, list] 
+    diagnostics : Dict[str, list]
         Time series diagnostics
     config : LockExchangeConfig, optional
         Configuration parameters
     **validation_kwargs
         Additional validation parameters (pe_initial)
-        
+
     Returns
     -------
     bool
@@ -420,7 +420,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
     """
     if config is None:
         config = LockExchangeConfig()
-    
+
     # Check for NaN/infinite values in final state
     if hasattr(final_state, 'T') and not jnp.all(jnp.isfinite(final_state.T.data)):
         return False, "NaN/Inf detected in final temperature field"
@@ -435,18 +435,18 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         min_T = float(_h[1])
         if max_T > config.max_blowup_threshold or min_T < -config.max_blowup_threshold:
             return False, f"Temperature blowup: T_range=[{min_T:.1f}, {max_T:.1f}]°C"
-    
+
     # Compute mixing metrics
     pe_initial = validation_kwargs.get("pe_initial", None)
     if pe_initial is not None:
         metrics = compute_mixing_metrics(diagnostics, pe_initial, config)
     else:
         metrics = {}
-    
+
     # Validation
     success = True
     notes_parts = []
-    
+
     # PE drift check
     if "pe_drift_relative" in metrics:
         pe_drift = metrics["pe_drift_relative"]
@@ -454,29 +454,29 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         if pe_drift > config.max_pe_drift:
             success = False
             notes_parts.append("FAIL: excessive PE drift")
-    
+
     # PE relative change
     if "pe_rel_final" in metrics:
         pe_rel = metrics["pe_rel_final"]
         notes_parts.append(f"PE_rel_final={pe_rel:.4e}")
-    
+
     # Temperature stability
     if "mean_T_final" in metrics:
         T_final = metrics["mean_T_final"]
         notes_parts.append(f"mean_T={T_final:.2f}°C")
-        
+
     if "mean_T_change" in metrics:
         T_change = metrics["mean_T_change"]
         notes_parts.append(f"T_change={T_change:.2f}°C")
-    
+
     notes = ", ".join(notes_parts)
-    
+
     return success, notes
 
 
 def get_diagnostic_field_specs() -> list:
     """Get field specifications for diagnostic output.
-    
+
     Returns
     -------
     list
@@ -490,7 +490,7 @@ def get_diagnostic_field_specs() -> list:
 
 def get_scalar_units() -> Dict[str, str]:
     """Get units for scalar diagnostic quantities.
-    
+
     Returns
     -------
     Dict[str, str]
@@ -498,7 +498,7 @@ def get_scalar_units() -> Dict[str, str]:
     """
     return {
         "mean_eta": "m",
-        "max_abs_eta": "m", 
+        "max_abs_eta": "m",
         "mean_T": "degC",
         "mean_S": "PSU",
         "PE": "J",
@@ -528,7 +528,7 @@ EXPERIMENT_CONFIG = {
     },
     "grid_support": {
         "cubed_sphere": True,
-        "latlon": True, 
+        "latlon": True,
         "mpas": True,
         "spectral": False  # RPE calculation complex for spectral
     },
