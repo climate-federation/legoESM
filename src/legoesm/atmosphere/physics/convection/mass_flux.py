@@ -50,6 +50,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
@@ -457,14 +458,16 @@ def edmf_convection(
     q_c_u = dilution * q_c_u_undiluted
 
     # Buoyancy: B = g * (T_v_u - T_v_env) / T_v_env.  Vapor contributes
-    # ``+0.61 q_v`` (water vapour is lighter than dry air) and cloud
-    # water contributes ``-q_c`` (the loaded condensate is mass drag,
-    # not buoyancy).  An earlier formulation used
-    # ``T_v = T*(1 + 0.61*(q_v + q_c))`` which treated q_c with the
+    # ``+(R_v/R_d - 1) q_v ≈ +0.608 q_v`` (water vapour is lighter than
+    # dry air) and cloud water contributes ``-q_c`` (the loaded
+    # condensate is mass drag, not buoyancy).  An earlier formulation
+    # used ``T_v = T*(1 + 0.61*(q_v + q_c))`` which treated q_c with the
     # *wrong sign* — making cloudy plumes spuriously buoyant — so we
-    # use the standard form here.
-    T_v_env = T * (1.0 + 0.61 * q_v)
-    T_v_u = T_u * (1.0 + 0.61 * q_v_u - q_c_u)
+    # use the standard form here.  ``virtual_temperature`` returns
+    # ``T*(1 + 0.608·q_v)`` from ``constants.epsilon``; the cloud-water
+    # loading term ``-T_u·q_c_u`` is added explicitly.
+    T_v_env = virtual_temperature(T, q_v)
+    T_v_u = virtual_temperature(T_u, q_v_u) - T_u * q_c_u
     B = constants.g * (T_v_u - T_v_env) / jnp.clip(T_v_env, 1.0, None)
 
     # Updraft velocity from buoyancy integral (surface upward), with a
