@@ -43,6 +43,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere FV3 PE cell-field halo collectives per stage | 2 | 1 |
 | Cubed-sphere FV3 PE hi-prec PGF ln_ps halo collectives per stage (float64 path) | 1 | 0 |
 | Cubed-sphere FV3 PE hybrid PGF hf_corner halo collectives per stage | 1 | 0 |
+| Cubed-sphere FV3 PE div_damp div_v halo collectives per stage      | 1 | 0 |
 | Spectral PE σ-coord cross-level collectives        |          3 |           1 |
 | Hybrid mass-flux + dp_s_dt cross-level collectives (CS, spectral) | 4 (2 in fn + 2 in callers) | 2 |
 | compute_sigma_dot internal cross-level collectives  |          2 |           1 |
@@ -147,6 +148,8 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+7d45ef15 cubed-sphere FV3 PE: pack div_v into merged exchange for div_damp
+9a43700d docs: record iter-60 hybrid_factor halo merge
 3487928f tests: cubed-sphere SPMD hybrid σ-pressure 6-device bit-equiv
 d7b6e3a4 cubed-sphere FV3 PE: pack hybrid_factor into merged exchange
 7f10c06d docs: record iter-59 cubed-sphere FV3 PE PGF ln_ps halo reuse
