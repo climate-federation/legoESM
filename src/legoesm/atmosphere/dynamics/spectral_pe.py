@@ -158,13 +158,24 @@ def _compute_geopotential_gaussian(T, p_s, sigma_coord, phis):
 
 
 def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
-    """Sigma-dot on arbitrary grid shape. div_3d is (..., nlev)."""
+    """Sigma-dot on arbitrary grid shape. div_3d is (..., nlev).
+
+    Returns ``(sigma_dot, D_total)`` where ``D_total`` is the
+    column-integrated divergence (``sum(div * dsigma, axis=-1,
+    keepdims=True)``) — exposing it lets the caller reuse the value
+    in the surface-pressure tendency without re-summing the column.
+    """
     dsigma = sigma_coord.dsigma
     fractional_sigma = sigma_coord.fractional_sigma
 
     div_dsigma = div_3d * dsigma
-    D_total = jnp.sum(div_dsigma, axis=-1, keepdims=True)
+    # ``cumsum`` already contains ``sum`` as its last entry — extract it
+    # rather than computing the sum independently.  Under level-sharding
+    # this drops the per-stage allreduce-equivalent cumsum-axis collective
+    # from 2 to 1 (the prefix-cumsum + slicing the last index reuses the
+    # same prefix-scan kernel).
     cumsum_div = jnp.cumsum(div_dsigma, axis=-1)
+    D_total = cumsum_div[..., -1:]
 
     sigma_dot_inner = fractional_sigma * D_total - cumsum_div
 
@@ -176,7 +187,7 @@ def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
     # sigma_dot[-1].
     pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
     sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
-    return sigma_dot
+    return sigma_dot, D_total
 
 
 def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
@@ -406,8 +417,16 @@ def spectral_pe_tendencies(
     if _hybrid:
         mass_flux = compute_mass_flux_hybrid(div, p_s, sigma_coord)
         sigma_dot = None   # hybrid path uses ``mass_flux`` instead
+        _D_total_sigma_full = None
     else:
-        sigma_dot = _compute_sigma_dot_gaussian(div, sigma_coord)
+        # ``D_total_sigma_full`` is the (..., 1)-shaped column-sum that
+        # ``_compute_sigma_dot_gaussian`` already produced — reuse it
+        # below in the surface-pressure tendency rather than recomputing
+        # ``jnp.sum(div * dsigma, axis=-1)``.  Saves one cross-level
+        # collective per RK3 stage under level-sharding.
+        sigma_dot, _D_total_sigma_full = _compute_sigma_dot_gaussian(
+            div, sigma_coord,
+        )
 
     # --- 8. Surface pressure tendency ---
     if _hybrid:
@@ -415,10 +434,11 @@ def spectral_pe_tendencies(
         dlnps_dt_grid = -D_total_p / (p_s * sigma_coord.B_range)
         dp_s_dt_grid = p_s * dlnps_dt_grid
     else:
-        dsigma = sigma_coord.dsigma
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
-        D_total = jnp.sum(div * dsigma, axis=-1)
+        # ``D_total_sigma_full`` has trailing-axis size 1; drop the
+        # singleton to match the original ``jnp.sum(...)`` shape.
+        D_total = _D_total_sigma_full[..., 0]
         dlnps_dt_grid = -D_total / sigma_range
         dp_s_dt_grid = p_s * dlnps_dt_grid
 
