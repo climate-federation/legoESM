@@ -39,6 +39,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere SPMD halo=1 cell-field collectives    |          4 |           1 |
 | Cubed-sphere SPMD halo=2 bandwidth                 |   ~6n²·#h2 |    ~8n·#h2 (36×–144× less) |
 | Cubed-sphere SPMD halo=1 with offsets at high-res  |  all_gather|    ppermute (~50× less interconnect) |
+| Cubed-sphere SPMD halo at 2/3 devices              | replicated-fallback | multi-face all_gather (31–44% lower per-step time) |
 | Cubed-sphere PPM halo=2 calls (SPMD or MPI)        |          3 |           2 |
 | MPAS dycore mass-fix payload                       |          3 |           2 |
 | Voronoi MPI sendrecvs                              |         12 |           6 |
