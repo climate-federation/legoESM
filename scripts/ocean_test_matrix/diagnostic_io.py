@@ -285,22 +285,24 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                     # domain_extent = (lon_west, lon_east, lat_south, lat_north)
                     lon_ext = [domain_extent[0], domain_extent[1]]
                     lat_ext = [domain_extent[2], domain_extent[3]]
-                    if coord_kind not in ("latlon", "gaussian"):
-                        lat_1d = np.linspace(-90, 90, regridded.shape[0])
-                        lon_1d = np.linspace(0, 360, regridded.shape[1])
-                        r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
-                        r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2,
-                                 len(lat_1d))
-                        c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
-                        c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2,
-                                 len(lon_1d))
-                        plot_data = regridded[r0:r1, c0:c1]
-                        lon_ext = [float(lon_1d[c0]),
-                                   float(lon_1d[min(c1, len(lon_1d)-1)])]
-                        lat_ext = [float(lat_1d[r0]),
-                                   float(lat_1d[min(r1, len(lat_1d)-1)])]
-                    else:
-                        plot_data = regridded
+                    # Crop the regridded array to the source domain so
+                    # imshow does not stretch an implicit [0, 360] × [-90, 90]
+                    # canvas into the regional extent. This applies to
+                    # both unstructured (mpas, cube) AND "latlon" coord_kind
+                    # (replot path reads data on a regridded global canvas).
+                    lat_1d = np.linspace(-90, 90, regridded.shape[0])
+                    lon_1d = np.linspace(0, 360, regridded.shape[1])
+                    r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
+                    r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2,
+                             len(lat_1d))
+                    c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
+                    c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2,
+                             len(lon_1d))
+                    plot_data = regridded[r0:r1, c0:c1]
+                    lon_ext = [float(lon_1d[c0]),
+                               float(lon_1d[min(c1, len(lon_1d)-1)])]
+                    lat_ext = [float(lat_1d[r0]),
+                               float(lat_1d[min(r1, len(lat_1d)-1)])]
                 elif coord_kind in ("latlon", "gaussian"):
                     lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
                     lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
@@ -431,35 +433,62 @@ def _bin_cross_section(
     # Regrid to regular lat-lon, then average over the requested axis.
     # Use k=20 neighbors for unstructured grids to avoid aliasing from
     # cubed-sphere face boundaries or icosahedral grid structure.
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
     if coord_kind not in ("latlon", "gaussian"):
         arr = np.asarray(f3d, dtype=np.float64)
         if arr.ndim == 1:
             arr = arr[:, None]
         flat = arr.reshape(-1, arr.shape[-1])
         nlev = flat.shape[1]
-        idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon, k=20,
-                                         ocean_mask=ocean_mask)
+        # For regional unstructured meshes use a regional target lat-lon
+        # grid that matches the source extent. A global 181×360 target
+        # would rely on KDTree nearest-neighbour extrapolation outside
+        # the source domain, and the subsequent bin_centers (computed
+        # linearly across 181 rows mapped to [lat_min, lat_max]) would
+        # then silently compress the gradient zone into a narrow band.
+        is_regional = (lat_flat.max() - lat_flat.min() < 0.8 * 180)
+        if is_regional:
+            target_lat = np.linspace(lat_flat.min(), lat_flat.max(), n_lat)
+            target_lon = np.linspace(lon_flat.min(), lon_flat.max(), n_lon)
+            d2r = np.pi / 180.0
+            n_pts = len(lat_flat)
+            mean_spacing = np.sqrt(
+                d2r**2 * (lat_flat.max() - lat_flat.min())
+                * min(360, lon_flat.max() - lon_flat.min()) / n_pts)
+            max_dist = 2.0 * np.sin(0.5 * mean_spacing * 3.0)
+        else:
+            target_lat = None
+            target_lon = None
+            max_dist = None
+        idxs, w = _build_latlon_weights(
+            lon_deg, lat_deg, n_lat, n_lon, k=20,
+            target_lat=target_lat, target_lon=target_lon,
+            max_dist=max_dist, ocean_mask=ocean_mask)
         ll = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
         for lev in range(nlev):
             ll[..., lev] = _apply_weights(flat[:, lev], idxs, w, n_lat, n_lon)
+        # Remember the target grid so bin_centers below uses the real
+        # positions of the regridded rows/cols.
+        _target_lat = target_lat if target_lat is not None \
+            else np.linspace(-90.0, 90.0, n_lat)
+        _target_lon = target_lon if target_lon is not None \
+            else np.linspace(0.0, 360.0, n_lon)
     else:
         ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
+        _target_lat = None
+        _target_lon = None
 
     section = np.nanmean(ll, axis=mean_axis)
-    # Use actual coordinate ranges from the data, not global defaults
-    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
-    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
     if mean_axis == 0:
         # Averaged over lat → lon-vertical section
         if coord_kind in ("latlon", "gaussian"):
             return section, np.unique(lon_flat)[:section.shape[0]]
-        return section, np.linspace(lon_flat.min(), lon_flat.max(),
-                                    section.shape[0])
+        return section, _target_lon[:section.shape[0]]
     # Averaged over lon → lat-vertical section
     if coord_kind in ("latlon", "gaussian"):
         return section, np.unique(lat_flat)[:section.shape[0]]
-    return section, np.linspace(lat_flat.min(), lat_flat.max(),
-                                section.shape[0])
+    return section, _target_lat[:section.shape[0]]
 
 
 def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,

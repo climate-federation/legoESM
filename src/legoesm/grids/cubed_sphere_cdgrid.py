@@ -30,10 +30,8 @@ import jax.numpy as jnp
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 _EPS = float(jnp.finfo(jnp.float32).eps)    # Float32 machine epsilon (~1.19e-7)
 
-from legoesm.grids.cubed_sphere import (
-    CubedSphereGrid,
-    _face_to_cartesian,
-)
+from legoesm import constants
+from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import _face_gnomonic_to_lonlat
 
 
@@ -79,8 +77,8 @@ class CubedSphereCDGrid(NamedTuple):
     rsin2_corner: jax.Array  # (6, n+1, n+1) 1/sin²(angle) for gradient correction
     cosa_u: jax.Array        # (6, n+1, n) non-orthogonality at u-interfaces
     cosa_v: jax.Array        # (6, n, n+1) non-orthogonality at v-interfaces
-    rsin_u: jax.Array        # (6, n+1, n) 1/sin² everywhere (uniform, no edge override)
-    rsin_v: jax.Array        # (6, n, n+1) 1/sin² everywhere (uniform, no edge override)
+    rsin_u: jax.Array        # (6, n+1, n) 1/sin² interior; 1/sin at panel edges (non-duogrid)
+    rsin_v: jax.Array        # (6, n, n+1) 1/sin² interior; 1/sin at panel edges (non-duogrid)
     # --- FV3 edge-midpoint D-grid metrics ---
     # Edge-midpoint positions
     lon_edge_x: jax.Array    # (6, n, n+1) lon at x-edge midpoints
@@ -150,6 +148,25 @@ def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
     Uses a supergrid (half the cell spacing) to evaluate the angle between
     i-tangent and j-tangent at each sub-grid position via centred
     differences of 3D Cartesian positions.
+
+    **Iter-678 note**: an attempt to replace this with Fortran's exact
+    ``cos_angle`` + ``mid_pt3_cart`` formula from
+    ``fv_grid_utils.F90:324-355`` (pointwise Fortran-faithful) WORSENED
+    Williamson 2 alpha=0 C36 1-day L2 by 2.2× (1.098e-3 vs iter-505 lock
+    ceiling 5.0e-4) and broke 9 regression tests.  Downstream operators
+    (c_sw, d2a2c_vect, deln flux, KE, vorticity) are tuned against this
+    tangent-vector cos_sg.  Switching cos_sg formulas without updating
+    the downstream operators in tandem breaks numerical consistency.
+
+    The ~O(1/N) discretization difference between Python's tangent method
+    and Fortran's cos_angle formula (verified by
+    ``TestCosSgFortranFormulaIter678`` at atol 2e-2 for C8) reflects a
+    CONSISTENT numerical choice: Python uses centred differences; Fortran
+    uses arc-projection.  Both are valid metrics; replacing one without
+    the other creates a MIXED scheme that neither Python nor Fortran has
+    tuned against.  Revisiting this requires a coordinated rewrite of
+    downstream operators, which is deferred architectural work (see
+    review doc item #1).
 
     Parameters
     ----------
@@ -336,6 +353,30 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
         # For i,j = 0..n: need 2i-1 >= 0 and 2i <= 2n-1 → i = 1..n-1 for interior
         # Boundaries use available cells only
 
+        # Iter-670 fix: at cube boundaries/vertices, the 4-quadrant
+        # supergrid sum misses contributions from neighbour faces
+        # (1 or 3 of the 4 quadrants are off-face).  This gave
+        # area_corner ≈ 0.22× interior at cube vertices and 0.43× at
+        # cube edges — which amplified rarea_corner by 2-4× at
+        # boundaries and propagated into every operator that uses
+        # `cdgrid.rarea_c` (e.g., `cdgrid_momentum_tendencies` at
+        # `operators_cdgrid.py:1090`).
+        #
+        # Fortran oracle (`tools/fv_grid_tools.F90:1084-1087, 1561-1564`)
+        # extrapolates the metric at cube boundaries:
+        #     area_c(isd,j)         = area_c(isd+1,j)          ! west edge
+        #     area_c(ied+1,j)       = area_c(ied,j)            ! east edge
+        #     area_c(i,jsd)         = area_c(i,jsd+1)          ! south edge
+        #     area_c(i,jed+1)       = area_c(i,jed)            ! north edge
+        #     area_c(isd,jsd)       = area_c(isd+1,jsd+1)      ! SW corner
+        #     area_c(isd,jed+1)     = area_c(isd+1,jed)        ! NW corner
+        #     area_c(ied+1,jsd)     = area_c(ied,jsd+1)        ! SE corner
+        #     area_c(ied+1,jed+1)   = area_c(ied,jed)          ! NE corner
+        # (exact match at leading order for uniform cubed-sphere; the
+        # neighbour-face area is identical.)
+        #
+        # For n >= 2, extrapolate interior values to the boundary.
+        # For n < 2, fall back to the partial-quadrant sum.
         area_c = np.zeros((n + 1, n + 1))
         for i in range(n + 1):
             for j in range(n + 1):
@@ -350,36 +391,103 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
                 if si < 2 * n and sj < 2 * n:
                     total += sg_area[si, sj]
                 area_c[i, j] = total
+        if n >= 2:
+            # Extrapolate edges from adjacent interior.
+            area_c[0, 1:n]    = area_c[1, 1:n]        # west edge
+            area_c[n, 1:n]    = area_c[n - 1, 1:n]    # east edge
+            area_c[1:n, 0]    = area_c[1:n, 1]        # south edge
+            area_c[1:n, n]    = area_c[1:n, n - 1]    # north edge
+            # Extrapolate corners from the diagonal interior cell.
+            area_c[0, 0]     = area_c[1, 1]
+            area_c[0, n]     = area_c[1, n - 1]
+            area_c[n, 0]     = area_c[n - 1, 1]
+            area_c[n, n]     = area_c[n - 1, n - 1]
         all_area_c.append(area_c)
 
         # --- dxc: distance between cell centers (i-1,j) and (i,j) ---
         # Cell center (i,j) at supergrid (2i+1, 2j+1)
         # dxc at x-face (i,j): dist from (2(i-1)+1, 2j+1) to (2i+1, 2j+1)
-        # = dist from (2i-1, 2j+1) to (2i+1, 2j+1) for i=1..n, j=0..n-1
-        # For i=0 and i=n (boundary), extrapolate
+        # = dist from (2i-1, 2j+1) to (2i+1, 2j+1) for i=1..n-1, j=0..n-1
+        # Iter-666/667/669 fix: at i=0 and i=n (cube boundary u-faces),
+        # the pre-iter-666 `max(2*i-1, 0)` / `min(2*i+1, 2*n)`
+        # clamping gave sj spans of 1 supergrid cell = HALF the
+        # interior cell width.  That made rdxc at cube boundaries 2×
+        # the interior value, which amplified PGF by 2× at cube
+        # edges — the direct cause of the FB-chain step-1 residual
+        # (measured 2.93 interior vs 5.87 boundary; ratio exactly
+        # 2.0, iter-665).
+        #
+        # Iter-669 verification: Fortran oracle at
+        # `atmos_cubed_sphere-symmetryclean/tools/fv_grid_tools.F90:
+        # 894-914` does exactly this — compute great-circle distance
+        # for interior i only (`do i=isd+1,ied`), then extrapolate:
+        #     dxc(isd,j)   = dxc(isd+1,j)
+        #     dxc(ied+1,j) = dxc(ied,j)
+        # The iter-666 fix below is the direct Python equivalent.
+        #
+        # Iter-667 (Codex correction on iter-666): the extrapolation
+        # requires adjacent interior cells (i=1, i=n-1) to exist,
+        # which needs n >= 2.  For n == 1 there IS no interior
+        # u-face, so fall back to the original clamped values — not
+        # Fortran-faithful but non-zero, which is what downstream
+        # code expects.  n == 1 is only used in toy regional tests.
         dxc = np.zeros((n + 1, n))
-        for i in range(n + 1):
-            for j in range(n):
-                si0 = max(2 * i - 1, 0)
-                si1 = min(2 * i + 1, 2 * n)
-                sj = 2 * j + 1
-                chord = np.sqrt((px[si0, sj] - px[si1, sj])**2
-                                + (py[si0, sj] - py[si1, sj])**2
-                                + (pz[si0, sj] - pz[si1, sj])**2)
-                dxc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        if n >= 2:
+            for i in range(1, n):  # interior u-faces only
+                for j in range(n):
+                    si0 = 2 * i - 1
+                    si1 = 2 * i + 1
+                    sj = 2 * j + 1
+                    chord = np.sqrt((px[si0, sj] - px[si1, sj])**2
+                                    + (py[si0, sj] - py[si1, sj])**2
+                                    + (pz[si0, sj] - pz[si1, sj])**2)
+                    dxc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+            # Extrapolate at cube boundaries (i=0 from i=1, i=n from i=n-1).
+            dxc[0, :] = dxc[1, :]
+            dxc[n, :] = dxc[n - 1, :]
+        else:
+            # n == 1: no interior u-face.  Fall back to the original
+            # clamped-supergrid computation so dxc is non-zero.
+            for i in range(n + 1):
+                for j in range(n):
+                    si0 = max(2 * i - 1, 0)
+                    si1 = min(2 * i + 1, 2 * n)
+                    sj = 2 * j + 1
+                    chord = np.sqrt((px[si0, sj] - px[si1, sj])**2
+                                    + (py[si0, sj] - py[si1, sj])**2
+                                    + (pz[si0, sj] - pz[si1, sj])**2)
+                    dxc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
         all_dxc.append(dxc)
 
         # --- dyc: distance between cell centers (i,j-1) and (i,j) ---
+        # Iter-666/667 fix: same clamping bug as dxc.  Extrapolate at
+        # cube-boundary v-faces (j=0, j=n) from adjacent interior when
+        # n >= 2.  For n == 1 fall back to original clamped behaviour.
         dyc = np.zeros((n, n + 1))
-        for i in range(n):
-            for j in range(n + 1):
-                si = 2 * i + 1
-                sj0 = max(2 * j - 1, 0)
-                sj1 = min(2 * j + 1, 2 * n)
-                chord = np.sqrt((px[si, sj0] - px[si, sj1])**2
-                                + (py[si, sj0] - py[si, sj1])**2
-                                + (pz[si, sj0] - pz[si, sj1])**2)
-                dyc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        if n >= 2:
+            for i in range(n):
+                for j in range(1, n):  # interior v-faces only
+                    si = 2 * i + 1
+                    sj0 = 2 * j - 1
+                    sj1 = 2 * j + 1
+                    chord = np.sqrt((px[si, sj0] - px[si, sj1])**2
+                                    + (py[si, sj0] - py[si, sj1])**2
+                                    + (pz[si, sj0] - pz[si, sj1])**2)
+                    dyc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+            # Extrapolate at cube boundaries.
+            dyc[:, 0] = dyc[:, 1]
+            dyc[:, n] = dyc[:, n - 1]
+        else:
+            # n == 1: fall back to original clamped computation.
+            for i in range(n):
+                for j in range(n + 1):
+                    si = 2 * i + 1
+                    sj0 = max(2 * j - 1, 0)
+                    sj1 = min(2 * j + 1, 2 * n)
+                    chord = np.sqrt((px[si, sj0] - px[si, sj1])**2
+                                    + (py[si, sj0] - py[si, sj1])**2
+                                    + (pz[si, sj0] - pz[si, sj1])**2)
+                    dyc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
         all_dyc.append(dyc)
 
         # --- dxa: cell width in x = face-to-face distance (FV3 fv_grid_tools.F90) ---
@@ -420,7 +528,7 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
 
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
-    omega: float = 7.292e-5,
+    omega: float = constants.Omega,
     metric_dtype=None,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
@@ -429,8 +537,11 @@ def create_cubed_sphere_cdgrid(
     ----------
     base : CubedSphereGrid
         cell-centre cubed-sphere with cell-center metrics.
-    omega : float
-        Planetary rotation rate [rad/s].
+    omega : float or None
+        Planetary rotation rate [rad/s].  If ``None`` (default), the
+        effective omega is inferred from ``base.f`` and ``base.sin_lat``
+        so that `cdgrid.f_corner` is consistent with `base.f` under
+        small-earth scaling (see ``scale_cubed_sphere_metrics``).
     metric_dtype : dtype or None
         Dtype for corner-critical metrics (gradient matrix, rsin, rarea,
         cosa, sin_sg, dxc/dyc).  Defaults to float32.
@@ -630,6 +741,27 @@ def create_cubed_sphere_cdgrid(
     from legoesm.grids.halo import pad_halo, _fill_corners_h1
     area_corner = area_c_sg  # (6, n+1, n+1)
 
+    # Infer omega from base.f when not explicitly provided so that
+    # `cdgrid.f_corner` remains consistent with `base.f` under any
+    # rescaling (e.g. `small_earth_factor` in NH model tests).  Use
+    # the cell with the largest |sin(lat)| for numerical stability.
+    # Falls back to Earth's default if the inference is not reliable
+    # (e.g. base.f/sin_lat cannot be reduced to a concrete scalar,
+    # or the base grid has sin_lat effectively zero everywhere).
+    if omega is None:
+        try:
+            flat_abs_sl = jnp.abs(base.sin_lat).reshape(-1)
+            idx = int(jnp.argmax(flat_abs_sl))
+            sl_probe = float(base.sin_lat.reshape(-1)[idx])
+            f_probe = float(base.f.reshape(-1)[idx])
+            if abs(sl_probe) > 1e-6:
+                omega = f_probe / (2.0 * sl_probe)
+            else:
+                omega = 7.292e-5  # fallback: sin_lat ~ 0 everywhere
+        except (TypeError, jax.errors.ConcretizationTypeError):
+            # base.f or base.sin_lat is a JAX tracer (e.g. JIT-time
+            # grid construction). Fall back to the Earth default.
+            omega = 7.292e-5
     f_corner = 2.0 * omega * jnp.sin(lat_corner)
     cos_angle_corner = jnp.cos(angle_corner)
     sin_angle_corner = jnp.sin(angle_corner)
@@ -742,14 +874,30 @@ def create_cubed_sphere_cdgrid(
         sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
     ], axis=2)
 
-    # rsin_u/rsin_v: 1/sin² EVERYWHERE (uniform — no edge override).
-    # FV3 overrides edges with 1/sin (fv_grid_utils.F90:548-554), but
-    # this creates a ~5% metric discontinuity at face boundaries that
-    # causes visible edge artifacts.  The duogrid path and the c_sw
-    # vorticity flux use /sina (not rsin_u) at boundaries anyway, so
-    # the edge override serves no purpose for the active code paths.
+    # rsin_u/rsin_v follow FV3 fv_grid_utils.F90:509-561:
+    #   - Interior u/v faces: rsin_u = 1/sina_u² (line 509, 517)
+    #   - Panel edges (i=1 or i=npx for rsin_u; j=1 or j=npy for rsin_v):
+    #     rsin_u = 1/sina_u (lines 548-561) — ONLY when .not. bounded_domain
+    # Gating matches Fortran bounded_domain = (regional .or. nested .or.
+    # duogrid) at fv_arrays.F90:1512.  In legoESM:
+    #   - duogrid → base.duogrid is not None
+    #   - regional/nested → single-face panel (base.lat.shape[0] == 1; see
+    #     create_cubed_sphere_panel and the `data.shape[0] == 1` branch in
+    #     pad_halo).  For a single-face panel the outer perimeter is a
+    #     physical wall, not a cube seam, and panel-edge rsin is not used.
     rsin_u = 1.0 / jnp.maximum(sina_u**2, _EPS)
     rsin_v = 1.0 / jnp.maximum(sina_v**2, _EPS)
+    _is_single_face = base.lat.shape[0] == 1
+    _bounded_domain = (base.duogrid is not None) or _is_single_face
+    if not _bounded_domain:
+        # Panel-edge override: replace 1/sin² with 1/sin at i==0 and i==n
+        # for rsin_u, and j==0 and j==n for rsin_v.
+        rsin_u_edge = 1.0 / jnp.sign(sina_u) / jnp.maximum(jnp.abs(sina_u), _EPS)
+        rsin_u = rsin_u.at[:, 0, :].set(rsin_u_edge[:, 0, :])
+        rsin_u = rsin_u.at[:, -1, :].set(rsin_u_edge[:, -1, :])
+        rsin_v_edge = 1.0 / jnp.sign(sina_v) / jnp.maximum(jnp.abs(sina_v), _EPS)
+        rsin_v = rsin_v.at[:, :, 0].set(rsin_v_edge[:, :, 0])
+        rsin_v = rsin_v.at[:, :, -1].set(rsin_v_edge[:, :, -1])
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics
@@ -941,9 +1089,17 @@ def create_cubed_sphere_cdgrid(
     # Interpolation of positions is required: without it, the nearest-
     # neighbor positional mismatch (up to 0.5 cells near cube vertices)
     # creates O(1) errors in the gradient transformation matrix.
-    x_pad = pad_halo(x_cc, interp_offsets=base.halo_interp_offsets)
-    y_pad = pad_halo(y_cc, interp_offsets=base.halo_interp_offsets)
-    z_pad = pad_halo(z_cc, interp_offsets=base.halo_interp_offsets)
+    # When duogrid is active on the base grid, route through the duogrid
+    # kinked-to-extended remap so the precomputed `grad_c00..c11` matrix
+    # is consistent with `_pad_halo_auto`-routed field halos used by the
+    # runtime `_arakawa_lamb_gradient` operator.  Previously these
+    # positions were pinned to `interp_offsets` even in duogrid mode,
+    # creating a silent inconsistency between grid-build and runtime halos.
+    _base_dg = base.duogrid
+    _pos_offs = None if _base_dg is not None else base.halo_interp_offsets
+    x_pad = pad_halo(x_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+    y_pad = pad_halo(y_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+    z_pad = pad_halo(z_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
     x_pad = _fill_corners_h1(x_pad)
     y_pad = _fill_corners_h1(y_pad)
     z_pad = _fill_corners_h1(z_pad)
@@ -1063,3 +1219,48 @@ def create_cubed_sphere_cdgrid(
         rdxa=rdxa.astype(_prec),
         rdya=rdya.astype(_prec),
     )
+
+
+# ==============================================================================
+# Diagnostic helper: 4-edge angle averaging for D-grid → geographic regrid
+# ==============================================================================
+
+def cell_centre_angles_from_4edge(cdgrid):
+    """4-surrounding-edge mean of grid angle for cell-centre D→geo regrid.
+
+    Returns (cos_alpha, sin_alpha) of shape (6, n, n) where each
+    cell-centre angle is the average of the 4 surrounding edge-midpoint
+    angles (2 x-edges + 2 y-edges).  This is the matrix's W2 v-wind
+    regrid path (see `run_atmosphere_test_matrix.py:1213-1233`):
+    using cell-centre angles instead introduces an O(dx) v_north
+    residual on Williamson 2 (~0.39 m/s); the 4-edge mean reduces
+    this to ~0.008 m/s at t=0 (47x improvement, see iter-25/26 of
+    docs/fv3_fortran_fidelity_review.md).
+
+    Iter-528: extracted from the matrix's inline `extract_fn` so any
+    diagnostic code that converts D-grid winds to geographic on the
+    cubed sphere can use the same higher-fidelity rotation without
+    duplicating the code.
+
+    Parameters
+    ----------
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    cos_alpha : jax.Array, shape (6, n, n)
+    sin_alpha : jax.Array, shape (6, n, n)
+    """
+    cax = cdgrid.cos_angle_edge_x  # (6, n, n+1)
+    sax = cdgrid.sin_angle_edge_x  # (6, n, n+1)
+    cay = cdgrid.cos_angle_edge_y  # (6, n+1, n)
+    say = cdgrid.sin_angle_edge_y  # (6, n+1, n)
+    ca = 0.25 * (cax[:, :, :-1] + cax[:, :, 1:]
+                 + cay[:, :-1, :] + cay[:, 1:, :])
+    sa = 0.25 * (sax[:, :, :-1] + sax[:, :, 1:]
+                 + say[:, :-1, :] + say[:, 1:, :])
+    # Renormalize to unit magnitude (4-point average on a unit
+    # circle does not preserve length exactly; the matrix does this
+    # at run_atmosphere_test_matrix.py:1230-1231).
+    norm = jnp.sqrt(ca ** 2 + sa ** 2)
+    return ca / norm, sa / norm

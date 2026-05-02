@@ -1,0 +1,28 @@
+Iter-787 W2 alpha=0 C36 1-day, LEGACY vs DUOGRID
+dt=300s (iter-761 canonical config)
+
+                path   L2 (h drift)     v_ll_Linf     v_cc_Linf
+-----------------------------------------------------------------
+              LEGACY      2.176e-04     1.585e-01     1.879e-01
+             DUOGRID      1.757e-01     9.996e+01     1.087e+02
+
+    DUOGRID / LEGACY        807.268       630.556       578.438
+
+Interpretation cues (observational only):
+- L2 (h drift): both should be small (~2e-4 for LEGACY iter-761
+  baseline).  DUOGRID may be larger due to _d2a2c_vect error.
+- v_ll_Linf: LEGACY baseline ~0.159 m/s (iter-765 documented).
+  If DUOGRID v_ll_Linf is >> 0.159 m/s, the duogrid cube-vertex
+  error in `_d2a2c_vect` directly drives the W2 artifact.
+- v_cc_Linf: raw v_north at cell centres (no lat-lon regrid)
+  provides a cleaner comparison unaffected by regrid interpol.
+
+What iter-787 DOES measure (observational only):
+- W2 alpha=0 1-day C36 L2 and v_ll_Linf under LEGACY
+  (use_duogrid=False) and DUOGRID (use_duogrid=True) paths.
+What it does NOT establish:
+- WHICH part of the duogrid chain (halo exchange, corner fill,
+  _d2a2c_vect, tendencies) drives the difference — that requires
+  finer decomposition than iter-787 provides.
+- Whether fixing iter-786's duogrid cube-vertex error would
+  make DUOGRID better than LEGACY.

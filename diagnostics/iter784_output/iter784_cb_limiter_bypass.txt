@@ -1,0 +1,35 @@
+Iter-784 cosine bell C36 with PPM limiter bypass
+dt=1440.0s, β=π/4, 1.0 day
+
+                    case      L_inf         L2        peak cell    peak err     h_min     h_max
+-----------------------------------------------------------------------------------------------
+   BASELINE (limiter ON)  1.213e+02  1.165e-01   face 3 (30,32)  +1.213e+02      0.00    895.40
+              NO LIMITER  1.204e+02  1.172e-01   face 3 (30,32)  +1.204e+02      0.00    893.42  [Linf -0.8%, L2 +0.6%]
+
+Interpretation cues (observational only):
+- If NO_LIMITER Linf is MUCH SMALLER (>=30% reduction):
+  candidate (d) 'PPM limiter' is supported as a primary
+  driver of the cosine bell distortion.
+- If NO_LIMITER Linf is similar or larger: the limiter is
+  NOT the primary driver.  Candidate (a) 'resolution-
+  invariant structural error' becomes more likely.
+- NO_LIMITER h_min / h_max may go below 0 / above H0=1000.
+  The mass_target fix then re-clips negatives to zero and
+  rescales, so the reported Linf is on the re-clipped field.
+- The peak_err sign (+/- signs before Linf) distinguishes
+  over- from undershoot; BASELINE typically undershoots (-)
+  because the limiter clips the PPM parabola.
+
+What iter-784 DOES measure (observational only):
+- Linf and L2 of the C36 1-day cosine bell with and without
+  the `_pert_ppm_iv0` + face-boundary `_pert_ppm` limiters.
+- Shift in peak-error location and sign.
+What it does NOT establish:
+- Whether a different limiter (e.g. hord=8 2*dm monotone vs
+  the current hord=9 positive-definite) would outperform the
+  current choice; iter-784 only tests OFF vs ON.
+- Whether other components (PPM reconstruction, flux
+  integration) contribute independently of the limiter.
+- Whether the limiter bypass preserves long-term stability
+  (mass_target fix restores non-negativity, but bell shape
+  may be unphysical).

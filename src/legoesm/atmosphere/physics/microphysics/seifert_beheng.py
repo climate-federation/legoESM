@@ -32,6 +32,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     accretion,
     self_collection_breakup,
     rain_evaporation,
+    safe_pow,
 )
 
 
@@ -66,7 +67,11 @@ def seifert_beheng_microphysics(
 
     N_c_eff = effective_Nc(N_c, config.Nc_0)
 
-    condensation, q_sat = saturation_adjustment(T, q_v, p_full, dt, sharpness)
+    # Pass ``q_c`` so the evaporation branch (negative ``condensation``) is
+    # donor-clamped — see _warm_rain.saturation_adjustment.
+    condensation, q_sat = saturation_adjustment(
+        T, q_v, p_full, dt, sharpness, q_c=q_c,
+    )
 
     # 1. Autoconversion (mass-dependent)
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
@@ -84,16 +89,46 @@ def seifert_beheng_microphysics(
     # 5. Rain evaporation
     evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff)
 
-    # 6. Sedimentation
+    # === Joint donor clamp on q_c sinks ===
+    # ``saturation_adjustment`` already donor-clamps the evaporation
+    # branch in isolation (negative ``condensation`` ≥ ``-q_c/dt``),
+    # but the COMBINED rate ``-condensation_evap + dq_c_au + dq_c_ac``
+    # can still exceed ``q_c/dt`` and drive ``q_c`` negative AND
+    # break total-water conservation.  Probe with q_c=1e-4, q_r=5e-3,
+    # 80 % RH at 290 K: SB drove q_c → -4e-3 over 1200 s and lost
+    # 5.5e-3 kg/kg of total water.  Mirror Morrison/Thompson's joint
+    # clamp (Codex audit cycle 2 + follow-up).
+    cond_evap_sink = jnp.maximum(-condensation, 0.0)
+    qc_sink_total = cond_evap_sink + dq_c_au + dq_c_ac
+    qc_avail = jnp.clip(q_c, 0.0)
+    qc_scale = jnp.minimum(
+        1.0,
+        qc_avail / jnp.maximum(qc_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
+    )
+    dq_c_au = dq_c_au * qc_scale
+    dq_c_ac = dq_c_ac * qc_scale
+    condensation = jnp.where(
+        condensation < 0.0, condensation * qc_scale, condensation,
+    )
+    # The autoconverted droplet number ``dN_r_au`` must scale
+    # consistently to preserve mass-per-droplet ``x_star``.
+    dN_r_au = dN_r_au * qc_scale
+
+    # 6. Sedimentation — Marshall-Palmer fall speed (q_r * rho/rho_sfc)^b_v_r
+    # has fractional exponent (b_v_r=0.5); guard the AD path with safe_pow.
     rho_sfc = rho[:, -1:]
-    V_t_r = config.a_v_r * (jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1)) ** config.b_v_r
+    V_t_r = config.a_v_r * safe_pow(
+        jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1), config.b_v_r,
+    )
     V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
     sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
 
     # 7. Latent heating
     dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
 
-    # Combine tendencies
+    # Combine tendencies — joint-scaled sinks/sources conserve total
+    # water (q_v + q_c + q_r) per layer (modulo rain-evap exchange
+    # with q_v and sedimentation).
     dq_v_dt = -condensation + evaporation
     dq_c_dt = condensation - dq_c_au - dq_c_ac
     dq_r_dt = dq_c_au + dq_c_ac - evaporation + sed_r

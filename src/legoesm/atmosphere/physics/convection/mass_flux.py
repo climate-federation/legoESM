@@ -50,6 +50,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
@@ -129,22 +130,57 @@ def _compute_centered_gradients(
     return dT_dz, dq_dz
 
 
+def stratosphere_mass_flux_gate(
+    p_full: jax.Array,
+    p_min_convection: float = 10_000.0,
+    p_gate_sharpness: float = 1_500.0,
+) -> jax.Array:
+    """Smooth sigmoid factor in [0, 1] that vanishes above the
+    tropopause (low ``p``) and equals one in the troposphere.
+
+    Multiplying any mass-flux profile by the returned factor prevents
+    convective tendencies from accumulating in the model top layer,
+    where the small mass per unit area (Δp/g) would amplify modest
+    heating into unphysical spikes (>400 K observed in 1-year RCE).
+
+    Defaults: cutoff at 100 hPa (canonical tropical tropopause) with
+    a 15-hPa transition width.  This gives factor ≈ 0.013 at the
+    model top (35 hPa), 0.034 at 50 hPa, 0.5 at 100 hPa, 0.91 at
+    130 hPa, and ≈ 1.0 below 200 hPa — i.e. the gate is *actually
+    closed* (not merely attenuated) in the deep stratosphere while
+    leaving the upper troposphere unaffected.  ``p_gate_sharpness``
+    must be << ``p_min_convection`` for the sigmoid to saturate
+    within the integration range; sharpness ≥ p_min only attenuates.
+
+    Differentiable everywhere; ``p_gate_sharpness`` sets the width of
+    the transition (Pa).
+    """
+    return jax.nn.sigmoid(
+        (p_full - p_min_convection) / jnp.maximum(p_gate_sharpness, 1.0)
+    )
+
+
 def _apply_mass_flux_kernel(
     T: jax.Array,
     q_v: jax.Array,
     p_full: jax.Array,
     T_u: jax.Array,
-    q_u: jax.Array,
+    q_v_u: jax.Array,
+    q_c_u: jax.Array,
     M_profile: jax.Array,
     z: jax.Array,
     rho: jax.Array,
     delta_0: float,
+    M_u_max: float = 0.05,
+    p_min_convection: float = 10_000.0,
+    p_gate_sharpness: float = 1_500.0,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     """Mass-flux core kernel: compensating subsidence + detrainment.
 
     Given the vertical mass-flux profile ``M_profile`` and the
-    entraining updraft properties ``(T_u, q_u)``, returns
-    ``(dT_dt, dq_v_dt, dq_c_conv_dt)`` — all shape ``(ncol, nlev)``.
+    entraining updraft thermodynamics ``(T_u, q_v_u, q_c_u)``,
+    returns ``(dT_dt, dq_v_dt, dq_c_conv_dt)`` — all shape
+    ``(ncol, nlev)``.
 
     The decomposition follows Tiedtke (1989) / Siebesma et al. (2007):
       (a) Compensating subsidence: ``(M/rho) * (dT/dz + g/c_p)`` for T
@@ -152,28 +188,57 @@ def _apply_mass_flux_kernel(
           adiabatic correction).
       (b) Detrainment mixing: ``+delta_0 * M * (X_u - X) / rho``.
 
-    The convective source for cloud water is the per-level detrained
-    condensate rate ``dq_c_conv_dt = delta_0 * M * condensate / rho``
-    [kg/kg/s], non-negative by construction. Microphysics processes
-    this through its full chain (autoconversion, sedimentation,
-    evaporation) and produces the resulting surface precipitation;
-    convection no longer assumes the condensate falls instantly.
+    The mass flux ``M_profile`` is gated by a smooth sigmoid in
+    pressure so that levels above ``p_min_convection`` (default 100
+    hPa, the canonical tropical tropopause) receive no convective
+    tendency.  See ``stratosphere_mass_flux_gate`` for details.
+
+    The convective source for cloud water is the per-level detrainment
+    of the plume's cloud water:
+    ``dq_c_conv_dt = delta_0 * M * q_c_u / rho`` [kg/kg/s], non-negative
+    by construction.  Splitting the plume into separate vapor (``q_v_u``)
+    and cloud (``q_c_u``) pieces — instead of a single ``q_u`` that
+    conflates total water with vapor — is what makes the column MSE
+    budget close.  The earlier formulation passed ``q_u = q_v_u + q_c_u``
+    as if it were vapor and computed condensate as ``max(q_u - q_sat,
+    0)``, which is essentially zero for an entraining-diluted plume —
+    the leaf then leaked latent energy.  Microphysics processes
+    ``dq_c_conv_dt`` through its full chain (autoconversion,
+    sedimentation, evaporation) and produces the resulting surface
+    precipitation; convection no longer assumes the condensate falls
+    instantly.
     Unit check: (1/m) * (kg/m²/s) * (kg/kg) / (kg/m³) = 1/s × kg/kg.
     """
     dT_dz, dq_dz = _compute_centered_gradients(T, q_v, z)
     rho_safe = jnp.clip(rho, 0.01, None)
 
+    # Per-level mass-flux cap.  The plume integrator can yield ``M_u``
+    # that grows with height when ``epsilon > delta`` (entraining
+    # plumes) or that responds non-linearly to a high-CAPE column.
+    # Per-layer convective heating ``≈ delta_0 · M_u · (T_u−T)/ρ``
+    # scales linearly with ``M_u``, so an uncapped ``M_u`` produces
+    # column heating well in excess of what surface fluxes can supply
+    # and destabilises the integration.  Clipping at the cap (default
+    # ``0.05 kg/m²/s``, the literature peak tropical updraft mass flux)
+    # bounds per-layer tendencies without distorting the moist adiabat
+    # or the q_v / q_c split.
+    M_profile = jnp.clip(M_profile, 0.0, M_u_max)
+
+    # Stratospheric pressure gate — see ``stratosphere_mass_flux_gate``.
+    M_profile = M_profile * stratosphere_mass_flux_gate(
+        p_full, p_min_convection, p_gate_sharpness,
+    )
+
     dT_subsidence = (M_profile / rho_safe) * (dT_dz + constants.g / constants.c_pd)
     dq_subsidence = (M_profile / rho_safe) * dq_dz
 
     dT_detrain = delta_0 * M_profile * (T_u - T) / rho_safe
-    dq_detrain = delta_0 * M_profile * (q_u - q_v) / rho_safe
+    dq_detrain = delta_0 * M_profile * (q_v_u - q_v) / rho_safe
 
     dT_dt = dT_subsidence + dT_detrain
     dq_v_dt = dq_subsidence + dq_detrain
 
-    condensate = jnp.clip(q_u - saturation_mixing_ratio(T_u, p_full), 0.0, None)
-    dq_c_conv_dt = delta_0 * M_profile * condensate / rho_safe
+    dq_c_conv_dt = delta_0 * M_profile * jnp.clip(q_c_u, 0.0, None) / rho_safe
     return dT_dt, dq_v_dt, dq_c_conv_dt
 
 
@@ -252,24 +317,39 @@ def mass_flux_convection_from_closure(
     m_profile = jnp.sin(jnp.pi * (p_base - p_full) / p_range)
     M_profile = M_c_new[:, None] * m_profile
 
-    # Entraining updraft: thermal dilutes from moist-adiabat parcel toward
-    # environment; moisture starts saturated at the cloud base parcel and
-    # dilutes toward the environmental humidity.
+    # Entraining updraft.  The undiluted plume rises with a fixed
+    # total-water reservoir equal to the actual launched-parcel vapor
+    # ``q_v_sfc`` (NOT ``q_sat_sfc`` — using the saturation value here
+    # would let a 5%-RH desert column produce convective cloud water
+    # because the plume would "remember" being saturated at base when
+    # it never was).  At each level the undiluted plume vapor saturates
+    # at ``min(q_sat_moist, q_v_sfc)`` and condenses the excess; below
+    # the actual LCL (``q_sat_moist > q_v_sfc``) condensation is zero.
+    # Entrainment dilutes both T and q_v with environmental values; the
+    # entrained env air carries no q_c, so q_c_u just scales by
+    # ``dilution``.  The fix keeps the saturated-surface case
+    # (``q_v_sfc = q_sat_sfc``) identical to the old formula.
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
-    q_sat_base = saturation_mixing_ratio(T[:, -1:], p_full[:, -1:])
-    q_u = dilution * q_sat_base + (1.0 - dilution) * q_v
+    q_v_sfc = q_v[:, -1:]
+    q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
+    q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
+    q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
+    q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
+    q_c_u = dilution * q_c_u_undiluted
 
     dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
         T=T,
         q_v=q_v,
         p_full=p_full,
         T_u=T_u,
-        q_u=q_u,
+        q_v_u=q_v_u,
+        q_c_u=q_c_u,
         M_profile=M_profile,
         z=z,
         rho=rho,
         delta_0=config.delta_0,
+        M_u_max=config.M_b_max,
     )
 
     return ConvectionOutput(
@@ -362,20 +442,32 @@ def edmf_convection(
     a_u_new = a_u + dt * (a_u_eq - a_u) / config.tau_a
     a_u_new = jnp.clip(a_u_new, 0.0, 0.5)
 
-    # Entraining updraft: thermal dilutes from the moist adiabat toward
-    # environment; moisture follows the moist-adiabat saturation profile
-    # (this differs from mass_flux, which dilutes from a single base
-    # parcel — a small but deliberate scientific distinction between
-    # the two schemes).
+    # Entraining updraft.  Same correction as in ``mass_flux_convection``:
+    # the undiluted plume's water reservoir is the *actual* launched-parcel
+    # vapor ``q_v_sfc``, not ``q_sat_sfc``.  Without this the plume would
+    # condense in dry columns even when the surface parcel never reached
+    # saturation (e.g. 5%-RH desert column gives ~2 mm/day of spurious
+    # convective precipitation — see ``test_no_cloud_water_in_dry_column``).
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
+    q_v_sfc = q_v[:, -1:]
     q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
-    q_u = dilution * q_sat_moist + (1.0 - dilution) * q_v
+    q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
+    q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
+    q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
+    q_c_u = dilution * q_c_u_undiluted
 
-    # Buoyancy: B = g * (T_v_u - T_v_env) / T_v_env (only positive part
-    # contributes to updraft kinetic energy).
-    T_v_env = T * (1.0 + 0.61 * q_v)
-    T_v_u = T_u * (1.0 + 0.61 * q_u)
+    # Buoyancy: B = g * (T_v_u - T_v_env) / T_v_env.  Vapor contributes
+    # ``+(R_v/R_d - 1) q_v ≈ +0.608 q_v`` (water vapour is lighter than
+    # dry air) and cloud water contributes ``-q_c`` (the loaded
+    # condensate is mass drag, not buoyancy).  An earlier formulation
+    # used ``T_v = T*(1 + 0.61*(q_v + q_c))`` which treated q_c with the
+    # *wrong sign* — making cloudy plumes spuriously buoyant — so we
+    # use the standard form here.  ``virtual_temperature`` returns
+    # ``T*(1 + 0.608·q_v)`` from ``constants.epsilon``; the cloud-water
+    # loading term ``-T_u·q_c_u`` is added explicitly.
+    T_v_env = virtual_temperature(T, q_v)
+    T_v_u = virtual_temperature(T_u, q_v_u) - T_u * q_c_u
     B = constants.g * (T_v_u - T_v_env) / jnp.clip(T_v_env, 1.0, None)
 
     # Updraft velocity from buoyancy integral (surface upward), with a
@@ -393,11 +485,13 @@ def edmf_convection(
         q_v=q_v,
         p_full=p_full,
         T_u=T_u,
-        q_u=q_u,
+        q_v_u=q_v_u,
+        q_c_u=q_c_u,
         M_profile=M_profile,
         z=z,
         rho=rho,
         delta_0=config.delta_0,
+        M_u_max=config.M_b_max,
     )
 
     conv_out = ConvectionOutput(

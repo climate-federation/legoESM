@@ -40,9 +40,9 @@ from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 logger = logging.getLogger("legoesm.parallel.cubesphere_exchange")
 
 try:
-    from jax.shard_map import shard_map  # JAX >= 0.8
-except (ImportError, ModuleNotFoundError):
-    from jax.experimental.shard_map import shard_map
+    from jax import shard_map  # JAX >= 0.8 exposes it at top level
+except ImportError:
+    from jax.experimental.shard_map import shard_map  # older JAX fallback
 
 # ---------------------------------------------------------------------------
 # Static connectivity tables (built once at import).
@@ -462,16 +462,22 @@ def explicit_pad_halo_vector_4d(
 # Packed multi-field exchange
 # ===================================================================
 
-def packed_pad_halo_4d(*fields, mesh):
+def packed_pad_halo_4d(*fields, mesh, duogrid=None):
     """Exchange halos for multiple 4D fields in a single collective.
 
     Stacks fields along the trailing axis, performs ONE exchange, then
     splits.  Reduces collective count from ``len(fields)`` to 1.
 
     All fields must share the same ``(6, n, n)`` spatial prefix.
+
+    When ``duogrid`` is provided, applies the kinked-to-extended remap
+    + corner fill to each output field after the packed exchange.
+    Without this, packed SPMD halos silently bypass duogrid while the
+    unpacked ``pad_halo_4d`` path applies it (see halo.py:559-573).
     """
     if not fields:
         return []
+
     if len(fields) == 1:
         return [explicit_pad_halo_4d(fields[0], mesh)]
 
@@ -483,7 +489,28 @@ def packed_pad_halo_4d(*fields, mesh):
     split_indices = np.cumsum(splits[:-1]).tolist()
     stacked = jnp.concatenate(fields, axis=-1)
     padded = explicit_pad_halo_4d(stacked, mesh, halo=1)
-    return list(jnp.split(padded, split_indices, axis=-1))
+    pieces = list(jnp.split(padded, jnp.cumsum(jnp.array(splits[:-1])), axis=-1))
+    if duogrid is not None:
+        pieces = [_apply_duogrid_4d(p, duogrid, halo=1) for p in pieces]
+    return pieces
+
+
+def _apply_duogrid_4d(padded, duogrid, halo):
+    """Apply duogrid kinked-to-extended remap + corner fill to a 4D
+    padded field, level-by-level via ``jax.vmap``.  Mirrors the
+    post-processing loop inside ``halo.pad_halo_4d``.
+    """
+    from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
+    import jax
+
+    def _remap_level(level_slice):
+        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
+        level_slice = fill_corner_region(level_slice, duogrid, halo)
+        return level_slice
+
+    padded_t = jnp.transpose(padded, (3, 0, 1, 2))
+    padded_t = jax.vmap(_remap_level)(padded_t)
+    return jnp.transpose(padded_t, (1, 2, 3, 0))
 
 
 # ===================================================================

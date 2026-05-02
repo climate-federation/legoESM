@@ -240,9 +240,11 @@ def _configure_tpu(config: HardwareConfig) -> None:
     # to allow XLA to choose bf16 for non-critical ops.
     jax.config.update("jax_default_matmul_precision", "bfloat16")
 
-    # For multi-host TPU pods, ensure SPMD partitioning is enabled.
-    if config.num_hosts > 1:
-        jax.config.update("jax_spmd_mode", "allow_all")
+    # NOTE: the legacy `jax_spmd_mode='allow_all'` toggle was removed
+    # in modern JAX (0.9+) — `jax.config.update("jax_spmd_mode", ...)`
+    # raises AttributeError.  Under the unified sharding model SPMD
+    # partitioning is the default for sharded arrays, so no explicit
+    # toggle is required for multi-host TPU pods.
 
 
 def _configure_gpu(config: HardwareConfig) -> None:
@@ -309,10 +311,13 @@ def _configure_metal(config: HardwareConfig) -> None:
     """
     if "XLA_FLAGS" not in os.environ:
         try:
-            n_cores = os.cpu_count() or 4
+            # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
+            # is NOT recognized by current XLA and crashes JAX at first
+            # use with a fatal `Unknown flag in XLA_FLAGS` error from
+            # parse_flags_from_env.cc.  Drop it; rely on XLA's default
+            # CPU thread-pool autoscaling from os.cpu_count().
             _set_xla_flags({
                 "xla_cpu_multi_thread_eigen": "true",
-                "intra_op_parallelism_threads": str(n_cores),
             })
         except Exception:
             pass  # Non-critical; XLA will use defaults.
@@ -324,10 +329,13 @@ def _configure_cpu(config: HardwareConfig) -> None:
     # the user has already set it.
     if "XLA_FLAGS" not in os.environ:
         try:
-            n_cores = os.cpu_count() or 4
+            # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
+            # is NOT recognized by current XLA and crashes JAX at first
+            # use with a fatal `Unknown flag in XLA_FLAGS` error from
+            # parse_flags_from_env.cc.  Drop it; rely on XLA's default
+            # CPU thread-pool autoscaling from os.cpu_count().
             _set_xla_flags({
                 "xla_cpu_multi_thread_eigen": "true",
-                "intra_op_parallelism_threads": str(n_cores),
             })
         except Exception:
             pass  # Non-critical; XLA will use defaults.

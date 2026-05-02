@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -97,11 +98,11 @@ def louis_turbulence(
     S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10  # shear squared, with floor
     S = jnp.sqrt(S2)
 
-    # Virtual potential temperature for buoyancy
-    # theta_v = T * (p_ref / p)^kappa * (1 + 0.61 * q_v)
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    # Virtual potential temperature for buoyancy:
+    # theta_v = T_v(T, q_v) · (p_ref / p)^kappa, with the canonical
+    # T_v factor 1 + (R_v/R_d - 1) q_v ≈ 1 + 0.6078 q_v.
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
 
     # Gradient Richardson number at half-levels
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])

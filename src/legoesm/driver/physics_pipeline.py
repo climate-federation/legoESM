@@ -831,6 +831,17 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 # Convection resolver
 # ---------------------------------------------------------------------------
 
+_PIPELINE_UNSUPPORTED_CONVECTION = frozenset(
+    {
+        "zhang_mcfarlane",
+        "kain_fritsch",
+        "emanuel",
+        "tiedtke",
+        "bechtold",
+    }
+)
+
+
 def _resolve_convection(config):
     """Resolve convection kernel and config from ExperimentConfig.
 
@@ -838,6 +849,19 @@ def _resolve_convection(config):
 
     Prognostic schemes (mass_flux, edmf) are returned directly and their
     prognostic variable is threaded explicitly through the unified driver.
+
+    The five profile-prognostic schemes (zhang_mcfarlane, kain_fritsch,
+    emanuel, tiedtke, bechtold) are registered in ``CONVECTION_REGISTRY``
+    but are NOT yet wired through ``PhysicsPipeline.physics_step_no_rad``
+    — the pipeline currently threads only a ``(ncol,)`` scalar carry,
+    while these schemes require a ``(ncol, nlev)`` ``conv_prog_profile``
+    plus per-scheme inputs (winds, w_grid, moisture_convergence,
+    stochastic state, PRNG key).  Selecting one of them through the
+    production driver therefore fails fast here rather than producing
+    silently wrong tendencies inside the hot loop.  Users who need
+    these schemes should drive them through
+    :func:`legoesm.atmosphere.physics.convection.integration.make_convection_physics`,
+    which is the supported per-model-type bridge factory.
     """
     from legoesm.atmosphere.physics.convection.config import (
         ConvectionConfig,
@@ -850,6 +874,21 @@ def _resolve_convection(config):
     scheme = config.convection
     if scheme == "none":
         return _noop_convection, None
+
+    if scheme in _PIPELINE_UNSUPPORTED_CONVECTION:
+        raise NotImplementedError(
+            f"Convection scheme {scheme!r} is registered but is not "
+            f"yet supported by the unified driver pipeline "
+            f"(PhysicsPipeline.physics_step_no_rad).  The pipeline "
+            f"only threads a (ncol,) scalar convective carry; "
+            f"profile-prognostic schemes need (ncol, nlev) "
+            f"`conv_prog_profile` plus winds / w_grid / "
+            f"moisture_convergence / stochastic state plumbing.  "
+            f"Use `legoesm.atmosphere.physics.convection.integration."
+            f"make_convection_physics` (the per-model-type bridge "
+            f"factory) instead, or extend the pipeline carry to "
+            f"support profile-prognostic schemes."
+        )
 
     conv_fn = resolve_kernel(CONVECTION_REGISTRY, scheme)
 

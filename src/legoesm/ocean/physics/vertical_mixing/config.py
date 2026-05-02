@@ -48,6 +48,9 @@ class KPPConfig(NamedTuple):
     Ri_0: float = 0.7        # LMD94 critical Ri for interior shear mixing
     c_s: float = 98.96       # LMD94 parameter for V_t^2 (Appendix B)
     c_b: float = 0.599       # LMD94 convective velocity scale parameter
+    epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
+    crossing_sharpness: float = 20.0  # Sigmoid sharpness for h_bl crossing-depth selector
+    crossing_threshold: float = 0.1   # Crossing-strength threshold for h_bl blend
 
 
 class VerticalMixingConfig(NamedTuple):

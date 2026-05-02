@@ -1,0 +1,27 @@
+Iter-788 W2 DUOGRID config sweep at C36, 6-hour runs, dt=300s
+
+LEGACY iter-761 canonical (for reference, 6h):
+  L2=1.225e-04, v_cc_Linf=4.310e-02
+
+           DUOGRID config           L2    v_cc_Linf      status
+----------------------------------------------------------------------
+       iter-761 canonical    8.894e-02    4.165e+01      broken
+       boundary_fix=False    1.078e-01    8.922e+01      broken
+        damp_v=0 nord_v=0    8.894e-02    4.259e+01      broken
+               div_damp=0    7.588e-02    8.602e+01      broken
+       div_damp=base (1x)    7.102e-02    7.568e+01      broken
+          all damping off    1.147e-01    2.556e+02      broken
+
+Interpretation cues (observational only):
+- 'OK' = v_cc_Linf < 5 m/s (approaching LEGACY baseline).
+- 'drifting' = v_cc_Linf in [5, 30] m/s (visible artifact).
+- 'broken' = v_cc_Linf > 30 m/s (gross failure like iter-787).
+- If any DUOGRID config reaches 'OK', that knob toggle is a
+  candidate for the broken duogrid wiring.
+
+What iter-788 DOES measure (observational only):
+- DUOGRID W2 6-hour L2 and v_cc_Linf under 6 config variants.
+What it does NOT establish:
+- Whether the identified failing config knob is FIXABLE (vs
+  reflecting a deeper wiring issue).
+- Whether 6-hour behaviour extrapolates to 1-day or longer.

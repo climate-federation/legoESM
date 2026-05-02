@@ -1,0 +1,24 @@
+Iter-833 cosine bell C36 multi-day Linf / L2 trajectory
+dt=1440.0s, β=π/4, samples every 1 day
+
+ day        Linf          L2       h_max   bell GC-to-vertex
+--------------------------------------------------------------
+   0   0.000e+00   0.000e+00      979.01              52.97°
+   1   1.213e+02   1.165e-01      895.40              25.93°
+   2   5.924e+02   5.959e-01      694.20               5.27°
+   3   6.121e+02   6.262e-01      539.91              34.38°
+   4   4.761e+02   4.752e-01      755.82               5.27°
+   5   5.742e+02   5.528e-01      845.66              25.93°
+   6   6.111e+02   5.707e-01      876.82              52.97°
+   7   6.558e+02   6.449e-01      794.40              25.93°
+   8   8.306e+02   9.192e-01      686.24               5.27°
+   9   8.430e+02   9.212e-01      605.75              34.38°
+  10   7.629e+02   8.406e-01      766.19               5.27°
+  11   9.516e+02   9.982e-01      898.57              25.93°
+  12   9.725e+02   1.007e+00      893.34              52.97°
+
+Interpretation cues (observational only):
+- Linf growth pattern: linear in day = dispersion at constant
+  rate.  Sharp jumps at specific days = cube-vertex crossings.
+- bell GC-to-vertex: when < 5°, bell is near a cube vertex.
+- h_max < 1000 = amplitude diffusion.

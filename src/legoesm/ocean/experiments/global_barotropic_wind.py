@@ -60,11 +60,11 @@ class GlobalBarotropicWindConfig:
     polar_cap_lat: float = 80.0        # [degrees]
 
     # Physics
-    A_h: float = 5e5               # Lateral viscosity [m²/s]
+    A_h: float = 5e4               # Lateral viscosity [m²/s]
     bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag [m/s]
 
 
-def _create_simplified_continent_mask(lon_deg, lat_deg, config):
+def create_simplified_continent_mask(lon_deg, lat_deg, config):
     """Create simplified continent land mask.
 
     Geometry:
@@ -73,7 +73,17 @@ def _create_simplified_continent_mask(lon_deg, lat_deg, config):
     - Open Drake Passage south of continent_lat_south
     - Everything else is ocean
 
-    Returns 1 = ocean, 0 = land.
+    Parameters
+    ----------
+    lon_deg, lat_deg : array-like
+        Longitude and latitude in degrees.
+    config : object
+        Must have attributes: polar_cap_lat, continent_lon_west,
+        continent_lon_east, continent_lat_south.
+
+    Returns
+    -------
+    array : 1 = ocean, 0 = land.
     """
     lon = jnp.asarray(lon_deg)
     lat = jnp.asarray(lat_deg)
@@ -146,7 +156,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
 
     # Apply simplified continent mask
-    mask = _create_simplified_continent_mask(lon_deg, lat_deg, config)
+    mask = create_simplified_continent_mask(lon_deg, lat_deg, config)
     mask_typed = np.asarray(mask).astype(np.asarray(state.eta.data).dtype)
     if grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import replace_land_mask
@@ -173,11 +183,12 @@ def create_forcings(grid_type: str, grid,
     )
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
+    # Bottom drag is applied via the dynamics-level ``bottom_drag_r``
+    # field (baroclinic PE + barotropic substeps), not through the
+    # physics pipeline.  The test matrix runner passes
+    # ``bottom_drag_r=config.bottom_drag_coeff`` to the model config.
     return OceanPhysicsConfig(
         surface_forcing=SurfaceForcingConfig(
             scheme="prescribed",
@@ -190,10 +201,6 @@ def create_forcings(grid_type: str, grid,
         ),
         vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(
-            scheme="linear",
-            linear=LinearDragConfig(r=config.bottom_drag_coeff),
-        ),
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=None,
     )

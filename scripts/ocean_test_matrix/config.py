@@ -39,10 +39,21 @@ B_H_OVERRIDE = None  # Set via --B-h CLI flag
 C_SMAG_OVERRIDE = None  # Set via --C-smag CLI flag
 K_H_OVERRIDE = None  # Set via --K-h CLI flag
 U_SURFACE_OVERRIDE = None  # Set via --U-surface CLI flag (Eady)
+PV_SCHEME_OVERRIDE = None  # Set via --pv-scheme CLI flag (MPAS only)
+APVM_DT_OVERRIDE = None    # Set via --apvm-dt CLI flag (MPAS only; seconds; 0 disables)
+PV_ALPHA_OVERRIDE = None   # Set via --pv-alpha CLI flag (MPAS only; used when pv_scheme="mixed")
+K_ZETA_BIH_OVERRIDE = None # Set via --K-zeta-bih CLI flag (MPAS only; m⁴/s; biharmonic ζ damping)
+C_LEITH_OVERRIDE = None    # Set via --C-leith CLI flag (MPAS only; flow-dependent biharmonic viscosity)
+C_LEITH_MODIFIED_OVERRIDE = None  # Set via --C-leith-modified CLI flag (uses |∇(ζ+Q_d)| instead of |∇ζ|)
 BAROTROPIC_DIV_DAMP_OVERRIDE = None  # Set via --barotropic-div-damp CLI flag
                                      # (dimensionless; targets grid-scale
                                      # compressible modes — see issue #213
                                      # hi-res Eady SOM investigation recipe)
+MOMENTUM_ADVECTION_OVERRIDE = None   # Set via --momentum-advection CLI flag
+                                     # (latlon C-grid only: "vector_invariant",
+                                     # "weno5", or "weno7")
+WENO_D_TERM_OVERRIDE = None          # Set via --no-weno-d-term CLI flag
+                                     # (disables the D-term in WENO momentum)
 
 # Output format: "netcdf" (default), "zarr", or "npz" (legacy)
 OUTPUT_FORMAT = "netcdf"

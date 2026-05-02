@@ -68,18 +68,16 @@ def ml_microphysics(
     """
     ncol, nlev = T.shape
 
-    # Build input features: [T/300, q_v*1e3, q_c*1e3, q_r*1e3,
-    #   q_i*1e3, log(p/p_ref), rho/1.2, dz/1000, dt_norm]
     features = jnp.stack([
-        T / 300.0,
-        q_v * 1e3,
-        hydrometeors.q_c * 1e3,
-        hydrometeors.q_r * 1e3,
-        hydrometeors.q_i * 1e3,
+        T / config.norm_T,
+        q_v * config.norm_q_factor,
+        hydrometeors.q_c * config.norm_q_factor,
+        hydrometeors.q_r * config.norm_q_factor,
+        hydrometeors.q_i * config.norm_q_factor,
         jnp.log(jnp.clip(p_full, 1.0) / constants.p_ref),
-        rho / 1.2,
-        dz / 1000.0,
-        jnp.full((ncol, nlev), dt / 3600.0, dtype=T.dtype),
+        rho / config.norm_rho,
+        dz / config.norm_dz,
+        jnp.full((ncol, nlev), dt / config.norm_dt, dtype=T.dtype),
     ], axis=-1)  # (ncol, nlev, n_input)
 
     # Apply MLP per level via double vmap

@@ -141,6 +141,32 @@ def compute_wind_stress(
             -0.08 - 0.0397 * s2 + 1.9487 * s2**2 - 2.0397 * s2**3
         ) * jnp.cos(lat)
         tau_y = jnp.zeros_like(tau_x)
+    elif cfg.wind_profile == "two_belt":
+        # Two-belt zonal wind: equatorial easterlies + mid-latitude
+        # westerlies, no polar easterlies.  Sum of two Gaussians:
+        #   tau_x = -0.5*tau_max * exp(-phi^2/sigma_t^2)
+        #         +     tau_max * exp(-( |phi| - phi_jet )^2/sigma_w^2)
+        #
+        # Default parameters (Option C):
+        #   phi_jet  = 50 deg   westerly jet latitude
+        #   sigma_w  = 12 deg   westerly jet width
+        #   sigma_t  = 15 deg   trade wind width
+        #
+        # Properties:
+        #   - Equatorial easterlies at half the westerly peak
+        #   - Westerly peak ~0.1 Pa at 50 deg latitude
+        #   - Smooth Gaussian decay toward poles (no polar easterlies)
+        #   - Zero crossing at ~27 deg latitude
+        #   - Meaningful wind stress over Drake Passage (55-80 deg S)
+        phi_jet = jnp.radians(50.0)
+        sigma_w = jnp.radians(12.0)
+        sigma_t = jnp.radians(15.0)
+        abs_lat = jnp.abs(lat)
+        tau_trade = -0.5 * cfg.tau_max * jnp.exp(-(lat / sigma_t) ** 2)
+        tau_west = cfg.tau_max * jnp.exp(
+            -((abs_lat - phi_jet) / sigma_w) ** 2)
+        tau_x = tau_trade + tau_west
+        tau_y = jnp.zeros_like(tau_x)
     else:  # "constant"
         tau_x = jnp.full_like(lat, cfg.tau_x)
         tau_y = jnp.full_like(lat, cfg.tau_y)

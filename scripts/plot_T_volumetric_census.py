@@ -176,7 +176,7 @@ def _mpas_cell_volumes(run_dir: Path, T_3d: np.ndarray) -> tuple[np.ndarray, np.
 
     cfg = EadyUniformConfig()
     mesh = create_regional_voronoi_mesh(
-        (0, 360), (cfg.lat_south, cfg.lat_north),
+        (cfg.lon_west, cfg.lon_east), (cfg.lat_south, cfg.lat_north),
         resolution_km=resolution_km, periodic_x=True,
     )
     area = np.asarray(mesh.areaCell, dtype=np.float64)  # (nCells,)

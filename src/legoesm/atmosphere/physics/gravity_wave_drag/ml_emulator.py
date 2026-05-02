@@ -65,14 +65,13 @@ def ml_gwd(
     """
     ncol, nlev = u.shape
 
-    # Build input features: [u/30, v/30, T/300, log(p/p_ref), z/30000, sin(lat), cos(lat)]
     lat_3d = jnp.broadcast_to(lat[:, None], (ncol, nlev))
     features = jnp.stack([
-        u / 30.0,
-        v / 30.0,
-        T / 300.0,
+        u / config.norm_u,
+        v / config.norm_u,
+        T / config.norm_T,
         jnp.log(jnp.clip(p_full, 1.0) / constants.p_ref),
-        z_full / 30000.0,
+        z_full / config.norm_z,
         jnp.sin(lat_3d),
         jnp.cos(lat_3d),
     ], axis=-1)  # (ncol, nlev, n_input)

@@ -22,12 +22,14 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.halo import (
     pad_halo,
     compute_padded_angle,
     compute_padded_half_metrics,
     compute_halo_interp_offsets,
     compute_halo_interp_offsets_h2,
+    compute_halo_interp_offsets_h3,
 )
 
 
@@ -98,6 +100,20 @@ class CubedSphereGrid(NamedTuple):
         Half dy on halo=2 extended grid, shape (6, n+4, n+4).
     halo_interp_offsets_h2 : jax.Array
         Interpolation offsets for halo=2 exchange, shape (6, 4, 2, n).
+    halo_interp_offsets_h3 : jax.Array
+        Interpolation offsets for halo=3 exchange, shape (6, 4, 3, n).
+        Iter-532: precomputed for the iter-496..501 ng=3 halo
+        extension that supports the FB-chain stability work
+        (review-doc item #2).
+    cos_angle_padded_h3 : jax.Array
+        Cosine of padded grid angle for halo=3, shape (6, n+6, n+6).
+        Iter-595: added for the ng=3 vector halo round-trip.
+    sin_angle_padded_h3 : jax.Array
+        Sine of padded grid angle for halo=3, shape (6, n+6, n+6).
+    hx_ext_h3 : jax.Array
+        Half dx on halo=3 extended grid, shape (6, n+6, n+6).
+    hy_ext_h3 : jax.Array
+        Half dy on halo=3 extended grid, shape (6, n+6, n+6).
     duogrid : DuoGridData or None
         Duo-Grid kinked-to-extended remapping data. When not None,
         pad_halo applies the Duo-Grid remap instead of interp_offsets.
@@ -129,6 +145,11 @@ class CubedSphereGrid(NamedTuple):
     hx_ext_h2: jax.Array
     hy_ext_h2: jax.Array
     halo_interp_offsets_h2: jax.Array
+    halo_interp_offsets_h3: jax.Array
+    cos_angle_padded_h3: jax.Array
+    sin_angle_padded_h3: jax.Array
+    hx_ext_h3: jax.Array
+    hy_ext_h3: jax.Array
     duogrid: object  # DuoGridData | None — use object to avoid circular import
 
     @property
@@ -151,6 +172,27 @@ class CubedSphereGrid(NamedTuple):
         is (π/2)*R/n.
         """
         return (jnp.pi / 2) * self.radius / (self.n * 1000.0)
+
+    @property
+    def bounded_domain(self) -> bool:
+        """Iter-865b: Fortran-faithful ``bounded_domain`` flag per
+        ``fv_arrays.F90:1512``: ``bounded_domain = (regional .or.
+        nested .or. duogrid)``.  In legoESM:
+        - duogrid: ``self.duogrid is not None``.
+        - regional / nested: a single-face panel (``self.lat.shape[0]
+          == 1``; see ``create_cubed_sphere_panel`` and the
+          ``data.shape[0] == 1`` branch of ``pad_halo`` which applies
+          Neumann wall BCs instead of inter-face halo exchange).
+
+        Operators with legacy edge-handling fallbacks should bypass
+        them when ``bounded_domain`` is True so the duogrid /
+        regional Fortran-faithful path is used uniformly across the
+        codebase.  Iter-865 originally hardcoded the gate to
+        ``self.duogrid is None``; iter-865b exposes the proper
+        bounded-domain abstraction so future regional/nested support
+        gates the same way.
+        """
+        return (self.duogrid is not None) or (self.lat.shape[0] == 1)
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -199,8 +241,8 @@ class CubedSphereGrid(NamedTuple):
 
 def create_cubed_sphere(
     n: int,
-    radius: float = 6.371229e6,
-    omega: float = 7.292e-5,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
     dtype=None,
     use_duogrid: bool = False,
     k2e_nord: int = 2,
@@ -271,6 +313,17 @@ def create_cubed_sphere(
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
     halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
 
+    # halo=3 quantities for the iter-496..501 ng=3 halo extension
+    # (FB-chain stability prerequisite, review-doc item #2).
+    halo_offsets_h3 = compute_halo_interp_offsets_h3(n)
+    # Iter-595: add grid-angle + half-metrics at halo=3 so the vector
+    # halo round-trip has the padded-angle reference needed to enable
+    # `pad_halo_vector(halo=3)` on the non-MPI backend.
+    angle_padded_h3 = compute_padded_angle(n, halo=3)
+    hx_ext_h3, hy_ext_h3 = compute_padded_half_metrics(n, radius, halo=3)
+    cos_angle_padded_h3_val = jnp.cos(angle_padded_h3)
+    sin_angle_padded_h3_val = jnp.sin(angle_padded_h3)
+
     # Optional: Duo-Grid kinked-to-extended remapping data.
     # Duo-Grid requires ng >= 2 so both halo depths used by the FV3
     # d2a2c_vect and PPM transport paths are remapped. Since ng <= n//2,
@@ -323,6 +376,11 @@ def create_cubed_sphere(
         hx_ext_h2=hx_ext_h2.astype(_dt),
         hy_ext_h2=hy_ext_h2.astype(_dt),
         halo_interp_offsets_h2=halo_offsets_h2.astype(_dt),
+        halo_interp_offsets_h3=halo_offsets_h3.astype(_dt),
+        cos_angle_padded_h3=cos_angle_padded_h3_val.astype(_dt),
+        sin_angle_padded_h3=sin_angle_padded_h3_val.astype(_dt),
+        hx_ext_h3=hx_ext_h3.astype(_dt),
+        hy_ext_h3=hy_ext_h3.astype(_dt),
         duogrid=duogrid,
     )
 
@@ -571,7 +629,7 @@ def lonlat_to_cartesian(
 def great_circle_distance(
     lon1: jax.Array, lat1: jax.Array,
     lon2: jax.Array, lat2: jax.Array,
-    radius: float = 6.371229e6,
+    radius: float = constants.R_earth,
 ) -> jax.Array:
     """Compute great-circle distance using the Haversine formula."""
     dlat = lat2 - lat1
@@ -640,8 +698,8 @@ def rotate_winds_grid_to_geo(
 def create_cubed_sphere_panel(
     n: int,
     face_id: int = 0,
-    radius: float = 6.371229e6,
-    omega: float = 7.292e-5,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
     dtype=None,
     return_cdgrid: bool = False,
 ) -> "CubedSphereGrid | tuple[CubedSphereGrid, ...]":
@@ -724,6 +782,12 @@ def create_cubed_sphere_panel(
         hx_ext_h2=_repad(_s(full.hx_ext_h2), halo=2),
         hy_ext_h2=_repad(_s(full.hy_ext_h2), halo=2),
         halo_interp_offsets_h2=None,  # not needed — wall BC
+        halo_interp_offsets_h3=None,  # not needed — wall BC
+        cos_angle_padded_h3=jnp.cos(_repad(_s(full.angle), halo=3)),
+        sin_angle_padded_h3=jnp.sin(_repad(_s(full.angle), halo=3)),
+        hx_ext_h3=_repad(_s(full.hx_ext_h3), halo=3),
+        hy_ext_h3=_repad(_s(full.hy_ext_h3), halo=3),
+        duogrid=None,  # regional panel: no cross-face duogrid data
     )
 
     if not return_cdgrid:
@@ -744,4 +808,24 @@ def create_cubed_sphere_panel(
     cdgrid_panel = jax.tree.map(_extract_face, full_cdgrid)
     # Replace the base grid with the panel (base is index 0 of the NamedTuple)
     cdgrid_panel = cdgrid_panel._replace(base=panel)
+
+    # Restore the FV3 bounded_domain rsin_u/rsin_v convention for the panel.
+    # The full-grid build applies the 1/sin panel-edge override only when
+    # bounded_domain is False (fv_arrays.F90:1512).  A single-face panel is
+    # a bounded_domain case (regional) and must use 1/sin² everywhere —
+    # matching fv_grid_utils.F90:509.  Undo the override that was inherited
+    # from the 6-face build.
+    import jax.numpy as _jnp
+    _EPS = float(_jnp.finfo(_jnp.float32).eps)
+    # cosa_u_panel was already extracted; recompute rsin_u = 1/sin² there.
+    sina_u_sq_panel = _jnp.maximum(
+        1.0 - cdgrid_panel.cosa_u**2, _EPS)
+    rsin_u_panel = 1.0 / _jnp.maximum(sina_u_sq_panel, _EPS)
+    sina_v_sq_panel = _jnp.maximum(
+        1.0 - cdgrid_panel.cosa_v**2, _EPS)
+    rsin_v_panel = 1.0 / _jnp.maximum(sina_v_sq_panel, _EPS)
+    cdgrid_panel = cdgrid_panel._replace(
+        rsin_u=rsin_u_panel.astype(cdgrid_panel.rsin_u.dtype),
+        rsin_v=rsin_v_panel.astype(cdgrid_panel.rsin_v.dtype),
+    )
     return panel, cdgrid_panel

@@ -1,0 +1,27 @@
+Iter-780 cosine bell peak-error location at C16/C24/C36/C48
+β=π/4, 1 day, dt=1350s
+
+  n  face      (i, j)      lat       lon    GC to vertex  cell to edge   peak|err|
+----------------------------------------------------------------------------------
+  16    3  (12,12)   23.15°   -64.69°         20.96°            3   1.675e+02
+  24    3  (18,17)   18.92°   -65.62°         24.48°            5   1.151e+02
+  36    3  (30,32)   32.08°   -58.75°         11.87°            3   1.213e+02
+  48    3  (39,43)   32.95°   -60.94°         13.38°            4   1.262e+02
+
+Measured summary across the 4 resolutions:
+  GC-distance to nearest cube vertex : min=11.87°, max=24.48°, span=12.62°
+  cell-distance to face edge         : min=3, max=5
+  peak |err|                          : min=1.151e+02, max=1.675e+02
+
+What this report DOES show (observational only):
+- At each n, the peak |h-h_exact| position (face, i, j) is
+  reported.
+- GC distance to the nearest of 8 cube vertices is reported.
+What it does NOT establish:
+- Whether the peak-error cell is also where the error was
+  ACCUMULATED (vs a downstream collection of upstream errors).
+- Whether the peak-error position is stable in time (this is
+  a single end-of-day snapshot, not a trajectory).
+- Which of iter-778's candidate mechanisms (a) / (c) / (d) is
+  supported — distinguishing requires further diagnostics that
+  iter-780 does not run.

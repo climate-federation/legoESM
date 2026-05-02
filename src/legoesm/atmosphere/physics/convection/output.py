@@ -27,8 +27,8 @@ import jax
 class ConvectionOutput(NamedTuple):
     """Output from a convection scheme (backend-agnostic).
 
-    All fields are at full levels with shape ``(ncol, nlev)`` except
-    column-mean diagnostics which have shape ``(ncol,)``.
+    All required fields are at full levels with shape ``(ncol, nlev)``
+    except column-mean diagnostics which have shape ``(ncol,)``.
 
     Fields
     ------
@@ -48,9 +48,23 @@ class ConvectionOutput(NamedTuple):
         CAPE diagnostic [J/kg], shape (ncol,).
     convective_mask : jax.Array
         Smooth 0-1 convective indicator, shape (ncol,).
+    du_dt_conv : jax.Array or None
+        Optional convective momentum tendency for zonal wind [m/s²],
+        shape (ncol, nlev).  ``None`` for schemes without convective
+        momentum transport (the existing five schemes plus the
+        Kain-Fritsch and Emanuel schemes added in PRs 2 and 3).
+        Populated by Zhang-McFarlane (PR 1), Tiedtke (PR 4), and
+        Bechtold/IFS (PR 5) via the Gregory et al. 1997 closure.  When
+        ``None``, the integration bridge zero-fills the dynamical-core
+        wind tendencies.
+    dv_dt_conv : jax.Array or None
+        Optional convective momentum tendency for meridional wind
+        [m/s²], shape (ncol, nlev).  Same conventions as ``du_dt_conv``.
     """
     dT_dt: jax.Array
     dq_v_dt: jax.Array
     dq_c_conv_dt: jax.Array
     cape: jax.Array
     convective_mask: jax.Array
+    du_dt_conv: jax.Array | None = None
+    dv_dt_conv: jax.Array | None = None

@@ -235,10 +235,23 @@ def capture_physics_teacher_snapshot(
                     1.0,
                 )
             )
+            # Diagnostic-rain semantics — must match
+            # ``microphysics/sundqvist.py``: q_r is drained to the
+            # surface every step, surface precipitation includes the
+            # drained mass.  The teacher snapshot is what the ML model
+            # learns to reproduce, so the snapshot must reflect the
+            # corrected leaf, not the pre-fix ``dq_r_dt = autoconv - evap``
+            # formulation that double-counted rain.
+            dt_safe_train = jnp.maximum(dt, 1e-10)
+            q_r_in_col = jnp.clip(q_r_col, 0.0, None)
+            dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+            q_r_drain_flux_col = jnp.sum(q_r_in_col * dp_col, axis=1) / (
+                constants.g * dt_safe_train
+            )
             dq_v_dt_micro = _copy_array(-rates.condensation + rates.evaporation)
             dq_c_dt_micro = _copy_array(rates.condensation - rates.autoconversion)
-            dq_r_dt_micro = _copy_array(rates.autoconversion - rates.evaporation)
-            precip_micro = _copy_array(rates.precipitation)
+            dq_r_dt_micro = _copy_array(-q_r_in_col / dt_safe_train)
+            precip_micro = _copy_array(rates.precipitation + q_r_drain_flux_col)
     elif micro_scheme != "none":
         raise ValueError(
             "capture_physics_teacher_snapshot currently supports "

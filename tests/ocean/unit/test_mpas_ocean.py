@@ -528,6 +528,74 @@ class TestBarotropicSubsteps:
         )
         assert u_3d_new.shape == state.u.data.shape
 
+    def test_barotropic_u_viscosity_damps_grid_noise(
+        self, state, mesh, z_coord, config,
+    ):
+        """``barotropic_u_viscosity`` damps grid-scale noise on u_bar.
+
+        Targets the TRiSK rotational null branch on hexagonal C-grids
+        (Thuburn 2008; Ringler et al. 2010, JCP §6) — a noise mode
+        that has both ∇·u_bar ≈ 0 and is not damped by eta diffusion
+        or divergence damping.
+
+        Strategy: seed the 3D velocity with random edge noise (which
+        projects onto all wavenumbers including the null branch),
+        run a single barotropic substep with and without viscosity,
+        and assert that the viscous run has significantly lower
+        u_bar variance.
+        """
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        u_noise = jnp.asarray(
+            0.01 * rng.standard_normal(state.u.data.shape),
+            dtype=state.u.data.dtype,
+        )
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = state.land_mask.data[c1] * state.land_mask.data[c2]
+        u_noise = u_noise * edge_mask[:, None]
+
+        state_noisy = state._replace(u=state.u.replace(data=u_noise))
+
+        dt_baro = 30.0
+        n_sub = 30
+
+        # Run without viscosity (baseline)
+        cfg_off = config._replace(
+            barotropic_u_viscosity=0.0,
+            barotropic_diffusion_alpha=0.0,
+            barotropic_div_damp=0.0,
+        )
+        _, u_bar_off, _ = barotropic_substeps_mpas(
+            state_noisy, mesh, z_coord, cfg_off, dt_baro, n_sub,
+        )
+
+        # Run with viscosity ON. On the level-2 mesh (~2400 km),
+        # forward-Euler stability requires A * dt / dx² < 0.5; with
+        # dt=30 s and dx²≈7e12 this gives A < 1.2e11. Pick A=1e10:
+        # diffusion timescale dx²/A ≈ 700 s, so ~30 substeps × 30 s
+        # = 900 s gives an O(1) reduction at the highest wavenumbers.
+        cfg_on = config._replace(
+            barotropic_u_viscosity=1.0e10,
+            barotropic_diffusion_alpha=0.0,
+            barotropic_div_damp=0.0,
+        )
+        _, u_bar_on, _ = barotropic_substeps_mpas(
+            state_noisy, mesh, z_coord, cfg_on, dt_baro, n_sub,
+        )
+
+        var_off = float(jnp.var(u_bar_off))
+        var_on = float(jnp.var(u_bar_on))
+        assert var_on < 0.5 * var_off, (
+            f"u_bar viscosity should reduce variance by ≥2×; "
+            f"got var_off={var_off:.3e}, var_on={var_on:.3e}"
+        )
+
+    def test_barotropic_u_viscosity_default_off(self, config):
+        """Default config keeps u_bar viscosity disabled for bit-stability."""
+        assert config.barotropic_u_viscosity == 0.0
+
 
 # ============================================================================
 # Test: Full Model
@@ -1012,37 +1080,27 @@ class TestSurfaceForcing:
         assert float(jnp.max(jnp.abs(tend.du_dt.data[:, 1:]))) == 0.0
 
     def test_bottom_drag_produces_tendency(self, mesh, z_coord):
-        """Linear bottom drag produces nonzero bottom-layer tendency."""
-        from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
-        from legoesm.ocean.physics.combined import OceanPhysicsConfig
-        from legoesm.ocean.physics.bottom_drag.config import (
-            BottomDragConfig, LinearDragConfig,
-        )
+        """Dynamics-level linear bottom drag produces nonzero tendency."""
+        from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
 
-        config = OceanPhysicsConfig(
-            bottom_drag=BottomDragConfig(
-                scheme="linear", linear=LinearDragConfig(r=1e-4)),
-        )
-        fn = make_mpas_ocean_physics(config)
+        config = MPASOceanConfig(bottom_drag_r=1e-4)
 
         # Create state with nonzero bottom velocity
         s = rest_state_mpas_ocean(mesh, z_coord, H_max=500.0)
         u_data = s.u.data.at[:, -1].set(1.0)
         s = s._replace(u=s.u.replace(data=u_data))
 
-        tend = fn(s, mesh, z_coord)
-        # Bottom layer should have drag: du/dt = -r * u = -1e-4
+        tend = mpas_ocean_baroclinic_tendencies(
+            s, mesh, z_coord, config)
+        # Bottom layer should have drag: du/dt = -r * u / dz_bottom
         assert float(jnp.max(jnp.abs(tend.du_dt.data[:, -1]))) > 0
 
     def test_model_step_with_physics(self, mesh, z_coord):
-        """Full model step with physics produces circulation."""
+        """Full model step with wind + dynamics bottom drag produces circulation."""
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.surface_forcing.config import (
             PrescribedForcingConfig, SurfaceForcingConfig,
-        )
-        from legoesm.ocean.physics.bottom_drag.config import (
-            BottomDragConfig, LinearDragConfig,
         )
         from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
 
@@ -1052,11 +1110,10 @@ class TestSurfaceForcing:
                 prescribed=PrescribedForcingConfig(
                     wind_profile="single_gyre", tau_max=0.1),
             ),
-            bottom_drag=BottomDragConfig(
-                scheme="linear", linear=LinearDragConfig(r=1e-4)),
         )
         config = MPASOceanConfig(
-            n_barotropic_substeps=5, physics=physics, A_h=1e3)
+            n_barotropic_substeps=5, physics=physics, A_h=1e3,
+            bottom_drag_r=1e-4)
         model = MPASOceanModel(mesh, z_coord, config)
 
         state = wind_driven_gyre_mpas(mesh, z_coord, H_max=500.0)

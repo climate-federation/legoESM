@@ -1,0 +1,16 @@
+Iter-819 FB DUOGRID damp_v sweep (nord_v=2) W2 C24 24.0h
+
+    damp_v                          status     h_max    u_cc_Linf    v_cc_Linf
+---------------------------------------------------------------------------
+     0.000                        ok (24h)     24040    8.757e+01    6.011e+01
+     0.001                        ok (24h)     24040    8.757e+01    6.011e+01
+     0.003                        ok (24h)     24040    8.757e+01    6.010e+01
+     0.010                        ok (24h)     24036    8.755e+01    6.001e+01
+     0.030                        ok (24h)     23923    8.719e+01    5.767e+01
+     0.060            CRASH step 94 (7.8h)         —            —            —
+
+Interpretation cues (observational only):
+- If small damp_v > 0 gives smaller h_max than baseline (0):
+  there's a stable sweet spot.  FB DUOGRID viable with tuning.
+- If all damp_v > 0 destabilise OR keep h_max >= 24040:
+  damp_v under FB is not the fix; need other approach.

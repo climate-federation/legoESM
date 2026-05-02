@@ -82,11 +82,25 @@ _b54 = 0.226007483236906
 
 
 def _state_inexact_dtype(state: State):
-    """Return first inexact (float/complex) dtype found in a pytree state."""
+    """Return the float dtype matching the state's precision policy.
+
+    Walks pytree leaves until it finds an inexact (float / complex)
+    leaf, then returns the *real* dtype with matching precision —
+    ``complex128 → float64``, ``complex64 → float32``.  This keeps
+    scalar coefficients (``dt``, RK weights) real-valued so multiplying
+    them against a real-tracer leaf does not promote the result to
+    complex.  ``complex_state + real_dt * complex_tendency`` still
+    yields ``complex_state`` via JAX's natural promotion, so the
+    spectral-field math is unchanged.
+    """
     for leaf in jax.tree.leaves(state):
         dtype = getattr(leaf, "dtype", None)
-        if dtype is not None and jnp.issubdtype(dtype, jnp.inexact):
-            return dtype
+        if dtype is None or not jnp.issubdtype(dtype, jnp.inexact):
+            continue
+        if jnp.issubdtype(dtype, jnp.complexfloating):
+            # Map complex → real of matching precision.
+            return jnp.float32 if dtype == jnp.complex64 else jnp.float64
+        return dtype
     return None
 
 

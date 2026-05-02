@@ -1,0 +1,26 @@
+Iter-800 DUOGRID vs LEGACY u_c, v_c, divergence at t=0 for W2
+W2 solid-body rotation: analytical divergence = 0 everywhere.
+
+LEGACY:
+                 LEGACY u_c  peak=3.860e+01  face=0  (0,17)  lat=-0.90° lon=-43.75°  GC=34.38°  |mean|=2.754e+01
+        LEGACY u_c (re-loc)  peak=3.860e+01  face=0  (0,17)  lat=-0.88° lon=-45.00°  GC=34.38°  |mean|=2.754e+01
+                 LEGACY v_c  peak=2.668e+01  face=4  (0,18)  lat=+46.25° lon=-90.00°  GC=35.28°  |mean|=7.186e+00
+         LEGACY div (∇·u_c)  peak=3.304e-08  face=0  (2,0)  lat=-36.74° lon=-38.75°  GC=5.27°  |mean|=3.748e-09
+    LEGACY mass_div (dh/dt)  peak=1.329e-04  face=4  (18,0)  lat=+46.24° lon=+1.31°  GC=34.38°  |mean|=1.120e-05
+
+DUOGRID:
+                DUOGRID u_c  peak=3.860e+01  face=0  (0,17)  lat=-0.90° lon=-43.75°  GC=34.38°  |mean|=2.754e+01
+       DUOGRID u_c (re-loc)  peak=3.860e+01  face=0  (0,17)  lat=-0.88° lon=-45.00°  GC=34.38°  |mean|=2.754e+01
+                DUOGRID v_c  peak=2.668e+01  face=4  (0,18)  lat=+46.25° lon=-90.00°  GC=35.28°  |mean|=7.186e+00
+        DUOGRID div (∇·u_c)  peak=3.598e-08  face=0  (2,0)  lat=-36.74° lon=-38.75°  GC=5.27°  |mean|=4.070e-09
+   DUOGRID mass_div (dh/dt)  peak=1.557e-01  face=2  (0,0)  lat=-34.66° lon=+136.25°  GC=1.19°  |mean|=2.410e-03
+
+Divergence ratio (DUOGRID/LEGACY) = 1.09x
+
+Interpretation cues (observational only):
+- If DUOGRID div peaks at cube vertices with large magnitude:
+  the `pad_halo_vector(duogrid=dg)` or `fv3_cc2c` duogrid
+  dispatch is broken at cube corners.
+- If DUOGRID u_c or v_c has obviously wrong values at cube
+  vertices (e.g. much larger than analytical ~40 m/s):
+  confirms the halo exchange is the culprit.

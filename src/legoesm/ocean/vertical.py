@@ -324,9 +324,9 @@ def vertical_advection_ocean(field, w_half, z_coord, jacobian):
     jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
     dz_half = z_coord.dz_half_ref * jac_safe
     grad = upwind_vertical_gradient(field, dz_half, w_full)
-    
+
     # Vertical advection calculation
-    
+
     return -w_full * grad
 
 

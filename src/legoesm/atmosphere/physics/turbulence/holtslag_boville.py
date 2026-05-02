@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -87,9 +88,8 @@ def holtslag_boville_turbulence(
     S = jnp.sqrt(S2)
 
     # Virtual potential temperature
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
 
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
@@ -138,12 +138,14 @@ def holtslag_boville_turbulence(
     l_mix = constants.kappa_vk * z_abs / (
         1.0 + constants.kappa_vk * z_abs / config.l_mix_max
     )
-    b_louis = 5.0
+    b_louis = config.b_louis
     Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + 5.0 * Ri_pos))
+    f_stable = 1.0 / (
+        1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + b_louis * Ri_pos)
+    )
     Ri_neg = jnp.minimum(Ri, 0.0)
     f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * 5.0 * l_mix ** 2
+        1.0 + 3.0 * b_louis * b_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
     blend_ri = jax.nn.sigmoid(100.0 * Ri)

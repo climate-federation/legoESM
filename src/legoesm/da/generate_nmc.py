@@ -98,7 +98,7 @@ class NMCConfig(NamedTuple):
 # ERA5 ↔ spectral state conversion
 # ---------------------------------------------------------------------------
 
-def _era5_to_spectral(era5, grid, sigma):
+def _era5_to_spectral(era5, grid, sigma, include_tracers: bool = True):
     """Convert an ERA5Slice to SpectralHydrostaticState on a Gaussian grid.
 
     Pipeline:
@@ -106,12 +106,22 @@ def _era5_to_spectral(era5, grid, sigma):
     2. Vertical interpolation: pressure levels → sigma levels
     3. (u, v) → spectral (vorticity, divergence) via SH analysis
     4. T, ln(p_s), phis → spectral
+    5. When ``include_tracers=True`` (default), package the regridded
+       ERA5 specific humidity as a grid-space ``q_v`` ``Field`` on
+       ``state.tracers``.  The dycore RHS will then advect q_v through
+       the forecast and any moisture-aware physics (gray radiation,
+       Kessler, ...) will consume it.
 
     Parameters
     ----------
     era5 : ERA5Slice
     grid : GaussianGrid
     sigma : SigmaCoordinate
+    include_tracers : bool
+        Whether to attach ``q_v`` as a grid-space tracer on the
+        returned state.  Default ``True`` enables the moisture-aware
+        NMC pipeline; pass ``False`` to recover the pre-tracer dry
+        pipeline (matches the legacy behavior).
 
     Returns
     -------
@@ -126,14 +136,13 @@ def _era5_to_spectral(era5, grid, sigma):
         sh_analysis_dmu_3d,
     )
     from legoesm.training.era5_to_state import (
-        _regrid_latlon_to_gaussian,
-        _regrid_2d_to_gaussian,
+        regrid_latlon_to_gaussian,
+        regrid_2d_to_gaussian,
     )
     from legoesm.training.vertical_interp import interp_pressure_to_sigma
 
-    # 1. Regrid lat-lon → Gaussian
-    T_ll, u_ll, v_ll, _q_ll, p_s_ll = _regrid_latlon_to_gaussian(era5, grid)
-    phis_ll = _regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    T_ll, u_ll, v_ll, q_ll, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
+    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
 
     # 2. Vertical interpolation
     sigma_f = jnp.array(sigma.sigma_full, dtype=jnp.float64)
@@ -174,6 +183,24 @@ def _era5_to_spectral(era5, grid, sigma):
 
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
+    grid_dims_3d = ("lat", "lon", "level")
+
+    tracers = None
+    if include_tracers:
+        # Vertical interpolation for q_v (clip to ≥ 0; ERA5 occasionally
+        # has tiny negative values from the interpolator).
+        q_model = jnp.maximum(
+            interp_pressure_to_sigma(
+                jnp.array(q_ll, dtype=jnp.float64), plev, p_s, sigma_f,
+            ),
+            0.0,
+        )
+        tracers = {
+            "q_v": Field(
+                data=q_model, name="q_v",
+                dims=grid_dims_3d, units="kg/kg",
+            ),
+        }
 
     return SpectralHydrostaticState(
         vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
@@ -181,21 +208,31 @@ def _era5_to_spectral(era5, grid, sigma):
         T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
         lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m2/s2"),
+        tracers=tracers,
     )
 
 
-def _spectral_to_hydrostatic(spec_state, grid, sigma):
+def _spectral_to_hydrostatic(spec_state, grid, sigma, include_tracers=False):
     """Convert SpectralHydrostaticState → HydrostaticState on Gaussian grid.
+
+    When ``include_tracers=True`` and ``spec_state.tracers`` is non-
+    empty, the grid-space tracer dict is forwarded to the
+    HydrostaticState (matches the dycore-side spectral PE convention
+    that tracers stay in grid space).  Default ``False`` preserves the
+    pre-tracer dry pipeline.
 
     Parameters
     ----------
     spec_state : SpectralHydrostaticState
     grid : GaussianGrid
     sigma : SigmaCoordinate
+    include_tracers : bool
+        If True, copy ``spec_state.tracers`` into the returned
+        HydrostaticState's ``tracers`` field.
 
     Returns
     -------
-    HydrostaticState  (tracers=None)
+    HydrostaticState
     """
     from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
     from legoesm.core.field import Field
@@ -206,13 +243,19 @@ def _spectral_to_hydrostatic(spec_state, grid, sigma):
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
 
+    tracers_out = None
+    if include_tracers and spec_state.tracers is not None:
+        # Tracers are already grid-space on the spectral PE side, so
+        # forward them as-is; this preserves Field-vs-raw container types.
+        tracers_out = dict(spec_state.tracers)
+
     return HydrostaticState(
         u=Field(data=gp["u"],   name="u",   dims=dims_3d, units="m/s"),
         v=Field(data=gp["v"],   name="v",   dims=dims_3d, units="m/s"),
         T=Field(data=gp["T"],   name="T",   dims=dims_3d, units="K"),
         p_s=Field(data=gp["p_s"], name="p_s", dims=dims_2d, units="Pa"),
         phis=Field(data=gp["phis"], name="phis", dims=dims_2d, units="m2/s2"),
-        tracers=None,
+        tracers=tracers_out,
     )
 
 
@@ -320,7 +363,15 @@ def _build_spectral_physics_fn(driver, gray_config, n_levels: int):
         T_col = T_g.reshape(ncol, n_levels)
         p_full_col = p_full.reshape(ncol, n_levels)
         p_half_col = p_half.reshape(ncol, n_levels + 1)
-        q_v_col = jnp.zeros_like(T_col)
+        # Pull q_v from the spectral state's tracer dict when present
+        # (PR1's spectral PE tracers).  Falling back to zero matches
+        # the pre-tracer dry pipeline.
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = jnp.maximum(_qv_data.reshape(ncol, n_levels), 0.0)
+        else:
+            q_v_col = jnp.zeros_like(T_col)
         T_sfc_col = T_sfc.reshape(ncol)
 
         # Gray radiation
@@ -349,12 +400,20 @@ def _build_spectral_physics_fn(driver, gray_config, n_levels: int):
         )
         dT_hat = sh_analysis_3d(grid_arg, dT_dt_rad)
 
+        # Mirror the input state's tracer pytree as zero tendencies so
+        # the dycore RHS sees a consistent structure (this matches what
+        # the spectral PE orchestrator does in
+        # ``_make_spectral_pe_combined``).  Gray radiation + Rayleigh
+        # friction don't move tracers themselves; the dycore advection
+        # does, plus any microphysics in the orchestrator path.
+        from legoesm.atmosphere.physics._shared import zero_like_tracers
         return SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=dvor_hat),
             div_hat=state.div_hat.replace(data=ddiv_hat),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=jnp.zeros_like(state.lnps_hat.data)),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            tracers=zero_like_tracers(state.tracers),
         )
 
     return physics_fn, day_ref
@@ -421,22 +480,45 @@ def _hydrostatic_diff(state_a, state_b):
 
     phis is taken from state_a (static field, difference ≈ 0).
 
+    When both ``state_a.tracers`` and ``state_b.tracers`` are non-empty
+    dicts, per-key differences are returned in the result's ``tracers``
+    field.  Tracers present in only one operand are dropped (the NMC
+    error proxy requires both 48h and 24h forecasts to carry the same
+    tracer set).  When either side has ``tracers=None`` the result also
+    has ``tracers=None`` (matches the legacy dry pipeline).
+
     Parameters
     ----------
     state_a, state_b : HydrostaticState
 
     Returns
     -------
-    HydrostaticState  (difference, tracers=None)
+    HydrostaticState  (difference)
     """
     def _diff(fa, fb):
         return fa.replace(data=fa.data - fb.data)
+
+    def _diff_value(va, vb):
+        # Duck-type Field-vs-raw container so the helper handles both.
+        if hasattr(va, "data") and hasattr(va, "replace"):
+            return va.replace(data=va.data - vb.data)
+        return va - vb
+
+    tracers_diff = None
+    if state_a.tracers is not None and state_b.tracers is not None:
+        common_keys = set(state_a.tracers.keys()) & set(state_b.tracers.keys())
+        if common_keys:
+            tracers_diff = {
+                k: _diff_value(state_a.tracers[k], state_b.tracers[k])
+                for k in common_keys
+            }
 
     return state_a._replace(
         u=_diff(state_a.u, state_b.u),
         v=_diff(state_a.v, state_b.v),
         T=_diff(state_a.T, state_b.T),
         p_s=_diff(state_a.p_s, state_b.p_s),
+        tracers=tracers_diff,
     )
 
 
@@ -611,25 +693,53 @@ def generate_nmc(config: NMCConfig) -> None:
         )
         jax.block_until_ready(f24_spec.T_hat.data)
 
-        f48_phys = _spectral_to_hydrostatic(f48_spec, grid, sigma)
-        f24_phys = _spectral_to_hydrostatic(f24_spec, grid, sigma)
+        f48_phys = _spectral_to_hydrostatic(
+            f48_spec, grid, sigma, include_tracers=True,
+        )
+        f24_phys = _spectral_to_hydrostatic(
+            f24_spec, grid, sigma, include_tracers=True,
+        )
 
         error = _hydrostatic_diff(f48_phys, f24_phys)
         nmc_errors.append(error)
 
-        # Fuse three RMS reductions into one host transfer.
-        _h = np.asarray(jnp.stack([
+        # Fuse the RMS reductions into one host transfer.  When the
+        # error sample carries a q_v tracer (moisture-aware NMC), also
+        # report rms(q_v) so the user can monitor moisture-error
+        # magnitudes alongside dry diagnostics.
+        rms_arrays = [
             jnp.sqrt(jnp.mean(error.T.data ** 2)),
             jnp.sqrt(jnp.mean(error.u.data ** 2)),
             jnp.sqrt(jnp.mean(error.p_s.data ** 2)),
-        ]))
-        logger.info(
-            "  Error sample %d: rms(T)=%.3f K, rms(u)=%.3f m/s, rms(p_s)=%.1f Pa",
-            len(nmc_errors),
-            float(_h[0]),
-            float(_h[1]),
-            float(_h[2]),
+        ]
+        has_q_v = (
+            error.tracers is not None
+            and "q_v" in error.tracers
         )
+        if has_q_v:
+            _qv_raw = error.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            rms_arrays.append(jnp.sqrt(jnp.mean(_qv_data ** 2)))
+        _h = np.asarray(jnp.stack(rms_arrays))
+        if has_q_v:
+            logger.info(
+                "  Error sample %d: rms(T)=%.3f K, rms(u)=%.3f m/s, "
+                "rms(p_s)=%.1f Pa, rms(q_v)=%.2e kg/kg",
+                len(nmc_errors),
+                float(_h[0]),
+                float(_h[1]),
+                float(_h[2]),
+                float(_h[3]),
+            )
+        else:
+            logger.info(
+                "  Error sample %d: rms(T)=%.3f K, rms(u)=%.3f m/s, "
+                "rms(p_s)=%.1f Pa",
+                len(nmc_errors),
+                float(_h[0]),
+                float(_h[1]),
+                float(_h[2]),
+            )
 
     if not nmc_errors:
         raise RuntimeError(

@@ -386,6 +386,304 @@ At 200×100 × 20 ≈ 55 MB — still negligible on V100 (32 GB).
 day 600 (weak forcing). Good deal for science runs; borderline for
 operational throughput.
 
+## MPAS channel runs (2026-04-23, post-#211 TRiSK fix)
+
+After the TRiSK `weightsOnEdge` + regional-Delaunay oversize-edge filter
+fixes in `cd77199` / `d1bc7a9` (issue #211), the MPAS 20 km sub-360°
+periodic channel is stable at weak forcing. First cross-grid
+apples-to-close comparison of advection schemes:
+
+### Setup
+
+MPAS 20 km sub-360° periodic Voronoi, 20 levels, 10°×18° domain,
+dt = 300 s, 600 days, U_surface = 0.2 m/s, B_h = 2.3e11, C_smag = 0,
+no sponge. Matches the lat-lon 100×50 weak-forcing setup above
+*except for* three unavoidable MPAS-only defaults:
+
+1. **KPP is not implemented on MPAS** (warning `ignoring unsupported
+   schemes: vertical_mixing='kpp'`). Only the background `A_v=1e-5`,
+   `K_v=5e-6` act vertically.
+2. `pv_scheme = "enstrophy"` (correct MPAS default — suppresses ζ
+   null mode of the energy-conserving scheme).
+3. `K_bih` is silently dropped (is 0 on both grids, so no-op).
+
+Schemes available on MPAS: **upwind** and **tvd** (Van Leer) only.
+No PPM, DST-3, or SOM on Voronoi yet.
+
+### Results
+
+| Scheme | Status | T_drift (K) | **Var(T) rel drift** | max_speed 600d | Wall time |
+|---|---|---|---|---|---|
+| MPAS upwind | PASS 600 d | −1.27e-5 | **−0.91%** | 0.057 m/s | 14 min |
+| MPAS tvd | PASS 600 d | −1.33e-5 | **+0.69%** | 0.058 m/s | 14 min |
+
+Both schemes produce nearly identical flow evolution:
+`max_abs_eta` peaks at ~0.38 m around day 120 (BCI saturation) then
+decays monotonically to ~0.18 m by day 600 as the unforced instability
+runs down. `max_speed` follows the same shape — 0.10 m/s peak,
+0.057 m/s final. The two schemes agree to ~1–2% in `max_speed` through
+the saturation phase, consistent with scheme-level diffusivity
+differences being small in this weak-forcing regime.
+
+Positive `Var(T) drift` for TVD is near machine-precision noise of the
+histogram reconstruction (the banded zonal-mean rebinning at 50 lat
+bands is not bitwise-conservative); the same scheme shows `T_drift =
+0.00e+00` exactly in the raw `mean_T` time series.
+
+Figures: `results/ocean/eady_uniform/mpas_channel/20km/advection_compare_U02_600d/`.
+
+### Cross-grid comparison at matched parameters
+
+Combining the 3 lat-lon weak-forcing 600-day runs (KPP on) with the
+2 MPAS weak-forcing 600-day runs (no KPP) gives the full matrix:
+
+| Run | Scheme / grid | T_drift (K) | **Var(T) rel drift** | (Tmax − Tmin) rel | hist redistrib |
+|---|---|---|---|---|---|
+| lat-lon + KPP | upwind | −1.95e-4 | **−11.33%** | −6.67% | 17.6% |
+| lat-lon + KPP | tvd | −7.33e-5 | **−6.03%** | −6.06% | 14.0% |
+| lat-lon + KPP | som + Cs 0.2 | −1.10e-4 | **−2.70%** | −0.88% | 10.6% |
+| MPAS no-KPP | upwind | −1.27e-5 | **−0.91%** | +0.10% | 7.3% |
+| MPAS no-KPP | tvd | −1.33e-5 | **+0.69%** | +0.32% | 8.3% |
+
+Figures: `results/ocean/eady_uniform/cross_grid_compare_U02_600d/`.
+
+### Interpretation — important caveat
+
+**The MPAS "wins" here are confounded by the absence of KPP.** KPP is a
+physical parameterization of ocean boundary-layer vertical mixing. In
+the `Var(T)` budget on a closed domain it looks exactly like numerical
+diffusion — both pathways reduce `Var(T)`. The lat-lon cases include
+KPP and therefore show more `Var(T)` loss, even when the advection
+scheme is identical.
+
+To compare the pure advection-scheme performance across grids we need
+*either*:
+
+- **(a)** rerun the lat-lon matrix with `vertical_mixing="none"` (matches
+  MPAS, eliminates KPP), *or*
+- **(b)** add a KPP-equivalent vertical-mixing scheme to the MPAS ocean
+  model (the more useful fix; KPP is physical).
+
+Path (b) is the right long-term direction but is out of scope for this
+issue. Path (a) — a 3-run KPP-off lat-lon rerun — is the cheap way to
+close the comparison. That is listed in "Open issues" below.
+
+### BCI development — the visualisations tell a different story
+
+Generating per-run SST / SST-anomaly / η / surface-speed panels
+(`scripts/replot_eady_bci.py` → `results/ocean/eady_uniform/bci_development/*_bci_snapshots.png`)
+on a physical aspect ratio cropped to the domain reveals a real
+dynamical divergence between the grids that the scalar metrics hide:
+
+- The **zonal-mean thermal-wind jet** is established on both grids
+  (surface speed ≈ 0.10 m/s at day 60 in the `|u|` row of every
+  panel).
+- The initial k=3 T perturbation (**row 2: SST − zonal mean**) is
+  imposed equally on both grids (`_add_perturbation_latlon` /
+  `_add_perturbation_mpas`, both amplitude 0.1 K with Gaussian
+  lat envelope). Diagnosed zonal σ(SST) at lat = 25°, t = 0 is
+  0.071 K in every run.
+- **Lat-lon runs** (all three schemes): the mid-latitude k=3 mode
+  decays rapidly (σ drops to ~1e-2 K by day 60) but
+  **wall-trapped eddies emerge near the northern boundary** by
+  day 240 and persist as visible meandering patterns in SST and
+  surface speed through day 600. SOM shows the strongest
+  wall-eddy activity; TVD and upwind similar in pattern but
+  weaker.
+- **MPAS runs** (both schemes): mid-latitude perturbation also
+  decays, but **no wall-trapped eddies emerge**. The flow stays
+  zonally uniform through day 600. σ(SST) at lat = 25°
+  monotonically decreases over 600 d (tvd: 0.073 → 0.030 K;
+  upwind: 0.073 → 0.017 K and flat after day 60).
+
+Interpretation: the "BCI activity" visible in the lat-lon runs at
+this forcing level is not textbook Eady growth at mid-latitude — it
+is a **wall-trapped secondary instability** (frontal / Kelvin-wave
+type) that develops once the zonal-mean jet has set up. MPAS
+appears to suppress or delay this wall-trapped mode, probably
+because:
+
+1. **Wall representation differs.** The lat-lon C-grid has hard
+   cell-face walls at specific latitudes. The regional Voronoi
+   mesh has a ragged boundary (Delaunay cells clipped at the
+   latitude bounds) with variable cell shapes at the edge —
+   potentially damping wall-trapped modes more strongly.
+2. **Effective grid viscosity near the wall may be higher on
+   MPAS** given irregular cell geometry and the TRiSK
+   reconstruction.
+3. **Enstrophy-conserving PV flux is a slightly more dissipative
+   choice** for grid-scale vorticity than the energy-conserving
+   lat-lon formulation.
+
+This is a **real physics divergence** between the two ocean cores
+at matched parameters — not a scheme-level artefact. It does not
+invalidate the conservation comparison above (which is what this
+issue originally tracked) but it does mean the two grids are not
+simulating the same flow regime at this forcing. The scalar
+metrics (T_drift, max_speed, Var(T) drift) agree to ~leading order
+because they are dominated by the zonal-mean jet, which both grids
+reproduce.
+
+### What this current comparison *does* show cleanly
+
+1. **Scheme ranking within each grid is consistent**: upwind is the
+   most diffusive, tvd intermediate, and (on lat-lon) som+Cs the
+   least. On MPAS, upwind and tvd differ mostly in how fast the
+   k=3 mode decays — tvd damps it ~2.5× slower than upwind at
+   lat = 25°.
+2. **Zonal-mean flow agrees** across grids at matched forcing:
+   peak η amplitude ~0.38 m (day ~120), peak max_speed ~0.11 m/s,
+   long-time decay toward a quasi-steady jet.
+3. **Post-#211 the MPAS channel is stable for at least 600 days at
+   weak forcing** with `T_drift` at machine precision (2.66e-15 for
+   upwind, 0.00 for tvd). No recurrence of the earlier blowup
+   (issue #211 closed).
+4. **Lat-lon develops wall-trapped eddies at weak forcing**; MPAS
+   does not. This is tracked as a follow-up item below.
+
+### Next comparison pieces (not done here)
+
+- Lat-lon 600 d runs for `ppm_fct` (post-conservation-fix), `dst3`,
+  `dst3_multidim` — to fill out the lat-lon row.
+- Lat-lon `vertical_mixing="none"` re-run of upwind / tvd / som to
+  enable apples-to-apples cross-grid comparison.
+- Rossby-number diagnostic on the MPAS runs (`plot_rossby_number.py`
+  is currently lat-lon-only; would need MPAS vorticity helper).
+
+## MPAS IC balance noise (2026-04-23 follow-up)
+
+While inspecting the weak-forcing replots it became clear that the
+MPAS surface-speed field shows visible zonal-direction inhomogeneity
+from t = 0, whereas lat-lon is smooth.
+
+### Measured numbers (t = 0 surface speed, zonal std within lat bins)
+
+| lat band | MPAS (TVD run) | lat-lon (TVD run) |
+|---|---|---|
+| 25° (jet centre, `u` ≈ 0.099 m/s) | 2.15e-4 m/s (0.22%) | 1e-18 m/s (machine 0) |
+| 21° (off-jet, `u` ≈ 0.053 m/s) | **9.45e-3 m/s (17.7%)** | 1e-18 m/s (machine 0) |
+| 30° (off-jet) | ~2.1e-3 m/s (~6%) | 1e-18 m/s (machine 0) |
+
+The noise **decays** under time stepping (off-jet band 17.7% → 11.4%
+by day 60 → 6.7% by day 600) — classic signature of a small
+imbalance being radiated away by geostrophic adjustment, not of
+operator inconsistency (cf. issue #211 where an analogous symptom
+grew instead and revealed the oversize-edge pathology).
+
+### Ocean-expert diagnosis (summary)
+
+Agent read `eady_uniform.py::_set_linear_shear_mpas`,
+`init_mpas.py::reconstruct_cell_velocity`, and the TRiSK code in
+`grids/voronoi.py`. Root cause:
+
+1. `_set_linear_shear_mpas` builds
+   ```
+   u_edge[e, k] = U_bc[k] * cos(angleEdge[e]) * envelope(lat_edge[e])
+   ```
+   This is an *analytic* thermal-wind evaluation at edge midpoints.
+2. For a hex cell, the six edges sit at six different latitudes
+   (Δlat up to ≈ `dc/(2R)` ≈ 0.09° at 20 km) and six different
+   `angleEdge` values.
+3. The Perot cell-centre reconstruction
+   (`reconstruct_cell_velocity`) sums
+   `u_east(C) = Σ_e w_e · u_edge(e) · cos(angleEdge_e)`. This sum is
+   exact only for spatially uniform `u_edge`. With a Gaussian envelope
+   whose `d(ln env)/dy ≈ −0.32 /°` at lat 21°, consecutive edges of
+   a cell sample the envelope with O(6%) differences. Hex-lattice row
+   alternation (pointy-top / flat-top) gives orientation-dependent
+   Perot projections, so the net reconstruction has O(few %)
+   cell-to-cell zonal variation. At lat 21° where mean `u` is itself
+   only half the jet maximum, this shows up as 17% relative.
+4. **On lat-lon** the equivalent step is a 1-D meridional assignment
+   with no edge-orientation ambiguity — hence machine-zero IC noise.
+
+**This is a discretization artefact, not a bug.** The TRiSK operators
+themselves are fine (fixed in #211); the problem is feeding them an
+IC velocity built from continuous formulas instead of inverting the
+discrete balance.
+
+### Standard practice and fix
+
+MPAS-Ocean's `baroclinic_channel` config builds IC by inverting the
+**discrete** momentum balance — set T(y, z), get η from discrete
+hydrostatic integration, then `u_edge = -(1/f) · (n̂·∇)(p/ρ₀)` where
+`(n̂·∇)` is the TRiSK edge-normal gradient (by construction it returns
+the edge-normal component — no `cos(angleEdge)` projection needed,
+which is exactly what eliminates the aliasing). ICON-O does the same.
+Our current code inlines the continuous thermal-wind formula and is
+thus off by the edge-aliasing error described above.
+
+### Recommended fix (not implemented yet)
+
+Minimal edit in `src/legoesm/ocean/experiments/eady_uniform.py`,
+function `_set_linear_shear_mpas` (approx L350–391):
+
+1. Build the analytic 3D T exactly as today.
+2. At each edge, compute `grad_n_T = (T[c2] − T[c1]) / dcEdge`
+   (this is already the edge-normal gradient; no cosine projection
+   needed).
+3. Thermal-wind integration per level using `grad_n_T` as the
+   meridional-temperature driver. Because analytic `∂T/∂y` is
+   z-constant here, this reduces to
+   `u_edge(e, k) = (U_baroclinic[k] / dTdy_analytic) · grad_n_T(e)`,
+   i.e. we replace the `cos(angleEdge) · envelope(lat_edge)` product
+   with the discrete normal gradient of the analytic T. The envelope
+   and projection both come through T.
+4. Zero the depth mean exactly as before to keep η = 0 meaningful.
+
+**Expected impact:** off-jet zonal std in IC surface speed should drop
+from ~17% to <1% (residual = truncation of the discrete hydrostatic
+integral, not edge-gradient aliasing).
+
+### What the IC noise does NOT explain
+
+- The MPAS BCI suppression (no wall-trapped eddies on MPAS at weak
+  forcing) is NOT caused by this IC noise. The noise is
+  k-broadband and decays; wall-trapped eddies on lat-lon are driven
+  by Kelvin-wave reflection off the northern boundary interacting
+  with the meridional shear, which requires a clean wall. MPAS has
+  a staircase-like boundary on unstructured cells and the sponge
+  (when enabled) is applied per cell — these are the more likely
+  suppressants. Separate follow-up item.
+
+## Strong-forcing cross-grid runs (in progress 2026-04-23 night)
+
+To separate the "weak-forcing-suppressed-BCI" question from the
+"MPAS-suppresses-BCI" question, two 200-day MPAS strong-forcing
+runs were launched in parallel alongside the IC investigation:
+
+- `results/ocean/eady_uniform/mpas_channel/20km/upwind_mpas_20km_U08_Bh2.3e11_Cs0.0_200d/`
+- `results/ocean/eady_uniform/mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.0_200d/`
+
+Parameters match the existing lat-lon strong-forcing runs
+(`*_nosponge_200d`): U_surface = 0.8, B_h = 2.3e11, C_smag = 0,
+dt = 300 s, no sponge, 20 levels.
+
+**Result at time of writing:**
+
+- **upwind BLEW UP at step 54100 (≈ day 188)**: `max_spd` 2.57 m/s in
+  the preceding diag window, then NaN. Same "energetic eddies
+  overwhelm dissipation" pattern the lat-lon `upwind_nosponge_200d`
+  was noted for in Run 1 / Run 4 of this doc — i.e. *expected* at
+  strong forcing with `C_smag=0` and no sponge. Not grid-specific.
+- **tvd stayed stable through day 195/200** with `max_spd` 1.92 m/s
+  — saturated-eddy regime, running down to completion.
+
+Implication: **the MPAS ocean core supports classical BCI saturation**
+when a scheme with enough implicit dissipation is used; the failure
+mode at strong-forcing + pure upwind is numerical, not dynamical, and
+matches the lat-lon grid's behaviour in the same setup. What's
+specifically missing in the **weak-forcing** regime is only the
+**wall-trapped secondary instability**, not BCI growth itself. This
+narrows the wall-eddy-suppression follow-up significantly.
+
+Once the tvd run finishes, rerun `scripts/replot_eady_bci.py` on the
+strong-forcing dirs (same script, no changes needed; may want to
+edit `TARGET_DAYS` to `[0, 30, 60, 100, 140, 180]` since strong
+forcing saturates earlier) to generate eddy-development figures
+matching the existing lat-lon `som_csmag02_nosponge_200d/snapshots_SST.png`
+aesthetic.
+
 ## Open issues and limitations
 
 - **PPM-FCT limiter** (#9): current `alpha_face = min(alpha_left,
@@ -460,6 +758,53 @@ operational throughput.
   `EadyUniformConfig.U_surface` default from 0.8 → 0.2 m/s and doubling
   the standard duration to 400–600 days. This would require updating
   other experiments that depend on the 0.8 default.
+- **Cross-grid comparison confound**: the MPAS 20 km runs above have
+  no KPP (not implemented in `mpas_physics.py`), while lat-lon runs
+  have KPP on. Closing this for a true scheme comparison needs either
+  a KPP-off lat-lon rerun of upwind / tvd / som (cheap, 3 GPU-h) or
+  porting KPP to MPAS (right long-term fix).
+- **MPAS advection-scheme inventory**: only `upwind` and `tvd` are
+  implemented on Voronoi. PPM / DST-3 / SOM on MPAS would require
+  unstructured-edge adaptations (SOM in particular is non-trivial —
+  9 moments per cell with all-neighbor interactions). Not a
+  scientific-correctness gap for 20 km weak-forcing runs, but would
+  be needed for MPAS equivalents of the lat-lon SOM recipe at
+  higher resolutions.
+- **Fix applied in passing**: `scripts/plot_T_volumetric_census.py`
+  previously hardcoded `(0, 360)` for MPAS mesh reconstruction.
+  Now reads `(cfg.lon_west, cfg.lon_east)` from `EadyUniformConfig`
+  so it works on the sub-360° periodic mesh.
+- **MPAS lacks wall-trapped eddies** that develop on lat-lon at
+  weak forcing (see "BCI development" section above). Unknown
+  whether this is a mesh/discretisation artifact, a physical
+  consequence of the enstrophy-conserving PV flux default, or
+  a real property of the flow. Possible diagnostic steps: bump
+  U_surface to test whether MPAS develops BCI at strong forcing;
+  switch MPAS to `pv_scheme="energy"` and see if wall-trapped
+  activity appears; run a lat-lon version with a rougher / "more
+  Voronoi-like" north wall. Not scheme-related — affects all MPAS
+  advection schemes equally.
+- **Stock test-matrix snapshot plots — fixed 2026-04-24**:
+  `snapshots_SST.png` / `snapshots_eta.png` in MPAS run dirs
+  previously used a regridded `(0, 360) × (−90, 90)` canvas and
+  did not crop to the actual `source_lon_range`, so the 10°-wide
+  domain appeared as a thin vertical sliver. Two fixes applied:
+  (i) `run_eady_uniform` in `scripts/ocean_test_matrix/experiments.py`
+  now passes `domain_extent=(lon_west, lon_east, lat_south, lat_north)`
+  to `_save_case_diagnostics`; (ii) `_save_snapshot_plots` in
+  `diagnostic_io.py` now crops the regridded array to
+  `domain_extent` for *both* unstructured and "latlon" coord_kinds
+  (the replot path uses "latlon" because regridded data is on a
+  regular lat-lon canvas). Previously the latlon branch just set
+  `extent=domain_extent` without cropping, which stretched the full
+  181×360 array into the narrow regional extent — producing a
+  thin strip. Existing runs can be regenerated via direct
+  `_replot_case_snapshots(case_dir)` invocation; see
+  `docs/ocean_experiments/NEXT_STEPS_advection_comparison.md`.
+  `scripts/replot_eady_bci.py` (native Voronoi, physical aspect,
+  SST-anomaly row) is still the preferred figure for cross-grid
+  comparisons because it uses the 20 km mesh natively rather than
+  the ~1° regrid.
 
 ## References
 

@@ -301,7 +301,7 @@ class ModelDriver:
         cfl_model = model_type_map.get(dc.model_type, "primitive_eq")
         dt_safe = cfl_check_and_adjust(
             dc.dt, gc.resolution, model_type=cfl_model,
-            radius=getattr(self.grid, 'radius', 6.371229e6),
+            radius=getattr(self.grid, 'radius', constants.R_earth),
             grid_type=gc.grid_type,
         )
         if dt_safe < dc.dt:

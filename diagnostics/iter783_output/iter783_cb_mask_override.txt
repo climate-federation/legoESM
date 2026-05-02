@@ -1,0 +1,28 @@
+Iter-783 cosine bell C36 with targeted ut/vt override at cube vertices
+dt=1440.0s, β=π/4, 1.0 day
+
+                          case      L_inf         L2            peak             overrides
+-----------------------------------------------------------------------------------------------
+        BASELINE (no override)  1.213e+02  1.165e-01  face 3 (30,32)            ut=0, vt=0
+           override GC <= 5.0°  1.213e+02  1.165e-01  face 3 (30,32)        ut=144, vt=144  [+0.0% Linf]
+          override GC <= 10.0°  1.213e+02  1.165e-01  face 3 (30,32)        ut=576, vt=576  [+0.0% Linf]
+          override GC <= 20.0°  1.260e+02  1.184e-01  face 3 (30,32)      ut=2136, vt=2136  [+3.9% Linf]
+
+What iter-783 DOES measure (observational only):
+- 1-day cosine bell Linf and L2 under BASELINE (unmodified
+  _d2a2c_vect) vs OVERRIDE (analytical ut/vt at cells within
+  GC <= {5,10,20}° of any cube vertex).
+- Count of stagger cells replaced at each mask radius.
+What it does NOT establish:
+- Whether the override is PHYSICALLY CONSISTENT (the override
+  breaks the local covariant/contravariant consistency with
+  the unmodified h-field and boundary_fix stabiliser); large
+  Linf reductions may partly reflect artificial smoothness
+  imposed by the override.
+- Which PART of `_d2a2c_vect` (fill_corner_region vs A→C
+  stencil) is responsible for the measured error — a separate
+  iter (iter-784+) would need to toggle each part.
+- Whether fixing the cube-vertex error in `_d2a2c_vect` itself
+  (via a Fortran-faithful change) would give the same Linf
+  reduction as the override; the override is a diagnostic-only
+  analytical injection, not a production fix.

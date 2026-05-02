@@ -343,9 +343,12 @@ def configure_backend(backend: str | None = None) -> str:
     if backend == "tpu":
         _set_xla_flags(_TPU_XLA_FLAGS)
         jax.config.update("jax_default_matmul_precision", "bfloat16")
-        num_hosts = jax.process_count()
-        if num_hosts > 1:
-            jax.config.update("jax_spmd_mode", "allow_all")
+        # NOTE: the legacy `jax_spmd_mode='allow_all'` toggle was removed
+        # in modern JAX (0.9+) — `jax.config.update("jax_spmd_mode", ...)`
+        # raises `AttributeError: Unrecognized config option: jax_spmd_mode`,
+        # which would crash the canonical TPU bootstrap on multi-host pods.
+        # Under the unified sharding model SPMD partitioning is automatic
+        # for sharded arrays, so no explicit toggle is required.
 
     elif backend == "gpu":
         # Detect vendor BEFORE ``jax.devices()`` so the XLA scheduler
@@ -417,10 +420,16 @@ def configure_backend(backend: str | None = None) -> str:
     else:  # cpu
         if "XLA_FLAGS" not in os.environ:
             try:
-                n_cores = os.cpu_count() or 4
+                # NOTE: the legacy `intra_op_parallelism_threads` flag is
+                # NOT recognized by the current XLA parse_flags_from_env
+                # and crashes at first JAX use with:
+                #   F parse_flags_from_env.cc:234]
+                #     Unknown flag in XLA_FLAGS: --intra_op_parallelism_threads=N
+                # Drop it; rely on the default XLA thread-pool autoscaling
+                # driven by `os.cpu_count()`.  `xla_cpu_multi_thread_eigen`
+                # remains valid and meaningful for multi-core CPUs.
                 _set_xla_flags({
                     "xla_cpu_multi_thread_eigen": "true",
-                    "intra_op_parallelism_threads": str(n_cores),
                 })
             except Exception:
                 pass

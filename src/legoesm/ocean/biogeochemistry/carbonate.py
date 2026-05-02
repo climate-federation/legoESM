@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
+
 
 # ============================================================================
 # Solubility and equilibrium constants
@@ -45,7 +47,7 @@ def co2_solubility(T_degC: jnp.ndarray, S_psu: jnp.ndarray) -> jnp.ndarray:
     K0 : array
         CO2 solubility [mol/(kg*atm)].
     """
-    T_K = T_degC + 273.15
+    T_K = T_degC + constants.T_freeze
     T_100 = T_K / 100.0
 
     ln_K0 = (
@@ -78,7 +80,7 @@ def carbonate_equilibria(
     K2 : array
         Second dissociation constant [mol/kg].
     """
-    T_K = T_degC + 273.15
+    T_K = T_degC + constants.T_freeze
 
     # pK1 = -log10(K1)
     pK1 = (
@@ -112,7 +114,7 @@ def borate_equilibrium(T_degC: jnp.ndarray, S_psu: jnp.ndarray) -> jnp.ndarray:
     K_B : array
         Borate dissociation constant [mol/kg].
     """
-    T_K = T_degC + 273.15
+    T_K = T_degC + constants.T_freeze
     sqrt_S = jnp.sqrt(jnp.clip(S_psu, 0.0, None))
 
     ln_KB = (

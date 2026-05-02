@@ -1,0 +1,26 @@
+Iter-802 DUOGRID t=0 tendency under fill_corner_region monotone clip
+C36 W2 IC, iter-761 config
+
+                         variant   dh/dt peak   du/dt peak   dv/dt peak
+----------------------------------------------------------------------
+               LEGACY (clip off)    1.329e-04    1.404e-05    1.903e-05
+    DUOGRID (clip off, baseline)    1.557e-01    4.700e-05    8.446e-05
+               DUOGRID (clip ON)    1.557e-01    2.816e-05    4.857e-05
+
+DUOGRID clip ON / clip off ratio:
+  dh_dt_peak: 1.000x
+  du_dt_peak: 0.599x
+  dv_dt_peak: 0.575x
+
+DUOGRID clip ON / LEGACY ratio:
+  dh_dt_peak: 1171.572x
+  du_dt_peak: 2.005x
+  dv_dt_peak: 2.552x
+
+Interpretation cues (observational only):
+- If DUOGRID clip ON dh/dt ≈ LEGACY dh/dt (~1e-4):
+  the monotonicity clip FIXES the DUOGRID t=0 blowup.
+  Next step: wire monotone_clip=True by default in
+  pad_halo → fill_corner_region when duogrid is active.
+- If DUOGRID clip ON dh/dt is still >> LEGACY:
+  clip doesn't fully fix; other duogrid issues remain.
