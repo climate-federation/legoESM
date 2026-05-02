@@ -220,15 +220,24 @@ def fv3_hydrostatic_tendencies(
     # --- 6. D-grid vorticity at cell centres via circulation ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)  # (6, n, n, nlev)
 
-    # === Stage-level packed halo exchange #1 ===
-    # Pack {ζ, B, 1/T} into one collective instead of 3 separate.
-    # Note: we pack ζ (relative vorticity) rather than ζ+f, since f is stored
-    # directly at corners as `cdgrid.f_corner` and adding it after the corner
-    # interpolation avoids the sin(lat) nonlinear-interpolation error.
-    # Matches iter-74 fix pattern in cdgrid_momentum_tendencies.
+    # === Stage-level packed halo exchange (merged iter-58) ===
+    # Pack ALL cell-field halos for the stage into ONE collective:
+    # {ζ, B, 1/T, T, ln_ps_3d}, plus {u_cell, v_cell} when the
+    # downstream Laplacian / hyperdiffusion needs them.
+    #
+    # Iter-58 merge: previously exchange #1 packed {ζ, B, 1/T} and
+    # exchange #2 packed {T, u_cell, v_cell, ln_ps_3d} as two
+    # separate stage-level packed collectives.  Both packs share the
+    # same mesh / duogrid / interp_offsets and same (6, n, n) spatial
+    # prefix, so they collapse into one call along the trailing axis
+    # — saves one SPMD all_gather / MPI sendrecv per RK3 stage.
+    # Matches the iter-74 ζ-vs-ζ+f convention: pack ζ (relative
+    # vorticity) and add f at corners after interpolation.
     ln_ps = jnp.log(p_s)
     inv_T = 1.0 / T
+    ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1) — rides the pack
     from legoesm.grids.halo import _halo_backend
+    _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     # Packed MPI/SPMD halos now apply the duogrid kinked-to-extended
     # remap when `duogrid=dg` is passed (iter-84).  Fall through to
     # None pre-pads only when neither backend is active.
@@ -241,18 +250,38 @@ def fv3_hydrostatic_tendencies(
     _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
-            zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
-            interp_offsets=_pe_offs,
-        )
+        if _needs_uv_pad:
+            _zeta_pad, _B_pad, _invT_pad, _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = (
+                packed_pad_halo_4d(
+                    zeta, B, inv_T, T, u_cell, v_cell, ln_ps_3d,
+                    mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
+                )
+            )
+        else:
+            _zeta_pad, _B_pad, _invT_pad, _T_pad, _lnps_pad = packed_pad_halo_4d(
+                zeta, B, inv_T, T, ln_ps_3d,
+                mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
+            )
+            _u_cc_pad = _v_cc_pad = None
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta, B, inv_T, topology=_mpi_topology, duogrid=_pe_dg,
-        )
+        if _needs_uv_pad:
+            _zeta_pad, _B_pad, _invT_pad, _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = (
+                packed_pad_halo_mpi_4d(
+                    zeta, B, inv_T, T, u_cell, v_cell, ln_ps_3d,
+                    topology=_mpi_topology, duogrid=_pe_dg,
+                )
+            )
+        else:
+            _zeta_pad, _B_pad, _invT_pad, _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+                zeta, B, inv_T, T, ln_ps_3d,
+                topology=_mpi_topology, duogrid=_pe_dg,
+            )
+            _u_cc_pad = _v_cc_pad = None
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
+        _T_pad = _lnps_pad = _u_cc_pad = _v_cc_pad = None  # exchange #2 fields
 
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
     zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
@@ -424,90 +453,27 @@ def fv3_hydrostatic_tendencies(
     dv_d_dt = dv_d_dt + vert_adv_v_d
 
     # --- 11. Thermodynamic equation ---
-    # Horizontal advection: centred advection using cell-centre velocities
-    # === Stage-level packed halo exchange #2 ===
-    # Batch {T, u_cell, v_cell, ln_ps} into one packed exchange (SPMD
-    # or MPI) or individual exchanges (local).  Pre-padded arrays
-    # reused by gradient, Laplacian, and hyperdiffusion operators
-    # downstream.
+    # Horizontal advection: centred advection using cell-centre velocities.
     #
-    # Loop 189 — promote ``ln_ps`` to ``(6, n, n, 1)`` and pack it
-    # into the same packed halo exchange as ``T`` (and, when
-    # ``_needs_uv_pad``, ``u_cell`` / ``v_cell``).  This eliminates
-    # the two standalone halo exchanges that previously fired inside
-    # ``gradient_x(ln_ps)`` and ``gradient_y(ln_ps)`` (each issued
-    # its own ``pad_halo``) — they are now replaced by sliced gradients
-    # of the shared 4D padded field.  Saves 2 halo exchanges (or, on
-    # SPMD/MPI, packs ln_ps into an existing collective at the cost
-    # of ``9*4`` extra bytes per face boundary).
-    _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
+    # Iter-58: ``_T_pad``, ``_u_cc_pad``, ``_v_cc_pad``, ``_lnps_pad``
+    # are now produced by the merged stage-level packed exchange near
+    # the start of the tendency function (single SPMD all_gather / MPI
+    # sendrecv that also produces ``_zeta_pad`` / ``_B_pad`` /
+    # ``_invT_pad``).  On the single-device backend they are still
+    # ``None`` and we fall back to per-field unpacked pads here so each
+    # gradient/Laplacian operator still has a pre-padded array (avoids
+    # the operator-internal halo on its own input).
     from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
-    # Packed MPI halo now applies duogrid remap (iter-84) so we use it
-    # even when duogrid is active.  Non-MPI fallback does per-field pads
-    # with duogrid routing preserved.
-    _pe_dg = grid.duogrid
-    # ``ln_ps_3d`` carries a singleton trailing axis on purpose so it
-    # can ride the same packed exchange as the full 3D fields.  This is
-    # explicitly supported by ``packed_pad_halo_mpi_4d`` (and its SPMD
-    # twin), whose docstring promises that "all fields must share the
-    # same (6, n, n) spatial prefix; the trailing axis (levels/channels)
-    # can differ" — the helper concatenates along the trailing axis and
-    # splits per-field on return (halo_exchange.py:1128-1133).  Loop 189
-    # added the optimisation; restoring it here preserves the
-    # ``∇(ln p_s)`` halo without paying for two extra exchanges.  The
-    # MPI branch is taken whenever the backend is MPI (regardless of
-    # ``_needs_uv_pad``) so the lnps halo is never silently routed
-    # through a non-packed code path under MPI.
-    ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
-    if _halo_backend == "mpi":
-        from legoesm.grids.halo import _mpi_topology
-        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        if _needs_uv_pad:
-            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, u_cell, v_cell, ln_ps_3d,
-                topology=_mpi_topology, duogrid=_pe_dg,
-            )
-        else:
-            _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
-            )
-            _u_cc_pad = _v_cc_pad = None
-    elif _halo_backend == "spmd":
-        # Pack the same 2 (T, lnps) or 4 (T, u_cc, v_cc, lnps) fields
-        # into a single SPMD allgather, mirroring the MPI packed path
-        # above.  Drops the per-stage cell-field collective count from
-        # 4 → 1 (or 2 → 1) on multi-GPU at the cost of one
-        # ``concatenate`` + ``split`` along the trailing axis.  Iter-7
-        # plumbed ``interp_offsets`` through ``packed_pad_halo_4d`` so
-        # the result is bit-equivalent to the unpacked path that the
-        # single-device branch uses.
-        from legoesm.parallel.cubesphere_exchange import (
-            packed_pad_halo_4d, _spmd_mesh,
-        )
-        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
-        if _needs_uv_pad:
-            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_4d(
-                T, u_cell, v_cell, ln_ps_3d,
-                mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
-            )
-        else:
-            _T_pad, _lnps_pad = packed_pad_halo_4d(
-                T, ln_ps_3d,
-                mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
-            )
-            _u_cc_pad = _v_cc_pad = None
-    else:
+    if _T_pad is None:
         # Single-device fallback: per-field unpacked exchanges with
         # offsets / duogrid forwarded.  Same numerics as the SPMD packed
-        # branch above (verified iter-7).
-        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        # branch above (verified iter-7).  This branch only executes when
+        # neither MPI nor SPMD halo backend is active.
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
         if _needs_uv_pad:
             _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
             _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
-        else:
-            _u_cc_pad = _v_cc_pad = None
 
     dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
     dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
