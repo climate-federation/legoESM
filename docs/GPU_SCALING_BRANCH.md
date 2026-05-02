@@ -44,6 +44,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Hybrid mass-flux + dp_s_dt cross-level collectives (CS, spectral) | 4 (2 in fn + 2 in callers) | 2 |
 | compute_sigma_dot internal cross-level collectives  |          2 |           1 |
 | Cubed-sphere FV3 σ-coord σ̇ + dp_s_dt cross-level collectives | 3 | 1 |
+| MPAS σ-coord σ̇ + dp_s_dt cross-cell-shard reductions |       2 |           1 |
 | Cubed-sphere PPM halo=2 calls (SPMD or MPI)        |          3 |           2 |
 | MPAS dycore mass-fix payload                       |          3 |           2 |
 | Voronoi MPI sendrecvs                              |         12 |           6 |
@@ -140,6 +141,8 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+6f2dd430 mpas dycore: reuse cumsum across dp_s_dt + sigma_dot
+8331acbc docs: record iter-52 compute_sigma_dot collective reductions
 181e65de vertical: add compute_sigma_dot_and_total; cubed-sphere FV3 PE reuses both
 5b69b9f6 vertical: drop redundant column-sum in compute_sigma_dot
 13a94241 docs: record iter-51 hybrid mass-flux collective reduction
