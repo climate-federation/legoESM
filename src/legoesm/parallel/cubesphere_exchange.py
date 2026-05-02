@@ -171,6 +171,65 @@ def _fill_halo_and_corners(padded, strips, n_spatial):
     return padded
 
 
+def _fill_halo_and_corners_h2_local(padded, strips, n):
+    """Place 4 width-2 edge strips into the halo region and fill 2x2 corners.
+
+    Single-face SPMD analogue of :func:`legoesm.grids.halo._fill_corners_h2`.
+
+    Parameters
+    ----------
+    padded : (n+4, n+4, ...) — interior already at [2:-2, 2:-2].
+    strips : list of 4 arrays, each (2, n, ...), in W/E/S/N order.
+        Within each strip:
+        - index 0 = depth-0 = the cell of the neighbour that touches the
+          local face's interior boundary; placed at the inner halo
+          position (closest to interior).
+        - index 1 = depth-1 = one cell deeper into the neighbour;
+          placed at the outer halo position.
+    n : int
+        Per-face interior resolution.
+
+    Returns
+    -------
+    padded with both halo layers and 2x2 corners filled.
+    """
+    # WEST: rows [0:2], cols [2:-2]; depth-0 → row 1, depth-1 → row 0
+    padded = padded.at[1, 2:-2].set(strips[WEST][0])
+    padded = padded.at[0, 2:-2].set(strips[WEST][1])
+    # EAST: rows [n+2:n+4], cols [2:-2]; depth-0 → row n+2, depth-1 → row n+3
+    padded = padded.at[n + 2, 2:-2].set(strips[EAST][0])
+    padded = padded.at[n + 3, 2:-2].set(strips[EAST][1])
+    # SOUTH: rows [2:-2], cols [0:2]; depth-0 → col 1, depth-1 → col 0
+    padded = padded.at[2:-2, 1].set(strips[SOUTH][0])
+    padded = padded.at[2:-2, 0].set(strips[SOUTH][1])
+    # NORTH: rows [2:-2], cols [n+2:n+4]; depth-0 → col n+2, depth-1 → col n+3
+    padded = padded.at[2:-2, n + 2].set(strips[NORTH][0])
+    padded = padded.at[2:-2, n + 3].set(strips[NORTH][1])
+    # Corners: 4 corners × 4 cells per corner.  Inner corner first, then
+    # propagate outward; matches ``halo._fill_corners_h2`` semantics.
+    # SW corner (rows 0..1, cols 0..1)
+    padded = padded.at[1, 1].set(0.5 * (padded[1, 2] + padded[2, 1]))
+    padded = padded.at[0, 1].set(0.5 * (padded[0, 2] + padded[1, 1]))
+    padded = padded.at[1, 0].set(0.5 * (padded[2, 0] + padded[1, 1]))
+    padded = padded.at[0, 0].set(0.5 * (padded[0, 1] + padded[1, 0]))
+    # SE corner (rows n+2..n+3, cols 0..1)
+    padded = padded.at[-2, 1].set(0.5 * (padded[-2, 2] + padded[-3, 1]))
+    padded = padded.at[-1, 1].set(0.5 * (padded[-1, 2] + padded[-2, 1]))
+    padded = padded.at[-2, 0].set(0.5 * (padded[-3, 0] + padded[-2, 1]))
+    padded = padded.at[-1, 0].set(0.5 * (padded[-1, 1] + padded[-2, 0]))
+    # NW corner (rows 0..1, cols n+2..n+3)
+    padded = padded.at[1, -2].set(0.5 * (padded[1, -3] + padded[2, -2]))
+    padded = padded.at[0, -2].set(0.5 * (padded[0, -3] + padded[1, -2]))
+    padded = padded.at[1, -1].set(0.5 * (padded[2, -1] + padded[1, -2]))
+    padded = padded.at[0, -1].set(0.5 * (padded[0, -2] + padded[1, -1]))
+    # NE corner (rows n+2..n+3, cols n+2..n+3)
+    padded = padded.at[-2, -2].set(0.5 * (padded[-2, -3] + padded[-3, -2]))
+    padded = padded.at[-1, -2].set(0.5 * (padded[-1, -3] + padded[-2, -2]))
+    padded = padded.at[-2, -1].set(0.5 * (padded[-3, -1] + padded[-2, -2]))
+    padded = padded.at[-1, -1].set(0.5 * (padded[-1, -2] + padded[-2, -1]))
+    return padded
+
+
 # ===================================================================
 # Backend A: all_gather  (simple, low-latency for ≤6 devices)
 # ===================================================================
@@ -234,6 +293,85 @@ def _make_exchange_allgather(mesh, ndim):
             halo_strips.append(strip)
 
         padded = _fill_halo_and_corners(padded, halo_strips, n)
+        return padded[None]
+
+    return _exchange
+
+
+# ===================================================================
+# Backend A2: all_gather for halo=2 (gather 2-cell-wide perimeter strips)
+# ===================================================================
+
+def _make_exchange_allgather_h2(mesh, ndim):
+    """Build a shard_map exchange for halo=2 using a single all_gather of
+    2-cell-wide perimeter strips.
+
+    The volume per face is ``8 * n[, * C]`` cells (4 edges × 2 deep)
+    versus the previous fall-through path which used the local h2 fill
+    on a face-sharded array — a pattern that triggers XLA auto-gather of
+    the full ``(6, n, n[, C])`` state.  The 2-strip allgather moves
+    ``n/4`` × less data per device for typical ``n``.
+    """
+    P = jax.sharding.PartitionSpec
+    in_sp = P("face", *((None,) * (ndim - 1)))
+    out_sp = P("face", *((None,) * (ndim - 1)))
+
+    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
+             check_vma=False)
+    def _exchange(local_shard):
+        n = local_shard.shape[1]
+        my_face = local_shard[0]   # (n, n[, C])
+
+        # Extract 4 perimeter strips of width 2.  Depth-0 (closest to
+        # the interface = my outermost cell on that edge) is at index 0
+        # along the depth axis; depth-1 (one cell inward) is at index 1.
+        # Receiver places depth-0 at its inner halo (closest to its
+        # interior) and depth-1 at the outer halo — matching the ordering
+        # used by the local-pad ``_fill_corners_h2`` helper.
+        if ndim == 3:
+            my_strips = jnp.stack([
+                jnp.stack([my_face[0, :], my_face[1, :]], axis=0),       # WEST
+                jnp.stack([my_face[-1, :], my_face[-2, :]], axis=0),     # EAST
+                jnp.stack([my_face[:, 0], my_face[:, 1]], axis=0),       # SOUTH
+                jnp.stack([my_face[:, -1], my_face[:, -2]], axis=0),     # NORTH
+            ], axis=0)  # (4, 2, n)
+        else:
+            my_strips = jnp.stack([
+                jnp.stack([my_face[0, :, :], my_face[1, :, :]], axis=0),
+                jnp.stack([my_face[-1, :, :], my_face[-2, :, :]], axis=0),
+                jnp.stack([my_face[:, 0, :], my_face[:, 1, :]], axis=0),
+                jnp.stack([my_face[:, -1, :], my_face[:, -2, :]], axis=0),
+            ], axis=0)  # (4, 2, n, C)
+
+        all_strips = jax.lax.all_gather(my_strips, "face", tiled=True)
+        n_faces = mesh.shape["face"]
+        if ndim == 3:
+            all_strips = all_strips.reshape(n_faces, 4, 2, n)
+        else:
+            all_strips = all_strips.reshape(
+                n_faces, 4, 2, n, my_face.shape[-1],
+            )
+
+        my_idx = jax.lax.axis_index("face")
+        my_nbr_f = _NBR_FACES[my_idx]
+        my_nbr_e = _NBR_EDGES[my_idx]
+        my_rev = _IS_REVERSED[my_idx]
+
+        if ndim == 3:
+            padded = jnp.pad(my_face, ((2, 2), (2, 2)))
+        else:
+            padded = jnp.pad(my_face, ((2, 2), (2, 2), (0, 0)))
+
+        halo_strips = []
+        for e in range(4):
+            strip = all_strips[my_nbr_f[e], my_nbr_e[e]]   # (2, n[, C])
+            # Reverse the spatial axis (axis 1 of (2, n[, C])) when the
+            # neighbour's edge is oriented opposite to ours.  The depth
+            # axis is invariant under spatial reversal.
+            strip = jnp.where(my_rev[e], strip[:, ::-1], strip)
+            halo_strips.append(strip)
+
+        padded = _fill_halo_and_corners_h2_local(padded, halo_strips, n)
         return padded[None]
 
     return _exchange
@@ -304,10 +442,29 @@ def _make_exchange_ppermute(mesh, ndim):
 _cache: dict[tuple, object] = {}
 
 
-def _get_exchange(mesh, ndim, use_ppermute):
-    key = (id(mesh), ndim, use_ppermute)
+def _get_exchange(mesh, ndim, use_ppermute, halo=1):
+    """Get (or build and cache) a SPMD halo-exchange kernel.
+
+    Parameters
+    ----------
+    mesh : jax.sharding.Mesh
+        Face-axis mesh.
+    ndim : int
+        3 for scalar (6, n, n) inputs, 4 for (6, n, n, C) inputs.
+    use_ppermute : bool
+        When *True* and ``halo == 1``, use the bandwidth-optimal
+        4-round ppermute backend.  Otherwise use the all_gather kernel.
+        ``ppermute`` is currently halo=1 only; halo=2 always uses the
+        2-strip all_gather kernel.
+    halo : int
+        Halo depth.  Supported: 1, 2.  Other values fall back to the
+        local pad path; see :func:`explicit_pad_halo`.
+    """
+    key = (id(mesh), ndim, use_ppermute, halo)
     if key not in _cache:
-        if use_ppermute:
+        if halo == 2:
+            _cache[key] = _make_exchange_allgather_h2(mesh, ndim)
+        elif use_ppermute:
             _cache[key] = _make_exchange_ppermute(mesh, ndim)
         else:
             _cache[key] = _make_exchange_allgather(mesh, ndim)
@@ -375,37 +532,30 @@ def set_ppermute_default(enabled: bool) -> None:
 def explicit_pad_halo(data, mesh, halo=1):
     """Explicit 3D scalar exchange.  (6,n,n) → (6,n+2h,n+2h).
 
-    Currently only the halo=1 path goes through an explicit SPMD
-    collective.  For halo=2 we delegate to ``_pad_halo_local_h2``,
-    whose ``data[nbr_face, ...]`` reads cause XLA to insert automatic
-    cross-shard gathers when ``data`` is face-sharded.  That keeps the
-    result correct but does not exploit the explicit SPMD path; a
-    proper halo=2 SPMD exchange would gather 2-cell-wide strips in a
-    single ``all_gather`` instead.  See follow-up TODO in
-    ``results/scaling_baseline/SUMMARY.md``.
+    Halo=1 uses ppermute or all_gather (auto-selected via the module
+    flag).  Halo=2 uses the 2-strip all_gather kernel.  Other halo
+    depths fall back to the local-pad path which triggers XLA
+    auto-gather under face-sharded execution.
     """
     if halo == 2:
-        from legoesm.grids.halo import _pad_halo_local_h2
-        return _pad_halo_local_h2(data)
+        return _get_exchange(mesh, 3, False, halo=2)(data)
     if halo != 1:
         from legoesm.grids.halo import _pad_halo_local
         return _pad_halo_local(data)
-    return _get_exchange(mesh, 3, _use_ppermute)(data)
+    return _get_exchange(mesh, 3, _use_ppermute, halo=1)(data)
 
 
 def explicit_pad_halo_4d(data, mesh, halo=1):
     """Explicit 4D scalar exchange.  (6,n,n,C) → (6,n+2h,n+2h,C).
 
-    See :func:`explicit_pad_halo` for the halo>=2 caveat — the SPMD
-    code path is exercised only at halo=1.
+    See :func:`explicit_pad_halo` for the halo support matrix.
     """
     if halo == 2:
-        from legoesm.grids.halo import _pad_halo_local_h2_4d
-        return _pad_halo_local_h2_4d(data)
+        return _get_exchange(mesh, 4, False, halo=2)(data)
     if halo != 1:
         from legoesm.grids.halo import _pad_halo_local_4d
         return _pad_halo_local_4d(data)
-    return _get_exchange(mesh, 4, _use_ppermute)(data)
+    return _get_exchange(mesh, 4, _use_ppermute, halo=1)(data)
 
 
 # ===================================================================
