@@ -317,12 +317,17 @@ def fv3_hydrostatic_tendencies(
     # --- 10b. Surface pressure tendency and vertical motion ---
 
     if _hybrid:
-        D_total_p = jnp.sum(div_v * dp, axis=-1)
-        dp_s_dt_data = -D_total_p / sigma_coord.B_range
+        # Reuse the column-sum that ``compute_mass_flux_hybrid``
+        # already produces internally instead of recomputing
+        # ``jnp.sum(div_v * dp, axis=-1)`` ourselves.  Saves one
+        # cross-level reduction per RK3 stage on every horizontal-shard
+        # configuration that touches the hybrid path.
+        mass_flux, _D_total_p_full = compute_mass_flux_hybrid(
+            div_v, p_s, sigma_coord,
+        )
+        dp_s_dt_data = -_D_total_p_full[..., 0] / sigma_coord.B_range
         if config.zero_mean_ps_tendency:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
-
-        mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
 
         # Vertical advection of D-grid winds: interpolate (u_d, v_d)
         # together to cell centres (single 4-point average instead of

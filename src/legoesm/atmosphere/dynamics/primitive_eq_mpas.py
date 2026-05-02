@@ -330,7 +330,7 @@ def mpas_hydrostatic_tendencies(
         div_dp_3d = div_dp_3d_pre  # (nCells, nlev)
         dp_s_dt = -jnp.sum(div_dp_3d, axis=-1) / sigma_coord.B_range
 
-        mass_flux = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
+        mass_flux, _ = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T_3d, mass_flux, p_s, sigma_coord)
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
     else:

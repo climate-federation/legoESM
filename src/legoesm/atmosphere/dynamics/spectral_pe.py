@@ -415,7 +415,14 @@ def spectral_pe_tendencies(
 
     # --- 7. Vertical velocity ---
     if _hybrid:
-        mass_flux = compute_mass_flux_hybrid(div, p_s, sigma_coord)
+        # ``compute_mass_flux_hybrid`` returns the column-integrated
+        # mass-weighted divergence ``D_total_p`` alongside the mass
+        # flux — reuse it in step 8 instead of recomputing
+        # ``jnp.sum(div * dp, axis=-1)``.  Saves one cross-level
+        # collective per RK3 stage under level-sharding.
+        mass_flux, _D_total_p_full = compute_mass_flux_hybrid(
+            div, p_s, sigma_coord,
+        )
         sigma_dot = None   # hybrid path uses ``mass_flux`` instead
         _D_total_sigma_full = None
     else:
@@ -427,10 +434,13 @@ def spectral_pe_tendencies(
         sigma_dot, _D_total_sigma_full = _compute_sigma_dot_gaussian(
             div, sigma_coord,
         )
+        _D_total_p_full = None
 
     # --- 8. Surface pressure tendency ---
     if _hybrid:
-        D_total_p = jnp.sum(div * dp, axis=-1)
+        # ``_D_total_p_full`` has trailing-axis size 1; drop the
+        # singleton to match the original ``jnp.sum(...)`` shape.
+        D_total_p = _D_total_p_full[..., 0]
         dlnps_dt_grid = -D_total_p / (p_s * sigma_coord.B_range)
         dp_s_dt_grid = p_s * dlnps_dt_grid
     else:

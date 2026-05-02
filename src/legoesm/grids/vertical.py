@@ -930,16 +930,19 @@ def compute_mass_flux_hybrid(
     div_3d: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
-) -> jax.Array:
+) -> tuple[jax.Array, jax.Array]:
     """Compute vertical mass flux at half-levels for hybrid coordinates.
 
-    Returns the pressure mass flux F at interfaces (analogous to
-    p_s * sigma_dot in sigma coordinates):
+    Returns ``(mass_flux, D_total_p)``:
 
         F_{k+1/2} = B_{k+1/2} * D_total_p - cumsum(D_k * dp_k)[k]
+        D_total_p = sum(D_k * dp_k)
 
-    where D_total_p = sum(div_k * dp_k) and dp_k is the layer pressure
-    thickness.
+    where dp_k is the layer pressure thickness.  ``D_total_p`` is
+    returned so the caller (e.g. ``spectral_pe_tendencies`` step 8)
+    can reuse it for the surface-pressure tendency without recomputing
+    the column sum — saves one cross-level collective per RK3 stage
+    under spectral level-sharding.
 
     Boundary conditions: F = 0 at top and surface.
 
@@ -953,19 +956,22 @@ def compute_mass_flux_hybrid(
 
     Returns
     -------
-    jax.Array
+    mass_flux : jax.Array
         Mass flux at half-levels, shape (..., nlev+1). Units: Pa/s.
+    D_total_p : jax.Array
+        Column-integrated mass-weighted divergence, shape (..., 1).
     """
     dp = dp_from_hybrid(coord, p_s)  # (..., nlev)
 
     # Mass-weighted divergence
     div_dp = div_3d * dp  # (..., nlev)
 
-    # Column-integrated divergence
-    D_total_p = jnp.sum(div_dp, axis=-1, keepdims=True)  # (..., 1)
-
-    # Cumulative sum from top
+    # Cumulative sum from top — its last entry is ``D_total_p``, so we
+    # extract that rather than calling ``jnp.sum`` independently.  Under
+    # level-sharding this drops the per-stage cross-level collective from
+    # 2 (sum + cumsum) to 1 (cumsum reuses its own last index).
     cumsum_div = jnp.cumsum(div_dp, axis=-1)  # (..., nlev)
+    D_total_p = cumsum_div[..., -1:]  # (..., 1)
 
     # Mass flux at interfaces 1..nlev
     # F_{k+1/2} = (B_{k+1/2} - B_top) / B_range * D_total_p - cumsum_k
@@ -980,7 +986,7 @@ def compute_mass_flux_hybrid(
     pad_axes = ((0, 0),) * (mass_flux_inner.ndim - 1)
     mass_flux = jnp.pad(mass_flux_inner[..., :-1], (*pad_axes, (1, 1)))
 
-    return mass_flux
+    return mass_flux, D_total_p
 
 
 def vertical_advection_hybrid(
