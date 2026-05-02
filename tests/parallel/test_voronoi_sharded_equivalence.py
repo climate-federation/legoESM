@@ -55,12 +55,13 @@ class TestVoronoiShardedEquivalence:
     is already tested at scale by the JW BCW conservation tests.
     """
 
-    def _run(self, *, devices: int, n_steps: int = 5):
+    def _run(self, *, devices: int, reorder_for: int | None = None,
+             n_steps: int = 5):
         """Run the SSP-RK3 evolution on a Voronoi mesh that has been
-        pre-reordered for ``devices``-way sharding.  Both the
-        single-device and multi-device paths use the *same* reordered
-        mesh so cell/edge indices match — direct array comparison is
-        meaningful.
+        pre-reordered for ``reorder_for``-way sharding (default:
+        same as ``devices``).  When comparing single-device against
+        N-device, set ``reorder_for=N`` on both so cell/edge indices
+        match for direct array comparison.
         """
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.voronoi import create_voronoi_mesh
@@ -74,13 +75,11 @@ class TestVoronoiShardedEquivalence:
 
         n_lev, dt = 8, 600.0
         mesh = create_voronoi_mesh(subdivision_level=4)
-        # Reorder for the *target* device count even on the
-        # single-device baseline so both runs use identical cell/edge
-        # indices.  Reorder is a no-op for n_devices=1 (or close to
-        # one).
-        mesh = reorder_voronoi_for_sharding(
-            mesh, max(devices, 2),  # always reorder for 2+
-        )
+        # Reorder for the *target* device count on both single-device
+        # and multi-device paths so cell/edge indices match — direct
+        # array comparison is meaningful.
+        target = reorder_for if reorder_for is not None else max(devices, 2)
+        mesh = reorder_voronoi_for_sharding(mesh, target)
         sigma = create_sigma_coordinate(n_lev)
         cfg = MPASPrimitiveEquationConfig(
             nu_del4=1e16, nu_del4_ps=1e16,
@@ -116,8 +115,9 @@ class TestVoronoiShardedEquivalence:
             state = step_fn(state, dt)
         return state
 
-    def test_2device_matches_1device(self):
-        """Verify the 2-device Voronoi sharded step matches single-device
+    @pytest.mark.parametrize("devices", [2, 3, 4])
+    def test_Ndevice_matches_1device(self, devices):
+        """Verify the N-device Voronoi sharded step matches single-device
         to floating-point precision after one SSP-RK3 step.
 
         Iter-23 fix removed the pre-existing 1e76 explosion (root cause:
@@ -125,13 +125,19 @@ class TestVoronoiShardedEquivalence:
         added an iterative augmentation that pulls in the OTHER cell of
         every halo edge until the halo is closed under the cellsOnEdge
         relation; this eliminates the residual ~1% drift from halo
-        cells lacking some of their edges.  Post-iter-25 the path is
-        bit-equivalent up to floating-point accumulation order:
-        max abs diff ≈ 1e-8 on u, 1e-9 on T, 1e-2 on p_s (1e-7 relative).
+        cells lacking some of their edges.  Iter-27 vectorised the
+        augmentation loop.  Iter-28 extends test coverage to 2, 3,
+        and 4 devices.
+
+        Post-iter-25 the path is bit-equivalent up to floating-point
+        accumulation order: max abs diff ≈ 1e-8 on u, 1e-9 on T,
+        ~1e-3 on p_s (1e-7 relative).
         """
-        _need_multi_device(2)
-        ref = self._run(devices=1, n_steps=1)
-        out = self._run(devices=2, n_steps=1)
+        _need_multi_device(devices)
+        # Reorder both single-device and multi-device runs for the same
+        # target device count so cell/edge indices match.
+        ref = self._run(devices=1, reorder_for=devices, n_steps=1)
+        out = self._run(devices=devices, reorder_for=devices, n_steps=1)
         for name, atol, rtol in (
             ("u", 1e-6, 1e-6),
             ("T", 1e-6, 1e-7),
@@ -141,5 +147,5 @@ class TestVoronoiShardedEquivalence:
             o = np.asarray(getattr(out, name).data)
             np.testing.assert_allclose(
                 o, r, atol=atol, rtol=rtol,
-                err_msg=f"{name}: 2-device drift exceeds float-pt envelope",
+                err_msg=f"{name}: {devices}-device drift exceeds float-pt envelope",
             )
