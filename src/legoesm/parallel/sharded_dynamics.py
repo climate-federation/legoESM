@@ -80,6 +80,7 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.mesh import DeviceConfig, _N_FACES
+from legoesm.core.field import Field
 
 logger = logging.getLogger(__name__)
 
@@ -1892,7 +1893,6 @@ def make_voronoi_sharded_step(
             my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
 
             # Build local state and compute tendency
-            from legoesm.core.field import Field
             local_state = MPASHydrostaticState(
                 u=Field(data=u_local, name="u",
                         dims=("nEdges", "nlev"), units="m/s",
@@ -1944,7 +1944,6 @@ def make_voronoi_sharded_step(
 
             my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
 
-            from legoesm.core.field import Field
             local_state = MPASHydrostaticState(
                 u=Field(data=u_local, name="u",
                         dims=("nEdges", "nlev"), units="m/s",
