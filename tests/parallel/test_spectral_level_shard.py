@@ -41,7 +41,7 @@ class TestSpectralLevelShardEquivalence:
     coefficients.
     """
 
-    def _run(self, *, devices: int, n_max: int = 21):
+    def _run(self, *, devices: int, n_max: int = 21, n_steps: int = 5):
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.atmosphere.dynamics.spectral_pe import (
@@ -52,7 +52,7 @@ class TestSpectralLevelShardEquivalence:
 
         # dt scales inversely with resolution to stay CFL-stable
         dt = 870.0 if n_max <= 21 else 450.0
-        n_lev, n_steps = 8, 5
+        n_lev = 8
         grid = create_gaussian_grid(n_max)
         sigma = create_sigma_coordinate(n_lev)
         state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
@@ -88,6 +88,35 @@ class TestSpectralLevelShardEquivalence:
         """
         _need_multi_device(2)
         self._assert_equivalent(devices=2, n_max=42)
+
+    def test_long_run_2device_T21_matches(self):
+        """20-step regression check that the iter-50/51 cumsum-as-sum
+        refactors do not accumulate FP drift over many RK3 steps.
+
+        Iter-50 dropped 2 of 3 cross-level collectives in the spectral
+        PE σ-coordinate path (``_compute_sigma_dot_gaussian``); iter-51
+        did the same in the hybrid path (``compute_mass_flux_hybrid``).
+        Both refactors trade one ``jnp.sum`` for ``cumsum[..., -1]``,
+        which has slightly different float-pt accumulation order.
+
+        This test runs 20 SSP-RK3 steps at T21 and asserts the level-
+        sharded result matches the single-device reference at the same
+        rtol/atol used for the 5-step test (1e-12).  If the drift were
+        accumulating (e.g., 1e-13/step) it would have grown to ~2e-12
+        and tripped the bound.
+        """
+        _need_multi_device(2)
+        ref = self._run(devices=1, n_max=21, n_steps=20)
+        out = self._run(devices=2, n_max=21, n_steps=20)
+        for name in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
+            r = getattr(ref, name).data
+            o = getattr(out, name).data
+            np.testing.assert_allclose(
+                np.asarray(o), np.asarray(r),
+                rtol=1e-12, atol=1e-12,
+                err_msg=f"{name} drifts under 2-device level sharding "
+                        f"after 20 RK3 steps at T21",
+            )
 
     def _assert_equivalent(self, *, devices: int, n_max: int):
         ref = self._run(devices=1, n_max=n_max)
