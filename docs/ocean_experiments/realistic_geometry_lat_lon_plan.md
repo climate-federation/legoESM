@@ -1,12 +1,78 @@
 # Realistic coastlines + bathymetry on the lat-lon C-grid ocean — implementation plan
 
-**Status (2026-05-01):** Phases 0–3.5 **complete**; Phase 4(a)
-smoke-test **complete**; Phase 4(b) first-pass 20-yr Wolfe-Cessi
-spinup on real ETOPO **complete with mixed result** — see
-``realistic_geometry_phase4_results.md``.  Thermodynamics develop
-correctly; momentum field has residual partial-cell q-noise plus
-cold-start imbalance.  Next session resumes from the priority list
-in that results doc.
+**Status (2026-05-02):** Phases 0, 1, 2, **3a**, 3.5 **complete**;
+Phases **3b, 3c, 3d, 3e deferred** (see "Deferred scope" below);
+Phase 4(a) smoke-test, Phase 4(b) 20-yr spinup, Phase 4(c) 50-yr
+spinup with cos²(lat) + polar cap **complete**; **Phase 4(c) extension
+to 100 yr complete** (yr 99.98, max|u|=1.21 m/s, equilibrated, AMOC
+absent — lines up the Phase 4(d) forcing-protocol baseline); Phase 5
+cross-comparison plotting **deferred** (will fold into Phase 4(d)
+forcing-experiment matrix).  See
+``realistic_geometry_phase4_results.md`` for full results and
+``realistic_geometry_forcing_literature_review.md`` for the Phase 4(d)
+forward plan derived from the 2026-05-02 OMIP/CORE literature review.
+
+The momentum-field residual originally attributed to "partial-cell
+q-noise + cold-start imbalance" was re-diagnosed in the 2026-05-01
+evening session as a 2Δy zonal-jet computational mode (in *u*) driven
+by the realistic-geometry config dropping A_h 20× from the idealised
+default.  The realistic config can't simply restore A_h=2e5 because
+that triggers a separate Arctic high-lat partial-cell instability
+(single-cell runaway at lat 82.5° in 15 days).  Standard MITgcm/
+MOM6/NEMO fix (cos²(lat) A_h scaling, lat>80° polar cap) landed.
+AL81 audit identified six defects but a discrete energy + enstrophy
+budget test confirmed they are stylistic / minor, not bugs.
+
+## Deferred scope
+
+The 2026-05-02 PR ships Phases 0–3a, 3.5, 4(a)–4(c).  The following
+items from the original plan are explicitly **deferred** rather than
+silently dropped:
+
+- **Phase 3b — Tilted Gaussian ridge (45° rotated)**.  Low expected
+  info-gain given Phase 4(c) ran 100 yr cleanly without grid-alignment
+  artefacts in the bulk interior (only the 2Δy mode at the equator,
+  fixed by cos²(lat)).  Revisit only if Phase 4(d) forcing changes
+  re-expose alignment-sensitive structure.
+- **Phase 3c — Munk gyre with 45° diagonal eastern boundary**.
+  Medium info-gain — would catch any latent corner-cell bug under
+  sustained flow.  Recommended before any future "real coastline +
+  diagonal western boundary current" claim (e.g. Gulf Stream
+  separation diagnostics).  Not blocking for the global-overturning
+  experiment matrix.
+- **Phase 3d — Circular island in closed basin**.  Low info-gain;
+  Phase 4(c) ran with multiple real islands (Antarctica, Australia,
+  Madagascar, etc.) without conservation drift.
+- **Phase 3e — Two-basin with narrow strait + Whitehead 1989
+  hydraulic-control comparison**.  Medium info-gain; would calibrate
+  our expectation for Indonesian Throughflow + Drake exchange in
+  Phase 4(d).  Recommended **before** publishing any throughflow
+  number from the realistic-geometry runs.
+- **Phase 5 — Cross-run comparison package** (Drake transport,
+  AMOC pathway, η spectrum on real bathy, topographic Rossby).
+  Folded into the Phase 4(d) experiment matrix in
+  ``realistic_geometry_forcing_literature_review.md`` so it has
+  multiple configs to compare, not a single-config baseline.
+
+The 2026-05-02 lit review identified **forcing protocol** (SST
+restoring → prescribed heat flux, add idealised E−P + β_S, Bryan-
+Lewis κ_v) as the highest-leverage path to credible AMOC, not
+boundary-handling.  The deferred 3b–3e tests retain their original
+scientific value but are no longer on the critical path to the
+"realistic Atlantic overturning at 5°" milestone.
+
+The momentum-field residual originally attributed to "partial-cell
+q-noise + cold-start imbalance" was re-diagnosed in the 2026-05-01
+evening session as a 2Δy zonal-jet computational mode (in *u*, peaking
+at the equator) driven by the realistic-geometry config dropping A_h
+20× from the idealised default.  The realistic config can't simply
+restore A_h=2e5 because that triggers a separate Arctic high-lat
+partial-cell instability (single-cell runaway at lat 82.5° in 15
+days).  Standard MITgcm/MOM6/NEMO fix (cos²(lat) A_h scaling) landed
+this session.  AL81 audit identified six defects but D2 (WENO5 vs
+AL81 = -15-20%) bounds their combined effect; a discrete energy +
+enstrophy budget test will discriminate "real theoretical hole" from
+"alternative stylistic choice" before any AL81 fix work proceeds.
 
 ### Phase 4(b) first-pass result (2026-05-01)
 
