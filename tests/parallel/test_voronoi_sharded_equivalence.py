@@ -56,7 +56,7 @@ class TestVoronoiShardedEquivalence:
     """
 
     def _run(self, *, devices: int, reorder_for: int | None = None,
-             n_steps: int = 5):
+             n_steps: int = 5, subdivision_level: int = 4):
         """Run the SSP-RK3 evolution on a Voronoi mesh that has been
         pre-reordered for ``reorder_for``-way sharding (default:
         same as ``devices``).  When comparing single-device against
@@ -73,8 +73,11 @@ class TestVoronoiShardedEquivalence:
         )
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
-        n_lev, dt = 8, 600.0
-        mesh = create_voronoi_mesh(subdivision_level=4)
+        # Lower dt at higher subdivision to stay CFL-stable (dx scales
+        # ~ 2^level so dt should scale 4× per level).
+        dt = 600.0 if subdivision_level == 4 else 200.0
+        n_lev = 8
+        mesh = create_voronoi_mesh(subdivision_level=subdivision_level)
         # Reorder for the *target* device count on both single-device
         # and multi-device paths so cell/edge indices match — direct
         # array comparison is meaningful.
@@ -117,6 +120,15 @@ class TestVoronoiShardedEquivalence:
 
     @pytest.mark.parametrize("devices", [2, 3, 4])
     def test_Ndevice_matches_1device(self, devices):
+        self._run_equivalence(devices=devices, subdivision_level=4)
+
+    def test_subdiv5_2device_matches(self):
+        """Verify the iter-37 cap=2 generalises to higher resolution
+        (subdivision_level=5, 10242 cells).  Same envelope as subdiv=4.
+        """
+        self._run_equivalence(devices=2, subdivision_level=5)
+
+    def _run_equivalence(self, *, devices: int, subdivision_level: int):
         """Verify the N-device Voronoi sharded step matches single-device
         to floating-point precision after one SSP-RK3 step.
 
@@ -136,8 +148,14 @@ class TestVoronoiShardedEquivalence:
         _need_multi_device(devices)
         # Reorder both single-device and multi-device runs for the same
         # target device count so cell/edge indices match.
-        ref = self._run(devices=1, reorder_for=devices, n_steps=1)
-        out = self._run(devices=devices, reorder_for=devices, n_steps=1)
+        ref = self._run(
+            devices=1, reorder_for=devices, n_steps=1,
+            subdivision_level=subdivision_level,
+        )
+        out = self._run(
+            devices=devices, reorder_for=devices, n_steps=1,
+            subdivision_level=subdivision_level,
+        )
         for name, atol, rtol in (
             ("u", 1e-6, 1e-6),
             ("T", 1e-6, 1e-7),
