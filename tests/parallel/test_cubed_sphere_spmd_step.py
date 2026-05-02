@@ -174,6 +174,36 @@ class TestCubedSphereSPMDStep:
                         f"drift exceeds float-pt envelope",
             )
 
+    def test_with_physics_6device_5step_stable(self):
+        """Iter-67: 5-step with-physics regression for iter-65's
+        ``physics_tendency_cc`` plumbing.
+
+        Verifies the iter-65 reorganization (cell-center physics
+        tendency batched into iter-64 corner-interp) does not
+        accumulate FP drift over multiple SSP-RK3 steps.  Uses a
+        relaxed tolerance on the dynamical fields appropriate for
+        5 steps (similar to the 10-step bounds in
+        ``test_6device_matches_1device``).
+        """
+        _need_devices(6)
+        ref = self._run_with_physics(devices=1, n_steps=5)
+        out = self._run_with_physics(devices=6, n_steps=5)
+        # Tolerance scales with n_steps for the post-step mass-fixer
+        # allreduce float-pt drift on ps that feeds back into u/v.
+        for name, atol, rtol in (
+            ("u", 1e-4, 1e-9),
+            ("v", 1e-4, 1e-9),
+            ("T", 1e-4, 1e-9),
+            ("p_s", 5.0, 1e-5),
+        ):
+            r = np.asarray(getattr(ref, name).data)
+            o = np.asarray(getattr(out, name).data)
+            np.testing.assert_allclose(
+                o, r, atol=atol, rtol=rtol,
+                err_msg=f"{name}: 6-dev cubed-sphere with-physics 5-step "
+                        f"drift exceeds float-pt envelope",
+            )
+
     def test_C48_6device_matches_1device(self):
         """Verify cubed-sphere SPMD bit-equivalence at production-ish
         resolution C48.  Iter-45 confirms the iter-31 fix carries
