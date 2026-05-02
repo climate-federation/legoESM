@@ -115,7 +115,7 @@ deterministic-reduction collective.
 | File                                                    | # tests | What |
 |---------------------------------------------------------|--------:|------|
 | `tests/parallel/test_cubesphere_exchange.py::TestSPMDWithOffsets` | 8 | halo bit-equivalence |
-| `tests/parallel/test_cubed_sphere_spmd_step.py`          |       6 | end-to-end cubed-sphere SPMD step (1 + 10 RK3 steps; with-physics; C48; 2- and 3-device multi-face) |
+| `tests/parallel/test_cubed_sphere_spmd_step.py`          |      11 | end-to-end cubed-sphere SPMD step (1 + 10 RK3 steps; with-physics; C48; 2/3/6-dev multi-face σ + hybrid; 2/3/6-dev div_damp) |
 | `tests/parallel/test_spectral_level_shard.py`            |       2 | level-shard equivalence (2 and 4 devices) |
 | `tests/parallel/test_voronoi_sharded_equivalence.py`     |       3 | cell-shard equivalence (2, 3, 4 devices) |
 
@@ -148,6 +148,8 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+ea0ec175 tests: extend iter-60/61 hybrid + div_damp SPMD tests to multi-face
+a83e1a91 docs: record iter-61 div_v halo merge for div_damp
 7d45ef15 cubed-sphere FV3 PE: pack div_v into merged exchange for div_damp
 9a43700d docs: record iter-60 hybrid_factor halo merge
 3487928f tests: cubed-sphere SPMD hybrid σ-pressure 6-device bit-equiv
