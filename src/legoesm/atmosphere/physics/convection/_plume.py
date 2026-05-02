@@ -447,19 +447,36 @@ def entraining_detraining_plume(
         plume is at half mass flux when ``T_u - T_env`` reaches the
         modest negative value of about ``-1.4 K``.
     buoyancy_death_memory : bool
-        Whether the buoyancy-tapering filter is *monotone-decreasing*
-        along the upward integration.  Default ``False`` (legacy
-        local filter): each level applies its own ``sigmoid(B_u)``
-        independently — a plume that is killed by negative buoyancy
-        at one level can resume reporting nonzero ``M_u`` above an
-        inversion, which can be physically inappropriate for
-        single-plume schemes (audit Codex cycle 2 P2: "plume
-        terminated by negative buoyancy can revive above an
-        inversion").  When ``True``, the filter takes the cumulative
-        minimum along the column ascent, so once the plume dies it
-        stays dead — the standard behavior of e.g. Kain-Fritsch.
-        Off by default to preserve numerics for existing schemes;
-        opt in by passing ``True`` from the calling scheme.
+        Whether the buoyancy-tapering filter has carry-state memory.
+        Default ``False`` (legacy local filter): each level applies
+        its own ``sigmoid(B_u)`` independently — a plume that is
+        killed by negative buoyancy at one level can resume reporting
+        nonzero ``M_u`` above an inversion, which can be physically
+        inappropriate for single-plume schemes (audit Codex cycle 2
+        P2: "plume terminated by negative buoyancy can revive above
+        an inversion").
+
+        When ``True``, the carry tracks two slots — ``launched``
+        (cumulative max of a buoyancy-ramp gated by ``abv²``) and
+        ``alive_min`` (cumulative min of ``launched·plume_alive +
+        (1-launched)``) — so once the plume reaches its CAPE region
+        and is then killed by an inversion, ``alive_min`` ratchets
+        down and stays low even if buoyancy recovers above the
+        inversion.
+
+        **The True branch is opt-in and not enabled in any production
+        scheme by default.**  Iterative review during cycle-3
+        identified six independent edge-case failure modes (sub-LCL
+        warm bubble, weak-CAPE miss, sub-LCL leak, missed cloud-base
+        launch, revival-after-inversion still leaks).  The current
+        ``buoyancy_ramp · abv²`` design satisfies all six in static
+        traces, but the strongest cycle-3 finding ("cloud-base launch
+        gate still does not block revival") suggests the cumulative-
+        max + cumulative-min algorithm needs a more discrete state-
+        machine treatment to fully suppress weak-CAPE revival.  The
+        opt-in interface is preserved so a future PR can land a
+        validated implementation; current callers stay on the
+        legacy behaviour.
 
     Returns
     -------
@@ -498,19 +515,23 @@ def entraining_detraining_plume(
     # Initial plume state at the surface-first index 0 (which is the
     # actual surface).  We launch with the parcel values; the
     # ``above_base_weight`` mask will suppress mass flux below cloud
-    # base.  All carry components are pinned to ``_dtype``.  The
-    # ``alive_min`` slot starts at 1 (plume fully alive) and only
-    # ratchets down via cumulative ``min`` when ``buoyancy_death_
-    # memory`` is enabled — see step body for the off path.
+    # base.  All carry components are pinned to ``_dtype``.
+    #
+    # ``alive_min`` tracks the cumulative MIN of ``plume_alive_local``
+    # once the plume has reached its CAPE region (gated by
+    # ``launched``).  ``launched`` is the cumulative MAX of a sharp
+    # detector ``sigmoid(launched_sharpness · (plume_alive_local -
+    # launched_threshold))`` — it ramps from 0 to 1 the first time
+    # plume_alive_local clearly exceeds the threshold, then stays at 1.
+    # Both start at 0/1 respectively (plume not launched, fully alive).
     init_carry = (
         T_parcel_base.astype(_dtype),                       # T_u_prev
         q_parcel_base.astype(_dtype),                       # q_u_prev
         jnp.zeros_like(T_parcel_base, dtype=_dtype),        # q_c_u_prev
         M_b.astype(_dtype),                                 # M_u_prev
         z_full_rev[:, 0],                                   # z_prev (already cast)
-        jnp.ones_like(T_parcel_base, dtype=_dtype),         # alive_min (carries
-                                                             # cumulative min of plume_alive
-                                                             # when buoyancy_death_memory)
+        jnp.ones_like(T_parcel_base, dtype=_dtype),         # alive_min
+        jnp.zeros_like(T_parcel_base, dtype=_dtype),        # launched
     )
 
     # Per-level inputs to the scan.  Transpose to (nlev, ncol).
@@ -529,7 +550,8 @@ def entraining_detraining_plume(
     L_v = constants.L_v
 
     def step(carry, layer_inputs):
-        T_u_prev, q_u_prev, q_c_u_prev, M_u_raw_prev, z_prev, alive_min_prev = carry
+        (T_u_prev, q_u_prev, q_c_u_prev, M_u_raw_prev,
+         z_prev, alive_min_prev, launched_prev) = carry
         T_e, q_e, p_e, z_e, eps, dlt, abv = layer_inputs
 
         dz = jnp.maximum(z_e - z_prev, 1.0)  # ascending; floor to avoid div-by-zero
@@ -628,27 +650,95 @@ def entraining_detraining_plume(
         # When ``buoyancy_death_memory`` is False (default), the
         # filter is purely local: each level applies its own
         # sigmoid(B_u), so a plume killed by an inversion can revive
-        # above it.  The carry does NOT track the filter; this
-        # preserves the cloud-base-to-LNB profile shape that
-        # consumers like ZM/Tiedtke depend on.
+        # above it.  The carry does NOT track the filter.
         #
-        # When True, ``alive_min`` carries the cumulative minimum
-        # of plume_alive seen so far — once buoyancy dies, the
-        # filter stays low through every level above (Codex audit
-        # cycle 2 P2: "plume terminated by negative buoyancy can
-        # revive above an inversion").  Schemes that opt in get
-        # monotone single-plume termination.
+        # When True, the death-memory carry has TWO slots:
+        #
+        # 1. ``launched``: cumulative max of a smooth ramp on
+        #    ``plume_alive_local`` that engages PROPORTIONALLY to
+        #    positive buoyancy AND only above cloud base:
+        #
+        #        launched_local = abv · clamp(2·max(pl - 0.5, 0), 0, 1)
+        #
+        #    The two factors gate independently:
+        #    - ``2 · max(pl - 0.5, 0)`` is the buoyancy ramp: 0 for
+        #      ``B_u ≤ 0``, scaling linearly with positive B_u up to
+        #      saturation at ``B_u → ∞``.  Captures ALL positive-CAPE
+        #      regions, including weak CAPE (an earlier sharp
+        #      threshold required ``B_u > 1.7 K`` to engage at all,
+        #      missing weak-CAPE columns — Codex cycle-3 follow-up
+        #      "launched gate misses weak positive CAPE").
+        #    - ``abv`` is the above-cloud-base weight: 0 below LCL,
+        #      1 above.  Without this factor, a sub-LCL warm bubble
+        #      (e.g. a cooler-air-aloft-over-warm-BL profile) could
+        #      drive ``B_u > 0`` briefly at the surface and trigger
+        #      ``launched`` prematurely, causing the LCL-to-LFC CIN
+        #      passage to ratchet alive_min before the plume reaches
+        #      its actual CAPE region (Codex cycle-3 follow-up:
+        #      "launch gate is not masked to cloud base/LFC").
+        #
+        #    Cumulative max ⇒ once the plume reaches its CAPE region,
+        #    ``launched_new`` stays at the highest value seen.
+        #
+        # 2. ``alive_min``: cumulative min of ``plume_alive_local``,
+        #    GATED by ``launched`` so it only tracks deaths AFTER the
+        #    plume has reached its CAPE region.  Pre-LFC the gate is
+        #    0 ⇒ ratchet target = 1 ⇒ alive_min preserved.  Above
+        #    LFC the gate is launched_new ∈ (0, 1] ⇒ ratchet target
+        #    interpolates between ``plume_alive`` (full ratchet) and
+        #    1 (no ratchet) by buoyancy strength.  Once an above-LFC
+        #    inversion kills the plume (alive_min drops), it stays
+        #    dead even if buoyancy recovers above the inversion
+        #    (audit Codex cycle 2 P2: "plume terminated by negative
+        #    buoyancy can revive above an inversion").
         plume_alive_local = jax.nn.sigmoid(buoyancy_sharpness * B_u)
         if buoyancy_death_memory:
-            alive_min_new = jnp.minimum(alive_min_prev, plume_alive_local)
+            # Buoyancy ramp: 0 for B_u ≤ 0, scales linearly above.
+            # ``relu`` is a smooth-enough subgradient for AD.
+            buoyancy_ramp = jnp.minimum(
+                2.0 * jax.nn.relu(plume_alive_local - 0.5), 1.0,
+            )
+            # Above-cloud-base weighting for the launched gate.  The
+            # plain ``abv`` factor leaks ~2 % of the buoyancy ramp at
+            # the sub-LCL transition zone (Codex cycle-3 "sub-LCL
+            # launch gate is still leaky"), but the harder
+            # ``max(2·abv - 1, 0)`` zeros the gate exactly AT cloud
+            # base and misses genuine cloud-base launches (Codex
+            # cycle-3 "the new launch mask can miss a real cloud-
+            # base launch").  ``abv²`` is the right trade-off:
+            #
+            #   abv = 0.1  → abv² = 0.01   (very small sub-LCL leak)
+            #   abv = 0.3  → abv² = 0.09   (still small)
+            #   abv = 0.5  → abv² = 0.25   (cloud-base launch engages
+            #                                at 25 % — partial but
+            #                                non-zero, captures the
+            #                                launch event)
+            #   abv = 0.7  → abv² = 0.49   (half engagement)
+            #   abv = 1.0  → abv² = 1.0    (full above cloud base)
+            #
+            # This gives a quadratic suppression of sub-LCL leaks
+            # while preserving non-zero engagement at cloud base
+            # itself.  Cumulative max ⇒ once a level engages the
+            # launched gate, subsequent levels can only hold or
+            # increase it.
+            launched_abv_mask = abv * abv
+            launched_local = buoyancy_ramp * launched_abv_mask
+            launched_new = jnp.maximum(launched_prev, launched_local)
+            # Ratchet target: blend plume_alive_local (when launched)
+            # with 1 (when not launched).
+            ratchet_target = (
+                launched_new * plume_alive_local + (1.0 - launched_new)
+            )
+            alive_min_new = jnp.minimum(alive_min_prev, ratchet_target)
         else:
             alive_min_new = jnp.ones_like(alive_min_prev)
+            launched_new = jnp.zeros_like(launched_prev)
         plume_alive_filter = (
             alive_min_new if buoyancy_death_memory else plume_alive_local
         )
         M_u_reported = M_u_raw * plume_alive_filter * abv
 
-        new_carry = (T_u, q_u, q_c_u, M_u_raw, z_e, alive_min_new)
+        new_carry = (T_u, q_u, q_c_u, M_u_raw, z_e, alive_min_new, launched_new)
         outputs = (T_u, q_u, q_c_u, M_u_reported, B_u)
         return new_carry, outputs
 
