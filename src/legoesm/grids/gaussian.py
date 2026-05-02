@@ -914,6 +914,41 @@ def sh_analysis_dmu_3d(
     )
 
 
+def sh_analysis_oc2_dmu_3d(
+    grid: GaussianGrid, field_3d: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Combined oc2 + dmu forward SH transforms, sharing the FFT + gather.
+
+    The standalone ``sh_analysis_oc2_3d`` and ``sh_analysis_dmu_3d``
+    each compute ``rfft(field) → slice → gather`` before applying their
+    Legendre weight matrix (``wPnm_oc2`` vs ``wDnm``).  When both are
+    called on the SAME input (3 sites in spectral_pe_tendencies), the
+    FFT + gather is duplicated.
+
+    This combined entry point runs the FFT + gather once and applies
+    both Legendre weight matrices.  Returns ``(oc2_result, dmu_result)``
+    matching the standalone outputs.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+    field_3d : jax.Array, shape (n_lat, n_lon, ...)
+
+    Returns
+    -------
+    oc2 : jax.Array — same shape and value as ``sh_analysis_oc2_3d(grid, field_3d)``
+    dmu : jax.Array — same shape and value as ``sh_analysis_dmu_3d(grid, field_3d)``
+    """
+    n_max = grid.n_max
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]
+    f_m_gathered = f_m[:, grid.ms, :]
+    twoπ = 2.0 * jnp.pi
+    oc2 = twoπ * jnp.sum(grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0)
+    dmu = twoπ * jnp.sum(grid.wDnm[:, :, None] * f_m_gathered, axis=0)
+    return oc2, dmu
+
+
 def uv_from_vordiv_3d(
     grid: GaussianGrid,
     vor_hat_3d: jax.Array,

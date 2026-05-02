@@ -43,6 +43,7 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     sh_analysis_oc2_3d,
     sh_analysis_dmu_3d,
+    sh_analysis_oc2_dmu_3d,
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
     _sh_synthesis_H,
@@ -280,8 +281,11 @@ def _tracer_advection_gaussian(
     n_lat_q, n_lon_q, nlev_q = q_grid.shape
     _flux_stack = jnp.stack([flux_x, flux_y], axis=-1)
     _flux_flat = _flux_stack.reshape(n_lat_q, n_lon_q, nlev_q * 2)
-    _oc2_pair = sh_analysis_oc2_3d(grid, _flux_flat).reshape(-1, nlev_q, 2)
-    _dmu_pair = sh_analysis_dmu_3d(grid, _flux_flat).reshape(-1, nlev_q, 2)
+    # Iter-81: fused oc2+dmu shares the FFT + gather (was 2 separate
+    # forward transforms on the same input).
+    _oc2_raw, _dmu_raw = sh_analysis_oc2_dmu_3d(grid, _flux_flat)
+    _oc2_pair = _oc2_raw.reshape(-1, nlev_q, 2)
+    _dmu_pair = _dmu_raw.reshape(-1, nlev_q, 2)
     flux_x_oc2 = _oc2_pair[..., 0]
     flux_y_dmu = _dmu_pair[..., 1]
 
@@ -477,8 +481,10 @@ def spectral_pe_tendencies(
     _AB_stack = jnp.stack([A_vor, B_vor], axis=-1)  # (..., nlev, 2)
     n_lat_t, n_lon_t, nlev_t, _ = _AB_stack.shape
     _AB_flat = _AB_stack.reshape(n_lat_t, n_lon_t, nlev_t * 2)
-    _oc2_AB = sh_analysis_oc2_3d(grid, _AB_flat).reshape(-1, nlev_t, 2)
-    _dmu_AB = sh_analysis_dmu_3d(grid, _AB_flat).reshape(-1, nlev_t, 2)
+    # Iter-81: fused oc2+dmu shares the FFT + gather.
+    _oc2_AB_raw, _dmu_AB_raw = sh_analysis_oc2_dmu_3d(grid, _AB_flat)
+    _oc2_AB = _oc2_AB_raw.reshape(-1, nlev_t, 2)
+    _dmu_AB = _dmu_AB_raw.reshape(-1, nlev_t, 2)
     _A_oc2, _B_oc2 = _oc2_AB[..., 0], _oc2_AB[..., 1]
     _A_dmu, _B_dmu = _dmu_AB[..., 0], _dmu_AB[..., 1]
 
@@ -660,8 +666,10 @@ def spectral_pe_tendencies(
     _vert_uv_stack = jnp.stack([vert_u_cos, vert_v_cos], axis=-1)
     n_lat_v, n_lon_v, nlev_v, _ = _vert_uv_stack.shape
     _vert_uv_flat = _vert_uv_stack.reshape(n_lat_v, n_lon_v, nlev_v * 2)
-    _vert_oc2 = sh_analysis_oc2_3d(grid, _vert_uv_flat).reshape(-1, nlev_v, 2)
-    _vert_dmu = sh_analysis_dmu_3d(grid, _vert_uv_flat).reshape(-1, nlev_v, 2)
+    # Iter-81: fused oc2+dmu shares the FFT + gather.
+    _vert_oc2_raw, _vert_dmu_raw = sh_analysis_oc2_dmu_3d(grid, _vert_uv_flat)
+    _vert_oc2 = _vert_oc2_raw.reshape(-1, nlev_v, 2)
+    _vert_dmu = _vert_dmu_raw.reshape(-1, nlev_v, 2)
     _vu_oc2, _vv_oc2 = _vert_oc2[..., 0], _vert_oc2[..., 1]
     _vu_dmu, _vv_dmu = _vert_dmu[..., 0], _vert_dmu[..., 1]
 
