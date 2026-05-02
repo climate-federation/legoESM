@@ -338,3 +338,27 @@ class TestSPMDWithOffsets:
         )
         np.testing.assert_array_equal(np.array(out1), ref1)
         np.testing.assert_array_equal(np.array(out2), ref2)
+
+    def test_packed_halo2_4d_with_offsets(self, mesh_6):
+        """``packed_pad_halo_4d(halo=2, ...)`` matches per-field
+        ``_pad_halo_local_h2_4d`` calls.  Iter-10 generalization to
+        halo=2 lets PPM-transport call sites pack their q_i / q_j
+        halo exchanges into a single SPMD collective.
+        """
+        from legoesm.grids.halo import _pad_halo_local_h2_4d
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+        n, c1, c2 = 8, 5, 3
+        f1 = jax.random.normal(jax.random.PRNGKey(11), (6, n, n, c1))
+        f2 = jax.random.normal(jax.random.PRNGKey(12), (6, n, n, c2))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(13), (6, 4, 2, n),
+        ) * 0.3
+        ref1 = np.array(_pad_halo_local_h2_4d(f1, offsets))
+        ref2 = np.array(_pad_halo_local_h2_4d(f2, offsets))
+        f1_s = _shard_on_face(f1, mesh_6)
+        f2_s = _shard_on_face(f2, mesh_6)
+        out1, out2 = packed_pad_halo_4d(
+            f1_s, f2_s, mesh=mesh_6, interp_offsets=offsets, halo=2,
+        )
+        np.testing.assert_array_equal(np.array(out1), ref1)
+        np.testing.assert_array_equal(np.array(out2), ref2)

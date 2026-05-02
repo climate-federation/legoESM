@@ -706,7 +706,9 @@ def explicit_pad_halo_vector_4d(
 # Packed multi-field exchange
 # ===================================================================
 
-def packed_pad_halo_4d(*fields, mesh, duogrid=None, interp_offsets=None):
+def packed_pad_halo_4d(
+    *fields, mesh, duogrid=None, interp_offsets=None, halo=1,
+):
     """Exchange halos for multiple 4D fields in a single collective.
 
     Stacks fields along the trailing axis, performs ONE exchange, then
@@ -726,13 +728,19 @@ def packed_pad_halo_4d(*fields, mesh, duogrid=None, interp_offsets=None):
     Without this, the packed SPMD path silently bypasses
     ``interp_offsets`` while the unpacked ``pad_halo_4d`` path applies
     them.
+
+    ``halo`` selects the SPMD exchange depth.  ``halo=1`` uses the
+    1-strip allgather kernel (shape ``(6, n+2, n+2, C)`` per device);
+    ``halo=2`` uses the 2-strip allgather kernel (shape
+    ``(6, n+4, n+4, C)``) — the same kernel
+    :func:`explicit_pad_halo_4d` selects when called with that depth.
     """
     if not fields:
         return []
 
     if len(fields) == 1:
         return [explicit_pad_halo_4d(
-            fields[0], mesh, halo=1, interp_offsets=interp_offsets,
+            fields[0], mesh, halo=halo, interp_offsets=interp_offsets,
         )]
 
     # Use plain Python ints for split indices so JAX treats them as
@@ -743,11 +751,11 @@ def packed_pad_halo_4d(*fields, mesh, duogrid=None, interp_offsets=None):
     split_indices = np.cumsum(splits[:-1]).tolist()
     stacked = jnp.concatenate(fields, axis=-1)
     padded = explicit_pad_halo_4d(
-        stacked, mesh, halo=1, interp_offsets=interp_offsets,
+        stacked, mesh, halo=halo, interp_offsets=interp_offsets,
     )
     pieces = list(jnp.split(padded, split_indices, axis=-1))
     if duogrid is not None:
-        pieces = [_apply_duogrid_4d(p, duogrid, halo=1) for p in pieces]
+        pieces = [_apply_duogrid_4d(p, duogrid, halo=halo) for p in pieces]
     return pieces
 
 
