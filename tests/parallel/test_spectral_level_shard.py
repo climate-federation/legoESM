@@ -67,15 +67,22 @@ class TestSpectralLevelShardEquivalence:
             state = m.step(state, dt)
         return state
 
-    def test_2device_matches_1device(self):
-        _need_multi_device(2)
+    @pytest.mark.parametrize("devices", [2, 4])
+    def test_Ndevice_matches_1device(self, devices):
+        """Single-device vs N-device level-sharded spectral PE.
+
+        With nlev=8 the level axis can be split evenly across 2 or 4
+        devices.  Iter-29 extends iter-20's 2-device test to also
+        cover 4 devices.
+        """
+        _need_multi_device(devices)
         ref = self._run(devices=1)
-        out = self._run(devices=2)
+        out = self._run(devices=devices)
         for name in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
             r = getattr(ref, name).data
             o = getattr(out, name).data
             np.testing.assert_allclose(
                 np.asarray(o), np.asarray(r),
                 rtol=1e-12, atol=1e-12,
-                err_msg=f"{name} drifts under level sharding",
+                err_msg=f"{name} drifts under {devices}-device level sharding",
             )
