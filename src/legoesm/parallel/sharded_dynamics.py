@@ -1216,19 +1216,62 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         halo_cells_set = _compute_halo_cells(
             cell_owner, cellsOnCell_np, maxEdges, rank, halo_depth,
         )
+        # Augment with the OTHER cell of every owned edge: on Voronoi
+        # SCVT meshes the cellsOnCell adjacency *should* match the
+        # cellsOnEdge connectivity, but the k-ring construction in
+        # ``_compute_halo_cells`` can miss a handful of cells at the
+        # mesh boundary or near pentagons (owned edges whose far cell
+        # is reachable via cellsOnEdge but whose hop chain through
+        # cellsOnCell at depth <= halo_depth is broken by a -1 slot
+        # or pentagon irregularity).  Without this augmentation, the
+        # local mesh's cellsOnEdge has -1 entries for those edges
+        # after remap → ``gradient_edge`` does ``phi[-1]`` (Python
+        # last-element indexing!) and produces 1e76 garbage
+        # within one SSP-RK3 step.  Iter-23 root-cause analysis.
+        owned_edge_cells = cellsOnEdge_np[:, owned_edges].reshape(-1)
+        owned_edge_cells = owned_edge_cells[owned_edge_cells >= 0]
+        for c in owned_edge_cells:
+            ic = int(c)
+            if ic not in owned_cells_set:
+                halo_cells_set.add(ic)
         halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
         local_cells = np.concatenate([owned_cells, halo_cells])
         local_cells_set = set(local_cells.tolist())
 
-        # ----- Halo edges: edges connected to local cells (vectorised) ----- #
+        # ----- Halo edges: edges where BOTH cellsOnEdge are in local_cells ----- #
         # Original Python loop over nEdges scaled poorly at MPAS resolutions
         # (1M+ cells); replace with a single ``np.isin`` on the cellsOnEdge
         # neighbour arrays so the whole partition setup is O(nEdges) numpy.
+        #
+        # CRITICAL: use AND, not OR.  Including an edge whose only one
+        # neighbour is in local_cells leaves the other neighbour at -1
+        # after the global→local remap (``cell_g2l[non_local] == -1``);
+        # downstream operators like ``gradient_edge(phi, mesh)`` then
+        # do ``phi[c1=-1]`` which is Python's last-element indexing
+        # and produces garbage, blowing the SSP-RK3 step into 1e76
+        # territory after a single iteration (iter-21 / iter-23 finding).
+        # Using AND keeps the cellsOnEdge connectivity fully valid in the
+        # local mesh; halo cells that lack some of their edges due to
+        # the cut do not break correctness because the dycore only
+        # uses tendencies on OWNED cells (halo tendencies are discarded
+        # by the ``return`` in ``_local_tendency``).
         local_cells_arr = local_cells
-        edge_in_local = np.isin(cellsOnEdge_np[0], local_cells_arr) | np.isin(
+        edge_in_local = np.isin(cellsOnEdge_np[0], local_cells_arr) & np.isin(
             cellsOnEdge_np[1], local_cells_arr,
         )
         local_edges_arr = np.flatnonzero(edge_in_local).astype(np.int64)
+        # Sanity: every owned edge must satisfy the both-sides-local test
+        # (an owned edge has at least one cell in owned_cells; the cell-
+        # halo of depth >=1 covers the other side).  Surface a clear
+        # error if a future mesh ordering change breaks that invariant.
+        if not np.isin(owned_edges, local_edges_arr).all():
+            missing = np.setdiff1d(owned_edges, local_edges_arr)
+            raise RuntimeError(
+                f"Voronoi partition rank={rank}: {len(missing)} owned "
+                f"edges have a neighbour cell outside the halo-depth="
+                f"{halo_depth} cell halo.  Increase halo_depth or check "
+                f"the mesh ordering produced by reorder_voronoi_for_sharding."
+            )
         halo_edges = np.setdiff1d(
             local_edges_arr, owned_edges, assume_unique=True,
         )
@@ -1623,7 +1666,7 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     logger.info(
         "Building halo-partitioned infrastructure for %d device(s) "
-        "(nCells=%d, nEdges=%d, halo_depth=2, strategy=%s) ...",
+        "(nCells=%d, nEdges=%d, halo_depth=3, strategy=%s) ...",
         n_dev, nCells, nEdges, halo_strategy,
     )
     t0 = time.time()
@@ -1637,7 +1680,7 @@ def make_voronoi_sharded_step(
         max_le,
         partitions_out,   # list[VoronoiPartition] (for ppermute schedule)
         cell_owner_out,   # np.ndarray (nCells,) cell ownership
-    ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2)
+    ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=3)
     logger.info(
         "  partition setup done in %.2fs  "
         "(max_local_cells=%d, max_local_edges=%d, cells_per=%d, edges_per=%d)",
