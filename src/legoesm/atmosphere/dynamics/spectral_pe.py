@@ -1001,6 +1001,7 @@ class SpectralPrimitiveEquationModel:
         self._state_prev = None  # Previous time level for leapfrog
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
+        self._hyperdiff_filter_div = None  # iter-69: precomputed hf**2
         self._hyperdiff_filter_dt = None
         # Tracer filter (combined spectral + implicit hyperdiff) is
         # precomputed lazily because it depends on dt.  ``None`` means
@@ -1082,7 +1083,9 @@ class SpectralPrimitiveEquationModel:
         self._sponge_dt = dt
 
     def _ensure_hyperdiff_filter(self, dt: float):
-        """Lazily precompute implicit hyperdiffusion filter."""
+        """Lazily precompute implicit hyperdiffusion filter and the
+        ``hf**2`` divergence variant.
+        """
         if not self.config.implicit_hyperdiff or self.config.hyperdiff_coeff <= 0:
             return
         if self._hyperdiff_filter is not None and self._hyperdiff_filter_dt == dt:
@@ -1096,6 +1099,10 @@ class SpectralPrimitiveEquationModel:
         dt_eff = 2.0 * dt if 'leapfrog' in integrator else dt
         # Multiplicative filter: exp(-nu * eig * dt_eff)
         self._hyperdiff_filter = jnp.exp(-nu * eig * dt_eff)
+        # Iter-69: precompute the squared variant used for divergence
+        # (``div`` gets 2× stronger damping than ``vor`` / ``T``).
+        # Avoids the per-step ``hf ** 2`` op and broadcasts cleanly.
+        self._hyperdiff_filter_div = self._hyperdiff_filter ** 2
         self._hyperdiff_filter_dt = dt
 
     def _apply_implicit_hyperdiff(self, state):
@@ -1107,10 +1114,8 @@ class SpectralPrimitiveEquationModel:
         """
         if self._hyperdiff_filter is None:
             return state
-        hf = self._hyperdiff_filter
-        hf_3d = hf[:, None]  # (n_sh, 1) for 3D fields
-        hf_div = hf ** 2  # stronger damping for divergence
-        hf_div_3d = hf_div[:, None]
+        hf_3d = self._hyperdiff_filter[:, None]  # (n_sh, 1) for 3D fields
+        hf_div_3d = self._hyperdiff_filter_div[:, None]
         return state._replace(
             vor_hat=state.vor_hat.replace(data=state.vor_hat.data * hf_3d),
             div_hat=state.div_hat.replace(data=state.div_hat.data * hf_div_3d),
