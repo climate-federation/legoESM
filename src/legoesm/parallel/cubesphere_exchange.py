@@ -182,7 +182,7 @@ def _make_exchange_allgather(mesh, ndim):
     out_sp = P("face", *((None,) * (ndim - 1)))
 
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
-             check_rep=False)
+             check_vma=False)
     def _exchange(local_shard):
         n = local_shard.shape[1]
         my_face = local_shard[0]
@@ -250,7 +250,7 @@ def _make_exchange_ppermute(mesh, ndim):
     out_sp = P("face", *((None,) * (ndim - 1)))
 
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
-             check_rep=False)
+             check_vma=False)
     def _exchange(local_shard):
         n = local_shard.shape[1]
         my_face = local_shard[0]
@@ -489,7 +489,7 @@ def packed_pad_halo_4d(*fields, mesh, duogrid=None):
     split_indices = np.cumsum(splits[:-1]).tolist()
     stacked = jnp.concatenate(fields, axis=-1)
     padded = explicit_pad_halo_4d(stacked, mesh, halo=1)
-    pieces = list(jnp.split(padded, jnp.cumsum(jnp.array(splits[:-1])), axis=-1))
+    pieces = list(jnp.split(padded, split_indices, axis=-1))
     if duogrid is not None:
         pieces = [_apply_duogrid_4d(p, duogrid, halo=1) for p in pieces]
     return pieces

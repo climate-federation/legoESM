@@ -694,10 +694,14 @@ def _run_segment_benchmark(
     input_dtypes = jax.tree.map(
         lambda x: x.dtype if hasattr(x, "dtype") else None, carry)
 
+    # dt is captured in the closure as a Python float so dycore step
+    # methods that do `if dt == cached_dt` checks see a concrete value.
+    _dt_static = float(dt_used)
+
     @jax.jit
-    def _scan_run(c, dt_val):
+    def _scan_run(c):
         def _body(carry, _):
-            new = step_fn(carry, dt_val)
+            new = step_fn(carry, _dt_static)
             new = jax.tree.map(
                 lambda x, d: x.astype(d)
                 if d is not None and hasattr(x, "astype") else x,
@@ -707,7 +711,7 @@ def _run_segment_benchmark(
         return jax.lax.scan(_body, c, None, length=n_timing)[0]
 
     # Pre-compile scan
-    carry = _scan_run(carry, dt_used)
+    carry = _scan_run(carry)
     jax.block_until_ready(jax.tree.leaves(carry))
 
     # MPI barrier before timing
@@ -720,7 +724,7 @@ def _run_segment_benchmark(
         pass
 
     t0 = time.perf_counter()
-    carry = _scan_run(carry, dt_used)
+    carry = _scan_run(carry)
     jax.block_until_ready(jax.tree.leaves(carry))
 
     try:
@@ -1138,11 +1142,20 @@ def run_benchmark(
     input_dtypes = jax.tree.map(
         lambda x: x.dtype if hasattr(x, "dtype") else None, state)
 
-    def _make_scan_runner(n):
+    # Capture dt as a Python float in the closure rather than passing
+    # it through scan as a traced argument.  Several dycore step methods
+    # (e.g. SpectralPrimitiveEquationModel._ensure_tracer_filter, the SI
+    # matrix cache, the sponge-factor cache) do Python `==` / `if dt > 0`
+    # checks against the cached dt — those require a concrete value.
+    # Treating dt as static also lets XLA fold dt into compiled constants,
+    # which is the right behaviour for a fixed-dt benchmark.
+    _dt_static = float(dt)
+
+    def _make_scan_runner(n, dt_const):
         @jax.jit
-        def _run(st, dt_val):
+        def _run(st):
             def _body(carry, _):
-                new = step_fn(carry, dt_val)
+                new = step_fn(carry, dt_const)
                 new = jax.tree.map(
                     lambda x, d: x.astype(d)
                     if d is not None and hasattr(x, "astype") else x,
@@ -1152,10 +1165,10 @@ def run_benchmark(
             return jax.lax.scan(_body, st, None, length=n)[0]
         return _run
 
-    scan_runner = _make_scan_runner(n_timing)
+    scan_runner = _make_scan_runner(n_timing, _dt_static)
 
     # Pre-compile the scan runner
-    state = scan_runner(state, dt)
+    state = scan_runner(state)
     jax.block_until_ready(jax.tree.leaves(state))
 
     # Synchronize all ranks before timing for fair measurement
@@ -1168,7 +1181,7 @@ def run_benchmark(
         pass
 
     t0 = time.perf_counter()
-    state = scan_runner(state, dt)
+    state = scan_runner(state)
     jax.block_until_ready(jax.tree.leaves(state))
 
     # Synchronize all ranks after timing for fair measurement

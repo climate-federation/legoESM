@@ -686,7 +686,15 @@ def make_sharded_step(
     # Activate explicit SPMD halo exchange for face-sharded cubed-sphere.
     # This replaces implicit cross-shard reads with explicit all_gather
     # collectives, producing much better XLA communication patterns.
-    if (config.n_devices <= 6
+    #
+    # The SPMD shard_map kernels in ``cubesphere_exchange`` assume the
+    # local shard contains exactly one face (``local_shard[0]`` is the
+    # owned face).  That holds only when 6 faces are split evenly across
+    # 6 devices.  With 2 or 3 devices a shard contains 3 or 2 faces and
+    # the kernel silently drops the extra faces, producing broadcast
+    # mismatches downstream.  Restrict activation to the 1-face-per-device
+    # case; sub-6 device counts fall back to the default halo backend.
+    if (config.n_devices == 6
             and getattr(config, 'tiling', (1, 1)) == (1, 1)
             and "face" in getattr(config.mesh, 'axis_names', ())):
         from legoesm.parallel.cubesphere_exchange import (
@@ -1842,7 +1850,7 @@ def make_voronoi_sharded_step(
         mesh=jax_mesh,
         in_specs=(P("device"), P("device"), P("device"), P("device"), P()),
         out_specs=(P("device"), P("device"), P("device")),
-        check_rep=False,
+        check_vma=False,
     )
 
     # ------------------------------------------------------------------
