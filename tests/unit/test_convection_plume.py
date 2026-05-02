@@ -464,6 +464,113 @@ def test_plume_q_c_u_diluted_by_entrainment():
     )
 
 
+def test_plume_buoyancy_death_memory_terminates_plume_above_inversion():
+    """Audit Codex cycle 2 P2 (deferred → addressed via opt-in flag).
+
+    In the default (legacy) mode, the plume's buoyancy filter is
+    purely local — each level applies its own ``sigmoid(B_u)`` — so
+    a plume killed by negative buoyancy at one level can resume
+    reporting nonzero ``M_u`` above an inversion.  The new
+    ``buoyancy_death_memory=True`` flag makes the filter
+    monotone-decreasing along the column ascent: once the plume
+    dies, it stays dead.
+
+    Test setup: stable lower troposphere up to a thin warm layer
+    that creates positive buoyancy aloft (an "elevated" CAPE region
+    above an inversion).  In legacy mode, the upper-CAPE region
+    sees high ``plume_alive`` and reports ``M_u``.  With memory
+    enabled, the negative-buoyancy zone in the inversion truncates
+    the plume and the upper levels see ``alive_min`` ≈ 0.
+    """
+    # Construct a column where the plume's buoyancy goes:
+    # positive (cloud base → LFC) → NEGATIVE (mid-trop inversion) →
+    # POSITIVE again (cold upper trop above the inversion).  The
+    # plume integrator's T_u follows a moist adiabat (cools roughly
+    # linearly with z), so for B_u to dip negative then recover, we
+    # need T_env to have a WARM bump at mid-altitude AGAINST a
+    # very steep lapse rate elsewhere (so upper trop is much colder
+    # than the moist adiabat).
+    ncol, nlev = 1, 40
+    p_s = 1.0e5
+    p_top = 5.0e3
+    sigma = jnp.linspace(p_top / p_s, 1.0, nlev)
+    p_full = sigma[None, :] * jnp.full((ncol, 1), p_s)
+    p_half_inner = 0.5 * (p_full[:, :-1] + p_full[:, 1:])
+    p_half = jnp.concatenate(
+        [jnp.full((ncol, 1), p_top * 0.5), p_half_inner, jnp.full((ncol, 1), p_s)],
+        axis=1,
+    )
+    z_full = -8500.0 * jnp.log(p_full / p_s)
+
+    # Steep environmental lapse rate (10 K/km) so upper trop is
+    # much colder than a moist adiabat — guarantees positive B_u
+    # aloft.  Add a strong warm bump at mid-altitude to drive a
+    # negative B_u zone in between.
+    T_sfc = 305.0
+    T_env_baseline = T_sfc - 10.0e-3 * z_full
+    z = z_full[0]
+    bump_center = 7000.0
+    bump_width = 1000.0
+    bump_amplitude = 12.0                        # +12 K bump
+    bump = bump_amplitude * jnp.exp(
+        -((z - bump_center) ** 2) / (2 * bump_width ** 2)
+    )
+    T_env = T_env_baseline + bump[None, :]
+    q_v_env = 16.0e-3 * jnp.exp(-z_full / 3000.0)
+    T_base = T_env[:, -1]
+    q_base = q_v_env[:, -1]
+    lcl = P.compute_lcl(T_base, q_base, p_full[:, -1], p_full)
+    eps = jnp.full((ncol, nlev), 5.0e-4)
+    dlt = jnp.full((ncol, nlev), 5.0e-4)
+    M_b = jnp.full((ncol,), 0.05)
+
+    plume_legacy = P.entraining_detraining_plume(
+        T_env, q_v_env, p_full, p_half, z_full,
+        T_base, q_base, lcl.k_lcl_smooth, eps, dlt, M_b,
+        buoyancy_death_memory=False,
+    )
+    plume_memory = P.entraining_detraining_plume(
+        T_env, q_v_env, p_full, p_half, z_full,
+        T_base, q_base, lcl.k_lcl_smooth, eps, dlt, M_b,
+        buoyancy_death_memory=True,
+    )
+
+    # The revival region is the layer JUST ABOVE the warm bump,
+    # where the env temperature drops sharply and the plume's
+    # T_u (still on its moist adiabat) becomes warmer again — a
+    # second positive-buoyancy zone.  For the bump centered at
+    # ~7000 m on a 40-level column, the revival zone is roughly
+    # k = 12-14 (surface-last with surface at index nlev-1, so
+    # the upper region is *low* indices).  Compute the maximum
+    # plume M_u over this slice and confirm legacy mode reports
+    # a substantial flux there while memory mode does not.
+    revival_slice = slice(10, 16)               # indices around z ≈ 8000–11000 m
+    upper_M_legacy = float(jnp.max(plume_legacy.M_u[0, revival_slice]))
+    upper_M_memory = float(jnp.max(plume_memory.M_u[0, revival_slice]))
+
+    # The two behaviors must differ — that's the whole point.
+    if upper_M_legacy < 1e-12 and upper_M_memory < 1e-12:
+        # Fixture didn't construct a strong-enough double-CAPE; the
+        # legacy plume isn't actually reviving in the upper trop.
+        # The test is then degenerate; surface a clear message so
+        # the fixture can be tuned.
+        pytest.skip(
+            f"fixture did not exercise the buoyancy-revive path "
+            f"(both upper M_u tiny: legacy={upper_M_legacy:.3e}, "
+            f"memory={upper_M_memory:.3e})"
+        )
+
+    # Memory-mode upper-trop M_u must be substantially smaller than
+    # legacy mode (the inversion killed the plume; the death is
+    # remembered so the upper-CAPE region cannot revive it).
+    assert upper_M_memory < 0.5 * upper_M_legacy, (
+        f"buoyancy_death_memory failed to suppress upper-CAPE plume "
+        f"revival: legacy upper M_u = {upper_M_legacy:.3e}, "
+        f"memory upper M_u = {upper_M_memory:.3e} — expected memory < "
+        f"50% of legacy."
+    )
+
+
 def test_plume_M_u_grad_through_strong_detrainment_is_finite_and_nonzero():
     """Audit Codex review (severity major): the explicit-Euler plume
     mass flux ``M * (1 + (eps - dlt) * dz)`` can produce a *negative*

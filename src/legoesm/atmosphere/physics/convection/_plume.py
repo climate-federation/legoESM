@@ -393,6 +393,7 @@ def entraining_detraining_plume(
     M_b: jax.Array,
     *,
     buoyancy_sharpness: float = 0.5,
+    buoyancy_death_memory: bool = False,
 ) -> Plume:
     """Bulk entraining-detraining updraft from cloud base to LNB.
 
@@ -445,6 +446,20 @@ def entraining_detraining_plume(
         [1/K].  Default ``0.5`` per Kelvin of buoyancy means the
         plume is at half mass flux when ``T_u - T_env`` reaches the
         modest negative value of about ``-1.4 K``.
+    buoyancy_death_memory : bool
+        Whether the buoyancy-tapering filter is *monotone-decreasing*
+        along the upward integration.  Default ``False`` (legacy
+        local filter): each level applies its own ``sigmoid(B_u)``
+        independently — a plume that is killed by negative buoyancy
+        at one level can resume reporting nonzero ``M_u`` above an
+        inversion, which can be physically inappropriate for
+        single-plume schemes (audit Codex cycle 2 P2: "plume
+        terminated by negative buoyancy can revive above an
+        inversion").  When ``True``, the filter takes the cumulative
+        minimum along the column ascent, so once the plume dies it
+        stays dead — the standard behavior of e.g. Kain-Fritsch.
+        Off by default to preserve numerics for existing schemes;
+        opt in by passing ``True`` from the calling scheme.
 
     Returns
     -------
@@ -483,13 +498,19 @@ def entraining_detraining_plume(
     # Initial plume state at the surface-first index 0 (which is the
     # actual surface).  We launch with the parcel values; the
     # ``above_base_weight`` mask will suppress mass flux below cloud
-    # base.  All carry components are pinned to ``_dtype``.
+    # base.  All carry components are pinned to ``_dtype``.  The
+    # ``alive_min`` slot starts at 1 (plume fully alive) and only
+    # ratchets down via cumulative ``min`` when ``buoyancy_death_
+    # memory`` is enabled — see step body for the off path.
     init_carry = (
         T_parcel_base.astype(_dtype),                       # T_u_prev
         q_parcel_base.astype(_dtype),                       # q_u_prev
         jnp.zeros_like(T_parcel_base, dtype=_dtype),        # q_c_u_prev
         M_b.astype(_dtype),                                 # M_u_prev
         z_full_rev[:, 0],                                   # z_prev (already cast)
+        jnp.ones_like(T_parcel_base, dtype=_dtype),         # alive_min (carries
+                                                             # cumulative min of plume_alive
+                                                             # when buoyancy_death_memory)
     )
 
     # Per-level inputs to the scan.  Transpose to (nlev, ncol).
@@ -508,7 +529,7 @@ def entraining_detraining_plume(
     L_v = constants.L_v
 
     def step(carry, layer_inputs):
-        T_u_prev, q_u_prev, q_c_u_prev, M_u_raw_prev, z_prev = carry
+        T_u_prev, q_u_prev, q_c_u_prev, M_u_raw_prev, z_prev, alive_min_prev = carry
         T_e, q_e, p_e, z_e, eps, dlt, abv = layer_inputs
 
         dz = jnp.maximum(z_e - z_prev, 1.0)  # ascending; floor to avoid div-by-zero
@@ -602,11 +623,32 @@ def entraining_detraining_plume(
 
         # Reporting filters: smoothly suppress the mass flux below
         # cloud base (``abv``) and where the plume has lost buoyancy
-        # (``plume_alive``).  These do NOT enter the carry.
-        plume_alive = jax.nn.sigmoid(buoyancy_sharpness * B_u)
-        M_u_reported = M_u_raw * plume_alive * abv
+        # (``plume_alive``).
+        #
+        # When ``buoyancy_death_memory`` is False (default), the
+        # filter is purely local: each level applies its own
+        # sigmoid(B_u), so a plume killed by an inversion can revive
+        # above it.  The carry does NOT track the filter; this
+        # preserves the cloud-base-to-LNB profile shape that
+        # consumers like ZM/Tiedtke depend on.
+        #
+        # When True, ``alive_min`` carries the cumulative minimum
+        # of plume_alive seen so far — once buoyancy dies, the
+        # filter stays low through every level above (Codex audit
+        # cycle 2 P2: "plume terminated by negative buoyancy can
+        # revive above an inversion").  Schemes that opt in get
+        # monotone single-plume termination.
+        plume_alive_local = jax.nn.sigmoid(buoyancy_sharpness * B_u)
+        if buoyancy_death_memory:
+            alive_min_new = jnp.minimum(alive_min_prev, plume_alive_local)
+        else:
+            alive_min_new = jnp.ones_like(alive_min_prev)
+        plume_alive_filter = (
+            alive_min_new if buoyancy_death_memory else plume_alive_local
+        )
+        M_u_reported = M_u_raw * plume_alive_filter * abv
 
-        new_carry = (T_u, q_u, q_c_u, M_u_raw, z_e)
+        new_carry = (T_u, q_u, q_c_u, M_u_raw, z_e, alive_min_new)
         outputs = (T_u, q_u, q_c_u, M_u_reported, B_u)
         return new_carry, outputs
 

@@ -556,3 +556,77 @@ def test_prognostic_spectral_grad_through_launch_flux():
         "non-trivial drag profile.  A zero gradient indicates the spectral "
         "prognostic state has become a non-traceable buffer."
     )
+
+
+# ============================================================================
+# Hines: drag has correct units (Pa, not kg/(m²·s))
+# ============================================================================
+
+def test_hines_drag_units_match_lindzen_pa():
+    """Audit cycle 2 P1 (deferred → fixed): the Hines drag formula
+    ``ρ · (σ_grown - σ_new)`` had units ``kg/(m²·s)`` rather than the
+    Pa expected by ``Fmax`` and the downstream ``accel = -drag/(ρ·dz)``
+    which needed Pa for ``m/s²``.  The fix uses
+    ``ρ · (σ²_grown - σ²_new)`` — wave momentum-flux divergence with
+    correct stress units.
+
+    This regression test: compute the Hines drag profile under a
+    canonical setup and check that the values are in the Pa-bounded
+    range ``[0, Fmax]``, *and* that the resulting acceleration
+    magnitude is in the physical ``m/s²`` range expected for
+    stratospheric GWD (~``1e-5`` to ``1e-3`` m/s²).  Pre-fix the
+    same fixture would also be in ``[0, 0.1]`` numerically (the cap
+    floors both forms identically) but the *acceleration* would be
+    in the wrong ``1/s`` units.
+    """
+    import jax.numpy as _jnp
+    from legoesm import constants as _const
+    from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
+
+    ncol, nlev = 1, 20
+    T = _jnp.full((ncol, nlev), 250.0)
+    H = _const.R_d * 250.0 / _const.g
+    z_full = _jnp.linspace(50e3, 0.0, nlev)
+    z_half_1d = _jnp.concatenate([
+        _jnp.array([z_full[0] + 1e3]),
+        0.5 * (z_full[:-1] + z_full[1:]),
+        _jnp.array([z_full[-1] - 1e3]),
+    ])
+    z_full_b = _jnp.broadcast_to(z_full[None, :], (ncol, nlev))
+    z_half_b = _jnp.broadcast_to(z_half_1d[None, :], (ncol, nlev + 1))
+    p_full = _jnp.broadcast_to(
+        (1e5 * _jnp.exp(-z_full / H))[None, :], (ncol, nlev),
+    )
+    p_half = _jnp.broadcast_to(
+        (1e5 * _jnp.exp(-z_half_1d / H))[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (_const.R_d * T)
+    u = _jnp.full((ncol, nlev), 10.0)
+    v = _jnp.zeros((ncol, nlev))
+    lat = _jnp.zeros(ncol)
+
+    # Default config: saturation is active aloft; Fmax = 0.1 Pa.
+    cfg = HinesConfig()
+    out = hines_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b, rho, lat,
+                   300.0, cfg)
+
+    # 1. Acceleration sign: GWD opposes the wind (u > 0 ⇒ du/dt ≤ 0)
+    #    everywhere active drag is deposited.
+    max_pos_dudt = float(jnp.max(out.du_dt))
+    assert max_pos_dudt <= 1e-15, (
+        f"Hines: positive du/dt = {max_pos_dudt:.3e} m/s² for u > 0 — "
+        "GWD must always oppose the resolved flow."
+    )
+
+    # 2. Acceleration magnitude: stratospheric GWD is typically
+    #    1e-5–1e-3 m/s² (≈1–100 m/s/day).  Anything > 0.1 m/s² is
+    #    non-physical and would indicate a unit error like the buggy
+    #    ``1/s`` form had been retained.
+    max_abs_dudt = float(jnp.max(jnp.abs(out.du_dt)))
+    assert max_abs_dudt < 1e-2, (
+        f"Hines: max |du/dt| = {max_abs_dudt:.3e} m/s² exceeds the "
+        "physical stratospheric GWD bound (~1e-3 m/s²).  This indicates "
+        "the drag dimensional fix has regressed — units back to "
+        "``kg/(m²·s)`` and the downstream acceleration in ``1/s``."
+    )

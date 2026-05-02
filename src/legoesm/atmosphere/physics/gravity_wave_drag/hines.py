@@ -117,14 +117,26 @@ def hines_gwd(
         )
         sigma_new = sigma_grown * (1.0 - f_diss) + sigma_sat[:, k] * f_diss
 
-        # Momentum deposited: rho * (sigma_grown - sigma_new) ~ stress gradient.
-        # Clamp the lower bound to zero: the smooth ``f_diss`` sigmoid does
-        # not vanish exactly when ``sigma_grown < sigma_sat``, so without
-        # the floor a small "anti-drag" leak can appear in the transition
-        # region (``sigma_new`` slightly larger than ``sigma_grown`` ⇒ drag
-        # negative ⇒ accel positive ⇒ wave accelerates the resolved flow).
-        # GWD on the mean flow is always a momentum sink, never a source.
-        drag = (sigma_grown - sigma_new) * rho[:, k]
+        # Momentum deposited: ``ΔF = ρ · (σ²_grown - σ²_new)`` [Pa] — this
+        # is the wave momentum-flux divergence between two levels of the
+        # WKB-grown wave, where ``F = ρ · <u'w'> ∝ ρ · σ²`` for an
+        # upward-propagating gravity wave.  Acceleration of the mean
+        # flow is then ``-ΔF / (ρ·dz)`` [m/s²].
+        #
+        # An earlier formulation used ``ρ · (σ_grown - σ_new)``, which
+        # has units ``kg/(m²·s)`` rather than Pa, so the downstream
+        # ``accel = drag / (ρ·dz)`` came out as ``1/s`` rather than
+        # ``m/s²`` (audit cycle 2 P1: "Hines drag dimensional
+        # inconsistency").  Operationally the two forms gave near-
+        # identical drag because Fmax saturates the upper levels in
+        # both, but they differ by a factor of ``σ_grown + σ_new``
+        # (typically 2-4×) in the sub-saturation troposphere.
+        #
+        # Clamp the lower bound to zero: the smooth ``f_diss`` sigmoid
+        # does not vanish exactly when ``sigma_grown < sigma_sat``, so
+        # without the floor a small "anti-drag" leak can appear in the
+        # transition region.  GWD on the mean flow is always a sink.
+        drag = (sigma_grown ** 2 - sigma_new ** 2) * rho[:, k]
         drag = jnp.clip(drag, 0.0, config.Fmax)
 
         return sigma_new, drag
