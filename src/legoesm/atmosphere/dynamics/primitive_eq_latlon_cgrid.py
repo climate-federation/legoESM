@@ -81,6 +81,11 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.conservation import (
+    zero_mean_tendency,
+    _accumulation_dtype,
+    _batch_global_area_sums,
+)
 from legoesm import constants
 
 
@@ -347,7 +352,6 @@ def cgrid_latlon_hydrostatic_tendencies(
     # When fix_mass=True the mass fixer already corrects the global integral,
     # and applying both creates a double-correction artifact.
     if config.zero_mean_ps_tendency and not config.fix_mass:
-        from legoesm.core.conservation import zero_mean_tendency
         dp_s_dt = zero_mean_tendency(dp_s_dt, grid)
 
     # --- 10. Vertical advection ---
@@ -604,7 +608,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
     def compute_mass(self, state: CGridLatLonHydrostaticState) -> jax.Array:
         """Compute total mass (for conservation fixer target)."""
-        from legoesm.core.conservation import _accumulation_dtype
         acc = _accumulation_dtype()
         return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
 
@@ -735,9 +738,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         # Conservation fixer for mass
         if self.config.fix_mass:
-            from legoesm.core.conservation import (
-                _accumulation_dtype, _batch_global_area_sums,
-            )
             acc = _accumulation_dtype()
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one
