@@ -58,6 +58,13 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.semi_implicit import (
+    precompute_si_matrices,
+    ssp_rk3_step_si,
+    euler_si_step,
+    leapfrog_si_step,
+    robert_asselin_filter,
+)
 from legoesm import constants
 
 _LNPS_MIN = float(jnp.log(100.0))
@@ -1051,7 +1058,6 @@ class SpectralPrimitiveEquationModel:
         if not self.config.semi_implicit:
             return
 
-        from legoesm.timestepping.semi_implicit import precompute_si_matrices
 
         dt_si = float(dt) / float(self.config.si_substeps)
         if self._si_data is None or self._si_dt != dt_si:
@@ -1194,8 +1200,6 @@ class SpectralPrimitiveEquationModel:
 
     def _ensure_si_data_leapfrog(self, dt: float):
         """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""
-        from legoesm.timestepping.semi_implicit import precompute_si_matrices
-
         dt_eff = 2.0 * float(dt)
         if self._si_data_lf is None or self._si_dt_lf != dt_eff:
             self._si_data_lf = precompute_si_matrices(
@@ -1213,7 +1217,6 @@ class SpectralPrimitiveEquationModel:
     def _do_step(self, state, dt, tendency_fn):
         """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge."""
         if self.config.semi_implicit:
-            from legoesm.timestepping.semi_implicit import ssp_rk3_step_si
             n_substeps = int(self.config.si_substeps)
             dt_si = dt / float(n_substeps)
 
@@ -1310,7 +1313,6 @@ class SpectralPrimitiveEquationModel:
             # Robert-Asselin filter on time-n state
             gamma = self.config.robert_asselin_coeff
             if gamma > 0:
-                from legoesm.timestepping.semi_implicit import robert_asselin_filter
                 state_n_filtered, state_np1_filtered = robert_asselin_filter(
                     self._state_prev, state, state_np1, gamma,
                 )
@@ -1344,7 +1346,6 @@ class SpectralPrimitiveEquationModel:
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
-        from legoesm.timestepping.semi_implicit import euler_si_step
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
     @partial(jax.jit, static_argnums=(0, 3, 4))
@@ -1358,7 +1359,6 @@ class SpectralPrimitiveEquationModel:
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
-        from legoesm.timestepping.semi_implicit import leapfrog_si_step
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
