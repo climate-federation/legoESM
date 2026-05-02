@@ -7,6 +7,19 @@ This module provides `saturation_mixing_ratio` and
 atmosphere physics package.
 
 All operations are pure JAX and compatible with jit, grad, vmap, scan.
+
+Conventions — water-vapor mass variables
+----------------------------------------
+This module returns the **mixing ratio** ``r_sat = ε e_sat / (p - e_sat)``
+(mass of water vapor per unit mass of *dry* air).  Throughout the
+``atmosphere/physics`` source tree the prognostic field is named
+``q_v`` and many docstrings call it "specific humidity".  In the
+typical atmospheric regime where ``e_sat ≪ p``, mixing ratio and
+specific humidity differ by ``q ≈ r / (1 + r)`` — about 1% for
+``r = 0.01``.  The codebase uses these interchangeably; physics that
+needs the distinction (vertical-flux conservation in saturated tropical
+columns, q_c bookkeeping) should read this caveat carefully and
+convert explicitly when the 1% drift matters.
 """
 
 from __future__ import annotations

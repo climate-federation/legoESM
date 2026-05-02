@@ -110,7 +110,11 @@ class RadiativeTransfer(dataclasses_json.DataClassJsonMixin):
   # every step.
   apply_cadence_seconds: float = 0.0
   # If True, use jax.lax.scan instead of for loop for scanning through an array.
-  use_scan: bool = False
+  # ``None`` (the default) auto-selects: scan on GPU/TPU where ``lax.scan``
+  # lowers to a single fused kernel that beats the ``nlev`` separate
+  # ``dynamic_update_slice`` ops the unrolled path emits; loop on CPU/Metal
+  # where the unrolled path historically benchmarked better.
+  use_scan: bool | None = None
 
   # ******** Output options ********
   # If True, save the longwave and shortwave heating rates individually in the

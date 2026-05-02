@@ -26,6 +26,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo, pad_halo_4d
 
@@ -424,7 +425,7 @@ def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
     -------
     u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    from legoesm.grids.halo import pad_halo_vector
+    from legoesm.grids.halo import pad_halo_vector, pad_halo_vector_4d
 
     grid = cdgrid.base
     dg = grid.duogrid
@@ -442,16 +443,21 @@ def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
                        + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
         return u_d, v_d
 
-    # 3D: vmap over levels
-    u_t = jnp.moveaxis(u_cc, -1, 0)
-    v_t = jnp.moveaxis(v_cc, -1, 0)
-
-    def convert_one(args):
-        uk, vk = args
-        return center_to_dgrid_vector(uk, vk, cdgrid)
-
-    u_d_t, v_d_t = jax.vmap(convert_one)((u_t, v_t))
-    return jnp.moveaxis(u_d_t, 0, -1), jnp.moveaxis(v_d_t, 0, -1)
+    # 4D: native single-message vector halo via pad_halo_vector_4d.
+    # Replaces nlev separate ``pad_halo_vector`` MPI calls under the
+    # previous per-level vmap.  4-point averaging then proceeds on axes
+    # 1, 2 (i, j), with the trailing nlev axis carried through passively.
+    u_pad, v_pad = pad_halo_vector_4d(
+        u_cc, v_cc,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=offsets, duogrid=dg,
+    )
+    u_d = 0.25 * (u_pad[:, :-1, :-1, :] + u_pad[:, 1:, :-1, :]
+                   + u_pad[:, :-1, 1:, :] + u_pad[:, 1:, 1:, :])
+    v_d = 0.25 * (v_pad[:, :-1, :-1, :] + v_pad[:, 1:, :-1, :]
+                   + v_pad[:, :-1, 1:, :] + v_pad[:, 1:, 1:, :])
+    return u_d, v_d
 
 
 def dgrid_to_center_vector(u_d, v_d):
@@ -662,6 +668,42 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 
 
 # ==============================================================================
+# C-grid compact gradient (cell centre → edge midpoints)
+# ==============================================================================
+
+def cgrid_gradient_2d(eta, cdgrid):
+    """Compact C-grid gradient of a cell-centre scalar to edge midpoints.
+
+    Uses single-cell differences scaled by centre-to-centre distances
+    (``dxc``, ``dyc``), matching the FV3 Bernoulli gradient stencil.
+
+    Parameters
+    ----------
+    eta : jax.Array, shape (6, n, n)
+        Cell-centre scalar (e.g. free-surface height).
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    deta_dx : jax.Array, shape (6, n+1, n)
+        Gradient at x-edge (u) midpoints.
+    deta_dy : jax.Array, shape (6, n, n+1)
+        Gradient at y-edge (v) midpoints.
+    """
+    eta_pad = _pad_halo_auto(eta, cdgrid)
+    # eta_pad shape: (6, n+2, n+2)  (1-cell halo on each side)
+
+    # x-gradient at u-points: (eta[i,j] - eta[i-1,j]) / dxc
+    # In padded coords: interior is [1:-1, 1:-1], so u-faces run 0..n
+    deta_dx = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * cdgrid.rdxc
+
+    # y-gradient at v-points: (eta[i,j] - eta[i,j-1]) / dyc
+    deta_dy = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * cdgrid.rdyc
+
+    return deta_dx, deta_dy
+
+
+# ==============================================================================
 # C-grid mass flux with PPM transport
 # ==============================================================================
 
@@ -807,7 +849,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
 # ==============================================================================
 
 def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
-    """Compute FCT-limited tracer fluxes on the C-D grid (2D only).
+    """Compute FCT-limited tracer fluxes on the C-D grid.
 
     Uses a two-stage approach for monotone transport:
 
@@ -825,20 +867,24 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
        aspect — even if each 1D face value is bounded, the combined
        x + y update can still overshoot.
 
+    Accepts both 2D ``(6, n, n)`` and 3D ``(6, n, n, nlev)`` tracers.
+    The 4D path moves ``nlev`` to the leading position so the spatial
+    slicing operates on axes ``-2, -1`` regardless of rank, and the
+    halo pad runs once for all levels via ``pad_halo_4d`` /
+    ``pad_halo_4d_h2`` (single MPI exchange).  Replaces the prior
+    per-level ``vmap`` dispatcher in :func:`cgrid_tracer_advection_fct`
+    that issued ``nlev`` separate halo exchanges.
+
     Parameters
     ----------
-    q : jax.Array, shape (6, n, n)
-        Tracer at cell centres.
-    u_c : jax.Array, shape (6, n+1, n)
-        C-grid x-velocity at x-faces.
-    v_c : jax.Array, shape (6, n, n+1)
-        C-grid y-velocity at y-faces.
+    q : jax.Array, shape (6, n, n) or (6, n, n, nlev)
+    u_c : jax.Array, shape (6, n+1, n[, nlev])
+    v_c : jax.Array, shape (6, n, n+1[, nlev])
     cdgrid : CubedSphereCDGrid
 
     Returns
     -------
-    dq_dt : jax.Array, shape (6, n, n)
-        Monotone advective tendency.
+    dq_dt : jax.Array, shape matching ``q``.
 
     References
     ----------
@@ -851,25 +897,47 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     dy = cdgrid.dy_edge_x     # (6, n+1, n)
     dx = cdgrid.dx_edge_y     # (6, n, n+1)
 
-    # Halo-padded field for neighbour lookups (halo=1)
-    q_pad = _pad_halo_auto(q, cdgrid)  # (6, n+2, n+2)
+    # Halo-padded fields (halo=1 for upwind / min-max stencil, halo=2 for PPM).
+    # ``_pad_halo_auto*`` already dispatch on ``q.ndim`` so 4D inputs use
+    # ``pad_halo_4d`` (one MPI message for all levels).
+    q_pad_full = _pad_halo_auto(q, cdgrid)        # (6, n+2, n+2[, nlev])
+    q_pad_h2_full = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4[, nlev])
+
+    # For 4D inputs we move ``nlev`` to the leading position so that the
+    # rest of the body's spatial slicing — written with ``[..., ...]``
+    # prefixes — operates on the same trailing ``(i, j)`` axes regardless
+    # of rank.  This also keeps ``_ppm_reconstruct_1d`` (axis -1) acting on
+    # the correct PPM axis (j with halo, n with halo stripped).
+    is_4d = q.ndim == 4
+    if is_4d:
+        q_t = jnp.moveaxis(q, -1, 0)
+        q_pad = jnp.moveaxis(q_pad_full, -1, 0)
+        q_pad_h2 = jnp.moveaxis(q_pad_h2_full, -1, 0)
+        u_c_t = jnp.moveaxis(u_c, -1, 0)
+        v_c_t = jnp.moveaxis(v_c, -1, 0)
+    else:
+        q_t = q
+        q_pad = q_pad_full
+        q_pad_h2 = q_pad_h2_full
+        u_c_t = u_c
+        v_c_t = v_c
 
     # ----------------------------------------------------------------
     # Step 1: First-order upwind fluxes (inherently monotone for CFL<1)
     # ----------------------------------------------------------------
-    q_left_x = q_pad[:, :-1, 1:-1]    # (6, n+1, n)
-    q_right_x = q_pad[:, 1:, 1:-1]    # (6, n+1, n)
-    q_face_low_x = jnp.where(u_c > 0, q_left_x, q_right_x)
+    q_left_x = q_pad[..., :-1, 1:-1]
+    q_right_x = q_pad[..., 1:, 1:-1]
+    q_face_low_x = jnp.where(u_c_t > 0, q_left_x, q_right_x)
 
-    q_below_y = q_pad[:, 1:-1, :-1]   # (6, n, n+1)
-    q_above_y = q_pad[:, 1:-1, 1:]    # (6, n, n+1)
-    q_face_low_y = jnp.where(v_c > 0, q_below_y, q_above_y)
+    q_below_y = q_pad[..., 1:-1, :-1]
+    q_above_y = q_pad[..., 1:-1, 1:]
+    q_face_low_y = jnp.where(v_c_t > 0, q_below_y, q_above_y)
 
-    flux_low_x = q_face_low_x * u_c * dy
-    flux_low_y = q_face_low_y * v_c * dx
+    flux_low_x = q_face_low_x * u_c_t * dy
+    flux_low_y = q_face_low_y * v_c_t * dx
 
-    net_low_x = flux_low_x[:, 1:] - flux_low_x[:, :-1]
-    net_low_y = flux_low_y[:, :, 1:] - flux_low_y[:, :, :-1]
+    net_low_x = flux_low_x[..., 1:, :] - flux_low_x[..., :-1, :]
+    net_low_y = flux_low_y[..., 1:] - flux_low_y[..., :-1]
     dq_low = -(net_low_x + net_low_y) / area
 
     # ----------------------------------------------------------------
@@ -904,11 +972,11 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     q_face_max_y = jnp.maximum(q_below_y, q_above_y)
     q_face_hi_y = jnp.clip(q_face_hi_y, q_face_min_y, q_face_max_y)
 
-    flux_hi_x = q_face_hi_x * u_c * dy
-    flux_hi_y = q_face_hi_y * v_c * dx
+    flux_hi_x = q_face_hi_x * u_c_t * dy
+    flux_hi_y = q_face_hi_y * v_c_t * dx
 
-    net_hi_x = flux_hi_x[:, 1:] - flux_hi_x[:, :-1]
-    net_hi_y = flux_hi_y[:, :, 1:] - flux_hi_y[:, :, :-1]
+    net_hi_x = flux_hi_x[..., 1:, :] - flux_hi_x[..., :-1, :]
+    net_hi_y = flux_hi_y[..., 1:] - flux_hi_y[..., :-1]
     dq_hi = -(net_hi_x + net_hi_y) / area
 
     # ----------------------------------------------------------------
@@ -925,22 +993,22 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     ad = dq_hi - dq_low  # anti-diffusive tendency
 
     # Local min/max including all face-adjacent neighbours
-    q_min = q
-    q_max = q
-    q_min = jnp.minimum(q_min, q_pad[:, :-2, 1:-1])   # west
-    q_min = jnp.minimum(q_min, q_pad[:, 2:, 1:-1])    # east
-    q_min = jnp.minimum(q_min, q_pad[:, 1:-1, :-2])   # south
-    q_min = jnp.minimum(q_min, q_pad[:, 1:-1, 2:])    # north
-    q_max = jnp.maximum(q_max, q_pad[:, :-2, 1:-1])
-    q_max = jnp.maximum(q_max, q_pad[:, 2:, 1:-1])
-    q_max = jnp.maximum(q_max, q_pad[:, 1:-1, :-2])
-    q_max = jnp.maximum(q_max, q_pad[:, 1:-1, 2:])
+    q_min = q_t
+    q_max = q_t
+    q_min = jnp.minimum(q_min, q_pad[..., :-2, 1:-1])   # west
+    q_min = jnp.minimum(q_min, q_pad[..., 2:, 1:-1])    # east
+    q_min = jnp.minimum(q_min, q_pad[..., 1:-1, :-2])   # south
+    q_min = jnp.minimum(q_min, q_pad[..., 1:-1, 2:])    # north
+    q_max = jnp.maximum(q_max, q_pad[..., :-2, 1:-1])
+    q_max = jnp.maximum(q_max, q_pad[..., 2:, 1:-1])
+    q_max = jnp.maximum(q_max, q_pad[..., 1:-1, :-2])
+    q_max = jnp.maximum(q_max, q_pad[..., 1:-1, 2:])
 
     # How much room does the low-order update leave?
     # After applying dq_low, q would be at q + dq_low (for unit "dt").
     # We allow the anti-diffusive part to bring it to at most q_max
     # and at least q_min.
-    q_td = q + dq_low   # provisional (unit-step low-order update)
+    q_td = q_t + dq_low   # provisional (unit-step low-order update)
 
     room_up = q_max - q_td     # how much we can still increase
     room_dn = q_td - q_min     # how much we can still decrease
@@ -969,7 +1037,10 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     )
     alpha = jnp.clip(alpha, 0.0, 1.0)
 
-    return dq_low + alpha * ad
+    result = dq_low + alpha * ad
+    if is_4d:
+        return jnp.moveaxis(result, 0, -1)
+    return result
 
 
 def _make_fct_2d_differentiable(cdgrid):
@@ -1022,7 +1093,13 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
     - Differentiable (custom JVP linearizes through unlimited PPM)
     - JAX-compatible (pure array operations, no Python control flow)
 
-    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
+    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.  The 4D
+    path runs ``_cgrid_fct_fluxes_2d`` natively on the 4D field — a
+    single ``pad_halo_4d`` MPI exchange across all levels — replacing
+    the prior per-level ``vmap`` that issued ``nlev`` separate halo
+    exchanges.  ``cgrid_mass_flux_divergence`` (used in the JVP path of
+    ``_make_fct_2d_differentiable``) is already 4D-native, so the
+    differentiable ``custom_jvp`` wrapper composes cleanly.
 
     Parameters
     ----------
@@ -1040,20 +1117,6 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
         Monotone tracer advection tendency.
     """
     fct_fn = _make_fct_2d_differentiable(cdgrid)
-
-    if q.ndim == 4:
-        # 3D: vmap over levels
-        q_t = jnp.moveaxis(q, -1, 0)
-        u_c_t = jnp.moveaxis(u_c, -1, 0)
-        v_c_t = jnp.moveaxis(v_c, -1, 0)
-
-        def fct_one(args):
-            qk, uk, vk = args
-            return fct_fn(qk, uk, vk)
-
-        result_t = jax.vmap(fct_one)((q_t, u_c_t, v_c_t))
-        return jnp.moveaxis(result_t, 0, -1)
-
     return fct_fn(q, u_c, v_c)
 
 
@@ -1385,8 +1448,14 @@ def _laplacian_dgrid(u_d, cdgrid):
     cell-centre Laplacian (which uses proper inter-face halo exchange),
     then interpolates back to D-grid corners.
 
-    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
-    For 3D, applies the Laplacian level-by-level.
+    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
+    The 3D path uses ``laplacian_compact_3d`` so the cell-centre halo
+    exchange is shared across all vertical levels in a single
+    ``pad_halo_4d`` collective — replaces the previous
+    ``moveaxis + jax.vmap + moveaxis`` dance that issued ``nlev``
+    separate halo calls.  ``_interp_corner_to_center`` and
+    ``_interp_center_to_corner`` are already 4D-native, so the whole
+    operator is batched with no per-level Python loop.
 
     Parameters
     ----------
@@ -1396,23 +1465,20 @@ def _laplacian_dgrid(u_d, cdgrid):
     -------
     jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    if u_d.ndim == 4:
-        u_t = jnp.moveaxis(u_d, -1, 0)
-
-        def lap_one(uk):
-            return _laplacian_dgrid(uk, cdgrid)
-
-        result = jax.vmap(lap_one)(u_t)
-        return jnp.moveaxis(result, 0, -1)
-
-    # 1. D-grid -> cell centres: (6, n+1, n+1) -> (6, n, n)
+    # 1. D-grid -> cell centres: (6, n+1, n+1[, nlev]) -> (6, n, n[, nlev])
     u_cc = _interp_corner_to_center(u_d)
 
-    # 2. Cell-centre Laplacian with proper halo exchange
-    from legoesm.core.operators import laplacian_compact
-    lap_a = laplacian_compact(u_cc, cdgrid.base)  # (6, n, n)
+    # 2. Cell-centre Laplacian with proper halo exchange.  Use the
+    # native-4D variant on 3D inputs so all levels share one
+    # ``pad_halo_4d`` MPI exchange.
+    if u_d.ndim == 4:
+        from legoesm.core.operators_3d import laplacian_compact_3d
+        lap_a = laplacian_compact_3d(u_cc, cdgrid.base)  # (6, n, n, nlev)
+    else:
+        from legoesm.core.operators import laplacian_compact
+        lap_a = laplacian_compact(u_cc, cdgrid.base)  # (6, n, n)
 
-    # 3. Cell centres -> D-grid: (6, n, n) -> (6, n+1, n+1)
+    # 3. Cell centres -> D-grid: (6, n, n[, nlev]) -> (6, n+1, n+1[, nlev])
     return _interp_center_to_corner(lap_a, cdgrid)
 
 
@@ -1468,7 +1534,7 @@ def _extrapolate_boundary_corners(du, dv, n):
 
 def cdgrid_momentum_tendencies(
     h_or_p, u_d, v_d, h_s_or_p_prime, cdgrid,
-    g=9.80616, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
+    g=constants.g, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
     rho_0=None, div_v=None, f_3d=None,
     u_prime=None, v_prime=None,
     dddmp=0.0,
@@ -1917,7 +1983,7 @@ def _fortran_agrid_vector_corner_fill(u_pad, v_pad):
 
 def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
-    g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
+    g=constants.g, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
     boundary_fix_skip_corners=False,
     zero_mean_correction=False,

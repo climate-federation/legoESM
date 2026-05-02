@@ -52,13 +52,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from legoesm.constants import g
+from legoesm.constants import g, R_earth
 from legoesm.core.field import Field
 
 
-# Physical constants
-_A_EARTH = 6.371e6  # Earth radius [m]
-_G_EARTH = 9.80616  # Gravitational acceleration [m/s^2]
+_A_EARTH = R_earth
+_G_EARTH = g
 
 
 @dataclass
@@ -205,8 +204,64 @@ def _add_igw_perturbation(state, grid_type: str, grid, z_coord,
         return _add_igw_spectral(state, grid, eta_pert, u_pert, v_pert)
     elif grid_type == "mpas":
         return _add_igw_mpas(state, grid, eta_pert, u_pert, v_pert)
+    elif grid_type == "latlon":
+        return _add_igw_latlon_cgrid(state, grid, config, eta_pert)
     else:
         return _add_igw_fv(state, eta_pert, u_pert, v_pert)
+
+
+def _add_igw_latlon_cgrid(state, grid, config, eta_pert):
+    """Add IGW IC on a latlon C-grid where u/v live on staggered faces.
+
+    u has shape (n_lat, n_lon+1) at eastern faces (lon + dlon/2);
+    v has shape (n_lat+1, n_lon) at northern faces (lat + dlat/2).
+    We evaluate the analytical IGW velocities at those face positions
+    rather than at cell centers.
+    """
+
+    lat_1d = np.asarray(grid.lat, dtype=np.float64)
+    lon_1d = np.asarray(grid.lon, dtype=np.float64)
+    dlon = float(grid.dlon)
+    dlat = float(grid.dlat)
+
+    H = config.H_max
+    f0 = config.f0
+    kx, ky = config.wavenumber_x, config.wavenumber_y
+    k_phys = kx / _A_EARTH
+    l_phys = ky / _A_EARTH
+    omega = np.sqrt(f0 ** 2 + _G_EARTH * H * (k_phys ** 2 + l_phys ** 2))
+    denom = omega ** 2 - f0 ** 2
+    if abs(denom) < 1e-30:
+        denom = 1e-30
+
+    # u-face coordinates: +dlon/2 in lon, same lat.
+    u_data = np.array(state.u.data, dtype=np.float64, copy=True)
+    n_u_lon = u_data.shape[1]
+    lon_u_1d = lon_1d[0] + dlon * (np.arange(n_u_lon) + 0.5)
+    lon_u, lat_u = np.meshgrid(lon_u_1d, lat_1d, indexing="xy")
+    phase_u = kx * lon_u + ky * lat_u
+    u_face = (_G_EARTH / denom) * (
+        omega * k_phys * np.cos(phase_u) - f0 * l_phys * np.sin(phase_u))
+    u_data[..., 0] = u_face
+
+    # v-face coordinates: +dlat/2 in lat, same lon.
+    v_data = np.array(state.v.data, dtype=np.float64, copy=True)
+    n_v_lat = v_data.shape[0]
+    lat_v_1d = lat_1d[0] + dlat * (np.arange(n_v_lat) + 0.5)
+    lon_v, lat_v = np.meshgrid(lon_1d, lat_v_1d, indexing="xy")
+    phase_v = kx * lon_v + ky * lat_v
+    v_face = (_G_EARTH / denom) * (
+        omega * l_phys * np.cos(phase_v) + f0 * k_phys * np.sin(phase_v))
+    v_data[..., 0] = v_face
+
+    return state._replace(
+        eta=Field(jnp.array(eta_pert), name="eta",
+                  dims=state.eta.dims, units="m"),
+        u=Field(jnp.array(u_data), name="u",
+                dims=state.u.dims, units="m/s"),
+        v=Field(jnp.array(v_data), name="v",
+                dims=state.v.dims, units="m/s"),
+    )
 
 
 def _add_igw_spectral(state, grid, eta_pert, u_pert, v_pert):

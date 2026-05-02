@@ -381,6 +381,10 @@ class MPASOceanState(NamedTuple):
         Salinity [PSU]. Shape (nCells, nlev). Prognostic.
     eta : Field
         Sea surface height [m]. Shape (nCells,). Prognostic.
+    w : Field
+        Vertical velocity [m/s]. Shape (nCells, nlev+1). Diagnostic field
+        computed from flux divergence on half levels (surface first,
+        bottom = 0).
     H_bathy : Field
         Bathymetry depth [m]. Shape (nCells,). Positive downward. Static.
     land_mask : Field
@@ -390,6 +394,7 @@ class MPASOceanState(NamedTuple):
     T: Field
     S: Field
     eta: Field
+    w: Field
     H_bathy: Field
     land_mask: Field
 
@@ -397,9 +402,12 @@ class MPASOceanState(NamedTuple):
 class MPASOceanTendencies(NamedTuple):
     """Tendencies for MPAS ocean primitive equations.
 
-    Only prognostic fields have tendencies.
+    F_slow_u is the depth-mean of the full nonlinear momentum tendency
+    (Coriolis via PV flux + PGF + KE).  Passed to the barotropic solver
+    as slow forcing (MOM6 pattern, Hallberg & Adcroft 2009).  Issue #160.
     """
     du_dt: Field
     dT_dt: Field
     dS_dt: Field
     deta_dt: Field
+    F_slow_u: Field | None = None

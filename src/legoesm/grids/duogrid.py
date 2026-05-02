@@ -24,6 +24,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
 # Maximum interpolation order (fixed array dimension for JAX pytree compat)
@@ -92,7 +93,7 @@ class DuoGridData(NamedTuple):
 
 def _cart2lonlat(x: np.ndarray, y: np.ndarray, z: np.ndarray):
     """Cartesian (x, y, z) on unit sphere → (lon, lat) in radians."""
-    lon = np.arctan2(y, x)
+    lon = np.mod(np.arctan2(y, x), 2.0 * np.pi)  # [0, 2π)
     lat = np.arctan2(z, np.sqrt(x**2 + y**2))
     return lon, lat
 
@@ -525,7 +526,7 @@ def _compute_corner_lagrange_coeff(n: int, ng: int, ext_lon, ext_lat):
 
 def create_duogrid_data(
     n: int,
-    radius: float = 6.371e6,
+    radius: float = constants.R_earth,
     ng: int = 3,
     k2e_nord: int = 2,
 ) -> DuoGridData:

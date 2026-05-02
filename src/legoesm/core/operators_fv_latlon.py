@@ -44,10 +44,13 @@ def lat_v_interfaces(grid):
     lat_v : jax.Array, shape (n_lat+1,)
     """
     lat = grid.lat  # (n_lat,)
-    lat_south = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    # Single Pad HLO op (constant_values=(-π/2, π/2)) replaces alloc-2-
+    # singletons + concatenate-of-three.
     lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    return jnp.concatenate([lat_south, lat_interior, lat_north])
+    return jnp.pad(
+        lat_interior, (1, 1),
+        constant_values=(-jnp.pi / 2, jnp.pi / 2),
+    )
 
 
 # ==============================================================================
@@ -288,6 +291,74 @@ def fv_gradient_lat(q, grid):
 
     # grid.dy spans 2 cells, single-cell = dy/2
     return dq / (grid.dy / 2.0)
+
+
+def fv_gradient_lon_3d(q_3d, grid, padded=None):
+    """3D-native PPM-compatible longitude gradient.
+
+    Same numeric algorithm as :func:`fv_gradient_lon` but with one
+    halo pad + one PPM reconstruction shared across all vertical
+    levels — saves ``nlev`` redundant halo pads per call.
+
+    Parameters
+    ----------
+    q_3d : jax.Array, shape (n_lat, n_lon, nlev)
+    grid : LatLonGrid
+    padded : jax.Array, optional
+        Pre-padded field with halo=2, shape ``(n_lat+4, n_lon+4, nlev)``.
+        When supplied, the internal ``pad_halo_latlon_3d`` call is
+        skipped — useful for paired (∂/∂lon, ∂/∂lat) calls on the
+        same input where the halo pad can be shared.
+
+    Returns
+    -------
+    jax.Array, shape (n_lat, n_lon, nlev)
+    """
+    from legoesm.grids.halo_latlon import pad_halo_latlon_3d
+
+    if padded is None:
+        # Pad once for all levels.
+        padded = pad_halo_latlon_3d(q_3d, halo=2)        # (n_lat+4, n_lon+4, nlev)
+    # Strip latitude halo; longitude axis is now axis -2 (the axis
+    # ``_ppm_edge_values`` operates on).
+    q_strip = padded[2:-2, :, :]                         # (n_lat, n_lon+4, nlev)
+    q_hat = _ppm_edge_values(q_strip)                    # (n_lat, n_lon+3, nlev)
+    q_edges = q_hat[:, 1:-1, :]                          # (n_lat, n_lon+1, nlev)
+    dq = q_edges[:, 1:, :] - q_edges[:, :-1, :]          # (n_lat, n_lon, nlev)
+    return dq / (grid.dx[..., None] / 2.0)
+
+
+def fv_gradient_lat_3d(q_3d, grid, padded=None):
+    """3D-native PPM-compatible latitude gradient.
+
+    Same numeric algorithm as :func:`fv_gradient_lat` but with one
+    halo pad + one PPM reconstruction shared across all vertical
+    levels.  Optional ``padded=`` skips the internal halo pad — see
+    :func:`fv_gradient_lon_3d` for usage.
+
+    Parameters
+    ----------
+    q_3d : jax.Array, shape (n_lat, n_lon, nlev)
+    grid : LatLonGrid
+    padded : jax.Array, optional
+        Pre-padded field, shape ``(n_lat+4, n_lon+4, nlev)``.
+
+    Returns
+    -------
+    jax.Array, shape (n_lat, n_lon, nlev)
+    """
+    from legoesm.grids.halo_latlon import pad_halo_latlon_3d
+
+    if padded is None:
+        padded = pad_halo_latlon_3d(q_3d, halo=2)        # (n_lat+4, n_lon+4, nlev)
+    # Strip longitude halo.  ``_ppm_edge_values`` operates on axis -2,
+    # so swap the lat/lon axes so latitude lives there.
+    q_strip = padded[:, 2:-2, :]                         # (n_lat+4, n_lon, nlev)
+    q_t = jnp.swapaxes(q_strip, 0, 1)                    # (n_lon, n_lat+4, nlev)
+    q_hat_t = _ppm_edge_values(q_t)                      # (n_lon, n_lat+3, nlev)
+    q_edges_t = q_hat_t[:, 1:-1, :]                      # (n_lon, n_lat+1, nlev)
+    dq_t = q_edges_t[:, 1:, :] - q_edges_t[:, :-1, :]    # (n_lon, n_lat, nlev)
+    return jnp.swapaxes(dq_t, 0, 1) / (grid.dy / 2.0)
 
 
 # ==============================================================================

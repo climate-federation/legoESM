@@ -72,6 +72,13 @@ def sbm_convection(
     """
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev) layer thickness
+    # ``jnp.full`` lowers to a single ``Broadcast`` HLO op; the previous
+    # ``broadcast_to(jnp.asarray(scalar, dtype), shape)`` form additionally
+    # forced a ``ConvertElementType`` for the implicit promotion of the
+    # Python float, which is unnecessary work per convection step.
+    tau_c = jnp.full((ncol,), config.tau_c, dtype=T.dtype)
+    RH_ref = jnp.full((ncol,), config.RH_ref, dtype=T.dtype)
+    CAPE_threshold = jnp.full((ncol,), config.CAPE_threshold, dtype=T.dtype)
 
     # 1. Surface temperature as parcel starting point
     T_base = T[:, -1]  # (ncol,)
@@ -91,7 +98,7 @@ def sbm_convection(
     # 5. Enthalpy-conserving correction (Newton iteration)
     #    Only over the cloud layer (masked levels).
     def _newton_step(T_trial):
-        q_trial = config.RH_ref * saturation_mixing_ratio(T_trial, p_full)
+        q_trial = RH_ref[:, None] * saturation_mixing_ratio(T_trial, p_full)
         residual = jnp.sum(
             cloud_mask * (constants.c_pd * (T_trial - T)
                           + constants.L_v * (q_trial - q_v)) * dp,
@@ -101,7 +108,7 @@ def sbm_convection(
         dqsat_dT = constants.L_v * q_sat_trial / (constants.R_v * T_trial ** 2)
         jacobian = jnp.sum(
             cloud_mask * (constants.c_pd
-                          + constants.L_v * config.RH_ref * dqsat_dT) * dp,
+                          + constants.L_v * RH_ref[:, None] * dqsat_dT) * dp,
             axis=1,
         )  # (ncol,)
         dT = -residual / jnp.clip(jacobian, 1.0, None)
@@ -111,30 +118,47 @@ def sbm_convection(
     T_ref = _newton_step(T_ref)    # second iteration
 
     # Reference moisture at converged temperature
-    q_ref = config.RH_ref * saturation_mixing_ratio(T_ref, p_full)
+    q_ref = RH_ref[:, None] * saturation_mixing_ratio(T_ref, p_full)
 
     # 6. Smooth trigger: sigmoid(sharpness * (CAPE - threshold))
     trigger = jax.nn.sigmoid(
-        config.smooth_trigger_sharpness * (cape - config.CAPE_threshold)
+        config.smooth_trigger_sharpness * (cape - CAPE_threshold)
     )  # (ncol,)
 
     # 7. Relaxation tendencies — only within the convective (cloud) layer
-    tau_c = config.tau_c
-    dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c
-    dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c
+    dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c[:, None]
+    dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c[:, None]
 
-    # 7. Precipitation: column-integrated moisture sink
-    # precip = -sum(dq_v_dt * dp) / g, clipped >= 0
-    precipitation = jnp.clip(
-        -jnp.sum(dq_v_dt * dp, axis=1) / constants.g,
-        0.0,
-        None,
-    )  # (ncol,)
+    # 7. Convective source for cloud water: vapor that condenses at each
+    # level becomes cloud water rather than precipitating instantly.
+    # Microphysics processes this through autoconversion, sedimentation,
+    # and evaporation, and produces the surface precipitation diagnostic.
+    #
+    # Naive ``max(-dq_v_dt, 0)`` per level would *create* water
+    # column-wide whenever the relaxation has both drying and
+    # moistening layers (column-integrated dq_v + column-integrated
+    # max(-dq_v, 0) = moistening_part > 0). To preserve column water
+    # conservation we rescale the per-level condensation candidate so
+    # its column integral equals the column-net drying — this matches
+    # the legacy ``precipitation`` formula exactly. Per-level the
+    # field is still non-negative (no negative q_c production); when
+    # the column is net moistening (col_dq_v > 0) the scale is 0 and
+    # dq_c_conv_dt = 0 everywhere, mirroring the legacy
+    # ``clip(-col_dq_v, 0)`` behavior.
+    local_cond = jnp.maximum(-dq_v_dt, 0.0)
+    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
+    col_net_drying = jnp.clip(
+        -jnp.sum(dq_v_dt * dp / constants.g, axis=-1, keepdims=True),
+        0.0, None,
+    )
+    dq_c_conv_dt = local_cond * (
+        col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
+    )  # (ncol, nlev) [kg/kg/s]
 
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        precipitation=precipitation,
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=trigger,
     )

@@ -83,7 +83,7 @@ def _boundary_layer_depth(
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
     V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 0.0))
-            / jnp.sqrt(jnp.maximum(cfg.c_s * 0.1, eps))
+            / jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))
             * jnp.maximum(cfg.Ri_crit * h_safe - z_depth, 0.0)
             * z_depth / h_safe)
 
@@ -100,11 +100,15 @@ def _boundary_layer_depth(
     # Weight at level k = sigmoid(sharpness * (Ri_b[k] - Ri_crit))
     #                    - sigmoid(sharpness * (Ri_b[k-1] - Ri_crit))
     # This is ~1 at the crossing level and ~0 elsewhere.
-    sharpness = 20.0
+    sharpness = cfg.crossing_sharpness
     sig = jax.nn.sigmoid(sharpness * (Ri_b - cfg.Ri_crit))  # (..., nlev)
 
-    # Crossing weight: difference of adjacent sigmoid values
-    sig_prev = jnp.concatenate([jnp.zeros_like(sig[..., :1]), sig[..., :-1]], axis=-1)
+    # Crossing weight: difference of adjacent sigmoid values.  ``jnp.pad``
+    # along the trailing axis is one HLO op; the previous
+    # ``concatenate([zeros_like(sig[..., :1]), sig[..., :-1]])`` allocated
+    # a fresh zero buffer and concatenated.
+    pad_axes = ((0, 0),) * (sig.ndim - 1)
+    sig_prev = jnp.pad(sig[..., :-1], (*pad_axes, (1, 0)))
     w_cross = sig - sig_prev  # (..., nlev), peaks at crossing level
     w_cross = jnp.maximum(w_cross, 0.0)
     w_sum = jnp.sum(w_cross, axis=-1, keepdims=True)
@@ -123,7 +127,7 @@ def _boundary_layer_depth(
 
     # Blend: use crossing depth when crossing signal is strong, fallback otherwise
     crossing_strength = w_sum[..., 0]
-    blend = jax.nn.sigmoid(20.0 * (crossing_strength - 0.1))
+    blend = jax.nn.sigmoid(cfg.crossing_sharpness * (crossing_strength - cfg.crossing_threshold))
     h = blend * h_crossing + (1.0 - blend) * h_fallback
 
     # At least one layer thick
@@ -146,6 +150,9 @@ def kpp_vertical_mixing(
     tau_x: jnp.ndarray | None = None,
     tau_y: jnp.ndarray | None = None,
     B_f: jnp.ndarray | None = None,
+    Q_sfc_T: jnp.ndarray | None = None,
+    Q_sfc_S: jnp.ndarray | None = None,
+    h_bl_prev: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -164,6 +171,15 @@ def kpp_vertical_mixing(
     B_f : array (6, n, n) or None
         Surface buoyancy flux [m^2/s^3], positive = destabilizing (convective).
         If None, estimated from surface density gradient.
+    Q_sfc_T : array (6, n, n) or None
+        Surface kinematic heat flux [K*m/s] for non-local transport (LMD94
+        Eq. 19).  If None, falls back to diagnosed K_sfc * dT/dz proxy.
+    Q_sfc_S : array (6, n, n) or None
+        Surface kinematic salt flux [PSU*m/s]. Same convention as Q_sfc_T.
+    h_bl_prev : array (6, n, n) or None
+        BL depth from the previous time step [m, positive downward].
+        Used to break the implicit V_t-h_bl coupling in the Ri_b diagnosis
+        (LMD94 Eq. 23).  If None, uses the full column depth as estimate.
 
     Returns
     -------
@@ -191,7 +207,10 @@ def kpp_vertical_mixing(
         B_f = -g / rho_0_ref * cfg.K_bg * drho_dz_sfc  # simplified proxy
 
     # --- Boundary layer depth ---
-    h_bl = _boundary_layer_depth(rho, u, v, z_coord, jacobian, u_star, B_f, cfg, g)
+    h_bl = _boundary_layer_depth(
+        rho, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
+        h_bl_prev=h_bl_prev,
+    )
 
     # --- Depth coordinate ---
     z_depth = jnp.cumsum(dz_actual, axis=-1) - 0.5 * dz_actual
@@ -205,10 +224,14 @@ def kpp_vertical_mixing(
     # w_s depends on stability (B_f) and depth d = sigma * h_bl
     d = sigma_clip * h_bl[..., jnp.newaxis]
     # Monin-Obukhov length: L_MO = u_star^3 / (kappa * B_f)
-    L_MO = u_star[..., jnp.newaxis]**3 / (
-        cfg.kappa_vk * jnp.where(jnp.abs(B_f[..., jnp.newaxis]) > eps,
-                                  B_f[..., jnp.newaxis], eps)
+    # Use copysign(eps, B_f) to preserve the sign of B_f near zero,
+    # preventing a stability classification flip (issue #168 bug 1).
+    B_f_safe = jnp.where(
+        jnp.abs(B_f[..., jnp.newaxis]) > eps,
+        B_f[..., jnp.newaxis],
+        jnp.copysign(eps, B_f[..., jnp.newaxis]),
     )
+    L_MO = u_star[..., jnp.newaxis]**3 / (cfg.kappa_vk * B_f_safe)
     zeta_kpp = d / L_MO
 
     # LMD94 Appendix B turbulent velocity scales:
@@ -218,7 +241,7 @@ def kpp_vertical_mixing(
     # Unstable, strongly convective (epsilon*d > |L|):
     #   w_s = (kappa * (u_star^3 + c_b * kappa * (-B_f) * d))^{1/3}
     is_unstable = B_f[..., jnp.newaxis] > 0.0
-    epsilon_lmd = 0.1  # LMD94 surface layer fraction
+    epsilon_lmd = cfg.epsilon_lmd
 
     # Weakly unstable: phi_m^{-1} formulation
     w_s_weak = (cfg.kappa_vk * u_star[..., jnp.newaxis]
@@ -305,14 +328,23 @@ def kpp_vertical_mixing(
     # We discretize this as the vertical divergence of the non-local
     # flux F_nl = C_s * Q_0 * G(sigma) evaluated at interfaces.
 
-    # Surface kinematic heat flux proxy: Q_0 = K_sfc * dT/dz  [K*m/s]
-    # Use the BL diffusivity at the surface as the flux velocity scale.
-    dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    K_sfc = K_bl_full[..., 0]  # BL diffusivity at surface level [m^2/s]
-    Q_T = K_sfc * dT_dz_sfc    # [K*m/s]
+    # Surface kinematic heat/salt flux for non-local transport (LMD94 Eq. 19).
+    # Use the IMPOSED surface flux when available (from bulk formulas or
+    # prescribed forcing).  Fall back to diagnosed K_sfc * dT/dz proxy
+    # only when no external flux is provided (issue #168 bug 2).
+    if Q_sfc_T is not None:
+        Q_T = Q_sfc_T  # [K*m/s]
+    else:
+        dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
+        K_sfc = K_bl_full[..., 0]
+        Q_T = K_sfc * dT_dz_sfc
 
-    dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    Q_S = K_sfc * dS_dz_sfc    # [psu*m/s]
+    if Q_sfc_S is not None:
+        Q_S = Q_sfc_S  # [PSU*m/s]
+    else:
+        dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
+        K_sfc = K_bl_full[..., 0]
+        Q_S = K_sfc * dS_dz_sfc
 
     # Only apply non-local transport for unstable (convective) columns.
     is_unstable_col = B_f > 0.0

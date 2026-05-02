@@ -63,6 +63,8 @@ class SegmentCarry(NamedTuple):
         Prognostic dynamics fields.
     q_v, q_c, q_r : jax.Array
         Moisture tracers.
+    conv_prog : jax.Array
+        Prognostic convection control state for mass_flux / EDMF schemes.
     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc : jax.Array
         Held radiation tendencies for sub-cycling.
     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa : jax.Array
@@ -94,6 +96,7 @@ class SegmentCarry(NamedTuple):
     q_v: jax.Array
     q_c: jax.Array
     q_r: jax.Array
+    conv_prog: jax.Array
     held_dT_rad: jax.Array
     held_sw_net_sfc: jax.Array
     held_lw_net_sfc: jax.Array
@@ -109,7 +112,7 @@ class SegmentCarry(NamedTuple):
     lhflx_accum: jax.Array
 
 
-def pack_carry(state, q_v, q_c, q_r,
+def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                step_index,
@@ -145,6 +148,8 @@ def pack_carry(state, q_v, q_c, q_r,
         shflx_accum = jnp.zeros_like(state.p_s.data)
     if lhflx_accum is None:
         lhflx_accum = jnp.zeros_like(state.p_s.data)
+    if conv_prog is None:
+        conv_prog = jnp.zeros((state.p_s.data.size,), dtype=storage)
     return SegmentCarry(
         u=_promote(state.u.data, storage),
         v=_promote(state.v.data, storage),
@@ -154,6 +159,7 @@ def pack_carry(state, q_v, q_c, q_r,
         q_v=_promote(q_v, storage),
         q_c=_promote(q_c, storage),
         q_r=_promote(q_r, storage),
+        conv_prog=_promote(conv_prog, storage),
         held_dT_rad=_promote(held_dT_rad, storage),
         held_sw_net_sfc=_promote(held_sw_net_sfc, storage),
         held_lw_net_sfc=_promote(held_lw_net_sfc, storage),
@@ -181,7 +187,7 @@ def unpack_carry(carry, state_template):
 
     Returns
     -------
-    state, q_v, q_c, q_r, held_tuple, step_index, precip_accum,
+    state, q_v, q_c, q_r, conv_prog, held_tuple, step_index, precip_accum,
     shflx_accum, lhflx_accum
     """
     new_state = state_template._replace(
@@ -195,7 +201,7 @@ def unpack_carry(carry, state_template):
         carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
         carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
     )
-    return (new_state, carry.q_v, carry.q_c, carry.q_r,
+    return (new_state, carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
             held_tuple, int(carry.step_index),
             carry.precip_accum,
             carry.shflx_accum, carry.lhflx_accum)
@@ -498,11 +504,15 @@ def build_segment_fn(
                 )
 
             # --- Physics with radiation sub-cycling ---
-            need_rad = jnp.where(
-                rad_update_steps <= 1,
-                jnp.bool_(True),
-                ((step_idx + 1) % rad_update_steps) == 0,
-            )
+            # ``rad_update_steps`` is a Python ``int`` captured in this
+            # closure — gate with a Python ``if`` so the dead branch is
+            # never traced.  The previous ``jnp.where`` on a static int
+            # forced both branches into the trace and added an unused
+            # modulo on every scan step (CLAUDE.md JAX rules).
+            if rad_update_steps <= 1:
+                need_rad = jnp.bool_(True)
+            else:
+                need_rad = ((step_idx + 1) % rad_update_steps) == 0
 
             if owned_face_ids is not None:
                 # MPI replicated dynamics: physics on owned faces only.
@@ -514,6 +524,7 @@ def build_segment_fn(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
                     carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
+                    carry.conv_prog,
                     u_new[_ofi], v_new[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
                     forcing.day_of_year, forcing.seconds_of_day, _dt,
@@ -546,6 +557,7 @@ def build_segment_fn(
                 q_r_upd = carry.q_r.at[_ofi].set(
                     jnp.maximum(carry.q_r[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
                 )
+                conv_prog_upd = phys_out.conv_prog
 
                 # Held radiation: update at owned indices
                 held_new = (
@@ -570,7 +582,7 @@ def build_segment_fn(
                 phys_out, held_new = step_unified(
                     need_rad,
                     T_new, p_s_new,
-                    carry.q_v, carry.q_c, carry.q_r,
+                    carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
                     u_new, v_new,
                     forcing.sst, forcing.sic, lat, lon,
                     forcing.day_of_year, forcing.seconds_of_day, _dt,
@@ -593,6 +605,7 @@ def build_segment_fn(
                 q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
                 q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
                 q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
+                conv_prog_upd = phys_out.conv_prog
 
                 # --- Accumulate precipitation ---
                 precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
@@ -646,6 +659,7 @@ def build_segment_fn(
                 q_v=_match_dtype(q_v_upd, carry.q_v),
                 q_c=_match_dtype(q_c_upd, carry.q_c),
                 q_r=_match_dtype(q_r_upd, carry.q_r),
+                conv_prog=_match_dtype(conv_prog_upd, carry.conv_prog),
                 held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
                 held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
                 held_lw_net_sfc=_match_dtype(held_new[2], carry.held_lw_net_sfc),

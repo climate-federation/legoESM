@@ -23,6 +23,11 @@ from legoesm.io.checkpoint import (
     load_checkpoint_zarr,
     load_checkpoint_auto,
 )
+from legoesm.io.state_checkpoint import (
+    save_state_checkpoint,
+    load_state_checkpoint,
+    validate_state_checkpoint,
+)
 from legoesm.io.distributed_checkpoint import (
     save_checkpoint_distributed,
     load_checkpoint_distributed,

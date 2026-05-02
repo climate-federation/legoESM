@@ -54,24 +54,23 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
-import json
-import shutil
 import sys
-import time
-import traceback
-
-import pandas as pd
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
 
+# Line-buffered stdout for CI/log visibility.
 sys.stdout.reconfigure(line_buffering=True)
 
+# Ensure project root is on sys.path (for legoesm imports).
 _PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+# Ensure scripts/ is on sys.path (for ocean_test_matrix package).
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+# JAX configuration must happen before any jax.numpy import.
 import jax
 jax.config.update("jax_enable_x64", True)
 
@@ -132,7 +131,7 @@ FIELD_RANGES = {
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
     "barotropic_wave": {
-        "eta": (-1.5, 1.5),        # meters - wave amplitude ~1m
+        "eta": (-1.5, 1.5),        # meters - wave amplitude ~1m  
         "SST": (1.5, 21.0),        # °C - background temperature range
     },
     "barotropic_gyre": {
@@ -690,7 +689,7 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
     """Regrid a binary land mask using nearest neighbor interpolation."""
     if coord_kind in ("latlon", "gaussian"):
         return np.asarray(mask_arr, dtype=np.float64)
-
+    
     # For unstructured grids, use nearest neighbor interpolation
     # (cKDTree already imported at module level)
 
@@ -698,7 +697,7 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
     lon_src = np.asarray(lon_deg, dtype=np.float64).ravel() % 360
     lat_src = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
     mask_src = np.asarray(mask_arr, dtype=np.float64).ravel()
-
+    
     # Target grid
     if target_lat is not None and target_lon is not None:
         n_lat, n_lon = len(target_lat), len(target_lon)
@@ -707,35 +706,35 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
         n_lat, n_lon = 181, 360
         lat_1d = np.linspace(-90.0, 90.0, n_lat)
         lon_1d = np.linspace(0.0, 360.0, n_lon)
-
+    
     # Convert to 3D Cartesian coordinates for accurate distance calculation
     d2r = np.pi / 180.0
-
+    
     # Source points in 3D
     src_3d = np.column_stack([
         np.cos(lat_src * d2r) * np.cos(lon_src * d2r),
         np.cos(lat_src * d2r) * np.sin(lon_src * d2r),
         np.sin(lat_src * d2r)
     ])
-
-    # Target points in 3D
+    
+    # Target points in 3D  
     lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
     tgt_3d = np.column_stack([
         np.cos(lat_2d.ravel() * d2r) * np.cos(lon_2d.ravel() * d2r),
         np.cos(lat_2d.ravel() * d2r) * np.sin(lon_2d.ravel() * d2r),
         np.sin(lat_2d.ravel() * d2r)
     ])
-
+    
     # Build KDTree and find nearest neighbors
     tree = cKDTree(src_3d)
     distances, indices = tree.query(tgt_3d, k=1)
-
+    
     # Get mask values at nearest neighbors
     mask_interp = mask_src[indices]
-
+    
     # For land mask, apply threshold to ensure binary values
     mask_interp = np.where(mask_interp > 0.5, 1.0, 0.0)
-
+    
     return mask_interp.reshape(n_lat, n_lon)
 
 
@@ -984,7 +983,7 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
     output_dir.mkdir(parents=True, exist_ok=True)
     valid_steps = sorted(snapshots.keys())
     first_saved = None
-
+    
     # Extract test case for consistent field ranges
     test_case = _extract_test_case_name(case_name)
     field_ranges = FIELD_RANGES.get(test_case, {})
@@ -1142,44 +1141,6 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                                        ocean_mask=_lm)
                     v_reg = _regrid_2d(v_raw, lon_deg, lat_deg, coord_kind,
                                        ocean_mask=_lm)
-
-                    # For C-grid sources (latlon ocean), u and v sit at
-                    # different stagger positions: u at u-faces (west/
-                    # east-of-cell, shape (nlat, nlon+1) for periodic
-                    # or (nlat, nlon+1) for open) and v at v-faces
-                    # (south/north-of-cell, shape (nlat+1, nlon) etc.).
-                    # For a faithful quiver overlay, COLOCATE both to
-                    # cell centres by averaging the two adjacent face
-                    # values.  This preserves the cell-centred flow
-                    # direction (truncating instead would zero the
-                    # east/north boundary arrows and mis-associate the
-                    # remaining ones with the wrong cell centres).
-                    if u_reg.shape != v_reg.shape:
-                        # Target cell-centre shape: min across both
-                        # (u collapses the nlon+1 axis, v collapses the
-                        # nlat+1 axis) — with both collapsed we land at
-                        # the common cell-centre grid.
-                        nlat_cc = min(u_reg.shape[0], v_reg.shape[0] - 1) \
-                            if v_reg.shape[0] > u_reg.shape[0] \
-                            else min(u_reg.shape[0] - 1, v_reg.shape[0])
-                        nlat_cc = min(u_reg.shape[0], v_reg.shape[0])
-                        nlon_cc = min(u_reg.shape[1], v_reg.shape[1])
-                        # Collapse u's extra columns (u-faces → cell
-                        # centres by averaging east+west faces).
-                        if u_reg.shape[1] > nlon_cc:
-                            u_reg = 0.5 * (u_reg[:, :-1] + u_reg[:, 1:])
-                        if u_reg.shape[1] > nlon_cc:
-                            u_reg = u_reg[:, :nlon_cc]
-                        if u_reg.shape[0] > nlat_cc:
-                            u_reg = u_reg[:nlat_cc, :]
-                        # Collapse v's extra rows (v-faces → cell
-                        # centres by averaging south+north faces).
-                        if v_reg.shape[0] > nlat_cc:
-                            v_reg = 0.5 * (v_reg[:-1, :] + v_reg[1:, :])
-                        if v_reg.shape[0] > nlat_cc:
-                            v_reg = v_reg[:nlat_cc, :]
-                        if v_reg.shape[1] > nlon_cc:
-                            v_reg = v_reg[:, :nlon_cc]
 
                     if domain_extent is not None and coord_kind not in ("latlon", "gaussian"):
                         lat_1d = np.linspace(-90, 90, u_reg.shape[0])
@@ -1347,7 +1308,7 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             """Compute interface depths from level center depths."""
             if len(level_centers) == 1:
                 return np.array([0.0, 2 * level_centers[0]])
-
+            
             # Compute interfaces as midpoints between level centers
             interfaces = np.zeros(len(level_centers) + 1)
             interfaces[0] = 0.0  # Surface
@@ -1356,7 +1317,7 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             return interfaces
 
         level_interfaces = compute_level_interfaces(levels)
-
+        
         for ax, step, section, bin_centers in zip(
                 axes_arr, valid_steps, all_sections, all_bin_centers):
             # Use pcolormesh to show true model grid structure instead of imshow
@@ -1368,7 +1329,7 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             im = ax.pcolormesh(
                 X, Y, section.T, cmap="RdBu_r", shading='flat',
                 vmin=cs_vmin, vmax=cs_vmax)
-
+            
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
@@ -1400,13 +1361,13 @@ def _save_profiles(output_dir: Path, case_name: str, snapshots: dict,
     colors = plt.cm.viridis(np.linspace(0, 1, len(valid_steps)))
     for step, color in zip(valid_steps, colors):
         f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
-
+        
         # Apply land masking to 3D field before computing profile if available
         if "land_mask" in snapshots[step]:
             land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
             land_mask_3d = land_mask_raw[..., np.newaxis]  # Expand to 3D
             f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
-
+        
         profile = np.nanmean(f3d, axis=tuple(range(f3d.ndim - 1)))
         day = step * dt / 86400.0
         ax.plot(profile, levels, color=color, lw=1.5, label=f"day {day:.1f}")
@@ -1566,7 +1527,7 @@ def _save_snapshot_data(
     domain_extent: tuple[float, float, float, float] | None = None,
 ):
     """Save snapshot field arrays as NPZ files with proper time series format.
-
+    
     NEW FORMAT: Each field is saved as a time series array with shape (n_times, ...).
     This replaces the old format where each timestep was a separate variable.
     """
@@ -1653,7 +1614,7 @@ def _save_snapshot_data(
                 # Field not available at this timestep - skip or use NaN
                 # For now, we'll skip incomplete time series
                 break
-
+        
         # Only save fields that are available at all timesteps
         if len(field_timesteps) == len(sorted_steps):
             # Stack into time series: shape (n_times, ...)
@@ -2079,7 +2040,7 @@ def _extract_fv_ocean(state, grid_type: str, include_velocity_3d: bool = False):
             result["w_133m"] = w_3d[..., 1]
             # Also keep surface for comparison if needed
             result["w_sfc"] = w_3d[..., 0]
-
+    
     # Create surface speed field by interpolating u,v to common grid
     if "u_sfc" in result and "v_sfc" in result:
         u_sfc = result["u_sfc"]
@@ -2135,7 +2096,7 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         result["u_3d"] = u_cc
         result["v_3d"] = v_cc
         result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
-
+        
         # Add vertical velocity if available (for future MPAS implementation)
         if hasattr(state, "w"):
             w_3d = np.asarray(state.w.data, dtype=np.float64)
@@ -2159,7 +2120,7 @@ def _extract_spectral_ocean(state, grid):
         sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
     SST = T_grid[..., 0] if T_grid.ndim >= 3 else T_grid
     SSS = S_grid[..., 0] if S_grid.ndim >= 3 else S_grid
-
+    
     # For spectral grids, synthesize land mask if available (typically all ocean for spectral)
     if hasattr(state, 'land_mask') and hasattr(state.land_mask, 'data'):
         land_mask_grid = np.asarray(
@@ -2167,7 +2128,7 @@ def _extract_spectral_ocean(state, grid):
     else:
         # Default to all ocean for spectral grids (consistent with rest_state config)
         land_mask_grid = np.ones_like(eta_grid, dtype=np.float64)
-
+    
     return {
         "eta": eta_grid,
         "SST": SST,
@@ -2219,25 +2180,25 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
     if grid_type == "spectral":
         if grid is None:
             raise ValueError("Grid object required for spectral scalar function")
-
+        
         def scalar_fn(s):
             from legoesm.grids.gaussian import sh_synthesis, sh_synthesis_3d
-
+            
             # Convert spectral coefficients to physical fields
             eta_phys = sh_synthesis(grid, s.eta_hat.data)        # meters
-            T_phys = sh_synthesis_3d(grid, s.T_hat.data)         # °C
+            T_phys = sh_synthesis_3d(grid, s.T_hat.data)         # °C  
             S_phys = sh_synthesis_3d(grid, s.S_hat.data)         # PSU
-
+            
             # Apply ocean masking if available
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
                 land_mask_phys = sh_synthesis(grid, s.land_mask.data)
                 ocean_mask = land_mask_phys > 0.5
-
+                
                 # Compute ocean-only statistics
                 eta_ocean = jnp.where(ocean_mask, eta_phys, jnp.nan)
                 T_ocean = jnp.where(ocean_mask, T_phys, jnp.nan)
                 S_ocean = jnp.where(ocean_mask, S_phys, jnp.nan)
-
+                
                 return {
                     "mean_eta": float(jnp.nanmean(eta_ocean)),           # meters
                     "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))), # meters
@@ -2634,7 +2595,7 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         label=f"Rest State ({tc.grid_type})", total_days=days)
 
     # Check drift is small - all grids now use same physical units
-    # Use absolute eta drift in meters rather than relative drift since
+    # Use absolute eta drift in meters rather than relative drift since 
     # initial mean_eta is ~0 in rest state, making relative drift meaningless (division by ~0).
     eta_list = diag.get("mean_eta", [])
     eta_drift = (abs(eta_list[-1] - eta_list[0])
@@ -2701,7 +2662,7 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
         label=f"Rest State No Land ({tc.grid_type})", total_days=days)
 
     # Check drift is small - all grids now use same physical units
-    # Use absolute eta drift in meters rather than relative drift since
+    # Use absolute eta drift in meters rather than relative drift since 
     # initial mean_eta is ~0 in rest state, making relative drift meaningless (division by ~0).
     eta_list = diag.get("mean_eta", [])
     eta_drift = (abs(eta_list[-1] - eta_list[0])
@@ -3161,107 +3122,107 @@ def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
 def _make_baroclinic_scalar_fn(grid_type: str, grid=None, z_coord=None, config=None):
     """Enhanced scalar function for baroclinic gyre with N-S temperature gradient diagnostics."""
     import jax.numpy as jnp
-
+    
     # Get base scalar function
     base_scalar_fn = _make_scalar_fn(grid_type, grid, z_coord)
-
+    
     # Domain bounds for North-South analysis
     lat_south = config.lat_south if config else 15.0
     lat_north = config.lat_north if config else 75.0
     lat_center = (lat_south + lat_north) / 2.0
-
+    
     if grid_type == "latlon_regional":
         # Get latitude coordinates
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
-
+        
         # Find indices for north/south split
         center_idx = np.argmin(np.abs(lat_deg - lat_center))
-
+        
         def scalar_fn(s):
             base_diag = base_scalar_fn(s)
-
+            
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
                 ocean_mask = s.land_mask.data > 0.5
-
+                
                 # Compute North-South temperature differences at key levels
                 T_data = s.T.data
-
+                
                 # Surface level (0) and thermocline level (4, ~681m depth)
                 for level, level_name in [(0, 'surface'), (4, 'thermocline')]:
                     if level < T_data.shape[-1]:
                         T_level = T_data[..., level]
                         T_level_ocean = jnp.where(ocean_mask, T_level, jnp.nan)
-
+                        
                         # Split domain at center latitude
                         T_north = T_level_ocean[center_idx:, :]
                         T_south = T_level_ocean[:center_idx, :]
-
+                        
                         # Compute mean temperatures in each region
                         T_north_mean = jnp.nanmean(T_north)
                         T_south_mean = jnp.nanmean(T_south)
-
+                        
                         # North-South temperature difference (positive = north warmer)
                         dT_ns = T_north_mean - T_south_mean
-
+                        
                         # Add to diagnostics
                         base_diag[f"dT_ns_{level_name}"] = float(dT_ns)
                         base_diag[f"T_north_{level_name}"] = float(T_north_mean)
                         base_diag[f"T_south_{level_name}"] = float(T_south_mean)
-
+                        
                         # Spatial standard deviation (measure of baroclinic development)
                         spatial_std = jnp.nanstd(T_level_ocean)
                         base_diag[f"T_spatial_std_{level_name}"] = float(spatial_std)
-
+            
             return base_diag
-
+            
         return scalar_fn
-
+        
     elif grid_type == "mpas_regional":
         # For MPAS, use cell latitude coordinates
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
-
+        
         # Find cells in north vs south regions
         north_mask = lat_deg >= lat_center
         south_mask = lat_deg < lat_center
-
+        
         def scalar_fn(s):
             base_diag = base_scalar_fn(s)
-
+            
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
                 ocean_mask = s.land_mask.data > 0.5
-
+                
                 # Compute North-South temperature differences at key levels
                 T_data = s.T.data
-
+                
                 for level, level_name in [(0, 'surface'), (4, 'thermocline')]:
                     if level < T_data.shape[-1]:
                         T_level = T_data[..., level]
                         T_level_ocean = jnp.where(ocean_mask, T_level, jnp.nan)
-
+                        
                         # Extract north and south regions
                         T_north = jnp.where(north_mask & ocean_mask, T_level, jnp.nan)
                         T_south = jnp.where(south_mask & ocean_mask, T_level, jnp.nan)
-
+                        
                         # Compute mean temperatures in each region
                         T_north_mean = jnp.nanmean(T_north)
                         T_south_mean = jnp.nanmean(T_south)
-
+                        
                         # North-South temperature difference
                         dT_ns = T_north_mean - T_south_mean
-
+                        
                         # Add to diagnostics
                         base_diag[f"dT_ns_{level_name}"] = float(dT_ns)
                         base_diag[f"T_north_{level_name}"] = float(T_north_mean)
                         base_diag[f"T_south_{level_name}"] = float(T_south_mean)
-
+                        
                         # Spatial standard deviation
                         spatial_std = jnp.nanstd(T_level_ocean)
                         base_diag[f"T_spatial_std_{level_name}"] = float(spatial_std)
-
+            
             return base_diag
-
+            
         return scalar_fn
-
+    
     else:
         # For other grids, just return the base function
         return base_scalar_fn
@@ -3273,35 +3234,35 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
     if tc.grid_type not in ("mpas_regional", "latlon_regional"):
         raise NotImplementedError(
             f"Baroclinic gyre only implemented for regional grids, not {tc.grid_type}")
-
+    
     from legoesm.ocean.experiments.baroclinic_gyre import (
         BaroclinicGyreConfig, create_initial_conditions, create_forcings)
-
+    
     config = BaroclinicGyreConfig()
     physics = create_forcings(tc.grid_type, None, config)
-
+    
     grid, z_coord, ocean_config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, physics=physics, A_h=config.A_h))
-
+    
     state = create_initial_conditions(tc.grid_type, grid, z_coord, config)
-
+    
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 40)
-
+    
     check_fn = _make_check_fn(tc.grid_type)
     scalar_fn = _make_baroclinic_scalar_fn(tc.grid_type, grid, z_coord, config)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
                                   include_velocity_3d=True)
-
+    
     def step_fn(s, dt_):
         return model.step(s, dt_)
-
+    
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Baroclinic Gyre ({tc.grid_type})", total_days=days)
-
+    
     max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
     eta_list = diag.get("mean_eta", [])
     eta_drift = (abs(eta_list[-1] - eta_list[0])
@@ -3309,18 +3270,18 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
     T_list = diag.get("mean_T", [])
     T_drift = (abs(T_list[-1] - T_list[0])
                if len(T_list) >= 2 else 0.0)
-
+    
     # Extract baroclinic diagnostics
     dT_ns_surface = diag.get("dT_ns_surface", [0])[-1] if diag.get("dT_ns_surface") else 0
     dT_ns_thermocline = diag.get("dT_ns_thermocline", [0])[-1] if diag.get("dT_ns_thermocline") else 0
     T_spatial_std_surface = diag.get("T_spatial_std_surface", [0])[-1] if diag.get("T_spatial_std_surface") else 0
     T_spatial_std_thermocline = diag.get("T_spatial_std_thermocline", [0])[-1] if diag.get("T_spatial_std_thermocline") else 0
-
+    
     notes = (f"max_speed={max_speed:.4f}m/s, eta_drift={eta_drift:.2e}, "
              f"T_drift={T_drift:.3f}degC, dT_NS_sfc={dT_ns_surface:.6f}degC, "
              f"dT_NS_thermo={dT_ns_thermocline:.6f}degC")
-
-    # Save results
+    
+    # Save results  
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
     _write_results_txt(output_dir, {
@@ -3329,7 +3290,7 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
         "max_speed": max_speed, "eta_drift": eta_drift, "T_drift": T_drift,
         "depth": depth.tolist(), "notes": notes,
     })
-
+    
     # Regional extent for proper plotting
     extent = (config.lon_west, config.lon_east, config.lat_south, config.lat_north)
     _save_case_diagnostics(
@@ -3352,7 +3313,7 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
                       "T_spatial_std_surface": "degC", "T_spatial_std_thermocline": "degC"},
         domain_extent=extent,
         mesh=grid if coord_kind == "mpas" else None)
-
+    
     return "PASS" if ok else "FAIL", wall, notes
 
 # ===========================================================================
@@ -4559,35 +4520,35 @@ def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
 
 def _collect_grid_results(test_case_dir: Path) -> dict:
     """Collect results from all grids that completed for this test case.
-
+    
     Returns:
         dict mapping grid_type -> {timeseries, snapshots, metadata}
     """
     grid_results = {}
-
+    
     for grid_dir in test_case_dir.iterdir():
         if not grid_dir.is_dir():
             continue
-
+            
         # Find resolution subdirectory (e.g., C24, 36x72, ico3, T21)
         resolution_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
         if not resolution_dirs:
             continue
         resolution_dir = resolution_dirs[0]  # Take first (should be only one)
-
+        
         # Check for required files
         csv_file = resolution_dir / "mean_timeseries.csv"
         npz_file = resolution_dir / "snapshots_latlon.npz"
         results_file = resolution_dir / "results.txt"
-
+        
         if all(f.exists() for f in [csv_file, npz_file, results_file]):
             try:
                 # Load timeseries data
                 timeseries_df = pd.read_csv(csv_file)
-
+                
                 # Load snapshot data
                 snapshots_data = np.load(npz_file)
-
+                
                 # Parse results metadata
                 metadata = {}
                 with open(results_file, 'r') as f:
@@ -4595,7 +4556,7 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
                         if ':' in line:
                             key, value = line.strip().split(':', 1)
                             metadata[key.strip()] = value.strip()
-
+                
                 grid_results[grid_dir.name] = {
                     'timeseries': timeseries_df,
                     'snapshots': snapshots_data,
@@ -4605,17 +4566,17 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
             except Exception as e:
                 print(f"Warning: Failed to load data for {grid_dir.name}: {e}")
                 continue
-
+    
     return grid_results
 
 
 def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> None:
     """Create 4-panel time series comparison plot across all grids."""
     import matplotlib.pyplot as plt
-
+    
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(f'Time Series Comparison - {test_case_dir.name}', fontsize=14, fontweight='bold')
-
+    
     # Colors for different grids
     colors = {
         'cubed_sphere': 'blue', 'latlon': 'red', 'mpas': 'green',
@@ -4627,7 +4588,7 @@ def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> No
         'spectral': '-', 'mpas_regional': '--',
         'latlon_regional': '--', 'cs_regional': '--',
     }
-
+    
     for grid_name, data in grid_results.items():
         df = data['timeseries']
         color = colors.get(grid_name, 'black')
@@ -4661,7 +4622,7 @@ def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> No
     for ax in axes.flat:
         ax.legend()
         ax.grid(True, alpha=0.3)
-
+    
     # Set common x-label
     for ax in axes[1,:]:
         ax.set_xlabel('Time (days)')
@@ -4682,7 +4643,7 @@ def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> No
 def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field: str = 'eta') -> None:
     """Create 4-panel final snapshot comparison for a given field."""
     import matplotlib.pyplot as plt
-
+    
     # Determine the test case for field ranges
     test_case = _extract_test_case_name(test_case_dir.name)
     field_ranges = FIELD_RANGES.get(test_case, {})
@@ -4714,25 +4675,25 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
             finite = combined[np.isfinite(combined)]
             if len(finite) > 0:
                 vmin, vmax = float(np.nanmin(finite)), float(np.nanmax(finite))
-
+    
     # Set up grid layout (2x2 for up to 4 grids + space for colorbar)
     n_grids = len(grid_results)
     if n_grids <= 2:
         nrows, ncols = 1, 3  # Extra column for colorbar
     else:
         nrows, ncols = 2, 3  # Extra column for colorbar
-
+        
     fig = plt.figure(figsize=(14, 10))  # Wider to accommodate colorbar
-
+    
     # Create subplots with specific width ratios: plots get most space, colorbar gets less
     gs = fig.add_gridspec(nrows, ncols, width_ratios=[1, 1, 0.05] if ncols == 3 else [1, 1, 1, 0.05])
-
+    
     axes = []
     for i in range(nrows):
         for j in range(ncols - 1):  # Don't include colorbar column
             ax = fig.add_subplot(gs[i, j])
             axes.append(ax)
-
+    
     # Determine simulation time of the final snapshot from any grid's data
     sim_time_str = ""
     for data in grid_results.values():
@@ -4744,7 +4705,7 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
 
     fig.suptitle(f'Final {field.upper()} Snapshots - {test_case_dir.name}{sim_time_str}',
                  fontsize=14, fontweight='bold')
-
+    
     # Choose colormap based on field
     if field == 'eta':
         cmap = 'RdBu_r'
@@ -4756,7 +4717,7 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
         cmap = 'RdBu_r'  # Diverging colormap for vertical velocity (upwelling/downwelling)
     else:
         cmap = 'viridis'
-
+    
     im = None
     for i, (grid_name, data) in enumerate(grid_results.items()):
         if i >= len(axes):
@@ -4824,7 +4785,7 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                 ax.set_xlabel('Longitude')
                 ax.set_ylabel('Latitude')
             else:
-                ax.text(0.5, 0.5, f'{field} wrong shape', transform=ax.transAxes,
+                ax.text(0.5, 0.5, f'{field} wrong shape', transform=ax.transAxes, 
                        ha='center', va='center')
                 ax.set_title(f'{grid_name} ({data["resolution"]})')
         else:
@@ -4836,7 +4797,7 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                 final_step = max(step_numbers)
                 final_field_name = f'{field}_step{final_step}'
                 final_field = snapshots[final_field_name]
-
+                
                 # Apply land masking if available (old format)
                 land_mask_name = f'land_mask_step{final_step}'
                 if land_mask_name in snapshots.files:
@@ -4865,14 +4826,14 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                 ax.set_xlabel('Longitude')
                 ax.set_ylabel('Latitude')
             else:
-                ax.text(0.5, 0.5, f'{field} not available', transform=ax.transAxes,
+                ax.text(0.5, 0.5, f'{field} not available', transform=ax.transAxes, 
                        ha='center', va='center')
                 ax.set_title(f'{grid_name} ({data["resolution"]})')
-
+    
     # Hide unused subplots
     for i in range(n_grids, len(axes)):
         axes[i].set_visible(False)
-
+    
     # Add colorbar in dedicated space
     if im is not None:
         # Create colorbar axes in the rightmost column, spanning all rows
@@ -4900,29 +4861,29 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
 
 def _create_comparison_summary(test_case_dir: Path, grid_results: dict) -> None:
     """Create cross-grid metrics comparison table."""
-
+    
     summary_file = test_case_dir / "comparison_summary.txt"
-
+    
     with open(summary_file, 'w') as f:
         f.write(f"{test_case_dir.name} - Cross-Grid Comparison\n")
         f.write("=" * 60 + "\n")
         f.write(f"{'Grid':<12} {'Status':<8} {'Resolution':<10} {'Wall Time':<10} {'Notes':<30}\n")
         f.write("-" * 80 + "\n")
-
+        
         # Find metrics for comparison
         eta_drifts = []
         T_drifts = []
         wall_times = []
-
+        
         for grid_name, data in grid_results.items():
             metadata = data['metadata']
             status = metadata.get('status', 'N/A')
             resolution = data['resolution']
             wall_time = metadata.get('wall_time', 'N/A')
             notes = metadata.get('notes', '')
-
+            
             f.write(f"{grid_name:<12} {status:<8} {resolution:<10} {wall_time:<10} {notes:<30}\n")
-
+            
             # Extract drift metrics from notes if available
             if 'eta drift=' in notes:
                 try:
@@ -4930,42 +4891,42 @@ def _create_comparison_summary(test_case_dir: Path, grid_results: dict) -> None:
                     eta_drifts.append((grid_name, float(eta_drift_str)))
                 except:
                     pass
-
+            
             if 'T drift=' in notes:
                 try:
                     T_drift_str = notes.split('T drift=')[1].split(',')[0].split()[0]
                     T_drifts.append((grid_name, float(T_drift_str)))
                 except:
                     pass
-
+            
             if wall_time != 'N/A':
                 try:
                     wall_time_val = float(wall_time.replace('s', ''))
                     wall_times.append((grid_name, wall_time_val))
                 except:
                     pass
-
+        
         f.write("-" * 80 + "\n")
-
+        
         # Summary statistics
         if eta_drifts:
             best_eta = min(eta_drifts, key=lambda x: abs(x[1]))
             worst_eta = max(eta_drifts, key=lambda x: abs(x[1]))
             f.write(f"Best η drift:    {best_eta[0]} ({best_eta[1]:.2e})\n")
             f.write(f"Worst η drift:   {worst_eta[0]} ({worst_eta[1]:.2e})\n")
-
+        
         if T_drifts:
             best_T = min(T_drifts, key=lambda x: abs(x[1]))
             worst_T = max(T_drifts, key=lambda x: abs(x[1]))
             f.write(f"Best T drift:    {best_T[0]} ({best_T[1]:.2e})\n")
             f.write(f"Worst T drift:   {worst_T[0]} ({worst_T[1]:.2e})\n")
-
+        
         if wall_times:
             fastest = min(wall_times, key=lambda x: x[1])
             slowest = max(wall_times, key=lambda x: x[1])
             f.write(f"Fastest:         {fastest[0]} ({fastest[1]:.1f}s)\n")
             f.write(f"Slowest:         {slowest[0]} ({slowest[1]:.1f}s)\n")
-
+    
     print(f"    Saved: {summary_file.name}")
 
 
@@ -5019,7 +4980,7 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
         return  # No grids at all
 
     # Ensure we have at least 2 time steps from grids that actually have the field
-    has_field_times = [nt for gname, nt in n_times_per_grid.items()
+    has_field_times = [nt for gname, nt in n_times_per_grid.items() 
                        if field in grid_results[gname]['snapshots'].files]
     if not has_field_times or max(has_field_times) < 2:
         return  # Need at least 2 time steps for evolution
@@ -5180,45 +5141,45 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
 def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict) -> None:
     """Create meridional vertical cross-section comparison for baroclinic gyre."""
     import numpy as np
-
+    
     # Check that we have T_3d data for all grids
     grids_with_T3d = {}
     for grid_name, data in grid_results.items():
         snapshots = data['snapshots']
         if 'T_3d' in snapshots.files:
             grids_with_T3d[grid_name] = data
-
+    
     if len(grids_with_T3d) < 2:
         return
-
+    
     # Domain parameters for baroclinic gyre (60° longitude × 60° latitude)
     lon_middle = 60.0  # Middle of 0-120° domain
     lat_range = (-90, 90)  # Full latitude range for averaging
-
+    
     fig, axes = plt.subplots(1, len(grids_with_T3d), figsize=(5 * len(grids_with_T3d), 6),
                              sharey=True)
     if len(grids_with_T3d) == 1:
         axes = [axes]
-
+    
     for idx, (grid_name, data) in enumerate(grids_with_T3d.items()):
         ax = axes[idx]
         snapshots = data['snapshots']
-
+        
         # Load final temperature field (use last time step)
         T_3d_all = np.asarray(snapshots['T_3d'], dtype=np.float64)
-        lon_deg = np.asarray(snapshots['lon'], dtype=np.float64)
+        lon_deg = np.asarray(snapshots['lon'], dtype=np.float64) 
         lat_deg = np.asarray(snapshots['lat'], dtype=np.float64)
-
-        # Handle different data structures - T_3d is (time, lat, lon, lev)
+        
+        # Handle different data structures - T_3d is (time, lat, lon, lev) 
         if T_3d_all.ndim == 4:  # (time, lat, lon, lev)
             T_3d = T_3d_all[-1]  # Take final time step → (lat, lon, lev)
-        elif T_3d_all.ndim == 3:  # (lat, lon, lev) - already final state
+        elif T_3d_all.ndim == 3:  # (lat, lon, lev) - already final state  
             T_3d = T_3d_all
         else:
             print(f"Warning: unexpected T_3d shape {T_3d_all.shape} for {grid_name}")
             continue
-
-        # Get depth levels from the first grid (they should be the same)
+        
+        # Get depth levels from the first grid (they should be the same)  
         if idx == 0:
             # Try to get depth data from results.txt or default levels
             results_file = test_case_dir / grid_name / 'results.txt'
@@ -5234,28 +5195,28 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
                             break
                     else:
                         # Fallback to default depth levels
-                        depth_data = np.array([26.19, 133.86, 352.12, 680.95, 1120.37,
+                        depth_data = np.array([26.19, 133.86, 352.12, 680.95, 1120.37, 
                                              1670.37, 2330.95, 3102.12, 3983.86, 4976.19])
             else:
                 # Fallback to default depth levels
                 depth_data = np.array([26.19, 133.86, 352.12, 680.95, 1120.37,
                                      1670.37, 2330.95, 3102.12, 3983.86, 4976.19])
-
+        
         # Extract meridional section at domain middle (longitude = 60°)
-        # Find closest longitude index to domain middle
+        # Find closest longitude index to domain middle  
         lon_idx = np.argmin(np.abs(lon_deg - lon_middle))
-
+        
         # Average over a few longitude points for smoother section
         lon_indices = slice(max(0, lon_idx-2), min(len(lon_deg), lon_idx+3))
         T_section = np.nanmean(T_3d[:, lon_indices, :], axis=1)  # T_3d is (lat, lon, lev) → (lat, lev)
-
+        
         # Apply land mask if available (simplified for now)
         if 'land_mask' in snapshots.files:
             land_mask = np.asarray(snapshots['land_mask'], dtype=np.float64)
             # For now, skip land masking to get basic functionality working
             # TODO: Fix land mask broadcasting for vertical sections
             pass
-
+        
         # Compute depth interfaces for proper plotting
         def compute_level_interfaces(level_centers):
             if len(level_centers) == 1:
@@ -5265,9 +5226,9 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
             interfaces[1:-1] = 0.5 * (level_centers[:-1] + level_centers[1:])
             interfaces[-1] = level_centers[-1] + (level_centers[-1] - interfaces[-2])
             return interfaces
-
+        
         level_interfaces = compute_level_interfaces(depth_data)
-
+        
         # Create coordinate meshes for pcolormesh
         # Ensure lat_interfaces matches the T_section shape
         if len(lat_deg) > 1:
@@ -5277,9 +5238,9 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
                                        len(lat_deg) + 1)
         else:
             lat_interfaces = np.array([lat_deg[0] - 1.0, lat_deg[0] + 1.0])
-
+        
         X, Y = np.meshgrid(lat_interfaces, level_interfaces)
-
+        
         # Verify dimensions match for pcolormesh
         expected_lat_size = len(lat_interfaces) - 1  # pcolormesh expects one less than interfaces
         expected_lev_size = len(level_interfaces) - 1
@@ -5287,7 +5248,7 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
             print(f"Warning: T_section shape {T_section.shape} doesn't match expected "
                   f"({expected_lat_size}, {expected_lev_size}) for {grid_name}")
             continue
-
+        
         # Plot with adaptive colormap range
         # For baroclinic_gyre, use data-adaptive range to show circulation patterns
         T_finite = T_section.T[np.isfinite(T_section.T)]
@@ -5295,10 +5256,10 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
             vmin, vmax = float(np.nanmin(T_finite)), float(np.nanmax(T_finite))
         else:
             vmin, vmax = 2, 20  # fallback for edge cases
-
-        im = ax.pcolormesh(X, Y, T_section.T, cmap='RdYlBu_r',
+        
+        im = ax.pcolormesh(X, Y, T_section.T, cmap='RdYlBu_r', 
                           vmin=vmin, vmax=vmax, shading='flat')
-
+        
         ax.set_title(f'{grid_name}', fontsize=12)
         ax.set_xlabel('Latitude (°)')
         if idx == 0:
@@ -5306,27 +5267,27 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
         ax.set_ylim(0, level_interfaces[-1])  # Set y-limits to actual depth range
         ax.invert_yaxis()  # Surface at top, deep at bottom
         ax.grid(True, alpha=0.3)
-
+        
         # Set x-limits to regional domain extent for consistent comparison
         # Use the actual experiment domain, not the interpolation grid extent
         regional_lat_min, regional_lat_max = 15.0, 75.0  # Baroclinic gyre domain
         ax.set_xlim(regional_lat_min, regional_lat_max)
-
+        
         # Add domain boundaries for regional grids
         if 'regional' in grid_name:
             ax.axvline(15, color='white', linewidth=2, linestyle='--', alpha=0.8)
             ax.axvline(75, color='white', linewidth=2, linestyle='--', alpha=0.8)
-
+    
     # Add colorbar
     plt.tight_layout()
     fig.subplots_adjust(right=0.88)
     cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
     cbar = fig.colorbar(im, cax=cbar_ax)
     cbar.set_label('Temperature (°C)', fontsize=12)
-
-    fig.suptitle(f'{test_case_dir.name} — Meridional Temperature Section (60°E)',
+    
+    fig.suptitle(f'{test_case_dir.name} — Meridional Temperature Section (60°E)', 
                  fontsize=14, y=0.95)
-
+    
     # Save the plot
     out_file = test_case_dir / 'comparison_vertical_section.png'
     fig.savefig(out_file, dpi=150, bbox_inches='tight')
@@ -5580,15 +5541,15 @@ def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_
     """Check if all grids completed for a test case and generate cross-grid comparisons."""
     # Find all results for this test case
     test_results = [r for r in all_results if r['test'] == test_case_name]
-
+    
     if len(test_results) < 2:
         return  # Need at least 2 grids for comparison
-
+    
     # Check if we have results for multiple grids
     grid_types = set(r['grid'] for r in test_results)
     if len(grid_types) < 2:
         return  # Need different grids, not just multiple resolutions
-
+        
     # Rest-state variants are grouped under rest_state/
     if test_case_name in TestCase._REST_STATE_GROUP:
         test_case_dir = output_base / "rest_state" / test_case_name
@@ -5596,7 +5557,7 @@ def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_
         test_case_dir = output_base / test_case_name
     if not test_case_dir.exists():
         return
-
+    
     # Try to collect grid results
     grid_results = _collect_grid_results(test_case_dir)
     if len(grid_results) > 1:
@@ -5872,7 +5833,7 @@ def main():
 
     # Keep track of completed test cases for cross-grid comparison
     completed_test_cases = set()
-
+    
     for i, tc in enumerate(tests, 1):
         if args.days is not None:
             days = args.days
@@ -5899,13 +5860,13 @@ def main():
             traceback.print_exc()
         finally:
             _ensure_required_artifacts(out_dir)
-
+        
         # Check if this test case just completed across all its grids
         if tc.case not in completed_test_cases:
             # Find how many grids are supposed to run for this test case
             test_case_tests = [t for t in tests if t.case == tc.case]
             test_case_results = [r for r in ALL_RESULTS if r['test'] == tc.case]
-
+            
             # If we have results for all grids of this test case, generate comparisons
             if len(test_case_results) >= len(test_case_tests):
                 _check_and_generate_comparisons(output_base, tc.case, ALL_RESULTS)
@@ -5980,12 +5941,12 @@ def main():
         test_cases[test_name].append(result)
         if test_name not in completed_test_cases:
             remaining_test_cases.add(test_name)
-
+    
     if remaining_test_cases:
         print("\n" + "=" * 78)
         print("  GENERATING REMAINING CROSS-GRID COMPARISONS")
         print("=" * 78)
-
+        
         # Create comparisons for test cases that weren't processed during the main loop
         for test_name in remaining_test_cases:
             results = test_cases[test_name]

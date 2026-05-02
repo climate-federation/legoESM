@@ -135,11 +135,16 @@ class TestCGridTendencies:
         assert jnp.all(jnp.isfinite(tend.deta_dt.data))
 
     def test_rest_state_small_tendencies(self, state, grid, z_coord, config):
+        # At u=v=0 with horizontally uniform T, S and flat bathymetry,
+        # every term in the baroclinic momentum tendency vanishes by
+        # construction: ζ=0, KE=0, ∇p'=0. Under JAX_ENABLE_X64=1 the
+        # result is exactly 0.0. The previous 1e-2 bound was six orders
+        # of magnitude too slack and masked regressions. See #160.
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, config,
         )
-        assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-2
-        assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1e-2
+        assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-14
+        assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1e-14
 
     def test_tendency_shapes(self, state, grid, z_coord, config):
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
@@ -160,6 +165,53 @@ class TestCGridTendencies:
         )
         assert jnp.all(tend.dH_bathy_dt.data == 0)
         assert jnp.all(tend.dland_mask_dt.data == 0)
+
+    def test_baroclinic_tendency_not_galilean_invariant(
+        self, state, grid, z_coord, config,
+    ):
+        """Barotropic-shift test for issue #160 (total-velocity KE/PV).
+
+        Two states differ only by a spatially constant δU added to u.
+        The total-velocity KE gradient produces an extra −δU·∂u/∂x
+        tendency, so du_dt_A ≠ du_dt_B when ∂u/∂x ≠ 0.
+        """
+        n_lat = grid.n_lat
+        n_lon = grid.n_lon
+        nlev = z_coord.n_levels
+
+        # Nontrivial depth-dependent zonal flow: 0.5·sin(lon)·z_profile
+        lon_u_1d = jnp.linspace(0.0, 2.0 * jnp.pi, n_lon + 1)
+        z_profile = jnp.linspace(1.0, 0.3, nlev)
+        u_A = (
+            0.5
+            * jnp.sin(lon_u_1d)[None, :, None]
+            * z_profile[None, None, :]
+            * jnp.ones((n_lat, n_lon + 1, nlev))
+        )
+        u_mask_3d = state.u_mask.data[:, :, None]
+        u_A = u_A * u_mask_3d
+
+        delta_U = 0.1
+        u_B = u_A + delta_U * u_mask_3d
+
+        state_A = state._replace(u=state.u.replace(data=u_A))
+        state_B = state._replace(u=state.u.replace(data=u_B))
+
+        tend_A = latlon_cgrid_ocean_baroclinic_tendencies(
+            state_A, grid, z_coord, config,
+        )
+        tend_B = latlon_cgrid_ocean_baroclinic_tendencies(
+            state_B, grid, z_coord, config,
+        )
+
+        diff_du = float(
+            jnp.max(jnp.abs(tend_A.du_dt.data - tend_B.du_dt.data))
+        )
+        # Total-velocity KE gradient produces O(δU · ∂u/∂x) difference.
+        assert diff_du > 1e-12, (
+            f"Baroclinic du/dt should depend on barotropic offset δU "
+            f"via the KE gradient; got diff={diff_du:.3e} (invariant → bug)."
+        )
 
 
 # =========================================================================

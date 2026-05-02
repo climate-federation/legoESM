@@ -668,13 +668,21 @@ def uv_from_vordiv(
     # This gives sum_nm psi_hat[nm] * Hnm[lat, nm] * exp(im*lon) / a
     # The /a comes from the sphere: gradient on sphere has 1/a factor
 
-    # d/d(theta) component: uses Hnm in synthesis
-    dpsi_dtheta = _sh_synthesis_H(grid, psi_hat) / a
-    dchi_dtheta = _sh_synthesis_H(grid, chi_hat) / a
+    # d/d(theta) and d/d(lon) components — batch (psi, chi) along a
+    # trailing axis so the SH synthesis runs once on (n_sh, 2) for
+    # each of the two synthesis variants.  Uses the 3D-native
+    # synthesis (``sh_synthesis_3d`` / ``_sh_synthesis_H_3d``), which
+    # treats any trailing axis (level *or* tracer/component) as a
+    # passive batch — for the SW 2D path the ``2`` plays the role of
+    # ``nlev=2``.  4 SH syntheses → 2.
+    pc_hat = jnp.stack([psi_hat, chi_hat], axis=-1)  # (n_sh, 2)
+    pc_dtheta = _sh_synthesis_H_3d(grid, pc_hat) / a
+    dpsi_dtheta = pc_dtheta[..., 0]
+    dchi_dtheta = pc_dtheta[..., 1]
 
-    # d/d(lon) component: multiply coeffs by im, then standard synthesis
-    dpsi_dlon = sh_synthesis(grid, 1j * grid.ms * psi_hat) / a
-    dchi_dlon = sh_synthesis(grid, 1j * grid.ms * chi_hat) / a
+    pc_dlon = sh_synthesis_3d(grid, (1j * grid.ms)[:, None] * pc_hat) / a
+    dpsi_dlon = pc_dlon[..., 0]
+    dchi_dlon = pc_dlon[..., 1]
 
     # u*cos_lat = d(psi)/d(theta) + d(chi)/d(lon)
     u_cos = dpsi_dtheta + dchi_dlon
@@ -689,6 +697,12 @@ def _sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     """Inverse SH transform using derivative Legendre Hnm (instead of Pnm).
 
     Produces the theta-derivative of the field on the grid.
+
+    Mirrors the ``sh_synthesis`` rewrite that replaced a scatter-add
+    (``zeros + at[:, ms].add``) with ``jax.ops.segment_sum``.  On GPU
+    the scatter-add falls back to atomic ops and is 5–20× slower than
+    a segment sum; this path is hit every spectral PE step via
+    ``uv_from_vordiv``.
     """
     n_lat = grid.n_lat
     n_lon = grid.n_lon
@@ -696,8 +710,11 @@ def _sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     ms = grid.ms
 
     contributions = grid.Hnm * coeffs[None, :]
-    f_m = jnp.zeros((n_lat, n_max + 1), dtype=jnp.complex128)
-    f_m = f_m.at[:, ms].add(contributions)
+    f_m = jax.ops.segment_sum(
+        contributions.T,
+        ms,
+        num_segments=n_max + 1,
+    ).T  # (n_lat, n_max + 1)
 
     f_hat_full = jnp.zeros((n_lat, n_lon // 2 + 1), dtype=jnp.complex128)
     f_hat_full = f_hat_full.at[:, :n_max + 1].set(f_m)
@@ -755,7 +772,12 @@ def spectral_hyperdiffusion(
 # =============================================================================
 
 def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
-    """Forward SH transform per vertical level.
+    """Forward SH transform per vertical level (3D-native).
+
+    Same numeric algorithm as :func:`sh_analysis` but with the
+    longitude FFT, the Legendre weight, and the latitude sum all
+    batched along the trailing level axis — no per-level moveaxis +
+    vmap.
 
     Parameters
     ----------
@@ -765,13 +787,29 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
     -------
     (n_sh, nlev) complex array.
     """
-    f_t = jnp.moveaxis(field_3d, -1, 0)  # (nlev, n_lat, n_lon)
-    result = jax.vmap(lambda f: sh_analysis(grid, f))(f_t)  # (nlev, n_sh)
-    return jnp.moveaxis(result, 0, -1)  # (n_sh, nlev)
+    n_lon = grid.n_lon
+    n_max = grid.n_max
+    ms = grid.ms
+
+    # FFT along longitude (axis 1) → (n_lat, n_lon//2+1, nlev) complex.
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]                    # (n_lat, n_max+1, nlev)
+    f_m_gathered = f_m[:, ms, :]                          # (n_lat, n_sh, nlev)
+
+    # Sum over latitudes; ``wPnm`` is (n_lat, n_sh) — broadcast over levels.
+    return 2.0 * jnp.pi * jnp.sum(
+        grid.wPnm[:, :, None] * f_m_gathered, axis=0,
+    )
 
 
 def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
-    """Inverse SH transform per vertical level.
+    """Inverse SH transform per vertical level (3D-native).
+
+    Same numeric algorithm as :func:`sh_synthesis` but with the
+    ``n_sh`` -> ``m`` segment-sum done in a single batched call over
+    ``(n_sh, n_lat, nlev)`` instead of vmap'ing the 2D path per level.
+    Eliminates the per-level moveaxis + vmap dance and lets XLA fuse
+    the FFT across the level axis.
 
     Parameters
     ----------
@@ -781,45 +819,99 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     -------
     (n_lat, n_lon, nlev) real array.
     """
-    c_t = jnp.moveaxis(coeffs_3d, -1, 0)  # (nlev, n_sh)
-    result = jax.vmap(lambda c: sh_synthesis(grid, c))(c_t)  # (nlev, n_lat, n_lon)
-    return jnp.moveaxis(result, 0, -1)  # (n_lat, n_lon, nlev)
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    n_max = grid.n_max
+    ms = grid.ms  # (n_sh,)
+
+    # contributions: (n_lat, n_sh, nlev) — Pnm broadcasts over levels.
+    contributions = grid.Pnm[..., None] * coeffs_3d[None, :, :]
+
+    # segment_sum operates on the leading axis; permute (n_sh, n_lat, nlev),
+    # group, then permute back to (n_lat, n_max+1, nlev).
+    f_m = jnp.swapaxes(
+        jax.ops.segment_sum(
+            jnp.swapaxes(contributions, 0, 1),
+            ms,
+            num_segments=n_max + 1,
+        ),
+        0, 1,
+    )
+
+    # Inverse FFT in longitude over axis 1.
+    nlev = coeffs_3d.shape[-1]
+    f_hat_full = jnp.zeros(
+        (n_lat, n_lon // 2 + 1, nlev), dtype=jnp.complex128,
+    )
+    f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
+    field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
+    return field_grid.real
+
+
+def _sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
+    """3D-native counterpart of :func:`_sh_synthesis_H`.
+
+    Returns the θ-derivative of the inverse SH transform at every
+    vertical level in a single batched ``segment_sum`` + IRFFT, instead
+    of vmap'ing the 2D path per level.
+    """
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    n_max = grid.n_max
+    ms = grid.ms
+
+    contributions = grid.Hnm[..., None] * coeffs_3d[None, :, :]
+    f_m = jnp.swapaxes(
+        jax.ops.segment_sum(
+            jnp.swapaxes(contributions, 0, 1),
+            ms,
+            num_segments=n_max + 1,
+        ),
+        0, 1,
+    )
+
+    nlev = coeffs_3d.shape[-1]
+    f_hat_full = jnp.zeros(
+        (n_lat, n_lon // 2 + 1, nlev), dtype=jnp.complex128,
+    )
+    f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
+    field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
+    return field_grid.real
 
 
 def sh_analysis_oc2_3d(
     grid: GaussianGrid, field_3d: jax.Array,
 ) -> jax.Array:
-    """Forward SH transform with 1/cos^2 weighting, per level.
+    """Forward SH transform with 1/cos² weighting, 3D-native.
 
-    Parameters
-    ----------
-    field_3d : (n_lat, n_lon, nlev).
-
-    Returns
-    -------
-    (n_sh, nlev) complex.
+    Same numeric algorithm as :func:`sh_analysis_oc2` but with the
+    longitude FFT, Legendre weighting, and latitude sum batched along
+    the trailing level axis.
     """
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(lambda f: sh_analysis_oc2(grid, f))(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    n_max = grid.n_max
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]
+    f_m_gathered = f_m[:, grid.ms, :]
+    return 2.0 * jnp.pi * jnp.sum(
+        grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0,
+    )
 
 
 def sh_analysis_dmu_3d(
     grid: GaussianGrid, field_3d: jax.Array,
 ) -> jax.Array:
-    """Forward SH transform with dPnm/dmu weighting, per level.
+    """Forward SH transform with dPnm/dμ weighting, 3D-native.
 
-    Parameters
-    ----------
-    field_3d : (n_lat, n_lon, nlev).
-
-    Returns
-    -------
-    (n_sh, nlev) complex.
+    Same numeric algorithm as :func:`sh_analysis_dmu` but batched along
+    the trailing level axis.
     """
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(lambda f: sh_analysis_dmu(grid, f))(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    n_max = grid.n_max
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]
+    f_m_gathered = f_m[:, grid.ms, :]
+    return 2.0 * jnp.pi * jnp.sum(
+        grid.wDnm[:, :, None] * f_m_gathered, axis=0,
+    )
 
 
 def uv_from_vordiv_3d(
@@ -827,7 +919,15 @@ def uv_from_vordiv_3d(
     vor_hat_3d: jax.Array,
     div_hat_3d: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """Reconstruct (u*cos_lat, v*cos_lat) at all levels from spectral vor/div.
+    """Reconstruct (u*cos_lat, v*cos_lat) at all levels from spectral
+    vor/div — 3D-native.
+
+    Same algorithm as :func:`uv_from_vordiv` but each synthesis is
+    batched across both the (psi, chi) potentials *and* all vertical
+    levels, using the trailing-axis-passive-batch property of
+    ``sh_synthesis_3d`` / ``_sh_synthesis_H_3d``.  4 per-call SH
+    syntheses collapse to 2 (one ``segment_sum`` + IRFFT for both
+    ``d/dtheta`` and ``d/dlon`` — psi/chi share the kernel).
 
     Parameters
     ----------
@@ -837,14 +937,98 @@ def uv_from_vordiv_3d(
     -------
     u_cos, v_cos : (n_lat, n_lon, nlev) real arrays.
     """
-    vor_t = jnp.moveaxis(vor_hat_3d, -1, 0)  # (nlev, n_sh)
-    div_t = jnp.moveaxis(div_hat_3d, -1, 0)
+    a = grid.radius
 
-    def single_level(v, d):
-        return uv_from_vordiv(grid, v, d)
+    # Streamfunction and velocity potential in spectral space
+    # (ilap is shape (n_sh,) — broadcasts over the trailing level axis).
+    psi_hat = grid.ilap[:, None] * vor_hat_3d
+    chi_hat = grid.ilap[:, None] * div_hat_3d
 
-    u_cos_t, v_cos_t = jax.vmap(single_level)(vor_t, div_t)
-    return jnp.moveaxis(u_cos_t, 0, -1), jnp.moveaxis(v_cos_t, 0, -1)
+    n_sh_pc, nlev_pc = psi_hat.shape
+    # Stack (psi, chi) along a trailing axis and fold into the level
+    # dim so each SH synthesis runs once on a thicker (n_sh, nlev*2)
+    # tensor instead of being called twice on (n_sh, nlev).
+    pc_stack = jnp.stack([psi_hat, chi_hat], axis=-1)  # (n_sh, nlev, 2)
+    pc_flat = pc_stack.reshape(n_sh_pc, nlev_pc * 2)
+
+    pc_dtheta_flat = _sh_synthesis_H_3d(grid, pc_flat) / a
+    pc_dtheta = pc_dtheta_flat.reshape(
+        pc_dtheta_flat.shape[0], pc_dtheta_flat.shape[1], nlev_pc, 2,
+    )
+    dpsi_dtheta = pc_dtheta[..., 0]
+    dchi_dtheta = pc_dtheta[..., 1]
+
+    im_pc = (1j * grid.ms)[:, None] * pc_flat
+    pc_dlon_flat = sh_synthesis_3d(grid, im_pc) / a
+    pc_dlon = pc_dlon_flat.reshape(
+        pc_dlon_flat.shape[0], pc_dlon_flat.shape[1], nlev_pc, 2,
+    )
+    dpsi_dlon = pc_dlon[..., 0]
+    dchi_dlon = pc_dlon[..., 1]
+
+    u_cos = dpsi_dtheta + dchi_dlon
+    v_cos = dpsi_dlon - dchi_dtheta
+    return u_cos, v_cos
+
+
+def vordiv_from_uv_3d(
+    grid: GaussianGrid,
+    u_grid: jax.Array,
+    v_grid: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Forward transform a grid-space vector field to spectral (vor, div).
+
+    Inverse of :func:`uv_from_vordiv_3d` (up to the n=0 mode, which is
+    annihilated by both directions because vor and div have no constant
+    mode on the sphere).
+
+    Implements the Hack & Jakob (1992) / Bourke (1972) spectral
+    divergence and curl operators in pole-safe form.  For a vector field
+    ``F = (F_x, F_y)`` with ``A = F_x · cos φ`` and ``B = F_y · cos φ``::
+
+        div_hat  = (im/a) · sh_oc2(A) - (1/a) · sh_dmu(B)
+        vor_hat  = (im/a) · sh_oc2(B) + (1/a) · sh_dmu(A)
+
+    where ``sh_oc2`` carries an embedded ``1/cos²φ`` weighting (pole-safe)
+    and ``sh_dmu`` carries the dPnm/dμ kernel.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+    u_grid, v_grid : (n_lat, n_lon, nlev) real arrays
+        Grid-space vector components in **physical** units (NOT pre-multiplied
+        by ``cos φ``).
+
+    Returns
+    -------
+    vor_hat, div_hat : (n_sh, nlev) complex arrays.
+    """
+    a = grid.radius
+    cos_lat_3d = grid.cos_lat[:, None, None]
+    A = u_grid * cos_lat_3d   # F_x · cos φ
+    B = v_grid * cos_lat_3d   # F_y · cos φ
+
+    # Stack (A, B) along a trailing axis and fold into the level dim so
+    # each SH-analysis variant runs once on a thicker
+    # (n_lat, n_lon, nlev*2) tensor — matches the
+    # ``uv_from_vordiv_3d`` / spectral PE batching pattern.  4 SH
+    # forwards collapse to 2.
+    n_lat_t, n_lon_t, nlev_t = A.shape
+    AB_stack = jnp.stack([A, B], axis=-1)
+    AB_flat = AB_stack.reshape(n_lat_t, n_lon_t, nlev_t * 2)
+    AB_oc2_flat = sh_analysis_oc2_3d(grid, AB_flat)
+    AB_dmu_flat = sh_analysis_dmu_3d(grid, AB_flat)
+    AB_oc2 = AB_oc2_flat.reshape(AB_oc2_flat.shape[0], nlev_t, 2)
+    AB_dmu = AB_dmu_flat.reshape(AB_dmu_flat.shape[0], nlev_t, 2)
+    A_oc2, B_oc2 = AB_oc2[..., 0], AB_oc2[..., 1]
+    A_dmu, B_dmu = AB_dmu[..., 0], AB_dmu[..., 1]
+
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    div_hat = im_over_a[:, None] * A_oc2 - one_over_a * B_dmu
+    vor_hat = im_over_a[:, None] * B_oc2 + one_over_a * A_dmu
+    return vor_hat, div_hat
 
 
 def spectral_hyperdiffusion_3d(

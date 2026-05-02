@@ -127,7 +127,7 @@ def tracer_tendencies_latlon(
     """
     t = state.time.data
     q = state.tracers.data  # (n_lat, n_lon, nlev, n_tracers)
-    n_tracers = q.shape[-1]
+    n_lat, n_lon, nlev, n_tracers = q.shape
 
     # Evaluate u at the n_lon unique longitude-face coordinates, then
     # append the periodic wrap column.  This avoids passing a 2π+ε
@@ -143,21 +143,38 @@ def tracer_tendencies_latlon(
     # sigma_dot at cell centers
     _, _, sigma_dot = wind_fn(t, grid.lon2d, grid.lat2d, sigma_coord)
 
-    def single_tracer_tendency(q_i):
-        """dq_i/dt for one tracer.  q_i shape: (n_lat, n_lon, nlev).
+    # Horizontal advection — fold tracer axis into level axis so the
+    # operator's halo pad + PPM reconstruction runs once for all tracers.
+    # ``pad_halo_latlon_3d`` and ``_ppm_reconstruct_*_3d`` only operate
+    # on lat/lon; the trailing combined axis is passively carried
+    # through.  ``u_face`` and ``v_face`` are the same for every tracer,
+    # so they are broadcast across the trailing axis using ``jnp.repeat``:
+    # the ``q_flat`` reshape interleaves levels and tracers as
+    # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]``, so each level's
+    # velocity must be duplicated ``n_tracers`` times to align — using
+    # ``jnp.tile`` would concatenate the entire array and mis-align
+    # tracer ↔ level.
+    q_flat = q.reshape(n_lat, n_lon, nlev * n_tracers)
+    if n_tracers == 1:
+        u_face_b, v_face_b = u_face, v_face
+    else:
+        u_face_b = jnp.repeat(u_face, n_tracers, axis=-1)
+        v_face_b = jnp.repeat(v_face, n_tracers, axis=-1)
+    horiz_adv_flat = cgrid_fv_scalar_advection_latlon_3d(
+        q_flat, u_face_b, v_face_b, grid,
+    )
+    horiz_adv = horiz_adv_flat.reshape(n_lat, n_lon, nlev, n_tracers)
 
-        Advective form: dq/dt = -v·∇q.  Preserves uniform tracers
-        exactly regardless of wind divergence — correct for
-        prescribed-wind transport with no companion continuity equation.
-        """
-        horiz_adv = cgrid_fv_scalar_advection_latlon_3d(q_i, u_face, v_face, grid)
-        vert_adv = vertical_advection(q_i, sigma_dot, sigma_coord)
-        return horiz_adv + vert_adv
+    # Vertical advection — local stencil along axis -1, no halo cost.
+    # ``vertical_advection`` hard-codes axis -1 as nlev, so vmap over
+    # the trailing tracer axis (with sigma_dot/sigma_coord captured in
+    # the closure) so JAX produces one batched kernel.
+    def _vert_one(q_one):
+        return vertical_advection(q_one, sigma_dot, sigma_coord)
 
-    # vmap over the tracer axis (last)
-    q_t = jnp.moveaxis(q, -1, 0)  # (n_tracers, n_lat, n_lon, nlev)
-    dq_dt_t = jax.vmap(single_tracer_tendency)(q_t)
-    dq_dt = jnp.moveaxis(dq_dt_t, 0, -1)  # (n_lat, n_lon, nlev, n_tracers)
+    vert_adv = jax.vmap(_vert_one, in_axes=-1, out_axes=-1)(q)
+
+    dq_dt = horiz_adv + vert_adv
 
     return TracerState(
         tracers=state.tracers.replace(data=dq_dt),

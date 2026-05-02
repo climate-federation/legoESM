@@ -23,7 +23,7 @@ Example Usage:
 Available Experiments:
 - rest_state: Fundamental stability and conservation test
 - barotropic_wave: Barotropic gravity wave propagation test
-- wind_gyre: Wind-driven double-gyre circulation development
+- regional_gyre: Regional wind-driven gyre circulation (base for gyre experiments)
 - baroclinic: Baroclinic adjustment from meridional temperature front
 - baroclinic_gyre: Regional wind-driven baroclinic gyre with surface restoring
 - phillips_two_layer: Two-layer baroclinic instability with relaxation
@@ -31,6 +31,11 @@ Available Experiments:
 - lock_exchange: Density-driven gravity current with RPE mixing diagnostics
 - overflow: Dense water overflow over bathymetric slope
 - stommel_gyre_tracer: Passive tracer transport in wind-driven gyre
+- geostrophic_adjustment: Geostrophic adjustment from temperature front
+- global_barotropic_wind: Global barotropic wind-driven circulation
+- eady_instability: Eady baroclinic instability from meridional temperature front
+- acc_channel: ACC-like channel with Gaussian ridge and wind forcing
+- global_overturning: Global baroclinic overturning with stratification and SST restoring
 
 Design Principles:
 1. Each experiment is self-documenting with scientific context
@@ -42,7 +47,7 @@ Design Principles:
 
 from . import rest_state
 from . import barotropic_wave
-from . import wind_gyre
+from . import regional_gyre
 from . import baroclinic
 from . import baroclinic_gyre
 from . import phillips_two_layer
@@ -50,12 +55,17 @@ from . import inertia_gravity_wave
 from . import lock_exchange
 from . import overflow
 from . import stommel_gyre_tracer
+from . import geostrophic_adjustment
+from . import global_barotropic_wind
+from . import eady_instability
+from . import acc_channel
+from . import global_overturning
 
 # Registry of all available experiments
 AVAILABLE_EXPERIMENTS = {
     "rest_state": rest_state.EXPERIMENT_CONFIG,
     "barotropic_wave": barotropic_wave.EXPERIMENT_CONFIG,
-    "wind_gyre": wind_gyre.EXPERIMENT_CONFIG,
+    "regional_gyre": regional_gyre.EXPERIMENT_CONFIG,
     "baroclinic": baroclinic.EXPERIMENT_CONFIG,
     "baroclinic_gyre": baroclinic_gyre.EXPERIMENT_CONFIG,
     "phillips_two_layer": phillips_two_layer.EXPERIMENT_CONFIG,
@@ -63,12 +73,17 @@ AVAILABLE_EXPERIMENTS = {
     "lock_exchange": lock_exchange.EXPERIMENT_CONFIG,
     "overflow": overflow.EXPERIMENT_CONFIG,
     "stommel_gyre_tracer": stommel_gyre_tracer.EXPERIMENT_CONFIG,
+    "geostrophic_adjustment": geostrophic_adjustment.EXPERIMENT_CONFIG,
+    "global_barotropic_wind": global_barotropic_wind.EXPERIMENT_CONFIG,
+    "eady_instability": eady_instability.EXPERIMENT_CONFIG,
+    "acc_channel": acc_channel.EXPERIMENT_CONFIG,
+    "global_overturning": global_overturning.EXPERIMENT_CONFIG,
 }
 
 __all__ = [
     "rest_state",
     "barotropic_wave",
-    "wind_gyre",
+    "regional_gyre",
     "baroclinic",
     "baroclinic_gyre",
     "phillips_two_layer",
@@ -76,5 +91,10 @@ __all__ = [
     "lock_exchange",
     "overflow",
     "stommel_gyre_tracer",
+    "geostrophic_adjustment",
+    "global_barotropic_wind",
+    "eady_instability",
+    "acc_channel",
+    "global_overturning",
     "AVAILABLE_EXPERIMENTS",
 ]

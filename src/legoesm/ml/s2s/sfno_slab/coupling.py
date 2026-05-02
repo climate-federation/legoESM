@@ -101,12 +101,12 @@ def _sst_uses_celsius_units(sst: np.ndarray, ocean_mask: np.ndarray) -> bool:
 
 def _sst_to_ocean_units(sst: np.ndarray, *, uses_celsius: bool) -> np.ndarray:
     values = np.asarray(sst, dtype=np.float32)
-    return values + np.float32(273.15) if uses_celsius else values
+    return values + np.float32(constants.T_freeze) if uses_celsius else values
 
 
 def _sst_from_ocean_units(sst: np.ndarray, *, uses_celsius: bool) -> np.ndarray:
     values = np.asarray(sst, dtype=np.float32)
-    return values - np.float32(273.15) if uses_celsius else values
+    return values - np.float32(constants.T_freeze) if uses_celsius else values
 
 
 def _build_atm_to_surface(

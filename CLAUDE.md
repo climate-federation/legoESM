@@ -28,10 +28,20 @@
 - Read nearby implementation and tests before proposing or making changes.
 - If a request is ambiguous and could affect numerics, physics, APIs, or scientific conclusions, ask a clarifying question before editing.
 - Prefer minimal, local diffs. Do not refactor unrelated code during targeted bug fixes.
-- Reuse existing shared functions, operators, diagnostics, initial-condition builders, and init/load paths whenever possible.
-- Before adding new helpers or new initialization logic, search for an existing implementation that can be extended or factored into a shared location.
-- Avoid duplicating numerics across dycores, physics packages, grids, or test setups when a common implementation is feasible.
+- **Mandatory pre-implementation search**: BEFORE writing any new function, helper, class, operator, diagnostic, init/load path, loss, or numerical routine, you MUST first search the codebase for an existing implementation. Use Grep/Glob/Explore to look across `src/legoesm/` for: similar function names, similar docstrings, similar formulas, and existing modules in the relevant subpackage (e.g., `thermo.py`, `constants.py`, `eos.py`, `ml/loss.py`, `diagnostics/`, `core/`, `atmosphere/physics/_shared.py`). State explicitly in your response what you searched for and what you found before adding new code. If something similar exists, extend or factor it — do not duplicate.
+- **Always use existing shared utilities by default — never re-derive.** This is the default for *every* task — production source, scripts, validation harnesses, plotting code, tests, notebooks, even one-off probes. Specifically:
+  - **Constants**: `from legoesm import constants` — `constants.T_freeze`, `constants.R_d`, `constants.c_pd`, `constants.L_v`, `constants.R_v`, `constants.epsilon`, `constants.g`, `constants.p_ref`, `constants.kappa`, `constants.sigma_sb`, `constants.T_freeze_ocean`, etc.  Never write literals like `273.15`, `287.0`, `1004.64`, `2.501e6`, `461.51`, `0.622`, `9.80616` in any file (production, scripts, tests, plotters).  This is audit-enforced for `src/legoesm/`; the same rule extends to `scripts/` and `tests/`.
+  - **Saturation thermodynamics**: `from legoesm.thermo import saturation_vapor_pressure, saturation_mixing_ratio, saturation_mixing_ratio_ice` — never re-implement Tetens / Magnus / Clausius–Clapeyron in any file (plotters included).  A plotter that re-derived `e_sat = 611.2*exp(17.67*Tc/(Tc+243.5))` produced a *different* q_sat than the model's saturation adjustment and falsely flagged supersaturation in a CI check; the rule exists because formula disagreement masquerades as a physics bug.
+  - **Column integrals**: use `legoesm.diagnostics.column_integrals` (e.g. `column_water_vapor`).
+  - **Loss functions**: import from `ml/loss.py`.
+  - **Optimizer setup**: `ml/training.create_optimizer()`.
+  - **Atmosphere column helpers** (hydrostatic heights, density, virtual temperature): `atmosphere.physics._shared`.
+  - **Ocean EOS / pressure**: `ocean.eos`.
+  - **Plotting** of model output: when computing diagnostic quantities (q_sat, RH, density, virtual T, MSE, etc.) inside a plotter, *import* the model's helper instead of re-deriving.  Plotters are NOT exempt from the "no re-derivation" rule.
+  When in doubt, search `src/legoesm/` for the function before writing one.
+- Avoid duplicating numerics across dycores, physics packages, grids, or test setups when a common implementation is feasible. Copy-paste with only indexing or naming changes is forbidden.
 - Do not trade correctness for speed by skipping validation or making speculative edits.
+- **No laziness on hard problems or large code production**: when a task is challenging (numerical bug hunts, dycore ports, multi-file refactors, new parameterizations) or requires substantial code (>100 LOC, multi-component changes, full operator chains, large test matrices), you MUST do the full work. Do not stub functions with `pass` or `raise NotImplementedError`. Do not write a partial implementation and call it done. Do not skip the harder corner cases (edge cells, boundary halos, corner stencils, non-duogrid branches, MPI/sharded paths, AD/VJP support) and quietly leave them for later. Do not abbreviate test coverage to a single happy path. If the task is genuinely too large for one pass, say so explicitly, list every piece that remains, and quantify the residual risk — never imply completion you have not delivered.
 
 ## JAX Engineering Rules
 - Keep functions pure and pytree-friendly.
@@ -99,10 +109,24 @@
 ## Code Hygiene Rules
 - Every new `.py` source file must have at least one test that imports and exercises it. Do not add files to `__init__.py` lazy imports or `supported_matrix.py` without a corresponding test.
 - New config dispatch branches (new Literal values in config NamedTuples + factory cases in `integration.py`) must have a test exercising that branch.
+- Every dispatch branch must have at least one test that selects it via the public config (not just a unit test of the leaf module).
 - When removing a source module, also remove: its `__init__.py` re-export, its `supported_matrix.py` entry, its dispatch entry, its test file, and any stale `__pycache__` files.
 - Do not add deprecated backward-compatibility wrappers. If an API changes, update call sites directly.
+- Do not add thin dispatch-only wrappers (e.g., `X_utils.py` that just re-exports a function from `X.py`). Inline the call at each site or factor the helper into the canonical module. (Modules with real branching/dispatch logic across multiple callers — like `land/stomata_utils.py` — are legitimate and not "thin wrappers".)
 - Grid-specific variants are legitimate when they have genuinely different numerics. Copy-paste with only indexing changes is forbidden — factor shared logic into a common function.
 - Run the slopbuster agent (`/slopbuster audit all` or `/slopbuster review`) periodically, especially before releases.
+
+## Constant and Parameter Discipline (audit-enforced)
+- **No hardcoded physical constants in function signatures or function bodies in production code (`src/legoesm/`).** Function defaults like `def f(g=9.80616, ...)` are forbidden — use `from legoesm import constants` and `g: float = constants.g`, or read from a config NamedTuple. This includes ocean experiment scaffolding: module-level patterns like `_G_EARTH = 9.80616` must be replaced with `constants.g`. NamedTuple field defaults may use literal floats with a `# = constants.X` comment.
+- **No hardcoded tunable parameters in physics function bodies.** Sigmoid sharpness, relaxation timescales, Louis coefficients, KPP epsilon, surface emissivity, drag coefficients, etc. must live in the scheme's config NamedTuple with a documented default. Numerical safety floors (`eps=1e-30` for division) and pure mathematical constants (`0.5` in midpoint averaging, `2.0` in squared norms) are exempt. Lookup tables that legitimately vary the constant by category (e.g., PFT-dependent `L_v` rounding in `surface_params.py`) are exempt — but document why.
+- **No `273.15` for Celsius↔Kelvin conversions in production code.** Import `constants.T_freeze`. The ocean freezing point (271.35 K) in `ocean/eos.py` is the only intentional exception — it stays a literal with a comment.
+
+## Naming Discipline
+- Surface temperature is `T_sfc` everywhere — atmosphere, land, coupler, diagnostics, ocean. Do not introduce new `T_surface` or `Ts` fields. (Existing split is tracked tech debt.)
+- Driver/config schema field names must match the runtime field they map to. When you add a new tunable, use the same name in `driver/config.py`, the scheme's config NamedTuple, and any YAML schema (e.g., consistent `hyperdiff_coeff`, not `hyperdiff_scale` in one and `hyperdiff_coeff` in another).
+
+## Untested-but-live debt (audit-enforced)
+- New physics schemes (ocean vertical mixing, atmosphere turbulence, convection, microphysics) must have at least one direct unit test that imports the leaf module and exercises its tendencies — not just an integration test that hits it via the factory. The 2026-04-28 audit found 12 high-risk leaf modules in `ocean/physics/` and `atmosphere/physics/turbulence/` that are reachable only through `integration.py` with no direct test. Do not extend this pattern.
 
 ## Common Mistakes to Avoid
 These are recurring mistakes caught by slopbuster. Check for them before submitting code:
@@ -111,12 +135,20 @@ These are recurring mistakes caught by slopbuster. Check for them before submitt
 - When accessing NamedTuple fields, **verify the actual field name** — not what you think it should be. Example: `PhysicsOutput` has `precip`, not `precipitation`. A `hasattr` guard silently degrades to a fallback instead of catching the typo.
 - When adding fields to a NamedTuple (e.g., `SegmentCarry`), **update every call site** that constructs the NamedTuple. Search with `grep -rn "SegmentCarry(" --include="*.py"` for all constructors. Missing a field causes a runtime error, but tests in other files may not run until CI catches it.
 
+### Land mask and face masks (latlon C-grid)
+- **Never use `state._replace(land_mask=...)` on `LatLonCGridOceanState`** without also updating `u_mask` and `v_mask`. Stale face masks allow mass flux through walls, causing silent mass leaks.
+- **Preferred**: pass the correct `land_mask_override` to `rest_state_latlon_cgrid_ocean()` at construction time.
+- **If post-construction replacement is needed**: use `replace_land_mask(state, new_mask)` from `init_latlon_cgrid.py` — it atomically updates all three masks.
+- The runtime check in `_assert_runtime_invariants` (gated by `enable_runtime_checks`) will catch inconsistencies.
+
 ### Reuse before writing
 - **Column integrals**: use `diagnostics.column_integrals.column_water_vapor()` — do not inline `jnp.sum(q * p_s * dsigma) / g`.
 - **Loss functions**: import from `ml/loss.py` (`area_weighted_mse`, `spectral_loss`, `per_variable_mse`) — do not reimplement.
 - **Optimizer setup**: use `ml/training.create_optimizer()` for warmup + cosine decay + grad clipping — do not inline bare `optax.adam()` without schedule.
 - **SFNO model**: import from `ml/sfno.py` — do not create new neural operator architectures in training code.
 - **Channel packing**: import from `ml/channel_packing.py` (`PE3DChannelSpec`, `pack_pe_state`, `unpack_pe_output`) — do not reimplement state↔tensor conversion.
+- **Ocean baroclinic helpers** (#214): for the EOS-pressure iteration, tracer sponge, freshwater virtual-salt flux, or implicit bottom-drag factor in any new ``ocean_pe_*.py`` (or refactor of an existing one), use the helpers in ``src/legoesm/ocean/dynamics/ocean_tendency_common.py`` (``iterate_eos_and_pressure_anomaly``, ``apply_sponge_tracer_relaxation``, ``apply_freshwater_virtual_salt_top``, ``implicit_bottom_drag_factor``). Do not re-inline the 2-pass loop or the sponge cast pattern.
+- **Ocean barotropic helpers** (#214): for the cosine/box time filter, BEBT eta blend, or MAXVEL clip in any new ``barotropic_*.py``, use ``src/legoesm/ocean/dynamics/barotropic_common.py`` (``compute_filter_weights``, ``bebt_blend``, ``maxvel_clip``). The structural enforcement test ``tests/ocean/unit/test_no_scheme_duplication.py`` will fail if these are reinlined.
 
 ### JIT and compilation
 - **Never build closures inside training loops**: `build_segment_fn` creates a new function object each call. If called inside a `for epoch` loop or inside `_loss_fn`, it causes JIT recompilation every iteration. Build once outside the loop; pass changing values as explicit arguments.

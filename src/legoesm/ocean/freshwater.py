@@ -60,6 +60,9 @@ def zero_freshwater(nCells: int) -> FreshwaterForcing:
     -------
     FreshwaterForcing
     """
+    # Init helper: keep at the JAX default float dtype.  Callers running
+    # under a non-default precision policy can ``cast_pytree`` the
+    # result to match their state.
     z = jnp.zeros(nCells)
     return FreshwaterForcing(precip=z, evap=z, runoff=z, ice_fw=z)
 
@@ -182,13 +185,15 @@ def freshwater_from_coupler(
     # Evaporation from latent heat flux: E = lhflx / L_v
     evap = lhflx / L_v
 
-    # Land runoff (sum surface + subsurface)
+    # Land runoff (sum surface + subsurface).  Pin the zero-fallback
+    # dtype to the precip path so a missing runoff input does not
+    # silently widen the freshwater forcing struct to f64 under x64.
     if runoff_surface is not None:
         runoff = runoff_surface
         if runoff_subsurface is not None:
             runoff = runoff + runoff_subsurface
     else:
-        runoff = jnp.zeros(nCells)
+        runoff = jnp.zeros(nCells, dtype=precip.dtype)
 
     # Ice freshwater: based on areal ice mass change.
     # ice_mass = rho_ice * h * A  (per unit area of grid cell)
@@ -210,7 +215,7 @@ def freshwater_from_coupler(
             ice_mass_new = jnp.sum(ice_mass_new, axis=-1)
         ice_fw = -(ice_mass_new - ice_mass_old) / jnp.maximum(dt, 1e-10)
     else:
-        ice_fw = jnp.zeros(nCells)
+        ice_fw = jnp.zeros(nCells, dtype=precip.dtype)
 
     # Mask to ocean cells
     if ocean_mask is not None:

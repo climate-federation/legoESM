@@ -267,14 +267,25 @@ def cgrid_latlon_hydrostatic_tendencies(
     # --- 4. Bernoulli function B = Φ + KE ---
     B = Phi + KE
 
-    # --- 5. Bernoulli gradient at faces ---
-    dB_dx = gradient_x_cgrid(B, grid)
-    dB_dy = gradient_y_cgrid(B, grid)
-
-    # --- 6. Pressure gradient correction ---
+    # --- 5/6. Bernoulli + ln(p_s) gradients (batched at faces) ---
+    # ``B`` is (n_lat, n_lon, nlev) and ``ln_ps`` is (n_lat, n_lon).
+    # ``gradient_*_cgrid`` treats any trailing axis as a passive batch
+    # (the per-lat ``cos_lat`` / ``dx_u`` metric broadcasts cleanly), so
+    # we promote ``ln_ps`` to a single-level tensor and concatenate
+    # along the level axis.  Each gradient runs once on the
+    # (n_lat, n_lon, nlev+1) tensor; ``ln_ps`` claims the trailing slot.
+    # 4 gradient calls collapse to 2 (one batched x + one batched y).
     ln_ps = jnp.log(p_s)
-    dln_dx = gradient_x_cgrid(ln_ps, grid)  # 2D
-    dln_dy = gradient_y_cgrid(ln_ps, grid)  # 2D
+    n_lat_g, n_lon_g, nlev_g = B.shape
+    _Bln_stack = jnp.concatenate(
+        [B, ln_ps[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, nlev+1)
+    _dBln_dx = gradient_x_cgrid(_Bln_stack, grid)  # (n_lat, n_lon+1, nlev+1)
+    _dBln_dy = gradient_y_cgrid(_Bln_stack, grid)  # (n_lat+1, n_lon, nlev+1)
+    dB_dx = _dBln_dx[..., :nlev_g]
+    dB_dy = _dBln_dy[..., :nlev_g]
+    dln_dx = _dBln_dx[..., nlev_g]   # squeeze trailing-1 → (n_lat, n_lon+1)
+    dln_dy = _dBln_dy[..., nlev_g]
 
     T_u = interp_cell_to_uface(T)
     T_v = interp_cell_to_vface(T)
@@ -344,9 +355,12 @@ def cgrid_latlon_hydrostatic_tendencies(
         _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
         _cumsum = jnp.cumsum(div_dp, axis=-1)
         _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum
-        _zero_top = jnp.zeros((*p_s.shape, 1))
-        mass_flux = jnp.concatenate([_zero_top, _mf_inner], axis=-1)
-        mass_flux = mass_flux.at[..., -1].set(0.0)
+        # Top BC: F=0; bottom BC: zero by construction
+        # (frac_B[-1]=1, cumsum[-1]=D_total_p → _mf_inner[-1]=0).  Drop
+        # the trailing (∼0) element + pad both ends in one Pad HLO op
+        # (replaces Pad + scatter, also eliminates the float roundoff).
+        _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 1),)
+        mass_flux = jnp.pad(_mf_inner[..., :-1], _pad_axes)
         mf_u = interp_cell_to_uface(mass_flux)
         mf_v = interp_cell_to_vface(mass_flux)
         ps_u = interp_cell_to_uface(p_s[..., jnp.newaxis])[..., 0]
@@ -362,8 +376,10 @@ def cgrid_latlon_hydrostatic_tendencies(
         sigma_dot_inner = (
             _frac * D_total_p[..., jnp.newaxis] - _cumsum_dp
         ) / (p_s[..., jnp.newaxis] + 1e-10)
-        _zero_top = jnp.zeros((*p_s.shape, 1))
-        sigma_dot = jnp.concatenate([_zero_top, sigma_dot_inner], axis=-1)
+        # Pad with zero on the top boundary; one HLO Pad op vs zeros
+        # buffer + concatenate.
+        _pad_axes_sd = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 0),)
+        sigma_dot = jnp.pad(sigma_dot_inner, _pad_axes_sd)
         sd_u = interp_cell_to_uface(sigma_dot)
         sd_v = interp_cell_to_vface(sigma_dot)
         du_dt = du_dt + vertical_advection(u, sd_u, sigma_coord)
@@ -375,10 +391,18 @@ def cgrid_latlon_hydrostatic_tendencies(
         # C-grid PPM advection of T (4th-order, shared operator)
         horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(T, u, v, grid)
     else:
-        # Cell-centered gradient advection (fallback)
-        from legoesm.core.operators_fv_latlon import fv_gradient_lon, fv_gradient_lat
-        dT_dx = jax.vmap(fv_gradient_lon, in_axes=(-1, None), out_axes=-1)(T, grid)
-        dT_dy = jax.vmap(fv_gradient_lat, in_axes=(-1, None), out_axes=-1)(T, grid)
+        # Cell-centered gradient advection (fallback) — 3D-native variants
+        # share one halo pad + PPM reconstruction across all levels.
+        # Pre-pad T once so both gradient calls share the halo.
+        from legoesm.core.operators_fv_latlon import (
+            fv_gradient_lon_3d, fv_gradient_lat_3d,
+        )
+        from legoesm.grids.halo_latlon import (
+            pad_halo_latlon_3d as _pad_T,
+        )
+        _T_pad_h2 = _pad_T(T, halo=2)
+        dT_dx = fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
+        dT_dy = fv_gradient_lat_3d(T, grid, padded=_T_pad_h2)
         horiz_adv_T = -(u_c * dT_dx + v_c * dT_dy)
 
     # Adiabatic heating: κ T (ω/p + v·∇_η(ln p))
@@ -413,23 +437,85 @@ def cgrid_latlon_hydrostatic_tendencies(
     # equation for discrete consistency.  The mixing-ratio tendency is:
     #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
     # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
+    #
+    # All tracers share the same u, v, dp, div_dp.  Stack along a trailing
+    # tracer axis and fold it into the level axis so the operator's
+    # halo-pad + PPM reconstruction runs once instead of n_tracers times.
+    # ``pad_halo_latlon_3d`` only touches axes 0 and 1, so the trailing
+    # ``nlev * n_tracers`` axis is passively carried through.
     tracer_tends = {}
-    for name, q in tracers.items():
+    if tracers:
+        tracer_names = list(tracers.keys())
+        n_tracers = len(tracer_names)
+        tracer_stack = jnp.stack(
+            [tracers[n] for n in tracer_names], axis=-1
+        )  # (n_lat, n_lon, nlev, n_tracers)
+        n_lat_t, n_lon_t, nlev_t, _ = tracer_stack.shape
+        tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
+
         if config.use_ppm_transport:
-            # Mass-weighted flux-form horizontal transport
-            flux_dpq = cgrid_fv_flux_divergence_latlon_3d(
-                q, dp_u * u, dp_v * v, grid)
-            horiz_q = (flux_dpq + q * div_dp) / (dp + 1e-10)
+            # Mass-weighted flux-form horizontal transport.
+            u_mass = dp_u * u  # (n_lat, n_lon+1, nlev)
+            v_mass = dp_v * v  # (n_lat+1, n_lon, nlev)
+            if n_tracers == 1:
+                u_mass_b, v_mass_b = u_mass, v_mass
+            else:
+                # ``tracer_flat`` reshape interleaves levels and tracers as
+                # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]`` — each level
+                # has all tracers consecutive.  ``jnp.repeat`` builds a
+                # matching velocity broadcast where every level value is
+                # duplicated ``n_tracers`` times.  ``jnp.tile`` would instead
+                # concatenate the whole array and mis-align tracer ↔ level.
+                u_mass_b = jnp.repeat(u_mass, n_tracers, axis=-1)
+                v_mass_b = jnp.repeat(v_mass, n_tracers, axis=-1)
+            flux_flat = cgrid_fv_flux_divergence_latlon_3d(
+                tracer_flat, u_mass_b, v_mass_b, grid)
+            flux_stack = flux_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            horiz_q_stack = (
+                flux_stack + tracer_stack * div_dp[..., None]
+            ) / (dp[..., None] + 1e-10)
         else:
-            from legoesm.core.operators_fv_latlon import fv_gradient_lon, fv_gradient_lat
-            dq_dx = jax.vmap(fv_gradient_lon, in_axes=(-1, None), out_axes=-1)(q, grid)
-            dq_dy = jax.vmap(fv_gradient_lat, in_axes=(-1, None), out_axes=-1)(q, grid)
-            horiz_q = -(u_c * dq_dx + v_c * dq_dy)
+            from legoesm.core.operators_fv_latlon import (
+                fv_gradient_lon_3d, fv_gradient_lat_3d,
+            )
+            from legoesm.grids.halo_latlon import (
+                pad_halo_latlon_3d as _pad_q,
+            )
+            # Pre-pad the stacked tracer field once so both gradients
+            # share the halo pad — saves one redundant pad_halo_latlon_3d
+            # call per timestep.
+            _q_pad_h2 = _pad_q(tracer_flat, halo=2)
+            dq_dx_flat = fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
+            dq_dy_flat = fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
+            dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            dq_dy_stack = dq_dy_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
+            horiz_q_stack = -(
+                u_c[..., None] * dq_dx_stack + v_c[..., None] * dq_dy_stack
+            )
+
+        # Vertical advection batched across all tracers — both
+        # ``vertical_advection_hybrid`` and ``vertical_advection``
+        # operate on ``axis=-1`` for the vertical, so move the tracer
+        # axis to leading where the velocity-independent shared work
+        # (``F_full`` / ``p_full`` for hybrid, ``F`` for sigma) is
+        # computed *once* and the upwind ``jnp.diff(field, axis=-1)``
+        # broadcasts across the (n_tracers,) axis.  Replaces a Python
+        # for-loop that called the operator ``n_tracers`` times.
+        # Same leading-axis batching as the (u, v) vertical advection
+        # in CD-grid CE/PE (Loop 142).
+        tracers_lead = jnp.moveaxis(
+            tracer_stack, -1, 0,
+        )  # (n_tracers, n_lat, n_lon, nlev)
         if _hybrid:
-            vert_q = vertical_advection_hybrid(q, mass_flux, p_s, sigma_coord)
+            vert_q_lead = vertical_advection_hybrid(
+                tracers_lead, mass_flux, p_s, sigma_coord,
+            )
         else:
-            vert_q = vertical_advection(q, sigma_dot, sigma_coord)
-        tracer_tends[name] = horiz_q + vert_q
+            vert_q_lead = vertical_advection(
+                tracers_lead, sigma_dot, sigma_coord,
+            )
+        for i, name in enumerate(tracer_names):
+            tracer_tends[name] = horiz_q_stack[..., i] + vert_q_lead[i]
 
     # --- 13. Diffusion (optional) ---
     if config.A_h > 0.0:
@@ -441,7 +527,10 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # Enforce zero tendency at poles (wall BC) so that intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    dv_dt = dv_dt.at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+    # Single ``Pad`` HLO op (zero-pad the interior slice) replaces two
+    # ``ScatterUpdate`` ops on the leading lat axis — same per-RK-stage
+    # pattern as the spectral_nh ``w_new`` rewrite.
+    dv_dt = jnp.pad(dv_dt[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
 
     return du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends
 
@@ -604,8 +693,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Enforce v = 0 at poles
-        v_new = state_new.v.at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+        # Enforce v = 0 at poles via a single Pad HLO op (matches the
+        # tendency-side rewrite above).
+        v_new = jnp.pad(state_new.v[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
         state_new = state_new._replace(v=v_new)
 
         # Safety rails: T floor, p_s floor, mass fixer
@@ -641,7 +731,11 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             from legoesm.core.conservation import _accumulation_dtype
             acc = _accumulation_dtype()
             area = self.grid.area.astype(acc)
-            total_area = jnp.sum(area)
+            # ``grid_total_area`` is a precomputed scalar on the grid;
+            # avoids recomputing ``jnp.sum(area)`` every step (one
+            # extra reduction in serial, one extra allreduce under
+            # latlon SPMD sharding).
+            total_area = self.grid.grid_total_area.astype(acc)
             if target_mass is not None:
                 mass_target = target_mass
             elif pre_state is not None:
@@ -712,18 +806,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             Evaluated at each RK stage alongside dynamics (3-arg legacy
             or 1-arg closure, tuple returns unwrapped).
 
-        Raises
-        ------
-        ValueError
-            If dt exceeds the pole-cell advective CFL limit.
         """
-        if dt > self._max_dt:
-            raise ValueError(
-                f"dt={dt:.1f} s exceeds the pole-cell CFL limit "
-                f"({self._max_dt:.1f} s) for this lat-lon grid. "
-                f"Use dt <= {self._max_dt:.1f} or a coarser grid."
-            )
-
         if isinstance(state, CGridLatLonHydrostaticState):
             return self._step_cgrid(state, dt, target_mass, physics_fn)
 

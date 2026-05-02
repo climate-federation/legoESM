@@ -109,7 +109,12 @@ class RRTMGPConfig(NamedTuple):
         Bulk aerosol asymmetry factor used when aerosol optical depth is
         externally prescribed (default 0.70).
     use_scan : bool
-        If True, use lax.scan (differentiable); else fori_loop (default False).
+        Column recurrence implementation inside the two-stream solver.
+        False (default): Python for-loop, fully unrolled at trace time —
+        produces a larger XLA graph but avoids scan's per-iteration
+        kernel launches and is usually faster on GPU/CPU for typical
+        atmospheric nlev.  True: jax.lax.scan — smaller graph and
+        typically preferred for large nlev or reverse-mode AD.
     include_clouds : bool
         If True, include cloud optics (default False).
     """

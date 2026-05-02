@@ -20,7 +20,7 @@ Domain Configuration:
 - Tracer blob initialization in gyre interior
 
 Physical Setup:
-- Wind-driven double-gyre circulation (inherited from wind_gyre experiment)
+- Wind-driven double-gyre circulation (inherited from regional_gyre experiment)
 - Passive salinity tracer blob superimposed on background circulation
 - Tracer blob: Gaussian shape, centered at (30°N, 30°W), 10° width
 - Background salinity: 35 PSU, tracer amplitude: ±2 PSU
@@ -65,7 +65,7 @@ class StommelGyreTracerConfig:
 
     Combines wind-driven gyre circulation with passive tracer transport.
     """
-    # Background circulation (inherits from wind_gyre)
+    # Background circulation (inherits from regional_gyre)
     T_surface: float = 20.0        # Surface temperature [°C]
     T_deep: float = 2.0            # Deep ocean temperature [°C]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
@@ -172,8 +172,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
 def _add_wind_gyre_circulation(state, grid_type: str, grid, z_coord,
                              config: StommelGyreTracerConfig):
     """Add wind-driven gyre circulation to the state.
-
-    Uses the same logic as wind_gyre experiment to establish circulation.
+    
+    Uses the same logic as regional_gyre experiment to establish circulation.
     """
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import wind_driven_gyre_init
@@ -215,7 +215,9 @@ def _add_tracer_blob(state, grid_type: str, grid, z_coord,
 
     # Compute Gaussian blob on sphere
     # Use spherical distance for proper shape
-    r2 = (lat - lat_c)**2 + (np.cos(lat_c) * (lon - lon_c))**2
+    # Periodic longitude wrapping to [-π, π] for correct distance
+    dlon = np.mod(lon - lon_c + np.pi, 2.0 * np.pi) - np.pi
+    r2 = (lat - lat_c)**2 + (np.cos(lat_c) * dlon)**2
     S_blob = S_bg + S_amp * np.exp(-r2 / (2.0 * sigma**2))
 
     # Apply to salinity field

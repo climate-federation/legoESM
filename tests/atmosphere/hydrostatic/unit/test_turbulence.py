@@ -25,7 +25,6 @@ from legoesm.atmosphere.physics.turbulence.config import (
     HoltslagBovilleConfig,
     YSUConfig,
     EDMFConfig,
-    MLTurbulenceEmulatorConfig,
     TurbulenceConfig,
 )
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -49,10 +48,6 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
-from legoesm.atmosphere.physics.turbulence.ml_emulator import (
-    ml_turbulence,
-    TurbulenceEmulator,
-)
 from legoesm.atmosphere.physics.turbulence.integration import (
     make_turbulence_physics,
 )
@@ -510,7 +505,7 @@ class TestIntegration:
         """Hydrostatic turbulence tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -531,7 +526,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero wind tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -558,7 +553,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -616,7 +611,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic turbulence physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -637,7 +632,7 @@ class TestIntegration:
         """Different schemes should produce different tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -668,10 +663,10 @@ class TestIntegration:
         assert not jnp.allclose(tend_smag.du_dt.data, tend_louis.du_dt.data, atol=1e-10)
 
     def test_all_scheme_strings_accepted(self):
-        """All 8 scheme strings + 'none' should be accepted by the factory."""
+        """All supported scheme strings plus 'none' should be accepted."""
         schemes = [
             "smagorinsky", "louis", "tke", "clubb_lite",
-            "holtslag_boville", "ysu", "edmf", "ml_emulator", "none",
+            "holtslag_boville", "ysu", "edmf", "none",
         ]
         for scheme in schemes:
             config = TurbulenceConfig(scheme=scheme)
@@ -682,7 +677,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -695,7 +690,6 @@ class TestIntegration:
         assert jnp.allclose(tendencies.dT_dt.data, 0.0)
         assert jnp.allclose(tendencies.du_dt.data, 0.0)
         assert jnp.allclose(tendencies.dv_dt.data, 0.0)
-
 
 # ===========================================================================
 # Holtslag-Boville tests
@@ -1039,118 +1033,6 @@ class TestEDMF:
         assert not jnp.allclose(out_mf.dT_dt, out_no_mf.dT_dt, atol=1e-10)
 
 
-# ===========================================================================
-# ML Turbulence Emulator tests
-# ===========================================================================
-
-class TestMLTurbulenceEmulator:
-    """Tests for ML turbulence emulator."""
-
-    def _make_model(self, config=None):
-        if config is None:
-            config = MLTurbulenceEmulatorConfig()
-        key = jax.random.PRNGKey(config.seed)
-        return TurbulenceEmulator(
-            config.n_input, config.n_hidden,
-            config.n_layers, config.n_output, key=key,
-        )
-
-    def test_output_shapes(self):
-        """ML emulator output should have correct shapes."""
-        ncol, nlev = 4, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        assert out.du_dt.shape == (ncol, nlev)
-        assert out.dv_dt.shape == (ncol, nlev)
-        assert out.dT_dt.shape == (ncol, nlev)
-        assert out.dq_v_dt.shape == (ncol, nlev)
-        assert out.Km.shape == (ncol, nlev)
-        assert out.Kh.shape == (ncol, nlev)
-        assert out.shflx.shape == (ncol,)
-
-    def test_nonzero_tendencies(self):
-        """ML emulator should produce nonzero (even if small) tendencies."""
-        ncol, nlev = 2, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        # Km/Kh should always be positive via softplus
-        assert jnp.all(out.Km > 0)
-        assert jnp.all(out.Kh > 0)
-
-    def test_differentiable(self):
-        """jax.grad should work through ML turbulence emulator."""
-        ncol, nlev = 2, 8
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        def loss(T_in):
-            out = ml_turbulence(
-                u, v, T_in, q_v, p_full, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-            )
-            return jnp.sum(out.dT_dt ** 2)
-
-        grad_T = jax.grad(loss)(T)
-        assert jnp.all(jnp.isfinite(grad_T))
-        assert grad_T.shape == T.shape
-
-    def test_finite_outputs(self):
-        """All outputs should be finite."""
-        ncol, nlev = 4, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        assert jnp.all(jnp.isfinite(out.du_dt))
-        assert jnp.all(jnp.isfinite(out.dT_dt))
-        assert jnp.all(jnp.isfinite(out.Km))
-        assert jnp.all(jnp.isfinite(out.Kh))
-
-    def test_untrained_near_zero(self):
-        """Untrained model with residual scaling should produce small tendencies."""
-        ncol, nlev = 2, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig(use_residual=True)
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        # Tendencies should be small (residual scaling ×0.01)
-        assert float(jnp.max(jnp.abs(out.dT_dt))) < 1.0
-        assert float(jnp.max(jnp.abs(out.du_dt))) < 1.0
 
 
 # ===========================================================================

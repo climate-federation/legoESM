@@ -11,10 +11,11 @@ class PrescribedForcingConfig(NamedTuple):
     tau_y: float = 0.0           # Meridional wind stress [N/m^2]
     Q_net: float = 0.0           # Net surface heat flux [W/m^2] (+ into ocean)
     E_minus_P: float = 0.0       # Evaporation minus precipitation [m/s]
-    wind_profile: str = "constant"   # "constant", "cosine_latitude", "single_gyre", "double_gyre", or "global_wind"
+    wind_profile: str = "constant"   # "constant", "cosine_latitude", "single_gyre", "double_gyre", "double_gyre_sin2", "double_gyre_tapered", or "global_wind"
     tau_max: float = 0.1         # Max wind stress for wind profiles [N/m^2]
     lat_south_deg: float = 15.0  # Southern basin boundary [degrees]
     lat_north_deg: float = 75.0  # Northern basin boundary [degrees]
+    wind_buffer_deg: float = 0.0  # Buffer zone width [degrees] where wind tapers to zero at basin edges
 
 
 class RestoringConfig(NamedTuple):
@@ -44,6 +45,7 @@ class BulkFormulaConfig(NamedTuple):
     z_ref: float = 10.0     # Reference height for MOST [m]
     z0: float = 1e-4        # Roughness length for MOST [m]
     bulk_n_iter: int = 5    # MOST iterations
+    emissivity: float = 0.97  # Surface longwave emissivity
 
 
 class SurfaceForcingConfig(NamedTuple):

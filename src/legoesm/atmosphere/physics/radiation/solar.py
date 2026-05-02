@@ -86,7 +86,7 @@ def cos_zenith_angle(
 def daily_mean_insolation(
     lat: jnp.ndarray,
     day_of_year: float,
-    S_0: float = 1360.0,
+    S_0: float = constants.S_0,
     obliquity: float = 23.45,
 ) -> jnp.ndarray:
     """Compute daily-mean insolation at the top of atmosphere.
@@ -176,7 +176,7 @@ def daylight_fraction(
 
 def perpetual_equinox_insolation(
     lat: jnp.ndarray,
-    S_0: float = 1360.0,
+    S_0: float = constants.S_0,
 ) -> jnp.ndarray:
     """Compute annual+daily mean insolation at perpetual equinox.
 

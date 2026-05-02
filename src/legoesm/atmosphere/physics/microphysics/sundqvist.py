@@ -14,6 +14,8 @@ References
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -24,6 +26,85 @@ from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
 )
+
+
+class SundqvistProcessRates(NamedTuple):
+    """Intermediate Sundqvist process rates used to assemble tendencies."""
+
+    condensation: jax.Array
+    autoconversion: jax.Array
+    evaporation: jax.Array
+    precipitation: jax.Array
+
+
+def diagnose_sundqvist_process_rates(
+    T: jax.Array,
+    q_v: jax.Array,
+    hydrometeors: HydrometeorState,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    rho: jax.Array,
+    dz: jax.Array,
+    dt: float,
+    config: SundqvistConfig = SundqvistConfig(),
+) -> SundqvistProcessRates:
+    """Diagnose the Sundqvist condensation, rain conversion, and evaporation terms."""
+    del p_half  # Included for signature parity with ``sundqvist_microphysics``.
+    q_c = hydrometeors.q_c
+    sharpness = config.sigmoid_sharpness
+
+    # Saturation
+    q_sat = saturation_mixing_ratio(T, p_full)
+    RH = q_v / jnp.clip(q_sat, 1e-10)
+
+    # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
+    f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
+    condensation = (
+        f * jnp.maximum(q_v - config.RH_crit * q_sat, 0.0) / dt
+    )  # [kg/kg/s]
+
+    # 2. Autoconversion
+    # condensation is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
+    P_auto = config.auto_rate * jnp.maximum(q_c + condensation * dt, 0.0)
+
+    # 3. Sub-cloud evaporation
+    evap_mask = jax.nn.sigmoid(sharpness * (config.RH_crit - RH))
+    P_flux_layer = P_auto * rho * dz
+
+    def scan_fn(carry, x):
+        P_above = carry
+        P_local, evap_m, rho_k, dz_k = x
+        P_total = P_above + P_local
+        evap = config.evap_coeff * evap_m * P_total / jnp.clip(rho_k * dz_k, 1.0)
+        evap = jnp.minimum(evap, P_total / jnp.clip(rho_k * dz_k, 1.0))
+        P_out = jnp.clip(P_total - evap * rho_k * dz_k, 0.0)
+        return P_out, evap
+
+    # Pick a working dtype that ``scan`` can carry without promotion.
+    # Under ``JAX_ENABLE_X64=1`` ``jnp.zeros``/``jnp.ones`` default to
+    # f64, so a state assembled from a mix of (f32) ``T`` and (f64)
+    # tracers ends up with f64 ``q_v``/``q_c``.  ``P_flux_layer``
+    # then inherits the f64 promotion from ``q_c + condensation * dt``,
+    # while a carry pinned to ``T.dtype`` (f32) would mismatch the
+    # f64 scan output.  Promoting to the wider of carry/input dtype
+    # keeps ``scan`` happy without silently downcasting precipitation
+    # mass.
+    _scan_dtype = jnp.promote_types(T.dtype, P_flux_layer.dtype)
+    inputs = (
+        jnp.moveaxis(P_flux_layer.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(evap_mask.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(rho.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(dz.astype(_scan_dtype), 1, 0),
+    )
+    P_init = jnp.zeros(T.shape[0], dtype=_scan_dtype)
+    P_final, evap_col = jax.lax.scan(scan_fn, P_init, inputs)
+    evaporation = jnp.moveaxis(evap_col, 0, 1)
+    return SundqvistProcessRates(
+        condensation=condensation,
+        autoconversion=P_auto,
+        evaporation=evaporation,
+        precipitation=P_final,
+    )
 
 
 def sundqvist_microphysics(
@@ -49,60 +130,58 @@ def sundqvist_microphysics(
     MicrophysicsOutput
     """
     ncol, nlev = T.shape
-    q_c = hydrometeors.q_c
-    sharpness = config.sigmoid_sharpness
-
-    # Saturation
-    q_sat = saturation_mixing_ratio(T, p_full)
-    RH = q_v / jnp.clip(q_sat, 1e-10)
-
-    # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
-    f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
-    condensation = f * jnp.maximum(q_v - config.RH_crit * q_sat, 0.0) / dt  # [kg/kg/s]
-
-    # 2. Autoconversion
-    # condensation is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
-    P_auto = config.auto_rate * (q_c + condensation * dt)
-
-    # 3. Sub-cloud evaporation
-    evap_mask = jax.nn.sigmoid(sharpness * (config.RH_crit - RH))
-    # Accumulate precipitation flux from top down via scan
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    P_flux_layer = P_auto * rho * dz
-
-    def scan_fn(carry, x):
-        P_above = carry
-        P_local, evap_m, rho_k, dz_k = x
-        P_total = P_above + P_local
-        evap = config.evap_coeff * evap_m * P_total / jnp.clip(rho_k * dz_k, 1.0)
-        evap = jnp.minimum(evap, P_total / jnp.clip(rho_k * dz_k, 1.0))
-        P_out = jnp.clip(P_total - evap * rho_k * dz_k, 0.0)
-        return P_out, evap
-
-    # Transpose for scan: (nlev, ncol)
-    inputs = (
-        jnp.moveaxis(P_flux_layer, 1, 0),
-        jnp.moveaxis(evap_mask, 1, 0),
-        jnp.moveaxis(rho, 1, 0),
-        jnp.moveaxis(dz, 1, 0),
+    rates = diagnose_sundqvist_process_rates(
+        T=T,
+        q_v=q_v,
+        hydrometeors=hydrometeors,
+        p_full=p_full,
+        p_half=p_half,
+        rho=rho,
+        dz=dz,
+        dt=dt,
+        config=config,
     )
-    P_init = jnp.zeros(ncol)
-    P_final, evap_col = jax.lax.scan(scan_fn, P_init, inputs)
-    evaporation = jnp.moveaxis(evap_col, 0, 1)  # (ncol, nlev)
 
     # 4. Latent heating
-    net_cond = condensation - evaporation
+    net_cond = rates.condensation - rates.evaporation
     dT_dt = constants.L_v * net_cond / constants.c_pd
 
-    # Tendencies
-    dq_v_dt = -condensation + evaporation
-    dq_c_dt = condensation - P_auto
-    dq_r_dt = P_auto - evaporation
+    # Tendencies.  Sundqvist is a *diagnostic* large-scale precipitation
+    # scheme: rain produced by autoconversion is treated as falling
+    # instantly through the column (the bottom-up scan in
+    # ``diagnose_sundqvist_process_rates`` accumulates the layer
+    # autoconversion source into a downward mass flux ``P_total`` and
+    # subtracts sub-cloud evaporation, so ``rates.precipitation`` is the
+    # surface flux).  Adding ``autoconversion - evaporation`` to ``dq_r_dt``
+    # would also accumulate that mass as a ``q_r`` tracer, double-counting
+    # it: the column would lose water to surface precipitation AND grow
+    # ``q_r`` per step.
+    #
+    # Diagnostic-rain semantics (full): the scheme should *own* the q_r
+    # tracer, not just leave it untouched.  Any q_r passed in (from a
+    # prior step under a prognostic scheme like Kessler, or from a
+    # warm-start) is treated as already-falling rain and drained to the
+    # surface in one step.  The drained mass is added to the surface
+    # precipitation flux so the column water budget closes:
+    #     int (dq_v + dq_c + dq_r) dp/g  =  -precipitation
+    # In a steady state with q_r = 0 input, ``dq_r_dt = 0`` and the
+    # column budget reduces to ``int (dq_v + dq_c) dp/g = -precipitation``.
+    dq_v_dt = -rates.condensation + rates.evaporation
+    dq_c_dt = rates.condensation - rates.autoconversion
+    dt_safe = jnp.maximum(dt, 1e-10)
+    q_r_in = jnp.clip(hydrometeors.q_r, 0.0, None)
+    dq_r_dt = -q_r_in / dt_safe
+    # Drained mass [kg/m^2/s] is added to the surface precipitation
+    # diagnostic so total column water exits the column at the correct
+    # rate.  ``rates.precipitation`` is the autoconversion-driven surface
+    # flux; ``q_r_drain_flux`` is the column-integrated drain.
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    q_r_drain_flux = jnp.sum(q_r_in * dp, axis=1) / (constants.g * dt_safe)
+    precipitation = rates.precipitation + q_r_drain_flux
 
-    # Surface precipitation
-    precipitation = P_final
-
-    z = jnp.zeros((ncol, nlev))
+    # Pin dtype to the input precision so we never silently promote
+    # the unused-tendency placeholders to f64 under x64 mode.
+    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

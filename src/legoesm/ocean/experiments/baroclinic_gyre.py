@@ -22,7 +22,7 @@ Domain Configuration:
 - Meridional surface temperature gradient with restoring
 
 Physical Setup:
-- Double-gyre wind stress: Holland & Lin (1975) pattern
+- Double-gyre wind stress: sin^2 westerly jet with 5° buffer at walls
 - Background stratification: exponential T profile with 1000m e-folding depth
 - Surface temperature restoring: τ_restore = 30 days
 - Meridional SST gradient: warm equatorward, cool poleward
@@ -56,10 +56,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Tuple
-
-from legoesm.constants import g
 
 
 @dataclass
@@ -90,11 +87,13 @@ class BaroclinicGyreConfig:
     T_mid_lat: float = 45.0        # Reference latitude for gradient [degrees]
 
     # Wind forcing parameters — same as barotropic case
-    wind_stress_max: float = 0.1   # Maximum wind stress [Pa]
+    wind_stress_max: float = 0.3   # Maximum wind stress [Pa]
+    wind_profile: str = "double_gyre_sin2"  # "double_gyre" (cosine) or "double_gyre_sin2"
+    wind_buffer_deg: float = 5.0   # Buffer zone width [degrees] for sin² profile
 
     # Physics parameters — same as barotropic case for comparison
     A_h: float = 5e5               # Horizontal viscosity [m²/s]
-    bottom_drag_coeff: float = 1e-4  # Linear bottom drag coefficient [s⁻¹]
+    bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag coefficient [m/s]
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord,
@@ -144,7 +143,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             lat_south=config.lat_south, lat_north=config.lat_north,
         )
         # Add vertical stratification
-        return _add_stratification(state, config)
+        return _add_stratification(state, z_coord, config)
 
     elif grid_type in ("mpas", "mpas_regional"):
         from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
@@ -155,40 +154,21 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             lat_south=config.lat_south, lat_north=config.lat_north,
         )
         # Add vertical stratification
-        return _add_stratification(state, config)
-
+        return _add_stratification(state, z_coord, config)
+        
     else:
         raise ValueError(f"Grid type {grid_type} not supported for baroclinic_gyre")
 
 
-def _add_stratification(state, config: BaroclinicGyreConfig):
+def _add_stratification(state, z_coord, config: BaroclinicGyreConfig):
     """Add exponential stratification to a uniform initial state."""
-    import numpy as np
-    import jax.numpy as jnp
     from legoesm.core.field import Field
 
-    # Get current uniform temperature
-    T_uniform = float(np.mean(state.T.data))
-
-    # FIXED: Use actual model level depths instead of rough linear spacing
-    # Extract actual level depths from model coordinate (these are the depths
-    # from the results files: [26.2, 133.9, 352.1, 681.0, 1120.4, ...])
-    n_levels = state.T.data.shape[-1]  # number of levels
-
-    # Use realistic model level depths (approximately matching z* coordinate)
-    # These depths are based on typical ocean model vertical grids
-    if n_levels == 10:
-        # Standard 10-level configuration depths [m]
-        actual_depths = np.array([26.2, 133.9, 352.1, 681.0, 1120.4,
-                                 1670.4, 2331.0, 3102.1, 3983.9, 4976.2])
-    else:
-        # Fallback: generate similar non-linear spacing
-        # Surface-concentrated levels typical of ocean models
-        sigma = np.linspace(0, 1, n_levels)
-        actual_depths = 26.0 + (5500.0 - 26.0) * sigma**1.5
+    # Use actual model level depths from the z-coordinate object
+    actual_depths = -np.asarray(z_coord.z_full_ref)  # positive-down depth [m]
+    n_levels = len(actual_depths)
 
     # Create exponential profile: T(z) = T_deep + (T_surface - T_deep) * exp(-z/scale_depth)
-    # where z is depth (positive), so exp(-z/scale_depth) decreases with depth
     z_coord_depths = -actual_depths  # Negative for depth coordinate
 
     # Exponential decay with depth
@@ -240,18 +220,18 @@ def create_forcings(grid_type: str, grid, config: BaroclinicGyreConfig = None):
     )
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
-    # Surface forcing: wind stress only (restoring not supported with wind)
-    # TODO: Extend surface forcing architecture to support combined schemes
+    # Surface forcing: sin^2 westerly jet profile.
+    # Wind goes to zero 5° inside the basin walls to avoid spurious
+    # coastal upwelling/downwelling from Ekman transport hitting the
+    # solid boundaries at coarse resolution.
     restoring_config = PrescribedForcingConfig(
-        wind_profile="double_gyre",
+        wind_profile=config.wind_profile,
         tau_max=config.wind_stress_max,
         lat_south_deg=config.lat_south,
         lat_north_deg=config.lat_north,
+        wind_buffer_deg=config.wind_buffer_deg,
     )
 
     surface_forcing = SurfaceForcingConfig(
@@ -272,22 +252,18 @@ def create_forcings(grid_type: str, grid, config: BaroclinicGyreConfig = None):
         scheme="none",  # A_h handled by ocean dynamics, not physics
     )
 
-    # Bottom drag: linear Rayleigh damping
-    bottom_drag = BottomDragConfig(
-        scheme="linear",
-        linear=LinearDragConfig(r=config.bottom_drag_coeff),
-    )
-
     # Convection: none for now
     convection = OceanConvectionConfig(
         scheme="none",
     )
 
+    # Bottom drag is applied via the dynamics-level ``bottom_drag_r``
+    # field (baroclinic PE + barotropic substeps), not through the
+    # physics pipeline.
     return OceanPhysicsConfig(
         surface_forcing=surface_forcing,
         vertical_mixing=vertical_mixing,
         lateral_mixing=lateral_mixing,
-        bottom_drag=bottom_drag,
         convection=convection,
     )
 

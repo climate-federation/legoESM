@@ -40,13 +40,16 @@ from legoesm.core.operators_cdgrid import (
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    iterate_eos_and_pressure_anomaly,
+)
 
 
 # ==============================================================================
@@ -115,48 +118,26 @@ def ocean_baroclinic_tendencies_cdgrid(
         min_water_column_m=config.min_water_column_m,
     )
 
-    # --- 2. Density from EOS (2 iterations, reference J) ---
-    # Use reference Jacobian (J=1, eta=0) for the EOS pressure iteration
-    # and baroclinic pressure gradient.  The barotropic solver already
-    # handles -g*grad(eta); using the actual J here would double-count
-    # the free-surface contribution (see #109).
+    # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
+    # Reference Jacobian (J=1, eta=0): the barotropic solver handles
+    # -g*grad(eta) and using the actual J here would double-count the
+    # free-surface contribution (see #109).
+    #
+    # The cubed-sphere path runs the cumsum in float64: at depth p has
+    # ULP = 0.0625 Pa in float32, so the halo-exchange interpolation
+    # of float32 values at face boundaries leaks O(ULP/dx) ≈ 2e-7 Pa/m
+    # — a spurious PGF that drives rest-state instability.  Keeping
+    # p_prime in float64 reduces the leak by 9 orders of magnitude.
     from legoesm.ocean.dynamics.barotropic import fill_land_cells
-    T_filled = jax.vmap(
-        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
-    )(T)
-    S_filled = jax.vmap(
-        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
-    )(S)
+    # ``fill_land_cells`` is ndim-aware: it uses ``pad_halo_4d`` for 4D
+    # input so all vertical levels share one MPI halo exchange per pass
+    # (instead of nlev separate exchanges under the prior vmap).
+    fill_TS = lambda field: fill_land_cells(field, mask, grid)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
-    J_ref = jnp.ones_like(J)
-    eta_ref = jnp.zeros_like(eta_safe)
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
-    for _ in range(2):
-        p_hydro = compute_hydrostatic_pressure(
-            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
-        )
-        rho = eos_fn(T_filled, S_filled, p_hydro)
-    p_hydro = compute_hydrostatic_pressure(
-        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
+    rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_TS, eos_fn, z_coord.dz_ref, rho_0, g,
+        n_iter=2, hi_precision_pressure=True,
     )
-    rho_prime = rho - rho_0
-
-    # --- 3. Baroclinic pressure gradient ---
-    # Use REFERENCE layer thickness (dz_ref, not dz_ref*J) to avoid
-    # double-counting the free-surface contribution.
-    # Must use float64 for cumulative sums AND the subsequent gradient
-    # computation.  With float32, the absolute pressure (~6e5 Pa at depth)
-    # has ULP = 0.0625 Pa.  The halo-exchange interpolation of float32
-    # values at face boundaries introduces O(ULP) errors, which the
-    # gradient operator amplifies to O(ULP/dx) ≈ O(2e-7) Pa/m — a
-    # spurious pressure gradient that drives rest-state instability
-    # on the cubed sphere.  Keeping p_prime in float64 (ULP ≈ 1e-10 Pa)
-    # reduces the halo interpolation error by 9 orders of magnitude.
-    rho_prime_hi = rho_prime.astype(jnp.float64)
-    dz_hi = z_coord.dz_ref.astype(jnp.float64)
-    dp_layer = rho_prime_hi * g * dz_hi
-    p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = p_prime + 0.5 * dp_layer  # stay in float64 through gradient
 
     # --- 4. Convert to D-grid ---
     u_d, v_d = center_to_dgrid_vector(u_a * mask_3d, v_a * mask_3d, cdgrid)
@@ -182,19 +163,54 @@ def ocean_baroclinic_tendencies_cdgrid(
     KE = 0.5 * (u_cc_ke ** 2 + v_cc_ke ** 2)
 
     # --- 10. Bernoulli and pressure gradients at D-grid corners ---
-    dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient(KE, cdgrid)
     # Fill land cells in p_prime before gradient so the 4-point stencil
     # sees smooth values at coastlines instead of the ocean-to-zero jump.
-    p_prime_filled = jax.vmap(
-        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
-    )(p_prime)
-    dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime_filled, cdgrid)
+    # ``fill_land_cells`` natively handles 4D input (single halo exchange
+    # across all levels), so call it directly.
+    p_prime_filled = fill_land_cells(p_prime, mask, grid)
+    # Batch the two Arakawa-Lamb gradients (KE, p_prime_filled) into a
+    # single call — both are 3D scalar fields on (face, n, n, nlev) and
+    # the operator treats the trailing axis as a passive batch.  Same
+    # exploit as Loop 119 (CD-grid CE) for K and pi_prime.  2 gradients
+    # → 1 (one halo exchange + one 4-point finite-difference + one 2x2
+    # metric-matrix multiply on the thicker tensor).
+    n_face_kp, n_i_kp, n_j_kp, nlev_kp = KE.shape
+    _kp_stack = jnp.stack([KE, p_prime_filled], axis=-1)
+    _kp_flat = _kp_stack.reshape(n_face_kp, n_i_kp, n_j_kp, nlev_kp * 2)
+    _dkp_dx_flat, _dkp_dy_perp_flat = _arakawa_lamb_gradient(_kp_flat, cdgrid)
+    _dkp_dx = _dkp_dx_flat.reshape(
+        _dkp_dx_flat.shape[0], _dkp_dx_flat.shape[1],
+        _dkp_dx_flat.shape[2], nlev_kp, 2,
+    )
+    _dkp_dy_perp = _dkp_dy_perp_flat.reshape(
+        _dkp_dy_perp_flat.shape[0], _dkp_dy_perp_flat.shape[1],
+        _dkp_dy_perp_flat.shape[2], nlev_kp, 2,
+    )
+    dKE_dx = _dkp_dx[..., 0]
+    dp_dx = _dkp_dx[..., 1]
+    dKE_dy_perp = _dkp_dy_perp[..., 0]
+    dp_dy_perp = _dkp_dy_perp[..., 1]
     # Downcast PGF results back to working precision
     dp_dx = dp_dx.astype(T.dtype)
     dp_dy_perp = dp_dy_perp.astype(T.dtype)
 
-    # --- 11. Vorticity at corners (relative only) ---
-    zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+    # --- 11. Vorticity + divergence at corners (batched) ---
+    # Batch the (zeta, div_v) center-to-corner interpolation: both are
+    # cell-centre (face, n, n, nlev) fields and the operator treats
+    # the trailing axis as a passive batch.  Stack and fold so a
+    # single halo + 4-point average serves both interps.  Same
+    # passive-trailing-axis pattern as the CD-grid PE corner interps.
+    n_face_zd, n_i_zd, n_j_zd, nlev_zd = zeta.shape
+    _zd_stack = jnp.stack([zeta, div_v], axis=-1)
+    _zd_corner_flat = _interp_center_to_corner(
+        _zd_stack.reshape(n_face_zd, n_i_zd, n_j_zd, nlev_zd * 2), cdgrid,
+    )
+    _zd_corner = _zd_corner_flat.reshape(
+        _zd_corner_flat.shape[0], _zd_corner_flat.shape[1],
+        _zd_corner_flat.shape[2], nlev_zd, 2,
+    )
+    zeta_corner = _zd_corner[..., 0]
+    div_corner = _zd_corner[..., 1]
     f_corner_3d = cdgrid.f_corner[:, :, :, None]   # (6, n+1, n+1, 1)
 
     # --- 12. Baroclinic Coriolis split ---
@@ -214,8 +230,8 @@ def ocean_baroclinic_tendencies_cdgrid(
     dv_d_dt = (-zeta_corner * u_d - f_corner_3d * u_prime_d
                - dKE_dy_perp - dp_dy_perp / rho_0)
 
-    # Skew-symmetric correction
-    div_corner = _interp_center_to_corner(div_v, cdgrid)
+    # Skew-symmetric correction (``div_corner`` was already computed
+    # alongside ``zeta_corner`` via the batched corner interpolation).
     du_d_dt = du_d_dt - 0.5 * u_d * div_corner
     dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
 
@@ -228,57 +244,125 @@ def ocean_baroclinic_tendencies_cdgrid(
     du_dt, dv_dt = dgrid_to_center_vector(du_d_dt, dv_d_dt)
 
     # --- 15. Vertical advection of u, v (cell-centre) ---
-    du_dt = du_dt + _vertical_advection_ocean(u_a, w, z_coord, J)
-    dv_dt = dv_dt + _vertical_advection_ocean(v_a, w, z_coord, J)
+    # Batch the two ``_vertical_advection_ocean`` calls by stacking
+    # (u_a, v_a) along a new leading axis.  ``w_full`` / ``jac_safe`` /
+    # ``dz_half`` depend only on (w, z_coord, J), so they are
+    # computed once and the trailing-axis ``[..., :-1] - [..., 1:]``
+    # upwind gradient broadcasts across the new axis.  Same
+    # leading-axis batching as Loop 142 in CD-grid CE / PE.
+    _uv_a_va = jnp.stack([u_a, v_a], axis=0)
+    _uv_a_va_adv = _vertical_advection_ocean(_uv_a_va, w, z_coord, J)
+    du_dt = du_dt + _uv_a_va_adv[0]
+    dv_dt = dv_dt + _uv_a_va_adv[1]
 
     # --- 16. Tracer tendencies ---
-    # Use C-grid velocities for upwind advection of tracers at cell centres
-    tracers = jnp.stack([T, S], axis=0)
+    # Use C-grid velocities for upwind advection of tracers at cell centres.
+    # Stack T, S along a trailing tracer axis and fold it into the level
+    # axis so the halo-issuing operators (cgrid_tracer_advection_fct,
+    # laplacian_viscosity_3d) run ONCE for both tracers instead of being
+    # called twice under vmap-over-(T,S) — each vmap'd call would emit
+    # its own pad_halo_4d MPI exchange.  Vertical operators stay
+    # per-tracer because they hard-code the vertical axis at -1.
+    tracer_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
+    n_face, n_i, n_j, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(n_face, n_i, n_j, nlev_t * n_tracers)
+    # Broadcast C-grid velocities across the combined (level × tracer)
+    # axis.  ``tracer_flat`` reshape interleaves levels and tracers as
+    # ``[lev0/trc0, lev0/trc1, ..., lev1/trc0, ...]`` — each level's
+    # velocity must be duplicated ``n_tracers`` times to align, which
+    # ``jnp.repeat`` does directly.  ``jnp.tile`` would instead
+    # concatenate the entire array and mis-align tracer ↔ level.
+    if n_tracers == 1:
+        u_c_b, v_c_b = u_c, v_c
+    else:
+        u_c_b = jnp.repeat(u_c, n_tracers, axis=-1)
+        v_c_b = jnp.repeat(v_c, n_tracers, axis=-1)
 
-    def tracer_tendency(tr):
-        # Horizontal: FCT-limited advection with C-grid velocities
-        # Uses Zalesak (1979) flux-corrected transport to ensure
-        # monotonicity — eliminates overshoot/undershoot that unlimited
-        # PPM produces on the cubed-sphere near panel boundaries.
-        dtr_dt = cgrid_tracer_advection_fct(tr, u_c, v_c, cdgrid)
-        # Vertical advection
-        dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
+    horiz_flat = cgrid_tracer_advection_fct(tracer_flat, u_c_b, v_c_b, cdgrid)
+    if config.K_h > 0:
+        from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
+        horiz_flat = horiz_flat + laplacian_viscosity_3d(
+            tracer_flat, grid, config.K_h,
+        )
+    horiz_stack = horiz_flat.reshape(n_face, n_i, n_j, nlev_t, n_tracers)
 
-        if config.K_h > 0:
-            from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-            dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
-        if config.K_v > 0:
-            from legoesm.ocean.physics.mixing import vertical_diffusion
-            dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
-        return dtr_dt
+    # Vertical advection per-tracer (vmap over the trailing tracer axis
+    # so JAX produces one batched kernel rather than n_tracers unrolled
+    # stencils).
+    def _vert_adv(q):
+        return _vertical_advection_ocean(q, w, z_coord, J)
 
-    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
-    dT_dt = tracer_tend[0]
-    dS_dt = tracer_tend[1]
+    vert_adv_stack = jax.vmap(_vert_adv, in_axes=-1, out_axes=-1)(tracer_stack)
+
+    if config.K_v > 0:
+        from legoesm.ocean.physics.mixing import vertical_diffusion
+
+        def _vdiff(q):
+            return vertical_diffusion(q, z_coord, J, config.K_v)
+
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        tracer_tend_stack = horiz_stack + vert_adv_stack + vdiff_stack
+    else:
+        tracer_tend_stack = horiz_stack + vert_adv_stack
+
+    dT_dt = tracer_tend_stack[..., 0]
+    dS_dt = tracer_tend_stack[..., 1]
 
     # --- 17. Mixing (always applied from config, grid-native operators) ---
+    # Stack u, v along a trailing axis and fold it into the level dim so
+    # the halo-issuing horizontal viscosity operators
+    # (``laplacian_viscosity_3d``, ``hyperdiffusion_3d``) run ONCE on the
+    # thicker (6, n, n, nlev*2) field instead of issuing two separate
+    # pad_halo_4d MPI exchanges per call.  Vertical diffusion stays
+    # per-component (axis -1 = nlev hard-coded, no halo).
+    n_face_v, n_i_v, n_j_v, nlev_v = u_a.shape
+    if config.A_h > 0 or config.hyperdiff_coeff > 0:
+        vel_masked_stack = jnp.stack(
+            [u_a * mask_3d, v_a * mask_3d], axis=-1,
+        )  # (6, n, n, nlev, 2)
+        vel_masked_flat = vel_masked_stack.reshape(
+            n_face_v, n_i_v, n_j_v, nlev_v * 2,
+        )
+        # Pre-pad the (u, v)-stack ONCE so the explicit Laplacian
+        # (``laplacian_viscosity_3d``) and the inner Laplacian of the
+        # biharmonic hyperdiffusion (``hyperdiffusion_3d``) share the
+        # same halo on ``vel_masked_flat`` instead of issuing two
+        # independent ``pad_halo_4d`` collectives on the same input.
+        # Saves 1 MPI message per RHS evaluation when both A_h and
+        # hyperdiff_coeff are non-zero — the dominant ocean test config.
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc
+        _dg_oc = getattr(grid, 'duogrid', None)
+        _offsets_oc = None if _dg_oc is not None else grid.halo_interp_offsets
+        vel_masked_pad = _pad_halo_4d_oc(
+            vel_masked_flat, interp_offsets=_offsets_oc, duogrid=_dg_oc,
+        )
     if config.A_h > 0:
         from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-        vel_masked = jnp.stack([u_a * mask_3d, v_a * mask_3d], axis=0)
-        vel_lap = jax.vmap(
-            lambda q: laplacian_viscosity_3d(q, grid, config.A_h),
-            in_axes=0, out_axes=0,
-        )(vel_masked)
-        du_dt = du_dt + vel_lap[0]
-        dv_dt = dv_dt + vel_lap[1]
+        vel_lap_flat = laplacian_viscosity_3d(
+            vel_masked_flat, grid, config.A_h, padded=vel_masked_pad,
+        )
+        vel_lap = vel_lap_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
+        du_dt = du_dt + vel_lap[..., 0]
+        dv_dt = dv_dt + vel_lap[..., 1]
     if config.A_v > 0:
         from legoesm.ocean.physics.mixing import vertical_diffusion
-        vel = jnp.stack([u_a, v_a], axis=0)
-        vel_vdiff = jax.vmap(
-            lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
-            in_axes=0, out_axes=0,
-        )(vel)
-        du_dt = du_dt + vel_vdiff[0]
-        dv_dt = dv_dt + vel_vdiff[1]
+
+        def _vdiff_uv(q):
+            return vertical_diffusion(q, z_coord, J, config.A_v)
+
+        vel_uv = jnp.stack([u_a, v_a], axis=-1)  # (6, n, n, nlev, 2)
+        vel_vdiff = jax.vmap(_vdiff_uv, in_axes=-1, out_axes=-1)(vel_uv)
+        du_dt = du_dt + vel_vdiff[..., 0]
+        dv_dt = dv_dt + vel_vdiff[..., 1]
     if config.hyperdiff_coeff > 0:
         from legoesm.core.operators_3d import hyperdiffusion_3d
-        du_dt = du_dt + hyperdiffusion_3d(u_a * mask_3d, grid, config.hyperdiff_coeff)
-        dv_dt = dv_dt + hyperdiffusion_3d(v_a * mask_3d, grid, config.hyperdiff_coeff)
+        vel_hyper_flat = hyperdiffusion_3d(
+            vel_masked_flat, grid, config.hyperdiff_coeff,
+            padded=vel_masked_pad,
+        )
+        vel_hyper = vel_hyper_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
+        du_dt = du_dt + vel_hyper[..., 0]
+        dv_dt = dv_dt + vel_hyper[..., 1]
 
     # --- 17b. Physics tendencies (surface forcing, bottom drag, etc.) ---
     if physics_fn is not None:

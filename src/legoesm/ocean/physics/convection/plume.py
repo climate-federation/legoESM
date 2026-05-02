@@ -78,14 +78,15 @@ def plume_convection(
         jnp.arange(1, nlev),
     )
 
-    # dT_levels shape: (nlev-1, 6, n, n) — move level axis to last
-    dT_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dS_dt = jnp.zeros(shape_3d, dtype=dtype)
-    # Scatter tendencies to levels 1..nlev-1
+    # dT_levels shape: (nlev-1, 6, n, n) — move level axis to last,
+    # then ``jnp.pad`` along the trailing axis instead of
+    # ``zeros + .at[..., 1:].set(...)`` which materialises a fresh
+    # zero buffer + scatter.  Single Pad HLO op each.
     dT_levels_t = jnp.moveaxis(dT_levels, 0, -1)  # (6, n, n, nlev-1)
     dS_levels_t = jnp.moveaxis(dS_levels, 0, -1)
-    dT_dt = dT_dt.at[..., 1:].set(dT_levels_t)
-    dS_dt = dS_dt.at[..., 1:].set(dS_levels_t)
+    pad_axes = ((0, 0),) * (dT_levels_t.ndim - 1)
+    dT_dt = jnp.pad(dT_levels_t, (*pad_axes, (1, 0)))
+    dS_dt = jnp.pad(dS_levels_t, (*pad_axes, (1, 0)))
 
     # Convection flag at interfaces (average of adjacent levels' activity)
     active_t = jnp.moveaxis(active_levels, 0, -1)  # (6, n, n, nlev-1)

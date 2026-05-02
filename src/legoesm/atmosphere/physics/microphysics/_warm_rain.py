@@ -13,7 +13,43 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 
 
-def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0):
+def safe_pow(x, p):
+    """Differentiable ``x ** p`` with grad=0 wherever ``x <= 0``.
+
+    Microphysics has many Marshall-Palmer-style fractional powers of
+    hydrometeor mixing ratios (``q_r``, ``q_i``, ``q_s``, ``q_g``,
+    ``N_i``, …) with exponents in (0, 1) — typically 0.5 for fall
+    speeds, 1/3 for diameters, 0.525/0.875 for ventilation/accretion.
+    Their analytic derivative ``p * x**(p-1)`` is unbounded at ``x=0``
+    and complex for ``x<0``.  ``jnp.clip(x, 0.0) ** p`` therefore
+    returns ``inf`` (at zero) or ``nan`` (at negatives) under
+    ``jax.grad``, breaking AD on cold-start (no-precip) initial
+    conditions.
+
+    The double-where pattern below routes the AD graph through a
+    placeholder of 1.0 in the inactive branch so the gradient never
+    sees ``0**(p-1)``.
+
+    Parameters
+    ----------
+    x : array
+        Argument of the power.  May be zero or negative.
+    p : float or array
+        Exponent.  Intended for ``0 < p < 1`` where the bug applies;
+        also safe for ``p >= 1``.
+
+    Returns
+    -------
+    array
+        ``x ** p`` for ``x > 0``, else 0; gradient is finite
+        everywhere.
+    """
+    positive = x > 0.0
+    safe_x = jnp.where(positive, x, 1.0)
+    return jnp.where(positive, safe_x ** p, 0.0)
+
+
+def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     """Compute smooth saturation adjustment (condensation tendency).
 
     Parameters
@@ -28,18 +64,45 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0):
         Time step [s].
     sharpness : float
         Sigmoid sharpness for smooth condensation switch.
+    q_c : array or None
+        Cloud water mixing ratio [kg/kg].  When provided, the negative
+        (evaporation) branch is donor-clamped against ``q_c`` so that
+        evaporation cannot drive ``q_c`` below zero in subsaturated
+        clear air.  Without ``q_c`` the legacy signed return is
+        produced (callers must apply their own donor clamp).
 
     Returns
     -------
     condensation : array (ncol, nlev)
-        Condensation tendency [kg/kg/s].
+        Condensation tendency [kg/kg/s].  Positive = condensation;
+        negative = evaporation (donor-clamped against ``q_c`` when
+        provided).  Without ``q_c``, the legacy unclamped signed
+        value is returned for backward compatibility.
     q_sat : array (ncol, nlev)
         Saturation mixing ratio [kg/kg].
+
+    Notes
+    -----
+    A subsaturated column with ``q_c = 0`` would otherwise produce
+    spurious negative ``q_c`` after the explicit Euler step ``q_c_new
+    = q_c + condensation * dt`` — Codex audit cycle 2 finding
+    "subsaturated clear air can create negative cloud water".  The
+    ``q_c``-aware donor clamp on the evaporation branch is the
+    minimal fix that conserves total water in both clear and cloudy
+    columns.
     """
     q_sat = saturation_mixing_ratio(T, p_full)
     excess = q_v - q_sat
     cond_frac = jax.nn.sigmoid(sharpness * excess)
     condensation = cond_frac * excess / dt
+    if q_c is not None:
+        # Evaporation rate (negative ``condensation``) is bounded by
+        # the available cloud water: |condensation| × dt ≤ q_c, i.e.
+        # condensation ≥ -q_c / dt.  ``maximum(condensation, -q_c/dt)``
+        # achieves this cleanly.  Differentiable everywhere — the
+        # clamp is a smooth-ish max on the evaporation magnitude.
+        q_c_avail = jnp.clip(q_c, 0.0, None)
+        condensation = jnp.maximum(condensation, -q_c_avail / jnp.maximum(dt, 1e-10))
     return condensation, q_sat
 
 
@@ -49,13 +112,27 @@ def effective_Nc(N_c, Nc_0):
     Parameters
     ----------
     N_c : array
-        Cloud droplet number concentration [1/kg].
+        Cloud droplet number concentration [1/m³] (Seifert-Beheng
+        per-volume convention; see Notes).
     Nc_0 : float
-        Default cloud droplet number.
+        Default cloud droplet number [1/m³].  Typical values:
+        ``1e8`` /m³ maritime, ``1e9`` /m³ continental.
 
     Returns
     -------
     array : Effective N_c.
+
+    Notes
+    -----
+    **Convention**: this module internally uses the Seifert-Beheng
+    per-volume (`[1/m³]`) convention for cloud droplet number — the
+    formulas ``x_c = q_c * rho / N_c`` and ``dN_r_au = dq_c_au * rho
+    / (x_star * 20)`` rely on it (audit Codex cycle 2).  An earlier
+    docstring labeled ``N_c`` as `[1/kg]` (per-mass), which conflicts
+    with the formulas: a per-mass ``N_c`` would give ``x_c`` in
+    `[kg²/m³]` rather than `[kg]`, breaking the comparison against
+    ``x_star = 2.6e-10 kg``.  The default ``Nc_0 = 1e8`` is the
+    canonical maritime per-volume value.
     """
     return jnp.where(N_c > 1.0, N_c, Nc_0 * jnp.ones_like(N_c))
 
@@ -68,7 +145,8 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_nor
     q_c : array
         Cloud water mixing ratio [kg/kg].
     N_c_eff : array
-        Effective cloud droplet number [1/kg].
+        Effective cloud droplet number [1/m³] (per-volume —
+        see :func:`effective_Nc` Notes).
     rho : array
         Air density [kg/m3].
     k_au : float
@@ -85,9 +163,12 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_nor
     dq_c_au : array
         Cloud water autoconversion rate [kg/kg/s].
     dN_r_au : array
-        Rain number formation rate [1/kg/s].
+        Rain number formation rate [1/(m³·s)] — per-volume, matching
+        ``N_c_eff``.
     x_c : array
-        Mean cloud droplet mass [kg].
+        Mean cloud droplet mass [kg]; with ``N_c`` in `[1/m³]`,
+        ``x_c = q_c · rho / N_c`` has units
+        `(kg/kg)·(kg/m³)·m³ = kg`.
     """
     q_c_pos = jnp.clip(q_c, 0.0)
     x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
@@ -144,10 +225,14 @@ def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
         Breakup tendency [1/kg/s].
     """
     dN_r_sc = -k_sc * jnp.clip(N_r, 0.0) * jnp.clip(q_r, 0.0) * rho
-    D_r = jnp.clip(
-        (jnp.clip(q_r, 0.0) * rho / jnp.clip(N_r, 1.0) / (jnp.pi / 6.0 * constants.rho_water)),
-        0.0,
-    ) ** (1.0 / 3.0)
+    # Mean drop diameter D ~ (q_r * rho / N_r / (pi/6 * rho_water))^(1/3).
+    # Cube-root has unbounded derivative at zero — guard with safe_pow.
+    D_r_arg = (
+        jnp.clip(q_r, 0.0) * rho
+        / jnp.clip(N_r, 1.0)
+        / (jnp.pi / 6.0 * constants.rho_water)
+    )
+    D_r = safe_pow(D_r_arg, 1.0 / 3.0)
     breakup_frac = jax.nn.sigmoid(breakup_sharpness * (D_r - D_eq))
     dN_r_br = -dN_r_sc * breakup_frac
     return dN_r_sc, dN_r_br
@@ -172,4 +257,6 @@ def rain_evaporation(q_v, q_r, q_sat, evap_coeff):
     array : Evaporation rate [kg/kg/s].
     """
     subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
-    return evap_coeff * subsaturation * jnp.clip(q_r, 0.0) ** 0.525
+    # Marshall-Palmer ventilation factor q_r^0.525 — fractional power has
+    # an unbounded derivative at q_r=0; safe_pow handles the AD guard.
+    return evap_coeff * subsaturation * safe_pow(q_r, 0.525)

@@ -61,8 +61,7 @@ from legoesm.constants import g
 from legoesm.core.field import Field
 
 
-# Physical constants for RPE calculation
-_G_EARTH = 9.80616  # Gravitational acceleration [m/s^2]
+_G_EARTH = g
 
 
 @dataclass
@@ -200,6 +199,9 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
     T_warm = config.T_warm
     front_lon = config.front_longitude
 
+    # Wrapping-aware "west of front" test: works for any lon convention
+    west_of_front = ((lon - front_lon + 180.0) % 360.0 - 180.0) < 0.0
+
     if grid_type == "spectral":
         # Spectral grid
         from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
@@ -208,9 +210,9 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
 
-        # Create temperature front at prime meridian
-        T_field = np.where(lon < front_lon, T_cold, T_warm)
-
+        # Create temperature front at front_longitude
+        T_field = np.where(west_of_front, T_cold, T_warm)
+        
         # Apply to all levels with land mask
         nlev = T_grid.shape[-1]
         for k in range(nlev):
@@ -230,7 +232,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         nlev = T_data.shape[-1]
 
         # Apply temperature front to all levels
-        T_front = np.where(lon < front_lon, T_cold, T_warm)
+        T_front = np.where(west_of_front, T_cold, T_warm)
         for k in range(nlev):
             T_data[..., k] = T_front * mask
 
@@ -424,11 +426,13 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         return False, "NaN/Inf detected in final temperature field"
     if hasattr(final_state, 'eta') and not jnp.all(jnp.isfinite(final_state.eta.data)):
         return False, "NaN/Inf detected in final eta field"
-
-    # Check for temperature blowup
+    
+    # Check for temperature blowup — fuse min/max into one host pull.
     if hasattr(final_state, 'T'):
-        max_T = float(jnp.max(final_state.T.data))
-        min_T = float(jnp.min(final_state.T.data))
+        _t = final_state.T.data
+        _h = np.asarray(jnp.stack([jnp.max(_t), jnp.min(_t)]))
+        max_T = float(_h[0])
+        min_T = float(_h[1])
         if max_T > config.max_blowup_threshold or min_T < -config.max_blowup_threshold:
             return False, f"Temperature blowup: T_range=[{min_T:.1f}, {max_T:.1f}]°C"
 

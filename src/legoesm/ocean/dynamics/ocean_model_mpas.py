@@ -11,16 +11,31 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.mpas_config import MPASOceanConfig
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    diagnose_w_from_flux_div,
+    flux_form_vertical_tracer_advection,
+    flux_form_vertical_tracer_advection_tvd,
+)
+from legoesm.ocean.dynamics.advection_mpas import (
+    compute_upup_cells,
+    tvd_tracer_to_edges,
+)
+from legoesm.core.operators_voronoi import divergence_cell_3d
 from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
 from legoesm.ocean.dynamics.barotropic_mpas import (
     barotropic_substeps_mpas,
     reconcile_3d_velocity,
+)
+from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
+    barotropic_implicit_mpas,
 )
 from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
@@ -115,6 +130,22 @@ class MPASOceanModel:
         self.mesh = mesh
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
+        self._cfl_checked = False
+
+        _valid_solvers = ("explicit_substep", "implicit_cn")
+        if self.config.barotropic_solver not in _valid_solvers:
+            raise ValueError(
+                f"barotropic_solver must be one of {_valid_solvers}, "
+                f"got {self.config.barotropic_solver!r}"
+            )
+
+        # Precompute upwind-of-upwind cell indices for TVD advection.
+        # This is a one-time mesh topology operation stored as static data.
+        if self.config.tracer_advection == "tvd":
+            self._upup_pos, self._upup_neg = compute_upup_cells(mesh)
+        else:
+            self._upup_pos = None
+            self._upup_neg = None
 
         if self.config.physics is not None:
             from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
@@ -122,11 +153,49 @@ class MPASOceanModel:
         else:
             self._physics_fn = None
 
+    def check_barotropic_cfl(self, dt: float) -> float:
+        """Check barotropic CFL and warn if marginal or unstable.
+
+        Parameters
+        ----------
+        dt : float
+            Baroclinic timestep [s].
+
+        Returns
+        -------
+        cfl : float
+            Barotropic CFL number.
+        """
+        import math
+        import warnings
+
+        g = self.config.g
+        H_max = self.z_coord.H_max
+        n_sub = self.config.n_barotropic_substeps
+        dx_min = float(jnp.min(self.mesh.dcEdge))
+
+        c_baro = math.sqrt(g * H_max)
+        dt_baro = dt / n_sub
+        cfl = c_baro * dt_baro / dx_min
+
+        if cfl > 0.8:
+            n_min = math.ceil(c_baro * dt / (0.8 * dx_min))
+            warnings.warn(
+                f"Barotropic CFL = {cfl:.2f} (> 0.8) — may be unstable. "
+                f"c_baro={c_baro:.1f} m/s, dx_min={dx_min:.0f} m, "
+                f"dt_baro={dt_baro:.1f} s. "
+                f"Suggest n_barotropic_substeps >= {n_min} "
+                f"(currently {n_sub}).",
+                stacklevel=2,
+            )
+        return cfl
+
     def tendencies(
         self,
         state: MPASOceanState,
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanTendencies:
         """Compute baroclinic tendencies."""
         return mpas_ocean_baroclinic_tendencies(
@@ -134,6 +203,7 @@ class MPASOceanModel:
             freshwater=freshwater,
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
+            sponge=sponge,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -143,6 +213,7 @@ class MPASOceanModel:
         dt: float,
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanState:
         """Advance one full timestep (baroclinic + barotropic).
 
@@ -169,7 +240,8 @@ class MPASOceanModel:
 
         # 1. Compute baroclinic tendencies
         tend = self.tendencies(state, freshwater=freshwater,
-                               surface_forcing=surface_forcing)
+                               surface_forcing=surface_forcing,
+                               sponge=sponge)
 
         # 2. Update tracers (forward Euler)
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -178,39 +250,55 @@ class MPASOceanModel:
         # Fill land cells with ocean-neighbor average (Neumann BC) so that
         # subsequent operators see smooth values at coastlines instead of
         # the sharp ocean-to-zero discontinuity that `* mask` would create.
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
-        m1 = mask[c1_m, jnp.newaxis]
-        m2 = mask[c2_m, jnp.newaxis]
-        nbr_sum = jnp.zeros_like(T_new).at[c1_m].add(T_new[c2_m] * m2)
-        nbr_sum = nbr_sum.at[c2_m].add(T_new[c1_m] * m1)
-        nbr_cnt = jnp.zeros_like(T_new).at[c1_m].add(m2)
-        nbr_cnt = nbr_cnt.at[c2_m].add(m1)
-        nbr_avg_T = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
-        mask_e = mask[:, jnp.newaxis]
-        T_new = jnp.where(mask_e > 0.5, T_new, nbr_avg_T)
+        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
+        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
 
-        nbr_sum_S = jnp.zeros_like(S_new).at[c1_m].add(S_new[c2_m] * m2)
-        nbr_sum_S = nbr_sum_S.at[c2_m].add(S_new[c1_m] * m1)
-        nbr_avg_S = nbr_sum_S / jnp.maximum(nbr_cnt, 1.0)
-        S_new = jnp.where(mask_e > 0.5, S_new, nbr_avg_S)
+        # 2b. GM/Redi isopycnal mixing (forward Euler tendency on top of
+        # the physics-stepped tracer, before advection).  Mirrors the
+        # lat-lon pattern in ocean_model_latlon_cgrid.py.  Only the
+        # centred scheme is implemented on MPAS (Phase 1-4 of the plan
+        # at docs/ocean_experiments/gm_redi_mpas_plan.md); the triad
+        # branch raises NotImplementedError.
+        if config.gm_redi is not None:
+            from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+                gm_redi_tracer_tendency_mpas,
+            )
+            dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(
+                T_new, S_new, state.eta.data, state.H_bathy.data,
+                mesh, z_coord, config.gm_redi,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask,
+            )
+            mask_3d = mask[:, jnp.newaxis]
+            T_new = T_new + dt * dT_gm * mask_3d
+            S_new = S_new + dt * dS_gm * mask_3d
 
-        # 3. Update 3D velocity with baroclinic tendency (non-Coriolis)
-        u_baro = state.u.data + dt * tend.du_dt.data
+        # 3. Update 3D velocity with baroclinic perturbation tendency.
+        # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
+        # planetary Coriolis) — Coriolis on the 3D perturbation is
+        # applied via forward-backward Matsuno below. Matches lat-lon
+        # pattern (#160).
+        u_star = state.u.data + dt * tend.du_dt.data
 
-        # 3b. Forward-backward Coriolis on perturbation velocity
-        # Coriolis is excluded from the baroclinic tendencies (issue #103)
-        # and applied here to the perturbation velocity u' = u - u_bar only.
-        # The barotropic solver handles depth-mean Coriolis separately.
+        # 3b. Forward-backward (trapezoidal predictor-corrector) Coriolis
+        # on the 3D perturbation velocity. Unconditionally stable for
+        # inertial oscillations; mirrors the lat-lon
+        # _forward_backward_coriolis_3d call in ocean_model_latlon_cgrid.py.
         u_baro = _forward_backward_coriolis_mpas_3d(
-            u_baro, dt, mesh, z_coord, config, mask,
-            state.eta.data, state.H_bathy.data,
+            u_star, dt, mesh, z_coord, config,
+            mask, state.eta.data, state.H_bathy.data,
         )
 
         # 4. Barotropic substeps
-        # The baroclinic tendency is already applied to u_baro, so the
-        # barotropic solver computes u_bar from the updated velocity.
-        # No F_slow_u is needed (same pattern as cubed-sphere barotropic.py).
+        # The 3D baroclinic tendency has been applied to u_baro above.
+        # F_slow_u (depth-mean of du_dt_full, with planetary Coriolis
+        # subtracted) is passed to the barotropic solver so it can
+        # apply *online evolving* f·v_t(u_bar) during each substep —
+        # matching the lat-lon C-grid pattern. See ocean_pe_mpas.py and
+        # barotropic_mpas.py for the split and its rationale.
         n_sub = config.n_barotropic_substeps
         dt_baro = dt / n_sub
 
@@ -227,52 +315,35 @@ class MPASOceanModel:
         if freshwater is not None and config.freshwater_closure != "none":
             F_slow_eta = freshwater_eta_tendency(freshwater, config.rho_0) * mask
 
-        eta_new, u_bar_new = barotropic_substeps_mpas(
-            state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
-            F_slow_eta=F_slow_eta,
-        )
+        F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 
-        # 5. Thickness-weighted tracer correction (split-explicit coupling)
-        #
-        # The tracer Euler step used the OLD layer thickness h_old:
-        #     T_new = T_old + dt * dT_dt   where dT_dt = (1/h_old) * flux_terms
-        # so:  h_old * T_new = h_old * T_old + dt * flux_terms
-        #
-        # But the barotropic solver changed eta → h_new != h_old.
-        # Conservation requires:  h_new * T_corrected = h_old * T_new
-        # Therefore:              T_corrected = T_new * (h_old / h_new)
-        #
-        # This is the standard split-explicit corrector used in MPAS-Ocean,
-        # MOM6, and POP (Higdon 2005, Hallberg 1997).  It ensures that the
-        # thickness-weighted tracer content h*T is exactly conserved through
-        # the barotropic-baroclinic splitting.  The correction is O(dt * deta/dt)
-        # and vanishes when eta is stationary (e.g., rest state).
-        #
-        # Freshwater forcing: F_slow_eta changes eta in the barotropic solver,
-        # so h_new reflects mass added by precipitation/evaporation.  The
-        # rescaling h_old/h_new correctly dilutes/concentrates tracers in
-        # proportion to the added/removed volume.  The virtual salt flux
-        # (already included in dS_dt) is a source term that gets diluted by
-        # the same factor, which is physically correct.
+        if config.barotropic_solver == "implicit_cn":
+            # Single-step implicit CN free surface (no substepping, no
+            # time filter).  See barotropic_implicit_mpas.py for the
+            # scheme.  Eliminates the TRiSK rotational null branch
+            # (Thuburn 2008; Ringler+ 2010 §6) that monotonically grows
+            # in the explicit_substep run on global ico4 (#214).
+            eta_new, u_bar_new, Hu_avg = barotropic_implicit_mpas(
+                state_for_baro, mesh, z_coord, config, dt,
+                F_slow_eta=F_slow_eta,
+                F_slow_u=F_slow_u_data,
+            )
+        else:
+            eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
+                state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
+                F_slow_eta=F_slow_eta,
+                F_slow_u=F_slow_u_data,
+            )
+
+        # 5. Layer thicknesses before and after barotropic
         h_k_old = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, z_coord,
             min_water_column_m=config.min_water_column_m,
-        )
+        )  # (nCells, nlev)
         h_k_new = compute_layer_thickness(
             eta_new, state.H_bathy.data, z_coord,
             min_water_column_m=config.min_water_column_m,
-        )
-        # Ratio h_old / h_new, with safe denominator for dry cells.
-        # On ocean cells where h_k > min_water_column_m, this is well-defined.
-        h_ratio = h_k_old / jnp.maximum(h_k_new, 1e-10)
-        mask_e = mask[:, jnp.newaxis]
-        T_new = jnp.where(mask_e > 0.5, T_new * h_ratio, T_new)
-        S_new = jnp.where(mask_e > 0.5, S_new * h_ratio, S_new)
-
-        # Explicit land cell masking: ensure land cells are set to 0.0°C
-        # This is the critical fix for MPAS regional grid land cell masking
-        T_new = jnp.where(mask_e > 0.5, T_new, 0.0)
-        S_new = jnp.where(mask_e > 0.5, S_new, 0.0)
+        )  # (nCells, nlev)
 
         # 6. Reconcile 3D velocity
         # Compute u_bar_old from the UPDATED state (state_for_baro),
@@ -287,25 +358,125 @@ class MPASOceanModel:
             u_baro, u_bar_old, u_bar_new, mesh, mask,
         )
 
-        # Final state construction with explicit land masking
-        # Ensure all fields respect land mask in the final state
-        mask_e = mask[:, jnp.newaxis]
-        T_final = jnp.where(mask_e > 0.5, T_new, 0.0)
-        S_final = jnp.where(mask_e > 0.5, S_new, 0.0)
+        # 7. Barotropic correction for transport-consistent tracer advection
+        #
+        # Correct the reconciled 3D velocity so that depth-integrated
+        # transport matches the time-averaged barotropic transport Hu_avg
+        # exactly.  This ensures mass flux consistency between the
+        # barotropic continuity equation (which produced eta_new) and
+        # the tracer transport (Hallberg & Adcroft 2009, issue #145).
+        #
+        # The correction is a uniform (depth-independent) velocity shift:
+        #   delta_u = (Hu_avg - sum_k(u_3d * h_e)) / H_e
+        # This preserves baroclinic shear while matching Hu_avg.
+        edge_mask = mask[c1] * mask[c2]
+        H_e_old = jnp.sum(h_e_k, axis=1)  # (nEdges,)
+        Hu_3d = jnp.sum(u_3d_new * h_e_k, axis=1)  # (nEdges,)
+        delta_u = (Hu_avg - Hu_3d) / jnp.maximum(H_e_old, 1e-10)
+        u_transport = u_3d_new + delta_u[:, jnp.newaxis]  # (nEdges, nlev)
 
+        # Per-layer mass fluxes with full 3D velocity structure.
+        # Preserves baroclinic shear and produces non-zero w from
+        # Ekman pumping/suction (unlike uniform barotropic distribution
+        # which gives w ≡ 0).
+        mass_flux = h_e_k * u_transport * edge_mask[:, jnp.newaxis]
+
+        # 8. Diagnose vertical velocity from per-layer flux divergence
+        #
+        # From continuity: dh_k/dt + div_h(h_k * u_k) + w_{k-1/2} - w_{k+1/2} = 0
+        # We accumulate div_h(h_k * u_k) bottom-up to get w at interfaces.
+        flux_div_3d = divergence_cell_3d(mass_flux, mesh)  # (nCells, nlev)
+
+        w = diagnose_w_from_flux_div(
+            flux_div_3d, z_coord, thickness_weighted=True,
+        )  # (nCells, nlev+1)
+
+        # 9. Flux-form tracer transport (horizontal + vertical)
+        #
+        # Both horizontal and vertical transport use the barotropic-averaged
+        # per-layer mass fluxes for consistency:
+        #   h_new * T_new = h_old * T_mid
+        #     - dt * div_h(mass_flux * T_face_h)   [horizontal flux]
+        #     - dt * (w * T_face_v)                 [vertical flux]
+        #
+        # T_mid contains diffusion+physics from the Euler step (step 2).
+        # Advection (horizontal + vertical) is applied here.
+        # This matches the latlon C-grid algorithm (ocean_model_latlon_cgrid.py).
+        mask_3d = mask[:, jnp.newaxis]  # (nCells, 1)
+
+        use_tvd = config.tracer_advection == "tvd"
+
+        for tr_name in ['T', 'S']:
+            tr = T_new if tr_name == 'T' else S_new
+
+            # Horizontal flux: reconstruct tracer at edges
+            # MPAS convention: u > 0 means flow from c1 to c2 (edge normal).
+            if use_tvd:
+                tr_edge = tvd_tracer_to_edges(
+                    tr, mass_flux, mesh,
+                    self._upup_pos, self._upup_neg,
+                )
+            else:
+                # First-order upwind
+                tr_c1 = tr[c1]  # (nEdges, nlev)
+                tr_c2 = tr[c2]  # (nEdges, nlev)
+                tr_edge = jnp.where(mass_flux > 0, tr_c1, tr_c2)
+            tracer_flux = mass_flux * tr_edge  # (nEdges, nlev)
+            div_hut = divergence_cell_3d(tracer_flux, mesh)  # (nCells, nlev)
+
+            # Vertical flux divergence
+            if use_tvd:
+                vert_flux_div = flux_form_vertical_tracer_advection_tvd(
+                    tr, w, h_k_old, dt)
+            else:
+                vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
+
+            # Full flux-form tracer update:
+            # h_new * T_new = h_old * T_mid - dt * vert - dt * horiz
+            hT_new = h_k_old * tr - dt * vert_flux_div - dt * div_hut
+            tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
+            # Preserve pre-step land values instead of zeroing them.
+            # Zeroing T, S on land each step and then averaging those
+            # zeros into coastal cells via the Neumann fill produced a
+            # cold/fresh front that propagated into the interior
+            # one-cell-per-step. See issue #164. Matches the lat-lon
+            # pattern in ocean_model_latlon_cgrid.py:493.
+            tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+
+            if tr_name == 'T':
+                T_corrected = tr_new
+            else:
+                S_corrected = tr_new
+
+        # Final state construction with explicit land masking
+        T_final = T_corrected
+        S_final = S_corrected
+        
         state_new = MPASOceanState(
             u=state.u.replace(data=u_3d_new),
             T=state.T.replace(data=T_final),
             S=state.S.replace(data=S_final),
             eta=state.eta.replace(data=eta_new * mask),
+            w=state.w.replace(data=w),
             H_bathy=state.H_bathy,
             land_mask=state.land_mask,
         )
 
-        # 7. Conservation fixers
+        # 10. Conservation fixers (#166: pass expected forcing so fixer
+        # only removes numerical drift, not the forcing itself)
         if config.use_conservation_fixer:
+            _f64 = jnp.float64
+            wa = mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
+            expected_dHeat = jnp.sum(
+                tend.dT_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
+            ) * dt
+            expected_dSalt = jnp.sum(
+                tend.dS_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
+            ) * dt
             state_new = mpas_ocean_conservation_fixer(
                 state_new, state, mesh, z_coord, config,
+                expected_dHeat=expected_dHeat,
+                expected_dSalt=expected_dSalt,
             )
 
         return cast_pytree(state_new, None, "storage")
@@ -316,50 +487,77 @@ class MPASOceanModel:
         dt: float,
         freshwater=None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanState:
         """Advance one timestep with host-side runtime validation.
 
         Unlike the previous implementation which silently clipped tracers,
         this raises on out-of-bounds values so the caller sees the failure.
         """
+        if not self._cfl_checked:
+            self.check_barotropic_cfl(dt)
+            self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
-                              surface_forcing=surface_forcing)
+                              surface_forcing=surface_forcing,
+                              sponge=sponge)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
 
     def _assert_runtime_invariants(self, state: MPASOceanState) -> None:
-        """Host-side runtime checks (matching cubed-sphere ocean model)."""
+        """Host-side runtime checks (matching cubed-sphere ocean model).
+
+        Fuses the finite-check, T-min/max, and S-min/max reductions
+        into a single ``jnp.stack`` + ``np.asarray`` host transfer so
+        the runtime checks cost one GPU stall per step instead of
+        five.  Uses ``jnp.where``-masked ``nanmin``/``nanmax`` to
+        avoid the boolean indexing path (``state.T.data[wet]`` allocates
+        a dynamically-shaped array that cannot be JIT'd; the masked
+        reductions are equivalent and stay on device).
+        """
         mask = state.land_mask.data
         wet = mask > 0.5
+        wet3 = wet[..., jnp.newaxis] if state.T.data.ndim > 1 else wet
+        T_wet = jnp.where(wet3, state.T.data, jnp.nan)
+        S_wet = jnp.where(wet3, state.S.data, jnp.nan)
+        any_wet = jnp.any(wet)
 
-        finite_ok = bool(
+        finite_ok = (
             jnp.all(jnp.isfinite(state.u.data))
             & jnp.all(jnp.isfinite(state.T.data))
             & jnp.all(jnp.isfinite(state.S.data))
             & jnp.all(jnp.isfinite(state.eta.data))
         )
-        if not finite_ok:
+
+        _stats = jnp.stack([
+            finite_ok.astype(state.eta.data.dtype),
+            any_wet.astype(state.eta.data.dtype),
+            jnp.nanmin(T_wet).astype(state.eta.data.dtype),
+            jnp.nanmax(T_wet).astype(state.eta.data.dtype),
+            jnp.nanmin(S_wet).astype(state.eta.data.dtype),
+            jnp.nanmax(S_wet).astype(state.eta.data.dtype),
+        ])
+        host = np.asarray(_stats)
+        finite_ok_h = bool(host[0] > 0.5)
+        any_wet_h = bool(host[1] > 0.5)
+
+        if not finite_ok_h:
             raise FloatingPointError(
                 "MPAS ocean runtime check failed: non-finite state detected"
             )
 
         config = self.config
-        T_wet = state.T.data[wet[:, jnp.newaxis].broadcast_to(state.T.data.shape)]
-        S_wet = state.S.data[wet[:, jnp.newaxis].broadcast_to(state.S.data.shape)]
-
-        if T_wet.size > 0:
-            T_min_val = float(jnp.min(T_wet))
-            T_max_val = float(jnp.max(T_wet))
+        if any_wet_h:
+            T_min_val = float(host[2])
+            T_max_val = float(host[3])
+            S_min_val = float(host[4])
+            S_max_val = float(host[5])
             if T_min_val < config.temperature_min_c or T_max_val > config.temperature_max_c:
                 raise ValueError(
                     f"MPAS ocean runtime check failed: T out of bounds "
                     f"[{T_min_val:.2f}, {T_max_val:.2f}] vs "
                     f"[{config.temperature_min_c}, {config.temperature_max_c}]"
                 )
-        if S_wet.size > 0:
-            S_min_val = float(jnp.min(S_wet))
-            S_max_val = float(jnp.max(S_wet))
             if S_min_val < config.salinity_min_psu or S_max_val > config.salinity_max_psu:
                 raise ValueError(
                     f"MPAS ocean runtime check failed: S out of bounds "

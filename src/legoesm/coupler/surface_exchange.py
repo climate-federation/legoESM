@@ -56,6 +56,10 @@ def extract_atm_to_surface(
     T_lowest = state.T.data[..., -1]
     u_lowest = state.u.data[..., -1]
     v_lowest = state.v.data[..., -1]
+    # Pin defaulted allocations to the state precision so x64 zeros do
+    # not silently widen the AtmToSurface struct precision.  This is on
+    # the hot path: surface_exchange runs every coupling step.
+    _state_dtype = T_lowest.dtype
 
     # Humidity: extract from tracers if available; else assume dry.
     if state.tracers is not None and "q_v" in state.tracers:
@@ -63,13 +67,13 @@ def extract_atm_to_surface(
         _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
         q_lowest = _qv_data[..., -1]
     else:
-        q_lowest = jnp.zeros(shape)
+        q_lowest = jnp.zeros(shape, dtype=_state_dtype)
 
     # Air density from ideal gas law
     rho_lowest = p_lowest / (constants.R_d * T_lowest)
 
     # Default unavailable fields to zero with flags
-    zero = jnp.zeros(shape)
+    zero = jnp.zeros(shape, dtype=_state_dtype)
     has_rad = jnp.array(1.0) if sw_down is not None else jnp.array(0.0)
     has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
 
@@ -140,7 +144,8 @@ def extract_atm_to_surface_nh(
     dz_sfc = height_coord.z_half[-1] - height_coord.z_half[-2]
     p_surface = p_lowest + constants.g * rho_low * jnp.abs(dz_sfc) * 0.5
 
-    zero = jnp.zeros(shape)
+    # Pin to the state precision (T_lowest is derived from theta_prime + theta_0).
+    zero = jnp.zeros(shape, dtype=T_lowest.dtype)
     has_rad = jnp.array(1.0) if sw_down is not None else jnp.array(0.0)
     has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""AMIP simulation — thin CLI wrapper around ModelDriver.
+"""AMIP simulation via the canonical ``ModelDriver`` path.
 
 Usage:
     JAX_ENABLE_X64=1 python scripts/run_amip.py \
@@ -7,19 +7,15 @@ Usage:
 
     JAX_ENABLE_X64=1 python scripts/run_amip.py \
         --dataset cobe --forcing-path /path/to/MODEL.SST.COBE-SST2.nc \
-        --days 365 --resolution 24 --dt 450 \
-        --checkpoint-days 30 --output results/amip_1yr
-
-    # Restart from checkpoint:
-    JAX_ENABLE_X64=1 python scripts/run_amip.py \
-        --restart-from results/amip_1yr/checkpoint_day_030.npz \
-        --forcing-path /path/to/COBE.nc --days 365
+        --radiation rrtmgp --convection sbm --turbulence louis \
+        --days 30 --resolution 16 --dt 600
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -27,13 +23,15 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
-from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import (
-    ExperimentConfig, GridConfig, DycoreConfig, OutputConfig
+    DycoreConfig,
+    ExperimentConfig,
+    GridConfig,
+    OutputConfig,
 )
 
 
-def main():
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="AMIP simulation with prescribed SST/SIC",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -47,6 +45,9 @@ def main():
                         help="Separate SIC file (for ICON split SST/SIC files)")
     parser.add_argument("--sst-var", type=str, default=None)
     parser.add_argument("--sic-var", type=str, default=None)
+    parser.add_argument("--time-var", type=str, default=None)
+    parser.add_argument("--lat-var", type=str, default=None)
+    parser.add_argument("--lon-var", type=str, default=None)
     parser.add_argument("--sst-offset", type=float, default=None)
     parser.add_argument("--sic-scale", type=float, default=None)
 
@@ -87,27 +88,101 @@ def main():
                         choices=["standard", "analytical", "none"])
     parser.add_argument("--ozone-forcing", type=str, default="inline",
                         choices=["inline", "external", "off"])
-    parser.add_argument("--ozone-file", type=str, default="")
+    parser.add_argument(
+        "--ozone-file", type=str, default="",
+        help=(
+            "Path to an ozone NetCDF/Zarr file (CMIP6 input4MIPs "
+            "compatible).  Auto-detects variable name among "
+            "'ozone'/'vmro3'/'o3'/'O3'/'tro3'.  Files with 12 months of "
+            "data are interpreted as a monthly climatology and looped "
+            "every year; files with >12 months (e.g. the CMIP6 "
+            "1850–2014 vmro3 file with 1980 months and "
+            "'months since 1850-01-01' CF units) are interpreted as an "
+            "interannually varying dataset and dispatched through "
+            "OzoneConfig.start_year to preserve the real time evolution."
+        ))
     parser.add_argument("--ghg-forcing", type=str, default="constant",
-                        choices=["constant", "external"],
-                        help="GHG forcing mode: constant (default) or external (time-varying from file)")
+                        choices=["constant", "external"])
     parser.add_argument("--ghg-file", type=str, default="",
-                        help="Path to CMIP6 annual GHG concentration file (greenhouse_historical_plus.nc)")
+                        help="Path to a time-varying GHG forcing file")
 
     # Solar
     parser.add_argument("--solar-source", type=str, default="constant",
-                        choices=["constant", "file", "spectral_file"])
+                        choices=["constant", "file", "spectral_file"],
+                        help=(
+                            "'constant' uses --co2/ch4/n2o/solar-S_0 "
+                            "defaults; 'file' reads a 1-D TSI time series; "
+                            "'spectral_file' additionally reads a 2-D "
+                            "(time, band|gpt) spectrum."
+                        ))
     parser.add_argument("--solar-file", type=str, default="")
-    parser.add_argument("--solar-spectral-var", type=str,
-                        default="solar_fraction_by_gpt")
+    parser.add_argument(
+        "--solar-tsi-var", type=str, default="tsi",
+        help=(
+            "Variable name for broadband TSI [W/m^2] in the solar forcing "
+            "file.  Case-insensitive: the canonical MPI-M CMIP6 spectral-"
+            "solar file stores 'TSI', the in-tree default is 'tsi' — "
+            "either works."
+        ))
+    parser.add_argument(
+        "--solar-spectral-var", type=str,
+        default="solar_fraction_by_gpt",
+        help=(
+            "Variable name for the normalised spectrum in "
+            "--solar-source=spectral_file.  Case-insensitive lookup.  "
+            "If the loaded axis has <50 entries (e.g. CMIP6 'SSI_frac' "
+            "with 14 solar bands) it is expanded to per-g-point weights "
+            "(112 g-points on the default RRTMG-SW table) so the "
+            "radiation solver receives one weight per g-point."
+        ))
 
     # Aerosol
     parser.add_argument("--aerosol-forcing", type=str, default="off",
                         choices=["off", "external"])
     parser.add_argument("--aerosol-file", type=str, default="")
     parser.add_argument("--aerosol-reference-aod", type=float, default=0.03)
-    parser.add_argument("--volcanic-aerosol-file", type=str, default="")
+    parser.add_argument(
+        "--volcanic-aerosol-file", type=str, default="",
+        help=(
+            "Path to a volcanic stratospheric aerosol file.  Auto-"
+            "dispatched by file schema: the legacy 'aod(time, lat)' "
+            "convention is read directly, while the CMIP6 / MPI-M files "
+            "'bc_aeropt_cmip6_volc_lw_b16_sw_b14_<year>.nc' storing "
+            "per-band 'ext_sun(solar_bands, lat, altitude, month)' in "
+            "[1/km] are integrated over altitude (∫ ext·dz) and averaged "
+            "over SW bands to produce a representative single-band AOD "
+            "(matching the Kinne multi-band aerosol convention)."
+        ))
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
+
+    # Subgrid physics
+    parser.add_argument("--convection", type=str, default="sbm",
+                        choices=[
+                            "none", "sbm", "dca", "kuo", "mass_flux", "edmf",
+                        ])
+    parser.add_argument("--turbulence", type=str, default="none",
+                        choices=[
+                            "none", "smagorinsky", "louis", "tke",
+                            "clubb_lite", "holtslag_boville", "ysu", "edmf",
+                        ])
+    parser.add_argument("--gravity-wave-drag", type=str, default="none",
+                        choices=[
+                            "none", "rayleigh", "lindzen", "mcfarlane",
+                            "hines", "prognostic_spectral", "ml_emulator",
+                        ])
+    parser.add_argument("--held-suarez-forcing", action="store_true", default=False)
+    parser.add_argument("--sbm-tau-c", type=float, default=7200.0)
+    parser.add_argument("--sbm-rh-ref", type=float, default=0.7)
+    parser.add_argument("--sbm-cape-threshold", type=float, default=70.0)
+
+    # Joint ML physics parameterization
+    parser.add_argument("--physics-parameterization", type=str, default="none",
+                        choices=["none", "ml"])
+    parser.add_argument("--physics-parameterization-checkpoint", type=str, default="")
+    parser.add_argument("--physics-parameterization-stats", type=str, default="")
+    parser.add_argument("--physics-parameterization-hidden-dim", type=int, default=128)
+    parser.add_argument("--physics-parameterization-layers", type=int, default=3)
+    parser.add_argument("--physics-parameterization-seed", type=int, default=0)
 
     # Clouds & microphysics
     parser.add_argument("--clouds", type=str, default="none",
@@ -121,7 +196,7 @@ def main():
     parser.add_argument("--topo-smoothing", type=int, default=4)
     parser.add_argument("--topo-edge-blend", type=float, default=0.3)
 
-    # Surface
+    # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
 
     # Moisture conservation
@@ -151,37 +226,10 @@ def main():
     parser.add_argument("--plot", action="store_true", default=False,
                         help="Generate diagnostic plots after simulation completes")
 
-    args = parser.parse_args()
+    return parser
 
-    # Auto-detect MPI environment: enable distributed if MPI launcher detected
-    import os
-    if not args.distributed and any(
-        k in os.environ for k in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
-                                   "SLURM_NTASKS", "MPI_LOCALNRANKS")
-    ):
-        args.distributed = True
 
-    # Backward-compatible alias
-    if args.radiation == "rrtmgp":
-        args.radiation = "rrtmg"
-
-    # Enforce forcing-path requirement
-    if (args.forcing_path is None and args.restart_from is None
-            and args.dataset != "analytical"):
-        parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
-    if args.solar_source in ("file", "spectral_file") and not args.solar_file:
-        parser.error("--solar-file required when --solar-source is file/spectral_file")
-    if args.ghg_forcing == "external" and not args.ghg_file:
-        parser.error("--ghg-file required when --ghg-forcing is external")
-
-    # Auto-configure for spectral discretization
-    if args.discretization == "spectral" or args.truncation is not None:
-        args.discretization = "spectral"
-        args.grid_type = "gaussian"
-        if args.truncation is not None:
-            args.resolution = args.truncation
-
-    # Build configuration
+def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
@@ -205,7 +253,7 @@ def main():
         clear_sky_diag=args.clear_sky_diag,
     )
 
-    config = ExperimentConfig(
+    return ExperimentConfig(
         grid=grid_config,
         dycore=dycore_config,
         output=output_config,
@@ -216,6 +264,9 @@ def main():
         sic_path=args.sic_path or "",
         sst_var=args.sst_var or "",
         sic_var=args.sic_var or "",
+        time_var=args.time_var or "",
+        lat_var=args.lat_var or "",
+        lon_var=args.lon_var or "",
         sst_offset=args.sst_offset or 0.0,
         sic_scale=args.sic_scale or 1.0,
         radiation=args.radiation,
@@ -231,6 +282,7 @@ def main():
         ghg_file=args.ghg_file,
         solar_source=args.solar_source,
         solar_file=args.solar_file,
+        solar_tsi_var=args.solar_tsi_var,
         solar_spectral_var=args.solar_spectral_var,
         aerosol_forcing=args.aerosol_forcing,
         aerosol_file=args.aerosol_file,
@@ -239,6 +291,9 @@ def main():
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         cloud_scheme=args.clouds,
         microphysics=args.microphysics,
+        convection=args.convection,
+        turbulence=args.turbulence,
+        gravity_wave_drag=args.gravity_wave_drag,
         fix_moisture=args.fix_moisture,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
@@ -246,21 +301,81 @@ def main():
         dynamic_albedo=False,
         experiment=args.experiment,
         start_year=args.start_year,
+        sbm_tau_c=args.sbm_tau_c,
+        sbm_RH_ref=args.sbm_rh_ref,
+        sbm_cape_threshold=args.sbm_cape_threshold,
+        held_suarez_forcing=args.held_suarez_forcing,
+        physics_parameterization=args.physics_parameterization,
+        physics_parameterization_checkpoint=args.physics_parameterization_checkpoint,
+        physics_parameterization_stats=args.physics_parameterization_stats,
+        physics_parameterization_hidden_dim=args.physics_parameterization_hidden_dim,
+        physics_parameterization_layers=args.physics_parameterization_layers,
+        physics_parameterization_seed=args.physics_parameterization_seed,
         precision=args.precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         ensemble_size=args.ensemble_size,
     )
 
-    # Create and run driver
+
+def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
+    # Auto-detect MPI environment
+    if not args.distributed and any(
+        key in os.environ for key in (
+            "OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
+            "SLURM_NTASKS", "MPI_LOCALNRANKS",
+        )
+    ):
+        args.distributed = True
+
+    # Backward-compatible alias
+    if args.radiation == "rrtmgp":
+        args.radiation = "rrtmg"
+
+    if (args.forcing_path is None and args.restart_from is None
+            and args.dataset != "analytical"):
+        parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
+    if args.solar_source in ("file", "spectral_file") and not args.solar_file:
+        parser.error("--solar-file required when --solar-source is file/spectral_file")
+    if args.ghg_forcing == "external" and not args.ghg_file:
+        parser.error("--ghg-file required when --ghg-forcing is external")
+    if args.physics_parameterization == "ml":
+        if args.convection != "mass_flux" or args.turbulence != "louis":
+            parser.error(
+                "--physics-parameterization ml currently requires "
+                "--convection mass_flux and --turbulence louis"
+            )
+        if not args.physics_parameterization_checkpoint or not args.physics_parameterization_stats:
+            parser.error(
+                "--physics-parameterization ml requires both "
+                "--physics-parameterization-checkpoint and "
+                "--physics-parameterization-stats"
+            )
+
+    # Auto-configure spectral runs
+    if args.discretization == "spectral" or args.truncation is not None:
+        args.discretization = "spectral"
+        args.grid_type = "gaussian"
+        if args.truncation is not None:
+            args.resolution = args.truncation
+
+    return args
+
+
+def main(argv: list[str] | None = None):
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    args = _postprocess_args(args, parser)
+    config = build_config_from_args(args)
+
+    from legoesm.driver.model_driver import ModelDriver
+
     driver = ModelDriver(config)
     print("Setup...")
     driver.setup()
 
-    # After setup(), MPI rank is known
     _is_root = (driver._mpi_rank is None or driver._mpi_rank == 0)
 
-    # Load checkpoint if restarting
     start_step = 0
     start_day = None
     if args.restart_from:
@@ -274,13 +389,12 @@ def main():
         if _is_root:
             print(f"  Resumed at step={start_step}, day={start_day:.2f}")
 
-    # Profiling mode: trace first N steps, save profile, and exit
     if args.profile > 0:
         import jax
+
         profile_dir = str(Path(driver.output_dir) / "jax_profile")
         if _is_root:
-            print(f"Profiling {args.profile} steps → {profile_dir}")
-        # Override days so run() only executes args.profile steps
+            print(f"Profiling {args.profile} steps -> {profile_dir}")
         n_profile_days = args.profile * args.dt / 86400.0
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
@@ -297,9 +411,9 @@ def main():
         print(f"Complete. Output: {driver.output_dir}")
 
     if args.plot and _is_root:
-        import sys
         sys.path.insert(0, str(Path(__file__).parent))
         from plot_amip import plot_amip as _plot_amip
+
         _plot_amip(driver.output_dir, show=False)
 
 

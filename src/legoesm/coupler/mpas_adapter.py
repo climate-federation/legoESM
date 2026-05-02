@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.coupler.config import CouplerConfig, TileConfig
 from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_from_coupler
@@ -137,7 +138,7 @@ def compute_mpas_freshwater(
     atm_forcing: AtmToSurface,
     sfc_response: SurfaceToAtm,
     ocean_mask: jnp.ndarray,
-    L_v: float = 2.5e6,
+    L_v: float = constants.L_v,
     land_state=None,
     ice_state_old=None,
     ice_state_new=None,

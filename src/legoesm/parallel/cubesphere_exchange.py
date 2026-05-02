@@ -33,6 +33,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
@@ -185,27 +186,47 @@ def _make_exchange_allgather(mesh, ndim):
     def _exchange(local_shard):
         n = local_shard.shape[1]
         my_face = local_shard[0]
-        all_faces = jax.lax.all_gather(local_shard, "face", tiled=True)
+
+        # Extract the 4 edge strips locally and only ``all_gather``
+        # those — the previous version gathered the whole ``(1,n,n,C)``
+        # shard, moving ~``n/4`` × more bytes than necessary on the
+        # interconnect.  At C48 × 30 levels that's ~1.4 MB → ~24 KB
+        # per halo call, which dominates the bandwidth budget on
+        # multi-GPU NCCL.
+        if ndim == 3:
+            my_strips = jnp.stack([
+                my_face[0, :], my_face[-1, :],
+                my_face[:, 0], my_face[:, -1],
+            ], axis=0)  # (4, n)
+        else:
+            my_strips = jnp.stack([
+                my_face[0, :, :], my_face[-1, :, :],
+                my_face[:, 0, :], my_face[:, -1, :],
+            ], axis=0)  # (4, n, C)
+
+        all_strips = jax.lax.all_gather(my_strips, "face", tiled=True)
+        # all_strips shape: (n_faces, 4, n[, C]) when tiled=True returns
+        # the gather along the first axis of ``my_strips``; with the
+        # leading-axis-of-4 layout, all_gather concatenates per-device
+        # along that axis, giving (n_faces*4,) on axis 0.  Restore the
+        # (n_faces, 4, ...) layout.
+        n_faces = mesh.shape["face"]
+        if ndim == 3:
+            all_strips = all_strips.reshape(n_faces, 4, n)
+        else:
+            all_strips = all_strips.reshape(n_faces, 4, n, my_face.shape[-1])
+
         my_idx = jax.lax.axis_index("face")
         my_nbr_f = _NBR_FACES[my_idx]
         my_nbr_e = _NBR_EDGES[my_idx]
         my_rev = _IS_REVERSED[my_idx]
 
+        # Single Pad HLO op replaces alloc-zeros + scatter (subsequent
+        # halo fill writes only into the zeroed border).
         if ndim == 3:
-            all_strips = jnp.stack([
-                all_faces[:, 0, :], all_faces[:, -1, :],
-                all_faces[:, :, 0], all_faces[:, :, -1],
-            ], axis=1)
-            padded = jnp.zeros((n + 2, n + 2), dtype=my_face.dtype)
+            padded = jnp.pad(my_face, ((1, 1), (1, 1)))
         else:
-            all_strips = jnp.stack([
-                all_faces[:, 0, :, :], all_faces[:, -1, :, :],
-                all_faces[:, :, 0, :], all_faces[:, :, -1, :],
-            ], axis=1)
-            padded = jnp.zeros((n + 2, n + 2, my_face.shape[-1]),
-                               dtype=my_face.dtype)
-
-        padded = padded.at[1:-1, 1:-1].set(my_face)
+            padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
         halo_strips = []
         for e in range(4):
             strip = all_strips[my_nbr_f[e], my_nbr_e[e]]
@@ -240,16 +261,14 @@ def _make_exchange_ppermute(mesh, ndim):
                 my_face[0, :], my_face[-1, :],
                 my_face[:, 0], my_face[:, -1],
             ])  # (4, n)
-            padded = jnp.zeros((n + 2, n + 2), dtype=my_face.dtype)
+            # Single Pad HLO op replaces alloc-zeros + scatter.
+            padded = jnp.pad(my_face, ((1, 1), (1, 1)))
         else:
             my_strips = jnp.stack([
                 my_face[0, :, :], my_face[-1, :, :],
                 my_face[:, 0, :], my_face[:, -1, :],
             ])  # (4, n, C)
-            padded = jnp.zeros((n + 2, n + 2, my_face.shape[-1]),
-                               dtype=my_face.dtype)
-
-        padded = padded.at[1:-1, 1:-1].set(my_face)
+            padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
         halo_strips = [None, None, None, None]
 
         for r in range(4):
@@ -460,12 +479,14 @@ def packed_pad_halo_4d(*fields, mesh, duogrid=None):
         return []
 
     if len(fields) == 1:
-        padded = explicit_pad_halo_4d(fields[0], mesh)
-        if duogrid is not None:
-            padded = _apply_duogrid_4d(padded, duogrid, halo=1)
-        return [padded]
+        return [explicit_pad_halo_4d(fields[0], mesh)]
 
-    splits = [f.shape[-1] for f in fields]
+    # Use plain Python ints for split indices so JAX treats them as
+    # static constants — passing a traced ``jnp.cumsum`` to ``jnp.split``
+    # forces a host evaluation in older JAX and outright errors in newer
+    # versions.  This mirrors the MPI-side fix in ``halo_exchange.py``.
+    splits = [int(f.shape[-1]) for f in fields]
+    split_indices = np.cumsum(splits[:-1]).tolist()
     stacked = jnp.concatenate(fields, axis=-1)
     padded = explicit_pad_halo_4d(stacked, mesh, halo=1)
     pieces = list(jnp.split(padded, jnp.cumsum(jnp.array(splits[:-1])), axis=-1))

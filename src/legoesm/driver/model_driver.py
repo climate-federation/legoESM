@@ -301,7 +301,7 @@ class ModelDriver:
         cfl_model = model_type_map.get(dc.model_type, "primitive_eq")
         dt_safe = cfl_check_and_adjust(
             dc.dt, gc.resolution, model_type=cfl_model,
-            radius=getattr(self.grid, 'radius', 6.371229e6),
+            radius=getattr(self.grid, 'radius', constants.R_earth),
             grid_type=gc.grid_type,
         )
         if dt_safe < dc.dt:
@@ -342,6 +342,9 @@ class ModelDriver:
                     dataset="custom", path=cfg.forcing_path,
                     sst_var=cfg.sst_var or "sst",
                     sic_var=cfg.sic_var or "sic",
+                    time_var=cfg.time_var or "time",
+                    lat_var=cfg.lat_var or "lat",
+                    lon_var=cfg.lon_var or "lon",
                     sst_offset=cfg.sst_offset, sic_scale=cfg.sic_scale,
                     sic_path=getattr(cfg, 'sic_path', ''),
                 )
@@ -412,10 +415,17 @@ class ModelDriver:
             self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
-            mean_qv = float(jnp.mean(self.tracers["q_v"])) * 1000.0
-            cwv = float(jnp.mean(
-                column_water_vapor(self.tracers["q_v"], self.state.p_s.data, self.sigma.dsigma)
-            ))
+            # Fuse the two diagnostic means into one host transfer.
+            _stats = jnp.stack([
+                jnp.mean(self.tracers["q_v"]),
+                jnp.mean(column_water_vapor(
+                    self.tracers["q_v"], self.state.p_s.data,
+                    self.sigma.dsigma,
+                )),
+            ])
+            _h = np.asarray(_stats)
+            mean_qv = float(_h[0]) * 1000.0
+            cwv = float(_h[1])
             logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
@@ -467,7 +477,9 @@ class ModelDriver:
         cfg = self.config
         self._solar_config = SolarConfig(
             S_0=cfg.S_0, source=cfg.solar_source,
-            path=cfg.solar_file, spectral_var=cfg.solar_spectral_var,
+            path=cfg.solar_file, tsi_var=cfg.solar_tsi_var,
+            spectral_var=cfg.solar_spectral_var,
+            start_year=cfg.start_year,
         )
         self._use_solar_spectral = (cfg.solar_source == "spectral_file")
 
@@ -478,6 +490,12 @@ class ModelDriver:
             enabled=self._ozone_ext_active,
             source="climatology", path=cfg.ozone_file,
             use_reference_if_missing=True,
+            # Required for the non-cyclic branch in ``get_ozone_at_time``
+            # so that CMIP6 multi-year ozone files (>12 months, e.g. the
+            # UReading 1850–2014 vmro3 file) are sampled at the actual
+            # simulation calendar year instead of falling back to a
+            # 1850 climatology.
+            start_year=cfg.start_year,
         )
 
         # Aerosol external forcing
@@ -1204,11 +1222,24 @@ class ModelDriver:
                 p_s_data = self.state.p_s.data
                 u_data = self.state.u.data
 
-                mean_T = float(jnp.mean(T_data))
-                mean_ps = float(jnp.mean(p_s_data))
-                max_u = float(jnp.max(jnp.abs(u_data)))
-                T_min = float(jnp.min(T_data))
-                T_max = float(jnp.max(T_data))
+                # Fuse the diagnostic reductions to a single device→host
+                # transfer instead of five separate ones — each ``float()``
+                # call is a GPU stall under default JAX scheduling.
+                _stats = jnp.stack([
+                    jnp.mean(T_data),
+                    jnp.mean(p_s_data),
+                    jnp.max(jnp.abs(u_data)),
+                    jnp.min(T_data),
+                    jnp.max(T_data),
+                    jnp.all(jnp.isfinite(T_data)).astype(T_data.dtype),
+                ])
+                _stats_host = np.asarray(_stats)
+                mean_T = float(_stats_host[0])
+                mean_ps = float(_stats_host[1])
+                max_u = float(_stats_host[2])
+                T_min = float(_stats_host[3])
+                T_max = float(_stats_host[4])
+                T_finite = bool(_stats_host[5] > 0.5)
 
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
@@ -1219,7 +1250,7 @@ class ModelDriver:
                 )
 
                 # Blowup detection
-                if not jnp.all(jnp.isfinite(T_data)):
+                if not T_finite:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break
@@ -1365,11 +1396,25 @@ class ModelDriver:
                 p_s_g = fields['p_s']
                 u_g, v_g = fields['u'], fields['v']
 
-                mean_T = float(jnp.mean(T_g))
-                T_min = float(jnp.min(T_g))
-                T_max = float(jnp.max(T_g))
-                mean_ps = float(jnp.mean(p_s_g))
-                max_wind = float(jnp.max(jnp.sqrt(u_g**2 + v_g**2)))
+                # Fuse the diagnostic reductions into one stack so we
+                # device→host-transfer once instead of five times.  At
+                # diagnostic cadence this saves O(DIAG_INTERVAL) GPU
+                # stalls per simulated period.
+                _stats = jnp.stack([
+                    jnp.mean(T_g),
+                    jnp.min(T_g),
+                    jnp.max(T_g),
+                    jnp.mean(p_s_g),
+                    jnp.max(jnp.sqrt(u_g ** 2 + v_g ** 2)),
+                    jnp.all(jnp.isfinite(T_g)).astype(T_g.dtype),
+                ])
+                _stats_host = np.asarray(_stats)
+                mean_T = float(_stats_host[0])
+                T_min = float(_stats_host[1])
+                T_max = float(_stats_host[2])
+                mean_ps = float(_stats_host[3])
+                max_wind = float(_stats_host[4])
+                T_finite = bool(_stats_host[5] > 0.5)
 
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
@@ -1379,7 +1424,7 @@ class ModelDriver:
                     f"|v|_max={max_wind:.1f}m/s  ({rate:.1f} sim-days/s)"
                 )
 
-                if not jnp.all(jnp.isfinite(T_g)):
+                if not T_finite:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break
@@ -1422,6 +1467,7 @@ class ModelDriver:
         if self._ensemble_size > 1:
             shape_2d = shape_2d[1:]
         shape_3d = (*shape_2d, cfg.grid.nlev)
+        conv_ncol = int(self.physics.adapter.ncol) if self.physics is not None else int(np.prod(shape_2d))
 
         # Solar forcing
         solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
@@ -1446,6 +1492,20 @@ class ModelDriver:
         held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
+        conv_shape = (_ens, conv_ncol) if _ens > 1 else (conv_ncol,)
+        if cfg.convection in ("mass_flux", "edmf"):
+            from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+            _conv_cfg = ConvectionConfig(scheme=cfg.convection)
+        else:
+            _conv_cfg = None
+
+        if cfg.convection == "mass_flux":
+            conv_prog_default = jnp.full(conv_shape, _conv_cfg.mass_flux.M_c_init, dtype=_sd)
+        elif cfg.convection == "edmf":
+            conv_prog_default = jnp.full(conv_shape, _conv_cfg.edmf.a_u_init, dtype=_sd)
+        else:
+            conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
+        conv_prog = _aux.get("conv_prog", conv_prog_default)
 
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
@@ -1471,6 +1531,7 @@ class ModelDriver:
             "held_sw_up_toa": held_sw_up_toa,
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
+            "conv_prog": conv_prog,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -1533,6 +1594,7 @@ class ModelDriver:
         held_sw_up_toa = ctx["held_sw_up_toa"]
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
+        conv_prog = ctx["conv_prog"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -1660,9 +1722,14 @@ class ModelDriver:
             # Pack state into carry
             carry = pack_carry(
                 self.state, self.q_v, self.q_c, self.q_r,
-                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-                current_step,
+                conv_prog=conv_prog,
+                held_dT_rad=held_dT_rad,
+                held_sw_net_sfc=held_sw_net_sfc,
+                held_lw_net_sfc=held_lw_net_sfc,
+                held_sw_up_toa=held_sw_up_toa,
+                held_lw_up_toa=held_lw_up_toa,
+                held_sw_down_toa=held_sw_down_toa,
+                step_index=current_step,
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
@@ -1696,11 +1763,11 @@ class ModelDriver:
             if self._ensemble_size > 1:
                 from legoesm.parallel.ensemble import ensemble_mean
                 mean_carry = ensemble_mean(carry)
-                (self.state, self.q_v, self.q_c, self.q_r,
+                (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(mean_carry, self._state_template)
             else:
-                (self.state, self.q_v, self.q_c, self.q_r,
+                (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(carry, self.state)
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
@@ -1714,6 +1781,7 @@ class ModelDriver:
                 "held_sw_up_toa": held_sw_up_toa,
                 "held_lw_up_toa": held_lw_up_toa,
                 "held_sw_down_toa": held_sw_down_toa,
+                "conv_prog": conv_prog,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
                 "seg_precip": seg_precip,
@@ -1906,6 +1974,7 @@ class ModelDriver:
         held_sw_up_toa = ctx["held_sw_up_toa"]
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
+        conv_prog = ctx["conv_prog"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -1935,7 +2004,7 @@ class ModelDriver:
             step_unified(
                 jnp.bool_(True),
                 self.state.T.data, self.state.p_s.data,
-                self.q_v, self.q_c, self.q_r,
+                self.q_v, self.q_c, self.q_r, conv_prog,
                 self.state.u.data, self.state.v.data,
                 sst, sic, self._grid_lat, self._grid_lon,
                 day_of_year, seconds_of_day, DT,
@@ -1945,6 +2014,7 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
             )
+        conv_prog = phys_out.conv_prog
 
         # Apply warmup tendencies
         new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -2018,7 +2088,7 @@ class ModelDriver:
                 step_unified(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
-                    self.q_v, self.q_c, self.q_r,
+                    self.q_v, self.q_c, self.q_r, conv_prog,
                     self.state.u.data, self.state.v.data,
                     sst, sic, self._grid_lat, self._grid_lon,
                     day_of_year, seconds_of_day, DT,
@@ -2028,6 +2098,7 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                 )
+            conv_prog = phys_out.conv_prog
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -2138,6 +2209,7 @@ class ModelDriver:
                 self._carry_aux = {
                     "held_sw_net_sfc": phys_out.sw_net_sfc,
                     "held_lw_net_sfc": phys_out.lw_net_sfc,
+                    "conv_prog": conv_prog,
                     "seg_precip": phys_out.precip,
                 }
 

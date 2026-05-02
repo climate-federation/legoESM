@@ -26,7 +26,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel as PrimitiveEquationModel,
     CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
 )
-from tests.test_cases.held_suarez import held_suarez_init
+from legoesm.atmosphere.held_suarez import held_suarez_init
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig, RRTMGPConfig, RadiationConfig,

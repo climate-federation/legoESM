@@ -24,6 +24,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 
 class AMIPForcingConfig(NamedTuple):
     """Configuration for AMIP boundary conditions.
@@ -50,8 +52,7 @@ class AMIPForcingConfig(NamedTuple):
         Multiplicative scale for SIC (e.g., 0.01 if data in percent).
     sic_path : str
         Separate SIC file path.  When non-empty, SIC is loaded from
-        this file instead of the main ``path``.  Required for ICON
-        boundary conditions which store SST and SIC in separate files.
+        this file instead of the main ``path``.
     T_ice : float
         Sea-ice surface temperature [K].
     albedo_ice : float
@@ -121,7 +122,7 @@ def get_amip_preset(dataset_name: str) -> AMIPForcingConfig:
             dataset="hadisst",
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,    # Celsius -> Kelvin
+            sst_offset=constants.T_freeze,    # Celsius -> Kelvin
             sic_scale=1.0,        # already fraction
         )
     else:
@@ -138,6 +139,39 @@ def _is_icon_unstructured(ds) -> bool:
     ``clon``/``clat`` coordinates in radians.
     """
     return "cell" in ds.dims and "clon" in ds.coords and "clat" in ds.coords
+
+
+def _time_coord_to_days(time_coord) -> np.ndarray:
+    """Convert numeric, NumPy datetime, or cftime coordinates to relative days."""
+    time_arr = np.asarray(time_coord)
+
+    if np.issubdtype(time_arr.dtype, np.datetime64):
+        t0 = time_arr[0]
+        return ((time_arr - t0) / np.timedelta64(1, "D")).astype(np.float64)
+
+    first = time_arr[0]
+    if hasattr(first, "calendar"):
+        import cftime
+
+        units = (
+            "days since "
+            f"{first.year:04d}-{first.month:02d}-{first.day:02d} "
+            f"{first.hour:02d}:{first.minute:02d}:{first.second:02d}"
+        )
+        return np.asarray(
+            cftime.date2num(list(time_arr), units=units, calendar=first.calendar),
+            dtype=np.float64,
+        )
+
+    try:
+        values = time_arr.astype(np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "Unsupported AMIP time coordinate type. Expected numeric, "
+            "numpy.datetime64, or cftime datetimes."
+        ) from exc
+
+    return values - values[0]
 
 
 def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
@@ -200,13 +234,7 @@ def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
     sic_regridded = sic_data[:, idx].reshape(ntime, *target_shape)
 
     # --- Time axis ---
-    if np.issubdtype(time_coord.dtype, np.datetime64):
-        t0 = time_coord[0]
-        times_days = (time_coord - t0) / np.timedelta64(1, "D")
-        times_days = times_days.astype(np.float64)
-    else:
-        times_days = time_coord.astype(np.float64)
-        times_days = times_days - times_days[0]
+    times_days = _time_coord_to_days(time_coord)
 
     sic_regridded = np.clip(sic_regridded, 0.0, 1.0)
 
@@ -249,7 +277,7 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         raise ValueError("AMIPForcingConfig.path is empty — provide a NetCDF file path")
 
     try:
-        ds = xr.open_dataset(path)
+        ds_sst = xr.open_dataset(path)
     except FileNotFoundError:
         raise FileNotFoundError(
             f"AMIP forcing file not found: {path}"
@@ -259,9 +287,27 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
             f"Failed to open AMIP forcing file: {path}\n  {exc}"
         ) from exc
 
+    sic_path = config.sic_path or path
+    ds_sic = ds_sst
+    if sic_path != path:
+        try:
+            ds_sic = xr.open_dataset(sic_path)
+        except FileNotFoundError:
+            ds_sst.close()
+            raise FileNotFoundError(
+                f"AMIP sea-ice forcing file not found: {sic_path}"
+            )
+        except Exception as exc:
+            ds_sst.close()
+            raise OSError(
+                f"Failed to open AMIP sea-ice forcing file: {sic_path}\n  {exc}"
+            ) from exc
+
     # --- Detect ICON unstructured grid ---
-    if _is_icon_unstructured(ds):
-        ds.close()
+    if _is_icon_unstructured(ds_sst):
+        if ds_sic is not ds_sst:
+            ds_sic.close()
+        ds_sst.close()
         return _load_icon_unstructured(config, grid)
 
     try:
@@ -269,24 +315,33 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         missing = []
         for vname, label in [
             (config.sst_var, "SST"),
-            (config.sic_var, "SIC"),
             (config.lat_var, "latitude"),
             (config.lon_var, "longitude"),
             (config.time_var, "time"),
         ]:
-            if vname not in ds:
-                missing.append(f"  {label}: expected variable '{vname}'")
+            if vname not in ds_sst:
+                missing.append(f"  {label}: expected variable '{vname}' in {path}")
+        if config.sic_var not in ds_sic:
+            missing.append(
+                f"  SIC: expected variable '{config.sic_var}' in {sic_path}"
+            )
         if missing:
-            available = ", ".join(sorted(ds.data_vars.keys() | ds.coords.keys()))
+            available = ", ".join(
+                sorted(
+                    (set(ds_sst.data_vars) | set(ds_sst.coords))
+                    | (set(ds_sic.data_vars) | set(ds_sic.coords))
+                )
+            )
             raise KeyError(
-                f"Missing variables in {path}:\n"
+                "Missing variables in AMIP forcing:\n"
                 + "\n".join(missing)
                 + f"\nAvailable: {available}"
             )
 
-        # Extract source grid
-        lat_src = ds[config.lat_var].values.astype(np.float64)
-        lon_src = ds[config.lon_var].values.astype(np.float64)
+        # Extract source grid from the SST file
+        lat_src = ds_sst[config.lat_var].values.astype(np.float64)
+        lon_src = ds_sst[config.lon_var].values.astype(np.float64)
+        time_coord = ds_sst[config.time_var].values
 
         # Ensure longitude is in [0, 360) for wrapping
         lon_src = lon_src % 360.0
@@ -296,19 +351,27 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         lon_src = lon_src[lon_order]
 
         # Extract SST and SIC
-        sst_data = ds[config.sst_var].values  # (ntime, nlat, nlon) or (ntime, nlon, nlat)
-        sic_data = ds[config.sic_var].values
+        sst_data = ds_sst[config.sst_var].values
+        sic_data = ds_sic[config.sic_var].values
 
-        # Handle dimension ordering: ensure (ntime, nlat, nlon)
-        # Check if shapes match (lat, lon) order
-        if sst_data.ndim == 3:
-            # Reorder longitude
-            sst_data = sst_data[:, :, lon_order]
-            sic_data = sic_data[:, :, lon_order]
-        elif sst_data.ndim == 2:
-            # Single time step
-            sst_data = sst_data[None, :, lon_order]
-            sic_data = sic_data[None, :, lon_order]
+        if sst_data.ndim == 2:
+            sst_data = sst_data[None, ...]
+        if sic_data.ndim == 2:
+            sic_data = sic_data[None, ...]
+        if sst_data.ndim != 3 or sic_data.ndim != 3:
+            raise ValueError(
+                "AMIP forcing variables must be 2D or 3D with optional time axis. "
+                f"Got SST ndim={sst_data.ndim}, SIC ndim={sic_data.ndim}."
+            )
+
+        if sic_data.shape[0] != sst_data.shape[0]:
+            raise ValueError(
+                "SST and SIC forcing must have the same number of time records. "
+                f"Got SST={sst_data.shape[0]} and SIC={sic_data.shape[0]}."
+            )
+
+        sst_data = sst_data[:, :, lon_order]
+        sic_data = sic_data[:, :, lon_order]
 
         # Apply unit conversions
         sst_data = sst_data.astype(np.float64) + config.sst_offset
@@ -366,17 +429,11 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
             sic_regridded[t] = interp_sic(target_points).reshape(target_shape)
 
         # Time axis: days since first record
-        time_coord = ds[config.time_var].values
-        if np.issubdtype(time_coord.dtype, np.datetime64):
-            t0 = time_coord[0]
-            times_days = (time_coord - t0) / np.timedelta64(1, "D")
-            times_days = times_days.astype(np.float64)
-        else:
-            # Assume already in days or similar numeric
-            times_days = time_coord.astype(np.float64)
-            times_days = times_days - times_days[0]
+        times_days = _time_coord_to_days(time_coord)
     finally:
-        ds.close()
+        if ds_sic is not ds_sst:
+            ds_sic.close()
+        ds_sst.close()
 
     # Clamp SIC again after interpolation
     sic_regridded = np.clip(sic_regridded, 0.0, 1.0)

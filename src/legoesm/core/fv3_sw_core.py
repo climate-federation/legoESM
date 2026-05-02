@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.core.operators_cdgrid import (
@@ -2153,7 +2154,7 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 # C-grid tendency for RK3 integration
 # ==============================================================================
 
-def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
+def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
                        div_damp=0.0, hyperdiff_coeff=0.0):
     """FV3 c_sw-style shallow water tendencies for RK3 integration.
 
@@ -2254,7 +2255,7 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
 # Complete forward-backward step
 # ==============================================================================
 
-def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
+def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
                                div_damp=0.0, hyperdiff_coeff=0.0,
                                apply_legacy_d_sw4_corner_ke_fix=False,
                                apply_legacy_d_sw5_corner_corrections=False,
@@ -3116,7 +3117,7 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     return h_new, u_d_new, v_d_new
 
 
-def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
+def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
                    div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
                    damp_v=0.0, nord_v=0,
                    apply_legacy_d_sw4_corner_ke_fix=False,

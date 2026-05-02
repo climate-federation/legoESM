@@ -30,6 +30,7 @@ import jax.numpy as jnp
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 _EPS = float(jnp.finfo(jnp.float32).eps)    # Float32 machine epsilon (~1.19e-7)
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import _face_gnomonic_to_lonlat
 
@@ -527,7 +528,7 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
 
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
-    omega: float | None = None,
+    omega: float = constants.Omega,
     metric_dtype=None,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
@@ -919,7 +920,7 @@ def create_cubed_sphere_cdgrid(
     mx_norm = jnp.sqrt(mx_x**2 + mx_y**2 + mx_z**2 + _TINY)
     mx_x /= mx_norm; mx_y /= mx_norm; mx_z /= mx_norm
     lat_edge_x = jnp.arcsin(jnp.clip(mx_z, -1.0, 1.0))
-    lon_edge_x = jnp.arctan2(mx_y, mx_x)
+    lon_edge_x = jnp.mod(jnp.arctan2(mx_y, mx_x), 2.0 * jnp.pi)  # [0, 2π)
 
     # --- y-edge midpoints (6, n+1, n) ---
     my_x = 0.5 * (xc[:, :, :-1] + xc[:, :, 1:])
@@ -928,7 +929,7 @@ def create_cubed_sphere_cdgrid(
     my_norm = jnp.sqrt(my_x**2 + my_y**2 + my_z**2 + _TINY)
     my_x /= my_norm; my_y /= my_norm; my_z /= my_norm
     lat_edge_y = jnp.arcsin(jnp.clip(my_z, -1.0, 1.0))
-    lon_edge_y = jnp.arctan2(my_y, my_x)
+    lon_edge_y = jnp.mod(jnp.arctan2(my_y, my_x), 2.0 * jnp.pi)  # [0, 2π)
 
     # --- Grid angle at edge midpoints ---
     # Use the Cartesian tangent-vector approach on the extended gnomonic

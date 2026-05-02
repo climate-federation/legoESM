@@ -209,7 +209,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         else:
             lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
 
-        T_data = np.asarray(state.T.data, dtype=np.float64)
+        T_data = np.array(state.T.data, dtype=np.float64)  # writable copy
         nlev = T_data.shape[-1]
         T_pert = T_amp * np.cos(np.radians(lat))
 
