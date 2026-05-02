@@ -142,18 +142,24 @@ class TestCubedSphereSPMDStep:
                 s = model.step(s, dt, physics_fn=held_suarez_forcing)
         return fv3_to_hydrostatic(s, cdgrid)
 
-    def test_6device_with_physics_matches_1device(self):
-        """6-device SPMD with Held-Suarez physics matches single-device.
+    @pytest.mark.parametrize("devices", [2, 3, 6])
+    def test_with_physics_matches_1device(self, devices):
+        """N-device SPMD with Held-Suarez physics matches single-device.
 
         Iter-44: physics_fn closures are captured in the JIT closure
         (not passed as traced args), so the with-physics SPMD path
-        could in principle differ from the no-physics path.  Verify
-        the iter-31 vector-halo offsets fix carries through to the
-        with-physics path too.
+        could in principle differ from the no-physics path.  Iter-65
+        introduced ``physics_tendency_cc`` so the physics du/dv corner
+        interp rides the iter-64 batched halo.
+
+        Iter-66: parametrize over devices ∈ {2, 3, 6} so the multi-face
+        SPMD path with physics is also covered.  When iter-65's
+        ``physics_tendency_cc`` is plumbed correctly, all device
+        counts should match single-device at FMA precision.
         """
-        _need_devices(6)
+        _need_devices(devices)
         ref = self._run_with_physics(devices=1, n_steps=1)
-        out = self._run_with_physics(devices=6, n_steps=1)
+        out = self._run_with_physics(devices=devices, n_steps=1)
         for name, atol, rtol in (
             ("u", 1e-12, 1e-13),
             ("v", 1e-12, 1e-13),
@@ -164,8 +170,8 @@ class TestCubedSphereSPMDStep:
             o = np.asarray(getattr(out, name).data)
             np.testing.assert_allclose(
                 o, r, atol=atol, rtol=rtol,
-                err_msg=f"{name}: 6-dev cubed-sphere with-physics drift "
-                        f"exceeds float-pt envelope",
+                err_msg=f"{name}: {devices}-dev cubed-sphere with-physics "
+                        f"drift exceeds float-pt envelope",
             )
 
     def test_C48_6device_matches_1device(self):
