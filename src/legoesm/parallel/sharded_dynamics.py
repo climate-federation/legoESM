@@ -81,6 +81,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.mesh import DeviceConfig, _N_FACES
 from legoesm.core.field import Field
+from legoesm.grids.halo import pad_halo, pad_halo_4d
 
 logger = logging.getLogger(__name__)
 
@@ -812,8 +813,6 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
         ``exchange(state) -> state`` that applies halo exchange to
         all face-dimensioned fields in the state pytree.
     """
-    from legoesm.grids.halo import pad_halo, pad_halo_4d
-
     def _exchange(state):
         """Apply halo exchange to face-dimensioned arrays.
 
