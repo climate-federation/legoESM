@@ -33,7 +33,13 @@ import numpy as np
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Moist RCE experiment")
+    # ``allow_abbrev=False`` ensures the legacy ``latlon_fv`` alias
+    # logic below (which inspects ``sys.argv`` to decide whether
+    # ``--grid-type`` was explicit) cannot be fooled by argparse-style
+    # long-option abbreviations like ``--grid`` for ``--grid-type``.
+    parser = argparse.ArgumentParser(
+        description="Moist RCE experiment", allow_abbrev=False,
+    )
     parser.add_argument("--mode", choices=["ocean", "land"], default="ocean",
                         help="Surface type: slab ocean or slab land")
     parser.add_argument("--ocean-mode", choices=["prescribed", "slab", "two_layer"],
@@ -54,11 +60,52 @@ def main():
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"],
                         help="Horizontal grid type")
     parser.add_argument("--discretization", type=str, default="cdgrid",
-                        choices=["cdgrid", "spectral", "latlon_fv", "mpas"],
-                        help="Discretization method")
+                        choices=["cdgrid", "centered", "spectral",
+                                 "latlon_fv", "finite_volume",
+                                 "latlon_cgrid", "mpas"],
+                        help="Discretization method.  ``latlon_fv`` is a "
+                             "legacy shorthand for ``--grid-type latlon "
+                             "--discretization finite_volume`` (lat-lon "
+                             "C-grid solver); using it implies the "
+                             "lat-lon grid.  ``finite_volume`` on its own "
+                             "stays on whatever ``--grid-type`` is "
+                             "selected (e.g. cubed_sphere → CDGrid FV). "
+                             "``centered`` and ``latlon_cgrid`` are "
+                             "supported aliases on cubed_sphere/latlon "
+                             "and latlon respectively.")
     parser.add_argument("--truncation", type=int, default=None,
                         help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
+    # Detect whether ``--grid-type`` was passed explicitly so the
+    # legacy-alias handler below can distinguish "user accepted the
+    # default" from "user explicitly asked for X".
+    _grid_type_explicit = any(
+        a == "--grid-type" or a.startswith("--grid-type=")
+        for a in sys.argv[1:]
+    )
+
     args = parser.parse_args()
+
+    # Translate the legacy ``latlon_fv`` alias to the canonical
+    # ``finite_volume`` name registered in
+    # ``component_factory._DRIVER_SUPPORTED`` for the lat-lon C-grid
+    # solver.  The alias is meaningful only on the lat-lon grid; on
+    # any other grid_type it would silently re-route to a different
+    # solver (e.g. cubed_sphere/finite_volume → CDGrid), which is not
+    # what a user typing ``--discretization latlon_fv`` is asking for.
+    # When the user did NOT explicitly choose ``--grid-type``, infer
+    # ``latlon``; when they did, fail fast on a mismatch instead of
+    # silently overriding the explicit grid choice.
+    if args.discretization == "latlon_fv":
+        if args.grid_type != "latlon":
+            if _grid_type_explicit:
+                parser.error(
+                    f"--discretization latlon_fv requires --grid-type "
+                    f"latlon (got {args.grid_type!r}). Pass "
+                    f"--discretization finite_volume / latlon_cgrid for "
+                    f"another grid, or remove --grid-type."
+                )
+            args.grid_type = "latlon"
+        args.discretization = "finite_volume"
 
     # Auto-configure for spectral discretization
     if args.discretization == "spectral" or args.truncation is not None:
@@ -66,6 +113,28 @@ def main():
         args.grid_type = "gaussian"
         if args.truncation is not None:
             args.resolution = args.truncation
+
+    # The grid-specific adapters (init function, to_grid_arrays,
+    # apply_T_update, apply_friction) below are tied to the unique
+    # model class supported on each grid (cubed_sphere → CDGrid,
+    # gaussian → Spectral, latlon → CGridLatLon, voronoi → MPAS).
+    # Reject mismatched (grid_type, discretization) combinations up
+    # front so the spectral adapter is never paired with a non-spectral
+    # state, etc.  Driver factory would catch this too, but the message
+    # here is more direct for a user who wired the script wrong.
+    _expected_disc = {
+        "cubed_sphere": {"cdgrid", "centered", "finite_volume"},
+        "gaussian": {"spectral"},
+        "latlon": {"finite_volume", "centered", "latlon_cgrid"},
+        "voronoi": {"mpas"},
+    }
+    _allowed = _expected_disc[args.grid_type]
+    if args.discretization not in _allowed:
+        parser.error(
+            f"Unsupported (--grid-type {args.grid_type!r}, "
+            f"--discretization {args.discretization!r}) combination. "
+            f"Allowed for {args.grid_type!r}: {sorted(_allowed)}"
+        )
 
     N = args.resolution
     NLEV = args.nlev
@@ -101,12 +170,39 @@ def main():
     sigma = create_sigma_coordinate(NLEV)
     shape_2d = grid.grid_shape_2d
 
+    # Pre-clamp DT to the pole-cell advective CFL limit on lat-lon
+    # grids before constructing ``DycoreConfig`` so that
+    # ``config.dycore.dt``, ``HYPERDIFF`` (via ``compute_diffusion``),
+    # the model's internal ``A_h``, and the script's stepping ``DT``
+    # all agree on a single value.  The factory would clamp internally
+    # too, but doing it here keeps every dt-derived quantity consistent.
+    if grid_type == "latlon":
+        from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
+        _dt_max_pole = float(cfl_max_dt(
+            pole_cell_dx(grid), 300.0, cfl_number=0.8, ndim=1,
+        ))
+        if DT > _dt_max_pole:
+            DT = _dt_max_pole
+
     config = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=N, nlev=NLEV),
         dycore=DycoreConfig(discretization=discretization, dt=DT),
     )
     model = create_atmosphere_dycore(config, grid, sigma)
     HYPERDIFF = compute_diffusion(grid, config.dycore).hyperdiff
+
+    # Sanity check: assert script DT matches the model's effective dt
+    # after factory clamping.  Triggers only if the factory's internal
+    # CFL formula diverges from the pre-clamp above (e.g. a future
+    # tightening); fail loudly rather than running with mismatched
+    # config/loop timesteps.
+    if hasattr(model, "effective_dt") and model.effective_dt is not None:
+        _eff = float(model.effective_dt)
+        if abs(_eff - DT) > 1e-6 * max(_eff, DT):
+            raise RuntimeError(
+                f"Script DT={DT:.6f} disagrees with model.effective_dt="
+                f"{_eff:.6f}; pre-clamp logic in run_rce.py is stale."
+            )
 
     # ---------------------------------------------------------------
     # Initial atmospheric state (isothermal 280 K, at rest)
@@ -117,16 +213,108 @@ def main():
     elif grid_type == "voronoi":
         from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
         state = held_suarez_init_mpas(grid, sigma, T_init=280.0)
+    elif grid_type == "gaussian":
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            isothermal_rest_state_spectral,
+        )
+        state = isothermal_rest_state_spectral(
+            grid, sigma, T_init=280.0, perturbation_amplitude=0.5,
+        )
     else:
         from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
         state = held_suarez_init_latlon(grid, sigma, T_init=280.0)
+
+    # Grid-specific adapters that bridge the differing state layouts
+    # (HydrostaticState / MPAS / SpectralHydrostaticState) to the
+    # grid-space arrays the physics step needs.  ``to_grid_arrays``
+    # returns ``(T, p_s, u, v)`` at cell centres; ``apply_T_update``
+    # writes a new grid-space temperature back; ``apply_friction``
+    # applies the per-level Rayleigh decay; ``is_finite`` powers the
+    # blowup detector.
+    if grid_type == "gaussian":
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            spectral_pe_to_grid,
+        )
+        from legoesm.grids.gaussian import sh_analysis_3d
+
+        def to_grid_arrays(s):
+            g = spectral_pe_to_grid(s, grid, sigma)
+            return g["T"], g["p_s"], g["u"], g["v"]
+
+        def apply_T_update(s, new_T_grid):
+            new_T_hat = sh_analysis_3d(grid, new_T_grid)
+            return s._replace(T_hat=s.T_hat.replace(data=new_T_hat))
+
+        def apply_friction(s, decay):
+            # k_f varies only with sigma → applying the per-level decay
+            # to (vor_hat, div_hat) is equivalent to scaling u, v by
+            # the same factor in grid-space (linear SH transform).
+            nv = s.vor_hat.data * decay[None, :]
+            nd = s.div_hat.data * decay[None, :]
+            return s._replace(
+                vor_hat=s.vor_hat.replace(data=nv),
+                div_hat=s.div_hat.replace(data=nd),
+            )
+
+        def is_finite_state(s):
+            # Cover every prognostic spectral field: a NaN in any of
+            # vor_hat, div_hat, T_hat, or lnps_hat will silently
+            # propagate to grid-space diagnostics on the next step.
+            return (
+                jnp.all(jnp.isfinite(s.T_hat.data))
+                & jnp.all(jnp.isfinite(s.vor_hat.data))
+                & jnp.all(jnp.isfinite(s.div_hat.data))
+                & jnp.all(jnp.isfinite(s.lnps_hat.data))
+            )
+    elif grid_type == "voronoi":
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+
+        def to_grid_arrays(s):
+            u_cell, v_cell = reconstruct_cell_velocity(s.u.data, grid)
+            return s.T.data, s.p_s.data, u_cell, v_cell
+
+        def apply_T_update(s, new_T_grid):
+            return s._replace(T=s.T.replace(data=new_T_grid))
+
+        def apply_friction(s, decay):
+            # u is edge-normal; per-level decay applies uniformly.
+            return s._replace(u=s.u.replace(data=s.u.data * decay))
+
+        def is_finite_state(s):
+            return (
+                jnp.all(jnp.isfinite(s.T.data))
+                & jnp.all(jnp.isfinite(s.u.data))
+                & jnp.all(jnp.isfinite(s.p_s.data))
+            )
+    else:
+        # cubed_sphere & latlon both expose HydrostaticState with u, v.
+        def to_grid_arrays(s):
+            return s.T.data, s.p_s.data, s.u.data, s.v.data
+
+        def apply_T_update(s, new_T_grid):
+            return s._replace(T=s.T.replace(data=new_T_grid))
+
+        def apply_friction(s, decay):
+            return s._replace(
+                u=s.u.replace(data=s.u.data * decay),
+                v=s.v.replace(data=s.v.data * decay),
+            )
+
+        def is_finite_state(s):
+            return (
+                jnp.all(jnp.isfinite(s.T.data))
+                & jnp.all(jnp.isfinite(s.u.data))
+                & jnp.all(jnp.isfinite(s.v.data))
+                & jnp.all(jnp.isfinite(s.p_s.data))
+            )
 
     # Moisture: 60% RH with sigma^2 vertical decay
     from legoesm import constants
     from legoesm.thermo import saturation_mixing_ratio
 
-    p_full_init = state.p_s.data[..., None] * sigma.sigma_full
-    q_sat_init = saturation_mixing_ratio(state.T.data, p_full_init)
+    T_grid_init, p_s_grid_init, _, _ = to_grid_arrays(state)
+    p_full_init = p_s_grid_init[..., None] * sigma.sigma_full
+    q_sat_init = saturation_mixing_ratio(T_grid_init, p_full_init)
     q_v = 0.6 * q_sat_init * sigma.sigma_full ** 2
     q_v = jnp.minimum(q_v, q_sat_init)
 
@@ -345,60 +533,67 @@ def main():
         # (1) Dynamics only (no inline physics)
         state = model.step(state, DT)
 
+        # Project the dynamics state into grid-space (T, p_s, u, v) for
+        # the physics step.  For HydrostaticState this is a no-op view;
+        # for spectral/MPAS states this performs the spectral synthesis
+        # / Perot reconstruction.
+        T_grid, p_s_grid, u_grid, v_grid = to_grid_arrays(state)
+
         # (2) Operator-split physics
         _T_deep_in = T_deep if IS_TWO_LAYER else jnp.zeros(shape_2d)
         dT_dt, dq_dt, T_sfc, _T_deep_out, W_bucket, precip = physics_step(
-            state.T.data, state.p_s.data, q_v,
-            state.u.data, state.v.data,
+            T_grid, p_s_grid, q_v,
+            u_grid, v_grid,
             T_sfc, _T_deep_in, W_bucket, grid.grid_lat, DT,
         )
         if IS_TWO_LAYER:
             T_deep = _T_deep_out
-        new_T = state.T.data + DT * dT_dt
+        new_T = T_grid + DT * dT_dt
         q_v = jnp.maximum(q_v + DT * dq_dt, 0.0)
 
         # (3) Large-scale condensation (saturation adjustment)
         q_sat = saturation_mixing_ratio(
-            new_T, state.p_s.data[..., None] * sigma.sigma_full,
+            new_T, p_s_grid[..., None] * sigma.sigma_full,
         )
         excess = jnp.maximum(q_v - q_sat, 0.0)
         q_v = q_v - excess
         new_T = new_T + constants.L_v * excess / constants.c_pd
-        state = state._replace(T=state.T.replace(data=new_T))
+
+        # Push the saturation-adjusted temperature back into the
+        # grid-native state representation.
+        state = apply_T_update(state, new_T)
 
         # Large-scale precipitation: column-integrated condensation [kg/m2/s]
-        ls_precip = jnp.sum(excess * state.p_s.data[..., None] * dsigma,
+        ls_precip = jnp.sum(excess * p_s_grid[..., None] * dsigma,
                             axis=-1) / constants.g / DT
         precip = precip + ls_precip  # total = convective + large-scale
         if IS_LAND:
             W_bucket = jnp.clip(W_bucket + DT * ls_precip, 0.0, W_max)
 
         # (4) Rayleigh friction
-        state = state._replace(
-            u=state.u.replace(data=state.u.data * fric_decay),
-            v=state.v.replace(data=state.v.data * fric_decay),
-        )
+        state = apply_friction(state, fric_decay)
 
         # Diagnostics
         if (step + 1) % diag_interval == 0:
-            jax.block_until_ready(state.u.data)
+            T_diag, p_s_diag, u_diag, v_diag = to_grid_arrays(state)
+            jax.block_until_ready(u_diag)
             day = (step + 1) * DT / 86400.0
             mean_sfc = float(jnp.mean(T_sfc))
-            mean_T = float(jnp.mean(state.T.data))
-            max_v = float(jnp.max(jnp.sqrt(
-                state.u.data ** 2 + state.v.data ** 2)))
+            mean_T = float(jnp.mean(T_diag))
+            max_v = float(jnp.max(jnp.sqrt(u_diag ** 2 + v_diag ** 2)))
             mean_precip = float(jnp.mean(precip)) * 86400.0
-            cwv = column_water_vapor(q_v, state.p_s.data, dsigma)
+            cwv = column_water_vapor(q_v, p_s_diag, dsigma)
             mean_cwv = float(jnp.mean(cwv))
 
             print(f"  {day:6.0f}  {mean_sfc:8.2f}  {mean_T:8.2f}"
                   f"  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}")
 
-            if not jnp.all(jnp.isfinite(state.u.data)) or max_v > 500:
+            if not bool(is_finite_state(state)) or max_v > 500:
                 print(f"  BLOWUP at day {day:.0f}")
                 break
 
-    jax.block_until_ready(state.u.data)
+    _, _, u_final, _ = to_grid_arrays(state)
+    jax.block_until_ready(u_final)
     total = time.time() - t_start
     print(f"\n  Complete: {total:.1f}s wall time")
     print(f"  Output: {OUTPUT_DIR}")
