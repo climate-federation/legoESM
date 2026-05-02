@@ -58,9 +58,19 @@ def compute_filter_weights(
     """
     i = jnp.arange(n_substeps, dtype=dtype)
     if use_cosine:
-        w_filter = 1.0 + jnp.cos(
-            2.0 * jnp.pi * (i - 0.5 * n_substeps) / n_substeps,
-        )
+        # Hanning-window weights.  At ``n_substeps == 1`` (rare, only
+        # used by tests / 1-substep spin-ups) the formula
+        # ``1 + cos(2 pi (0 - 0.5)/1) = 1 + cos(-pi) = 0`` collapses to
+        # zero, which then divides by zero in
+        # ``eta_sum / w_total`` downstream.  Fall back to the box
+        # filter when the cosine bell would degenerate (codex
+        # adversarial review iter-1, bug #4).
+        if n_substeps < 2:
+            w_filter = jnp.ones(n_substeps, dtype=dtype)
+        else:
+            w_filter = 1.0 + jnp.cos(
+                2.0 * jnp.pi * (i - 0.5 * n_substeps) / n_substeps,
+            )
     else:
         w_filter = jnp.ones(n_substeps, dtype=dtype)
     return w_filter, jnp.sum(w_filter)
