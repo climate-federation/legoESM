@@ -317,12 +317,18 @@ def cgrid_latlon_hydrostatic_tendencies(
     # This differs from the advective form p_s * div(v) when p_s has
     # horizontal gradients (which is always the case in practice).
 
+    # Iter-54: precompute the cumsum of ``div_dp`` once and reuse it
+    # both for ``D_total_p = sum(div_dp)`` (the surface-pressure
+    # tendency) and for the sigma_dot / mass_flux integration below.
+    # Saves one cross-shard reduction per RK3 stage in each branch on
+    # any horizontal sharding (lat-lon mesh).
     if _hybrid:
         # Hybrid closure: dp = dA + dB * p_s varies horizontally.
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
-        D_total_p = jnp.sum(div_dp, axis=-1)
+        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
+        D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_coord.B_range
     else:
         dsigma = sigma_coord.dsigma
@@ -333,7 +339,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
-        D_total_p = jnp.sum(div_dp, axis=-1)
+        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
+        D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_range
 
     # Apply zero-mean correction only when the post-step mass fixer is OFF.
@@ -353,8 +360,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         # F_{k+1/2} = (B_{k+1/2}-B_top)/B_range * D_total_p - cumsum(div_dp)
         _B_top = sigma_coord.B_half[0]
         _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
-        _cumsum = jnp.cumsum(div_dp, axis=-1)
-        _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum
+        # Iter-54: reuse the cumsum precomputed for D_total_p above.
+        _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum_dp
         # Top BC: F=0; bottom BC: zero by construction
         # (frac_B[-1]=1, cumsum[-1]=D_total_p → _mf_inner[-1]=0).  Drop
         # the trailing (∼0) element + pad both ends in one Pad HLO op
@@ -372,7 +379,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         # Flux-form sigma_dot consistent with mass-flux continuity:
         # σ̇_{k+1/2} = [frac_k · D_total_p - cumsum_k(div(dp·v))] / p_s
         _frac = sigma_coord.fractional_sigma  # (nlev,)
-        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
+        # Iter-54: reuse the cumsum precomputed for D_total_p above.
         sigma_dot_inner = (
             _frac * D_total_p[..., jnp.newaxis] - _cumsum_dp
         ) / (p_s[..., jnp.newaxis] + 1e-10)
