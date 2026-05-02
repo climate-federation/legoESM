@@ -623,6 +623,58 @@ def pad_halo(
     return padded
 
 
+def pad_halo_pair_h2(
+    q1: jax.Array,
+    q2: jax.Array,
+    interp_offsets: jax.Array | None = None,
+    duogrid=None,
+) -> tuple[jax.Array, jax.Array]:
+    """Halo=2 exchange a pair of independent ``(6, n, n)`` fields.
+
+    Under the SPMD backend, the two fields ride a single
+    ``packed_pad_halo_4d(halo=2)`` collective — dropping per-call halo=2
+    cross-device collective count from 2 → 1 when both fields can be
+    exchanged together (e.g. PPM transport's ``q_i`` and ``q_j``,
+    which depend only on the already-padded ``q``).  Under the
+    local / MPI backends this falls through to two sequential
+    ``pad_halo(halo=2)`` calls — same arithmetic, no extra overhead.
+
+    Parameters
+    ----------
+    q1, q2 : jax.Array, shape ``(6, n, n)``
+    interp_offsets : optional
+        Forwarded to the underlying SPMD / local kernels (3D h2
+        offsets shaped ``(6, 4, 2, n)`` when ``duogrid is None``).
+    duogrid : DuoGridData or None
+
+    Returns
+    -------
+    (q1_pad, q2_pad) : tuple of jax.Array, each shape ``(6, n+4, n+4)``.
+    """
+    if _halo_backend == "spmd" and _spmd_mesh is not None:
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+        offsets = None if duogrid is not None else interp_offsets
+        # Add a singleton trailing axis so the SPMD packed kernel —
+        # which targets 4D ``(6, n, n, C)`` inputs — can ride the same
+        # all_gather.  Squeeze the channel axis off on return.
+        q1_4d = q1[..., None]
+        q2_4d = q2[..., None]
+        q1_pad_4d, q2_pad_4d = packed_pad_halo_4d(
+            q1_4d, q2_4d, mesh=_spmd_mesh,
+            duogrid=duogrid, interp_offsets=offsets, halo=2,
+        )
+        return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+    # Local / MPI fallback: two sequential pad_halo calls.  Identical
+    # arithmetic to the existing per-field path; no scaling penalty
+    # because neither backend is inserting a real cross-device
+    # collective for this 3D shape today.
+    q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    q2_pad = pad_halo(q2, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    return q1_pad, q2_pad
+
+
 def pad_halo_4d(
     data: jax.Array,
     halo: int = 1,
