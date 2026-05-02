@@ -116,39 +116,30 @@ class TestVoronoiShardedEquivalence:
             state = step_fn(state, dt)
         return state
 
-    def test_2device_no_runaway(self):
-        """Verify the 2-device Voronoi sharded step produces physical
-        values (no NaN, no 1e76 garbage) and tracks single-device to
-        within a small fraction of dynamical-field magnitudes.
-        Iter-23 fix removed the pre-existing 1e76 explosion.
+    def test_2device_matches_1device(self):
+        """Verify the 2-device Voronoi sharded step matches single-device
+        to floating-point precision after one SSP-RK3 step.
+
+        Iter-23 fix removed the pre-existing 1e76 explosion (root cause:
+        ``-1`` cellsOnEdge from the OR-edge-halo filter).  Iter-25
+        added an iterative augmentation that pulls in the OTHER cell of
+        every halo edge until the halo is closed under the cellsOnEdge
+        relation; this eliminates the residual ~1% drift from halo
+        cells lacking some of their edges.  Post-iter-25 the path is
+        bit-equivalent up to floating-point accumulation order:
+        max abs diff ≈ 1e-8 on u, 1e-9 on T, 1e-2 on p_s (1e-7 relative).
         """
         _need_multi_device(2)
         ref = self._run(devices=1, n_steps=1)
         out = self._run(devices=2, n_steps=1)
-        # Both must be finite (the iter-21 symptom was 1e76 NaN-precursor).
-        for name in ("u", "T", "p_s"):
-            r = np.asarray(getattr(ref, name).data)
-            o = np.asarray(getattr(out, name).data)
-            assert np.all(np.isfinite(o)), f"{name} not finite under SPMD"
-            assert np.all(np.isfinite(r)), f"{name} not finite single-device"
-        # Dynamical field magnitudes must not blow up beyond a small
-        # multiple of single-device peak.  Peak |u| in JW BCW after 1
-        # step is ~30 m/s; we accept up to 100.  T ~ 230-300 K; we
-        # accept up to 1e4 (catches NaN-like blowup).  ps near 1e5.
-        u_peak = float(np.max(np.abs(np.asarray(out.u.data))))
-        T_peak = float(np.max(np.abs(np.asarray(out.T.data))))
-        ps_peak = float(np.max(np.abs(np.asarray(out.p_s.data))))
-        assert u_peak < 100.0, f"u explodes to {u_peak} under SPMD"
-        assert T_peak < 1e4, f"T explodes to {T_peak} under SPMD"
-        assert ps_peak < 1e7, f"p_s explodes to {ps_peak} under SPMD"
-        # Sharded vs single drift after 1 step is ~1% on u, ~0.02% on
-        # ps — typical for sub-perfect halo overlap.  Use abs+rel
-        # tolerance that's tight enough to catch new regressions but
-        # loose enough not to flake.
-        for name, atol in (("u", 5.0), ("T", 1.0), ("p_s", 200.0)):
+        for name, atol, rtol in (
+            ("u", 1e-6, 1e-6),
+            ("T", 1e-6, 1e-7),
+            ("p_s", 1e-1, 1e-6),
+        ):
             r = np.asarray(getattr(ref, name).data)
             o = np.asarray(getattr(out, name).data)
             np.testing.assert_allclose(
-                o, r, atol=atol, rtol=0.10,
-                err_msg=f"{name}: 2-device drift exceeds physical envelope",
+                o, r, atol=atol, rtol=rtol,
+                err_msg=f"{name}: 2-device drift exceeds float-pt envelope",
             )

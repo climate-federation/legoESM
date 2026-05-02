@@ -1234,6 +1234,37 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
             ic = int(c)
             if ic not in owned_cells_set:
                 halo_cells_set.add(ic)
+        # Iter-25: also augment with OTHER cells of HALO edges.  Without
+        # this, halo cells have a few of their adjacent edges silently
+        # excluded (the AND filter below cuts edges whose far cell is
+        # outside ``local_cells``).  Operator quantities at halo cells
+        # then differ slightly from single-device, and owned-cell
+        # tendencies that read those halo quantities inherit ~1% drift
+        # per step.  Iterate the augmentation until stable so halo
+        # cells always have all their adjacent edges valid in the local
+        # mesh.  On SCVT meshes this converges in 1–2 iterations.
+        for _ in range(4):
+            local_cells_for_check = (
+                owned_cells_set | halo_cells_set
+            )
+            cur_local_arr = np.fromiter(
+                local_cells_for_check, dtype=np.int64,
+                count=len(local_cells_for_check),
+            )
+            edge_one_in = np.isin(cellsOnEdge_np[0], cur_local_arr) | np.isin(
+                cellsOnEdge_np[1], cur_local_arr,
+            )
+            cand_edges = np.flatnonzero(edge_one_in)
+            cand_cells = cellsOnEdge_np[:, cand_edges].reshape(-1)
+            cand_cells = cand_cells[cand_cells >= 0]
+            new = 0
+            for c in cand_cells:
+                ic = int(c)
+                if ic not in owned_cells_set and ic not in halo_cells_set:
+                    halo_cells_set.add(ic)
+                    new += 1
+            if new == 0:
+                break
         halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
         local_cells = np.concatenate([owned_cells, halo_cells])
         local_cells_set = set(local_cells.tolist())
