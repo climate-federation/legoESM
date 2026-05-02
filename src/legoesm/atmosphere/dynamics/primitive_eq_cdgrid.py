@@ -842,24 +842,26 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 p_s=state_new.p_s.replace(data=p_s_damped),
             )
 
-        # Conservation fixer (operates on p_s which is at cell centres)
+        # Conservation fixer (operates on p_s which is at cell centres).
+        # ``fix_mass_hydrostatic_target`` / ``fix_mass_hydrostatic`` only
+        # touch ``state.p_s`` and call ``state._replace(p_s=...)``, so
+        # we can pass the FV3 state directly.  Going through
+        # ``fv3_to_hydrostatic`` ran a corner-to-centre halo exchange +
+        # 4-point average on (u_d, v_d) just to throw the wind result
+        # away — wasted compute and an extra collective on the SPMD
+        # cubed-sphere path.
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
                 from legoesm.core.conservation import fix_mass_hydrostatic_target
                 # _target_mass is precomputed in step() outside the JIT boundary.
-                state_h = fv3_to_hydrostatic(state_new, cdgrid)
-                state_h_fixed = fix_mass_hydrostatic_target(
-                    state_h, self._target_mass, self.grid,
+                state_new = fix_mass_hydrostatic_target(
+                    state_new, self._target_mass, self.grid,
                 )
-                state_new = state_new._replace(p_s=state_h_fixed.p_s)
             else:
                 from legoesm.core.conservation import fix_mass_hydrostatic
-                state_h_new = fv3_to_hydrostatic(state_new, cdgrid)
-                state_h_old = fv3_to_hydrostatic(state, cdgrid)
-                state_h_fixed = fix_mass_hydrostatic(
-                    state_h_new, state_h_old, self.grid,
+                state_new = fix_mass_hydrostatic(
+                    state_new, state, self.grid,
                 )
-                state_new = state_new._replace(p_s=state_h_fixed.p_s)
 
         return cast_pytree(state_new, None, "storage")
 
