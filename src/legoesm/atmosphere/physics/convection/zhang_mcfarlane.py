@@ -185,6 +185,7 @@ def zhang_mcfarlane_convection(
         T, q_v, p_full, p_half, z,
         T_parcel, q_parcel, k_base_smooth,
         eps_profile, dlt_profile, M_b,
+        buoyancy_death_memory=config.buoyancy_death_memory,
     )
 
     # Cap plume.M_u once at the source so every downstream use (kernel
