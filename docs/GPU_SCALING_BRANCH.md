@@ -46,6 +46,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere FV3 PE div_damp div_v halo collectives per stage      | 1 | 0 |
 | Cubed-sphere FV3 PE A_h+hyperdiff corner-interp halos per stage    | 2 | 1 (when both active) |
 | Cubed-sphere FV3 PE vert_adv+lap+hyperdiff corner-interp halos per stage | 1+1+1 = 3 (vert_adv always; A_h, hyperdiff conditional) | 1 batched |
+| Cubed-sphere FV3 PE physics du/dv corner-interp halo per stage      | 1 (when physics active) | 0 (rides iter-64 batch) |
 | Spectral PE σ-coord cross-level collectives        |          3 |           1 |
 | Hybrid mass-flux + dp_s_dt cross-level collectives (CS, spectral) | 4 (2 in fn + 2 in callers) | 2 |
 | compute_sigma_dot internal cross-level collectives  |          2 |           1 |
@@ -150,6 +151,9 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+59c5c51b cubed-sphere FV3 PE: batch physics corner interp with iter-64 batch
+8c4797c9 tests: cubed-sphere SPMD no-diffusion 6-dev bit-equiv (iter-64 minimal batch)
+d232587e docs: record iter-64 vert_adv corner-interp batching
 186c6bf4 scripts: plot_scaling_laws picks up icosahedral + spectral weak CSVs
 e6ae8e0a cubed-sphere FV3 PE: batch vert_adv_uv corner interp with iter-63 batch
 05b0714a docs: record iter-63 corner-interp batching + scaling-plot script
