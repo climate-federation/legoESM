@@ -461,10 +461,34 @@ def fv3_hydrostatic_tendencies(
                 T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
             )
             _u_cc_pad = _v_cc_pad = None
+    elif _halo_backend == "spmd":
+        # Pack the same 2 (T, lnps) or 4 (T, u_cc, v_cc, lnps) fields
+        # into a single SPMD allgather, mirroring the MPI packed path
+        # above.  Drops the per-stage cell-field collective count from
+        # 4 → 1 (or 2 → 1) on multi-GPU at the cost of one
+        # ``concatenate`` + ``split`` along the trailing axis.  Iter-7
+        # plumbed ``interp_offsets`` through ``packed_pad_halo_4d`` so
+        # the result is bit-equivalent to the unpacked path that the
+        # single-device branch uses.
+        from legoesm.parallel.cubesphere_exchange import (
+            packed_pad_halo_4d, _spmd_mesh,
+        )
+        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        if _needs_uv_pad:
+            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_4d(
+                T, u_cell, v_cell, ln_ps_3d,
+                mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
+            )
+        else:
+            _T_pad, _lnps_pad = packed_pad_halo_4d(
+                T, ln_ps_3d,
+                mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
+            )
+            _u_cc_pad = _v_cc_pad = None
     else:
-        # Route through duogrid remap when duogrid is active on the grid,
-        # matching the pattern used by _arakawa_lamb_gradient via
-        # `_pad_halo_auto`.
+        # Single-device fallback: per-field unpacked exchanges with
+        # offsets / duogrid forwarded.  Same numerics as the SPMD packed
+        # branch above (verified iter-7).
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
