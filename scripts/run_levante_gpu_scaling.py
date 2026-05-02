@@ -303,7 +303,7 @@ _MIN_TIMING_SECONDS = 2.0
 
 
 def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
-                    max_timing: int = 2000) -> int:
+                    max_timing: int = 1000) -> int:
     """Scale timing steps up for small grids to ensure stable measurements.
 
     For sub-millisecond step times (small cells/GPU), the default 100
@@ -312,6 +312,12 @@ def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
     bumps n_timing so the timed window is ≥ _MIN_TIMING_SECONDS.
 
     Capped at *max_timing* to keep total benchmark runtime practical.
+    A ``lax.scan(length=N)`` that times a single step compiles roughly
+    proportional to *N*; pushing *max_timing* much past 1000 makes
+    compile time dominate wall-clock for small grids without improving
+    the precision of the timing measurement.  For sub-50-µs step times
+    we further clamp to 200 steps — that's still ~10 ms of timed work,
+    well above per-step jitter at that scale.
     """
     cells_per_gpu = total_cells // max(n_gpus, 1)
     # Rough model: step time ~ 0.01 ms per 1000 cells/GPU (from I4–I6 data)
@@ -320,9 +326,13 @@ def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
     if est_total_s >= _MIN_TIMING_SECONDS:
         return n_timing_base
     needed = int(math.ceil(_MIN_TIMING_SECONDS / (est_ms / 1000.0)))
-    # Round up to nearest 100 for clean reporting, capped
+    if est_ms < 0.05:
+        # Sub-50µs steps: 200 scan iterations is enough timed work and
+        # avoids paying a long XLA compile for a 2000-iteration scan.
+        needed = min(needed, 200)
     needed = max(needed, n_timing_base)
     needed = min(needed, max_timing)
+    # Round up to nearest 100 for clean reporting
     needed = ((needed + 99) // 100) * 100
     return needed
 
@@ -814,6 +824,22 @@ def run_benchmark(
     import jax
     import jax.numpy as jnp
 
+    # Spectral guard: the Gaussian/spectral pathway requires x64 (the
+    # spherical-harmonic transforms operate on complex128).  A
+    # float32 sweep step can land here after a float64 step has already
+    # enabled x64, and JAX cannot disable x64 once it has been turned on
+    # — so we silently get float64 internally regardless.  Surface the
+    # mismatch immediately so benchmark CSVs do not record bogus
+    # "float32 spectral" entries that are really running in float64.
+    if grid_type == "spectral" and precision != "float64":
+        import warnings
+        warnings.warn(
+            "Spectral dycore requires float64; coercing precision to float64 "
+            "for this run.  Use --precision float64 to silence this warning.",
+            stacklevel=2,
+        )
+        precision = "float64"
+
     # Set precision
     if precision == "float64":
         jax.config.update("jax_enable_x64", True)
@@ -1029,16 +1055,22 @@ def run_benchmark(
     if dev_config.n_devices > 1 and not _is_cs_distributed and not _is_mpi:
         state = shard_pytree(state, dev_config)
 
-    # Verify sharding is effective (not accidentally replicated)
+    # Verify sharding is effective (not accidentally replicated).
+    # ``NamedSharding`` has no ``.shape`` attribute, so the previous
+    # ``getattr(..., 'shape', (1,))`` always returned ``(1,)`` and the
+    # warning fired for every multi-device cubed-sphere run, masking any
+    # real replication issue.  Use the existing diagnostic helper which
+    # inspects ``sharding.spec``.
     if dev_config.n_devices > 1 and not _is_mpi:
-        sample_leaf = jax.tree.leaves(state)[0]
-        if hasattr(sample_leaf, 'sharding'):
-            is_replicated = all(
-                s == 1 for s in getattr(sample_leaf.sharding, 'shape', (1,))
+        from legoesm.parallel.sharded_dynamics import check_sharding
+        sr = check_sharding(state, dev_config)
+        if sr["n_sharded"] == 0 and grid_type != "icosahedral":
+            print(
+                f"    WARNING: State appears fully replicated — sharding "
+                f"may not be effective ({sr['n_replicated']} replicated, "
+                f"{sr['n_unsharded']} unsharded leaves)",
+                flush=True,
             )
-            if is_replicated and grid_type != "icosahedral":
-                print("    WARNING: State appears fully replicated — "
-                      "sharding may not be effective", flush=True)
 
     # Build physics function (None for dycore-only and moist tiers).
     physics_fn = _build_physics_fn(physics_level, grid_type)

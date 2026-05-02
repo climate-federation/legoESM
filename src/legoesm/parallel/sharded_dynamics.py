@@ -1894,9 +1894,16 @@ def make_voronoi_sharded_step(
             T_new = jnp.maximum(T_new, cfg.T_min)
 
         if cfg.fix_mass:
-            mass_old = jnp.sum(ps * _area_for_mass)
-            mass_new = jnp.sum(ps_new * _area_for_mass)
-            correction = (mass_old - mass_new) / _total_area
+            # Compute both masses inside a single reduction.  Stacking
+            # the two ps fields and reducing once lets XLA fuse the
+            # two cross-device sums into a single allreduce HLO instead
+            # of emitting two sequentially-dependent allreduces (the
+            # second cannot start until the first materialises).
+            ps_pair = jnp.stack([ps, ps_new], axis=0)
+            masses = jnp.sum(ps_pair * _area_for_mass[None], axis=tuple(
+                range(1, ps_pair.ndim)
+            ))  # shape (2,)
+            correction = (masses[0] - masses[1]) / _total_area
             ps_new = ps_new + correction
 
         return MPASHydrostaticState(
