@@ -735,21 +735,34 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         # Conservation fixer for mass
         if self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
+            from legoesm.core.conservation import (
+                _accumulation_dtype, _batch_global_area_sums,
+            )
             acc = _accumulation_dtype()
-            area = self.grid.area.astype(acc)
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one
             # extra reduction in serial, one extra allreduce under
             # latlon SPMD sharding).
             total_area = self.grid.grid_total_area.astype(acc)
             if target_mass is not None:
+                # Closure-constant target → only ``mass_new`` is reduced.
+                area = self.grid.area.astype(acc)
                 mass_target = target_mass
+                mass_new = jnp.sum(state.p_s.astype(acc) * area)
             elif pre_state is not None:
-                mass_target = jnp.sum(pre_state.p_s.astype(acc) * area)
+                # Iter-57: batch the two area-weighted sums into a
+                # single MPI allreduce / cross-shard reduction (the
+                # cubed-sphere ``fix_mass_hydrostatic`` already does
+                # this via ``_batch_global_area_sums``).
+                mass_target, mass_new = _batch_global_area_sums(
+                    [pre_state.p_s, state.p_s], self.grid,
+                )
             else:
-                mass_target = jnp.sum(state.p_s.astype(acc) * area)
-            mass_new = jnp.sum(state.p_s.astype(acc) * area)
+                # Degenerate case: mass_target == mass_new → correction=0.
+                # Skip the redundant second reduction.
+                area = self.grid.area.astype(acc)
+                mass_new = jnp.sum(state.p_s.astype(acc) * area)
+                mass_target = mass_new
             correction = (mass_target - mass_new) / total_area
 
             # Preserve tracer mass: ∫ q·dp·dA must be invariant when the
