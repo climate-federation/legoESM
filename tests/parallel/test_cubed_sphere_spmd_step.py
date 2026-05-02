@@ -87,49 +87,38 @@ class TestCubedSphereSPMDStep:
                 s = model.step(s, dt)
         return fv3_to_hydrostatic(s, cdgrid)
 
-    def test_6device_no_runaway(self):
-        """6-device face-sharded cubed-sphere produces physical output.
+    def test_6device_matches_1device(self):
+        """6-device face-sharded cubed-sphere matches single-device to
+        floating-point precision on dynamical fields after one
+        SSP-RK3 step.
 
-        Iter-30 measurement shows that after 1 SSP-RK3 step at C24/L8,
-        the 6-device SPMD path drifts from single-device by:
-            u  ≈ 1.7e-2 m/s (rel 6e-4)
-            v  ≈ 8e-3 m/s   (rel 3e-4)
-            T  ≈ 5e-3 K     (rel 2e-5)
-            ps ≈ 0.7 Pa     (rel 7e-6)
+        Iter-30 surfaced ~6e-4 relative drift on u under 6-device
+        SPMD; iter-31 root-caused it to ``pad_halo_vector_4d``
+        silently dropping ``interp_offsets`` under SPMD when called by
+        ``divergence_3d`` inside the hyperdiffusion path.  Forwarding
+        offsets through ``explicit_pad_halo_vector_4d`` restored
+        bit-equivalence on dynamical fields:
 
-        This is larger than the Voronoi or spectral SPMD paths
-        (1e-8 / 1e-12 respectively) — the cubed-sphere halo kernels
-        have legitimate accumulation-order differences relative to the
-        local-pad reference (the SPMD halo=2 kernel's 2x2 corner fill
-        sweeps through cells in a different order than the local
-        ``_fill_corners_h2``).  Closing this gap to full bit-equivalence
-        is non-trivial — the corner-fill semantics differ in ways the
-        local-pad path documents as "average two adjacent halo cells"
-        but the SPMD path implements with single-face indexing — and
-        is captured as a deferred follow-up.
-
-        For now the test asserts the path produces physically sensible
-        values and does not blow up (the symptom that motivated the
-        iter-23 voronoi-equivalent fix).  Tolerance covers up to a
-        few RK3 steps of compound drift.
+            u, v, T : 1e-14 .. 1e-16 abs (FMA precision)
+            ps      : 5e-2 abs (5e-7 rel) — float-pt accumulation-order
+                       difference in the post-step ``fix_mass_hydrostatic_target``
+                       allreduce, fundamental to sharded reductions.
         """
         _need_devices(6)
-        out = self._run(devices=6, n_steps=3)
-        # All fields must be finite (no NaN/inf precursor).
-        for name in ("u", "v", "T", "p_s"):
+        ref = self._run(devices=1, n_steps=1)
+        out = self._run(devices=6, n_steps=1)
+        # Tight tolerance on dynamical fields (post-iter-31 fix)
+        for name, atol, rtol in (
+            ("u", 1e-12, 1e-13),
+            ("v", 1e-12, 1e-13),
+            ("T", 1e-11, 1e-13),
+            # ps drift from sharded allreduce — looser envelope
+            ("p_s", 1.0, 1e-5),
+        ):
+            r = np.asarray(getattr(ref, name).data)
             o = np.asarray(getattr(out, name).data)
-            assert np.all(np.isfinite(o)), f"{name} not finite under SPMD"
-        # Dynamical-field magnitudes must stay within physical envelopes.
-        u_peak = float(np.max(np.abs(np.asarray(out.u.data))))
-        v_peak = float(np.max(np.abs(np.asarray(out.v.data))))
-        T_peak = float(np.max(np.abs(np.asarray(out.T.data))))
-        ps_min = float(np.min(np.asarray(out.p_s.data)))
-        ps_max = float(np.max(np.asarray(out.p_s.data)))
-        # Initial state has |u| up to ~35 m/s; after 3 steps (~22 min)
-        # the wave's nonlinear evolution doesn't push that beyond ~50.
-        assert u_peak < 50.0, f"u explodes to {u_peak} under SPMD"
-        assert v_peak < 50.0, f"v explodes to {v_peak} under SPMD"
-        assert 100.0 < T_peak < 350.0, f"T out of range: {T_peak}"
-        # ps near 1e5; allow ±3% envelope after a few steps.
-        assert 9.7e4 < ps_min < 1.05e5, f"ps_min out of range: {ps_min}"
-        assert 9.5e4 < ps_max < 1.05e5, f"ps_max out of range: {ps_max}"
+            np.testing.assert_allclose(
+                o, r, atol=atol, rtol=rtol,
+                err_msg=f"{name}: 6-device cubed-sphere SPMD drift "
+                        f"exceeds float-pt envelope",
+            )

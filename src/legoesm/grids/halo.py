@@ -1034,11 +1034,20 @@ def pad_halo_vector_4d(
         from legoesm.parallel.cubesphere_exchange import (
             explicit_pad_halo_vector_4d,
         )
+        # Iter-31: forward ``interp_offsets`` to the SPMD vector kernel.
+        # Without this, the dycore's hyperdiffusion path
+        # (``hyperdiffusion_3d`` → ``divergence_3d`` → here) silently
+        # drops the Lagrange correction under SPMD, producing ~6e-4
+        # relative drift on u/v after a single SSP-RK3 step at C24/L8.
+        # ``duogrid``-on-grid runs already handle this through the
+        # post-exchange remap; ``interp_offsets``-with-no-duogrid runs
+        # need the explicit forwarding.
+        offsets = None if duogrid is not None else interp_offsets
         return explicit_pad_halo_vector_4d(
             u_data, v_data,
             cos_angle, sin_angle,
             cos_angle_padded, sin_angle_padded,
-            _spmd_mesh, halo=halo,
+            _spmd_mesh, halo=halo, interp_offsets=offsets,
         )
 
     # Broadcast 2D angles to match 4D data

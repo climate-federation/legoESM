@@ -695,7 +695,7 @@ def explicit_pad_halo_vector_4d(
     u_data, v_data,
     cos_angle, sin_angle,
     cos_angle_padded, sin_angle_padded,
-    mesh, halo=1,
+    mesh, halo=1, interp_offsets=None,
 ):
     """Explicit 4D vector halo exchange.
 
@@ -706,6 +706,14 @@ def explicit_pad_halo_vector_4d(
     This halves the collective count compared to two separate scalar
     exchanges.
 
+    When ``interp_offsets`` is provided, the underlying scalar SPMD
+    exchange applies the per-edge Lagrange correction so the result
+    matches the local-pad vector reference bit-for-bit.  Iter-31 fix:
+    without this forwarding, the dycore's hyperdiffusion path
+    (`hyperdiffusion_3d` → `divergence_3d` → `pad_halo_vector_4d` →
+    here) silently dropped offsets under SPMD, producing ~6e-4 relative
+    drift on u/v after one SSP-RK3 step at C24/L8.
+
     Parameters
     ----------
     u_data, v_data : (6, n, n, nlev)
@@ -713,6 +721,8 @@ def explicit_pad_halo_vector_4d(
     cos_angle_padded, sin_angle_padded : (6, n+2, n+2) — padded angles
     mesh : jax.sharding.Mesh
     halo : int
+    interp_offsets : (6, 4, n) or None
+        Forwarded to the inner ``explicit_pad_halo_4d``.
 
     Returns
     -------
@@ -726,7 +736,9 @@ def explicit_pad_halo_vector_4d(
 
     # Step 2: pack both into one field → single collective
     packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
-    packed_padded = explicit_pad_halo_4d(packed, mesh, halo=halo)
+    packed_padded = explicit_pad_halo_4d(
+        packed, mesh, halo=halo, interp_offsets=interp_offsets,
+    )
 
     # Step 3: unpack
     nlev = u_data.shape[-1]
