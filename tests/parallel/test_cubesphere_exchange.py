@@ -362,3 +362,58 @@ class TestSPMDWithOffsets:
         )
         np.testing.assert_array_equal(np.array(out1), ref1)
         np.testing.assert_array_equal(np.array(out2), ref2)
+
+    def test_pad_halo_pair_h2_local_fallback(self):
+        """``pad_halo_pair_h2`` under the local backend falls back to
+        two sequential ``pad_halo(halo=2)`` calls — bit-exact match.
+        This guards the iter-11 PPM rewiring against accidental
+        regressions on single-device runs.
+        """
+        from legoesm.grids.halo import (
+            pad_halo, pad_halo_pair_h2, get_halo_backend,
+        )
+        # Verify we're in the local backend (or fall through)
+        assert get_halo_backend() in ("local", "spmd")
+        n = 8
+        q1 = jax.random.normal(jax.random.PRNGKey(20), (6, n, n))
+        q2 = jax.random.normal(jax.random.PRNGKey(21), (6, n, n))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(22), (6, 4, 2, n),
+        ) * 0.3
+        # Sequential references
+        ref1 = np.array(pad_halo(q1, halo=2, interp_offsets=offsets))
+        ref2 = np.array(pad_halo(q2, halo=2, interp_offsets=offsets))
+        # Pair-pack (under local backend, falls back to sequential)
+        out1, out2 = pad_halo_pair_h2(q1, q2, interp_offsets=offsets)
+        np.testing.assert_array_equal(np.array(out1), ref1)
+        np.testing.assert_array_equal(np.array(out2), ref2)
+
+    def test_pad_halo_pair_h2_spmd(self, mesh_6):
+        """``pad_halo_pair_h2`` under the SPMD backend produces a
+        bit-exact match against the local pad_halo reference.  Guards
+        the iter-11 packing path through PPM transport.
+        """
+        from legoesm.grids.halo import (
+            pad_halo, pad_halo_pair_h2,
+        )
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend,
+        )
+        n = 8
+        q1 = jax.random.normal(jax.random.PRNGKey(30), (6, n, n))
+        q2 = jax.random.normal(jax.random.PRNGKey(31), (6, n, n))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(32), (6, 4, 2, n),
+        ) * 0.3
+        # Sequential local references (no SPMD)
+        ref1 = np.array(pad_halo(q1, halo=2, interp_offsets=offsets))
+        ref2 = np.array(pad_halo(q2, halo=2, interp_offsets=offsets))
+        activate_spmd_halo_backend(mesh_6)
+        try:
+            q1_s = _shard_on_face(q1, mesh_6)
+            q2_s = _shard_on_face(q2, mesh_6)
+            out1, out2 = pad_halo_pair_h2(q1_s, q2_s, interp_offsets=offsets)
+            np.testing.assert_array_equal(np.array(out1), ref1)
+            np.testing.assert_array_equal(np.array(out2), ref2)
+        finally:
+            deactivate_spmd_halo_backend()
