@@ -375,13 +375,16 @@ def set_ppermute_default(enabled: bool) -> None:
 def explicit_pad_halo(data, mesh, halo=1):
     """Explicit 3D scalar exchange.  (6,n,n) → (6,n+2h,n+2h).
 
-    For halo=2 uses all_gather (ppermute only supports halo=1).
+    Currently only the halo=1 path goes through an explicit SPMD
+    collective.  For halo=2 we delegate to ``_pad_halo_local_h2``,
+    whose ``data[nbr_face, ...]`` reads cause XLA to insert automatic
+    cross-shard gathers when ``data`` is face-sharded.  That keeps the
+    result correct but does not exploit the explicit SPMD path; a
+    proper halo=2 SPMD exchange would gather 2-cell-wide strips in a
+    single ``all_gather`` instead.  See follow-up TODO in
+    ``results/scaling_baseline/SUMMARY.md``.
     """
     if halo == 2:
-        # halo=2: use all_gather for SPMD exchange (not ppermute, which
-        # only supports halo=1), falling back to local if needed.
-        exchange = _get_exchange(mesh, 3, False)  # all_gather
-        # all_gather gives halo=1 padded; apply second halo layer locally
         from legoesm.grids.halo import _pad_halo_local_h2
         return _pad_halo_local_h2(data)
     if halo != 1:
@@ -393,7 +396,8 @@ def explicit_pad_halo(data, mesh, halo=1):
 def explicit_pad_halo_4d(data, mesh, halo=1):
     """Explicit 4D scalar exchange.  (6,n,n,C) → (6,n+2h,n+2h,C).
 
-    For halo=2 uses all_gather (ppermute only supports halo=1).
+    See :func:`explicit_pad_halo` for the halo>=2 caveat — the SPMD
+    code path is exercised only at halo=1.
     """
     if halo == 2:
         from legoesm.grids.halo import _pad_halo_local_h2_4d
