@@ -52,8 +52,14 @@ def plume_convection(
         T_plume, S_plume, active = carry
         dz_k = dz_actual[..., k]
 
-        # Entrain environment
-        entrain = cfg.epsilon * dz_k
+        # Entrain environment.  ``1 - exp(-epsilon*dz)`` is the exact
+        # solution of dT_plume/dz = -epsilon*(T_plume - T_env) over a
+        # layer of thickness ``dz``.  The first-order linearization
+        # ``epsilon*dz`` exceeds 1 and goes negative for thick layers
+        # (e.g. epsilon=1e-3 m^-1, dz>1000 m), which would produce an
+        # unphysical sign-flip on the plume properties.  ``-expm1(-x)``
+        # is monotone in [0, 1) for x>=0 and gradient-friendly.
+        entrain = -jnp.expm1(-cfg.epsilon * dz_k)
         T_plume = (1.0 - entrain) * T_plume + entrain * T[..., k]
         S_plume = (1.0 - entrain) * S_plume + entrain * S[..., k]
 
