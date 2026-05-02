@@ -257,3 +257,84 @@ class TestBackendActivation:
             np.testing.assert_allclose(result, ref, rtol=1e-6, atol=1e-10)
         finally:
             deactivate_spmd_halo_backend()
+
+
+# =======================================================================
+# SPMD with interp_offsets (iter-7 plumbing)
+# =======================================================================
+
+class TestSPMDWithOffsets:
+    """Bit-exact equivalence with local pad when interp_offsets are
+    forwarded.  Guards the iter-7 plumbing: ``pad_halo`` /
+    ``pad_halo_4d`` SPMD branch passes ``offsets`` to
+    ``explicit_pad_halo[_4d]``, which in turn dispatches to the
+    ``with_offsets`` variant of the allgather kernel.
+    """
+
+    def test_halo1_3d_with_offsets(self, mesh_6):
+        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
+        n = 8
+        data = jax.random.normal(jax.random.PRNGKey(0), (6, n, n))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(1), (6, 4, n),
+        ) * 0.3
+        ref = np.array(_pad_halo_local(data, offsets))
+        result = np.array(explicit_pad_halo(
+            _shard_on_face(data, mesh_6), mesh_6,
+            halo=1, interp_offsets=offsets,
+        ))
+        # Bit-exact: same arithmetic on each device's strips.
+        np.testing.assert_array_equal(result, ref)
+
+    def test_halo2_3d_with_offsets(self, mesh_6):
+        from legoesm.grids.halo import _pad_halo_local_h2
+        from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
+        n = 8
+        data = jax.random.normal(jax.random.PRNGKey(2), (6, n, n))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(3), (6, 4, 2, n),
+        ) * 0.3
+        ref = np.array(_pad_halo_local_h2(data, offsets))
+        result = np.array(explicit_pad_halo(
+            _shard_on_face(data, mesh_6), mesh_6,
+            halo=2, interp_offsets=offsets,
+        ))
+        np.testing.assert_array_equal(result, ref)
+
+    def test_halo2_4d_with_offsets(self, mesh_6):
+        from legoesm.grids.halo import _pad_halo_local_h2_4d
+        from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
+        n, nlev = 8, 5
+        data = jax.random.normal(jax.random.PRNGKey(4), (6, n, n, nlev))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(5), (6, 4, 2, n),
+        ) * 0.3
+        ref = np.array(_pad_halo_local_h2_4d(data, offsets))
+        result = np.array(explicit_pad_halo_4d(
+            _shard_on_face(data, mesh_6), mesh_6,
+            halo=2, interp_offsets=offsets,
+        ))
+        np.testing.assert_array_equal(result, ref)
+
+    def test_packed_halo1_4d_with_offsets(self, mesh_6):
+        """``packed_pad_halo_4d`` with offsets matches per-field
+        ``_pad_halo_local_4d`` calls.  Iter-8 plumbing.
+        """
+        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+        n, c1, c2 = 8, 5, 3
+        f1 = jax.random.normal(jax.random.PRNGKey(6), (6, n, n, c1))
+        f2 = jax.random.normal(jax.random.PRNGKey(7), (6, n, n, c2))
+        offsets = jax.random.normal(
+            jax.random.PRNGKey(8), (6, 4, n),
+        ) * 0.3
+        ref1 = np.array(_pad_halo_local_4d(f1, offsets))
+        ref2 = np.array(_pad_halo_local_4d(f2, offsets))
+        f1_s = _shard_on_face(f1, mesh_6)
+        f2_s = _shard_on_face(f2, mesh_6)
+        out1, out2 = packed_pad_halo_4d(
+            f1_s, f2_s, mesh=mesh_6, interp_offsets=offsets,
+        )
+        np.testing.assert_array_equal(np.array(out1), ref1)
+        np.testing.assert_array_equal(np.array(out2), ref2)
