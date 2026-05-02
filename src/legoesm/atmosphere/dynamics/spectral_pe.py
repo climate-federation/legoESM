@@ -821,7 +821,7 @@ def _compute_sponge_factor(sigma_full, sponge_sigma, sponge_tau, dt):
     return jnp.exp(-damping_rate * dt)
 
 
-def _apply_sponge_filter(state, sponge_factor, ms):
+def _apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     """Apply multiplicative sponge damping to vor, div, and T' at top levels.
 
     Damps vor and div toward zero.  Damps T perturbations (m != 0 modes)
@@ -833,19 +833,17 @@ def _apply_sponge_filter(state, sponge_factor, ms):
     state : SpectralHydrostaticState
     sponge_factor : jax.Array, shape (nlev,)
         Per-level damping factors in [0, 1].
-    ms : jax.Array, shape (n_sh,)
-        Zonal wavenumber for each spectral coefficient.
+    sponge_factor_T : jax.Array, shape (n_sh, nlev)
+        Per-mode T damping factor.  Iter-70: precomputed in
+        ``_ensure_sponge_factor`` to avoid the per-step
+        ``jnp.where(is_zonal, 1.0, sf)`` cost.  Equals 1.0 at m=0
+        and ``sponge_factor[None,:]`` elsewhere.
     """
     sf = sponge_factor[None, :]  # (1, nlev)
 
     vor_hat_damped = state.vor_hat.data * sf
     div_hat_damped = state.div_hat.data * sf
-
-    # For temperature, only damp non-zonal modes (m != 0) to preserve
-    # the mean thermal stratification
-    is_zonal = (ms == 0)[:, None]  # (n_sh, 1) bool
-    T_sf = jnp.where(is_zonal, 1.0, sf)  # no damping for m=0
-    T_hat_damped = state.T_hat.data * T_sf
+    T_hat_damped = state.T_hat.data * sponge_factor_T
 
     return state._replace(
         vor_hat=state.vor_hat.replace(data=vor_hat_damped),
@@ -996,6 +994,7 @@ class SpectralPrimitiveEquationModel:
         self._si_data_lf = None  # SI data for leapfrog (dt_eff = 2*dt)
         self._si_dt_lf = None
         self._sponge_factor = None
+        self._sponge_factor_T = None  # iter-70: precomputed (n_sh, nlev) T factor
         self._sponge_dt = None
         # Leapfrog state management
         self._state_prev = None  # Previous time level for leapfrog
@@ -1065,7 +1064,14 @@ class SpectralPrimitiveEquationModel:
             self._si_dt = dt_si
 
     def _ensure_sponge_factor(self, dt: float):
-        """Lazily precompute sponge damping factors and refresh when dt changes."""
+        """Lazily precompute sponge damping factors and refresh when dt changes.
+
+        Iter-70: precompute the per-mode T sponge factor as a single
+        ``(n_sh, nlev)`` array (zonal m=0 modes preserved at 1.0,
+        non-zonal modes get the sponge factor).  Avoids the per-step
+        ``jnp.where(is_zonal, 1.0, sf)`` op in
+        ``_apply_sponge_filter``.
+        """
         if self.config.sponge_tau <= 0:
             return
         if self._sponge_factor is not None and self._sponge_dt == dt:
@@ -1080,6 +1086,11 @@ class SpectralPrimitiveEquationModel:
         self._sponge_factor = _compute_sponge_factor(
             sigma_full, self.config.sponge_sigma, self.config.sponge_tau, dt,
         )
+        # Per-(n_sh, nlev) factor for T: 1.0 at m=0, sf elsewhere.
+        _is_zonal = (self.grid.ms == 0)[:, None]  # (n_sh, 1) bool
+        self._sponge_factor_T = jnp.where(
+            _is_zonal, 1.0, self._sponge_factor[None, :],
+        )  # (n_sh, nlev)
         self._sponge_dt = dt
 
     def _ensure_hyperdiff_filter(self, dt: float):
@@ -1223,7 +1234,7 @@ class SpectralPrimitiveEquationModel:
 
         # Apply implicit sponge filter (unconditionally stable)
         if self._sponge_factor is not None:
-            result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
+            result = _apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
 
         # Apply spectral filter (damps highest wavenumbers)
         if self._spectral_filter is not None:
@@ -1268,7 +1279,7 @@ class SpectralPrimitiveEquationModel:
             result = self._euler_si_jit(state, dt, physics_fn)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
-                result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
+                result = _apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
             if self._spectral_filter is not None:
                 result = _apply_spectral_filter_to_state(result, self._spectral_filter)
             # Implicit hyperdiffusion (unconditionally stable)
@@ -1286,7 +1297,7 @@ class SpectralPrimitiveEquationModel:
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 state_np1 = _apply_sponge_filter(
-                    state_np1, self._sponge_factor, self.grid.ms,
+                    state_np1, self._sponge_factor, self._sponge_factor_T,
                 )
             if self._spectral_filter is not None:
                 state_np1 = _apply_spectral_filter_to_state(
