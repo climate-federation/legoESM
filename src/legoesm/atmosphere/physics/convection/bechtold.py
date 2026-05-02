@@ -123,20 +123,32 @@ def bechtold_convection(
 
     # -- PBL parcel: mass-weighted average over the boundary-layer
     # depth.  Smooth weighting via ``smooth_level_indicator`` so the
-    # PBL-depth threshold is differentiable.
+    # PBL-depth threshold is differentiable.  The mass weight is
+    # ``pbl_weight * dp`` (dp/g per layer is mass per unit area) — an
+    # earlier form averaged with ``pbl_weight`` alone, which is only
+    # correct for uniform-thickness layers and gave a height-weighted,
+    # not mass-weighted, mean (audit Codex finding: "Bechtold PBL
+    # parcel is not actually mass weighted").
+    dp_full = p_half[:, 1:] - p_half[:, :-1]
     pbl_weight = smooth_level_indicator(
         z, threshold=config.cape_pbl_depth, sharpness=2.0e-3,
         direction="below",
     )                                                       # (ncol, nlev)
-    pbl_norm = jnp.sum(pbl_weight, axis=-1, keepdims=True).clip(1e-6, None)
-    T_pbl = jnp.sum(pbl_weight * T, axis=-1) / pbl_norm.squeeze(-1)
-    q_pbl = jnp.sum(pbl_weight * q_v, axis=-1) / pbl_norm.squeeze(-1)
+    pbl_mass_weight = pbl_weight * dp_full
+    pbl_norm = jnp.sum(pbl_mass_weight, axis=-1, keepdims=True).clip(1e-6, None)
+    T_pbl = jnp.sum(pbl_mass_weight * T, axis=-1) / pbl_norm.squeeze(-1)
+    q_pbl = jnp.sum(pbl_mass_weight * q_v, axis=-1) / pbl_norm.squeeze(-1)
+    # Mass-weighted PBL pressure for the LCL launch level when the
+    # parcel comes from the PBL mean (otherwise use surface pressure).
+    p_pbl = jnp.sum(pbl_mass_weight * p_full, axis=-1) / pbl_norm.squeeze(-1)
     if config.use_pbl_cape:
         T_parcel_source = T_pbl
         q_parcel_source = q_pbl
+        p_parcel_source = p_pbl
     else:
         T_parcel_source = T_base
         q_parcel_source = q_base
+        p_parcel_source = p_base
 
     T_parcel = T_parcel_source + config.parcel_dT
     q_parcel = q_parcel_source + config.parcel_dq
@@ -149,7 +161,7 @@ def bechtold_convection(
     )
 
     # -- LCL, LFC/LNB ------------------------------------------------------
-    lcl = compute_lcl(T_parcel, q_parcel, p_base, p_full)
+    lcl = compute_lcl(T_parcel, q_parcel, p_parcel_source, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
     k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
 
@@ -185,20 +197,27 @@ def bechtold_convection(
     # gracefully reduces to pure PBL-CAPE when MC is unavailable
     # (zero-filled by the bridge for spectral PE and other dycores
     # without an MC diagnostic).
+    # Dimensionally-correct PBL-CAPE closure (Kain 2004 §3 form):
+    #     M_b = rho_BL * (CAPE_pbl - threshold)+ / (g * tau_bl)   [kg/m^2/s]
+    # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
+    # masked operationally only by ``M_b_max``.
+    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
     M_b_pbl_cape = (
         cape_weight
+        * rho_BL
         * smooth_positive_part(cape_pbl - config.cape_threshold, config.cape_sharpness)
-        / config.tau_bl
+        / (constants.g * config.tau_bl)
     )
     if moisture_convergence is not None:
-        dp_full = p_half[:, 1:] - p_half[:, :-1]
         column_MC = jnp.sum(
             jnp.maximum(moisture_convergence, 0.0) * dp_full, axis=-1,
         ) / constants.g
         # Normalize the MC term so it acts as an O(1) multiplier.
-        # 0.05 kg/m^2/s is a typical strong-convergence value over
-        # tropical convective regions (Bechtold 2008 Fig. 2).
-        mc_enhancement = column_MC / 0.05
+        # ``mc_normalize_scale`` (default 0.05 kg/m²/s) is a typical
+        # strong-convergence value over tropical convective regions
+        # (Bechtold 2008 Fig. 2).  Lifted from a literal per CLAUDE.md
+        # 'no hardcoded tunables in physics body' (audit B9).
+        mc_enhancement = column_MC / config.mc_normalize_scale
         M_b_deterministic = M_b_pbl_cape * (1.0 + mc_enhancement)
     else:
         M_b_deterministic = M_b_pbl_cape
@@ -243,7 +262,10 @@ def bechtold_convection(
     )
 
     # -- Implicit-Euler relaxation of the M_u profile carry ---------------
-    dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, dt)
+    # ``dt / tau`` (floor tau against zero), NOT ``dt / max(tau, dt)``;
+    # the latter under-stepped the relaxation when ``dt > tau`` (audit
+    # Codex finding).
+    dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, 1e-30)
     M_u_new = (conv_prog_profile + dt_over_tau * plume.M_u) / (1.0 + dt_over_tau)
     # Cap M_u_new at config.M_b_max so every downstream use (kernel
     # tendencies, dq_c_conv_raw, downdraft trigger, CMT, carry update)
@@ -256,20 +278,20 @@ def bechtold_convection(
         + shallow_weight * config.delta_shallow
         + midlevel_weight * config.delta_midlevel
     )
-    dT_dt_raw, dq_v_dt_raw, _ = _apply_mass_flux_kernel(
+    # Pass per-column blended delta_0 directly to the kernel — see
+    # tiedtke.py for the rationale.  Multiplying the kernel's full
+    # output by ``delta_0_eff / delta_deep`` would also rescale the
+    # delta-independent subsidence terms.
+    dT_dt, dq_v_dt, _ = _apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_new,
-        z, rho, float(config.delta_deep), M_u_max=config.M_b_max,
+        z, rho, delta_0_eff[:, None], M_u_max=config.M_b_max,
     )
     rho_safe = jnp.clip(rho, 0.01, None)
     p_gate_qc = stratosphere_mass_flux_gate(p_full)
-    dq_c_conv_dt_raw = (
+    dq_c_conv_dt = (
         delta_0_eff[:, None] * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
     )
-    rescale = delta_0_eff[:, None] / config.delta_deep
-    dT_dt = dT_dt_raw * rescale
-    dq_v_dt = dq_v_dt_raw * rescale
-    dq_c_conv_dt = dq_c_conv_dt_raw
 
     # -- Optional downdraft (RH-dependent) ---------------------------------
     if config.enable_downdraft:
@@ -278,20 +300,40 @@ def bechtold_convection(
         )
         q_sat_env = saturation_mixing_ratio(T, p_full)
         rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
-        dp = p_half[:, 1:] - p_half[:, :-1]
-        below_mass = jnp.sum(below_lcl * dp, axis=-1) + 1e-6
+        below_mass = jnp.sum(below_lcl * dp_full, axis=-1) + 1e-6
         rh_below = (
-            jnp.sum(below_lcl * rh_layer * dp, axis=-1) / below_mass
+            jnp.sum(below_lcl * rh_layer * dp_full, axis=-1) / below_mass
         )
         downdraft_trigger = jax.nn.sigmoid(
             10.0 * (config.downdraft_RH_min - rh_below)
         )
         M_d_base = -config.downdraft_alpha * M_b * downdraft_trigger
-        below_lcl_norm = below_lcl / jnp.sum(below_lcl, axis=-1, keepdims=True).clip(1e-6, None)
-        dT_dt_dd = -(constants.L_v / constants.c_pd) * (
-            jnp.abs(M_d_base[:, None]) * below_lcl_norm * 0.05
-        ) / rho_safe
+        # Subcloud rain-evaporation cooling — see tiedtke.py for the
+        # full derivation.  ``E_layer`` [kg/(kg·s)] mass-weighted over
+        # below-LCL layers; the rain mass that re-evaporates is drawn
+        # from ``dq_c_conv_dt`` so the column water budget closes
+        # (Codex stop-time review: "downdraft fix still creates column
+        # water" — earlier form added vapor without removing the
+        # corresponding cloud-water source).
+        below_lcl_mass = jnp.sum(below_lcl * dp_full, axis=-1, keepdims=True).clip(1e-6, None)
+        rain_source_total = jnp.sum(
+            jnp.maximum(dq_c_conv_dt, 0.0) * dp_full, axis=-1,
+        ) / constants.g
+        evap_total = jnp.minimum(
+            jnp.abs(M_d_base) * config.downdraft_evap_efficiency,
+            rain_source_total,
+        )
+        evap_rate = (
+            evap_total[:, None] * below_lcl * constants.g / below_lcl_mass
+        )
+        dT_dt_dd = -(constants.L_v / constants.c_pd) * evap_rate
         dT_dt = dT_dt + dT_dt_dd
+        dq_v_dt = dq_v_dt + evap_rate
+        rain_source_safe = jnp.clip(rain_source_total[:, None], 1e-30, None)
+        rain_scale = 1.0 - evap_total[:, None] / rain_source_safe
+        dq_c_conv_dt = jnp.where(
+            dq_c_conv_dt > 0.0, dq_c_conv_dt * rain_scale, dq_c_conv_dt,
+        )
 
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:

@@ -33,6 +33,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -165,11 +166,18 @@ def kain_fritsch_convection(
 
     # -- Cloud-base mass flux closure: CAPE / cape_consumption_time --------
     # Following Kain (2004) §3 — the cloud-base mass flux is
-    # ``M_b = CAPE / (g * tau_consume)`` modulated by the trigger.
+    # ``M_b = rho_BL * CAPE / (g * tau_consume)`` (kg/m^2/s) modulated
+    # by the trigger.  The earlier formula omitted both ``rho_BL`` and
+    # ``g``, leaving units of m^2/s^3 — the bug was masked operationally
+    # by the ``M_b_max`` cap but produced an order-of-magnitude error in
+    # the gradient w.r.t. CAPE and made ``M_b`` independent of surface
+    # density.
+    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
     M_b = (
         overall_weight
+        * rho_BL
         * cape
-        / jnp.maximum(config.cape_consumption_time, dt)
+        / (constants.g * jnp.maximum(config.cape_consumption_time, dt))
     )
     # Bound M_b to a literature peak tropical value
     # (config.M_b_max, default 0.1 kg/m²/s) — see ZhangMcFarlaneConfig.

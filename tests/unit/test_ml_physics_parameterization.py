@@ -399,3 +399,61 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         rtol=1.0e-6,
         atol=1.0e-12,
     )
+
+
+def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
+    """The ML rebuild path must apply the same diagnostic-rain semantics
+    as the physical scheme.
+
+    When q_r > 0 on input (e.g., from a prior Kessler step or warm-start),
+    both the leaf scheme and the ML rebuild must:
+      (a) drain q_r to ~0 in one step (``dq_r_dt = -q_r/dt``),
+      (b) include the drained mass in ``precipitation``.
+
+    Pre-fix the ML path emitted ``dq_r_dt = autoconv - evap`` (no drain),
+    so an ML model trained against a teacher snapshot that exhibited
+    this bug would learn to leak rain mass.
+    """
+    T = jnp.array([[282.0, 276.0]])
+    q_v = jnp.array([[5.0e-3, 3.0e-3]])  # subsaturated to suppress autoconv
+    q_c = jnp.zeros((1, 2))
+    q_r = jnp.array([[3.0e-4, 2.0e-4]])  # nonzero rain on input
+    p_full = jnp.array([[8.5e4, 6.5e4]])
+    p_half = jnp.array([[9.5e4, 7.5e4, 5.5e4]])
+    rho = jnp.array([[1.05, 0.82]])
+    dz = jnp.array([[1200.0, 1500.0]])
+    hydrometeors = HydrometeorState(
+        q_c=q_c, q_r=q_r,
+        q_i=jnp.zeros_like(q_c),
+        q_s=jnp.zeros_like(q_c),
+        q_g=jnp.zeros_like(q_c),
+        N_c=jnp.zeros_like(q_c),
+        N_r=jnp.zeros_like(q_c),
+        N_i=jnp.zeros_like(q_c),
+    )
+    config = SundqvistConfig()
+    dt = 150.0
+
+    physical = sundqvist_microphysics(
+        T=T, q_v=q_v, hydrometeors=hydrometeors,
+        p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
+    )
+    # Use survival-fraction = 1 (no rain re-evaporation) for the rebuild;
+    # the q_r-drain channel is independent.
+    rebuilt = apply_predicted_sundqvist_rain_survival_fraction(
+        jnp.ones((1,)),
+        T=T, q_v=q_v, hydrometeors=hydrometeors,
+        p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
+    )
+    # q_r drains in both paths.
+    q_r_after_phys = q_r + physical.dq_r_dt * dt
+    q_r_after_ml = q_r + rebuilt.dq_r_dt * dt
+    assert float(jnp.max(jnp.abs(q_r_after_phys))) < 1e-12
+    assert float(jnp.max(jnp.abs(q_r_after_ml))) < 1e-12
+    # Drain flux contributes to precipitation in both paths.
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    expected_drain = float(
+        jnp.sum(q_r * dp, axis=1)[0] / (9.80616 * dt)
+    )
+    assert float(physical.precipitation[0]) >= expected_drain - 1e-12
+    assert float(rebuilt.precipitation[0]) >= expected_drain - 1e-12

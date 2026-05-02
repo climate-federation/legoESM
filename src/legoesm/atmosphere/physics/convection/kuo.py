@@ -165,11 +165,19 @@ def kuo_convection(
         trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax
     )  # (ncol,)
 
-    # Distribute moistening proportional to deficit, normalized to budget
+    # Distribute moistening proportional to deficit, normalized so the
+    # column integral exactly equals the budget.  With ``f = deficit /
+    # ∫(deficit·dp/g)`` (units m²/kg), ``dq_v_dt = budget · f`` has units
+    # ``kg/(m²·s) × m²/kg = kg/(kg·s)`` ✓ and ``∫(dq_v_dt · dp/g) =
+    # budget · ∫(f · dp/g) = budget · 1`` ✓.  An earlier form multiplied
+    # by an extra ``g/dp`` factor, which gave units ``m²/(kg·s)`` and
+    # under-reported the column moistening budget by a factor of
+    # ``~Σ_k g²/(dp_k · g) = nlev`` — for nlev=20 the column integral
+    # was ~500× smaller than the design intent (audit Codex finding:
+    # 'Kuo moistening-budget distribution has an extra g/dp').
     dq_v_dt = (
         moistening_budget[:, None]
         * (deficit / deficit_integral_safe)
-        * constants.g / dp
     )  # (ncol, nlev) [kg/kg/s]
 
     # Subtract condensation implied by heating

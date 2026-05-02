@@ -165,7 +165,7 @@ def edmf_turbulence(
         jnp.full(ncol, config.w_updraft_min, dtype=_dtype),
         (2.5 * ustar).astype(_dtype),
     )
-    theta_u_init = (theta[:, -1] + 0.5).astype(_dtype)  # slightly warmer
+    theta_u_init = (theta[:, -1] + config.parcel_dT).astype(_dtype)
     q_u_init = q_v[:, -1].astype(_dtype)  # same moisture
 
     # Scan from surface upward (reverse level index)

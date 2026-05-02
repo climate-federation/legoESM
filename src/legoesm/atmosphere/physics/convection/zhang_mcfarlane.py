@@ -128,18 +128,36 @@ def zhang_mcfarlane_convection(
     cape_weight = cape_trigger(
         cape, config.cape_threshold, config.cape_sharpness,
     )
+    # Dimensionally-correct CAPE-relaxation closure (Kain 2004 §3):
+    #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
+    # The earlier formula ``(CAPE - threshold)+ / tau`` had units
+    # ``m^2/s^3`` — wrong by a factor of ``rho_BL/g``.  At sea level
+    # this made M_b ~8x larger than the dimensionally-correct value;
+    # the runaway was masked operationally only by the ``M_b_max`` cap,
+    # but the gradient w.r.t. CAPE was off by the same factor and ``M_b``
+    # did not scale with the surface air density at all.
+    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
     M_b_eq = (
         cape_weight
+        * rho_BL
         * smooth_positive_part(
             cape - config.cape_threshold, config.cape_sharpness,
         )
-        / config.tau_cape
+        / (constants.g * config.tau_cape)
     )
     # Implicit-Euler relaxation toward equilibrium — stable for any
     # ``dt / tau_cape`` ratio:
     #     M_b_new = (M_b_old + (dt/tau) * M_b_eq) / (1 + dt/tau).
+    # For ``dt >> tau`` this approaches ``M_b_eq`` (full
+    # equilibration); for ``dt << tau`` it approaches a small
+    # fractional adjustment ``(dt/tau) * (M_b_eq - M_b_old)``.  An
+    # earlier form ``dt / max(tau, dt)`` clamped the ratio to ≤ 1 —
+    # under-stepping by up to ``r/(r+1) - 1/2 ≈ 41%`` at ``r=10`` —
+    # which is *not* what the comment claims (audit Codex finding:
+    # "the documented implicit-Euler factor is not what is
+    # implemented").  Protect against ``tau == 0`` only.
     M_b_old = conv_prog_profile[:, -1]
-    dt_over_tau = dt / jnp.maximum(config.tau_cape, dt)
+    dt_over_tau = dt / jnp.maximum(config.tau_cape, 1e-30)
     M_b = (M_b_old + dt_over_tau * M_b_eq) / (1.0 + dt_over_tau)
     # Bound M_b to a literature peak tropical value (config.M_b_max,
     # default 0.1 kg/m²/s).  Without this cap a column with very large

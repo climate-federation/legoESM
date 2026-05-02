@@ -316,19 +316,26 @@ def mass_flux_convection_from_closure(
     m_profile = jnp.sin(jnp.pi * (p_base - p_full) / p_range)
     M_profile = M_c_new[:, None] * m_profile
 
-    # Entraining updraft.  The undiluted plume rises along the moist
-    # adiabat from the cloud-base parcel (T_base, q_sat_base): its
-    # vapor at level z is q_sat(T_moist(z), p), and its cloud water
-    # is the moisture lost during ascent ``q_sat_base − q_sat(T_moist)``.
-    # Entrainment dilutes both T and q_v with environmental values;
-    # the entrained env air carries no q_c, so q_c_u just scales by
-    # ``dilution``.
+    # Entraining updraft.  The undiluted plume rises with a fixed
+    # total-water reservoir equal to the actual launched-parcel vapor
+    # ``q_v_sfc`` (NOT ``q_sat_sfc`` — using the saturation value here
+    # would let a 5%-RH desert column produce convective cloud water
+    # because the plume would "remember" being saturated at base when
+    # it never was).  At each level the undiluted plume vapor saturates
+    # at ``min(q_sat_moist, q_v_sfc)`` and condenses the excess; below
+    # the actual LCL (``q_sat_moist > q_v_sfc``) condensation is zero.
+    # Entrainment dilutes both T and q_v with environmental values; the
+    # entrained env air carries no q_c, so q_c_u just scales by
+    # ``dilution``.  The fix keeps the saturated-surface case
+    # (``q_v_sfc = q_sat_sfc``) identical to the old formula.
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
-    q_sat_base = saturation_mixing_ratio(T[:, -1:], p_full[:, -1:])
+    q_v_sfc = q_v[:, -1:]
     q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
-    q_v_u = dilution * q_sat_moist + (1.0 - dilution) * q_v
-    q_c_u = dilution * jnp.clip(q_sat_base - q_sat_moist, 0.0, None)
+    q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
+    q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
+    q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
+    q_c_u = dilution * q_c_u_undiluted
 
     dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
         T=T,
@@ -434,21 +441,20 @@ def edmf_convection(
     a_u_new = a_u + dt * (a_u_eq - a_u) / config.tau_a
     a_u_new = jnp.clip(a_u_new, 0.0, 0.5)
 
-    # Entraining updraft: thermal dilutes from the moist adiabat toward
-    # environment; moisture follows the moist-adiabat saturation profile
-    # (this differs from mass_flux, which dilutes from a single base
-    # parcel — a small but deliberate scientific distinction between
-    # the two schemes).
+    # Entraining updraft.  Same correction as in ``mass_flux_convection``:
+    # the undiluted plume's water reservoir is the *actual* launched-parcel
+    # vapor ``q_v_sfc``, not ``q_sat_sfc``.  Without this the plume would
+    # condense in dry columns even when the surface parcel never reached
+    # saturation (e.g. 5%-RH desert column gives ~2 mm/day of spurious
+    # convective precipitation — see ``test_no_cloud_water_in_dry_column``).
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
-    q_sat_base = saturation_mixing_ratio(T[:, -1:], p_full[:, -1:])
+    q_v_sfc = q_v[:, -1:]
     q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
-    # Diluted plume: vapor follows the saturated moist adiabat at each
-    # level (mixed with env vapor by entrainment), and cloud water is
-    # the integrated condensation lost during ascent (zero contribution
-    # from entrained env which carries no cloud water).
-    q_v_u = dilution * q_sat_moist + (1.0 - dilution) * q_v
-    q_c_u = dilution * jnp.clip(q_sat_base - q_sat_moist, 0.0, None)
+    q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
+    q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
+    q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
+    q_c_u = dilution * q_c_u_undiluted
 
     # Buoyancy: B = g * (T_v_u - T_v_env) / T_v_env.  Vapor contributes
     # ``+0.61 q_v`` (water vapour is lighter than dry air) and cloud

@@ -163,6 +163,68 @@ def test_zm_implicit_relaxation_toward_equilibrium():
     )
 
 
+def test_zm_implicit_relaxation_steps_more_when_dt_exceeds_tau():
+    """Audit Codex finding: ``dt_over_tau = dt / max(tau, dt)`` clamped
+    the implicit-Euler ratio to ≤ 1, under-stepping the relaxation
+    when ``dt > tau``.  With the documented ``dt / tau`` formulation,
+    a single step at ``dt = 10 * tau`` should equilibrate ~91% of the
+    way (``r/(1+r) = 10/11 ≈ 0.909``) vs the buggy form's clamped 50%.
+
+    This test compares two single-step calls — one at ``dt = tau``
+    (50% equilibration) and one at ``dt = 10 * tau`` (91% expected).
+    The fractional approach to equilibrium must be larger for the
+    ``dt = 10 * tau`` step.  Under the buggy form both would give 50%
+    and the assertion would fail.
+    """
+    # Milder sounding so the equilibrium M_b stays well below
+    # ``M_b_max`` — the cap saturates both runs to the same value
+    # otherwise and the test cannot distinguish the two regimes.
+    T, q, pf, ph, u, v = _synthetic_column(T_sfc=296.0, q_sfc=10.0e-3, lapse_rate=6.0)
+    ncol, nlev = T.shape
+    tau = 600.0
+    # Raise the cap as well so M_b_eq is observable.
+    config = ZhangMcFarlaneConfig(tau_cape=tau, M_b_max=10.0)
+
+    # Single-step relaxation from M_b = 0 (cold start).  M_b after one
+    # step is ``r/(1+r) * M_b_eq``; we don't know M_b_eq absolutely
+    # but the *ratio* between the dt=tau and dt=10*tau cases must
+    # equal ``(10/11) / (1/2) ≈ 1.82``.  In the buggy form both would
+    # give 50% so the ratio would be 1.0 — well outside any reasonable
+    # tolerance.
+    cpp0 = jnp.zeros((ncol, nlev))
+    _, cpp_short = zhang_mcfarlane_convection(
+        T, q, pf, ph, u, v, cpp0, dt=tau, config=config,
+    )
+    _, cpp_long = zhang_mcfarlane_convection(
+        T, q, pf, ph, u, v, cpp0, dt=10.0 * tau, config=config,
+    )
+    M_b_short = float(cpp_short[0, -1])
+    M_b_long = float(cpp_long[0, -1])
+
+    # Both must be positive (equilibrium M_b > 0 on this CAPE-positive sounding)
+    assert M_b_short > 1e-12 and M_b_long > 1e-12, (
+        f"Test fixture broken — M_b_short={M_b_short:.3e}, "
+        f"M_b_long={M_b_long:.3e}; equilibrium M_b is zero."
+    )
+    # Long step must equilibrate further than short step
+    assert M_b_long > M_b_short, (
+        f"dt=10·tau step should equilibrate further than dt=tau step, "
+        f"but M_b_long={M_b_long:.3e} <= M_b_short={M_b_short:.3e}.  "
+        "Likely the dt/max(tau,dt) clamp has been re-introduced — "
+        "audit Codex finding 'documented implicit-Euler factor is "
+        "not what is implemented'."
+    )
+    # Quantitative check: ratio should be close to (10/11) / (1/2) = 1.818
+    # (not 1.0 as the buggy form would give).
+    ratio = M_b_long / M_b_short
+    assert ratio > 1.5, (
+        f"Expected dt=10·tau / dt=tau equilibration ratio ≈ 1.82 "
+        f"(=(10/11)/(1/2)), got {ratio:.3f}.  Buggy form clamps both "
+        "to 50% giving ratio = 1.0; values < 1.5 indicate the clamp "
+        "has been re-introduced."
+    )
+
+
 # ---------------------------------------------------------------------------
 # CAPE reduction
 # ---------------------------------------------------------------------------
@@ -302,6 +364,59 @@ def test_zm_cmt_zero_in_no_shear_column():
 # ---------------------------------------------------------------------------
 # Stable column: tendencies near zero
 # ---------------------------------------------------------------------------
+
+def test_zm_M_b_matches_dimensional_formula():
+    """``M_b`` magnitude must equal the dimensionally-correct formula
+    ``rho_BL * (CAPE - threshold)+ / (g * tau)`` (kg/m^2/s).
+
+    Pre-fix the closure used ``(CAPE - threshold)+ / tau`` (units
+    m^2/s^3 — wrong by a factor of ``rho_BL / g``).  At sea level
+    (``rho_BL/g ≈ 0.122 s/m``) the pre-fix value is ~8.2× larger than
+    the dimensionally-correct one — the magnitude was masked
+    operationally only because ``M_b_max`` capped runaway values.
+
+    Test setup uses a long ``tau_cape`` and a relaxed ``M_b_max`` so
+    the equilibrium ``M_b`` is well below the cap and we are testing
+    the *formula*, not the cap.
+    """
+    T, q, pf, ph, u, v = _synthetic_column(
+        T_sfc=300.0, q_sfc=16e-3, lapse_rate=7.0,
+    )
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    tau_cape = 1800.0
+    # Use small tau so equilibrium is reached quickly; use M_b_max=10 so
+    # the (post-fix) cap doesn't engage; ITERATE long enough for M_b to
+    # saturate at its (smooth-trigger-modulated) equilibrium.
+    config = ZhangMcFarlaneConfig(tau_cape=tau_cape, M_b_max=10.0)
+    for _ in range(200):
+        out, cpp = zhang_mcfarlane_convection(
+            T, q, pf, ph, u, v, cpp, dt=300.0, config=config,
+        )
+    M_b_actual = cpp[:, -1]
+    cape_excess_pos = jnp.clip(out.cape - config.cape_threshold, 0.0, None)
+    rho_BL = pf[:, -1] / (constants.R_d * T[:, -1])
+    # Post-fix dimensional formula:
+    M_b_post_fix = rho_BL * cape_excess_pos / (constants.g * tau_cape)
+    # Pre-fix wrong formula:
+    M_b_pre_fix = cape_excess_pos / tau_cape
+    # Both formulas include the smooth ``cape_trigger`` sigmoid as a
+    # multiplicative factor; with CAPE >> threshold this is ~1 and we
+    # can compare the bare formulas.  Test which formula M_b_actual
+    # matches.
+    err_post = float(jnp.max(jnp.abs(M_b_actual - M_b_post_fix) / jnp.maximum(M_b_post_fix, 1e-30)))
+    err_pre = float(jnp.max(jnp.abs(M_b_actual - M_b_pre_fix) / jnp.maximum(M_b_pre_fix, 1e-30)))
+    # Post-fix code: M_b matches the dimensional formula.
+    # Pre-fix code: M_b matches the WRONG formula and is ~8x larger.
+    assert err_post < err_pre, (
+        f"M_b matches WRONG formula: |M_b - M_b_pre| = {err_pre:.3f} "
+        f"(should be the larger error), |M_b - M_b_post| = {err_post:.3f}. "
+        "Closure must be rho_BL * cape_excess / (g * tau)."
+    )
+    assert err_post < 0.2, (
+        f"M_b vs dimensional formula: rel_err = {err_post:.3f} > 0.2"
+    )
+
 
 def test_zm_stable_column_tendencies_small():
     """A statically stable, dry column should produce near-zero

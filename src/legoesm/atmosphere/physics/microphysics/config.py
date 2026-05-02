@@ -45,7 +45,8 @@ class SeifertBehengConfig(NamedTuple):
     """Configuration for Seifert-Beheng two-moment warm rain."""
     k_au: float = 6e2                # Autoconversion rate [1/(kg*s)]
     x_star: float = 2.6e-10          # Separation mass [kg]
-    Nc_0: float = 1e8                # Initial cloud droplet number [1/kg]
+    # ``N_c`` per-volume: see ``_warm_rain.effective_Nc`` Notes.
+    Nc_0: float = 1e8                # Initial cloud droplet number [1/m³]
     k_ac: float = 5.25               # Accretion rate [m^3/(kg*s)]
     k_sc: float = 1e-3               # Self-collection rate [m^3/(kg*s)]
     D_eq: float = 1.1e-3             # Equilibrium breakup diameter [m]
@@ -71,7 +72,9 @@ class MorrisonConfig(NamedTuple):
     evap_coeff: float = 1.0
     saturation_sharpness: float = 100.0
     # Ice nucleation (Cooper 1986)
-    N_i0: float = 5e3               # Base ice crystal number [1/m^3]
+    # Cooper (1986) per-volume base number; nucleation divides by rho
+    # to produce the per-mass ``N_i`` stored in HydrometeorState.
+    N_i0: float = 5e3               # Cooper base ice crystal number [1/m³]
     cooper_a: float = 0.304          # Cooper exponent
     cooper_T_act: float = 265.0      # Activation temperature [K]
     ice_sigmoid_sharpness: float = 5.0  # Sharpness for ice-liquid partition

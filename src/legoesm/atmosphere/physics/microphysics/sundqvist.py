@@ -146,10 +146,38 @@ def sundqvist_microphysics(
     net_cond = rates.condensation - rates.evaporation
     dT_dt = constants.L_v * net_cond / constants.c_pd
 
-    # Tendencies
+    # Tendencies.  Sundqvist is a *diagnostic* large-scale precipitation
+    # scheme: rain produced by autoconversion is treated as falling
+    # instantly through the column (the bottom-up scan in
+    # ``diagnose_sundqvist_process_rates`` accumulates the layer
+    # autoconversion source into a downward mass flux ``P_total`` and
+    # subtracts sub-cloud evaporation, so ``rates.precipitation`` is the
+    # surface flux).  Adding ``autoconversion - evaporation`` to ``dq_r_dt``
+    # would also accumulate that mass as a ``q_r`` tracer, double-counting
+    # it: the column would lose water to surface precipitation AND grow
+    # ``q_r`` per step.
+    #
+    # Diagnostic-rain semantics (full): the scheme should *own* the q_r
+    # tracer, not just leave it untouched.  Any q_r passed in (from a
+    # prior step under a prognostic scheme like Kessler, or from a
+    # warm-start) is treated as already-falling rain and drained to the
+    # surface in one step.  The drained mass is added to the surface
+    # precipitation flux so the column water budget closes:
+    #     int (dq_v + dq_c + dq_r) dp/g  =  -precipitation
+    # In a steady state with q_r = 0 input, ``dq_r_dt = 0`` and the
+    # column budget reduces to ``int (dq_v + dq_c) dp/g = -precipitation``.
     dq_v_dt = -rates.condensation + rates.evaporation
     dq_c_dt = rates.condensation - rates.autoconversion
-    dq_r_dt = rates.autoconversion - rates.evaporation
+    dt_safe = jnp.maximum(dt, 1e-10)
+    q_r_in = jnp.clip(hydrometeors.q_r, 0.0, None)
+    dq_r_dt = -q_r_in / dt_safe
+    # Drained mass [kg/m^2/s] is added to the surface precipitation
+    # diagnostic so total column water exits the column at the correct
+    # rate.  ``rates.precipitation`` is the autoconversion-driven surface
+    # flux; ``q_r_drain_flux`` is the column-integrated drain.
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    q_r_drain_flux = jnp.sum(q_r_in * dp, axis=1) / (constants.g * dt_safe)
+    precipitation = rates.precipitation + q_r_drain_flux
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-tendency placeholders to f64 under x64 mode.
@@ -165,5 +193,5 @@ def sundqvist_microphysics(
         dN_c_dt=z,
         dN_r_dt=z,
         dN_i_dt=z,
-        precipitation=rates.precipitation,
+        precipitation=precipitation,
     )

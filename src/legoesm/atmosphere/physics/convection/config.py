@@ -419,6 +419,13 @@ class TiedtkeConfig(NamedTuple):
     enable_downdraft: bool = True
     downdraft_alpha: float = 0.3
     downdraft_RH_min: float = 0.2
+    # Fraction of the downdraft mass flux that re-evaporates as rain
+    # falling through the subcloud layer (default 0.05 — matches a
+    # historical hardcoded literal that was previously dimensionally
+    # wrong; the current implementation distributes the resulting
+    # evaporation rate over below-LCL layers by mass weight, with a
+    # matching dq_v source so the column water budget closes).
+    downdraft_evap_efficiency: float = 0.05
     moisture_convergence_threshold: float = 1.0e-8
     moisture_convergence_sharpness: float = 1.0e8
     cape_threshold: float = 70.0
@@ -434,7 +441,12 @@ class TiedtkeConfig(NamedTuple):
     tau_M_u_relax: float = 1800.0
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
-    tau_MC_proxy: float = 3600.0   # for saturation-deficit MC proxy
+    tau_MC_proxy: float = 3600.0   # for saturation-excess MC proxy
+    # Critical column-mean RH above which the MC proxy starts firing.
+    # The proxy approximates moisture convergence as the column-integrated
+    # vapor in excess of ``RH_crit * q_sat``: positive in moist columns,
+    # vanishing in dry ones.
+    mc_proxy_RH_crit: float = 0.6
     tau_shallow_M_b: float = 3600.0  # Shallow-cloud-base mass-flux timescale [s]
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
     midlevel_M_b_fraction: float = 0.5  # M_b_midlevel = M_b_shallow * this
@@ -510,6 +522,8 @@ class BechtoldConfig(NamedTuple):
     enable_downdraft: bool = True
     downdraft_alpha: float = 0.3
     downdraft_RH_min: float = 0.2
+    # See TiedtkeConfig.downdraft_evap_efficiency for definition.
+    downdraft_evap_efficiency: float = 0.05
     enable_cmt: bool = True
     cmt_c_u: float = 0.7
     cmt_c_d: float = 0.7
@@ -535,6 +549,10 @@ class BechtoldConfig(NamedTuple):
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # Strong-convergence normaliser used to make the moisture-convergence
+    # enhancement an O(1) multiplier of M_b (Bechtold 2008 Fig. 2 — typical
+    # tropical strong-convergence is ≈ 0.05 kg/m²/s).
+    mc_normalize_scale: float = 0.05
 
 
 class EDMFConfig(NamedTuple):

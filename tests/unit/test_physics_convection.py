@@ -427,3 +427,435 @@ def test_all_outputs_finite(scheme):
         f"{scheme}: dq_c_conv_dt has NaN/Inf"
     )
     assert jnp.all(jnp.isfinite(out.cape)), f"{scheme}: cape has NaN/Inf"
+
+
+# ============================================================================
+# 3b extended -- closed energy budget across all conservative schemes
+# ============================================================================
+#
+# Each scheme's "natural" energy invariant differs by design under Option C:
+#
+#   * SBM enforces a Newton enthalpy correction so c_pd*int(dT) + Lv*int(dq_v)
+#     ~ 0 (standard MSE).  Cloud water is rescaled to match column-net drying,
+#     so the EXTENDED invariant c_pd*int(dT) + Lv*int(dq_v + dq_c) is NOT zero
+#     for SBM -- it equals Lv * cloud-water creation, the latent heat that
+#     microphysics will release downstream.
+#
+#   * DCA preserves layer-mean T per pair (no in-scheme latent heating) and
+#     removes excess vapor as cloud water.  The natural invariant is the
+#     EXTENDED MSE c_pd*int(dT) + Lv*int(dq_v + dq_c) ~ 0; the standard MSE
+#     is large negative because the latent heat from condensation is left
+#     for microphysics to release rather than released in convection's T_dt.
+#
+#   * Kuo is non-conservative by design (alpha_heat fraction sourced
+#     externally) -- excluded from both forms.
+#
+#   * mass_flux / edmf use detrainment + compensating subsidence.  Column
+#     budgets do NOT close to <10 W/m^2 at finite resolution because the
+#     detrained plume thermodynamics carry energy at the boundaries; the
+#     residual is bounded by the integrated detrainment rate, not zero.
+#     The standard-MSE residual happens to be small for mass_flux because
+#     M_c starts at 0 and grows slowly (~50 W/m^2 within one step); for
+#     EDMF with a_u=0.1 already active, the residual is order 1500 W/m^2.
+
+def test_dca_extended_mse_conservation():
+    """DCA: c_pd*int(dT) + L_v*int(dq_v + dq_c) ~ 0.
+
+    DCA preserves layer-mean T per pair (col_dT ~ 0) and conserves total
+    water (col_dqv = -col_dqc in net-drying columns).  The extended MSE
+    test passes by both effects independently.  The standard MSE
+    (c_pd*dT + L_v*dq_v) is intentionally NOT zero for DCA -- see the
+    block comment above.
+    """
+    T, q_v, p_full, p_half = _make_unstable_column()
+    out = _call_scheme("dca", T, q_v, p_full, p_half)
+
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    ext = (
+        constants.c_pd * out.dT_dt
+        + constants.L_v * (out.dq_v_dt + out.dq_c_conv_dt)
+    )
+    col = jnp.sum(ext * dp / constants.g, axis=1)
+    max_imbalance = float(jnp.max(jnp.abs(col)))
+    assert max_imbalance < 10.0, (
+        f"DCA extended-MSE imbalance = {max_imbalance:.3e} W/m^2 > 10"
+    )
+
+
+def test_mass_flux_standard_mse_small():
+    """Mass-flux: c_pd*int(dT) + L_v*int(dq_v) is small (~kernel residual).
+
+    The plume releases latent heat in T_u during ascent and emits the
+    diluted condensate as dq_c_conv_dt at detrainment.  Column-integrated
+    standard MSE residual is bounded by the boundary detrainment flux;
+    with M_c ~ M_eq * dt/tau_adj ~ 8e-4 kg/m^2/s after one step, a few
+    tens of W/m^2 is the realistic scale.  The bound here (<100 W/m^2)
+    catches breakage to hundreds of W/m^2 from kernel sign flips
+    without being so tight it tracks small numerics changes.
+    """
+    T, q_v, p_full, p_half = _make_unstable_column()
+    out = _call_scheme("mass_flux", T, q_v, p_full, p_half)
+
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    mse = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
+    col = jnp.sum(mse * dp / constants.g, axis=1)
+    max_imbalance = float(jnp.max(jnp.abs(col)))
+    assert max_imbalance < 100.0, (
+        f"mass_flux standard-MSE imbalance = {max_imbalance:.2f} W/m^2 > 100"
+    )
+
+
+# ============================================================================
+# 3c extended -- CAPE response of mass-flux schemes
+# ============================================================================
+
+def test_mass_flux_cape_does_not_increase():
+    """Mass-flux applied to a CAPE-positive column should not INCREASE CAPE.
+
+    Strict reduction requires sustained mass flux; after one step from
+    M_c=0 the change is small but should be in the right direction
+    (non-increase).  Tolerance allows for sub-J/kg numerical wiggle.
+    """
+    T, q_v, p_full, p_half = _make_unstable_column()
+    ncol = T.shape[0]
+    out, _ = mass_flux_convection(
+        T, q_v, p_full, p_half, jnp.zeros(ncol), 300.0, MassFluxConfig(),
+    )
+
+    T_moist_before = compute_moist_adiabat(T[:, -1], p_full)
+    cape_before = compute_cape(T, T_moist_before, p_full, p_half)
+
+    T_after = T + out.dT_dt * 300.0
+    T_moist_after = compute_moist_adiabat(T_after[:, -1], p_full)
+    cape_after = compute_cape(T_after, T_moist_after, p_full, p_half)
+
+    delta = float(jnp.mean(cape_after) - jnp.mean(cape_before))
+    assert delta <= 1.0, (
+        f"mass_flux: CAPE increased by {delta:.2f} J/kg in one step"
+    )
+
+
+# ============================================================================
+# 3d extended -- stable profile gating for DCA and Kuo
+# ============================================================================
+
+@pytest.mark.parametrize("scheme", ["dca", "kuo"])
+def test_stable_profile_dca_kuo(scheme):
+    """Stable / dry columns produce small tendencies via smooth triggers.
+
+    DCA: cape_gate sigmoid at CAPE=0 with default sharpness 0.1 is
+    sigmoid(-10) ~ 5e-5 -- tendencies bounded by that factor times
+    the saturation-adjustment magnitude.  Kuo: trigger sigmoid on
+    column moisture excess (zero in undersaturated profile) -> gates off.
+    """
+    T, q_v, p_full, p_half = _make_stable_column()
+    out = _call_scheme(scheme, T, q_v, p_full, p_half)
+    max_dT = float(jnp.max(jnp.abs(out.dT_dt)))
+    max_dq_c = float(jnp.max(out.dq_c_conv_dt))
+    # 1e-2 K/s = 36 K/hr is a generous bound; the smooth triggers should
+    # be well below this in stable profiles.
+    assert max_dT < 1e-2, f"{scheme}: dT_dt = {max_dT:.2e} in stable column"
+    assert max_dq_c < 1e-7, (
+        f"{scheme}: dq_c_conv_dt = {max_dq_c:.2e} kg/kg/s in stable column"
+    )
+
+
+# ============================================================================
+# 3e extended -- precipitation non-negative across multiple random profiles
+# ============================================================================
+
+@pytest.mark.parametrize("scheme", ["sbm", "dca", "kuo", "mass_flux", "edmf"])
+def test_precipitation_non_negative_random_profiles(scheme):
+    """dq_c_conv_dt >= 0 at every level for a spread of random profiles.
+
+    Generates 8 randomized column profiles by perturbing the unstable
+    template with multiplicative T noise and additive RH noise.
+    Captures sign-flip bugs that a single profile may miss.
+    """
+    key = jax.random.PRNGKey(0xC0DE)
+    T0, q0, p_full, p_half = _make_unstable_column(nlev=20, ncol=8)
+
+    # T jitter: +/- 5 K independent per (col, level)
+    key_T, key_q = jax.random.split(key)
+    T = T0 + 5.0 * jax.random.normal(key_T, T0.shape)
+    T = jnp.clip(T, 180.0, 320.0)
+
+    # RH jitter: q scaled by uniform 0.4..1.1
+    rh_factor = 0.4 + 0.7 * jax.random.uniform(key_q, q0.shape)
+    q_v = jnp.clip(q0 * rh_factor, 1e-10, None)
+
+    out = _call_scheme(scheme, T, q_v, p_full, p_half)
+    min_dq_c = float(jnp.min(out.dq_c_conv_dt))
+    # Allow eps for floating-point round-off in the rescale division.
+    assert min_dq_c >= -1e-12, (
+        f"{scheme}: random-profile min dq_c_conv_dt = {min_dq_c:.2e}"
+    )
+
+
+# ============================================================================
+# 3f extended -- tendency signs for unstable profiles, all schemes
+# ============================================================================
+
+@pytest.mark.parametrize("scheme", ["dca", "mass_flux", "edmf"])
+def test_drying_in_unstable_column(scheme):
+    """Convection in an unstable column should dry SOMEWHERE in the column.
+
+    Targets the lower-troposphere drying signature in the agent spec
+    without locking to a specific level (different schemes peak their
+    drying at different heights: SBM/DCA in the BL, mass-flux/EDMF
+    higher up via compensating subsidence).
+    """
+    T, q_v, p_full, p_half = _make_unstable_column()
+    out = _call_scheme(scheme, T, q_v, p_full, p_half)
+    min_dqv = float(jnp.min(out.dq_v_dt))
+    assert min_dqv < -1e-10, (
+        f"{scheme}: no drying detected, min dq_v_dt = {min_dqv:.2e}"
+    )
+
+
+@pytest.mark.parametrize("scheme", ["sbm", "dca", "mass_flux", "edmf"])
+def test_upper_trop_warming_in_unstable_column(scheme):
+    """Convection in an unstable column should warm SOMEWHERE in the column.
+
+    Latent heat release (SBM/Kuo) or detrained plume warmth (mass-flux/EDMF)
+    should produce dT_dt > 0 in at least the upper-troposphere section.
+    """
+    T, q_v, p_full, p_half = _make_unstable_column()
+    out = _call_scheme(scheme, T, q_v, p_full, p_half)
+    nlev = T.shape[1]
+    upper = out.dT_dt[:, : nlev // 2]   # top half (low pressure)
+    max_dT_upper = float(jnp.max(upper))
+    assert max_dT_upper > 1e-8, (
+        f"{scheme}: no upper-trop warming, max dT_dt[upper] = {max_dT_upper:.2e}"
+    )
+
+
+# ============================================================================
+# 3g extended -- M_c responds to CAPE
+# ============================================================================
+
+def test_mass_flux_M_c_grows_under_high_cape():
+    """M_c should grow toward the CAPE-driven equilibrium.
+
+    With M_c starting at 0 and a CAPE-positive column, the implicit
+    relaxation gives M_c_new = dt * M_eq / tau_adj > 0.  With a
+    CAPE-zero column, M_c_new should be near zero (sigmoid gate
+    suppresses M_eq).  This pins the qualitative response to CAPE.
+    """
+    T_hi, q_hi, p_full, p_half = _make_unstable_column()
+    T_lo, q_lo, _, _ = _make_stable_column()
+    ncol = T_hi.shape[0]
+    M_c0 = jnp.zeros(ncol)
+
+    _, M_hi = mass_flux_convection(
+        T_hi, q_hi, p_full, p_half, M_c0, 300.0, MassFluxConfig(),
+    )
+    _, M_lo = mass_flux_convection(
+        T_lo, q_lo, p_full, p_half, M_c0, 300.0, MassFluxConfig(),
+    )
+
+    mean_hi = float(jnp.mean(M_hi))
+    mean_lo = float(jnp.mean(M_lo))
+    # High-CAPE column should have order(1e3) more mass flux than the
+    # gated stable column.  Probe values: ~8.3e-4 vs ~7.6e-7.
+    assert mean_hi > 1e-5, (
+        f"mass_flux: high-CAPE M_c = {mean_hi:.2e} did not grow"
+    )
+    assert mean_hi > 100.0 * mean_lo, (
+        f"mass_flux: high/low CAPE ratio M_c = {mean_hi/max(mean_lo, 1e-30):.1f}, "
+        "expected >100x"
+    )
+
+
+# ============================================================================
+# 3h extended -- a_u responds to CAPE, stays in [0, clip]
+# ============================================================================
+
+def test_edmf_a_u_grows_under_high_cape():
+    """EDMF a_u should grow under high CAPE and stay near zero in stable air.
+
+    The diagnosed equilibrium a_u_eq = convective_mask * a_u_init.  With
+    a_u starting at 0, the implicit relaxation grows a_u toward a_u_eq.
+    Probe values: ~1.7e-2 vs ~1.5e-5 (~1000x ratio).
+    """
+    T_hi, q_hi, p_full, p_half = _make_unstable_column()
+    T_lo, q_lo, _, _ = _make_stable_column()
+    ncol = T_hi.shape[0]
+    a_u0 = jnp.zeros(ncol)
+
+    _, a_hi = edmf_convection(
+        T_hi, q_hi, p_full, p_half, a_u0, 300.0, EDMFConfig(),
+    )
+    _, a_lo = edmf_convection(
+        T_lo, q_lo, p_full, p_half, a_u0, 300.0, EDMFConfig(),
+    )
+
+    mean_hi = float(jnp.mean(a_hi))
+    mean_lo = float(jnp.mean(a_lo))
+    assert mean_hi > 1e-4, f"EDMF: high-CAPE a_u = {mean_hi:.2e} did not grow"
+    assert mean_hi > 100.0 * mean_lo, (
+        f"EDMF: high/low CAPE ratio a_u = {mean_hi/max(mean_lo, 1e-30):.1f}, "
+        "expected >100x"
+    )
+    # The leaf clips a_u_new to [0, 0.5].  In CAPE-positive conditions,
+    # a_u should still be well below the clip bound.
+    max_a = float(jnp.max(a_hi))
+    assert 0.0 <= max_a <= 0.5, (
+        f"EDMF: a_u out of [0, 0.5] bound: max={max_a:.4e}"
+    )
+
+
+# ============================================================================
+# mass_flux / edmf cloud-water source must vanish in dry columns
+# ============================================================================
+
+@pytest.mark.parametrize("scheme", ["mass_flux", "edmf"])
+def test_no_cloud_water_in_dry_column(scheme):
+    """Plume cloud water must follow actual q_v, not assume saturated parcel.
+
+    A 5% RH column with a hot surface produces a (formally) large CAPE
+    because compute_moist_adiabat assumes a saturated launched parcel,
+    but the *actual* parcel water content is q_v_sfc, not q_sat_sfc.
+    Pre-fix the plume kernel built ``q_c_u = dilution * (q_sat_sfc -
+    q_sat_moist)`` — independent of the column's actual q_v — producing
+    cloud water and surface precipitation in genuinely dry columns
+    (~2 mm/day in this test setup for EDMF).  Post-fix the plume's
+    initial water reservoir is q_v_sfc and condensation only occurs
+    where ``q_sat_moist`` falls below ``q_v_sfc`` (i.e. above the LCL
+    of the actual unsaturated parcel).
+    """
+    ncol, nlev = 1, 20
+    p_s = 1.0e5
+    sigma_full = jnp.linspace(0.025, 0.975, nlev)
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    p_full = jnp.broadcast_to((sigma_full * p_s)[None, :], (ncol, nlev))
+    p_half = jnp.broadcast_to((sigma_half * p_s)[None, :], (ncol, nlev + 1))
+    T = 320.0 * jnp.clip(sigma_full, 0.01, None) ** 0.19
+    T = jnp.maximum(T, 200.0)
+    T = jnp.broadcast_to(T[None, :], (ncol, nlev))
+    q_sat = saturation_mixing_ratio(T, p_full)
+    q_v = 0.05 * q_sat   # 5% RH everywhere
+
+    if scheme == "mass_flux":
+        out, _ = mass_flux_convection(
+            T, q_v, p_full, p_half, jnp.zeros(ncol), 300.0, MassFluxConfig(),
+        )
+    else:
+        out, _ = edmf_convection(
+            T, q_v, p_full, p_half, 0.1 * jnp.ones(ncol), 300.0, EDMFConfig(),
+        )
+
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    surface_precip = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1)[0])
+    # Convert to mm/day for readability: kg/m^2/s * 86400 = mm/day
+    precip_mm_day = surface_precip * 86400.0
+    # Allow some bleed (sigmoid soft transition near LCL) but block
+    # the order-of-magnitude bug.  Pre-fix EDMF is ~2 mm/day;
+    # post-fix should be < 0.1 mm/day.
+    assert precip_mm_day < 0.1, (
+        f"{scheme}: dry-column (5% RH) surface precip = {precip_mm_day:.4f} mm/day; "
+        f"expected < 0.1 mm/day. Plume q_c_u must depend on the actual "
+        "q_v_sfc, not q_sat at surface."
+    )
+
+
+def test_kuo_column_moistening_budget_matches_design():
+    """Kuo's design is to inject ``(1 - alpha_heat) * MC / tau_relax`` of
+    column-integrated vapor source, distributed by the subsaturation
+    deficit profile.  An earlier formulation multiplied by an extra
+    ``g/dp`` factor and emitted ~500× too little column moistening
+    (audit Codex finding: "Kuo moistening-budget distribution has an
+    extra g/dp").
+
+    Critical sanity-check for this test: Kuo computes MC as
+    ``∫max(q_v - q_sat, 0) dp/g`` — i.e. it fires only on
+    supersaturated columns.  An earlier version of this test used
+    ``q_v = 0.7 * q_sat`` (subsaturated) which gave ``MC = 0``,
+    ``budget = 0``, and ``col_external = 0`` so the assertion
+    ``max_rel < 1e-6`` passed trivially regardless of the bug
+    (Codex stop-time review: "Kuo regression test does not exercise
+    the fixed path").  The fixed version below seeds part of the
+    column with ``q_v > q_sat`` so the trigger fires and the test
+    actually exercises the per-level distribution.
+
+    The test asserts:
+      1. Trigger actually fires (``budget > 0``) — guards against
+         the silent-zero failure mode.
+      2. Column-integrated EXTERNAL moistening ``∫(dq_v_dt + implied_
+         condensation) dp/g`` matches design budget to round-off.  An
+         extra ``g/dp`` factor in the per-level distribution would
+         give a column ratio of ``∫(deficit/D × g/dp) × dp/g = (1/D)
+         × Σ deficit`` instead of ``∫(deficit/D) × dp/g = 1`` — for
+         nlev=20 the ratio collapses to ~1/nlev ≈ 5%.
+    """
+    from legoesm import constants
+    from legoesm.atmosphere.physics.convection.kuo import kuo_convection
+    from legoesm.atmosphere.physics.convection.config import KuoConfig
+    from legoesm.thermo import saturation_mixing_ratio
+
+    ncol, nlev = 4, 20
+    p_s = 1.0e5
+    sigma_h = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_f = 0.5 * (sigma_h[:-1] + sigma_h[1:])
+    p_full = jnp.broadcast_to((sigma_f * p_s)[None, :], (ncol, nlev))
+    p_half = jnp.broadcast_to((sigma_h * p_s)[None, :], (ncol, nlev + 1))
+    T_sfc = 300.0
+    T_top = 220.0
+    T_profile = T_sfc + (T_top - T_sfc) * (1.0 - sigma_f)
+    T = jnp.broadcast_to(T_profile[None, :], (ncol, nlev))
+    q_sat = saturation_mixing_ratio(T, p_full)
+    # SUPERSATURATED in the lower troposphere so MC > 0 and the trigger
+    # actually fires.  Use a 1.05x supersat in the bottom 8 levels and
+    # subsaturated elsewhere to make the deficit profile non-trivial.
+    q_v = 0.6 * q_sat
+    q_v = q_v.at[:, -8:].set(1.05 * q_sat[:, -8:])
+
+    config = KuoConfig()
+    out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    # Replicate the kernel's MC computation: ∫max(q_v - q_sat, 0) dp/g.
+    excess = jnp.maximum(q_v - q_sat, 0.0)
+    MC = jnp.sum(excess * dp, axis=1) / constants.g
+    smooth_trigger = jax.nn.sigmoid(
+        config.smooth_trigger_sharpness * (MC - config.me_threshold)
+    )
+    expected_budget = (
+        smooth_trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax
+    )
+
+    # (1) Trigger sanity-check: assert the fixture actually fires.  This
+    # guards against a silent-zero failure mode where both sides of the
+    # column-integral comparison are zero (which would pass any
+    # ``rel_err < 1e-6`` check trivially).
+    assert float(jnp.min(MC)) > 0.0, (
+        f"Test fixture is broken — Kuo MC = {float(jnp.min(MC)):.3e} kg/m² "
+        "is not strictly positive, the trigger does not fire, and the "
+        "budget invariant degenerates to 0 == 0 (passes regardless of bug)."
+    )
+    assert float(jnp.min(expected_budget)) > 1e-15, (
+        f"Test fixture is broken — Kuo budget "
+        f"{float(jnp.min(expected_budget)):.3e} ≈ 0; supersaturate the "
+        "fixture more or lower me_threshold."
+    )
+
+    # (2) Reconstructed column external moistening from leaf output:
+    # dq_v_dt = external_moistening - implied_condensation, so the
+    # external moistening column integral is ∫(dq_v + implied) dp/g
+    # where implied = dT_dt·c_pd/L_v.
+    implied_condensation = out.dT_dt * constants.c_pd / constants.L_v
+    col_external = jnp.sum(
+        (out.dq_v_dt + implied_condensation) * dp, axis=1,
+    ) / constants.g
+
+    rel_err = jnp.abs(col_external - expected_budget) / jnp.maximum(
+        jnp.abs(expected_budget), 1e-15,
+    )
+    max_rel = float(jnp.max(rel_err))
+    assert max_rel < 1e-6, (
+        f"Kuo column external moistening = {[float(x) for x in col_external]} kg/m²/s; "
+        f"expected = {[float(x) for x in expected_budget]} kg/m²/s; "
+        f"max rel err = {max_rel:.3e} — should be ~0 to round-off.  "
+        "An extra g/dp factor in the per-level distribution would here "
+        "give a ratio of ~1/nlev (audit Codex)."
+    )

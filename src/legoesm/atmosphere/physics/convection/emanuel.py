@@ -120,12 +120,17 @@ def emanuel_convection(
     k_lcl_smooth = lcl.k_lcl_smooth
 
     # -- Cloud-base mass flux closure (CAPE-relaxation, Emanuel style) ----
-    # Emanuel 1991 uses a sub-cloud-layer relaxation.  We approximate
-    # it as a CAPE-driven mass flux with the configured timescale.
+    # Emanuel 1991 uses a sub-cloud-layer relaxation.  Dimensionally-
+    # correct CAPE-relaxation closure (Kain 2004 §3 form):
+    #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
+    # The earlier formula ``(CAPE - threshold)+ / tau`` had units
+    # ``m^2/s^3``; magnitude masked operationally only by ``M_b_max``.
+    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
     M_b_eq = (
         cape_weight
+        * rho_BL
         * smooth_positive_part(cape - config.cape_threshold, config.cape_sharpness)
-        / config.sub_cloud_relaxation
+        / (constants.g * config.sub_cloud_relaxation)
     )
     # See ZhangMcFarlaneConfig.M_b_max.
     M_b = jnp.clip(M_b_eq, 0.0, config.M_b_max)
@@ -177,16 +182,25 @@ def emanuel_convection(
     # -- Environment tendencies via the shared mass-flux kernel ------------
     # Plume splits vapor (``plume.q_u``) and cloud water (``plume.q_c_u``)
     # explicitly so we use the kernel's correct cloud-water source.
-    dT_dt_raw, dq_v_dt_raw, dq_c_conv_dt_raw = _apply_mass_flux_kernel(
+    # ``sort_multiplier`` is Emanuel's per-level detrainment enhancement
+    # from the buoyancy-sorted ensemble.  Pass it through ``delta_0`` so
+    # only the detrainment terms in the kernel are scaled — multiplying
+    # the full kernel output by ``sort_multiplier`` also rescaled the
+    # delta-independent subsidence terms (compensating-subsidence drying
+    # / warming and the adiabatic ``g/c_p`` correction), which is wrong.
+    dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
-        z, rho, config.delta_0, M_u_max=config.M_b_max,
+        z, rho, config.delta_0 * sort_multiplier, M_u_max=config.M_b_max,
     )
-
-    # Emanuel's per-level detrainment enhancement:
-    dT_dt = dT_dt_raw * sort_multiplier
-    dq_v_dt = dq_v_dt_raw * sort_multiplier
-    dq_c_conv_dt = dq_c_conv_dt_raw * sort_multiplier
+    # Un-enhanced cloud-water source — used by the downdraft bookkeeping
+    # below.  ``dq_c_conv_dt`` from the kernel is already enhanced by
+    # ``sort_multiplier`` (since we passed ``delta_0 * sort_multiplier``);
+    # dividing by ``sort_multiplier`` reconstructs the pre-enhancement
+    # value so the downdraft column-budget bookkeeping matches the
+    # original implementation's intent (downdraft uses the basic
+    # condensate, not the buoyancy-sort-enhanced version).
+    dq_c_conv_dt_raw = dq_c_conv_dt / jnp.maximum(sort_multiplier, 1e-30)
 
     # -- Optional unsaturated-downdraft cooling ---------------------------
     # Implemented as a static Python branch (closure-time decision) so

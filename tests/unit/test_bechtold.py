@@ -139,6 +139,67 @@ def test_bechtold_cmt_disabled():
     assert out.dv_dt_conv is None
 
 
+def test_bechtold_downdraft_evap_conserves_water_locally():
+    """Bechtold inherits the same downdraft fix as Tiedtke.
+
+    Three invariants (see ``tests/unit/test_tiedtke.py::
+    test_tiedtke_downdraft_evap_conserves_water_locally`` for the
+    detailed audit / Codex rationale):
+      1. Local energy-water balance per level: ``Δ(dT_dt)·c_pd +
+         Δ(dq_v_dt)·L_v == 0``.
+      2. Column water conservation: column-integrated
+         ``Δ(dq_v_dt) + Δ(dq_c_conv_dt) == 0`` (vapor source matched
+         by reduction in convective rain source).
+      3. Cooling is actually exercised.
+    """
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out_off, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=300.0,
+        config=BechtoldConfig(enable_downdraft=False, enable_stochastic=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    out_on, _, _ = bechtold_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
+        conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
+        dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True, enable_stochastic=False),
+        moisture_convergence=jnp.zeros_like(T),
+    )
+    dT_diff = out_on.dT_dt - out_off.dT_dt
+    dqv_diff = out_on.dq_v_dt - out_off.dq_v_dt
+    dqc_diff = out_on.dq_c_conv_dt - out_off.dq_c_conv_dt
+
+    assert float(jnp.min(dT_diff)) < 0.0, (
+        "Bechtold downdraft did not produce cooling — formulation regressed."
+    )
+
+    # (1) Local energy-water balance
+    H = dT_diff * constants.c_pd
+    Q = dqv_diff * constants.L_v
+    res_local = float(jnp.max(jnp.abs(H + Q)))
+    scale_local = float(jnp.max(jnp.abs(H)))
+    assert res_local < 1e-8 * max(scale_local, 1.0), (
+        f"Bechtold downdraft local energy-water budget unclosed: max|H+Q|="
+        f"{res_local:.3e}, max|H|={scale_local:.3e}"
+    )
+
+    # (2) Column water conservation
+    dp = ph[:, 1:] - ph[:, :-1]
+    col_dqv = jnp.sum(dqv_diff * dp, axis=-1) / constants.g
+    col_dqc = jnp.sum(dqc_diff * dp, axis=-1) / constants.g
+    col_residual = float(jnp.max(jnp.abs(col_dqv + col_dqc)))
+    col_scale = float(jnp.max(jnp.abs(col_dqv)) + 1e-15)
+    assert col_residual < 1e-10 * max(col_scale, 1.0), (
+        f"Bechtold downdraft column water unclosed: max|∫dq_v + ∫dq_c|="
+        f"{col_residual:.3e} kg/m²/s, vapor source={col_scale:.3e}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stochastic perturbation
 # ---------------------------------------------------------------------------

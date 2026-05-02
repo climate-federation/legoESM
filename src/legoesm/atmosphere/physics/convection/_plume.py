@@ -241,14 +241,34 @@ def compute_lfc_lnb(
     # primitive to ``-buoyancy`` AFTER the LFC is reached; the soft
     # gating-by-LFC weight ensures we don't pick up sub-cloud layers
     # where the parcel was negatively buoyant.
+    #
+    # Convention: ``profile`` and ``k_lfc`` are both surface-last indices
+    # (surface at index ``nlev-1``, top at index 0).  "Above LFC altitude"
+    # means *smaller* surface-last index than ``k_lfc``.  ``direction="below"``
+    # in ``smooth_level_indicator`` gives ``sigmoid(threshold - profile)``
+    # which is ~1 where ``profile < threshold`` — so the threshold IS
+    # ``k_lfc`` itself.  The earlier formula ``(nlev - 1) - k_lfc`` flipped
+    # ``k_lfc`` into surface-first space and then compared against the
+    # surface-last ``profile``, marking the wrong levels as "above LFC"
+    # and collapsing the LNB onto the LFC for many columns.
     above_lfc_weight = smooth_level_indicator(
         jnp.broadcast_to(jnp.arange(nlev, dtype=buoyancy.dtype), buoyancy.shape),
-        threshold=(nlev - 1.0) - k_lfc[:, None],  # surface-first index of LFC
+        threshold=k_lfc[:, None],
         sharpness=sharpness,
-        direction="below",  # surface-last: indices below LFC index are above LFC altitude
+        direction="below",
     )
-    masked_buoyancy = buoyancy * above_lfc_weight
-    k_lnb = smooth_lowest_crossing_index(-masked_buoyancy, 0.0, sharpness)
+    # Drive ``-buoyancy`` strongly negative below the LFC so that the
+    # smooth-crossing primitive does not register near-zero spurious
+    # crossings produced by multiplicative masking ``buoyancy * weight``
+    # (where ``-masked_buoyancy ≈ 0`` for an entire stretch of levels
+    # near the surface).  ``LARGE = 1e6 K`` is far below any physical
+    # buoyancy magnitude (which is bounded by the moist-adiabat /
+    # environmental temperature difference, ~tens of K), so a smooth
+    # blend is safe.  Above LFC altitude the offset vanishes and the
+    # crossing detector sees the genuine ``-buoyancy`` profile.
+    LARGE = jnp.asarray(1.0e6, dtype=buoyancy.dtype)
+    guarded_neg_buoyancy = -buoyancy - LARGE * (1.0 - above_lfc_weight)
+    k_lnb = smooth_lowest_crossing_index(guarded_neg_buoyancy, 0.0, sharpness)
     return k_lfc, k_lnb
 
 
@@ -304,17 +324,23 @@ def compute_cin(
     levels = jnp.arange(nlev, dtype=T_env.dtype)
     levels = jnp.broadcast_to(levels, T_env.shape)
 
-    # The integration window in surface-last index space is
-    # ``LFC_idx <= k <= LCL_idx`` because LFC is *above* LCL and
-    # surface-last indices DECREASE with altitude.  The smooth window
-    # is the product of two sigmoids.
-    window_above_lfc = jax.nn.sigmoid(
-        indicator_sharpness * (k_lfc_smooth[:, None] + 0.5 - levels)
-    )  # 1 at indices above LFC altitude (smaller index), 0 below.
-    window_below_lcl = jax.nn.sigmoid(
-        indicator_sharpness * (levels - (k_lcl_smooth[:, None] - 0.5))
-    )  # 1 at indices at LCL or below (larger index, lower altitude), 0 above.
-    window = window_above_lfc * window_below_lcl
+    # The integration window covers altitudes BETWEEN the LCL and the
+    # LFC.  In surface-last index space (surface at the LARGEST index)
+    # the LCL has a larger index than the LFC, so the CIN layer is at
+    # indices ``k_lfc < k < k_lcl``.  The smooth window is the product
+    # of two sigmoids: ``below LFC altitude`` (index larger than
+    # ``k_lfc``) AND ``above LCL altitude`` (index smaller than
+    # ``k_lcl``).  Earlier this product was the WRONG intersection
+    # (``above_LFC AND below_LCL``) which is empty for the natural
+    # ordering ``k_lnb < k_lfc < k_lcl`` — CIN was suppressed by ~93%
+    # in straightforward test columns.
+    window_below_lfc = jax.nn.sigmoid(
+        indicator_sharpness * (levels - (k_lfc_smooth[:, None] + 0.5))
+    )  # 1 at indices below LFC altitude (larger index), 0 above.
+    window_above_lcl = jax.nn.sigmoid(
+        indicator_sharpness * (k_lcl_smooth[:, None] - 0.5 - levels)
+    )  # 1 at indices above LCL altitude (smaller index), 0 below.
+    window = window_below_lfc * window_above_lcl
 
     dp = p_half[:, 1:] - p_half[:, :-1]
     inhibiting_buoyancy = jnp.maximum(0.0, T_env - T_parcel_ma)
@@ -487,17 +513,39 @@ def entraining_detraining_plume(
 
         dz = jnp.maximum(z_e - z_prev, 1.0)  # ascending; floor to avoid div-by-zero
 
-        # Raw plume mass flux: dM/dz = (epsilon - delta) * M.  We
-        # intentionally do NOT bake the buoyancy / sub-cloud masks
+        # Raw plume mass flux: dM/dz = (epsilon - delta) * M.  Use the
+        # exact integration ``M(z+dz) = M(z) * exp((eps - dlt) * dz)``
+        # for this linear ODE — always positive, AD-safe everywhere,
+        # and exact when ``(eps - dlt)`` is constant over the layer.
+        # An earlier explicit-Euler form ``M * (1 + (eps - dlt) * dz)``
+        # could go negative for strong detrainment + thick layers
+        # (e.g. ``dlt = 5e-3 /m``, ``dz = 2000 m`` ⇒ multiplier =
+        # ``-7``); the subsequent ``jnp.maximum(..., 0)`` clipped the
+        # mass flux to 0 AND *zeroed the gradient* w.r.t. ``dlt`` /
+        # ``eps``, breaking AD-based sensitivity studies through the
+        # plume integrator (audit Codex finding: "plume mass flux uses
+        # explicit Euler plus a hard nonnegative clip ... after
+        # which jnp.maximum kills both mass flux and gradients").
+        # We intentionally do NOT bake the buoyancy / sub-cloud masks
         # into the carry — those are reporting filters, not dynamics.
         # Folding them into the carry would compound across levels and
         # destroy the cloud-base-to-LNB profile that consumers expect.
-        M_u_raw = M_u_raw_prev * (1.0 + (eps - dlt) * dz)
-        M_u_raw = jnp.maximum(M_u_raw, 0.0)
+        M_u_raw = M_u_raw_prev * jnp.exp((eps - dlt) * dz)
 
-        # Entrainment of environmental T, q.
-        T_u_ent = T_u_prev + eps * dz * (T_e - T_u_prev)
-        q_u_ent = q_u_prev + eps * dz * (q_e - q_u_prev)
+        # Entrainment of environmental T, q via the analytic relaxation
+        # ``X(z+dz) = X_e + (X_prev - X_e) * exp(-eps · dz)`` — exact for
+        # the linear ODE ``dX/dz = -eps · (X - X_e)`` and always bounded
+        # between ``X_prev`` and ``X_e``.  An earlier explicit-Euler form
+        # ``X_prev + eps · dz · (X_e - X_prev)`` overshoots past ``X_e``
+        # for ``eps · dz > 1`` (e.g. Bechtold ``epsilon_shallow=3e-3``
+        # with a 500–1000 m layer gives ``eps·dz ∈ [1.5, 3]``) — making
+        # ``q_u_ent`` go negative and zeroing the gradient w.r.t. ``eps``.
+        # The exponential form is dimensionally identical and AD-safe
+        # everywhere (Codex stop-time review cycle 2: "plume entrainment
+        # still uses unstable explicit Euler").
+        decay_eps = jnp.exp(-eps * dz)
+        T_u_ent = T_e + (T_u_prev - T_e) * decay_eps
+        q_u_ent = q_e + (q_u_prev - q_e) * decay_eps
 
         # Use the analytic moist-adiabatic lapse rate from
         # ``moist_adiabat_lapse_rate`` (Iribarne–Godson) at the
@@ -524,7 +572,28 @@ def entraining_detraining_plume(
         q_sat_new = saturation_mixing_ratio(T_u, p_e).astype(_dtype)
         condensate = jnp.maximum(q_u_ent - q_sat_new, 0.0).astype(_dtype)
         q_u = (q_u_ent - condensate).astype(_dtype)
-        q_c_u = (q_c_u_prev + condensate).astype(_dtype)
+        # Dilute plume cloud water by entrainment.  The continuity
+        # equation for an intensive quantity in an entraining-
+        # detraining plume is ``dq_c/dz = -eps · q_c + cond/M`` —
+        # environmental air carries q_c=0 so entrainment uniformly
+        # decreases ``q_c_u`` while detrainment is intensively
+        # neutral (it removes mass but not the per-kg amount).  An
+        # earlier formulation ``q_c_u = q_c_u_prev + condensate``
+        # carried ``q_c_u_prev`` forward unchanged and the plume's
+        # total water grew unphysically aloft (audit Codex finding:
+        # "plume cloud water is accumulated but not diluted by
+        # entrainment").
+        # Exponential dilution: ``q_c_u_ent = q_c_u_prev * exp(-eps·dz)``
+        # — exact analytic solution to ``dq_c/dz = -eps · q_c`` for an
+        # entraining plume with environment q_c=0.  Always non-negative,
+        # AD-safe everywhere.  An earlier explicit-Euler form
+        # ``max(q_c_u_prev * (1 - eps·dz), 0)`` zeroed the gradient
+        # whenever ``eps·dz > 1`` (corner case at Bechtold's
+        # ``epsilon_shallow=3e-3`` × dz=500 m and thicker — the clip
+        # branch dominated and made the test case ineffective for AD-
+        # tuning of ``eps`` in shallow convection).
+        q_c_u_ent = q_c_u_prev * decay_eps
+        q_c_u = (q_c_u_ent + condensate).astype(_dtype)
 
         T_u = T_u.astype(_dtype)
 
