@@ -887,8 +887,15 @@ def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
     halo._spmd_mesh = mesh
 
     # Auto-select ppermute vs all_gather based on data volume.
+    # The ppermute kernel still assumes exactly one face per shard
+    # (only the all_gather + all_gather_h2 kernels are multi-face,
+    # iter-49); force all_gather when n_devices != 6 so 2- and
+    # 3-device configs at high resolution stay correct.
     n_devices = len(mesh.devices.flat)
-    use_pp = select_exchange_backend(n, nlev, n_devices) if n > 0 else False
+    if n_devices == 6 and n > 0:
+        use_pp = select_exchange_backend(n, nlev, n_devices)
+    else:
+        use_pp = False
     _use_ppermute = use_pp
     backend_name = "ppermute" if use_pp else "all_gather"
     logger.info(
