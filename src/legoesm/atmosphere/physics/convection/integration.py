@@ -29,6 +29,8 @@ from legoesm.grids.vertical import (
     SigmaCoordinate,
     TerrainMetric,
     pressure_from_sigma,
+    compute_sigma_dot_and_total,
+    compute_pressure_velocity,
 )
 from legoesm import constants
 
@@ -278,9 +280,6 @@ def _make_hydrostatic_convection(
         # Only the cubed-sphere and lat-lon grids ship with a divergence
         # operator we can call here; other grids fall back to zeros.
         if is_w_grid_consumer:
-            from legoesm.grids.vertical import (
-                compute_sigma_dot_and_total, compute_pressure_velocity,
-            )
             from legoesm.atmosphere.physics._shared import (
                 diagnose_grid_w_from_omega,
             )
@@ -990,9 +989,6 @@ def _make_spectral_pe_convection(
         # convergence/divergence (the wedge of model behavior the
         # ``parcel_perturb_T``-only fallback is blind to).
         if is_w_grid_consumer:
-            from legoesm.grids.vertical import (
-                compute_sigma_dot_and_total, compute_pressure_velocity,
-            )
             from legoesm.atmosphere.physics._shared import (
                 diagnose_grid_w_from_omega,
             )
