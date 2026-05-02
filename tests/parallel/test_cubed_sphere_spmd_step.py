@@ -193,20 +193,20 @@ class TestCubedSphereSPMDStep:
                         f"exceeds float-pt envelope",
             )
 
-    def test_hybrid_coord_6device_matches_1device(self):
-        """6-device hybrid σ-pressure SPMD step matches single-device.
+    @pytest.mark.parametrize("devices", [2, 3, 6])
+    def test_hybrid_coord_matches_1device(self, devices):
+        """N-device hybrid σ-pressure SPMD step matches single-device.
 
         Iter-60 added ``_hybrid_factor = B_full * p_s / p_full`` to the
         merged stage halo exchange so the PGF correction's corner
-        interpolation reuses the pre-padded buffer.  This is only
-        exercised on the hybrid coordinate path; the existing tests
-        all use ``create_sigma_coordinate``, leaving iter-60's new
-        SPMD branch untested.
+        interpolation reuses the pre-padded buffer.  Iter-62 extends
+        coverage to 2- and 3-device multi-face shards so the dynamic
+        field list packing is exercised across all activation cases.
 
         Tolerance envelope same as the σ-coord 1-step test:
         u/v at FMA precision (1e-12), T at 1e-11, p_s at 1.0 abs.
         """
-        _need_devices(6)
+        _need_devices(devices)
         from legoesm.grids.vertical import make_hybrid_levels
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -242,8 +242,8 @@ class TestCubedSphereSPMDStep:
         # 1-device reference
         s_ref = model.step(s0, dt)
         ref = fv3_to_hydrostatic(s_ref, cdgrid)
-        # 6-device SPMD
-        dev_config = create_device_mesh(n_devices=6)
+        # N-device SPMD
+        dev_config = create_device_mesh(n_devices=devices)
         activate_spmd_halo_backend(dev_config.mesh, n=n_grid, nlev=n_lev)
         try:
             s_spmd = shard_pytree(s0, dev_config)
@@ -261,22 +261,24 @@ class TestCubedSphereSPMDStep:
             o = np.asarray(getattr(out, name).data)
             np.testing.assert_allclose(
                 o, r, atol=atol, rtol=rtol,
-                err_msg=f"{name}: 6-dev cubed-sphere hybrid-coord SPMD "
+                err_msg=f"{name}: {devices}-dev cubed-sphere hybrid-coord SPMD "
                         f"drift exceeds float-pt envelope",
             )
 
-    def test_div_damp_6device_matches_1device(self):
-        """6-device SPMD with divergence damping enabled matches single-device.
+    @pytest.mark.parametrize("devices", [2, 3, 6])
+    def test_div_damp_matches_1device(self, devices):
+        """N-device SPMD with divergence damping enabled matches single-device.
 
         Iter-61: ``div_v`` is now computed BEFORE the merged stage halo
         and packed alongside the cell fields when ``div_damp_coeff > 0``,
         so the line-363 ``_arakawa_lamb_gradient(div_v, cdgrid)`` reuses
         the pre-padded ``_div_v_pad`` instead of doing its own halo.
+        Iter-62 extends to 2/3-device multi-face shards.
 
         Existing CS SPMD tests all use ``div_damp_coeff=0`` (default),
         so this branch was untested.  Test passes at FMA precision.
         """
-        _need_devices(6)
+        _need_devices(devices)
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -313,8 +315,8 @@ class TestCubedSphereSPMDStep:
         # 1-device reference
         s_ref = model.step(s0, dt)
         ref = fv3_to_hydrostatic(s_ref, cdgrid)
-        # 6-device SPMD
-        dev_config = create_device_mesh(n_devices=6)
+        # N-device SPMD
+        dev_config = create_device_mesh(n_devices=devices)
         activate_spmd_halo_backend(dev_config.mesh, n=n_grid, nlev=n_lev)
         try:
             s_spmd = shard_pytree(s0, dev_config)
@@ -332,7 +334,7 @@ class TestCubedSphereSPMDStep:
             o = np.asarray(getattr(out, name).data)
             np.testing.assert_allclose(
                 o, r, atol=atol, rtol=rtol,
-                err_msg=f"{name}: 6-dev cubed-sphere div_damp SPMD drift "
+                err_msg=f"{name}: {devices}-dev cubed-sphere div_damp SPMD drift "
                         f"exceeds float-pt envelope",
             )
 
