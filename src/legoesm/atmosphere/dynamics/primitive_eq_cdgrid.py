@@ -75,6 +75,7 @@ from legoesm.grids.vertical import (
     compute_geopotential,
     compute_geopotential_hybrid,
     compute_sigma_dot,
+    compute_sigma_dot_and_total,
     compute_mass_flux_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
@@ -469,7 +470,6 @@ def fv3_hydrostatic_tendencies(
         # separately and then ``compute_sigma_dot`` doing its own
         # cumsum.  Saves one cross-level collective per RK3 stage on
         # the non-hybrid σ-coordinate path.
-        from legoesm.grids.vertical import compute_sigma_dot_and_total
         sigma_dot, _D_total_full = compute_sigma_dot_and_total(
             div_v, sigma_coord,
         )
