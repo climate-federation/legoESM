@@ -44,6 +44,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere FV3 PE hi-prec PGF ln_ps halo collectives per stage (float64 path) | 1 | 0 |
 | Cubed-sphere FV3 PE hybrid PGF hf_corner halo collectives per stage | 1 | 0 |
 | Cubed-sphere FV3 PE div_damp div_v halo collectives per stage      | 1 | 0 |
+| Cubed-sphere FV3 PE A_h+hyperdiff corner-interp halos per stage    | 2 | 1 (when both active) |
 | Spectral PE σ-coord cross-level collectives        |          3 |           1 |
 | Hybrid mass-flux + dp_s_dt cross-level collectives (CS, spectral) | 4 (2 in fn + 2 in callers) | 2 |
 | compute_sigma_dot internal cross-level collectives  |          2 |           1 |
@@ -148,6 +149,9 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+872ab569 scripts: add plot_scaling_laws.py for strong + weak + iter-progression
+cb39d47c cubed-sphere FV3 PE: batch lap_uv + hyperdiff_uv corner interpolations
+ac411688 docs: record iter-62 multi-face test extensions
 ea0ec175 tests: extend iter-60/61 hybrid + div_damp SPMD tests to multi-face
 a83e1a91 docs: record iter-61 div_v halo merge for div_damp
 7d45ef15 cubed-sphere FV3 PE: pack div_v into merged exchange for div_damp
