@@ -136,6 +136,16 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+9cb136f1 docs: record iter-49 multi-face SPMD halo scaling impact
+51abec8a cubesphere_exchange: force all_gather backend at n_devices != 6
+54b09ccd cubesphere_exchange: multi-face SPMD halo kernels (allgather, allgather_h2)
+eb7ba319 tests: cubed-sphere SPMD bit-equiv at C48
+522dffe8 tests: cubed-sphere SPMD with Held-Suarez physics bit-equiv
+570c51aa tests: extend spectral level-shard equivalence to T42
+92c177f9 refactor: extract _close_halo_under_cellsOnEdge helper
+63e75704 tests: extend voronoi sharded equivalence to subdivision_level=5
+54902899 voronoi sharded: tighten iter-25 augmentation cap from 4 to 2 passes
+dc53e6a8 docs: GPU-scaling branch overview
 863fb639 tests: parametrise cubed-sphere SPMD bit-equiv test over n_steps
 9d1b84e0 fix cubed-sphere SPMD: forward interp_offsets through pad_halo_vector_4d
 459e1599 tests: cubed-sphere SPMD step end-to-end physical-envelope test
