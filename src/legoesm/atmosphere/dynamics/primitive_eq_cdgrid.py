@@ -296,9 +296,21 @@ def fv3_hydrostatic_tendencies(
     # Use result_type to only upcast (never downcast from current dtype).
     from legoesm.core.precision import _resolve_dtype
     _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
-    # ln_ps is 2D — async overlap not beneficial for 2D fields
     ln_ps_hi = ln_ps.astype(_pg_dt)
-    dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
+    # Iter-59: when the merged stage halo (iter-58) already exchanged
+    # ``ln_ps`` at the PGF compute precision (i.e. ``ln_ps.dtype == _pg_dt``),
+    # reuse ``_lnps_pad`` here instead of re-exchanging ln_ps standalone.
+    # Saves one halo collective per RK3 stage on the SPMD / MPI cubed-
+    # sphere FV3 PE float64 path.  Falls through to the legacy 2D-halo
+    # path when dtypes differ (e.g. mixed float32 state with float64 PGF
+    # compute precision) so no precision is lost.
+    if _lnps_pad is not None and ln_ps.dtype == _pg_dt:
+        _lnps_pad_hi = _lnps_pad[..., 0]  # (6, n+2, n+2) at PGF precision
+        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(
+            ln_ps_hi, cdgrid, padded=_lnps_pad_hi,
+        )
+    else:
+        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
     T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
     T_corner_hi = T_corner.astype(_pg_dt)
