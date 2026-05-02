@@ -41,6 +41,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import (
     HydrostaticState,
+    HydrostaticTendencies,
     FV3HydrostaticState,
     FV3HydrostaticTendencies,
 )
@@ -155,6 +156,7 @@ def fv3_hydrostatic_tendencies(
     cdgrid: CubedSphereCDGrid,
     config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
     physics_tendency: FV3HydrostaticTendencies | None = None,
+    physics_tendency_cc: HydrostaticTendencies | None = None,
 ) -> FV3HydrostaticTendencies:
     """Compute tendencies for the FV3 hydrostatic PE with D-grid winds.
 
@@ -171,6 +173,17 @@ def fv3_hydrostatic_tendencies(
     cdgrid : CubedSphereCDGrid
     config : CDGridPrimitiveEquationConfig
     physics_tendency : FV3HydrostaticTendencies, optional
+        Pre-converted D-grid physics tendency.  Existing API; added
+        directly to the dycore tendencies (no extra halo).
+    physics_tendency_cc : HydrostaticTendencies, optional
+        Iter-65: cell-centre physics tendency.  When provided, the
+        ``du_dt`` / ``dv_dt`` components ride iter-64's batched
+        corner interpolation rather than firing their own halo
+        collective in the caller.  The caller passes this instead of
+        ``physics_tendency`` to skip the standalone corner-interp
+        halo for the physics u/v contribution.  ``dT_dt`` /
+        ``dp_s_dt`` from this object are added directly (cell-centre,
+        no interp needed).
 
     Returns
     -------
@@ -629,8 +642,9 @@ def fv3_hydrostatic_tendencies(
         )
 
     # Build the cell-center batch: vert_adv (always) + lap (if A_h>0)
-    # + hyperdiff (if hyperdiff_coeff>0), each shape (n_face, n, n,
-    # nlev*2) along the trailing axis.
+    # + hyperdiff (if hyperdiff_coeff>0) + phys_cc.du/dv (iter-65,
+    # when ``physics_tendency_cc`` is provided), each shape
+    # (n_face, n, n, nlev*2) along the trailing axis.
     _uv_corner_blocks = [
         _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
     ]
@@ -642,6 +656,12 @@ def fv3_hydrostatic_tendencies(
         _uv_corner_blocks.append(
             hyperdiff_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
         )
+    if physics_tendency_cc is not None and physics_tendency_cc.du_dt is not None:
+        _phys_uv_cc = jnp.stack(
+            [physics_tendency_cc.du_dt.data, physics_tendency_cc.dv_dt.data],
+            axis=-1,
+        ).reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
+        _uv_corner_blocks.append(_phys_uv_cc)
     _n_blocks = len(_uv_corner_blocks)
     if _n_blocks == 1:
         _combined_uv_cc = _uv_corner_blocks[0]
@@ -662,6 +682,11 @@ def fv3_hydrostatic_tendencies(
     _hd_uv_d = None
     if hyperdiff_uvT is not None:
         _hd_uv_d = _combined_uv_d[:, :, :, _block_idx]
+        _block_idx += 1
+    _phys_uv_d = None
+    if (physics_tendency_cc is not None
+            and physics_tendency_cc.du_dt is not None):
+        _phys_uv_d = _combined_uv_d[:, :, :, _block_idx]
         _block_idx += 1
 
     # Add the vert_adv contribution to du_d_dt/dv_d_dt now that the
@@ -703,6 +728,15 @@ def fv3_hydrostatic_tendencies(
         dv_d_dt = dv_d_dt + physics_tendency.dv_d_dt.data
         dT_dt_data = dT_dt_data + physics_tendency.dT_dt.data
         dp_s_dt_data = dp_s_dt_data + physics_tendency.dp_s_dt.data
+    # Iter-65: cell-centre physics ``du_dt`` / ``dv_dt`` rode the
+    # iter-64 batch above; ``dT_dt`` / ``dp_s_dt`` are added directly
+    # (cell-centre, no corner interp needed).
+    if physics_tendency_cc is not None:
+        if physics_tendency_cc.du_dt is not None and _phys_uv_d is not None:
+            du_d_dt = du_d_dt + _phys_uv_d[..., 0]
+            dv_d_dt = dv_d_dt + _phys_uv_d[..., 1]
+        dT_dt_data = dT_dt_data + physics_tendency_cc.dT_dt.data
+        dp_s_dt_data = dp_s_dt_data + physics_tendency_cc.dp_s_dt.data
 
     dims_3d_corner = ("face", "x", "y", "level")
     dims_3d = ("face", "x", "y", "level")
@@ -856,42 +890,25 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         cdgrid = self.cdgrid
 
         def tendency_fn(s):
-            phys_tend_dgrid = None
+            phys_cc = None
             if physics_fn is not None:
-                # Convert D-grid state to cell-centre for physics
+                # Convert D-grid state to cell-centre for physics.
+                # Iter-65: pass the cell-centre physics tendency
+                # directly to fv3_hydrostatic_tendencies via
+                # ``physics_tendency_cc`` so its (du_dt, dv_dt)
+                # corner interpolation is batched with the iter-64
+                # vert_adv/lap/hyperdiff corner interp — saves the
+                # standalone halo collective that the old conversion
+                # path emitted here.
                 s_cc = fv3_to_hydrostatic(s, cdgrid)
                 _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
                 phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-                # Convert cell-centre physics (du_dt, dv_dt) tendencies
-                # to D-grid corners — batched: stack along trailing
-                # axis and run a single halo + 4-point average instead
-                # of two.  Matches the corner-interp batching pattern
-                # used in the tendency function.
-                _pu_cc = phys_cc.du_dt.data
-                _pv_cc = phys_cc.dv_dt.data
-                _np_face, _np_i, _np_j, _np_lev = _pu_cc.shape
-                _pp = jnp.stack([_pu_cc, _pv_cc], axis=-1)
-                _pp_d_flat = _interp_center_to_corner(
-                    _pp.reshape(_np_face, _np_i, _np_j, _np_lev * 2),
-                    cdgrid,
-                )
-                _pp_d = _pp_d_flat.reshape(
-                    _pp_d_flat.shape[0], _pp_d_flat.shape[1], _pp_d_flat.shape[2],
-                    _np_lev, 2,
-                )
-                pu_d = _pp_d[..., 0]
-                pv_d = _pp_d[..., 1]
-                phys_tend_dgrid = FV3HydrostaticTendencies(
-                    du_d_dt=phys_cc.du_dt.replace(data=pu_d, name="du_d_dt"),
-                    dv_d_dt=phys_cc.dv_dt.replace(data=pv_d, name="dv_d_dt"),
-                    dT_dt=phys_cc.dT_dt,
-                    dp_s_dt=phys_cc.dp_s_dt,
-                    dphis_dt=phys_cc.dphis_dt,
-                )
 
             tend = fv3_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, cdgrid,
-                self.config, phys_tend_dgrid,
+                self.config,
+                physics_tendency=None,
+                physics_tendency_cc=phys_cc,
             )
             # Return an FV3HydrostaticState-shaped pytree with tendency data
             # so that the time integrator's tree_map works correctly.
