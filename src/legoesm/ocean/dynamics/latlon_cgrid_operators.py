@@ -786,6 +786,77 @@ def vector_bilaplacian_cgrid(
     return bilap_u, bilap_v
 
 
+def _cos_lat_uv(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """cos(lat) on u- and v-face latitudes for a lat-lon C-grid.
+
+    u-face points sit at cell-centre latitudes (where ``grid.cos_lat``
+    is defined directly).  v-face points sit at latitude interfaces
+    between cells and are obtained by linear interpolation of
+    ``cos_lat``, with the south/north boundary v-faces clamped to the
+    nearest cell-centre value.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+
+    Returns
+    -------
+    cos_u : (n_lat,)
+        cos(lat) at u-face latitudes.
+    cos_v : (n_lat+1,)
+        cos(lat) at v-face latitudes.
+    """
+    cos_u = grid.cos_lat                                  # (n_lat,)
+    cos_v_interior = 0.5 * (cos_u[:-1] + cos_u[1:])       # (n_lat-1,)
+    cos_v = jnp.concatenate([
+        cos_u[:1],                                        # south boundary ≈ cos(lat[0])
+        cos_v_interior,
+        cos_u[-1:],                                       # north boundary ≈ cos(lat[-1])
+    ])                                                    # (n_lat+1,)
+    return cos_u, cos_v
+
+
+def laplacian_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Grid-dependent scaling for Laplacian viscosity on a lat-lon grid.
+
+    On a latitude-longitude grid the zonal grid spacing shrinks as
+    ``cos(lat)`` near the poles.  Because the Laplacian-viscosity
+    timescale ``dx^2 / A_h`` shrinks with ``cos^2(lat)``, a constant
+    ``A_h`` becomes effectively very large near the poles — and at the
+    high-latitude coastal partial-cell vertices on real ETOPO this
+    triggers a viscous-Coriolis amplification that produces a localized
+    runaway in η at lat ~82.5° (see ``docs/ocean_experiments/realistic_geometry_phase4_results.md``
+    and the D1 diagnostic in ``ah_diagnostics/``).
+
+    Following the standard MITgcm/MOM6/NEMO production convention, the
+    Laplacian coefficient is multiplied by ``cos^2(lat)``.  This keeps
+    the viscous CFL number ``A_h * dt / dx^2`` latitude-independent and
+    matches the cos⁴-scaling that ``biharmonic_scaling_factor`` already
+    applies to ``B_h``.
+
+    Usage::
+
+        scale_u, scale_v = laplacian_scaling_factor(grid)
+        vlap_u, vlap_v = vector_laplacian_cgrid(u, v, grid, ...)
+        du_dt += A_h * scale_u[:, None, None] * vlap_u
+        dv_dt += A_h * scale_v[:, None, None] * vlap_v
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+
+    Returns
+    -------
+    scale_u : (n_lat,)
+        cos²(lat) at u-face latitudes (cell centres).  Reshape to
+        ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
+    scale_v : (n_lat+1,)
+        cos²(lat) at v-face latitudes.
+    """
+    cos_u, cos_v = _cos_lat_uv(grid)
+    return cos_u ** 2, cos_v ** 2
+
+
 def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Grid-dependent scaling for biharmonic viscosity on a lat-lon grid.
 
@@ -796,9 +867,9 @@ def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarra
 
     Following the MOM6 convention (Griffies & Hallberg 2000), the
     biharmonic coefficient should be multiplied by
-    ``(dx_local / dx_ref)^4`` where ``dx_ref`` is a reference spacing
-    (typically the maximum or equatorial value).  This function returns
-    the pre-computed scaling arrays for u-face and v-face points.
+    ``(dx_local / dx_ref)^4`` where ``dx_ref`` is the reference
+    (equatorial / maximum) spacing.  Here ``dx_ref`` corresponds to
+    ``cos_lat = 1`` so the scaling reduces to ``cos^4(lat)``.
 
     Usage in the tendency function::
 
@@ -814,30 +885,13 @@ def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarra
     Returns
     -------
     scale_u : (n_lat,)
-        Scaling factor at u-face latitudes.  Callers should reshape
-        to ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
+        cos⁴(lat) at u-face latitudes.  Callers should reshape to
+        ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
     scale_v : (n_lat+1,)
-        Scaling factor at v-face latitudes.
+        cos⁴(lat) at v-face latitudes.
     """
-    cos_lat = grid.cos_lat  # (n_lat,)
-
-    # Reference: equatorial (maximum) spacing
-    cos_max = 1.0
-
-    # u-face points sit at cell-center latitudes
-    scale_u = (cos_lat / cos_max) ** 4  # (n_lat,)
-
-    # v-face points sit at latitude interfaces between cells;
-    # interpolate cos_lat to v-face positions.
-    cos_v_interior = 0.5 * (cos_lat[:-1] + cos_lat[1:])  # (n_lat-1,)
-    cos_v = jnp.concatenate([
-        cos_lat[:1],         # south boundary ≈ cos(lat[0])
-        cos_v_interior,
-        cos_lat[-1:],        # north boundary ≈ cos(lat[-1])
-    ])  # (n_lat+1,)
-    scale_v = (cos_v / cos_max) ** 4  # (n_lat+1,)
-
-    return scale_u, scale_v
+    cos_u, cos_v = _cos_lat_uv(grid)
+    return cos_u ** 4, cos_v ** 4
 
 
 def strain_rate_cgrid(

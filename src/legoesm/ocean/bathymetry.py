@@ -126,6 +126,21 @@ class BathymetryConfig(NamedTuple):
     smoothing alone, which is known to be insufficient for sharp
     bathymetric features (Phase 3a finding)."""
     meo_max_iter: int = 200
+    north_cap_lat: float | None = None
+    """Northern polar cap latitude [deg].  When set, all ocean cells
+    with ``lat > north_cap_lat`` are converted to land.  Matches the
+    ``polar_cap_lat`` convention of the idealized GO config (default
+    80°).  Standard production fix for lat-lon ocean models that the
+    Arctic singular-point + tiny-dx high-latitude regime is hard to
+    keep stable + damped simultaneously, especially with cos²(lat)
+    A_h scaling that *reduces* damping at high latitudes.  See
+    ``docs/ocean_experiments/realistic_geometry_topology_fixes.md``.
+    When None, no cap is applied (preserves bit-exact regression)."""
+    south_cap_lat: float | None = None
+    """Southern polar cap latitude [deg].  When set, all ocean cells
+    with ``lat < south_cap_lat`` are converted to land.  Antarctica is
+    already mostly land in ETOPO so this is rarely needed in practice;
+    provided for symmetry with ``north_cap_lat``.  When None, no cap."""
 
 
 # ============================================================================
@@ -980,6 +995,16 @@ def load_bathymetry_latlon_cgrid(
         target_lat, target_lon, cfg, grid_spacing_deg=grid_spacing,
     )
 
+    # Polar caps — close off the high-lat regions where the lat-lon grid
+    # singularity + small dx make the cos²(lat) A_h scaling regime hard
+    # to keep both stable and damped.  Applied BEFORE smoothing so the
+    # cap edge is also smoothed into a neat coastline.
+    if cfg.north_cap_lat is not None:
+        ocean_mask = np.where(target_lat > cfg.north_cap_lat, 0.0, ocean_mask)
+    if cfg.south_cap_lat is not None:
+        ocean_mask = np.where(target_lat < cfg.south_cap_lat, 0.0, ocean_mask)
+    depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
     # Smoothing on regular lat-lon (periodic in longitude, walls at poles).
     depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
 
@@ -1030,6 +1055,13 @@ def load_bathymetry_gaussian(
     depth, ocean_mask = load_bathymetry(
         target_lat_2d, target_lon_2d, cfg, grid_spacing_deg=grid_spacing,
     )
+
+    # Polar caps (see load_bathymetry_latlon_cgrid for rationale).
+    if cfg.north_cap_lat is not None:
+        ocean_mask = np.where(target_lat_2d > cfg.north_cap_lat, 0.0, ocean_mask)
+    if cfg.south_cap_lat is not None:
+        ocean_mask = np.where(target_lat_2d < cfg.south_cap_lat, 0.0, ocean_mask)
+    depth = np.where(ocean_mask > 0.5, depth, 0.0)
 
     # Smoothing on Gaussian grid
     depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)

@@ -474,6 +474,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4
+    A_h_lat_scaling: bool = False  # When True, A_h is multiplied by cos²(lat)
+                                    # to keep viscous CFL latitude-independent on
+                                    # lat-lon grids.  Standard MITgcm/MOM6/NEMO
+                                    # convention.  Default False to preserve
+                                    # bit-exact regression on legacy configs.
     B_h: float = 0.0
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0

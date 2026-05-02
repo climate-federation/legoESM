@@ -60,6 +60,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     biharmonic_scaling_factor,
+    laplacian_scaling_factor,
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
@@ -1309,8 +1310,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _vlap_u, _vlap_v = vector_laplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        diag_Ah_lap_u = config.A_h * _vlap_u
-        diag_Ah_lap_v = config.A_h * _vlap_v
+        if config.A_h_lat_scaling:
+            lap_scale_u, lap_scale_v = laplacian_scaling_factor(grid)
+            diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * _vlap_u
+            diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * _vlap_v
+        else:
+            diag_Ah_lap_u = config.A_h * _vlap_u
+            diag_Ah_lap_v = config.A_h * _vlap_v
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
         bilap_u, bilap_v = vector_laplacian_cgrid(
@@ -1325,8 +1331,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        diag_Ah_lap_u = config.A_h * vlap_u
-        diag_Ah_lap_v = config.A_h * vlap_v
+        if config.A_h_lat_scaling:
+            lap_scale_u, lap_scale_v = laplacian_scaling_factor(grid)
+            diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * vlap_u
+            diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * vlap_v
+        else:
+            diag_Ah_lap_u = config.A_h * vlap_u
+            diag_Ah_lap_v = config.A_h * vlap_v
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
     elif config.B_h > 0:

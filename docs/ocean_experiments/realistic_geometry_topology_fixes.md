@@ -131,9 +131,45 @@ use 2.5° as the floor.
   required.
 - Continental shelves resolved (~3-5 cells).
 
+## Polar caps (added 2026-05-01 evening)
+
+`BathymetryConfig.north_cap_lat` and `BathymetryConfig.south_cap_lat`
+(both default `None` for bit-exact regression).  When set, all ocean
+cells north/south of the threshold latitude are converted to land.
+
+**Why**: the lat-lon grid singularity at the poles + small dx at high
+latitude make the polar regions hard to keep both stable AND damped.
+`cos²(lat)` A_h scaling (added in the same session) prevents the
+viscous-Coriolis runaway at A_h_global=2e5 by *reducing* effective
+viscosity at high latitudes — but at lat > 80° this drops A_h_eff
+below the original Phase 4 default of 1e4 m²/s, leaving residual
+grid-scale noise visible in the surface speed at very high latitudes.
+
+The simplest production-typical fix is to close off the Arctic.  The
+idealized GO config has always done this via `polar_cap_lat=80°`; this
+just exposes the same option for the realistic geometry.  Antarctica
+is already mostly land in ETOPO so the south cap is rarely needed.
+
+**Recommended setting for realistic-geometry GO at 5° resolution**:
+`north_cap_lat = 80.0` (matches idealized).  For full discussion,
+see `realistic_geometry_phase4_results.md`.
+
+**Tradeoff**: closes the Arctic-Atlantic exchange through Davis Strait
+and Bering Strait.  At 5° both straits are unresolvable anyway (Bering
+is enforced via `enforce_straits` but is < 1 cell wide).  No
+significant scientific loss for a Wolfe-Cessi-style spinup, where the
+canonical AMOC + ACC + gyre dynamics happen south of ~70°N.
+
+**Future directions**:
+- Smagorinsky-Leith biharmonic (`C_leith` already in config) is the
+  alternative production fix that doesn't need a polar cap.  Worth
+  trying after first-pass production results are in hand.
+- Tripole grid (`docs/ocean_experiments/tripole_grid_plan.md`) is the
+  long-term solution that eliminates the polar singularity entirely.
+
 ## Status
 
-**No modifications applied beyond the defaults listed above** as of
-the realistic-geometry implementation.  Phase 4 (50-yr realistic-
-geometry run) may surface additional resolution-specific fixes; if
-so, they will be documented here.
+`north_cap_lat = 80.0` is the recommended default for the realistic-
+geometry production config at 5° resolution (along with cos²(lat)
+A_h scaling, A_h_lat_scaling=True, A_h_global=2e5).  Original 50-yr
+flat-bottom reference and idealized GO already use lat>80° = land.
