@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AMIP Forcing Files — scripts/run_amip.py</title>
+<style>
+    :root {
+        --bg: #fafbfc;
+        --surface: #ffffff;
+        --text: #1f2328;
+        --text-muted: #656d76;
+        --border: #d0d7de;
+        --border-soft: #eaeef2;
+        --accent: #0969da;
+        --accent-soft: #ddf4ff;
+        --code-bg: #eff1f3;
+        --code-text: #24292f;
+        --header-bg: #f6f8fa;
+        --row-alt: #f8fafb;
+        --success: #1a7f37;
+        --success-bg: #dafbe1;
+        --success-border: #4ac26b;
+        --warn: #9a6700;
+        --warn-bg: #fff8c5;
+        --warn-border: #d4a72c;
+        --info: #0969da;
+        --info-bg: #ddf4ff;
+        --info-border: #54aeff;
+        --danger: #cf222e;
+        --tag-var-bg: #fff1e5;
+        --tag-var-text: #8c4a00;
+        --tag-dim-bg: #eef7ff;
+        --tag-dim-text: #0550ae;
+        --tag-path-bg: #f0f3f6;
+        --tag-path-text: #3f4752;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Arial, Helvetica, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    .page-header {
+        background: linear-gradient(135deg, #0969da 0%, #218bff 100%);
+        color: #fff;
+        padding: 40px 24px 36px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .page-header .inner {
+        max-width: 1180px;
+        margin: 0 auto;
+    }
+
+    .page-header .eyebrow {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.85;
+        margin-bottom: 8px;
+    }
+
+    .page-header h1 {
+        margin: 0 0 10px 0;
+        font-size: 32px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+    }
+
+    .page-header .subtitle {
+        font-size: 15px;
+        opacity: 0.92;
+        max-width: 780px;
+    }
+
+    .page-header .meta-row {
+        margin-top: 18px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .meta-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(255, 255, 255, 0.18);
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        color: #fff;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-family: var(--mono);
+    }
+
+    .container {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 32px 24px 80px;
+    }
+
+    nav.toc {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin-bottom: 32px;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+
+    nav.toc h2 {
+        margin: 0 0 10px 0;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        font-weight: 600;
+    }
+
+    nav.toc ol {
+        margin: 0;
+        padding-left: 20px;
+        columns: 2;
+        column-gap: 32px;
+    }
+
+    nav.toc li {
+        margin: 4px 0;
+    }
+
+    nav.toc a {
+        color: var(--accent);
+        text-decoration: none;
+    }
+
+    nav.toc a:hover { text-decoration: underline; }
+
+    section {
+        margin-bottom: 48px;
+        scroll-margin-top: 16px;
+    }
+
+    h2.section-title {
+        font-size: 24px;
+        font-weight: 700;
+        margin: 0 0 6px 0;
+        padding-bottom: 10px;
+        border-bottom: 2px solid var(--border-soft);
+        letter-spacing: -0.01em;
+    }
+
+    h2.section-title .section-num {
+        display: inline-block;
+        min-width: 32px;
+        height: 32px;
+        line-height: 32px;
+        text-align: center;
+        border-radius: 8px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-family: var(--mono);
+        font-size: 14px;
+        font-weight: 700;
+        margin-right: 12px;
+        vertical-align: middle;
+        padding: 0 8px;
+    }
+
+    h3 {
+        font-size: 18px;
+        font-weight: 600;
+        margin: 28px 0 12px 0;
+    }
+
+    h3 .tag-emoji {
+        font-size: 20px;
+        margin-right: 6px;
+        vertical-align: -2px;
+    }
+
+    p { margin: 10px 0; }
+
+    /* Inline badges / code */
+    code, .badge {
+        font-family: var(--mono);
+        font-size: 0.88em;
+    }
+
+    code {
+        background: var(--code-bg);
+        color: var(--code-text);
+        padding: 1px 6px;
+        border-radius: 4px;
+        border: 1px solid var(--border-soft);
+        white-space: nowrap;
+    }
+
+    .badge-var {
+        background: var(--tag-var-bg);
+        color: var(--tag-var-text);
+        border: 1px solid rgba(140, 74, 0, 0.2);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-family: var(--mono);
+        font-size: 0.86em;
+        white-space: nowrap;
+    }
+
+    .badge-dim {
+        background: var(--tag-dim-bg);
+        color: var(--tag-dim-text);
+        border: 1px solid rgba(5, 80, 174, 0.2);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-family: var(--mono);
+        font-size: 0.86em;
+        white-space: nowrap;
+    }
+
+    .badge-path {
+        background: var(--tag-path-bg);
+        color: var(--tag-path-text);
+        border: 1px solid var(--border);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-family: var(--mono);
+        font-size: 0.84em;
+        display: inline-block;
+        word-break: break-all;
+    }
+
+    /* Tables */
+    .table-wrap {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: auto;
+        max-height: 720px;
+        background: var(--surface);
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+
+    table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        font-size: 13.5px;
+    }
+
+    thead th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: var(--header-bg);
+        color: var(--text);
+        text-align: left;
+        font-weight: 600;
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 12px 14px;
+        border-bottom: 2px solid var(--border);
+        white-space: nowrap;
+    }
+
+    tbody td {
+        padding: 14px;
+        border-bottom: 1px solid var(--border-soft);
+        vertical-align: top;
+    }
+
+    tbody tr:nth-child(even) td { background: var(--row-alt); }
+    tbody tr:hover td { background: #f1f8ff; }
+    tbody tr:last-child td { border-bottom: none; }
+
+    td.col-file {
+        font-weight: 600;
+        min-width: 220px;
+    }
+
+    /* Callout boxes */
+    .callout {
+        border: 1px solid var(--border);
+        border-left-width: 4px;
+        border-radius: 6px;
+        padding: 14px 18px;
+        margin: 14px 0;
+        background: var(--surface);
+    }
+
+    .callout.success {
+        border-left-color: var(--success-border);
+        background: var(--success-bg);
+    }
+
+    .callout.warn {
+        border-left-color: var(--warn-border);
+        background: var(--warn-bg);
+    }
+
+    .callout.info {
+        border-left-color: var(--info-border);
+        background: var(--info-bg);
+    }
+
+    .callout .title {
+        font-weight: 700;
+        margin-bottom: 4px;
+        display: block;
+    }
+
+    .callout ul { margin: 8px 0 0 0; padding-left: 22px; }
+    .callout ul ul { margin-top: 4px; }
+    .callout li { margin: 4px 0; }
+
+    /* Key-value blocks for glossary */
+    .kv-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 14px;
+        margin: 14px 0;
+    }
+
+    .kv-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px 18px;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+
+    .kv-card h4 {
+        margin: 0 0 6px 0;
+        font-size: 14px;
+        color: var(--text-muted);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }
+
+    .kv-card .value {
+        font-family: var(--mono);
+        font-size: 18px;
+        color: var(--accent);
+        font-weight: 600;
+    }
+
+    /* Recommended changes list */
+    ol.recs { padding-left: 0; list-style: none; counter-reset: reccount; }
+    ol.recs li {
+        counter-increment: reccount;
+        position: relative;
+        padding: 14px 16px 14px 56px;
+        margin-bottom: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+    ol.recs li::before {
+        content: counter(reccount);
+        position: absolute;
+        left: 14px;
+        top: 14px;
+        width: 28px;
+        height: 28px;
+        line-height: 28px;
+        text-align: center;
+        background: var(--accent);
+        color: white;
+        font-family: var(--mono);
+        font-weight: 700;
+        border-radius: 50%;
+        font-size: 13px;
+    }
+
+    ul.plain { padding-left: 22px; }
+    ul.plain li { margin: 6px 0; }
+    ul.plain li ul { margin-top: 4px; }
+
+    /* Summary panel for glossary band counts */
+    .band-summary {
+        background: #0d1117;
+        color: #c9d1d9;
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin: 14px 0;
+        font-family: var(--mono);
+        font-size: 13.5px;
+        line-height: 1.8;
+        white-space: pre-wrap;
+    }
+    .band-summary .k { color: #79c0ff; }
+    .band-summary .v { color: #ffa657; }
+
+    /* Expandable details boxes */
+    details.expandable {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        margin: 12px 0;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+        overflow: hidden;
+        transition: box-shadow 0.15s ease;
+    }
+    details.expandable[open] {
+        box-shadow: 0 2px 8px rgba(31, 35, 40, 0.08);
+        border-color: var(--accent);
+    }
+    details.expandable summary {
+        cursor: pointer;
+        padding: 12px 18px;
+        font-weight: 600;
+        font-size: 14.5px;
+        color: var(--text);
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        user-select: none;
+        background: var(--header-bg);
+        transition: background 0.15s ease;
+    }
+    details.expandable summary:hover {
+        background: var(--accent-soft);
+    }
+    details.expandable summary::-webkit-details-marker { display: none; }
+    details.expandable summary::before {
+        content: "▸";
+        display: inline-block;
+        color: var(--accent);
+        font-size: 14px;
+        transition: transform 0.15s ease;
+        width: 12px;
+        flex-shrink: 0;
+    }
+    details.expandable[open] summary::before {
+        transform: rotate(90deg);
+    }
+    details.expandable summary .tag {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: var(--accent);
+        color: #fff;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-left: auto;
+    }
+    details.expandable .details-body {
+        padding: 16px 20px 18px 40px;
+        border-top: 1px solid var(--border-soft);
+        background: var(--surface);
+    }
+    details.expandable .details-body > *:first-child { margin-top: 0; }
+    details.expandable .details-body > *:last-child { margin-bottom: 0; }
+    details.expandable ol, details.expandable ul { padding-left: 22px; }
+    details.expandable li { margin: 6px 0; }
+
+    footer {
+        margin-top: 60px;
+        padding-top: 20px;
+        border-top: 1px solid var(--border-soft);
+        color: var(--text-muted);
+        font-size: 12px;
+        text-align: center;
+    }
+
+    @media (max-width: 700px) {
+        nav.toc ol { columns: 1; }
+        .page-header h1 { font-size: 24px; }
+        thead th, tbody td { padding: 10px; }
+    }
+</style>
+</head>
+<body>
+
+<header class="page-header">
+    <div class="inner">
+        <div class="eyebrow">legoESM · Forcing Analysis</div>
+        <h1>AMIP Forcing Files — <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">scripts/run_amip.py</code></h1>
+        <div class="subtitle">Expected schema derived from loader code, compared against the actual CMIP6 / MPI-M forcing files on the Levante HPC. Includes compatibility findings and recommended code fixes.</div>
+        <div class="meta-row">
+            <span class="meta-pill">📂 /pool/data/ICON/grids/public/mpim</span>
+            <span class="meta-pill">🐍 xarray / netCDF4</span>
+            <span class="meta-pill">🌐 RRTMG-SW / RRTMG-LW</span>
+        </div>
+    </div>
+</header>
+
+<div class="container">
+
+<nav class="toc">
+    <h2>Contents</h2>
+    <ol>
+        <li><a href="#s1">Expected schema (from loader code)</a></li>
+        <li><a href="#s2">Actual file structures on HPC</a></li>
+        <li><a href="#s3">Compatibility assessment</a></li>
+        <li><a href="#s4">Glossary — SW/LW bands and vertical layers</a></li>
+        <li><a href="#s5">Recommended code changes</a></li>
+    </ol>
+</nav>
+
+<!-- SECTION 1 -->
+<section id="s1">
+    <h2 class="section-title"><span class="section-num">§1</span>Expected schema <span style="font-weight:400;color:var(--text-muted);font-size:16px;">(from loader code)</span></h2>
+    <p>The table below summarises what each <code>run_amip.py</code> flag <em>expects</em> to find inside a forcing file, as reverse-engineered from the loader modules <code>legoesm.forcing.amip</code> and <code>legoesm.forcing.external</code>.</p>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Forcing File</th>
+                    <th>Variables</th>
+                    <th>Dimensions / Shape</th>
+                    <th>Bands / Levels</th>
+                    <th>Code Line / Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file">SST/SIC — <code>--forcing-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(COBE preset)</span></td>
+                    <td><span class="badge-var">SST_cpl</span> [K], <span class="badge-var">ice_cov</span> [%], <span class="badge-var">time</span>, <span class="badge-var">lat</span>, <span class="badge-var">lon</span></td>
+                    <td><span class="badge-dim">(ntime, nlat, nlon)</span> regular lat-lon; regridded to <span class="badge-dim">(ntime, 6, n, n)</span> CS or <span class="badge-dim">(ntime, n_lat, n_lon)</span> Gaussian</td>
+                    <td>Surface only (no vertical, no bands)</td>
+                    <td><code>amip.py:111-118</code> preset; <code>amip.py:287-391</code> loader (<code>load_amip_forcing</code>); <code>sic_scale=0.01</code> (% → fraction), <code>sst_offset=0.0</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">SST/SIC — <code>--forcing-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(HadISST preset)</span></td>
+                    <td><span class="badge-var">sst</span> [°C], <span class="badge-var">sic</span> [fraction], <span class="badge-var">time</span>, <span class="badge-var">lat</span>, <span class="badge-var">lon</span></td>
+                    <td><span class="badge-dim">(ntime, nlat, nlon)</span></td>
+                    <td>Surface only</td>
+                    <td><code>amip.py:119-126</code>; <code>sst_offset=+273.15</code> (°C → K), <code>sic_scale=1.0</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">SST/SIC — <code>--forcing-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(custom)</span></td>
+                    <td><code>--sst-var</code>/<code>--sic-var</code> (user-set), <span class="badge-var">time</span>, <span class="badge-var">lat</span>, <span class="badge-var">lon</span></td>
+                    <td><span class="badge-dim">(ntime, nlat, nlon)</span> or <span class="badge-dim">(nlat, nlon)</span> → broadcast to <span class="badge-dim">(1, nlat, nlon)</span></td>
+                    <td>Surface only</td>
+                    <td><code>model_driver.py:340-347</code>; <code>amip.py:299-311</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">SST/SIC — <code>--forcing-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(ICON unstructured)</span></td>
+                    <td><code>&lt;sst_var&gt;</code>, <code>&lt;sic_var&gt;</code>, <span class="badge-var">clon</span> [rad], <span class="badge-var">clat</span> [rad], <span class="badge-var">time</span></td>
+                    <td><span class="badge-dim">(ntime, ncell)</span> unstructured; KD-tree nearest-neighbour regridded to target</td>
+                    <td>Surface only</td>
+                    <td><code>amip.py:134-220</code> <code>_load_icon_unstructured</code>; detected by presence of <code>cell</code> dim + <code>clon</code>/<code>clat</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">SIC split file — <code>--sic-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(ICON)</span></td>
+                    <td><code>&lt;sic_var&gt;</code> only</td>
+                    <td><span class="badge-dim">(ntime, ncell)</span></td>
+                    <td>Surface only</td>
+                    <td><code>amip.py:163-169</code>; opened separately when <code>sic_path</code> non-empty</td>
+                </tr>
+                <tr>
+                    <td class="col-file">Ozone — <code>--ozone-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--ozone-forcing external</code>)</span></td>
+                    <td>auto-detected: <span class="badge-var">ozone</span> / <span class="badge-var">vmro3</span> / <span class="badge-var">o3</span> / <span class="badge-var">O3</span> / <span class="badge-var">tro3</span> [mol/mol], <span class="badge-var">time</span>, <span class="badge-var">lat</span>, optional <span class="badge-var">plev</span>/<span class="badge-var">level</span>/<span class="badge-var">lev</span></td>
+                    <td><span class="badge-dim">(time=12, lat[, plev])</span>; CMIP6 <span class="badge-dim">(time, plev, lat)</span> auto-swapped → <span class="badge-dim">(time, lat, plev)</span></td>
+                    <td>Vertical levels: <code>nlev_src</code> from <code>plev</code> (Pa; hPa auto-converted if units ∈ {hPa, mb,…} or max&lt;1500)</td>
+                    <td><code>external.py:637-707</code> <code>get_ozone_at_time</code>; <code>_detect_ozone_varname</code>, <code>_load_monthly_zonal_with_levels</code>; cyclic monthly interp 365.25 d</td>
+                </tr>
+                <tr>
+                    <td class="col-file">GHG annual — <code>--ghg-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--ghg-forcing external</code>)</span></td>
+                    <td><span class="badge-var">CO2</span> [1e-6], <span class="badge-var">CH4</span> [1e-9], <span class="badge-var">N2O</span> [1e-9], <span class="badge-var">CFC_11</span> [1e-12], <span class="badge-var">CFC_12</span> [1e-12], <span class="badge-var">time</span> (fractional year, <code>"year as %Y.%f"</code>)</td>
+                    <td><span class="badge-dim">(time, lat=1, lon=1)</span> → squeezed to <span class="badge-dim">(time,)</span>; 5 separate 1-D series</td>
+                    <td>Global-mean scalar; no bands/levels</td>
+                    <td><code>external.py:446-485</code> <code>_load_ghg_annual_file</code>; <code>external.py:519-535</code> <code>get_ghg_at_time</code> annual_file branch; day→year via <code>start_year + day/365.25</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">Solar TSI — <code>--solar-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--solar-source file</code>)</span></td>
+                    <td><span class="badge-var">tsi</span> (or user <code>--solar-tsi-var</code>, e.g. <code>TSI</code>; case-insensitive lookup), <span class="badge-var">time</span> (days)</td>
+                    <td><span class="badge-dim">(time,)</span> 1-D</td>
+                    <td>Broadband scalar; no bands</td>
+                    <td><code>external.py:891-913</code>; <code>_load_timeseries</code>; abs-day ref = 1850-01-01 (<code>abs_day = (start_year−1850)*365.25 + day</code>)</td>
+                </tr>
+                <tr>
+                    <td class="col-file">Solar spectral — <code>--solar-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--solar-source spectral_file</code>)</span></td>
+                    <td><span class="badge-var">tsi</span> (optional), <span class="badge-var">solar_fraction_by_gpt</span> (or <code>--solar-spectral-var</code>), <span class="badge-var">time</span></td>
+                    <td><span class="badge-dim">time (N,)</span>; spectral <span class="badge-dim">(time, nspec)</span> where <code>nspec ∈ {14 bands, 112/224 gpts}</code></td>
+                    <td>Bands: 14 RRTMG-SW → expanded to 112 g-points via <code>bnd_limits_gpt</code> when <code>nspec&lt;50</code></td>
+                    <td><code>external.py:265-305</code> <code>_load_time_gpt</code>; <code>external.py:915-941</code>; <code>_expand_bands_to_gpoints</code> uses <code>_DEFAULT_SW_GAS</code> LUT</td>
+                </tr>
+                <tr>
+                    <td class="col-file">Aerosol climatology — <code>--aerosol-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--aerosol-forcing external</code>)</span></td>
+                    <td><span class="badge-var">aod</span> [dimensionless, 550 nm], <span class="badge-var">time</span>, <span class="badge-var">lat</span>/<span class="badge-var">latitude</span>, optional <span class="badge-var">lon</span>, optional band axis (e.g. <code>lnwl</code>)</td>
+                    <td><span class="badge-dim">(time=12, lat)</span>; Kinne-style <span class="badge-dim">(time, lnwl, lat, lon)</span> → zonal+band-averaged/summed to <span class="badge-dim">(time, lat)</span></td>
+                    <td>Bands collapsed (summed to total column AOD after zonal mean); no vertical</td>
+                    <td><code>external.py:142-196</code> <code>_load_monthly_zonal</code>; <code>external.py:765-811</code>; trailing dims summed post-interp (<code>issue #178</code>)</td>
+                </tr>
+                <tr>
+                    <td class="col-file">Volcanic aerosol — <code>--volcanic-aerosol-file</code></td>
+                    <td><span class="badge-var">aod</span>, <span class="badge-var">time</span>, <span class="badge-var">lat</span></td>
+                    <td><span class="badge-dim">(time, lat)</span> (same schema as aerosol)</td>
+                    <td>Same as aerosol (multi-dim trailing summed)</td>
+                    <td><code>external.py:813-844</code>; scaled by <code>--volcanic-aerosol-scale</code>, added to baseline AOD, clipped ≥0</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- SECTION 2 -->
+<section id="s2">
+    <h2 class="section-title"><span class="section-num">§2</span>Actual file structures on HPC</h2>
+    <p>Structural metadata extracted via <code>xarray</code> from sample files under <span class="badge-path">/pool/data/ICON/grids/public/mpim</span> (MPI-M CMIP6 / ICON boundary condition collection).</p>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>File</th>
+                    <th>Dimensions</th>
+                    <th>Key Variables</th>
+                    <th>Bands / Levels</th>
+                    <th>Time axis</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">common/solar_radiation/swflux_14band_cmip6_1850-2299-v3.2.nc</span></td>
+                    <td><span class="badge-dim">time=5400</span>, <span class="badge-dim">numwl=14</span></td>
+                    <td><span class="badge-var">TSI</span> (time,) [W/m²], <span class="badge-var">SSI</span> (time, numwl) [W/m²], <span class="badge-var">SSI_frac</span> (time, numwl), <span class="badge-var">year</span>, <span class="badge-var">month</span>, <span class="badge-var">lb</span>/<span class="badge-var">ub</span> (numwl) [nm]</td>
+                    <td>14 RRTMG-SW bands</td>
+                    <td><code>"days since 1850-01-01 00:00:00"</code>, float64</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">independent/greenhouse_gases/greenhouse_historical_plus.nc</span></td>
+                    <td><span class="badge-dim">time=2021</span>, <span class="badge-dim">lat=1</span>, <span class="badge-dim">lon=1</span></td>
+                    <td><span class="badge-var">CO2</span> [1e-6], <span class="badge-var">CH4</span> [1e-9], <span class="badge-var">N2O</span> [1e-9], <span class="badge-var">CFC_11</span> [1e-12], <span class="badge-var">CFC_12</span> [1e-12]</td>
+                    <td>Global scalar</td>
+                    <td><code>"year as %Y.%f"</code>, float64</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">common/aerosol_kinne/aeropt_kinne_sw_b14_fin_*_rast.nc</span><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(fine mode, SW)</span></td>
+                    <td><span class="badge-dim">time=12</span>, <span class="badge-dim">lnwl=14</span>, <span class="badge-dim">lat=180</span>, <span class="badge-dim">lon=360</span>, <span class="badge-dim">lev=40</span></td>
+                    <td><span class="badge-var">aod/asy/ssa</span> (time, lnwl, lat, lon) [f32], <span class="badge-var">z_aer_fine_mo</span> (time, lev, lat, lon), <span class="badge-var">fp1</span>/<span class="badge-var">fp4</span> (time, lat, lon), <span class="badge-var">zbot</span>/<span class="badge-var">ztop</span> (lev, lat, lon), <span class="badge-var">asl</span> (lat, lon)</td>
+                    <td>14 SW bands, 40 altitude layers</td>
+                    <td><code>"days since 2000-01-01 00:00"</code>, monthly mid-days 14…349</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">common/aerosol_kinne/aeropt_kinne_sw_b14_coa_rast.nc</span><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(coarse, SW)</span></td>
+                    <td><span class="badge-dim">time=12</span>, <span class="badge-dim">lnwl=14</span>, <span class="badge-dim">lat=180</span>, <span class="badge-dim">lon=360</span>, <span class="badge-dim">lev=40</span></td>
+                    <td><span class="badge-var">aod/asy/ssa</span>, <span class="badge-var">z_aer_coarse_mo</span>, <span class="badge-var">zbot</span>/<span class="badge-var">ztop</span>, <span class="badge-var">asl</span></td>
+                    <td>14 SW bands, 40 layers</td>
+                    <td>Same as above</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">common/aerosol_kinne/aeropt_kinne_lw_b16_coa_rast.nc</span><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(coarse, LW)</span></td>
+                    <td><span class="badge-dim">time=12</span>, <span class="badge-dim">lnwl=16</span>, <span class="badge-dim">lat=180</span>, <span class="badge-dim">lon=360</span>, <span class="badge-dim">lev=40</span></td>
+                    <td><span class="badge-var">aod/asy/ssa</span>, <span class="badge-var">z_aer_coarse_mo</span>, <span class="badge-var">zbot</span>/<span class="badge-var">ztop</span>, <span class="badge-var">asl</span></td>
+                    <td><strong>16 LW bands</strong> (matches RRTMG-LW), 40 layers</td>
+                    <td>Same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">common/aerosol_volcanic_cmip6/bc_aeropt_cmip6_volc_lw_b16_sw_b14_*.nc</span></td>
+                    <td><span class="badge-dim">solar_bands=14</span>, <span class="badge-dim">terrestrial_bands=16</span>, <span class="badge-dim">latitude=36</span>, <span class="badge-dim">altitude=70</span>, <span class="badge-dim">month=12</span></td>
+                    <td><span class="badge-var">ext_sun</span>/<span class="badge-var">omega_sun</span>/<span class="badge-var">g_sun</span> (solar_bands, latitude, altitude, month) [1/km]; <span class="badge-var">ext_earth</span>/<span class="badge-var">omega_earth</span>/<span class="badge-var">g_earth</span> (terrestrial_bands, latitude, altitude, month); <span class="badge-var">wl1_sun</span>/<span class="badge-var">wl2_sun</span>, <span class="badge-var">wl1_earth</span>/<span class="badge-var">wl2_earth</span></td>
+                    <td>14 SW + 16 LW bands, <strong>70 altitude levels</strong> (5 → 39.5 km)</td>
+                    <td>Dim <code>month=12</code>; altitude in km; per-year file</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">common/ozone_cmip6_forcing/historical/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_*.nc</span></td>
+                    <td><span class="badge-dim">time=600</span>, <span class="badge-dim">plev=66</span>, <span class="badge-dim">lat=96</span>, <span class="badge-dim">lon=144</span>, <span class="badge-dim">bound=2</span></td>
+                    <td><span class="badge-var">vmro3</span> (time, plev, lat, lon) [mol mol⁻¹]; <span class="badge-var">bounds_plev/bounds_lat/bounds_lon</span></td>
+                    <td>66 pressure levels (1000 hPa → 1e-4 hPa)</td>
+                    <td><code>"months since 1850-01-01 00:00"</code>, 1850-01 → 1899-12</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- SECTION 3 -->
+<section id="s3">
+    <h2 class="section-title"><span class="section-num">§3</span>Compatibility assessment vs. <code style="background: var(--code-bg); color: var(--code-text);">run_amip.py</code></h2>
+
+    <h3><span class="tag-emoji">✅</span>Correct matches</h3>
+
+    <div class="callout success">
+        <span class="title"><span class="badge-path">greenhouse_historical_plus.nc</span> → <code>--ghg-forcing external --ghg-file …</code></span>
+        <ul>
+            <li>Exact match for <code>_load_ghg_annual_file</code> (<code>external.py:446-485</code>). Time units <code>"year as %Y.%f"</code> and <span class="badge-dim">(time, lat=1, lon=1)</span> layout are explicitly supported.</li>
+            <li>Unit scales (1e-6 / 1e-9 / 1e-12) are consumed correctly by <code>get_ghg_at_time</code> (<code>external.py:519-535</code>).</li>
+        </ul>
+    </div>
+
+    <div class="callout success">
+        <span class="title"><span class="badge-path">swflux_14band_cmip6_*.nc</span> → <code>--solar-source spectral_file</code> <em>(with correct var flags)</em></span>
+        <ul>
+            <li><code>time=5400</code>, units <code>"days since 1850-01-01"</code>, match <code>_REF_YEAR=1850</code> in <code>get_solar_forcing_at_time</code> (<code>external.py:906-907</code>).</li>
+            <li>Spectral dim <code>numwl=14 &lt; 50</code> → auto-expansion via <code>_expand_bands_to_gpoints</code> → <strong>112 g-points</strong> (<code>external.py:929-933</code>). ✓</li>
+            <li><strong>Required flags</strong>:
+                <ul>
+                    <li><code>--solar-tsi-var TSI</code> (uppercase — see caveat below)</li>
+                    <li><code>--solar-spectral-var SSI_frac</code> (default is <span class="badge-var">solar_fraction_by_gpt</span>, not present in file)</li>
+                </ul>
+            </li>
+        </ul>
+    </div>
+
+    <div class="callout success">
+        <span class="title">Kinne <span class="badge-path">aeropt_kinne_sw_b14_*_rast.nc</span> / <span class="badge-path">lw_b16_coa_rast.nc</span> → <code>--aerosol-file</code></span>
+        <ul>
+            <li><span class="badge-var">aod</span> variable present with <span class="badge-dim">(time=12, lnwl, lat=180, lon=360)</span> layout.</li>
+            <li><code>_load_monthly_zonal</code> averages over <code>lon</code>, then collapses <code>lnwl</code> → <span class="badge-dim">(time=12, lat=180)</span> (<code>external.py:177-196</code>). ✓</li>
+            <li>No <code>time.units</code> attribute, but numeric mid-days <code>14…349</code> go through <code>_to_days_float</code> → cyclic interp <code>day % 365.25</code> works correctly.</li>
+        </ul>
+    </div>
+
+    <h3><span class="tag-emoji">⚠️</span>Mismatches / bugs</h3>
+
+    <div class="callout warn">
+        <span class="title">Ozone time axis — unit string not parsed <span style="font-weight:400;color:var(--text-muted);">(<code>external.py:48-78</code>, <code>_to_days_float</code>)</span></span>
+        <ul>
+            <li>File units: <code>"months since 1850-01-01"</code>, values <code>0, 1, 2, …, 599</code>.</li>
+            <li><code>_to_days_float</code> only handles <code>datetime64</code> / <code>cftime.datetime</code> / numeric — on a numeric array it just casts <code>.astype(np.float64)</code>, <strong>ignoring the unit string</strong>. So <code>month=1</code> is treated as <code>day=1</code>.</li>
+            <li><code>_interp_monthly_cyclic</code> then does <code>day_mod = day % 365.25</code> on this mis-scaled axis and against mid-days in <code>[0, 599]</code> → wrong month selected for every query.</li>
+            <li>Additional mismatch: the loader assumes 12-month climatology; this file has 600 months of time-varying ozone. Cyclic interpolation discards all interannual evolution.</li>
+            <li><strong>Fix needed</strong>: detect <code>"months since"</code> in <code>units</code> attr and convert (e.g., × 30.4375) inside <code>_to_days_float</code>; or collapse the file to a climatology before passing to <code>--ozone-file</code>; or add a non-cyclic time-varying ozone code path.</li>
+        </ul>
+    </div>
+
+    <div class="callout warn">
+        <span class="title">Volcanic aerosol — loader will crash <span style="font-weight:400;color:var(--text-muted);">(<code>external.py:156-158</code>, <code>_load_monthly_zonal</code>)</span></span>
+        <ul>
+            <li>File has <strong>no <span class="badge-var">aod</span> variable</strong>. It stores per-band extinction <span class="badge-var">ext_sun</span> / <span class="badge-var">ext_earth</span> in <code>[1/km]</code>, distributed over 70 altitude levels.</li>
+            <li><code>_load_monthly_zonal(path, "aod")</code> raises <code>ValueError: Variable 'aod' not found</code>.</li>
+            <li>Dim name is <code>month</code> (not <code>time</code>), lat is <code>latitude</code> — <code>_load_monthly_zonal</code> handles <code>latitude</code> but falls back to synthetic monthly days for <code>time</code>, so dim-name aliasing alone would not fail; the missing <code>aod</code> var is the hard blocker.</li>
+            <li>Physical mismatch: <code>ext_sun</code> is not a column AOD — it must be vertically integrated <code>∫ ext · dz</code> over the <code>altitude</code> axis and a single 550 nm band selected (or each of the 14 SW / 16 LW bands carried independently).</li>
+            <li><strong>Fix needed</strong>: dedicated volcanic loader that (a) reads <code>ext_sun</code>/<code>ext_earth</code>, (b) multiplies by layer thickness (from <code>altitude</code> coord, km → m), (c) picks or averages over bands, (d) does lat interp on <code>latitude=36</code>.</li>
+        </ul>
+    </div>
+
+    <div class="callout warn">
+        <span class="title"><code>_load_time_gpt</code> TSI-var lookup is case-sensitive <span style="font-weight:400;color:var(--text-muted);">(<code>external.py:297</code>)</span></span>
+        <ul>
+            <li>Uses <code>if tsi_var in ds.data_vars</code> (strict match), unlike <code>_load_timeseries</code> which builds a lowercase <code>varname_map</code> (<code>external.py:105-108</code>).</li>
+            <li>The MPI-M solar file uses <code>TSI</code> (uppercase); without <code>--solar-tsi-var TSI</code> on the CLI the spectral_file path silently falls back to <code>config.S_0</code> (loses time-varying TSI).</li>
+            <li><strong>Fix needed</strong>: mirror the case-insensitive lookup from <code>_load_timeseries</code> in <code>_load_time_gpt</code>.</li>
+        </ul>
+    </div>
+
+    <h3><span class="tag-emoji">ℹ️</span>Observations (not bugs)</h3>
+
+    <div class="callout info">
+        <ul>
+            <li>Kinne files carry far more information than the loader uses: per-band <span class="badge-var">aod/asy/ssa</span>, vertical distribution <span class="badge-var">z_aer_{fine,coarse}_mo</span> <span class="badge-dim">(time, 40, 180, 360)</span>, fine vs. coarse mode separation, and Twomey indirect-effect factors <span class="badge-var">fp1</span>/<span class="badge-var">fp4</span>. The current <code>run_amip.py</code> path only consumes column-integrated, band-averaged <code>aod</code> — a significant simplification relative to a full Kinne implementation.</li>
+            <li>SW (<code>lnwl=14</code>) and LW (<code>lnwl=16</code>) Kinne files are treated identically by <code>_load_monthly_zonal</code> (all non-(time, lat) axes collapsed). There is no SW/LW-aware path in <code>run_amip.py</code>.</li>
+            <li>The solar file also stores <span class="badge-var">year</span> and <span class="badge-var">month</span> as integer variables, plus band edges <span class="badge-var">lb</span>/<span class="badge-var">ub</span> in nm — useful for verification but not consumed by the loader.</li>
+        </ul>
+    </div>
+</section>
+
+<!-- SECTION 4 -->
+<section id="s4">
+    <h2 class="section-title"><span class="section-num">§4</span>Glossary — SW/LW bands and vertical layers</h2>
+
+    <h3>RRTMG spectral bands</h3>
+    <p>These are the spectral discretization used by <strong>RRTMG</strong> (Rapid Radiative Transfer Model for GCMs, Iacono et al. 2008), the broadband radiation scheme that legoESM's <code>rrtmg</code> path targets. RRTMG splits the electromagnetic spectrum into a fixed set of bands; within each band the gaseous absorption is further resolved by <em>g-points</em> using the correlated-k method.</p>
+
+    <div class="kv-grid">
+        <div class="kv-card">
+            <h4>RRTMG-SW</h4>
+            <div class="value">14 shortwave bands</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">Covers the <em>incoming</em> solar spectrum.<br>~0.2–12 µm · expands to 112 g-points.</p>
+        </div>
+        <div class="kv-card">
+            <h4>RRTMG-LW</h4>
+            <div class="value">16 longwave bands</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">Covers the <em>outgoing</em> thermal IR spectrum.<br>~3.1–1000 µm · expands to 140 g-points.</p>
+        </div>
+    </div>
+
+    <div class="band-summary"><span class="k">RRTMG-SW bands</span> = <span class="v">14</span>    →  expanded to <span class="v">112</span> g-points
+<span class="k">RRTMG-LW bands</span> = <span class="v">16</span>    →  expanded to <span class="v">140</span> g-points
+<span class="k">Kinne SW (b14)</span>  ↔  RRTMG-SW (14 bands, 1-to-1)
+<span class="k">Kinne LW (b16)</span>  ↔  RRTMG-LW (16 bands, 1-to-1)</div>
+
+    <details class="expandable">
+        <summary>RRTMG-SW — band edges & absorber features <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <ul>
+                <li>Range: ~0.2–12 µm (820–50 000 cm⁻¹), spanning UV → visible → near-IR.</li>
+                <li>14 bands, numbered <strong>16–29</strong> in AER's canonical numbering.</li>
+                <li>Each band holds 8–16 g-points → <strong>112 g-points total</strong>. <code>_expand_bands_to_gpoints</code> (<code>external.py:946-976</code>) turns 14 per-band fractions into 112 per-g-point weights by repeating each band's value over its g-point range, using <code>bnd_limits_gpt</code> from the RRTMG-SW LUT.</li>
+                <li>Band edges isolate specific absorber features (e.g. O₃ Hartley/Huggins UV, H₂O windows, near-IR CO₂).</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="expandable">
+        <summary>RRTMG-LW — band edges & absorber features <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <ul>
+                <li>Range: ~3.1–1000 µm (10–3250 cm⁻¹).</li>
+                <li>16 bands, numbered <strong>1–16</strong>; 140 g-points total (standard config).</li>
+                <li>Band edges isolate major LW absorbers: H₂O rotation, CO₂ 15 µm (key band for CO₂ forcing), O₃ 9.6 µm, CH₄/N₂O bands, 8–12 µm atmospheric window.</li>
+            </ul>
+        </div>
+    </details>
+
+    <h3>"Matches RRTMG-LW" / "matches RRTMG-SW"</h3>
+    <p>A compatibility statement about file layout: the Kinne aerosol file's <code>lnwl</code> axis is aligned <strong>1-to-1 with the RRTMG band table</strong>, in the same order and with the same wavelength edges — so the radiation scheme can feed <code>aod[t, k, :, :]</code> for band <em>k</em> directly into the RRTMG solver with no spectral remapping.</p>
+
+    <details class="expandable">
+        <summary>What "1-to-1 alignment" means in practice <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <ul>
+                <li><span class="badge-path">aeropt_kinne_lw_b16_coa_rast.nc</span> stores <span class="badge-var">aod/asy/ssa</span> on a <code>lnwl=16</code> axis.</li>
+                <li>Those 16 slots are aligned <strong>1-to-1 with RRTMG-LW's 16 bands</strong>, in the same order and with the same wavelength edges. Band <code>lnwl=3</code> in the file <em>is</em> RRTMG-LW band 3.</li>
+                <li>Consequence: the radiation scheme can feed <code>aod[t, k, :, :]</code> for band <em>k</em> directly into the RRTMG-LW solver — no spectral remapping or averaging needed.</li>
+                <li>Same logic applies to SW Kinne files (<code>lnwl=14</code> ↔ RRTMG-SW 14 bands).</li>
+                <li>The CMIP6 volcanic file uses <code>solar_bands=14</code> + <code>terrestrial_bands=16</code> — same band counts, different (but also RRTMG-compatible) naming.</li>
+            </ul>
+        </div>
+    </details>
+
+    <h3>G-points (correlated-k quadrature points)</h3>
+    <p><strong>G-points</strong> (also written "g-points" or "gpt") are the fundamental computational unit of the <strong>correlated-k distribution (CKD) method</strong>, the technique RRTMG uses to replace brute-force line-by-line radiative transfer with something a GCM can afford.</p>
+
+    <div class="callout info">
+        <span class="title">tl;dr</span>
+        G-points are <em>"Gauss quadrature points in sorted-absorption-coefficient space"</em>. One g-point = one <code>(k, weight)</code> pair that represents some fraction of a band's spectral interval, chosen so that fluxes come out right despite the spiky underlying absorption.
+    </div>
+
+    <div class="kv-grid">
+        <div class="kv-card">
+            <h4>RRTMG-SW</h4>
+            <div class="value">14 bands → 112 g-points</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">~10 000× faster than line-by-line.</p>
+        </div>
+        <div class="kv-card">
+            <h4>RRTMG-LW</h4>
+            <div class="value">16 bands → 140 g-points</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">~10 000× faster than line-by-line.</p>
+        </div>
+    </div>
+
+    <p>Per-band g-point counts vary (some bands have 2, some have 16) — that's why <code>bnd_limits_gpt</code> in the RRTMG-SW lookup table is a <span class="badge-dim">(14, 2)</span> array giving the <code>[start, end]</code> g-point index for each band. <code>_expand_bands_to_gpoints</code> (<code>external.py:946-976</code>) uses that exact table to broadcast a per-band solar fraction to its constituent g-points.</p>
+
+    <details class="expandable">
+        <summary>The problem g-points solve <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <p>Gas absorption spectra are wildly jagged. Within even a "narrow" band like 15 µm CO₂, the absorption coefficient <code>k(ν)</code> oscillates over <strong>~5 orders of magnitude</strong> across thousands of individual spectral lines.</p>
+            <p>To compute flux accurately you'd have to integrate at thousands of wavenumber points per band — ~10⁶ evaluations for the whole spectrum. That's <strong>line-by-line (LBL)</strong>: fine for reference calculations, impossible for a GCM doing this every column, every radiation step.</p>
+        </div>
+    </details>
+
+    <details class="expandable">
+        <summary>The CKD trick <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <p>Within one band, the optical depth <code>τ(ν) = k(ν)·u</code> depends only on the <em>distribution</em> of <code>k</code> values, not on which wavenumber they came from (assuming pressure/temperature don't vary across the band — the key approximation).</p>
+            <p>So you:</p>
+            <ol>
+                <li>Take the spiky <code>k(ν)</code> in a band.</li>
+                <li><strong>Sort it</strong> from smallest to largest. Call the result the <strong>cumulative distribution</strong> <code>k(g)</code>, where <code>g ∈ [0, 1]</code> is the cumulative probability.</li>
+                <li><code>k(g)</code> is a <strong>smooth, monotonic function</strong> — it can be integrated with a handful of Gauss quadrature points.</li>
+            </ol>
+            <p>Each quadrature point is a <strong>g-point</strong>. It carries:</p>
+            <ul>
+                <li>a representative absorption coefficient <code>k_gpt</code> (tabulated vs. p, T, and absorber amount in the RRTMG LUT),</li>
+                <li>a quadrature weight <code>w_gpt</code>.</li>
+            </ul>
+            <p>The band flux is then <code>F_band = Σ_gpt w_gpt · F(k_gpt)</code>, summed over maybe 8–16 g-points instead of thousands of wavenumbers.</p>
+        </div>
+    </details>
+
+    <details class="expandable">
+        <summary>"Correlated" — what actually correlates? <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <p>The approximation is that the ordering of <code>k(ν)</code> values stays roughly the same across different pressures and temperatures — the strong-absorbing wavenumbers at the surface are still the strong-absorbing ones at the stratopause.</p>
+            <p>That lets RRTMG use one <code>g(ν)</code> mapping per band for the whole column. When multiple gases overlap in one band, RRTMG handles the correlation via lookup tables parameterised by <code>η</code> (a mixing parameter).</p>
+        </div>
+    </details>
+
+    <details class="expandable" open>
+        <summary>Why <code>run_amip.py</code> cares <span class="tag">Relevance</span></summary>
+        <div class="details-body">
+            <p>The CMIP6 solar file stores per-band fractions (<span class="badge-var">SSI_frac</span>, shape <span class="badge-dim">(time, 14)</span>). But RRTMG's radiation solver operates at g-point resolution — it wants a <span class="badge-dim">(112,)</span> array of fractions, one per g-point, summing to 1. Two ways to get there:</p>
+            <ol>
+                <li><strong>Per-band input</strong> → expand: each band's single fraction is repeated over all g-points in that band. <code>run_amip.py</code>'s auto-path when <code>nspec &lt; 50</code> (<code>external.py:929-933</code>).</li>
+                <li><strong>Per-g-point input</strong> → use directly: file already stores <span class="badge-var">solar_fraction_by_gpt</span> with shape <span class="badge-dim">(time, 112)</span>.</li>
+            </ol>
+            <p>Both end up as a <span class="badge-dim">(112,)</span> weight vector fed into the RRTMG-SW solver so that band-integrated fluxes are weighted by the current solar spectrum (important for solar-cycle and Maunder-Minimum-type experiments).</p>
+        </div>
+    </details>
+
+    <h3>"40 layers" in Kinne files</h3>
+    <p><code>lev=40</code> is a <strong>vertical discretization of the aerosol column into 40 altitude bins</strong>, independent of the host model's vertical grid. The file stores where each layer sits and how much aerosol mass is in it as a function of month, lat, and lon.</p>
+
+    <div class="callout info">
+        <span class="title">File layout summary</span>
+        How much AOD <em>per band</em> (14 SW or 16 LW) × <em>where in the column</em> (40 layers) × <em>which season</em> (12 months) × <em>where on Earth</em> (180 × 360).
+    </div>
+
+    <details class="expandable">
+        <summary>The 40-layer variables in detail <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <ul>
+                <li><span class="badge-var">zbot_abs</span> / <span class="badge-var">ztop_abs</span> <span class="badge-dim">(lev=40,)</span>, m: absolute altitudes of each layer's bottom/top above sea level. Fixed vertical grid, identical everywhere.</li>
+                <li><span class="badge-var">zbot</span> / <span class="badge-var">ztop</span> <span class="badge-dim">(lev=40, lat=180, lon=360)</span>, m above ground: same layering but referenced to local surface altitude <span class="badge-var">asl</span>. Over mountains, layer 1 starts higher in absolute altitude.</li>
+                <li><span class="badge-var">z_aer_fine_mo</span> / <span class="badge-var">z_aer_coarse_mo</span> <span class="badge-dim">(time=12, lev=40, lat, lon)</span>, 1/m: <strong>vertical profile of the aerosol distribution</strong> — fraction of column AOD per metre of height in each layer. <code>Σ z_aer · (ztop − zbot) = 1</code> over <code>lev</code> (i.e. 100% of the column).</li>
+                <li>Usage: the radiation scheme multiplies <code>aod[time, band, lat, lon]</code> (column total) by <code>z_aer · Δz</code> to redistribute AOD onto the host model's vertical levels.</li>
+            </ul>
+        </div>
+    </details>
+
+    <div class="callout warn">
+        <span class="title">Current <code>run_amip.py</code> behaviour</span>
+        <code>_load_monthly_zonal</code> collapses over <code>lon</code>, <code>lnwl</code>, <em>and</em> <code>lev</code> to return only <span class="badge-dim">(time=12, lat)</span> total column AOD. It discards all band- and height-resolved information that Kinne was specifically built to provide.
+    </div>
+</section>
+
+<!-- SECTION 5 -->
+<section id="s5">
+    <h2 class="section-title"><span class="section-num">§5</span>Recommended code changes</h2>
+    <ol class="recs">
+        <li><strong><code>external.py:_to_days_float</code></strong> — inspect the <code>units</code> attribute for <code>"months since"</code> / <code>"hours since"</code> / <code>"seconds since"</code> and convert to days before returning.</li>
+        <li><strong><code>external.py:get_ozone_at_time</code></strong> — add a non-cyclic, calendar-aware path for time-varying ozone (e.g. CMIP6 input4MIPs), or document that files longer than one year must be pre-reduced to a 12-month climatology.</li>
+        <li><strong>New volcanic loader</strong> — dedicated code path for CMIP6 volcanic files (<span class="badge-var">ext_sun</span>, <span class="badge-var">ext_earth</span>, altitude in km, <code>month</code>, <code>latitude</code>), returning per-band column AOD after vertical integration and 550 nm band selection.</li>
+        <li><strong><code>external.py:_load_time_gpt</code> (line 297)</strong> — case-insensitive <code>tsi_var</code> lookup consistent with <code>_load_timeseries</code>.</li>
+        <li><strong><code>run_amip.py</code> help strings</strong> — document MPI-M CMIP6 solar requirement: <code>--solar-tsi-var TSI --solar-spectral-var SSI_frac</code>.</li>
+    </ol>
+</section>
+
+<footer>
+    Generated from <code>amip_forcing_files.md</code> · legoESM forcing analysis · run_amip.py compatibility report
+</footer>
+
+</div>
+
+</body>
+</html>

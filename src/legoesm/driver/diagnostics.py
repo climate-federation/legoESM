@@ -164,6 +164,7 @@ class DiagnosticCollector:
         n_days: int = 200,
         output_dir: str | Path = "",
         cmip_resolution_deg: float = 5.0,
+        start_year: int = 1979,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -205,7 +206,11 @@ class DiagnosticCollector:
         self.cf_writer = None
         self._spatial_monthly = None
         self._cs_regrid_weights = None  # cached cubed-sphere → lat-lon weights
-        self._cmip_start_year = 1  # updated by set_cmip_start_year()
+        # Time axis reference is the experiment start year (CMIP6 AMIP
+        # convention: ``days since <start_year>-01-01``), which makes the
+        # stored time values start at zero and decode to the correct
+        # wall-clock dates without relying on a distant epoch.
+        self._cmip_start_year = start_year
         if cmip_output:
             from legoesm.io.cmor_output import CFWriter
             cmor_dir = str(Path(output_dir) / "cmor") if output_dir else "cmor"
@@ -215,21 +220,38 @@ class DiagnosticCollector:
                 model_id="legoESM-1-0",
                 freq="mon",
                 calendar="noleap",
-                ref_date="0001-01-01",
+                ref_date=f"{start_year:04d}-01-01",
             )
             if not monthly_means:
                 from legoesm.diagnostics.monthly_means import MonthlyAccumulator
                 self.monthly_means = True
                 self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
             # Full spatial accumulator for CMIP NetCDF output
-            from legoesm.diagnostics.monthly_means import SpatialMonthlyAccumulator
+            from legoesm.diagnostics.monthly_means import (
+                SpatialMonthlyAccumulator, SpatialDailyAccumulator,
+            )
             _cmip_nlon = int(round(360.0 / cmip_resolution_deg))
             _cmip_nlat = int(round(180.0 / cmip_resolution_deg))
             self._spatial_monthly = SpatialMonthlyAccumulator(
                 nlat=_cmip_nlat, nlon=_cmip_nlon, nlev=nlev,
             )
+            # Daily accumulator (CMIP6 ``day`` table) — tracks running
+            # min/max for tas so tasmin/tasmax can be emitted.
+            self._spatial_daily = SpatialDailyAccumulator(
+                nlat=_cmip_nlat, nlon=_cmip_nlon,
+                track_extremes={"tas"},
+            )
             self._cmip_nlat = _cmip_nlat
             self._cmip_nlon = _cmip_nlon
+            # Time-invariant (``fx`` table) fields — filled by
+            # ``set_fixed_fields`` if the driver supplies topography /
+            # land mask; written once at end-of-run.
+            self._fixed_phis: np.ndarray | None = None
+            self._fixed_land_fraction: np.ndarray | None = None
+        else:
+            self._spatial_daily = None
+            self._fixed_phis = None
+            self._fixed_land_fraction = None
 
         # Snapshots
         self.snapshot_days: set[int] = set()
@@ -293,6 +315,28 @@ class DiagnosticCollector:
                 f"Voronoi/MPAS grids require unstructured-to-latlon regridding "
                 f"which is not yet implemented."
             )
+
+    def set_fixed_fields(
+        self,
+        phis: np.ndarray | None = None,
+        land_fraction: np.ndarray | None = None,
+    ) -> None:
+        """Register time-invariant source fields for the CMIP6 ``fx`` file.
+
+        Parameters
+        ----------
+        phis : array, optional
+            Surface geopotential [m2/s2] on the native model grid.
+            Converted to orography (``orog = phis / g``) and regridded
+            to the CMIP target grid at save time.
+        land_fraction : array, optional
+            Land fraction in [0, 1] on the native model grid.  Emitted
+            as ``sftlf`` (percent) on the CMIP target grid.
+        """
+        if phis is not None:
+            self._fixed_phis = np.asarray(phis)
+        if land_fraction is not None:
+            self._fixed_land_fraction = np.asarray(land_fraction)
 
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
@@ -681,6 +725,24 @@ class DiagnosticCollector:
             if fields_3d:
                 self._spatial_monthly.add_3d(doy, year, fields_3d)
 
+            # Daily accumulation (CMIP6 ``day`` table).  Reuses the 2-D
+            # regridded fields computed above, plus 850 hPa winds sliced
+            # out of the already-regridded 3-D ua/va arrays.
+            if self._spatial_daily is not None:
+                daily_2d: dict[str, np.ndarray] = {}
+                for _name in ("tas", "pr", "psl"):
+                    if _name in fields_2d:
+                        daily_2d[_name] = fields_2d[_name]
+                # 850 hPa is index 16 in the ascending-sorted PLEV19 axis
+                # (same sort order used by ``_interp_to_plev19``).
+                _plev_sorted = np.sort(CMIP6_PLEV19)
+                _idx850 = int(np.argmin(np.abs(_plev_sorted - 85000.0)))
+                for _src, _dst in (("ua", "ua850"), ("va", "va850")):
+                    if _src in fields_3d and fields_3d[_src].shape[2] > _idx850:
+                        daily_2d[_dst] = fields_3d[_src][:, :, _idx850]
+                if daily_2d:
+                    self._spatial_daily.add_2d(doy, year, daily_2d)
+
         return {
             'mean_sst': mean_sst,
             'mean_sic': mean_sic,
@@ -933,6 +995,8 @@ class DiagnosticCollector:
 
         if self.cf_writer is not None:
             self._write_cmip_monthly_files()
+            self._write_cmip_daily_files()
+            self._write_cmip_fixed_files()
             self.cf_writer.close()
 
     def _write_cmip_monthly_files(self) -> None:
@@ -944,6 +1008,93 @@ class DiagnosticCollector:
             return
         data = self._spatial_monthly.finalize()
         self._write_cmip_data(data)
+
+    def _cmip_target_latlon(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return (lat, lon) 1-D arrays for the CMIP target grid."""
+        dlat = 180.0 / self._cmip_nlat
+        dlon = 360.0 / self._cmip_nlon
+        lat = np.linspace(
+            -90.0 + dlat / 2, 90.0 - dlat / 2, self._cmip_nlat,
+        )
+        lon = np.linspace(
+            dlon / 2, 360.0 - dlon / 2, self._cmip_nlon,
+        )
+        return lat, lon
+
+    def _write_cmip_daily_files(self) -> None:
+        """Flush the daily accumulator to CMIP6 ``day`` NetCDF files."""
+        if self._spatial_daily is None or self.cf_writer is None:
+            return
+        data = self._spatial_daily.finalize()
+        if not data.get("days"):
+            return
+        lat, lon = self._cmip_target_latlon()
+        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+
+    def _write_cmip_fixed_files(self) -> None:
+        """Write the CMIP6 ``fx`` file (orog / sftlf / areacella).
+
+        ``areacella`` is always computed from the CMIP target lat-lon
+        grid (cosine-latitude weights on Earth's radius).  ``orog`` and
+        ``sftlf`` are written only when ``set_fixed_fields`` supplied
+        the source data.
+        """
+        if self.cf_writer is None:
+            return
+        if getattr(self, "_cmip_nlat", None) is None:
+            return
+
+        from legoesm import constants as _c
+
+        lat, lon = self._cmip_target_latlon()
+
+        # areacella: cell area on the target grid [m^2].  Using exact
+        # sin-latitude differences (not small-angle approx) keeps total
+        # surface area equal to 4 π R^2 to machine precision.
+        lat_edges_deg = np.linspace(-90.0, 90.0, self._cmip_nlat + 1)
+        sin_edges = np.sin(np.radians(lat_edges_deg))
+        band_area_frac = sin_edges[1:] - sin_edges[:-1]  # (nlat,)
+        dlon_rad = 2.0 * np.pi / self._cmip_nlon
+        R = float(_c.R_earth)
+        area_lat = (R ** 2) * band_area_frac * dlon_rad  # (nlat,)
+        areacella = np.broadcast_to(
+            area_lat[:, None], (self._cmip_nlat, self._cmip_nlon),
+        ).astype(np.float64)
+        try:
+            self.cf_writer.write_fixed(
+                var_name="areacella",
+                data=areacella, lat=lat, lon=lon,
+            )
+        except (KeyError, ValueError):
+            pass
+
+        # orog: surface altitude = phis / g
+        if self._fixed_phis is not None:
+            orog_native = np.asarray(self._fixed_phis) / float(_c.g)
+            orog = self._regrid_to_latlon_2d(orog_native)
+            if orog is not None:
+                try:
+                    self.cf_writer.write_fixed(
+                        var_name="orog",
+                        data=orog, lat=lat, lon=lon,
+                    )
+                except (KeyError, ValueError):
+                    pass
+
+        # sftlf: land area fraction in %.  Clipped to [0, 100] to guard
+        # against small negative overshoots from bilinear regridding.
+        if self._fixed_land_fraction is not None:
+            lf_native = np.asarray(self._fixed_land_fraction)
+            sftlf = self._regrid_to_latlon_2d(lf_native)
+            if sftlf is not None:
+                sftlf = np.clip(sftlf * 100.0, 0.0, 100.0)
+                try:
+                    self.cf_writer.write_fixed(
+                        var_name="sftlf",
+                        data=sftlf, lat=lat, lon=lon,
+                    )
+                except (KeyError, ValueError):
+                    pass
 
     def _write_cmip_data(self, data: dict) -> None:
         """Write a batch of CMIP monthly data to NetCDF files.
@@ -964,12 +1115,15 @@ class DiagnosticCollector:
         lon = np.linspace(dlon / 2, 360.0 - dlon / 2, self._cmip_nlon)
 
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        start_year = self._cmip_start_year
 
         from legoesm.io.cmor_output import CMIP6_PLEV19
 
+        # ``yr`` here is the 0-based run-relative calendar year (not the
+        # absolute calendar year) because the CFWriter's ``ref_date`` is
+        # ``<start_year>-01-01``, so time values must start from zero at
+        # the first simulation month.
         for i, (yr, mo) in enumerate(months):
-            year_offset = (start_year - 1 + yr) * 365.0
+            year_offset = yr * 365.0
             day_start = year_offset + sum(month_days[:mo - 1])
             day_end = day_start + month_days[mo - 1]
             time_mid = 0.5 * (day_start + day_end)

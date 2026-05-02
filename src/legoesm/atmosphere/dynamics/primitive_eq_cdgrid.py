@@ -264,7 +264,7 @@ def fv3_hydrostatic_tendencies(
     ln_ps_hi = ln_ps.astype(_pg_dt)
     dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
-    T_corner = 1.0 / inv_T_corner
+    T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
     T_corner_hi = T_corner.astype(_pg_dt)
     pg_corr_x = (R_d * T_corner_hi * dln_dx_hi[..., None]).astype(u_d.dtype)
     pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi[..., None]).astype(v_d.dtype)
@@ -428,18 +428,39 @@ def fv3_hydrostatic_tendencies(
     # even when duogrid is active.  Non-MPI fallback does per-field pads
     # with duogrid routing preserved.
     _pe_dg = grid.duogrid
-    if _halo_backend == "mpi" and _needs_uv_pad:
+    # ``ln_ps_3d`` carries a singleton trailing axis on purpose so it
+    # can ride the same packed exchange as the full 3D fields.  This is
+    # explicitly supported by ``packed_pad_halo_mpi_4d`` (and its SPMD
+    # twin), whose docstring promises that "all fields must share the
+    # same (6, n, n) spatial prefix; the trailing axis (levels/channels)
+    # can differ" — the helper concatenates along the trailing axis and
+    # splits per-field on return (halo_exchange.py:1128-1133).  Loop 189
+    # added the optimisation; restoring it here preserves the
+    # ``∇(ln p_s)`` halo without paying for two extra exchanges.  The
+    # MPI branch is taken whenever the backend is MPI (regardless of
+    # ``_needs_uv_pad``) so the lnps halo is never silently routed
+    # through a non-packed code path under MPI.
+    ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
+    if _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_mpi_4d(
-            T, u_cell, v_cell, topology=_mpi_topology, duogrid=_pe_dg,
-        )
+        if _needs_uv_pad:
+            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+                T, u_cell, v_cell, ln_ps_3d,
+                topology=_mpi_topology, duogrid=_pe_dg,
+            )
+        else:
+            _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+                T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
+            )
+            _u_cc_pad = _v_cc_pad = None
     else:
         # Route through duogrid remap when duogrid is active on the grid,
         # matching the pattern used by _arakawa_lamb_gradient via
         # `_pad_halo_auto`.
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
+        _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
         if _needs_uv_pad:
             _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
             _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
