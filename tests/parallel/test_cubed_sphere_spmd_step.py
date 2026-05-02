@@ -87,6 +87,85 @@ class TestCubedSphereSPMDStep:
                 s = model.step(s, dt)
         return fv3_to_hydrostatic(s, cdgrid)
 
+    def _run_with_physics(self, *, devices: int, n_steps: int = 1):
+        """Variant of ``_run`` that wires Held-Suarez physics into the
+        step.  Mirrors what ``run_levante_gpu_scaling.py`` does for
+        ``--physics held_suarez``.
+        """
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.cfl import (
+            adaptive_hyperdiff_coeff, estimate_min_dx_cubed_sphere,
+        )
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
+            hydrostatic_to_fv3, fv3_to_hydrostatic,
+        )
+        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+
+        n_grid, n_lev, dt = 24, 8, 450.0
+        grid = create_cubed_sphere(n_grid)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sigma = create_sigma_coordinate(n_lev)
+        dx_min = estimate_min_dx_cubed_sphere(n_grid)
+        nu4 = adaptive_hyperdiff_coeff(dx_min, dt, order=4, safety=0.5)
+        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+        cfg = CDGridPrimitiveEquationConfig(
+            hyperdiff_coeff=nu4, hyperdiff_ps_coeff=nu4,
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True, zero_mean_ps_tendency=False,
+            time_integrator='ssp_rk3',
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+        s = hydrostatic_to_fv3(state_cc, cdgrid)
+        if devices > 1:
+            from legoesm.parallel.mesh import (
+                create_device_mesh, shard_pytree,
+            )
+            from legoesm.parallel.cubesphere_exchange import (
+                activate_spmd_halo_backend, deactivate_spmd_halo_backend,
+            )
+            dev_config = create_device_mesh(n_devices=devices)
+            activate_spmd_halo_backend(dev_config.mesh, n=n_grid, nlev=n_lev)
+            try:
+                s = shard_pytree(s, dev_config)
+                for _ in range(n_steps):
+                    s = model.step(s, dt, physics_fn=held_suarez_forcing)
+            finally:
+                deactivate_spmd_halo_backend()
+        else:
+            for _ in range(n_steps):
+                s = model.step(s, dt, physics_fn=held_suarez_forcing)
+        return fv3_to_hydrostatic(s, cdgrid)
+
+    def test_6device_with_physics_matches_1device(self):
+        """6-device SPMD with Held-Suarez physics matches single-device.
+
+        Iter-44: physics_fn closures are captured in the JIT closure
+        (not passed as traced args), so the with-physics SPMD path
+        could in principle differ from the no-physics path.  Verify
+        the iter-31 vector-halo offsets fix carries through to the
+        with-physics path too.
+        """
+        _need_devices(6)
+        ref = self._run_with_physics(devices=1, n_steps=1)
+        out = self._run_with_physics(devices=6, n_steps=1)
+        for name, atol, rtol in (
+            ("u", 1e-12, 1e-13),
+            ("v", 1e-12, 1e-13),
+            ("T", 1e-11, 1e-13),
+            ("p_s", 1.0, 1e-5),
+        ):
+            r = np.asarray(getattr(ref, name).data)
+            o = np.asarray(getattr(out, name).data)
+            np.testing.assert_allclose(
+                o, r, atol=atol, rtol=rtol,
+                err_msg=f"{name}: 6-dev cubed-sphere with-physics drift "
+                        f"exceeds float-pt envelope",
+            )
+
     @pytest.mark.parametrize("n_steps", [1, 10])
     def test_6device_matches_1device(self, n_steps):
         """6-device face-sharded cubed-sphere matches single-device to
