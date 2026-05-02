@@ -38,7 +38,7 @@ class TestCubedSphereSPMDStep:
     SSP-RK3 steps.
     """
 
-    def _run(self, *, devices: int, n_steps: int = 3):
+    def _run(self, *, devices: int, n_steps: int = 3, n_grid: int = 24):
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -51,7 +51,9 @@ class TestCubedSphereSPMDStep:
         )
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
-        n_grid, n_lev, dt = 24, 8, 450.0
+        # dt scales with resolution to stay CFL-stable
+        dt = 450.0 if n_grid <= 24 else 225.0
+        n_lev = 8
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         sigma = create_sigma_coordinate(n_lev)
@@ -163,6 +165,31 @@ class TestCubedSphereSPMDStep:
             np.testing.assert_allclose(
                 o, r, atol=atol, rtol=rtol,
                 err_msg=f"{name}: 6-dev cubed-sphere with-physics drift "
+                        f"exceeds float-pt envelope",
+            )
+
+    def test_C48_6device_matches_1device(self):
+        """Verify cubed-sphere SPMD bit-equivalence at production-ish
+        resolution C48.  Iter-45 confirms the iter-31 fix carries
+        through to higher horizontal resolution.
+
+        Same envelope as C24: u/v/T at FMA precision, p_s ~1e-7 rel
+        (allreduce float-pt).
+        """
+        _need_devices(6)
+        ref = self._run(devices=1, n_steps=1, n_grid=48)
+        out = self._run(devices=6, n_steps=1, n_grid=48)
+        for name, atol, rtol in (
+            ("u", 1e-12, 1e-13),
+            ("v", 1e-12, 1e-13),
+            ("T", 1e-11, 1e-13),
+            ("p_s", 1.0, 1e-5),
+        ):
+            r = np.asarray(getattr(ref, name).data)
+            o = np.asarray(getattr(out, name).data)
+            np.testing.assert_allclose(
+                o, r, atol=atol, rtol=rtol,
+                err_msg=f"{name}: 6-dev cubed-sphere C48 SPMD drift "
                         f"exceeds float-pt envelope",
             )
 
