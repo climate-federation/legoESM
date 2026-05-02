@@ -1,7 +1,34 @@
 # Realistic coastlines + bathymetry on the lat-lon C-grid ocean — implementation plan
 
-**Status (2026-05-01):** Phases 0–3.5 **complete**; Phase 4-5
-remaining, blocked on a non-PGF ETOPO-domain instability.
+**Status (2026-05-01):** Phases 0–3.5 **complete**; Phase 4(a)
+smoke-test **complete**; Phase 4(b) first-pass 20-yr Wolfe-Cessi
+spinup on real ETOPO **complete with mixed result** — see
+``realistic_geometry_phase4_results.md``.  Thermodynamics develop
+correctly; momentum field has residual partial-cell q-noise plus
+cold-start imbalance.  Next session resumes from the priority list
+in that results doc.
+
+### Phase 4(b) first-pass result (2026-05-01)
+
+Run: ``results/ocean/global_overturning_realistic_geometry/`` —
+ETOPO 5° (36×72), MEO r=0.2, A_h=1e4, K_GM=K_Redi=800,
+drag=2.5e-3, B_h=5e9, SMC03 PGF, AL81 PV-flux, implicit-CN
+barotropic.  50-yr targeted, killed at year 20.8 with sufficient
+qualitative data.  Restarts saved at years 0, 5, 10, 15, 20.
+
+- ✅ Stratification, SST pattern, SSH pattern, mass conservation,
+  no NaN, bottom-T trend correct.
+- ❌ No deep AMOC-like MOC cell forms; barotropic streamfunction
+  dominated by coastal noise (no coherent gyres); surface speeds
+  3–5× realistic with pathological striping in equatorial Pacific.
+
+The full SMC03 + AL81 + h_vtx min-rule + MEO + closure stack is
+**stable shippable infrastructure**.  Gap to production-quality
+dynamics is a combination of (a) residual partial-cell q-noise in
+the AL81 stencil (likely missing corner-triad ENE corrections),
+and (b) absence of production spinup machinery (Levitus/WOA IC,
+forcing ramp, viscosity ramp).  See results doc for the prioritised
+next-session plan.
 
 ### Resumed (was: paused at Phase 3.5/4 pending partial cells)
 
@@ -512,6 +539,26 @@ to expose.  Cost: ~3–4 days for ~6 h of additional model runtime
 (30+90 days at dt=600s + diagnostics).
 
 ### Phase 4 — 50-yr global overturning on realistic geometry  (≈ 1 week + wall time)
+
+**Status (2026-05-01):** First-pass complete — see
+``realistic_geometry_phase4_results.md``.  Run reached year 20.8
+without NaN; thermodynamics correct, momentum noisy.  Next-session
+priorities (in order of cost/info-gain):
+
+1. Audit ``pv_flux_al81_partial_cell`` for missing corner-triad ENE
+   corrections (Sadourny-Salmon energy-enstrophy form).  Diagnose
+   via discrete energy + enstrophy budgets vs flat-bottom reference.
+2. Forcing ramp: τ_wind=0 + long SST τ_T for first sim-year, ramp
+   over 6 months to production values.
+3. Equilibrated initial T/S from Levitus/WOA climatology rather
+   than analytic exp(z).
+4. Spinup viscosity ramp: A_h=5e5 for first year → 1e4 after gyres
+   set up.
+5. Re-run 50-100 yr with above.
+
+If after (1)-(5) partial-cell noise still dominates, fall back to
+PLM-in-(T, S) PGF upgrade flagged in
+``pgf_production_models_research.md``.
 
 **Gated on Phases 3 and 3.5**: do not start Phase 4 until 3a–3e all
 pass and 3.5's smoke tests complete cleanly.  This is a multi-hour
