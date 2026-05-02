@@ -42,6 +42,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere SPMD halo at 2/3 devices              | replicated-fallback | multi-face all_gather (31–44% lower per-step time) |
 | Spectral PE σ-coord cross-level collectives        |          3 |           1 |
 | Hybrid mass-flux + dp_s_dt cross-level collectives (CS, spectral) | 4 (2 in fn + 2 in callers) | 2 |
+| compute_sigma_dot internal cross-level collectives  |          2 |           1 |
+| Cubed-sphere FV3 σ-coord σ̇ + dp_s_dt cross-level collectives | 3 | 1 |
 | Cubed-sphere PPM halo=2 calls (SPMD or MPI)        |          3 |           2 |
 | MPAS dycore mass-fix payload                       |          3 |           2 |
 | Voronoi MPI sendrecvs                              |         12 |           6 |
@@ -138,6 +140,9 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 ## Commit log
 
 ```
+181e65de vertical: add compute_sigma_dot_and_total; cubed-sphere FV3 PE reuses both
+5b69b9f6 vertical: drop redundant column-sum in compute_sigma_dot
+13a94241 docs: record iter-51 hybrid mass-flux collective reduction
 bb3ebd9c hybrid mass flux: return D_total_p; reuse in cubed-sphere + spectral PE
 715045c5 docs: record iter-50 spectral PE column-sum collective reduction
 da3b87f8 spectral PE: drop redundant column-sum collectives in non-hybrid path
