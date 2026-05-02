@@ -102,7 +102,7 @@ deterministic-reduction collective.
 | File                                                    | # tests | What |
 |---------------------------------------------------------|--------:|------|
 | `tests/parallel/test_cubesphere_exchange.py::TestSPMDWithOffsets` | 8 | halo bit-equivalence |
-| `tests/parallel/test_cubed_sphere_spmd_step.py`          |       2 | end-to-end cubed-sphere SPMD step (1 and 10 RK3 steps) |
+| `tests/parallel/test_cubed_sphere_spmd_step.py`          |       6 | end-to-end cubed-sphere SPMD step (1 + 10 RK3 steps; with-physics; C48; 2- and 3-device multi-face) |
 | `tests/parallel/test_spectral_level_shard.py`            |       2 | level-shard equivalence (2 and 4 devices) |
 | `tests/parallel/test_voronoi_sharded_equivalence.py`     |       3 | cell-shard equivalence (2, 3, 4 devices) |
 
@@ -110,10 +110,14 @@ Run with the appropriate `XLA_FLAGS=--xla_force_host_platform_device_count=N`.
 
 ## Outstanding follow-ups (not addressed in this branch)
 
-- **Multi-face-per-device cubed-sphere SPMD halo**: kernels currently
-  assume exactly 1 face per device.  2- and 3-device cubed-sphere
-  configurations fall back to a replicated halo — the SPMD halo path
-  requires generalisation to handle multiple faces per shard.
+- **Multi-face ppermute**: the all_gather-based SPMD halo kernels
+  (halo=1 and halo=2) now support multi-face shards
+  (`n_faces_per_shard ∈ {1, 2, 3, 6}`, iter-49); the ppermute kernel
+  still assumes exactly one face per shard, so 2- and 3-device
+  configurations route through the all_gather kernel.  At small face
+  counts that's negligible — the all_gather payload is a constant
+  multiple of the ppermute payload up to the 6-device limit — so this
+  is low priority.
 
 - **MPI-side `interp_offsets` plumbing**: `pad_halo_mpi_4d` raises
   `NotImplementedError` on `interp_offsets`.  Single-face-panel and

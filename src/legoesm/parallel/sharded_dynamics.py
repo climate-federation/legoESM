@@ -688,15 +688,16 @@ def make_sharded_step(
     # This replaces implicit cross-shard reads with explicit all_gather
     # collectives, producing much better XLA communication patterns.
     #
-    # The SPMD shard_map kernels in ``cubesphere_exchange`` assume the
-    # local shard contains exactly one face (``local_shard[0]`` is the
-    # owned face).  That holds only when 6 faces are split evenly across
-    # 6 devices.  With 2 or 3 devices a shard contains 3 or 2 faces and
-    # the kernel silently drops the extra faces, producing broadcast
-    # mismatches downstream.  Restrict activation to the 1-face-per-device
-    # case; sub-6 device counts fall back to the default halo backend.
-    if (config.n_devices == 6
+    # Iter-49: the SPMD halo kernels (allgather + halo=2 allgather) now
+    # support multi-face shards (n_faces_per_shard ∈ {1, 2, 3, 6}).
+    # Activation generalised from "exactly 6 devices" to "any divisor
+    # of 6" — 1, 2, 3, 6 — so 2- and 3-device configurations also use
+    # the explicit SPMD path instead of falling back to the auto-gather
+    # default halo backend.
+    _n = config.n_devices
+    if (_n in (1, 2, 3, 6)
             and getattr(config, 'tiling', (1, 1)) == (1, 1)
+            and config.mesh is not None
             and "face" in getattr(config.mesh, 'axis_names', ())):
         from legoesm.parallel.cubesphere_exchange import (
             activate_spmd_halo_backend,

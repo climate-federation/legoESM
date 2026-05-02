@@ -193,6 +193,34 @@ class TestCubedSphereSPMDStep:
                         f"exceeds float-pt envelope",
             )
 
+    @pytest.mark.parametrize("devices", [2, 3])
+    def test_multiface_shard_matches_1device(self, devices):
+        """Iter-49 generalises the SPMD halo kernel to multi-face shards.
+
+        On 2 devices each shard owns 3 faces (n_faces_per_shard=3); on
+        3 devices each shard owns 2 faces.  The iter-1 activation guard
+        previously restricted the SPMD halo to exactly 6 devices and
+        fell back to the auto-gather backend for 2 / 3 — iter-49 lifted
+        that.  This test composes everything end-to-end and asserts
+        the multi-face SPMD path matches the single-device dycore.
+        """
+        _need_devices(devices)
+        ref = self._run(devices=1, n_steps=1)
+        out = self._run(devices=devices, n_steps=1)
+        for name, atol, rtol in (
+            ("u", 1e-12, 1e-13),
+            ("v", 1e-12, 1e-13),
+            ("T", 1e-11, 1e-13),
+            ("p_s", 1.0, 1e-5),
+        ):
+            r = np.asarray(getattr(ref, name).data)
+            o = np.asarray(getattr(out, name).data)
+            np.testing.assert_allclose(
+                o, r, atol=atol, rtol=rtol,
+                err_msg=f"{name}: {devices}-dev cubed-sphere multi-face "
+                        f"SPMD drift exceeds float-pt envelope",
+            )
+
     @pytest.mark.parametrize("n_steps", [1, 10])
     def test_6device_matches_1device(self, n_steps):
         """6-device face-sharded cubed-sphere matches single-device to

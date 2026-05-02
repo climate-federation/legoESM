@@ -265,61 +265,79 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
             (local_shard,) = args
             offsets = None
 
+        n_faces_per_shard = local_shard.shape[0]
         n = local_shard.shape[1]
-        my_face = local_shard[0]
+        # ``mesh.shape["face"]`` is the device count along the face
+        # axis (1, 2, 3, or 6 for cubed-sphere) — *not* the global
+        # face count (always 6).  Iter-49 fix.
+        n_faces = 6
 
-        # Extract the 4 edge strips locally and only ``all_gather``
-        # those — the previous version gathered the whole ``(1,n,n,C)``
-        # shard, moving ~``n/4`` × more bytes than necessary on the
-        # interconnect.  At C48 × 30 levels that's ~1.4 MB → ~24 KB
-        # per halo call, which dominates the bandwidth budget on
-        # multi-GPU NCCL.
+        # Extract 4 perimeter strips from EACH face this shard owns.
+        # Iter-49: previously the kernel hard-coded ``my_face = local_shard[0]``
+        # and assumed exactly 1 face per shard.  That made the SPMD
+        # path safe only at 6 devices; at 2 or 3 devices the kernel
+        # silently dropped 1 or 2 faces.  Generalising via per-face
+        # loop (n_faces_per_shard ≤ 6) lets the SPMD halo activate at
+        # any divisor of 6.  Iter-1's restriction in
+        # ``make_sharded_step`` is left in place pending a final
+        # ppermute multi-face refit (the all_gather kernel is the
+        # default and is fully generalised here).
         if ndim == 3:
             my_strips = jnp.stack([
-                my_face[0, :], my_face[-1, :],
-                my_face[:, 0], my_face[:, -1],
-            ], axis=0)  # (4, n)
+                jnp.stack([
+                    local_shard[i, 0, :], local_shard[i, -1, :],
+                    local_shard[i, :, 0], local_shard[i, :, -1],
+                ], axis=0)
+                for i in range(n_faces_per_shard)
+            ], axis=0)  # (n_faces_per_shard, 4, n)
         else:
             my_strips = jnp.stack([
-                my_face[0, :, :], my_face[-1, :, :],
-                my_face[:, 0, :], my_face[:, -1, :],
-            ], axis=0)  # (4, n, C)
+                jnp.stack([
+                    local_shard[i, 0, :, :], local_shard[i, -1, :, :],
+                    local_shard[i, :, 0, :], local_shard[i, :, -1, :],
+                ], axis=0)
+                for i in range(n_faces_per_shard)
+            ], axis=0)  # (n_faces_per_shard, 4, n, C)
 
+        # All-gather along the face axis: contributes (4, n[, C]) per
+        # face per device → after gather, shape (n_faces, 4, n[, C]).
+        # Reshape from the tiled layout (n_faces_per_shard merges with
+        # device axis after concatenation).
         all_strips = jax.lax.all_gather(my_strips, "face", tiled=True)
-        # all_strips shape: (n_faces, 4, n[, C]) when tiled=True returns
-        # the gather along the first axis of ``my_strips``; with the
-        # leading-axis-of-4 layout, all_gather concatenates per-device
-        # along that axis, giving (n_faces*4,) on axis 0.  Restore the
-        # (n_faces, 4, ...) layout.
-        n_faces = mesh.shape["face"]
+        # all_strips after tiled gather: (n_faces, 4, n[, C]).
         if ndim == 3:
             all_strips = all_strips.reshape(n_faces, 4, n)
         else:
-            all_strips = all_strips.reshape(n_faces, 4, n, my_face.shape[-1])
+            all_strips = all_strips.reshape(
+                n_faces, 4, n, local_shard.shape[-1],
+            )
 
         my_idx = jax.lax.axis_index("face")
-        my_nbr_f = _NBR_FACES[my_idx]
-        my_nbr_e = _NBR_EDGES[my_idx]
-        my_rev = _IS_REVERSED[my_idx]
-
-        # Single Pad HLO op replaces alloc-zeros + scatter (subsequent
-        # halo fill writes only into the zeroed border).
-        if ndim == 3:
-            padded = jnp.pad(my_face, ((1, 1), (1, 1)))
-        else:
-            padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
-        halo_strips = []
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
-        for e in range(4):
-            strip = all_strips[my_nbr_f[e], my_nbr_e[e]]
-            strip = jnp.where(my_rev[e], strip[::-1], strip)
-            if with_offsets:
-                strip = _interp_strip(strip, offsets[my_idx, e])
-            halo_strips.append(strip)
 
-        padded = _fill_halo_and_corners(padded, halo_strips, n)
-        return padded[None]
+        padded_faces = []
+        for i in range(n_faces_per_shard):
+            global_face = my_idx * n_faces_per_shard + i
+            nbr_f = _NBR_FACES[global_face]
+            nbr_e = _NBR_EDGES[global_face]
+            rev = _IS_REVERSED[global_face]
+            face = local_shard[i]
+            if ndim == 3:
+                padded = jnp.pad(face, ((1, 1), (1, 1)))
+            else:
+                padded = jnp.pad(face, ((1, 1), (1, 1), (0, 0)))
+            halo_strips = []
+            for e in range(4):
+                strip = all_strips[nbr_f[e], nbr_e[e]]
+                strip = jnp.where(rev[e], strip[::-1], strip)
+                if with_offsets:
+                    strip = _interp_strip(strip, offsets[global_face, e])
+                halo_strips.append(strip)
+            padded = _fill_halo_and_corners(padded, halo_strips, n)
+            padded_faces.append(padded)
+
+        return jnp.stack(padded_faces, axis=0)
 
     return _exchange
 
@@ -362,70 +380,83 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
             (local_shard,) = args
             offsets = None
 
+        n_faces_per_shard = local_shard.shape[0]
         n = local_shard.shape[1]
-        my_face = local_shard[0]   # (n, n[, C])
+        n_faces = 6  # iter-49: cubed-sphere always has 6 faces globally
 
-        # Extract 4 perimeter strips of width 2.  Depth-0 (closest to
-        # the interface = my outermost cell on that edge) is at index 0
-        # along the depth axis; depth-1 (one cell inward) is at index 1.
-        # Receiver places depth-0 at its inner halo (closest to its
-        # interior) and depth-1 at the outer halo — matching the ordering
-        # used by the local-pad ``_fill_corners_h2`` helper.
+        # Extract 4 perimeter strips of width 2 from EACH face this
+        # shard owns.  Iter-49 generalises the kernel to multi-face
+        # shards (n_faces_per_shard ∈ {1, 2, 3, 6} for n_devices ∈
+        # {6, 3, 2, 1}).  Depth-0 (closest to the interface = my
+        # outermost cell on that edge) is at index 0; depth-1 (one
+        # cell inward) is at index 1.
         if ndim == 3:
             my_strips = jnp.stack([
-                jnp.stack([my_face[0, :], my_face[1, :]], axis=0),       # WEST
-                jnp.stack([my_face[-1, :], my_face[-2, :]], axis=0),     # EAST
-                jnp.stack([my_face[:, 0], my_face[:, 1]], axis=0),       # SOUTH
-                jnp.stack([my_face[:, -1], my_face[:, -2]], axis=0),     # NORTH
-            ], axis=0)  # (4, 2, n)
+                jnp.stack([
+                    jnp.stack([local_shard[i, 0, :], local_shard[i, 1, :]], axis=0),
+                    jnp.stack([local_shard[i, -1, :], local_shard[i, -2, :]], axis=0),
+                    jnp.stack([local_shard[i, :, 0], local_shard[i, :, 1]], axis=0),
+                    jnp.stack([local_shard[i, :, -1], local_shard[i, :, -2]], axis=0),
+                ], axis=0)
+                for i in range(n_faces_per_shard)
+            ], axis=0)  # (n_faces_per_shard, 4, 2, n)
         else:
             my_strips = jnp.stack([
-                jnp.stack([my_face[0, :, :], my_face[1, :, :]], axis=0),
-                jnp.stack([my_face[-1, :, :], my_face[-2, :, :]], axis=0),
-                jnp.stack([my_face[:, 0, :], my_face[:, 1, :]], axis=0),
-                jnp.stack([my_face[:, -1, :], my_face[:, -2, :]], axis=0),
-            ], axis=0)  # (4, 2, n, C)
+                jnp.stack([
+                    jnp.stack([local_shard[i, 0, :, :], local_shard[i, 1, :, :]], axis=0),
+                    jnp.stack([local_shard[i, -1, :, :], local_shard[i, -2, :, :]], axis=0),
+                    jnp.stack([local_shard[i, :, 0, :], local_shard[i, :, 1, :]], axis=0),
+                    jnp.stack([local_shard[i, :, -1, :], local_shard[i, :, -2, :]], axis=0),
+                ], axis=0)
+                for i in range(n_faces_per_shard)
+            ], axis=0)  # (n_faces_per_shard, 4, 2, n, C)
 
         all_strips = jax.lax.all_gather(my_strips, "face", tiled=True)
-        n_faces = mesh.shape["face"]
         if ndim == 3:
             all_strips = all_strips.reshape(n_faces, 4, 2, n)
         else:
             all_strips = all_strips.reshape(
-                n_faces, 4, 2, n, my_face.shape[-1],
+                n_faces, 4, 2, n, local_shard.shape[-1],
             )
 
         my_idx = jax.lax.axis_index("face")
-        my_nbr_f = _NBR_FACES[my_idx]
-        my_nbr_e = _NBR_EDGES[my_idx]
-        my_rev = _IS_REVERSED[my_idx]
-
-        if ndim == 3:
-            padded = jnp.pad(my_face, ((2, 2), (2, 2)))
-        else:
-            padded = jnp.pad(my_face, ((2, 2), (2, 2), (0, 0)))
-
-        halo_strips = []
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
-        for e in range(4):
-            strip = all_strips[my_nbr_f[e], my_nbr_e[e]]   # (2, n[, C])
-            # Reverse the spatial axis (axis 1 of (2, n[, C])) when the
-            # neighbour's edge is oriented opposite to ours.  The depth
-            # axis is invariant under spatial reversal.
-            strip = jnp.where(my_rev[e], strip[:, ::-1], strip)
-            if with_offsets:
-                # Apply 3-point Lagrange correction per depth.  The
-                # spatial axis (n) is axis 1 of ``strip``;
-                # ``_interp_strip`` interpolates along axis 0 of its
-                # input, so we slice each depth as a (n[, C]) tensor.
-                strip_d0 = _interp_strip(strip[0], offsets[my_idx, e, 0])
-                strip_d1 = _interp_strip(strip[1], offsets[my_idx, e, 1])
-                strip = jnp.stack([strip_d0, strip_d1], axis=0)
-            halo_strips.append(strip)
 
-        padded = _fill_halo_and_corners_h2_local(padded, halo_strips, n)
-        return padded[None]
+        padded_faces = []
+        for i in range(n_faces_per_shard):
+            global_face = my_idx * n_faces_per_shard + i
+            nbr_f = _NBR_FACES[global_face]
+            nbr_e = _NBR_EDGES[global_face]
+            rev = _IS_REVERSED[global_face]
+            face = local_shard[i]
+
+            if ndim == 3:
+                padded = jnp.pad(face, ((2, 2), (2, 2)))
+            else:
+                padded = jnp.pad(face, ((2, 2), (2, 2), (0, 0)))
+
+            halo_strips = []
+            for e in range(4):
+                strip = all_strips[nbr_f[e], nbr_e[e]]   # (2, n[, C])
+                # Reverse the spatial axis (axis 1 of (2, n[, C])) when
+                # the neighbour's edge is oriented opposite to ours.
+                # The depth axis is invariant under spatial reversal.
+                strip = jnp.where(rev[e], strip[:, ::-1], strip)
+                if with_offsets:
+                    # Apply 3-point Lagrange correction per depth.  The
+                    # spatial axis (n) is axis 1 of ``strip``;
+                    # ``_interp_strip`` interpolates along axis 0 of its
+                    # input, so we slice each depth as a (n[, C]) tensor.
+                    strip_d0 = _interp_strip(strip[0], offsets[global_face, e, 0])
+                    strip_d1 = _interp_strip(strip[1], offsets[global_face, e, 1])
+                    strip = jnp.stack([strip_d0, strip_d1], axis=0)
+                halo_strips.append(strip)
+
+            padded = _fill_halo_and_corners_h2_local(padded, halo_strips, n)
+            padded_faces.append(padded)
+
+        return jnp.stack(padded_faces, axis=0)
 
     return _exchange
 
