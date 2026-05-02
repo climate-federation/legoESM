@@ -70,6 +70,12 @@ from legoesm.core.operators import (
     hyperdiffusion,
     laplacian_compact,
 )
+from legoesm.parallel.cubesphere_exchange import (
+    packed_pad_halo_4d as _packed_pad_halo_4d_spmd,
+)
+from legoesm.parallel.halo_exchange import (
+    packed_pad_halo_mpi_4d as _packed_pad_halo_4d_mpi,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -304,17 +310,14 @@ def fv3_hydrostatic_tendencies(
     _div_v_pad = None
     if _halo_backend in ("spmd", "mpi"):
         if _halo_backend == "spmd":
-            from legoesm.parallel.cubesphere_exchange import (
-                packed_pad_halo_4d, _spmd_mesh,
-            )
-            _padded_list = packed_pad_halo_4d(
+            from legoesm.parallel.cubesphere_exchange import _spmd_mesh
+            _padded_list = _packed_pad_halo_4d_spmd(
                 *_pack_fields,
                 mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
             )
         else:
             from legoesm.grids.halo import _mpi_topology
-            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-            _padded_list = packed_pad_halo_mpi_4d(
+            _padded_list = _packed_pad_halo_4d_mpi(
                 *_pack_fields,
                 topology=_mpi_topology, duogrid=_pe_dg,
             )
