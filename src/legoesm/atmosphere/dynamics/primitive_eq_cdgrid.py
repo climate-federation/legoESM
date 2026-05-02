@@ -237,6 +237,20 @@ def fv3_hydrostatic_tendencies(
         _hybrid_factor = sigma_coord.B_full * p_s[..., None] / p_full  # (6, n, n, nlev)
     else:
         _hybrid_factor = None
+    # Iter-61: when divergence damping is active, compute ``div_v`` via
+    # the C-grid divergence operator BEFORE the merged stage halo and
+    # pack it so the corresponding ``_arakawa_lamb_gradient(div_v)``
+    # below skips its own standalone halo collective.  ``cgrid_divergence``
+    # is local (no halo) and depends only on (u_c, v_c) which are
+    # already in scope.  Note: ``div_v`` is also used downstream by
+    # ``compute_mass_flux_hybrid`` / ``compute_sigma_dot_and_total`` —
+    # those consume the unpadded interior values so this hoist is
+    # transparent to them.
+    _need_div_pad = config.div_damp_coeff > 0
+    if _need_div_pad:
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+    else:
+        div_v = None  # computed lazily below if not div-damped
     from legoesm.grids.halo import _halo_backend
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     # Packed MPI/SPMD halos now apply the duogrid kinked-to-extended
@@ -252,15 +266,19 @@ def fv3_hydrostatic_tendencies(
     # Build the field list dynamically: {zeta, B, inv_T, T} are always
     # packed; {u_cell, v_cell} ride the pack when the Laplacian /
     # hyperdiffusion need them; {_hybrid_factor} rides when the PGF
-    # correction needs it (hybrid coord); ln_ps_3d always rides last.
+    # correction needs it (hybrid coord); {div_v} rides when divergence
+    # damping is active; ln_ps_3d always rides last.
     _pack_fields = [zeta, B, inv_T, T]
     if _needs_uv_pad:
         _pack_fields += [u_cell, v_cell]
     if _hybrid_factor is not None:
         _pack_fields.append(_hybrid_factor)
+    if _need_div_pad:
+        _pack_fields.append(div_v)
     _pack_fields.append(ln_ps_3d)
     _zeta_pad = _B_pad = _invT_pad = _T_pad = None
     _u_cc_pad = _v_cc_pad = _lnps_pad = _hf_pad = None
+    _div_v_pad = None
     if _halo_backend in ("spmd", "mpi"):
         if _halo_backend == "spmd":
             from legoesm.parallel.cubesphere_exchange import (
@@ -288,6 +306,8 @@ def fv3_hydrostatic_tendencies(
             _v_cc_pad = _padded_list[_idx]; _idx += 1
         if _hybrid_factor is not None:
             _hf_pad = _padded_list[_idx]; _idx += 1
+        if _need_div_pad:
+            _div_v_pad = _padded_list[_idx]; _idx += 1
         _lnps_pad = _padded_list[_idx]; _idx += 1
 
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
@@ -350,7 +370,14 @@ def fv3_hydrostatic_tendencies(
     # previous code computed ``cgrid_divergence(u_c, v_c, cdgrid)``
     # twice when ``div_damp_coeff > 0`` — one full halo exchange + PPM
     # pass per RHS evaluation.  Drop the duplicate.
-    div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+    # Iter-61: when div_damp is active, ``div_v`` was already computed
+    # before the merged stage halo and packed alongside the cell fields,
+    # so reuse it here.  Without div_damp, compute lazily — no need to
+    # pad it since downstream operators (``compute_mass_flux_hybrid``,
+    # ``compute_sigma_dot_and_total``) consume the unpadded interior
+    # values.
+    if div_v is None:
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
 
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
@@ -360,7 +387,13 @@ def fv3_hydrostatic_tendencies(
                 div_v, cdgrid,
             )
         else:
-            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)
+            # Iter-61: feed the pre-padded ``_div_v_pad`` from the
+            # merged stage halo so the A-L gradient skips its own halo
+            # exchange.  Falls through to a standalone exchange on the
+            # single-device (None) path or the async-overlap path above.
+            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(
+                div_v, cdgrid, padded=_div_v_pad,
+            )
         du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
 
