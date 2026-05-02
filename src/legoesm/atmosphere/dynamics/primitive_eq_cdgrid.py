@@ -609,31 +609,19 @@ def fv3_hydrostatic_tendencies(
             lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
         dT_dt_data = dT_dt_data + nu_T * lap_T
 
+    # Iter-63: when BOTH ``A_h > 0`` and ``hyperdiff_coeff > 0`` are
+    # active, batch the (lap_u, lap_v) and (hyperdiff_u, hyperdiff_v)
+    # corner interpolations into a single ``_interp_center_to_corner``
+    # call.  Each one would otherwise do its own halo collective; the
+    # batched version stacks both pairs along the trailing axis,
+    # exchanges in one halo, and splits.  Saves 1 collective per RK3
+    # stage on the (A_h + hyperdiff) configuration.
+    _lap_uv_d = None
+    _hd_uv_d = None
+    lap_uvT = None
+    hyperdiff_uvT = None
     if config.A_h > 0:
         lap_uvT = _lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
-        # Batch the (lap_u, lap_v) corner interpolation: same passive-
-        # trailing-axis pattern as the (u, v) corner interpolation in
-        # Loop 113 — single halo + single 4-point average for both.
-        _lap_uv_d_flat = _interp_center_to_corner(
-            lap_uvT[..., :2].reshape(
-                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
-            ),
-            cdgrid,
-        )
-        _lap_uv_d = _lap_uv_d_flat.reshape(
-            _lap_uv_d_flat.shape[0], _lap_uv_d_flat.shape[1],
-            _lap_uv_d_flat.shape[2], nlev_uvT, 2,
-        )
-        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
-        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
-        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
-
-    # 12b. Hyperdiffusion on D-grid winds (biharmonic)
-    #
-    # Apply the biharmonic at cell centres (where the compact Laplacian
-    # works at full strength) and interpolate the tendency back to
-    # D-grid corners.  Single batched call shares the outer ∇² halo
-    # across (u_cell, v_cell, T).
     if config.hyperdiff_coeff > 0:
         hyperdiff_flat = _hyperdiffusion_3d(
             _uvT_flat, grid, config.hyperdiff_coeff,
@@ -646,8 +634,38 @@ def fv3_hydrostatic_tendencies(
         hyperdiff_uvT = hyperdiff_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
-        # Same batching as the laplacian section above — one halo +
-        # 4-point average for both u and v components.
+    if lap_uvT is not None and hyperdiff_uvT is not None:
+        # Both active — batch the corner interpolation into ONE halo.
+        _combined_uv_cc = jnp.concatenate(
+            [
+                lap_uvT[..., :2].reshape(
+                    n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
+                ),
+                hyperdiff_uvT[..., :2].reshape(
+                    n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
+                ),
+            ],
+            axis=-1,
+        )  # (n_face, n, n, nlev*4)
+        _combined_uv_d_flat = _interp_center_to_corner(_combined_uv_cc, cdgrid)
+        _combined_uv_d = _combined_uv_d_flat.reshape(
+            _combined_uv_d_flat.shape[0], _combined_uv_d_flat.shape[1],
+            _combined_uv_d_flat.shape[2], 2, nlev_uvT, 2,
+        )  # (n_face_d, n_i_d, n_j_d, 2-blocks, nlev, 2-uv)
+        _lap_uv_d = _combined_uv_d[:, :, :, 0]
+        _hd_uv_d = _combined_uv_d[:, :, :, 1]
+    elif lap_uvT is not None:
+        _lap_uv_d_flat = _interp_center_to_corner(
+            lap_uvT[..., :2].reshape(
+                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
+            ),
+            cdgrid,
+        )
+        _lap_uv_d = _lap_uv_d_flat.reshape(
+            _lap_uv_d_flat.shape[0], _lap_uv_d_flat.shape[1],
+            _lap_uv_d_flat.shape[2], nlev_uvT, 2,
+        )
+    elif hyperdiff_uvT is not None:
         _hd_uv_d_flat = _interp_center_to_corner(
             hyperdiff_uvT[..., :2].reshape(
                 n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
@@ -658,6 +676,13 @@ def fv3_hydrostatic_tendencies(
             _hd_uv_d_flat.shape[0], _hd_uv_d_flat.shape[1],
             _hd_uv_d_flat.shape[2], nlev_uvT, 2,
         )
+
+    if config.A_h > 0:
+        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
+        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
+        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+
+    if config.hyperdiff_coeff > 0:
         du_d_dt = du_d_dt + _hd_uv_d[..., 0]
         dv_d_dt = dv_d_dt + _hd_uv_d[..., 1]
         dT_dt_data = dT_dt_data + hyperdiff_uvT[..., 2]
