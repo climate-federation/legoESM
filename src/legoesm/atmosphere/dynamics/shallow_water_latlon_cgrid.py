@@ -54,6 +54,8 @@ from legoesm.grids.polar_filter import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.conservation import _accumulation_dtype
+from legoesm.core.precision import cast_pytree
 from legoesm import constants
 
 
@@ -312,7 +314,6 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
 
     def compute_mass(self, state: CGridLatLonShallowWaterState) -> jax.Array:
         """Compute total mass (for conservation fixer target)."""
-        from legoesm.core.conservation import _accumulation_dtype
         acc = _accumulation_dtype()
         return jnp.sum(state.h.astype(acc) * self.grid.area.astype(acc))
 
@@ -341,8 +342,6 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
             as an explicit traced argument (avoids JIT recompilation
             when the target changes).
         """
-        from legoesm.core.precision import cast_pytree
-
         state_c = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
@@ -369,7 +368,6 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer (use float64 accumulation for precision)
         if self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
             acc = _accumulation_dtype()
             area = self.grid.area.astype(acc)
             total_area = jnp.sum(area)
