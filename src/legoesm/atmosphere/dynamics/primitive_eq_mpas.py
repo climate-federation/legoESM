@@ -440,6 +440,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         self.mesh = mesh
         self.sigma_coord = sigma_coord
         self.config = config or MPASPrimitiveEquationConfig()
+        # Pre-compute the global total area once at construction time so
+        # the per-step mass fixer does not include this constant in its
+        # cross-device reduction payload (drops 3-element allreduce → 2).
+        # ``mesh`` here is the full global mesh (the MPI-partitioned step
+        # lives in ``parallel/voronoi_mpi.py`` and has its own constant);
+        # under SPMD sharding XLA folds this value as a compile-time
+        # constant and avoids the live-time reduction.
+        self._total_area = float(jnp.sum(mesh.areaCell))
 
     def tendencies(
         self,
@@ -502,33 +510,42 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             )
 
         if self.config.fix_mass:
-            state_new = _fix_mass_mpas_hydro(state_new, state, self.mesh)
+            state_new = _fix_mass_mpas_hydro(
+                state_new, state, self.mesh, total_area=self._total_area,
+            )
 
         return cast_pytree(state_new, None, "storage")
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
-def _fix_mass_mpas_hydro(state_new, state_old, mesh):
+def _fix_mass_mpas_hydro(state_new, state_old, mesh, total_area=None):
     """Fix mass conservation: uniform additive correction to p_s.
 
-    The 3 sums (mass_old, mass_new, total_area) are computed locally
-    and reduced together — this collapses 3 MPI allreduces into 1
-    when the MPAS mesh is sharded across ranks.  ``total_area`` is
-    constant per mesh; reduce it alongside the masses to keep the
-    helper signature simple, and rely on XLA constant-folding for
-    the case where it can.
+    The two ps mass sums are stacked into a single ``jnp.sum`` so XLA
+    can emit one cross-device reduction when sharded.  ``total_area``
+    is a state-independent constant — pass it in (precomputed once at
+    setup) so we drop it from the per-step reduction payload.
+
+    Parameters
+    ----------
+    total_area : float or jax.Array, optional
+        Pre-allreduced global ``sum(areaCell)``.  Defaults to a fresh
+        ``jnp.sum(mesh.areaCell)`` (correct for single-rank /
+        non-sharded; redundant work under MPI when *total_area* is
+        already known at the call site).
     """
     area = mesh.areaCell
+    if total_area is None:
+        total_area = jnp.sum(area)
     local = jnp.stack([
         jnp.sum(state_old.p_s.data * area),
         jnp.sum(state_new.p_s.data * area),
-        jnp.sum(area),
     ])
     if jax.process_count() > 1:
         from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
-    mass_old, mass_new, total_area = local[0], local[1], local[2]
+    mass_old, mass_new = local[0], local[1]
     correction = (mass_old - mass_new) / total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
