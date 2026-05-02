@@ -664,10 +664,32 @@ def pad_halo_pair_h2(
             duogrid=duogrid, interp_offsets=offsets, halo=2,
         )
         return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
-    # Local / MPI fallback: two sequential pad_halo calls.  Identical
-    # arithmetic to the existing per-field path; no scaling penalty
-    # because neither backend is inserting a real cross-device
-    # collective for this 3D shape today.
+    if _halo_backend == "mpi" and _mpi_topology is not None:
+        # MPI: ``packed_pad_halo_mpi_4d`` already supports halo=2 and
+        # halves the MPI message count from 2 → 1 by stacking the two
+        # fields along the trailing axis.  Same singleton-channel trick
+        # as the SPMD path.  ``packed_pad_halo_mpi_4d`` does not
+        # currently support ``interp_offsets`` (the underlying MPI
+        # exchange ignores them — see the explicit guard in
+        # ``pad_halo_mpi_4d``); when offsets are requested, fall back
+        # to the per-field unpacked ``pad_halo`` path which raises a
+        # clear NotImplementedError so callers know to either run with
+        # duogrid (preferred) or accept the unpacked MPI path until
+        # offset-aware MPI exchange lands.
+        if interp_offsets is None:
+            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+            q1_4d = q1[..., None]
+            q2_4d = q2[..., None]
+            q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
+                q1_4d, q2_4d, topology=_mpi_topology,
+                halo=2, duogrid=duogrid,
+            )
+            return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+        # offsets requested under MPI — `pad_halo` already raises a
+        # clear NotImplementedError on this combination.  Let the
+        # per-field path do that for a sharper error than ours.
+    # Local backend (or MPI-with-offsets — handled above): two
+    # sequential pad_halo calls with identical arithmetic.
     q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
                       duogrid=duogrid)
     q2_pad = pad_halo(q2, halo=2, interp_offsets=interp_offsets,
