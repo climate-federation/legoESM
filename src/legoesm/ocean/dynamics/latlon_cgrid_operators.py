@@ -71,6 +71,60 @@ def interp_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
 
 
+def min_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
+    """Min-rule interpolation of a cell-center thickness to u-faces.
+
+    Use this (NOT ``interp_cell_to_uface``) for layer thickness ``h_k``
+    when the model has partial bottom cells.  At a face between cell
+    W (partial cell at level k, h_W) and cell E (full cell, h_E),
+    the face's effective wet thickness equals the shallower side's
+    thickness — the deeper side has rock below the shallower seafloor
+    at that level, so the face is closed there and the wet area is
+    bounded by ``min(h_W, h_E)``.
+
+    Equivalent to MOM6/MITgcm's ``hFacW = min(hFacC_L, hFacC_R)``
+    convention (Adcroft, Hill & Marshall 1997 eq. 11-13).
+
+    For full-cell columns (pure z\\* with same bathymetry on both
+    sides), ``min(h_W, h_E) == h_W == h_E`` so this is bit-exact
+    backwards-compat.  Differs from arithmetic mean when adjacent
+    cells have different layer thicknesses (partial-cell faces, or
+    z\\* with horizontally varying eta).
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, ...) at cell centers.
+
+    Returns
+    -------
+    f_u : (n_lat, n_lon+1, ...) at u-faces.
+    """
+    f_u = jnp.minimum(jnp.roll(f, 1, axis=1), f)
+    return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+
+
+def min_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
+    """Min-rule interpolation of a cell-center thickness to v-faces.
+
+    Same convention as ``min_cell_to_uface`` for the meridional
+    direction.  Pole rows (south=0, north=n_lat) are zero-padded:
+    the pole is a wall, no fluid passes through, so the face wet
+    thickness there is exactly zero.  This matches the ocean-PE
+    convention used everywhere else for thickness at v-faces.
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, ...) at cell centers.
+
+    Returns
+    -------
+    f_v : (n_lat+1, n_lon, ...) at v-faces.
+    """
+    f_v_interior = jnp.minimum(f[:-1], f[1:])
+    pad_axes = ((0, 0),) * (f_v_interior.ndim - 1)
+    return jnp.pad(f_v_interior, ((1, 1), *pad_axes))
+
+
 def cell_to_cgrid_winds(
     u_cell: jnp.ndarray,
     v_cell: jnp.ndarray,
@@ -732,6 +786,77 @@ def vector_bilaplacian_cgrid(
     return bilap_u, bilap_v
 
 
+def _cos_lat_uv(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """cos(lat) on u- and v-face latitudes for a lat-lon C-grid.
+
+    u-face points sit at cell-centre latitudes (where ``grid.cos_lat``
+    is defined directly).  v-face points sit at latitude interfaces
+    between cells and are obtained by linear interpolation of
+    ``cos_lat``, with the south/north boundary v-faces clamped to the
+    nearest cell-centre value.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+
+    Returns
+    -------
+    cos_u : (n_lat,)
+        cos(lat) at u-face latitudes.
+    cos_v : (n_lat+1,)
+        cos(lat) at v-face latitudes.
+    """
+    cos_u = grid.cos_lat                                  # (n_lat,)
+    cos_v_interior = 0.5 * (cos_u[:-1] + cos_u[1:])       # (n_lat-1,)
+    cos_v = jnp.concatenate([
+        cos_u[:1],                                        # south boundary ≈ cos(lat[0])
+        cos_v_interior,
+        cos_u[-1:],                                       # north boundary ≈ cos(lat[-1])
+    ])                                                    # (n_lat+1,)
+    return cos_u, cos_v
+
+
+def laplacian_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Grid-dependent scaling for Laplacian viscosity on a lat-lon grid.
+
+    On a latitude-longitude grid the zonal grid spacing shrinks as
+    ``cos(lat)`` near the poles.  Because the Laplacian-viscosity
+    timescale ``dx^2 / A_h`` shrinks with ``cos^2(lat)``, a constant
+    ``A_h`` becomes effectively very large near the poles — and at the
+    high-latitude coastal partial-cell vertices on real ETOPO this
+    triggers a viscous-Coriolis amplification that produces a localized
+    runaway in η at lat ~82.5° (see ``docs/ocean_experiments/realistic_geometry_phase4_results.md``
+    and the D1 diagnostic in ``ah_diagnostics/``).
+
+    Following the standard MITgcm/MOM6/NEMO production convention, the
+    Laplacian coefficient is multiplied by ``cos^2(lat)``.  This keeps
+    the viscous CFL number ``A_h * dt / dx^2`` latitude-independent and
+    matches the cos⁴-scaling that ``biharmonic_scaling_factor`` already
+    applies to ``B_h``.
+
+    Usage::
+
+        scale_u, scale_v = laplacian_scaling_factor(grid)
+        vlap_u, vlap_v = vector_laplacian_cgrid(u, v, grid, ...)
+        du_dt += A_h * scale_u[:, None, None] * vlap_u
+        dv_dt += A_h * scale_v[:, None, None] * vlap_v
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+
+    Returns
+    -------
+    scale_u : (n_lat,)
+        cos²(lat) at u-face latitudes (cell centres).  Reshape to
+        ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
+    scale_v : (n_lat+1,)
+        cos²(lat) at v-face latitudes.
+    """
+    cos_u, cos_v = _cos_lat_uv(grid)
+    return cos_u ** 2, cos_v ** 2
+
+
 def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Grid-dependent scaling for biharmonic viscosity on a lat-lon grid.
 
@@ -742,9 +867,9 @@ def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarra
 
     Following the MOM6 convention (Griffies & Hallberg 2000), the
     biharmonic coefficient should be multiplied by
-    ``(dx_local / dx_ref)^4`` where ``dx_ref`` is a reference spacing
-    (typically the maximum or equatorial value).  This function returns
-    the pre-computed scaling arrays for u-face and v-face points.
+    ``(dx_local / dx_ref)^4`` where ``dx_ref`` is the reference
+    (equatorial / maximum) spacing.  Here ``dx_ref`` corresponds to
+    ``cos_lat = 1`` so the scaling reduces to ``cos^4(lat)``.
 
     Usage in the tendency function::
 
@@ -760,30 +885,13 @@ def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarra
     Returns
     -------
     scale_u : (n_lat,)
-        Scaling factor at u-face latitudes.  Callers should reshape
-        to ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
+        cos⁴(lat) at u-face latitudes.  Callers should reshape to
+        ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
     scale_v : (n_lat+1,)
-        Scaling factor at v-face latitudes.
+        cos⁴(lat) at v-face latitudes.
     """
-    cos_lat = grid.cos_lat  # (n_lat,)
-
-    # Reference: equatorial (maximum) spacing
-    cos_max = 1.0
-
-    # u-face points sit at cell-center latitudes
-    scale_u = (cos_lat / cos_max) ** 4  # (n_lat,)
-
-    # v-face points sit at latitude interfaces between cells;
-    # interpolate cos_lat to v-face positions.
-    cos_v_interior = 0.5 * (cos_lat[:-1] + cos_lat[1:])  # (n_lat-1,)
-    cos_v = jnp.concatenate([
-        cos_lat[:1],         # south boundary ≈ cos(lat[0])
-        cos_v_interior,
-        cos_lat[-1:],        # north boundary ≈ cos(lat[-1])
-    ])  # (n_lat+1,)
-    scale_v = (cos_v / cos_max) ** 4  # (n_lat+1,)
-
-    return scale_u, scale_v
+    cos_u, cos_v = _cos_lat_uv(grid)
+    return cos_u ** 4, cos_v ** 4
 
 
 def strain_rate_cgrid(
@@ -1706,6 +1814,94 @@ def leith_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+def neumann_fill_vertex(
+    f: jnp.ndarray,
+    vtx_mask: jnp.ndarray,
+    n_passes: int = 3,
+) -> jnp.ndarray:
+    """Fill land vertices with nearest ocean-neighbour (Neumann BC).
+
+    Vertex-level analog of ``_neumann_fill_cgrid`` for the
+    ``(n_lat+1, n_lon+1)`` vertex grid.  Longitude is periodic
+    (column ``n_lon`` duplicates column 0); rows 0 and ``n_lat`` are
+    pole vertices with Neumann padding in the meridional direction.
+
+    Public helper because it is reused by:
+      - the WENO branch of ``ocean_pe_latlon_cgrid`` (smooth q before
+        the smoothness-detector reconstruction)
+      - the AL81 ``pv_flux_al81_partial_cell`` helper (smooth q before
+        the 12-point triad stencil)
+
+    Parameters
+    ----------
+    f : (n_lat+1, n_lon+1, nlev) or (n_lat+1, n_lon+1)
+        Vertex field to fill.
+    vtx_mask : (n_lat+1, n_lon+1)
+        1 = ocean vertex, 0 = land vertex.
+    n_passes : int
+        Number of fill passes.  3 is sufficient to cover the typical
+        coastal triad stencil.
+
+    Returns
+    -------
+    filled : same shape as ``f``
+        ``f`` at ocean vertices; nearest-neighbour-averaged value
+        at land vertices that have at least one wet neighbour after
+        ``n_passes`` iterations; original value (typically zero) at
+        fully-isolated land vertices.
+    """
+    m = vtx_mask
+    filled = f
+
+    for _ in range(n_passes):
+        # N/S neighbours: Neumann padding at rows 0 and n_lat.
+        f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
+        m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
+        f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
+        m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+
+        # E/W neighbours: periodic on core columns 0..n_lon-1, then wrap.
+        # Column n_lon duplicates column 0, so rolling the full array
+        # along axis 1 is correct for the core columns and the wrap
+        # column picks up the right neighbour automatically.
+        f_w = jnp.roll(filled, 1, axis=1)
+        m_w = jnp.roll(m, 1, axis=1)
+        f_e = jnp.roll(filled, -1, axis=1)
+        m_e = jnp.roll(m, -1, axis=1)
+
+        is_land = m < 0.5
+
+        if f.ndim > 2:
+            m_s_e = m_s[..., jnp.newaxis]
+            m_n_e = m_n[..., jnp.newaxis]
+            m_w_e = m_w[..., jnp.newaxis]
+            m_e_e = m_e[..., jnp.newaxis]
+            is_land_e = is_land[..., jnp.newaxis]
+        else:
+            m_s_e = m_s
+            m_n_e = m_n
+            m_w_e = m_w
+            m_e_e = m_e
+            is_land_e = is_land
+
+        nbr_sum = f_s * m_s_e + f_n * m_n_e + f_w * m_w_e + f_e * m_e_e
+        nbr_count = m_s_e + m_n_e + m_w_e + m_e_e
+        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+
+        has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
+        if f.ndim > 2:
+            has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
+        else:
+            has_any_nbr_e = has_any_nbr
+
+        filled = jnp.where(is_land_e & has_any_nbr_e, nbr_avg, filled)
+        m = jnp.where(is_land & has_any_nbr, 1.0, m)
+
+    # Re-sync periodic wrap column.
+    filled = filled.at[:, -1].set(filled[:, 0])
+    return filled
+
+
 def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     """Compute vertex mask: wet only if all four surrounding cells are wet.
 
@@ -1737,6 +1933,840 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
 # =============================================================================
 # Utility: compute face masks from cell mask
 # =============================================================================
+
+def compute_face_masks_3d(
+    is_active_3d: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-level u-face and v-face masks from a 3D cell-activity mask.
+
+    A face is wet at level k only if BOTH adjacent cells are wet at
+    that level — partial-cell-aware analogue of ``compute_face_masks``.
+    For columns with the same ``bottom_level``, this is identical to
+    broadcasting the 2D ``compute_face_masks`` result.  For columns
+    with different ``bottom_level`` (the realistic-bathymetry case),
+    this correctly zeroes the face below the shallower column's
+    seafloor.
+
+    Parameters
+    ----------
+    is_active_3d : array, shape (n_lat, n_lon, nlev)
+        Per-cell activity mask: True/1.0 where the cell has water,
+        False/0.0 below the seafloor.  Typically
+        ``partial_coord.is_active.astype(...)``.
+
+    Returns
+    -------
+    u_mask_3d : array, shape (n_lat, n_lon+1, nlev)
+        Wet u-face mask at each level (periodic in longitude).
+    v_mask_3d : array, shape (n_lat+1, n_lon, nlev)
+        Wet v-face mask at each level (pole rows always zero).
+    """
+    a = is_active_3d.astype(jnp.float32)
+    # u-face j is between cell (j-1) mod n_lon (west) and cell j (east).
+    u_mask_interior = a * jnp.roll(a, 1, axis=1)
+    u_mask = jnp.concatenate(
+        [u_mask_interior, u_mask_interior[:, 0:1, :]], axis=1,
+    )
+    # v-face i is between cell i-1 (south) and cell i (north).  Pole
+    # boundaries (i=0 and i=n_lat) are always wall.
+    v_mask_interior = a[:-1] * a[1:]
+    pad_axes = ((0, 0),) * (v_mask_interior.ndim - 1)
+    v_mask = jnp.pad(v_mask_interior, ((1, 1), *pad_axes))
+    return u_mask, v_mask
+
+
+def partial_cell_pgf_correction_x(
+    centroid_depth: jnp.ndarray,
+    rho_prime: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Adcroft & Campin (2004) face correction at u-faces (zonal direction).
+
+    Returns an additive correction to ``∂p'/∂x`` that shifts each
+    adjacent cell's baroclinic pressure to the face-reference depth
+    (the shallower of the two cell centroids).  At u-face j between
+    cell west=(j-1) mod n_lon and cell east=j::
+
+        face_ref[k] = min(centroid_east[k], centroid_west[k])
+        excess_east[k] = centroid_east[k] - face_ref[k]   ≥ 0
+        excess_west[k] = centroid_west[k] - face_ref[k]   ≥ 0
+        correction[k] = -g * (rho_prime_east * excess_east
+                                - rho_prime_west * excess_west) / dx_u
+
+    Adding this to the standard ``(p_east - p_west) / dx`` is
+    mathematically equivalent to comparing ``p_eff = p - rho_prime * g
+    * excess`` at the face-reference depth — eliminating the partial-
+    cell-vs-full PGF cancellation error that drives spurious flow on
+    realistic bathymetry.
+
+    For full-cell columns where centroids align across cells, both
+    excess values are zero and the correction is identically zero —
+    so the legacy z\\* path is bit-exact unaffected.
+
+    Output shape matches ``gradient_x_cgrid``: ``(n_lat, n_lon+1, nlev)``,
+    with face j=n_lon wrapping around to face j=0.
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    cos_lat = grid.cos_lat
+
+    centroid_east = centroid_depth                     # (n_lat, n_lon, nlev)
+    centroid_west = jnp.roll(centroid_depth, 1, axis=1)
+    rho_prime_east = rho_prime
+    rho_prime_west = jnp.roll(rho_prime, 1, axis=1)
+
+    face_ref = jnp.minimum(centroid_east, centroid_west)
+    excess_east = centroid_east - face_ref
+    excess_west = centroid_west - face_ref
+
+    # Per-face correction at faces 0..n_lon-1
+    correction = -g * (
+        rho_prime_east * excess_east
+        - rho_prime_west * excess_west
+    )
+
+    # Wrap face j=n_lon to face j=0 (matches gradient_x_cgrid convention)
+    correction_full = jnp.concatenate(
+        [correction, correction[:, 0:1, :]], axis=1,
+    )
+
+    dx_u = R * dlon * cos_lat
+    return correction_full / dx_u[:, jnp.newaxis, jnp.newaxis]
+
+
+def partial_cell_pgf_correction_y(
+    centroid_depth: jnp.ndarray,
+    rho_prime: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Adcroft & Campin (2004) face correction at v-faces (meridional).
+
+    Same structure as ``partial_cell_pgf_correction_x`` but for the
+    v-faces.  Wall BCs at poles → boundary v-faces have zero
+    correction (consistent with v=0 there).
+
+    Output shape: ``(n_lat+1, n_lon, nlev)``.
+    """
+    R = grid.radius
+    dlat = grid.dlat
+    dy_v = R * dlat
+
+    # Interior v-faces: between cell i and cell i+1 in latitude
+    centroid_north = centroid_depth[1:]                 # (n_lat-1, n_lon, nlev)
+    centroid_south = centroid_depth[:-1]                # (n_lat-1, n_lon, nlev)
+    rho_prime_north = rho_prime[1:]
+    rho_prime_south = rho_prime[:-1]
+
+    face_ref = jnp.minimum(centroid_north, centroid_south)
+    excess_north = centroid_north - face_ref
+    excess_south = centroid_south - face_ref
+
+    correction_interior = -g * (
+        rho_prime_north * excess_north
+        - rho_prime_south * excess_south
+    )
+
+    # Pad pole faces with zero (wall BC: no v-flux through poles)
+    pad_axes = ((0, 0),) * (correction_interior.ndim - 1)
+    correction = jnp.pad(correction_interior, ((1, 1), *pad_axes))
+
+    return correction / dy_v
+
+
+# =============================================================================
+# Density-Jacobian PGF (Shchepetkin & McWilliams 2003) — building blocks
+# =============================================================================
+
+
+def reconstruct_harmonic_slopes(
+    rho_per_cell: jnp.ndarray,
+    z_centroid: jnp.ndarray,
+    is_active: jnp.ndarray,
+    eps: float = 1e-30,
+) -> jnp.ndarray:
+    """Per-cell harmonic-mean monotonized density slopes ``σ_k``.
+
+    For Shchepetkin & McWilliams 2003 density-Jacobian PGF.  Within
+    each cell ``k`` of a column we represent ``ρ(z) = ρ_k + σ_k · (z −
+    z_centroid_k)``.  The slope ``σ_k`` is the harmonic mean of the
+    one-sided slopes computed from the cell-centroid finite differences
+
+        Δρ_top_k = (ρ_{k-1} − ρ_k) / (z_{k-1} − z_k)
+        Δρ_bot_k = (ρ_k − ρ_{k+1}) / (z_k − z_{k+1})
+        σ_k      = 2 · Δρ_top · Δρ_bot / (Δρ_top + Δρ_bot)
+
+    monotonized to zero at extrema (signs differ).  Two key properties:
+
+    1. For linear ρ(z), ``Δρ_top = Δρ_bot = a`` and ``σ_k = a`` exactly
+       in every column, regardless of where the centroids sit.  This
+       makes adjacent columns reconstruct ρ at intermediate depths
+       identically — the property that lets the rest-state PGF vanish
+       on partial cells with shifted centroids.
+    2. At local extrema the limiter sets ``σ_k = 0`` (flat-top), so the
+       reconstruction is monotone (no overshoots).
+
+    Boundary handling:
+    - Top cell (no neighbour above): ``σ_0 = Δρ_bot_0`` (one-sided).
+    - Bottom-active cell (no active neighbour below — the partial
+      seafloor): ``σ_{bot} = Δρ_top_{bot}`` (one-sided).
+    - Inactive cells (below seafloor): ``σ = 0``.
+
+    Parameters
+    ----------
+    rho_per_cell : array, shape (..., nlev)
+        Cell-mean density [kg/m³] (often the baroclinic anomaly
+        ``ρ'`` from ``iterate_eos_and_pressure_anomaly``).
+    z_centroid : array, shape (..., nlev)
+        Per-cell centroid depth [m], positive downward.
+    is_active : array, shape (..., nlev)
+        1.0 for wet cells, 0.0 below the partial seafloor.
+    eps : float
+        Safety floor for the harmonic-mean denominator.
+
+    Returns
+    -------
+    sigma : array, shape (..., nlev)
+        Per-cell density slope [kg/m⁴] (dρ/dz, positive z downward).
+
+    References
+    ----------
+    Shchepetkin & McWilliams (2003), JGR Oceans 108(C9), §4.
+    """
+    rho = rho_per_cell
+    z = z_centroid
+    active_f = is_active.astype(rho.dtype)
+
+    # Roll along the cell axis to get neighbour values.  Boundary slots
+    # (k=0 above, k=nlev-1 below) are filled with the cell's own values
+    # so that "Δρ" at the boundary safely evaluates to zero — the
+    # boundary mask below selects the correct one-sided fall-back.
+    rho_above = jnp.concatenate([rho[..., :1], rho[..., :-1]], axis=-1)
+    rho_below = jnp.concatenate([rho[..., 1:], rho[..., -1:]], axis=-1)
+    z_above = jnp.concatenate([z[..., :1], z[..., :-1]], axis=-1)
+    z_below = jnp.concatenate([z[..., 1:], z[..., -1:]], axis=-1)
+
+    # Has-active-neighbour masks.  The slot at k=0 has no upper
+    # neighbour by construction; same for k=nlev-1 below.
+    is_active_above = jnp.concatenate(
+        [jnp.zeros_like(active_f[..., :1]), active_f[..., :-1]], axis=-1,
+    )
+    is_active_below = jnp.concatenate(
+        [active_f[..., 1:], jnp.zeros_like(active_f[..., -1:])], axis=-1,
+    )
+    has_top = (active_f * is_active_above) > 0.5
+    has_bot = (active_f * is_active_below) > 0.5
+
+    # Safe-divide one-sided slopes.  When there is no active neighbour
+    # the denominator can be zero; we substitute 1 to keep gradients
+    # finite and zero out the result via ``jnp.where``.
+    dz_top = z_above - z
+    dz_bot = z - z_below
+    safe_dz_top = jnp.where(has_top, dz_top, 1.0)
+    safe_dz_bot = jnp.where(has_bot, dz_bot, 1.0)
+    delta_top = jnp.where(has_top, (rho_above - rho) / safe_dz_top, 0.0)
+    delta_bot = jnp.where(has_bot, (rho - rho_below) / safe_dz_bot, 0.0)
+
+    # Harmonic mean of one-sided slopes (when both signs agree).
+    sum_slopes = delta_top + delta_bot
+    safe_sum = jnp.where(jnp.abs(sum_slopes) > eps, sum_slopes, eps)
+    sigma_harm = 2.0 * delta_top * delta_bot / safe_sum
+    same_sign = (delta_top * delta_bot) > 0.0
+    sigma_interior = jnp.where(same_sign, sigma_harm, 0.0)
+
+    sigma = jnp.where(
+        has_top & has_bot, sigma_interior,
+        jnp.where(has_top, delta_top,
+                  jnp.where(has_bot, delta_bot, 0.0)),
+    )
+    return jnp.where(active_f > 0.5, sigma, 0.0)
+
+
+def compute_pressure_at_target_smc03(
+    rho_per_cell: jnp.ndarray,
+    h_partial: jnp.ndarray,
+    z_centroid: jnp.ndarray,
+    sigma: jnp.ndarray,
+    z_target: jnp.ndarray,
+    g: float,
+) -> jnp.ndarray:
+    """Per-column pressure at arbitrary target depths, evaluated from
+    the harmonic-slope piecewise-linear ρ(z) reconstruction.
+
+    Sign convention: all depths are **positive downward** [m].
+
+    Algorithm:
+
+    1. Cell-top interface depths and pressures by cumulative sum:
+
+       ``z_top_0   = 0,                  P_top_0   = 0``
+       ``z_top_k   = z_top_{k-1} + h_{k-1}``
+       ``P_top_k   = P_top_{k-1} + g · h_{k-1} · ρ_{k-1}``
+
+       (Cell-mean integral of the linear deviation ``σ_k · (z' − z_c)``
+       across a full cell vanishes because ``z_c`` is the geometric
+       centroid — so ``P_top_{k+1} − P_top_k = g · h_k · ρ_k`` exactly.)
+
+    2. For each target ``z_t`` find its enclosing cell ``k_t`` such
+       that ``z_top_{k_t} ≤ z_t ≤ z_top_{k_t}+h_{k_t}``.  Within that
+       cell the analytic linear-deviation integral gives
+
+       ``P(z_t) = P_top_{k_t}
+                  + g · (z_t − z_top_{k_t})
+                      · [ρ_{k_t}
+                         + 0.5 · σ_{k_t}
+                              · (z_t + z_top_{k_t} − 2 · z_c_{k_t})]``
+
+    Parameters
+    ----------
+    rho_per_cell : array, shape (..., nlev)
+        Cell-mean density [kg/m³].
+    h_partial : array, shape (..., nlev)
+        Per-cell layer thickness [m].  Inactive cells (below the
+        partial seafloor) have ``h = 0`` and contribute nothing to the
+        integral.
+    z_centroid : array, shape (..., nlev)
+        Per-cell centroid depth [m, positive downward].  Inactive
+        cells inherit the seafloor depth from above (``h = 0`` cells
+        have ``z_centroid`` at the seafloor; inert).
+    sigma : array, shape (..., nlev)
+        Per-cell density slope [kg/m⁴] from
+        ``reconstruct_harmonic_slopes``.  Inactive cells: 0.
+    z_target : array, shape (..., n_targets)
+        Target depths [m, positive downward].  Targets outside the
+        column ``[0, sum h_partial]`` are clamped — the resulting
+        pressure equals zero (above surface) or the seafloor pressure
+        (below).  Phase 3 face-mask logic should keep that branch
+        from materially affecting answers, but the clamp ensures
+        finite output and stable AD.
+    g : float
+        Gravitational acceleration [m/s²].
+
+    Returns
+    -------
+    P : array, shape (..., n_targets)
+        Hydrostatic pressure [Pa] at each target depth.
+    """
+    # 1. Cell-top depths and pressures (cumulative).
+    z_bot_per_cell = jnp.cumsum(h_partial, axis=-1)
+    z_top_per_cell = z_bot_per_cell - h_partial
+
+    cell_dP = g * h_partial * rho_per_cell
+    P_bot_per_cell = jnp.cumsum(cell_dP, axis=-1)
+    P_top_per_cell = P_bot_per_cell - cell_dP
+
+    # 2. Clamp z_target to the column's valid range.  Targets above the
+    # surface saturate to z=0 (P=0); targets below the column-bottom
+    # saturate to the seafloor depth (P = column-integrated weight).
+    z_seafloor = z_bot_per_cell[..., -1:]                  # (..., 1)
+    z_t_clamped = jnp.clip(z_target, min=0.0, max=z_seafloor)
+
+    # 3. Find enclosing cell per target via broadcasting + argmax.
+    # in_cell[..., k, t] == True iff z_top_k <= z_t <= z_bot_k.
+    z_top_e = z_top_per_cell[..., :, None]                 # (..., nlev, 1)
+    z_bot_e = z_bot_per_cell[..., :, None]
+    z_t_e = z_t_clamped[..., None, :]                       # (..., 1, n_t)
+    in_cell = (z_t_e >= z_top_e) & (z_t_e <= z_bot_e)
+    # First-True (argmax of int) handles interface ties deterministically:
+    # a target sitting exactly at z_top_k matches both cell k-1 (its bottom)
+    # and cell k (its top) — argmax picks k-1, which is a valid cell.
+    k_t = jnp.argmax(in_cell.astype(jnp.int32), axis=-2)   # (..., n_t)
+
+    # 4. Gather per-cell quantities at k_t and evaluate the in-cell integral.
+    rho_kt = jnp.take_along_axis(rho_per_cell, k_t, axis=-1)
+    sigma_kt = jnp.take_along_axis(sigma, k_t, axis=-1)
+    z_top_kt = jnp.take_along_axis(z_top_per_cell, k_t, axis=-1)
+    z_c_kt = jnp.take_along_axis(z_centroid, k_t, axis=-1)
+    P_top_kt = jnp.take_along_axis(P_top_per_cell, k_t, axis=-1)
+
+    dz = z_t_clamped - z_top_kt
+    rho_eff = rho_kt + 0.5 * sigma_kt * (z_t_clamped + z_top_kt - 2.0 * z_c_kt)
+    return P_top_kt + g * dz * rho_eff
+
+
+def density_jacobian_pgf_smc03_x(
+    rho_per_cell: jnp.ndarray,
+    h_partial: jnp.ndarray,
+    is_active: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Density-Jacobian PGF at u-faces (S&M03 §4) — zonal direction.
+
+    Replaces the cumsum ``p'`` + Adcroft-Campin face-correction stack
+    with a per-column ``P(z)`` reconstruction from harmonic-mean
+    monotonized slopes, evaluated at a face-reference depth and
+    differenced horizontally.
+
+    Algorithm (per u-face j between cell W=(j-1) mod n_lon and cell
+    E=j; per level k):
+
+    1. Per-column ``z_centroid`` = ``cumsum(h_partial) − 0.5 h``.
+       (η=0 reference, consistent with the rest of the baroclinic
+       path.)
+    2. Per-column ``σ`` from ``reconstruct_harmonic_slopes``.
+    3. **Face-adaptive z_target** = ``0.5 · (z_centroid_W + z_centroid_E)``
+       (Option B from plan §2.3).  At full-cell faces this reduces to
+       the standard reference-cell centroid (both centroids equal
+       ``|z_full_ref[k]|``).  At partial-cell faces — where the
+       column-independent ``|z_full_ref[k]|`` of Option A can fall
+       below one column's seafloor when the partial cell sits in the
+       upper half of the reference cell — the per-face midpoint of
+       centroids is by construction inside both columns' partial
+       cells.  This avoids the clamp pathology that drove the BH
+       seamount blowup with Option A.
+    4. ``P_at_target`` per column from
+       ``compute_pressure_at_target_smc03`` (each column evaluated at
+       the face-pair midpoint of *its* face).
+    5. Horizontal Jacobian: ``∂P/∂x = (P_E − P_W) / dx_u``, periodic
+       in longitude.
+
+    Output shape matches ``gradient_x_cgrid``: ``(n_lat, n_lon+1,
+    nlev)``, with face j=n_lon wrapping to face j=0.
+
+    For face-levels at which one column is inactive (``h = 0`` past
+    its seafloor), the face mask in the integrating PE step gates
+    the result downstream.
+    """
+    # Per-column geometry and slopes.
+    z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
+    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+
+    # West-neighbour rolls (column j-1 at u-face j).
+    rho_W = jnp.roll(rho_per_cell, 1, axis=1)
+    h_W = jnp.roll(h_partial, 1, axis=1)
+    z_c_W = jnp.roll(z_centroid, 1, axis=1)
+    sigma_W = jnp.roll(sigma, 1, axis=1)
+
+    # Face-adaptive target depth: the *shallower* of the two centroids
+    # (Adcroft & Campin 2004 face_ref convention; see
+    # ``partial_cell_pgf_correction_x`` for the matching choice in
+    # the legacy path).  Using ``min`` rather than ``mean`` is
+    # essential: at a face between a full-cell column and a partial-
+    # bottom column with ``h_partial / dz_ref < 1/3``, the midpoint
+    # ``0.5·(z_c_W + z_c_E)`` falls *below* the partial column's
+    # seafloor, ``compute_pressure_at_target_smc03`` clamps that
+    # column to its seafloor pressure while the deeper column
+    # evaluates in-cell, and the asymmetric clamp leaves a residual
+    # ``ρ·g·(dz_ref − 3·h_partial)/4`` per face that does not vanish
+    # for any ρ — drove the 525 mm/s BH steady state in an earlier
+    # iteration.  The shallower centroid is by construction inside
+    # both columns (the partial column's centroid sits inside its
+    # own partial cell, and a deeper column's full or partial cell
+    # at the same level extends at least to that depth).  Reduces
+    # to the standard centroid on full-cell faces.
+    z_target_face = jnp.minimum(z_c_W, z_centroid)
+
+    # Per-face-pair pressures evaluated at the SAME z_target.
+    P_E = compute_pressure_at_target_smc03(
+        rho_per_cell, h_partial, z_centroid, sigma, z_target_face, g,
+    )
+    P_W = compute_pressure_at_target_smc03(
+        rho_W, h_W, z_c_W, sigma_W, z_target_face, g,
+    )
+    diff_interior = P_E - P_W
+    diff = jnp.concatenate([diff_interior, diff_interior[:, 0:1, :]], axis=1)
+
+    R = grid.radius
+    dlon = grid.dlon
+    cos_lat = grid.cos_lat
+    dx_u = R * dlon * cos_lat                           # (n_lat,)
+    return diff / dx_u[:, jnp.newaxis, jnp.newaxis]
+
+
+def density_jacobian_pgf_smc03_y(
+    rho_per_cell: jnp.ndarray,
+    h_partial: jnp.ndarray,
+    is_active: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+) -> jnp.ndarray:
+    """Density-Jacobian PGF at v-faces (S&M03 §4) — meridional direction.
+
+    Same machinery as ``density_jacobian_pgf_smc03_x``; v-face i is
+    between cell S=(i−1) and cell N=i; pole faces (i=0, i=n_lat) are
+    walls and pad with zero (consistent with v=0 at the wall).
+    Uses the same face-adaptive midpoint-of-centroids target depth
+    (Option B from plan §2.3).
+
+    Output shape: ``(n_lat+1, n_lon, nlev)``.
+    """
+    z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
+    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+
+    # North-direction interior pairs (i and i-1).
+    rho_N = rho_per_cell[1:]
+    rho_S = rho_per_cell[:-1]
+    h_N = h_partial[1:]
+    h_S = h_partial[:-1]
+    z_c_N = z_centroid[1:]
+    z_c_S = z_centroid[:-1]
+    sigma_N = sigma[1:]
+    sigma_S = sigma[:-1]
+
+    # Shallower-of-centroids (Adcroft & Campin convention; see x-direction
+    # operator for the rationale and the C1 bug it resolves).
+    z_target_face_int = jnp.minimum(z_c_S, z_c_N)
+    P_N = compute_pressure_at_target_smc03(
+        rho_N, h_N, z_c_N, sigma_N, z_target_face_int, g,
+    )
+    P_S = compute_pressure_at_target_smc03(
+        rho_S, h_S, z_c_S, sigma_S, z_target_face_int, g,
+    )
+    diff_interior = P_N - P_S
+
+    pad_axes = ((0, 0),) * (diff_interior.ndim - 1)
+    diff = jnp.pad(diff_interior, ((1, 1), *pad_axes))
+
+    R = grid.radius
+    dlat = grid.dlat
+    dy_v = R * dlat
+    return diff / dy_v
+
+
+def pv_flux_al81_partial_cell(
+    zeta: jnp.ndarray,
+    h_vtx: jnp.ndarray,
+    h_v: jnp.ndarray,
+    v: jnp.ndarray,
+    h_u: jnp.ndarray,
+    u: jnp.ndarray,
+    u_mask_3d: jnp.ndarray,
+    v_mask_3d: jnp.ndarray,
+    vtx_mask: jnp.ndarray,
+    eps_h: float = 1.0e-10,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
+
+    Production-grade vector-invariant Coriolis advection on the
+    Arakawa C-grid for z-coordinate models with partial cells (NEMO
+    ``ln_zps`` regime).  Implements the 12-point triad (4-corner ⊗
+    3-vertex) stencil of Arakawa & Lamb (1981) — equivalent to NEMO
+    ``dyn_vor_een`` (Le Sommer et al. 2009) and to the Hamiltonian
+    discretisation of Salmon (2004) / Stewart & Dellar (2016) when
+    the AL81 coefficient set
+    {α, β, γ ∈ Appendix A, Stewart-Dellar 2016} is used.
+
+    The simple 2-point Sadourny enstrophy form
+    ``q_at_u = ½(q_S + q_N)`` is unstable on real partial-cell
+    bathymetry (live-T ETOPO 30-day NaN by day 19).  The AL81 form
+    suppresses the grid-scale q-noise mode at step vertices because
+    the 12-point triad averages q over **9 neighbouring vertices**
+    (not 2) at every face, with weights chosen so that **discrete
+    energy AND discrete potential enstrophy are conserved
+    simultaneously** in the inviscid, flat-bottom limit.
+
+    On partial cells, ``h_vtx`` (the F-point thickness, MITgcm
+    ``hFacZ`` / NEMO ``e3f``) absorbs the geometric dependence: at a
+    step vertex with one tall and three short surrounding cells,
+    ``h_vtx = min`` is small, so ``q = ζ/h_vtx`` is large there.
+    The triad's 1/12 weighting on each q value, combined with mass
+    fluxes ``h·v`` and ``h·u`` that vanish at closed faces, gives a
+    PV flux that is bounded and consistent with the same
+    ``min(h_W, h_E)`` face-thickness convention used in continuity
+    (Adcroft, Hill & Marshall 1997 eq. 11; Pacanowski & Gnanadesikan
+    1998 §3).
+
+    Index conventions (same as the rest of latlon_cgrid_operators)
+    --------------------------------------------------------------
+    - cell-centre  ``(j, i)``,           shape ``(n_lat, n_lon, nlev)``
+    - u-face       ``u[j, i]``  =  west face of cell ``(j, i)``,
+                                  shape ``(n_lat, n_lon+1, nlev)``,
+                                  periodic wrap ``u[:, n_lon] = u[:, 0]``.
+    - v-face       ``v[j, i]``  =  south face of cell ``(j, i)``,
+                                  shape ``(n_lat+1, n_lon, nlev)``,
+                                  with pole walls at ``j=0, n_lat``.
+    - vertex       ``q[j, i]``  =  SW corner of cell ``(j, i)``,
+                                  shape ``(n_lat+1, n_lon+1, nlev)``,
+                                  periodic wrap.
+
+    AL81 stencil
+    ------------
+    For each cell ``(j, i)`` define **four corner triads**, each the
+    1/12-weighted sum of the three vertices nearest the named corner
+    of that cell (the L-shape of corners excluding the diagonal):
+
+        SW corner triad : (q_SW, q_SE, q_NW)  / 12
+        SE corner triad : (q_SE, q_SW, q_NE)  / 12
+        NW corner triad : (q_NW, q_SW, q_NE)  / 12
+        NE corner triad : (q_NE, q_SE, q_NW)  / 12
+
+    where (using the array convention above) the four corners of
+    cell ``(j, i)`` are::
+
+        q_SW = q[j  , i  ]    q_SE = q[j  , i+1]
+        q_NW = q[j+1, i  ]    q_NE = q[j+1, i+1]
+
+    For u-face ``u[j, i]`` (between west cell ``(j, i-1)`` and east
+    cell ``(j, i)``), the AL81 PV-flux contribution is::
+
+        +F_u[j,i] = + SE_triad(west_cell) * V[j+1, i-1]
+                    + SW_triad(east_cell) * V[j+1, i  ]
+                    + NE_triad(west_cell) * V[j  , i-1]
+                    + NW_triad(east_cell) * V[j  , i  ]
+
+    where ``V = h_v · v`` is the meridional mass flux at v-faces.
+
+    For v-face ``v[j, i]`` (between south cell ``(j-1, i)`` and
+    north cell ``(j, i)``)::
+
+        -F_v[j,i] = + NW_triad(south_cell) * U[j-1, i+1]
+                    + NE_triad(south_cell) * U[j-1, i  ]
+                    + SW_triad(north_cell) * U[j  , i+1]
+                    + SE_triad(north_cell) * U[j  , i  ]
+
+    where ``U = h_u · u`` is the zonal mass flux at u-faces.
+
+    On a uniform-h, fully-wet grid this stencil reduces to a 9-point
+    average of q (the symmetric AL81 "energy-enstrophy compromise"),
+    not the 2-point Sadourny form.  In the smooth limit the truncation
+    error is the same O(d²) as Sadourny but the leading-order
+    grid-scale dispersion is much smaller — that is the property that
+    suppresses the partial-cell q-noise mode.
+
+    Land treatment
+    --------------
+    PV ``q = ζ/h_vtx`` is evaluated AFTER ``h_vtx`` has the active-cell
+    masking applied (``BIG_H`` on dry sides; min over wet cells gives
+    the true F-point wet thickness — MITgcm ``hFacZ``).  Where the
+    vertex itself is fully dry (all 4 surrounding cells inactive),
+    ``h_vtx → BIG_H`` makes ``q → 0`` — and the surrounding mass
+    fluxes ``V = h_v·v·v_mask`` and ``U = h_u·u·u_mask`` also vanish
+    at the closed faces, so triad contributions through dry vertices
+    are exactly zero (no spurious flow at the coast).
+
+    A Neumann fill of ``q`` at land-adjacent vertices (where
+    ``vtx_mask == 0`` but at least one neighbour is wet) replaces the
+    masked-zero value with the average of wet neighbours.  This
+    avoids a discontinuity in q at the coast that would otherwise
+    drive a spurious PV gradient even when the mass flux is zero
+    (the discontinuity does not affect the dynamics through ``q·F``,
+    but it pollutes the coupling to neighbouring faces through the
+    triad's 9-vertex stencil).  Same Neumann fill helper as is used
+    by the WENO branch.
+
+    Parameters
+    ----------
+    zeta : (n_lat+1, n_lon+1, nlev)
+        Relative vorticity at vertices.
+    h_vtx : (n_lat+1, n_lon+1, nlev)
+        F-point layer thickness (MITgcm hFacZ-like, min over active
+        cells with a ``BIG_H`` sentinel for fully-dry vertices).
+    h_v, v : (n_lat+1, n_lon, nlev)
+        Layer thickness and meridional velocity at v-faces.
+    h_u, u : (n_lat, n_lon+1, nlev)
+        Layer thickness and zonal velocity at u-faces.
+    u_mask_3d : (n_lat, n_lon+1, nlev) or broadcastable
+        u-face active mask (1 at wet faces, 0 at closed/dry faces).
+    v_mask_3d : (n_lat+1, n_lon, nlev) or broadcastable
+        v-face active mask.
+    vtx_mask : (n_lat+1, n_lon+1)
+        Vertex mask (1 if all 4 surrounding cells are wet, 0 otherwise);
+        used to drive the Neumann fill of q.
+    eps_h : float
+        Floor on ``h_vtx`` to avoid divide-by-zero at fully-dry verts.
+        Already partially handled by ``BIG_H`` sentinel; this is a
+        belt-and-braces guard.
+
+    Returns
+    -------
+    diag_vortcor_u : (n_lat, n_lon+1, nlev)
+        ``+ q · F_v`` contribution to ``du/dt`` at u-faces.
+    diag_vortcor_v : (n_lat+1, n_lon, nlev)
+        ``- q · F_u`` contribution to ``dv/dt`` at v-faces.
+
+    References
+    ----------
+    - Arakawa, A. and Lamb, V.R. (1981): A potential-enstrophy and
+      energy-conserving scheme for the shallow-water equations.
+      Mon. Wea. Rev. 109, 18-36.
+    - Salmon, R. (2004): Poisson-bracket approach to the construction
+      of energy- and potential-enstrophy-conserving algorithms for
+      the shallow-water equations.  J. Atmos. Sci. 61, 2016-2036.
+    - Stewart, A.L. and Dellar, P.J. (2016): An energy- and
+      potential-enstrophy-conserving numerical scheme for the
+      multilayer shallow-water equations with the complete Coriolis
+      force.  J. Comput. Phys. 313, 99-120.  (Appendix A: AL81
+      coefficient set.)
+    - Le Sommer, J., Penduff, T., Theetten, S., Madec, G., Barnier, B.
+      (2009): How momentum advection schemes influence
+      current-topography interactions at eddy-permitting resolution.
+      Ocean Modelling 29, 1-14.  (NEMO ``dyn_vor_een``;
+      recommendation for ``ln_zps``.)
+    - Adcroft, A. and Hallberg, R. (2006): On methods for solving the
+      oceanic equations of motion in generalized vertical
+      coordinates.  Ocean Modelling 11, 224-233.  (PV consistency on
+      partial cells.)
+    - Pacanowski, R.C. and Gnanadesikan, A. (1998): Transient response
+      in a z-level ocean model that resolves topography with
+      partial cells.  Mon. Wea. Rev. 126, 3248-3270.  (min-rule for
+      vertex thickness.)
+    """
+    # --- 1. PV at vertices, ``q = ζ / h_vtx`` ----------------------
+    # ``h_vtx`` already carries the BIG_H sentinel at fully-dry
+    # vertices (set by the caller) so q ≈ 0 there; eps_h is a guard
+    # against floating-point edge cases.
+    q = zeta / jnp.maximum(h_vtx, eps_h)
+
+    # Neumann-fill q at land-adjacent vertices so the triad sees a
+    # smooth field across coastlines.  The fill is idempotent at
+    # interior wet vertices (vtx_mask == 1).  Keeps q in the same
+    # 4D shape ``(n_lat+1, n_lon+1, nlev)`` as zeta.
+    q = neumann_fill_vertex(q, vtx_mask)
+
+    # --- 2. Mass fluxes at u/v faces -------------------------------
+    # ``F_u = h·u`` at u-faces, ``F_v = h·v`` at v-faces.  Multiply
+    # by the per-level face mask so closed/dry faces contribute
+    # exactly zero — required for q·F to vanish at the coast.
+    F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
+    F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+
+    # --- 3. Corner triads at every cell ----------------------------
+    # Each triad lives at a corner of a cell.  We index triads by the
+    # cell ``(j, i)`` they belong to, with shape ``(n_lat, n_lon,
+    # nlev)`` and the named corner indicating which 3 of the cell's
+    # 4 corner-q values are summed.
+    #
+    # Cell (j, i) has corners (using array indexing on q[j', i']):
+    #   q_SW = q[j  , i  ]    q_SE = q[j  , i+1]
+    #   q_NW = q[j+1, i  ]    q_NE = q[j+1, i+1]
+    #
+    # We need q_SW, q_SE, q_NW, q_NE as ``(n_lat, n_lon, nlev)``
+    # arrays.  Because ``q`` has shape ``(n_lat+1, n_lon+1, nlev)``
+    # with periodic wrap on the longitude axis (column n_lon == col
+    # 0), simple slicing extracts each corner.
+    q_SW = q[:-1, :-1, :]                # (n_lat, n_lon, nlev)
+    q_SE = q[:-1, 1:, :]
+    q_NW = q[1:, :-1, :]
+    q_NE = q[1:, 1:, :]
+
+    inv12 = 1.0 / 12.0
+    # 4 triads per cell (1/12-weighted sum of 3 corner-q values, the
+    # 3 q's nearest the named corner).
+    t_SW = inv12 * (q_SW + q_SE + q_NW)
+    t_SE = inv12 * (q_SE + q_SW + q_NE)
+    t_NW = inv12 * (q_NW + q_SW + q_NE)
+    t_NE = inv12 * (q_NE + q_SE + q_NW)
+
+    # --- 4. AL81 PV flux at u-faces --------------------------------
+    # u-face u[j, i] is between west cell (j, i-1) and east cell
+    # (j, i).  AL81 form (NEMO dyn_vor_een, translated to our index
+    # convention):
+    #   +F_pv_u[j, i] = + t_SE(west_cell)  * F_v[j+1, i-1]
+    #                   + t_SW(east_cell)  * F_v[j+1, i  ]
+    #                   + t_NE(west_cell)  * F_v[j  , i-1]
+    #                   + t_NW(east_cell)  * F_v[j  , i  ]
+    #
+    # We need the west-cell triads (cell at (j, i-1)) at u-face index
+    # i; this is ``t_*`` rolled +1 in axis 1.  East-cell triads at
+    # u-face index i are ``t_*`` itself, but we need to extend along
+    # axis 1 from n_lon → n_lon+1 to match u-face shape (the periodic
+    # wrap face).  We use ``jnp.concatenate`` with the col-0 wrap.
+    #
+    # F_v is (n_lat+1, n_lon, nlev); we need F_v at v-face indices
+    # (j, i-1), (j, i), (j+1, i-1), (j+1, i).  For u-face (j, i)
+    # with i ∈ [0, n_lon], periodic in i.
+
+    # Roll periodic in axis 1 to get west-cell triads aligned with
+    # u-face index.  After rolling +1, position i holds cell index
+    # (i-1) mod n_lon, which is the west cell of u-face i.
+    t_SE_W = jnp.roll(t_SE, 1, axis=1)   # west-cell SE at u-face i
+    t_NE_W = jnp.roll(t_NE, 1, axis=1)
+    # East-cell triads are at u-face i = cell i.  Also wrap the
+    # n_lon-th u-face to col 0 (periodic).
+    # t_SW, t_NW have shape (n_lat, n_lon, nlev); pad axis 1 by 1 on
+    # the right with the col-0 value to match u-face shape.
+    t_SW_E = jnp.concatenate([t_SW, t_SW[:, 0:1, :]], axis=1)
+    t_NW_E = jnp.concatenate([t_NW, t_NW[:, 0:1, :]], axis=1)
+    # West-cell triads also need the periodic wrap column
+    t_SE_W = jnp.concatenate([t_SE_W, t_SE_W[:, 0:1, :]], axis=1)
+    t_NE_W = jnp.concatenate([t_NE_W, t_NE_W[:, 0:1, :]], axis=1)
+
+    # F_v at the four offsets, mapped to u-face index.  At u-face
+    # (j, i), we need:
+    #   F_v_S_W = F_v[j  , i-1, :]   (south-west of u-face)
+    #   F_v_S_E = F_v[j  , i  , :]
+    #   F_v_N_W = F_v[j+1, i-1, :]
+    #   F_v_N_E = F_v[j+1, i  , :]
+    # F_v has shape (n_lat+1, n_lon, nlev); the south face of the
+    # u-face row j is F_v[j, :, :], the north face is F_v[j+1, :, :].
+    F_v_south = F_v[:-1, :, :]           # (n_lat, n_lon, nlev) — south of each u-row
+    F_v_north = F_v[1:, :, :]            # (n_lat, n_lon, nlev)
+    # West/east neighbour in i, periodic, plus wrap to (n_lat, n_lon+1, nlev).
+    F_v_S_E = jnp.concatenate([F_v_south, F_v_south[:, 0:1, :]], axis=1)
+    F_v_N_E = jnp.concatenate([F_v_north, F_v_north[:, 0:1, :]], axis=1)
+    F_v_S_W = jnp.roll(F_v_S_E, 1, axis=1)
+    F_v_N_W = jnp.roll(F_v_N_E, 1, axis=1)
+
+    # AL81 contribution at u-faces.
+    diag_vortcor_u = (
+        t_SE_W * F_v_N_W       # west-cell SE × NW V
+        + t_SW_E * F_v_N_E     # east-cell SW × NE V
+        + t_NE_W * F_v_S_W     # west-cell NE × SW V
+        + t_NW_E * F_v_S_E     # east-cell NW × SE V
+    )
+
+    # --- 5. AL81 PV flux at v-faces --------------------------------
+    # v-face v[j, i] is between south cell (j-1, i) and north cell
+    # (j, i).  AL81 form:
+    #   -F_pv_v[j, i] = + t_NW(south_cell) * F_u[j-1, i+1]
+    #                   + t_NE(south_cell) * F_u[j-1, i  ]
+    #                   + t_SW(north_cell) * F_u[j  , i+1]
+    #                   + t_SE(north_cell) * F_u[j  , i  ]
+    # The v-tendency is the negative of this (since q × u with the
+    # cross-product sign convention is q × F_u for v).
+    #
+    # South-cell triads at v-face j are ``t_*`` shifted +1 in axis 0
+    # (i.e., t_*[j-1, i] = south-cell of v-face j).  North-cell
+    # triads at v-face j are ``t_*`` itself.  v-face has shape
+    # (n_lat+1, n_lon, nlev); pole faces (j=0, n_lat) are walls
+    # → set the contribution to zero by zero-padding in axis 0.
+    #
+    # Pad t_* in axis 0 by 1 on south (south-cell of v-face 0 doesn't
+    # exist) and 1 on north (north-cell of v-face n_lat doesn't
+    # exist).  This produces (n_lat+2, n_lon, nlev) arrays from which
+    # the south-cell view is t_pad[:-1, ...] (rows 0..n_lat) and the
+    # north-cell view is t_pad[1:, ...] (rows 1..n_lat+1).  At the
+    # pole rows the corresponding triad value is 0, so the v-tendency
+    # at pole faces vanishes naturally.
+    pad0 = ((1, 1), (0, 0), (0, 0))
+    t_NW_S = jnp.pad(t_NW, pad0)[:-1, :, :]   # south-cell NW at v-face j
+    t_NE_S = jnp.pad(t_NE, pad0)[:-1, :, :]
+    t_SW_N = jnp.pad(t_SW, pad0)[1:, :, :]    # north-cell SW at v-face j
+    t_SE_N = jnp.pad(t_SE, pad0)[1:, :, :]
+
+    # F_u at the four offsets, mapped to v-face index.  At v-face
+    # (j, i), we need:
+    #   F_u_S_W = F_u[j-1, i  , :]   (south-west of v-face)
+    #   F_u_S_E = F_u[j-1, i+1, :]
+    #   F_u_N_W = F_u[j  , i  , :]
+    #   F_u_N_E = F_u[j  , i+1, :]
+    # F_u has shape (n_lat, n_lon+1, nlev); pad in axis 0 with zeros
+    # to align with v-face row index (rows 0..n_lat for v).
+    F_u_pad = jnp.pad(F_u, pad0)              # (n_lat+2, n_lon+1, nlev)
+    F_u_south = F_u_pad[:-1, :, :]            # (n_lat+1, n_lon+1, nlev)
+    F_u_north = F_u_pad[1:, :, :]
+    # Convert (n_lon+1) periodic to per-cell-index (n_lon).  At v-face
+    # i (cell column i):
+    #   F_u_*_W = F_u[*, i, :]      (west u-face of cell i)
+    #   F_u_*_E = F_u[*, i+1, :]    (east u-face of cell i)
+    F_u_S_W = F_u_south[:, :-1, :]            # (n_lat+1, n_lon, nlev)
+    F_u_S_E = F_u_south[:, 1:, :]
+    F_u_N_W = F_u_north[:, :-1, :]
+    F_u_N_E = F_u_north[:, 1:, :]
+
+    # v-tendency from PV (negative sign per the cross-product
+    # convention used by the simple Sadourny call site).
+    diag_vortcor_v = -(
+        t_NW_S * F_u_S_E       # south-cell NW × SE U
+        + t_NE_S * F_u_S_W     # south-cell NE × SW U
+        + t_SW_N * F_u_N_E     # north-cell SW × NE U
+        + t_SE_N * F_u_N_W     # north-cell SE × NW U
+    )
+
+    return diag_vortcor_u, diag_vortcor_v
+
 
 def compute_face_masks(
     land_mask: jnp.ndarray,

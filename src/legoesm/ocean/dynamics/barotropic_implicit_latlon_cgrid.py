@@ -78,15 +78,30 @@ def _depth_average_to_faces(
     u_mask: jnp.ndarray,
     v_mask: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Depth-average 3D velocity to C-grid face points (thickness-weighted)."""
-    # h at u-faces (avg of adjacent cell h, periodic in lon)
-    h_u = 0.5 * (jnp.roll(h_k, 1, axis=1) + h_k)
-    h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)
+    """Depth-average 3D velocity to C-grid face points (thickness-weighted).
+
+    Partial-cells aware: at faces between cells with different
+    ``bottom_level`` (one column has water at level k, the other
+    doesn't), the face thickness contribution must be zero — naively
+    averaging ``0.5 * (h_active + 0)`` would otherwise double-count
+    depth and skew the depth-integrated transport.  We multiply by a
+    3D face-active mask derived from ``h_k > 0``.  For legacy z\\*
+    columns where every cell has ``h_k > 0`` (full cells everywhere),
+    the mask is 1 and the result is bit-exact unchanged.
+    """
+    # Use ``min(h_left, h_right)`` instead of the arithmetic mean.  This
+    # is the physically correct face thickness — the partial cell is
+    # the constraint on flux capacity at the face.  Identical to the
+    # arithmetic mean when adjacent cells have the same thickness
+    # (flat bottom, full cells on both sides) → backwards-compat
+    # bit-exact for the dominant legacy use case.  Naturally zero at
+    # active-vs-inactive partial-cell faces (one side has h=0).
+    h_u_inner = jnp.minimum(jnp.roll(h_k, 1, axis=1), h_k)
+    h_u = jnp.concatenate([h_u_inner, h_u_inner[:, 0:1, :]], axis=1)
     H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
     U_bar = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
 
-    # h at v-faces (avg of adjacent cell h; pole rows zeroed by v_mask)
-    h_v_int = 0.5 * (h_k[:-1] + h_k[1:])
+    h_v_int = jnp.minimum(h_k[:-1], h_k[1:])
     n_lon = h_k.shape[1]
     nlev = h_k.shape[2]
     zero_row = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
@@ -98,22 +113,36 @@ def _depth_average_to_faces(
 
 
 def _h_total_at_faces(
-    eta: jnp.ndarray,
-    H_bathy: jnp.ndarray,
+    h_k: jnp.ndarray,
     min_water_col: jnp.ndarray,
     mask: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Total water-column thickness H = max(η + H_bathy, min_col), at u/v faces.
+    """Total water-column thickness ``H = sum_k(h_k)`` at u/v faces.
 
-    Face values are face-area-weighted averages of the two adjacent cells,
-    multiplied by the *cell* mask product so that dry-face transport is zero.
+    Uses ``min(H_left, H_right)`` rather than the arithmetic mean —
+    the gravity-wave at the face propagates through the shared wet
+    depth (the shallower of two columns), so this is the physically
+    correct face H for the Helmholtz operator.  When adjacent cells
+    have the same H_bathy (flat bottom), min == average → bit-exact
+    backwards-compat preserved.
+
+    The cell-center total is computed as ``sum_k(h_k)``, NOT as
+    ``eta + H_bathy``.  This is mathematically equivalent but bit-
+    consistent with the per-level mass flux pipeline that uses
+    ``min_cell_to_uface(h_k)`` and ``H_u_old = sum_k(h_u_old)``.
+    Using ``eta + H_bathy`` here would drift by O(1e-4 m) from
+    ``sum_k(h_k)`` due to the float-precision residue in
+    ``create_ocean_z_star``'s ``dz_ref`` construction, breaking the
+    Hallberg-Adcroft 2009 column-sum identity.
+
+    Multiplied by the *cell* mask so that dry-face transport is zero.
     """
-    H_total = jnp.maximum(eta + H_bathy, min_water_col) * mask
+    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col) * mask
 
-    H_u = 0.5 * (jnp.roll(H_total, 1, axis=1) + H_total)
-    H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
+    H_u_inner = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
+    H_u = jnp.concatenate([H_u_inner, H_u_inner[:, 0:1]], axis=1)
 
-    H_v_int = 0.5 * (H_total[:-1] + H_total[1:])
+    H_v_int = jnp.minimum(H_total[:-1], H_total[1:])
     n_lon = H_total.shape[1]
     zero_row = jnp.zeros((1, n_lon), dtype=H_total.dtype)
     H_v = jnp.concatenate([zero_row, H_v_int, zero_row], axis=0)
@@ -289,8 +318,12 @@ def barotropic_implicit_latlon_cgrid(
     )
 
     # ----- Step 2: face total depth from eta_old -------------------------
+    # Use sum(h_k_old) for cell-center total, not eta+H_bathy: ensures
+    # bit-consistency with the per-level mass flux pipeline that builds
+    # H_u_old as sum_k(min_cell_to_uface(h_k_old)).  This is required
+    # for the Hallberg-Adcroft 2009 column-sum identity.
     H_u_old, H_v_old = _h_total_at_faces(
-        eta_old, H_bathy, min_water_col, mask,
+        h_k_old, min_water_col, mask,
     )
 
     # ----- Step 3: Coriolis face values ---------------------------------
@@ -389,8 +422,14 @@ def barotropic_implicit_latlon_cgrid(
     V_new = (V_pred - theta_pgf * dt_t * g * delta_grad_y) * v_mask
 
     # ----- Step 7: time-averaged transport for tracer step --------------
+    # H_u_new uses sum(h_k_new) — bit-consistent with the per-level
+    # mass flux pipeline.  See comment in Step 2.
+    h_k_new = compute_layer_thickness(
+        eta_new, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )
     H_u_new, H_v_new = _h_total_at_faces(
-        eta_new, H_bathy, min_water_col, mask,
+        h_k_new, min_water_col, mask,
     )
     Hu_avg = (
         (1.0 - theta_eta) * H_u_old * U_old + theta_eta * H_u_new * U_new
@@ -404,8 +443,33 @@ def barotropic_implicit_latlon_cgrid(
     v_baro_old = V_old[..., jnp.newaxis]
     u_prime = u_3d - u_baro_old
     v_prime = v_3d - v_baro_old
-    u_new_3d = (u_prime + U_new[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
-    v_new_3d = (v_prime + V_new[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
+    # Partial-cells: at faces where one cell is below-seafloor (h_k=0)
+    # and the other has water, the 2D u_mask is 1 (both columns are
+    # ocean cells in 2D), but u_new at the inactive level should be
+    # zero.  Use a 3D face-active mask derived from h_k > 0.  For
+    # legacy z* (all h_k > 0), this mask is 1 everywhere → bit-exact.
+    h_active_3d = (h_k_old > 0).astype(u_3d.dtype)
+    u_active_3d_inner = h_active_3d * jnp.roll(h_active_3d, 1, axis=1)
+    u_active_3d = jnp.concatenate(
+        [u_active_3d_inner, u_active_3d_inner[:, 0:1, :]], axis=1,
+    )
+    v_active_3d_int = h_active_3d[:-1] * h_active_3d[1:]
+    n_lon_grid = h_active_3d.shape[1]
+    nlev_g = h_active_3d.shape[2]
+    zero_row_3d = jnp.zeros(
+        (1, n_lon_grid, nlev_g), dtype=u_3d.dtype,
+    )
+    v_active_3d = jnp.concatenate(
+        [zero_row_3d, v_active_3d_int, zero_row_3d], axis=0,
+    )
+    u_new_3d = (
+        (u_prime + U_new[..., jnp.newaxis])
+        * u_mask[..., jnp.newaxis] * u_active_3d
+    )
+    v_new_3d = (
+        (v_prime + V_new[..., jnp.newaxis])
+        * v_mask[..., jnp.newaxis] * v_active_3d
+    )
 
     state_new = state._replace(
         eta=state.eta.replace(data=eta_new),

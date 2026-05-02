@@ -117,6 +117,30 @@ class BathymetryConfig(NamedTuple):
     edge_blend_strength: float = 0.2
     edge_blend_width: int = 2
     depth_is_negative: bool = True
+    r_factor_max: float | None = None
+    """Mellor-Ezer-Oey r-factor cap.  When set, iteratively deepens
+    shallower ocean cells so that for every ocean-ocean neighbour pair
+    ``r = |H_i - H_j| / max(H_i, H_j) <= r_factor_max``.  Typical
+    target: 0.2 (the Beckmann-Haidvogel literature bound).  When None,
+    no MEO smoothing is applied — the model relies on Laplacian
+    smoothing alone, which is known to be insufficient for sharp
+    bathymetric features (Phase 3a finding)."""
+    meo_max_iter: int = 200
+    north_cap_lat: float | None = None
+    """Northern polar cap latitude [deg].  When set, all ocean cells
+    with ``lat > north_cap_lat`` are converted to land.  Matches the
+    ``polar_cap_lat`` convention of the idealized GO config (default
+    80°).  Standard production fix for lat-lon ocean models that the
+    Arctic singular-point + tiny-dx high-latitude regime is hard to
+    keep stable + damped simultaneously, especially with cos²(lat)
+    A_h scaling that *reduces* damping at high latitudes.  See
+    ``docs/ocean_experiments/realistic_geometry_topology_fixes.md``.
+    When None, no cap is applied (preserves bit-exact regression)."""
+    south_cap_lat: float | None = None
+    """Southern polar cap latitude [deg].  When set, all ocean cells
+    with ``lat < south_cap_lat`` are converted to land.  Antarctica is
+    already mostly land in ETOPO so this is rarely needed in practice;
+    provided for symmetry with ``north_cap_lat``.  When None, no cap."""
 
 
 # ============================================================================
@@ -128,9 +152,10 @@ def _detect_depth_variable(ds) -> tuple[str, str, str]:
     """Auto-detect depth, latitude, and longitude variable names."""
     all_vars = set(ds.data_vars.keys()) | set(ds.coords.keys())
 
-    # Depth/elevation candidates (ETOPO, GEBCO, generic)
+    # Depth/elevation candidates (ETOPO, GEBCO, NOAA ERDDAP, generic).
+    # "altitude" is the NOAA ERDDAP convention for etopo180.
     depth_candidates = [
-        "z", "elevation", "depth", "topo", "Band1",
+        "z", "elevation", "altitude", "depth", "topo", "Band1",
         "bedrock_topography", "surface_elevation",
     ]
     depth_var = None
@@ -205,7 +230,20 @@ def _regrid_bathymetry(
     """
     from scipy.interpolate import RegularGridInterpolator
 
-    # Wrap longitude for periodic interpolation
+    # Drop a duplicated periodic endpoint if the source covers the full
+    # span twice (e.g. ETOPO with lon ∈ [−180, 180] — both endpoints
+    # represent the same physical line).  Without this the periodic
+    # padding below produces a back-to-back duplicate that scipy's
+    # RegularGridInterpolator rejects with "points must be strictly
+    # ascending or descending".
+    if (
+        lon_src.size >= 2
+        and np.isclose(lon_src[-1] - lon_src[0], 360.0, atol=1e-6)
+    ):
+        lon_src = lon_src[:-1]
+        depth_data = depth_data[:, :-1]
+
+    # Wrap longitude for periodic interpolation.
     lon_wrapped = np.concatenate([
         lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
     ])
@@ -375,6 +413,142 @@ def _laplacian_smooth_voronoi(
             smoothed[c] = total / count
         result = 0.5 * arr + 0.5 * smoothed
     return result
+
+
+# ============================================================================
+# Mellor-Ezer-Oey r-factor cap
+# ============================================================================
+
+
+def _r_factor_max(H_bathy, ocean_mask):
+    """Maximum r-factor over ocean-ocean neighbour pairs (4-connected).
+
+    r = |H_i - H_j| / max(H_i, H_j).  Periodic in longitude (axis=1)
+    via np.roll; latitude (axis=0) is bounded — we still roll, but
+    only count pairs where both cells are ocean, which excludes any
+    polar-row wrap-around since polar rows are always land in our
+    setup.
+    """
+    H = np.asarray(H_bathy)
+    ocean = np.asarray(ocean_mask) > 0.5
+    r_max = 0.0
+    for shift, axis in [(-1, 1), (+1, 1), (-1, 0), (+1, 0)]:
+        H_n = np.roll(H, shift, axis=axis)
+        ocean_n = np.roll(ocean, shift, axis=axis)
+        valid = ocean & ocean_n
+        if not valid.any():
+            continue
+        diff = np.abs(H - H_n)
+        denom = np.fmax(H, H_n)
+        # Avoid division-by-zero (only occurs at land neighbours, masked out)
+        denom_safe = np.where(denom > 0.0, denom, 1.0)
+        r = np.where(valid, diff / denom_safe, 0.0)
+        r_max = max(r_max, float(r.max()))
+    return r_max
+
+
+def apply_meo_r_factor_cap(
+    H_bathy,
+    ocean_mask,
+    r_factor_max,
+    *,
+    max_iter: int = 200,
+    tol: float = 1.0e-6,
+):
+    """Mellor-Ezer-Oey iterative r-factor cap.
+
+    Iteratively deepens shallower ocean cells so that for every
+    ocean-ocean neighbour pair, ``r = |H_i - H_j| / max(H_i, H_j) <=
+    r_factor_max``.  Uses Jacobi-style parallel updates (each
+    iteration updates all cells based on the previous iteration's
+    state).  Convergence is monotone: cells only get deeper, so
+    max(r) is non-increasing.
+
+    The classic Mellor-Ezer-Oey 1994 prescription: when r > target,
+    deepen the shallower cell to ``H_deep * (1 - r_factor_max)``.
+    Volume change is added (small, typically <2% at 1° on real
+    bathymetry).
+
+    Parameters
+    ----------
+    H_bathy : array, shape (...)
+        Ocean depth [m], positive downward.  Land cells should have
+        H_bathy = 0 or any value, but ``ocean_mask`` must mark them.
+    ocean_mask : array, shape (...)
+        1 = ocean, 0 = land.  Same shape as H_bathy.
+    r_factor_max : float
+        Target r-factor cap (typically 0.2).
+    max_iter : int
+        Maximum Jacobi iterations.
+    tol : float
+        Convergence tolerance — stop when no cell changed by more
+        than tol [m] in an iteration.
+
+    Returns
+    -------
+    H_new : np.ndarray
+        New bathymetry with r <= r_factor_max for every ocean pair.
+    info : dict
+        - ``iterations``: number of iterations performed
+        - ``initial_r_max``: r before MEO
+        - ``final_r_max``: r after MEO
+        - ``volume_change_frac``: fractional ocean volume change
+          (positive means added water)
+        - ``max_depth_change_m``: max single-cell depth change
+        - ``cells_modified``: count of cells whose depth changed
+    """
+    if r_factor_max <= 0.0 or r_factor_max >= 1.0:
+        raise ValueError(
+            f"r_factor_max must be in (0, 1), got {r_factor_max!r}",
+        )
+    H = np.asarray(H_bathy, dtype=np.float64).copy()
+    ocean = np.asarray(ocean_mask) > 0.5
+    factor = 1.0 - r_factor_max  # H_shallow >= H_deep * factor
+
+    H_initial = H.copy()
+    initial_r = _r_factor_max(H, ocean)
+
+    iterations = 0
+    for it in range(max_iter):
+        H_old = H.copy()
+        # Walk the four neighbours, deepening this cell to satisfy
+        # the constraint with each.  Jacobi-style: use H_old's neighbour
+        # values within the same iteration.
+        H_new = H.copy()
+        for shift, axis in [(-1, 1), (+1, 1), (-1, 0), (+1, 0)]:
+            H_n = np.roll(H_old, shift, axis=axis)
+            ocean_n = np.roll(ocean, shift, axis=axis)
+            min_required = H_n * factor
+            # Only constrain ocean-ocean pairs.
+            valid = ocean & ocean_n
+            H_new = np.where(
+                valid, np.maximum(H_new, min_required), H_new,
+            )
+        # Land cells unchanged.
+        H_new = np.where(ocean, H_new, H)
+        delta_max = float(np.max(np.abs(H_new - H_old)))
+        H = H_new
+        iterations = it + 1
+        if delta_max < tol:
+            break
+
+    final_r = _r_factor_max(H, ocean)
+    # Volume change (per unit area; this is in units of m, i.e. mean depth change)
+    vol_change = float(np.sum(np.where(ocean, H - H_initial, 0.0)))
+    vol_initial = float(np.sum(np.where(ocean, H_initial, 0.0)))
+    vol_change_frac = vol_change / vol_initial if vol_initial > 0 else 0.0
+    cells_modified = int(np.sum(np.where(ocean, np.abs(H - H_initial) > tol, 0)))
+    max_change = float(np.max(np.where(ocean, np.abs(H - H_initial), 0.0)))
+
+    info = {
+        "iterations": iterations,
+        "initial_r_max": initial_r,
+        "final_r_max": final_r,
+        "volume_change_frac": vol_change_frac,
+        "max_depth_change_m": max_change,
+        "cells_modified": cells_modified,
+    }
+    return H, info
 
 
 # ============================================================================
@@ -572,11 +746,19 @@ def load_bathymetry(
 
     ds.close()
 
-    # Ensure longitude in [0, 360)
+    # Ensure longitude in [0, 360).  ETOPO/GEBCO often store longitude in
+    # [-180, +180] inclusive, which after modulo produces duplicate values
+    # (both -180 and +180 → 180).  RegularGridInterpolator below rejects
+    # non-strictly-monotonic axes, so we deduplicate after sorting.
     lon_src = lon_src % 360.0
     lon_order = np.argsort(lon_src)
     lon_src = lon_src[lon_order]
     elev_data = elev_data[:, lon_order]
+    if lon_src.size > 1:
+        keep_lon = np.concatenate([[True], np.diff(lon_src) > 0.0])
+        if not keep_lon.all():
+            lon_src = lon_src[keep_lon]
+            elev_data = elev_data[:, keep_lon]
 
     # Ensure latitude sorted ascending
     if lat_src[0] > lat_src[-1]:
@@ -638,6 +820,30 @@ def load_bathymetry(
     return depth, ocean_mask
 
 
+# Last MEO run summary (read by diagnostic scripts).  Per-call info also
+# returned by ``apply_meo_r_factor_cap`` directly.
+_LAST_MEO_INFO: dict = {}
+
+
+def _maybe_apply_meo(depth, ocean_mask, cfg):
+    """Helper used by per-grid loaders to apply MEO after smoothing.
+
+    MEO must run after Laplacian smoothing because the smoothing
+    blends land cells (depth=0) into adjacent ocean cells, which
+    reduces ocean-cell depth at coastlines and re-introduces
+    r-factor violations.  Running MEO last guarantees the final
+    bathymetry satisfies r <= cfg.r_factor_max.
+    """
+    if cfg.r_factor_max is None:
+        return depth
+    depth, meo_info = apply_meo_r_factor_cap(
+        np.asarray(depth), np.asarray(ocean_mask), cfg.r_factor_max,
+        max_iter=cfg.meo_max_iter,
+    )
+    _LAST_MEO_INFO.update(meo_info)
+    return depth
+
+
 # ============================================================================
 # Grid-specific initialization
 # ============================================================================
@@ -678,6 +884,9 @@ def load_bathymetry_cubed_sphere(
     # Re-enforce minimum depth after smoothing
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # MEO r-factor cap (after smoothing).
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
 
     # Edge blending for cubed-sphere face boundaries
     if cfg.edge_blend_strength > 0:
@@ -746,7 +955,71 @@ def load_bathymetry_mpas(
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
 
+    # MEO r-factor cap (after smoothing).
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
+
     H_bathy = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    dtype = get_policy().storage
+    return jnp.array(H_bathy, dtype=dtype), jnp.array(ocean_mask, dtype=dtype)
+
+
+def load_bathymetry_latlon_cgrid(
+    grid,
+    cfg: BathymetryConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Load realistic bathymetry for the lat-lon C-grid.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Target grid with lat2d/lon2d in radians, shape (n_lat, n_lon).
+    cfg : BathymetryConfig
+        Configuration.
+
+    Returns
+    -------
+    H_bathy : jnp.ndarray
+        Bathymetry depth [m], shape (n_lat, n_lon). Positive downward.
+        Set to H_max on land for smooth z* Jacobian (the land_mask
+        prevents actual flow on land cells).
+    ocean_mask : jnp.ndarray
+        1=ocean, 0=land, shape (n_lat, n_lon).
+    """
+    target_lat = np.asarray(grid.lat2d) * 180.0 / np.pi
+    target_lon = np.asarray(grid.lon2d) * 180.0 / np.pi
+    target_lon = target_lon % 360.0
+    grid_spacing = 180.0 / grid.n_lat
+
+    depth, ocean_mask = load_bathymetry(
+        target_lat, target_lon, cfg, grid_spacing_deg=grid_spacing,
+    )
+
+    # Polar caps — close off the high-lat regions where the lat-lon grid
+    # singularity + small dx make the cos²(lat) A_h scaling regime hard
+    # to keep both stable and damped.  Applied BEFORE smoothing so the
+    # cap edge is also smoothed into a neat coastline.
+    if cfg.north_cap_lat is not None:
+        ocean_mask = np.where(target_lat > cfg.north_cap_lat, 0.0, ocean_mask)
+    if cfg.south_cap_lat is not None:
+        ocean_mask = np.where(target_lat < cfg.south_cap_lat, 0.0, ocean_mask)
+    depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # Smoothing on regular lat-lon (periodic in longitude, walls at poles).
+    depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
+
+    # Re-enforce minimum depth after smoothing.
+    ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
+    depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # MEO r-factor cap — applied last, after smoothing has finished
+    # blending coastal cells.  This guarantees the final bathymetry
+    # satisfies r <= cfg.r_factor_max for every ocean-ocean pair.
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
+
+    # For z* Jacobian smoothness: set land depth to H_max
+    # (the land_mask prevents actual flow on land cells).
+    H_bathy = np.where(ocean_mask > 0.5, depth, cfg.H_max)
 
     dtype = get_policy().storage
     return jnp.array(H_bathy, dtype=dtype), jnp.array(ocean_mask, dtype=dtype)
@@ -783,12 +1056,22 @@ def load_bathymetry_gaussian(
         target_lat_2d, target_lon_2d, cfg, grid_spacing_deg=grid_spacing,
     )
 
+    # Polar caps (see load_bathymetry_latlon_cgrid for rationale).
+    if cfg.north_cap_lat is not None:
+        ocean_mask = np.where(target_lat_2d > cfg.north_cap_lat, 0.0, ocean_mask)
+    if cfg.south_cap_lat is not None:
+        ocean_mask = np.where(target_lat_2d < cfg.south_cap_lat, 0.0, ocean_mask)
+    depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
     # Smoothing on Gaussian grid
     depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
 
     # Re-enforce minimum depth after smoothing
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
+
+    # MEO r-factor cap (after smoothing).
+    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
 
     H_bathy = np.where(ocean_mask > 0.5, depth, cfg.H_max)
 
@@ -838,8 +1121,30 @@ def init_ocean_bathymetry(
         )
 
 
+def _is_latlon_cgrid(grid) -> bool:
+    """LatLonGrid has dlon/dlat (regular spacing) — distinguishes from
+    CubedSphereGrid (which has the same ``n`` property), Voronoi (nCells),
+    and Gaussian (irregular Gauss latitudes, no dlat)."""
+    return (
+        hasattr(grid, 'dlon')
+        and hasattr(grid, 'dlat')
+        and hasattr(grid, 'lat2d')
+        and not hasattr(grid, 'nCells')
+        and not hasattr(grid, 'Pnm')
+    )
+
+
 def _idealized_dispatch(grid, cfg: BathymetryConfig):
     """Dispatch idealized bathymetry to appropriate grid handler."""
+    # LatLonGrid: check FIRST since it also exposes ``n`` (= n_lat) via property
+    if _is_latlon_cgrid(grid):
+        from legoesm.ocean.init_latlon_cgrid import (
+            idealized_bathymetry_latlon_cgrid,
+        )
+        return idealized_bathymetry_latlon_cgrid(
+            grid, cfg.H_max, cfg.land_lat_threshold,
+        )
+
     # CubedSphereGrid: has attribute 'n'
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         from legoesm.ocean.init import idealized_bathymetry
@@ -862,6 +1167,10 @@ def _idealized_dispatch(grid, cfg: BathymetryConfig):
 
 def _file_dispatch(grid, cfg: BathymetryConfig):
     """Dispatch file-based bathymetry to appropriate grid handler."""
+    # LatLonGrid: check first
+    if _is_latlon_cgrid(grid):
+        return load_bathymetry_latlon_cgrid(grid, cfg)
+
     # CubedSphereGrid
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         return load_bathymetry_cubed_sphere(grid, cfg)
@@ -913,6 +1222,11 @@ def rest_state_ocean_realistic(
     """
     H_bathy, ocean_mask = init_ocean_bathymetry(grid, cfg)
 
+    # LatLonGrid: check first
+    if _is_latlon_cgrid(grid):
+        return _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
+                                          T_surface, T_deep, S_uniform)
+
     # CubedSphereGrid
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         return _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,
@@ -929,6 +1243,26 @@ def rest_state_ocean_realistic(
                                     T_surface, T_deep, S_uniform)
 
     raise TypeError(f"Unsupported grid type: {type(grid)}")
+
+
+def _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
+                              T_surface, T_deep, S_uniform):
+    """Create lat-lon C-grid ocean rest state with given bathymetry.
+
+    Delegates to ``rest_state_latlon_cgrid_ocean`` (which handles the
+    full LatLonCGridOceanState construction including face masks and
+    z* metadata) by passing the loaded bathymetry + mask via the
+    *_override* parameters.
+    """
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    return rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        T_surface=T_surface,
+        T_deep=T_deep,
+        S_uniform=S_uniform,
+        land_mask_override=ocean_mask,
+        H_bathy_override=H_bathy,
+    )
 
 
 def _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,

@@ -474,9 +474,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4
+    A_h_lat_scaling: bool = False  # When True, A_h is multiplied by cos²(lat)
+                                    # to keep viscous CFL latitude-independent on
+                                    # lat-lon grids.  Standard MITgcm/MOM6/NEMO
+                                    # convention.  Default False to preserve
+                                    # bit-exact regression on legacy configs.
     B_h: float = 0.0
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -537,3 +543,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
+    # Pressure-gradient force scheme on partial cells.  ``"adcroft"``
+    # (default): existing centered-diff p_prime + Adcroft & Campin 2004
+    # face-PGF correction.  ``"smc03"``: full Shchepetkin & McWilliams
+    # 2003 density-Jacobian PGF with harmonic-mean monotonized slope
+    # reconstruction — closes the BH partial-cell gap by avoiding the
+    # single-level z-spike that the Adcroft correction produces and that
+    # drives the 2Δz computational mode.  See
+    # docs/ocean_experiments/density_jacobian_pgf_plan.md.  Pure-z*
+    # runs ignore this field (the existing path is identical).
+    pgf_scheme: str = "adcroft"

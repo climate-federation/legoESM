@@ -59,6 +59,7 @@ def rest_state_latlon_cgrid_ocean(
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
     land_mask_override: jnp.ndarray | None = None,
+    H_bathy_override: jnp.ndarray | None = None,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -84,6 +85,13 @@ def rest_state_latlon_cgrid_ocean(
         If provided, use this as the land mask (1=ocean, 0=land) instead
         of deriving one from *land_lat_threshold*.  Face masks (u_mask,
         v_mask) are computed from it automatically.
+    H_bathy_override : array (n_lat, n_lon), optional
+        If provided, use this as the per-cell bathymetry depth [m].
+        When supplied together with *land_mask_override*, both are used
+        as-is (caller is responsible for consistency between them).
+        When supplied without *land_mask_override*, the land mask is
+        derived from ``H_bathy_override > 0``.  When neither is given,
+        a flat-bottom idealized bathymetry is constructed.
 
     Returns
     -------
@@ -93,11 +101,17 @@ def rest_state_latlon_cgrid_ocean(
     n_lon = grid.n_lon
     nlev = z_coord.n_levels
 
-    if land_mask_override is not None:
-        # Cast both fields to the active precision policy so that a
-        # caller running under x32 does not silently get an x64 land
-        # mask + bathymetry (codex adversarial review iter-1, bug #6).
-        dtype = get_policy().storage
+    # Cast bathymetry/mask inputs to the active precision policy so that a
+    # caller running under x32 does not silently get x64 fields (codex
+    # adversarial review iter-1, bug #6).
+    dtype = get_policy().storage
+    if H_bathy_override is not None:
+        H_bathy = jnp.asarray(H_bathy_override).astype(dtype)
+        if land_mask_override is not None:
+            land_mask = jnp.asarray(land_mask_override).astype(dtype)
+        else:
+            land_mask = (H_bathy > 0.0).astype(dtype)
+    elif land_mask_override is not None:
         land_mask = jnp.asarray(land_mask_override).astype(dtype)
         H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=dtype)
     else:

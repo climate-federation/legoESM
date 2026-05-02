@@ -100,17 +100,27 @@ def create_ocean_z_star(
     scale = H_max / jnp.sum(dz_raw)
     dz_ref = dz_raw * scale
 
+    # Snap the last layer so ``sum(dz_ref) == H_max`` to bit-precision.
+    # Without this, the cumsum round-trip below leaves a float-drift
+    # residue of order ``H_max * eps_dtype`` (~2e-4 m for H_max=4000m
+    # in fp32) that breaks the Hallberg-Adcroft 2009 column-sum
+    # identity in partial-cell models — ``sum_k(h_partial)`` would
+    # differ from the user-supplied ``H_bathy`` by that residue.
+    dz_ref = dz_ref.at[-1].set(H_max - jnp.sum(dz_ref[:-1]))
+
     # Interface depths from cumulative sum (surface=0, bottom=-H_max)
     z_half_ref = jnp.concatenate([
         jnp.array([0.0], dtype=dz_ref.dtype),
         -jnp.cumsum(dz_ref),
     ])
+    # Snap the bottom interface to exactly -H_max (kills cumsum drift).
+    z_half_ref = z_half_ref.at[-1].set(-H_max)
 
     # Full level depths (cell centers)
     z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
 
-    # Layer thicknesses (positive)
-    dz_ref = z_half_ref[:-1] - z_half_ref[1:]  # positive since z[k] > z[k+1]
+    # Layer thicknesses (positive). Recover from the snapped interfaces.
+    dz_ref = z_half_ref[:-1] - z_half_ref[1:]
 
     # Distance between full levels
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]  # positive
@@ -125,18 +135,221 @@ def create_ocean_z_star(
     )
 
 
+class OceanPartialCellCoordinate(NamedTuple):
+    """z* + partial bottom cells (Adcroft, Hill, Marshall 1997;
+    Adcroft & Campin 2004).
+
+    Same z*-style reference levels as ``OceanZStarCoordinate``, but
+    augmented with per-cell layer thicknesses ``h_partial(..., k)``
+    that account for the seafloor cutting through the deepest active
+    level.
+
+    For each column with bathymetry depth ``H_bathy(i,j)``:
+      - Levels k < bottom_level(i,j): full cells, h_partial[k] = dz_ref[k]
+      - Level k = bottom_level(i,j): partial cell,
+                                       h_partial[k] = H_bathy - |z_half_ref[k]|
+      - Levels k > bottom_level(i,j): below seafloor, h_partial[k] = 0
+
+    The reference fields (``z_full_ref``, ``z_half_ref``, ``dz_ref``,
+    ``dz_half_ref``) match ``OceanZStarCoordinate`` exactly so callers
+    that need only the reference grid can treat both coords
+    uniformly.
+
+    Fields specific to partial cells
+    --------------------------------
+    h_partial : array, shape (..., nlev)
+        Per-cell at-rest layer thickness [m], with H_bathy folded in.
+        Sum over k of h_partial[..., k] equals H_bathy(i, j) per column.
+    bottom_level : array of int32, shape (...)
+        Index of the deepest active level for each column.  ``-1`` for
+        dry columns (H_bathy <= 0).
+    is_active : array of bool, shape (..., nlev)
+        True for cells at or above bottom_level.  Cells below the
+        seafloor are False.
+    """
+    n_levels: int
+    H_max: float
+    z_full_ref: jnp.ndarray
+    z_half_ref: jnp.ndarray
+    dz_ref: jnp.ndarray
+    dz_half_ref: jnp.ndarray
+    h_partial: jnp.ndarray
+    bottom_level: jnp.ndarray
+    is_active: jnp.ndarray
+
+
+def create_partial_cell_coordinate(
+    z_coord: OceanZStarCoordinate,
+    H_bathy: jnp.ndarray,
+) -> OceanPartialCellCoordinate:
+    """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry.
+
+    Parameters
+    ----------
+    z_coord : OceanZStarCoordinate
+        Reference vertical grid (sets H_max, dz_ref, etc.).  Used to
+        derive partial-cell thicknesses.
+    H_bathy : array
+        Per-column bathymetry depth [m], positive downward.  Land
+        cells should have H_bathy <= 0; they're flagged as
+        ``bottom_level = -1`` and ``is_active = False`` everywhere.
+
+    Returns
+    -------
+    OceanPartialCellCoordinate
+
+    Notes
+    -----
+    The factory is differentiable w.r.t. continuous ``H_bathy`` only
+    while ``bottom_level`` does not change — i.e., piecewise smooth
+    with discontinuities at every reference-level interface.  This is
+    the documented limitation of partial-cell schemes (see
+    ``docs/ocean_experiments/partial_cells_plan.md`` Differentiability
+    Contract); not specific to this implementation.
+    """
+    H = jnp.asarray(H_bathy)
+    nlev = z_coord.n_levels
+    abs_z_half = jnp.abs(z_coord.z_half_ref)        # (nlev+1,) positive depths
+
+    # Number of half-interfaces strictly shallower than H_bathy.
+    # E.g. abs_z_half = [0, 10, 300, 1500, 4000], H=2350 → count=4 → bottom_level=3.
+    n_lead = H.ndim
+    H_exp = H[..., jnp.newaxis]                     # (..., 1)
+    interfaces_above = jnp.sum(
+        abs_z_half[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
+        axis=-1,
+    )                                                # (...) integer
+    bottom_level = interfaces_above.astype(jnp.int32) - 1
+    # Dry columns (H <= 0): mark bottom_level = -1 (no active cells).
+    bottom_level = jnp.where(H > 0.0, bottom_level, -1)
+    # Cap at the deepest possible level (when H exceeds H_max).
+    bottom_level = jnp.minimum(bottom_level, nlev - 1)
+
+    # Per-cell active mask.
+    k_idx = jnp.arange(nlev, dtype=jnp.int32)
+    k_view = k_idx.reshape((1,) * n_lead + (nlev,))
+    bottom_view = bottom_level[..., jnp.newaxis]    # (..., 1)
+    is_active = (k_view <= bottom_view) & (bottom_view >= 0)
+
+    # Per-cell layer thickness.
+    # Start with dz_ref broadcast to (..., nlev).
+    dz_ref_view = z_coord.dz_ref.reshape((1,) * n_lead + (nlev,))
+    h_full = jnp.broadcast_to(dz_ref_view, H.shape + (nlev,))
+
+    # Partial thickness at bottom level: H - |z_half_ref[bottom_level]|,
+    # capped above by the full-cell reference thickness ``dz_ref[bottom]``,
+    # AND snapped to ``dz_ref[bottom]`` when within float32 precision.
+    #
+    # The cap matters when ``H_bathy >= H_max`` (caller passes a column
+    # at or beyond reference depth — full cells, no extra thickness).
+    #
+    # The snap matters because ``abs_z_half`` (cumsum-built in float32)
+    # has ~1e-7 relative error → for a column at exactly the reference
+    # depth, ``H - abs_z_half[bottom]`` differs from ``dz_ref[bottom]``
+    # by sub-millimetre.  Without the snap, ``use_partial_cells=False``
+    # backwards-compat regression in Phase 6 breaks — the partial path
+    # gives a slightly different thickness than the legacy path.
+    # We snap when the values agree to ~1e-5 relative, well below any
+    # physically meaningful column-thickness variation.
+    #
+    # For dry columns, bottom_level = -1 and we use 0 (the value gets
+    # masked out by is_active anyway).
+    safe_bottom = jnp.maximum(bottom_level, 0)
+    abs_z_at_bottom = abs_z_half[safe_bottom]       # (...)
+    dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
+    raw_partial = H - abs_z_at_bottom
+    capped = jnp.minimum(raw_partial, dz_at_bottom)
+    near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
+    partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
+
+    is_bottom = (k_view == bottom_view) & (bottom_view >= 0)
+    h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
+    h_partial = jnp.where(is_active, h_partial, 0.0)
+
+    return OceanPartialCellCoordinate(
+        n_levels=nlev,
+        H_max=z_coord.H_max,
+        z_full_ref=z_coord.z_full_ref,
+        z_half_ref=z_coord.z_half_ref,
+        dz_ref=z_coord.dz_ref,
+        dz_half_ref=z_coord.dz_half_ref,
+        h_partial=h_partial,
+        bottom_level=bottom_level,
+        is_active=is_active,
+    )
+
+
+def compute_centroid_depth(
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    z_coord,
+    min_water_column_m: float | None = None,
+) -> jnp.ndarray:
+    """Compute the geometric centroid depth (positive downward) of each
+    cell, accounting for eta and partial cells.
+
+    For each (column, level k):
+      centroid_depth[..., k] = sum_{j<k} h_actual[..., j] + 0.5 * h_actual[..., k]
+
+    For pure z\\* coord (full cells everywhere): centroid is at
+    ``|z_full_ref[k]| * (eta + H_bathy) / H_max`` — uniform across columns.
+    For partial-cell coord: centroid varies per column at the partial
+    bottom.  Cells below the seafloor have h_actual=0 and inherit the
+    seafloor depth from above (no further increment).
+
+    Used by the Adcroft-Campin face PGF correction (Phase 3b): the
+    horizontal pressure gradient between two cells with different
+    centroid depths is corrected by shifting each cell's pressure to a
+    common face-reference depth.
+
+    Parameters
+    ----------
+    eta : array
+        Sea surface height [m], shape (...).
+    H_bathy : array
+        Local bathymetry depth [m], shape (...).  Positive.
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
+        Vertical coordinate.
+    min_water_column_m : float or None
+        Optional water-column floor (passed to ``compute_layer_thickness``).
+
+    Returns
+    -------
+    array : Centroid depth [m], shape (..., nlev).  Positive downward.
+    """
+    h = compute_layer_thickness(
+        eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
+    )
+    # cumsum gives interface depths at the *bottom* of each layer.
+    # Centroid is half a layer above the bottom interface.
+    cum = jnp.cumsum(h, axis=-1)
+    return cum - 0.5 * h
+
+
 def compute_layer_thickness(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
+    z_coord,
     min_water_column_m: float | None = None,
 ) -> jnp.ndarray:
     """Compute actual layer thickness incorporating eta and bathymetry.
 
-    h_k = dz_ref[k] * (eta + H_bathy) / H_max
+    Dispatches on the coordinate type:
 
-    The dynamic Jacobian J = (eta + H_bathy) / H_max modifies
-    reference thicknesses to account for the actual water column.
+    - ``OceanZStarCoordinate``: pure z\\*.
+      ``h_k = dz_ref[k] * (eta + H_bathy) / H_max``.
+      All layers compressed uniformly by the column Jacobian.
+    - ``OceanPartialCellCoordinate``: z\\* + partial bottom cell.
+      ``h_k = h_partial[..., k] * (eta + H_bathy) / H_bathy``.
+      Same uniform Jacobian, but applied to the per-cell partial-cell
+      thicknesses.  Cells below the seafloor stay zero (h_partial = 0).
+
+    For the flat-bottom case (``H_bathy = H_max`` everywhere),
+    both formulas yield identical layer thicknesses — the partial-cell
+    coord has ``h_partial = dz_ref`` for every column, and the
+    Jacobian becomes ``(eta + H_max) / H_max`` either way.  This
+    backwards-compat property is guaranteed by the snap-to-dz_ref logic
+    in ``create_partial_cell_coordinate``.
 
     Parameters
     ----------
@@ -144,7 +357,7 @@ def compute_layer_thickness(
         Sea surface height [m], shape (...).
     H_bathy : array
         Local bathymetry depth [m], shape (...). Positive.
-    z_coord : OceanZStarCoordinate
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
         Vertical coordinate.
     min_water_column_m : float or None
         Optional lower bound for local water-column thickness
@@ -155,6 +368,15 @@ def compute_layer_thickness(
     -------
     array : Layer thickness [m], shape (..., nlev). Positive.
     """
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        wc = eta + H_bathy
+        if min_water_column_m is not None:
+            wc = jnp.maximum(wc, min_water_column_m)
+        # Avoid division-by-zero in dry columns; h_partial is already
+        # zero there, so the result is zero regardless of the divisor.
+        H_safe = jnp.maximum(H_bathy, 1.0e-10)
+        return z_coord.h_partial * (wc / H_safe)[..., jnp.newaxis]
+    # Pure z\\* path (legacy, unchanged).
     J = compute_ocean_jacobian(
         eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
     )
@@ -164,14 +386,22 @@ def compute_layer_thickness(
 def compute_ocean_jacobian(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
+    z_coord,
     min_water_column_m: float | None = None,
 ) -> jnp.ndarray:
-    """Compute the dynamic z-star Jacobian.
+    """Compute the dynamic vertical-coordinate Jacobian.
 
-    J = (eta + H_bathy) / H_max
+    Dispatches on coord type:
 
-    This is recomputed at every timestep as eta evolves.
+    - ``OceanZStarCoordinate``: ``J = (eta + H_bathy) / H_max``.  Used
+      with ``dz_ref`` to get per-cell thickness.
+    - ``OceanPartialCellCoordinate``: ``J = (eta + H_bathy) / H_bathy``.
+      Used with ``h_partial`` to get per-cell thickness (the partial
+      cell, full cells, and below-seafloor zero cells all scale with
+      the same Jacobian).
+
+    For backwards-compat on flat-bottom (H_bathy = H_max everywhere),
+    both formulas give the same Jacobian.
 
     Parameters
     ----------
@@ -179,8 +409,8 @@ def compute_ocean_jacobian(
         Sea surface height [m], shape (...).
     H_bathy : array
         Local bathymetry depth [m], shape (...). Positive.
-    z_coord : OceanZStarCoordinate
-        Vertical coordinate (provides H_max).
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
+        Vertical coordinate.
     min_water_column_m : float or None
         Optional lower bound for local water-column thickness
         ``eta + H_bathy`` [m].
@@ -193,6 +423,9 @@ def compute_ocean_jacobian(
     if min_water_column_m is not None:
         min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
         water_col = jnp.maximum(water_col, min_col)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        H_safe = jnp.maximum(H_bathy, 1.0e-10)
+        return water_col / H_safe
     return water_col / z_coord.H_max
 
 
@@ -297,8 +530,28 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
     if z_coord is None:
         return w_euler
 
-    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
     deta_dt = w_euler[..., 0:1]
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        # Partial cells: sigma must use each column's actual seafloor
+        # depth, not the reference H_max.  Otherwise w at the partial
+        # seafloor (k = bottom_level + 1, not k = nlev) is non-zero by
+        # ``sigma_zstar - sigma_partial`` * deta_dt — a spurious vertical
+        # mass flux at the seafloor that breaks tracer mass conservation.
+        # z_half_actual[k] = -cumsum(h_partial[0..k-1]) from surface;
+        # H_bathy_per_column = sum(h_partial).  sigma_per_cell[k] =
+        # (z_half_actual + H_bathy)/H_bathy is 1 at surface, 0 at the
+        # column's own seafloor (where h_partial = 0 below).
+        h_p = z_coord.h_partial                                  # (..., nlev)
+        z_half_actual_inner = -jnp.cumsum(h_p, axis=-1)          # (..., nlev)
+        pad_axes = ((0, 0),) * (z_half_actual_inner.ndim - 1)
+        z_half_actual = jnp.pad(
+            z_half_actual_inner, (*pad_axes, (1, 0)),
+        )                                                          # (..., nlev+1)
+        H_col = jnp.sum(h_p, axis=-1, keepdims=True)             # (..., 1)
+        H_col_safe = jnp.maximum(H_col, 1e-10)
+        sigma = (z_half_actual + H_col) / H_col_safe
+    else:
+        sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
     return w_euler - sigma * deta_dt
 
 
@@ -360,6 +613,7 @@ def flux_form_vertical_momentum_advection(
     u: jnp.ndarray,
     w_half: jnp.ndarray,
     h_u: jnp.ndarray,
+    face_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Flux-form vertical momentum advection as a per-thickness tendency.
 
@@ -408,6 +662,12 @@ def flux_form_vertical_momentum_advection(
     h_u : array, shape (..., nlev)
         Layer thickness at the momentum points.  Used only as the
         advective-form denominator.
+    face_active : array | None, shape (..., nlev)
+        Optional per-level face-activity mask (1 = wet face, 0 = closed
+        face below the partial seafloor).  When provided, the vertical
+        flux at any interface bordering an inactive face level is
+        gated to exactly zero — same purpose as the ``cell_active``
+        argument of the tracer helper, applied here to momentum.
 
     Returns
     -------
@@ -415,7 +675,9 @@ def flux_form_vertical_momentum_advection(
         ``-(F_top - F_bot) / h_u`` — a per-thickness momentum tendency
         ready to add to ``du/dt``.
     """
-    vert_flux_div = flux_form_vertical_tracer_advection(u, w_half)
+    vert_flux_div = flux_form_vertical_tracer_advection(
+        u, w_half, cell_active=face_active,
+    )
     h_u_safe = jnp.maximum(h_u, 1.0e-10)
     return -vert_flux_div / h_u_safe
 
@@ -423,6 +685,7 @@ def flux_form_vertical_momentum_advection(
 def flux_form_vertical_tracer_advection(
     field: jnp.ndarray,
     w_half: jnp.ndarray,
+    cell_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Flux-form vertical tracer advection with first-order upwind.
 
@@ -450,6 +713,19 @@ def flux_form_vertical_tracer_advection(
         Tracer at full levels (e.g. temperature [degC]).
     w_half : array, shape (..., nlev+1)
         Vertical velocity on half (interface) levels [m/s].
+    cell_active : array | None, shape (..., nlev)
+        Optional per-cell activity mask (1 = wet, 0 = below seafloor).
+        When provided, the flux at any interface bordering an inactive
+        cell is gated to exactly zero — needed on partial-cell grids
+        where ``w_half`` may carry float-precision noise (~1e-10 m/s)
+        at inactive interfaces.  Without the gate, that noise produces
+        a tiny spurious ``vert_flux_div`` at inactive cells; combined
+        with the ``max(h_k_new, 1e-10)`` floor at the caller, this can
+        amplify into ~1e3 spurious tracer values inside the rock, then
+        propagate into the EOS as huge density and break the model.
+        Also makes adjoint sensitivities through inactive cells exactly
+        zero (under ``jax.grad``), instead of poorly-conditioned values
+        depending on the float noise.
 
     Returns
     -------
@@ -477,6 +753,17 @@ def flux_form_vertical_tracer_advection(
 
     T_face_interior = jnp.where(w_interior > 0.0, T_below, T_above)
     F_interior = w_interior * T_face_interior  # (..., nlev-1)
+
+    # Mask the flux at interfaces that border any inactive cell.  An
+    # interior interface k (k=1..nlev-1) is between cells k-1 and k —
+    # both must be active for the flux there to be physical.  The
+    # surface (k=0) and bottom (k=nlev) interfaces are already zero by
+    # the pad below.
+    if cell_active is not None:
+        active_above = cell_active[..., :-1]   # cells k-1 for k=1..nlev-1
+        active_below = cell_active[..., 1:]    # cells k   for k=1..nlev-1
+        face_active_interior = active_above * active_below
+        F_interior = F_interior * face_active_interior
 
     # Full flux array with zero boundaries — single Pad HLO op vs
     # alloc fresh ``(..., 1)`` zero buffer and 3-array concatenate.

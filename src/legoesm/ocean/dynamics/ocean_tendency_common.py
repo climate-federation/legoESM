@@ -54,6 +54,7 @@ def iterate_eos_and_pressure_anomaly(
     *,
     n_iter: int = 2,
     hi_precision_pressure: bool = False,
+    h_actual: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -133,17 +134,28 @@ def iterate_eos_and_pressure_anomaly(
     for _ in range(n_iter):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_ref, dz_ref, J_ref, rho_0, g,
+            h_actual=h_actual,
         )
         rho = eos_fn(T_filled, S_filled, p_hydro)
 
     rho_prime = rho - rho_0
 
+    # Layer-thickness array used in the baroclinic-anomaly cumsum.
+    # When ``h_actual`` is None, use the reference ``dz_ref`` (legacy z*
+    # path).  When provided (partial-cell path), use per-cell thickness
+    # so the anomaly integrates to each cell's actual centroid depth.
+    # Cells below the seafloor have h_actual=0 and contribute zero.
+    if h_actual is None:
+        h_for_cumsum = dz_ref
+    else:
+        h_for_cumsum = h_actual
+
     if hi_precision_pressure:
         rho_prime_hi = rho_prime.astype(jnp.float64)
-        dz_hi = dz_ref.astype(jnp.float64)
-        dp_layer = rho_prime_hi * g * dz_hi
+        h_hi = jnp.asarray(h_for_cumsum, dtype=jnp.float64)
+        dp_layer = rho_prime_hi * g * h_hi
     else:
-        dp_layer = rho_prime * g * dz_ref
+        dp_layer = rho_prime * g * h_for_cumsum
 
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
