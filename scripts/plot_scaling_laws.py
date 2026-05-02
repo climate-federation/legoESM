@@ -295,6 +295,8 @@ def main() -> None:
     # ------------------- weak scaling datasets ----------------------
     weak_paths = {
         "cubed-sphere": _latest_csv(Path("results/scaling_iter63/cs"), "weak_scaling.csv"),
+        "icosahedral": _latest_csv(Path("results/scaling_iter63/ico"), "weak_scaling.csv"),
+        "spectral": _latest_csv(Path("results/scaling_iter63/spec"), "weak_scaling.csv"),
     }
     weak_datasets: dict[str, list[StrongRow]] = {}
     for label, p in weak_paths.items():
