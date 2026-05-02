@@ -596,7 +596,9 @@ def pad_halo(
                 "SPMD halo=3 exchange not yet implemented; "
                 "halo=3 is only available on the single-node local path.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
-        padded = explicit_pad_halo(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local(data, offsets)
     elif halo == 2:
@@ -711,7 +713,9 @@ def pad_halo_4d(
                 "SPMD 4D halo=3 exchange not yet implemented; "
                 "halo=3 is only available on MPI and single-node paths.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
-        padded = explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo_4d(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local_4d(data, offsets)
     elif halo == 2:

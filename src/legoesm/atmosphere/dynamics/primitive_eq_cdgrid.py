@@ -233,10 +233,17 @@ def fv3_hydrostatic_tendencies(
     # remap when `duogrid=dg` is passed (iter-84).  Fall through to
     # None pre-pads only when neither backend is active.
     _pe_dg = grid.duogrid
+    # Mirror the unpacked ``pad_halo_4d`` policy: when no duogrid is
+    # active, pass through the cubed-sphere ``halo_interp_offsets`` so
+    # the SPMD packed kernel applies the same Lagrange correction the
+    # local-pad path uses; otherwise, the duogrid path produces the
+    # remap and offsets must be None.
+    _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
             zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
+            interp_offsets=_pe_offs,
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
