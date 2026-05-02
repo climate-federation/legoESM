@@ -919,18 +919,44 @@ def _apply_filter_to_tracers(tracers, multiplicative_filter, grid):
     if tracers is None or multiplicative_filter is None:
         return tracers
     sf_3d = multiplicative_filter[:, None]  # (n_sh, 1) — broadcasts over level
+    names = list(tracers.keys())
+    if not names:
+        return tracers
+    # Iter-85: stack all tracers along the trailing axis and do ONE
+    # SH analysis + ONE multiply + ONE SH synthesis.  Both
+    # ``sh_analysis_3d`` and ``sh_synthesis_3d`` treat any trailing
+    # axis as a passive batch — so 5 tracers (q_v, q_c, q_r, q_i, q_s)
+    # collapse from 10 SH transforms (5 forward + 5 inverse) to 2.
+    sample = tracers[names[0]]
+    sample_data = sample.data if hasattr(sample, "data") else sample
+    n_lat_q, n_lon_q, nlev_q = sample_data.shape
+    n_tracers = len(names)
+    # Track each tracer's dtype so we can cast back per-tracer at the end.
+    raw = [
+        (tracers[n].data if hasattr(tracers[n], "data") else tracers[n])
+        for n in names
+    ]
+    # Promote all to the highest float dtype to avoid silent precision loss
+    # in the SH transform (SH transforms internally promote to complex128).
+    target_dtype = jnp.result_type(*[r.dtype for r in raw])
+    stacked = jnp.stack(
+        [r.astype(target_dtype) for r in raw], axis=-1,
+    )  # (n_lat, n_lon, nlev, n_tracers)
+    flat = stacked.reshape(n_lat_q, n_lon_q, nlev_q * n_tracers)
+    hat_flat = sh_analysis_3d(grid, flat)  # (n_sh, nlev * n_tracers)
+    hat_filtered_flat = hat_flat * sf_3d
+    grid_filtered_flat = sh_synthesis_3d(grid, hat_filtered_flat)
+    grid_filtered = grid_filtered_flat.reshape(
+        n_lat_q, n_lon_q, nlev_q, n_tracers,
+    )
     out = {}
-    for name, value in tracers.items():
-        q_grid = value.data if hasattr(value, "data") else value
-        q_hat = sh_analysis_3d(grid, q_grid)
-        q_hat_filtered = q_hat * sf_3d
-        q_grid_filtered = sh_synthesis_3d(grid, q_hat_filtered)
+    for i, name in enumerate(names):
+        value = tracers[name]
+        out_data = grid_filtered[..., i]
         if hasattr(value, "data") and hasattr(value, "replace"):
-            out[name] = value.replace(
-                data=q_grid_filtered.astype(value.data.dtype),
-            )
+            out[name] = value.replace(data=out_data.astype(value.data.dtype))
         else:
-            out[name] = q_grid_filtered.astype(value.dtype)
+            out[name] = out_data.astype(value.dtype)
     return out
 
 
