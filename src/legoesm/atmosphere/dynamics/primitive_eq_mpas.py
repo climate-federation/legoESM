@@ -60,6 +60,7 @@ from legoesm.grids.vertical import (
     compute_geopotential,
     compute_geopotential_hybrid,
     compute_sigma_dot,
+    compute_sigma_dot_and_total,
     compute_mass_flux_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
@@ -334,14 +335,20 @@ def mpas_hydrostatic_tendencies(
         vert_adv_T = vertical_advection_hybrid(T_3d, mass_flux, p_s, sigma_coord)
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
     else:
-        dsigma = sigma_coord.dsigma
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
 
-        D_total = jnp.sum(div_3d * dsigma, axis=-1)  # (nCells,)
-        dp_s_dt = -p_s * D_total / sigma_range
+        # Iter-53: share the cumsum between σ̇ and ``D_total`` rather
+        # than running ``jnp.sum(div_3d * dsigma)`` separately and
+        # ``compute_sigma_dot`` doing its own cumsum.  Saves one
+        # cross-cell-shard reduction per RK3 stage on the MPAS
+        # non-hybrid σ-coordinate path (mirrors iter-52's cubed-sphere
+        # FV3 PE refactor).
+        sigma_dot, _D_total_full = compute_sigma_dot_and_total(
+            div_3d, sigma_coord,
+        )
+        dp_s_dt = -p_s * _D_total_full[..., 0] / sigma_range
 
-        sigma_dot = compute_sigma_dot(div_3d, sigma_coord)
         vert_adv_T = vertical_advection(T_3d, sigma_dot, sigma_coord)
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
 
