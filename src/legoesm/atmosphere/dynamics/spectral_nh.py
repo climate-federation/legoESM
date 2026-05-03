@@ -57,6 +57,7 @@ from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
 )
+from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm import constants
 
 _COS_LAT_MIN = 1.0e-6
@@ -600,8 +601,6 @@ def _acoustic_substeps_grid_semi_implicit(
     gradient in the w equation is treated implicitly via a tridiagonal
     solve, removing the vertical acoustic CFL constraint.
     """
-    from legoesm.timestepping.tridiagonal import thomas_solve_batched
-
     g = config.g
     c_p = constants.c_pd
     R_d = constants.R_d
