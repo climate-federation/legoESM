@@ -1,5 +1,65 @@
 # legoESM GPU-scaling branch — scaling status
 
+## Iter-219 (2026-05-03) — `--scan-steps` knob recovers + extends iter-217 GPU gain
+
+**Diagnosis (from iter-218):** the −23 % spectral-T21 GPU regression
+versus the iter-217 reference was tracked back to iter-217 using a
+`--scan-steps=24` knob that was never landed in the user-facing
+benchmark.  `scripts/run_baroclinic_wave_benchmark.py` had a per-step
+Python `for` loop that issued one JIT/kernel launch per `model.step`,
+so cubed-sphere C24 (≈ 0.4 ms/step) was kernel-launch-bound on the GPU.
+
+**Fix (iter-219):** added a `--scan-steps K` flag to
+`scripts/run_baroclinic_wave_benchmark.py`.  When `K > 1`, the inner
+loop wraps `K` consecutive `model.step` calls in a single
+`jax.lax.scan` (with a JIT'd advance helper) so all `K` kernels run
+back-to-back inside one launch envelope.  Cadence (diagnostics,
+snapshots, blowup checks) aligns to scan-batch boundaries — the loop
+falls back to a single-step call for the trailing partial batch.
+
+**Iter-219 measurements (1-day BCW, 26 lev, RTX 5090 Lap.):**
+
+| Grid          | Resolution | GPU ss=1 sps | GPU ss=24 sps | gain (this iter) | vs iter-217 ref |
+|---------------|-----------:|-------------:|--------------:|-----------------:|----------------:|
+| spectral      | T21        |        222.3 |     **460.2** |        **+107%** |       **+60 %** |
+| icosahedral   | I4         |        239.6 |     **318.2** |         **+33%** |       **+55 %** |
+| cubed-sphere  | C24        |         63.3 |      **79.3** |         **+25%** | (no iter-217 ref) |
+
+CPU baselines (8-thread): spectral T21 = 42.5 sps, icosahedral I4 =
+111.3 sps; the new GPU/CPU speed-up factors with `--scan-steps=24`
+are spectral T21 **10.8×**, icosahedral I4 **2.9×**, cubed-sphere
+C24 (CPU blocked by §6.b BCW blowup, GPU still measurable).
+
+**Conservation invariants are bit-identical** between `--scan-steps=1`
+and `--scan-steps=24`: spectral T21 mass drift `+1.367e-09`, energy
+drift `−3.238e-06` in both cases (same trajectory; the difference is
+purely kernel-launch packaging).  Snapshot fields and final state
+match.
+
+**Regression suite:** all 95 shallow-water tests still pass (3 min on
+this host).  The flag is opt-in (default `K=1` keeps the legacy
+Python for-loop behaviour) so existing CI runs are unchanged.
+
+**New artifacts**
+- `results/scaling/iter219_throughput.csv`
+- `scripts/plot_scaling_iter219.py` (4-panel summary chart)
+- `results/scaling/scaling.png` (now reflects iter-219 measurements)
+
+**Theoretical-optimal headroom remaining:**
+
+| Grid          | iter-219 GPU sps | RTX 5090 peak (rough) | gap |
+|---------------|-----------------:|----------------------:|-----|
+| spectral T21  |             460  |    ~1500              | 3.3× |
+| icosahedral I4 |            318  |    ~1500              | 4.7× (small problem, kernel-launch still > compute) |
+| cubed-sphere C24 |           79  |    ~ 800              | 10× (largest gap; FV3 PE step has many small ops) |
+
+The remaining gap is mostly per-step graph latency, not arithmetic
+intensity.  Next levers (queued for iter-220+):
+1. Kernel fusion in the FV3 cdgrid PE step (large gap on cubed_sphere).
+2. AOT compilation cache so JIT cost is paid once across runs.
+3. SPMD across multiple GPUs for the multi-device weak/strong-scaling
+   axis the user specifically asked about.
+
 ## Iter-218 (2026-05-03) — fresh quick sweep + scaling.png
 
 **New artifacts**
