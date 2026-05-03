@@ -35,6 +35,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -1058,7 +1059,6 @@ class SpectralPrimitiveEquationModel:
             )
 
         # --- Metal detection MUST happen before any float64 computation ---
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True
