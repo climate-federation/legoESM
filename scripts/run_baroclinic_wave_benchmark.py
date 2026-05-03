@@ -196,6 +196,43 @@ def compute_dry_mass(
 # Main benchmark
 # ---------------------------------------------------------------------------
 
+# Per-(grid, resolution) optimal scan-batch size, picked by the iter-220
+# sweep (`results/scaling/iter220_scan_steps.csv`).  Auto-mode falls
+# back to the closest larger resolution row, then to the grid-default
+# row keyed on ``None``.  See scaling.md "Iter-220" for the sweep
+# methodology.  Updating these defaults requires re-running
+# ``scripts/run_scaling_iter220.sh`` and refreshing this table.
+_AUTO_SCAN_STEPS_TABLE: dict[str, dict[int | None, int]] = {
+    "spectral":     {21: 24, 42: 48,                        None: 24},
+    "cubed-sphere": {24: 12, 48: 24, 96: 24,                 None: 12},
+    "icosahedral":  {4:  24,  5: 48,  6: 48,                 None: 24},
+}
+
+
+def _resolve_scan_steps(scan_steps_str: str, grid_type: str,
+                         n_grid: int) -> int:
+    """Convert a ``--scan-steps`` CLI value to the integer K used at
+    runtime.  ``"auto"`` triggers the per-grid lookup table."""
+    s = (scan_steps_str or "auto").strip().lower()
+    if s == "auto":
+        table = _AUTO_SCAN_STEPS_TABLE.get(grid_type, {None: 1})
+        # Exact match → use it.  Otherwise fall back to the largest key
+        # that is ≤ n_grid (so e.g. C36 picks the C24 entry rather than
+        # the C48 one if both exist), then to the grid-default.
+        if n_grid in table:
+            return max(1, int(table[n_grid]))
+        ordered = sorted(k for k in table if isinstance(k, int) and k <= n_grid)
+        if ordered:
+            return max(1, int(table[ordered[-1]]))
+        return max(1, int(table.get(None, 1)))
+    try:
+        return max(1, int(s))
+    except ValueError as exc:
+        raise SystemExit(
+            f"--scan-steps must be 'auto' or a positive integer, got {scan_steps_str!r}"
+        ) from exc
+
+
 def _parse_resolution(res_str: str, grid_type: str) -> int:
     """Parse a resolution string like 'C48', 'T42', 'I5', or plain '48'."""
     s = res_str.strip().upper()
@@ -283,19 +320,22 @@ def main():
              "Pass --tag '' to use plain filenames (old behavior)."
     )
     parser.add_argument(
-        "--scan-steps", type=int, default=1,
+        "--scan-steps", type=str, default="auto",
         help=(
-            "Batch size for jax.lax.scan over the per-step model.step "
-            "loop.  Default 1 keeps the legacy Python for-loop (one "
-            "JIT invocation per step).  Values > 1 wrap K consecutive "
-            "model.step calls in a single ``lax.scan`` so the kernel "
-            "launch overhead amortises over K steps — typically a 1.3–"
-            "2× GPU speed-up at K=12-24 for the spectral and "
-            "icosahedral grids; cubed-sphere C-D's compile budget is "
-            "less sensitive but still benefits.  Cadence boundaries "
-            "(diagnostics, snapshots, blowup checks) align to "
-            "scan-batch ends, so use a divisor of ``diag_interval_steps`` "
-            "(typically 1, 2, 3, 4, 6, 12, 24 for dt=600s)."
+            "Batch size K for jax.lax.scan over the per-step model.step "
+            "loop.  Accepts an integer (legacy behaviour, K=1 is the "
+            "Python for-loop) or the literal ``auto`` (default), in "
+            "which case the per-grid iter-220 optimum is selected from "
+            "_AUTO_SCAN_STEPS_TABLE below.  Values > 1 wrap K "
+            "consecutive ``model.step`` calls in a single ``lax.scan`` "
+            "so the kernel launch overhead amortises over K steps — "
+            "typically a 1.3-2× GPU speed-up.  Cadence boundaries "
+            "(diagnostics, snapshots, blowup checks) align to scan-"
+            "batch ends, so K must be a divisor of "
+            "``diag_interval_steps`` (typically 1, 2, 3, 4, 6, 12, 24 "
+            "for dt=600s).  Pass ``--scan-steps 1`` to disable on CPU "
+            "or when reproducibility-bisecting against pre-iter-219 "
+            "behaviour."
         )
     )
     args = parser.parse_args()
@@ -583,9 +623,14 @@ def main():
     # Optional ``lax.scan`` batching: amortise JIT/kernel-launch overhead
     # by stepping K times per outer iteration.  Cadence (diagnostics,
     # snapshots, blowup checks) is enforced at scan-batch boundaries.
-    SCAN_STEPS = max(1, int(args.scan_steps))
+    SCAN_STEPS = _resolve_scan_steps(args.scan_steps, grid_type, N_GRID)
+    _is_auto = str(args.scan_steps).lower() == "auto"
     if SCAN_STEPS > 1:
-        print(f"  scan-batch K = {SCAN_STEPS} (kernel-launch amortisation)")
+        suffix = (f"(auto-picked from iter-220 sweep table for "
+                  f"{grid_type}/{res_str})"
+                  if _is_auto
+                  else "(kernel-launch amortisation)")
+        print(f"  scan-batch K = {SCAN_STEPS} {suffix}")
 
         def _scan_body(carry_state, _unused):
             return model.step(carry_state, DT), None

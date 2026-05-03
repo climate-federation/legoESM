@@ -1,5 +1,55 @@
 # legoESM GPU-scaling branch — scaling status
 
+## Iter-221 (2026-05-03) — auto-pick `--scan-steps` from grid + resolution
+
+The iter-220 sweep identified per-(grid, resolution) optimal scan-batch
+sizes.  This iteration bakes them into the user-facing benchmark so
+the optimum is the new default — users no longer need to know about
+the `--scan-steps` knob unless they want to override.
+
+**Code change** (`scripts/run_baroclinic_wave_benchmark.py`):
+
+- `--scan-steps` now accepts either an integer (legacy: `1` = single
+  step / no `lax.scan`, `K>1` = explicit K) or the literal `auto`.
+- Default flipped from `1` → `auto`.
+- `_AUTO_SCAN_STEPS_TABLE` codifies the iter-220 optimums:
+  ```python
+  {
+      "spectral":     {21: 24, 42: 48, None: 24},
+      "cubed-sphere": {24: 12, 48: 24, 96: 24, None: 12},
+      "icosahedral":  {4:  24,  5: 48,  6: 48, None: 24},
+  }
+  ```
+- `_resolve_scan_steps(scan_steps_str, grid, n_grid)` resolves the
+  CLI value to a concrete integer K with two fallback rules:
+  1. resolution above the largest tabulated entry → largest entry ≤ n_grid;
+  2. resolution below the smallest entry → grid-default key (`None`);
+  3. unknown grid → `K=1` (no-op).
+
+**Verification**
+
+| Grid          | Res | auto-pick | sps measured | iter-220 K=24 ref |
+|---------------|----:|----------:|-------------:|------------------:|
+| spectral      | T21 |        24 |    **466.1** | 495.8             |
+| cubed-sphere  | C24 |        12 |     **80.3** | 79.9 (K=12 ref)   |
+
+Both within sweep noise of iter-220 measurements.  Explicit
+`--scan-steps 1` still works (247.6 sps) for users that need the
+legacy per-step path (e.g. CPU runs where the scan-batch is a small
+loss).
+
+**Regression coverage**: 16 new unit tests in
+``tests/unit/test_bcw_auto_scan_steps.py`` cover (a) every entry in
+the lookup table, (b) the two fallback paths, (c) the unknown-grid
+fallback, (d) integer pass-through, (e) zero/negative clamp to 1,
+(f) non-integer error, (g) case-insensitive `"AUTO"`.  All pass.
+
+**User-facing impact**: anyone running
+`scripts/run_baroclinic_wave_benchmark.py --grid <X> --resolution <Y>`
+on a GPU now gets the iter-219 `lax.scan` amortisation gain by
+default — no knob discovery required.  Pre-iter-219 behaviour is
+opt-in via `--scan-steps 1`.
+
 ## Iter-220 (2026-05-03) — `--scan-steps` sweep + per-grid optimal K
 
 With the iter-219 `--scan-steps` knob in place, this iteration sweeps
