@@ -116,11 +116,15 @@ def _forward_backward_coriolis_3d(
     h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     # --- Depth-averaged velocity (barotropic component) ---
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
-    U_bar = jnp.sum(u * h_u, axis=-1) / H_u * u_mask
+    # Per-face thickness + barotropic-mean column reductions share the
+    # h_u/h_v weight on the level axis — fuse into one stack each.
+    _u_pair = jnp.sum(jnp.stack([h_u, u * h_u], axis=-1), axis=-2)
+    H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
+    U_bar = _u_pair[..., 1] / H_u * u_mask
 
-    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), min_water_col)
-    V_bar = jnp.sum(v * h_v, axis=-1) / H_v * v_mask
+    _v_pair = jnp.sum(jnp.stack([h_v, v * h_v], axis=-1), axis=-2)
+    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
+    V_bar = _v_pair[..., 1] / H_v * v_mask
 
     # --- Perturbation velocity ---
     u_prime = (u - U_bar[..., jnp.newaxis]) * u_mask_3d
@@ -411,16 +415,19 @@ class LatLonCGridOceanModel:
         # h at u-faces
         h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
         h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
-        H_u_pre = jnp.maximum(jnp.sum(h_u_pre, axis=-1), 1e-10)
         # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
         # replaces alloc-zeros + concatenate-of-three.
         h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
         h_v_pre = jnp.pad(h_v_pre_int, ((1, 1), (0, 0), (0, 0)))
-        H_v_pre = jnp.maximum(jnp.sum(h_v_pre, axis=-1), 1e-10)
 
-        # Depth-averaged tendency → slow forcing for barotropic solver
-        F_slow_u = jnp.sum(du_dt * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
-        F_slow_v = jnp.sum(dv_dt * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+        # H + F_slow share the per-face h weight on the level axis —
+        # fuse the two reductions per face into one stacked sum.
+        _u_pair = jnp.sum(jnp.stack([h_u_pre, du_dt * h_u_pre], axis=-1), axis=-2)
+        H_u_pre = jnp.maximum(_u_pair[..., 0], 1e-10)
+        F_slow_u = _u_pair[..., 1] / H_u_pre * state.u_mask.data
+        _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
+        H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
+        F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
 
         # Perturbation tendency (depth-mean removed) → applied to 3D
         du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
@@ -522,8 +529,6 @@ class LatLonCGridOceanModel:
         # Layer thickness at face points
         h_u_old = interp_cell_to_uface(h_k_old)  # (n_lat, n_lon+1, nlev)
         h_v_old = _interp_to_v_points(h_k_old)  # (n_lat+1, n_lon, nlev)
-        H_u_old = jnp.sum(h_u_old, axis=-1)     # (n_lat, n_lon+1)
-        H_v_old = jnp.sum(h_v_old, axis=-1)     # (n_lat+1, n_lon)
 
         # Full 3D velocity (barotropic + baroclinic) from state after
         # barotropic correction.  The barotropic solver preserves the
@@ -536,8 +541,12 @@ class LatLonCGridOceanModel:
         # transport matches Hu_avg exactly.  The correction is the
         # difference between <H*U> (time-averaged transport) and
         # <U>*H (time-averaged velocity times pre-barotropic H).
-        Hu_3d = jnp.sum(u_3d * h_u_old, axis=-1)
-        Hv_3d = jnp.sum(v_3d * h_v_old, axis=-1)
+        # H + Hu reductions per face share the h_u_old/h_v_old weight
+        # on the level axis — fuse into one stack each.
+        _u_pair = jnp.sum(jnp.stack([h_u_old, u_3d * h_u_old], axis=-1), axis=-2)
+        H_u_old, Hu_3d = _u_pair[..., 0], _u_pair[..., 1]  # (n_lat, n_lon+1)
+        _v_pair = jnp.sum(jnp.stack([h_v_old, v_3d * h_v_old], axis=-1), axis=-2)
+        H_v_old, Hv_3d = _v_pair[..., 0], _v_pair[..., 1]  # (n_lat+1, n_lon)
         delta_U = (Hu_avg - Hu_3d) / jnp.maximum(H_u_old, 1e-10)
         delta_V = (Hv_avg - Hv_3d) / jnp.maximum(H_v_old, 1e-10)
         u_corrected = u_3d + delta_U[..., jnp.newaxis]

@@ -187,9 +187,14 @@ def ocean_baroclinic_tendencies_fc(
     # with p_prime, halving the cost of each timestep).
 
     # --- 7. Vector-invariant momentum (skew-symmetric) ---
-    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
-    U_bar = jnp.sum(u * h_k, axis=-1) / H_total * mask
-    V_bar = jnp.sum(v * h_k, axis=-1) / H_total * mask
+    # H_total + U_bar + V_bar all reduce ``... * h_k`` over the level
+    # axis — fuse into one stacked column reduction.
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u * h_k, v * h_k], axis=-1), axis=-2,
+    )
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar = _bar_triple[..., 1] / H_total * mask
+    V_bar = _bar_triple[..., 2] / H_total * mask
     u_prime = (u - U_bar[..., jnp.newaxis]) * mask_3d
     v_prime = (v - V_bar[..., jnp.newaxis]) * mask_3d
     f_3d = grid.f[..., jnp.newaxis]
