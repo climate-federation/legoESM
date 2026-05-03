@@ -90,6 +90,10 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere ocean fix_heat / fix_salt / fix_volume 3-term diagnostics | 6 reductions per fixer (3 column + 3 area) | 2 reductions per fixer (1 column + 1 area) |
 | Ocean freshwater ITD ice-mass per-loop reduction   | 2 ``jnp.sum`` per loop pass | 1 stacked-and-reduced ``jnp.sum`` per pass |
 | Bechtold + Tiedtke z_lcl + z_lnb cloud-depth softmax | 2 reductions per scheme | 1 stacked per scheme |
+| Spectral ocean PE 5-term tracer-conservation diagnostics | 5 column + 5 area reductions | 2 column + 1 area reduction |
+| Ocean MPAS PE H_e + u_bar baroclinic-prep            | 2 column reductions | 1 stacked |
+| SW lat-lon C-grid mass_target+mass_new (uncached)   | 2 local sums | 1 stacked |
+| SW MPAS _fix_mass / _fix_energy local sums          | 3 + 4 separate kernels | 1 + 2 stacked reductions |
 
 ## SPMD-vs-single-device numerical equivalence
 
