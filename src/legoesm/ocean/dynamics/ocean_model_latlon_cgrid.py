@@ -36,6 +36,16 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
+    _interp_to_v_points,
+    _upwind_to_u_points,
+    _upwind_to_v_points,
+    _tvd_to_u_points,
+    _tvd_to_v_points,
+)
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    compute_face_masks,
+    divergence_cgrid,
+    interp_cell_to_uface,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
@@ -513,17 +523,6 @@ class LatLonCGridOceanModel:
         # baroclinic structure) and apply a uniform barotropic correction
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
-            _upwind_to_u_points,
-            _upwind_to_v_points,
-            _tvd_to_u_points,
-            _tvd_to_v_points,
-        )
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            divergence_cgrid, interp_cell_to_uface,
-        )
-
         mask = state.land_mask.data
 
         # Layer thickness at face points
@@ -820,7 +819,6 @@ class LatLonCGridOceanModel:
         land = ~wet
 
         # Face mask consistency: u_mask/v_mask must match land_mask
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
         u_expected, v_expected = compute_face_masks(mask)
         if not (bool(jnp.all(state.u_mask.data == u_expected))
                 and bool(jnp.all(state.v_mask.data == v_expected))):

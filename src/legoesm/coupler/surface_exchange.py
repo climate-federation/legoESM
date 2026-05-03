@@ -13,10 +13,6 @@ from legoesm.coupler.config import CouplerConfig
 from legoesm.coupler.coupling_fields import AtmToSurface
 from legoesm.core.state import HydrostaticState, NonHydrostaticState
 from legoesm.grids.vertical import SigmaCoordinate
-from legoesm.atmosphere.physics.thermodynamics import (
-    pressure_from_eos,
-    temperature_from_theta,
-)
 
 
 def extract_atm_to_surface(
@@ -115,6 +111,11 @@ def extract_atm_to_surface_nh(
 
     Reads only the lowest model level (index -1) plus surface fields.
     """
+    from legoesm.atmosphere.physics.thermodynamics import (
+        pressure_from_eos,
+        temperature_from_theta,
+    )
+
     shape = state.phis.data.shape  # (6, n, n)
 
     # Lowest-level fields
