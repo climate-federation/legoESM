@@ -123,6 +123,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Coupler mpas_adapter 5 inline imports             | 5 inline imports across init + factory | 5 module-level imports |
 | Parallel reductions mpi_timer inline (×5)         | 5 inline imports across MPI primitives | 1 module-level import |
 | Cubed-sphere CD-grid grids halo inline imports    | 2 inline imports per ``create_cubed_sphere_cdgrid`` | 7 names folded into existing module-level halo import |
+| Coupler.py compute_most_fluxes + _constants alias | 1 inline import + redundant alias      | 1 module-level import + drop alias |
+| Coupler.py init helper inline imports             | 2 inline imports (get_policy + multilayer_land) | 2 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
