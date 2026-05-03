@@ -134,6 +134,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean surface_forcing integration scheme inline   | 4 inline imports across 3 ``_make_*`` factories | 3 module-level imports |
 | Ocean lateral_mixing integration scheme inline    | 3 inline imports (harmonic / biharmonic / gm_redi) | 3 module-level imports |
 | Ocean bottom_drag integration scheme inline       | 2 inline imports (linear / quadratic)  | 2 module-level imports |
+| Ocean vertical_mixing integration scheme inline   | 3 inline imports (constant / richardson / kpp) | 3 module-level imports |
+| Ocean convection integration scheme inline        | 2 inline imports (enhanced_diffusion / plume) | 2 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
