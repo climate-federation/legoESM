@@ -266,12 +266,36 @@ def implicit_bottom_drag_factor(
     *,
     eps: float = 1e-10,
 ) -> jnp.ndarray:
-    """Per-substep bottom-drag multiplier ``1 - dt · r / max(H, eps)``.
+    """Per-substep bottom-drag multiplier ``1 / (1 + dt·r / max(H, eps))``.
 
-    Used by both the lat-lon C-grid and MPAS barotropic substeps to
-    apply a linear bottom drag on the depth-averaged velocity.  The
-    floor on ``H`` prevents the drag from blowing up over very thin
-    water columns (≈ inundation).
+    Backward-Euler implicit form that, *as a standalone update* of
+    ``dU/dt = -r·U/H``, solves ``U_new = U_old - dt·r·U_new / H`` for
+    ``U_new / U_old``.  The result is in ``(0, 1]`` for any positive
+    ``dt``, ``r``, ``H`` — unconditionally stable, never flips velocity
+    sign.  Equivalent to the explicit form ``1 - dt·r/H`` to first
+    order; finite and bounded for arbitrary ``dt·r/H`` (the explicit
+    form would diverge for ``dt·r/H > 2``, a hazard in shallow-shelf
+    and inundation configurations).
+
+    Known limitation — combined drag application
+    --------------------------------------------
+    The explicit barotropic substep loops in this codebase apply this
+    factor *in addition to* a depth-mean bottom drag carried by
+    ``F_slow_u`` / ``F_slow_v`` (the depth-average of the 3D PE solver's
+    ``du_dt``, which already contains a bottom-cell drag of magnitude
+    ``-r·u_bot / dz_bot`` whose depth-average is ``-r·u_bot / H``).
+    The Crank-Nicolson implicit barotropic solver
+    (``barotropic_implicit_*``) intentionally relies on ``F_slow``
+    alone and does *not* apply this factor.  Effective barotropic-mode
+    drag in the explicit path is therefore ``≈ 2·r/H`` rather than
+    ``r/H`` (codex adversarial review iter-2 finding #1).  Resolving
+    this requires single-owner drag plumbing: either subtract the
+    depth-mean bottom drag from ``F_slow_u`` before the barotropic
+    substep, or remove the bottom-drag contribution from the 3D
+    solver's ``du_dt`` for the barotropic-explicit path.  Tracked as
+    open architectural debt; do not silently change call-site
+    semantics without a paired update to ``F_slow`` construction in
+    ``ocean_model_*.py``.
 
     Parameters
     ----------
@@ -288,4 +312,4 @@ def implicit_bottom_drag_factor(
     -------
     jax.Array, same shape as ``H``.
     """
-    return 1.0 - dt * drag_r / jnp.maximum(H, eps)
+    return 1.0 / (1.0 + dt * drag_r / jnp.maximum(H, eps))

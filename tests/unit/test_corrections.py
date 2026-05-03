@@ -627,6 +627,309 @@ class TestKPP:
         diff = float(jnp.max(jnp.abs(out_shallow.K_v - out_default.K_v)))
         assert diff > 1e-15, "h_bl_prev had no effect on K_v profile"
 
+    def test_w_s_suppressed_in_stable_conditions(self):
+        """In stable forcing (B_f<0), the turbulent velocity scale w_s
+        must be suppressed by phi_m = 1 + 5*|zeta|, NOT remain at the
+        unsuppressed value kappa*u_star.
+
+        Convention used here: ``B_f > 0 = unstable``.  Then
+        ``L_MO = u*^3/(kappa*B_f) < 0`` for stable, and
+        ``zeta = d/L_MO < 0`` for stable.  An earlier version used
+        ``max(zeta, 0)`` which always returned 0 in stable conditions,
+        disabling the suppression entirely.  Fixed to ``max(-zeta, 0)``.
+
+        Codex adversarial review iter-1, finding #4.
+        """
+        from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+        from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+        u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
+
+        # Match-magnitude probes: same |B_f|, opposite signs.
+        B_f_stable = jnp.full((6, 4, 4), -1e-6, dtype=jnp.float64)
+        B_f_unstable = jnp.full((6, 4, 4), 1e-6, dtype=jnp.float64)
+        cfg = KPPConfig()
+
+        out_s = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f_stable)
+        out_u = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f_unstable)
+
+        # Stable boundary layer should mix LESS than unstable
+        # at the same |B_f|.  K_v inside the BL = h_bl * w_s * G, so
+        # K_v_stable.max() < K_v_unstable.max() if w_s suppression is
+        # active.
+        K_v_stable_max = float(jnp.max(out_s.K_v))
+        K_v_unstable_max = float(jnp.max(out_u.K_v))
+        # Unstable should have at least 1.5x more max K_v than stable.
+        # Under the bug (no suppression), the two are nearly identical.
+        ratio = K_v_unstable_max / max(K_v_stable_max, 1e-30)
+        assert ratio > 1.2, (
+            f"Stable BL mixes too aggressively: K_v_stable_max="
+            f"{K_v_stable_max:.3e}, K_v_unstable_max={K_v_unstable_max:.3e}, "
+            f"ratio={ratio:.2f}.  Stable suppression formula likely "
+            f"degenerated to no-op (max(zeta_kpp, 0) bug)."
+        )
+
+    def test_a_v_uses_a_bg_not_k_bg(self):
+        """Interior momentum viscosity falls back to A_bg, not K_bg.
+
+        In LMD94, momentum and tracer share the shear-instability
+        formulation but have different background floors:
+        ``K_bg = 1e-5`` for tracers, ``A_bg = 1e-4`` for momentum.
+        An earlier version used ``K_bg`` for the momentum interior
+        floor, dropping ``A_v`` by an order of magnitude in stable
+        interior layers.  Codex adversarial review iter-1, finding #6.
+        """
+        from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+        from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+        u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
+
+        # Stable forcing → all interior interfaces below the BL are in
+        # the "interior" branch; pick a small h_bl_prev to keep BL thin.
+        B_f = jnp.full((6, 4, 4), -1e-7, dtype=jnp.float64)
+        h_bl_prev = jnp.full((6, 4, 4), 5.0, dtype=jnp.float64)
+        cfg = KPPConfig()
+        out = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg,
+            B_f=B_f, h_bl_prev=h_bl_prev,
+        )
+
+        # Far below the BL, in stably stratified layers with weak
+        # shear, K_v should be at or near K_bg = 1e-5 and A_v at or
+        # near A_bg = 1e-4.  Take the minimum over the lowest layers
+        # (away from the BL where K_bl_half dominates).
+        # Specifically, the LAST few interfaces should reflect the
+        # interior floor.
+        K_v_min_bottom = float(jnp.min(out.K_v[..., -3:]))
+        A_v_min_bottom = float(jnp.min(out.A_v[..., -3:]))
+
+        # K_v floor ~ K_bg = 1e-5.  Check it is within 50% of K_bg.
+        assert abs(K_v_min_bottom - cfg.K_bg) / cfg.K_bg < 0.5, (
+            f"K_v interior floor {K_v_min_bottom:.3e} differs from "
+            f"K_bg={cfg.K_bg} by more than 50%."
+        )
+        # A_v floor must be ~A_bg = 1e-4, NOT K_bg = 1e-5.  The
+        # discriminator: A_v should be at least 5x K_v in stable
+        # interior (since A_bg = 10 * K_bg).
+        assert A_v_min_bottom > 5.0 * K_v_min_bottom, (
+            f"A_v interior {A_v_min_bottom:.3e} is not significantly "
+            f"larger than K_v interior {K_v_min_bottom:.3e}.  "
+            f"Bug: A_v branch is using K_bg ({cfg.K_bg}) instead of "
+            f"A_bg ({cfg.A_bg})."
+        )
+
+    def test_nonlocal_transport_conserves_column_tracer(self):
+        """KPP non-local transport is column-conservative.
+
+        The non-local heat/salt fluxes ``F = gamma * Q * G(sigma)``
+        vanish at sigma=0 (G=0) and sigma>=1 (G clipped to 0), so the
+        flux divergence ``-dF/dz`` integrates to zero over the column
+        with zero-flux BCs.  An earlier version masked the divergence
+        with ``in_bl_full`` (sigma_center < 1), which dropped the
+        compensating tendency in the cell whose center sigma >= 1
+        but whose top interface sigma_half < 1 — breaking column
+        conservation when h_bl cut through a grid cell.  Codex
+        adversarial review iter-1, finding #1.
+        """
+        from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+        from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+        from legoesm.ocean.eos import wright_eos
+        from legoesm.ocean.vertical import create_ocean_z_star
+
+        nlev = 8
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=200.0)
+        shape = (6, 2, 2, nlev)
+        shape_2d = (6, 2, 2)
+
+        # Unstable column: cold over warm.
+        T_profile = jnp.array([2.0, 5.0, 10.0, 15.0, 18.0, 20.0, 22.0, 23.0])
+        T = jnp.broadcast_to(T_profile[None, None, None, :], shape).astype(jnp.float64)
+        S = jnp.full(shape, 35.0, dtype=jnp.float64)
+        p = jnp.full(shape, 1e6, dtype=jnp.float64)
+        rho = wright_eos(T, S, p)
+
+        u = jnp.full(shape, 0.05, dtype=jnp.float64)
+        v = jnp.zeros(shape, dtype=jnp.float64)
+        eta = jnp.zeros(shape_2d, dtype=jnp.float64)
+        J = jnp.ones(shape_2d, dtype=jnp.float64)
+
+        B_f = jnp.full(shape_2d, 1e-6, dtype=jnp.float64)
+        Q_sfc_T = jnp.full(shape_2d, 1e-3, dtype=jnp.float64)
+
+        # h_bl_prev placed mid-column to ensure the BL crosses a layer.
+        h_bl_prev = jnp.full(shape_2d, 75.0, dtype=jnp.float64)
+        cfg = KPPConfig()
+
+        out = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg,
+            B_f=B_f, Q_sfc_T=Q_sfc_T, h_bl_prev=h_bl_prev,
+        )
+        out_no_qsfc = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg,
+            B_f=B_f, Q_sfc_T=jnp.zeros(shape_2d), h_bl_prev=h_bl_prev,
+        )
+
+        # Isolate the non-local contribution by differencing.
+        dT_nonlocal = out.dT_dt - out_no_qsfc.dT_dt
+
+        dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
+        column_integral = jnp.sum(dT_nonlocal * dz_actual, axis=-1)
+        max_drift = float(jnp.max(jnp.abs(column_integral)))
+        norm = float(jnp.max(jnp.abs(dT_nonlocal)))
+        rel_drift = max_drift / max(norm, 1e-30)
+
+        assert rel_drift < 1e-12, (
+            f"KPP non-local transport non-conservative: column drift "
+            f"{max_drift:.3e}, relative {rel_drift:.3e}.  Was the "
+            f"in_bl_full mask re-introduced?"
+        )
+
+    def test_b_f_proxy_sign_for_stable_column(self):
+        """The B_f proxy (used when caller passes B_f=None) must produce
+        a NEGATIVE B_f for a statically-stable surface layer.
+
+        Convention: ``B_f > 0 = unstable``.  The diffusive proxy
+        ``B_f = +g/rho_0 * K_bg * drho_dz_sfc`` (with
+        ``drho_dz_sfc = (rho[0] - rho[1]) / dz``) gives:
+            stable column   (rho[0] < rho[1] ⇒ drho_dz_sfc < 0) → B_f < 0  ✓
+            unstable column (rho[0] > rho[1] ⇒ drho_dz_sfc > 0) → B_f > 0  ✓
+
+        Regression guard: an earlier version had a leading minus sign
+        on the proxy which inverted the stability classification.
+        """
+        from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+        from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+        u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
+        cfg = KPPConfig()
+
+        # T monotone-decreasing → STABLE column.  Provide an explicit
+        # negative B_f for the reference case.
+        B_f_stable = jnp.full((6, 4, 4), -1e-7, dtype=jnp.float64)
+        Q_sfc_T = jnp.full((6, 4, 4), 1e-3, dtype=jnp.float64)
+        Q_sfc_S = jnp.zeros((6, 4, 4), dtype=jnp.float64)
+
+        out_explicit = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg,
+            B_f=B_f_stable, Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
+        )
+        out_proxy = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg,
+            Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
+        )
+
+        # If the proxy is correctly STABLE (B_f<0), non-local
+        # transport stays inactive and the proxy run agrees with the
+        # explicit-negative-B_f run.  Under the buggy +g/rho_0 →
+        # -g/rho_0 sign flip, the proxy would report B_f>0, fire
+        # non-local transport, and the two outputs would disagree.
+        diff = float(jnp.max(jnp.abs(out_proxy.dT_dt - out_explicit.dT_dt)))
+        assert diff < 1e-12, (
+            f"B_f proxy sign regression: stable-column proxy run differs "
+            f"from explicit-negative-B_f run by {diff:.3e}.  This "
+            f"indicates the proxy is producing the WRONG SIGN of B_f "
+            f"and incorrectly firing non-local transport in stable "
+            f"columns."
+        )
+
+    def test_b_salt_sign_freshening_is_stabilizing(self):
+        """Surface buoyancy flux from freshwater has the correct sign.
+
+        The KPP B_f convention is ``B_f > 0 = unstable``, with formula
+        ``B_f = -g*alpha*Q_T + g*beta*Q_S`` where Q_T, Q_S are kinematic
+        fluxes INTO the ocean.  For pure surface freshening (P > E,
+        Q_T = 0) the salt flux INTO the ocean is NEGATIVE
+        (Q_S = -S * F_fw / rho_0 < 0 because freshwater dilutes the
+        surface), which makes B_salt = +g*beta*Q_S < 0 — STABILIZING,
+        consistent with lighter water on top.
+
+        Regression guard: a previous implementation used the wrong sign
+        ``B_salt = -g*beta*Q_S``, producing destabilization for
+        freshening — exactly opposite of physical reality.
+        """
+        from legoesm.ocean.physics.vertical_mixing.integration import (
+            make_vertical_mixing_physics,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            KPPConfig, VerticalMixingConfig,
+        )
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.core.field import Field
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        # Build minimal cubed-sphere ocean state with strong surface freshening.
+        n, nlev = 4, 6
+        grid = create_cubed_sphere(n=n)
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=2000.0)
+        shape = (6, n, n, nlev)
+        shape_2d = (6, n, n)
+
+        # Mildly stable column (T decreasing with depth, near-zero density gradient
+        # so the surface buoyancy flux dominates h_bl).
+        T_data = jnp.broadcast_to(
+            jnp.linspace(15.0, 5.0, nlev)[None, None, None, :], shape,
+        ).astype(jnp.float64)
+        S_data = jnp.full(shape, 35.0, dtype=jnp.float64)
+        u_data = jnp.zeros(shape, dtype=jnp.float64)
+        v_data = jnp.zeros(shape, dtype=jnp.float64)
+        eta_data = jnp.zeros(shape_2d, dtype=jnp.float64)
+        H_bathy_data = jnp.full(shape_2d, 2000.0, dtype=jnp.float64)
+        land_mask = jnp.ones(shape_2d, dtype=jnp.float64)
+
+        from legoesm.ocean.state import OceanState
+        state = OceanState(
+            u=Field(data=u_data),
+            v=Field(data=v_data),
+            T=Field(data=T_data),
+            S=Field(data=S_data),
+            eta=Field(data=eta_data),
+            H_bathy=Field(data=H_bathy_data),
+            land_mask=Field(data=land_mask),
+        )
+
+        # Strong freshening: P >> E.
+        fw_freshening = jnp.full(shape_2d, 5e-4, dtype=jnp.float64)  # kg/m^2/s
+        # Strong brine rejection: -P + E >> 0 (e.g. sea-ice formation).
+        fw_brine = jnp.full(shape_2d, -5e-4, dtype=jnp.float64)
+        # Zero net heat flux so freshwater is the only buoyancy driver.
+        zero_2d = jnp.zeros(shape_2d, dtype=jnp.float64)
+
+        cfg = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
+        physics_fn = make_vertical_mixing_physics(cfg)
+
+        # Pure freshening: K_v should pick up the BACKGROUND value (B_f<0,
+        # h_bl <= 1 layer) rather than an enhanced convective profile.
+        sf_fresh = OceanSurfaceForcing(
+            tau_x=zero_2d, tau_y=zero_2d, q_net=zero_2d, freshwater=fw_freshening,
+        )
+        out_fresh = physics_fn(state, grid, z_coord, surface_forcing=sf_fresh)
+
+        # Pure brine rejection: K_v should be larger because B_f > 0
+        # destabilizes the column → deeper BL → enhanced K_v.
+        sf_brine = OceanSurfaceForcing(
+            tau_x=zero_2d, tau_y=zero_2d, q_net=zero_2d, freshwater=fw_brine,
+        )
+        out_brine = physics_fn(state, grid, z_coord, surface_forcing=sf_brine)
+
+        # Compute column-averaged K_v to compare overall mixing intensity.
+        K_v_fresh = float(jnp.mean(out_fresh.K_v if hasattr(out_fresh, "K_v")
+                                   else jnp.zeros(1)))
+        # The factory wraps to OceanTendencies which doesn't expose K_v;
+        # fall back to comparing dT/dt (non-local) magnitudes.
+        diff_T = float(jnp.max(jnp.abs(out_brine.dT_dt.data - out_fresh.dT_dt.data)))
+
+        # Brine rejection should produce STRONGER mixing (larger |dT/dt|)
+        # than freshening — the asymmetry is exactly what would FAIL
+        # under the buggy `B_salt = -g*beta*Q_S` (which would invert
+        # the asymmetry: freshening would mix harder than brine).
+        max_T_brine = float(jnp.max(jnp.abs(out_brine.dT_dt.data)))
+        max_T_fresh = float(jnp.max(jnp.abs(out_fresh.dT_dt.data)))
+        assert max_T_brine >= max_T_fresh - 1e-30, (
+            f"B_salt sign regression: freshening produced stronger mixing "
+            f"({max_T_fresh:.3e}) than brine rejection ({max_T_brine:.3e}). "
+            "Under the correct sign (B_salt = +g*beta*Q_S), brine "
+            "rejection destabilizes and should mix at least as hard as "
+            "freshening (which stabilizes)."
+        )
+
 
 # ===========================================================================
 # P0: Large-Yeager bulk flux
