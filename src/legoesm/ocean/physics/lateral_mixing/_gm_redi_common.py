@@ -157,17 +157,26 @@ def compute_visbeck_kappa_gm(
     S_mag = jnp.sqrt(S_x ** 2 + S_y ** 2 + 1e-30)
     sigma = N * S_mag
 
-    # Depth-weighted average of sigma_Eady.
-    w_total = jnp.sum(dz_half, axis=-1)
-    sigma_bar = jnp.sum(sigma * dz_half, axis=-1) / jnp.maximum(w_total, eps)
-
-    # Mixing length L.
+    # Depth-weighted average of sigma_Eady (and N, when needed) — fuse
+    # the column reductions that share the ``dz_half`` weight.
     if cfg.use_rossby_radius:
-        N_bar = jnp.sum(N * dz_half, axis=-1) / jnp.maximum(w_total, eps)
+        # 3 reductions over the same axis with weight ``dz_half``:
+        # ``w_total``, ``sigma * dz_half`` and ``N * dz_half``.
+        _stack = jnp.stack([jnp.ones_like(sigma), sigma, N], axis=-1)
+        _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
+        w_total = _col[..., 0]
+        w_safe = jnp.maximum(w_total, eps)
+        sigma_bar = _col[..., 1] / w_safe
+        N_bar = _col[..., 2] / w_safe
         H_col = jnp.sum(dz_actual, axis=-1)
         f_safe = jnp.maximum(jnp.abs(f_coriolis), cfg.f_min)
         L = jnp.clip(N_bar * H_col / f_safe, cfg.L_min, cfg.L_max)
     else:
+        # 2 reductions over the same axis with weight ``dz_half``.
+        _stack = jnp.stack([jnp.ones_like(sigma), sigma], axis=-1)
+        _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
+        w_total = _col[..., 0]
+        sigma_bar = _col[..., 1] / jnp.maximum(w_total, eps)
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
     kappa = cfg.alpha * L ** 2 * sigma_bar
