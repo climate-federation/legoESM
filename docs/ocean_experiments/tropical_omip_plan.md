@@ -383,5 +383,77 @@ NSIDC + PIOMAS passes the minimum-viable set in `omip_protocol_review.md` §3.
 
 ---
 
+## 9. GPU performance: `lax.scan` with partial cells — RESOLVED
+
+**Status**: fixed (2026-05-03)
+**Result**: ~130× speedup (180 s/day → 1.4 s/day on V100)
+
+### Root cause
+
+The scan-block path was never actually exercised with partial cells.
+Two bugs combined to create the appearance of a scan-specific divergence:
+
+1. **Missing `block_fn` construction**: `_build_jra55_block_fn()` was never
+   called inside `_run_omip_loop()`, so `block_fn` was undefined.  The scan
+   path would have raised `NameError` on the first call.
+
+2. **`_use_single_step` masking the bug**: when `--bathymetry` was set,
+   `run_omip_single()` injected `jra55_state["_use_single_step"] = True`,
+   routing all partial-cell runs to the Python for-loop path.  The
+   divergence reported in the original diagnosis was from an earlier
+   iteration of the code before the `_use_single_step` fallback was
+   added, and was never re-tested after the workaround went in.
+
+### Fix (3 changes)
+
+1. **`_run_omip_loop`**: build `block_fn` via `_build_jra55_block_fn()`
+   at the top of the scan-blocks section.
+2. **`_build_jra55_block_fn`**: scan body now calls `model._step_impl()`
+   instead of `model.step()` to avoid nested JIT boundaries (preventive —
+   testing showed both produce identical results, but `_step_impl` is the
+   correct pattern per CLAUDE.md's buffer-donation / JIT-reuse guidance).
+3. **`LatLonCGridOceanModel`**: extracted `_step_impl()` (no JIT) from
+   `step()`, which is now a thin `@jax.jit` wrapper.  `step_impl()` is
+   the entry point for any outer-JIT context (scan blocks, training).
+
+### Verified config
+
+Same as the original plan config, now running via scan:
+
+```python
+LatLonCGridOceanConfig(
+    A_h=2.0e5, A_h_lat_scaling=True,
+    B_h=5.0e9,
+    bottom_drag_r=2.5e-3, bottom_drag_bbl_thickness=100.0,
+    A_v=1e-3, K_v=1e-4,
+    barotropic_solver="implicit_cn",
+    pgf_scheme="smc03",
+    physics=None,
+)
+```
+
+Grid: 180×360 (1°), 20 levels, H_max=5000, dz_surface=20, dz_deep=500.
+ETOPO: H_min=50, 5 smoothing passes, r_factor_max=0.2, polar caps ±80°.
+Partial cells via `create_partial_cell_coordinate(z_base, H_bathy)`.
+
+### Performance (V100 GPU)
+
+| Metric | Single-step (old) | Scan-block (new) |
+|--------|-------------------|------------------|
+| Time per day | ~180 s | ~1.4 s |
+| s/step (after JIT) | ~0.6 s | 0.005 s |
+| 7-day wall time | ~21 min | ~75 s |
+| 1-yr projection | ~18 hr | ~8.5 min |
+
+### Stability test
+
+7-day ETOPO run with JRA55-do RYF forcing, T_ramp=1 day:
+- max_speed: 0.015 → 0.032 m/s (day 1→7, no exponential growth)
+- SST: 19.82 → 19.77°C (healthy adjustment)
+- SSH: −0.001 → −0.002 m (smooth evolution)
+- All blocks finite, no blowups.
+
+---
+
 **Next action**: scope item 1 (LY09 bulk-formula audit). Audit memo target:
 `docs/ocean_experiments/bulk_flux_ly09_audit.md`.

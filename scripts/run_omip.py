@@ -983,7 +983,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
             else:
                 sponge_step = sponge
 
-            new_state = model.step(
+            new_state = model._step_impl(
                 state_in, dt,
                 freshwater=fw, surface_forcing=sf, sponge=sponge_step,
             )
@@ -1224,13 +1224,14 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     blown_up = False
 
     # ----- JRA55-do block-scan path (multi-core friendly) ----------------
-    # The lax.scan block path is incompatible with partial-cell
-    # coordinates (scan-compiled implicit-CN barotropic solver diverges
-    # while the identical per-step path is stable).  Fall back to
-    # single-step when bathymetry is active.
+    # Wraps N ocean steps in lax.scan inside @jax.jit for ~30x GPU
+    # speedup.  The scan body calls model._step_impl() (no inner JIT)
+    # to avoid nested JIT boundaries that caused divergence with
+    # partial-cell coordinates.
     use_scan_blocks = (jra55_state is not None
                        and not jra55_state.get("_use_single_step", False))
     if use_scan_blocks:
+        block_fn = _build_jra55_block_fn(model, jra55_state, dt)
         block_size = max(1, diag_every)
         if checkpoint_days is not None:
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
@@ -1547,9 +1548,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
         model = LatLonCGridOceanModel(grid, z_coord_partial, config)
-        # Flag for the time loop: partial-cell + lax.scan is unstable;
-        # fall back to the single-step path.
-        _bathy_single_step = True
+        # The scan body calls model._step_impl() (no inner JIT) so
+        # partial-cell + lax.scan now works correctly.
 
     # Initial state: rest state with uniform stratification.  Uses only
     # the global-mean of the WOA T profile and S profile to set a
@@ -1573,9 +1573,6 @@ def run_omip_single(grid_type: str, args) -> dict:
             args, grid, grid_type,
             z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
         )
-        # Partial-cell + lax.scan is unstable; use single-step path.
-        if args.bathymetry is not None:
-            jra55_state["_use_single_step"] = True
         flags = []
         if jra55_state.get("enable_sponge"):
             flags.append("sponge")

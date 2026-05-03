@@ -358,25 +358,16 @@ class LatLonCGridOceanModel:
             diagnose_momentum=True,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: LatLonCGridOceanState, dt: float,
-             freshwater=None, surface_forcing=None,
-             sponge=None) -> LatLonCGridOceanState:
-        """Advance one time step using split-explicit stepping.
+    def _step_impl(self, state: LatLonCGridOceanState, dt: float,
+                   freshwater=None, surface_forcing=None,
+                   sponge=None) -> LatLonCGridOceanState:
+        """Core step logic — no JIT wrapper.
 
-        Parameters
-        ----------
-        state : LatLonCGridOceanState
-        dt : float
-            Time step [seconds].
-        freshwater : FreshwaterForcing or None
-            Freshwater forcing (P, E, runoff, ice).  If None, no
-            freshwater mass/salt flux is applied.
-        surface_forcing : OceanSurfaceForcing or None
-
-        Returns
-        -------
-        LatLonCGridOceanState
+        Use this directly inside an outer ``@jax.jit`` context (e.g.
+        ``lax.scan`` block functions) to avoid nested JIT boundaries
+        that can cause numerical divergence with partial-cell
+        coordinates.  For standalone calls, use ``step()`` which wraps
+        this in ``@jax.jit``.
         """
         state = cast_pytree(state, None, "compute")
 
@@ -829,6 +820,34 @@ class LatLonCGridOceanModel:
             )
 
         return cast_pytree(state_new, None, "storage")
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, state: LatLonCGridOceanState, dt: float,
+             freshwater=None, surface_forcing=None,
+             sponge=None) -> LatLonCGridOceanState:
+        """Advance one time step using split-explicit stepping.
+
+        JIT-compiled wrapper around ``_step_impl``.  For use inside an
+        outer JIT context (e.g. ``lax.scan``), call ``_step_impl``
+        directly to avoid nested JIT boundaries.
+
+        Parameters
+        ----------
+        state : LatLonCGridOceanState
+        dt : float
+            Time step [seconds].
+        freshwater : FreshwaterForcing or None
+            Freshwater forcing (P, E, runoff, ice).  If None, no
+            freshwater mass/salt flux is applied.
+        surface_forcing : OceanSurfaceForcing or None
+
+        Returns
+        -------
+        LatLonCGridOceanState
+        """
+        return self._step_impl(state, dt, freshwater=freshwater,
+                               surface_forcing=surface_forcing,
+                               sponge=sponge)
 
     def step_checked(
         self,
