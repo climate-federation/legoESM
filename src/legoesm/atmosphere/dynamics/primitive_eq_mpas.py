@@ -546,10 +546,12 @@ def _fix_mass_mpas_hydro(state_new, state_old, mesh, total_area=None):
     area = mesh.areaCell
     if total_area is None:
         total_area = jnp.sum(area)
-    local = jnp.stack([
-        jnp.sum(state_old.p_s.data * area),
-        jnp.sum(state_new.p_s.data * area),
-    ])
+    # Both p_s mass sums share the ``* area`` weight on the same axes —
+    # stack the two fields and reduce once locally before the allreduce.
+    _ps_stack = jnp.stack(
+        [state_old.p_s.data, state_new.p_s.data], axis=-1,
+    ) * area[..., None]
+    local = jnp.sum(_ps_stack, axis=tuple(range(area.ndim)))
     if jax.process_count() > 1:
         local = global_sum_mpi(local)
     mass_old, mass_new = local[0], local[1]
