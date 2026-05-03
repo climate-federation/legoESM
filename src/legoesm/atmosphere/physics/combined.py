@@ -69,6 +69,11 @@ from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
     make_gwd_physics,
 )
 from legoesm.atmosphere.physics.physics_state import update_physics_state
+from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
 
 
 class PhysicsConfig(NamedTuple):
@@ -419,18 +424,12 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt), True, "gwd_spectrum"))
 
     def physics_fn(state, grid, sigma_coord, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)
             # Preserve the input state's tracer pytree structure as a
             # zero tendency so downstream tree.map(state, tendency)
             # works.  ``zero_like_tracers`` duck-types Field vs raw-array.
-            from legoesm.atmosphere.physics._shared import zero_like_tracers
             zero_tracers = zero_like_tracers(state.tracers)
             zero_tend = SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
@@ -520,7 +519,6 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         # match downstream tree.map(state, tendency) calls.  When no
         # physics module touched tracers we emit ``zero_like_tracers``
         # of the input state's tracers (the original safe default).
-        from legoesm.atmosphere.physics._shared import zero_like_tracers
         if state.tracers is None:
             tracers_combined = None
         elif accumulated_tracers is None:
