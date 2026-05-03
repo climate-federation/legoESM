@@ -257,3 +257,36 @@ class TestDeckConsistency:
             f"AMIP CO2 should increase by >50 ppmv from 1979 ({co2_1979:.1f}) "
             f"to 2014 ({co2_2014:.1f})"
         )
+
+    def test_fix_moisture_warns_with_prognostic_microphysics(self):
+        """Regression: enabling --fix-moisture together with a precipitating
+        microphysics scheme should now emit a strongly-worded warning
+        explaining that the q_v-only rescale is unsafe.
+
+        Catches the bug where ``fix_moisture_hydrostatic`` rescales only
+        ``q_v`` (not ``q_c`` / ``q_r`` / cumulative precipitation),
+        which, in concert with Kessler-style schemes, drives a runaway
+        moisture source that crashes the dycore.
+        """
+        from legoesm.driver.config import ExperimentConfig
+
+        cfg = ExperimentConfig(
+            fix_moisture=True,
+            microphysics="kessler",
+        )
+        warnings = cfg.validate()
+        relevant = [w for w in warnings if "fix_moisture" in w]
+        assert len(relevant) == 1, (
+            f"Expected exactly one fix_moisture warning, got: {warnings}"
+        )
+        msg = relevant[0]
+        assert "INCORRECT" in msg or "unsafe" in msg.lower(), (
+            f"Warning should flag the bug strongly, got: {msg}"
+        )
+
+    def test_no_fix_moisture_warning_without_microphysics(self):
+        """The warning must NOT fire when microphysics='none'."""
+        from legoesm.driver.config import ExperimentConfig
+        cfg = ExperimentConfig(fix_moisture=True, microphysics="none")
+        warnings = cfg.validate()
+        assert not any("fix_moisture" in w for w in warnings)
