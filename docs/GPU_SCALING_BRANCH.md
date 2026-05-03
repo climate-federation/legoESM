@@ -101,6 +101,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean cubed-sphere split-explicit barotropic H + U_bar + V_bar | 3 reductions per substep | 1 stacked column reduction |
 | Ocean PE latlon C-grid weno + advection inline imports | 6 inline imports per call | 3 module-level imports (no per-call import overhead) |
 | Ocean eta_floor inline parallel-runtime imports | 3 inline imports per multi-process check | 4 module-level imports |
+| Ocean PE FC inline halo + operator imports        | 3 inline imports per RHS                | 3 module-level imports |
+| Ocean PE cubed-sphere CD-grid inline imports      | 6 inline imports per RHS (4 distinct, 2 dupes) | 3 module-level imports (combine same-module) |
 
 ## SPMD-vs-single-device numerical equivalence
 
