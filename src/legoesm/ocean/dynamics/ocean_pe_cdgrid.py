@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.operators_3d import hyperdiffusion_3d
 from legoesm.core.operators_cdgrid import (
     center_to_dgrid_vector,
     dgrid_to_center_vector,
@@ -357,7 +358,6 @@ def ocean_baroclinic_tendencies_cdgrid(
         du_dt = du_dt + vel_vdiff[..., 0]
         dv_dt = dv_dt + vel_vdiff[..., 1]
     if config.hyperdiff_coeff > 0:
-        from legoesm.core.operators_3d import hyperdiffusion_3d
         vel_hyper_flat = hyperdiffusion_3d(
             vel_masked_flat, grid, config.hyperdiff_coeff,
             padded=vel_masked_pad,

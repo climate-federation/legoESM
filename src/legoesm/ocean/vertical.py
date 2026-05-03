@@ -19,6 +19,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.precision import get_policy
+
 
 class OceanZStarCoordinate(NamedTuple):
     """Static vertical grid definition (independent of eta).
@@ -90,7 +92,6 @@ def create_ocean_z_star(
 
     # Stretched grid: dz grows smoothly from dz_surface to dz_deep.
     # Use a normalized distribution then scale to match H_max.
-    from legoesm.core.precision import get_policy
     k = jnp.arange(n_levels, dtype=get_policy().control)
 
     # Layer thickness profile: linear growth from dz_surface to dz_deep
