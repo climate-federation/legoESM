@@ -62,6 +62,11 @@ from legoesm.atmosphere.physics.thermodynamics import (
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
 
 
 def _get_convection_fn(config: ConvectionConfig):
@@ -924,12 +929,6 @@ def _make_spectral_pe_convection(
             prog_key, prog_init = "a_u", scheme_config.a_u_init
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
-
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
