@@ -215,12 +215,16 @@ def emanuel_convection(
         below_lcl = jax.nn.sigmoid(
             2.0 * (nlev_idx[None, :] - k_lcl_smooth[:, None])
         )                                                # (ncol, nlev)
-        # Column-integrated condensate source [kg/m^2/s].
+        # Column-integrated condensate source [kg/m^2/s] and below-LCL
+        # mass [kg/m^2] both reduce ``* dp / g`` over the level axis —
+        # fuse them into one stacked reduction.
         dp = p_half[:, 1:] - p_half[:, :-1]
-        column_condensate = jnp.sum(dq_c_conv_dt_raw * dp, axis=-1) / constants.g
-        # Distribute evaporation cooling proportional to below_lcl
-        # mass.
-        below_mass = jnp.sum(below_lcl * dp, axis=-1) / constants.g
+        _col_pair = jnp.sum(
+            jnp.stack([dq_c_conv_dt_raw, below_lcl], axis=-1) * dp[..., None],
+            axis=-2,
+        ) / constants.g
+        column_condensate = _col_pair[..., 0]
+        below_mass = _col_pair[..., 1]
         evap_rate = (
             config.downdraft_efficiency
             * column_condensate[:, None]
@@ -241,11 +245,9 @@ def emanuel_convection(
         dq_v_evap = evap_rate
         dT_dt = dT_dt + dT_evap
         dq_v_dt = dq_v_dt + dq_v_evap
-        # Per-column total evap [kg/m²/s] = downdraft_efficiency *
-        # column_condensate by construction.  Subtract from the source
-        # at the levels where condensate is produced to keep
-        # ``dq_c_conv_dt ≥ 0`` and column water conserved.
-        col_dq_c = jnp.sum(dq_c_conv_dt_raw * dp, axis=-1) / constants.g
+        # ``col_dq_c`` is the same column reduction as
+        # ``column_condensate`` above; reuse it instead of recomputing.
+        col_dq_c = column_condensate
         weight = dq_c_conv_dt_raw / jnp.maximum(col_dq_c[:, None], 1e-12)
         weight = jnp.where(
             (col_dq_c > 1e-12)[:, None], weight, 0.0,
