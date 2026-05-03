@@ -197,17 +197,19 @@ Three stages so far:
   single packed exchange already present, batched the lap_uv +
   hyperdiff_uv + vert_adv_uv corner interpolations.
 
-### Stage C — Python overhead removal (iters 128–189)
-- 200+ inline-import hoists across atmosphere/ocean dycores, physics
+### Stage C — Python overhead removal (iters 128–191)
+- 210+ inline-import hoists across atmosphere/ocean dycores, physics
   parameterisations, conservation fixers, halo helpers, runtime, ML
   channel-packing, training losses, driver diagnostics, FV3 SW core,
-  3D operators, async-halo overlap helpers, and Held-Suarez physics —
-  moving lazy function-body imports to module-load time so the
-  JIT-compiled hot loop has zero per-call import-machinery overhead.
-  Skipped only the underscore-private re-exports (CLAUDE.md rule) and
-  documented cycles (coupler.surface_exchange thermodynamics;
-  halo ↔ duogrid; fv_tp_2d ↔ operators_cdgrid; mutable
-  `_halo_backend` / `_spmd_mesh` runtime-dispatch globals).
+  3D operators, async-halo overlap helpers, Held-Suarez physics,
+  forcing analytical SST/SIC, and the cubed-sphere shallow-water
+  models (per-step ``cast_pytree`` + FV3-FB step) — moving lazy
+  function-body imports to module-load time so the JIT-compiled hot
+  loop has zero per-call import-machinery overhead.  Skipped only the
+  underscore-private re-exports (CLAUDE.md rule) and documented cycles
+  (coupler.surface_exchange thermodynamics; halo ↔ duogrid;
+  fv_tp_2d ↔ operators_cdgrid; mutable `_halo_backend` / `_spmd_mesh`
+  runtime-dispatch globals).
 
 ## 5. Outstanding gaps for "near-optimal scaling"
 
