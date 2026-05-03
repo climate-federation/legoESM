@@ -154,6 +154,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Core precision backend inline imports             | 2 per-call inline imports (``supports_float64`` / ``is_x64_enabled`` in ``validate_policy`` and ``_clamp_to_backend``) | 1 module-level import |
 | Core tracers get_policy inline                    | 1 inline import in ``zero_tracers_dict`` | 1 module-level import |
 | Diagnostics energy_budget column_water_vapor      | 1 inline import in ``MoistureBudgetTracker.update`` | 1 module-level import |
+| Training losses sh_analysis_3d                    | 1 inline import in ``carry_spectral_loss`` (per loss eval) | 1 module-level import |
 
 ## SPMD-vs-single-device numerical equivalence
 
