@@ -98,6 +98,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean KPP w_sum + column_stability per-step          | 2 column reductions | 1 stacked |
 | Convection ``smooth_lowest_crossing`` total + idx-numerator | 2 column reductions | 1 stacked |
 | CPU multi-thread Eigen XLA-flag setup (Metal + CPU paths) | duplicated in 2 functions | shared helper + ``OMP_NUM_THREADS`` fallback |
+| Ocean cubed-sphere split-explicit barotropic H + U_bar + V_bar | 3 reductions per substep | 1 stacked column reduction |
 
 ## SPMD-vs-single-device numerical equivalence
 
