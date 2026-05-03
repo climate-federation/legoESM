@@ -216,6 +216,26 @@ radiation equilibrium with prescribed SST=292.6 K — physically expected.
   test after the deck driver change.
 - All 81 AMIP-related unit tests still pass.
 
+### Iter 9 — Interannual ozone option + non-cyclic dispatch tests
+
+`scripts/generate_amip_forcing.py:make_ozone_clim` now optionally writes
+an interannual ozone file (``start_year``/``end_year`` → ``ntime =
+nyears*12``).  The loader's non-cyclic dispatch
+(``_interp_monthly_noncyclic``, keyed on ``ntime > 12``) is what real
+CMIP6 input4MIPs ozone files use, so this generator branch lets the
+unit-test suite exercise the same code path.
+
+A linearly-strengthening Antarctic ozone-hole signal (0% in 1979 →
+60% reduction in 2014, austral spring) gives the file a verifiable
+secular trend, and `tests/unit/test_amip_cmip6_deck.py::TestOzoneInterannual`
+exercises:
+1. The non-cyclic loader branch consumes a 36-year file without error.
+2. SH polar lower-strat ozone in austral spring must drop by >30%
+   from 1979 → 2014 (validates both the secular signal *and* the
+   sim-day → file-day mapping in `_simday_to_file_day`).
+
+17/17 AMIP-deck tests pass.
+
 ### Iter 8 — Extend smoke-test matrix to all 8 (grid, discretization) cases
 
 Updated `scripts/smoke_test_amip_all_grids.py` to cover every
