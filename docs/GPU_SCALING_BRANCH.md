@@ -81,6 +81,12 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Voronoi APVM 1D advection + count edge reductions  | 2 reductions | 1 stacked |
 | Ocean MPAS fix_volume + fix_heat + fix_salt 3-term diagnostics | 3 allreduces per fixer | 1 allreduce per fixer |
 | Sea-ice ITD aggregate_categories 3-term reduction  | 3 category reductions | 1 stacked |
+| Land multilayer w_frac_rz pre/post-Richards branches | 2 redundant column reductions per call | 1 reused (drop branch) |
+| MPAS atm fix_mass_hydrostatic_target local sums   | 2 sequential ``jnp.sum`` kernels | 1 stacked column reduction |
+| Core ``_batch_global_area_sums`` Python loop       | N independent local sums | 1 stacked-and-split reduction |
+| Ocean dycore depth-mean H + U_bar/V_bar per face   | 2–3 reductions per face | 1 stacked per face (CD/FC PE, latlon CG model) |
+| FV3 shallow-water mass_target + mass_new          | 2 local sums when target uncached | 1 stacked (3 SW model paths) |
+| MPAS fix_energy KE + PE local sums                 | 2 separate ``jnp.sum`` kernels | 1 stacked-and-split reduction |
 
 ## SPMD-vs-single-device numerical equivalence
 
