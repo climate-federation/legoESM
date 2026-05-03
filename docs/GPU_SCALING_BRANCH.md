@@ -141,6 +141,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean conservation global_sum_mpi inline          | 1 inline import per distributed call   | 1 module-level import |
 | Ocean spectral PE global_sum_mpi inline           | 1 inline import per distributed call (``_spectral_global_sum``) | 1 module-level import |
 | Ocean conservation_mpas 3 inline imports          | 3 inline imports (``import jax``, ``_is_distributed``, ``global_sum_mpi``) per fix_volume/heat/salt | 3 module-level imports |
+| Ocean advection WENO inline imports               | 3 inline imports per WENO call (u/v/vertical) | 1 shared module-level import |
 
 ## SPMD-vs-single-device numerical equivalence
 
