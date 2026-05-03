@@ -99,6 +99,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Convection ``smooth_lowest_crossing`` total + idx-numerator | 2 column reductions | 1 stacked |
 | CPU multi-thread Eigen XLA-flag setup (Metal + CPU paths) | duplicated in 2 functions | shared helper + ``OMP_NUM_THREADS`` fallback |
 | Ocean cubed-sphere split-explicit barotropic H + U_bar + V_bar | 3 reductions per substep | 1 stacked column reduction |
+| Ocean PE latlon C-grid weno + advection inline imports | 6 inline imports per call | 3 module-level imports (no per-call import overhead) |
+| Ocean eta_floor inline parallel-runtime imports | 3 inline imports per multi-process check | 4 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
