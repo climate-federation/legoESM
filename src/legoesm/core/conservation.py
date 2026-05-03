@@ -374,7 +374,6 @@ def zero_mean_tendency(
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
         if _is_distributed():
-            from legoesm.parallel.reductions import global_sum_mpi
             level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
         # Broadcast corrections to match tendency shape
