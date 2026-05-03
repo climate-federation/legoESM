@@ -457,3 +457,103 @@ def test_implicit_solver_cn_function_directly(state, mesh, z_coord):
     assert bool(jnp.all(jnp.isfinite(eta_new)))
     assert bool(jnp.all(jnp.isfinite(u_bar_new)))
     assert bool(jnp.all(jnp.isfinite(Hu_avg)))
+
+
+def test_implicit_solver_baro_u_viscosity_damps_u_bar(state, mesh, z_coord):
+    """``barotropic_u_viscosity`` actually damps u_bar inside the
+    implicit-CN solver — required by the partial-cell ETOPO stability
+    fix (project_mpas_etopo_instability.md).  Without this hook the
+    rotational u_bar null mode at topographic step edges grows
+    e-folding ~5 days and NaNs the model around day 24.
+
+    Test plan: drive a small nonzero u_bar via F_slow_u, then compare
+    the corrector u_bar magnitudes between viscosity=0 and viscosity=1e7.
+    The viscosity must reduce ‖u_bar‖_∞ measurably (not merely round-off)
+    so we know the operator is wired in (regression guard).
+    """
+    rng = np.random.default_rng(42)
+    # Random F_slow_u with grid-scale structure to excite the Laplacian
+    F_u = jnp.asarray(
+        1.0e-5 * rng.standard_normal(mesh.nEdges), dtype=jnp.float64,
+    )
+
+    cfg_off = MPASOceanConfig(
+        barotropic_solver="implicit_cn", barotropic_u_viscosity=0.0,
+    )
+    cfg_on = MPASOceanConfig(
+        barotropic_solver="implicit_cn", barotropic_u_viscosity=1.0e7,
+    )
+
+    _, u_bar_off, _ = barotropic_implicit_mpas(
+        state, mesh, z_coord, cfg_off, dt=300.0, F_slow_u=F_u,
+    )
+    _, u_bar_on, _ = barotropic_implicit_mpas(
+        state, mesh, z_coord, cfg_on, dt=300.0, F_slow_u=F_u,
+    )
+
+    max_off = float(jnp.max(jnp.abs(u_bar_off)))
+    max_on = float(jnp.max(jnp.abs(u_bar_on)))
+    assert max_off > 0.0, "F_slow_u should drive a nonzero u_bar"
+    assert max_on < max_off, (
+        f"barotropic_u_viscosity must reduce ‖u_bar‖_∞; got "
+        f"viscosity=0: {max_off:.3e}, viscosity=1e7: {max_on:.3e}"
+    )
+    # Sanity: damping shouldn't be catastrophic for a one-step kick
+    assert max_on > 0.0, "viscosity should not zero out u_bar"
+
+
+def test_implicit_solver_equatorial_visc_boost_strongest_at_equator(
+    state, mesh, z_coord,
+):
+    """``equatorial_visc_boost`` must apply MORE damping at edges near
+    the equator than at high latitudes.  Targets the equatorial f→0
+    u_baro mode (project_mpas_etopo_instability.md §"equatorial mode").
+
+    Test: drive the same F_slow_u with two configs — uniform A_baro
+    (boost=0) and boosted (boost=10).  Compare the per-edge damping by
+    checking that the boost reduces u_bar AT EQUATORIAL EDGES more than
+    AT POLAR EDGES.
+    """
+    rng = np.random.default_rng(123)
+    F_u = jnp.asarray(
+        1.0e-5 * rng.standard_normal(mesh.nEdges), dtype=jnp.float64,
+    )
+    cfg_uniform = MPASOceanConfig(
+        barotropic_solver="implicit_cn",
+        barotropic_u_viscosity=1.0e6,
+        equatorial_visc_boost=0.0,
+    )
+    cfg_boosted = MPASOceanConfig(
+        barotropic_solver="implicit_cn",
+        barotropic_u_viscosity=1.0e6,
+        equatorial_visc_boost=10.0,
+    )
+    _, u_uniform, _ = barotropic_implicit_mpas(
+        state, mesh, z_coord, cfg_uniform, dt=300.0, F_slow_u=F_u,
+    )
+    _, u_boosted, _ = barotropic_implicit_mpas(
+        state, mesh, z_coord, cfg_boosted, dt=300.0, F_slow_u=F_u,
+    )
+
+    lat_e = np.asarray(mesh.latEdge)
+    is_eq = np.abs(lat_e) < np.deg2rad(15.0)
+    is_polar = np.abs(lat_e) > np.deg2rad(60.0)
+    assert is_eq.sum() > 0 and is_polar.sum() > 0, (
+        "Test mesh must have both equatorial and polar edges"
+    )
+
+    eq_uniform = float(np.mean(np.abs(np.asarray(u_uniform)[is_eq])))
+    eq_boosted = float(np.mean(np.abs(np.asarray(u_boosted)[is_eq])))
+    pol_uniform = float(np.mean(np.abs(np.asarray(u_uniform)[is_polar])))
+    pol_boosted = float(np.mean(np.abs(np.asarray(u_boosted)[is_polar])))
+
+    eq_reduction = (eq_uniform - eq_boosted) / max(eq_uniform, 1e-30)
+    pol_reduction = (pol_uniform - pol_boosted) / max(pol_uniform, 1e-30)
+    assert eq_reduction > pol_reduction, (
+        f"Equatorial damping reduction ({eq_reduction:.3f}) should "
+        f"exceed polar reduction ({pol_reduction:.3f}) when "
+        f"equatorial_visc_boost > 0"
+    )
+    assert eq_reduction > 0, (
+        f"Equatorial reduction must be positive; got {eq_reduction:.3f}"
+    )

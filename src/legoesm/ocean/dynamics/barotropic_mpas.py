@@ -224,9 +224,24 @@ def barotropic_substeps_mpas(
     def _substep(carry, w_i):
         eta_c, u_bar_c, Hu_sum_c, eta_sum_c, ubar_sum_c = carry
 
-        # Total depth at edges (updated with current eta)
+        # Total depth at edges (updated with current eta).  On partial
+        # cells use min-rule so the per-substep H_e_c matches the
+        # per-level ``min_cell_to_edge(h_k)`` convention used by
+        # F_slow_u (ocean_pe_mpas.py:239), the implicit-CN solver
+        # (barotropic_implicit_mpas.py:133), the reconcile-velocity
+        # transport divide (ocean_model_mpas.py:382), and the tracer-
+        # flux mass channel (ocean_model_mpas.py:419).  Centered
+        # ``_edge_avg`` here would leave a ``(centered − min)·u_bar``
+        # residual at every step edge that gets fed back into u_3d
+        # via ``Hu_avg = mean(H_e_c·u_bar_c)`` and the reconcile-
+        # velocity ``delta_u = (Hu_avg − Hu_3d) / H_e_old``.  Latent
+        # bug only — the implicit-CN solver is the production path
+        # and is already self-consistent.  Audit 2026-05-04.
         H_c = jnp.maximum(eta_c + H_bathy, config.min_water_column_m)
-        H_e_c = _edge_avg(H_c, mesh)
+        if partial_cells:
+            H_e_c = jnp.minimum(H_c[c1], H_c[c2])
+        else:
+            H_e_c = _edge_avg(H_c, mesh)
 
         # Forward: update eta (continuity + freshwater mass source)
         transport = H_e_c * u_bar_c * edge_mask

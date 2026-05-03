@@ -255,6 +255,21 @@ class MPASOceanModel:
         z_coord = self.z_coord
         mask = state.land_mask.data
 
+        # Per-level active mask.  On partial-cell coords, below-seafloor
+        # cells have ``h_partial = 0`` (vertical.py:267).  The tracer
+        # update divides by ``jnp.maximum(h_k_new, 1e-10)``; using only
+        # the 2D land mask there lets a float-precision residual in
+        # ``hT_new`` amplify to ~1e10 tracer values below the seafloor
+        # — the same bug that caused step-1 blowup on lat-lon
+        # (PR #231).  Even though the MPAS PGF stencils gate the
+        # corrupted ρ from the active dynamics, the values still feed
+        # the GM/Redi tendency and any non-active-aware diagnostic.
+        # Audit 2026-05-04.
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            active_3d = z_coord.is_active.astype(state.T.data.dtype)
+        else:
+            active_3d = mask[:, jnp.newaxis]
+
         # 1. Compute baroclinic tendencies
         tend = self.tendencies(state, freshwater=freshwater,
                                surface_forcing=surface_forcing,
@@ -285,9 +300,8 @@ class MPASOceanModel:
                 eos=config.eos, eos_linear=config.eos_linear,
                 mask=mask,
             )
-            mask_3d = mask[:, jnp.newaxis]
-            T_new = T_new + dt * dT_gm * mask_3d
-            S_new = S_new + dt * dS_gm * mask_3d
+            T_new = T_new + dt * dT_gm * active_3d
+            S_new = S_new + dt * dS_gm * active_3d
 
         # 3. Update 3D velocity with baroclinic perturbation tendency.
         # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
@@ -432,7 +446,7 @@ class MPASOceanModel:
         # T_mid contains diffusion+physics from the Euler step (step 2).
         # Advection (horizontal + vertical) is applied here.
         # This matches the latlon C-grid algorithm (ocean_model_latlon_cgrid.py).
-        mask_3d = mask[:, jnp.newaxis]  # (nCells, 1)
+        # ``active_3d`` (built above) is per-level on partial cells.
 
         use_tvd = config.tracer_advection == "tvd"
 
@@ -471,7 +485,10 @@ class MPASOceanModel:
             # cold/fresh front that propagated into the interior
             # one-cell-per-step. See issue #164. Matches the lat-lon
             # pattern in ocean_model_latlon_cgrid.py:493.
-            tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+            # On partial-cell coordinates ``active_3d`` is per-level
+            # and additionally preserves pre-step values in below-
+            # seafloor cells (audit 2026-05-04).
+            tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
             if tr_name == 'T':
                 T_corrected = tr_new
@@ -490,6 +507,7 @@ class MPASOceanModel:
             w=state.w.replace(data=w),
             H_bathy=state.H_bathy,
             land_mask=state.land_mask,
+            rho_ref_z=state.rho_ref_z,
         )
 
         # 10. Conservation fixers (#166: pass expected forcing so fixer

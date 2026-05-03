@@ -9,7 +9,13 @@ Builds on the existing ``run_global_overturning_implicit_spinup.py``
   dispatch landed in this PR.
 - ``OceanPartialCellCoordinate`` to represent the bathymetric H_bathy
   on the z* reference grid.
-- ``pgf_scheme="smc03"`` (S&M 2003 density-Jacobian PGF).
+- ``pgf_scheme="adcroft"`` (centered + Adcroft-Campin 2004 face
+  correction with h_actual integration — the canonical MITgcm/MOM6/
+  NEMO ``ln_hpg_zps`` recipe for z*+partial cells).  Verified
+  bit-equivalent to the previous SMC03 default on lat-lon 5° ETOPO
+  to 4 sig figs at 30 days, and stable for 1-yr (max\|u\| converging
+  to ~1.4 m/s, max\|eta\| ~0.27 m, no NaN).  See
+  ``docs/ocean_experiments/density_jacobian_pgf_mpas.md`` §8d.
 - ``momentum_advection="vector_invariant"`` which now uses the
   Arakawa-Lamb 1981 12-point triad PV flux (NEMO ``dyn_vor_een``,
   via ``pv_flux_al81_partial_cell``) — required for stability on
@@ -254,7 +260,8 @@ def main():
         eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
         # Production-grade dynamical core for partial cells
-        pgf_scheme="smc03",
+        pgf_scheme="adcroft",   # AC + h_actual; previously "smc03"
+                                # (bit-equivalent on lat-lon, simpler)
         momentum_advection="vector_invariant",   # → AL81 for partial cells
         barotropic_solver="implicit_cn",
     )

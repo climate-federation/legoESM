@@ -58,6 +58,7 @@ from legoesm.core.operators_voronoi import (
 )
 from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
     compute_max_level_edge_bot,
+    density_jacobian_pgf_smc03_mpas,
     donor_cell_to_edge,
     min_cell_to_edge,
     partial_cell_pgf_correction_edge,
@@ -143,11 +144,41 @@ def mpas_ocean_baroclinic_tendencies(
     # Uses the reference Jacobian (J=1, eta=0): the barotropic solver
     # handles g*grad(eta) and using actual J here would double-count it.
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    # Depth-dependent reference profile for ρ'.  Two flavors:
+    #   * STATIC (preferred): if ``state.rho_ref_z`` was populated at
+    #     init, ρ' = ρ − ρ_ref(z) using a frozen profile.  Cuts the
+    #     partial-cell PGF residual ~24× without the dynamic version's
+    #     positive-feedback drift (project_mpas_etopo_instability.md
+    #     §8g).  Always wins when present.
+    #   * DYNAMIC (legacy / discouraged): wet-cell mean recomputed every
+    #     call (``use_baroclinic_rho_ref=True``).  NaN'd at day 60 on
+    #     ETOPO+ico4 because ρ_ref chases T,S drift.  Kept only for
+    #     back-compat / comparison.
+    _rho_ref_z_static = (
+        state.rho_ref_z.data if state.rho_ref_z is not None else None
+    )
+    _use_dd_rho_ref = getattr(config, "use_baroclinic_rho_ref", False)
+    if _use_dd_rho_ref and isinstance(z_coord, OceanPartialCellCoordinate):
+        _is_active_3d = z_coord.is_active.astype(T_3d.dtype)
+    else:
+        _is_active_3d = None
+    # Use h_actual (partial-cell-aware) for the baroclinic pressure
+    # cumsum on partial cells — matches NEMO ``ln_hpg_zps`` and MITgcm
+    # conventions.  When unset, falls back to dz_ref (legacy z*).
+    _use_h_actual_pgf = getattr(config, "use_h_actual_pgf", False)
+    if _use_h_actual_pgf and isinstance(z_coord, OceanPartialCellCoordinate):
+        _h_for_pgf = h_k
+    else:
+        _h_for_pgf = None
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T_3d, S_3d, mask,
         lambda field: _fill_land_cells_mpas(field, mask),
         eos_fn, z_coord.dz_ref, rho_0, g,
         n_iter=2,
+        use_depth_dependent_ref=_use_dd_rho_ref,
+        is_active_3d=_is_active_3d,
+        h_actual=_h_for_pgf,
+        rho_ref_z_static=_rho_ref_z_static,
     )
 
     # Fill land cells in p_prime before gradient_edge so the 2-cell
@@ -248,8 +279,71 @@ def mpas_ocean_baroclinic_tendencies(
         u_3d * edge_mask[:, jnp.newaxis], mesh,
     )  # (nCells, nlev)
 
-    # Bernoulli function: KE(u) + p'/rho_0
-    bernoulli = ke + p_prime / rho_0  # (nCells, nlev)
+    # PGF scheme dispatch — looked up early so the SMC03 / AHH08 paths
+    # can split ``p'/rho_0`` out of the batched Bernoulli gradient.
+    # Allowed values (see ``MPASOceanConfig.pgf_scheme`` docstring):
+    #   "centered" : bare ``gradient_edge(p'/rho_0)`` (default; correct
+    #                on z-star, has O(1 cm/s) shelf-break residual on
+    #                partial cells).
+    #   "adcroft"  : centered + Adcroft & Campin (2004) face-correction
+    #                additive term (eliminates the partial-cell
+    #                cancellation error to leading order).
+    #   "smc03"    : Shchepetkin & McWilliams (2003) density-Jacobian
+    #                PGF (per-column harmonic-slope ρ(z) reconstruction
+    #                evaluated at a face-reference depth).
+    #   "ahh08"    : Adcroft, Hallberg & Hill (2008) analytic finite-
+    #                volume PGF.  Closed-form ``∫p dz`` per cell using
+    #                the Wright EOS rational form; differences
+    #                face-averaged pressures over the common wet face.
+    #                Machine-zero rest state on partial cells regardless
+    #                of step structure (the property SMC03 only achieves
+    #                on linear ρ).
+    pgf_scheme = getattr(config, "pgf_scheme", "centered")
+    use_smc03 = (
+        pgf_scheme == "smc03"
+        and isinstance(z_coord, OceanPartialCellCoordinate)
+    )
+    use_ahh08 = (
+        pgf_scheme == "ahh08"
+        and isinstance(z_coord, OceanPartialCellCoordinate)
+    )
+    # ``"zero"`` is a diagnostic-only scheme that drops both ``p'/rho_0``
+    # and any partial-cell correction from the momentum tendency.  Used
+    # to test whether PGF is the energy injector for a given mode (per
+    # §8f's monkey-patch experiment; now exposed as a production-style
+    # config so the §8j-era PGF=0 test on audit-fixed runs can be
+    # reproducible).  Should NEVER be set in production: removes the
+    # restoring force that drives the entire baroclinic dynamics.
+    use_zero_pgf = pgf_scheme == "zero"
+    # AHH08 evaluates the Wright EOS analytically and is therefore tied
+    # to the Wright EOS path.  Linear EOS users should stay on adcroft
+    # / smc03 (the analytic integral simplifies trivially to a quadratic
+    # but adds nothing — already linear-exact under SMC03).
+    if use_ahh08 and getattr(config, "eos", "wright") != "wright":
+        raise ValueError(
+            f"pgf_scheme='ahh08' requires eos='wright'; got eos="
+            f"{config.eos!r}.  Switch to a different PGF scheme or "
+            f"the Wright EOS.",
+        )
+
+    # Bernoulli scalar.  Default = KE + p'/rho_0 so the centered/adcroft
+    # paths get both the kinetic-energy gradient and the bare pressure
+    # gradient in a single batched ``gradient_edge_3d`` call.  Under
+    # SMC03 the pressure gradient is computed by a separate column-aware
+    # operator (no longer a gradient-of-a-scalar), so we drop p'/rho_0
+    # here and add it back as ``pgf_smc03 / rho_0`` after the batched
+    # call.  ``ke`` and ``p_prime`` share shape ``(nCells, nlev)`` so
+    # the downstream slicing/reshape is unaffected.
+    if use_smc03 or use_ahh08 or use_zero_pgf:
+        # AHH08 and SMC03 both compute the pressure gradient directly
+        # (not as a gradient-of-a-scalar), so drop p'/rho_0 from the
+        # Bernoulli scalar and add the scheme's PGF acceleration after
+        # the batched gradient call.  ``"zero"`` drops it for the
+        # different reason of producing zero PGF acceleration entirely
+        # (diagnostic only).
+        bernoulli = ke                      # (nCells, nlev)
+    else:
+        bernoulli = ke + p_prime / rho_0    # (nCells, nlev)
 
     # Pressure gradient + Bernoulli — when scalar tracer diffusion is on
     # (``K_h > 0``) we *also* need ``∇T`` and ``∇S`` for the harmonic
@@ -281,19 +375,30 @@ def mpas_ocean_baroclinic_tendencies(
         grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
         _tracer_grad_flat_pre = None
 
-    # ---- Adcroft-Campin partial-cell PGF correction (P3) ----
-    # On a partial-cell coordinate with ``cfg.pgf_scheme = "adcroft"``,
-    # add the Adcroft & Campin (2004) face correction that shifts each
-    # cell's pressure to the shallower face-reference depth before
-    # differencing.  Eliminates the partial-cell-vs-full PGF
-    # cancellation error (O(1 cm/s) spurious shelf-break currents per
-    # the ocean-modeling audit).  Bit-exact zero on full cells, so the
-    # legacy z-star path is unaffected even when ``pgf_scheme="adcroft"``.
-    # Compute centroid_depth at the eta=0 reference (matching the
-    # rho_prime / p_prime reference; see ``ocean_pe_latlon_cgrid.py:961``
-    # for the rationale — using live eta breaks the rest-state
-    # machine-zero claim once eta evolves).
-    pgf_scheme = getattr(config, "pgf_scheme", "centered")
+    # ---- Partial-cell PGF correction dispatch (P3 / P3c) ----
+    # ``pgf_scheme`` is resolved above the Bernoulli build so the SMC03
+    # path can drop ``p'/rho_0`` from the batched gradient.  Three
+    # branches (matching that resolution; ``use_smc03`` already encodes
+    # the partial-cell precondition):
+    #
+    #   "adcroft"  : add Adcroft & Campin (2004) face correction to
+    #                ``grad_B = ∇(KE + p'/rho_0)``.  Bit-exact zero on
+    #                full cells, so flat-bottom z-star is unaffected.
+    #                Centroid_depth uses the eta=0 reference (matching
+    #                the rho_prime / p_prime reference; using live eta
+    #                breaks the rest-state machine-zero claim once eta
+    #                evolves — see ``ocean_pe_latlon_cgrid.py:961``).
+    #   "smc03"    : ``grad_B`` currently holds only ``∇KE`` (Bernoulli
+    #                was rebuilt without p'/rho_0); add the SMC03
+    #                column-aware density-Jacobian PGF acceleration
+    #                ``pgf_smc03 / rho_0``.  Required for stability
+    #                over real bathymetry (the Adcroft correction is a
+    #                thin spike at partial-cell interfaces that drives
+    #                a 2Δz vertical mode on ETOPO; SMC03's per-column
+    #                ρ(z) reconstruction is smooth in z).  See
+    #                ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``.
+    #   "centered" : no correction; ``grad_B`` already contains the
+    #                bare ``∇(KE + p'/rho_0)``.
     if pgf_scheme == "adcroft" and isinstance(z_coord, OceanPartialCellCoordinate):
         centroid_depth = compute_centroid_depth(
             jnp.zeros_like(eta), H_bathy, z_coord,
@@ -302,11 +407,27 @@ def mpas_ocean_baroclinic_tendencies(
             centroid_depth, rho_prime, mesh, g, rho_0,
         )
         grad_B = grad_B + ac_correction
-    elif pgf_scheme not in ("centered", "adcroft"):
-        # SMC03 reserved for P3c follow-up.
-        raise NotImplementedError(
-            f"pgf_scheme={pgf_scheme!r} not implemented yet "
-            f"(supported: 'centered', 'adcroft')",
+    elif use_smc03:
+        pgf_smc03 = density_jacobian_pgf_smc03_mpas(
+            rho_prime, z_coord.h_partial, z_coord.is_active, mesh, g,
+        )                                       # (nEdges, nlev) [Pa/m]
+        grad_B = grad_B + pgf_smc03 / rho_0     # acceleration [m/s^2]
+    elif use_ahh08:
+        # AHH08 needs T, S directly (not rho_prime) — the Wright EOS
+        # is evaluated internally by the analytic integrator.  Pass
+        # h_partial unconditionally; on z-star (no partial cells)
+        # ``use_ahh08`` is False so we never reach this branch.
+        from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
+            density_jacobian_pgf_ahh08_mpas,
+        )
+        pgf_ahh08 = density_jacobian_pgf_ahh08_mpas(
+            T_3d, S_3d, z_coord.h_partial, mesh, g,
+        )                                       # (nEdges, nlev) [Pa/m]
+        grad_B = grad_B + pgf_ahh08 / rho_0     # acceleration [m/s^2]
+    elif pgf_scheme not in ("centered", "adcroft", "smc03", "ahh08", "zero"):
+        raise ValueError(
+            f"pgf_scheme={pgf_scheme!r} unsupported on MPAS "
+            f"(allowed: 'centered', 'adcroft', 'smc03', 'ahh08', 'zero')",
         )
 
     # PV flux: RELATIVE vorticity only, q = ζ(u)/h. Planetary Coriolis is
@@ -333,7 +454,9 @@ def mpas_ocean_baroclinic_tendencies(
     zero_f = jnp.zeros_like(mesh.fVertex)
     if isinstance(z_coord, OceanPartialCellCoordinate):
         zeta = curl_vertex_3d(u_3d, mesh)
-        h_v_hybrid = vertex_thickness_hybrid(h_k, mesh)
+        h_v_hybrid = vertex_thickness_hybrid(
+            h_k, mesh, alpha=config.vertex_thickness_alpha,
+        )
         h_v_safe = jnp.maximum(h_v_hybrid, 1.0e-10)
         q_relative = (zeta + zero_f[:, None]) / h_v_safe
     else:
@@ -385,16 +508,27 @@ def mpas_ocean_baroclinic_tendencies(
     # Leith-only, or B_h-only) skips the unconditional del2 the
     # previous code paid for and discarded.
     visc = jnp.zeros_like(u_prime_3d)
+    # Per-edge equatorial-boost factor for A_h (and B_h).  Boosts
+    # damping at low latitudes where the implicit-CN solver's Coriolis
+    # restoring fails (f→0).  Diagnosed in project_mpas_etopo_
+    # instability.md §"equatorial mode": top-100 hot-spot edges
+    # cluster at mean |lat|=22°, peaking in equatorial Pacific.
+    _eq_boost = getattr(config, "equatorial_visc_boost", 0.0)
+    if _eq_boost > 0:
+        _cos2 = jnp.cos(mesh.latEdge.astype(u_prime_3d.dtype)) ** 2
+        _lat_factor = (1.0 + _eq_boost * _cos2)[:, jnp.newaxis]  # (nEdges, 1)
+    else:
+        _lat_factor = 1.0
     if config.A_h > 0 and config.B_h > 0:
         _del2_u_visc = vector_laplacian_del2_3d(u_prime_3d, mesh)
-        visc = visc + config.A_h * _del2_u_visc
+        visc = visc + config.A_h * _lat_factor * _del2_u_visc
         # vector_laplacian_del4 = -del2(del2); fold the sign into the
         # subtraction so the arithmetic matches ``+ B_h * del4``.
-        visc = visc - config.B_h * vector_laplacian_del2_3d(_del2_u_visc, mesh)
+        visc = visc - config.B_h * _lat_factor * vector_laplacian_del2_3d(_del2_u_visc, mesh)
     elif config.A_h > 0:
-        visc = visc + config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
+        visc = visc + config.A_h * _lat_factor * vector_laplacian_del2_3d(u_prime_3d, mesh)
     elif config.B_h > 0:
-        visc = visc + config.B_h * vector_laplacian_del4_3d(u_prime_3d, mesh)
+        visc = visc + config.B_h * _lat_factor * vector_laplacian_del4_3d(u_prime_3d, mesh)
 
     # Flow-dependent Smagorinsky biharmonic viscosity
     if config.C_smag > 0:
@@ -443,7 +577,31 @@ def mpas_ocean_baroclinic_tendencies(
     # of the realistic-geometry plan: scatter the drag to each edge's
     # actual bottom level via a one-hot expansion.
     if config.bottom_drag_r > 0:
-        if isinstance(z_coord, OceanPartialCellCoordinate):
+        H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        if H_BBL > 0:
+            # Distributed BBL drag (Killworth & Edwards 1999, MOM6
+            # ``BBL_thick_min``): spread drag over a fixed Ekman thickness
+            # near the seafloor instead of applying ``r·u/h_partial_bot``
+            # to a single (possibly very thin) partial cell.  Required
+            # on partial-cell coordinates with realistic bathymetry —
+            # the thinnest ETOPO+ico4 partial-cell bottom is 0.28 m, so
+            # the legacy ``r·dt/h_bot`` ratio reaches 2 at ``r=1.1e-3``,
+            # ``dt=500`` and the explicit drag sign-reverses ``u`` (per
+            # the 2026-05-03 diagnostic).  Bounds per-cell drag by
+            # ``r·u/H_BBL``.  Grid-agnostic helper shared with lat-lon
+            # C-grid PE.  Multiply by ``edge_mask`` to zero dry edges.
+            from legoesm.ocean.dynamics.ocean_tendency_common import (
+                bbl_distributed_drag_face_column,
+            )
+            drag_3d = bbl_distributed_drag_face_column(
+                u_3d, h_e_3d, config.bottom_drag_r, H_BBL,
+            )
+            du_dt_full = du_dt_full + drag_3d * edge_mask[:, jnp.newaxis]
+        elif isinstance(z_coord, OceanPartialCellCoordinate):
+            # Legacy single-cell drag at maxLevelEdgeBot.
+            # WARNING: CFL-violates at thin partial cells (see
+            # docs/ocean_experiments/density_jacobian_pgf_mpas.md §8a).
+            # Prefer ``bottom_drag_bbl_thickness > 0`` on real bathymetry.
             bot_e = compute_max_level_edge_bot(z_coord.bottom_level, mesh)
             # Edges with at least one dry neighbor have bot_e < 0 (since
             # dry cells have bottom_level = -1); mask via valid_edge below.

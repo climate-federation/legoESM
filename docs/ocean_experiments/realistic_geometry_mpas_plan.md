@@ -71,6 +71,109 @@ we either switch to `h_actual` PGF integration or formally re-derive
 the AC convention for `dz_ref`, **use `pgf_scheme="centered"`**.
 Tracked in plan §P3c.
 
+**ETOPO long-run instability — open follow-up (2026-05-03).**
+With the seamount fixes shipped and `pgf_scheme="centered"`, the
+production script (`run_mpas_etopo_spinup.py`) on real ETOPO at
+ico-4 (1854 ocean cells, depth 28-5490 m, MEO smoothing on) now:
+
+* loads cleanly (auto-detected ETOPO/`altitude` vars, depth flip,
+  Voronoi MEO smoothing, partial-cell construction with bottom_level
+  range [1, 19] — all OK)
+* runs short integrations (centered PGF, dt ≤ 500 s) without
+  immediate NaN — the seamount-style step-edge bugs are gone
+* **but exhibits a slow-growth instability with ~1-day e-folding
+  time on REST state.**  KE doubles every day for ~7 days, then
+  explodes by day 9.  Symptom is configuration-independent across
+  viscosity (A_h up to 1e7), PCG tolerance (1e-10 to 1e-12), and
+  `min_water_column_m` (1 m to 100 m); higher A_h actually
+  *accelerates* the failure.
+
+There is also a hard CFL-like boundary at dt ≈ 525 s (dt ≤ 500
+stable for short runs; dt ≥ 550 NaNs within 1 day) that does NOT
+respond to viscosity or PCG-tolerance knobs — almost certainly a
+partial-cell-induced stiff mode that the implicit-CN barotropic
+solver doesn't damp because it only treats the depth-mean
+gravity-wave mode implicitly.
+
+Hypothesis: a slow grid-noise mode (TRiSK rotational null branch
+at step-edge vertices, or a residual of the dz_ref vs h_actual PGF
+convention spread over ~800 ETOPO step edges) accumulates linearly
+in u, and once u is large enough the nonlinear KE-grad and PV-flux
+tendencies amplify it exponentially.  Seamount fix removes the
+*per-edge* error but ETOPO has hundreds of step edges and any tiny
+per-edge residual sums into a global mode.  Unit tests on a single
+seamount cannot detect this.
+
+Required next-session work (ordered):
+
+1. Identify the spatial structure of the unstable mode — dump
+   u, eta, KE every step from day 5 onward and look at
+   level-by-level snapshots.  Is it grid-scale (chequerboard,
+   needs scale-selective filtering)?  Coastal/strait coherent
+   (boundary-condition issue)?  Deep-ocean broad-scale (PGF
+   convention residual)?
+2. Try APVM (`apvm_dt > 0`) and biharmonic vorticity damping
+   (`K_zeta_bih`) — both target the TRiSK enstrophy null mode
+   that's the prime suspect.  Both are zero by default.
+3. Try the `barotropic_u_viscosity` knob (already in the config,
+   targets the depth-mean rotational null).
+4. If filtering doesn't fix it, reconsider the dz_ref PGF
+   convention — slim chance the slow growth is the same
+   convention residual the AC scheme was meant to address (just
+   without AC's overcorrection).
+
+Conclusion: realistic-bathymetry MPAS is **dycore-correct** at
+the partial-cell-stack level (seamount stable, all 200 unit tests
+pass), and **integration-plumbing-correct** for ETOPO (loader,
+MEO, partial-cell init all work).  But it's not yet
+*long-run-stable* on real bathymetry.  Production validation
+(P6 plan) blocks on the slow-growth-mode investigation above.
+
+**Diagnosis sprint (2026-05-03 cont'd) — what we learned:**
+
+* **Spatial structure of the unstable mode** (snapshot probe at
+  rest, dt=300s, days 1-7): bottom-trapped (lev 16-19 hold 10-100×
+  surface energy), spatially coherent along bathymetric features
+  (mid-Atlantic ridge, East Pacific Rise, continental shelves,
+  Indonesian throughflow, Aleutian arc).  *Not* chequerboard at
+  vertices, *not* broad-scale interior.  Same shape at day 3 and
+  day 7, just amplified.  This rules out the TRiSK rotational null
+  branch, surface gravity-wave noise, and Coriolis double-counting,
+  and implicates the partial-bottom-cell PGF treatment.
+
+* **Tried `h_actual` PGF integration + `pgf_scheme="adcroft"`**
+  (matching the lat-lon C-grid wiring at
+  `ocean_pe_latlon_cgrid.py:757`).  Effect on the seamount: AC
+  residual dropped from 1.4e-4 m/s² (with dz_ref) to 6.8e-7 m/s²
+  (with h_actual + AC), confirming AC works correctly under the
+  h_actual convention.  But on real ETOPO the per-step max|du_dt|
+  *increased* from 1.6e-7 m/s² (dz_ref + centered) to 1.2e-6 m/s²
+  (h_actual + AC), and both conventions still NaN at day 5.
+  **AC is necessary but not sufficient on real bathymetry.**
+  Reverted.
+
+* **Why AC isn't enough:** on a single seamount (one isolated step
+  edge) AC kills the residual cleanly; on real ETOPO with hundreds
+  of step edges of varying geometry, AC's first-order extrapolation
+  (assumes ρ constant from cell centroid down to the face-reference
+  depth) leaves O(stratification·excess_depth²) residuals that
+  accumulate.  Ruled out by inspection: not a damp-able mode (A_h
+  up to 1e7 makes failure faster, not slower).
+
+**The next real fix is SMC03** (Shchepetkin & McWilliams 2003,
+density-Jacobian PGF).  This is what the lat-lon code uses to keep
+ETOPO stable for 100 years — the doc at
+`docs/ocean_experiments/density_jacobian_pgf_plan.md` describes
+the lat-lon work and is the reference for porting to MPAS.  SMC03
+on Voronoi is non-trivial (the cell geometry is irregular so the
+Jacobian has more edge terms than on a regular grid), so this is
+multi-day work and probably warrants its own dedicated plan doc.
+
+**Plan §P3c (SMC03 for MPAS) is now critical-path** for any
+realistic-bathymetry MPAS production run.  Until then the model
+RUNS on ETOPO (loads, integrates 4-5 days without immediate NaN)
+but is not long-run stable.
+
 * **P0 done** — verified by inspection plus two new tests in
   `tests/ocean/unit/test_barotropic_implicit_mpas.py`:
   `test_implicit_solver_strong_depth_contrast` exercises 600x depth

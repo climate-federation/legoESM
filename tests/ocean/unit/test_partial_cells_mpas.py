@@ -1148,8 +1148,9 @@ def test_p7_grad_through_realistic_partial_cell_bathy(mesh, z_coord):
 
 
 def test_pgf_unsupported_scheme_raises(mesh, z_coord):
-    """``pgf_scheme="smc03"`` must raise NotImplementedError until
-    P3c lands."""
+    """An unrecognized ``pgf_scheme`` must raise ValueError listing the
+    allowed values.  ``"smc03"`` (P3c) is now implemented and should
+    NOT raise — covered by the SMC03 unit-test suite."""
     from legoesm.ocean.dynamics.ocean_pe_mpas import (
         mpas_ocean_baroclinic_tendencies,
     )
@@ -1159,8 +1160,8 @@ def test_pgf_unsupported_scheme_raises(mesh, z_coord):
     H = jnp.full(nCells, 4000.0, dtype=jnp.float64)
     pc = create_partial_cell_coordinate(z_coord, H)
     state = _build_state_with_H(mesh, z_coord, H)
-    cfg = MPASOceanConfig(pgf_scheme="smc03")
-    with pytest.raises(NotImplementedError, match="smc03"):
+    cfg = MPASOceanConfig(pgf_scheme="bogus_scheme")
+    with pytest.raises(ValueError, match="bogus_scheme"):
         mpas_ocean_baroclinic_tendencies(state, mesh, pc, cfg)
 
 

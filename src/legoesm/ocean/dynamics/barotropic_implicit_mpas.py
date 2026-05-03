@@ -78,6 +78,8 @@ from legoesm.core.operators_voronoi import (
     divergence_cell,
     gradient_edge,
     tangential_velocity,
+    vector_laplacian_del2,
+    vector_laplacian_del4,
     edge_thickness as _edge_avg,
 )
 from legoesm.ocean.dynamics.eta_floor import (
@@ -353,6 +355,46 @@ def barotropic_implicit_mpas(
     delta_grad = grad_eta_new - grad_eta_old
 
     u_bar_new = (u_pred - theta_pgf * dt_t * g * delta_grad) * edge_mask
+
+    # Barotropic-mode lateral viscosity on u_bar — damps modes that
+    # have ∇·(H·u_bar)≈0 (so the Helmholtz solve doesn't see them) and
+    # f·v_t cancellations near step edges (so the predictor-corrector
+    # doesn't damp them either).  On flat bottom the implicit Helmholtz
+    # is sufficient (project_mpas_barotropic_noise.md, 5-yr σ plateau);
+    # on partial-cell ETOPO the topographic step edges energize a
+    # rotational u_bar null mode that grows e-folding ~5 days
+    # (project_mpas_etopo_instability.md).  Mirrors the explicit-substep
+    # path (barotropic_mpas.py:272) and the lat-lon Follow-up C
+    # recommendation (docs/issues/barotropic_mode_noise.md §"Residual").
+    A_baro_visc = jnp.asarray(
+        getattr(config, "barotropic_u_viscosity", 0.0), dtype=eta_dtype,
+    )
+    # Per-edge equatorial-boost factor — same mechanism as 3D A_h.
+    # Damps the equatorial f→0 u_baro mode that the implicit-CN
+    # solver's Coriolis predictor-corrector cannot catch.  See
+    # project_mpas_etopo_instability.md §"equatorial mode".
+    _eq_boost = jnp.asarray(
+        getattr(config, "equatorial_visc_boost", 0.0), dtype=eta_dtype,
+    )
+    _cos2 = jnp.cos(mesh.latEdge.astype(eta_dtype)) ** 2
+    _lat_factor = 1.0 + _eq_boost * _cos2  # (nEdges,)
+    if config.barotropic_u_viscosity > 0.0:
+        lap_u = vector_laplacian_del2(u_bar_new, mesh).astype(eta_dtype)
+        u_bar_new = (
+            u_bar_new + dt_t * A_baro_visc * _lat_factor * lap_u
+        ) * edge_mask
+
+    # Biharmonic ∇⁴ damping on u_bar — preferred over harmonic for the
+    # partial-cell rotational null mode (dycore-expert review 2026-05-03).
+    # Scale-selective: damps grid-scale much harder than mesoscale, so
+    # safe to use at production strength.  ``vector_laplacian_del4``
+    # returns ``-∇²(∇²u)`` so adding ``+dt·K·del4`` gives stable decay.
+    K_baro_bih = jnp.asarray(
+        getattr(config, "barotropic_u_biharmonic", 0.0), dtype=eta_dtype,
+    )
+    if config.barotropic_u_biharmonic > 0.0:
+        del4_u = vector_laplacian_del4(u_bar_new, mesh).astype(eta_dtype)
+        u_bar_new = (u_bar_new + dt_t * K_baro_bih * del4_u) * edge_mask
 
     # Bottom drag enters via F_slow_u (depth-mean of the 3D bottom-cell
     # drag set in ocean_pe_mpas.py); applying it again here would

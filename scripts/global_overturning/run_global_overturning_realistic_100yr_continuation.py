@@ -239,7 +239,9 @@ def main():
         bottom_drag_r=config.bottom_drag_coeff,
         bottom_drag_bbl_thickness=100.0,
         eos="linear", eos_linear=eos_config, gm_redi=gm_redi_cfg,
-        pgf_scheme="smc03",
+        pgf_scheme="adcroft",   # AC + h_actual; previously "smc03"
+                                # (bit-equivalent on lat-lon, simpler;
+                                # see plan-doc §8d)
         momentum_advection="vector_invariant",
         barotropic_solver="implicit_cn",
     )
