@@ -33,9 +33,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
+from legoesm.land.soil_hydraulics import psi_from_theta
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
@@ -180,7 +181,6 @@ def step_multilayer_land(
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
@@ -433,8 +433,6 @@ def init_multilayer_land_state(
     -------
     MultiLayerLandState
     """
-    from legoesm.land.soil_hydraulics import psi_from_theta
-
     grid = make_soil_grid(config.soil_grid)
     nlayers = grid.n_layers
 
