@@ -373,8 +373,12 @@ class MPASOceanModel:
         #   delta_u = (Hu_avg - sum_k(u_3d * h_e)) / H_e
         # This preserves baroclinic shear while matching Hu_avg.
         edge_mask = mask[c1] * mask[c2]
-        H_e_old = jnp.sum(h_e_k, axis=1)  # (nEdges,)
-        Hu_3d = jnp.sum(u_3d_new * h_e_k, axis=1)  # (nEdges,)
+        # Fuse the two h_e_k-weighted column reductions into one stack.
+        _hu_pair = jnp.sum(
+            jnp.stack([h_e_k, u_3d_new * h_e_k], axis=-1), axis=1,
+        )
+        H_e_old = _hu_pair[..., 0]  # (nEdges,)
+        Hu_3d = _hu_pair[..., 1]    # (nEdges,)
         delta_u = (Hu_avg - Hu_3d) / jnp.maximum(H_e_old, 1e-10)
         u_transport = u_3d_new + delta_u[:, jnp.newaxis]  # (nEdges, nlev)
 
