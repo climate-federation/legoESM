@@ -115,6 +115,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Radiation physics_fn spectral_pe + gaussian inline | 3 inline imports per call             | 3 module-level imports |
 | Learned-column zero_like_tracers inline           | 1 inline import per skip-physics call  | 1 module-level import |
 | Atmosphere physics _shared 4 inline imports       | 4 inline imports across pack_*_column_features | 4 module-level imports |
+| Atmosphere physics _shared 6 more inline imports  | Field/Tendencies + 4 grid-conditional in compute_moisture_convergence | 6 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
