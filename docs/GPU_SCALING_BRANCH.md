@@ -113,6 +113,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Surface-layer compute_most_fluxes inline import   | 1 inline import per call               | 1 module-level import |
 | Microphysics physics_fn spectral_pe + gaussian + zero_like_tracers inline | 4 inline imports per call             | 4 module-level imports |
 | Radiation physics_fn spectral_pe + gaussian inline | 3 inline imports per call             | 3 module-level imports |
+| Learned-column zero_like_tracers inline           | 1 inline import per skip-physics call  | 1 module-level import |
+| Atmosphere physics _shared 4 inline imports       | 4 inline imports across pack_*_column_features | 4 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
