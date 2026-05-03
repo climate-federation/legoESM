@@ -10,6 +10,12 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.grids.vertical import pressure_from_sigma
+from legoesm.atmosphere.physics.thermodynamics import (
+    pressure_from_eos,
+    reconstruct_half_level_pressure_hydrostatic,
+    sanitize_theta_rho,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +148,6 @@ def extract_hydrostatic_columns(state, sigma_coord):
     dict with keys: T_col, p_full_col, p_half_col, q_v_col, ncol, nlev,
         shape_3d, shape_2d
     """
-    from legoesm.grids.vertical import pressure_from_sigma
-
     T = state.T.data
     p_s = state.p_s.data
     nlev = sigma_coord.n_levels
@@ -190,11 +194,6 @@ def extract_nonhydrostatic_columns(state, height_coord, terrain_metric):
         ncol, nlev, shape_3d, shape_2d, shape_w, tracers, n_tracers,
         exner, theta_total, rho_total, z_full, z_half
     """
-    from legoesm.atmosphere.physics.thermodynamics import (
-        pressure_from_eos, reconstruct_half_level_pressure_hydrostatic,
-        sanitize_theta_rho,
-    )
-
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
     tracers = state.tracers.data
