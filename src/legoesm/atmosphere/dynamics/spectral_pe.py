@@ -61,12 +61,13 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.semi_implicit import (
-    precompute_si_matrices,
-    ssp_rk3_step_si,
     euler_si_step,
     leapfrog_si_step,
+    precompute_si_matrices,
     robert_asselin_filter,
+    ssp_rk3_step_si,
 )
+from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm import constants
 
 _LNPS_MIN = float(jnp.log(100.0))
@@ -1092,7 +1093,6 @@ class SpectralPrimitiveEquationModel:
         if not self.config.semi_implicit:
             return
 
-
         dt_si = float(dt) / float(self.config.si_substeps)
         if self._si_data is None or self._si_dt != dt_si:
             self._si_data = precompute_si_matrices(
@@ -1404,7 +1404,19 @@ class SpectralPrimitiveEquationModel:
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """JIT-compiled inner step (SI matrices already precomputed), optionally with physics."""
+        """JIT-compiled inner step (SI matrices already precomputed), optionally with physics.
+
+        ``dt`` is intentionally a **static** arg.  Iter-211 measured a
+        ~60 % throughput regression on spectral T21 GPU when ``dt`` was
+        made traced (479 → 284 sps with ``--scan-steps=24``): with
+        ``dt`` static the SI matrices, sponge factors and hyperdiff
+        filters constant-fold into the compiled program, but a traced
+        ``dt`` forces a more general program that pays an extra
+        broadcast at every reference.  Until a separate ``dt``-traced
+        path is needed for outer-JIT wrapping (multi-device sharding
+        — currently impossible on this host, see scaling.md §10), keep
+        the fast path.
+        """
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:

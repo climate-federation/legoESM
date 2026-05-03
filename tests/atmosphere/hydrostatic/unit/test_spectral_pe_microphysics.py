@@ -86,13 +86,14 @@ def _proper_hyperdiff(grid):
 
 
 def _moist_state(grid, sigma_coord, rest_state, rh_low=1.10, rh_high=0.5):
-    """Build a moist tropospheric state for warm-rain tests.
+    """Build a near-saturated tropospheric state for warm-rain tests.
 
-    Default ``rh_low=1.10`` puts the lower troposphere into supersaturation
-    so Kessler's saturation-adjustment branch produces a non-zero
-    condensation sink even with no initial cloud water.  Tests that
-    specifically want sub-saturation pass ``rh_low<1.0`` explicitly
-    (e.g. ``test_smooth_evaporation_above_saturation`` at 0.95).
+    rh_low default raised 0.95 → 1.10 in iter-196: at RH=0.95 the
+    state is sub-saturated, so kessler condensation produces zero
+    tendency (q_v < q_sat throughout) and several differential
+    microphysics tests collapse onto the noise floor.  RH=1.10 is
+    mildly supersaturated, firing condensation cleanly without
+    breaking the four call sites that pass an explicit ``rh_low``.
     """
     nlev = sigma_coord.n_levels
     sigma_full = sigma_coord.sigma_full

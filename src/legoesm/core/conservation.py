@@ -18,7 +18,6 @@ def _tiny(x=None):
     """Smallest normal float for the given array's dtype (or active accumulate dtype)."""
     if x is not None and hasattr(x, 'dtype'):
         return float(jnp.finfo(x.dtype).tiny)
-    from legoesm.core.precision import _resolve_dtype
     return float(jnp.finfo(_resolve_dtype(None, "accumulate")).tiny)
 # Epsilon for energy fixers: prevents sqrt(0) which has infinite gradient,
 # causing 0*Inf=NaN in the backward pass when jnp.maximum clamps KE_target to 0.
@@ -27,12 +26,8 @@ _EPS_ENERGY = 1e-20
 from legoesm import constants
 from legoesm.core.operators import global_integral, _is_distributed
 from legoesm.core.operators_voronoi import kinetic_energy_cell
-from legoesm.core.precision import get_policy
-from legoesm.core.state import (
-    HydrostaticState,
-    MPASShallowWaterState,
-    ShallowWaterState,
-)
+from legoesm.core.precision import _resolve_dtype, get_policy
+from legoesm.core.state import ShallowWaterState, HydrostaticState
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import compute_geopotential
 from legoesm.parallel.reductions import batch_allreduce_mpi, global_sum_mpi

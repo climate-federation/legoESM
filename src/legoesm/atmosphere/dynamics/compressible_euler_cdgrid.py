@@ -68,10 +68,20 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     _sponge_profile,
     acoustic_substeps,
     acoustic_substeps_semi_implicit,
+    CompressibleEulerConfig,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
-from legoesm.grids.halo import pad_halo_4d
+from legoesm.core.cfl import estimate_min_dx_cubed_sphere
+from legoesm.core.conservation import (
+    compute_nh_dry_mass,
+    fix_mass_nonhydrostatic,
+)
+from legoesm.grids.cubed_sphere import apply_small_earth_scaling
+from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_module
+from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
 from legoesm import constants
+import logging
 
 
 class CDGridCompressibleEulerConfig(NamedTuple):
@@ -180,18 +190,13 @@ def cdgrid_compressible_euler_slow_tendencies(
     # its internal halo when supplied.
     from legoesm.grids.halo import _halo_backend as _hb_step6
     if _hb_step6 == "spmd":
-        from legoesm.parallel.cubesphere_exchange import (
-            packed_pad_halo_4d as _packed_4d_spmd, _spmd_mesh as _spmd_mesh_step6,
-        )
-        _K_pad_step6, _pi_pad_step6 = _packed_4d_spmd(
+        from legoesm.parallel.cubesphere_exchange import _spmd_mesh as _spmd_mesh_step6
+        _K_pad_step6, _pi_pad_step6 = packed_pad_halo_4d(
             K, pi_prime, mesh=_spmd_mesh_step6,
         )
     elif _hb_step6 == "mpi":
         from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
-        from legoesm.parallel.halo_exchange import (
-            packed_pad_halo_mpi_4d as _packed_mpi_4d_step6,
-        )
-        _K_pad_step6, _pi_pad_step6 = _packed_mpi_4d_step6(
+        _K_pad_step6, _pi_pad_step6 = packed_pad_halo_mpi_4d(
             K, pi_prime, topology=_mpi_topo_step6,
         )
     else:
@@ -270,11 +275,9 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
     # passive-trailing-axis pattern; ``_interp_corner_to_center`` is a
     # 4-point average with no halo, so this saves one kernel launch.
-    # ``du_d_dt``/``dv_d_dt`` live on D-grid corners (spatial dims may
-    # differ from cell-centre by one in the staggered direction); after
-    # ``_interp_corner_to_center`` the result lands on cell-centre
-    # ``(n_face_uv, n_i_uv, n_j_uv, nlev_uv)`` from line 155.
-    _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., nlev, 2)
+    # Cell-centre shape captured at line 153 — ``_interp_corner_to_center``
+    # outputs cell-centre.  Replaces undefined ``_at`` placeholders.
+    _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., 2)
     _duv_d_dt_flat = _duv_d_dt.reshape(
         _duv_d_dt.shape[0], _duv_d_dt.shape[1], _duv_d_dt.shape[2],
         nlev_uv * 2,
@@ -391,6 +394,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         _lap1 = laplacian_compact_3d(_hyper_flat, grid)
         # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
         # both gradient ops (saves 1 ``pad_halo_4d`` per call).
+        _pad_halo_4d_uvtr = _pad_halo_4d_module
         _dg = getattr(grid, 'duogrid', None)
         _offsets = None if _dg is not None else grid.halo_interp_offsets
         _lap1_pad = pad_halo_4d(_lap1, interp_offsets=_offsets, duogrid=_dg)
@@ -440,6 +444,7 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Pre-pad ``w_full`` once and pass to both gradient_x_3d /
     # gradient_y_3d via ``padded=`` so they share the halo MPI exchange.
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
+    _pad_halo_4d = _pad_halo_4d_module
     _dg_w = getattr(grid, 'duogrid', None)
     _offsets_w = None if _dg_w is not None else grid.halo_interp_offsets
     _w_full_pad = pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
@@ -517,15 +522,12 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         self._target_mass = None
 
         if self.config.small_earth_factor != 1.0:
-            from legoesm.grids.cubed_sphere import apply_small_earth_scaling
             grid = apply_small_earth_scaling(grid, self.config.small_earth_factor)
         self.grid = grid
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
 
         # Acoustic CFL check at construction time (outside JIT)
-        from legoesm.core.cfl import estimate_min_dx_cubed_sphere
-        import logging as _logging
-        _ce_logger = _logging.getLogger("legoesm.compressible_euler")
+        _ce_logger = logging.getLogger("legoesm.compressible_euler")
         dx_min = estimate_min_dx_cubed_sphere(
             grid.n, getattr(grid, 'radius', constants.R_earth),
         )
@@ -559,7 +561,6 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
-            from legoesm.core.conservation import compute_nh_dry_mass
             self._target_mass = compute_nh_dry_mass(
                 state.rho_prime.data, self.height_coord,
                 self.terrain_metric, self.grid,
@@ -618,9 +619,6 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         )
 
         if self.config.fix_mass:
-            from legoesm.core.conservation import (
-                fix_mass_nonhydrostatic, compute_nh_dry_mass,
-            )
             # _target_mass is precomputed in step() outside the JIT boundary.
             target = self._target_mass if self.config.anchor_mass_to_initial else (
                 compute_nh_dry_mass(

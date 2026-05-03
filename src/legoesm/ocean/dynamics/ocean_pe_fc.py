@@ -16,6 +16,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.operators_fc import FCOperatorConfig, _fc_pad_halo_vector
+from legoesm.grids.halo import pad_halo_4d
 from legoesm.core.operators_fc_3d import (
     fc_curl_z_3d,
     fc_gradient_x_3d,
@@ -314,8 +315,7 @@ def ocean_baroclinic_tendencies_fc(
             # on ``vel_masked_flat`` instead of issuing two independent
             # ``pad_halo_4d`` collectives on the same input.  Same
             # halo-sharing pattern as the CD-grid ocean (Loop 133).
-            from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc_fc
-            vel_masked_pad = _pad_halo_4d_oc_fc(
+            vel_masked_pad = pad_halo_4d(
                 vel_masked_flat, halo=1,
                 interp_offsets=grid.halo_interp_offsets,
             )

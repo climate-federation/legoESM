@@ -115,7 +115,6 @@ def mpas_ocean_baroclinic_tendencies(
     c1 = mesh.cellsOnEdge[0]  # (nEdges,)
     c2 = mesh.cellsOnEdge[1]  # (nEdges,)
 
-
     def _fill_land_cells_mpas(field_cell, mask_cell):
         return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
 

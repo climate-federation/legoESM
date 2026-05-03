@@ -41,6 +41,10 @@ from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
 from legoesm.core.operators_voronoi import tangential_velocity_3d
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
+from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+    gm_redi_tracer_tendency_mpas,
+)
 
 
 def _forward_backward_coriolis_mpas_3d(
@@ -152,7 +156,6 @@ class MPASOceanModel:
             self._upup_neg = None
 
         if self.config.physics is not None:
-            from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
             self._physics_fn = make_mpas_ocean_physics(self.config.physics)
         else:
             self._physics_fn = None
@@ -266,9 +269,6 @@ class MPASOceanModel:
         # at docs/ocean_experiments/gm_redi_mpas_plan.md); the triad
         # branch raises NotImplementedError.
         if config.gm_redi is not None:
-            from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
-                gm_redi_tracer_tendency_mpas,
-            )
             dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(
                 T_new, S_new, state.eta.data, state.H_bathy.data,
                 mesh, z_coord, config.gm_redi,

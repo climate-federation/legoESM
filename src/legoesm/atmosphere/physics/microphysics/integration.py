@@ -34,6 +34,12 @@ from legoesm import constants
 
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.grids.gaussian import sh_analysis_3d
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics

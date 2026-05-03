@@ -29,6 +29,8 @@ from typing import Callable, NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+
 
 class LatLonBandLayout(NamedTuple):
     """Latitude-band decomposition layout for MPI.
@@ -146,8 +148,6 @@ def _exchange_halo_latlon(
         raise ImportError(
             "Lat-lon MPI halo exchange requires mpi4jax and mpi4py."
         ) from exc
-
-    from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
 
     comm = MPI.COMM_WORLD
     rank = layout.rank

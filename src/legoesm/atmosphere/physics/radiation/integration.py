@@ -43,6 +43,12 @@ from legoesm.atmosphere.physics.radiation.config import (
 )
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import sh_analysis_3d
+from legoesm.core.precision import get_policy
 from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
@@ -195,7 +201,6 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None):
             # real dtype.
             dtype = state.T_hat.data.real.dtype
         else:
-            from legoesm.core.precision import get_policy
             dtype = get_policy().compute
     T_col_shape = (ncol, nlev)
     q_v_col = jnp.zeros(T_col_shape, dtype=dtype)

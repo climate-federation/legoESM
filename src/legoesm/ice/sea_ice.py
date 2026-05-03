@@ -28,6 +28,9 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.ice.dynamics import evp_solver, free_drift_velocity
+from legoesm.ice.transport import advect_ice_tracers
+from legoesm.ice.itd import aggregate_state, linear_remap
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.dynamics import evp_solver, free_drift_velocity

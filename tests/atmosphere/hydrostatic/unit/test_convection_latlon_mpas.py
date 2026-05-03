@@ -331,9 +331,49 @@ class TestConvectionMPAS:
         # mismatch → u/v are zeros (this is the bridge's MPAS CMT
         # graceful-degrade branch).  ``phys_state is None`` →
         # conv_prog_profile is zeros at first call.
+        # Build column inputs first so we can attach a non-zero q_v
+        # both to the in-test ``mpas_state.tracers`` (bridge sees it)
+        # and to the proxy/zeros leaf calls (so the proxy path actually
+        # has sat_excess > 0 — without this, q_v=0 makes the proxy
+        # collapse to the same near-zero ``mc_gate(0)`` floor as the
+        # zeros-MC bypass, and the differential test cannot
+        # discriminate the bridge fix.  Pre-fix the test exposed
+        # ``zeros_diff/proxy_scale ≈ 0/2.6e-14``).
+        nlev = sigma_coord.n_levels
+        ncol = mpas_state.T.data.shape[0]
+        T_col = mpas_state.T.data.reshape(ncol, nlev)
+        _state_dtype = T_col.dtype
+        p_s = mpas_state.p_s.data
+        from legoesm.grids.vertical import pressure_from_sigma
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.core.field import Field
+        p_full_col = pressure_from_sigma(
+            sigma_coord.sigma_full, p_s,
+        ).reshape(ncol, nlev)
+        p_half_col = pressure_from_sigma(
+            sigma_coord.sigma_half, p_s,
+        ).reshape(ncol, nlev + 1)
+
+        q_sat_col = saturation_mixing_ratio(T_col, p_full_col)
+        sigma_full = sigma_coord.sigma_full
+        rh_profile = jnp.where(sigma_full > 0.7, 0.95, 0.5)
+        q_v_col = (rh_profile[None, :] * q_sat_col).astype(_state_dtype)
+        q_v_grid = q_v_col.reshape(mpas_state.T.data.shape)
+        q_v_field = Field(
+            data=q_v_grid, name="q_v",
+            dims=mpas_state.T.dims, units="kg/kg",
+        )
+        mpas_state = mpas_state._replace(tracers={"q_v": q_v_field})
+
         u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+
+        # Bridge call (must come AFTER the tracer attachment).
+        physics_fn = make_convection_physics(
+            cfg, model_type="mpas", dt=300.0,
+        )
+        tend_bridge, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
 
         # Proxy path: moisture_convergence=None → leaf engages the
         # saturation-deficit proxy.

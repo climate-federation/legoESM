@@ -63,7 +63,8 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d, vertical_diffusion
-from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc
+from legoesm.grids.halo import pad_halo_4d
+from legoesm.core.operators_3d import hyperdiffusion_3d
 
 
 # ==============================================================================
@@ -338,7 +339,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         # hyperdiff_coeff are non-zero — the dominant ocean test config.
         _dg_oc = getattr(grid, 'duogrid', None)
         _offsets_oc = None if _dg_oc is not None else grid.halo_interp_offsets
-        vel_masked_pad = _pad_halo_4d_oc(
+        vel_masked_pad = pad_halo_4d(
             vel_masked_flat, interp_offsets=_offsets_oc, duogrid=_dg_oc,
         )
     if config.A_h > 0:

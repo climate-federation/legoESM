@@ -47,6 +47,8 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.parallel.reductions import global_sum_mpi
+from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -715,7 +717,6 @@ class SpectralOceanModel:
             else:
                 raise ValueError(msg)
 
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True

@@ -12,6 +12,8 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.precision import get_policy
+
 
 class Field:
     """A coordinate-aware JAX array.
@@ -183,7 +185,6 @@ def zeros_field(
     storage dtype (``get_policy().storage``).
     """
     if dtype is None:
-        from legoesm.core.precision import get_policy
         dtype = get_policy().storage
     return Field(
         data=jnp.zeros(shape, dtype=dtype),
@@ -207,7 +208,6 @@ def ones_field(
     storage dtype (``get_policy().storage``).
     """
     if dtype is None:
-        from legoesm.core.precision import get_policy
         dtype = get_policy().storage
     return Field(
         data=jnp.ones(shape, dtype=dtype),

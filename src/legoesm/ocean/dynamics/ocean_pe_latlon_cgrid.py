@@ -75,12 +75,24 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     smagorinsky_biharmonic_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
     _compute_vertex_mask,
+    compute_face_masks_3d,
+    density_jacobian_pgf_smc03_x,
+    density_jacobian_pgf_smc03_y,
+    partial_cell_pgf_correction_x,
+    partial_cell_pgf_correction_y,
+    pv_flux_al81_partial_cell,
+)
+from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+from legoesm.ocean.advection import (
+    flux_form_vertical_tracer_advection_weno5,
+    flux_form_vertical_tracer_advection_weno7,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
     flux_form_vertical_tracer_advection_tvd as _flux_form_vertical_advection_tvd,
+    compute_centroid_depth,
 )
 from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 from legoesm.ocean.advection import (
@@ -311,7 +323,6 @@ def _weno_zeta_at_u(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-
     hw = {5: 3, 7: 4}[order]
     n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
     nlev = phi.shape[2]
@@ -322,11 +333,18 @@ def _weno_zeta_at_u(
     v_at_vtx = jnp.concatenate(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
+    # Convert point values to cell averages along the meridional
+    # reconstruction axis before WENO.
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+    v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
+
     # Ghost cells (Neumann BC) along axis 0 for the meridional stencil
     phi_ext = jnp.concatenate(
-        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
+        [phi_avg[:1, :, :]] * hw + [phi_avg] + [phi_avg[-1:, :, :]] * hw, axis=0)
     v_ext = jnp.concatenate(
-        [v_at_vtx[:1, :, :]] * hw + [v_at_vtx] + [v_at_vtx[-1:, :, :]] * hw,
+        [v_at_vtx_avg[:1, :, :]] * hw + [v_at_vtx_avg] + [v_at_vtx_avg[-1:, :, :]] * hw,
         axis=0)
 
     phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
@@ -347,8 +365,9 @@ def _weno_zeta_at_u(
     u_ext_lat = jnp.concatenate([zero_u, u_smooth, zero_u], axis=0)
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
+    u_at_vtx_avg = point_to_cellavg_bounded(u_at_vtx, axis=0, order=conv_order)
     u_ext = jnp.concatenate(
-        [u_at_vtx[:1, :, :]] * hw + [u_at_vtx] + [u_at_vtx[-1:, :, :]] * hw,
+        [u_at_vtx_avg[:1, :, :]] * hw + [u_at_vtx_avg] + [u_at_vtx_avg[-1:, :, :]] * hw,
         axis=0)
     psi_u_stencil = [u_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
@@ -389,7 +408,6 @@ def _weno_zeta_at_v(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1] - 1
     nlev = phi.shape[2]
@@ -401,12 +419,19 @@ def _weno_zeta_at_v(
         [zero_u, u_smooth, zero_u], axis=0)
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
+    # Convert point values to cell averages along zonal axis (periodic).
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
 
-    phi_stencil = [jnp.roll(phi_core, hw - 1 - j, axis=1)
+    phi_core_avg = point_to_cellavg_periodic(phi_core, axis=1, order=conv_order)
+    u_core_avg = point_to_cellavg_periodic(u_core, axis=1, order=conv_order)
+
+    phi_stencil = [jnp.roll(phi_core_avg, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
-    psi_u_stencil = [jnp.roll(u_core, hw - 1 - j, axis=1)
+    psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
     phi_plus_u, phi_minus_u = weno_reconstruct_split(
@@ -423,7 +448,8 @@ def _weno_zeta_at_v(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)
 
     v_core = v_at_vtx[:, :n_lon, :]
-    psi_v_stencil = [jnp.roll(v_core, hw - 1 - j, axis=1)
+    v_core_avg = point_to_cellavg_periodic(v_core, axis=1, order=conv_order)
+    psi_v_stencil = [jnp.roll(v_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
     phi_plus_v, phi_minus_v = weno_reconstruct_split(
@@ -568,18 +594,23 @@ def _weno_cell_to_uface(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1]
+
+    # Convert point values to cell averages before WENO reconstruction.
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
+    psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
 
     # Periodic stencil along axis 1 (longitude).
     # U-face j is between cell j-1 and cell j.  WENO at the face between
     # cells (j-1) and j needs cells j-hw, ..., j+hw-1.
     # Roll offset for stencil position s: hw - s places cell j-hw+s at
     # position j.
-    phi_stencil = [jnp.roll(phi, hw - s, axis=1)
+    phi_stencil = [jnp.roll(phi_avg, hw - s, axis=1)
                    for s in range(2 * hw)]
-    psi_stencil = [jnp.roll(psi, hw - s, axis=1)
+    psi_stencil = [jnp.roll(psi_avg, hw - s, axis=1)
                    for s in range(2 * hw)]
 
     phi_plus, phi_minus = weno_reconstruct_split(
@@ -618,17 +649,22 @@ def _weno_cell_to_vface(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-
     hw = {5: 3, 7: 4}[order]
     n_lat = phi.shape[0]
     nlev = phi.shape[2]
     n_lon = phi.shape[1]
 
+    # Convert point values to cell averages before WENO reconstruction.
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+    psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+
     # Ghost cells (Neumann BC) along axis 0 for meridional stencil.
     phi_ext = jnp.concatenate(
-        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
+        [phi_avg[:1, :, :]] * hw + [phi_avg] + [phi_avg[-1:, :, :]] * hw, axis=0)
     psi_ext = jnp.concatenate(
-        [psi[:1, :, :]] * hw + [psi] + [psi[-1:, :, :]] * hw, axis=0)
+        [psi_avg[:1, :, :]] * hw + [psi_avg] + [psi_avg[-1:, :, :]] * hw, axis=0)
 
     # V-face i (i=1,...,n_lat-1) sits between cell i-1 and cell i.
     # WENO needs cells i-hw, ..., i+hw-1.
@@ -709,9 +745,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # partial cells with all columns having the same bottom_level,
     # this produces identical results to broadcasting the 2D mask.
     if isinstance(z_coord, OceanPartialCellCoordinate):
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            compute_face_masks_3d,
-        )
         u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active)
     else:
         u_mask_3d = u_mask[..., jnp.newaxis]
@@ -928,10 +961,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     if isinstance(z_coord, OceanPartialCellCoordinate):
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme == "smc03":
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                density_jacobian_pgf_smc03_x,
-                density_jacobian_pgf_smc03_y,
-            )
             # Replace (centered-diff p_prime gradient) + (Adcroft face
             # correction) with the density-Jacobian PGF evaluated at a
             # smooth-in-k face-reference depth.  Same ``rho_prime`` and
@@ -950,11 +979,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             dp_dx = dp_dx_smc.astype(dp_dx.dtype)
             dp_dy = dp_dy_smc.astype(dp_dy.dtype)
         else:
-            from legoesm.ocean.vertical import compute_centroid_depth
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                partial_cell_pgf_correction_x,
-                partial_cell_pgf_correction_y,
-            )
             # Use eta=0 reference for centroid: rho_prime / p_prime above
             # are computed at the J=1, eta=0 reference (line 802 comment).
             # Using live eta here would make the Adcroft correction time-
@@ -1135,9 +1159,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_vortcor_u = q_at_u * Fv_at_u
         diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            pv_flux_al81_partial_cell,
-        )
         vtx_mask_va = _compute_vertex_mask(mask)
         diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
             zeta, h_vtx, h_v, v, h_u, u,

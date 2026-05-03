@@ -121,11 +121,12 @@ def kessler_microphysics(
     cond_evap_sink = jnp.maximum(-condensation, 0.0)
     qc_sink_total = cond_evap_sink + autoconv + accretion
     qc_avail = jnp.clip(q_c, 0.0)
-    # Double-where pattern so the AD graph never sees ``0 / max(0, eps)``
-    # — under fp32 the squared eps in the VJP underflows to zero, giving
-    # ``0/0 = NaN`` even though the forward result is well-defined.  See
-    # the ``safe_pow`` helper for the same pattern around fractional
-    # powers of zero hydrometeors.
+    # Double-where pattern: under fp32 ``1e-30`` underflows in the VJP
+    # (``1e-30**2 < fp32.tiny``) so the reverse-mode pass evaluates
+    # ``0/0`` even though the forward path is well-defined.  Short-
+    # circuit to ``1.0`` when there is no q_c sink so the AD graph
+    # never sees the underflow.  See ``safe_pow`` for the same
+    # pattern around fractional powers of zero hydrometeors.
     qc_sink_dt = qc_sink_total * jnp.maximum(dt, 1e-10)
     sink_active = qc_sink_dt > 0.0
     safe_sink_dt = jnp.where(sink_active, qc_sink_dt, 1.0)

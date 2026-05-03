@@ -16,7 +16,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.core.precision import get_policy
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.land.multilayer_land import init_multilayer_land_state
+from legoesm.land.surface_params import reshape_params
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.core.precision import get_policy
 from legoesm.land.multilayer_land import init_multilayer_land_state
@@ -327,7 +330,6 @@ def make_coupler(
                 _lp = _land_param_provider()
             # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))
             if not _use_multilayer:
-                from legoesm.land.surface_params import reshape_params
                 _lp = reshape_params(_lp, atm_forcing.sw_down.shape)
         else:
             _lp = None

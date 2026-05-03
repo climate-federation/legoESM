@@ -684,6 +684,96 @@ forcing saturates earlier) to generate eddy-development figures
 matching the existing lat-lon `som_csmag02_nosponge_200d/snapshots_SST.png`
 aesthetic.
 
+## Run 7: 2026-04-29 — Implicit barotropic solver comparison
+
+After PR #218 introduced the implicit Crank-Nicolson barotropic solver
+(`barotropic_solver="implicit_cn"`), which eliminated 2dt aliasing noise
+in the explicit substep solver, we re-ran the previously-validated
+advection scheme experiments to test whether the implicit solver
+changes the dynamics.
+
+**Hypothesis**: barotropic noise from the explicit solver was confounding
+WENO stability tests and contaminating V_baro time-means. The implicit
+solver should give cleaner dynamics.
+
+**Tool**: new standalone script `scripts/run_eady_advection_comparison.py`
+with EKE, Var(T), and zonal spectra diagnostics.
+
+### Setup
+
+Same physics as Runs 4-5: 100×50, 20 levels, dt=300s, B_h=2.3e11,
+C_smag=0 (except som which uses C_smag=0.2), no sponge, KPP on.
+Each scheme run twice: once with `explicit_substep`, once with
+`implicit_cn`.
+
+### Results — Weak forcing (U=0.2, 600 days)
+
+| Scheme | Solver | Status | max_spd (m/s) | Var(T) drift | EKE final |
+|---|---|---|---|---|---|
+| upwind | explicit | PASS 600d | 0.11 | −12.4% | 6.0e-4 |
+| upwind | implicit | PASS 600d | **0.85** | **−36.7%** | 5.2e-3 |
+| tvd | explicit | PASS 600d | 0.19 | −7.3% | 7.4e-4 |
+| tvd | implicit | **FAIL d~116** | 1.33 | — | — |
+| som+Csmag | explicit | PASS 600d | 0.12 | −2.5% | 1.5e-3 |
+| som+Csmag | implicit | "PASS" 600d | **8.02** | **−16.7%** | 1.7e-1 |
+
+### Results — Strong forcing (U=0.8, 200 days)
+
+All schemes blow up with the implicit solver (NaN). Previously upwind
+and tvd survived 200 days with the explicit solver.
+
+| Scheme | Solver | NaN at day | Old explicit result |
+|---|---|---|---|
+| upwind | implicit | ~111 | PASS 200d |
+| tvd | implicit | ~94 | PASS 200d |
+| dst3 | implicit | ~91 | not tested |
+| weno5 | implicit | ~87 | not tested |
+| weno7 | implicit | ~81 | not tested |
+
+### Key finding: explicit solver noise was accidental eddy damping
+
+The implicit Crank-Nicolson solver produces **8–65× higher max_speed**
+and **3–6× worse Var(T) preservation** than the explicit substep solver
+at identical physics settings. Schemes that were stable with the explicit
+solver (tvd, som+Csmag) blow up or become unphysically energetic with
+the implicit solver.
+
+The most likely explanation is that the explicit substep solver's cosine
+time filter introduces numerical damping on the barotropic mode, which
+feeds back to suppress baroclinic eddy growth through the depth-averaged
+velocity coupling. Removing this damping (implicit solver) reveals that
+B_h=2.3e11 alone is insufficient to control grid-scale eddy energy —
+even at weak forcing.
+
+**Implications:**
+
+1. **Previous comparison results are qualitatively valid** (scheme
+   ranking by Var(T) loss is real) **but quantitatively contaminated**
+   by the explicit solver's accidental damping. The absolute Var(T)
+   losses and max_speed values understate the true eddy activity.
+
+2. **Dissipation parameters need re-tuning** for the implicit solver.
+   Higher B_h, larger C_smag, or a sponge layer is needed to match the
+   effective dissipation the explicit solver provided for free.
+
+3. **The implicit solver is the correct solver** — it eliminates
+   checkerboard noise in V_baro by construction. The old "stable" runs
+   were stable partly for the wrong reason.
+
+### Next steps
+
+- Diagnose the energy budget difference: decompose dKE/dt into
+  baroclinic conversion, B_h dissipation, bottom drag, vertical mixing
+  to identify which term is out of balance.
+- Tune dissipation for the implicit solver: sweep B_h and C_smag to
+  find the minimum dissipation that stabilizes tvd and som at weak
+  forcing, then re-run the full scheme comparison.
+- Compare vorticity fields (max|ζ|, ζ spectra) between solvers to
+  determine whether the energy accumulates at the grid scale.
+- Once re-tuned, run the full matrix (upwind, tvd, dst3, weno5, weno7,
+  som) at weak forcing with the implicit solver for the definitive
+  advection scheme ranking.
+
 ## Open issues and limitations
 
 - **PPM-FCT limiter** (#9): current `alpha_face = min(alpha_left,

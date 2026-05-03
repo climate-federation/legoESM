@@ -20,8 +20,6 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo, pad_halo_vector, get_halo_backend
-from legoesm.parallel.mesh import get_active_config
-from legoesm.parallel.reductions import global_sum_mpi
 
 
 def _pad_scalar(data, grid):

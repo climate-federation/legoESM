@@ -25,6 +25,21 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.fv_tp_2d import (
+    _pert_ppm,
+    compute_transport_quantities,
+    fv_tp_2d,
+    transport_step,
+)
+from legoesm.core.operators_cdgrid import (
+    _pad_halo_auto,
+    cgrid_mass_flux_divergence,
+    _interp_center_to_corner,
+    _interp_center_to_corner_a2b_ord4,
+    cgrid_divergence,
+    fv3_cc2c,
+    fv3_d2cc,
+)
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.duogrid import ext_vector_dgrid
 from legoesm.grids.halo import (
@@ -32,12 +47,6 @@ from legoesm.grids.halo import (
     pad_halo_vector,
     synchronize_bgrid_ne_corner_geo,
     synchronize_cgrid_fluxes,
-)
-from legoesm.core.operators_cdgrid import (
-    _pad_halo_auto,
-    cgrid_mass_flux_divergence,
-    _interp_center_to_corner,
-    cgrid_divergence,
 )
 
 _EPS = float(jnp.finfo(jnp.float32).eps)
@@ -624,7 +633,6 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     3. Covariant→contravariant via cosa_s/rsin2 (FV3 line 3451-3452).
     4. 4th-order A→C interpolation on the full-halo utmp / vtmp.
     """
-
     n = cdgrid.n
     grid = cdgrid.base
     dg = grid.duogrid
@@ -1785,9 +1793,6 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
             # Iter-972: use Fortran-faithful 4th-order a2b_ord4
             # interpolation (matching sw_core.F90:1795 `a2b_ord4` call)
             # instead of the 2nd-order `_interp_center_to_corner`.
-            from legoesm.core.operators_cdgrid import (
-                _interp_center_to_corner_a2b_ord4,
-            )
             wk_corner = _interp_center_to_corner_a2b_ord4(wk, cdgrid)
             smag_vort = jnp.abs(dt) * jnp.sqrt(
                 delpc ** 2 + wk_corner ** 2)
@@ -2180,8 +2185,6 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
     """
     n = cdgrid.n
 
-    from legoesm.core.operators_cdgrid import fv3_d2cc, fv3_cc2c
-
     # 1. d2a2c_vect: D→A→C for KE and vorticity (covariant convention)
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
 
@@ -2514,7 +2517,6 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
     #   bl(1) = xt - v(1);  br(0) = xt - v(0)
     #   pert_ppm(v(2), bl(2), br(2), iv=-1) → standard PPM constraint
     if apply_d_sw3_boundary_fix:
-        from legoesm.core.fv_tp_2d import _pert_ppm as _pert_ppm_iv1
         s11_c = 11.0 / 14.0
         s14_c = 4.0 / 7.0
         s15_c = 3.0 / 14.0
@@ -2642,12 +2644,12 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
         # pert_ppm(iv=1) at j=2 and j=npy-2 (standard PPM constraint).
         bl_2 = bl[:, 2, :]
         br_2 = br[:, 2, :]
-        bl_2_new, br_2_new = _pert_ppm_iv1(bl_2, br_2)
+        bl_2_new, br_2_new = _pert_ppm(bl_2, br_2)
         bl = bl.at[:, 2, :].set(bl_2_new)
         br = br.at[:, 2, :].set(br_2_new)
         bl_nm2 = bl[:, k_nm2, :]
         br_nm2 = br[:, k_nm2, :]
-        bl_nm2_new, br_nm2_new = _pert_ppm_iv1(bl_nm2, br_nm2)
+        bl_nm2_new, br_nm2_new = _pert_ppm(bl_nm2, br_nm2)
         bl = bl.at[:, k_nm2, :].set(bl_nm2_new)
         br = br.at[:, k_nm2, :].set(br_nm2_new)
 
@@ -2923,9 +2925,6 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     -------
     h_new, u_d_new, v_d_new
     """
-    from legoesm.core.fv_tp_2d import (
-        compute_transport_quantities, fv_tp_2d, transport_step,
-    )
     n = cdgrid.n
 
     # === 1. Contravariant transport velocity from updated C-grid ===
