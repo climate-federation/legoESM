@@ -60,6 +60,22 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Voronoi MPI sendrecvs                              |         12 |           6 |
 | Voronoi MPI mass-fix payload                       |          3 |           2 |
 | Voronoi SPMD mass-fix HLOs                         |          2 |           1 |
+| Spectral PE oc2 + dmu SH analyses (PGF / vert-adv) | 2 separate FFT+Legendre passes | 1 fused (`sh_analysis_oc2_dmu_3d` shares FFT + φ-gather) |
+| Spectral PE per-tracer SH filter passes            | 1 per tracer (`n_tracer` analyses + `n_tracer` syntheses) | 1 batched (analysis on stacked `(n_lat, n_lon, n_tracer*nlev)`) |
+| Spectral PE T sponge multiplier per RK3 stage      | recomputed each stage | precomputed once |
+| Spectral PE hyperdiff filter for div coeffs        | recomputed each stage | precomputed once |
+| Convection scheme column reductions per timestep   | up to 4 per scheme (Bechtold PBL, downdraft, Tiedtke below-LCL, Emanuel) | 1 stacked per scheme (iter-86, 87, 89, 90, 91, 88) |
+| GWD prognostic-spectral du/dv spectrum reductions  | 2 over (n_az, n_wn) | 1 stacked |
+| Turbulence h_pbl numerator + denominator (3 modules) | 2 per module | 1 stacked |
+| ML microphysics autoconv + base-evap fluxes        | 2 column reductions | 1 stacked |
+| Ocean visbeck depth-weighted column reductions     | 2 or 3 per call | 1 stacked |
+| Ocean rossby radius w_total + N_bar                | 2 reductions | 1 stacked |
+| Ocean lat-lon C-grid U_bar/V_bar barotropic mean   | 4 reductions per call (2 num + 2 denom) | 2 stacked |
+| Ocean MPAS H_e + u_bar + transport-correction      | 4 column reductions | 2 stacked |
+| Ocean barotropic 3-file H + U_bar + V_bar          | 3 reductions × 3 files | 1 stacked × 3 files |
+| Ocean MPAS conservation heat/salt 3-term diagnostics | 6 column reductions per tracer | 1 stacked column + 1 area sum |
+| Land multilayer f_veg + weight_sum                 | 2 redundant column reductions | 1 reused |
+| Core conservation hydrostatic + NH energy diagnostics | 3 column reductions per call | 1 stacked per call |
 
 ## SPMD-vs-single-device numerical equivalence
 
