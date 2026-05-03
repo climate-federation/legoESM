@@ -130,6 +130,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Land slab_land compute_most_fluxes inline         | 1 inline import per call (MOST branch) | 1 module-level import |
 | ML channel_packing 6 inline imports               | 6 inline imports across pack/unpack helpers | 6 module-level imports |
 | Ocean model latlon C-grid 4 inline imports        | 4 inline imports per transport-correction call | 4 module-level imports |
+| Ocean model cdgrid baroclinic-tendency inline     | 1 inline import per call (``_compute_tendencies``) | 1 module-level import |
+| Ocean surface_forcing integration scheme inline   | 4 inline imports across 3 ``_make_*`` factories | 3 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
