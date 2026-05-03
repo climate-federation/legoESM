@@ -866,10 +866,14 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     area = mesh.areaCell
 
     KE_cells = kinetic_energy_cell(u, mesh)
-    energy_terms = jnp.stack([
-        jnp.sum(KE_cells * h * area),
-        jnp.sum(0.5 * g * (h + h_s) ** 2 * area),
-    ])
+    # Both KE and PE share the ``area`` weight on the horizontal axes —
+    # stack the two integrands and reduce once locally so XLA fires one
+    # sum kernel; the stacked result still yields a 2-vector for the
+    # downstream ``KE / PE`` split (and a future allreduce, if any).
+    _energy_intg = jnp.stack(
+        [KE_cells * h, 0.5 * g * (h + h_s) ** 2], axis=-1,
+    ) * area[..., None]
+    energy_terms = jnp.sum(_energy_intg, axis=tuple(range(area.ndim)))
     KE, PE = energy_terms[0], energy_terms[1]
 
     KE_target = jnp.maximum(target_energy - PE, _EPS_ENERGY)
