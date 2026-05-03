@@ -121,6 +121,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Land multilayer 2 inline imports                  | 2 inline imports per call              | 2 module-level imports |
 | Coupler surface_exchange thermodynamics inline    | 2 inline imports per NH call           | 2 module-level imports |
 | Coupler mpas_adapter 5 inline imports             | 5 inline imports across init + factory | 5 module-level imports |
+| Parallel reductions mpi_timer inline (×5)         | 5 inline imports across MPI primitives | 1 module-level import |
 
 ## SPMD-vs-single-device numerical equivalence
 
