@@ -255,8 +255,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.extra:
         cmd += list(args.extra)
 
+    # Tell the user which CMIP6 forcing channels will *actually* affect
+    # the run.  The driver gates GHG/ozone/aerosol on
+    # ``cfg.radiation in ("rrtmg", "rrtmgp")``: those channels are
+    # configured but inert under ``--radiation gray``.  Surface SST/SIC
+    # and solar TSI affect both gray and RRTMG paths.
     print("[deck] Command:")
     print("  " + " \\\n    ".join(cmd))
+    print("[deck] Forcing-channel activity for this run:")
+    rad = args.radiation
+    rad_active = rad in ("rrtmg", "rrtmgp")
+    flag = lambda b: "ACTIVE" if b else "inert (gray radiation)"
+    print(f"  SST/SIC                              ACTIVE        (radiation-independent)")
+    print(f"  Solar TSI + 14-band spectral         ACTIVE        (radiation-independent)")
+    print(f"  Greenhouse gases (transient annual)  {flag(rad_active)}")
+    print(f"  Ozone (cyclic clim or interannual)   {flag(rad_active)}")
+    if not args.no_aerosol:
+        print(f"  Tropospheric aerosol (Kinne)         {flag(rad_active)}")
+    if not args.no_volcanic and args.volcanic_aerosol_scale > 0:
+        print(f"  Volcanic stratospheric AOD           {flag(rad_active)}")
+    if not rad_active:
+        print(
+            "[deck] NOTE: --radiation gray is FAST but disables all "
+            "spectral-radiation-dependent forcings. Use --radiation rrtmg "
+            "for the production CMIP6 AMIP physics; gray is for smoke "
+            "testing the dycore + SST forcing path only."
+        )
     if args.dry_run:
         return 0
 
