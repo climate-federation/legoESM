@@ -18,6 +18,8 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
+from legoesm.core.precision import get_policy
+from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
 from legoesm.core.field import Field
 from legoesm.coupler.accumulator import (
@@ -108,13 +110,10 @@ def init_surface_state(
         initialises prognostic carbon pools.
     """
     dims_2d = ("face", "x", "y")
-    from legoesm.core.precision import get_policy
     _sd = get_policy().storage
 
     if isinstance(land_config, MultiLayerLandConfig):
-        from legoesm.land.multilayer_land import init_multilayer_land_state
         # For multi-layer land, ncol = product of spatial dims
-        import math
         ncol = math.prod(shape)
         land = init_multilayer_land_state(
             ncol, land_config, T_init=T_soil_init,
