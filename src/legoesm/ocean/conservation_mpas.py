@@ -95,9 +95,20 @@ def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None
     """Fix volume conservation via uniform eta correction."""
     mask = state_old.land_mask.data
 
-    vol_old = _ocean_area_sum_mpas(state_old.eta.data, mask, mesh)
-    vol_new = _ocean_area_sum_mpas(state_new.eta.data, mask, mesh)
-    ocean_area = _ocean_area_sum_mpas(jnp.ones_like(mask), mask, mesh)
+    # Three area-weighted scalars (eta_old, eta_new, ocean_area) share
+    # the ``mask * areaCell`` weight on the same horizontal axes — fuse
+    # the local column reduction and the allreduce.
+    eta_old_acc = cast(state_old.eta.data, _ACC_MODULE, "accumulate")
+    eta_new_acc = cast(state_new.eta.data, _ACC_MODULE, "accumulate")
+    mask_acc = cast(mask, _ACC_MODULE, "accumulate")
+    area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
+    weighted = mask_acc * area_acc
+    _local = jnp.sum(
+        jnp.stack([eta_old_acc, eta_new_acc, jnp.ones_like(eta_old_acc)], axis=-1)
+        * weighted[..., None],
+        axis=tuple(range(eta_old_acc.ndim)),
+    )
+    vol_old, vol_new, ocean_area = _global_sum(_local)
 
     correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
     eta_fixed = state_new.eta.data + correction.astype(state_new.eta.data.dtype) * mask
