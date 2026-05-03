@@ -143,6 +143,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean conservation_mpas 3 inline imports          | 3 inline imports (``import jax``, ``_is_distributed``, ``global_sum_mpi``) per fix_volume/heat/salt | 3 module-level imports |
 | Ocean advection WENO inline imports               | 3 inline imports per WENO call (u/v/vertical) | 1 shared module-level import |
 | Atm physics combined.py 3 inline imports          | 3 inline imports inside ``physics_fn`` (every step) — ``SpectralHydrostaticState`` / ``spectral_pe_to_grid`` / ``zero_like_tracers`` (×2) | 3 module-level imports |
+| Atm physics gwd integration 5 inline imports      | 5 inline imports inside ``physics_fn`` (every step) — spectral_pe state/grid + 3 SH analysis kernels | 5 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
