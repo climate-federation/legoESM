@@ -233,13 +233,13 @@ def _open_source_dataset(path: str):
 # ---------------------------------------------------------------------------
 
 def _parse_time_axis_to_gregorian(time_values, time_units: str):
-    """Parse JRA55-do's ``"days since YYYY-MM-DD"`` time axis into a
-    NumPy structured array of (year, month, day, hour) tuples.
+    """Parse a CF time axis into ``(year, month, day, hour)`` arrays.
 
-    JRA55-do's standard encoding is ``"days since 1958-01-01 00:00:00"``
-    on a Gregorian calendar (with leap days). Returns three int arrays
-    ``(year, month, day)`` and one float array ``hour``, all of length
-    ``len(time_values)``.
+    Accepts ``"<unit> since YYYY-MM-DD[...]"`` for ``unit`` in
+    ``{"days", "hours", "seconds", "minutes"}``. JRA55-do's
+    interannual files use ``"days since 1958-01-01 00:00:00"``;
+    xarray-written outputs (e.g. from ``make_ryf.py``) often
+    auto-encode in ``"hours since ..."``.
 
     A small dependency-free Gregorian-date arithmetic layer is used so
     that callers don't need ``cftime`` for the offline cache build.
@@ -247,20 +247,31 @@ def _parse_time_axis_to_gregorian(time_values, time_units: str):
     import re
 
     m = re.match(
-        r"^\s*days\s+since\s+(\d{4})-(\d{1,2})-(\d{1,2})", time_units,
+        r"^\s*(days|hours|minutes|seconds)\s+since\s+"
+        r"(\d{4})-(\d{1,2})-(\d{1,2})",
+        time_units,
     )
     if not m:
         raise ValueError(
-            f"Cannot parse JRA55-do time units {time_units!r}; expected "
-            "'days since YYYY-MM-DD ...'"
+            f"Cannot parse time units {time_units!r}; expected "
+            "'<days|hours|minutes|seconds> since YYYY-MM-DD ...'"
         )
-    epoch_year = int(m.group(1))
-    epoch_month = int(m.group(2))
-    epoch_day = int(m.group(3))
+    unit = m.group(1)
+    epoch_year = int(m.group(2))
+    epoch_month = int(m.group(3))
+    epoch_day = int(m.group(4))
 
-    time_arr = np.asarray(time_values, dtype=np.float64)
-    days_int = np.floor(time_arr).astype(np.int64)
-    hours = (time_arr - days_int) * 24.0
+    # Convert the unit-of-time to fractional days so the rest of the
+    # function is unit-agnostic.
+    unit_to_days = {
+        "days": 1.0,
+        "hours": 1.0 / 24.0,
+        "minutes": 1.0 / (24.0 * 60.0),
+        "seconds": 1.0 / 86400.0,
+    }
+    time_in_days = np.asarray(time_values, dtype=np.float64) * unit_to_days[unit]
+    days_int = np.floor(time_in_days).astype(np.int64)
+    hours = (time_in_days - days_int) * 24.0
 
     # Convert (epoch_year, epoch_month, epoch_day) + days_int → Gregorian.
     # Use the Julian-day algorithm to keep this dependency-free and

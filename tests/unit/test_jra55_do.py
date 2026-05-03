@@ -167,9 +167,32 @@ def test_parse_time_axis_basic():
     assert h[3] == pytest.approx(12.0)
 
 
-def test_parse_time_axis_rejects_bad_units():
+def test_parse_time_axis_rejects_unrecognised_units():
+    """Anything not in {days,hours,minutes,seconds} since YYYY-MM-DD
+    is a hard error."""
     with pytest.raises(ValueError, match="Cannot parse"):
-        _parse_time_axis_to_gregorian(np.array([0.0]), "hours since 1958-01-01")
+        _parse_time_axis_to_gregorian(np.array([0.0]),
+                                       "fortnights since 1958-01-01")
+    with pytest.raises(ValueError, match="Cannot parse"):
+        _parse_time_axis_to_gregorian(np.array([0.0]),
+                                       "no time units here")
+
+
+def test_parse_time_axis_handles_hours_since():
+    """xarray often serialises 3-hourly data as 'hours since ...';
+    the cache builder must accept it (this is exactly what make_ryf
+    produces)."""
+    # 24.0 hours since 1958-01-01 00:00 → 1958-01-02
+    y, mo, d, h = _parse_time_axis_to_gregorian(
+        np.array([0.0, 3.0, 24.0, 27.5]),
+        "hours since 1958-01-01 00:00:00",
+    )
+    assert (int(y[0]), int(mo[0]), int(d[0])) == (1958, 1, 1)
+    assert h[0] == pytest.approx(0.0)
+    assert h[1] == pytest.approx(3.0)
+    assert (int(y[2]), int(mo[2]), int(d[2])) == (1958, 1, 2)
+    assert h[2] == pytest.approx(0.0)
+    assert h[3] == pytest.approx(3.5)
 
 
 # ============================================================================
