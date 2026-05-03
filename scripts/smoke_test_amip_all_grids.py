@@ -32,37 +32,59 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-# Resolution per grid type (chosen so each grid has a comparable cell count).
-# ``extra`` lists per-grid overrides forwarded to ``run_amip.py``.
+# Per-case configuration.  Keys are unique labels; values supply the
+# grid_type / discretization / resolution / per-case ``extra`` overrides
+# forwarded as ``--extra <args>`` to ``run_amip.py``.
+#
+# The matrix covers all (grid_type, discretization) combinations that
+# the legoESM dispatch matrix supports for hydrostatic AMIP runs:
+#
+#   cubed_sphere/centered, cubed_sphere/finite_volume, cubed_sphere/cdgrid
+#   latlon/centered, latlon/finite_volume, latlon/latlon_cgrid
+#   gaussian/spectral
+#   voronoi/mpas (currently fails — pre-existing dycore stability issue)
 _GRID_RESOLUTIONS = {
-    "cubed_sphere": dict(resolution=12, discretization="centered", extra=[]),
-    "gaussian":     dict(resolution=21, discretization="spectral", extra=[]),  # T21
-    "latlon":       dict(resolution=24, discretization="centered", extra=[]),
+    "cubed_sphere":     dict(grid_type="cubed_sphere",   resolution=12,
+                              discretization="centered", extra=[]),
+    "cubed_sphere_fv":  dict(grid_type="cubed_sphere",   resolution=12,
+                              discretization="finite_volume", extra=[]),
+    "cubed_sphere_cd":  dict(grid_type="cubed_sphere",   resolution=12,
+                              discretization="cdgrid",   extra=[]),
+    "latlon":           dict(grid_type="latlon",         resolution=24,
+                              discretization="centered", extra=[]),
+    "latlon_fv":        dict(grid_type="latlon",         resolution=24,
+                              discretization="finite_volume", extra=[]),
+    "latlon_cgrid":     dict(grid_type="latlon",         resolution=24,
+                              discretization="latlon_cgrid", extra=[]),
+    "gaussian":         dict(grid_type="gaussian",       resolution=21,
+                              discretization="spectral", extra=[]),
     # Voronoi SCVT: ``resolution`` is the bisection level
     # (level=4 → 2562 cells, similar size to C24).
-    # The MPAS turbulence bridge isn't implemented (the integration
-    # raises ``NotImplementedError`` because TKE expects cell-centered
-    # winds while MPAS stores edge-normal winds), so disable it for
-    # the smoke test.  See ``atmosphere/physics/turbulence/integration.py``.
-    "voronoi":      dict(resolution=4, discretization="mpas",
-                          extra=["--turbulence", "none"]),
+    # The MPAS turbulence bridge isn't implemented (TKE expects
+    # cell-centered winds while MPAS stores edge-normal winds), so
+    # disable it for the smoke test.  See
+    # ``atmosphere/physics/turbulence/integration.py``.
+    "voronoi":          dict(grid_type="voronoi",        resolution=4,
+                              discretization="mpas",
+                              extra=["--turbulence", "none"]),
 }
 
 
-def run_one(grid: str, *, days: int, resolution: int | None,
+def run_one(label: str, *, days: int, resolution: int | None,
             timeout: int = 360) -> tuple[bool, str]:
-    """Execute one grid case and return (ok, summary)."""
-    info = _GRID_RESOLUTIONS[grid]
+    """Execute one (grid, discretization) case and return (ok, summary)."""
+    info = _GRID_RESOLUTIONS[label]
+    grid_type = info["grid_type"]
     res = resolution if resolution is not None else info["resolution"]
     disc = info["discretization"]
-    grid_extra = list(info.get("extra", []))
+    case_extra = list(info.get("extra", []))
 
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "run"
         cmd = [
             sys.executable,
             str(_REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"),
-            "--grid-type", grid,
+            "--grid-type", grid_type,
             "--discretization", disc,
             "--resolution", str(res),
             "--days", str(days),
@@ -71,19 +93,20 @@ def run_one(grid: str, *, days: int, resolution: int | None,
             "--no-aerosol", "--no-volcanic",
             "--output", str(out),
         ]
-        if grid_extra:
-            cmd += ["--extra", *grid_extra]
+        if case_extra:
+            cmd += ["--extra", *case_extra]
         env = os.environ.copy()
         env.setdefault("JAX_ENABLE_X64", "1")
         try:
             r = subprocess.run(cmd, env=env, timeout=timeout,
                                 capture_output=True, text=True)
         except subprocess.TimeoutExpired:
-            return False, f"{grid}/{disc}/n={res}: TIMEOUT"
+            return False, f"{label} ({grid_type}/{disc}/n={res}): TIMEOUT"
 
         if r.returncode != 0:
             tail = "\n".join(r.stderr.splitlines()[-5:])
-            return False, f"{grid}/{disc}/n={res}: exit={r.returncode}\n  {tail}"
+            return False, (f"{label} ({grid_type}/{disc}/n={res}): "
+                            f"exit={r.returncode}\n  {tail}")
 
         # Validate output
         valid_cmd = [sys.executable,
@@ -91,7 +114,8 @@ def run_one(grid: str, *, days: int, resolution: int | None,
                      str(out)]
         v = subprocess.run(valid_cmd, capture_output=True, text=True)
         if v.returncode != 0:
-            return False, (f"{grid}/{disc}/n={res}: validation FAILED:\n"
+            return False, (f"{label} ({grid_type}/{disc}/n={res}): "
+                            f"validation FAILED:\n"
                             f"{v.stdout.splitlines()[-3:]}")
         # Read results.txt for summary
         try:
@@ -102,7 +126,7 @@ def run_one(grid: str, *, days: int, resolution: int | None,
                             if l.startswith("Final <Precip>:")), "")
         except FileNotFoundError:
             t_line, p_line = "", ""
-        return True, f"{grid}/{disc}/n={res}: OK  {t_line}  {p_line}"
+        return True, f"{label} ({grid_type}/{disc}/n={res}): OK  {t_line}  {p_line}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,32 +136,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resolution", type=int, default=None,
                         help="Override resolution for all grids (else "
                              "per-grid defaults)")
-    parser.add_argument("--grids", nargs="*",
+    parser.add_argument("--cases", "--grids", nargs="*",
+                        dest="cases",
                         choices=list(_GRID_RESOLUTIONS.keys()),
-                        default=list(_GRID_RESOLUTIONS.keys()))
+                        default=list(_GRID_RESOLUTIONS.keys()),
+                        help="Case label(s); default = all")
     parser.add_argument("--timeout", type=int, default=360)
     args = parser.parse_args(argv)
 
     print(f"=== AMIP CMIP6 deck smoke test ({args.days}-day runs) ===")
-    print(f"Grids: {args.grids}")
+    print(f"Cases: {args.cases}")
     print()
 
     results: list[tuple[str, bool, str]] = []
-    for grid in args.grids:
-        print(f"Running {grid} …", flush=True)
-        ok, summary = run_one(grid, days=args.days,
+    for case in args.cases:
+        print(f"Running {case} …", flush=True)
+        ok, summary = run_one(case, days=args.days,
                                 resolution=args.resolution,
                                 timeout=args.timeout)
         print(f"  {summary}", flush=True)
-        results.append((grid, ok, summary))
+        results.append((case, ok, summary))
 
     n_pass = sum(1 for _, ok, _ in results if ok)
     n_fail = len(results) - n_pass
     print()
-    print(f"Summary: {n_pass}/{len(results)} grids passed")
-    for grid, ok, summary in results:
+    print(f"Summary: {n_pass}/{len(results)} cases passed")
+    for case, ok, summary in results:
         tag = "PASS" if ok else "FAIL"
-        print(f"  [{tag}] {grid}: {summary.splitlines()[0]}")
+        print(f"  [{tag}] {case}: {summary.splitlines()[0]}")
 
     return 0 if n_fail == 0 else 1
 

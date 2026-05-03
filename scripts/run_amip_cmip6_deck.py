@@ -117,8 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
     parser.add_argument("--discretization", type=str, default="centered",
-                        choices=["centered", "finite_volume", "cgrid", "mpas",
-                                  "spectral"])
+                        choices=["centered", "finite_volume", "cgrid",
+                                  "latlon_cgrid", "cdgrid", "mpas", "spectral"])
 
     # Physics — defaults match a balanced CMIP6 AMIP stack
     parser.add_argument("--radiation", type=str, default="rrtmg")
