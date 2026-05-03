@@ -132,6 +132,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean model latlon C-grid 4 inline imports        | 4 inline imports per transport-correction call | 4 module-level imports |
 | Ocean model cdgrid baroclinic-tendency inline     | 1 inline import per call (``_compute_tendencies``) | 1 module-level import |
 | Ocean surface_forcing integration scheme inline   | 4 inline imports across 3 ``_make_*`` factories | 3 module-level imports |
+| Ocean lateral_mixing integration scheme inline    | 3 inline imports (harmonic / biharmonic / gm_redi) | 3 module-level imports |
+| Ocean bottom_drag integration scheme inline       | 2 inline imports (linear / quadratic)  | 2 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
