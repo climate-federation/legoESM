@@ -65,6 +65,32 @@ def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh):
     ))
 
 
+def _ocean_volume_sums_old_new(field_old, h_k_old, field_new, h_k_new, mask, mesh):
+    """Stack the 3 (old / new / volume) volume-weighted scalar sums into
+    a single ``_global_sum`` allreduce.
+
+    The old leg uses ``h_k_old``; both new legs share ``h_k_new``, so
+    the new pair is fused into one column reduction first, then the 3
+    scalars are stacked for a single ``_global_sum``.
+    """
+    fold_acc = cast(field_old, _ACC_MODULE, "accumulate")
+    fnew_acc = cast(field_new, _ACC_MODULE, "accumulate")
+    h_old_acc = cast(h_k_old, _ACC_MODULE, "accumulate")
+    h_new_acc = cast(h_k_new, _ACC_MODULE, "accumulate")
+    mask_acc = cast(mask, _ACC_MODULE, "accumulate")
+    area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
+    weighted = mask_acc[:, jnp.newaxis] * area_acc[:, jnp.newaxis]
+    # ``new`` pair shares ``h_new_acc * weighted`` weight — fuse first
+    # (collapse over all spatial axes so the result is a 2-vector).
+    _new_pair = jnp.sum(
+        jnp.stack([fnew_acc, jnp.ones_like(fnew_acc)], axis=-1)
+        * (h_new_acc * weighted)[..., None],
+        axis=tuple(range(fnew_acc.ndim)),
+    )
+    field_old_sum = jnp.sum(fold_acc * h_old_acc * weighted)
+    return _global_sum(jnp.stack([field_old_sum, _new_pair[..., 0], _new_pair[..., 1]]))
+
+
 def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
     """Fix volume conservation via uniform eta correction."""
     mask = state_old.land_mask.data
@@ -102,10 +128,8 @@ def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
         min_water_column_m=min_water_column_m,
     )
 
-    heat_old = _ocean_volume_sum_mpas(state_old.T.data, h_k_old, mask, mesh)
-    heat_new = _ocean_volume_sum_mpas(state_new.T.data, h_k_new, mask, mesh)
-    vol_new = _ocean_volume_sum_mpas(
-        jnp.ones_like(state_new.T.data), h_k_new, mask, mesh,
+    heat_old, heat_new, vol_new = _ocean_volume_sums_old_new(
+        state_old.T.data, h_k_old, state_new.T.data, h_k_new, mask, mesh,
     )
 
     correction = (heat_old - heat_new) / jnp.maximum(vol_new, 1.0)
@@ -130,10 +154,8 @@ def fix_salt_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
         min_water_column_m=min_water_column_m,
     )
 
-    salt_old = _ocean_volume_sum_mpas(state_old.S.data, h_k_old, mask, mesh)
-    salt_new = _ocean_volume_sum_mpas(state_new.S.data, h_k_new, mask, mesh)
-    vol_new = _ocean_volume_sum_mpas(
-        jnp.ones_like(state_new.S.data), h_k_new, mask, mesh,
+    salt_old, salt_new, vol_new = _ocean_volume_sums_old_new(
+        state_old.S.data, h_k_old, state_new.S.data, h_k_new, mask, mesh,
     )
 
     correction = (salt_old - salt_new) / jnp.maximum(vol_new, 1.0)
