@@ -477,9 +477,14 @@ def apvm_correction(q_vertex, u_edge, mesh, dt):
     vt = tangential_velocity(u_edge, mesh)
     vt_at_edges = vt[eov_safe]
 
-    # Advective derivative at vertex: average of edge contributions
-    advection = jnp.sum((vt_at_edges * dq_ds) * mask, axis=0)
-    count = jnp.maximum(jnp.sum(mask, axis=0), 1.0)
+    # Advective derivative at vertex: average of edge contributions —
+    # both reductions sum along the ``maxEdges`` axis with weight ``mask``.
+    _pair = jnp.sum(
+        jnp.stack([vt_at_edges * dq_ds, jnp.ones_like(mask)], axis=-1) * mask[..., None],
+        axis=0,
+    )
+    advection = _pair[..., 0]
+    count = jnp.maximum(_pair[..., 1], 1.0)
     u_dot_grad_q = advection / count
 
     return q_vertex - 0.5 * dt * u_dot_grad_q
