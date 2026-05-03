@@ -12,7 +12,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.diagnostics.column_integrals import column_water_vapor
-from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
+from legoesm.diagnostics.energy_budget import (
+    EnergyBudgetTracker,
+    MoistureBudgetTracker,
+)
+from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+from legoesm.forcing.surface_utils import blend_surface_temperature
 from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.io.cmor_output import CMIP6_PLEV19
 
@@ -192,14 +197,12 @@ class DiagnosticCollector:
         self.energy_tracker = EnergyBudgetTracker()
 
         # Moisture budget tracker
-        from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
         self.moisture_tracker = MoistureBudgetTracker()
 
         # Monthly means
         self.monthly_means = monthly_means
         self.monthly_accum = None
         if monthly_means:
-            from legoesm.diagnostics.monthly_means import MonthlyAccumulator
             self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
 
         # CFWriter + spatial monthly accumulator for CMIP output
@@ -486,8 +489,6 @@ class DiagnosticCollector:
         lat_deg_grid : array, optional
             Latitude in degrees for monthly means.
         """
-        from legoesm.forcing.surface_utils import blend_surface_temperature
-
         # Fuse 12 diagnostic reductions into one ``jnp.stack`` +
         # ``np.asarray`` host transfer.  Each ``float(jnp.X(...))``
         # was previously its own device→host sync, serialising the
@@ -931,10 +932,8 @@ class DiagnosticCollector:
         if self._spatial_monthly is None or self.cf_writer is None:
             return
 
-        from legoesm.forcing.time_utils import day_to_calendar
         doy, _ = day_to_calendar(current_day)
         current_year = int(current_day // 365.0)
-        from legoesm.diagnostics.monthly_means import MonthlyAccumulator
         current_month = MonthlyAccumulator.day_to_month(doy)
 
         data = self._spatial_monthly.pop_completed_months(
@@ -1115,8 +1114,6 @@ class DiagnosticCollector:
         lon = np.linspace(dlon / 2, 360.0 - dlon / 2, self._cmip_nlon)
 
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-
-        from legoesm.io.cmor_output import CMIP6_PLEV19
 
         # ``yr`` here is the 0-based run-relative calendar year (not the
         # absolute calendar year) because the CFWriter's ``ref_date`` is
