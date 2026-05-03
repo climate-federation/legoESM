@@ -149,6 +149,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Core operators_fv_latlon pad_halo_3d inline       | 2 inline imports (``fv_gradient_lon_3d`` + ``fv_gradient_lat_3d``) | folded into existing module-level halo_latlon import |
 | Core operators_cdgrid 11 inline imports           | 11 per-call inline imports across vorticity, divergence, KE-diffusion, hyperdiff, transport-step, async-halo | 4 new module-level imports + 3 names folded into existing halo block |
 | Core operators 3 inline imports                   | ``global_sum_mpi`` (per global allreduce) + ``get_halo_backend`` / ``get_active_config`` (per ``_is_distributed``/``_get_device_config`` call) | 3 module-level imports |
+| Core fv_tp_2d sync_cgrid_fluxes inline            | 1 inline import per ``transport_step`` cgrid-sync branch | folded into existing module-level halo import |
 
 ## SPMD-vs-single-device numerical equivalence
 
