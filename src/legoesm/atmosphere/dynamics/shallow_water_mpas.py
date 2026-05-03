@@ -45,6 +45,8 @@ from legoesm.core.operators_voronoi import (
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.precision import cast_pytree
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm import constants
 
 
@@ -162,7 +164,6 @@ class MPASShallowWaterModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: MPASShallowWaterState, dt: float) -> MPASShallowWaterState:
         """Advance one time step."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
@@ -209,7 +210,6 @@ def _fix_mass_mpas(state_new, state_old, mesh):
         jnp.sum(area),
     ])
     if jax.process_count() > 1:
-        from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
     mass_old, mass_new, total_area = local[0], local[1], local[2]
     correction = (mass_old - mass_new) / total_area
@@ -242,7 +242,6 @@ def _fix_energy_mpas(state_new, state_old, mesh, g):
 
     local = jnp.stack([KE_old, PE_old, KE_new, PE_new])
     if jax.process_count() > 1:
-        from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
     KE_old, PE_old, KE_new, PE_new = local[0], local[1], local[2], local[3]
     E_old = KE_old + PE_old

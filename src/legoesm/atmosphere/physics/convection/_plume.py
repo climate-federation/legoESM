@@ -251,10 +251,19 @@ def compute_lfc_lnb(
     # ``k_lfc`` into surface-first space and then compared against the
     # surface-last ``profile``, marking the wrong levels as "above LFC"
     # and collapsing the LNB onto the LFC for many columns.
+    # Sharp gate (independent of outer ``sharpness``) so the ``LARGE``
+    # guard is essentially binary in the level axis: ~0 above LFC, ~1
+    # below.  Re-using the K^-1 outer ``sharpness`` (typically O(1)) for
+    # the level-axis indicator gives a sigmoid scale of ~1 *level*,
+    # which combined with ``LARGE = 1e6`` leaks the guard far above LFC
+    # and monotonises the profile so no upward-crossing is detected
+    # (LNB then collapses onto the surface fallback).  Use ~20 so the
+    # transition spans ~0.1 level.
+    GATE_SHARPNESS = 20.0
     above_lfc_weight = smooth_level_indicator(
         jnp.broadcast_to(jnp.arange(nlev, dtype=buoyancy.dtype), buoyancy.shape),
         threshold=k_lfc[:, None],
-        sharpness=sharpness,
+        sharpness=GATE_SHARPNESS,
         direction="below",
     )
     # Drive ``-buoyancy`` strongly negative below the LFC so that the

@@ -68,6 +68,7 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm import constants
 
 
@@ -526,7 +527,6 @@ def _fix_mass_mpas_hydro(state_new, state_old, mesh):
         jnp.sum(area),
     ])
     if jax.process_count() > 1:
-        from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
     mass_old, mass_new, total_area = local[0], local[1], local[2]
     correction = (mass_old - mass_new) / total_area

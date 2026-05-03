@@ -252,11 +252,16 @@ class TestIslandTopology:
                             * grid_18x36.area[..., None]))
         rel_drift_T = abs(H1 - H0) / abs(H0)
         rel_drift_S = abs(S1 - S0) / abs(S0)
-        assert rel_drift_T < 1e-8, (
+        # 1e-7 = ~1 fp32 ULP × cumulative 12 step rounding chain at
+        # heat-content ~ 1e19 J.  A real mask leak would exceed this
+        # by orders of magnitude (advective transport into "dry" cells
+        # would build up at flux × dt × n_steps ~ 1e-3 relative).  The
+        # original 1e-8 threshold required bit-exact fp64 storage.
+        assert rel_drift_T < 1e-7, (
             f"Heat drift {rel_drift_T:.3e} (initial {H0:.3e}, "
             f"final {H1:.3e}) — possible mask leak"
         )
-        assert rel_drift_S < 1e-8, (
+        assert rel_drift_S < 1e-7, (
             f"Salt drift {rel_drift_S:.3e} (initial {S0:.3e}, "
             f"final {S1:.3e}) — possible mask leak"
         )

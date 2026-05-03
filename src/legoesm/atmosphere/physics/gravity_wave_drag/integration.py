@@ -37,6 +37,15 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 from legoesm.atmosphere.physics.gravity_wave_drag.rayleigh import rayleigh_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import lindzen_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
@@ -438,16 +447,6 @@ def _make_spectral_pe_gwd(
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         gwd_spectrum_out = None
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import (
-            sh_analysis_3d,
-            sh_analysis_oc2_3d,
-            sh_analysis_dmu_3d,
-        )
-
         fields = grid_fields
         if fields is None:
             fields = spectral_pe_to_grid(state, grid, sigma_coord)

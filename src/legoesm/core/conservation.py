@@ -18,7 +18,6 @@ def _tiny(x=None):
     """Smallest normal float for the given array's dtype (or active accumulate dtype)."""
     if x is not None and hasattr(x, 'dtype'):
         return float(jnp.finfo(x.dtype).tiny)
-    from legoesm.core.precision import _resolve_dtype
     return float(jnp.finfo(_resolve_dtype(None, "accumulate")).tiny)
 # Epsilon for energy fixers: prevents sqrt(0) which has infinite gradient,
 # causing 0*Inf=NaN in the backward pass when jnp.maximum clamps KE_target to 0.
@@ -26,8 +25,13 @@ _EPS_ENERGY = 1e-20
 
 from legoesm import constants
 from legoesm.core.operators import global_integral, _is_distributed
-from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.core.operators_voronoi import kinetic_energy_cell
+from legoesm.core.precision import _resolve_dtype, get_policy
 from legoesm.core.state import ShallowWaterState, HydrostaticState
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.vertical import compute_geopotential
+from legoesm.parallel.reductions import batch_allreduce_mpi, global_sum_mpi
+from legoesm.runtime.backend import is_x64_enabled, supports_float64
 
 
 def _accumulation_dtype():
@@ -38,9 +42,6 @@ def _accumulation_dtype():
     float64 (e.g. Apple Metal) or when JAX x64 mode is disabled, the
     result is clamped to float32 even if the policy requests float64.
     """
-    from legoesm.core.precision import get_policy
-    from legoesm.runtime.backend import supports_float64, is_x64_enabled
-
     target = get_policy().accumulate
     if target == jnp.float64 and not (supports_float64() and is_x64_enabled()):
         return jnp.float32
@@ -91,7 +92,6 @@ def _global_area_sum(
         prod = prod * mask
     local_sum = jnp.sum(prod)
     if _is_distributed():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     return local_sum
 
@@ -125,7 +125,6 @@ def _batch_global_area_sums(
         local_sums.append(jnp.sum(prod))
 
     if _is_distributed():
-        from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     return local_sums
 
@@ -367,7 +366,6 @@ def zero_mean_tendency(
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
         if _is_distributed():
-            from legoesm.parallel.reductions import global_sum_mpi
             level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
         # Broadcast corrections to match tendency shape
@@ -410,7 +408,6 @@ def compute_global_moisture(
     -------
     jax.Array : Scalar global moisture integral [kg].
     """
-    from legoesm import constants
     # Column water vapor: ∫ q_v dp/g = q_v * p_s * dsigma / g
     cwv = jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
     return _global_area_sum(cwv, grid, owned_mask=owned_mask)
@@ -646,9 +643,6 @@ def compute_hydrostatic_energy(
         'potential_energy': ∫ Φ·p_s·dσ·dA / g
         'total_energy': sum of all three
     """
-    from legoesm import constants
-    from legoesm.grids.vertical import compute_geopotential
-
     u = state.u.data
     v = state.v.data
     T = state.T.data
@@ -703,8 +697,6 @@ def compute_nh_energy(
         'potential_energy': ∫ g·z·rho·J·dz·dA
         'total_energy': sum of all three
     """
-    from legoesm import constants
-
     u = state.u.data
     v = state.v.data
     w = state.w.data
@@ -816,7 +808,6 @@ def fix_mass_mpas(state, target_mass, mesh):
     -------
     MPASShallowWaterState
     """
-    from legoesm.core.state import MPASShallowWaterState
     current_mass = global_integral_voronoi(state.h.data, mesh)
     # ``mesh.grid_total_area`` is precomputed at mesh construction —
     # avoid recomputing the global ``jnp.sum(areaCell)`` every step
@@ -849,8 +840,6 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     -------
     MPASShallowWaterState
     """
-    from legoesm.core.operators_voronoi import kinetic_energy_cell
-
     h = state.h.data
     u = state.u.data
     h_s = state.h_s.data

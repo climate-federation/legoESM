@@ -18,7 +18,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo
+from legoesm.grids.halo import pad_halo, synchronize_cgrid_fluxes
 
 _R3 = 1.0 / 3.0
 
@@ -861,7 +861,6 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     # active for the mass-flux callers (`transport_step`).
     dg = cdgrid.base.duogrid
     if apply_cgrid_flux_sync and dg is not None and dg.ng >= 2:
-        from legoesm.grids.halo import synchronize_cgrid_fluxes
         fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
 
     return fx, fy

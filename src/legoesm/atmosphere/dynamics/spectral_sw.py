@@ -45,6 +45,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm import constants
 
 
@@ -248,7 +249,6 @@ class SpectralShallowWaterModel:
             )
 
         # --- Metal detection MUST happen before any float64 computation ---
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True

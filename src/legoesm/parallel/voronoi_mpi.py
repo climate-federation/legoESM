@@ -35,8 +35,10 @@ from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.parallel.voronoi_partition import (
     VoronoiPartition,
-    partition_voronoi_mesh,
     build_local_mesh,
+    partition_cells_geometric,
+    partition_cells_metis,
+    partition_voronoi_mesh,
     scatter_to_local,
 )
 from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
@@ -275,11 +277,9 @@ def initialize_voronoi_mpi(
     n_ranks = comm.Get_size()
 
     # Compute cell ownership on all ranks (deterministic, no communication)
-    from legoesm.parallel.voronoi_partition import partition_cells_geometric
     if method == "geometric":
         cell_owner = partition_cells_geometric(global_mesh, n_ranks)
     else:
-        from legoesm.parallel.voronoi_partition import partition_cells_metis
         cell_owner = partition_cells_metis(global_mesh, n_ranks)
 
     layout = make_voronoi_partition_layout(

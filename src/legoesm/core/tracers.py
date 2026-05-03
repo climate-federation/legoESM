@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.precision import get_policy
+
 
 class TracerInfo(NamedTuple):
     """Metadata for a single tracer species."""
@@ -101,7 +103,6 @@ def init_tracers(
     dict[str, jax.Array]
         Mapping from tracer name to zero-filled array of *shape_3d*.
     """
-    from legoesm.core.precision import get_policy
     _sd = get_policy().storage
     return {info.name: jnp.zeros(shape_3d, dtype=_sd) for info in registry.tracers}
 

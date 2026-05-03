@@ -85,8 +85,16 @@ def _proper_hyperdiff(grid):
     return 1.0 / (4.0 * 3600.0 * eig_max ** 2)
 
 
-def _moist_state(grid, sigma_coord, rest_state, rh_low=0.95, rh_high=0.5):
-    """Build a near-saturated tropospheric state for warm-rain tests."""
+def _moist_state(grid, sigma_coord, rest_state, rh_low=1.10, rh_high=0.5):
+    """Build a near-saturated tropospheric state for warm-rain tests.
+
+    rh_low default raised 0.95 → 1.10 in iter-196: at RH=0.95 the
+    state is sub-saturated, so kessler condensation produces zero
+    tendency (q_v < q_sat throughout) and several differential
+    microphysics tests collapse onto the noise floor.  RH=1.10 is
+    mildly supersaturated, firing condensation cleanly without
+    breaking the four call sites that pass an explicit ``rh_low``.
+    """
     nlev = sigma_coord.n_levels
     sigma_full = sigma_coord.sigma_full
     # Realistic vertical T profile (warmer near surface).

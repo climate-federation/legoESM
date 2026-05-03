@@ -58,6 +58,14 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.semi_implicit import (
+    euler_si_step,
+    leapfrog_si_step,
+    precompute_si_matrices,
+    robert_asselin_filter,
+    ssp_rk3_step_si,
+)
+from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm import constants
 
 _LNPS_MIN = float(jnp.log(100.0))
@@ -987,7 +995,6 @@ class SpectralPrimitiveEquationModel:
             )
 
         # --- Metal detection MUST happen before any float64 computation ---
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True
@@ -1020,8 +1027,6 @@ class SpectralPrimitiveEquationModel:
         """Lazily precompute semi-implicit matrices and refresh when dt changes."""
         if not self.config.semi_implicit:
             return
-
-        from legoesm.timestepping.semi_implicit import precompute_si_matrices
 
         dt_si = float(dt) / float(self.config.si_substeps)
         if self._si_data is None or self._si_dt != dt_si:
@@ -1148,8 +1153,6 @@ class SpectralPrimitiveEquationModel:
 
     def _ensure_si_data_leapfrog(self, dt: float):
         """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""
-        from legoesm.timestepping.semi_implicit import precompute_si_matrices
-
         dt_eff = 2.0 * float(dt)
         if self._si_data_lf is None or self._si_dt_lf != dt_eff:
             self._si_data_lf = precompute_si_matrices(
@@ -1167,7 +1170,6 @@ class SpectralPrimitiveEquationModel:
     def _do_step(self, state, dt, tendency_fn):
         """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge."""
         if self.config.semi_implicit:
-            from legoesm.timestepping.semi_implicit import ssp_rk3_step_si
             n_substeps = int(self.config.si_substeps)
             dt_si = dt / float(n_substeps)
 
@@ -1264,7 +1266,6 @@ class SpectralPrimitiveEquationModel:
             # Robert-Asselin filter on time-n state
             gamma = self.config.robert_asselin_coeff
             if gamma > 0:
-                from legoesm.timestepping.semi_implicit import robert_asselin_filter
                 state_n_filtered, state_np1_filtered = robert_asselin_filter(
                     self._state_prev, state, state_np1, gamma,
                 )
@@ -1298,7 +1299,6 @@ class SpectralPrimitiveEquationModel:
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
-        from legoesm.timestepping.semi_implicit import euler_si_step
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
     @partial(jax.jit, static_argnums=(0, 3, 4))
@@ -1312,7 +1312,6 @@ class SpectralPrimitiveEquationModel:
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
-        from legoesm.timestepping.semi_implicit import leapfrog_si_step
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
@@ -1324,7 +1323,19 @@ class SpectralPrimitiveEquationModel:
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """JIT-compiled inner step (SI matrices already precomputed), optionally with physics."""
+        """JIT-compiled inner step (SI matrices already precomputed), optionally with physics.
+
+        ``dt`` is intentionally a **static** arg.  Iter-211 measured a
+        ~60 % throughput regression on spectral T21 GPU when ``dt`` was
+        made traced (479 → 284 sps with ``--scan-steps=24``): with
+        ``dt`` static the SI matrices, sponge factors and hyperdiff
+        filters constant-fold into the compiled program, but a traced
+        ``dt`` forces a more general program that pays an extra
+        broadcast at every reference.  Until a separate ``dt``-traced
+        path is needed for outer-JIT wrapping (multi-device sharding
+        — currently impossible on this host, see scaling.md §10), keep
+        the fast path.
+        """
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -1461,9 +1472,6 @@ def isothermal_rest_state_spectral(
         values may be ``Field``-wrapped or raw JAX arrays — the dycore
         RHS duck-types both.
     """
-    import jax
-    from legoesm import constants
-
     nlev = sigma_coord.n_levels
     n_sh = grid.n_sh
 

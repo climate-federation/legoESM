@@ -75,12 +75,24 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     smagorinsky_biharmonic_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
     _compute_vertex_mask,
+    compute_face_masks_3d,
+    density_jacobian_pgf_smc03_x,
+    density_jacobian_pgf_smc03_y,
+    partial_cell_pgf_correction_x,
+    partial_cell_pgf_correction_y,
+    pv_flux_al81_partial_cell,
+)
+from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+from legoesm.ocean.advection import (
+    flux_form_vertical_tracer_advection_weno5,
+    flux_form_vertical_tracer_advection_weno7,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
     flux_form_vertical_tracer_advection_tvd as _flux_form_vertical_advection_tvd,
+    compute_centroid_depth,
 )
 
 
@@ -306,8 +318,6 @@ def _weno_zeta_at_u(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
-
     hw = {5: 3, 7: 4}[order]
     n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
     nlev = phi.shape[2]
@@ -385,8 +395,6 @@ def _weno_zeta_at_v(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
-
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1] - 1
     nlev = phi.shape[2]
@@ -460,15 +468,9 @@ def _flux_form_vertical_momentum_advection_weno(
         ``-(F_top - F_bot) / h_u``
     """
     if order == 5:
-        from legoesm.ocean.advection import (
-            flux_form_vertical_tracer_advection_weno5,
-        )
         vert_flux_div = flux_form_vertical_tracer_advection_weno5(
             u, w_half, h_u, dt=0.0)
     elif order == 7:
-        from legoesm.ocean.advection import (
-            flux_form_vertical_tracer_advection_weno7,
-        )
         vert_flux_div = flux_form_vertical_tracer_advection_weno7(
             u, w_half, h_u, dt=0.0)
     else:
@@ -571,8 +573,6 @@ def _weno_cell_to_uface(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
-
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1]
 
@@ -622,8 +622,6 @@ def _weno_cell_to_vface(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
-
     hw = {5: 3, 7: 4}[order]
     n_lat = phi.shape[0]
     nlev = phi.shape[2]
@@ -714,9 +712,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # partial cells with all columns having the same bottom_level,
     # this produces identical results to broadcasting the 2D mask.
     if isinstance(z_coord, OceanPartialCellCoordinate):
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            compute_face_masks_3d,
-        )
         u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active)
     else:
         u_mask_3d = u_mask[..., jnp.newaxis]
@@ -931,10 +926,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     if isinstance(z_coord, OceanPartialCellCoordinate):
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme == "smc03":
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                density_jacobian_pgf_smc03_x,
-                density_jacobian_pgf_smc03_y,
-            )
             # Replace (centered-diff p_prime gradient) + (Adcroft face
             # correction) with the density-Jacobian PGF evaluated at a
             # smooth-in-k face-reference depth.  Same ``rho_prime`` and
@@ -953,11 +944,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             dp_dx = dp_dx_smc.astype(dp_dx.dtype)
             dp_dy = dp_dy_smc.astype(dp_dy.dtype)
         else:
-            from legoesm.ocean.vertical import compute_centroid_depth
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                partial_cell_pgf_correction_x,
-                partial_cell_pgf_correction_y,
-            )
             # Use eta=0 reference for centroid: rho_prime / p_prime above
             # are computed at the J=1, eta=0 reference (line 802 comment).
             # Using live eta here would make the Adcroft correction time-
@@ -1138,9 +1124,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_vortcor_u = q_at_u * Fv_at_u
         diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            pv_flux_al81_partial_cell,
-        )
         vtx_mask_va = _compute_vertex_mask(mask)
         diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
             zeta, h_vtx, h_v, v, h_u, u,

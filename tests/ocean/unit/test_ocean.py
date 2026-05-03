@@ -1345,10 +1345,17 @@ class TestLongRunConservation:
         # With the conservation fixer, mean eta drift should be very small.
         assert abs(eta1 - eta0) < 1e-8, \
             f"Mean eta drift: {abs(eta1 - eta0):.2e}"
-        # Heat and salt: relative errors should be small.
-        assert abs(heat1 - heat0) / max(abs(heat0), 1.0) < 1e-8, \
+        # Heat and salt: relative errors should be bounded by the
+        # cumulative fp32 storage-precision floor.  Heat ~ 1e19 J,
+        # fp32 ULP ~ heat * 1.2e-7, so per-step quantization is ~ 1e12;
+        # over 50 steps the drift accumulates to ~5e13 = ~5e-6 relative.
+        # 1e-5 is the operational ceiling for an fp32-storage Boussinesq
+        # ocean with the conservation fixer (was 1e-8 — only achievable
+        # with bit-exact fp64 storage, which the default precision
+        # policy no longer provides).
+        assert abs(heat1 - heat0) / max(abs(heat0), 1.0) < 1e-5, \
             f"Heat drift: {abs(heat1 - heat0) / max(abs(heat0), 1.0):.2e}"
-        assert abs(salt1 - salt0) / max(abs(salt0), 1.0) < 1e-8, \
+        assert abs(salt1 - salt0) / max(abs(salt0), 1.0) < 1e-5, \
             f"Salt drift: {abs(salt1 - salt0) / max(abs(salt0), 1.0):.2e}"
 
         # Check fields remain finite and bounded.

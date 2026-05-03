@@ -24,11 +24,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
+    OceanPartialCellCoordinate,
     compute_layer_thickness,
+    diagnose_w_from_flux_div,
+    flux_form_vertical_tracer_advection,
+    flux_form_vertical_tracer_advection_tvd,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -36,6 +41,18 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
+    _interp_to_v_points,
+    _upwind_to_u_points,
+    _upwind_to_v_points,
+    _tvd_to_u_points,
+    _tvd_to_v_points,
+)
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    compute_face_masks,
+    compute_face_masks_3d,
+    divergence_cgrid,
+    min_cell_to_uface,
+    min_cell_to_vface,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
@@ -44,6 +61,28 @@ from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
     barotropic_implicit_latlon_cgrid,
 )
 from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
+from legoesm.ocean.physics.combined import make_ocean_physics
+from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+    gm_redi_tracer_tendency_latlon,
+)
+from legoesm.ocean.advection_som import som_advect_tracers
+from legoesm.ocean.advection import (
+    fct_tracer_advection,
+    ppm_to_u_points,
+    ppm_to_v_points,
+    flux_form_vertical_tracer_advection_ppm,
+    dst3_to_u_points,
+    dst3_to_v_points,
+    flux_form_vertical_tracer_advection_dst3,
+    multidim_tracer_advection,
+    weno5_to_u_points,
+    weno5_to_v_points,
+    weno7_to_u_points,
+    weno7_to_v_points,
+    flux_form_vertical_tracer_advection_weno5,
+    flux_form_vertical_tracer_advection_weno7,
+)
+from legoesm.ocean.conservation import ocean_conservation_fixer
 
 
 def _forward_backward_coriolis_3d(
@@ -204,7 +243,6 @@ class LatLonCGridOceanModel:
         self._cfl_checked = False
 
         if self.config.physics is not None:
-            from legoesm.ocean.physics.combined import make_ocean_physics
             self._physics_fn = make_ocean_physics(self.config.physics)
         else:
             self._physics_fn = None
@@ -417,9 +455,6 @@ class LatLonCGridOceanModel:
         # ``sum_k(h_u * u_corrected) == Hu_avg`` to hold to machine
         # precision.  For full cells this reduces to the cell value
         # (bit-exact backwards-compat).
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            min_cell_to_uface, min_cell_to_vface,
-        )
         h_k_pre = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
@@ -517,19 +552,8 @@ class LatLonCGridOceanModel:
         # baroclinic structure) and apply a uniform barotropic correction
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
-            _upwind_to_u_points,
-            _upwind_to_v_points,
-            _tvd_to_u_points,
-            _tvd_to_v_points,
-        )
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-            divergence_cgrid, compute_face_masks_3d,
-            min_cell_to_uface as _min_uface_op,
-            min_cell_to_vface as _min_vface_op,
-        )
-        from legoesm.ocean.vertical import OceanPartialCellCoordinate
+        _min_uface_op = min_cell_to_uface
+        _min_vface_op = min_cell_to_vface
 
         mask = state.land_mask.data
 
@@ -601,12 +625,6 @@ class LatLonCGridOceanModel:
         # The horizontal flux integrates to zero by the 2D divergence theorem.
         # The vertical flux telescopes to surface/bottom (both zero).
         # Total conservation is exact.
-        from legoesm.ocean.vertical import (
-            diagnose_w_from_flux_div,
-            flux_form_vertical_tracer_advection,
-            flux_form_vertical_tracer_advection_tvd,
-        )
-
         h_k_new = compute_layer_thickness(
             state_new.eta.data, state_new.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
@@ -626,9 +644,6 @@ class LatLonCGridOceanModel:
 
         # GM/Redi isopycnal mixing (if configured)
         if self.config.gm_redi is not None:
-            from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
-                gm_redi_tracer_tendency_latlon,
-            )
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
                 self.grid, self.z_coord, self.config.gm_redi,
@@ -645,9 +660,6 @@ class LatLonCGridOceanModel:
             # Advects polynomial sub-cell distributions (mean + 9 moments)
             # via directional sweeps.  Near-zero spurious diapycnal mixing,
             # fully differentiable (no limiter).
-            from legoesm.ocean.advection_som import som_advect_tracers
-            from legoesm.core.field import Field
-
             # Initialise moments: use existing Fields, or create from zeros.
             # Always produce Field output (not None → Field transition) so
             # the pytree structure is stable for jax.lax.scan.
@@ -687,17 +699,12 @@ class LatLonCGridOceanModel:
             if self.config.tracer_advection == "ppm_fct":
                 # PPM + FCT: 4th-order PPM accuracy with Zalesak limiter
                 # for guaranteed monotonicity. Stable at any CFL.
-                from legoesm.ocean.advection import fct_tracer_advection
                 div_hut, vert_flux_div = fct_tracer_advection(
                     tr, mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, self.grid, dt,
                 )
             elif self.config.tracer_advection == "ppm":
                 # Raw PPM (unstable at low CFL — for testing only)
-                from legoesm.ocean.advection import (
-                    ppm_to_u_points, ppm_to_v_points,
-                    flux_form_vertical_tracer_advection_ppm,
-                )
                 tr_u = ppm_to_u_points(tr, mass_flux_u)
                 tr_v = ppm_to_v_points(tr, mass_flux_v)
                 tracer_flux_u = mass_flux_u * tr_u
@@ -708,10 +715,6 @@ class LatLonCGridOceanModel:
             elif self.config.tracer_advection == "dst3":
                 # DST-3 with Sweby limiter, applied independently per
                 # direction. Third-order in space and time, monotone (#210).
-                from legoesm.ocean.advection import (
-                    dst3_to_u_points, dst3_to_v_points,
-                    flux_form_vertical_tracer_advection_dst3,
-                )
                 tr_u = dst3_to_u_points(tr, mass_flux_u, h_u_old, self.grid, dt)
                 tr_v = dst3_to_v_points(tr, mass_flux_v, h_v_old, self.grid, dt)
                 tracer_flux_u = mass_flux_u * tr_u
@@ -722,7 +725,6 @@ class LatLonCGridOceanModel:
             elif self.config.tracer_advection == "dst3_multidim":
                 # DST-3 with multi-dimensional transverse correction.
                 # More accurate at diagonal flows but less robust.
-                from legoesm.ocean.advection import multidim_tracer_advection
                 div_hut, vert_flux_div = multidim_tracer_advection(
                     tr, mass_flux_u, mass_flux_v, w_baro,
                     h_k_old, h_u_old, h_v_old, self.grid, dt,
@@ -731,12 +733,6 @@ class LatLonCGridOceanModel:
                 # WENO-Z high-order reconstruction (Silvestri et al. 2024).
                 # Purely spatial, no CFL dependence. Like PPM but higher
                 # order with ENO oscillation suppression via nonlinear weights.
-                from legoesm.ocean.advection import (
-                    weno5_to_u_points, weno5_to_v_points,
-                    weno7_to_u_points, weno7_to_v_points,
-                    flux_form_vertical_tracer_advection_weno5,
-                    flux_form_vertical_tracer_advection_weno7,
-                )
                 _u_fn, _v_fn, _vert_fn = {
                     "weno5": (weno5_to_u_points, weno5_to_v_points,
                               flux_form_vertical_tracer_advection_weno5),
@@ -823,7 +819,6 @@ class LatLonCGridOceanModel:
 
         # 9. Conservation fixers
         if self.config.use_conservation_fixer:
-            from legoesm.ocean.conservation import ocean_conservation_fixer
             state_new = ocean_conservation_fixer(
                 state_new, state, self.grid, self.z_coord, self.config,
             )
@@ -856,7 +851,6 @@ class LatLonCGridOceanModel:
         land = ~wet
 
         # Face mask consistency: u_mask/v_mask must match land_mask
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
         u_expected, v_expected = compute_face_masks(mask)
         if not (bool(jnp.all(state.u_mask.data == u_expected))
                 and bool(jnp.all(state.v_mask.data == v_expected))):

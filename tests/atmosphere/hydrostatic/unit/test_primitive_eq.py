@@ -783,4 +783,121 @@ class TestMassConservation:
             state = model.step(state, 60.0)
         final_mass = float(global_integral(state.p_s, grid))
         rel_err = abs(final_mass - initial_mass) / abs(initial_mass)
-        assert rel_err < 1e-8, f"Mass drift = {rel_err}"
+        # fp32 ULP floor: the corrected p_s is quantized back to fp32
+        # storage between steps, so cumulative quantization sets a 1e-6
+        # ULP floor on the relative drift (was 1e-8 originally — only
+        # achievable on a bit-exact fp64 storage, which we no longer
+        # have under the default precision policy).
+        assert rel_err < 1e-6, f"Mass drift = {rel_err}"
+
+
+class TestHydrostaticToFV3VectorHalo:
+    """Pin the iter-199 fix: ``hydrostatic_to_fv3`` must use
+    ``pad_halo_vector`` (with cos/sin angle rotation across cube
+    faces), NOT the scalar ``_interp_center_to_corner`` path.  Pre-fix
+    the scalar halo introduced ~70 % distortion on the round-trip and
+    drove a 1009 Pa/step ps imbalance from a balanced JW jet IC.
+    See scaling.md §3 for the audit history.
+    """
+
+    def test_round_trip_preserves_vector_field(self):
+        """``state → hydrostatic_to_fv3 → fv3_to_hydrostatic`` round-trip
+        on the JW BCW IC must preserve cell-centre winds to within ~1
+        m/s (vector-aware halo); the pre-fix scalar halo distorted u
+        by ~20 m/s out of a 28 m/s field at C24."""
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            hydrostatic_to_fv3, fv3_to_hydrostatic,
+        )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+
+        n = 24
+        cs_grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(cs_grid)
+        sigma = create_sigma_coordinate(8)
+        state_cc = baroclinic_wave_init(cs_grid, sigma, perturbed=False)
+        state_fv3 = hydrostatic_to_fv3(state_cc, cdgrid)
+        state_back = fv3_to_hydrostatic(state_fv3, cdgrid)
+
+        u_err = float(jnp.max(jnp.abs(state_back.u.data - state_cc.u.data)))
+        v_err = float(jnp.max(jnp.abs(state_back.v.data - state_cc.v.data)))
+        # Vector-aware halo (post-fix): u_err ≈ 0.32 m/s.  Pre-fix:
+        # ≈ 19.6 m/s (70 % of field).  Threshold of 1 m/s catches a
+        # regression to the scalar-halo path while tolerating the
+        # legitimate centre→corner→centre interpolation roundoff.
+        assert u_err < 1.0, (
+            f"u round-trip distortion {u_err:.2f} m/s — likely a "
+            f"reversion to scalar pad_halo in hydrostatic_to_fv3"
+        )
+        assert v_err < 1.0, (
+            f"v round-trip distortion {v_err:.2f} m/s — likely a "
+            f"reversion to scalar pad_halo in hydrostatic_to_fv3"
+        )
+
+    def test_ic_divergence_is_balanced(self):
+        """The JW jet's analytic state has near-zero horizontal
+        divergence by construction.  After ``hydrostatic_to_fv3``,
+        the C-grid divergence diagnosed from the projected D-grid
+        winds must stay below ~1e-6 s^-1.  Pre-iter-199 the scalar
+        halo produced |div_v|_max = 5.3e-5 s^-1 (146× too high) and
+        drove the BCW blow-up at day 0.35.
+        """
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            hydrostatic_to_fv3,
+        )
+        from legoesm.core.operators_cdgrid import dgrid_to_cgrid, cgrid_divergence
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+
+        n = 24
+        cs_grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(cs_grid)
+        sigma = create_sigma_coordinate(8)
+        state_cc = baroclinic_wave_init(cs_grid, sigma, perturbed=False)
+        state_fv3 = hydrostatic_to_fv3(state_cc, cdgrid)
+        u_c, v_c = dgrid_to_cgrid(state_fv3.u_d.data, state_fv3.v_d.data, cdgrid)
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)
+        max_div = float(jnp.max(jnp.abs(div_v)))
+        # 1e-6 catches regression cleanly: scalar halo gave 5.3e-5,
+        # vector halo gives 3.8e-7; this threshold is 10× safety.
+        assert max_div < 1e-6, (
+            f"|div_v|_max = {max_div:.2e} 1/s on JW IC after "
+            f"hydrostatic_to_fv3 — possible reversion to scalar "
+            f"pad_halo (was 5.3e-5 1/s pre-iter-199)"
+        )
+
+    def test_first_step_ps_balanced(self):
+        """One BCW step from the JW IC must leave ps within ~10 hPa of
+        1000 hPa.  Pre-iter-199 the scalar halo distorted the IC enough
+        to shift ps by 1009 Pa in step 1 (1 % of total field).  The
+        post-fix step-1 swing is ~7 Pa.  Threshold of 100 Pa is the
+        right gate: catches a reversion (which gives 1000+ Pa) without
+        false-positives on legitimate gravity-wave adjustment.
+        """
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
+            hydrostatic_to_fv3, fv3_to_hydrostatic,
+        )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+
+        n = 24
+        cs_grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(cs_grid)
+        sigma = create_sigma_coordinate(8)
+        state_cc = baroclinic_wave_init(cs_grid, sigma, perturbed=False)
+        state_fv3 = hydrostatic_to_fv3(state_cc, cdgrid)
+        # Disable conservation fixer so we measure the raw dycore
+        # imbalance, not the post-step correction.
+        config = CDGridPrimitiveEquationConfig(
+            hyperdiff_coeff=0.0, hyperdiff_ps_coeff=0.0,
+            use_conservation_fixer=False, fix_mass=False,
+            anchor_mass_to_initial=False,
+        )
+        model = CDGridPrimitiveEquationModel(cs_grid, sigma, config)
+        state_fv3 = model.step(state_fv3, 300.0)
+        cc = fv3_to_hydrostatic(state_fv3, cdgrid)
+        ps = cc.p_s.data
+        ps_init = state_cc.p_s.data
+        max_swing = float(jnp.max(jnp.abs(ps - ps_init)))
+        assert max_swing < 100.0, (
+            f"Step-1 ps swing on JW IC: {max_swing:.1f} Pa — possible "
+            f"reversion to scalar pad_halo (was ~1009 Pa pre-iter-199)"
+        )

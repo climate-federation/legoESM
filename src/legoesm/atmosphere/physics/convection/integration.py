@@ -28,11 +28,25 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
+    compute_pressure_velocity,
+    compute_sigma_dot,
     pressure_from_sigma,
 )
 from legoesm import constants
 
 from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.atmosphere.physics._shared import (
+    compute_moisture_convergence,
+    diagnose_grid_w_from_omega,
+    zero_like_tracers,
+)
+from legoesm.core.operators_3d import divergence_3d as _div3_cs
+from legoesm.core.operators_latlon_3d import divergence_3d as _div3_latlon
+from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
@@ -278,21 +292,11 @@ def _make_hydrostatic_convection(
         # Only the cubed-sphere and lat-lon grids ship with a divergence
         # operator we can call here; other grids fall back to zeros.
         if is_w_grid_consumer:
-            from legoesm.grids.vertical import (
-                compute_sigma_dot, compute_pressure_velocity,
-            )
-            from legoesm.atmosphere.physics._shared import (
-                diagnose_grid_w_from_omega,
-            )
             div_grid = None
             if isinstance(grid, CubedSphereGrid):
-                from legoesm.core.operators_3d import divergence_3d as _div3
                 if state.v is not None:
-                    div_grid = _div3(state.u.data, state.v.data, grid)
+                    div_grid = _div3_cs(state.u.data, state.v.data, grid)
             elif hasattr(grid, "dlat") and hasattr(grid, "dlon"):
-                from legoesm.core.operators_latlon_3d import (
-                    divergence_3d as _div3_latlon,
-                )
                 if state.v is not None:
                     div_grid = _div3_latlon(state.u.data, state.v.data, grid)
 
@@ -327,9 +331,7 @@ def _make_hydrostatic_convection(
             and "q_v" in state.tracers
             and state.v is not None
         ):
-            from legoesm.atmosphere.physics._shared import (
-                compute_moisture_convergence as _compute_mc,
-            )
+            _compute_mc = compute_moisture_convergence
             # Tracer values may be Field-wrapped or raw JAX arrays.
             _qv_raw_full = state.tracers["q_v"]
             _qv_grid_full = (
@@ -709,9 +711,7 @@ def _make_nonhydrostatic_convection(
         # saturation-deficit proxy (Tiedtke gates the proxy on
         # ``moisture_convergence is None`` — zero-filling bypassed it).
         if is_mc_consumer and n_tracers > 0:
-            from legoesm.atmosphere.physics._shared import (
-                compute_moisture_convergence as _compute_mc,
-            )
+            _compute_mc = compute_moisture_convergence
             _qv_grid_full = tracers[..., 0]   # (face, n, n, nlev)
             mc_col = _compute_mc(
                 _qv_grid_full, state.u.data, state.v.data, grid,
@@ -919,12 +919,6 @@ def _make_spectral_pe_convection(
             prog_key, prog_init = "a_u", scheme_config.a_u_init
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
-
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -984,12 +978,6 @@ def _make_spectral_pe_convection(
         # convergence/divergence (the wedge of model behavior the
         # ``parcel_perturb_T``-only fallback is blind to).
         if is_w_grid_consumer:
-            from legoesm.grids.vertical import (
-                compute_sigma_dot, compute_pressure_velocity,
-            )
-            from legoesm.atmosphere.physics._shared import (
-                diagnose_grid_w_from_omega,
-            )
             div_grid = fields['div'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
             dsigma = sigma_coord.dsigma
             sigma_top = sigma_coord.sigma_half[0]
@@ -1022,9 +1010,7 @@ def _make_spectral_pe_convection(
             and state.tracers is not None
             and "q_v" in state.tracers
         ):
-            from legoesm.atmosphere.physics._shared import (
-                compute_moisture_convergence as _compute_mc,
-            )
+            _compute_mc = compute_moisture_convergence
             _qv_raw = state.tracers["q_v"]
             _qv_grid = (
                 _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
@@ -1198,7 +1184,6 @@ def _make_spectral_pe_convection(
             # Mirror untouched tracers as zeros so the dycore RHS sees a
             # complete tracer pytree (the orchestrator's accumulation
             # also requires matching keys across modules).
-            from legoesm.atmosphere.physics._shared import zero_like_tracers
             zeros = zero_like_tracers(_state_tracers)
             if zeros is not None:
                 for k, zv in zeros.items():

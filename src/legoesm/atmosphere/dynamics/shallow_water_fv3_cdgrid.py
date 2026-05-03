@@ -41,6 +41,23 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.precision import cast_pytree
+from legoesm.core.conservation import _accumulation_dtype
+from legoesm.core.fv3_sw_core import (
+    _d2a2c_vect,
+    _d_sw5_corner_divergence,
+    fv3_csw_tendencies,
+    fv3_fb_sw_step,
+)
+from legoesm.core.fv_tp_2d import transport_step
+from legoesm.core.fv3_del6_vt_flux import fv3_del6_vorticity_damping
+from legoesm.grids.halo import (
+    CONNECTIVITY,
+    EAST,
+    NORTH,
+    SOUTH,
+    WEST,
+)
 from legoesm import constants
 
 
@@ -626,8 +643,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
         Vertices (shared by 3 faces) are owned by the lowest face index.
         """
-        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
-
         u_d, v_d = state.u_d, state.v_d
         n = self.grid.n
         ca_c = self.cdgrid.cos_angle_corner
@@ -702,7 +717,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self, state: CDGridShallowWaterState, dt: float,
     ) -> CDGridShallowWaterState:
         """Advance one time step using SSP-RK3."""
-        from legoesm.core.precision import cast_pytree
         # Cast state to compute precision at the boundary.
         state_c = cast_pytree(state, None, "compute")
 
@@ -724,7 +738,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
             acc = _accumulation_dtype()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
@@ -821,8 +834,6 @@ class FV3FBShallowWaterModel:
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step using FV3 forward-backward."""
-        from legoesm.core.precision import cast_pytree
-        from legoesm.core.fv3_sw_core import fv3_fb_sw_step
 
         state_c = cast_pytree(state, None, "compute")
 
@@ -865,7 +876,6 @@ class FV3FBShallowWaterModel:
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
             acc = _accumulation_dtype()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
@@ -927,7 +937,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
         if self.config.use_experimental_csw:
@@ -944,7 +953,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 "docs/cubed_sphere_edge_artifacts.md.",
                 stacklevel=2,
             )
-            from legoesm.core.fv3_sw_core import fv3_csw_tendencies
 
             def tendency_fn_csw(s):
                 dh, du, dv = fv3_csw_tendencies(
@@ -1054,8 +1062,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 # Iter-905: split mass+momentum integration.  Mass via
                 # transport_step ONCE outside RK3; momentum via RK3
                 # with h held fixed at the IC throughout the 3 stages.
-                from legoesm.core.fv3_sw_core import _d2a2c_vect
-                from legoesm.core.fv_tp_2d import transport_step
                 _, _, _, _, ut0, vt0 = _d2a2c_vect(
                     state.u_d, state.v_d, self.cdgrid)
                 eff_nord = (min(2, self.config.nord)
@@ -1103,8 +1109,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             # to the Fortran-faithful post-step form to avoid RK3-
             # multiplied damping semantics.
             if self.config.damp_v > 0.0:
-                from legoesm.core.fv3_del6_vt_flux import (
-                    fv3_del6_vorticity_damping)
                 eff_nord_v = (min(2, self.config.nord)
                               if self.config.nord_v < 0
                               else self.config.nord_v)
@@ -1141,8 +1145,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             # matters because Fortran d_sw5 is per-step KE/wind-
             # update structure, not a continuous RK3 tendency."
             if self.config.use_fv3_dsw5_corner_damping:
-                from legoesm.core.fv3_sw_core import (
-                    _d_sw5_corner_divergence, _d2a2c_vect)
                 _EPS = 1e-30
                 ua, va, _, _, _, _ = _d2a2c_vect(
                     state_new.u_d, state_new.v_d, self.cdgrid)
@@ -1172,7 +1174,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
             acc = _accumulation_dtype()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)

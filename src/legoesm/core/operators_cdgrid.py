@@ -28,7 +28,17 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo, pad_halo_4d
+from legoesm.grids.halo import (
+    pad_halo,
+    pad_halo_4d,
+    pad_halo_vector,
+    pad_halo_vector_4d,
+    synchronize_cgrid_fluxes,
+)
+from legoesm.core.operators import laplacian_compact
+from legoesm.core.operators_3d import laplacian_compact_3d
+from legoesm.core.fv_tp_2d import transport_step
+from legoesm.parallel.async_halo import overlapped_halo_compute
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
@@ -425,7 +435,6 @@ def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
     -------
     u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    from legoesm.grids.halo import pad_halo_vector, pad_halo_vector_4d
 
     grid = cdgrid.base
     dg = grid.duogrid
@@ -831,7 +840,6 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     # unconditional sync causes 110x W2 regression).
     dg = cdgrid.base.duogrid
     if dg is not None and dg.ng >= 2:
-        from legoesm.grids.halo import synchronize_cgrid_fluxes
         flux_x, flux_y = synchronize_cgrid_fluxes(flux_x, flux_y, n)
 
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
@@ -1477,10 +1485,8 @@ def _laplacian_dgrid(u_d, cdgrid):
     # native-4D variant on 3D inputs so all levels share one
     # ``pad_halo_4d`` MPI exchange.
     if u_d.ndim == 4:
-        from legoesm.core.operators_3d import laplacian_compact_3d
         lap_a = laplacian_compact_3d(u_cc, cdgrid.base)  # (6, n, n, nlev)
     else:
-        from legoesm.core.operators import laplacian_compact
         lap_a = laplacian_compact(u_cc, cdgrid.base)  # (6, n, n)
 
     # 3. Cell centres -> D-grid: (6, n, n[, nlev]) -> (6, n+1, n+1[, nlev])
@@ -1644,7 +1650,6 @@ def cdgrid_momentum_tendencies(
     # Boundary corners (i=0, n; j=0, n) are left untouched (handled
     # by _extrapolate_boundary_corners); interior corners use on-face data.
     if (A_h > 0 or hyperdiff_coeff > 0) and not is_3d:
-        from legoesm.core.operators import laplacian_compact
         # Geographic-frame diffusion at CELL CENTRES.  Geographic winds
         # are smooth across face boundaries AND at the poles (unlike
         # face-local or geographic at corners).  The D→A averaging kills
@@ -1768,7 +1773,6 @@ def fv3_vorticity(u_d, v_d, cdgrid):
     -------
     vort : jax.Array, shape (6, n+1, n+1)
     """
-    from legoesm.grids.halo import pad_halo_vector
 
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
@@ -1874,7 +1878,6 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
     u_c : jax.Array, shape (6, n+1, n)
     v_c : jax.Array, shape (6, n, n+1)
     """
-    from legoesm.grids.halo import pad_halo_vector
 
     grid = cdgrid.base
     dg = grid.duogrid
@@ -2088,7 +2091,6 @@ def fv3_sw_tendencies(
                 "forwards `dt` automatically when the flag is set; "
                 "non-production callers must do the same.")
         from legoesm.core.fv3_sw_core import _d2a2c_vect
-        from legoesm.core.fv_tp_2d import transport_step
         _, _, _, _, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
         h_new = transport_step(
             h, ut, vt, dt, cdgrid,
@@ -2132,7 +2134,6 @@ def fv3_sw_tendencies(
     # CONSISTENT interpolation errors that cancel in geostrophic balance
     # (tested: D-grid circulation vorticity breaks this cancellation,
     # causing 3x W2 regression despite 4x W5 improvement).
-    from legoesm.grids.halo import pad_halo_vector
     grid = cdgrid.base
     dg = grid.duogrid
     offsets = None if dg is not None else grid.halo_interp_offsets
@@ -2298,7 +2299,6 @@ def fv3_sw_tendencies(
 
     # (i) Biharmonic hyperdiffusion (cell-centre geographic path)
     if hyperdiff_coeff > 0:
-        from legoesm.core.operators import laplacian_compact
         cos_a = jnp.cos(cdgrid.base.angle)
         sin_a = jnp.sin(cdgrid.base.angle)
         ue_cc = cos_a * u_cc - sin_a * v_cc
@@ -2453,7 +2453,6 @@ def _overlapped_interp_center_to_corner(field, cdgrid, masks=None):
     if field.ndim == 3:
         return _interp_center_to_corner(field, cdgrid)
 
-    from legoesm.parallel.async_halo import overlapped_halo_compute
 
     def _stencil_body(f_pad):
         """4-point average on padded (6, n+2, n+2) field -> (6, n+1, n+1)."""
@@ -2487,7 +2486,6 @@ def _overlapped_arakawa_lamb_gradient(B, cdgrid, masks=None):
     if B.ndim == 3:
         return _arakawa_lamb_gradient(B, cdgrid)
 
-    from legoesm.parallel.async_halo import overlapped_halo_compute
 
     c00 = cdgrid.grad_c00
     c01 = cdgrid.grad_c01

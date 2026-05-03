@@ -81,7 +81,16 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.conservation import zero_mean_tendency, _accumulation_dtype
+from legoesm.core.operators_fv_latlon import (
+    fv_gradient_lon_3d,
+    fv_gradient_lat_3d,
+)
+from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
+from legoesm.core.precision import cast_pytree
+from legoesm.grids.halo_latlon import pad_halo_latlon_3d
 from legoesm import constants
+import inspect
 
 
 # ==============================================================================
@@ -340,7 +349,6 @@ def cgrid_latlon_hydrostatic_tendencies(
     # When fix_mass=True the mass fixer already corrects the global integral,
     # and applying both creates a double-correction artifact.
     if config.zero_mean_ps_tendency and not config.fix_mass:
-        from legoesm.core.conservation import zero_mean_tendency
         dp_s_dt = zero_mean_tendency(dp_s_dt, grid)
 
     # --- 10. Vertical advection ---
@@ -394,13 +402,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         # Cell-centered gradient advection (fallback) — 3D-native variants
         # share one halo pad + PPM reconstruction across all levels.
         # Pre-pad T once so both gradient calls share the halo.
-        from legoesm.core.operators_fv_latlon import (
-            fv_gradient_lon_3d, fv_gradient_lat_3d,
-        )
-        from legoesm.grids.halo_latlon import (
-            pad_halo_latlon_3d as _pad_T,
-        )
-        _T_pad_h2 = _pad_T(T, halo=2)
+        _T_pad_h2 = pad_halo_latlon_3d(T, halo=2)
         dT_dx = fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
         dT_dy = fv_gradient_lat_3d(T, grid, padded=_T_pad_h2)
         horiz_adv_T = -(u_c * dT_dx + v_c * dT_dy)
@@ -475,16 +477,10 @@ def cgrid_latlon_hydrostatic_tendencies(
                 flux_stack + tracer_stack * div_dp[..., None]
             ) / (dp[..., None] + 1e-10)
         else:
-            from legoesm.core.operators_fv_latlon import (
-                fv_gradient_lon_3d, fv_gradient_lat_3d,
-            )
-            from legoesm.grids.halo_latlon import (
-                pad_halo_latlon_3d as _pad_q,
-            )
             # Pre-pad the stacked tracer field once so both gradients
             # share the halo pad — saves one redundant pad_halo_latlon_3d
             # call per timestep.
-            _q_pad_h2 = _pad_q(tracer_flat, halo=2)
+            _q_pad_h2 = pad_halo_latlon_3d(tracer_flat, halo=2)
             dq_dx_flat = fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
             dq_dy_flat = fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
             dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
@@ -569,7 +565,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.config = config or CGridLatLonPrimitiveEquationConfig()
 
         # Pole-cell CFL limit: dx_pole is the smallest cell on the grid.
-        from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
         dx_pole = pole_cell_dx(grid)
         self._max_dt = cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1)
 
@@ -597,7 +592,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
     def compute_mass(self, state: CGridLatLonHydrostaticState) -> jax.Array:
         """Compute total mass (for conservation fixer target)."""
-        from legoesm.core.conservation import _accumulation_dtype
         acc = _accumulation_dtype()
         return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
 
@@ -620,7 +614,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         Also unwraps ``(tendencies, aux)`` tuple returns from
         PhysicsModuleProtocol-style callables.
         """
-        import inspect
         sig = inspect.signature(physics_fn)
         n_params = len(sig.parameters)
         if n_params >= 3:
@@ -644,8 +637,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         Physics is evaluated inside each RK stage (matching the CDGrid
         PE contract), not as a post-step Euler update.
         """
-        from legoesm.core.precision import cast_pytree
-
         state_c = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
@@ -728,7 +719,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         # Conservation fixer for mass
         if self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
             acc = _accumulation_dtype()
             area = self.grid.area.astype(acc)
             # ``grid_total_area`` is a precomputed scalar on the grid;

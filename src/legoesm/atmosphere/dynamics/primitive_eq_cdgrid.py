@@ -82,6 +82,25 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.precision import _resolve_dtype, cast_pytree
+from legoesm.core.operators import (
+    global_integral,
+    hyperdiffusion,
+    laplacian_compact,
+)
+from legoesm.core.operators_cdgrid import _overlapped_arakawa_lamb_gradient
+from legoesm.core.conservation import (
+    fix_mass_hydrostatic,
+    fix_mass_hydrostatic_target,
+)
+from legoesm.core.state import HydrostaticTendencies
+from legoesm.grids.halo import (
+    pad_halo_4d as _pad_halo_4d_module,
+    pad_halo_vector,
+    pad_halo_vector_4d,
+)
+from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
 from legoesm import constants
 
 
@@ -234,13 +253,12 @@ def fv3_hydrostatic_tendencies(
     # None pre-pads only when neither backend is active.
     _pe_dg = grid.duogrid
     if _halo_backend == "spmd":
-        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
+        from legoesm.parallel.cubesphere_exchange import _spmd_mesh
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
             zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
-        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
             zeta, B, inv_T, topology=_mpi_topology, duogrid=_pe_dg,
         )
@@ -258,7 +276,6 @@ def fv3_hydrostatic_tendencies(
     # Promote to higher precision for the PGF computation to avoid
     # catastrophic cancellation (large p terms, small gradient).
     # Use result_type to only upcast (never downcast from current dtype).
-    from legoesm.core.precision import _resolve_dtype
     _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
     # ln_ps is 2D — async overlap not beneficial for 2D fields
     ln_ps_hi = ln_ps.astype(_pg_dt)
@@ -298,7 +315,6 @@ def fv3_hydrostatic_tendencies(
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
         if config.use_async_halo and _halo_backend == "mpi":
-            from legoesm.core.operators_cdgrid import _overlapped_arakawa_lamb_gradient
             ddiv_dx, ddiv_dy_perp = _overlapped_arakawa_lamb_gradient(
                 div_v, cdgrid,
             )
@@ -423,7 +439,7 @@ def fv3_hydrostatic_tendencies(
     # SPMD/MPI, packs ln_ps into an existing collective at the cost
     # of ``9*4`` extra bytes per face boundary).
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+    _pad_halo_4d = _pad_halo_4d_module
     # Packed MPI halo now applies duogrid remap (iter-84) so we use it
     # even when duogrid is active.  Non-MPI fallback does per-field pads
     # with duogrid routing preserved.
@@ -443,7 +459,6 @@ def fv3_hydrostatic_tendencies(
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
     if _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
-        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
         if _needs_uv_pad:
             _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
                 T, u_cell, v_cell, ln_ps_3d,
@@ -602,7 +617,6 @@ def fv3_hydrostatic_tendencies(
 
     # Surface pressure hyperdiffusion (cell-centre)
     if config.hyperdiff_ps_coeff > 0:
-        from legoesm.core.operators import hyperdiffusion
         ps_field = Field(data=p_s, name="p_s", dims=("face", "x", "y"),
                          units="Pa", staggering="cell")
         diff_ps = hyperdiffusion(ps_field, grid, config.hyperdiff_ps_coeff)
@@ -756,7 +770,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         if (self.config.use_conservation_fixer and self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
-            from legoesm.core.operators import global_integral
             self._target_mass = global_integral(state.p_s, self.grid)
 
         if isinstance(state, FV3HydrostaticState):
@@ -772,7 +785,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> FV3HydrostaticState:
         """Advance one time step with D-grid prognostic winds."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
 
@@ -833,7 +845,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:
-            from legoesm.core.operators import laplacian_compact
             alpha = self.config.implicit_grav_wave_damping
             lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
             p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
@@ -845,7 +856,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # Conservation fixer (operates on p_s which is at cell centres)
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
-                from legoesm.core.conservation import fix_mass_hydrostatic_target
                 # _target_mass is precomputed in step() outside the JIT boundary.
                 state_h = fv3_to_hydrostatic(state_new, cdgrid)
                 state_h_fixed = fix_mass_hydrostatic_target(
@@ -853,7 +863,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 )
                 state_new = state_new._replace(p_s=state_h_fixed.p_s)
             else:
-                from legoesm.core.conservation import fix_mass_hydrostatic
                 state_h_new = fv3_to_hydrostatic(state_new, cdgrid)
                 state_h_old = fv3_to_hydrostatic(state, cdgrid)
                 state_h_fixed = fix_mass_hydrostatic(
@@ -932,7 +941,6 @@ def cdgrid_hydrostatic_tendencies(
 
     If given a FV3HydrostaticState, delegates directly to fv3_hydrostatic_tendencies.
     """
-    from legoesm.core.state import HydrostaticTendencies
 
     if isinstance(state, FV3HydrostaticState):
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
@@ -993,23 +1001,48 @@ def hydrostatic_to_fv3(
 ) -> FV3HydrostaticState:
     """Convert cell-centre HydrostaticState to FV3 D-grid state.
 
-    Uses centre-to-corner interpolation for the wind components.
-    Batches (u, v) into a single ``_interp_center_to_corner`` call —
-    one halo + 4-point average shared between u and v.
+    Uses **vector**-aware halo exchange + 4-point averaging — the
+    cell-centre ``(u, v)`` are local-east/local-north components, and
+    the local basis rotates across face boundaries.  Scalar
+    ``_interp_center_to_corner`` (which uses scalar ``pad_halo``)
+    averages ``u`` from a face into a neighbouring face's edge
+    without rotating into that face's basis, which leaves a non-zero
+    spurious divergence at every cube edge — initialising the JW
+    baroclinic-wave IC through that path injected ``|div_v| ~ 5e-5
+    s^-1`` at t=0 and produced a 970 Pa surface-pressure shift in
+    one 300 s step.  This was the structural cause of the C24 BCW
+    blow-up at day 0.35 (issue tracked in scaling.md §1.b).
+
+    The shallow-water ``_sw_to_cdgrid`` helper used the correct
+    vector-aware path; this routine now mirrors it.
     """
+
     _u_in = state.u.data
     _v_in = state.v.data
-    _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
-    _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
-    _uv_d_flat = _interp_center_to_corner(
-        _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2), cdgrid,
-    )
-    _uv_d = _uv_d_flat.reshape(
-        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-        _ni_lev, 2,
-    )
-    u_d = _uv_d[..., 0]
-    v_d = _uv_d[..., 1]
+    base = cdgrid.base
+    if _u_in.ndim == 4:
+        u_pad, v_pad = pad_halo_vector_4d(
+            _u_in, _v_in,
+            base.cos_angle, base.sin_angle,
+            base.cos_angle_padded, base.sin_angle_padded,
+            interp_offsets=base.halo_interp_offsets,
+        )
+        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
+                      + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
+                      + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+    else:
+        u_pad, v_pad = pad_halo_vector(
+            _u_in, _v_in,
+            base.cos_angle, base.sin_angle,
+            base.cos_angle_padded, base.sin_angle_padded,
+            interp_offsets=base.halo_interp_offsets,
+        )
+        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
+                      + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
+                      + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+
     return FV3HydrostaticState(
         u_d=state.u.replace(data=u_d, name="u_d"),
         v_d=state.v.replace(data=v_d, name="v_d"),

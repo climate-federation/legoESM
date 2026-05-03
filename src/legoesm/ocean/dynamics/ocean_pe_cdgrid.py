@@ -60,6 +60,10 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
 )
+from legoesm.ocean.dynamics.barotropic import fill_land_cells
+from legoesm.ocean.physics.mixing import laplacian_viscosity_3d, vertical_diffusion
+from legoesm.grids.halo import pad_halo_4d
+from legoesm.core.operators_3d import hyperdiffusion_3d
 
 
 # ==============================================================================
@@ -128,7 +132,6 @@ def ocean_baroclinic_tendencies_cdgrid(
     # of float32 values at face boundaries leaks O(ULP/dx) ≈ 2e-7 Pa/m
     # — a spurious PGF that drives rest-state instability.  Keeping
     # p_prime in float64 reduces the leak by 9 orders of magnitude.
-    from legoesm.ocean.dynamics.barotropic import fill_land_cells
     # ``fill_land_cells`` is ndim-aware: it uses ``pad_halo_4d`` for 4D
     # input so all vertical levels share one MPI halo exchange per pass
     # (instead of nlev separate exchanges under the prior vmap).
@@ -280,7 +283,6 @@ def ocean_baroclinic_tendencies_cdgrid(
 
     horiz_flat = cgrid_tracer_advection_fct(tracer_flat, u_c_b, v_c_b, cdgrid)
     if config.K_h > 0:
-        from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
         horiz_flat = horiz_flat + laplacian_viscosity_3d(
             tracer_flat, grid, config.K_h,
         )
@@ -295,7 +297,6 @@ def ocean_baroclinic_tendencies_cdgrid(
     vert_adv_stack = jax.vmap(_vert_adv, in_axes=-1, out_axes=-1)(tracer_stack)
 
     if config.K_v > 0:
-        from legoesm.ocean.physics.mixing import vertical_diffusion
 
         def _vdiff(q):
             return vertical_diffusion(q, z_coord, J, config.K_v)
@@ -330,14 +331,12 @@ def ocean_baroclinic_tendencies_cdgrid(
         # independent ``pad_halo_4d`` collectives on the same input.
         # Saves 1 MPI message per RHS evaluation when both A_h and
         # hyperdiff_coeff are non-zero — the dominant ocean test config.
-        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc
         _dg_oc = getattr(grid, 'duogrid', None)
         _offsets_oc = None if _dg_oc is not None else grid.halo_interp_offsets
-        vel_masked_pad = _pad_halo_4d_oc(
+        vel_masked_pad = pad_halo_4d(
             vel_masked_flat, interp_offsets=_offsets_oc, duogrid=_dg_oc,
         )
     if config.A_h > 0:
-        from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
         vel_lap_flat = laplacian_viscosity_3d(
             vel_masked_flat, grid, config.A_h, padded=vel_masked_pad,
         )
@@ -345,7 +344,6 @@ def ocean_baroclinic_tendencies_cdgrid(
         du_dt = du_dt + vel_lap[..., 0]
         dv_dt = dv_dt + vel_lap[..., 1]
     if config.A_v > 0:
-        from legoesm.ocean.physics.mixing import vertical_diffusion
 
         def _vdiff_uv(q):
             return vertical_diffusion(q, z_coord, J, config.A_v)
@@ -355,7 +353,6 @@ def ocean_baroclinic_tendencies_cdgrid(
         du_dt = du_dt + vel_vdiff[..., 0]
         dv_dt = dv_dt + vel_vdiff[..., 1]
     if config.hyperdiff_coeff > 0:
-        from legoesm.core.operators_3d import hyperdiffusion_3d
         vel_hyper_flat = hyperdiffusion_3d(
             vel_masked_flat, grid, config.hyperdiff_coeff,
             padded=vel_masked_pad,
