@@ -147,6 +147,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Atm physics gwd output get_policy inline          | 1 inline import in ``make_zero_output`` (called per step) | 1 module-level import |
 | ML channel_packing unpack_ocean_output cleanup    | 1 missed inline import (``SpectralOceanState``) + 1 redundant inline (SH analyses already at module scope) | 1 module-level import + redundant lines removed |
 | Core operators_fv_latlon pad_halo_3d inline       | 2 inline imports (``fv_gradient_lon_3d`` + ``fv_gradient_lat_3d``) | folded into existing module-level halo_latlon import |
+| Core operators_cdgrid 11 inline imports           | 11 per-call inline imports across vorticity, divergence, KE-diffusion, hyperdiff, transport-step, async-halo | 4 new module-level imports + 3 names folded into existing halo block |
 
 ## SPMD-vs-single-device numerical equivalence
 
