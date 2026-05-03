@@ -83,9 +83,13 @@ _GHG_HISTORICAL: dict[int, tuple[float, float, float]] = {
     1850: (284.3, 808.2, 273.0),
     1900: (295.7, 911.0, 275.7),
     1950: (310.7, 1147.0, 289.0),
+    1979: (336.78, 1550.0, 301.0),  # AMIP start year (NOAA Mauna Loa + AGGI)
     1980: (338.7, 1547.0, 301.0),
+    1990: (354.39, 1714.0, 308.0),
     2000: (369.5, 1773.0, 316.0),
-    2014: (397.5, 1834.0, 327.0),
+    2010: (389.85, 1798.0, 323.0),
+    2014: (397.5, 1834.0, 327.0),  # AMIP CMIP6 end year
+    2021: (414.72, 1895.0, 334.5),  # CMIP7 AMIP extension
 }
 
 _GHG_SSP245: dict[int, tuple[float, float, float]] = {
@@ -110,6 +114,10 @@ _GHG_TABLES: dict[str, dict[int, tuple[float, float, float]]] = {
     "historical": _GHG_HISTORICAL,
     "ssp245": _GHG_SSP245,
     "ssp585": _GHG_SSP585,
+    # AMIP shares the historical GHG trajectory: the CMIP6 AMIP protocol
+    # mandates the same time-varying CO2/CH4/N2O as the historical run
+    # (only the SST/SIC are observed rather than coupled).
+    "amip": _GHG_HISTORICAL,
 }
 
 
@@ -155,10 +163,11 @@ def ghg_at_year(
     Linear interpolation between benchmark years; clamped at the edges
     of each scenario's time series.
 
-    For ``"piControl"`` and ``"amip"`` the concentrations are constant
-    (the template's base values).  For ``"1pctCO2"`` the CO2 grows at
-    1 % per year from 284.3 ppmv while CH4 and N2O stay at
-    pre-industrial levels.
+    For ``"piControl"`` the concentrations are constant (the template's
+    base values).  ``"amip"`` shares the ``"historical"`` GHG table so
+    CO2/CH4/N2O follow the CMIP6 historical trajectory (1979-2014).
+    For ``"1pctCO2"`` the CO2 grows at 1 % per year from 284.3 ppmv
+    while CH4 and N2O stay at pre-industrial levels.
 
     Parameters
     ----------
@@ -277,15 +286,18 @@ EXPERIMENT_TEMPLATES: dict[str, ExperimentTemplate] = {
     ),
     "amip": ExperimentTemplate(
         name="amip",
-        description="AMIP simulation with prescribed SST and sea-ice (1979-2014)",
+        description=(
+            "AMIP simulation with prescribed SST and sea-ice (1979-2014). "
+            "GHGs follow the CMIP6 historical trajectory (transient)."
+        ),
         start_year=1979,
         end_year=2014,
         parent_experiment="",
-        forcing_type="fixed",
+        forcing_type="transient",
         variant_label="r1i1p1f1",
-        base_co2_ppmv=348.0,
-        base_ch4_ppbv=1650.0,
-        base_n2o_ppbv=306.0,
+        base_co2_ppmv=336.78,
+        base_ch4_ppbv=1550.0,
+        base_n2o_ppbv=301.0,
     ),
     "1pctCO2": ExperimentTemplate(
         name="1pctCO2",

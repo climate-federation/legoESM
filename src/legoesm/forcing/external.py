@@ -851,6 +851,15 @@ def _interp_vertical(field_plev: jnp.ndarray, plev_src: np.ndarray,
     field_flat = np.asarray(field_plev).reshape(-1, nsrc)
     log_p_tgt_flat = np.asarray(log_p_tgt).reshape(-1, nlev_tgt)
 
+    # Canonicalise to ascending log_p_src.  CMIP6 ozone files (e.g.
+    # ``vmro3_input4MIPs_ozone_*.nc``) ship plev descending (1000→0.1 hPa);
+    # ``np.searchsorted`` requires an ascending xp, otherwise the lerp
+    # silently lands on the wrong bracketing pair (bug surfaced as zero/
+    # near-zero ozone in the synthetic AMIP deck unit test).
+    if nsrc > 1 and log_p_src[0] > log_p_src[-1]:
+        log_p_src = log_p_src[::-1]
+        field_flat = field_flat[:, ::-1]
+
     # Vectorised lerp in log-pressure space.  Replaces the
     # ``for i in range(ncol): np.interp(...)`` loop that scaled
     # ``ncol × n_lev`` Python-level for every forcing update — at
