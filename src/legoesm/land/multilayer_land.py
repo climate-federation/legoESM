@@ -143,16 +143,14 @@ def step_multilayer_land(
     # --- Moisture availability from root-zone water content ---
     # Root-zone weighted beta: integrates moisture stress across layers
     # weighted by root density, so a dry top with wet deeper layers
-    # still permits transpiration.
+    # still permits transpiration.  Numpy broadcasting handles both
+    # ``root_frac`` shapes (``(nlayers,)`` when ``lp is None``,
+    # ``(ncol, nlayers)`` when present); ``root_frac[None, :] * beta_root``
+    # produces the same result as ``root_frac * beta_root`` for the 1D
+    # case so a separate branch is unnecessary.
     w_frac_rz = jnp.clip(
         jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0,
-    )  # (ncol,)  — note: root_frac may be (nlayers,) or (ncol, nlayers)
-    # Handle broadcast: if root_frac is 1D, the sum over axis=-1 on
-    # root_frac[None,:]*beta_root gives the same result.
-    if lp is None:
-        w_frac_rz = jnp.clip(
-            jnp.sum(root_frac[None, :] * beta_root, axis=-1), 0.0, 1.0,
-        )
+    )  # (ncol,)
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac_rz
 
     # --- Stomatal conductance (if enabled) ---
@@ -354,17 +352,16 @@ def step_multilayer_land(
             (theta_new - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
             0.0, 1.0,
         )
-        w_frac_rz_new = jnp.clip(
-            jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0,
-        )
     else:
         beta_root_new = jnp.clip(
             (theta_new - theta_wp) / (theta_fc - theta_wp + 1e-10),
             0.0, 1.0,
         )
-        w_frac_rz_new = jnp.clip(
-            jnp.sum(root_frac[None, :] * beta_root_new, axis=-1), 0.0, 1.0,
-        )
+    # See comment above ``w_frac_rz``: broadcasting handles both
+    # ``root_frac`` shapes uniformly, no per-branch reduction needed.
+    w_frac_rz_new = jnp.clip(
+        jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0,
+    )
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
     beta_new = stomatal_ratio * beta_soil_new
     q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
