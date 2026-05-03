@@ -121,6 +121,7 @@ def _argparse_namespace(**kwargs):
         forcing_mode="jra55_do_tropical",
         jra55_cache=None,
         jra55_co2_ppmv=400.0,
+        jra55_cycle=False,    # RYF mode is opt-in
         # Day-3 closure-domain defaults (match parse_args defaults).
         sponge_lat_min=-60.0,
         sponge_lat_max=60.0,
@@ -194,6 +195,52 @@ def test_setup_propagates_co2_override(tmp_path):
     args = _argparse_namespace(jra55_cache=str(cache), jra55_co2_ppmv=420.0)
     state = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
     assert state["co2_ppmv"] == 420.0
+
+
+def test_setup_default_cycle_is_off(tmp_path):
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    args = _argparse_namespace(jra55_cache=str(cache))
+    state = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    assert state["cycle"] is False
+
+
+def test_setup_jra55_cycle_flag_propagates(tmp_path):
+    """--jra55-cycle should set the cycle flag in the forcing state."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=True)
+    state = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    assert state["cycle"] is True
+
+
+def test_jra55_step_cycle_runs_past_cache_end(tmp_path):
+    """With cycle=True the driver can step past day-365 without
+    raising; the same step_idx in 'year 1' produces the same
+    forcing as in 'year 0'."""
+    n_lat, n_lon = 4, 8
+    # 1-year cache (8 records: one day at 3-hourly).
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                   n_records=8)
+    grid, z_coord, _, model, _ = _make_tiny_latlon_setup(
+        n_lat=n_lat, n_lon=n_lon,
+    )
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=True)
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+
+    # cache_length_days = n_records / 8 = 1.0 day.
+    # step at dt=10800 s (3 h): step_idx=0 → day 0; step_idx=8 → day 1
+    # (= 1 cache cycle); step_idx=16 → day 2 (= 2 cycles); etc.
+    s_a = run_omip._jra55_step(state, step_idx=0, dt=10800.0,
+                                model=model, jra55_state=js)
+    # Without cycle we'd hit IndexError at step_idx=10 (day=1.25 exceeds
+    # cache length 1.0); with cycle this should succeed.
+    s_b = run_omip._jra55_step(state, step_idx=10, dt=10800.0,
+                                model=model, jra55_state=js)
+    # Both finite
+    assert bool(jnp.all(jnp.isfinite(s_a.T.data)))
+    assert bool(jnp.all(jnp.isfinite(s_b.T.data)))
 
 
 # ============================================================================

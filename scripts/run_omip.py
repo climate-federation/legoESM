@@ -114,6 +114,14 @@ def parse_args():
                        "Static atmospheric CO2 [ppmv] for JRA55-do mode "
                        "(default 400 — OMIP-2 protocol holds CO2 constant)."
                    ))
+    p.add_argument("--jra55-cycle", action="store_true",
+                   help=(
+                       "Cycle the JRA55-do cache modulo its length. "
+                       "Use this with a 1-year RYF cache (Stewart 2020) "
+                       "for multi-year repeat-year-forcing runs. Default "
+                       "off (cache must cover the requested run length, "
+                       "e.g. for IAF mode)."
+                   ))
     # Tropical-OMIP sponge / SSS restoring / freeze-cap (Day 3 of Item 4).
     p.add_argument("--sponge-lat-min", type=float, default=-60.0,
                    help="Southern boundary of tropical-OMIP active domain [°].")
@@ -506,6 +514,10 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         "lon_2d": lon_2d,
         "coupler_cfg": coupler_cfg,
         "co2_ppmv": float(args.jra55_co2_ppmv),
+        # Cycle the cache modulo its length when --jra55-cycle is set.
+        # This is the Stewart 2020 RYF path: a single-year cache drives
+        # a multi-year run by replaying the same 12 months.
+        "cycle": bool(getattr(args, "jra55_cycle", False)),
     }
 
     # Sponge layer at 60°S/60°N — uses the existing
@@ -660,6 +672,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
     slc = load_jra55_slice(
         jra55_state["cache_path"], day,
         ref_year=jra55_state["ref_year"],
+        cycle=jra55_state.get("cycle", False),
     )
     atm = jra55_to_atm_surface(
         slc,

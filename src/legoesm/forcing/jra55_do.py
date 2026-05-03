@@ -645,6 +645,8 @@ def load_jra55_slice(
     cache_path: str | Path,
     day: float,
     ref_year: int = 1958,
+    *,
+    cycle: bool = False,
 ) -> JRA55Slice:
     """Load a single JRA55Slice at fractional simulation ``day``.
 
@@ -660,6 +662,11 @@ def load_jra55_slice(
         ``date_to_day(...)`` produces this from a calendar date.
     ref_year : int
         Must match the cache's ``ref_year`` attribute (validated).
+    cycle : bool
+        If True, ``day`` is wrapped modulo the cache length so a
+        single-year cache can drive a multi-year run (the Stewart 2020
+        Repeat Year Forcing path). When False (default), ``day`` past
+        the cache length raises ``IndexError``.
     """
     import xarray as xr
 
@@ -671,7 +678,14 @@ def load_jra55_slice(
         )
 
     n_records = int(ds.attrs["n_records"])
+    if cycle:
+        cache_length_days = n_records / RECORDS_PER_DAY
+        day = day % cache_length_days
     i_lo, i_hi, alpha = _floor_indices_and_alpha(day, ref_year=ref_year)
+    # In cycle mode, also wrap the upper bracket if it overflows so
+    # the linear interp works at the wrap boundary.
+    if cycle and i_hi >= n_records:
+        i_hi = i_hi % n_records
     if i_hi >= n_records:
         raise IndexError(
             f"day={day} (cache slot {i_hi}) exceeds cache length "

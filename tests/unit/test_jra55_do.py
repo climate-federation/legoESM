@@ -364,6 +364,46 @@ def test_load_slice_rejects_out_of_range_day(synthetic_cache):
         load_jra55_slice(cache_path, day=10000.0)
 
 
+# ============================================================================
+# RYF cycling — wrap modulo cache length
+# ============================================================================
+
+def test_load_slice_cycle_wraps_past_cache_end(synthetic_cache):
+    """With cycle=True a 365-day cache repeats every 365 days."""
+    cache_path, _ = synthetic_cache
+    s_year0 = load_jra55_slice(cache_path, day=0.0, cycle=True)
+    s_year1 = load_jra55_slice(cache_path, day=365.0, cycle=True)
+    s_year2 = load_jra55_slice(cache_path, day=730.0, cycle=True)
+    for var in JRA55_VARIABLES:
+        np.testing.assert_array_equal(
+            np.asarray(getattr(s_year0, var)),
+            np.asarray(getattr(s_year1, var)),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(getattr(s_year0, var)),
+            np.asarray(getattr(s_year2, var)),
+        )
+
+
+def test_load_slice_cycle_preserves_seasonal_phase(synthetic_cache):
+    """day=10 in year 0 must equal day=375 in year 1 under cycling
+    (i.e. the same simulation day-of-year)."""
+    cache_path, _ = synthetic_cache
+    a = load_jra55_slice(cache_path, day=10.0, cycle=True)
+    b = load_jra55_slice(cache_path, day=375.0, cycle=True)
+    for var in JRA55_VARIABLES:
+        np.testing.assert_array_equal(
+            np.asarray(getattr(a, var)), np.asarray(getattr(b, var)),
+        )
+
+
+def test_load_slice_no_cycle_still_raises_past_end(synthetic_cache):
+    """The default (cycle=False) behaviour is unchanged."""
+    cache_path, _ = synthetic_cache
+    with pytest.raises(IndexError):
+        load_jra55_slice(cache_path, day=400.0, cycle=False)
+
+
 def test_load_slice_returns_jax_arrays(synthetic_cache):
     cache_path, _ = synthetic_cache
     slc = load_jra55_slice(cache_path, day=0.0)
