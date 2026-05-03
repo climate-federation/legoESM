@@ -113,3 +113,36 @@ def test_deck_runs_and_validates_gaussian_spectral(tmp_path):
     )
     v = _validate(out)
     assert v.returncode == 0, v.stdout
+
+
+def test_deck_runs_and_validates_voronoi_mpas(tmp_path):
+    """Voronoi/MPAS needs a 10× smaller dt than CFL would suggest
+    (Known issue #2 — hidden stability constraint).  Disable
+    turbulence (no edge→cell wind interpolation in the TKE bridge)
+    and pass --dt 60 explicitly."""
+    out = tmp_path / "amip_run"
+    r = _run_deck(
+        out, grid_type="voronoi", discretization="mpas", resolution=4,
+        extra=["--turbulence", "none", "--dt", "60"],
+        timeout=480,
+    )
+    assert r.returncode == 0, (
+        f"deck driver failed (exit={r.returncode}):\n"
+        f"--- stderr (tail) ---\n{r.stderr[-2000:]}"
+    )
+    v = _validate(out)
+    assert v.returncode == 0, v.stdout
+
+
+def test_deck_runs_and_validates_latlon_cgrid(tmp_path):
+    """Lat-lon C-grid uses ``--discretization latlon_cgrid`` after
+    the iter-7 cgrid alias fix."""
+    out = tmp_path / "amip_run"
+    r = _run_deck(out, grid_type="latlon", discretization="latlon_cgrid",
+                   resolution=24)
+    assert r.returncode == 0, (
+        f"deck driver failed (exit={r.returncode}):\n"
+        f"--- stderr (tail) ---\n{r.stderr[-2000:]}"
+    )
+    v = _validate(out)
+    assert v.returncode == 0, v.stdout
