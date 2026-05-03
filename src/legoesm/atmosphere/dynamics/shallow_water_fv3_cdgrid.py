@@ -37,6 +37,13 @@ from legoesm.core.operators_cdgrid import (
     fv3_sw_tendencies,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import (
+    CONNECTIVITY,
+    EAST,
+    NORTH,
+    SOUTH,
+    WEST,
+)
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
     create_cubed_sphere_cdgrid,
@@ -628,8 +635,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
         Vertices (shared by 3 faces) are owned by the lowest face index.
         """
-        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
-
         u_d, v_d = state.u_d, state.v_d
         n = self.grid.n
         ca_c = self.cdgrid.cos_angle_corner
