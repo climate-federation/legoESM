@@ -663,18 +663,22 @@ def compute_hydrostatic_energy(
     # (6, n, n, nlev) and lat-lon (n_lat, n_lon, nlev) state shapes.
     mass_weight = p_s[..., None] * dsigma / g
 
-    # Kinetic energy
-    ke_3d = 0.5 * (u**2 + v**2) * mass_weight
-    ke_col = jnp.sum(ke_3d, axis=-1)
-
-    # Internal energy
-    ie_3d = c_v * T * mass_weight
-    ie_col = jnp.sum(ie_3d, axis=-1)
-
-    # Potential energy
+    # Kinetic + internal + potential energy column reductions all share
+    # the level axis and ``mass_weight``; stack the integrands and reduce
+    # once.  ``mass_weight`` is factored into the stack so each integrand
+    # contributes only its own value field.
     Phi = compute_geopotential(T, p_s, sigma_coord, phis)
-    pe_3d = Phi * mass_weight
-    pe_col = jnp.sum(pe_3d, axis=-1)
+    _ke_intg = 0.5 * (u**2 + v**2)
+    _ie_intg = c_v * T
+    _pe_intg = Phi
+    _col_triple = jnp.sum(
+        jnp.stack([_ke_intg, _ie_intg, _pe_intg], axis=-1)
+        * mass_weight[..., None],
+        axis=-2,
+    )
+    ke_col = _col_triple[..., 0]
+    ie_col = _col_triple[..., 1]
+    pe_col = _col_triple[..., 2]
 
     ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
@@ -729,17 +733,19 @@ def compute_nh_energy(
 
     weight = J[..., None] * dz[None, None, None, :] * rho_total  # (6,n,n,nlev)
 
-    # Kinetic
-    ke_3d = 0.5 * (u**2 + v**2 + w_full**2) * weight
-    ke_col = jnp.sum(ke_3d, axis=-1)
-
-    # Internal
-    ie_3d = c_v * T * weight
-    ie_col = jnp.sum(ie_3d, axis=-1)
-
-    # Potential
-    pe_3d = g * z_full[None, None, None, :] * weight
-    pe_col = jnp.sum(pe_3d, axis=-1)
+    # KE+IE+PE column reductions all share the level axis and
+    # ``weight``; stack the integrands and reduce once.
+    _ke_intg = 0.5 * (u**2 + v**2 + w_full**2)
+    _ie_intg = c_v * T
+    _pe_intg = g * jnp.broadcast_to(z_full[None, None, None, :], T.shape)
+    _col_triple = jnp.sum(
+        jnp.stack([_ke_intg, _ie_intg, _pe_intg], axis=-1)
+        * weight[..., None],
+        axis=-2,
+    )
+    ke_col = _col_triple[..., 0]
+    ie_col = _col_triple[..., 1]
+    pe_col = _col_triple[..., 2]
 
     ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
