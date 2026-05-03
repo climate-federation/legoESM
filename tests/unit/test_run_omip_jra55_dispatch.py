@@ -728,8 +728,10 @@ def test_jra55_step_runs_with_features_disabled(tmp_path):
         args_off, grid, "latlon",
         z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
     )
-    s_full = run_omip._jra55_step(state_init, 0, 300.0, model, js_full)
-    s_off = run_omip._jra55_step(state_init, 0, 300.0, model, js_off)
+    # step_idx=1 so the spinup ramp is nonzero (ramp=0 at step 0
+    # would make both paths identical since tau and sponge are zero).
+    s_full = run_omip._jra55_step(state_init, 1, 300.0, model, js_full)
+    s_off = run_omip._jra55_step(state_init, 1, 300.0, model, js_off)
     # Both finite
     assert bool(jnp.all(jnp.isfinite(s_full.T.data)))
     assert bool(jnp.all(jnp.isfinite(s_off.T.data)))

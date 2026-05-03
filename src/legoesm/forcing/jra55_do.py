@@ -528,7 +528,7 @@ def build_jra55_cache(
         },
     )
 
-    chunks = {"time": min(RECORDS_PER_DAY * NOLEAP_DAYS_PER_YEAR, n_records),
+    chunks = {"time": RECORDS_PER_DAY,  # 1 day of 3-hourly = ~4 MB/var
               "lat": n_dst_lat, "lon": n_dst_lon}
     cache_ds.chunk(chunks).to_zarr(
         str(out), mode="w", consolidated=True,
@@ -714,6 +714,115 @@ def load_jra55_slice(
         fields[var] = jnp.asarray(arr, dtype=jnp.float64)
 
     return JRA55Slice(**fields)
+
+
+def load_jra55_block(
+    cache_path: str | Path,
+    start_day: float,
+    n_steps: int,
+    dt: float,
+    ref_year: int = 1958,
+    *,
+    cycle: bool = False,
+) -> list[JRA55Slice]:
+    """Load *n_steps* consecutive JRA55Slices in one bulk read.
+
+    Opens the Zarr cache **once**, reads a contiguous slab per variable
+    covering all required time indices, then interpolates per-step on
+    the host.  This replaces ``n_steps`` individual
+    :func:`load_jra55_slice` calls (each of which reopens the dataset),
+    eliminating the dominant I/O overhead in the scan-block path.
+
+    Parameters
+    ----------
+    cache_path : str or Path
+        Path to the Zarr cache.
+    start_day : float
+        Fractional simulation day of the first step.
+    n_steps : int
+        Number of consecutive steps to load.
+    dt : float
+        Timestep in seconds.
+    ref_year : int
+        Must match the cache's ``ref_year`` attribute.
+    cycle : bool
+        RYF modulo-cycling mode (see :func:`load_jra55_slice`).
+
+    Returns
+    -------
+    list[JRA55Slice]
+        One slice per step, linearly interpolated between the
+        bracketing 3-hourly records.
+    """
+    import xarray as xr
+
+    ds = xr.open_zarr(str(cache_path), decode_times=False)
+    cache_ref = int(ds.attrs.get("ref_year", ref_year))
+    if cache_ref != ref_year:
+        raise ValueError(
+            f"cache ref_year={cache_ref} does not match request {ref_year}"
+        )
+    n_records = int(ds.attrs["n_records"])
+    cache_length_days = n_records / RECORDS_PER_DAY
+
+    # Compute all (i_lo, i_hi, alpha) pairs upfront.
+    indices: list[tuple[int, int, float]] = []
+    for k in range(n_steps):
+        day = start_day + k * dt / 86400.0
+        if cycle:
+            day = day % cache_length_days
+        i_lo, i_hi, alpha = _floor_indices_and_alpha(day, ref_year=ref_year)
+        if cycle and i_hi >= n_records:
+            i_hi = i_hi % n_records
+        if i_hi >= n_records:
+            raise IndexError(
+                f"day={day} (cache slot {i_hi}) exceeds cache length "
+                f"{n_records}"
+            )
+        indices.append((i_lo, i_hi, alpha))
+
+    # Determine the contiguous range of time indices needed.
+    all_idxs = set()
+    for i_lo, i_hi, _ in indices:
+        all_idxs.add(i_lo)
+        all_idxs.add(i_hi)
+    sorted_idxs = sorted(all_idxs)
+
+    # If indices are contiguous (common case: consecutive steps within
+    # the same day-block), use a single slice read.  Otherwise fall
+    # back to fancy indexing.
+    idx_min, idx_max = sorted_idxs[0], sorted_idxs[-1]
+    contiguous = len(sorted_idxs) == (idx_max - idx_min + 1)
+
+    # Bulk-read each variable once.
+    var_data: dict[str, np.ndarray] = {}
+    idx_to_pos: dict[int, int] = {}
+    for var in JRA55_VARIABLES:
+        if contiguous:
+            slab = ds[var].isel(time=slice(idx_min, idx_max + 1)).values
+            for j, idx in enumerate(range(idx_min, idx_max + 1)):
+                idx_to_pos[idx] = j
+        else:
+            slab = ds[var].isel(time=sorted_idxs).values
+            for j, idx in enumerate(sorted_idxs):
+                idx_to_pos[idx] = j
+        var_data[var] = slab
+
+    # Build per-step slices with linear interpolation.
+    slices: list[JRA55Slice] = []
+    for i_lo, i_hi, alpha in indices:
+        fields: dict[str, jnp.ndarray] = {}
+        for var in JRA55_VARIABLES:
+            lo = var_data[var][idx_to_pos[i_lo]]
+            if alpha == 0.0:
+                arr = lo
+            else:
+                hi = var_data[var][idx_to_pos[i_hi]]
+                arr = (1.0 - alpha) * lo + alpha * hi
+            fields[var] = jnp.asarray(arr, dtype=jnp.float64)
+        slices.append(JRA55Slice(**fields))
+
+    return slices
 
 
 # ---------------------------------------------------------------------------
