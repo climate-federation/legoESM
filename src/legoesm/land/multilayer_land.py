@@ -269,9 +269,11 @@ def step_multilayer_land(
     # Partition evaporation into bare-soil and root-mediated transpiration
     # to avoid double-counting (surface flux_top subtracts bare-soil evap,
     # Richards sink removes root-mediated transpiration).
-    f_veg = jnp.clip(
-        jnp.sum(root_frac[None, :] * beta_root, axis=-1), 0.0, 1.0,
-    )  # (ncol,) vegetation cover proxy
+    # ``f_veg`` and ``weight_sum`` reduce the same ``root_frac * beta_root``
+    # product; compute the column reduction once and reuse it.
+    weight = root_frac[None, :] * beta_root  # (ncol, n_layers)
+    _weight_sum_raw = jnp.sum(weight, axis=-1)  # (ncol,)
+    f_veg = jnp.clip(_weight_sum_raw, 0.0, 1.0)  # vegetation cover proxy
     evap_bare = evap_rate * (1.0 - f_veg)      # bare-soil evaporation
     evap_transp = evap_rate * f_veg             # transpiration (root-mediated)
 
@@ -285,8 +287,7 @@ def step_multilayer_land(
     # the water budget. beta_root weights the distribution but must NOT reduce
     # the total — the surface flux already embedded moisture stress via f_veg.
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w  # m/s
-    weight = root_frac[None, :] * beta_root  # (ncol, n_layers)
-    weight_sum = jnp.sum(weight, axis=-1, keepdims=True)  # (ncol, 1)
+    weight_sum = _weight_sum_raw[..., None]  # (ncol, 1)
     # Safe normalization: when all layers are dry, E_pot_transp ≈ 0 anyway
     weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
