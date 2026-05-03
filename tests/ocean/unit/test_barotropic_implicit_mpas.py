@@ -25,6 +25,7 @@ import pytest
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 jax.config.update("jax_enable_x64", True)
 
+from legoesm.core.field import Field
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.init_mpas import rest_state_mpas_ocean
@@ -299,6 +300,141 @@ def test_implicit_solver_cleaner_than_explicit_substep(state, mesh, z_coord):
         f"explicit = {r_exp:.3e} (any improvement is sufficient at "
         f"level-2 resolution; the 5-yr ico4 run shows the order-of-"
         f"magnitude difference)"
+    )
+
+
+def test_implicit_solver_strong_depth_contrast(state, mesh, z_coord):
+    """P0 of the MPAS topography plan
+    (``docs/ocean_experiments/realistic_geometry_mpas_plan.md``):
+    confirm the implicit-CN Helmholtz operator handles realistic
+    bathymetry depth contrast (~600x, 10m shelves to 6000m abyss
+    on ETOPO ico4) without losing PCG convergence or mass
+    conservation.
+
+    A scalar-mean linearization of the Helmholtz stiffness would
+    misrepresent the gravity-wave timescale on shelves and could
+    badly condition the elliptic solve.  The current implementation
+    builds ``H_e = edge_thickness(eta + H_bathy)`` per edge from
+    per-cell ``H_bathy``, so the stiffness matrix is cell-local;
+    this test exercises that path on a synthetic 600x-contrast
+    bathymetry and asserts both finiteness and mass closure.
+    """
+    nCells = state.H_bathy.data.shape[0]
+    rng = np.random.default_rng(42)
+    log_H = rng.uniform(np.log(10.0), np.log(6000.0), size=nCells)
+    H_synth = jnp.asarray(np.exp(log_H), dtype=state.H_bathy.data.dtype)
+    H_synth = jnp.where(state.land_mask.data > 0.5, H_synth, 4000.0)
+    H_field = Field(
+        data=H_synth, name="H_bathy", dims=("nCells",), units="m",
+    )
+    state_topo = state._replace(H_bathy=H_field)
+
+    cfg = MPASOceanConfig(
+        barotropic_solver="implicit_cn",
+        A_h=1.0e3, A_v=1.0e-3, K_v=1.0e-4,
+        bottom_drag_r=1.1e-3,
+        physics=_make_physics(tau_max=0.05),
+        barotropic_implicit_pcg_tol=1.0e-12,
+        barotropic_implicit_pcg_maxiter=400,
+        min_water_column_m=1.0,
+    )
+    model = MPASOceanModel(mesh, z_coord, cfg)
+
+    area = np.asarray(mesh.areaCell)
+    mask = np.asarray(state_topo.land_mask.data)
+    V0 = float(np.sum(np.asarray(state_topo.eta.data) * area * mask))
+    abs_eta_sum = 1.0e-30
+
+    s = state_topo
+    for k in range(20):
+        s = model.step(s, dt=600.0)
+        assert bool(jnp.all(jnp.isfinite(s.eta.data))), (
+            f"eta non-finite at step {k} under 600x depth contrast"
+        )
+        assert bool(jnp.all(jnp.isfinite(s.u.data))), (
+            f"u non-finite at step {k} under 600x depth contrast"
+        )
+        abs_eta_sum = max(
+            abs_eta_sum,
+            float(np.sum(np.abs(np.asarray(s.eta.data)) * area * mask)),
+        )
+
+    V1 = float(np.sum(np.asarray(s.eta.data) * area * mask))
+    rel_drift = abs(V1 - V0) / abs_eta_sum
+    assert rel_drift < 5.0e-7, (
+        f"Mass drift under 600x depth contrast: {rel_drift:.3e} "
+        f"(reference max |Sum|eta|*A| = {abs_eta_sum:.3e})"
+    )
+
+
+def test_implicit_helmholtz_operator_uses_cell_local_H(mesh):
+    """Direct probe of the implicit Helmholtz operator
+    ``A(eta) = eta - coeff * div(H_e * grad eta)``.
+
+    A scalar-mean linearization would scale the dispersive (div-grad)
+    term identically for any uniform H.  The cell-local
+    implementation reads ``H_e = edge_thickness(H_total)`` per edge,
+    so doubling H must double the magnitude of ``(A - I)(eta)`` for
+    the same eta perturbation.  This is the unambiguous gate that the
+    Helmholtz operator does not collapse H to a global mean.
+    """
+    from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
+        _make_helmholtz,
+    )
+    from legoesm.core.operators_voronoi import edge_thickness
+
+    nCells = mesh.nCells
+    rng = np.random.default_rng(0)
+    eta_pert = jnp.asarray(rng.standard_normal(nCells), dtype=jnp.float64)
+    mask = jnp.ones((nCells,), dtype=jnp.float64)
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    edge_mask = mask[c1] * mask[c2]
+
+    coeff = jnp.asarray(1.0e6, dtype=jnp.float64)
+
+    def dispersive_response(H_value: float) -> jnp.ndarray:
+        H_total = jnp.full((nCells,), H_value, dtype=jnp.float64)
+        H_e = edge_thickness(H_total, mesh)
+        A_op = _make_helmholtz(H_e, coeff, mesh, mask, edge_mask)
+        return A_op(eta_pert) - eta_pert  # = -coeff * div(H_e * grad eta)
+
+    r1 = dispersive_response(1000.0)
+    r2 = dispersive_response(2000.0)
+
+    norm1 = float(jnp.linalg.norm(r1))
+    norm2 = float(jnp.linalg.norm(r2))
+    ratio = norm2 / max(norm1, 1.0e-30)
+
+    # Doubling H must double ||r||.  Tolerance allows for floating-
+    # point noise but excludes any scalar-mean degeneracy (which would
+    # give ratio = 1.0).
+    assert abs(ratio - 2.0) < 1.0e-10, (
+        f"||(A-I) eta|| should scale linearly in uniform H. "
+        f"||r||(H=1000)={norm1:.3e}, ||r||(H=2000)={norm2:.3e}, "
+        f"ratio={ratio:.6f} (expected 2.0)."
+    )
+
+    # Also verify spatial sensitivity to a non-uniform H (impulse on
+    # one cell): the response field should differ from the uniform-H
+    # response in the neighborhood of the impulse, not just globally.
+    H_uniform = jnp.full((nCells,), 1000.0, dtype=jnp.float64)
+    H_perturbed = H_uniform.at[0].set(6000.0)
+    H_e_uniform = edge_thickness(H_uniform, mesh)
+    H_e_perturbed = edge_thickness(H_perturbed, mesh)
+
+    A_uniform = _make_helmholtz(H_e_uniform, coeff, mesh, mask, edge_mask)
+    A_perturbed = _make_helmholtz(H_e_perturbed, coeff, mesh, mask, edge_mask)
+
+    diff = A_perturbed(eta_pert) - A_uniform(eta_pert)
+    diff_np = np.asarray(diff)
+    # The local impulse on cell 0's bathymetry should produce a
+    # response concentrated near cell 0.  The cell-0 entry must be
+    # the largest in magnitude.
+    assert int(np.argmax(np.abs(diff_np))) == 0, (
+        "Perturbing H_bathy on cell 0 should change A(eta) most at "
+        "cell 0; if it instead changes A globally, the operator is "
+        "averaging H across cells."
     )
 
 

@@ -171,6 +171,18 @@ class MPASOceanConfig(NamedTuple):
     # relied on at MPAS call sites.
     C_leith: float = 0.0
     C_leith_modified: bool = False
+    # Pressure-gradient scheme (P3 of MPAS realistic-geometry plan;
+    # see ``docs/ocean_experiments/realistic_geometry_mpas_plan.md``).
+    # ``"centered"`` (default) is the legacy bare-gradient
+    # ``gradient_edge(p'/rho_0)`` — correct for flat-bottom z-star but
+    # produces O(1 cm/s) spurious shelf-break currents on partial cells.
+    # ``"adcroft"`` adds the Adcroft & Campin (2004) face correction
+    # that shifts each cell's pressure to the shallower of the two
+    # cell centroids before differencing — bit-exact zero on full
+    # cells, eliminates the partial-cell PGF cancellation error.
+    # CVT mesh required for ``"adcroft"`` (see helper docstring).
+    # SMC03 ("smc03") density-Jacobian PGF reserved for P3c follow-up.
+    pgf_scheme: str = "centered"
 
 
 class MPASSimpleOceanConfig(NamedTuple):

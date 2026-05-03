@@ -56,10 +56,19 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del4_3d,
     vertex_thickness_3d,
 )
+from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
+    compute_max_level_edge_bot,
+    donor_cell_to_edge,
+    min_cell_to_edge,
+    partial_cell_pgf_correction_edge,
+    vertex_thickness_hybrid,
+)
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate,
     OceanZStarCoordinate,
+    compute_centroid_depth,
     compute_layer_thickness,
     compute_ocean_jacobian,
     diagnose_w_from_flux_div,
@@ -155,7 +164,24 @@ def mpas_ocean_baroclinic_tendencies(
     # pressure gradient, and KE; the baroclinic step handles only the
     # vertical shear (perturbation) component.
     # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:256-266)
-    h_e_3d = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    # ---- Edge thickness on partial cells (P2 of MPAS realistic-geometry plan) ----
+    # On a partial-cell coordinate, two distinct edge thicknesses are
+    # needed (Petersen 2015 §3.4):
+    #   * h_e_3d         — min-rule (MITgcm hFacZ): the flux-closure /
+    #     metric thickness used by the depth-averaging weight, PV-flux
+    #     normalization, vertical momentum advection cross-section, and
+    #     bottom-drag layer thickness.
+    #   * h_e_continuity — donor-cell upstream: the *advected* h in
+    #     ``div(h u)`` for the continuity equation.  A centered average
+    #     leaks thickness from below the seafloor through a step.
+    # On the legacy z-star coordinate every column is a full cell, so
+    # both reduce to the centered mean ``0.5*(h[c1]+h[c2])`` bit-exactly.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        h_e_3d = min_cell_to_edge(h_k, mesh)
+        h_e_continuity = donor_cell_to_edge(h_k, u_3d, mesh)
+    else:
+        h_e_3d = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+        h_e_continuity = h_e_3d
     # Both ``H_e`` and ``u_bar`` numerator share the ``h_e_3d`` weight
     # on the level axis — fuse into one stacked column reduction.
     _u_pair = jnp.sum(jnp.stack([h_e_3d, u_3d * h_e_3d], axis=-1), axis=1)
@@ -167,7 +193,9 @@ def mpas_ocean_baroclinic_tendencies(
     # ---- Thickness flux and vertical velocity ----
     # Compute flux divergence BEFORE momentum tendencies because we need
     # w for vertical advection of momentum (issue #152).
-    thickness_flux = u_3d * h_e_3d * edge_mask[:, jnp.newaxis]  # (nEdges, nlev)
+    # Use ``h_e_continuity`` (donor-cell upstream) for the conservative
+    # mass flux on partial cells; identical to ``h_e_3d`` on z-star.
+    thickness_flux = u_3d * h_e_continuity * edge_mask[:, jnp.newaxis]  # (nEdges, nlev)
     div_flux = divergence_cell_3d(thickness_flux, mesh)  # (nCells, nlev)
 
     # Diagnose w from full-velocity flux divergence (matching latlon pattern:
@@ -183,8 +211,15 @@ def mpas_ocean_baroclinic_tendencies(
     # The depth-mean → F_slow_u for the barotropic solver; the
     # baroclinic perturbation gets the deviation.
 
-    # Kinetic energy from TOTAL velocity
-    ke = kinetic_energy_cell_3d(u_3d, mesh)  # (nCells, nlev)
+    # Kinetic energy from TOTAL velocity.  Multiply by edge_mask first
+    # (defense-in-depth per the ocean-modeling audit) so dry-edge u
+    # contributions are zeroed out before squaring; suppresses spurious
+    # coastal Kelvin-wave ringing if upstream code lets nonzero u into
+    # a dry edge.  edge_mask is 0 or 1 → the multiplication is a no-op
+    # on flat-bottom z-star where dry edges already carry u=0.
+    ke = kinetic_energy_cell_3d(
+        u_3d * edge_mask[:, jnp.newaxis], mesh,
+    )  # (nCells, nlev)
 
     # Bernoulli function: KE(u) + p'/rho_0
     bernoulli = ke + p_prime / rho_0  # (nCells, nlev)
@@ -219,6 +254,34 @@ def mpas_ocean_baroclinic_tendencies(
         grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
         _tracer_grad_flat_pre = None
 
+    # ---- Adcroft-Campin partial-cell PGF correction (P3) ----
+    # On a partial-cell coordinate with ``cfg.pgf_scheme = "adcroft"``,
+    # add the Adcroft & Campin (2004) face correction that shifts each
+    # cell's pressure to the shallower face-reference depth before
+    # differencing.  Eliminates the partial-cell-vs-full PGF
+    # cancellation error (O(1 cm/s) spurious shelf-break currents per
+    # the ocean-modeling audit).  Bit-exact zero on full cells, so the
+    # legacy z-star path is unaffected even when ``pgf_scheme="adcroft"``.
+    # Compute centroid_depth at the eta=0 reference (matching the
+    # rho_prime / p_prime reference; see ``ocean_pe_latlon_cgrid.py:961``
+    # for the rationale — using live eta breaks the rest-state
+    # machine-zero claim once eta evolves).
+    pgf_scheme = getattr(config, "pgf_scheme", "centered")
+    if pgf_scheme == "adcroft" and isinstance(z_coord, OceanPartialCellCoordinate):
+        centroid_depth = compute_centroid_depth(
+            jnp.zeros_like(eta), H_bathy, z_coord,
+        )
+        ac_correction = partial_cell_pgf_correction_edge(
+            centroid_depth, rho_prime, mesh, g, rho_0,
+        )
+        grad_B = grad_B + ac_correction
+    elif pgf_scheme not in ("centered", "adcroft"):
+        # SMC03 reserved for P3c follow-up.
+        raise NotImplementedError(
+            f"pgf_scheme={pgf_scheme!r} not implemented yet "
+            f"(supported: 'centered', 'adcroft')",
+        )
+
     # PV flux: RELATIVE vorticity only, q = ζ(u)/h. Planetary Coriolis is
     # applied separately (a) as online f·v_t(u_bar) in the barotropic
     # substep and (b) as a forward-backward Matsuno correction on the
@@ -226,10 +289,30 @@ def mpas_ocean_baroclinic_tendencies(
     # C-grid pattern and sidesteps the frozen-Coriolis instability that
     # follows from carrying planetary Coriolis in the baroclinic-step
     # depth-mean forcing (τ ~ 1/f ≈ 0.2 days at mid-latitudes; see #160).
+    #
+    # P4 of MPAS realistic-geometry plan: on partial-cell coordinates,
+    # use the hybrid vertex thickness (active-renormalized kite-area
+    # mean in the interior, min-over-active fallback at coasts) for
+    # the q = ζ/h_v normalization.  Pure kite-mean lets a thin partial
+    # vertex transmit O(1) PV flux from a deep neighbor and drive
+    # spurious coastal currents (per the dycore audit).  The
+    # downstream ``du_dt_full * edge_mask`` already zeros the
+    # perimeter contribution from edges with one dry cell, so we do
+    # NOT additionally mask the Thuburn tangential reconstruction
+    # (per audit recommendation; keeps the discrete summation-by-
+    # parts identity intact on the wet sub-mesh).  Default
+    # ``pv_scheme="enstrophy"`` (already in MPASOceanConfig) is the
+    # right choice for realistic bathymetry per the audit.
     zero_f = jnp.zeros_like(mesh.fVertex)
-    q_relative = potential_vorticity_vertex_3d(
-        u_3d, h_k, zero_f, mesh,
-    )  # (nVertices, nlev); equals ζ/h_v
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        zeta = curl_vertex_3d(u_3d, mesh)
+        h_v_hybrid = vertex_thickness_hybrid(h_k, mesh)
+        h_v_safe = jnp.maximum(h_v_hybrid, 1.0e-10)
+        q_relative = (zeta + zero_f[:, None]) / h_v_safe
+    else:
+        q_relative = potential_vorticity_vertex_3d(
+            u_3d, h_k, zero_f, mesh,
+        )  # (nVertices, nlev); equals ζ/h_v_kite
 
     # APVM (Anticipated Potential Vorticity Method, Sadourny & Basdevant
     # 1985; Ringler et al. 2010) upstream-biases q by dt_apvm/2 to damp
@@ -320,10 +403,46 @@ def mpas_ocean_baroclinic_tendencies(
     # sees the total flow.  Applied before F_slow_u computation so the
     # depth-averaged drag enters the barotropic solver via slow forcing.
     # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
+    #
+    # On partial-cell coordinates the ocean floor sits at the per-edge
+    # bottom level ``maxLevelEdgeBot = min(bot[c1], bot[c2])``, which
+    # generally differs from ``nlev-1``.  Applying drag at level
+    # ``nlev-1`` unconditionally silently skips drag on every edge
+    # whose true bottom is shallower (h_e at nlev-1 is 0 there → the
+    # 1e-10 floor masks the divide and the drag tendency is ~0). P3.5
+    # of the realistic-geometry plan: scatter the drag to each edge's
+    # actual bottom level via a one-hot expansion.
     if config.bottom_drag_r > 0:
-        dz_bot_e = jnp.maximum(h_e_3d[:, -1], 1e-10)
-        du_dt_full = du_dt_full.at[:, -1].add(
-            -config.bottom_drag_r * u_3d[:, -1] / dz_bot_e * edge_mask)
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            bot_e = compute_max_level_edge_bot(z_coord.bottom_level, mesh)
+            # Edges with at least one dry neighbor have bot_e < 0 (since
+            # dry cells have bottom_level = -1); mask via valid_edge below.
+            bot_e_safe = jnp.maximum(bot_e, 0)
+            nlev_u = u_3d.shape[1]
+            is_bot = (
+                jnp.arange(nlev_u, dtype=bot_e.dtype)[None, :]
+                == bot_e_safe[:, None]
+            )  # (nEdges, nlev) bool, exactly one True per edge
+            valid_edge = (bot_e >= 0) & (edge_mask > 0.5)
+            valid_edge_dt = valid_edge.astype(u_3d.dtype)
+            h_at_bot = jnp.sum(
+                jnp.where(is_bot, h_e_3d, 0.0), axis=1,
+            )
+            u_at_bot = jnp.sum(
+                jnp.where(is_bot, u_3d, 0.0), axis=1,
+            )
+            dz_bot_e = jnp.maximum(h_at_bot, 1.0e-10)
+            drag_at_bot = (
+                -config.bottom_drag_r * u_at_bot / dz_bot_e * valid_edge_dt
+            )
+            du_dt_full = du_dt_full + (
+                drag_at_bot[:, None] * is_bot.astype(du_dt_full.dtype)
+            )
+        else:
+            # Legacy z-star: every column has a full bottom cell at nlev-1.
+            dz_bot_e = jnp.maximum(h_e_3d[:, -1], 1e-10)
+            du_dt_full = du_dt_full.at[:, -1].add(
+                -config.bottom_drag_r * u_3d[:, -1] / dz_bot_e * edge_mask)
 
     # Depth-mean → slow forcing for barotropic solver.
     # du_dt_full now carries only (PGF + relative-vorticity PV flux +

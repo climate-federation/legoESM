@@ -56,6 +56,7 @@ def rest_state_mpas_ocean(
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
+    bathymetry=None,
 ) -> MPASOceanState:
     """Create a rest-state initial condition on Voronoi mesh.
 
@@ -73,9 +74,18 @@ def rest_state_mpas_ocean(
     S_uniform : float
         Uniform salinity [PSU].
     H_max : float
-        Ocean depth [m].
+        Ocean depth [m]. Used by the idealized bathymetry path.
     land_lat_threshold : float
-        Land above this latitude [deg].
+        Land above this latitude [deg]. Used by the idealized
+        bathymetry path.
+    bathymetry : BathymetryConfig or None, optional
+        Realistic bathymetry config. When provided with
+        ``source="file"``, ``H_bathy`` and ``land_mask`` are loaded
+        from a NetCDF file (ETOPO/GEBCO style) via
+        :func:`load_bathymetry_mpas` instead of the idealized path.
+        ``H_max``/``land_lat_threshold`` are ignored in that case.
+        Default ``None`` keeps the idealized behavior for backwards
+        compatibility.
 
     Returns
     -------
@@ -85,7 +95,17 @@ def rest_state_mpas_ocean(
     nEdges = mesh.nEdges
     nlev = z_coord.n_levels
 
-    H_bathy, land_mask = idealized_bathymetry_mpas(mesh, H_max, land_lat_threshold)
+    use_realistic = (
+        bathymetry is not None and getattr(bathymetry, "source", None) == "file"
+    )
+    if use_realistic:
+        # Lazy import to avoid pulling xarray into idealized-only callers.
+        from legoesm.ocean.bathymetry import load_bathymetry_mpas
+        H_bathy, land_mask = load_bathymetry_mpas(mesh, bathymetry)
+    else:
+        H_bathy, land_mask = idealized_bathymetry_mpas(
+            mesh, H_max, land_lat_threshold,
+        )
 
     dtype = get_policy().storage
 
