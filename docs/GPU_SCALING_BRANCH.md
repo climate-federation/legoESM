@@ -107,6 +107,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Atmosphere tracer_transport pad_halo_4d inline    | 1 inline import per call               | 1 module-level import |
 | Convection physics_fn spectral_pe + gaussian inline | 4 inline imports per call             | 4 module-level imports |
 | Turbulence physics_fn spectral_pe + gaussian inline | 5 inline imports per call             | 5 module-level imports |
+| NH compressible-euler cdgrid pad_halo_4d (×2)      | 2 inline imports per RHS               | 1 module-level import |
+| NH compressible-euler + spectral-NH thomas_solve   | 2 inline imports per acoustic substep  | 2 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
