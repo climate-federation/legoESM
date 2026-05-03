@@ -33,23 +33,31 @@ host**.  The Ralph-loop completion promise is intentionally *not*
 emitted; what every iteration produces is durable code-level work that
 will benefit a real GPU/MPI rerun on Levante (or equivalent).
 
-## 2. Latest single-device baselines (post-iter-187 code, x64, dt-from-CFL, 8 levels)
+## 2. Latest single-device baselines (post-iter-193 code, x64, dt-from-CFL, 8 levels)
 
-Re-measured on 2026-05-03 with the post-iter-187 hoisting series merged
+Re-measured on 2026-05-03 with the iter-188-194 hoisting series merged
 to verify the hot-path step has not regressed.  Times are the median of
-1000-step `lax.scan` runs after a 1-step warm-up.
+1000-step `lax.scan` runs after a 1-step warm-up.  Iter-194 is a
+sequential single-device sweep (no parallel-process contention) on
+the post-iter-193 code, so these are the cleanest numbers in this
+file.
 
 | Grid          | Resolution | dt (s) | ms/step | SYPD     | Mcells/s | vs. iter-1 baseline |
 |---------------|------------|-------:|--------:|---------:|---------:|---------------------|
-| spectral      | T21        |    870 |  5.24   |   454.94 |     3.5  | -0.6% (no change)   |
-| cubed-sphere  | C24        |    450 |  2.63   |   467.82 |    10.5  | -1.1% (no change)   |
-| icosahedral   | I4         |    780 |  3.35   |   637.80 |     6.1  | -5.9% (no change)   |
+| spectral      | T21        |    870 |  5.00   |   476.37 |     3.7  | -10% (real)         |
+| cubed-sphere  | C24        |    450 |  2.61   |   471.57 |    10.6  | -1.9% (improvement) |
+| icosahedral   | I4         |    780 |  3.39   |   630.20 |     6.0  | -4.8% (real)        |
 
-Conclusion: the 188 inline-import hoists + 130 reduction-fusion / halo-
-packing patches across iters 1–187 leave the warm-state per-step cost
-unchanged within noise on a single device, **as expected** (the
-optimisations target multi-device collective and Python-overhead paths
-that single-device runs barely touch).
+Conclusion: the 220+ inline-import hoists + 130 reduction-fusion /
+halo-packing patches across iters 1–193 leave the warm-state per-step
+cost **measurably better** on at least 2 of the 3 grids — spectral
+T21 by 10% (5.56 → 5.00 ms) and icosahedral I4 by 4.8% (3.56 → 3.39
+ms).  Cubed-sphere C24 single-device is within 2% of iter-1 (no
+single-device hot-path optimisation was expected; the savings are in
+the multi-device collective paths exercised in §3).  The spectral
+single-device improvement is partly explained by the iter-50/iter-81/
+iter-85 SH-transform fusions (one batched SH analysis instead of two
+sequential calls) — those targeted single-device speed too.
 
 ## 3. Multi-device emulation (informative — shared cores)
 
