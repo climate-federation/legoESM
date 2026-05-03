@@ -63,6 +63,7 @@ from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
+    CompressibleEulerConfig,
     compute_exner_perturbation,
     _sponge_profile,
     acoustic_substeps,
@@ -564,7 +565,6 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_jitted(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
         """JIT-compiled step core."""
-        from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
             n_acoustic_substeps=self.config.n_acoustic_substeps,
