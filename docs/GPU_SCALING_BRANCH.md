@@ -155,6 +155,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Core tracers get_policy inline                    | 1 inline import in ``zero_tracers_dict`` | 1 module-level import |
 | Diagnostics energy_budget column_water_vapor      | 1 inline import in ``MoistureBudgetTracker.update`` | 1 module-level import |
 | Training losses sh_analysis_3d                    | 1 inline import in ``carry_spectral_loss`` (per loss eval) | 1 module-level import |
+| Driver diagnostics 5 inline imports               | ``MoistureBudgetTracker`` / ``MonthlyAccumulator`` (×2) / ``blend_surface_temperature`` per call + 2 redundant ``day_to_calendar`` / ``CMIP6_PLEV19`` reimports | 3 module-level imports + 2 redundant lines removed |
 
 ## SPMD-vs-single-device numerical equivalence
 
