@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.coupler.bulk_flux import compute_most_fluxes
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
@@ -51,7 +52,6 @@ def bulk_formula_surface_forcing(
     Q_lw_up = cfg.emissivity * constants.sigma_sb * T_s ** 4
 
     if cfg.bulk_scheme in ("coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         # Wind is zonal only (prescribed), zero meridional
         u_a = jnp.full_like(T_s, cfg.U_a, dtype=dtype)
         v_a = jnp.zeros_like(T_s)
