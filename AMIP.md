@@ -216,6 +216,33 @@ radiation equilibrium with prescribed SST=292.6 K — physically expected.
   test after the deck driver change.
 - All 81 AMIP-related unit tests still pass.
 
+### Iter 10 — Voronoi/MPAS works at dt=60 s — 8/8 grids pass
+
+Empirical observation: the MPAS hydrostatic dycore on a level-4 SCVT
+mesh is unstable at the default dt=600 s **despite the CFL diagnostic
+reporting CFL≈0.09 (~10× margin)**.  Reducing dt to 60 s holds for at
+least 1 day with the analytical AMIP IC.  This is a hidden CFL
+constraint — likely tied to the MPAS PV-flux closure or the
+hydrostatic adjustment cadence — and is tracked in "Known issues" #2.
+
+Update `scripts/smoke_test_amip_all_grids.py` to pass `--dt 60` for
+the voronoi case.
+
+**Final validation matrix (1-day analytical AMIP runs, post-iter-10)**
+
+| label             | grid_type      | discretization  | dt   | result | T_atm@1d  |
+|-------------------|----------------|-----------------|-----:|--------|----------:|
+| cubed_sphere      | cubed_sphere   | centered        |  450 | ✅ | 297.5 K  |
+| cubed_sphere_fv   | cubed_sphere   | finite_volume   |  600 | ✅ | 297.5 K  |
+| cubed_sphere_cd   | cubed_sphere   | cdgrid          |  600 | ✅ | 297.5 K  |
+| latlon            | latlon         | centered        |  600 | ✅ | 296.9 K  |
+| latlon_fv         | latlon         | finite_volume   |  600 | ✅ | 296.9 K  |
+| latlon_cgrid      | latlon         | latlon_cgrid    |  600 | ✅ | 296.9 K  |
+| gaussian          | gaussian       | spectral        |  600 | ✅ | 296.7 K  |
+| voronoi           | voronoi        | mpas            |   60 | ✅ | 297.7 K  |
+
+**8/8 cases pass.**
+
 ### Iter 9 — Interannual ozone option + non-cyclic dispatch tests
 
 `scripts/generate_amip_forcing.py:make_ozone_clim` now optionally writes
@@ -309,7 +336,7 @@ for legitimate runs.  15/15 deck tests pass.
 | # | Issue | Status | Workaround |
 |---|-------|--------|------------|
 | 1 | **Kessler microphysics blows up** (NaN winds day ~2) in the integrated AMIP path with C12-C16 / dt=600s, even with `--convection none` and no clouds.  Bug doesn't surface in the dedicated unit tests.  Latent-heating tendency from the Sigmoid saturation adjustment may interact poorly with the dycore Euler stepping.  | OPEN | Use `--microphysics sundqvist` (now the deck default). |
-| 2 | **Voronoi/MPAS dycore blows up at day 1** even with `--convection none --clouds none --microphysics none --turbulence none --radiation gray` and the analytical AMIP IC (T=300K, RH=0.7, prescribed SST).  Pre-existing — same blow-up surfaces with the dycore alone, no AMIP forcing involved. | OPEN | Skip the voronoi grid in AMIP runs until the MPAS dycore stability fix lands. |
+| 2 | **MPAS dycore on Voronoi has a hidden CFL constraint** — at level-4 SCVT (n=2562) the run blows up at the default dt=600 s despite the CFL diagnostic reporting 0.09.  Reducing to dt=60 s makes the run stable for at least 1 day.  The CFL diagnostic and the actual stability bound disagree by ~10×; root cause likely the PV-flux closure or hydrostatic adjustment cadence.  Pre-existing. | PARTIAL | Pass `--dt 60` for voronoi runs (smoke test now does this).  Long-term fix: tighten the MPAS CFL diagnostic to match actual stability. |
 | 3 | **MPAS turbulence integration** raises `NotImplementedError` (TKE expects cell-centered winds; MPAS stores edge-normal winds — edge→cell interpolation is missing). | OPEN | Pass `--turbulence none` for voronoi runs (smoke-test now does this). |
 | 4 | **Spectral / MPAS run paths bypass `DiagnosticCollector`** so detailed diagnostics (zonal monthly means, energy/moisture residuals, vertical profiles, snapshots) are unavailable on these grids — the lightweight timeseries fix only writes scalar global means. | OPEN, low-priority | Production AMIP runs use cubed_sphere/latlon. |
 | 5 | **Synthetic forcing files are not bit-exact CMIP6** — they reproduce the schemas and physical bounds but not the actual observed time series (not feasible without network access). | EXPECTED | Replace with real input4MIPs files when running for science (drop them under `forcing_amip/` with the canonical names; `run_amip_cmip6_deck.py` will pick them up). |
