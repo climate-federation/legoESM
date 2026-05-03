@@ -280,11 +280,17 @@ def main() -> None:
     plt = _try_imports()
 
     # ------------------- strong scaling datasets --------------------
+    # Prefer iter-188 fresh measurements (post-iter-187 hoisting) when
+    # they exist; fall back to earlier sweeps otherwise so the plot
+    # remains comparable across iterations.
     strong_paths = {
-        "cubed-sphere C24": _latest_csv(Path("results/scaling_iter58/cs")),
+        "cubed-sphere C24 (iter-188)": _latest_csv(Path("results/scaling_iter188_cs")),
+        "cubed-sphere C24 (iter-58)": _latest_csv(Path("results/scaling_iter58/cs")),
         "cubed-sphere C48": _latest_csv(Path("results/scaling_iter49/cs_c48")),
-        "spectral T21": _latest_csv(Path("results/scaling_iter49/spec")),
-        "icosahedral L4": _latest_csv(Path("results/scaling_iter49/ico")),
+        "spectral T21 (iter-188)": _latest_csv(Path("results/scaling_iter188_spec")),
+        "spectral T21 (iter-49)": _latest_csv(Path("results/scaling_iter49/spec")),
+        "icosahedral L4 (iter-188)": _latest_csv(Path("results/scaling_iter188_ico")),
+        "icosahedral L4 (iter-49)": _latest_csv(Path("results/scaling_iter49/ico")),
     }
     strong_datasets: dict[str, list[StrongRow]] = {}
     for label, p in strong_paths.items():
