@@ -12,6 +12,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.precision import get_policy
+
 
 class GWDOutput(NamedTuple):
     """Output from a gravity wave drag scheme (backend-agnostic).
@@ -40,7 +42,6 @@ class GWDOutput(NamedTuple):
 def make_zero_output(ncol: int, nlev: int, dtype=None) -> GWDOutput:
     """Create a zero-valued GWDOutput for the given dimensions."""
     if dtype is None:
-        from legoesm.core.precision import get_policy
         dtype = get_policy().storage
     z = jnp.zeros((ncol, nlev), dtype=dtype)
     return GWDOutput(
