@@ -69,8 +69,12 @@ def first_baroclinic_deformation_radius(
     # surface and bottom.  Using N_bar * H_col extrapolates N to the
     # boundaries — matches the Visbeck (1997) Rossby-radius convention
     # in compute_visbeck_kappa_gm().
-    w_total = jnp.sum(dz_half, axis=-1)
-    N_bar = jnp.sum(N * dz_half, axis=-1) / jnp.maximum(w_total, 1e-30)
+    # ``w_total`` and the ``N_bar`` numerator share the ``dz_half``
+    # weight on the same axis — fuse into one stacked reduction.
+    _stack = jnp.stack([jnp.ones_like(N), N], axis=-1) * dz_half[..., None]
+    _col = jnp.sum(_stack, axis=-2)
+    w_total = _col[..., 0]
+    N_bar = _col[..., 1] / jnp.maximum(w_total, 1e-30)
     H_col = jnp.sum(dz_actual, axis=-1)
 
     f_safe = jnp.maximum(jnp.abs(f_coriolis), f_min)
