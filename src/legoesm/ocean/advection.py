@@ -22,6 +22,7 @@ where:
 
 import jax.numpy as jnp
 
+from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
 
 
@@ -936,8 +937,6 @@ def _weno_to_u_points(
     f_u : array, shape (n_lat, n_lon+1, nlev)
         WENO face values at u-points.
     """
-    from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
-
     weno_fn = {5: weno5_z, 7: weno7_z}[order]
     hw = {5: 3, 7: 4}[order]
     n_lon = f.shape[1]
@@ -980,8 +979,6 @@ def _weno_to_v_points(
     f_v : array, shape (n_lat+1, n_lon, nlev)
         WENO face values at v-points. Zero at pole boundaries.
     """
-    from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
-
     weno_fn = {5: weno5_z, 7: weno7_z}[order]
     hw = {5: 3, 7: 4}[order]
     n_lat = f.shape[0]
@@ -1037,8 +1034,6 @@ def _flux_form_vertical_tracer_advection_weno(
     vert_flux_div : array, shape (..., nlev)
         Vertical flux divergence F_top[k] - F_bot[k] for each level.
     """
-    from legoesm.core.weno import weno5_z, weno7_z
-
     weno_fn = {5: weno5_z, 7: weno7_z}[order]
     hw = {5: 3, 7: 4}[order]
     nlev = field.shape[-1]
