@@ -157,6 +157,33 @@ def mpas_ocean_baroclinic_tendencies(
     # ---- Edge mask for land boundaries ----
     edge_mask = mask[c1] * mask[c2]  # 1 only if both cells are ocean
 
+    # ---- Per-level edge mask for partial-cell step edges ----
+    # On a step edge (one cell deeper than the other), the cell-level
+    # ``edge_mask`` is 1 (both cells wet) but the deeper cell's lower
+    # levels have no real water on the shallow neighbor's side.
+    # ``gradient_edge_3d`` doesn't know that and computes ∇p' there
+    # using the FILLED tracer values from the dry side — a non-physical
+    # pressure gradient that drives a phantom du_dt at the bottom
+    # partial cell on the deeper side, growing 1000×/step (root cause
+    # of the seamount rest-state explosion).  Build a per-level mask
+    # ``edge_mask_3d[edge, k] = 1`` only when ``k <= maxLevelEdgeBot``
+    # and apply it to ``du_dt_full`` so tendencies below the shallower
+    # neighbor's seafloor are exactly zero.  On legacy z-star (every
+    # column full) ``maxLevelEdgeBot = nlev-1`` everywhere → the mask
+    # is identically ``edge_mask[:, None]`` → bit-exact regression.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        bot_e = compute_max_level_edge_bot(z_coord.bottom_level, mesh)
+        nlev_loc = u_3d.shape[1]
+        k_idx = jnp.arange(nlev_loc, dtype=bot_e.dtype)
+        edge_mask_3d = (
+            (k_idx[None, :] <= bot_e[:, None]).astype(u_3d.dtype)
+            * edge_mask[:, None]
+        )
+    else:
+        edge_mask_3d = jnp.broadcast_to(
+            edge_mask[:, None], u_3d.shape,
+        ).astype(u_3d.dtype)
+
     # ---- Depth-averaged velocity and perturbation ----
     # The baroclinic step must operate on PERTURBATION velocity
     # u' = u - u_bar to avoid double-counting with the barotropic
@@ -396,8 +423,11 @@ def mpas_ocean_baroclinic_tendencies(
         u_prime_3d, w_e, h_e_3d,
     )
 
-    # Full nonlinear momentum tendency
-    du_dt_full = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
+    # Full nonlinear momentum tendency.  Use the per-level edge mask
+    # (zero below the shallower neighbor's seafloor on partial cells)
+    # so spurious ∇p' from dry-cell-filled tracers can't drive a
+    # phantom tendency at the bottom partial cell of the deeper column.
+    du_dt_full = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask_3d
 
     # Bottom drag on full velocity (not perturbation) — the ocean floor
     # sees the total flow.  Applied before F_slow_u computation so the
@@ -456,7 +486,7 @@ def mpas_ocean_baroclinic_tendencies(
     # Baroclinic perturbation = full minus depth-mean. Planetary Coriolis
     # on this perturbation is applied via forward-backward Matsuno in the
     # step() function (see _forward_backward_coriolis_mpas_3d).
-    du_dt_3d = (du_dt_full - F_slow_u[:, jnp.newaxis]) * edge_mask[:, jnp.newaxis]
+    du_dt_3d = (du_dt_full - F_slow_u[:, jnp.newaxis]) * edge_mask_3d
 
     # ---- Tracer tendencies (diffusion + physics only) ----
     # Horizontal AND vertical tracer advection are handled in the step()

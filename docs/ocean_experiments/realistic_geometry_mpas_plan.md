@@ -6,23 +6,70 @@ scaffolds for production validation). P7-MPI **scaffolded**
 (MPAS-ocean MPI step infrastructure does not exist yet — separate
 follow-up issue).
 
-**Open known issue surfaced during P6 smoke testing**: forward
-integration of the partial-cell stack on a Gaussian-seamount rest
-state goes unstable after 2-3 steps regardless of dt (300s → 60s),
-viscosity (1e3 → 1e6), or PGF scheme (centered/adcroft) — both at
-ico-2 (162 cells) and ico-4 (2562 cells). Single-step tendencies
-are physically reasonable; the instability appears at the second
-step. Likely culprits include (a) the bottom-drag scatter
-introducing a feedback loop with the FB-Coriolis substep on
-partial-cell columns, (b) interaction between min-rule edge
-thickness and the implicit-CN PCG residual at columns with
-sub-resolution H_bathy steps, or (c) a sign convention in the
-Adcroft correction that was masked by the rest-of-zero bare
-gradient in the unit tests. P0-P5 unit tests all pass cleanly,
-so this is a step-to-step nonlinear interaction, not a
-single-tendency bug. Should be the first item on the P6
-validation track. Reproduce with:
-``JAX_ENABLE_X64=1 python scripts/mpas_realistic_geometry/run_mpas_seamount_rest.py``
+**Seamount instability — RESOLVED (2026-05-03).** Five distinct
+partial-cell consistency bugs were found and fixed:
+
+1. `barotropic_implicit_mpas.py`: the Helmholtz operator's `H_e`
+   used `_edge_avg(eta + H_bathy)` (centered mean across step
+   edges) instead of the column-sum of min-rule per-level edge
+   thickness. The flux-closure H on a step edge between H=2200m
+   and H=4000m should be 2200m, not 3100m. Fixed by adding
+   `_edge_H_min_rule` and dispatching on `OceanPartialCellCoordinate`.
+
+2. `barotropic_implicit_mpas._depth_average_to_edges`: per-level
+   `h_e_k = 0.5*(h[c1]+h[c2])` lets phantom transport leak through
+   step edges. Fixed by adding a `partial_cells` flag that switches
+   to `min_cell_to_edge`.
+
+3. `ocean_model_mpas.step()` (line 351 area): the reconcile step
+   recomputed `h_e_k` with the centered mean while the barotropic
+   solver returned `Hu_avg` based on min-rule. The mismatch
+   injected a per-step phantom kick into u_3d at every step edge.
+   Fixed to use min-rule on partial cells.
+
+4. `ocean_model_mpas._forward_backward_coriolis_mpas_3d`: same
+   centered `h_e` bug — strips off the wrong u_bar from u_3d
+   before applying Coriolis to u_prime, so the depth-mean we add
+   back disagrees with what the barotropic solver expects. Fixed.
+
+5. **Per-level edge mask** in `ocean_pe_mpas.py`: the cell-level
+   `edge_mask = mask[c1] * mask[c2]` is 1 for the entire column
+   even when one cell is dry at deep levels (above seafloor on
+   the shallow side, below seafloor on the deep side). The
+   min-rule on `h_e_3d` correctly zeros the *flux*, but
+   `gradient_edge_3d(p_prime/rho_0)` reads filled tracer values
+   in the dry levels of the shallow neighbor and produces a
+   non-physical PGF that drives a phantom du_dt at the bottom
+   partial cell of the deeper column — growing 1000×/step in the
+   diagnostic. Fixed by building `edge_mask_3d[edge, k] = 1`
+   only when `k <= maxLevelEdgeBot` and applying it to
+   `du_dt_full` and `du_dt_3d`. On legacy z-star this reduces to
+   `edge_mask[:, None]` bit-exactly.
+
+`barotropic_mpas.py` (explicit-substep solver) was patched in the
+same commit for consistency, even though the implicit-CN solver is
+the production default.
+
+**Validation:** centered scheme on a 2000m Gaussian seamount at
+ico-2 with `bot_level` range [7, 9] is now stable for 6 hours
+(`max|u| = 2.6e-3 m/s`, growing slowly but bounded, no NaN);
+original was NaN at step 3 with `max|u| = 4.7e+06 m/s`. All 200
+MPAS-tagged unit tests pass; z-star regression bit-exact via the
+`isinstance(z_coord, OceanPartialCellCoordinate)` dispatch.
+
+**`pgf_scheme="adcroft"` known-bad on legoesm.** With the per-level
+mask fix, the centered scheme delivers the small bare gradient
+(5e-7 m/s²) that the `dz_ref`-integration convention is supposed
+to produce, and the seamount stays bounded. The Adcroft-Campin
+correction adds 1.4e-4 m/s² (260× larger than the bare gradient)
+that the `dz_ref` convention does not need to cancel — net result
+is 0.6 m/s of spurious flow over 6 h on the seamount, growing.
+The AC formula is correct for codes that integrate `p'` against
+`h_partial` (MITgcm/MOM6); legoesm's `dz_ref` integration already
+produces the small bare gradient AC was designed to recover. Until
+we either switch to `h_actual` PGF integration or formally re-derive
+the AC convention for `dz_ref`, **use `pgf_scheme="centered"`**.
+Tracked in plan §P3c.
 
 * **P0 done** — verified by inspection plus two new tests in
   `tests/ocean/unit/test_barotropic_implicit_mpas.py`:

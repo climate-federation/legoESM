@@ -32,7 +32,10 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del2,
     edge_thickness as _edge_avg,
 )
-from legoesm.ocean.vertical import compute_layer_thickness
+from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate, compute_layer_thickness,
+)
+from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
@@ -104,16 +107,28 @@ def barotropic_substeps_mpas(
         min_water_column_m=config.min_water_column_m,
     )  # (nCells, nlev)
 
-    # Edge layer thickness for each level
-    h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    # Edge layer thickness for each level — min-rule on partial cells
+    # so the depth-mean here matches what the implicit-CN solver and
+    # the baroclinic step's F_slow_u see.  Using a centered
+    # 0.5*(h[c1]+h[c2]) on a step edge lets phantom transport leak
+    # through and drives the seamount rest-state explosion.
+    partial_cells = isinstance(z_coord, OceanPartialCellCoordinate)
+    if partial_cells:
+        h_e_k = min_cell_to_edge(h_k, mesh)
+    else:
+        h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
 
     # Depth-integrated transport: sum_k(u_k * h_e_k)
     Hu_bar = jnp.sum(u_3d * h_e_k, axis=1)  # (nEdges,)
 
-    # Total water column at edges
-    H_total_cell = eta + H_bathy  # (nCells,)
-    H_total_cell = jnp.maximum(H_total_cell, config.min_water_column_m)
-    H_e = _edge_avg(H_total_cell, mesh)  # (nEdges,)
+    # Total water column at edges — min-rule on partial cells (matches
+    # ``barotropic_implicit_mpas._edge_H_min_rule``).
+    if partial_cells:
+        H_e = jnp.maximum(jnp.sum(h_e_k, axis=1), config.min_water_column_m)
+    else:
+        H_total_cell = eta + H_bathy  # (nCells,)
+        H_total_cell = jnp.maximum(H_total_cell, config.min_water_column_m)
+        H_e = _edge_avg(H_total_cell, mesh)  # (nEdges,)
 
     # Depth-averaged velocity (from state that already includes baroclinic tendency).
     # Mask land edges to zero up-front so any stale value at a land

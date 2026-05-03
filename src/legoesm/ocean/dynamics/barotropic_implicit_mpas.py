@@ -84,6 +84,8 @@ from legoesm.ocean.dynamics.eta_floor import (
     clamp_and_redistribute as _clamp_redistribute,
 )
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
+from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
 
 def _depth_average_to_edges(
@@ -91,13 +93,43 @@ def _depth_average_to_edges(
     h_k: jnp.ndarray,
     H_e: jnp.ndarray,
     mesh: VoronoiMesh,
+    *,
+    partial_cells: bool = False,
 ) -> jnp.ndarray:
-    """Thickness-weighted depth-average of edge-normal velocity."""
-    c1 = mesh.cellsOnEdge[0]
-    c2 = mesh.cellsOnEdge[1]
-    h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    """Thickness-weighted depth-average of edge-normal velocity.
+
+    On partial cells, the per-level edge thickness MUST use the min-rule
+    (MITgcm hFacZ) so the depth-mean matches what the baroclinic step's
+    ``F_slow_u`` is computed against (see ``ocean_pe_mpas.py:186``).
+    Using a centered ``0.5*(h[c1]+h[c2])`` here lets phantom transport
+    leak through a step edge — drives the seamount rest-state explosion.
+    """
+    if partial_cells:
+        h_e_k = min_cell_to_edge(h_k, mesh)
+    else:
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
     Hu = jnp.sum(u_3d * h_e_k, axis=1)
     return Hu / jnp.maximum(H_e, 1.0e-10)
+
+
+def _edge_H_min_rule(
+    h_k: jnp.ndarray,
+    mesh: VoronoiMesh,
+    min_water_col,
+) -> jnp.ndarray:
+    """Column-sum of min-rule per-level edge thickness — the partial-cell
+    analog of ``_edge_avg(eta+H_bathy)``.
+
+    On partial cells, the barotropic Helmholtz operator must use this
+    flux-closure H_e (matching the baroclinic step's H_e) so that
+    ``c² = g·H_min`` is the correct gravity-wave speed across step
+    edges and the predictor-corrector eta/u_bar update stays
+    consistent with the slow-forcing F_slow_u.
+    """
+    h_e_k = min_cell_to_edge(h_k, mesh)
+    return jnp.maximum(jnp.sum(h_e_k, axis=1), min_water_col)
 
 
 def _make_helmholtz(
@@ -237,9 +269,20 @@ def barotropic_implicit_mpas(
         eta_old, H_bathy, z_coord,
         min_water_column_m=config.min_water_column_m,
     )  # (nCells, nlev)
-    H_total_old = jnp.maximum(eta_old + H_bathy, min_water_col)
-    H_e_old = _edge_avg(H_total_old, mesh)
-    u_bar_old = _depth_average_to_edges(u_3d, h_k_old, H_e_old, mesh)
+    # Partial-cell H_e: use the min-rule column-sum of per-level edge
+    # thickness so the Helmholtz operator's gravity-wave speed matches
+    # the flux closure at step edges (consistent with the baroclinic
+    # step's H_e at ocean_pe_mpas.py:186).  On legacy z-star (every
+    # column full) min-rule equals 0.5*(H[c1]+H[c2]) bit-exactly.
+    partial_cells = isinstance(z_coord, OceanPartialCellCoordinate)
+    if partial_cells:
+        H_e_old = _edge_H_min_rule(h_k_old, mesh, min_water_col).astype(eta_dtype)
+    else:
+        H_total_old = jnp.maximum(eta_old + H_bathy, min_water_col)
+        H_e_old = _edge_avg(H_total_old, mesh)
+    u_bar_old = _depth_average_to_edges(
+        u_3d, h_k_old, H_e_old, mesh, partial_cells=partial_cells,
+    ).astype(eta_dtype)
 
     # ----- Step 2: predictor (Heun on Coriolis, OLD η gradient) ---------
     eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2)
@@ -318,8 +361,17 @@ def barotropic_implicit_mpas(
     # as an open issue.
 
     # ----- Step 6: time-averaged transport for tracer flux --------------
-    H_total_new = jnp.maximum(eta_new + H_bathy, min_water_col)
-    H_e_new = _edge_avg(H_total_new, mesh)
+    # Same partial-cell H_e convention as step 1 — use min-rule so the
+    # tracer-flux divergence matches the η evolution exactly.
+    if partial_cells:
+        h_k_new = compute_layer_thickness(
+            eta_new, H_bathy, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
+        H_e_new = _edge_H_min_rule(h_k_new, mesh, min_water_col).astype(eta_dtype)
+    else:
+        H_total_new = jnp.maximum(eta_new + H_bathy, min_water_col)
+        H_e_new = _edge_avg(H_total_new, mesh)
     Hu_avg = (
         (1.0 - theta_eta) * H_e_old * u_bar_old
         + theta_eta * H_e_new * u_bar_new

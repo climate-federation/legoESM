@@ -18,12 +18,14 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate,
     OceanZStarCoordinate,
     compute_layer_thickness,
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
     flux_form_vertical_tracer_advection_tvd,
 )
+from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
 from legoesm.ocean.dynamics.advection_mpas import (
     compute_upup_cells,
     tvd_tracer_to_edges,
@@ -85,12 +87,20 @@ def _forward_backward_coriolis_mpas_3d(
     c2 = mesh.cellsOnEdge[1]
     edge_mask = (mask[c1] * mask[c2])[:, jnp.newaxis]  # (nEdges, 1)
 
-    # Layer thickness at edges for depth averaging
+    # Layer thickness at edges for depth averaging.
+    # On partial cells, MUST use min-rule so the u_bar computed here
+    # matches the barotropic solver's u_bar — otherwise the depth-mean
+    # we strip in u_prime = u - u_bar disagrees with what the barotropic
+    # step adds back at the next iteration, and the inconsistency
+    # accumulates as a phantom kick on every step edge.
     h_k = compute_layer_thickness(
         eta, H_bathy, z_coord,
         min_water_column_m=config.min_water_column_m,
     )
-    h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        h_e = min_cell_to_edge(h_k, mesh)
+    else:
+        h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
     # ``H_e = sum(h_e)`` and ``u_bar`` numerator ``sum(u_3d * h_e)``
     # share the level axis and h_e weight — fuse into one stacked sum.
     _u_pair = jnp.sum(
@@ -351,10 +361,23 @@ class MPASOceanModel:
         # 6. Reconcile 3D velocity
         # Compute u_bar_old from the UPDATED state (state_for_baro),
         # not the original. This ensures depth_avg(u_3d_new) = u_bar_new.
-        h_e_k = 0.5 * (h_k_old[c1] + h_k_old[c2])  # (nEdges, nlev)
-        H_total = jnp.maximum(state.eta.data + state.H_bathy.data,
+        # On partial cells, MUST use the same min-rule per-level edge
+        # thickness as the implicit-CN solver (barotropic_implicit_mpas).
+        # If we used a centered 0.5*(h[c1]+h[c2]) here, u_bar_old and
+        # u_bar_new would be on different bases and reconcile_3d_velocity
+        # would inject the difference into u_3d as a phantom barotropic
+        # kick at every step edge — drove the seamount rest-state
+        # explosion at step 2.
+        partial_cells = isinstance(z_coord, OceanPartialCellCoordinate)
+        if partial_cells:
+            h_e_k = min_cell_to_edge(h_k_old, mesh)
+            H_e = jnp.maximum(jnp.sum(h_e_k, axis=1),
                               config.min_water_column_m)
-        H_e = 0.5 * (H_total[c1] + H_total[c2])
+        else:
+            h_e_k = 0.5 * (h_k_old[c1] + h_k_old[c2])  # (nEdges, nlev)
+            H_total = jnp.maximum(state.eta.data + state.H_bathy.data,
+                                  config.min_water_column_m)
+            H_e = 0.5 * (H_total[c1] + H_total[c2])
         u_bar_old = jnp.sum(u_baro * h_e_k, axis=1) / jnp.maximum(H_e, 1e-10)
 
         u_3d_new = reconcile_3d_velocity(

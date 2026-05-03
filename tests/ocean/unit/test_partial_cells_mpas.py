@@ -1163,3 +1163,112 @@ def test_pgf_unsupported_scheme_raises(mesh, z_coord):
     with pytest.raises(NotImplementedError, match="smc03"):
         mpas_ocean_baroclinic_tendencies(state, mesh, pc, cfg)
 
+
+# ----- Seamount step-edge stability (regression for the 5 partial-cell
+#       consistency bugs found and fixed on 2026-05-03) ------------------
+
+
+def test_seamount_centered_stable_over_steps(mesh, z_coord):
+    """Forward integration on a Gaussian seamount (bottom_level differs
+    between cells) must stay bounded for many steps with the centered
+    PGF scheme.  Regression for the 5 partial-cell consistency bugs:
+
+    1. Centered ``H_e`` in the implicit-CN Helmholtz operator
+       (vs min-rule).
+    2. Centered per-level ``h_e_k`` in the depth-average inside the
+       implicit-CN solver.
+    3. Centered ``h_e_k`` in ``ocean_model_mpas.step()`` reconcile
+       (mismatched with the solver's min-rule output).
+    4. Centered ``h_e`` in the FB-Coriolis sub-routine on the
+       perturbation velocity.
+    5. Cell-level ``edge_mask`` letting ``gradient_edge_3d(p_prime)``
+       leak the dry-cell-filled tracer values into a phantom ∇p' at
+       the bottom partial cell of the deeper column.
+
+    Pre-fix: centered seamount went NaN at step 3
+    (max|u| = 4.7e+06 m/s).
+    Post-fix: centered seamount stays bounded for 60+ steps at
+    dt=60 s (max|u| < 1e-3 m/s after 1 simulated hour).
+    """
+    from legoesm.core.field import Field
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.vertical import (
+        compute_centroid_depth,
+        create_partial_cell_coordinate,
+    )
+
+    H_max = 4000.0
+    T_surf, T_deep = 20.0, 2.0
+    # Gaussian seamount centred at (0, 0).  Heights above the level
+    # boundaries pick up a step in ``bottom_level`` between columns —
+    # the configuration that triggered the explosion.
+    lat = np.asarray(mesh.latCell)
+    lon = np.asarray(mesh.lonCell)
+    dlat = lat
+    dlon = (lon + np.pi) % (2 * np.pi) - np.pi
+    r2 = dlat ** 2 + dlon ** 2
+    sigma2 = np.deg2rad(15.0) ** 2
+    bump = 2000.0 * np.exp(-r2 / sigma2)
+    H_bathy_seamount = jnp.asarray(H_max - bump, dtype=jnp.float64)
+
+    # Use a 10-level z-star tuned to H_max=4000 so the seamount creates
+    # a 2-3 level step in bottom_level (which is what triggered the bug).
+    z_seamount = create_ocean_z_star(n_levels=10, H_max=H_max)
+    pc = create_partial_cell_coordinate(z_seamount, H_bathy_seamount)
+    bots = np.asarray(pc.bottom_level)
+    assert bots.max() - bots.min() >= 1, (
+        "Test seamount must produce at least one bottom_level step"
+    )
+
+    centroid = compute_centroid_depth(
+        jnp.zeros_like(H_bathy_seamount), H_bathy_seamount, pc,
+    )
+    T_per_cell = T_deep + (T_surf - T_deep) * jnp.exp(-centroid / _SCALE_DEPTH)
+    T_per_cell = jnp.where(pc.is_active, T_per_cell, T_deep)
+
+    state = rest_state_mpas_ocean(
+        mesh, z_seamount, H_max=H_max, land_lat_threshold=90.0,
+    )
+    state = state._replace(
+        H_bathy=Field(
+            data=H_bathy_seamount.astype(state.H_bathy.data.dtype),
+            name="H_bathy", dims=("nCells",), units="m",
+        ),
+        T=Field(
+            data=T_per_cell.astype(state.T.data.dtype),
+            name="T", dims=("nCells", "nlev"), units="degC",
+        ),
+    )
+
+    cfg = MPASOceanConfig(
+        barotropic_solver="implicit_cn",
+        A_h=1.0e4, A_v=1.0e-3, K_v=1.0e-4,
+        bottom_drag_r=1.1e-3,
+        barotropic_implicit_pcg_tol=1.0e-10,
+        barotropic_implicit_pcg_maxiter=300,
+        min_water_column_m=1.0,
+        pgf_scheme="centered",
+        pv_scheme="enstrophy",
+    )
+    model = MPASOceanModel(mesh, pc, cfg)
+
+    s = state
+    dt = 60.0
+    n_steps = 60  # 1 simulated hour
+    for k in range(n_steps):
+        s = model.step(s, dt=dt)
+        mu = float(jnp.max(jnp.abs(s.u.data)))
+        me = float(jnp.max(jnp.abs(s.eta.data)))
+        assert np.isfinite(mu) and np.isfinite(me), (
+            f"Seamount integration went NaN at step {k+1}"
+        )
+        # Generous absolute bound — the regression is from
+        # max|u|=4.7e+06 to max|u| < 1e-3.
+        assert mu < 1.0e-2, (
+            f"Seamount centered scheme exploded: step {k+1}, "
+            f"max|u|={mu:.3e} m/s — partial-cell consistency bug "
+            "regression"
+        )

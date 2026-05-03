@@ -175,7 +175,14 @@ def main():
     p.add_argument("--hours", type=float, default=6.0)
     p.add_argument("--dt", type=float, default=300.0)
     p.add_argument("--A-h", dest="A_h", type=float, default=1.0e4)
-    p.add_argument("--schemes", nargs="+", default=["centered", "adcroft"])
+    # ``centered`` is the working partial-cell PGF on legoesm (its
+    # ``dz_ref``-integrated p_prime already gives the small bare
+    # gradient that AC is meant to recover).  ``adcroft`` adds a 260×-
+    # too-large correction on the seamount and grows the rest-state
+    # flow to ~0.6 m/s over 6 hours; kept available for diagnostic /
+    # convention-comparison work but not used in production.  See
+    # plan-doc status block "pgf_scheme=adcroft known-bad on legoesm".
+    p.add_argument("--schemes", nargs="+", default=["centered"])
     p.add_argument("--outdir", default="outputs/mpas_seamount")
     args = p.parse_args()
     run(args)
