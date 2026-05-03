@@ -216,6 +216,36 @@ radiation equilibrium with prescribed SST=292.6 K — physically expected.
   test after the deck driver change.
 - All 81 AMIP-related unit tests still pass.
 
+### Iter 7 — Fix legacy `--discretization cgrid` alias
+
+**Bug:**  `run_amip.py --grid-type latlon --discretization cgrid` raised
+`ValueError: Unsupported atmosphere configuration` — argparse accepted
+`cgrid` but the dycore factory's canonical name is `latlon_cgrid`.
+
+**Fix:**  Add `latlon_cgrid` and `cdgrid` to the argparse choices and
+canonicalise `cgrid → latlon_cgrid` in the postprocessor.  Old scripts
+that use `cgrid` keep working.
+
+**Validation matrix (1-day analytical AMIP runs)**
+
+| grid_type     | discretization  | result |
+|---------------|-----------------|--------|
+| cubed_sphere  | centered        | ✅ |
+| cubed_sphere  | finite_volume   | ✅ |
+| cubed_sphere  | cdgrid          | ✅ |
+| latlon        | centered        | ✅ |
+| latlon        | finite_volume   | (not yet tested) |
+| latlon        | cgrid → latlon_cgrid | ✅ |
+| gaussian      | spectral        | ✅ |
+| voronoi       | mpas            | ❌ (pre-existing dycore stability) |
+
+### Iter 6 — Regression tests for fix_moisture warning
+
+`tests/unit/test_amip_cmip6_deck.py`: two new tests exercise the
+strengthened `fix_moisture + microphysics ≠ none` warning, including a
+"don't warn when microphysics='none'" check to keep the warning quiet
+for legitimate runs.  15/15 deck tests pass.
+
 ### Iter 5 — End-to-end integration test in `tests/integration/`
 
 **New code**
