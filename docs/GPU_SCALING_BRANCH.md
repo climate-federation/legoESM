@@ -76,6 +76,11 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean MPAS conservation heat/salt 3-term diagnostics | 6 column reductions per tracer | 1 stacked column + 1 area sum |
 | Land multilayer f_veg + weight_sum                 | 2 redundant column reductions | 1 reused |
 | Core conservation hydrostatic + NH energy diagnostics | 3 column reductions per call | 1 stacked per call |
+| ML conservation moisture / heat / salt 3-term diagnostics | 4–6 reductions per call | 2 stacked per call |
+| Ocean GM Neumann fill 1D nbr_sum + nbr_count       | 2 reductions × n_passes | 1 stacked × n_passes |
+| Voronoi APVM 1D advection + count edge reductions  | 2 reductions | 1 stacked |
+| Ocean MPAS fix_volume + fix_heat + fix_salt 3-term diagnostics | 3 allreduces per fixer | 1 allreduce per fixer |
+| Sea-ice ITD aggregate_categories 3-term reduction  | 3 category reductions | 1 stacked |
 
 ## SPMD-vs-single-device numerical equivalence
 
