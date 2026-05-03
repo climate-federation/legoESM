@@ -157,8 +157,11 @@ def mpas_ocean_baroclinic_tendencies(
     # vertical shear (perturbation) component.
     # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:256-266)
     h_e_3d = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
-    H_e = jnp.maximum(jnp.sum(h_e_3d, axis=1), config.min_water_column_m)
-    u_bar = jnp.sum(u_3d * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)
+    # Both ``H_e`` and ``u_bar`` numerator share the ``h_e_3d`` weight
+    # on the level axis — fuse into one stacked column reduction.
+    _u_pair = jnp.sum(jnp.stack([h_e_3d, u_3d * h_e_3d], axis=-1), axis=1)
+    H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
+    u_bar = _u_pair[..., 1] / jnp.maximum(H_e, 1e-10)
     u_bar = u_bar * edge_mask  # (nEdges,)
     u_prime_3d = u_3d - u_bar[:, jnp.newaxis]  # (nEdges, nlev)
 
