@@ -60,13 +60,19 @@ _GRID_RESOLUTIONS = {
                               discretization="spectral", extra=[]),
     # Voronoi SCVT: ``resolution`` is the bisection level
     # (level=4 → 2562 cells, similar size to C24).
-    # The MPAS turbulence bridge isn't implemented (TKE expects
-    # cell-centered winds while MPAS stores edge-normal winds), so
-    # disable it for the smoke test.  See
-    # ``atmosphere/physics/turbulence/integration.py``.
+    #
+    # MPAS-specific overrides:
+    # - ``--turbulence none``: the TKE bridge isn't implemented (TKE
+    #   expects cell-centered winds; MPAS stores edge-normal winds).
+    # - ``--dt 60``: the MPAS hydrostatic dycore is unstable at the
+    #   default 600 s step *despite* the CFL diagnostic reporting 0.09.
+    #   Empirically dt=60 s holds at level=4 for at least 1 day; the
+    #   dt-vs-stability discrepancy is tracked in AMIP.md "Known
+    #   issues" #2 (MPAS dycore stability — hidden CFL constraint).
     "voronoi":          dict(grid_type="voronoi",        resolution=4,
                               discretization="mpas",
-                              extra=["--turbulence", "none"]),
+                              extra=["--turbulence", "none",
+                                      "--dt", "60"]),
 }
 
 
