@@ -1514,7 +1514,7 @@ def isothermal_rest_state_spectral(
     grid: GaussianGrid,
     sigma_coord: SigmaCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1e5,
+    p_s_init: float = constants.p_ref,
     phis: jnp.ndarray | None = None,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,

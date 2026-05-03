@@ -18,6 +18,7 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ml.data.era5_loader import (
     ERA5Config,
     WB2_ERA5_ZARR,
@@ -433,7 +434,7 @@ def era5_sst_to_forcing(
     grid,
     day_of_year: float = 1.0,
     seconds_of_day: float = 0.0,
-    s_0: float = 1361.0,
+    s_0: float = constants.S_0,
 ):
     """Extract SST/SIC forcing from ERA5 for SegmentForcing.
 

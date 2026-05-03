@@ -28,6 +28,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.dynamics.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
@@ -138,7 +139,7 @@ def make_column_physics_fn(
         else:
             q_col = jnp.zeros_like(T_col)
         p_s_col = p_s.reshape(-1)
-        solar_col = jnp.full_like(p_s_col, 1361.0)
+        solar_col = jnp.full_like(p_s_col, constants.S_0)
 
         # Pack features + vmap forward (normalization built into _pack)
         features = jax.vmap(_pack_column_features)(

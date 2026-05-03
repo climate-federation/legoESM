@@ -463,7 +463,7 @@ def vertical_advection_theta(
     """
     kappa = constants.kappa
     sigma_full = sigma_coord.sigma_full  # (nlev,)
-    P_0 = 1.0e5
+    P_0 = constants.p_ref
 
     # Pressure at full levels
     p_full = sigma_full * p_s[..., None]  # (..., nlev)
@@ -658,7 +658,7 @@ def create_hybrid_coordinate(
     n_levels: int,
     A_half: jax.Array,
     B_half: jax.Array,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
     dtype=None,
 ) -> HybridSigmaPressureCoordinate:
     """Create a hybrid sigma-pressure coordinate from A/B coefficients.
@@ -729,7 +729,7 @@ def create_hybrid_coordinate(
 def make_hybrid_levels(
     n_levels: int,
     p_top_Pa: float = 200.0,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
     transition_exponent: int = 3,
     stretching: float = 0.0,
 ) -> HybridSigmaPressureCoordinate:
@@ -779,7 +779,7 @@ def make_hybrid_levels(
 
 def standard_hybrid_levels(
     n_levels: int = 40,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
 ) -> HybridSigmaPressureCoordinate:
     """Create standard hybrid levels with good defaults for any resolution.
 
@@ -828,7 +828,7 @@ def standard_hybrid_levels(
 
 def hybrid_from_sigma(
     sigma_coord: SigmaCoordinate,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
 ) -> HybridSigmaPressureCoordinate:
     """Convert a SigmaCoordinate to hybrid form (A=0, B=sigma).
 

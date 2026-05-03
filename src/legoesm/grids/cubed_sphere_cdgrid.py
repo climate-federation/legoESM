@@ -763,11 +763,11 @@ def create_cubed_sphere_cdgrid(
             if abs(sl_probe) > 1e-6:
                 omega = f_probe / (2.0 * sl_probe)
             else:
-                omega = 7.292e-5  # fallback: sin_lat ~ 0 everywhere
+                omega = constants.Omega  # fallback: sin_lat ~ 0 everywhere
         except (TypeError, jax.errors.ConcretizationTypeError):
             # base.f or base.sin_lat is a JAX tracer (e.g. JIT-time
             # grid construction). Fall back to the Earth default.
-            omega = 7.292e-5
+            omega = constants.Omega
     f_corner = 2.0 * omega * jnp.sin(lat_corner)
     cos_angle_corner = jnp.cos(angle_corner)
     sin_angle_corner = jnp.sin(angle_corner)

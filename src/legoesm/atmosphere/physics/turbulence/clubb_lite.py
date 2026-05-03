@@ -46,7 +46,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio as _q_sat
+from legoesm.thermo import (
+    saturation_mixing_ratio as _q_sat,
+    saturation_mixing_ratio_dT as _dqsat_dT,
+)
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -57,15 +60,6 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
 )
-
-
-def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
-    """d(q_sat)/dT for the Gaussian PDF width scaling."""
-    e_sat = 611.2 * jnp.exp(17.67 * (T - constants.T_freeze) /
-                             (T - constants.T_freeze + 243.5))
-    de_dT = e_sat * 17.67 * 243.5 / (T - constants.T_freeze + 243.5) ** 2
-    p_eff = jnp.clip(p - e_sat, 1.0)
-    return constants.epsilon * de_dT * p / p_eff ** 2
 
 
 # ---------------------------------------------------------------------------

@@ -224,6 +224,12 @@ class ExperimentConfig(NamedTuple):
                 "physics_parameterization_layers must be > 0, "
                 f"got {self.physics_parameterization_layers}"
             )
+        _valid_cloud_schemes = ("none", "sundqvist", "xu_randall")
+        if self.cloud_scheme not in _valid_cloud_schemes:
+            errors.append(
+                f"cloud_scheme must be one of {_valid_cloud_schemes}, "
+                f"got {self.cloud_scheme!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(

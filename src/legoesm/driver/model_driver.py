@@ -1310,7 +1310,7 @@ class ModelDriver:
         gray_config = GrayRadiationConfig()
         shape_2d = (self.grid.n_lat, self.grid.n_lon)
         shape_3d = (*shape_2d, cfg.grid.nlev)
-        S_0 = 1361.0
+        S_0 = constants.S_0
         T_ice = cfg.T_ice
 
         # Precompute spectral transform constants

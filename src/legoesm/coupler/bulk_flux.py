@@ -150,7 +150,9 @@ def compute_most_fluxes(
     wind_speed = jnp.sqrt(u_rel ** 2 + v_rel ** 2 + 1e-4)
     dT = T_sfc - T_atm
     dq = q_sfc - q_atm
-    T_v = T_atm * (1.0 + 0.61 * q_atm)
+    # Virtual-T moisture coefficient = 1/ε − 1 ≈ 0.6078 (canonical, not 0.61).
+    _vT_coef = 1.0 / constants.epsilon - 1.0
+    T_v = T_atm * (1.0 + _vT_coef * q_atm)
 
     # Initialize with neutral log-law profile
     z0 = jnp.full_like(wind_speed, z0_init)
@@ -169,8 +171,8 @@ def compute_most_fluxes(
         u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
         u_star_safe = jnp.maximum(u_star, 1e-6)
 
-        # Virtual potential temperature scale
-        theta_v_star = theta_star + 0.61 * T_atm * q_star_val
+        # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
+        theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
 
         # Obukhov length: L = −u*² T_v / (κ g θ_v*)
         L_denom = KAPPA * G * theta_v_star

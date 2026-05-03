@@ -68,8 +68,8 @@ DELTA_T_Y = 60.0    # [K] meridional temperature gradient
 DELTA_THETA_Z = 10.0  # [K] vertical potential temperature gradient
 T_MIN = 200.0        # [K] minimum equilibrium temperature
 
-# Reference pressure
-P_0 = 1.0e5  # [Pa]
+# Reference pressure (alias for constants.p_ref kept for local readability)
+P_0 = constants.p_ref
 
 
 # ==============================================================================
@@ -205,7 +205,7 @@ def held_suarez_init(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -363,7 +363,7 @@ def held_suarez_init_latlon(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -526,7 +526,7 @@ def held_suarez_init_mpas(
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,

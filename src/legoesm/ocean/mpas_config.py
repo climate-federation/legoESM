@@ -218,15 +218,15 @@ class MPASSimpleOceanConfig(NamedTuple):
     mode: str = "fixed"
     sst_constant: float = 300.0
     h_mix: float = 50.0
-    rho_ocean: float = 1025.0
-    c_ocean: float = 3994.0
+    rho_ocean: float = 1025.0           # = eos.rho_0
+    c_ocean: float = 3994.0             # = eos.c_sw
     Q_flux: float = 0.0
     albedo_ocean: float = 0.06
     emissivity_ocean: float = 0.97
     Cd_ocean: float = 1.5e-3
     Ch_ocean: float = 1.5e-3
     U_min: float = 1.0
-    T_freeze: float = 271.35
+    T_freeze: float = 271.35            # = constants.T_freeze_ocean
     h_deep: float = 200.0
     k_mix: float = 1.0e-4
     restore_deep: bool = False
