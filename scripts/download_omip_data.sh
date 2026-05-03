@@ -128,14 +128,15 @@ if [[ $DO_JRA55 -eq 1 ]]; then
     mkdir -p "$JRA55_DIR"
     echo ""
     echo "=== JRA55-do v1.6.0 IAF (1990 + 1991) -> $JRA55_DIR ==="
-    extra_args=()
+    # Build args without empty-array expansion (macOS bash 3.2 + set -u
+    # aborts on ``"${arr[@]}"`` when arr is empty).
     if [[ $FORCE -eq 1 ]]; then
-        extra_args+=(--force)
+        python "$SCRIPT_DIR/download_jra55_iaf.py" \
+            --years 1990 1991 --out-dir "$JRA55_DIR" --force
+    else
+        python "$SCRIPT_DIR/download_jra55_iaf.py" \
+            --years 1990 1991 --out-dir "$JRA55_DIR"
     fi
-    python "$SCRIPT_DIR/download_jra55_iaf.py" \
-        --years 1990 1991 \
-        --out-dir "$JRA55_DIR" \
-        "${extra_args[@]}"
 fi
 
 # ---------------------------------------------------------------------------
