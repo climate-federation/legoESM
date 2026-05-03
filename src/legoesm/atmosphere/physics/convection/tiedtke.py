@@ -329,13 +329,17 @@ def tiedtke_convection(
         # `0.05` cooling — dimensionally wrong AND non-water-conserving";
         # Codex stop-time review: "downdraft fix still creates column
         # water").
-        below_lcl_mass = jnp.sum(below_lcl * dp, axis=-1, keepdims=True).clip(1e-6, None)
-        # Column-integrated convective rain source available this step
-        # [kg/(m²·s)] (positive part — cloud water is generated where
-        # M_u detrains, never destroyed by this term).
-        rain_source_total = jnp.sum(
-            jnp.maximum(dq_c_conv_dt, 0.0) * dp, axis=-1,
-        ) / constants.g
+        # Below-LCL mass [kg/m^2] and column-integrated convective rain
+        # source [kg/(m^2*s)] both reduce ``* dp`` over the level axis;
+        # stack and reduce once.  ``rain_source_total`` is the positive
+        # part of ``dq_c_conv_dt`` — cloud water is generated where
+        # ``M_u`` detrains, never destroyed by this term.
+        _stack = jnp.stack(
+            [below_lcl, jnp.maximum(dq_c_conv_dt, 0.0)], axis=-1,
+        ) * dp[..., None]
+        _col_pair = jnp.sum(_stack, axis=-2)
+        below_lcl_mass = _col_pair[..., 0:1].clip(1e-6, None)
+        rain_source_total = _col_pair[..., 1] / constants.g
         # Total downdraft evap mass flux [kg/(m²·s)], capped at available
         # convective rain so dq_c_conv_dt stays non-negative after the
         # correction below.
