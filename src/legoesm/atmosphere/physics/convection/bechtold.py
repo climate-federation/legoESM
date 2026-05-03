@@ -135,12 +135,26 @@ def bechtold_convection(
         direction="below",
     )                                                       # (ncol, nlev)
     pbl_mass_weight = pbl_weight * dp_full
-    pbl_norm = jnp.sum(pbl_mass_weight, axis=-1, keepdims=True).clip(1e-6, None)
-    T_pbl = jnp.sum(pbl_mass_weight * T, axis=-1) / pbl_norm.squeeze(-1)
-    q_pbl = jnp.sum(pbl_mass_weight * q_v, axis=-1) / pbl_norm.squeeze(-1)
+    # Iter-86: batch the 4 column sums into one stacked reduction so XLA
+    # plans a single column-sum sweep instead of 4 separate ones.  Same
+    # arithmetic; cleaner code and slightly fewer HLO ops.
+    _pbl_sum_stack = jnp.stack(
+        [
+            pbl_mass_weight,
+            pbl_mass_weight * T,
+            pbl_mass_weight * q_v,
+            pbl_mass_weight * p_full,
+        ],
+        axis=-1,
+    )  # (ncol, nlev, 4)
+    _pbl_sums = jnp.sum(_pbl_sum_stack, axis=-2)  # (ncol, 4)
+    pbl_norm_val = _pbl_sums[..., 0].clip(1e-6, None)
+    pbl_norm = pbl_norm_val[..., None]  # (ncol, 1) — preserve keepdims shape
+    T_pbl = _pbl_sums[..., 1] / pbl_norm_val
+    q_pbl = _pbl_sums[..., 2] / pbl_norm_val
     # Mass-weighted PBL pressure for the LCL launch level when the
     # parcel comes from the PBL mean (otherwise use surface pressure).
-    p_pbl = jnp.sum(pbl_mass_weight * p_full, axis=-1) / pbl_norm.squeeze(-1)
+    p_pbl = _pbl_sums[..., 3] / pbl_norm_val
     if config.use_pbl_cape:
         T_parcel_source = T_pbl
         q_parcel_source = q_pbl
