@@ -18,6 +18,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+from legoesm.coupler.bulk_flux import compute_most_fluxes
 
 
 def compute_surface_fluxes(
@@ -69,7 +70,6 @@ def compute_surface_fluxes(
         Friction velocity [m/s], shape (ncol,).
     """
     if config.bulk_scheme in ("coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_ref=config.z_ref,
