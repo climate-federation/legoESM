@@ -27,6 +27,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.fv3_sw_core import fv3_fb_sw_step
+from legoesm.core.precision import cast_pytree
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
     cgrid_mass_flux_divergence,
@@ -702,7 +704,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self, state: CDGridShallowWaterState, dt: float,
     ) -> CDGridShallowWaterState:
         """Advance one time step using SSP-RK3."""
-        from legoesm.core.precision import cast_pytree
         # Cast state to compute precision at the boundary.
         state_c = cast_pytree(state, None, "compute")
 
@@ -830,9 +831,6 @@ class FV3FBShallowWaterModel:
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step using FV3 forward-backward."""
-        from legoesm.core.precision import cast_pytree
-        from legoesm.core.fv3_sw_core import fv3_fb_sw_step
-
         state_c = cast_pytree(state, None, "compute")
 
         # FV3 dyn_core.F90:757,1258 derives nord_v(k) = min(2, nord) at
@@ -944,7 +942,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
         if self.config.use_experimental_csw:
