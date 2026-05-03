@@ -33,6 +33,30 @@ host**.  The Ralph-loop completion promise is intentionally *not*
 emitted; what every iteration produces is durable code-level work that
 will benefit a real GPU/MPI rerun on Levante (or equivalent).
 
+## 1.b — User-specified benchmark `run_baroclinic_wave_benchmark.py` (iter-195)
+
+To verify the user-named entry point still runs end-to-end after the
+iter-1-194 scaling work, ran the canonical 2-day Jablonowski-Williamson
+test with default settings and 26 levels:
+
+| Grid          | Resolution | Wall time | Steps/s | Mass drift | Energy drift | Status     |
+|---------------|------------|----------:|--------:|-----------:|-------------:|------------|
+| spectral      | T21        |       6 s |    44.5 |    +4.2e-9 |     -6.4e-6  | **OK**     |
+| icosahedral   | 4 (2562)   |      10 s |   120.1 |    +1.5e-9 |     -1.5e-5  | **OK**     |
+| cubed-sphere  | C24        |       —   |    —    |        —   |        —    | **blowup at day 0.35 / step 100** |
+
+The cubed-sphere C24 BCW blowup at step 100 is **pre-existing** —
+reproduced on the iter-1 baseline `primitive_eq_cdgrid.py` (commit
+``f79206b1``).  This is a numerical-instability bug in the FV3 PE
+dycore at C24 + dt=300s + 26L that exists independently of the
+scaling work.  It does not block any of the §3 multi-device timing
+results (those use `run_levante_gpu_scaling.py` over 1000 dycore-only
+warm steps with no integration past step 1000) but it does mean that
+**``run_baroclinic_wave_benchmark.py --grid cubed-sphere`` is broken
+on this code branch**.  Filing a follow-up issue is left to the
+dycore-numerics audit; the iter-1-194 scaling work is independent of
+the bug.
+
 ## 2. Latest single-device baselines (post-iter-193 code, x64, dt-from-CFL, 8 levels)
 
 Re-measured on 2026-05-03 with the iter-188-194 hoisting series merged
