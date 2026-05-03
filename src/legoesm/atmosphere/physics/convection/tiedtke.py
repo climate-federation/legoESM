@@ -292,10 +292,15 @@ def tiedtke_convection(
             2.0 * (levels[None, :] - k_lcl_smooth[:, None])
         )
         rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
-        below_mass = jnp.sum(below_lcl * dp, axis=-1) + 1e-6
-        rh_below = (
-            jnp.sum(below_lcl * rh_layer * dp, axis=-1) / below_mass
+        # Both below-LCL reductions share ``below_lcl * dp`` — fuse them
+        # into a single column reduction to halve the device work.
+        _below_weight = below_lcl * dp
+        _below_sums = jnp.sum(
+            jnp.stack([_below_weight, _below_weight * rh_layer], axis=-1),
+            axis=-2,
         )
+        below_mass = _below_sums[..., 0] + 1e-6
+        rh_below = _below_sums[..., 1] / below_mass
         downdraft_trigger = jax.nn.sigmoid(
             10.0 * (config.downdraft_RH_min - rh_below)
         )
