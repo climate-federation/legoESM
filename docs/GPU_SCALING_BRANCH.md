@@ -145,6 +145,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Atm physics combined.py 3 inline imports          | 3 inline imports inside ``physics_fn`` (every step) — ``SpectralHydrostaticState`` / ``spectral_pe_to_grid`` / ``zero_like_tracers`` (×2) | 3 module-level imports |
 | Atm physics gwd integration 5 inline imports      | 5 inline imports inside ``physics_fn`` (every step) — spectral_pe state/grid + 3 SH analysis kernels | 5 module-level imports |
 | Atm physics gwd output get_policy inline          | 1 inline import in ``make_zero_output`` (called per step) | 1 module-level import |
+| ML channel_packing unpack_ocean_output cleanup    | 1 missed inline import (``SpectralOceanState``) + 1 redundant inline (SH analyses already at module scope) | 1 module-level import + redundant lines removed |
 
 ## SPMD-vs-single-device numerical equivalence
 
