@@ -213,6 +213,55 @@ def _splice_variable(template_da, source_da, plan: SplicePlan):
 # Time-axis harmonisation
 # ---------------------------------------------------------------------------
 
+def _harmonise_horizontal_grid(per_var):
+    """Re-interpolate variables that don't share the reference grid.
+
+    JRA55-do v1.6.0 publishes atmospheric variables on a TL319 reduced
+    Gaussian grid (320×640) and ``friver`` on a separate 0.25° regular
+    grid (720×1440). A naive ``xr.Dataset(out_vars)`` merge would
+    fail. We interpolate the off-grid variables onto the reference
+    grid (the first variable's lat/lon) using xarray's bilinear
+    ``interp`` — not strictly mass-conservative for ``friver``, but
+    acceptable for the smoke test and downstream coastal
+    redistribution. Production OMIP runs should replace this with a
+    flux-conservative remap.
+
+    Input: dict ``{var_name: xr.DataArray}`` with possibly varying
+    horizontal grids.
+    Output: dict with all values on the reference grid.
+    """
+    ref_var = VARS[0].name
+    ref_da = per_var[ref_var]
+    ref_lat = ref_da["lat"].values
+    ref_lon = ref_da["lon"].values
+
+    out: dict = {}
+    for v in VARS:
+        da = per_var[v.name]
+        same_lat = (
+            da["lat"].size == ref_lat.size
+            and np.allclose(da["lat"].values, ref_lat)
+        )
+        same_lon = (
+            da["lon"].size == ref_lon.size
+            and np.allclose(da["lon"].values, ref_lon)
+        )
+        if same_lat and same_lon:
+            out[v.name] = da
+        else:
+            print(
+                f"[make_ryf] regridding {v.name} "
+                f"({da['lat'].size}×{da['lon'].size}) -> reference "
+                f"({ref_lat.size}×{ref_lon.size}) via bilinear interp",
+                flush=True,
+            )
+            out[v.name] = da.interp(
+                lat=ref_lat, lon=ref_lon, method="linear",
+                kwargs={"fill_value": 0.0},
+            )
+    return out
+
+
 def _rebase_to_common_3hourly(per_var):
     """Resample each variable to a common 3-hourly time axis at HH:00.
 
@@ -224,7 +273,9 @@ def _rebase_to_common_3hourly(per_var):
     For daily ``friver`` we broadcast each daily value across 8 slots
     of 3h.
 
-    Input: dict ``{var_name: xarray.DataArray}`` with native cadences.
+    Input: dict ``{var_name: xarray.DataArray}`` with native cadences
+    (assumed already on a common horizontal grid — call
+    ``_harmonise_horizontal_grid`` first).
     Output: xarray.Dataset with all variables on a single 3-hourly time
     coordinate.
     """
@@ -337,6 +388,10 @@ def make_ryf(iaf_dir: Path, year1: int, year2: int, out_path: Path,
         ds_s = xr.open_dataset(path_source)
         spliced = _splice_variable(ds_t[v.name], ds_s[v.name], plan)
         per_var[v.name] = spliced
+
+    if progress:
+        print("[make_ryf] harmonising to common horizontal grid ...")
+    per_var = _harmonise_horizontal_grid(per_var)
 
     if progress:
         print("[make_ryf] harmonising to common 3-hourly axis ...")

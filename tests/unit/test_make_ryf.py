@@ -229,6 +229,65 @@ def test_make_ryf_rejects_missing_variable_file(tmp_path):
         make_ryf_mod.make_ryf(iaf, 1990, 1991, out, progress=False)
 
 
+def test_make_ryf_handles_friver_on_different_grid(tmp_path):
+    """Real JRA55-do v1.6.0 publishes friver on a 0.25° regular grid
+    while the atmospheric vars are on TL319 (~0.55°). This test
+    reproduces that layout in miniature: 9 atmos vars on 4×8, friver
+    on 8×16. make_ryf must interpolate friver onto the atmos grid
+    rather than fail at the merge step."""
+    iaf = tmp_path / "iaf"
+    # 9 atmos vars on the small grid
+    for v in make_ryf_mod.VARS:
+        if v.name == "friver":
+            continue
+        _write_iaf_var(iaf, v, 1990, base_value=10000.0)
+        _write_iaf_var(iaf, v, 1991, base_value=20000.0)
+
+    # friver on a finer grid (8×16) — must be regridded
+    _write_friver_alt_grid = (
+        lambda year, base: _write_iaf_var_alt_grid(iaf, year, base)
+    )
+    _write_friver_alt_grid(1990, base=10000.0)
+    _write_friver_alt_grid(1991, base=20000.0)
+
+    out = tmp_path / "RYF9091.zarr"
+    make_ryf_mod.make_ryf(iaf, 1990, 1991, out, progress=False)
+
+    ds = xr.open_zarr(str(out), decode_times=False)
+    # friver should now be on the same grid as atmos (4×8) after
+    # bilinear interp.
+    assert ds["friver"].sizes == {"time": 365 * 8, "lat": 4, "lon": 8}
+    assert not np.any(np.isnan(ds["friver"].values))
+
+
+def _write_iaf_var_alt_grid(iaf_dir, year, base):
+    """Write friver on a finer 8x16 grid (vs the 4x8 default in
+    _write_iaf_var) to exercise the regrid path."""
+    var = next(v for v in make_ryf_mod.VARS if v.name == "friver")
+    n_per_day = 1
+    first_offset = pd.Timedelta(hours=12)
+    n_days = 365
+    n = n_days * n_per_day
+    times = pd.date_range(f"{year}-01-01 12:00", periods=n, freq="1D")
+
+    n_lat, n_lon = 8, 16  # different from atmos grid
+    data = (base + np.arange(n, dtype=np.float64)[:, None, None]
+            * np.ones((1, n_lat, n_lon)))
+
+    half_lat = 90.0 / n_lat
+    half_lon = 180.0 / n_lon
+    lat = np.linspace(-90.0 + half_lat, 90.0 - half_lat, n_lat)
+    lon = np.linspace(half_lon, 360.0 - half_lon, n_lon)
+
+    ds = xr.Dataset(
+        {var.name: (("time", "lat", "lon"), data)},
+        coords={"time": times, "lat": lat, "lon": lon},
+    )
+    path = make_ryf_mod._local_path(iaf_dir, var, year)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(str(path))
+
+
 def test_make_ryf_cli_entry_point(synthetic_iaf, tmp_path):
     """Smoke test the argv parser + main()."""
     out = tmp_path / "out.zarr"
