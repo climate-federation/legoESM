@@ -118,7 +118,10 @@ def ysu_turbulence(
     # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
     sigma_pbl = jax.nn.sigmoid(config.pbl_smooth_sharpness * (config.Ri_crit - Ri_bulk))
     w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.sum(w_pbl, axis=1)
+    # Numerator and denominator share the level axis — fuse into one
+    # stacked reduction.
+    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
+    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
     # ----- K-profile -----
