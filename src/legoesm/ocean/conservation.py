@@ -33,6 +33,7 @@ from legoesm.ocean.state import (
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.parallel.reductions import global_sum_mpi
 
 # Types accepted by the conservation fixer (cubed-sphere + lat-lon C-grid)
 _OceanStateT = Union[OceanState, LatLonCGridOceanState]
@@ -43,7 +44,6 @@ _GridT = Union[CubedSphereGrid, LatLonGrid]
 def _ocean_global_sum(local_value):
     """MPI-aware global sum for scalar or vector reductions."""
     if _is_distributed():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_value)
     return local_value
 
