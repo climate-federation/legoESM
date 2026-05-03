@@ -1541,9 +1541,6 @@ def isothermal_rest_state_spectral(
         values may be ``Field``-wrapped or raw JAX arrays — the dycore
         RHS duck-types both.
     """
-    import jax
-    from legoesm import constants
-
     nlev = sigma_coord.n_levels
     n_sh = grid.n_sh
 
