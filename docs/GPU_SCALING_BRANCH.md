@@ -94,6 +94,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean MPAS PE H_e + u_bar baroclinic-prep            | 2 column reductions | 1 stacked |
 | SW lat-lon C-grid mass_target+mass_new (uncached)   | 2 local sums | 1 stacked |
 | SW MPAS _fix_mass / _fix_energy local sums          | 3 + 4 separate kernels | 1 + 2 stacked reductions |
+| Spectral SW compute_diagnostics mass+energy+enstrophy | 3 area-weighted sums | 1 stacked reduction |
 
 ## SPMD-vs-single-device numerical equivalence
 
