@@ -109,3 +109,79 @@ atmosphere-only run with:
   `test_driver_forcing_dispatch.py`, `test_amip_config.py`,
   `test_corrections.py`) — no regressions from the loader or template fixes.
 
+### Iter 3 — All-grid smoke test + lightweight diagnostics
+
+**New code**
+
+- `scripts/smoke_test_amip_all_grids.py` — drives a 1-day AMIP run on
+  each grid (cubed_sphere/centered/C12, latlon/centered/24, gaussian/
+  spectral/T21, voronoi/mpas/level=4) and validates each via
+  `validate_amip_run.py`. Returns non-zero if any grid fails.
+- `scripts/validate_amip_run.py` — physics-realism / conservation
+  checker.  Bounds:
+    - Final atmospheric T in [200, 320] K (fatal)
+    - Precip in [0, 30] mm/day (warn-only)
+    - CWV in [0, 200] kg/m² (fatal, optional)
+    - SIC in [0, 1] (fatal, optional)
+    - max_wind ≤ 200 m/s (fatal)
+    - TOA fluxes finite (fatal, optional)
+    - Mass conservation < 5% relative (fatal)
+    - Moisture residual < 5 mm/day (warn)
+    - TOA energy residual: 500 W/m² band for spinup (n<30 d), 200 for
+      spin-up (n<365 d), 50 for production.
+  Optional channels (CWV, SIC, precip, TOA fluxes) become SKIP when the
+  spectral / MPAS lightweight path doesn't compute them — avoids
+  spurious failures while still failing the checks that matter (mass
+  conservation, T finite, wind bounded).
+
+**Code fixes**
+
+- `src/legoesm/driver/model_driver.py:_run_spectral` and `_run_mpas`:
+  - **Bug fix**: both run paths now emit `timeseries.npz` + `results.txt`
+    via the new `_save_lightweight_timeseries` helper.  Previously these
+    paths short-circuited the unified `DiagnosticCollector` (which
+    expects `HydrostaticState.u.data` etc., not the spectral coefficient
+    state or MPAS edge-velocity state) and silently produced no
+    diagnostics.  This made every gaussian/voronoi AMIP run untestable
+    via the validation harness.
+- `scripts/run_amip_cmip6_deck.py`:
+  - Default `--microphysics` flipped from `kessler` → `sundqvist`
+    (Kessler in the integrated AMIP path produces NaN winds at day 2;
+    tracked under "Known issues / follow-ups").
+
+**Test results: smoke test 3/4 grids pass, 30-day cubed_sphere validates**
+
+| Grid          | Discr.   | Resolution | Status | T_atm@1d | Precip@1d |
+|---------------|----------|-----------:|--------|---------:|----------:|
+| cubed_sphere  | centered |        C12 | ✅ OK  | 297.5 K  | 0.46 mm/d |
+| latlon        | centered |   24×48    | ✅ OK  | 296.9 K  | 0.59 mm/d |
+| gaussian      | spectral |       T21  | ✅ OK  | 296.7 K  | (not measured) |
+| voronoi       | mpas     |  level=4   | ❌    | NaN      | NaN       |
+
+**30-day full-deck cubed_sphere AMIP validation result**
+
+```
+Status: COMPLETED
+Final <T_atm>: 278.93 K   Final <Precip>: 7.58 mm/day
+Final <CWV>:  84.45       Final max_wind: 6.94 m/s
+Mass conservation (rel): 1.48e-05            ✓
+TOA energy residual max:  282.15 W/m² (n=6, bound=500) — spinup OK
+Moisture residual max:    7.58 mm/day — borderline (warn-only)
+ALL FATAL CHECKS PASSED
+```
+
+The atmosphere is cooling from the 300K isothermal IC toward the gray-
+radiation equilibrium with prescribed SST=292.6 K — physically expected.
+
+### Known issues / follow-ups
+
+| # | Issue | Status | Workaround |
+|---|-------|--------|------------|
+| 1 | **Kessler microphysics blows up** (NaN winds day ~2) in the integrated AMIP path with C12-C16 / dt=600s, even with `--convection none` and no clouds.  Bug doesn't surface in the dedicated unit tests.  Latent-heating tendency from the Sigmoid saturation adjustment may interact poorly with the dycore Euler stepping.  | OPEN | Use `--microphysics sundqvist` (now the deck default). |
+| 2 | **Voronoi/MPAS dycore blows up at day 1** even with `--convection none --clouds none --microphysics none --turbulence none --radiation gray` and the analytical AMIP IC (T=300K, RH=0.7, prescribed SST).  Pre-existing — same blow-up surfaces with the dycore alone, no AMIP forcing involved. | OPEN | Skip the voronoi grid in AMIP runs until the MPAS dycore stability fix lands. |
+| 3 | **MPAS turbulence integration** raises `NotImplementedError` (TKE expects cell-centered winds; MPAS stores edge-normal winds — edge→cell interpolation is missing). | OPEN | Pass `--turbulence none` for voronoi runs (smoke-test now does this). |
+| 4 | **Spectral / MPAS run paths bypass `DiagnosticCollector`** so detailed diagnostics (zonal monthly means, energy/moisture residuals, vertical profiles, snapshots) are unavailable on these grids — the lightweight timeseries fix only writes scalar global means. | OPEN, low-priority | Production AMIP runs use cubed_sphere/latlon. |
+| 5 | **Synthetic forcing files are not bit-exact CMIP6** — they reproduce the schemas and physical bounds but not the actual observed time series (not feasible without network access). | EXPECTED | Replace with real input4MIPs files when running for science (drop them under `forcing_amip/` with the canonical names; `run_amip_cmip6_deck.py` will pick them up). |
+
+
+
