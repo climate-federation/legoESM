@@ -125,6 +125,9 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Cubed-sphere CD-grid grids halo inline imports    | 2 inline imports per ``create_cubed_sphere_cdgrid`` | 7 names folded into existing module-level halo import |
 | Coupler.py compute_most_fluxes + _constants alias | 1 inline import + redundant alias      | 1 module-level import + drop alias |
 | Coupler.py init helper inline imports             | 2 inline imports (get_policy + multilayer_land) | 2 module-level imports |
+| Coupler accumulator _resolve_dtype inline         | 1 inline import in ``_tiny`` helper    | 1 module-level import |
+| Ice state aggregate_state inline                  | 1 inline import in ``dynamic_to_slab`` | 1 module-level import |
+| Land slab_land compute_most_fluxes inline         | 1 inline import per call (MOST branch) | 1 module-level import |
 
 ## SPMD-vs-single-device numerical equivalence
 
