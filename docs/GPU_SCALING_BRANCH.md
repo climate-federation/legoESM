@@ -109,6 +109,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Turbulence physics_fn spectral_pe + gaussian inline | 5 inline imports per call             | 5 module-level imports |
 | NH compressible-euler cdgrid pad_halo_4d (×2)      | 2 inline imports per RHS               | 1 module-level import |
 | NH compressible-euler + spectral-NH thomas_solve   | 2 inline imports per acoustic substep  | 2 module-level imports |
+| NH cdgrid CompressibleEulerConfig + spectral_pe redundant inline imports | 2 inline imports (jit body / dead duplicate) | 1 hoisted + 2 dead drops |
 
 ## SPMD-vs-single-device numerical equivalence
 
