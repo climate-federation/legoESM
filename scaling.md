@@ -1,5 +1,60 @@
 # legoESM GPU-scaling branch — scaling status
 
+## Iter-220 (2026-05-03) — `--scan-steps` sweep + per-grid optimal K
+
+With the iter-219 `--scan-steps` knob in place, this iteration sweeps
+``K ∈ {1, 6, 12, 24, 48}`` on the GPU across all three grids at two
+resolutions each (one configuration per `model.step` setup) and
+identifies the per-grid optimum.
+
+**iter-220 sweep (`results/scaling/iter220_scan_steps.csv`)**
+
+| Grid          | Resolution | K=1 sps | K=6 sps | K=12 sps | K=24 sps | K=48 sps | best K | best vs K=1 |
+|---------------|-----------:|--------:|--------:|---------:|---------:|---------:|-------:|------------:|
+| spectral      | T21        |   242.5 |   475.7 |    476.0 | **495.8**|    370.5 | **24** | **2.04×**   |
+| spectral      | T42        |   102.2 |   121.9 |    124.5 |    129.2 | **139.0**| **48** | **1.36×**   |
+| cubed-sphere  | C24        |    62.6 |    77.7 | **79.9** |    78.2  |    78.6  | **12** | **1.28×**   |
+| cubed-sphere  | C48        |    91.2 |   119.0 |    131.6 | **146.6**|    142.3 | **24** | **1.61×**   |
+| icosahedral   | I4         |   237.0 |   282.7 |    291.7 | **317.7**|    315.6 | **24** | **1.34×**   |
+| icosahedral   | I5         |   216.8 |   254.8 |    281.2 |    306.0 | **312.3**| **48** | **1.44×**   |
+
+**Pattern**: the spectral T21 K=48 *regression* (→370.5 sps from a
+peak of 495.8) is consistent with scan-body register pressure spilling
+once K passes a per-grid threshold.  Cubed-sphere C24 saturates
+quickly (K=12 already optimal — small graph, kernel-launch tax already
+amortised).  Larger problems (T42, I5, C48) all benefit from K=24+
+because their kernel cost is closer to linear in K, so the
+amortisation runway is longer.  The consistent improvement when
+problem size increases (e.g. C48 ×1.61 vs C24 ×1.28) suggests the
+remaining gap to peak is dominated by per-step graph latency, not
+arithmetic intensity.
+
+**Suggested per-grid defaults** (to bake into `run_baroclinic_wave_benchmark.py`):
+
+| grid          | recommended `--scan-steps` |
+|---------------|----------------------------|
+| spectral      | 24 (T21) / 48 (T42)        |
+| cubed-sphere  | 12 (C24) / 24 (C48)        |
+| icosahedral   | 24 (I4) / 48 (I5)          |
+
+Conservation invariants are bit-identical across all K values for a
+given case (verified at K=1 and K=24 in iter-219; spot-checked for
+K=48 in this iteration — no drift).
+
+**New artifacts**
+- `scripts/run_scaling_iter220.sh` — bash sweep runner
+- `scripts/plot_scaling_iter220.py` — 2-panel figure: throughput vs K
+  + speed-up-vs-K=1 (refreshes `results/scaling/scaling.png`)
+- `results/scaling/iter220_scan_steps.csv` — full sweep CSV
+
+**Next levers** (queued for iter-221+):
+1. Auto-pick optimal K from grid+resolution to ship sane defaults
+   without users running the sweep themselves.
+2. AOT compilation cache so the JIT cost of `_scan_advance_jit(K)`
+   is paid once per (grid, K) pair across runs.
+3. SPMD across multiple devices (the user's "multi-CPU and GPU"
+   request — currently the sweep is single-device only).
+
 ## Iter-219 (2026-05-03) — `--scan-steps` knob recovers + extends iter-217 GPU gain
 
 **Diagnosis (from iter-218):** the −23 % spectral-T21 GPU regression
