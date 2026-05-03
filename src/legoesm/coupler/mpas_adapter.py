@@ -19,6 +19,9 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.coupler.config import CouplerConfig, TileConfig
 from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
+from legoesm.coupler.coupler import init_surface_state, make_coupler, LakeConfig
+from legoesm.land.config import LandConfig
+from legoesm.ice.config import SeaIceConfig
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_from_coupler
 
 
@@ -72,8 +75,6 @@ def init_mpas_surface_state(
     -------
     SurfaceState
     """
-    from legoesm.coupler.coupler import init_surface_state
-
     return init_surface_state(
         shape=(nCells,),
         T_soil_init=T_soil_init,
@@ -113,11 +114,6 @@ def make_mpas_coupler(
         ``(sfc_state, atm_forcing, tile_config, ocean_sst, ocean_u, ocean_v, dt, doy)``
         → ``(SurfaceState, SurfaceToAtm)``
     """
-    from legoesm.coupler.coupler import make_coupler
-    from legoesm.land.config import LandConfig
-    from legoesm.ice.config import SeaIceConfig
-    from legoesm.coupler.coupler import LakeConfig
-
     if land_config is None:
         land_config = LandConfig()
     if ice_config is None:
