@@ -306,9 +306,13 @@ def main() -> None:
         print("  no strong-scaling data — skipping strong plot")
 
     # ------------------- weak scaling datasets ----------------------
+    # Prefer iter-189 fresh weak measurements when present; fall back to
+    # earlier sweeps so the plot remains comparable across iterations.
     weak_paths = {
-        "cubed-sphere": _latest_csv(Path("results/scaling_iter63/cs"), "weak_scaling.csv"),
-        "icosahedral": _latest_csv(Path("results/scaling_iter63/ico"), "weak_scaling.csv"),
+        "cubed-sphere (iter-189)": _latest_csv(Path("results/scaling_iter189_cs_weak"), "weak_scaling.csv"),
+        "cubed-sphere (iter-63)": _latest_csv(Path("results/scaling_iter63/cs"), "weak_scaling.csv"),
+        "icosahedral (iter-189)": _latest_csv(Path("results/scaling_iter189_ico_weak"), "weak_scaling.csv"),
+        "icosahedral (iter-63)": _latest_csv(Path("results/scaling_iter63/ico"), "weak_scaling.csv"),
         "spectral": _latest_csv(Path("results/scaling_iter63/spec"), "weak_scaling.csv"),
     }
     weak_datasets: dict[str, list[StrongRow]] = {}

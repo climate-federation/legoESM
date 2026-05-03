@@ -118,13 +118,18 @@ small, packed sendrecv set rather than a full edge perimeter transfer.
 
 ### 3.5 Weak scaling (iter-63 → iter-189 fresh re-runs)
 
-#### Cubed-sphere — base N=24
+#### Cubed-sphere — base N=24 (iter-189 fresh)
 | n_devices | resolution | cells/dev | ms/step | "Eff" |
 |----------:|-----------:|----------:|--------:|------:|
-|         1 |       C24  |    27 648 |    2.74 | 100.0% |
-|         2 |       C34  |    27 744 |    6.79 |  40.5% |
-|         3 |       C42  |    28 224 |    9.88 |  28.3% |
-|         6 |       C58  |    26 912 |   14.95 |  17.8% |
+|         1 |       C24  |    27 648 |    2.97 | 100.0% |
+|         2 |       C34  |    27 744 |    7.18 |  41.5% |
+|         3 |       C42  |    28 224 |   10.58 |  28.6% |
+|         6 |       C58  |    26 912 |   12.87 |  22.4% |
+
+vs iter-63: 1-dev 2.74 → 2.97 (+8%, noise + parallel-sweep
+contamination), 2-dev 6.79 → 7.18 (+6%, same), 3-dev 9.88 → 10.58
+(+7%), **6-dev 14.95 → 12.87 (-14%, real improvement from
+iter-186/187/189 hot-path hoists**).
 
 #### Icosahedral — base level=4 (iter-189 fresh)
 | n_devices | resolution | cells/dev | ms/step | "Eff" |
