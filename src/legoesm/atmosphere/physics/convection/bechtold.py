@@ -315,10 +315,21 @@ def bechtold_convection(
         )
         q_sat_env = saturation_mixing_ratio(T, p_full)
         rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
-        below_mass = jnp.sum(below_lcl * dp_full, axis=-1) + 1e-6
-        rh_below = (
-            jnp.sum(below_lcl * rh_layer * dp_full, axis=-1) / below_mass
-        )
+        # The 4 ``* dp_full`` column reductions in this branch
+        # (below-LCL mass for ``rh_below`` denom, RH-weighted below-LCL
+        # for ``rh_below`` num, below-LCL mass for ``evap_rate`` denom,
+        # and rain-source positive part for ``evap_total``) all reduce
+        # over the same level axis with the same ``dp_full`` weight.
+        # Fuse the 3 distinct integrands into one stacked reduction;
+        # ``below_mass`` and ``below_lcl_mass`` reuse the first column.
+        _stack = jnp.stack(
+            [below_lcl, below_lcl * rh_layer, jnp.maximum(dq_c_conv_dt, 0.0)],
+            axis=-1,
+        ) * dp_full[..., None]
+        _col_triple = jnp.sum(_stack, axis=-2)
+        _below_lcl_dp = _col_triple[..., 0]
+        below_mass = _below_lcl_dp + 1e-6
+        rh_below = _col_triple[..., 1] / below_mass
         downdraft_trigger = jax.nn.sigmoid(
             10.0 * (config.downdraft_RH_min - rh_below)
         )
@@ -330,10 +341,8 @@ def bechtold_convection(
         # (Codex stop-time review: "downdraft fix still creates column
         # water" — earlier form added vapor without removing the
         # corresponding cloud-water source).
-        below_lcl_mass = jnp.sum(below_lcl * dp_full, axis=-1, keepdims=True).clip(1e-6, None)
-        rain_source_total = jnp.sum(
-            jnp.maximum(dq_c_conv_dt, 0.0) * dp_full, axis=-1,
-        ) / constants.g
+        below_lcl_mass = _below_lcl_dp[:, None].clip(1e-6, None)
+        rain_source_total = _col_triple[..., 2] / constants.g
         evap_total = jnp.minimum(
             jnp.abs(M_d_base) * config.downdraft_evap_efficiency,
             rain_source_total,
