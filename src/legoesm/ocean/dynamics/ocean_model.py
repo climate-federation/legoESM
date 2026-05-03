@@ -35,6 +35,7 @@ from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
+from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 from legoesm.ocean.dynamics.barotropic_cgrid import barotropic_substeps_cgrid
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
@@ -292,9 +293,6 @@ class OceanModel:
 
     def _compute_tendencies(self, state: OceanState, surface_forcing=None):
         """Compute baroclinic tendencies using C-D grid operators."""
-        from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
-            ocean_baroclinic_tendencies_cdgrid,
-        )
         return ocean_baroclinic_tendencies_cdgrid(
             state, self.grid, self.z_coord,
             self._cdgrid, self.config,
