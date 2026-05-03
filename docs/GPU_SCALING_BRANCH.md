@@ -104,6 +104,9 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean PE FC inline halo + operator imports        | 3 inline imports per RHS                | 3 module-level imports |
 | Ocean PE cubed-sphere CD-grid inline imports      | 6 inline imports per RHS (4 distinct, 2 dupes) | 3 module-level imports (combine same-module) |
 | Ocean MPAS fill_land_cells_mpas inline imports    | 3 inline imports across dycore/barotropic/model | 3 module-level imports |
+| Atmosphere tracer_transport pad_halo_4d inline    | 1 inline import per call               | 1 module-level import |
+| Convection physics_fn spectral_pe + gaussian inline | 4 inline imports per call             | 4 module-level imports |
+| Turbulence physics_fn spectral_pe + gaussian inline | 5 inline imports per call             | 5 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
