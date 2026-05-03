@@ -209,10 +209,14 @@ def freshwater_from_coupler(
         ice_mass_old = rho_ice * h_old * A_old
         ice_mass_new = rho_ice * h_new * A_new
         # Multi-category: h has more dims than precip_total; sum categories.
+        # Stack the two ice-mass arrays once and reduce the trailing axes
+        # together — each loop pass becomes one ``jnp.sum`` instead of two.
         n_extra = ice_mass_old.ndim - precip_total.ndim
-        for _ in range(n_extra):
-            ice_mass_old = jnp.sum(ice_mass_old, axis=-1)
-            ice_mass_new = jnp.sum(ice_mass_new, axis=-1)
+        if n_extra > 0:
+            _ice_pair = jnp.stack([ice_mass_old, ice_mass_new], axis=-1)
+            for _ in range(n_extra):
+                _ice_pair = jnp.sum(_ice_pair, axis=-2)
+            ice_mass_old, ice_mass_new = _ice_pair[..., 0], _ice_pair[..., 1]
         ice_fw = -(ice_mass_new - ice_mass_old) / jnp.maximum(dt, 1e-10)
     else:
         ice_fw = jnp.zeros(nCells, dtype=precip.dtype)
