@@ -29,6 +29,9 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
+    diagnose_w_from_flux_div,
+    flux_form_vertical_tracer_advection,
+    flux_form_vertical_tracer_advection_tvd,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -570,12 +573,6 @@ class LatLonCGridOceanModel:
         # The horizontal flux integrates to zero by the 2D divergence theorem.
         # The vertical flux telescopes to surface/bottom (both zero).
         # Total conservation is exact.
-        from legoesm.ocean.vertical import (
-            diagnose_w_from_flux_div,
-            flux_form_vertical_tracer_advection,
-            flux_form_vertical_tracer_advection_tvd,
-        )
-
         h_k_new = compute_layer_thickness(
             state_new.eta.data, state_new.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
