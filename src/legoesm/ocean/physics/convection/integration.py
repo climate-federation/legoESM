@@ -15,6 +15,8 @@ from legoesm.ocean.eos import (
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+from legoesm.ocean.physics.convection.enhanced_diffusion import enhanced_diffusion_convection
+from legoesm.ocean.physics.convection.plume import plume_convection
 
 
 def make_convection_physics(
@@ -51,7 +53,6 @@ def _make_none() -> Callable:
 
 
 def _make_enhanced_diffusion(config: OceanConvectionConfig) -> Callable:
-    from legoesm.ocean.physics.convection.enhanced_diffusion import enhanced_diffusion_convection
     cfg = config.enhanced_diffusion
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -68,7 +69,6 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig) -> Callable:
 
 
 def _make_plume(config: OceanConvectionConfig) -> Callable:
-    from legoesm.ocean.physics.convection.plume import plume_convection
     cfg = config.plume
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
