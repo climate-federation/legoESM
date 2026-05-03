@@ -198,15 +198,22 @@ def mpas_ocean_conservation_fixer(
     h_k_fix_acc = cast(h_k_corrected, _ACC_MODULE, "accumulate")
 
     # --- Heat (T) correction (3 sums batched into 1 allreduce; #166) ---
+    # The 3 inner column-axis reductions also share the level axis;
+    # stack them into one ``jnp.sum(..., axis=-2)`` and then collapse
+    # the area-weighted outer sum with ``axis=0`` so the whole 3-term
+    # diagnostic costs one column reduction + one area reduction.
     T_corrected = state_new.T.data
     if config.fix_heat:
         T_old_acc = cast(state_old.T.data, _ACC_MODULE, "accumulate")
         T_new_acc = cast(state_new.T.data, _ACC_MODULE, "accumulate")
-        heat_terms = jnp.stack([
-            jnp.sum(jnp.sum(T_old_acc * h_k_old_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(T_new_acc * h_k_fix_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(h_k_fix_acc, axis=-1) * weighted_area_acc),
-        ])
+        _heat_inner = jnp.sum(
+            jnp.stack(
+                [T_old_acc * h_k_old_acc, T_new_acc * h_k_fix_acc, h_k_fix_acc],
+                axis=-1,
+            ),
+            axis=-2,
+        )
+        heat_terms = jnp.sum(_heat_inner * weighted_area_acc[..., None], axis=0)
         heat_old, heat_new, ocean_vol = _global_sum(heat_terms)
         heat_expected = heat_old + jnp.asarray(expected_dHeat, dtype=heat_old.dtype)
         T_correction = (heat_expected - heat_new) / jnp.maximum(ocean_vol, 1.0)
@@ -217,11 +224,14 @@ def mpas_ocean_conservation_fixer(
     if config.fix_salt:
         S_old_acc = cast(state_old.S.data, _ACC_MODULE, "accumulate")
         S_new_acc = cast(state_new.S.data, _ACC_MODULE, "accumulate")
-        salt_terms = jnp.stack([
-            jnp.sum(jnp.sum(S_old_acc * h_k_old_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(S_new_acc * h_k_fix_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(h_k_fix_acc, axis=-1) * weighted_area_acc),
-        ])
+        _salt_inner = jnp.sum(
+            jnp.stack(
+                [S_old_acc * h_k_old_acc, S_new_acc * h_k_fix_acc, h_k_fix_acc],
+                axis=-1,
+            ),
+            axis=-2,
+        )
+        salt_terms = jnp.sum(_salt_inner * weighted_area_acc[..., None], axis=0)
         salt_old, salt_new, ocean_vol = _global_sum(salt_terms)
         salt_expected = salt_old + jnp.asarray(expected_dSalt, dtype=salt_old.dtype)
         S_correction = (salt_expected - salt_new) / jnp.maximum(ocean_vol, 1.0)
