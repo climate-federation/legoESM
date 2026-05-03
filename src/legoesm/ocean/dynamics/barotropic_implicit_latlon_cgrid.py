@@ -82,8 +82,11 @@ def _depth_average_to_faces(
     # h at u-faces (avg of adjacent cell h, periodic in lon)
     h_u = 0.5 * (jnp.roll(h_k, 1, axis=1) + h_k)
     h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
-    U_bar = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
+    # Fuse the per-face thickness + barotropic-mean reductions into
+    # one stacked sum each — both reduce ``... * h`` over the level axis.
+    _u_pair = jnp.sum(jnp.stack([h_u, u_3d * h_u], axis=-1), axis=-2)
+    H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
+    U_bar = _u_pair[..., 1] / H_u * u_mask
 
     # h at v-faces (avg of adjacent cell h; pole rows zeroed by v_mask)
     h_v_int = 0.5 * (h_k[:-1] + h_k[1:])
@@ -91,8 +94,9 @@ def _depth_average_to_faces(
     nlev = h_k.shape[2]
     zero_row = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
     h_v = jnp.concatenate([zero_row, h_v_int, zero_row], axis=0)
-    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), min_water_col)
-    V_bar = jnp.sum(v_3d * h_v, axis=-1) / H_v * v_mask
+    _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
+    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
+    V_bar = _v_pair[..., 1] / H_v * v_mask
 
     return U_bar, V_bar
 
