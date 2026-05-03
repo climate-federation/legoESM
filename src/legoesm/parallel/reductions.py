@@ -18,6 +18,8 @@ import warnings
 
 import jax
 
+from legoesm.parallel.profiling import mpi_timer
+
 
 _TESTED_JAX_MIN = (0, 8, 0)
 _TESTED_JAX_MAX_EXCL = (0, 10, 0)
@@ -220,7 +222,6 @@ def global_sum_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global sum across all processes.
     """
-    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
     with mpi_timer("global_sum_mpi"):
@@ -247,7 +248,6 @@ def global_max_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global maximum across all processes.
     """
-    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
     with mpi_timer("global_max_mpi"):
@@ -274,7 +274,6 @@ def global_min_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global minimum across all processes.
     """
-    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
     with mpi_timer("global_min_mpi"):
@@ -302,7 +301,6 @@ def allgather_mpi(local_value: jax.Array) -> jax.Array:
         Concatenated array from all processes along a new leading axis.
         Shape: ``(n_processes,) + local_value.shape``.
     """
-    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
     n_procs = MPI.COMM_WORLD.Get_size()
@@ -373,7 +371,6 @@ def batch_allreduce_mpi(
     packed = jnp.concatenate(flat_parts, axis=0)
 
     # Single MPI allreduce.
-    from legoesm.parallel.profiling import mpi_timer
     with mpi_timer("batch_allreduce_mpi"):
         global_packed = _mpi4jax_array_result(
             mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),

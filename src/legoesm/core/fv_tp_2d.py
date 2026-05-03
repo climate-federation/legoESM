@@ -18,7 +18,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo
+from legoesm.grids.halo import pad_halo, pad_halo_pair_h2, synchronize_cgrid_fluxes
 
 _R3 = 1.0 / 3.0
 
@@ -807,7 +807,7 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
 
     q_full = pad_halo(q, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
 
-    # Pass 1: Y-sweep on q, X-sweep on cross-corrected q_i
+    # Pass 1: Y-sweep on q to produce q_i.
     fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
@@ -815,14 +815,10 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
-    # Proper halo exchange for q_i (required for mass conservation)
-    q_i_pad = pad_halo(q_i, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
-    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
-                use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
-
-    # Pass 2: X-sweep on q, Y-sweep on cross-corrected q_j
+    # Pass 2: X-sweep on q to produce q_j.  fx2 depends only on q_full
+    # (already padded), not on q_i, so this can be reordered up to here
+    # — letting us pack the q_i and q_j halos into a single SPMD
+    # collective below.
     fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
@@ -830,8 +826,20 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
-    # Proper halo exchange for q_j (required for mass conservation)
-    q_j_pad = pad_halo(q_j, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
+    # Pack q_i and q_j into a single halo=2 exchange under SPMD; the
+    # MPI / local fallbacks reduce to two sequential ``pad_halo`` calls
+    # with identical arithmetic.  Mass conservation requires both halos
+    # to be filled before the cross-sweeps; the pair-pack drops the
+    # per-PPM halo=2 collective count from 3 → 2.
+    q_i_pad, q_j_pad = pad_halo_pair_h2(
+        q_i, q_j, interp_offsets=halo_offsets, duogrid=halo_dg,
+    )
+
+    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
+                use_duogrid=use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=bounded_domain)
+
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
@@ -861,7 +869,6 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     # active for the mass-flux callers (`transport_step`).
     dg = cdgrid.base.duogrid
     if apply_cgrid_flux_sync and dg is not None and dg.ng >= 2:
-        from legoesm.grids.halo import synchronize_cgrid_fluxes
         fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
 
     return fx, fy

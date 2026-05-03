@@ -21,7 +21,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.land.carbon.config import CarbonState
@@ -132,7 +132,6 @@ def step_land(
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,

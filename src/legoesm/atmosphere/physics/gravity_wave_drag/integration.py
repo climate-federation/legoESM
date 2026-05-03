@@ -53,6 +53,15 @@ from legoesm.atmosphere.physics.thermodynamics import (
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 
 
 def _get_gwd_fn(config: GravityWaveDragConfig):
@@ -438,16 +447,6 @@ def _make_spectral_pe_gwd(
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         gwd_spectrum_out = None
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import (
-            sh_analysis_3d,
-            sh_analysis_oc2_3d,
-            sh_analysis_dmu_3d,
-        )
-
         fields = grid_fields
         if fields is None:
             fields = spectral_pe_to_grid(state, grid, sigma_coord)

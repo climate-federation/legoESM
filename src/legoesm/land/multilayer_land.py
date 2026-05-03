@@ -33,9 +33,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
+from legoesm.land.soil_hydraulics import psi_from_theta
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
@@ -143,16 +144,14 @@ def step_multilayer_land(
     # --- Moisture availability from root-zone water content ---
     # Root-zone weighted beta: integrates moisture stress across layers
     # weighted by root density, so a dry top with wet deeper layers
-    # still permits transpiration.
+    # still permits transpiration.  Numpy broadcasting handles both
+    # ``root_frac`` shapes (``(nlayers,)`` when ``lp is None``,
+    # ``(ncol, nlayers)`` when present); ``root_frac[None, :] * beta_root``
+    # produces the same result as ``root_frac * beta_root`` for the 1D
+    # case so a separate branch is unnecessary.
     w_frac_rz = jnp.clip(
         jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0,
-    )  # (ncol,)  — note: root_frac may be (nlayers,) or (ncol, nlayers)
-    # Handle broadcast: if root_frac is 1D, the sum over axis=-1 on
-    # root_frac[None,:]*beta_root gives the same result.
-    if lp is None:
-        w_frac_rz = jnp.clip(
-            jnp.sum(root_frac[None, :] * beta_root, axis=-1), 0.0, 1.0,
-        )
+    )  # (ncol,)
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac_rz
 
     # --- Stomatal conductance (if enabled) ---
@@ -182,7 +181,6 @@ def step_multilayer_land(
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
@@ -269,9 +267,11 @@ def step_multilayer_land(
     # Partition evaporation into bare-soil and root-mediated transpiration
     # to avoid double-counting (surface flux_top subtracts bare-soil evap,
     # Richards sink removes root-mediated transpiration).
-    f_veg = jnp.clip(
-        jnp.sum(root_frac[None, :] * beta_root, axis=-1), 0.0, 1.0,
-    )  # (ncol,) vegetation cover proxy
+    # ``f_veg`` and ``weight_sum`` reduce the same ``root_frac * beta_root``
+    # product; compute the column reduction once and reuse it.
+    weight = root_frac[None, :] * beta_root  # (ncol, n_layers)
+    _weight_sum_raw = jnp.sum(weight, axis=-1)  # (ncol,)
+    f_veg = jnp.clip(_weight_sum_raw, 0.0, 1.0)  # vegetation cover proxy
     evap_bare = evap_rate * (1.0 - f_veg)      # bare-soil evaporation
     evap_transp = evap_rate * f_veg             # transpiration (root-mediated)
 
@@ -285,8 +285,7 @@ def step_multilayer_land(
     # the water budget. beta_root weights the distribution but must NOT reduce
     # the total — the surface flux already embedded moisture stress via f_veg.
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w  # m/s
-    weight = root_frac[None, :] * beta_root  # (ncol, n_layers)
-    weight_sum = jnp.sum(weight, axis=-1, keepdims=True)  # (ncol, 1)
+    weight_sum = _weight_sum_raw[..., None]  # (ncol, 1)
     # Safe normalization: when all layers are dry, E_pot_transp ≈ 0 anyway
     weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
@@ -353,17 +352,16 @@ def step_multilayer_land(
             (theta_new - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
             0.0, 1.0,
         )
-        w_frac_rz_new = jnp.clip(
-            jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0,
-        )
     else:
         beta_root_new = jnp.clip(
             (theta_new - theta_wp) / (theta_fc - theta_wp + 1e-10),
             0.0, 1.0,
         )
-        w_frac_rz_new = jnp.clip(
-            jnp.sum(root_frac[None, :] * beta_root_new, axis=-1), 0.0, 1.0,
-        )
+    # See comment above ``w_frac_rz``: broadcasting handles both
+    # ``root_frac`` shapes uniformly, no per-branch reduction needed.
+    w_frac_rz_new = jnp.clip(
+        jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0,
+    )
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
     beta_new = stomatal_ratio * beta_soil_new
     q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
@@ -435,8 +433,6 @@ def init_multilayer_land_state(
     -------
     MultiLayerLandState
     """
-    from legoesm.land.soil_hydraulics import psi_from_theta
-
     grid = make_soil_grid(config.soil_grid)
     nlayers = grid.n_layers
 

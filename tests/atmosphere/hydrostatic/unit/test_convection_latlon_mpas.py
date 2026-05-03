@@ -270,9 +270,52 @@ class TestConvectionMPAS:
         (no-proxy path) — and assert the bridge's dT/dt matches the
         proxy call and *differs* from the zeros call.  This pins the
         actual semantic difference the fix is meant to deliver.
+
+        For the proxy path to differ measurably from the
+        ``moisture_convergence=zeros`` path the column needs *some*
+        moisture: the proxy is ``column-integrated max(q_v - RH_crit
+        q_sat, 0)`` and vanishes identically when ``q_v = 0``.  Attach
+        a near-saturated ``q_v`` field to ``mpas_state.tracers`` so
+        the proxy fires (~2.7e-14 magnitude under q_v=0 collapses to
+        identical noise floor in both paths and the differential
+        signal vanishes).
         """
         from legoesm.atmosphere.physics.convection.tiedtke import (
             tiedtke_convection,
+        )
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.grids.vertical import pressure_from_sigma
+        from legoesm.core.field import Field
+
+        # Build a near-saturated q_v field consistent with the state's T,p_s
+        # profile, then wrap in tracers so the bridge's q_v_col path fires.
+        nlev = sigma_coord.n_levels
+        ncol = mpas_state.T.data.shape[0]
+        T_col = mpas_state.T.data.reshape(ncol, nlev)
+        _state_dtype = T_col.dtype
+        p_s_arr = mpas_state.p_s.data
+        p_full_col = pressure_from_sigma(
+            sigma_coord.sigma_full, p_s_arr,
+        ).reshape(ncol, nlev)
+        p_half_col = pressure_from_sigma(
+            sigma_coord.sigma_half, p_s_arr,
+        ).reshape(ncol, nlev + 1)
+        q_sat_col = saturation_mixing_ratio(T_col, p_full_col)
+        # 0.95 RH near the surface, ramping to 0.50 aloft — mirrors the
+        # spectral-PE test fixture.  The proxy uses RH_crit ~ 0.7, so
+        # 0.95 RH layers register as super-critical and the column-MC
+        # proxy produces a non-trivial value.
+        sigma_full = sigma_coord.sigma_full
+        rh_profile = jnp.where(sigma_full > 0.7, 0.95, 0.50)
+        q_v_col = (rh_profile[None, :] * q_sat_col).astype(_state_dtype)
+        q_v_grid = q_v_col.reshape(mpas_state.T.data.shape)
+        mpas_state = mpas_state._replace(
+            tracers={
+                "q_v": Field(
+                    data=q_v_grid, name="q_v",
+                    dims=mpas_state.T.dims, units="kg/kg",
+                ),
+            },
         )
 
         cfg = ConvectionConfig(scheme="tiedtke", tiedtke=TiedtkeConfig())
@@ -284,24 +327,10 @@ class TestConvectionMPAS:
         tend_bridge, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
 
         # Replicate the column inputs the bridge constructs for the
-        # MPAS Tiedtke path.  ``state.tracers is None`` → q_v_col is
-        # zeros; ``state.v is None`` and edge-vs-cell mismatch → u/v
-        # are zeros (this is the bridge's MPAS CMT graceful-degrade
-        # branch).  ``phys_state is None`` → conv_prog_profile is
-        # zeros at first call.
-        nlev = sigma_coord.n_levels
-        ncol = mpas_state.T.data.shape[0]
-        T_col = mpas_state.T.data.reshape(ncol, nlev)
-        _state_dtype = T_col.dtype
-        p_s = mpas_state.p_s.data
-        from legoesm.grids.vertical import pressure_from_sigma
-        p_full_col = pressure_from_sigma(
-            sigma_coord.sigma_full, p_s,
-        ).reshape(ncol, nlev)
-        p_half_col = pressure_from_sigma(
-            sigma_coord.sigma_half, p_s,
-        ).reshape(ncol, nlev + 1)
-        q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        # MPAS Tiedtke path.  ``state.v is None`` and edge-vs-cell
+        # mismatch → u/v are zeros (this is the bridge's MPAS CMT
+        # graceful-degrade branch).  ``phys_state is None`` →
+        # conv_prog_profile is zeros at first call.
         u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)

@@ -783,4 +783,11 @@ class TestMassConservation:
             state = model.step(state, 60.0)
         final_mass = float(global_integral(state.p_s, grid))
         rel_err = abs(final_mass - initial_mass) / abs(initial_mass)
-        assert rel_err < 1e-8, f"Mass drift = {rel_err}"
+        # Storage policy is float32 by default → mass fixer corrects to
+        # machine precision (~1e-7 ULP for sums of order 1e5 p_s × 5e14 area)
+        # at every step, but cumulative quantization-on-write of the
+        # corrected p_s back to float32 storage between steps yields a few
+        # ULPs of residual drift over the 3-step run.  Tolerance matches
+        # the float32 ULP floor (cf. ``test_mass_fix_via_step`` above which
+        # uses 1e-5 for one step).
+        assert rel_err < 1e-6, f"Mass drift = {rel_err}"

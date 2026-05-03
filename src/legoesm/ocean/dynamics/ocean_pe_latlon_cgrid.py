@@ -82,6 +82,11 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
     flux_form_vertical_tracer_advection_tvd as _flux_form_vertical_advection_tvd,
 )
+from legoesm.core.weno import weno_reconstruct_split, weno_upwind
+from legoesm.ocean.advection import (
+    flux_form_vertical_tracer_advection_weno5,
+    flux_form_vertical_tracer_advection_weno7,
+)
 
 
 # interp_cell_to_uface is imported from latlon_cgrid_operators (shared).
@@ -306,7 +311,6 @@ def _weno_zeta_at_u(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 
     hw = {5: 3, 7: 4}[order]
     n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
@@ -385,7 +389,6 @@ def _weno_zeta_at_v(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1] - 1
@@ -460,15 +463,9 @@ def _flux_form_vertical_momentum_advection_weno(
         ``-(F_top - F_bot) / h_u``
     """
     if order == 5:
-        from legoesm.ocean.advection import (
-            flux_form_vertical_tracer_advection_weno5,
-        )
         vert_flux_div = flux_form_vertical_tracer_advection_weno5(
             u, w_half, h_u, dt=0.0)
     elif order == 7:
-        from legoesm.ocean.advection import (
-            flux_form_vertical_tracer_advection_weno7,
-        )
         vert_flux_div = flux_form_vertical_tracer_advection_weno7(
             u, w_half, h_u, dt=0.0)
     else:
@@ -571,7 +568,6 @@ def _weno_cell_to_uface(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1]
@@ -622,7 +618,6 @@ def _weno_cell_to_vface(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    from legoesm.core.weno import weno_reconstruct_split, weno_upwind
 
     hw = {5: 3, 7: 4}[order]
     n_lat = phi.shape[0]
@@ -792,10 +787,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # The barotropic solver handles the depth-averaged momentum.
     # The baroclinic step must operate on the PERTURBATION velocity
     # u' = u - U_bar to avoid double-counting the barotropic tendency.
-    U_bar = jnp.sum(u * h_u, axis=-1) / jnp.maximum(
-        jnp.sum(h_u, axis=-1), 1e-10) * u_mask  # (n_lat, n_lon+1)
-    V_bar = jnp.sum(v * h_v, axis=-1) / jnp.maximum(
-        jnp.sum(h_v, axis=-1), 1e-10) * v_mask  # (n_lat+1, n_lon)
+    # Fuse num/denom reductions per face — both share their h_u/h_v
+    # weight on the level axis.
+    _u_pair = jnp.sum(jnp.stack([u * h_u, h_u], axis=-1), axis=-2)
+    U_bar = _u_pair[..., 0] / jnp.maximum(_u_pair[..., 1], 1e-10) * u_mask  # (n_lat, n_lon+1)
+    _v_pair = jnp.sum(jnp.stack([v * h_v, h_v], axis=-1), axis=-2)
+    V_bar = _v_pair[..., 0] / jnp.maximum(_v_pair[..., 1], 1e-10) * v_mask  # (n_lat+1, n_lon)
     u_prime = u - U_bar[..., jnp.newaxis]
     v_prime = v - V_bar[..., jnp.newaxis]
 

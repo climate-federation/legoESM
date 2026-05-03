@@ -22,8 +22,24 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
 from legoesm.core.field import Field
-from legoesm.core.state import HydrostaticState, HydrostaticTendencies
+from legoesm.core.precision import get_policy
+from legoesm.core.state import (
+    HydrostaticState,
+    HydrostaticTendencies,
+    MPASHydrostaticState,
+    MPASHydrostaticTendencies,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis,
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 from legoesm.grids.vertical import (
     SigmaCoordinate,
     HybridSigmaPressureCoordinate,
@@ -223,7 +239,6 @@ def held_suarez_init(
     -------
     HydrostaticState : Initial state.
     """
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
 
     n = grid.n
@@ -381,7 +396,6 @@ def held_suarez_init_latlon(
     -------
     HydrostaticState : Initial state.
     """
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
 
     n_lat = grid.n_lat
@@ -444,8 +458,6 @@ def held_suarez_forcing_mpas(
     -------
     MPASHydrostaticTendencies
     """
-    from legoesm.core.state import MPASHydrostaticTendencies
-
     u = state.u.data       # (nEdges, nlev)
     T = state.T.data       # (nCells, nlev)
     p_s = state.p_s.data   # (nCells,)
@@ -544,9 +556,6 @@ def held_suarez_init_mpas(
     -------
     MPASHydrostaticState
     """
-    from legoesm.core.state import MPASHydrostaticState
-    from legoesm.core.precision import get_policy
-
     _dtype = get_policy().storage
 
     nCells = mesh.nCells
@@ -611,17 +620,6 @@ def held_suarez_forcing_spectral(
     SpectralHydrostaticState
         Physics tendencies in spectral space (same pytree structure).
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import (
-        SpectralHydrostaticState,
-        spectral_pe_to_grid,
-    )
-    from legoesm.grids.gaussian import (
-        sh_analysis,
-        sh_analysis_3d,
-        sh_analysis_oc2_3d,
-        sh_analysis_dmu_3d,
-    )
-
     # --- 1. Transform state to grid space ---
     fields = spectral_pe_to_grid(state, grid, sigma_coord)
     u = fields['u']         # (n_lat, n_lon, nlev)

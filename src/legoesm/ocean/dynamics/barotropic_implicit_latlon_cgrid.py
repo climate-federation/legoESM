@@ -106,8 +106,9 @@ def _depth_average_to_faces(
     nlev = h_k.shape[2]
     zero_row = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
     h_v = jnp.concatenate([zero_row, h_v_int, zero_row], axis=0)
-    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), min_water_col)
-    V_bar = jnp.sum(v_3d * h_v, axis=-1) / H_v * v_mask
+    _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
+    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
+    V_bar = _v_pair[..., 1] / H_v * v_mask
 
     return U_bar, V_bar
 

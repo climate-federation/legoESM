@@ -98,7 +98,7 @@ class TestCheckpointRestart:
         ckpt_path = tmp_path / "checkpoint.npz"
 
         save_checkpoint(ckpt_path, state, q_v, step=100, day=10.0, config=config)
-        state2, q_v2, step2, day2, config2, diag_acc, _, _ = load_checkpoint(
+        state2, q_v2, step2, day2, config2, diag_acc, _, _, _ = load_checkpoint(
             ckpt_path, grid, sigma,
         )
 
@@ -125,7 +125,7 @@ class TestCheckpointRestart:
         save_checkpoint(ckpt_path, state, q_v, step=50, day=5.0,
                         config=config, diag_accumulators=accum)
 
-        _, _, _, _, _, diag_acc, _, _ = load_checkpoint(ckpt_path, grid, sigma)
+        _, _, _, _, _, diag_acc, _, _, _ = load_checkpoint(ckpt_path, grid, sigma)
         assert "precip_total" in diag_acc
         assert "rad_total" in diag_acc
         np.testing.assert_allclose(diag_acc["precip_total"], 3.14, atol=1e-12)
@@ -135,7 +135,7 @@ class TestCheckpointRestart:
         ckpt_path = tmp_path / "checkpoint_nodiag.npz"
 
         save_checkpoint(ckpt_path, state, q_v, step=1, day=0.1, config=config)
-        _, _, _, _, _, diag_acc, _, _ = load_checkpoint(ckpt_path, grid, sigma)
+        _, _, _, _, _, diag_acc, _, _, _ = load_checkpoint(ckpt_path, grid, sigma)
         assert diag_acc == {}
 
 

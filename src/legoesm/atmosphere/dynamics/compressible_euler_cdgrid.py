@@ -63,12 +63,14 @@ from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
+    CompressibleEulerConfig,
     compute_exner_perturbation,
     _sponge_profile,
     acoustic_substeps,
     acoustic_substeps_semi_implicit,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
+from legoesm.grids.halo import pad_halo_4d
 from legoesm import constants
 
 
@@ -268,13 +270,17 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
     # passive-trailing-axis pattern; ``_interp_corner_to_center`` is a
     # 4-point average with no halo, so this saves one kernel launch.
-    _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., 2)
+    # ``du_d_dt``/``dv_d_dt`` live on D-grid corners (spatial dims may
+    # differ from cell-centre by one in the staggered direction); after
+    # ``_interp_corner_to_center`` the result lands on cell-centre
+    # ``(n_face_uv, n_i_uv, n_j_uv, nlev_uv)`` from line 155.
+    _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., nlev, 2)
     _duv_d_dt_flat = _duv_d_dt.reshape(
         _duv_d_dt.shape[0], _duv_d_dt.shape[1], _duv_d_dt.shape[2],
-        nlev_at * 2,
+        nlev_uv * 2,
     )
     _duv_dt = _interp_corner_to_center(_duv_d_dt_flat).reshape(
-        n_face_at, n_i_at, n_j_at, nlev_at, 2,
+        n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2,
     )
     du_dt = _duv_dt[..., 0]
     dv_dt = _duv_dt[..., 1]
@@ -385,10 +391,9 @@ def cdgrid_compressible_euler_slow_tendencies(
         _lap1 = laplacian_compact_3d(_hyper_flat, grid)
         # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
         # both gradient ops (saves 1 ``pad_halo_4d`` per call).
-        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_uvtr
         _dg = getattr(grid, 'duogrid', None)
         _offsets = None if _dg is not None else grid.halo_interp_offsets
-        _lap1_pad = _pad_halo_4d_uvtr(_lap1, interp_offsets=_offsets, duogrid=_dg)
+        _lap1_pad = pad_halo_4d(_lap1, interp_offsets=_offsets, duogrid=_dg)
         _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
         _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
         _lap2 = divergence_3d(_gx, _gy, grid).reshape(
@@ -435,10 +440,9 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Pre-pad ``w_full`` once and pass to both gradient_x_3d /
     # gradient_y_3d via ``padded=`` so they share the halo MPI exchange.
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
     _dg_w = getattr(grid, 'duogrid', None)
     _offsets_w = None if _dg_w is not None else grid.halo_interp_offsets
-    _w_full_pad = _pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
+    _w_full_pad = pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
     dw_dx = gradient_x_3d(w_full, grid, padded=_w_full_pad)
     dw_dy = gradient_y_3d(w_full, grid, padded=_w_full_pad)
     horiz_adv_w = -(u * dw_dx + v * dw_dy)
@@ -565,7 +569,6 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_jitted(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
         """JIT-compiled step core."""
-        from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
             n_acoustic_substeps=self.config.n_acoustic_substeps,

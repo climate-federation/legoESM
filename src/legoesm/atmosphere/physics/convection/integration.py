@@ -29,6 +29,8 @@ from legoesm.grids.vertical import (
     SigmaCoordinate,
     TerrainMetric,
     pressure_from_sigma,
+    compute_sigma_dot_and_total,
+    compute_pressure_velocity,
 )
 from legoesm import constants
 
@@ -60,6 +62,11 @@ from legoesm.atmosphere.physics.thermodynamics import (
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
 
 
 def _get_convection_fn(config: ConvectionConfig):
@@ -278,9 +285,6 @@ def _make_hydrostatic_convection(
         # Only the cubed-sphere and lat-lon grids ship with a divergence
         # operator we can call here; other grids fall back to zeros.
         if is_w_grid_consumer:
-            from legoesm.grids.vertical import (
-                compute_sigma_dot, compute_pressure_velocity,
-            )
             from legoesm.atmosphere.physics._shared import (
                 diagnose_grid_w_from_omega,
             )
@@ -297,11 +301,17 @@ def _make_hydrostatic_convection(
                     div_grid = _div3_latlon(state.u.data, state.v.data, grid)
 
             if div_grid is not None:
-                dsigma = sigma_coord.dsigma
                 sigma_top = sigma_coord.sigma_half[0]
-                D_total = jnp.sum(div_grid * dsigma, axis=-1)
-                dp_s_dt_grid = -state.p_s.data * D_total / (1.0 - sigma_top)
-                sigma_dot_grid = compute_sigma_dot(div_grid, sigma_coord)
+                # Iter-55: share the cumsum between σ̇ and ``D_total``
+                # (mirrors iter-52/53 in the dycores).  Saves one
+                # cross-shard reduction per physics call on this w-grid
+                # diagnostic path.
+                sigma_dot_grid, _D_total_full = compute_sigma_dot_and_total(
+                    div_grid, sigma_coord,
+                )
+                dp_s_dt_grid = (
+                    -state.p_s.data * _D_total_full[..., 0] / (1.0 - sigma_top)
+                )
                 omega_grid = compute_pressure_velocity(
                     sigma_dot_grid, state.p_s.data, dp_s_dt_grid, sigma_coord,
                 )                                          # shape_3d
@@ -919,12 +929,6 @@ def _make_spectral_pe_convection(
             prog_key, prog_init = "a_u", scheme_config.a_u_init
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
-
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -984,18 +988,16 @@ def _make_spectral_pe_convection(
         # convergence/divergence (the wedge of model behavior the
         # ``parcel_perturb_T``-only fallback is blind to).
         if is_w_grid_consumer:
-            from legoesm.grids.vertical import (
-                compute_sigma_dot, compute_pressure_velocity,
-            )
             from legoesm.atmosphere.physics._shared import (
                 diagnose_grid_w_from_omega,
             )
             div_grid = fields['div'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
-            dsigma = sigma_coord.dsigma
             sigma_top = sigma_coord.sigma_half[0]
-            D_total = jnp.sum(div_grid * dsigma, axis=-1)
-            dp_s_dt_grid = -p_s * D_total / (1.0 - sigma_top)
-            sigma_dot_grid = compute_sigma_dot(div_grid, sigma_coord)
+            # Iter-55: share the cumsum between σ̇ and ``D_total``.
+            sigma_dot_grid, _D_total_full = compute_sigma_dot_and_total(
+                div_grid, sigma_coord,
+            )
+            dp_s_dt_grid = -p_s * _D_total_full[..., 0] / (1.0 - sigma_top)
             omega_grid = compute_pressure_velocity(
                 sigma_dot_grid, p_s, dp_s_dt_grid, sigma_coord,
             )                                               # (n_lat, n_lon, nlev)

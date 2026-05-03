@@ -32,6 +32,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.core.operators_3d import (
     vertical_advection_height,
 )
@@ -57,6 +58,7 @@ from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
 )
+from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm import constants
 
 _COS_LAT_MIN = 1.0e-6
@@ -600,8 +602,6 @@ def _acoustic_substeps_grid_semi_implicit(
     gradient in the w equation is treated implicitly via a tridiagonal
     solve, removing the vertical acoustic CFL constraint.
     """
-    from legoesm.timestepping.tridiagonal import thomas_solve_batched
-
     g = config.g
     c_p = constants.c_pd
     R_d = constants.R_d
@@ -735,7 +735,6 @@ class SpectralCompressibleEulerModel:
                 )
             )
 
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True

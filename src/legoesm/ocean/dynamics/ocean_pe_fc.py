@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.core.operators_fc import FCOperatorConfig
+from legoesm.core.operators_fc import FCOperatorConfig, _fc_pad_halo_vector
 from legoesm.core.operators_fc_3d import (
     fc_curl_z_3d,
     fc_gradient_x_3d,
@@ -27,6 +27,7 @@ from legoesm.core.operators_fc_3d import (
     fc_divergence_damping_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo_4d
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -113,8 +114,7 @@ def ocean_baroclinic_tendencies_fc(
     n_face_pK, n_i_pK, n_j_pK, nlev_pK = p_prime.shape
     _pK_stack = jnp.stack([p_prime, K], axis=-1)
     _pK_flat = _pK_stack.reshape(n_face_pK, n_i_pK, n_j_pK, nlev_pK * 2)
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fc
-    _pK_pad = _pad_halo_4d_fc(_pK_flat, halo=1, interp_offsets=grid.halo_interp_offsets)
+    _pK_pad = pad_halo_4d(_pK_flat, halo=1, interp_offsets=grid.halo_interp_offsets)
     _dpK_dx_flat = fc_gradient_x_3d(_pK_flat, grid, fc_config, padded=_pK_pad)
     _dpK_dy_flat = fc_gradient_y_3d(_pK_flat, grid, fc_config, padded=_pK_pad)
     _dpK_dx = _dpK_dx_flat.reshape(
@@ -158,8 +158,7 @@ def ocean_baroclinic_tendencies_fc(
     # halo with cross-face cos/sin rotation, costlier than a scalar
     # halo) — same Loop 134 exploit as the FC laplacian/hyperdiff
     # share.
-    from legoesm.core.operators_fc import _fc_pad_halo_vector as _fc_pad_halo_vector_oc
-    _combined_u_pad, _combined_v_pad = _fc_pad_halo_vector_oc(
+    _combined_u_pad, _combined_v_pad = _fc_pad_halo_vector(
         _div_u_pair_flat, _div_v_pair_flat, grid,
     )
     _div_pair_flat = fc_divergence_3d(
@@ -187,9 +186,14 @@ def ocean_baroclinic_tendencies_fc(
     # with p_prime, halving the cost of each timestep).
 
     # --- 7. Vector-invariant momentum (skew-symmetric) ---
-    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
-    U_bar = jnp.sum(u * h_k, axis=-1) / H_total * mask
-    V_bar = jnp.sum(v * h_k, axis=-1) / H_total * mask
+    # H_total + U_bar + V_bar all reduce ``... * h_k`` over the level
+    # axis — fuse into one stacked column reduction.
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u * h_k, v * h_k], axis=-1), axis=-2,
+    )
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar = _bar_triple[..., 1] / H_total * mask
+    V_bar = _bar_triple[..., 2] / H_total * mask
     u_prime = (u - U_bar[..., jnp.newaxis]) * mask_3d
     v_prime = (v - V_bar[..., jnp.newaxis]) * mask_3d
     f_3d = grid.f[..., jnp.newaxis]
@@ -253,8 +257,7 @@ def ocean_baroclinic_tendencies_fc(
     # Three halo-issuing calls on the same input collapse to a single
     # ``pad_halo_4d`` collective per RHS evaluation when
     # diffusion is on (Loop 178 extension of Loops 134/177).
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_oc_fc_tr
-    tracer_flat_pad = _pad_halo_4d_oc_fc_tr(
+    tracer_flat_pad = pad_halo_4d(
         tracer_flat, halo=1, interp_offsets=grid.halo_interp_offsets,
     )
     horiz_flat = fc_scalar_advection_3d(

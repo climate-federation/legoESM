@@ -79,6 +79,15 @@ from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 
 
 def make_turbulence_physics(
@@ -434,16 +443,6 @@ def _make_spectral_pe_turbulence(
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import (
-            sh_analysis_3d,
-            sh_analysis_oc2_3d,
-            sh_analysis_dmu_3d,
-        )
-
         tke_out = None
 
         # Transform spectral state to grid space (or reuse precomputed fields).

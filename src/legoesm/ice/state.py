@@ -13,6 +13,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.ice.itd import aggregate_state
 
 
 class SeaIceState(NamedTuple):
@@ -74,7 +75,6 @@ def dynamic_to_slab(state: DynamicSeaIceState) -> SeaIceState:
 
     # Multi-category: aggregate
     if h.ndim > 3:
-        from legoesm.ice.itd import aggregate_state
         h_agg, T_agg, a_agg = aggregate_state(h, T, a)
         return SeaIceState(
             h_ice=state.h_ice.replace(data=h_agg),

@@ -81,6 +81,7 @@ from legoesm.grids.halo import (
     _fill_corners_h3,  # iter-628: needed for halo=3 MPI port
 )
 from legoesm.parallel.comm import CommTopology
+from legoesm.parallel.profiling import mpi_timer
 from legoesm.parallel.reductions import _mpi4jax_array_result
 
 
@@ -569,7 +570,6 @@ def pad_halo_mpi(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
-    from legoesm.parallel.profiling import mpi_timer
     with mpi_timer("pad_halo_mpi"):
         if topology.tiling != (1, 1):
             return _pad_halo_mpi_tiled(data, topology, halo, mpi4jax, MPI)
@@ -1074,7 +1074,6 @@ def pad_halo_mpi_4d(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
-    from legoesm.parallel.profiling import mpi_timer
     with mpi_timer("pad_halo_mpi_4d"):
         if topology.tiling != (1, 1):
             return _pad_halo_mpi_tiled_4d(data, topology, halo, mpi4jax, MPI)

@@ -318,8 +318,15 @@ def apply_predicted_sundqvist_rain_survival_fraction(
         dt=dt,
         config=config,
     )
-    generated_rain_flux = jnp.sum(rates.autoconversion * rho * dz, axis=1)
-    base_evap_flux = jnp.sum(rates.evaporation * rho * dz, axis=1)
+    # Both fluxes share the ``rho * dz`` weight on the level axis; fuse
+    # the autoconversion and base-evaporation column reductions.
+    _flux_pair = jnp.sum(
+        jnp.stack([rates.autoconversion, rates.evaporation], axis=-1)
+        * (rho * dz)[..., None],
+        axis=-2,
+    )
+    generated_rain_flux = _flux_pair[..., 0]
+    base_evap_flux = _flux_pair[..., 1]
     target_precip = jnp.clip(predicted_rain_survival_fraction, 0.0, 1.0) * generated_rain_flux
     target_evap_flux = jnp.clip(generated_rain_flux - target_precip, 0.0, generated_rain_flux)
     scale = jnp.where(

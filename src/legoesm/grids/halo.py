@@ -596,7 +596,9 @@ def pad_halo(
                 "SPMD halo=3 exchange not yet implemented; "
                 "halo=3 is only available on the single-node local path.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
-        padded = explicit_pad_halo(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local(data, offsets)
     elif halo == 2:
@@ -619,6 +621,80 @@ def pad_halo(
         padded = fill_corner_region(padded, duogrid, halo)
 
     return padded
+
+
+def pad_halo_pair_h2(
+    q1: jax.Array,
+    q2: jax.Array,
+    interp_offsets: jax.Array | None = None,
+    duogrid=None,
+) -> tuple[jax.Array, jax.Array]:
+    """Halo=2 exchange a pair of independent ``(6, n, n)`` fields.
+
+    Under the SPMD backend, the two fields ride a single
+    ``packed_pad_halo_4d(halo=2)`` collective — dropping per-call halo=2
+    cross-device collective count from 2 → 1 when both fields can be
+    exchanged together (e.g. PPM transport's ``q_i`` and ``q_j``,
+    which depend only on the already-padded ``q``).  Under the
+    local / MPI backends this falls through to two sequential
+    ``pad_halo(halo=2)`` calls — same arithmetic, no extra overhead.
+
+    Parameters
+    ----------
+    q1, q2 : jax.Array, shape ``(6, n, n)``
+    interp_offsets : optional
+        Forwarded to the underlying SPMD / local kernels (3D h2
+        offsets shaped ``(6, 4, 2, n)`` when ``duogrid is None``).
+    duogrid : DuoGridData or None
+
+    Returns
+    -------
+    (q1_pad, q2_pad) : tuple of jax.Array, each shape ``(6, n+4, n+4)``.
+    """
+    if _halo_backend == "spmd" and _spmd_mesh is not None:
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+        offsets = None if duogrid is not None else interp_offsets
+        # Add a singleton trailing axis so the SPMD packed kernel —
+        # which targets 4D ``(6, n, n, C)`` inputs — can ride the same
+        # all_gather.  Squeeze the channel axis off on return.
+        q1_4d = q1[..., None]
+        q2_4d = q2[..., None]
+        q1_pad_4d, q2_pad_4d = packed_pad_halo_4d(
+            q1_4d, q2_4d, mesh=_spmd_mesh,
+            duogrid=duogrid, interp_offsets=offsets, halo=2,
+        )
+        return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+    if _halo_backend == "mpi" and _mpi_topology is not None:
+        # MPI: ``packed_pad_halo_mpi_4d`` already supports halo=2 and
+        # halves the MPI message count from 2 → 1 by stacking the two
+        # fields along the trailing axis.  Same singleton-channel trick
+        # as the SPMD path.  ``packed_pad_halo_mpi_4d`` does not
+        # currently support ``interp_offsets`` (the underlying MPI
+        # exchange ignores them — see the explicit guard in
+        # ``pad_halo_mpi_4d``); when offsets are requested, fall back
+        # to the per-field unpacked ``pad_halo`` path which raises a
+        # clear NotImplementedError so callers know to either run with
+        # duogrid (preferred) or accept the unpacked MPI path until
+        # offset-aware MPI exchange lands.
+        if interp_offsets is None:
+            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+            q1_4d = q1[..., None]
+            q2_4d = q2[..., None]
+            q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
+                q1_4d, q2_4d, topology=_mpi_topology,
+                halo=2, duogrid=duogrid,
+            )
+            return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+        # offsets requested under MPI — `pad_halo` already raises a
+        # clear NotImplementedError on this combination.  Let the
+        # per-field path do that for a sharper error than ours.
+    # Local backend (or MPI-with-offsets — handled above): two
+    # sequential pad_halo calls with identical arithmetic.
+    q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    q2_pad = pad_halo(q2, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    return q1_pad, q2_pad
 
 
 def pad_halo_4d(
@@ -711,7 +787,9 @@ def pad_halo_4d(
                 "SPMD 4D halo=3 exchange not yet implemented; "
                 "halo=3 is only available on MPI and single-node paths.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
-        padded = explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo_4d(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local_4d(data, offsets)
     elif halo == 2:
@@ -956,11 +1034,20 @@ def pad_halo_vector_4d(
         from legoesm.parallel.cubesphere_exchange import (
             explicit_pad_halo_vector_4d,
         )
+        # Iter-31: forward ``interp_offsets`` to the SPMD vector kernel.
+        # Without this, the dycore's hyperdiffusion path
+        # (``hyperdiffusion_3d`` → ``divergence_3d`` → here) silently
+        # drops the Lagrange correction under SPMD, producing ~6e-4
+        # relative drift on u/v after a single SSP-RK3 step at C24/L8.
+        # ``duogrid``-on-grid runs already handle this through the
+        # post-exchange remap; ``interp_offsets``-with-no-duogrid runs
+        # need the explicit forwarding.
+        offsets = None if duogrid is not None else interp_offsets
         return explicit_pad_halo_vector_4d(
             u_data, v_data,
             cos_angle, sin_angle,
             cos_angle_padded, sin_angle_padded,
-            _spmd_mesh, halo=halo,
+            _spmd_mesh, halo=halo, interp_offsets=offsets,
         )
 
     # Broadcast 2D angles to match 4D data

@@ -41,6 +41,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import (
     HydrostaticState,
+    HydrostaticTendencies,
     FV3HydrostaticState,
     FV3HydrostaticTendencies,
 )
@@ -59,7 +60,24 @@ from legoesm.core.operators_3d import (
     hyperdiffusion_3d as _hyperdiffusion_3d,
     laplacian_compact_3d as _laplacian_compact_3d,
 )
-from legoesm.core.conservation import zero_mean_tendency
+from legoesm.core.conservation import (
+    zero_mean_tendency,
+    fix_mass_hydrostatic,
+    fix_mass_hydrostatic_target,
+)
+from legoesm.core.operators import (
+    global_integral,
+    hyperdiffusion,
+    laplacian_compact,
+)
+from legoesm.parallel.cubesphere_exchange import (
+    packed_pad_halo_4d as _packed_pad_halo_4d_spmd,
+)
+from legoesm.parallel.halo_exchange import (
+    packed_pad_halo_mpi_4d as _packed_pad_halo_4d_mpi,
+)
+from legoesm.core.precision import _resolve_dtype, cast_pytree
+from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -74,6 +92,7 @@ from legoesm.grids.vertical import (
     compute_geopotential,
     compute_geopotential_hybrid,
     compute_sigma_dot,
+    compute_sigma_dot_and_total,
     compute_mass_flux_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
@@ -155,6 +174,7 @@ def fv3_hydrostatic_tendencies(
     cdgrid: CubedSphereCDGrid,
     config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
     physics_tendency: FV3HydrostaticTendencies | None = None,
+    physics_tendency_cc: HydrostaticTendencies | None = None,
 ) -> FV3HydrostaticTendencies:
     """Compute tendencies for the FV3 hydrostatic PE with D-grid winds.
 
@@ -171,6 +191,17 @@ def fv3_hydrostatic_tendencies(
     cdgrid : CubedSphereCDGrid
     config : CDGridPrimitiveEquationConfig
     physics_tendency : FV3HydrostaticTendencies, optional
+        Pre-converted D-grid physics tendency.  Existing API; added
+        directly to the dycore tendencies (no extra halo).
+    physics_tendency_cc : HydrostaticTendencies, optional
+        Iter-65: cell-centre physics tendency.  When provided, the
+        ``du_dt`` / ``dv_dt`` components ride iter-64's batched
+        corner interpolation rather than firing their own halo
+        collective in the caller.  The caller passes this instead of
+        ``physics_tendency`` to skip the standalone corner-interp
+        halo for the physics u/v contribution.  ``dT_dt`` /
+        ``dp_s_dt`` from this object are added directly (cell-centre,
+        no interp needed).
 
     Returns
     -------
@@ -220,32 +251,92 @@ def fv3_hydrostatic_tendencies(
     # --- 6. D-grid vorticity at cell centres via circulation ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)  # (6, n, n, nlev)
 
-    # === Stage-level packed halo exchange #1 ===
-    # Pack {ζ, B, 1/T} into one collective instead of 3 separate.
-    # Note: we pack ζ (relative vorticity) rather than ζ+f, since f is stored
-    # directly at corners as `cdgrid.f_corner` and adding it after the corner
-    # interpolation avoids the sin(lat) nonlinear-interpolation error.
-    # Matches iter-74 fix pattern in cdgrid_momentum_tendencies.
+    # === Stage-level packed halo exchange (merged iter-58/60) ===
+    # Pack ALL cell-field halos for the stage into ONE collective:
+    # always {ζ, B, 1/T, T, ln_ps_3d}; conditionally {u_cell, v_cell}
+    # for hyperdiff and {hybrid_factor} for the hybrid PGF correction.
+    #
+    # Iter-58 merge: previously two separate packed exchanges fired
+    # at different points in the function.  Iter-59 added ln_ps_hi
+    # reuse for the high-precision PGF.  Iter-60 adds the hybrid
+    # factor ``B_full * p_s / p_full`` to the pack so the PGF
+    # correction's corner interpolation skips its standalone halo too.
     ln_ps = jnp.log(p_s)
     inv_T = 1.0 / T
+    ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1) — rides the pack
+    if _hybrid:
+        _hybrid_factor = sigma_coord.B_full * p_s[..., None] / p_full  # (6, n, n, nlev)
+    else:
+        _hybrid_factor = None
+    # Iter-61: when divergence damping is active, compute ``div_v`` via
+    # the C-grid divergence operator BEFORE the merged stage halo and
+    # pack it so the corresponding ``_arakawa_lamb_gradient(div_v)``
+    # below skips its own standalone halo collective.  ``cgrid_divergence``
+    # is local (no halo) and depends only on (u_c, v_c) which are
+    # already in scope.  Note: ``div_v`` is also used downstream by
+    # ``compute_mass_flux_hybrid`` / ``compute_sigma_dot_and_total`` —
+    # those consume the unpadded interior values so this hoist is
+    # transparent to them.
+    _need_div_pad = config.div_damp_coeff > 0
+    if _need_div_pad:
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+    else:
+        div_v = None  # computed lazily below if not div-damped
     from legoesm.grids.halo import _halo_backend
+    _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     # Packed MPI/SPMD halos now apply the duogrid kinked-to-extended
     # remap when `duogrid=dg` is passed (iter-84).  Fall through to
     # None pre-pads only when neither backend is active.
     _pe_dg = grid.duogrid
-    if _halo_backend == "spmd":
-        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
-            zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
-        )
-    elif _halo_backend == "mpi":
-        from legoesm.grids.halo import _mpi_topology
-        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta, B, inv_T, topology=_mpi_topology, duogrid=_pe_dg,
-        )
-    else:
-        _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
+    # Mirror the unpacked ``pad_halo_4d`` policy: when no duogrid is
+    # active, pass through the cubed-sphere ``halo_interp_offsets`` so
+    # the SPMD packed kernel applies the same Lagrange correction the
+    # local-pad path uses; otherwise, the duogrid path produces the
+    # remap and offsets must be None.
+    _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+    # Build the field list dynamically: {zeta, B, inv_T, T} are always
+    # packed; {u_cell, v_cell} ride the pack when the Laplacian /
+    # hyperdiffusion need them; {_hybrid_factor} rides when the PGF
+    # correction needs it (hybrid coord); {div_v} rides when divergence
+    # damping is active; ln_ps_3d always rides last.
+    _pack_fields = [zeta, B, inv_T, T]
+    if _needs_uv_pad:
+        _pack_fields += [u_cell, v_cell]
+    if _hybrid_factor is not None:
+        _pack_fields.append(_hybrid_factor)
+    if _need_div_pad:
+        _pack_fields.append(div_v)
+    _pack_fields.append(ln_ps_3d)
+    _zeta_pad = _B_pad = _invT_pad = _T_pad = None
+    _u_cc_pad = _v_cc_pad = _lnps_pad = _hf_pad = None
+    _div_v_pad = None
+    if _halo_backend in ("spmd", "mpi"):
+        if _halo_backend == "spmd":
+            from legoesm.parallel.cubesphere_exchange import _spmd_mesh
+            _padded_list = _packed_pad_halo_4d_spmd(
+                *_pack_fields,
+                mesh=_spmd_mesh, duogrid=_pe_dg, interp_offsets=_pe_offs,
+            )
+        else:
+            from legoesm.grids.halo import _mpi_topology
+            _padded_list = _packed_pad_halo_4d_mpi(
+                *_pack_fields,
+                topology=_mpi_topology, duogrid=_pe_dg,
+            )
+        # Unpack in the same order they were packed.
+        _idx = 0
+        _zeta_pad = _padded_list[_idx]; _idx += 1
+        _B_pad = _padded_list[_idx]; _idx += 1
+        _invT_pad = _padded_list[_idx]; _idx += 1
+        _T_pad = _padded_list[_idx]; _idx += 1
+        if _needs_uv_pad:
+            _u_cc_pad = _padded_list[_idx]; _idx += 1
+            _v_cc_pad = _padded_list[_idx]; _idx += 1
+        if _hybrid_factor is not None:
+            _hf_pad = _padded_list[_idx]; _idx += 1
+        if _need_div_pad:
+            _div_v_pad = _padded_list[_idx]; _idx += 1
+        _lnps_pad = _padded_list[_idx]; _idx += 1
 
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
     zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
@@ -258,11 +349,22 @@ def fv3_hydrostatic_tendencies(
     # Promote to higher precision for the PGF computation to avoid
     # catastrophic cancellation (large p terms, small gradient).
     # Use result_type to only upcast (never downcast from current dtype).
-    from legoesm.core.precision import _resolve_dtype
     _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
-    # ln_ps is 2D — async overlap not beneficial for 2D fields
     ln_ps_hi = ln_ps.astype(_pg_dt)
-    dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
+    # Iter-59: when the merged stage halo (iter-58) already exchanged
+    # ``ln_ps`` at the PGF compute precision (i.e. ``ln_ps.dtype == _pg_dt``),
+    # reuse ``_lnps_pad`` here instead of re-exchanging ln_ps standalone.
+    # Saves one halo collective per RK3 stage on the SPMD / MPI cubed-
+    # sphere FV3 PE float64 path.  Falls through to the legacy 2D-halo
+    # path when dtypes differ (e.g. mixed float32 state with float64 PGF
+    # compute precision) so no precision is lost.
+    if _lnps_pad is not None and ln_ps.dtype == _pg_dt:
+        _lnps_pad_hi = _lnps_pad[..., 0]  # (6, n+2, n+2) at PGF precision
+        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(
+            ln_ps_hi, cdgrid, padded=_lnps_pad_hi,
+        )
+    else:
+        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
     T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
     T_corner_hi = T_corner.astype(_pg_dt)
@@ -275,10 +377,12 @@ def fv3_hydrostatic_tendencies(
     # from surface pressure should vanish.  Without this factor the model
     # develops spurious upper-level heating and eventually blows up.
     if _hybrid:
-        B_full = sigma_coord.B_full  # (nlev,)
-        _hybrid_factor = B_full * p_s[..., None] / p_full  # (6, n, n, nlev)
-        # Interpolate to D-grid corners for the PGF correction
-        _hf_corner = _interp_center_to_corner(_hybrid_factor, cdgrid)
+        # ``_hybrid_factor`` and ``_hf_pad`` are produced by the merged
+        # halo exchange above (iter-60).  Reuse the pre-padded halo so
+        # the corner interpolation skips its own standalone collective.
+        _hf_corner = _interp_center_to_corner(
+            _hybrid_factor, cdgrid, padded=_hf_pad,
+        )
         pg_corr_x = pg_corr_x * _hf_corner
         pg_corr_y_perp = pg_corr_y_perp * _hf_corner
 
@@ -293,7 +397,14 @@ def fv3_hydrostatic_tendencies(
     # previous code computed ``cgrid_divergence(u_c, v_c, cdgrid)``
     # twice when ``div_damp_coeff > 0`` — one full halo exchange + PPM
     # pass per RHS evaluation.  Drop the duplicate.
-    div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+    # Iter-61: when div_damp is active, ``div_v`` was already computed
+    # before the merged stage halo and packed alongside the cell fields,
+    # so reuse it here.  Without div_damp, compute lazily — no need to
+    # pad it since downstream operators (``compute_mass_flux_hybrid``,
+    # ``compute_sigma_dot_and_total``) consume the unpadded interior
+    # values.
+    if div_v is None:
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
 
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
@@ -303,19 +414,30 @@ def fv3_hydrostatic_tendencies(
                 div_v, cdgrid,
             )
         else:
-            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)
+            # Iter-61: feed the pre-padded ``_div_v_pad`` from the
+            # merged stage halo so the A-L gradient skips its own halo
+            # exchange.  Falls through to a standalone exchange on the
+            # single-device (None) path or the async-overlap path above.
+            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(
+                div_v, cdgrid, padded=_div_v_pad,
+            )
         du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
 
     # --- 10b. Surface pressure tendency and vertical motion ---
 
     if _hybrid:
-        D_total_p = jnp.sum(div_v * dp, axis=-1)
-        dp_s_dt_data = -D_total_p / sigma_coord.B_range
+        # Reuse the column-sum that ``compute_mass_flux_hybrid``
+        # already produces internally instead of recomputing
+        # ``jnp.sum(div_v * dp, axis=-1)`` ourselves.  Saves one
+        # cross-level reduction per RK3 stage on every horizontal-shard
+        # configuration that touches the hybrid path.
+        mass_flux, _D_total_p_full = compute_mass_flux_hybrid(
+            div_v, p_s, sigma_coord,
+        )
+        dp_s_dt_data = -_D_total_p_full[..., 0] / sigma_coord.B_range
         if config.zero_mean_ps_tendency:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
-
-        mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
 
         # Vertical advection of D-grid winds: interpolate (u_d, v_d)
         # together to cell centres (single 4-point average instead of
@@ -344,28 +466,29 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
-        _vert_adv_uv_d = _interp_center_to_corner(
-            _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
-            cdgrid,
-        ).reshape(
-            n_face_uv, n_i_uv + 1, n_j_uv + 1, nlev_uv, 2,
-        )
-        vert_adv_u_d = _vert_adv_uv_d[..., 0]
-        vert_adv_v_d = _vert_adv_uv_d[..., 1]
+        # Iter-64: defer the cell-center → D-grid corner interpolation
+        # of ``_vert_adv_uv_cc`` until the diffusion section so it can
+        # be batched with the (lap_uv, hyperdiff_uv) corner interps
+        # into a single halo collective.
 
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
     else:
-        dsigma = sigma_coord.dsigma
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
 
-        D_total = jnp.sum(div_v * dsigma, axis=-1)
-        dp_s_dt_data = -p_s * D_total / sigma_range
+        # Iter-52: ``compute_sigma_dot_and_total`` runs the cumsum
+        # exactly once and returns both σ̇ and ``D_total = Σ div · Δσ``,
+        # rather than recomputing ``jnp.sum(div_v * dsigma, ...)``
+        # separately and then ``compute_sigma_dot`` doing its own
+        # cumsum.  Saves one cross-level collective per RK3 stage on
+        # the non-hybrid σ-coordinate path.
+        sigma_dot, _D_total_full = compute_sigma_dot_and_total(
+            div_v, sigma_coord,
+        )
+        dp_s_dt_data = -p_s * _D_total_full[..., 0] / sigma_range
         if config.zero_mean_ps_tendency:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
-
-        sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 
         # Vertical advection of D-grid winds via cell-centre interpolation.
         # Batch (u_d, v_d) → (u_cc, v_cc) and (vert_adv_u_cc,
@@ -390,82 +513,38 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
-        _vert_adv_uv_d = _interp_center_to_corner(
-            _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
-            cdgrid,
-        ).reshape(
-            n_face_uv, n_i_uv + 1, n_j_uv + 1, nlev_uv, 2,
-        )
-        vert_adv_u_d = _vert_adv_uv_d[..., 0]
-        vert_adv_v_d = _vert_adv_uv_d[..., 1]
+        # Iter-64: defer the cell-center → D-grid corner interpolation
+        # of ``_vert_adv_uv_cc`` (mirrors the hybrid branch above).
 
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
 
-    du_d_dt = du_d_dt + vert_adv_u_d
-    dv_d_dt = dv_d_dt + vert_adv_v_d
+    # Iter-64: ``vert_adv_uv_d`` will be added to ``du_d_dt``/``dv_d_dt``
+    # in section 12c below alongside the lap_uv and hyperdiff_uv
+    # contributions, so the three corner interpolations share a single
+    # halo collective.
 
     # --- 11. Thermodynamic equation ---
-    # Horizontal advection: centred advection using cell-centre velocities
-    # === Stage-level packed halo exchange #2 ===
-    # Batch {T, u_cell, v_cell, ln_ps} into one packed exchange (SPMD
-    # or MPI) or individual exchanges (local).  Pre-padded arrays
-    # reused by gradient, Laplacian, and hyperdiffusion operators
-    # downstream.
+    # Horizontal advection: centred advection using cell-centre velocities.
     #
-    # Loop 189 — promote ``ln_ps`` to ``(6, n, n, 1)`` and pack it
-    # into the same packed halo exchange as ``T`` (and, when
-    # ``_needs_uv_pad``, ``u_cell`` / ``v_cell``).  This eliminates
-    # the two standalone halo exchanges that previously fired inside
-    # ``gradient_x(ln_ps)`` and ``gradient_y(ln_ps)`` (each issued
-    # its own ``pad_halo``) — they are now replaced by sliced gradients
-    # of the shared 4D padded field.  Saves 2 halo exchanges (or, on
-    # SPMD/MPI, packs ln_ps into an existing collective at the cost
-    # of ``9*4`` extra bytes per face boundary).
-    _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
-    # Packed MPI halo now applies duogrid remap (iter-84) so we use it
-    # even when duogrid is active.  Non-MPI fallback does per-field pads
-    # with duogrid routing preserved.
-    _pe_dg = grid.duogrid
-    # ``ln_ps_3d`` carries a singleton trailing axis on purpose so it
-    # can ride the same packed exchange as the full 3D fields.  This is
-    # explicitly supported by ``packed_pad_halo_mpi_4d`` (and its SPMD
-    # twin), whose docstring promises that "all fields must share the
-    # same (6, n, n) spatial prefix; the trailing axis (levels/channels)
-    # can differ" — the helper concatenates along the trailing axis and
-    # splits per-field on return (halo_exchange.py:1128-1133).  Loop 189
-    # added the optimisation; restoring it here preserves the
-    # ``∇(ln p_s)`` halo without paying for two extra exchanges.  The
-    # MPI branch is taken whenever the backend is MPI (regardless of
-    # ``_needs_uv_pad``) so the lnps halo is never silently routed
-    # through a non-packed code path under MPI.
-    ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
-    if _halo_backend == "mpi":
-        from legoesm.grids.halo import _mpi_topology
-        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        if _needs_uv_pad:
-            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, u_cell, v_cell, ln_ps_3d,
-                topology=_mpi_topology, duogrid=_pe_dg,
-            )
-        else:
-            _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
-            )
-            _u_cc_pad = _v_cc_pad = None
-    else:
-        # Route through duogrid remap when duogrid is active on the grid,
-        # matching the pattern used by _arakawa_lamb_gradient via
-        # `_pad_halo_auto`.
-        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+    # Iter-58: ``_T_pad``, ``_u_cc_pad``, ``_v_cc_pad``, ``_lnps_pad``
+    # are now produced by the merged stage-level packed exchange near
+    # the start of the tendency function (single SPMD all_gather / MPI
+    # sendrecv that also produces ``_zeta_pad`` / ``_B_pad`` /
+    # ``_invT_pad``).  On the single-device backend they are still
+    # ``None`` and we fall back to per-field unpacked pads here so each
+    # gradient/Laplacian operator still has a pre-padded array (avoids
+    # the operator-internal halo on its own input).
+    if _T_pad is None:
+        # Single-device fallback: per-field unpacked exchanges with
+        # offsets / duogrid forwarded.  Same numerics as the SPMD packed
+        # branch above (verified iter-7).  This branch only executes when
+        # neither MPI nor SPMD halo backend is active.
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
         if _needs_uv_pad:
             _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
             _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
-        else:
-            _u_cc_pad = _v_cc_pad = None
 
     dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
     dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
@@ -547,31 +626,20 @@ def fv3_hydrostatic_tendencies(
             lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
         dT_dt_data = dT_dt_data + nu_T * lap_T
 
+    # Iter-63/64: collect ALL (u, v) cell-center → D-grid corner
+    # interpolations of the stage and batch them into ONE halo +
+    # 4-pt corner average.  ``_vert_adv_uv_cc`` (always present) plus
+    # optionally ``lap_uvT[..., :2]`` (when A_h > 0) and
+    # ``hyperdiff_uvT[..., :2]`` (when hyperdiff_coeff > 0).  Each
+    # ``_interp_center_to_corner`` would otherwise do its own halo
+    # exchange; the batched version stacks the pairs along the trailing
+    # axis and exchanges in one halo.  Saves 1 collective per stage
+    # in the typical hyperdiff-only config; 2 per stage when both
+    # A_h and hyperdiff are active.
+    lap_uvT = None
+    hyperdiff_uvT = None
     if config.A_h > 0:
         lap_uvT = _lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
-        # Batch the (lap_u, lap_v) corner interpolation: same passive-
-        # trailing-axis pattern as the (u, v) corner interpolation in
-        # Loop 113 — single halo + single 4-point average for both.
-        _lap_uv_d_flat = _interp_center_to_corner(
-            lap_uvT[..., :2].reshape(
-                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
-            ),
-            cdgrid,
-        )
-        _lap_uv_d = _lap_uv_d_flat.reshape(
-            _lap_uv_d_flat.shape[0], _lap_uv_d_flat.shape[1],
-            _lap_uv_d_flat.shape[2], nlev_uvT, 2,
-        )
-        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
-        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
-        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
-
-    # 12b. Hyperdiffusion on D-grid winds (biharmonic)
-    #
-    # Apply the biharmonic at cell centres (where the compact Laplacian
-    # works at full strength) and interpolate the tendency back to
-    # D-grid corners.  Single batched call shares the outer ∇² halo
-    # across (u_cell, v_cell, T).
     if config.hyperdiff_coeff > 0:
         hyperdiff_flat = _hyperdiffusion_3d(
             _uvT_flat, grid, config.hyperdiff_coeff,
@@ -584,25 +652,72 @@ def fv3_hydrostatic_tendencies(
         hyperdiff_uvT = hyperdiff_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
-        # Same batching as the laplacian section above — one halo +
-        # 4-point average for both u and v components.
-        _hd_uv_d_flat = _interp_center_to_corner(
-            hyperdiff_uvT[..., :2].reshape(
-                n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2,
-            ),
-            cdgrid,
+
+    # Build the cell-center batch: vert_adv (always) + lap (if A_h>0)
+    # + hyperdiff (if hyperdiff_coeff>0) + phys_cc.du/dv (iter-65,
+    # when ``physics_tendency_cc`` is provided), each shape
+    # (n_face, n, n, nlev*2) along the trailing axis.
+    _uv_corner_blocks = [
+        _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
+    ]
+    if lap_uvT is not None:
+        _uv_corner_blocks.append(
+            lap_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
         )
-        _hd_uv_d = _hd_uv_d_flat.reshape(
-            _hd_uv_d_flat.shape[0], _hd_uv_d_flat.shape[1],
-            _hd_uv_d_flat.shape[2], nlev_uvT, 2,
+    if hyperdiff_uvT is not None:
+        _uv_corner_blocks.append(
+            hyperdiff_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
         )
+    if physics_tendency_cc is not None and physics_tendency_cc.du_dt is not None:
+        _phys_uv_cc = jnp.stack(
+            [physics_tendency_cc.du_dt.data, physics_tendency_cc.dv_dt.data],
+            axis=-1,
+        ).reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
+        _uv_corner_blocks.append(_phys_uv_cc)
+    _n_blocks = len(_uv_corner_blocks)
+    if _n_blocks == 1:
+        _combined_uv_cc = _uv_corner_blocks[0]
+    else:
+        _combined_uv_cc = jnp.concatenate(_uv_corner_blocks, axis=-1)
+    _combined_uv_d_flat = _interp_center_to_corner(_combined_uv_cc, cdgrid)
+    _combined_uv_d = _combined_uv_d_flat.reshape(
+        _combined_uv_d_flat.shape[0], _combined_uv_d_flat.shape[1],
+        _combined_uv_d_flat.shape[2], _n_blocks, nlev_uv, 2,
+    )  # (n_face_d, n_i_d, n_j_d, n_blocks, nlev, 2-uv)
+    _block_idx = 0
+    _vert_adv_uv_d = _combined_uv_d[:, :, :, _block_idx]
+    _block_idx += 1
+    _lap_uv_d = None
+    if lap_uvT is not None:
+        _lap_uv_d = _combined_uv_d[:, :, :, _block_idx]
+        _block_idx += 1
+    _hd_uv_d = None
+    if hyperdiff_uvT is not None:
+        _hd_uv_d = _combined_uv_d[:, :, :, _block_idx]
+        _block_idx += 1
+    _phys_uv_d = None
+    if (physics_tendency_cc is not None
+            and physics_tendency_cc.du_dt is not None):
+        _phys_uv_d = _combined_uv_d[:, :, :, _block_idx]
+        _block_idx += 1
+
+    # Add the vert_adv contribution to du_d_dt/dv_d_dt now that the
+    # corner interpolation is done.
+    du_d_dt = du_d_dt + _vert_adv_uv_d[..., 0]
+    dv_d_dt = dv_d_dt + _vert_adv_uv_d[..., 1]
+
+    if config.A_h > 0:
+        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
+        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
+        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+
+    if config.hyperdiff_coeff > 0:
         du_d_dt = du_d_dt + _hd_uv_d[..., 0]
         dv_d_dt = dv_d_dt + _hd_uv_d[..., 1]
         dT_dt_data = dT_dt_data + hyperdiff_uvT[..., 2]
 
     # Surface pressure hyperdiffusion (cell-centre)
     if config.hyperdiff_ps_coeff > 0:
-        from legoesm.core.operators import hyperdiffusion
         ps_field = Field(data=p_s, name="p_s", dims=("face", "x", "y"),
                          units="Pa", staggering="cell")
         diff_ps = hyperdiffusion(ps_field, grid, config.hyperdiff_ps_coeff)
@@ -624,6 +739,15 @@ def fv3_hydrostatic_tendencies(
         dv_d_dt = dv_d_dt + physics_tendency.dv_d_dt.data
         dT_dt_data = dT_dt_data + physics_tendency.dT_dt.data
         dp_s_dt_data = dp_s_dt_data + physics_tendency.dp_s_dt.data
+    # Iter-65: cell-centre physics ``du_dt`` / ``dv_dt`` rode the
+    # iter-64 batch above; ``dT_dt`` / ``dp_s_dt`` are added directly
+    # (cell-centre, no corner interp needed).
+    if physics_tendency_cc is not None:
+        if physics_tendency_cc.du_dt is not None and _phys_uv_d is not None:
+            du_d_dt = du_d_dt + _phys_uv_d[..., 0]
+            dv_d_dt = dv_d_dt + _phys_uv_d[..., 1]
+        dT_dt_data = dT_dt_data + physics_tendency_cc.dT_dt.data
+        dp_s_dt_data = dp_s_dt_data + physics_tendency_cc.dp_s_dt.data
 
     dims_3d_corner = ("face", "x", "y", "level")
     dims_3d = ("face", "x", "y", "level")
@@ -756,7 +880,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         if (self.config.use_conservation_fixer and self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
-            from legoesm.core.operators import global_integral
             self._target_mass = global_integral(state.p_s, self.grid)
 
         if isinstance(state, FV3HydrostaticState):
@@ -772,47 +895,29 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> FV3HydrostaticState:
         """Advance one time step with D-grid prognostic winds."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
 
         def tendency_fn(s):
-            phys_tend_dgrid = None
+            phys_cc = None
             if physics_fn is not None:
-                # Convert D-grid state to cell-centre for physics
+                # Convert D-grid state to cell-centre for physics.
+                # Iter-65: pass the cell-centre physics tendency
+                # directly to fv3_hydrostatic_tendencies via
+                # ``physics_tendency_cc`` so its (du_dt, dv_dt)
+                # corner interpolation is batched with the iter-64
+                # vert_adv/lap/hyperdiff corner interp — saves the
+                # standalone halo collective that the old conversion
+                # path emitted here.
                 s_cc = fv3_to_hydrostatic(s, cdgrid)
                 _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
                 phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-                # Convert cell-centre physics (du_dt, dv_dt) tendencies
-                # to D-grid corners — batched: stack along trailing
-                # axis and run a single halo + 4-point average instead
-                # of two.  Matches the corner-interp batching pattern
-                # used in the tendency function.
-                _pu_cc = phys_cc.du_dt.data
-                _pv_cc = phys_cc.dv_dt.data
-                _np_face, _np_i, _np_j, _np_lev = _pu_cc.shape
-                _pp = jnp.stack([_pu_cc, _pv_cc], axis=-1)
-                _pp_d_flat = _interp_center_to_corner(
-                    _pp.reshape(_np_face, _np_i, _np_j, _np_lev * 2),
-                    cdgrid,
-                )
-                _pp_d = _pp_d_flat.reshape(
-                    _pp_d_flat.shape[0], _pp_d_flat.shape[1], _pp_d_flat.shape[2],
-                    _np_lev, 2,
-                )
-                pu_d = _pp_d[..., 0]
-                pv_d = _pp_d[..., 1]
-                phys_tend_dgrid = FV3HydrostaticTendencies(
-                    du_d_dt=phys_cc.du_dt.replace(data=pu_d, name="du_d_dt"),
-                    dv_d_dt=phys_cc.dv_dt.replace(data=pv_d, name="dv_d_dt"),
-                    dT_dt=phys_cc.dT_dt,
-                    dp_s_dt=phys_cc.dp_s_dt,
-                    dphis_dt=phys_cc.dphis_dt,
-                )
 
             tend = fv3_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, cdgrid,
-                self.config, phys_tend_dgrid,
+                self.config,
+                physics_tendency=None,
+                physics_tendency_cc=phys_cc,
             )
             # Return an FV3HydrostaticState-shaped pytree with tendency data
             # so that the time integrator's tree_map works correctly.
@@ -833,7 +938,6 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:
-            from legoesm.core.operators import laplacian_compact
             alpha = self.config.implicit_grav_wave_damping
             lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
             p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
@@ -842,24 +946,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 p_s=state_new.p_s.replace(data=p_s_damped),
             )
 
-        # Conservation fixer (operates on p_s which is at cell centres)
+        # Conservation fixer (operates on p_s which is at cell centres).
+        # ``fix_mass_hydrostatic_target`` / ``fix_mass_hydrostatic`` only
+        # touch ``state.p_s`` and call ``state._replace(p_s=...)``, so
+        # we can pass the FV3 state directly.  Going through
+        # ``fv3_to_hydrostatic`` ran a corner-to-centre halo exchange +
+        # 4-point average on (u_d, v_d) just to throw the wind result
+        # away — wasted compute and an extra collective on the SPMD
+        # cubed-sphere path.
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
-                from legoesm.core.conservation import fix_mass_hydrostatic_target
                 # _target_mass is precomputed in step() outside the JIT boundary.
-                state_h = fv3_to_hydrostatic(state_new, cdgrid)
-                state_h_fixed = fix_mass_hydrostatic_target(
-                    state_h, self._target_mass, self.grid,
+                state_new = fix_mass_hydrostatic_target(
+                    state_new, self._target_mass, self.grid,
                 )
-                state_new = state_new._replace(p_s=state_h_fixed.p_s)
             else:
-                from legoesm.core.conservation import fix_mass_hydrostatic
-                state_h_new = fv3_to_hydrostatic(state_new, cdgrid)
-                state_h_old = fv3_to_hydrostatic(state, cdgrid)
-                state_h_fixed = fix_mass_hydrostatic(
-                    state_h_new, state_h_old, self.grid,
+                state_new = fix_mass_hydrostatic(
+                    state_new, state, self.grid,
                 )
-                state_new = state_new._replace(p_s=state_h_fixed.p_s)
 
         return cast_pytree(state_new, None, "storage")
 
@@ -932,8 +1036,6 @@ def cdgrid_hydrostatic_tendencies(
 
     If given a FV3HydrostaticState, delegates directly to fv3_hydrostatic_tendencies.
     """
-    from legoesm.core.state import HydrostaticTendencies
-
     if isinstance(state, FV3HydrostaticState):
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
 

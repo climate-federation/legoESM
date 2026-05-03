@@ -34,6 +34,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
 )
 from legoesm.grids.gaussian import GaussianGrid, sh_analysis_3d
 from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, _pack_column_features
+from legoesm.atmosphere.physics._shared import zero_like_tracers
 
 
 def build_column_physics(
@@ -157,7 +158,6 @@ def make_column_physics_fn(
         # structure (matches the radiation / GWD bridges).
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
-        from legoesm.atmosphere.physics._shared import zero_like_tracers
 
         return SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=zero_3d),

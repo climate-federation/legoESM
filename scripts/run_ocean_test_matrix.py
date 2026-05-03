@@ -67,6 +67,13 @@ from typing import Any, Callable
 # Line-buffered stdout for CI/log visibility.
 sys.stdout.reconfigure(line_buffering=True)
 
+import argparse
+import json
+import shutil
+import time
+import traceback
+from dataclasses import dataclass, field
+
 # Ensure project root is on sys.path (for legoesm imports).
 _PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if _PROJECT_ROOT not in sys.path:

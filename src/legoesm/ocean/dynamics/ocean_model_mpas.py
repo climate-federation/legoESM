@@ -40,6 +40,7 @@ from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
 from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
 from legoesm.core.operators_voronoi import tangential_velocity_3d
+from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
 
 
 def _forward_backward_coriolis_mpas_3d(
@@ -86,10 +87,13 @@ def _forward_backward_coriolis_mpas_3d(
         min_water_column_m=config.min_water_column_m,
     )
     h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
-    H_e = jnp.maximum(jnp.sum(h_e, axis=1, keepdims=True), config.min_water_column_m)
-
-    # Depth-averaged velocity
-    u_bar = jnp.sum(u_3d * h_e, axis=1, keepdims=True) / H_e  # (nEdges, 1)
+    # ``H_e = sum(h_e)`` and ``u_bar`` numerator ``sum(u_3d * h_e)``
+    # share the level axis and h_e weight — fuse into one stacked sum.
+    _u_pair = jnp.sum(
+        jnp.stack([h_e, u_3d * h_e], axis=-1), axis=1, keepdims=True,
+    )
+    H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
+    u_bar = _u_pair[..., 1] / H_e  # (nEdges, 1)
     u_bar = u_bar * edge_mask
 
     # Perturbation velocity
@@ -250,7 +254,6 @@ class MPASOceanModel:
         # Fill land cells with ocean-neighbor average (Neumann BC) so that
         # subsequent operators see smooth values at coastlines instead of
         # the sharp ocean-to-zero discontinuity that `* mask` would create.
-        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
@@ -370,8 +373,12 @@ class MPASOceanModel:
         #   delta_u = (Hu_avg - sum_k(u_3d * h_e)) / H_e
         # This preserves baroclinic shear while matching Hu_avg.
         edge_mask = mask[c1] * mask[c2]
-        H_e_old = jnp.sum(h_e_k, axis=1)  # (nEdges,)
-        Hu_3d = jnp.sum(u_3d_new * h_e_k, axis=1)  # (nEdges,)
+        # Fuse the two h_e_k-weighted column reductions into one stack.
+        _hu_pair = jnp.sum(
+            jnp.stack([h_e_k, u_3d_new * h_e_k], axis=-1), axis=1,
+        )
+        H_e_old = _hu_pair[..., 0]  # (nEdges,)
+        Hu_3d = _hu_pair[..., 1]    # (nEdges,)
         delta_u = (Hu_avg - Hu_3d) / jnp.maximum(H_e_old, 1e-10)
         u_transport = u_3d_new + delta_u[:, jnp.newaxis]  # (nEdges, nlev)
 

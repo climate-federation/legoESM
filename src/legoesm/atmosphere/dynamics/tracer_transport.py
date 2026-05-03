@@ -31,6 +31,7 @@ from legoesm.core.operators_3d import (
     hyperdiffusion_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo_4d
 from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
@@ -105,10 +106,9 @@ def tracer_tendencies(
     # (1 MPI exchange instead of 2 on the same input).  The pad is
     # also reused inside ``hyperdiffusion_3d``'s inner Laplacian when
     # hyperdiffusion is enabled.
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
     _dg_q = getattr(grid, 'duogrid', None)
     _offsets_q = None if _dg_q is not None else grid.halo_interp_offsets
-    _q_flat_pad = _pad_halo_4d(q_flat, interp_offsets=_offsets_q, duogrid=_dg_q)
+    _q_flat_pad = pad_halo_4d(q_flat, interp_offsets=_offsets_q, duogrid=_dg_q)
 
     dq_dx_flat = gradient_x_3d(q_flat, grid, padded=_q_flat_pad)
     dq_dy_flat = gradient_y_3d(q_flat, grid, padded=_q_flat_pad)

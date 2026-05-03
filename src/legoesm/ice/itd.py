@@ -112,15 +112,21 @@ def aggregate_state(
     conc_agg : array (...)
         Total concentration.
     """
-    conc_total = jnp.sum(concentration, axis=-1)
+    # All three reductions share the ``concentration`` weight on the
+    # category axis — fuse into one stacked sum.
+    _stack = jnp.stack(
+        [jnp.ones_like(h_ice), h_ice, T_ice], axis=-1,
+    ) * concentration[..., None]
+    _agg = jnp.sum(_stack, axis=-2)
+    conc_total = _agg[..., 0]
     conc_safe = jnp.maximum(conc_total, 1e-20)
 
     # Volume-conserving mean thickness: sum(h_k * a_k) / sum(a_k)
-    h_agg = jnp.sum(h_ice * concentration, axis=-1) / conc_safe
+    h_agg = _agg[..., 1] / conc_safe
     h_agg = jnp.where(conc_total > 0.0, h_agg, 0.0)
 
     # Area-weighted mean temperature
-    T_agg = jnp.sum(T_ice * concentration, axis=-1) / conc_safe
+    T_agg = _agg[..., 2] / conc_safe
     T_agg = jnp.where(conc_total > 0.0, T_agg, 271.35)
 
     return h_agg, T_agg, conc_total

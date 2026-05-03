@@ -40,6 +40,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     maxvel_clip,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
+from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
 
 
 def barotropic_substeps_mpas(
@@ -130,8 +131,6 @@ def barotropic_substeps_mpas(
     # Fill land-cell eta with nearest-ocean-neighbor average so that
     # gradient_edge sees smooth fields at coastlines instead of the
     # sharp ocean-to-zero jump from masking.
-    from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
-
     def _fill_land_cells_mpas(field_cell, mask_cell):
         return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
 

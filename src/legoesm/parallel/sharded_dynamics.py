@@ -76,9 +76,12 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.mesh import DeviceConfig, _N_FACES
+from legoesm.core.field import Field
+from legoesm.grids.halo import pad_halo, pad_halo_4d
 
 logger = logging.getLogger(__name__)
 
@@ -686,8 +689,17 @@ def make_sharded_step(
     # Activate explicit SPMD halo exchange for face-sharded cubed-sphere.
     # This replaces implicit cross-shard reads with explicit all_gather
     # collectives, producing much better XLA communication patterns.
-    if (config.n_devices <= 6
+    #
+    # Iter-49: the SPMD halo kernels (allgather + halo=2 allgather) now
+    # support multi-face shards (n_faces_per_shard ∈ {1, 2, 3, 6}).
+    # Activation generalised from "exactly 6 devices" to "any divisor
+    # of 6" — 1, 2, 3, 6 — so 2- and 3-device configurations also use
+    # the explicit SPMD path instead of falling back to the auto-gather
+    # default halo backend.
+    _n = config.n_devices
+    if (_n in (1, 2, 3, 6)
             and getattr(config, 'tiling', (1, 1)) == (1, 1)
+            and config.mesh is not None
             and "face" in getattr(config.mesh, 'axis_names', ())):
         from legoesm.parallel.cubesphere_exchange import (
             activate_spmd_halo_backend,
@@ -801,8 +813,6 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
         ``exchange(state) -> state`` that applies halo exchange to
         all face-dimensioned fields in the state pytree.
     """
-    from legoesm.grids.halo import pad_halo, pad_halo_4d
-
     def _exchange(state):
         """Apply halo exchange to face-dimensioned arrays.
 
@@ -1116,6 +1126,70 @@ def _pad_local_mesh_to(mesh, target_nCells, target_nEdges, target_nVertices):
     )
 
 
+def _close_halo_under_cellsOnEdge(
+    owned_cells_arr,
+    halo_cells_set,
+    cellsOnEdge_np,
+    n_passes,
+):
+    """Iteratively extend ``halo_cells_set`` so the halo is "closed
+    under cellsOnEdge".
+
+    A halo set is *closed* when every edge whose one ``cellsOnEdge``
+    entry is in ``owned ∪ halo`` also has its OTHER entry in the halo.
+    Closure ensures that downstream ``cellsOnEdge``-based operators
+    (e.g., ``gradient_edge``, ``divergence_cell``) at every owned cell
+    AND at every halo cell whose value is read by an owned-cell
+    operator can be evaluated locally without ``-1`` indices.
+
+    Iter-23 surfaced the *unclosed* failure mode: a single
+    ``cellsOnEdge`` entry of ``-1`` (the global→local sentinel)
+    caused ``gradient_edge`` to silently dereference Python's
+    last-element index → 1e76 garbage after one SSP-RK3 step.
+
+    Iter-25/27/37 settled on 2 passes as the minimum sufficient depth
+    for the MPAS dycore's longest operator chain (∇⁴ in
+    hyperdiffusion: owned → halo-1 → halo-2).
+
+    Modifies ``halo_cells_set`` in place.
+
+    Parameters
+    ----------
+    owned_cells_arr : np.ndarray, shape (n_owned,), int64
+        Owned cell global indices for this rank.
+    halo_cells_set : set[int]
+        Initial halo (cellsOnCell ring + iter-23 owned-edge other-cells).
+    cellsOnEdge_np : np.ndarray, shape (2, nEdges), int
+        Global cellsOnEdge connectivity.
+    n_passes : int
+        Number of augmentation iterations.  2 is the minimum that
+        closes the dycore's depth-2 operator chain; use a higher
+        value only if a future operator extends the chain depth.
+    """
+    for _ in range(n_passes):
+        cur_local_arr = np.concatenate([
+            owned_cells_arr,
+            np.fromiter(
+                halo_cells_set,
+                dtype=np.int64,
+                count=len(halo_cells_set),
+            ),
+        ])
+        # Edges where AT LEAST one ``cellsOnEdge`` is currently local.
+        edge_one_in = (
+            np.isin(cellsOnEdge_np[0], cur_local_arr)
+            | np.isin(cellsOnEdge_np[1], cur_local_arr)
+        )
+        cand_edges = np.flatnonzero(edge_one_in)
+        cand_cells = cellsOnEdge_np[:, cand_edges].reshape(-1)
+        cand_cells = np.unique(cand_cells[cand_cells >= 0])
+        # Set difference: cells not yet in local set.
+        new_cells = cand_cells[~np.isin(cand_cells, cur_local_arr)]
+        if new_cells.size == 0:
+            return
+        halo_cells_set.update(new_cells.tolist())
+
+
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
@@ -1208,19 +1282,75 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         halo_cells_set = _compute_halo_cells(
             cell_owner, cellsOnCell_np, maxEdges, rank, halo_depth,
         )
+        # Augment with the OTHER cell of every owned edge: on Voronoi
+        # SCVT meshes the cellsOnCell adjacency *should* match the
+        # cellsOnEdge connectivity, but the k-ring construction in
+        # ``_compute_halo_cells`` can miss a handful of cells at the
+        # mesh boundary or near pentagons (owned edges whose far cell
+        # is reachable via cellsOnEdge but whose hop chain through
+        # cellsOnCell at depth <= halo_depth is broken by a -1 slot
+        # or pentagon irregularity).  Without this augmentation, the
+        # local mesh's cellsOnEdge has -1 entries for those edges
+        # after remap → ``gradient_edge`` does ``phi[-1]`` (Python
+        # last-element indexing!) and produces 1e76 garbage
+        # within one SSP-RK3 step.  Iter-23 root-cause analysis.
+        owned_edge_cells = cellsOnEdge_np[:, owned_edges].reshape(-1)
+        owned_edge_cells = owned_edge_cells[owned_edge_cells >= 0]
+        for c in owned_edge_cells:
+            ic = int(c)
+            if ic not in owned_cells_set:
+                halo_cells_set.add(ic)
+        # Iter-25/27/37: extend the halo so every halo cell's adjacent
+        # edges have BOTH cells in local_cells.  Without this, halo
+        # cells have some of their adjacent edges silently excluded by
+        # the AND filter below; operator quantities at halo cells then
+        # differ slightly from single-device, and owned-cell tendencies
+        # that read those halo quantities inherit ~1% drift per step.
+        # Two passes are sufficient for the dycore's longest operator
+        # chain (depth 2: cell → edge → cell, twice for ∇⁴ in
+        # hyperdiffusion) — see iter-37 docstring.
+        owned_cells_arr = np.asarray(owned_cells, dtype=np.int64)
+        _close_halo_under_cellsOnEdge(
+            owned_cells_arr, halo_cells_set, cellsOnEdge_np, n_passes=2,
+        )
         halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
         local_cells = np.concatenate([owned_cells, halo_cells])
         local_cells_set = set(local_cells.tolist())
 
-        # ----- Halo edges: edges connected to local cells (vectorised) ----- #
+        # ----- Halo edges: edges where BOTH cellsOnEdge are in local_cells ----- #
         # Original Python loop over nEdges scaled poorly at MPAS resolutions
         # (1M+ cells); replace with a single ``np.isin`` on the cellsOnEdge
         # neighbour arrays so the whole partition setup is O(nEdges) numpy.
+        #
+        # CRITICAL: use AND, not OR.  Including an edge whose only one
+        # neighbour is in local_cells leaves the other neighbour at -1
+        # after the global→local remap (``cell_g2l[non_local] == -1``);
+        # downstream operators like ``gradient_edge(phi, mesh)`` then
+        # do ``phi[c1=-1]`` which is Python's last-element indexing
+        # and produces garbage, blowing the SSP-RK3 step into 1e76
+        # territory after a single iteration (iter-21 / iter-23 finding).
+        # Using AND keeps the cellsOnEdge connectivity fully valid in the
+        # local mesh; halo cells that lack some of their edges due to
+        # the cut do not break correctness because the dycore only
+        # uses tendencies on OWNED cells (halo tendencies are discarded
+        # by the ``return`` in ``_local_tendency``).
         local_cells_arr = local_cells
-        edge_in_local = np.isin(cellsOnEdge_np[0], local_cells_arr) | np.isin(
+        edge_in_local = np.isin(cellsOnEdge_np[0], local_cells_arr) & np.isin(
             cellsOnEdge_np[1], local_cells_arr,
         )
         local_edges_arr = np.flatnonzero(edge_in_local).astype(np.int64)
+        # Sanity: every owned edge must satisfy the both-sides-local test
+        # (an owned edge has at least one cell in owned_cells; the cell-
+        # halo of depth >=1 covers the other side).  Surface a clear
+        # error if a future mesh ordering change breaks that invariant.
+        if not np.isin(owned_edges, local_edges_arr).all():
+            missing = np.setdiff1d(owned_edges, local_edges_arr)
+            raise RuntimeError(
+                f"Voronoi partition rank={rank}: {len(missing)} owned "
+                f"edges have a neighbour cell outside the halo-depth="
+                f"{halo_depth} cell halo.  Increase halo_depth or check "
+                f"the mesh ordering produced by reorder_voronoi_for_sharding."
+            )
         halo_edges = np.setdiff1d(
             local_edges_arr, owned_edges, assume_unique=True,
         )
@@ -1615,7 +1745,7 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     logger.info(
         "Building halo-partitioned infrastructure for %d device(s) "
-        "(nCells=%d, nEdges=%d, halo_depth=2, strategy=%s) ...",
+        "(nCells=%d, nEdges=%d, halo_depth=3, strategy=%s) ...",
         n_dev, nCells, nEdges, halo_strategy,
     )
     t0 = time.time()
@@ -1629,7 +1759,7 @@ def make_voronoi_sharded_step(
         max_le,
         partitions_out,   # list[VoronoiPartition] (for ppermute schedule)
         cell_owner_out,   # np.ndarray (nCells,) cell ownership
-    ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2)
+    ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=3)
     logger.info(
         "  partition setup done in %.2fs  "
         "(max_local_cells=%d, max_local_edges=%d, cells_per=%d, edges_per=%d)",
@@ -1762,7 +1892,6 @@ def make_voronoi_sharded_step(
             my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
 
             # Build local state and compute tendency
-            from legoesm.core.field import Field
             local_state = MPASHydrostaticState(
                 u=Field(data=u_local, name="u",
                         dims=("nEdges", "nlev"), units="m/s",
@@ -1814,7 +1943,6 @@ def make_voronoi_sharded_step(
 
             my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
 
-            from legoesm.core.field import Field
             local_state = MPASHydrostaticState(
                 u=Field(data=u_local, name="u",
                         dims=("nEdges", "nlev"), units="m/s",
@@ -1842,7 +1970,7 @@ def make_voronoi_sharded_step(
         mesh=jax_mesh,
         in_specs=(P("device"), P("device"), P("device"), P("device"), P()),
         out_specs=(P("device"), P("device"), P("device")),
-        check_rep=False,
+        check_vma=False,
     )
 
     # ------------------------------------------------------------------
@@ -1886,9 +2014,16 @@ def make_voronoi_sharded_step(
             T_new = jnp.maximum(T_new, cfg.T_min)
 
         if cfg.fix_mass:
-            mass_old = jnp.sum(ps * _area_for_mass)
-            mass_new = jnp.sum(ps_new * _area_for_mass)
-            correction = (mass_old - mass_new) / _total_area
+            # Compute both masses inside a single reduction.  Stacking
+            # the two ps fields and reducing once lets XLA fuse the
+            # two cross-device sums into a single allreduce HLO instead
+            # of emitting two sequentially-dependent allreduces (the
+            # second cannot start until the first materialises).
+            ps_pair = jnp.stack([ps, ps_new], axis=0)
+            masses = jnp.sum(ps_pair * _area_for_mass[None], axis=tuple(
+                range(1, ps_pair.ndim)
+            ))  # shape (2,)
+            correction = (masses[0] - masses[1]) / _total_area
             ps_new = ps_new + correction
 
         return MPASHydrostaticState(

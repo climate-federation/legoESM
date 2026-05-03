@@ -9,6 +9,9 @@ from legoesm.ocean.eos import compute_ocean_rho as _compute_rho
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
 
 
 def make_vertical_mixing_physics(
@@ -47,7 +50,6 @@ def _make_none() -> Callable:
 
 
 def _make_constant(config: VerticalMixingConfig) -> Callable:
-    from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
     cfg = config.constant
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -63,7 +65,6 @@ def _make_constant(config: VerticalMixingConfig) -> Callable:
 
 
 def _make_richardson(config: VerticalMixingConfig) -> Callable:
-    from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
     cfg = config.richardson
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -80,16 +81,6 @@ def _make_richardson(config: VerticalMixingConfig) -> Callable:
 
 
 def _make_kpp(config: VerticalMixingConfig) -> Callable:
-    from legoesm import constants
-    from legoesm.ocean.eos import (
-        rho_0 as _RHO_0,
-        c_sw as _C_SW,
-        thermal_expansion_coeff,
-        haline_contraction_coeff,
-    )
-    from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
-    import jax.numpy as jnp
-
     cfg = config.kpp
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,

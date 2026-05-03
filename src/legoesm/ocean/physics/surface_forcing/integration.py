@@ -8,6 +8,9 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+from legoesm.ocean.physics.surface_forcing.prescribed import prescribed_surface_forcing
+from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
+from legoesm.ocean.physics.surface_forcing.bulk_formulas import bulk_formula_surface_forcing
 
 
 def make_surface_forcing_physics(
@@ -48,7 +51,6 @@ def _make_none() -> Callable:
 
 
 def _make_prescribed(config: SurfaceForcingConfig) -> Callable:
-    from legoesm.ocean.physics.surface_forcing.prescribed import prescribed_surface_forcing
     cfg = config.prescribed
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -64,7 +66,6 @@ def _make_prescribed(config: SurfaceForcingConfig) -> Callable:
 
 
 def _make_restoring(config: SurfaceForcingConfig) -> Callable:
-    from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
     cfg = config.restoring
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -77,8 +78,6 @@ def _make_restoring(config: SurfaceForcingConfig) -> Callable:
 
 def _make_combined(config: SurfaceForcingConfig) -> Callable:
     """Prescribed wind stress + temperature/salinity restoring."""
-    from legoesm.ocean.physics.surface_forcing.prescribed import prescribed_surface_forcing
-    from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
     cfg_p = config.prescribed
     cfg_r = config.restoring
 
@@ -102,7 +101,6 @@ def _make_combined(config: SurfaceForcingConfig) -> Callable:
 
 
 def _make_bulk_formulas(config: SurfaceForcingConfig) -> Callable:
-    from legoesm.ocean.physics.surface_forcing.bulk_formulas import bulk_formula_surface_forcing
     cfg = config.bulk_formulas
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,

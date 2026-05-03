@@ -31,6 +31,10 @@ from legoesm.core.operators_fv import (
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo_4d, pad_halo_vector_4d
+from legoesm.parallel.async_halo import (
+    overlapped_halo_compute,
+    overlapped_halo_compute_vector,
+)
 
 
 def vorticity_3d(
@@ -315,8 +319,6 @@ def overlapped_gradient_3d(
     -------
     (dx, dy) : tuple of jax.Array, each shape (6, n, n, nlev).
     """
-    from legoesm.parallel.async_halo import overlapped_halo_compute
-
     dx_grid = grid.dx
     dy_grid = grid.dy
 
@@ -354,8 +356,6 @@ def overlapped_laplacian_compact_3d(
     -------
     jax.Array, shape (6, n, n, nlev).
     """
-    from legoesm.parallel.async_halo import overlapped_halo_compute
-
     hx_sq = (grid.dx / 2.0) ** 2
     hy_sq = (grid.dy / 2.0) ** 2
 
@@ -394,8 +394,6 @@ def overlapped_divergence_3d(
     -------
     jax.Array, shape (6, n, n, nlev).
     """
-    from legoesm.parallel.async_halo import overlapped_halo_compute_vector
-
     hy_ext = grid.hy_ext
     hx_ext = grid.hx_ext
     area = grid.area
@@ -446,8 +444,6 @@ def overlapped_vorticity_3d(
     -------
     jax.Array, shape (6, n, n, nlev).
     """
-    from legoesm.parallel.async_halo import overlapped_halo_compute_vector
-
     hy_ext = grid.hy_ext
     hx_ext = grid.hx_ext
     area = grid.area

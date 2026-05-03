@@ -27,6 +27,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.fv3_sw_core import fv3_fb_sw_step
+from legoesm.core.precision import cast_pytree
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
     cgrid_mass_flux_divergence,
@@ -35,6 +37,13 @@ from legoesm.core.operators_cdgrid import (
     fv3_sw_tendencies,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import (
+    CONNECTIVITY,
+    EAST,
+    NORTH,
+    SOUTH,
+    WEST,
+)
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
     create_cubed_sphere_cdgrid,
@@ -626,8 +635,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
         Vertices (shared by 3 faces) are owned by the lowest face index.
         """
-        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
-
         u_d, v_d = state.u_d, state.v_d
         n = self.grid.n
         ca_c = self.cdgrid.cos_angle_corner
@@ -702,7 +709,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self, state: CDGridShallowWaterState, dt: float,
     ) -> CDGridShallowWaterState:
         """Advance one time step using SSP-RK3."""
-        from legoesm.core.precision import cast_pytree
         # Cast state to compute precision at the boundary.
         state_c = cast_pytree(state, None, "compute")
 
@@ -730,9 +736,18 @@ class CDGridShallowWaterModel(IntegrationMixin):
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
+                mass_new = jnp.sum(state_new.h.astype(acc) * area)
             else:
-                mass_target = jnp.sum(state.h.astype(acc) * area)
-            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                # Both mass integrals share the ``* area`` weight on
+                # the same horizontal axes — stack and reduce once so
+                # the local sum kernel fires only once.
+                _h_pair = jnp.stack(
+                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
+                ) * area[..., None]
+                _mass_pair = jnp.sum(
+                    _h_pair, axis=tuple(range(area.ndim)),
+                )
+                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
@@ -821,9 +836,6 @@ class FV3FBShallowWaterModel:
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step using FV3 forward-backward."""
-        from legoesm.core.precision import cast_pytree
-        from legoesm.core.fv3_sw_core import fv3_fb_sw_step
-
         state_c = cast_pytree(state, None, "compute")
 
         # FV3 dyn_core.F90:757,1258 derives nord_v(k) = min(2, nord) at
@@ -871,9 +883,17 @@ class FV3FBShallowWaterModel:
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
+                mass_new = jnp.sum(state_new.h.astype(acc) * area)
             else:
-                mass_target = jnp.sum(state.h.astype(acc) * area)
-            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                # Both mass integrals share the ``* area`` weight on
+                # the same horizontal axes — stack and reduce once.
+                _h_pair = jnp.stack(
+                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
+                ) * area[..., None]
+                _mass_pair = jnp.sum(
+                    _h_pair, axis=tuple(range(area.ndim)),
+                )
+                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
@@ -927,7 +947,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
         if self.config.use_experimental_csw:
@@ -1178,9 +1197,17 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
+                mass_new = jnp.sum(state_new.h.astype(acc) * area)
             else:
-                mass_target = jnp.sum(state.h.astype(acc) * area)
-            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                # Both mass integrals share the ``* area`` weight on
+                # the same horizontal axes — stack and reduce once.
+                _h_pair = jnp.stack(
+                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
+                ) * area[..., None]
+                _mass_pair = jnp.sum(
+                    _h_pair, axis=tuple(range(area.ndim)),
+                )
+                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)

@@ -10,6 +10,18 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.grids.vertical import pressure_from_sigma
+from legoesm.atmosphere.physics.thermodynamics import (
+    pressure_from_eos,
+    reconstruct_half_level_pressure_hydrostatic,
+    sanitize_theta_rho,
+)
+from legoesm.core.field import Field
+from legoesm.core.state import HydrostaticTendencies, NonHydrostaticTendencies
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.core.operators_3d import fv_flux_divergence_3d
+from legoesm.grids.gaussian import sh_synthesis_3d, vordiv_from_uv_3d
+from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +154,6 @@ def extract_hydrostatic_columns(state, sigma_coord):
     dict with keys: T_col, p_full_col, p_half_col, q_v_col, ncol, nlev,
         shape_3d, shape_2d
     """
-    from legoesm.grids.vertical import pressure_from_sigma
-
     T = state.T.data
     p_s = state.p_s.data
     nlev = sigma_coord.n_levels
@@ -190,11 +200,6 @@ def extract_nonhydrostatic_columns(state, height_coord, terrain_metric):
         ncol, nlev, shape_3d, shape_2d, shape_w, tracers, n_tracers,
         exner, theta_total, rho_total, z_full, z_half
     """
-    from legoesm.atmosphere.physics.thermodynamics import (
-        pressure_from_eos, reconstruct_half_level_pressure_hydrostatic,
-        sanitize_theta_rho,
-    )
-
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
     tracers = state.tracers.data
@@ -302,9 +307,6 @@ def make_zero_hydrostatic_tendencies(shape_3d, shape_2d, prefix=""):
     -------
     HydrostaticTendencies
     """
-    from legoesm.core.field import Field
-    from legoesm.core.state import HydrostaticTendencies
-
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
     sfx = f"_{prefix}" if prefix else ""
@@ -337,9 +339,6 @@ def make_zero_nonhydrostatic_tendencies(shape_3d, shape_2d, shape_w, tracers, pr
     -------
     NonHydrostaticTendencies
     """
-    from legoesm.core.field import Field
-    from legoesm.core.state import NonHydrostaticTendencies
-
     dims_3d = ("face", "x", "y", "level")
     dims_w = ("face", "x", "y", "level_half")
     dims_2d = ("face", "x", "y")
@@ -438,10 +437,7 @@ def compute_moisture_convergence(
     advection in the dycore proper still uses the limiter; this is a
     closure diagnostic, not an advected quantity.
     """
-    from legoesm.grids.cubed_sphere import CubedSphereGrid
-
     if isinstance(grid, CubedSphereGrid):
-        from legoesm.core.operators_3d import fv_flux_divergence_3d
         # q_v_grid shape (6, n, n, nlev)
         flux_div = fv_flux_divergence_3d(
             q_v_grid, u_grid, v_grid, grid, limiter=False,
@@ -458,9 +454,6 @@ def compute_moisture_convergence(
     # the standard transform pathway for spectral models and stays
     # smooth / differentiable.
     if hasattr(grid, "n_max") and hasattr(grid, "Pnm"):
-        from legoesm.grids.gaussian import (
-            sh_synthesis_3d, vordiv_from_uv_3d,
-        )
         flux_x = q_v_grid * u_grid    # (n_lat, n_lon, nlev)
         flux_y = q_v_grid * v_grid
         # ``vordiv_from_uv_3d`` returns spectral (vor, div).  We only
@@ -474,9 +467,6 @@ def compute_moisture_convergence(
     # Try lat-lon — duck-typed by attribute presence so we don't
     # introduce an import dependency for users who never touch lat-lon.
     if hasattr(grid, "dlat") and hasattr(grid, "dlon"):
-        from legoesm.core.operators_fv_latlon_3d import (
-            fv_flux_divergence_latlon_3d,
-        )
         flux_div = fv_flux_divergence_latlon_3d(
             q_v_grid, u_grid, v_grid, grid, limiter=False,
         )

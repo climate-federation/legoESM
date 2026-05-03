@@ -241,11 +241,21 @@ def reconstruct_cell_velocity(u_edge, mesh):
     if is_3d:
         u_gathered = u_edge[eoc_safe] * mask[..., jnp.newaxis]
         w3d = weight[..., jnp.newaxis]
-        u_east = jnp.sum(u_gathered * w3d * cos_a[..., jnp.newaxis], axis=0)
-        v_north = jnp.sum(u_gathered * w3d * sin_a[..., jnp.newaxis], axis=0)
+        # Both reductions share ``u_gathered * w3d`` weighting along the
+        # ``maxEdges`` axis — fuse into one stacked sum.
+        _stack = (u_gathered * w3d)[..., jnp.newaxis] * jnp.stack(
+            [cos_a, sin_a], axis=-1,
+        )[..., jnp.newaxis, :]
+        _uv = jnp.sum(_stack, axis=0)
+        u_east = _uv[..., 0]
+        v_north = _uv[..., 1]
     else:
         u_gathered = u_edge[eoc_safe] * mask
-        u_east = jnp.sum(u_gathered * weight * cos_a, axis=0)
-        v_north = jnp.sum(u_gathered * weight * sin_a, axis=0)
+        _stack = (u_gathered * weight)[..., jnp.newaxis] * jnp.stack(
+            [cos_a, sin_a], axis=-1,
+        )
+        _uv = jnp.sum(_stack, axis=0)
+        u_east = _uv[..., 0]
+        v_north = _uv[..., 1]
 
     return u_east, v_north

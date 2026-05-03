@@ -29,6 +29,9 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
+    diagnose_w_from_flux_div,
+    flux_form_vertical_tracer_advection,
+    flux_form_vertical_tracer_advection_tvd,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -36,6 +39,16 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
+    _interp_to_v_points,
+    _upwind_to_u_points,
+    _upwind_to_v_points,
+    _tvd_to_u_points,
+    _tvd_to_v_points,
+)
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    compute_face_masks,
+    divergence_cgrid,
+    interp_cell_to_uface,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
@@ -116,11 +129,15 @@ def _forward_backward_coriolis_3d(
     h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     # --- Depth-averaged velocity (barotropic component) ---
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
-    U_bar = jnp.sum(u * h_u, axis=-1) / H_u * u_mask
+    # Per-face thickness + barotropic-mean column reductions share the
+    # h_u/h_v weight on the level axis — fuse into one stack each.
+    _u_pair = jnp.sum(jnp.stack([h_u, u * h_u], axis=-1), axis=-2)
+    H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
+    U_bar = _u_pair[..., 1] / H_u * u_mask
 
-    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), min_water_col)
-    V_bar = jnp.sum(v * h_v, axis=-1) / H_v * v_mask
+    _v_pair = jnp.sum(jnp.stack([h_v, v * h_v], axis=-1), axis=-2)
+    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
+    V_bar = _v_pair[..., 1] / H_v * v_mask
 
     # --- Perturbation velocity ---
     u_prime = (u - U_bar[..., jnp.newaxis]) * u_mask_3d
@@ -424,14 +441,22 @@ class LatLonCGridOceanModel:
             state.eta.data, state.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
         )
-        h_u_pre = min_cell_to_uface(h_k_pre)
-        H_u_pre = jnp.maximum(jnp.sum(h_u_pre, axis=-1), 1e-10)
-        h_v_pre = min_cell_to_vface(h_k_pre)
-        H_v_pre = jnp.maximum(jnp.sum(h_v_pre, axis=-1), 1e-10)
+        # h at u-faces
+        h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
+        h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
+        # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
+        # replaces alloc-zeros + concatenate-of-three.
+        h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
+        h_v_pre = jnp.pad(h_v_pre_int, ((1, 1), (0, 0), (0, 0)))
 
-        # Depth-averaged tendency → slow forcing for barotropic solver
-        F_slow_u = jnp.sum(du_dt * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
-        F_slow_v = jnp.sum(dv_dt * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+        # H + F_slow share the per-face h weight on the level axis —
+        # fuse the two reductions per face into one stacked sum.
+        _u_pair = jnp.sum(jnp.stack([h_u_pre, du_dt * h_u_pre], axis=-1), axis=-2)
+        H_u_pre = jnp.maximum(_u_pair[..., 0], 1e-10)
+        F_slow_u = _u_pair[..., 1] / H_u_pre * state.u_mask.data
+        _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
+        H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
+        F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
 
         # Perturbation tendency (depth-mean removed) → applied to 3D
         du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
@@ -517,6 +542,11 @@ class LatLonCGridOceanModel:
         # baroclinic structure) and apply a uniform barotropic correction
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
+        mask = state.land_mask.data
+
+        # Layer thickness at face points
+        h_u_old = interp_cell_to_uface(h_k_old)  # (n_lat, n_lon+1, nlev)
+        h_v_old = _interp_to_v_points(h_k_old)  # (n_lat+1, n_lon, nlev)
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             _interp_to_v_points,
             _upwind_to_u_points,
@@ -575,8 +605,12 @@ class LatLonCGridOceanModel:
         # transport matches Hu_avg exactly.  The correction is the
         # difference between <H*U> (time-averaged transport) and
         # <U>*H (time-averaged velocity times pre-barotropic H).
-        Hu_3d = jnp.sum(u_3d * h_u_old, axis=-1)
-        Hv_3d = jnp.sum(v_3d * h_v_old, axis=-1)
+        # H + Hu reductions per face share the h_u_old/h_v_old weight
+        # on the level axis — fuse into one stack each.
+        _u_pair = jnp.sum(jnp.stack([h_u_old, u_3d * h_u_old], axis=-1), axis=-2)
+        H_u_old, Hu_3d = _u_pair[..., 0], _u_pair[..., 1]  # (n_lat, n_lon+1)
+        _v_pair = jnp.sum(jnp.stack([h_v_old, v_3d * h_v_old], axis=-1), axis=-2)
+        H_v_old, Hv_3d = _v_pair[..., 0], _v_pair[..., 1]  # (n_lat+1, n_lon)
         delta_U = (Hu_avg - Hu_3d) / jnp.maximum(H_u_old, 1e-10)
         delta_V = (Hv_avg - Hv_3d) / jnp.maximum(H_v_old, 1e-10)
         u_corrected = u_3d + delta_U[..., jnp.newaxis]
@@ -601,12 +635,6 @@ class LatLonCGridOceanModel:
         # The horizontal flux integrates to zero by the 2D divergence theorem.
         # The vertical flux telescopes to surface/bottom (both zero).
         # Total conservation is exact.
-        from legoesm.ocean.vertical import (
-            diagnose_w_from_flux_div,
-            flux_form_vertical_tracer_advection,
-            flux_form_vertical_tracer_advection_tvd,
-        )
-
         h_k_new = compute_layer_thickness(
             state_new.eta.data, state_new.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
@@ -856,7 +884,6 @@ class LatLonCGridOceanModel:
         land = ~wet
 
         # Face mask consistency: u_mask/v_mask must match land_mask
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
         u_expected, v_expected = compute_face_masks(mask)
         if not (bool(jnp.all(state.u_mask.data == u_expected))
                 and bool(jnp.all(state.v_mask.data == v_expected))):
