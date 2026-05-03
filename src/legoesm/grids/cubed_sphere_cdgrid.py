@@ -32,7 +32,16 @@ _EPS = float(jnp.finfo(jnp.float32).eps)    # Float32 machine epsilon (~1.19e-7)
 
 from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import _face_gnomonic_to_lonlat
+from legoesm.grids.halo import (
+    CONNECTIVITY,
+    EAST,
+    NORTH,
+    SOUTH,
+    WEST,
+    _face_gnomonic_to_lonlat,
+    _fill_corners_h1,
+    pad_halo,
+)
 
 
 class CubedSphereCDGrid(NamedTuple):
@@ -682,8 +691,6 @@ def create_cubed_sphere_cdgrid(
     # angle between that face's i-tangent and geographic east), and is
     # therefore inherently different on each face even at shared points.
     # ------------------------------------------------------------------
-    from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
-
     def _get_strip_corner(arr, face, edge, n_):
         if edge == WEST:    return arr[face, 0, :]
         elif edge == EAST:  return arr[face, n_, :]
@@ -738,7 +745,6 @@ def create_cubed_sphere_cdgrid(
                 lat_corner = arr
 
     # --- area_corner from FV3 supergrid (sum of 4 supergrid quadrilaterals) ---
-    from legoesm.grids.halo import pad_halo, _fill_corners_h1
     area_corner = area_c_sg  # (6, n+1, n+1)
 
     # Infer omega from base.f when not explicitly provided so that
