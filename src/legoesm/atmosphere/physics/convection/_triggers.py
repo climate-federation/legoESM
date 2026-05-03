@@ -299,12 +299,16 @@ def smooth_lowest_crossing_index(
     # tiny floor protects against ``0/0`` when ``total_first_cross``
     # is exactly zero; the no-crossing branch below replaces this
     # value with the surface fallback when the gate fires.
-    total_first_cross = jnp.sum(first_cross_weight, axis=-1)
-    safe_total = jnp.maximum(total_first_cross, 1e-12)
-    idx_min_naive = (
-        jnp.sum(first_cross_weight * idx_surface_first, axis=-1)
-        / safe_total
+    # ``total_first_cross`` and ``idx_min_naive`` numerator share the
+    # ``first_cross_weight`` weight on the level axis — fuse into one
+    # stacked column reduction.
+    _pair = jnp.sum(
+        jnp.stack([first_cross_weight, first_cross_weight * idx_surface_first], axis=-1),
+        axis=-2,
     )
+    total_first_cross = _pair[..., 0]
+    safe_total = jnp.maximum(total_first_cross, 1e-12)
+    idx_min_naive = _pair[..., 1] / safe_total
 
     # No-crossing fallback: blend toward the surface index (which is
     # ``0`` in surface-first coordinates) when ``total_first_cross``
