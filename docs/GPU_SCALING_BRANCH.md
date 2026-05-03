@@ -103,6 +103,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean eta_floor inline parallel-runtime imports | 3 inline imports per multi-process check | 4 module-level imports |
 | Ocean PE FC inline halo + operator imports        | 3 inline imports per RHS                | 3 module-level imports |
 | Ocean PE cubed-sphere CD-grid inline imports      | 6 inline imports per RHS (4 distinct, 2 dupes) | 3 module-level imports (combine same-module) |
+| Ocean MPAS fill_land_cells_mpas inline imports    | 3 inline imports across dycore/barotropic/model | 3 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
