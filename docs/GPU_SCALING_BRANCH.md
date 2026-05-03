@@ -119,6 +119,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Sea-ice 5 inline imports + redundant ``_constants`` alias | 5 inline imports across slab + dynamic paths, ``constants as _constants`` ×2 | 5 module-level imports + drop alias |
 | Two-layer lake 3 inline imports + ``_constants`` alias | 3 inline imports + redundant alias | 3 module-level imports + drop alias |
 | Land multilayer 2 inline imports                  | 2 inline imports per call              | 2 module-level imports |
+| Coupler surface_exchange thermodynamics inline    | 2 inline imports per NH call           | 2 module-level imports |
+| Coupler mpas_adapter 5 inline imports             | 5 inline imports across init + factory | 5 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
