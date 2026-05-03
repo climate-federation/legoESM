@@ -309,24 +309,23 @@ def _configure_metal(config: HardwareConfig) -> None:
     automatically.  We enable multi-threading for CPU fallback operations
     to ensure the spectral transforms (which run on CPU) use all cores.
     """
-    if "XLA_FLAGS" not in os.environ:
-        try:
-            # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
-            # is NOT recognized by current XLA and crashes JAX at first
-            # use with a fatal `Unknown flag in XLA_FLAGS` error from
-            # parse_flags_from_env.cc.  Drop it; rely on XLA's default
-            # CPU thread-pool autoscaling from os.cpu_count().
-            _set_xla_flags({
-                "xla_cpu_multi_thread_eigen": "true",
-            })
-        except Exception:
-            pass  # Non-critical; XLA will use defaults.
+    _enable_cpu_multithreading()
 
 
 def _configure_cpu(config: HardwareConfig) -> None:
     """Apply CPU-specific JAX configuration."""
-    # Set intra-op parallelism to use all available cores unless
-    # the user has already set it.
+    _enable_cpu_multithreading()
+
+
+def _enable_cpu_multithreading() -> None:
+    """Enable multi-threaded Eigen on the CPU backend.
+
+    XLA dropped the ``--intra_op_parallelism_threads`` flag in jaxlib
+    0.10; passing it now aborts the process at backend init.  Multi-thread
+    Eigen is still enabled via ``--xla_cpu_multi_thread_eigen``, and the
+    Eigen worker count is controlled by ``OMP_NUM_THREADS`` (defaults to
+    hardware concurrency).
+    """
     if "XLA_FLAGS" not in os.environ:
         try:
             # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
@@ -334,11 +333,14 @@ def _configure_cpu(config: HardwareConfig) -> None:
             # use with a fatal `Unknown flag in XLA_FLAGS` error from
             # parse_flags_from_env.cc.  Drop it; rely on XLA's default
             # CPU thread-pool autoscaling from os.cpu_count().
-            _set_xla_flags({
-                "xla_cpu_multi_thread_eigen": "true",
-            })
+            _set_xla_flags({"xla_cpu_multi_thread_eigen": "true"})
         except Exception:
             pass  # Non-critical; XLA will use defaults.
+    if "OMP_NUM_THREADS" not in os.environ:
+        try:
+            os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
+        except Exception:
+            pass
 
 
 # ============================================================================

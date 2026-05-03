@@ -433,6 +433,14 @@ def configure_backend(backend: str | None = None) -> str:
                 })
             except Exception:
                 pass
+            # XLA no longer accepts ``--intra_op_parallelism_threads`` since
+            # jaxlib 0.10. Eigen pulls its worker count from ``OMP_NUM_THREADS``
+            # (falling back to the hardware concurrency), so set that instead.
+            if "OMP_NUM_THREADS" not in os.environ:
+                try:
+                    os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
+                except Exception:
+                    pass
 
     logger.info("Configured XLA for %s backend", backend)
     return backend
