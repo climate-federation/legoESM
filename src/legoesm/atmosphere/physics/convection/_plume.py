@@ -251,21 +251,22 @@ def compute_lfc_lnb(
     # ``k_lfc`` into surface-first space and then compared against the
     # surface-last ``profile``, marking the wrong levels as "above LFC"
     # and collapsing the LNB onto the LFC for many columns.
+    # Sharp gate (independent of outer ``sharpness``) so the ``LARGE``
+    # guard is essentially binary in the level axis: ~0 above LFC, ~1
+    # below.  The outer ``sharpness`` is in units of K^-1 (buoyancy
+    # threshold sigmoid) and is typically O(1); reusing it for the
+    # level-axis indicator gave a sigmoid scale of ~1 *level*, which
+    # combined with ``LARGE = 1e6`` leaks the guard into levels far
+    # above LFC and monotonises the profile so no crossing is detected
+    # (the LNB then collapses onto the surface fallback).  Use a level-
+    # axis sharpness of ``20`` so the transition spans ~0.1 of one level.
+    GATE_SHARPNESS = 20.0
     above_lfc_weight = smooth_level_indicator(
         jnp.broadcast_to(jnp.arange(nlev, dtype=buoyancy.dtype), buoyancy.shape),
         threshold=k_lfc[:, None],
-        sharpness=sharpness,
+        sharpness=GATE_SHARPNESS,
         direction="below",
     )
-    # Drive ``-buoyancy`` strongly negative below the LFC so that the
-    # smooth-crossing primitive does not register near-zero spurious
-    # crossings produced by multiplicative masking ``buoyancy * weight``
-    # (where ``-masked_buoyancy ≈ 0`` for an entire stretch of levels
-    # near the surface).  ``LARGE = 1e6 K`` is far below any physical
-    # buoyancy magnitude (which is bounded by the moist-adiabat /
-    # environmental temperature difference, ~tens of K), so a smooth
-    # blend is safe.  Above LFC altitude the offset vanishes and the
-    # crossing detector sees the genuine ``-buoyancy`` profile.
     LARGE = jnp.asarray(1.0e6, dtype=buoyancy.dtype)
     guarded_neg_buoyancy = -buoyancy - LARGE * (1.0 - above_lfc_weight)
     k_lnb = smooth_lowest_crossing_index(guarded_neg_buoyancy, 0.0, sharpness)

@@ -377,6 +377,127 @@ canonical resolution and grid count) maps directly onto the
 will *never* satisfy that criterion; numbers from the real-hardware
 runs will.
 
+## 6.b Atmosphere test status (added iter-196, 2026-05-03)
+
+The hydrostatic + shallow-water suites now run **fully green**:
+
+| Suite                                | Tests passing |
+|--------------------------------------|--------------:|
+| `tests/atmosphere/shallow_water/`    |   **95 / 95** |
+| `tests/atmosphere/hydrostatic/`      | **692 / 692** |
+| `tests/atmosphere/nonhydrostatic/`   |   **60 / 60** |
+
+Six unrelated failures cleared in iter-196 (5 in scope + 1 bonus
+nonhydrostatic NameError fix that was found while running the whole
+suite for regression coverage):
+
+1. **`compute_lfc_lnb` LFC gate sharpness** (`_plume.py`) — the LFC
+   gate (`smooth_level_indicator(arange, k_lfc, sharpness=outer)`) used
+   the outer K^-1 buoyancy sharpness (~1) for the level-axis indicator,
+   which spans ~1 *level*.  Combined with the `LARGE = 1e6 K` guard,
+   this bled the additive penalty into levels far above the LFC and
+   monotonised `-buoyancy`.  `smooth_lowest_crossing_index` then found
+   no crossing and fell back to surface, collapsing every CAPE-positive
+   sounding's LNB onto the surface and zeroing the deep-class weight.
+   Decoupled the gate sharpness to a hard-coded `20.0` so the LARGE
+   guard is essentially binary in the level axis.  Restores Tiedtke's
+   spectral-MC plumbing test (`test_tiedtke_responds_to_moisture_convergence`).
+
+2. **`kessler.py` qc_scale fp32 NaN gradient** — the donor-clamp
+   `qc_avail / max(qc_sink_total*dt, 1e-30)` underflowed in fp32 when
+   `qc_c=0, q_r=0`: `1e-30^2 = 1e-60` is below `fp32.tiny`, so the
+   reverse-mode VJP saw `0/0 = NaN` even though the forward result
+   was 0.  Replaced with the `safe_pow`-style double-`jnp.where`:
+   when `qc_sink_dt > 0`, do the divide; else short-circuit to 1.0 so
+   the AD graph never touches the underflow.  Restores
+   `test_grad_through_hydrostatic` for cold-start initial conditions.
+
+3. **`load_checkpoint` 9-tuple signature** — the function now also
+   returns `carry_aux` (held radiation state), but four checkpoint
+   round-trip tests were still unpacking the old 8-tuple form.
+   Updated the unpacks in `test_amip_config.py` (3 tests) and
+   `test_microphysics.py::TestCheckpointWithHydrometeors` (3 tests +
+   `len(loaded) == 8` assertion).
+
+4. **`test_combined_reuses_single_spectral_transform` monkeypatch
+   target** — the combined orchestrator imports
+   `spectral_pe_to_grid` via `from … import …`, so patching
+   `legoesm.atmosphere.dynamics.spectral_pe.spectral_pe_to_grid`
+   leaves the local binding intact and the wrapped function never
+   fires (count 0 instead of 1).  Retargeted the patch to
+   `legoesm.atmosphere.physics.combined.spectral_pe_to_grid` — the
+   binding the call site actually resolves.
+
+5. **`compressible_euler_cdgrid.py:276` NameError** — the iter-65
+   batch corner-interp landed `nlev_at`, `n_face_at`, `n_i_at`,
+   `n_j_at` placeholders in the §8 cell-centre conversion that were
+   never assigned in the function (every other batched-stack site in
+   the file uses the `_uv` / `_kp` / `_vl` / `_tr` suffix bound from
+   the immediately-preceding `.shape` unpack).  Replaced with
+   `nlev_uv`, `n_face_uv`, `n_i_uv`, `n_j_uv` from the cell-centre
+   `u.shape` capture at line 155 (the natural target of
+   `_interp_corner_to_center`).  Cleared **10 nonhydrostatic test
+   failures** in one fix (`test_compressible_euler.py` 7 tests +
+   `test_fv_cubesphere.py` 1 test + 2 `Tendencies` tests).
+
+The cubed-sphere C24 BCW dycore blowup (§1.b) is **independent of
+these test failures**: it lives in the FV3 PE step and is reproduced
+on the iter-1 baseline `primitive_eq_cdgrid.py` (commit ``f79206b1``).
+Symptoms: blowup time scales weakly with `dt` (dt=300 → step 100, day
+0.35 ;  dt=150 → step 300, day 0.52 ;  dt=75 → step 500, day 0.43),
+suggesting a structural numerical-instability bug rather than a CFL
+violation.  This is filed as a separate dycore-numerics audit item
+and does not affect the test suites.
+
+### 6.b.i — CS C24 BCW blowup trace (iter-196)
+
+Per-step probe (perturbed=False so the IC is the balanced JW jet,
+no perturbation; identical trajectory to perturbed=True at this
+resolution because the perturbation is below the truncation noise):
+
+```
+Step | day   | ps_min hPa | ps_max hPa | max|u| | max|v|
+   1 | 0.003 |     990.4  |    1009.8  |   27.6 |   26.3
+  11 | 0.038 |     966.0  |    1031.1  |   29.8 |   28.0
+  31 | 0.108 |     968.5  |    1030.5  |   37.1 |   32.2
+  51 | 0.177 |     970.1  |    1025.2  |   40.7 |   33.4
+  61 | 0.212 |     954.6  |    1052.4  |   40.8 |   32.3
+  71 | 0.247 |     910.0  |    1100.0  |   40.0 |   31.2  <- ps_min drops 60 hPa
+  81 | 0.281 |     697.9  |    1338.1  |   40.6 |   78.8  <- explosion begins
+  91 | 0.316 |     388.5  |    1817.5  |  281.7 |  191.5  <- runaway
+ 101 | 0.351 |      59.1  |    2666.6  | 1514.8 | 1027.2  <- catastrophic
+```
+
+Key observations:
+
+* IC is `ps = 1000 hPa` flat; after **one** SSP-RK3 step
+  `ps_min = 990.4` (1 % drop).  The shallow-water FV3 code shows nothing
+  comparable on similar IC, so the issue is in the FV3 **PE** step
+  specifically (vertical mass-flux + sigma-coordinate piece, not
+  the horizontal C-D operators).
+* `u_max` stays bounded (~40 m/s) through step 71.  Then between
+  steps 71 → 81 the surface pressure *anomaly* explodes (60 → 200 hPa
+  swing in 10 steps) without a corresponding wind change — so the
+  driver of the blowup is **the ps continuity equation**, not the
+  momentum equations directly.
+* Only after that pressure wave does `u_max` blow through 100 m/s.
+  This is the secondary response to the now-huge PGF.
+* Increasing `hyperdiff_coeff` 5× delays the blowup but does not
+  cure it (still blows by step ~110).  Reducing `dt` 4× shifts the
+  blowup from step 100 → step 500 (same physical day, ≈ 0.4),
+  consistent with a non-CFL structural bug.
+* `use_conservation_fixer=False, fix_mass=False` produces the
+  identical trajectory — the mass fixer is not the culprit.
+
+Most likely failure mode: the FV3 `dp_s/dt = -∂(D_total)/∂σ` term in
+`primitive_eq_cdgrid.py` is mis-signed, mis-staggered, or applies the
+wrong column integral (`compute_sigma_dot_and_total` was refactored
+in iter-51-53 to share the cumsum between `σ̇` and `D_total`).  The
+spectral and MPAS dycores reuse the same helper and are stable, so the
+divergence/mass-flux *helper* is fine; the bug must be in how the FV3
+cdgrid step **consumes** its output (sign / staggering / halo).
+Investigation continued in next iteration.
+
 ## 7. Iteration log pointer
 
 The full per-iteration code-change log (1106 commits, every patch from
