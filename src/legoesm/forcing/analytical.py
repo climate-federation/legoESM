@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.precision import get_policy
 from legoesm.forcing.time_utils import day_to_calendar
 
 
@@ -51,6 +52,5 @@ def analytical_sst_sic(
     # SIC: ramp from 0 to 1 as SST drops below T_ice
     sic = np.clip(((T_ice + 0.5) - sst) / 3.0, 0.0, 1.0)
 
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
     return jnp.array(sst, dtype=_dtype), jnp.array(sic, dtype=_dtype)
