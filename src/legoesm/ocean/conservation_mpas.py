@@ -21,27 +21,27 @@ hard-coded float64 upcast.  See issue #167.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
+from legoesm.core.operators import _is_distributed
 from legoesm.core.precision import cast
 from legoesm.ocean.vertical import compute_layer_thickness
+from legoesm.parallel.reductions import global_sum_mpi
 
 _ACC_MODULE = "ocean_diagnostics"
 
 
 def _is_multi_process() -> bool:
     """Check MPI or multi-process JAX (#177)."""
-    import jax
     if jax.process_count() > 1:
         return True
-    from legoesm.core.operators import _is_distributed
     return _is_distributed()
 
 
 def _global_sum(x):
     """MPI-aware global sum (#177)."""
     if _is_multi_process():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(x)
     return x
 
