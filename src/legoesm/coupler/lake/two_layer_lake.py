@@ -16,8 +16,9 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.field import Field
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.coupler.lake.config import LakeConfig
@@ -47,7 +48,6 @@ def step_lake(
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
@@ -98,7 +98,6 @@ def step_lake(
 
     Q_freeze_total = Q_freeze_epi + Q_freeze_hypo
 
-    from legoesm.core.field import Field
     Q_freeze_field = None
     if state.Q_freeze is not None:
         Q_freeze_field = state.Q_freeze.replace(data=Q_freeze_total)
@@ -119,8 +118,7 @@ def step_lake(
     # albedo) and the LW balance just to discard them and read out
     # ``lw_up_new``.  One multiply + one pow vs the full radiation
     # call.
-    from legoesm import constants as _constants
-    lw_up_new = config.emissivity_lake * _constants.sigma_sb * T_epi_new ** 4
+    lw_up_new = config.emissivity_lake * constants.sigma_sb * T_epi_new ** 4
 
     # Recompute q_surface from updated epilimnion temperature for consistency
     q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
