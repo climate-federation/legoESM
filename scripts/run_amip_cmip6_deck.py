@@ -241,8 +241,16 @@ def main(argv: list[str] | None = None) -> int:
         ]
     if args.output:
         cmd += ["--output", args.output]
-    # Default to fix-moisture for conservation
-    cmd.append("--fix-moisture")
+    # NOTE: --fix-moisture is *intentionally not passed*. The current
+    # implementation (`fix_moisture_hydrostatic` in `core/conservation.py`)
+    # rescales only `q_v`, not the prognostic condensate tracers
+    # (`q_c`/`q_r`).  When microphysics precipitates water out of the
+    # column, q_v decreases and the fixer multiplies it back up — a
+    # spurious source of vapor that drives a runaway with Kessler-type
+    # schemes (catalogued in AMIP.md "Known issues").  Sundqvist
+    # microphysics is also prognostic-condensate, so the same caveat
+    # applies; turning fix-moisture on for AMIP requires a `fix_total_water`
+    # path that tracks cumulative precipitation, which is a follow-up.
 
     if args.extra:
         cmd += list(args.extra)

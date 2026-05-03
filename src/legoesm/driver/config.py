@@ -259,9 +259,21 @@ class ExperimentConfig(NamedTuple):
                 "set radiation='rrtmgp' for cloud-radiation coupling"
             )
         if self.fix_moisture and self.microphysics != "none":
+            # The current ``fix_moisture_hydrostatic`` implementation only
+            # rescales ``q_v``, not prognostic condensate (``q_c``/``q_r``)
+            # nor cumulative precipitation flux at the surface.  When a
+            # precipitating microphysics scheme is active, the fixer
+            # multiplies q_v back up after each precipitation event — an
+            # unphysical source of water vapor that compounds with the
+            # microphysical condensation/heating loop and drives the
+            # column unstable (catalogued under AMIP.md "Known issues").
             warns.append(
-                "fix_moisture with active microphysics may conflict "
-                "with microphysical moisture sources/sinks"
+                "fix_moisture with prognostic-condensate microphysics "
+                f"({self.microphysics}) is INCORRECT: the current "
+                "implementation rescales only q_v, not q_c/q_r/precip — "
+                "spurious vapor sources will accumulate and may drive the "
+                "column unstable.  Disable --fix-moisture or replace it "
+                "with a fix_total_water path that tracks precipitation."
             )
         if (self.output.cmip_output
                 and self.output.diagnostics_perf_mode == "always"):

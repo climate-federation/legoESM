@@ -173,6 +173,49 @@ ALL FATAL CHECKS PASSED
 The atmosphere is cooling from the 300K isothermal IC toward the gray-
 radiation equilibrium with prescribed SST=292.6 K — physically expected.
 
+### Iter 4 — Investigate Kessler blow-up + fix moisture-fixer bug
+
+**Diagnostic**
+
+- Wrote `scripts/diag_kessler_amip_blowup.py` — a probe that runs Kessler
+  microphysics directly with the AMIP IC (T=300K, RH=0.7 × σ², SST
+  blended) for 200 explicit-Euler steps.  **Kessler is stable in
+  isolation** (zero condensation, zero tendencies) for the entire 1.4-day
+  trajectory.
+- Confirmed blow-up requires the integrated dycore + Kessler path:
+  - Day 1 stable, Day 2 NaN winds across cubed_sphere C16/L30 with
+    `--microphysics kessler`, regardless of whether convection /
+    turbulence / clouds / fix-moisture are on.
+  - Same blow-up with cooler/drier IC (T=280K, RH=0.5).
+
+**Code-level bug found and partially fixed**
+
+- `src/legoesm/core/conservation.py:fix_moisture_hydrostatic` rescales
+  **only `q_v`**, not the prognostic condensate tracers (`q_c`, `q_r`,
+  ...) and not the cumulative surface precipitation flux.  When a
+  precipitating microphysics scheme (Kessler / Sundqvist / Morrison /
+  Thompson) is active, water leaves `q_v` through the
+  vapor → cloud → rain → precip chain.  The fixer then multiplies
+  `q_v` back up by `(target / current_q_v)` to restore the global
+  q_v inventory — adding spurious vapor every step that compounds with
+  the microphysical condensation / latent-heating loop.
+- **Fix (this iter):** strengthened the existing `cfg.fix_moisture +
+  cfg.microphysics ≠ none` warning in `src/legoesm/driver/config.py` to
+  mention the actual failure mode (q_v-only rescale, missing precip
+  bookkeeping).  Disabled `--fix-moisture` by default in
+  `scripts/run_amip_cmip6_deck.py`; the deck now relies on the
+  microphysics scheme's own donor clamps for moisture conservation.
+- **Remaining bug (open):** the AMIP Kessler path still blows up at day
+  ~2 *without* `fix_moisture`.  Probe confirms Kessler-in-isolation is
+  stable, so the failure is in the dycore-tracer-advection ↔ Kessler
+  feedback loop.  Tracked under "Known issues" #1.
+
+**Validation**
+
+- 3/3 working grids (cubed_sphere, latlon, gaussian) pass the smoke
+  test after the deck driver change.
+- All 81 AMIP-related unit tests still pass.
+
 ### Known issues / follow-ups
 
 | # | Issue | Status | Workaround |
