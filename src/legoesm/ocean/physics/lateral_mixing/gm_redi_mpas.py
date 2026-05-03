@@ -111,8 +111,10 @@ def _voronoi_neumann_fill(
         m_nbr = m[coc_safe] * valid              # (maxEdges, nCells)
 
         if filled.ndim == 1:
-            nbr_sum = jnp.sum(f_nbr * m_nbr, axis=0)         # (nCells,)
-            nbr_count = jnp.sum(m_nbr, axis=0)               # (nCells,)
+            # Both reductions share ``m_nbr`` weight on axis 0 — fuse.
+            _pair = jnp.sum(jnp.stack([f_nbr * m_nbr, m_nbr], axis=-1), axis=0)
+            nbr_sum = _pair[..., 0]                         # (nCells,)
+            nbr_count = _pair[..., 1]                       # (nCells,)
         else:
             nbr_sum = jnp.sum(f_nbr * m_nbr[:, :, None], axis=0)  # (nCells, nlev)
             nbr_count = jnp.sum(m_nbr, axis=0)               # (nCells,)
