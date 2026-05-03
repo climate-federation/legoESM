@@ -33,6 +33,12 @@ from legoesm.coupler.coupling_fields import (
     SurfaceToAtm,
     TileResponse,
 )
+
+# LY09 sea-surface saturation reduction for typical seawater salinity (~35 PSU).
+# The saturation vapor pressure over saline water is ~2 % lower than over
+# fresh water; q_sat at the air-sea interface is correspondingly reduced.
+# Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
+_Q_SAT_SALINE_FACTOR = 0.98
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 from legoesm.coupler.tile_fractions import (
     blend_tiles,
@@ -180,7 +186,9 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    q_sfc = saturation_mixing_ratio(ocean_sst, forcing.p_surface)
+    q_sfc = _Q_SAT_SALINE_FACTOR * saturation_mixing_ratio(
+        ocean_sst, forcing.p_surface,
+    )
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("coare3", "large_yeager"):
@@ -194,6 +202,8 @@ def ocean_tile_response(
             ocean_sst, q_sfc,
             rho,
             z_ref=config.z_ref,
+            z_t=config.z_t_atm,
+            z_q=config.z_q_atm,
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,

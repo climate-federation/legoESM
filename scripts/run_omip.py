@@ -94,6 +94,46 @@ def parse_args():
                    help="Disable SST/SSS restoring")
     p.add_argument("--diag-every", type=int, default=None,
                    help="Diagnostic interval in steps (default: ~1 day)")
+    # Tropical-OMIP forcing (Item 4 of tropical_omip_plan.md).
+    p.add_argument("--forcing-mode", type=str, default="restoring",
+                   choices=["restoring", "jra55_do_tropical"],
+                   help=(
+                       "Surface forcing source. 'restoring' (default) uses "
+                       "Haney SST/SSS restoring toward WOA. 'jra55_do_tropical' "
+                       "uses LY09 bulk fluxes from a pre-built JRA55-do cache "
+                       "(see scripts/prepare_omip_forcing.py). Currently "
+                       "supports only --grid latlon."
+                   ))
+    p.add_argument("--jra55-cache", type=str, default=None,
+                   help=(
+                       "Path to JRA55-do Zarr cache. Required when "
+                       "--forcing-mode=jra55_do_tropical."
+                   ))
+    p.add_argument("--jra55-co2-ppmv", type=float, default=400.0,
+                   help=(
+                       "Static atmospheric CO2 [ppmv] for JRA55-do mode "
+                       "(default 400 — OMIP-2 protocol holds CO2 constant)."
+                   ))
+    # Tropical-OMIP sponge / SSS restoring / freeze-cap (Day 3 of Item 4).
+    p.add_argument("--sponge-lat-min", type=float, default=-60.0,
+                   help="Southern boundary of tropical-OMIP active domain [°].")
+    p.add_argument("--sponge-lat-max", type=float, default=60.0,
+                   help="Northern boundary of tropical-OMIP active domain [°].")
+    p.add_argument("--sponge-width-deg", type=float, default=5.0,
+                   help="Sponge-zone width inside the active domain [°].")
+    p.add_argument("--sponge-tau-days", type=float, default=5.0,
+                   help="Sponge relaxation timescale at the boundary [days].")
+    p.add_argument("--sss-piston-velocity", type=float, default=5.0e-7,
+                   help=(
+                       "SSS restoring piston velocity [m/s] "
+                       "(default 5e-7 ≈ 200-day timescale at 10 m, NEMO/ORCA standard)."
+                   ))
+    p.add_argument("--jra55-no-sponge", action="store_true",
+                   help="Disable the polar sponge layer.")
+    p.add_argument("--jra55-no-sss-restoring", action="store_true",
+                   help="Disable global SSS restoring.")
+    p.add_argument("--jra55-no-freeze-cap", action="store_true",
+                   help="Disable the T_freeze cap inside the sponge zone.")
     return p.parse_args()
 
 
@@ -387,6 +427,309 @@ def _apply_restoring(state, grid_type, grid, T_target, S_target, dt, tau_s):
 
 
 # ===========================================================================
+# Tropical OMIP — JRA55-do forcing path (Item 4 of tropical_omip_plan.md)
+# ===========================================================================
+
+def _setup_jra55_forcing_state(args, grid, grid_type,
+                               z_coord=None, T_woa=None, S_woa=None):
+    """Open the JRA55-do cache and pre-compute per-step constants.
+
+    Returns a dict with everything ``_jra55_step`` needs:
+    cache path, ref_year, 2-D lat/lon arrays in radians, ``CouplerConfig``
+    with the Item-1 LY09 / 0.98 q_sat / z_t/z_q fixes, plus optional
+    sponge / SSS-restoring / T_freeze-cap state when ``z_coord`` and
+    the WOA targets are provided.
+
+    Validates that the cache target grid matches the model grid;
+    mismatched cache must be rebuilt with the right resolution.
+
+    Parameters
+    ----------
+    z_coord : OceanZStarCoordinate or None
+        Vertical coordinate of the model. Required for SSS restoring
+        (uses the top-layer thickness for the piston-velocity step).
+    T_woa, S_woa : ndarray or None, shape (n_lat, n_lon, nlev)
+        WOA monthly climatology targets. Required for the sponge T,S
+        references and the SSS-restoring target. If either is None,
+        the corresponding feature is disabled regardless of the
+        ``--jra55-no-...`` flags.
+    """
+    if grid_type != "latlon":
+        raise ValueError(
+            "--forcing-mode jra55_do_tropical currently supports only "
+            f"--grid latlon (got {grid_type!r}). Other grids will need "
+            "an additional regridding step."
+        )
+    if args.jra55_cache is None:
+        raise ValueError(
+            "--forcing-mode jra55_do_tropical requires --jra55-cache PATH."
+        )
+    cache_path = Path(args.jra55_cache)
+    if not cache_path.exists():
+        raise FileNotFoundError(
+            f"JRA55-do cache not found at {cache_path}. Build one with "
+            "scripts/prepare_omip_forcing.py."
+        )
+
+    import xarray as xr
+    ds = xr.open_zarr(str(cache_path), decode_times=False)
+    cache_n_lat = int(ds.sizes["lat"])
+    cache_n_lon = int(ds.sizes["lon"])
+    model_n_lat = int(grid.lat.shape[0])
+    model_n_lon = int(grid.lon.shape[0])
+    if (cache_n_lat, cache_n_lon) != (model_n_lat, model_n_lon):
+        raise ValueError(
+            f"JRA55-do cache grid ({cache_n_lat}×{cache_n_lon}) does not "
+            f"match model grid ({model_n_lat}×{model_n_lon}). Rebuild the "
+            "cache with prepare_omip_forcing.py at the matching resolution."
+        )
+
+    # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
+    lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
+    lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
+
+    # Coupler config: LY09 bulk flux at 10 m winds, 2 m T/q (the JRA55-do
+    # convention). The Item 1 fixes (LY09 U^6 term, 0.98 q_sat, separate
+    # reference heights) are wired through CouplerConfig.
+    from legoesm.coupler.config import CouplerConfig
+    coupler_cfg = CouplerConfig(
+        bulk_scheme="large_yeager",
+        z_ref=10.0,
+        z_t_atm=2.0,
+        z_q_atm=2.0,
+    )
+
+    state: dict = {
+        "cache_path": str(cache_path),
+        "ref_year": int(ds.attrs.get("ref_year", 1958)),
+        "lat_2d": lat_2d,
+        "lon_2d": lon_2d,
+        "coupler_cfg": coupler_cfg,
+        "co2_ppmv": float(args.jra55_co2_ppmv),
+    }
+
+    # Sponge layer at 60°S/60°N — uses the existing
+    # legoesm.ocean.sponge.compute_sponge_gamma_latlon utility. Active
+    # only when WOA targets are available (the sponge needs T_ref, S_ref).
+    sponge_enabled = (
+        not args.jra55_no_sponge
+        and T_woa is not None
+        and S_woa is not None
+    )
+    if sponge_enabled:
+        from legoesm.ocean.sponge import compute_sponge_gamma_latlon
+        sponge_gamma = compute_sponge_gamma_latlon(
+            grid,
+            lat_south=args.sponge_lat_min,
+            lat_north=args.sponge_lat_max,
+            width_deg=args.sponge_width_deg,
+            timescale_days=args.sponge_tau_days,
+        )
+        state["sponge_gamma_2d"] = jnp.asarray(sponge_gamma)
+        state["sponge_T_ref_3d"] = jnp.asarray(T_woa)
+        state["sponge_S_ref_3d"] = jnp.asarray(S_woa)
+    state["enable_sponge"] = sponge_enabled
+
+    # SSS restoring — Haney piston-velocity formulation, applied
+    # globally (i.e. on every ocean cell) after the dynamics step.
+    sss_restoring_enabled = (
+        not args.jra55_no_sss_restoring
+        and S_woa is not None
+        and z_coord is not None
+    )
+    if sss_restoring_enabled:
+        state["sss_target_2d"] = jnp.asarray(S_woa[..., 0])
+        state["sss_piston_velocity"] = float(args.sss_piston_velocity)
+        state["dz_top"] = float(np.asarray(z_coord.dz_ref)[0])
+    state["enable_sss_restoring"] = sss_restoring_enabled
+
+    # T_freeze cap inside the sponge zone — stand-in for sea ice.
+    # Requires the sponge mask to define the cap region.
+    freeze_cap_enabled = (
+        not args.jra55_no_freeze_cap
+        and sponge_enabled  # need sponge mask to scope the cap
+    )
+    state["enable_freeze_cap"] = freeze_cap_enabled
+    from legoesm import constants as _consts
+    # State temperature is stored in °C per the lat-lon C-grid ocean
+    # convention (init_latlon_cgrid + init_woa both use °C). The cap
+    # threshold therefore lives in °C: T_freeze_ocean (271.35 K) minus
+    # T_freeze (273.15 K) = -1.8 °C, the seawater freezing point.
+    state["T_freeze_ocean_C"] = float(_consts.T_freeze_ocean - _consts.T_freeze)
+
+    return state
+
+
+def _build_sponge_forcing(jra55_state):
+    """Build a ``SpongeForcing`` from the precomputed tropical-OMIP state."""
+    from legoesm.ocean.sponge import SpongeForcing
+    return SpongeForcing(
+        gamma=jra55_state["sponge_gamma_2d"],
+        T_ref=jra55_state["sponge_T_ref_3d"],
+        S_ref=jra55_state["sponge_S_ref_3d"],
+    )
+
+
+def _apply_sss_restoring(state, jra55_state, dt):
+    """Haney SSS restoring with a piston-velocity formulation.
+
+    Applied as a post-step operation on the surface salinity layer
+    of the lat-lon C-grid state. Restricted to ocean cells via the
+    state's land mask.
+
+    The discretised step is::
+
+        alpha = piston_velocity * dt / dz_top
+        S_top_new = S_top - alpha * (S_top - S_target)
+
+    For ``piston_velocity = 5e-7 m/s`` and ``dz_top = 10 m``, the
+    e-folding timescale is ~230 days — light enough to let the
+    bulk-flux freshwater dominate but stiff enough to damp drift.
+    """
+    alpha = (
+        jra55_state["sss_piston_velocity"]
+        * dt
+        / max(jra55_state["dz_top"], 1e-6)
+    )
+    S = state.S.data
+    mask = state.land_mask.data  # 2-D
+    # Cast target + alpha to S's dtype so scatter doesn't trip the
+    # JAX dtype-promotion FutureWarning when the state runs in float32.
+    S_target = jnp.asarray(jra55_state["sss_target_2d"], dtype=S.dtype)
+    alpha = jnp.asarray(alpha, dtype=S.dtype)
+    mask = jnp.asarray(mask, dtype=S.dtype)
+    S_top_new = S[..., 0] - alpha * (S[..., 0] - S_target) * mask
+    S_new = S.at[..., 0].set(S_top_new)
+    return state._replace(S=state.S.replace(data=S_new))
+
+
+def _apply_freeze_cap(state, jra55_state):
+    """Cap surface T from below at ``T_freeze_ocean`` inside the sponge.
+
+    Stand-in for the missing sea-ice model: where the sponge gamma is
+    non-zero (the polar 5° of the active domain), prevent the surface
+    layer from cooling below seawater's freezing point. Without this,
+    bulk-flux heat loss in the closure cap drives spurious open-ocean
+    deep convection at the boundary.
+    """
+    sponge_active = jra55_state["sponge_gamma_2d"] > 0.0  # (n_lat, n_lon)
+    T = state.T.data
+    T_top = T[..., 0]
+    # State T is in °C; cap value is the seawater freezing point in °C
+    # (-1.8). Without this the cap would silently never trigger.
+    T_freeze_C = jnp.asarray(jra55_state["T_freeze_ocean_C"], dtype=T.dtype)
+    T_top_capped = jnp.where(
+        sponge_active,
+        jnp.maximum(T_top, T_freeze_C),
+        T_top,
+    )
+    T_new = T.at[..., 0].set(T_top_capped)
+    return state._replace(T=state.T.replace(data=T_new))
+
+
+def _jra55_step(state, step_idx, dt, model, jra55_state):
+    """One forced-ocean step under JRA55-do bulk-flux forcing.
+
+    Per-step pipeline:
+      1. Map step index to fractional simulation day (noleap, since
+         ``ref_year-01-01``).
+      2. Load JRA55Slice from the cache (linear-in-time interp between
+         the bracketing 3-hourly records).
+      3. Build AtmToSurface from the slice + model lat/lon + day.
+      4. Call ``ocean_tile_response`` with surface SST and zero ocean
+         current (forced runs at 1° treat |u_o| << |u_a|).
+      5. Compute net heat flux into ocean from SW/LW/SH/LH + LW up.
+      6. Build FreshwaterForcing with E from the latent heat flux.
+      7. Step the ocean model with ``freshwater=``, ``surface_forcing=``,
+         and (if enabled) ``sponge=``.
+      8. Apply post-step SSS restoring and the T_freeze cap.
+
+    Steps 1–7 are the Day-2 path; steps 7-sponge and 8 are Day 3.
+    The ``enable_sponge``, ``enable_sss_restoring``, ``enable_freeze_cap``
+    flags in ``jra55_state`` gate each piece independently.
+    """
+    from legoesm.coupler.coupler import ocean_tile_response
+    from legoesm.forcing.jra55_do import (
+        jra55_to_atm_surface,
+        jra55_to_freshwater,
+        load_jra55_slice,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    day = float(step_idx) * dt / 86400.0
+    slc = load_jra55_slice(
+        jra55_state["cache_path"], day,
+        ref_year=jra55_state["ref_year"],
+    )
+    atm = jra55_to_atm_surface(
+        slc,
+        jra55_state["lat_2d"],
+        jra55_state["lon_2d"],
+        day,
+        ref_year=jra55_state["ref_year"],
+        co2_ppmv=jra55_state["co2_ppmv"],
+    )
+
+    # State T is stored in °C; the bulk-flux solver and q_sat lookup
+    # need K. This matches the conversion in
+    # ocean/physics/surface_forcing/bulk_formulas.py:48.
+    from legoesm import constants as _consts
+    sst_K = state.T.data[..., 0] + _consts.T_freeze
+    # Forced-ocean approximation: at 1° non-eddying resolution
+    # |u_ocean| ~ 0.1 m/s << |u_atm| ~ 10 m/s, so we drop the
+    # surface-current correction in the bulk-flux solver.
+    u_o = jnp.zeros_like(sst_K)
+    v_o = jnp.zeros_like(sst_K)
+
+    tile_resp = ocean_tile_response(
+        atm, sst_K, u_o, v_o, jra55_state["coupler_cfg"],
+    )
+
+    # Net heat into ocean (positive into ocean):
+    #   Q_net = SW_absorbed + LW_down − LW_up − SH − LH
+    # where SH and LH are positive upward (out of ocean) per the
+    # TileResponse contract.
+    sw_net = atm.sw_down * (1.0 - tile_resp.albedo)
+    q_net = (
+        sw_net
+        + atm.lw_down
+        - tile_resp.lw_up
+        - tile_resp.shflx
+        - tile_resp.lhflx
+    )
+
+    fw = jra55_to_freshwater(slc, tile_resp.lhflx)
+    sf = OceanSurfaceForcing(
+        sw_down=atm.sw_down,
+        q_net=q_net,
+        tau_x=tile_resp.tau_x,
+        tau_y=tile_resp.tau_y,
+        freshwater=None,  # using the structured FreshwaterForcing path
+    )
+
+    sponge = (
+        _build_sponge_forcing(jra55_state)
+        if jra55_state.get("enable_sponge", False)
+        else None
+    )
+
+    state = model.step(
+        state, dt,
+        freshwater=fw,
+        surface_forcing=sf,
+        sponge=sponge,
+    )
+
+    # Post-step closure-domain operations.
+    if jra55_state.get("enable_sss_restoring", False):
+        state = _apply_sss_restoring(state, jra55_state, dt)
+    if jra55_state.get("enable_freeze_cap", False):
+        state = _apply_freeze_cap(state, jra55_state)
+
+    return state
+
+
+# ===========================================================================
 # Diagnostics
 # ===========================================================================
 
@@ -477,23 +820,95 @@ def _check_finite(state, grid_type):
 
 
 # ===========================================================================
+# Restart I/O — minimum-viable npz format compatible with the
+# global-overturning progress plotter.  We dump every field of the
+# state that has a ``.data`` attribute, plus the simulation day and
+# step index.  The plotter
+# (``scripts/global_overturning/plot_realistic_geometry_progress.py``
+# and the JRA55 sibling) reads these to compute MOC, BSF, snapshots.
+# ===========================================================================
+
+
+def _save_restart(state, day, step, output_dir):
+    """Save a state restart in the global-overturning npz format.
+
+    Mirrors ``scripts/global_overturning/run_global_overturning_*``
+    so the same plotting helpers consume both runs without
+    discrimination.
+
+    Parameters
+    ----------
+    state : ocean state
+    day : float
+        Simulation day (filename uses ``int(round(day))``).
+    step : int
+        Step index (stored in npz for provenance only).
+    output_dir : Path
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "step": int(step),
+        "time_days": float(day),
+        "grid_type": "latlon",
+    }
+    for f in state._fields:
+        obj = getattr(state, f)
+        if obj is None or not hasattr(obj, "data"):
+            continue
+        payload[f] = np.asarray(obj.data)
+    fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
+    np.savez_compressed(fname, **payload)
+    return fname
+
+
+# ===========================================================================
 # Time loop
 # ===========================================================================
 
 def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    diag_every, label="",
-                   restoring_targets=None, restoring_tau_s=None):
+                   restoring_targets=None, restoring_tau_s=None,
+                   jra55_state=None,
+                   checkpoint_days=None, checkpoint_dir=None):
     """Run time loop with diagnostics.
+
+    Two forcing paths, mutually exclusive:
+
+    * **restoring** (default): plain ``model.step(state, dt)`` followed
+      by Haney SST/SSS restoring when ``restoring_targets`` is set.
+    * **jra55_do_tropical**: ``_jra55_step(...)`` per step using a
+      pre-built JRA55-do cache (set ``jra55_state``); the model
+      receives bulk-flux fields and structured freshwater forcing.
 
     Parameters
     ----------
     restoring_targets : tuple(T_target, S_target) or None
-        Surface T/S targets for SST/SSS restoring.
+        Surface T/S targets for SST/SSS restoring (restoring path).
     restoring_tau_s : float or None
-        Restoring timescale [seconds].
+        Restoring timescale [seconds] (restoring path).
+    jra55_state : dict or None
+        Output of :func:`_setup_jra55_forcing_state`.  When provided,
+        replaces the restoring path with JRA55-do bulk-flux forcing.
+    checkpoint_days : float or None
+        If set, save a ``restart_dayXXXXXX.npz`` snapshot every
+        ``checkpoint_days`` simulated days (and at the final step).
+        Format mirrors the global-overturning runs so the existing
+        progress plotters consume it directly.
+    checkpoint_dir : Path or None
+        Output directory for restarts. Required when
+        ``checkpoint_days`` is set.
 
     Returns (final_state, diagnostics, wall_time, ok).
     """
+    if jra55_state is not None and restoring_targets is not None:
+        raise ValueError(
+            "_run_omip_loop: jra55_state and restoring_targets are mutually "
+            "exclusive — choose one forcing path."
+        )
+    if checkpoint_days is not None and checkpoint_dir is None:
+        raise ValueError(
+            "_run_omip_loop: checkpoint_days requires checkpoint_dir."
+        )
     diag: dict[str, list] = {"day": [], "step": []}
     snapshots: dict[int, dict] = {}
     snap_steps = {0, n_steps}
@@ -512,15 +927,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     blown_up = False
 
     for i in range(n_steps):
-        state = model.step(state, dt)
+        if jra55_state is not None:
+            state = _jra55_step(state, i, dt, model, jra55_state)
+        else:
+            state = model.step(state, dt)
 
-        # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
-        if restoring_targets is not None:
-            T_tgt, S_tgt = restoring_targets
-            state = _apply_restoring(
-                state, grid_type, grid, T_tgt, S_tgt,
-                dt, restoring_tau_s,
-            )
+            # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
+            if restoring_targets is not None:
+                T_tgt, S_tgt = restoring_targets
+                state = _apply_restoring(
+                    state, grid_type, grid, T_tgt, S_tgt,
+                    dt, restoring_tau_s,
+                )
 
         step = i + 1
 
@@ -556,6 +974,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 print(f"    [{label}] Day {day:7.1f}/{total_days:.0f} | {summary} "
                       f"| {elapsed:.0f}s elapsed")
                 last_print = now
+
+        # Restart-checkpoint cadence (independent of the diag cadence
+        # so checkpoints land on round-number simulation days).
+        if checkpoint_days is not None:
+            day_now = step * dt / 86400.0
+            steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
+            if step % steps_per_ckpt == 0 or step == n_steps:
+                fname = _save_restart(state, day_now, step, checkpoint_dir)
+                # Friendly progress; gated on the same 15-s cadence as
+                # the diag print so we don't spam.
+                if time.time() - last_print < 1.0:
+                    print(f"    Restart saved: {fname.name}", flush=True)
 
     if grid_type == "spectral":
         jax.block_until_ready(state.T_hat.data)
@@ -675,10 +1105,34 @@ def run_omip_single(grid_type: str, args) -> dict:
     # physically sensible (but horizontally uniform) initial condition.
     state = _init_rest_state(grid_type, grid, z_coord, args.H_max)
 
-    # SST/SSS restoring targets: WOA surface T/S climatology.
+    # Forcing dispatch: 'restoring' (default) vs JRA55-do bulk fluxes.
     restoring_targets = None
     restoring_tau_s = None
-    if not args.no_restoring and grid_type != "spectral":
+    jra55_state = None
+
+    if args.forcing_mode == "jra55_do_tropical":
+        # Tropical OMIP: bulk fluxes from JRA55-do cache. The setup
+        # also builds the polar sponge layer (60°S/60°N), the SSS-
+        # restoring target, and the T_freeze cap region from the WOA
+        # climatology and z-coordinate.
+        jra55_state = _setup_jra55_forcing_state(
+            args, grid, grid_type,
+            z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
+        )
+        flags = []
+        if jra55_state.get("enable_sponge"):
+            flags.append("sponge")
+        if jra55_state.get("enable_sss_restoring"):
+            flags.append("SSS-restoring")
+        if jra55_state.get("enable_freeze_cap"):
+            flags.append("freeze-cap")
+        flag_str = ", ".join(flags) or "no closure-domain features"
+        print(
+            f"  Forcing: jra55_do_tropical "
+            f"(cache={Path(args.jra55_cache).name}, "
+            f"ref_year={jra55_state['ref_year']}, {flag_str})"
+        )
+    elif not args.no_restoring and grid_type != "spectral":
         # SST/SSS restoring toward WOA climatology for FV grids.
         # Spectral model: restoring is unstable at coarse resolution
         # (large-scale gradients trigger exponential growth that
@@ -692,6 +1146,19 @@ def run_omip_single(grid_type: str, args) -> dict:
     setup_time = time.time() - t_setup
     print(f"  Setup: {setup_time:.1f}s")
 
+    # Restart cadence — only wired for the JRA55 path for now (the
+    # restoring path is fast enough that re-running from scratch is
+    # cheaper than maintaining restarts; revisit if needed).
+    checkpoint_dir = None
+    checkpoint_days = None
+    if jra55_state is not None and args.checkpoint_days > 0.0:
+        checkpoint_dir = Path(args.output) / grid_type / resolution
+        checkpoint_days = float(args.checkpoint_days)
+        print(
+            f"  Restart cadence: every {checkpoint_days:g} simulated days "
+            f"→ {checkpoint_dir}"
+        )
+
     # Run time loop
     state, diag, wall_time, ok = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
@@ -699,6 +1166,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         label=f"{grid_type}/{resolution}",
         restoring_targets=restoring_targets,
         restoring_tau_s=restoring_tau_s,
+        jra55_state=jra55_state,
+        checkpoint_days=checkpoint_days,
+        checkpoint_dir=checkpoint_dir,
     )
 
     status = "PASS" if ok else "FAIL"
