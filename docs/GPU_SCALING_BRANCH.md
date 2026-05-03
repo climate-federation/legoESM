@@ -117,6 +117,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Atmosphere physics _shared 4 inline imports       | 4 inline imports across pack_*_column_features | 4 module-level imports |
 | Atmosphere physics _shared 6 more inline imports  | Field/Tendencies + 4 grid-conditional in compute_moisture_convergence | 6 module-level imports |
 | Sea-ice 5 inline imports + redundant ``_constants`` alias | 5 inline imports across slab + dynamic paths, ``constants as _constants`` ×2 | 5 module-level imports + drop alias |
+| Two-layer lake 3 inline imports + ``_constants`` alias | 3 inline imports + redundant alias | 3 module-level imports + drop alias |
+| Land multilayer 2 inline imports                  | 2 inline imports per call              | 2 module-level imports |
 
 ## SPMD-vs-single-device numerical equivalence
 
