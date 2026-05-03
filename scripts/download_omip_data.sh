@@ -5,17 +5,23 @@
 # byte size.  Pass --force to redownload.
 #
 # Targets:
-#   data/woa18/    — WOA18 1° annual mean temperature + salinity
-#                    (NCEI; public, no auth)
-#   data/jra55_ryf/ — JRA55-do RYF NOT FETCHED HERE (ESGF auth required;
-#                    see the section at the bottom of this script)
+#   data/woa18/      — WOA18 1° annual mean T + S (NCEI; public, no auth).
+#   data/jra55_iaf/  — JRA55-do v1.6.0 raw IAF for the RYF window
+#                      (1990 + 1991 by default; opt-in via flag).
+#                      Public Globus HTTPS replica, no auth needed.
+#                      ~23 GB.
 #
 # All paths land under ``data/`` which is gitignored.
 #
 # Usage:
-#   ./scripts/download_omip_data.sh
-#   ./scripts/download_omip_data.sh --force
-#   ./scripts/download_omip_data.sh --woa-only   (default; explicit)
+#   ./scripts/download_omip_data.sh                       # WOA only (default)
+#   ./scripts/download_omip_data.sh --force               # rebuild WOA
+#   ./scripts/download_omip_data.sh --with-jra55-1990-1991  # WOA + IAF
+#   ./scripts/download_omip_data.sh --jra55-only          # IAF only
+#
+# After IAF lands, build the RYF year via ``scripts/make_ryf.py``
+# (Stewart 2020 smooth wraparound), then point our cache builder
+# (``scripts/prepare_omip_forcing.py``) at the resulting Zarr.
 
 set -euo pipefail
 
@@ -28,10 +34,14 @@ DATA_DIR="$REPO_ROOT/data"
 WOA_DIR="$DATA_DIR/woa18"
 
 FORCE=0
+DO_WOA=1
+DO_JRA55=0
 for arg in "$@"; do
     case "$arg" in
-        --force)     FORCE=1 ;;
-        --woa-only)  ;;  # default behaviour; accepted for clarity
+        --force)                FORCE=1 ;;
+        --woa-only)             ;;  # default; accepted for clarity
+        --with-jra55-1990-1991) DO_JRA55=1 ;;
+        --jra55-only)           DO_WOA=0; DO_JRA55=1 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -93,50 +103,59 @@ verify_netcdf() {
     return 1
 }
 
-echo "=== WOA18 1° annual climatology -> $WOA_DIR ==="
-for url in "${WOA_FILES[@]}"; do
-    fname=$(basename "$url")
-    download "$url" "$WOA_DIR/$fname"
-    verify_netcdf "$WOA_DIR/$fname" || true
-done
+if [[ $DO_WOA -eq 1 ]]; then
+    echo "=== WOA18 1° annual climatology -> $WOA_DIR ==="
+    for url in "${WOA_FILES[@]}"; do
+        fname=$(basename "$url")
+        download "$url" "$WOA_DIR/$fname"
+        verify_netcdf "$WOA_DIR/$fname" || true
+    done
 
-echo ""
-echo "WOA18 fetch complete."
-echo "  T:  $WOA_DIR/woa18_decav_t00_01.nc"
-echo "  S:  $WOA_DIR/woa18_decav_s00_01.nc"
+    echo ""
+    echo "WOA18 fetch complete."
+    echo "  T:  $WOA_DIR/woa18_decav_t00_01.nc"
+    echo "  S:  $WOA_DIR/woa18_decav_s00_01.nc"
+fi
 
 # ---------------------------------------------------------------------------
-# JRA55-do RYF — NOT downloaded here.
+# JRA55-do v1.6.0 IAF — opt-in via --with-jra55-1990-1991 / --jra55-only.
+# Delegates to scripts/download_jra55_iaf.py for resumable per-file fetching
+# with size verification against the live ESGF Solr catalog.
+# ---------------------------------------------------------------------------
+
+if [[ $DO_JRA55 -eq 1 ]]; then
+    JRA55_DIR="$DATA_DIR/jra55_iaf"
+    mkdir -p "$JRA55_DIR"
+    echo ""
+    echo "=== JRA55-do v1.6.0 IAF (1990 + 1991) -> $JRA55_DIR ==="
+    extra_args=()
+    if [[ $FORCE -eq 1 ]]; then
+        extra_args+=(--force)
+    fi
+    python "$SCRIPT_DIR/download_jra55_iaf.py" \
+        --years 1990 1991 \
+        --out-dir "$JRA55_DIR" \
+        "${extra_args[@]}"
+fi
+
+# ---------------------------------------------------------------------------
+# JRA55-do RYF (Repeat Year Forcing) workflow.
 #
-# The Stewart et al. 2020 pre-built RYF files are hosted on NCI Gadi
-# (Australia) under the ``ik11`` (formerly ``ua8``) project, alongside
-# the ``qv56`` mirror of the input4MIPs IAF.  Both require an NCI
-# account + group membership; there is no public Zenodo mirror.
+# We do NOT download Stewart et al. 2020's pre-built RYF files — those
+# live on NCI Gadi (auth-walled, ``ik11`` / ``ua8`` projects) with no
+# public Zenodo mirror.
 #
-# Recommended path for users without NCI access:
+# Instead, with --with-jra55-1990-1991 we pull the raw IAF window
+# (~23 GB, public Globus HTTPS, no auth) and build the RYF year
+# locally via ``scripts/make_ryf.py`` (Stewart 2020 smooth wraparound).
+# This is the path the paper itself recommends for users not at NCI.
 #
-#   1. Get an ESGF account (free OpenID at any node, e.g.
-#      https://esgf-node.llnl.gov/projects/input4mips/).
-#   2. Search input4MIPs for: MIP Era = CMIP6Plus, Target MIP = OMIP,
-#      Institution = MRI, Source = MRI-JRA55-do-1-6-0.
-#      Or fetch directly from MRI:
-#      https://climate.mri-jma.go.jp/pub/ocean/JRA55-do/
-#   3. Pull the RYF 12-month window — May 1990 to April 1991 (RYF9091)
-#      is the recommended neutral year per Stewart et al. 2020.
-#   4. Apply the Stewart-style smooth wraparound blending; reference
-#      implementation lives in the COSIMA GitHub org under tools that
-#      accompanied the 2020 paper.
-#
-# Once the resulting RYF NetCDF/Zarr is on disk, point our cache builder
-# at it:
+# After IAF lands and ``make_ryf.py`` produces the blended year,
+# point the OMIP cache builder at it:
 #
 #   python scripts/prepare_omip_forcing.py \
 #       --source data/jra55_ryf/RYF9091.zarr \
 #       --years 1990 1990 \
 #       --target-resolution-deg 1.0 \
 #       --cache-dir data/jra55_ryf_cache
-#
-# When you're ready to wire JRA55-do RYF into this script, factor the
-# WOA download into a function and add a parallel ``download_jra55_ryf``
-# section guarded by a ``--with-jra55`` flag.
 # ---------------------------------------------------------------------------
