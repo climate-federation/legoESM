@@ -86,10 +86,13 @@ def _forward_backward_coriolis_mpas_3d(
         min_water_column_m=config.min_water_column_m,
     )
     h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
-    H_e = jnp.maximum(jnp.sum(h_e, axis=1, keepdims=True), config.min_water_column_m)
-
-    # Depth-averaged velocity
-    u_bar = jnp.sum(u_3d * h_e, axis=1, keepdims=True) / H_e  # (nEdges, 1)
+    # ``H_e = sum(h_e)`` and ``u_bar`` numerator ``sum(u_3d * h_e)``
+    # share the level axis and h_e weight — fuse into one stacked sum.
+    _u_pair = jnp.sum(
+        jnp.stack([h_e, u_3d * h_e], axis=-1), axis=1, keepdims=True,
+    )
+    H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
+    u_bar = _u_pair[..., 1] / H_e  # (nEdges, 1)
     u_bar = u_bar * edge_mask
 
     # Perturbation velocity
