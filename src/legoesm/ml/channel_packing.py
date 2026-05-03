@@ -36,6 +36,7 @@ from legoesm.grids.gaussian import (
 from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
 from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
 from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.ocean.state import SpectralOceanState
 
 # WeatherBench2 standard pressure levels [hPa]
 WB2_PRESSURE_LEVELS = (
@@ -448,12 +449,6 @@ def unpack_ocean_output(
     -------
     SpectralOceanState
     """
-    from legoesm.ocean.state import SpectralOceanState
-    from legoesm.grids.gaussian import (
-        sh_analysis_oc2_3d,
-        sh_analysis_dmu_3d,
-    )
-
     nlev = state.T_hat.data.shape[-1]
     spec = OceanChannelSpec(nlev=nlev)
 
