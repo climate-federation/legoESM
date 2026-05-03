@@ -80,7 +80,13 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
 from legoesm.atmosphere.physics._shared import (
     compute_layer_dz as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
+    zero_like_tracers,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import sh_analysis_3d
 
 
 def make_microphysics_physics(
@@ -474,13 +480,6 @@ def _make_spectral_pe_microphysics(
     }
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.atmosphere.physics._shared import zero_like_tracers
-        from legoesm.grids.gaussian import sh_analysis_3d
-
         # Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
