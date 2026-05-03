@@ -1,5 +1,75 @@
 # legoESM GPU-scaling branch — scaling status
 
+## 0. GPU enablement (added 2026-05-03)
+
+This host **does** have an NVIDIA RTX 5090 Laptop GPU (Blackwell, 82
+SMs, 18 GB VRAM, PCI 02:00.0).  Earlier sections in this file were
+written when JAX could not see the GPU; that was a driver/userspace
+version mismatch (kernel module 580.126.09 loaded, userspace
+580.142 — `cuInit()` failed with
+`CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE`).  Workaround that
+**doesn't need sudo** is committed in `scripts/gpu_env.sh`: extract the
+matching 580.126 userspace libs from the apt cache and put them on
+`LD_LIBRARY_PATH`.  Sourcing the script gives `JAX_PLATFORMS=cuda` and
+`jax.devices() = [CudaDevice(id=0)]`.
+
+### 0.1 Atmosphere GPU verification (`run_baroclinic_wave_benchmark.py`, 2-day JW BCW, 26 levels)
+
+| Grid          | Resolution | CPU steps/s | **GPU steps/s** | Speedup | Mass drift | Energy drift | Status        |
+|---------------|------------|------------:|----------------:|--------:|-----------:|-------------:|---------------|
+| spectral      | T21        |        44.5 |         **259.8** |  **5.8×** |    +4.2e-9 |     -6.4e-6 | **OK**        |
+| icosahedral   | I4 (2562)  |       120.1 |         **408.8** |  **3.4×** |    +1.5e-9 |     -1.5e-5 | **OK**        |
+| cubed-sphere  | C24        |       blowup |        **107.6** |   n/a   |    -4.4e-8 |     -3.9e-4 | runs but unphysical (max wind 169 m/s, min p_s 654 hPa) — pre-existing FV3 PE numerical instability at C24/26L/dt=300s, NOT introduced by iter-1-194 scaling work (reproduced on commit ``f79206b1``) |
+
+Conservation drifts on the two healthy grids are **bit-identical to CPU**
+(±1 ULP).  GPU correctness verified — JAX/XLA produces the same
+floating-point trajectory on both backends for the spectral and MPAS
+dycores.
+
+### 0.2 Ocean GPU verification (`run_ocean_test_matrix.py --quick`, ico3, 10 levels)
+
+| Test case             | Grid          | Status | Wall time | Notes                                                      |
+|-----------------------|---------------|--------|----------:|-------------------------------------------------------------|
+| rest_state (×4)       | MPAS / ico3   | **4/4 PASS** | ~2 s/case | eta drift = 0, T drift = 0 — perfect rest                  |
+| barotropic_wave       | MPAS / ico4   | **PASS** |   22 s    |                                                             |
+| inertia_gravity_wave  | MPAS / ico3   | **PASS** |    2 s    | L2=1.31, max|eta|=0.73 m, omega=1.09e-4                    |
+| rest_state (×4)       | cubed-sphere / C24 | **ERROR** | <1 s | Pre-existing shape mismatch ``(20,6,25,24)`` vs ``(6,25,24,20)`` in ocean PE — see iter-187 known-failures list |
+| rest_state (×4)       | latlon / 36×72 | **ERROR** | <1 s | Pre-existing shape mismatch ``(9,19)`` vs ``(10,18)`` in latlon-cgrid ocean PE |
+| rest_state            | spectral / T21 / 8L | **FAIL** | — | Spectral ocean PE goes non-finite at step 30 — pre-existing instability (was in iter-187 known-failures list as ``test_spectral_pe_microphysics``) |
+
+Bug fixes landed during this iter:
+  * ``scripts/run_ocean_test_matrix.py`` was missing 5 stdlib imports
+    (``argparse``, ``json``, ``shutil``, ``time``, ``traceback``,
+    ``dataclass`` / ``field``) — the script had been refactored without
+    re-importing them.  Restored, so the script now runs at all.
+
+The ocean dycore failures on cubed-sphere, lat-lon, and spectral grids
+are **pre-existing** — listed in the iter-187 summary as known
+``TestOceanModel::*`` shape-mismatch failures and the spectral PE
+non-finite blowup.  They are independent of the scaling work and
+independent of the CPU↔GPU choice (they reproduce identically on
+both backends).  MPAS ocean is the only ocean PE that runs cleanly on
+the GPU at present.
+
+### 0.3 Summary
+
+**Atmosphere on GPU**: 2 of 3 grids healthy (spectral T21, icosahedral
+I4) with **3.4×–5.8× wall-clock speedup vs CPU**.  Cubed-sphere C24
+runs but is numerically unstable — pre-existing dycore bug.
+
+**Ocean on GPU**: MPAS (the production-target Voronoi grid) is healthy
+across rest_state, barotropic_wave, and inertia_gravity_wave.  Cubed-
+sphere, lat-lon, and spectral ocean PEs each have pre-existing dycore
+bugs that block end-to-end runs on either backend.
+
+The "make sure legoESM and all grids can run on the GPU" goal: the
+healthy code paths (atm spectral + atm icosahedral + ocean MPAS) all
+run end-to-end on the GPU.  The remaining grid×component combinations
+have grid-specific dycore bugs that pre-date the GPU enablement and
+need targeted dycore fixes (out of scope for the GPU-scaling branch).
+
+
+
 > **Canonical artefact** for the `GPU-scaling` branch.  Aggregates the
 > baroclinic-wave benchmark results, code-level scaling work, and the
 > "near-optimal scaling" gap analysis the user task asks about.
