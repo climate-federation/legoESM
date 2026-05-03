@@ -730,9 +730,18 @@ class CDGridShallowWaterModel(IntegrationMixin):
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
+                mass_new = jnp.sum(state_new.h.astype(acc) * area)
             else:
-                mass_target = jnp.sum(state.h.astype(acc) * area)
-            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                # Both mass integrals share the ``* area`` weight on
+                # the same horizontal axes — stack and reduce once so
+                # the local sum kernel fires only once.
+                _h_pair = jnp.stack(
+                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
+                ) * area[..., None]
+                _mass_pair = jnp.sum(
+                    _h_pair, axis=tuple(range(area.ndim)),
+                )
+                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
@@ -871,9 +880,17 @@ class FV3FBShallowWaterModel:
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
+                mass_new = jnp.sum(state_new.h.astype(acc) * area)
             else:
-                mass_target = jnp.sum(state.h.astype(acc) * area)
-            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                # Both mass integrals share the ``* area`` weight on
+                # the same horizontal axes — stack and reduce once.
+                _h_pair = jnp.stack(
+                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
+                ) * area[..., None]
+                _mass_pair = jnp.sum(
+                    _h_pair, axis=tuple(range(area.ndim)),
+                )
+                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
@@ -1178,9 +1195,17 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
+                mass_new = jnp.sum(state_new.h.astype(acc) * area)
             else:
-                mass_target = jnp.sum(state.h.astype(acc) * area)
-            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                # Both mass integrals share the ``* area`` weight on
+                # the same horizontal axes — stack and reduce once.
+                _h_pair = jnp.stack(
+                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
+                ) * area[..., None]
+                _mass_pair = jnp.sum(
+                    _h_pair, axis=tuple(range(area.ndim)),
+                )
+                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
