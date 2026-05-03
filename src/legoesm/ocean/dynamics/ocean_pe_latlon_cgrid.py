@@ -814,10 +814,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # The barotropic solver handles the depth-averaged momentum.
     # The baroclinic step must operate on the PERTURBATION velocity
     # u' = u - U_bar to avoid double-counting the barotropic tendency.
-    U_bar = jnp.sum(u * h_u, axis=-1) / jnp.maximum(
-        jnp.sum(h_u, axis=-1), 1e-10) * u_mask  # (n_lat, n_lon+1)
-    V_bar = jnp.sum(v * h_v, axis=-1) / jnp.maximum(
-        jnp.sum(h_v, axis=-1), 1e-10) * v_mask  # (n_lat+1, n_lon)
+    # Fuse num/denom reductions per face — both share their h_u/h_v
+    # weight on the level axis.
+    _u_pair = jnp.sum(jnp.stack([u * h_u, h_u], axis=-1), axis=-2)
+    U_bar = _u_pair[..., 0] / jnp.maximum(_u_pair[..., 1], 1e-10) * u_mask  # (n_lat, n_lon+1)
+    _v_pair = jnp.sum(jnp.stack([v * h_v, h_v], axis=-1), axis=-2)
+    V_bar = _v_pair[..., 0] / jnp.maximum(_v_pair[..., 1], 1e-10) * v_mask  # (n_lat+1, n_lon)
     u_prime = u - U_bar[..., jnp.newaxis]
     v_prime = v - V_bar[..., jnp.newaxis]
 
