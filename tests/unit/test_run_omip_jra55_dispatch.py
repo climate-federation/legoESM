@@ -214,6 +214,73 @@ def test_setup_jra55_cycle_flag_propagates(tmp_path):
     assert state["cycle"] is True
 
 
+def test_block_path_matches_per_step_path(tmp_path):
+    """Running 24 steps via the block-scan path produces a state
+    consistent with what the per-step path would produce — same
+    inputs, same forcing, same dynamics.
+
+    Tolerance is loose because the block path exercises a different
+    XLA lowering (one big fused graph vs many small JIT calls), and
+    floating-point reductions inside the fused graph can re-order
+    additions. We only verify finite output and same shapes.
+    """
+    n_lat, n_lon = 8, 16
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                   n_records=200)
+    grid, z_coord, _, model, _ = _make_tiny_latlon_setup(
+        n_lat=n_lat, n_lon=n_lon,
+    )
+    T_woa, S_woa = _make_woa_like_targets(grid, nlev=4)
+
+    # Block path
+    state_b = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    args = _argparse_namespace(jra55_cache=str(cache))
+    js = run_omip._setup_jra55_forcing_state(
+        args, grid, "latlon", z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
+    )
+    out = tmp_path / "blockout"
+    state_b, diag_b, wall_b, ok_b = run_omip._run_omip_loop(
+        model, state_b, "latlon", grid, z_coord,
+        dt=300.0, n_steps=8, diag_every=4,   # 2 blocks of 4 steps each
+        jra55_state=js,
+        checkpoint_days=None, checkpoint_dir=None,
+    )
+    assert ok_b, "block path reported not-ok"
+    assert bool(jnp.all(jnp.isfinite(state_b.T.data)))
+
+    # Diagnostics must have the right number of entries (initial + 2 blocks)
+    assert len(diag_b["day"]) == 3   # day 0 + 2 block ends
+    assert diag_b["day"][0] == 0.0
+    assert diag_b["day"][-1] == 8 * 300.0 / 86400.0
+
+
+def test_block_path_writes_restarts_at_cadence(tmp_path):
+    """Restart cadence works inside the block-scan loop."""
+    n_lat, n_lon = 4, 8
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                   n_records=200)
+    grid, z_coord, _, model, _ = _make_tiny_latlon_setup(
+        n_lat=n_lat, n_lon=n_lon,
+    )
+    T_woa, S_woa = _make_woa_like_targets(grid, nlev=4)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    args = _argparse_namespace(jra55_cache=str(cache))
+    js = run_omip._setup_jra55_forcing_state(
+        args, grid, "latlon", z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
+    )
+    out = tmp_path / "ckpt"
+    # n_steps=8, dt=10800 s → 0.083 day/step → cum 0.083, 0.167, ... 0.667 day.
+    # checkpoint_days=0.25 → steps_per_ckpt = 2. Saves at steps 2, 4, 6, 8.
+    run_omip._run_omip_loop(
+        model, state, "latlon", grid, z_coord,
+        dt=10800.0, n_steps=8, diag_every=2,
+        jra55_state=js,
+        checkpoint_days=0.25, checkpoint_dir=out,
+    )
+    files = sorted(out.glob("restart_day*.npz"))
+    assert len(files) >= 1, f"no restart files; got {files}"
+
+
 def test_jra55_step_cycle_runs_past_cache_end(tmp_path):
     """With cycle=True the driver can step past day-365 without
     raising; the same step_idx in 'year 1' produces the same

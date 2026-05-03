@@ -743,6 +743,198 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
 
 
 # ===========================================================================
+# JRA55-do scan-block path (Item 4 follow-up — multi-core utilisation)
+# ===========================================================================
+#
+# The plain Python time loop calling ``model.step`` once per step is
+# correct but single-core-bound: XLA can't see across the loop, so the
+# Eigen / BLAS threadpools don't get a useful work item per call at 1°
+# resolution. The realistic-geometry GO continuation scripts wrap N
+# steps in ``jax.lax.scan`` inside a single ``@jax.jit``; that gives
+# XLA one big computation graph and 5–10× speedup at 1° on multi-core
+# CPU.
+#
+# We can't put ``load_jra55_slice`` inside ``lax.scan`` (Zarr I/O is
+# not a JAX op). Instead the outer Python layer pre-loads N steps of
+# forcing into stacked JAX arrays once, then calls a JIT-compiled
+# block function that scans through them.
+
+def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
+    """Pre-load N steps of JRA55-do forcing into stacked JAX arrays.
+
+    Returns a tuple ``(atm_stack, runoff_stack)`` where ``atm_stack``
+    is a dict of stacked AtmToSurface fields with shape
+    ``(n_steps, n_lat, n_lon)`` and ``runoff_stack`` is the per-step
+    friver field with the same shape.
+
+    Pure host-side I/O — runs once per block, then the JIT-compiled
+    block_fn consumes the result.
+    """
+    from legoesm.forcing.jra55_do import (
+        jra55_to_atm_surface,
+        load_jra55_slice,
+    )
+
+    cache_path = jra55_state["cache_path"]
+    ref_year = jra55_state["ref_year"]
+    cycle = jra55_state.get("cycle", False)
+    lat_2d = jra55_state["lat_2d"]
+    lon_2d = jra55_state["lon_2d"]
+    co2_ppmv = jra55_state["co2_ppmv"]
+
+    # Names match AtmToSurface field set; collected per-step then stacked.
+    fields = (
+        "sw_down", "lw_down", "precip_total", "precip_snow",
+        "T_lowest", "q_lowest", "u_lowest", "v_lowest",
+        "p_lowest", "p_surface", "rho_lowest", "cos_zenith",
+    )
+    accum: dict[str, list] = {f: [] for f in fields}
+    runoffs: list = []
+
+    for k in range(n_steps):
+        day = (start_step_idx + k) * dt / 86400.0
+        slc = load_jra55_slice(
+            cache_path, day, ref_year=ref_year, cycle=cycle,
+        )
+        atm = jra55_to_atm_surface(
+            slc, lat_2d, lon_2d, day,
+            ref_year=ref_year, co2_ppmv=co2_ppmv,
+        )
+        for f in fields:
+            accum[f].append(getattr(atm, f))
+        runoffs.append(slc.friver)
+
+    atm_stack = {f: jnp.stack(accum[f]) for f in fields}
+    runoff_stack = jnp.stack(runoffs)
+    return atm_stack, runoff_stack
+
+
+def _build_jra55_block_fn(model, jra55_state, dt):
+    """Return a JIT-compiled block function that runs N steps via lax.scan.
+
+    Captures everything that's static across the block (sponge, SSS
+    target, freeze-cap mask, coupler config, dt) in the closure so
+    the scan body has a clean ``(state, idx) → (state', None)`` signature.
+    Re-using the returned function across blocks reuses the JIT cache.
+    """
+    from legoesm import constants as _const
+    from legoesm.coupler.coupler import ocean_tile_response
+    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    coupler_cfg = jra55_state["coupler_cfg"]
+    co2_ppmv = float(jra55_state["co2_ppmv"])
+    enable_sponge = bool(jra55_state.get("enable_sponge", False))
+    enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
+
+    sponge = _build_sponge_forcing(jra55_state) if enable_sponge else None
+
+    if enable_sss:
+        sss_pv = float(jra55_state["sss_piston_velocity"])
+        sss_dz = float(jra55_state["dz_top"])
+        sss_alpha_static = sss_pv * dt / max(sss_dz, 1e-6)
+        sss_target_static = jra55_state["sss_target_2d"]
+    else:
+        sss_alpha_static = 0.0
+        sss_target_static = None
+
+    if enable_freeze:
+        freeze_mask_static = jra55_state["sponge_gamma_2d"] > 0.0
+        T_freeze_C_static = float(jra55_state["T_freeze_ocean_C"])
+    else:
+        freeze_mask_static = None
+        T_freeze_C_static = -1.8
+
+    @jax.jit
+    def block_fn(state, atm_stack, runoff_stack):
+        def step_body(state_in, idx):
+            atm = AtmToSurface(
+                sw_down=atm_stack["sw_down"][idx],
+                lw_down=atm_stack["lw_down"][idx],
+                precip_total=atm_stack["precip_total"][idx],
+                precip_snow=atm_stack["precip_snow"][idx],
+                T_lowest=atm_stack["T_lowest"][idx],
+                q_lowest=atm_stack["q_lowest"][idx],
+                u_lowest=atm_stack["u_lowest"][idx],
+                v_lowest=atm_stack["v_lowest"][idx],
+                p_lowest=atm_stack["p_lowest"][idx],
+                p_surface=atm_stack["p_surface"][idx],
+                rho_lowest=atm_stack["rho_lowest"][idx],
+                cos_zenith=atm_stack["cos_zenith"][idx],
+                co2_ppmv=jnp.asarray(co2_ppmv, dtype=atm_stack["T_lowest"].dtype),
+                has_radiation=jnp.asarray(1.0, dtype=atm_stack["T_lowest"].dtype),
+                has_precipitation=jnp.asarray(1.0, dtype=atm_stack["T_lowest"].dtype),
+            )
+
+            sst_K = state_in.T.data[..., 0] + _const.T_freeze
+            u_o = jnp.zeros_like(sst_K)
+            v_o = jnp.zeros_like(sst_K)
+            tile = ocean_tile_response(atm, sst_K, u_o, v_o, coupler_cfg)
+
+            sw_net = atm.sw_down * (1.0 - tile.albedo)
+            q_net = (sw_net + atm.lw_down
+                     - tile.lw_up - tile.shflx - tile.lhflx)
+
+            evap = tile.lhflx / _const.L_v
+            fw = FreshwaterForcing(
+                precip=atm.precip_total,
+                evap=evap,
+                runoff=runoff_stack[idx],
+                ice_fw=jnp.zeros_like(runoff_stack[idx]),
+            )
+            sf = OceanSurfaceForcing(
+                sw_down=atm.sw_down,
+                q_net=q_net,
+                tau_x=tile.tau_x,
+                tau_y=tile.tau_y,
+                freshwater=None,
+            )
+            new_state = model.step(
+                state_in, dt,
+                freshwater=fw, surface_forcing=sf, sponge=sponge,
+            )
+
+            # SSS restoring (gated at compile time via Python `if`).
+            if enable_sss:
+                S = new_state.S.data
+                target = jnp.asarray(sss_target_static, dtype=S.dtype)
+                alpha = jnp.asarray(sss_alpha_static, dtype=S.dtype)
+                mask = jnp.asarray(new_state.land_mask.data, dtype=S.dtype)
+                S_top_new = (
+                    S[..., 0] - alpha * (S[..., 0] - target) * mask
+                )
+                new_state = new_state._replace(
+                    S=new_state.S.replace(data=S.at[..., 0].set(S_top_new)),
+                )
+
+            # T_freeze cap inside sponge.
+            if enable_freeze:
+                T = new_state.T.data
+                T_freeze_C = jnp.asarray(T_freeze_C_static, dtype=T.dtype)
+                T_top = T[..., 0]
+                T_top_capped = jnp.where(
+                    freeze_mask_static,
+                    jnp.maximum(T_top, T_freeze_C),
+                    T_top,
+                )
+                new_state = new_state._replace(
+                    T=new_state.T.replace(data=T.at[..., 0].set(T_top_capped)),
+                )
+
+            return new_state, None
+
+        n = atm_stack["sw_down"].shape[0]
+        final_state, _ = jax.lax.scan(
+            step_body, state, jnp.arange(n, dtype=jnp.int32),
+        )
+        return final_state
+
+    return block_fn
+
+
+# ===========================================================================
 # Diagnostics
 # ===========================================================================
 
@@ -939,19 +1131,81 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     last_print = t0
     blown_up = False
 
-    for i in range(n_steps):
-        if jra55_state is not None:
-            state = _jra55_step(state, i, dt, model, jra55_state)
+    # ----- JRA55-do block-scan path (multi-core friendly) ----------------
+    if jra55_state is not None:
+        block_fn = _build_jra55_block_fn(model, jra55_state, dt)
+        block_size = max(1, diag_every)
+        if checkpoint_days is not None:
+            steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
         else:
-            state = model.step(state, dt)
+            steps_per_ckpt = None
 
-            # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
-            if restoring_targets is not None:
-                T_tgt, S_tgt = restoring_targets
-                state = _apply_restoring(
-                    state, grid_type, grid, T_tgt, S_tgt,
-                    dt, restoring_tau_s,
-                )
+        block_start = 0
+        while block_start < n_steps and not blown_up:
+            actual = min(block_size, n_steps - block_start)
+            t_io_start = time.time()
+            atm_stack, runoff_stack = _preload_jra55_forcing_block(
+                block_start, actual, dt, jra55_state,
+            )
+            io_dt = time.time() - t_io_start
+
+            t_compute_start = time.time()
+            state = block_fn(state, atm_stack, runoff_stack)
+            jax.block_until_ready(state.T.data)
+            compute_dt = time.time() - t_compute_start
+
+            block_start += actual
+            step = block_start
+            day = step * dt / 86400.0
+
+            if not _check_finite(state, grid_type):
+                print(f"  BLOWUP at step {step}")
+                blown_up = True
+                break
+
+            scalars = _extract_scalars(state, grid_type, grid, z_coord)
+            diag["day"].append(day)
+            diag["step"].append(step)
+            for k, v in scalars.items():
+                diag.setdefault(k, []).append(v)
+
+            elapsed_total = time.time() - t0
+            total_days = n_steps * dt / 86400.0
+            summary = " | ".join(
+                f"{k}={v:.4g}" for k, v in list(scalars.items())[:4]
+            )
+            print(
+                f"    [{label}] Day {day:7.2f}/{total_days:.0f} | {summary} "
+                f"| io={io_dt:.1f}s compute={compute_dt:.1f}s "
+                f"({compute_dt/actual:.2f} s/step) | {elapsed_total:.0f}s total",
+                flush=True,
+            )
+
+            if (steps_per_ckpt is not None and
+                    (step % steps_per_ckpt == 0 or step == n_steps)):
+                fname = _save_restart(state, day, step, checkpoint_dir)
+                print(f"    Restart saved: {fname.name}", flush=True)
+
+        # After the block loop, jump to the post-loop tally below.
+        if grid_type == "spectral":
+            jax.block_until_ready(state.T_hat.data)
+        else:
+            jax.block_until_ready(state.T.data)
+        wall = time.time() - t0
+        ok = not blown_up and _check_finite(state, grid_type)
+        return state, diag, wall, ok
+    # --------------------------------------------------------------------
+
+    for i in range(n_steps):
+        state = model.step(state, dt)
+
+        # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
+        if restoring_targets is not None:
+            T_tgt, S_tgt = restoring_targets
+            state = _apply_restoring(
+                state, grid_type, grid, T_tgt, S_tgt,
+                dt, restoring_tau_s,
+            )
 
         step = i + 1
 
