@@ -139,6 +139,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean MPAS physics 2 config inline imports        | 2 inline imports per factory call      | 2 module-level imports |
 | Ocean surface_forcing bulk_formulas inline        | 1 inline import per call (COARE/L-Y)   | 1 module-level import |
 | Ocean conservation global_sum_mpi inline          | 1 inline import per distributed call   | 1 module-level import |
+| Ocean spectral PE global_sum_mpi inline           | 1 inline import per distributed call (``_spectral_global_sum``) | 1 module-level import |
 
 ## SPMD-vs-single-device numerical equivalence
 
