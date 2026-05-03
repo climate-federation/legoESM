@@ -33,6 +33,8 @@ from typing import NamedTuple, Sequence
 import jax
 import jax.numpy as jnp
 
+from legoesm.runtime.backend import is_x64_enabled, supports_float64
+
 
 # ---------------------------------------------------------------------------
 # Dtype parsing helper
@@ -194,7 +196,6 @@ def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     )
     if not needs_x64:
         return
-    from legoesm.runtime.backend import supports_float64
     if not supports_float64():
         # Backend cannot do float64; _resolve_dtype will clamp to float32.
         return
@@ -260,7 +261,6 @@ def _clamp_to_backend(dtype: jnp.dtype) -> jnp.dtype:
     the precision policy never requests an impossible dtype.
     """
     if dtype == jnp.float64:
-        from legoesm.runtime.backend import supports_float64, is_x64_enabled
         if not (supports_float64() and is_x64_enabled()):
             return jnp.float32
     return dtype
