@@ -124,7 +124,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--radiation", type=str, default="rrtmg")
     parser.add_argument("--rad-update-steps", type=int, default=6)
     parser.add_argument("--clouds", type=str, default="sundqvist")
-    parser.add_argument("--microphysics", type=str, default="kessler")
+    # Sundqvist microphysics (large-scale condensation) is the canonical
+    # CMIP-physics default — Kessler in the integrated AMIP path produces
+    # NaN winds at day ~2 with current SBM/clouds settings (tracked in
+    # AMIP.md "Known issues"; surfaces in `tests/unit/test_amip_cmip6_deck.py`
+    # follow-ups).
+    parser.add_argument("--microphysics", type=str, default="sundqvist")
     parser.add_argument("--convection", type=str, default="sbm")
     parser.add_argument("--turbulence", type=str, default="louis")
     parser.add_argument("--gravity-wave-drag", type=str, default="none")
