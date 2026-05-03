@@ -306,6 +306,7 @@ def compute_hydrostatic_pressure(
     jacobian: jnp.ndarray,
     rho_ref: float = rho_0,
     g: float = constants.g,
+    h_actual: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Compute hydrostatic pressure at full levels.
 
@@ -322,13 +323,26 @@ def compute_hydrostatic_pressure(
     eta : array
         Sea surface height [m], shape (...).
     dz : array
-        Reference layer thickness [m], shape (nlev,).
+        Reference layer thickness [m], shape (nlev,).  Ignored when
+        ``h_actual`` is provided.
     jacobian : array
-        Dynamic Jacobian (eta + H) / H, shape (...).
+        Dynamic Jacobian, shape (...).  Ignored when ``h_actual`` is
+        provided.
     rho_ref : float
         Reference density [kg/m^3].
     g : float
         Gravitational acceleration [m/s^2].
+    h_actual : array or None
+        Optional pre-computed per-cell layer thickness, shape
+        (..., nlev).  When provided, used directly; when None, the
+        legacy formula ``dz * jacobian[..., None]`` is used.
+
+        This is the partial-cells extension point: callers using an
+        ``OceanPartialCellCoordinate`` should pass
+        ``h_actual = compute_layer_thickness(eta, H_bathy, coord)``
+        to integrate pressure with the correct partial bottom-cell
+        thickness.  Cells below the seafloor have h_actual=0, so they
+        contribute zero pressure increment automatically.
 
     Returns
     -------
@@ -337,11 +351,13 @@ def compute_hydrostatic_pressure(
     # Surface pressure from free surface
     p_surface = rho_ref * g * eta  # (...,)
 
-    # Actual layer thickness
-    dz_actual = dz * jacobian[..., jnp.newaxis]  # (..., nlev)
+    # Actual layer thickness — pre-computed (partial cells) or
+    # dz * jacobian (legacy z*).
+    if h_actual is None:
+        h_actual = dz * jacobian[..., jnp.newaxis]  # (..., nlev)
 
-    # Pressure increment per layer: rho * g * dz
-    dp = rho * g * dz_actual  # (..., nlev)
+    # Pressure increment per layer: rho * g * h
+    dp = rho * g * h_actual  # (..., nlev)
 
     # Pressure at layer top = cumulative sum from surface
     # p_top[k] = p_surface + sum(dp[0:k])
@@ -395,20 +411,47 @@ def compute_buoyancy_frequency(
 # Shared helpers for ocean physics integration modules
 # ==============================================================================
 
+def _maybe_partial_h_actual(state, z_coord):
+    """Return per-cell h_actual when z_coord is a partial-cell coord,
+    else None (caller falls back to dz * jacobian).
+
+    Routed through the local import to avoid a circular dependency:
+    eos.py imports vertical.py would create a cycle through state.py.
+    """
+    from legoesm.ocean.vertical import (
+        OceanPartialCellCoordinate, compute_layer_thickness,
+    )
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        return compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, z_coord,
+        )
+    return None
+
+
 def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
     """Compute in-situ density from ocean state.
 
     Used by vertical mixing, lateral mixing, and convection integration
     bridges. Avoids triplicating the same hydrostatic pressure + EOS call.
 
+    Dispatches on coord type:
+
+    - ``OceanZStarCoordinate``: legacy path, uses ``dz_ref * jacobian``
+      for layer thickness.  Bit-exact unchanged.
+    - ``OceanPartialCellCoordinate``: passes per-cell ``h_partial *
+      (eta+H_bathy)/H_bathy`` to the hydrostatic integrator so the
+      partial bottom cell's contribution is correct.
+
     Parameters
     ----------
     state : OceanState
-        Must have .T, .S, .eta fields.
-    z_coord : OceanZStarCoordinate
-        Vertical coordinate with .dz_ref.
+        Must have .T, .S, .eta, .H_bathy fields.
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
+        Vertical coordinate.
     jacobian : array
-        Dynamic Jacobian (eta + H) / H.
+        Dynamic Jacobian.  For pure z*: (eta + H) / H_max.  For
+        partial cells: (eta + H_bathy) / H_bathy.  Caller is expected
+        to use ``compute_ocean_jacobian`` which dispatches.
     eos_fn : callable or None
         EOS function ``fn(T, S, p) -> rho``.  If None, uses ``wright_eos``.
 
@@ -418,12 +461,14 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
     """
     if eos_fn is None:
         eos_fn = wright_eos
+    h_actual = _maybe_partial_h_actual(state, z_coord)
     # Two EOS iterations for density-pressure consistency, matching the
     # dynamical core (ocean_pe_cdgrid.py).
     rho = eos_fn(state.T.data, state.S.data, jnp.zeros_like(state.T.data))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+            h_actual=h_actual,
         )
         rho = eos_fn(state.T.data, state.S.data, p_hydro)
     return rho
@@ -432,9 +477,7 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
 def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
     """Compute in-situ density and hydrostatic pressure from ocean state.
 
-    Delegates to ``compute_ocean_rho`` for the 2-iteration EOS-pressure
-    coupling, then computes a final hydrostatic pressure consistent with
-    the converged density.
+    Dispatches on coord type — see ``compute_ocean_rho``.
 
     Parameters
     ----------
@@ -448,7 +491,9 @@ def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
     p_hydro : array — hydrostatic pressure [Pa].
     """
     rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn)
+    h_actual = _maybe_partial_h_actual(state, z_coord)
     p_hydro = compute_hydrostatic_pressure(
         rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+        h_actual=h_actual,
     )
     return rho, p_hydro

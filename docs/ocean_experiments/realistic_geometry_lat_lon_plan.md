@@ -1,6 +1,167 @@
 # Realistic coastlines + bathymetry on the lat-lon C-grid ocean — implementation plan
 
-**Status (2026-04-29):** Scoping only.  No implementation in tree.
+**Status (2026-05-02):** Phases 0, 1, 2, **3a**, 3.5 **complete**;
+Phases **3b, 3c, 3d, 3e deferred** (see "Deferred scope" below);
+Phase 4(a) smoke-test, Phase 4(b) 20-yr spinup, Phase 4(c) 50-yr
+spinup with cos²(lat) + polar cap **complete**; **Phase 4(c) extension
+to 100 yr complete** (yr 99.98, max|u|=1.21 m/s, equilibrated, AMOC
+absent — lines up the Phase 4(d) forcing-protocol baseline); Phase 5
+cross-comparison plotting **deferred** (will fold into Phase 4(d)
+forcing-experiment matrix).  See
+``realistic_geometry_phase4_results.md`` for full results and
+``realistic_geometry_forcing_literature_review.md`` for the Phase 4(d)
+forward plan derived from the 2026-05-02 OMIP/CORE literature review.
+
+The momentum-field residual originally attributed to "partial-cell
+q-noise + cold-start imbalance" was re-diagnosed in the 2026-05-01
+evening session as a 2Δy zonal-jet computational mode (in *u*) driven
+by the realistic-geometry config dropping A_h 20× from the idealised
+default.  The realistic config can't simply restore A_h=2e5 because
+that triggers a separate Arctic high-lat partial-cell instability
+(single-cell runaway at lat 82.5° in 15 days).  Standard MITgcm/
+MOM6/NEMO fix (cos²(lat) A_h scaling, lat>80° polar cap) landed.
+AL81 audit identified six defects but a discrete energy + enstrophy
+budget test confirmed they are stylistic / minor, not bugs.
+
+## Deferred scope
+
+The 2026-05-02 PR ships Phases 0–3a, 3.5, 4(a)–4(c).  The following
+items from the original plan are explicitly **deferred** rather than
+silently dropped:
+
+- **Phase 3b — Tilted Gaussian ridge (45° rotated)**.  Low expected
+  info-gain given Phase 4(c) ran 100 yr cleanly without grid-alignment
+  artefacts in the bulk interior (only the 2Δy mode at the equator,
+  fixed by cos²(lat)).  Revisit only if Phase 4(d) forcing changes
+  re-expose alignment-sensitive structure.
+- **Phase 3c — Munk gyre with 45° diagonal eastern boundary**.
+  Medium info-gain — would catch any latent corner-cell bug under
+  sustained flow.  Recommended before any future "real coastline +
+  diagonal western boundary current" claim (e.g. Gulf Stream
+  separation diagnostics).  Not blocking for the global-overturning
+  experiment matrix.
+- **Phase 3d — Circular island in closed basin**.  Low info-gain;
+  Phase 4(c) ran with multiple real islands (Antarctica, Australia,
+  Madagascar, etc.) without conservation drift.
+- **Phase 3e — Two-basin with narrow strait + Whitehead 1989
+  hydraulic-control comparison**.  Medium info-gain; would calibrate
+  our expectation for Indonesian Throughflow + Drake exchange in
+  Phase 4(d).  Recommended **before** publishing any throughflow
+  number from the realistic-geometry runs.
+- **Phase 5 — Cross-run comparison package** (Drake transport,
+  AMOC pathway, η spectrum on real bathy, topographic Rossby).
+  Folded into the Phase 4(d) experiment matrix in
+  ``realistic_geometry_forcing_literature_review.md`` so it has
+  multiple configs to compare, not a single-config baseline.
+
+The 2026-05-02 lit review identified **forcing protocol** (SST
+restoring → prescribed heat flux, add idealised E−P + β_S, Bryan-
+Lewis κ_v) as the highest-leverage path to credible AMOC, not
+boundary-handling.  The deferred 3b–3e tests retain their original
+scientific value but are no longer on the critical path to the
+"realistic Atlantic overturning at 5°" milestone.
+
+The momentum-field residual originally attributed to "partial-cell
+q-noise + cold-start imbalance" was re-diagnosed in the 2026-05-01
+evening session as a 2Δy zonal-jet computational mode (in *u*, peaking
+at the equator) driven by the realistic-geometry config dropping A_h
+20× from the idealised default.  The realistic config can't simply
+restore A_h=2e5 because that triggers a separate Arctic high-lat
+partial-cell instability (single-cell runaway at lat 82.5° in 15
+days).  Standard MITgcm/MOM6/NEMO fix (cos²(lat) A_h scaling) landed
+this session.  AL81 audit identified six defects but D2 (WENO5 vs
+AL81 = -15-20%) bounds their combined effect; a discrete energy +
+enstrophy budget test will discriminate "real theoretical hole" from
+"alternative stylistic choice" before any AL81 fix work proceeds.
+
+### Phase 4(b) first-pass result (2026-05-01)
+
+Run: ``results/ocean/global_overturning_realistic_geometry/`` —
+ETOPO 5° (36×72), MEO r=0.2, A_h=1e4, K_GM=K_Redi=800,
+drag=2.5e-3, B_h=5e9, SMC03 PGF, AL81 PV-flux, implicit-CN
+barotropic.  50-yr targeted, killed at year 20.8 with sufficient
+qualitative data.  Restarts saved at years 0, 5, 10, 15, 20.
+
+- ✅ Stratification, SST pattern, SSH pattern, mass conservation,
+  no NaN, bottom-T trend correct.
+- ❌ No deep AMOC-like MOC cell forms; barotropic streamfunction
+  dominated by coastal noise (no coherent gyres); surface speeds
+  3–5× realistic with pathological striping in equatorial Pacific.
+
+The full SMC03 + AL81 + h_vtx min-rule + MEO + closure stack is
+**stable shippable infrastructure**.  Gap to production-quality
+dynamics is a combination of (a) residual partial-cell q-noise in
+the AL81 stencil (likely missing corner-triad ENE corrections),
+and (b) absence of production spinup machinery (Levitus/WOA IC,
+forcing ramp, viscosity ramp).  See results doc for the prioritised
+next-session plan.
+
+### Resumed (was: paused at Phase 3.5/4 pending partial cells)
+
+The pause documented below was lifted on 2026-05-01 by the merge of
+the partial-cells branch (``ocean-partial-cells``) and the
+density-Jacobian PGF branch (``ocean-pgf-smc03``, S&M 2003) into this
+PR.  Phase 3.5 (the headline "lat-lon C-grid runs the seamount
+stress test cleanly on real ETOPO" gate that motivated the pause):
+
+- **Beckmann-Haidvogel seamount, 30-day rest-state**:
+  smoothing=5, r_max=0.54, drag=1e−3 →
+  ``|u|max = 1.5 mm/s`` (target < 5 mm/s).  **PASS.**  Down from
+  the legacy Adcroft-only path's 99 mm/s 2Δz computational mode.
+  Rest-state PGF residual 60× smaller than Adcroft (1.1e−8 vs
+  6.7e−7 m/s²).
+- **Real ETOPO 30-day rest-state, 3°/20-level**:
+  Adcroft baseline never reaches the < 50 mm/s criterion (390 mm/s
+  on day 1) and crashes day 12.  SMC03 satisfies the < 50 mm/s
+  criterion through day 12 (peak 49 mm/s); a non-PGF global-domain
+  instability (likely coastal computational mode at irregular
+  coastlines / thin-cell implicit-CN solver pathology) drives both
+  schemes to NaN later (Adcroft day 12, SMC03 day 19).  The
+  remaining 30-day gap is downstream of the PGF and out-of-scope
+  for the SMC03 work.
+
+See ``partial_cells_results.md`` for the full result table, the
+iteration log (initial Option A → Option B → C1 ``min(z_c)`` fix),
+and the on-branch research artefacts
+(``pgf_production_models_research.md`` documenting MOM6/ROMS/NEMO
+production PGF approaches, ``pgf_smc03_code_review.md`` documenting
+the C1 bug and its fix).
+
+**Phase 4-5 remaining work**: Wolfe-Cessi-style spinup on real
+ETOPO and eddy-permitting experiments.  Both gated on closing the
+30-day NaN-free instability noted above — likely horizontal
+viscosity / biharmonic / Smagorinsky tuning, coastal sponge, or
+MEO-style additional smoothing.  A diagnostic spike to localise
+the instability (homogeneous T,S 1-day ETOPO run to separate
+"stratification × coastline" from "pure dynamics × coastline") is
+the recommended next step.
+
+---
+
+### Original pause note (2026-04-30, kept for history)
+
+**Why paused**: Phase 3a's empirical regime boundary (model passes
+seamount stress at r_max < 0.24) plus Phase 3a's MEO sweep on real
+ETOPO showed that getting r_max below the model's stability bound at
+2.5° resolution requires r_target ≤ 0.03 — corresponding to a +32%
+ocean volume change that effectively eliminates continental shelves
+and slopes.  The plan's "realistic geometry" promise is undermined
+if we land Phase 4 with a near-flat-bottom bathymetry.
+
+The chosen mitigation path (per the d-J PGF decision gate the plan
+explicitly flagged) is **z\* + partial cells** — the modern MOM6 /
+MITgcm production approach.  Partial cells eliminate the PGF
+cancellation problem in the bulk of the water column by keeping
+full-cell `z_k` constant horizontally; only the partial bottom cell
+needs special-case PGF treatment.  This is the production-grade
+solution that ~half of all CMIP-class ocean models use.
+
+The realistic-geometry plan resumes at Phase 3.5 once
+`partial_cells_plan.md` ships and lat-lon C-grid runs the seamount
+stress test cleanly on real ETOPO.  Phases 0–3a artefacts (MEO
+machinery, idealised-coastline tests, ETOPO ingest, regime-boundary
+characterisation) all remain valuable infrastructure regardless of
+the coordinate change.
 
 ## Motivation
 
@@ -401,11 +562,76 @@ interpret the realistic-geometry Phase 4 run.
   realistic-bathymetry slopes), that decision goes through a
   separate review — do NOT silently bake it into the plan.
 
+### Phase 3.5 — Realistic-geometry smoke test  (≈ 3–4 days)
+
+The Phase 3 ladder catches each failure mode in isolation, but does
+not test whether they appear simultaneously when full ETOPO bathymetry
++ real coastlines are combined.  This phase bridges the gap before
+the multi-hour Phase 4 commitment.
+
+**Tasks:**
+
+- 30-day rest-state run on the real ETOPO bathymetry + real coastlines
+  product from Phase 0 (with the Shapiro smoothing chosen in Phase 3a).
+  Stratified T initial condition, zero forcing.
+  - Diagnostic: peak `|u|` over time, regional max-velocity maps focused
+    on the Mid-Atlantic Ridge, East Pacific Rise, Drake Passage shelf
+    break, continental shelves around Antarctica.
+- 90-day forced run with the Wolfe-Cessi-style two-belt wind + cosine
+  SST restoring on the same realistic geometry.
+  - Diagnostic: `|η|`, `|u|`, T-range bounded; mass + heat conservation
+    to round-off; targeted regional checks at known PGF-hard regions
+    (each gets a documented bound).
+- A short driver script analogous to the Phase 4 driver but capped at
+  90 days, output to
+  `results/ocean/realistic_geometry_smoke_test/`.
+
+**Decision gate:**
+
+- 30-day rest-state run produces `|u|max ≤ 5 mm/s` (same threshold as
+  Phase 3a Beckmann-Haidvogel).  Regional bounds met everywhere
+  identified in Phase 0's slope-histogram diagnostic.
+- 90-day forced run completes cleanly with documented diagnostics, OR
+  identifies a specific regional issue that gets fixed before Phase 4
+  starts.
+- If the forced run shows local instability or persistent unphysical
+  flow at a known PGF-hard region, the fix is to revisit Phase 0's
+  smoothing parameters or apply a regional `H_bathy` floor (documented),
+  not to silently increase global smoothing.
+
+This phase exists specifically to **avoid wasting a multi-hour Phase 4
+run** on a regression that the Phase 3 idealized ladder happened not
+to expose.  Cost: ~3–4 days for ~6 h of additional model runtime
+(30+90 days at dt=600s + diagnostics).
+
 ### Phase 4 — 50-yr global overturning on realistic geometry  (≈ 1 week + wall time)
 
-**Gated on Phase 3**: do not start Phase 4 until 3a–3e all pass.
-This is a multi-hour wall-clock investment; we want every distinct
-boundary-handling failure mode characterised and resolved beforehand.
+**Status (2026-05-01):** First-pass complete — see
+``realistic_geometry_phase4_results.md``.  Run reached year 20.8
+without NaN; thermodynamics correct, momentum noisy.  Next-session
+priorities (in order of cost/info-gain):
+
+1. Audit ``pv_flux_al81_partial_cell`` for missing corner-triad ENE
+   corrections (Sadourny-Salmon energy-enstrophy form).  Diagnose
+   via discrete energy + enstrophy budgets vs flat-bottom reference.
+2. Forcing ramp: τ_wind=0 + long SST τ_T for first sim-year, ramp
+   over 6 months to production values.
+3. Equilibrated initial T/S from Levitus/WOA climatology rather
+   than analytic exp(z).
+4. Spinup viscosity ramp: A_h=5e5 for first year → 1e4 after gyres
+   set up.
+5. Re-run 50-100 yr with above.
+
+If after (1)-(5) partial-cell noise still dominates, fall back to
+PLM-in-(T, S) PGF upgrade flagged in
+``pgf_production_models_research.md``.
+
+**Gated on Phases 3 and 3.5**: do not start Phase 4 until 3a–3e all
+pass and 3.5's smoke tests complete cleanly.  This is a multi-hour
+wall-clock investment; we want every distinct boundary-handling failure
+mode characterised and resolved beforehand, *and* the realistic
+combined geometry verified to integrate stably for at least a
+full season.
 
 Mirror the lat-lon flat-bottom 50-yr workflow but with realistic
 geometry.
@@ -481,6 +707,8 @@ In ascending order of difficulty:
 | 3c Munk gyre, diagonal eastern boundary | Corner cells under sustained flow | 3 |
 | 3d Circular island in closed basin | Closed-loop topology / island handling | 3 |
 | 3e Two-basin with strait | Sill exchange + connected-basin dynamics | 3 |
+| 3.5 — 30d real-geometry rest state | Combined-geometry steady stability | 3.5 |
+| 3.5 — 90d real-geometry forced run | Combined-geometry forced stability | 3.5 |
 | 50-yr realistic geometry run | End-to-end production readiness | 4 |
 | Drake transport vs published estimates | Big-picture circulation correctness | 5 |
 | AMOC pathway topology | Realistic basin connectivity | 5 |
@@ -550,10 +778,11 @@ operator refactoring.
 |   ↳ 3c Munk gyre, diagonal coastline | 2 d | |
 |   ↳ 3d Circular island | 1 d | |
 |   ↳ 3e Two-basin with strait (full diagnostic) | 4 d | |
-| 4 — 50-yr realistic-geometry run (gated on 3a–3e) | 1 week + ~6 h wall | 30 d |
-| 5 — Diagnostics + comparison | 1 week | 35 d |
+| 3.5 — Realistic-geometry smoke test | 3–4 days | 29 d |
+| 4 — 50-yr realistic-geometry run (gated on 3 + 3.5) | 1 week + ~6 h wall | 34 d |
+| 5 — Diagnostics + comparison | 1 week | 39 d |
 
-**Total: ~5 weeks** of focused work plus the 50-yr wall-clock time
+**Total: ~5.5 weeks** of focused work plus the 50-yr wall-clock time
 (now ~6 h on the implicit-CN path at dt=600 s, may need adjusting
 for variable bathymetry CFL).
 

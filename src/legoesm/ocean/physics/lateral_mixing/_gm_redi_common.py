@@ -151,7 +151,16 @@ def compute_visbeck_kappa_gm(
     N2 = compute_buoyancy_frequency(
         rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
     )
-    N = jnp.sqrt(jnp.maximum(N2, 0.0))
+    # Use a small positive floor on N² before sqrt, NOT a hard zero.
+    # ``sqrt(0)`` has an infinite gradient in JAX; combined with the
+    # ``maximum(N²,0)`` mask whose gradient is zero on the unstable
+    # side, the backward pass evaluates ``inf * 0`` and produces NaN.
+    # ``maximum(N², 1e-30)`` keeps N tiny but positive in unstable
+    # layers, so ``sqrt`` has a finite (but very large) derivative
+    # which is then multiplied by zero from ``maximum``'s VJP — a
+    # well-defined zero rather than NaN.  Forward effect is at most
+    # ``sqrt(1e-30) ≈ 1e-15``, negligible.
+    N = jnp.sqrt(jnp.maximum(N2, 1e-30))
     # Regularise sqrt at zero slope — 1e-30 avoids spurious |S| ~ 3e-4
     # that the float32 eps (~1.19e-7) would produce.
     S_mag = jnp.sqrt(S_x ** 2 + S_y ** 2 + 1e-30)

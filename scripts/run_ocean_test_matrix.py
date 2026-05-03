@@ -54,8 +54,15 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
+import json
+import shutil
 import sys
+import time
+import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
 # Line-buffered stdout for CI/log visibility.
 sys.stdout.reconfigure(line_buffering=True)
@@ -261,11 +268,26 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
 
+    # sin² wind variant (5° edge taper) — exercises the
+    # ``wind_buffer_deg`` path in PrescribedForcingConfig that is not
+    # otherwise covered by the cosine-wind double-gyre case above.
+    for g in ["mpas_regional", "latlon_regional"]:
+        matrix.append(TestCase(
+            "barotropic_double_gyre_sin2", g, res[g], 30.0, 2.0))
+
     # --- Wind-driven regional baroclinic gyre: regional grids ---
     # Tests Coriolis double-counting fix (#103) with realistic stratification
     for g in ["mpas_regional", "latlon_regional"]:
         matrix.append(TestCase(
             "baroclinic_gyre", g, res[g], 60.0, 5.0))
+
+    # Cosine-wind / no-edge-taper variant — pairs with the default
+    # sin² baroclinic_gyre (BaroclinicGyreConfig default) to compare
+    # the effect of the edge-buffer treatment on the western boundary
+    # current and gyre asymmetry.
+    for g in ["mpas_regional", "latlon_regional"]:
+        matrix.append(TestCase(
+            "baroclinic_gyre_cos", g, res[g], 60.0, 5.0))
 
     # --- Global barotropic wind-driven: latlon, mpas ---
     # (cubed_sphere excluded — face-boundary instability produces unphysical speeds)
@@ -2885,13 +2907,20 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
 # Runner: Wind-Driven Gyre
 # ===========================================================================
 
-def _make_gyre_physics(wind_profile: str = "single_gyre"):
+def _make_gyre_physics(
+    wind_profile: str = "single_gyre",
+    wind_buffer_deg: float = 0.0,
+):
     """Create OceanPhysicsConfig with prescribed gyre wind forcing.
 
     Parameters
     ----------
     wind_profile : str
-        "single_gyre" or "double_gyre".
+        "single_gyre", "double_gyre", or "double_gyre_sin2".
+    wind_buffer_deg : float
+        Buffer zone width [degrees] for the sin² wind taper. Only
+        meaningful for ``wind_profile="double_gyre_sin2"``; ignored
+        otherwise.
 
     Notes
     -----
@@ -2922,6 +2951,7 @@ def _make_gyre_physics(wind_profile: str = "single_gyre"):
             scheme="prescribed",
             prescribed=PrescribedForcingConfig(
                 wind_profile=wind_profile,
+                wind_buffer_deg=wind_buffer_deg,
                 tau_max=0.1,
                 lat_south_deg=15.0,
                 lat_north_deg=75.0,
@@ -3027,6 +3057,7 @@ def _create_simplified_continent_mask(lon_deg, lat_deg,
 
 def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
                          wind_profile: str, label: str,
+                         wind_buffer_deg: float = 0.0,
                          ) -> tuple[str, float, str]:
     """Shared runner for barotropic gyre experiments."""
     _supported = ("cubed_sphere", "latlon", "mpas", "mpas_regional",
@@ -3036,7 +3067,7 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
             f"{label} not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
 
-    physics = _make_gyre_physics(wind_profile)
+    physics = _make_gyre_physics(wind_profile, wind_buffer_deg=wind_buffer_deg)
     # A_h = 5e5 m^2/s: Munk layer delta_M ~ 300 km, needed to
     # stabilise long integrations at ~5-degree resolution.
     # Default A_v = 1e-3 (higher values destabilise latlon).
@@ -3120,10 +3151,19 @@ def run_barotropic_gyre(tc: TestCase, output_dir: Path, days: float
 
 def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
                                ) -> tuple[str, float, str]:
-    """Wind-driven barotropic double gyre (Holland & Lin 1975)."""
+    """Wind-driven barotropic double gyre (Holland & Lin 1975) — cosine wind."""
     return _run_gyre_experiment(tc, output_dir, days,
                                 wind_profile="double_gyre",
                                 label="Barotropic Double Gyre")
+
+
+def run_barotropic_double_gyre_sin2(tc: TestCase, output_dir: Path, days: float
+                                    ) -> tuple[str, float, str]:
+    """Wind-driven barotropic double gyre with sin² wind profile (5° taper)."""
+    return _run_gyre_experiment(tc, output_dir, days,
+                                wind_profile="double_gyre_sin2",
+                                wind_buffer_deg=5.0,
+                                label="Barotropic Double Gyre sin2")
 
 
 def _make_baroclinic_scalar_fn(grid_type: str, grid=None, z_coord=None, config=None):
@@ -3235,17 +3275,24 @@ def _make_baroclinic_scalar_fn(grid_type: str, grid=None, z_coord=None, config=N
         return base_scalar_fn
 
 
-def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
-                       ) -> tuple[str, float, str]:
-    """Regional wind-driven baroclinic gyre with surface restoring."""
+def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float,
+                        gyre_config=None, label: str = "Baroclinic Gyre",
+                        ) -> tuple[str, float, str]:
+    """Regional wind-driven baroclinic gyre with surface restoring.
+
+    ``gyre_config`` defaults to ``BaroclinicGyreConfig()`` (sin² wind
+    profile with 5° edge taper). Pass an explicit config to select a
+    different wind profile / taper combination — see
+    ``run_baroclinic_gyre_cos`` for the cosine-wind / no-taper variant.
+    """
     if tc.grid_type not in ("mpas_regional", "latlon_regional"):
         raise NotImplementedError(
-            f"Baroclinic gyre only implemented for regional grids, not {tc.grid_type}")
-    
+            f"{label} only implemented for regional grids, not {tc.grid_type}")
+
     from legoesm.ocean.experiments.baroclinic_gyre import (
         BaroclinicGyreConfig, create_initial_conditions, create_forcings)
-    
-    config = BaroclinicGyreConfig()
+
+    config = gyre_config if gyre_config is not None else BaroclinicGyreConfig()
     physics = create_forcings(tc.grid_type, None, config)
     
     grid, z_coord, ocean_config, model, coord_kind, lon_deg, lat_deg = (
@@ -3268,7 +3315,7 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
-        label=f"Baroclinic Gyre ({tc.grid_type})", total_days=days)
+        label=f"{label} ({tc.grid_type})", total_days=days)
     
     max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
     eta_list = diag.get("mean_eta", [])
@@ -3301,7 +3348,7 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
     # Regional extent for proper plotting
     extent = (config.lon_west, config.lon_east, config.lat_south, config.lat_north)
     _save_case_diagnostics(
-        output_dir, f"Baroclinic Gyre {tc.grid_type} {tc.resolution}",
+        output_dir, f"{label} {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("eta", "SSH (m)", "RdBu_r"),
@@ -3320,8 +3367,22 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
                       "T_spatial_std_surface": "degC", "T_spatial_std_thermocline": "degC"},
         domain_extent=extent,
         mesh=grid if coord_kind == "mpas" else None)
-    
+
     return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_baroclinic_gyre_cos(tc: TestCase, output_dir: Path, days: float
+                            ) -> tuple[str, float, str]:
+    """Regional baroclinic gyre with cosine wind profile (no edge taper)."""
+    from legoesm.ocean.experiments.baroclinic_gyre import BaroclinicGyreConfig
+    config_ = BaroclinicGyreConfig(
+        wind_profile="double_gyre", wind_buffer_deg=0.0,
+    )
+    return run_baroclinic_gyre(
+        tc, output_dir, days,
+        gyre_config=config_, label="Baroclinic Gyre cos",
+    )
+
 
 # ===========================================================================
 # Runner: Global Wind-Driven Circulation
@@ -4453,7 +4514,9 @@ RUNNERS: dict[str, Callable] = {
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
+    "barotropic_double_gyre_sin2": run_barotropic_double_gyre_sin2,
     "baroclinic_gyre": run_baroclinic_gyre,
+    "baroclinic_gyre_cos": run_baroclinic_gyre_cos,
     "global_barotropic_wind": run_global_barotropic_wind,
     "global_barotropic_wind_1lev": run_global_barotropic_wind,
     "geostrophic_adjustment": run_geostrophic_adjustment,

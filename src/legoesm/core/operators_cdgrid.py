@@ -950,29 +950,34 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     # ----------------------------------------------------------------
     # Step 2: PPM face values with face-value clipping
     # ----------------------------------------------------------------
-    q_pad_h2 = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4)
+    # NOTE: ``q_pad_h2`` was assigned above (and moveaxis'd for 4D
+    # inputs).  Do *not* re-pad here — that would discard the leading
+    # ``nlev`` axis and break the 4D path with a shape mismatch when
+    # the clip step (line ~960) compares against ``q_left_x`` /
+    # ``q_right_x`` (which use the rotated ``q_pad``).
 
-    # X-direction PPM — pass `axis=1` explicitly to reconstruct along
-    # the halo-padded i-direction.  Same iter-508 contract as
-    # `cgrid_mass_flux_divergence`.
-    q_x_strips = q_pad_h2[:, :, 2:-2]                   # (6, n+4, n)
-    q_L_x, q_R_x = _ppm_reconstruct_1d(q_x_strips, axis=1)
-    q_R_left = q_R_x[:, 1:n+2, :]
-    q_L_right = q_L_x[:, 2:n+3, :]
-    q_face_hi_x = jnp.where(u_c > 0, q_R_left, q_L_right)
+    # X-direction PPM — strips are taken along the trailing ``(i, j)``
+    # axes regardless of rank.  Use negative axes so the helper acts on
+    # the correct PPM (i) axis whether ``q`` is 3D ``(6, ny, nx)`` or
+    # 4D moved to ``(nlev, 6, ny, nx)``.
+    q_x_strips = q_pad_h2[..., :, 2:-2]                 # (..., n+4, n)
+    q_L_x, q_R_x = _ppm_reconstruct_1d(q_x_strips, axis=-2)
+    q_R_left = q_R_x[..., 1:n+2, :]
+    q_L_right = q_L_x[..., 2:n+3, :]
+    q_face_hi_x = jnp.where(u_c_t > 0, q_R_left, q_L_right)
 
     # Clip to local bounds of adjacent cells
     q_face_min_x = jnp.minimum(q_left_x, q_right_x)
     q_face_max_x = jnp.maximum(q_left_x, q_right_x)
     q_face_hi_x = jnp.clip(q_face_hi_x, q_face_min_x, q_face_max_x)
 
-    # Y-direction PPM — strip shape (6, n, n+4) puts the halo-padded
-    # j-axis at axis=2; pass `axis=2` explicitly per iter-509 contract.
-    q_y_strips = q_pad_h2[:, 2:-2, :]
-    q_L_y, q_R_y = _ppm_reconstruct_1d(q_y_strips, axis=2)
-    q_R_bottom = q_R_y[:, :, 1:n+2]
-    q_L_top = q_L_y[:, :, 2:n+3]
-    q_face_hi_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)
+    # Y-direction PPM — strip shape (..., n, n+4) puts the halo-padded
+    # j-axis at axis=-1.
+    q_y_strips = q_pad_h2[..., 2:-2, :]
+    q_L_y, q_R_y = _ppm_reconstruct_1d(q_y_strips, axis=-1)
+    q_R_bottom = q_R_y[..., :, 1:n+2]
+    q_L_top = q_L_y[..., :, 2:n+3]
+    q_face_hi_y = jnp.where(v_c_t > 0, q_R_bottom, q_L_top)
 
     # Clip to local bounds of adjacent cells
     q_face_min_y = jnp.minimum(q_below_y, q_above_y)

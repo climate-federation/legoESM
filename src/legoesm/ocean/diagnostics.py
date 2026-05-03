@@ -58,7 +58,10 @@ def first_baroclinic_deformation_radius(
     N2 = compute_buoyancy_frequency(
         rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
     )
-    N = jnp.sqrt(jnp.maximum(N2, 0.0))
+    # Tiny positive floor avoids NaN gradients in unstable layers,
+    # where ``sqrt(0)`` × ``maximum``-mask backward yields ``inf*0=NaN``.
+    # See _gm_redi_common.py:154 for the analogous fix.
+    N = jnp.sqrt(jnp.maximum(N2, 1e-30))
 
     # Interface thicknesses for depth-weighted averaging.
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]  # (..., nlev)

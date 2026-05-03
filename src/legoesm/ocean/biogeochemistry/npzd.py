@@ -183,9 +183,20 @@ def npzd_source_sink(
     caco3_dissolution = cfg.R_CaP * cfg.R_CN * remin
 
     dDIC_dt = dDIC_bio - caco3_production + caco3_dissolution
-    # Alkalinity: -1 per mol NO3 consumed (nitrification sign convention)
-    # + 2 per mol CaCO3 dissolved, -2 per mol CaCO3 precipitated
-    dALK_dt = (-growth + remin + (1.0 - cfg.gamma_Z) * grazing
+    # Alkalinity (Dickson total alkalinity, which carries the
+    # ``-[NO3-]`` term):
+    #   * NO3 uptake by phytoplankton REMOVES nitrate from solution, so
+    #     -d[NO3-]/dt is positive ⇒ TA increases ⇒ +growth.
+    #   * Remineralization adds NO3- back ⇒ TA decreases ⇒ -remin.
+    #   * Zooplankton excretion (``(1-gamma_Z)*grazing``) returns N as
+    #     NO3- to solution ⇒ -(1-gamma_Z)*grazing.
+    #   * CaCO3 precipitation removes 2 mol of charge per mol CaCO3
+    #     ⇒ -2*caco3_production.
+    #   * CaCO3 dissolution adds 2 mol of charge ⇒ +2*caco3_dissolution.
+    # The previous code had the N-cycle signs flipped (was tracking
+    # dNO3_dt instead of -dNO3_dt for the organic terms) — caught by
+    # codex adversarial review (iter-1).
+    dALK_dt = (growth - remin - (1.0 - cfg.gamma_Z) * grazing
                - 2.0 * caco3_production + 2.0 * caco3_dissolution)
 
     return dNO3_dt, dPhyto_dt, dZoo_dt, dDet_dt, dDIC_dt, dALK_dt

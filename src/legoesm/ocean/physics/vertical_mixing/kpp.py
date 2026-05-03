@@ -82,7 +82,13 @@ def _boundary_layer_depth(
     max_depth = z_depth[..., -1]
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
-    V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 0.0))
+    # ``sqrt(0)`` has an infinite backward derivative; combined with
+    # ``maximum(., 0)`` whose VJP is zero on the masked side, JAX
+    # produces ``0 * inf = NaN``.  Use a tiny positive floor instead
+    # so the gradient is finite (very large) and gets multiplied by
+    # zero through ``maximum`` to a well-defined zero.  Forward
+    # error is at most ``sqrt(1e-30) ≈ 1e-15``, negligible.
+    V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 1e-30))
             / jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))
             * jnp.maximum(cfg.Ri_crit * h_safe - z_depth, 0.0)
             * z_depth / h_safe)
@@ -208,9 +214,15 @@ def kpp_vertical_mixing(
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     dz_half0 = 0.5 * (dz_actual[..., 0] + dz_actual[..., 1])
     if B_f is None:
-        # Estimate from near-surface density gradient
+        # Diffusive proxy from near-surface density gradient.  The KPP
+        # convention here is ``B_f > 0 = unstable``, so the proxy must
+        # be POSITIVE when the surface layer is statically unstable
+        # (i.e. ``rho[0] > rho[1]`` ⇒ ``drho_dz_sfc > 0`` ⇒
+        # ``B_f > 0``).  An earlier version had a leading minus sign
+        # which inverted the sign and made stable columns spuriously
+        # trigger non-local transport.
         drho_dz_sfc = (rho[..., 0] - rho[..., 1]) / jnp.maximum(dz_half0, eps)
-        B_f = -g / rho_0_ref * cfg.K_bg * drho_dz_sfc  # simplified proxy
+        B_f = g / rho_0_ref * cfg.K_bg * drho_dz_sfc  # simplified proxy
 
     # --- Boundary layer depth ---
     h_bl = _boundary_layer_depth(
@@ -265,9 +277,16 @@ def kpp_vertical_mixing(
     is_strongly_convective = epsilon_lmd * d > jnp.abs(L_MO)
     w_s_unstable = jnp.where(is_strongly_convective, w_s_conv, w_s_weak)
 
-    # Stable: standard suppression
+    # Stable suppression: ``phi_m = 1 + 5*|zeta|`` for |zeta| > 0 in the
+    # classical Monin-Obukhov convention.  Under the sign convention
+    # used here (B_f > 0 = unstable), ``L_MO = u*^3 / (kappa * B_f)``
+    # is NEGATIVE for stable forcing, so ``zeta_kpp = d / L_MO < 0`` for
+    # stable.  The previous form ``max(zeta_kpp, 0)`` always returned
+    # zero in stable conditions and disabled the suppression entirely.
+    # Use ``max(-zeta_kpp, 0)`` so the magnitude of zeta drives the
+    # stable suppression (codex adversarial review iter-1, finding #4).
     w_s_stable = (cfg.kappa_vk * u_star[..., jnp.newaxis]
-                  / jnp.maximum(1.0 + 5.0 * jnp.maximum(zeta_kpp, 0.0), 1.0))
+                  / jnp.maximum(1.0 + 5.0 * jnp.maximum(-zeta_kpp, 0.0), 1.0))
     w_s = jnp.where(is_unstable, w_s_unstable, w_s_stable)
     w_s = jnp.maximum(w_s, 1e-10)
 
@@ -285,11 +304,19 @@ def kpp_vertical_mixing(
     # LMD94 interior shear instability: K = K_0 * (1 - (Ri/Ri_0)^2)^3
     # for Ri < Ri_0, zero above.
     Ri_ratio = jnp.clip(Ri_int / cfg.Ri_0, 0.0, 1.0)
-    K_interior = cfg.K_0_shear * (1.0 - Ri_ratio**2) ** 3 + cfg.K_bg
+    Ri_shear_curve = cfg.K_0_shear * (1.0 - Ri_ratio**2) ** 3
 
     # Interior static instability: enhanced mixing where N2 < 0
     K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)
-    K_interior = K_interior + K_conv
+
+    # Build separate interior floors for tracer (K_v) and momentum (A_v).
+    # The shear-instability + convective enhancement is shared, but the
+    # background floors differ (K_bg = 1e-5 for tracers, A_bg = 1e-4 for
+    # momentum).  Previously both branches used cfg.K_bg, which dropped
+    # the momentum interior viscosity by an order of magnitude (codex
+    # adversarial review iter-1, finding #6).
+    K_interior = Ri_shear_curve + cfg.K_bg + K_conv
+    A_interior = Ri_shear_curve + cfg.A_bg + K_conv
 
     # --- K at interfaces (average of full level K_bl) ---
     K_bl_half = 0.5 * (K_bl_full[..., :-1] + K_bl_full[..., 1:])
@@ -299,9 +326,12 @@ def kpp_vertical_mixing(
     sigma_half = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
     in_bl = sigma_half < 1.0
 
-    # Combine BL and interior
-    K_v = jnp.where(in_bl, K_bl_half, K_interior) + cfg.K_bg
-    A_v = jnp.where(in_bl, K_bl_half * 1.0, K_interior) + cfg.A_bg
+    # Combine BL and interior.  Each branch uses its own background
+    # floor (K_bg for tracers, A_bg for momentum) so the merged field
+    # honors the configured background levels in BOTH the BL and the
+    # interior.
+    K_v = jnp.where(in_bl, K_bl_half + cfg.K_bg, K_interior)
+    A_v = jnp.where(in_bl, K_bl_half + cfg.A_bg, A_interior)
     K_v = jnp.minimum(K_v, cfg.K_max)
     A_v = jnp.minimum(A_v, cfg.K_max)
 
@@ -360,10 +390,17 @@ def kpp_vertical_mixing(
     sigma_half_clip = jnp.clip(sigma_half_full, 0.0, 1.0)
     G_half = sigma_half_clip * (1.0 - sigma_half_clip) ** 2  # (..., nlev-1)
 
-    in_bl_full = sigma < 1.0
-
     # --- Temperature non-local tendency ---
     # Non-local flux at interfaces: F_nl = C_s * Q_T * G_half  [K*m/s]
+    # G_half = 0 for sigma_half >= 1 (outside BL) so F_T automatically
+    # vanishes below the BL — the divergence ``-dF/dz`` is naturally
+    # restricted to the BL.  The previous in-BL mask
+    # ``in_bl_full & is_unstable_col`` zeroed the compensating
+    # tendency in the layer whose CENTER sigma >= 1 but whose TOP
+    # interface sigma_half < 1, breaking column conservation when h_bl
+    # cut through a grid cell (codex adversarial review iter-1,
+    # finding #1).  Keep only the column-level ``is_unstable_col``
+    # gate.
     F_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G_half  # (..., nlev-1)
     # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom)
     dT_nonlocal_top = -F_T[..., :1] / dz_actual[..., :1]
@@ -373,7 +410,7 @@ def kpp_vertical_mixing(
         [dT_nonlocal_top, dT_nonlocal_int, dT_nonlocal_bot], axis=-1
     )  # (..., nlev)  [K/s]
     dT_nonlocal = jnp.where(
-        in_bl_full & is_unstable_col[..., jnp.newaxis], dT_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis], dT_nonlocal, 0.0
     )
 
     # --- Salinity non-local tendency ---
@@ -385,7 +422,7 @@ def kpp_vertical_mixing(
         [dS_nonlocal_top, dS_nonlocal_int, dS_nonlocal_bot], axis=-1
     )  # (..., nlev)  [psu/s]
     dS_nonlocal = jnp.where(
-        in_bl_full & is_unstable_col[..., jnp.newaxis], dS_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis], dS_nonlocal, 0.0
     )
 
     return VerticalMixingOutput(

@@ -188,12 +188,14 @@ def freshwater_from_coupler(
     # Land runoff (sum surface + subsurface).  Pin the zero-fallback
     # dtype to the precip path so a missing runoff input does not
     # silently widen the freshwater forcing struct to f64 under x64.
+    # Both fields are summed independently (codex adversarial review,
+    # iter-1, bug #3) — previously, ``runoff_subsurface`` was silently
+    # dropped whenever ``runoff_surface`` was ``None``.
+    runoff = jnp.zeros(nCells, dtype=precip.dtype)
     if runoff_surface is not None:
-        runoff = runoff_surface
-        if runoff_subsurface is not None:
-            runoff = runoff + runoff_subsurface
-    else:
-        runoff = jnp.zeros(nCells, dtype=precip.dtype)
+        runoff = runoff + runoff_surface
+    if runoff_subsurface is not None:
+        runoff = runoff + runoff_subsurface
 
     # Ice freshwater: based on areal ice mass change.
     # ice_mass = rho_ice * h * A  (per unit area of grid cell)
