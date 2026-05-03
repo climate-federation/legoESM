@@ -175,11 +175,13 @@ def mpas_ocean_conservation_fixer(
     if config.fix_volume:
         eta_old_acc = cast(state_old.eta.data, _ACC_MODULE, "accumulate")
         eta_new_acc = cast(state_new.eta.data, _ACC_MODULE, "accumulate")
-        vol_terms = jnp.stack([
-            jnp.sum(eta_old_acc * weighted_area_acc),
-            jnp.sum(eta_new_acc * weighted_area_acc),
-            jnp.sum(weighted_area_acc),
-        ])
+        # Three area-weighted scalar sums share the ``weighted_area_acc``
+        # weight on the same horizontal axes — stack the integrands and
+        # reduce once with ``axis=(0, 1, ...)``.
+        _vol_stack = jnp.stack(
+            [eta_old_acc, eta_new_acc, jnp.ones_like(eta_old_acc)], axis=-1,
+        ) * weighted_area_acc[..., None]
+        vol_terms = jnp.sum(_vol_stack, axis=tuple(range(eta_old_acc.ndim)))
         vol_old, vol_new, ocean_area = _global_sum(vol_terms)
         eta_correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
         eta_corrected = state_new.eta.data + eta_correction.astype(eta_corrected.dtype) * mask
