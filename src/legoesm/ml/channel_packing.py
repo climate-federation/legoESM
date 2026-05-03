@@ -29,7 +29,13 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     sh_analysis,
     sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+    uv_from_vordiv_3d,
 )
+from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
+from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+from legoesm.atmosphere.physics._shared import zero_like_tracers
 
 # WeatherBench2 standard pressure levels [hPa]
 WB2_PRESSURE_LEVELS = (
@@ -141,8 +147,6 @@ def unpack_sw_output(
     SpectralSWState
         New state or tendencies in spectral space.
     """
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
-
     vor_grid = output[..., 0]
     div_grid = output[..., 1]
     phi_grid = output[..., 2]
@@ -194,8 +198,6 @@ def pack_pe_state(
     array, shape (n_lat, n_lon, n_channels)
         Packed grid-space fields.
     """
-    from legoesm.grids.gaussian import uv_from_vordiv_3d
-
     # 3D fields: (n_lat, n_lon, nlev)
     T = sh_synthesis_3d(grid, state.T_hat.data)
 
@@ -262,12 +264,6 @@ def unpack_pe_output(
     -------
     SpectralHydrostaticState
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
-    from legoesm.grids.gaussian import (
-        sh_analysis_oc2_3d,
-        sh_analysis_dmu_3d,
-    )
-
     nlev = state.T_hat.data.shape[-1]
     spec = PE3DChannelSpec(nlev=nlev)
 
@@ -317,7 +313,6 @@ def unpack_pe_output(
     #   * if input.tracers is None → output also None (legacy dry path)
     tracers_out = None
     if state.tracers is not None:
-        from legoesm.atmosphere.physics._shared import zero_like_tracers
         tracers_out = zero_like_tracers(state.tracers) or {}
         if "q_v" in state.tracers:
             template = state.tracers["q_v"]
@@ -401,8 +396,6 @@ def pack_ocean_state(
     array, shape (n_lat, n_lon, n_channels)
         Packed grid-space fields: [u(nlev), v(nlev), T(nlev), S(nlev), eta, H_bathy].
     """
-    from legoesm.grids.gaussian import uv_from_vordiv_3d
-
     # 3D fields: (n_lat, n_lon, nlev)
     T = sh_synthesis_3d(grid, state.T_hat.data)
     S = sh_synthesis_3d(grid, state.S_hat.data)
