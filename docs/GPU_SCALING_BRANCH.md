@@ -87,6 +87,9 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Ocean dycore depth-mean H + U_bar/V_bar per face   | 2–3 reductions per face | 1 stacked per face (CD/FC PE, latlon CG model) |
 | FV3 shallow-water mass_target + mass_new          | 2 local sums when target uncached | 1 stacked (3 SW model paths) |
 | MPAS fix_energy KE + PE local sums                 | 2 separate ``jnp.sum`` kernels | 1 stacked-and-split reduction |
+| Cubed-sphere ocean fix_heat / fix_salt / fix_volume 3-term diagnostics | 6 reductions per fixer (3 column + 3 area) | 2 reductions per fixer (1 column + 1 area) |
+| Ocean freshwater ITD ice-mass per-loop reduction   | 2 ``jnp.sum`` per loop pass | 1 stacked-and-reduced ``jnp.sum`` per pass |
+| Bechtold + Tiedtke z_lcl + z_lnb cloud-depth softmax | 2 reductions per scheme | 1 stacked per scheme |
 
 ## SPMD-vs-single-device numerical equivalence
 
