@@ -131,8 +131,11 @@ def tiedtke_convection(
     weight_lnb = jax.nn.softmax(
         -2.0 * (levels[None, :] - k_lnb_smooth[:, None]) ** 2, axis=-1,
     )
-    z_lcl = jnp.sum(weight_lcl * z, axis=-1)
-    z_lnb = jnp.sum(weight_lnb * z, axis=-1)
+    # Both reductions share the level axis with weight ``z`` — fuse.
+    _z_pair = jnp.sum(
+        jnp.stack([weight_lcl, weight_lnb], axis=-1) * z[..., None], axis=-2,
+    )
+    z_lcl, z_lnb = _z_pair[..., 0], _z_pair[..., 1]
     cloud_depth = jnp.maximum(z_lnb - z_lcl, 0.0)
 
     # -- Three-class soft assignment ---------------------------------------
