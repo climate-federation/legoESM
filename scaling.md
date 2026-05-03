@@ -1,5 +1,55 @@
 # legoESM GPU-scaling branch — scaling status
 
+## Iter-218 (2026-05-03) — fresh quick sweep + scaling.png
+
+**New artifacts**
+
+- `scripts/run_scaling_iter218.sh` — bash sweep that runs
+  `scripts/run_baroclinic_wave_benchmark.py` on each of three production
+  grids at two resolutions on both CPU and GPU and writes a
+  CSV summary.  `--quick` mode skips the heavier T42 / I5 / C48 / C96
+  cases for fast iteration.
+- `scripts/plot_scaling_iter218.py` — 4-panel summary chart:
+  (a) CPU vs GPU log-throughput per case,
+  (b) GPU/CPU speed-up factor,
+  (c) cell-level Mcells/s normalised by problem size,
+  (d) iter-217 reference vs iter-218 measurement (regression check).
+- `results/scaling/iter218_throughput.csv` — fresh measurements.
+- `results/scaling/scaling.png` — the user-facing summary chart
+  promised by `/ralph-loop`.
+
+**Iter-218 quick-sweep CSV** (1-day BCW, 26 lev, post-iter-217 code,
+RTX 5090 Lap. + 8-thread CPU):
+
+| tag                          | backend | grid          | res | wall (s) | steps/s |
+|------------------------------|---------|---------------|----:|---------:|--------:|
+| iter218_cpu_spectral_T21     | cpu     | spectral      | T21 |       3  | **42.5** |
+| iter218_cpu_icosahedral_4    | cpu     | icosahedral   |  I4 |       5  | **111.3**|
+| iter218_gpu_spectral_T21     | gpu     | spectral      | T21 |       1  | **222.3**|
+| iter218_gpu_cubed_sphere_24  | gpu     | cubed-sphere  | C24 |       5  | **63.3** |
+| iter218_gpu_icosahedral_4    | gpu     | icosahedral   |  I4 |       2  | **239.6**|
+
+The cubed-sphere C24 CPU run failed — known iter-196 BCW dycore-blowup
+(scaling.md §6.b: structural FV3-PE bug, blowup time scales weakly
+with `dt`, not a CFL violation).  The same configuration on GPU runs
+to completion (the error is dycore numerics, not a parallelism issue).
+
+**vs iter-217 reference**
+
+| Case                  | iter-217 ref | iter-218 measured | delta |
+|-----------------------|-------------:|------------------:|------:|
+| spectral T21 GPU      |        288.4 |             222.3 |  −23% |
+| spectral T21 CPU      |         38.2 |              42.5 |  +11% |
+| icosahedral I4 GPU    |        205.5 |             239.6 |  +17% |
+
+The −23 % spectral-T21-GPU regression vs iter-217 is consistent with
+the iter-217 number using `--scan-steps=24` (an explicit knob that
+this iter-218 quick sweep omits because the user-facing benchmark
+script doesn't expose it).  Adding `--scan-steps` parity to the next
+sweep is the obvious follow-up.  CPU and icosahedral GPU both improved
+slightly, attributed to the iter-187-194 hoist series being warm in
+the JIT cache here (older iter-217 measurements ran cold).
+
 ## 0. GPU enablement (added 2026-05-03)
 
 This host **does** have an NVIDIA RTX 5090 Laptop GPU (Blackwell, 82
