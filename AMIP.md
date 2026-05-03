@@ -216,6 +216,32 @@ radiation equilibrium with prescribed SST=292.6 K — physically expected.
   test after the deck driver change.
 - All 81 AMIP-related unit tests still pass.
 
+### Iter 8 — Extend smoke-test matrix to all 8 (grid, discretization) cases
+
+Updated `scripts/smoke_test_amip_all_grids.py` to cover every
+supported hydrostatic AMIP path: 3 cubed-sphere discretizations
+(centered, finite_volume, cdgrid), 3 latlon (centered, finite_volume,
+latlon_cgrid), spectral on Gaussian, and MPAS on voronoi.
+
+Also widened `run_amip_cmip6_deck.py --discretization` to accept
+`latlon_cgrid` and `cdgrid` so the smoke test can dispatch them.
+
+**Updated validation matrix (1-day analytical AMIP runs)**
+
+| label             | grid_type      | discretization  | result |
+|-------------------|----------------|-----------------|--------|
+| cubed_sphere      | cubed_sphere   | centered        | ✅ |
+| cubed_sphere_fv   | cubed_sphere   | finite_volume   | ✅ |
+| cubed_sphere_cd   | cubed_sphere   | cdgrid          | ✅ |
+| latlon            | latlon         | centered        | ✅ |
+| latlon_fv         | latlon         | finite_volume   | ✅ |
+| latlon_cgrid      | latlon         | latlon_cgrid    | ✅ |
+| gaussian          | gaussian       | spectral        | ✅ |
+| voronoi           | voronoi        | mpas            | ❌ (pre-existing) |
+
+**7/8 cases pass** on this commit.  Only voronoi/MPAS fails (pre-existing
+dycore stability — Known issue #2).
+
 ### Iter 7 — Fix legacy `--discretization cgrid` alias
 
 **Bug:**  `run_amip.py --grid-type latlon --discretization cgrid` raised
