@@ -26,7 +26,13 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.duogrid import ext_vector_dgrid
+from legoesm.grids.halo import (
+    pad_halo,
+    pad_halo_vector,
+    synchronize_bgrid_ne_corner_geo,
+    synchronize_cgrid_fluxes,
+)
 from legoesm.core.operators_cdgrid import (
     _pad_halo_auto,
     cgrid_mass_flux_divergence,
@@ -68,7 +74,6 @@ def _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo: int = 2):
     u_d_ihalo : (6, n + 2*halo, n+1)
     v_d_jhalo : (6, n+1, n + 2*halo)
     """
-    from legoesm.grids.duogrid import ext_vector_dgrid
     n = cdgrid.n
     h = halo
     grid = cdgrid.base
@@ -167,7 +172,6 @@ def _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid):
     vc_ihalo : (6, n+2, n+1) — covariant vc with i-halo of width 1
         (i=-1 prepended, i=n appended) along axis 1.
     """
-    from legoesm.grids.duogrid import ext_vector_dgrid
     n = cdgrid.n
     grid = cdgrid.base
     dg = grid.duogrid
@@ -436,7 +440,6 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt,
     sin_w_left = sg[:, :, :, 2]   # E-edge of cell to the left
     sin_w_right = sg[:, :, :, 0]  # W-edge of cell to the right
     # Pad sin_sg for cross-face upwind selection
-    from legoesm.grids.halo import pad_halo
     grid = cdgrid.base
     offsets = grid.halo_interp_offsets
     se_pad = pad_halo(sin_w_left, interp_offsets=offsets)
@@ -621,7 +624,6 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     3. Covariant→contravariant via cosa_s/rsin2 (FV3 line 3451-3452).
     4. 4th-order A→C interpolation on the full-halo utmp / vtmp.
     """
-    from legoesm.grids.duogrid import ext_vector_dgrid
 
     n = cdgrid.n
     grid = cdgrid.base
@@ -1649,11 +1651,10 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # this for the nord=0 branch (only nord>=1 branch still uses
         # `_divergence_corner_duo` which has its own `mode='edge'`
         # gap flagged as unresolved).
-        from legoesm.grids.halo import pad_halo as _pad_halo
         dg = cdgrid.base.duogrid
         _offs = None if dg is not None else cdgrid.base.halo_interp_offsets
-        ua_full = _pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
-        va_full = _pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
+        ua_full = pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
+        va_full = pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
         # Match the shape of the old jnp.pad call to preserve
         # downstream slicing: ua_pad is (6, n+2, n) — halo along
         # axis 1 only; va_pad is (6, n, n+2) — halo along axis 2.
@@ -1918,7 +1919,6 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
     #   Replaced here by `pad_halo_vector` on cell-centre-averaged
     #   (uc, vc) — cross-face rotation-correct to leading order.
     if use_duogrid and n >= 2:
-        from legoesm.grids.halo import pad_halo_vector as _phv
         # Halo-only fix (iter-836b after Codex adversarial review):
         # compute HALO fx/fy values from cross-face-rotated uc/vc
         # cell-centre averages, but PRESERVE interior fx_circ/fy_circ
@@ -1938,7 +1938,7 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
         # non-orthogonality metrics).  Without these, the default path
         # rotates as if the inputs were grid-aligned — the wrong
         # quantity per Codex WEAKENS finding iter-836b.
-        uc_cc_pad, vc_cc_pad = _phv(
+        uc_cc_pad, vc_cc_pad = pad_halo_vector(
             uc_cc, vc_cc,
             grid.cos_angle, grid.sin_angle,
             grid.cos_angle_padded, grid.sin_angle_padded,
@@ -2079,7 +2079,6 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     # Route through the duogrid kinked-to-extended remap when duogrid is
     # active, matching compute_transport_quantities and the Fortran
     # `bounded_domain` path (sw_core.F90:830-862 skips copy_corners).
-    from legoesm.grids.halo import pad_halo
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
     sg = cdgrid.sin_sg
@@ -2117,7 +2116,6 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 
     # Duogrid flux synchronization (FV3 dyn_core.F90:853-900)
     if use_duogrid:
-        from legoesm.grids.halo import synchronize_cgrid_fluxes
         fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
 
     rarea = 1.0 / cdgrid.base.area
@@ -2230,7 +2228,6 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
     # halo-exchanged cell-centre averaging. The previous edge-copy padding
     # created a linear instability at face corners (blowup at ~2h).
     # Now: C-grid → cell-centre average → vector halo exchange → D-grid.
-    from legoesm.grids.halo import pad_halo_vector
     grid = cdgrid.base
     dg = grid.duogrid
     offsets = None if dg is not None else grid.halo_interp_offsets
@@ -2859,7 +2856,6 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # unchanged either way.  (`dg` and `use_duogrid` are already in
     # scope from the iter-945 PPM-halo gate above.)
     if use_duogrid:
-        from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
         cac = cdgrid.cos_angle_corner
         sac = cdgrid.sin_angle_corner
         ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
