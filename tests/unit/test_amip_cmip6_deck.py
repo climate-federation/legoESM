@@ -290,3 +290,65 @@ class TestDeckConsistency:
         cfg = ExperimentConfig(fix_moisture=True, microphysics="none")
         warnings = cfg.validate()
         assert not any("fix_moisture" in w for w in warnings)
+
+
+class TestOzoneInterannual:
+    """Tests for the ``--ozone-interannual`` generator branch.
+
+    The CMIP6 AMIP protocol uses a 1850–2014 (>12 month) input4MIPs
+    ozone file, which the loader dispatches through the *non-cyclic*
+    branch (``_interp_monthly_noncyclic`` keyed on ``ntime > 12``).
+    The synthetic generator's interannual mode triggers exactly this
+    code path, with a 1979→2014 strengthening Antarctic ozone-hole
+    signal that should be visible at the SH polar lower stratosphere
+    in austral spring.
+    """
+
+    @pytest.fixture(scope="class")
+    def interannual_path(self, tmp_path_factory):
+        out = tmp_path_factory.mktemp("o3ia")
+        gaf.make_ozone_clim(out / "ozone.nc", nlat=18, nlev=20,
+                             start_year=1979, end_year=2014)
+        return out / "ozone.nc"
+
+    def test_loads_through_noncyclic_branch(self, interannual_path):
+        import jax.numpy as jnp
+        from legoesm.forcing.external import OzoneConfig, get_ozone_at_time
+        cfg = OzoneConfig(
+            enabled=True, source="climatology", path=str(interannual_path),
+            start_year=1979,
+        )
+        lat_grid = jnp.array(np.deg2rad(np.linspace(-89.0, 89.0, 16)))
+        p_grid = jnp.array(np.logspace(2, 5, 20))
+        out = get_ozone_at_time(cfg, day=15.0, lat_grid=lat_grid,
+                                p_grid=p_grid)
+        assert out.shape == (16, 20)
+        assert float(np.max(out)) > 1e-7
+
+    def test_ozone_hole_strengthens_over_time(self, interannual_path):
+        """SH polar lower-strat ozone in austral spring should drop
+        between 1979 and 2014 (strengthening hole)."""
+        import jax.numpy as jnp
+        from legoesm.forcing.external import OzoneConfig, get_ozone_at_time
+
+        cfg = OzoneConfig(
+            enabled=True, source="climatology", path=str(interannual_path),
+            start_year=1979,
+        )
+        lat_grid = jnp.array(np.deg2rad(np.linspace(-89.0, 89.0, 18)))
+        # Target a level inside the synthetic hole window (50-200 hPa)
+        p_grid = jnp.array(np.logspace(np.log10(80e2), np.log10(150e2), 6))
+
+        def sh_polar_min(day_int: int) -> float:
+            o3 = get_ozone_at_time(
+                cfg, day=float(day_int), lat_grid=lat_grid, p_grid=p_grid,
+            )
+            return float(np.min(np.asarray(o3)[0:3, :]))  # 3 southernmost lats
+
+        sept_1979 = sh_polar_min(258)        # 1979 Sept
+        sept_2014 = sh_polar_min(13042)      # 2014 Sept
+        assert sept_2014 < sept_1979 * 0.7, (
+            f"Synthetic Antarctic ozone hole should strengthen by 1979→2014; "
+            f"got 1979 Sept SH-polar O3={sept_1979:.2e}, "
+            f"2014 Sept SH-polar O3={sept_2014:.2e}"
+        )

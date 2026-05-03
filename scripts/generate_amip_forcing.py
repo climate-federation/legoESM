@@ -285,21 +285,44 @@ def make_ghg_annual(out_path: Path, start_year: int, end_year: int) -> None:
 # Ozone (monthly climatology with vertical levels)
 # ============================================================================
 
-def make_ozone_clim(out_path: Path, *, nlat: int = 36, nlev: int = 30) -> None:
-    """Monthly zonal-mean ozone climatology on pressure levels.
+def make_ozone_clim(out_path: Path, *, nlat: int = 36, nlev: int = 30,
+                     start_year: int | None = None,
+                     end_year: int | None = None) -> None:
+    """Monthly zonal-mean ozone climatology or time-varying field.
+
+    When ``start_year``/``end_year`` are *not* provided (default), writes
+    a 12-month climatology that is sampled cyclically by the loader
+    (``_interp_monthly_cyclic``).  This is the historical legoESM AMIP
+    setup.
+
+    When ``start_year`` and ``end_year`` are provided, writes an
+    interannually-varying field with ``ntime = (end_year - start_year + 1) * 12``
+    so the loader takes the non-cyclic dispatch
+    (``_interp_monthly_noncyclic`` keyed on ``ntime > 12``) and the
+    Antarctic ozone-hole season strengthens linearly from 1979→2014
+    to mimic the CMIP6 input4MIPs reduced-ozone era.
 
     Schema:
-      - var ``vmro3`` [mol/mol] dims ``(time=12, lat, plev)``
-      - ``time``: mid-month days, ``"days since 0000-01-01"`` (cyclic)
+      - var ``vmro3`` [mol/mol] dims ``(time, lat, plev)``
+      - ``time``: mid-month days; ``"days since 0000-01-01"`` for the
+        12-month clim, ``"days since <start_year>-01-01"`` and CF
+        ``calendar="noleap"`` for the multi-year file (matches
+        ``_extract_first_date`` requirements).
       - ``lat``: degrees_north
-      - ``plev``: Pa, descending (top → surface)
-
-    Profile: log-pressure Gaussian peaking at 30 hPa with maximum
-    8 ppmv, polar enhancement of 1.4, modest seasonal cycle in the
-    polar regions to mimic the Antarctic ozone hole.
+      - ``plev``: Pa, ascending (top of atmosphere → surface).
     """
-    months = np.arange(12)
-    mid_days = np.array([15.5 + 30.4375 * m for m in months])
+    cyclic = start_year is None or end_year is None
+    if cyclic:
+        nyears = 1
+        ntime = 12
+    else:
+        nyears = end_year - start_year + 1
+        ntime = nyears * 12
+    if cyclic:
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+    else:
+        # Multi-year axis with mid-month days since start_year-01-01
+        mid_days = monthly_midpoints_days(start_year, end_year)
     lat = np.linspace(-87.5, 87.5, nlat)
     # Ascending pressure axis (top of atmosphere → surface) so that
     # ``_interp_vertical``'s ``np.searchsorted(log_p_src, ...)`` operates on
@@ -327,21 +350,34 @@ def make_ozone_clim(out_path: Path, *, nlat: int = 36, nlev: int = 30) -> None:
     o3_clim = (o3_max_vmr * profile_p[None, :] * lat_factor[:, None]).astype(np.float64)
 
     # Antarctic ozone hole proxy: 60% reduction at SH polar lower stratosphere
-    # (~50–200 hPa) in austral spring (Sep–Nov, months 8,9,10)
+    # (~50–200 hPa) in austral spring (Sep–Nov, months 8,9,10).  For
+    # multi-year files the reduction strengthens linearly from
+    # 0% in 1979 to 60% in 2014 so the non-cyclic dispatch produces a
+    # visible secular trend.
     plev_hole_mask = (plev_hPa > 50.0) & (plev_hPa < 200.0)
     hole_lat_mask = lat < -55.0
 
-    o3_3d = np.broadcast_to(o3_clim, (12, nlat, nlev)).copy()
-    for m in (8, 9, 10):
-        o3_3d[m][np.ix_(hole_lat_mask, plev_hole_mask)] *= 0.45
+    o3_3d = np.broadcast_to(o3_clim, (ntime, nlat, nlev)).copy()
+    for t in range(ntime):
+        m = t % 12
+        if m in (8, 9, 10):
+            if cyclic:
+                hole_factor = 0.45  # 55% reduction
+            else:
+                year_index = t // 12
+                year_frac = year_index / max(nyears - 1, 1)
+                # ramp from 1.0 (no hole) to 0.4 (60% reduction) over the file span
+                hole_factor = 1.0 - 0.6 * year_frac
+            o3_3d[t][np.ix_(hole_lat_mask, plev_hole_mask)] *= hole_factor
 
     with netCDF4.Dataset(out_path, "w", format="NETCDF4") as ds:
-        ds.createDimension("time", 12)
+        ds.createDimension("time", ntime)
         ds.createDimension("lat", nlat)
         ds.createDimension("plev", nlev)
         t = ds.createVariable("time", "f8", ("time",))
         t[:] = mid_days
-        t.units = "days since 0000-01-01 00:00:00"
+        t.units = ("days since 0000-01-01 00:00:00" if cyclic
+                    else f"days since {start_year}-01-01 00:00:00")
         t.calendar = "noleap"
         la = ds.createVariable("lat", "f8", ("lat",))
         la[:] = lat
@@ -353,8 +389,11 @@ def make_ozone_clim(out_path: Path, *, nlat: int = 36, nlev: int = 30) -> None:
         v = ds.createVariable("vmro3", "f8", ("time", "lat", "plev"))
         v[:] = o3_3d
         v.units = "mol mol-1"
-        v.long_name = "Ozone volume mixing ratio (synthetic monthly clim)"
-        ds.title = "Synthetic AMIP ozone monthly climatology"
+        v.long_name = ("Ozone volume mixing ratio (synthetic monthly clim)"
+                        if cyclic else
+                        "Ozone volume mixing ratio (synthetic interannual)")
+        ds.title = ("Synthetic AMIP ozone monthly climatology" if cyclic
+                     else "Synthetic AMIP ozone interannual time series")
         ds.source = "scripts/generate_amip_forcing.py"
 
     # Column ozone in Dobson Units. DU = molecules/cm² / 2.687e16.
@@ -367,7 +406,7 @@ def make_ozone_clim(out_path: Path, *, nlat: int = 36, nlev: int = 30) -> None:
     dp = np.abs(np.diff(np.concatenate([[0.0], plev])))  # shape (nlev,)
     col_molec_m2 = (o3_3d * dp[None, None, :]).sum(axis=-1) * (N_A / m_air / g)
     col_du = col_molec_m2 / (2.687e16 * 1e4)  # 1e4 cm²/m²
-    print(f"Wrote {out_path} (12 months × {nlat} lat × {nlev} plev); "
+    print(f"Wrote {out_path} ({ntime} months × {nlat} lat × {nlev} plev); "
           f"col O3 ~ {col_du.min():.1f}–{col_du.max():.1f} DU")
 
 
@@ -557,6 +596,10 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["all", "sst", "ghg", "ozone", "solar",
                                  "aerosol", "volcanic"],
                         help="Generate a single component (debug)")
+    parser.add_argument("--ozone-interannual", action="store_true", default=False,
+                        help="Generate the ozone file as interannually-varying "
+                             "(ntime = nyears*12) so the loader uses the "
+                             "non-cyclic dispatch.  Default: 12-month climatology.")
     args = parser.parse_args(argv)
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -568,7 +611,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.component in ("all", "ghg"):
         make_ghg_annual(args.out / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
     if args.component in ("all", "ozone"):
-        make_ozone_clim(args.out / "ozone_amip_clim.nc")
+        if args.ozone_interannual:
+            make_ozone_clim(
+                args.out / f"ozone_amip_{sy}-{ey}.nc",
+                start_year=sy, end_year=ey,
+            )
+        else:
+            make_ozone_clim(args.out / "ozone_amip_clim.nc")
     if args.component in ("all", "solar"):
         make_solar(args.out / f"solar_amip_{sy}-{ey}.nc", sy, ey)
     if args.component in ("all", "aerosol"):
