@@ -40,6 +40,7 @@ from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
 from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
 from legoesm.core.operators_voronoi import tangential_velocity_3d
+from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
 
 
 def _forward_backward_coriolis_mpas_3d(
@@ -253,7 +254,6 @@ class MPASOceanModel:
         # Fill land cells with ocean-neighbor average (Neumann BC) so that
         # subsequent operators see smooth values at coastlines instead of
         # the sharp ocean-to-zero discontinuity that `* mask` would create.
-        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
