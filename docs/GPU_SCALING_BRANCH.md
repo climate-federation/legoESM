@@ -96,6 +96,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | SW MPAS _fix_mass / _fix_energy local sums          | 3 + 4 separate kernels | 1 + 2 stacked reductions |
 | Spectral SW compute_diagnostics mass+energy+enstrophy | 3 area-weighted sums | 1 stacked reduction |
 | Ocean KPP w_sum + column_stability per-step          | 2 column reductions | 1 stacked |
+| Convection ``smooth_lowest_crossing`` total + idx-numerator | 2 column reductions | 1 stacked |
+| CPU multi-thread Eigen XLA-flag setup (Metal + CPU paths) | duplicated in 2 functions | shared helper + ``OMP_NUM_THREADS`` fallback |
 
 ## SPMD-vs-single-device numerical equivalence
 
