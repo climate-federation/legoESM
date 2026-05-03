@@ -216,6 +216,18 @@ radiation equilibrium with prescribed SST=292.6 K — physically expected.
   test after the deck driver change.
 - All 81 AMIP-related unit tests still pass.
 
+### Iter 5 — End-to-end integration test in `tests/integration/`
+
+**New code**
+
+- `tests/integration/test_amip_deck_smoke.py` — pytest module with three
+  parameterised cases (cubed_sphere/centered/C12, latlon/centered/24,
+  gaussian/spectral/T21).  Each case spawns the full chain (deck driver
+  → ``run_amip.py`` → ``ModelDriver`` → validator) and asserts the run
+  passes the post-run validator.  Default-skipped (45 s wall time
+  including JIT) — CI flips ``LEGOESM_RUN_AMIP_INTEGRATION=1`` to
+  enable.  All 3 cases pass on this commit.
+
 ### Known issues / follow-ups
 
 | # | Issue | Status | Workaround |
