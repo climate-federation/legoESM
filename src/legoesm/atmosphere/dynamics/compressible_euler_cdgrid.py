@@ -268,13 +268,15 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
     # passive-trailing-axis pattern; ``_interp_corner_to_center`` is a
     # 4-point average with no halo, so this saves one kernel launch.
+    # Cell-centre shape captured at line 153 — ``_interp_corner_to_center``
+    # outputs cell-centre.  Replaces undefined ``_at`` placeholders.
     _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., 2)
     _duv_d_dt_flat = _duv_d_dt.reshape(
         _duv_d_dt.shape[0], _duv_d_dt.shape[1], _duv_d_dt.shape[2],
-        nlev_at * 2,
+        nlev_uv * 2,
     )
     _duv_dt = _interp_corner_to_center(_duv_d_dt_flat).reshape(
-        n_face_at, n_i_at, n_j_at, nlev_at, 2,
+        n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2,
     )
     du_dt = _duv_dt[..., 0]
     dv_dt = _duv_dt[..., 1]
