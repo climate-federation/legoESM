@@ -151,6 +151,8 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Core operators 3 inline imports                   | ``global_sum_mpi`` (per global allreduce) + ``get_halo_backend`` / ``get_active_config`` (per ``_is_distributed``/``_get_device_config`` call) | 3 module-level imports |
 | Core fv_tp_2d sync_cgrid_fluxes inline            | 1 inline import per ``transport_step`` cgrid-sync branch | folded into existing module-level halo import |
 | Core conservation 9 inline imports                 | 6 per-call inline imports (``get_policy`` / ``supports_float64`` / ``is_x64_enabled`` / ``global_sum_mpi`` / ``batch_allreduce_mpi`` / ``compute_geopotential`` / ``MPASShallowWaterState`` / ``kinetic_energy_cell``) plus 3 redundant ``import constants`` | 8 module-level imports + 3 redundant lines removed |
+| Core precision backend inline imports             | 2 per-call inline imports (``supports_float64`` / ``is_x64_enabled`` in ``validate_policy`` and ``_clamp_to_backend``) | 1 module-level import |
+| Core tracers get_policy inline                    | 1 inline import in ``zero_tracers_dict`` | 1 module-level import |
 
 ## SPMD-vs-single-device numerical equivalence
 
