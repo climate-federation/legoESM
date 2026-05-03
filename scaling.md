@@ -116,7 +116,7 @@ augmentation work) is the only grid that shows a per-device step-time
 improvement on emulated CPU — because the SPMD halo exchange is a
 small, packed sendrecv set rather than a full edge perimeter transfer.
 
-### 3.5 Weak scaling (iter-63)
+### 3.5 Weak scaling (iter-63 → iter-189 fresh re-runs)
 
 #### Cubed-sphere — base N=24
 | n_devices | resolution | cells/dev | ms/step | "Eff" |
@@ -126,13 +126,20 @@ small, packed sendrecv set rather than a full edge perimeter transfer.
 |         3 |       C42  |    28 224 |    9.88 |  28.3% |
 |         6 |       C58  |    26 912 |   14.95 |  17.8% |
 
-#### Icosahedral — base level=4
+#### Icosahedral — base level=4 (iter-189 fresh)
 | n_devices | resolution | cells/dev | ms/step | "Eff" |
 |----------:|-----------:|----------:|--------:|------:|
-|         1 |        I4  |    20 496 |    3.46 | 100.0% |
-|         2 |        I5  |    40 968 |    9.50 |  72.9% |
-|         3 |        I5  |    27 312 |    8.43 |  54.8% |
-|         4 |        I5  |    20 484 |    8.06 |  43.0% |
+|         1 |        I4  |    20 496 |    3.50 | 100.0% |
+|         2 |        I5  |    40 968 |    9.78 |  71.5% |
+|         3 |        I5  |    27 312 |    8.74 |  53.3% |
+|         4 |        I5  |    20 484 |    8.90 |  39.3% |
+
+vs iter-63: 1-dev 3.46 → 3.50 (+1.2%, noise), 4-dev 8.06 → 8.90
+(+10%, but ran in parallel with cs sweep on shared cores so measurement
+is contaminated; the iter-188 strong-scaling re-run on the same code
+showed the opposite direction — the timing scatter on this CPU host is
+~10% per measurement and overlapping multi-process runs degrades
+further).
 
 The same caveat applies — these efficiencies measure XLA emulation
 overhead under shared cores, **not** parallel efficiency on real GPU.
@@ -185,15 +192,17 @@ Three stages so far:
   single packed exchange already present, batched the lap_uv +
   hyperdiff_uv + vert_adv_uv corner interpolations.
 
-### Stage C — Python overhead removal (iters 128–187)
-- 188 inline-import hoists across atmosphere/ocean dycores, physics
+### Stage C — Python overhead removal (iters 128–189)
+- 200+ inline-import hoists across atmosphere/ocean dycores, physics
   parameterisations, conservation fixers, halo helpers, runtime, ML
-  channel-packing, training losses, driver diagnostics — moving lazy
-  function-body imports to module-load time so the JIT-compiled hot
-  loop has zero per-call import-machinery overhead.  Skipped only the
-  underscore-private re-exports (CLAUDE.md rule) and three documented
-  cycles (coupler.surface_exchange thermodynamics path; halo ↔ duogrid;
-  mutable `_halo_backend` / `_spmd_mesh` runtime dispatch globals).
+  channel-packing, training losses, driver diagnostics, FV3 SW core,
+  3D operators, async-halo overlap helpers, and Held-Suarez physics —
+  moving lazy function-body imports to module-load time so the
+  JIT-compiled hot loop has zero per-call import-machinery overhead.
+  Skipped only the underscore-private re-exports (CLAUDE.md rule) and
+  documented cycles (coupler.surface_exchange thermodynamics;
+  halo ↔ duogrid; fv_tp_2d ↔ operators_cdgrid; mutable
+  `_halo_backend` / `_spmd_mesh` runtime-dispatch globals).
 
 ## 5. Outstanding gaps for "near-optimal scaling"
 
