@@ -5,20 +5,21 @@ Redistributes mass injected by the floor clamp over cells with headroom.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
+
+from legoesm.core.operators import _is_distributed
+from legoesm.parallel.reductions import batch_allreduce_mpi, global_sum_mpi
 
 
 def _is_multi_process() -> bool:
-    import jax
     if jax.process_count() > 1:
         return True
-    from legoesm.core.operators import _is_distributed
     return _is_distributed()
 
 
 def _global_sum(x):
     if _is_multi_process():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(x)
     return x
 
@@ -35,7 +36,6 @@ def _global_sum_pair(a: jnp.ndarray, b: jnp.ndarray) -> tuple[jnp.ndarray, jnp.n
     latency, not bandwidth.
     """
     if _is_multi_process():
-        from legoesm.parallel.reductions import batch_allreduce_mpi
         a_g, b_g = batch_allreduce_mpi([a, b], op="sum")
         return a_g, b_g
     return a, b
