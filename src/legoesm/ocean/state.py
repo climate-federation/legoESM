@@ -325,6 +325,8 @@ class LatLonCGridOceanState(NamedTuple):
     w: Field
     T_som: object = None
     S_som: object = None
+    T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
+    S_flux_div_prev: object = None  # Previous advection flux divergence for S (AB2 only)
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -553,3 +555,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean_experiments/density_jacobian_pgf_plan.md.  Pure-z*
     # runs ignore this field (the existing path is identical).
     pgf_scheme: str = "adcroft"
+    # Tracer time integration for the flux-form advection step.
+    # "euler" (default): forward Euler (1st-order).
+    # "ab2": Adams-Bashforth 2 with stabilization (MITgcm convention).
+    #   Formally 1st-order when ab2_epsilon > 0, but error constant is
+    #   ~epsilon * dt, much smaller than Euler's ~dt.  Set ab2_epsilon=0
+    #   for pure 2nd-order (less stable).  CFL limit is ~0.72 (tighter
+    #   than Euler's ~1.0).
+    # "rk3": RK3 in Butcher-tableau form (3rd-order, 3x advection cost).
+    #   Uses effective tendency F_eff = F0/6 + F1/6 + 2*F2/3 for exact
+    #   conservation.  Note: the Shu-Osher SSP (monotonicity) property
+    #   is NOT preserved in this form — new extrema may appear with
+    #   nonlinear limiters (TVD, WENO, FCT).
+    tracer_time_integrator: str = "euler"
+    ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)

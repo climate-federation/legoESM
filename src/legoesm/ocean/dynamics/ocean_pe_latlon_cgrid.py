@@ -328,11 +328,18 @@ def _weno_zeta_at_u(
     v_at_vtx = jnp.concatenate(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
+    # Convert point values to cell averages along the meridional
+    # reconstruction axis before WENO.
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+    v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
+
     # Ghost cells (Neumann BC) along axis 0 for the meridional stencil
     phi_ext = jnp.concatenate(
-        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
+        [phi_avg[:1, :, :]] * hw + [phi_avg] + [phi_avg[-1:, :, :]] * hw, axis=0)
     v_ext = jnp.concatenate(
-        [v_at_vtx[:1, :, :]] * hw + [v_at_vtx] + [v_at_vtx[-1:, :, :]] * hw,
+        [v_at_vtx_avg[:1, :, :]] * hw + [v_at_vtx_avg] + [v_at_vtx_avg[-1:, :, :]] * hw,
         axis=0)
 
     phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
@@ -353,8 +360,9 @@ def _weno_zeta_at_u(
     u_ext_lat = jnp.concatenate([zero_u, u_smooth, zero_u], axis=0)
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
+    u_at_vtx_avg = point_to_cellavg_bounded(u_at_vtx, axis=0, order=conv_order)
     u_ext = jnp.concatenate(
-        [u_at_vtx[:1, :, :]] * hw + [u_at_vtx] + [u_at_vtx[-1:, :, :]] * hw,
+        [u_at_vtx_avg[:1, :, :]] * hw + [u_at_vtx_avg] + [u_at_vtx_avg[-1:, :, :]] * hw,
         axis=0)
     psi_u_stencil = [u_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
@@ -406,12 +414,19 @@ def _weno_zeta_at_v(
         [zero_u, u_smooth, zero_u], axis=0)
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
+    # Convert point values to cell averages along zonal axis (periodic).
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
 
-    phi_stencil = [jnp.roll(phi_core, hw - 1 - j, axis=1)
+    phi_core_avg = point_to_cellavg_periodic(phi_core, axis=1, order=conv_order)
+    u_core_avg = point_to_cellavg_periodic(u_core, axis=1, order=conv_order)
+
+    phi_stencil = [jnp.roll(phi_core_avg, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
-    psi_u_stencil = [jnp.roll(u_core, hw - 1 - j, axis=1)
+    psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
     phi_plus_u, phi_minus_u = weno_reconstruct_split(
@@ -428,7 +443,8 @@ def _weno_zeta_at_v(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)
 
     v_core = v_at_vtx[:, :n_lon, :]
-    psi_v_stencil = [jnp.roll(v_core, hw - 1 - j, axis=1)
+    v_core_avg = point_to_cellavg_periodic(v_core, axis=1, order=conv_order)
+    psi_v_stencil = [jnp.roll(v_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
     phi_plus_v, phi_minus_v = weno_reconstruct_split(
@@ -576,14 +592,20 @@ def _weno_cell_to_uface(
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1]
 
+    # Convert point values to cell averages before WENO reconstruction.
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
+    psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+
     # Periodic stencil along axis 1 (longitude).
     # U-face j is between cell j-1 and cell j.  WENO at the face between
     # cells (j-1) and j needs cells j-hw, ..., j+hw-1.
     # Roll offset for stencil position s: hw - s places cell j-hw+s at
     # position j.
-    phi_stencil = [jnp.roll(phi, hw - s, axis=1)
+    phi_stencil = [jnp.roll(phi_avg, hw - s, axis=1)
                    for s in range(2 * hw)]
-    psi_stencil = [jnp.roll(psi, hw - s, axis=1)
+    psi_stencil = [jnp.roll(psi_avg, hw - s, axis=1)
                    for s in range(2 * hw)]
 
     phi_plus, phi_minus = weno_reconstruct_split(
@@ -627,11 +649,17 @@ def _weno_cell_to_vface(
     nlev = phi.shape[2]
     n_lon = phi.shape[1]
 
+    # Convert point values to cell averages before WENO reconstruction.
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+    psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+
     # Ghost cells (Neumann BC) along axis 0 for meridional stencil.
     phi_ext = jnp.concatenate(
-        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
+        [phi_avg[:1, :, :]] * hw + [phi_avg] + [phi_avg[-1:, :, :]] * hw, axis=0)
     psi_ext = jnp.concatenate(
-        [psi[:1, :, :]] * hw + [psi] + [psi[-1:, :, :]] * hw, axis=0)
+        [psi_avg[:1, :, :]] * hw + [psi_avg] + [psi_avg[-1:, :, :]] * hw, axis=0)
 
     # V-face i (i=1,...,n_lat-1) sits between cell i-1 and cell i.
     # WENO needs cells i-hw, ..., i+hw-1.

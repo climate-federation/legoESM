@@ -56,7 +56,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         C_leith: float | None = None,
                         C_leith_modified: bool | None = None,
                         momentum_advection: str | None = None,
-                        weno_d_term: bool | None = None):
+                        weno_d_term: bool | None = None,
+                        barotropic_solver: str | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -301,6 +302,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["momentum_advection"] = momentum_advection
         if weno_d_term is not None:
             kw["weno_d_term"] = weno_d_term
+        if barotropic_solver is not None:
+            kw["barotropic_solver"] = barotropic_solver
         cfg = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"

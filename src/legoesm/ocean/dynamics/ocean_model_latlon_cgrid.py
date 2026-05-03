@@ -85,6 +85,203 @@ from legoesm.ocean.advection import (
 from legoesm.ocean.conservation import ocean_conservation_fixer
 
 
+# ---------------------------------------------------------------------------
+# Advection flux-divergence helpers (extracted for AB2/RK3 reuse)
+# ---------------------------------------------------------------------------
+
+def _compute_advection_flux_div(
+    tr: jnp.ndarray,
+    tracer_advection: str,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_baro: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    h_u_old: jnp.ndarray,
+    h_v_old: jnp.ndarray,
+    grid,
+    dt: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Compute advection flux divergence for a single tracer field.
+
+    Returns ``(div_hut, vert_flux_div)`` — horizontal and vertical
+    components of the total flux divergence.  Units: [tracer · m/s]
+    (thickness-weighted: ``div(h·u·T_face)``).  The caller combines
+    them into a flux-form tracer update:
+
+        hT_new = h_old * tr - dt * (div_hut + vert_flux_div)
+
+    Notes
+    -----
+    When used with AB2: the extrapolated flux divergence
+    ``(3/2+eps)*F^n - (1/2+eps)*F^{n-1}`` uses thickness-weighted
+    divergences from different time levels.  In variable-thickness
+    (z-star) runs this introduces an O(dt) accuracy degradation
+    because ``F^{n-1}`` was computed with ``h^{n-1}`` mass fluxes
+    but is combined with the current ``h_k_old``.  For constant-
+    thickness convergence tests this is exact.
+
+    When used with AB2 + FCT/PPM_FCT: the individual ``F^n`` and
+    ``F^{n-1}`` are separately monotone (Zalesak-limited), but their
+    AB2 linear combination is NOT guaranteed monotone.  This is a
+    known limitation shared with MITgcm.
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        _upwind_to_u_points,
+        _upwind_to_v_points,
+        _tvd_to_u_points,
+        _tvd_to_v_points,
+    )
+    from legoesm.ocean.vertical import (
+        flux_form_vertical_tracer_advection,
+        flux_form_vertical_tracer_advection_tvd,
+    )
+
+    if tracer_advection == "ppm_fct":
+        from legoesm.ocean.advection import fct_tracer_advection
+        div_hut, vert_flux_div = fct_tracer_advection(
+            tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
+        )
+    elif tracer_advection == "ppm":
+        from legoesm.ocean.advection import (
+            ppm_to_u_points, ppm_to_v_points,
+            flux_form_vertical_tracer_advection_ppm,
+        )
+        tr_u = ppm_to_u_points(tr, mass_flux_u)
+        tr_v = ppm_to_v_points(tr, mass_flux_v)
+        tracer_flux_u = mass_flux_u * tr_u
+        tracer_flux_v = mass_flux_v * tr_v
+        div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
+        vert_flux_div = flux_form_vertical_tracer_advection_ppm(
+            tr, w_baro, h_k_old, dt)
+    elif tracer_advection == "dst3":
+        from legoesm.ocean.advection import (
+            dst3_to_u_points, dst3_to_v_points,
+            flux_form_vertical_tracer_advection_dst3,
+        )
+        tr_u = dst3_to_u_points(tr, mass_flux_u, h_u_old, grid, dt)
+        tr_v = dst3_to_v_points(tr, mass_flux_v, h_v_old, grid, dt)
+        tracer_flux_u = mass_flux_u * tr_u
+        tracer_flux_v = mass_flux_v * tr_v
+        div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
+        vert_flux_div = flux_form_vertical_tracer_advection_dst3(
+            tr, w_baro, h_k_old, dt)
+    elif tracer_advection == "dst3_multidim":
+        from legoesm.ocean.advection import multidim_tracer_advection
+        div_hut, vert_flux_div = multidim_tracer_advection(
+            tr, mass_flux_u, mass_flux_v, w_baro,
+            h_k_old, h_u_old, h_v_old, grid, dt,
+        )
+    elif tracer_advection in ("weno5", "weno7"):
+        from legoesm.ocean.advection import (
+            weno5_to_u_points, weno5_to_v_points,
+            weno7_to_u_points, weno7_to_v_points,
+            flux_form_vertical_tracer_advection_weno5,
+            flux_form_vertical_tracer_advection_weno7,
+        )
+        _u_fn, _v_fn, _vert_fn = {
+            "weno5": (weno5_to_u_points, weno5_to_v_points,
+                      flux_form_vertical_tracer_advection_weno5),
+            "weno7": (weno7_to_u_points, weno7_to_v_points,
+                      flux_form_vertical_tracer_advection_weno7),
+        }[tracer_advection]
+        tr_u = _u_fn(tr, mass_flux_u)
+        tr_v = _v_fn(tr, mass_flux_v)
+        tracer_flux_u = mass_flux_u * tr_u
+        tracer_flux_v = mass_flux_v * tr_v
+        div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
+        vert_flux_div = _vert_fn(tr, w_baro, h_k_old, dt)
+    else:
+        # upwind or tvd
+        if tracer_advection == "tvd":
+            tr_u = _tvd_to_u_points(tr, mass_flux_u)
+            tr_v = _tvd_to_v_points(tr, mass_flux_v)
+        else:
+            tr_u = _upwind_to_u_points(tr, mass_flux_u)
+            tr_v = _upwind_to_v_points(tr, mass_flux_v)
+        tracer_flux_u = mass_flux_u * tr_u
+        tracer_flux_v = mass_flux_v * tr_v
+        div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
+
+        if tracer_advection == "tvd":
+            vert_flux_div = flux_form_vertical_tracer_advection_tvd(
+                tr, w_baro, h_k_old, dt)
+        else:
+            vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
+
+    return div_hut, vert_flux_div
+
+
+def _ssp_rk3_tracer_step(
+    tr: jnp.ndarray,
+    tracer_advection: str,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_baro: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    h_k_new: jnp.ndarray,
+    h_u_old: jnp.ndarray,
+    h_v_old: jnp.ndarray,
+    grid,
+    dt: float,
+    mask_3d: jnp.ndarray,
+) -> jnp.ndarray:
+    """RK3 flux-form tracer advection step (Butcher-tableau form).
+
+    Three-stage Runge-Kutta with the same coefficients as SSP-RK3
+    (Shu-Osher 1988), but applied via the effective tendency
+
+        F_eff = F0/6 + F1/6 + 2*F2/3
+
+    in flux form for **exact conservation**:
+
+        h_new * T_new = h_old * T - dt * F_eff
+
+    Trade-off: the Shu-Osher convex-combination form preserves the
+    strong stability (monotonicity/TVD) property of the forward Euler
+    operator, but does not conserve mass exactly when h changes.
+    This Butcher form conserves mass exactly but does NOT preserve
+    SSP — with nonlinear limiters (TVD, WENO, FCT) new extrema may
+    appear that would not appear under the true Shu-Osher form.
+
+    Intermediate stages use ``h_k_old`` (exact for constant-thickness
+    convergence tests, O(dt) approximation for the full model where
+    thickness changes are from the barotropic step).  The velocity
+    field is frozen across all three stages (correct for the
+    operator-split advection sub-problem where velocity comes from
+    the barotropic solver).
+    """
+
+    def _flux_div(tr_val):
+        dh, dv = _compute_advection_flux_div(
+            tr_val, tracer_advection, mass_flux_u, mass_flux_v, w_baro,
+            h_k_old, h_u_old, h_v_old, grid, dt,
+        )
+        return dh + dv
+
+    h_safe = jnp.maximum(h_k_old, 1e-10)
+
+    # Stage 1
+    fd0 = _flux_div(tr)
+    tr1 = (h_k_old * tr - dt * fd0) / h_safe
+    tr1 = jnp.where(mask_3d > 0.5, tr1, tr)
+
+    # Stage 2
+    fd1 = _flux_div(tr1)
+    tr1_adv = (h_k_old * tr1 - dt * fd1) / h_safe
+    tr1_adv = jnp.where(mask_3d > 0.5, tr1_adv, tr)
+    tr2 = 0.75 * tr + 0.25 * tr1_adv
+
+    # Stage 3 — conservative final update via effective flux
+    fd2 = _flux_div(tr2)
+    F_eff = (1.0 / 6.0) * fd0 + (1.0 / 6.0) * fd1 + (2.0 / 3.0) * fd2
+    hT_new = h_k_old * tr - dt * F_eff
+    tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
+    tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+
+    return tr_new
+
+
 def _forward_backward_coriolis_3d(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -318,6 +515,14 @@ class LatLonCGridOceanModel:
         if pgf_scheme not in _valid_pgf:
             raise ValueError(
                 f"pgf_scheme must be one of {_valid_pgf}, got {pgf_scheme!r}")
+        _valid_time_int = {"euler", "ab2", "rk3"}
+        if config.tracer_time_integrator not in _valid_time_int:
+            raise ValueError(
+                f"tracer_time_integrator must be one of {_valid_time_int}, "
+                f"got {config.tracer_time_integrator!r}")
+        if config.ab2_epsilon < 0.0:
+            raise ValueError(
+                f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
@@ -355,6 +560,21 @@ class LatLonCGridOceanModel:
                 f"(currently {n_sub}).",
                 stacklevel=2,
             )
+
+        # AB2 has a tighter advective CFL limit (~0.72 with eps=0.1)
+        # than forward Euler (~1.0).  Warn if the advective CFL is
+        # close to the AB2 stability boundary.
+        if self.config.tracer_time_integrator == "ab2":
+            # Rough advective CFL estimate using max barotropic velocity
+            adv_cfl = c_baro * dt / dx_min  # upper bound (uses gravity wave speed)
+            if adv_cfl > 0.7:
+                warnings.warn(
+                    f"Advective CFL estimate ~{adv_cfl:.2f} is near the "
+                    f"AB2 stability limit (~0.72 with eps={self.config.ab2_epsilon}). "
+                    f"Consider reducing dt or using tracer_time_integrator='euler'.",
+                    stacklevel=2,
+                )
+
         return cfl
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
@@ -554,6 +774,12 @@ class LatLonCGridOceanModel:
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         _min_uface_op = min_cell_to_uface
         _min_vface_op = min_cell_to_vface
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _interp_to_v_points,
+        )
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            divergence_cgrid, interp_cell_to_uface,
+        )
 
         mask = state.land_mask.data
 
@@ -625,6 +851,9 @@ class LatLonCGridOceanModel:
         # The horizontal flux integrates to zero by the 2D divergence theorem.
         # The vertical flux telescopes to surface/bottom (both zero).
         # Total conservation is exact.
+        from legoesm.ocean.vertical import diagnose_w_from_flux_div
+
+
         h_k_new = compute_layer_thickness(
             state_new.eta.data, state_new.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
@@ -693,94 +922,94 @@ class LatLonCGridOceanModel:
                 S_som=state_new.S_som.replace(data=S_mom_new),
             )
         else:
-          for tr_name in ['T', 'S']:
-            tr = T_mid if tr_name == 'T' else S_mid
+            _adv = self.config.tracer_advection
+            _tti = self.config.tracer_time_integrator
+            _T_flux_div_cur = None
+            _S_flux_div_cur = None
 
-            if self.config.tracer_advection == "ppm_fct":
-                # PPM + FCT: 4th-order PPM accuracy with Zalesak limiter
-                # for guaranteed monotonicity. Stable at any CFL.
-                div_hut, vert_flux_div = fct_tracer_advection(
-                    tr, mass_flux_u, mass_flux_v, w_baro,
-                    h_k_old, self.grid, dt,
+            # AB2: ensure pytree structure is stable for jax.lax.scan.
+            # When the input state has None carry fields, pre-create
+            # zero-filled Fields on state_new so the output pytree
+            # always matches the input (same pattern as SOM moments).
+            if _tti == "ab2" and state.T_flux_div_prev is None:
+                from legoesm.core.field import Field as _Field
+                _dims_fd = ("lat", "lon", "level")
+                _zero_fd = jnp.zeros_like(T_mid)
+                state_new = state_new._replace(
+                    T_flux_div_prev=_Field(
+                        data=_zero_fd, name="T_flux_div_prev",
+                        dims=_dims_fd, units="m/s"),
+                    S_flux_div_prev=_Field(
+                        data=_zero_fd, name="S_flux_div_prev",
+                        dims=_dims_fd, units="m/s"),
                 )
-            elif self.config.tracer_advection == "ppm":
-                # Raw PPM (unstable at low CFL — for testing only)
-                tr_u = ppm_to_u_points(tr, mass_flux_u)
-                tr_v = ppm_to_v_points(tr, mass_flux_v)
-                tracer_flux_u = mass_flux_u * tr_u
-                tracer_flux_v = mass_flux_v * tr_v
-                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
-                vert_flux_div = flux_form_vertical_tracer_advection_ppm(
-                    tr, w_baro, h_k_old, dt)
-            elif self.config.tracer_advection == "dst3":
-                # DST-3 with Sweby limiter, applied independently per
-                # direction. Third-order in space and time, monotone (#210).
-                tr_u = dst3_to_u_points(tr, mass_flux_u, h_u_old, self.grid, dt)
-                tr_v = dst3_to_v_points(tr, mass_flux_v, h_v_old, self.grid, dt)
-                tracer_flux_u = mass_flux_u * tr_u
-                tracer_flux_v = mass_flux_v * tr_v
-                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
-                vert_flux_div = flux_form_vertical_tracer_advection_dst3(
-                    tr, w_baro, h_k_old, dt)
-            elif self.config.tracer_advection == "dst3_multidim":
-                # DST-3 with multi-dimensional transverse correction.
-                # More accurate at diagonal flows but less robust.
-                div_hut, vert_flux_div = multidim_tracer_advection(
-                    tr, mass_flux_u, mass_flux_v, w_baro,
-                    h_k_old, h_u_old, h_v_old, self.grid, dt,
-                )
-            elif self.config.tracer_advection in ("weno5", "weno7"):
-                # WENO-Z high-order reconstruction (Silvestri et al. 2024).
-                # Purely spatial, no CFL dependence. Like PPM but higher
-                # order with ENO oscillation suppression via nonlinear weights.
-                _u_fn, _v_fn, _vert_fn = {
-                    "weno5": (weno5_to_u_points, weno5_to_v_points,
-                              flux_form_vertical_tracer_advection_weno5),
-                    "weno7": (weno7_to_u_points, weno7_to_v_points,
-                              flux_form_vertical_tracer_advection_weno7),
-                }[self.config.tracer_advection]
-                tr_u = _u_fn(tr, mass_flux_u)
-                tr_v = _v_fn(tr, mass_flux_v)
-                tracer_flux_u = mass_flux_u * tr_u
-                tracer_flux_v = mass_flux_v * tr_v
-                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
-                vert_flux_div = _vert_fn(tr, w_baro, h_k_old, dt)
-            else:
-                # Horizontal flux: div(mf_k * T_face)
-                if self.config.tracer_advection == "tvd":
-                    tr_u = _tvd_to_u_points(tr, mass_flux_u)
-                    tr_v = _tvd_to_v_points(tr, mass_flux_v)
-                else:
-                    tr_u = _upwind_to_u_points(tr, mass_flux_u)
-                    tr_v = _upwind_to_v_points(tr, mass_flux_v)
-                tracer_flux_u = mass_flux_u * tr_u
-                tracer_flux_v = mass_flux_v * tr_v
-                div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
 
-                # Flux-form vertical advection:
-                # TVD Van Leer reduces implicit numerical diffusion from
-                # K_num~|w|*dz/2 (upwind) to ~0 in smooth regions (#209).
-                if self.config.tracer_advection == "tvd":
-                    vert_flux_div = flux_form_vertical_tracer_advection_tvd(
-                        tr, w_baro, h_k_old, dt)
-                else:
-                    vert_flux_div = flux_form_vertical_tracer_advection(
-                        tr, w_baro, cell_active=active_3d,
+            for tr_name in ['T', 'S']:
+                tr = T_mid if tr_name == 'T' else S_mid
+
+                if _tti == "rk3":
+                    # RK3: 3 sub-stages, 3x cost, 3rd-order temporal
+                    tr_new = _ssp_rk3_tracer_step(
+                        tr, _adv,
+                        mass_flux_u, mass_flux_v, w_baro,
+                        h_k_old, h_k_new, h_u_old, h_v_old,
+                        self.grid, dt, mask_3d,
                     )
+                else:
+                    # Compute flux divergence (single evaluation for Euler/AB2)
+                    div_hut, vert_flux_div = _compute_advection_flux_div(
+                        tr, _adv,
+                        mass_flux_u, mass_flux_v, w_baro,
+                        h_k_old, h_u_old, h_v_old, self.grid, dt,
+                    )
+                    total_flux_div = div_hut + vert_flux_div
 
-            # Full flux-form tracer update:
-            # h_new * T_new = h_old * T_old - dt * vert_flux_div - dt * div_h(mf*T_face)
-            hT_new = h_k_old * tr - dt * vert_flux_div - dt * div_hut
-            tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
-            # Gate by 3D activity: at inactive cells (below the partial
-            # seafloor) h_k_new = 0 and the 1e-10 floor would amplify
-            # any tiny residual into a huge spurious value.  For pure
-            # z\\* active_3d collapses to the 2D mask_3d broadcast.
-            tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
-            if tr_name == 'T':
-                T_corrected = tr_new
-            else:
-                S_corrected = tr_new
+                    if _tti == "ab2":
+                        # Adams-Bashforth 2: extrapolate flux divergence
+                        # F^{n+1/2} = (3/2+eps)*F^n - (1/2+eps)*F^{n-1}
+                        eps = self.config.ab2_epsilon
+                        prev_field = (state.T_flux_div_prev
+                                      if tr_name == 'T'
+                                      else state.S_flux_div_prev)
+                        if prev_field is not None:
+                            fd_prev = prev_field.data
+                            effective_fd = ((1.5 + eps) * total_flux_div
+                                            - (0.5 + eps) * fd_prev)
+                        else:
+                            # First step: fall back to Euler
+                            effective_fd = total_flux_div
+                        hT_new = h_k_old * tr - dt * effective_fd
+                    else:
+                        # Forward Euler (default)
+                        hT_new = h_k_old * tr - dt * total_flux_div
+
+                    tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
+                    tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+
+                    # Store current flux divergence for AB2 carry
+                    if _tti == "ab2":
+                        if tr_name == 'T':
+                            _T_flux_div_cur = total_flux_div
+                        else:
+                            _S_flux_div_cur = total_flux_div
+
+                if tr_name == 'T':
+                    T_corrected = tr_new
+                else:
+                    S_corrected = tr_new
+
+            # Persist AB2 previous flux divergence on state
+            if _tti == "ab2":
+                from legoesm.core.field import Field as _Field
+                _dims_fd = ("lat", "lon", "level")
+                state_new = state_new._replace(
+                    T_flux_div_prev=_Field(
+                        data=_T_flux_div_cur, name="T_flux_div_prev",
+                        dims=_dims_fd, units="m/s"),
+                    S_flux_div_prev=_Field(
+                        data=_S_flux_div_cur, name="S_flux_div_prev",
+                        dims=_dims_fd, units="m/s"),
+                )
 
         # Include vertical velocity diagnostic in state
         # w_baro has shape (..., nlev+1) on half levels, interpolate to full levels (..., nlev)
@@ -996,7 +1225,35 @@ class LatLonCGridOceanModel:
         Returns
         -------
         final_state, trajectory (stacked)
+
+        Notes
+        -----
+        For AB2: the initial carry must have Field (not None) for
+        ``T_flux_div_prev`` / ``S_flux_div_prev`` so the pytree
+        structure is stable across scan iterations.  If they are None,
+        this method pre-initializes them with zero-filled Fields.
+        The first step then uses AB2 with zero previous tendency,
+        giving an effective coefficient of (3/2+eps) ≈ 1.6 rather
+        than the Euler fallback of 1.0.  At typical CFL values
+        (≤ 0.3) this is stable.
         """
+        # Pre-initialize AB2 carry fields so the pytree structure
+        # is stable across scan iterations (None → Field transition
+        # would crash jax.lax.scan).
+        if (self.config.tracer_time_integrator == "ab2"
+                and state.T_flux_div_prev is None):
+            from legoesm.core.field import Field
+            _dims_fd = ("lat", "lon", "level")
+            _zero = jnp.zeros_like(state.T.data)
+            state = state._replace(
+                T_flux_div_prev=Field(
+                    data=_zero, name="T_flux_div_prev",
+                    dims=_dims_fd, units="m/s"),
+                S_flux_div_prev=Field(
+                    data=_zero, name="S_flux_div_prev",
+                    dims=_dims_fd, units="m/s"),
+            )
+
         def scan_fn(state, _):
             new_state = self.step(state, dt)
             return new_state, new_state
