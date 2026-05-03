@@ -111,18 +111,21 @@ def _batch_global_area_sums(
     """
     acc = _accumulation_dtype()
     area_acc = grid.area.astype(acc)
-    mask = None
+    weight = area_acc
     if owned_mask is not None:
         mask = owned_mask.astype(acc)
         while mask.ndim < area_acc.ndim:
             mask = mask[..., None]
+        weight = area_acc * mask
 
-    local_sums = []
-    for arr in arrays:
-        prod = arr.astype(acc) * area_acc
-        if mask is not None:
-            prod = prod * mask
-        local_sums.append(jnp.sum(prod))
+    # All inputs share the same horizontal axes and weight ``weight``;
+    # stack them along a new trailing axis and reduce once locally so
+    # XLA fuses the N independent sum kernels into one.
+    stacked = jnp.stack([arr.astype(acc) for arr in arrays], axis=-1)
+    summed = jnp.sum(
+        stacked * weight[..., None], axis=tuple(range(area_acc.ndim)),
+    )
+    local_sums = [summed[..., i] for i in range(len(arrays))]
 
     if _is_distributed():
         from legoesm.parallel.reductions import batch_allreduce_mpi
