@@ -157,6 +157,7 @@ cluster per `docs/REAL_HARDWARE_SCALING.md`.
 | Training losses sh_analysis_3d                    | 1 inline import in ``carry_spectral_loss`` (per loss eval) | 1 module-level import |
 | Driver diagnostics 5 inline imports               | ``MoistureBudgetTracker`` / ``MonthlyAccumulator`` (×2) / ``blend_surface_temperature`` per call + 2 redundant ``day_to_calendar`` / ``CMIP6_PLEV19`` reimports | 3 module-level imports + 2 redundant lines removed |
 | Driver compiled_segments Field inline             | 1 inline import in ``_rebuild_state`` (per segment) | 1 module-level import |
+| Parallel halo_exchange mpi_timer inline           | 2 inline imports (``pad_halo_mpi``, ``pad_halo_mpi_4d`` — per MPI exchange) | 1 module-level import |
 
 ## SPMD-vs-single-device numerical equivalence
 
