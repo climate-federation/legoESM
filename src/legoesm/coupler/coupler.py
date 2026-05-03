@@ -16,7 +16,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
 from legoesm.core.field import Field
@@ -184,7 +184,6 @@ def ocean_tile_response(
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -227,9 +226,8 @@ def ocean_tile_response(
     # expression as the loop-11 ``two_layer_lake.py`` fix — avoids the
     # full ``surface_radiation_fluxes`` call which recomputes
     # ``sw_net`` and the LW balance only to discard them.
-    from legoesm import constants as _constants
     lw_up = (
-        config.ocean_emissivity * _constants.sigma_sb * ocean_sst ** 4
+        config.ocean_emissivity * constants.sigma_sb * ocean_sst ** 4
         + (1.0 - config.ocean_emissivity) * forcing.lw_down
     )
 
