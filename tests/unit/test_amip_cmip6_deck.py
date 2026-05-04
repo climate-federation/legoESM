@@ -574,15 +574,88 @@ class TestOzoneUnitDetection:
         )
 
 
-class TestSpectralPathWarning:
-    """Regression test for the gaussian/spectral + rrtmg silent-drop
-    warning (P2 codex iter-3 review).
+class TestGHGOutOfRangeWarning:
+    """Regression test for the GHG anchor-table out-of-range warning
+    (P2 own audit, iter 4).
 
-    ``ModelDriver._run_spectral`` hard-codes gray radiation and constant
-    solar.  When a user requests ``--radiation rrtmg`` with
-    ``--grid-type gaussian --discretization spectral``, the deck driver
-    should warn loudly that the external GHG/ozone/aerosol/volcanic
-    forcings are loaded but never consumed by the radiation kernel.
+    For an AMIP run starting after 2021 (last anchor in
+    ``_GHG_HISTORICAL``), ``ghg_at_year("amip", year)`` silently
+    returns the 2021 endpoint — a flat-tail extrapolation.  At year
+    2025 the real-world CO2 is ~424 ppm but the table returns
+    414.72 — a ~2% silent bias.  The warning informs the user that
+    they need an external GHG file or a table extension.
+    """
+
+    def test_year_in_range_does_not_warn(self, caplog):
+        from legoesm.forcing.experiments import (
+            ghg_at_year, _GHG_OUT_OF_RANGE_WARNED,
+        )
+        _GHG_OUT_OF_RANGE_WARNED.clear()
+        import logging
+        with caplog.at_level(logging.WARNING,
+                              logger="legoesm.forcing.experiments"):
+            ghg_at_year("amip", 2014.0)
+        assert all("ghg_table" not in r.message for r in caplog.records)
+
+    def test_year_out_of_range_warns_once(self, caplog):
+        from legoesm.forcing.experiments import (
+            ghg_at_year, _GHG_OUT_OF_RANGE_WARNED,
+        )
+        _GHG_OUT_OF_RANGE_WARNED.clear()
+        import logging
+        with caplog.at_level(logging.WARNING,
+                              logger="legoesm.forcing.experiments"):
+            ghg_at_year("amip", 2025.0)
+            ghg_at_year("amip", 2025.5)  # same int year — no second warning
+        warnings = [r for r in caplog.records
+                    if "ghg_table" in r.message]
+        assert len(warnings) == 1, (
+            f"Expected one warning for 2025.0/2025.5; got "
+            f"{[w.message for w in warnings]}"
+        )
+        assert "amip" in warnings[0].message
+        assert "[1850, 2021]" in warnings[0].message
+
+    def test_different_years_warn_separately(self, caplog):
+        from legoesm.forcing.experiments import (
+            ghg_at_year, _GHG_OUT_OF_RANGE_WARNED,
+        )
+        _GHG_OUT_OF_RANGE_WARNED.clear()
+        import logging
+        with caplog.at_level(logging.WARNING,
+                              logger="legoesm.forcing.experiments"):
+            ghg_at_year("amip", 2025.0)
+            ghg_at_year("amip", 2030.0)
+        warnings = [r for r in caplog.records
+                    if "ghg_table" in r.message]
+        assert len(warnings) == 2
+
+    def test_amip_clamps_at_last_anchor(self):
+        """Verify the bias the warning is alerting users to: years past
+        2021 silently clamp to the 2021 CO2 value."""
+        from legoesm.forcing.experiments import ghg_at_year
+        co2_2021, _, _ = ghg_at_year("amip", 2021.0)
+        co2_2025, _, _ = ghg_at_year("amip", 2025.0)
+        co2_2050, _, _ = ghg_at_year("amip", 2050.0)
+        # Flat tail beyond 2021.
+        assert co2_2025 == co2_2021
+        assert co2_2050 == co2_2021
+
+
+class TestSpectralPathWarning:
+    """Regression tests for the silent-drop warning for grid paths that
+    bypass the external CMIP6 forcing pipeline (P2 codex iter-3 + iter-4).
+
+    Two paths are affected:
+    * ``ModelDriver._run_spectral`` (gaussian/spectral) hard-codes
+      gray radiation and constant solar.
+    * ``ModelDriver._run_mpas`` (voronoi/mpas) builds physics without
+      calling ``_precompute_external_forcing``; the external configs
+      never reach the radiation kernel.
+
+    When a user requests ``--radiation rrtmg`` on either path, the
+    deck driver must warn loudly that the external GHG/ozone/aerosol/
+    volcanic forcings are loaded but never consumed.
     """
 
     def test_warning_fires_on_gaussian_spectral_rrtmg(self, tmp_path):
@@ -681,6 +754,55 @@ class TestSpectralPathWarning:
                           if label in ln), None)
             assert line is not None
             assert "ACTIVE" in line, f"Got: {line!r}"
+
+    def test_warning_fires_on_voronoi_mpas_rrtmg(self, tmp_path):
+        """voronoi/mpas + rrtmg also bypasses external forcings;
+        the deck driver must warn just like for gaussian/spectral."""
+        import subprocess
+
+        sy, ey = 1979, 1980
+        gaf.make_sst_sic(tmp_path / f"sst_sic_amip_{sy}-{ey}.nc",
+                          sy, ey, nlat=37, nlon=72)
+        gaf.make_ghg_annual(tmp_path / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_ozone_clim(tmp_path / "ozone_amip_clim.nc",
+                             nlat=18, nlev=20)
+        gaf.make_solar(tmp_path / f"solar_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_aerosol_clim(tmp_path / "aerosol_amip_clim.nc",
+                                nlat=36)
+        gaf.make_volcanic(tmp_path / f"volcanic_amip_{sy}-{ey}.nc",
+                           sy, ey, nlat=18)
+
+        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
+        cmd = [
+            sys.executable, str(deck_script),
+            "--forcing-dir", str(tmp_path),
+            "--start-year", str(sy), "--end-year", str(ey),
+            "--grid-type", "voronoi", "--discretization", "mpas",
+            "--radiation", "rrtmg", "--resolution", "4",
+            "--days", "1", "--dry-run",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        assert r.returncode == 0, f"dry-run failed:\n{r.stderr}"
+        out = r.stdout
+        assert "WARNING" in out and ("voronoi" in out.lower()
+                                       or "mpas" in out.lower()), (
+            f"Deck driver should warn that voronoi/mpas + rrtmg "
+            f"silently drops external forcings; got stdout:\n{out}"
+        )
+        report_labels = (
+            "Greenhouse gases",
+            "Ozone (cyclic clim",
+            "Tropospheric aerosol",
+            "Volcanic stratospheric",
+        )
+        for label in report_labels:
+            line = next((ln for ln in out.splitlines()
+                          if label in ln), None)
+            assert line is not None
+            assert "inert" in line.lower(), (
+                f"Forcing line {line!r} should be 'inert' under "
+                f"voronoi/mpas + rrtmg, not 'ACTIVE'."
+            )
 
 
 class TestVolcanicNonCyclic:

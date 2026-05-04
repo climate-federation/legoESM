@@ -280,13 +280,21 @@ def main(argv: list[str] | None = None) -> int:
     # configured but inert under ``--radiation gray``.  Surface SST/SIC
     # and solar TSI affect both gray and RRTMG paths.
     #
-    # Special case: ``--grid-type gaussian --discretization spectral``
-    # routes through ``ModelDriver._run_spectral``, which hard-codes
-    # gray radiation and never consumes the external GHG/ozone/
-    # aerosol/volcanic configs even when the user requested rrtmg.
+    # Two grid paths bypass the external-forcing pipeline entirely
+    # even when the user has requested rrtmg/rrtmgp:
+    #
+    # * gaussian/spectral routes through ``ModelDriver._run_spectral``,
+    #   which hard-codes gray radiation + constant solar.
+    # * voronoi/mpas routes through ``ModelDriver._run_mpas``, which
+    #   builds the physics via ``make_physics(model_type="mpas", ...)``
+    #   without calling ``_precompute_external_forcing`` and without
+    #   passing ``SegmentForcing`` — the external o3/aerosol/ghg/solar
+    #   configs are *set up* by ``_configure_external_forcing`` but
+    #   never reach the radiation kernel on this grid.
+    #
     # Without an explicit warning here the deck-driver activity report
     # would say "ACTIVE" while the run silently ignores those forcings
-    # — exactly the silent-bias case the iter-3 codex review flagged.
+    # — the silent-bias case the iter-3/4 codex reviews flagged.
     print("[deck] Command:")
     print("  " + " \\\n    ".join(cmd))
     print("[deck] Forcing-channel activity for this run:")
@@ -294,31 +302,45 @@ def main(argv: list[str] | None = None) -> int:
     rad_active = rad in ("rrtmg", "rrtmgp")
     spectral_path = (args.grid_type == "gaussian"
                      and args.discretization == "spectral")
-    forcing_silently_dropped = rad_active and spectral_path
+    mpas_path = (args.grid_type == "voronoi"
+                 and args.discretization == "mpas")
+    bypassed_path = spectral_path or mpas_path
+    forcing_silently_dropped = rad_active and bypassed_path
     if forcing_silently_dropped:
+        path_name = ("gaussian/spectral" if spectral_path
+                     else "voronoi/mpas")
         print(
-            "[deck] WARNING: gaussian/spectral routes through "
-            "ModelDriver._run_spectral, which hard-codes gray "
-            "radiation and constant solar.  External GHG/ozone/"
-            "aerosol/volcanic forcings are LOADED but NOT consumed "
-            "by the radiation kernel on this grid.  Use cubed_sphere/"
-            "latlon for production CMIP6 AMIP runs, or run with "
-            "--radiation gray on gaussian/spectral so the activity "
-            "report below matches what the model actually does."
+            f"[deck] WARNING: {path_name} routes through a code path "
+            "that does NOT consume external CMIP6 forcings even when "
+            "--radiation rrtmg is selected.  GHG / ozone / aerosol / "
+            "volcanic configs are LOADED but the radiation kernel on "
+            "this grid uses an internal default profile.  Use "
+            "cubed_sphere/latlon for production CMIP6 AMIP runs, or "
+            "run with --radiation gray here so the activity report "
+            "below matches what the model actually does."
         )
     # Effective active state: a forcing is only ACTIVE if both
     # rrtmg/rrtmgp is selected AND the grid path actually consumes it.
-    effective_active = rad_active and not spectral_path
+    effective_active = rad_active and not bypassed_path
 
     def _flag(b: bool) -> str:
         if b:
             return "ACTIVE"
         if rad_active and spectral_path:
             return "inert (spectral path uses gray radiation)"
+        if rad_active and mpas_path:
+            return "inert (MPAS path bypasses external forcing)"
         return "inert (gray radiation)"
 
+    if spectral_path:
+        solar_label = "inert (spectral path uses constant S_0)"
+    elif mpas_path:
+        solar_label = "inert (MPAS path uses constant S_0)"
+    else:
+        solar_label = "ACTIVE"
+
     print(f"  SST/SIC                              ACTIVE        (radiation-independent)")
-    print(f"  Solar TSI + 14-band spectral         {('ACTIVE' if not spectral_path else 'inert (spectral path uses constant S_0)'):<35}")
+    print(f"  Solar TSI + 14-band spectral         {solar_label:<35}")
     print(f"  Greenhouse gases (transient annual)  {_flag(effective_active)}")
     print(f"  Ozone (cyclic clim or interannual)   {_flag(effective_active)}")
     if not args.no_aerosol:

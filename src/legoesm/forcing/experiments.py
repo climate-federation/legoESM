@@ -21,11 +21,19 @@ Public API
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import numpy as np
 
 from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+logger = logging.getLogger(__name__)
+
+# Set of (table_name, year) pairs that have already triggered the
+# out-of-range GHG warning in this process.  Without de-duplication a
+# 365-step AMIP run would log the same warning 365 times.
+_GHG_OUT_OF_RANGE_WARNED: set[tuple[str, int]] = set()
 
 
 # ======================================================================
@@ -128,8 +136,19 @@ _GHG_TABLES: dict[str, dict[int, tuple[float, float, float]]] = {
 def _interp_ghg_table(
     table: dict[int, tuple[float, float, float]],
     year: float,
+    table_name: str = "ghg",
 ) -> tuple[float, float, float]:
     """Linearly interpolate a GHG table, clamped at endpoints.
+
+    A one-shot warning is emitted when ``year`` falls more than 0.5
+    years outside the table's anchor range (e.g. ``ghg_at_year("amip",
+    2026)`` when the historical table stops at 2021).  ``np.interp``
+    silently clamps in this case, so the silent extrapolation /
+    constant-tail behaviour is otherwise invisible to the user — this
+    is exactly the kind of forcing bias the iter-3/4 codex review
+    flagged as a high-leverage failure mode for production CMIP6 AMIP
+    runs that extend past 2021 (or past 2014 for the strict CMIP6
+    protocol).
 
     Parameters
     ----------
@@ -137,6 +156,9 @@ def _interp_ghg_table(
         Sparse year-to-concentration mapping.
     year : float
         Target year (may be fractional).
+    table_name : str, optional
+        Used in the out-of-range warning so users can identify which
+        scenario / experiment is producing the clamped value.
 
     Returns
     -------
@@ -147,6 +169,25 @@ def _interp_ghg_table(
     ch4_vals = np.array([table[y][1] for y in years])
     n2o_vals = np.array([table[y][2] for y in years])
     years_arr = np.array(years, dtype=np.float64)
+
+    # One-shot out-of-range warning: triggered once per (table,
+    # integer-year) bin so a multi-year run doesn't flood the log.
+    # Truncate (``int(...)``) rather than round-half-to-even so that
+    # 2025.0 and 2025.5 share the same warning slot.
+    y_min, y_max = float(years_arr[0]), float(years_arr[-1])
+    if year < y_min - 0.5 or year > y_max + 0.5:
+        key = (table_name, int(year))
+        if key not in _GHG_OUT_OF_RANGE_WARNED:
+            _GHG_OUT_OF_RANGE_WARNED.add(key)
+            logger.warning(
+                f"[ghg_table] year={year:.2f} is outside the {table_name!r} "
+                f"GHG anchor range [{y_min:.0f}, {y_max:.0f}] — "
+                f"np.interp will clamp to the endpoint value, producing "
+                f"a flat tail in CO2/CH4/N2O.  For accurate forcing "
+                f"past {y_max:.0f}, supply an external GHG file via "
+                f"--ghg-forcing external --ghg-file <path> or extend "
+                f"the anchor table in src/legoesm/forcing/experiments.py."
+            )
 
     co2 = float(np.interp(year, years_arr, co2_vals))
     ch4 = float(np.interp(year, years_arr, ch4_vals))
@@ -195,7 +236,10 @@ def ghg_at_year(
 
     # Experiments with a dedicated GHG table.
     if experiment_name in _GHG_TABLES:
-        return _interp_ghg_table(_GHG_TABLES[experiment_name], year)
+        return _interp_ghg_table(
+            _GHG_TABLES[experiment_name], year,
+            table_name=experiment_name,
+        )
 
     # 1pctCO2: 1 % per year compound increase from pre-industrial CO2.
     if experiment_name == "1pctCO2":
