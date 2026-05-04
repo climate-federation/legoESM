@@ -16,6 +16,13 @@ The test is **skipped** in the default fast unit-test sweep (it takes
 environment variable so CI can flip it on for nightly runs without
 slowing the per-PR loop.
 
+The test is self-contained: it generates the forcing deck under
+``tmp_path / "forcing"`` and points the driver at it via
+``--forcing-dir`` and ``--auto-generate``.  This makes the test work
+on a clean checkout where ``forcing_amip/`` (gitignored) does not
+exist, and avoids contaminating any pre-existing forcing dataset on
+the developer's machine.
+
 To run::
 
     LEGOESM_RUN_AMIP_INTEGRATION=1 \\
@@ -25,7 +32,6 @@ To run::
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -43,13 +49,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_deck(out_dir: Path, *, grid_type: str = "cubed_sphere",
+def _run_deck(out_dir: Path, *, forcing_dir: Path,
+              grid_type: str = "cubed_sphere",
               discretization: str = "centered",
               resolution: int = 12,
               extra: list[str] | None = None,
               timeout: int = 240) -> subprocess.CompletedProcess:
+    """Drive ``run_amip_cmip6_deck.py`` with a self-contained
+    auto-generated forcing deck under ``forcing_dir``."""
     cmd = [
         sys.executable, str(_DECK_DRIVER),
+        "--forcing-dir", str(forcing_dir),
+        "--auto-generate",
         "--grid-type", grid_type,
         "--discretization", discretization,
         "--resolution", str(resolution),
@@ -73,8 +84,9 @@ def _validate(out_dir: Path) -> subprocess.CompletedProcess:
 
 
 def test_deck_runs_and_validates_cubed_sphere(tmp_path):
+    forcing = tmp_path / "forcing"
     out = tmp_path / "amip_run"
-    r = _run_deck(out)
+    r = _run_deck(out, forcing_dir=forcing)
     assert r.returncode == 0, (
         f"deck driver failed (exit={r.returncode}):\n"
         f"--- stdout (tail) ---\n{r.stdout[-2000:]}\n"
@@ -92,8 +104,10 @@ def test_deck_runs_and_validates_cubed_sphere(tmp_path):
 
 
 def test_deck_runs_and_validates_latlon(tmp_path):
+    forcing = tmp_path / "forcing"
     out = tmp_path / "amip_run"
-    r = _run_deck(out, grid_type="latlon", discretization="centered",
+    r = _run_deck(out, forcing_dir=forcing,
+                   grid_type="latlon", discretization="centered",
                    resolution=24)
     assert r.returncode == 0, (
         f"deck driver failed (exit={r.returncode}):\n"
@@ -104,8 +118,10 @@ def test_deck_runs_and_validates_latlon(tmp_path):
 
 
 def test_deck_runs_and_validates_gaussian_spectral(tmp_path):
+    forcing = tmp_path / "forcing"
     out = tmp_path / "amip_run"
-    r = _run_deck(out, grid_type="gaussian", discretization="spectral",
+    r = _run_deck(out, forcing_dir=forcing,
+                   grid_type="gaussian", discretization="spectral",
                    resolution=21)
     assert r.returncode == 0, (
         f"deck driver failed (exit={r.returncode}):\n"
@@ -120,9 +136,11 @@ def test_deck_runs_and_validates_voronoi_mpas(tmp_path):
     (Known issue #2 — hidden stability constraint).  Disable
     turbulence (no edge→cell wind interpolation in the TKE bridge)
     and pass --dt 60 explicitly."""
+    forcing = tmp_path / "forcing"
     out = tmp_path / "amip_run"
     r = _run_deck(
-        out, grid_type="voronoi", discretization="mpas", resolution=4,
+        out, forcing_dir=forcing,
+        grid_type="voronoi", discretization="mpas", resolution=4,
         extra=["--turbulence", "none", "--dt", "60"],
         timeout=480,
     )
@@ -137,8 +155,10 @@ def test_deck_runs_and_validates_voronoi_mpas(tmp_path):
 def test_deck_runs_and_validates_latlon_cgrid(tmp_path):
     """Lat-lon C-grid uses ``--discretization latlon_cgrid`` after
     the iter-7 cgrid alias fix."""
+    forcing = tmp_path / "forcing"
     out = tmp_path / "amip_run"
-    r = _run_deck(out, grid_type="latlon", discretization="latlon_cgrid",
+    r = _run_deck(out, forcing_dir=forcing,
+                   grid_type="latlon", discretization="latlon_cgrid",
                    resolution=24)
     assert r.returncode == 0, (
         f"deck driver failed (exit={r.returncode}):\n"

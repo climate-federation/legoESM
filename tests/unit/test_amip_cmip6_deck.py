@@ -352,3 +352,203 @@ class TestOzoneInterannual:
             f"got 1979 Sept SH-polar O3={sept_1979:.2e}, "
             f"2014 Sept SH-polar O3={sept_2014:.2e}"
         )
+
+
+class TestDeckChecker:
+    """Regression tests for ``run_amip_cmip6_deck.py:_check_forcing_files``.
+
+    The deck checker must:
+    1. Reject decks missing one or more of the 6 canonical files.
+    2. Accept the **interannual** ozone filename
+       ``ozone_amip_<sy>-<ey>.nc`` produced by
+       ``generate_amip_forcing.py --ozone-interannual``.
+    3. **Prefer** the interannual ozone file when both interannual and
+       climatology files coexist (it is what real CMIP6 input4MIPs
+       ozone is, and exercises the loader's non-cyclic dispatch).
+    """
+
+    def _make_deck(self, out: Path, *, with_interannual_o3: bool,
+                    with_clim_o3: bool, sy: int = 1979, ey: int = 1980) -> None:
+        """Generate a deck with one of (interannual ozone, clim ozone, both)
+        plus all the other forcing files."""
+        out.mkdir(parents=True, exist_ok=True)
+        gaf.make_sst_sic(out / f"sst_sic_amip_{sy}-{ey}.nc", sy, ey,
+                          nlat=37, nlon=72)
+        gaf.make_ghg_annual(out / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
+        if with_interannual_o3:
+            gaf.make_ozone_clim(out / f"ozone_amip_{sy}-{ey}.nc",
+                                 nlat=18, nlev=20, start_year=sy, end_year=ey)
+        if with_clim_o3:
+            gaf.make_ozone_clim(out / "ozone_amip_clim.nc", nlat=18, nlev=20)
+        gaf.make_solar(out / f"solar_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_aerosol_clim(out / "aerosol_amip_clim.nc", nlat=36)
+        gaf.make_volcanic(out / f"volcanic_amip_{sy}-{ey}.nc", sy, ey,
+                           nlat=18)
+
+    def test_missing_files_reported(self, tmp_path):
+        from run_amip_cmip6_deck import _check_forcing_files
+        files = _check_forcing_files(tmp_path, 1979, 1980)
+        assert "_missing" in files
+        # All six channels should be reported missing
+        missing = files["_missing"].split(",")
+        assert set(missing) == {"sst", "ghg", "ozone", "solar",
+                                  "aerosol", "volcanic"}
+
+    def test_interannual_ozone_accepted(self, tmp_path):
+        """Interannual ozone file alone is sufficient; clim is optional."""
+        from run_amip_cmip6_deck import _check_forcing_files
+        self._make_deck(tmp_path, with_interannual_o3=True,
+                        with_clim_o3=False)
+        files = _check_forcing_files(tmp_path, 1979, 1980)
+        assert "_missing" not in files, (
+            f"Interannual-only deck should be complete, got missing: "
+            f"{files.get('_missing')}"
+        )
+        assert files["ozone"].name == "ozone_amip_1979-1980.nc"
+
+    def test_climatology_ozone_accepted(self, tmp_path):
+        """Climatology ozone file alone is sufficient (legacy default)."""
+        from run_amip_cmip6_deck import _check_forcing_files
+        self._make_deck(tmp_path, with_interannual_o3=False,
+                        with_clim_o3=True)
+        files = _check_forcing_files(tmp_path, 1979, 1980)
+        assert "_missing" not in files
+        assert files["ozone"].name == "ozone_amip_clim.nc"
+
+    def test_interannual_preferred_over_clim(self, tmp_path):
+        """When both files exist, the interannual one wins (it's what
+        real CMIP6 ozone is and exercises the non-cyclic loader)."""
+        from run_amip_cmip6_deck import _check_forcing_files
+        self._make_deck(tmp_path, with_interannual_o3=True,
+                        with_clim_o3=True)
+        files = _check_forcing_files(tmp_path, 1979, 1980)
+        assert "_missing" not in files
+        assert files["ozone"].name == "ozone_amip_1979-1980.nc", (
+            "When both interannual and climatology ozone files are "
+            "present, the deck checker must prefer the interannual file."
+        )
+
+
+class TestValidator:
+    """Regression tests for ``scripts/validate_amip_run.py``.
+
+    Two specific failure modes the loose validator can exhibit:
+    1. ``Status: BLOWUP`` line in ``results.txt`` should be **fatal**
+       in all modes (including non-strict).  Otherwise a clamped /
+       NaN-then-finite model can sneak past validation when its
+       last-step diagnostics happen to fall inside the bounds.
+    2. The TOA energy-residual tolerance must scale on **simulated
+       days**, not on ``ts['days'].size``.  With a 5-day diagnostic
+       cadence, a 365-day production run only writes 73 samples and
+       would otherwise stay in the cold-start band forever, masking a
+       divergent radiative imbalance.
+    """
+
+    def _write_run(
+        self, run_dir: Path, *, status: str, residual_max: float,
+        sim_days: float, n_samples: int,
+    ) -> None:
+        """Write a minimal ``timeseries.npz`` + ``results.txt`` for the
+        validator."""
+        run_dir.mkdir(parents=True, exist_ok=True)
+        days = np.linspace(0.0, sim_days, n_samples)
+        residuals = np.linspace(0.0, residual_max, n_samples)
+        np.savez(
+            run_dir / "timeseries.npz",
+            days=days,
+            sst=np.full(n_samples, 293.0),
+            sic=np.zeros(n_samples),
+            T_atm=np.full(n_samples, 295.0),
+            T_low=np.full(n_samples, 295.0),
+            max_wind=np.full(n_samples, 20.0),
+            precip=np.full(n_samples, 3.0),
+            CWV=np.full(n_samples, 50.0),
+            sw_up_toa=np.full(n_samples, 100.0),
+            lw_up_toa=np.full(n_samples, 240.0),
+            sw_net_sfc=np.full(n_samples, 180.0),
+            lw_net_sfc=np.full(n_samples, -60.0),
+            dry_mass_ps=np.full(n_samples, 1.0e5),
+            sigma=np.linspace(0.05, 0.95, 30),
+            profiles_T=np.array([]),
+            profiles_qv=np.array([]),
+            energy_toa_net=np.full(n_samples, 0.0),
+            energy_column=np.full(n_samples, 1e7),
+            energy_dE_dt=np.zeros(n_samples),
+            energy_residual=residuals,
+            moisture_column_water=np.full(n_samples, 50.0),
+            moisture_precip_rate=np.full(n_samples, 3.0),
+            moisture_residual=np.full(n_samples, 0.5),
+        )
+        (run_dir / "results.txt").write_text(f"Status: {status}\n")
+
+    def test_blowup_status_fatal_even_without_strict(self, tmp_path):
+        """A ``Status: BLOWUP`` run with otherwise OK scalars must
+        return non-zero from validate() with ``strict=False``."""
+        sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+        from validate_amip_run import validate
+
+        run = tmp_path / "blowup_run"
+        # Diagnostics inside bounds, but status says BLOWUP.
+        self._write_run(run, status="BLOWUP", residual_max=10.0,
+                        sim_days=1.0, n_samples=3)
+        rc = validate(run, strict=False)
+        assert rc == 1, (
+            "validate() with strict=False must FAIL when results.txt has "
+            "Status: BLOWUP, even when diagnostics are inside bounds."
+        )
+
+    def test_failed_status_fatal_even_without_strict(self, tmp_path):
+        sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+        from validate_amip_run import validate
+
+        run = tmp_path / "failed_run"
+        self._write_run(run, status="FAILED", residual_max=10.0,
+                        sim_days=1.0, n_samples=3)
+        rc = validate(run, strict=False)
+        assert rc == 1
+
+    def test_completed_status_passes(self, tmp_path):
+        sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+        from validate_amip_run import validate
+
+        run = tmp_path / "ok_run"
+        self._write_run(run, status="COMPLETED", residual_max=10.0,
+                        sim_days=1.0, n_samples=3)
+        rc = validate(run, strict=False)
+        assert rc == 0
+
+    def test_long_run_uses_production_residual_bound(self, tmp_path):
+        """A 400-day run with a residual just over 50 W/m² should fail
+        the production tolerance even though n_samples=80 is small.
+
+        Before the fix, this would slip through the spin-up bound
+        (200 W/m²) because it was keyed on ``n = days.size`` instead of
+        elapsed simulated days.
+        """
+        sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+        from validate_amip_run import validate
+
+        run = tmp_path / "long_run"
+        # 400 simulated days, 5-day diagnostic cadence → 80 samples.
+        # Residual just above the production threshold (50 W/m²) but
+        # well under the spin-up threshold (200 W/m²).
+        self._write_run(run, status="COMPLETED", residual_max=80.0,
+                        sim_days=400.0, n_samples=80)
+        rc = validate(run, strict=False)
+        assert rc == 1, (
+            "A 400-day run with |residual| max=80 W/m² must fail the "
+            "production bound (50 W/m²); the previous sample-count "
+            "gate would have falsely passed it."
+        )
+
+    def test_short_run_keeps_cold_start_bound(self, tmp_path):
+        """A 1-day cold-start run with residual=400 W/m² must still
+        pass — the cold-start tolerance is 500 W/m²."""
+        sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+        from validate_amip_run import validate
+
+        run = tmp_path / "short_run"
+        self._write_run(run, status="COMPLETED", residual_max=400.0,
+                        sim_days=1.0, n_samples=3)
+        rc = validate(run, strict=False)
+        assert rc == 0

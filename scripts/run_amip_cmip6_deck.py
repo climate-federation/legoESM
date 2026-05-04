@@ -58,11 +58,30 @@ from legoesm import constants  # noqa: E402
 
 def _check_forcing_files(forcing_dir: Path, start_year: int,
                          end_year: int) -> dict[str, Path]:
-    """Verify the canonical 6-file deck exists in ``forcing_dir``."""
+    """Verify the canonical 6-file deck exists in ``forcing_dir``.
+
+    Ozone resolution (``ozone_amip_<sy>-<ey>.nc`` interannual *vs.*
+    ``ozone_amip_clim.nc`` 12-month climatology): if both are present
+    we prefer the **interannual** file because that's what real
+    input4MIPs CMIP6 ozone is — the loader's non-cyclic dispatch
+    (`_interp_monthly_noncyclic`, keyed on ``ntime > 12``) is the right
+    code path to exercise for production AMIP.  The climatology is the
+    fallback when the user has only generated the cyclic file.
+    """
+    interannual_o3 = forcing_dir / f"ozone_amip_{start_year}-{end_year}.nc"
+    clim_o3 = forcing_dir / "ozone_amip_clim.nc"
+    if interannual_o3.exists():
+        ozone_path = interannual_o3
+    elif clim_o3.exists():
+        ozone_path = clim_o3
+    else:
+        # Default to climatology name so the missing-file message
+        # mentions the file users see most often.
+        ozone_path = clim_o3
     files = {
         "sst": forcing_dir / f"sst_sic_amip_{start_year}-{end_year}.nc",
         "ghg": forcing_dir / f"ghg_amip_{start_year}-{end_year}.nc",
-        "ozone": forcing_dir / "ozone_amip_clim.nc",
+        "ozone": ozone_path,
         "solar": forcing_dir / f"solar_amip_{start_year}-{end_year}.nc",
         "aerosol": forcing_dir / "aerosol_amip_clim.nc",
         "volcanic": forcing_dir / f"volcanic_amip_{start_year}-{end_year}.nc",

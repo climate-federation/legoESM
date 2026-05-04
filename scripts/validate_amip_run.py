@@ -62,16 +62,24 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
 
     print(f"=== Validating AMIP run: {run_dir} ===")
 
-    # Run status from results.txt
+    # Run status from results.txt — BLOWUP / FAIL is a fatal model-side
+    # failure: even when the saved diagnostics happen to fall inside the
+    # numeric bounds, a NaN-then-clamp model can leak a passing
+    # validation result.  Treat the explicit status string as fatal in
+    # all modes; ``--strict`` is reserved for warning-level diagnostics
+    # (precip/moisture residual).
+    status_failed = False
     if res_path.exists():
         text = res_path.read_text()
         for line in text.splitlines():
             if line.startswith("Status:"):
                 print(f"  Run status line: {line.strip()}")
                 if "BLOWUP" in line or "FAIL" in line:
-                    print("  FAIL: model blew up")
-                    if strict:
-                        return 1
+                    print("  FAIL: model status indicates blow-up / failure")
+                    status_failed = True
+                    break
+    if status_failed:
+        return 1
 
     ts = np.load(ts_path)
     days = ts["days"]
@@ -118,21 +126,28 @@ def validate(run_dir: Path, *, strict: bool = False) -> int:
                   lambda x: 0.0 <= x <= 200.0, fatal=True):
         failures.append("max_wind")
 
-    # TOA energy balance — use a generous bound during spinup (n < 100 d)
-    # because the column is far from radiative equilibrium.  At 100+ days
-    # the residual should approach the production tolerance.
+    # TOA energy balance — gate the tolerance on **simulated days**
+    # (final entry of ``ts['days']``), NOT on ``n = days.size``.  The
+    # diagnostic cadence is set by ``--diag-days`` (default 5), so a
+    # 365-d production run only writes ~73 samples; tying the bound to
+    # ``n`` keeps a year-long run inside the cold-start band and would
+    # mask a divergent imbalance.  The right gate is elapsed simulated
+    # time, which is what the radiative-equilibrium argument cares about.
     if "energy_residual" in ts:
         res = ts["energy_residual"]
         rmax = float(np.nanmax(np.abs(res))) if res.size else 0.0
-        # Tighten the bound as the spin-up progresses:
-        if n < 30:
+        sim_days = float(days[-1]) if days.size > 0 else 0.0
+        # Tighten the bound as the simulation progresses (in days, not
+        # samples):
+        if sim_days < 30.0:
             bound, warn_thr = 500.0, 200.0   # cold start
-        elif n < 365:
+        elif sim_days < 365.0:
             bound, warn_thr = 200.0, 50.0    # spin-up
         else:
             bound, warn_thr = 50.0, 5.0      # production
         if not _check(
-            f"|TOA energy residual| max [W/m²] (n={n}d, bound={bound})",
+            f"|TOA energy residual| max [W/m²] "
+            f"(sim_days={sim_days:.1f}, bound={bound})",
             rmax, lambda x: x < bound, fatal=True, skip_if_nan=True,
         ):
             failures.append("toa_residual")
