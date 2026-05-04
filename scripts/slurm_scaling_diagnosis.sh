@@ -94,8 +94,12 @@ module load cuda/12.3.2
 # Activate venv
 source .venv/bin/activate
 
-# JAX configuration
-export JAX_PLATFORMS="gpu,cpu"
+# JAX configuration.  Iter 25: ``gpu,cpu`` is the legacy alias and is
+# rejected by JAX 0.10+ (``Backend 'rocm' is not in the list of
+# known backends: ['cpu', 'tpu', 'cuda']``).  Use ``cuda,cpu`` on
+# Levante's NVIDIA partition; ROCm sites should override via
+# ``--export=JAX_PLATFORMS=rocm,cpu`` on the sbatch command line.
+export JAX_PLATFORMS="cuda,cpu"
 export XLA_PYTHON_CLIENT_PREALLOCATE="false"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="0.90"
 export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true"
