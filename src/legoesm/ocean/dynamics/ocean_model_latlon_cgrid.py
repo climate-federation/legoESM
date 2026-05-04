@@ -424,9 +424,49 @@ class LatLonCGridOceanModel:
         F_slow_u = jnp.sum(du_dt * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
         F_slow_v = jnp.sum(dv_dt * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
 
-        # Perturbation tendency (depth-mean removed) → applied to 3D
+        # Perturbation tendency (depth-mean removed) → applied to 3D.
+        # MUST be computed from the *baroclinic-only* F_slow (before A2 is
+        # added below) so that the depth-mean biharmonic damping acts only
+        # on U_bar, not on the perturbation u' = u - U_bar.
         du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
         dv_dt_pert = dv_dt - F_slow_v[..., jnp.newaxis]
+
+        # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
+        # Damps the barotropic standing mode at deep cells next to steep
+        # slopes (Rhines 1969 bottom-trapped wave with f≈0) without
+        # touching the baroclinic perturbation u' (already finalized
+        # above as du_dt_pert / dv_dt_pert).  Applied as an additional
+        # slow forcing on the implicit-CN barotropic solver:
+        #   ∂U_bar/∂t |_diss = -ν₄ · ∇⁴ U_bar.
+        # MOM6/HIM BIHARMONIC_BAROTROPIC analog.  No-op at default
+        # ``B_h_barotropic = 0`` (bit-exact backward compat).
+        if getattr(self.config, "B_h_barotropic", 0.0) > 0.0:
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                vector_bilaplacian_cgrid, biharmonic_scaling_factor,
+            )
+            U_bar = jnp.sum(state.u.data * h_u_pre, axis=-1) / H_u_pre
+            V_bar = jnp.sum(state.v.data * h_v_pre, axis=-1) / H_v_pre
+            U_bar = U_bar * state.u_mask.data
+            V_bar = V_bar * state.v_mask.data
+            bilap_U, bilap_V = vector_bilaplacian_cgrid(
+                U_bar, V_bar, self.grid,
+                mask=state.land_mask.data,
+                u_mask=state.u_mask.data,
+                v_mask=state.v_mask.data,
+            )
+            # cos^4(lat) scaling: lat-lon grid spacing shrinks as
+            # cos(lat) near the poles, so a constant ν₄ would violate
+            # biharmonic CFL there.  Same convention as the layered B_h.
+            scale_u, scale_v = biharmonic_scaling_factor(self.grid)
+            nu4 = jnp.asarray(
+                self.config.B_h_barotropic, dtype=F_slow_u.dtype,
+            )
+            scale_u_b = scale_u.astype(F_slow_u.dtype)[:, None]
+            scale_v_b = scale_v.astype(F_slow_v.dtype)[:, None]
+            F_slow_u = F_slow_u - nu4 * scale_u_b * bilap_U.astype(F_slow_u.dtype)
+            F_slow_v = F_slow_v - nu4 * scale_v_b * bilap_V.astype(F_slow_v.dtype)
+            F_slow_u = F_slow_u * state.u_mask.data
+            F_slow_v = F_slow_v * state.v_mask.data
 
         u_star = state.u.data + dt * du_dt_pert
         v_star = state.v.data + dt * dv_dt_pert

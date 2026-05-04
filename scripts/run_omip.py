@@ -342,6 +342,15 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 A_h=2.0e5, A_h_lat_scaling=True,
                 K_h=1e3, A_v=A_v, K_v=K_v,
                 B_h=5.0e9,
+                # A2: biharmonic hyperviscosity on the DEPTH-MEAN
+                # (U_bar, V_bar) only.  Surgically damps the barotropic
+                # standing mode at deep cells next to steep slopes
+                # (Rhines 1969 bottom-trapped wave with f≈0) without
+                # touching baroclinic geostrophy.  HIM/MOM6
+                # BIHARMONIC_BAROTROPIC analog at 1° global resolution.
+                # Scaled per Griffies-Hallberg 2000: ν₄ ≈ Δx³·U/8.
+                # At 1° (Δx≈111 km, U≈1 m/s) that's 1.7e14 m⁴/s.
+                B_h_barotropic=1.0e14,
                 bottom_drag_r=2.5e-3,
                 bottom_drag_bbl_thickness=100.0,
                 # MOM6 OM4 DRAG_BG_VEL — quadratic-with-floor drag.

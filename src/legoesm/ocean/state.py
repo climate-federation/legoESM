@@ -480,6 +480,16 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # convention.  Default False to preserve
                                     # bit-exact regression on legacy configs.
     B_h: float = 0.0
+    B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
+                                   # applied to the DEPTH-MEAN (U_bar,
+                                   # V_bar) only, via the F_slow channel
+                                   # of the implicit-CN barotropic
+                                   # solver.  Damps the barotropic
+                                   # standing mode at deep cells next
+                                   # to steep slopes without touching
+                                   # baroclinic geostrophy (which lives
+                                   # in u' = u_3d - U_bar).  HIM/MOM6
+                                   # BIHARMONIC_BAROTROPIC analog.
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
