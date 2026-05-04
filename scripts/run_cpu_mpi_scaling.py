@@ -2,15 +2,20 @@
 """CPU MPI scaling benchmark for AMIP-like runs.
 
 Measures wall-clock time per step and SYPD across varying MPI rank counts
-and resolutions for four grid types and three physics levels.
+and resolutions for the supported grid+physics combinations.
 
-Supported grids (MPI-scalable):
-  cubed-sphere  -- C-D grid + FV3 PE dycore
-  latlon        -- Lat-lon FV PE dycore
+MPI-scalable grid (multi-rank weak/strong scaling):
   icosahedral   -- MPAS Voronoi TRiSK PE dycore
 
-Single-rank baseline:
-  spectral      -- Gaussian + spectral PE dycore (no MPI)
+Single-rank only (these grids are listed but their MPI paths are not
+domain-decomposed at the dycore level — see iter 13/14 honest-sweep
+guards):
+  cubed-sphere  -- C-D grid + FV3 PE dycore (replicated dynamics
+                   under MPI; iter 3 added scattered halo support but
+                   driver-side state scatter is not yet implemented)
+  latlon        -- Lat-lon FV PE dycore (``make_latlon_mpi_step``
+                   raises NotImplementedError, see #115)
+  spectral      -- Gaussian + spectral PE dycore (no MPI path at all)
 
 Physics levels:
   held_suarez   -- Newtonian relaxation (cheapest, no I/O)
@@ -22,20 +27,20 @@ Use --sweep to generate all cases for a SLURM array job.
 
 Usage
 -----
-Single case::
+Multi-rank MPI scaling (icosahedral only)::
 
-    mpirun -np 4 python scripts/run_cpu_mpi_scaling.py \\
-        --grid latlon --resolution 64 --physics held_suarez
+    mpirun -np 8 python scripts/run_cpu_mpi_scaling.py \\
+        --grid icosahedral --mode strong --physics held_suarez
+
+Single-rank case (any grid)::
+
+    python scripts/run_cpu_mpi_scaling.py \\
+        --grid cubed-sphere --resolution 48 --physics held_suarez
 
 Sweep mode (generate case list, no execution)::
 
     python scripts/run_cpu_mpi_scaling.py --sweep \\
         --grid icosahedral --mode strong --physics held_suarez
-
-From JSON case spec::
-
-    mpirun -np 6 python scripts/run_cpu_mpi_scaling.py \\
-        --case '{"grid":"cubed-sphere","resolution":48,...}'
 """
 
 from __future__ import annotations
