@@ -855,11 +855,36 @@ def main() -> int:
         else:
             resolution = 42
 
-    # Spectral only supports 1 rank
+    # Non-domain-decomposed grids only support 1 rank in this driver.
     if grid_type == "spectral" and n_ranks > 1:
         if is_rank0:
             print("ERROR: Spectral grid does not support MPI. Use 1 rank.")
         return 1
+    # Iter 14 follow-up: defensive runtime guard for cubed-sphere MPI.
+    # The iter 13 ``_valid_rank_counts`` guard prevents the sweep from
+    # *generating* multi-rank cases, but a user could still pass an
+    # explicit ``--case`` with ``n_ranks>1`` or invoke the script under
+    # ``mpirun -np N`` with ``--mode single``.  Refuse the
+    # configuration up-front instead of silently capturing replicated-
+    # dynamics numbers.
+    if grid_type == "cubed-sphere" and n_ranks > 1:
+        if is_rank0:
+            print(
+                "ERROR: cubed-sphere MPI is currently replicated-"
+                "dynamics-only (every rank holds full state).  Use 1 "
+                "rank or --grid icosahedral for genuine MPI scaling.",
+                flush=True,
+            )
+        return 2
+    if grid_type == "latlon" and n_ranks > 1:
+        if is_rank0:
+            print(
+                "ERROR: lat-lon MPI step is not implemented "
+                "(``make_latlon_mpi_step`` raises NotImplementedError, "
+                "see #115).  Use 1 rank.",
+                flush=True,
+            )
+        return 2
 
     if is_rank0:
         print("=" * 72)
