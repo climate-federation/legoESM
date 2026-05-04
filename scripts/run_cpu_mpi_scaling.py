@@ -219,18 +219,17 @@ def _valid_rank_counts(max_ranks: int, grid_type: str) -> list[int]:
         # immediately error out and pollute the sweep summary.  See #115.
         return [1]
     if grid_type == "cubed-sphere":
-        valid = []
-        for n in [1, 2, 3, 6]:
-            if n <= max_ranks:
-                valid.append(n)
-        k = 2
-        while True:
-            n = 6 * k * k
-            if n > max_ranks:
-                break
-            valid.append(n)
-            k += 1
-        return sorted(set(valid))
+        # Iter 13 honest-sweep guard: cubed-sphere MPI is not yet
+        # domain-decomposed — every rank holds the full (6, n, n, ...)
+        # state and runs the full dycore.  Multi-rank wall-clock
+        # measurements are *not* real weak/strong scaling, just
+        # rank-replicated computation plus halo overhead.  Until the
+        # halo-side scattered indexing (iter 3) is plumbed through
+        # ``model_driver.py`` and the scaling drivers actually scatter
+        # per-rank state, restrict cubed-sphere MPI sweeps to rank 1
+        # so the summary numbers reflect genuine single-rank
+        # throughput rather than replicated-dynamics noise.
+        return [1]
     # latlon and icosahedral: powers of 2 up to max
     counts = []
     n = 1

@@ -172,12 +172,17 @@ _SUPPORTED_PHYSICS = {
 }
 
 # MPI distributed benchmark support.  Only finite-volume grids with
-# validated local-domain operators are listed here:
-# cubed-sphere (via distributed.py) and icosahedral/Voronoi (via
-# voronoi_mpi.py).  Lat-lon MPI is intentionally excluded — its
-# C-grid operators have not been ported to latitude sub-domains
+# validated local-domain operators are listed here.  Iter 13 honest-
+# sweep update: cubed-sphere MPI is excluded because the dycore still
+# keeps full (6, n, n, ...) state on every rank — multi-rank
+# wall-clock measurements would not be true weak/strong scaling but
+# replicated-dynamics noise.  Halo-side scattered face indexing
+# landed in iter 3 (``halo_exchange.py``); the remaining piece is
+# scattering state in ``model_driver.py`` and the scaling driver.
+# Lat-lon MPI is also intentionally excluded — its C-grid operators
+# have not been ported to latitude sub-domains
 # (``make_latlon_mpi_step`` raises NotImplementedError, see #115).
-_MPI_SUPPORTED_GRIDS = {"cubed-sphere", "icosahedral"}
+_MPI_SUPPORTED_GRIDS = {"icosahedral"}
 
 
 @dataclass
@@ -1887,6 +1892,23 @@ def main() -> int:
     # Under MPI, the GPU count is fixed (= world_size * GPUs/rank).
     # Disable sweep by pinning to the actual count.
     fixed = max_gpus if world_size > 1 else None
+
+    # Iter 13 honest-sweep guard: cubed-sphere MPI is not yet
+    # domain-decomposed at the dycore/driver level (state is replicated
+    # per rank).  Refuse to run a multi-rank cubed-sphere sweep so
+    # users do not capture replicated-dynamics numbers as scaling.
+    if world_size > 1 and grid_type == "cubed-sphere":
+        if is_rank0:
+            print(
+                "ERROR: cubed-sphere MPI multi-rank scaling is currently "
+                "replicated-dynamics-only (every rank holds full "
+                "(6, n, n, ...) state).  Halo support is in place "
+                "(iter 3) but driver scatter is not.  Use icosahedral "
+                "MPI (``--grid icosahedral``) for genuine multi-rank "
+                "scaling, or run cubed-sphere with a single MPI rank.",
+                flush=True,
+            )
+        raise SystemExit(2)
 
     all_results: list[TimingResult] = []
 
