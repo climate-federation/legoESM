@@ -19,7 +19,51 @@ atmosphere-only run with:
 | Aerosol (tropospheric) | MPI-M Kinne dataset `aeropt_kinne_{sw_b14,lw_b16}_*_rast.nc` — monthly, lat × lon × lev |
 | Volcanic stratospheric | `bc_aeropt_cmip6_volc_lw_b16_sw_b14_<year>.nc` — per-band per-altitude |
 
-## Final summary (after 14 iterations)
+## Iter 15–20 — adversarial-review hardening
+
+Five rounds of codex adversarial review (iter 15-20) drove a hardening
+pass focused on silent-bias forcing failure modes that the iter-1-to-14
+work did not catch.  Thirteen P2 issues were addressed across the five
+iterations; full details in the iteration log below.  Highlights:
+
+- **Silent-bias forcing fixes** (iter 16, 17, 18, 20):
+  - Ozone unit detection: ``tro3 [kg kg-1]`` files now convert to
+    vmr via ``M_dry / M_o3``; ``vmro3 [mol mol-1]`` passes through
+    unchanged (was a silent ~40% SW bias).
+  - Volcanic non-cyclic dispatch: multi-year volcanic files (e.g.
+    1979–2014 Pinatubo / El Chichón) now sample at calendar months
+    instead of being collapsed onto a 12-month cycle.
+  - Solar band → g-point expansion preserves per-band integrals
+    (was a silent rescaling proportional to g-points-per-band).
+  - Calendar-aware sim epoch: NoLeap/360-day file anchors no longer
+    trigger Gregorian leap-day arithmetic (was ~30 day shift).
+  - GHG out-of-range warning: years past 2021 emit a one-shot
+    warning so users know they are getting flat-tail extrapolation.
+
+- **Driver/deck integrity** (iter 17, 18, 19):
+  - Deck driver warns LOUDLY when ``gaussian/spectral`` or
+    ``voronoi/mpas`` is combined with ``--radiation rrtmg``, since
+    those run paths bypass the external forcing pipeline.
+  - ``--no-aerosol`` now correctly implies no-volcanic (driver gates
+    volcanic on ``aerosol_forcing == external``); deck checker
+    skips disabled channels from the missing-file check.
+  - Lightweight diagnostics now write ``timeseries.npz +
+    results.txt`` for runs shorter than the diagnostic cadence, and
+    correctly convert ``SpectralHydrostaticState`` to grid-space
+    before computing summary statistics.
+
+- **Validation harness** (iter 15):
+  - ``Status: BLOWUP / FAILED`` is fatal in non-strict mode (was
+    only fatal under ``--strict``, allowing clamped runs to pass).
+  - TOA energy-residual bound is keyed on simulated days, not
+    sample count (was permissive for long runs with sparse cadence).
+  - Integration test self-contained (auto-generates forcing under
+    ``tmp_path``); same for the multi-grid smoke test.
+
+- **Test coverage**: 102 AMIP-related unit tests pass (was 73 at
+  iter 14).  29 new regression tests cover every iter-15-to-20 fix.
+
+## Final summary (after 20 iterations)
 
 ### What works
 
