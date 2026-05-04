@@ -574,6 +574,117 @@ class TestOzoneUnitDetection:
         )
 
 
+class TestNoAerosolNoVolcanicFlags:
+    """Regression tests for the iter-4 codex review's three deck-driver
+    fixes around disabled aerosol/volcanic channels:
+
+    1. ``_check_forcing_files`` skips aerosol/volcanic from the
+       missing-file check when ``require_aerosol``/``require_volcanic``
+       is False.  This lets users run ``--no-aerosol --no-volcanic``
+       on a partial deck without spurious "missing files" errors.
+    2. ``--no-aerosol`` (without ``--no-volcanic``) implies the
+       volcanic channel is also disabled — ``ModelDriver`` gates
+       volcanic on ``aerosol_forcing == "external"``, so passing
+       ``--volcanic-aerosol-file`` without ``--aerosol-forcing
+       external`` is silently ignored.  The deck driver now prints a
+       NOTE at startup and does not pass the volcanic flag.
+    3. The activity report now uses the same ``aerosol_active`` /
+       ``volcanic_active`` state, so the report cannot lie when the
+       channels are disabled by either flag.
+    """
+
+    def _make_partial_deck(self, out: Path, *, sy: int = 1979,
+                            ey: int = 1980,
+                            include_aerosol: bool = False,
+                            include_volcanic: bool = False) -> None:
+        out.mkdir(parents=True, exist_ok=True)
+        gaf.make_sst_sic(out / f"sst_sic_amip_{sy}-{ey}.nc",
+                          sy, ey, nlat=37, nlon=72)
+        gaf.make_ghg_annual(out / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_ozone_clim(out / "ozone_amip_clim.nc", nlat=18, nlev=20)
+        gaf.make_solar(out / f"solar_amip_{sy}-{ey}.nc", sy, ey)
+        if include_aerosol:
+            gaf.make_aerosol_clim(out / "aerosol_amip_clim.nc", nlat=36)
+        if include_volcanic:
+            gaf.make_volcanic(out / f"volcanic_amip_{sy}-{ey}.nc",
+                               sy, ey, nlat=18)
+
+    def test_check_files_skips_aerosol_when_disabled(self, tmp_path):
+        from run_amip_cmip6_deck import _check_forcing_files
+        self._make_partial_deck(tmp_path,
+                                 include_aerosol=False,
+                                 include_volcanic=False)
+        # With aerosol/volcanic NOT required, the partial deck must
+        # be considered complete.
+        files = _check_forcing_files(
+            tmp_path, 1979, 1980,
+            require_aerosol=False, require_volcanic=False,
+        )
+        assert "_missing" not in files, (
+            f"Partial deck should be complete with aerosol/volcanic "
+            f"disabled, got missing: {files.get('_missing')}"
+        )
+        # Default require=True still reports missing.
+        files_required = _check_forcing_files(tmp_path, 1979, 1980)
+        assert "_missing" in files_required
+        assert "aerosol" in files_required["_missing"]
+        assert "volcanic" in files_required["_missing"]
+
+    def test_check_files_skips_volcanic_only(self, tmp_path):
+        from run_amip_cmip6_deck import _check_forcing_files
+        self._make_partial_deck(tmp_path,
+                                 include_aerosol=True,
+                                 include_volcanic=False)
+        files = _check_forcing_files(
+            tmp_path, 1979, 1980,
+            require_aerosol=True, require_volcanic=False,
+        )
+        assert "_missing" not in files
+
+    def test_no_aerosol_implies_no_volcanic_in_deck_driver(self, tmp_path):
+        """End-to-end: --no-aerosol disables volcanic too (with NOTE)."""
+        import subprocess
+        self._make_partial_deck(tmp_path,
+                                 include_aerosol=True,
+                                 include_volcanic=True)
+        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
+        cmd = [
+            sys.executable, str(deck_script),
+            "--forcing-dir", str(tmp_path),
+            "--start-year", "1979", "--end-year", "1980",
+            "--grid-type", "cubed_sphere", "--discretization", "centered",
+            "--radiation", "rrtmg", "--resolution", "8",
+            "--days", "1", "--no-aerosol",  # volcanic *not* disabled
+            "--dry-run",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        assert r.returncode == 0, f"dry-run failed: {r.stderr}"
+        out = r.stdout
+        # NOTE explaining the implicit no-volcanic
+        assert "NOTE" in out and "aerosol" in out and "volcanic" in out, (
+            f"Expected NOTE about --no-aerosol implying no-volcanic; "
+            f"got:\n{out}"
+        )
+        # Activity report must not show Aerosol / Volcanic as ACTIVE.
+        for label in ("Tropospheric aerosol", "Volcanic stratospheric"):
+            line = next((ln for ln in out.splitlines() if label in ln), None)
+            assert line is None or "ACTIVE" not in line, (
+                f"Activity report shows {label} as ACTIVE under "
+                f"--no-aerosol; got: {line!r}"
+            )
+        # Command line must NOT include --volcanic-aerosol-file
+        # (passing it without --aerosol-forcing external would silently
+        # drop it; the iter-4 fix prevents the lie).
+        cmd_block = out.split("[deck] Command:", 1)[1].split(
+            "[deck] Forcing-channel activity"
+        )[0]
+        assert "--volcanic-aerosol-file" not in cmd_block, (
+            "Volcanic file should not be passed when --no-aerosol "
+            "implicitly disables volcanic; cmd block:\n"
+            f"{cmd_block}"
+        )
+
+
 class TestGHGOutOfRangeWarning:
     """Regression test for the GHG anchor-table out-of-range warning
     (P2 own audit, iter 4).

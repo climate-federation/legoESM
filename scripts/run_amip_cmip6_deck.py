@@ -56,8 +56,10 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 from legoesm import constants  # noqa: E402
 
 
-def _check_forcing_files(forcing_dir: Path, start_year: int,
-                         end_year: int) -> dict[str, Path]:
+def _check_forcing_files(
+    forcing_dir: Path, start_year: int, end_year: int,
+    *, require_aerosol: bool = True, require_volcanic: bool = True,
+) -> dict[str, Path]:
     """Verify the canonical 6-file deck exists in ``forcing_dir``.
 
     Ozone resolution (``ozone_amip_<sy>-<ey>.nc`` interannual *vs.*
@@ -67,6 +69,14 @@ def _check_forcing_files(forcing_dir: Path, start_year: int,
     (`_interp_monthly_noncyclic`, keyed on ``ntime > 12``) is the right
     code path to exercise for production AMIP.  The climatology is the
     fallback when the user has only generated the cyclic file.
+
+    Parameters
+    ----------
+    require_aerosol, require_volcanic : bool
+        When False, the corresponding file is omitted from the
+        missing-file check.  This lets users intentionally disable a
+        channel (``--no-aerosol`` / ``--no-volcanic`` /
+        ``--volcanic-aerosol-scale 0``) without supplying files for it.
     """
     interannual_o3 = forcing_dir / f"ozone_amip_{start_year}-{end_year}.nc"
     clim_o3 = forcing_dir / "ozone_amip_clim.nc"
@@ -86,7 +96,16 @@ def _check_forcing_files(forcing_dir: Path, start_year: int,
         "aerosol": forcing_dir / "aerosol_amip_clim.nc",
         "volcanic": forcing_dir / f"volcanic_amip_{start_year}-{end_year}.nc",
     }
-    missing = [name for name, p in files.items() if not p.exists()]
+    # Skip aerosol/volcanic from the *required* set when the caller
+    # intends to disable them; the path is still returned in ``files``
+    # so the caller can choose whether to forward it.
+    skip = set()
+    if not require_aerosol:
+        skip.add("aerosol")
+    if not require_volcanic:
+        skip.add("volcanic")
+    missing = [name for name, p in files.items()
+               if name not in skip and not p.exists()]
     if missing:
         return {"_missing": ",".join(missing), **files}
     return files
@@ -174,13 +193,51 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    # ``ModelDriver`` only consumes the volcanic file when
+    # ``aerosol_forcing == "external"``.  When the user disables
+    # aerosol entirely, volcanic is silently dropped too — the
+    # downstream activity report would otherwise lie.  Force the two
+    # flags into a consistent state at the deck-driver boundary so
+    # the rest of this function can reason about a single ``aerosol_active``
+    # / ``volcanic_active`` state.
+    aerosol_active = not args.no_aerosol
+    volcanic_active = (not args.no_volcanic
+                       and args.volcanic_aerosol_scale > 0
+                       and aerosol_active)
+    if (not aerosol_active) and (not args.no_volcanic) and (
+        args.volcanic_aerosol_scale > 0
+    ):
+        # User asked to disable aerosol but left volcanic enabled.
+        # ModelDriver gates volcanic on aerosol_forcing being external,
+        # so volcanic would silently drop.  Inform the user up front
+        # and treat the run as no-volcanic.
+        print(
+            "[deck] NOTE: --no-aerosol was passed without --no-volcanic; "
+            "ModelDriver only loads volcanic forcing when aerosol "
+            "forcing is external, so volcanic is being disabled too. "
+            "Pass --no-volcanic explicitly to silence this notice, or "
+            "drop --no-aerosol if you want both channels active."
+        )
+
     forcing_dir = Path(args.forcing_dir).resolve()
-    files = _check_forcing_files(forcing_dir, args.start_year, args.end_year)
+    # Skip aerosol/volcanic from the missing-file check when those
+    # channels are intentionally disabled — otherwise a user with only
+    # SST/GHG/ozone/solar files (a perfectly valid no-aerosol AMIP run)
+    # would hit a spurious missing-file error before the model starts.
+    files = _check_forcing_files(
+        forcing_dir, args.start_year, args.end_year,
+        require_aerosol=aerosol_active,
+        require_volcanic=volcanic_active,
+    )
 
     if "_missing" in files:
         if args.auto_generate:
             _auto_generate(forcing_dir, args.start_year, args.end_year)
-            files = _check_forcing_files(forcing_dir, args.start_year, args.end_year)
+            files = _check_forcing_files(
+                forcing_dir, args.start_year, args.end_year,
+                require_aerosol=aerosol_active,
+                require_volcanic=volcanic_active,
+            )
             if "_missing" in files:
                 raise RuntimeError(
                     f"Auto-generation completed but files still missing: "
@@ -247,13 +304,18 @@ def main(argv: list[str] | None = None) -> int:
         cmd.append("--diurnal-cycle")
     if args.monthly_means:
         cmd.append("--monthly-means")
-    if not args.no_aerosol:
+    if aerosol_active:
         cmd += [
             "--aerosol-forcing", "external",
             "--aerosol-file", str(files["aerosol"]),
             "--aerosol-reference-aod", "0.05",
         ]
-    if not args.no_volcanic and args.volcanic_aerosol_scale > 0:
+    # ``volcanic_active`` requires ``aerosol_active`` (see top of main()
+    # for the rationale): ModelDriver gates volcanic on
+    # ``aerosol_forcing == "external"``, so passing
+    # ``--volcanic-aerosol-file`` without ``--aerosol-forcing external``
+    # would be silently ignored.
+    if volcanic_active:
         cmd += [
             "--volcanic-aerosol-file", str(files["volcanic"]),
             "--volcanic-aerosol-scale", str(args.volcanic_aerosol_scale),
@@ -343,9 +405,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Solar TSI + 14-band spectral         {solar_label:<35}")
     print(f"  Greenhouse gases (transient annual)  {_flag(effective_active)}")
     print(f"  Ozone (cyclic clim or interannual)   {_flag(effective_active)}")
-    if not args.no_aerosol:
+    if aerosol_active:
         print(f"  Tropospheric aerosol (Kinne)         {_flag(effective_active)}")
-    if not args.no_volcanic and args.volcanic_aerosol_scale > 0:
+    if volcanic_active:
         print(f"  Volcanic stratospheric AOD           {_flag(effective_active)}")
     if not rad_active:
         print(

@@ -1511,7 +1511,39 @@ class ModelDriver:
         out_dir.mkdir(parents=True, exist_ok=True)
         n = len(ts.get("days", []))
         if n == 0:
-            return
+            # Run too short for any diagnostic interval to fire (e.g.
+            # ``--days 1 --diag-days 5``).  Synthesise a single
+            # end-of-run sample from the final state so the validation
+            # harness still has a ``timeseries.npz`` + ``results.txt``
+            # to consume.  This avoids the silent-no-output behaviour
+            # that the iter-4 codex review flagged: previously a
+            # 1-day spectral / MPAS smoke run produced no validator
+            # artefacts and the smoke test fell through.
+            try:
+                final_day = float(self.config.days)
+                T_final = float(jnp.mean(self.state.T.data))
+                u_final = float(jnp.max(jnp.abs(self.state.u.data)))
+                ps_final = float(jnp.mean(self.state.p_s.data))
+                T_finite = bool(jnp.all(jnp.isfinite(self.state.T.data)))
+            except Exception as exc:
+                logger.warning(
+                    f"_save_lightweight_timeseries: end-of-run "
+                    f"summary failed ({exc!r}); writing empty "
+                    f"timeseries.npz anyway."
+                )
+                final_day = 0.0
+                T_final = float("nan")
+                u_final = float("nan")
+                ps_final = float("nan")
+                T_finite = False
+            ts = {
+                "days": [final_day],
+                "T_atm": [T_final],
+                "max_wind": [u_final],
+                "dry_mass_ps": [ps_final],
+                "T_finite": [T_finite],
+            }
+            n = 1
         nan = np.full(n, np.nan, dtype=np.float64)
         days = np.array(ts["days"], dtype=np.float64)
 
