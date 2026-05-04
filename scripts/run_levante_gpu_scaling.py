@@ -1898,19 +1898,22 @@ def main() -> int:
     # Disable sweep by pinning to the actual count.
     fixed = max_gpus if world_size > 1 else None
 
-    # Iter 13 honest-sweep guard: cubed-sphere MPI is not yet
-    # domain-decomposed at the dycore/driver level (state is replicated
-    # per rank).  Refuse to run a multi-rank cubed-sphere sweep so
-    # users do not capture replicated-dynamics numbers as scaling.
-    if world_size > 1 and grid_type == "cubed-sphere":
+    # Iter 13/17 honest-sweep guard: refuse multi-rank MPI for any
+    # grid that is *not* in the validated MPI-supported set.  The set
+    # is currently ``{icosahedral}`` — cubed-sphere keeps full state
+    # per rank (replicated dynamics, not real scaling), lat-lon raises
+    # NotImplementedError, spectral has no MPI path.  This catches all
+    # three with one branch and one consistent error message.
+    if world_size > 1 and grid_type not in _MPI_SUPPORTED_GRIDS:
         if is_rank0:
             print(
-                "ERROR: cubed-sphere MPI multi-rank scaling is currently "
-                "replicated-dynamics-only (every rank holds full "
-                "(6, n, n, ...) state).  Halo support is in place "
-                "(iter 3) but driver scatter is not.  Use icosahedral "
-                "MPI (``--grid icosahedral``) for genuine multi-rank "
-                "scaling, or run cubed-sphere with a single MPI rank.",
+                f"ERROR: {grid_type} MPI multi-rank scaling is not "
+                f"validated in this script. Supported MPI grids are "
+                f"{sorted(_MPI_SUPPORTED_GRIDS)}.  cubed-sphere is "
+                "replicated-dynamics-only (driver scatter pending); "
+                "lat-lon raises NotImplementedError (#115); spectral "
+                "has no MPI path.  Run with a single MPI rank or use "
+                "``--grid icosahedral`` for genuine multi-rank scaling.",
                 flush=True,
             )
         raise SystemExit(2)
