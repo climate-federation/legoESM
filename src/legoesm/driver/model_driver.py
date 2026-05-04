@@ -1537,16 +1537,30 @@ class ModelDriver:
                     )
                     T_arr = fields["T"]
                     u_arr = fields["u"]
+                    v_arr = fields.get("v")
                     ps_arr = fields["p_s"]
                 else:
                     T_arr = self.state.T.data
                     u_arr = self.state.u.data
+                    v_arr = (self.state.v.data
+                             if getattr(self.state, "v", None) is not None
+                             else None)
                     ps_arr = self.state.p_s.data
                 final_day = float(self.config.days)
                 T_final = float(jnp.mean(T_arr))
-                u_final = float(jnp.max(jnp.abs(u_arr)))
+                # max_wind must include v: a meridional spike or NaN in
+                # ``v`` would otherwise be invisible to the validator
+                # and let a divergent run pass (Codex iter-6 review).
+                if v_arr is not None:
+                    wind_speed = jnp.sqrt(u_arr ** 2 + v_arr ** 2)
+                    u_final = float(jnp.max(wind_speed))
+                    wind_finite = bool(jnp.all(jnp.isfinite(v_arr)))
+                else:
+                    u_final = float(jnp.max(jnp.abs(u_arr)))
+                    wind_finite = True
                 ps_final = float(jnp.mean(ps_arr))
-                T_finite = bool(jnp.all(jnp.isfinite(T_arr)))
+                T_finite = (bool(jnp.all(jnp.isfinite(T_arr)))
+                            and wind_finite)
             except Exception as exc:
                 logger.warning(
                     f"_save_lightweight_timeseries: end-of-run "

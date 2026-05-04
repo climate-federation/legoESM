@@ -182,6 +182,38 @@ def _read_time_axis(ds):
     return days, first_date
 
 
+def _cftime_constructor_for_calendar(cal: str | None):
+    """Return the cftime datetime constructor that matches a CF
+    ``calendar`` string.
+
+    Used in two places:
+    * :func:`_extract_first_date` — so the file's first-record anchor
+      stays in the file's native calendar (a noleap CF file produces
+      a ``DatetimeNoLeap`` anchor, not Gregorian).
+    * :func:`_simday_to_file_day` — so the simulation epoch is built
+      in the same calendar before the cftime subtraction.
+
+    The mapping covers every calendar legoESM forcing files use in
+    practice (CMIP6 input4MIPs ozone / aerosol / GHG annual default
+    to ``noleap``; some CMIP-like archives use ``360_day``).
+    Unknown calendars fall back to ``DatetimeGregorian`` so the
+    function never raises.
+    """
+    import cftime
+    cal_norm = (cal or "standard").lower()
+    return {
+        "noleap": cftime.DatetimeNoLeap,
+        "365_day": cftime.DatetimeNoLeap,
+        "all_leap": cftime.DatetimeAllLeap,
+        "366_day": cftime.DatetimeAllLeap,
+        "360_day": cftime.Datetime360Day,
+        "julian": cftime.DatetimeJulian,
+        "proleptic_gregorian": cftime.DatetimeProlepticGregorian,
+        "gregorian": cftime.DatetimeGregorian,
+        "standard": cftime.DatetimeGregorian,
+    }.get(cal_norm, cftime.DatetimeGregorian)
+
+
 def _extract_first_date(time_values, units, calendar):
     """Best-effort first-record extraction for a CF time axis.
 
@@ -195,7 +227,13 @@ def _extract_first_date(time_values, units, calendar):
     * Numeric arrays with CF units of ``months since`` / ``years since``
       on a non-``360_day`` calendar (which ``cftime.num2date`` refuses):
       parse ``<ref>`` manually and add the integer month / year offset
-      using :class:`cftime.DatetimeGregorian`.
+      using a calendar-aware ``cftime.Datetime*`` constructor.
+
+    The returned anchor stays in the file's native calendar
+    (``noleap`` / ``360_day`` / ``gregorian`` / …) so downstream
+    callers like :func:`_simday_to_file_day` can build a matching
+    simulation epoch and avoid Gregorian-vs-noleap leap-day drift
+    (Codex iter-6 review).
 
     Returns ``None`` when none of those paths succeeds — the caller then
     falls back to the 1850 CMIP6 reference year in
@@ -214,12 +252,13 @@ def _extract_first_date(time_values, units, calendar):
     try:
         import cftime
         import datetime as _dt
+        ctor = _cftime_constructor_for_calendar(cal)
         if "months since" in ul or "years since" in ul:
             anchor_str = units.split("since", 1)[1].strip().split(" ")[0]
             y_str, m_str, d_str = anchor_str.split("-")
-            anchor = cftime.DatetimeGregorian(
-                int(y_str), int(m_str), int(d_str),
-            )
+            # Build the anchor in the file's native calendar so the
+            # offset arithmetic below stays calendar-consistent.
+            anchor = ctor(int(y_str), int(m_str), int(d_str))
             v0 = float(numeric.flat[0])
             # Add whole months / years, then fractional part as days so
             # files with mid-month sample points (v0 = 0.5) anchor to
@@ -231,12 +270,12 @@ def _extract_first_date(time_values, units, calendar):
                 total_m = anchor.month - 1 + whole
                 ny = anchor.year + total_m // 12
                 nm = (total_m % 12) + 1
-                base = cftime.DatetimeGregorian(ny, nm, anchor.day)
+                base = ctor(ny, nm, anchor.day)
                 frac_days = frac * (30.0 if cal == "360_day" else 365.25 / 12.0)
             else:  # years since
                 whole = int(np.floor(v0))
                 frac = v0 - whole
-                base = cftime.DatetimeGregorian(
+                base = ctor(
                     anchor.year + whole, anchor.month, anchor.day,
                 )
                 frac_days = frac * (360.0 if cal == "360_day" else 365.25)
@@ -912,21 +951,10 @@ def _simday_to_file_day(sim_day: float, start_year: int,
         import cftime
         # Calendar-aware epoch: pick the cftime constructor that
         # matches ``first_date.calendar`` so the subtraction stays
-        # calendar-consistent.
+        # calendar-consistent.  Falls back to Gregorian when the
+        # anchor is not a calendar-aware cftime datetime.
         if hasattr(first_date, "calendar"):
-            cal = (first_date.calendar or "standard").lower()
-            calendar_map = {
-                "noleap": cftime.DatetimeNoLeap,
-                "365_day": cftime.DatetimeNoLeap,
-                "all_leap": cftime.DatetimeAllLeap,
-                "366_day": cftime.DatetimeAllLeap,
-                "360_day": cftime.Datetime360Day,
-                "julian": cftime.DatetimeJulian,
-                "proleptic_gregorian": cftime.DatetimeProlepticGregorian,
-                "gregorian": cftime.DatetimeGregorian,
-                "standard": cftime.DatetimeGregorian,
-            }
-            ctor = calendar_map.get(cal, cftime.DatetimeGregorian)
+            ctor = _cftime_constructor_for_calendar(first_date.calendar)
             sim_epoch = ctor(int(start_year), 1, 1)
         else:
             sim_epoch = cftime.DatetimeGregorian(int(start_year), 1, 1)

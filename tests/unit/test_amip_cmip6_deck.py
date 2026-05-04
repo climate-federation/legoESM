@@ -660,6 +660,75 @@ class TestSolarBandExpansion:
         assert np.isclose(np.sum(out), 1.0)
 
 
+class TestFirstDateCalendarPreservation:
+    """Regression test for the iter-6 calendar-preservation fix in
+    ``_extract_first_date``.
+
+    A CMIP6 file with ``time.units="months since 1850-01-01"`` and
+    ``calendar="noleap"`` previously produced a ``DatetimeGregorian``
+    anchor.  Combined with the iter-5 calendar-aware
+    ``_simday_to_file_day`` (which picks the constructor based on
+    ``first_date.calendar``), a Gregorian first_date would silently
+    use Gregorian arithmetic against a noleap file, producing a ~31
+    day offset by 1979 (and much larger for ``360_day``).
+    """
+
+    def test_first_date_noleap_calendar_preserved(self):
+        import cftime
+        from legoesm.forcing.external import _extract_first_date
+        # Numeric mid_days = 0.5 month past 1850-01-01 (mid-January 1850).
+        time_values = np.array([0.5, 1.5, 2.5])
+        first = _extract_first_date(
+            time_values, "months since 1850-01-01", "noleap",
+        )
+        assert isinstance(first, cftime.DatetimeNoLeap), (
+            f"Noleap calendar lost: got {type(first).__name__}"
+        )
+        # 0.5 month past Jan 1 = mid-January 1850.
+        assert first.year == 1850 and first.month == 1
+
+    def test_first_date_360day_calendar_preserved(self):
+        import cftime
+        from legoesm.forcing.external import _extract_first_date
+        time_values = np.array([15.0, 45.0, 75.0])
+        first = _extract_first_date(
+            time_values, "months since 1850-01-01", "360_day",
+        )
+        assert isinstance(first, cftime.Datetime360Day)
+
+    def test_first_date_gregorian_calendar_preserved(self):
+        import cftime
+        from legoesm.forcing.external import _extract_first_date
+        time_values = np.array([15.5, 45.5, 75.5])
+        first = _extract_first_date(
+            time_values, "months since 1850-01-01", "gregorian",
+        )
+        assert isinstance(first, cftime.DatetimeGregorian)
+
+    def test_extract_to_simday_noleap_end_to_end(self):
+        """Combined extract + sim_day pipeline: noleap file with mid-Jan
+        1850 anchor and 1979 sim epoch must give 129 * 365 - 15 days
+        (Jan 1 1979 is 47070 days past mid-Jan 1850 in a noleap
+        calendar)."""
+        from legoesm.forcing.external import (
+            _extract_first_date, _simday_to_file_day,
+        )
+        # 0.5 month past Jan 1 1850 (mid-January 1850 noleap).
+        time_values = np.array([0.5, 1.5])
+        first = _extract_first_date(
+            time_values, "months since 1850-01-01", "noleap",
+        )
+        file_day = _simday_to_file_day(0.0, 1979, first)
+        # 1850-Jan-1 → 1979-Jan-1 in noleap = 129 * 365 = 47085 days.
+        # First record is mid-Jan 1850 (≈ 15 days past Jan 1).
+        # So Jan 1 1979 lands at file_day ≈ 47085 - 15 = 47070.
+        # Allow ±2 days for noleap-month roundoff (365.25/12 vs 30).
+        expected = 129 * 365 - 15
+        assert abs(file_day - expected) < 3.0, (
+            f"NoLeap end-to-end: expected ~{expected}, got {file_day}"
+        )
+
+
 class TestSimDayCalendar:
     """Regression test for the calendar-aware sim-epoch in
     ``_simday_to_file_day`` (P2 codex iter-5 review).
