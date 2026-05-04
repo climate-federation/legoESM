@@ -793,6 +793,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         lambda field: _neumann_fill_cgrid(field, mask),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
         n_iter=2,
+        hi_precision_pressure=True,
         h_actual=_h_actual_pprime,
     )
 

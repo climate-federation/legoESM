@@ -267,11 +267,14 @@ def barotropic_substeps_latlon_cgrid(
         H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
         # Forward: update eta from continuity (C-grid divergence)
-        H_u = 0.5 * (jnp.roll(H_total_c, 1, axis=1) + H_total_c)
+        # Min-rule face depth (consistent with implicit solver and PE
+        # tendency).  Arithmetic mean overestimates face depth at
+        # topographic steps, creating a transport mismatch.
+        H_u = jnp.minimum(jnp.roll(H_total_c, 1, axis=1), H_total_c)
         H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
         # Pole rows are zero (wall BC); single Pad HLO op replaces
         # alloc-zeros + concatenate-of-three (called every substep).
-        H_v_interior = 0.5 * (H_total_c[:-1] + H_total_c[1:])
+        H_v_interior = jnp.minimum(H_total_c[:-1], H_total_c[1:])
         H_v = jnp.pad(H_v_interior, ((1, 1), (0, 0)))
 
         flux_u = H_u * U_bar_c * u_mask

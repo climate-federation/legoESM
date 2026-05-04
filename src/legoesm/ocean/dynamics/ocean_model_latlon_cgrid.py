@@ -683,13 +683,14 @@ class LatLonCGridOceanModel:
             state.eta.data, state.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
         )
-        # h at u-faces
-        h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
-        h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
-        # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
-        # replaces alloc-zeros + concatenate-of-three.
-        h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
-        h_v_pre = jnp.pad(h_v_pre_int, ((1, 1), (0, 0), (0, 0)))
+        # h at u-faces — min-rule (MOM6/MITgcm hFacW convention).
+        # Must match the PE tendency which uses min_cell_to_uface, so
+        # that F_slow = depth_avg(du_dt, h_u) is consistent with the
+        # 3D tendency.  Arithmetic mean overestimates face depth at
+        # topographic steps, creating a barotropic-baroclinic residual.
+        h_u_pre = min_cell_to_uface(h_k_pre)
+        # h at v-faces — same min-rule for meridional direction.
+        h_v_pre = min_cell_to_vface(h_k_pre)
 
         # H + F_slow share the per-face h weight on the level axis —
         # fuse the two reductions per face into one stacked sum.
