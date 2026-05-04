@@ -592,16 +592,32 @@ def _build_segment_benchmark(
     # Use the non-donating variant for benchmarking (safe with scan)
     run_segment = run_segment_obj.raw
 
-    # Pack initial carry
+    # Pack initial carry.  Iter 10: route the held_* arrays through
+    # keyword args (``pack_carry`` makes them keyword-only after the
+    # ``*,`` marker — passing them positionally collided with the
+    # ``conv_prog`` slot and would raise) and seed ``target_mass`` so
+    # the segment-level mass fixer has a non-zero anchor.  We compute
+    # the global mass via the existing budget-aware
+    # ``_global_area_sum`` helper (fp64 accumulator when JAX has x64
+    # enabled — see iter 1 ``_conservation_accumulator``).
     shape_2d = ctx["shape_2d"]
     shape_3d = ctx["shape_3d"]
     _sd = ctx["_sd"]
 
+    from legoesm.core.conservation import _global_area_sum
+    _target_mass = _global_area_sum(driver.state.p_s.data, driver.grid)
+
     carry = pack_carry(
         driver.state, driver.q_v, driver.q_c, driver.q_r,
-        ctx["held_dT_rad"], ctx["held_sw_net_sfc"], ctx["held_lw_net_sfc"],
-        ctx["held_sw_up_toa"], ctx["held_lw_up_toa"], ctx["held_sw_down_toa"],
+        conv_prog=ctx.get("conv_prog"),
+        held_dT_rad=ctx["held_dT_rad"],
+        held_sw_net_sfc=ctx["held_sw_net_sfc"],
+        held_lw_net_sfc=ctx["held_lw_net_sfc"],
+        held_sw_up_toa=ctx["held_sw_up_toa"],
+        held_lw_up_toa=ctx["held_lw_up_toa"],
+        held_sw_down_toa=ctx["held_sw_down_toa"],
         step_index=0,
+        target_mass=_target_mass,
     )
 
     # Pack forcing (constant during benchmark)
