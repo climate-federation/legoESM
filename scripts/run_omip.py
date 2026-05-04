@@ -39,6 +39,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core.precision import PrecisionPolicy, set_policy
+set_policy(PrecisionPolicy.fp64())
+
 # ===========================================================================
 # Grid types and default resolutions / timesteps
 # ===========================================================================
@@ -292,15 +295,59 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             #   - SMC03 density-Jacobian PGF (accurate on partial cells)
             #   - biharmonic viscosity (damps topographic comp. modes)
             #   - linear bottom drag with BBL
+            #   - convective adjustment (enhanced diffusion)
+            #   - GM/Redi isopycnal mixing (Visbeck adaptive)
+            #   - K_h=0 (GM/Redi replaces horizontal tracer diffusion)
+            from legoesm.ocean.physics.combined import OceanPhysicsConfig
+            from legoesm.ocean.physics.convection.config import (
+                OceanConvectionConfig, EnhancedDiffusionConfig,
+            )
+            from legoesm.ocean.physics.lateral_mixing.config import (
+                GMRediConfig, VisbeckConfig, LateralMixingConfig,
+            )
+            from legoesm.ocean.physics.vertical_mixing.config import (
+                VerticalMixingConfig, KPPConfig,
+            )
+            bathy_physics = OceanPhysicsConfig(
+                vertical_mixing=VerticalMixingConfig(
+                    scheme="kpp",
+                    kpp=KPPConfig(),
+                ),
+                convection=OceanConvectionConfig(
+                    scheme="enhanced_diffusion",
+                    enhanced_diffusion=EnhancedDiffusionConfig(
+                        K_conv=1.0, K_bg=1e-5,
+                    ),
+                ),
+                # Disable the physics pipeline's lateral mixing — the
+                # C-grid model applies its own A_h/B_h/K_h viscosity
+                # and GM/Redi is wired via the gm_redi config field.
+                lateral_mixing=LateralMixingConfig(scheme="none"),
+                # Disable shortwave penetration — q_net already includes
+                # SW, so the physics SW module would double-count.
+                shortwave_penetration=None,
+            )
+            bathy_gm_redi = GMRediConfig(
+                kappa_GM=800.0,
+                kappa_Redi=800.0,
+                S_max=0.005,
+                visbeck=VisbeckConfig(
+                    enabled=True,
+                    alpha=0.015,
+                    kappa_min=200.0,
+                    kappa_max=2000.0,
+                ),
+            )
             config = LatLonCGridOceanConfig(
                 A_h=2.0e5, A_h_lat_scaling=True,
-                K_h=K_h, A_v=A_v, K_v=K_v,
+                K_h=1e3, A_v=A_v, K_v=K_v,
                 B_h=5.0e9,
                 bottom_drag_r=2.5e-3,
                 bottom_drag_bbl_thickness=100.0,
                 n_barotropic_substeps=30,
                 use_conservation_fixer=True,
-                physics=None,
+                physics=bathy_physics,
+                gm_redi=bathy_gm_redi,
                 barotropic_solver="implicit_cn",
                 pgf_scheme="smc03",
             )
@@ -951,7 +998,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
             # Wind-stress spinup ramp (gated at compile time).
             if enable_ramp:
                 abs_step = block_start_step + idx
-                t_sim = abs_step.astype(jnp.float32) * dt
+                t_sim = abs_step.astype(jnp.float64) * dt
                 ramp = jnp.minimum(1.0, t_sim / T_ramp_seconds)
                 tau_x = tile.tau_x * ramp
                 tau_y = tile.tau_y * ramp
@@ -1531,8 +1578,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             south_cap_lat=-80.0,
         )
         H_bathy_init, land_mask_init = init_ocean_bathymetry(grid, bathy_cfg)
-        H_bathy_init = H_bathy_init.astype(jnp.float32)
-        land_mask_init = land_mask_init.astype(jnp.float32)
+        H_bathy_init = jnp.asarray(H_bathy_init, dtype=jnp.float64)
+        land_mask_init = jnp.asarray(land_mask_init, dtype=jnp.float64)
         n_ocean = int(np.sum(np.asarray(land_mask_init) > 0.5))
         n_total = int(np.prod(np.asarray(land_mask_init).shape))
         print(f"  Bathymetry: {Path(args.bathymetry).name} "
@@ -1540,11 +1587,98 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"H_min={args.H_min}m, {args.smoothing_passes} smoothing passes, "
               f"r_max=0.2)")
 
-        # Upgrade to partial-cell coordinate and rebuild model so the
-        # SMC03 PGF sees the correct per-cell thicknesses.
-        # Keep z_coord_base for state initialization (rest_state needs
-        # the reference z* levels); model gets the partial-cell version.
+        # Equatorial-only extra smoothing.
+        # The 30-day spinup diagnosed a barotropic standing-mode
+        # instability at deep ocean cells in the equatorial belt
+        # (Java Trench off Sumatra; deep Atlantic; deep Pacific east of
+        # S. America), with growth factors of 500-1200× in 20 days.
+        # Common features: |lat|<13°, H>4000 m, large ∂H/∂x near coast.
+        # f≈0 there cannot damp PGF errors driven by steep H gradients.
+        # The standard fix is more aggressive bathymetry smoothing in
+        # the equatorial belt: the loss of "true" bathymetry detail at
+        # ±10° is acceptable for a 1° model that can't resolve the EUC
+        # anyway.  Apply a Laplacian smoother with cosine taper from
+        # full strength at the equator to zero at the band edge, and
+        # average only over wet neighbours (don't pull from land).
+        eq_band = 15.0          # smooth within ±15° of equator
+        eq_passes = 30           # extra Laplacian passes at the equator
+        H_np = np.asarray(H_bathy_init)
+        ocean_mask = np.asarray(land_mask_init) > 0.5
+        # Cell-center latitudes (axis 0)
+        from legoesm.grids.latlon import create_latlon_grid as _clg
+        # we already have grid; pull lat
+        lat_c = np.asarray(grid.lat) if hasattr(grid, 'lat') else None
+        if lat_c is not None:
+            # taper alpha(lat): quadratic, 1 at eq, 0 at ±eq_band
+            x = np.clip(np.abs(lat_c) / eq_band, 0.0, 1.0)
+            taper = (1.0 - x**2)                # (n_lat,)
+            taper2d = np.broadcast_to(taper[:, None], H_np.shape)
+            n_lat_g, n_lon_g = H_np.shape
+            for _p in range(eq_passes):
+                # neighbour sum over wet cells only, with periodic lon
+                up    = np.roll(H_np, -1, axis=0); up_m    = np.roll(ocean_mask, -1, axis=0)
+                down  = np.roll(H_np,  1, axis=0); down_m  = np.roll(ocean_mask,  1, axis=0)
+                left  = np.roll(H_np,  1, axis=1); left_m  = np.roll(ocean_mask,  1, axis=1)
+                right = np.roll(H_np, -1, axis=1); right_m = np.roll(ocean_mask, -1, axis=1)
+                # No wrap in lat: zero the off-grid neighbour mask
+                up_m[-1, :] = False; down_m[0, :] = False
+                neigh_sum = (up * up_m + down * down_m
+                             + left * left_m + right * right_m)
+                neigh_cnt = up_m.astype(np.float64) + down_m + left_m + right_m
+                avg = np.where(neigh_cnt > 0,
+                               neigh_sum / np.maximum(neigh_cnt, 1.0),
+                               H_np)
+                # alpha = 0.5 * taper(lat) → mixes self with neighbour avg
+                alpha = 0.5 * taper2d
+                new_H = (1.0 - alpha) * H_np + alpha * avg
+                # Keep land cells fixed
+                H_np = np.where(ocean_mask, new_H, H_np)
+            # Floor at H_min so the smoother doesn't accidentally
+            # create cells shallower than the physical floor.
+            H_np = np.where(ocean_mask, np.maximum(H_np, args.H_min), H_np)
+            H_bathy_init = jnp.asarray(H_np, dtype=jnp.float64)
+            print(f"  Equatorial smoothing: {eq_passes} extra Laplacian "
+                  f"passes within ±{eq_band:.0f}° (cosine taper, wet-only)")
+
+        # Snap H_bathy to layer interfaces when the resulting partial
+        # cell would be too thin.  Thin partial cells (<30% of full
+        # dz_ref) at the bottom of deep equatorial columns drove the
+        # day-13 PGF instability we diagnosed in the 30-day spinup —
+        # f≈0 there, so geostrophy can't damp pressure-gradient errors
+        # quickly, and a 67 m partial cell adjacent to a 470 m full
+        # cell amplified SMC03 PGF errors enough to blow up.  The snap
+        # is the standard MOM6/MITgcm fix: round H_bathy DOWN to the
+        # nearest interface above (i.e., bottom moves up by one level)
+        # whenever the partial cell would be thinner than the cutoff,
+        # so that every column ends with a full bottom cell or a
+        # "thick enough" partial cell.
         from legoesm.ocean.vertical import create_partial_cell_coordinate
+        H_np = np.asarray(H_bathy_init)
+        z_half_np = np.asarray(z_coord.z_half_ref)        # negative
+        dz_ref_np = np.asarray(z_coord.dz_ref)            # positive
+        abs_z_half = np.abs(z_half_np)                    # positive
+        H_snapped = H_np.copy()
+        n_snapped = 0
+        thin_threshold = 0.3
+        for k in range(z_coord.n_levels):
+            top = abs_z_half[k]
+            bot = abs_z_half[k + 1]
+            in_layer = (H_np > top) & (H_np <= bot)
+            partial_h = H_np - top
+            too_thin = in_layer & (partial_h < thin_threshold * dz_ref_np[k])
+            H_snapped = np.where(too_thin, top, H_snapped)
+            n_snapped += int(np.sum(too_thin))
+        # Cells where the new H_bathy is at the surface (k=0 case
+        # snapped down to 0) become land.  Update land_mask consistently.
+        new_land = (H_snapped <= 0.0) & (np.asarray(land_mask_init) > 0.5)
+        n_new_land = int(np.sum(new_land))
+        if n_new_land > 0:
+            land_mask_init = jnp.where(
+                jnp.asarray(new_land), 0.0, land_mask_init,
+            )
+        H_bathy_init = jnp.asarray(H_snapped, dtype=jnp.float64)
+        print(f"  Partial-cell snap (cutoff {thin_threshold*100:.0f}%): "
+              f"{n_snapped} cells snapped, {n_new_land} → land")
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
         model = LatLonCGridOceanModel(grid, z_coord_partial, config)
