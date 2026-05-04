@@ -230,23 +230,30 @@ def fv3_hydrostatic_tendencies(
     zeta_abs = zeta + grid.f[..., None]
 
     # === Stage-level packed halo exchange #1 ===
-    # Pack {zeta_abs, B, 1/T} into one collective instead of 3 separate.
+    # Pack {zeta_abs, B, 1/T, ln_ps_3d} into one collective instead of
+    # 4 separate.  ``ln_ps`` is 2D, so we materialise a singleton-level
+    # 4D view ``ln_ps[..., None]`` that travels through the packed
+    # exchange and unpacks into a 2D padded array (``_lnps_pad`` ->
+    # ``_lnps_pad_2d`` below).  Folding it here removes the separate
+    # 2D Arakawa-Lamb halo at section 8 (``ln_ps_hi``), saving one
+    # round-trip per RHS evaluation under MPI/SPMD.
     ln_ps = jnp.log(p_s)
+    ln_ps_3d = ln_ps[..., None]  # (6, n, n, 1) — singleton level for packing
     inv_T = 1.0 / T
     from legoesm.grids.halo import _halo_backend
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
-            zeta_abs, B, inv_T, mesh=_spmd_mesh,
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = packed_pad_halo_4d(
+            zeta_abs, B, inv_T, ln_ps_3d, mesh=_spmd_mesh,
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta_abs, B, inv_T, topology=_mpi_topology,
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+            zeta_abs, B, inv_T, ln_ps_3d, topology=_mpi_topology,
         )
     else:
-        _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
+        _zeta_pad = _B_pad = _invT_pad = _lnps_pad = None  # operators do own exchange
 
     # Batch (zeta_abs, inv_T) corner interpolation — both share the
     # (6, n, n, nlev) shape; when the stage-level packed halo exchange
@@ -292,9 +299,19 @@ def fv3_hydrostatic_tendencies(
     # Use result_type to only upcast (never downcast from current dtype).
     from legoesm.core.precision import _resolve_dtype
     _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
-    # ln_ps is 2D — async overlap not beneficial for 2D fields
+    # When ``_lnps_pad`` was provided by the stage-level packed halo
+    # exchange #1, reuse it: drop the singleton level axis and feed
+    # the resulting 2D padded array to ``_arakawa_lamb_gradient`` so
+    # it skips its own halo round-trip.  Falls back to the standalone
+    # 2D Arakawa-Lamb gradient when no pre-pad exists (local backend).
     ln_ps_hi = ln_ps.astype(_pg_dt)
-    dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
+    if _lnps_pad is not None:
+        _lnps_pad_2d = _lnps_pad[..., 0].astype(_pg_dt)
+        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(
+            ln_ps_hi, cdgrid, padded=_lnps_pad_2d,
+        )
+    else:
+        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
     T_corner = 1.0 / inv_T_corner
     T_corner_hi = T_corner.astype(_pg_dt)

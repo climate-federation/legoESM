@@ -788,12 +788,17 @@ def start_halo_exchange(
 ) -> jax.Array:
     """Initiate MPI halo exchange and return the padded result.
 
-    Since mpi4jax exposes only blocking ``sendrecv``, this function
-    performs the full synchronous MPI halo exchange.  It is provided as
-    a named entry point so that callers can structure their code in the
-    ``start / compute_interior / finish`` pattern.  XLA may still
-    overlap the host-side MPI scheduling with device-side interior
-    kernels when the computation graph is structured this way.
+    .. warning::
+        **This is currently a blocking pass-through to** :func:`pad_halo_mpi`,
+        not a non-blocking primitive.  ``mpi4jax`` does not yet expose
+        ``Isend`` / ``Irecv``, so the ``start / compute_interior / finish``
+        idiom this function suggests cannot deliver real overlap on top of
+        it.  The packed 4D halo exchange (``packed_pad_halo_mpi_4d``)
+        coalesces multiple fields into one collective and is the path
+        production code should use.  This API is preserved for back-
+        compat and as a hook for a future ``mpi4jax`` non-blocking
+        upgrade — its current performance profile is identical to
+        ``pad_halo_mpi``.
 
     Parameters
     ----------

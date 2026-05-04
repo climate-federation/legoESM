@@ -170,11 +170,24 @@ def main() -> int:
             if rows:
                 break  # one CSV per dir
 
-    # CPU rows: from any sub-folder named like ``iter{N}_cpu*`` (each contains
-    # per-case JSON outputs).
+    # CPU rows: from any sub-folder named like ``iter{N}_cpu*``.  Each
+    # such folder contains either per-case JSONs (run_cpu_mpi_scaling.py
+    # output) or a strong/weak_scaling CSV (when the levante driver was
+    # invoked under ``JAX_PLATFORMS=cpu`` for SPMD multi-shard sweeps).
     cpu_rows: list[dict] = []
     for d in sorted(scalings.glob(f"{iter_tag}_cpu*")):
         cpu_rows.extend(_read_cpu_jsons(d))
+        for csv_name in ("strong_scaling.csv", "weak_scaling.csv", "all_scaling.csv"):
+            rows = _read_gpu_csv(d / csv_name)
+            for r in rows:
+                # Re-tag as a CPU row in the throughput plot, with a
+                # ``cubed-sphere (SPMD-N)`` label that disambiguates
+                # shard counts.  Keep ``n_gpus`` as the shard count.
+                r["device"] = "cpu"
+                r["grid"] = f"cubed-sphere (SPMD-{r['n_gpus']})"
+            cpu_rows.extend(rows)
+            if rows:
+                break
 
     print(f"  collected {len(gpu_rows)} GPU rows, {len(cpu_rows)} CPU rows")
 

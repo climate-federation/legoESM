@@ -84,13 +84,19 @@ def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh, owned_mask=None):
     ))
 
 
-def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
-    """Fix volume conservation via uniform eta correction."""
+def fix_volume_mpas(state_new, state_old, mesh, z_coord,
+                    min_water_column_m=None, owned_mask=None):
+    """Fix volume conservation via uniform eta correction.
+
+    ``owned_mask`` (optional, shape ``(n_local_cells,)``) restricts the
+    local accumulators to owned cells before the global allreduce so
+    halo cells are not double-counted under MPI partitioning.
+    """
     mask = state_old.land_mask.data
 
-    vol_old = _ocean_area_sum_mpas(state_old.eta.data, mask, mesh)
-    vol_new = _ocean_area_sum_mpas(state_new.eta.data, mask, mesh)
-    ocean_area = _ocean_area_sum_mpas(jnp.ones_like(mask), mask, mesh)
+    vol_old = _ocean_area_sum_mpas(state_old.eta.data, mask, mesh, owned_mask=owned_mask)
+    vol_new = _ocean_area_sum_mpas(state_new.eta.data, mask, mesh, owned_mask=owned_mask)
+    ocean_area = _ocean_area_sum_mpas(jnp.ones_like(mask), mask, mesh, owned_mask=owned_mask)
 
     correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
     eta_fixed = state_new.eta.data + correction.astype(state_new.eta.data.dtype) * mask
@@ -107,8 +113,12 @@ def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None
     )
 
 
-def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
-    """Fix heat conservation via uniform T correction."""
+def fix_heat_mpas(state_new, state_old, mesh, z_coord,
+                  min_water_column_m=None, owned_mask=None):
+    """Fix heat conservation via uniform T correction.
+
+    ``owned_mask`` (optional) — see :func:`fix_volume_mpas`.
+    """
     mask = state_old.land_mask.data
     H_bathy = state_old.H_bathy.data
 
@@ -121,10 +131,10 @@ def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
         min_water_column_m=min_water_column_m,
     )
 
-    heat_old = _ocean_volume_sum_mpas(state_old.T.data, h_k_old, mask, mesh)
-    heat_new = _ocean_volume_sum_mpas(state_new.T.data, h_k_new, mask, mesh)
+    heat_old = _ocean_volume_sum_mpas(state_old.T.data, h_k_old, mask, mesh, owned_mask=owned_mask)
+    heat_new = _ocean_volume_sum_mpas(state_new.T.data, h_k_new, mask, mesh, owned_mask=owned_mask)
     vol_new = _ocean_volume_sum_mpas(
-        jnp.ones_like(state_new.T.data), h_k_new, mask, mesh,
+        jnp.ones_like(state_new.T.data), h_k_new, mask, mesh, owned_mask=owned_mask,
     )
 
     correction = (heat_old - heat_new) / jnp.maximum(vol_new, 1.0)
@@ -135,8 +145,12 @@ def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
     )
 
 
-def fix_salt_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
-    """Fix salt conservation via uniform S correction."""
+def fix_salt_mpas(state_new, state_old, mesh, z_coord,
+                  min_water_column_m=None, owned_mask=None):
+    """Fix salt conservation via uniform S correction.
+
+    ``owned_mask`` (optional) — see :func:`fix_volume_mpas`.
+    """
     mask = state_old.land_mask.data
     H_bathy = state_old.H_bathy.data
 
@@ -149,10 +163,10 @@ def fix_salt_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
         min_water_column_m=min_water_column_m,
     )
 
-    salt_old = _ocean_volume_sum_mpas(state_old.S.data, h_k_old, mask, mesh)
-    salt_new = _ocean_volume_sum_mpas(state_new.S.data, h_k_new, mask, mesh)
+    salt_old = _ocean_volume_sum_mpas(state_old.S.data, h_k_old, mask, mesh, owned_mask=owned_mask)
+    salt_new = _ocean_volume_sum_mpas(state_new.S.data, h_k_new, mask, mesh, owned_mask=owned_mask)
     vol_new = _ocean_volume_sum_mpas(
-        jnp.ones_like(state_new.S.data), h_k_new, mask, mesh,
+        jnp.ones_like(state_new.S.data), h_k_new, mask, mesh, owned_mask=owned_mask,
     )
 
     correction = (salt_old - salt_new) / jnp.maximum(vol_new, 1.0)

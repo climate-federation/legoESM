@@ -213,6 +213,30 @@ def _place_strip_h2(
 # Face-only MPI halo exchange (≤6 ranks)
 # ======================================================================
 
+def _build_global_to_local(topology: CommTopology, n_leading: int) -> dict[int, int]:
+    """Build a mapping from global face id → local leading-axis index.
+
+    Two regimes:
+
+    * **Replicated dynamics**: ``n_leading == 6`` and every rank holds
+      a full ``(6, n, n[, ...])`` array.  Identity mapping.
+    * **Scattered dynamics**: ``n_leading == len(topology.local_face_ids)``.
+      Local indices are positions of the rank's owned faces in
+      ``topology.local_face_ids``.
+
+    Centralizing the lookup here lets the face-only and tiled MPI halo
+    paths both work on compact local arrays without each call site
+    open-coding the translation, and falls back to identity when the
+    array is replicated so the existing replicated-only call sites
+    are unaffected.
+    """
+    if n_leading == 6 and len(topology.local_face_ids) != n_leading:
+        # Replicated state: caller hands us a full (6, ...) tile.  All
+        # global face ids are valid array indices.
+        return {f: f for f in range(6)}
+    return {f: i for i, f in enumerate(topology.local_face_ids)}
+
+
 def _pad_halo_mpi_face_only(
     data: jax.Array,
     topology: CommTopology,
@@ -225,10 +249,26 @@ def _pad_halo_mpi_face_only(
     Groups remote edges by neighbor rank and issues one sendrecv per
     unique neighbor (at most 4 for face-only decomposition), rather
     than an O(world_size) allgather.
+
+    Supports two leading-axis regimes:
+
+    * Replicated dynamics — ``data.shape[0] == 6``.  Every rank holds
+      all six faces; only owned faces are written by remote-edge
+      sendrecv (the rest stay as the local copy).  Backward-compatible
+      with the iter 1/2 driver path.
+    * Scattered dynamics — ``data.shape[0] == len(local_face_ids)``.
+      Each rank only owns its faces; ``_build_global_to_local`` maps
+      global face/neighbour ids to compact array indices for indexing.
     """
     # Single Pad HLO op replaces alloc-zeros + scatter (subsequent
     # halo scatters only fill the zeroed halo regions).
     padded = jnp.pad(data, ((0, 0), (halo, halo), (halo, halo)))
+
+    g2l = _build_global_to_local(topology, data.shape[0])
+
+    def _local_face(f: int) -> int:
+        """Translate a global face id to its compact local index."""
+        return g2l[f]
 
     # --- Classify edges as local vs remote ---
     local_edges = []
@@ -249,18 +289,23 @@ def _pad_halo_mpi_face_only(
 
     # --- Handle local edges (no MPI) ---
     for face, edge, nbr_face, nbr_edge, is_reversed, _ in local_edges:
+        # Both ``face`` (write target) and ``nbr_face`` (read source)
+        # need translation: in scattered mode a "local" edge means both
+        # endpoints live on this rank, so both are valid local indices.
+        f_loc = _local_face(face)
+        nf_loc = _local_face(nbr_face)
         if halo == 1:
-            strip = _extract_edge_strip(data, nbr_face, nbr_edge)
+            strip = _extract_edge_strip(data, nf_loc, nbr_edge)
             if is_reversed:
                 strip = strip[::-1]
-            padded = _place_strip(padded, face, edge, strip)
+            padded = _place_strip(padded, f_loc, edge, strip)
         else:
-            strip_d0 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 0)
-            strip_d1 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 1)
+            strip_d0 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 0)
+            strip_d1 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 1)
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
-            padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+            padded = _place_strip_h2(padded, f_loc, edge, strip_d0, strip_d1)
 
     if not remote_edges:
         # Still need to fill corner cells (matching local implementation).
@@ -293,19 +338,23 @@ def _pad_halo_mpi_face_only(
         send_order = sorted(entries, key=lambda e: (e[2], e[3]))
         recv_order = sorted(entries, key=lambda e: (e[0], e[1]))
 
-        # Pack all edge strips destined for this neighbor.
+        # Pack all edge strips destined for this neighbor.  ``face`` is
+        # the *local* face whose interior edge we send; ``nbr_face`` is
+        # global on the receiver side and used purely for ordering.
         send_parts = []
         for face, edge, nbr_face, nbr_edge, is_reversed, _ in send_order:
+            f_loc = _local_face(face)
             if halo == 1:
-                send_parts.append(_extract_edge_strip(data, face, edge))
+                send_parts.append(_extract_edge_strip(data, f_loc, edge))
             else:
                 for depth in range(halo):
                     send_parts.append(
-                        _extract_edge_strip_at_depth(data, face, edge, depth)
+                        _extract_edge_strip_at_depth(data, f_loc, edge, depth)
                     )
         send_buf = jnp.concatenate(send_parts)
 
-        # Single sendrecv per neighbor.
+        # Single sendrecv per neighbor.  Tags + neighbor ranks remain
+        # global — they identify the *MPI peer*, not the array slot.
         send_tag = rank
         recv_tag = nbr_rank
         sendrecv = _get_sendrecv_vjp(mpi4jax)
@@ -315,15 +364,17 @@ def _pad_halo_mpi_face_only(
             send_tag, recv_tag, comm,
         )
 
-        # Unpack received strips in canonical recv_order.
+        # Unpack received strips in canonical recv_order.  Write target
+        # ``face`` is again local-translated.
         offset = 0
         for face, edge, nbr_face, nbr_edge, is_reversed, _ in recv_order:
+            f_loc = _local_face(face)
             if halo == 1:
                 strip = recv_buf[offset:offset + n]
                 offset += n
                 if is_reversed:
                     strip = strip[::-1]
-                padded = _place_strip(padded, face, edge, strip)
+                padded = _place_strip(padded, f_loc, edge, strip)
             else:
                 strip_d0 = recv_buf[offset:offset + n]
                 strip_d1 = recv_buf[offset + n:offset + 2 * n]
@@ -331,7 +382,7 @@ def _pad_halo_mpi_face_only(
                 if is_reversed:
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
-                padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+                padded = _place_strip_h2(padded, f_loc, edge, strip_d0, strip_d1)
 
     # Fill corner cells by averaging adjacent edge-halo values
     # (matching the local implementation).
@@ -644,6 +695,11 @@ def _pad_halo_mpi_face_only_4d(
         data, ((0, 0), (halo, halo), (halo, halo), (0, 0)),
     )
 
+    g2l = _build_global_to_local(topology, data.shape[0])
+
+    def _local_face(f: int) -> int:
+        return g2l[f]
+
     local_edges = []
     remote_edges = []
 
@@ -659,20 +715,22 @@ def _pad_halo_mpi_face_only_4d(
             else:
                 remote_edges.append(entry)
 
-    # Handle local edges
+    # Handle local edges (both endpoints on this rank).
     for face, edge, nbr_face, nbr_edge, is_reversed, _ in local_edges:
+        f_loc = _local_face(face)
+        nf_loc = _local_face(nbr_face)
         if halo == 1:
-            strip = _extract_edge_strip_4d(data, nbr_face, nbr_edge)
+            strip = _extract_edge_strip_4d(data, nf_loc, nbr_edge)
             if is_reversed:
                 strip = strip[::-1]
-            padded = _place_strip_4d(padded, face, edge, strip)
+            padded = _place_strip_4d(padded, f_loc, edge, strip)
         else:
-            strip_d0 = _extract_edge_strip_at_depth_4d(data, nbr_face, nbr_edge, 0)
-            strip_d1 = _extract_edge_strip_at_depth_4d(data, nbr_face, nbr_edge, 1)
+            strip_d0 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 0)
+            strip_d1 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 1)
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
-            padded = _place_strip_h2_4d(padded, face, edge, strip_d0, strip_d1)
+            padded = _place_strip_h2_4d(padded, f_loc, edge, strip_d0, strip_d1)
 
     if not remote_edges:
         if halo == 1:
@@ -700,16 +758,17 @@ def _pad_halo_mpi_face_only_4d(
 
         send_parts = []
         for face, edge, nbr_face, nbr_edge, is_reversed, _ in send_order:
+            f_loc = _local_face(face)
             if halo == 1:
                 # shape (n, nlev) → flatten to (n * nlev,)
                 send_parts.append(
-                    _extract_edge_strip_4d(data, face, edge).reshape(-1)
+                    _extract_edge_strip_4d(data, f_loc, edge).reshape(-1)
                 )
             else:
                 for depth in range(halo):
                     send_parts.append(
                         _extract_edge_strip_at_depth_4d(
-                            data, face, edge, depth
+                            data, f_loc, edge, depth
                         ).reshape(-1)
                     )
         send_buf = jnp.concatenate(send_parts)
@@ -726,12 +785,13 @@ def _pad_halo_mpi_face_only_4d(
         offset = 0
         chunk = n * nlev
         for face, edge, nbr_face, nbr_edge, is_reversed, _ in recv_order:
+            f_loc = _local_face(face)
             if halo == 1:
                 strip = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 offset += chunk
                 if is_reversed:
                     strip = strip[::-1]
-                padded = _place_strip_4d(padded, face, edge, strip)
+                padded = _place_strip_4d(padded, f_loc, edge, strip)
             else:
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
@@ -739,7 +799,7 @@ def _pad_halo_mpi_face_only_4d(
                 if is_reversed:
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
-                padded = _place_strip_h2_4d(padded, face, edge, strip_d0, strip_d1)
+                padded = _place_strip_h2_4d(padded, f_loc, edge, strip_d0, strip_d1)
 
     if halo == 1:
         padded = _fill_corners_h1(padded)

@@ -709,9 +709,13 @@ def _run_segment_benchmark(
             return new, None
         return jax.lax.scan(_body, c, None, length=n_timing)[0]
 
-    # Pre-compile scan
-    carry = _scan_run(carry, dt_used)
-    jax.block_until_ready(jax.tree.leaves(carry))
+    # Pre-compile scan against a leaf-cloned carry so the timed run
+    # starts from the post-warmup state rather than state advanced by
+    # ``n_timing`` extra steps.  Iter 1 made this fix in the bare-dycore
+    # benchmark; iter 3 extends it to the segment-driver path here.
+    _precompile_carry = jax.tree.map(lambda x: x, carry)
+    _ = _scan_run(_precompile_carry, dt_used)
+    jax.block_until_ready(jax.tree.leaves(_precompile_carry))
 
     # MPI barrier before timing
     try:
