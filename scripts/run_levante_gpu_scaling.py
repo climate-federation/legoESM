@@ -151,9 +151,12 @@ def _maybe_init_distributed(
         except ImportError:
             pass
 
-    # Check for SLURM multi-node
+    # Check for SLURM-launched multi-process jobs.  A plain sbatch allocation
+    # may set SLURM_NTASKS>1 even when this script is executed once for a
+    # single-process, multi-device run, so require a per-task rank variable.
     slurm_ntasks = os.environ.get("SLURM_NTASKS")
-    if slurm_ntasks and int(slurm_ntasks) > 1:
+    slurm_procid = os.environ.get("SLURM_PROCID")
+    if slurm_ntasks and slurm_procid is not None and int(slurm_ntasks) > 1:
         import jax
         jax.distributed.initialize()
         return jax.process_index(), jax.process_count()
