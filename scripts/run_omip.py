@@ -94,6 +94,14 @@ def parse_args():
                    help="Minimum ocean depth [m]; shallower cells become land (default 10).")
     p.add_argument("--smoothing-passes", type=int, default=2,
                    help="Laplacian smoothing passes for bathymetry (default 2).")
+    p.add_argument("--north-cap-lat", type=float, default=80.0,
+                   help="Latitude [°N] above which all cells become land (default 80).")
+    p.add_argument("--south-cap-lat", type=float, default=-80.0,
+                   help=(
+                       "Latitude [°S] below which all cells become land. "
+                       "Set to -90 to disable the southern cap and let "
+                       "ETOPO define Antarctica naturally (default -80)."
+                   ))
     p.add_argument("--sw-down", type=float, default=200.0,
                    help="Constant downwelling SW [W/m²]")
     p.add_argument("--physics", type=str, default="full",
@@ -161,6 +169,13 @@ def parse_args():
                    help="Disable global SSS restoring.")
     p.add_argument("--jra55-no-freeze-cap", action="store_true",
                    help="Disable the T_freeze cap inside the sponge zone.")
+    p.add_argument("--restart", type=str, default=None,
+                   help=(
+                       "Path to a restart_dayXXXXXX.npz file from a previous "
+                       "run. When provided, the state is loaded from the "
+                       "restart instead of initializing from rest. The time "
+                       "loop starts from the restart day."
+                   ))
     return p.parse_args()
 
 
@@ -1252,6 +1267,49 @@ def _save_restart(state, day, step, output_dir):
     return fname
 
 
+def _load_restart(restart_path, template_state):
+    """Load a restart npz and populate the state from a template.
+
+    The template state (from ``_init_rest_state``) provides the pytree
+    structure, Field metadata (name, dims, units), and masks.  Only the
+    prognostic data arrays (u, v, T, S, eta, and optional SOM/AB2 carry
+    fields) are overwritten from the restart file.
+
+    Parameters
+    ----------
+    restart_path : str or Path
+        Path to a ``restart_dayXXXXXX.npz`` file.
+    template_state : ocean state
+        A freshly initialized state with correct grid, masks, and
+        z-coordinate.
+
+    Returns
+    -------
+    state : same type as template_state
+        State with prognostic fields loaded from the restart.
+    restart_day : float
+        Simulation day at which the restart was saved.
+    restart_step : int
+        Step index at which the restart was saved.
+    """
+    data = np.load(restart_path)
+    restart_day = float(data["time_days"])
+    restart_step = int(data["step"])
+
+    replacements = {}
+    for f in template_state._fields:
+        if f not in data:
+            continue
+        obj = getattr(template_state, f)
+        if obj is None or not hasattr(obj, "data"):
+            continue
+        arr = jnp.asarray(data[f], dtype=obj.data.dtype)
+        replacements[f] = obj.replace(data=arr)
+
+    state = template_state._replace(**replacements)
+    return state, restart_day, restart_step
+
+
 # ===========================================================================
 # Time loop
 # ===========================================================================
@@ -1260,7 +1318,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    diag_every, label="",
                    restoring_targets=None, restoring_tau_s=None,
                    jra55_state=None,
-                   checkpoint_days=None, checkpoint_dir=None):
+                   checkpoint_days=None, checkpoint_dir=None,
+                   start_step=0):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -1341,7 +1400,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         else:
             steps_per_ckpt = None
 
-        block_start = 0
+        block_start = start_step
         while block_start < n_steps and not blown_up:
             actual = min(block_size, n_steps - block_start)
             t_io_start = time.time()
@@ -1445,7 +1504,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         else:
             steps_per_ckpt = None
 
-        for i in range(n_steps):
+        for i in range(start_step, n_steps):
             state = _jra55_step(state, i, dt, model, jra55_state)
 
             step = i + 1
@@ -1481,7 +1540,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         return state, diag, wall, ok
     # --------------------------------------------------------------------
 
-    for i in range(n_steps):
+    for i in range(start_step, n_steps):
         state = model.step(state, dt)
 
         # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
@@ -1668,8 +1727,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             fill_isolated_basins=True,
             depth_is_negative=True,
             r_factor_max=0.2,
-            north_cap_lat=80.0,
-            south_cap_lat=-80.0,
+            north_cap_lat=args.north_cap_lat,
+            south_cap_lat=args.south_cap_lat,
         )
         H_bathy_init, land_mask_init = init_ocean_bathymetry(grid, bathy_cfg)
         H_bathy_init = jnp.asarray(H_bathy_init, dtype=jnp.float64)
@@ -1779,13 +1838,19 @@ def run_omip_single(grid_type: str, args) -> dict:
         # The scan body calls model._step_impl() (no inner JIT) so
         # partial-cell + lax.scan now works correctly.
 
-    # Initial state: rest state with uniform stratification.  Uses only
-    # the global-mean of the WOA T profile and S profile to set a
-    # physically sensible (but horizontally uniform) initial condition.
+    # Initial state: from restart or rest.
+    start_step = 0
     state = _init_rest_state(
         grid_type, grid, z_coord, args.H_max,
         H_bathy=H_bathy_init, land_mask=land_mask_init,
     )
+    if args.restart is not None:
+        state, restart_day, restart_step = _load_restart(
+            args.restart, state,
+        )
+        start_step = restart_step
+        print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
+              f"from {Path(args.restart).name}")
 
     # Forcing dispatch: 'restoring' (default) vs JRA55-do bulk fluxes.
     restoring_targets = None
@@ -1851,6 +1916,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         jra55_state=jra55_state,
         checkpoint_days=checkpoint_days,
         checkpoint_dir=checkpoint_dir,
+        start_step=start_step,
     )
 
     status = "PASS" if ok else "FAIL"

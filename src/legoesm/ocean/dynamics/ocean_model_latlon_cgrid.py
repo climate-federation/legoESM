@@ -224,7 +224,7 @@ def _ssp_rk3_tracer_step(
     h_v_old: jnp.ndarray,
     grid,
     dt: float,
-    mask_3d: jnp.ndarray,
+    active_3d: jnp.ndarray,
 ) -> jnp.ndarray:
     """RK3 flux-form tracer advection step (Butcher-tableau form).
 
@@ -264,12 +264,12 @@ def _ssp_rk3_tracer_step(
     # Stage 1
     fd0 = _flux_div(tr)
     tr1 = (h_k_old * tr - dt * fd0) / h_safe
-    tr1 = jnp.where(mask_3d > 0.5, tr1, tr)
+    tr1 = jnp.where(active_3d > 0.5, tr1, tr)
 
     # Stage 2
     fd1 = _flux_div(tr1)
     tr1_adv = (h_k_old * tr1 - dt * fd1) / h_safe
-    tr1_adv = jnp.where(mask_3d > 0.5, tr1_adv, tr)
+    tr1_adv = jnp.where(active_3d > 0.5, tr1_adv, tr)
     tr2 = 0.75 * tr + 0.25 * tr1_adv
 
     # Stage 3 — conservative final update via effective flux
@@ -277,7 +277,7 @@ def _ssp_rk3_tracer_step(
     F_eff = (1.0 / 6.0) * fd0 + (1.0 / 6.0) * fd1 + (2.0 / 3.0) * fd2
     hT_new = h_k_old * tr - dt * F_eff
     tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
-    tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+    tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
     return tr_new
 
@@ -1001,7 +1001,7 @@ class LatLonCGridOceanModel:
                         tr, _adv,
                         mass_flux_u, mass_flux_v, w_baro,
                         h_k_old, h_k_new, h_u_old, h_v_old,
-                        self.grid, dt, mask_3d,
+                        self.grid, dt, active_3d,
                     )
                 else:
                     # Compute flux divergence (single evaluation for Euler/AB2)
@@ -1032,7 +1032,7 @@ class LatLonCGridOceanModel:
                         hT_new = h_k_old * tr - dt * total_flux_div
 
                     tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
-                    tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+                    tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
                     # Store current flux divergence for AB2 carry
                     if _tti == "ab2":
