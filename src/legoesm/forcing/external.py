@@ -18,11 +18,14 @@ Status
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
@@ -527,6 +530,83 @@ def _load_volcanic_auto(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return _load_monthly_zonal(path, "aod")
 
 
+def _ozone_unit_factor(units: str, varname: str) -> float:
+    """Return the multiplicative factor that converts ozone from the
+    file's units into volume mixing ratio (mol/mol).
+
+    The legoESM radiation kernel (RRTMG / RRTMGP) consumes ozone as a
+    dimensionless mole fraction.  CMIP6 input4MIPs ozone is supplied
+    as ``vmro3`` in mol/mol, but older / non-CMIP6 datasets expose
+    ozone as ``tro3`` in kg/kg (mass mixing ratio).  Without unit
+    detection a kg/kg file would be silently consumed at the wrong
+    magnitude (off by ``M_dry / M_o3 ≈ 0.6035``), producing a quiet
+    ~40% radiative bias in the stratospheric SW heating.
+
+    Detection rules
+    ---------------
+    1. ``mol mol-1`` / ``mole mole-1`` / ``vmr`` / ``"1"`` /
+       ``dimensionless`` → return 1.0 (already vmr).
+    2. ``kg kg-1`` / ``kg/kg`` / ``g/g`` → return ``M_dry / M_o3``
+       (convert mass-mixing-ratio to vmr).
+    3. ``ppmv`` → return 1e-6 (ppmv to mol/mol).
+    4. ``ppbv`` → return 1e-9.
+    5. Empty / unrecognised units: fall back on the **variable name**:
+       - ``vmro3`` / ``o3`` / ``O3`` / ``ozone`` → 1.0 (vmr — CMIP6 default).
+       - ``tro3`` → ``M_dry / M_o3`` (CMIP convention for mass mixing ratio).
+    6. Anything else: raise ``ValueError`` with the offending units
+       string so the user can either rename the variable or specify
+       a known unit.
+
+    Parameters
+    ----------
+    units : str
+        Value of the variable's ``units`` attribute (lower-cased
+        before comparison).
+    varname : str
+        Variable name, used as a fallback when ``units`` is empty.
+
+    Returns
+    -------
+    float
+        Multiplicative factor: ``vmr_data = file_data * factor``.
+    """
+    from legoesm import constants
+    u = (units or "").strip().lower().replace(" ", "")
+    # Canonicalise: "mol mol-1" → "molmol-1"; "kg kg-1" → "kgkg-1".
+    vmr_strings = {
+        "mol/mol", "molmol-1", "molemole-1", "mole/mole",
+        "vmr", "1", "dimensionless", "fraction", "",
+    }
+    mmr_strings = {
+        "kg/kg", "kgkg-1", "kg.kg-1", "g/g", "gg-1",
+        "mass_mixing_ratio", "massmixingratio",
+    }
+    if u in vmr_strings or u in {"mol mol-1"}:  # extra guard
+        # When units is empty fall through to the varname heuristic
+        # below (CMIP6 default is vmr).
+        if u == "":
+            if varname in {"vmro3", "ozone", "o3", "O3"}:
+                return 1.0
+            if varname == "tro3":
+                # CMIP convention: ``tro3`` is mass mixing ratio.
+                return constants.M_dry / constants.M_o3
+            return 1.0  # last-ditch default: assume vmr
+        return 1.0
+    if u in mmr_strings:
+        return constants.M_dry / constants.M_o3
+    if u in {"ppmv", "ppm"}:
+        return 1.0e-6
+    if u in {"ppbv", "ppb"}:
+        return 1.0e-9
+    if u in {"pptv", "ppt"}:
+        return 1.0e-12
+    raise ValueError(
+        f"Unrecognised ozone units {units!r} on variable {varname!r}. "
+        f"Supported: 'mol mol-1' (vmr, CMIP6 default), 'kg kg-1' "
+        f"(mass mixing ratio), 'ppmv', 'ppbv', 'pptv', or empty."
+    )
+
+
 @lru_cache(maxsize=16)
 def _load_monthly_zonal_with_levels(path: str, varname: str):
     """Like ``_load_monthly_zonal`` but also returns pressure levels and a
@@ -543,6 +623,13 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
       the file's absolute time axis for multi-year (``ntime > 12``)
       ozone files.
     * ``plev``: shape (nlev,) in [Pa] or ``None`` if no vertical dim.
+    * ``data`` is **always returned in volume mixing ratio (mol/mol)**.
+      When the file's ozone variable carries ``units = "kg kg-1"`` (or
+      the variable is named ``tro3`` per CMIP convention), the data is
+      multiplied by ``M_dry / M_o3 ≈ 0.6035`` so the downstream
+      radiation kernel — which consumes vmr — sees physically
+      consistent values regardless of the file's native unit.  The
+      conversion is logged at info-level when applied.
     """
     ds = _open_forcing_dataset(path)
     if varname not in ds.data_vars:
@@ -550,6 +637,17 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
         raise ValueError(f"Variable {varname!r} not found in {path!r}")
     var = ds[varname]
     data = np.asarray(var.values, dtype=np.float64)
+    var_units = var.attrs.get("units", "")
+    # Apply the vmr conversion (no-op for CMIP6 vmro3, multiplicative
+    # for tro3 / kg-kg-1 / ppm-style files).
+    factor = _ozone_unit_factor(var_units, varname)
+    if factor != 1.0:
+        logger.info(
+            f"[ozone-loader] Converting {varname!r} from units={var_units!r} "
+            f"to vmr (mol/mol) with factor {factor:.5g}; "
+            f"file: {path!r}"
+        )
+        data = data * factor
     dims = list(var.dims)
     if "lat" in ds:
         lat = np.asarray(ds["lat"].values, dtype=np.float64)

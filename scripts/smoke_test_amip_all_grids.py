@@ -76,9 +76,24 @@ _GRID_RESOLUTIONS = {
 }
 
 
+_FORCING_START_YEAR = 1979
+_FORCING_END_YEAR = 1980
+
+
 def run_one(label: str, *, days: int, resolution: int | None,
+            forcing_dir: Path,
             timeout: int = 360) -> tuple[bool, str]:
-    """Execute one (grid, discretization) case and return (ok, summary)."""
+    """Execute one (grid, discretization) case and return (ok, summary).
+
+    Parameters
+    ----------
+    forcing_dir : Path
+        Where the AMIP CMIP6 forcing deck lives.  The orchestrator
+        (``main()``) generates this once under a fresh temp dir and
+        passes the same directory to every case so we don't pay the
+        ~5 s generator cost per case.  Each case still gets its own
+        ``--output`` temp dir for run artefacts.
+    """
     info = _GRID_RESOLUTIONS[label]
     grid_type = info["grid_type"]
     res = resolution if resolution is not None else info["resolution"]
@@ -90,6 +105,9 @@ def run_one(label: str, *, days: int, resolution: int | None,
         cmd = [
             sys.executable,
             str(_REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"),
+            "--forcing-dir", str(forcing_dir),
+            "--start-year", str(_FORCING_START_YEAR),
+            "--end-year", str(_FORCING_END_YEAR),
             "--grid-type", grid_type,
             "--discretization", disc,
             "--resolution", str(res),
@@ -148,30 +166,76 @@ def main(argv: list[str] | None = None) -> int:
                         default=list(_GRID_RESOLUTIONS.keys()),
                         help="Case label(s); default = all")
     parser.add_argument("--timeout", type=int, default=360)
+    parser.add_argument("--forcing-dir", type=Path, default=None,
+                        help="Pre-existing forcing deck directory.  When "
+                             "omitted the script auto-generates a 1-year "
+                             "deck in a temp dir so the smoke test is "
+                             "self-contained on a clean checkout where "
+                             "``forcing_amip/`` (gitignored) is absent.")
     args = parser.parse_args(argv)
 
     print(f"=== AMIP CMIP6 deck smoke test ({args.days}-day runs) ===")
     print(f"Cases: {args.cases}")
     print()
 
-    results: list[tuple[str, bool, str]] = []
-    for case in args.cases:
-        print(f"Running {case} …", flush=True)
-        ok, summary = run_one(case, days=args.days,
-                                resolution=args.resolution,
-                                timeout=args.timeout)
-        print(f"  {summary}", flush=True)
-        results.append((case, ok, summary))
+    # Auto-generate the forcing deck once (under tmp_path) when no path
+    # was supplied.  We share the same forcing dir across all cases so
+    # the synthetic-deck generator only runs once per smoke-test
+    # invocation.
+    forcing_owns_tempdir = False
+    if args.forcing_dir is None:
+        forcing_tempdir = tempfile.mkdtemp(prefix="amip_smoke_forcing_")
+        forcing_dir = Path(forcing_tempdir)
+        forcing_owns_tempdir = True
+        print(f"[smoke] Auto-generating forcing deck under {forcing_dir} …",
+              flush=True)
+        gen_cmd = [
+            sys.executable,
+            str(_REPO_ROOT / "scripts" / "generate_amip_forcing.py"),
+            "--out", str(forcing_dir),
+            # Single-year deck — minimal coverage to keep the smoke
+            # test fast.  Year window matches what we pass to the deck
+            # driver via ``--start-year`` / ``--end-year`` so the
+            # generated filenames line up with ``_check_forcing_files``.
+            "--start-year", str(_FORCING_START_YEAR),
+            "--end-year", str(_FORCING_END_YEAR),
+            # Coarse synthetic SST grid — interpolation tests live in
+            # the unit-test module, not here.
+            "--nlat-sst", "37",
+            "--nlon-sst", "72",
+        ]
+        gen_rc = subprocess.run(gen_cmd, capture_output=True, text=True)
+        if gen_rc.returncode != 0:
+            print(f"[smoke] FATAL: forcing generation failed: "
+                  f"{gen_rc.stderr.strip()[-500:]}")
+            return 2
+    else:
+        forcing_dir = Path(args.forcing_dir).resolve()
 
-    n_pass = sum(1 for _, ok, _ in results if ok)
-    n_fail = len(results) - n_pass
-    print()
-    print(f"Summary: {n_pass}/{len(results)} cases passed")
-    for case, ok, summary in results:
-        tag = "PASS" if ok else "FAIL"
-        print(f"  [{tag}] {case}: {summary.splitlines()[0]}")
+    try:
+        results: list[tuple[str, bool, str]] = []
+        for case in args.cases:
+            print(f"Running {case} …", flush=True)
+            ok, summary = run_one(case, days=args.days,
+                                    resolution=args.resolution,
+                                    forcing_dir=forcing_dir,
+                                    timeout=args.timeout)
+            print(f"  {summary}", flush=True)
+            results.append((case, ok, summary))
 
-    return 0 if n_fail == 0 else 1
+        n_pass = sum(1 for _, ok, _ in results if ok)
+        n_fail = len(results) - n_pass
+        print()
+        print(f"Summary: {n_pass}/{len(results)} cases passed")
+        for case, ok, summary in results:
+            tag = "PASS" if ok else "FAIL"
+            print(f"  [{tag}] {case}: {summary.splitlines()[0]}")
+
+        return 0 if n_fail == 0 else 1
+    finally:
+        if forcing_owns_tempdir:
+            import shutil
+            shutil.rmtree(forcing_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

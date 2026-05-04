@@ -429,6 +429,151 @@ class TestDeckChecker:
         )
 
 
+class TestOzoneUnitDetection:
+    """Regression tests for the ozone unit-conversion path.
+
+    The legoESM radiation kernel (RRTMG/RRTMGP) consumes ozone as
+    volume mixing ratio (mol/mol).  CMIP6 ``vmro3`` files are already
+    in mol/mol — no conversion needed — but several alternative
+    datasets (older NCAR/E3SM, some CESM forcing decks) use ``tro3``
+    in kg/kg.  The loader must detect units and convert; otherwise a
+    silently-mis-loaded ozone file would distort stratospheric SW
+    heating by ~40%.
+    """
+
+    def _write_ozone_file(self, path: Path, *, varname: str,
+                           units: str | None,
+                           value: float = 1.0e-6) -> None:
+        """Write a tiny 12-month × 4-lat × 5-plev ozone file with the
+        requested variable name and units.  Stores a constant value
+        ``value`` so the post-load array exactly equals
+        ``value * unit_factor``."""
+        from netCDF4 import Dataset
+        with Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", 4)
+            ds.createDimension("plev", 5)
+
+            t = ds.createVariable("time", "f8", ("time",))
+            t.units = "days since 1850-01-01 00:00:00"
+            t.calendar = "noleap"
+            t[:] = np.array([15.5 + 30.4375 * m for m in range(12)])
+
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la.units = "degrees_north"
+            la[:] = np.array([-60.0, -30.0, 30.0, 60.0])
+
+            pl = ds.createVariable("plev", "f8", ("plev",))
+            pl.units = "Pa"
+            pl[:] = np.array([5e2, 5e3, 1e4, 5e4, 9e4])
+
+            v = ds.createVariable(varname, "f8", ("time", "lat", "plev"))
+            if units is not None:
+                v.units = units
+            v[:] = value
+
+    def test_vmr_units_pass_through_unchanged(self, tmp_path):
+        """``mol mol-1`` is the CMIP6 vmro3 default; no conversion."""
+        from legoesm.forcing.external import _ozone_unit_factor
+        assert _ozone_unit_factor("mol mol-1", "vmro3") == 1.0
+        assert _ozone_unit_factor("mol/mol", "vmro3") == 1.0
+        assert _ozone_unit_factor("1", "vmro3") == 1.0
+
+    def test_kg_kg_converts_to_vmr(self):
+        """``kg kg-1`` is mass mixing ratio; convert by M_dry/M_o3."""
+        from legoesm import constants
+        from legoesm.forcing.external import _ozone_unit_factor
+        expected = constants.M_dry / constants.M_o3
+        assert _ozone_unit_factor("kg kg-1", "tro3") == expected
+        assert _ozone_unit_factor("kg/kg", "tro3") == expected
+
+    def test_ppmv_converts(self):
+        from legoesm.forcing.external import _ozone_unit_factor
+        assert _ozone_unit_factor("ppmv", "o3") == pytest.approx(1.0e-6)
+
+    def test_empty_units_with_vmro3_assumed_vmr(self):
+        """When ``units`` is missing, ``vmro3`` is assumed vmr (CMIP6
+        convention)."""
+        from legoesm.forcing.external import _ozone_unit_factor
+        assert _ozone_unit_factor("", "vmro3") == 1.0
+
+    def test_empty_units_with_tro3_assumed_mmr(self):
+        """``tro3`` is the CMIP-protocol name for mass mixing ratio."""
+        from legoesm import constants
+        from legoesm.forcing.external import _ozone_unit_factor
+        expected = constants.M_dry / constants.M_o3
+        assert _ozone_unit_factor("", "tro3") == expected
+
+    def test_unrecognised_units_raises(self):
+        from legoesm.forcing.external import _ozone_unit_factor
+        with pytest.raises(ValueError, match="Unrecognised ozone units"):
+            _ozone_unit_factor("DU", "ozone")
+
+    def test_loader_applies_conversion_for_kg_kg(self, tmp_path):
+        """End-to-end: a ``tro3`` file in kg/kg loads as vmr after
+        multiplication by ``M_dry / M_o3``.
+
+        Dispatch through the public ``get_ozone_at_time`` so the test
+        also covers the file-read path, not only the factor function.
+        """
+        import jax.numpy as jnp
+        from legoesm import constants
+        from legoesm.forcing.external import (
+            OzoneConfig, get_ozone_at_time, _detect_ozone_varname,
+            _load_monthly_zonal_with_levels,
+        )
+
+        path = tmp_path / "tro3_kgkg.nc"
+        # Use a value that becomes a sensible vmr after conversion:
+        # kg/kg = 1e-6 → vmr = 1e-6 * (M_dry / M_o3) ≈ 6.04e-7.
+        self._write_ozone_file(path, varname="tro3",
+                                units="kg kg-1", value=1.0e-6)
+
+        # Clear cache so the new file is re-read
+        _detect_ozone_varname.cache_clear()
+        _load_monthly_zonal_with_levels.cache_clear()
+
+        cfg = OzoneConfig(enabled=True, source="climatology",
+                          path=str(path), start_year=1979)
+        lat_grid = jnp.array(np.deg2rad(np.array([-30.0, 30.0])))
+        p_grid = jnp.array(np.array([1e3, 1e4, 5e4]))
+        out = get_ozone_at_time(cfg, day=15.0, lat_grid=lat_grid,
+                                 p_grid=p_grid)
+        out = np.asarray(out)
+        expected = 1.0e-6 * (constants.M_dry / constants.M_o3)
+        # Field is constant so all entries must match the expected vmr.
+        assert np.allclose(out, expected, rtol=1e-6), (
+            f"tro3 kg/kg conversion failed: got {out.flat[0]:.3e}, "
+            f"expected {expected:.3e}"
+        )
+
+    def test_loader_no_conversion_for_vmro3(self, tmp_path):
+        """A ``vmro3`` file in mol mol-1 must come back unchanged."""
+        import jax.numpy as jnp
+        from legoesm.forcing.external import (
+            OzoneConfig, get_ozone_at_time, _detect_ozone_varname,
+            _load_monthly_zonal_with_levels,
+        )
+
+        path = tmp_path / "vmro3_molmol.nc"
+        self._write_ozone_file(path, varname="vmro3",
+                                units="mol mol-1", value=2.0e-6)
+
+        _detect_ozone_varname.cache_clear()
+        _load_monthly_zonal_with_levels.cache_clear()
+
+        cfg = OzoneConfig(enabled=True, source="climatology",
+                          path=str(path), start_year=1979)
+        lat_grid = jnp.array(np.deg2rad(np.array([-30.0, 30.0])))
+        p_grid = jnp.array(np.array([1e3, 1e4, 5e4]))
+        out = np.asarray(get_ozone_at_time(cfg, day=15.0,
+                                             lat_grid=lat_grid,
+                                             p_grid=p_grid))
+        assert np.allclose(out, 2.0e-6, rtol=1e-6), (
+            f"vmro3 mol mol-1 should pass unchanged; got {out.flat[0]:.3e}"
+        )
+
+
 class TestValidator:
     """Regression tests for ``scripts/validate_amip_run.py``.
 
