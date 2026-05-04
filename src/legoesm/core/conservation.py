@@ -366,7 +366,7 @@ def zero_mean_tendency(
     -------
     jax.Array : Corrected tendency with zero global integral.
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     area = grid.area
     area_acc = area.astype(acc)
     total_area_acc = jnp.sum(area_acc)
@@ -541,6 +541,31 @@ def fix_mass_hydrostatic_target(
     correction = (target_mass - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
+
+
+def fix_ps_mass(
+    p_s_new: jax.Array,
+    p_s_old: jax.Array,
+    grid: CubedSphereGrid,
+    owned_mask: jax.Array | None = None,
+) -> jax.Array:
+    """Fix dry mass on raw p_s arrays — non-anchor variant.
+
+    Raw-array equivalent of :func:`fix_mass_hydrostatic`.  Lets
+    callers (e.g. the FV3 D-grid dycore) avoid round-tripping the
+    full prognostic state through ``fv3_to_hydrostatic`` just to
+    extract ``p_s``: D-grid → cell-centre wind interpolation is
+    expensive and gets thrown away because only ``p_s`` is touched.
+
+    Both ``mass_old`` and ``mass_new`` are computed in one
+    batched allreduce, matching :func:`fix_mass_hydrostatic`'s
+    communication pattern.
+    """
+    mass_old, mass_new = _batch_global_area_sums(
+        [p_s_old, p_s_new], grid, owned_mask=owned_mask,
+    )
+    correction = (mass_old - mass_new) / grid.total_area
+    return p_s_new + correction
 
 
 def fix_ps_mass_target(
@@ -817,7 +842,7 @@ def global_integral_voronoi(field, mesh) -> jax.Array:
     -------
     jax.Array : scalar
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     return jnp.sum(field.astype(acc) * mesh.areaCell.astype(acc))
 
 

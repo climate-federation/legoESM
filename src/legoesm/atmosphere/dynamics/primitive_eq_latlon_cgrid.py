@@ -597,8 +597,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
     def compute_mass(self, state: CGridLatLonHydrostaticState) -> jax.Array:
         """Compute total mass (for conservation fixer target)."""
-        from legoesm.core.conservation import _accumulation_dtype
-        acc = _accumulation_dtype()
+        from legoesm.core.conservation import _conservation_accumulator
+        acc = _conservation_accumulator()
         return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
@@ -728,8 +728,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         # Conservation fixer for mass
         if self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
-            acc = _accumulation_dtype()
+            from legoesm.core.conservation import _conservation_accumulator
+            acc = _conservation_accumulator()
             area = self.grid.area.astype(acc)
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one

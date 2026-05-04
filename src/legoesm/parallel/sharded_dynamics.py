@@ -1,6 +1,6 @@
 """Sharded dynamics for multi-GPU/TPU cubed-sphere simulations.
 
-Uses ``jax.experimental.shard_map`` to partition cubed-sphere faces across
+Uses ``jax.shard_map`` to partition cubed-sphere faces across
 devices, with explicit halo exchange at partition boundaries.
 
 Design overview
@@ -1568,8 +1568,13 @@ def make_voronoi_sharded_step(
 
     import numpy as np
     try:
-        from jax.shard_map import shard_map
-    except ImportError:  # JAX < 0.8
+        _shard_map_impl = jax.shard_map
+
+        def shard_map(*args, check_rep=None, **kwargs):
+            if check_rep is not None and "check_vma" not in kwargs:
+                kwargs["check_vma"] = check_rep
+            return _shard_map_impl(*args, **kwargs)
+    except AttributeError:  # JAX < 0.8
         from jax.experimental.shard_map import shard_map
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
         mpas_hydrostatic_tendencies,

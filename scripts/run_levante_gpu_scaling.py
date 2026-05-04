@@ -841,7 +841,6 @@ def run_benchmark(
     _is_mpi = _n_ranks > 1
 
     # Grid-specific MPI layouts (populated in grid branches below).
-    _latlon_layout = None
     _voronoi_layout = None
 
     if grid_type == "spectral":
@@ -990,13 +989,10 @@ def run_benchmark(
         return x
     state = jax.tree.map(_cast, state)
 
-    # --- MPI scatter for lat-lon and icosahedral ---
-    # (cubed-sphere MPI keeps full state on all ranks; lat-lon and
-    # icosahedral scatter to rank-local)
-    if _latlon_layout is not None:
-        from legoesm.parallel.latlon_mpi import scatter_state_latlon
-        state = scatter_state_latlon(state, _latlon_layout)
-    elif _voronoi_layout is not None:
+    # --- MPI scatter for rank-local grids ---
+    # Cubed-sphere MPI still keeps full state on all ranks; icosahedral
+    # scatters to rank-local domains.
+    if _voronoi_layout is not None:
         from legoesm.parallel.voronoi_mpi import scatter_state_voronoi
         state = scatter_state_voronoi(state, _voronoi_layout.partition)
 
@@ -1030,19 +1026,8 @@ def run_benchmark(
     physics_fn = _build_physics_fn(physics_level, grid_type)
 
     # --- Step function selection ---
-    # MPI distributed step functions (lat-lon and icosahedral) take
-    # priority over SPMD sharded steps.
-    if _latlon_layout is not None:
-        from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
-        # Physics wrapping: MPI step calls model.step per RK stage.
-        if physics_fn is not None:
-            _phys = physics_fn
-            _orig_step = model.step
-            model.step = lambda s, dt, physics_fn=None: _orig_step(
-                s, dt, physics_fn=_phys,
-            )
-        step_fn = make_latlon_mpi_step(model, grid, _latlon_layout, sigma, config)
-    elif _voronoi_layout is not None:
+    # MPI distributed step functions take priority over SPMD sharded steps.
+    if _voronoi_layout is not None:
         from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
         step_fn = make_voronoi_mpi_step(model, _voronoi_layout, sigma, config)
     # SPMD sharded step functions (single-node multi-GPU).
@@ -1052,24 +1037,16 @@ def run_benchmark(
     elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
         step_fn = make_sharded_step(model, dev_config, n=n_grid, nlev=n_levels)
-    elif grid_type == "latlon" and dev_config.n_devices > 1:
-        from legoesm.parallel.latlon_sharded import make_latlon_sharded_step
-        step_fn = make_latlon_sharded_step(model, dev_config, physics_fn=physics_fn)
     else:
         step_fn = model.step
 
-    # Wrap step_fn to include physics for non-MPI, non-latlon grids.
-    # MPI lat-lon already has physics baked in above.
+    # Wrap step_fn to include physics for non-MPI grids.
     # MPI icosahedral: make_voronoi_mpi_step handles dycore only
     #   (physics integration requires extending make_voronoi_mpi_step).
-    # Lat-lon sharded step already has physics baked in via closure.
     # For cubed-sphere and icosahedral SPMD, physics_fn is passed to __call__.
     # For single-GPU all grids, physics_fn is passed to model.step.
-    if physics_fn is not None and _latlon_layout is None and _voronoi_layout is None:
-        if grid_type == "latlon" and dev_config.n_devices > 1:
-            # Physics already baked into the sharded step
-            pass
-        elif dev_config.n_devices > 1 and grid_type in ("cubed-sphere", "icosahedral"):
+    if physics_fn is not None and _voronoi_layout is None:
+        if dev_config.n_devices > 1 and grid_type in ("cubed-sphere", "icosahedral"):
             # CompiledShardedStep / VoronoiShardedStep accept physics_fn
             _sharded_step = step_fn
             _phys = physics_fn

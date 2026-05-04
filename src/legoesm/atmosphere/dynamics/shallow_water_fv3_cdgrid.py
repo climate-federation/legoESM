@@ -263,8 +263,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
-            acc = _accumulation_dtype()
+            from legoesm.core.conservation import _conservation_accumulator
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -335,8 +335,8 @@ class FV3FBShallowWaterModel:
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
-            acc = _accumulation_dtype()
+            from legoesm.core.conservation import _conservation_accumulator
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -451,8 +451,8 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import _accumulation_dtype
-            acc = _accumulation_dtype()
+            from legoesm.core.conservation import _conservation_accumulator
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:

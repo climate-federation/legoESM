@@ -40,8 +40,13 @@ from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 logger = logging.getLogger("legoesm.parallel.cubesphere_exchange")
 
 try:
-    from jax.shard_map import shard_map  # JAX >= 0.8
-except (ImportError, ModuleNotFoundError):
+    _shard_map_impl = jax.shard_map  # JAX >= 0.8
+
+    def shard_map(*args, check_rep=None, **kwargs):
+        if check_rep is not None and "check_vma" not in kwargs:
+            kwargs["check_vma"] = check_rep
+        return _shard_map_impl(*args, **kwargs)
+except AttributeError:
     from jax.experimental.shard_map import shard_map
 
 # ---------------------------------------------------------------------------
@@ -185,7 +190,7 @@ def _make_exchange_allgather(mesh, ndim):
              check_rep=False)
     def _exchange(local_shard):
         n = local_shard.shape[1]
-        my_face = local_shard[0]
+        n_local_faces = local_shard.shape[0]
 
         # Extract the 4 edge strips locally and only ``all_gather``
         # those — the previous version gathered the whole ``(1,n,n,C)``
@@ -195,46 +200,49 @@ def _make_exchange_allgather(mesh, ndim):
         # multi-GPU NCCL.
         if ndim == 3:
             my_strips = jnp.stack([
-                my_face[0, :], my_face[-1, :],
-                my_face[:, 0], my_face[:, -1],
-            ], axis=0)  # (4, n)
+                local_shard[:, 0, :], local_shard[:, -1, :],
+                local_shard[:, :, 0], local_shard[:, :, -1],
+            ], axis=1)  # (n_local_faces, 4, n)
         else:
             my_strips = jnp.stack([
-                my_face[0, :, :], my_face[-1, :, :],
-                my_face[:, 0, :], my_face[:, -1, :],
-            ], axis=0)  # (4, n, C)
+                local_shard[:, 0, :, :], local_shard[:, -1, :, :],
+                local_shard[:, :, 0, :], local_shard[:, :, -1, :],
+            ], axis=1)  # (n_local_faces, 4, n, C)
 
         all_strips = jax.lax.all_gather(my_strips, "face", tiled=True)
-        # all_strips shape: (n_faces, 4, n[, C]) when tiled=True returns
-        # the gather along the first axis of ``my_strips``; with the
-        # leading-axis-of-4 layout, all_gather concatenates per-device
-        # along that axis, giving (n_faces*4,) on axis 0.  Restore the
-        # (n_faces, 4, ...) layout.
         n_faces = mesh.shape["face"]
+        n_global_faces = n_faces * n_local_faces
         if ndim == 3:
-            all_strips = all_strips.reshape(n_faces, 4, n)
+            all_strips = all_strips.reshape(n_global_faces, 4, n)
         else:
-            all_strips = all_strips.reshape(n_faces, 4, n, my_face.shape[-1])
+            all_strips = all_strips.reshape(
+                n_global_faces, 4, n, local_shard.shape[-1],
+            )
 
-        my_idx = jax.lax.axis_index("face")
-        my_nbr_f = _NBR_FACES[my_idx]
-        my_nbr_e = _NBR_EDGES[my_idx]
-        my_rev = _IS_REVERSED[my_idx]
+        shard_idx = jax.lax.axis_index("face")
+        first_face = shard_idx * n_local_faces
+        local_face_ids = first_face + jnp.arange(n_local_faces, dtype=jnp.int32)
 
-        # Single Pad HLO op replaces alloc-zeros + scatter (subsequent
-        # halo fill writes only into the zeroed border).
-        if ndim == 3:
-            padded = jnp.pad(my_face, ((1, 1), (1, 1)))
-        else:
-            padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
-        halo_strips = []
-        for e in range(4):
-            strip = all_strips[my_nbr_f[e], my_nbr_e[e]]
-            strip = jnp.where(my_rev[e], strip[::-1], strip)
-            halo_strips.append(strip)
+        def _assemble_face(my_face, my_idx):
+            my_nbr_f = _NBR_FACES[my_idx]
+            my_nbr_e = _NBR_EDGES[my_idx]
+            my_rev = _IS_REVERSED[my_idx]
 
-        padded = _fill_halo_and_corners(padded, halo_strips, n)
-        return padded[None]
+            # Single Pad HLO op replaces alloc-zeros + scatter (subsequent
+            # halo fill writes only into the zeroed border).
+            if ndim == 3:
+                padded = jnp.pad(my_face, ((1, 1), (1, 1)))
+            else:
+                padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
+            halo_strips = []
+            for e in range(4):
+                strip = all_strips[my_nbr_f[e], my_nbr_e[e]]
+                strip = jnp.where(my_rev[e], strip[::-1], strip)
+                halo_strips.append(strip)
+
+            return _fill_halo_and_corners(padded, halo_strips, n)
+
+        return jax.vmap(_assemble_face)(local_shard, local_face_ids)
 
     return _exchange
 
@@ -355,6 +363,12 @@ def select_exchange_backend(
     bool
         True if ppermute is recommended, False for all_gather.
     """
+    if n_devices != 6:
+        # The ppermute schedule maps cubed-sphere face IDs directly to
+        # device IDs.  With 2 or 3 devices each shard owns multiple faces,
+        # so use the all_gather backend that understands grouped faces.
+        return False
+
     allgather_bytes = 6 * n * n * nlev * dtype_bytes
     return allgather_bytes > _AUTO_THRESHOLD_BYTES
 
@@ -395,141 +409,136 @@ def _make_h2_exchange_allgather(mesh, ndim):
              check_rep=False)
     def _exchange(local_shard):
         n = local_shard.shape[1]
-        my_face = local_shard[0]
+        n_local_faces = local_shard.shape[0]
 
         # Pack 4 edges × 2 depths from the local face.
         # Edge order: WEST(0), EAST(1), SOUTH(2), NORTH(3).
         if ndim == 3:
             my_strips = jnp.stack([
-                jnp.stack([my_face[0, :], my_face[1, :]], axis=0),
-                jnp.stack([my_face[-1, :], my_face[-2, :]], axis=0),
-                jnp.stack([my_face[:, 0], my_face[:, 1]], axis=0),
-                jnp.stack([my_face[:, -1], my_face[:, -2]], axis=0),
-            ], axis=0)  # (4, 2, n)
+                jnp.stack([local_shard[:, 0, :], local_shard[:, 1, :]], axis=1),
+                jnp.stack([local_shard[:, -1, :], local_shard[:, -2, :]], axis=1),
+                jnp.stack([local_shard[:, :, 0], local_shard[:, :, 1]], axis=1),
+                jnp.stack([local_shard[:, :, -1], local_shard[:, :, -2]], axis=1),
+            ], axis=1)  # (n_local_faces, 4, 2, n)
         else:
             my_strips = jnp.stack([
-                jnp.stack([my_face[0, :, :], my_face[1, :, :]], axis=0),
-                jnp.stack([my_face[-1, :, :], my_face[-2, :, :]], axis=0),
-                jnp.stack([my_face[:, 0, :], my_face[:, 1, :]], axis=0),
-                jnp.stack([my_face[:, -1, :], my_face[:, -2, :]], axis=0),
-            ], axis=0)  # (4, 2, n, C)
+                jnp.stack([local_shard[:, 0, :, :], local_shard[:, 1, :, :]], axis=1),
+                jnp.stack([local_shard[:, -1, :, :], local_shard[:, -2, :, :]], axis=1),
+                jnp.stack([local_shard[:, :, 0, :], local_shard[:, :, 1, :]], axis=1),
+                jnp.stack([local_shard[:, :, -1, :], local_shard[:, :, -2, :]], axis=1),
+            ], axis=1)  # (n_local_faces, 4, 2, n, C)
 
         all_strips = jax.lax.all_gather(my_strips, "face", tiled=True)
         n_faces = mesh.shape["face"]
+        n_global_faces = n_faces * n_local_faces
         if ndim == 3:
-            all_strips = all_strips.reshape(n_faces, 4, 2, n)
+            all_strips = all_strips.reshape(n_global_faces, 4, 2, n)
         else:
             all_strips = all_strips.reshape(
-                n_faces, 4, 2, n, my_face.shape[-1],
+                n_global_faces, 4, 2, n, local_shard.shape[-1],
             )
 
-        my_idx = jax.lax.axis_index("face")
-        my_nbr_f = _NBR_FACES[my_idx]
-        my_nbr_e = _NBR_EDGES[my_idx]
-        my_rev = _IS_REVERSED[my_idx]
+        shard_idx = jax.lax.axis_index("face")
+        first_face = shard_idx * n_local_faces
+        local_face_ids = first_face + jnp.arange(n_local_faces, dtype=jnp.int32)
 
-        if ndim == 3:
-            padded = jnp.pad(my_face, ((2, 2), (2, 2)))
-        else:
-            padded = jnp.pad(my_face, ((2, 2), (2, 2), (0, 0)))
+        def _assemble_face(my_face, my_idx):
+            my_nbr_f = _NBR_FACES[my_idx]
+            my_nbr_e = _NBR_EDGES[my_idx]
+            my_rev = _IS_REVERSED[my_idx]
 
-        # Place each edge's two-deep strip.  ``recv_edge`` is which
-        # edge of *this* face needs filling; the source comes from
-        # the neighbour face's neighbour-edge.
-        for recv_edge in range(4):
-            nbr_face = my_nbr_f[recv_edge]
-            nbr_edge = my_nbr_e[recv_edge]
-            rev = my_rev[recv_edge]
+            if ndim == 3:
+                padded = jnp.pad(my_face, ((2, 2), (2, 2)))
+            else:
+                padded = jnp.pad(my_face, ((2, 2), (2, 2), (0, 0)))
 
-            strip_d0 = all_strips[nbr_face, nbr_edge, 0]
-            strip_d1 = all_strips[nbr_face, nbr_edge, 1]
-            strip_d0 = jnp.where(rev, strip_d0[::-1], strip_d0)
-            strip_d1 = jnp.where(rev, strip_d1[::-1], strip_d1)
+            # Place each edge's two-deep strip.  ``recv_edge`` is which
+            # edge of *this* face needs filling; the source comes from
+            # the neighbour face's neighbour-edge.
+            for recv_edge in range(4):
+                nbr_face = my_nbr_f[recv_edge]
+                nbr_edge = my_nbr_e[recv_edge]
+                rev = my_rev[recv_edge]
 
-            if recv_edge == 0:  # WEST
-                padded = padded.at[1, 2:-2].set(strip_d0)
-                padded = padded.at[0, 2:-2].set(strip_d1)
-            elif recv_edge == 1:  # EAST
-                padded = padded.at[n + 2, 2:-2].set(strip_d0)
-                padded = padded.at[n + 3, 2:-2].set(strip_d1)
-            elif recv_edge == 2:  # SOUTH
-                padded = padded.at[2:-2, 1].set(strip_d0)
-                padded = padded.at[2:-2, 0].set(strip_d1)
-            else:  # NORTH
-                padded = padded.at[2:-2, n + 2].set(strip_d0)
-                padded = padded.at[2:-2, n + 3].set(strip_d1)
+                strip_d0 = all_strips[nbr_face, nbr_edge, 0]
+                strip_d1 = all_strips[nbr_face, nbr_edge, 1]
+                strip_d0 = jnp.where(rev, strip_d0[::-1], strip_d0)
+                strip_d1 = jnp.where(rev, strip_d1[::-1], strip_d1)
 
-        # Fill the L-shaped corner cells (4 cells per corner × 4 corners).
-        # Each corner only depends on already-filled edge halos within
-        # *this* face, so we can compute it directly without re-using
-        # the (6,...) loop in :func:`_fill_corners_h2`.  (The shared
-        # helper iterates ``for f in range(6)`` and would access
-        # non-existent faces on the single-face shard here.)
-        if ndim == 3:
-            sw_inner = 0.5 * (padded[1, 2] + padded[2, 1])
-            padded = padded.at[1, 1].set(sw_inner)
-            padded = padded.at[0, 1].set(0.5 * (padded[0, 2] + sw_inner))
-            padded = padded.at[1, 0].set(0.5 * (padded[2, 0] + sw_inner))
-            padded = padded.at[0, 0].set(
-                0.5 * (padded[0, 1] + padded[1, 0]),
-            )
+                if recv_edge == 0:  # WEST
+                    padded = padded.at[1, 2:-2].set(strip_d0)
+                    padded = padded.at[0, 2:-2].set(strip_d1)
+                elif recv_edge == 1:  # EAST
+                    padded = padded.at[n + 2, 2:-2].set(strip_d0)
+                    padded = padded.at[n + 3, 2:-2].set(strip_d1)
+                elif recv_edge == 2:  # SOUTH
+                    padded = padded.at[2:-2, 1].set(strip_d0)
+                    padded = padded.at[2:-2, 0].set(strip_d1)
+                else:  # NORTH
+                    padded = padded.at[2:-2, n + 2].set(strip_d0)
+                    padded = padded.at[2:-2, n + 3].set(strip_d1)
 
-            se_inner = 0.5 * (padded[-2, 2] + padded[-3, 1])
-            padded = padded.at[-2, 1].set(se_inner)
-            padded = padded.at[-1, 1].set(0.5 * (padded[-1, 2] + se_inner))
-            padded = padded.at[-2, 0].set(0.5 * (padded[-3, 0] + se_inner))
-            padded = padded.at[-1, 0].set(
-                0.5 * (padded[-1, 1] + padded[-2, 0]),
-            )
+            # Fill the L-shaped corner cells.  Each corner only depends on
+            # already-filled edge halos within this local face.
+            if ndim == 3:
+                sw_inner = 0.5 * (padded[1, 2] + padded[2, 1])
+                padded = padded.at[1, 1].set(sw_inner)
+                padded = padded.at[0, 1].set(0.5 * (padded[0, 2] + sw_inner))
+                padded = padded.at[1, 0].set(0.5 * (padded[2, 0] + sw_inner))
+                padded = padded.at[0, 0].set(0.5 * (padded[0, 1] + padded[1, 0]))
 
-            nw_inner = 0.5 * (padded[1, -3] + padded[2, -2])
-            padded = padded.at[1, -2].set(nw_inner)
-            padded = padded.at[0, -2].set(0.5 * (padded[0, -3] + nw_inner))
-            padded = padded.at[1, -1].set(0.5 * (padded[2, -1] + nw_inner))
-            padded = padded.at[0, -1].set(
-                0.5 * (padded[0, -2] + padded[1, -1]),
-            )
+                se_inner = 0.5 * (padded[-2, 2] + padded[-3, 1])
+                padded = padded.at[-2, 1].set(se_inner)
+                padded = padded.at[-1, 1].set(0.5 * (padded[-1, 2] + se_inner))
+                padded = padded.at[-2, 0].set(0.5 * (padded[-3, 0] + se_inner))
+                padded = padded.at[-1, 0].set(0.5 * (padded[-1, 1] + padded[-2, 0]))
 
-            ne_inner = 0.5 * (padded[-2, -3] + padded[-3, -2])
-            padded = padded.at[-2, -2].set(ne_inner)
-            padded = padded.at[-1, -2].set(0.5 * (padded[-1, -3] + ne_inner))
-            padded = padded.at[-2, -1].set(0.5 * (padded[-3, -1] + ne_inner))
-            padded = padded.at[-1, -1].set(
-                0.5 * (padded[-1, -2] + padded[-2, -1]),
-            )
-        else:
-            sw_inner = 0.5 * (padded[1, 2, :] + padded[2, 1, :])
-            padded = padded.at[1, 1, :].set(sw_inner)
-            padded = padded.at[0, 1, :].set(0.5 * (padded[0, 2, :] + sw_inner))
-            padded = padded.at[1, 0, :].set(0.5 * (padded[2, 0, :] + sw_inner))
-            padded = padded.at[0, 0, :].set(
-                0.5 * (padded[0, 1, :] + padded[1, 0, :]),
-            )
+                nw_inner = 0.5 * (padded[1, -3] + padded[2, -2])
+                padded = padded.at[1, -2].set(nw_inner)
+                padded = padded.at[0, -2].set(0.5 * (padded[0, -3] + nw_inner))
+                padded = padded.at[1, -1].set(0.5 * (padded[2, -1] + nw_inner))
+                padded = padded.at[0, -1].set(0.5 * (padded[0, -2] + padded[1, -1]))
 
-            se_inner = 0.5 * (padded[-2, 2, :] + padded[-3, 1, :])
-            padded = padded.at[-2, 1, :].set(se_inner)
-            padded = padded.at[-1, 1, :].set(0.5 * (padded[-1, 2, :] + se_inner))
-            padded = padded.at[-2, 0, :].set(0.5 * (padded[-3, 0, :] + se_inner))
-            padded = padded.at[-1, 0, :].set(
-                0.5 * (padded[-1, 1, :] + padded[-2, 0, :]),
-            )
+                ne_inner = 0.5 * (padded[-2, -3] + padded[-3, -2])
+                padded = padded.at[-2, -2].set(ne_inner)
+                padded = padded.at[-1, -2].set(0.5 * (padded[-1, -3] + ne_inner))
+                padded = padded.at[-2, -1].set(0.5 * (padded[-3, -1] + ne_inner))
+                padded = padded.at[-1, -1].set(0.5 * (padded[-1, -2] + padded[-2, -1]))
+            else:
+                sw_inner = 0.5 * (padded[1, 2, :] + padded[2, 1, :])
+                padded = padded.at[1, 1, :].set(sw_inner)
+                padded = padded.at[0, 1, :].set(0.5 * (padded[0, 2, :] + sw_inner))
+                padded = padded.at[1, 0, :].set(0.5 * (padded[2, 0, :] + sw_inner))
+                padded = padded.at[0, 0, :].set(
+                    0.5 * (padded[0, 1, :] + padded[1, 0, :]),
+                )
 
-            nw_inner = 0.5 * (padded[1, -3, :] + padded[2, -2, :])
-            padded = padded.at[1, -2, :].set(nw_inner)
-            padded = padded.at[0, -2, :].set(0.5 * (padded[0, -3, :] + nw_inner))
-            padded = padded.at[1, -1, :].set(0.5 * (padded[2, -1, :] + nw_inner))
-            padded = padded.at[0, -1, :].set(
-                0.5 * (padded[0, -2, :] + padded[1, -1, :]),
-            )
+                se_inner = 0.5 * (padded[-2, 2, :] + padded[-3, 1, :])
+                padded = padded.at[-2, 1, :].set(se_inner)
+                padded = padded.at[-1, 1, :].set(0.5 * (padded[-1, 2, :] + se_inner))
+                padded = padded.at[-2, 0, :].set(0.5 * (padded[-3, 0, :] + se_inner))
+                padded = padded.at[-1, 0, :].set(
+                    0.5 * (padded[-1, 1, :] + padded[-2, 0, :]),
+                )
 
-            ne_inner = 0.5 * (padded[-2, -3, :] + padded[-3, -2, :])
-            padded = padded.at[-2, -2, :].set(ne_inner)
-            padded = padded.at[-1, -2, :].set(0.5 * (padded[-1, -3, :] + ne_inner))
-            padded = padded.at[-2, -1, :].set(0.5 * (padded[-3, -1, :] + ne_inner))
-            padded = padded.at[-1, -1, :].set(
-                0.5 * (padded[-1, -2, :] + padded[-2, -1, :]),
-            )
-        return padded[None]
+                nw_inner = 0.5 * (padded[1, -3, :] + padded[2, -2, :])
+                padded = padded.at[1, -2, :].set(nw_inner)
+                padded = padded.at[0, -2, :].set(0.5 * (padded[0, -3, :] + nw_inner))
+                padded = padded.at[1, -1, :].set(0.5 * (padded[2, -1, :] + nw_inner))
+                padded = padded.at[0, -1, :].set(
+                    0.5 * (padded[0, -2, :] + padded[1, -1, :]),
+                )
+
+                ne_inner = 0.5 * (padded[-2, -3, :] + padded[-3, -2, :])
+                padded = padded.at[-2, -2, :].set(ne_inner)
+                padded = padded.at[-1, -2, :].set(0.5 * (padded[-1, -3, :] + ne_inner))
+                padded = padded.at[-2, -1, :].set(0.5 * (padded[-3, -1, :] + ne_inner))
+                padded = padded.at[-1, -1, :].set(
+                    0.5 * (padded[-1, -2, :] + padded[-2, -1, :]),
+                )
+            return padded
+
+        return jax.vmap(_assemble_face)(local_shard, local_face_ids)
 
     return _exchange
 

@@ -884,24 +884,28 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 p_s=state_new.p_s.replace(data=p_s_damped),
             )
 
-        # Conservation fixer (operates on p_s which is at cell centres)
+        # Conservation fixer (operates on p_s, which is at cell centres
+        # in *both* hydrostatic and FV3 D-grid layouts).  The previous
+        # implementation routed through ``fv3_to_hydrostatic`` just to
+        # extract p_s, which redundantly computed the (expensive) D-grid
+        # → cell-centre wind interpolation only to discard it.  The raw
+        # p_s fix functions in :mod:`legoesm.core.conservation` operate
+        # directly on the surface-pressure array and skip all winds.
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
-                from legoesm.core.conservation import fix_mass_hydrostatic_target
+                from legoesm.core.conservation import fix_ps_mass_target
                 # _target_mass is precomputed in step() outside the JIT boundary.
-                state_h = fv3_to_hydrostatic(state_new, cdgrid)
-                state_h_fixed = fix_mass_hydrostatic_target(
-                    state_h, self._target_mass, self.grid,
+                p_s_fixed = fix_ps_mass_target(
+                    state_new.p_s.data, self._target_mass, self.grid,
                 )
-                state_new = state_new._replace(p_s=state_h_fixed.p_s)
             else:
-                from legoesm.core.conservation import fix_mass_hydrostatic
-                state_h_new = fv3_to_hydrostatic(state_new, cdgrid)
-                state_h_old = fv3_to_hydrostatic(state, cdgrid)
-                state_h_fixed = fix_mass_hydrostatic(
-                    state_h_new, state_h_old, self.grid,
+                from legoesm.core.conservation import fix_ps_mass
+                p_s_fixed = fix_ps_mass(
+                    state_new.p_s.data, state.p_s.data, self.grid,
                 )
-                state_new = state_new._replace(p_s=state_h_fixed.p_s)
+            state_new = state_new._replace(
+                p_s=state_new.p_s.replace(data=p_s_fixed),
+            )
 
         return cast_pytree(state_new, None, "storage")
 
