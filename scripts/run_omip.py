@@ -344,6 +344,13 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 B_h=5.0e9,
                 bottom_drag_r=2.5e-3,
                 bottom_drag_bbl_thickness=100.0,
+                # MOM6 OM4 DRAG_BG_VEL — quadratic-with-floor drag.
+                # At standing-mode amplitudes (~0.05 m/s) this gives ~3×
+                # more drag than pure linear, which is the cheapest
+                # production fix for the deep-cell barotropic mode at
+                # steep slopes.  Recovers linear drag (bit-exact) at
+                # |u|→0; scales as Cd·|u| for |u|≫u_bg.
+                bottom_drag_bg_velocity=0.1,
                 n_barotropic_substeps=30,
                 use_conservation_fixer=True,
                 physics=bathy_physics,
@@ -1124,9 +1131,40 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         else:
             u_c = u_raw
             v_c = v_raw
-        max_u = float(np.max(np.sqrt(u_c**2 + v_c**2)))
+        speed_3d = np.sqrt(u_c**2 + v_c**2)
+        max_u = float(np.max(speed_3d))
 
-    return {"SST": sst, "SSS": sss, "SSH": ssh, "max_speed": max_u if grid_type != "spectral" else 0.0}
+    # ---- B2 standing-mode purity diagnostic P_bt ----
+    # P_bt = ⟨|U_bar|²⟩ / ⟨|u_3d|²⟩ — fraction of KE in the depth-mean
+    # (barotropic) component.  At a healthy spinup P_bt ≈ 0.05–0.15
+    # depending on the regime; a barotropic standing mode locked onto
+    # a single column drives P_bt → 1 there.  Uses simple unweighted
+    # depth-mean (partial-cell thickness ignored — proxy good enough
+    # for monitoring; it overweights deep columns slightly which is
+    # exactly where the failure lives).  Also reports max\|u\| location.
+    pbt = 0.0
+    j_max = i_max = -1
+    if grid_type != "spectral" and grid_type != "mpas":
+        nlev_state = u_c.shape[-1]
+        U_bar = np.mean(u_c, axis=-1)
+        V_bar = np.mean(v_c, axis=-1)
+        ke_baro = 0.5 * (U_bar**2 + V_bar**2)
+        ke_3d = 0.5 * speed_3d**2
+        wet_3d_b = np.broadcast_to(wet[..., np.newaxis], ke_3d.shape)
+        ke_baro_total = float(np.sum(np.where(wet, ke_baro, 0.0))) * nlev_state
+        ke_3d_total = float(np.sum(np.where(wet_3d_b, ke_3d, 0.0)))
+        pbt = ke_baro_total / max(ke_3d_total, 1e-30)
+        speed_masked = np.where(wet[..., np.newaxis], speed_3d, -1.0)
+        idx = np.unravel_index(np.argmax(speed_masked), speed_3d.shape)
+        j_max, i_max = int(idx[0]), int(idx[1])
+
+    return {
+        "SST": sst, "SSS": sss, "SSH": ssh,
+        "max_speed": max_u if grid_type != "spectral" else 0.0,
+        "P_bt": float(pbt),
+        "j_maxu": j_max,
+        "i_maxu": i_max,
+    }
 
 
 def _check_finite(state, grid_type):
@@ -1270,6 +1308,15 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     last_print = t0
     blown_up = False
 
+    # ---- B2 standing-mode time diagnostic χ ----
+    # χ(t) = ||η^n - ½(η^{n−1} + η^{n+1})||² / ||η^n||²  (Williams 2009).
+    # Tracks the 2-Δt-block computational-mode amplitude in η: a clean
+    # integration sits at χ~1e-6, a growing computational mode shows χ
+    # rising exponentially 5–10 days BEFORE max|u| spikes.  Buffer
+    # holds the last 3 end-of-block η snapshots; we compute χ on the
+    # middle once we have 3.
+    eta_history: list[np.ndarray] = []
+
     # ----- JRA55-do block-scan path (multi-core friendly) ----------------
     # Wraps N ocean steps in lax.scan inside @jax.jit for ~30x GPU
     # speedup.  The scan body calls model._step_impl() (no inner JIT)
@@ -1312,6 +1359,34 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 break
 
             scalars = _extract_scalars(state, grid_type, grid, z_coord)
+
+            # B2: chi diagnostic from last 3 eta snapshots
+            chi = 0.0
+            if grid_type == "latlon":
+                eta_now = np.asarray(state.eta.data)
+                eta_history.append(eta_now)
+                if len(eta_history) > 3:
+                    eta_history.pop(0)
+                if len(eta_history) == 3:
+                    eta_m2, eta_m1, eta_0 = eta_history
+                    mask_eta = np.asarray(state.land_mask.data) > 0.5
+                    diff = (eta_m1 - 0.5 * (eta_0 + eta_m2)) * mask_eta
+                    den = eta_m1 * mask_eta
+                    num_sq = float(np.sum(diff * diff))
+                    den_sq = float(np.sum(den * den))
+                    chi = num_sq / max(den_sq, 1e-30)
+            scalars["chi"] = chi
+
+            # Convert max|u| location indices → lat/lon for readability
+            if grid_type == "latlon" and "j_maxu" in scalars and scalars["j_maxu"] >= 0:
+                lat_v = np.asarray(grid.lat) if hasattr(grid, "lat") else None
+                lon_v = np.asarray(grid.lon) if hasattr(grid, "lon") else None
+                if lat_v is not None and lon_v is not None:
+                    j = scalars["j_maxu"]; i = scalars["i_maxu"]
+                    if 0 <= j < len(lat_v) and 0 <= i < len(lon_v):
+                        scalars["lat_maxu"] = float(lat_v[j])
+                        scalars["lon_maxu"] = float(lon_v[i])
+
             diag["day"].append(day)
             diag["step"].append(step)
             for k, v in scalars.items():
@@ -1319,9 +1394,19 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             elapsed_total = time.time() - t0
             total_days = n_steps * dt / 86400.0
-            summary = " | ".join(
-                f"{k}={v:.4g}" for k, v in list(scalars.items())[:4]
+            # Custom summary string includes the new diagnostics
+            scalar_summary = (
+                f"SST={scalars['SST']:.3g} "
+                f"max|u|={scalars['max_speed']:.3g} "
+                f"P_bt={scalars['P_bt']:.3g} "
+                f"χ={chi:.2e}"
             )
+            if "lat_maxu" in scalars:
+                scalar_summary += (
+                    f" @({scalars['lat_maxu']:.0f},"
+                    f"{scalars['lon_maxu']:.0f})"
+                )
+            summary = scalar_summary
             print(
                 f"    [{label}] Day {day:7.2f}/{total_days:.0f} | {summary} "
                 f"| io={io_dt:.1f}s compute={compute_dt:.1f}s "

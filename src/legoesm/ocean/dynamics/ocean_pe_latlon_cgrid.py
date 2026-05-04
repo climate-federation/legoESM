@@ -1376,6 +1376,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
         H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        # MOM6-style background-velocity floor (DRAG_BG_VEL).  When >0,
+        # the linear-in-u drag is upgraded to quadratic-with-floor:
+        #   r_eff = (bottom_drag_r / u_bg) · √(u² + u_bg²)
+        # which (a) recovers linear ``bottom_drag_r`` at |u| → 0 (so
+        # legacy weak-flow behaviour is preserved) and (b) scales as
+        # quadratic Cd · |u| at |u| ≫ u_bg (production-equivalent
+        # to MOM6 OM4's `BOTTOMDRAGLAW="quadratic"` with `DRAG_BG_VEL`).
+        # u_bg=0 → exactly the legacy linear formula (bit-exact path).
+        u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        if u_bg > 0.0:
+            Cd_eq = config.bottom_drag_r / u_bg
+            r_eff_u = Cd_eq * jnp.sqrt(u * u + u_bg * u_bg)
+            r_eff_v = Cd_eq * jnp.sqrt(v * v + u_bg * u_bg)
+        else:
+            r_eff_u = config.bottom_drag_r
+            r_eff_v = config.bottom_drag_r
         if H_BBL > 0:
             # Distributed BBL drag (Killworth & Edwards 1999, MOM6 BBL_thick_min):
             # spread drag over a fixed Ekman thickness ``H_BBL`` near the
@@ -1400,7 +1416,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # along the level axis.  For the seafloor, ``z_seafloor =
             # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
             # face thickness, partial-aware via min h).
-            def _bbl_drag_for_face(u_field, h_face):
+            def _bbl_drag_for_face(u_field, h_face, r_eff):
                 pad_axes = ((0, 0),) * (h_face.ndim - 1)
                 z_half = jnp.concatenate([
                     jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
@@ -1416,11 +1432,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                     - jnp.maximum(z_bot, z_seafloor),
                 )
                 h_safe = jnp.maximum(h_face, 1e-10)
-                return -config.bottom_drag_r * u_field * overlap / (
-                    h_safe * H_BBL
-                )
-            diag_botdrag_u = _bbl_drag_for_face(u, h_u)
-            diag_botdrag_v = _bbl_drag_for_face(v, h_v)
+                return -r_eff * u_field * overlap / (h_safe * H_BBL)
+            diag_botdrag_u = _bbl_drag_for_face(u, h_u, r_eff_u)
+            diag_botdrag_v = _bbl_drag_for_face(v, h_v, r_eff_v)
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Partial cells: apply drag at each column's actual seafloor
             # (the lowest active level, ``bottom_level[i,j]``), using the
@@ -1456,19 +1470,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_u_drag = jnp.maximum(h_u, 1e-10)
             h_v_drag = jnp.maximum(h_v, 1e-10)
             diag_botdrag_u = (
-                -config.bottom_drag_r * u / h_u_drag * is_bot_u_3d
+                -r_eff_u * u / h_u_drag * is_bot_u_3d
             )
             diag_botdrag_v = (
-                -config.bottom_drag_r * v / h_v_drag * is_bot_v_3d
+                -r_eff_v * v / h_v_drag * is_bot_v_3d
             )
         else:
             dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
             dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
             # Capture only at the bottom level; zeros elsewhere.
+            r_eff_u_bot = r_eff_u[..., -1] if u_bg > 0.0 else r_eff_u
+            r_eff_v_bot = r_eff_v[..., -1] if u_bg > 0.0 else r_eff_v
             diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
-                -config.bottom_drag_r * u[..., -1] / dz_bot_u)
+                -r_eff_u_bot * u[..., -1] / dz_bot_u)
             diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
-                -config.bottom_drag_r * v[..., -1] / dz_bot_v)
+                -r_eff_v_bot * v[..., -1] / dz_bot_v)
         du_dt = du_dt + diag_botdrag_u
         dv_dt = dv_dt + diag_botdrag_v
 

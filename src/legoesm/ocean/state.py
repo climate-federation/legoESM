@@ -483,6 +483,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
+                                           # drag is quadratic-with-floor:
+                                           # tau ∝ √(u²+v²+u_bg²) · u, with
+                                           # the linear-in-u limit set to
+                                           # bottom_drag_r at |u|→0.
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
