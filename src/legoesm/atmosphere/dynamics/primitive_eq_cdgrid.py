@@ -659,13 +659,20 @@ def fv3_hydrostatic_tendencies(
         dv_d_dt = dv_d_dt + _hd_uv_d[..., 1]
         dT_dt_data = dT_dt_data + hyperdiff_uvT[..., 2]
 
-    # Surface pressure hyperdiffusion (cell-centre)
+    # Surface pressure hyperdiffusion (cell-centre).
+    #
+    # Iter 7: route through the 3D-native hyperdiffusion path with a
+    # singleton level axis instead of the 2D ``Field`` operator.  Both
+    # paths run the same compact-inner + composed-outer biharmonic
+    # stencil, but the 3D path shares the outer scalar halo between
+    # ``gradient_x_3d`` and ``gradient_y_3d`` (one ``pad_halo_4d``
+    # round-trip vs the 2D path's ``pad_halo`` per gradient).  Saves
+    # one halo per RHS evaluation under MPI when ``hyperdiff_ps_coeff>0``.
     if config.hyperdiff_ps_coeff > 0:
-        from legoesm.core.operators import hyperdiffusion
-        ps_field = Field(data=p_s, name="p_s", dims=("face", "x", "y"),
-                         units="Pa", staggering="cell")
-        diff_ps = hyperdiffusion(ps_field, grid, config.hyperdiff_ps_coeff)
-        dp_s_dt_data = dp_s_dt_data + diff_ps.data
+        diff_ps = _hyperdiffusion_3d(
+            p_s[..., None], grid, config.hyperdiff_ps_coeff,
+        )[..., 0]
+        dp_s_dt_data = dp_s_dt_data + diff_ps
 
     # --- 13. Upper-atmosphere Rayleigh sponge (D-grid) ---
     if config.sponge_tau_sec > 0 and config.sponge_sigma > 0:
