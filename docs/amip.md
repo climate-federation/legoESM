@@ -3,6 +3,63 @@
 Atmosphere-only integration with prescribed sea surface temperature (SST) and
 sea-ice concentration (SIC) from observational datasets.
 
+## Quick start: CMIP6 AMIP deck
+
+For a complete CMIP6-protocol AMIP run (transient GHG, ozone, solar, aerosol,
+volcanic), use `scripts/run_amip_cmip6_deck.py` instead of `run_amip.py`
+directly.  The deck driver auto-generates synthetic CMIP6-shape forcing files
+(or consumes real ones if dropped under `forcing_amip/` with the canonical
+names) and pins the canonical RRTMG + Sundqvist + Kessler + SBM + Louis stack:
+
+```bash
+JAX_ENABLE_X64=1 python scripts/run_amip_cmip6_deck.py \
+    --resolution 16 --days 30 --output results/amip_deck_test
+```
+
+The `forcing_amip/` directory expects six files following the CMIP6 schemas:
+
+| File                              | Purpose             | Schema reference                               |
+|-----------------------------------|---------------------|------------------------------------------------|
+| `sst_sic_amip_<sy>-<ey>.nc`       | SST + SIC monthly   | HadISST                                        |
+| `ghg_amip_<sy>-<ey>.nc`           | Annual GHG          | input4MIPs `greenhouse_historical_plus.nc`    |
+| `ozone_amip_clim.nc` (or `_<sy>-<ey>.nc`) | Ozone clim or interannual | input4MIPs vmro3 (CCMI-1-0)            |
+| `solar_amip_<sy>-<ey>.nc`         | Daily TSI + 14-band | MPI-M `swflux_14band_cmip6_*`                 |
+| `aerosol_amip_clim.nc`            | Monthly zonal AOD   | Kinne                                          |
+| `volcanic_amip_<sy>-<ey>.nc`      | Volcanic AOD        | CMIP6 `bc_aeropt_cmip6_volc_*`                |
+
+To regenerate (or seed) the synthetic deck:
+
+```bash
+python scripts/generate_amip_forcing.py --out forcing_amip \
+    --start-year 1979 --end-year 2014
+# Optional: interannually-varying ozone (exercises the loader's
+# non-cyclic dispatch instead of the 12-month climatology):
+python scripts/generate_amip_forcing.py --out forcing_amip \
+    --start-year 1979 --end-year 2014 \
+    --component ozone --ozone-interannual
+```
+
+To validate a finished run:
+
+```bash
+python scripts/validate_amip_run.py results/amip_deck_test
+```
+
+To run the deck across every supported (grid, discretization)
+combination as a smoke test:
+
+```bash
+python scripts/smoke_test_amip_all_grids.py --days 1
+# All 8 cases pass on legoESM main:
+#   cubed_sphere/{centered,finite_volume,cdgrid}
+#   latlon/{centered,finite_volume,latlon_cgrid}
+#   gaussian/spectral
+#   voronoi/mpas (--dt 60 due to MPAS hidden CFL constraint)
+```
+
+See `AMIP.md` (in the repo root) for the iteration-by-iteration trace
+of how this infrastructure was built.
+
 ## Overview
 
 The AMIP driver (`scripts/run_amip.py`) couples:

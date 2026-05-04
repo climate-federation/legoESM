@@ -18,11 +18,14 @@ Status
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
@@ -179,6 +182,38 @@ def _read_time_axis(ds):
     return days, first_date
 
 
+def _cftime_constructor_for_calendar(cal: str | None):
+    """Return the cftime datetime constructor that matches a CF
+    ``calendar`` string.
+
+    Used in two places:
+    * :func:`_extract_first_date` — so the file's first-record anchor
+      stays in the file's native calendar (a noleap CF file produces
+      a ``DatetimeNoLeap`` anchor, not Gregorian).
+    * :func:`_simday_to_file_day` — so the simulation epoch is built
+      in the same calendar before the cftime subtraction.
+
+    The mapping covers every calendar legoESM forcing files use in
+    practice (CMIP6 input4MIPs ozone / aerosol / GHG annual default
+    to ``noleap``; some CMIP-like archives use ``360_day``).
+    Unknown calendars fall back to ``DatetimeGregorian`` so the
+    function never raises.
+    """
+    import cftime
+    cal_norm = (cal or "standard").lower()
+    return {
+        "noleap": cftime.DatetimeNoLeap,
+        "365_day": cftime.DatetimeNoLeap,
+        "all_leap": cftime.DatetimeAllLeap,
+        "366_day": cftime.DatetimeAllLeap,
+        "360_day": cftime.Datetime360Day,
+        "julian": cftime.DatetimeJulian,
+        "proleptic_gregorian": cftime.DatetimeProlepticGregorian,
+        "gregorian": cftime.DatetimeGregorian,
+        "standard": cftime.DatetimeGregorian,
+    }.get(cal_norm, cftime.DatetimeGregorian)
+
+
 def _extract_first_date(time_values, units, calendar):
     """Best-effort first-record extraction for a CF time axis.
 
@@ -192,7 +227,13 @@ def _extract_first_date(time_values, units, calendar):
     * Numeric arrays with CF units of ``months since`` / ``years since``
       on a non-``360_day`` calendar (which ``cftime.num2date`` refuses):
       parse ``<ref>`` manually and add the integer month / year offset
-      using :class:`cftime.DatetimeGregorian`.
+      using a calendar-aware ``cftime.Datetime*`` constructor.
+
+    The returned anchor stays in the file's native calendar
+    (``noleap`` / ``360_day`` / ``gregorian`` / …) so downstream
+    callers like :func:`_simday_to_file_day` can build a matching
+    simulation epoch and avoid Gregorian-vs-noleap leap-day drift
+    (Codex iter-6 review).
 
     Returns ``None`` when none of those paths succeeds — the caller then
     falls back to the 1850 CMIP6 reference year in
@@ -211,12 +252,13 @@ def _extract_first_date(time_values, units, calendar):
     try:
         import cftime
         import datetime as _dt
+        ctor = _cftime_constructor_for_calendar(cal)
         if "months since" in ul or "years since" in ul:
             anchor_str = units.split("since", 1)[1].strip().split(" ")[0]
             y_str, m_str, d_str = anchor_str.split("-")
-            anchor = cftime.DatetimeGregorian(
-                int(y_str), int(m_str), int(d_str),
-            )
+            # Build the anchor in the file's native calendar so the
+            # offset arithmetic below stays calendar-consistent.
+            anchor = ctor(int(y_str), int(m_str), int(d_str))
             v0 = float(numeric.flat[0])
             # Add whole months / years, then fractional part as days so
             # files with mid-month sample points (v0 = 0.5) anchor to
@@ -228,12 +270,12 @@ def _extract_first_date(time_values, units, calendar):
                 total_m = anchor.month - 1 + whole
                 ny = anchor.year + total_m // 12
                 nm = (total_m % 12) + 1
-                base = cftime.DatetimeGregorian(ny, nm, anchor.day)
+                base = ctor(ny, nm, anchor.day)
                 frac_days = frac * (30.0 if cal == "360_day" else 365.25 / 12.0)
             else:  # years since
                 whole = int(np.floor(v0))
                 frac = v0 - whole
-                base = cftime.DatetimeGregorian(
+                base = ctor(
                     anchor.year + whole, anchor.month, anchor.day,
                 )
                 frac_days = frac * (360.0 if cal == "360_day" else 365.25)
@@ -336,6 +378,36 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
     -------
     (mid_days, lat, data) where mid_days is shape (ntime,), lat is shape
     (nlat,), and data is shape (ntime, nlat).
+
+    For a CF-anchored variant that also returns the absolute calendar
+    anchor of the first record (needed by callers that map
+    simulation-day → file-day for non-cyclic multi-year files), see
+    :func:`_load_monthly_zonal_anchored`.
+    """
+    mid_days, _first_date, lat, data = _load_monthly_zonal_anchored(
+        path, varname
+    )
+    return mid_days, lat, data
+
+
+@lru_cache(maxsize=16)
+def _load_monthly_zonal_anchored(
+    path: str, varname: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Like :func:`_load_monthly_zonal` but also returns the first
+    record's CF-time anchor (``first_date``) so callers can map a
+    simulation day onto the file's absolute time axis when the file
+    spans multiple years.
+
+    This matches the API of :func:`_load_monthly_zonal_with_levels`
+    used by the ozone loader.
+
+    Returns
+    -------
+    (mid_days, first_date, lat, data) where ``first_date`` is a
+    :class:`cftime.datetime` / :class:`numpy.datetime64` matching
+    :func:`_read_time_axis`'s second return, or ``None`` when the
+    file's time axis lacks a CF ``units`` attribute.
     """
     ds = _open_forcing_dataset(path)
     if varname not in ds.data_vars:
@@ -353,9 +425,10 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
         ds.close()
         raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
     if "time" in ds:
-        mid_days = _read_time_days(ds)
+        mid_days, first_date = _read_time_axis(ds)
     else:
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        first_date = None
     ds.close()
 
     # Average over longitude to produce a zonal mean.
@@ -378,7 +451,7 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
         data = np.nanmean(data, axis=ax)
         dims.pop(ax)
 
-    return mid_days, lat, data
+    return mid_days, first_date, lat, data
 
 
 @lru_cache(maxsize=16)
@@ -403,7 +476,26 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     Returns ``(mid_days, lat, aod)`` with ``aod`` shape
     ``(ntime, nlat)`` — a drop-in replacement for
     :func:`_load_monthly_zonal` output.
+
+    For a CF-anchored variant that also returns the calendar anchor
+    of the first record (needed by callers that map sim-day → file-day
+    for non-cyclic multi-year volcanic time-series), see
+    :func:`_load_volcanic_cmip6_anchored`.
     """
+    mid_days, _first_date, lat, aod = _load_volcanic_cmip6_anchored(path)
+    return mid_days, lat, aod
+
+
+@lru_cache(maxsize=16)
+def _load_volcanic_cmip6_anchored(
+    path: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Like :func:`_load_volcanic_cmip6` but also returns the first
+    record's CF-time anchor (``first_date``) so callers can map a
+    simulation day onto the file's absolute time axis when the file
+    spans multiple years (e.g. 1850–2014 CMIP6 volcanic climatology
+    with the 1982 El Chichón and 1991 Pinatubo eruptions in their
+    real calendar months)."""
     ds = _open_forcing_dataset(path)
     # Only ``ext_sun`` (SW stratospheric extinction) is valid here: the SW
     # aerosol branch multiplies this into broadband AOD, so reading the LW
@@ -449,11 +541,14 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     # Month / time axis — CMIP6 volcanic may use ``month`` or ``time``.
     if "time" in dims:
         time_name = "time"
-        mid_days = _read_time_days(ds)
+        mid_days, first_date = _read_time_axis(ds)
     elif "month" in dims:
         time_name = "month"
         nm = ext.shape[dims.index("month")]
         mid_days = np.array([15.5 + 30.4375 * m for m in range(nm)])
+        # No CF anchor on a bare 'month' axis — the caller falls back to
+        # cyclic dispatch automatically when ``first_date is None``.
+        first_date = None
     else:
         ds.close()
         raise ValueError(
@@ -495,7 +590,7 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
             order.append(dims_after.index(dim_name))
     order += [i for i in range(len(dims_after)) if i not in order]
     aod = np.transpose(aod_with_bands, order)
-    return mid_days, lat, aod
+    return mid_days, first_date, lat, aod
 
 
 @lru_cache(maxsize=16)
@@ -504,27 +599,116 @@ def _load_volcanic_auto(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     Returns the same ``(mid_days, lat, data)`` tuple as
     :func:`_load_monthly_zonal` regardless of which on-disk schema the
-    file follows.  Criterion: presence of the CMIP6 ``ext_sun`` variable
-    triggers :func:`_load_volcanic_cmip6`; otherwise fall back to the
-    legacy ``aod(time, lat)`` schema.  Cached so that repeated calls in
-    an AMIP time-step loop don't re-open the dataset just to dispatch
-    (Codex review 2026-04-24).
+    file follows.  See :func:`_load_volcanic_auto_anchored` for a
+    variant that also returns the file's CF anchor (used by the
+    multi-year non-cyclic dispatch in :func:`get_aerosol_at_time`).
+    """
+    mid_days, _first_date, lat, data = _load_volcanic_auto_anchored(path)
+    return mid_days, lat, data
+
+
+@lru_cache(maxsize=16)
+def _load_volcanic_auto_anchored(
+    path: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Like :func:`_load_volcanic_auto` but also returns ``first_date``.
+
+    Criterion: presence of the CMIP6 ``ext_sun`` variable triggers
+    :func:`_load_volcanic_cmip6_anchored`; otherwise fall back to the
+    legacy ``aod(time, lat)`` schema via
+    :func:`_load_monthly_zonal_anchored`.  Cached so that repeated
+    calls in an AMIP time-step loop don't re-open the dataset just to
+    dispatch.
     """
     ds = _open_forcing_dataset(path)
     dvars = set(ds.data_vars)
     ds.close()
     if "ext_sun" in dvars:
-        return _load_volcanic_cmip6(path)
+        return _load_volcanic_cmip6_anchored(path)
     if "ext_earth" in dvars and "aod" not in dvars:
-        # CMIP6 file with only LW extinction — not a valid SW aerosol
-        # source.  Fail with a specific error rather than the generic
-        # "aod not found" from the legacy-path fallback.
         raise ValueError(
             f"Volcanic file {path!r} has only LW extinction "
             "('ext_earth') and no SW extinction ('ext_sun'); cannot be "
             "used as a SW AOD source.",
         )
-    return _load_monthly_zonal(path, "aod")
+    return _load_monthly_zonal_anchored(path, "aod")
+
+
+def _ozone_unit_factor(units: str, varname: str) -> float:
+    """Return the multiplicative factor that converts ozone from the
+    file's units into volume mixing ratio (mol/mol).
+
+    The legoESM radiation kernel (RRTMG / RRTMGP) consumes ozone as a
+    dimensionless mole fraction.  CMIP6 input4MIPs ozone is supplied
+    as ``vmro3`` in mol/mol, but older / non-CMIP6 datasets expose
+    ozone as ``tro3`` in kg/kg (mass mixing ratio).  Without unit
+    detection a kg/kg file would be silently consumed at the wrong
+    magnitude (off by ``M_dry / M_o3 ≈ 0.6035``), producing a quiet
+    ~40% radiative bias in the stratospheric SW heating.
+
+    Detection rules
+    ---------------
+    1. ``mol mol-1`` / ``mole mole-1`` / ``vmr`` / ``"1"`` /
+       ``dimensionless`` → return 1.0 (already vmr).
+    2. ``kg kg-1`` / ``kg/kg`` / ``g/g`` → return ``M_dry / M_o3``
+       (convert mass-mixing-ratio to vmr).
+    3. ``ppmv`` → return 1e-6 (ppmv to mol/mol).
+    4. ``ppbv`` → return 1e-9.
+    5. Empty / unrecognised units: fall back on the **variable name**:
+       - ``vmro3`` / ``o3`` / ``O3`` / ``ozone`` → 1.0 (vmr — CMIP6 default).
+       - ``tro3`` → ``M_dry / M_o3`` (CMIP convention for mass mixing ratio).
+    6. Anything else: raise ``ValueError`` with the offending units
+       string so the user can either rename the variable or specify
+       a known unit.
+
+    Parameters
+    ----------
+    units : str
+        Value of the variable's ``units`` attribute (lower-cased
+        before comparison).
+    varname : str
+        Variable name, used as a fallback when ``units`` is empty.
+
+    Returns
+    -------
+    float
+        Multiplicative factor: ``vmr_data = file_data * factor``.
+    """
+    from legoesm import constants
+    u = (units or "").strip().lower().replace(" ", "")
+    # Canonicalise: "mol mol-1" → "molmol-1"; "kg kg-1" → "kgkg-1".
+    vmr_strings = {
+        "mol/mol", "molmol-1", "molemole-1", "mole/mole",
+        "vmr", "1", "dimensionless", "fraction", "",
+    }
+    mmr_strings = {
+        "kg/kg", "kgkg-1", "kg.kg-1", "g/g", "gg-1",
+        "mass_mixing_ratio", "massmixingratio",
+    }
+    if u in vmr_strings or u in {"mol mol-1"}:  # extra guard
+        # When units is empty fall through to the varname heuristic
+        # below (CMIP6 default is vmr).
+        if u == "":
+            if varname in {"vmro3", "ozone", "o3", "O3"}:
+                return 1.0
+            if varname == "tro3":
+                # CMIP convention: ``tro3`` is mass mixing ratio.
+                return constants.M_dry / constants.M_o3
+            return 1.0  # last-ditch default: assume vmr
+        return 1.0
+    if u in mmr_strings:
+        return constants.M_dry / constants.M_o3
+    if u in {"ppmv", "ppm"}:
+        return 1.0e-6
+    if u in {"ppbv", "ppb"}:
+        return 1.0e-9
+    if u in {"pptv", "ppt"}:
+        return 1.0e-12
+    raise ValueError(
+        f"Unrecognised ozone units {units!r} on variable {varname!r}. "
+        f"Supported: 'mol mol-1' (vmr, CMIP6 default), 'kg kg-1' "
+        f"(mass mixing ratio), 'ppmv', 'ppbv', 'pptv', or empty."
+    )
 
 
 @lru_cache(maxsize=16)
@@ -543,6 +727,13 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
       the file's absolute time axis for multi-year (``ntime > 12``)
       ozone files.
     * ``plev``: shape (nlev,) in [Pa] or ``None`` if no vertical dim.
+    * ``data`` is **always returned in volume mixing ratio (mol/mol)**.
+      When the file's ozone variable carries ``units = "kg kg-1"`` (or
+      the variable is named ``tro3`` per CMIP convention), the data is
+      multiplied by ``M_dry / M_o3 ≈ 0.6035`` so the downstream
+      radiation kernel — which consumes vmr — sees physically
+      consistent values regardless of the file's native unit.  The
+      conversion is logged at info-level when applied.
     """
     ds = _open_forcing_dataset(path)
     if varname not in ds.data_vars:
@@ -550,6 +741,17 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
         raise ValueError(f"Variable {varname!r} not found in {path!r}")
     var = ds[varname]
     data = np.asarray(var.values, dtype=np.float64)
+    var_units = var.attrs.get("units", "")
+    # Apply the vmr conversion (no-op for CMIP6 vmro3, multiplicative
+    # for tro3 / kg-kg-1 / ppm-style files).
+    factor = _ozone_unit_factor(var_units, varname)
+    if factor != 1.0:
+        logger.info(
+            f"[ozone-loader] Converting {varname!r} from units={var_units!r} "
+            f"to vmr (mol/mol) with factor {factor:.5g}; "
+            f"file: {path!r}"
+        )
+        data = data * factor
     dims = list(var.dims)
     if "lat" in ds:
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
@@ -735,19 +937,37 @@ def _simday_to_file_day(sim_day: float, start_year: int,
       fall through to ``file_day = sim_day``: the file's raw numeric
       time is assumed to share the simulation reference, which is the
       only consistent interpretation for a units-less axis.
+
+    **Calendar-aware sim epoch**: when ``first_date`` is a
+    ``cftime.datetime`` instance, we construct the simulation epoch
+    using the **same calendar** as the file (``noleap``, ``360_day``,
+    ``gregorian``, …) before subtracting.  Counting Gregorian leap
+    days against a noleap file would shift the file_day by ~30 days
+    by 1979 against a 1850 noleap epoch (Codex iter-5 review).
     """
     if first_date is None:
         return sim_day
     try:
         import cftime
-        sim_epoch = cftime.DatetimeGregorian(int(start_year), 1, 1)
+        # Calendar-aware epoch: pick the cftime constructor that
+        # matches ``first_date.calendar`` so the subtraction stays
+        # calendar-consistent.  Falls back to Gregorian when the
+        # anchor is not a calendar-aware cftime datetime.
+        if hasattr(first_date, "calendar"):
+            ctor = _cftime_constructor_for_calendar(first_date.calendar)
+            sim_epoch = ctor(int(start_year), 1, 1)
+        else:
+            sim_epoch = cftime.DatetimeGregorian(int(start_year), 1, 1)
         if hasattr(first_date, "year") and hasattr(first_date, "month"):
             delta = sim_epoch - first_date
             delta_days = delta.days + delta.seconds / 86400.0
             return delta_days + sim_day
     except Exception:
         pass
-    # numpy.datetime64 path: take scalar difference in days.
+    # numpy.datetime64 path: take scalar difference in days.  This
+    # branch is Gregorian-only (numpy has no calendar concept), so it
+    # is reached only when ``first_date`` is itself a ``datetime64``
+    # — by definition Gregorian.
     try:
         anchor = np.datetime64(f"{int(start_year):04d}-01-01")
         delta_days = float(
@@ -850,6 +1070,15 @@ def _interp_vertical(field_plev: jnp.ndarray, plev_src: np.ndarray,
     nsrc = log_p_src.shape[0]
     field_flat = np.asarray(field_plev).reshape(-1, nsrc)
     log_p_tgt_flat = np.asarray(log_p_tgt).reshape(-1, nlev_tgt)
+
+    # Canonicalise to ascending log_p_src.  CMIP6 ozone files (e.g.
+    # ``vmro3_input4MIPs_ozone_*.nc``) ship plev descending (1000→0.1 hPa);
+    # ``np.searchsorted`` requires an ascending xp, otherwise the lerp
+    # silently lands on the wrong bracketing pair (bug surfaced as zero/
+    # near-zero ozone in the synthetic AMIP deck unit test).
+    if nsrc > 1 and log_p_src[0] > log_p_src[-1]:
+        log_p_src = log_p_src[::-1]
+        field_flat = field_flat[:, ::-1]
 
     # Vectorised lerp in log-pressure space.  Replaces the
     # ``for i in range(ncol): np.interp(...)`` loop that scaled
@@ -1251,6 +1480,13 @@ class AerosolConfig(NamedTuple):
     volcanic_enabled: bool = False
     volcanic_path: str = ""
     volcanic_scale: float = 1.0
+    # Calendar year of simulation day 0.  Required for the non-cyclic
+    # dispatch in :func:`get_aerosol_at_time` so multi-year volcanic
+    # files (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*`` with the
+    # 1982 El Chichón and 1991 Pinatubo eruptions) are sampled at their
+    # actual calendar months instead of being collapsed onto a 12-month
+    # cyclic axis.  Mirrors :class:`OzoneConfig.start_year`.
+    start_year: int = 1979
 
 
 def _reference_aerosol_profile(lat_grid: jnp.ndarray, config: AerosolConfig) -> jnp.ndarray:
@@ -1281,8 +1517,21 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     if not config.enabled:
         return None
     if config.path:
-        mid_days, lat, data = _load_monthly_zonal(config.path, "aod")
-        aod_interp = _interp_monthly_cyclic(mid_days, data, day)
+        # Dispatch cyclic (12-month climatology) vs non-cyclic
+        # (multi-year, e.g. real CMIP6 input4MIPs aerosol).  Keyed on
+        # ``len(mid_days) > 12``; ``config.start_year`` maps the
+        # simulation day onto the file's absolute time axis when a CF
+        # anchor is present.  Without this dispatch, a 36-year aerosol
+        # file would be sampled cyclically (mod 365.25), throwing away
+        # interannual evolution.
+        mid_days, first_date, lat, data = _load_monthly_zonal_anchored(
+            config.path, "aod",
+        )
+        if len(mid_days) > 12:
+            file_day = _simday_to_file_day(day, config.start_year, first_date)
+            aod_interp = _interp_monthly_noncyclic(mid_days, data, file_day)
+        else:
+            aod_interp = _interp_monthly_cyclic(mid_days, data, day)
         if lat_grid is not None:
             base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
             # Kinne aerosol files may have extra dimensions (level, band).
@@ -1311,13 +1560,32 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     # Optional volcanic contribution.
     if config.volcanic_enabled:
         if config.volcanic_path:
-            # ``_load_volcanic_auto`` handles both the legacy
+            # ``_load_volcanic_auto_anchored`` handles both the legacy
             # ``aod(time, lat)`` schema and the CMIP6 / MPI-M
             # ``ext_sun(solar_bands, lat, altitude, month)`` schema
-            # (issue #207 bug 3) by integrating ext * dz over altitude
-            # and returning a drop-in ``(mid_days, lat, aod)`` tuple.
-            mid_days_v, lat_v, data_v = _load_volcanic_auto(config.volcanic_path)
-            aod_v = _interp_monthly_cyclic(mid_days_v, data_v, day) * config.volcanic_scale
+            # (issue #207 bug 3), and additionally returns the file's
+            # CF time anchor so multi-year volcanic time series with
+            # real eruption calendars (1982 El Chichón, 1991 Pinatubo,
+            # …) are sampled non-cyclically — the previous cyclic
+            # path mod-365.25-wrapped a multi-year file onto 12 months
+            # and lost the eruption calendars entirely (Codex iter-3
+            # review).
+            mid_days_v, first_date_v, lat_v, data_v = _load_volcanic_auto_anchored(
+                config.volcanic_path
+            )
+            if len(mid_days_v) > 12:
+                file_day_v = _simday_to_file_day(
+                    day, config.start_year, first_date_v,
+                )
+                aod_v = (
+                    _interp_monthly_noncyclic(mid_days_v, data_v, file_day_v)
+                    * config.volcanic_scale
+                )
+            else:
+                aod_v = (
+                    _interp_monthly_cyclic(mid_days_v, data_v, day)
+                    * config.volcanic_scale
+                )
             if lat_grid is not None:
                 volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
                 # Sum trailing dims for multi-dimensional volcanic files
@@ -1481,24 +1749,38 @@ def _rrtmg_sw_band_counts(rrtmg_sw_path: str) -> tuple[int, int]:
 
 
 def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.ndarray:
-    """Expand per-band spectral fractions to per-g-point fractions.
+    """Expand per-band spectral fractions to per-g-point fractions
+    such that the band-integrated flux is preserved.
 
-    CMIP6 solar files (e.g. ``SSI_frac``) store one value per RRTMG-SW
-    band (14 bands), but the RRTMG solver expects one value per g-point
-    (112 g-points for the standard g112 table).  Each band's fraction is
-    repeated uniformly across all g-points that belong to that band.
+    CMIP6 solar files (e.g. ``SSI_frac``) store one *band-integrated*
+    fraction per RRTMG-SW band (14 bands).  The RRTMG solver expects
+    one fraction per g-point (112 g-points for the g112 table).  When
+    each band's value is **copied** to every g-point in that band, the
+    per-g-point integral over the band becomes ``f_b * n_gpt_b``
+    instead of ``f_b`` — different g-point counts across bands then
+    distort the per-band ratio after a downstream sum-to-1
+    normalization (Codex iter-5 review).
+
+    Fix: divide each band's fraction by the number of g-points in
+    that band when expanding.  After this transformation, the sum
+    over g-points equals the sum over bands, so a sum-to-1 normalize
+    preserves the per-band proportions.  Each g-point inside band b
+    receives ``f_b / n_gpt_b`` so that ``Σ_{g ∈ band b} f_g = f_b``.
 
     Parameters
     ----------
-    spec_bands : np.ndarray, shape (n_bands,)
-        Per-band solar fractions.
+    spec_bands : np.ndarray, shape ``(..., n_bands)``
+        Per-band solar fractions.  Trailing axis must equal ``n_bands``.
+        (Time-major arrays of shape ``(ntime, n_bands)`` are also
+        supported and broadcast over the leading axis.)
     rrtmg_sw_path : str
-        Path to the RRTMG-SW lookup table NetCDF/Zarr (for ``bnd_limits_gpt``).
+        Path to the RRTMG-SW lookup table NetCDF/Zarr (for
+        ``bnd_limits_gpt``).
 
     Returns
     -------
-    np.ndarray, shape (n_gpt,)
-        Per-g-point fractions.
+    np.ndarray, shape ``(..., n_gpt)``
+        Per-g-point fractions, with band-integrated flux preserved.
     """
     import xarray as xr
     ds = xr.open_dataset(rrtmg_sw_path) if not rrtmg_sw_path.endswith(".zarr") \
@@ -1507,9 +1789,22 @@ def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.n
     bnd_lims = ds["bnd_limits_gpt"].values.astype(int)  # 1-indexed
     ds.close()
     n_gpt = int(bnd_lims[:, 1].max())
-    out = np.zeros(n_gpt, dtype=np.float64)
+    spec_bands = np.asarray(spec_bands, dtype=np.float64)
+    if spec_bands.ndim == 1:
+        out = np.zeros(n_gpt, dtype=np.float64)
+        for i, (lo, hi) in enumerate(bnd_lims):
+            n_gpt_in_band = int(hi - lo + 1)
+            # Divide so that ``Σ_{g ∈ band b} f_g == spec_bands[b]``.
+            out[lo - 1 : hi] = spec_bands[i] / n_gpt_in_band
+        return out
+    # Trailing-axis case: (..., n_bands) → (..., n_gpt).
+    leading_shape = spec_bands.shape[:-1]
+    out = np.zeros(leading_shape + (n_gpt,), dtype=np.float64)
     for i, (lo, hi) in enumerate(bnd_lims):
-        out[lo - 1 : hi] = spec_bands[i]   # convert to 0-indexed slice
+        n_gpt_in_band = int(hi - lo + 1)
+        out[..., lo - 1 : hi] = (
+            spec_bands[..., i:i + 1] / n_gpt_in_band
+        )
     return out
 
 

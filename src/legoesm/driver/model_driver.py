@@ -509,6 +509,12 @@ class ModelDriver:
             volcanic_enabled=bool(cfg.volcanic_aerosol_file),
             volcanic_path=cfg.volcanic_aerosol_file,
             volcanic_scale=cfg.volcanic_aerosol_scale,
+            # Calendar anchor for the non-cyclic dispatch in
+            # ``get_aerosol_at_time``.  Multi-year volcanic time-series
+            # (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*``) are
+            # sampled at their actual eruption calendars instead of
+            # being collapsed onto a 12-month cycle.
+            start_year=cfg.start_year,
         )
 
         # Solar init
@@ -1218,6 +1224,13 @@ class ModelDriver:
         run_status = "COMPLETED"
         logger.info(f"Starting MPAS: {n_steps_total - start_step} steps, {N_DAYS} days")
 
+        # Light-weight time series — see _run_spectral for the rationale
+        # (the MPAS path also bypasses the unified DiagnosticCollector).
+        _ts: dict[str, list] = {
+            "days": [], "T_atm": [], "T_min": [], "T_max": [],
+            "max_wind": [], "dry_mass_ps": [], "T_finite": [],
+        }
+
         t_start = time.time()
 
         for step in range(start_step, n_steps_total):
@@ -1250,6 +1263,14 @@ class ModelDriver:
                 T_max = float(_stats_host[4])
                 T_finite = bool(_stats_host[5] > 0.5)
 
+                _ts["days"].append(elapsed_day)
+                _ts["T_atm"].append(mean_T)
+                _ts["T_min"].append(T_min)
+                _ts["T_max"].append(T_max)
+                _ts["max_wind"].append(max_u)
+                _ts["dry_mass_ps"].append(mean_ps)
+                _ts["T_finite"].append(T_finite)
+
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
                 logger.info(
@@ -1266,6 +1287,7 @@ class ModelDriver:
 
         elapsed = time.time() - t_start
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")
+        self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
 
     # ==================================================================
@@ -1390,6 +1412,16 @@ class ModelDriver:
         run_status = "COMPLETED"
         logger.info(f"Starting spectral: {n_steps_total - start_step} steps, {N_DAYS} days")
 
+        # Light-weight time series for AMIP / validation.  The spectral
+        # path is otherwise diagnostic-free; without these arrays the
+        # `validate_amip_run.py` post-run check rejects the run for
+        # missing ``timeseries.npz`` (caught when extending the AMIP
+        # CMIP6 deck to all four grid types).
+        _ts: dict[str, list] = {
+            "days": [], "T_atm": [], "T_min": [], "T_max": [],
+            "max_wind": [], "dry_mass_ps": [], "T_finite": [],
+        }
+
         t_start = time.time()
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
@@ -1425,6 +1457,14 @@ class ModelDriver:
                 max_wind = float(_stats_host[4])
                 T_finite = bool(_stats_host[5] > 0.5)
 
+                _ts["days"].append(elapsed_day)
+                _ts["T_atm"].append(mean_T)
+                _ts["T_min"].append(T_min)
+                _ts["T_max"].append(T_max)
+                _ts["max_wind"].append(max_wind)
+                _ts["dry_mass_ps"].append(mean_ps)
+                _ts["T_finite"].append(T_finite)
+
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
                 logger.info(
@@ -1440,7 +1480,150 @@ class ModelDriver:
 
         elapsed = time.time() - t_start
         logger.info(f"Spectral run {run_status} in {elapsed:.1f}s")
+        # Persist the lightweight time series so AMIP validators can
+        # consume the run.  Mirrors the layout written by
+        # `DiagnosticCollector.save` for the keys we actually populate;
+        # other keys are filled with NaN of the same length so the
+        # downstream consumer can iterate without ``KeyError``.
+        self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
+
+    def _save_lightweight_timeseries(
+        self,
+        ts: dict,
+        run_status: str,
+        t_start: float,
+    ) -> None:
+        """Write a minimal ``timeseries.npz`` for spectral / MPAS runs.
+
+        These two run paths short-circuit the unified
+        ``DiagnosticCollector`` pipeline (the collector expects
+        gridpoint-space ``HydrostaticState`` fields, but the spectral
+        path keeps state in spectral coefficients and the MPAS path
+        uses voronoi cell-state with a different layout).  Without
+        this fallback the run silently produces no ``timeseries.npz``
+        and the AMIP validation harness rejects it for missing data.
+        """
+        from pathlib import Path
+        import numpy as np
+
+        out_dir = Path(self._output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        n = len(ts.get("days", []))
+        if n == 0:
+            # Run too short for any diagnostic interval to fire (e.g.
+            # ``--days 1 --diag-days 5``).  Synthesise a single
+            # end-of-run sample from the final state so the validation
+            # harness still has a ``timeseries.npz`` + ``results.txt``
+            # to consume.  This avoids the silent-no-output behaviour
+            # that the iter-4 codex review flagged: previously a
+            # 1-day spectral / MPAS smoke run produced no validator
+            # artefacts and the smoke test fell through.
+            #
+            # Spectral states (``SpectralHydrostaticState``) keep
+            # ``T_hat / vor_hat / div_hat / lnps_hat`` in spectral
+            # coefficients and **do not** expose ``state.T``.  Convert
+            # via ``spectral_pe_to_grid`` first so ``mean(T)`` and
+            # ``max(|u|)`` are physical (Codex iter-5 review).
+            try:
+                # Late import to avoid hard dependency at module
+                # import time when spectral support is unavailable.
+                from legoesm.atmosphere.dynamics.spectral_pe import (
+                    SpectralHydrostaticState, spectral_pe_to_grid,
+                )
+                if isinstance(self.state, SpectralHydrostaticState):
+                    fields = spectral_pe_to_grid(
+                        self.state, self.grid, self.sigma,
+                    )
+                    T_arr = fields["T"]
+                    u_arr = fields["u"]
+                    v_arr = fields.get("v")
+                    ps_arr = fields["p_s"]
+                else:
+                    T_arr = self.state.T.data
+                    u_arr = self.state.u.data
+                    v_arr = (self.state.v.data
+                             if getattr(self.state, "v", None) is not None
+                             else None)
+                    ps_arr = self.state.p_s.data
+                final_day = float(self.config.days)
+                T_final = float(jnp.mean(T_arr))
+                # max_wind must include v: a meridional spike or NaN in
+                # ``v`` would otherwise be invisible to the validator
+                # and let a divergent run pass (Codex iter-6 review).
+                if v_arr is not None:
+                    wind_speed = jnp.sqrt(u_arr ** 2 + v_arr ** 2)
+                    u_final = float(jnp.max(wind_speed))
+                    wind_finite = bool(jnp.all(jnp.isfinite(v_arr)))
+                else:
+                    u_final = float(jnp.max(jnp.abs(u_arr)))
+                    wind_finite = True
+                ps_final = float(jnp.mean(ps_arr))
+                T_finite = (bool(jnp.all(jnp.isfinite(T_arr)))
+                            and wind_finite)
+            except Exception as exc:
+                logger.warning(
+                    f"_save_lightweight_timeseries: end-of-run "
+                    f"summary failed ({exc!r}); writing empty "
+                    f"timeseries.npz anyway."
+                )
+                final_day = 0.0
+                T_final = float("nan")
+                u_final = float("nan")
+                ps_final = float("nan")
+                T_finite = False
+            ts = {
+                "days": [final_day],
+                "T_atm": [T_final],
+                "max_wind": [u_final],
+                "dry_mass_ps": [ps_final],
+                "T_finite": [T_finite],
+            }
+            n = 1
+        nan = np.full(n, np.nan, dtype=np.float64)
+        days = np.array(ts["days"], dtype=np.float64)
+
+        def _arr(key: str) -> np.ndarray:
+            v = ts.get(key)
+            if v is None or len(v) == 0:
+                return nan
+            return np.array(v, dtype=np.float64)
+
+        np.savez(
+            out_dir / "timeseries.npz",
+            days=days,
+            T_atm=_arr("T_atm"),
+            T_low=_arr("T_low") if "T_low" in ts else nan,
+            max_wind=_arr("max_wind"),
+            dry_mass_ps=_arr("dry_mass_ps"),
+            sst=_arr("sst") if "sst" in ts else nan,
+            sic=_arr("sic") if "sic" in ts else nan,
+            precip=_arr("precip") if "precip" in ts else nan,
+            CWV=_arr("CWV") if "CWV" in ts else nan,
+            sw_up_toa=_arr("sw_up_toa") if "sw_up_toa" in ts else nan,
+            lw_up_toa=_arr("lw_up_toa") if "lw_up_toa" in ts else nan,
+            sw_net_sfc=_arr("sw_net_sfc") if "sw_net_sfc" in ts else nan,
+            lw_net_sfc=_arr("lw_net_sfc") if "lw_net_sfc" in ts else nan,
+            energy_residual=_arr("energy_residual") if "energy_residual" in ts else nan,
+            moisture_residual=_arr("moisture_residual") if "moisture_residual" in ts else nan,
+        )
+        # Persist the run summary in the same place run_amip's main path
+        # writes it, so `validate_amip_run.py` can read the status line.
+        import time as _time
+        wall = _time.time() - t_start
+        cfg = self.config
+        with open(out_dir / "results.txt", "w") as f:
+            f.write("legoESM AMIP run\n")
+            f.write(
+                f"Grid: {cfg.grid.grid_type} {cfg.grid.resolution} / "
+                f"L{cfg.grid.nlev}, dt={cfg.dycore.dt}s, {cfg.days} days\n"
+            )
+            f.write(f"Radiation: {cfg.radiation}\n")
+            f.write(f"Status: {run_status}\n\n")
+            f.write(f"Wall time: {wall:.1f}s\n\n")
+            if n > 0 and len(ts.get("T_atm", [])) > 0:
+                f.write(f"Final <T_atm>: {ts['T_atm'][-1]:.3f} K\n")
+                f.write(f"Final max_wind: {ts['max_wind'][-1]:.2f} m/s\n")
 
     # ==================================================================
     # Shared run helpers (used by both compiled and per-step paths)
