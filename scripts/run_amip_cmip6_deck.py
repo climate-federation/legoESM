@@ -279,20 +279,52 @@ def main(argv: list[str] | None = None) -> int:
     # ``cfg.radiation in ("rrtmg", "rrtmgp")``: those channels are
     # configured but inert under ``--radiation gray``.  Surface SST/SIC
     # and solar TSI affect both gray and RRTMG paths.
+    #
+    # Special case: ``--grid-type gaussian --discretization spectral``
+    # routes through ``ModelDriver._run_spectral``, which hard-codes
+    # gray radiation and never consumes the external GHG/ozone/
+    # aerosol/volcanic configs even when the user requested rrtmg.
+    # Without an explicit warning here the deck-driver activity report
+    # would say "ACTIVE" while the run silently ignores those forcings
+    # — exactly the silent-bias case the iter-3 codex review flagged.
     print("[deck] Command:")
     print("  " + " \\\n    ".join(cmd))
     print("[deck] Forcing-channel activity for this run:")
     rad = args.radiation
     rad_active = rad in ("rrtmg", "rrtmgp")
-    flag = lambda b: "ACTIVE" if b else "inert (gray radiation)"
+    spectral_path = (args.grid_type == "gaussian"
+                     and args.discretization == "spectral")
+    forcing_silently_dropped = rad_active and spectral_path
+    if forcing_silently_dropped:
+        print(
+            "[deck] WARNING: gaussian/spectral routes through "
+            "ModelDriver._run_spectral, which hard-codes gray "
+            "radiation and constant solar.  External GHG/ozone/"
+            "aerosol/volcanic forcings are LOADED but NOT consumed "
+            "by the radiation kernel on this grid.  Use cubed_sphere/"
+            "latlon for production CMIP6 AMIP runs, or run with "
+            "--radiation gray on gaussian/spectral so the activity "
+            "report below matches what the model actually does."
+        )
+    # Effective active state: a forcing is only ACTIVE if both
+    # rrtmg/rrtmgp is selected AND the grid path actually consumes it.
+    effective_active = rad_active and not spectral_path
+
+    def _flag(b: bool) -> str:
+        if b:
+            return "ACTIVE"
+        if rad_active and spectral_path:
+            return "inert (spectral path uses gray radiation)"
+        return "inert (gray radiation)"
+
     print(f"  SST/SIC                              ACTIVE        (radiation-independent)")
-    print(f"  Solar TSI + 14-band spectral         ACTIVE        (radiation-independent)")
-    print(f"  Greenhouse gases (transient annual)  {flag(rad_active)}")
-    print(f"  Ozone (cyclic clim or interannual)   {flag(rad_active)}")
+    print(f"  Solar TSI + 14-band spectral         {('ACTIVE' if not spectral_path else 'inert (spectral path uses constant S_0)'):<35}")
+    print(f"  Greenhouse gases (transient annual)  {_flag(effective_active)}")
+    print(f"  Ozone (cyclic clim or interannual)   {_flag(effective_active)}")
     if not args.no_aerosol:
-        print(f"  Tropospheric aerosol (Kinne)         {flag(rad_active)}")
+        print(f"  Tropospheric aerosol (Kinne)         {_flag(effective_active)}")
     if not args.no_volcanic and args.volcanic_aerosol_scale > 0:
-        print(f"  Volcanic stratospheric AOD           {flag(rad_active)}")
+        print(f"  Volcanic stratospheric AOD           {_flag(effective_active)}")
     if not rad_active:
         print(
             "[deck] NOTE: --radiation gray is FAST but disables all "

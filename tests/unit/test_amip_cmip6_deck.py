@@ -574,6 +574,262 @@ class TestOzoneUnitDetection:
         )
 
 
+class TestSpectralPathWarning:
+    """Regression test for the gaussian/spectral + rrtmg silent-drop
+    warning (P2 codex iter-3 review).
+
+    ``ModelDriver._run_spectral`` hard-codes gray radiation and constant
+    solar.  When a user requests ``--radiation rrtmg`` with
+    ``--grid-type gaussian --discretization spectral``, the deck driver
+    should warn loudly that the external GHG/ozone/aerosol/volcanic
+    forcings are loaded but never consumed by the radiation kernel.
+    """
+
+    def test_warning_fires_on_gaussian_spectral_rrtmg(self, tmp_path):
+        """The deck driver --dry-run output must include the
+        silent-drop warning for the (gaussian, spectral, rrtmg) combo."""
+        import subprocess
+
+        # Build a tiny forcing deck so --dry-run can pass file checks.
+        sy, ey = 1979, 1980
+        gaf.make_sst_sic(tmp_path / f"sst_sic_amip_{sy}-{ey}.nc",
+                          sy, ey, nlat=37, nlon=72)
+        gaf.make_ghg_annual(tmp_path / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_ozone_clim(tmp_path / "ozone_amip_clim.nc",
+                             nlat=18, nlev=20)
+        gaf.make_solar(tmp_path / f"solar_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_aerosol_clim(tmp_path / "aerosol_amip_clim.nc",
+                                nlat=36)
+        gaf.make_volcanic(tmp_path / f"volcanic_amip_{sy}-{ey}.nc",
+                           sy, ey, nlat=18)
+
+        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
+        cmd = [
+            sys.executable, str(deck_script),
+            "--forcing-dir", str(tmp_path),
+            "--start-year", str(sy), "--end-year", str(ey),
+            "--grid-type", "gaussian", "--discretization", "spectral",
+            "--radiation", "rrtmg", "--resolution", "21",
+            "--days", "1", "--dry-run",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        assert r.returncode == 0, f"dry-run failed:\n{r.stderr}"
+        out = r.stdout
+        assert "WARNING" in out and "spectral" in out, (
+            f"Deck driver should warn that gaussian/spectral + rrtmg "
+            f"silently drops external forcings; got stdout:\n{out}"
+        )
+        # Forcing channels must be reported as inert, not ACTIVE.
+        # Match only the activity-report lines (start with '  ' and
+        # contain the channel name in label form); skip the command
+        # printout where flags like '--aerosol-forcing' would alias.
+        report_labels = (
+            "Greenhouse gases",
+            "Ozone (cyclic clim",
+            "Tropospheric aerosol",
+            "Volcanic stratospheric",
+        )
+        for label in report_labels:
+            line = next((ln for ln in out.splitlines()
+                          if label in ln), None)
+            assert line is not None, f"Missing {label} report line"
+            assert "inert" in line.lower(), (
+                f"Forcing line {line!r} should be 'inert' under "
+                f"gaussian/spectral + rrtmg, not 'ACTIVE'."
+            )
+
+    def test_no_warning_on_cubed_sphere_rrtmg(self, tmp_path):
+        """No warning should fire for cubed_sphere + rrtmg."""
+        import subprocess
+
+        sy, ey = 1979, 1980
+        gaf.make_sst_sic(tmp_path / f"sst_sic_amip_{sy}-{ey}.nc",
+                          sy, ey, nlat=37, nlon=72)
+        gaf.make_ghg_annual(tmp_path / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_ozone_clim(tmp_path / "ozone_amip_clim.nc",
+                             nlat=18, nlev=20)
+        gaf.make_solar(tmp_path / f"solar_amip_{sy}-{ey}.nc", sy, ey)
+        gaf.make_aerosol_clim(tmp_path / "aerosol_amip_clim.nc",
+                                nlat=36)
+        gaf.make_volcanic(tmp_path / f"volcanic_amip_{sy}-{ey}.nc",
+                           sy, ey, nlat=18)
+
+        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
+        cmd = [
+            sys.executable, str(deck_script),
+            "--forcing-dir", str(tmp_path),
+            "--start-year", str(sy), "--end-year", str(ey),
+            "--grid-type", "cubed_sphere", "--discretization", "centered",
+            "--radiation", "rrtmg", "--resolution", "8",
+            "--days", "1", "--dry-run",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        assert r.returncode == 0
+        assert "WARNING" not in r.stdout, (
+            f"No warning expected on cubed_sphere + rrtmg; got:\n"
+            f"{r.stdout}"
+        )
+        # Forcing channels must all show ACTIVE.
+        report_labels = (
+            "Greenhouse gases",
+            "Ozone (cyclic clim",
+            "Tropospheric aerosol",
+            "Volcanic stratospheric",
+        )
+        for label in report_labels:
+            line = next((ln for ln in r.stdout.splitlines()
+                          if label in ln), None)
+            assert line is not None
+            assert "ACTIVE" in line, f"Got: {line!r}"
+
+
+class TestVolcanicNonCyclic:
+    """Regression tests for the volcanic non-cyclic dispatch (P2 codex
+    iter-3 review).
+
+    A multi-year volcanic AOD file (e.g. 1979–1980 with the synthetic
+    Pinatubo signal anchored at 1991) was previously sampled via
+    ``_interp_monthly_cyclic``, which mod-365.25-wraps a multi-year
+    axis and erases the eruption calendar.  The fix dispatches
+    ``len(mid_days) > 12`` files through ``_interp_monthly_noncyclic``
+    with ``_simday_to_file_day`` mapping, so 1991 Pinatubo lands at
+    sim-day = (1991 - start_year) * 365.25 + month_offset rather than
+    being collapsed onto a 12-month repeating cycle.
+    """
+
+    @pytest.fixture(scope="class")
+    def volcanic_path(self, tmp_path_factory):
+        """Generate a multi-year volcanic file (1979–1992) so the
+        Pinatubo 1991 spike is in the file but at a calendar location
+        that gets erased by cyclic interpolation."""
+        out = tmp_path_factory.mktemp("volc")
+        path = out / "volcanic_1979_1992.nc"
+        gaf.make_volcanic(path, 1979, 1992, nlat=18)
+        return path
+
+    def test_multiyear_volcanic_dispatch_through_noncyclic(self,
+                                                            volcanic_path):
+        """A 14-year volcanic file should hit the non-cyclic branch."""
+        import jax.numpy as jnp
+        from legoesm.forcing.external import (
+            AerosolConfig, get_aerosol_at_time,
+            _load_volcanic_auto_anchored, _load_volcanic_cmip6_anchored,
+            _load_volcanic_cmip6, _load_volcanic_auto,
+        )
+
+        # Bust caches — fixtures may have run earlier with a different
+        # path.
+        for fn in (
+            _load_volcanic_auto, _load_volcanic_auto_anchored,
+            _load_volcanic_cmip6, _load_volcanic_cmip6_anchored,
+        ):
+            if hasattr(fn, "cache_clear"):
+                fn.cache_clear()
+
+        cfg = AerosolConfig(
+            enabled=True, source="climatology", path="",
+            use_reference_if_missing=True,
+            reference_aod_550=0.0, reference_lat_factor=0.0,
+            volcanic_enabled=True, volcanic_path=str(volcanic_path),
+            volcanic_scale=1.0, start_year=1979,
+        )
+        lat_grid = jnp.array(np.deg2rad(np.array([-45.0, 0.0, 45.0])))
+
+        # Day 0 = 1979-01-01: very low background AOD.
+        a0 = float(np.max(np.asarray(
+            get_aerosol_at_time(cfg, day=0.0, lat_grid=lat_grid)
+        )))
+        # Day in 1991 (Pinatubo) — strong volcanic AOD expected.
+        # 1991-07-01 ≈ sim_day 12*365.25 + 182 ≈ 4565
+        pinatubo_sim_day = 12.0 * 365.25 + 182.0
+        a_pinatubo = float(np.max(np.asarray(
+            get_aerosol_at_time(cfg, day=pinatubo_sim_day,
+                                  lat_grid=lat_grid)
+        )))
+        # Day in 1995 (post-Pinatubo): AOD should have fallen back
+        # below the 1991 peak.
+        a_1995 = float(np.max(np.asarray(
+            get_aerosol_at_time(cfg, day=16.0 * 365.25 + 182.0,
+                                  lat_grid=lat_grid)
+        )))
+
+        # The synthetic generator places Pinatubo at year 1991 with
+        # peak AOD ~0.18.  Without non-cyclic dispatch, day 0 and day
+        # 4565 would sample the same cyclic phase and yield the same
+        # AOD (or near-zero in both, depending on phase).  With
+        # non-cyclic dispatch, the 1991 spike is visible.
+        assert a_pinatubo > a0 + 0.01, (
+            f"Pinatubo 1991 AOD {a_pinatubo:.4f} should significantly "
+            f"exceed 1979 background {a0:.4f}; if it doesn't, the "
+            f"multi-year volcanic file is being sampled cyclically "
+            f"and the 1991 calendar location is lost."
+        )
+        assert a_pinatubo > a_1995 + 0.005, (
+            f"Pinatubo 1991 AOD {a_pinatubo:.4f} should exceed "
+            f"post-Pinatubo 1995 AOD {a_1995:.4f}; a flat trace "
+            f"indicates cyclic sampling masked the eruption calendar."
+        )
+
+    def test_twelve_month_volcanic_still_cyclic(self, tmp_path):
+        """A 12-month volcanic file should continue to use cyclic
+        interpolation (no behavior change for legacy climatology)."""
+        import jax.numpy as jnp
+        from legoesm.forcing.external import (
+            AerosolConfig, get_aerosol_at_time,
+            _load_volcanic_auto_anchored, _load_volcanic_cmip6_anchored,
+            _load_volcanic_cmip6, _load_volcanic_auto,
+            _load_monthly_zonal_anchored,
+        )
+
+        # Build a tiny 12-month aod file.
+        from netCDF4 import Dataset
+        path = tmp_path / "volc_clim.nc"
+        with Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", 4)
+            t = ds.createVariable("time", "f8", ("time",))
+            t.units = "days since 1850-01-01 00:00:00"
+            t.calendar = "noleap"
+            t[:] = np.array([15.5 + 30.4375 * m for m in range(12)])
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la.units = "degrees_north"
+            la[:] = np.array([-60.0, -30.0, 30.0, 60.0])
+            v = ds.createVariable("aod", "f8", ("time", "lat"))
+            v[:] = 0.05  # constant climatology
+
+        for fn in (
+            _load_volcanic_auto, _load_volcanic_auto_anchored,
+            _load_volcanic_cmip6, _load_volcanic_cmip6_anchored,
+            _load_monthly_zonal_anchored,
+        ):
+            if hasattr(fn, "cache_clear"):
+                fn.cache_clear()
+
+        cfg = AerosolConfig(
+            enabled=True, source="climatology", path="",
+            use_reference_if_missing=True,
+            reference_aod_550=0.0, reference_lat_factor=0.0,
+            volcanic_enabled=True, volcanic_path=str(path),
+            volcanic_scale=1.0, start_year=1979,
+        )
+        lat_grid = jnp.array(np.deg2rad(np.array([-30.0, 30.0])))
+        # Day 0 vs day 365 should give the same result on a cyclic
+        # 12-month file.
+        a0 = np.asarray(get_aerosol_at_time(cfg, day=0.0,
+                                              lat_grid=lat_grid))
+        a365 = np.asarray(get_aerosol_at_time(cfg, day=365.0,
+                                                lat_grid=lat_grid))
+        assert np.allclose(a0, a365, atol=1e-6), (
+            f"12-month volcanic climatology must be cyclic; got "
+            f"a(day=0)={a0}, a(day=365)={a365}"
+        )
+
+    def test_aerosol_config_has_start_year_default(self):
+        """AerosolConfig.start_year defaults to 1979 (CMIP6 AMIP)."""
+        from legoesm.forcing.external import AerosolConfig
+        assert AerosolConfig().start_year == 1979
+
+
 class TestValidator:
     """Regression tests for ``scripts/validate_amip_run.py``.
 

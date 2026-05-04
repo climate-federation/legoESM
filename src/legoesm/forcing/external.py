@@ -339,6 +339,36 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
     -------
     (mid_days, lat, data) where mid_days is shape (ntime,), lat is shape
     (nlat,), and data is shape (ntime, nlat).
+
+    For a CF-anchored variant that also returns the absolute calendar
+    anchor of the first record (needed by callers that map
+    simulation-day → file-day for non-cyclic multi-year files), see
+    :func:`_load_monthly_zonal_anchored`.
+    """
+    mid_days, _first_date, lat, data = _load_monthly_zonal_anchored(
+        path, varname
+    )
+    return mid_days, lat, data
+
+
+@lru_cache(maxsize=16)
+def _load_monthly_zonal_anchored(
+    path: str, varname: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Like :func:`_load_monthly_zonal` but also returns the first
+    record's CF-time anchor (``first_date``) so callers can map a
+    simulation day onto the file's absolute time axis when the file
+    spans multiple years.
+
+    This matches the API of :func:`_load_monthly_zonal_with_levels`
+    used by the ozone loader.
+
+    Returns
+    -------
+    (mid_days, first_date, lat, data) where ``first_date`` is a
+    :class:`cftime.datetime` / :class:`numpy.datetime64` matching
+    :func:`_read_time_axis`'s second return, or ``None`` when the
+    file's time axis lacks a CF ``units`` attribute.
     """
     ds = _open_forcing_dataset(path)
     if varname not in ds.data_vars:
@@ -356,9 +386,10 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
         ds.close()
         raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
     if "time" in ds:
-        mid_days = _read_time_days(ds)
+        mid_days, first_date = _read_time_axis(ds)
     else:
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        first_date = None
     ds.close()
 
     # Average over longitude to produce a zonal mean.
@@ -381,7 +412,7 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
         data = np.nanmean(data, axis=ax)
         dims.pop(ax)
 
-    return mid_days, lat, data
+    return mid_days, first_date, lat, data
 
 
 @lru_cache(maxsize=16)
@@ -406,7 +437,26 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     Returns ``(mid_days, lat, aod)`` with ``aod`` shape
     ``(ntime, nlat)`` — a drop-in replacement for
     :func:`_load_monthly_zonal` output.
+
+    For a CF-anchored variant that also returns the calendar anchor
+    of the first record (needed by callers that map sim-day → file-day
+    for non-cyclic multi-year volcanic time-series), see
+    :func:`_load_volcanic_cmip6_anchored`.
     """
+    mid_days, _first_date, lat, aod = _load_volcanic_cmip6_anchored(path)
+    return mid_days, lat, aod
+
+
+@lru_cache(maxsize=16)
+def _load_volcanic_cmip6_anchored(
+    path: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Like :func:`_load_volcanic_cmip6` but also returns the first
+    record's CF-time anchor (``first_date``) so callers can map a
+    simulation day onto the file's absolute time axis when the file
+    spans multiple years (e.g. 1850–2014 CMIP6 volcanic climatology
+    with the 1982 El Chichón and 1991 Pinatubo eruptions in their
+    real calendar months)."""
     ds = _open_forcing_dataset(path)
     # Only ``ext_sun`` (SW stratospheric extinction) is valid here: the SW
     # aerosol branch multiplies this into broadband AOD, so reading the LW
@@ -452,11 +502,14 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     # Month / time axis — CMIP6 volcanic may use ``month`` or ``time``.
     if "time" in dims:
         time_name = "time"
-        mid_days = _read_time_days(ds)
+        mid_days, first_date = _read_time_axis(ds)
     elif "month" in dims:
         time_name = "month"
         nm = ext.shape[dims.index("month")]
         mid_days = np.array([15.5 + 30.4375 * m for m in range(nm)])
+        # No CF anchor on a bare 'month' axis — the caller falls back to
+        # cyclic dispatch automatically when ``first_date is None``.
+        first_date = None
     else:
         ds.close()
         raise ValueError(
@@ -498,7 +551,7 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
             order.append(dims_after.index(dim_name))
     order += [i for i in range(len(dims_after)) if i not in order]
     aod = np.transpose(aod_with_bands, order)
-    return mid_days, lat, aod
+    return mid_days, first_date, lat, aod
 
 
 @lru_cache(maxsize=16)
@@ -507,27 +560,39 @@ def _load_volcanic_auto(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     Returns the same ``(mid_days, lat, data)`` tuple as
     :func:`_load_monthly_zonal` regardless of which on-disk schema the
-    file follows.  Criterion: presence of the CMIP6 ``ext_sun`` variable
-    triggers :func:`_load_volcanic_cmip6`; otherwise fall back to the
-    legacy ``aod(time, lat)`` schema.  Cached so that repeated calls in
-    an AMIP time-step loop don't re-open the dataset just to dispatch
-    (Codex review 2026-04-24).
+    file follows.  See :func:`_load_volcanic_auto_anchored` for a
+    variant that also returns the file's CF anchor (used by the
+    multi-year non-cyclic dispatch in :func:`get_aerosol_at_time`).
+    """
+    mid_days, _first_date, lat, data = _load_volcanic_auto_anchored(path)
+    return mid_days, lat, data
+
+
+@lru_cache(maxsize=16)
+def _load_volcanic_auto_anchored(
+    path: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Like :func:`_load_volcanic_auto` but also returns ``first_date``.
+
+    Criterion: presence of the CMIP6 ``ext_sun`` variable triggers
+    :func:`_load_volcanic_cmip6_anchored`; otherwise fall back to the
+    legacy ``aod(time, lat)`` schema via
+    :func:`_load_monthly_zonal_anchored`.  Cached so that repeated
+    calls in an AMIP time-step loop don't re-open the dataset just to
+    dispatch.
     """
     ds = _open_forcing_dataset(path)
     dvars = set(ds.data_vars)
     ds.close()
     if "ext_sun" in dvars:
-        return _load_volcanic_cmip6(path)
+        return _load_volcanic_cmip6_anchored(path)
     if "ext_earth" in dvars and "aod" not in dvars:
-        # CMIP6 file with only LW extinction — not a valid SW aerosol
-        # source.  Fail with a specific error rather than the generic
-        # "aod not found" from the legacy-path fallback.
         raise ValueError(
             f"Volcanic file {path!r} has only LW extinction "
             "('ext_earth') and no SW extinction ('ext_sun'); cannot be "
             "used as a SW AOD source.",
         )
-    return _load_monthly_zonal(path, "aod")
+    return _load_monthly_zonal_anchored(path, "aod")
 
 
 def _ozone_unit_factor(units: str, varname: str) -> float:
@@ -1358,6 +1423,13 @@ class AerosolConfig(NamedTuple):
     volcanic_enabled: bool = False
     volcanic_path: str = ""
     volcanic_scale: float = 1.0
+    # Calendar year of simulation day 0.  Required for the non-cyclic
+    # dispatch in :func:`get_aerosol_at_time` so multi-year volcanic
+    # files (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*`` with the
+    # 1982 El Chichón and 1991 Pinatubo eruptions) are sampled at their
+    # actual calendar months instead of being collapsed onto a 12-month
+    # cyclic axis.  Mirrors :class:`OzoneConfig.start_year`.
+    start_year: int = 1979
 
 
 def _reference_aerosol_profile(lat_grid: jnp.ndarray, config: AerosolConfig) -> jnp.ndarray:
@@ -1388,8 +1460,21 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     if not config.enabled:
         return None
     if config.path:
-        mid_days, lat, data = _load_monthly_zonal(config.path, "aod")
-        aod_interp = _interp_monthly_cyclic(mid_days, data, day)
+        # Dispatch cyclic (12-month climatology) vs non-cyclic
+        # (multi-year, e.g. real CMIP6 input4MIPs aerosol).  Keyed on
+        # ``len(mid_days) > 12``; ``config.start_year`` maps the
+        # simulation day onto the file's absolute time axis when a CF
+        # anchor is present.  Without this dispatch, a 36-year aerosol
+        # file would be sampled cyclically (mod 365.25), throwing away
+        # interannual evolution.
+        mid_days, first_date, lat, data = _load_monthly_zonal_anchored(
+            config.path, "aod",
+        )
+        if len(mid_days) > 12:
+            file_day = _simday_to_file_day(day, config.start_year, first_date)
+            aod_interp = _interp_monthly_noncyclic(mid_days, data, file_day)
+        else:
+            aod_interp = _interp_monthly_cyclic(mid_days, data, day)
         if lat_grid is not None:
             base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
             # Kinne aerosol files may have extra dimensions (level, band).
@@ -1418,13 +1503,32 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     # Optional volcanic contribution.
     if config.volcanic_enabled:
         if config.volcanic_path:
-            # ``_load_volcanic_auto`` handles both the legacy
+            # ``_load_volcanic_auto_anchored`` handles both the legacy
             # ``aod(time, lat)`` schema and the CMIP6 / MPI-M
             # ``ext_sun(solar_bands, lat, altitude, month)`` schema
-            # (issue #207 bug 3) by integrating ext * dz over altitude
-            # and returning a drop-in ``(mid_days, lat, aod)`` tuple.
-            mid_days_v, lat_v, data_v = _load_volcanic_auto(config.volcanic_path)
-            aod_v = _interp_monthly_cyclic(mid_days_v, data_v, day) * config.volcanic_scale
+            # (issue #207 bug 3), and additionally returns the file's
+            # CF time anchor so multi-year volcanic time series with
+            # real eruption calendars (1982 El Chichón, 1991 Pinatubo,
+            # …) are sampled non-cyclically — the previous cyclic
+            # path mod-365.25-wrapped a multi-year file onto 12 months
+            # and lost the eruption calendars entirely (Codex iter-3
+            # review).
+            mid_days_v, first_date_v, lat_v, data_v = _load_volcanic_auto_anchored(
+                config.volcanic_path
+            )
+            if len(mid_days_v) > 12:
+                file_day_v = _simday_to_file_day(
+                    day, config.start_year, first_date_v,
+                )
+                aod_v = (
+                    _interp_monthly_noncyclic(mid_days_v, data_v, file_day_v)
+                    * config.volcanic_scale
+                )
+            else:
+                aod_v = (
+                    _interp_monthly_cyclic(mid_days_v, data_v, day)
+                    * config.volcanic_scale
+                )
             if lat_grid is not None:
                 volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
                 # Sum trailing dims for multi-dimensional volcanic files

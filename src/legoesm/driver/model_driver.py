@@ -509,6 +509,12 @@ class ModelDriver:
             volcanic_enabled=bool(cfg.volcanic_aerosol_file),
             volcanic_path=cfg.volcanic_aerosol_file,
             volcanic_scale=cfg.volcanic_aerosol_scale,
+            # Calendar anchor for the non-cyclic dispatch in
+            # ``get_aerosol_at_time``.  Multi-year volcanic time-series
+            # (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*``) are
+            # sampled at their actual eruption calendars instead of
+            # being collapsed onto a 12-month cycle.
+            start_year=cfg.start_year,
         )
 
         # Solar init
