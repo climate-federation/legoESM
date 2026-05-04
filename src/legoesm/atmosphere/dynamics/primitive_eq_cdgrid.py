@@ -136,6 +136,13 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Ensures exact mass conservation to machine precision but
         # requires a global reduction (MPI allreduce when distributed).
         # Disable for pure performance benchmarks to eliminate sync.
+        #
+        # Note: this stage-level reduction is **automatically suppressed**
+        # when ``use_conservation_fixer=True`` and ``fix_mass=True``,
+        # because the end-step mass fixer already enforces conservation
+        # at machine precision in a single allreduce per step instead of
+        # one per RK stage.  To force per-stage zero-mean, set
+        # ``use_conservation_fixer=False`` or ``fix_mass=False``.
     use_async_halo: bool = False
         # Enable interior/boundary split for compute-communication
         # overlap in MPI mode.  Computes stencils on interior points
@@ -334,10 +341,20 @@ def fv3_hydrostatic_tendencies(
 
     # --- 10b. Surface pressure tendency and vertical motion ---
 
+    # Gate per-stage zero-mean: skip when end-step fix_mass is active.
+    # End-step mass fixer enforces conservation per step at machine precision;
+    # per-stage zero-mean would add one allreduce per RK stage (3-4 per
+    # step in SSP-RK3) for an effect that the end-step fixer corrects in
+    # one shot.  Toggle by disabling fix_mass or use_conservation_fixer.
+    _apply_zero_mean_per_stage = (
+        config.zero_mean_ps_tendency
+        and not (config.use_conservation_fixer and config.fix_mass)
+    )
+
     if _hybrid:
         D_total_p = jnp.sum(div_v * dp, axis=-1)
         dp_s_dt_data = -D_total_p / sigma_coord.B_range
-        if config.zero_mean_ps_tendency:
+        if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
@@ -387,7 +404,7 @@ def fv3_hydrostatic_tendencies(
 
         D_total = jnp.sum(div_v * dsigma, axis=-1)
         dp_s_dt_data = -p_s * D_total / sigma_range
-        if config.zero_mean_ps_tendency:
+        if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         sigma_dot = compute_sigma_dot(div_v, sigma_coord)

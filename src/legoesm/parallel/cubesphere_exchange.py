@@ -372,18 +372,187 @@ def set_ppermute_default(enabled: bool) -> None:
     _use_ppermute = enabled
 
 
+def _make_h2_exchange_allgather(mesh, ndim):
+    """Build a shard_map exchange for halo=2 using all_gather.
+
+    Each device all-gathers the *outer two layers* of every edge from
+    every face, then assembles its own padded ``(n+4, n+4)`` (3D) or
+    ``(n+4, n+4, C)`` (4D) tile.  This is a correct SPMD halo=2
+    exchange — distinct from the broken pre-fix path that constructed
+    an exchange object and discarded it, falling back to the local
+    helper that had no neighbour-face data on a sharded mesh.
+
+    Implementation: pack the two outermost layers of each of the four
+    edges into a (4, 2, n[, C]) tensor per device, all_gather along
+    the ``"face"`` axis, then route incoming strips to the correct
+    halo slot using the static cubed-sphere connectivity tables.
+    """
+    P = jax.sharding.PartitionSpec
+    in_sp = P("face", *((None,) * (ndim - 1)))
+    out_sp = P("face", *((None,) * (ndim - 1)))
+
+    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
+             check_rep=False)
+    def _exchange(local_shard):
+        n = local_shard.shape[1]
+        my_face = local_shard[0]
+
+        # Pack 4 edges × 2 depths from the local face.
+        # Edge order: WEST(0), EAST(1), SOUTH(2), NORTH(3).
+        if ndim == 3:
+            my_strips = jnp.stack([
+                jnp.stack([my_face[0, :], my_face[1, :]], axis=0),
+                jnp.stack([my_face[-1, :], my_face[-2, :]], axis=0),
+                jnp.stack([my_face[:, 0], my_face[:, 1]], axis=0),
+                jnp.stack([my_face[:, -1], my_face[:, -2]], axis=0),
+            ], axis=0)  # (4, 2, n)
+        else:
+            my_strips = jnp.stack([
+                jnp.stack([my_face[0, :, :], my_face[1, :, :]], axis=0),
+                jnp.stack([my_face[-1, :, :], my_face[-2, :, :]], axis=0),
+                jnp.stack([my_face[:, 0, :], my_face[:, 1, :]], axis=0),
+                jnp.stack([my_face[:, -1, :], my_face[:, -2, :]], axis=0),
+            ], axis=0)  # (4, 2, n, C)
+
+        all_strips = jax.lax.all_gather(my_strips, "face", tiled=True)
+        n_faces = mesh.shape["face"]
+        if ndim == 3:
+            all_strips = all_strips.reshape(n_faces, 4, 2, n)
+        else:
+            all_strips = all_strips.reshape(
+                n_faces, 4, 2, n, my_face.shape[-1],
+            )
+
+        my_idx = jax.lax.axis_index("face")
+        my_nbr_f = _NBR_FACES[my_idx]
+        my_nbr_e = _NBR_EDGES[my_idx]
+        my_rev = _IS_REVERSED[my_idx]
+
+        if ndim == 3:
+            padded = jnp.pad(my_face, ((2, 2), (2, 2)))
+        else:
+            padded = jnp.pad(my_face, ((2, 2), (2, 2), (0, 0)))
+
+        # Place each edge's two-deep strip.  ``recv_edge`` is which
+        # edge of *this* face needs filling; the source comes from
+        # the neighbour face's neighbour-edge.
+        for recv_edge in range(4):
+            nbr_face = my_nbr_f[recv_edge]
+            nbr_edge = my_nbr_e[recv_edge]
+            rev = my_rev[recv_edge]
+
+            strip_d0 = all_strips[nbr_face, nbr_edge, 0]
+            strip_d1 = all_strips[nbr_face, nbr_edge, 1]
+            strip_d0 = jnp.where(rev, strip_d0[::-1], strip_d0)
+            strip_d1 = jnp.where(rev, strip_d1[::-1], strip_d1)
+
+            if recv_edge == 0:  # WEST
+                padded = padded.at[1, 2:-2].set(strip_d0)
+                padded = padded.at[0, 2:-2].set(strip_d1)
+            elif recv_edge == 1:  # EAST
+                padded = padded.at[n + 2, 2:-2].set(strip_d0)
+                padded = padded.at[n + 3, 2:-2].set(strip_d1)
+            elif recv_edge == 2:  # SOUTH
+                padded = padded.at[2:-2, 1].set(strip_d0)
+                padded = padded.at[2:-2, 0].set(strip_d1)
+            else:  # NORTH
+                padded = padded.at[2:-2, n + 2].set(strip_d0)
+                padded = padded.at[2:-2, n + 3].set(strip_d1)
+
+        # Fill the L-shaped corner cells (4 cells per corner × 4 corners).
+        # Each corner only depends on already-filled edge halos within
+        # *this* face, so we can compute it directly without re-using
+        # the (6,...) loop in :func:`_fill_corners_h2`.  (The shared
+        # helper iterates ``for f in range(6)`` and would access
+        # non-existent faces on the single-face shard here.)
+        if ndim == 3:
+            sw_inner = 0.5 * (padded[1, 2] + padded[2, 1])
+            padded = padded.at[1, 1].set(sw_inner)
+            padded = padded.at[0, 1].set(0.5 * (padded[0, 2] + sw_inner))
+            padded = padded.at[1, 0].set(0.5 * (padded[2, 0] + sw_inner))
+            padded = padded.at[0, 0].set(
+                0.5 * (padded[0, 1] + padded[1, 0]),
+            )
+
+            se_inner = 0.5 * (padded[-2, 2] + padded[-3, 1])
+            padded = padded.at[-2, 1].set(se_inner)
+            padded = padded.at[-1, 1].set(0.5 * (padded[-1, 2] + se_inner))
+            padded = padded.at[-2, 0].set(0.5 * (padded[-3, 0] + se_inner))
+            padded = padded.at[-1, 0].set(
+                0.5 * (padded[-1, 1] + padded[-2, 0]),
+            )
+
+            nw_inner = 0.5 * (padded[1, -3] + padded[2, -2])
+            padded = padded.at[1, -2].set(nw_inner)
+            padded = padded.at[0, -2].set(0.5 * (padded[0, -3] + nw_inner))
+            padded = padded.at[1, -1].set(0.5 * (padded[2, -1] + nw_inner))
+            padded = padded.at[0, -1].set(
+                0.5 * (padded[0, -2] + padded[1, -1]),
+            )
+
+            ne_inner = 0.5 * (padded[-2, -3] + padded[-3, -2])
+            padded = padded.at[-2, -2].set(ne_inner)
+            padded = padded.at[-1, -2].set(0.5 * (padded[-1, -3] + ne_inner))
+            padded = padded.at[-2, -1].set(0.5 * (padded[-3, -1] + ne_inner))
+            padded = padded.at[-1, -1].set(
+                0.5 * (padded[-1, -2] + padded[-2, -1]),
+            )
+        else:
+            sw_inner = 0.5 * (padded[1, 2, :] + padded[2, 1, :])
+            padded = padded.at[1, 1, :].set(sw_inner)
+            padded = padded.at[0, 1, :].set(0.5 * (padded[0, 2, :] + sw_inner))
+            padded = padded.at[1, 0, :].set(0.5 * (padded[2, 0, :] + sw_inner))
+            padded = padded.at[0, 0, :].set(
+                0.5 * (padded[0, 1, :] + padded[1, 0, :]),
+            )
+
+            se_inner = 0.5 * (padded[-2, 2, :] + padded[-3, 1, :])
+            padded = padded.at[-2, 1, :].set(se_inner)
+            padded = padded.at[-1, 1, :].set(0.5 * (padded[-1, 2, :] + se_inner))
+            padded = padded.at[-2, 0, :].set(0.5 * (padded[-3, 0, :] + se_inner))
+            padded = padded.at[-1, 0, :].set(
+                0.5 * (padded[-1, 1, :] + padded[-2, 0, :]),
+            )
+
+            nw_inner = 0.5 * (padded[1, -3, :] + padded[2, -2, :])
+            padded = padded.at[1, -2, :].set(nw_inner)
+            padded = padded.at[0, -2, :].set(0.5 * (padded[0, -3, :] + nw_inner))
+            padded = padded.at[1, -1, :].set(0.5 * (padded[2, -1, :] + nw_inner))
+            padded = padded.at[0, -1, :].set(
+                0.5 * (padded[0, -2, :] + padded[1, -1, :]),
+            )
+
+            ne_inner = 0.5 * (padded[-2, -3, :] + padded[-3, -2, :])
+            padded = padded.at[-2, -2, :].set(ne_inner)
+            padded = padded.at[-1, -2, :].set(0.5 * (padded[-1, -3, :] + ne_inner))
+            padded = padded.at[-2, -1, :].set(0.5 * (padded[-3, -1, :] + ne_inner))
+            padded = padded.at[-1, -1, :].set(
+                0.5 * (padded[-1, -2, :] + padded[-2, -1, :]),
+            )
+        return padded[None]
+
+    return _exchange
+
+
+def _get_h2_exchange(mesh, ndim):
+    """Cached halo=2 SPMD exchange (always all_gather backend)."""
+    key = ("h2", id(mesh), ndim)
+    if key not in _cache:
+        _cache[key] = _make_h2_exchange_allgather(mesh, ndim)
+    return _cache[key]
+
+
 def explicit_pad_halo(data, mesh, halo=1):
     """Explicit 3D scalar exchange.  (6,n,n) → (6,n+2h,n+2h).
 
-    For halo=2 uses all_gather (ppermute only supports halo=1).
+    halo=1 uses ppermute or all_gather (selectable); halo=2 uses a
+    dedicated 2-deep-edge all_gather exchange.  ``ppermute`` is not
+    supported for halo=2 because it would need a 4-edge × 2-depth
+    pipeline; the all_gather variant is correct and bandwidth-bounded
+    by ``2 × n × dtype_bytes`` per edge.
     """
     if halo == 2:
-        # halo=2: use all_gather for SPMD exchange (not ppermute, which
-        # only supports halo=1), falling back to local if needed.
-        exchange = _get_exchange(mesh, 3, False)  # all_gather
-        # all_gather gives halo=1 padded; apply second halo layer locally
-        from legoesm.grids.halo import _pad_halo_local_h2
-        return _pad_halo_local_h2(data)
+        return _get_h2_exchange(mesh, 3)(data)
     if halo != 1:
         from legoesm.grids.halo import _pad_halo_local
         return _pad_halo_local(data)
@@ -393,11 +562,11 @@ def explicit_pad_halo(data, mesh, halo=1):
 def explicit_pad_halo_4d(data, mesh, halo=1):
     """Explicit 4D scalar exchange.  (6,n,n,C) → (6,n+2h,n+2h,C).
 
-    For halo=2 uses all_gather (ppermute only supports halo=1).
+    halo=2 uses the dedicated 2-deep-edge all_gather exchange (see
+    :func:`explicit_pad_halo`).
     """
     if halo == 2:
-        from legoesm.grids.halo import _pad_halo_local_h2_4d
-        return _pad_halo_local_h2_4d(data)
+        return _get_h2_exchange(mesh, 4)(data)
     if halo != 1:
         from legoesm.grids.halo import _pad_halo_local_4d
         return _pad_halo_local_4d(data)

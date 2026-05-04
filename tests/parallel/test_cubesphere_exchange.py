@@ -182,6 +182,49 @@ class TestVectorExchange:
 
 
 # =======================================================================
+# Halo=2 SPMD exchange
+# =======================================================================
+
+class TestHalo2SPMD:
+    """SPMD halo=2 must match the local halo=2 reference.
+
+    Regression: previously :func:`explicit_pad_halo` (halo=2) created an
+    exchange object and silently discarded it, falling through to the
+    local h2 helper.  On a sharded mesh the local helper has no
+    neighbour-face data, so the halo cells contained junk.  The fix
+    introduces a dedicated 2-deep-edge all_gather exchange.
+    """
+
+    def test_3d_matches_local(self, mesh_6):
+        from legoesm.grids.halo import _pad_halo_local_h2
+        from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
+        n = 8
+        data = jax.random.normal(jax.random.PRNGKey(2024), (6, n, n))
+        ref = np.array(_pad_halo_local_h2(data))
+        result = np.array(
+            explicit_pad_halo(_shard_on_face(data, mesh_6), mesh_6, halo=2),
+        )
+        np.testing.assert_allclose(
+            result, ref, rtol=1e-6, atol=1e-10,
+            err_msg="SPMD halo=2 3D differs from local h2 reference",
+        )
+
+    def test_4d_matches_local(self, mesh_6):
+        from legoesm.grids.halo import _pad_halo_local_h2_4d
+        from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
+        n, nlev = 8, 5
+        data = jax.random.normal(jax.random.PRNGKey(2025), (6, n, n, nlev))
+        ref = np.array(_pad_halo_local_h2_4d(data))
+        result = np.array(
+            explicit_pad_halo_4d(_shard_on_face(data, mesh_6), mesh_6, halo=2),
+        )
+        np.testing.assert_allclose(
+            result, ref, rtol=1e-6, atol=1e-10,
+            err_msg="SPMD halo=2 4D differs from local h2 reference",
+        )
+
+
+# =======================================================================
 # Backend activation / dispatch integration
 # =======================================================================
 

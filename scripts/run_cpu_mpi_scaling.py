@@ -594,9 +594,15 @@ def run_single_benchmark(
             return new, None
         return jax.lax.scan(_body, st, None, length=n_timing)[0]
 
-    # Pre-compile scan
-    state = _scan_run(state, dt_used)
-    jax.block_until_ready(jax.tree.leaves(state))
+    # Pre-compile scan without mutating the state used for timing.
+    # Previously we rebound ``state`` to the precompile output, so the
+    # timed run started from state already advanced by ``n_timing``
+    # steps and the benchmark was biased.  Use a leaf-cloned input so
+    # XLA still warms compile + caches against identical layout but
+    # ``state`` keeps its original (post-warmup) trajectory.
+    _precompile_state = jax.tree.map(lambda x: x, state)
+    _ = _scan_run(_precompile_state, dt_used)
+    jax.block_until_ready(jax.tree.leaves(_precompile_state))
 
     # MPI barrier before timing
     try:

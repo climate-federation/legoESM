@@ -47,6 +47,25 @@ def _accumulation_dtype():
     return target
 
 
+def _conservation_accumulator():
+    """Accumulator dtype for *budget* sums (mass, energy, tracer).
+
+    Distinct from :func:`_accumulation_dtype` — promotes to ``float64``
+    whenever JAX has x64 enabled, regardless of the active precision
+    policy.  Mass/energy budgets involve subtracting two near-equal
+    extensive quantities (e.g. ``mass_old - mass_new``), so even when
+    storage/compute are intentionally float32 we want the budget sum
+    to use the highest precision JAX is willing to give us.  This
+    restores end-step :func:`fix_mass_hydrostatic` to ~machine
+    precision and lets the "skip per-stage ``zero_mean_tendency`` when
+    end-step fixer is on" scaling optimisation be lossless even in
+    float32 storage/compute mode.
+    """
+    if jax.config.read("jax_enable_x64"):
+        return jnp.float64
+    return _accumulation_dtype()
+
+
 def _global_area_sum(
     array: jax.Array,
     grid,
@@ -81,7 +100,7 @@ def _global_area_sum(
     - **MPI distributed** (replicated dynamics): mask to owned faces,
       local sum, then ``allreduce(SUM)``.
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     prod = array.astype(acc) * grid.area.astype(acc)
     if owned_mask is not None:
         # Broadcast (n_faces,) → match prod shape: (6,) → (6,1,1,...)
@@ -109,7 +128,7 @@ def _batch_global_area_sums(
 
     Falls back to individual ``jnp.sum`` when not distributed.
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     area_acc = grid.area.astype(acc)
     mask = None
     if owned_mask is not None:

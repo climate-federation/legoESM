@@ -274,6 +274,7 @@ def _pad_halo_mpi_face_only(
     # Group remote edges by neighbor rank so we send one message per
     # unique neighbor instead of an O(world_size) allgather.
     from collections import defaultdict
+    n = data.shape[1]
     strip_size = halo * n
     comm = MPI.COMM_WORLD
     rank = topology.rank
@@ -682,6 +683,8 @@ def _pad_halo_mpi_face_only_4d(
 
     # Batched neighbor sendrecv — one message per neighbor for all levels
     from collections import defaultdict
+    n = data.shape[1]
+    nlev = data.shape[3]
     comm = MPI.COMM_WORLD
     rank = topology.rank
 

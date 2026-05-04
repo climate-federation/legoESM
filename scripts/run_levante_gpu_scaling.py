@@ -171,10 +171,13 @@ _SUPPORTED_PHYSICS = {
     "spectral": {"none", "held_suarez"},
 }
 
-# MPI distributed benchmark support.  All three finite-volume grids have
-# validated MPI paths: cubed-sphere (via distributed.py), lat-lon (via
-# latlon_mpi.py), and icosahedral/Voronoi (via voronoi_mpi.py).
-_MPI_SUPPORTED_GRIDS = {"cubed-sphere", "latlon", "icosahedral"}
+# MPI distributed benchmark support.  Only finite-volume grids with
+# validated local-domain operators are listed here:
+# cubed-sphere (via distributed.py) and icosahedral/Voronoi (via
+# voronoi_mpi.py).  Lat-lon MPI is intentionally excluded — its
+# C-grid operators have not been ported to latitude sub-domains
+# (``make_latlon_mpi_step`` raises NotImplementedError, see #115).
+_MPI_SUPPORTED_GRIDS = {"cubed-sphere", "icosahedral"}
 
 
 @dataclass
@@ -933,19 +936,6 @@ def run_benchmark(
             "A-grid latlon atmosphere has been removed. "
             "Use --grid cubed-sphere or --grid icosahedral instead. See #115."
         )
-        if _is_mpi:
-            # MPI distributed: 1D latitude-band decomposition.
-            # State is scattered to rank-local bands after cast.
-            from legoesm.parallel.latlon_mpi import (
-                make_latlon_band_layout,
-            )
-            _latlon_layout = make_latlon_band_layout(
-                _rank, _n_ranks, n_lat, n_lon,
-            )
-            # Each MPI rank uses 1 GPU.
-            dev_config = create_latlon_mesh(n_devices=1)
-        else:
-            dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -1154,9 +1144,16 @@ def run_benchmark(
 
     scan_runner = _make_scan_runner(n_timing)
 
-    # Pre-compile the scan runner
-    state = scan_runner(state, dt)
-    jax.block_until_ready(jax.tree.leaves(state))
+    # Pre-compile the scan runner without mutating the timed state.
+    # The previous implementation re-bound ``state`` to the precompile
+    # output, so the *timing* run started from state advanced by
+    # ``n_timing`` steps — biasing finite-time comparisons.  We clone
+    # the leaves so XLA still compiles and warms caches against
+    # identical input shapes/dtypes/sharding, but the original state
+    # remains the seed for the timed scan.
+    _precompile_state = jax.tree.map(lambda x: x, state)
+    _ = scan_runner(_precompile_state, dt)
+    jax.block_until_ready(jax.tree.leaves(_precompile_state))
 
     # Synchronize all ranks before timing for fair measurement
     try:
