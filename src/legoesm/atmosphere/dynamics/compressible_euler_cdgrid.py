@@ -33,11 +33,9 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.core.operators_3d import (
-    divergence_3d,
     gradient_x_3d,
     gradient_y_3d,
     hyperdiffusion_3d,
-    laplacian_compact_3d,
     vertical_advection_height,
 )
 from legoesm.core.operators_cdgrid import (
@@ -368,62 +366,53 @@ def cdgrid_compressible_euler_slow_tendencies(
         dtracers_dt = jnp.zeros_like(tracers)
 
     # --- 13. Hyperdiffusion ---
-    # ``hyperdiffusion_3d(field, grid, coeff)`` is defined as
-    # ``-coeff * ∇²(∇²(field))`` where each ∇² runs the cubed-sphere
-    # 4D-native compact stencil (single ``pad_halo_4d`` per call).
-    # When *both* ``hyperdiff_coeff`` (applied to (u, v, theta_p))
-    # and ``hyperdiff_rho_coeff`` (applied to rho_p) are non-zero,
-    # the two operator chains share the same biharmonic structure
-    # but use different coefficients on the outer step.  Inline the
-    # operator and stack ALL four fields along a trailing axis: a
-    # single inner ∇² and a single outer ∇² serve all four fields,
-    # then per-field coefficients are applied at the very end.
-    # 4 ∇² evaluations → 2 (one inner, one outer) per RHS evaluation
-    # when both coefficients are active.  When only one coefficient
-    # is active, fall back to the existing path (3-field or 1-field).
-    _coeff_uvT = config.hyperdiff_coeff
+    # ``hyperdiffusion_3d(field, grid, coeff)`` is horizontal only: the
+    # trailing dimension is just a batch axis.  Pack every active CE
+    # hyperdiffusion field into that axis, including half-level ``w``.
+    # One inner ∇² and one outer ∇² then serve all active fields; offsets
+    # preserve the different full-level (nlev) and half-level (nlev+1)
+    # blocks before per-field coefficients are applied.
+    _coeff_uvt = config.hyperdiff_coeff
     _coeff_rho = config.hyperdiff_rho_coeff
-    if _coeff_uvT > 0 and _coeff_rho > 0:
-        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
-        _hyper_stack = jnp.stack(
-            [u, v, theta_p, rho_p], axis=-1,
-        )  # (6, n, n, nlev, 4)
-        _hyper_flat = _hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 4)
-        # Inner ∇² (compact stencil) — shared across all four fields.
-        _lap1 = laplacian_compact_3d(_hyper_flat, grid)
-        # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
-        # both gradient ops (saves 1 ``pad_halo_4d`` per call).
-        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_uvtr
-        _dg = getattr(grid, 'duogrid', None)
-        _offsets = None if _dg is not None else grid.halo_interp_offsets
-        _lap1_pad = _pad_halo_4d_uvtr(_lap1, interp_offsets=_offsets, duogrid=_dg)
-        _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
-        _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
-        _lap2 = divergence_3d(_gx, _gy, grid).reshape(
-            n_face_h, n_i_h, n_j_h, nlev_h, 4,
+    _coeff_w = config.hyperdiff_w_coeff
+    _hyper_w = None
+    if _coeff_uvt > 0 or _coeff_rho > 0 or _coeff_w > 0:
+        nlev_h = u.shape[-1]
+        nlev_w_h = w.shape[-1]
+        _hyper_blocks = []
+        _offset = 0
+
+        if _coeff_uvt > 0:
+            _uvt_offset = _offset
+            _hyper_blocks.append(jnp.concatenate([u, v, theta_p], axis=-1))
+            _offset += 3 * nlev_h
+        if _coeff_rho > 0:
+            _rho_offset = _offset
+            _hyper_blocks.append(rho_p)
+            _offset += nlev_h
+        if _coeff_w > 0:
+            _w_offset = _offset
+            _hyper_blocks.append(w)
+            _offset += nlev_w_h
+
+        _hyper_in = (
+            _hyper_blocks[0]
+            if len(_hyper_blocks) == 1
+            else jnp.concatenate(_hyper_blocks, axis=-1)
         )
-        # Apply per-field hyperdiffusion coefficients.
-        du_dt = du_dt - _coeff_uvT * _lap2[..., 0]
-        dv_dt = dv_dt - _coeff_uvT * _lap2[..., 1]
-        dtheta_p_dt = dtheta_p_dt - _coeff_uvT * _lap2[..., 2]
-        drho_p_dt = drho_p_dt - _coeff_rho * _lap2[..., 3]
-    elif _coeff_uvT > 0:
-        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
-        hyper_stack = jnp.stack(
-            [u, v, theta_p], axis=-1,
-        )  # (6, n, n, nlev, 3)
-        hyper_flat = hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 3)
-        hyper_out_flat = hyperdiffusion_3d(
-            hyper_flat, grid, _coeff_uvT,
-        )
-        hyper_out = hyper_out_flat.reshape(n_face_h, n_i_h, n_j_h, nlev_h, 3)
-        du_dt = du_dt + hyper_out[..., 0]
-        dv_dt = dv_dt + hyper_out[..., 1]
-        dtheta_p_dt = dtheta_p_dt + hyper_out[..., 2]
-    elif _coeff_rho > 0:
-        drho_p_dt = drho_p_dt + hyperdiffusion_3d(
-            rho_p, grid, _coeff_rho,
-        )
+        _hyper_out = hyperdiffusion_3d(_hyper_in, grid, 1.0)
+
+        if _coeff_uvt > 0:
+            _uvt = _hyper_out[..., _uvt_offset:_uvt_offset + 3 * nlev_h]
+            du_dt = du_dt + _coeff_uvt * _uvt[..., :nlev_h]
+            dv_dt = dv_dt + _coeff_uvt * _uvt[..., nlev_h:2 * nlev_h]
+            dtheta_p_dt = dtheta_p_dt + _coeff_uvt * _uvt[..., 2 * nlev_h:]
+        if _coeff_rho > 0:
+            drho_p_dt = drho_p_dt + _coeff_rho * _hyper_out[
+                ..., _rho_offset:_rho_offset + nlev_h
+            ]
+        if _coeff_w > 0:
+            _hyper_w = _coeff_w * _hyper_out[..., _w_offset:_w_offset + nlev_w_h]
 
     # --- 14. Sponge layer ---
     sponge = _sponge_profile(
@@ -460,8 +449,8 @@ def cdgrid_compressible_euler_slow_tendencies(
     )
 
     dw_dt = horiz_adv_w_half - sponge_half * w
-    if config.hyperdiff_w_coeff > 0:
-        dw_dt = dw_dt + hyperdiffusion_3d(w, grid, config.hyperdiff_w_coeff)
+    if _hyper_w is not None:
+        dw_dt = dw_dt + _hyper_w
 
     # --- 16. Physics ---
     if physics_tendency is not None:
