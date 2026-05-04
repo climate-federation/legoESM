@@ -2000,7 +2000,7 @@ def main() -> int:
             "backend": backend,
             "hostname": hostname,
             "max_gpus": max_gpus,
-            "valid_gpu_counts": _valid_gpu_counts(max_gpus),
+            "valid_gpu_counts": _valid_gpu_counts(max_gpus, grid_type),
             "precisions": precisions,
             "modes": modes,
             "n_levels": args.n_levels,
