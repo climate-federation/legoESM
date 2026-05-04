@@ -574,6 +574,145 @@ class TestOzoneUnitDetection:
         )
 
 
+class TestSolarBandExpansion:
+    """Regression tests for the band → g-point expansion fix
+    (P2 codex iter-5 review).
+
+    Previously, ``_expand_bands_to_gpoints`` *copied* each band's
+    fraction to every g-point in the band, then a downstream
+    sum-to-1 normalize ran.  The result inflated bands with more
+    g-points and shrunk bands with fewer, distorting the per-band
+    proportions.  The fix divides each band's fraction by the
+    number of g-points in that band so the sum-over-band-g-points
+    equals the band fraction, and a sum-to-1 normalize preserves the
+    per-band integrals.
+    """
+
+    def _make_fake_rrtmg_lookup(self, path: Path,
+                                  *, bnd_limits: list[tuple[int, int]]) -> None:
+        """Create a synthetic netCDF that mimics the bnd_limits_gpt
+        layout of the real RRTMG-SW lookup table."""
+        from netCDF4 import Dataset
+        n_bands = len(bnd_limits)
+        with Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("band", n_bands)
+            ds.createDimension("two", 2)
+            v = ds.createVariable("bnd_limits_gpt", "i4", ("band", "two"))
+            for i, (lo, hi) in enumerate(bnd_limits):
+                v[i, 0] = lo
+                v[i, 1] = hi
+
+    def test_band_integral_preserved_uniform_bands(self, tmp_path):
+        """Equal-width bands: each band 4 g-points; expansion +
+        sum-to-1 normalize should give a uniform per-g-point profile
+        (1/n_gpt) for a uniform per-band input (1/n_bands)."""
+        from legoesm.forcing.external import _expand_bands_to_gpoints
+        path = tmp_path / "rrtmg_uniform.nc"
+        n_bands = 4
+        n_gpt_per_band = 4
+        bnd_limits = [(i * n_gpt_per_band + 1,
+                        (i + 1) * n_gpt_per_band)
+                       for i in range(n_bands)]
+        self._make_fake_rrtmg_lookup(path, bnd_limits=bnd_limits)
+
+        # Uniform per-band input
+        spec = np.full(n_bands, 1.0 / n_bands)
+        out = _expand_bands_to_gpoints(spec, str(path))
+        assert out.shape == (n_bands * n_gpt_per_band,)
+        # Each g-point should have value 1 / (n_bands * n_gpt_per_band)
+        expected = np.full(n_bands * n_gpt_per_band,
+                             1.0 / (n_bands * n_gpt_per_band))
+        assert np.allclose(out, expected, rtol=1e-12), (
+            f"Uniform expansion broken: got {out}, expected {expected}"
+        )
+        # Sum-over-g-points-in-band-i must equal spec[i].
+        for i, (lo, hi) in enumerate(bnd_limits):
+            band_sum = np.sum(out[lo - 1:hi])
+            assert np.isclose(band_sum, spec[i]), (
+                f"Band {i} integral broken: got {band_sum}, "
+                f"expected {spec[i]}"
+            )
+
+    def test_band_integral_preserved_unequal_bands(self, tmp_path):
+        """Unequal-width bands (the realistic CMIP6 case): expansion
+        must preserve each band's integral so the per-band SW power
+        is not silently rescaled."""
+        from legoesm.forcing.external import _expand_bands_to_gpoints
+        # Two bands: band 0 has 8 g-points, band 1 has 2 g-points.
+        # With the *old* (broken) expansion, the band-0 integral
+        # would be 8x its band fraction (due to copy-to-all-gpoints).
+        bnd_limits = [(1, 8), (9, 10)]
+        path = tmp_path / "rrtmg_unequal.nc"
+        self._make_fake_rrtmg_lookup(path, bnd_limits=bnd_limits)
+
+        spec = np.array([0.7, 0.3])  # CMIP6-like band fractions
+        out = _expand_bands_to_gpoints(spec, str(path))
+        # Sum over g-points in each band must equal the band fraction
+        assert np.isclose(np.sum(out[0:8]), 0.7), (
+            f"Band 0 integral broken: got {np.sum(out[0:8]):.4f}, "
+            f"expected 0.7"
+        )
+        assert np.isclose(np.sum(out[8:10]), 0.3), (
+            f"Band 1 integral broken: got {np.sum(out[8:10]):.4f}, "
+            f"expected 0.3"
+        )
+        # Total sum must equal sum-of-band-fractions == 1.0
+        assert np.isclose(np.sum(out), 1.0)
+
+
+class TestSimDayCalendar:
+    """Regression test for the calendar-aware sim-epoch in
+    ``_simday_to_file_day`` (P2 codex iter-5 review).
+
+    When a real CMIP6 file uses ``calendar='noleap'`` (most
+    input4MIPs ozone, aerosol, GHG annual files do), the sim epoch
+    must be constructed in the *same* calendar so the day-difference
+    counts no leap days.  The previous fallback through
+    ``numpy.datetime64`` is Gregorian-only and would shift the file
+    date by ~30 days for a 1979 sim_day with 1850 noleap anchor.
+    """
+
+    def test_noleap_anchor_does_not_count_gregorian_leaps(self):
+        import cftime
+        from legoesm.forcing.external import _simday_to_file_day
+        # Anchor: 1850-01-01 in NOLEAP calendar.  Simulation epoch:
+        # 1979-01-01.  Expected delta = (1979-1850) * 365 = 47085 days.
+        # Gregorian arithmetic would introduce ~32 leap days.
+        anchor = cftime.DatetimeNoLeap(1850, 1, 1)
+        file_day = _simday_to_file_day(0.0, 1979, anchor)
+        expected = (1979 - 1850) * 365
+        assert int(round(file_day)) == expected, (
+            f"NOLEAP anchor: expected file_day={expected}, "
+            f"got {file_day:.1f} — mismatch implies the sim epoch "
+            f"was constructed in a different calendar."
+        )
+
+    def test_360day_anchor_uses_360day_year(self):
+        import cftime
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = cftime.Datetime360Day(1850, 1, 1)
+        file_day = _simday_to_file_day(0.0, 1979, anchor)
+        expected = (1979 - 1850) * 360
+        assert int(round(file_day)) == expected, (
+            f"360_day anchor: expected file_day={expected}, "
+            f"got {file_day:.1f}"
+        )
+
+    def test_gregorian_anchor_unchanged(self):
+        """Gregorian/standard anchor — original behavior preserved.
+
+        1850 → 1979 spans 31 leap years in the Gregorian calendar:
+        every fourth year from 1852 to 1976 inclusive is 32 years,
+        minus 1900 (a centurial year not divisible by 400) gives 31.
+        Expected delta = 129 * 365 + 31 = 47116 days.
+        """
+        import cftime
+        from legoesm.forcing.external import _simday_to_file_day
+        anchor = cftime.DatetimeGregorian(1850, 1, 1)
+        file_day = _simday_to_file_day(0.0, 1979, anchor)
+        assert int(round(file_day)) == 47116
+
+
 class TestNoAerosolNoVolcanicFlags:
     """Regression tests for the iter-4 codex review's three deck-driver
     fixes around disabled aerosol/volcanic channels:

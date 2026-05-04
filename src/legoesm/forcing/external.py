@@ -898,19 +898,48 @@ def _simday_to_file_day(sim_day: float, start_year: int,
       fall through to ``file_day = sim_day``: the file's raw numeric
       time is assumed to share the simulation reference, which is the
       only consistent interpretation for a units-less axis.
+
+    **Calendar-aware sim epoch**: when ``first_date`` is a
+    ``cftime.datetime`` instance, we construct the simulation epoch
+    using the **same calendar** as the file (``noleap``, ``360_day``,
+    ``gregorian``, …) before subtracting.  Counting Gregorian leap
+    days against a noleap file would shift the file_day by ~30 days
+    by 1979 against a 1850 noleap epoch (Codex iter-5 review).
     """
     if first_date is None:
         return sim_day
     try:
         import cftime
-        sim_epoch = cftime.DatetimeGregorian(int(start_year), 1, 1)
+        # Calendar-aware epoch: pick the cftime constructor that
+        # matches ``first_date.calendar`` so the subtraction stays
+        # calendar-consistent.
+        if hasattr(first_date, "calendar"):
+            cal = (first_date.calendar or "standard").lower()
+            calendar_map = {
+                "noleap": cftime.DatetimeNoLeap,
+                "365_day": cftime.DatetimeNoLeap,
+                "all_leap": cftime.DatetimeAllLeap,
+                "366_day": cftime.DatetimeAllLeap,
+                "360_day": cftime.Datetime360Day,
+                "julian": cftime.DatetimeJulian,
+                "proleptic_gregorian": cftime.DatetimeProlepticGregorian,
+                "gregorian": cftime.DatetimeGregorian,
+                "standard": cftime.DatetimeGregorian,
+            }
+            ctor = calendar_map.get(cal, cftime.DatetimeGregorian)
+            sim_epoch = ctor(int(start_year), 1, 1)
+        else:
+            sim_epoch = cftime.DatetimeGregorian(int(start_year), 1, 1)
         if hasattr(first_date, "year") and hasattr(first_date, "month"):
             delta = sim_epoch - first_date
             delta_days = delta.days + delta.seconds / 86400.0
             return delta_days + sim_day
     except Exception:
         pass
-    # numpy.datetime64 path: take scalar difference in days.
+    # numpy.datetime64 path: take scalar difference in days.  This
+    # branch is Gregorian-only (numpy has no calendar concept), so it
+    # is reached only when ``first_date`` is itself a ``datetime64``
+    # — by definition Gregorian.
     try:
         anchor = np.datetime64(f"{int(start_year):04d}-01-01")
         delta_days = float(
@@ -1692,24 +1721,38 @@ def _rrtmg_sw_band_counts(rrtmg_sw_path: str) -> tuple[int, int]:
 
 
 def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.ndarray:
-    """Expand per-band spectral fractions to per-g-point fractions.
+    """Expand per-band spectral fractions to per-g-point fractions
+    such that the band-integrated flux is preserved.
 
-    CMIP6 solar files (e.g. ``SSI_frac``) store one value per RRTMG-SW
-    band (14 bands), but the RRTMG solver expects one value per g-point
-    (112 g-points for the standard g112 table).  Each band's fraction is
-    repeated uniformly across all g-points that belong to that band.
+    CMIP6 solar files (e.g. ``SSI_frac``) store one *band-integrated*
+    fraction per RRTMG-SW band (14 bands).  The RRTMG solver expects
+    one fraction per g-point (112 g-points for the g112 table).  When
+    each band's value is **copied** to every g-point in that band, the
+    per-g-point integral over the band becomes ``f_b * n_gpt_b``
+    instead of ``f_b`` — different g-point counts across bands then
+    distort the per-band ratio after a downstream sum-to-1
+    normalization (Codex iter-5 review).
+
+    Fix: divide each band's fraction by the number of g-points in
+    that band when expanding.  After this transformation, the sum
+    over g-points equals the sum over bands, so a sum-to-1 normalize
+    preserves the per-band proportions.  Each g-point inside band b
+    receives ``f_b / n_gpt_b`` so that ``Σ_{g ∈ band b} f_g = f_b``.
 
     Parameters
     ----------
-    spec_bands : np.ndarray, shape (n_bands,)
-        Per-band solar fractions.
+    spec_bands : np.ndarray, shape ``(..., n_bands)``
+        Per-band solar fractions.  Trailing axis must equal ``n_bands``.
+        (Time-major arrays of shape ``(ntime, n_bands)`` are also
+        supported and broadcast over the leading axis.)
     rrtmg_sw_path : str
-        Path to the RRTMG-SW lookup table NetCDF/Zarr (for ``bnd_limits_gpt``).
+        Path to the RRTMG-SW lookup table NetCDF/Zarr (for
+        ``bnd_limits_gpt``).
 
     Returns
     -------
-    np.ndarray, shape (n_gpt,)
-        Per-g-point fractions.
+    np.ndarray, shape ``(..., n_gpt)``
+        Per-g-point fractions, with band-integrated flux preserved.
     """
     import xarray as xr
     ds = xr.open_dataset(rrtmg_sw_path) if not rrtmg_sw_path.endswith(".zarr") \
@@ -1718,9 +1761,22 @@ def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.n
     bnd_lims = ds["bnd_limits_gpt"].values.astype(int)  # 1-indexed
     ds.close()
     n_gpt = int(bnd_lims[:, 1].max())
-    out = np.zeros(n_gpt, dtype=np.float64)
+    spec_bands = np.asarray(spec_bands, dtype=np.float64)
+    if spec_bands.ndim == 1:
+        out = np.zeros(n_gpt, dtype=np.float64)
+        for i, (lo, hi) in enumerate(bnd_lims):
+            n_gpt_in_band = int(hi - lo + 1)
+            # Divide so that ``Σ_{g ∈ band b} f_g == spec_bands[b]``.
+            out[lo - 1 : hi] = spec_bands[i] / n_gpt_in_band
+        return out
+    # Trailing-axis case: (..., n_bands) → (..., n_gpt).
+    leading_shape = spec_bands.shape[:-1]
+    out = np.zeros(leading_shape + (n_gpt,), dtype=np.float64)
     for i, (lo, hi) in enumerate(bnd_lims):
-        out[lo - 1 : hi] = spec_bands[i]   # convert to 0-indexed slice
+        n_gpt_in_band = int(hi - lo + 1)
+        out[..., lo - 1 : hi] = (
+            spec_bands[..., i:i + 1] / n_gpt_in_band
+        )
     return out
 
 

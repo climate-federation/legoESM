@@ -1519,12 +1519,34 @@ class ModelDriver:
             # that the iter-4 codex review flagged: previously a
             # 1-day spectral / MPAS smoke run produced no validator
             # artefacts and the smoke test fell through.
+            #
+            # Spectral states (``SpectralHydrostaticState``) keep
+            # ``T_hat / vor_hat / div_hat / lnps_hat`` in spectral
+            # coefficients and **do not** expose ``state.T``.  Convert
+            # via ``spectral_pe_to_grid`` first so ``mean(T)`` and
+            # ``max(|u|)`` are physical (Codex iter-5 review).
             try:
+                # Late import to avoid hard dependency at module
+                # import time when spectral support is unavailable.
+                from legoesm.atmosphere.dynamics.spectral_pe import (
+                    SpectralHydrostaticState, spectral_pe_to_grid,
+                )
+                if isinstance(self.state, SpectralHydrostaticState):
+                    fields = spectral_pe_to_grid(
+                        self.state, self.grid, self.sigma,
+                    )
+                    T_arr = fields["T"]
+                    u_arr = fields["u"]
+                    ps_arr = fields["p_s"]
+                else:
+                    T_arr = self.state.T.data
+                    u_arr = self.state.u.data
+                    ps_arr = self.state.p_s.data
                 final_day = float(self.config.days)
-                T_final = float(jnp.mean(self.state.T.data))
-                u_final = float(jnp.max(jnp.abs(self.state.u.data)))
-                ps_final = float(jnp.mean(self.state.p_s.data))
-                T_finite = bool(jnp.all(jnp.isfinite(self.state.T.data)))
+                T_final = float(jnp.mean(T_arr))
+                u_final = float(jnp.max(jnp.abs(u_arr)))
+                ps_final = float(jnp.mean(ps_arr))
+                T_finite = bool(jnp.all(jnp.isfinite(T_arr)))
             except Exception as exc:
                 logger.warning(
                     f"_save_lightweight_timeseries: end-of-run "
