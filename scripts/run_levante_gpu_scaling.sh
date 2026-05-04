@@ -222,7 +222,12 @@ module load python3 cuda/12
 source .venv/bin/activate
 
 # --- JAX / XLA configuration ---
-export JAX_PLATFORMS="gpu,cpu"
+# Iter 22: ``JAX_PLATFORMS="gpu,cpu"`` is the legacy alias and is
+# rejected by JAX 0.10+ ("Backend 'rocm' is not in the list of known
+# backends: ['cpu', 'tpu', 'cuda']").  Use ``cuda,cpu`` on NVIDIA
+# nodes; for AMD ROCm nodes pass ``--export=JAX_PLATFORMS=rocm,cpu``
+# via the SLURM submit command instead of changing this line.
+export JAX_PLATFORMS="cuda,cpu"
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
