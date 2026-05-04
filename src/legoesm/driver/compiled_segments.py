@@ -33,6 +33,7 @@ boundary, without needing to interrupt the compiled kernel mid-segment.
 
 from __future__ import annotations
 
+import copy
 import math
 import logging
 from functools import partial
@@ -470,6 +471,27 @@ def build_segment_fn(
         _owned_mask = jnp.zeros(6, dtype=jnp.float32)
         _owned_mask = _owned_mask.at[owned_face_ids].set(1.0)
 
+    # Iter 8: when the segment driver applies a target-anchored
+    # ``fix_ps_mass_target`` immediately after the dycore step, the
+    # dycore's *own* end-step mass fixer is redundant — both reduce
+    # mass globally over the same surface-pressure field, and the
+    # segment fixer overwrites whatever the dycore fixer produced.
+    # That is one extra global allreduce per compiled timestep on the
+    # MPI/SPMD path, *inside* the lax.scan body where it is hard to
+    # hide with overlap.  Disable the inner fixer while the outer one
+    # is active by working with a shallow-cloned model whose config has
+    # ``fix_mass=False``.  Behaviour is unchanged because the segment
+    # fixer is strictly stronger (anchored to ``carry.target_mass``).
+    _dynamics_model = model
+    _model_cfg = getattr(model, "config", None)
+    if (
+        fix_mass
+        and getattr(_model_cfg, "fix_mass", False)
+        and hasattr(_model_cfg, "_replace")
+    ):
+        _dynamics_model = copy.copy(model)
+        _dynamics_model.config = _model_cfg._replace(fix_mass=False)
+
     def _make_single_step(forcing: SegmentForcing):
         """Create the scan body closed over a specific forcing pytree.
 
@@ -487,8 +509,8 @@ def build_segment_fn(
             step_idx = carry.step_index
 
             # --- Dynamics ---
-            dyn_state = model.step(
-                _rebuild_state(carry, model),
+            dyn_state = _dynamics_model.step(
+                _rebuild_state(carry, _dynamics_model),
                 _dt,
             )
 
