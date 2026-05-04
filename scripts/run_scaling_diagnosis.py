@@ -70,12 +70,31 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _configure_env(precision: str = "float64"):
-    """Set JAX env vars before import."""
+    """Set JAX env vars before import.
+
+    Iter 24: stop forcing ``JAX_PLATFORMS=gpu,cpu`` (rejected by JAX
+    0.10+, see iter 21 fix in ``run_levante_gpu_scaling.py``).  Wrappers
+    that need a specific backend should ``export JAX_PLATFORMS=cuda,cpu``
+    (NVIDIA) or ``rocm,cpu`` (AMD) before invoking the script.
+
+    Also ensure the project root is on ``sys.path`` so that
+    ``tests.test_cases`` (canonical IC location) imports cleanly when
+    the script is run as a standalone executable rather than via
+    ``pytest`` from the repo root.
+    """
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
-    os.environ.setdefault("JAX_PLATFORMS", "gpu,cpu")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
+
+    # Make the repository root importable so ``tests.test_cases`` works
+    # when the script is launched as ``python scripts/...`` (no
+    # ``PYTHONPATH=$PWD``).
+    import sys
+    from pathlib import Path
+    _repo_root = Path(__file__).resolve().parent.parent
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
 
     # GPU affinity for MPI
     local_rank = (
@@ -86,9 +105,16 @@ def _configure_env(precision: str = "float64"):
     if local_rank is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
 
-    # Enable profiling-friendly XLA flags
-    platforms = os.environ.get("JAX_PLATFORMS", "gpu,cpu")
-    if "gpu" in platforms:
+    # Enable profiling-friendly XLA flags when running on GPU (or
+    # auto-detect / unset).  Skip when ``JAX_PLATFORMS`` is explicitly
+    # ``cpu`` or ``tpu`` to avoid pinging GPU-specific flags that the
+    # chosen backend rejects.
+    platforms = os.environ.get("JAX_PLATFORMS", "")
+    is_gpu_run = (
+        not platforms
+        or any(tok in platforms for tok in ("gpu", "cuda", "rocm"))
+    )
+    if is_gpu_run:
         xla_flags = os.environ.get("XLA_FLAGS", "")
         for flag in [
             "--xla_gpu_enable_latency_hiding_scheduler=true",
