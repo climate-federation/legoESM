@@ -210,6 +210,14 @@ def _weak_resolution_ico(n_ranks: int, base_level: int = WEAK_BASE_ICO) -> int:
 def _valid_rank_counts(max_ranks: int, grid_type: str) -> list[int]:
     if grid_type == "spectral":
         return [1]
+    if grid_type == "latlon":
+        # Lat-lon MPI step raises NotImplementedError (the latitude-band
+        # decomposition infrastructure exists but the C-grid operators
+        # have not been adapted to local domains).  Iter 1 stripped
+        # lat-lon from the GPU sweep; iter 5 mirrors that here so the
+        # CPU MPI driver does not generate multi-rank cases that
+        # immediately error out and pollute the sweep summary.  See #115.
+        return [1]
     if grid_type == "cubed-sphere":
         valid = []
         for n in [1, 2, 3, 6]:
@@ -601,8 +609,8 @@ def run_single_benchmark(
     # XLA still warms compile + caches against identical layout but
     # ``state`` keeps its original (post-warmup) trajectory.
     _precompile_state = jax.tree.map(lambda x: x, state)
-    _ = _scan_run(_precompile_state, dt_used)
-    jax.block_until_ready(jax.tree.leaves(_precompile_state))
+    _precompile_out = _scan_run(_precompile_state, dt_used)
+    jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # MPI barrier before timing
     try:

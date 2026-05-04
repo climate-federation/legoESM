@@ -714,8 +714,8 @@ def _run_segment_benchmark(
     # ``n_timing`` extra steps.  Iter 1 made this fix in the bare-dycore
     # benchmark; iter 3 extends it to the segment-driver path here.
     _precompile_carry = jax.tree.map(lambda x: x, carry)
-    _ = _scan_run(_precompile_carry, dt_used)
-    jax.block_until_ready(jax.tree.leaves(_precompile_carry))
+    _precompile_out = _scan_run(_precompile_carry, dt_used)
+    jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # MPI barrier before timing
     try:
@@ -1131,10 +1131,13 @@ def run_benchmark(
     # ``n_timing`` steps — biasing finite-time comparisons.  We clone
     # the leaves so XLA still compiles and warms caches against
     # identical input shapes/dtypes/sharding, but the original state
-    # remains the seed for the timed scan.
+    # remains the seed for the timed scan.  IMPORTANT: block on the
+    # *output* leaves, not the input — blocking the input does not
+    # wait for the queued kernel to finish, so XLA work could overlap
+    # with the timed region and bias measurements.  Iter 5 fix.
     _precompile_state = jax.tree.map(lambda x: x, state)
-    _ = scan_runner(_precompile_state, dt)
-    jax.block_until_ready(jax.tree.leaves(_precompile_state))
+    _precompile_out = scan_runner(_precompile_state, dt)
+    jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # Synchronize all ranks before timing for fair measurement
     try:
