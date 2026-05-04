@@ -336,19 +336,36 @@ def make_voronoi_mpi_step(
     owned_mask = layout.owned_mask_cells
 
     def _exchange_mpas_state(state: MPASHydrostaticState) -> MPASHydrostaticState:
-        """Exchange halos for all prognostic MPAS fields."""
+        """Exchange halos for all prognostic MPAS fields.
+
+        ``phis`` is a static surface geopotential (set at scatter time
+        in :func:`scatter_state_voronoi`); it never changes during a
+        run and so the halo cells in ``state.phis`` are already correct
+        — re-exchanging it every RK stage was an O(allreduce-equivalent)
+        round-trip per stage for zero numerical effect.
+
+        ``T`` and ``p_s`` are both cell-centred fields and share the
+        same MPI peer set, so they are packed into a single
+        ``exchange_cell_field`` call — one collective for two fields
+        instead of two collectives.  The leading axis is the local cell
+        axis; the second axis carries levels (T) or a singleton (p_s).
+        We concatenate along the level axis with ``p_s[:, None]``,
+        exchange, then unpack.
+        """
         u_ex = halo_ex.exchange_edge_field(state.u.data)
-        T_ex = halo_ex.exchange_cell_field(state.T.data)
-        ps_ex = halo_ex.exchange_cell_field(state.p_s.data)
-        # phis is static — exchange once is enough, but for simplicity
-        # we exchange every time (cost is negligible)
-        phis_ex = halo_ex.exchange_cell_field(state.phis.data)
+        nlev = state.T.data.shape[-1]
+        cell_pack = jnp.concatenate(
+            [state.T.data, state.p_s.data[:, None]], axis=-1,
+        )
+        cell_pack_ex = halo_ex.exchange_cell_field(cell_pack)
+        T_ex = cell_pack_ex[:, :nlev]
+        ps_ex = cell_pack_ex[:, nlev]
 
         return MPASHydrostaticState(
             u=state.u.replace(data=u_ex),
             T=state.T.replace(data=T_ex),
             p_s=state.p_s.replace(data=ps_ex),
-            phis=state.phis.replace(data=phis_ex),
+            phis=state.phis,  # static after scatter; halos already correct
         )
 
     def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:

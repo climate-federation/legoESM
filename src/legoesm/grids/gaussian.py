@@ -20,6 +20,7 @@ References
 from __future__ import annotations
 
 import math
+import os
 from typing import NamedTuple
 import warnings
 
@@ -28,6 +29,53 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+
+
+def _sh_chunk_size() -> int:
+    """Return the trailing-axis chunk size for the 3D SH transforms.
+
+    The 3D SH analysis/synthesis kernels in this module materialise a
+    ``(n_lat, n_sh, n_batch)`` intermediate on the way to the FFT.  At
+    T127 with ~30 levels and complex128 this is ~1.5 GB; at T255 with
+    60 levels it is ~12 GB — enough to OOM on 16-40 GB GPUs.
+
+    When ``LEGOESM_SH_CHUNK_SIZE`` is set to a positive integer N, the
+    3D paths split the trailing batch axis into chunks of size N and
+    process them with a static Python loop, capping the peak working
+    set at ``(n_lat, n_sh, N) * dtype_bytes``.  N=0 (the default)
+    keeps the original single-pass behaviour.
+
+    The branch is purely Python-static at trace time, so the chunked
+    path remains AD-compatible.
+    """
+    raw = os.environ.get("LEGOESM_SH_CHUNK_SIZE", "0")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _maybe_chunk_trailing(
+    fn, arr: jax.Array, chunk: int, axis: int = -1,
+) -> jax.Array:
+    """Apply ``fn`` to ``arr`` in chunks along ``axis``.
+
+    ``fn`` must accept and return arrays with the same trailing axis
+    layout.  When ``chunk == 0`` or ``arr.shape[axis] <= chunk``,
+    forwards the whole array in a single call (no Python loop).
+    Otherwise splits along ``axis`` and concatenates outputs.
+    """
+    n = arr.shape[axis]
+    if chunk <= 0 or n <= chunk:
+        return fn(arr)
+    parts = []
+    start = 0
+    while start < n:
+        end = min(start + chunk, n)
+        sub = jax.lax.dynamic_slice_in_dim(arr, start, end - start, axis=axis)
+        parts.append(fn(sub))
+        start = end
+    return jnp.concatenate(parts, axis=axis)
 
 
 # =============================================================================
@@ -779,6 +827,10 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
     batched along the trailing level axis — no per-level moveaxis +
     vmap.
 
+    Memory: when ``LEGOESM_SH_CHUNK_SIZE > 0``, the trailing level
+    axis is processed in chunks to cap the ``(n_lat, n_sh, n_batch)``
+    intermediate at ``n_batch = chunk_size`` per inner call.
+
     Parameters
     ----------
     field_3d : (n_lat, n_lon, nlev) real array.
@@ -791,15 +843,19 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
     n_max = grid.n_max
     ms = grid.ms
 
-    # FFT along longitude (axis 1) → (n_lat, n_lon//2+1, nlev) complex.
-    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / n_lon
-    f_m = f_hat_lon[:, :n_max + 1, :]                    # (n_lat, n_max+1, nlev)
-    f_m_gathered = f_m[:, ms, :]                          # (n_lat, n_sh, nlev)
+    def _kernel(field):
+        f_hat_lon = jnp.fft.rfft(field, axis=1) / n_lon
+        f_m = f_hat_lon[:, :n_max + 1, :]
+        f_m_gathered = f_m[:, ms, :]
+        return 2.0 * jnp.pi * jnp.sum(
+            grid.wPnm[:, :, None] * f_m_gathered, axis=0,
+        )
 
-    # Sum over latitudes; ``wPnm`` is (n_lat, n_sh) — broadcast over levels.
-    return 2.0 * jnp.pi * jnp.sum(
-        grid.wPnm[:, :, None] * f_m_gathered, axis=0,
-    )
+    # field_3d has trailing axis = level (axis -1 == 2); the kernel
+    # output's trailing axis is also level (axis -1 == 1 for output
+    # shape (n_sh, nlev)) so chunking on axis -1 of the input chunks
+    # the kernel's output too.  Concatenate along the same axis.
+    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
 
 
 def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
@@ -810,6 +866,9 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     ``(n_sh, n_lat, nlev)`` instead of vmap'ing the 2D path per level.
     Eliminates the per-level moveaxis + vmap dance and lets XLA fuse
     the FFT across the level axis.
+
+    Memory: when ``LEGOESM_SH_CHUNK_SIZE > 0`` the trailing level axis
+    is processed in chunks (see :func:`_maybe_chunk_trailing`).
 
     Parameters
     ----------
@@ -824,28 +883,25 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     n_max = grid.n_max
     ms = grid.ms  # (n_sh,)
 
-    # contributions: (n_lat, n_sh, nlev) — Pnm broadcasts over levels.
-    contributions = grid.Pnm[..., None] * coeffs_3d[None, :, :]
+    def _kernel(coeffs):
+        # contributions: (n_lat, n_sh, nlev_chunk) — Pnm broadcasts.
+        contributions = grid.Pnm[..., None] * coeffs[None, :, :]
+        f_m = jnp.swapaxes(
+            jax.ops.segment_sum(
+                jnp.swapaxes(contributions, 0, 1),
+                ms,
+                num_segments=n_max + 1,
+            ),
+            0, 1,
+        )
+        nlev_chunk = coeffs.shape[-1]
+        f_hat_full = jnp.zeros(
+            (n_lat, n_lon // 2 + 1, nlev_chunk), dtype=jnp.complex128,
+        )
+        f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
+        return jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1).real
 
-    # segment_sum operates on the leading axis; permute (n_sh, n_lat, nlev),
-    # group, then permute back to (n_lat, n_max+1, nlev).
-    f_m = jnp.swapaxes(
-        jax.ops.segment_sum(
-            jnp.swapaxes(contributions, 0, 1),
-            ms,
-            num_segments=n_max + 1,
-        ),
-        0, 1,
-    )
-
-    # Inverse FFT in longitude over axis 1.
-    nlev = coeffs_3d.shape[-1]
-    f_hat_full = jnp.zeros(
-        (n_lat, n_lon // 2 + 1, nlev), dtype=jnp.complex128,
-    )
-    f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
-    field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
-    return field_grid.real
+    return _maybe_chunk_trailing(_kernel, coeffs_3d, _sh_chunk_size(), axis=-1)
 
 
 def _sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
@@ -854,29 +910,33 @@ def _sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     Returns the θ-derivative of the inverse SH transform at every
     vertical level in a single batched ``segment_sum`` + IRFFT, instead
     of vmap'ing the 2D path per level.
+
+    Memory: trailing-axis chunking via ``LEGOESM_SH_CHUNK_SIZE`` —
+    see :func:`_maybe_chunk_trailing`.
     """
     n_lat = grid.n_lat
     n_lon = grid.n_lon
     n_max = grid.n_max
     ms = grid.ms
 
-    contributions = grid.Hnm[..., None] * coeffs_3d[None, :, :]
-    f_m = jnp.swapaxes(
-        jax.ops.segment_sum(
-            jnp.swapaxes(contributions, 0, 1),
-            ms,
-            num_segments=n_max + 1,
-        ),
-        0, 1,
-    )
+    def _kernel(coeffs):
+        contributions = grid.Hnm[..., None] * coeffs[None, :, :]
+        f_m = jnp.swapaxes(
+            jax.ops.segment_sum(
+                jnp.swapaxes(contributions, 0, 1),
+                ms,
+                num_segments=n_max + 1,
+            ),
+            0, 1,
+        )
+        nlev_chunk = coeffs.shape[-1]
+        f_hat_full = jnp.zeros(
+            (n_lat, n_lon // 2 + 1, nlev_chunk), dtype=jnp.complex128,
+        )
+        f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
+        return jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1).real
 
-    nlev = coeffs_3d.shape[-1]
-    f_hat_full = jnp.zeros(
-        (n_lat, n_lon // 2 + 1, nlev), dtype=jnp.complex128,
-    )
-    f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
-    field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
-    return field_grid.real
+    return _maybe_chunk_trailing(_kernel, coeffs_3d, _sh_chunk_size(), axis=-1)
 
 
 def sh_analysis_oc2_3d(
@@ -886,15 +946,20 @@ def sh_analysis_oc2_3d(
 
     Same numeric algorithm as :func:`sh_analysis_oc2` but with the
     longitude FFT, Legendre weighting, and latitude sum batched along
-    the trailing level axis.
+    the trailing level axis.  Trailing-axis chunking via
+    ``LEGOESM_SH_CHUNK_SIZE``.
     """
     n_max = grid.n_max
-    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
-    f_m = f_hat_lon[:, :n_max + 1, :]
-    f_m_gathered = f_m[:, grid.ms, :]
-    return 2.0 * jnp.pi * jnp.sum(
-        grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0,
-    )
+
+    def _kernel(field):
+        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
+        f_m = f_hat_lon[:, :n_max + 1, :]
+        f_m_gathered = f_m[:, grid.ms, :]
+        return 2.0 * jnp.pi * jnp.sum(
+            grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0,
+        )
+
+    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
 
 
 def sh_analysis_dmu_3d(
@@ -903,15 +968,20 @@ def sh_analysis_dmu_3d(
     """Forward SH transform with dPnm/dμ weighting, 3D-native.
 
     Same numeric algorithm as :func:`sh_analysis_dmu` but batched along
-    the trailing level axis.
+    the trailing level axis.  Trailing-axis chunking via
+    ``LEGOESM_SH_CHUNK_SIZE``.
     """
     n_max = grid.n_max
-    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
-    f_m = f_hat_lon[:, :n_max + 1, :]
-    f_m_gathered = f_m[:, grid.ms, :]
-    return 2.0 * jnp.pi * jnp.sum(
-        grid.wDnm[:, :, None] * f_m_gathered, axis=0,
-    )
+
+    def _kernel(field):
+        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
+        f_m = f_hat_lon[:, :n_max + 1, :]
+        f_m_gathered = f_m[:, grid.ms, :]
+        return 2.0 * jnp.pi * jnp.sum(
+            grid.wDnm[:, :, None] * f_m_gathered, axis=0,
+        )
+
+    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
 
 
 def uv_from_vordiv_3d(
