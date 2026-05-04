@@ -76,17 +76,32 @@ def _configure_mpi_gpu_affinity() -> None:
 
 
 def _configure_jax(precision: str) -> None:
-    """Set JAX env vars before import."""
+    """Set JAX env vars before import.
+
+    Iter 21: stop *forcing* ``JAX_PLATFORMS=gpu,cpu`` as the default —
+    JAX 0.10+ uses backend names ``cuda`` / ``rocm`` / ``cpu`` and
+    rejects the generic ``gpu`` token, raising
+    "Backend 'rocm' is not in the list of known backends" before any
+    benchmark code runs.  Leave the variable unset by default and let
+    JAX pick its default backend; respect any value the user / SLURM
+    wrapper has already set.
+    """
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
-    os.environ.setdefault("JAX_PLATFORMS", "gpu,cpu")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
     # Enable XLA GPU scheduling optimizations for multi-device scaling.
-    # Only set GPU-specific flags when JAX_PLATFORMS includes "gpu" to
-    # avoid crashes on CPU-only runs.
-    platforms = os.environ.get("JAX_PLATFORMS", "gpu,cpu")
-    if "gpu" in platforms:
+    # Apply when ``JAX_PLATFORMS`` is unset (auto-detect) or names a
+    # GPU vendor — ``gpu`` (legacy alias), ``cuda`` (JAX 0.10 NVIDIA),
+    # or ``rocm`` (AMD).  Skip when the user explicitly set ``cpu`` or
+    # ``tpu`` to avoid pinging XLA flags that the chosen backend
+    # rejects.
+    platforms = os.environ.get("JAX_PLATFORMS", "")
+    is_gpu_run = (
+        not platforms
+        or any(tok in platforms for tok in ("gpu", "cuda", "rocm"))
+    )
+    if is_gpu_run:
         xla_flags = os.environ.get("XLA_FLAGS", "")
         for flag in [
             "--xla_gpu_enable_latency_hiding_scheduler=true",
