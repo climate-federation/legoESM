@@ -320,6 +320,19 @@ def fv3_hydrostatic_tendencies(
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
 
+    # Pre-pad slots for fields whose merged-stage exchange now happens
+    # in section 11 (T / ln_ps_3d / u_cell / v_cell) and for the hybrid-
+    # factor / div_v halos that are no longer packed at this point in
+    # the function.  Initialising to ``None`` lets each downstream
+    # operator fall back to its own standalone halo collective via
+    # ``_pad_halo_auto`` — same numerical result, one extra exchange.
+    # Without these defaults the references at lines ~343/~366/~403
+    # raise ``UnboundLocalError`` (regression introduced when the
+    # iter-58/60 merged-stage halo was split apart).
+    _lnps_pad = None
+    _hf_pad = None
+    _div_v_pad = None
+
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
     zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
                    + cdgrid.f_corner[..., None])

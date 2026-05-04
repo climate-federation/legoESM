@@ -18,7 +18,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo, synchronize_cgrid_fluxes
+from legoesm.grids.halo import pad_halo, pad_halo_pair_h2, synchronize_cgrid_fluxes
 
 _R3 = 1.0 / 3.0
 
