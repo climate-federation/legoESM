@@ -489,8 +489,20 @@ def build_segment_fn(
         and getattr(_model_cfg, "fix_mass", False)
         and hasattr(_model_cfg, "_replace")
     ):
+        # Iter 8 dropped the redundant inner-dycore mass fixer.  Iter 9
+        # follow-up: turning off ``fix_mass`` on the inner copy re-enables
+        # the per-RK-stage ``zero_mean_ps_tendency`` allreduce, because
+        # the iter-1 gating in :mod:`primitive_eq_cdgrid` was
+        # "skip per-stage zero-mean *only when* end-step fix_mass is on".
+        # Closing the loop: also disable the per-stage zero-mean on the
+        # inner copy so the segment driver sees zero RK-stage allreduces
+        # in addition to zero end-step inner allreduces.  The outer
+        # target-anchored fixer enforces conservation once per timestep.
         _dynamics_model = copy.copy(model)
-        _dynamics_model.config = _model_cfg._replace(fix_mass=False)
+        _replace_kwargs = {"fix_mass": False}
+        if hasattr(_model_cfg, "zero_mean_ps_tendency"):
+            _replace_kwargs["zero_mean_ps_tendency"] = False
+        _dynamics_model.config = _model_cfg._replace(**_replace_kwargs)
 
     def _make_single_step(forcing: SegmentForcing):
         """Create the scan body closed over a specific forcing pytree.
