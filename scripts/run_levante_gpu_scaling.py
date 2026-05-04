@@ -10,6 +10,13 @@ Supported grids:
   icosahedral   -- MPAS Voronoi mesh + TRiSK PE dycore
   latlon        -- Lat-lon finite-volume grid + FV PE dycore
 
+Multi-rank MPI scaling support (iter-13/14 honest-sweep guards):
+  icosahedral   -- domain-decomposed (validated multi-rank path)
+  cubed-sphere  -- single-rank only (replicated dynamics under MPI;
+                   refused at runtime with a clear error)
+  latlon        -- single-rank only (NotImplementedError, see #115)
+  spectral      -- single-rank only (no MPI path)
+
 Two modes:
   weak   -- fix problem size per GPU, increase resolution with GPU count
             (replicates Yatunin et al. 2026 JAMES Figure 11 left panel)
@@ -18,17 +25,15 @@ Two modes:
 
 Usage
 -----
-Single-node (4 A100s)::
+Single-node SPMD (1-6 face-sharded devices on a single process,
+``shard_map`` backend, no MPI)::
 
     python scripts/run_levante_gpu_scaling.py --mode weak --precision float32
-    python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong --precision both
+    python scripts/run_levante_gpu_scaling.py --grid cubed-sphere \\
+        --mode strong --precision both
 
-Multi-node via MPI (set up by the companion SLURM script)::
+Multi-node via MPI -- icosahedral only (validated path)::
 
-    mpirun -np 8 python scripts/run_levante_gpu_scaling.py \\
-        --grid cubed-sphere --mode strong --precision float64 --n-gpus 8
-    mpirun -np 4 python scripts/run_levante_gpu_scaling.py \\
-        --grid latlon --mode strong --n-gpus 4
     mpirun -np 4 python scripts/run_levante_gpu_scaling.py \\
         --grid icosahedral --mode strong --n-gpus 4
 
