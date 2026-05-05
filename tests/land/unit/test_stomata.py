@@ -250,59 +250,79 @@ class TestJarvis(unittest.TestCase):
 
     def test_VPD_uses_specific_humidity_form(self):
         """``e_air = q · p / (ε + (1−ε)·q)`` is the correct form when
-        q is specific humidity.  The earlier mixing-ratio form
-        ``q · p / (ε + q)`` biases e_air upward — for q ≈ 0.02, the
-        mixing-ratio formula gives e ≈ 1.6 % too large, biasing VPD
-        downward and falsely *opening* stomata.
+        q is specific humidity (iter-22 fix).  The earlier
+        mixing-ratio form ``q · p / (ε + q)`` biases e_air upward by
+        ~1.5 % at q = 0.02 — biasing VPD downward and falsely
+        *opening* stomata.
 
-        Regression test: at typical tropical q ≈ 0.02 and p = 1 atm,
-        the corrected formula must give a VALUE between the two
-        canonical limits e=q·p/ε (small-q approx) and e=p (q→1).
-        We can't easily compare bit-exact to the buggy version
-        without reimplementing it, but we can pin a high-precision
-        expected value derived from the corrected formula and assert
-        the live code agrees.
+        Regression strategy: pin the live ``jarvis_gs`` output at
+        precise inputs against the expected value derived from the
+        corrected formula.  Then assert the same inputs would have
+        produced a *different* (larger) ``gs`` under the buggy
+        mixing-ratio formula — proving the test would catch a
+        regression.
         """
         from legoesm import constants
-        # Inputs at typical tropical conditions
-        q = 0.02
+        from legoesm.thermo import saturation_vapor_pressure
+        # Pick inputs that put the VPD response solidly in its linear
+        # regime (not clipped at f_VPD_min=0.01 nor saturated at 1):
+        #   T = 305 K  →  e_sat ≈ 4720 Pa
+        #   q = 0.012  →  e_air ≈ 1907 Pa (corrected) / 1928 Pa (buggy)
+        #   VPD ≈ 28-29 hPa, with cfg.a_vpd = 0.05/hPa → f_VPD ≈ -0.4
+        #   clipped at f_VPD_min so the diff is observable in the
+        #   linear region just above the clip threshold.
+        # Use cfg with a_vpd small enough to stay above the clip.
+        cfg = StomataConfig(a_vpd=0.01, f_VPD_min=0.001)
+        q = 0.012
         p = 101325.0
-        T = 300.0
+        T = 305.0
         eps = constants.epsilon
-        # Expected e_air with the CORRECTED specific-humidity form
-        e_expected = q * p / (eps + (1.0 - eps) * q)
 
-        # Run jarvis_gs and back-derive what e_air the code computed
-        # via the f_VPD response.  Choose conditions where soil and
-        # PAR responses are saturated (=1) so the gs ratio depends
-        # only on f_VPD.
-        T_ar = jnp.array(T)
-        q_ar = jnp.array(q)
-        p_ar = jnp.array(p)
-        beta = jnp.array(1.0)
-        # Bright PAR, near-optimal T → f_PAR ≈ 1, f_T ≈ 1, f_soil = 1
-        gs = jarvis_gs(T_ar, jnp.array(2000.0), q_ar, p_ar, beta, self.cfg)
-        # The buggy mixing-ratio form would give e_air' = q·p/(ε+q)
-        # which is larger by factor (ε + (1-ε)q) / (ε + q) for q>0.
-        # Sanity: just assert gs is positive and finite — the bit-
-        # exact e_air computation is unit-tested implicitly through
-        # this path because the corrected formula is what the code
-        # uses.  More important: verify the corrected formula agrees
-        # with the canonical small-q limit when q→0.
-        e_at_q0 = 0.0  # in the limit q→0
-        e_corrected_zero_q = 0.0 * p / (eps + (1.0 - eps) * 0.0)
-        assert e_corrected_zero_q == 0.0
-        # And at q = ε (a smoothness check for the corrected formula
-        # — this is symbolic; it's just a sanity invariant):
-        # Both forms collapse to e = p · ε / (2ε) = p/2 when q = ε in
-        # the mixing-ratio form, but the specific-humidity form
-        # gives e = ε · p / (ε + (1-ε)·ε) = p / (1 + (1-ε)).
-        # We don't have to encode that; the actual regression is
-        # that the live code produces a positive gs without NaN.
-        self.assertGreater(float(gs), 0.0)
-        # Cross-check: e_expected should be between 0 and p
-        self.assertGreater(e_expected, 0.0)
-        self.assertLess(e_expected, p)
+        # CORRECTED formula (specific-humidity)
+        e_corrected = q * p / (eps + (1.0 - eps) * q)
+        # BUGGY formula (mixing-ratio applied to specific humidity)
+        e_buggy = q * p / (eps + q)
+        # The corrected denom is smaller (because (1−ε)·q < q for q>0
+        # and ε<1), so e_corrected > e_buggy.  Therefore the buggy
+        # version under-reports e_air, OVER-reports VPD, and
+        # UNDER-reports f_VPD → smaller gs.
+        assert e_corrected > e_buggy
+
+        # Compute expected gs analytically from the corrected formula
+        e_sat = float(saturation_vapor_pressure(jnp.array(T)))
+        VPD_corrected_hPa = max(e_sat - e_corrected, 0.0) / 100.0
+        VPD_buggy_hPa = max(e_sat - e_buggy, 0.0) / 100.0
+        f_VPD_corrected = max(min(1.0 - cfg.a_vpd * VPD_corrected_hPa, 1.0), cfg.f_VPD_min)
+        f_VPD_buggy = max(min(1.0 - cfg.a_vpd * VPD_buggy_hPa, 1.0), cfg.f_VPD_min)
+        # f_PAR and f_T at saturating PAR and near-optimal T should
+        # be ≈ 1 each, but compute them exactly via the same formulas
+        # used in jarvis_gs to keep the comparison bit-faithful.
+        T_C = T - constants.T_freeze
+        dT_norm = (T_C - cfg.T_opt_jarvis) / cfg.T_range_jarvis
+        f_T = max(1.0 - dT_norm ** 2, 0.0)
+        PAR_FRAC = 0.48  # _PAR_FRAC in stomata.py
+        PAR = PAR_FRAC * 2000.0
+        f_PAR = PAR / (PAR + cfg.K_PAR + 1e-10)
+        f_soil = 1.0  # beta = 1
+        gs_expected_corrected = cfg.gs_max * f_PAR * f_T * f_VPD_corrected * f_soil
+        gs_expected_buggy = cfg.gs_max * f_PAR * f_T * f_VPD_buggy * f_soil
+
+        # Live code under the corrected formula
+        gs_live = float(jarvis_gs(
+            jnp.array(T), jnp.array(2000.0), jnp.array(q),
+            jnp.array(p), jnp.array(1.0), cfg,
+        ))
+
+        # Live code MUST agree with the corrected expected value
+        # (within float tolerance), and MUST disagree with the buggy
+        # expected value by more than that tolerance — otherwise this
+        # test is vacuous.
+        self.assertAlmostEqual(gs_live, gs_expected_corrected, places=8)
+        self.assertNotAlmostEqual(
+            gs_live, gs_expected_buggy, places=6,
+            msg="Live gs matched the buggy mixing-ratio formula — "
+            "this test would not catch the iter-22 regression.",
+        )
 
 
 class TestCoupledFarquharStomata(unittest.TestCase):
