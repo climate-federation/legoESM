@@ -521,6 +521,48 @@ class TestLinearRemap:
         assert jnp.all(a_remap >= 0.0)
         assert jnp.all(a_remap <= 1.0)
 
+    @pytest.mark.xfail(
+        reason=(
+            "Iter-85 audit: linear_remap leaks 1-4% volume per call when "
+            "h_new straddles category bounds.  The naive lo/hi clamp "
+            "overwrites h_remap without adjusting a_remap, so the post-"
+            "clamp volume differs from the pre-clamp volume.  Proper fix "
+            "requires CICE-style Lipscomb piecewise-linear g(h) remapping "
+            "— deferred to future structural work.  This xfail test "
+            "documents the expected post-fix behavior so future "
+            "maintainers see the contract."
+        ),
+        strict=True,
+    )
+    def test_strict_volume_conservation_under_clamping(self):
+        """Volume drift through linear_remap should be < 0.1% even when
+        category bounds activate the clamp.
+
+        Construction: each category's mean thickness is just slightly
+        above its upper bound, so the partial-promotion + clamp cascade
+        fires.  Audit probe shows 1.68% drift in this case.
+        """
+        n_cat = 5
+        # CICE-standard category bounds
+        lo = jnp.array([0.0, 0.6, 1.4, 2.4, 3.6])  # noqa: F841 (visible to fix)
+        hi = jnp.array([0.6, 1.4, 2.4, 3.6, 100.0])  # noqa: F841
+
+        # h_new just above each hi → triggers cascade clamping
+        h_old = jnp.array([0.3, 1.0, 2.0, 3.0, 5.0])
+        a_old = jnp.array([0.1, 0.1, 0.1, 0.1, 0.1])
+        h_new = jnp.array([0.7, 1.5, 2.5, 3.7, 5.0])
+        a_new = a_old
+
+        vol_before = float(jnp.sum(h_new * a_new))
+        h_remap, a_remap = linear_remap(h_old, a_old, h_new, a_new, n_cat)
+        vol_after = float(jnp.sum(h_remap * a_remap))
+
+        rel_drift = abs(vol_after - vol_before) / vol_before
+        assert rel_drift < 0.001, (
+            f"linear_remap leaked {rel_drift*100:.3f}% volume when "
+            f"h_new straddles category bounds.  Expected < 0.1%."
+        )
+
 
 # ==============================================================================
 # Test State Conversion
