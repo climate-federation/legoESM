@@ -230,7 +230,7 @@ The testing pyramid for parameterizations follows three tiers:
 
 | Scheme | Source | Unit tests | Validation | Notes |
 |--------|--------|------------|------------|-------|
-| EVP (Hunke-Dukowicz 1997) | `ice/rheology.py` + `ice/dynamics.py::evp_solver` | `tests/unit/test_sea_ice_dynamics.py::TestEVPStressUpdate` + `TestEVPSolver` | none | **AUDIT-2026-05-05**: stress-update relaxation factor now includes N_evp; m_ice weighted by concentration. |
+| EVP (Hunke-Dukowicz 1997) | `ice/rheology.py` + `ice/dynamics.py::evp_solver` | `tests/unit/test_sea_ice_dynamics.py::TestEVPStressUpdate` + `TestEVPSolver` | none | **AUDIT-2026-05-05**: stress-update relaxation factor now includes N_evp; m_ice kept per ice-covered area (not concentration-weighted — both stress and mass would need to scale by A together for that convention to be self-consistent). |
 | Free-drift | `ice/dynamics.py::free_drift_velocity` | `test_sea_ice_dynamics.py::TestFreeDrift` | none | Heuristic placeholder; documented. |
 | Strain rates / divergence | `ice/dynamics.py::strain_rates`, `stress_divergence` | `test_sea_ice_dynamics.py::TestStrainRates`, `TestStressDivergence` | none | |
 | Ice strength | `ice/rheology.py::ice_strength` | `test_sea_ice_dynamics.py::TestIceStrength` | none | |
