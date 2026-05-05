@@ -82,7 +82,13 @@ def init_slab_state(
     T_sfc_init: float = 300.0,
     T_deep_init: float = 278.0,
 ) -> SlabOceanState:
-    """Initialize a SlabOceanState with uniform temperatures."""
+    """Initialize a SlabOceanState with uniform temperatures.
+
+    ``Q_freeze`` is initialised to a zero Field so the pytree shape
+    is invariant across timesteps (matches ``LakeState.Q_freeze``
+    convention).  Step functions update the values in place via
+    ``state.Q_freeze.replace(data=...)``.
+    """
     return SlabOceanState(
         T_sfc=Field(
             jnp.full(shape, T_sfc_init),
@@ -91,6 +97,10 @@ def init_slab_state(
         T_deep=Field(
             jnp.full(shape, T_deep_init),
             name="T_deep", dims=DIMS_2D, units="K",
+        ),
+        Q_freeze=Field(
+            jnp.zeros(shape),
+            name="Q_freeze", dims=DIMS_2D, units="W/m2",
         ),
     )
 
