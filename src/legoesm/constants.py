@@ -40,6 +40,7 @@ rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
 rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3]
 rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
+c_sw = 3994.0                   # Specific heat of seawater [J/(kg*K)] (Gill 1982)
 T_freeze = 273.15               # Freezing point of water [K]
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
 # Freshwater EOS local-parabolic fit (Kell 1975 / Jones-Harris)
