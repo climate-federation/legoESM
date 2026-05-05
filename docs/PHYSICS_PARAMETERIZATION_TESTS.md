@@ -402,6 +402,11 @@ Two CRITICAL iter-1 fixes lacked dedicated regression tests; both now have one:
 - **Audit finding #24 (MEDIUM)**: `land/carbon/stomata.py` switches the vapor-pressure-from-specific-humidity formula from the mixing-ratio form `e = q · p / (ε + q)` to the correct specific-humidity form `e = q · p / (ε + (1 − ε) · q)`.  Affects both `jarvis_gs` and `coupled_farquhar_stomata`.  The bias is ~1 % at typical tropical q but propagates through the VPD-driven stomatal closure into GPP.
 - 90 stomata + carbon-cycle tests pass.
 
+### Iter-23 (2026-05-05 — bulk-formulas |U_a| regression test)
+
+- `tests/ocean/unit/test_surface_forcing_dispatch.py::test_bulk_formula_constant_heat_flux_uses_wind_speed` locks in the iter-1 HIGH-severity sign fix: heat fluxes Q_sh, Q_lh use `|U_a|`, stress `tau_x` is directional.  Test runs the constant-coefficient bulk formula with +5 m/s and -5 m/s zonal wind and asserts Q_net is identical (heat-flux symmetry) while tau_x flips sign (stress directionality).
+- 15 surface-forcing-dispatch tests pass.
+
 ### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
