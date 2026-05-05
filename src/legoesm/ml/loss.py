@@ -46,11 +46,17 @@ def area_weighted_mse(
     if mask is not None:
         sq_err = sq_err * mask[..., None]
 
-    # Weight by latitude: weights has shape (n_lat,)
+    # Weight by latitude.  ``weights`` are Gauss-Legendre weights on
+    # μ = sin(lat) summing to 2.0 — they encode the cos(lat) area
+    # element directly.  The proper area-weighted mean is
+    #     Σ(sq·w) / (B · Σw · n_lon · n_channels)
+    # whereas ``jnp.mean(sq·w)`` divides by the full array size
+    # (= B · n_lat · n_lon · n_channels).  Correcting by the ratio
+    # ``n_lat / Σw`` gives the resolution-independent weighted mean.
     w = weights[:, None, None]  # (n_lat, 1, 1)
     weighted = sq_err * w
-
-    return jnp.mean(weighted)
+    n_lat = weights.shape[0]
+    return jnp.mean(weighted) * n_lat / jnp.sum(weights)
 
 
 def per_variable_mse(
