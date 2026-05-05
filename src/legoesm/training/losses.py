@@ -251,7 +251,15 @@ def carry_spectral_loss(
     pred_hat = sh_analysis_3d(grid, pred_T)
     target_hat = sh_analysis_3d(grid, target_T)
 
-    return spectral_loss(pred_hat, target_hat)
+    spec_loss = spectral_loss(pred_hat, target_hat)
+    # Normalize by T_scale² so spectral loss is in commensurate
+    # units with the iter-69-normalized ``carry_mse``.  Without
+    # this, ``spectral_weight`` user-tunings would have to
+    # silently absorb a factor of T_scale² ≈ 900 K² to balance
+    # against carry_mse — a calibration trap.  Iter-72 fix.
+    if config.normalize_by_scale:
+        spec_loss = spec_loss / (config.T_scale ** 2)
+    return spec_loss
 
 
 def combined_loss(
