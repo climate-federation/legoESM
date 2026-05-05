@@ -3409,24 +3409,26 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 │   └── test_cases/                         # Williamson, DCMIP, DCMIP-2025
 │
 ├── scripts/                                # Research &amp; experiment scripts
-│   ├── run_amip.py                         # AMIP simulation (gray/RRTMG, checkpoint)
-│   ├── run_amip_spectral.py                # AMIP spectral PE simulation
-│   ├── run_100day.py                       # 100-day atmospheric simulation
-│   ├── run_100day_spectral.py              # 100-day spectral simulation
-│   ├── run_held_suarez.py                  # Held-Suarez experiment
-│   ├── run_held_suarez_latlon.py           # Held-Suarez on lat-lon
-│   ├── run_held_suarez_spectral.py         # Held-Suarez spectral
-│   ├── run_dycore_tests.py                 # Comprehensive dycore suite
-│   ├── run_williamson_spectral.py          # Spectral Williamson tests
-│   ├── run_dcmip2025.py                    # DCMIP-2025 intercomparison
-│   ├── run_ocean_tests.py                  # Ocean validation
-│   ├── run_ocean_realistic.py              # Realistic ocean simulations
-│   ├── run_rce_25deg.py                    # Radiative-convective equilibrium
-│   ├── run_rce_slab_ocean.py               # RCE with slab ocean
-│   ├── run_rce_slab_land.py                # RCE with slab land
-│   ├── run_parallel_validation.py          # Multi-device scaling validation
-│   ├── run_baroclinic_wave.py              # Baroclinic wave experiment
-│   └── ...                                 # 26 total run scripts
+│   ├── run_amip.py                         # Production AMIP CLI (gray/RRTMG, checkpoint)
+│   ├── run_atmosphere_test_matrix.py       # Master atmosphere test suite (64+ cases)
+│   ├── run_ocean_test_matrix.py            # Master ocean test suite (4 grids × 9 cases)
+│   ├── run_ocean_spectral_tests.py         # Spectral ocean (Gaussian grid)
+│   ├── run_baroclinic_wave_benchmark.py    # Publication figures (CliMA Fig 3)
+│   ├── run_w2_mpas_convergence.py          # MPAS convergence study
+│   ├── run_levante_gpu_scaling.py          # GPU scaling benchmarks
+│   ├── run_levante_gpu_scaling.sh          # SLURM batch driver
+│   ├── run_cpu_mpi_scaling.py              # CPU MPI scaling benchmarks
+│   ├── run_cpu_mpi_scaling.sh              # SLURM batch driver (CPU)
+│   ├── run_scaling_diagnosis.py            # Scaling-bottleneck diagnosis
+│   ├── run_held_suarez_icos_0p5deg.py      # Icos 0.5° HS reference
+│   ├── run_held_suarez_rrtmgp_*.py         # HS + RRTMGP variants
+│   ├── run_coupled.py / run_omip.py        # Coupled and ocean-only drivers
+│   ├── run_rce.py                          # Radiative-convective equilibrium
+│   ├── plot_iter_scalings.py               # Aggregate iter PNG plots
+│   ├── diagnostic/                         # Plotting + validation utilities
+│   ├── s2s/                                # SFNO inference + slab campaigns
+│   ├── ocean_test_matrix/                  # Ocean test case definitions
+│   └── diagnostic/...
 │
 ├── config/                                 # Configuration templates
 │   ├── williamson_test2.yaml
