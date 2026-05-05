@@ -407,6 +407,21 @@ Two CRITICAL iter-1 fixes lacked dedicated regression tests; both now have one:
 - `tests/ocean/unit/test_surface_forcing_dispatch.py::test_bulk_formula_constant_heat_flux_uses_wind_speed` locks in the iter-1 HIGH-severity sign fix: heat fluxes Q_sh, Q_lh use `|U_a|`, stress `tau_x` is directional.  Test runs the constant-coefficient bulk formula with +5 m/s and -5 m/s zonal wind and asserts Q_net is identical (heat-flux symmetry) while tau_x flips sign (stress directionality).
 - 15 surface-forcing-dispatch tests pass.
 
+### Iter-26 (2026-05-05 — gravity-wave-drag deep audit)
+
+Second-pass audit of the GWD subpackage caught two real bugs:
+
+- **P0 (CRITICAL)** — `gravity_wave_drag/prognostic_spectral.py`: the stress-divergence to acceleration conversion was missing the `g` factor.  Hydrostatic identity `dp = -ρ·g·dz` requires ``F/(ρ·dz) = F·g/(-dp)``, so the conversion factor is `g` (~9.8 m/s²), not 1.  The earlier code under-counted GWD acceleration by a factor of ~9.8 in the prognostic-spectral path.
+- **P1** — `gravity_wave_drag/ml_emulator.py`: column dissipation `eps_gwd` was computed with `jnp.abs(u·du + v·dv)` instead of `-(u·du + v·dv)`.  Switched to match every other GWD scheme; preserves the conservation tie-back ``c_pd · ∫ρ·dT_dt·dz = eps_gwd`` so an untrained model that accidentally adds KE shows as a negative eps_gwd diagnostic.
+
+Structural physics gaps flagged but deferred:
+
+- Lindzen / McFarlane / prognostic_spectral lack critical-level filters (waves are not absorbed at the level where local U projects to wave phase speed).
+- Hines drag direction is tied to local wind rather than wave direction; differs from canonical isotropic Hines.
+- Lindzen uses hard `jnp.minimum` at saturation kink (McFarlane uses smooth softmin) — gradient pinching.
+
+37 GWD tests pass after the fixes.
+
 ### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
