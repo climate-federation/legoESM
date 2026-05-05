@@ -28,7 +28,7 @@ from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
 # Height / thickness from hydrostatic balance
 # ---------------------------------------------------------------------------
 
-def compute_heights_from_sigma(T, p_half):
+def compute_heights_from_sigma(T, p_half, q_v=None):
     """Approximate full- and half-level heights from hydrostatic balance.
 
     Parameters
@@ -37,6 +37,13 @@ def compute_heights_from_sigma(T, p_half):
         Temperature at full levels [K].
     p_half : array (ncol, nlev+1)
         Pressure at half levels [Pa], TOA-first.
+    q_v : array (ncol, nlev) or None, optional
+        Water-vapour specific humidity [kg/kg].  When provided, the
+        hypsometric integral uses the **virtual temperature**
+        ``T_v = T · (1 + (1/ε − 1) · q_v)`` — ~1 % thicker layers in
+        tropical moist columns.  Default ``None`` keeps the legacy
+        dry-T behaviour for callers that don't have q_v handy.
+        Audit cycle iter-35 finding F2.
 
     Returns
     -------
@@ -49,8 +56,9 @@ def compute_heights_from_sigma(T, p_half):
 
     dp = p_half[:, 1:] - p_half[:, :-1]
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T_eff = T if q_v is None else virtual_temperature(T, q_v)
     dz = jnp.abs(
-        constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+        constants.R_d * T_eff * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
 
     # Integrate from surface upward.  Use ``jnp.pad`` to append the
@@ -66,7 +74,7 @@ def compute_heights_from_sigma(T, p_half):
     return z_full, z_half
 
 
-def compute_layer_dz(T, p_half):
+def compute_layer_dz(T, p_half, q_v=None):
     """Approximate layer thicknesses from hydrostatic balance.
 
     Parameters
@@ -75,6 +83,10 @@ def compute_layer_dz(T, p_half):
         Temperature at full levels [K].
     p_half : array (ncol, nlev+1)
         Pressure at half levels [Pa], TOA-first.
+    q_v : array (ncol, nlev) or None, optional
+        Water-vapour specific humidity [kg/kg].  When provided, uses
+        virtual temperature in the hypsometric integral — ~1 %
+        thicker layers in moist columns.  Audit iter-35 F2.
 
     Returns
     -------
@@ -83,8 +95,9 @@ def compute_layer_dz(T, p_half):
     """
     dp = p_half[:, 1:] - p_half[:, :-1]
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T_eff = T if q_v is None else virtual_temperature(T, q_v)
     return jnp.abs(
-        constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+        constants.R_d * T_eff * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
 
 
