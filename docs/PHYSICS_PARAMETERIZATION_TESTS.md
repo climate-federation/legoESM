@@ -319,6 +319,12 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - DCA `test_moist_static_energy_conservation` added (tolerance 1e-4, ⟨Δq⟩>1e-4 guard) — directly exercises the per-pair `c_p·ΔT + L_v·Δq = 0` invariant added in iter-1.
 - `docs/legoesm_scientific_guide.tex`: stale `Ri_crit = 0.25` LaTeX values updated to 0.3 in both KPP/PBL sections.
 
+### Iter-10 (2026-05-05 — coupler/conservation audit)
+
+- **F15 (HIGH)**: `coupler/lake/two_layer_lake.py` lake `lw_up` now includes the reflected `(1−ε)·lw_down` term, matching every other tile.  Earlier formulation under-counted lw_up by ~10 W/m² (ε=0.97, lw_down ≈ 350 W/m²).
+- **F11 (MEDIUM)**: `ice/dynamics.py` function defaults for `rho_air`, `rho_ice`, `rho_ocean` now reference `legoesm.constants.*`.  `constants.rho_air = 1.225` and `constants.rho_ocean = 1025.0` added as canonical references.
+- **F19, F23 (LOW)**: `forcing/amip.py` and `forcing/analytical.py` documented `T_ice` legacy field as `= constants.T_freeze_ocean`; bare `1.8` literal in `analytical.py` replaced with the explicit `(T_freeze - T_freeze_ocean)` difference.
+
 ### Open audit findings (deferred for follow-up)
 
 1. **HIGH** — Soil freeze/thaw latent heat not in `soil_thermal.py`.  Cold-climate cases unsupported.
