@@ -469,6 +469,20 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
     if n_ranks > 1:
+        # Iter 38 honest-sweep: ``make_voronoi_mpi_step`` does not
+        # forward ``physics_fn`` to the per-rank step (it builds its
+        # own dycore-only step), so a multi-rank icosahedral sweep
+        # with ``--physics held_suarez`` would label the run with
+        # ``held_suarez`` but silently benchmark dycore-only —
+        # corrupting the campaign comparison.  Refuse the
+        # combination up front; users should run physics-tier
+        # sweeps single-rank or use the bare-dycore path.
+        if physics_fn is not None:
+            raise ValueError(
+                "icosahedral MPI multi-rank does not apply physics_fn; "
+                "rerun with --physics none, or run single-rank for "
+                "physics-on benchmarks."
+            )
         from legoesm.parallel.voronoi_mpi import (
             make_voronoi_partition_layout,
             scatter_state_voronoi,
