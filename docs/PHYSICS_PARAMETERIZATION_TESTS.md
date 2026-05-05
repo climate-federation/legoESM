@@ -567,12 +567,36 @@ Structural physics gaps flagged but deferred:
 
 - ``spectral_ocean_pe.py`` line 957 had ``scale_depth = 1000.0`` hardcoded instead of importing from ``legoesm.ocean.eos.scale_depth``.  Per the strengthened CLAUDE.md rule, ocean constants must reference the canonical value.
 
+### Iter-67 (2026-05-05 — multilayer_land has_snow includes fresh snowfall)
+
+- ``multilayer_land.py`` line 183: ``has_snow`` was evaluated from OLD ``snow`` value before fresh ``precip_snow`` accumulation.  Fresh-snow columns started the step routed as bare soil (L_v evap, liquid q_sat) even though the surface is snow-covered for most of the step.  ~13% bias in the latent flux phase coupling.  Fixed with ``has_snow = (snow + precip_snow * dt) > 1e-6``.
+
+### Iter-68 (2026-05-05 — Codex round: refine has_snow with T_surface gate)
+
+- Codex correctly noted that warm-surface snowfall (T_surface > T_freeze) melts immediately within the step, so iter-67's pure post-accum rule over-corrected.  Refined to ``has_existing_snow | (fresh_snow > 1e-6 AND T_surface < T_freeze)``.  Same fix applied to slab_land.py (Codex flagged the analogous bug).
+
+### Iter-69 (2026-05-05 — LossConfig per-variable scale normalization)
+
+- ``training/losses.py:carry_mse`` summed raw-units MSE for variables that differ by 9 orders of magnitude (T~K, q~kg/kg, ps~Pa).  Added per-variable amplitude scales (T_scale=30 K, q_scale=5e-3, ps_scale=1000 Pa, wind_scale=20 m/s) and ``normalize_by_scale`` flag (default True).  Without normalization: ``loss_ps / loss_T = 333``; with normalization: ratio bounded in [0.01, 100].
+
+### Iter-70 (2026-05-05 — Codex round: LossConfig field order + spectral consistency)
+
+- Codex flagged: (1) iter-69 inserted scale fields in MIDDLE of NamedTuple, breaking positional construction; (2) ``spectral_state_vs_carry_loss`` ignored the new scale fields, leaving spectral path on raw-unit MSE.  Fixed both: appended new fields to END of LossConfig; applied scale normalization to spectral path.
+
+### Iter-71 (2026-05-05 — multilayer_land albedo path matches has_snow rule)
+
+- Codex follow-up: albedo path at line 234 still used OLD ``snow`` while iter-68 bulk-flux phase used iter-68 effective snow.  Routed ``snow_effective`` (with the same warm-surface gating) through ``compute_land_albedo``.
+
+### Iter-72 (2026-05-05 — carry_spectral_loss normalized by T_scale²)
+
+- ``carry_spectral_loss`` returned raw-K² spectral MSE while ``carry_mse`` was dimensionless after iter-69.  ``combined_loss`` adding them required user to absorb a factor of ~900 K² in spectral_weight.  Normalized by T_scale² so both terms in combined loss are commensurate.
+
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
 |----------|-------------|-------|----------|
 | CRITICAL | 9  | 9  | 0 (1 spectral-ocean w/η consistency tracked as future work) |
-| HIGH     | 36 | 33 | 3 (F1, F2, F10) |
+| HIGH     | 42 | 39 | 3 (F1, F2, F10) |
 | MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
 | LOW      | ~30+ | 12 | rest documented in catalog |
 
