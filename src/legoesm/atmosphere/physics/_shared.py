@@ -105,8 +105,19 @@ def compute_layer_dz(T, p_half, q_v=None):
 # Density from ideal-gas law
 # ---------------------------------------------------------------------------
 
-def compute_rho(T, p_full):
-    """Compute air density from the ideal gas law: rho = p / (R_d * T).
+def compute_rho(T, p_full, q_v=None):
+    """Compute air density from the ideal gas law.
+
+    Without ``q_v`` returns the dry-air density ``rho = p / (R_d · T)``.
+    With ``q_v`` returns the moist density ``rho = p / (R_d · T_v)``
+    where ``T_v = T · (1 + (1/ε − 1) · q_v)``.
+
+    The moist form is consistent with ``diagnose_grid_w_from_omega``
+    (which has always used T_v when ``q_v`` is provided) and
+    avoids the ~1 % drift between dry-rho and moist-rho in tropical
+    columns.  Default ``q_v=None`` preserves the legacy dry-T
+    behaviour for callers that don't have q_v handy.  Audit cycle
+    iter-35 finding F6.
 
     Parameters
     ----------
@@ -114,12 +125,16 @@ def compute_rho(T, p_full):
         Temperature [K].
     p_full : array
         Pressure at full levels [Pa].
+    q_v : array or None, optional
+        Water-vapour specific humidity [kg/kg].  When provided, uses
+        virtual temperature in the ideal-gas law.
 
     Returns
     -------
     array : Density [kg/m^3].
     """
-    return p_full / (constants.R_d * jnp.clip(T, 1.0, None))
+    T_eff = T if q_v is None else virtual_temperature(T, q_v)
+    return p_full / (constants.R_d * jnp.clip(T_eff, 1.0, None))
 
 
 def virtual_temperature(T, q_v):
