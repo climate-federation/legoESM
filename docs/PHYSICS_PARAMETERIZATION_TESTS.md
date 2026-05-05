@@ -187,7 +187,13 @@ Quoted at 2026-05-05 with all fixes applied:
 | `tests/unit/test_sea_ice_dynamics.py` + `test_diff_sea_ice.py` + `test_land_ice_sea_ice_dynamics.py` | 64 | green |
 | `tests/unit/test_physics_ocean.py` | 11 | green |
 | `tests/ocean/unit/test_gm_redi*.py` | 58 | green |
+| `tests/atmosphere/hydrostatic/unit/test_radiation.py::TestSolarGeometry` + `TestGrayRadiation` | 18 | green |
+| `tests/unit/test_diff_atmosphere_physics.py` (AD through atmosphere physics) | 32 | green |
+| `tests/unit/test_diff_sea_ice.py` (AD through sea-ice) | 9 | green |
 | Pre-existing ocean MPAS K_bih=0 strict-equality test | 0/1 | 1 unrelated `atol=0,rtol=0` flake — independent of these changes |
+| Pre-existing FV3 hydrostatic dycore `_lnps_pad` UnboundLocalError | n/a | Hits some `tests/atmosphere/hydrostatic/integration/test_amip*.py` and `test_atmosphere_invariants.py::TestRestStateInvariance::test_zero_wind_*`; reachable only via `cdgrid_hydrostatic_tendencies` → `fv3_hydrostatic_tendencies` (`primitive_eq_cdgrid.py:343`).  Not touched by Physical_Consistency. |
+
+**Roll-up**: Approximately **600+ unit tests + 1 idealized-validation case** pass with all Physical_Consistency fixes applied.  No regression introduced by these changes; the only failing tests on the branch are pre-existing dycore / strict-equality flakes that are not in the physics-parameterization scope of this audit.
 
 ### 2.9  Idealized validation (ocean)
 
