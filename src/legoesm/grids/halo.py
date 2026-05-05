@@ -485,7 +485,12 @@ def pad_halo(
     offsets = None if duogrid is not None else interp_offsets
 
     # Single-face (regional panel) dispatch: wall boundary conditions.
-    if data.shape[0] == 1:
+    # Iter 29: gate the wall-BC fast path on the *non-MPI* backends.
+    # When MPI is active and a rank owns exactly one face (compact
+    # local layout), ``data.shape[0] == 1`` is the *normal* state and
+    # we still need to exchange halos with neighbouring ranks — taking
+    # the wall-BC branch silently zeroed out the inter-face coupling.
+    if data.shape[0] == 1 and _halo_backend != "mpi":
         return _pad_halo_wall(data, halo)
 
     # MPI dispatch.
@@ -549,7 +554,8 @@ def pad_halo_4d(
     offsets = None if duogrid is not None else interp_offsets
 
     # Single-face (regional panel) dispatch: wall boundary conditions.
-    if data.shape[0] == 1:
+    # Iter 29: gate on non-MPI backends (see pad_halo above).
+    if data.shape[0] == 1 and _halo_backend != "mpi":
         return _pad_halo_wall(data, halo)
 
     # MPI dispatch.
