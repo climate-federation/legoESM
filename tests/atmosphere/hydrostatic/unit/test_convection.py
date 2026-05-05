@@ -186,6 +186,43 @@ class TestThermodynamics:
         cape = compute_cape(T, T_parcel, p_full, p_half)
         assert jnp.allclose(cape, 0.0, atol=1e-10)
 
+    def test_cape_uses_p_mid_for_dlnp_weighting(self):
+        """Audit cycle iter-39 finding HIGH #1: ``compute_cape`` must
+        use the half-level midpoint pressure ``p_mid = 0.5(p_half[k]
+        + p_half[k+1])`` for the discrete ``∫ dlnp`` weighting,
+        consistent with every sister physics helper.  The earlier
+        formulation used ``p_full`` (a layer-mean pressure on
+        hybrid-sigma grids), which produced a 0.5-2 % CAPE bias.
+
+        Test: pin the CAPE value to the analytical reference using
+        ``p_mid``.  If a future regression switches back to
+        ``p_full``, the value would drift outside the tight
+        relative tolerance.
+        """
+        # Single-column setup with deliberately non-trivial p_full vs
+        # p_mid: hybrid-sigma layer-mean ≠ half-level midpoint.
+        nlev = 8
+        p_half = jnp.array([[100.0, 1.0e4, 2.0e4, 3.5e4, 5.0e4,
+                             6.5e4, 8.0e4, 9.5e4, 1.0e5]])  # (1, nlev+1)
+        # p_full deliberately offset from the midpoint to simulate a
+        # log-pressure layer mean.
+        p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        # Constant 5 K positive buoyancy for clean integral.
+        T_env = jnp.full((1, nlev), 280.0)
+        T_parcel = T_env + 5.0
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        cape_actual = float(compute_cape(T_env, T_parcel, p_mid, p_half)[0])
+        # Analytical: R_d · 5 · ∑ dp/p_mid
+        from legoesm import constants
+        cape_expected = float(
+            constants.R_d * 5.0 * jnp.sum(dp / p_mid),
+        )
+        # Bit-exact agreement when the helper uses p_mid.
+        assert abs(cape_actual - cape_expected) < 1.0, (
+            f"compute_cape returned {cape_actual:.3f} vs expected "
+            f"{cape_expected:.3f} (p_mid weighting).  Iter-39 fix"
+        )
+
     def test_qsat_grad_works(self):
         """jax.grad should work through saturation_mixing_ratio."""
         def loss(T):
