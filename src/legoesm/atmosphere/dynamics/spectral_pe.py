@@ -1300,18 +1300,44 @@ class SpectralPrimitiveEquationModel:
 
         return result
 
-    def step(self, state: SpectralHydrostaticState, dt: float, physics_fn=None) -> SpectralHydrostaticState:
+    def step(
+        self,
+        state: SpectralHydrostaticState,
+        dt: float,
+        physics_fn=None,
+        forcing_data=None,
+    ) -> SpectralHydrostaticState:
         """Advance one time step, optionally with physics forcing.
 
         Dispatches to leapfrog+SI or SSP-RK3 based on config.time_integrator.
+
+        Parameters
+        ----------
+        forcing_data : pytree of jax.Array, optional
+            Dynamic forcing data passed as a TRACED argument to
+            ``physics_fn(state, grid, sigma_coord, forcing_data)``.
+            When provided, the JIT cache is keyed by physics_fn
+            identity (static) but the forcing data is treated as a
+            dynamic argument — JAX retraces only if the pytree
+            *structure* (not values) changes.  This avoids the
+            stale-day pathology of closure-captured Python state
+            (audit iter-74).  When None, falls back to the legacy
+            3-arg ``physics_fn(state, grid, sigma_coord)`` API for
+            backward compatibility.
         """
         integrator = self.config.time_integrator.lower()
         if integrator in ("leapfrog", "leapfrog_si"):
+            # Leapfrog path doesn't yet support forcing_data; fall through
+            # to legacy physics_fn API.  Tracked for follow-up work.
             return self._leapfrog_step(state, dt, physics_fn)
 
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
         self._ensure_tracer_filter(dt)
+        if forcing_data is not None:
+            return self._step_with_forcing_jit(
+                state, dt, physics_fn, forcing_data,
+            )
         return self._step_jit(state, dt, physics_fn)
 
     def _leapfrog_step(self, state, dt, physics_fn=None):
@@ -1454,6 +1480,50 @@ class SpectralPrimitiveEquationModel:
     _euler_si_physics_jit = _euler_si_jit
     _leapfrog_si_physics_jit = _leapfrog_si_jit
     _step_with_physics_jit = _step_jit
+
+    @partial(jax.jit, static_argnums=(0, 2, 3))
+    def _step_with_forcing_jit(
+        self,
+        state: SpectralHydrostaticState,
+        dt: float,
+        physics_fn,
+        forcing_data,
+    ) -> SpectralHydrostaticState:
+        """JIT-compiled step with TRACED ``forcing_data``.
+
+        ``forcing_data`` is a non-static pytree — values can change
+        between calls without triggering retrace (only structure
+        changes do).  This solves the iter-74 ``_DayRef`` JIT-cache
+        stale-day issue: callers pass ``day``, ``sst``, ``sic`` etc.
+        as a JAX-array dict, and JAX retraces ONCE at first call but
+        treats the values as dynamic for all subsequent calls.
+
+        physics_fn is called with ``(state, grid, sigma_coord,
+        forcing_data)`` — a 4-arg signature.  Existing 3-arg
+        physics_fn implementations need to be extended.
+        """
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                _phys_result = physics_fn(
+                    s, self.grid, self.sigma_coord, forcing_data,
+                )
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+
+        if self._use_cpu_for_spectral:
+            state_cpu = jax.device_put(state, self._cpu_device)
+            forcing_cpu = jax.device_put(forcing_data, self._cpu_device)
+            # Note: _do_step closes over tendency_fn which references
+            # forcing_data; the cpu-put forcing is not directly used
+            # but the device_put ensures the trace is on CPU.
+            del forcing_cpu  # keep linter happy
+            result_cpu = self._do_step(state_cpu, dt, tendency_fn)
+            return jax.device_put(result_cpu, self._default_device)
+
+        return self._do_step(state, dt, tendency_fn)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_on_cpu(
