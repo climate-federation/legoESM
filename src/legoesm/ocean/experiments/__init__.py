@@ -11,12 +11,12 @@ test case. Each experiment module provides:
 
 Example Usage:
     from legoesm.ocean.experiments import rest_state
-    
+
     # Create initial conditions
     config = rest_state.RestStateConfig(T_surface=18.0)
     initial_state = rest_state.create_initial_conditions(
         "cubed_sphere", grid, z_coord, config)
-    
+
     # Validate results
     success, notes = rest_state.validate_results(final_state, diagnostics)
 
@@ -35,6 +35,7 @@ Available Experiments:
 - global_barotropic_wind: Global barotropic wind-driven circulation
 - eady_instability: Eady baroclinic instability from meridional temperature front
 - acc_channel: ACC-like channel with Gaussian ridge and wind forcing
+- global_overturning: Global baroclinic overturning with stratification and SST restoring
 
 Design Principles:
 1. Each experiment is self-documenting with scientific context
@@ -58,6 +59,7 @@ from . import geostrophic_adjustment
 from . import global_barotropic_wind
 from . import eady_instability
 from . import acc_channel
+from . import global_overturning
 
 # Registry of all available experiments
 AVAILABLE_EXPERIMENTS = {
@@ -75,6 +77,7 @@ AVAILABLE_EXPERIMENTS = {
     "global_barotropic_wind": global_barotropic_wind.EXPERIMENT_CONFIG,
     "eady_instability": eady_instability.EXPERIMENT_CONFIG,
     "acc_channel": acc_channel.EXPERIMENT_CONFIG,
+    "global_overturning": global_overturning.EXPERIMENT_CONFIG,
 }
 
 __all__ = [
@@ -92,5 +95,6 @@ __all__ = [
     "global_barotropic_wind",
     "eady_instability",
     "acc_channel",
+    "global_overturning",
     "AVAILABLE_EXPERIMENTS",
 ]

@@ -33,9 +33,11 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.core.operators_3d import (
+    divergence_3d,
     gradient_x_3d,
     gradient_y_3d,
     hyperdiffusion_3d,
+    laplacian_compact_3d,
     vertical_advection_height,
 )
 from legoesm.core.operators_cdgrid import (
@@ -61,13 +63,25 @@ from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
+    CompressibleEulerConfig,
     compute_exner_perturbation,
     _sponge_profile,
     acoustic_substeps,
     acoustic_substeps_semi_implicit,
+    CompressibleEulerConfig,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
+from legoesm.core.cfl import estimate_min_dx_cubed_sphere
+from legoesm.core.conservation import (
+    compute_nh_dry_mass,
+    fix_mass_nonhydrostatic,
+)
+from legoesm.grids.cubed_sphere import apply_small_earth_scaling
+from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_module
+from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
 from legoesm import constants
+import logging
 
 
 class CDGridCompressibleEulerConfig(NamedTuple):
@@ -162,12 +176,8 @@ def cdgrid_compressible_euler_slow_tendencies(
     # --- 3. C-grid velocities ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
 
-    # --- 4. Vorticity and Coriolis ---
+    # --- 4. Vorticity (cell centres) ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)
-    if config.use_coriolis:
-        abs_vor = zeta + cdgrid.base.f[..., None]
-    else:
-        abs_vor = zeta
 
     # --- 5. KE at cell centres from D-grid (orthogonal basis) ---
     u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
@@ -180,18 +190,13 @@ def cdgrid_compressible_euler_slow_tendencies(
     # its internal halo when supplied.
     from legoesm.grids.halo import _halo_backend as _hb_step6
     if _hb_step6 == "spmd":
-        from legoesm.parallel.cubesphere_exchange import (
-            packed_pad_halo_4d as _packed_4d_spmd, _spmd_mesh as _spmd_mesh_step6,
-        )
-        _K_pad_step6, _pi_pad_step6 = _packed_4d_spmd(
+        from legoesm.parallel.cubesphere_exchange import _spmd_mesh as _spmd_mesh_step6
+        _K_pad_step6, _pi_pad_step6 = packed_pad_halo_4d(
             K, pi_prime, mesh=_spmd_mesh_step6,
         )
     elif _hb_step6 == "mpi":
         from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
-        from legoesm.parallel.halo_exchange import (
-            packed_pad_halo_mpi_4d as _packed_mpi_4d_step6,
-        )
-        _K_pad_step6, _pi_pad_step6 = _packed_mpi_4d_step6(
+        _K_pad_step6, _pi_pad_step6 = packed_pad_halo_mpi_4d(
             K, pi_prime, topology=_mpi_topo_step6,
         )
     else:
@@ -232,21 +237,17 @@ def cdgrid_compressible_euler_slow_tendencies(
     dpi_dy_perp = _dKpi_dy_perp[..., 1]
 
     # --- 7. D-grid momentum tendencies ---
-    # Batch (abs_vor, theta_total) center-to-corner interp — same
-    # passive-trailing-axis batching as the (u, v) interp earlier.
-    # 2 corner-interpolations → 1 (one halo exchange + one 4-point
-    # average shared between abs_vor and theta_total).
-    n_face_at, n_i_at, n_j_at, nlev_at = abs_vor.shape
-    _at_stack = jnp.stack([abs_vor, theta_total], axis=-1)
-    _at_d_flat = _interp_center_to_corner(
-        _at_stack.reshape(n_face_at, n_i_at, n_j_at, nlev_at * 2), cdgrid,
-    )
-    _at_d = _at_d_flat.reshape(
-        _at_d_flat.shape[0], _at_d_flat.shape[1], _at_d_flat.shape[2],
-        nlev_at, 2,
-    )
-    abs_vor_corner = _at_d[..., 0]
-    theta_corner = _at_d[..., 1]
+    # Interpolate ζ only; add f_corner directly (FV3 stores f at corners).
+    # Previously abs_vor = ζ + f was interpolated as a single field; because
+    # the 4-point interpolator is linear but sin(lat) is not,
+    # interp(f_cc) ≠ f_corner introduced an O(dx²) Coriolis error at corners.
+    # Matches iter-74 fix in cdgrid_momentum_tendencies.
+    zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+    if config.use_coriolis:
+        abs_vor_corner = zeta_corner + cdgrid.f_corner[..., None]
+    else:
+        abs_vor_corner = zeta_corner
+    theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
@@ -274,13 +275,15 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
     # passive-trailing-axis pattern; ``_interp_corner_to_center`` is a
     # 4-point average with no halo, so this saves one kernel launch.
+    # Cell-centre shape captured at line 153 — ``_interp_corner_to_center``
+    # outputs cell-centre.  Replaces undefined ``_at`` placeholders.
     _duv_d_dt = jnp.stack([du_d_dt, dv_d_dt], axis=-1)  # (..., 2)
     _duv_d_dt_flat = _duv_d_dt.reshape(
         _duv_d_dt.shape[0], _duv_d_dt.shape[1], _duv_d_dt.shape[2],
-        nlev_at * 2,
+        nlev_uv * 2,
     )
     _duv_dt = _interp_corner_to_center(_duv_d_dt_flat).reshape(
-        n_face_at, n_i_at, n_j_at, nlev_at, 2,
+        n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2,
     )
     du_dt = _duv_dt[..., 0]
     dv_dt = _duv_dt[..., 1]
@@ -366,53 +369,62 @@ def cdgrid_compressible_euler_slow_tendencies(
         dtracers_dt = jnp.zeros_like(tracers)
 
     # --- 13. Hyperdiffusion ---
-    # ``hyperdiffusion_3d(field, grid, coeff)`` is horizontal only: the
-    # trailing dimension is just a batch axis.  Pack every active CE
-    # hyperdiffusion field into that axis, including half-level ``w``.
-    # One inner ∇² and one outer ∇² then serve all active fields; offsets
-    # preserve the different full-level (nlev) and half-level (nlev+1)
-    # blocks before per-field coefficients are applied.
-    _coeff_uvt = config.hyperdiff_coeff
+    # ``hyperdiffusion_3d(field, grid, coeff)`` is defined as
+    # ``-coeff * ∇²(∇²(field))`` where each ∇² runs the cubed-sphere
+    # 4D-native compact stencil (single ``pad_halo_4d`` per call).
+    # When *both* ``hyperdiff_coeff`` (applied to (u, v, theta_p))
+    # and ``hyperdiff_rho_coeff`` (applied to rho_p) are non-zero,
+    # the two operator chains share the same biharmonic structure
+    # but use different coefficients on the outer step.  Inline the
+    # operator and stack ALL four fields along a trailing axis: a
+    # single inner ∇² and a single outer ∇² serve all four fields,
+    # then per-field coefficients are applied at the very end.
+    # 4 ∇² evaluations → 2 (one inner, one outer) per RHS evaluation
+    # when both coefficients are active.  When only one coefficient
+    # is active, fall back to the existing path (3-field or 1-field).
+    _coeff_uvT = config.hyperdiff_coeff
     _coeff_rho = config.hyperdiff_rho_coeff
-    _coeff_w = config.hyperdiff_w_coeff
-    _hyper_w = None
-    if _coeff_uvt > 0 or _coeff_rho > 0 or _coeff_w > 0:
-        nlev_h = u.shape[-1]
-        nlev_w_h = w.shape[-1]
-        _hyper_blocks = []
-        _offset = 0
-
-        if _coeff_uvt > 0:
-            _uvt_offset = _offset
-            _hyper_blocks.append(jnp.concatenate([u, v, theta_p], axis=-1))
-            _offset += 3 * nlev_h
-        if _coeff_rho > 0:
-            _rho_offset = _offset
-            _hyper_blocks.append(rho_p)
-            _offset += nlev_h
-        if _coeff_w > 0:
-            _w_offset = _offset
-            _hyper_blocks.append(w)
-            _offset += nlev_w_h
-
-        _hyper_in = (
-            _hyper_blocks[0]
-            if len(_hyper_blocks) == 1
-            else jnp.concatenate(_hyper_blocks, axis=-1)
+    if _coeff_uvT > 0 and _coeff_rho > 0:
+        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
+        _hyper_stack = jnp.stack(
+            [u, v, theta_p, rho_p], axis=-1,
+        )  # (6, n, n, nlev, 4)
+        _hyper_flat = _hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 4)
+        # Inner ∇² (compact stencil) — shared across all four fields.
+        _lap1 = laplacian_compact_3d(_hyper_flat, grid)
+        # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
+        # both gradient ops (saves 1 ``pad_halo_4d`` per call).
+        _pad_halo_4d_uvtr = _pad_halo_4d_module
+        _dg = getattr(grid, 'duogrid', None)
+        _offsets = None if _dg is not None else grid.halo_interp_offsets
+        _lap1_pad = pad_halo_4d(_lap1, interp_offsets=_offsets, duogrid=_dg)
+        _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
+        _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
+        _lap2 = divergence_3d(_gx, _gy, grid).reshape(
+            n_face_h, n_i_h, n_j_h, nlev_h, 4,
         )
-        _hyper_out = hyperdiffusion_3d(_hyper_in, grid, 1.0)
-
-        if _coeff_uvt > 0:
-            _uvt = _hyper_out[..., _uvt_offset:_uvt_offset + 3 * nlev_h]
-            du_dt = du_dt + _coeff_uvt * _uvt[..., :nlev_h]
-            dv_dt = dv_dt + _coeff_uvt * _uvt[..., nlev_h:2 * nlev_h]
-            dtheta_p_dt = dtheta_p_dt + _coeff_uvt * _uvt[..., 2 * nlev_h:]
-        if _coeff_rho > 0:
-            drho_p_dt = drho_p_dt + _coeff_rho * _hyper_out[
-                ..., _rho_offset:_rho_offset + nlev_h
-            ]
-        if _coeff_w > 0:
-            _hyper_w = _coeff_w * _hyper_out[..., _w_offset:_w_offset + nlev_w_h]
+        # Apply per-field hyperdiffusion coefficients.
+        du_dt = du_dt - _coeff_uvT * _lap2[..., 0]
+        dv_dt = dv_dt - _coeff_uvT * _lap2[..., 1]
+        dtheta_p_dt = dtheta_p_dt - _coeff_uvT * _lap2[..., 2]
+        drho_p_dt = drho_p_dt - _coeff_rho * _lap2[..., 3]
+    elif _coeff_uvT > 0:
+        n_face_h, n_i_h, n_j_h, nlev_h = u.shape
+        hyper_stack = jnp.stack(
+            [u, v, theta_p], axis=-1,
+        )  # (6, n, n, nlev, 3)
+        hyper_flat = hyper_stack.reshape(n_face_h, n_i_h, n_j_h, nlev_h * 3)
+        hyper_out_flat = hyperdiffusion_3d(
+            hyper_flat, grid, _coeff_uvT,
+        )
+        hyper_out = hyper_out_flat.reshape(n_face_h, n_i_h, n_j_h, nlev_h, 3)
+        du_dt = du_dt + hyper_out[..., 0]
+        dv_dt = dv_dt + hyper_out[..., 1]
+        dtheta_p_dt = dtheta_p_dt + hyper_out[..., 2]
+    elif _coeff_rho > 0:
+        drho_p_dt = drho_p_dt + hyperdiffusion_3d(
+            rho_p, grid, _coeff_rho,
+        )
 
     # --- 14. Sponge layer ---
     sponge = _sponge_profile(
@@ -432,10 +444,10 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Pre-pad ``w_full`` once and pass to both gradient_x_3d /
     # gradient_y_3d via ``padded=`` so they share the halo MPI exchange.
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+    _pad_halo_4d = _pad_halo_4d_module
     _dg_w = getattr(grid, 'duogrid', None)
     _offsets_w = None if _dg_w is not None else grid.halo_interp_offsets
-    _w_full_pad = _pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
+    _w_full_pad = pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
     dw_dx = gradient_x_3d(w_full, grid, padded=_w_full_pad)
     dw_dy = gradient_y_3d(w_full, grid, padded=_w_full_pad)
     horiz_adv_w = -(u * dw_dx + v * dw_dy)
@@ -449,8 +461,8 @@ def cdgrid_compressible_euler_slow_tendencies(
     )
 
     dw_dt = horiz_adv_w_half - sponge_half * w
-    if _hyper_w is not None:
-        dw_dt = dw_dt + _hyper_w
+    if config.hyperdiff_w_coeff > 0:
+        dw_dt = dw_dt + hyperdiffusion_3d(w, grid, config.hyperdiff_w_coeff)
 
     # --- 16. Physics ---
     if physics_tendency is not None:
@@ -510,17 +522,14 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         self._target_mass = None
 
         if self.config.small_earth_factor != 1.0:
-            from legoesm.grids.cubed_sphere import apply_small_earth_scaling
             grid = apply_small_earth_scaling(grid, self.config.small_earth_factor)
         self.grid = grid
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
 
         # Acoustic CFL check at construction time (outside JIT)
-        from legoesm.core.cfl import estimate_min_dx_cubed_sphere
-        import logging as _logging
-        _ce_logger = _logging.getLogger("legoesm.compressible_euler")
+        _ce_logger = logging.getLogger("legoesm.compressible_euler")
         dx_min = estimate_min_dx_cubed_sphere(
-            grid.n, getattr(grid, 'radius', 6.371229e6),
+            grid.n, getattr(grid, 'radius', constants.R_earth),
         )
         c_sound = float(jnp.sqrt(
             constants.c_pd / constants.c_vd * constants.R_d * 300.0
@@ -552,7 +561,6 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
-            from legoesm.core.conservation import compute_nh_dry_mass
             self._target_mass = compute_nh_dry_mass(
                 state.rho_prime.data, self.height_coord,
                 self.terrain_metric, self.grid,
@@ -562,7 +570,6 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_jitted(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
         """JIT-compiled step core."""
-        from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
             n_acoustic_substeps=self.config.n_acoustic_substeps,
@@ -612,9 +619,6 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         )
 
         if self.config.fix_mass:
-            from legoesm.core.conservation import (
-                fix_mass_nonhydrostatic, compute_nh_dry_mass,
-            )
             # _target_mass is precomputed in step() outside the JIT boundary.
             target = self._target_mass if self.config.anchor_mass_to_initial else (
                 compute_nh_dry_mass(

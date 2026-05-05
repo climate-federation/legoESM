@@ -31,11 +31,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
+from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 from legoesm.ocean.dynamics.barotropic_cgrid import barotropic_substeps_cgrid
+from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
+from legoesm.ocean.conservation import ocean_conservation_fixer
+from legoesm.ocean.physics.combined import make_ocean_physics
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
 
@@ -117,12 +122,10 @@ class OceanModel:
         if cdgrid is not None:
             self._cdgrid = cdgrid
         else:
-            from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
             self._cdgrid = create_cubed_sphere_cdgrid(grid)
 
         # Build physics function if configured
         if self.config.physics is not None:
-            from legoesm.ocean.physics.combined import make_ocean_physics
             self._physics_fn = make_ocean_physics(self.config.physics)
         else:
             self._physics_fn = None
@@ -292,9 +295,6 @@ class OceanModel:
 
     def _compute_tendencies(self, state: OceanState, surface_forcing=None):
         """Compute baroclinic tendencies using C-D grid operators."""
-        from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
-            ocean_baroclinic_tendencies_cdgrid,
-        )
         return ocean_baroclinic_tendencies_cdgrid(
             state, self.grid, self.z_coord,
             self._cdgrid, self.config,
@@ -368,7 +368,6 @@ class OceanModel:
 
         # --- 5. Conservation fixers ---
         if self.config.use_conservation_fixer:
-            from legoesm.ocean.conservation import ocean_conservation_fixer
             state_new = ocean_conservation_fixer(
                 state_new, state, self.grid, self.z_coord, self.config,
             )

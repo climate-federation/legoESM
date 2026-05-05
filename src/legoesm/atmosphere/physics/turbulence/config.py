@@ -192,6 +192,13 @@ class HoltslagBovilleConfig(NamedTuple):
         Counter-gradient momentum coefficient (default 0.0).
     Ri_crit : float
         Critical Richardson number (default 0.25).
+    b_louis : float
+        Louis (1979) stability-function coefficient (default 5.0).
+        Used in both the stable branch
+        ``f_stable = 1 / (1 + 2*b_louis*Ri / sqrt(1 + 5*Ri))`` and the
+        unstable branch via the ``3*b_louis*5*l_mix^2*sqrt(|Ri|)``
+        denominator term.  Was hardcoded as ``5.0`` in the scheme body
+        prior to the audit-driven config migration.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -200,6 +207,7 @@ class HoltslagBovilleConfig(NamedTuple):
     gamma_h: float = 10.0
     gamma_m: float = 0.0
     Ri_crit: float = 0.25
+    b_louis: float = 5.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -254,6 +262,12 @@ class EDMFConfig(NamedTuple):
         Lateral entrainment rate [1/m] (default 1e-3).
     detrainment_rate : float
         Lateral detrainment rate [1/m] (default 2e-3).
+    parcel_dT : float
+        Initial updraft potential-temperature perturbation [K]
+        (default 0.5).  Was hardcoded as ``+0.5`` in the scan body
+        prior to the audit-driven config migration; lifting it to a
+        config field lets users tune the initial buoyancy of the
+        plume against scheme calibration data.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -267,6 +281,7 @@ class EDMFConfig(NamedTuple):
     w_updraft_min: float = 0.1
     entrainment_rate: float = 1e-3
     detrainment_rate: float = 2e-3
+    parcel_dT: float = 0.5
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

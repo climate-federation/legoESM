@@ -22,8 +22,24 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
 from legoesm.core.field import Field
-from legoesm.core.state import HydrostaticState, HydrostaticTendencies
+from legoesm.core.precision import get_policy
+from legoesm.core.state import (
+    HydrostaticState,
+    HydrostaticTendencies,
+    MPASHydrostaticState,
+    MPASHydrostaticTendencies,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis,
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 from legoesm.grids.vertical import (
     SigmaCoordinate,
     HybridSigmaPressureCoordinate,
@@ -52,8 +68,8 @@ DELTA_T_Y = 60.0    # [K] meridional temperature gradient
 DELTA_THETA_Z = 10.0  # [K] vertical potential temperature gradient
 T_MIN = 200.0        # [K] minimum equilibrium temperature
 
-# Reference pressure
-P_0 = 1.0e5  # [Pa]
+# Reference pressure (alias for constants.p_ref kept for local readability)
+P_0 = constants.p_ref
 
 
 # ==============================================================================
@@ -189,7 +205,7 @@ def held_suarez_init(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -223,7 +239,6 @@ def held_suarez_init(
     -------
     HydrostaticState : Initial state.
     """
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
 
     n = grid.n
@@ -348,7 +363,7 @@ def held_suarez_init_latlon(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -381,7 +396,6 @@ def held_suarez_init_latlon(
     -------
     HydrostaticState : Initial state.
     """
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
 
     n_lat = grid.n_lat
@@ -444,8 +458,6 @@ def held_suarez_forcing_mpas(
     -------
     MPASHydrostaticTendencies
     """
-    from legoesm.core.state import MPASHydrostaticTendencies
-
     u = state.u.data       # (nEdges, nlev)
     T = state.T.data       # (nCells, nlev)
     p_s = state.p_s.data   # (nCells,)
@@ -514,7 +526,7 @@ def held_suarez_init_mpas(
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -544,9 +556,6 @@ def held_suarez_init_mpas(
     -------
     MPASHydrostaticState
     """
-    from legoesm.core.state import MPASHydrostaticState
-    from legoesm.core.precision import get_policy
-
     _dtype = get_policy().storage
 
     nCells = mesh.nCells
@@ -611,17 +620,6 @@ def held_suarez_forcing_spectral(
     SpectralHydrostaticState
         Physics tendencies in spectral space (same pytree structure).
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import (
-        SpectralHydrostaticState,
-        spectral_pe_to_grid,
-    )
-    from legoesm.grids.gaussian import (
-        sh_analysis,
-        sh_analysis_3d,
-        sh_analysis_oc2_3d,
-        sh_analysis_dmu_3d,
-    )
-
     # --- 1. Transform state to grid space ---
     fields = spectral_pe_to_grid(state, grid, sigma_coord)
     u = fields['u']         # (n_lat, n_lon, nlev)

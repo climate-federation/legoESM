@@ -24,6 +24,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
 # Maximum interpolation order (fixed array dimension for JAX pytree compat)
@@ -525,7 +526,7 @@ def _compute_corner_lagrange_coeff(n: int, ng: int, ext_lon, ext_lat):
 
 def create_duogrid_data(
     n: int,
-    radius: float = 6.371e6,
+    radius: float = constants.R_earth,
     ng: int = 3,
     k2e_nord: int = 2,
 ) -> DuoGridData:
@@ -869,6 +870,7 @@ def fill_corner_region(
     padded: jax.Array,
     duogrid: DuoGridData,
     halo: int,
+    monotone_clip: bool = False,
 ) -> jax.Array:
     """Fill corner blocks using FV3 Lagrange polynomial interpolation.
 
@@ -880,6 +882,24 @@ def fill_corner_region(
 
     Falls back to simple averaging when Lagrange coefficients are not
     available (corner_xp is None).
+
+    Parameters
+    ----------
+    padded : jax.Array, shape (6, n+2h, n+2h)
+    duogrid : DuoGridData
+    halo : int
+    monotone_clip : bool, default False
+        Iter-802: when True, clip each Lagrange-extrapolated cube-corner
+        cell to `[min, max]` of the adjacent interior + edge-halo cells.
+        Iter-801 measured a 144 m overshoot of interior max at polar
+        cube corners on smooth W2 h, which iter-800 showed drives a
+        1172× dh/dt blowup via PPM on the padded h-field.  The clip is
+        a pragmatic monotonicity constraint that preserves Lagrange
+        values when they fall within the physical range.  Default False
+        preserves FV3-faithful behaviour (Fortran `lagrange_poly_interp_2d`
+        does not clip either, but Fortran's FB time-splitting structure
+        mitigates the overshoot downstream in a way that our A-L+RK3
+        path does not).  Enable for DUOGRID mass-transport stability.
     """
     n = duogrid.n
     ng = duogrid.ng
@@ -913,9 +933,44 @@ def fill_corner_region(
     # FV3 fill order: (1) non-diagonal cells first, (2) then diagonal
     # cells as average of X and Y interpolations on a COPY of padded.
 
+    def _maybe_clip(val, padded, i_p, j_p):
+        """Iter-802: optionally clip val to min/max of the 4 neighbours
+        (within the padded array) at (i_p±1, j_p), (i_p, j_p±1).  The
+        neighbours are either already-filled halo cells or interior
+        cells, all within the physical range."""
+        if not monotone_clip:
+            return val
+        # Wrap at array boundaries using clip-to-last-valid-index so that
+        # at the extreme corner cell [0,0] or [-1,-1] we still have 2 valid
+        # neighbours.
+        n_i = padded.shape[1]
+        n_j = padded.shape[2]
+        im = max(i_p - 1, 0)
+        ip = min(i_p + 1, n_i - 1)
+        jm = max(j_p - 1, 0)
+        jp = min(j_p + 1, n_j - 1)
+        neighbours = jnp.stack([
+            padded[:, im, j_p], padded[:, ip, j_p],
+            padded[:, i_p, jm], padded[:, i_p, jp],
+        ], axis=-1)  # (6, 4)
+        lo = jnp.min(neighbours, axis=-1)
+        hi = jnp.max(neighbours, axis=-1)
+        return jnp.clip(val, lo, hi)
+
     def _fill_one_corner(padded, x_interp, y_interp, x_coefs, y_coefs,
                          get_ip, get_jp):
-        """Fill one h×h corner block with FV3 ordering."""
+        """Fill one h×h corner block with FV3 ordering.
+
+        Iter-803: adds Fortran-faithful veltemp/veltempp snapshot
+        semantics for pass-2 diagonal cells.  Fortran
+        `fill_corner_region_2d` (fv_duogrid.F90:1759-1779) captures
+        `veltemp = vel` and `veltempp = vel` ONCE after pass-1 and
+        BEFORE any pass-2 diagonal writes, so every pass-2 diagonal
+        reads from a SNAPSHOT unaffected by earlier pass-2 writes.
+        Python's previous pass-2 loop updated `padded` in place, so
+        a later pass-2 diagonal could read an earlier pass-2 diagonal
+        value — a subtle compounding that is NOT in Fortran.
+        """
         # Pass 1: non-diagonal cells (d1 != d2)
         for d1 in range(1, h + 1):
             for d2 in range(1, h + 1):
@@ -929,18 +984,31 @@ def fill_corner_region(
                     val = x_interp(padded, x_coefs, i_e, j_e, j_p, n, h)
                 else:
                     val = y_interp(padded, y_coefs, i_e, j_e, i_p, n, h)
+                val = _maybe_clip(val, padded, i_p, j_p)
                 padded = padded.at[:, i_p, j_p].set(val)
 
-        # Pass 2: diagonal cells (d1 == d2), averaged from X and Y
-        # on separate copies (FV3 uses veltemp/veltempp)
+        # Iter-803: Fortran-faithful snapshot.  Fortran pattern:
+        #   veltemp = vel   ! snapshot after pass-1
+        #   veltempp = vel
+        #   do each diagonal cell (i_p, j_p):
+        #       lagrange_poly_interp(veltemp, i_p, j_p, 'X+')
+        #       lagrange_poly_interp(veltempp, i_p, j_p, 'Y+')
+        #       vel(i_p, j_p) = 0.5 * (veltemp(i_p, j_p) + veltempp(i_p, j_p))
+        # Key: each lagrange_poly_interp reads from the SNAPSHOT.  We
+        # capture the padded state AFTER pass-1 and BEFORE writing any
+        # pass-2 diagonal, then read from that snapshot.
+        padded_snapshot = padded
+
         for d in range(1, h + 1):
             i_p = get_ip(d)
             j_p = get_jp(d)
             i_e = i_p + offset
             j_e = j_p + offset
-            val_x = x_interp(padded, x_coefs, i_e, j_e, j_p, n, h)
-            val_y = y_interp(padded, y_coefs, i_e, j_e, i_p, n, h)
-            padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
+            val_x = x_interp(padded_snapshot, x_coefs, i_e, j_e, j_p, n, h)
+            val_y = y_interp(padded_snapshot, y_coefs, i_e, j_e, i_p, n, h)
+            val = 0.5 * (val_x + val_y)
+            val = _maybe_clip(val, padded, i_p, j_p)
+            padded = padded.at[:, i_p, j_p].set(val)
 
         return padded
 

@@ -29,6 +29,7 @@ from legoesm.core.operators_voronoi import (
     divergence_cell,
     gradient_edge,
     tangential_velocity,
+    vector_laplacian_del2,
     edge_thickness as _edge_avg,
 )
 from legoesm.ocean.vertical import compute_layer_thickness
@@ -39,6 +40,7 @@ from legoesm.ocean.dynamics.barotropic_common import (
     maxvel_clip,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import implicit_bottom_drag_factor
+from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
 
 
 def barotropic_substeps_mpas(
@@ -129,8 +131,6 @@ def barotropic_substeps_mpas(
     # Fill land-cell eta with nearest-ocean-neighbor average so that
     # gradient_edge sees smooth fields at coastlines instead of the
     # sharp ocean-to-zero jump from masking.
-    from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
-
     def _fill_land_cells_mpas(field_cell, mask_cell):
         return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
 
@@ -156,6 +156,15 @@ def barotropic_substeps_mpas(
             config.barotropic_div_damp, dtype=eta.dtype,
         ) * (dt_baro / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
         div_damp_area_edge = 0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2])
+
+    # Barotropic-mode lateral viscosity on u_bar: A_baro * del2(u_bar).
+    # Targets the TRiSK rotational null branch on hexagonal C-grids
+    # (Thuburn 2008; Ringler et al. 2010), which is invisible to eta
+    # diffusion and to divergence damping (the null mode has both
+    # ∇·u_bar ≈ 0 and ∇η ≈ 0). MPAS-O production uses an analogous
+    # del2 viscosity on the depth-mean velocity (Ringler et al. 2013).
+    A_baro_visc = jnp.asarray(config.barotropic_u_viscosity, dtype=eta.dtype)
+    use_baro_visc = config.barotropic_u_viscosity > 0.0
 
     # --- Fix 3: Semi-implicit Coriolis (trapezoidal predictor-corrector) ---
     # On Voronoi meshes, the (u, v_tangential) decomposition doesn't
@@ -242,6 +251,14 @@ def barotropic_substeps_mpas(
             grad_div = gradient_edge(div_filled, mesh)
             u_bar_next = (
                 u_bar_next + div_damp_coeff * div_damp_area_edge * grad_div
+            ) * edge_mask
+
+        # Barotropic-mode lateral viscosity on u_bar (TRiSK null branch).
+        # Forward-Euler Laplacian: stable while A_baro_visc * dt_baro / dx² < 0.5.
+        if use_baro_visc:
+            lap_u = vector_laplacian_del2(u_bar_next, mesh)
+            u_bar_next = (
+                u_bar_next + dt_baro * A_baro_visc * lap_u
             ) * edge_mask
 
         # Optional barotropic damping (Rayleigh drag)

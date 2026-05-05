@@ -9,6 +9,9 @@ from legoesm.ocean.eos import compute_ocean_rho as _compute_rho
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
 
 
 def make_vertical_mixing_physics(
@@ -47,7 +50,6 @@ def _make_none() -> Callable:
 
 
 def _make_constant(config: VerticalMixingConfig) -> Callable:
-    from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
     cfg = config.constant
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -63,7 +65,6 @@ def _make_constant(config: VerticalMixingConfig) -> Callable:
 
 
 def _make_richardson(config: VerticalMixingConfig) -> Callable:
-    from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
     cfg = config.richardson
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -80,7 +81,6 @@ def _make_richardson(config: VerticalMixingConfig) -> Callable:
 
 
 def _make_kpp(config: VerticalMixingConfig) -> Callable:
-    from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
     cfg = config.kpp
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -88,9 +88,63 @@ def _make_kpp(config: VerticalMixingConfig) -> Callable:
                    surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         rho = _compute_rho(state, z_coord, J)
+
+        # Forward surface forcing into KPP.  KPP needs:
+        #   tau_x, tau_y [Pa] for the friction velocity u_star
+        #   B_f [m^2/s^3, +ve = unstable] from net heat + freshwater fluxes
+        #   Q_sfc_T [K m/s] kinematic heat flux for non-local T transport
+        #   Q_sfc_S [PSU m/s] kinematic salt flux for non-local S transport
+        # All are derived from the OceanSurfaceForcing struct when
+        # available; otherwise we fall through to the proxies inside
+        # ``kpp_vertical_mixing`` so KPP still runs unforced.
+        tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
+        tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
+        q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
+        fw    = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+
+        # Surface kinematic heat flux: Q_T = q_net / (rho_0 * c_sw)  [K m/s]
+        # KPP convention: positive Q_T heats the ocean.
+        Q_sfc_T = None
+        B_f = None
+        if q_net is not None:
+            Q_sfc_T = q_net / (_RHO_0 * _C_SW)
+            # Surface thermal expansion at the top layer.
+            T_sfc = state.T.data[..., 0]
+            S_sfc = state.S.data[..., 0]
+            p_sfc = jnp.zeros_like(T_sfc)
+            alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
+            # Buoyancy flux from heat: B_heat = g * alpha * Q_T  (positive
+            # Q_T = warming = lighter water at top = stabilizing).  KPP
+            # convention is B_f > 0 = unstable (cooling-driven), so we
+            # keep the *negative* of the heat-driven contribution.
+            B_f = -constants.g * alpha * Q_sfc_T
+
+        # Surface kinematic salt flux from freshwater: Q_S = -S_sfc * F_fw
+        # / rho_0  [PSU m/s].  Net P-E entering ocean (F_fw > 0) freshens
+        # the surface, hence the negative sign.
+        Q_sfc_S = None
+        if fw is not None:
+            S_sfc = state.S.data[..., 0]
+            T_sfc = state.T.data[..., 0]
+            p_sfc = jnp.zeros_like(T_sfc)
+            beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
+            Q_sfc_S = -S_sfc * fw / _RHO_0
+            # Salt-driven surface buoyancy flux (KPP convention,
+            # B_f > 0 = unstable):
+            #   B_f = -g*(alpha*Q_T - beta*Q_S) = -g*alpha*Q_T + g*beta*Q_S
+            # so the salt contribution is +g*beta*Q_S, NOT -g*beta*Q_S.
+            # Sanity check: freshening (fw>0) gives Q_sfc_S<0 (salt flux
+            # INTO ocean is negative) → B_salt = +g*beta*(neg) < 0
+            # (stabilizing, lighter water on top).  Brine rejection
+            # (fw<0) gives Q_sfc_S>0 → B_salt > 0 (destabilizing).
+            B_salt = constants.g * beta * Q_sfc_S
+            B_f = B_salt if B_f is None else (B_f + B_salt)
+
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, cfg,
+            tau_x=tau_x, tau_y=tau_y, B_f=B_f,
+            Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn

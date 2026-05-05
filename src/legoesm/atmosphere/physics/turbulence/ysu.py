@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import YSUConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -86,9 +87,8 @@ def ysu_turbulence(
     S = jnp.sqrt(S2)
 
     # Virtual potential temperature
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
 
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
@@ -118,7 +118,10 @@ def ysu_turbulence(
     # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
     sigma_pbl = jax.nn.sigmoid(config.pbl_smooth_sharpness * (config.Ri_crit - Ri_bulk))
     w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.sum(w_pbl, axis=1)
+    # Numerator and denominator share the level axis — fuse into one
+    # stacked reduction.
+    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
+    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
     # ----- K-profile -----

@@ -19,7 +19,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.halo import pad_halo, pad_halo_vector, get_halo_backend
 
 
 def _pad_scalar(data, grid):
@@ -356,7 +356,6 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     local_sum = jnp.sum(prod)
 
     if _is_distributed():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
 
     # For multi-device (non-MPI, NamedSharding-based SPMD): jnp.sum on
@@ -368,13 +367,11 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
 
 def _is_distributed() -> bool:
     """Check if the MPI halo backend is active."""
-    from legoesm.grids.halo import get_halo_backend
     return get_halo_backend() == "mpi"
 
 
 def _get_device_config():
     """Return the active DeviceConfig, or None."""
-    from legoesm.parallel.mesh import get_active_config
     return get_active_config()
 
 

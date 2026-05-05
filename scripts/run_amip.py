@@ -60,8 +60,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stretching", type=float, default=None)
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
+    # The canonical names in `supported_matrix.py` are:
+    #   - centered       (cubed_sphere, latlon)
+    #   - finite_volume  (cubed_sphere, latlon)
+    #   - cdgrid         (cubed_sphere only)
+    #   - latlon_cgrid   (latlon only)  — was 'cgrid' below; alias kept
+    #   - mpas           (voronoi only)
+    #   - spectral       (gaussian only)
+    # Both 'cgrid' (legacy) and 'latlon_cgrid' (canonical) are accepted;
+    # the postprocessor canonicalises 'cgrid' → 'latlon_cgrid' so the
+    # downstream factory finds a matching ``(model_type, discretization,
+    # grid_type)`` triple.
     parser.add_argument("--discretization", type=str, default="centered",
-                        choices=["centered", "finite_volume", "cgrid", "mpas", "spectral"])
+                        choices=["centered", "finite_volume", "cgrid",
+                                  "latlon_cgrid", "cdgrid", "mpas", "spectral"])
     parser.add_argument("--truncation", type=int, default=None,
                         help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
 
@@ -75,6 +87,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--checkpoint-days", type=int, default=0)
     parser.add_argument("--restart-from", type=str, default=None)
+
+    # Initial atmospheric state
+    parser.add_argument("--t-init", type=float, default=None,
+                        help="Initial isothermal temperature [K] (default 300)")
+    parser.add_argument("--rh-init", type=float, default=None,
+                        help="Initial relative humidity (default 0.7); lower for drier IC")
 
     # Radiation
     parser.add_argument("--radiation", type=str, default="gray",
@@ -315,6 +333,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         ensemble_size=args.ensemble_size,
+        **({"T_init": args.t_init} if args.t_init is not None else {}),
+        **({"RH_init": args.rh_init} if args.rh_init is not None else {}),
     )
 
 
@@ -358,6 +378,12 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         args.grid_type = "gaussian"
         if args.truncation is not None:
             args.resolution = args.truncation
+
+    # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
+    # factory finds a matching (model_type, discretization, grid_type)
+    # triple.  ``cdgrid`` is the cubed-sphere C-D grid; keep it as-is.
+    if args.discretization == "cgrid" and args.grid_type == "latlon":
+        args.discretization = "latlon_cgrid"
 
     return args
 

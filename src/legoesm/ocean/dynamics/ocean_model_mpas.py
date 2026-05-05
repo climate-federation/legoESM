@@ -34,9 +34,17 @@ from legoesm.ocean.dynamics.barotropic_mpas import (
     barotropic_substeps_mpas,
     reconcile_3d_velocity,
 )
+from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
+    barotropic_implicit_mpas,
+)
 from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
 from legoesm.core.operators_voronoi import tangential_velocity_3d
+from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
+from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+    gm_redi_tracer_tendency_mpas,
+)
 
 
 def _forward_backward_coriolis_mpas_3d(
@@ -83,10 +91,13 @@ def _forward_backward_coriolis_mpas_3d(
         min_water_column_m=config.min_water_column_m,
     )
     h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
-    H_e = jnp.maximum(jnp.sum(h_e, axis=1, keepdims=True), config.min_water_column_m)
-
-    # Depth-averaged velocity
-    u_bar = jnp.sum(u_3d * h_e, axis=1, keepdims=True) / H_e  # (nEdges, 1)
+    # ``H_e = sum(h_e)`` and ``u_bar`` numerator ``sum(u_3d * h_e)``
+    # share the level axis and h_e weight — fuse into one stacked sum.
+    _u_pair = jnp.sum(
+        jnp.stack([h_e, u_3d * h_e], axis=-1), axis=1, keepdims=True,
+    )
+    H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
+    u_bar = _u_pair[..., 1] / H_e  # (nEdges, 1)
     u_bar = u_bar * edge_mask
 
     # Perturbation velocity
@@ -129,6 +140,13 @@ class MPASOceanModel:
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
 
+        _valid_solvers = ("explicit_substep", "implicit_cn")
+        if self.config.barotropic_solver not in _valid_solvers:
+            raise ValueError(
+                f"barotropic_solver must be one of {_valid_solvers}, "
+                f"got {self.config.barotropic_solver!r}"
+            )
+
         # Precompute upwind-of-upwind cell indices for TVD advection.
         # This is a one-time mesh topology operation stored as static data.
         if self.config.tracer_advection == "tvd":
@@ -138,7 +156,6 @@ class MPASOceanModel:
             self._upup_neg = None
 
         if self.config.physics is not None:
-            from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
             self._physics_fn = make_mpas_ocean_physics(self.config.physics)
         else:
             self._physics_fn = None
@@ -240,11 +257,27 @@ class MPASOceanModel:
         # Fill land cells with ocean-neighbor average (Neumann BC) so that
         # subsequent operators see smooth values at coastlines instead of
         # the sharp ocean-to-zero discontinuity that `* mask` would create.
-        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
+
+        # 2b. GM/Redi isopycnal mixing (forward Euler tendency on top of
+        # the physics-stepped tracer, before advection).  Mirrors the
+        # lat-lon pattern in ocean_model_latlon_cgrid.py.  Only the
+        # centred scheme is implemented on MPAS (Phase 1-4 of the plan
+        # at docs/ocean_experiments/gm_redi_mpas_plan.md); the triad
+        # branch raises NotImplementedError.
+        if config.gm_redi is not None:
+            dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(
+                T_new, S_new, state.eta.data, state.H_bathy.data,
+                mesh, z_coord, config.gm_redi,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask,
+            )
+            mask_3d = mask[:, jnp.newaxis]
+            T_new = T_new + dt * dT_gm * mask_3d
+            S_new = S_new + dt * dS_gm * mask_3d
 
         # 3. Update 3D velocity with baroclinic perturbation tendency.
         # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
@@ -287,11 +320,23 @@ class MPASOceanModel:
 
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 
-        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
-            state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
-            F_slow_eta=F_slow_eta,
-            F_slow_u=F_slow_u_data,
-        )
+        if config.barotropic_solver == "implicit_cn":
+            # Single-step implicit CN free surface (no substepping, no
+            # time filter).  See barotropic_implicit_mpas.py for the
+            # scheme.  Eliminates the TRiSK rotational null branch
+            # (Thuburn 2008; Ringler+ 2010 §6) that monotonically grows
+            # in the explicit_substep run on global ico4 (#214).
+            eta_new, u_bar_new, Hu_avg = barotropic_implicit_mpas(
+                state_for_baro, mesh, z_coord, config, dt,
+                F_slow_eta=F_slow_eta,
+                F_slow_u=F_slow_u_data,
+            )
+        else:
+            eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
+                state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
+                F_slow_eta=F_slow_eta,
+                F_slow_u=F_slow_u_data,
+            )
 
         # 5. Layer thicknesses before and after barotropic
         h_k_old = compute_layer_thickness(
@@ -328,8 +373,12 @@ class MPASOceanModel:
         #   delta_u = (Hu_avg - sum_k(u_3d * h_e)) / H_e
         # This preserves baroclinic shear while matching Hu_avg.
         edge_mask = mask[c1] * mask[c2]
-        H_e_old = jnp.sum(h_e_k, axis=1)  # (nEdges,)
-        Hu_3d = jnp.sum(u_3d_new * h_e_k, axis=1)  # (nEdges,)
+        # Fuse the two h_e_k-weighted column reductions into one stack.
+        _hu_pair = jnp.sum(
+            jnp.stack([h_e_k, u_3d_new * h_e_k], axis=-1), axis=1,
+        )
+        H_e_old = _hu_pair[..., 0]  # (nEdges,)
+        Hu_3d = _hu_pair[..., 1]    # (nEdges,)
         delta_u = (Hu_avg - Hu_3d) / jnp.maximum(H_e_old, 1e-10)
         u_transport = u_3d_new + delta_u[:, jnp.newaxis]  # (nEdges, nlev)
 

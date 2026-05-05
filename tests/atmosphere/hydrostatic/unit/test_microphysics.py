@@ -526,7 +526,7 @@ class TestIntegrationHydrostatic:
     def setup(self):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -714,7 +714,7 @@ class TestCheckpointWithHydrometeors:
     def setup(self, tmp_path):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
         from legoesm.forcing.amip_config import (
             AMIPExperimentConfig, save_checkpoint, load_checkpoint,
         )
@@ -740,8 +740,8 @@ class TestCheckpointWithHydrometeors:
                         q_c=q_c, q_r=q_r)
 
         loaded = load_checkpoint(path, grid, sigma)
-        assert len(loaded) == 8  # state, q_v, step, day, config, diag, q_c, q_r
-        _, _, step, day, _, _, q_c_loaded, q_r_loaded = loaded
+        assert len(loaded) == 9  # state, q_v, step, day, config, diag, q_c, q_r, carry_aux
+        _, _, step, day, _, _, q_c_loaded, q_r_loaded, _ = loaded
         assert step == 100
         assert day == 10.0
         assert q_c_loaded is not None
@@ -758,7 +758,7 @@ class TestCheckpointWithHydrometeors:
         save_checkpoint(path, state, q_v, step=50, day=5.0, config=config)
 
         loaded = load_checkpoint(path, grid, sigma)
-        _, _, _, _, _, _, q_c_loaded, q_r_loaded = loaded
+        _, _, _, _, _, _, q_c_loaded, q_r_loaded, _ = loaded
         assert q_c_loaded is None
         assert q_r_loaded is None
 
@@ -768,7 +768,7 @@ class TestCheckpointWithHydrometeors:
         path = tmp_path / "ckpt_cfg.npz"
         save_checkpoint(path, state, q_v, step=10, day=1.0, config=config,
                         q_c=q_c, q_r=q_r)
-        _, _, _, _, restored_config, _, _, _ = load_checkpoint(path, grid, sigma)
+        _, _, _, _, restored_config, _, _, _, _ = load_checkpoint(path, grid, sigma)
         assert restored_config.microphysics == "kessler"
 
 

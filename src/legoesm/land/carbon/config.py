@@ -47,6 +47,8 @@ class CarbonConfig(NamedTuple):
     moisture_factor: float = 0.5  # Moisture scaling strength
     T_ref: float = 283.15         # Reference temperature [K]
     precip_ref: float = 3e-5      # Reference precipitation rate [kg/m2/s]
+    moist_modifier_min: float = 0.1  # Lower clip on moisture modifier
+    moist_modifier_max: float = 3.0  # Upper clip on moisture modifier
 
     # --- Leaf properties ---
     LCMA: float = 50.0            # Leaf carbon mass per area [gC/m2]

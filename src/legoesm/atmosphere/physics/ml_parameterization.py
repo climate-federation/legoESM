@@ -318,8 +318,15 @@ def apply_predicted_sundqvist_rain_survival_fraction(
         dt=dt,
         config=config,
     )
-    generated_rain_flux = jnp.sum(rates.autoconversion * rho * dz, axis=1)
-    base_evap_flux = jnp.sum(rates.evaporation * rho * dz, axis=1)
+    # Both fluxes share the ``rho * dz`` weight on the level axis; fuse
+    # the autoconversion and base-evaporation column reductions.
+    _flux_pair = jnp.sum(
+        jnp.stack([rates.autoconversion, rates.evaporation], axis=-1)
+        * (rho * dz)[..., None],
+        axis=-2,
+    )
+    generated_rain_flux = _flux_pair[..., 0]
+    base_evap_flux = _flux_pair[..., 1]
     target_precip = jnp.clip(predicted_rain_survival_fraction, 0.0, 1.0) * generated_rain_flux
     target_evap_flux = jnp.clip(generated_rain_flux - target_precip, 0.0, generated_rain_flux)
     scale = jnp.where(
@@ -328,8 +335,21 @@ def apply_predicted_sundqvist_rain_survival_fraction(
         1.0,
     )
     evaporation = rates.evaporation * scale[:, None]
+    # Diagnostic-rain semantics (must match the non-ML Sundqvist leaf):
+    # rain produced by autoconversion is treated as falling instantly;
+    # any pre-existing q_r is drained to the surface in one step and
+    # added to the precipitation flux.  See ``microphysics/sundqvist.py``
+    # for the full rationale.  Without this the ML rebuild would emit
+    # ``dq_r_dt = autoconv - evap`` and double-count rain mass — q_r
+    # would accumulate while precipitation also reports it leaving.
+    dt_safe = jnp.maximum(dt, 1e-10)
+    q_r_in = jnp.clip(hydrometeors.q_r, 0.0, None)
+    dq_r_dt = -q_r_in / dt_safe
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    q_r_drain_flux = jnp.sum(q_r_in * dp, axis=1) / (constants.g * dt_safe)
     precipitation = jnp.clip(
-        generated_rain_flux - jnp.sum(evaporation * rho * dz, axis=1),
+        generated_rain_flux - jnp.sum(evaporation * rho * dz, axis=1)
+        + q_r_drain_flux,
         0.0,
         None,
     )
@@ -338,7 +358,7 @@ def apply_predicted_sundqvist_rain_survival_fraction(
         dT_dt=constants.L_v * (rates.condensation - evaporation) / constants.c_pd,
         dq_v_dt=-rates.condensation + evaporation,
         dq_c_dt=rates.condensation - rates.autoconversion,
-        dq_r_dt=rates.autoconversion - evaporation,
+        dq_r_dt=dq_r_dt,
         dq_i_dt=zeros,
         dq_s_dt=zeros,
         dq_g_dt=zeros,

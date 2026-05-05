@@ -2,8 +2,15 @@
 
 Provides `PhysicsConfig` and `make_physics()`, which create a single
 physics function that combines radiation, convection, turbulence,
-and microphysics tendencies.  Each sub-module can be independently
-enabled/disabled via its ``scheme`` field (set to ``"none"`` to disable).
+microphysics, and **gravity wave drag** tendencies. Each sub-module
+can be independently enabled/disabled via its ``scheme`` field (set to
+``"none"`` to disable).
+
+Gravity wave drag is included as a first-class component on equal
+footing with the other parameterizations; the supported schemes are
+``"rayleigh"``, ``"lindzen"``, ``"mcfarlane"``, ``"hines"``,
+``"prognostic_spectral"``, ``"ml_emulator"``, and ``"none"`` (see
+``GravityWaveDragConfig``).
 
 The combined function accepts an optional ``phys_state`` (``PhysicsState``)
 argument.  When provided, prognostic physics variables (TKE, convective
@@ -15,13 +22,14 @@ Example
 >>> from legoesm.atmosphere.physics import (
 ...     PhysicsConfig, make_physics,
 ...     RadiationConfig, ConvectionConfig, TurbulenceConfig,
-...     MicrophysicsConfig,
+...     MicrophysicsConfig, GravityWaveDragConfig,
 ... )
 >>> config = PhysicsConfig(
 ...     radiation=RadiationConfig(scheme="gray"),
 ...     convection=ConvectionConfig(scheme="sbm"),
 ...     turbulence=TurbulenceConfig(scheme="louis"),
 ...     microphysics=MicrophysicsConfig(scheme="kessler"),
+...     gravity_wave_drag=GravityWaveDragConfig(scheme="lindzen"),
 ... )
 >>> physics_fn = make_physics(config, model_type="hydrostatic", dt=300.0)
 >>> state = model.step_with_physics(state, dt, physics_fn)
@@ -59,6 +67,12 @@ from legoesm.atmosphere.physics.microphysics.integration import (
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
     make_gwd_physics,
+)
+from legoesm.atmosphere.physics.physics_state import update_physics_state
+from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
 )
 
 
@@ -131,32 +145,6 @@ def make_physics(
         )
 
 
-def _build_updated_phys_state(phys_state, updates):
-    """Build updated PhysicsState from explicitly returned field updates.
-
-    Parameters
-    ----------
-    phys_state : PhysicsState or None
-        Input physics state.  When ``None``, returns ``None``.
-    updates : dict
-        Mapping from field name ('tke', 'conv_prog', 'gwd_spectrum')
-        to the updated JAX array returned by the sub-physics function.
-
-    Returns
-    -------
-    PhysicsState or None
-    """
-    if phys_state is None:
-        return None
-    from legoesm.atmosphere.physics.physics_state import PhysicsState
-
-    return PhysicsState(
-        tke=updates.get('tke', phys_state.tke),
-        conv_prog=updates.get('conv_prog', phys_state.conv_prog),
-        gwd_spectrum=updates.get('gwd_spectrum', phys_state.gwd_spectrum),
-    )
-
-
 # ======================================================================
 # Hydrostatic
 # ======================================================================
@@ -173,7 +161,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.radiation.scheme != "none":
         tagged_fns.append((make_radiation_physics(config.radiation, model_type), False, None))
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog"))
+        tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
         tagged_fns.append((make_turbulence_physics(config.turbulence, model_type, dt), True, "tke"))
     if config.microphysics.scheme != "none":
@@ -213,7 +201,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         if accepts_ps:
             first, field_val = fn0(state, grid, sigma_coord, phys_state=phys_state)
             if field_val is not None and field_name is not None:
-                phys_updates[field_name] = field_val
+                # Multi-field updates (e.g., Bechtold's conv_prog_profile
+                # and conv_stoch_state) are returned as a dict, which
+                # we merge into ``phys_updates``.
+                if isinstance(field_val, dict):
+                    phys_updates.update(field_val)
+                else:
+                    phys_updates[field_name] = field_val
         else:
             first = fn0(state, grid, sigma_coord)
         du_dt = first.du_dt.data
@@ -232,7 +226,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             if accepts_ps:
                 t, field_val = fn(state, grid, sigma_coord, phys_state=phys_state)
                 if field_val is not None and field_name is not None:
-                    phys_updates[field_name] = field_val
+                    # Match the first-iteration branch: dict updates
+                    # (e.g., Bechtold's conv_prog_profile +
+                    # conv_stoch_state + prng_key) must MERGE into
+                    # phys_updates, not be assigned as a single
+                    # blob under field_name.
+                    if isinstance(field_val, dict):
+                        phys_updates.update(field_val)
+                    else:
+                        phys_updates[field_name] = field_val
             else:
                 t = fn(state, grid, sigma_coord)
             du_dt = du_dt + t.du_dt.data
@@ -270,7 +272,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             dv_dt=combined_dv_dt,
             tracer_tendencies=tracer_tends_out,
         )
-        phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
+        phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
     def reset_state():
@@ -300,7 +302,7 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.radiation.scheme != "none":
         tagged_fns.append((make_radiation_physics(config.radiation, "nonhydrostatic"), False, None))
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog"))
+        tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
         tagged_fns.append((make_turbulence_physics(config.turbulence, "nonhydrostatic", dt), True, "tke"))
     if config.microphysics.scheme != "none":
@@ -335,7 +337,13 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         if accepts_ps:
             first, field_val = fn0(state, grid, height_coord, terrain_metric, phys_state=phys_state)
             if field_val is not None and field_name is not None:
-                phys_updates[field_name] = field_val
+                # Multi-field updates (e.g., Bechtold's conv_prog_profile
+                # and conv_stoch_state) are returned as a dict, which
+                # we merge into ``phys_updates``.
+                if isinstance(field_val, dict):
+                    phys_updates.update(field_val)
+                else:
+                    phys_updates[field_name] = field_val
         else:
             first = fn0(state, grid, height_coord, terrain_metric)
         du_dt = first.du_dt.data
@@ -350,7 +358,15 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             if accepts_ps:
                 t, field_val = fn(state, grid, height_coord, terrain_metric, phys_state=phys_state)
                 if field_val is not None and field_name is not None:
-                    phys_updates[field_name] = field_val
+                    # Match the first-iteration branch: dict updates
+                    # (e.g., Bechtold's conv_prog_profile +
+                    # conv_stoch_state + prng_key) must MERGE into
+                    # phys_updates, not be assigned as a single
+                    # blob under field_name.
+                    if isinstance(field_val, dict):
+                        phys_updates.update(field_val)
+                    else:
+                        phys_updates[field_name] = field_val
             else:
                 t = fn(state, grid, height_coord, terrain_metric)
             du_dt = du_dt + t.du_dt.data
@@ -370,7 +386,7 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dphis_dt=first.dphis_dt.replace(data=dphis_dt),
             dtracers_dt=first.dtracers_dt.replace(data=dtracers_dt),
         )
-        phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
+        phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
     def reset_state():
@@ -399,7 +415,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.radiation.scheme != "none":
         tagged_fns.append((make_radiation_physics(config.radiation, "spectral_pe"), False, None))
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog"))
+        tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
         tagged_fns.append((make_turbulence_physics(config.turbulence, "spectral_pe", dt), True, "tke"))
     if config.microphysics.scheme != "none":
@@ -408,20 +424,20 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt), True, "gwd_spectrum"))
 
     def physics_fn(state, grid, sigma_coord, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)
+            # Preserve the input state's tracer pytree structure as a
+            # zero tendency so downstream tree.map(state, tendency)
+            # works.  ``zero_like_tracers`` duck-types Field vs raw-array.
+            zero_tracers = zero_like_tracers(state.tracers)
             zero_tend = SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
                 div_hat=state.div_hat.replace(data=zero_3d),
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
                 lnps_hat=state.lnps_hat.replace(data=zero_2d),
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+                tracers=zero_tracers,
             )
             return zero_tend, None
 
@@ -433,7 +449,13 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         if accepts_ps:
             first, field_val = fn0(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
             if field_val is not None and field_name is not None:
-                phys_updates[field_name] = field_val
+                # Multi-field updates (e.g., Bechtold's conv_prog_profile
+                # and conv_stoch_state) are returned as a dict, which
+                # we merge into ``phys_updates``.
+                if isinstance(field_val, dict):
+                    phys_updates.update(field_val)
+                else:
+                    phys_updates[field_name] = field_val
         else:
             first = fn0(state, grid, sigma_coord, grid_fields=shared_fields)
         vor_hat = first.vor_hat.data
@@ -442,11 +464,33 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         lnps_hat = first.lnps_hat.data
         phis_hat = first.phis_hat.data
 
+        # Tracer accumulation: start from the first module's
+        # contribution if it has any, otherwise None.  Subsequent
+        # modules are summed in the loop below.  Each value is kept
+        # as a raw grid-space jax array (dropping the Field container)
+        # so the per-key sum is a plain ``+``.  We re-wrap with the
+        # state's container at the end for pytree-leaf consistency.
+        def _grid_data(value):
+            return value.data if hasattr(value, "data") else value
+        accumulated_tracers = None
+        if first.tracers is not None:
+            accumulated_tracers = {
+                k: _grid_data(v) for k, v in first.tracers.items()
+            }
+
         for fn, accepts_ps, field_name in tagged_fns[1:]:
             if accepts_ps:
                 t, field_val = fn(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
                 if field_val is not None and field_name is not None:
-                    phys_updates[field_name] = field_val
+                    # Match the first-iteration branch: dict updates
+                    # (e.g., Bechtold's conv_prog_profile +
+                    # conv_stoch_state + prng_key) must MERGE into
+                    # phys_updates, not be assigned as a single
+                    # blob under field_name.
+                    if isinstance(field_val, dict):
+                        phys_updates.update(field_val)
+                    else:
+                        phys_updates[field_name] = field_val
             else:
                 t = fn(state, grid, sigma_coord, grid_fields=shared_fields)
             vor_hat = vor_hat + t.vor_hat.data
@@ -454,15 +498,55 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             T_hat = T_hat + t.T_hat.data
             lnps_hat = lnps_hat + t.lnps_hat.data
             phis_hat = phis_hat + t.phis_hat.data
+            # Per-tracer accumulation across modules.
+            if t.tracers is not None:
+                if accumulated_tracers is None:
+                    accumulated_tracers = {
+                        k: _grid_data(v) for k, v in t.tracers.items()
+                    }
+                else:
+                    for k, v in t.tracers.items():
+                        v_data = _grid_data(v)
+                        if k in accumulated_tracers:
+                            accumulated_tracers[k] = (
+                                accumulated_tracers[k] + v_data
+                            )
+                        else:
+                            accumulated_tracers[k] = v_data
 
+        # Build the final tracers dict for the combined tendency,
+        # mirroring the input state's container types so pytree leaves
+        # match downstream tree.map(state, tendency) calls.  When no
+        # physics module touched tracers we emit ``zero_like_tracers``
+        # of the input state's tracers (the original safe default).
+        if state.tracers is None:
+            tracers_combined = None
+        elif accumulated_tracers is None:
+            tracers_combined = zero_like_tracers(state.tracers)
+        else:
+            tracers_combined = {}
+            for k, template in state.tracers.items():
+                if k in accumulated_tracers:
+                    arr = accumulated_tracers[k]
+                else:
+                    arr = (
+                        jnp.zeros_like(template.data)
+                        if hasattr(template, "data")
+                        else jnp.zeros_like(template)
+                    )
+                if hasattr(template, "data") and hasattr(template, "replace"):
+                    tracers_combined[k] = template.replace(data=arr)
+                else:
+                    tracers_combined[k] = arr
         combined = SpectralHydrostaticState(
             vor_hat=first.vor_hat.replace(data=vor_hat),
             div_hat=first.div_hat.replace(data=div_hat),
             T_hat=first.T_hat.replace(data=T_hat),
             lnps_hat=first.lnps_hat.replace(data=lnps_hat),
             phis_hat=first.phis_hat.replace(data=phis_hat),
+            tracers=tracers_combined,
         )
-        phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
+        phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
     def reset_state():

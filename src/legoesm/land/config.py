@@ -30,7 +30,7 @@ class LandConfig(NamedTuple):
     # Snow/albedo
     snow_albedo_feedback: bool = False  # Enable snow albedo feedback
     land_albedo: LandAlbedoConfig = LandAlbedoConfig()
-    T_snow_melt: float = 273.15  # Temperature above which snow melts [K]
+    T_snow_melt: float = 273.15  # = constants.T_freeze; temperature above which snow melts [K]
     snow_melt_rate: float = 5.0e-6  # Snowmelt rate [kg/m2/s/K above T_melt]
     # Carbon cycle
     carbon: CarbonConfig = CarbonConfig()
@@ -54,7 +54,7 @@ class MultiLayerLandConfig(NamedTuple):
     # Snow/albedo
     snow_albedo_feedback: bool = False  # Enable snow albedo feedback
     land_albedo: LandAlbedoConfig = LandAlbedoConfig()
-    T_snow_melt: float = 273.15
+    T_snow_melt: float = 273.15  # = constants.T_freeze
     snow_melt_rate: float = 5.0e-6
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]

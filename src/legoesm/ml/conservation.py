@@ -95,13 +95,17 @@ def correct_moisture(
     """
     w = grid.weights[:, None]  # (n_lat, 1)
 
-    # Column-integrated moisture: integral(q * dp) = p_s * sum(q * dsigma)
-    col_old = jnp.sum(q_old * dsigma[None, None, :], axis=-1) * p_s
-    col_new = jnp.sum(q_new * dsigma[None, None, :], axis=-1) * p_s
-
-    # Global integrals
-    global_old = jnp.sum(col_old * w)
-    global_new = jnp.sum(col_new * w)
+    # Column-integrated moisture: integral(q * dp) = p_s * sum(q * dsigma).
+    # Both ``col_old`` and ``col_new`` reduce ``q * dsigma`` over the
+    # level axis with the same weight; stack and reduce once.  Then the
+    # subsequent area-weighted reduction collapses to one ``sum`` call.
+    _col_pair = jnp.sum(
+        jnp.stack([q_old, q_new], axis=-1) * dsigma[None, None, :, None],
+        axis=-2,
+    ) * p_s[..., None]
+    _global_pair = jnp.sum(_col_pair * w[..., None], axis=(0, 1))
+    global_old = _global_pair[..., 0]
+    global_new = _global_pair[..., 1]
 
     # Proportional correction factor
     ratio = global_old / jnp.maximum(global_new, _TINY)
@@ -208,10 +212,16 @@ def correct_ocean_heat(
     weighted_area = mask * area
     mask_3d = mask[..., None]
 
-    # Volume-integrated heat
-    heat_old = jnp.sum(jnp.sum(T_old * h_k_old, axis=-1) * weighted_area)
-    heat_new = jnp.sum(jnp.sum(T_new * h_k_new, axis=-1) * weighted_area)
-    ocean_volume = jnp.sum(jnp.sum(h_k_new, axis=-1) * weighted_area)
+    # Volume-integrated heat — fuse the 3 column reductions into one
+    # stack and the 3 area reductions into one ``axis=(0, 1)`` collapse.
+    _inner = jnp.sum(
+        jnp.stack([T_old * h_k_old, T_new * h_k_new, h_k_new], axis=-1),
+        axis=-2,
+    )
+    _global = jnp.sum(_inner * weighted_area[..., None], axis=(0, 1))
+    heat_old = _global[..., 0]
+    heat_new = _global[..., 1]
+    ocean_volume = _global[..., 2]
 
     correction = (heat_old - heat_new) / jnp.maximum(ocean_volume, 1.0)
     return T_new + correction * mask_3d
@@ -255,9 +265,15 @@ def correct_ocean_salt(
     weighted_area = mask * area
     mask_3d = mask[..., None]
 
-    salt_old = jnp.sum(jnp.sum(S_old * h_k_old, axis=-1) * weighted_area)
-    salt_new = jnp.sum(jnp.sum(S_new * h_k_new, axis=-1) * weighted_area)
-    ocean_volume = jnp.sum(jnp.sum(h_k_new, axis=-1) * weighted_area)
+    # Volume-integrated salt — same 3-into-1 fusion as the heat fixer.
+    _inner = jnp.sum(
+        jnp.stack([S_old * h_k_old, S_new * h_k_new, h_k_new], axis=-1),
+        axis=-2,
+    )
+    _global = jnp.sum(_inner * weighted_area[..., None], axis=(0, 1))
+    salt_old = _global[..., 0]
+    salt_new = _global[..., 1]
+    ocean_volume = _global[..., 2]
 
     correction = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
     return S_new + correction * mask_3d

@@ -43,6 +43,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.field import Field
 from legoesm.thermo import saturation_mixing_ratio
 
 logger = logging.getLogger(__name__)
@@ -768,8 +769,6 @@ def _rebuild_state(carry: SegmentCarry, model):
     Inside lax.scan we store raw arrays, so we reconstruct the state
     type here.  This is cheap — only Python object creation, no data copy.
     """
-    from legoesm.core.field import Field
-
     # Detect state type from model
     if hasattr(model, '_state_type'):
         StateType = model._state_type

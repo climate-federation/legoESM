@@ -112,20 +112,45 @@ class TestMetricIdentities(unittest.TestCase):
         self.assertLess(max_err, 2e-7, f"cosa^2+sina^2 at corners: max err = {max_err:.2e}")
 
     def test_cosa_sina_identity_at_u_edges(self):
-        """cosa_u^2 + sina_u^2 ≈ 1 where sina_u = 1/rsin_u."""
+        """cosa_u^2 + sina_u^2 ≈ 1 with FV3's mixed rsin_u convention.
+
+        Per Fortran fv_grid_utils.F90:509,548-554 (non-duogrid cubed sphere):
+          - Interior u-faces: rsin_u = 1/sina_u²  → sina_u² = 1/rsin_u
+          - Panel edges (i=0, i=n): rsin_u = 1/sina_u → sina_u = 1/rsin_u
+        """
         _, cdgrid = _make_grid_and_cdgrid(16)
-        sina_u = 1.0 / cdgrid.rsin_u
-        identity = cdgrid.cosa_u**2 + sina_u**2
-        max_err = float(jnp.max(jnp.abs(identity - 1.0)))
-        self.assertLess(max_err, 1e-6, f"cosa^2+sina^2 at u-edges: max err = {max_err:.2e}")
+        n = cdgrid.n
+        # Interior slice [:, 1:n, :] → sina² = 1/rsin_u
+        rsin_u_int = cdgrid.rsin_u[:, 1:n, :]
+        id_int = cdgrid.cosa_u[:, 1:n, :]**2 + 1.0 / rsin_u_int
+        err_int = float(jnp.max(jnp.abs(id_int - 1.0)))
+        self.assertLess(err_int, 1e-6, f"interior: max err = {err_int:.2e}")
+        # Panel edges i=0, i=n → sina = 1/rsin_u
+        for i in (0, n):
+            sina_edge = 1.0 / cdgrid.rsin_u[:, i, :]
+            id_edge = cdgrid.cosa_u[:, i, :]**2 + sina_edge**2
+            err = float(jnp.max(jnp.abs(id_edge - 1.0)))
+            self.assertLess(err, 1e-6,
+                            f"panel edge i={i}: max err = {err:.2e}")
 
     def test_cosa_sina_identity_at_v_edges(self):
-        """cosa_v^2 + sina_v^2 ≈ 1 where sina_v = 1/rsin_v."""
+        """cosa_v^2 + sina_v^2 ≈ 1 with FV3's mixed rsin_v convention.
+
+        See :meth:`test_cosa_sina_identity_at_u_edges` for the interior/
+        panel-edge split. Same rule along the j-axis for v-faces.
+        """
         _, cdgrid = _make_grid_and_cdgrid(16)
-        sina_v = 1.0 / cdgrid.rsin_v
-        identity = cdgrid.cosa_v**2 + sina_v**2
-        max_err = float(jnp.max(jnp.abs(identity - 1.0)))
-        self.assertLess(max_err, 1e-6, f"cosa^2+sina^2 at v-edges: max err = {max_err:.2e}")
+        n = cdgrid.n
+        rsin_v_int = cdgrid.rsin_v[:, :, 1:n]
+        id_int = cdgrid.cosa_v[:, :, 1:n]**2 + 1.0 / rsin_v_int
+        err_int = float(jnp.max(jnp.abs(id_int - 1.0)))
+        self.assertLess(err_int, 1e-6, f"interior: max err = {err_int:.2e}")
+        for j in (0, n):
+            sina_edge = 1.0 / cdgrid.rsin_v[:, :, j]
+            id_edge = cdgrid.cosa_v[:, :, j]**2 + sina_edge**2
+            err = float(jnp.max(jnp.abs(id_edge - 1.0)))
+            self.assertLess(err, 1e-6,
+                            f"panel edge j={j}: max err = {err:.2e}")
 
     def test_cosa_sina_identity_at_cells(self):
         """cosa_cell^2 + sina_cell^2 ≈ 1."""

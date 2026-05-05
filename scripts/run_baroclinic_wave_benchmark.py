@@ -43,6 +43,7 @@ import argparse
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import jax
@@ -74,6 +75,78 @@ from legoesm.core.cfl import (
 from legoesm import constants
 
 GRID_CHOICES = ("spectral", "cubed-sphere", "icosahedral")
+
+# iter-219 / iter-212: per-grid recommended ``--scan-steps`` value
+# resolved when the user passes ``--scan-steps auto``.  Module-level so
+# tests can import it (regression-pin for the dispatch table) and so
+# any future retune lands in exactly one place.  See scaling.md §13
+# for the measurement rationale.
+AUTO_SCAN_STEPS = {
+    "spectral":     24,   # iter-212: +29..45 % gain (Python-dispatch matters for SH)
+    "cubed-sphere": 24,   # iter-212: +20 % gain
+    "icosahedral":  1,    # iter-212: scan=24 → -9 % at I5 (MPAS dycore well-fused)
+}
+
+
+def chunk_crosses_boundary(prev_step: int, current_step: int, period: int) -> bool:
+    """Return True if the half-open interval ``(prev_step, current_step]``
+    crosses a multiple of ``period``.
+
+    iter-208: the older ``current_step % period == 0`` predicate was
+    silently broken under ``--scan-steps`` > ``period`` — the multi-step
+    chunk could leap over the boundary entirely so no step was ever
+    exactly divisible.  This formulation is robust to any chunk size
+    and reduces to the modulo predicate when ``current_step =
+    prev_step + 1`` (the ``scan_steps == 1`` regime).
+    """
+    if period <= 0:
+        return False
+    return (current_step // period) > (prev_step // period)
+
+
+def resolve_scan_steps(grid: str, raw_scan_steps, *, verbose: bool = True) -> int:
+    """Resolve a user-supplied ``--scan-steps`` value into the integer
+    actually used by the benchmark.  Centralises the iter-219 ``auto``
+    dispatch and the iter-216 RuntimeWarning so both paths can be
+    regression-pinned in a unit test instead of via subprocess.
+
+    Parameters
+    ----------
+    grid : str
+        One of ``GRID_CHOICES``.
+    raw_scan_steps : str | int
+        Either the string ``"auto"`` (case-insensitive) or anything
+        ``int(...)`` accepts.
+    verbose : bool, default True
+        If True, prints the iter-219 dispatch banner on ``auto`` (matches
+        the original ``main()`` behaviour).  Tests pass ``False`` to
+        keep stdout clean.
+
+    Returns
+    -------
+    int
+        The resolved scan-steps integer (always ≥ 1 by construction in
+        AUTO_SCAN_STEPS; users may still pass 0 explicitly, in which
+        case downstream ``max(1, scan_steps)`` clamps).
+    """
+    if isinstance(raw_scan_steps, str) and raw_scan_steps.lower() == "auto":
+        resolved = AUTO_SCAN_STEPS.get(grid, 1)
+        if verbose:
+            print(
+                f"[--scan-steps auto] grid={grid} → "
+                f"scan-steps={resolved} (iter-212 honest recommendation)"
+            )
+    else:
+        resolved = int(raw_scan_steps)
+
+    if resolved > 1 and grid == "icosahedral":
+        warnings.warn(
+            f"--scan-steps={resolved} on icosahedral grid: "
+            f"iter-212 measured -9 % throughput at I5 (MPAS dycore is "
+            f"already well-fused).  Consider --scan-steps=1 or auto.",
+            RuntimeWarning, stacklevel=2,
+        )
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +355,30 @@ def main():
              "'spectral_T42_20260327_143022'). "
              "Pass --tag '' to use plain filenames (old behavior)."
     )
+    parser.add_argument(
+        "--scan-steps", default="1",
+        help="Number of consecutive ``model.step`` calls to fuse inside a "
+             "single ``jax.lax.scan`` body (default: 1 = no scanning).  "
+             "Pass ``auto`` to use the iter-212 honest per-grid recommendation: "
+             "spectral=24, cubed-sphere=24, icosahedral=1.  "
+             "Amortises Python+JAX-dispatch overhead per step.  Iter-212 "
+             "measurements per grid (1-day BCW, GPU): "
+             "**spectral**: scan=24 → +29-45 % (recommended); "
+             "**cubed-sphere**: scan=24 → +20 % (recommended); "
+             "**icosahedral**: scan=24 → -9 % at I5 (NOT recommended — "
+             "MPAS dycore is already well-fused, scan adds compile cost "
+             "with no offsetting Python-overhead gain).  Diagnostic "
+             "samples still fire on every chunk-boundary that crosses "
+             "``diag_interval_steps`` (=3600/dt), but pick a value "
+             "smaller than ``diag_interval_steps`` to keep hourly "
+             "cadence intact."
+    )
     args = parser.parse_args()
+
+    # iter-219 ``auto`` dispatch + iter-216 icosahedral warning live
+    # in the module-level ``resolve_scan_steps`` helper so both paths
+    # can be regression-pinned without subprocess overhead.
+    args.scan_steps = resolve_scan_steps(args.grid, args.scan_steps)
 
     grid_type = args.grid
     res_str = args.resolution or _default_resolution(grid_type)
@@ -557,30 +653,68 @@ def main():
 
     print(f"\nIntegrating for {n_steps_total} steps...")
 
-    # JIT warmup
+    # JIT warmup — compile both the per-step path and (if requested)
+    # the scanned multi-step path so the timed loop is on the warm path.
+    SCAN_STEPS = max(1, int(args.scan_steps))
+
     print("  JIT compiling (first step)...", end=" ", flush=True)
     t_jit = time.time()
     state = model.step(state, DT)
     jax.block_until_ready(jax.tree.leaves(state))
     print(f"done ({time.time() - t_jit:.1f}s)")
 
+    if SCAN_STEPS > 1:
+        # Build a JIT-compiled function that runs ``SCAN_STEPS`` steps
+        # via ``jax.lax.scan``.  Each call replaces ``SCAN_STEPS`` Python
+        # iterations + JAX dispatches with one.  ``model.step`` is
+        # already JAX-pure (it takes a pytree state, returns a pytree
+        # state, with ``dt`` static) so it slots straight into a scan
+        # body.  The scan accumulates nothing (output ``None``) — we
+        # only care about the final carry.
+        def _scan_body(s, _):
+            return model.step(s, DT), None
+
+        @jax.jit
+        def _scan_chunk(s):
+            s_new, _ = jax.lax.scan(_scan_body, s, None, length=SCAN_STEPS)
+            return s_new
+
+        print(f"  JIT compiling ({SCAN_STEPS}-step scan)...", end=" ", flush=True)
+        t_jit2 = time.time()
+        state = _scan_chunk(state)
+        jax.block_until_ready(jax.tree.leaves(state))
+        print(f"done ({time.time() - t_jit2:.1f}s)")
+        # The scan-chunk warmup advanced the state by SCAN_STEPS extra
+        # steps; account for that in the post-warmup loop bookkeeping.
+        steps_consumed_in_warmup = 1 + SCAN_STEPS
+    else:
+        steps_consumed_in_warmup = 1
+
     t_start = time.time()
     last_print = t_start
 
-    for step in range(1, n_steps_total):
-        state = model.step(state, DT)
+    step = steps_consumed_in_warmup - 1
+    prev_current_step = step + 1   # current_step value at the *start* of the next iteration
+    while step + 1 < n_steps_total:
+        if SCAN_STEPS > 1 and (step + 1 + SCAN_STEPS) <= n_steps_total:
+            state = _scan_chunk(state)
+            step += SCAN_STEPS
+        else:
+            state = model.step(state, DT)
+            step += 1
 
         current_step = step + 1  # 1-indexed (we already did step 0 warmup)
         day = current_step * DT / 86400.0
 
-        # Blowup check every 100 steps
-        if current_step % 100 == 0:
+        # Blowup check whenever the chunk crosses a 100-step boundary.
+        if chunk_crosses_boundary(prev_current_step, current_step, 100):
             if not _blowup_check(state):
                 print(f"\n  *** BLOWUP at day {day:.2f}, step {current_step} ***")
                 sys.exit(1)
 
-        # Hourly diagnostics
-        if current_step % diag_interval_steps == 0:
+        # Hourly diagnostics — fire if the just-completed chunk crossed
+        # at least one ``diag_interval_steps`` boundary (iter-208 fix).
+        if chunk_crosses_boundary(prev_current_step, current_step, diag_interval_steps):
             ps_now, u_now, v_now, T_now = _get_grid_fields(state)
             if USE_SPECTRAL or USE_ICOSAHEDRAL:
                 mass_now = float(jnp.sum(ps_now * area) / constants.g)
@@ -630,9 +764,15 @@ def main():
             )
             last_print = now
 
+        # Roll forward the chunk-boundary cursor for the next iteration.
+        prev_current_step = current_step
+
     elapsed_total = time.time() - t_start
-    print(f"\nIntegration complete: {elapsed_total:.0f}s "
-          f"({n_steps_total / elapsed_total:.1f} steps/s)")
+    # iter-212: 3-decimal seconds + 2-decimal sps so short runs don't
+    # report integer-rounded sps (the iter-204/205 ".../1s (479.4 sps)"
+    # numbers were inflated upper bounds — see scaling.md §10.b).
+    print(f"\nIntegration complete: {elapsed_total:.3f}s "
+          f"({n_steps_total / max(elapsed_total, 1e-9):.2f} steps/s)")
 
     # Convert arrays
     diag_times = np.array(diag_times)
@@ -645,6 +785,8 @@ def main():
     # Save NPZ diagnostics
     # -----------------------------------------------------------------------
     npz_path = _out("baroclinic_wave_diagnostics", "npz")
+    # Throughput stats land in the npz so post-hoc parsers don't need
+    # to re-grep stdout (used by ``scripts/parse_strong_sweep.py``).
     npz_data = dict(
         times_days=diag_times,
         dry_mass=diag_dry_mass,
@@ -655,6 +797,10 @@ def main():
         resolution=N_GRID,
         nlev=N_LEV,
         dt=DT,
+        wall_time_s=elapsed_total,
+        steps_per_sec=n_steps_total / max(elapsed_total, 1e-9),
+        n_steps_total=n_steps_total,
+        backend=jax.default_backend(),
         snapshot_days=np.array(sorted(snapshots.keys())),
     )
     # Save all snapshot fields so long runs preserve intermediate data.
@@ -987,8 +1133,8 @@ def main():
     print("=" * 72)
     print(f"  Resolution:      {res_label} L{N_LEV}")
     print(f"  Duration:        {N_DAYS} days ({n_steps_total} steps)")
-    print(f"  Wall time:       {elapsed_total:.0f}s "
-          f"({n_steps_total / elapsed_total:.1f} steps/s)")
+    print(f"  Wall time:       {elapsed_total:.3f}s "
+          f"({n_steps_total / max(elapsed_total, 1e-9):.2f} steps/s)")
     print(f"  Mass drift:      {mass_rel[-1]:+.3e} (relative)")
     print(f"  Energy drift:    {energy_rel[-1]:+.3e} (relative)")
     print(f"  Min p_s (final): {diag_ps_min[-1] / 100:.1f} hPa")

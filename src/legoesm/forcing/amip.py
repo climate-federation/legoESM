@@ -24,6 +24,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 
 class AMIPForcingConfig(NamedTuple):
     """Configuration for AMIP boundary conditions.
@@ -120,7 +122,7 @@ def get_amip_preset(dataset_name: str) -> AMIPForcingConfig:
             dataset="hadisst",
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,    # Celsius -> Kelvin
+            sst_offset=constants.T_freeze,    # Celsius -> Kelvin
             sic_scale=1.0,        # already fraction
         )
     else:

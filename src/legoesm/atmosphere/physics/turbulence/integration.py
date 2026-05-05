@@ -36,6 +36,15 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.tke import tke_turbulence
@@ -79,6 +88,15 @@ from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 
 
 def make_turbulence_physics(
@@ -108,10 +126,24 @@ def make_turbulence_physics(
         return _make_nonhydrostatic_turbulence(turbulence_config, dt)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_turbulence(turbulence_config, dt)
+    elif model_type == "mpas":
+        # MPAS dispatch is intentionally NOT supported: the turbulence
+        # bridges read both ``state.u`` and ``state.v`` directly, but
+        # MPAS stores only the normal velocity ``state.u`` on edges
+        # and has ``state.v is None``.  Until an edge→cell wind
+        # interpolator is added, fail fast with a clear message rather
+        # than a confusing ``AttributeError`` deep inside the bridge.
+        raise NotImplementedError(
+            "Turbulence on MPAS Voronoi mesh is not yet supported.  "
+            "The bridge expects cell-centered u and v winds but MPAS "
+            "stores only the normal velocity on edges.  Edge→cell "
+            "interpolation is a follow-up; until then, run MPAS with "
+            "turbulence='none'."
+        )
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
 
 
@@ -420,16 +452,6 @@ def _make_spectral_pe_turbulence(
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import (
-            sh_analysis_3d,
-            sh_analysis_oc2_3d,
-            sh_analysis_dmu_3d,
-        )
-
         tke_out = None
 
         # Transform spectral state to grid space (or reuse precomputed fields).

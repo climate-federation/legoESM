@@ -26,10 +26,16 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.ice.dynamics import evp_solver, free_drift_velocity
+from legoesm.ice.transport import advect_ice_tracers
+from legoesm.ice.itd import aggregate_state, linear_remap
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.dynamics import evp_solver, free_drift_velocity
+from legoesm.ice.transport import advect_ice_tracers
+from legoesm.ice.itd import aggregate_state, linear_remap
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
@@ -131,7 +137,6 @@ def _step_slab(
     q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
 
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
@@ -183,9 +188,8 @@ def _step_slab(
     # ``surface_radiation_fluxes`` call (which discards ``sw_net``
     # / ``lw_net``) — same direct-expression rewrite as the
     # ``ocean_tile_response`` and ``two_layer_lake`` fixes.
-    from legoesm import constants as _constants
     lw_up_new = (
-        config.emissivity_ice * _constants.sigma_sb * T_ice_new ** 4
+        config.emissivity_ice * constants.sigma_sb * T_ice_new ** 4
         + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
     q_sfc_new = saturation_mixing_ratio_ice(T_ice_new, forcing.p_surface)
@@ -231,10 +235,6 @@ def _step_dynamic(
     state : DynamicSeaIceState
     grid : CubedSphereGrid, required for dynamics/transport
     """
-    from legoesm.ice.dynamics import evp_solver, free_drift_velocity
-    from legoesm.ice.transport import advect_ice_tracers
-    from legoesm.ice.itd import aggregate_state, linear_remap
-
     h = state.h_ice.data
     T_ice = state.T_ice.data
     conc = state.concentration.data
@@ -487,9 +487,8 @@ def _build_response(
     # ``surface_radiation_fluxes`` call (which discards ``sw_net``
     # / ``lw_net``).  Same direct-expression rewrite used for
     # ``ocean_tile_response`` and ``two_layer_lake``.
-    from legoesm import constants as _constants
     lw_up = (
-        config.emissivity_ice * _constants.sigma_sb * T_ice ** 4
+        config.emissivity_ice * constants.sigma_sb * T_ice ** 4
         + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
 
@@ -500,7 +499,6 @@ def _build_response(
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,

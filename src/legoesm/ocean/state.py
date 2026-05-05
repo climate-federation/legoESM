@@ -166,7 +166,7 @@ class SpectralOceanState(NamedTuple):
 
 class SpectralOceanConfig(NamedTuple):
     """Configuration for the spectral ocean model."""
-    g: float = 9.80616
+    g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4
     K_h: float = 0.0
@@ -239,7 +239,7 @@ class LatLonOceanTendencies(NamedTuple):
 
 class LatLonOceanConfig(NamedTuple):
     """Configuration for the lat-lon FV ocean model."""
-    g: float = 9.80616
+    g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
     K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
@@ -325,14 +325,16 @@ class LatLonCGridOceanState(NamedTuple):
     w: Field
     T_som: object = None
     S_som: object = None
+    T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
+    S_flux_div_prev: object = None  # Previous advection flux divergence for S (AB2 only)
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
     """Diagnostic fields for debugging ocean dynamics on lat-lon C-grid.
-    
+
     These fields are computed during tendency calculation for analysis purposes
     but are not part of the prognostic state.
-    
+
     Fields
     ------
     w : Field
@@ -355,7 +357,7 @@ class LatLonCGridOceanDiagnostics(NamedTuple):
         Physics tendency [degC/s]. Shape (n_lat, n_lon, nlev).
     wind_stress_x : Field
         Zonal wind stress applied [Pa]. Shape (n_lat, n_lon).
-    wind_stress_y : Field  
+    wind_stress_y : Field
         Meridional wind stress applied [Pa]. Shape (n_lat, n_lon).
     """
     w: Field
@@ -383,6 +385,87 @@ class LatLonCGridOceanTendencies(NamedTuple):
     dland_mask_dt: Field
 
 
+class MomentumTendencyDiagnostics(NamedTuple):
+    """Per-term momentum-tendency diagnostics for closure analysis.
+
+    Captured at the point each term is computed inside
+    ``compute_tendencies`` so that, by construction,
+    ``Σ components == du_dt`` to machine precision.  Mirrors the
+    pattern in MOM6 (``MOM_diagnostics``), MITgcm
+    (``DIAGNOSTICS_PKG``), and NEMO (``trd_*``).
+
+    All fields share the same shape as ``du_dt`` / ``dv_dt`` (3D on the
+    C-grid u-/v-faces).  Terms not active in a given config (e.g.,
+    biharmonic when ``B_h == 0``) are zero arrays.
+
+    Naming convention: ``<term>_u`` and ``<term>_v`` for the u- and
+    v-momentum contributions respectively.  The same pattern can be
+    re-used for future tracer or energy budgets — see Phase 1.5 of
+    docs/ocean_experiments/global_overturning_plan.md.
+
+    Fields
+    ------
+    KE_PGF_u, KE_PGF_v : Field
+        −∂(KE)/∂x − (1/ρ_0)·∂p/∂x   (kinetic-energy gradient + pressure gradient)
+    vortcor_u, vortcor_v : Field
+        ζ × v_at_u  /  −ζ × u_at_v   (vorticity-Coriolis advection)
+    vertadv_u, vertadv_v : Field
+        Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z
+    Ah_lap_u, Ah_lap_v : Field
+        A_h · ∇²u_prime, A_h · ∇²v_prime  (lateral Laplacian viscosity
+        on the *baroclinic perturbation*; depth integral is identically 0)
+    Bh_bilap_u, Bh_bilap_v : Field
+        −B_h · scale · ∇⁴u_prime  (biharmonic, 0 when B_h = 0)
+    Cs_smag_u, Cs_smag_v : Field
+        Smagorinsky biharmonic (0 when C_smag = 0)
+    Cl_leith_u, Cl_leith_v : Field
+        Leith biharmonic (0 when C_leith = 0)
+    botdrag_u, botdrag_v : Field
+        −r·u/dz_bot at the bottom level only; zero elsewhere
+        (matches the model's path-1 explicit bottom-cell drag)
+    Av_vert_u, Av_vert_v : Field
+        A_v · ∂²u/∂z² (vertical viscosity on the perturbation)
+    phys_u, phys_v : Field
+        ``phys.du_dt`` / ``phys.dv_dt`` from the surface-forcing physics
+        module (wind stress at the surface; possibly other physics
+        contributions if active)
+    sponge_u, sponge_v : Field
+        Sponge restoring (0 when no sponge)
+    total_u, total_v : Field
+        The actually-applied du_dt / dv_dt (after mask multiplication).
+        Sanity check: ``total ≡ Σ components`` to machine precision —
+        enforced by ``test_momentum_diagnostics_closure``.
+    """
+
+    KE_PGF_u: Field
+    KE_PGF_v: Field
+    vortcor_u: Field
+    vortcor_v: Field
+    Dterm_u: Field        # WENO momentum-advection D-term (Silvestri 2024
+    Dterm_v: Field        # Eqs. 31-32); zero unless `momentum_advection`
+                          # in {"weno5","weno7"} and `weno_d_term=True`.
+    vertadv_u: Field
+    vertadv_v: Field
+    Ah_lap_u: Field
+    Ah_lap_v: Field
+    Bh_bilap_u: Field
+    Bh_bilap_v: Field
+    Cs_smag_u: Field
+    Cs_smag_v: Field
+    Cl_leith_u: Field
+    Cl_leith_v: Field
+    botdrag_u: Field
+    botdrag_v: Field
+    Av_vert_u: Field
+    Av_vert_v: Field
+    phys_u: Field
+    phys_v: Field
+    sponge_u: Field
+    sponge_v: Field
+    total_u: Field
+    total_v: Field
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -390,12 +473,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     since operator semantics differ (compact stencils vs centered).
     """
 
-    g: float = 9.80616
+    g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0
     A_h: float = 1.0e4
+    A_h_lat_scaling: bool = False  # When True, A_h is multiplied by cos²(lat)
+                                    # to keep viscous CFL latitude-independent on
+                                    # lat-lon grids.  Standard MITgcm/MOM6/NEMO
+                                    # convention.  Default False to preserve
+                                    # bit-exact regression on legacy configs.
     B_h: float = 0.0
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -422,7 +511,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
-    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som"
+    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"
@@ -435,3 +524,48 @@ class LatLonCGridOceanConfig(NamedTuple):
     # keep working.
     C_leith: float = 0.0
     C_leith_modified: bool = False
+    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
+    weno_d_term: bool = True  # Include WENO D-term (divergence flux, Silvestri Eqs. 31-32).
+                              # Implemented with proper split: matching-direction divergence
+                              # is WENO-upwinded, cross-direction stays centered (Appendix C).
+                              # Set False to disable the divergent-mode dissipation.
+    # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
+    # ``"explicit_substep"`` (default) → existing forward-backward substep
+    # loop with cosine/box time filter.
+    # ``"implicit_cn"`` → single-step Crank-Nicolson free surface, PCG
+    # Helmholtz solve.  Eliminates the chequerboard mode by construction;
+    # no substepping, no time filter, no divergence damping needed.
+    barotropic_solver: str = "explicit_substep"
+    # Implicit-solver knobs (only used when ``barotropic_solver = 'implicit_cn'``).
+    # 0.5 = pure Crank-Nicolson (2nd-order, no implicit damping); 1.0 =
+    # fully backward (1st-order, maximum damping).  0.55 is the standard
+    # MITgcm/MPAS-O choice — slightly past CN for chequerboard suppression
+    # while staying close to 2nd-order in time.
+    barotropic_implicit_theta_eta: float = 0.55
+    barotropic_implicit_theta_pgf: float = 0.55
+    barotropic_implicit_pcg_tol: float = 1.0e-10
+    barotropic_implicit_pcg_maxiter: int = 200
+    # Pressure-gradient force scheme on partial cells.  ``"adcroft"``
+    # (default): existing centered-diff p_prime + Adcroft & Campin 2004
+    # face-PGF correction.  ``"smc03"``: full Shchepetkin & McWilliams
+    # 2003 density-Jacobian PGF with harmonic-mean monotonized slope
+    # reconstruction — closes the BH partial-cell gap by avoiding the
+    # single-level z-spike that the Adcroft correction produces and that
+    # drives the 2Δz computational mode.  See
+    # docs/ocean_experiments/density_jacobian_pgf_plan.md.  Pure-z*
+    # runs ignore this field (the existing path is identical).
+    pgf_scheme: str = "adcroft"
+    # Tracer time integration for the flux-form advection step.
+    # "euler" (default): forward Euler (1st-order).
+    # "ab2": Adams-Bashforth 2 with stabilization (MITgcm convention).
+    #   Formally 1st-order when ab2_epsilon > 0, but error constant is
+    #   ~epsilon * dt, much smaller than Euler's ~dt.  Set ab2_epsilon=0
+    #   for pure 2nd-order (less stable).  CFL limit is ~0.72 (tighter
+    #   than Euler's ~1.0).
+    # "rk3": RK3 in Butcher-tableau form (3rd-order, 3x advection cost).
+    #   Uses effective tendency F_eff = F0/6 + F1/6 + 2*F2/3 for exact
+    #   conservation.  Note: the Shu-Osher SSP (monotonicity) property
+    #   is NOT preserved in this form — new extrema may appear with
+    #   nonlinear limiters (TVD, WENO, FCT).
+    tracer_time_integrator: str = "euler"
+    ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)

@@ -252,9 +252,16 @@ def dcmip11_wind_geo(
               + _u0_11 * jnp.cos(lat[..., None])
               + ud)
 
-    # Meridional wind (geographic north)
+    # Meridional wind (geographic north).
+    # The DCMIP-1.1 v_north formula is level-independent, but downstream
+    # consumers — in particular ``tracer_transport_latlon``'s batched
+    # ``jnp.repeat(v_face, n_tracers, axis=-1)`` (introduced in #217) —
+    # require ``v_north`` to carry the full ``nlev`` trailing dimension
+    # promised by the docstring.  Multiply by ``jnp.ones_like(p)`` to
+    # broadcast the otherwise-singleton trailing axis up to ``(nlev,)``
+    # without changing the wind values.
     v_north = (_k0 * jnp.sin(2.0 * lonp) * jnp.cos(lat[..., None])
-               * jnp.cos(jnp.pi * t / _tau11))
+               * jnp.cos(jnp.pi * t / _tau11)) * jnp.ones_like(p)
 
     # Vertical velocity w in z-coordinates (v5)
     w = ((-(_Rd * _T0) / (_g * p)) * _omega0

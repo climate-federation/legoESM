@@ -829,7 +829,7 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
 
     Memory: when ``LEGOESM_SH_CHUNK_SIZE > 0``, the trailing level
     axis is processed in chunks to cap the ``(n_lat, n_sh, n_batch)``
-    intermediate at ``n_batch = chunk_size`` per inner call.
+    intermediate at ``n_batch = chunk_size`` per inner call (iter 4).
 
     Parameters
     ----------
@@ -844,9 +844,11 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
     ms = grid.ms
 
     def _kernel(field):
+        # FFT along longitude (axis 1) → (n_lat, n_lon//2+1, n_batch).
         f_hat_lon = jnp.fft.rfft(field, axis=1) / n_lon
-        f_m = f_hat_lon[:, :n_max + 1, :]
-        f_m_gathered = f_m[:, ms, :]
+        f_m = f_hat_lon[:, :n_max + 1, :]              # (n_lat, n_max+1, n_batch)
+        f_m_gathered = f_m[:, ms, :]                    # (n_lat, n_sh, n_batch)
+        # Sum over latitudes; ``wPnm`` is (n_lat, n_sh) — broadcast.
         return 2.0 * jnp.pi * jnp.sum(
             grid.wPnm[:, :, None] * f_m_gathered, axis=0,
         )
@@ -868,7 +870,7 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     the FFT across the level axis.
 
     Memory: when ``LEGOESM_SH_CHUNK_SIZE > 0`` the trailing level axis
-    is processed in chunks (see :func:`_maybe_chunk_trailing`).
+    is processed in chunks (see :func:`_maybe_chunk_trailing`, iter 4).
 
     Parameters
     ----------
@@ -886,6 +888,9 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     def _kernel(coeffs):
         # contributions: (n_lat, n_sh, nlev_chunk) — Pnm broadcasts.
         contributions = grid.Pnm[..., None] * coeffs[None, :, :]
+        # segment_sum operates on the leading axis; permute
+        # (n_sh, n_lat, n_batch), group, then permute back to
+        # (n_lat, n_max+1, n_batch).
         f_m = jnp.swapaxes(
             jax.ops.segment_sum(
                 jnp.swapaxes(contributions, 0, 1),
@@ -912,7 +917,7 @@ def _sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     of vmap'ing the 2D path per level.
 
     Memory: trailing-axis chunking via ``LEGOESM_SH_CHUNK_SIZE`` —
-    see :func:`_maybe_chunk_trailing`.
+    see :func:`_maybe_chunk_trailing` (iter 4).
     """
     n_lat = grid.n_lat
     n_lon = grid.n_lon
@@ -947,7 +952,7 @@ def sh_analysis_oc2_3d(
     Same numeric algorithm as :func:`sh_analysis_oc2` but with the
     longitude FFT, Legendre weighting, and latitude sum batched along
     the trailing level axis.  Trailing-axis chunking via
-    ``LEGOESM_SH_CHUNK_SIZE``.
+    ``LEGOESM_SH_CHUNK_SIZE`` (iter 4).
     """
     n_max = grid.n_max
 
@@ -969,7 +974,7 @@ def sh_analysis_dmu_3d(
 
     Same numeric algorithm as :func:`sh_analysis_dmu` but batched along
     the trailing level axis.  Trailing-axis chunking via
-    ``LEGOESM_SH_CHUNK_SIZE``.
+    ``LEGOESM_SH_CHUNK_SIZE`` (iter 4).
     """
     n_max = grid.n_max
 
@@ -982,6 +987,41 @@ def sh_analysis_dmu_3d(
         )
 
     return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
+
+
+def sh_analysis_oc2_dmu_3d(
+    grid: GaussianGrid, field_3d: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Combined oc2 + dmu forward SH transforms, sharing the FFT + gather.
+
+    The standalone ``sh_analysis_oc2_3d`` and ``sh_analysis_dmu_3d``
+    each compute ``rfft(field) → slice → gather`` before applying their
+    Legendre weight matrix (``wPnm_oc2`` vs ``wDnm``).  When both are
+    called on the SAME input (3 sites in spectral_pe_tendencies), the
+    FFT + gather is duplicated.
+
+    This combined entry point runs the FFT + gather once and applies
+    both Legendre weight matrices.  Returns ``(oc2_result, dmu_result)``
+    matching the standalone outputs.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+    field_3d : jax.Array, shape (n_lat, n_lon, ...)
+
+    Returns
+    -------
+    oc2 : jax.Array — same shape and value as ``sh_analysis_oc2_3d(grid, field_3d)``
+    dmu : jax.Array — same shape and value as ``sh_analysis_dmu_3d(grid, field_3d)``
+    """
+    n_max = grid.n_max
+    f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
+    f_m = f_hat_lon[:, :n_max + 1, :]
+    f_m_gathered = f_m[:, grid.ms, :]
+    twoπ = 2.0 * jnp.pi
+    oc2 = twoπ * jnp.sum(grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0)
+    dmu = twoπ * jnp.sum(grid.wDnm[:, :, None] * f_m_gathered, axis=0)
+    return oc2, dmu
 
 
 def uv_from_vordiv_3d(
@@ -1039,6 +1079,66 @@ def uv_from_vordiv_3d(
     u_cos = dpsi_dtheta + dchi_dlon
     v_cos = dpsi_dlon - dchi_dtheta
     return u_cos, v_cos
+
+
+def vordiv_from_uv_3d(
+    grid: GaussianGrid,
+    u_grid: jax.Array,
+    v_grid: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Forward transform a grid-space vector field to spectral (vor, div).
+
+    Inverse of :func:`uv_from_vordiv_3d` (up to the n=0 mode, which is
+    annihilated by both directions because vor and div have no constant
+    mode on the sphere).
+
+    Implements the Hack & Jakob (1992) / Bourke (1972) spectral
+    divergence and curl operators in pole-safe form.  For a vector field
+    ``F = (F_x, F_y)`` with ``A = F_x · cos φ`` and ``B = F_y · cos φ``::
+
+        div_hat  = (im/a) · sh_oc2(A) - (1/a) · sh_dmu(B)
+        vor_hat  = (im/a) · sh_oc2(B) + (1/a) · sh_dmu(A)
+
+    where ``sh_oc2`` carries an embedded ``1/cos²φ`` weighting (pole-safe)
+    and ``sh_dmu`` carries the dPnm/dμ kernel.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+    u_grid, v_grid : (n_lat, n_lon, nlev) real arrays
+        Grid-space vector components in **physical** units (NOT pre-multiplied
+        by ``cos φ``).
+
+    Returns
+    -------
+    vor_hat, div_hat : (n_sh, nlev) complex arrays.
+    """
+    a = grid.radius
+    cos_lat_3d = grid.cos_lat[:, None, None]
+    A = u_grid * cos_lat_3d   # F_x · cos φ
+    B = v_grid * cos_lat_3d   # F_y · cos φ
+
+    # Stack (A, B) along a trailing axis and fold into the level dim so
+    # each SH-analysis variant runs once on a thicker
+    # (n_lat, n_lon, nlev*2) tensor — matches the
+    # ``uv_from_vordiv_3d`` / spectral PE batching pattern.  4 SH
+    # forwards collapse to 2.
+    n_lat_t, n_lon_t, nlev_t = A.shape
+    AB_stack = jnp.stack([A, B], axis=-1)
+    AB_flat = AB_stack.reshape(n_lat_t, n_lon_t, nlev_t * 2)
+    AB_oc2_flat = sh_analysis_oc2_3d(grid, AB_flat)
+    AB_dmu_flat = sh_analysis_dmu_3d(grid, AB_flat)
+    AB_oc2 = AB_oc2_flat.reshape(AB_oc2_flat.shape[0], nlev_t, 2)
+    AB_dmu = AB_dmu_flat.reshape(AB_dmu_flat.shape[0], nlev_t, 2)
+    A_oc2, B_oc2 = AB_oc2[..., 0], AB_oc2[..., 1]
+    A_dmu, B_dmu = AB_dmu[..., 0], AB_dmu[..., 1]
+
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    div_hat = im_over_a[:, None] * A_oc2 - one_over_a * B_dmu
+    vor_hat = im_over_a[:, None] * B_oc2 + one_over_a * A_dmu
+    return vor_hat, div_hat
 
 
 def spectral_hyperdiffusion_3d(

@@ -374,3 +374,49 @@ class TestGMRediWithVisbeck:
             u, v, T, S, rho, z_coord, jacobian, grid, cfg_visbeck)
         max_diff = float(jnp.max(jnp.abs(o1.dT_dt - o2.dT_dt)))
         assert max_diff > 0.0
+
+    def test_visbeck_kappa_grad_finite_in_unstable_column(self):
+        """``compute_visbeck_kappa_gm`` must produce finite gradients
+        even when the column has statically unstable layers (N²<0).
+
+        Regression guard for ``sqrt(max(N², 0))``: in JAX, ``sqrt(0)``
+        has an infinite backward derivative, and chained with the
+        ``maximum(., 0)`` mask whose VJP is zero on the negative side,
+        the autodiff produces ``inf*0 = NaN``.  The fixed form
+        ``sqrt(max(N², 1e-30))`` keeps N tiny but positive, giving a
+        finite (very large) derivative which is still gradient-zero
+        through the ``maximum`` VJP — well-defined zero, not NaN.
+        """
+        nlev = 6
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=1000.0)
+        shape = (4, nlev)
+        # Column with N² < 0 in mid-layer (unstable).
+        T = jnp.array([20.0, 5.0, 18.0, 8.0, 3.0, 1.0]).astype(jnp.float64)
+        T = jnp.broadcast_to(T, shape)
+        from legoesm.ocean.eos import wright_eos
+        S = jnp.full(shape, 35.0, dtype=jnp.float64)
+        p = jnp.full(shape, 1e7, dtype=jnp.float64)
+        rho = wright_eos(T, S, p)
+
+        S_x = jnp.full((4, nlev - 1), 1e-3, dtype=jnp.float64)
+        S_y = jnp.zeros((4, nlev - 1), dtype=jnp.float64)
+        J = jnp.ones(4, dtype=jnp.float64)
+        f_coriolis = jnp.full(4, 1e-4, dtype=jnp.float64)
+        cfg = VisbeckConfig()
+
+        def _loss(rho_in):
+            kappa = compute_visbeck_kappa_gm(
+                rho_in, S_x, S_y, z_coord, J, f_coriolis, cfg,
+            )
+            return jnp.sum(kappa)
+
+        g = jax.grad(_loss)(rho)
+        assert not bool(jnp.any(jnp.isnan(g))), (
+            f"Visbeck kappa gradient contains NaN — sqrt(max(N²,0)) "
+            f"backward pass blew up at N²<0.  Use sqrt(max(N², 1e-30)).\n"
+            f"Gradient: {g}"
+        )
+        assert not bool(jnp.any(jnp.isinf(g))), (
+            f"Visbeck kappa gradient contains Inf — likely sqrt(0) "
+            f"backward.  Gradient: {g}"
+        )

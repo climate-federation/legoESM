@@ -29,7 +29,7 @@ class GridConfig(NamedTuple):
 
 class DycoreConfig(NamedTuple):
     """Dynamical core configuration."""
-    model_type: str = "hydrostatic"       # hydrostatic, nonhydrostatic, spectral_pe
+    model_type: str = "hydrostatic"       # shallow_water, hydrostatic, nonhydrostatic
     discretization: str = "cdgrid"        # cdgrid, spectral, sfno, mpas
     dt: float = 600.0
     hyperdiff_scale: float = 1.0
@@ -224,6 +224,12 @@ class ExperimentConfig(NamedTuple):
                 "physics_parameterization_layers must be > 0, "
                 f"got {self.physics_parameterization_layers}"
             )
+        _valid_cloud_schemes = ("none", "sundqvist", "xu_randall")
+        if self.cloud_scheme not in _valid_cloud_schemes:
+            errors.append(
+                f"cloud_scheme must be one of {_valid_cloud_schemes}, "
+                f"got {self.cloud_scheme!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(
@@ -259,9 +265,21 @@ class ExperimentConfig(NamedTuple):
                 "set radiation='rrtmgp' for cloud-radiation coupling"
             )
         if self.fix_moisture and self.microphysics != "none":
+            # The current ``fix_moisture_hydrostatic`` implementation only
+            # rescales ``q_v``, not prognostic condensate (``q_c``/``q_r``)
+            # nor cumulative precipitation flux at the surface.  When a
+            # precipitating microphysics scheme is active, the fixer
+            # multiplies q_v back up after each precipitation event — an
+            # unphysical source of water vapor that compounds with the
+            # microphysical condensation/heating loop and drives the
+            # column unstable (catalogued under AMIP.md "Known issues").
             warns.append(
-                "fix_moisture with active microphysics may conflict "
-                "with microphysical moisture sources/sinks"
+                "fix_moisture with prognostic-condensate microphysics "
+                f"({self.microphysics}) is INCORRECT: the current "
+                "implementation rescales only q_v, not q_c/q_r/precip — "
+                "spurious vapor sources will accumulate and may drive the "
+                "column unstable.  Disable --fix-moisture or replace it "
+                "with a fix_total_water path that tracks precipitation."
             )
         if (self.output.cmip_output
                 and self.output.diagnostics_perf_mode == "always"):

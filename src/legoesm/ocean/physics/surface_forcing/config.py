@@ -45,6 +45,7 @@ class BulkFormulaConfig(NamedTuple):
     z_ref: float = 10.0     # Reference height for MOST [m]
     z0: float = 1e-4        # Roughness length for MOST [m]
     bulk_n_iter: int = 5    # MOST iterations
+    emissivity: float = 0.97  # Surface longwave emissivity
 
 
 class SurfaceForcingConfig(NamedTuple):

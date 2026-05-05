@@ -27,7 +27,7 @@ def _make_hydrostatic_setup():
     """Create a minimal hydrostatic state, grid, sigma for testing."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from tests.test_cases.held_suarez import held_suarez_init
+    from legoesm.atmosphere.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(8)
     sigma = create_sigma_coordinate(10)
@@ -479,15 +479,19 @@ class TestCombinedSpectralPE:
         )
         physics_fn = make_physics(cfg, "spectral_pe", dt=300.0)
 
-        import legoesm.atmosphere.dynamics.spectral_pe as spectral_pe_mod
-        original = spectral_pe_mod.spectral_pe_to_grid
+        # Patch the binding the orchestrator actually uses — combined.py
+        # imports ``spectral_pe_to_grid`` directly via ``from … import``
+        # so monkeypatching the source module's attribute would not
+        # intercept the local binding the call site sees.
+        import legoesm.atmosphere.physics.combined as combined_mod
+        original = combined_mod.spectral_pe_to_grid
         n_calls = {"count": 0}
 
         def wrapped(*args, **kwargs):
             n_calls["count"] += 1
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(spectral_pe_mod, "spectral_pe_to_grid", wrapped)
+        monkeypatch.setattr(combined_mod, "spectral_pe_to_grid", wrapped)
         _ = physics_fn(state, grid, sigma)
 
         assert n_calls["count"] == 1

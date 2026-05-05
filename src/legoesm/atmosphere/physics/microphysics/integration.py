@@ -33,10 +33,13 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-from legoesm.atmosphere.physics.microphysics.output import (
-    HydrometeorState,
-    make_zero_hydrometeors,
+from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
 )
+from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.grids.gaussian import sh_analysis_3d
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
@@ -83,7 +86,13 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
 from legoesm.atmosphere.physics._shared import (
     compute_layer_dz as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
+    zero_like_tracers,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import sh_analysis_3d
 
 
 def make_microphysics_physics(
@@ -107,7 +116,12 @@ def make_microphysics_physics(
     Callable
         Physics function with the correct signature for the model.
     """
-    if model_type == "hydrostatic":
+    # ``model_type="mpas"`` reuses the hydrostatic factory: the
+    # ``_make_hydrostatic_microphysics`` bridge reshapes
+    # ``(*shape_2d, nlev)`` to ``(ncol, nlev)`` and never references
+    # grid lat/lon — works identically for cubed-sphere ``(face, n, n)``,
+    # lat-lon ``(n_lat, n_lon)``, and MPAS Voronoi ``(nCells,)``.
+    if model_type in ("hydrostatic", "mpas"):
         return _make_hydrostatic_microphysics(microphysics_config, dt)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_microphysics(microphysics_config, dt)
@@ -116,7 +130,7 @@ def make_microphysics_physics(
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
 
 
@@ -138,7 +152,7 @@ def _make_hydrostatic_microphysics(
 
     def physics_fn(
         state: HydrostaticState,
-        grid: CubedSphereGrid,
+        grid,
         sigma_coord: SigmaCoordinate,
     ) -> HydrostaticTendencies:
         T = state.T.data
@@ -148,16 +162,37 @@ def _make_hydrostatic_microphysics(
         shape_3d = T.shape
         shape_2d = p_s.shape
 
-        dims_3d = ("face", "x", "y", "level")
-        dims_2d = ("face", "x", "y")
+        # Derive Field metadata from the input state so the returned
+        # tendencies match the underlying grid: cubed-sphere uses
+        # ("face","x","y",...), lat-lon uses ("lat","lon",...), and
+        # MPAS uses ("nCells",...).
+        dims_3d = state.T.dims
+        dims_2d = state.p_s.dims
+        u_shape = state.u.data.shape
+        u_dims = state.u.dims
+        v_dims = state.v.dims if state.v is not None else None
+        v_shape = state.v.data.shape if state.v is not None else None
 
         # Pin defaulted allocations to the state precision so we never
         # silently flow x64 zeros into the column physics path.
         _state_dtype = T.dtype
+
+        def _zero_dv_dt():
+            """``None`` for MPAS (no v), Field of zeros otherwise."""
+            if state.v is None:
+                return None
+            return Field(
+                data=jnp.zeros(v_shape, dtype=_state_dtype),
+                name="dv_dt_micro", dims=v_dims, units="m/s^2",
+            )
+
         if micro_fn is None:
             return HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+                du_dt=Field(
+                    data=jnp.zeros(u_shape, dtype=_state_dtype),
+                    name="du_dt_micro", dims=u_dims, units="m/s^2",
+                ),
+                dv_dt=_zero_dv_dt(),
                 dT_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dT_dt_micro", dims=dims_3d, units="K/s"),
                 dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
                 dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
@@ -167,8 +202,12 @@ def _make_hydrostatic_microphysics(
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
         p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
 
-        # Reshape to columns
-        ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+        # Reshape to columns generically across cubed-sphere
+        # ``shape_2d=(6,n,n)``, lat-lon ``(n_lat,n_lon)``, and MPAS
+        # ``(nCells,)``.
+        ncol = 1
+        for s in shape_2d:
+            ncol *= int(s)
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
@@ -237,8 +276,11 @@ def _make_hydrostatic_microphysics(
         }
 
         return HydrostaticTendencies(
-            du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
-            dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+            du_dt=Field(
+                data=jnp.zeros(u_shape, dtype=_state_dtype),
+                name="du_dt_micro", dims=u_dims, units="m/s^2",
+            ),
+            dv_dt=_zero_dv_dt(),
             dT_dt=Field(data=dT_dt, name="dT_dt_micro", dims=dims_3d, units="K/s"),
             dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
@@ -412,19 +454,38 @@ def _make_spectral_pe_microphysics(
 ) -> Callable:
     """Create microphysics physics_fn for SpectralPEModel.
 
-    Signature: (state, grid, sigma_coord) -> SpectralHydrostaticState
+    Signature: (state, grid, sigma_coord, grid_fields=None) -> SpectralHydrostaticState
+
+    The bridge pulls ``q_v`` and the full hydrometeor state out of
+    ``state.tracers`` (when present), runs the column microphysics
+    backend, and returns a ``SpectralHydrostaticState`` whose ``T_hat``
+    carries the spectral latent-heating tendency *and* whose ``tracers``
+    dict carries grid-space ``dq_v_dt`` / ``dq_c_dt`` / ``dq_r_dt`` /
+    etc.  The dycore RHS (``spectral_pe_tendencies``) adds these tracer
+    tendencies to its own advective tendencies during the SSP-RK stages.
     """
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import sh_analysis_3d
+    # Tracer key → MicrophysicsOutput attribute name.  Mirrors the
+    # ``HydrometeorState`` field layout in ``microphysics/output.py``
+    # plus ``q_v``.  The dycore RHS only flows tendencies for keys that
+    # exist on the input ``state.tracers``; missing keys are silently
+    # dropped (no carry to write into).
+    _TRACER_TEND_MAP = {
+        "q_v": "dq_v_dt",
+        "q_c": "dq_c_dt",
+        "q_r": "dq_r_dt",
+        "q_i": "dq_i_dt",
+        "q_s": "dq_s_dt",
+        "q_g": "dq_g_dt",
+        "N_c": "dN_c_dt",
+        "N_r": "dN_r_dt",
+        "N_i": "dN_i_dt",
+    }
 
+    def physics_fn(state, grid, sigma_coord, grid_fields=None):
         # Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -437,14 +498,22 @@ def _make_spectral_pe_microphysics(
 
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
+        # Pin the column-physics dtype to the gridded state precision so
+        # we do not silently flow x64 zeros into the column path.
+        _state_dtype = T.dtype
 
         if micro_fn is None:
+            # Mirror the input tracer pytree shape with zeros so the
+            # orchestrator's accumulator and the dycore RHS see a
+            # consistent tendency structure even when microphysics is
+            # disabled.
             return SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
                 div_hat=state.div_hat.replace(data=zero_3d),
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
                 lnps_hat=state.lnps_hat.replace(data=zero_2d),
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+                tracers=zero_like_tracers(state.tracers),
             )
 
         # Pressure at full and half levels
@@ -458,14 +527,33 @@ def _make_spectral_pe_microphysics(
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
-        # Pin the column-physics dtype to the gridded state precision so
-        # we do not silently flow x64 zeros into the column path.
-        q_v_col = jnp.zeros((ncol, nlev), dtype=T.dtype)
+
+        # Pull tracer fields out of ``state.tracers`` and reshape to the
+        # column-physics ``(ncol, nlev)`` layout.  Backend microphysics
+        # schemes assume non-negative mixing ratios, so clip on the way
+        # in (matches the hydrostatic bridge's ``_get_tracer``).
+        def _get_tracer(name):
+            if state.tracers is not None and name in state.tracers:
+                raw = state.tracers[name]
+                data = raw.data if hasattr(raw, "data") else raw
+                return jnp.maximum(data.reshape(ncol, nlev), 0.0)
+            return jnp.zeros((ncol, nlev), dtype=_state_dtype)
+
+        q_v_col = _get_tracer("q_v")
 
         rho = _compute_rho(T_col, p_full_col)
         dz = _compute_heights_from_sigma(T_col, p_half_col)
 
-        hydrometeors = make_zero_hydrometeors(ncol, nlev, dtype=T.dtype)
+        hydrometeors = HydrometeorState(
+            q_c=_get_tracer("q_c"),
+            q_r=_get_tracer("q_r"),
+            q_i=_get_tracer("q_i"),
+            q_s=_get_tracer("q_s"),
+            q_g=_get_tracer("q_g"),
+            N_c=_get_tracer("N_c"),
+            N_r=_get_tracer("N_r"),
+            N_i=_get_tracer("N_i"),
+        )
 
         if is_ml:
             if _ml_model_cache[0] is None:
@@ -490,12 +578,44 @@ def _make_spectral_pe_microphysics(
         # Transform T tendency to spectral space
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
+        # Build the tracer tendency dict in grid-space ``(n_lat, n_lon,
+        # nlev)`` layout, matching ``SpectralHydrostaticState.tracers``.
+        # Wrap each tendency back into the same container type as the
+        # input state's tracer (``Field`` vs raw ``jax.Array``) so the
+        # SSP-RK ``tree.map`` pytree leaves line up.  Untouched tracer
+        # keys are mirrored as zeros via ``zero_like_tracers``.
+        tracers_tend = None
+        if state.tracers is not None:
+            tt = {}
+            for name, attr in _TRACER_TEND_MAP.items():
+                if name not in state.tracers:
+                    continue
+                template = state.tracers[name]
+                tend_grid = getattr(micro_out, attr).reshape(
+                    n_lat, n_lon, nlev,
+                )
+                if hasattr(template, "data") and hasattr(template, "replace"):
+                    tt[name] = template.replace(
+                        data=tend_grid.astype(template.data.dtype),
+                    )
+                else:
+                    tt[name] = tend_grid.astype(template.dtype)
+            # Mirror any untouched tracer keys (e.g. a passive scalar
+            # the user attached) as zeros so the orchestrator's
+            # accumulator and the dycore RHS see a complete pytree.
+            zeros = zero_like_tracers(state.tracers)
+            if zeros is not None:
+                for k, zv in zeros.items():
+                    tt.setdefault(k, zv)
+            tracers_tend = tt
+
         return SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=zero_3d),
             div_hat=state.div_hat.replace(data=zero_3d),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            tracers=tracers_tend,
         )
 
     def reset_state():

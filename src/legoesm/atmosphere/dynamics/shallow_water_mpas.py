@@ -45,6 +45,8 @@ from legoesm.core.operators_voronoi import (
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.precision import cast_pytree
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm import constants
 
 
@@ -162,7 +164,6 @@ class MPASShallowWaterModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: MPASShallowWaterState, dt: float) -> MPASShallowWaterState:
         """Advance one time step."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
@@ -203,13 +204,19 @@ def _fix_mass_mpas(state_new, state_old, mesh):
     Three sums batched into one allreduce for multi-rank scaling.
     """
     area = mesh.areaCell.astype(jnp.float64)
-    local = jnp.stack([
-        jnp.sum(state_old.h.data.astype(jnp.float64) * area),
-        jnp.sum(state_new.h.data.astype(jnp.float64) * area),
-        jnp.sum(area),
-    ])
+    # All three local sums share ``area`` on the same horizontal axes —
+    # stack the integrands and reduce locally once so XLA fires one
+    # sum kernel instead of three sequentially-dependent ones.
+    _h_stack = jnp.stack(
+        [
+            state_old.h.data.astype(jnp.float64),
+            state_new.h.data.astype(jnp.float64),
+            jnp.ones_like(state_new.h.data, dtype=jnp.float64),
+        ],
+        axis=-1,
+    ) * area[..., None]
+    local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
     if jax.process_count() > 1:
-        from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
     mass_old, mass_new, total_area = local[0], local[1], local[2]
     correction = (mass_old - mass_new) / total_area
@@ -233,16 +240,20 @@ def _fix_energy_mpas(state_new, state_old, mesh, g):
         h = state.h.data
         u = state.u.data
         h_s = state.h_s.data
-        ke = jnp.sum(kinetic_energy_cell(u, mesh) * h * area)
-        pe = jnp.sum(0.5 * g * (h + h_s) ** 2 * area)
-        return ke, pe
+        # KE and PE share ``area`` on the same horizontal axes — stack
+        # the two integrands and reduce locally once.
+        _stack = jnp.stack(
+            [kinetic_energy_cell(u, mesh) * h, 0.5 * g * (h + h_s) ** 2],
+            axis=-1,
+        ) * area[..., None]
+        _pair = jnp.sum(_stack, axis=tuple(range(area.ndim)))
+        return _pair[0], _pair[1]
 
     KE_old, PE_old = _ke_pe_terms(state_old)
     KE_new, PE_new = _ke_pe_terms(state_new)
 
     local = jnp.stack([KE_old, PE_old, KE_new, PE_new])
     if jax.process_count() > 1:
-        from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
     KE_old, PE_old, KE_new, PE_new = local[0], local[1], local[2], local[3]
     E_old = KE_old + PE_old

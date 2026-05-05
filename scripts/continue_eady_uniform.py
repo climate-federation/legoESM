@@ -135,6 +135,8 @@ def _build_config_and_model(args):
             barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
             barotropic_div_damp=cfg.barotropic_div_damp,
             tracer_advection=cfg.tracer_advection,
+            momentum_advection=args.momentum_advection,
+            weno_d_term=False if args.no_weno_d_term else None,
         )
     )
     return cfg, grid, z_coord, model, lon_deg, lat_deg
@@ -159,6 +161,11 @@ def main() -> int:
     p.add_argument("--K-h", type=float, default=0.0)
     p.add_argument("--K-bih", type=float, default=0.0)
     p.add_argument("--tracer-advection", type=str, default="som")
+    p.add_argument("--momentum-advection", type=str, default=None,
+                   choices=[None, "vector_invariant", "weno5", "weno7"],
+                   help="Override momentum advection scheme")
+    p.add_argument("--no-weno-d-term", action="store_true",
+                   help="Disable the WENO D-term in momentum advection")
     p.add_argument("--no-sponge", action="store_true", default=True,
                    help="Weak-forcing runs use no sponge (default).")
     p.add_argument("--n-snaps", type=int, default=20,

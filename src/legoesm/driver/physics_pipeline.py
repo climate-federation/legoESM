@@ -280,7 +280,13 @@ class PhysicsPipeline:
             )
         dT_dt_conv = ad.unflatten_3d(conv_out.dT_dt)
         dq_v_dt_conv = ad.unflatten_3d(conv_out.dq_v_dt)
-        precip = ad.unflatten_2d(conv_out.precipitation)
+        # Convection no longer surfaces its own precip diagnostic. Its
+        # detrained condensate joins the cloud-water bucket and is
+        # routed through microphysics for proper sedimentation /
+        # melting / evaporation; surface precipitation is owned by
+        # ``micro_out.precipitation`` (read into ``precip_micro`` below).
+        dq_c_dt_conv = ad.unflatten_3d(conv_out.dq_c_conv_dt)
+        precip = jnp.zeros(shape_2d, dtype=T.dtype)
 
         # Microphysics (resolved kernel — no dispatch here)
         _sd = T.dtype  # inherit storage dtype from state arrays
@@ -364,6 +370,14 @@ class PhysicsPipeline:
             dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
             dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
+
+        # Convection→microphysics coupling: detrained convective
+        # condensate is added to the cloud-water tendency. Microphysics
+        # processes the augmented bucket on the next step (operator
+        # splitting), giving proper autoconversion / sedimentation /
+        # evaporation for convective rain instead of the previous
+        # instant-fall assumption.
+        dq_c_dt = dq_c_dt + dq_c_dt_conv
 
         # Boundary layer exchange (grid-agnostic: uses [..., -1] indexing)
         rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T[..., -1])
@@ -686,8 +700,12 @@ def _build_gray_radiation_fn(config):
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None,
-                     ghg_vmr_override=None):
+                     ghg_vmr_override=None,
+                     cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
+        del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
         if tau_equator is not None:
@@ -813,6 +831,17 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 # Convection resolver
 # ---------------------------------------------------------------------------
 
+_PIPELINE_UNSUPPORTED_CONVECTION = frozenset(
+    {
+        "zhang_mcfarlane",
+        "kain_fritsch",
+        "emanuel",
+        "tiedtke",
+        "bechtold",
+    }
+)
+
+
 def _resolve_convection(config):
     """Resolve convection kernel and config from ExperimentConfig.
 
@@ -820,6 +849,19 @@ def _resolve_convection(config):
 
     Prognostic schemes (mass_flux, edmf) are returned directly and their
     prognostic variable is threaded explicitly through the unified driver.
+
+    The five profile-prognostic schemes (zhang_mcfarlane, kain_fritsch,
+    emanuel, tiedtke, bechtold) are registered in ``CONVECTION_REGISTRY``
+    but are NOT yet wired through ``PhysicsPipeline.physics_step_no_rad``
+    — the pipeline currently threads only a ``(ncol,)`` scalar carry,
+    while these schemes require a ``(ncol, nlev)`` ``conv_prog_profile``
+    plus per-scheme inputs (winds, w_grid, moisture_convergence,
+    stochastic state, PRNG key).  Selecting one of them through the
+    production driver therefore fails fast here rather than producing
+    silently wrong tendencies inside the hot loop.  Users who need
+    these schemes should drive them through
+    :func:`legoesm.atmosphere.physics.convection.integration.make_convection_physics`,
+    which is the supported per-model-type bridge factory.
     """
     from legoesm.atmosphere.physics.convection.config import (
         ConvectionConfig,
@@ -832,6 +874,21 @@ def _resolve_convection(config):
     scheme = config.convection
     if scheme == "none":
         return _noop_convection, None
+
+    if scheme in _PIPELINE_UNSUPPORTED_CONVECTION:
+        raise NotImplementedError(
+            f"Convection scheme {scheme!r} is registered but is not "
+            f"yet supported by the unified driver pipeline "
+            f"(PhysicsPipeline.physics_step_no_rad).  The pipeline "
+            f"only threads a (ncol,) scalar convective carry; "
+            f"profile-prognostic schemes need (ncol, nlev) "
+            f"`conv_prog_profile` plus winds / w_grid / "
+            f"moisture_convergence / stochastic state plumbing.  "
+            f"Use `legoesm.atmosphere.physics.convection.integration."
+            f"make_convection_physics` (the per-model-type bridge "
+            f"factory) instead, or extend the pipeline carry to "
+            f"support profile-prognostic schemes."
+        )
 
     conv_fn = resolve_kernel(CONVECTION_REGISTRY, scheme)
 
@@ -856,7 +913,7 @@ def _noop_convection(T, q_v, p_full, p_half, dt, config):
     z2 = jnp.zeros_like(T)
     z1 = jnp.zeros((ncol,), dtype=T.dtype)
     return ConvectionOutput(
-        dT_dt=z2, dq_v_dt=z2, precipitation=z1, cape=z1, convective_mask=z1,
+        dT_dt=z2, dq_v_dt=z2, dq_c_conv_dt=z2, cape=z1, convective_mask=z1,
     )
 
 

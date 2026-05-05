@@ -1,0 +1,21 @@
+Iter-796 W2 dv_cc residual with zeta replaced by ZERO
+C36, β=0, LEGACY path, no div damp applied (isolate Coriolis+pressure)
+
+               variant        peak       face,(i,j)     GC      |mean|    hot        near_vert
+-------------------------------------------------------------------------------------------------------------------
+  default (numerical zeta)  peak=2.516e-05  (5,0,0)  lat=-36.45° lon=-135.00°  GC=1.19°  |mean|=2.038e-06  hot=8 near_vert=8 (100.0%)
+   zeta = 0 (analytical)  peak=2.307e-04  (1,17,0)  lat=-43.74° lon=+88.75°  GC=34.38°  |mean|=1.350e-04  hot=4896 near_vert=528 (10.8%)
+
+max |dv_default - dv_zeta_zero| = 2.336e-04
+This equals max |zeta * u_cc| = 2.336e-04
+
+Interpretation cues (observational only):
+- If zeta→0 makes dv_zeta_zero MUCH SMALLER than dv_default:
+  zeta noise is the cube-vertex mechanism; fix corner-wind halo.
+- If dv_zeta_zero is SIMILAR to dv_default:
+  zeta noise is not the main contributor.
+
+What iter-796 DOES measure (observational only):
+- dv_cc residual at t=0 with numerical zeta vs analytical (zero) zeta.
+What it does NOT establish:
+- 1-day v_ll_Linf impact of an improved zeta operator.

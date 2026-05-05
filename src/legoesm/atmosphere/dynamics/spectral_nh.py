@@ -32,11 +32,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.core.operators_3d import (
     vertical_advection_height,
 )
 from legoesm.grids.gaussian import (
     GaussianGrid,
+    create_gaussian_grid,
     sh_analysis,
     sh_synthesis,
     sh_analysis_3d,
@@ -47,7 +49,15 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
     _sh_synthesis_H_3d,
 )
-from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
+from legoesm.grids.vertical import (
+    HeightCoordinate,
+    TerrainMetric,
+    create_height_coordinate,
+    compute_terrain_metric,
+)
+from legoesm.runtime.backend import get_backend, check_spectral_backend
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
     _sponge_profile,
@@ -57,6 +67,7 @@ from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
 )
+from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm import constants
 
 _COS_LAT_MIN = 1.0e-6
@@ -600,8 +611,6 @@ def _acoustic_substeps_grid_semi_implicit(
     gradient in the w equation is treated implicitly via a tridiagonal
     solve, removing the vertical acoustic CFL constraint.
     """
-    from legoesm.timestepping.tridiagonal import thomas_solve_batched
-
     g = config.g
     c_p = constants.c_pd
     R_d = constants.R_d
@@ -718,7 +727,6 @@ class SpectralCompressibleEulerModel:
         self.terrain_metric = terrain_metric
         self.config = config or SpectralNHConfig()
         if self.config.small_earth_factor != 1.0:
-            from legoesm import constants
             factor = self.config.small_earth_factor
             grid = grid._replace(
                 radius=constants.R_earth / factor,
@@ -735,7 +743,6 @@ class SpectralCompressibleEulerModel:
                 )
             )
 
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True
@@ -931,10 +938,6 @@ def dcmip25_tc1_init_spectral(
         piecewise_lapse_theta_ref,
     )
     from tests.test_cases.dcmip2025.test_case_1 import TC1_PARAMS
-    from legoesm.grids.vertical import (
-        create_height_coordinate,
-        compute_terrain_metric,
-    )
 
     p = {**TC1_PARAMS, **(params or {})}
 
@@ -1108,11 +1111,6 @@ def dcmip25_tc2_init_spectral(
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2 import (
         TC2_PARAMS,
     )
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.vertical import (
-        create_height_coordinate,
-        compute_terrain_metric,
-    )
 
     p = {**TC2_PARAMS, **(params or {})}
     factor = p["small_earth_factor"]
@@ -1210,11 +1208,6 @@ def dcmip25_tc3_init_spectral(
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3 import (
         TC3_PARAMS, _squall_line_sounding, _squall_line_theta_fn,
     )
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.vertical import (
-        create_height_coordinate, compute_terrain_metric,
-    )
-    from legoesm.thermo import saturation_mixing_ratio
 
     p = {**TC3_PARAMS, **(params or {})}
     factor = p["small_earth_factor"]

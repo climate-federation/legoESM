@@ -43,6 +43,12 @@ from legoesm.atmosphere.physics.radiation.config import (
 )
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import sh_analysis_3d
+from legoesm.core.precision import get_policy
 from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
@@ -54,6 +60,11 @@ from legoesm.atmosphere.physics.thermodynamics import (
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import sh_analysis_3d
 
 
 def _make_time_state():
@@ -190,7 +201,6 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None):
             # real dtype.
             dtype = state.T_hat.data.real.dtype
         else:
-            from legoesm.core.precision import get_policy
             dtype = get_policy().compute
     T_col_shape = (ncol, nlev)
     q_v_col = jnp.zeros(T_col_shape, dtype=dtype)
@@ -722,12 +732,6 @@ def _make_spectral_pe_radiation(
     _time, set_time = _make_time_state()
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import sh_analysis_3d
-
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:

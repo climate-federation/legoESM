@@ -33,6 +33,7 @@ _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38
 
 from legoesm.core.field import Field
 from legoesm.core.operators import _is_distributed
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -46,6 +47,8 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.parallel.reductions import global_sum_mpi
+from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -66,7 +69,6 @@ def _spectral_cell_area(grid: GaussianGrid) -> jnp.ndarray:
 def _spectral_global_sum(local_value: jnp.ndarray) -> jnp.ndarray:
     """MPI-aware global sum for spectral ocean reductions."""
     if _is_distributed():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_value)
     return local_value
 
@@ -137,14 +139,37 @@ def _spectral_conservation_fixer(
     S_old = _ts_grid[..., 2]
     S_new = _ts_grid[..., 3]
 
-    local_tracer_terms = jnp.stack(
+    # Five column reductions split into two groups by their h-weight:
+    #   * ``h_k_old`` weight: ``T_old``, ``S_old``
+    #   * ``h_k_new`` weight: ``T_new``, ``S_new``, ``ones (volume)``
+    # Each group is one stacked column reduction; the area-weighted
+    # outer sum then collapses with ``axis=tuple(range(weighted_area.ndim))``
+    # so the 5 nested ``jnp.sum`` pairs become 2 column reductions
+    # + 1 area reduction.  Concatenate in the order the
+    # ``_spectral_global_sum`` contract expects:
+    # ``heat_old, heat_new, salt_old, salt_new, ocean_volume``.
+    _old_inner = jnp.sum(
+        jnp.stack([T_old * h_k_old, S_old * h_k_old], axis=-1), axis=-2,
+    )  # columns: [T_old, S_old]
+    _new_inner = jnp.sum(
+        jnp.stack(
+            [T_new * h_k_new, S_new * h_k_new, h_k_new], axis=-1,
+        ),
+        axis=-2,
+    )  # columns: [T_new, S_new, vol_new]
+    _inner = jnp.stack(
         [
-            jnp.sum(jnp.sum(T_old * h_k_old, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(T_new * h_k_new, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(S_old * h_k_old, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(S_new * h_k_new, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(h_k_new, axis=-1) * weighted_area),
+            _old_inner[..., 0],  # heat_old
+            _new_inner[..., 0],  # heat_new
+            _old_inner[..., 1],  # salt_old
+            _new_inner[..., 1],  # salt_new
+            _new_inner[..., 2],  # ocean_volume
         ],
+        axis=-1,
+    )
+    local_tracer_terms = jnp.sum(
+        _inner * weighted_area[..., None],
+        axis=tuple(range(weighted_area.ndim)),
     )
     heat_old, heat_new, salt_old, salt_new, ocean_volume = _spectral_global_sum(
         local_tracer_terms,
@@ -692,7 +717,6 @@ class SpectralOceanModel:
             else:
                 raise ValueError(msg)
 
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True

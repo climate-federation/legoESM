@@ -29,7 +29,14 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     sh_analysis,
     sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+    uv_from_vordiv_3d,
 )
+from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
+from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.ocean.state import SpectralOceanState
 
 # WeatherBench2 standard pressure levels [hPa]
 WB2_PRESSURE_LEVELS = (
@@ -141,8 +148,6 @@ def unpack_sw_output(
     SpectralSWState
         New state or tendencies in spectral space.
     """
-    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
-
     vor_grid = output[..., 0]
     div_grid = output[..., 1]
     phi_grid = output[..., 2]
@@ -175,6 +180,11 @@ def pack_pe_state(
 ) -> jnp.ndarray:
     """Pack a SpectralHydrostaticState into a dense tensor.
 
+    The q channel is populated from ``state.tracers["q_v"]`` when
+    present (the canonical spectral PE moisture tracer); falls back to
+    zeros for the legacy dry pipeline.  Without this, the SFNO never
+    sees ERA5 humidity even when the IC carries it.
+
     Parameters
     ----------
     state : SpectralHydrostaticState
@@ -189,8 +199,6 @@ def pack_pe_state(
     array, shape (n_lat, n_lon, n_channels)
         Packed grid-space fields.
     """
-    from legoesm.grids.gaussian import uv_from_vordiv_3d
-
     # 3D fields: (n_lat, n_lon, nlev)
     T = sh_synthesis_3d(grid, state.T_hat.data)
 
@@ -206,12 +214,18 @@ def pack_pe_state(
     lnps = sh_synthesis(grid, state.lnps_hat.data)
     phis = sh_synthesis(grid, state.phis_hat.data)
 
-    # Pack: [u(nlev), v(nlev), T(nlev), zeros_q(nlev), lnps, phis]
-    nlev = T.shape[-1]
-    q_placeholder = jnp.zeros_like(T)  # humidity placeholder
+    # Pull q_v from the tracer dict when present.  Container is duck-
+    # typed (Field vs raw) for symmetry with the dycore RHS / physics
+    # bridges.  Cast to T's dtype to keep the channel tensor uniform.
+    if state.tracers is not None and "q_v" in state.tracers:
+        _qv_raw = state.tracers["q_v"]
+        _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+        q = _qv_data.astype(T.dtype)
+    else:
+        q = jnp.zeros_like(T)
 
     packed = jnp.concatenate(
-        [u, v, T, q_placeholder,
+        [u, v, T, q,
          lnps[..., None], phis[..., None]],
         axis=-1,
     )
@@ -225,6 +239,16 @@ def unpack_pe_output(
     mode: str = "state_update",
 ) -> "SpectralHydrostaticState":
     """Unpack SFNO output back into a SpectralHydrostaticState.
+
+    The q output channel is read and emitted as ``state.tracers["q_v"]``
+    (grid-space, matching the spectral PE tracer convention) when the
+    input state carries a q_v tracer.  In ``mode="tendencies"`` this
+    is the SFNO's predicted ``dq_v/dt`` (consumed by the dycore RHS
+    via the physics_tendency.tracers path); in ``mode="state_update"``
+    it is the new q_v field directly.
+
+    Mirrors :func:`pack_pe_state` — without this round-trip, the SFNO
+    output's q channel would be silently discarded.
 
     Parameters
     ----------
@@ -241,18 +265,13 @@ def unpack_pe_output(
     -------
     SpectralHydrostaticState
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
-    from legoesm.grids.gaussian import (
-        sh_analysis_oc2_3d,
-        sh_analysis_dmu_3d,
-    )
-
     nlev = state.T_hat.data.shape[-1]
     spec = PE3DChannelSpec(nlev=nlev)
 
     u = output[..., spec.u_slice].astype(jnp.float64)
     v = output[..., spec.v_slice].astype(jnp.float64)
     T = output[..., spec.T_slice].astype(jnp.float64)
+    q = output[..., spec.q_slice].astype(jnp.float64)
     lnps = output[..., spec.lnps_idx].astype(jnp.float64)
 
     # T → spectral
@@ -285,12 +304,33 @@ def unpack_pe_output(
     else:
         phis_hat = state.phis_hat.data
 
+    # Build the tracer dict for the output state.  We mirror the input
+    # state's tracer pytree:
+    #   * if input has q_v → emit q_v (the SFNO's predicted dq_v/dt
+    #     in tendency mode, or new q_v in state-update mode)
+    #   * if input has additional tracer keys (q_c, q_r, ...) we don't
+    #     receive predictions for them, so we mirror them as zeros to
+    #     keep the pytree structure aligned for jax.tree.map
+    #   * if input.tracers is None → output also None (legacy dry path)
+    tracers_out = None
+    if state.tracers is not None:
+        tracers_out = zero_like_tracers(state.tracers) or {}
+        if "q_v" in state.tracers:
+            template = state.tracers["q_v"]
+            if hasattr(template, "data") and hasattr(template, "replace"):
+                tracers_out["q_v"] = template.replace(
+                    data=q.astype(template.data.dtype),
+                )
+            else:
+                tracers_out["q_v"] = q.astype(template.dtype)
+
     return SpectralHydrostaticState(
         vor_hat=state.vor_hat.replace(data=vor_hat),
         div_hat=state.div_hat.replace(data=div_hat),
         T_hat=state.T_hat.replace(data=T_hat),
         lnps_hat=state.lnps_hat.replace(data=lnps_hat),
         phis_hat=state.phis_hat.replace(data=phis_hat),
+        tracers=tracers_out,
     )
 
 
@@ -357,8 +397,6 @@ def pack_ocean_state(
     array, shape (n_lat, n_lon, n_channels)
         Packed grid-space fields: [u(nlev), v(nlev), T(nlev), S(nlev), eta, H_bathy].
     """
-    from legoesm.grids.gaussian import uv_from_vordiv_3d
-
     # 3D fields: (n_lat, n_lon, nlev)
     T = sh_synthesis_3d(grid, state.T_hat.data)
     S = sh_synthesis_3d(grid, state.S_hat.data)
@@ -411,12 +449,6 @@ def unpack_ocean_output(
     -------
     SpectralOceanState
     """
-    from legoesm.ocean.state import SpectralOceanState
-    from legoesm.grids.gaussian import (
-        sh_analysis_oc2_3d,
-        sh_analysis_dmu_3d,
-    )
-
     nlev = state.T_hat.data.shape[-1]
     spec = OceanChannelSpec(nlev=nlev)
 

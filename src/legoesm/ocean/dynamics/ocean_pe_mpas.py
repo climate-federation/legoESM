@@ -41,6 +41,7 @@ from legoesm.core.field import Field
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.core.operators_voronoi import (
     apvm_correction_3d,
+    biharmonic_vorticity_del4_3d,
     bilaplacian_cell_3d,
     divergence_cell_3d,
     gradient_edge_3d,
@@ -71,6 +72,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
     iterate_eos_and_pressure_anomaly,
 )
+from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
 
 
 def mpas_ocean_baroclinic_tendencies(
@@ -113,8 +115,6 @@ def mpas_ocean_baroclinic_tendencies(
     c1 = mesh.cellsOnEdge[0]  # (nEdges,)
     c2 = mesh.cellsOnEdge[1]  # (nEdges,)
 
-    from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
-
     def _fill_land_cells_mpas(field_cell, mask_cell):
         return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
 
@@ -156,8 +156,11 @@ def mpas_ocean_baroclinic_tendencies(
     # vertical shear (perturbation) component.
     # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:256-266)
     h_e_3d = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
-    H_e = jnp.maximum(jnp.sum(h_e_3d, axis=1), config.min_water_column_m)
-    u_bar = jnp.sum(u_3d * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)
+    # Both ``H_e`` and ``u_bar`` numerator share the ``h_e_3d`` weight
+    # on the level axis — fuse into one stacked column reduction.
+    _u_pair = jnp.sum(jnp.stack([h_e_3d, u_3d * h_e_3d], axis=-1), axis=1)
+    H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
+    u_bar = _u_pair[..., 1] / jnp.maximum(H_e, 1e-10)
     u_bar = u_bar * edge_mask  # (nEdges,)
     u_prime_3d = u_3d - u_bar[:, jnp.newaxis]  # (nEdges, nlev)
 
@@ -243,6 +246,20 @@ def mpas_ocean_baroclinic_tendencies(
         pv_flux = pv_flux_energy_conserving_3d(
             u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
         )
+    elif config.pv_scheme == "mixed":
+        # Weighted blend: α·F_energy + (1−α)·F_enstrophy. α=1 reverts to
+        # pure energy-conserving; α=0 to pure enstrophy-conserving. For the
+        # Eady ζ-checkerboard null mode, α ≈ 0.6–0.9 preserves most of the
+        # BCI growth rate while inheriting the enstrophy scheme's stability.
+        alpha = config.pv_alpha
+        pv_flux = (
+            alpha * pv_flux_energy_conserving_3d(
+                u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+            )
+            + (1.0 - alpha)
+              * pv_flux_enstrophy_conserving_3d(
+                  u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+              ))
     else:
         pv_flux = pv_flux_enstrophy_conserving_3d(
             u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
@@ -278,6 +295,17 @@ def mpas_ocean_baroclinic_tendencies(
         visc = visc + leith_biharmonic_3d(
             u_prime_3d, mesh, config.C_leith,
             modified=getattr(config, "C_leith_modified", False))
+
+    # Biharmonic dissipation on relative vorticity ζ (scale-selective damping
+    # of grid-scale vorticity patterns — notably the ζ-checkerboard null
+    # mode of the energy-conserving PV flux).  This is applied to the total
+    # velocity u_3d (not u_prime_3d) because ζ is a derived quantity and the
+    # full ζ (including the planetary-Coriolis-free baroclinic+barotropic ζ)
+    # carries the null-mode amplitude.  Invisible to ``B_h·del4(u)`` because
+    # the null mode lives in the kernel of the discrete curl-to-velocity map.
+    if config.K_zeta_bih > 0:
+        visc = visc + config.K_zeta_bih * biharmonic_vorticity_del4_3d(
+            u_3d, mesh)
 
     # Vertical advection of perturbation momentum (#171 Level-1).
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)

@@ -181,9 +181,14 @@ def barotropic_substeps_cgrid(
     h_k = compute_layer_thickness(
         eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     )
-    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
-    U_bar_cc = jnp.sum(u * h_k, axis=-1) / H_total * mask
-    V_bar_cc = jnp.sum(v * h_k, axis=-1) / H_total * mask
+    # ``H_total``, ``U_bar`` and ``V_bar`` numerators all reduce
+    # ``... * h_k`` over the level axis — fuse into one stacked sum.
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u * h_k, v * h_k], axis=-1), axis=-2,
+    )
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar_cc = _bar_triple[..., 1] / H_total * mask
+    V_bar_cc = _bar_triple[..., 2] / H_total * mask
 
     # --- Project to C-grid via vector halo exchange ---
     U_bar, V_bar = fv3_cc2c(U_bar_cc, V_bar_cc, cdgrid)

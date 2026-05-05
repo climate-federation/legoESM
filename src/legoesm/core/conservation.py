@@ -18,7 +18,6 @@ def _tiny(x=None):
     """Smallest normal float for the given array's dtype (or active accumulate dtype)."""
     if x is not None and hasattr(x, 'dtype'):
         return float(jnp.finfo(x.dtype).tiny)
-    from legoesm.core.precision import _resolve_dtype
     return float(jnp.finfo(_resolve_dtype(None, "accumulate")).tiny)
 # Epsilon for energy fixers: prevents sqrt(0) which has infinite gradient,
 # causing 0*Inf=NaN in the backward pass when jnp.maximum clamps KE_target to 0.
@@ -26,8 +25,13 @@ _EPS_ENERGY = 1e-20
 
 from legoesm import constants
 from legoesm.core.operators import global_integral, _is_distributed
-from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.core.operators_voronoi import kinetic_energy_cell
+from legoesm.core.precision import _resolve_dtype, get_policy
 from legoesm.core.state import ShallowWaterState, HydrostaticState
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.vertical import compute_geopotential
+from legoesm.parallel.reductions import batch_allreduce_mpi, global_sum_mpi
+from legoesm.runtime.backend import is_x64_enabled, supports_float64
 
 
 def _accumulation_dtype():
@@ -38,9 +42,6 @@ def _accumulation_dtype():
     float64 (e.g. Apple Metal) or when JAX x64 mode is disabled, the
     result is clamped to float32 even if the policy requests float64.
     """
-    from legoesm.core.precision import get_policy
-    from legoesm.runtime.backend import supports_float64, is_x64_enabled
-
     target = get_policy().accumulate
     if target == jnp.float64 and not (supports_float64() and is_x64_enabled()):
         return jnp.float32
@@ -110,7 +111,6 @@ def _global_area_sum(
         prod = prod * mask
     local_sum = jnp.sum(prod)
     if _is_distributed():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     return local_sum
 
@@ -130,21 +130,23 @@ def _batch_global_area_sums(
     """
     acc = _conservation_accumulator()
     area_acc = grid.area.astype(acc)
-    mask = None
+    weight = area_acc
     if owned_mask is not None:
         mask = owned_mask.astype(acc)
         while mask.ndim < area_acc.ndim:
             mask = mask[..., None]
+        weight = area_acc * mask
 
-    local_sums = []
-    for arr in arrays:
-        prod = arr.astype(acc) * area_acc
-        if mask is not None:
-            prod = prod * mask
-        local_sums.append(jnp.sum(prod))
+    # All inputs share the same horizontal axes and weight ``weight``;
+    # stack them along a new trailing axis and reduce once locally so
+    # XLA fuses the N independent sum kernels into one.
+    stacked = jnp.stack([arr.astype(acc) for arr in arrays], axis=-1)
+    summed = jnp.sum(
+        stacked * weight[..., None], axis=tuple(range(area_acc.ndim)),
+    )
+    local_sums = [summed[..., i] for i in range(len(arrays))]
 
     if _is_distributed():
-        from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     return local_sums
 
@@ -386,7 +388,6 @@ def zero_mean_tendency(
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
         if _is_distributed():
-            from legoesm.parallel.reductions import global_sum_mpi
             level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
         # Broadcast corrections to match tendency shape
@@ -429,7 +430,6 @@ def compute_global_moisture(
     -------
     jax.Array : Scalar global moisture integral [kg].
     """
-    from legoesm import constants
     # Column water vapor: ∫ q_v dp/g = q_v * p_s * dsigma / g
     cwv = jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
     return _global_area_sum(cwv, grid, owned_mask=owned_mask)
@@ -690,9 +690,6 @@ def compute_hydrostatic_energy(
         'potential_energy': ∫ Φ·p_s·dσ·dA / g
         'total_energy': sum of all three
     """
-    from legoesm import constants
-    from legoesm.grids.vertical import compute_geopotential
-
     u = state.u.data
     v = state.v.data
     T = state.T.data
@@ -707,18 +704,22 @@ def compute_hydrostatic_energy(
     # (6, n, n, nlev) and lat-lon (n_lat, n_lon, nlev) state shapes.
     mass_weight = p_s[..., None] * dsigma / g
 
-    # Kinetic energy
-    ke_3d = 0.5 * (u**2 + v**2) * mass_weight
-    ke_col = jnp.sum(ke_3d, axis=-1)
-
-    # Internal energy
-    ie_3d = c_v * T * mass_weight
-    ie_col = jnp.sum(ie_3d, axis=-1)
-
-    # Potential energy
+    # Kinetic + internal + potential energy column reductions all share
+    # the level axis and ``mass_weight``; stack the integrands and reduce
+    # once.  ``mass_weight`` is factored into the stack so each integrand
+    # contributes only its own value field.
     Phi = compute_geopotential(T, p_s, sigma_coord, phis)
-    pe_3d = Phi * mass_weight
-    pe_col = jnp.sum(pe_3d, axis=-1)
+    _ke_intg = 0.5 * (u**2 + v**2)
+    _ie_intg = c_v * T
+    _pe_intg = Phi
+    _col_triple = jnp.sum(
+        jnp.stack([_ke_intg, _ie_intg, _pe_intg], axis=-1)
+        * mass_weight[..., None],
+        axis=-2,
+    )
+    ke_col = _col_triple[..., 0]
+    ie_col = _col_triple[..., 1]
+    pe_col = _col_triple[..., 2]
 
     ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
@@ -747,8 +748,6 @@ def compute_nh_energy(
         'potential_energy': ∫ g·z·rho·J·dz·dA
         'total_energy': sum of all three
     """
-    from legoesm import constants
-
     u = state.u.data
     v = state.v.data
     w = state.w.data
@@ -773,17 +772,19 @@ def compute_nh_energy(
 
     weight = J[..., None] * dz[None, None, None, :] * rho_total  # (6,n,n,nlev)
 
-    # Kinetic
-    ke_3d = 0.5 * (u**2 + v**2 + w_full**2) * weight
-    ke_col = jnp.sum(ke_3d, axis=-1)
-
-    # Internal
-    ie_3d = c_v * T * weight
-    ie_col = jnp.sum(ie_3d, axis=-1)
-
-    # Potential
-    pe_3d = g * z_full[None, None, None, :] * weight
-    pe_col = jnp.sum(pe_3d, axis=-1)
+    # KE+IE+PE column reductions all share the level axis and
+    # ``weight``; stack the integrands and reduce once.
+    _ke_intg = 0.5 * (u**2 + v**2 + w_full**2)
+    _ie_intg = c_v * T
+    _pe_intg = g * jnp.broadcast_to(z_full[None, None, None, :], T.shape)
+    _col_triple = jnp.sum(
+        jnp.stack([_ke_intg, _ie_intg, _pe_intg], axis=-1)
+        * weight[..., None],
+        axis=-2,
+    )
+    ke_col = _col_triple[..., 0]
+    ie_col = _col_triple[..., 1]
+    pe_col = _col_triple[..., 2]
 
     ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
@@ -860,7 +861,6 @@ def fix_mass_mpas(state, target_mass, mesh):
     -------
     MPASShallowWaterState
     """
-    from legoesm.core.state import MPASShallowWaterState
     current_mass = global_integral_voronoi(state.h.data, mesh)
     # ``mesh.grid_total_area`` is precomputed at mesh construction —
     # avoid recomputing the global ``jnp.sum(areaCell)`` every step
@@ -893,18 +893,20 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     -------
     MPASShallowWaterState
     """
-    from legoesm.core.operators_voronoi import kinetic_energy_cell
-
     h = state.h.data
     u = state.u.data
     h_s = state.h_s.data
     area = mesh.areaCell
 
     KE_cells = kinetic_energy_cell(u, mesh)
-    energy_terms = jnp.stack([
-        jnp.sum(KE_cells * h * area),
-        jnp.sum(0.5 * g * (h + h_s) ** 2 * area),
-    ])
+    # Both KE and PE share the ``area`` weight on the horizontal axes —
+    # stack the two integrands and reduce once locally so XLA fires one
+    # sum kernel; the stacked result still yields a 2-vector for the
+    # downstream ``KE / PE`` split (and a future allreduce, if any).
+    _energy_intg = jnp.stack(
+        [KE_cells * h, 0.5 * g * (h + h_s) ** 2], axis=-1,
+    ) * area[..., None]
+    energy_terms = jnp.sum(_energy_intg, axis=tuple(range(area.ndim)))
     KE, PE = energy_terms[0], energy_terms[1]
 
     KE_target = jnp.maximum(target_energy - PE, _EPS_ENERGY)

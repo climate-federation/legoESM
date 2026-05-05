@@ -69,8 +69,19 @@ def make_ocean_physics(config: OceanPhysicsConfig) -> Callable:
         fns.append(make_lateral_mixing_physics(config.lateral_mixing))
     if config.surface_forcing.scheme != "none":
         fns.append(make_surface_forcing_physics(config.surface_forcing))
+    # Physics-level bottom drag is deprecated — use the dynamics-level
+    # ``bottom_drag_r`` field on the model config instead.  The dynamics
+    # path applies drag in both the baroclinic PE and the barotropic
+    # substeps, which is physically correct (MOM6 convention).
     if config.bottom_drag.scheme != "none":
-        fns.append(make_bottom_drag_physics(config.bottom_drag))
+        raise ValueError(
+            f"Physics-level bottom drag (scheme={config.bottom_drag.scheme!r}) "
+            "is deprecated. Use bottom_drag_r on your model config "
+            "(LatLonCGridOceanConfig or MPASOceanConfig) instead, which "
+            "applies drag in both the baroclinic PE and the barotropic "
+            "substeps (matching MOM6). Set BottomDragConfig(scheme='none') "
+            "in your OceanPhysicsConfig."
+        )
     if config.convection.scheme != "none":
         fns.append(make_convection_physics(config.convection))
 

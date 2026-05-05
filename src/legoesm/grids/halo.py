@@ -238,18 +238,56 @@ def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
         that the true fractional index on the neighbour strip at that
         depth is ``j + δ``.
     """
+    return _compute_halo_interp_offsets_hN(n, halo=2)
+
+
+def compute_halo_interp_offsets_h3(n: int) -> jnp.ndarray:
+    """Precompute fractional-index offsets for halo=3 exchange.
+
+    Like :func:`compute_halo_interp_offsets_h2` but returns offsets for
+    three halo depths (depth 0 = adjacent to interior, depth 2 = outer).
+
+    This supports the FB-path stability work that requires deeper halos
+    to reach stable c_sw/d_sw stencils at C36 resolution.
+
+    Parameters
+    ----------
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    offsets : jax.Array, shape (6, 4, 3, n)
+        ``offsets[face, edge_idx, depth, j]`` is the correction δ such
+        that the true fractional index on the neighbour strip at that
+        depth is ``j + δ``.
+    """
+    return _compute_halo_interp_offsets_hN(n, halo=3)
+
+
+def _compute_halo_interp_offsets_hN(n: int, halo: int) -> jnp.ndarray:
+    """General N-depth halo interp-offset precomputation.
+
+    Shared implementation for :func:`compute_halo_interp_offsets_h2`
+    and :func:`compute_halo_interp_offsets_h3` — folded into a single
+    function so the per-depth gnomonic→neighbour mapping logic is in
+    one place.
+    """
+    if halo < 1:
+        raise ValueError(f"halo must be >= 1, got {halo}")
+
     dalpha = np.pi / (2 * n)
     alpha = np.linspace(-np.pi / 4, np.pi / 4, n, endpoint=False) + dalpha / 2
 
     edges = [WEST, EAST, SOUTH, NORTH]
-    offsets = np.zeros((6, 4, 2, n), dtype=np.float64)
+    offsets = np.zeros((6, 4, halo, n), dtype=np.float64)
 
     for face in range(6):
         for edge_idx, edge in enumerate(edges):
             nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
 
-            for depth in range(2):
-                # Distance from boundary: depth=0 → dα/2, depth=1 → 3dα/2
+            for depth in range(halo):
+                # Distance from boundary: depth=0 → dα/2, depth=k → (2k+1)dα/2
                 d = dalpha / 2 + depth * dalpha
 
                 for j in range(n):
@@ -306,17 +344,19 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     idx = jnp.arange(n, dtype=offsets_1d.dtype) + offsets_1d
     idx = jnp.clip(idx, 0.0, n - 1.0)
 
-    # Reshape interpolation weights so they broadcast against ``strip``'s
-    # trailing axes.  For 1D ``strip`` this is a no-op; for 2D/3D inputs
-    # (e.g. native 4D halo on lat-lon-extended levels) it inserts the
-    # right number of singleton axes so weights broadcast.
-    bcast = (slice(None),) + (None,) * (strip.ndim - 1)
+    # Iter-724: support 4D strips `(n, nlev)` by broadcasting weights
+    # along a trailing level axis.  Prior to iter-724 this function
+    # assumed `strip.shape == (n,)`; callers passing multi-level
+    # strips got a latent broadcast failure when offsets != None
+    # (caught by Codex iter-723 review on the new halo=3 4D path).
+    extra_dims = strip.ndim - 1
+    broadcast_shape = (n,) + (1,) * extra_dims
 
     if n < 3:
         # Fall back to linear for very coarse grids
         lo = jnp.clip(jnp.floor(idx).astype(jnp.int32), 0, n - 2)
         w = jnp.clip(idx - lo.astype(offsets_1d.dtype), 0.0, 1.0)
-        w_b = w[bcast]
+        w_b = w.reshape(broadcast_shape)
         return ((1.0 - w_b) * strip[lo] + w_b * strip[lo + 1]).astype(strip.dtype)
 
     # 3-point Lagrange: stencil centre clamped to [1, n-2] so all
@@ -326,9 +366,9 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     # With float32 offsets + float64 data, the float32 weights have
     # sum(w) = 1 ± O(1e-7), causing ~0.06 Pa error for 6e5 Pa fields.
     f = (idx - jc.astype(offsets_1d.dtype)).astype(strip.dtype)
-    c_m1 = (0.5 * f * (f - 1.0))[bcast]
-    c_0 = (1.0 - f * f)[bcast]
-    c_p1 = (0.5 * f * (f + 1.0))[bcast]
+    c_m1 = (0.5 * f * (f - 1.0)).reshape(broadcast_shape)
+    c_0 = (1.0 - f * f).reshape(broadcast_shape)
+    c_p1 = (0.5 * f * (f + 1.0)).reshape(broadcast_shape)
     interp = c_m1 * strip[jc - 1] + c_0 * strip[jc] + c_p1 * strip[jc + 1]
     return interp.astype(strip.dtype)
 
@@ -478,8 +518,35 @@ def pad_halo(
         raise ValueError(
             "interp_offsets and duogrid are mutually exclusive"
         )
-    if halo not in (1, 2):
-        raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+    if halo not in (1, 2, 3):
+        raise NotImplementedError(
+            f"Only halo=1, halo=2, and halo=3 are supported, got {halo}")
+
+    # Validate interp_offsets shape for halo=3 (the new path added in
+    # iter-499).  Without this guard, a wrongly-shaped offsets array
+    # would fail with a cryptic IndexError deep inside
+    # `_pad_halo_local_h3`.  halo=1/2 are intentionally *not* checked
+    # here because several existing callers pass the h1 shape
+    # `(6, 4, n)` together with `halo=2`; that usage is silently
+    # reduced to nearest-neighbour-like interpolation by
+    # `_pad_halo_local_h2` and any pure tightening would be a broader
+    # refactor outside iter-500's Codex-driven guardrail scope.  The
+    # halo=3 path has no legacy callers so we lock it down now.
+    #
+    # iter-501 (Codex stop-time review of iter-500): the ndim + depth
+    # check alone is not strict — it accepts (10, 7, 3, 100) which
+    # would then fail cryptically in the loop for face=6..9 / edge=4..6,
+    # and even if it survived the indexing loop a strip shape
+    # mismatch against `data.shape[1]` (the grid size `n`) would give
+    # silently-wrong interpolation.  Now every axis is validated.
+    if interp_offsets is not None and halo == 3:
+        n = data.shape[1]
+        expected = (6, 4, 3, n)
+        if tuple(interp_offsets.shape) != expected:
+            raise ValueError(
+                f"halo=3 expects interp_offsets of shape {expected} "
+                f"(6 faces, 4 edges, 3 halo depths, n = data.shape[1]); "
+                f"got shape={tuple(interp_offsets.shape)}.")
 
     # When duogrid is active, suppress interp_offsets (use nearest copy + remap)
     offsets = None if duogrid is not None else interp_offsets
@@ -495,24 +562,138 @@ def pad_halo(
 
     # MPI dispatch.
     if _halo_backend == "mpi":
+        # iter-630: MPI halo=3 is now supported end-to-end.  The 2D scalar
+        # (`_pad_halo_mpi_face_only` / `_pad_halo_mpi_tiled`) and 4D tensor
+        # (`_pad_halo_mpi_4d_face_only` / `_pad_halo_mpi_4d_tiled`) paths
+        # all handle three halo depths, and corner cells are filled by
+        # `_fill_corners_h3`.
+        #
+        # Iter-631 (Codex stop-time finding on iter-630): the MPI helpers
+        # do NOT honor `interp_offsets` — they do a nearest-index copy
+        # only.  Before iter-630 this silent-drop was unreachable on the
+        # halo=3 path because of the halo=3 guard; removing that guard
+        # newly exposed the hazard.  Refuse with a clear error instead of
+        # silently producing wrong results.  `duogrid` is handled below
+        # in the MPI path via the scalar `pad_halo_mpi` + post-dispatch
+        # `cube_rmp_vectorized` (offsets is None there by construction of
+        # line 541), so it is NOT affected.
+        if offsets is not None:
+            raise NotImplementedError(
+                "pad_halo(interp_offsets=...) is not supported on the "
+                "MPI backend: `pad_halo_mpi` does a nearest-index copy "
+                "only.  If you need interpolated halo placement under "
+                "MPI, either (a) teach `pad_halo_mpi` / `pad_halo_mpi_4d` "
+                "to carry offsets and apply `_interp_strip_*` on the "
+                "receive side, or (b) pre-interpolate before calling "
+                "pad_halo.  Single-device backend supports this today.")
         from legoesm.parallel.halo_exchange import pad_halo_mpi
         padded = pad_halo_mpi(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
+        if halo == 3:
+            raise NotImplementedError(
+                "SPMD halo=3 exchange not yet implemented; "
+                "halo=3 is only available on the single-node local path.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
-        padded = explicit_pad_halo(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local(data, offsets)
-    else:
+    elif halo == 2:
         padded = _pad_halo_local_h2(data, offsets)
+    else:  # halo == 3
+        padded = _pad_halo_local_h3(data, offsets)
 
-    # Duo-Grid post-processing: kinked→extended remap + corner fill
+    # Duo-Grid post-processing: kinked→extended remap + corner fill.
+    # iter-533: halo=3 is now ALLOWED for the duogrid path:
+    # `cube_rmp_vectorized` already loops `for d in range(min(halo,
+    # duogrid.ng))` (line 775), and `fill_corner_region` falls back
+    # to averaging when `h > duogrid.ng` (line 893).  So:
+    #   - duogrid.ng >= 3: full Lagrange remap at all 3 halo depths
+    #   - duogrid.ng <  3: outer halo-3 cells get averaging-fallback
+    #     instead of Lagrange, matching the iter-114 behaviour for
+    #     halo > ng.
     if duogrid is not None:
         from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
         padded = cube_rmp_vectorized(padded, duogrid, halo)
         padded = fill_corner_region(padded, duogrid, halo)
 
     return padded
+
+
+def pad_halo_pair_h2(
+    q1: jax.Array,
+    q2: jax.Array,
+    interp_offsets: jax.Array | None = None,
+    duogrid=None,
+) -> tuple[jax.Array, jax.Array]:
+    """Halo=2 exchange a pair of independent ``(6, n, n)`` fields.
+
+    Under the SPMD backend, the two fields ride a single
+    ``packed_pad_halo_4d(halo=2)`` collective — dropping per-call halo=2
+    cross-device collective count from 2 → 1 when both fields can be
+    exchanged together (e.g. PPM transport's ``q_i`` and ``q_j``,
+    which depend only on the already-padded ``q``).  Under the
+    local / MPI backends this falls through to two sequential
+    ``pad_halo(halo=2)`` calls — same arithmetic, no extra overhead.
+
+    Parameters
+    ----------
+    q1, q2 : jax.Array, shape ``(6, n, n)``
+    interp_offsets : optional
+        Forwarded to the underlying SPMD / local kernels (3D h2
+        offsets shaped ``(6, 4, 2, n)`` when ``duogrid is None``).
+    duogrid : DuoGridData or None
+
+    Returns
+    -------
+    (q1_pad, q2_pad) : tuple of jax.Array, each shape ``(6, n+4, n+4)``.
+    """
+    if _halo_backend == "spmd" and _spmd_mesh is not None:
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+        offsets = None if duogrid is not None else interp_offsets
+        # Add a singleton trailing axis so the SPMD packed kernel —
+        # which targets 4D ``(6, n, n, C)`` inputs — can ride the same
+        # all_gather.  Squeeze the channel axis off on return.
+        q1_4d = q1[..., None]
+        q2_4d = q2[..., None]
+        q1_pad_4d, q2_pad_4d = packed_pad_halo_4d(
+            q1_4d, q2_4d, mesh=_spmd_mesh,
+            duogrid=duogrid, interp_offsets=offsets, halo=2,
+        )
+        return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+    if _halo_backend == "mpi" and _mpi_topology is not None:
+        # MPI: ``packed_pad_halo_mpi_4d`` already supports halo=2 and
+        # halves the MPI message count from 2 → 1 by stacking the two
+        # fields along the trailing axis.  Same singleton-channel trick
+        # as the SPMD path.  ``packed_pad_halo_mpi_4d`` does not
+        # currently support ``interp_offsets`` (the underlying MPI
+        # exchange ignores them — see the explicit guard in
+        # ``pad_halo_mpi_4d``); when offsets are requested, fall back
+        # to the per-field unpacked ``pad_halo`` path which raises a
+        # clear NotImplementedError so callers know to either run with
+        # duogrid (preferred) or accept the unpacked MPI path until
+        # offset-aware MPI exchange lands.
+        if interp_offsets is None:
+            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+            q1_4d = q1[..., None]
+            q2_4d = q2[..., None]
+            q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
+                q1_4d, q2_4d, topology=_mpi_topology,
+                halo=2, duogrid=duogrid,
+            )
+            return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+        # offsets requested under MPI — `pad_halo` already raises a
+        # clear NotImplementedError on this combination.  Let the
+        # per-field path do that for a sharper error than ours.
+    # Local backend (or MPI-with-offsets — handled above): two
+    # sequential pad_halo calls with identical arithmetic.
+    q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    q2_pad = pad_halo(q2, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    return q1_pad, q2_pad
 
 
 def pad_halo_4d(
@@ -548,8 +729,29 @@ def pad_halo_4d(
         raise ValueError(
             "interp_offsets and duogrid are mutually exclusive"
         )
-    if halo not in (1, 2):
-        raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+    if halo not in (1, 2, 3):
+        raise NotImplementedError(
+            f"Only halo=1, halo=2, and halo=3 are supported, got {halo}")
+    # iter-723: halo=3 single-node 4D now supported via
+    # `_pad_halo_local_h3_4d` (below).  MPI halo=3 4D already supported
+    # via `pad_halo_mpi_4d` (iter-630).  SPMD halo=3 4D still not
+    # implemented (checked below).
+
+    # Iter-724 (Codex iter-723 finding): validate halo=3 interp_offsets
+    # shape at the 4D entry mirroring the scalar `pad_halo` guard
+    # (iter-500/501).  Without this, a wrongly-shaped offsets array
+    # would fail cryptically in `_pad_halo_local_h3_4d`'s strip
+    # loop.  Matches the scalar guard at line 531.  halo=1/2 are
+    # NOT checked (legacy callers pass h1-shaped offsets with halo=2
+    # per existing precedent in `pad_halo`).
+    if interp_offsets is not None and halo == 3:
+        n = data.shape[1]
+        expected = (6, 4, 3, n)
+        if tuple(interp_offsets.shape) != expected:
+            raise ValueError(
+                f"halo=3 expects interp_offsets of shape {expected} "
+                f"(6 faces, 4 edges, 3 halo depths, n = data.shape[1]); "
+                f"got shape={tuple(interp_offsets.shape)}.")
 
     offsets = None if duogrid is not None else interp_offsets
 
@@ -560,16 +762,40 @@ def pad_halo_4d(
 
     # MPI dispatch.
     if _halo_backend == "mpi":
+        # Iter-632 (Codex stop-time finding on iter-631): same silent-
+        # drop hazard as the scalar `pad_halo` MPI branch — `pad_halo_mpi_4d`
+        # does not carry or honor `interp_offsets`, so a caller passing
+        # offsets under MPI would silently get nearest-index placement.
+        # Guard mirrors the scalar version (same message for grep-
+        # locality); halo=3 is already rejected by the guard above so
+        # this fires only for halo=1/2 under MPI.
+        if offsets is not None:
+            raise NotImplementedError(
+                "pad_halo_4d(interp_offsets=...) is not supported on "
+                "the MPI backend: `pad_halo_mpi_4d` does nearest-index "
+                "copy only.  If you need interpolated halo placement "
+                "under MPI, either teach `pad_halo_mpi_4d` to carry "
+                "offsets and apply `_interp_strip_*` on the receive "
+                "side, or pre-interpolate before calling pad_halo_4d. "
+                "Single-device backend supports this today.")
         from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
         padded = pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
+        if halo == 3:
+            raise NotImplementedError(
+                "SPMD 4D halo=3 exchange not yet implemented; "
+                "halo=3 is only available on MPI and single-node paths.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
-        padded = explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo_4d(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local_4d(data, offsets)
-    else:
+    elif halo == 2:
         padded = _pad_halo_local_h2_4d(data, offsets)
+    else:  # halo == 3 (iter-723)
+        padded = _pad_halo_local_h3_4d(data, offsets)
 
     # Duo-Grid post-processing: apply per-level via vmap
     if duogrid is not None:
@@ -710,6 +936,78 @@ def _pad_halo_local_h2_4d(
     return padded
 
 
+def _pad_halo_local_h3_4d(
+    data: jax.Array,
+    interp_offsets: jax.Array | None = None,
+) -> jax.Array:
+    """Local 4D scalar halo exchange for halo=3.
+
+    Iter-723 port of :func:`_pad_halo_local_h3` (3D scalar halo=3) to
+    the 4D multi-level case.  The 4D form is required for FB-chain
+    production work (review-doc item #2): multi-level scalar fields
+    (e.g., 3D height, vorticity snapshots) need halo=3 quality to
+    match Fortran's ng=3 halo semantic at cube face boundaries and
+    vertices.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n, nlev)
+    interp_offsets : jax.Array or None, shape (6, 4, 3, n)
+        Precomputed fractional-index offsets for 3 halo depths (see
+        :func:`compute_halo_interp_offsets_h3`).
+
+    Returns
+    -------
+    padded : jax.Array, shape (6, n+6, n+6, nlev)
+    """
+    n = data.shape[1]
+    nlev = data.shape[3]
+    padded = jnp.zeros((6, n + 6, n + 6, nlev), dtype=data.dtype)
+
+    # Place interior data
+    padded = padded.at[:, 3:-3, 3:-3, :].set(data)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for depth in range(3):
+                # Extract neighbour strip at this depth — for a 4D
+                # array `data[face, i, j]` returns (nlev,) so the
+                # strip along an edge has shape (n, nlev).
+                strip = _extract_edge_strip_at_depth(
+                    data, nbr_face, nbr_edge, depth,
+                )
+
+                if is_reversed:
+                    strip = strip[::-1]
+
+                if interp_offsets is not None:
+                    strip = _interp_strip(
+                        strip, interp_offsets[face, edge_idx, depth],
+                    )
+
+                # Interior is at [3:-3, 3:-3, :], so:
+                #   WEST  halo positions: i = 2 - depth
+                #   EAST  halo positions: i = n + 3 + depth
+                #   SOUTH halo positions: j = 2 - depth
+                #   NORTH halo positions: j = n + 3 + depth
+                if edge == WEST:
+                    padded = padded.at[face, 2 - depth, 3:-3].set(strip)
+                elif edge == EAST:
+                    padded = padded.at[face, n + 3 + depth, 3:-3].set(strip)
+                elif edge == SOUTH:
+                    padded = padded.at[face, 3:-3, 2 - depth].set(strip)
+                elif edge == NORTH:
+                    padded = padded.at[face, 3:-3, n + 3 + depth].set(strip)
+
+    # Fill 3×3 L-shaped corner regions (9 cells × 4 corners × 6 faces).
+    padded = _fill_corners_h3(padded)
+    return padded
+
+
 def pad_halo_vector_4d(
     u_data: jax.Array,
     v_data: jax.Array,
@@ -736,11 +1034,20 @@ def pad_halo_vector_4d(
         from legoesm.parallel.cubesphere_exchange import (
             explicit_pad_halo_vector_4d,
         )
+        # Iter-31: forward ``interp_offsets`` to the SPMD vector kernel.
+        # Without this, the dycore's hyperdiffusion path
+        # (``hyperdiffusion_3d`` → ``divergence_3d`` → here) silently
+        # drops the Lagrange correction under SPMD, producing ~6e-4
+        # relative drift on u/v after a single SSP-RK3 step at C24/L8.
+        # ``duogrid``-on-grid runs already handle this through the
+        # post-exchange remap; ``interp_offsets``-with-no-duogrid runs
+        # need the explicit forwarding.
+        offsets = None if duogrid is not None else interp_offsets
         return explicit_pad_halo_vector_4d(
             u_data, v_data,
             cos_angle, sin_angle,
             cos_angle_padded, sin_angle_padded,
-            _spmd_mesh, halo=halo,
+            _spmd_mesh, halo=halo, interp_offsets=offsets,
         )
 
     # Broadcast 2D angles to match 4D data
@@ -753,12 +1060,37 @@ def pad_halo_vector_4d(
     # When MPI is active, pack both components along the level axis and
     # do one exchange instead of two, halving MPI message count.
     if _halo_backend == "mpi":
-        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
-        packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
-        packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
-        nlev = u_data.shape[-1]
-        u_east_padded = packed_padded[..., :nlev]
-        v_north_padded = packed_padded[..., nlev:]
+        # Iter-632/633 refused both `interp_offsets != None` and
+        # `duogrid != None`.  Iter-634 (Codex stop-time follow-up):
+        # `pad_halo_4d` already applies `cube_rmp_vectorized` +
+        # `fill_corner_region` post-dispatch regardless of backend,
+        # so per-component fallback under MPI is drop-in correct.
+        # Reinstate the duogrid path via that fallback; keep refusing
+        # `interp_offsets` because no path under MPI honors offsets.
+        if interp_offsets is not None:
+            raise NotImplementedError(
+                "pad_halo_vector_4d(interp_offsets=...) is not supported "
+                "on the MPI backend: `pad_halo_mpi_4d` does "
+                "nearest-index copy only.  If you need interpolated "
+                "halo placement under MPI, either teach `pad_halo_mpi_4d` "
+                "to carry offsets and apply `_interp_strip_*` on the "
+                "receive side, or pre-interpolate before calling "
+                "pad_halo_vector_4d.  Single-device backend supports "
+                "this today.")
+        if duogrid is not None:
+            # Iter-634: per-component scalar `pad_halo_4d` fallback.
+            # Pays 2 MPI messages instead of 1 packed exchange, but
+            # exercises `pad_halo_4d`'s validated duogrid post-
+            # processing so the kinked→extended remap actually runs.
+            u_east_padded = pad_halo_4d(u_east, halo=halo, duogrid=duogrid)
+            v_north_padded = pad_halo_4d(v_north, halo=halo, duogrid=duogrid)
+        else:
+            from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+            packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
+            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            nlev = u_data.shape[-1]
+            u_east_padded = packed_padded[..., :nlev]
+            v_north_padded = packed_padded[..., nlev:]
     else:
         u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets,
                                      duogrid=duogrid)
@@ -899,6 +1231,76 @@ def _pad_halo_local_h2(
 
     # Fill L-shaped corner regions (4 cells per corner × 4 corners × 6 faces)
     padded = _fill_corners_h2(padded)
+
+    return padded
+
+
+def _pad_halo_local_h3(
+    data: jax.Array,
+    interp_offsets: jax.Array | None = None,
+) -> jax.Array:
+    """Local (single-node) scalar halo exchange for halo=3.
+
+    Generalizes :func:`_pad_halo_local_h2` to 3 halo depths.  This is
+    plumbing for the FB-path C36 stability work (review-doc item #2),
+    which requires ng=3-equivalent halo quality to reach Fortran-
+    faithful stability on the `_c_sw` first-order upwind mass flux.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n)
+    interp_offsets : jax.Array or None, shape (6, 4, 3, n)
+        Precomputed fractional-index offsets for 3 halo depths (see
+        :func:`compute_halo_interp_offsets_h3`).
+
+    Returns
+    -------
+    padded : jax.Array, shape (6, n+6, n+6)
+    """
+    n = data.shape[1]
+    padded = jnp.zeros((6, n + 6, n + 6), dtype=data.dtype)
+
+    # Place interior data
+    padded = padded.at[:, 3:-3, 3:-3].set(data)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for depth in range(3):
+                # Extract neighbour strip at this depth
+                strip = _extract_edge_strip_at_depth(
+                    data, nbr_face, nbr_edge, depth,
+                )
+
+                if is_reversed:
+                    strip = strip[::-1]
+
+                # Interpolate to correct physical position if offsets provided
+                if interp_offsets is not None:
+                    strip = _interp_strip(
+                        strip, interp_offsets[face, edge_idx, depth],
+                    )
+
+                # Place in halo: depth=0 → adjacent to interior; depth=2 → outer
+                # Interior is at [3:-3, 3:-3], so:
+                #   WEST  halo positions: i = 2 - depth (2, 1, 0 for depths 0..2)
+                #   EAST  halo positions: i = n + 3 + depth
+                #   SOUTH halo positions: j = 2 - depth
+                #   NORTH halo positions: j = n + 3 + depth
+                if edge == WEST:
+                    padded = padded.at[face, 2 - depth, 3:-3].set(strip)
+                elif edge == EAST:
+                    padded = padded.at[face, n + 3 + depth, 3:-3].set(strip)
+                elif edge == SOUTH:
+                    padded = padded.at[face, 3:-3, 2 - depth].set(strip)
+                elif edge == NORTH:
+                    padded = padded.at[face, 3:-3, n + 3 + depth].set(strip)
+
+    # Fill L-shaped 3×3 corner regions (9 cells × 4 corners × 6 faces)
+    padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -1068,6 +1470,22 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     Vectorized: all 24 corners (6 faces × 4 corners) in a single
     gather + average + scatter.
 
+    Fidelity note (Codex iter-69 review): the Fortran transport path uses
+    `copy_corners(dir=1/2)` in tp_core.F90:243-299 — a directional rotated
+    copy tailored to X-sweep vs Y-sweep of PPM.  That mechanism writes
+    DIFFERENT values at the same cube-vertex cell for different sweep
+    directions.  Our 2-point average is a direction-invariant single value.
+
+    This discrepancy has no functional impact on ``fv_tp_2d`` (verified):
+    the operator-split PPM slices q_full to keep EITHER i-halo OR j-halo
+    (``q_full[:, 2:-2, :]`` for y-sweep, ``q_i_pad[:, :, 2:-2]`` for
+    x-sweep), never simultaneously — so cube-vertex corner cells at
+    (i_halo, j_halo) are never referenced by any PPM stencil.
+
+    The corner fill IS read by Arakawa-Lamb gradient (``B_pad[:, :-1, :-1]``
+    includes corner cells), but that gradient is a non-FV3 Python operator
+    and there is no Fortran reference to match.
+
     Parameters
     ----------
     padded : jax.Array, shape (6, n+2, n+2)
@@ -1176,28 +1594,156 @@ def _fill_corners_h2(padded: jax.Array) -> jax.Array:
     return padded
 
 
-def extrapolate_to_halo(data: jax.Array) -> jax.Array:
-    """Extrapolate a field to halo cells using boundary values.
+def _fill_corners_h3(padded: jax.Array) -> jax.Array:
+    """Fill L-shaped 3×3 corner regions of halo=3 padded array.
 
-    Unlike pad_halo (which gets neighbor data), this copies each face's
-    own boundary values to its halo cells. This is appropriate for
-    grid metric terms (dx, dy, area) that are defined in the local
-    face coordinate system and should NOT be exchanged between faces
-    with different axis orientations.
+    Each face has 4 corner regions of 3×3 = 9 cells that are not
+    filled by the edge-strip exchange.  Fill inside-out so each cell
+    depends only on already-filled neighbours:
+
+    ``(2,2)`` (diagonal from interior) first, using adjacent edge
+    halos; then the axis-aligned cells outward along each arm; then
+    the interior-to-outer diagonals; finally the outermost corner
+    ``(0,0)``.
 
     Parameters
     ----------
-    data : jax.Array, shape (6, n, n)
-        Field to extrapolate.
+    padded : jax.Array, shape (6, n+6, n+6)
 
     Returns
     -------
-    padded : jax.Array, shape (6, n+2, n+2)
+    jax.Array, shape (6, n+6, n+6)
     """
-    # jnp.pad with mode='edge' replicates boundary values — equivalent to
-    # the previous 9 sequential .at[].set() scatter operations but compiled
-    # as a single XLA pad op.
-    return jnp.pad(data, ((0, 0), (1, 1), (1, 1)), mode='edge')
+    for f in range(6):
+        # --- SW corner (rows 0..2, cols 0..2) ---
+        # Interior-adjacent cells along the two arms:
+        #   (2, 3..) is WEST depth=0 halo (set)
+        #   (3, 2)  is SOUTH depth=0 halo (set)
+        # So (2,2) = avg of those two neighbours.
+        padded = padded.at[f, 2, 2].set(
+            0.5 * (padded[f, 2, 3] + padded[f, 3, 2])
+        )
+        # (1,2): WEST depth=1 (padded[f,1,3]) and (2,2) just filled
+        padded = padded.at[f, 1, 2].set(
+            0.5 * (padded[f, 1, 3] + padded[f, 2, 2])
+        )
+        # (2,1): SOUTH depth=1 (padded[f,3,1]) and (2,2) just filled
+        padded = padded.at[f, 2, 1].set(
+            0.5 * (padded[f, 3, 1] + padded[f, 2, 2])
+        )
+        # (0,2): WEST depth=2 (padded[f,0,3]) and (1,2) just filled
+        padded = padded.at[f, 0, 2].set(
+            0.5 * (padded[f, 0, 3] + padded[f, 1, 2])
+        )
+        # (2,0): SOUTH depth=2 (padded[f,3,0]) and (2,1) just filled
+        padded = padded.at[f, 2, 0].set(
+            0.5 * (padded[f, 3, 0] + padded[f, 2, 1])
+        )
+        # (1,1): diagonal interior-ward, average of just-filled (1,2) and (2,1)
+        padded = padded.at[f, 1, 1].set(
+            0.5 * (padded[f, 1, 2] + padded[f, 2, 1])
+        )
+        # (0,1): average of just-filled (0,2) and (1,1)
+        padded = padded.at[f, 0, 1].set(
+            0.5 * (padded[f, 0, 2] + padded[f, 1, 1])
+        )
+        # (1,0): average of just-filled (2,0) and (1,1)
+        padded = padded.at[f, 1, 0].set(
+            0.5 * (padded[f, 2, 0] + padded[f, 1, 1])
+        )
+        # (0,0): outermost, average of just-filled (0,1) and (1,0)
+        padded = padded.at[f, 0, 0].set(
+            0.5 * (padded[f, 0, 1] + padded[f, 1, 0])
+        )
+
+        # --- SE corner (rows n+3..n+5, cols 0..2) ---
+        padded = padded.at[f, -3, 2].set(
+            0.5 * (padded[f, -3, 3] + padded[f, -4, 2])
+        )
+        padded = padded.at[f, -2, 2].set(
+            0.5 * (padded[f, -2, 3] + padded[f, -3, 2])
+        )
+        padded = padded.at[f, -3, 1].set(
+            0.5 * (padded[f, -4, 1] + padded[f, -3, 2])
+        )
+        padded = padded.at[f, -1, 2].set(
+            0.5 * (padded[f, -1, 3] + padded[f, -2, 2])
+        )
+        padded = padded.at[f, -3, 0].set(
+            0.5 * (padded[f, -4, 0] + padded[f, -3, 1])
+        )
+        padded = padded.at[f, -2, 1].set(
+            0.5 * (padded[f, -2, 2] + padded[f, -3, 1])
+        )
+        padded = padded.at[f, -1, 1].set(
+            0.5 * (padded[f, -1, 2] + padded[f, -2, 1])
+        )
+        padded = padded.at[f, -2, 0].set(
+            0.5 * (padded[f, -3, 0] + padded[f, -2, 1])
+        )
+        padded = padded.at[f, -1, 0].set(
+            0.5 * (padded[f, -1, 1] + padded[f, -2, 0])
+        )
+
+        # --- NW corner (rows 0..2, cols n+3..n+5) ---
+        padded = padded.at[f, 2, -3].set(
+            0.5 * (padded[f, 2, -4] + padded[f, 3, -3])
+        )
+        padded = padded.at[f, 1, -3].set(
+            0.5 * (padded[f, 1, -4] + padded[f, 2, -3])
+        )
+        padded = padded.at[f, 2, -2].set(
+            0.5 * (padded[f, 3, -2] + padded[f, 2, -3])
+        )
+        padded = padded.at[f, 0, -3].set(
+            0.5 * (padded[f, 0, -4] + padded[f, 1, -3])
+        )
+        padded = padded.at[f, 2, -1].set(
+            0.5 * (padded[f, 3, -1] + padded[f, 2, -2])
+        )
+        padded = padded.at[f, 1, -2].set(
+            0.5 * (padded[f, 1, -3] + padded[f, 2, -2])
+        )
+        padded = padded.at[f, 0, -2].set(
+            0.5 * (padded[f, 0, -3] + padded[f, 1, -2])
+        )
+        padded = padded.at[f, 1, -1].set(
+            0.5 * (padded[f, 2, -1] + padded[f, 1, -2])
+        )
+        padded = padded.at[f, 0, -1].set(
+            0.5 * (padded[f, 0, -2] + padded[f, 1, -1])
+        )
+
+        # --- NE corner (rows n+3..n+5, cols n+3..n+5) ---
+        padded = padded.at[f, -3, -3].set(
+            0.5 * (padded[f, -3, -4] + padded[f, -4, -3])
+        )
+        padded = padded.at[f, -2, -3].set(
+            0.5 * (padded[f, -2, -4] + padded[f, -3, -3])
+        )
+        padded = padded.at[f, -3, -2].set(
+            0.5 * (padded[f, -4, -2] + padded[f, -3, -3])
+        )
+        padded = padded.at[f, -1, -3].set(
+            0.5 * (padded[f, -1, -4] + padded[f, -2, -3])
+        )
+        padded = padded.at[f, -3, -1].set(
+            0.5 * (padded[f, -4, -1] + padded[f, -3, -2])
+        )
+        padded = padded.at[f, -2, -2].set(
+            0.5 * (padded[f, -2, -3] + padded[f, -3, -2])
+        )
+        padded = padded.at[f, -1, -2].set(
+            0.5 * (padded[f, -1, -3] + padded[f, -2, -2])
+        )
+        padded = padded.at[f, -2, -1].set(
+            0.5 * (padded[f, -3, -1] + padded[f, -2, -2])
+        )
+        padded = padded.at[f, -1, -1].set(
+            0.5 * (padded[f, -1, -2] + padded[f, -2, -1])
+        )
+
+    return padded
 
 
 # ==============================================================================
@@ -1263,6 +1809,22 @@ def pad_halo_vector(
     v_padded : jax.Array, shape (6, n+2*halo, n+2*halo)
         Padded grid-aligned y-velocity.
     """
+    # Iter-595: halo=3 support for the non-MPI single-device path.
+    # Requires the caller to pass `cos_angle_padded_h3` /
+    # `sin_angle_padded_h3` (shape (6, n+6, n+6)) as the
+    # `cos_angle_padded` / `sin_angle_padded` args.  The scalar
+    # `pad_halo(halo=3)` path has been validated since iter-499; the
+    # vector round-trip just reuses that scalar exchange twice.
+    #
+    # Iter-630: `pad_halo_mpi_4d(halo=3)` was added in iter-627/628 and
+    # the 2D scalar MPI paths gained halo=3 support in iter-630, so the
+    # MPI backend now handles halo=3 end-to-end.  The prior
+    # `NotImplementedError` guard that lived here has been removed.
+    if halo not in (1, 2, 3):
+        raise NotImplementedError(
+            f"Only halo=1, halo=2 and halo=3 are supported for "
+            f"pad_halo_vector, got {halo}")
+
     _EPS = float(jnp.finfo(jnp.float32).eps)
 
     if cos_theta is not None and sin_theta is not None:
@@ -1281,11 +1843,39 @@ def pad_halo_vector(
     # When MPI is active, pack both into a single 4D exchange to halve
     # the MPI message count (one exchange instead of two).
     if _halo_backend == "mpi":
-        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
-        packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
-        packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
-        u_east_padded = packed_padded[..., 0]
-        v_north_padded = packed_padded[..., 1]
+        # Iter-633 refused both `interp_offsets != None` and
+        # `duogrid != None` under MPI because the packed MPI vector
+        # path does NOT honor offsets or apply the duogrid
+        # kinked→extended remap.  Iter-634 (Codex stop-time follow-up):
+        # the duogrid refusal was overcautious — scalar `pad_halo`
+        # already runs `cube_rmp_vectorized` + `fill_corner_region`
+        # after dispatch regardless of backend, so per-component
+        # fallback is correct.  The `interp_offsets` refusal stays
+        # because `pad_halo_mpi` (invoked by the scalar fallback) does
+        # not carry offsets either.
+        if interp_offsets is not None:
+            raise NotImplementedError(
+                "pad_halo_vector(interp_offsets=...) is not supported "
+                "on the MPI backend: `pad_halo_mpi` / `pad_halo_mpi_4d` "
+                "do nearest-index copy only.  If you need interpolated "
+                "halo placement under MPI, either teach the MPI helpers "
+                "to carry offsets and apply `_interp_strip_*` on the "
+                "receive side, or pre-interpolate before calling "
+                "pad_halo_vector.  Single-device backend supports this "
+                "today.")
+        if duogrid is not None:
+            # Iter-634: per-component scalar fallback.  Pays 2 MPI
+            # messages instead of 1 packed exchange, but exercises
+            # `pad_halo`'s validated duogrid post-processing so the
+            # kinked→extended remap actually runs.  Drop-in correct.
+            u_east_padded = pad_halo(u_east, halo=halo, duogrid=duogrid)
+            v_north_padded = pad_halo(v_north, halo=halo, duogrid=duogrid)
+        else:
+            from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+            packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
+            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            u_east_padded = packed_padded[..., 0]
+            v_north_padded = packed_padded[..., 1]
     else:
         u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
                                   duogrid=duogrid)
@@ -1296,8 +1886,19 @@ def pad_halo_vector(
     cap, sap = cos_angle_padded, sin_angle_padded
     if cos_theta is not None and sin_theta is not None:
         # Non-orthogonal back-rotation: vtmp = cos_beta*u_east + sin_beta*v_north
-        ct_pad = jnp.pad(cos_theta, [(0, 0), (halo, halo), (halo, halo)], mode='edge')
-        st_pad = jnp.pad(sin_theta, [(0, 0), (halo, halo), (halo, halo)], mode='edge')
+        # Iter-838 (Codex stop-time review): replace `mode='edge'` padding
+        # of `cos_theta`/`sin_theta` (same-face extension, loses cross-
+        # face metric values at panel boundaries) with proper cross-face
+        # halo exchange via `pad_halo`.  The non-orthogonality metrics
+        # are scalar cell-centre fields, continuous across panel seams,
+        # but their numerical values on face F's halo at a seam with
+        # face G should come from G's metric, not a copy of F's.  Matches
+        # Fortran's halo-exchanged `gridstruct%sin_sg(:,:,5)` /
+        # `cos_sg(:,:,5)` semantics at panel boundaries.
+        ct_pad = pad_halo(cos_theta, halo=halo, interp_offsets=interp_offsets,
+                          duogrid=duogrid)
+        st_pad = pad_halo(sin_theta, halo=halo, interp_offsets=interp_offsets,
+                          duogrid=duogrid)
         cos_beta = cap * ct_pad - sap * st_pad
         sin_beta = sap * ct_pad + cap * st_pad
         u_padded = cap * u_east_padded + sap * v_north_padded
@@ -1325,7 +1926,9 @@ def compute_padded_angle(n: int, halo: int = 1) -> jax.Array:
     n : int
         Number of cells per face edge (interior grid).
     halo : int
-        Halo width (1 or 2).
+        Halo width (1, 2, or 3 — iter-530 confirmed halo=3 numerically
+        consistent with the halo=2 output at the overlapping interior
+        region; supports the iter-496..501 ng=3 halo extension).
 
     Returns
     -------
@@ -1437,7 +2040,9 @@ def compute_padded_half_metrics(
     radius : float
         Sphere radius [m].
     halo : int
-        Halo width (1 or 2).
+        Halo width (1, 2, or 3 — iter-530 confirmed halo=3
+        numerically consistent with halo=2 at overlapping interior
+        cells; supports the iter-496..501 ng=3 halo extension).
 
     Returns
     -------
@@ -1503,6 +2108,29 @@ def compute_padded_half_metrics(
 # CGRID flux synchronization (duogrid face-boundary averaging)
 # ==============================================================================
 
+# Iter-808: empirical sign-flip table for `synchronize_cgrid_fluxes`.
+# Certain face-to-face adjacencies (all involving polar faces 4 or 5)
+# use OPPOSITE sign conventions for the mass flux across the shared
+# edge, because the local (i, j) axes on the two faces point in
+# different physical directions at the shared edge.  When averaging
+# face A's flux with face B's flux, we need to sign-flip B's flux
+# at these edges to obtain the physically-correct conservation
+# average.
+#
+# iter-807 measured |A - B| / max(|A|, |B|) for all shared edges on
+# W2 IC at C36.  Most edges had rel ~ 0 (both faces agree).  Four
+# edges had rel = 2.00, indicating opposite signs: identified below.
+#
+# Fortran's mpp_get_boundary handles this internally; our Python
+# extracts raw neighbor data and must apply the sign-flip explicitly.
+_FLUX_SIGN_FLIP_EDGES = frozenset({
+    (1, NORTH), (4, EAST),
+    (2, SOUTH), (5, SOUTH),
+    (2, NORTH), (4, NORTH),
+    (3, SOUTH), (5, WEST),
+})
+
+
 def synchronize_cgrid_fluxes(fx, fy, n):
     """Average C-grid fluxes at shared face boundaries (duogrid conservation fix).
 
@@ -1514,6 +2142,14 @@ def synchronize_cgrid_fluxes(fx, fy, n):
     This is required for conservation when using duogrid halo exchange,
     because each face computes boundary fluxes independently using its own
     extended grid, producing slightly different values at shared edges.
+
+    Iter-808: polar-adjacent shared edges require a sign flip on the
+    neighbor's flux before averaging, because the local (i, j) axes on
+    the two faces point in opposite physical directions at those shared
+    edges.  See ``_FLUX_SIGN_FLIP_EDGES`` above for the empirical table
+    (derived from iter-807 flux-discrepancy measurements).  Without the
+    sign flip, the sync reduced DUOGRID W2 t=0 dh/dt by 1172× vs the
+    signed version (iter-806b/807/808).
 
     Parameters
     ----------
@@ -1539,6 +2175,8 @@ def synchronize_cgrid_fluxes(fx, fy, n):
             nbr_bdy = _extract_cgrid_boundary(fx, fy, nbr_face, nbr_edge, n)
             if rev:
                 nbr_bdy = nbr_bdy[::-1]
+            if (face, edge) in _FLUX_SIGN_FLIP_EDGES:
+                nbr_bdy = -nbr_bdy
             avgs[(face, edge)] = 0.5 * (local_bdy + nbr_bdy)
 
     # Write all averaged values back.
@@ -1682,3 +2320,55 @@ def synchronize_corner_scalar(field, n):
                 field = field.at[fc, ci_c, cj_c].set(avg3)
 
     return field
+
+
+def synchronize_bgrid_ne_corner_geo(u, v, cos_ang_c, sin_ang_c, n):
+    """BGRID_NE vector corner sync via the geographic frame.
+
+    For every one of the 24 panel-edge seams (including reversed and
+    cross-axis) and for the 8 cube-vertex corners (3 faces meeting),
+    averages the vector (u, v) at corner-stagger positions in the
+    INVARIANT geographic frame.  The rotation-free averaging uses the
+    observation that a physical vector at a shared point has the same
+    (east, north) components regardless of which face we measure it
+    on — so conversion to geo frame sidesteps the per-seam rotation
+    tables that the same-axis-only helper required.
+
+    Algorithm:
+      1. Convert face-local (u, v) to geographic (u_east, u_north)
+         per corner using:
+           u_east  = cos_ang_c * u - sin_ang_c * v
+           u_north = sin_ang_c * u + cos_ang_c * v
+      2. For each seam, average boundaries:
+           geo_sync = 0.5 * (local_geo + nbr_geo[rev_slice])
+      3. For each of 8 cube vertices, 3-face average (orig pre-sync
+         values) — mirrors `synchronize_corner_scalar` Pass 2.
+      4. Convert synced geo back to face-local:
+           u =  cos_ang_c * u_east + sin_ang_c * u_north
+           v = -sin_ang_c * u_east + cos_ang_c * u_north
+
+    Parameters
+    ----------
+    u, v : jax.Array, shape (6, n+1, n+1)
+        Face-local corner-stagger vector components.
+    cos_ang_c, sin_ang_c : jax.Array, shape (6, n+1, n+1)
+        cdgrid.cos_angle_corner / sin_angle_corner.
+    n : int
+
+    Returns
+    -------
+    u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
+    """
+    # Convert to geographic frame
+    u_east = cos_ang_c * u - sin_ang_c * v
+    u_north = sin_ang_c * u + cos_ang_c * v
+
+    # Sync geo components independently (each is a scalar field)
+    u_east = synchronize_corner_scalar(u_east, n)
+    u_north = synchronize_corner_scalar(u_north, n)
+
+    # Rotate back to face-local
+    u_sync = cos_ang_c * u_east + sin_ang_c * u_north
+    v_sync = -sin_ang_c * u_east + cos_ang_c * u_north
+
+    return u_sync, v_sync

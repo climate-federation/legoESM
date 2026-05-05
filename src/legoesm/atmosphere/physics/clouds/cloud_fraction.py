@@ -165,9 +165,14 @@ def compute_cloud_properties(
         q_i = jnp.zeros_like(T) if q_ice is None else q_ice
         q_condensate = q_c + q_i
         cf = xu_randall_cloud_fraction(RH, q_condensate, q_sat, config)
-    else:
-        # Sundqvist (default)
+    elif config.scheme == "sundqvist":
         cf = sundqvist_cloud_fraction(RH, config)
+    else:
+        raise ValueError(
+            f"Unknown cloud scheme: {config.scheme!r}. "
+            f"Valid schemes: 'sundqvist', 'xu_randall'. "
+            f"(Use cloud_scheme='none' upstream to skip clouds entirely.)"
+        )
 
     # --- Cloud condensate ---
     has_explicit_condensate = q_cloud is not None or q_ice is not None

@@ -1,0 +1,27 @@
+Iter-799 DUOGRID vs LEGACY t=0 tendency audit for W2 C36
+Analytical tendencies for W2 steady state are all ZERO.
+
+              path    dh/dt peak    du/dt peak    dv/dt peak
+------------------------------------------------------------
+            LEGACY     1.329e-04     1.404e-05     1.903e-05
+           DUOGRID     1.557e-01     4.700e-05     8.446e-05
+
+  DUOGRID/LEGACY dh_dt_peak: 1171.57x
+  DUOGRID/LEGACY du_dt_peak: 3.35x
+  DUOGRID/LEGACY dv_dt_peak: 4.44x
+
+Interpretation cues (observational only):
+- If DUOGRID tendency peaks are MUCH larger than LEGACY at
+  t=0: the duogrid-dispatched operator chain produces
+  immediate spurious tendencies, not accumulation.
+- If DUOGRID tendency peaks are similar to LEGACY at t=0:
+  the blowup is from time-step accumulation, not the
+  instantaneous operator chain.
+
+What iter-799 DOES measure:
+- DUOGRID vs LEGACY t=0 peak tendency magnitudes for W2.
+What it does NOT establish:
+- WHICH specific duogrid-dispatched operator (dgrid_to_cgrid,
+  halo exchanges, KE, pressure gradient) produces the peak.
+- Whether the observed magnitudes CAUSE iter-787's 1-day
+  v_ll_Linf=100 m/s (requires tracking over timesteps).

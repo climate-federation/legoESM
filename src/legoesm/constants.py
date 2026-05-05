@@ -48,6 +48,20 @@ sigma_sb = 5.670374419e-8       # Stefan-Boltzmann constant [W/(m^2*K^4)]
 S_0 = 1361.0                    # Total solar irradiance [W/m^2]
 
 # ==============================================================================
+# Molecular Weights
+# ==============================================================================
+# These are needed by forcing loaders to convert between mass-mixing-ratio
+# (kg/kg) and volume-mixing-ratio (mol/mol) when an external file uses
+# one convention and the radiation kernel expects the other.  CMIP6
+# input4MIPs ozone uses ``vmro3`` in mol/mol (no conversion required), but
+# older NCAR/E3SM pathways supply ``tro3`` in kg/kg, which has to be
+# multiplied by ``M_dry / M_o3`` to land back in mol/mol before the
+# radiation solver consumes it.  Values from NIST CODATA / IUPAC.
+M_dry = 0.0289644               # Molecular weight of dry air [kg/mol]
+M_o3 = 0.0479982                # Molecular weight of ozone [kg/mol]
+M_h2o = 0.018015                # Molecular weight of water [kg/mol]
+
+# ==============================================================================
 # Mathematical Constants
 # ==============================================================================
 PI = jnp.pi

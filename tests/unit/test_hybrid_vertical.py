@@ -229,7 +229,7 @@ class TestHybridMassFlux:
         coord = make_hybrid_levels(NLEV)
         div = jnp.ones((6, 4, 4, NLEV)) * 1e-5
         p_s = jnp.full((6, 4, 4), P_REF)
-        F = compute_mass_flux_hybrid(div, p_s, coord)
+        F, _ = compute_mass_flux_hybrid(div, p_s, coord)
         assert F.shape == (6, 4, 4, NLEV + 1)
 
     def test_mass_flux_boundary_conditions(self):
@@ -237,7 +237,7 @@ class TestHybridMassFlux:
         coord = make_hybrid_levels(NLEV)
         div = jnp.ones((6, 4, 4, NLEV)) * 1e-5
         p_s = jnp.full((6, 4, 4), P_REF)
-        F = compute_mass_flux_hybrid(div, p_s, coord)
+        F, _ = compute_mass_flux_hybrid(div, p_s, coord)
         np.testing.assert_allclose(F[..., 0], 0.0, atol=1e-20)
         np.testing.assert_allclose(F[..., -1], 0.0, atol=1e-10)
 
@@ -246,7 +246,7 @@ class TestHybridMassFlux:
         coord = make_hybrid_levels(NLEV)
         div = jnp.zeros((6, 4, 4, NLEV))
         p_s = jnp.full((6, 4, 4), P_REF)
-        F = compute_mass_flux_hybrid(div, p_s, coord)
+        F, _ = compute_mass_flux_hybrid(div, p_s, coord)
         np.testing.assert_allclose(F, 0.0, atol=1e-20)
 
     def test_sigma_hybrid_mass_flux_equivalence(self):
@@ -259,7 +259,7 @@ class TestHybridMassFlux:
         p_s = jnp.full((6, 4, 4), P_REF)
 
         sigma_dot = compute_sigma_dot(div, sigma)
-        mass_flux = compute_mass_flux_hybrid(div, p_s, hybrid)
+        mass_flux, _ = compute_mass_flux_hybrid(div, p_s, hybrid)
 
         # mass_flux = p_s * sigma_dot for pure sigma
         expected = p_s[..., None] * sigma_dot
@@ -386,7 +386,8 @@ class TestHybridDifferentiability:
         p_s = jnp.full((2, 2, 2), P_REF)
 
         def f(div):
-            return jnp.sum(compute_mass_flux_hybrid(div, p_s, coord) ** 2)
+            mf, _ = compute_mass_flux_hybrid(div, p_s, coord)
+            return jnp.sum(mf ** 2)
 
         div = jnp.ones((2, 2, 2, NLEV)) * 1e-5
         grad = jax.grad(f)(div)

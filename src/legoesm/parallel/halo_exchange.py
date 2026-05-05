@@ -78,8 +78,10 @@ from legoesm.grids.halo import (
     _extract_edge_strip_at_depth,
     _fill_corners_h1,
     _fill_corners_h2,
+    _fill_corners_h3,  # iter-628: needed for halo=3 MPI port
 )
 from legoesm.parallel.comm import CommTopology
+from legoesm.parallel.profiling import mpi_timer
 from legoesm.parallel.reductions import _mpi4jax_array_result
 
 
@@ -209,6 +211,36 @@ def _place_strip_h2(
     return padded
 
 
+def _place_strip_h3(
+    padded: jax.Array, face: int, edge: int,
+    strip_d0: jax.Array, strip_d1: jax.Array, strip_d2: jax.Array,
+) -> jax.Array:
+    """Iter-630: place three received strips into halo=3 positions
+    of a 2D scalar padded array.  Same depth conventions as
+    `_place_strip_h3_4d` but without the nlev axis.
+
+    Depth 0 = adjacent to interior, depth 1 = middle, depth 2 = outer.
+    """
+    n = padded.shape[1] - 6
+    if edge == WEST:
+        padded = padded.at[face, 2, 3:-3].set(strip_d0)
+        padded = padded.at[face, 1, 3:-3].set(strip_d1)
+        padded = padded.at[face, 0, 3:-3].set(strip_d2)
+    elif edge == EAST:
+        padded = padded.at[face, n + 3, 3:-3].set(strip_d0)
+        padded = padded.at[face, n + 4, 3:-3].set(strip_d1)
+        padded = padded.at[face, n + 5, 3:-3].set(strip_d2)
+    elif edge == SOUTH:
+        padded = padded.at[face, 3:-3, 2].set(strip_d0)
+        padded = padded.at[face, 3:-3, 1].set(strip_d1)
+        padded = padded.at[face, 3:-3, 0].set(strip_d2)
+    elif edge == NORTH:
+        padded = padded.at[face, 3:-3, n + 3].set(strip_d0)
+        padded = padded.at[face, 3:-3, n + 4].set(strip_d1)
+        padded = padded.at[face, 3:-3, n + 5].set(strip_d2)
+    return padded
+
+
 # ======================================================================
 # Face-only MPI halo exchange (≤6 ranks)
 # ======================================================================
@@ -299,20 +331,32 @@ def _pad_halo_mpi_face_only(
             if is_reversed:
                 strip = strip[::-1]
             padded = _place_strip(padded, f_loc, edge, strip)
-        else:
+        elif halo == 2:
             strip_d0 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 0)
             strip_d1 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 1)
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
             padded = _place_strip_h2(padded, f_loc, edge, strip_d0, strip_d1)
+        else:  # halo == 3 (main iter-630, threaded with face-id translation)
+            strip_d0 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 0)
+            strip_d1 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 1)
+            strip_d2 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 2)
+            if is_reversed:
+                strip_d0 = strip_d0[::-1]
+                strip_d1 = strip_d1[::-1]
+                strip_d2 = strip_d2[::-1]
+            padded = _place_strip_h3(padded, f_loc, edge,
+                                       strip_d0, strip_d1, strip_d2)
 
     if not remote_edges:
         # Still need to fill corner cells (matching local implementation).
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3
+            padded = _fill_corners_h3(padded)
         return padded
 
     # --- Batched neighbor sendrecv for remote edges ---
@@ -375,7 +419,7 @@ def _pad_halo_mpi_face_only(
                 if is_reversed:
                     strip = strip[::-1]
                 padded = _place_strip(padded, f_loc, edge, strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + n]
                 strip_d1 = recv_buf[offset + n:offset + 2 * n]
                 offset += 2 * n
@@ -383,13 +427,26 @@ def _pad_halo_mpi_face_only(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2(padded, f_loc, edge, strip_d0, strip_d1)
+            else:  # halo == 3 (main iter-630, threaded with face-id translation)
+                strip_d0 = recv_buf[offset:offset + n]
+                strip_d1 = recv_buf[offset + n:offset + 2 * n]
+                strip_d2 = recv_buf[offset + 2 * n:offset + 3 * n]
+                offset += 3 * n
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3(padded, f_loc, edge,
+                                           strip_d0, strip_d1, strip_d2)
 
     # Fill corner cells by averaging adjacent edge-halo values
     # (matching the local implementation).
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -453,8 +510,10 @@ def _pad_halo_mpi_tiled(
     if not edge_info:
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3 (iter-630)
+            padded = _fill_corners_h3(padded)
         return padded
 
     # Group by neighbor rank for batching.
@@ -502,7 +561,7 @@ def _pad_halo_mpi_tiled(
                 if is_reversed:
                     recv_strip = recv_strip[::-1]
                 padded = _place_strip(padded, face_loc, edge, recv_strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + n]
                 strip_d1 = recv_buf[offset + n:offset + 2 * n]
                 offset += 2 * n
@@ -510,12 +569,25 @@ def _pad_halo_mpi_tiled(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2(padded, face_loc, edge, strip_d0, strip_d1)
+            else:  # halo == 3 (main iter-630, threaded with face-id translation)
+                strip_d0 = recv_buf[offset:offset + n]
+                strip_d1 = recv_buf[offset + n:offset + 2 * n]
+                strip_d2 = recv_buf[offset + 2 * n:offset + 3 * n]
+                offset += 3 * n
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3(padded, face_loc, edge,
+                                           strip_d0, strip_d1, strip_d2)
 
     # Fill corner cells by averaging adjacent edge-halo values.
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -542,7 +614,8 @@ def pad_halo_mpi(
     topology : CommTopology
         Pre-computed communication topology.
     halo : int
-        Halo width (1 or 2).
+        Halo width (1, 2, or 3 — halo=3 was added in iter-630 so the
+        FB-chain ng=3 path works under MPI).
 
     Returns
     -------
@@ -557,7 +630,6 @@ def pad_halo_mpi(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
-    from legoesm.parallel.profiling import mpi_timer
     with mpi_timer("pad_halo_mpi"):
         if topology.tiling != (1, 1):
             return _pad_halo_mpi_tiled(data, topology, halo, mpi4jax, MPI)
@@ -689,6 +761,49 @@ def _place_strip_h2_4d(
     return padded
 
 
+def _place_strip_h3_4d(
+    padded: jax.Array, face: int, edge: int,
+    strip_d0: jax.Array, strip_d1: jax.Array, strip_d2: jax.Array,
+) -> jax.Array:
+    """Iter-627: place three strips (n, nlev) into halo=3 positions of
+    a 4D padded array.
+
+    Depth conventions:
+      depth 0 = adjacent to interior
+      depth 1 = middle
+      depth 2 = outermost
+
+    Interior is at [3:-3, 3:-3].  Halo cell index layout per side:
+
+      WEST:   i=2 (d0, adjacent) → i=1 (d1, middle) → i=0 (d2, outer)
+      EAST:   i=n+3 (d0) → i=n+4 (d1) → i=n+5 (d2)
+      SOUTH:  j=2 (d0) → j=1 (d1) → j=0 (d2)
+      NORTH:  j=n+3 (d0) → j=n+4 (d1) → j=n+5 (d2)
+
+    This helper is part of step #7 of the iter-613 port spec for
+    `pad_halo_mpi_4d(halo=3)` (see the anchor comments in
+    `_pad_halo_mpi_face_only_4d` and `_pad_halo_mpi_tiled_4d`).
+    """
+    n = padded.shape[1] - 6
+    if edge == WEST:
+        padded = padded.at[face, 2, 3:-3, :].set(strip_d0)
+        padded = padded.at[face, 1, 3:-3, :].set(strip_d1)
+        padded = padded.at[face, 0, 3:-3, :].set(strip_d2)
+    elif edge == EAST:
+        padded = padded.at[face, n + 3, 3:-3, :].set(strip_d0)
+        padded = padded.at[face, n + 4, 3:-3, :].set(strip_d1)
+        padded = padded.at[face, n + 5, 3:-3, :].set(strip_d2)
+    elif edge == SOUTH:
+        padded = padded.at[face, 3:-3, 2, :].set(strip_d0)
+        padded = padded.at[face, 3:-3, 1, :].set(strip_d1)
+        padded = padded.at[face, 3:-3, 0, :].set(strip_d2)
+    elif edge == NORTH:
+        padded = padded.at[face, 3:-3, n + 3, :].set(strip_d0)
+        padded = padded.at[face, 3:-3, n + 4, :].set(strip_d1)
+        padded = padded.at[face, 3:-3, n + 5, :].set(strip_d2)
+    return padded
+
+
 def _pad_halo_mpi_face_only_4d(
     data: jax.Array,
     topology: CommTopology,
@@ -724,6 +839,9 @@ def _pad_halo_mpi_face_only_4d(
                 remote_edges.append(entry)
 
     # Handle local edges (both endpoints on this rank).
+    # [ANCHOR iter-613: local-edge-depth-extraction] — main iter-628
+    # extended to halo=3 via `_place_strip_h3_4d` + 3-depth strips,
+    # threaded through the iter-3 face-id translation.
     for face, edge, nbr_face, nbr_edge, is_reversed, _ in local_edges:
         f_loc = _local_face(face)
         nf_loc = _local_face(nbr_face)
@@ -732,19 +850,33 @@ def _pad_halo_mpi_face_only_4d(
             if is_reversed:
                 strip = strip[::-1]
             padded = _place_strip_4d(padded, f_loc, edge, strip)
-        else:
+        elif halo == 2:
             strip_d0 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 0)
             strip_d1 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 1)
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
             padded = _place_strip_h2_4d(padded, f_loc, edge, strip_d0, strip_d1)
+        else:  # halo == 3
+            strip_d0 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 0)
+            strip_d1 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 1)
+            strip_d2 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 2)
+            if is_reversed:
+                strip_d0 = strip_d0[::-1]
+                strip_d1 = strip_d1[::-1]
+                strip_d2 = strip_d2[::-1]
+            padded = _place_strip_h3_4d(padded, f_loc, edge,
+                                          strip_d0, strip_d1, strip_d2)
 
+    # [ANCHOR iter-613: corner-fill-face-only] — iter-628 extended
+    # to halo=3 via `_fill_corners_h3`.
     if not remote_edges:
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3
+            padded = _fill_corners_h3(padded)
         return padded
 
     # Batched neighbor sendrecv — one message per neighbor for all levels
@@ -792,6 +924,9 @@ def _pad_halo_mpi_face_only_4d(
 
         offset = 0
         chunk = n * nlev
+        # [ANCHOR iter-613: remote-recv-depth-extraction] — iter-629
+        # extended halo==2 branch to halo==3: extract strip_d0/d1/d2
+        # (3 * chunk bytes), place via _place_strip_h3_4d.
         for face, edge, nbr_face, nbr_edge, is_reversed, _ in recv_order:
             f_loc = _local_face(face)
             if halo == 1:
@@ -800,7 +935,7 @@ def _pad_halo_mpi_face_only_4d(
                 if is_reversed:
                     strip = strip[::-1]
                 padded = _place_strip_4d(padded, f_loc, edge, strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
                 offset += 2 * chunk
@@ -808,11 +943,26 @@ def _pad_halo_mpi_face_only_4d(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2_4d(padded, f_loc, edge, strip_d0, strip_d1)
+            else:  # halo == 3
+                strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
+                strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
+                strip_d2 = recv_buf[offset + 2 * chunk:offset + 3 * chunk].reshape(n, nlev)
+                offset += 3 * chunk
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3_4d(padded, f_loc, edge,
+                                             strip_d0, strip_d1, strip_d2)
 
+    # [ANCHOR iter-613: corner-fill-face-only-post-recv] — iter-629
+    # extended to halo==3 via _fill_corners_h3.
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -824,11 +974,20 @@ def _pad_halo_mpi_tiled_4d(
     mpi4jax,
     MPI,
 ) -> jax.Array:
-    """Sub-face tiling 4D halo exchange: one sendrecv per neighbor for all levels."""
-    # Iter 30: see ``_pad_halo_mpi_tiled``.  Tiled mode owns one tile of
-    # one face per rank; ``face`` is the global id (used for connectivity
-    # lookups) but data/padded are compact local arrays so we always
-    # index them with local index 0.
+    """Sub-face tiling 4D halo exchange: one sendrecv per neighbor for all levels.
+
+    Iter 30: tiled mode owns one tile of one face per rank; ``face`` is
+    the global id (used for connectivity lookups) but data/padded are
+    compact local arrays so we always index them with local index 0.
+
+    [ANCHORS iter-613 for halo=3 port]:
+      - corner-fill-tiled-early: the `if not edge_info` branch
+        (short-circuit when no neighbours).
+      - corner-fill-tiled-late: the `if halo == 1` / else branch at
+        the end of the function.
+      - tiled-remote-depth-extraction: the recv loop inside the
+        `by_nbr_rank` dispatch (extend halo==2 branch to halo==3).
+    """
     face = topology.local_face_ids[0]
     face_loc = _build_global_to_local(topology, data.shape[0]).get(face, 0)
     n = data.shape[1]
@@ -853,11 +1012,15 @@ def _pad_halo_mpi_tiled_4d(
             nbr_rank = topology.neighbor_ranks[(face, edge)]
             edge_info.append((edge, nbr_rank, nbr_edge, is_reversed, False))
 
+    # [ANCHOR iter-613: corner-fill-tiled-early] — iter-629 extended
+    # to halo==3 via _fill_corners_h3.
     if not edge_info:
         if halo == 1:
             padded = _fill_corners_h1(padded)
-        else:
+        elif halo == 2:
             padded = _fill_corners_h2(padded)
+        else:  # halo == 3
+            padded = _fill_corners_h3(padded)
         return padded
 
     from collections import defaultdict
@@ -896,6 +1059,9 @@ def _pad_halo_mpi_tiled_4d(
         )
 
         offset = 0
+        # [ANCHOR iter-613: tiled-remote-depth-extraction] — iter-629
+        # extended halo==2 branch to halo==3: extract strip_d0/d1/d2,
+        # place via _place_strip_h3_4d.
         for edge, _, nbr_edge, is_reversed, is_tile_nbr in recv_order:
             if halo == 1:
                 recv_strip = recv_buf[offset:offset + chunk].reshape(n, nlev)
@@ -903,7 +1069,7 @@ def _pad_halo_mpi_tiled_4d(
                 if is_reversed:
                     recv_strip = recv_strip[::-1]
                 padded = _place_strip_4d(padded, face_loc, edge, recv_strip)
-            else:
+            elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
                 offset += 2 * chunk
@@ -911,11 +1077,26 @@ def _pad_halo_mpi_tiled_4d(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2_4d(padded, face_loc, edge, strip_d0, strip_d1)
+            else:  # halo == 3
+                strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
+                strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
+                strip_d2 = recv_buf[offset + 2 * chunk:offset + 3 * chunk].reshape(n, nlev)
+                offset += 3 * chunk
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                    strip_d2 = strip_d2[::-1]
+                padded = _place_strip_h3_4d(padded, face_loc, edge,
+                                             strip_d0, strip_d1, strip_d2)
 
+    # [ANCHOR iter-613: corner-fill-tiled-late] — iter-629 extended
+    # to halo==3 via _fill_corners_h3.
     if halo == 1:
         padded = _fill_corners_h1(padded)
-    else:
+    elif halo == 2:
         padded = _fill_corners_h2(padded)
+    else:  # halo == 3
+        padded = _fill_corners_h3(padded)
 
     return padded
 
@@ -941,6 +1122,26 @@ def pad_halo_mpi_4d(
     -------
     padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    # Iter-629: halo=3 MPI path now fully implemented (all 7 steps of
+    # the iter-613 port spec done — see `[ANCHOR iter-613: <name>]`
+    # comments in `_pad_halo_mpi_face_only_4d` and
+    # `_pad_halo_mpi_tiled_4d` for the insertion sites).  Progression:
+    #   iter-611: explicit halo=3 NotImplementedError guard.
+    #   iter-613: 7-step inline port spec.
+    #   iter-614..616: stable ANCHOR comments + tokenize-based
+    #                  anti-rot test (`test_iter613_mpi_halo3_port_
+    #                  anchors_present`).
+    #   iter-627: added `_place_strip_h3_4d` helper (step 7).
+    #   iter-628: wired halo=3 into `_pad_halo_mpi_face_only_4d`'s
+    #             local-edge branch + corner-fill (steps 1, 4).
+    #   iter-629 (THIS): extended face-only remote-recv + tiled helper
+    #             (steps 3, 5).  Guard removed; halo=3 MPI is LIVE.
+    if halo not in (1, 2, 3):
+        raise NotImplementedError(
+            f"pad_halo_mpi_4d supports only halo=1, 2, or 3, got "
+            f"halo={halo}."
+        )
+
     try:
         import mpi4jax
         from mpi4py import MPI
@@ -950,7 +1151,6 @@ def pad_halo_mpi_4d(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
-    from legoesm.parallel.profiling import mpi_timer
     with mpi_timer("pad_halo_mpi_4d"):
         if topology.tiling != (1, 1):
             return _pad_halo_mpi_tiled_4d(data, topology, halo, mpi4jax, MPI)
@@ -961,6 +1161,7 @@ def packed_pad_halo_mpi_4d(
     *fields: jax.Array,
     topology: CommTopology,
     halo: int = 1,
+    duogrid=None,
 ) -> list[jax.Array]:
     """Exchange halos for multiple 4D fields in a single MPI round.
 
@@ -971,12 +1172,21 @@ def packed_pad_halo_mpi_4d(
     All fields must share the same ``(6, n, n)`` spatial prefix.
     The trailing axis (levels/channels) can differ.
 
+    When ``duogrid`` is provided, applies the duogrid kinked-to-extended
+    remap to each output field after the packed MPI exchange, matching
+    the behaviour of unpacked ``pad_halo_4d(duogrid=dg)``.  This closes
+    the silent non-duogrid halo gap that the Codex stop-time review
+    flagged in iter-83.
+
     Parameters
     ----------
     *fields : jax.Array
         4D arrays of shape ``(6, n, n, C_i)``.
     topology : CommTopology
     halo : int
+    duogrid : DuoGridData or None
+        Duo-Grid remapping data. When provided, the post-exchange
+        kinked-to-extended remap + corner fill is applied per field.
 
     Returns
     -------
@@ -986,11 +1196,35 @@ def packed_pad_halo_mpi_4d(
     if not fields:
         return []
     if len(fields) == 1:
-        return [pad_halo_mpi_4d(fields[0], topology, halo)]
+        padded = pad_halo_mpi_4d(fields[0], topology, halo)
+        if duogrid is not None:
+            padded = _apply_duogrid_4d(padded, duogrid, halo)
+        return [padded]
 
     splits = [f.shape[-1] for f in fields]
     stacked = jnp.concatenate(fields, axis=-1)
     padded = pad_halo_mpi_4d(stacked, topology, halo)
     import numpy as _np
     split_indices = list(_np.cumsum(splits[:-1]))
-    return list(jnp.split(padded, split_indices, axis=-1))
+    pieces = list(jnp.split(padded, split_indices, axis=-1))
+    if duogrid is not None:
+        pieces = [_apply_duogrid_4d(p, duogrid, halo) for p in pieces]
+    return pieces
+
+
+def _apply_duogrid_4d(padded, duogrid, halo):
+    """Apply the duogrid kinked-to-extended remap + corner fill to a 4D
+    padded field, level-by-level via ``jax.vmap``.  Mirrors the
+    post-processing loop inside ``halo.pad_halo_4d``.
+    """
+    from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
+    import jax
+
+    def _remap_level(level_slice):
+        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
+        level_slice = fill_corner_region(level_slice, duogrid, halo)
+        return level_slice
+
+    padded_t = jnp.transpose(padded, (3, 0, 1, 2))  # (nlev, 6, ...)
+    padded_t = jax.vmap(_remap_level)(padded_t)
+    return jnp.transpose(padded_t, (1, 2, 3, 0))

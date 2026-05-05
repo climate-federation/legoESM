@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -45,6 +46,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm import constants
 
 
@@ -248,7 +250,6 @@ class SpectralShallowWaterModel:
             )
 
         # --- Metal detection MUST happen before any float64 computation ---
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True
@@ -558,15 +559,20 @@ def compute_spectral_diagnostics(
     # Gaussian weights integrate over μ=sin(lat), so dA = a² dμ dλ = a² w dlon
     dA = w * dlon * a2
 
-    # Total mass: integral of h
-    mass = jnp.sum(h * dA)
-
-    # Total energy: integral of h*(u^2+v^2)/2 + g*h^2/2
-    energy = jnp.sum((0.5 * h * (u**2 + v**2) + 0.5 * g * h**2) * dA)
-
-    # Potential enstrophy: integral of (vor+f)^2 / (2*h)
+    # All three diagnostics share the ``dA`` weight on the same
+    # horizontal axes — stack the integrands and reduce locally once
+    # so XLA fires one sum kernel.
     abs_vor = vor + grid.f
-    enstrophy = jnp.sum(abs_vor**2 / (2.0 * h) * dA)
+    _intg = jnp.stack(
+        [
+            h,
+            0.5 * h * (u**2 + v**2) + 0.5 * g * h**2,
+            abs_vor**2 / (2.0 * h),
+        ],
+        axis=-1,
+    ) * dA[..., None]
+    _diag = jnp.sum(_intg, axis=tuple(range(dA.ndim)))
+    mass, energy, enstrophy = _diag[0], _diag[1], _diag[2]
 
     # One device→host transfer instead of three separate ``float(...)``
     # casts — this diagnostic is called every save_every steps in

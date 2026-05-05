@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/scripts/diag_iter790_dgrid_to_cgrid_fidelity.py", line 87, in <module>
+    u_c, v_c = dgrid_to_cgrid(state.u_d, state.v_d, cdgrid)
+               ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/src/legoesm/core/operators_cdgrid.py", line 312, in dgrid_to_cgrid
+    u_c = u_avg * sina_u - v_avg_x * cosa_u
+          ~~~~~~^~~~~~~~
+  File "/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/.venv/lib/python3.14/site-packages/jax/_src/numpy/array_methods.py", line 609, in deferring_binary_op
+    return binary_op(*args)
+  File "/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/.venv/lib/python3.14/site-packages/jax/_src/numpy/ufunc_api.py", line 182, in __call__
+    return call(*args)
+  File "/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/.venv/lib/python3.14/site-packages/jax/_src/numpy/ufuncs.py", line 1281, in multiply
+    return lax.mul(x, y) if x.dtype != bool else lax.bitwise_and(x, y)
+           ~~~~~~~^^^^^^
+TypeError: mul got incompatible shapes for broadcasting: (6, 36, 36), (6, 37, 36).
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.

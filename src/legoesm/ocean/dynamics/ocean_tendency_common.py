@@ -54,6 +54,7 @@ def iterate_eos_and_pressure_anomaly(
     *,
     n_iter: int = 2,
     hi_precision_pressure: bool = False,
+    h_actual: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -133,17 +134,28 @@ def iterate_eos_and_pressure_anomaly(
     for _ in range(n_iter):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_ref, dz_ref, J_ref, rho_0, g,
+            h_actual=h_actual,
         )
         rho = eos_fn(T_filled, S_filled, p_hydro)
 
     rho_prime = rho - rho_0
 
+    # Layer-thickness array used in the baroclinic-anomaly cumsum.
+    # When ``h_actual`` is None, use the reference ``dz_ref`` (legacy z*
+    # path).  When provided (partial-cell path), use per-cell thickness
+    # so the anomaly integrates to each cell's actual centroid depth.
+    # Cells below the seafloor have h_actual=0 and contribute zero.
+    if h_actual is None:
+        h_for_cumsum = dz_ref
+    else:
+        h_for_cumsum = h_actual
+
     if hi_precision_pressure:
         rho_prime_hi = rho_prime.astype(jnp.float64)
-        dz_hi = dz_ref.astype(jnp.float64)
-        dp_layer = rho_prime_hi * g * dz_hi
+        h_hi = jnp.asarray(h_for_cumsum, dtype=jnp.float64)
+        dp_layer = rho_prime_hi * g * h_hi
     else:
-        dp_layer = rho_prime * g * dz_ref
+        dp_layer = rho_prime * g * h_for_cumsum
 
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
@@ -254,12 +266,36 @@ def implicit_bottom_drag_factor(
     *,
     eps: float = 1e-10,
 ) -> jnp.ndarray:
-    """Per-substep bottom-drag multiplier ``1 - dt · r / max(H, eps)``.
+    """Per-substep bottom-drag multiplier ``1 / (1 + dt·r / max(H, eps))``.
 
-    Used by both the lat-lon C-grid and MPAS barotropic substeps to
-    apply a linear bottom drag on the depth-averaged velocity.  The
-    floor on ``H`` prevents the drag from blowing up over very thin
-    water columns (≈ inundation).
+    Backward-Euler implicit form that, *as a standalone update* of
+    ``dU/dt = -r·U/H``, solves ``U_new = U_old - dt·r·U_new / H`` for
+    ``U_new / U_old``.  The result is in ``(0, 1]`` for any positive
+    ``dt``, ``r``, ``H`` — unconditionally stable, never flips velocity
+    sign.  Equivalent to the explicit form ``1 - dt·r/H`` to first
+    order; finite and bounded for arbitrary ``dt·r/H`` (the explicit
+    form would diverge for ``dt·r/H > 2``, a hazard in shallow-shelf
+    and inundation configurations).
+
+    Known limitation — combined drag application
+    --------------------------------------------
+    The explicit barotropic substep loops in this codebase apply this
+    factor *in addition to* a depth-mean bottom drag carried by
+    ``F_slow_u`` / ``F_slow_v`` (the depth-average of the 3D PE solver's
+    ``du_dt``, which already contains a bottom-cell drag of magnitude
+    ``-r·u_bot / dz_bot`` whose depth-average is ``-r·u_bot / H``).
+    The Crank-Nicolson implicit barotropic solver
+    (``barotropic_implicit_*``) intentionally relies on ``F_slow``
+    alone and does *not* apply this factor.  Effective barotropic-mode
+    drag in the explicit path is therefore ``≈ 2·r/H`` rather than
+    ``r/H`` (codex adversarial review iter-2 finding #1).  Resolving
+    this requires single-owner drag plumbing: either subtract the
+    depth-mean bottom drag from ``F_slow_u`` before the barotropic
+    substep, or remove the bottom-drag contribution from the 3D
+    solver's ``du_dt`` for the barotropic-explicit path.  Tracked as
+    open architectural debt; do not silently change call-site
+    semantics without a paired update to ``F_slow`` construction in
+    ``ocean_model_*.py``.
 
     Parameters
     ----------
@@ -276,4 +312,4 @@ def implicit_bottom_drag_factor(
     -------
     jax.Array, same shape as ``H``.
     """
-    return 1.0 - dt * drag_r / jnp.maximum(H, eps)
+    return 1.0 / (1.0 + dt * drag_r / jnp.maximum(H, eps))

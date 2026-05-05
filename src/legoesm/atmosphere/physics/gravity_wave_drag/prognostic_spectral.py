@@ -154,11 +154,14 @@ def prognostic_spectral_gwd(
     # Weight by azimuthal direction for du/dv
     # drag is stress gradient -> acceleration = -drag_deposit (already divided by dp)
     # Convert from dp-based to dz-based: multiply by dp/(rho*dz) -> just -drag
-    du_dt_spec = -drag_4d * cos_az[None, :, None, None]  # (ncol, n_az, n_wn, nlev)
-    dv_dt_spec = -drag_4d * sin_az[None, :, None, None]
-
-    du_dt = jnp.sum(du_dt_spec, axis=(1, 2))  # (ncol, nlev)
-    dv_dt = jnp.sum(dv_dt_spec, axis=(1, 2))
+    # Both ``du_dt`` and ``dv_dt`` reduce ``-drag_4d * trig`` over
+    # (n_az, n_wn) — fuse by stacking the cos/sin azimuth weights along
+    # a trailing axis so the spectrum reduction runs once.
+    _trig_stack = jnp.stack([cos_az, sin_az], axis=-1)[None, :, None, None, :]
+    _duv_spec = -drag_4d[..., None] * _trig_stack
+    _duv = jnp.sum(_duv_spec, axis=(1, 2))  # (ncol, nlev, 2)
+    du_dt = _duv[..., 0]
+    dv_dt = _duv[..., 1]
 
     # Frictional heating
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd

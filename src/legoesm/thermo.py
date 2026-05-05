@@ -7,6 +7,19 @@ This module provides `saturation_mixing_ratio` and
 atmosphere physics package.
 
 All operations are pure JAX and compatible with jit, grad, vmap, scan.
+
+Conventions — water-vapor mass variables
+----------------------------------------
+This module returns the **mixing ratio** ``r_sat = ε e_sat / (p - e_sat)``
+(mass of water vapor per unit mass of *dry* air).  Throughout the
+``atmosphere/physics`` source tree the prognostic field is named
+``q_v`` and many docstrings call it "specific humidity".  In the
+typical atmospheric regime where ``e_sat ≪ p``, mixing ratio and
+specific humidity differ by ``q ≈ r / (1 + r)`` — about 1% for
+``r = 0.01``.  The codebase uses these interchangeably; physics that
+needs the distinction (vertical-flux conservation in saturated tropical
+columns, q_c bookkeeping) should read this caveat carefully and
+convert explicitly when the 1% drift matters.
 """
 
 from __future__ import annotations
@@ -96,6 +109,39 @@ def saturation_mixing_ratio_ice(
     denom = jax.nn.softplus(p - e_sat_i - 1.0) + 1.0
     q_sat_i = constants.epsilon * e_sat_i / denom
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
+
+
+def saturation_mixing_ratio_dT(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Analytic derivative d(q_sat)/dT consistent with ``saturation_mixing_ratio``.
+
+    Uses the same Tetens vapor-pressure formula as
+    ``saturation_vapor_pressure`` and the same hard ``p - e_sat`` floor as
+    historically used by closure schemes (CLUBB-style PDF widths).  The
+    smooth softplus floor used by ``saturation_mixing_ratio`` itself
+    is intentionally NOT applied here — for derivative use cases
+    (e.g. Gaussian PDF width scaling), the simpler ``max(p - e_sat, 1)``
+    floor is the standard convention.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        d(q_sat)/dT [kg/kg/K].
+    """
+    e_sat = saturation_vapor_pressure(T)
+    T_c = T - constants.T_freeze
+    de_dT = e_sat * 17.67 * 243.5 / (T_c + 243.5) ** 2
+    p_eff = jnp.clip(p - e_sat, 1.0)
+    return constants.epsilon * de_dT * p / p_eff ** 2
 
 
 def saturation_specific_humidity(

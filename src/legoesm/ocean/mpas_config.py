@@ -94,6 +94,19 @@ class MPASOceanConfig(NamedTuple):
                           # bias (damps ζ-checkerboard null mode of the
                           # energy-conserving PV flux). 0 = disabled.
                           # Set automatically by the test matrix to dt.
+    pv_alpha: float = 1.0  # Weight on energy-conserving flux when
+                           # ``pv_scheme == "mixed"``: α·energy + (1−α)·enstrophy.
+                           # α=1.0 recovers pure energy; α=0.0 pure enstrophy.
+                           # Ignored for pv_scheme in {"energy", "enstrophy"}.
+    K_zeta_bih: float = 0.0  # Biharmonic dissipation on relative vorticity ζ
+                             # [m⁴/s]. Adds −K_ζ·∇⁴ζ to the vorticity
+                             # equation (scale-selective damping of grid-scale
+                             # ζ patterns), applied as a tangential-gradient
+                             # force on the momentum equation. Targets the
+                             # ζ-checkerboard null mode of the energy-
+                             # conserving PV flux — invisible to B_h·∇⁴u
+                             # because the null mode lives in the kernel of
+                             # the discrete curl. 0 = disabled.
     use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
@@ -103,15 +116,43 @@ class MPASOceanConfig(NamedTuple):
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
+    barotropic_u_viscosity: float = 0.0  # Lateral viscosity on u_bar [m²/s].
+                                         # Damps the TRiSK rotational null branch
+                                         # (Thuburn 2008; Ringler et al. 2010) on
+                                         # hexagonal C-grids — invisible to eta
+                                         # diffusion and divergence damping.
+                                         # 0 = disabled; typical 1e3-1e4 m²/s
+                                         # for global ico4 (~460 km) meshes.
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled.
     barotropic_time_filter: str = "cosine"  # "box" or "cosine"
     semi_implicit_coriolis: bool = True
+    # Barotropic solver selection.  ``"explicit_substep"`` (default) uses
+    # the existing forward-backward substep loop with cosine filter.
+    # ``"implicit_cn"`` uses a single-step Crank-Nicolson free surface
+    # with PCG Helmholtz solve, mirroring the lat-lon implementation
+    # (docs/issues/barotropic_mode_noise.md).  Eliminates the TRiSK
+    # rotational null branch (Thuburn 2008; Ringler+ 2010 §6) by
+    # construction; no substepping or time filter needed.
+    barotropic_solver: str = "explicit_substep"
+    # Implicit-CN knobs (only used when ``barotropic_solver = 'implicit_cn'``).
+    # 0.5 = pure Crank-Nicolson (2nd-order, no implicit damping); 1.0 =
+    # fully backward (1st-order, max damping).  0.55 is the standard
+    # MITgcm/MPAS-O choice — slightly past CN to suppress chequerboard
+    # while staying close to 2nd-order in time.
+    barotropic_implicit_theta_eta: float = 0.55
+    barotropic_implicit_theta_pgf: float = 0.55
+    barotropic_implicit_pcg_tol: float = 1.0e-10
+    barotropic_implicit_pcg_maxiter: int = 200
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0
     physics: object = None  # OceanPhysicsConfig or None
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    gm_redi: object = None  # GMRediConfig — None disables GM/Redi.  Only the
+                            # 'centered' slope_scheme is implemented on MPAS;
+                            # 'triads' raises NotImplementedError (Phase 5
+                            # of docs/ocean_experiments/gm_redi_mpas_plan.md).
     tracer_advection: str = "upwind"
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False
@@ -177,15 +218,15 @@ class MPASSimpleOceanConfig(NamedTuple):
     mode: str = "fixed"
     sst_constant: float = 300.0
     h_mix: float = 50.0
-    rho_ocean: float = 1025.0
-    c_ocean: float = 3994.0
+    rho_ocean: float = 1025.0           # = eos.rho_0
+    c_ocean: float = 3994.0             # = eos.c_sw
     Q_flux: float = 0.0
     albedo_ocean: float = 0.06
     emissivity_ocean: float = 0.97
     Cd_ocean: float = 1.5e-3
     Ch_ocean: float = 1.5e-3
     U_min: float = 1.0
-    T_freeze: float = 271.35
+    T_freeze: float = 271.35            # = constants.T_freeze_ocean
     h_deep: float = 200.0
     k_mix: float = 1.0e-4
     restore_deep: bool = False

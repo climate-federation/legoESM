@@ -9,6 +9,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+from legoesm.core.precision import get_policy
 from legoesm.forcing.time_utils import day_to_calendar
 
 
@@ -40,7 +42,7 @@ def analytical_sst_sic(
     lat_eff = np.asarray(lat_deg) - lat_shift
 
     # Qobs-like SST profile: warm equator, cold poles
-    sst = 27.0 * (1.0 - np.sin(np.radians(lat_eff)) ** 2) + 273.15
+    sst = 27.0 * (1.0 - np.sin(np.radians(lat_eff)) ** 2) + constants.T_freeze
     seasonal_amp = 3.0 * np.cos(np.radians(lat_eff)) * np.cos(
         2.0 * np.pi * day_of_year / 365.0
     )
@@ -50,6 +52,5 @@ def analytical_sst_sic(
     # SIC: ramp from 0 to 1 as SST drops below T_ice
     sic = np.clip(((T_ice + 0.5) - sst) / 3.0, 0.0, 1.0)
 
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
     return jnp.array(sst, dtype=_dtype), jnp.array(sic, dtype=_dtype)

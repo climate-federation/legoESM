@@ -35,8 +35,10 @@ from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
-from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
-from legoesm.atmosphere.physics.convection.edmf import edmf_convection
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    edmf_convection,
+    mass_flux_convection,
+)
 from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
 )

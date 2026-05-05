@@ -28,6 +28,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
+from legoesm import constants
 from legoesm.constants import g, Omega
 from legoesm.core.field import Field
 
@@ -248,7 +249,7 @@ def _set_uniform_stratification(state, z_coord, config, grid):
     lat_rad = np.asarray(grid.lat)
     lat_deg = np.degrees(lat_rad)
     lat_center_rad = np.radians(config.lat_center)
-    R = 6.371e6
+    R = constants.R_earth
     y = (lat_rad - lat_center_rad) * R
 
     envelope = _jet_envelope(lat_deg, config)
@@ -275,7 +276,7 @@ def _set_uniform_stratification_mpas(state, z_coord, config, mesh):
     lat_cell = np.asarray(mesh.latCell)
     lat_deg = np.degrees(lat_cell)
     lat_center_rad = np.radians(config.lat_center)
-    R = 6.371e6
+    R = constants.R_earth
     y = (lat_cell - lat_center_rad) * R
 
     envelope = _jet_envelope(lat_deg, config)

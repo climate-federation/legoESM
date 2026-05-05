@@ -74,20 +74,42 @@ def hines_gwd(
     # As gravity waves propagate upward, their amplitude grows with
     # decreasing density (energy conservation: F ~ rho * sigma^2 = const).
     # Saturation occurs when the wave-induced velocity perturbation
-    # reaches a fraction of the local wind: sigma_sat ~ U / m_star_norm
-    rho_sfc = rho[:, -1:]  # (ncol, 1)
-    rho_ratio = jnp.sqrt(jnp.clip(rho_sfc / jnp.clip(rho, 0.01, None), 1.0, None))
-    # sigma_sat = wind_fraction * N / (m_star) at each level
-    sigma_sat = N_full / jnp.clip(config.m_star * rho_ratio, 1e-6, None)
+    # reaches the critical Doppler-broadening amplitude
+    # ``sigma_critical = N / m_*`` (Hines 1997 eq. 9), which is constant
+    # per column at fixed N and m_*.  An earlier formulation divided this
+    # by ``rho_ratio = sqrt(rho_sfc/rho) ≥ 1`` ⇒ ``sigma_sat`` *decreased*
+    # with altitude, the opposite of physical expectation: amplitudes
+    # grow with altitude (1/sqrt(rho)) so the cap should remain at least
+    # constant.  The /rho_ratio factor caused premature saturation aloft
+    # and biased the drag deposition lower in the column (audit GWD-B2).
+    sigma_sat = N_full / jnp.clip(config.m_star, 1e-6, None)
 
-    # Bottom-up scan: propagate sigma_gw upward from surface
-    # As wave propagates up, amplitude grows with sqrt(rho_sfc/rho)
+    # Per-level WKB growth factor for the bottom-up scan.  Going from
+    # level (k+1) to level k (one step upward), the amplitude grows by
+    # ``sqrt(rho[k+1] / rho[k])`` (energy conservation rho * sigma^2).
+    # The carry already contains the integrated WKB amplitude from the
+    # surface to level k+1, so we multiply by the *inter-level* ratio,
+    # not the cumulative ``sqrt(rho_sfc/rho_k)``.  Multiplying by the
+    # cumulative factor at every step compounds the growth and
+    # over-amplifies the wave by a product of cumulative ratios — a
+    # bug masked in operational use only because the sigma_sat cap
+    # truncates the runaway.
+    rho_ratio_step = jnp.ones_like(rho)
+    rho_ratio_step = rho_ratio_step.at[:, :-1].set(
+        jnp.sqrt(jnp.clip(
+            rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,
+        ))
+    )
+
+    # Bottom-up scan: propagate sigma_gw upward from surface.
+    # ``rho_ratio_step[:, k]`` carries amplitude from level k+1 to level k;
+    # at the surface (k = nlev-1) the step factor is 1 (initial condition).
     def scan_fn(carry, k_rev):
         sigma_gw = carry
         k = nlev - 1 - k_rev
 
-        # Amplitude growth from density decrease
-        sigma_grown = sigma_gw * rho_ratio[:, k]
+        # Amplitude growth from density decrease (single-layer step)
+        sigma_grown = sigma_gw * rho_ratio_step[:, k]
 
         # Dissipation where grown amplitude exceeds saturation
         f_diss = jax.nn.sigmoid(
@@ -95,9 +117,27 @@ def hines_gwd(
         )
         sigma_new = sigma_grown * (1.0 - f_diss) + sigma_sat[:, k] * f_diss
 
-        # Momentum deposited: rho * (sigma_grown - sigma_new) ~ stress gradient
-        drag = (sigma_grown - sigma_new) * rho[:, k]
-        drag = jnp.clip(drag, -config.Fmax, config.Fmax)
+        # Momentum deposited: ``ΔF = ρ · (σ²_grown - σ²_new)`` [Pa] — this
+        # is the wave momentum-flux divergence between two levels of the
+        # WKB-grown wave, where ``F = ρ · <u'w'> ∝ ρ · σ²`` for an
+        # upward-propagating gravity wave.  Acceleration of the mean
+        # flow is then ``-ΔF / (ρ·dz)`` [m/s²].
+        #
+        # An earlier formulation used ``ρ · (σ_grown - σ_new)``, which
+        # has units ``kg/(m²·s)`` rather than Pa, so the downstream
+        # ``accel = drag / (ρ·dz)`` came out as ``1/s`` rather than
+        # ``m/s²`` (audit cycle 2 P1: "Hines drag dimensional
+        # inconsistency").  Operationally the two forms gave near-
+        # identical drag because Fmax saturates the upper levels in
+        # both, but they differ by a factor of ``σ_grown + σ_new``
+        # (typically 2-4×) in the sub-saturation troposphere.
+        #
+        # Clamp the lower bound to zero: the smooth ``f_diss`` sigmoid
+        # does not vanish exactly when ``sigma_grown < sigma_sat``, so
+        # without the floor a small "anti-drag" leak can appear in the
+        # transition region.  GWD on the mean flow is always a sink.
+        drag = (sigma_grown ** 2 - sigma_new ** 2) * rho[:, k]
+        drag = jnp.clip(drag, 0.0, config.Fmax)
 
         return sigma_new, drag
 
@@ -110,9 +150,8 @@ def hines_gwd(
     # Convert to acceleration
     accel = -drag_all / jnp.clip(rho * dz, 1e-10, None)
 
-    # Project isotropically along wind direction
-    cos_a = u / jnp.clip(U_mag, 0.1, None)
-    sin_a = v / jnp.clip(U_mag, 0.1, None)
+    cos_a = u / jnp.clip(U_mag, config.U_mag_floor, None)
+    sin_a = v / jnp.clip(U_mag, config.U_mag_floor, None)
     du_dt = accel * cos_a
     dv_dt = accel * sin_a
 

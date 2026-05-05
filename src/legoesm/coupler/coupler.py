@@ -16,8 +16,13 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.core.precision import get_policy
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.land.multilayer_land import init_multilayer_land_state
+from legoesm.land.surface_params import reshape_params
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
+from legoesm.core.precision import get_policy
+from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
 from legoesm.core.field import Field
 from legoesm.coupler.accumulator import (
@@ -108,13 +113,10 @@ def init_surface_state(
         initialises prognostic carbon pools.
     """
     dims_2d = ("face", "x", "y")
-    from legoesm.core.precision import get_policy
     _sd = get_policy().storage
 
     if isinstance(land_config, MultiLayerLandConfig):
-        from legoesm.land.multilayer_land import init_multilayer_land_state
         # For multi-layer land, ncol = product of spatial dims
-        import math
         ncol = math.prod(shape)
         land = init_multilayer_land_state(
             ncol, land_config, T_init=T_soil_init,
@@ -184,7 +186,6 @@ def ocean_tile_response(
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -227,9 +228,8 @@ def ocean_tile_response(
     # expression as the loop-11 ``two_layer_lake.py`` fix — avoids the
     # full ``surface_radiation_fluxes`` call which recomputes
     # ``sw_net`` and the LW balance only to discard them.
-    from legoesm import constants as _constants
     lw_up = (
-        config.ocean_emissivity * _constants.sigma_sb * ocean_sst ** 4
+        config.ocean_emissivity * constants.sigma_sb * ocean_sst ** 4
         + (1.0 - config.ocean_emissivity) * forcing.lw_down
     )
 
@@ -330,7 +330,6 @@ def make_coupler(
                 _lp = _land_param_provider()
             # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))
             if not _use_multilayer:
-                from legoesm.land.surface_params import reshape_params
                 _lp = reshape_params(_lp, atm_forcing.sw_down.shape)
         else:
             _lp = None

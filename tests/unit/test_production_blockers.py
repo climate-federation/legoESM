@@ -189,7 +189,7 @@ class TestCloudRadiationCoupling:
         from legoesm.driver.physics_pipeline import _build_rrtmgp_radiation_fn
         import inspect
 
-        ec = ExperimentConfig(radiation="rrtmgp", cloud_scheme="simple")
+        ec = ExperimentConfig(radiation="rrtmgp", cloud_scheme="sundqvist")
         rad_fn = _build_rrtmgp_radiation_fn(ec)
 
         # Check signature includes cloud parameters
@@ -206,7 +206,7 @@ class TestCloudRadiationCoupling:
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import RRTMGPConfig
 
         # With cloud scheme
-        ec_clouds = ExperimentConfig(radiation="rrtmgp", cloud_scheme="simple")
+        ec_clouds = ExperimentConfig(radiation="rrtmgp", cloud_scheme="sundqvist")
         # Without cloud scheme
         ec_clear = ExperimentConfig(radiation="rrtmgp", cloud_scheme="none")
 

@@ -129,18 +129,39 @@ def sbm_convection(
     dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c[:, None]
     dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c[:, None]
 
-    # 7. Precipitation: column-integrated moisture sink
-    # precip = -sum(dq_v_dt * dp) / g, clipped >= 0
-    precipitation = jnp.clip(
-        -jnp.sum(dq_v_dt * dp, axis=1) / constants.g,
-        0.0,
-        None,
-    )  # (ncol,)
+    # 7. Convective source for cloud water: vapor that condenses at each
+    # level becomes cloud water rather than precipitating instantly.
+    # Microphysics processes this through autoconversion, sedimentation,
+    # and evaporation, and produces the surface precipitation diagnostic.
+    #
+    # Naive ``max(-dq_v_dt, 0)`` per level would *create* water
+    # column-wide whenever the relaxation has both drying and
+    # moistening layers (column-integrated dq_v + column-integrated
+    # max(-dq_v, 0) = moistening_part > 0). To preserve column water
+    # conservation we rescale the per-level condensation candidate so
+    # its column integral equals the column-net drying — this matches
+    # the legacy ``precipitation`` formula exactly. Per-level the
+    # field is still non-negative (no negative q_c production); when
+    # the column is net moistening (col_dq_v > 0) the scale is 0 and
+    # dq_c_conv_dt = 0 everywhere, mirroring the legacy
+    # ``clip(-col_dq_v, 0)`` behavior.
+    local_cond = jnp.maximum(-dq_v_dt, 0.0)
+    # Both column reductions share the ``* dp / g`` weight on the level
+    # axis — stack the two integrands and reduce once.
+    _col_pair = jnp.sum(
+        jnp.stack([local_cond, dq_v_dt], axis=-1) * (dp / constants.g)[..., None],
+        axis=-2,
+    )
+    col_local_cond = _col_pair[..., 0:1]
+    col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
+    dq_c_conv_dt = local_cond * (
+        col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
+    )  # (ncol, nlev) [kg/kg/s]
 
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        precipitation=precipitation,
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=trigger,
     )

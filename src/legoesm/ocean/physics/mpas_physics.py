@@ -17,6 +17,8 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.eos import rho_0 as rho_0_ref
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
 
 def make_mpas_ocean_physics(config) -> Callable:
@@ -32,17 +34,14 @@ def make_mpas_ocean_physics(config) -> Callable:
         ``physics_fn(state, mesh, z_coord, surface_forcing=None)``
         returning ``MPASOceanTendencies``.
     """
-    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
-    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-
     sf_config = config.surface_forcing
     bd_config = config.bottom_drag
 
     # Warn about unsupported physics schemes that would be silently ignored.
+    # ``convection`` is handled explicitly below (supports "enhanced_diffusion").
     import warnings
     _unsupported = []
-    for attr in ("vertical_mixing", "lateral_mixing", "convection",
-                 "shortwave_penetration"):
+    for attr in ("vertical_mixing", "lateral_mixing", "shortwave_penetration"):
         sub = getattr(config, attr, None)
         if sub is not None and getattr(sub, "scheme", "none") != "none":
             _unsupported.append(f"{attr}={getattr(sub, 'scheme', '?')!r}")
@@ -54,14 +53,44 @@ def make_mpas_ocean_physics(config) -> Callable:
             stacklevel=2,
         )
 
-    has_surface_forcing = (
-        isinstance(sf_config, SurfaceForcingConfig)
-        and sf_config.scheme != "none"
-    )
-    has_bottom_drag = (
-        isinstance(bd_config, BottomDragConfig)
-        and bd_config.scheme != "none"
-    )
+    sf_scheme = (sf_config.scheme
+                 if isinstance(sf_config, SurfaceForcingConfig)
+                 else "none")
+    # Bail loudly on schemes the MPAS factory does not implement, rather
+    # than silently producing zero tendencies.
+    _supported_sf = ("none", "prescribed", "restoring", "combined")
+    if sf_scheme not in _supported_sf:
+        raise NotImplementedError(
+            f"MPAS ocean physics does not support surface_forcing scheme "
+            f"{sf_scheme!r}. Supported: {_supported_sf}."
+        )
+    apply_wind_block = sf_scheme in ("prescribed", "combined")
+    apply_restoring = sf_scheme in ("restoring", "combined")
+
+    conv_config = getattr(config, "convection", None)
+    conv_scheme = (conv_config.scheme
+                   if conv_config is not None else "none")
+    _supported_conv = ("none", "enhanced_diffusion")
+    if conv_scheme not in _supported_conv:
+        raise NotImplementedError(
+            f"MPAS ocean physics does not support convection scheme "
+            f"{conv_scheme!r}. Supported: {_supported_conv}."
+        )
+    apply_convection = conv_scheme == "enhanced_diffusion"
+
+    # Physics-level bottom drag is deprecated — use the dynamics-level
+    # ``bottom_drag_r`` field on ``MPASOceanConfig`` instead.  The
+    # dynamics path applies drag in both the baroclinic PE and the
+    # barotropic substeps, which is physically correct (MOM6 convention).
+    if (isinstance(bd_config, BottomDragConfig)
+            and bd_config.scheme != "none"):
+        raise ValueError(
+            f"Physics-level bottom drag (scheme={bd_config.scheme!r}) is "
+            "deprecated. Use MPASOceanConfig(bottom_drag_r=...) instead, "
+            "which applies drag in both the baroclinic PE and the "
+            "barotropic substeps (matching MOM6). Set "
+            "BottomDragConfig(scheme='none') in your OceanPhysicsConfig."
+        )
 
     def physics_fn(
         state: MPASOceanState,
@@ -81,12 +110,16 @@ def make_mpas_ocean_physics(config) -> Callable:
         dS_dt = jnp.zeros_like(T_3d)
         deta_dt = jnp.zeros_like(eta)
 
-        # --- Prescribed surface forcing ---
-        if has_surface_forcing and sf_config.scheme == "prescribed":
+        # Jacobian — needed by surface forcing (top-layer thickness) and
+        # bottom drag (bottom-layer thickness).  Compute once.
+        jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+        c1 = mesh.cellsOnEdge[0]  # (nEdges,)
+        c2 = mesh.cellsOnEdge[1]  # (nEdges,)
+
+        # --- Prescribed wind / Q_net / E-P (also reused under "combined") ---
+        if apply_wind_block:
             cfg = sf_config.prescribed
 
-            # Jacobian for top-layer thickness
-            jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
             dz_0_cell = z_coord.dz_ref[0] * jacobian  # (nCells,)
 
             # Compute cell-centered wind stress from latitude
@@ -96,8 +129,6 @@ def make_mpas_ocean_physics(config) -> Callable:
             # Project cell-centered wind stress onto edge normals.
             # Average tau from the two cells sharing each edge, then dot
             # with the edge-normal direction (angleEdge).
-            c1 = mesh.cellsOnEdge[0]  # (nEdges,)
-            c2 = mesh.cellsOnEdge[1]  # (nEdges,)
             tau_x_e = 0.5 * (tau_x[c1] + tau_x[c2])
             tau_y_e = 0.5 * (tau_y[c1] + tau_y[c2])
             tau_n = (tau_x_e * jnp.cos(mesh.angleEdge)
@@ -123,10 +154,38 @@ def make_mpas_ocean_physics(config) -> Callable:
                 dS_dt = dS_dt.at[:, 0].add(
                     state.S.data[:, 0] * cfg.E_minus_P * inv_dz * mask)
 
-        # --- Bottom drag ---
-        if has_bottom_drag and bd_config.scheme == "linear":
-            r = bd_config.linear.r
-            du_dt = du_dt.at[:, -1].add(-r * u_3d[:, -1])
+        # --- T/S restoring (under "restoring" or "combined") ---
+        if apply_restoring:
+            from legoesm.ocean.physics.surface_forcing.restoring import (
+                restoring_surface_forcing,
+            )
+            cfg_r = sf_config.restoring
+            r_out = restoring_surface_forcing(
+                state.T.data, state.S.data, mesh, cfg_r,
+            )
+            # restoring_surface_forcing does not mask land; do it here so
+            # land-cell tracer values are not driven by the restoring term.
+            dT_dt = dT_dt + r_out.dT_dt * mask[:, None]
+            dS_dt = dS_dt + r_out.dS_dt * mask[:, None]
+
+        # --- Convective adjustment (enhanced diffusion where N²<0) ---
+        if apply_convection:
+            from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                enhanced_diffusion_convection,
+            )
+            from legoesm.ocean.eos import compute_ocean_rho
+            cfg_c = conv_config.enhanced_diffusion
+            # Match the lat-lon convection integration: use the default
+            # (Wright) EOS for the ρ used in the static-stability check,
+            # even when the dycore is configured with linear EOS.  This
+            # is a known approximation — the EOS choice only affects the
+            # static-stability ranking, not the dycore tendencies.
+            rho = compute_ocean_rho(state, z_coord, jacobian)
+            c_out = enhanced_diffusion_convection(
+                state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+            )
+            dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
+            dS_dt = dS_dt + c_out.dS_dt * mask[:, None]
 
         return MPASOceanTendencies(
             du_dt=Field(data=du_dt, name="du_dt",

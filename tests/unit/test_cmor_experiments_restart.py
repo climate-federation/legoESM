@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -800,6 +801,502 @@ class TestPrintTuningGuide(unittest.TestCase):
 
         self.assertGreater(len(output), 100)
         self.assertIn("dynamics", output.lower())
+
+
+class TestCMIP6Compliance(unittest.TestCase):
+    """CMIP6 controlled-vocabulary + CF spatial-bounds compliance."""
+
+    def test_parse_variant_label(self):
+        from legoesm.io.cmor_output import _parse_variant_label
+        self.assertEqual(_parse_variant_label("r1i1p1f1"), (1, 1, 1, 1))
+        self.assertEqual(_parse_variant_label("r12i3p4f5"), (12, 3, 4, 5))
+        with self.assertRaises(ValueError):
+            _parse_variant_label("bogus")
+        with self.assertRaises(ValueError):
+            _parse_variant_label("r1i1p1")  # missing forcing index
+
+    def test_malformed_variant_label_rejected_in_constructor(self):
+        from legoesm.io.cmor_output import CFWriter
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(ValueError):
+                CFWriter(
+                    output_dir=tmpdir,
+                    experiment_id="amip",
+                    model_id="legoESM-1-0",
+                    variant_label="malformed",
+                )
+
+    def test_compute_nominal_resolution_5deg(self):
+        from legoesm.io.cmor_output import _compute_nominal_resolution
+        lat = np.linspace(-87.5, 87.5, 36)  # 5°
+        lon = np.linspace(2.5, 357.5, 72)   # 5°
+        # 5° ≈ 556 km → bucket "1000 km" (smallest upper-bound that
+        # covers the spacing).
+        self.assertEqual(_compute_nominal_resolution(lat, lon), "1000 km")
+
+    def test_compute_nominal_resolution_2deg(self):
+        from legoesm.io.cmor_output import _compute_nominal_resolution
+        lat = np.linspace(-89, 89, 90)   # 2°
+        lon = np.linspace(1, 359, 180)   # 2°
+        # 2° ≈ 222 km → bucket "250 km"
+        self.assertEqual(_compute_nominal_resolution(lat, lon), "250 km")
+
+    def test_tracking_id_format(self):
+        from legoesm.io.cmor_output import _generate_tracking_id
+        tid = _generate_tracking_id()
+        self.assertTrue(tid.startswith("hdl:21.14100/"))
+        self.assertNotEqual(tid, _generate_tracking_id())  # fresh each call
+
+    def test_cell_bounds_from_uniform_centers(self):
+        from legoesm.io.cmor_output import _cell_bounds_from_centers
+        c = np.array([0.0, 10.0, 20.0, 30.0])
+        bnds = _cell_bounds_from_centers(c)
+        self.assertEqual(bnds.shape, (4, 2))
+        # Interior cells: halfway between neighbors.
+        np.testing.assert_allclose(bnds[1], [5.0, 15.0])
+        np.testing.assert_allclose(bnds[2], [15.0, 25.0])
+        # Exterior cells: half-step extrapolation from nearest neighbor.
+        np.testing.assert_allclose(bnds[0], [-5.0, 5.0])
+        np.testing.assert_allclose(bnds[3], [25.0, 35.0])
+        # Edges must be contiguous (no gaps).
+        np.testing.assert_allclose(bnds[:-1, 1], bnds[1:, 0])
+
+    def test_lat_bnds_clipped_at_poles(self):
+        from legoesm.io.cmor_output import _make_lat_bnds_da
+        lat = np.array([-87.5, -82.5, 82.5, 87.5])
+        da = _make_lat_bnds_da(lat)
+        self.assertEqual(da.shape, (4, 2))
+        # Polar edges must not extend beyond ±90°.
+        self.assertGreaterEqual(float(da.values.min()), -90.0)
+        self.assertLessEqual(float(da.values.max()), 90.0)
+
+    def test_realm_for_table(self):
+        from legoesm.io.cmor_output import _realm_for_table
+        self.assertEqual(_realm_for_table("Amon"), "atmos")
+        self.assertEqual(_realm_for_table("Lmon"), "land")
+        self.assertEqual(_realm_for_table("Omon"), "ocean")
+        self.assertEqual(_realm_for_table("Aday"), "atmos")
+
+    def test_written_file_has_cmip6_required_globals(self):
+        try:
+            import xarray as xr
+        except ImportError:
+            self.skipTest("xarray not installed")
+        from legoesm.io.cmor_output import CFWriter
+
+        required = {
+            "Conventions", "mip_era", "activity_id", "experiment_id",
+            "sub_experiment", "sub_experiment_id",
+            "institution", "institution_id", "source_id", "source",
+            "source_type", "product", "realm",
+            "variant_label", "realization_index", "initialization_index",
+            "physics_index", "forcing_index",
+            "grid_label", "nominal_resolution",
+            "creation_date", "tracking_id", "license",
+            "parent_experiment_id", "parent_source_id",
+            "parent_variant_label", "parent_activity_id",
+            "parent_time_units",
+            "branch_method", "branch_time_in_child", "branch_time_in_parent",
+            "frequency", "table_id", "variable_id",
+            "external_variables",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = CFWriter(
+                output_dir=tmpdir,
+                experiment_id="amip",
+                model_id="legoESM-1-0",
+                variant_label="r2i3p4f5",
+            )
+            lat = np.linspace(-87.5, 87.5, 8)
+            lon = np.linspace(2.5, 357.5, 16)
+            data = np.full((8, 16), 288.0, dtype=np.float32)
+            path = writer.write_field(
+                var_name="tas", data=data,
+                time=15.0, time_bounds=(0.0, 30.0),
+                lat=lat, lon=lon,
+            )
+            ds = xr.open_dataset(path)
+            attrs = dict(ds.attrs)
+            ds.close()
+
+        missing = required - set(attrs)
+        self.assertFalse(missing, f"Missing globals: {missing}")
+        self.assertEqual(attrs["mip_era"], "CMIP6")
+        self.assertEqual(attrs["realm"], "atmos")
+        self.assertEqual(int(attrs["realization_index"]), 2)
+        self.assertEqual(int(attrs["initialization_index"]), 3)
+        self.assertEqual(int(attrs["physics_index"]), 4)
+        self.assertEqual(int(attrs["forcing_index"]), 5)
+        self.assertTrue(
+            attrs["tracking_id"].startswith("hdl:21.14100/"),
+            f"tracking_id not hdl-form: {attrs['tracking_id']!r}",
+        )
+        self.assertEqual(attrs["external_variables"], "areacella")
+
+    def test_written_file_has_spatial_bounds_and_height(self):
+        try:
+            import xarray as xr
+        except ImportError:
+            self.skipTest("xarray not installed")
+        from legoesm.io.cmor_output import CFWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = CFWriter(
+                output_dir=tmpdir, experiment_id="amip",
+                model_id="legoESM-1-0",
+            )
+            lat = np.linspace(-87.5, 87.5, 8)
+            lon = np.linspace(2.5, 357.5, 16)
+            # tas — should carry height = 2 m
+            data_tas = np.full((8, 16), 288.0, dtype=np.float32)
+            p_tas = writer.write_field(
+                var_name="tas", data=data_tas,
+                time=15.0, time_bounds=(0.0, 30.0),
+                lat=lat, lon=lon,
+            )
+            # ps — surface pressure, no height
+            data_ps = np.full((8, 16), 101325.0, dtype=np.float32)
+            p_ps = writer.write_field(
+                var_name="ps", data=data_ps,
+                time=15.0, time_bounds=(0.0, 30.0),
+                lat=lat, lon=lon,
+            )
+            # ``decode_coords=False`` preserves the raw ``coordinates``
+            # variable attribute; xarray otherwise consumes it while
+            # promoting auxiliary coordinates, which hides whether the
+            # writer actually emitted it.
+            ds_tas = xr.open_dataset(
+                p_tas, decode_times=False, decode_coords=False,
+            ).load()
+            ds_ps = xr.open_dataset(
+                p_ps, decode_times=False, decode_coords=False,
+            ).load()
+            ds_tas.close()
+            ds_ps.close()
+
+        # Spatial cell bounds present on both files
+        for ds in (ds_tas, ds_ps):
+            self.assertIn("lat_bnds", ds.variables)
+            self.assertIn("lon_bnds", ds.variables)
+            self.assertEqual(ds["lat"].attrs.get("bounds"), "lat_bnds")
+            self.assertEqual(ds["lon"].attrs.get("bounds"), "lon_bnds")
+            # lat bounds must not leak past the poles
+            self.assertGreaterEqual(
+                float(ds["lat_bnds"].values.min()), -90.0,
+            )
+            self.assertLessEqual(
+                float(ds["lat_bnds"].values.max()), 90.0,
+            )
+
+        # tas: scalar height = 2 m stored as a variable referenced via
+        # the CF ``coordinates`` attribute on the data variable.
+        self.assertIn("height", ds_tas.variables)
+        self.assertAlmostEqual(float(ds_tas["height"].values), 2.0)
+        self.assertEqual(ds_tas["height"].attrs.get("units"), "m")
+        self.assertEqual(
+            ds_tas["tas"].attrs.get("coordinates"), "height",
+        )
+        # Regression: bnds variables must NOT carry coordinates="height".
+        # xarray will auto-tag every data variable with a ``coordinates``
+        # attribute when the coord is attached to the surrounding Dataset
+        # via ``assign_coords``; the fix is to attach it to the DataArray
+        # itself so only that variable is tagged.
+        for bnds in ("time_bnds", "lat_bnds", "lon_bnds"):
+            self.assertNotEqual(
+                ds_tas[bnds].attrs.get("coordinates"), "height",
+                msg=f"{bnds} should not be tagged with coordinates=height",
+            )
+        # ps: no height
+        self.assertNotIn("height", ds_ps.variables)
+        self.assertNotIn("coordinates", ds_ps["ps"].attrs)
+
+    def test_write_monthly_height_not_on_bnds(self):
+        """Regression: ``write_monthly`` must not propagate the scalar
+        ``height`` coordinate onto bnds variables. Parallels the fix
+        already in ``write_field``.
+        """
+        try:
+            import xarray as xr
+        except ImportError:
+            self.skipTest("xarray not installed")
+        from legoesm.io.cmor_output import CFWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = CFWriter(
+                output_dir=tmpdir, experiment_id="amip",
+                model_id="legoESM-1-0",
+            )
+            nlat, nlon = 8, 16
+            lat = np.linspace(-87.5, 87.5, nlat)
+            lon = np.linspace(2.5, 357.5, nlon)
+            # Two-month zonal_tas accumulator payload
+            n_months = 2
+            monthly_data = {
+                "months": [(1, 1), (1, 2)],
+                "zonal_tas": np.full(
+                    (n_months, nlat), 288.0, dtype=np.float32,
+                ),
+                "lat": lat,
+            }
+            paths = writer.write_monthly(monthly_data, lat, lon)
+            self.assertTrue(len(paths) >= 1)
+            tas_path = next(p for p in paths if "tas_" in p.name)
+            ds_tas = xr.open_dataset(
+                tas_path, decode_times=False, decode_coords=False,
+            ).load()
+            ds_tas.close()
+
+        self.assertIn("height", ds_tas.variables)
+        self.assertAlmostEqual(float(ds_tas["height"].values), 2.0)
+        self.assertEqual(
+            ds_tas["tas"].attrs.get("coordinates"), "height",
+        )
+        for bnds in ("time_bnds", "lat_bnds", "lon_bnds"):
+            self.assertNotEqual(
+                ds_tas[bnds].attrs.get("coordinates"), "height",
+                msg=f"{bnds} should not be tagged with coordinates=height",
+            )
+
+    def test_spatial_monthly_partial_after_flush(self):
+        """Regression: after ``pop_completed_months`` flushes full months,
+        the in-progress partial month must still be dropped by
+        ``finalize()`` — i.e. the guard cannot rely on there being
+        multiple live buckets.
+        """
+        from legoesm.diagnostics.monthly_means import SpatialMonthlyAccumulator
+        accum = SpatialMonthlyAccumulator(nlat=4, nlon=8, nlev=0)
+        full = np.full((4, 8), 290.0)
+        # Full Jan (doy 1): 7 samples
+        for _ in range(7):
+            accum.add_2d(1, 0, {"tas": full})
+        # Full Feb (doy 32): 5 samples
+        for _ in range(5):
+            accum.add_2d(32, 0, {"tas": full})
+        # Pop Jan + Feb (simulates the incremental flush path while the
+        # model is mid-March).
+        popped = accum.pop_completed_months(current_year=0, current_month=3)
+        self.assertEqual(popped["months"], [(0, 1), (0, 2)])
+        # A single partial-April sample after the flush:
+        accum.add_2d(91, 0, {"tas": full})
+        # finalize should now drop the lone 1-sample April bucket because
+        # ``_max_count_ever`` remembers that full months had 7 samples.
+        data = accum.finalize(min_sample_fraction=0.5)
+        self.assertEqual(data["months"], [])
+
+    def test_spatial_daily_partial_day_dropped(self):
+        """A lone final bucket with fewer samples than full days is
+        dropped by ``SpatialDailyAccumulator.finalize`` at the default
+        ``min_sample_fraction=0.5`` guard.
+        """
+        from legoesm.diagnostics.monthly_means import SpatialDailyAccumulator
+        accum = SpatialDailyAccumulator(nlat=4, nlon=8, track_extremes={"tas"})
+        # Two full days (8 samples each) + one partial day (1 sample).
+        tas_full = np.full((4, 8), 290.0)
+        for doy in (1, 2):
+            for _ in range(8):
+                accum.add_2d(doy, 0, {"tas": tas_full})
+        accum.add_2d(3, 0, {"tas": tas_full})
+        data = accum.finalize(min_sample_fraction=0.5)
+        days = [d for _, d in data["days"]]
+        self.assertEqual(days, [1, 2])
+        # Setting threshold to 0 keeps the partial day.
+        data_all = accum.finalize(min_sample_fraction=0.0)
+        self.assertEqual([d for _, d in data_all["days"]], [1, 2, 3])
+
+    def test_spatial_daily_tracks_min_max(self):
+        """``tas`` extremes are tracked correctly per-day."""
+        from legoesm.diagnostics.monthly_means import SpatialDailyAccumulator
+        accum = SpatialDailyAccumulator(nlat=2, nlon=2, track_extremes={"tas"})
+        a = np.array([[280.0, 285.0], [290.0, 295.0]])
+        b = np.array([[278.0, 286.0], [291.0, 294.0]])
+        c = np.array([[281.0, 284.0], [292.0, 296.0]])
+        for f in (a, b, c):
+            accum.add_2d(1, 0, {"tas": f})
+        data = accum.finalize(min_sample_fraction=0.0)
+        np.testing.assert_allclose(
+            data["field_2d_tas"][0], (a + b + c) / 3.0,
+        )
+        np.testing.assert_allclose(
+            data["field_2d_tas_min"][0], np.minimum(np.minimum(a, b), c),
+        )
+        np.testing.assert_allclose(
+            data["field_2d_tas_max"][0], np.maximum(np.maximum(a, b), c),
+        )
+
+    def test_write_daily_emits_day_tables_with_tasmin_tasmax(self):
+        """``CFWriter.write_daily`` consumes the accumulator finalize
+        dict and produces CMIP6 ``day``-table files for ``tas``,
+        ``tasmin``, and ``tasmax``.
+        """
+        try:
+            import xarray as xr
+        except ImportError:
+            self.skipTest("xarray not installed")
+        from legoesm.io.cmor_output import CFWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = CFWriter(
+                output_dir=tmpdir, experiment_id="amip",
+                model_id="legoESM-1-0", freq="day", ref_date="1979-01-01",
+            )
+            nlat, nlon = 4, 8
+            lat = np.linspace(-67.5, 67.5, nlat)
+            lon = np.linspace(22.5, 337.5, nlon)
+            n = 3
+            mean = np.full((n, nlat, nlon), 290.0, dtype=np.float32)
+            lo = mean - 2.0
+            hi = mean + 2.0
+            daily_data = {
+                "days": [(0, 1), (0, 2), (0, 3)],
+                "field_2d_tas": mean,
+                "field_2d_tas_min": lo,
+                "field_2d_tas_max": hi,
+            }
+            paths = writer.write_daily(daily_data, lat=lat, lon=lon)
+            self.assertEqual(len(paths), 3)  # tas, tasmin, tasmax
+            names = sorted(p.name for p in paths)
+            self.assertTrue(any(n.startswith("tas_day_") for n in names))
+            self.assertTrue(any(n.startswith("tasmin_day_") for n in names))
+            self.assertTrue(any(n.startswith("tasmax_day_") for n in names))
+            tas_path = next(p for p in paths if p.name.startswith("tas_day_"))
+            ds = xr.open_dataset(tas_path, decode_times=False).load()
+            ds.close()
+        # Three daily timesteps were written.
+        self.assertEqual(int(ds.sizes["time"]), 3)
+        self.assertEqual(ds.attrs.get("frequency"), "day")
+        self.assertEqual(ds.attrs.get("table_id"), "day")
+        # Time axis starts at 0.5 (noon day 1) relative to 1979-01-01.
+        np.testing.assert_allclose(ds["time"].values[0], 0.5)
+
+    def test_write_fixed_produces_fx_file(self):
+        """``CFWriter.write_fixed`` writes a time-invariant ``fx`` file
+        with no time dimension and ``frequency='fx'``.
+        """
+        try:
+            import xarray as xr
+        except ImportError:
+            self.skipTest("xarray not installed")
+        from legoesm.io.cmor_output import CFWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = CFWriter(
+                output_dir=tmpdir, experiment_id="amip",
+                model_id="legoESM-1-0",
+            )
+            nlat, nlon = 4, 8
+            lat = np.linspace(-67.5, 67.5, nlat)
+            lon = np.linspace(22.5, 337.5, nlon)
+            orog = np.full((nlat, nlon), 500.0, dtype=np.float32)
+            path = writer.write_fixed("orog", orog, lat=lat, lon=lon)
+            ds = xr.open_dataset(path, decode_times=False).load()
+            ds.close()
+        self.assertNotIn("time", ds.dims)
+        self.assertEqual(ds.attrs.get("frequency"), "fx")
+        self.assertEqual(ds.attrs.get("table_id"), "fx")
+        np.testing.assert_allclose(ds["orog"].values, 500.0)
+        self.assertEqual(ds["orog"].attrs.get("units"), "m")
+
+    def test_diagnostic_collector_writes_daily_and_fx(self):
+        """Integration: DiagnosticCollector with cmip_output=True emits
+        ``day/tas_*.nc``, ``day/tasmin_*.nc``, ``day/tasmax_*.nc``, and
+        ``fx/areacella_*.nc`` + ``fx/orog_*.nc`` + ``fx/sftlf_*.nc``.
+        """
+        try:
+            import xarray as xr  # noqa: F401
+        except ImportError:
+            self.skipTest("xarray not installed")
+        from legoesm.driver.diagnostics import DiagnosticCollector
+        from legoesm.diagnostics.monthly_means import SpatialDailyAccumulator
+
+        nlat, nlon = 4, 8
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DiagnosticCollector(
+                nlev=4,
+                sigma_full=np.array([0.125, 0.375, 0.625, 0.875]),
+                dsigma=np.array([0.25, 0.25, 0.25, 0.25]),
+                cmip_output=True,
+                n_days=3,
+                output_dir=tmpdir,
+                cmip_resolution_deg=45.0,  # → (4, 8) target grid
+                start_year=1979,
+            )
+            # Force the daily accumulator/target shape so the test stays
+            # independent of any subtle rounding in the factor-to-shape
+            # calculation inside ``__init__``.
+            collector._cmip_nlat = nlat
+            collector._cmip_nlon = nlon
+            collector._spatial_daily = SpatialDailyAccumulator(
+                nlat=nlat, nlon=nlon, track_extremes={"tas"},
+            )
+
+            # Populate daily accumulator directly with three full days of
+            # consistent samples so ``min_sample_fraction=0.5`` keeps all.
+            tas_field = np.full((nlat, nlon), 290.0)
+            for doy in (1, 2, 3):
+                for _ in range(4):
+                    collector._spatial_daily.add_2d(
+                        doy, 0, {"tas": tas_field},
+                    )
+
+            # Fixed-field inputs on the target grid (skip regridding
+            # since weights aren't set in this minimal test).
+            collector._fixed_phis = np.full(
+                (nlat, nlon), 9.80665 * 500.0,
+            )  # orog = 500 m
+            collector._fixed_land_fraction = np.full((nlat, nlon), 0.3)
+
+            # Monkey-patch _regrid_to_latlon_2d to identity on (nlat, nlon).
+            def _id(arr):
+                arr = np.asarray(arr)
+                if arr.shape == (nlat, nlon):
+                    return arr
+                return None
+            collector._regrid_to_latlon_2d = _id
+
+            collector._write_cmip_daily_files()
+            collector._write_cmip_fixed_files()
+            collector.cf_writer.close()
+
+            cmor_root = Path(tmpdir) / "cmor"
+            day_files = sorted((cmor_root).rglob("day/*.nc"))
+            fx_files = sorted((cmor_root).rglob("fx/*.nc"))
+            day_names = [p.name.split("_")[0] for p in day_files]
+            fx_names = [p.name.split("_")[0] for p in fx_files]
+
+        self.assertIn("tas", day_names)
+        self.assertIn("tasmin", day_names)
+        self.assertIn("tasmax", day_names)
+        self.assertIn("orog", fx_names)
+        self.assertIn("sftlf", fx_names)
+        self.assertIn("areacella", fx_names)
+
+    def test_nominal_resolution_matches_grid(self):
+        try:
+            import xarray as xr
+        except ImportError:
+            self.skipTest("xarray not installed")
+        from legoesm.io.cmor_output import CFWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = CFWriter(
+                output_dir=tmpdir, experiment_id="amip",
+                model_id="legoESM-1-0",
+            )
+            # 5° grid → nominal_resolution "1000 km" (smallest CV bucket
+            # that covers the ~556 km equatorial spacing)
+            lat = np.linspace(-87.5, 87.5, 36)
+            lon = np.linspace(2.5, 357.5, 72)
+            data = np.full((36, 72), 288.0, dtype=np.float32)
+            path = writer.write_field(
+                var_name="tas", data=data,
+                time=15.0, time_bounds=(0.0, 30.0),
+                lat=lat, lon=lon,
+            )
+            ds = xr.open_dataset(path)
+            nominal = ds.attrs["nominal_resolution"]
+            ds.close()
+
+        self.assertEqual(nominal, "1000 km")
 
 
 if __name__ == "__main__":

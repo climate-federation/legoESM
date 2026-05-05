@@ -33,7 +33,9 @@ from legoesm.grids.halo import pad_halo, pad_halo_vector
 # PPM edge reconstruction
 # ==============================================================================
 
-def _ppm_edge_values(q_1d, blend_edges=False):
+def _ppm_edge_values(q_1d, blend_edges=False,
+                     apply_fortran_xppm_boundary=False,
+                     n_interior=None):
     """4th-order edge values from cell averages along last-but-one axis.
 
     When ``blend_edges=True``, the boundary edges (inner-most halo to
@@ -49,6 +51,29 @@ def _ppm_edge_values(q_1d, blend_edges=False):
     blend_edges : bool
         If True, blend boundary edges with one-sided extrapolation.
         Default False (full 4th-order everywhere with Duo-Grid halo).
+    apply_fortran_xppm_boundary : bool, default False
+        Iter-891 (parallel to iter-889 in `operators_cdgrid.py:_ppm_reconstruct_1d`).
+        When True AND ``n_interior`` provided, overwrite the 5
+        cube-edge ``q_hat`` indices [1, 2, 3, n_interior+1,
+        n_interior+2] with Fortran's iord<7 boundary formulas from
+        ``tp_core.F90:357-369``:
+        - Left side: ``q_hat[1] = c1*q1(-2) + c2*q1(-1) + c3*q1(0)``
+          (Fortran al(0)), ``q_hat[2] = uniform 4-point xt`` (Fortran
+          al(1) — cube-face edge), ``q_hat[3] = c3*q1(1) + c2*q1(2)
+          + c1*q1(3)`` (Fortran al(2)).
+        - Right side: ``q_hat[n_interior+1] = c1*q1(npx-3) + c2*q1(npx-2)
+          + c3*q1(npx-1)`` (Fortran al(npx-1)), ``q_hat[n_interior+2]
+          = uniform 4-point xt`` clipped (Fortran al(npx) — right
+          cube-face edge).
+        Constants from ``tp_core.F90:63-65``: ``c1 = -2/14, c2 = 11/14,
+        c3 = 5/14``.  4-point xt uses uniform-grid simplification
+        ``0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))`` (and right mirror)
+        clipped to ``min/max(q1(-1..2))`` (and right mirror).
+        Default False preserves prior behaviour bit-for-bit.
+    n_interior : int or None, default None
+        Number of interior cells along the swept axis when the strip
+        has halo=2 padding (so ``M = n_interior + 4``).  Required when
+        ``apply_fortran_xppm_boundary=True``.  Ignored otherwise.
 
     Returns
     -------
@@ -90,10 +115,100 @@ def _ppm_edge_values(q_1d, blend_edges=False):
     # All M-1 = n+3 edge values
     q_hat = jnp.concatenate([q_hat_lo, q_hat_inner, q_hat_hi], axis=-2)
 
-    # Monotonicity: clamp each edge between its two flanking cell values
-    q_lo = jnp.minimum(q_1d[..., :-1, :], q_1d[..., 1:, :])
-    q_hi = jnp.maximum(q_1d[..., :-1, :], q_1d[..., 1:, :])
-    q_hat = jnp.clip(q_hat, q_lo, q_hi)
+    # Iter-880: pre-iter-880 we clipped each edge value into the
+    # ``[min(q[i],q[i+1]), max(q[i],q[i+1])]`` range here.  Fortran's
+    # ``xppm`` (tp_core.F90:353-355) does NOT clip the 4th-order
+    # edge values; it passes them directly to the CW84 ``pert_ppm``
+    # constraint (which our caller applies via ``_ppm_limit``).  The
+    # extra clip step in our Python made the limiter MORE diffusive
+    # than Fortran by pre-flattening edge overshoots before the CW84
+    # constraint could see them.  Removed for Fortran fidelity.
+
+    # Iter-891b (Codex iter-891 stop-time fix — off-by-one in q_hat
+    # placement).  Apply Fortran's iord<7 cube-edge boundary overrides
+    # at tp_core.F90:357-369 behind a default-OFF kwarg.  Constants
+    # from tp_core.F90:63-65: c1 = -2/14, c2 = 11/14, c3 = 5/14.
+    #
+    # Correct index mapping (Codex iter-891 stop-time correction):
+    #   q_1d[k] = Fortran q1(k-1) for k=0..n+3   (q_1d[0]=q1(-1)=halo
+    #     depth 1, q_1d[1]=q1(0)=halo depth 0, q_1d[2]=q1(1)=first
+    #     interior).
+    #   q_hat[k] for k=1..n_int+1 is the inner 4th-order face between
+    #     q_1d[k] and q_1d[k+1] = face between q1(k-1) and q1(k) =
+    #     Fortran al(k).  i.e. al(i) → q_hat[i].
+    # Pre-iter-891b iter-891 used `al(i) → q_hat[i+1]`, off-by-one.
+    #
+    # Fortran al(0) needs q1(-2) and Fortran al(npx+1) needs q1(npx+2);
+    # both are halo depth 2 cells unavailable with our halo=2 input.
+    # iter-891b therefore overrides ONLY the 4 cube-edge faces that
+    # are computable Fortran-faithfully with halo=2:
+    #   q_hat[1]            ← Fortran al(1)     left 4-point xt clipped
+    #   q_hat[2]            ← Fortran al(2)     left c3/c2/c1 mirror
+    #   q_hat[n_int]        ← Fortran al(npx-1) right c1/c2/c3 formula
+    #   q_hat[n_int+1]      ← Fortran al(npx)   right 4-point xt clipped
+    # Fortran al(0)/al(npx+1) need halo=3 for true Fortran fidelity;
+    # those slots are LEFT UNTOUCHED on the standard 4th-order /
+    # boundary-halo path.
+    if apply_fortran_xppm_boundary and n_interior is not None:
+        c1 = -2.0 / 14.0
+        c2 = 11.0 / 14.0
+        c3 = 5.0 / 14.0
+        n_int = int(n_interior)
+
+        # LEFT cube-edge overrides (al(1) and al(2), placed at q_hat[1]
+        # and q_hat[2]).  q_hat[0] (= q_hat_lo, al(0) position) is left
+        # untouched because Fortran al(0) needs q1(-2) which our halo=2
+        # input lacks.
+        # al(1) = uniform 4-pt xt = 0.75*(q1(0)+q1(1)) - 0.25*(q1(-1)+q1(2))
+        # clipped to min/max(q1(-1..2)).
+        # In our q_1d: q1(-1)=q_1d[0], q1(0)=q_1d[1], q1(1)=q_1d[2],
+        # q1(2)=q_1d[3].
+        xt_L = (0.75 * (q_1d[..., 1, :] + q_1d[..., 2, :])
+                - 0.25 * (q_1d[..., 0, :] + q_1d[..., 3, :]))
+        q_lo_L = jnp.minimum(jnp.minimum(q_1d[..., 0, :], q_1d[..., 1, :]),
+                              jnp.minimum(q_1d[..., 2, :], q_1d[..., 3, :]))
+        q_hi_L = jnp.maximum(jnp.maximum(q_1d[..., 0, :], q_1d[..., 1, :]),
+                              jnp.maximum(q_1d[..., 2, :], q_1d[..., 3, :]))
+        face_al1 = jnp.clip(xt_L, q_lo_L, q_hi_L)
+        # al(2) = c3*q1(1) + c2*q1(2) + c1*q1(3)
+        # In our q_1d: q1(1)=q_1d[2], q1(2)=q_1d[3], q1(3)=q_1d[4].
+        face_al2 = (c3 * q_1d[..., 2, :] + c2 * q_1d[..., 3, :]
+                    + c1 * q_1d[..., 4, :])
+
+        q_hat = q_hat.at[..., 1, :].set(face_al1)
+        q_hat = q_hat.at[..., 2, :].set(face_al2)
+
+        # RIGHT cube-edge overrides (al(npx-1) and al(npx), placed at
+        # q_hat[n_int] and q_hat[n_int+1]).  q_hat[n_int+2] (=
+        # q_hat_hi, al(npx+1) position) is left untouched because
+        # Fortran al(npx+1) needs q1(npx+2) which our halo=2 input
+        # lacks.
+        #
+        # Index map: q_1d[k] = q1(k-1) for k=0..n_int+3, so q1(j) =
+        # q_1d[j+1].  With npx = n_int + 1 (n_int interior cells in
+        # q_1d at indices 2..n_int+1):
+        #   q1(npx-3) = q1(n_int-2) = q_1d[n_int-1]
+        #   q1(npx-2) = q1(n_int-1) = q_1d[n_int]
+        #   q1(npx-1) = q1(n_int)   = q_1d[n_int+1]   (last interior)
+        #   q1(npx)   = q1(n_int+1) = q_1d[n_int+2]   (right halo depth 0)
+        #   q1(npx+1) = q1(n_int+2) = q_1d[n_int+3]   (right halo depth 1)
+        # al(npx-1) = c1*q1(npx-3) + c2*q1(npx-2) + c3*q1(npx-1)
+        face_alnm1 = (c1 * q_1d[..., n_int - 1, :]
+                      + c2 * q_1d[..., n_int, :]
+                      + c3 * q_1d[..., n_int + 1, :])
+        # al(npx) = uniform 4-pt xt clipped to min/max(q1(npx-2..npx+1)).
+        xt_R = (0.75 * (q_1d[..., n_int + 1, :] + q_1d[..., n_int + 2, :])
+                - 0.25 * (q_1d[..., n_int, :] + q_1d[..., n_int + 3, :]))
+        q_lo_R = jnp.minimum(
+            jnp.minimum(q_1d[..., n_int, :], q_1d[..., n_int + 1, :]),
+            jnp.minimum(q_1d[..., n_int + 2, :], q_1d[..., n_int + 3, :]))
+        q_hi_R = jnp.maximum(
+            jnp.maximum(q_1d[..., n_int, :], q_1d[..., n_int + 1, :]),
+            jnp.maximum(q_1d[..., n_int + 2, :], q_1d[..., n_int + 3, :]))
+        face_aln = jnp.clip(xt_R, q_lo_R, q_hi_R)
+
+        q_hat = q_hat.at[..., n_int, :].set(face_alnm1)
+        q_hat = q_hat.at[..., n_int + 1, :].set(face_aln)
 
     return q_hat
 
@@ -136,7 +251,8 @@ def _ppm_limit(q_bar, q_L, q_R):
     return q_L_lim, q_R_lim
 
 
-def _ppm_reconstruct_x(q_pad_h2, limiter=True):
+def _ppm_reconstruct_x(q_pad_h2, limiter=True,
+                       apply_fortran_xppm_boundary=False):
     """PPM reconstruction in x-direction.
 
     Parameters
@@ -145,6 +261,12 @@ def _ppm_reconstruct_x(q_pad_h2, limiter=True):
         Scalar padded with halo=2.
     limiter : bool
         Apply Colella-Woodward limiter.
+    apply_fortran_xppm_boundary : bool, default False
+        Iter-891: forwards through to ``_ppm_edge_values`` so the
+        Fortran iord<7 cube-edge boundary formulas
+        (`tp_core.F90:357-369`) are reachable from
+        ``fv_flux_divergence`` callers.  Default False preserves
+        prior behaviour bit-for-bit.
 
     Returns
     -------
@@ -154,9 +276,13 @@ def _ppm_reconstruct_x(q_pad_h2, limiter=True):
         q_right[i] = left-edge of cell i+1 (cell to right of interface i)
     """
     q = q_pad_h2[:, :, 2:-2]  # (6, n+4, n) — strip transverse halo
+    n = q.shape[-2] - 4  # interior cell count along the swept axis
 
     # Edge values: (6, n+3, n) at all M-1 interfaces
-    q_hat = _ppm_edge_values(q)
+    q_hat = _ppm_edge_values(
+        q,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        n_interior=n)
 
     # Parabola for cells 1..n+2 (interior cells in padded array)
     a_L = q_hat[..., :-1, :]   # left edge of each cell, (6, n+2, n)
@@ -173,8 +299,12 @@ def _ppm_reconstruct_x(q_pad_h2, limiter=True):
     return q_left, q_right
 
 
-def _ppm_reconstruct_y(q_pad_h2, limiter=True):
+def _ppm_reconstruct_y(q_pad_h2, limiter=True,
+                       apply_fortran_xppm_boundary=False):
     """PPM reconstruction in y-direction.
+
+    Iter-891: forwards ``apply_fortran_xppm_boundary`` to
+    ``_ppm_edge_values``.  Default False preserves prior behaviour.
 
     Parameters
     ----------
@@ -185,9 +315,13 @@ def _ppm_reconstruct_y(q_pad_h2, limiter=True):
     q_left, q_right : each shape (6, n, n+1)
     """
     q = q_pad_h2[:, 2:-2, :]  # (6, n, n+4) — strip transverse halo
+    n = q.shape[-1] - 4  # interior cell count along the swept axis
     # Transpose to reuse x-direction logic
     q_t = jnp.swapaxes(q, -2, -1)  # (6, n+4, n)
-    q_hat = _ppm_edge_values(q_t)
+    q_hat = _ppm_edge_values(
+        q_t,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+        n_interior=n)
 
     a_L = q_hat[..., :-1, :]
     a_R = q_hat[..., 1:, :]
@@ -206,7 +340,8 @@ def _ppm_reconstruct_y(q_pad_h2, limiter=True):
 # Unsplit 2D flux-form transport
 # ==============================================================================
 
-def fv_flux_divergence(q, u, v, grid, limiter=True):
+def fv_flux_divergence(q, u, v, grid, limiter=True,
+                       apply_fortran_xppm_boundary=False):
     """Conservative flux-form 2D transport using PPM (unsplit).
 
     Both x and y fluxes are computed on the SAME unmodified field q.
@@ -225,12 +360,29 @@ def fv_flux_divergence(q, u, v, grid, limiter=True):
     grid : CubedSphereGrid
     limiter : bool
         Apply Colella-Woodward monotonicity limiter.
+    apply_fortran_xppm_boundary : bool, default False
+        Iter-891 (parallel to iter-889 production-path plumbing).
+        Forwards through to ``_ppm_reconstruct_x`` / ``_ppm_reconstruct_y``
+        / ``_ppm_edge_values`` so Fortran's iord<7 cube-edge boundary
+        formulas (`tp_core.F90:357-369`) become reachable from
+        ``fv_flux_divergence``.  Iter-891 also matches iter-889b's
+        bounded_domain gate: we only fire the override when the grid
+        is a global cubed sphere (`not grid.bounded_domain`).
+        Default False preserves prior behaviour bit-for-bit.
 
     Returns
     -------
     jax.Array, shape (6, n, n)
         Flux divergence tendency: dq/dt = -div(q * v).
     """
+    # Iter-891b (matching iter-889b's bounded_domain gate pattern):
+    # the iord<7 boundary formulas are gated on `not bounded_domain`
+    # in Fortran (`tp_core.F90:333/357`).  Compute the effective flag
+    # here so the leaf `_ppm_edge_values` receives a pre-gated boolean.
+    effective_xppm_boundary = (
+        apply_fortran_xppm_boundary
+        and not bool(getattr(grid, "bounded_domain", False)))
+
     # Single halo exchange for both directions
     q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
     u_pad, v_pad = pad_halo_vector(
@@ -241,7 +393,9 @@ def fv_flux_divergence(q, u, v, grid, limiter=True):
     )
 
     # --- X-direction flux ---
-    q_L_x, q_R_x = _ppm_reconstruct_x(q_pad, limiter)  # each (6, n+1, n)
+    q_L_x, q_R_x = _ppm_reconstruct_x(
+        q_pad, limiter,
+        apply_fortran_xppm_boundary=effective_xppm_boundary)  # each (6, n+1, n)
 
     u_strip = u_pad[:, :, 2:-2]  # (6, n+4, n)
     u_iface = 0.5 * (u_strip[:, 1:-2, :] + u_strip[:, 2:-1, :])  # (6, n+1, n)
@@ -254,7 +408,9 @@ def fv_flux_divergence(q, u, v, grid, limiter=True):
     Phi_x = u_iface * hy_iface * q_face_x  # (6, n+1, n)
 
     # --- Y-direction flux ---
-    q_L_y, q_R_y = _ppm_reconstruct_y(q_pad, limiter)  # each (6, n, n+1)
+    q_L_y, q_R_y = _ppm_reconstruct_y(
+        q_pad, limiter,
+        apply_fortran_xppm_boundary=effective_xppm_boundary)  # each (6, n, n+1)
 
     v_strip = v_pad[:, 2:-2, :]  # (6, n, n+4)
     v_iface = 0.5 * (v_strip[:, :, 1:-2] + v_strip[:, :, 2:-1])  # (6, n, n+1)

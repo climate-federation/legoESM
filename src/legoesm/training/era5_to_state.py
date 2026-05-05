@@ -18,6 +18,7 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ml.data.era5_loader import (
     ERA5Config,
     WB2_ERA5_ZARR,
@@ -293,7 +294,7 @@ def era5_to_spectral_carry(
 
     # ERA5 is on 1440x721 lat-lon; regrid to Gaussian grid via simple
     # nearest-neighbor or linear interpolation in lat-lon space
-    T_ll, u_ll, v_ll, q_ll, p_s_ll = _regrid_latlon_to_gaussian(
+    T_ll, u_ll, v_ll, q_ll, p_s_ll = regrid_latlon_to_gaussian(
         era5, grid,
     )
 
@@ -311,7 +312,7 @@ def era5_to_spectral_carry(
     )
 
     # Surface geopotential (regrid to Gaussian)
-    phis_ll = _regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
     phis_jax = jnp.asarray(phis_ll)
 
     # Build HydrostaticState
@@ -433,7 +434,7 @@ def era5_sst_to_forcing(
     grid,
     day_of_year: float = 1.0,
     seconds_of_day: float = 0.0,
-    s_0: float = 1361.0,
+    s_0: float = constants.S_0,
 ):
     """Extract SST/SIC forcing from ERA5 for SegmentForcing.
 
@@ -453,7 +454,7 @@ def era5_sst_to_forcing(
     # SST from skin temperature, SIC = 0 (ERA5 skin temp approximation)
     if hasattr(grid, 'n_lat'):
         # Gaussian grid
-        sst = jnp.asarray(_regrid_2d_to_gaussian(
+        sst = jnp.asarray(regrid_2d_to_gaussian(
             era5.sst, era5.lat, era5.lon, grid,
         ))
         sic = jnp.zeros_like(sst)
@@ -484,7 +485,7 @@ def era5_sst_to_forcing(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _regrid_latlon_to_gaussian(era5: ERA5Slice, grid):
+def regrid_latlon_to_gaussian(era5: ERA5Slice, grid):
     """Regrid ERA5 lat-lon fields to the model's Gaussian grid.
 
     Uses scipy linear interpolation for simplicity.  This runs at
@@ -531,7 +532,7 @@ def _regrid_latlon_to_gaussian(era5: ERA5Slice, grid):
     )
 
 
-def _regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):
+def regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):
     """Regrid a 2D field from ERA5 lat-lon to Gaussian grid."""
     from scipy.interpolate import RegularGridInterpolator
 

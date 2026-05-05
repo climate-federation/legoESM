@@ -12,6 +12,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.grids.gaussian import sh_analysis_3d
 from legoesm.ml.loss import spectral_loss
 
 
@@ -176,8 +177,6 @@ def carry_spectral_loss(
     -------
     scalar — spectral L2 loss on T
     """
-    from legoesm.grids.gaussian import sh_analysis_3d
-
     if not jax.config.jax_enable_x64:
         raise RuntimeError(
             "carry_spectral_loss requires JAX_ENABLE_X64=True for "
