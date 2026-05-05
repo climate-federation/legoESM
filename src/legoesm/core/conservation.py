@@ -534,6 +534,7 @@ def fix_mass_hydrostatic_target(
     state_new: HydrostaticState,
     target_mass: jax.Array,
     grid: CubedSphereGrid,
+    owned_mask: jax.Array | None = None,
 ) -> HydrostaticState:
     """Fix mass conservation anchored to a fixed target mass.
 
@@ -548,11 +549,28 @@ def fix_mass_hydrostatic_target(
     target_mass : jax.Array
         Target global mass integral (∫ p_s * dA at t=0).
     grid : CubedSphereGrid
+    owned_mask : jax.Array, optional
+        Shape ``(n_faces,)`` for MPI replicated dynamics — pass-through
+        to ``fix_ps_mass_target`` so the mass integral correctly
+        avoids double-counting under replicated MPI.  Iter-99 audit
+        fix: previously this function called the Field-API
+        ``global_integral`` directly without an owned_mask escape
+        hatch.
 
     Returns
     -------
     HydrostaticState : Mass-conserving state.
     """
+    if owned_mask is not None:
+        # Use the raw-array path that handles owned_mask for MPI
+        # replicated dynamics.  Same correction formula but the
+        # global integral correctly weights by owned_mask.
+        p_s_fixed_data = fix_ps_mass_target(
+            state_new.p_s.data, target_mass, grid, owned_mask=owned_mask,
+        )
+        return state_new._replace(
+            p_s=state_new.p_s.replace(data=p_s_fixed_data),
+        )
     mass_new = global_integral(state_new.p_s, grid)
     correction = (target_mass - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
