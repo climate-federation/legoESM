@@ -118,17 +118,17 @@ def thompson_microphysics(
     ) / jnp.clip(rho, 0.1)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0)
 
-    # Depositional growth (see morrison.py for derivation).  Use the
-    # canonical N_i^(2/3) · q_i^(1/3) scaling and floor q_i so freshly
-    # nucleated ice (N_i > 0, q_i ≈ 0) can grow.
+    # Depositional growth.  Same heuristic form as Morrison —
+    # ``q_i_min_growth`` floor only, so fresh nucleation can grow.
+    # See morrison.py for the rationale.
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
     q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
     dq_i_dep = (
         config.dep_coeff
         * jnp.maximum(S_i, 0.0)
-        * safe_pow(q_i_eff, 1.0 / 3.0)
-        * safe_pow(N_i, 2.0 / 3.0)
+        * q_i_eff
+        * safe_pow(N_i, 1.0 / 3.0)
         * f_ice
     )
 
