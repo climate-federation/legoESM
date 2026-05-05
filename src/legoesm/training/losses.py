@@ -17,13 +17,33 @@ from legoesm.ml.loss import spectral_loss
 
 
 class LossConfig(NamedTuple):
-    """Configuration for dycore training loss."""
-    # Variable weights (relative importance)
+    """Configuration for dycore training loss.
+
+    Per-variable normalization
+    --------------------------
+    Set ``normalize_by_scale=True`` to divide each variable's MSE
+    contribution by its typical amplitude squared
+    (``T_scale²``, ``q_scale²``, ``ps_scale²``, ``wind_scale²``).
+    Without this, the raw-units MSE has variable contributions that
+    differ by ~9 orders of magnitude (ps² ~ 1e10 Pa², q² ~ 1e-4
+    kg²/kg², T² ~ 1e2 K², wind² ~ 1e2 m²/s²) so the moisture and
+    wind branches receive negligible gradient compared to ps.
+    Default: enabled, with ESM-typical anomaly scales.
+    """
+    # Variable weights (relative importance, applied AFTER per-variable
+    # scale normalization when ``normalize_by_scale=True``)
     w_T: float = 1.0          # temperature
     w_u: float = 0.5          # zonal wind
     w_v: float = 0.5          # meridional wind
     w_q: float = 0.2          # specific humidity
     w_ps: float = 0.3         # surface pressure
+    # Per-variable amplitude scales used for normalization
+    # (typical anomaly magnitudes; squared in the denominator).
+    normalize_by_scale: bool = True
+    T_scale: float = 30.0          # K — typical mid-tropospheric T anomaly
+    wind_scale: float = 20.0       # m/s — typical wind anomaly
+    q_scale: float = 5.0e-3        # kg/kg — typical q anomaly
+    ps_scale: float = 1000.0       # Pa — typical ps anomaly
     # Loss components
     spectral_weight: float = 0.0   # weight for spectral loss term
     level_weighting: str = "pressure"  # "uniform", "pressure", or "boundary_layer"
@@ -125,23 +145,37 @@ def carry_mse(
         # No matching axis — fall back to uniform mean.
         return jnp.mean(sq_err)
 
+    # Per-variable scale denominators.  When normalize_by_scale=True
+    # each variable's MSE is divided by its typical amplitude² so the
+    # different variables contribute in commensurate units.  Without
+    # this, w_T·<dT²>, w_q·<dq²>, w_ps·<dps²> differ by ~9 orders of
+    # magnitude (ps² ~ 1e10 dominates; q² ~ 1e-4 is invisible).  Set
+    # to all-1 when normalization is off for backward compatibility.
+    if config.normalize_by_scale:
+        T_norm = config.T_scale ** 2
+        wind_norm = config.wind_scale ** 2
+        q_norm = config.q_scale ** 2
+        ps_norm = config.ps_scale ** 2
+    else:
+        T_norm = wind_norm = q_norm = ps_norm = 1.0
+
     # Temperature: (..., nlev)
     dT = pred_carry.T - target_carry.T
-    loss = loss + config.w_T * _lat_weighted_mean(dT ** 2 * lev_w)
+    loss = loss + config.w_T * _lat_weighted_mean(dT ** 2 * lev_w) / T_norm
 
     # Winds: (..., nlev)
     du = pred_carry.u - target_carry.u
     dv = pred_carry.v - target_carry.v
-    loss = loss + config.w_u * _lat_weighted_mean(du ** 2 * lev_w)
-    loss = loss + config.w_v * _lat_weighted_mean(dv ** 2 * lev_w)
+    loss = loss + config.w_u * _lat_weighted_mean(du ** 2 * lev_w) / wind_norm
+    loss = loss + config.w_v * _lat_weighted_mean(dv ** 2 * lev_w) / wind_norm
 
     # Moisture: (..., nlev)
     dq = pred_carry.q_v - target_carry.q_v
-    loss = loss + config.w_q * _lat_weighted_mean(dq ** 2 * lev_w)
+    loss = loss + config.w_q * _lat_weighted_mean(dq ** 2 * lev_w) / q_norm
 
     # Surface pressure: (...)
     dp = pred_carry.p_s - target_carry.p_s
-    loss = loss + config.w_ps * _lat_weighted_mean(dp ** 2)
+    loss = loss + config.w_ps * _lat_weighted_mean(dp ** 2) / ps_norm
 
     return loss
 
