@@ -208,7 +208,7 @@ class LinearEOSConfig(NamedTuple):
 
     ρ = rho_ref * [1 - alpha_T * (T - T_ref) + beta_S * (S - S_ref)]
     """
-    rho_ref: float = 1025.0    # Reference density [kg/m³]
+    rho_ref: float = 1025.0    # = eos.rho_0
     alpha_T: float = 2.0e-4    # Thermal expansion coefficient [1/K]
     beta_S: float = 7.4e-4     # Haline contraction coefficient [1/PSU]
     T_ref: float = 10.0        # Reference temperature [°C]
