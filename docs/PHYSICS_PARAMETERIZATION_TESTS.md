@@ -609,20 +609,40 @@ Found one HIGH bug deferred to future structural fix:
 Audit cycle iter-44..74 has converged to structural follow-up issues only:
 - ``f_veg = sum(root_frac · beta_root)`` in ``multilayer_land.py`` conflates moisture stress with vegetation cover.  Decided not a bug per se: without explicit LAI / PFT cover data, this is a defensible design choice ("effective root coverage" rather than pure cover).  In a fully-wilted column, the formulation correctly routes evaporation to the bare-soil path with its own moisture limit.
 
-Final integration sweep (209 tests across atmosphere/ocean/land/sea-ice/coupler/training):
-- 209 passed
-- 2 pre-existing failures in ``test_diff_coupler.py`` (TileResponse field-count drift) unrelated to this cycle's fixes.
+### Iter-76 (2026-05-05 — final cross-cutting audit pass)
 
-Held-Suarez spectral-PE stability validation: PASS.
+- coupler/surface_exchange.py, spectral_pe.py step_with_physics, surface_energy.surface_radiation_fluxes, radiation/integration.py — ALL CLEAN.
+- Verified ``RadiationOutput.heating_rate = lw_hr + sw_hr`` invariant exactly (gray.py:313).
 
-The Physical_Consistency cycle has stabilized at 9 CRITICAL + 39 HIGH bugs fixed across 75 audit iterations / 99 commits.  The remaining open items (F1/F2/F10 ocean tau wiring; spectral-ocean w/η consistency; _DayRef JIT cache; multiplicative moisture fixer tracking) all require structural refactoring beyond the scope of single-iteration fixes.
+### Iter-77 (2026-05-05 — spectral ocean PE w/η flux-form consistency — CRITICAL)
+
+Closed the iter-66 deferred CRITICAL bug.  ``ocean/dynamics/spectral_ocean_pe.py`` w cumulative integral was using advective form ``div · h_k`` while η tendency used flux form ``∇·(h_k · v_k)``.  On z-star, the difference is ``v_k · ∇h_k`` — small for typical |η|/H_max but non-zero, and the kinematic BC ``w(η) = ∂η/∂t`` was silently violated.  Fix: pre-batch hu_oc2/hv_dmu BEFORE the w-step, build flux-form div_hv, use it in the w cumulative integral.  Main batch shrinks (6,5)→(5,4) channels.
+
+### Iter-78 (2026-05-05 — Codex round on iter-77)
+
+- Codex caught a stale ``hv_dmu = _ocean_dmu[..., 4]`` line that wasn't removed when the main batch shrunk to 4 channels.  Out-of-bounds indexing.  Removed.
+- Reuse ``div_hv_pre`` for η tendency (saves one SH synthesis per step; guarantees exact bit-equality between w cumulative integral and η tendency).
+
+### Iter-79 (2026-05-05 — final integration sweep + cycle closeout)
+
+Final integration sweep across atmosphere convection, turbulence, microphysics, shallow water, spectral PE tracers, sea-ice, lake, land snow/soil, training, time-integration, ocean physics:
+- **346 tests pass**.
+- Held-Suarez spectral-PE stability validation: PASS.
+
+Final cycle status: **10 CRITICAL** + **40 HIGH** physics bugs fixed across 79 audit iterations / 102 commits.
+
+Remaining open items requiring structural refactoring beyond single-iteration scope:
+- F1/F2/F10: atmosphere ↔ ocean ↔ ice tau sign-convention split; coupler bulk-scheme duplication; ocean prognostic tau wiring.
+- ``_DayRef`` JIT cache: ``_DayRef.day`` mutation does not propagate through JIT-cached ``physics_fn`` (static_argnums in spectral_pe step).  Fix requires threading ``day`` as TRACED scalar through ``step()``.  Affects NMC generation and any time-dependent radiation/SST in production model_driver runs with diurnal/seasonal cycle.
+- Multiplicative moisture fixer in ``core/conservation.py``: untracked corrections compound with input-clip mass adjustments; should emit a "moisture correction flux" diagnostic.
+- ``f_veg`` from LAI/PFT cover (requires data not in current LandParameters).
 
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
 |----------|-------------|-------|----------|
-| CRITICAL | 9  | 9  | 0 (1 spectral-ocean w/η consistency tracked as future work) |
-| HIGH     | 42 | 39 | 3 (F1, F2, F10) |
+| CRITICAL | 10 | 10 | 0 |
+| HIGH     | 43 | 40 | 3 (F1, F2, F10) |
 | MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
 | LOW      | ~30+ | 12 | rest documented in catalog |
 
