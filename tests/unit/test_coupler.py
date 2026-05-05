@@ -226,6 +226,127 @@ def test_sea_ice_no_spurious_growth_from_open_water():
 
 
 # ==============================================================================
+# Coupler-conservation regression tests (audit F3/F4/F8/F9 channels)
+# ==============================================================================
+
+def test_sea_ice_freshwater_flux_balances_ice_mass_change():
+    """Sea-ice TileResponse.freshwater_flux must equal -rho_ice·dh/dt
+    minus the sublimation contribution (audit F4).
+
+    With realistic warm forcing the ice is melting → freshwater INTO
+    ocean → flux > 0.
+    """
+    from legoesm import constants
+    state = _make_ice_state(h=0.5, conc=0.9, T=271.35)
+    forcing = _make_forcing(T_lowest=280.0, sw=400.0, lw=350.0)
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 275.0)
+
+    new_state, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    # Total ice mass change rate
+    dh_dt = (new_state.h_ice.data - state.h_ice.data) / DT
+    # Sublimation contribution (over ice cells only)
+    sublim_rate = jnp.where(
+        state.h_ice.data > config.h_ice_min,
+        -resp.lhflx / (config.rho_ice * constants.L_s),
+        0.0,
+    )
+    expected_fw = -config.rho_ice * (dh_dt - sublim_rate)
+    assert jnp.allclose(resp.freshwater_flux, expected_fw, rtol=1e-6, atol=1e-12)
+    # Sanity: ice melting should yield positive freshwater into ocean
+    assert float(jnp.mean(resp.freshwater_flux)) > 0.0, (
+        "Warm-forcing scenario should melt ice → freshwater_flux > 0"
+    )
+
+
+def test_sea_ice_ocean_heat_extraction_positive_under_warm_ocean():
+    """Sea-ice TileResponse.ocean_heat_extraction > 0 when ocean is
+    warm above T_freeze_ocean (audit F8 — ocean LOSES heat to melt
+    ice base).
+    """
+    state = _make_ice_state(h=1.0, conc=1.0, T=270.0)
+    forcing = _make_forcing()
+    config = SeaIceConfig()
+    # Warm ocean (4 K above freezing) drives basal melt
+    ocean_sst = jnp.full(SHAPE, 275.35)
+
+    _, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    expected_F_ocean = config.ocean_heat_transfer_coeff * 4.0  # SST - T_freeze_ocean
+    # Tolerance generous: ocean_heat_extraction may include a small
+    # open_freeze_flux contribution from any cells where ice grew.
+    assert float(jnp.min(resp.ocean_heat_extraction)) > 0.5 * expected_F_ocean
+    assert jnp.all(resp.ocean_heat_extraction >= 0.0)
+
+
+def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
+    """Sea-ice TileResponse.ocean_stress_x/y is the negative of
+    rho_ocean·C_oi·|U_w − U_i|·(U_w − U_i), weighted by concentration
+    (audit F9).
+    """
+    state = _make_ice_state(h=2.0, conc=0.8, T=265.0)
+    # Use _make_forcing default winds (u=5, v=-3) — strong enough to
+    # exercise the back-reaction stress.
+    forcing = _make_forcing()
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_u = jnp.zeros(SHAPE)
+    ocean_v = jnp.zeros(SHAPE)
+
+    _, resp = step_sea_ice(
+        state, forcing, ocean_sst, ocean_u, ocean_v,
+        config, U_min=1.0, dt=DT,
+    )
+
+    # Ice velocity from free-drift formula uses drag_atm·rho_air/rho_ice·wind
+    rho_air_ratio = config.rho_air_ref / config.rho_ice
+    u_ice_expected = (
+        config.drag_ocean * 0.0  # ocean at rest contributes 0
+        + config.drag_atm * rho_air_ratio * 5.0
+    )
+    # Relative velocity ocean - ice = -u_ice (ocean at rest)
+    du_oi = -u_ice_expected
+    v_ice_expected = config.drag_atm * rho_air_ratio * (-3.0)
+    dv_oi = -v_ice_expected
+    speed_oi = float(jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10))
+    tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi
+    expected_stress_x = -tau_oi_x * 0.8  # weighted by concentration
+
+    assert jnp.allclose(resp.ocean_stress_x, expected_stress_x, rtol=1e-2)
+    # Wind is eastward → ice moves east → ocean→ice drag pulls ice
+    # westward (tau_oi_x < 0) → reaction on ocean is +tau_oi (eastward),
+    # so ocean_stress_x is POSITIVE.
+    assert float(jnp.mean(resp.ocean_stress_x)) > 0.0
+
+
+def test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls():
+    """Sea-ice TileResponse.surface_mass_flux = lhflx / L_s exactly
+    (audit F3 — phase-aware mass flux uses sublimation latent heat
+    over ice).
+    """
+    from legoesm import constants
+    state = _make_ice_state(h=1.0, conc=0.7, T=263.0)
+    forcing = _make_forcing()
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 271.35)
+
+    _, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    expected = resp.lhflx / constants.L_s
+    assert jnp.allclose(resp.surface_mass_flux, expected, rtol=1e-12)
+
+
+# ==============================================================================
 # Test lake
 # ==============================================================================
 
