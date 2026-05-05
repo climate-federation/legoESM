@@ -216,7 +216,11 @@ def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
     sst_data = sst_data + config.sst_offset
     sic_data = sic_data * config.sic_scale
     sic_data = np.clip(sic_data, 0.0, 1.0)
-    sst_data = np.maximum(sst_data, 200.0)
+    # Clamp SST to the seawater freezing point (271.35 K).  Was 200 K
+    # — 71 K below physical freezing — which silently allowed
+    # unphysical sub-freezing SST values to leak into surface-flux
+    # bulk formulas.
+    sst_data = np.maximum(sst_data, constants.T_freeze_ocean)
 
     # --- Build KD-tree from ICON cell centroids (3D Cartesian) ---
     x_src = np.cos(clat) * np.cos(clon)
@@ -389,8 +393,10 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         # Clamp SIC to [0, 1]
         sic_data = np.clip(sic_data, 0.0, 1.0)
 
-        # Ensure SST is physically reasonable (at least freezing)
-        sst_data = np.maximum(sst_data, 200.0)
+        # Ensure SST is at least the seawater freezing point.  Was
+        # 200 K — 71 K below physical freezing — which silently
+        # allowed unphysical SST values to flow into bulk formulas.
+        sst_data = np.maximum(sst_data, constants.T_freeze_ocean)
 
         # Wrap longitude for interpolation continuity
         # Pad one column at each end
