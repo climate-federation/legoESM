@@ -420,7 +420,6 @@ def spectral_ocean_tendencies(
     vert_u_dmu = _ocean_dmu[..., 2]
     vert_v_dmu = _ocean_dmu[..., 3]
     hv_dmu = hv_dmu_pre   # cached from iter-77 pre-batch
-    hv_dmu = _ocean_dmu[..., 4]
 
     flux_vor_div = im_over_a[:, jnp.newaxis] * A_vor_oc2 - one_over_a * B_vor_dmu
     flux_vor_curl = im_over_a[:, jnp.newaxis] * B_vor_oc2 + one_over_a * A_vor_dmu
@@ -572,9 +571,10 @@ def spectral_ocean_tendencies(
     # --- 16. Free-surface tendency ---
     # Use flux-form continuity explicitly: dη/dt = -sum_k div(h_k * v_k).
     # This avoids the div(v)*h approximation error on deforming z-star layers.
-    div_hv_hat = im_over_a[:, jnp.newaxis] * hu_oc2 - one_over_a * hv_dmu
-    div_hv = sh_synthesis_3d(grid, div_hv_hat).real * mask_3d
-    deta_dt_grid = -jnp.sum(div_hv, axis=-1) * mask
+    # Reuse ``div_hv_pre`` synthesized in section 7 above (same hu/hv
+    # spectral coefficients, no need to synthesize twice — iter-78
+    # Codex follow-up on the iter-77 flux-form fix).
+    deta_dt_grid = -jnp.sum(div_hv_pre, axis=-1) * mask
 
     # Merge the deferred ``_dtr_grid_flat`` plain analysis with the
     # ``deta_dt_grid`` 2D analysis via ``jnp.concatenate`` along the
