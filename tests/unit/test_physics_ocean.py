@@ -44,43 +44,70 @@ def _make_ocean_state(n=8, nlev=10):
 def test_richardson_prandtl_grows_with_ri():
     """Pacanowski & Philander (1981) PP81 mandates that the Prandtl
     ratio ν/κ = 1 + α·Ri GROWS with Richardson number, because in stable
-    shear momentum mixes more efficiently than tracer.  The previous
-    (buggy) implementation used a constant Prandtl number Pr_t = 10
-    which inverted the canonical scaling.
+    shear momentum mixes more efficiently than tracer.
 
-    This test directly exercises the fixed PP81 formulas:
-        A_v = K_0 / (1 + α·Ri)^n + A_bg            (momentum, n=2)
-        K_v = (K_0 / (1 + α·Ri)^n) / (1 + α·Ri) + K_bg   (tracer)
-    and verifies that A_v / K_v grows with Ri (modulo background terms).
+    This test exercises the *full pipeline* — calling
+    ``richardson_vertical_mixing`` on a low-Ri and a high-Ri column —
+    and asserts that the returned A_v / K_v ratio is materially larger
+    in the high-Ri column.
 
-    Why non-vacuous: under the prior bug, A_v / K_v == Pr_t (constant 10
-    independent of Ri), so this assertion would FAIL.
+    Construction:
+    - low-Ri: shear-dominated (large du/dz, weak N²): Ri ≈ 0
+    - high-Ri: stable-stratification-dominated (weak shear, strong N²)
+
+    Why non-vacuous: under the prior bug (A_v = K_v · constant_Pr_t),
+    the ratio A_v/K_v == 10 in both columns regardless of Ri — this
+    assertion would fail by construction.
     """
+    from legoesm.ocean.physics.vertical_mixing.richardson import (
+        richardson_vertical_mixing,
+    )
     from legoesm.ocean.physics.vertical_mixing.config import (
         RichardsonVerticalMixingConfig,
     )
 
+    state, grid, z_coord = _make_ocean_state()
     cfg = RichardsonVerticalMixingConfig()
-    Ri_low = 0.0
-    Ri_high = 5.0
-    one_plus_aRi_low = 1.0 + cfg.alpha * Ri_low
-    one_plus_aRi_high = 1.0 + cfg.alpha * Ri_high
+    jacobian = jnp.ones_like(state.eta.data)
 
-    A_v_low = cfg.K_0 / one_plus_aRi_low ** cfg.n + cfg.A_bg
-    K_v_low = (cfg.K_0 / one_plus_aRi_low ** cfg.n) / one_plus_aRi_low + cfg.K_bg
-    A_v_high = cfg.K_0 / one_plus_aRi_high ** cfg.n + cfg.A_bg
-    K_v_high = (cfg.K_0 / one_plus_aRi_high ** cfg.n) / one_plus_aRi_high + cfg.K_bg
+    # Low-Ri column: large velocity gradient, weak T-stratification
+    u_shear = jnp.zeros_like(state.u.data).at[..., :].set(
+        jnp.linspace(0.0, 1.0, state.u.data.shape[-1])
+    )
+    T_weak = jnp.full_like(state.T.data, 10.0)  # quasi-isothermal
+    S_uniform = jnp.full_like(state.S.data, 35.0)
+    # rho weak gradient — match T quasi-isothermal
+    rho_weak = jnp.full_like(state.T.data, 1027.0)
 
-    Pr_low = A_v_low / K_v_low
-    Pr_high = A_v_high / K_v_high
+    out_low_ri = richardson_vertical_mixing(
+        u_shear, jnp.zeros_like(state.v.data),
+        T_weak, S_uniform, rho_weak, z_coord, jacobian, cfg,
+    )
 
-    # Prandtl must grow with Ri (PP81 essential physics).  Constant-Pr
-    # bug would give Pr_low ≈ Pr_high; the canonical scaling has
-    # Pr_high > Pr_low by a meaningful margin.
-    assert float(Pr_high) > float(Pr_low) + 0.5, (
-        f"Prandtl ratio did not grow with Ri (Pr@Ri=0={float(Pr_low):.3f}, "
-        f"Pr@Ri=5={float(Pr_high):.3f}).  PP81 scaling broken; the prior "
-        f"constant-Pr_t bug would return ≈10 at both Ri values."
+    # High-Ri column: zero velocity gradient, strong T-stratification
+    u_quiet = jnp.zeros_like(state.u.data)
+    nlev = state.T.data.shape[-1]
+    # Strong stratification: T decreasing with depth (warm at top)
+    T_stratified = state.T.data  # already has T_surface=20, T_deep=2
+    rho_strong = jnp.broadcast_to(
+        jnp.linspace(1024.0, 1030.0, nlev)[None, None, None, :],
+        state.T.data.shape,
+    )
+
+    out_high_ri = richardson_vertical_mixing(
+        u_quiet, jnp.zeros_like(state.v.data),
+        T_stratified, S_uniform, rho_strong, z_coord, jacobian, cfg,
+    )
+
+    # PP81: Pr = A_v / K_v grows with Ri.  Floor by background to avoid
+    # zero-division when both A_v and K_v are background-dominated.
+    Pr_low = float(jnp.mean(out_low_ri.A_v / jnp.maximum(out_low_ri.K_v, 1e-10)))
+    Pr_high = float(jnp.mean(out_high_ri.A_v / jnp.maximum(out_high_ri.K_v, 1e-10)))
+
+    assert Pr_high > Pr_low + 0.1, (
+        f"Pacanowski–Philander 1981 Prandtl-Ri scaling broken: "
+        f"Pr(low Ri) = {Pr_low:.3f}, Pr(high Ri) = {Pr_high:.3f}. "
+        f"Under the prior bug both ratios would equal Pr_t = 10."
     )
 
 
