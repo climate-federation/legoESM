@@ -1035,8 +1035,7 @@ Shared thermodynamic utilities: saturation vapor pressure, virtual temperature, 
 
 | Forcing | File | Description |
 |---------|------|-------------|
-| **Held-Suarez** | `held_suarez.py` | Newtonian relaxation + Rayleigh friction (spectral + cubed-sphere) |
-| **Held-Suarez (lat-lon)** | `held_suarez_latlon.py` | Held-Suarez adapted for lat-lon grid |
+| **Held-Suarez** | `held_suarez.py` | Newtonian relaxation + Rayleigh friction for spectral, cubed-sphere, MPAS, and lat-lon grids |
 | **Baroclinic wave** | `baroclinic_wave.py` | Jablonowski-Williamson initial conditions |
 
 ### 4.2 Ocean
@@ -2343,8 +2342,7 @@ legoESM/
 │   │       ├── __init__.py                 # Physics exports
 │   │       ├── combined.py                 # Physics suite combiner
 │   │       ├── thermodynamics.py           # Thermodynamic utilities
-│   │       ├── held_suarez.py              # Held-Suarez forcing
-│   │       ├── held_suarez_latlon.py       # Held-Suarez (lat-lon)
+│   │       ├── held_suarez.py              # Held-Suarez forcing (all grids)
 │   │       ├── baroclinic_wave.py          # Baroclinic wave init
 │   │       ├── kessler.py                  # Legacy Kessler wrapper
 │   │       │
