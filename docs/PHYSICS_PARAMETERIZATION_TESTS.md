@@ -331,6 +331,17 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - **F17 (MEDIUM)**: `coupler/lake/two_layer_lake.py` switches `q_sfc` to ice saturation and `L_eff` to L_s when `T_epi ≤ T_freeze`.  Frozen-lake lhflx was previously biased by ~13% from always using L_v.
 - **F6 (MEDIUM)**: `ocean/simple_ocean.py` slab + two-layer ocean freezing clamps now diagnose `Q_freeze` (the energy that would have driven SST below `T_freeze`, equivalent to the latent heat of fusion flowing into ice formation).  `SlabOceanState` gained a `Q_freeze: Field | None` field; `init_slab_state` populates it with a zero Field so the pytree shape is invariant across steps.
 
+### Iter-13 (2026-05-05 — F4 freshwater channel)
+
+- **F4 (HIGH)**: `TileResponse` and `SurfaceToAtm` gained a `freshwater_flux` field [kg/m²/s, positive INTO ocean].  Each tile populates it from its own water budget:
+    - slab land: bucket-overflow `runoff`
+    - multilayer land: `runoff_surface + runoff_subsurface`
+    - ocean tile: `precip_total − lhflx/L_v`
+    - lake: `precip_total − lhflx/L_eff` (L_eff phase-aware, iter-11)
+    - sea ice (slab): `−rho_ice · (h_new − h)/dt` minus sublimation (already in lhflx)
+- `tile_fractions.blend_tiles` and `accumulator.{FluxAccumulator, accumulate, mean_accumulator, accumulator_from_flux}` were extended in lockstep so the time-averaged blended freshwater flux propagates through the coupler.
+- 50 coupler tests + 398 cross-component tests pass after the change.
+
 ### Remaining HIGH-severity items (deferred)
 
 The deep coupler-conservation audit also flagged the following HIGH items that require structural changes beyond the scope of this audit cycle:
@@ -338,7 +349,6 @@ The deep coupler-conservation audit also flagged the following HIGH items that r
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
 - **F2**: Slab ocean and surface coupler tile compute fluxes with different bulk schemes — duplicated paths.
 - **F3**: `TileResponse.lhflx` blends use L_v only — sublimation mass under-counted by ~13% over cold tiles when consumers back-derive evap from lhflx.
-- **F4**: `TileResponse` carries no freshwater / runoff / salt channel — the `compute_mpas_freshwater` adapter exists but is not wired into the production coupled driver.
 - **F8**: Sea-ice → ocean heat flux not delivered (F_ocean removed from ocean column without a return channel).
 - **F9**: Sea-ice → ocean stress reaction force not delivered.
 
