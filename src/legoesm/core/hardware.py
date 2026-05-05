@@ -19,8 +19,13 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 # Legacy constants — kept so that ``from legoesm.core.hardware import
 # _UNSUPPORTED_F64_BACKENDS`` in conservation.py et al. keeps working.
+# Iter 32: include both lowercase and uppercase spellings.  Older
+# callers (and ``test_runtime_bootstrap``) match against ``"METAL"``;
+# newer callers normalise to lowercase.  Carrying both keys avoids
+# subtle cross-version mismatches without changing the lookup
+# semantics elsewhere (every existing call lowercases its query).
 # ---------------------------------------------------------------------------
-_UNSUPPORTED_F64_BACKENDS = frozenset({"metal"})
+_UNSUPPORTED_F64_BACKENDS = frozenset({"metal", "METAL"})
 
 _PRECISION_NAME_TO_DTYPE = {
     "float16": jnp.float16,
