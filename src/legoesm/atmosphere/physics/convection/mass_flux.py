@@ -171,7 +171,7 @@ def _apply_mass_flux_kernel(
     z: jax.Array,
     rho: jax.Array,
     delta_0: float,
-    M_u_max: float = 0.05,
+    M_u_max: float,
     p_min_convection: float = 10_000.0,
     p_gate_sharpness: float = 1_500.0,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:

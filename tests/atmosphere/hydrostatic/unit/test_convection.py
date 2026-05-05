@@ -377,6 +377,63 @@ class TestDCA:
         assert jnp.all(jnp.isfinite(grad_T))
         assert grad_T.shape == T.shape
 
+    def test_moist_static_energy_conservation(self):
+        """DCA must conserve moist static energy column-wise.
+
+        Adjustment imposes the moist-adiabatic lapse rate and removes
+        super-saturation; the latent heat released by condensation
+        must warm the column so that
+
+            c_p · ⟨ΔT⟩ + L_v · ⟨Δq⟩ = 0   (column mean, dp-weighted)
+
+        holds layer-pair by layer-pair.  The Physical_Consistency
+        cycle iter-1 fix added this latent-heat term — without it,
+        DCA conserved only dry static energy and biased the column
+        cool by ~2.5 K per g/kg condensed.
+        """
+        from legoesm import constants
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.atmosphere.physics.convection.dca import (
+            _adjust_one_iteration,
+        )
+
+        ncol, nlev = 4, 10
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        # Saturate the column so removing super-saturation actually
+        # condenses water (otherwise q_adj == q_v and the test is
+        # vacuous on stable / dry columns).
+        q_v = saturation_mixing_ratio(T, p_full) * 1.05
+
+        # Bypass CAPE-gating by calling the inner adjustment loop
+        # directly: the conservation property we are testing is a
+        # property of ``_adjust_one_iteration``, not of the cape
+        # threshold.
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        T_new, q_new, _ = _adjust_one_iteration(
+            T, q_v, p_full, dp, mixing_fraction=1.0,
+        )
+
+        # Column mean tendencies, mass-weighted by dp.
+        dT = T_new - T  # K
+        dq = q_new - q_v  # kg/kg
+        dT_col = jnp.sum(dT * dp, axis=-1) / jnp.sum(dp, axis=-1)
+        dq_col = jnp.sum(dq * dp, axis=-1) / jnp.sum(dp, axis=-1)
+
+        # Moist static energy invariant: c_p · ⟨ΔT⟩ + L_v · ⟨Δq⟩ = 0
+        # since dq is negative (condensation) and dT positive (latent
+        # heat release), the residual should be near zero.
+        residual = constants.c_pd * dT_col + constants.L_v * dq_col
+        scale = jnp.maximum(constants.c_pd * jnp.abs(dT_col), 1e-12)
+        max_rel = float(jnp.max(jnp.abs(residual) / scale))
+        # Tight tolerance: the per-pair fix is exact in the
+        # mass-weighted sense, so the only residual comes from
+        # interactions between successive scan steps (each pair sees
+        # a slightly modified T from the previous pair's update).
+        assert max_rel < 0.10, (
+            f"DCA moist-static-energy residual = {max_rel:.3e}; "
+            "iter-1 latent-heat fix should keep this small."
+        )
+
 
 # ===========================================================================
 # Integration tests
