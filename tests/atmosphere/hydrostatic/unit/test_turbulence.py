@@ -879,6 +879,40 @@ class TestYSU:
         assert jnp.all(jnp.isfinite(out.dT_dt))
         assert jnp.all(jnp.isfinite(out.Km))
 
+    def test_louis_constants_are_config_driven(self):
+        """The Louis (1982) ``b`` and ``b'`` stability constants must come
+        from ``YSUConfig`` (config.louis_b, config.louis_d) and not be
+        hardcoded inside ``ysu.py``.
+
+        Why this is non-vacuous: doubling ``louis_b`` changes the
+        f_stable / f_unstable shape of the stability function, which
+        materially alters Km in stable / unstable Ri regimes.  If the
+        scheme ignored config.louis_b (the previously-hardcoded
+        ``b_louis = 5.0``), the two outputs would be bit-identical.
+        """
+        ncol, nlev = 2, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        T_sfc = T[:, -1] + 5.0
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+
+        config_default = YSUConfig(louis_b=5.0, louis_d=5.0)
+        config_doubled = YSUConfig(louis_b=10.0, louis_d=5.0)
+
+        out_default = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=config_default,
+        )
+        out_doubled = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=config_doubled,
+        )
+
+        # Km must differ — falsifies the hardcoded-constant version
+        assert not jnp.allclose(out_default.Km, out_doubled.Km, atol=1e-12), (
+            "Km did not change under config.louis_b doubling — Louis "
+            "stability constants are still hardcoded inside ysu.py."
+        )
+
     def test_entrainment_near_pbl_top(self):
         """YSU with entrainment should differ from zero-entrainment."""
         ncol, nlev = 2, 20

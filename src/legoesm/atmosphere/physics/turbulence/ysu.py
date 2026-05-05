@@ -137,15 +137,21 @@ def ysu_turbulence(
     l_mix = constants.kappa_vk * z_abs / (
         1.0 + constants.kappa_vk * z_abs / config.l_mix_max
     )
-    b_louis = 5.0
+    # Louis (1982) stability constants come from config; the previous
+    # hardcoded ``b_louis = 5.0`` and ``5.0`` literals violated the
+    # constant-discipline rule (CLAUDE.md) — moving them to YSUConfig
+    # lets calibration sweeps adjust them and keeps a single source of
+    # truth for the Louis (1982) ``b`` and ``b'`` parameters.
+    b_louis = config.louis_b
+    d_louis = config.louis_d
     Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + 5.0 * Ri_pos))
+    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos))
     Ri_neg = jnp.minimum(Ri, 0.0)
     f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * 5.0 * l_mix ** 2
+        1.0 + 3.0 * b_louis * d_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
-    blend_ri = jax.nn.sigmoid(100.0 * Ri)
+    blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
     f_m = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     Km_local = l_mix ** 2 * S * f_m
 

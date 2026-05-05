@@ -225,11 +225,17 @@ def clubb_lite_turbulence(
     wprtp = -Kh_full * drt_dz_full        # (ncol, nlev)
 
     # Scalar variances from flux-gradient closure:
-    #   thlp2 = 2 * |wpthlp| * |dtheta/dz| * tau / C5
+    #   thlp2 ≈ -2 * wpthlp * dtheta/dz * tau / C5
+    #         = 2 * Kh * (dtheta/dz)^2 * tau / C5    (since wpthlp = -Kh * dθ/dz)
+    # The squared-gradient form is everywhere differentiable; the prior
+    # ``|wpthlp| * |dtheta/dz|`` form gave the same value (Kh ≥ 0) but
+    # had non-differentiable ``|·|`` kinks at zero gradient — which kills
+    # ``jax.grad`` of any loss that depends on profile variances through
+    # well-mixed (zero-gradient) layers.
     tau_safe = jnp.clip(tau_turb, 1.0, None)
-    thlp2 = 2.0 * jnp.abs(wpthlp) * jnp.abs(dtheta_dz_full) * tau_safe / config.C5
+    thlp2 = 2.0 * Kh_full * dtheta_dz_full ** 2 * tau_safe / config.C5
     thlp2 = jnp.maximum(thlp2, config.var_min)
-    rtp2 = 2.0 * jnp.abs(wprtp) * jnp.abs(drt_dz_full) * tau_safe / config.C5
+    rtp2 = 2.0 * Kh_full * drt_dz_full ** 2 * tau_safe / config.C5
     rtp2 = jnp.maximum(rtp2, config.var_min)
 
     # ===== Cloud fraction from Gaussian PDF =====
