@@ -228,7 +228,14 @@ source .venv/bin/activate
 # NVIDIA nodes.  Iter 26 follow-up: respect a value already exported
 # by ``sbatch --export=JAX_PLATFORMS=...`` so ROCm sites can override
 # without editing this file.
-export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
+# Iter 27: escape the parameter expansion so it resolves at *job*
+# runtime (under the sbatch'd shell), not at wrapper-execution time
+# inside the heredoc.  Without the backslash, bash expands
+# ${JAX_PLATFORMS:-cuda,cpu} when writing the .sbatch script, picking
+# up the wrapper's env (typically empty on the submit host) and
+# baking ``cuda,cpu`` into the file — which then overrides any
+# ``sbatch --export=JAX_PLATFORMS=rocm,cpu`` the user supplied.
+export JAX_PLATFORMS="\${JAX_PLATFORMS:-cuda,cpu}"
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
