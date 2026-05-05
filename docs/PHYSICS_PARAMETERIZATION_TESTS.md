@@ -373,21 +373,36 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - **F14 (LOW)**: Same fix for `LakeState.Q_freeze`.
 - Together with the iter-12 `SlabOceanState.Q_freeze` fix, all three "diagnostic field initialised None then set to array" pytree-shape inconsistencies are resolved.
 
-### Iter-18 (2026-05-05 — conservation channel regression tests)
+### Iter-18/19 (2026-05-05 — conservation channel regression tests)
 
-Add four explicit regression tests in `tests/unit/test_coupler.py` so future regressions in the F3/F4/F8/F9 channels are caught at the test level rather than only by integration drift:
+Add seven explicit regression tests in `tests/unit/test_coupler.py` covering all four conservation channels on every tile that produces them:
 
-- `test_sea_ice_freshwater_flux_balances_ice_mass_change` (F4) — asserts `freshwater_flux ≈ -rho_ice·dh/dt` minus the sublimation contribution, with a sanity check that warm forcing yields melt → flux > 0.
-- `test_sea_ice_ocean_heat_extraction_positive_under_warm_ocean` (F8) — asserts `ocean_heat_extraction > 0` when SST > T_freeze_ocean and cross-checks the magnitude against `ocean_heat_transfer_coeff · ΔT`.
-- `test_sea_ice_ocean_stress_opposes_ocean_ice_drag` (F9) — asserts `ocean_stress_x = -tau_oi · concentration` with the proper Cauchy drag formula.
-- `test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls` (F3) — asserts the bit-exact identity `surface_mass_flux = lhflx / L_s` over the sea-ice tile.
+- iter-18 (sea-ice tile, 4 tests): `test_sea_ice_freshwater_flux_balances_ice_mass_change` (F4); `test_sea_ice_ocean_heat_extraction_positive_under_warm_ocean` (F8); `test_sea_ice_ocean_stress_opposes_ocean_ice_drag` (F9); `test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls` (F3).
+- iter-19 (lake / land tiles, 3 tests): `test_lake_surface_mass_flux_uses_phase_aware_L` (F3, both warm/L_v and frozen/L_s branches); `test_lake_freshwater_flux_is_P_minus_E` (F4); `test_land_freshwater_flux_equals_runoff` (F4, with a saturated bucket and heavy precip to force overflow).
 
-416 tests pass after iter-18 (was 412 before; +4 new tests).
+419 tests pass after iter-19 (412 → 416 in iter-18 → 419 in iter-19).
+
+### Iter-20 (2026-05-05 — F22 + F5 wire MPAS freshwater path)
+
+- **F22 (LOW)**: `coupler/mpas_adapter.compute_mpas_freshwater` now consumes the phase-aware `SurfaceToAtm.surface_mass_flux` (iter-16) instead of back-deriving evap from `lhflx / L_v`.  The L_v fallback path is preserved for legacy callers that wire a SurfaceToAtm without the new field.  Removes the ~13 % mass under-count over sublimating tiles.
+- **F5 (MEDIUM)**: same adapter now reads slab-land runoff from `LandState.runoff` (single field) when the multilayer `runoff_surface` / `runoff_subsurface` aren't present — earlier code silently dropped slab runoff.
+- `ocean/freshwater.freshwater_from_coupler` gains an optional `surface_mass_flux` kwarg.  44 freshwater tests pass.
 
 ### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
 - **F2**: Slab ocean and surface coupler tile compute fluxes with different bulk schemes — duplicated paths.
+
+### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
+
+| Severity | Total found | Fixed | Deferred |
+|----------|-------------|-------|----------|
+| CRITICAL | 7  | 7  | 0 |
+| HIGH     | 14 | 11 | 3 (F1, F2, F10) |
+| MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
+| LOW      | ~30+ | 12 | rest documented in catalog |
+
+All seven CRITICAL findings (DCA latent heat, Richards `L psi^m`, EVP relaxation, ocean integration imports, three more) are fixed and Codex-verified.
 
 ### Open audit findings (deferred for follow-up)
 
