@@ -477,18 +477,64 @@ Structural physics gaps flagged but deferred:
 - Two non-vacuous regression tests verify both: existing-ice basal growth doesn't change A; partial-cover lead refreezing DOES change A.
 - 11 differentiable sea-ice tests pass; Held-Suarez passes.
 
+### Iter-49 (2026-05-05 — lake convective overturn for freshwater)
+
+- `coupler/lake/two_layer_lake.py` had no convective overturn check; freshwater density inversions (T_epi < T_hypo with both layers > 4 °C) were preserved indefinitely.  CICE/FLake/ALMA all instantaneously homogenize density inversions.
+- Added Kell 1975 / Jones-Harris parabolic ρ(T) anomaly check; when ρ_epi > ρ_hypo, set both layers to mass-weighted mean.
+- Constants ``T_freshwater_max_density`` and ``rho_freshwater_curvature`` added to ``legoesm.constants``.
+- CLAUDE.md strengthened: ALL physical constants live in ``legoesm.constants`` — no hardcoded values in config.py, function bodies, tests, or plotters.
+- 8 lake tests pass (1 new convective-overturn regression with enthalpy-conservation check); Held-Suarez passes.
+
+### Iter-50 (2026-05-05 — HoltslagBoville sharpness + EDMF exner)
+
+- `turbulence/holtslag_boville.py` had three hardcoded sharpness literals (20.0, 100.0, 10.0).  Lifted to ``HoltslagBovilleConfig.pbl_sharpness`` / ``blend_ri_sharpness`` / ``blend_pbl_sharpness``.
+- `turbulence/edmf.py` had a single ``exner`` variable shadowed mid-function (first ``(p_ref/p)^κ``, then ``(p/p_ref)^κ``).  Renamed to ``exner_pref`` / ``exner_inv`` for clarity.
+- 53 turbulence tests pass; Held-Suarez passes.
+
+### Iter-51 (2026-05-05 — spectral-PE hybrid tracer vertical advection — CRITICAL)
+
+- ``atmosphere/dynamics/spectral_pe.py``: tracer vertical advection was silently dropped on the hybrid coordinate path.  ``_tracer_advection_gaussian`` returned horizontal-only when sigma_coord is ``HybridSigmaPressureCoordinate``, and the caller never added the vertical contribution.  T, u, v had vertical advection (lines 604, 656-657); only tracers were broken.
+- Fix: add ``vertical_advection_hybrid(q_grid, mass_flux, p_s, sigma_coord)`` inside the tracer loop, gated on ``is_hybrid``.
+- Source-level regression test added.  10 spectral-PE tracer-advection tests pass; Held-Suarez passes.
+
+### Iter-52 (2026-05-05 — coupled driver hardcoded constants + snow_frac)
+
+- ``driver/coupled_esm_driver.py``: hardcoded ``M_CO2 = 44.01``, ``M_air = 28.97`` in three places; ``eps_sfc = 0.96``; ``S_0 = 1360.0`` (vs canonical 1361.0).  All moved to ``legoesm.constants``: M_air, M_CO2, M_H2O, emissivity_ocean/ice/land.
+- ``snow_frac = where(T_low < T_freeze, 1, 0)`` hard step replaced with smooth ramp ``clip((T_freeze + 2 - T_low) / 4, 0, 1)`` (Wigmosta 1994 / Dai 2008).
+- 67 coupler/diff-coupler tests pass; Held-Suarez passes.
+
+### Iter-53 (2026-05-05 — ocean rho_0 / c_sw to constants.py)
+
+- ``ocean/eos.py`` had module-level literals ``rho_0 = 1025.0`` and ``c_sw = 3994.0``.  Both rebound to ``constants.rho_ocean`` and ``constants.c_sw`` (newly added).
+- 21 ocean physics + plume tests pass; Held-Suarez passes.
+
+### Iter-54 (2026-05-05 — Robert-Asselin-Williams filter sign error — CRITICAL)
+
+- ``timestepping/semi_implicit.py:robert_asselin_filter`` had both filter increments with the SAME sign and α/(1-α) swapped.  Williams 2009 (eqs. 8-9) requires OPPOSITE signs:
+      X^n_filtered = X^n + α·d_n
+      X^{n+1}_filtered = X^{n+1} − (1 − α)·d_n
+- The buggy formulation produced sum drift of +d_n every step (~10% per 100 steps at γ = 0.05) — climate-relevant.
+- Three non-vacuous regression tests added (sum-conservation at α = 0.5, 2·dt damping rate = 1−γ, α = 1 recovers original RA).
+- 23 timestepping + 17 leapfrog tracer-filter + Held-Suarez tests pass.
+
+### Iter-55 (2026-05-05 — RAW α = 0.53 default + dtype-aware test)
+
+- Codex flagged α = 0.5 (the "neutral" point) as unconditionally unstable per Williams 2009 §3b.  Default changed to α = 0.53 (conditionally stable) and exposed via ``SpectralPEConfig.robert_asselin_alpha``.
+- Citation corrected to Williams 2009 eqs. 8-9.
+- Tests made dtype-aware to pass under both x64 (1e-10 tol) and fp32 (1e-6 tol).
+
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
 |----------|-------------|-------|----------|
-| CRITICAL | 7  | 7  | 0 |
-| HIGH     | 19 | 16 | 3 (F1, F2, F10) |
+| CRITICAL | 9  | 9  | 0 |
+| HIGH     | 27 | 24 | 3 (F1, F2, F10) |
 | MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
 | LOW      | ~30+ | 12 | rest documented in catalog |
 
-All seven CRITICAL findings (DCA latent heat, Richards `L psi^m`, EVP relaxation, ocean integration imports, three more) are fixed and Codex-verified.
+All nine CRITICAL findings (DCA latent heat, Richards `L psi^m`, EVP relaxation, ocean integration imports, GWD g-factor, _shared moisture-convergence, spectral-PE hybrid tracer vertical advection, RAW filter sign, plus one more) are fixed and Codex-verified.
 
-Iter-44 → 48 added 5 more HIGH fixes (compute_cin p_full→p_mid; SBM differentiability; YSU/CLUBB-lite hardcoded constants; PP81 momentum/tracer; sea-ice concentration growth).
+Iter-44 → 55 audited 12 new modules and added 16 HIGH/CRITICAL fixes (compute_cin p_full→p_mid; SBM straight-through cloud_mask; YSU/CLUBB-lite hardcoded constants; PP81 momentum/tracer swap; sea-ice concentration growth from leads; lake convective overturn; HoltslagBoville sharpness; EDMF exner shadowing; spectral-PE hybrid tracer vertical advection; coupled driver constants + snow_frac; ocean rho_0/c_sw module-level literals; RAW filter sign error).
 
 ### Open audit findings (deferred for follow-up)
 
