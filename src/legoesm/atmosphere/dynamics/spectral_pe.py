@@ -757,16 +757,26 @@ def spectral_pe_tendencies(
     if state.tracers is None:
         tracers_tend = None
     else:
+        is_hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
         tracers_tend = {}
         for name, value in state.tracers.items():
             q_grid = value.data if hasattr(value, "data") else value
-            # Compute advective tendency (sigma-coord branch handles
-            # vertical advection internally; hybrid drops vertical for
-            # now, follow-up work).
+            # Compute advective tendency.  Sigma-coord branch handles
+            # vertical advection internally; hybrid path returns
+            # horizontal-only and we add vertical advection here using
+            # the same ``vertical_advection_hybrid`` helper used for
+            # T, u, v above (lines 604, 656-657).  Without this addition
+            # tracers had NO vertical transport on the hybrid path —
+            # iter-51 audit caught this CRITICAL bug.
             dq_dt_grid = _tracer_advection_gaussian(
                 q_grid, u_cos, v_cos, div, sigma_dot,
                 sigma_coord, grid,
             )
+            if is_hybrid:
+                vert_adv_q = vertical_advection_hybrid(
+                    q_grid, mass_flux, p_s, sigma_coord
+                )
+                dq_dt_grid = dq_dt_grid + vert_adv_q
             # Add physics tendency for this tracer when the bridge
             # provided one.
             if (
