@@ -397,6 +397,21 @@ Two CRITICAL iter-1 fixes lacked dedicated regression tests; both now have one:
 
 474 tests pass after iter-21 (419 → 463 with iter-20's freshwater suite → 474 with iter-21's 3 new tests).
 
+### Iter-35 (2026-05-05 — CRITICAL F1 moisture-convergence sign + F2 hypsometric T_v)
+
+The deep audit of `atmosphere/physics/_shared.py` found two new fixes:
+
+- **F1 (CRITICAL)**: `compute_moisture_convergence` was double-negating the FV flux divergence on cubed-sphere and lat-lon C-grid branches, returning `+div(q·V)` (moisture DIVERGENCE) instead of `-div(q·V)` (moisture CONVERGENCE).  The Gaussian/spectral branch was correct.  Bug silently inverted the Tiedtke / Bechtold convection deep-closure mass-flux trigger on cubed-sphere/lat-lon runs.
+- **F2 (HIGH)**: iter-36 added an optional `q_v` argument to `compute_heights_from_sigma` and `compute_layer_dz` so the hypsometric integral uses virtual temperature `T_v = T·(1 + (1/ε−1)·q_v)`.  Previously dry T was used, biasing layer heights low by ~1 % in tropical moist columns.
+
+Regression tests:
+- `test_mc_sign_matches_dycore_tracer_tendency`: asserts `compute_moisture_convergence` returns bit-exactly the same value as `fv_flux_divergence_3d` (both = `dq/dt = -div(q·V)` = MC).  Catches the F1 bug; the previous test was vacuous.
+
+**Integration verification**:
+- Held-Suarez spectral-PE stability validation passes (6.62 s) with iter-35 + iter-36 fixes applied.
+- 210 atmosphere physics unit tests pass (microphysics + convection + GWD + turbulence).
+- 63 / 64 combined-physics + spectral-PE tests pass; 1 fail is pre-existing dycore `_lnps_pad` bug unrelated to physics.
+
 ### Iter-22 (2026-05-05 — stomata vapor pressure formula)
 
 - **Audit finding #24 (MEDIUM)**: `land/carbon/stomata.py` switches the vapor-pressure-from-specific-humidity formula from the mixing-ratio form `e = q · p / (ε + q)` to the correct specific-humidity form `e = q · p / (ε + (1 − ε) · q)`.  Affects both `jarvis_gs` and `coupled_farquhar_stomata`.  The bias is ~1 % at typical tropical q but propagates through the VPD-driven stomatal closure into GPP.
