@@ -292,6 +292,8 @@ def step_land(
         # bucket overflow ``runoff`` (kg/m²/s).  This closes the water
         # budget through the coupler if a downstream consumer wires it.
         freshwater_flux=runoff,
+        # Land does not extract heat directly from the ocean.
+        ocean_heat_extraction=jnp.zeros_like(T_soil),
     )
 
     return new_state, response, carbon_state_new

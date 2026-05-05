@@ -101,4 +101,11 @@ def blend_tiles(
             ocean_resp.freshwater_flux, ice_resp.freshwater_flux,
             land_resp.freshwater_flux, lake_resp.freshwater_flux,
         ),
+        # Tile-blended heat extracted from the ocean by ice.  Audit F8.
+        ocean_heat_extraction=_blend(
+            ocean_resp.ocean_heat_extraction,
+            ice_resp.ocean_heat_extraction,
+            land_resp.ocean_heat_extraction,
+            lake_resp.ocean_heat_extraction,
+        ),
     )

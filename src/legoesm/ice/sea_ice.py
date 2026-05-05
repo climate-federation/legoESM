@@ -207,6 +207,29 @@ def _step_slab(
     )
     freshwater_to_ocean = -config.rho_ice * (dh_dt_total - dh_dt_sublim)
 
+    # Heat extracted from the ocean by this tile.  Two contributions:
+    #   1) basal melt/growth: F_ocean drawn from warm ocean to melt
+    #      ice base (positive when SST > T_freeze_ocean).
+    #   2) open-water freezing: latent heat L_f · rho_ice · dh_open
+    #      removed from the ocean to form new ice.
+    # The signs work out so both are positive when ocean LOSES energy
+    # to the ice tile.  Ocean tile receives this back as a sink in
+    # its surface heat budget.  Audit F8.
+    ice_mask_init = h > config.h_ice_min
+    F_ocean = jnp.where(
+        ice_mask_init,
+        config.ocean_heat_transfer_coeff * jnp.maximum(
+            ocean_sst - config.T_freeze_ocean, 0.0,
+        ),
+        0.0,
+    )
+    # On previously-open-water cells, all of h_new is freshly frozen
+    # ice at base.  L_f · rho_ice · h_new / dt is the heat extracted
+    # from the ocean per unit area.
+    dh_dt_freeze_open = jnp.where(~ice_mask_init, h_new / dt, 0.0)
+    open_freeze_flux = config.rho_ice * config.L_f * dh_dt_freeze_open
+    ocean_heat_extraction = F_ocean + open_freeze_flux
+
     response = TileResponse(
         T_surface=T_ice_new,
         albedo=alpha_ice,
@@ -222,6 +245,7 @@ def _step_slab(
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
         freshwater_flux=freshwater_to_ocean,
+        ocean_heat_extraction=ocean_heat_extraction,
     )
 
     return new_state, response
@@ -559,11 +583,10 @@ def _build_response(
         u_ocean_sfc=u_ice,
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
-        # Multi-cat aggregate: freshwater_flux is constructed in the
-        # multi-cat step path (above); the aggregator just exposes it
-        # as-is via the TileResponse from that path.  The
-        # ``_build_response`` helper is used by the aggregate state
-        # path that does not have access to the per-step mass change,
-        # so we return zero here and let the multi-cat path overwrite.
+        # Multi-cat aggregate: freshwater and ocean-heat-extraction
+        # are constructed in the multi-cat step path (above); the
+        # aggregator just exposes zero placeholders and lets the
+        # multi-cat path overwrite if needed.
         freshwater_flux=jnp.zeros_like(h),
+        ocean_heat_extraction=jnp.zeros_like(h),
     )

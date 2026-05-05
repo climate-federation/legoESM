@@ -259,6 +259,11 @@ def ocean_tile_response(
         v_ocean_sfc=ocean_v,
         co2_flux=jnp.zeros(shape, dtype=_ssh_dtype),
         freshwater_flux=freshwater_flux,
+        # Ocean tile is itself the source of ocean heat — does not
+        # extract from the ocean.  Sea-ice tiles report their
+        # extraction; the ocean column treats the sum across tiles
+        # (after blending) as a heat-budget sink.
+        ocean_heat_extraction=jnp.zeros(shape, dtype=_ssh_dtype),
     )
 
 

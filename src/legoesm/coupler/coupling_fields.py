@@ -69,6 +69,15 @@ class TileResponse(NamedTuple):
     # tree-prefix mismatch when one tile has None and others have
     # arrays).
     freshwater_flux: jax.Array
+    # Heat flux extracted from the ocean by this tile [W/m²,
+    # positive = ocean LOSES energy to this tile].  Sea-ice draws
+    # heat from the warm ocean to melt at its base (F_ocean), and
+    # latent heat of fusion is removed from the ocean when open
+    # water freezes — both should be subtracted from the ocean
+    # column heat budget.  Land/lake tiles return zeros (no direct
+    # ocean exchange).  Ocean tile reports zero (it is the source,
+    # not a sink).  Audit F8.
+    ocean_heat_extraction: jax.Array
 
 
 class SurfaceToAtm(NamedTuple):
@@ -90,3 +99,7 @@ class SurfaceToAtm(NamedTuple):
     # body [kg/m²/s, positive into the ocean / surface].  Always a
     # populated array (zeros if no tile reports a freshwater channel).
     freshwater_flux: jax.Array
+    # Tile-blended heat flux extracted from the ocean [W/m²,
+    # positive = ocean LOSES energy to surface tiles].  See
+    # ``TileResponse.ocean_heat_extraction``.
+    ocean_heat_extraction: jax.Array
