@@ -49,8 +49,9 @@ legoESM is a next-generation, fully differentiable Earth System Model spanning w
 
 ### External Forcing
 - **GHG**: Constant or time-varying (NetCDF), CMIP6 experiment templates (piControl, historical, SSP2-4.5, SSP5-8.5, AMIP, 1pctCO2)
-- **Ozone/Aerosol/Solar**: Climatological or time-varying from files
-- **Real topography**: NetCDF loading with bilinear regridding, Laplacian smoothing, land fraction derivation
+- **Ozone/Aerosol/Solar**: Climatological or time-varying from files; CMIP6-shape loaders for `vmro3`, Kinne aerosol, MPI-M 14-band TSI, and CMIP6 volcanic AOD
+- **AMIP CMIP6 deck**: `scripts/run_amip_cmip6_deck.py` drives the transient GHG / ozone / solar / aerosol / volcanic stack with RRTMG + Sundqvist clouds + Sundqvist large-scale condensation + SBM + Louis (GHG concentrations consumed by RRTMGP only). Production grids are cubed-sphere and lat-lon; the dispatch smoke test (`smoke_test_amip_all_grids.py`) also exercises Gaussian spectral and Voronoi/MPAS but Voronoi requires `--turbulence none --dt 60` workarounds and bypasses `DiagnosticCollector`
+- **Real topography / bathymetry**: NetCDF loading (ETOPO/GEBCO/ERDDAP), bilinear regridding, Laplacian smoothing, MEO r-cap steepness limiter, polar-cap masking, isolated-basin filling, and strait enforcement
 
 ### Parallelism
 - **Canonical parallel runtime** (`ParallelRuntime`): single entry point for serial, multi-GPU, MPI, and hybrid execution
