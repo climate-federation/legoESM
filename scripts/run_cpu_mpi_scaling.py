@@ -139,8 +139,15 @@ PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full")
 # Grid/physics support matrix.  Moist tiers require tracer storage
 # that MPAS and spectral states do not have today.
 _SUPPORTED_PHYSICS = {
-    "cubed-sphere": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
-    "latlon": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
+    # Iter 40 honest-sweep: ``_build_physics_fn`` only knows how to
+    # construct the Held-Suarez forcing.  ``gray_sbm`` /
+    # ``rrtmg_full`` are routed through the AMIP segment driver
+    # (``run_levante_gpu_scaling.py`` ``_run_segment_benchmark``),
+    # not through this CPU-MPI script.  Listing them as supported
+    # here let users pass ``--physics gray_sbm`` and silently
+    # benchmark dycore-only with the moist-physics label.
+    "cubed-sphere": {"none", "held_suarez"},
+    "latlon": {"none", "held_suarez"},
     "icosahedral": {"none", "held_suarez"},
     "spectral": {"none", "held_suarez"},
 }
