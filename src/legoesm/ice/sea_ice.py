@@ -230,6 +230,20 @@ def _step_slab(
     open_freeze_flux = config.rho_ice * config.L_f * dh_dt_freeze_open
     ocean_heat_extraction = F_ocean + open_freeze_flux
 
+    # Sea-ice → ocean back-reaction stress (Newton's third law).
+    # The ocean→ice drag tau_oi accelerates the ice; the ice exerts
+    # −tau_oi on the ocean column.  Compute the proper Cauchy drag
+    # using the ocean-ice drag coefficient (config.drag_ocean = C_oi)
+    # and the relative velocity, weighted by ice concentration so
+    # ice-free cells contribute no stress.  Audit F9.
+    du_oi = ocean_u - u_ice
+    dv_oi = ocean_v - v_ice
+    speed_oi = jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10)
+    tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi
+    tau_oi_y = config.rho_ocean_ref * config.drag_ocean * speed_oi * dv_oi
+    ocean_stress_x = -tau_oi_x * conc
+    ocean_stress_y = -tau_oi_y * conc
+
     response = TileResponse(
         T_surface=T_ice_new,
         albedo=alpha_ice,
@@ -246,6 +260,8 @@ def _step_slab(
         co2_flux=jnp.zeros_like(h),
         freshwater_flux=freshwater_to_ocean,
         ocean_heat_extraction=ocean_heat_extraction,
+        ocean_stress_x=ocean_stress_x,
+        ocean_stress_y=ocean_stress_y,
     )
 
     return new_state, response
@@ -583,10 +599,12 @@ def _build_response(
         u_ocean_sfc=u_ice,
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
-        # Multi-cat aggregate: freshwater and ocean-heat-extraction
-        # are constructed in the multi-cat step path (above); the
-        # aggregator just exposes zero placeholders and lets the
-        # multi-cat path overwrite if needed.
+        # Multi-cat aggregate: freshwater, ocean-heat-extraction, and
+        # ice→ocean stress are constructed in the multi-cat step
+        # path (above); the aggregator just exposes zero placeholders
+        # and lets the multi-cat path overwrite if needed.
         freshwater_flux=jnp.zeros_like(h),
         ocean_heat_extraction=jnp.zeros_like(h),
+        ocean_stress_x=jnp.zeros_like(h),
+        ocean_stress_y=jnp.zeros_like(h),
     )

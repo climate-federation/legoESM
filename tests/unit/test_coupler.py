@@ -102,15 +102,15 @@ def test_coupling_fields_shapes():
     assert forcing.sw_down.shape == SHAPE
 
     z = jnp.zeros(SHAPE)
-    # SurfaceToAtm and TileResponse gained ``freshwater_flux`` (F4)
-    # and ``ocean_heat_extraction`` (F8) slots in the
-    # Physical_Consistency cycle for tile-blended water and ice→ocean
-    # heat closure.
-    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(sfc) == 15  # 13 → 14 (F4) → 15 (F8)
+    # SurfaceToAtm and TileResponse gained ``freshwater_flux`` (F4),
+    # ``ocean_heat_extraction`` (F8), and ``ocean_stress_x``/``y`` (F9)
+    # slots in the Physical_Consistency cycle for tile-blended water,
+    # ice→ocean heat, and ice→ocean stress-reaction closure.
+    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(sfc) == 17  # 13 → 14 (F4) → 15 (F8) → 17 (F9 adds 2)
 
-    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(tile) == 15  # 13 → 14 (F4) → 15 (F8)
+    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(tile) == 17
 
 
 # ==============================================================================
@@ -297,6 +297,7 @@ def test_blending_is_area_weighted():
             shflx=z, lhflx=z, tau_x=z, tau_y=z, lw_up=z,
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
             freshwater_flux=z, ocean_heat_extraction=z,
+            ocean_stress_x=z, ocean_stress_y=z,
         )
 
     fracs = TileFractions(
@@ -342,6 +343,7 @@ def test_accumulator_mean():
         tau_x=z, tau_y=z, lw_up=z,
         u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
         freshwater_flux=z, ocean_heat_extraction=z,
+        ocean_stress_x=z, ocean_stress_y=z,
     )
     acc = accumulate(acc, sfc1, 100.0)
 

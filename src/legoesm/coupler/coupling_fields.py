@@ -78,6 +78,16 @@ class TileResponse(NamedTuple):
     # ocean exchange).  Ocean tile reports zero (it is the source,
     # not a sink).  Audit F8.
     ocean_heat_extraction: jax.Array
+    # Stress applied by this tile back onto the ocean surface [Pa,
+    # positive = eastward / northward force on the ocean].  By
+    # Newton's third law, the air→ice and ocean→ice stresses produce
+    # an equal-and-opposite reaction force on the ocean column under
+    # the ice.  Sea-ice tiles deliver −tau_ocean_from_ice (the
+    # ocean→ice drag inverted).  Land/lake tiles return zeros.
+    # Ocean tile returns zero (its own wind stress is already in
+    # tau_x/tau_y).  Audit F9.
+    ocean_stress_x: jax.Array
+    ocean_stress_y: jax.Array
 
 
 class SurfaceToAtm(NamedTuple):
@@ -103,3 +113,8 @@ class SurfaceToAtm(NamedTuple):
     # positive = ocean LOSES energy to surface tiles].  See
     # ``TileResponse.ocean_heat_extraction``.
     ocean_heat_extraction: jax.Array
+    # Tile-blended stress applied to the ocean surface [Pa,
+    # positive = eastward / northward force on the ocean].  See
+    # ``TileResponse.ocean_stress_x / y``.
+    ocean_stress_x: jax.Array
+    ocean_stress_y: jax.Array

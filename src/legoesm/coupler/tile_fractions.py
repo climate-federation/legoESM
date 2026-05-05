@@ -108,4 +108,13 @@ def blend_tiles(
             land_resp.ocean_heat_extraction,
             lake_resp.ocean_heat_extraction,
         ),
+        # Tile-blended back-reaction stress on the ocean.  Audit F9.
+        ocean_stress_x=_blend(
+            ocean_resp.ocean_stress_x, ice_resp.ocean_stress_x,
+            land_resp.ocean_stress_x, lake_resp.ocean_stress_x,
+        ),
+        ocean_stress_y=_blend(
+            ocean_resp.ocean_stress_y, ice_resp.ocean_stress_y,
+            land_resp.ocean_stress_y, lake_resp.ocean_stress_y,
+        ),
     )

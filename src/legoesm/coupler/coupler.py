@@ -264,6 +264,10 @@ def ocean_tile_response(
         # extraction; the ocean column treats the sum across tiles
         # (after blending) as a heat-budget sink.
         ocean_heat_extraction=jnp.zeros(shape, dtype=_ssh_dtype),
+        # Ocean tile contributes its own wind stress (already in
+        # tau_x/tau_y) — back-reaction is the ice tile's job.
+        ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
+        ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
     )
 
 

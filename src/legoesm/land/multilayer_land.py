@@ -412,6 +412,9 @@ def step_multilayer_land(
         ),
         # Land does not extract heat directly from the ocean.
         ocean_heat_extraction=jnp.zeros(ncol),
+        # Land does not exert stress on the ocean.
+        ocean_stress_x=jnp.zeros(ncol),
+        ocean_stress_y=jnp.zeros(ncol),
     )
 
     return new_state, response, carbon_state_new

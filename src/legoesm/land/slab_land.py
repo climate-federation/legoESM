@@ -294,6 +294,9 @@ def step_land(
         freshwater_flux=runoff,
         # Land does not extract heat directly from the ocean.
         ocean_heat_extraction=jnp.zeros_like(T_soil),
+        # Land does not exert stress on the ocean.
+        ocean_stress_x=jnp.zeros_like(T_soil),
+        ocean_stress_y=jnp.zeros_like(T_soil),
     )
 
     return new_state, response, carbon_state_new

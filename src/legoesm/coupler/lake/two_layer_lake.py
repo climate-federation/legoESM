@@ -176,6 +176,9 @@ def step_lake(
         freshwater_flux=freshwater_flux,
         # Lake tiles do not extract heat from the ocean.
         ocean_heat_extraction=jnp.zeros_like(T_epi),
+        # Lake tiles do not exert stress on the ocean.
+        ocean_stress_x=jnp.zeros_like(T_epi),
+        ocean_stress_y=jnp.zeros_like(T_epi),
     )
 
     return new_state, response
