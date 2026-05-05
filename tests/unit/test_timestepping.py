@@ -325,9 +325,10 @@ class TestRobertAsselinWilliamsFilter:
         from legoesm.timestepping.semi_implicit import robert_asselin_filter
 
         # Pure 2·dt computational mode — exactly what RAW is designed to damp.
-        state_nm1 = jnp.array([1.0, 2.0])
-        state_n = jnp.array([-1.0, -2.0])
-        state_np1 = jnp.array([1.0, 2.0])
+        # Force x64 for the precision-sensitive sum check.
+        state_nm1 = jnp.array([1.0, 2.0], dtype=jnp.float64)
+        state_n = jnp.array([-1.0, -2.0], dtype=jnp.float64)
+        state_np1 = jnp.array([1.0, 2.0], dtype=jnp.float64)
 
         gamma = 0.05
         alpha = 0.5
@@ -337,8 +338,9 @@ class TestRobertAsselinWilliamsFilter:
 
         sum_before = state_nm1 + state_n + state_np1
         sum_after = state_nm1 + sn_f + snp1_f
+        tol = 1e-12 if _IS_X64 else 1e-6
         # At α = 0.5 the two filter increments cancel — sum preserved.
-        assert jnp.allclose(sum_before, sum_after, atol=1e-12), (
+        assert jnp.allclose(sum_before, sum_after, atol=tol), (
             f"Three-time-level sum changed by "
             f"{float(jnp.max(jnp.abs(sum_after - sum_before))):.3e} "
             f"at α=0.5; the prior buggy formulation produced a drift "
@@ -359,9 +361,9 @@ class TestRobertAsselinWilliamsFilter:
         from legoesm.timestepping.semi_implicit import robert_asselin_filter
 
         A = 1.0
-        state_nm1 = jnp.array([A])
-        state_n = jnp.array([-A])
-        state_np1 = jnp.array([A])
+        state_nm1 = jnp.array([A], dtype=jnp.float64)
+        state_n = jnp.array([-A], dtype=jnp.float64)
+        state_np1 = jnp.array([A], dtype=jnp.float64)
 
         gamma = 0.05
         sn_f, _ = robert_asselin_filter(
@@ -370,7 +372,8 @@ class TestRobertAsselinWilliamsFilter:
         # |X^n_filtered| should be (1 - gamma) · |X^n|
         damping = float(jnp.abs(sn_f[0]) / A)
         expected = 1.0 - gamma
-        assert abs(damping - expected) < 1e-10, (
+        tol = 1e-10 if _IS_X64 else 1e-6
+        assert abs(damping - expected) < tol, (
             f"2·dt computational mode damping is {damping:.6f}, "
             f"expected {expected:.6f} (= 1 − γ at α=0.5)."
         )

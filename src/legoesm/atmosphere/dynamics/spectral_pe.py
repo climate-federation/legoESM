@@ -133,8 +133,14 @@ class SpectralPEConfig(NamedTuple):
     implicit_hyperdiff: bool = False
     # Pressure floor for adiabatic heating (limits 1/p at model top)
     p_floor: float = 10.0           # Pa; adiabatic uses max(p, p_floor) to prevent omega/p overflow
-    # Robert-Asselin filter for leapfrog (controls computational mode)
-    robert_asselin_coeff: float = 0.05  # Filter coefficient (0 = off, 0.05-0.1 typical)
+    # Robert-Asselin-Williams filter for leapfrog (controls computational mode)
+    robert_asselin_coeff: float = 0.05  # Filter coefficient γ (0 = off, 0.05-0.1 typical)
+    # Williams 2009 α parameter.  0.53 is conditionally stable and is
+    # the recommended practical RAW choice; 0.5 conserves the
+    # three-time-level mean exactly but is unconditionally unstable.
+    # 1.0 recovers the original Robert-Asselin filter (3rd-order phase
+    # error retained).
+    robert_asselin_alpha: float = 0.53
 
 
 # =============================================================================
@@ -1354,11 +1360,12 @@ class SpectralPrimitiveEquationModel:
             state_np1 = self._apply_implicit_hyperdiff(state_np1)
             # Same combined filter applied to grid-space tracers
             state_np1 = self._apply_tracer_filter(state_np1)
-            # Robert-Asselin filter on time-n state
+            # Robert-Asselin-Williams filter on time-n / time-(n+1) states.
             gamma = self.config.robert_asselin_coeff
+            alpha = self.config.robert_asselin_alpha
             if gamma > 0:
                 state_n_filtered, state_np1_filtered = robert_asselin_filter(
-                    self._state_prev, state, state_np1, gamma,
+                    self._state_prev, state, state_np1, gamma, alpha=alpha,
                 )
             else:
                 state_n_filtered = state
