@@ -61,6 +61,7 @@ RAD_TO_DEG = 180.0 / jnp.pi
 # Turbulence
 # ==============================================================================
 kappa_vk = 0.4                  # von Kármán constant
+nu_air = 1.5e-5                 # Kinematic viscosity of air at 15°C [m^2/s]
 
 # ==============================================================================
 # Shallow Water Test Case Constants
