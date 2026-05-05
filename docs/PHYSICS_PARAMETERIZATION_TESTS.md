@@ -312,6 +312,13 @@ Sea ice:
 
 Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated).
 
+### Iter-8 / iter-9 (2026-05-05 — Codex round 4)
+
+- KPP `Ri_crit` updated 0.25 → **0.3** (LMD94 default; matches NCAR POP2 / MOM6 / MITgCM).
+- `mass_flux._apply_mass_flux_kernel`: bare `M_u_max=0.05` default removed; all callers thread it from their config NamedTuple.
+- DCA `test_moist_static_energy_conservation` added (tolerance 1e-4, ⟨Δq⟩>1e-4 guard) — directly exercises the per-pair `c_p·ΔT + L_v·Δq = 0` invariant added in iter-1.
+- `docs/legoesm_scientific_guide.tex`: stale `Ri_crit = 0.25` LaTeX values updated to 0.3 in both KPP/PBL sections.
+
 ### Open audit findings (deferred for follow-up)
 
 1. **HIGH** — Soil freeze/thaw latent heat not in `soil_thermal.py`.  Cold-climate cases unsupported.
@@ -320,7 +327,6 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 4. **MEDIUM** — Sea-ice → ocean brine/freshwater flux not in `TileResponse`.
 5. **MEDIUM** — Centered flux-form ice transport not monotone; clamp leaks volume / temperature.
 6. **MEDIUM** — Sea-ice multi-category open-water freezing flux double-counting in non-empty-cat0 cells.
-7. **LOW** — KPP `Ri_crit = 0.25` vs LMD94 0.3.
-8. **LOW** — Ocean prescribed vs OceanSurfaceForcing freshwater unit/sign convention split.
-9. **LOW** — `compute_moist_adiabat` saturated-everywhere assumption (8 convection schemes).
-10. **LOW** — `T_vs_θ` vertical diffusion: dry adiabat not exact null state of vertical mixing.
+7. **LOW** — Ocean prescribed vs OceanSurfaceForcing freshwater unit/sign convention split.
+8. **LOW** — `compute_moist_adiabat` saturated-everywhere assumption (8 convection schemes).
+9. **LOW** — `T_vs_θ` vertical diffusion: dry adiabat not exact null state of vertical mixing.
