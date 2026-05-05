@@ -715,6 +715,17 @@ def generate_sweep_cases(
     cases = []
     rank_counts = _valid_rank_counts(max_ranks, grid_type)
 
+    # Iter 39 honest-sweep: icosahedral MPI multi-rank does not apply
+    # ``physics_fn`` (``make_voronoi_mpi_step`` builds a dycore-only
+    # step), so a multi-rank icosahedral sweep with a non-trivial
+    # physics tier would label cases as "held_suarez" / etc. but
+    # silently benchmark dycore-only.  Iter 38 made the runner refuse
+    # the combination at execution time; iter 39 stops the sweep
+    # generator from emitting those (now-broken) cases in the first
+    # place.
+    if grid_type == "icosahedral" and physics != "none":
+        rank_counts = [1]
+
     if mode in ("weak", "both"):
         for n in rank_counts:
             if grid_type == "cubed-sphere":
