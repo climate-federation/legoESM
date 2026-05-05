@@ -2275,14 +2275,16 @@ legoESM/
 │   │   ├── state.py                        # State containers
 │   │   ├── operators.py                    # 2D centered operators (cubed-sphere)
 │   │   ├── operators_3d.py                 # 3D centered operators (cubed-sphere)
+│   │   ├── operators_cdgrid.py             # FV3 C-D grid operators (cubed-sphere)
 │   │   ├── operators_latlon.py             # 2D centered operators (lat-lon)
 │   │   ├── operators_latlon_3d.py          # 3D centered operators (lat-lon)
 │   │   ├── operators_fv.py                 # 2D FV/PPM operators (cubed-sphere)
-│   │   ├── operators_fv_3d.py              # 3D FV/PPM operators (cubed-sphere)
+│   │   ├── operators_fv_cubed.py           # FV cubed-sphere damping utilities
 │   │   ├── operators_fv_latlon.py          # 2D FV/PPM operators (lat-lon)
 │   │   ├── operators_fv_latlon_3d.py       # 3D FV/PPM operators (lat-lon)
 │   │   ├── operators_fc.py                 # 2D FC-Gram operators (cubed-sphere)
 │   │   ├── operators_fc_3d.py              # 3D FC-Gram operators (cubed-sphere)
+│   │   ├── operators_voronoi.py            # MPAS/Voronoi mesh operators
 │   │   ├── fc_gram.py                      # FC-Gram basis and differentiation
 │   │   ├── conservation.py                 # Conservation fixers
 │   │   ├── smooth.py                       # Smooth approximations
