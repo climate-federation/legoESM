@@ -290,8 +290,17 @@ def linear_remap(
     h_remap = jnp.where(a_remap > 0.0, vol_remap / a_safe, 0.0)
     h_remap = jnp.maximum(h_remap, 0.0)
 
-    # Post-remap: clamp category mean thickness to bounds.
-    # Last category has no finite upper bound (100 m sentinel).
+    # KNOWN ISSUE (iter-85 audit): clamp at lo/hi without adjusting
+    # ``a_remap`` silently leaks volume — production probes show
+    # 1–4 % drift per call.  Naively scaling a by h_pre/h_clamp
+    # explodes at the upper-bound sentinel (hi=100 m for the last
+    # category) and at the lower bound where h_clamped → 0.  The
+    # proper fix requires Lipscomb piecewise-linear g(h) remapping
+    # (CICE convention) where the moved sliver between categories
+    # is analytically integrated and redistributed across category
+    # bounds.  This is a substantial structural refactor deferred
+    # to future cycle work.  Affects multi-day integration sea-ice
+    # mass budget by O(10–100 %) drift on long runs.
     h_remap = jnp.where(
         (a_remap > 0.0) & (h_remap < lo),
         lo,
