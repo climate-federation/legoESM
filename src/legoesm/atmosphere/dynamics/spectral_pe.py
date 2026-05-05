@@ -1327,9 +1327,7 @@ class SpectralPrimitiveEquationModel:
         """
         integrator = self.config.time_integrator.lower()
         if integrator in ("leapfrog", "leapfrog_si"):
-            # Leapfrog path doesn't yet support forcing_data; fall through
-            # to legacy physics_fn API.  Tracked for follow-up work.
-            return self._leapfrog_step(state, dt, physics_fn)
+            return self._leapfrog_step(state, dt, physics_fn, forcing_data)
 
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
@@ -1340,11 +1338,15 @@ class SpectralPrimitiveEquationModel:
             )
         return self._step_jit(state, dt, physics_fn)
 
-    def _leapfrog_step(self, state, dt, physics_fn=None):
+    def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None):
         """Leapfrog + SI step with Robert-Asselin filter + implicit diffusion.
 
         First call: forward Euler + SI (startup).
         Subsequent calls: leapfrog + SI + RA filter + implicit hyperdiffusion.
+
+        ``forcing_data`` is threaded through to physics_fn as a TRACED
+        pytree argument when provided (iter-95 extension to the iter-92
+        forcing_data API).
         """
         self._ensure_sponge_factor(dt)
         self._ensure_hyperdiff_filter(dt)
@@ -1355,7 +1357,12 @@ class SpectralPrimitiveEquationModel:
             self._ensure_si_data(dt)  # SI matrices for dt
             # Also precompute leapfrog SI for next step (avoids stale jit)
             self._ensure_si_data_leapfrog(dt)
-            result = self._euler_si_jit(state, dt, physics_fn)
+            if forcing_data is not None:
+                result = self._euler_si_with_forcing_jit(
+                    state, dt, physics_fn, forcing_data,
+                )
+            else:
+                result = self._euler_si_jit(state, dt, physics_fn)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 result = _apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
@@ -1370,9 +1377,14 @@ class SpectralPrimitiveEquationModel:
         else:
             # --- Leapfrog + SI ---
             self._ensure_si_data_leapfrog(dt)
-            state_np1 = self._leapfrog_si_jit(
-                state, self._state_prev, dt, physics_fn,
-            )
+            if forcing_data is not None:
+                state_np1 = self._leapfrog_si_with_forcing_jit(
+                    state, self._state_prev, dt, physics_fn, forcing_data,
+                )
+            else:
+                state_np1 = self._leapfrog_si_jit(
+                    state, self._state_prev, dt, physics_fn,
+                )
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 state_np1 = _apply_sponge_filter(
@@ -1425,6 +1437,21 @@ class SpectralPrimitiveEquationModel:
             )
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
+    @partial(jax.jit, static_argnums=(0, 2, 3))
+    def _euler_si_with_forcing_jit(self, state, dt, physics_fn, forcing_data):
+        """Iter-95: Euler + SI step with TRACED forcing_data threading."""
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                _phys_result = physics_fn(
+                    s, self.grid, self.sigma_coord, forcing_data,
+                )
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
+
     @partial(jax.jit, static_argnums=(0, 3, 4))
     def _leapfrog_si_jit(self, state_n, state_nm1, dt, physics_fn=None):
         """JIT-compiled leapfrog + SI step, optionally with physics."""
@@ -1432,6 +1459,25 @@ class SpectralPrimitiveEquationModel:
             phys = None
             if physics_fn is not None:
                 _phys_result = physics_fn(s, self.grid, self.sigma_coord)
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        return leapfrog_si_step(
+            state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
+        )
+
+    @partial(jax.jit, static_argnums=(0, 3, 4))
+    def _leapfrog_si_with_forcing_jit(
+        self, state_n, state_nm1, dt, physics_fn, forcing_data,
+    ):
+        """Iter-95: leapfrog + SI step with TRACED forcing_data threading."""
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                _phys_result = physics_fn(
+                    s, self.grid, self.sigma_coord, forcing_data,
+                )
                 phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
