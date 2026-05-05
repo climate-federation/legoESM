@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.operators_3d import divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
@@ -33,7 +34,7 @@ def advect_ice_tracers(
     grid: CubedSphereGrid,
     dt: float,
     T_ice_min: float = 180.0,
-    T_freeze_ocean: float = 271.35,
+    T_freeze_ocean: float = constants.T_freeze_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advect ice tracers by the ice velocity field.
 

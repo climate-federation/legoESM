@@ -213,14 +213,21 @@ def evp_stress_update(
     e_yield: float,
     T_evp: float,
     dt_s: float,
+    N_evp: int,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single EVP subcycle stress update (Hunke & Dukowicz 1997).
 
-    Each stress component is relaxed toward the VP solution:
-        sigma_new = (1/(1 + E_factor)) * (sigma_old + E_factor * sigma_VP)
+    Backward-Euler relaxation of each stress component toward the VP
+    target:
 
-    where E_factor = dt_s / (2 * T_damp) and T_damp is the EVP
-    damping timescale.
+        sigma_new = (1/(1 + E_factor)) · (sigma_old + E_factor · sigma_VP)
+
+    where ``E_factor = dt_s / (2 · T_damp)`` and the EVP damping
+    timescale ``T_damp = T_evp · dt_dyn = T_evp · N_evp · dt_s``.  This
+    gives ``E_factor = 1 / (2 · T_evp · N_evp)``.  An earlier
+    formulation used ``E_factor = 1 / (2 · T_evp)``, which omits the
+    ``N_evp`` factor and over-relaxes by O(N_evp×) per subcycle —
+    defeating the elastic regularisation that keeps EVP stable.
 
     Parameters
     ----------
@@ -233,15 +240,22 @@ def evp_stress_update(
     e_yield : float
         Yield curve eccentricity.
     T_evp : float
-        EVP damping timescale ratio (T_damp = T_evp * N_evp * dt_s).
+        EVP damping ratio T_damp / dt_dyn (Hunke & Dukowicz E_y).
+        Default 0.36 in CICE.
     dt_s : float
-        EVP subcycle timestep [s].
+        EVP subcycle timestep [s].  Reserved for an explicit
+        ``dt_s / (2·T_damp)`` form; kept in the signature so callers
+        do not need to be rewritten when that path is added.
+    N_evp : int
+        Number of EVP subcycles per dynamic step.  Required to recover
+        the correct relaxation timescale.
 
     Returns
     -------
     sigma_11_new, sigma_22_new, sigma_12_new : arrays
         Updated stress tensor [N/m].
     """
+    del dt_s  # currently unused; see docstring
     Delta = delta_deformation(eps_11, eps_22, eps_12, e_yield)
 
     # VP target stress
@@ -249,11 +263,9 @@ def evp_stress_update(
         eps_11, eps_22, eps_12, P, Delta, e_yield,
     )
 
-    # EVP relaxation factor
-    # T_damp = T_evp * dt_subcycle_total; but we express per substep:
-    # E_factor = dt_s / (2 * T_damp) = 1 / (2 * T_evp * N_evp)
-    # Simplified: use T_evp as the ratio dt_s / T_damp directly
-    E_factor = 1.0 / (2.0 * T_evp)
+    # EVP relaxation factor: E = dt_s / (2 · T_damp) with T_damp =
+    # T_evp · N_evp · dt_s  ⇒  E = 1 / (2 · T_evp · N_evp).
+    E_factor = 1.0 / (2.0 * T_evp * float(N_evp))
     denom = 1.0 + E_factor
 
     sigma_11_new = (sigma_11 + E_factor * s11_vp) / denom

@@ -186,7 +186,7 @@ class TestRheologyGrad:
             s11, s22, s12 = evp_stress_update(
                 sigma_11, sigma_22, sigma_12,
                 eps_11, eps_22, eps_12, P,
-                e_yield=2.0, T_evp=0.36, dt_s=30.0,
+                e_yield=2.0, T_evp=0.36, dt_s=30.0, N_evp=120,
             )
             return jnp.sum(s11 ** 2 + s22 ** 2 + s12 ** 2)
 

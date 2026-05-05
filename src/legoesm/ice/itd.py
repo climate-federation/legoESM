@@ -29,6 +29,7 @@ from functools import lru_cache
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -127,7 +128,7 @@ def aggregate_state(
 
     # Area-weighted mean temperature
     T_agg = _agg[..., 2] / conc_safe
-    T_agg = jnp.where(conc_total > 0.0, T_agg, 271.35)
+    T_agg = jnp.where(conc_total > 0.0, T_agg, constants.T_freeze_ocean)
 
     return h_agg, T_agg, conc_total
 
@@ -177,7 +178,7 @@ def distribute_to_categories(
     in_cat_f = in_cat.astype(h_ice.dtype)
 
     h_mc = h_exp * in_cat_f          # (..., n_cat)
-    T_mc = T_ice[..., jnp.newaxis] * in_cat_f + 271.35 * (1.0 - in_cat_f)
+    T_mc = T_ice[..., jnp.newaxis] * in_cat_f + constants.T_freeze_ocean * (1.0 - in_cat_f)
     conc_mc = concentration[..., jnp.newaxis] * in_cat_f
 
     return h_mc, T_mc, conc_mc
@@ -195,7 +196,7 @@ def linear_remap(
     n_cat: int,
     T_new: jnp.ndarray | None = None,
     T_ice_min: float = 180.0,
-    T_freeze_ocean: float = 271.35,
+    T_freeze_ocean: float = constants.T_freeze_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Redistribute ice across categories after thermodynamic changes.
 

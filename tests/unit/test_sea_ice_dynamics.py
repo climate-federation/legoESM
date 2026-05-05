@@ -221,12 +221,16 @@ class TestEVPStressUpdate:
         Delta = delta_deformation(eps_11, eps_22, eps_12)
         s11_vp, s22_vp, s12_vp = vp_stress(eps_11, eps_22, eps_12, P, Delta)
 
-        # Start from zero stress and iterate
+        # Start from zero stress and iterate.  N_evp is the EVP
+        # subcycle count; the relaxation factor scales as 1/(2·T_evp·N_evp),
+        # so converging to within 5% of the VP target requires roughly
+        # ~5·T_evp·N_evp iterations.  Use N_evp=1 here to keep the
+        # convergence test compact.
         s11, s22, s12 = jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)
         for _ in range(200):
             s11, s22, s12 = evp_stress_update(
                 s11, s22, s12, eps_11, eps_22, eps_12,
-                P, e_yield=2.0, T_evp=0.36, dt_s=100.0,
+                P, e_yield=2.0, T_evp=0.36, dt_s=100.0, N_evp=1,
             )
 
         assert float(s11) == pytest.approx(float(s11_vp), rel=0.05)
