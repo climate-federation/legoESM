@@ -671,14 +671,21 @@ When ``forcing_data`` is provided, dispatches to a new ``_step_with_forcing_jit`
 - forcing_data values (day, sst, sic) change every step without retrace
 - physics_fn extends to 4-arg signature ``(state, grid, sigma_coord, forcing_data)``
 
-Existing 3-arg physics_fn callers continue to work via the legacy ``_step_jit`` path — backward compatibility guaranteed.
+### Iter-95 (2026-05-05 — forcing_data threaded through leapfrog path)
 
-Migration to the new API is left for follow-up commits in:
-- NMC ``generate_nmc.py`` (leapfrog path; needs leapfrog forcing_data support first)
-- ``model_driver._run_spectral`` (SSP-RK3 path; can adopt directly)
-- ``_run_mpas`` and ``compiled_segments``: own structural patterns
+Extended the iter-92 forcing_data API to the leapfrog integrator path.  Added ``_euler_si_with_forcing_jit`` and ``_leapfrog_si_with_forcing_jit`` JIT methods.  All spectral-PE integrator paths (SSP-RK3, leapfrog Euler startup, leapfrog SI) now support the new API.
 
-The leapfrog integrator currently falls back to legacy 3-arg API (forcing_data not yet wired through ``_leapfrog_step``).  Tracked for follow-up.
+### Iter-96 (2026-05-05 — NMC migrated to forcing_data API)
+
+``generate_nmc.py:_run_forecast_with_physics`` now uses the new API: physics_fn extended to 4-arg, run loop builds ``forcing_data = {"day": jnp.asarray(day), "sst": ..., "sic": ..., "insol": ...}`` each step.  Closes the iter-74 ``_DayRef`` JIT-cache stale-day pathology for NMC forecasts.
+
+### Iter-97 (2026-05-05 — model_driver._run_spectral migrated to forcing_data API)
+
+``model_driver.py:_run_spectral`` migrated to the new API (same pattern as iter-96).  Closes the iter-74 ``_DayRef`` JIT-cache stale-day pathology for production spectral forecasts.
+
+### Iter-98 (2026-05-05 — Codex round on iter-96/97; verified clean)
+
+Codex confirmed: NMC and ``_run_spectral`` loops always pass a stable ``forcing_data`` dict with the same keys and array shapes; JIT wrappers treat ``forcing_data`` as dynamic, not static.  Day changes do not retrace; values flow as dynamic inputs.  Legacy fallback branches remain only for backward compat.  Broadcast/reshape semantics consistent with legacy path.
 
 Final cycle status: **10 CRITICAL** + **41 HIGH** physics bugs fixed across 87 audit iterations / 110 commits.
 
@@ -695,7 +702,7 @@ Remaining open items requiring structural refactoring beyond single-iteration sc
 | Severity | Total found | Fixed | Deferred |
 |----------|-------------|-------|----------|
 | CRITICAL | 10 | 10 | 0 |
-| HIGH     | 47 | 41 | 6 (F1, F2, F10; _DayRef class; ITD remap; fix_mass MPI edge) |
+| HIGH     | 47 | 43 | 4 (F1, F2, F10; ITD remap; fix_mass MPI edge; f_veg LAI) |
 | MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
 | LOW      | ~30+ | 12 | rest documented in catalog |
 
