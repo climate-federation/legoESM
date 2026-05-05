@@ -417,21 +417,21 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
                             f"Col {col}: mass residual = {residual}")
 
     def test_matric_flux_redistributes_steep_psi_gradient(self):
-        """Capillary (matric) flux should drive water from wet to dry
-        layers when there is a steep psi gradient — even without
-        gravity acting alone.
+        """Capillary (matric) flux should pull water UPWARD from a
+        wet bottom into a dry top — gravity alone cannot do this.
 
         This is the regression test for the iter-1 fix that added
         the missing ``L^m psi^m`` flux divergence to the Richards
         RHS.  Without that term, the converged Picard solution
-        reduced to gravity-drainage only: a wet layer would drain
-        downward via gravity but a dry layer would not pull water
-        upward via capillarity, even with strong head gradients.
+        reduces to gravity-drainage only — gravity drains downward
+        but **never pulls water upward against gravity**.  So a
+        setup with a wet BOTTOM and a dry TOP isolates the matric
+        flux: any upward redistribution can only come from
+        capillary suction.
 
-        Setup: dry bottom layers, wet top layer, zero surface flux,
-        zero-flux bottom (no gravity drainage at the bottom).  The
-        wet layer should lose water and the dry layers should gain
-        water due to matric flux alone.
+        (The original test had wet TOP and dry BOTTOM, which
+        gravity ALONE would also resolve, masking the L psi^m
+        regression — Codex round-8 caught this.)
         """
         from legoesm.land.richards import RichardsConfig, solve_richards
         from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
@@ -443,9 +443,11 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
         ncol, nlayers = 2, 8
         grid = make_soil_grid(SoilGridConfig(n_layers=nlayers))
 
-        # Wet upper layer (theta near saturation), dry layers below.
-        theta = jnp.full((ncol, nlayers), hconfig.theta_r + 0.05)
-        theta = theta.at[:, 0].set(hconfig.theta_sat - 0.02)
+        # Dry top layers, wet BOTTOM layer.  The matric (capillary)
+        # flux must move water *upward* against gravity — gravity
+        # alone would never do this.
+        theta = jnp.full((ncol, nlayers), hconfig.theta_r + 0.03)
+        theta = theta.at[:, -1].set(hconfig.theta_sat - 0.02)
         psi = psi_from_theta(theta, hconfig)
 
         # Zero-flux at top (no infiltration), zero-flux at bottom
@@ -453,28 +455,32 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
         rconfig = RichardsConfig(bottom_bc="zero_flux", max_iter=20)
         flux_top = jnp.zeros(ncol)
         sink = jnp.zeros((ncol, nlayers))
-        dt = 7200.0  # 2 h — long enough for noticeable redistribution
+        # Run for a full day so the slow capillary equilibration
+        # produces a measurable signal at threshold ≥ 1e-6 m³/m³.
+        dt = 86400.0
 
         out = solve_richards(psi, theta, grid, hconfig, rconfig,
                              flux_top, sink, dt)
 
-        dtheta_top = float(out.theta_new[0, 0] - theta[0, 0])
-        dtheta_below = float(out.theta_new[0, 1] - theta[0, 1])
-
-        # The wet top layer must lose moisture (capillary suction
-        # from the dry layers below pulls water down) AND the
-        # adjacent dry layer must gain moisture.  Without the
-        # iter-1 L psi^m fix, the converged Picard iteration can
-        # produce gravity-drainage-only behaviour — but with zero
-        # gravity flux at the bottom, even gravity drainage would
-        # be suppressed for layers above the bottom.  The matric
-        # flux is the only mechanism that can redistribute here.
-        self.assertLess(dtheta_top, -1e-5,
-                        f"Wet top layer should lose moisture via "
-                        f"capillarity; saw dtheta = {dtheta_top}")
-        self.assertGreater(dtheta_below, 1e-5,
-                           f"Dry second layer should gain moisture "
-                           f"via capillarity; saw dtheta = {dtheta_below}")
+        # The wet BOTTOM should lose moisture (drained UPWARD into
+        # dry layers via capillary suction) AND the layer just
+        # above (still relatively dry) should gain moisture.
+        # Without the iter-1 L psi^m fix, the converged Picard
+        # solution would be gravity-drainage only, which CANNOT
+        # move water upward, so dtheta_above_bottom would be 0 and
+        # this test would fail.  Threshold 1e-6 catches the
+        # qualitative direction while staying above float noise.
+        dtheta_bot = float(out.theta_new[0, -1] - theta[0, -1])
+        dtheta_above = float(out.theta_new[0, -2] - theta[0, -2])
+        self.assertLess(dtheta_bot, -1e-6,
+                        f"Wet bottom should lose moisture via "
+                        f"capillarity; saw dtheta = {dtheta_bot}")
+        self.assertGreater(dtheta_above, 1e-6,
+                           f"Dry layer above the wet bottom should "
+                           f"gain moisture via upward capillary flux; "
+                           f"saw dtheta = {dtheta_above}.  Without the "
+                           f"L psi^m fix, gravity alone cannot move "
+                           f"water upward.")
 
 
 if __name__ == "__main__":
