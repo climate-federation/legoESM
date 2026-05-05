@@ -397,6 +397,11 @@ Two CRITICAL iter-1 fixes lacked dedicated regression tests; both now have one:
 
 474 tests pass after iter-21 (419 → 463 with iter-20's freshwater suite → 474 with iter-21's 3 new tests).
 
+### Iter-22 (2026-05-05 — stomata vapor pressure formula)
+
+- **Audit finding #24 (MEDIUM)**: `land/carbon/stomata.py` switches the vapor-pressure-from-specific-humidity formula from the mixing-ratio form `e = q · p / (ε + q)` to the correct specific-humidity form `e = q · p / (ε + (1 − ε) · q)`.  Affects both `jarvis_gs` and `coupled_farquhar_stomata`.  The bias is ~1 % at typical tropical q but propagates through the VPD-driven stomatal closure into GPP.
+- 90 stomata + carbon-cycle tests pass.
+
 ### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
