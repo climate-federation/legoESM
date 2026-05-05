@@ -2519,12 +2519,12 @@ legoESM/
 │   ├── run_ocean_test_matrix.py            # Master ocean test suite (4 grids × 9 cases)
 │   ├── run_ocean_spectral_tests.py         # Spectral ocean (Gaussian grid)
 │   ├── run_baroclinic_wave_benchmark.py    # Publication figures (CliMA Fig 3)
-│   ├── validate_cubed_sphere_fv3_atmos.py  # FV3 C-D grid edge validation
+│   ├── diagnostic/validate_cubed_sphere_fv3_atmos.py  # FV3 C-D grid edge validation
 │   ├── run_levante_gpu_scaling.py          # GPU scaling benchmarks
 │   ├── run_levante_gpu_scaling.sh          # SLURM batch driver
 │   ├── run_w2_mpas_convergence.py          # MPAS convergence study
-│   ├── run_sfno_campaign.py                # ML inference campaign
-│   └── sfno_slab.py                        # SFNO slab-ocean CLI wrapper
+│   ├── s2s/run_sfno_campaign.py            # ML inference campaign
+│   └── s2s/sfno_slab.py                    # SFNO slab-ocean CLI wrapper
 │
 ├── config/                                 # Configuration templates
 │   ├── williamson_test2.yaml
