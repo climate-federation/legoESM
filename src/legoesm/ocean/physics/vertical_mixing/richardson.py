@@ -60,9 +60,22 @@ def richardson_vertical_mixing(
     Ri = N2 / jnp.maximum(S2, eps)
     Ri = jnp.maximum(Ri, 0.0)  # Clip negative Ri (unstable → max mixing)
 
-    # Diffusivity and viscosity at interfaces
-    K_v = cfg.K_0 / (1.0 + cfg.alpha * Ri) ** cfg.n + cfg.K_bg
-    A_v = K_v * cfg.Pr_t + cfg.A_bg
+    # Pacanowski & Philander (1981, JPO 11, p.1448, Eq. 1):
+    #   ν (momentum) = ν₀ / (1 + α·Ri)^n + ν_b      [n = 2]
+    #   κ (tracer)   = ν / (1 + α·Ri) + κ_b
+    #                = ν₀ / (1 + α·Ri)^(n+1) + κ_b
+    # The Prandtl ratio ν/κ = (1 + α·Ri) GROWS with Ri — this is
+    # physically essential because in stable shear, momentum mixes more
+    # efficiently than tracer (different inertial-range cascade).
+    #
+    # The previous formulation computed K_v with the (1+αRi)^n decay
+    # (momentum's form) and assigned momentum A_v = K_v · const_Pr_t —
+    # which (a) used the momentum decay rate for the tracer field, and
+    # (b) discarded the canonical Prandtl-Ri dependence (constant 10×
+    # Prandtl instead of Ri-growing).
+    one_plus_aRi = 1.0 + cfg.alpha * Ri
+    A_v = cfg.K_0 / one_plus_aRi ** cfg.n + cfg.A_bg              # momentum
+    K_v = (cfg.K_0 / one_plus_aRi ** cfg.n) / one_plus_aRi + cfg.K_bg  # tracer
 
     # Apply variable-K vertical diffusion
     vel = jnp.stack([u, v], axis=0)

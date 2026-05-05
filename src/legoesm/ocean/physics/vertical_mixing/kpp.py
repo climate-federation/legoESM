@@ -214,15 +214,17 @@ def kpp_vertical_mixing(
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     dz_half0 = 0.5 * (dz_actual[..., 0] + dz_actual[..., 1])
     if B_f is None:
-        # Diffusive proxy from near-surface density gradient.  The KPP
-        # convention here is ``B_f > 0 = unstable``, so the proxy must
-        # be POSITIVE when the surface layer is statically unstable
-        # (i.e. ``rho[0] > rho[1]`` ⇒ ``drho_dz_sfc > 0`` ⇒
-        # ``B_f > 0``).  An earlier version had a leading minus sign
-        # which inverted the sign and made stable columns spuriously
-        # trigger non-local transport.
-        drho_dz_sfc = (rho[..., 0] - rho[..., 1]) / jnp.maximum(dz_half0, eps)
-        B_f = g / rho_0_ref * cfg.K_bg * drho_dz_sfc  # simplified proxy
+        # When the caller does not supply a surface buoyancy flux, set
+        # B_f = 0 (no convective non-local transport).  The previous
+        # ``K_bg · g/ρ₀ · drho_dz_sfc`` proxy is ~1e-10 m²/s³ for
+        # realistic density gradients (~1e-3 kg/m⁴), which is 2-4
+        # orders of magnitude below realistic destabilizing B_f
+        # (1e-8 to 1e-7 m²/s³).  A wrong-magnitude fallback masks
+        # missing surface forcing without the user noticing — a
+        # zero-flux fallback fails closed (forward integration is
+        # consistent with no surface buoyancy forcing) and forces the
+        # caller to provide B_f explicitly when convective KPP matters.
+        B_f = jnp.zeros_like(rho[..., 0])
 
     # --- Boundary layer depth ---
     h_bl = _boundary_layer_depth(
