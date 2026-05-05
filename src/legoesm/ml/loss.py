@@ -63,7 +63,7 @@ def per_variable_mse(
     pred: jnp.ndarray,
     target: jnp.ndarray,
     weights: jnp.ndarray,
-    _channel_weights: jnp.ndarray | None = None,
+    channel_weights: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-channel area-weighted MSE for monitoring.
 
@@ -76,23 +76,35 @@ def per_variable_mse(
     weights : array, shape (n_lat,)
         Gaussian quadrature weights.
     channel_weights : array, optional, shape (n_channels,)
-        Per-channel importance weights for the total loss.
+        Per-channel importance weights — multiply each channel's
+        area-weighted MSE before returning.  When None, all
+        channels are reported with weight 1.
 
     Returns
     -------
     per_channel : array, shape (n_channels,)
-        MSE for each channel.
+        MSE for each channel (multiplied by channel_weights when
+        provided).  Each entry is a true area-weighted mean
+        independent of grid resolution.
     """
     sq_err = (pred - target) ** 2
 
-    # Average over batch, longitude (and optionally batch dims)
-    # keeping channel dimension
+    # Average over batch, longitude, leaving (n_lat, n_channels)
     w = weights[:, None, None]
     weighted = sq_err * w
 
-    # Average over all spatial dims, keep channels
     axes = tuple(range(weighted.ndim - 1))
-    per_channel = jnp.mean(weighted, axis=axes)
+    # Use the same correction factor as ``area_weighted_mse``
+    # (iter-63 fix) so the per-channel MSE is a proper area-
+    # weighted mean: Σ(sq·w)/(B·Σw·n_lon) instead of mean(sq·w).
+    n_lat = weights.shape[0]
+    per_channel = jnp.mean(weighted, axis=axes) * n_lat / jnp.sum(weights)
+
+    # Apply optional per-channel weights.  Previously the argument
+    # was ``_channel_weights`` (leading underscore) and never read,
+    # silently dropping any caller-supplied weighting.  Iter-64 fix.
+    if channel_weights is not None:
+        per_channel = per_channel * channel_weights
 
     return per_channel
 

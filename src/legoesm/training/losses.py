@@ -100,23 +100,48 @@ def carry_mse(
     from legoesm.core.precision import _resolve_dtype
     loss = jnp.array(0.0, dtype=_resolve_dtype(None, "accumulate"))
 
+    def _lat_weighted_mean(sq_err: jax.Array) -> jax.Array:
+        """Mean over all dims, with optional latitude weighting.
+
+        When ``lat_weights`` is provided and ``sq_err`` has an axis
+        of length ``n_lat = len(lat_weights)``, the mean is
+        replaced by the area-weighted mean
+        ``mean(sq · lat_w) · n_lat / Σ(lat_w)`` (resolution-
+        independent, identical correction as iter-63 ml/loss.py).
+        Without lat_weights or on non-Gaussian shapes (e.g.
+        cubed-sphere with leading face dim) this falls back to
+        a uniform mean.
+        """
+        if lat_weights is None:
+            return jnp.mean(sq_err)
+        n_lat_w = lat_weights.shape[0]
+        # Apply weight on the FIRST axis of length n_lat.
+        for axis, dim in enumerate(sq_err.shape):
+            if dim == n_lat_w:
+                shape = [1] * sq_err.ndim
+                shape[axis] = n_lat_w
+                w = lat_weights.reshape(shape)
+                return jnp.mean(sq_err * w) * n_lat_w / jnp.sum(lat_weights)
+        # No matching axis — fall back to uniform mean.
+        return jnp.mean(sq_err)
+
     # Temperature: (..., nlev)
     dT = pred_carry.T - target_carry.T
-    loss = loss + config.w_T * jnp.mean(dT ** 2 * lev_w)
+    loss = loss + config.w_T * _lat_weighted_mean(dT ** 2 * lev_w)
 
     # Winds: (..., nlev)
     du = pred_carry.u - target_carry.u
     dv = pred_carry.v - target_carry.v
-    loss = loss + config.w_u * jnp.mean(du ** 2 * lev_w)
-    loss = loss + config.w_v * jnp.mean(dv ** 2 * lev_w)
+    loss = loss + config.w_u * _lat_weighted_mean(du ** 2 * lev_w)
+    loss = loss + config.w_v * _lat_weighted_mean(dv ** 2 * lev_w)
 
     # Moisture: (..., nlev)
     dq = pred_carry.q_v - target_carry.q_v
-    loss = loss + config.w_q * jnp.mean(dq ** 2 * lev_w)
+    loss = loss + config.w_q * _lat_weighted_mean(dq ** 2 * lev_w)
 
     # Surface pressure: (...)
     dp = pred_carry.p_s - target_carry.p_s
-    loss = loss + config.w_ps * jnp.mean(dp ** 2)
+    loss = loss + config.w_ps * _lat_weighted_mean(dp ** 2)
 
     return loss
 
