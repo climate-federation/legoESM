@@ -126,5 +126,14 @@ class Test11j_AlbedoEmissivity:
         new_state, resp = step_lake(state, forcing, CONFIG, 1.0, DT)
         assert jnp.allclose(resp.albedo, CONFIG.albedo_lake, atol=1e-10)
         T = new_state.T_epi.data
-        expected_lw = CONFIG.emissivity_lake * constants.sigma_sb * T ** 4
+        # Greybody upward LW with reflected component, matching the
+        # convention used by every other tile (slab/multilayer land,
+        # sea-ice, ocean):
+        #     lw_up = ε σ T⁴ + (1 − ε) lw_down
+        # (Earlier the lake dropped the reflection term, biasing
+        # lw_up low by ~10 W/m² for ε=0.97 and lw_down ≈ 350 W/m².)
+        expected_lw = (
+            CONFIG.emissivity_lake * constants.sigma_sb * T ** 4
+            + (1.0 - CONFIG.emissivity_lake) * forcing.lw_down
+        )
         assert jnp.allclose(resp.lw_up, expected_lw, rtol=1e-3)

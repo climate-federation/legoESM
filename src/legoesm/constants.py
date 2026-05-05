@@ -33,6 +33,8 @@ L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
+rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3]
+rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
 T_freeze = 273.15               # Freezing point of water [K]
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
 

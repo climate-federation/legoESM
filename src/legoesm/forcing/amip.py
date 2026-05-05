@@ -70,7 +70,12 @@ class AMIPForcingConfig(NamedTuple):
     sst_offset: float = 0.0
     sic_scale: float = 1.0
     sic_path: str = ""
-    T_ice: float = 271.35
+    # NOTE: ``T_ice`` is the seawater freezing point used as the SST
+    # floor / SIC ramp threshold — NOT the sea-ice surface temperature.
+    # The legacy name is preserved for AMIP config compatibility, but
+    # the value tracks ``constants.T_freeze_ocean`` (CLAUDE.md naming
+    # discipline gap; renaming is tracked tech debt).
+    T_ice: float = 271.35           # = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
 

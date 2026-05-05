@@ -113,12 +113,18 @@ def step_lake(
         Q_freeze=Q_freeze_field,
     )
 
-    # Direct ``lw_up = ε σ T⁴`` — the previous call to
-    # ``surface_radiation_fluxes`` recomputed ``sw_net`` (depends only on
-    # albedo) and the LW balance just to discard them and read out
-    # ``lw_up_new``.  One multiply + one pow vs the full radiation
-    # call.
-    lw_up_new = config.emissivity_lake * constants.sigma_sb * T_epi_new ** 4
+    # Upward longwave with explicit reflected component, matching the
+    # convention used by every other tile (slab/multilayer land via
+    # ``surface_radiation_fluxes``; sea-ice; ocean):
+    #     lw_up = ε σ T⁴ + (1 − ε) · lw_down
+    # The earlier formulation dropped the reflection term, biasing the
+    # lake-tile lw_up low by (1−ε)·lw_down ≈ 10 W/m² (ε=0.97,
+    # lw_down ≈ 350 W/m²) and feeding that bias up into the atmosphere
+    # TOA budget proportional to lake fraction.
+    lw_up_new = (
+        config.emissivity_lake * constants.sigma_sb * T_epi_new ** 4
+        + (1.0 - config.emissivity_lake) * forcing.lw_down
+    )
 
     # Recompute q_surface from updated epilimnion temperature for consistency
     q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)

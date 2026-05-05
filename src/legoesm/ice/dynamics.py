@@ -29,6 +29,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -108,8 +109,8 @@ def free_drift_velocity(
     wind_v: jnp.ndarray,
     drag_ocean: float = 5.5e-3,
     drag_atm: float = 1.3e-3,
-    rho_air: float = 1.225,
-    rho_ice: float = 917.0,
+    rho_air: float = constants.rho_air,
+    rho_ice: float = constants.rho_ice,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute diagnostic ice velocity via linear drag combination.
 
@@ -151,7 +152,7 @@ def air_ice_stress(
     v_ice: jnp.ndarray,
     wind_u: jnp.ndarray,
     wind_v: jnp.ndarray,
-    rho_air: float = 1.225,
+    rho_air: float = constants.rho_air,
     C_ai: float = 1.3e-3,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute air-ice drag stress.
@@ -186,7 +187,7 @@ def ocean_ice_stress(
     v_ice: jnp.ndarray,
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
-    rho_ocean: float = 1025.0,
+    rho_ocean: float = constants.rho_ocean,
     C_oi: float = 5.5e-3,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute ocean-ice drag stress.
@@ -239,9 +240,9 @@ def evp_solver(
     P_star: float = 2.75e4,
     C_strength: float = 20.0,
     T_evp: float = 0.36,
-    rho_ice: float = 917.0,
-    rho_air: float = 1.225,
-    rho_ocean: float = 1025.0,
+    rho_ice: float = constants.rho_ice,
+    rho_air: float = constants.rho_air,
+    rho_ocean: float = constants.rho_ocean,
     C_ai: float = 1.3e-3,
     C_oi: float = 5.5e-3,
     differentiable: bool = False,
