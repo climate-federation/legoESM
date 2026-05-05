@@ -3230,40 +3230,30 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 │   ├── atmosphere/                         # Atmosphere component
 │   │   ├── dynamics/
 │   │   │   ├── __init__.py                 # Factory: make_model(equations, discretization)
-│   │   │   ├── shallow_water.py            # Centered SW (cubed-sphere)
-│   │   │   ├── shallow_water_fv.py         # FV SW (cubed-sphere)
-│   │   │   ├── shallow_water_fv_latlon.py  # FV SW (lat-lon)
-│   │   │   ├── primitive_eq.py             # Centered PE (cubed-sphere)
-│   │   │   ├── primitive_eq_fv.py          # FV PE (cubed-sphere)
-│   │   │   ├── primitive_eq_latlon.py      # Centered PE (lat-lon)
-│   │   │   ├── primitive_eq_fv_latlon.py   # FV PE (lat-lon)
-│   │   │   ├── compressible_euler.py       # Centered CE (cubed-sphere)
-│   │   │   ├── compressible_euler_fv.py    # FV CE (cubed-sphere)
-│   │   │   ├── compressible_euler_fv_latlon.py  # FV CE (lat-lon)
-│   │   │   ├── spectral_sw.py             # Spectral SW (Gaussian)
-│   │   │   ├── spectral_pe.py             # Spectral PE (Gaussian)
-│   │   │   ├── spectral_nh.py             # Spectral NH (Gaussian)
-│   │   │   ├── sfno_sw.py                 # Learned SW (SFNO)
-│   │   │   ├── sfno_pe.py                 # Learned PE (SFNO)
-│   │   │   ├── shallow_water_fc.py        # FC-Gram SW (cubed-sphere)
-│   │   │   ├── shallow_water_fc_cgrid.py  # FC-Gram SW + div damping
-│   │   │   ├── primitive_eq_fc.py         # FC-Gram PE (cubed-sphere)
-│   │   │   ├── primitive_eq_fc_cgrid.py   # FC-Gram PE + div damping
-│   │   │   ├── compressible_euler_fc.py   # FC-Gram CE (cubed-sphere)
-│   │   │   ├── compressible_euler_fc_cgrid.py  # FC-Gram CE + div damping
-│   │   │   ├── shallow_water_cgrid_latlon.py   # True C-grid SW (lat-lon)
-│   │   │   ├── shallow_water_cgrid.py     # A-grid SW + div damping (cubed-sphere)
-│   │   │   ├── primitive_eq_cgrid.py      # A-grid PE + div damping (cubed-sphere)
-│   │   │   ├── compressible_euler_cgrid.py # A-grid CE + div damping (cubed-sphere)
-│   │   │   ├── tracer_transport.py        # Passive tracer advection
-│   │   │   └── edge_blending.py           # Face boundary blending
+│   │   │   ├── shallow_water_fv3_cdgrid.py # FV3 C-D grid SW (cubed-sphere)
+│   │   │   ├── shallow_water_latlon_cgrid.py # C-grid SW (lat-lon)
+│   │   │   ├── shallow_water_mpas.py       # TRiSK SW (MPAS Voronoi)
+│   │   │   ├── primitive_eq_cdgrid.py      # FV3 C-D grid PE (cubed-sphere)
+│   │   │   ├── primitive_eq_latlon_cgrid.py # C-grid PE (lat-lon)
+│   │   │   ├── primitive_eq_mpas.py        # TRiSK PE (MPAS Voronoi)
+│   │   │   ├── compressible_euler.py       # CE shared utilities
+│   │   │   ├── compressible_euler_cdgrid.py # FV3 C-D grid CE (cubed-sphere)
+│   │   │   ├── compressible_euler_mpas.py  # TRiSK CE (MPAS Voronoi)
+│   │   │   ├── spectral_sw.py              # Spectral SW (Gaussian)
+│   │   │   ├── spectral_pe.py              # Spectral PE (Gaussian)
+│   │   │   ├── spectral_nh.py              # Spectral NH (Gaussian)
+│   │   │   ├── sfno_sw.py                  # Learned SW (SFNO)
+│   │   │   ├── sfno_pe.py                  # Learned PE (SFNO)
+│   │   │   ├── tracer_transport.py         # Passive tracer advection (shared)
+│   │   │   ├── tracer_transport_latlon.py  # Passive tracer advection (lat-lon)
+│   │   │   └── tracer_transport_mpas.py    # Passive tracer advection (MPAS)
+│   │   │
+│   │   ├── held_suarez.py                  # Held-Suarez forcing (all grids)
 │   │   │
 │   │   └── physics/
 │   │       ├── __init__.py                 # Physics exports
 │   │       ├── combined.py                 # Physics suite combiner
 │   │       ├── thermodynamics.py           # Thermodynamic utilities
-│   │       ├── held_suarez.py              # Held-Suarez forcing
-│   │       ├── held_suarez_latlon.py       # Held-Suarez (lat-lon)
 │   │       ├── baroclinic_wave.py          # Baroclinic wave init
 │   │       ├── kessler.py                  # Legacy Kessler wrapper
 │   │       │
