@@ -131,14 +131,25 @@ def step_multilayer_land(
         root_frac = jnp.exp(-z_centers / root_depth)
         root_frac = root_frac / jnp.sum(root_frac)
 
+    # Wilting-point / field-capacity range guard.  Using ``+ 1e-10``
+    # only protects against exact equality; a misconfigured cell with
+    # ``theta_fc <= theta_wp`` still produced exploding ``beta_root``
+    # values because the denominator goes near-zero on the same scale
+    # as theta itself (~0.1).  Floor the range at 1e-3 m³/m³ (~1 % of
+    # theta_sat) so even pathological PFT lookup tables produce sane
+    # ``beta_root ∈ [0, 1]``.  Audit finding #6.
     if lp is not None:
+        denom = jnp.maximum(
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+        )
         beta_root = jnp.clip(
-            (theta - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            (theta - theta_wp[:, None]) / denom,
             0.0, 1.0,
         )
     else:
+        denom = jnp.maximum(theta_fc - theta_wp, 1e-3)
         beta_root = jnp.clip(
-            (theta - theta_wp) / (theta_fc - theta_wp + 1e-10),
+            (theta - theta_wp) / denom,
             0.0, 1.0,
         )
 
