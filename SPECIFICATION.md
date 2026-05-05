@@ -2338,11 +2338,12 @@ legoESM/
 │   │   │   ├── tracer_transport.py        # Passive tracer advection
 │   │   │   └── edge_blending.py           # Face boundary blending
 │   │   │
+│   │   ├── held_suarez.py                  # Held-Suarez forcing (all grids)
+│   │   │
 │   │   └── physics/
 │   │       ├── __init__.py                 # Physics exports
 │   │       ├── combined.py                 # Physics suite combiner
 │   │       ├── thermodynamics.py           # Thermodynamic utilities
-│   │       ├── held_suarez.py              # Held-Suarez forcing (all grids)
 │   │       ├── baroclinic_wave.py          # Baroclinic wave init
 │   │       ├── kessler.py                  # Legacy Kessler wrapper
 │   │       │
