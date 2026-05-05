@@ -151,13 +151,23 @@ def compute_mpas_freshwater(
     atm_forcing : AtmToSurface
         Atmospheric forcing with precip_total.
     sfc_response : SurfaceToAtm
-        Surface response with lhflx.
+        Surface response with lhflx and (post-iter-16) the
+        phase-aware ``surface_mass_flux`` channel.  When available,
+        ``surface_mass_flux`` is used in preference to back-deriving
+        evap from ``lhflx / L_v`` because the latter under-counts
+        mass by ~13 % on tiles that sublimate (sea-ice / cold lakes /
+        snow-covered land).  ``L_v`` is retained as a fallback for
+        callers that wire a SurfaceToAtm without surface_mass_flux.
     ocean_mask : jax.Array, shape (nCells,)
         Ocean mask (1=ocean, 0=land).
     L_v : float
-        Latent heat of vaporization [J/kg].
-    land_state : MultiLayerLandState or None
-        Land state with runoff fields.
+        Latent heat of vaporization [J/kg].  Used only as the
+        fallback for back-deriving evap from lhflx when
+        surface_mass_flux is not populated.
+    land_state : MultiLayerLandState or LandState or None
+        Land state with runoff fields.  Both multilayer
+        (``runoff_surface``, ``runoff_subsurface``) and slab
+        (``runoff``) state shapes are supported.  Audit F5.
     ice_state_old, ice_state_new : SeaIceState or None
         Ice states before/after step for ice freshwater.
     ice_config : SeaIceConfig or None
@@ -168,7 +178,9 @@ def compute_mpas_freshwater(
     -------
     FreshwaterForcing
     """
-    # Land runoff
+    # Land runoff: support multilayer (runoff_surface + runoff_subsurface)
+    # AND slab (single ``runoff`` field).  Audit F5 caught that the
+    # earlier code dropped the slab path silently.
     runoff_sfc = None
     runoff_sub = None
     if land_state is not None:
@@ -176,6 +188,21 @@ def compute_mpas_freshwater(
             runoff_sfc = land_state.runoff_surface
         if hasattr(land_state, 'runoff_subsurface'):
             runoff_sub = land_state.runoff_subsurface
+        # Slab LandState exposes a single ``runoff`` field — fold it
+        # into ``runoff_surface`` if multilayer fields aren't present.
+        if (
+            runoff_sfc is None
+            and runoff_sub is None
+            and hasattr(land_state, 'runoff')
+            and land_state.runoff is not None
+        ):
+            runoff_sfc = land_state.runoff
+
+    # Phase-aware evap mass flux (audit F22).  Prefer
+    # ``surface_mass_flux`` over the L_v back-derivation when
+    # available, since SurfaceToAtm gained the field in iter-16 and
+    # it correctly accounts for sublimation over cold tiles.
+    surface_mass_flux = getattr(sfc_response, 'surface_mass_flux', None)
 
     return freshwater_from_coupler(
         precip_total=atm_forcing.precip_total,
@@ -188,4 +215,5 @@ def compute_mpas_freshwater(
         ice_config=ice_config,
         ocean_mask=ocean_mask,
         dt=dt,
+        surface_mass_flux=surface_mass_flux,
     )
