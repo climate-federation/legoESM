@@ -102,11 +102,14 @@ def test_coupling_fields_shapes():
     assert forcing.sw_down.shape == SHAPE
 
     z = jnp.zeros(SHAPE)
-    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(sfc) == 13
+    # SurfaceToAtm and TileResponse gained a ``freshwater_flux``
+    # slot in the Physical_Consistency cycle (audit F4) for
+    # tile-blended freshwater closure.
+    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(sfc) == 14  # was 13 before adding freshwater_flux
 
-    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(tile) == 13
+    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(tile) == 14  # was 13 before adding freshwater_flux
 
 
 # ==============================================================================
@@ -292,6 +295,7 @@ def test_blending_is_area_weighted():
             albedo=z, emissivity=z, z0=z, q_surface=z,
             shflx=z, lhflx=z, tau_x=z, tau_y=z, lw_up=z,
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
+            freshwater_flux=z,
         )
 
     fracs = TileFractions(
@@ -336,6 +340,7 @@ def test_accumulator_mean():
         shflx=jnp.full(SHAPE, 10.0), lhflx=z,
         tau_x=z, tau_y=z, lw_up=z,
         u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
+        freshwater_flux=z,
     )
     acc = accumulate(acc, sfc1, 100.0)
 

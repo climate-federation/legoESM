@@ -194,6 +194,19 @@ def _step_slab(
     )
     q_sfc_new = saturation_mixing_ratio_ice(T_ice_new, forcing.p_surface)
 
+    # Sea-ice → ocean freshwater flux: the ice mass that exchanged
+    # with the ocean (basal/surface melt and open-water freezing),
+    # NOT counting sublimation (already in the atmospheric lhflx
+    # channel).  Positive = freshwater INTO ocean (melt > freeze);
+    # negative = freshwater extracted to form ice.
+    dh_dt_total = (h_new - h) / dt
+    dh_dt_sublim = jnp.where(
+        h > config.h_ice_min,
+        -lhflx / (config.rho_ice * constants.L_s),
+        0.0,
+    )
+    freshwater_to_ocean = -config.rho_ice * (dh_dt_total - dh_dt_sublim)
+
     response = TileResponse(
         T_surface=T_ice_new,
         albedo=alpha_ice,
@@ -208,6 +221,7 @@ def _step_slab(
         u_ocean_sfc=u_ice,
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
+        freshwater_flux=freshwater_to_ocean,
     )
 
     return new_state, response
@@ -545,4 +559,11 @@ def _build_response(
         u_ocean_sfc=u_ice,
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
+        # Multi-cat aggregate: freshwater_flux is constructed in the
+        # multi-cat step path (above); the aggregator just exposes it
+        # as-is via the TileResponse from that path.  The
+        # ``_build_response`` helper is used by the aggregate state
+        # path that does not have access to the per-step mass change,
+        # so we return zero here and let the multi-cat path overwrite.
+        freshwater_flux=jnp.zeros_like(h),
     )

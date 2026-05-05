@@ -93,4 +93,12 @@ def blend_tiles(
                            land_resp.v_ocean_sfc, lake_resp.v_ocean_sfc),
         co2_flux=_blend(ocean_resp.co2_flux, ice_resp.co2_flux,
                         land_resp.co2_flux, lake_resp.co2_flux),
+        # Tile-blended freshwater flux to the ocean.  Each tile
+        # populates freshwater_flux as a populated array (zeros for
+        # tiles that don't deliver freshwater), so this blend is a
+        # straight area-weighted sum.
+        freshwater_flux=_blend(
+            ocean_resp.freshwater_flux, ice_resp.freshwater_flux,
+            land_resp.freshwater_flux, lake_resp.freshwater_flux,
+        ),
     )

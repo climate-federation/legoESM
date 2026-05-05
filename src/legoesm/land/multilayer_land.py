@@ -405,6 +405,11 @@ def step_multilayer_land(
         u_ocean_sfc=jnp.zeros(ncol),
         v_ocean_sfc=jnp.zeros(ncol),
         co2_flux=co2_flux,
+        # Multilayer land: total freshwater to ocean is surface +
+        # subsurface runoff.  Both already kg/m²/s.
+        freshwater_flux=(
+            richards_out.runoff_surface + richards_out.runoff_subsurface
+        ),
     )
 
     return new_state, response, carbon_state_new

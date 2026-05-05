@@ -153,6 +153,12 @@ def step_lake(
     # promotion of the Python float.  Tiny per-call savings but
     # this fires every coupler step.
     _t_dtype = T_epi.dtype
+    # Lake → ocean freshwater: P − E (E uses L_eff to handle frozen
+    # lakes correctly; we recover the mass via E = lhflx / L_eff).
+    # Lakes are typically internally drained but for the tile-blend
+    # accounting we still report the surface mass-flux signal.
+    evap_rate = lhflx / L_eff
+    freshwater_flux = forcing.precip_total - evap_rate
     response = TileResponse(
         T_surface=T_epi_new,
         albedo=jnp.full(T_epi.shape, config.albedo_lake, dtype=_t_dtype),
@@ -167,6 +173,7 @@ def step_lake(
         u_ocean_sfc=jnp.zeros_like(T_epi),
         v_ocean_sfc=jnp.zeros_like(T_epi),
         co2_flux=jnp.zeros_like(T_epi),
+        freshwater_flux=freshwater_flux,
     )
 
     return new_state, response

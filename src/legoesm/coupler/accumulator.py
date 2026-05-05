@@ -37,6 +37,7 @@ class FluxAccumulator(NamedTuple):
     sum_u_ocean_sfc: jax.Array
     sum_v_ocean_sfc: jax.Array
     sum_co2_flux: jax.Array
+    sum_freshwater_flux: jax.Array
     total_dt: jax.Array          # Scalar: total accumulated dt
 
 
@@ -54,6 +55,7 @@ def reset_accumulator(
         sum_tau_x=z, sum_tau_y=z, sum_lw_up=z,
         sum_u_ocean_sfc=z, sum_v_ocean_sfc=z,
         sum_co2_flux=z,
+        sum_freshwater_flux=z,
         total_dt=jnp.array(0.0, dtype=z.dtype),
     )
 
@@ -79,6 +81,7 @@ def accumulate(
         sum_u_ocean_sfc=acc.sum_u_ocean_sfc + dt_arr * sfc.u_ocean_sfc,
         sum_v_ocean_sfc=acc.sum_v_ocean_sfc + dt_arr * sfc.v_ocean_sfc,
         sum_co2_flux=acc.sum_co2_flux + dt_arr * sfc.co2_flux,
+        sum_freshwater_flux=acc.sum_freshwater_flux + dt_arr * sfc.freshwater_flux,
         total_dt=acc.total_dt + dt_arr,
     )
 
@@ -100,6 +103,7 @@ def mean_accumulator(acc: FluxAccumulator) -> SurfaceToAtm:
         u_ocean_sfc=acc.sum_u_ocean_sfc * inv_dt,
         v_ocean_sfc=acc.sum_v_ocean_sfc * inv_dt,
         co2_flux=acc.sum_co2_flux * inv_dt,
+        freshwater_flux=acc.sum_freshwater_flux * inv_dt,
     )
 
 
@@ -125,5 +129,6 @@ def accumulator_from_flux(
         sum_u_ocean_sfc=dt_arr * sfc.u_ocean_sfc,
         sum_v_ocean_sfc=dt_arr * sfc.v_ocean_sfc,
         sum_co2_flux=dt_arr * sfc.co2_flux,
+        sum_freshwater_flux=dt_arr * sfc.freshwater_flux,
         total_dt=dt_arr,
     )

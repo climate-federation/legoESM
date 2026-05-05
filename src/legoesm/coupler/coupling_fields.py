@@ -40,6 +40,13 @@ class TileResponse(NamedTuple):
     time-step-averaged exchange.  This is standard practice in land
     surface models (the fluxes drove the state update, so they are
     self-consistent with the energy/water budget over the step).
+
+    **freshwater_flux** (kg/m²/s, positive INTO ocean / surface) is
+    the net liquid-water mass flux from this tile to the ocean — for
+    land it is `runoff_surface + runoff_subsurface`, for sea-ice it is
+    melt + brine + sublimation mass, for ocean it is `precip - evap`.
+    Tiles that do not produce a freshwater channel return zeros.
+    Added in the Physical_Consistency cycle (audit F4).
     """
     T_surface: jax.Array         # [end-of-step] Surface skin temperature [K]
     albedo: jax.Array            # [end-of-step] Surface albedo [0-1]
@@ -54,6 +61,14 @@ class TileResponse(NamedTuple):
     u_ocean_sfc: jax.Array       # Ocean surface zonal current [m/s]
     v_ocean_sfc: jax.Array       # Ocean surface meridional current [m/s]
     co2_flux: jax.Array          # CO2 flux [kg/m2/s] (positive up)
+    # Net liquid-water mass flux delivered by this tile [kg/m²/s,
+    # positive into the ocean / receiving body].  Zero for tiles that
+    # do not produce a freshwater channel — but must always be a
+    # populated array, never None, so the structure is pytree-uniform
+    # across all four tiles (jax.tree.map otherwise raises a
+    # tree-prefix mismatch when one tile has None and others have
+    # arrays).
+    freshwater_flux: jax.Array
 
 
 class SurfaceToAtm(NamedTuple):
@@ -71,3 +86,7 @@ class SurfaceToAtm(NamedTuple):
     u_ocean_sfc: jax.Array
     v_ocean_sfc: jax.Array
     co2_flux: jax.Array
+    # Net freshwater flux from blended surface tiles to the receiving
+    # body [kg/m²/s, positive into the ocean / surface].  Always a
+    # populated array (zeros if no tile reports a freshwater channel).
+    freshwater_flux: jax.Array

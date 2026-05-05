@@ -288,6 +288,10 @@ def step_land(
         u_ocean_sfc=jnp.zeros_like(T_soil),
         v_ocean_sfc=jnp.zeros_like(T_soil),
         co2_flux=co2_flux,
+        # Slab land: freshwater leaving the column to the ocean is the
+        # bucket overflow ``runoff`` (kg/m²/s).  This closes the water
+        # budget through the coupler if a downstream consumer wires it.
+        freshwater_flux=runoff,
     )
 
     return new_state, response, carbon_state_new

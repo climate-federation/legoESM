@@ -239,6 +239,11 @@ def ocean_tile_response(
     # — same per-coupler-step micro-optimisation as the loop-18 lake
     # rewrite.
     _ssh_dtype = ocean_sst.dtype
+    # Ocean tile freshwater: P − E, where evap is back-derived from
+    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
+    # freshwater INTO ocean.
+    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_surface=ocean_sst,
         albedo=alpha_ocean,
@@ -253,6 +258,7 @@ def ocean_tile_response(
         u_ocean_sfc=ocean_u,
         v_ocean_sfc=ocean_v,
         co2_flux=jnp.zeros(shape, dtype=_ssh_dtype),
+        freshwater_flux=freshwater_flux,
     )
 
 
