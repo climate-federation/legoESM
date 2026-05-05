@@ -438,13 +438,21 @@ def compute_moisture_convergence(
     closure diagnostic, not an advected quantity.
     """
     if isinstance(grid, CubedSphereGrid):
-        # q_v_grid shape (6, n, n, nlev)
-        flux_div = fv_flux_divergence_3d(
+        # q_v_grid shape (6, n, n, nlev).  ``fv_flux_divergence_3d``
+        # already returns the tendency form ``-div(q·V)`` (see its
+        # docstring "dq/dt = -div(q*v)"), which IS the moisture
+        # convergence — no extra sign flip needed.  Audit cycle
+        # iter-35 finding F1 (CRITICAL): the previous implementation
+        # double-negated, returning ``+div(q·V)`` (moisture
+        # DIVERGENCE) for cubed-sphere and lat-lon while the spectral
+        # branch was correct.  This silently inverted convective
+        # forcing on cubed-sphere/lat-lon runs.
+        mc = fv_flux_divergence_3d(
             q_v_grid, u_grid, v_grid, grid, limiter=False,
         )
         # Reshape to (ncol, nlev)
         face, n, _, nlev = q_v_grid.shape
-        return -flux_div.reshape(face * n * n, nlev)
+        return mc.reshape(face * n * n, nlev)
 
     # Gaussian grid (spectral PE).  Compute the divergence of
     # (q_v u, q_v v) via the transform method: synthesize the grid
@@ -467,11 +475,13 @@ def compute_moisture_convergence(
     # Try lat-lon — duck-typed by attribute presence so we don't
     # introduce an import dependency for users who never touch lat-lon.
     if hasattr(grid, "dlat") and hasattr(grid, "dlon"):
-        flux_div = fv_flux_divergence_latlon_3d(
+        # Same convention as cubed-sphere — the FV operator already
+        # returns ``-div(q·V)`` = MC.  Audit F1.
+        mc = fv_flux_divergence_latlon_3d(
             q_v_grid, u_grid, v_grid, grid, limiter=False,
         )
         n_lat, n_lon, nlev = q_v_grid.shape
-        return -flux_div.reshape(n_lat * n_lon, nlev)
+        return mc.reshape(n_lat * n_lon, nlev)
 
     raise TypeError(
         f"compute_moisture_convergence: unsupported grid type "
