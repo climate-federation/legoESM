@@ -1323,8 +1323,8 @@ Bulk Richardson number:
   \frac{(\theta_v-\theta_{v,\mathrm{sfc}})\,z}{|\vect{V}|^2}.
 \end{equation}
 PBL height $h$ is diagnosed where $\mathrm{Ri}_{\mathrm{bulk}}$
-crosses $\mathrm{Ri}_{\mathrm{crit}}=0.25$, using sigmoid-weighted
-averaging for a smooth, differentiable diagnosis.
+crosses $\mathrm{Ri}_{\mathrm{crit}}=0.3$ (LMD94 default), using
+sigmoid-weighted averaging for a smooth, differentiable diagnosis.
 
 \subsubsection{K-Profile Inside PBL}
 \begin{equation}
@@ -1634,7 +1634,7 @@ Following \citet{LMD1994}:
 \subsection{Boundary Layer Depth}
 
 The boundary layer depth $h$ is diagnosed where the bulk Richardson number
-crosses $\mathrm{Ri}_{\mathrm{crit}}=0.25$ (LMD94 default):
+crosses $\mathrm{Ri}_{\mathrm{crit}}=0.3$ (LMD94 default):
 \begin{equation}
   \mathrm{Ri}_b(z) = \frac{g\,\Delta\rho\,z}
   {\rho_0\,(|\Delta\vect{V}|^2+V_t^2)},

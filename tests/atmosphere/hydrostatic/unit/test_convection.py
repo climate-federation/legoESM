@@ -419,17 +419,26 @@ class TestDCA:
         dT_col = jnp.sum(dT * dp, axis=-1) / jnp.sum(dp, axis=-1)
         dq_col = jnp.sum(dq * dp, axis=-1) / jnp.sum(dp, axis=-1)
 
+        # Sanity: the column actually condensed water (negative ⟨Δq⟩
+        # at meaningful magnitude).  Without this check the test
+        # would pass vacuously on a column where no adjustment fired.
+        assert float(jnp.min(-dq_col)) > 1e-4, (
+            f"test setup did not produce real condensation; "
+            f"<Δq> = {float(jnp.min(dq_col)):.2e}"
+        )
+
         # Moist static energy invariant: c_p · ⟨ΔT⟩ + L_v · ⟨Δq⟩ = 0
         # since dq is negative (condensation) and dT positive (latent
         # heat release), the residual should be near zero.
         residual = constants.c_pd * dT_col + constants.L_v * dq_col
         scale = jnp.maximum(constants.c_pd * jnp.abs(dT_col), 1e-12)
         max_rel = float(jnp.max(jnp.abs(residual) / scale))
-        # Tight tolerance: the per-pair fix is exact in the
-        # mass-weighted sense, so the only residual comes from
-        # interactions between successive scan steps (each pair sees
-        # a slightly modified T from the previous pair's update).
-        assert max_rel < 0.10, (
+        # Per-pair conservation is exact; the residual at the column
+        # level comes only from successive scan steps each seeing a
+        # slightly updated T.  Empirically max_rel ~ 3e-6 with f64.
+        # Codex review tightened from 0.10 to 1e-4 on grounds that
+        # the looser bound let a regression slip past undetected.
+        assert max_rel < 1e-4, (
             f"DCA moist-static-energy residual = {max_rel:.3e}; "
             "iter-1 latent-heat fix should keep this small."
         )
