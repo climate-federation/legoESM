@@ -437,7 +437,10 @@ def main(argv: list[str] | None = None):
         print(f"Complete. Output: {driver.output_dir}")
 
     if args.plot and _is_root:
-        sys.path.insert(0, str(Path(__file__).parent))
+        # Iter 34: ``plot_amip`` lives under ``scripts/diagnostic/``
+        # (moved in an earlier reorg).  ``--plot`` previously inserted
+        # ``scripts/`` and crashed with ``ModuleNotFoundError``.
+        sys.path.insert(0, str(Path(__file__).parent / "diagnostic"))
         from plot_amip import plot_amip as _plot_amip
 
         _plot_amip(driver.output_dir, show=False)

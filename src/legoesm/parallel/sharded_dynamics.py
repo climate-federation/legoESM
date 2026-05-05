@@ -1,6 +1,6 @@
 """Sharded dynamics for multi-GPU/TPU cubed-sphere simulations.
 
-Uses ``jax.experimental.shard_map`` to partition cubed-sphere faces across
+Uses ``jax.shard_map`` to partition cubed-sphere faces across
 devices, with explicit halo exchange at partition boundaries.
 
 Design overview

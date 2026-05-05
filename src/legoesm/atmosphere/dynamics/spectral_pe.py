@@ -1248,20 +1248,38 @@ class SpectralPrimitiveEquationModel:
         """Reset leapfrog state (next step will use Euler startup)."""
         self._state_prev = None
 
-    def _do_step(self, state, dt, tendency_fn):
-        """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge."""
+    def _do_step(self, state, dt, tendency_fn,
+                 si_data=None, sponge_factor=None):
+        """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge.
+
+        ``si_data`` and ``sponge_factor`` are passed as **dynamic args**
+        (not read off ``self``).  This is required because :func:`step`
+        wraps this in a ``@jax.jit`` with ``static_argnums=(0, ...)`` —
+        JAX caches on object identity for ``self``, which means a
+        Python-level mutation of ``self._si_data`` after a dt change
+        is invisible to the cache and the compiled function would
+        keep using stale matrices (verified: ``maxdiff_after_dt_change_vs_fresh
+        = 2.45e-05`` at dt=300 → 600).  Threading them as dynamic
+        inputs lets XLA capture them as runtime tensors without
+        recompilation.
+        """
+        if si_data is None:
+            si_data = self._si_data
+        if sponge_factor is None:
+            sponge_factor = self._sponge_factor
+
         if self.config.semi_implicit:
             n_substeps = int(self.config.si_substeps)
             dt_si = dt / float(n_substeps)
 
             if n_substeps == 1:
                 result = ssp_rk3_step_si(
-                    state, tendency_fn, dt_si, self._si_data, self.grid,
+                    state, tendency_fn, dt_si, si_data, self.grid,
                 )
             else:
                 def si_substep(_, s):
                     return ssp_rk3_step_si(
-                        s, tendency_fn, dt_si, self._si_data, self.grid,
+                        s, tendency_fn, dt_si, si_data, self.grid,
                     )
                 result = jax.lax.fori_loop(0, n_substeps, si_substep, state)
         else:
@@ -1369,7 +1387,7 @@ class SpectralPrimitiveEquationModel:
         """Backward-compatible wrapper for _leapfrog_step() with physics."""
         return self._leapfrog_step(state, dt, physics_fn=physics_fn)
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):
         """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics."""
         def tendency_fn(s):
@@ -1380,9 +1398,10 @@ class SpectralPrimitiveEquationModel:
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
+        from legoesm.timestepping.semi_implicit import euler_si_step
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
-    @partial(jax.jit, static_argnums=(0, 3, 4))
+    @partial(jax.jit, static_argnums=(0, 4))
     def _leapfrog_si_jit(self, state_n, state_nm1, dt, physics_fn=None):
         """JIT-compiled leapfrog + SI step, optionally with physics."""
         def tendency_fn(s):
@@ -1397,7 +1416,7 @@ class SpectralPrimitiveEquationModel:
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 3))
     def _step_jit(
         self,
         state: SpectralHydrostaticState,
@@ -1412,10 +1431,12 @@ class SpectralPrimitiveEquationModel:
         ``dt`` static the SI matrices, sponge factors and hyperdiff
         filters constant-fold into the compiled program, but a traced
         ``dt`` forces a more general program that pays an extra
-        broadcast at every reference.  Until a separate ``dt``-traced
-        path is needed for outer-JIT wrapping (multi-device sharding
-        — currently impossible on this host, see scaling.md §10), keep
-        the fast path.
+        broadcast at every reference.  My iter-5 ``si_data``/
+        ``sponge_factor`` dynamic-arg variant is reverted here in favour
+        of main's measured perf choice; the dt-stale-matrix risk is
+        mitigated by ``_ensure_si_data`` / ``_ensure_sponge_factor``
+        recomputing on every ``step()`` entry — the JIT cache is keyed
+        on ``id(self)`` and the dt value, so a dt change re-traces.
         """
         def tendency_fn(s):
             phys = None
@@ -1438,14 +1459,19 @@ class SpectralPrimitiveEquationModel:
     _leapfrog_si_physics_jit = _leapfrog_si_jit
     _step_with_physics_jit = _step_jit
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 3))
     def _step_on_cpu(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """Step on CPU without device transfers, optionally with physics."""
+        """Step on CPU without device transfers, optionally with physics.
+
+        Same static-arg pattern as :func:`_step_jit`; reverted from the
+        iter-5 dynamic-arg variant in favour of main's measured perf
+        choice (see ``_step_jit`` docstring for the iter-211 rationale).
+        """
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -1493,6 +1519,9 @@ class SpectralPrimitiveEquationModel:
         state_cpu = jax.device_put(state, self._cpu_device)
         trajectory_cpu = [state_cpu]
 
+        # Refresh dt-dependent matrices on the host once before stepping.
+        self._ensure_si_data(dt)
+        self._ensure_sponge_factor(dt)
         for i in range(n_steps):
             state_cpu = self._step_on_cpu(state_cpu, dt, physics_fn)
             if (i + 1) % save_every == 0:

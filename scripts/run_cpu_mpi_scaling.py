@@ -2,15 +2,20 @@
 """CPU MPI scaling benchmark for AMIP-like runs.
 
 Measures wall-clock time per step and SYPD across varying MPI rank counts
-and resolutions for four grid types and three physics levels.
+and resolutions for the supported grid+physics combinations.
 
-Supported grids (MPI-scalable):
-  cubed-sphere  -- C-D grid + FV3 PE dycore
-  latlon        -- Lat-lon FV PE dycore
+MPI-scalable grid (multi-rank weak/strong scaling):
   icosahedral   -- MPAS Voronoi TRiSK PE dycore
 
-Single-rank baseline:
-  spectral      -- Gaussian + spectral PE dycore (no MPI)
+Single-rank only (these grids are listed but their MPI paths are not
+domain-decomposed at the dycore level — see iter 13/14 honest-sweep
+guards):
+  cubed-sphere  -- C-D grid + FV3 PE dycore (replicated dynamics
+                   under MPI; iter 3 added scattered halo support but
+                   driver-side state scatter is not yet implemented)
+  latlon        -- Lat-lon FV PE dycore (``make_latlon_mpi_step``
+                   raises NotImplementedError, see #115)
+  spectral      -- Gaussian + spectral PE dycore (no MPI path at all)
 
 Physics levels:
   held_suarez   -- Newtonian relaxation (cheapest, no I/O)
@@ -22,20 +27,20 @@ Use --sweep to generate all cases for a SLURM array job.
 
 Usage
 -----
-Single case::
+Multi-rank MPI scaling (icosahedral only)::
 
-    mpirun -np 4 python scripts/run_cpu_mpi_scaling.py \\
-        --grid latlon --resolution 64 --physics held_suarez
+    mpirun -np 8 python scripts/run_cpu_mpi_scaling.py \\
+        --grid icosahedral --mode strong --physics held_suarez
+
+Single-rank case (any grid)::
+
+    python scripts/run_cpu_mpi_scaling.py \\
+        --grid cubed-sphere --resolution 48 --physics held_suarez
 
 Sweep mode (generate case list, no execution)::
 
     python scripts/run_cpu_mpi_scaling.py --sweep \\
         --grid icosahedral --mode strong --physics held_suarez
-
-From JSON case spec::
-
-    mpirun -np 6 python scripts/run_cpu_mpi_scaling.py \\
-        --case '{"grid":"cubed-sphere","resolution":48,...}'
 """
 
 from __future__ import annotations
@@ -134,8 +139,15 @@ PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full")
 # Grid/physics support matrix.  Moist tiers require tracer storage
 # that MPAS and spectral states do not have today.
 _SUPPORTED_PHYSICS = {
-    "cubed-sphere": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
-    "latlon": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
+    # Iter 40 honest-sweep: ``_build_physics_fn`` only knows how to
+    # construct the Held-Suarez forcing.  ``gray_sbm`` /
+    # ``rrtmg_full`` are routed through the AMIP segment driver
+    # (``run_levante_gpu_scaling.py`` ``_run_segment_benchmark``),
+    # not through this CPU-MPI script.  Listing them as supported
+    # here let users pass ``--physics gray_sbm`` and silently
+    # benchmark dycore-only with the moist-physics label.
+    "cubed-sphere": {"none", "held_suarez"},
+    "latlon": {"none", "held_suarez"},
     "icosahedral": {"none", "held_suarez"},
     "spectral": {"none", "held_suarez"},
 }
@@ -210,19 +222,26 @@ def _weak_resolution_ico(n_ranks: int, base_level: int = WEAK_BASE_ICO) -> int:
 def _valid_rank_counts(max_ranks: int, grid_type: str) -> list[int]:
     if grid_type == "spectral":
         return [1]
+    if grid_type == "latlon":
+        # Lat-lon MPI step raises NotImplementedError (the latitude-band
+        # decomposition infrastructure exists but the C-grid operators
+        # have not been adapted to local domains).  Iter 1 stripped
+        # lat-lon from the GPU sweep; iter 5 mirrors that here so the
+        # CPU MPI driver does not generate multi-rank cases that
+        # immediately error out and pollute the sweep summary.  See #115.
+        return [1]
     if grid_type == "cubed-sphere":
-        valid = []
-        for n in [1, 2, 3, 6]:
-            if n <= max_ranks:
-                valid.append(n)
-        k = 2
-        while True:
-            n = 6 * k * k
-            if n > max_ranks:
-                break
-            valid.append(n)
-            k += 1
-        return sorted(set(valid))
+        # Iter 13 honest-sweep guard: cubed-sphere MPI is not yet
+        # domain-decomposed — every rank holds the full (6, n, n, ...)
+        # state and runs the full dycore.  Multi-rank wall-clock
+        # measurements are *not* real weak/strong scaling, just
+        # rank-replicated computation plus halo overhead.  Until the
+        # halo-side scattered indexing (iter 3) is plumbed through
+        # ``model_driver.py`` and the scaling drivers actually scatter
+        # per-rank state, restrict cubed-sphere MPI sweeps to rank 1
+        # so the summary numbers reflect genuine single-rank
+        # throughput rather than replicated-dynamics noise.
+        return [1]
     # latlon and icosahedral: powers of 2 up to max
     counts = []
     n = 1
@@ -457,6 +476,20 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
     if n_ranks > 1:
+        # Iter 38 honest-sweep: ``make_voronoi_mpi_step`` does not
+        # forward ``physics_fn`` to the per-rank step (it builds its
+        # own dycore-only step), so a multi-rank icosahedral sweep
+        # with ``--physics held_suarez`` would label the run with
+        # ``held_suarez`` but silently benchmark dycore-only —
+        # corrupting the campaign comparison.  Refuse the
+        # combination up front; users should run physics-tier
+        # sweeps single-rank or use the bare-dycore path.
+        if physics_fn is not None:
+            raise ValueError(
+                "icosahedral MPI multi-rank does not apply physics_fn; "
+                "rerun with --physics none, or run single-rank for "
+                "physics-on benchmarks."
+            )
         from legoesm.parallel.voronoi_mpi import (
             make_voronoi_partition_layout,
             scatter_state_voronoi,
@@ -594,9 +627,15 @@ def run_single_benchmark(
             return new, None
         return jax.lax.scan(_body, st, None, length=n_timing)[0]
 
-    # Pre-compile scan
-    state = _scan_run(state, dt_used)
-    jax.block_until_ready(jax.tree.leaves(state))
+    # Pre-compile scan without mutating the state used for timing.
+    # Previously we rebound ``state`` to the precompile output, so the
+    # timed run started from state already advanced by ``n_timing``
+    # steps and the benchmark was biased.  Use a leaf-cloned input so
+    # XLA still warms compile + caches against identical layout but
+    # ``state`` keeps its original (post-warmup) trajectory.
+    _precompile_state = jax.tree.map(lambda x: x, state)
+    _precompile_out = _scan_run(_precompile_state, dt_used)
+    jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # MPI barrier before timing
     try:
@@ -682,6 +721,17 @@ def generate_sweep_cases(
     """Generate all benchmark cases for a sweep."""
     cases = []
     rank_counts = _valid_rank_counts(max_ranks, grid_type)
+
+    # Iter 39 honest-sweep: icosahedral MPI multi-rank does not apply
+    # ``physics_fn`` (``make_voronoi_mpi_step`` builds a dycore-only
+    # step), so a multi-rank icosahedral sweep with a non-trivial
+    # physics tier would label cases as "held_suarez" / etc. but
+    # silently benchmark dycore-only.  Iter 38 made the runner refuse
+    # the combination at execution time; iter 39 stops the sweep
+    # generator from emitting those (now-broken) cases in the first
+    # place.
+    if grid_type == "icosahedral" and physics != "none":
+        rank_counts = [1]
 
     if mode in ("weak", "both"):
         for n in rank_counts:
@@ -798,6 +848,13 @@ def main() -> int:
 
     # --- Sweep mode: just print cases and exit ---
     if args.sweep:
+        # Iter 41: validate the grid+physics combo *before* the
+        # sweep generator runs, so unsupported tiers (e.g. moist
+        # physics on cubed-sphere/lat-lon CPU MPI, see iter 40)
+        # error out immediately with a clear message instead of
+        # producing a JSON-lines list that subsequently fails at
+        # runtime under the SLURM array.
+        _validate_physics(args.grid, args.physics)
         cases = generate_sweep_cases(
             args.grid, args.mode if args.mode != "single" else "both",
             args.physics, args.max_ranks,
@@ -842,11 +899,36 @@ def main() -> int:
         else:
             resolution = 42
 
-    # Spectral only supports 1 rank
+    # Non-domain-decomposed grids only support 1 rank in this driver.
     if grid_type == "spectral" and n_ranks > 1:
         if is_rank0:
             print("ERROR: Spectral grid does not support MPI. Use 1 rank.")
         return 1
+    # Iter 14 follow-up: defensive runtime guard for cubed-sphere MPI.
+    # The iter 13 ``_valid_rank_counts`` guard prevents the sweep from
+    # *generating* multi-rank cases, but a user could still pass an
+    # explicit ``--case`` with ``n_ranks>1`` or invoke the script under
+    # ``mpirun -np N`` with ``--mode single``.  Refuse the
+    # configuration up-front instead of silently capturing replicated-
+    # dynamics numbers.
+    if grid_type == "cubed-sphere" and n_ranks > 1:
+        if is_rank0:
+            print(
+                "ERROR: cubed-sphere MPI is currently replicated-"
+                "dynamics-only (every rank holds full state).  Use 1 "
+                "rank or --grid icosahedral for genuine MPI scaling.",
+                flush=True,
+            )
+        return 2
+    if grid_type == "latlon" and n_ranks > 1:
+        if is_rank0:
+            print(
+                "ERROR: lat-lon MPI step is not implemented "
+                "(``make_latlon_mpi_step`` raises NotImplementedError, "
+                "see #115).  Use 1 rank.",
+                flush=True,
+            )
+        return 2
 
     if is_rank0:
         print("=" * 72)

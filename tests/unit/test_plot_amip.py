@@ -9,7 +9,14 @@ matplotlib.use("Agg")  # non-interactive backend for CI
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "diagnostic"))
+# Add scripts/diagnostic to path so we can import plot_amip.
+# Iter 33: the script lives under ``scripts/diagnostic/`` (moved
+# in an earlier reorganisation); the previous import path pointed
+# at ``scripts/`` and broke pytest collection with
+# ``ModuleNotFoundError: No module named 'plot_amip'``.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2] / "scripts" / "diagnostic"),
+)
 from plot_amip import load_timeseries, plot_amip
 
 

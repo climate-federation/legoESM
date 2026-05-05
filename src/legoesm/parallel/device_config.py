@@ -156,12 +156,48 @@ def detect_devices() -> HardwareConfig:
     """Auto-detect hardware and return configuration.
 
     Queries JAX for available devices and infers backend capabilities.
-    This function does not modify any JAX state.
+
+    Side-effect: applies environment-variable-only XLA scheduler flags
+    *before* the first ``jax.devices()`` query.  Setting XLA flags
+    after PJRT initialisation is silently ineffective on most JAX
+    versions, which would defeat the latency-hiding scheduler flag
+    that is critical for multi-GPU strong scaling.  We therefore
+    sniff the GPU vendor from env-vars only (no ``jax.*`` calls)
+    and prime ``XLA_FLAGS`` here, before the device query.  The
+    follow-up :func:`configure_jax_for_device` call still sets
+    backend-specific JAX-level options (matmul precision, SPMD mode,
+    etc.) which are safe to set post-init.
 
     Returns
     -------
     HardwareConfig
     """
+    # Pre-init: set XLA scheduler flags based on env-var-only vendor
+    # detection, before jax.devices() is called.  After PJRT init,
+    # mutating XLA_FLAGS is silently ineffective on most JAX versions.
+    try:
+        from legoesm.runtime.backend import (
+            _detect_gpu_vendor_pre_init,
+            _NVIDIA_GPU_XLA_FLAGS,
+            _AMD_GPU_XLA_FLAGS,
+            _TPU_XLA_FLAGS,
+            _set_xla_flags,
+        )
+
+        _platforms = os.environ.get("JAX_PLATFORMS", "").lower()
+        if "tpu" in _platforms:
+            _set_xla_flags(_TPU_XLA_FLAGS)
+        else:
+            _vendor = _detect_gpu_vendor_pre_init()
+            if _vendor == "nvidia":
+                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+            elif _vendor == "amd":
+                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+    except Exception:
+        # Non-fatal: if the runtime helpers are unavailable for any
+        # reason, fall through to plain JAX detection.
+        pass
+
     backend = jax.default_backend().lower()
     devices = jax.devices()
     device_count = len(devices)
