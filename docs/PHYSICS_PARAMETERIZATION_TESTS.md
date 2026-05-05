@@ -591,6 +591,19 @@ Structural physics gaps flagged but deferred:
 
 - ``carry_spectral_loss`` returned raw-K² spectral MSE while ``carry_mse`` was dimensionless after iter-69.  ``combined_loss`` adding them required user to absorb a factor of ~900 K² in spectral_weight.  Normalized by T_scale² so both terms in combined loss are commensurate.
 
+### Iter-73 (2026-05-05 — catalog update through iter-72)
+
+- Documented all iter-67..72 fixes with cumulative status.  Several audit findings investigated and verified non-bugs:
+  - ``microphysics/integration.py:make_microphysics_physics`` discards ``micro_out.precipitation`` — verified by design (precipitation flows through ``physics_pipeline.py``, not the tendency-only NamedTuple).
+  - ``_get_tracer`` clip silently zeros negative tracers — defensive boundary at the microphysics call (negative q_v is unphysical, scheme assumes q_v ≥ 0); structural mass-tracking deferred.
+
+### Iter-74 (2026-05-05 — DA / TRiSK audit, deferred findings)
+
+Audited DA paths (background_error.py, observation.py, cost_function.py, incremental.py, cycling.py) and MPAS TRiSK operators (operators_voronoi.py, shallow_water_mpas.py, ocean_pe_mpas.py).  ALL CLEAN for sign / unit / conservation issues.
+
+Found one HIGH bug deferred to future structural fix:
+- ``da/generate_nmc.py:343`` (and ``model_driver.py:1321``): ``_DayRef.day`` mutation does NOT propagate through the JIT-cached ``physics_fn`` because ``physics_fn`` is ``static_argnums`` in ``spectral_pe._step_jit``.  The day-of-year is baked in at first trace.  Affects solar insolation, SST/SIC boundary, and any time-dependent radiation in NMC generation and production forecast paths.  Fix requires threading ``day`` as a TRACED scalar argument through the spectral_pe step path — a structural refactor.
+
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
