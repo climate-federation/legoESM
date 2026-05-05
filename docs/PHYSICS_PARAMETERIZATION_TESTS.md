@@ -325,6 +325,23 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - **F11 (MEDIUM)**: `ice/dynamics.py` function defaults for `rho_air`, `rho_ice`, `rho_ocean` now reference `legoesm.constants.*`.  `constants.rho_air = 1.225` and `constants.rho_ocean = 1025.0` added as canonical references.
 - **F19, F23 (LOW)**: `forcing/amip.py` and `forcing/analytical.py` documented `T_ice` legacy field as `= constants.T_freeze_ocean`; bare `1.8` literal in `analytical.py` replaced with the explicit `(T_freeze - T_freeze_ocean)` difference.
 
+### Iter-11 / iter-12 (2026-05-05 — F6/F7/F17 + state hygiene)
+
+- **F7 (HIGH)**: `ice/sea_ice.py` adds `dh_dt_sublim = -lhflx / (rho_ice · L_s)` (over ice mask) so sublimation removes ice mass and deposition adds it.  Previously the energy budget closed via L_s but the mass budget was open — thin polar ice was growing endlessly under sublimation, biased high by tens of cm/yr.
+- **F17 (MEDIUM)**: `coupler/lake/two_layer_lake.py` switches `q_sfc` to ice saturation and `L_eff` to L_s when `T_epi ≤ T_freeze`.  Frozen-lake lhflx was previously biased by ~13% from always using L_v.
+- **F6 (MEDIUM)**: `ocean/simple_ocean.py` slab + two-layer ocean freezing clamps now diagnose `Q_freeze` (the energy that would have driven SST below `T_freeze`, equivalent to the latent heat of fusion flowing into ice formation).  `SlabOceanState` gained a `Q_freeze: Field | None` field; `init_slab_state` populates it with a zero Field so the pytree shape is invariant across steps.
+
+### Remaining HIGH-severity items (deferred)
+
+The deep coupler-conservation audit also flagged the following HIGH items that require structural changes beyond the scope of this audit cycle:
+
+- **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
+- **F2**: Slab ocean and surface coupler tile compute fluxes with different bulk schemes — duplicated paths.
+- **F3**: `TileResponse.lhflx` blends use L_v only — sublimation mass under-counted by ~13% over cold tiles when consumers back-derive evap from lhflx.
+- **F4**: `TileResponse` carries no freshwater / runoff / salt channel — the `compute_mpas_freshwater` adapter exists but is not wired into the production coupled driver.
+- **F8**: Sea-ice → ocean heat flux not delivered (F_ocean removed from ocean column without a return channel).
+- **F9**: Sea-ice → ocean stress reaction force not delivered.
+
 ### Open audit findings (deferred for follow-up)
 
 1. **HIGH** — Soil freeze/thaw latent heat not in `soil_thermal.py`.  Cold-climate cases unsupported.
