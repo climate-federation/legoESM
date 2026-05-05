@@ -219,7 +219,7 @@ def linear_eos(
     T: jnp.ndarray,
     S: jnp.ndarray,
     p: jnp.ndarray,
-    rho_ref: float = 1025.0,
+    rho_ref: float = rho_0,
     alpha_T: float = 2.0e-4,
     beta_S: float = 7.4e-4,
     T_ref: float = 10.0,

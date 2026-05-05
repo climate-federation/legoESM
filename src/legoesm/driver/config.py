@@ -92,7 +92,7 @@ class ExperimentConfig(NamedTuple):
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
-    S_0: float = 1361.0
+    S_0: float = 1361.0                    # = constants.S_0
     ozone_source: str = "standard"
     ozone_forcing: str = "inline"       # inline, external, off
     ozone_file: str = ""
@@ -142,7 +142,10 @@ class ExperimentConfig(NamedTuple):
     # Surface parameters
     C_H: float = 0.0044
     C_E: float = 0.0044
-    T_ice: float = 271.35
+    # T_ice is the seawater freezing point used as the SST floor /
+    # SIC ramp threshold — NOT the ice surface temperature.  Legacy
+    # name kept for AMIP config compatibility.
+    T_ice: float = 271.35                  # = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
     sfc_emissivity: float = 0.97
