@@ -97,7 +97,7 @@ The testing pyramid for parameterizations follows three tiers:
 
 | Test case | File | Status |
 |-----------|------|--------|
-| Held-Suarez | `tests/atmosphere/hydrostatic/validation/test_held_suarez_fix.py` | green |
+| Held-Suarez (spectral PE dycore + full physics chain) | `tests/atmosphere/hydrostatic/validation/test_held_suarez_fix.py::test_held_suarez_spectral_stability` | green (re-verified 2026-05-05 after Physical_Consistency fixes — 8.16 s, slow marker) |
 | Stability (CFL / dycore) | `test_stability_fix.py` | green |
 | Spectral PE moist Held-Suarez | `test_spectral_pe_moist_held_suarez.py` | green |
 | Williamson 2/5 (shallow water) | `tests/atmosphere/shallow_water/integration/` | green |
@@ -170,6 +170,24 @@ The testing pyramid for parameterizations follows three tiers:
 ### 2.8  MPAS-specific
 
 `ocean/physics/mpas_physics.py` — wires prescribed surface forcing + bulk formulas onto MPAS grid.  Tested via `tests/ocean/unit/test_mpas_ocean.py`.
+
+### 1.9  Test pass-counts after Physical_Consistency cycle
+
+Quoted at 2026-05-05 with all fixes applied:
+
+| Suite | Tests run | Result |
+|-------|-----------|--------|
+| `tests/atmosphere/hydrostatic/unit/test_microphysics.py` | 118 | green |
+| `tests/atmosphere/hydrostatic/unit/test_convection.py` | 67 | green |
+| `tests/atmosphere/hydrostatic/unit/test_spectral_pe_microphysics.py` + spectral_pe_convection.py | 36 | green |
+| `tests/atmosphere/hydrostatic/unit/test_atmosphere_invariants.py` (interim) | 29 / 30 | 1 pre-existing dycore bug (`_lnps_pad` UnboundLocalError, primitive_eq_cdgrid.py:343) — unrelated |
+| `tests/atmosphere/hydrostatic/validation/test_held_suarez_fix.py` (slow) | 1 | green |
+| `tests/land/unit/` | 164 | green |
+| `tests/land/test_land_stability.py::TestMultiLayerStability::test_no_nan` (15-day run) | 1 | green (348 s — JIT compile dominated) |
+| `tests/unit/test_sea_ice_dynamics.py` + `test_diff_sea_ice.py` + `test_land_ice_sea_ice_dynamics.py` | 64 | green |
+| `tests/unit/test_physics_ocean.py` | 11 | green |
+| `tests/ocean/unit/test_gm_redi*.py` | 58 | green |
+| Pre-existing ocean MPAS K_bih=0 strict-equality test | 0/1 | 1 unrelated `atol=0,rtol=0` flake — independent of these changes |
 
 ### 2.9  Idealized validation (ocean)
 
