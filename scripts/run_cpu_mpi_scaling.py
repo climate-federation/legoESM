@@ -848,6 +848,13 @@ def main() -> int:
 
     # --- Sweep mode: just print cases and exit ---
     if args.sweep:
+        # Iter 41: validate the grid+physics combo *before* the
+        # sweep generator runs, so unsupported tiers (e.g. moist
+        # physics on cubed-sphere/lat-lon CPU MPI, see iter 40)
+        # error out immediately with a clear message instead of
+        # producing a JSON-lines list that subsequently fails at
+        # runtime under the SLURM array.
+        _validate_physics(args.grid, args.physics)
         cases = generate_sweep_cases(
             args.grid, args.mode if args.mode != "single" else "both",
             args.physics, args.max_ranks,
