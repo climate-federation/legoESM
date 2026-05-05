@@ -367,6 +367,12 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
   - sea ice: `lhflx / L_s` (sublimation)
 - Without this channel, consumers had to back-derive evap mass from `lhflx / L_v`, which under-counts by ~13 % on any sublimating tile.
 
+### Iter-17 (2026-05-05 — F13/F14 pytree-shape invariance)
+
+- **F13 (LOW)**: `LandState.runoff` now initialised to a populated zero Field rather than `None`.  After `step_land` populates it with an array, the pytree shape used to differ from the init state — any `lax.scan` / `jax.tree.map` over the surface state would have raised a tree-structure mismatch.
+- **F14 (LOW)**: Same fix for `LakeState.Q_freeze`.
+- Together with the iter-12 `SlabOceanState.Q_freeze` fix, all three "diagnostic field initialised None then set to array" pytree-shape inconsistencies are resolved.
+
 ### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
