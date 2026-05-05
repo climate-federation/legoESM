@@ -357,13 +357,20 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - Newton's third law: ice exerts equal-and-opposite stress on the ocean column.  Without this channel, the ocean felt only its own wind stress through bulk fluxes — under-ice currents drifted incorrectly relative to free-drift currents.
 - Land, lake, and ocean tiles return zeros.  Ocean tile already contributes its own wind stress via `tau_x`/`tau_y`.
 
-### Remaining HIGH-severity items (deferred)
+### Iter-16 (2026-05-05 — F3 phase-aware surface_mass_flux)
 
-The deep coupler-conservation audit also flagged the following HIGH items that require structural changes beyond the scope of this audit cycle:
+- **F3 (HIGH)**: `TileResponse` and `SurfaceToAtm` gained `surface_mass_flux` [kg/m²/s, positive up = drying].  Each tile populates this directly from its own bulk-flux calculation using the appropriate phase latent heat:
+  - ocean: `lhflx / L_v` (always liquid)
+  - lake: `lhflx / L_eff` with L_eff phase-aware (iter-11)
+  - slab land: `lhflx_actual / L_eff` with L_eff snow-aware
+  - multilayer land: `evap_rate` (already phase-aware via Richards solve)
+  - sea ice: `lhflx / L_s` (sublimation)
+- Without this channel, consumers had to back-derive evap mass from `lhflx / L_v`, which under-counts by ~13 % on any sublimating tile.
+
+### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
 - **F2**: Slab ocean and surface coupler tile compute fluxes with different bulk schemes — duplicated paths.
-- **F3**: `TileResponse.lhflx` blends use L_v only — sublimation mass under-counted by ~13% over cold tiles when consumers back-derive evap from lhflx.
 
 ### Open audit findings (deferred for follow-up)
 
