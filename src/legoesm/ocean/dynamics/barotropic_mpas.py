@@ -115,8 +115,15 @@ def barotropic_substeps_mpas(
     H_total_cell = jnp.maximum(H_total_cell, config.min_water_column_m)
     H_e = _edge_avg(H_total_cell, mesh)  # (nEdges,)
 
-    # Depth-averaged velocity (from state that already includes baroclinic tendency)
+    # Depth-averaged velocity (from state that already includes baroclinic tendency).
+    # Mask land edges to zero up-front so any stale value at a land
+    # edge (e.g. from FP roundoff or spin-up transient) cannot leak
+    # into the Coriolis tangential-velocity gather below — TRiSK's
+    # ``tangential_velocity`` gathers neighboring edges, so a
+    # nonzero land-edge u_bar can contaminate adjacent interior
+    # edges' v_t.  Iter-62 audit follow-up to iter-61 fix.
     u_bar = Hu_bar / jnp.maximum(H_e, 1e-10)
+    u_bar = u_bar * edge_mask
 
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta)
