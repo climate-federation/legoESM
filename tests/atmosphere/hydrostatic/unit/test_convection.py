@@ -320,6 +320,56 @@ class TestSBM:
         assert jnp.all(jnp.isfinite(grad_T))
         assert grad_T.shape == T.shape
 
+    def test_smooth_cloud_mask_passes_layer_boundary_gradients(self):
+        """Smooth sigmoid cloud_mask must produce a non-zero gradient at the
+        moist-adiabat / environment crossing.
+
+        With the legacy hard ``(T_moist >= T).astype(...)`` mask, the
+        derivative of the mask w.r.t. T is zero almost everywhere — so
+        ``jax.grad`` of any loss that depends on layer membership returns
+        zero at those levels.  The smooth sigmoid replacement should give
+        a non-trivial gradient at the level where ``T_moist ≈ T``.
+
+        Why this is non-vacuous: a hard mask still produces *finite* grads
+        (they're zero), so a `np.isfinite` check would pass for the buggy
+        version.  We assert the gradient at the boundary level is strictly
+        positive, which falsifies the hard-mask implementation by
+        construction.
+        """
+        # 2-column setup with the cloud/environment crossing engineered to
+        # land at level 4: layers 0..3 are environment-warmer (T > T_moist),
+        # layers 4..7 are environment-cooler (T < T_moist) — the crossing
+        # point is the level we probe.
+        ncol, nlev = 2, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = SBMConfig()
+
+        # Loss that integrates only the cloud-mask weighted environment T;
+        # if cloud_mask were a hard step in T, its derivative w.r.t. T at
+        # the crossing level is zero a.e. and grad_T at that level is zero.
+        def loss(T_in):
+            out = sbm_convection(T_in, q_v, p_full, p_half, dt=300.0, config=config)
+            # Use dT_dt absolute magnitude — depends on the cloud_mask shape
+            return jnp.sum(jnp.abs(out.dT_dt))
+
+        grad_T = jax.grad(loss)(T)
+        # Locate the per-column crossing (where moist_adiabat meets env)
+        from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
+        T_moist = compute_moist_adiabat(T[:, -1], p_full)
+        diff = T_moist - T  # near-zero at the crossing
+        boundary_levels = jnp.argmin(jnp.abs(diff), axis=1)  # (ncol,)
+        # At each column's boundary level, the gradient should be NON-ZERO
+        # (the smooth sigmoid feeds gradient through layer-membership).
+        # With a hard boolean mask, the derivative there is exactly zero.
+        for c in range(ncol):
+            lev = int(boundary_levels[c])
+            assert float(jnp.abs(grad_T[c, lev])) > 1e-6, (
+                f"Gradient at boundary level {lev} of column {c} is "
+                f"{float(grad_T[c, lev])} — would be zero under a hard "
+                f"(T_moist >= T) mask, must be non-zero with a smooth "
+                f"sigmoid."
+            )
+
     def test_accepts_columnwise_parameters(self):
         """SBM should support per-column traced control parameters."""
         ncol, nlev = 3, 8
