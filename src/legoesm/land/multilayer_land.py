@@ -358,15 +358,27 @@ def step_multilayer_land(
     # Recompute q_surface with updated temperature and root-zone moisture.
     # Apply stomatal_ratio so q_surface reflects both soil moisture
     # availability AND stomatal limitation (same as slab land).
+    # Use the same ``jnp.maximum(theta_fc - theta_wp, 1e-3)`` floor as
+    # the pre-step computation above (lines 142-150) so degenerate PFT
+    # lookup-table cells (theta_fc ≈ theta_wp) cannot blow up the
+    # post-step ``beta_root_new``.  The previous ``+ 1e-10`` floor was
+    # too small relative to the typical theta scale (~0.1), so a
+    # pathological PFT cell would produce O(1e7) beta_root_new values
+    # — propagating into ``q_sfc_new`` reported back to the atmosphere.
+    # Iter-65 audit fix.
     theta_new = richards_out.theta_new
     if lp is not None:
+        denom_new = jnp.maximum(
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+        )
         beta_root_new = jnp.clip(
-            (theta_new - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            (theta_new - theta_wp[:, None]) / denom_new,
             0.0, 1.0,
         )
     else:
+        denom_new = jnp.maximum(theta_fc - theta_wp, 1e-3)
         beta_root_new = jnp.clip(
-            (theta_new - theta_wp) / (theta_fc - theta_wp + 1e-10),
+            (theta_new - theta_wp) / denom_new,
             0.0, 1.0,
         )
     # See comment above ``w_frac_rz``: broadcasting handles both
