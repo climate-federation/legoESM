@@ -351,6 +351,12 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - `tile_fractions.blend_tiles` and the `FluxAccumulator` chain were extended in lockstep with iter-13.
 - 106 coupler/lake/ice tests + 412 cross-component tests pass after the change.
 
+### Iter-15 (2026-05-05 — F9 ocean_stress_x/y back-reaction)
+
+- **F9 (HIGH)**: `TileResponse` and `SurfaceToAtm` gained `ocean_stress_x` and `ocean_stress_y` fields [Pa, positive eastward/northward force on the ocean].  Sea-ice tile populates `-tau_oi · concentration` where `tau_oi = rho_ocean · drag_ocean · |U_w − U_i| · (U_w − U_i)` is the ocean→ice Cauchy drag.
+- Newton's third law: ice exerts equal-and-opposite stress on the ocean column.  Without this channel, the ocean felt only its own wind stress through bulk fluxes — under-ice currents drifted incorrectly relative to free-drift currents.
+- Land, lake, and ocean tiles return zeros.  Ocean tile already contributes its own wind stress via `tau_x`/`tau_y`.
+
 ### Remaining HIGH-severity items (deferred)
 
 The deep coupler-conservation audit also flagged the following HIGH items that require structural changes beyond the scope of this audit cycle:
@@ -358,7 +364,6 @@ The deep coupler-conservation audit also flagged the following HIGH items that r
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
 - **F2**: Slab ocean and surface coupler tile compute fluxes with different bulk schemes — duplicated paths.
 - **F3**: `TileResponse.lhflx` blends use L_v only — sublimation mass under-counted by ~13% over cold tiles when consumers back-derive evap from lhflx.
-- **F9**: Sea-ice → ocean stress reaction force not delivered.
 
 ### Open audit findings (deferred for follow-up)
 
