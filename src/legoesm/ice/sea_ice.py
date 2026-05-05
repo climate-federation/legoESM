@@ -524,8 +524,23 @@ def _thermo_single(
     dh_dt = jnp.where(ice_mask, dh_dt_ice, dh_dt_open)
     h_new = jnp.maximum(h + dt * dh_dt, 0.0)
 
-    # Concentration
-    dconc_growth = jnp.maximum(dh_dt, 0.0) * (1.0 - conc) / config.h_new_ice
+    # Concentration evolution.
+    #   Growth (CICE convention): areal concentration only increases
+    #   from NEW-ICE FORMATION in open-water portions of the cell —
+    #   ``dh_dt_open · (1 − A) / h_new_ice`` with new floes appearing
+    #   at thickness ``h_new_ice``.  Existing-ice basal growth thickens
+    #   the floe (h_new > h) but does NOT spread it laterally.  The
+    #   prior formulation used ``max(dh_dt, 0)`` for both branches,
+    #   letting existing floes grow in area when basal freezing
+    #   dominated — unphysical for any ice-covered cell.
+    #   Melt:   areal concentration decreases as floes shrink in area
+    #   while their thickness stays roughly constant —
+    #   ``dh_dt · A / h_eff`` (sign carries through; dh_dt < 0).
+    dconc_growth = jnp.where(
+        ice_mask,
+        0.0,
+        dh_dt_open * (1.0 - conc) / config.h_new_ice,
+    )
     dconc_melt = jnp.minimum(dh_dt, 0.0) * conc / h_eff
     conc_new = jnp.clip(conc + dt * (dconc_growth + dconc_melt), 0.0, 1.0)
 
