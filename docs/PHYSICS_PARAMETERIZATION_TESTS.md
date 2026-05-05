@@ -629,13 +629,29 @@ Final integration sweep across atmosphere convection, turbulence, microphysics, 
 - **346 tests pass**.
 - Held-Suarez spectral-PE stability validation: PASS.
 
-Final cycle status: **10 CRITICAL** + **40 HIGH** physics bugs fixed across 79 audit iterations / 102 commits.
+### Iter-80/81 (2026-05-05 — attempted brute-force closure fix; REVERTED)
+
+Attempted to close the iter-74 ``_DayRef`` JIT-cache stale-day bug by creating a fresh closure each forecast step (defeats JIT cache by design).
+
+### Iter-82 (2026-05-05 — Codex round; reverted iter-80/81)
+
+Codex correctly identified that the fresh-closure pattern creates a JAX executable-cache LEAK: 1000 retraces → 1000 cached programs → multi-GB memory growth on long runs.  Reverted both iter-80/81 fixes.  Documented as KNOWN ISSUE with pointer to the proper structural fix (thread ``day`` as TRACED scalar through ``model.step()`` API).  This is a worse-pathology-than-bug regression — better to document the bug than introduce a memory leak.
+
+### Iter-83 (2026-05-05 — final audit on conservation.py)
+
+Audited ``core/conservation.py``, ``_apply_implicit_hyperdiff``, ``_shared.py`` virtual_temperature/hypsometric helpers — ALL CLEAN.
+
+One MPI-replicated edge case noted in ``fix_mass_hydrostatic_target`` (line 521): ``global_integral(state_new.p_s, grid)`` lacks ``owned_mask`` parameter, while sister ``fix_ps_mass_target`` accepts it.  Under MPI replicated dynamics (each rank has full state) this would over-count.  Production single-rank and SCATTER MPI paths are unaffected.  Deferred as MPI edge-case.
+
+Final cycle status: **10 CRITICAL** + **40 HIGH** physics bugs fixed across 83 audit iterations / 107 commits.
 
 Remaining open items requiring structural refactoring beyond single-iteration scope:
 - F1/F2/F10: atmosphere ↔ ocean ↔ ice tau sign-convention split; coupler bulk-scheme duplication; ocean prognostic tau wiring.
-- ``_DayRef`` JIT cache: ``_DayRef.day`` mutation does not propagate through JIT-cached ``physics_fn`` (static_argnums in spectral_pe step).  Fix requires threading ``day`` as TRACED scalar through ``step()``.  Affects NMC generation and any time-dependent radiation/SST in production model_driver runs with diurnal/seasonal cycle.
-- Multiplicative moisture fixer in ``core/conservation.py``: untracked corrections compound with input-clip mass adjustments; should emit a "moisture correction flux" diagnostic.
-- ``f_veg`` from LAI/PFT cover (requires data not in current LandParameters).
+- ``_DayRef`` JIT cache (NMC + production model_driver): proper fix requires threading ``day`` as TRACED scalar through ``step()`` API.
+- ``_run_mpas`` line 1224 + ``compiled_segments.py:474`` SegmentForcing: same JIT-cache stale-time class.
+- Multiplicative moisture fixer untracked diagnostic.
+- ``fix_mass_hydrostatic_target`` MPI replicated edge case (missing owned_mask).
+- ``f_veg`` from explicit LAI/PFT cover.
 
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
