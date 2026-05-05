@@ -113,8 +113,12 @@ fi
 # Enable MPI profiling
 export LEGOESM_PROFILE_MPI=1
 
-# GPU binding: each rank gets one GPU
-export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
+# Iter 28: GPU binding is applied inside each ``srun`` task by SLURM
+# (``--gpus-per-task=1``) and the Python entry point's
+# ``_configure_env`` (which reads ``SLURM_LOCALID`` per-rank).
+# Exporting ``CUDA_VISIBLE_DEVICES`` here at wrapper scope binds
+# *every* rank to the launcher's local id (typically 0), pinning all
+# ranks to GPU 0 and serialising the run.
 
 # NCCL tuning for Levante
 export NCCL_DEBUG=WARN
