@@ -324,8 +324,31 @@ def spectral_ocean_tendencies(
     abs_vor = vor + grid.f[..., jnp.newaxis]
 
     # --- 7. Diagnose z-star transport velocity ---
-    div_h = div.real * h_k.real
-    div_h_rev = div_h[..., ::-1]
+    # Use the FLUX-FORM divergence ``∇·(h_k · v_k)`` rather than the
+    # advective form ``h_k · ∇·v_k``.  On z-star with spatially-varying
+    # ``h_k(η, x, y)``, the two differ by ``v_k · ∇h_k`` — small for
+    # |η|/H_max ~ 1e-4 but non-zero, and using the advective form
+    # makes the diagnosed ``w_euler[0]`` inconsistent with the
+    # prognostic ``∂η/∂t`` (which uses the flux form, line 552), so
+    # the surface kinematic BC ``w(η) = ∂η/∂t`` is silently violated.
+    # Iter-77 fix: compute hu_oc2/hv_dmu in a small pre-batch and use
+    # the flux-form ``div_hv`` for the w cumulative integral.
+
+    # --- 8. Spectral operators (moved up so we can compute div_hv) ---
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    # Small pre-batch: just (hu_cos, hv_cos) → hu_oc2, hv_dmu.
+    # Caches the result so the main batch below skips these.
+    hu_cos_pre = h_k.real * u_cos * mask_3d
+    hv_cos_pre = h_k.real * v_cos * mask_3d
+    n_lat_pre, n_lon_pre, nlev_pre = hu_cos_pre.shape
+    hu_oc2_pre = sh_analysis_oc2_3d(grid, hu_cos_pre)  # (n_sh, nlev)
+    hv_dmu_pre = sh_analysis_dmu_3d(grid, hv_cos_pre)
+    div_hv_hat_pre = im_over_a[:, jnp.newaxis] * hu_oc2_pre - one_over_a * hv_dmu_pre
+    div_hv_pre = sh_synthesis_3d(grid, div_hv_hat_pre).real * mask_3d
+
+    div_h_rev = div_hv_pre[..., ::-1]
     cumsum_rev = jnp.cumsum(div_h_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
     # Pad with zero on the bottom — single Pad HLO op vs alloc-zeros
@@ -333,13 +356,11 @@ def spectral_ocean_tendencies(
     _pad_axes_w = ((0, 0),) * (w_inner.ndim - 1)
     w_euler = jnp.pad(w_inner, (*_pad_axes_w, (0, 1)))
     # z-star correction: subtract grid velocity so ẇ[0]=0, ẇ[nlev]=0.
+    # ``w_euler[0]`` now equals ``∂η/∂t`` exactly (consistent with the
+    # prognostic form at line 552 below), so the kinematic BC closes.
     sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
     deta_dt_local = w_euler[..., 0:1]
     w = w_euler - sigma * deta_dt_local
-
-    # --- 8. Spectral operators ---
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-    one_over_a = 1.0 / a
 
     # --- 9-12. Vorticity fluxes + energy + vertical advection (batched) ---
     # The vor/div tendencies need oc2 and dmu of {A_vor, B_vor,
@@ -370,33 +391,35 @@ def spectral_ocean_tendencies(
     vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
 
     KE_cos2_masked = KE_cos2 * mask_3d
-    # Free-surface mass-flux inputs (Loop 188 — folded into the
-    # earlier batch from section 16).
-    hu_cos = h_k.real * u_cos * mask_3d
-    hv_cos = h_k.real * v_cos * mask_3d
+    # Free-surface mass-flux spectral coefficients ``hu_oc2`` and
+    # ``hv_dmu`` were already computed in the iter-77 pre-batch above
+    # (used to build the flux-form ``div_hv`` for the w cumulative
+    # integral).  Reuse them here so the main batch shrinks back from
+    # 6/5 → 5/4 channels and avoids a redundant SH analysis.
     n_lat_o, n_lon_o, nlev_o = A_vor.shape
     _ocean_oc2_stack = jnp.stack(
-        [A_vor, B_vor, vert_u_cos, vert_v_cos, KE_cos2_masked, hu_cos], axis=-1,
-    )  # (..., nlev, 6)
-    _ocean_dmu_stack = jnp.stack(
-        [A_vor, B_vor, vert_u_cos, vert_v_cos, hv_cos], axis=-1,
+        [A_vor, B_vor, vert_u_cos, vert_v_cos, KE_cos2_masked], axis=-1,
     )  # (..., nlev, 5)
+    _ocean_dmu_stack = jnp.stack(
+        [A_vor, B_vor, vert_u_cos, vert_v_cos], axis=-1,
+    )  # (..., nlev, 4)
     _ocean_oc2 = sh_analysis_oc2_3d(
-        grid, _ocean_oc2_stack.reshape(n_lat_o, n_lon_o, nlev_o * 6),
-    ).reshape(-1, nlev_o, 6)
-    _ocean_dmu = sh_analysis_dmu_3d(
-        grid, _ocean_dmu_stack.reshape(n_lat_o, n_lon_o, nlev_o * 5),
+        grid, _ocean_oc2_stack.reshape(n_lat_o, n_lon_o, nlev_o * 5),
     ).reshape(-1, nlev_o, 5)
+    _ocean_dmu = sh_analysis_dmu_3d(
+        grid, _ocean_dmu_stack.reshape(n_lat_o, n_lon_o, nlev_o * 4),
+    ).reshape(-1, nlev_o, 4)
     A_vor_oc2 = _ocean_oc2[..., 0]
     B_vor_oc2 = _ocean_oc2[..., 1]
     vert_u_oc2 = _ocean_oc2[..., 2]
     vert_v_oc2 = _ocean_oc2[..., 3]
     KE_oc2 = _ocean_oc2[..., 4]
-    hu_oc2 = _ocean_oc2[..., 5]
+    hu_oc2 = hu_oc2_pre   # cached from iter-77 pre-batch
     A_vor_dmu = _ocean_dmu[..., 0]
     B_vor_dmu = _ocean_dmu[..., 1]
     vert_u_dmu = _ocean_dmu[..., 2]
     vert_v_dmu = _ocean_dmu[..., 3]
+    hv_dmu = hv_dmu_pre   # cached from iter-77 pre-batch
     hv_dmu = _ocean_dmu[..., 4]
 
     flux_vor_div = im_over_a[:, jnp.newaxis] * A_vor_oc2 - one_over_a * B_vor_dmu
