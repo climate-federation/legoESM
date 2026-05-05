@@ -373,6 +373,17 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - **F14 (LOW)**: Same fix for `LakeState.Q_freeze`.
 - Together with the iter-12 `SlabOceanState.Q_freeze` fix, all three "diagnostic field initialised None then set to array" pytree-shape inconsistencies are resolved.
 
+### Iter-18 (2026-05-05 — conservation channel regression tests)
+
+Add four explicit regression tests in `tests/unit/test_coupler.py` so future regressions in the F3/F4/F8/F9 channels are caught at the test level rather than only by integration drift:
+
+- `test_sea_ice_freshwater_flux_balances_ice_mass_change` (F4) — asserts `freshwater_flux ≈ -rho_ice·dh/dt` minus the sublimation contribution, with a sanity check that warm forcing yields melt → flux > 0.
+- `test_sea_ice_ocean_heat_extraction_positive_under_warm_ocean` (F8) — asserts `ocean_heat_extraction > 0` when SST > T_freeze_ocean and cross-checks the magnitude against `ocean_heat_transfer_coeff · ΔT`.
+- `test_sea_ice_ocean_stress_opposes_ocean_ice_drag` (F9) — asserts `ocean_stress_x = -tau_oi · concentration` with the proper Cauchy drag formula.
+- `test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls` (F3) — asserts the bit-exact identity `surface_mass_flux = lhflx / L_s` over the sea-ice tile.
+
+416 tests pass after iter-18 (was 412 before; +4 new tests).
+
 ### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
