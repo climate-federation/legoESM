@@ -604,6 +604,19 @@ Audited DA paths (background_error.py, observation.py, cost_function.py, increme
 Found one HIGH bug deferred to future structural fix:
 - ``da/generate_nmc.py:343`` (and ``model_driver.py:1321``): ``_DayRef.day`` mutation does NOT propagate through the JIT-cached ``physics_fn`` because ``physics_fn`` is ``static_argnums`` in ``spectral_pe._step_jit``.  The day-of-year is baked in at first trace.  Affects solar insolation, SST/SIC boundary, and any time-dependent radiation in NMC generation and production forecast paths.  Fix requires threading ``day`` as a TRACED scalar argument through the spectral_pe step path — a structural refactor.
 
+### Iter-75 (2026-05-05 — convergence; closed deferred items)
+
+Audit cycle iter-44..74 has converged to structural follow-up issues only:
+- ``f_veg = sum(root_frac · beta_root)`` in ``multilayer_land.py`` conflates moisture stress with vegetation cover.  Decided not a bug per se: without explicit LAI / PFT cover data, this is a defensible design choice ("effective root coverage" rather than pure cover).  In a fully-wilted column, the formulation correctly routes evaporation to the bare-soil path with its own moisture limit.
+
+Final integration sweep (209 tests across atmosphere/ocean/land/sea-ice/coupler/training):
+- 209 passed
+- 2 pre-existing failures in ``test_diff_coupler.py`` (TileResponse field-count drift) unrelated to this cycle's fixes.
+
+Held-Suarez spectral-PE stability validation: PASS.
+
+The Physical_Consistency cycle has stabilized at 9 CRITICAL + 39 HIGH bugs fixed across 75 audit iterations / 99 commits.  The remaining open items (F1/F2/F10 ocean tau wiring; spectral-ocean w/η consistency; _DayRef JIT cache; multiplicative moisture fixer tracking) all require structural refactoring beyond the scope of single-iteration fixes.
+
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
