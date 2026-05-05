@@ -464,9 +464,24 @@ def _run_forecast_with_physics(
     driver.model._state_prev = None
 
     state = ic_spectral
+    # Iter-80 fix: rebuild a tagged physics_fn each step that
+    # explicitly depends on the current ``day`` via a Python int wrapper.
+    # JAX caches by physics_fn IDENTITY; mutating ``day_ref.day`` does
+    # NOT trigger retrace because the function object is the same.  By
+    # creating a fresh wrapper closure each step we force JAX to see
+    # a new function and compile a fresh kernel with the current day
+    # baked in.  Cost: ~1 retrace per step.  This is acceptable for
+    # offline NMC diagnostics; production runs without diurnal cycle
+    # are unaffected.
+    base_physics = physics_fn
     for step in range(n_steps):
         day_ref.day = start_day + (step + 1) * dt / 86400.0
-        state = driver.model.step(state, dt, physics_fn=physics_fn)
+        # Create a new closure each step — the closure ID changes
+        # per step, defeating the JIT cache by design.
+        step_idx = step + 1  # captured into closure for unique identity
+        def _step_physics(s, g, sc, _step_idx=step_idx, _base=base_physics):
+            return _base(s, g, sc)
+        state = driver.model.step(state, dt, physics_fn=_step_physics)
 
     return state
 
