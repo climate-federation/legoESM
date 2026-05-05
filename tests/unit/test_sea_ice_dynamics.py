@@ -237,6 +237,44 @@ class TestEVPStressUpdate:
         assert float(s22) == pytest.approx(float(s22_vp), rel=0.05)
         assert float(s12) == pytest.approx(float(s12_vp), rel=0.05)
 
+    def test_e_factor_scales_with_N_evp(self):
+        """Hunke-Dukowicz 1997: E_factor = 1/(2·T_evp·N_evp).
+
+        With production defaults T_evp=0.36, N_evp=120 the per-subcycle
+        relaxation is ~1.16% toward the VP target.  Verify the closed
+        form directly against the implementation so a regression that
+        drops the ``N_evp`` factor (the original bug) is caught.
+        """
+        T_evp = 0.36
+        N_evp = 120
+        s11, s22, s12 = jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)
+        eps_11 = jnp.array(1e-6)
+        eps_22 = jnp.array(-5e-7)
+        eps_12 = jnp.array(2e-7)
+        P = jnp.array(1e4)
+
+        # One subcycle from sigma_old = 0 should give
+        # sigma_new = E·sigma_VP / (1+E)  with  E = 1/(2·T_evp·N_evp).
+        Delta = delta_deformation(eps_11, eps_22, eps_12)
+        s11_vp, s22_vp, _ = vp_stress(eps_11, eps_22, eps_12, P, Delta)
+        E_expected = 1.0 / (2.0 * T_evp * N_evp)
+        s11_expected = float(E_expected * s11_vp / (1.0 + E_expected))
+
+        s11_new, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=T_evp, dt_s=100.0, N_evp=N_evp,
+        )
+        assert float(s11_new) == pytest.approx(s11_expected, rel=1e-6)
+
+        # Cross-check: with a different N_evp, the relaxation factor
+        # must change in the expected direction.
+        s11_n240, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=T_evp, dt_s=100.0, N_evp=240,
+        )
+        # Larger N_evp → smaller per-subcycle relaxation → smaller stress.
+        assert abs(float(s11_n240)) < abs(float(s11_new))
+
 
 # ==============================================================================
 # Test Dynamics

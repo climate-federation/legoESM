@@ -101,15 +101,20 @@ def solve_richards(
     theta_n = theta  # θ at time level n (saved for mass conservation)
 
     # --- Infiltration capacity ---
-    # Darcy: q_max = K_top · (1 + dpsi/dz), with dpsi taken across the
-    # half-distance from the surface (assumed psi=0) to the first node
-    # at depth ``z_node[0] = 0.5 · dz[0]``.  Using the full-layer
-    # ``dz[0]`` halves the head gradient and underestimates infiltration
-    # capacity by 2× in dry conditions, producing spurious surface
-    # runoff in unsaturated soils.
+    # Darcy: q_max = K_top · (1 − dpsi/dz), with the head gradient
+    # taken across the half-distance from the surface (assumed psi=0)
+    # to the first node at depth ``z_node[0] = 0.5 · dz[0]``:
+    #     grad = (psi[0] − 0) / (0.5 · dz[0]) = psi[0] / (0.5 · dz[0]).
+    # For unsaturated soil (psi[0] < 0) the gradient is negative and
+    # capacity > K_top (suction draws water down).  For ponded /
+    # saturated surfaces (psi[0] ≥ 0) the gradient is positive and the
+    # capacity is reduced — clamping to 0 prevents a positive head from
+    # producing artificially-enhanced infiltration.  Using ``abs(psi)``
+    # would always increase the capacity, which is wrong for ponded
+    # cells (Codex GPT-5 review caught the sign).
     K_top = hydraulic_conductivity(psi[:, 0], theta[:, 0], hydro_config)
-    psi_top_abs = jnp.abs(psi[:, 0])
-    infil_capacity = K_top * (1.0 + psi_top_abs / (0.5 * dz[0]))
+    head_grad = psi[:, 0] / (0.5 * dz[0])
+    infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
 
     # Surface runoff: excess over Darcy infiltration capacity.
     # Do NOT additionally cap by top-layer saturation — the implicit Picard

@@ -42,8 +42,8 @@ The testing pyramid for parameterizations follows three tiers:
 | Kessler | `atmosphere/physics/microphysics/kessler.py` | `test_microphysics.py::TestKessler` | `tests/atmosphere/hydrostatic/integration/test_amip_smoke.py` | Latent-heat closure verified by `test_evaporation_enthalpy_balance`. |
 | Sundqvist | `atmosphere/physics/microphysics/sundqvist.py` | `test_microphysics.py::TestSundqvist` | none | Diagnostic condensation; column water budget tested. |
 | Seifert-Beheng (warm rain) | `atmosphere/physics/microphysics/seifert_beheng.py` | `test_microphysics.py::TestSeifertBeheng` | none | Two-moment warm rain. |
-| Morrison (ice + liquid) | `atmosphere/physics/microphysics/morrison.py` | `test_microphysics.py::TestMorrison` | none | **AUDIT-2026-05-05**: q_i deposition rescaled to N_i^(2/3)·q_i^(1/3); donor clamp added for q_i and q_s sinks. |
-| Thompson | `atmosphere/physics/microphysics/thompson.py` | `test_microphysics.py::TestThompson` | none | **AUDIT-2026-05-05**: same fixes as Morrison; graupel pathway + donor clamps. |
+| Morrison (ice + liquid) | `atmosphere/physics/microphysics/morrison.py` | `test_microphysics.py::TestMorrison` | none | **AUDIT-2026-05-05**: q_i deposition keeps the legacy q_i·N_i^(1/3) scaling but adds a `q_i_min_growth` floor so freshly-nucleated ice can grow; donor clamp added for q_i and q_s sinks. (Recalibrating to the canonical N_i^(2/3)·q_i^(1/3) scaling deferred to a tuning effort.) |
+| Thompson | `atmosphere/physics/microphysics/thompson.py` | `test_microphysics.py::TestThompson` | none | **AUDIT-2026-05-05**: same q_i_min_growth + donor clamps as Morrison. Graupel pathway preserved. |
 | ML emulator | `atmosphere/physics/microphysics/ml_emulator.py` | `test_microphysics.py::TestMLEmulator` | none | Equinox MLP with norm constants. |
 
 **Cross-cutting**: `TestSchemeSelection`, `TestCheckpointWithHydrometeors`, `test_amip_microphysics_config`.  Differentiability covered by `tests/unit/test_diff_microphysics.py`.
@@ -269,7 +269,7 @@ Sea-ice has **no idealized validation tests** beyond unit-level differentiabilit
 
 Atmospheric:
 - DCA latent-heat release added (CRITICAL).
-- Morrison + Thompson q_i deposition rescaled; donor clamps for q_i and q_s sinks.
+- Morrison + Thompson q_i_min_growth floor added; donor clamps for q_i and q_s sinks. The dimensional rescaling to N_i^(2/3)·q_i^(1/3) was reverted because it would change the deposition magnitude by O(10^3) at typical mid-cloud values without a re-tune of `dep_coeff` — recalibration is deferred.
 
 Ocean:
 - vertical_mixing/integration.py imports fixed (CRITICAL).
@@ -283,7 +283,7 @@ Land:
 
 Sea ice:
 - EVP relaxation factor includes N_evp (CRITICAL — ~120× over-relaxation).
-- m_ice weighted by concentration (HIGH — marginal-ice-zone decoupling).
+- m_ice kept as `rho_ice · max(h, 0.01)` per ice-area (the iter-1 attempt at concentration-weighting introduced a 1/A over-acceleration; Codex GPT-5 review caught the bookkeeping error).
 - T_freeze_ocean replaced with `constants.T_freeze_ocean`.
 
 Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated).

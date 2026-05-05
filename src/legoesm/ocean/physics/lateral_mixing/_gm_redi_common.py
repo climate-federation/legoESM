@@ -198,5 +198,9 @@ def compute_visbeck_kappa_gm(
         )
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
-    kappa = cfg.alpha * L ** 2 * sigma_bar
-    return jnp.clip(kappa, cfg.kappa_min, cfg.kappa_max)
+    # Apply the wet-column mask AFTER clipping — otherwise dry columns
+    # get lifted to ``kappa_min`` rather than 0 (Codex review caught
+    # this).  A dry column should contribute exactly zero diffusivity
+    # so it cannot leak gradients through the GM/Redi tendencies.
+    kappa = jnp.clip(cfg.alpha * L ** 2 * sigma_bar, cfg.kappa_min, cfg.kappa_max)
+    return jnp.where(wet_col, kappa, 0.0)

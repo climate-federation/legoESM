@@ -295,15 +295,18 @@ def evp_solver(
     """
     dt_s = dt / N_evp  # subcycle timestep
 
-    # Ice mass per unit grid-cell area: rho_ice · h · A.  The CICE / Hibler
-    # convention uses concentration-weighted mass so that ice in a partly
-    # ice-covered cell accelerates correctly under the same wind and ocean
-    # stresses as in a fully covered cell.  An earlier form used
-    # ``rho_ice · max(h, 0.01)`` (no A weighting) which made ice mass
-    # ~10× too large in the marginal-ice zone (e.g. A=0.1, h=2 m gave
-    # 1834 kg/m² instead of 183 kg/m²) and effectively decoupled ice
-    # from the wind near the ice edge.
-    m_ice = rho_ice * jnp.maximum(h_ice * concentration, 0.01)
+    # Ice mass per unit ice-covered area: rho_ice · h.  In the CICE
+    # equation of motion, both the wind/ocean stress AND the mass scale
+    # by concentration A: m_grid · du/dt = A · tau_a + A · tau_o + ...,
+    # which simplifies to rho_ice · h · du/dt = tau_a + tau_o + ...
+    # because air_ice_stress / ocean_ice_stress already return stress
+    # per unit ice-covered area (no A factor).  Including concentration
+    # in m_ice without also weighting the stresses introduces a 1/A
+    # over-acceleration in the marginal-ice zone.  An earlier audit
+    # iteration claimed the original ``rho_ice · max(h, 0.01)`` was
+    # missing concentration weighting; Codex GPT-5 review caught the
+    # bookkeeping mistake, and the original form is correct.
+    m_ice = rho_ice * jnp.maximum(h_ice, 0.01)
 
     # Ice strength (constant during subcycling)
     P = ice_strength(h_ice, concentration, P_star, C_strength)
