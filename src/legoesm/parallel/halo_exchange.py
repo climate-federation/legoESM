@@ -416,7 +416,15 @@ def _pad_halo_mpi_tiled(
     All send buffers are pre-packed before any communication starts,
     maximizing the data available to MPI's internal pipeline.
     """
+    # Iter 30: ``face`` is the *global* face id this rank's tile lives on
+    # — used for connectivity lookups (``topology.neighbor_info`` keys) —
+    # but the data/padded arrays are compact local layouts.  In the
+    # tiled mode each rank owns exactly one tile of one face, so the
+    # local leading-axis index is always 0.  Indexing the compact array
+    # with the global face id silently scatters off-shard or wraps
+    # around for face ids > 0.
     face = topology.local_face_ids[0]
+    face_loc = _build_global_to_local(topology, data.shape[0]).get(face, 0)
     n = data.shape[1]  # tile dimension
     # Single Pad HLO op replaces alloc-zeros + scatter.
     padded = jnp.pad(data, ((0, 0), (halo, halo), (halo, halo)))
@@ -467,11 +475,11 @@ def _pad_halo_mpi_tiled(
         send_parts = []
         for edge, _, _, _, _ in send_order:
             if halo == 1:
-                send_parts.append(_extract_edge_strip(data, face, edge))
+                send_parts.append(_extract_edge_strip(data, face_loc, edge))
             else:
                 for depth in range(halo):
                     send_parts.append(
-                        _extract_edge_strip_at_depth(data, face, edge, depth)
+                        _extract_edge_strip_at_depth(data, face_loc, edge, depth)
                     )
         send_buf = jnp.concatenate(send_parts)
 
@@ -493,7 +501,7 @@ def _pad_halo_mpi_tiled(
                 offset += n
                 if is_reversed:
                     recv_strip = recv_strip[::-1]
-                padded = _place_strip(padded, face, edge, recv_strip)
+                padded = _place_strip(padded, face_loc, edge, recv_strip)
             else:
                 strip_d0 = recv_buf[offset:offset + n]
                 strip_d1 = recv_buf[offset + n:offset + 2 * n]
@@ -501,7 +509,7 @@ def _pad_halo_mpi_tiled(
                 if is_reversed:
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
-                padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+                padded = _place_strip_h2(padded, face_loc, edge, strip_d0, strip_d1)
 
     # Fill corner cells by averaging adjacent edge-halo values.
     if halo == 1:
@@ -817,7 +825,12 @@ def _pad_halo_mpi_tiled_4d(
     MPI,
 ) -> jax.Array:
     """Sub-face tiling 4D halo exchange: one sendrecv per neighbor for all levels."""
+    # Iter 30: see ``_pad_halo_mpi_tiled``.  Tiled mode owns one tile of
+    # one face per rank; ``face`` is the global id (used for connectivity
+    # lookups) but data/padded are compact local arrays so we always
+    # index them with local index 0.
     face = topology.local_face_ids[0]
+    face_loc = _build_global_to_local(topology, data.shape[0]).get(face, 0)
     n = data.shape[1]
     nlev = data.shape[3]
     # Single Pad HLO op replaces alloc-zeros + scatter (4D tiled path).
@@ -862,13 +875,13 @@ def _pad_halo_mpi_tiled_4d(
         for edge, _, _, _, _ in send_order:
             if halo == 1:
                 send_parts.append(
-                    _extract_edge_strip_4d(data, face, edge).reshape(-1)
+                    _extract_edge_strip_4d(data, face_loc, edge).reshape(-1)
                 )
             else:
                 for depth in range(halo):
                     send_parts.append(
                         _extract_edge_strip_at_depth_4d(
-                            data, face, edge, depth
+                            data, face_loc, edge, depth
                         ).reshape(-1)
                     )
         send_buf = jnp.concatenate(send_parts)
@@ -889,7 +902,7 @@ def _pad_halo_mpi_tiled_4d(
                 offset += chunk
                 if is_reversed:
                     recv_strip = recv_strip[::-1]
-                padded = _place_strip_4d(padded, face, edge, recv_strip)
+                padded = _place_strip_4d(padded, face_loc, edge, recv_strip)
             else:
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 strip_d1 = recv_buf[offset + chunk:offset + 2 * chunk].reshape(n, nlev)
@@ -897,7 +910,7 @@ def _pad_halo_mpi_tiled_4d(
                 if is_reversed:
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
-                padded = _place_strip_h2_4d(padded, face, edge, strip_d0, strip_d1)
+                padded = _place_strip_h2_4d(padded, face_loc, edge, strip_d0, strip_d1)
 
     if halo == 1:
         padded = _fill_corners_h1(padded)
