@@ -660,6 +660,26 @@ Added ``test_strict_volume_conservation_under_clamping`` as ``@pytest.mark.xfail
 
 Added ``diagnose_moisture_correction()`` to ``core/conservation.py`` that reports the silent multiplicative correction that ``fix_moisture_hydrostatic`` would apply.  Lets callers track moisture-mass injections.  Two non-vacuous regression tests verify the contract.  Closes the deferred multiplicative-fixer tracking finding.
 
+### Iter-92 (2026-05-05 — spectral_pe step API extension for forcing_data)
+
+Introduced backward-compatible API extension to ``SpectralPEModel.step()`` providing the proper structural fix path for the iter-74 ``_DayRef`` JIT-cache stale-day issue:
+
+    model.step(state, dt, physics_fn, forcing_data)
+
+When ``forcing_data`` is provided, dispatches to a new ``_step_with_forcing_jit`` that takes ``forcing_data`` as a NON-STATIC pytree argument.  JAX traces over array values as dynamic inputs:
+- physics_fn identity stays static (single compile)
+- forcing_data values (day, sst, sic) change every step without retrace
+- physics_fn extends to 4-arg signature ``(state, grid, sigma_coord, forcing_data)``
+
+Existing 3-arg physics_fn callers continue to work via the legacy ``_step_jit`` path — backward compatibility guaranteed.
+
+Migration to the new API is left for follow-up commits in:
+- NMC ``generate_nmc.py`` (leapfrog path; needs leapfrog forcing_data support first)
+- ``model_driver._run_spectral`` (SSP-RK3 path; can adopt directly)
+- ``_run_mpas`` and ``compiled_segments``: own structural patterns
+
+The leapfrog integrator currently falls back to legacy 3-arg API (forcing_data not yet wired through ``_leapfrog_step``).  Tracked for follow-up.
+
 Final cycle status: **10 CRITICAL** + **41 HIGH** physics bugs fixed across 87 audit iterations / 110 commits.
 
 Remaining open items requiring structural refactoring beyond single-iteration scope:
