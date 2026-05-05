@@ -108,6 +108,52 @@ class Test11g_FreezingFloor:
         assert jnp.all(state.T_hypo.data >= CONFIG.T_freeze)
 
 
+class Test11h_ConvectiveOverturn:
+    def test_density_inversion_homogenizes(self):
+        """Freshwater density peaks at ~4 °C (277.15 K), so above T_max
+        a colder layer is DENSER.  A column with T_epi = 5 °C over
+        T_hypo = 9 °C is statically unstable: |T_epi − T_max| = 1 K
+        (anomaly = -α), while |T_hypo − T_max| = 5 K (anomaly = -25α),
+        so ρ_epi > ρ_hypo despite T_epi < T_hypo.
+
+        Why non-vacuous: under the prior implementation (no convective
+        adjustment), the diffusive mixing term ``F_mix ∝ T_epi − T_hypo``
+        is NEGATIVE here (T_epi < T_hypo), so heat flows UP from
+        hypolimnion to epilimnion at a rate set by k_mix — but the
+        unstable density profile is preserved indefinitely.  Without
+        the convective adjustment, the post-step difference is
+        ``T_hypo − T_epi ≈ +4 K − F_mix·dt/cap`` (small reduction).
+        With the convective fix, the column homogenizes within one
+        step (|ΔT| < 0.1 K).
+        """
+        # T_epi=278.15 K (5°C, anomaly -α), T_hypo=292.15 K (19°C,
+        # anomaly -225α): ρ_epi >> ρ_hypo ⇒ strongly unstable.
+        # Use a strongly unstable column so the convective adjustment
+        # fires even after the diffusive flux has narrowed the gap
+        # within one step.  Use a small dt to disable the
+        # surface-flux-driven heating of the epilimnion (which would
+        # otherwise also work toward removing the inversion).
+        state = make_lake_state(T_epi=278.15, T_hypo=292.15)
+        forcing = make_forcing(
+            sw_down=0.0, lw_down=0.0, T_lowest=278.15, u_lowest=0.0, v_lowest=0.0
+        )
+        new_state, _ = step_lake(state, forcing, CONFIG, 1.0, dt=10.0)
+
+        T_epi_after = float(new_state.T_epi.data.flatten()[0])
+        T_hypo_after = float(new_state.T_hypo.data.flatten()[0])
+
+        # After convective adjustment, both layers should be at the
+        # mass-weighted mean (~281.35 K with h_epi=5, h_hypo=20).
+        # Without the fix, |ΔT| stays at ~4 K (one step of small
+        # diffusive flux barely changes it).
+        assert abs(T_epi_after - T_hypo_after) < 0.1, (
+            f"Convective overturn did not homogenize unstable column: "
+            f"T_epi={T_epi_after:.3f}, T_hypo={T_hypo_after:.3f}, "
+            f"diff={T_epi_after - T_hypo_after:.3f}.  Without the fix, "
+            f"|ΔT| ≳ 3.9 K (the inversion is preserved)."
+        )
+
+
 class Test11i_MultiStepConvergence:
     def test_500_steps_stable(self):
         state = make_lake_state(T_epi=295.0, T_hypo=280.0)
