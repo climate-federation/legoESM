@@ -523,18 +523,73 @@ Structural physics gaps flagged but deferred:
 - Citation corrected to Williams 2009 eqs. 8-9.
 - Tests made dtype-aware to pass under both x64 (1e-10 tol) and fp32 (1e-6 tol).
 
+### Iter-56 (2026-05-05 — spectral SW energy diag missing g·h·h_s)
+
+- ``spectral_sw.py:compute_spectral_diagnostics`` line 569 omitted the topography PE term ``g·h·h_s``, producing spurious ~0.3% "energy non-conservation" on Williamson 5 (isolated 2000 m mountain).  Prognostic dynamics use the full potential ``E + Φ + Φs`` correctly; only the diagnostic was wrong.
+- Non-vacuous regression test added.
+
+### Iter-57 (2026-05-05 — fv3_csw divergence damping sign — anti-damping)
+
+- ``core/fv3_sw_core.py:fv3_csw_tendencies`` lines 2222-2228 had the wrong sign on divergence damping: ``+ div_damp · ddiv_x`` produced ``∂D/∂t = −K_d · ∇²D`` (anti-damping → grid-scale divergence GROWS).  Path is reachable only via ``shallow_water_fv3_cdgrid.use_experimental_csw=True``.
+- Production FB chain bypasses this; uses ``_d_sw5_corner_divergence`` which is correct.
+- Iter-58 added a non-vacuous regression test that compares post-step divergence energy with vs without damping.
+
+### Iter-59 (2026-05-05 — ERA5 specific-humidity → mixing-ratio at training boundary)
+
+- ``training/era5_to_state.py``: ERA5 ``q`` is specific humidity, but the legoesm physics path treats q_v as mass mixing ratio.  Convert at the ingestion boundary using ``r = q / (1 − q)`` in BOTH the lat-lon and cubed-sphere paths.
+
+### Iter-60 (2026-05-05 — AMIP SST floor at constants.T_freeze_ocean)
+
+- ``forcing/amip.py``: SST floor was hardcoded as 200.0 K, 71 K BELOW the seawater freezing point.  Replaced with ``constants.T_freeze_ocean = 271.35 K`` at both call sites (HadISST + ICON branches).
+
+### Iter-61 (2026-05-05 — barotropic_mpas land-edge mask hoisted)
+
+- ``ocean/dynamics/barotropic_mpas.py``: predictor/corrector velocity updates had ``u_bar_c + dt·tendency * edge_mask`` which masks only the tendency, not the base state.  Hoisted mask to wrap the full update: ``(u_bar_c + dt·tendency) * edge_mask``.
+
+### Iter-62 (2026-05-05 — barotropic_mpas u_bar masked at depth-average)
+
+- Codex follow-up: initial ``u_bar = Hu_bar / max(H_e, 1e-10)`` was unmasked.  TRiSK ``tangential_velocity`` gathers neighboring edges, so stale land-edge values can contaminate adjacent interior-edge Coriolis tendency.  Masked u_bar immediately after depth-average.
+
+### Iter-63 (2026-05-05 — ml/loss area_weighted_mse normalization)
+
+- ``ml/loss.py:area_weighted_mse`` used ``jnp.mean(weighted)`` which divides by full array size (B·n_lat·n_lon·n_channels), embedding a factor of 2/n_lat baked in.  Fixed with correction factor ``n_lat / Σw_lat`` so the loss magnitude is grid-resolution-independent.
+
+### Iter-64 (2026-05-05 — training/losses lat_weights + per_variable_mse channel_weights)
+
+- ``training/losses.py:carry_mse``: ``lat_weights`` argument was declared but never applied.  Added ``_lat_weighted_mean`` helper.
+- ``ml/loss.py:per_variable_mse``: ``_channel_weights`` parameter was dead (leading underscore).  Renamed and applied; also fixed underlying normalization with iter-63 correction factor.
+
+### Iter-65 (2026-05-05 — multilayer_land beta_root_new denominator floor)
+
+- ``land/multilayer_land.py`` lines 364, 369 used ``+ 1e-10`` denominator floor for the post-step ``beta_root_new`` computation.  The pre-step ``beta_root`` had been fixed to ``jnp.maximum(theta_fc - theta_wp, 1e-3)`` per "audit finding #6"; the post-step site was missed.  Pathological PFT cells could produce O(1e7) ``beta_root_new`` and contaminate ``q_sfc_new`` reported to the atmosphere.
+
+### Iter-66 (2026-05-05 — spectral ocean PE scale_depth from constants)
+
+- ``spectral_ocean_pe.py`` line 957 had ``scale_depth = 1000.0`` hardcoded instead of importing from ``legoesm.ocean.eos.scale_depth``.  Per the strengthened CLAUDE.md rule, ocean constants must reference the canonical value.
+
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
 |----------|-------------|-------|----------|
-| CRITICAL | 9  | 9  | 0 |
-| HIGH     | 27 | 24 | 3 (F1, F2, F10) |
+| CRITICAL | 9  | 9  | 0 (1 spectral-ocean w/η consistency tracked as future work) |
+| HIGH     | 36 | 33 | 3 (F1, F2, F10) |
 | MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
 | LOW      | ~30+ | 12 | rest documented in catalog |
 
-All nine CRITICAL findings (DCA latent heat, Richards `L psi^m`, EVP relaxation, ocean integration imports, GWD g-factor, _shared moisture-convergence, spectral-PE hybrid tracer vertical advection, RAW filter sign, plus one more) are fixed and Codex-verified.
+All nine CRITICAL findings (DCA latent heat, Richards `L psi^m`, EVP relaxation, ocean integration imports, GWD g-factor, _shared moisture-convergence, spectral-PE hybrid tracer vertical advection, RAW filter sign, plus the iter-39 CAPE p_full→p_mid) are fixed and Codex-verified.
 
-Iter-44 → 55 audited 12 new modules and added 16 HIGH/CRITICAL fixes (compute_cin p_full→p_mid; SBM straight-through cloud_mask; YSU/CLUBB-lite hardcoded constants; PP81 momentum/tracer swap; sea-ice concentration growth from leads; lake convective overturn; HoltslagBoville sharpness; EDMF exner shadowing; spectral-PE hybrid tracer vertical advection; coupled driver constants + snow_frac; ocean rho_0/c_sw module-level literals; RAW filter sign error).
+Iter-44 → 66 audited 14 new modules and added 24 HIGH/CRITICAL fixes:
+- atmosphere convection (compute_cin p_full→p_mid; SBM straight-through cloud_mask)
+- atmosphere turbulence (YSU Louis constants; CLUBB-lite squared-gradient; HoltslagBoville sharpness; EDMF exner)
+- ocean physics (PP81 momentum/tracer; KPP B_f fallback)
+- ocean dynamics (rho_0/c_sw to constants; barotropic_mpas land-edge mask hoist + initial u_bar mask; spectral_ocean_pe scale_depth)
+- sea-ice (concentration growth from leads only)
+- coupler (lake convective overturn for freshwater density inversion)
+- driver (coupled-ESM constants M_CO2/M_air/eps_sfc/S_0; snow_frac smooth ramp; AMIP SST floor 200K → T_freeze_ocean)
+- dycores (spectral-PE hybrid tracer vertical advection; spectral-SW energy g·h·h_s; FV3 div damp sign in legacy CSW path)
+- time integration (RAW filter sign violation; α=0.53 default)
+- training (ERA5 q specific→mixing; ml/loss normalization; carry_mse lat_weights; per_variable_mse channel_weights)
+- land (multilayer_land beta_root_new denominator floor)
 
 ### Open audit findings (deferred for follow-up)
 
