@@ -46,6 +46,12 @@ T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
 T_freshwater_max_density = 277.133  # Max-density temperature [K] (~3.983 C)
 rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT² at T_max
 
+# Molar masses (g/mol) — used for CO2 ↔ mixing-ratio conversions, etc.
+# Dry-air mean molar mass (NIST, US Standard Atmosphere 1976)
+M_air = 28.9647        # [g/mol] dry air
+M_CO2 = 44.01           # [g/mol] CO2
+M_H2O = 18.01528        # [g/mol] water
+
 # ==============================================================================
 # Moisture Parameters
 # ==============================================================================
@@ -56,6 +62,13 @@ epsilon = R_d / R_v              # Molecular weight ratio (~0.622)
 # ==============================================================================
 sigma_sb = 5.670374419e-8       # Stefan-Boltzmann constant [W/(m^2*K^4)]
 S_0 = 1361.0                    # Total solar irradiance [W/m^2]
+
+# Broadband longwave emissivities (used as defaults when a tile config
+# does not specify its own).  Sea-water and most ice surfaces are
+# near-blackbody in the thermal-IR window; sand/dry-soil ~0.91.
+emissivity_ocean = 0.97         # [-] open ocean / lake water
+emissivity_ice = 0.97           # [-] sea ice / fresh snow
+emissivity_land = 0.95          # [-] generic land surface
 
 # ==============================================================================
 # Mathematical Constants
