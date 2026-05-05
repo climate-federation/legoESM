@@ -1318,15 +1318,32 @@ class ModelDriver:
         _one_over_a = 1.0 / a
         cos_lat_3d = self.grid.cos_lat[:, None, None]
 
-        def _spectral_physics_fn(state, grid, sigma_coord):
-            """Compute physics tendencies and return spectral tendencies."""
+        def _spectral_physics_fn(state, grid, sigma_coord, forcing_data=None):
+            """Compute physics tendencies and return spectral tendencies.
+
+            Iter-97 migration: when ``forcing_data`` is supplied (the
+            new iter-92/95 API), reads ``day``, ``sst``, ``sic``,
+            ``insol`` from the TRACED pytree.  Closes the iter-74
+            ``_DayRef`` JIT-cache stale-day pathology for production
+            spectral runs with diurnal/seasonal forcing.  Falls back
+            to closure-captured ``self._current_day`` for backward
+            compat with the legacy 3-arg call.
+            """
             fields = spectral_pe_to_grid(state, grid, sigma_coord)
             T_g = fields['T']
             u_g = fields['u']
             v_g = fields['v']
             p_s_g = fields['p_s']
 
-            sst, sic = self.get_sst_sic(self._current_day)
+            # SST/SIC: prefer TRACED forcing_data (iter-97 fix); fall
+            # back to closure-captured day for legacy callers.
+            if forcing_data is not None and "sst" in forcing_data:
+                sst = forcing_data["sst"]
+                sic = forcing_data["sic"]
+                current_day = forcing_data["day"]
+            else:
+                sst, sic = self.get_sst_sic(self._current_day)
+                current_day = self._current_day
             # Broadcast from (n_lat,) to (n_lat, n_lon) if needed
             if sst.ndim == 1 and len(shape_2d) == 2:
                 sst = jnp.broadcast_to(sst[:, None], shape_2d)
@@ -1347,7 +1364,11 @@ class ModelDriver:
                 lat_2d = self._grid_lat
             lat_col = lat_2d.reshape(-1)
 
-            insol = daily_mean_insolation(lat_col, self._current_day, S_0)
+            # Insolation: TRACED from forcing_data when supplied
+            if forcing_data is not None and "insol" in forcing_data:
+                insol = forcing_data["insol"]
+            else:
+                insol = daily_mean_insolation(lat_col, current_day, S_0)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -1390,28 +1411,40 @@ class ModelDriver:
         run_status = "COMPLETED"
         logger.info(f"Starting spectral: {n_steps_total - start_step} steps, {N_DAYS} days")
 
-        # KNOWN ISSUE (audit iter-74 / iter-81): ``_spectral_physics_fn``
-        # reads ``self._current_day`` from a closure.  JAX caches the
-        # JIT-compiled ``model.step`` by ``physics_fn`` identity, so
-        # mutating ``self._current_day`` between steps does NOT trigger
-        # retrace — the day-of-year baked at first trace is used for
-        # every step's solar insolation / SST / time-dependent forcing.
-        # The fresh-closure-per-step fix from iter-81 was REVERTED
-        # because it created 1 retrace per step → growing JAX
-        # executable cache (memory leak).  The proper fix requires
-        # threading ``day`` as a TRACED scalar argument through
-        # ``model.step()`` so JAX retraces ONCE with day as a dynamic
-        # input.  This is a structural API change deferred to future
-        # work.  Affects production runs with diurnal/seasonal cycle
-        # (gray radiation + time-dependent SST); does NOT affect
-        # Held-Suarez (no diurnal cycle).
+        # Iter-97 migration: build TRACED forcing_data each step
+        # (day, sst, sic, insol as JAX arrays) and pass through the
+        # iter-92/95 ``model.step(forcing_data=...)`` API.  Single
+        # JIT compile (physics_fn identity stable) + dynamic forcing
+        # values (no retrace, no cache leak).  Closes the iter-74
+        # ``_DayRef`` JIT-cache stale-day pathology for production
+        # spectral runs with diurnal/seasonal cycle.
+
+        # Pre-compute lat_col_local for insolation (constant across steps)
+        if self._grid_lat.ndim == 1:
+            _lat_2d_loop = jnp.broadcast_to(
+                self._grid_lat[:, None], shape_2d,
+            )
+        else:
+            _lat_2d_loop = self._grid_lat
+        _lat_col_loop = _lat_2d_loop.reshape(-1)
 
         t_start = time.time()
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
 
+            # Build TRACED forcing_data
+            sst_step, sic_step = self.get_sst_sic(self._current_day)
+            insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
+            forcing_data = {
+                "day": jnp.asarray(self._current_day),
+                "sst": sst_step,
+                "sic": sic_step,
+                "insol": insol_step,
+            }
             self.state = self.model.step(
-                self.state, DT, physics_fn=_spectral_physics_fn,
+                self.state, DT,
+                physics_fn=_spectral_physics_fn,
+                forcing_data=forcing_data,
             )
 
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
