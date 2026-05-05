@@ -342,6 +342,15 @@ Test updates: `evp_stress_update` signature now takes `N_evp` (2 callers updated
 - `tile_fractions.blend_tiles` and `accumulator.{FluxAccumulator, accumulate, mean_accumulator, accumulator_from_flux}` were extended in lockstep so the time-averaged blended freshwater flux propagates through the coupler.
 - 50 coupler tests + 398 cross-component tests pass after the change.
 
+### Iter-14 (2026-05-05 — F8 ocean_heat_extraction channel)
+
+- **F8 (HIGH)**: `TileResponse` and `SurfaceToAtm` gained an `ocean_heat_extraction` field [W/m², positive = ocean LOSES energy to this tile].  Sea-ice tile populates two contributions:
+    - Basal melt: `F_ocean = ocean_heat_transfer_coeff · max(SST − T_freeze_ocean, 0)` on previously-ice-covered cells
+    - Open-water freezing: `rho_ice · L_f · h_new / dt` on previously-ice-free cells (latent heat extracted to form new ice)
+- Land, lake, and ocean tiles return zeros (no direct ocean-heat exchange).
+- `tile_fractions.blend_tiles` and the `FluxAccumulator` chain were extended in lockstep with iter-13.
+- 106 coupler/lake/ice tests + 412 cross-component tests pass after the change.
+
 ### Remaining HIGH-severity items (deferred)
 
 The deep coupler-conservation audit also flagged the following HIGH items that require structural changes beyond the scope of this audit cycle:
@@ -349,7 +358,6 @@ The deep coupler-conservation audit also flagged the following HIGH items that r
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
 - **F2**: Slab ocean and surface coupler tile compute fluxes with different bulk schemes — duplicated paths.
 - **F3**: `TileResponse.lhflx` blends use L_v only — sublimation mass under-counted by ~13% over cold tiles when consumers back-derive evap from lhflx.
-- **F8**: Sea-ice → ocean heat flux not delivered (F_ocean removed from ocean column without a return channel).
 - **F9**: Sea-ice → ocean stress reaction force not delivered.
 
 ### Open audit findings (deferred for follow-up)
