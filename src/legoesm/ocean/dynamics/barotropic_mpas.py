@@ -227,22 +227,28 @@ def barotropic_substeps_mpas(
         # — otherwise the barotropic u_bar loses its rotational restoring
         # torque inside the substep loop and a near-inertial numerical
         # mode (τ ~ 1/f) grows on the order of 0.2 days at mid-latitudes.
+        # Land-edge zero-out: wrap the FULL update (u_bar_c + dt·tendency)
+        # in ``* edge_mask`` so any stale u_bar_c at a land edge is also
+        # zeroed each substep.  Previously the parens lay only around the
+        # tendency: ``u_bar_c + dt * (...) * mask`` parses as
+        # ``u_bar_c + (dt * (...) * mask)``, which masks the tendency
+        # but leaves u_bar_c untouched at land edges.  Iter-61 audit fix.
         if use_semi_implicit:
             # Heun predictor-corrector for Coriolis (#172 docs fix)
             v_t_old = tangential_velocity(u_bar_c, mesh)
-            u_star = u_bar_c + dt_baro * (
+            u_star = (u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * v_t_old + F_slow_u
-            ) * edge_mask
+            )) * edge_mask
             v_t_star = tangential_velocity(u_star, mesh)
-            u_bar_next = u_bar_c + dt_baro * (
+            u_bar_next = (u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * 0.5 * (v_t_old + v_t_star)
                 + F_slow_u
-            ) * edge_mask
+            )) * edge_mask
         else:
             v_t_old = tangential_velocity(u_bar_c, mesh)
-            u_bar_next = u_bar_c + dt_baro * (
+            u_bar_next = (u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * v_t_old + F_slow_u
-            ) * edge_mask
+            )) * edge_mask
 
         # Divergence damping: add nu * grad(div(u_bar)) (#205).
         if use_div_damp:
