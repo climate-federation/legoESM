@@ -139,16 +139,19 @@ def ysu_turbulence(
     )
     # Louis (1982) stability constants come from config; the previous
     # hardcoded ``b_louis = 5.0`` and ``5.0`` literals violated the
-    # constant-discipline rule (CLAUDE.md) — moving them to YSUConfig
-    # lets calibration sweeps adjust them and keeps a single source of
-    # truth for the Louis (1982) ``b`` and ``b'`` parameters.
+    # constant-discipline rule (CLAUDE.md).  Note that Louis (1982)
+    # distinguishes three coefficients (b, c, d): ``b`` enters both
+    # branches, ``d`` is the stable-branch sqrt coefficient, and ``c``
+    # is the unstable-branch denominator coefficient — the repository's
+    # louis.py already follows this split, and YSU now does too.
     b_louis = config.louis_b
+    c_louis = config.louis_c
     d_louis = config.louis_d
     Ri_pos = jnp.maximum(Ri, 0.0)
     f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos))
     Ri_neg = jnp.minimum(Ri, 0.0)
     f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * d_louis * l_mix ** 2
+        1.0 + 3.0 * b_louis * c_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
     blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)

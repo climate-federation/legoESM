@@ -228,14 +228,22 @@ def clubb_lite_turbulence(
     #   thlp2 ≈ -2 * wpthlp * dtheta/dz * tau / C5
     #         = 2 * Kh * (dtheta/dz)^2 * tau / C5    (since wpthlp = -Kh * dθ/dz)
     # The squared-gradient form is everywhere differentiable; the prior
-    # ``|wpthlp| * |dtheta/dz|`` form gave the same value (Kh ≥ 0) but
+    # ``|wpthlp| * |dtheta/dz|`` form gave the same value when Kh ≥ 0 but
     # had non-differentiable ``|·|`` kinks at zero gradient — which kills
     # ``jax.grad`` of any loss that depends on profile variances through
     # well-mixed (zero-gradient) layers.
+    #
+    # Positivity guard: variances must be non-negative.  Kh_full is
+    # constructed from non-negative tke (config.tke_min ≥ 0), positive
+    # ``Ck * l_mix`` (config defaults), and divided by Pr_t > 0, so
+    # Kh ≥ 0 in practice.  The explicit ``maximum(Kh, 0)`` keeps the
+    # variance non-negative even if a future config or stability-function
+    # extension allowed Kh < 0.
     tau_safe = jnp.clip(tau_turb, 1.0, None)
-    thlp2 = 2.0 * Kh_full * dtheta_dz_full ** 2 * tau_safe / config.C5
+    Kh_pos = jnp.maximum(Kh_full, 0.0)
+    thlp2 = 2.0 * Kh_pos * dtheta_dz_full ** 2 * tau_safe / config.C5
     thlp2 = jnp.maximum(thlp2, config.var_min)
-    rtp2 = 2.0 * Kh_full * drt_dz_full ** 2 * tau_safe / config.C5
+    rtp2 = 2.0 * Kh_pos * drt_dz_full ** 2 * tau_safe / config.C5
     rtp2 = jnp.maximum(rtp2, config.var_min)
 
     # ===== Cloud fraction from Gaussian PDF =====

@@ -229,10 +229,16 @@ class YSUConfig(NamedTuple):
     louis_b : float
         Louis (1982) stability-function ``b`` constant
         (default 5.0).  Used in YSU local-Ri f_stable / f_unstable.
+    louis_c : float
+        Louis (1982) UNSTABLE-branch denominator coefficient
+        (default 5.0).  Multiplies the ``b · l_mix² · sqrt(|Ri|)``
+        denominator term in f_unstable.  The repository's louis.py
+        distinguishes this from louis_d; YSU now follows the same
+        convention.
     louis_d : float
-        Louis (1982) stability-function ``d`` (a.k.a. ``b'``) constant
-        (default 5.0).  Appears in the unstable denominator and the
-        sqrt term of f_stable.
+        Louis (1982) STABLE-branch sqrt coefficient (a.k.a. ``b'``)
+        (default 5.0).  Appears only in ``sqrt(1 + d · Ri)`` of
+        f_stable.
     blend_ri_sharpness : float
         Sigmoid sharpness for stable / unstable blend in
         Richardson-number space (default 100.0 1/Ri).
@@ -245,6 +251,7 @@ class YSUConfig(NamedTuple):
     Ri_crit: float = 0.25
     pbl_smooth_sharpness: float = 20.0
     louis_b: float = 5.0
+    louis_c: float = 5.0
     louis_d: float = 5.0
     blend_ri_sharpness: float = 100.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
