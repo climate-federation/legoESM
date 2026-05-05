@@ -208,6 +208,16 @@ class HoltslagBovilleConfig(NamedTuple):
     gamma_m: float = 0.0
     Ri_crit: float = 0.25
     b_louis: float = 5.0
+    # Sigmoid sharpness for the Ri_crit transition-zone weighting
+    # used in the bulk-Ri PBL-height diagnostic (default 20.0 1/Ri).
+    pbl_sharpness: float = 20.0
+    # Sigmoid sharpness for stable/unstable Ri-branch blend in the
+    # local Louis Km calculation (default 100.0 1/Ri).
+    blend_ri_sharpness: float = 100.0
+    # Sigmoid sharpness for the smooth profile-to-local transition
+    # at the PBL top in the Km blend (default 10.0; sigmoid(10·1) ≈ 1
+    # one PBL-height above the top, sigmoid(10·-1) ≈ 5e-5 below).
+    blend_pbl_sharpness: float = 10.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
