@@ -17,7 +17,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.field import Field
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import (
+    saturation_mixing_ratio,
+    saturation_mixing_ratio_ice,
+)
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
@@ -41,8 +44,21 @@ def step_lake(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
     )
 
-    # Surface humidity: saturated at epilimnion temperature
-    q_sfc = saturation_mixing_ratio(T_epi, forcing.p_surface)
+    # Surface humidity: saturated at epilimnion temperature.  Use
+    # the ice saturation form when the lake is at or below freezing
+    # (frozen-over lakes sublimate, not evaporate).
+    is_frozen = T_epi <= config.T_freeze
+    q_sfc_liq = saturation_mixing_ratio(T_epi, forcing.p_surface)
+    q_sfc_ice = saturation_mixing_ratio_ice(T_epi, forcing.p_surface)
+    q_sfc = jnp.where(is_frozen, q_sfc_ice, q_sfc_liq)
+
+    # Latent heat: sublimation (L_s) when frozen, vaporization (L_v)
+    # otherwise.  ``simple_bulk_fluxes`` and ``compute_most_fluxes``
+    # both return ``lhflx`` as a positive-up energy flux equal to
+    # ``L · evap_rate``, so phase-correct L is the only switch needed.
+    # Earlier the lake always used L_v, biasing lhflx by ~13% over
+    # frozen lakes (coupler-conservation audit F17).
+    L_eff = jnp.where(is_frozen, constants.L_s, constants.L_v)
 
     # Bulk fluxes
     rho = forcing.rho_lowest
@@ -56,6 +72,7 @@ def step_lake(
             z0_init=config.z0_lake,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
+            L_latent=L_eff,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -63,6 +80,7 @@ def step_lake(
             forcing.T_lowest, forcing.q_lowest,
             T_epi, q_sfc, rho, wind_speed,
             config.Cd_lake, config.Ch_lake,
+            L_latent=L_eff,
         )
 
     # Radiation

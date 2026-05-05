@@ -445,8 +445,21 @@ def _thermo_single(
     )
     dh_dt_basal = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
 
-    # Combine surface and basal melt/growth for existing ice
-    dh_dt_ice = dh_dt_basal + dh_dt_surface_melt
+    # Sublimation mass loss: lhflx > 0 means moisture leaves the
+    # surface into the atmosphere via L_s, so the equivalent ice mass
+    # is removed from the column.  When lhflx < 0 (deposition), mass
+    # is added.  Without this term the surface energy budget closes
+    # but the ice mass budget is open: thin polar ice would grow
+    # endlessly under sublimation, biased high by ~tens of cm/year.
+    # (Coupler-conservation audit F7.)
+    dh_dt_sublim = jnp.where(
+        ice_mask,
+        -lhflx / (config.rho_ice * constants.L_s),
+        0.0,
+    )
+
+    # Combine surface and basal melt/growth + sublimation for existing ice
+    dh_dt_ice = dh_dt_basal + dh_dt_surface_melt + dh_dt_sublim
 
     freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     dh_dt_open = freeze_flux_open / (config.rho_ice * config.L_f)
