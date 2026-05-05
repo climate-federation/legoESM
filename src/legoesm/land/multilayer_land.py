@@ -180,15 +180,25 @@ def step_multilayer_land(
     # --- Surface saturation humidity: use ice saturation over snow ---
     q_sat_liq = saturation_mixing_ratio(T_surface, forcing.p_surface)
     q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
-    # Treat a column as snow-covered when EITHER existing snow OR fresh
-    # snowfall during this step is present.  Iter-67 audit fix: a
-    # column that starts snow-free but receives precip_snow this step
-    # was being treated as bare soil for the bulk-flux phase decision
-    # (q_sat liquid, β = soil-moisture stress, L_eff = L_v) even though
-    # the surface is snow-covered for most of the step.  Including the
-    # accumulation in ``has_snow`` routes the latent heat correctly.
-    snow_post_accum = snow + forcing.precip_snow * dt
-    has_snow = snow_post_accum > 1e-6  # kg/m2 threshold
+    # Treat a column as snow-covered when:
+    #   (a) Existing snowpack > 1e-6 kg/m² (always snow regardless of
+    #       fresh accumulation OR melt), OR
+    #   (b) Fresh snowfall is happening AND the surface is below
+    #       freezing (so the new snow will survive — won't melt
+    #       immediately during this step).
+    # Rule (b) prevents the "warm-surface snowfall" anti-pattern that
+    # the iter-67 first-pass fix introduced: a snow-free warm column
+    # receiving precip_snow would have been routed as L_s
+    # sublimation over an ice qsat surface for the whole turbulent
+    # step even though the snow melts away in seconds.  By gating
+    # on T_surface < T_freeze we only switch to snow phase when the
+    # snow can survive.  Existing snow always uses snow phase
+    # regardless of surface temperature (snow_budget handles melt
+    # energy correctly).  Iter-68 audit fix.
+    fresh_snow_mass = forcing.precip_snow * dt
+    has_existing_snow = snow > 1e-6
+    has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
+    has_snow = has_existing_snow | has_surviving_fresh_snow
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Over snow, moisture is freely available from the snowpack (beta=1)
     beta_effective = jnp.where(has_snow, 1.0, beta)
