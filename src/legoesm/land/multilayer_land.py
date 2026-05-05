@@ -180,7 +180,15 @@ def step_multilayer_land(
     # --- Surface saturation humidity: use ice saturation over snow ---
     q_sat_liq = saturation_mixing_ratio(T_surface, forcing.p_surface)
     q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
-    has_snow = snow > 1e-6  # kg/m2 threshold
+    # Treat a column as snow-covered when EITHER existing snow OR fresh
+    # snowfall during this step is present.  Iter-67 audit fix: a
+    # column that starts snow-free but receives precip_snow this step
+    # was being treated as bare soil for the bulk-flux phase decision
+    # (q_sat liquid, β = soil-moisture stress, L_eff = L_v) even though
+    # the surface is snow-covered for most of the step.  Including the
+    # accumulation in ``has_snow`` routes the latent heat correctly.
+    snow_post_accum = snow + forcing.precip_snow * dt
+    has_snow = snow_post_accum > 1e-6  # kg/m2 threshold
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Over snow, moisture is freely available from the snowpack (beta=1)
     beta_effective = jnp.where(has_snow, 1.0, beta)
