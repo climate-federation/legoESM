@@ -453,6 +453,41 @@ def fix_moisture_hydrostatic(
     return q_v * scale
 
 
+def diagnose_moisture_correction(
+    q_v: jax.Array,
+    target_moisture: jax.Array,
+    p_s: jax.Array,
+    dsigma: jax.Array,
+    grid,
+    owned_mask: jax.Array | None = None,
+) -> dict[str, jax.Array]:
+    """Diagnose the moisture correction that ``fix_moisture_hydrostatic``
+    would apply, without actually applying it.
+
+    Returns a dict of:
+      - ``current_mass`` [kg]: current global column water-vapor integral
+      - ``target_mass`` [kg]: prescribed target
+      - ``correction_mass`` [kg]: target - current (positive = mass added by
+        the fixer; negative = mass removed)
+      - ``scale``: multiplicative factor that ``fix_moisture_hydrostatic``
+        would multiply q_v by.  Equals 1.0 when target == current.
+
+    Use to track silent corrections that would otherwise compound with
+    other untracked sources/sinks (advection clipping, microphysics
+    saturation adjustment, etc.) and bias the moist energy budget.
+    Iter-87 audit follow-up to the deferred multiplicative-fixer
+    tracking finding.
+    """
+    current = compute_global_moisture(q_v, p_s, dsigma, grid, owned_mask=owned_mask)
+    scale = jnp.where(current > _tiny(current), target_moisture / current, 1.0)
+    return {
+        "current_mass": current,
+        "target_mass": target_moisture,
+        "correction_mass": target_moisture - current,
+        "scale": scale,
+    }
+
+
 def fix_total_water(
     tracers: dict[str, jax.Array],
     target_total_water: jax.Array,
