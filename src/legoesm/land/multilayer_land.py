@@ -230,10 +230,20 @@ def step_multilayer_land(
             L_latent=L_eff,
         )
 
-    # --- Surface albedo (from current snow state) ---
+    # --- Surface albedo (snow-mass dependent) ---
+    # Use the SAME effective snow mass as the bulk-flux phase decision
+    # (iter-68 fix): existing snow always counts; fresh snow counts
+    # only when T_surface < T_freeze (it survives the step).  Without
+    # this consistency, SW absorption would lag the LH/SH phase
+    # transition by one step on every fresh-snow event.  Iter-71 fix.
+    snow_effective = jnp.where(
+        has_existing_snow | has_surviving_fresh_snow,
+        snow + jnp.where(has_surviving_fresh_snow, fresh_snow_mass, 0.0),
+        snow,
+    )
     if config.snow_albedo_feedback and lat is not None:
         alpha = compute_land_albedo(
-            lat, snow, snow_age, config.land_albedo,
+            lat, snow_effective, snow_age, config.land_albedo,
         )
     else:
         alpha = jnp.full(T_surface.shape, albedo_land, dtype=T_surface.dtype)
