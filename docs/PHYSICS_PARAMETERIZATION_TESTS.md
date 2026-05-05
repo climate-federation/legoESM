@@ -414,6 +414,8 @@ Regression tests:
 
 **Iter-37 wider integration verification (post-MC-sign-flip)**: 175 tests pass + 2 skipped across `test_convection.py + test_convection_latlon_mpas.py + test_microphysics.py + test_moisture_convergence.py + Held-Suarez slow validation`.  The MC sign flip did NOT cause regressions in Tiedtke / Bechtold / mass-flux convection schemes, microphysics, or the Held-Suarez integration.  This confirms the fix is operationally correct: convection responds to MOISTURE CONVERGENCE (positive when air converges) as physically intended, not to its negation.
 
+**Iter-42 final verification sweep**: 439 tests pass + 6 warnings in 246 s across atmosphere physics (microphysics, convection, moisture convergence, AMIP forcing) + ocean physics + land + sea-ice + coupler + Held-Suarez spectral-PE slow validation.  All physics fixes from iter-1 through iter-41 are operational without regressions.
+
 ### Iter-22 (2026-05-05 — stomata vapor pressure formula)
 
 - **Audit finding #24 (MEDIUM)**: `land/carbon/stomata.py` switches the vapor-pressure-from-specific-humidity formula from the mixing-ratio form `e = q · p / (ε + q)` to the correct specific-humidity form `e = q · p / (ε + (1 − ε) · q)`.  Affects both `jarvis_gs` and `coupled_farquhar_stomata`.  The bias is ~1 % at typical tropical q but propagates through the VPD-driven stomatal closure into GPP.
