@@ -58,3 +58,4 @@ src/legoesm/ml/data/**
 ralph-claude-code/
 ralph/
 .claude/ralph-loop.local.md
+.claude/scheduled_tasks.lock
