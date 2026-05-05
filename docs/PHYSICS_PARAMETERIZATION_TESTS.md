@@ -446,16 +446,49 @@ Structural physics gaps flagged but deferred:
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
 - **F2**: Slab ocean and surface coupler tile compute fluxes with different bulk schemes — duplicated paths.
 
+### Iter-44 (2026-05-05 — convection compute_cin p_full→p_mid)
+
+- `_plume.compute_cin` had the same bug as iter-39's `compute_cape` HIGH #1 fix: the discrete `∫ dlnp` weighting used `p_full` (a layer-mean pressure on hybrid-sigma grids) instead of `p_mid` (the half-level midpoint).  Produced 0.5–2 % CIN bias relative to the matching CAPE.  Fix matches every sister physics helper.
+- 62 atmosphere convection tests pass; Held-Suarez stability validation passes.
+
+### Iter-45 (2026-05-05 — SBM straight-through cloud_mask)
+
+- SBM `sbm_convection` used a hard boolean `(T_moist >= T).astype(...)` cloud_mask, breaking differentiability through layer top/bottom transitions even though the docstring claimed smooth-everywhere semantics.
+- Fix: straight-through estimator `cloud_mask = soft + lax.stop_gradient(hard - soft)` — forward semantics bit-identical to the prior hard mask, backward gradient is `sigmoid'`.
+- Non-vacuous regression test asserts the gradient at the boundary level equals `-sharpness/4`, falsifying the hard-mask version.
+- 8 SBM tests pass; Held-Suarez passes.
+
+### Iter-46 (2026-05-05 — YSU Louis constants + CLUBB-lite)
+
+- `ysu.py` had hardcoded Louis (1982) stability-function constants (`b_louis = 5.0`, `5.0` for `b'`, `100.0` for blend sharpness) violating CLAUDE.md constant-discipline.  Lifted to `YSUConfig.louis_b`, `louis_c`, `louis_d`, `blend_ri_sharpness`.
+- `clubb_lite.py` variance formula used `|wpthlp| · |dθ/dz|` (kink at zero gradient).  Rewritten as algebraically-equivalent `Kh · (dθ/dz)²` with explicit positivity guard `Kh_pos = max(Kh, 0)`.
+- 64 turbulence tests pass; Held-Suarez passes.
+
+### Iter-47 (2026-05-05 — PP81 momentum/tracer + KPP B_f fallback)
+
+- `richardson.py` (Pacanowski-Philander): momentum and tracer roles were SWAPPED.  Canonical PP81 (POP / E3SM Omega): `ν = ν₀/(1+αRi)^n + ν_b`, `κ = ν/(1+αRi) + κ_b`.  The Prandtl ratio Pr = ν/κ = (1+αRi) GROWS with Ri because momentum mixes more efficiently than tracer in stable shear.  Prior code used a constant Pr_t = 10 which inverted this.  `cfg.Pr_t` is now dead (UserWarning on non-default).
+- `kpp.py`: B_f=None fallback used `g/ρ₀ · K_bg · drho_dz_sfc` proxy (~1e-10 m²/s³, 2-4 orders of magnitude below realistic 1e-8 to 1e-7 m²/s³).  Changed to `B_f=0` fail-closed semantics.
+- 13 ocean physics + KPP corrections tests pass; Held-Suarez passes.
+
+### Iter-48 (2026-05-05 — sea-ice concentration growth from leads)
+
+- `sea_ice.py` line 528 used `dconc_growth = max(dh_dt, 0) · (1-A) / h_new_ice` for both branches of `where(ice_mask, dh_dt_ice, dh_dt_open)`, letting basal vertical growth of existing floes spuriously spread them laterally.
+- Fix (after Codex round): drive concentration growth ONLY from `dh_dt_open · (1-A) / h_new_ice` regardless of ice_mask.  This (a) prevents existing-ice basal growth from changing A, (b) preserves CICE/Icepack ``add_new_ice`` lead refreezing on partially-covered cells.
+- Two non-vacuous regression tests verify both: existing-ice basal growth doesn't change A; partial-cover lead refreezing DOES change A.
+- 11 differentiable sea-ice tests pass; Held-Suarez passes.
+
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
 |----------|-------------|-------|----------|
 | CRITICAL | 7  | 7  | 0 |
-| HIGH     | 14 | 11 | 3 (F1, F2, F10) |
+| HIGH     | 19 | 16 | 3 (F1, F2, F10) |
 | MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
 | LOW      | ~30+ | 12 | rest documented in catalog |
 
 All seven CRITICAL findings (DCA latent heat, Richards `L psi^m`, EVP relaxation, ocean integration imports, three more) are fixed and Codex-verified.
+
+Iter-44 → 48 added 5 more HIGH fixes (compute_cin p_full→p_mid; SBM differentiability; YSU/CLUBB-lite hardcoded constants; PP81 momentum/tracer; sea-ice concentration growth).
 
 ### Open audit findings (deferred for follow-up)
 
