@@ -37,19 +37,21 @@ class LossConfig(NamedTuple):
     w_v: float = 0.5          # meridional wind
     w_q: float = 0.2          # specific humidity
     w_ps: float = 0.3         # surface pressure
-    # Per-variable amplitude scales used for normalization
-    # (typical anomaly magnitudes; squared in the denominator).
-    normalize_by_scale: bool = True
-    T_scale: float = 30.0          # K — typical mid-tropospheric T anomaly
-    wind_scale: float = 20.0       # m/s — typical wind anomaly
-    q_scale: float = 5.0e-3        # kg/kg — typical q anomaly
-    ps_scale: float = 1000.0       # Pa — typical ps anomaly
     # Loss components
     spectral_weight: float = 0.0   # weight for spectral loss term
     level_weighting: str = "pressure"  # "uniform", "pressure", or "boundary_layer"
     # Pressure weighting parameters
     p_ref_Pa: float = 50000.0      # reference pressure for level weighting [Pa]
     p_scale_Pa: float = 30000.0    # width of weighting function [Pa]
+    # Per-variable amplitude scales used for normalization
+    # (iter-69 fix; appended to keep positional construction
+    # backward-compatible — older callers using
+    # ``LossConfig(..., spectral_weight=...)`` keep working).
+    normalize_by_scale: bool = True
+    T_scale: float = 30.0          # K — typical mid-tropospheric T anomaly
+    wind_scale: float = 20.0       # m/s — typical wind anomaly
+    q_scale: float = 5.0e-3        # kg/kg — typical q anomaly
+    ps_scale: float = 1000.0       # Pa — typical ps anomaly
 
 
 def level_weights(
