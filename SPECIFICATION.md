@@ -2514,10 +2514,7 @@ legoESM/
 │   └── test_cases/                         # Williamson, DCMIP, DCMIP-2025
 │
 ├── scripts/                                # Research & experiment scripts
-│   ├── run_amip.py                         # AMIP simulation (gray/RRTMG, checkpoint)
-│   ├── run_amip_spectral.py                # AMIP spectral PE simulation
-│   ├── run_100day.py                       # 100-day atmospheric simulation
-│   ├── run_amip.py                         # Production AMIP CLI (ModelDriver)
+│   ├── run_amip.py                         # Production AMIP CLI (gray/RRTMG, checkpoint)
 │   ├── run_atmosphere_test_matrix.py       # Master atmosphere test suite (64+ cases)
 │   ├── run_ocean_test_matrix.py            # Master ocean test suite (4 grids × 9 cases)
 │   ├── run_ocean_spectral_tests.py         # Spectral ocean (Gaussian grid)
