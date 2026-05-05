@@ -375,6 +375,69 @@ def test_lake_mixing_direction():
     assert jnp.all(new_state.T_hypo.data > 275.0)
 
 
+def test_lake_surface_mass_flux_uses_phase_aware_L():
+    """Lake TileResponse.surface_mass_flux = lhflx / L_eff, where
+    L_eff = L_s for frozen lakes (T_epi <= T_freeze) and L_v
+    otherwise (audit F3 + iter-11).
+    """
+    from legoesm import constants
+    config = LakeConfig()
+
+    # Warm liquid lake: L_eff = L_v
+    state_warm = _make_lake_state(T_epi=285.0, T_hypo=280.0)
+    forcing_warm = _make_forcing(T_lowest=290.0)
+    _, resp_warm = step_lake(state_warm, forcing_warm, config, U_min=1.0, dt=DT)
+    expected_warm = resp_warm.lhflx / constants.L_v
+    assert jnp.allclose(resp_warm.surface_mass_flux, expected_warm, rtol=1e-6)
+
+    # Frozen lake: L_eff = L_s
+    state_cold = _make_lake_state(T_epi=270.0, T_hypo=270.0)
+    forcing_cold = _make_forcing(T_lowest=240.0, sw=0.0, lw=200.0)
+    _, resp_cold = step_lake(state_cold, forcing_cold, config, U_min=1.0, dt=DT)
+    expected_cold = resp_cold.lhflx / constants.L_s
+    assert jnp.allclose(resp_cold.surface_mass_flux, expected_cold, rtol=1e-6)
+
+
+def test_lake_freshwater_flux_is_P_minus_E():
+    """Lake TileResponse.freshwater_flux = precip_total − E
+    (audit F4).
+    """
+    state = _make_lake_state(T_epi=285.0, T_hypo=280.0)
+    forcing = _make_forcing(precip=2e-5)  # nontrivial precip
+    config = LakeConfig()
+
+    _, resp = step_lake(state, forcing, config, U_min=1.0, dt=DT)
+
+    expected = forcing.precip_total - resp.surface_mass_flux
+    assert jnp.allclose(resp.freshwater_flux, expected, rtol=1e-6)
+
+
+def test_land_freshwater_flux_equals_runoff():
+    """Slab land TileResponse.freshwater_flux equals the bucket
+    overflow runoff (audit F4).  ``LandConfig.W_max = 150 kg/m²`` —
+    saturate the bucket and apply heavy precip with cool dry forcing
+    (so evap doesn't drain the bucket within the step) to force
+    overflow.
+    """
+    from legoesm.land.config import LandConfig
+    state = _make_land_state(W=149.99)  # right at saturation
+    # Cool, dry, low-wind forcing keeps evap minimal; very heavy
+    # precip forces overflow regardless.
+    forcing = _make_forcing(
+        T_lowest=275.0, sw=0.0, lw=200.0, precip=1.0,
+    )
+    config = LandConfig()
+
+    new_state, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
+
+    # The bucket overflow becomes runoff, which is freshwater_flux.
+    # ``LandState.runoff`` is a bare jax.Array (not a Field), so use
+    # it directly.
+    assert jnp.allclose(resp.freshwater_flux, new_state.runoff, rtol=1e-6)
+    # Heavy precip on a saturated bucket → positive runoff.
+    assert float(jnp.mean(resp.freshwater_flux)) > 0.0
+
+
 # ==============================================================================
 # Test tile blending
 # ==============================================================================
