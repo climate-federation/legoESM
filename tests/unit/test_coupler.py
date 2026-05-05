@@ -225,6 +225,115 @@ def test_sea_ice_no_spurious_growth_from_open_water():
     assert jnp.allclose(new_state.concentration.data, 0.0, atol=1e-8)
 
 
+def test_sea_ice_sublimation_mass_term_is_included():
+    """Audit F7 (HIGH): ice mass budget must include
+    ``dh_dt_sublim = -lhflx / (rho_ice · L_s)`` over ice cells.
+
+    Run the same forcing twice — once with the production lhflx,
+    once with lhflx=0 (no sublimation) — and verify that the
+    delta in dh/dt matches the expected sublimation contribution.
+
+    Strategy: rather than zeroing lhflx (which requires bypassing
+    the bulk-flux call), use a *very dry* atmosphere to maximise
+    lhflx, run two cases differing only in q_lowest, and check
+    that the difference in dh_dt is consistent with the
+    ``-Δlhflx / (rho_ice · L_s)`` sublim-mass term.
+
+    Without the iter-11 fix, ``dh/dt`` would be invariant under
+    q_lowest changes (energy budget closes via lhflx but mass
+    budget ignores sublimation), so the delta would be zero.
+    """
+    from legoesm import constants
+
+    state = _make_ice_state(h=2.0, conc=1.0, T=265.0)
+    # Two forcings differing only in q_lowest: dry vs more moist.
+    base_forcing = _make_forcing(T_lowest=240.0, sw=0.0, lw=200.0)
+    forcing_dry = base_forcing._replace(q_lowest=jnp.full(SHAPE, 1e-5))
+    forcing_moist = base_forcing._replace(q_lowest=jnp.full(SHAPE, 5e-3))
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 271.35)
+
+    # Run both cases.
+    state_dry, resp_dry = step_sea_ice(
+        state, forcing_dry, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+    state_moist, resp_moist = step_sea_ice(
+        state, forcing_moist, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    # lhflx must be larger under dry conditions (more sublimation).
+    dlhflx = float(jnp.mean(resp_dry.lhflx - resp_moist.lhflx))
+    assert dlhflx > 0.0, (
+        f"dry case should give larger lhflx (more sublimation); "
+        f"Δlhflx = {dlhflx:.2e}"
+    )
+
+    # Predicted Δ(dh/dt) from sublimation term alone:
+    # Δdh_dt_sublim = -Δlhflx / (rho_ice · L_s)  (negative — more sublim
+    # in dry case → more mass loss → MORE NEGATIVE dh/dt).
+    expected_d_dh_dt = -dlhflx / (config.rho_ice * constants.L_s)
+
+    dh_dt_dry = float(jnp.mean(state_dry.h_ice.data - state.h_ice.data) / DT)
+    dh_dt_moist = float(jnp.mean(state_moist.h_ice.data - state.h_ice.data) / DT)
+    actual_d_dh_dt = dh_dt_dry - dh_dt_moist
+
+    # Without iter-11 fix this would be ~0 (mass budget ignores
+    # the lhflx-driven mass loss).  With the fix, actual_d_dh_dt
+    # should match expected_d_dh_dt.  The shflx ALSO changes a
+    # little between the two runs because the sensible-heat
+    # transfer responds to T_ice via the surface energy budget,
+    # so allow a generous tolerance.
+    assert abs(actual_d_dh_dt - expected_d_dh_dt) < 0.5 * abs(expected_d_dh_dt), (
+        f"Δ(dh/dt) = {actual_d_dh_dt:.2e} does not match expected "
+        f"sublim contribution {expected_d_dh_dt:.2e} — iter-11 fix "
+        f"may be missing."
+    )
+    # Must be a NEGATIVE delta (dry case loses more mass).
+    assert actual_d_dh_dt < 0.0, (
+        f"Δ(dh/dt) should be negative (dry case loses more mass); "
+        f"saw {actual_d_dh_dt:.2e}"
+    )
+
+
+def test_slab_ocean_Q_freeze_diagnostic_populated():
+    """Audit F6 (MEDIUM): slab ocean freezing clamp must diagnose
+    ``Q_freeze`` (latent heat of fusion implicitly extracted from
+    the surface budget when SST clamps at T_freeze) instead of
+    silently destroying the energy.  The iter-11 fix adds this
+    diagnostic; iter-12 ensures it's a populated zero Field at
+    init so the pytree shape is invariant.
+
+    Test asserts:
+    - Cold-forcing column drives SST below T_freeze → Q_freeze > 0.
+    - Warm-forcing column → Q_freeze = 0 (no clamping).
+    """
+    from legoesm.ocean.simple_ocean import (
+        _slab_step, init_slab_state, SimpleOceanConfig,
+    )
+
+    config = SimpleOceanConfig()
+    state = init_slab_state(SHAPE, T_sfc_init=271.5)  # very near freezing
+    # Cold forcing — net heat loss large enough to drive below freezing
+    cold_forcing = _make_forcing(T_lowest=200.0, sw=0.0, lw=150.0)
+    new_state, _, _, _ = _slab_step(state, cold_forcing, config, dt=86400.0)
+    # Q_freeze must be populated and POSITIVE in cells where SST
+    # would have dropped below T_freeze.
+    assert new_state.Q_freeze is not None
+    assert float(jnp.max(new_state.Q_freeze.data)) > 0.0, (
+        "Q_freeze should be positive when SST clamps at T_freeze"
+    )
+
+    # Warm forcing — no clamping → Q_freeze should be zero.
+    warm_state = init_slab_state(SHAPE, T_sfc_init=290.0)
+    warm_forcing = _make_forcing(T_lowest=290.0, sw=300.0, lw=350.0)
+    new_warm_state, _, _, _ = _slab_step(
+        warm_state, warm_forcing, config, dt=86400.0,
+    )
+    assert float(jnp.max(new_warm_state.Q_freeze.data)) == 0.0
+
+
 # ==============================================================================
 # Coupler-conservation regression tests (audit F3/F4/F8/F9 channels)
 # ==============================================================================
