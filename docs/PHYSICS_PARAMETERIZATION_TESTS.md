@@ -643,22 +643,39 @@ Audited ``core/conservation.py``, ``_apply_implicit_hyperdiff``, ``_shared.py`` 
 
 One MPI-replicated edge case noted in ``fix_mass_hydrostatic_target`` (line 521): ``global_integral(state_new.p_s, grid)`` lacks ``owned_mask`` parameter, while sister ``fix_ps_mass_target`` accepts it.  Under MPI replicated dynamics (each rank has full state) this would over-count.  Production single-rank and SCATTER MPI paths are unaffected.  Deferred as MPI edge-case.
 
-Final cycle status: **10 CRITICAL** + **40 HIGH** physics bugs fixed across 83 audit iterations / 107 commits.
+### Iter-85 (2026-05-05 — ITD remap volume non-conservation, deferred)
+
+Audited ``ice/itd.py:linear_remap``.  The iter-48 "approximate conservation tech debt" classification was understated.  Production probes show:
+- Mild growth chain (CICE bounds, 5 categories): -1.68 % volume per call
+- Single overgrown category (h=2.6 in cat 2): -4.14 % per call
+- Deficit case (h=0.05 in cat 1): +3.16 % per call
+
+Over a multi-day integration with one remap per dynamics step (~hourly), this compounds to O(10–100 %) drift — material climatology bias.  Attempted a volume-preserving clamp ``a_new = vol/h_clamp`` fix — but it explodes at the lo (h_clamped → 0) and hi=100 m sentinel edges, creating spurious volume (7873 % drift).  Reverted.  Documented as KNOWN ISSUE: production bug, structural Lipscomb-style fix required.
+
+### Iter-86 (2026-05-05 — ITD xfail regression test)
+
+Added ``test_strict_volume_conservation_under_clamping`` as ``@pytest.mark.xfail(strict=True)`` to track the iter-85 deferred bug.  Currently fails by ~1.68%.  When the proper Lipscomb fix lands, ``strict=True`` flips xfail to a hard failure if it regresses.
+
+### Iter-87 (2026-05-05 — moisture-correction diagnostic helper)
+
+Added ``diagnose_moisture_correction()`` to ``core/conservation.py`` that reports the silent multiplicative correction that ``fix_moisture_hydrostatic`` would apply.  Lets callers track moisture-mass injections.  Two non-vacuous regression tests verify the contract.  Closes the deferred multiplicative-fixer tracking finding.
+
+Final cycle status: **10 CRITICAL** + **41 HIGH** physics bugs fixed across 87 audit iterations / 110 commits.
 
 Remaining open items requiring structural refactoring beyond single-iteration scope:
 - F1/F2/F10: atmosphere ↔ ocean ↔ ice tau sign-convention split; coupler bulk-scheme duplication; ocean prognostic tau wiring.
 - ``_DayRef`` JIT cache (NMC + production model_driver): proper fix requires threading ``day`` as TRACED scalar through ``step()`` API.
 - ``_run_mpas`` line 1224 + ``compiled_segments.py:474`` SegmentForcing: same JIT-cache stale-time class.
-- Multiplicative moisture fixer untracked diagnostic.
 - ``fix_mass_hydrostatic_target`` MPI replicated edge case (missing owned_mask).
-- ``f_veg`` from explicit LAI/PFT cover.
+- ITD ``linear_remap`` volume non-conservation under clamping (Lipscomb structural refactor).
+- ``f_veg`` from explicit LAI/PFT cover (requires LandParameters extension).
 
 ### Cumulative audit-finding status (Physical_Consistency cycle 2026-05-05)
 
 | Severity | Total found | Fixed | Deferred |
 |----------|-------------|-------|----------|
 | CRITICAL | 10 | 10 | 0 |
-| HIGH     | 43 | 40 | 3 (F1, F2, F10) |
+| HIGH     | 47 | 41 | 6 (F1, F2, F10; _DayRef class; ITD remap; fix_mass MPI edge) |
 | MEDIUM   | 33 | 18 | 15 (mostly LOW-impact / structural cleanup) |
 | LOW      | ~30+ | 12 | rest documented in catalog |
 
