@@ -131,6 +131,11 @@ def init_surface_state(
                              name="snow_depth", dims=dims_2d, units="kg/m2"),
             snow_age=Field(data=jnp.zeros(shape, dtype=_sd),
                            name="snow_age", dims=dims_2d, units="s"),
+            # Initialise runoff to zeros so the pytree shape is
+            # invariant across timesteps (slab_land sets it to a
+            # populated array after every step; matches LakeState.Q_freeze
+            # convention).  Audit F13.
+            runoff=jnp.zeros(shape, dtype=_sd),
         )
 
     ice = SeaIceState(
@@ -150,6 +155,11 @@ def init_surface_state(
                     name="T_epi", dims=dims_2d, units="K"),
         T_hypo=Field(data=jnp.full(shape, T_hypo_init, dtype=_sd),
                      name="T_hypo", dims=dims_2d, units="K"),
+        # Initialise Q_freeze to zeros so the pytree shape is
+        # invariant across timesteps (two_layer_lake populates this
+        # at every step).  Audit F14.
+        Q_freeze=Field(data=jnp.zeros(shape, dtype=_sd),
+                       name="Q_freeze", dims=dims_2d, units="W/m2"),
     )
 
     acc = reset_accumulator(shape)
