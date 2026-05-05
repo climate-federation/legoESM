@@ -1390,28 +1390,28 @@ class ModelDriver:
         run_status = "COMPLETED"
         logger.info(f"Starting spectral: {n_steps_total - start_step} steps, {N_DAYS} days")
 
-        # Iter-81 fix: ``_spectral_physics_fn`` reads
-        # ``self._current_day`` from a closure.  JAX caches the JIT-
-        # compiled ``model.step`` by ``physics_fn`` identity, so
+        # KNOWN ISSUE (audit iter-74 / iter-81): ``_spectral_physics_fn``
+        # reads ``self._current_day`` from a closure.  JAX caches the
+        # JIT-compiled ``model.step`` by ``physics_fn`` identity, so
         # mutating ``self._current_day`` between steps does NOT trigger
         # retrace — the day-of-year baked at first trace is used for
         # every step's solar insolation / SST / time-dependent forcing.
-        # Same root cause as the iter-80 NMC fix.  Wrap each step in a
-        # fresh closure to defeat the JIT cache by design.  Cost:
-        # ~1 retrace per step.  Acceptable for runs with diurnal /
-        # seasonal cycle (Held-Suarez has neither so retrace is
-        # negligible).
+        # The fresh-closure-per-step fix from iter-81 was REVERTED
+        # because it created 1 retrace per step → growing JAX
+        # executable cache (memory leak).  The proper fix requires
+        # threading ``day`` as a TRACED scalar argument through
+        # ``model.step()`` so JAX retraces ONCE with day as a dynamic
+        # input.  This is a structural API change deferred to future
+        # work.  Affects production runs with diurnal/seasonal cycle
+        # (gray radiation + time-dependent SST); does NOT affect
+        # Held-Suarez (no diurnal cycle).
 
         t_start = time.time()
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
-            # Fresh closure each step — distinct id() defeats JIT cache
-            _step_idx = step + 1
-            def _step_physics(s, g, sc, _idx=_step_idx,
-                              _base=_spectral_physics_fn):
-                return _base(s, g, sc)
+
             self.state = self.model.step(
-                self.state, DT, physics_fn=_step_physics,
+                self.state, DT, physics_fn=_spectral_physics_fn,
             )
 
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
