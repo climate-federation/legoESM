@@ -115,20 +115,25 @@ def step_lake(
     Q_freeze_hypo = cap_hypo * jnp.maximum(T_freeze - T_trial_hypo, 0.0) / dt
 
     # Convective overturn for freshwater density inversion.
-    # Freshwater density peaks at T_max ≈ 4 °C (277.15 K) — its anomaly
-    # is well-approximated by ρ(T) = ρ_max · (1 − α · (T − T_max)²)
-    # with α ≈ 8.5e-6 K⁻² (Kell 1975; Chen-Millero polynomial fits this
-    # in the 0–10 °C window to better than 5e-3 kg/m³ accuracy).
-    # In autumn/winter the epilimnion can cool below the hypolimnion's
-    # temperature while remaining above 4 °C — or below 4 °C with a
-    # warmer hypolimnion at 5 °C.  In either case ρ_epi > ρ_hypo and
-    # the column is statically unstable.  Without convective overturn
-    # the model freezes the inversion in place; CICE / ALMA / FLake
-    # instantaneously homogenize the two layers.
-    T_max_dens = 277.15  # = constants.T_freeze + 4 K (freshwater max-density)
-    alpha_dens = 8.5e-6  # [K⁻²], freshwater density-anomaly curvature
-    rho_epi = 1.0 - alpha_dens * (T_epi_new - T_max_dens) ** 2
-    rho_hypo = 1.0 - alpha_dens * (T_hypo_new - T_max_dens) ** 2
+    # Freshwater density peaks at T_max ≈ 3.983 °C (277.133 K) — its
+    # local anomaly is well-approximated by
+    #     ρ(T) = ρ_max · (1 − α · (T − T_max)²)
+    # with α ≈ 8.0e-6 K⁻² from the Kell (1975) polynomial.  In autumn
+    # / winter the epilimnion can cool below the hypolimnion's
+    # temperature while both layers remain above T_max — making ρ_epi
+    # > ρ_hypo even though T_epi < T_hypo (T_epi is closer to the
+    # max-density point).  Without convective overturn the model
+    # freezes this static instability in place; CICE / ALMA / FLake
+    # instantaneously homogenize the two layers.  The α constant
+    # cancels in the boolean ρ_epi > ρ_hypo comparison, but using the
+    # canonical Kell value keeps the EOS reusable for future buoyancy
+    # / N² diagnostics.
+    rho_epi = 1.0 - constants.rho_freshwater_curvature * (
+        T_epi_new - constants.T_freshwater_max_density
+    ) ** 2
+    rho_hypo = 1.0 - constants.rho_freshwater_curvature * (
+        T_hypo_new - constants.T_freshwater_max_density
+    ) ** 2
     unstable = rho_epi > rho_hypo
     T_mix = (
         cap_epi * T_epi_new + cap_hypo * T_hypo_new

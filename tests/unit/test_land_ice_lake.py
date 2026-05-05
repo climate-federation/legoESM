@@ -142,15 +142,33 @@ class Test11h_ConvectiveOverturn:
         T_epi_after = float(new_state.T_epi.data.flatten()[0])
         T_hypo_after = float(new_state.T_hypo.data.flatten()[0])
 
-        # After convective adjustment, both layers should be at the
-        # mass-weighted mean (~281.35 K with h_epi=5, h_hypo=20).
-        # Without the fix, |ΔT| stays at ~4 K (one step of small
-        # diffusive flux barely changes it).
+        # (1) After convective adjustment, both layers should be at
+        # nearly the same temperature — without the fix, |ΔT| stays
+        # at ~14 K (10 s of diffusive flux barely changes it).
         assert abs(T_epi_after - T_hypo_after) < 0.1, (
             f"Convective overturn did not homogenize unstable column: "
             f"T_epi={T_epi_after:.3f}, T_hypo={T_hypo_after:.3f}, "
             f"diff={T_epi_after - T_hypo_after:.3f}.  Without the fix, "
-            f"|ΔT| ≳ 3.9 K (the inversion is preserved)."
+            f"|ΔT| ≳ 14 K (the inversion is preserved)."
+        )
+
+        # (2) Enthalpy conservation: the mass-weighted mean must equal
+        # the capacity-weighted mean of the pre-step temperatures
+        # (within tolerance of the small forcing — sw_down=0,
+        # lw_down=0, T_lowest=T_epi → very small surface flux).
+        # cap_epi = ρ·c·h_epi, cap_hypo = ρ·c·h_hypo.  With h_epi=5,
+        # h_hypo=20 (ratio 1:4), expected mean = (1·278.15 + 4·292.15)/5
+        # = 289.35 K.  A broken adjustment that, e.g., uses the
+        # arithmetic mean (285.15 K) would FAIL this check.
+        cap_epi = CONFIG.rho_water * CONFIG.c_water * CONFIG.h_epi
+        cap_hypo = CONFIG.rho_water * CONFIG.c_water * CONFIG.h_hypo
+        T_expected_mean = (cap_epi * 278.15 + cap_hypo * 292.15) / (cap_epi + cap_hypo)
+        assert abs(T_epi_after - T_expected_mean) < 0.5, (
+            f"Convective overturn violates enthalpy conservation: "
+            f"T_epi_after={T_epi_after:.3f} vs expected mass-weighted "
+            f"mean {T_expected_mean:.3f}.  An arithmetic-mean "
+            f"adjustment (285.15 K) or hypolimnion-only adjustment "
+            f"(292.15 K) would FAIL this check."
         )
 
 

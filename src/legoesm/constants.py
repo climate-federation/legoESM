@@ -42,6 +42,9 @@ rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3
 rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
 T_freeze = 273.15               # Freezing point of water [K]
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+# Freshwater EOS local-parabolic fit (Kell 1975 / Jones-Harris)
+T_freshwater_max_density = 277.133  # Max-density temperature [K] (~3.983 C)
+rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT² at T_max
 
 # ==============================================================================
 # Moisture Parameters
