@@ -415,6 +415,10 @@ def step_multilayer_land(
         # Land does not exert stress on the ocean.
         ocean_stress_x=jnp.zeros(ncol),
         ocean_stress_y=jnp.zeros(ncol),
+        # Phase-aware moisture mass flux (evap_rate already accounts
+        # for L_eff switch and water-limit in the columnar Richards
+        # solve).  Audit F3.
+        surface_mass_flux=evap_rate,
     )
 
     return new_state, response, carbon_state_new

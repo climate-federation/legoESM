@@ -117,4 +117,9 @@ def blend_tiles(
             ocean_resp.ocean_stress_y, ice_resp.ocean_stress_y,
             land_resp.ocean_stress_y, lake_resp.ocean_stress_y,
         ),
+        # Phase-aware blended surface mass flux.  Audit F3.
+        surface_mass_flux=_blend(
+            ocean_resp.surface_mass_flux, ice_resp.surface_mass_flux,
+            land_resp.surface_mass_flux, lake_resp.surface_mass_flux,
+        ),
     )

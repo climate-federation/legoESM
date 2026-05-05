@@ -179,6 +179,10 @@ def step_lake(
         # Lake tiles do not exert stress on the ocean.
         ocean_stress_x=jnp.zeros_like(T_epi),
         ocean_stress_y=jnp.zeros_like(T_epi),
+        # Phase-aware moisture mass flux (L_eff already switches to
+        # L_s on frozen lakes, iter-11; ``evap_rate`` was just
+        # computed above for freshwater_flux).
+        surface_mass_flux=evap_rate,
     )
 
     return new_state, response

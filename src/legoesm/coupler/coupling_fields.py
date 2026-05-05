@@ -88,6 +88,15 @@ class TileResponse(NamedTuple):
     # tau_x/tau_y).  Audit F9.
     ocean_stress_x: jax.Array
     ocean_stress_y: jax.Array
+    # Phase-aware surface moisture mass flux [kg/m²/s, positive = up
+    # = drying].  Each tile populates this directly using the
+    # appropriate phase latent heat (L_v for liquid surfaces, L_s
+    # for frozen surfaces, mixed for snow-on-land).  Consumers
+    # should use this field rather than back-deriving evaporation
+    # from ``lhflx / L_v`` — the latter under-counts mass by ~13%
+    # over any tile that sublimates rather than evaporates.
+    # Audit F3.
+    surface_mass_flux: jax.Array
 
 
 class SurfaceToAtm(NamedTuple):
@@ -118,3 +127,6 @@ class SurfaceToAtm(NamedTuple):
     # ``TileResponse.ocean_stress_x / y``.
     ocean_stress_x: jax.Array
     ocean_stress_y: jax.Array
+    # Tile-blended phase-aware surface moisture mass flux
+    # [kg/m²/s, positive up].  See ``TileResponse.surface_mass_flux``.
+    surface_mass_flux: jax.Array

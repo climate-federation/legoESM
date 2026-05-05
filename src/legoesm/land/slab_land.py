@@ -297,6 +297,10 @@ def step_land(
         # Land does not exert stress on the ocean.
         ocean_stress_x=jnp.zeros_like(T_soil),
         ocean_stress_y=jnp.zeros_like(T_soil),
+        # Phase-aware moisture mass flux: lhflx_actual was computed
+        # using L_eff (L_s if snow-covered, L_v otherwise) so dividing
+        # by L_eff recovers the correct mass.
+        surface_mass_flux=lhflx_actual / L_eff,
     )
 
     return new_state, response, carbon_state_new

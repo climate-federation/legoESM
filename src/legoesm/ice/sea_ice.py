@@ -262,6 +262,10 @@ def _step_slab(
         ocean_heat_extraction=ocean_heat_extraction,
         ocean_stress_x=ocean_stress_x,
         ocean_stress_y=ocean_stress_y,
+        # Sea-ice surface moisture exchange is sublimation/deposition
+        # (L_s).  lhflx already used L_s in the bulk-flux call, so
+        # surface_mass_flux = lhflx / L_s recovers the correct mass.
+        surface_mass_flux=lhflx / constants.L_s,
     )
 
     return new_state, response
@@ -607,4 +611,6 @@ def _build_response(
         ocean_heat_extraction=jnp.zeros_like(h),
         ocean_stress_x=jnp.zeros_like(h),
         ocean_stress_y=jnp.zeros_like(h),
+        # Sublimation mass flux from the aggregated ice surface.
+        surface_mass_flux=lhflx / constants.L_s,
     )
