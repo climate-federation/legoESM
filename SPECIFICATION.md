@@ -2559,7 +2559,7 @@ R_earth = 6.371229e6       # Earth mean radius [m]
 # Dry air
 R_d = 287.05               # Gas constant for dry air [J/(kg*K)]
 c_pd = 1004.64             # Specific heat at const pressure [J/(kg*K)]
-c_vd = 717.56              # Specific heat at const volume [J/(kg*K)]
+c_vd = c_pd - R_d          # = 717.59  (enforces R_d = c_pd - c_vd identity, audit iter-39)
 kappa = R_d / c_pd         # Poisson constant (~0.2857)
 p_ref = 1.0e5              # Reference pressure [Pa]
 
