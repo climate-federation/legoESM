@@ -17,7 +17,12 @@ R_earth = 6.371229e6            # Earth mean radius [m]
 # ==============================================================================
 R_d = 287.05                    # Gas constant for dry air [J/(kg*K)]
 c_pd = 1004.64                  # Specific heat at constant pressure [J/(kg*K)]
-c_vd = 717.56                   # Specific heat at constant volume [J/(kg*K)]
+# Enforce the thermodynamic identity ``R_d = c_pd - c_vd`` exactly so
+# the compressible Euler EOS (``pressure_from_eos``: p_0 · (R_d·ρ·θ/p_0)^(c_p/c_v))
+# is consistent.  An earlier hardcoded value of 717.56 violated the
+# identity by 0.03 J/(kg·K), introducing a ~0.01 % bias in p that
+# compounded in tendencies.  Audit cycle iter-39 finding MEDIUM #6.
+c_vd = c_pd - R_d               # Specific heat at constant volume [J/(kg*K)] = 717.59
 kappa = R_d / c_pd              # Poisson constant R_d/c_pd (~0.2857)
 p_ref = 1.0e5                   # Reference pressure [Pa] (1000 hPa)
 
