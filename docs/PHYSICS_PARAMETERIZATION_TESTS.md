@@ -388,6 +388,15 @@ Add seven explicit regression tests in `tests/unit/test_coupler.py` covering all
 - **F5 (MEDIUM)**: same adapter now reads slab-land runoff from `LandState.runoff` (single field) when the multilayer `runoff_surface` / `runoff_subsurface` aren't present — earlier code silently dropped slab runoff.
 - `ocean/freshwater.freshwater_from_coupler` gains an optional `surface_mass_flux` kwarg.  44 freshwater tests pass.
 
+### Iter-21 (2026-05-05 — regression tests for CRITICAL fixes)
+
+Two CRITICAL iter-1 fixes lacked dedicated regression tests; both now have one:
+
+- `tests/land/unit/test_land_water_budget.py::TestRichardsNoPrematureRunoff::test_matric_flux_redistributes_steep_psi_gradient` — verifies that the Richards solver redistributes water from a wet top layer to dry layers below under zero-flux top + bottom BCs.  Without the iter-1 `L psi^m` divergence term the converged Picard solution reduces to gravity-drainage only and no redistribution occurs.
+- `tests/ocean/unit/test_shortwave_penetration.py::test_column_sw_conservation_{deep,shallow}_water` — verifies `sum(dT/dt · rho_0 · c_sw · dz_layer) == sw_down` to bit-precision.  The shallow (H=50 m) case is the regression test for the iter-1 bottom-layer leakage absorption: without the fix, ~6 % of SW would escape the column.
+
+474 tests pass after iter-21 (419 → 463 with iter-20's freshwater suite → 474 with iter-21's 3 new tests).
+
 ### Remaining HIGH-severity items (deferred)
 
 - **F1 / F10**: Atmosphere ↔ ocean ↔ ice tau sign-convention split (latent until prognostic ocean is wired through coupler).
