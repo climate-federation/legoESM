@@ -49,7 +49,7 @@ from legoesm.grids.gaussian import (
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.runtime.backend import get_backend, check_spectral_backend
-from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn, scale_depth
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -953,8 +953,10 @@ def rest_state_spectral_ocean(
         mask = 0.5 * (1.0 - jnp.tanh((lat_deg - land_lat_threshold) / taper_width))
         H_bathy_grid = 1.0 + (H_max - 1.0) * mask
 
-    # Temperature profile (exponential stratification)
-    scale_depth = 1000.0
+    # Temperature profile (exponential stratification).  ``scale_depth``
+    # comes from ``legoesm.ocean.eos`` (the canonical 1000 m e-folding
+    # depth for ocean stratification) rather than a local literal —
+    # iter-66 audit fix.
     T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
     T_grid = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, :],
