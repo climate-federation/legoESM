@@ -524,23 +524,26 @@ def _thermo_single(
     dh_dt = jnp.where(ice_mask, dh_dt_ice, dh_dt_open)
     h_new = jnp.maximum(h + dt * dh_dt, 0.0)
 
-    # Concentration evolution.
-    #   Growth (CICE convention): areal concentration only increases
-    #   from NEW-ICE FORMATION in open-water portions of the cell —
-    #   ``dh_dt_open · (1 − A) / h_new_ice`` with new floes appearing
-    #   at thickness ``h_new_ice``.  Existing-ice basal growth thickens
-    #   the floe (h_new > h) but does NOT spread it laterally.  The
-    #   prior formulation used ``max(dh_dt, 0)`` for both branches,
-    #   letting existing floes grow in area when basal freezing
-    #   dominated — unphysical for any ice-covered cell.
-    #   Melt:   areal concentration decreases as floes shrink in area
-    #   while their thickness stays roughly constant —
-    #   ``dh_dt · A / h_eff`` (sign carries through; dh_dt < 0).
-    dconc_growth = jnp.where(
-        ice_mask,
-        0.0,
-        dh_dt_open * (1.0 - conc) / config.h_new_ice,
-    )
+    # Concentration evolution (CICE / Icepack ``add_new_ice`` convention).
+    #
+    # Growth: areal concentration only increases from NEW-ICE FORMATION
+    # in OPEN-WATER portions of the cell.  The driver is ``dh_dt_open``
+    # (the lead-freezing rate from a destabilizing surface flux), NOT
+    # ``dh_dt_ice`` (vertical growth of existing floes by basal /
+    # surface / sublimation processes).  This holds whether the cell
+    # is fully open water (ice_mask=False) or partially ice-covered
+    # (ice_mask=True with A<1).  In the partial-cover case
+    # ``(1 − A) > 0`` represents the lead fraction that can refreeze;
+    # the prior formulation suppressed this entire pathway by gating on
+    # ``~ice_mask``, which under-grew concentration on every partial-
+    # cover cell with positive surface freezing flux.  The earlier
+    # ``max(dh_dt, 0)`` formulation was wrong in the opposite direction:
+    # it let basal vertical growth spread floes laterally.
+    #
+    # Melt: concentration decreases as floes shrink in area while their
+    # thickness stays roughly constant — ``dh_dt · A / h_eff`` (sign
+    # carries through, dh_dt < 0 in melt).
+    dconc_growth = dh_dt_open * (1.0 - conc) / config.h_new_ice
     dconc_melt = jnp.minimum(dh_dt, 0.0) * conc / h_eff
     conc_new = jnp.clip(conc + dt * (dconc_growth + dconc_melt), 0.0, 1.0)
 

@@ -100,6 +100,63 @@ class TestSlabIceGrad:
         grad = jax.grad(loss)(self.ocean_sst)
         assert_gradient_ok(grad, "Slab ice h_ice w.r.t. ocean_sst")
 
+    def test_partial_cover_lead_freezing_grows_concentration(self):
+        """A partially-covered cell (h > 0, A < 1) with destabilizing
+        surface flux must refreeze the open-water lead and INCREASE
+        concentration via the CICE/Icepack ``add_new_ice`` pathway.
+
+        Why non-vacuous: in iter-48's first attempt I gated dconc_growth
+        on ``~ice_mask`` (i.e., suppressed lead refreezing on any
+        partially-covered cell).  This test would fail under that
+        formulation because ΔA == 0 despite positive lead freezing.
+        It also fails the ORIGINAL buggy code's ``max(dh_dt, 0)``
+        formulation because the basal growth of existing ice produces
+        SPURIOUS ΔA.  This test only passes when lead refreezing is
+        the SOLE driver of concentration growth — exactly the CICE
+        convention.
+        """
+        # Partially-covered cell with strong surface cooling so the
+        # lead freezing rate is large.  Make ice cold (basal freezing
+        # is also active) so that the buggy ``max(dh_dt, 0)`` formula
+        # would over-grow concentration.
+        ice_state = self.state._replace(
+            h_ice=self.state.h_ice.replace(
+                data=jnp.full_like(self.state.h_ice.data, 1.0)
+            ),
+            T_ice=self.state.T_ice.replace(
+                data=jnp.full_like(self.state.T_ice.data, 250.0)
+            ),
+            concentration=self.state.concentration.replace(
+                data=jnp.full_like(self.state.concentration.data, 0.5)
+            ),
+        )
+        # Set forcing for very cold air (drives strong surface cooling
+        # → Q_sfc < 0 → freeze_flux_open > 0 → lead refreezing).
+        cold_forcing = self.forcing._replace(
+            T_lowest=jnp.full_like(self.forcing.T_lowest, 230.0),
+            sw_down=jnp.zeros_like(self.forcing.sw_down),  # polar night
+            lw_down=jnp.full_like(self.forcing.lw_down, 150.0),  # cold sky
+        )
+        ocean_sst = jnp.full_like(self.ocean_sst, 271.35)
+        out, _ = self.step_fn(
+            ice_state, cold_forcing, ocean_sst,
+            self.ocean_u, self.ocean_v,
+            self.config, U_min=1.0, dt=self.dt,
+        )
+
+        conc_change = float(jnp.max(
+            out.concentration.data - ice_state.concentration.data
+        ))
+        # Lead refreezing must INCREASE concentration on a partial-
+        # cover cell.  Under the over-restrictive iter-48-first-pass
+        # gate on ~ice_mask, this would be ΔA == 0 (FAIL).
+        assert conc_change > 1e-6, (
+            f"Concentration did not grow on partial-cover cell with "
+            f"lead refreezing (ΔA = {conc_change:.3e}).  Per CICE / "
+            f"Icepack add_new_ice convention, lead refreezing must "
+            f"increase A even when ice_mask = True."
+        )
+
     def test_existing_ice_basal_growth_does_not_spread_laterally(self):
         """Basal growth of EXISTING ice (ice_mask=True) should thicken
         the floe (h_new > h) without changing concentration.  CICE
