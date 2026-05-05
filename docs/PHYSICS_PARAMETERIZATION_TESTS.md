@@ -407,10 +407,12 @@ The deep audit of `atmosphere/physics/_shared.py` found two new fixes:
 Regression tests:
 - `test_mc_sign_matches_dycore_tracer_tendency`: asserts `compute_moisture_convergence` returns bit-exactly the same value as `fv_flux_divergence_3d` (both = `dq/dt = -div(q·V)` = MC).  Catches the F1 bug; the previous test was vacuous.
 
-**Integration verification**:
+**Integration verification (iter-35/36)**:
 - Held-Suarez spectral-PE stability validation passes (6.62 s) with iter-35 + iter-36 fixes applied.
 - 210 atmosphere physics unit tests pass (microphysics + convection + GWD + turbulence).
 - 63 / 64 combined-physics + spectral-PE tests pass; 1 fail is pre-existing dycore `_lnps_pad` bug unrelated to physics.
+
+**Iter-37 wider integration verification (post-MC-sign-flip)**: 175 tests pass + 2 skipped across `test_convection.py + test_convection_latlon_mpas.py + test_microphysics.py + test_moisture_convergence.py + Held-Suarez slow validation`.  The MC sign flip did NOT cause regressions in Tiedtke / Bechtold / mass-flux convection schemes, microphysics, or the Held-Suarez integration.  This confirms the fix is operationally correct: convection responds to MOISTURE CONVERGENCE (positive when air converges) as physically intended, not to its negation.
 
 ### Iter-22 (2026-05-05 — stomata vapor pressure formula)
 
