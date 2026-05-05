@@ -298,3 +298,98 @@ class TestSSPRK54:
         # x32 accumulates noticeably more roundoff over 1000 steps.
         tol = 1.0e-6 if _IS_X64 else 1.0e-4
         assert abs(E_final - E0) / E0 < tol
+
+
+class TestRobertAsselinWilliamsFilter:
+    """Tests for the Robert-Asselin-Williams (RAW) leapfrog filter
+    (semi_implicit.py:robert_asselin_filter).
+
+    Iter-54 fixed a sign-error bug: the prior implementation had both
+    filter increments with the SAME sign, producing a slow drift in
+    the three-time-level mean.  Williams (2009) eqs. 6-7 require
+    OPPOSITE signs on X^n and X^{n+1} so their sum is preserved at
+    α = 0.5.
+    """
+
+    def test_three_time_level_sum_conserved_at_alpha_half(self):
+        """At α = 0.5 the RAW filter must preserve the three-time-level
+        mean exactly: sum(X^{n-1}, X^n_filtered, X^{n+1}_filtered)
+        = sum(X^{n-1}, X^n, X^{n+1}).
+
+        Why non-vacuous: the prior buggy formulation
+            X^n_filtered    = X^n     + (1 − α)·d_n
+            X^{n+1}_filtered = X^{n+1} + α·d_n
+        produced sum drift of +d_n every step.  This test asserts the
+        sum is preserved — falsifies the buggy version by construction.
+        """
+        from legoesm.timestepping.semi_implicit import robert_asselin_filter
+
+        # Pure 2·dt computational mode — exactly what RAW is designed to damp.
+        state_nm1 = jnp.array([1.0, 2.0])
+        state_n = jnp.array([-1.0, -2.0])
+        state_np1 = jnp.array([1.0, 2.0])
+
+        gamma = 0.05
+        alpha = 0.5
+        sn_f, snp1_f = robert_asselin_filter(
+            state_nm1, state_n, state_np1, gamma, alpha,
+        )
+
+        sum_before = state_nm1 + state_n + state_np1
+        sum_after = state_nm1 + sn_f + snp1_f
+        # At α = 0.5 the two filter increments cancel — sum preserved.
+        assert jnp.allclose(sum_before, sum_after, atol=1e-12), (
+            f"Three-time-level sum changed by "
+            f"{float(jnp.max(jnp.abs(sum_after - sum_before))):.3e} "
+            f"at α=0.5; the prior buggy formulation produced a drift "
+            f"equal to d_n = γ·(X^{{n-1}} − 2·X^n + X^{{n+1}}) per step."
+        )
+
+    def test_damps_2dt_computational_mode(self):
+        """The filter must damp a pure 2·dt mode (X^n alternating sign).
+
+        Pure 2dt mode: X^{n-1}=A, X^n=-A, X^{n+1}=A
+            d_n = (γ/2)·(A − 2·(-A) + A) = (γ/2)·4A = 2γA
+            X^n_filtered  = -A + α·2γA  = -A·(1 − 2γα)
+            X^{n+1}_filt  = A − (1−α)·2γA = A·(1 − 2γ(1−α))
+
+        At α = 0.5: |X^n_filtered / X^n| = 1 − γ.  The 2·dt mode is
+        damped by exactly γ per step.
+        """
+        from legoesm.timestepping.semi_implicit import robert_asselin_filter
+
+        A = 1.0
+        state_nm1 = jnp.array([A])
+        state_n = jnp.array([-A])
+        state_np1 = jnp.array([A])
+
+        gamma = 0.05
+        sn_f, _ = robert_asselin_filter(
+            state_nm1, state_n, state_np1, gamma, alpha=0.5,
+        )
+        # |X^n_filtered| should be (1 - gamma) · |X^n|
+        damping = float(jnp.abs(sn_f[0]) / A)
+        expected = 1.0 - gamma
+        assert abs(damping - expected) < 1e-10, (
+            f"2·dt computational mode damping is {damping:.6f}, "
+            f"expected {expected:.6f} (= 1 − γ at α=0.5)."
+        )
+
+    def test_alpha_one_recovers_original_robert_asselin(self):
+        """At α = 1 the filter recovers the original Robert-Asselin
+        (only X^n is modified; X^{n+1} is unchanged)."""
+        from legoesm.timestepping.semi_implicit import robert_asselin_filter
+
+        state_nm1 = jnp.array([0.5, 1.0])
+        state_n = jnp.array([0.6, 1.5])
+        state_np1 = jnp.array([0.7, 2.5])
+        gamma = 0.1
+
+        sn_f, snp1_f = robert_asselin_filter(
+            state_nm1, state_n, state_np1, gamma, alpha=1.0,
+        )
+        # X^{n+1} unchanged at α=1 (1 - α = 0 multiplies d_n).
+        assert jnp.allclose(snp1_f, state_np1, atol=1e-12), (
+            "At α=1 (original Robert-Asselin), X^{n+1} must be "
+            "unchanged."
+        )

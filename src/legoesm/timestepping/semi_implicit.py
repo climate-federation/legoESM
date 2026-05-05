@@ -475,17 +475,27 @@ def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.5):
     """Robert-Asselin-Williams (RAW) time filter for leapfrog.
 
     The standard Robert-Asselin filter damps the computational mode
-    (2*dt oscillation) that leapfrog permits, but introduces a first-order
-    phase error.  The Williams (2009) modification splits the correction
-    between the current and next time levels, restoring second-order
-    accuracy while preserving the damping:
+    (2·dt oscillation) that leapfrog permits, but introduces a
+    first-order phase error.  The Williams (2009) modification splits
+    the correction between the current and next time levels with
+    OPPOSITE signs, restoring second-order accuracy while preserving
+    the damping AND conserving the three-time-level mean at α = 0.5:
 
-        d_n = (gamma/2) * (X^{n-1} - 2*X^n + X^{n+1})
-        X^n_filtered   = X^n   + (1 - alpha) * d_n
-        X^{n+1}_filtered = X^{n+1} + alpha * d_n
+        d_n = (γ/2) · (X^{n-1} − 2·X^n + X^{n+1})
+        X^n_filtered    = X^n    + α     · d_n
+        X^{n+1}_filtered = X^{n+1} − (1 − α) · d_n
 
-    With alpha=0.5 this is the RAW filter; alpha=0 recovers the original
-    Robert-Asselin filter.
+    With α = 0.5 the corrections cancel in the n + (n+1) sum, giving
+    the "neutral" property of RAW.  With α = 1 only X^n is modified
+    and the original Robert-Asselin filter is recovered.
+
+    NOTE — iter-54 fix: a prior implementation had both filter
+    increments with the SAME sign and with α/(1−α) swapped:
+        X^n_filtered    = X^n + (1 − α)·d_n
+        X^{n+1}_filtered = X^{n+1} + α·d_n
+    This does NOT preserve the three-time-level sum (sum changes by
+    +d_n every step) and produces a slow climate-relevant drift
+    toward the centered value at γ = 0.05.
 
     Parameters
     ----------
@@ -499,7 +509,8 @@ def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.5):
         Filter coefficient (typically 0.05-0.1).
     alpha : float
         Williams parameter. 0.5 = RAW (default, recommended for long
-        climate runs). 0.0 = original Robert-Asselin.
+        climate runs). 1.0 = original Robert-Asselin (no modification
+        on the n+1 level).
 
     Returns
     -------
@@ -513,7 +524,7 @@ def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.5):
     - Asselin, R. (1972). Frequency filter for time integrations.
       Mon. Wea. Rev., 100, 487-490.
     - Williams, P. D. (2009). A proposed modification to the Robert-Asselin
-      time filter. Mon. Wea. Rev., 137, 2538-2546.
+      time filter. Mon. Wea. Rev., 137, 2538-2546 (eqs. 6-7).
     """
     coeff = gamma / 2.0
     d_n = jax.tree.map(
@@ -521,11 +532,11 @@ def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.5):
         state_nm1, state_n, state_np1,
     )
     state_n_filtered = jax.tree.map(
-        lambda xn, dn: xn + (1.0 - alpha) * dn,
+        lambda xn, dn: xn + alpha * dn,
         state_n, d_n,
     )
     state_np1_filtered = jax.tree.map(
-        lambda xp, dn: xp + alpha * dn,
+        lambda xp, dn: xp - (1.0 - alpha) * dn,
         state_np1, d_n,
     )
     return state_n_filtered, state_np1_filtered
