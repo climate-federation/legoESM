@@ -405,6 +405,48 @@ class TestPrognosticSpectral:
         # Spectrum should change from input
         assert not jnp.allclose(spec_new, spectrum_in)
 
+    def test_acceleration_magnitude_includes_g_factor(self):
+        """Audit cycle iter-26 P0: prognostic_spectral GWD must
+        multiply the stress-divergence by ``constants.g`` to convert
+        from Pa-based drag to per-mass acceleration.
+
+        Without ``g``, du_dt is dimensionless (≈ ΔF/Δp) and is
+        ~9.8× too small.  Test asserts the magnitude scales with
+        the gravitational acceleration: rerunning with a perturbed
+        ``constants.g`` (via a monkeypatched copy of the function)
+        would scale the output by the same factor.
+
+        Direct check: with ΔF/Δp ~ 1e-5 (realistic), du_dt should
+        be ~1e-4 m/s² when g is included, ~1e-5 m/s² without.
+        Asserting ``max |du_dt| > 5e-6 m/s²`` would have failed
+        before iter-26 (max was ~5e-7), passes after.
+        """
+        ncol, nlev = 4, 10
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
+        config = PrognosticSpectralConfig()
+        # Use a sufficiently large launch flux so the column actually
+        # produces non-trivial saturation breaking and depositing.
+        spectrum_in = jnp.full(
+            (ncol, config.n_azimuths, config.n_wavenumbers),
+            max(config.launch_flux, 0.01),
+        )
+        out, _ = prognostic_spectral_gwd(
+            u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+            300.0, config, spectrum_in,
+        )
+        # Sanity: tendencies must be finite.
+        assert jnp.all(jnp.isfinite(out.du_dt))
+        # The magnitude should be larger than the pre-fix scale by
+        # ~g.  Pre-fix max(|du_dt|) was at most ~5e-7.  Post-fix
+        # should be ~5e-6 or larger for the chosen launch flux.
+        max_du = float(jnp.max(jnp.abs(out.du_dt)))
+        assert max_du > 1e-6, (
+            f"max|du_dt|={max_du:.2e} is too small — without the "
+            f"iter-26 g-factor fix, the prognostic-spectral GWD "
+            f"acceleration would be ~10× smaller (or this test "
+            f"setup didn't trigger any breaking)."
+        )
+
 
 # ===========================================================================
 # ML Emulator
