@@ -3080,11 +3080,25 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
 
-    _write_results_txt(output_dir, {
+    # iter-32 codex LOW: record effective GHG concentrations in
+    # ``results.txt`` for reproducibility when RRTMGP is active.
+    rows = {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "radiation": radiation, "days": days, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s",
+    }
+    if radiation == "rrtmgp":
+        co2 = _RUNTIME_RRTMGP_OVERRIDES.get("co2_ppmv")
+        ch4 = _RUNTIME_RRTMGP_OVERRIDES.get("ch4_ppbv")
+        n2o = _RUNTIME_RRTMGP_OVERRIDES.get("n2o_ppbv")
+        if co2 is not None:
+            rows["co2_ppmv"] = co2
+        if ch4 is not None:
+            rows["ch4_ppbv"] = ch4
+        if n2o is not None:
+            rows["n2o_ppbv"] = n2o
+    _write_results_txt(output_dir, rows)
     _save_case_diagnostics(
         output_dir,
         f"AMIP {radiation} {tc.resolution} hybrid",
@@ -4695,20 +4709,32 @@ def _create_atmosphere_comparison_summary(
         for g in grids_sorted:
             md = grid_results[g]["metadata"]
             wt_str = md.get("wall_time", "")
-            days_str = md.get("days", "")
-            if not wt_str or not days_str:
+            # iter-32 codex MEDIUM: ``run_dcmip_transport`` writes
+            # ``period_days`` and ``run_nonhydrostatic`` writes
+            # ``duration_hours`` instead of ``days``.  Try all 3
+            # so the GPU efficiency table fires on those cases too.
+            days_str = md.get("days") or md.get("period_days") or ""
+            duration_hours_str = md.get("duration_hours", "")
+            if not wt_str or (not days_str and not duration_hours_str):
                 continue
             try:
                 wt = float(wt_str.rstrip("s").strip())
-                d = float(days_str)
+                if days_str:
+                    d = float(days_str)
+                else:
+                    d = float(duration_hours_str) / 24.0
             except ValueError:
                 continue
-            if d <= 0:
+            # iter-32 codex caveat: skip non-finite or non-positive d.
+            import math as _m
+            if d <= 0 or not _m.isfinite(d) or not _m.isfinite(wt):
                 continue
             wall_per_day.append((g, wt / d))
         if wall_per_day:
             wall_per_day.sort(key=lambda kv: kv[1])
-            fastest = wall_per_day[0][1]
+            # iter-32 codex LOW: removed unused ``fastest`` local
+            # (Ruff F841 lint failure).  ``slowest`` is the value
+            # we actually use for the speedup denominator.
             fh.write(
                 "\nGPU / MPI efficiency — wall-time per simulated day "
                 "(faster = better):\n"
@@ -4985,13 +5011,19 @@ def main():
     if args.days is not None and args.days <= 0:
         parser.error("--days must be positive")
 
-    # iter-31: thread per-run GHG overrides through to _make_rrtmgp_physics.
-    if args.co2_ppmv is not None and args.co2_ppmv <= 0:
-        parser.error("--co2-ppmv must be positive")
-    if args.ch4_ppbv is not None and args.ch4_ppbv <= 0:
-        parser.error("--ch4-ppbv must be positive")
-    if args.n2o_ppbv is not None and args.n2o_ppbv <= 0:
-        parser.error("--n2o-ppbv must be positive")
+    # iter-31: thread per-run GHG overrides through to
+    # _make_rrtmgp_physics.  iter-32 codex MEDIUM: zero is a valid
+    # sensitivity-test value (RRTMGP gas_optics has explicit
+    # zero-abundance fallback at gas_optics.py:172-179) — only
+    # reject NEGATIVE / non-finite values.
+    import math as _math
+    for fname, fval in [
+        ("--co2-ppmv", args.co2_ppmv),
+        ("--ch4-ppbv", args.ch4_ppbv),
+        ("--n2o-ppbv", args.n2o_ppbv),
+    ]:
+        if fval is not None and (fval < 0 or not _math.isfinite(fval)):
+            parser.error(f"{fname} must be a non-negative finite number")
     _RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = args.co2_ppmv
     _RUNTIME_RRTMGP_OVERRIDES["ch4_ppbv"] = args.ch4_ppbv
     _RUNTIME_RRTMGP_OVERRIDES["n2o_ppbv"] = args.n2o_ppbv

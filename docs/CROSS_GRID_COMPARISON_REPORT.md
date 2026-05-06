@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-23 snapshot)
+**Branch**: `simulation_full_check` (iter-32 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..22 findings.  It is the user-facing
+This report consolidates iter-1..32 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,9 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (35 / 35 pass in
-`tests/test_atmosphere_cross_grid_plots.py` + `test_ocean_cross_grid_plots.py`).
+Every helper has a corresponding unit test (39 / 39 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (33) +
+`test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
 * `--no-cross-grid-plots` — skip the post-run comparison block.
