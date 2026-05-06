@@ -730,3 +730,74 @@ class TestSharedConventions:
             assert re.search(r"\$\{1:\?usage", text), (
                 f"{path.name} missing ``${{1:?usage:...}}`` guard"
             )
+
+
+class TestWrappersPropagateAnyFailedToExitCode:
+    """iter-103: pre-iter-103, all 3 cross-grid wrappers
+    detected per-grid failures via ``ANY_FAILED=1`` and printed
+    a NOTE about it, but exited with code 0 unconditionally.
+    CI/automation calling
+    ``bash run_amip_cross_grid.sh ... && publish_results``
+    would proceed to ``publish_results`` even when all grids
+    BLEW UP.
+
+    iter-103 added ``exit "$ANY_FAILED"`` at the end of each
+    wrapper so:
+    * 0 if all grids succeeded → caller proceeds.
+    * 1 if any grid had no usable output → caller halts.
+
+    Comparison plots are still generated regardless (so
+    successful grids contribute debugging output even on
+    partial failure), but the final exit code reflects
+    overall status.
+
+    Verified end-to-end: invoking
+    ``bash run_rce_cross_grid.sh /tmp/X 2 1`` (which exercises
+    the iter-73 voronoi RCE BLOWUP) now correctly exits 1.
+    Pre-iter-103 it exited 0.
+    """
+
+    @pytest.fixture(scope="class")
+    def wrappers(self):
+        return [
+            _SCRIPTS_DIR / "run_rce_cross_grid.sh",
+            _SCRIPTS_DIR / "run_omip_cross_grid.sh",
+            _SCRIPTS_DIR / "run_amip_cross_grid.sh",
+        ]
+
+    def test_all_wrappers_exit_with_any_failed(self, wrappers):
+        for path in wrappers:
+            text = _strip_comments(path.read_text())
+            assert 'exit "$ANY_FAILED"' in text, (
+                f"iter-103: {path.name} must end with "
+                f"``exit \"$ANY_FAILED\"`` so CI can detect "
+                f"per-grid failures via ``$?``."
+            )
+
+    def test_exit_is_after_comparison_plot_step(self, wrappers):
+        """The exit must come AFTER the comparison plot step
+        so partial-failure runs still produce diagnostic
+        output for the grids that succeeded.
+        """
+        for path in wrappers:
+            text = path.read_text()
+            # Find the index of the comparison-plot Python
+            # invocation and the index of the exit line; exit
+            # must be later.
+            plot_idx = text.find("--cross-grid-plots-only")
+            if plot_idx < 0:
+                plot_idx = text.find("--replot")
+            exit_idx = text.find('exit "$ANY_FAILED"')
+            assert plot_idx >= 0, (
+                f"iter-103 prerequisite: {path.name} must invoke "
+                f"a comparison-plot step "
+                f"(--cross-grid-plots-only or --replot)."
+            )
+            assert exit_idx > plot_idx, (
+                f"iter-103: in {path.name}, "
+                f"``exit \"$ANY_FAILED\"`` must come AFTER the "
+                f"comparison-plot step so partial-failure runs "
+                f"still get diagnostic plots for the successful "
+                f"grids.  Found exit at index {exit_idx}, plot "
+                f"at {plot_idx}."
+            )

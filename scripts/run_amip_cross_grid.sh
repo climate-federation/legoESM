@@ -164,3 +164,8 @@ if [ "$ANY_FAILED" = "1" ]; then
 fi
 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
     --cross-grid-plots-only --test amip --output "$OUTPUT"
+
+# iter-103: propagate ANY_FAILED to the wrapper's own exit
+# code so CI/automation can detect per-grid failures via
+# ``$?``.  See ``run_omip_cross_grid.sh`` for the rationale.
+exit "$ANY_FAILED"

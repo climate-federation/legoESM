@@ -98,3 +98,12 @@ if [ "$ANY_FAILED" = "1" ]; then
 fi
 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
     --cross-grid-plots-only --test rce --output "$OUTPUT"
+
+# iter-103: propagate ANY_FAILED to the wrapper's own exit
+# code so CI/automation can detect per-grid failures via
+# ``$?``.  This pairs with iter-101 which fixed
+# ``run_rce.py`` to exit 1 on BLOWUP — the per-grid exit code
+# is now reliably caught by the ``|| { ANY_FAILED=1; }``
+# guard above.  See ``run_omip_cross_grid.sh`` for the
+# rationale.
+exit "$ANY_FAILED"

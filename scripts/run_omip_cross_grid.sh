@@ -82,3 +82,13 @@ fi
 # wrapper produces only per-grid plots.
 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
     --replot --only omip --output "$OUTPUT"
+
+# iter-103: propagate ANY_FAILED to the wrapper's own exit
+# code so CI/automation that calls
+# ``bash run_omip_cross_grid.sh ... && next-step`` correctly
+# halts on per-grid BLOWUP.  Pre-iter-103 the wrapper exited
+# 0 unconditionally, masking failures from the caller (the
+# user-facing per-grid printout still showed FAIL, but
+# ``$?`` was 0).  Comparison plots are still generated above
+# so successful grids contribute to debugging output.
+exit "$ANY_FAILED"
