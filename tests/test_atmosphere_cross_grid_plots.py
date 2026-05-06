@@ -1951,97 +1951,251 @@ class TestHeldSuarezDissipationImbalance:
                 f"marked done."
             )
 
-    def test_cube_branch_wires_helpers_with_local_n(self):
-        """iter-59 codex MEDIUM: pin that the cube HS branch
-        actually invokes ``_hyperdiff_cube(n)``,
-        ``_div_damp_cube(n)``, ``_laplacian_visc_cube(n)`` with
-        the local ``n`` derived from ``tc.resolution``, AND
-        passes those values to the corresponding config fields.
-
-        The iter-58 helper-scaling tests pinned the helpers
-        themselves but did NOT prove the HS branch actually
-        wires them.  A refactor that drops the helper and
-        replaces it with a hardcoded constant would slip
-        through.
+    def _find_branch_body(self, branch_grid: str):
+        """Return the AST nodes that make up the branch body for
+        ``tc.grid_type == <branch_grid>`` inside ``run_held_suarez``.
+        Used by iter-60 to walk the actual config-call AST.
         """
         import ast
         import inspect
         src = inspect.getsource(M.run_held_suarez)
         tree = ast.parse(src)
+        # Find run_held_suarez.
+        run_hs = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "run_held_suarez":
+                run_hs = node
+                break
+        assert run_hs is not None
 
-        # Find the cube branch as before.
-        cube_branch_body = None
-        for func_def in (n for n in ast.walk(tree)
-                         if isinstance(n, ast.FunctionDef)
-                         and n.name == "run_held_suarez"):
-            for node in ast.walk(func_def):
-                if (
-                    isinstance(node, ast.If)
-                    and isinstance(node.test, ast.Compare)
-                    and isinstance(node.test.left, ast.Attribute)
-                    and node.test.left.attr == "grid_type"
-                    and len(node.test.comparators) == 1
-                    and isinstance(node.test.comparators[0], ast.Constant)
-                    and node.test.comparators[0].value == "cubed_sphere"
-                ):
-                    cube_branch_body = node.body
-                    break
-        assert cube_branch_body is not None
-        cube_src = "\n".join(ast.unparse(s) for s in cube_branch_body)
+        # Walk if-elif chain.
+        def _matches(test, value):
+            return (
+                isinstance(test, ast.Compare)
+                and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.left, ast.Attribute)
+                and test.left.attr == "grid_type"
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == value
+            )
 
-        # Each helper must be invoked with ``n`` (local var) — pin
-        # against any future hardcode like ``_hyperdiff_cube(48)``.
-        assert "_hyperdiff_cube(n)" in cube_src, (
-            "iter-59 codex MEDIUM: cube HS branch must call "
-            "``_hyperdiff_cube(n)`` (uses the per-resolution n)"
+        def _walk(node):
+            if not isinstance(node, ast.If):
+                return None
+            if _matches(node.test, branch_grid):
+                return node.body
+            for sub in node.orelse:
+                hit = _walk(sub)
+                if hit is not None:
+                    return hit
+            return None
+
+        for node in run_hs.body:
+            hit = _walk(node)
+            if hit is not None:
+                return hit
+        raise AssertionError(
+            f"could not locate ``tc.grid_type == {branch_grid!r}`` branch"
         )
-        assert "_div_damp_cube(n)" in cube_src
-        assert "_laplacian_visc_cube(n)" in cube_src
 
-    def test_hyperdiff_ps_coeff_uses_same_helper_as_hyperdiff(self):
-        """iter-59 codex MEDIUM: the iter-58 tests numerically
-        pinned ``_hyperdiff_cube`` scaling, but only name-checked
-        ``hyperdiff_ps_coeff``.  Pin that the cube HS branch
-        passes the SAME ``hd`` value to both.  A divergence between
-        atmospheric and surface-pressure biharmonic would shift
-        the cube-cold pattern in a hard-to-attribute way.
+    def _resolve_local_assignment(self, body: list, target_name: str):
+        """Find ``<target_name> = <expr>`` inside the AST body and
+        return the right-hand-side AST node (last assignment wins).
+        ``None`` if not found.
         """
         import ast
-        import inspect
-        src = inspect.getsource(M.run_held_suarez)
-        tree = ast.parse(src)
-        # Find the cube branch.
-        for func_def in (n for n in ast.walk(tree)
-                         if isinstance(n, ast.FunctionDef)
-                         and n.name == "run_held_suarez"):
-            for node in ast.walk(func_def):
+        rhs = None
+        for stmt in body:
+            for node in ast.walk(stmt):
                 if (
-                    isinstance(node, ast.If)
-                    and isinstance(node.test, ast.Compare)
-                    and isinstance(node.test.left, ast.Attribute)
-                    and node.test.left.attr == "grid_type"
-                    and len(node.test.comparators) == 1
-                    and isinstance(node.test.comparators[0], ast.Constant)
-                    and node.test.comparators[0].value == "cubed_sphere"
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == target_name
                 ):
-                    cube_branch = node.body
-                    break
-        cube_src = "\n".join(ast.unparse(s) for s in cube_branch)
+                    rhs = node.value
+        return rhs
 
-        # The cube branch idiom is:
-        #   hd = _hyperdiff_cube(n)
-        #   ...
-        #   PrimitiveEquationConfig(
-        #       hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd, ...)
-        assert "hyperdiff_coeff=hd" in cube_src, (
-            "cube HS branch should pass ``hyperdiff_coeff=hd``"
+    def _is_call_to(self, node, callee_name: str, arg_name: str | None = None):
+        """True iff ``node`` is ``callee_name(arg_name)`` or
+        ``callee_name(arg_name, ...)``.
+        """
+        import ast
+        if not isinstance(node, ast.Call):
+            return False
+        if not (isinstance(node.func, ast.Name) and node.func.id == callee_name):
+            return False
+        if arg_name is None:
+            return True
+        if not node.args:
+            return False
+        first = node.args[0]
+        return isinstance(first, ast.Name) and first.id == arg_name
+
+    def _find_config_call(self, body: list, ctor_name: str):
+        """Find a ``ConfigCtor(...)`` call inside the branch body and
+        return the ``ast.Call`` node.
+        """
+        import ast
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == ctor_name
+                ):
+                    return node
+        return None
+
+    def test_cube_branch_config_wires_helpers_via_local_aliases(self):
+        """iter-60 codex HIGH/MEDIUM: walk the AST to verify the
+        cube branch actually wires the helpers through the
+        ``PrimitiveEquationConfig(...)`` call:
+
+          n   = int(tc.resolution[1:])      # from tc
+          hd  = _hyperdiff_cube(n)
+          dd  = _div_damp_cube(n)
+          ah  = _laplacian_visc_cube(n)
+          config = PrimitiveEquationConfig(
+              hyperdiff_coeff=hd,
+              hyperdiff_ps_coeff=hd,
+              div_damp_coeff=dd,
+              A_h=ah,
+              ...)
+
+        Every step in this chain must be checked at the AST
+        level.  Substring matches let dead code or dataflow
+        breaks pass.
+        """
+        import ast
+        body = self._find_branch_body("cubed_sphere")
+
+        # Each local assignment has the right RHS.
+        hd_rhs = self._resolve_local_assignment(body, "hd")
+        dd_rhs = self._resolve_local_assignment(body, "dd")
+        ah_rhs = self._resolve_local_assignment(body, "ah")
+        n_rhs = self._resolve_local_assignment(body, "n")
+
+        assert hd_rhs is not None and self._is_call_to(hd_rhs, "_hyperdiff_cube", "n"), (
+            "iter-60 codex MEDIUM: ``hd = _hyperdiff_cube(n)`` "
+            "expected in cube HS branch"
         )
-        assert "hyperdiff_ps_coeff=hd" in cube_src, (
-            "cube HS branch should pass ``hyperdiff_ps_coeff=hd``"
-            " — the iter-57 audit assumes the same biharmonic "
-            "coefficient is shared between atmospheric and "
-            "surface-pressure operators"
+        assert dd_rhs is not None and self._is_call_to(dd_rhs, "_div_damp_cube", "n"), (
+            "iter-60 codex MEDIUM: ``dd = _div_damp_cube(n)`` "
+            "expected in cube HS branch"
         )
+        assert ah_rhs is not None and self._is_call_to(ah_rhs, "_laplacian_visc_cube", "n"), (
+            "iter-60 codex MEDIUM: ``ah = _laplacian_visc_cube(n)`` "
+            "expected in cube HS branch"
+        )
+        # ``n = int(tc.resolution[1:])`` is the canonical idiom for
+        # parsing the cube resolution string (e.g. ``C48`` → 48).
+        # Pin that ``n`` is derived from ``tc.resolution`` rather
+        # than hardcoded.
+        assert n_rhs is not None, "``n = ...`` assignment missing"
+        n_src = ast.unparse(n_rhs)
+        assert "tc.resolution" in n_src, (
+            f"iter-60 codex MEDIUM: ``n`` must be derived from "
+            f"``tc.resolution``, got ``n = {n_src!r}``"
+        )
+
+        # PrimitiveEquationConfig(...) call must use the local
+        # aliases.  Find the call.
+        ctor_call = self._find_config_call(body, "PrimitiveEquationConfig")
+        assert ctor_call is not None, (
+            "iter-60 codex HIGH: cube HS branch must invoke "
+            "``PrimitiveEquationConfig(...)``"
+        )
+        kwargs = {kw.arg: kw.value for kw in ctor_call.keywords}
+        for field, expected_alias in (
+            ("hyperdiff_coeff", "hd"),
+            ("hyperdiff_ps_coeff", "hd"),
+            ("div_damp_coeff", "dd"),
+            ("A_h", "ah"),
+        ):
+            assert field in kwargs, (
+                f"iter-60 codex HIGH: cube HS branch's "
+                f"``PrimitiveEquationConfig`` call is missing "
+                f"keyword ``{field}``"
+            )
+            value = kwargs[field]
+            assert (
+                isinstance(value, ast.Name)
+                and value.id == expected_alias
+            ), (
+                f"iter-60 codex HIGH: ``PrimitiveEquationConfig({field}=...)`` "
+                f"must reference local alias ``{expected_alias}``, "
+                f"got ``{ast.unparse(value)}``"
+            )
+
+    def test_latlon_branch_config_wires_A_h_via_local_alias(self):
+        """iter-60 codex HIGH: pin that the latlon HS branch
+        actually instantiates
+        ``CGridLatLonPrimitiveEquationConfig(A_h=ah, ...)`` with
+        the ``ah`` local — not just that "A_h" appears as a
+        substring somewhere.  An unused local would have slipped
+        through the iter-59 substring check.
+        """
+        import ast
+        body = self._find_branch_body("latlon")
+        # Look at ALL ``ah = ...`` assignments in the branch.  The
+        # latlon HS path has ``ah = _laplacian_visc_latlon(n_lat)``
+        # followed by an optional clip ``ah = min(ah, _A_h_max)``.
+        # We accept any chain that includes a call to the canonical
+        # helper.
+        ah_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "ah"
+                ):
+                    ah_assignments.append(node.value)
+        assert ah_assignments, (
+            "iter-60 codex HIGH: latlon HS branch must compute an "
+            "``ah`` Laplacian-viscosity local"
+        )
+        # At least ONE assignment must invoke the canonical helper
+        # (the other(s) may be clips / refinements of the result).
+        helper_used = any(
+            "_laplacian_visc_latlon" in ast.unparse(rhs)
+            for rhs in ah_assignments
+        )
+        assert helper_used, (
+            f"iter-60 codex HIGH: latlon ``ah`` should derive from "
+            f"``_laplacian_visc_latlon(...)`` somewhere in the "
+            f"chain.  Saw: "
+            f"{[ast.unparse(rhs) for rhs in ah_assignments]}"
+        )
+        # And the config call must reference ``ah``.
+        ctor_call = self._find_config_call(
+            body, "CGridLatLonPrimitiveEquationConfig",
+        )
+        assert ctor_call is not None, (
+            "iter-60 codex HIGH: latlon HS branch must invoke "
+            "``CGridLatLonPrimitiveEquationConfig(...)``"
+        )
+        kwargs = {kw.arg: kw.value for kw in ctor_call.keywords}
+        assert "A_h" in kwargs, (
+            "iter-60 codex HIGH: latlon HS config call is missing "
+            "``A_h=`` keyword"
+        )
+        ah_value = kwargs["A_h"]
+        assert isinstance(ah_value, ast.Name) and ah_value.id == "ah", (
+            f"iter-60 codex HIGH: ``A_h=`` must reference local "
+            f"``ah``, got ``{ast.unparse(ah_value)}``"
+        )
+        # And pin the iter-57 finding: NO biharmonic / div_damp
+        # kwarg in the latlon config.
+        for nope in ("hyperdiff_coeff", "div_damp_coeff"):
+            assert nope not in kwargs, (
+                f"iter-60 codex: latlon config now passes "
+                f"``{nope}=`` — the §5 fix-candidate (a) should be "
+                f"marked done and the iter-57 audit refreshed."
+            )
 
     def test_hyperdiff_cube_scales_inversely_with_n_to_fourth_power(self):
         """Pin the iter-57 hyperdiff scaling.  This is the

@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-59 snapshot)
+**Branch**: `simulation_full_check` (iter-60 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..59 findings.  It is the user-facing
+This report consolidates iter-1..60 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -179,8 +179,8 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
 iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49,
-iter-50, iter-52, iter-53, iter-54, iter-58.  Each round
-caught real issues; final convergence is clean.
+iter-50, iter-52, iter-53, iter-54, iter-58, iter-59.  Each
+round caught real issues; final convergence is clean.
 
 ---
 
@@ -197,7 +197,7 @@ caught real issues; final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (22 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52/53/54/58, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (23 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52/53/54/58/59, all findings addressed) |
 
 ---
 
@@ -630,6 +630,23 @@ caught real issues; final convergence is clean.
   ``hyperdiff_ps_coeff=hd`` use the same value (a divergence
   would shift the cube-cold pattern subtly).
 
+* iter-60: address codex iter-59 review (1 HIGH + 2 MEDIUM).
+  Replaced the iter-59 substring-only checks for helper
+  invocations and config wiring with deep AST walks:
+  ``_resolve_local_assignment`` finds ``hd``/``dd``/``ah``/``n``
+  RHS expressions; ``_find_config_call`` finds the
+  ``PrimitiveEquationConfig(...)`` /
+  ``CGridLatLonPrimitiveEquationConfig(...)`` call sites;
+  ``_is_call_to`` verifies a node matches a specific helper
+  call.  Tests now assert: cube branch has
+  ``hd = _hyperdiff_cube(n)`` AND
+  ``PrimitiveEquationConfig(hyperdiff_coeff=hd, ...)`` etc.;
+  latlon branch has at least one ``ah`` assignment that
+  invokes ``_laplacian_visc_latlon(...)`` (allows the
+  ``ah = min(ah, _A_h_max)`` clip seen in the source) AND
+  ``CGridLatLonPrimitiveEquationConfig(A_h=ah, ...)``;
+  ``n`` is derived from ``tc.resolution`` (not hardcoded).
+
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
@@ -638,4 +655,4 @@ caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-59 update).*
+(iter-60 update).*
