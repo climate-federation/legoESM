@@ -133,6 +133,10 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rotated_steady":     frozenset({"hydro", "dcmip2008", "hughes"}),
+    "gravity_wave_3_1":   frozenset({"hydro", "dcmip2008", "hughes"}),
+    "inertio_gravity_3_2": frozenset({"hydro", "dcmip2008", "hughes"}),
+    "mountain_rossby_5_0": frozenset({"hydro", "dcmip2008", "hughes"}),
+    "rossby_haurwitz_6_0": frozenset({"hydro", "dcmip2008", "hughes"}),
     "rest_state_topo":    frozenset({"hydro", "dcmip2012", "hughes"}),
     # Tracer transport
     "dcmip_transport_11": frozenset({"tracer", "dcmip2012", "hughes"}),
@@ -141,6 +145,7 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     # Climate-timescale
     "held_suarez":        frozenset({"climate", "hughes"}),
     "held_suarez_topo":   frozenset({"climate", "hughes"}),
+    "held_suarez_small_planet": frozenset({"climate", "hughes"}),
     # Production AMIP — NOT a canonical Hughes idealized test
     "amip":               frozenset({"climate"}),
     # Non-hydrostatic (DCMIP 2025; partial coverage of Hughes §4 / §6)
@@ -243,6 +248,26 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "hydrostatic", "held_suarez_topo", g, res[g], "hybrid", 200, 30,
             {"h_0": 2000.0}))
+        # DCMIP 2008 §3-1 / §3-2 / §5-0 / §6-0 — dry-3D Hughes-tutorial
+        # tests on hydrostatic dycores.  Short integrations (1-3 days) so
+        # the wave packets / Rossby trains have time to develop without
+        # consuming AMIP-scale wall-clock.
+        matrix.append(TestCase(
+            "hydrostatic", "gravity_wave_3_1", g, res[g], "hybrid", 1.0, 0.25, {}))
+        matrix.append(TestCase(
+            "hydrostatic", "inertio_gravity_3_2", g, res[g], "hybrid",
+            3.0, 0.5, {}))
+        matrix.append(TestCase(
+            "hydrostatic", "mountain_rossby_5_0", g, res[g], "hybrid",
+            10.0, 2.0, {}))
+        matrix.append(TestCase(
+            "hydrostatic", "rossby_haurwitz_6_0", g, res[g], "hybrid",
+            14.0, 2.0, {}))
+        # Wedi-Smolarkiewicz 2009 small-planet Held-Suarez (X=125).
+        # The IC + grid factories are in place at
+        # ``src/legoesm/atmosphere/idealized/small_planet.py``; matrix
+        # runner wiring is deferred to M1.b because the existing
+        # ``run_held_suarez`` builds grids with default Earth radius.
 
     # --- Non-hydrostatic: cubed-sphere, icosahedral, and spectral only ---
     # (lat-lon NH dycore does not exist)
@@ -2315,6 +2340,55 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
 
 # ===========================================================================
+# DCMIP 2008 dry-3D dispatch helper
+# ===========================================================================
+
+def _build_dcmip2008_state(case: str, grid_kind: str, grid_or_mesh, sigma):
+    """Dispatch ``(case, grid_kind) -> init function`` for DCMIP-2008
+    dry-3D Hughes-tutorial cases.
+
+    ``grid_kind`` is one of ``"cube" / "latlon" / "mpas" / "spectral"``;
+    the returned state matches the tendency dispatch each downstream
+    runner expects.
+    """
+    if case == "gravity_wave_3_1":
+        from tests.test_cases.dcmip2008 import gravity_wave_3_1 as _m
+        fn = {
+            "cube": _m.gravity_wave_init,
+            "latlon": _m.gravity_wave_init_latlon,
+            "mpas": _m.gravity_wave_init_mpas,
+            "spectral": _m.gravity_wave_init_spectral,
+        }[grid_kind]
+    elif case == "inertio_gravity_3_2":
+        from tests.test_cases.dcmip2008 import inertio_gravity_3_2 as _m
+        fn = {
+            "cube": _m.inertio_gravity_init,
+            "latlon": _m.inertio_gravity_init_latlon,
+            "mpas": _m.inertio_gravity_init_mpas,
+            "spectral": _m.inertio_gravity_init_spectral,
+        }[grid_kind]
+    elif case == "mountain_rossby_5_0":
+        from tests.test_cases.dcmip2008 import mountain_rossby_5_0 as _m
+        fn = {
+            "cube": _m.mountain_rossby_init,
+            "latlon": _m.mountain_rossby_init_latlon,
+            "mpas": _m.mountain_rossby_init_mpas,
+            "spectral": _m.mountain_rossby_init_spectral,
+        }[grid_kind]
+    elif case == "rossby_haurwitz_6_0":
+        from tests.test_cases.dcmip2008 import rossby_haurwitz_6_0 as _m
+        fn = {
+            "cube": _m.rossby_haurwitz_init,
+            "latlon": _m.rossby_haurwitz_init_latlon,
+            "mpas": _m.rossby_haurwitz_init_mpas,
+            "spectral": _m.rossby_haurwitz_init_spectral,
+        }[grid_kind]
+    else:
+        raise ValueError(f"Unknown DCMIP 2008 dry-3D case: {case!r}")
+    return fn(grid_or_mesh, sigma)
+
+
+# ===========================================================================
 # Runner: Baroclinic Wave
 # ===========================================================================
 
@@ -2335,6 +2409,23 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # terrain-following coordinates.
     _rest = tc.case == "rest_state_topo"
     _rest_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _rest else 0.0
+    # DCMIP 2008 dry-3D family: gravity wave (§3-1), inertio-gravity
+    # wave (§3-2), mountain Rossby (§5-0), Rossby-Haurwitz (§6-0).
+    # All four use isothermal hydrostatic state + zonal solid-body
+    # flow as the base; they differ in perturbation / topography only.
+    _dcmip2008_dry = tc.case in (
+        "gravity_wave_3_1", "inertio_gravity_3_2",
+        "mountain_rossby_5_0", "rossby_haurwitz_6_0",
+    )
+    # DCMIP 2008 §3-1 is canonical *only* on a non-rotating sphere:
+    # the gravity-wave packet is supposed to disperse free of inertial
+    # effects.  When this case is selected we override the planetary
+    # rotation rate at grid-construction time (the four grid factories
+    # all accept ``omega``); ``None`` leaves the factory's default
+    # (Earth) Ω in place.
+    _omega_override: float | None = (
+        0.0 if tc.case == "gravity_wave_3_1" else None
+    )
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -2347,7 +2438,10 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.core.operators import global_integral
 
         n = int(tc.resolution[1:])
-        grid = create_cubed_sphere(n)
+        _cube_kwargs = {}
+        if _omega_override is not None:
+            _cube_kwargs["omega"] = _omega_override
+        grid = create_cubed_sphere(n, **_cube_kwargs)
         sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_cube(n)
@@ -2369,6 +2463,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.dcmip2012.rest_state_topography import (
                 rest_state_topography_init)
             state = rest_state_topography_init(grid, sigma, h_0=_rest_h0)
+        elif _dcmip2008_dry:
+            state = _build_dcmip2008_state(tc.case, "cube", grid, sigma)
         else:
             state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
 
@@ -2410,7 +2506,10 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             baroclinic_wave_init_latlon)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
-        grid = create_latlon_grid(n_lat, n_lon)
+        _ll_kwargs = {}
+        if _omega_override is not None:
+            _ll_kwargs["omega"] = _omega_override
+        grid = create_latlon_grid(n_lat, n_lon, **_ll_kwargs)
         sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         ah = _laplacian_visc_latlon(n_lat)
@@ -2433,6 +2532,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 rest_state_topography_init_latlon)
             state_cc = rest_state_topography_init_latlon(
                 grid, sigma, h_0=_rest_h0)
+        elif _dcmip2008_dry:
+            state_cc = _build_dcmip2008_state(
+                tc.case, "latlon", grid, sigma)
         else:
             state_cc = baroclinic_wave_init_latlon(
                 grid, sigma_for_init, perturbed=True)
@@ -2482,7 +2584,10 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             baroclinic_wave_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
-        mesh = create_voronoi_mesh(level)
+        _vor_kwargs = {}
+        if _omega_override is not None:
+            _vor_kwargs["omega"] = _omega_override
+        mesh = create_voronoi_mesh(level, **_vor_kwargs)
         sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 200.0
@@ -2501,6 +2606,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 rest_state_topography_init_mpas)
             state = rest_state_topography_init_mpas(
                 mesh, sigma, h_0=_rest_h0)
+        elif _dcmip2008_dry:
+            state = _build_dcmip2008_state(tc.case, "mpas", mesh, sigma)
         else:
             state = baroclinic_wave_init_mpas(
                 mesh, sigma_for_init, perturbed=True)
@@ -2544,7 +2651,10 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         n_max = int(tc.resolution.replace("T", ""))
-        grid = create_gaussian_grid(n_max)
+        _gauss_kwargs = {}
+        if _omega_override is not None:
+            _gauss_kwargs["omega"] = _omega_override
+        grid = create_gaussian_grid(n_max, **_gauss_kwargs)
         sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 600.0
@@ -2565,6 +2675,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 rest_state_topography_init_spectral)
             state = rest_state_topography_init_spectral(
                 grid, sigma, h_0=_rest_h0)
+        elif _dcmip2008_dry:
+            state = _build_dcmip2008_state(
+                tc.case, "spectral", grid, sigma)
         else:
             state = baroclinic_wave_init_spectral(
                 grid, sigma_for_init, perturbed=True)
@@ -3728,6 +3841,10 @@ RUNNERS: dict[str, Callable] = {
     "rotated_baroclinic": run_baroclinic,            # M1.a (DCMIP 2008 §4-2 rotated)
     "rotated_steady": run_baroclinic,                # M1.a (DCMIP 2008 §4-1 rotated)
     "rest_state_topo": run_baroclinic,               # M1.a (DCMIP 2012 §2-0-0)
+    "gravity_wave_3_1":   run_baroclinic,            # M1.a (DCMIP 2008 §3-1)
+    "inertio_gravity_3_2": run_baroclinic,           # M1.a (DCMIP 2008 §3-2)
+    "mountain_rossby_5_0": run_baroclinic,           # M1.a (DCMIP 2008 §5-0)
+    "rossby_haurwitz_6_0": run_baroclinic,           # M1.a (DCMIP 2008 §6-0)
     "dcmip_transport_11": run_dcmip_transport,
     "dcmip_transport_12": run_dcmip_transport,
     "dcmip_transport_13": run_dcmip_transport,

@@ -58,8 +58,13 @@ def test_dcmip2008_excludes_canonical_jw(matrix_module):
     (``baroclinic``) — that one is *not* a DCMIP 2008 test."""
     cases = _names_for(matrix_module, family="dcmip2008")
     assert "baroclinic" not in cases
-    # The rotated variants are the only DCMIP 2008 cases wired in M1.a.
-    assert cases == {"rotated_baroclinic", "rotated_steady"}
+    assert "rest_state_topo" not in cases  # DCMIP 2012, not 2008
+    # M1.a + M1.b DCMIP 2008 cases.
+    assert cases == {
+        "rotated_baroclinic", "rotated_steady",
+        "gravity_wave_3_1", "inertio_gravity_3_2",
+        "mountain_rossby_5_0", "rossby_haurwitz_6_0",
+    }
 
 
 def test_dcmip2008_excludes_rest_state_topo(matrix_module):
@@ -111,6 +116,8 @@ def test_hughes_includes_full_canonical_set(matrix_module):
         "williamson2", "williamson5", "williamson6", "cosine_bell",
         "baroclinic", "rotated_baroclinic", "rotated_steady",
         "rest_state_topo", "held_suarez", "held_suarez_topo",
+        "gravity_wave_3_1", "inertio_gravity_3_2",
+        "mountain_rossby_5_0", "rossby_haurwitz_6_0",
         "dcmip_transport_11", "dcmip_transport_12", "dcmip_transport_13",
         "dcmip_tc1", "dcmip_tc2", "dcmip_tc3",
     }

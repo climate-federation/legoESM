@@ -26,5 +26,6 @@ with the existing matrix-script wiring.
 
 from legoesm.atmosphere.idealized import (  # noqa: F401
     held_suarez_topo,
+    small_planet,
     topography,
 )

@@ -44,10 +44,10 @@ Run with `JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py
 | JW06-RS | Rotated JW steady-state (α=π/4) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
 | JW06-RB | Rotated JW baroclinic wave (α=π/4) | all | ✅ M1 | `tests/test_cases/dcmip2008/jablonowski_rotated.py` |
 | DCMIP12-2-0-0 | Atmospheric rest state with steep hydrostatic topography | all | ✅ M1 | `tests/test_cases/dcmip2012/rest_state_topography.py` |
-| DCMIP08-6-0 | Small-amplitude Rossby-Haurwitz wave (3D, isothermal background) | all | ✅ M1 | `tests/test_cases/dcmip2008/rossby_haurwitz_6_0.py` |
-| DCMIP08-5-0 | Mountain-induced Rossby wave (3D zonal flow over isolated mountain) | all | ❌ M1.b | TBD `tests/test_cases/dcmip2008/mountain_rossby_5_0.py` |
-| DCMIP08-3-1 | Gravity wave on non-rotating Earth (small-Earth, isothermal) | all | ✅ M1 | `tests/test_cases/dcmip2008/gravity_wave_3_1.py` |
-| DCMIP08-3-2 | Inertio-gravity wave on rotating planet | all | ❌ M1.b | TBD `tests/test_cases/dcmip2008/inertio_gravity_3_2.py` |
+| DCMIP08-6-0 | Small-amplitude Rossby-Haurwitz wave (3D, isothermal background) | all | ✅ M1.b | `tests/test_cases/dcmip2008/rossby_haurwitz_6_0.py` |
+| DCMIP08-5-0 | Mountain-induced Rossby wave (3D zonal flow over isolated mountain) | all | ✅ M1.b | `tests/test_cases/dcmip2008/mountain_rossby_5_0.py` |
+| DCMIP08-3-1 | Gravity wave on non-rotating Earth (isothermal) | all | ✅ M1.b (canonical: matrix runner builds grid with `omega=0`) | `tests/test_cases/dcmip2008/gravity_wave_3_1.py` |
+| DCMIP08-3-2 | Inertio-gravity wave on rotating planet | all | ✅ M1.b | `tests/test_cases/dcmip2008/inertio_gravity_3_2.py` |
 
 ## §4 — Non-hydrostatic dry 3D
 
@@ -85,7 +85,7 @@ Run with `JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py
 | --- | --- | --- | --- | --- |
 | HS94 | Held-Suarez (1994) — Newtonian relaxation + Rayleigh friction | all | ✅ | `src/legoesm/atmosphere/held_suarez.py` |
 | HS-Topo | Held-Suarez with idealized Gaussian-mountain topography | all | ✅ M1 | `src/legoesm/atmosphere/idealized/held_suarez_topo.py` |
-| WS09-SP | Small-planet Held-Suarez (Wedi & Smolarkiewicz 2009, X=125) | all | ❌ M1.b | TBD `src/legoesm/atmosphere/idealized/small_planet.py` |
+| WS09-SP | Small-planet Held-Suarez (Wedi & Smolarkiewicz 2009, X=125) | all | ⚠️ M1.b | helpers at `src/legoesm/atmosphere/idealized/small_planet.py`; matrix-script runner wiring deferred to a follow-up commit |
 | TJ16-MHS | Moist Held-Suarez (Thatcher & Jablonowski 2016) | all | ⚠️ stability fixture only | TBD `src/legoesm/atmosphere/idealized/moist_held_suarez.py`; existing fixture: `tests/atmosphere/hydrostatic/validation/test_spectral_pe_moist_held_suarez.py` |
 | F06-AQUA | Frierson gray-radiation aquaplanet (2006) | all | ❌ M1.b/M3 | TBD `src/legoesm/atmosphere/idealized/frierson_gray.py` |
 
@@ -135,20 +135,34 @@ hydrostatic dycores (no new physics packages). M1.a (delivered in this PR):
   direct-import sanity tests covering all of the above (all green)
 - `README.md` — links the catalog under "Validation Infrastructure"
 
-M1.b (follow-up commit, before M2 lands):
+M1.b (delivered in a second commit on this PR):
 
+- `tests/test_cases/dcmip2008/_shared.py` — isothermal-hydrostatic
+  state builders for all four grids (factored out so the four
+  DCMIP-2008 modules below can stay short)
 - `tests/test_cases/dcmip2008/gravity_wave_3_1.py` — DCMIP §3-1
-  gravity wave on non-rotating sphere
+  gravity wave on (notionally) non-rotating sphere
 - `tests/test_cases/dcmip2008/inertio_gravity_3_2.py` — DCMIP §3-2
-  inertio-gravity wave on rotating planet
 - `tests/test_cases/dcmip2008/mountain_rossby_5_0.py` — DCMIP §5-0
 - `tests/test_cases/dcmip2008/rossby_haurwitz_6_0.py` — DCMIP §6-0
+- `src/legoesm/atmosphere/idealized/small_planet.py` — small-planet
+  grid factory wrappers (Wedi & Smolarkiewicz 2009)
+- 4 new TestCase rows × 4 grids per case = 16 rows wired into
+  `run_baroclinic` via a new `_build_dcmip2008_state` dispatcher
+- 21 direct-import unit tests in
+  `tests/atmosphere/hydrostatic/unit/test_dcmip2008_dry_3d.py`
+- Catalog updated to mark all four DCMIP-2008 dry-3D entries ✅
+
+Still deferred (small follow-up):
+
 - `tests/test_cases/williamson_extended.py::williamson3_*`, `williamson4_*`
 - W6 matrix-script wiring for cubed-sphere (FV3 D-grid) and
   lat-lon C-grid (needs analytic edge-/face-midpoint wind init for
   non-zonally-symmetric flow)
-- `src/legoesm/atmosphere/idealized/small_planet.py`
-- `src/legoesm/atmosphere/idealized/frierson_gray.py` (dry version)
+- Small-planet HS matrix-runner wiring (the IC + grid factory are
+  delivered; wiring needs a small extension to ``run_held_suarez``
+  to plumb the small-planet grid factories)
+- `src/legoesm/atmosphere/idealized/frierson_gray.py` (dry + moist)
 - Progression-suite extension (`tests/validation/run_dycore_progression_suite.py`)
 
 ### M2 — Non-hydrostatic dry 3D (next PR)
